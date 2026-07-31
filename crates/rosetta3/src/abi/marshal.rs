@@ -80,13 +80,31 @@ pub fn is_marshallable(abi: &FunctionAbi) -> bool {
 
 /// Call `host` with the arguments `ctx` holds, and write the result back.
 ///
-/// `ctx` is left untouched unless the call is actually made.
+/// `ctx` is left untouched unless the call is actually made. Guest function
+/// pointers are refused; see [`call_with`].
 pub fn call(
     symbol: &str,
     abi: &FunctionAbi,
     host: u64,
     ctx: &mut RegisterContext,
     mem: &dyn GuestMemory,
+) -> Result<()> {
+    call_with(symbol, abi, host, ctx, mem, &super::NoCallbacks)
+}
+
+/// [`call`], with a bridge for the arguments [`FunctionAbi::callbacks`] names.
+///
+/// Substitution happens here rather than in the caller because *here* is where
+/// an argument's parameter index is known: `place_args` returns locations in
+/// declaration order, so the `i`-th of them is parameter `i` whatever registers
+/// or stack slots it happened to land in.
+pub fn call_with(
+    symbol: &str,
+    abi: &FunctionAbi,
+    host: u64,
+    ctx: &mut RegisterContext,
+    mem: &dyn GuestMemory,
+    callbacks: &dyn super::Callbacks,
 ) -> Result<()> {
     let guest = guest_call_abi();
     let placed = guest.place_args(abi.types).ok_or_else(|| AbiError::Unmarshallable {
@@ -100,8 +118,14 @@ pub fn call(
     let mut fps = [0f64; MAX_FP_ARGS];
     let (mut n_int, mut n_fp) = (0usize, 0usize);
 
-    for (ty, loc) in &placed {
-        let raw = read_location(symbol, ctx, mem, *loc)?;
+    for (index, (ty, loc)) in placed.iter().enumerate() {
+        let mut raw = read_location(symbol, ctx, mem, *loc)?;
+        // A guest address the host would otherwise call as arm64. Substituted
+        // before anything else looks at it, and a refusal here still leaves the
+        // guest context untouched — nothing has been called yet.
+        if abi.callbacks.contains(&(index as u8)) {
+            raw = callbacks.substitute(symbol, raw)?;
+        }
         if is_fp(*ty) {
             if n_fp == MAX_FP_ARGS {
                 return Err(AbiError::Unmarshallable {

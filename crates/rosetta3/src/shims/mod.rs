@@ -26,8 +26,8 @@
 //!
 //! ## Scope
 //!
-//! Implemented: `printf`, `fprintf`, `sprintf`, `snprintf`. Everything else
-//! variadic is *classified* by [`crate::abi::table`] and refused by name with
+//! Implemented: `printf`, `fprintf`, `sprintf`, `snprintf`, and `ioctl`.
+//! Everything else variadic is *classified* by [`crate::abi::table`] and refused by name with
 //! [`AbiError::NoShim`] until someone needs it — a refusal that names the
 //! symbol is a work item; a guess is a bug report from a user.
 
@@ -35,7 +35,9 @@ use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{AbiError, GuestMemory, Result};
 
+pub mod ioctl;
 pub mod printf;
+pub mod runtime;
 
 /// Run the shim for `symbol`, if there is one.
 ///
@@ -60,6 +62,9 @@ pub fn dispatch(
         // fires for the programs that actually exist.
         "__sprintf_chk" => printf::sprintf_chk,
         "__snprintf_chk" => printf::snprintf_chk,
+        // Variadic in its declaration and one argument wide in fact; see
+        // [`ioctl`] for why that makes it forwardable when `printf` is not.
+        "ioctl" => ioctl::ioctl,
         _ => return None,
     };
     Some(f(name, ctx, mem))
@@ -70,7 +75,13 @@ pub fn is_shimmed(symbol: &str) -> bool {
     let name = symbol.strip_prefix('_').unwrap_or(symbol);
     matches!(
         name,
-        "printf" | "fprintf" | "sprintf" | "snprintf" | "__sprintf_chk" | "__snprintf_chk"
+        "printf"
+            | "fprintf"
+            | "sprintf"
+            | "snprintf"
+            | "__sprintf_chk"
+            | "__snprintf_chk"
+            | "ioctl"
     )
 }
 

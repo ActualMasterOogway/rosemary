@@ -20,6 +20,8 @@ pub use buffer::BufferSpace;
 #[cfg(feature = "std")]
 pub use host_mmap::MmapSpace;
 
+use alloc::vec::Vec;
+
 use crate::error::Result;
 use crate::raw::Word;
 use crate::spec::constants::{VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE};
@@ -168,6 +170,27 @@ pub trait AddressSpace {
         let _ = addr;
         None
     }
+}
+
+/// An address space that can hand its mapped bytes back as slices.
+///
+/// Separate from [`AddressSpace`] because it is a *stronger* promise: an
+/// address space need only be able to copy bytes in and out at an address,
+/// while this says the bytes exist contiguously somewhere the caller may look
+/// at directly. A recompiler wants the second — it is handed a region's
+/// contents once and decodes from them — and a loader only ever needs the
+/// first, so the two are kept apart rather than merged for convenience.
+///
+/// For a host-native space the returned slice aliases live memory that guest
+/// execution can write to. Nothing here can prevent that; it is the same
+/// aliasing the identity mapping is *for*. Callers that need a stable view
+/// (a lifter's constant-folding input, say) must copy.
+pub trait Regions: AddressSpace {
+    /// The region containing `addr`, as `(base, bytes)`.
+    fn region_at(&self, addr: Word) -> Option<(Word, &[u8])>;
+
+    /// Every region, in reservation order.
+    fn regions(&self) -> Vec<(Word, &[u8])>;
 }
 
 /// Round `v` down to a multiple of `align`, which must be a power of two.

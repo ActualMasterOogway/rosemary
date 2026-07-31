@@ -139,6 +139,16 @@ impl BufferSpace {
     }
 }
 
+impl crate::memory::Regions for BufferSpace {
+    fn region_at(&self, addr: Word) -> Option<(Word, &[u8])> {
+        BufferSpace::region_at(self, addr)
+    }
+
+    fn regions(&self) -> alloc::vec::Vec<(Word, &[u8])> {
+        BufferSpace::regions(self).collect()
+    }
+}
+
 impl AddressSpace for BufferSpace {
     fn reserve(&mut self, size: usize, align: usize, placement: Placement) -> Result<Word> {
         if size == 0 {

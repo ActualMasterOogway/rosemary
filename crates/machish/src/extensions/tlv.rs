@@ -24,7 +24,7 @@
 //! `TlsImage` and stops (`selfish/src/extensions/tls.rs:16-40`), and for the
 //! same reason: making it work requires deciding how *guest* threads map onto
 //! *host* threads, and that is a question about the execution model rather than
-//! about the file format. It is milestone 3.
+//! about the file format. It is milestone 4.
 //!
 //! Meanwhile [`TlvExtension`] does the one thing the loader can usefully do
 //! now: rewrite the bootstrap imports so an embedder's shim can claim them

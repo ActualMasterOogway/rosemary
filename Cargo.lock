@@ -556,6 +556,8 @@ dependencies = [
 name = "rosetta3"
 version = "0.1.0"
 dependencies = [
+ "cranelift-codegen",
+ "cranelift-frontend",
  "iced-x86",
  "libc",
  "machish",

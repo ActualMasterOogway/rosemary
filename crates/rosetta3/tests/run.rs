@@ -1,0 +1,133 @@
+//! Milestone 3's acceptance gate: Intel programs that actually run.
+//!
+//! Everything here goes through the built driver rather than the library, and
+//! that is the point. The claims are about a *process* — it prints, it exits
+//! with its own status, its `atexit` handlers fire from the host's exit — and
+//! none of those are visible from inside a test that only calls
+//! [`Vm::call`](rosetta3::Vm::call).
+//!
+//! Each test names what would be false if it failed:
+//!
+//! - **hello** — the loop works at all: lift, enter, service an import, resume.
+//! - **qsort** — the host called *back into* the guest. Falsifiable: a
+//!   comparator that is not really run leaves the array unsorted.
+//! - **constructors** — initializers ran, in order, before `main`.
+//! - **`/bin/ls`** — a real system binary agrees with the host's own, byte for
+//!   byte, which is the claim no fixture can make on its own.
+
+mod common;
+
+use std::path::Path;
+
+use common::{run_guest, run_guest_with};
+
+#[test]
+fn a_hello_world_prints_and_exits_zero() {
+    let Some(path) = common::hello() else { skip!("cannot build x86_64 fixtures") };
+    let (status, out, err) = run_guest(&path, &[]);
+
+    assert_eq!(status, Some(0), "stderr: {err}");
+    assert_eq!(out, "Hello, world (5)! 1 1.50\ndone\ngoodbye\n", "stderr: {err}");
+}
+
+#[test]
+fn a_guest_exit_status_reaches_the_shell() {
+    // `main` returns `abs(argc) - 1`, so one argument makes it 1. A runtime
+    // that always exited 0 would pass every other test here.
+    let Some(path) = common::hello() else { skip!("cannot build x86_64 fixtures") };
+    let (status, _, err) = run_guest(&path, &["someone"]);
+    assert_eq!(status, Some(1), "stderr: {err}");
+}
+
+#[test]
+fn arguments_reach_the_guest() {
+    let Some(path) = common::hello() else { skip!("cannot build x86_64 fixtures") };
+    let (_, out, err) = run_guest(&path, &["rosetta"]);
+    assert!(out.starts_with("Hello, rosetta (7)! 2 1.50\n"), "{out:?} (stderr: {err})");
+}
+
+#[test]
+fn the_host_calls_a_guest_comparator_and_a_guest_exit_handler() {
+    // The host→guest thunk, from both directions it is reached from: `qsort`
+    // calls back during the call, `atexit`'s handler after `main` has returned
+    // and from inside the host's own `exit`.
+    let Some(path) = common::qsort_fixture() else { skip!("cannot build x86_64 fixtures") };
+    let (status, out, err) = run_guest(&path, &[]);
+
+    assert_eq!(status, Some(0), "stderr: {err}");
+    assert_eq!(out, "12345789 calls=yes\nbye\n", "stderr: {err}");
+}
+
+#[test]
+fn initializers_run_before_main_and_in_order() {
+    let Some(path) = common::ctor_fixture() else { skip!("cannot build x86_64 fixtures") };
+    let (status, out, err) = run_guest(&path, &[]);
+
+    assert_eq!(status, Some(0), "stderr: {err}");
+    assert_eq!(out, "order=abc\n", "stderr: {err}");
+}
+
+#[test]
+fn fast_and_slow_imports_produce_the_same_program() {
+    // Milestone 2 claimed promotion is an optimisation; this is the end-to-end
+    // form of that claim. `--slow` sends every import through a VM exit and the
+    // marshaller, `--fast` (the default) lets the lifter inline the ones it can.
+    // Any observable difference means one of the two paths is wrong.
+    let Some(path) = common::qsort_fixture() else { skip!("cannot build x86_64 fixtures") };
+
+    let (fast_status, fast_out, _) = run_guest(&path, &[]);
+    let (slow_status, slow_out, slow_err) = run_guest_with(&["--slow"], &path, &[]);
+
+    assert_eq!(fast_status, slow_status, "slow stderr: {slow_err}");
+    assert_eq!(fast_out, slow_out);
+}
+
+#[test]
+fn bin_ls_agrees_with_the_hosts_own_ls() {
+    if !Path::new("/bin/ls").exists() {
+        skip!("/bin/ls not present");
+    }
+    // A directory with entries of both kinds, and content that is stable while
+    // the test runs — `ls` of anything shared would race with the rest of the
+    // system.
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ls-fixture");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("subdir")).expect("create fixture dir");
+    for name in ["alpha", "beta", "gamma"] {
+        std::fs::write(dir.join(name), name).expect("write fixture file");
+    }
+    let dir = dir.to_string_lossy().into_owned();
+
+    // `-l` as well as the bare form: the long listing pulls in `strftime`,
+    // `getpwuid`, `snprintf` and the terminal width, so it exercises far more
+    // of the import surface than the names alone.
+    for flags in [&[][..], &["-1"][..], &["-la"][..]] {
+        let mut args: Vec<&str> = flags.to_vec();
+        args.push(&dir);
+
+        let host = std::process::Command::new("/bin/ls")
+            .args(&args)
+            .output()
+            .expect("running the host's ls");
+        let (status, out, err) = run_guest("/bin/ls", &args);
+
+        assert_eq!(status, host.status.code(), "ls {args:?}: stderr: {err}");
+        assert_eq!(
+            out,
+            String::from_utf8_lossy(&host.stdout),
+            "ls {args:?} differs from the host's own output"
+        );
+    }
+}
+
+#[test]
+fn an_untranslatable_stop_names_itself_instead_of_crashing() {
+    // The other half of "it runs": when it does not, the reason is a sentence.
+    // `/usr/bin/true` is not a Mach-O this loader accepts on every system, so
+    // the case chosen is one that is always available and always wrong — a
+    // path that is not an executable at all.
+    let (status, out, err) = run_guest("/etc/hosts", &[]);
+    assert_eq!(status, Some(1));
+    assert!(out.is_empty());
+    assert!(err.starts_with("rosetta3: /etc/hosts:"), "{err:?}");
+}

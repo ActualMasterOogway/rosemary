@@ -19,6 +19,13 @@ iced-x86 = "1"
 # publishable and free of any microlift coupling, so the two only ever meet
 # here. See `docs/ROADMAP.md`, "the microlift seam".
 microlift = { path = "../../../microlift" }
+# Host->guest thunks are compiled, not assembled: a trampoline is a handful of
+# Cranelift IR instructions, and letting the compiler emit the prologue and the
+# argument moves is what keeps this crate free of hand-written arm64. Same
+# version as `microlift`'s, deliberately — the `Function` built here is handed
+# to `microlift::backend::CraneliftBackend`, so the two must be one crate.
+cranelift-codegen = "0.133"
+cranelift-frontend = "0.133"
 
 [dev-dependencies]
 # The ABI tests call real host libSystem functions through the marshaller, and

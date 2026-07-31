@@ -443,6 +443,7 @@ unsafe extern "C" fn eight_ints(
 
 static EIGHT_INTS: FunctionAbi = FunctionAbi {
     name: "eight_ints",
+    callbacks: &[],
     types: &[
         T::SignedDoubleword,
         T::SignedDoubleword,
@@ -503,10 +504,26 @@ fn a_symbol_with_no_signature_fails_by_name_and_changes_nothing() {
 fn a_refused_symbol_says_why() {
     let mut mem = guest_stack();
     let mut ctx = RegisterContext::new();
-    let err = rosetta3::call_import("_qsort", 0, 0x1000, &mut ctx, &mut mem as &mut dyn GuestMemory)
-        .expect_err("qsort takes a guest callback and must be refused");
+    let err =
+        rosetta3::call_import("_sigaction", 0, 0x1000, &mut ctx, &mut mem as &mut dyn GuestMemory)
+            .expect_err("a signal handler is a guest pointer the host cannot enter");
     assert!(matches!(err, AbiError::Refused { .. }));
-    assert!(err.to_string().contains("thunk"), "the reason should point at what is missing");
+    assert!(err.to_string().contains("M5"), "the reason should point at what is missing");
+}
+
+#[test]
+fn a_callback_taker_is_refused_without_a_vm_rather_than_passed_through() {
+    // `qsort` has a signature and a marked callback argument, so it is callable
+    // — but only by something that can build a thunk. Reached through
+    // `call_import`, which has no JIT behind it, the guest pointer must not be
+    // handed to the host's `qsort` to be called as arm64.
+    let mut mem = guest_stack();
+    let mut ctx = RegisterContext::new();
+    ctx.rcx = 0x1_0000_1234; // the comparator
+    let err = rosetta3::call_import("_qsort", 0, 0x1000, &mut ctx, &mut mem as &mut dyn GuestMemory)
+        .expect_err("there is nowhere for the guest function pointer to go");
+    assert!(matches!(err, AbiError::Refused { .. }), "{err}");
+    assert_eq!(ctx.rax, 0, "a refusal leaves the guest context alone");
 }
 
 #[test]

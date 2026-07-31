@@ -111,6 +111,97 @@ pub fn hello() -> Option<String> {
 
 
 
+/// Milestone 3's callback program: a guest comparator called by the *host's*
+/// `qsort`, and a guest handler called by the host's `exit`.
+///
+/// Both are host→guest calls, and both are falsifiable: a comparator that is
+/// never really called leaves the array unsorted, and a thunk that is called
+/// with the wrong arguments sorts it wrongly. `atexit` additionally pins down
+/// *when* — its output has to come after `main`'s.
+pub const QSORT_C: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+
+static int calls = 0;
+
+static int by_int(const void *a, const void *b) {
+    calls++;
+    int x = *(const int *)a, y = *(const int *)b;
+    return (x > y) - (x < y);
+}
+
+static void bye(void) { puts("bye"); }
+
+int main(void) {
+    int v[8] = {5, 3, 9, 1, 7, 2, 8, 4};
+    atexit(bye);
+    qsort(v, 8, sizeof(int), by_int);
+    for (int i = 0; i < 8; i++) printf("%d", v[i]);
+    printf(" calls=%s\n", calls > 0 ? "yes" : "no");
+    return 0;
+}
+"#;
+
+/// Milestone 3's initializer program.
+///
+/// Three constructors with explicit priorities, so the test can check the order
+/// rather than only that they ran, and a `main` that observes their combined
+/// effect — which is the part that proves they ran *before* it.
+pub const CTOR_C: &str = r#"
+#include <stdio.h>
+
+static char order[8];
+static int n = 0;
+
+__attribute__((constructor(101))) static void first(void)  { order[n++] = 'a'; }
+__attribute__((constructor(102))) static void second(void) { order[n++] = 'b'; }
+__attribute__((constructor(103))) static void third(void)  { order[n++] = 'c'; }
+
+int main(void) {
+    order[n] = 0;
+    printf("order=%s\n", order);
+    return n == 3 ? 0 : 1;
+}
+"#;
+
+/// Build [`QSORT_C`], or `None` if this host cannot.
+pub fn qsort_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| build_x86_64("qsort_cb", QSORT_C, &[])).clone()
+}
+
+/// Build [`CTOR_C`], or `None` if this host cannot.
+pub fn ctor_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| build_x86_64("ctors", CTOR_C, &[])).clone()
+}
+
+/// Run a guest program under the driver, returning `(status, stdout, stderr)`.
+///
+/// Through the built binary rather than the library, because that is what the
+/// milestone claims: a program *runs*, exits with its own status, and its
+/// `atexit` handlers fire from the host's exit — none of which is observable
+/// from inside a test that only calls `Vm::call`.
+pub fn run_guest(path: &str, args: &[&str]) -> (Option<i32>, String, String) {
+    run_guest_with(&[], path, args)
+}
+
+/// [`run_guest`], with extra driver flags before the program path.
+pub fn run_guest_with(flags: &[&str], path: &str, args: &[&str]) -> (Option<i32>, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_rosetta3"))
+        .arg("run")
+        .args(flags)
+        .arg(path)
+        .args(args)
+        .output()
+        .expect("running the driver");
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
 /// Skip the calling test with an explanatory note.
 #[macro_export]
 macro_rules! skip {

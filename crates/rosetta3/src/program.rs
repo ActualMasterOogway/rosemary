@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use machish::loader::Loader;
-use machish::memory::{AddressSpace, BufferSpace};
+use machish::memory::{BufferSpace, Regions};
 use machish::namespace::FsDylibSource;
 use machish::report::LinkReport;
 use machish::resolve::{eager_binding_shims, NativeDylibProvider, SymbolProvider};
@@ -85,22 +85,24 @@ impl From<machish::Error> for ProgramError {
 
 /// An Intel Mach-O loaded, linked against the host, and ready for the lifter.
 ///
-/// ## Backed by a buffer, which is why it cannot yet execute
+/// ## Which address space, and why it is a parameter
 ///
-/// The guest is mapped into a [`BufferSpace`] — a plain allocation at a chosen
-/// base, not memory at the guest's own addresses. That is right for inspecting
-/// and auditing an image, and it is *insufficient for execution*: the host
-/// pointers written into the guest's import slots only mean anything if the
-/// guest's virtual addresses are this process's virtual addresses. Running the
-/// guest requires an identity mapping, i.e. [`MmapSpace`], and threading the
-/// address space out as a parameter. That is M3 work.
+/// A [`BufferSpace`]-backed program is a plain allocation at a chosen base: the
+/// right thing for inspecting and auditing an image, and *insufficient for
+/// execution*, because the host pointers written into the guest's import slots
+/// only mean anything if the guest's virtual addresses are this process's
+/// virtual addresses. Running the guest needs an identity mapping —
+/// [`MmapSpace`] — which is why the space is a type parameter rather than a
+/// fixed choice: [`Program::load`] gives the inspectable form and
+/// [`Program::load_executable`] the runnable one, and everything between them
+/// is the same code.
 ///
 /// [`MmapSpace`]: machish::memory::MmapSpace
-pub struct Program {
+pub struct Program<M: Regions = BufferSpace> {
     /// The full linking transcript.
     pub report: LinkReport,
     /// The guest's mapped memory.
-    pub memory: BufferSpace,
+    pub memory: M,
     /// `(virtual address, bytes)` of the root image's `__TEXT,__text`.
     pub text: (u64, Vec<u8>),
     /// Slid extents of each function in `__text`, from `LC_FUNCTION_STARTS`.
@@ -127,12 +129,15 @@ pub struct ImportSite {
     pub is_stub: bool,
 }
 
-impl Program {
+impl Program<BufferSpace> {
     /// Load and link `path` against the host, with no guest system libraries.
     ///
     /// `extra` is consulted *before* the native provider, which is how a symbol
     /// that must be virtualized rather than passed through gets intercepted —
     /// see [`machish::resolve`] for why ordering is the mechanism.
+    ///
+    /// The result is *inspectable*, not runnable: see
+    /// [`Program::load_executable`].
     pub fn load(path: &str, extra: &[&dyn SymbolProvider]) -> Result<Self, ProgramError> {
         let bytes = std::fs::read(path)?;
         Self::from_bytes(&bytes, path, extra)
@@ -144,12 +149,50 @@ impl Program {
         path: &str,
         extra: &[&dyn SymbolProvider],
     ) -> Result<Self, ProgramError> {
-        let mut memory = BufferSpace::new(0x1_0000_0000);
+        Self::load_into(bytes, path, extra, BufferSpace::new(0x1_0000_0000))
+    }
+}
+
+impl Program<machish::memory::MmapSpace> {
+    /// Load and link `path` into **host memory at the guest's own addresses**.
+    ///
+    /// The identity mapping is what makes execution possible at all: a host
+    /// function pointer bound into a guest import slot is directly callable,
+    /// and a guest pointer handed to a host function is directly
+    /// dereferenceable. Its price is that a pointer no longer says which side
+    /// it came from — see [`Program::is_guest_address`], the question every
+    /// indirect call has to answer.
+    ///
+    /// The mapping is never executable. The guest is x86-64; this CPU cannot
+    /// run a byte of it under any protection, and the recompiler reads it as
+    /// data.
+    pub fn load_executable(
+        path: &str,
+        extra: &[&dyn SymbolProvider],
+    ) -> Result<Self, ProgramError> {
+        let bytes = std::fs::read(path)?;
+        Self::load_into(bytes.as_slice(), path, extra, machish::memory::MmapSpace::new())
+    }
+}
+
+impl<M: Regions> Program<M> {
+    /// Load and link into a caller-supplied address space.
+    pub fn load_into(
+        bytes: &[u8],
+        path: &str,
+        extra: &[&dyn SymbolProvider],
+        mut memory: M,
+    ) -> Result<Self, ProgramError> {
         let mut source = FsDylibSource::new();
 
         let eager = eager_binding_shims();
         let native = NativeDylibProvider::system();
+        // Ahead of the host: `___stack_chk_guard` is a symbol the host declines
+        // to export and every guest with an array on its stack dereferences in
+        // its own prologue. See `crate::shims::runtime`.
+        let runtime = crate::shims::runtime::provider();
         let mut providers: Vec<&dyn SymbolProvider> = extra.to_vec();
+        providers.push(&runtime);
         providers.push(&eager);
         providers.push(&native);
 
@@ -268,25 +311,31 @@ impl Program {
         crate::abi::call_import(&symbol, tag, resolved, ctx, &mut self.memory)
     }
 
-    /// The region a JIT should lift in order to execute `va`: the enclosing
-    /// function, and the bytes to hand microlift.
+    /// The region a JIT should lift in order to execute `va`: where it starts,
+    /// and the bytes to hand microlift.
     ///
-    /// Function granularity, from `LC_FUNCTION_STARTS`, because microlift lifts
-    /// a region with its internal control flow already resolved — so a whole
-    /// function is one unit of work and one cache entry, while a basic block
-    /// would fragment every loop.
+    /// `LC_FUNCTION_STARTS` supplies a *hint* — the enclosing function's start,
+    /// so that every call site reaching one function shares one translation —
+    /// and nothing more. The extent is computed by walking the guest's control
+    /// flow from that start; see [`crate::region`] for why a function's recorded
+    /// extent cannot be handed to the lifter as-is, and what happens to the code
+    /// on the far side of an embedded jump table.
     ///
-    /// `None` when `va` is outside the root image's `__text`, which today covers
-    /// three real cases a running JIT must handle and this does not yet: code in
-    /// a bundled dylib, code in an image with no `LC_FUNCTION_STARTS`, and code
-    /// the guest generated at runtime. All three are M3.
-    pub fn lift_region(&self, va: u64) -> Option<(u64, &[u8])> {
-        let (text_va, text) = &self.text;
-        let f = self.functions.iter().find(|f| f.contains(&va))?;
-        let start = usize::try_from(f.start.checked_sub(*text_va)?).ok()?;
-        let end = usize::try_from(f.end.checked_sub(*text_va)?).ok()?.min(text.len());
-        let bytes = text.get(start..end).filter(|b| !b.is_empty())?;
-        Some((f.start, bytes))
+    /// Any mapped image answers, not only the root's `__text`: a bundled dylib,
+    /// an image whose function starts were stripped, and code the guest wrote at
+    /// run time all reach this the same way — the first by hint, the other two
+    /// with none.
+    ///
+    /// `None` when `va` is not in mapped guest memory, or when nothing there
+    /// decodes.
+    pub fn lift_region(&self, va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
+        let (base, bytes) = self.memory.region_at(va)?;
+        let function = self.functions.iter().find(|f| f.contains(&va)).cloned();
+        let region = crate::region::region_for(bytes, base, va, function)?;
+        let start = usize::try_from(region.range.start - base).ok()?;
+        let end = usize::try_from(region.range.end - base).ok()?.min(bytes.len());
+        let code = bytes.get(start..end)?.to_vec();
+        Some((region, code))
     }
 
     /// Whether `va` lies inside a mapped guest image.
@@ -310,6 +359,15 @@ impl Program {
     /// The root image's entry point, slid.
     pub fn entry(&self) -> Option<u64> {
         self.report.root().and_then(|i| i.entry)
+    }
+
+    /// The import registered at `va`, if any.
+    ///
+    /// `va` is whatever an exit named: a pointer slot or a `__stubs` entry,
+    /// both of which are registered, which is why this is a lookup rather than
+    /// a search through the bindings.
+    pub fn import_at(&self, va: u64) -> Option<&ImportSite> {
+        self.imports.get(&va)
     }
 
     /// Every import address, in ascending order.

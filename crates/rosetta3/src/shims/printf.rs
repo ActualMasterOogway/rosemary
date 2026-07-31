@@ -18,7 +18,8 @@
 //!
 //! Conversions: `d i u o x X c s p f F e E g G %`, with the `- + space # 0`
 //! flags, `*`-or-literal width and precision, and the `hh h l ll z j t L`
-//! length modifiers. Everything else is emitted **literally**, including the
+//! length modifiers, plus BSD's `q`. Everything else is emitted **literally**,
+//! including the
 //! `%`, which is the failure mode that shows up in output rather than in a
 //! register.
 //!
@@ -196,9 +197,13 @@ pub fn render(fmt: &[u8], args: &mut VarArgs<'_>) -> Result<Vec<u8>> {
                     len = if len == Len::Long { Len::LongLong } else { Len::Long };
                     i += 1;
                 }
-                // `z`, `j`, `t` are all 64-bit here; `L` only qualifies a
-                // `long double`, which arrives promoted like any other double.
-                Some(b'z') | Some(b'j') | Some(b't') => {
+                // `z`, `j`, `t` are all 64-bit here, and so is BSD's `q`
+                // ("quad") — which is not a historical curiosity to skip:
+                // `/bin/ls` prints its `total` line with `%qu`, and a shim that
+                // does not know the modifier emits the conversion literally
+                // rather than a number. `L` only qualifies a `long double`,
+                // which arrives promoted like any other double.
+                Some(b'z') | Some(b'j') | Some(b't') | Some(b'q') => {
                     len = Len::Size;
                     i += 1;
                 }

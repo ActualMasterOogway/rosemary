@@ -11,17 +11,25 @@
 //! ## Three answers, not two
 //!
 //! [`lookup`] distinguishes *unknown* from *refused*, and the distinction is
-//! the useful one. `_qsort` is not missing from this table by accident: it
-//! takes a guest function pointer, and calling it would hand the host's `qsort`
-//! an x86-64 address to call as arm64. Recording that as
-//! [`Lookup::Refused`] with a reason turns a crash into a sentence, and keeps
+//! the useful one. `_sigaction` is not missing from this table by accident: it
+//! installs a guest function pointer as a signal handler, and the handler would
+//! be entered with a *host* `ucontext_t` the guest cannot read. Recording that
+//! as [`Lookup::Refused`] with a reason turns a crash into a sentence, and keeps
 //! it out of the "someone should write this signature" list where it would sit
 //! forever.
+//!
+//! A refusal is also the honest record of a milestone boundary, and it moves
+//! when the milestone does: `qsort`, `qsort_r`, `bsearch` and `atexit` were
+//! refused for taking a guest function pointer, and are now ordinary entries
+//! whose pointer argument is marked in [`FunctionAbi::callbacks`] and
+//! substituted with a thunk. Nothing about their signatures changed.
 //!
 //! [`REFUSED`] therefore holds three kinds of thing:
 //!
 //! - **Data**, which is imported through a slot and read, never called.
-//! - **Callback takers**, which need the host→guest thunk (M3).
+//! - **Callback takers whose callback the thunk cannot yet carry**: a start
+//!   routine that needs a guest thread (M4), a signal handler that needs a
+//!   translated `ucontext_t` (M5).
 //! - **Stack walkers**, where passthrough is not merely unimplemented but
 //!   *wrong*: `setjmp` saves host registers the guest cannot restore, and the
 //!   host unwinder cannot walk guest frames (M5).
@@ -59,6 +67,16 @@ pub struct FunctionAbi {
     /// implements it: the two platforms disagree about where variadic arguments
     /// live, so there is no generic forwarding path.
     pub variadic: bool,
+    /// Zero-based parameter indices that are **guest function pointers**.
+    ///
+    /// A pointer is a pointer to the marshaller; this is the one place the
+    /// distinction matters, because handing the host an x86-64 address it will
+    /// call as arm64 is the failure mode host→guest thunks exist to prevent.
+    /// Each listed argument is substituted with a thunk on its way out — see
+    /// [`crate::thunk`] — which is also why a signature carrying one can never
+    /// be a *fast* import: the lifter would inline the call and pass the raw
+    /// pointer.
+    pub callbacks: &'static [u8],
 }
 
 impl FunctionAbi {
@@ -128,7 +146,7 @@ fn by_tag(_tag: u64) -> Option<&'static FunctionAbi> {
 /// `(ret, args...)`, in `DynamicSymbol` order.
 macro_rules! sig {
     ($name:literal, $ret:expr $(, $arg:expr)* $(,)?) => {
-        FunctionAbi { name: $name, types: &[$ret $(, $arg)*], variadic: false }
+        FunctionAbi { name: $name, types: &[$ret $(, $arg)*], variadic: false, callbacks: &[] }
     };
 }
 
@@ -136,7 +154,25 @@ macro_rules! sig {
 /// ellipsis is implied by the flag.
 macro_rules! vsig {
     ($name:literal, $ret:expr $(, $arg:expr)* $(,)?) => {
-        FunctionAbi { name: $name, types: &[$ret $(, $arg)* , T::VariadicList], variadic: true }
+        FunctionAbi {
+            name: $name,
+            types: &[$ret $(, $arg)* , T::VariadicList],
+            variadic: true,
+            callbacks: &[],
+        }
+    };
+}
+
+/// As [`sig`], for a function taking guest function pointers. `$cb` lists the
+/// zero-based parameter indices that are callbacks.
+macro_rules! cbsig {
+    ([$($cb:literal),* $(,)?], $name:literal, $ret:expr $(, $arg:expr)* $(,)?) => {
+        FunctionAbi {
+            name: $name,
+            types: &[$ret $(, $arg)*],
+            variadic: false,
+            callbacks: &[$($cb),*],
+        }
     };
 }
 
@@ -197,11 +233,16 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     vsig!("asprintf", I32, P, P),
     sig!("atan", F64, F64),
     sig!("atan2", F64, F64, F64),
+    // `atexit`, `bsearch`, `qsort` and `qsort_r` were refused until the
+    // host->guest thunk existed. What changed is only that the pointer they
+    // take can now be substituted; the signature was never in doubt.
+    cbsig!([0], "atexit", I32, P),
     sig!("atof", F64, P),
     sig!("atoi", I32, P),
     sig!("atol", I64, P),
     sig!("atoll", I64, P),
     sig!("bcmp", I32, P, P, U64),
+    cbsig!([4], "bsearch", P, P, P, U64, U64, P),
     sig!("bzero", V, P, U64),
     sig!("calloc", P, U64, U64),
     sig!("ceil", F64, F64),
@@ -252,6 +293,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("ftell", I64, P),
     sig!("fts_children", P, P, I32),
     sig!("fts_close", I32, P),
+    // The comparator takes `const FTSENT **`, which is still just a pointer:
+    // `ls` sorts its output with one, so this is the entry that makes the
+    // milestone-1 acceptance binary produce output at all.
+    cbsig!([2], "fts_open", P, P, I32, P),
     sig!("fts_read", P, P),
     sig!("fts_set", I32, P, P, I32),
     sig!("fwrite", U64, P, U64, U64, P),
@@ -313,6 +358,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("putchar", I32, I32),
     sig!("puts", I32, P),
     sig!("putwchar", I32, I32),
+    cbsig!([3], "qsort", V, P, U64, U64, P),
+    cbsig!([4], "qsort_r", V, P, U64, U64, P, P),
     sig!("rand", I32),
     sig!("read", I64, I32, P, U64),
     sig!("readdir", P, P),
@@ -375,6 +422,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("time", I64, P),
     sig!("tolower", I32, I32),
     sig!("toupper", I32, I32),
+    // The output function is called once per character: `tputs` is how a
+    // terminal-aware program emits a capability string, and `/bin/ls` reaches
+    // it whenever its output is a terminal.
+    cbsig!([2], "tputs", I32, P, I32, P),
     sig!("trunc", F64, F64),
     sig!("umask", U32, U32),
     sig!("ungetc", I32, I32, P),
@@ -408,11 +459,8 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("__stdoutp", "a data import, read through its slot and never called"),
     ("_longjmp", "restores a stack the host's implementation never saw (M5)"),
     ("_setjmp", "saves host registers, not the guest's (M5)"),
-    ("atexit", "takes a guest function pointer; needs the host->guest thunk (M3)"),
-    ("bsearch", "takes a guest function pointer; needs the host->guest thunk (M3)"),
     ("dyld_stub_binder", "the lazy-binding entry point; every slot is bound eagerly"),
     ("environ", "a data import, read through its slot and never called"),
-    ("fts_open", "takes a guest comparator; needs the host->guest thunk (M3)"),
     ("humanize_number", UNDECLARED),
     ("longjmp", "restores a stack the host's implementation never saw (M5)"),
     ("mbr_identifier_translate", UNDECLARED),
@@ -420,15 +468,16 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("opterr", "a data import, read through its slot and never called"),
     ("optind", "a data import, read through its slot and never called"),
     ("optopt", "a data import, read through its slot and never called"),
-    ("pthread_create", "takes a guest function pointer; needs the host->guest thunk (M3)"),
-    ("qsort", "takes a guest function pointer; needs the host->guest thunk (M3)"),
-    ("qsort_r", "takes a guest function pointer; needs the host->guest thunk (M3)"),
+    (
+        "pthread_create",
+        "its start routine is a guest function on a new thread, which needs the \
+         per-thread guest state of M4, not just a thunk",
+    ),
     ("setjmp", "saves host registers, not the guest's (M5)"),
     ("sigaction", "installs a guest function pointer as a handler (M5)"),
     ("siglongjmp", "restores a stack the host's implementation never saw (M5)"),
     ("signal", "installs a guest function pointer as a handler (M5)"),
     ("sigsetjmp", "saves host registers, not the guest's (M5)"),
-    ("tputs", "takes a guest output function; needs the host->guest thunk (M3)"),
 ];
 
 #[cfg(test)]
@@ -478,7 +527,10 @@ mod tests {
         // never had `$INODE64`, so what is known about the variant is whatever
         // is known about the plain symbol — here, that it takes a comparator.
         assert_eq!(lookup(0, "_fts_open"), lookup(0, "_fts_open$INODE64"));
-        assert!(matches!(lookup(0, "_fts_open$INODE64"), Lookup::Refused(_)));
+        // `fts_open` is a signature now that the thunk exists, and the point
+        // of this assertion is unchanged: the `$INODE64` spelling finds
+        // whatever the plain name has to say.
+        assert!(matches!(lookup(0, "_fts_open$INODE64"), Lookup::Known(abi) if abi.name == "fts_open"));
         assert_eq!(lookup(0, "_strtod$UNIX2003"), lookup(0, "_strtod"));
     }
 

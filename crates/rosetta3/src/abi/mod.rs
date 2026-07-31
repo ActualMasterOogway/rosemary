@@ -209,6 +209,25 @@ pub fn call_import(
     ctx: &mut RegisterContext,
     mem: &mut dyn GuestMemory,
 ) -> Result<()> {
+    call_import_with(symbol, tag, host, ctx, mem, &NoCallbacks)
+}
+
+/// [`call_import`], with somewhere for a guest function pointer to go.
+///
+/// The extra parameter is what makes `qsort` callable. Its argument is a guest
+/// address the host would call as arm64, so it has to be replaced with a thunk
+/// — and building one means entering the JIT, which is knowledge this module
+/// must not have. Hence a trait: the ABI layer knows *which* arguments are
+/// callbacks (from [`FunctionAbi::callbacks`]) and the VM knows what to do
+/// about them.
+pub fn call_import_with(
+    symbol: &str,
+    tag: u64,
+    host: u64,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
     if host == 0 {
         return Err(AbiError::Unsatisfied { symbol: symbol.to_string() });
     }
@@ -219,11 +238,49 @@ pub fn call_import(
     }
     match table::lookup(tag, symbol) {
         Lookup::Known(abi) if abi.variadic => Err(AbiError::NoShim { symbol: symbol.to_string() }),
-        Lookup::Known(abi) => marshal::call(symbol, abi, host, ctx, mem),
+        Lookup::Known(abi) => marshal::call_with(symbol, abi, host, ctx, mem, callbacks),
         Lookup::Refused(reason) => {
             Err(AbiError::Refused { symbol: symbol.to_string(), reason })
         }
         Lookup::Unknown => Err(AbiError::NoSignature { symbol: symbol.to_string() }),
+    }
+}
+
+/// How a guest function pointer becomes something the host can call.
+///
+/// Implemented by [`crate::vm::Vm`]; see [`crate::thunk`] for what the answer
+/// actually is.
+pub trait Callbacks {
+    /// What to pass the host in place of the guest's function-pointer argument
+    /// `va`, while servicing `symbol`.
+    ///
+    /// One method rather than a "is it guest code" predicate and a builder,
+    /// because the decision and the substitution have to be made together: an
+    /// implementation that cannot build a thunk must **refuse**, not pass the
+    /// pointer through. A null stays null (`atexit(NULL)` is the guest's error
+    /// to have), and a pointer that is already a host address is passed
+    /// unchanged — a program may hand back a callback it was given, and
+    /// wrapping that would break the pointer equality the host can observe.
+    fn substitute(&self, symbol: &str, va: u64) -> Result<u64>;
+}
+
+/// The bridge for a caller that has no JIT to re-enter — the marshaller's own
+/// tests, and [`call_import`] itself.
+///
+/// It refuses rather than passing the pointer through, which keeps the M2
+/// behaviour exactly: a callback-taking import is a diagnostic naming the
+/// symbol, not a host calling x86-64 as arm64.
+pub struct NoCallbacks;
+
+impl Callbacks for NoCallbacks {
+    fn substitute(&self, symbol: &str, va: u64) -> Result<u64> {
+        if va == 0 {
+            return Ok(0);
+        }
+        Err(AbiError::Refused {
+            symbol: symbol.to_string(),
+            reason: "takes a guest function pointer, and this caller has no JIT to re-enter",
+        })
     }
 }
 
@@ -239,7 +296,8 @@ pub enum Classification {
     /// Serviced at an `ImportedFunctionCall` exit — a variadic with a shim, or
     /// a signature this marshaller cannot inline.
     Slow,
-    /// Known and deliberately not callable (data, or needs an M3 thunk).
+    /// Known and deliberately not callable: data read through its slot, or a
+    /// callback whose shape the host→guest thunk cannot carry (M4, M5).
     Refused(&'static str),
     /// Nothing describes it. The one outcome the acceptance test forbids.
     Unknown,
@@ -249,6 +307,11 @@ pub enum Classification {
 pub fn classify(tag: u64, symbol: &str) -> Classification {
     match table::lookup(tag, symbol) {
         Lookup::Known(abi) if abi.variadic => Classification::Slow,
+        // A fast import is inlined by the lifter, which passes the guest's
+        // registers straight through — including the function pointer that has
+        // to become a thunk first. Substitution only exists at an exit, so a
+        // callback taker is slow by construction, not by preference.
+        Lookup::Known(abi) if !abi.callbacks.is_empty() => Classification::Slow,
         Lookup::Known(abi) => {
             if guest_call_abi().can_fast_call(abi.types) && marshal::is_marshallable(abi) {
                 Classification::Fast

@@ -52,6 +52,17 @@ impl Region {
         // SAFETY: `off + len` was just checked against this region's length.
         Some(unsafe { self.base.add(off) })
     }
+
+    /// The region's bytes.
+    ///
+    /// The slice aliases memory the guest may be executing against — see
+    /// [`Regions`](crate::memory::Regions) for why that is inherent to an
+    /// identity-mapped space rather than something this could guard.
+    fn as_slice(&self) -> &[u8] {
+        // SAFETY: `base..base+len` is a live mapping this space owns and keeps
+        // readable for its whole lifetime; the borrow is tied to `self`.
+        unsafe { core::slice::from_raw_parts(self.base as *const u8, self.len) }
+    }
 }
 
 /// `mmap`-backed host memory owning its mappings; all unmapped on drop.
@@ -180,6 +191,18 @@ impl MmapSpace {
 
         self.regions.push(Region { base: raw as *mut u8, len: size });
         Ok(Some(want))
+    }
+}
+
+impl crate::memory::Regions for MmapSpace {
+    fn region_at(&self, addr: Word) -> Option<(Word, &[u8])> {
+        let a = usize::try_from(addr).ok()?;
+        let r = self.regions.iter().find(|r| a >= r.base as usize && a < r.base as usize + r.len)?;
+        Some((r.base as Word, r.as_slice()))
+    }
+
+    fn regions(&self) -> Vec<(Word, &[u8])> {
+        self.regions.iter().map(|r| (r.base as Word, r.as_slice())).collect()
     }
 }
 

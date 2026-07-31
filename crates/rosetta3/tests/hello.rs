@@ -183,11 +183,12 @@ fn the_entry_function_still_lifts_with_imports_promoted() {
     let Some(path) = common::hello() else { skip!("cannot build x86_64 fixtures") };
     let program = load(&path);
     let entry = program.entry().expect("an executable has an entry point");
-    let (start, bytes) = program.lift_region(entry).expect("entry is inside a known function");
+    let (region, bytes) = program.lift_region(entry).expect("entry is inside a known function");
+    let start = region.range.start;
 
     for policy in [ImportPolicy::FastWhenKnown, ImportPolicy::AlwaysSlow] {
         let config = program.lifter_config_with(policy);
-        microlift::core::lift_to_function::<microlift::arch::x86_64::X86_64>(bytes, start, config)
+        microlift::core::lift_to_function::<microlift::arch::x86_64::X86_64>(&bytes, start, config)
             .unwrap_or_else(|e| panic!("{policy:?}: lifting the entry function failed: {e}"));
     }
 }

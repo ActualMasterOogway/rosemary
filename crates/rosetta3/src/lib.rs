@@ -35,8 +35,12 @@
 //! runtime memory access. That is an optimisation input, not a translation
 //! plan.
 //!
-//! The one place this crate looks at code it is not about to run is
-//! [`audit_call_targets`], and that is a *diagnostic* — see its module note.
+//! Two places look at code that is not about to run, and both are deliberate.
+//! [`audit_call_targets`] is a *diagnostic* — see its module note. And
+//! [`Vm::thunk_for`] translates a callback when its thunk is built, because
+//! handing a pointer to host code *is* the demand signal: the host may call it
+//! at a moment when compiling is impossible, and process exit is exactly that
+//! moment.
 //!
 //! ## What "registering an import" has to cover
 //!
@@ -61,6 +65,19 @@
 //! So `stub_va` is not an optimisation that saves a VM exit. It is what keeps
 //! the recompiler from walking off the end of the guest and into the host.
 
+//! ## Running it
+//!
+//! [`Vm`] is the loop: lift the region control is about to reach, enter it,
+//! service the exit, repeat. [`region`] decides which bytes a region is,
+//! [`cache`] keeps the translations, [`stack`] is the guest's stack and its
+//! process arguments, [`thunk`] is the mirror of import interception — a native
+//! trampoline per guest function pointer handed outward — and [`startup`] runs
+//! the initializers and then `main`.
+//!
+//! Every exit the loop cannot service is a **stop that names itself**: an
+//! address, a symbol, or an instruction. There is no arm that guesses, for the
+//! same reason [`abi`] refuses an undescribed import.
+//!
 //! ## Knowing an address is not knowing a call
 //!
 //! Registering an import stops the recompiler following a call out of the
@@ -75,9 +92,16 @@
 
 pub mod abi;
 pub mod audit;
+pub mod cache;
 pub mod program;
+pub mod region;
 pub mod shims;
+pub mod stack;
+pub mod startup;
+pub mod thunk;
+pub mod vm;
 
 pub use abi::{call_import, AbiError, Classification};
 pub use audit::{audit_call_targets, CallTargetAudit, UnresolvedCall};
 pub use program::{ImportPolicy, Program, ProgramError};
+pub use vm::{Vm, VmError};
