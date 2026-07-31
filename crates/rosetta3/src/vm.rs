@@ -772,12 +772,22 @@ impl crate::abi::Callbacks for Vm {
         if !self.program.is_guest_address(va) {
             return Ok(va);
         }
-        self.thunk_for(va).map_err(|e| AbiError::Refused {
+        self.thunk_for(va).map_err(|e: VmError| AbiError::Refused {
             symbol: symbol.to_string(),
             reason: match e {
                 VmError::Thunk { .. } => "a host->guest thunk could not be built",
                 _ => "the guest function pointer could not be made callable",
             },
         })
+    }
+
+    /// A thunk handed back by host code becomes the guest pointer it stands for.
+    ///
+    /// `signal` is what needs this: it *returns* the previous disposition, so a
+    /// program that saves one and restores it later would otherwise install an
+    /// arm64 trampoline as its own handler — and, worse, compare it against its
+    /// own function and find them unequal.
+    fn unsubstitute(&self, va: u64) -> u64 {
+        self.guest_behind_thunk(va).unwrap_or(va)
     }
 }

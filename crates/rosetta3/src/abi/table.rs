@@ -443,6 +443,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("putwchar", I32, I32),
     cbsig!([3], "qsort", V, P, U64, U64, P),
     cbsig!([4], "qsort_r", V, P, U64, U64, P, P),
+    // `raise` and `kill` deliver to this process, so a guest handler installed
+    // through [`crate::signal`] is reached exactly the way the kernel reaches
+    // any other: asynchronously, on whichever thread the kernel picks.
+    sig!("raise", I32, I32),
     sig!("rand", I32),
     sig!("read", I64, I32, P, U64),
     sig!("readdir", P, P),
@@ -457,7 +461,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("setjmp", I32, P),
     sig!("setlocale", P, I32, P),
     sig!("setvbuf", I32, P, P, I32, U64),
+    // Shimmed, like the `setjmp` family and for a related reason: the handler
+    // is a guest function pointer that crosses out as a thunk and comes *back*
+    // in `signal`'s result and `sigaction`'s `oldact`. See [`crate::signal`].
+    sig!("sigaction", I32, I32, P, P),
     sig!("siglongjmp", V, P, I32),
+    sig!("signal", P, I32, P),
     sig!("sigsetjmp", I32, P, I32),
     sig!("sin", F64, F64),
     sig!("sleep", U32, U32),
@@ -554,8 +563,6 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("optind", "a data import, read through its slot and never called"),
     ("optopt", "a data import, read through its slot and never called"),
     ("pthread_cancel", "cancellation unwinds a stack the host's unwinder never saw (M5)"),
-    ("sigaction", "installs a guest function pointer as a handler (M5)"),
-    ("signal", "installs a guest function pointer as a handler (M5)"),
 ];
 
 #[cfg(test)]

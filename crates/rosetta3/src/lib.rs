@@ -125,6 +125,7 @@ pub mod jmpbuf;
 pub mod program;
 pub mod region;
 pub mod shims;
+pub mod signal;
 pub mod stack;
 pub mod startup;
 pub mod thread;

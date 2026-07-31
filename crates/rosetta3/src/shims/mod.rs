@@ -50,6 +50,7 @@ pub fn dispatch(
     symbol: &str,
     ctx: &mut RegisterContext,
     mem: &mut dyn GuestMemory,
+    callbacks: &dyn crate::abi::Callbacks,
 ) -> Option<Result<()>> {
     let name = symbol.strip_prefix('_').unwrap_or(symbol);
     let f = match name {
@@ -76,7 +77,15 @@ pub fn dispatch(
         // would operate on the *host's* registers and the host's stack. See
         // [`crate::jmpbuf`], which is a module of its own because a stack is not
         // a calling convention.
-        _ => return crate::jmpbuf::shim_for(name).map(|f| f(name, ctx, mem)),
+        _ => {
+            if let Some(f) = crate::jmpbuf::shim_for(name) {
+                return Some(f(name, ctx, mem));
+            }
+            // And the signal dispositions, which need one thing more than the
+            // rest: a guest function pointer crossing back *in*. See
+            // [`crate::signal`].
+            return crate::signal::shim_for(name).map(|f| f(name, ctx, mem, callbacks));
+        }
     };
     Some(f(name, ctx, mem))
 }
@@ -88,7 +97,7 @@ pub fn dispatch(
 /// shim is that reaching the host function is wrong.
 pub fn is_shimmed(symbol: &str) -> bool {
     let name = symbol.strip_prefix('_').unwrap_or(symbol);
-    if crate::jmpbuf::shim_for(name).is_some() {
+    if crate::jmpbuf::shim_for(name).is_some() || crate::signal::shim_for(name).is_some() {
         return true;
     }
     matches!(

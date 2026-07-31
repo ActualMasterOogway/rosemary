@@ -233,7 +233,7 @@ pub fn call_import_with(
     }
     // Shims first, unconditionally: a shim exists precisely because passing the
     // call through would be wrong, so it must win over any table entry.
-    if let Some(result) = crate::shims::dispatch(symbol, ctx, mem) {
+    if let Some(result) = crate::shims::dispatch(symbol, ctx, mem, callbacks) {
         return result;
     }
     match table::lookup(tag, symbol) {
@@ -262,6 +262,23 @@ pub trait Callbacks {
     /// unchanged — a program may hand back a callback it was given, and
     /// wrapping that would break the pointer equality the host can observe.
     fn substitute(&self, symbol: &str, va: u64) -> Result<u64>;
+
+    /// The guest address behind `va`, if `va` is a thunk this runtime handed
+    /// out; `va` otherwise.
+    ///
+    /// The direction [`Callbacks::substitute`] alone cannot express, and it is
+    /// not symmetry for its own sake: a signal disposition, unlike a `qsort`
+    /// comparator, comes *back* — `signal` returns the previous handler and
+    /// `sigaction` writes it into the guest's `oldact`. A program that saves one
+    /// and restores it later would otherwise be handed an arm64 trampoline and
+    /// pass it around as if it were its own function.
+    ///
+    /// The default is the identity, which is right for every caller that hands
+    /// nothing out: an address that is not a thunk is a host function the guest
+    /// can only ever pass back.
+    fn unsubstitute(&self, va: u64) -> u64 {
+        va
+    }
 }
 
 /// The bridge for a caller that has no JIT to re-enter — the marshaller's own

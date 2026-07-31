@@ -504,9 +504,17 @@ fn a_symbol_with_no_signature_fails_by_name_and_changes_nothing() {
 fn a_refused_symbol_says_why() {
     let mut mem = guest_stack();
     let mut ctx = RegisterContext::new();
-    let err =
-        rosetta3::call_import("_sigaction", 0, 0x1000, &mut ctx, &mut mem as &mut dyn GuestMemory)
-            .expect_err("a signal handler is a guest pointer the host cannot enter");
+    // `pthread_cancel` unwinds a stack the host's unwinder has never seen, and
+    // says so. `sigaction` was the example here until M5 shimmed it; a refusal
+    // that turns into an implementation is what the reason string is *for*.
+    let err = rosetta3::call_import(
+        "_pthread_cancel",
+        0,
+        0x1000,
+        &mut ctx,
+        &mut mem as &mut dyn GuestMemory,
+    )
+    .expect_err("cancellation walks frames the host cannot read");
     assert!(matches!(err, AbiError::Refused { .. }));
     assert!(err.to_string().contains("M5"), "the reason should point at what is missing");
 }

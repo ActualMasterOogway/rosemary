@@ -414,6 +414,100 @@ pub fn longjmp_across_fixture() -> Option<String> {
     BUILT.get_or_init(|| build_x86_64("longjmp_across", LONGJMP_ACROSS_C, &[])).clone()
 }
 
+/// Milestone 5's signal program.
+///
+/// The kernel calling a guest function, which is the third distinct caller of a
+/// host→guest thunk after `qsort` and `pthread_create` — and the first that
+/// arrives without the runtime being anywhere nearby.
+///
+/// - Both installers, because they substitute the handler differently:
+///   `signal` returns the old disposition in a register, `sigaction` writes it
+///   into a struct the guest owns.
+/// - The handler is **saved and restored**, which is the direction a runtime
+///   that only substituted outbound pointers would get wrong: the guest would
+///   be handed an arm64 thunk and would install it as its own function.
+/// - `SIG_IGN` and `SIG_DFL` are installed too. They are dispositions, not
+///   addresses, and a runtime that wrapped them in thunks would run a handler
+///   where the program asked for the signal to be ignored.
+pub const SIGNAL_C: &str = r#"
+#include <signal.h>
+#include <stdio.h>
+
+static volatile sig_atomic_t hits = 0;
+
+static void on_usr1(int sig) { hits++; printf("handler saw %d\n", sig); }
+
+int main(void) {
+    printf("layout %zu %zu\n", sizeof(struct sigaction), sizeof(sigset_t));
+
+    void (*previous)(int) = signal(SIGUSR1, on_usr1);
+    printf("previous was default %d\n", previous == SIG_DFL);
+    raise(SIGUSR1);
+
+    /* The round trip: what `signal` gives back must be the guest's own
+       function, or restoring it installs something else entirely. */
+    void (*saved)(int) = signal(SIGUSR1, SIG_IGN);
+    printf("saved is mine %d\n", saved == on_usr1);
+    raise(SIGUSR1);
+    signal(SIGUSR1, saved);
+    raise(SIGUSR1);
+
+    struct sigaction sa, old;
+    sa.sa_handler = on_usr1;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGUSR2, &sa, &old);
+    printf("old was default %d\n", old.sa_handler == SIG_DFL);
+    raise(SIGUSR2);
+
+    sigaction(SIGUSR2, 0, &old);
+    printf("queried is mine %d\n", old.sa_handler == on_usr1);
+
+    signal(SIGUSR1, SIG_DFL);
+    printf("hits %d\n", hits);
+    return 0;
+}
+"#;
+
+/// Build [`SIGNAL_C`], or `None` if this host cannot.
+pub fn signal_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| build_x86_64("signals", SIGNAL_C, &[])).clone()
+}
+
+/// Milestone 5's refusal fixture for signals: a handler wanting a `ucontext_t`.
+///
+/// `SA_SIGINFO` asks for the machine state at the interrupted instruction, which
+/// on this runtime is inside a Cranelift-compiled translation with no map back
+/// to the guest's x86-64 registers. The refusal is the deliverable; the program
+/// exists so it can be checked as a named diagnostic.
+pub const SIGINFO_C: &str = r#"
+#include <signal.h>
+#include <stdio.h>
+
+static void detailed(int sig, siginfo_t *info, void *uc) {
+    (void)uc;
+    printf("detailed %d %p\n", sig, info->si_addr);
+}
+
+int main(void) {
+    struct sigaction sa;
+    sa.sa_sigaction = detailed;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGUSR1, &sa, 0);
+    raise(SIGUSR1);
+    printf("done\n");
+    return 0;
+}
+"#;
+
+/// Build [`SIGINFO_C`], or `None` if this host cannot.
+pub fn siginfo_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| build_x86_64("siginfo", SIGINFO_C, &[])).clone()
+}
+
 /// Build [`THREAD_C`], or `None` if this host cannot.
 pub fn thread_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
