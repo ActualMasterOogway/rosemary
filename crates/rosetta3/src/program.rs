@@ -10,8 +10,45 @@ use machish::report::LinkReport;
 use machish::resolve::{eager_binding_shims, NativeDylibProvider, SymbolProvider};
 use machish::spec::arch::X86_64;
 
+use microlift::arch::x86_64::context::RegisterContext;
 use microlift::core::exit::MemorySegment;
 use microlift::core::LifterConfig;
+
+use crate::abi::{AbiError, Classification, FunctionAbi, Lookup};
+
+/// Whether an import with a known signature is inlined by the lifter or left to
+/// a VM exit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ImportPolicy {
+    /// Inline every call whose signature is known and marshallable; everything
+    /// else — variadics, refusals, unknowns — stays a slow exit.
+    #[default]
+    FastWhenKnown,
+    /// Every import is a slow exit. Correct, and the baseline the fast path is
+    /// measured against.
+    AlwaysSlow,
+}
+
+impl ImportPolicy {
+    /// The signature to inline this site's call with, if any.
+    fn promotion_for(self, site: &ImportSite) -> Option<&'static FunctionAbi> {
+        if self == ImportPolicy::AlwaysSlow || site.resolved == 0 {
+            return None;
+        }
+        // A shimmed symbol must never be promoted: the whole reason it has a
+        // shim is that calling the host function directly would be wrong.
+        if crate::shims::is_shimmed(&site.symbol) {
+            return None;
+        }
+        if crate::abi::classify(site.tag, &site.symbol) != Classification::Fast {
+            return None;
+        }
+        match crate::abi::table::lookup(site.tag, &site.symbol) {
+            Lookup::Known(abi) => Some(abi),
+            _ => None,
+        }
+    }
+}
 
 /// Anything that can go wrong loading a program.
 #[derive(Debug)]
@@ -173,15 +210,62 @@ impl Program {
     /// Marked non-writable for exactly that reason — the lifter must not fold a
     /// value the guest can later store over.
     pub fn lifter_config(&self) -> LifterConfig {
+        self.lifter_config_with(ImportPolicy::FastWhenKnown)
+    }
+
+    /// [`Program::lifter_config`], with the promotion decision made explicitly.
+    ///
+    /// [`ImportPolicy::AlwaysSlow`] exists because it is the falsifiable half
+    /// of the M2 claim: fast is an *optimisation* of slow, so lifting a program
+    /// both ways must differ in the number of VM exits and in nothing else. A
+    /// test that can only run the fast path cannot check that.
+    pub fn lifter_config_with(&self, policy: ImportPolicy) -> LifterConfig {
         let mut config = LifterConfig::default();
 
         for (base, bytes) in self.memory.regions() {
             config.segments.push(MemorySegment::new(base, bytes.to_vec(), false));
         }
-        for &va in self.imports.keys() {
-            config.register_slow_import(va);
+        for (&va, site) in &self.imports {
+            match policy.promotion_for(site) {
+                Some(abi) => config.register_fast_import(
+                    va,
+                    crate::abi::dynamic_symbol(abi, site.resolved),
+                    crate::abi::guest_call_abi(),
+                ),
+                None => config.register_slow_import(va),
+            }
         }
         config
+    }
+
+    /// How every import of this program will be reached, by symbol.
+    ///
+    /// The M2 acceptance question in one call: an entry classified
+    /// [`Classification::Unknown`] is a symbol nobody has described, which is
+    /// the one outcome that becomes a wrong value in a register at run time
+    /// rather than a diagnostic.
+    pub fn classify_imports(&self) -> BTreeMap<&str, Classification> {
+        let mut out = BTreeMap::new();
+        for b in self.report.bindings() {
+            out.insert(b.symbol.as_str(), crate::abi::classify(b.tag, &b.symbol));
+        }
+        out
+    }
+
+    /// Service an `ExitReason::ImportedFunctionCall`.
+    ///
+    /// `ctx.imported_function_va` names the address the guest called — a slot
+    /// or a stub, both of which are registered — and the guest resumes at
+    /// `ctx.rip`, which microlift already set to the instruction after the
+    /// `CALL`. Nothing here touches `rip` or `rsp`: the call was intercepted
+    /// *before* it executed, so there is no return address to pop.
+    pub fn service_import_call(&mut self, ctx: &mut RegisterContext) -> Result<(), AbiError> {
+        let va = ctx.imported_function_va;
+        let Some(site) = self.imports.get(&va) else {
+            return Err(AbiError::NoSignature { symbol: format!("<unregistered {va:#x}>") });
+        };
+        let (symbol, tag, resolved) = (site.symbol.clone(), site.tag, site.resolved);
+        crate::abi::call_import(&symbol, tag, resolved, ctx, &mut self.memory)
     }
 
     /// The region a JIT should lift in order to execute `va`: the enclosing

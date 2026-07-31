@@ -14,7 +14,7 @@
 use std::collections::BTreeSet;
 use std::process::ExitCode;
 
-use rosetta3::{audit_call_targets, Program};
+use rosetta3::{audit_call_targets, Classification, Program};
 
 use microlift::arch::x86_64::X86_64;
 use microlift::core::lift_to_function;
@@ -56,6 +56,26 @@ fn main() -> ExitCode {
     let missing: usize = program.report.images.iter().map(|i| i.missing.len()).sum();
     if missing > 0 {
         println!("  {missing} import(s) unresolved (need shims)");
+    }
+
+    // What it would take to *call* each of those imports, which is milestone 2.
+    // An unknown symbol is the only entry that matters: it is the one that
+    // would become a wrong value in a register rather than a diagnostic.
+    let classified = program.classify_imports();
+    let count = |want: fn(&Classification) -> bool| classified.values().filter(|c| want(c)).count();
+    println!(
+        "  abi: {} fast, {} slow, {} refused, {} unknown",
+        count(|c| matches!(c, Classification::Fast)),
+        count(|c| matches!(c, Classification::Slow)),
+        count(|c| matches!(c, Classification::Refused(_))),
+        count(|c| matches!(c, Classification::Unknown)),
+    );
+    for (symbol, class) in &classified {
+        match class {
+            Classification::Unknown => println!("  abi: {symbol} has no signature"),
+            Classification::Refused(reason) => println!("  abi: {symbol} refused: {reason}"),
+            _ => {}
+        }
     }
 
     // One lift, on demand, of the region control would actually reach first.

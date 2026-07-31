@@ -7,7 +7,20 @@ license.workspace = true
 
 [dependencies]
 machish.workspace = true
+# The shims call host libc directly (stdio for the `printf` family, `errno` for
+# diagnostics). `machish` keeps `libc` optional; the driver is `std`-only
+# anyway, so here it is unconditional.
+libc.workspace = true
+# For `iced_x86::Register`, which is what a `microlift` `GuestReg` payload
+# actually is. Resolving one is how an `ArgLocation::IntReg` becomes a field of
+# the guest register context; the alternative is matching raw register numbers.
+iced-x86 = "1"
 # A path dependency, deliberately outside this workspace: `machish` must stay
 # publishable and free of any microlift coupling, so the two only ever meet
 # here. See `docs/ROADMAP.md`, "the microlift seam".
 microlift = { path = "../../../microlift" }
+
+[dev-dependencies]
+# The ABI tests call real host libSystem functions through the marshaller, and
+# `dlsym` them to find the addresses in the first place.
+libc.workspace = true

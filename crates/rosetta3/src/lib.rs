@@ -61,8 +61,23 @@
 //! So `stub_va` is not an optimisation that saves a VM exit. It is what keeps
 //! the recompiler from walking off the end of the guest and into the host.
 
+//! ## Knowing an address is not knowing a call
+//!
+//! Registering an import stops the recompiler following a call out of the
+//! guest. *Servicing* one needs its signature — how many integer arguments, how
+//! many floating-point, what comes back — and no Mach-O records that. [`abi`]
+//! is where that comes from: a table the embedder writes, indexed by the
+//! provider's tag or by name, with a marshaller that reads the guest's register
+//! context and calls the host function. Its governing decision is that an
+//! import with no signature is **refused by name** rather than guessed at, and
+//! [`shims`] is where the calls that cannot be forwarded generically — the
+//! variadics — are written out by hand.
+
+pub mod abi;
 pub mod audit;
 pub mod program;
+pub mod shims;
 
+pub use abi::{call_import, AbiError, Classification};
 pub use audit::{audit_call_targets, CallTargetAudit, UnresolvedCall};
-pub use program::{Program, ProgramError};
+pub use program::{ImportPolicy, Program, ProgramError};
