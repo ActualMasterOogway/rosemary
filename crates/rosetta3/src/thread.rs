@@ -64,6 +64,23 @@ pub struct ThreadState {
     /// soon as control is back in the runtime *on this thread* — a callback's
     /// failure is not another thread's business.
     pub(crate) pending: RefCell<Option<VmError>>,
+    /// Which entry into guest code is live on this thread.
+    ///
+    /// Nesting depth would not do: entries at the same depth are different
+    /// entries, and the question this answers is identity, not distance. What
+    /// asks it is [`crate::jmpbuf`] — a `longjmp` whose `setjmp` happened in an
+    /// *outer* entry has host frames between the two, and restoring the guest
+    /// context would abandon them silently. A monotonic id makes that case a
+    /// comparison rather than a guess.
+    entry: Cell<u64>,
+    /// Whether the call being serviced set `rip` itself instead of returning.
+    ///
+    /// `longjmp` is the only thing that does. It matters because a compiler tail
+    /// calls freely — `jmp _longjmp` at the end of a function — and the runtime's
+    /// tail-call path finishes an intercepted call by popping a return address
+    /// over `rip`, which for a `longjmp` would discard the destination it just
+    /// restored. See [`crate::vm`].
+    redirected: Cell<bool>,
 }
 
 impl ThreadState {
@@ -75,7 +92,44 @@ impl ThreadState {
             rsp: Cell::new(rsp),
             depth: Cell::new(0),
             pending: RefCell::new(None),
+            entry: Cell::new(0),
+            redirected: Cell::new(false),
         }
+    }
+
+    /// The entry into guest code currently live on this thread, or zero when
+    /// none is.
+    pub(crate) fn entry(&self) -> u64 {
+        self.entry.get()
+    }
+
+    /// Begin a new entry, returning the previous one to be restored after it.
+    ///
+    /// Ids come from one process-wide counter rather than a per-thread one, so
+    /// that a buffer filled on another thread is distinguishable from one filled
+    /// in another entry of this thread — two different refusals with two
+    /// different reasons.
+    pub(crate) fn enter(&self) -> u64 {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let previous = self.entry.get();
+        self.entry.set(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        previous
+    }
+
+    /// Restore the entry that was live before [`ThreadState::enter`].
+    pub(crate) fn leave(&self, previous: u64) {
+        self.entry.set(previous);
+    }
+
+    /// Record that the call being serviced transferred control rather than
+    /// returning: its `rip` is a destination, not a resume point.
+    pub(crate) fn redirect(&self) {
+        self.redirected.set(true);
+    }
+
+    /// Whether the last serviced call redirected, clearing the flag.
+    pub(crate) fn took_redirect(&self) -> bool {
+        self.redirected.replace(false)
     }
 
     /// `(argc, argv, envp, apple)`, as laid out on this thread's stack.

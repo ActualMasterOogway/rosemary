@@ -32,8 +32,10 @@
 //!   `pthread_create` was here until M4 gave a new host thread its own guest
 //!   stack and register context; nothing about its signature changed either.
 //! - **Stack walkers**, where passthrough is not merely unimplemented but
-//!   *wrong*: `setjmp` saves host registers the guest cannot restore, and the
-//!   host unwinder cannot walk guest frames (M5).
+//!   *wrong*: the host's unwinder cannot walk guest frames, so `pthread_cancel`
+//!   is refused (M5). `setjmp` and `longjmp` were here for the same reason and
+//!   are now ordinary entries with a shim behind them — the signature says what
+//!   the guest passes, and [`crate::jmpbuf`] does the part the host cannot.
 //!
 //! ## Names
 //!
@@ -217,6 +219,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("__strncpy_chk", P, P, P, U64, U64),
     sig!("__tolower", I32, I32),
     sig!("__toupper", I32, I32),
+    // The Darwin spellings that skip the signal mask, imported as `__longjmp`
+    // and `__setjmp`. One implementation serves both pairs: the distinction is
+    // about a mask this runtime does not model yet. See [`crate::jmpbuf`].
+    sig!("_longjmp", V, P, I32),
+    sig!("_setjmp", I32, P),
     // Both spellings of the thread-local bootstrap. It is an ordinary host
     // function taking the descriptor's address and returning this thread's
     // address for the variable — see [`crate::tls`] — and it is reached through
@@ -340,6 +347,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("log", F64, F64),
     sig!("log10", F64, F64),
     sig!("log2", F64, F64),
+    // `longjmp` and `setjmp` are *shimmed*, not forwarded: the host's would save
+    // and restore arm64 registers and the JIT's own stack frame, which is the
+    // one kind of wrongness that does not fault. The signature is here anyway
+    // because it is what stops them being promoted to an inlined fast import and
+    // what names them at an exit — see [`crate::jmpbuf`].
+    sig!("longjmp", V, P, I32),
     sig!("lseek", I64, I32, I64, I32),
     sig!("lstat", I32, P, P),
     sig!("malloc", P, U64),
@@ -441,8 +454,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("round", F64, F64),
     vsig!("scanf", I32, P),
     sig!("setenv", I32, P, P, I32),
+    sig!("setjmp", I32, P),
     sig!("setlocale", P, I32, P),
     sig!("setvbuf", I32, P, P, I32, U64),
+    sig!("siglongjmp", V, P, I32),
+    sig!("sigsetjmp", I32, P, I32),
     sig!("sin", F64, F64),
     sig!("sleep", U32, U32),
     vsig!("snprintf", I32, P, U64, P),
@@ -529,23 +545,17 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("__stderrp", "a data import, read through its slot and never called"),
     ("__stdinp", "a data import, read through its slot and never called"),
     ("__stdoutp", "a data import, read through its slot and never called"),
-    ("_longjmp", "restores a stack the host's implementation never saw (M5)"),
-    ("_setjmp", "saves host registers, not the guest's (M5)"),
     ("dyld_stub_binder", "the lazy-binding entry point; every slot is bound eagerly"),
     ("environ", "a data import, read through its slot and never called"),
     ("humanize_number", UNDECLARED),
-    ("longjmp", "restores a stack the host's implementation never saw (M5)"),
     ("mbr_identifier_translate", UNDECLARED),
     ("optarg", "a data import, read through its slot and never called"),
     ("opterr", "a data import, read through its slot and never called"),
     ("optind", "a data import, read through its slot and never called"),
     ("optopt", "a data import, read through its slot and never called"),
     ("pthread_cancel", "cancellation unwinds a stack the host's unwinder never saw (M5)"),
-    ("setjmp", "saves host registers, not the guest's (M5)"),
     ("sigaction", "installs a guest function pointer as a handler (M5)"),
-    ("siglongjmp", "restores a stack the host's implementation never saw (M5)"),
     ("signal", "installs a guest function pointer as a handler (M5)"),
-    ("sigsetjmp", "saves host registers, not the guest's (M5)"),
 ];
 
 #[cfg(test)]

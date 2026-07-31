@@ -302,6 +302,118 @@ int main(void) {
 }
 "#;
 
+/// Milestone 5's `setjmp`/`longjmp` program.
+///
+/// Written so that each claim fails on its own:
+///
+/// - **The jump happens at all.** `level3` never returns, so any line printed
+///   after its call site means the `longjmp` was a no-op.
+/// - **Three frames are discarded.** `level1` and `level2` print after their
+///   inner call, and neither line may appear.
+/// - **The value comes back.** Two round trips through the same buffer with
+///   different values, plus the C rule that zero arrives as one.
+/// - **The stack is really restored.** `main` keeps a large local array and
+///   long-lived counters across the jump; a `longjmp` that restored `rip` and
+///   not `rsp` would run `main`'s tail on `level3`'s frame, and the array's
+///   sentinel bytes are what say so.
+/// - **Both spellings.** `_setjmp`/`_longjmp` and `sigsetjmp`/`siglongjmp` are
+///   separate imports (`__setjmp`, `_sigsetjmp`) reaching the same shim.
+///
+/// Deliberately *not* jumping out of a callback the host called: that is a
+/// `longjmp` across host frames, which the runtime refuses by name. See the
+/// milestone note.
+pub const SETJMP_C: &str = r#"
+#include <setjmp.h>
+#include <stdio.h>
+#include <string.h>
+
+static jmp_buf env;
+static sigjmp_buf senv;
+
+/* File scope, not locals: a non-volatile local modified between `setjmp` and
+   `longjmp` has an indeterminate value afterwards — C says so — and a fixture
+   whose expected output depends on undefined behaviour tests the compiler, not
+   the runtime. */
+static int trips = 0, total = 0;
+
+static void level3(int v) { printf("level3\n"); longjmp(env, v); }
+static void level2(int v) { printf("level2\n"); level3(v); printf("BUG: level2 returned\n"); }
+static void level1(int v) { printf("level1\n"); level2(v); printf("BUG: level1 returned\n"); }
+
+static void plain(void)  { _longjmp(env, 9); }
+static void masked(void) { siglongjmp(senv, 11); }
+
+int main(void) {
+    char guard[256];
+    memset(guard, 'g', sizeof guard);
+    guard[255] = 0;
+
+    int v = setjmp(env);
+    if (v == 0) {
+        printf("first return\n");
+        level1(42);
+        printf("BUG: setjmp fell through\n");
+    }
+    trips++;
+    total += v;
+    printf("came back with %d (trip %d)\n", v, trips);
+    if (v == 42) level1(0);
+
+    if (_setjmp(env) == 0) plain();
+    else printf("plain spelling ok\n");
+
+    if (sigsetjmp(senv, 1) == 0) masked();
+    else printf("masked spelling ok\n");
+
+    printf("guard %c%c len %zu trips %d total %d\n",
+           guard[0], guard[254], strlen(guard), trips, total);
+    return 0;
+}
+"#;
+
+/// Build [`SETJMP_C`], or `None` if this host cannot.
+pub fn setjmp_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| build_x86_64("setjmp", SETJMP_C, &[])).clone()
+}
+
+/// Milestone 5's refusal fixture: a `longjmp` out of a host→guest callback.
+///
+/// The comparator is called by the *host's* `qsort`, so the `setjmp` it jumps
+/// back to is in an outer VM entry with host frames in between. Restoring the
+/// guest context would abandon them silently, so the runtime refuses — and this
+/// program is how the refusal is checked to be a named diagnostic rather than a
+/// crash. It runs natively; under the driver it must stop and say why.
+pub const LONGJMP_ACROSS_C: &str = r#"
+#include <setjmp.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+static jmp_buf env;
+
+static int by_int(const void *a, const void *b) {
+    if (*(const int *)a == 9) longjmp(env, 5);
+    return 0;
+}
+
+int main(void) {
+    int v[4] = {5, 9, 1, 7};
+    if (setjmp(env) == 0) {
+        qsort(v, 4, sizeof(int), by_int);
+        printf("no jump\n");
+    } else {
+        printf("jumped out of the comparator\n");
+    }
+    return 0;
+}
+"#;
+
+/// Build [`LONGJMP_ACROSS_C`], or `None` if this host cannot.
+pub fn longjmp_across_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| build_x86_64("longjmp_across", LONGJMP_ACROSS_C, &[])).clone()
+}
+
 /// Build [`THREAD_C`], or `None` if this host cannot.
 pub fn thread_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();

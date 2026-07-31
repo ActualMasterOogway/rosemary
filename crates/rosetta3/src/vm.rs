@@ -463,9 +463,16 @@ impl Vm {
         let saved_rsp = state.rsp.get();
         state.rsp.set(rsp);
         state.depth.set(state.depth.get() + 1);
+        // This entry gets an identity of its own, which `setjmp` records and
+        // `longjmp` checks: a jump back into an *outer* entry would leave the
+        // host frames between the two — the host's `qsort`, with a guest
+        // comparator above it — on the host's stack with nothing to return
+        // through them. See [`crate::jmpbuf`].
+        let outer_entry = state.enter();
         // Publish the VM for the duration: a thunk called from inside a host
         // function has no other way to find it. See `crate::thunk`.
         let result = crate::thunk::with_current(self, || self.run_loop(state, &mut ctx));
+        state.leave(outer_entry);
         state.depth.set(state.depth.get() - 1);
         state.rsp.set(saved_rsp);
         result
@@ -493,6 +500,15 @@ impl Vm {
             if self.program.import_at(pc).is_some() {
                 ctx.imported_function_va = pc;
                 self.service_import(ctx)?;
+                // Unless the call transferred control instead of returning. A
+                // tail-called `jmp _longjmp` arrives here, and by the time the
+                // shim is done `rip` is the `setjmp` it restored — popping a
+                // return address over it would jump to the caller of the
+                // function that longjmped, which is precisely the frame the
+                // guest asked to leave. See [`crate::jmpbuf`].
+                if state.took_redirect() {
+                    continue;
+                }
                 let mut ret = [0u8; 8];
                 self.view()
                     .read(ctx.rsp, &mut ret)
@@ -597,6 +613,14 @@ impl Vm {
 
     /// Call the host function an intercepted import resolved to.
     fn service_import(&self, ctx: &mut RegisterContext) -> Result<(), VmError> {
+        // Cleared here rather than where it is read, so the flag always describes
+        // *this* call. Only the tail-call path consults it; at an ordinary
+        // `ImportedFunctionCall` exit a redirected `rip` is already what the loop
+        // continues at, and a leftover flag would make the next tail call skip a
+        // return it really does have.
+        if let Some(state) = crate::thread::current() {
+            state.took_redirect();
+        }
         let va = ctx.imported_function_va;
         let Some(site) = self.program.import_at(va) else {
             return Err(AbiError::NoSignature { symbol: format!("<unregistered {va:#x}>") }.into());

@@ -72,14 +72,25 @@ pub fn dispatch(
         "open" => openat::open,
         "openat" => openat::openat,
         "fcntl" => openat::fcntl,
-        _ => return None,
+        // Not variadic, and here for the same underlying reason: forwarding it
+        // would operate on the *host's* registers and the host's stack. See
+        // [`crate::jmpbuf`], which is a module of its own because a stack is not
+        // a calling convention.
+        _ => return crate::jmpbuf::shim_for(name).map(|f| f(name, ctx, mem)),
     };
     Some(f(name, ctx, mem))
 }
 
 /// Whether [`dispatch`] would handle `symbol`.
+///
+/// Consulted by [`crate::ImportPolicy`] before promoting an import: a shimmed
+/// symbol must never be inlined by the lifter, because the whole reason it has a
+/// shim is that reaching the host function is wrong.
 pub fn is_shimmed(symbol: &str) -> bool {
     let name = symbol.strip_prefix('_').unwrap_or(symbol);
+    if crate::jmpbuf::shim_for(name).is_some() {
+        return true;
+    }
     matches!(
         name,
         "printf"

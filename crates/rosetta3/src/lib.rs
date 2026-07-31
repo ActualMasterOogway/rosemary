@@ -106,10 +106,22 @@
 //! import with no signature is **refused by name** rather than guessed at, and
 //! [`shims`] is where the calls that cannot be forwarded generically — the
 //! variadics — are written out by hand.
+//!
+//! ## Where passthrough stops being free
+//!
+//! Almost everything a guest imports operates on *memory*, and memory is shared,
+//! which is why high-level emulation works at all. The exceptions are the
+//! functions that operate on a **stack**: the host's implementation would save,
+//! walk, or restore arm64 frames belonging to the JIT rather than the guest
+//! frames the program means, and it would do so without faulting. [`jmpbuf`] is
+//! the first of them — `setjmp` and `longjmp`, implemented against the guest's
+//! own register context. Unwinding and signal delivery are the rest of the same
+//! milestone and are not built yet; both are refused by name until they are.
 
 pub mod abi;
 pub mod audit;
 pub mod cache;
+pub mod jmpbuf;
 pub mod program;
 pub mod region;
 pub mod shims;

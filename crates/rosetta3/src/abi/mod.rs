@@ -305,6 +305,14 @@ pub enum Classification {
 
 /// Decide how `symbol` will be reached, without calling anything.
 pub fn classify(tag: u64, symbol: &str) -> Classification {
+    // A shimmed symbol is slow whatever its signature says, because
+    // [`crate::ImportPolicy`] refuses to promote one: `setjmp` has an ordinary
+    // `int(void *)` signature and inlining it would call the *host's*. Asked
+    // here as well as there so the audit reports how an import will really be
+    // reached rather than how its types would allow.
+    if crate::shims::is_shimmed(symbol) {
+        return Classification::Slow;
+    }
     match table::lookup(tag, symbol) {
         Lookup::Known(abi) if abi.variadic => Classification::Slow,
         // A fast import is inlined by the lifter, which passes the guest's
