@@ -313,6 +313,15 @@ impl<'a, S: MachSpec> MachObject<'a, S> {
         })
     }
 
+    /// `LC_FUNCTION_STARTS`, whose payload is decoded by
+    /// [`function_starts`](crate::image::function_starts).
+    pub fn function_starts_data(&self) -> Option<LinkeditData> {
+        self.commands.iter().find_map(|cmd| match cmd {
+            LoadCommand::FunctionStarts(d) => Some(*d),
+            _ => None,
+        })
+    }
+
     pub fn exports_trie(&self) -> Option<LinkeditData> {
         self.commands.iter().find_map(|cmd| match cmd {
             LoadCommand::ExportsTrie(d) => Some(*d),

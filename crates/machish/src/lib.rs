@@ -38,10 +38,18 @@ extern crate alloc;
 extern crate std;
 
 pub mod error;
+pub mod exports;
+pub mod extensions;
 pub mod fat;
+pub mod fixups;
 pub mod image;
+pub mod install_name;
+pub mod loader;
 pub mod memory;
+pub mod namespace;
 pub mod raw;
+pub mod report;
+pub mod resolve;
 pub mod spec;
 
 pub use error::{Error, Result};

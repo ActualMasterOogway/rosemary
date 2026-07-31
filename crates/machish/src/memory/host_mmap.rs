@@ -24,6 +24,7 @@
 //! on a collision would blow a hole in the host's own libraries. The address is
 //! passed as an advisory hint instead and the result is checked.
 
+use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::ptr;
 
@@ -36,19 +37,38 @@ unsafe extern "C" {
     fn sys_icache_invalidate(start: *mut c_void, len: usize);
 }
 
-/// An `mmap`-backed region owning its mapping; unmapped on drop.
-pub struct MmapSpace {
+/// One `mmap`ed region.
+struct Region {
     base: *mut u8,
     len: usize,
+}
+
+impl Region {
+    fn contains(&self, addr: usize, len: usize) -> Option<*mut u8> {
+        let off = addr.checked_sub(self.base as usize)?;
+        if off.checked_add(len)? > self.len {
+            return None;
+        }
+        // SAFETY: `off + len` was just checked against this region's length.
+        Some(unsafe { self.base.add(off) })
+    }
+}
+
+/// `mmap`-backed host memory owning its mappings; all unmapped on drop.
+///
+/// Holds one region per [`reserve`](AddressSpace::reserve), because a link maps
+/// one region per image and a program with a bundled dylib has more than one.
+pub struct MmapSpace {
+    regions: Vec<Region>,
     /// Whether the caller asked for host-executable memory.
     want_exec: bool,
-    /// Whether the live mapping is `MAP_JIT` (implies `want_exec` on macOS).
+    /// Whether the live mappings are `MAP_JIT` (implies `want_exec` on macOS).
     jit: bool,
 }
 
 impl MmapSpace {
     pub fn new() -> Self {
-        MmapSpace { base: ptr::null_mut(), len: 0, want_exec: false, jit: false }
+        MmapSpace { regions: Vec::new(), want_exec: false, jit: false }
     }
 
     /// Request memory the host CPU may execute.
@@ -63,15 +83,36 @@ impl MmapSpace {
     }
 
     fn in_bounds(&self, addr: Word, len: usize) -> Result<*mut u8> {
-        let base = self.base as usize;
         let a = usize::try_from(addr).map_err(|_| Error::OutOfBounds { addr, len })?;
-        let off = a.checked_sub(base).ok_or(Error::OutOfBounds { addr, len })?;
-        let end = off.checked_add(len).ok_or(Error::OutOfBounds { addr, len })?;
-        if end > self.len {
-            return Err(Error::OutOfBounds { addr, len });
-        }
-        // SAFETY: `off + len` was just checked against the owned mapping's length.
-        Ok(unsafe { self.base.add(off) })
+        self.regions
+            .iter()
+            .find_map(|r| r.contains(a, len))
+            .ok_or(Error::OutOfBounds { addr, len })
+    }
+
+    /// Total bytes mapped across every region.
+    pub fn len(&self) -> usize {
+        self.regions.iter().map(|r| r.len).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.regions.is_empty()
+    }
+
+    /// How many regions have been reserved.
+    pub fn region_count(&self) -> usize {
+        self.regions.len()
+    }
+
+    /// Whether `[base, base+len)` overlaps a region already mapped *by us*.
+    ///
+    /// Only our own regions: the kernel is the authority on everything else,
+    /// and `try_reserve_at` already defers to it by checking where the
+    /// non-`MAP_FIXED` hint actually landed.
+    fn collides(&self, base: usize, len: usize) -> bool {
+        self.regions
+            .iter()
+            .any(|r| base < r.base as usize + r.len && (r.base as usize) < base + len)
     }
 
     fn mmap_flags(&self) -> (libc::c_int, libc::c_int) {
@@ -111,8 +152,7 @@ impl MmapSpace {
             unsafe { libc::munmap((aligned + size) as *mut c_void, tail) };
         }
 
-        self.base = aligned as *mut u8;
-        self.len = size;
+        self.regions.push(Region { base: aligned as *mut u8, len: size });
         Ok(aligned as Word)
     }
 
@@ -138,23 +178,33 @@ impl MmapSpace {
             return Ok(None);
         }
 
-        self.base = raw as *mut u8;
-        self.len = size;
+        self.regions.push(Region { base: raw as *mut u8, len: size });
         Ok(Some(want))
     }
 }
 
 impl AddressSpace for MmapSpace {
     fn reserve(&mut self, size: usize, align: usize, placement: Placement) -> Result<Word> {
-        if self.len != 0 {
-            return Err(Error::Memory("MmapSpace already reserved"));
-        }
         if size == 0 {
             return Err(Error::Memory("zero-length reservation"));
         }
         // On macOS, host-executable memory must be MAP_JIT from the start:
         // a page that was ever writable cannot later become executable.
         self.jit = self.want_exec && cfg!(target_os = "macos");
+
+        // Guard our own regions before asking the kernel. Without this a second
+        // image preferring the same address as the first would get the hint
+        // honoured — the range is genuinely mapped, just by us — and the two
+        // images would be written over each other.
+        if let Some(want) = placement.wanted()
+            && let Ok(want) = usize::try_from(want)
+            && self.collides(want, size)
+        {
+            return match placement {
+                Placement::Fixed(_) => Err(Error::Memory("fixed placement already reserved")),
+                _ => self.reserve_anywhere(size, align),
+            };
+        }
 
         match placement {
             Placement::Anywhere => self.reserve_anywhere(size, align),
@@ -242,9 +292,11 @@ impl Default for MmapSpace {
 
 impl Drop for MmapSpace {
     fn drop(&mut self) {
-        if !self.base.is_null() && self.len != 0 {
-            // SAFETY: unmapping exactly the region we reserved and still own.
-            unsafe { libc::munmap(self.base as *mut c_void, self.len) };
+        for r in &self.regions {
+            if !r.base.is_null() && r.len != 0 {
+                // SAFETY: unmapping exactly a region we reserved and still own.
+                unsafe { libc::munmap(r.base as *mut c_void, r.len) };
+            }
         }
     }
 }
@@ -372,5 +424,48 @@ mod tests {
         // Protecting read-execute is still a legal request the caller may make;
         // the loader is what declines to make it for a non-native spec.
         mem.protect(base, 0x1000, Prot::RO).unwrap();
+    }
+
+    #[test]
+    fn several_reservations_coexist_without_clobbering_each_other() {
+        // The multi-image case. Two reservations must both stay live and stay
+        // independently addressable — a second `reserve` replacing the first
+        // would leak one mapping and make every address in it invalid.
+        let mut mem = MmapSpace::new();
+        let a = mem.reserve(0x8000, 0x4000, Placement::Anywhere).unwrap();
+        let b = mem.reserve(0x8000, 0x4000, Placement::Anywhere).unwrap();
+        assert_eq!(mem.region_count(), 2);
+        assert_ne!(a, b);
+
+        mem.write(a, &[0xaa; 8]).unwrap();
+        mem.write(b, &[0xbb; 8]).unwrap();
+        let mut buf = [0u8; 8];
+        mem.read(a, &mut buf).unwrap();
+        assert_eq!(buf, [0xaa; 8]);
+        mem.read(b, &mut buf).unwrap();
+        assert_eq!(buf, [0xbb; 8]);
+    }
+
+    #[test]
+    fn a_second_image_preferring_an_address_we_already_hold_slides() {
+        // Without the self-collision check this is the dangerous case: the
+        // kernel would honour the hint, because the range *is* mapped — by us —
+        // and the second image would be written over the first.
+        let mut mem = MmapSpace::new();
+        let a = mem.reserve(0x8000, 0x4000, Placement::Anywhere).unwrap();
+        let b = mem.reserve(0x4000, 0x4000, Placement::Preferred(a)).unwrap();
+        assert_ne!(b, a, "a colliding preferred placement must slide");
+
+        mem.write(a, &[0x11; 8]).unwrap();
+        let mut buf = [0u8; 8];
+        mem.read(b, &mut buf).unwrap();
+        assert_eq!(buf, [0u8; 8], "the second reservation overlapped the first");
+    }
+
+    #[test]
+    fn a_fixed_placement_onto_our_own_region_is_refused() {
+        let mut mem = MmapSpace::new();
+        let a = mem.reserve(0x8000, 0x4000, Placement::Anywhere).unwrap();
+        assert!(mem.reserve(0x4000, 0x4000, Placement::Fixed(a)).is_err());
     }
 }

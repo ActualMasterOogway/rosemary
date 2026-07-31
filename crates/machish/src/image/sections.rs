@@ -89,6 +89,19 @@ impl<'a> Section<'a> {
         self.section_type() == constants::S_MOD_INIT_FUNC_POINTERS
     }
 
+    /// `__init_offsets`: the same job as `__mod_init_func`, encoded as 32-bit
+    /// offsets from the image base. Modern toolchains emit this instead, so a
+    /// loader that checks only for `__mod_init_func` finds no initializers at
+    /// all in anything built recently.
+    pub fn is_init_offsets(&self) -> bool {
+        self.section_type() == constants::S_INIT_FUNC_OFFSETS
+    }
+
+    /// Either encoding of the initializer list.
+    pub fn is_initializers(&self) -> bool {
+        self.is_mod_init() || self.is_init_offsets()
+    }
+
     /// `__mod_term_func`: destructors, run at unload.
     pub fn is_mod_term(&self) -> bool {
         self.section_type() == constants::S_MOD_TERM_FUNC_POINTERS

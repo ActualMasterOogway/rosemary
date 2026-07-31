@@ -257,3 +257,77 @@ fn corrupted_load_commands_fail_cleanly() {
         }
     }
 }
+
+// --------------------------------------------- decoders on hostile input ----
+//
+// The parser's totality is only half the requirement. The fixup decoders and
+// the export trie walker read `__LINKEDIT` — offsets and counts that the header
+// checks never look at — so they need their own sweep. Each case below asserts
+// only "does not panic and does not hang"; whether a particular corruption
+// happens to produce an error or a plausible-looking decode is not something
+// worth pinning down, and pinning it down would make the test a change
+// detector.
+
+/// The corruptible extent of a real binary: header, load commands, and
+/// `__LINKEDIT`, where every structure these decoders read actually lives.
+fn thin_slice(path: &str) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    Some(machish::fat::select(&bytes, &X86_64).ok()?.to_vec())
+}
+
+fn decode_everything(bytes: &[u8]) {
+    let Ok(obj) = parse(bytes) else { return };
+    let _ = machish::exports::ExportTable::parse(&obj);
+    let _ = machish::exports::ExportTable::parse_symtab(&obj);
+    let _ = machish::fixups::decode_image(&obj);
+    let _ = machish::fixups::StubMap::build(&obj);
+}
+
+#[test]
+fn decoders_survive_every_prefix_of_a_real_binary() {
+    for path in ["/bin/ls", "/bin/echo"] {
+        let Some(thin) = thin_slice(path) else { continue };
+        // Step rather than walk every byte: a full sweep of a 100 KiB binary is
+        // 100k full decodes, which turns a fast test into a slow one without
+        // reaching a meaningfully different set of code paths.
+        for len in (0..thin.len()).step_by(97) {
+            decode_everything(&thin[..len]);
+        }
+        decode_everything(&thin);
+    }
+}
+
+#[test]
+fn decoders_survive_single_byte_corruption() {
+    for path in ["/bin/ls", "/bin/echo"] {
+        let Some(thin) = thin_slice(path) else { continue };
+        for i in (0..thin.len()).step_by(211) {
+            for patch in [0x00u8, 0xff, 0x80] {
+                let mut corrupt = thin.clone();
+                corrupt[i] = patch;
+                decode_everything(&corrupt);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_chained_fixups_command_pointing_at_nonsense_is_an_error() {
+    // The chained decoder reads offsets out of its own header, so a header of
+    // all-ones is the shortest path to every bounds check it has.
+    let Some(mut thin) = thin_slice("/bin/echo") else { return };
+    let Ok(obj) = parse(&thin) else { return };
+    let Some(cf) = obj.chained_fixups() else { return };
+    let at = cf.dataoff as usize;
+    if at + 32 > thin.len() {
+        return;
+    }
+    for b in &mut thin[at..at + 32] {
+        *b = 0xff;
+    }
+    let obj = parse(&thin).unwrap();
+    assert!(
+        machish::fixups::decode_image(&obj).is_err(),
+        "a chained header of all-ones must not decode"
+    );
+}

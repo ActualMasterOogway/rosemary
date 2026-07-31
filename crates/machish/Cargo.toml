@@ -23,5 +23,17 @@ ext-tlv = []
 ext-objc = []
 ext-dyld = ["ext-initializers", "ext-tlv"]
 
+# The example links a real binary against the host, so it needs both the host
+# frontend and the guest architecture. Declared here so `--no-default-features`
+# still builds — that configuration is what proves the `no_std` core.
+[[example]]
+name = "link"
+required-features = ["std", "arch-x86_64"]
+
 [dependencies]
 libc = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Only for tests that verify a resolved address is a real host image address
+# via `dladdr`. The crate itself keeps `libc` optional and `std`-gated.
+libc = { workspace = true }
