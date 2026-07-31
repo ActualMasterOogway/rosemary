@@ -1,0 +1,27 @@
+[package]
+name = "machish"
+description = "A templatable, no_std-core Mach-O loader and dynamic linker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["std", "arch-all", "fixups-all", "ext-dyld"]
+std = ["dep:libc"]
+
+arch-x86_64 = []
+arch-arm64 = []
+arch-all = ["arch-x86_64", "arch-arm64"]
+
+fixups-dyld-info = []
+fixups-chained = []
+fixups-classic = []
+fixups-all = ["fixups-dyld-info", "fixups-chained", "fixups-classic"]
+
+ext-initializers = []
+ext-tlv = []
+ext-objc = []
+ext-dyld = ["ext-initializers", "ext-tlv"]
+
+[dependencies]
+libc = { workspace = true, optional = true }
