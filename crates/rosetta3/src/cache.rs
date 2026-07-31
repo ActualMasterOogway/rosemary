@@ -35,7 +35,7 @@
 //! a stale translation produces wrong answers rather than an error.
 
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use machish::memory::Regions;
 
@@ -64,6 +64,20 @@ pub struct Translation {
     /// Keeps the JIT module — and therefore `entry`'s pages — mapped.
     _backend: CraneliftBackend,
 }
+
+// SAFETY: a `Translation` is immutable once built, and what the guest's threads
+// do with one is run it — which is what threads do with any function. `enter`
+// touches only the caller's own `RegisterContext` and guest memory, whose races
+// are the guest's own (see the note on `Vm`). `_backend` is never read after
+// construction; it is held so the code stays mapped, and its `Drop` runs once,
+// when the last `Arc` goes, by which time no thread can be inside the code.
+//
+// The reason this is written out rather than derived is that `CraneliftBackend`
+// is neither `Send` nor `Sync` — it is a JIT module, built on one thread and, in
+// microlift's intended use, used there. We use it as a finished artefact, which
+// is a narrower thing than the type allows and so has to be asserted.
+unsafe impl Send for Translation {}
+unsafe impl Sync for Translation {}
 
 impl Translation {
     /// Enter the translation, resuming at `ctx.rip`.
@@ -94,12 +108,20 @@ impl Translation {
 
 /// Translations, keyed by the guest address each begins at.
 pub struct CodeCache {
-    regions: BTreeMap<u64, Rc<Translation>>,
+    regions: BTreeMap<u64, Arc<Translation>>,
     /// Everything microlift needs to know before it lifts anything: the
     /// registered import addresses and the read-only segment hints. Built once,
     /// cloned per lift, because it does not change while a program runs.
     config: LifterConfig,
 }
+
+// SAFETY: the one thing keeping a cache off a second thread is the raw pointer
+// inside `LifterConfig`'s `DynamicSymbol`s — the *host address* a fast import
+// resolved to. It is a function address, cloned into each lift and never
+// dereferenced on this side; the code that eventually calls it is compiled arm64
+// doing what any thread may do with a function pointer. The translations beside
+// it carry their own claim (see `Translation` above).
+unsafe impl Send for CodeCache {}
 
 impl CodeCache {
     /// A cache that lifts with `config`.
@@ -124,7 +146,7 @@ impl CodeCache {
         &mut self,
         program: &Program<M>,
         pc: u64,
-    ) -> Result<Rc<Translation>, VmError> {
+    ) -> Result<Arc<Translation>, VmError> {
         if let Some(hit) = self.lookup(pc) {
             return Ok(hit);
         }
@@ -145,19 +167,19 @@ impl CodeCache {
             unsafe { std::mem::transmute(code) };
 
         let translation =
-            Rc::new(Translation { start, end, starts: region.starts, entry, _backend: backend });
-        self.regions.insert(start, Rc::clone(&translation));
+            Arc::new(Translation { start, end, starts: region.starts, entry, _backend: backend });
+        self.regions.insert(start, Arc::clone(&translation));
         Ok(translation)
     }
 
     /// An existing translation covering `pc`, if there is one.
-    fn lookup(&self, pc: u64) -> Option<Rc<Translation>> {
+    fn lookup(&self, pc: u64) -> Option<Arc<Translation>> {
         // Regions may overlap: the same bytes are reachable from two PCs when
         // one lift stopped at a hole, and a function reached only through a
         // pointer may sit inside the span of a region lifted from elsewhere.
         // So this asks each candidate whether `pc` is on *its* instruction
         // grid, nearest first, and a miss means lifting a region that starts at
         // `pc` rather than entering one that would run the wrong code.
-        self.regions.range(..=pc).rev().find(|(_, t)| t.covers(pc)).map(|(_, t)| Rc::clone(t))
+        self.regions.range(..=pc).rev().find(|(_, t)| t.covers(pc)).map(|(_, t)| Arc::clone(t))
     }
 }

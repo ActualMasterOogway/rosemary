@@ -124,6 +124,16 @@ impl<'a> Section<'a> {
         self.section_type() == constants::S_THREAD_LOCAL_VARIABLES
     }
 
+    /// `__thread_data`: the initial values a new thread's block is copied from.
+    pub fn is_thread_local_data(&self) -> bool {
+        self.section_type() == constants::S_THREAD_LOCAL_REGULAR
+    }
+
+    /// `__thread_bss`: the zero-filled tail of a thread's block.
+    pub fn is_thread_local_bss(&self) -> bool {
+        self.section_type() == constants::S_THREAD_LOCAL_ZEROFILL
+    }
+
     /// How many entries a fixed-stride table holds.
     pub fn entry_count(&self, stride: u64) -> u64 {
         self.size.checked_div(stride).unwrap_or(0)

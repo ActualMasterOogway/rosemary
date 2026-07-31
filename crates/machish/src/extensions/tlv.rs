@@ -16,19 +16,25 @@
 //! first use allocates the thread's block, replaces `thunk` with a fast path,
 //! and returns the address.
 //!
-//! ## Scope: enumerate and stop
+//! ## Scope: describe, and let the embedder allocate
 //!
-//! This crate parses the descriptors and does nothing else — no per-thread
-//! blocks, no `pthread_key_create`, no `__tlv_bootstrap` implementation. That is
-//! exactly the posture `selfish` takes with `PT_TLS`, which it parses into a
-//! `TlsImage` and stops (`selfish/src/extensions/tls.rs:16-40`), and for the
-//! same reason: making it work requires deciding how *guest* threads map onto
-//! *host* threads, and that is a question about the execution model rather than
-//! about the file format. It is milestone 4.
+//! This crate parses the descriptors and the block layout they index into, and
+//! does nothing else — no per-thread blocks, no `pthread_key_create`, no
+//! `__tlv_bootstrap` implementation. That is the posture `selfish` takes with
+//! `PT_TLS`, which it parses into a `TlsImage` and stops
+//! (`selfish/src/extensions/tls.rs:16-40`), and for the same reason: allocating
+//! a block means deciding how *guest* threads map onto *host* threads, and that
+//! is a question about the execution model rather than about the file format.
 //!
-//! Meanwhile [`TlvExtension`] does the one thing the loader can usefully do
-//! now: rewrite the bootstrap imports so an embedder's shim can claim them
-//! without having to know which library each image imported them from.
+//! What the loader can honestly say is *what a block would have to look like*,
+//! which is why [`tlv_template`] is here and the allocation is not: a
+//! descriptor's `offset` is meaningless without the base it is an offset from,
+//! and finding that base is section arithmetic — exactly this crate's job. The
+//! embedder supplies the memory and the per-thread lifetime.
+//!
+//! [`TlvExtension`] additionally rewrites the bootstrap imports to flat
+//! references, so that shim can claim them without having to know which library
+//! each image imported them from.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -39,7 +45,7 @@ use crate::fixups::{Fixup, LibraryRef};
 use crate::image::MachObject;
 use crate::memory::AddressSpace;
 use crate::raw::Word;
-use crate::report::{ImageReport, ThreadLocalDescriptor};
+use crate::report::{ImageReport, ThreadLocalDescriptor, TlvTemplate};
 use crate::spec::MachSpec;
 
 /// Words per `tlv_descriptor`.
@@ -148,6 +154,7 @@ impl<S: MachSpec> Extension<S> for TlvExtension {
         report: &mut ImageReport,
     ) -> Result<()> {
         report.thread_locals = collect_thread_locals(obj, mem, slide)?;
+        report.tlv_template = tlv_template(obj, slide);
         Ok(())
     }
 }
@@ -199,6 +206,45 @@ fn leak_static(name: &str) -> &'static str {
             return leaked;
         }
     }
+}
+
+/// How big one thread's block for this image must be, and where its initial
+/// bytes come from.
+///
+/// The link editor lays a descriptor's `offset` out relative to the start of
+/// `__thread_data`, and places `__thread_bss` after it — so the block is those
+/// two sections back to back, padding included, and `offset` indexes straight
+/// into it. Verified against a fixture rather than assumed: see
+/// `tests/extensions.rs`.
+///
+/// `None` when the image has neither section, which is also when it has no
+/// descriptors to index into one.
+pub fn tlv_template<S: MachSpec>(obj: &MachObject<'_, S>, slide: Word) -> Option<TlvTemplate> {
+    let data = obj.sections.iter().find(|s| s.is_thread_local_data());
+    let bss = obj.sections.iter().find(|s| s.is_thread_local_bss());
+
+    // Byte zero of the block is `__thread_data`'s first byte, or — for an image
+    // whose thread-locals are all zero-initialised, which has no `__thread_data`
+    // at all — `__thread_bss`'s.
+    let start = data.or(bss)?.addr;
+    let end = bss
+        .or(data)
+        .map(|s| s.addr.wrapping_add(s.size))
+        .filter(|&e| e > start)?;
+
+    Some(TlvTemplate {
+        initial_va: start.wrapping_add(slide),
+        // Only `__thread_data` has bytes in the file; everything past it is the
+        // zero-filled tail, whether that is `__thread_bss` or the alignment
+        // padding in front of it.
+        initial_size: data.map_or(0, |s| s.size),
+        total_size: end - start,
+        // The stricter of the two sections' requirements, capped where an
+        // allocation could not honour it anyway: `align` is a log2 in the file
+        // and nothing checks it, so a corrupt image must not become a shift
+        // overflow here.
+        align: data.map_or(0, |s| s.align).max(bss.map_or(0, |s| s.align)).min(16),
+    })
 }
 
 /// Every `tlv_descriptor` in the image, read as it stands in memory.

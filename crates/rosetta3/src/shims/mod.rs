@@ -26,7 +26,8 @@
 //!
 //! ## Scope
 //!
-//! Implemented: `printf`, `fprintf`, `sprintf`, `snprintf`, and `ioctl`.
+//! Implemented: `printf`, `fprintf`, `sprintf`, `snprintf`, `ioctl`, and the
+//! `open`/`openat`/`fcntl` group.
 //! Everything else variadic is *classified* by [`crate::abi::table`] and refused by name with
 //! [`AbiError::NoShim`] until someone needs it — a refusal that names the
 //! symbol is a work item; a guess is a bug report from a user.
@@ -36,6 +37,7 @@ use microlift::arch::x86_64::context::RegisterContext;
 use crate::abi::{AbiError, GuestMemory, Result};
 
 pub mod ioctl;
+pub mod openat;
 pub mod printf;
 pub mod runtime;
 
@@ -65,6 +67,11 @@ pub fn dispatch(
         // Variadic in its declaration and one argument wide in fact; see
         // [`ioctl`] for why that makes it forwardable when `printf` is not.
         "ioctl" => ioctl::ioctl,
+        // Variadic in their declarations and one argument wide in fact, decided
+        // by a flag word rather than a format string; see [`openat`].
+        "open" => openat::open,
+        "openat" => openat::openat,
+        "fcntl" => openat::fcntl,
         _ => return None,
     };
     Some(f(name, ctx, mem))
@@ -82,6 +89,9 @@ pub fn is_shimmed(symbol: &str) -> bool {
             | "__sprintf_chk"
             | "__snprintf_chk"
             | "ioctl"
+            | "open"
+            | "openat"
+            | "fcntl"
     )
 }
 

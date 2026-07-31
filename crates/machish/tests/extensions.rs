@@ -155,6 +155,64 @@ fn thread_local_descriptors_are_enumerated_with_their_three_words() {
     assert_eq!(offsets.len(), img.thread_locals.len(), "two variables share an offset");
 }
 
+/// The fact the whole thread-local block layout rests on, checked against the
+/// link editor rather than assumed from its documentation.
+///
+/// A descriptor says "offset 0x8" and nothing about what it is an offset from.
+/// The claim is that it is relative to the start of `__thread_data` — so for
+/// each thread-local, `template.initial_va + offset` must be the address `ld64`
+/// gave that variable's storage, which it records under the name
+/// `_<var>$tlv$init`. Getting this wrong by one section would produce a runtime
+/// that reads and writes plausible neighbouring variables.
+#[test]
+fn a_descriptor_offset_is_relative_to_the_start_of_the_thread_block() {
+    let Some((bytes, report)) = link("ext_tlv_layout", &[]) else {
+        skip!("cc -arch x86_64 unavailable")
+    };
+    let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
+    let img = report.root().unwrap();
+    let template = img.tlv_template.expect("the fixture declares thread-locals");
+
+    // Where `ld64` actually put each variable's initial storage.
+    let table = machish::image::SymbolTable::new(
+        *obj.view(),
+        obj.symtab().expect("a symbol table"),
+        obj.dysymtab(),
+    )
+    .unwrap();
+    let mut storage: Vec<u64> = table
+        .iter()
+        .filter_map(|(_, sym)| {
+            let name = table.name(&sym).ok()?;
+            (!sym.is_stab() && name.ends_with("$tlv$init")).then_some(sym.n_value)
+        })
+        .collect();
+    storage.sort_unstable();
+    assert!(storage.len() >= 2, "the fixture declares two thread-locals");
+
+    let mut described: Vec<u64> = img
+        .thread_locals
+        .iter()
+        .map(|d| template.initial_va.wrapping_sub(img.slide).wrapping_add(d.offset))
+        .collect();
+    described.sort_unstable();
+    assert_eq!(
+        described, storage,
+        "a descriptor's offset is not relative to the start of __thread_data"
+    );
+
+    // The block has to hold the last variable whole, and the initialised prefix
+    // is `__thread_data` alone — everything past it is zero, which is what lets
+    // a bootstrap copy the template and zero the rest without re-reading the
+    // section table.
+    let data = obj.sections.iter().find(|s| s.is_thread_local_data()).unwrap();
+    let bss = obj.sections.iter().find(|s| s.is_thread_local_bss()).unwrap();
+    assert_eq!(template.initial_va.wrapping_sub(img.slide), data.addr);
+    assert_eq!(template.initial_size, data.size);
+    assert_eq!(template.total_size, bss.addr + bss.size - data.addr);
+    assert!(template.total_size >= template.initial_size);
+}
+
 #[test]
 fn descriptors_are_read_correctly_from_a_chained_fixups_image_too() {
     // The reason `observe` runs against memory rather than the file: in a

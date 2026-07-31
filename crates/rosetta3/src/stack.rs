@@ -1,5 +1,9 @@
 //! The guest's stack, and the process arguments laid out on it.
 //!
+//! One per *thread*, since milestone 4 — [`crate::thread`] owns the lifetime.
+//! Only the one made for the thread that starts the program has `argv` on it;
+//! see [`GuestStack::bare`] for why a spawned thread's does not.
+//!
 //! ## Why the stack is guest memory and not a `Vec`
 //!
 //! Anything the guest can address, a shim may be handed a pointer into. A
@@ -84,6 +88,18 @@ impl GuestStack {
     /// `getenv`, reading the host's `environ`, so handing the guest a different
     /// set on the stack would produce a program that disagrees with itself.
     pub fn new(size: usize, exe_path: &str, args: &[String]) -> Result<Self, VmError> {
+        let mut stack = Self::bare(size)?;
+        stack.place_args(exe_path, args)?;
+        Ok(stack)
+    }
+
+    /// Reserve `size` bytes with nothing laid out on them.
+    ///
+    /// What a thread the guest spawned needs: a `pthread` start routine is
+    /// called with one argument in `rdi` and has no `argc`, no `argv` and no
+    /// `apple` — so laying them out again per thread would be building a second
+    /// copy of the process's arguments that nothing can reach.
+    pub fn bare(size: usize) -> Result<Self, VmError> {
         let page = machish::memory::host_page_size() as usize;
         let size = size.next_multiple_of(page).max(page * 4);
 
@@ -96,7 +112,7 @@ impl GuestStack {
         space.protect(base, page, Prot::NONE).map_err(|source| VmError::Stack { source })?;
 
         let top = (base + size as u64) & !0xf;
-        let mut stack = GuestStack {
+        Ok(GuestStack {
             space,
             base,
             size,
@@ -106,9 +122,7 @@ impl GuestStack {
             argv: 0,
             envp: 0,
             apple: 0,
-        };
-        stack.place_args(exe_path, args)?;
-        Ok(stack)
+        })
     }
 
     /// Write the strings and the three pointer arrays into the top of the stack.

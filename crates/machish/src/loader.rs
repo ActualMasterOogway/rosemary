@@ -386,6 +386,7 @@ impl<S: MachSpec + 'static> Loader<S> {
                 initializers: Vec::new(),
                 terminators: Vec::new(),
                 thread_locals: Vec::new(),
+                tlv_template: None,
                 segments,
                 entry: m.entry,
             };

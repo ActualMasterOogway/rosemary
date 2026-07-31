@@ -164,6 +164,197 @@ int main(void) {
 }
 "#;
 
+/// Milestone 4's thread program, written so each claim can fail on its own.
+///
+/// - Four threads each increment a `_Thread_local` ten times and print what
+///   they see. Four independent counts is the whole thread-local claim; one
+///   shared block would print 10/20/30/40 in some order.
+/// - `main` prints its *own* counter afterwards. A runtime that gave the main
+///   thread a spawned thread's block would print something other than zero.
+/// - Each start routine returns a value derived from both its counter and its
+///   argument, and `pthread_join` is asserted to deliver it — the argument
+///   proves the thunk passed `rdi` through, the counter proves it ran on the
+///   right block.
+///
+/// The output is deliberately order-independent per line but not per set: the
+/// threads race, so the test sorts.
+pub const THREAD_C: &str = r#"
+#include <pthread.h>
+#include <stdio.h>
+
+_Thread_local int counter = 0;
+
+static void *worker(void *arg) {
+    long id = (long)arg;
+    for (int i = 0; i < 10; i++) counter++;
+    printf("thread %ld counter %d\n", id, counter);
+    return (void *)(long)(counter * 100 + id);
+}
+
+int main(void) {
+    pthread_t t[4];
+    for (long i = 0; i < 4; i++) pthread_create(&t[i], 0, worker, (void *)i);
+    for (long i = 0; i < 4; i++) {
+        void *r = 0;
+        pthread_join(t[i], &r);
+        printf("joined %ld -> %ld\n", i, (long)r);
+    }
+    printf("main counter %d\n", counter);
+    return 0;
+}
+"#;
+
+/// Milestone 4's `errno` program.
+///
+/// `errno` is the case where passthrough is *correct* rather than merely
+/// unimplemented: it is `__error()` returning a thread-local pointer, and a
+/// guest "syscall" is really the host's libSystem call on the same host thread —
+/// so the two agree without any work. What this checks is that they really do,
+/// including that a failure on a spawned thread does not disturb the main
+/// thread's value.
+pub const ERRNO_C: &str = r#"
+#include <pthread.h>
+#include <stdio.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <string.h>
+
+static void *worker(void *arg) {
+    (void)arg;
+    int fd = open("/nonexistent/definitely/not/here", O_RDONLY);
+    printf("worker fd=%d errno=%d (%s)\n", fd, errno, strerror(errno));
+    return 0;
+}
+
+int main(void) {
+    int fd = open("/dev/null", O_RDONLY);
+    printf("main fd ok=%d errno=%d\n", fd >= 0, errno);
+    pthread_t t;
+    pthread_create(&t, 0, worker, 0);
+    pthread_join(t, 0);
+    printf("main errno still %d\n", errno);
+    return 0;
+}
+"#;
+
+/// Milestone 4's synchronisation program: the rest of the pthread surface.
+///
+/// A mutex-protected shared counter (four threads, a thousand increments each,
+/// so a lost update shows up as a wrong total), `pthread_once` with a guest
+/// initialiser, and `pthread_key_create` with a guest destructor that libpthread
+/// calls on thread teardown — three host→guest callbacks the host invokes at
+/// three quite different moments.
+pub const PTHREAD_SYNC_C: &str = r#"
+#include <pthread.h>
+#include <stdio.h>
+
+static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+static pthread_once_t once = PTHREAD_ONCE_INIT;
+static pthread_key_t key;
+static int shared = 0;
+static int inits = 0;
+
+static void init_once(void) { inits++; }
+static void destroy(void *p) { printf("tsd destructor %ld\n", (long)p); }
+
+static void *worker(void *arg) {
+    pthread_once(&once, init_once);
+    pthread_setspecific(key, (void *)((long)arg + 1));
+    for (int i = 0; i < 1000; i++) {
+        pthread_mutex_lock(&m);
+        shared++;
+        pthread_mutex_unlock(&m);
+    }
+    return (void *)(long)pthread_getspecific(key);
+}
+
+int main(void) {
+    pthread_key_create(&key, destroy);
+    pthread_t t[4];
+    for (long i = 0; i < 4; i++) pthread_create(&t[i], 0, worker, (void *)i);
+    for (int i = 0; i < 4; i++) { void *r; pthread_join(t[i], &r); printf("tsd %ld\n", (long)r); }
+    printf("shared=%d inits=%d\n", shared, inits);
+    return 0;
+}
+"#;
+
+/// Milestone 4's single-threaded thread-local program.
+///
+/// Separate from [`THREAD_C`] because it isolates a different failure: reading
+/// a `_Thread_local` at all. It compiles to `leaq _x(%rip), %rdi; callq *(%rdi)`
+/// — an indirect call through a descriptor — and every value here is distinct
+/// and non-zero, so an off-by-one in the block layout reads a neighbour rather
+/// than passing by luck. The zero-initialised variable is the one that must come
+/// out of the `__thread_bss` half.
+pub const TLS_C: &str = r#"
+#include <stdio.h>
+
+_Thread_local int a = 11;
+_Thread_local int b;
+_Thread_local long c = 22;
+_Thread_local char pad[100];
+
+int main(void) {
+    b = 33;
+    pad[99] = 'z';
+    printf("%d %d %ld %c %d\n", a, b, c, pad[99], pad[0]);
+    return 0;
+}
+"#;
+
+/// Build [`THREAD_C`], or `None` if this host cannot.
+pub fn thread_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| build_x86_64("threads", THREAD_C, &[])).clone()
+}
+
+/// Build [`ERRNO_C`], or `None` if this host cannot.
+pub fn errno_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| build_x86_64("errno_thread", ERRNO_C, &[])).clone()
+}
+
+/// Build [`PTHREAD_SYNC_C`], or `None` if this host cannot.
+pub fn pthread_sync_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| build_x86_64("pthread_sync", PTHREAD_SYNC_C, &[])).clone()
+}
+
+/// Build [`TLS_C`], or `None` if this host cannot.
+pub fn tls_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| build_x86_64("thread_locals", TLS_C, &[])).clone()
+}
+
+/// Compile `source` for the **host's** architecture and return its path.
+///
+/// The counterpart to [`build_x86_64`], for tests whose claim is that the two
+/// architectures agree about something.
+pub fn build_native(name: &str, source: &str) -> Option<String> {
+    let dir = fixture_dir();
+    let src = dir.join(format!("{name}.c"));
+    let out = dir.join(name);
+    std::fs::write(&src, source).ok()?;
+
+    let status = Command::new("cc").arg("-o").arg(&out).arg(&src).status().ok()?;
+    status.success().then(|| out.to_string_lossy().into_owned())
+}
+
+/// Run a program **natively**, as the host's own copy of it.
+///
+/// The only assertion worth making about a pthread or `errno` fixture: what the
+/// program prints on this machine when nothing translates it. Rosetta 2 runs the
+/// x86_64 build directly, so the comparison is against the same binary rather
+/// than a recompilation of the same source — and when it is not available the
+/// caller skips rather than fails.
+pub fn run_native(path: &str) -> Option<(Option<i32>, String)> {
+    let out = Command::new(path).output().ok()?;
+    out.status
+        .code()
+        .is_some()
+        .then(|| (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned()))
+}
+
 /// Build [`QSORT_C`], or `None` if this host cannot.
 pub fn qsort_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();

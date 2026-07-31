@@ -74,6 +74,23 @@
 //! trampoline per guest function pointer handed outward — and [`startup`] runs
 //! the initializers and then `main`.
 //!
+//! ## One guest thread per host thread
+//!
+//! A guest thread is a host thread: `pthread_create`'s start routine leaves as
+//! an ordinary [`thunk`] and libpthread calls it on a thread of its own. What
+//! that costs is a division of the runtime's state — [`thread`] holds the part
+//! that is per-thread (a guest stack, the live stack pointer, the callback
+//! depth), and everything in [`Vm`] is shared, because a translation does not
+//! depend on which thread runs it and a guest pointer must map to the *same*
+//! thunk for every thread that sees it.
+//!
+//! [`tls`] is the other half: a `_Thread_local` compiles to an indirect call
+//! through a descriptor, and the runtime answers it with a block allocated per
+//! thread on first touch. `errno` needs neither, and is worth knowing about as
+//! the case where passthrough is simply *correct* — it is `__error()` returning
+//! a thread-local pointer, and a guest "syscall" is the host's libSystem call on
+//! the same host thread, so the two agree with no work at all.
+//!
 //! Every exit the loop cannot service is a **stop that names itself**: an
 //! address, a symbol, or an instruction. There is no arm that guesses, for the
 //! same reason [`abi`] refuses an undescribed import.
@@ -98,7 +115,9 @@ pub mod region;
 pub mod shims;
 pub mod stack;
 pub mod startup;
+pub mod thread;
 pub mod thunk;
+pub mod tls;
 pub mod vm;
 
 pub use abi::{call_import, AbiError, Classification};

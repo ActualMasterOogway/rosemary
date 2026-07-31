@@ -1,4 +1,4 @@
-//! Data the guest imports that the host will not hand out.
+//! Symbols the runtime supplies itself, because the host will not hand them out.
 //!
 //! `machish`'s native provider passes imports through to the host's own
 //! libSystem by `dlsym`, and a handful of symbols it deliberately declines.
@@ -21,6 +21,13 @@
 //! pretending otherwise would be theatre. What it must do is exist, be stable,
 //! and have a zero byte in it, which is what makes a string overflow unable to
 //! copy it back intact.
+//!
+//! ## `__tlv_bootstrap`
+//!
+//! The other symbol the host declines, for a better reason than `dlsym`
+//! visibility: the host's copy allocates out of the *host's* image state, which
+//! knows nothing about a guest descriptor. It is supplied here and implemented
+//! in [`crate::tls`].
 
 use machish::resolve::SyntheticDylib;
 
@@ -43,6 +50,13 @@ pub fn provider() -> SyntheticDylib {
     let mut lib = SyntheticDylib::new("<rosetta3 runtime>");
     lib.flat(true)
         .define_data("___stack_chk_guard", &STACK_CHK_GUARD as *const u64 as usize as u64);
+    // Both spellings, because which one an image imports depends on its
+    // toolchain's vintage and `machish`'s TLV extension redirects whichever it
+    // finds to a flat lookup — which is this one. See [`crate::tls`] for why the
+    // implementation needs no VM.
+    for name in machish::extensions::tlv::BOOTSTRAP_SYMBOLS {
+        lib.define_fn(name, crate::tls::bootstrap as *const ());
+    }
     lib
 }
 

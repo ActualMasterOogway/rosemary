@@ -27,9 +27,10 @@
 //! [`REFUSED`] therefore holds three kinds of thing:
 //!
 //! - **Data**, which is imported through a slot and read, never called.
-//! - **Callback takers whose callback the thunk cannot yet carry**: a start
-//!   routine that needs a guest thread (M4), a signal handler that needs a
-//!   translated `ucontext_t` (M5).
+//! - **Callback takers whose callback the thunk cannot yet carry**: a signal
+//!   handler, which would be entered with a host `ucontext_t` (M5).
+//!   `pthread_create` was here until M4 gave a new host thread its own guest
+//!   stack and register context; nothing about its signature changed either.
 //! - **Stack walkers**, where passthrough is not merely unimplemented but
 //!   *wrong*: `setjmp` saves host registers the guest cannot restore, and the
 //!   host unwinder cannot walk guest frames (M5).
@@ -216,6 +217,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("__strncpy_chk", P, P, P, U64, U64),
     sig!("__tolower", I32, I32),
     sig!("__toupper", I32, I32),
+    // Both spellings of the thread-local bootstrap. It is an ordinary host
+    // function taking the descriptor's address and returning this thread's
+    // address for the variable — see [`crate::tls`] — and it is reached through
+    // an *indirect* call (`callq *(%rdi)`), not a stub, so the signature is what
+    // lets the runtime service it at all.
+    sig!("_tlv_bootstrap", P, P),
     sig!("abort", V),
     sig!("abs", I32, I32),
     sig!("access", I32, P, I32),
@@ -354,6 +361,69 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("pow", F64, F64, F64),
     sig!("powf", F32, F32, F32),
     vsig!("printf", I32, P),
+    // ## The pthread family
+    //
+    // Passthrough is correct here for a reason worth stating rather than
+    // assuming, because it is the whole basis of M4: every opaque pthread type
+    // is **byte-identical** on x86_64 and arm64 macOS — `pthread_mutex_t` is 64
+    // bytes on both, `pthread_cond_t` 48, `pthread_rwlock_t` 200,
+    // `pthread_attr_t` 64, `pthread_t` a pointer. The guest allocates one on its
+    // own stack and the host's libpthread operates on it in place, with no
+    // translation at all. (`pthread_types_agree_across_architectures` checks
+    // this rather than trusting it.)
+    //
+    // What is *not* passthrough is the start routine, which is guest code and
+    // goes out as a thunk like any other callback — the difference being that
+    // the host calls it on a brand-new host thread, which is why M4 needed
+    // per-thread guest state before this entry could exist. See
+    // [`crate::thread`].
+    sig!("pthread_attr_destroy", I32, P),
+    sig!("pthread_attr_getstacksize", I32, P, P),
+    sig!("pthread_attr_init", I32, P),
+    sig!("pthread_attr_setdetachstate", I32, P, I32),
+    sig!("pthread_attr_setstacksize", I32, P, U64),
+    sig!("pthread_cond_broadcast", I32, P),
+    sig!("pthread_cond_destroy", I32, P),
+    sig!("pthread_cond_init", I32, P, P),
+    sig!("pthread_cond_signal", I32, P),
+    sig!("pthread_cond_timedwait", I32, P, P, P),
+    sig!("pthread_cond_wait", I32, P, P),
+    cbsig!([2], "pthread_create", I32, P, P, P, P),
+    sig!("pthread_detach", I32, U64),
+    sig!("pthread_equal", I32, U64, U64),
+    // Terminates the calling host thread from inside our thunk: the Rust frames
+    // between here and the JIT entry are abandoned rather than unwound. That is
+    // what Darwin's own `pthread_exit` does to any C frame, and it is safe here
+    // only because the runtime never holds a lock across guest code. Thread-local
+    // destructors still run, so this thread's guest stack and TLS blocks are
+    // still released.
+    sig!("pthread_exit", V, P),
+    sig!("pthread_getname_np", I32, U64, P, U64),
+    sig!("pthread_getspecific", P, U64),
+    sig!("pthread_join", I32, U64, P),
+    // The destructor is guest code, called by libpthread on thread teardown.
+    cbsig!([1], "pthread_key_create", I32, P, P),
+    sig!("pthread_key_delete", I32, U64),
+    sig!("pthread_mutex_destroy", I32, P),
+    sig!("pthread_mutex_init", I32, P, P),
+    sig!("pthread_mutex_lock", I32, P),
+    sig!("pthread_mutex_trylock", I32, P),
+    sig!("pthread_mutex_unlock", I32, P),
+    sig!("pthread_mutexattr_destroy", I32, P),
+    sig!("pthread_mutexattr_init", I32, P),
+    sig!("pthread_mutexattr_settype", I32, P, I32),
+    // The initialiser is guest code, and `pthread_once` guarantees it runs
+    // exactly once — a guarantee that survives thunking, since the thunk is
+    // stable per guest address.
+    cbsig!([1], "pthread_once", I32, P, P),
+    sig!("pthread_rwlock_destroy", I32, P),
+    sig!("pthread_rwlock_init", I32, P, P),
+    sig!("pthread_rwlock_rdlock", I32, P),
+    sig!("pthread_rwlock_unlock", I32, P),
+    sig!("pthread_rwlock_wrlock", I32, P),
+    sig!("pthread_self", U64),
+    sig!("pthread_setname_np", I32, P),
+    sig!("pthread_setspecific", I32, U64, P),
     sig!("putc", I32, I32, P),
     sig!("putchar", I32, I32),
     sig!("puts", I32, P),
@@ -420,6 +490,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("tgetstr", P, P, P),
     sig!("tgoto", P, P, I32, I32),
     sig!("time", I64, P),
+    // The other spelling; see `_tlv_bootstrap` above.
+    sig!("tlv_bootstrap", P, P),
     sig!("tolower", I32, I32),
     sig!("toupper", I32, I32),
     // The output function is called once per character: `tputs` is how a
@@ -468,11 +540,7 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("opterr", "a data import, read through its slot and never called"),
     ("optind", "a data import, read through its slot and never called"),
     ("optopt", "a data import, read through its slot and never called"),
-    (
-        "pthread_create",
-        "its start routine is a guest function on a new thread, which needs the \
-         per-thread guest state of M4, not just a thunk",
-    ),
+    ("pthread_cancel", "cancellation unwinds a stack the host's unwinder never saw (M5)"),
     ("setjmp", "saves host registers, not the guest's (M5)"),
     ("sigaction", "installs a guest function pointer as a handler (M5)"),
     ("siglongjmp", "restores a stack the host's implementation never saw (M5)"),

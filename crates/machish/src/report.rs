@@ -91,6 +91,10 @@ pub struct ImageReport {
     pub terminators: Vec<Word>,
     /// Thread-local descriptors, enumerated and not otherwise honoured.
     pub thread_locals: Vec<ThreadLocalDescriptor>,
+    /// The image's thread-local block layout, if it has one. Present exactly
+    /// when [`thread_locals`](ImageReport::thread_locals) is non-empty and the
+    /// image carries a `__thread_data` or `__thread_bss` section.
+    pub tlv_template: Option<TlvTemplate>,
     /// Where each segment landed, with the file bytes backing it, so a driver
     /// can hand exact ranges to a recompiler without re-reading memory.
     pub segments: Vec<SegmentReport>,
@@ -122,6 +126,37 @@ impl ImageReport {
         }
         Err(Error::UnresolvedSymbol(msg))
     }
+}
+
+/// The layout of one image's per-thread block.
+///
+/// A `tlv_descriptor`'s `offset` is a byte offset into a block the runtime
+/// allocates per thread, and the block is the image's `__thread_data` followed
+/// by its `__thread_bss` — which is why an offset alone is not enough to honour
+/// one. This is the rest: where the initial values live and how big the whole
+/// block has to be.
+///
+/// Both halves are optional in an image and neither is optional in the
+/// arithmetic, so the fields are absolute: `total_size` spans from the start of
+/// `__thread_data` (or of `__thread_bss`, if there is no data) to the end of
+/// `__thread_bss`, alignment padding included. Anything past `initial_size` is
+/// zero, which is what makes "copy the template, zero the rest" correct without
+/// consulting the section table again.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TlvTemplate {
+    /// Slid VA the block's byte zero is copied from.
+    pub initial_va: Word,
+    /// How many bytes of the block have initial values.
+    pub initial_size: Word,
+    /// The whole block's size, including the zero-filled tail.
+    pub total_size: Word,
+    /// Byte alignment the block must be allocated at, as `1 << align`.
+    ///
+    /// Reported because a thread-local may be over-aligned — `_Thread_local
+    /// __attribute__((aligned(64)))` is legal — and an allocator's default
+    /// alignment would satisfy the common case and silently not the declared
+    /// one.
+    pub align: u32,
 }
 
 /// One thread-local variable's `tlv_descriptor`, as found in

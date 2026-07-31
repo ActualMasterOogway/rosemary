@@ -27,25 +27,37 @@
 //! the guest took `&mut self`, that re-entry would be a second mutable borrow
 //! of the same object, and no amount of care would make it legal.
 //!
-//! So execution takes `&self` and the mutable state is behind [`RefCell`]s held
-//! only across single operations, never across an entry into guest or host
-//! code. Guest *memory* is exempt from this and reached through [`GuestView`],
-//! because it is genuinely shared: the identity mapping means the host's own
-//! `libc` writes into guest buffers whenever a shim forwards a call, and
-//! pretending Rust owns those bytes exclusively would be a fiction.
+//! So execution takes `&self` and the mutable state is behind locks held only
+//! across single operations, never across an entry into guest or host code.
+//! Guest *memory* is exempt from this and reached through [`GuestView`], because
+//! it is genuinely shared: the identity mapping means the host's own `libc`
+//! writes into guest buffers whenever a shim forwards a call, and pretending
+//! Rust owns those bytes exclusively would be a fiction.
+//!
+//! Milestone 4 turned those `RefCell`s into `Mutex`es, because the same
+//! re-entrancy argument reappears between *threads*: the host may call a thunk
+//! on a thread this runtime has never seen, while another thread is inside the
+//! loop. The lock discipline is unchanged — take it, do one thing, drop it — and
+//! the reason it is enough is that no lock is ever held across guest code.
 //!
 //! ## The stack the guest runs on
 //!
-//! One [`GuestStack`], and nested entries continue below the innermost frame,
-//! which is what a real nested call does. A live stack pointer is tracked and
-//! updated at every exit, so a host→guest thunk entered from inside a
-//! host function starts below the guest frame that made the call rather than
-//! back at the top of the stack, where it would overwrite live frames.
+//! One [`GuestStack`] **per thread**, in [`crate::thread`], and nested entries
+//! continue below the innermost frame, which is what a real nested call does. A
+//! live stack pointer is tracked and updated at every exit, so a host→guest
+//! thunk entered from inside a host function starts below the guest frame that
+//! made the call rather than back at the top of the stack, where it would
+//! overwrite live frames.
+//!
+//! The per-thread part is not an elaboration of that; it is the same rule
+//! applied one level out. Two guest threads sharing one stack would interleave
+//! their frames exactly as two nested calls sharing one *offset* would, and with
+//! as little to report about it afterwards.
 
-use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::fmt;
 use std::ops::Range;
+use std::sync::{Arc, Mutex};
 
 use machish::memory::{MmapSpace, Regions};
 
@@ -167,18 +179,27 @@ pub const MAX_DEPTH: usize = 64;
 /// turn the common bug — a null or wild pointer — into a named error instead of
 /// a fault. It is not a guarantee. Results are cached per page, because
 /// `read_cstr` walks a byte at a time.
+///
+/// ## What is *not* in the region list
+///
+/// The stacks of threads the guest spawned. Those are reserved per thread as
+/// control reaches them (see [`crate::thread`]), and threading them into a
+/// shared region list would put a lock in front of every byte of every
+/// `read_cstr`. They do not need to be: a spawned stack is host memory the host
+/// has mapped, so it takes the same path a `strerror` result already takes, at
+/// the cost of one probe per page instead of a range check.
 #[derive(Clone)]
 pub struct GuestView {
-    regions: std::rc::Rc<Vec<Range<u64>>>,
-    mapped: std::rc::Rc<RefCell<BTreeSet<u64>>>,
+    regions: Arc<Vec<Range<u64>>>,
+    mapped: Arc<Mutex<BTreeSet<u64>>>,
 }
 
 impl GuestView {
     /// A view over `regions`, which must be identity-mapped host memory.
     pub fn new(regions: Vec<Range<u64>>) -> Self {
         GuestView {
-            regions: std::rc::Rc::new(regions),
-            mapped: std::rc::Rc::new(RefCell::new(BTreeSet::new())),
+            regions: Arc::new(regions),
+            mapped: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
 
@@ -205,11 +226,12 @@ impl GuestView {
         let page = machish::memory::host_page_size();
         let mut at = va & !(page - 1);
         while at < end {
-            if !self.mapped.borrow().contains(&at) {
+            let known = self.mapped.lock().unwrap_or_else(|e| e.into_inner()).contains(&at);
+            if !known {
                 if !page_is_mapped(at, page) {
                     return false;
                 }
-                self.mapped.borrow_mut().insert(at);
+                self.mapped.lock().unwrap_or_else(|e| e.into_inner()).insert(at);
             }
             at += page;
         }
@@ -255,22 +277,74 @@ impl GuestMemory for GuestView {
 }
 
 /// A loaded program and everything needed to run it.
+///
+/// ## What is shared between guest threads, and what is not
+///
+/// Everything in this struct is shared, because everything in it is either
+/// immutable or genuinely common to every thread: a translation does not depend
+/// on which thread runs it, and a guest function pointer must map to the *same*
+/// thunk for every thread that sees it, or the guest could compare two and find
+/// them unequal.
+///
+/// The per-thread half — a guest stack, the live stack pointer, the callback
+/// nesting depth, the parked error — lives in [`crate::thread`]. Splitting them
+/// that way is the whole of milestone 4's execution model: one guest thread per
+/// host thread, sharing an address space and a code cache and nothing else.
 pub struct Vm {
     /// The linked guest, identity-mapped. Immutable once loaded: guest *memory*
     /// changes constantly, but through [`GuestView`], not through this.
-    pub program: Program<MmapSpace>,
-    stack: RefCell<GuestStack>,
-    cache: RefCell<CodeCache>,
-    thunks: RefCell<ThunkTable>,
+    pub program: SharedProgram,
+    cache: Mutex<CodeCache>,
+    thunks: Mutex<ThunkTable>,
     view: GuestView,
-    /// Where a nested guest entry should put its first frame.
-    guest_rsp: Cell<u64>,
-    depth: Cell<usize>,
-    /// An error raised inside a host→guest callback, which cannot be returned
-    /// through the host function that caused it. Collected here and re-raised
-    /// as soon as control is back in the runtime.
-    pending: RefCell<Option<VmError>>,
 }
+
+/// A linked program, shareable between the threads running it.
+///
+/// The `unsafe impl` is deliberately confined to this one field rather than
+/// asserted over the whole [`Vm`], so that everything else — the code cache, the
+/// thunk table, the guest view — still has to convince the compiler on its own.
+/// A blanket claim on `Vm` would have silently permitted an `Rc` inside the
+/// cache, which is exactly the bug that would be invisible until two guest
+/// threads dropped the same translation.
+pub struct SharedProgram(Program<MmapSpace>);
+
+// SAFETY: two claims, and the second is the interesting one.
+//
+// First, a `Program` is not mutated after construction. What makes it `!Sync`
+// automatically is the raw pointers inside its `MmapSpace`, and those are
+// read-only handles to mappings that live exactly as long as the `Vm`.
+//
+// Second, guest *memory* is shared and unsynchronised — deliberately. The guest
+// is identity-mapped, its threads run in one address space, and two guest
+// threads racing on a guest variable is a race the guest wrote and would have
+// had on Intel too. Serialising it would be both impossible and wrong. What this
+// runtime owes is that its *own* structures survive concurrent use, which is
+// what the mutexes beside this field are for.
+unsafe impl Sync for SharedProgram {}
+unsafe impl Send for SharedProgram {}
+
+impl std::ops::Deref for SharedProgram {
+    type Target = Program<MmapSpace>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+// A `Vm` is reached from more than one thread — through
+// [`crate::thunk::publish`], which is how a thread the guest spawned finds it —
+// and nothing in the type system was demanding it be sound, because a published
+// VM travels through an `AtomicPtr` and a raw pointer carries no bounds.
+//
+// So the requirement is written down, and the compiler checks it. If a field
+// ever gains an `Rc`, or a `Mutex` is dropped in favour of a `RefCell`, this
+// fails to compile rather than producing a runtime that corrupts a refcount
+// under a second guest thread.
+const _: () = {
+    const fn requires_sync<T: Sync>() {}
+    requires_sync::<Vm>();
+};
 
 impl Vm {
     /// Load `path`, identity-mapped, with a guest stack and `argv`.
@@ -312,17 +386,20 @@ impl Vm {
             .collect();
         ranges.push(stack.range());
 
+        // Every `_Thread_local` in the program becomes addressable here, before
+        // a line of guest code runs — an initializer may touch one. See
+        // [`crate::tls`] for why the registry is global rather than a field.
+        crate::tls::register(&program.report);
+
         let cache = CodeCache::new(program.lifter_config_with(policy));
-        let rsp = stack.initial_rsp();
+        // The calling thread becomes the guest's main thread: this is the stack
+        // `argv` was laid out on, so it is the only one `main` can run on.
+        crate::thread::install(crate::thread::ThreadState::new(stack));
         Ok(Vm {
-            program,
-            stack: RefCell::new(stack),
-            cache: RefCell::new(cache),
-            thunks: RefCell::new(ThunkTable::new()),
+            program: SharedProgram(program),
+            cache: Mutex::new(cache),
+            thunks: Mutex::new(ThunkTable::new()),
             view: GuestView::new(ranges),
-            guest_rsp: Cell::new(rsp),
-            depth: Cell::new(0),
-            pending: RefCell::new(None),
         })
     }
 
@@ -333,12 +410,16 @@ impl Vm {
 
     /// How many regions have been translated so far.
     pub fn translated(&self) -> usize {
-        self.cache.borrow().len()
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// `(argc, argv, envp, apple)` for the entry point and the initializers.
+    ///
+    /// Read from *this* thread's stack, which is where they were laid out — so
+    /// this answers on the thread that built the [`Vm`] and reports zeros
+    /// anywhere else. A spawned guest thread has no `argv` and no use for one.
     pub fn main_args(&self) -> (u64, u64, u64, u64) {
-        self.stack.borrow().main_args()
+        crate::thread::current().map_or((0, 0, 0, 0), |t| t.main_args())
     }
 
     /// Call a guest function with up to six integer arguments, and return
@@ -363,32 +444,39 @@ impl Vm {
     /// As [`Vm::call`], with the whole initial register context supplied — the
     /// form a thunk needs, since it has floating-point arguments to place too.
     pub fn call_with(&self, entry: u64, mut ctx: RegisterContext) -> Result<u64, VmError> {
-        if self.depth.get() >= MAX_DEPTH {
+        // A thread the guest spawned reaches here first, through a thunk, with
+        // no stack of its own yet.
+        let state = crate::thread::ensure()?;
+        if state.depth.get() >= MAX_DEPTH {
             return Err(VmError::TooDeep { pc: entry });
         }
 
         // Below the innermost live frame, past the red zone the guest's ABI
         // lets a leaf function use without adjusting `rsp`.
-        let rsp = ((self.guest_rsp.get() - 128) & !0xf) - 8;
+        let rsp = ((state.rsp.get() - 128) & !0xf) - 8;
         self.view().write(rsp, &RETURN_SENTINEL.to_le_bytes()).map_err(|source| {
             VmError::Stack { source }
         })?;
         ctx.rsp = rsp;
         ctx.rip = entry;
 
-        let saved_rsp = self.guest_rsp.get();
-        self.guest_rsp.set(rsp);
-        self.depth.set(self.depth.get() + 1);
+        let saved_rsp = state.rsp.get();
+        state.rsp.set(rsp);
+        state.depth.set(state.depth.get() + 1);
         // Publish the VM for the duration: a thunk called from inside a host
         // function has no other way to find it. See `crate::thunk`.
-        let result = crate::thunk::with_current(self, || self.run_loop(&mut ctx));
-        self.depth.set(self.depth.get() - 1);
-        self.guest_rsp.set(saved_rsp);
+        let result = crate::thunk::with_current(self, || self.run_loop(state, &mut ctx));
+        state.depth.set(state.depth.get() - 1);
+        state.rsp.set(saved_rsp);
         result
     }
 
     /// Enter regions and service exits until the call that started this returns.
-    fn run_loop(&self, ctx: &mut RegisterContext) -> Result<u64, VmError> {
+    fn run_loop(
+        &self,
+        state: &crate::thread::ThreadState,
+        ctx: &mut RegisterContext,
+    ) -> Result<u64, VmError> {
         loop {
             let pc = ctx.rip;
 
@@ -418,15 +506,22 @@ impl Vm {
                 continue;
             }
 
-            let translation = self.cache.borrow_mut().get_or_lift(&self.program, pc)?;
+            // The lock is taken to look up or lift and released before guest
+            // code runs, which is what keeps a callback re-entering the VM on
+            // this same thread from deadlocking against its own caller.
+            let translation = self
+                .cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_or_lift(&self.program, pc)?;
             ctx.rip = pc;
             let exit = translation.enter(ctx);
-            self.guest_rsp.set(ctx.rsp);
+            state.rsp.set(ctx.rsp);
 
             if let Some(done) = self.step(ctx, exit)? {
                 return Ok(done);
             }
-            if let Some(err) = self.pending.borrow_mut().take() {
+            if let Some(err) = state.pending.borrow_mut().take() {
                 return Err(err);
             }
         }
@@ -506,6 +601,15 @@ impl Vm {
         let Some(site) = self.program.import_at(va) else {
             return Err(AbiError::NoSignature { symbol: format!("<unregistered {va:#x}>") }.into());
         };
+        self.call_site(site, ctx)
+    }
+
+    /// Marshal and perform the call `site` describes.
+    fn call_site(
+        &self,
+        site: &crate::program::ImportSite,
+        ctx: &mut RegisterContext,
+    ) -> Result<(), VmError> {
         let mut mem = self.view();
         crate::abi::call_import_with(
             &site.symbol,
@@ -538,7 +642,12 @@ impl Vm {
         // One of our own thunks, handed out earlier and now called by the guest
         // through a variable. Calling it would be correct and absurd — out to
         // arm64 and straight back in — so the wrapper is unwrapped.
-        let target = self.thunks.borrow().guest_for(callee).unwrap_or(callee);
+        let target = self
+            .thunks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .guest_for(callee)
+            .unwrap_or(callee);
 
         if self.program.is_guest_address(target) {
             // Stand in for the `CALL` microlift declined to perform.
@@ -551,6 +660,21 @@ impl Vm {
             return Ok(());
         }
 
+        // A host address the guest *loaded from an import slot* and then called
+        // through a register, rather than at a `call` site the lifter could
+        // match. `_Thread_local` access is the case that forces this: reading
+        // one compiles to `leaq _x(%rip), %rdi; callq *(%rdi)`, so the callee is
+        // the resolved `__tlv_bootstrap` address and there is no displacement to
+        // register. An ordinary `int (*f)(const char*) = strlen; f(s)` arrives
+        // the same way.
+        //
+        // Looked up rather than guessed at, exactly as everywhere else: the
+        // answer is the signature the import already has, and a host address
+        // nothing imported is still `UnknownIndirectCall`.
+        if let Some(site) = self.program.import_by_target(callee) {
+            return self.call_site(site, ctx);
+        }
+
         Err(VmError::UnknownIndirectCall { callee, resume })
     }
 
@@ -560,11 +684,13 @@ impl Vm {
     /// for the VM's lifetime, so the host may compare two thunks for equality
     /// and get the answer the guest would have.
     pub fn thunk_for(&self, guest_va: u64) -> Result<u64, VmError> {
-        if let Some(existing) = self.thunks.borrow().host_for(guest_va) {
+        if let Some(existing) =
+            self.thunks.lock().unwrap_or_else(|e| e.into_inner()).host_for(guest_va)
+        {
             return Ok(existing);
         }
         let thunk = crate::thunk::build(guest_va)?;
-        let host = self.thunks.borrow_mut().insert(thunk);
+        let host = self.thunks.lock().unwrap_or_else(|e| e.into_inner()).insert(thunk);
 
         // Translate the callback now, while translating is possible.
         //
@@ -577,31 +703,37 @@ impl Vm {
         // `atexit` handler translated on first call would be translated too
         // late. A failure here is left for the call to report, where the error
         // has somewhere to go.
-        let _ = self.cache.borrow_mut().get_or_lift(&self.program, guest_va);
+        let _ = self
+            .cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_lift(&self.program, guest_va);
         Ok(host)
     }
 
     /// How many guest function pointers have been handed to host code.
     pub fn thunks(&self) -> usize {
-        self.thunks.borrow().len()
+        self.thunks.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Whether `va` is a thunk this VM handed out.
     pub fn guest_behind_thunk(&self, va: u64) -> Option<u64> {
-        self.thunks.borrow().guest_for(va)
+        self.thunks.lock().unwrap_or_else(|e| e.into_inner()).guest_for(va)
     }
 
-    /// Record an error raised inside a host→guest callback.
+    /// Record an error raised inside a host→guest callback, on the thread it
+    /// happened on.
     pub(crate) fn set_pending(&self, err: VmError) {
-        let mut slot = self.pending.borrow_mut();
+        let Some(state) = crate::thread::current() else { return };
+        let mut slot = state.pending.borrow_mut();
         if slot.is_none() {
             *slot = Some(err);
         }
     }
 
-    /// Take whatever error a callback left behind.
+    /// Take whatever error a callback left behind on this thread.
     pub fn take_pending(&self) -> Option<VmError> {
-        self.pending.borrow_mut().take()
+        crate::thread::current().and_then(|s| s.pending.borrow_mut().take())
     }
 }
 

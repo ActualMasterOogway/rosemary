@@ -113,6 +113,22 @@ pub struct Program<M: Regions = BufferSpace> {
     /// Every address a call site might name, mapped to the host address behind
     /// it: both `slot_va` and `stub_va` for each binding.
     pub imports: BTreeMap<u64, ImportSite>,
+    /// The same sites, keyed by the address they *resolved to*.
+    ///
+    /// The other direction, and it answers a different question. [`imports`]
+    /// answers "the guest called this address; what is it" for an address the
+    /// lifter recognised at a call site. This answers "the guest loaded a
+    /// pointer, and here is its value" — the case where nothing was recognisable
+    /// at lift time because the call is `callq *(%rdi)`. Reading a
+    /// `_Thread_local` is compiled exactly that way, which is what makes this
+    /// load-bearing rather than a convenience.
+    ///
+    /// Deduplicated by symbol name so the entry for an address two symbols
+    /// resolve to (`bzero` and `__bzero` are one function) is the same on every
+    /// run, rather than whichever binding the decoder happened to reach first.
+    ///
+    /// [`imports`]: Program::imports
+    imports_by_target: BTreeMap<u64, ImportSite>,
 }
 
 /// One address microlift should treat as a call out of the guest.
@@ -231,7 +247,23 @@ impl<M: Regions> Program<M> {
             }
         }
 
-        Ok(Program { report, memory, text: (text_va, text), functions, imports })
+        let mut by_symbol: Vec<&ImportSite> = imports.values().filter(|s| !s.is_stub).collect();
+        by_symbol.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        let mut imports_by_target: BTreeMap<u64, ImportSite> = BTreeMap::new();
+        for site in by_symbol {
+            if site.resolved != 0 {
+                imports_by_target.entry(site.resolved).or_insert_with(|| site.clone());
+            }
+        }
+
+        Ok(Program {
+            report,
+            memory,
+            text: (text_va, text),
+            functions,
+            imports,
+            imports_by_target,
+        })
     }
 
     /// The shared [`LifterConfig`] every on-demand lift is performed with.
@@ -368,6 +400,14 @@ impl<M: Regions> Program<M> {
     /// a search through the bindings.
     pub fn import_at(&self, va: u64) -> Option<&ImportSite> {
         self.imports.get(&va)
+    }
+
+    /// The import that *resolved to* `host`, if any.
+    ///
+    /// What an indirect call through a loaded function pointer needs: see
+    /// [`Program::imports_by_target`](Program#structfield.imports_by_target).
+    pub fn import_by_target(&self, host: u64) -> Option<&ImportSite> {
+        self.imports_by_target.get(&host)
     }
 
     /// Every import address, in ascending order.

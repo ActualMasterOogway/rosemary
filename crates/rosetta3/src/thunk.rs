@@ -9,6 +9,12 @@
 //! `pthread_create`'s start routine, `sigaction`'s handler, and — later and
 //! pervasively — every Objective-C `IMP`.
 //!
+//! The thunk is also the whole of what a guest *thread* is. Milestone 4 added no
+//! mechanism here: `pthread_create`'s start routine crosses out as an ordinary
+//! callback, and the only thing that makes it a thread rather than a comparator
+//! is that libpthread calls it on a new host thread — where the VM comes from
+//! `PUBLISHED` and the guest stack is made on demand. See [`crate::thread`].
+//!
 //! Passing the raw pointer through cannot work: it is x86-64, and this CPU will
 //! decode it as arm64 and do something arbitrary. So every guest pointer
 //! crossing into a host argument is substituted with a **thunk** — a real arm64
@@ -86,6 +92,13 @@ pub struct Thunk {
     _backend: CraneliftBackend,
 }
 
+// SAFETY: as for `Translation` in `crate::cache`, and for the same reason. A
+// thunk is immutable once compiled; `host` is an address the *host* calls, from
+// whichever thread it likes, which is the entire point of it. `_backend` is held
+// to keep that address mapped and is never read again.
+unsafe impl Send for Thunk {}
+unsafe impl Sync for Thunk {}
+
 /// Every thunk handed out, both ways round.
 ///
 /// The reverse direction is needed because a host function may hand a pointer
@@ -143,8 +156,14 @@ impl Default for ThunkTable {
 // A thunk is called by *host* code — the host's `qsort`, deep inside a call the
 // runtime made — so there is no argument to pass the VM through. It has to be
 // found. A thread-local is the whole of the mechanism, and it is also the
-// statement of a limit: one VM per thread, which is what M4 will have to
-// revisit when guest threads become host threads.
+// statement of a limit: one VM per thread.
+//
+// M4 did not change that and did not need to. A thread the guest spawned starts
+// inside libpthread, where this is empty and `PUBLISHED` answers instead; from
+// then on `with_current` fills it in for the duration of every guest call on
+// that thread, exactly as on the first one. What is per-thread is the guest
+// *state* — a stack, a stack pointer, a nesting depth — and that lives in
+// `crate::thread` rather than here.
 thread_local! {
     static CURRENT: Cell<*const Vm> = const { Cell::new(std::ptr::null()) };
 }
@@ -170,14 +189,22 @@ pub(crate) fn with_current<R>(vm: &Vm, f: impl FnOnce() -> R) -> R {
     out
 }
 
-/// Publish `vm` for the rest of the process's life, on this thread.
+/// Publish `vm` for the rest of the process's life, and for every thread.
+///
+/// Two things need this, and the second arrived with milestone 4.
 ///
 /// The guest's `atexit` handlers are entries in the **host's** exit list — that
 /// is what forwarding `atexit` with a thunk means — so they fire during `exit`,
 /// after `main` has returned and the runtime has stopped driving anything. They
-/// still have to find a VM. A program that intends to let them run therefore
-/// publishes a VM that outlives it, which is what [`Box::leak`] is for; nothing
-/// is reclaimed at exit anyway.
+/// still have to find a VM.
+///
+/// And a thread the guest spawned is started by the *host's* libpthread, which
+/// calls a thunk on a thread that has never been inside [`with_current`]. The
+/// thread-local is empty there by construction, so a guest that calls
+/// `pthread_create` runs its start routines only if a VM has been published.
+///
+/// In both cases the VM has to outlive the call, which is what [`Box::leak`] is
+/// for; nothing is reclaimed at process exit in any case.
 pub fn publish(vm: &'static Vm) {
     PUBLISHED.store(vm as *const Vm as *mut Vm, Ordering::Release);
 }
@@ -269,7 +296,25 @@ pub(crate) fn build(guest_va: u64) -> Result<Thunk, VmError> {
 /// raised the moment control is back in the runtime. Same for a panic, which
 /// must not cross this boundary at all.
 unsafe extern "C" fn thunk_entry(guest_va: u64, ints: *const u64, floats: *const f64) -> u64 {
-    let Some(vm) = current() else { return 0 };
+    let Some(vm) = current() else {
+        // Nowhere to report this — the caller is `qsort`, or libpthread's thread
+        // start, and neither has an error channel — so it is said out loud once
+        // and the callback returns zero. M3 could leave this silent because the
+        // only way to reach it was to drop a VM that was still handing out
+        // thunks. M4 adds a second way that is easy to hit by accident: a
+        // *spawned* thread has no thread-local to find a VM on and depends
+        // entirely on `publish`, so an embedder that forgets it would otherwise
+        // see every guest thread do nothing at all, successfully.
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| {
+            eprintln!(
+                "rosetta3: a guest callback at {guest_va:#x} ran with no VM reachable; \
+                 an embedder whose guest spawns threads or registers `atexit` handlers \
+                 must call `rosetta3::thunk::publish`"
+            );
+        });
+        return 0;
+    };
 
     // The VM that answered may not be the one that built this thunk: a process
     // can run more than one, and the process-lifetime fallback holds whichever
