@@ -201,8 +201,34 @@ const U8: T = T::UnsignedByte;
 /// Variadics are interleaved rather than grouped, because the array is one
 /// sorted keyspace; `vsig!` marks them.
 pub static SIGNATURES: &[FunctionAbi] = &[
+    // The C++ exception surface, all of it shimmed: see [`crate::unwind`] for
+    // why none of it can reach the host's libc++abi. `_ZSt9terminatev` is the
+    // exception to the exception — `std::terminate` really does mean "stop this
+    // process", and the host's does that correctly.
+    sig!("_Unwind_Resume", V, P),
+    // What a guest class deriving from `std::exception` reaches: the base's
+    // constructor and destructor, and `operator delete`. Ordinary host calls —
+    // the object is guest memory the host writes a vtable pointer into, which
+    // works for the same reason a `pthread_mutex_t` does.
+    sig!("_ZNKSt9exception4whatEv", P, P),
+    sig!("_ZNSt9exceptionC1Ev", V, P),
+    sig!("_ZNSt9exceptionC2Ev", V, P),
+    sig!("_ZNSt9exceptionD0Ev", V, P),
+    sig!("_ZNSt9exceptionD1Ev", V, P),
+    sig!("_ZNSt9exceptionD2Ev", V, P),
+    sig!("_ZSt9terminatev", V),
+    sig!("_ZdaPv", V, P),
+    sig!("_ZdlPv", V, P),
+    sig!("_Znam", P, U64),
+    sig!("_Znwm", P, U64),
     sig!("__assert_rtn", V, P, P, I32, P),
     sig!("__bzero", V, P, U64),
+    sig!("__cxa_allocate_exception", P, U64),
+    sig!("__cxa_begin_catch", P, P),
+    sig!("__cxa_end_catch", V),
+    sig!("__cxa_free_exception", V, P),
+    sig!("__cxa_rethrow", V),
+    sig!("__cxa_throw", V, P, P, P),
     sig!("__error", P),
     sig!("__maskrune", I32, I32, U64),
     sig!("__memcpy_chk", P, P, P, U64, U64),
@@ -549,6 +575,15 @@ const UNDECLARED: &str = "no public declaration; a guessed signature would fail 
 /// for the same reason as [`SIGNATURES`].
 pub static REFUSED: &[(&str, &str)] = &[
     ("_DefaultRuneLocale", "a data import, read through its slot and never called"),
+    // A `type_info` and the vtable a guest's own `type_info` objects point at.
+    // Both are read through their slots and compared by address, which is what
+    // makes a `catch` clause decidable at all — see [`crate::unwind`].
+    ("_ZTISt9exception", "a data import, read through its slot and never called"),
+    ("_ZTIi", "a data import, read through its slot and never called"),
+    ("_ZTVN10__cxxabiv117__class_type_infoE", "a data import, read through its slot"),
+    ("_ZTVN10__cxxabiv120__si_class_type_infoE", "a data import, read through its slot"),
+    ("_ZTVN10__cxxabiv121__vmi_class_type_infoE", "a data import, read through its slot"),
+    ("_ZTVSt9exception", "a data import, read through its slot and never called"),
     ("__mb_cur_max", "a data import, read through its slot and never called"),
     ("__stack_chk_guard", "a data import, read through its slot and never called"),
     ("__stderrp", "a data import, read through its slot and never called"),

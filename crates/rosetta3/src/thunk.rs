@@ -210,7 +210,10 @@ pub fn publish(vm: &'static Vm) {
 }
 
 /// The VM this thread is executing, if any.
-fn current() -> Option<&'static Vm> {
+///
+/// Also how [`crate::unwind`] reaches the guest's tables: an unwinding shim is
+/// handed a register context and guest memory, and needs the program itself.
+pub(crate) fn current() -> Option<&'static Vm> {
     // `try_with`, not `with`: at process exit this thread's TLS has been
     // destroyed and reading it would panic inside a host `atexit` handler.
     let p = match CURRENT.try_with(|c| c.get()) {

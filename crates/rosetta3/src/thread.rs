@@ -81,6 +81,19 @@ pub struct ThreadState {
     /// over `rip`, which for a `longjmp` would discard the destination it just
     /// restored. See [`crate::vm`].
     redirected: Cell<bool>,
+    /// The exception being unwound on this thread, if any.
+    ///
+    /// Per thread because a stack is: two threads throwing at once are two
+    /// independent walks over two stacks, and nothing about one is the other's
+    /// business. See [`crate::unwind`].
+    unwinding: Cell<Option<crate::unwind::InFlight>>,
+    /// Exception headers whose `catch` blocks are running, innermost last.
+    ///
+    /// A stack rather than a single value because a `catch` block may itself
+    /// contain a `try`, and `__cxa_end_catch` takes no argument: it means "the
+    /// one this frame began", which is only answerable by remembering the order
+    /// they began in.
+    caught: RefCell<Vec<u64>>,
 }
 
 impl ThreadState {
@@ -94,6 +107,8 @@ impl ThreadState {
             pending: RefCell::new(None),
             entry: Cell::new(0),
             redirected: Cell::new(false),
+            unwinding: Cell::new(None),
+            caught: RefCell::new(Vec::new()),
         }
     }
 
@@ -119,6 +134,32 @@ impl ThreadState {
     /// Restore the entry that was live before [`ThreadState::enter`].
     pub(crate) fn leave(&self, previous: u64) {
         self.entry.set(previous);
+    }
+
+    /// The exception being unwound on this thread.
+    pub(crate) fn in_flight(&self) -> Option<crate::unwind::InFlight> {
+        self.unwinding.get()
+    }
+
+    /// Set or clear it. Cleared by `__cxa_end_catch`, and by a walk that ends
+    /// with nowhere to go.
+    pub(crate) fn set_in_flight(&self, flight: Option<crate::unwind::InFlight>) {
+        self.unwinding.set(flight);
+    }
+
+    /// Note that a `catch` block for `header` has begun on this thread.
+    pub(crate) fn begin_catch(&self, header: u64) {
+        self.caught.borrow_mut().push(header);
+    }
+
+    /// The exception whose `catch` block is innermost, without ending it.
+    pub(crate) fn caught(&self) -> Option<u64> {
+        self.caught.borrow().last().copied()
+    }
+
+    /// End the innermost `catch` block, naming the exception it was for.
+    pub(crate) fn end_catch(&self) -> Option<u64> {
+        self.caught.borrow_mut().pop()
     }
 
     /// Record that the call being serviced transferred control rather than

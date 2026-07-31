@@ -131,6 +131,7 @@ pub mod startup;
 pub mod thread;
 pub mod thunk;
 pub mod tls;
+pub mod unwind;
 pub mod vm;
 
 pub use abi::{call_import, AbiError, Classification};

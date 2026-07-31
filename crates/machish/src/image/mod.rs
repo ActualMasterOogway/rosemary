@@ -7,6 +7,7 @@ mod object;
 mod sections;
 mod segments;
 mod symbols;
+mod unwind;
 
 pub use commands::{
     Dependency, DependencyKind, DyldInfo, Dysymtab, EncryptionInfo, LinkeditData, LoadCommand,
@@ -17,4 +18,5 @@ pub use functions::{function_ranges, function_starts};
 pub use object::MachObject;
 pub use sections::Section;
 pub use symbols::{Nlist, SymbolTable};
+pub use unwind::{UnwindEntry, UnwindInfo};
 pub use segments::{map_segments, protect_segments, MappedImage, PageConflict, Segment};

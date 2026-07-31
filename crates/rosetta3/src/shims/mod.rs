@@ -78,7 +78,8 @@ pub fn dispatch(
         // [`crate::jmpbuf`], which is a module of its own because a stack is not
         // a calling convention.
         _ => {
-            if let Some(f) = crate::jmpbuf::shim_for(name) {
+            if let Some(f) = crate::jmpbuf::shim_for(name).or_else(|| crate::unwind::shim_for(name))
+            {
                 return Some(f(name, ctx, mem));
             }
             // And the signal dispositions, which need one thing more than the
@@ -97,7 +98,10 @@ pub fn dispatch(
 /// shim is that reaching the host function is wrong.
 pub fn is_shimmed(symbol: &str) -> bool {
     let name = symbol.strip_prefix('_').unwrap_or(symbol);
-    if crate::jmpbuf::shim_for(name).is_some() || crate::signal::shim_for(name).is_some() {
+    if crate::jmpbuf::shim_for(name).is_some()
+        || crate::unwind::shim_for(name).is_some()
+        || crate::signal::shim_for(name).is_some()
+    {
         return true;
     }
     matches!(

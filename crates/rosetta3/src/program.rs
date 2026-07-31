@@ -113,6 +113,13 @@ pub struct Program<M: Regions = BufferSpace> {
     /// Every address a call site might name, mapped to the host address behind
     /// it: both `slot_va` and `stub_va` for each binding.
     pub imports: BTreeMap<u64, ImportSite>,
+    /// How to leave each function of the root image, from `__unwind_info`.
+    ///
+    /// Read at load for the same reason [`functions`](Program::functions) is:
+    /// it is a table in the image, and the alternative is re-parsing the Mach-O
+    /// at the moment an exception is being thrown. Empty for an image without
+    /// the section, which is a C program that never unwinds.
+    pub unwind: machish::image::UnwindInfo,
     /// The same sites, keyed by the address they *resolved to*.
     ///
     /// The other direction, and it answers a different question. [`imports`]
@@ -232,6 +239,8 @@ impl<M: Regions> Program<M> {
                 .map(|r| r.start.wrapping_add(slide)..r.end.wrapping_add(slide))
                 .collect();
 
+        let unwind = machish::image::UnwindInfo::parse(&obj, slide)?;
+
         let mut imports = BTreeMap::new();
         for b in report.bindings() {
             let site = ImportSite {
@@ -261,6 +270,7 @@ impl<M: Regions> Program<M> {
             memory,
             text: (text_va, text),
             functions,
+            unwind,
             imports,
             imports_by_target,
         })
@@ -393,6 +403,15 @@ impl<M: Regions> Program<M> {
         self.report.root().and_then(|i| i.entry)
     }
 
+    /// How to leave the function containing `va`.
+    ///
+    /// The unwinder's only question about the image, and it is a lookup rather
+    /// than a search because `__unwind_info` is sorted by address — see
+    /// [`crate::unwind`] for what is done with the answer.
+    pub fn unwind_entry(&self, va: u64) -> Option<machish::image::UnwindEntry> {
+        self.unwind.lookup(va).copied()
+    }
+
     /// The import registered at `va`, if any.
     ///
     /// `va` is whatever an exit named: a pointer slot or a `__stubs` entry,
@@ -400,6 +419,21 @@ impl<M: Regions> Program<M> {
     /// a search through the bindings.
     pub fn import_at(&self, va: u64) -> Option<&ImportSite> {
         self.imports.get(&va)
+    }
+
+    /// What an imported symbol resolved to, by name.
+    ///
+    /// The reverse of the usual question, and it has one caller: the unwinder
+    /// needs the addresses of libc++abi's `type_info` **vtables** in order to
+    /// tell a class with no bases from one with a single base. Those are data
+    /// imports the guest binds like any other, so the answer is already in the
+    /// transcript — no host header, no `dlsym`, and nothing assumed about
+    /// libc++'s internals beyond the layout its ABI documents.
+    pub fn resolved_symbol(&self, symbol: &str) -> Option<u64> {
+        self.imports
+            .values()
+            .find(|s| !s.is_stub && s.symbol == symbol && s.resolved != 0)
+            .map(|s| s.resolved)
     }
 
     /// The import that *resolved to* `host`, if any.

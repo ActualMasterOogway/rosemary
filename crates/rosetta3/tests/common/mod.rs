@@ -414,6 +414,146 @@ pub fn longjmp_across_fixture() -> Option<String> {
     BUILT.get_or_init(|| build_x86_64("longjmp_across", LONGJMP_ACROSS_C, &[])).clone()
 }
 
+/// Compile `source` as x86_64 C++ and return its path.
+///
+/// The `.c` extension the helper writes is overridden with `-x c++`, which is
+/// also what makes the guest link against libc++ and import the Itanium ABI
+/// surface [`rosetta3::unwind`] implements.
+pub fn build_cpp(name: &str, source: &str) -> Option<String> {
+    build_x86_64(name, source, &["-x", "c++", "-lc++"])
+}
+
+/// Milestone 5's exception program: everything about unwinding that works.
+///
+/// Each clause is a separate claim, and each one fails on its own:
+///
+/// - **three frames and their destructors** — the walk itself. `~level3`,
+///   `~level2`, `~level1` must appear in that order and before the handler: a
+///   runtime that entered the handler without the cleanups prints them late or
+///   not at all.
+/// - **the object's own destructor** — run by `__cxa_end_catch`, which is a
+///   host→guest call from inside a shim.
+/// - **nested `try`** — the inner handler must *not* take an exception of the
+///   wrong type, which is the difference between matching a type and matching
+///   the first clause found.
+/// - **`catch (...)`** — a null type-table entry, and the one case where a
+///   pc-relative decode of zero would produce a plausible wrong address.
+/// - **base classes** — both a guest base and `std::exception`, whose
+///   `type_info` lives in the host's libc++.
+/// - **rethrow** — `throw;` continues the *same* exception past the handler that
+///   caught it, without freeing it at the end of that handler.
+/// - **a second thread** — its own stack, its own walk, its own in-flight state.
+pub const EXCEPTIONS_CPP: &str = r#"
+#include <cstdio>
+#include <exception>
+#include <pthread.h>
+
+struct Trace { const char *n; ~Trace() { printf("~%s\n", n); } };
+struct Boom { int v; ~Boom() { printf("~Boom(%d)\n", v); } };
+struct Other { const char *why; };
+struct Base { int v; Base(int x) : v(x) {} };
+struct Derived : Base { Derived(int x) : Base(x) {} };
+struct MyError : std::exception {
+    const char *what() const noexcept override { return "my error"; }
+};
+
+static int level3(int n) { Trace t{"level3"}; if (n > 0) throw Boom{n * 2}; return 1; }
+static int level2(int n) { Trace t{"level2"}; return level3(n) + 1; }
+static int level1(int n) { Trace t{"level1"}; return level2(n) + 1; }
+
+static void nested() {
+    try {
+        try { throw Other{"inner"}; }
+        catch (const Boom &) { printf("BUG: matched the wrong clause\n"); }
+    } catch (const Other &o) { printf("outer caught %s\n", o.why); }
+}
+
+static int same_frame() { try { throw 11; } catch (int i) { return i; } }
+
+static void rethrower() {
+    try { throw Boom{1}; }
+    catch (const Boom &b) { printf("rethrowing %d\n", b.v); throw; }
+}
+
+static void *worker(void *arg) {
+    try { Trace t{"thread"}; throw Boom{(int)(long)arg}; }
+    catch (const Boom &b) { printf("thread caught %d\n", b.v); }
+    return (void *)1;
+}
+
+int main(void) {
+    try { level1(3); } catch (const Boom &b) { printf("caught Boom %d\n", b.v); }
+    nested();
+    try { throw 3.5; } catch (...) { printf("caught something\n"); }
+    printf("same frame %d\n", same_frame());
+    try { throw Other{"by value"}; } catch (Other o) { printf("by value %s\n", o.why); }
+    try { throw Derived(4); } catch (const Base &b) { printf("base caught %d\n", b.v); }
+    try { throw MyError{}; } catch (const std::exception &e) { printf("std %s\n", e.what()); }
+    try { rethrower(); } catch (const Boom &b) { printf("finally %d\n", b.v); }
+
+    pthread_t t;
+    pthread_create(&t, 0, worker, (void *)7L);
+    void *r = 0;
+    pthread_join(t, &r);
+    printf("thread returned %ld\n", (long)r);
+
+    printf("done\n");
+    return 0;
+}
+"#;
+
+/// Build [`EXCEPTIONS_CPP`], or `None` if this host cannot.
+pub fn exceptions_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| build_cpp("exceptions", EXCEPTIONS_CPP)).clone()
+}
+
+/// Milestone 5's boundary program: the three throws that must be *refused*.
+///
+/// One binary, selected by argument, because each case ends the process — and
+/// because a refusal is only worth anything if the program that provokes it runs
+/// correctly everywhere else, which the shared `main` here demonstrates.
+pub const UNWIND_REFUSALS_CPP: &str = r#"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+struct Trace { const char *n; ~Trace() { printf("~%s\n", n); } };
+struct Boom { int v; };
+struct A { int a; };
+struct B { int b; };
+struct AB : A, B { };
+
+static void uncaught() { Trace t{"uncaught"}; throw Boom{1}; }
+
+static int compare(const void *a, const void *b) {
+    if (*(const int *)a == 9) throw Boom{2};
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *which = argc > 1 ? argv[1] : "";
+    printf("before\n");
+    if (!strcmp(which, "uncaught")) {
+        uncaught();
+    } else if (!strcmp(which, "across")) {
+        int v[2] = {9, 1};
+        try { qsort(v, 2, sizeof(int), compare); }
+        catch (const Boom &) { printf("caught across a host frame\n"); }
+    } else if (!strcmp(which, "multiple")) {
+        try { throw AB{}; } catch (const B &) { printf("multiple inheritance\n"); }
+    }
+    printf("after\n");
+    return 0;
+}
+"#;
+
+/// Build [`UNWIND_REFUSALS_CPP`], or `None` if this host cannot.
+pub fn unwind_refusals_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| build_cpp("unwind_refusals", UNWIND_REFUSALS_CPP)).clone()
+}
+
 /// Milestone 5's signal program.
 ///
 /// The kernel calling a guest function, which is the third distinct caller of a

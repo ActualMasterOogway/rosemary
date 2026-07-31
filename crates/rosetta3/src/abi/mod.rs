@@ -89,6 +89,12 @@ pub enum AbiError {
     /// A guest memory access failed: a stack argument or a string argument
     /// pointing outside anything mapped.
     Memory { symbol: String, addr: u64 },
+    /// A shim called *into the guest* and that call failed. The payload is the
+    /// inner failure, rendered: a thrown object's destructor that imports
+    /// something undescribed fails one level below the symbol being serviced,
+    /// and reporting only the outer name would send the reader to the wrong
+    /// place entirely.
+    Nested { symbol: String, reason: String },
 }
 
 impl AbiError {
@@ -100,7 +106,8 @@ impl AbiError {
             | AbiError::NoShim { symbol }
             | AbiError::Unmarshallable { symbol, .. }
             | AbiError::Unsatisfied { symbol }
-            | AbiError::Memory { symbol, .. } => symbol,
+            | AbiError::Memory { symbol, .. }
+            | AbiError::Nested { symbol, .. } => symbol,
         }
     }
 }
@@ -124,6 +131,7 @@ impl fmt::Display for AbiError {
             AbiError::Memory { symbol, addr } => {
                 write!(f, "{symbol}: guest memory at {addr:#x} is not readable")
             }
+            AbiError::Nested { symbol, reason } => write!(f, "{symbol}: {reason}"),
         }
     }
 }

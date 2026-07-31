@@ -281,6 +281,10 @@ fn decode_everything(bytes: &[u8]) {
     let _ = machish::exports::ExportTable::parse_symtab(&obj);
     let _ = machish::fixups::decode_image(&obj);
     let _ = machish::fixups::StubMap::build(&obj);
+    // `__unwind_info` is read from `__TEXT` rather than `__LINKEDIT`, but it is
+    // the same shape of risk: offsets and counts inside the section that no
+    // header check ever looks at.
+    let _ = machish::image::UnwindInfo::parse(&obj, 0);
 }
 
 #[test]
