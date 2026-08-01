@@ -404,7 +404,10 @@ impl<M: Regions> Program<M> {
     /// both ways must differ in the number of VM exits and in nothing else. A
     /// test that can only run the fast path cannot check that.
     pub fn lifter_config_with(&self, policy: ImportPolicy) -> LifterConfig {
-        let use_vector_xmm = {
+        // Host-specific, so it is the half of the optimisation setting that
+        // belongs to the lift rather than to the lowering — see [`crate::jit`].
+        // Below `all` the guest's vector registers stay scalar lo/hi pairs.
+        let use_vector_xmm = crate::jit::opt_level().host_specific() && {
             #[cfg(target_arch = "aarch64")]
             {
                 std::arch::is_aarch64_feature_detected!("neon")

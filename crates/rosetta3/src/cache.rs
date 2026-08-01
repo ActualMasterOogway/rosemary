@@ -162,7 +162,7 @@ impl CodeCache {
         let func = lift_to_function::<X86_64>(&bytes, start, self.config.clone())
             .map_err(|source| VmError::Lift { pc, start, source })?;
         let mut backend =
-            CraneliftBackend::new().map_err(|source| VmError::Lift { pc, start, source })?;
+            crate::jit::backend().map_err(|source| VmError::Lift { pc, start, source })?;
         let code = backend
             .compile(func)
             .map_err(|source| VmError::Lift { pc, start, source })?;

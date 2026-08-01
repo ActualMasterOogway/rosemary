@@ -411,7 +411,7 @@ pub(crate) fn build_typed(guest_va: u64, signature: ThunkSignature) -> Result<Th
     }
     b.finalize();
 
-    let mut backend = CraneliftBackend::new().map_err(|e| fail(e.to_string()))?;
+    let mut backend = crate::jit::backend().map_err(|e| fail(e.to_string()))?;
     let code = backend.compile(func).map_err(|e| fail(e.to_string()))?;
     Ok(Thunk {
         guest: guest_va,
@@ -486,7 +486,7 @@ pub(crate) fn build(guest_va: u64) -> Result<Thunk, VmError> {
     b.ins().return_(&[result]);
     b.finalize();
 
-    let mut backend = CraneliftBackend::new().map_err(|e| fail(e.to_string()))?;
+    let mut backend = crate::jit::backend().map_err(|e| fail(e.to_string()))?;
     let code = backend.compile(func).map_err(|e| fail(e.to_string()))?;
     Ok(Thunk {
         guest: guest_va,
