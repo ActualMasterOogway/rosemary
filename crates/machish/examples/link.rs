@@ -116,6 +116,58 @@ fn print(report: &LinkReport, quiet: bool) {
                 tlv.at, tlv.thunk, tlv.key, tlv.offset
             );
         }
+        if let Some(objc) = &img.objc {
+            if let Some(info) = objc.image_info {
+                println!(
+                    "  objc image info version {} flags {:#x}",
+                    info.version, info.flags
+                );
+            }
+            for c in &objc.classes {
+                let meta_methods = c.meta.as_ref().map_or(0, |m| m.ro.methods.len());
+                println!(
+                    "  objc class {:#x} {}  super {:#x}  {} method(s), {} class method(s), {} ivar(s), {} protocol(s)",
+                    c.va,
+                    c.ro.name,
+                    c.superclass,
+                    c.ro.methods.len(),
+                    meta_methods,
+                    c.ro.ivars.len(),
+                    c.ro.protocols.len()
+                );
+                for m in c.ro.methods.iter().chain(c.meta.iter().flat_map(|m| &m.ro.methods)) {
+                    println!("    -[{} {}] {} imp {:#x}", c.ro.name, m.name, m.types, m.imp);
+                }
+            }
+            for c in &objc.categories {
+                println!(
+                    "  objc category {:#x} ({})  on class {:#x}  {} method(s)",
+                    c.va,
+                    c.name,
+                    c.class,
+                    c.instance_methods.len() + c.class_methods.len()
+                );
+            }
+            for p in &objc.protocols {
+                println!(
+                    "  objc protocol {:#x} {}  {} required, {} optional",
+                    p.va,
+                    p.name,
+                    p.instance_methods.len() + p.class_methods.len(),
+                    p.optional_instance_methods.len() + p.optional_class_methods.len()
+                );
+            }
+            println!(
+                "  objc {} selref(s), {} classref(s), {} superref(s)",
+                objc.selector_refs.len(),
+                objc.class_refs.len(),
+                objc.super_refs.len()
+            );
+            for r in &objc.refusals {
+                println!("  objc REFUSED {r:?}");
+            }
+        }
+
         for m in &img.missing {
             println!(
                 "  MISSING {} from {} at {:#x}{}",

@@ -78,6 +78,51 @@ pub fn build_x86_64(name: &str, source: &str, extra: &[&str]) -> Option<Vec<u8>>
     std::fs::read(&out).ok()
 }
 
+/// Whether this host can build x86_64 Objective-C binaries.
+///
+/// A separate probe from [`can_build_x86_64`], because it asks a different
+/// question: the x86_64 *SDK* has the Foundation headers and the x86_64 slice
+/// of the framework stub, and a machine with the compiler but not the SDK is a
+/// configuration a test must skip on rather than fail.
+pub fn can_build_objc_x86_64() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| build_objc_x86_64("objc_probe", "int main(void){return 0;}").is_some())
+}
+
+/// Compile an Objective-C `source` into an x86_64 Mach-O and return its bytes.
+///
+/// `-framework Foundation` is not optional even for a fixture that only
+/// declares a root class: without it there is no `NSObject` to derive from, and
+/// a class with no superclass exercises a code path real programs never take.
+pub fn build_objc_x86_64(name: &str, source: &str) -> Option<Vec<u8>> {
+    build_objc_x86_64_flags(name, source, &[])
+}
+
+/// [`build_objc_x86_64`] with extra flags — `-Wl,-no_fixup_chains` above all,
+/// which is how a modern toolchain is made to emit `LC_DYLD_INFO_ONLY`.
+pub fn build_objc_x86_64_flags(name: &str, source: &str, extra: &[&str]) -> Option<Vec<u8>> {
+    if !can_build_x86_64() {
+        return None;
+    }
+    let dir = fixture_dir();
+    let src = dir.join(format!("{name}.m"));
+    let out = dir.join(name);
+    std::fs::write(&src, source).ok()?;
+
+    let status = Command::new("cc")
+        .args(["-arch", "x86_64", "-framework", "Foundation"])
+        .args(extra)
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    std::fs::read(&out).ok()
+}
+
 /// Skip the calling test with an explanatory note.
 #[macro_export]
 macro_rules! skip {

@@ -21,7 +21,7 @@ fixups-all = ["fixups-dyld-info", "fixups-chained", "fixups-classic"]
 ext-initializers = []
 ext-tlv = []
 ext-objc = []
-ext-dyld = ["ext-initializers", "ext-tlv"]
+ext-dyld = ["ext-initializers", "ext-tlv", "ext-objc"]
 
 # The example links a real binary against the host, so it needs both the host
 # frontend and the guest architecture. Declared here so `--no-default-features`

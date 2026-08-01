@@ -95,6 +95,15 @@ pub struct ImageReport {
     /// when [`thread_locals`](ImageReport::thread_locals) is non-empty and the
     /// image carries a `__thread_data` or `__thread_bss` section.
     pub tlv_template: Option<TlvTemplate>,
+    /// What the image declares to the Objective-C runtime, decoded and
+    /// otherwise untouched: no class is realized, no selector uniqued, no
+    /// category attached. `None` when the image carries no `__objc_*` sections
+    /// — an image that declares nothing is distinct from one not looked at.
+    ///
+    /// Gated on the decoder's own feature: without it there is nothing that
+    /// could fill this in.
+    #[cfg(feature = "ext-objc")]
+    pub objc: Option<crate::extensions::objc::ObjcImage>,
     /// Where each segment landed, with the file bytes backing it, so a driver
     /// can hand exact ranges to a recompiler without re-reading memory.
     pub segments: Vec<SegmentReport>,

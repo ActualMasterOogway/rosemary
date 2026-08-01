@@ -33,6 +33,8 @@
 
 #[cfg(feature = "ext-initializers")]
 pub mod initializers;
+#[cfg(feature = "ext-objc")]
+pub mod objc;
 #[cfg(feature = "ext-tlv")]
 pub mod tlv;
 
@@ -112,6 +114,8 @@ impl<S: MachSpec> ExtensionSet<S> {
         extensions.push(alloc::boxed::Box::new(initializers::InitializersExtension));
         #[cfg(feature = "ext-tlv")]
         extensions.push(alloc::boxed::Box::new(tlv::TlvExtension::new()));
+        #[cfg(feature = "ext-objc")]
+        extensions.push(alloc::boxed::Box::new(objc::ObjcExtension));
         ExtensionSet { extensions }
     }
 

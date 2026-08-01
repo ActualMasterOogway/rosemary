@@ -148,6 +148,36 @@ fn main() -> ExitCode {
         }
     }
 
+    // What the guest declares to the Objective-C runtime. Decoded and nothing
+    // else — no class is realized, no selector uniqued, no category attached —
+    // so this is a description of the work M6 has to do, printed as a count.
+    for img in &program.report.images {
+        let Some(objc) = &img.objc else { continue };
+        let methods: usize = objc.implementations().count();
+        println!(
+            "  objc: {} class(es), {} categor(y/ies), {} protocol(s), {} method(s), {} selref(s)",
+            objc.classes.len(),
+            objc.categories.len(),
+            objc.protocols.len(),
+            methods,
+            objc.selector_refs.len(),
+        );
+        for c in &objc.classes {
+            println!(
+                "  objc: class {} : {:#x}{}",
+                c.ro.name,
+                c.superclass,
+                if c.ro.is_root() { " (root)" } else { "" }
+            );
+        }
+        for c in &objc.categories {
+            println!("  objc: category {} on {:#x}", c.name, c.class);
+        }
+        for r in &objc.refusals {
+            println!("  objc: refused {r:?}");
+        }
+    }
+
     // One lift, on demand, of the region control would actually reach first.
     // This is the execution model in miniature: a JIT repeats it, keyed on
     // wherever the previous region exited to.

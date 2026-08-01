@@ -387,6 +387,8 @@ impl<S: MachSpec + 'static> Loader<S> {
                 terminators: Vec::new(),
                 thread_locals: Vec::new(),
                 tlv_template: None,
+                #[cfg(feature = "ext-objc")]
+                objc: None,
                 segments,
                 entry: m.entry,
             };
