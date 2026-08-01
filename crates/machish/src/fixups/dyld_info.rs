@@ -126,12 +126,21 @@ impl<'a, S: MachSpec> Machine<'a, '_, S> {
         self.positioned = true;
     }
 
-    fn advance(&mut self, by: u64) -> Result<()> {
-        self.seg_offset = self
-            .seg_offset
-            .checked_add(by)
-            .ok_or(Error::OutOfBounds { addr: self.seg_offset, len: 0 })?;
-        Ok(())
+    /// Move the cursor by `by` bytes, **wrapping**.
+    ///
+    /// `ADD_ADDR_ULEB` is spelled unsigned but is used signed: `ld` emits a
+    /// backwards step as a ULEB of the two's-complement value, so a jump back
+    /// 232 bytes arrives here as `0xffff_ffff_ffff_ff18`. dyld adds it into a
+    /// `uintptr_t` and lets it wrap, and images in the wild depend on that —
+    /// DELTARUNE's runner binds a `__DATA` slot below the one before it dozens
+    /// of times. Rejecting the overflow refused the whole image before it ran.
+    ///
+    /// Wrapping is safe because it is not what makes the address legal:
+    /// [`Self::address`] re-checks segment bounds at every fixup, so a step that
+    /// wraps past zero (or a genuinely runaway one) lands out of range and
+    /// errors there, with the offending address in the diagnostic.
+    fn advance(&mut self, by: u64) {
+        self.seg_offset = self.seg_offset.wrapping_add(by);
     }
 }
 
@@ -158,7 +167,7 @@ fn run_rebase<'a, S: MachSpec>(
             let (count, skip): (u64, u64) = ($count, $skip);
             for _ in 0..count {
                 push(out, Fixup::Rebase { at: m.address()? })?;
-                m.advance(c::POINTER_SIZE + skip)?;
+                m.advance(c::POINTER_SIZE.wrapping_add(skip));
             }
         }};
     }
@@ -192,11 +201,11 @@ fn run_rebase<'a, S: MachSpec>(
 
             c::REBASE_OPCODE_ADD_ADDR_ULEB => {
                 let by = cur.uleb128()?;
-                m.advance(by)?;
+                m.advance(by);
             }
 
             c::REBASE_OPCODE_ADD_ADDR_IMM_SCALED => {
-                m.advance(u64::from(imm) * c::POINTER_SIZE)?;
+                m.advance(u64::from(imm) * c::POINTER_SIZE);
             }
 
             c::REBASE_OPCODE_DO_REBASE_IMM_TIMES => emit!(u64::from(imm), 0),
@@ -249,7 +258,7 @@ fn run_bind<'a, S: MachSpec>(
                 SymbolRef { name, library: library_ref(obj, ordinal), weak_import };
             for _ in 0..count {
                 push(out, Fixup::Bind { at: m.address()?, symbol, addend, kind })?;
-                m.advance(c::POINTER_SIZE + skip)?;
+                m.advance(c::POINTER_SIZE.wrapping_add(skip));
             }
         }};
     }
@@ -307,7 +316,7 @@ fn run_bind<'a, S: MachSpec>(
 
             c::BIND_OPCODE_ADD_ADDR_ULEB => {
                 let by = cur.uleb128()?;
-                m.advance(by)?;
+                m.advance(by);
             }
 
             c::BIND_OPCODE_DO_BIND => emit!(1, 0),

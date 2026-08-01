@@ -201,6 +201,79 @@ fn both_encodings_decode_to_the_same_stream() {
     assert_eq!(ba, bb, "the two encodings disagree about this image's imports");
 }
 
+/// `ADD_ADDR_ULEB` is a *signed* step spelled as an unsigned ULEB: a backwards
+/// jump is encoded two's-complement, which dyld adds into a `uintptr_t` and
+/// lets wrap. Real images rely on it — DELTARUNE's Mac runner steps back
+/// dozens of times in its bind stream, and rejecting the overflow refused the
+/// whole binary with `access out of bounds: addr=0x87558 len=0`.
+///
+/// Built by hand rather than from a fixture: `ld` only emits a backwards step
+/// when a large image's slot ordering happens to demand it, so a compiled
+/// fixture would not reliably contain one.
+#[test]
+fn a_backwards_add_addr_uleb_wraps_instead_of_erroring() {
+    use machish::spec::constants as c;
+
+    // One __DATA segment at 0x1000, so a segment offset is an address minus it.
+    let mut cmds = Vec::new();
+    let mut seg = vec![0u8; c::SEGMENT_COMMAND_64_SIZE];
+    seg[0..4].copy_from_slice(&c::LC_SEGMENT_64.to_le_bytes());
+    seg[4..8].copy_from_slice(&(c::SEGMENT_COMMAND_64_SIZE as u32).to_le_bytes());
+    seg[8..14].copy_from_slice(b"__DATA");
+    seg[24..32].copy_from_slice(&0x1000u64.to_le_bytes()); // vmaddr
+    seg[32..40].copy_from_slice(&0x1000u64.to_le_bytes()); // vmsize
+    cmds.extend_from_slice(&seg);
+
+    // A bind stream: bind at offset 0x100, then step *back* 0x108 bytes and
+    // bind again at offset 0x8.
+    let back = (-0x108i64) as u64;
+    let mut stream = vec![c::BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | 1];
+    stream.push(c::BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM);
+    stream.extend_from_slice(b"_foo\0");
+    stream.push(c::BIND_OPCODE_SET_TYPE_IMM | c::BIND_TYPE_POINTER);
+    stream.push(c::BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB); // segment 0
+    stream.extend_from_slice(&[0x80, 0x02]); // uleb 0x100
+    stream.push(c::BIND_OPCODE_DO_BIND); // -> 0x1100, leaves offset 0x108
+    stream.push(c::BIND_OPCODE_ADD_ADDR_ULEB);
+    let mut v = back;
+    loop {
+        let byte = (v & 0x7f) as u8;
+        v >>= 7;
+        stream.push(if v == 0 { byte } else { byte | 0x80 });
+        if v == 0 {
+            break;
+        }
+    }
+    stream.push(c::BIND_OPCODE_DO_BIND); // -> 0x1000
+    stream.push(c::BIND_OPCODE_DONE);
+
+    let bind_off = c::MACH_HEADER_64_SIZE + cmds.len() + 48;
+    let mut info = vec![0u8; 48];
+    info[0..4].copy_from_slice(&c::LC_DYLD_INFO_ONLY.to_le_bytes());
+    info[4..8].copy_from_slice(&48u32.to_le_bytes());
+    info[16..20].copy_from_slice(&(bind_off as u32).to_le_bytes());
+    info[20..24].copy_from_slice(&(stream.len() as u32).to_le_bytes());
+    cmds.extend_from_slice(&info);
+
+    let mut image = Vec::new();
+    image.extend_from_slice(&c::MH_MAGIC_64.to_le_bytes());
+    image.extend_from_slice(&c::CPU_TYPE_X86_64.to_le_bytes());
+    image.extend_from_slice(&3i32.to_le_bytes());
+    image.extend_from_slice(&c::MH_EXECUTE.to_le_bytes());
+    image.extend_from_slice(&2u32.to_le_bytes()); // ncmds
+    image.extend_from_slice(&(cmds.len() as u32).to_le_bytes());
+    image.extend_from_slice(&0u32.to_le_bytes()); // flags
+    image.extend_from_slice(&0u32.to_le_bytes()); // reserved
+    image.extend_from_slice(&cmds);
+    assert_eq!(image.len(), bind_off);
+    image.extend_from_slice(&stream);
+
+    let obj = MachObject::parse(&image, X86_64).unwrap();
+    let (_, fixups) = decode_image(&obj).unwrap();
+    let addrs: Vec<u64> = fixups.iter().map(Fixup::address).collect();
+    assert_eq!(addrs, vec![0x1100, 0x1000], "the backwards step did not land where dyld puts it");
+}
+
 // ------------------------------------------------------------ stub_va -------
 
 #[test]
