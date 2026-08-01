@@ -60,9 +60,13 @@
 //! metadata record is not an `objc_class` and this reads it as one.
 //!
 //! Dispatch — `objc_msgSend` and its variants, entered from *guest* code — is
-//! M6.3 and is not here. What is here is enough for the host to message a guest
-//! class, which is the direction that proves realization and thunking together.
+//! [`dispatch`], which is the other direction and needs everything here first:
+//! a message resolves an `IMP` through the class this module realized, and finds
+//! either one of its thunks (a jump back into the guest) or a host method whose
+//! type encoding says how to call it.
 
+pub mod dispatch;
+pub mod encoding;
 pub mod host;
 
 use std::collections::{HashMap, HashSet};
@@ -153,6 +157,21 @@ impl ObjcRuntime {
         self.to_guest.get(&host).copied()
     }
 
+    /// [`ObjcRuntime::host_class`], leaving anything that is not a guest class
+    /// alone.
+    ///
+    /// The form the seam actually wants: a pointer crossing out is a class or it
+    /// is not, and an object — which is a host allocation on both sides — must
+    /// pass through untouched. See [`dispatch`].
+    pub fn host_or(&self, va: u64) -> u64 {
+        self.host_class(va).unwrap_or(va)
+    }
+
+    /// [`ObjcRuntime::guest_class`], with the same rule for the other direction.
+    pub fn guest_or(&self, host: u64) -> u64 {
+        self.guest_class(host).unwrap_or(host)
+    }
+
     pub fn stats(&self) -> &Stats {
         &self.stats
     }
@@ -222,6 +241,97 @@ pub fn register(vm: &Vm) -> Result<ObjcRuntime, VmError> {
     }
 
     Ok(rt)
+}
+
+/// Call every `+load` the guest declares, superclass first.
+///
+/// The one Objective-C method that runs *because the image was loaded* rather
+/// than because somebody sent a message, and programs use it for exactly that:
+/// registering a class with a factory, installing a swizzle, setting a flag a
+/// later `main` reads. Nothing else calls it, so a runtime that skips it runs a
+/// program whose setup silently did not happen.
+///
+/// Called from [`crate::startup`] between registration and the initializers,
+/// which is dyld's order: `+load` runs as soon as its image's classes are
+/// realized, before any C constructor in the same image.
+///
+/// ## Order, as far as it is defined
+///
+/// A class's `+load` runs after its superclass's, which is the only ordering
+/// guarantee the language makes and the only one worth reproducing — a subclass
+/// whose superclass has not been prepared is the case programs actually depend
+/// on. Categories come last, as they do on a real launch. Beyond that the order
+/// is this pass's, and a program relying on more than that would be relying on
+/// dyld's link order.
+pub fn call_load_methods(vm: &Vm, rt: &ObjcRuntime) -> Result<usize, VmError> {
+    let images: Vec<&ObjcImage> =
+        vm.program.report.images.iter().rev().filter_map(|i| i.objc.as_ref()).collect();
+    let by_va: HashMap<u64, &ObjcClass> =
+        images.iter().flat_map(|i| i.classes.iter()).map(|c| (c.va, c)).collect();
+
+    let mut done = HashSet::new();
+    let mut called = 0;
+    for image in &images {
+        for class in &image.classes {
+            called += load_class(vm, rt, &by_va, class, &mut done)?;
+        }
+    }
+    // A category's `+load` is a method on the target class's metaclass and is
+    // called even when the class itself has one — both run, which is the one
+    // place Objective-C does not collapse a category over a class.
+    for image in &images {
+        for cat in &image.categories {
+            for m in &cat.class_methods {
+                if m.name == "load" && vm.program.is_guest_address(m.imp) {
+                    let target = rt.host_or(cat.class);
+                    vm.call(m.imp, &[target, load_selector()])?;
+                    called += 1;
+                }
+            }
+        }
+    }
+    Ok(called)
+}
+
+/// One class's `+load`, its superclass's first.
+fn load_class(
+    vm: &Vm,
+    rt: &ObjcRuntime,
+    by_va: &HashMap<u64, &ObjcClass>,
+    class: &ObjcClass,
+    done: &mut HashSet<u64>,
+) -> Result<usize, VmError> {
+    if !done.insert(class.va) {
+        return Ok(0);
+    }
+    let mut called = 0;
+    if let Some(parent) = by_va.get(&class.superclass).copied() {
+        called += load_class(vm, rt, by_va, parent, done)?;
+    }
+    // Only a class this pass registered: a refused class has no realized
+    // metaclass, and running its `+load` would be running a method of an object
+    // that does not exist.
+    if rt.host_class(class.va).is_none() {
+        return Ok(called);
+    }
+    let Some(meta) = &class.meta else { return Ok(called) };
+    for m in &meta.ro.methods {
+        if m.name == "load" && vm.program.is_guest_address(m.imp) {
+            // `self` is the class as the *guest* names it, which is the rule
+            // everywhere: guest code sees guest addresses, and a `+load` that
+            // messages `self` gets it translated at the seam like any other.
+            vm.call(m.imp, &[class.va, load_selector()])?;
+            called += 1;
+        }
+    }
+    Ok(called)
+}
+
+/// The uniqued `load` selector, as the second argument every method takes.
+fn load_selector() -> u64 {
+    // SAFETY: a NUL-terminated literal; the returned `SEL` is interned by the
+    // runtime for the process lifetime.
+    unsafe { host::sel_registerName(c"load".as_ptr()) as u64 }
 }
 
 /// A failed write into the guest's own metadata, named with the address.
@@ -387,6 +497,15 @@ fn register_class(
     let host_va = cls as u64;
     rt.to_host.insert(class.va, host_va);
     rt.to_guest.insert(host_va, class.va);
+    // The metaclass is a class the guest names too. `[super description]` inside
+    // a `+` method puts the guest's *metaclass* address in the `objc_super`
+    // struct, and a message send that could not translate it would look a method
+    // up on a structure the host runtime has never realized. It costs one map
+    // entry to make the pair total over both halves of a class.
+    if let Some(declared) = &class.meta {
+        rt.to_host.insert(declared.va, meta as u64);
+        rt.to_guest.insert(meta as u64, declared.va);
+    }
     rt.stats.classes += 1;
     rt.stats.methods += methods;
     rt.stats.ivars += ivars;

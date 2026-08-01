@@ -27,7 +27,11 @@
 //! ## Scope
 //!
 //! Implemented: `printf`, `fprintf`, `sprintf`, `snprintf`, `ioctl`, and the
-//! `open`/`openat`/`fcntl` group.
+//! `open`/`openat`/`fcntl` group. Three families live in modules of their own
+//! and are reached from here: [`crate::jmpbuf`], [`crate::unwind`],
+//! [`crate::signal`], and [`crate::objc::dispatch`] — each because what it
+//! stands in for is a stack, a personality routine, a callback crossing back
+//! in, or a message, rather than a calling convention.
 //! Everything else variadic is *classified* by [`crate::abi::table`] and refused by name with
 //! [`AbiError::NoShim`] until someone needs it — a refusal that names the
 //! symbol is a work item; a guess is a bug report from a user.
@@ -78,7 +82,9 @@ pub fn dispatch(
         // [`crate::jmpbuf`], which is a module of its own because a stack is not
         // a calling convention.
         _ => {
-            if let Some(f) = crate::jmpbuf::shim_for(name).or_else(|| crate::unwind::shim_for(name))
+            if let Some(f) = crate::jmpbuf::shim_for(name)
+                .or_else(|| crate::unwind::shim_for(name))
+                .or_else(|| crate::objc::dispatch::shim_for(name))
             {
                 return Some(f(name, ctx, mem));
             }
@@ -100,6 +106,7 @@ pub fn is_shimmed(symbol: &str) -> bool {
     let name = symbol.strip_prefix('_').unwrap_or(symbol);
     if crate::jmpbuf::shim_for(name).is_some()
         || crate::unwind::shim_for(name).is_some()
+        || crate::objc::dispatch::shim_for(name).is_some()
         || crate::signal::shim_for(name).is_some()
     {
         return true;

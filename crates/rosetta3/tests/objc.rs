@@ -7,8 +7,9 @@
 //! answer coming back at all means realization, selector uniquing, method
 //! installation and the JIT re-entry all worked together.
 //!
-//! Guest-side dispatch is M6.3 and is deliberately absent: no fixture here
-//! sends a message from guest code.
+//! Guest-side dispatch is deliberately absent here: no fixture in this file
+//! sends a message from guest code. That is M6.3, and it is
+//! [`msgsend.rs`](msgsend.rs).
 //!
 //! ## Why every fixture names its class differently
 //!

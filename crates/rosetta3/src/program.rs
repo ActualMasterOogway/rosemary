@@ -214,8 +214,15 @@ impl<M: Regions> Program<M> {
         // to export and every guest with an array on its stack dereferences in
         // its own prologue. See `crate::shims::runtime`.
         let runtime = crate::shims::runtime::provider();
+        // And the Objective-C runtime, for the same reason one step further out:
+        // the native provider denies the `_objc_`, `_class_`, `_sel_` and
+        // `_protocol_` families precisely so a shim can claim them, and passing
+        // one through unexamined would hand the host runtime a guest class. See
+        // [`crate::objc::dispatch`].
+        let objc = crate::objc::dispatch::provider();
         let mut providers: Vec<&dyn SymbolProvider> = extra.to_vec();
         providers.push(&runtime);
+        providers.push(&objc);
         providers.push(&eager);
         providers.push(&native);
 
@@ -253,6 +260,32 @@ impl<M: Regions> Program<M> {
             imports.insert(b.slot_va, site.clone());
             if let Some(stub) = b.stub_va {
                 imports.insert(stub, ImportSite { is_stub: true, ..site });
+            }
+        }
+
+        // Imports **nothing satisfied** are registered too, resolved to zero.
+        //
+        // Not for completeness: for the diagnostic. An unregistered call site is
+        // followed as guest code, so a call to an unsatisfied import decodes the
+        // `__stubs` trampoline, follows its `jmp qword [rip+disp]` to the slot
+        // the binder zeroed, and stops with "no guest code at 0x0" — a report
+        // about an address, for a failure whose whole content is a *name*.
+        // Registered, the same call is `AbiError::Unsatisfied` naming the symbol,
+        // which is a work item. See [`crate::abi::call_import_with`], which
+        // refuses a zero host address before anything else.
+        for image in &report.images {
+            for m in &image.missing {
+                let site = ImportSite {
+                    symbol: m.symbol.clone(),
+                    library: m.library.clone(),
+                    resolved: 0,
+                    tag: 0,
+                    is_stub: false,
+                };
+                imports.insert(m.slot_va, site.clone());
+                if let Some(stub) = m.stub_va {
+                    imports.insert(stub, ImportSite { is_stub: true, ..site });
+                }
             }
         }
 

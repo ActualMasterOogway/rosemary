@@ -432,6 +432,160 @@ pub fn build_objc(name: &str, source: &str) -> Option<String> {
     build_x86_64(name, source, &["-x", "objective-c", "-framework", "Foundation"])
 }
 
+/// M6.3's message-sending program: an Objective-C guest that actually runs.
+///
+/// Sent from *guest* code, which is the whole of M6.3, and written so that each
+/// mechanism fails on its own rather than as one blob of output:
+///
+/// - **`+load`** runs before `main`, superclass first, and the counter says so:
+///   11 means both ran and in that order, 10 means the superclass's did not.
+/// - **guest → guest** dispatch, which is a jump rather than a call
+///   (`legs`, `says`).
+/// - **overriding**, where `[d says]` and `[[Animal alloc] ...] says]` must
+///   differ — a runtime that resolved the `IMP` on the wrong class prints the
+///   same string twice.
+/// - **`super`**, twice over: `Dog`'s initialiser calls `Animal`'s, which calls
+///   `NSObject`'s. `objc_msgSendSuper2` naming the wrong class recurses forever.
+/// - **a `double` return and a pointer argument**, so the marshaller is
+///   exercised in both register classes.
+/// - **guest → host** dispatch by type encoding: `isKindOfClass:`,
+///   `respondsToSelector:`, `stringWithUTF8String:`, `UTF8String`, `length`.
+/// - **class identity in both directions**: `[d class] == [Dog class]` is only
+///   true if a host `Class` coming back is translated to the address the guest
+///   already has, and `!= [Animal class]` says the translation is not a
+///   constant.
+/// - **a category on a host class**, reached by messaging an `NSObject`.
+/// - **a constant `@"..."` string**, which is an object living in *guest* memory
+///   whose `isa` is the host's class.
+/// - **messaging nil**, which is the language rather than an error.
+/// - **`@synchronized` and `@autoreleasepool`**, the two runtime entry points a
+///   program reaches without naming them.
+pub const OBJC_MESSAGES_M: &str = r#"
+#import <Foundation/Foundation.h>
+#import <objc/runtime.h>
+
+static int loaded = 0;
+
+@protocol Speaks
+- (const char *)says;
+@end
+
+@interface Animal : NSObject { int legs; }
+- (instancetype)initWithLegs:(int)n;
+- (int)legs;
+- (const char *)says;
+- (int)twiceLegs;
+@end
+
+@implementation Animal
++ (void)load { loaded += 1; }
+- (instancetype)initWithLegs:(int)n { self = [super init]; if (self) legs = n; return self; }
+- (int)legs { return legs; }
+- (const char *)says { return "..."; }
+/* One message and nothing else, so clang tail-jumps to objc_msgSend at -O2. */
+- (int)twiceLegs { return [self legs] * 2; }
+@end
+
+@interface Dog : Animal <Speaks> { double weight; }
+- (instancetype)initWithWeight:(double)w;
+- (double)weight;
+- (const char *)describeWith:(const char *)prefix;
++ (const char *)species;
+@end
+
+@implementation Dog
++ (void)load { loaded += 10; }
+- (instancetype)initWithWeight:(double)w {
+    self = [super initWithLegs:4];
+    if (self) weight = w;
+    return self;
+}
+- (double)weight { return weight; }
+- (const char *)says { return "woof"; }
+- (const char *)describeWith:(const char *)prefix { return prefix; }
++ (const char *)species { return "canis"; }
+@end
+
+@interface NSObject (Rosetta)
+- (const char *)rosetta;
+@end
+@implementation NSObject (Rosetta)
+- (const char *)rosetta { return "category on a host class"; }
+@end
+
+int main(void) {
+    Dog *d = [[Dog alloc] initWithWeight:12.5];
+    printf("load %d\n", loaded);
+    printf("legs %d says %s\n", [d legs], [d says]);
+    printf("inherited %s\n", [[[Animal alloc] initWithLegs:2] says]);
+    printf("twice %d\n", [d twiceLegs]);
+    printf("weight %.1f\n", [d weight]);
+    printf("prefix %s\n", [d describeWith:"argument"]);
+    printf("species %s\n", [Dog species]);
+    printf("identity %d %d\n", [d class] == [Dog class], [d class] == [Animal class]);
+    printf("kind %d\n", [d isKindOfClass:[Animal class]]);
+    printf("name %s super %s\n",
+           class_getName([d class]), class_getName(class_getSuperclass([d class])));
+    printf("responds %d %d\n",
+           [d respondsToSelector:@selector(weight)], [d respondsToSelector:@selector(fly)]);
+    printf("conforms %d\n", [d conformsToProtocol:@protocol(Speaks)]);
+    printf("category %s\n", [d rosetta]);
+    NSString *s = [NSString stringWithUTF8String:"a host object"];
+    printf("host %s %lu\n", [s UTF8String], (unsigned long)[s length]);
+    printf("constant %s\n", [@"a constant string" UTF8String]);
+    printf("nil %d %p\n", [(Dog *)nil legs], (void *)[(Dog *)nil says]);
+    @synchronized (d) { printf("synchronized\n"); }
+    @autoreleasepool { printf("pool\n"); }
+    return 0;
+}
+"#;
+
+/// Build [`OBJC_MESSAGES_M`], or `None` if this host cannot.
+///
+/// `extra` is threaded so the same source can be built at `-O2`, where clang
+/// tail-jumps to `objc_msgSend` instead of calling it — a different path through
+/// the runtime for identical output.
+pub fn objc_messages_fixture(name: &str, extra: &[&str]) -> Option<String> {
+    let mut flags = vec!["-x", "objective-c", "-framework", "Foundation"];
+    flags.extend_from_slice(extra);
+    build_x86_64(name, OBJC_MESSAGES_M, &flags)
+}
+
+/// M6.3's boundary program: the three messages that must be *refused*.
+///
+/// One binary selected by argument, as [`UNWIND_REFUSALS_CPP`] is, and for the
+/// same reason: a refusal is only worth anything if the program that provokes it
+/// is otherwise ordinary, which the shared `main` shows.
+pub const OBJC_REFUSALS_M: &str = r#"
+#import <Foundation/Foundation.h>
+#include <string.h>
+
+int main(int argc, char **argv) {
+    const char *which = argc > 1 ? argv[1] : "";
+    printf("before\n");
+    if (!strcmp(which, "variadic")) {
+        /* `appendFormat:` takes an ellipsis, and no type encoding records it. */
+        NSMutableString *s = [[NSMutableString alloc] init];
+        [s appendFormat:@"%d", 3];
+        printf("appended %s\n", [s UTF8String]);
+    } else if (!strcmp(which, "aggregate")) {
+        /* `rangeOfString:` returns an NSRange by value. */
+        NSRange r = [@"hello world" rangeOfString:@"world"];
+        printf("range %lu\n", (unsigned long)r.location);
+    } else if (!strcmp(which, "throw")) {
+        @throw [NSException exceptionWithName:@"E" reason:@"r" userInfo:nil];
+    }
+    printf("after\n");
+    return 0;
+}
+"#;
+
+/// Build [`OBJC_REFUSALS_M`], or `None` if this host cannot.
+pub fn objc_refusals_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| build_objc("objc_refusals", OBJC_REFUSALS_M)).clone()
+}
+
 /// Milestone 5's exception program: everything about unwinding that works.
 ///
 /// Each clause is a separate claim, and each one fails on its own:

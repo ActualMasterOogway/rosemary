@@ -139,6 +139,7 @@ impl<'s> Binder<'s> {
                 symbol: symbol.name.to_string(),
                 library,
                 slot_va,
+                stub_va,
                 weak_import: symbol.weak_import,
             });
             return Ok(());

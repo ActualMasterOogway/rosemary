@@ -81,6 +81,17 @@ pub struct ThreadState {
     /// over `rip`, which for a `longjmp` would discard the destination it just
     /// restored. See [`crate::vm`].
     redirected: Cell<bool>,
+    /// Whether the import being serviced was reached by a **jump** rather than a
+    /// call.
+    ///
+    /// The mirror image of `redirected`, and it exists for the one shim that has
+    /// to stand in for the call itself: `objc_msgSend` is a trampoline, so a
+    /// message to a guest method is serviced by setting `rip` to the `IMP`. Where
+    /// the callee's return address comes from depends entirely on how control
+    /// arrived — an intercepted `call` has not pushed one and a tail `jmp` has —
+    /// and guessing produces a return to the wrong frame rather than a fault. So
+    /// the loop states it. See [`crate::objc::dispatch`].
+    entered_by_jump: Cell<bool>,
     /// The exception being unwound on this thread, if any.
     ///
     /// Per thread because a stack is: two threads throwing at once are two
@@ -107,6 +118,7 @@ impl ThreadState {
             pending: RefCell::new(None),
             entry: Cell::new(0),
             redirected: Cell::new(false),
+            entered_by_jump: Cell::new(false),
             unwinding: Cell::new(None),
             caught: RefCell::new(Vec::new()),
         }
@@ -171,6 +183,16 @@ impl ThreadState {
     /// Whether the last serviced call redirected, clearing the flag.
     pub(crate) fn took_redirect(&self) -> bool {
         self.redirected.replace(false)
+    }
+
+    /// Record how the import now being serviced was reached.
+    pub(crate) fn set_entered_by_jump(&self, jumped: bool) {
+        self.entered_by_jump.set(jumped);
+    }
+
+    /// Whether it was a jump. Only meaningful while a shim is running.
+    pub(crate) fn entered_by_jump(&self) -> bool {
+        self.entered_by_jump.get()
     }
 
     /// `(argc, argv, envp, apple)`, as laid out on this thread's stack.

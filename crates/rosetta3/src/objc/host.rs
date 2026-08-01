@@ -31,6 +31,9 @@ pub type Protocol = *mut std::ffi::c_void;
 pub type Sel = *const std::ffi::c_void;
 /// An `Ivar` description.
 pub type Ivar = *const std::ffi::c_void;
+/// A `Method` description: an `IMP` and a type encoding, which is the pair
+/// [`crate::objc::dispatch`] needs and the reason a message is callable at all.
+pub type Method = *const std::ffi::c_void;
 /// A method implementation. Always one of this runtime's arm64 thunks when we
 /// are the ones installing it.
 pub type Imp = *const std::ffi::c_void;
@@ -57,7 +60,16 @@ unsafe extern "C" {
     ) -> bool;
     pub fn class_addProtocol(cls: Class, protocol: Protocol) -> bool;
     pub fn class_getInstanceVariable(cls: Class, name: *const c_char) -> Ivar;
-    pub fn class_getInstanceMethod(cls: Class, name: Sel) -> *const std::ffi::c_void;
+    pub fn class_getInstanceMethod(cls: Class, name: Sel) -> Method;
+
+    /// The `IMP` and the type encoding of a method, which together are the whole
+    /// of what a message send needs to know.
+    ///
+    /// Asked of the *class of the receiver*, so one function answers for both
+    /// kinds of method: a class method is an instance method of the metaclass,
+    /// which is what `object_getClass` of a class returns.
+    pub fn method_getImplementation(method: Method) -> Imp;
+    pub fn method_getTypeEncoding(method: Method) -> *const c_char;
 
     pub fn ivar_getOffset(ivar: Ivar) -> isize;
 

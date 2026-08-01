@@ -106,8 +106,77 @@ pub fn call_with(
     mem: &dyn GuestMemory,
     callbacks: &dyn super::Callbacks,
 ) -> Result<()> {
+    call_types(symbol, abi.types, host, ctx, mem, &ForCallbacks { abi, callbacks })
+}
+
+/// What a value means on the other side of the seam.
+///
+/// The marshaller moves *bits*, and for almost every argument that is the whole
+/// job. Two kinds of value mean something different on each side and have to be
+/// translated as they cross: a guest function pointer, which the host would call
+/// as arm64 (see [`super::Callbacks`]), and an Objective-C `Class`, which the
+/// guest names by the address of the dead `objc_class` in its own `__objc_data`
+/// (see [`crate::objc`]). Both are "this pointer is not what the other side
+/// thinks it is", so both go through one hook rather than two mechanisms.
+///
+/// By index rather than by value, because *which* arguments are special is
+/// stated by a signature and cannot be recovered from the bits.
+pub trait Convert {
+    /// The value the host should receive for parameter `index`.
+    fn argument(&self, symbol: &str, index: usize, raw: u64) -> Result<u64>;
+
+    /// The value the guest should receive back from an integer or pointer
+    /// return. The default is the identity, which is right for everything that
+    /// returns a plain scalar.
+    fn result(&self, raw: u64) -> u64 {
+        raw
+    }
+}
+
+/// Every argument crosses unchanged. The common case, and the marshaller's own
+/// tests.
+pub struct Verbatim;
+
+impl Convert for Verbatim {
+    fn argument(&self, _symbol: &str, _index: usize, raw: u64) -> Result<u64> {
+        Ok(raw)
+    }
+}
+
+/// [`Convert`] for the parameters [`FunctionAbi::callbacks`] names.
+struct ForCallbacks<'a> {
+    abi: &'a FunctionAbi,
+    callbacks: &'a dyn super::Callbacks,
+}
+
+impl Convert for ForCallbacks<'_> {
+    fn argument(&self, symbol: &str, index: usize, raw: u64) -> Result<u64> {
+        if self.abi.callbacks.contains(&(index as u8)) {
+            self.callbacks.substitute(symbol, raw)
+        } else {
+            Ok(raw)
+        }
+    }
+}
+
+/// [`call_with`], for a signature that is not in the table.
+///
+/// The same marshaller driven by a `&[ArgType]` computed at run time rather than
+/// by a `&'static FunctionAbi`. There is exactly one such signature source and
+/// it is the reason M6.3 is possible at all: an Objective-C method carries its
+/// own type encoding, so `objc_msgSend` — which has no signature of its own —
+/// has *whichever* signature the selector's method declares. See
+/// [`crate::objc::encoding`].
+pub fn call_types(
+    symbol: &str,
+    types: &[ArgType],
+    host: u64,
+    ctx: &mut RegisterContext,
+    mem: &dyn GuestMemory,
+    convert: &dyn Convert,
+) -> Result<()> {
     let guest = guest_call_abi();
-    let placed = guest.place_args(abi.types).ok_or_else(|| AbiError::Unmarshallable {
+    let placed = guest.place_args(types).ok_or_else(|| AbiError::Unmarshallable {
         symbol: symbol.to_string(),
         reason: "the guest ABI cannot place its arguments",
     })?;
@@ -119,13 +188,12 @@ pub fn call_with(
     let (mut n_int, mut n_fp) = (0usize, 0usize);
 
     for (index, (ty, loc)) in placed.iter().enumerate() {
-        let mut raw = read_location(symbol, ctx, mem, *loc)?;
-        // A guest address the host would otherwise call as arm64. Substituted
-        // before anything else looks at it, and a refusal here still leaves the
-        // guest context untouched — nothing has been called yet.
-        if abi.callbacks.contains(&(index as u8)) {
-            raw = callbacks.substitute(symbol, raw)?;
-        }
+        // A pointer that means something different on the far side — a guest
+        // function address the host would call as arm64, or a guest class the
+        // host runtime has never realized. Translated before anything else looks
+        // at it, and a refusal here still leaves the guest context untouched:
+        // nothing has been called yet.
+        let raw = convert.argument(symbol, index, read_location(symbol, ctx, mem, *loc)?)?;
         if is_fp(*ty) {
             if n_fp == MAX_FP_ARGS {
                 return Err(AbiError::Unmarshallable {
@@ -147,7 +215,7 @@ pub fn call_with(
         }
     }
 
-    let ret = abi.ret();
+    let ret = types.first().copied().unwrap_or(ArgType::None);
     match ret {
         // SAFETY: `host` is a host function address a `SymbolProvider` resolved
         // via `dlsym`, i.e. a real native arm64 C function. The prototypes below
@@ -171,7 +239,7 @@ pub fn call_with(
         }
         _ => {
             let v = unsafe { call_int(host, &ints, &fps) };
-            ctx.rax = int_ret(ret, v);
+            ctx.rax = int_ret(ret, convert.result(v));
         }
     }
     Ok(())

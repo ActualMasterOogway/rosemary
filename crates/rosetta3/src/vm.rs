@@ -434,6 +434,25 @@ impl Vm {
         self.objc.get()
     }
 
+    /// A class pointer on its way *out* to the host runtime.
+    ///
+    /// The guest names its own class by the address of the dead `objc_class` in
+    /// its `__objc_data`; the host runtime knows the class it realized. Anything
+    /// that is not a registered guest class — an object, a host class, a null —
+    /// is itself on both sides and crosses unchanged. See [`crate::objc`].
+    pub fn objc_host_class(&self, va: u64) -> u64 {
+        self.objc().map_or(va, |rt| rt.host_or(va))
+    }
+
+    /// A class pointer on its way back *in*.
+    ///
+    /// Not symmetry for its own sake: a guest comparing `[obj class]` against
+    /// `Greeter` must find them equal, and the only address it can compare
+    /// against is the one it already has.
+    pub fn objc_guest_class(&self, host: u64) -> u64 {
+        self.objc().map_or(host, |rt| rt.guest_or(host))
+    }
+
     /// Guest memory, as a value a shim can hold.
     pub fn view(&self) -> GuestView {
         self.view.clone()
@@ -528,9 +547,22 @@ impl Vm {
             // the host address in its slot.
             //
             // A tail call is a call and a return, so both halves happen here.
-            if self.program.import_at(pc).is_some() {
+            //
+            // The pc may be the import's address or the address it *resolved
+            // to*, and the second is not an exotic case. A `jmp qword
+            // [rip+disp]` through the slot has no `rel32` for the lifter to
+            // match, so it folds the load instead — the slot lives in a region
+            // the config marks non-writable and was already bound when the
+            // snapshot was taken — and what arrives here is the host function.
+            // `objc_msgSend` is where that shows up, because a method whose body
+            // is one message (`- (id)a { return [self b]; }`) compiles to
+            // exactly that. Following it means running the host's own
+            // `objc_msgSend` on the guest's registers.
+            if let Some(site) =
+                self.program.import_at(pc).or_else(|| self.program.import_by_target(pc))
+            {
                 ctx.imported_function_va = pc;
-                self.service_import(ctx)?;
+                self.service_site_as(site, ctx, true)?;
                 // Unless the call transferred control instead of returning. A
                 // tail-called `jmp _longjmp` arrives here, and by the time the
                 // shim is done `rip` is the `setjmp` it restored — popping a
@@ -620,7 +652,7 @@ impl Vm {
             },
 
             ExitReason::ImportedFunctionCall => {
-                self.service_import(ctx)?;
+                self.service_import(ctx, false)?;
                 Ok(None)
             }
 
@@ -643,19 +675,37 @@ impl Vm {
     }
 
     /// Call the host function an intercepted import resolved to.
-    fn service_import(&self, ctx: &mut RegisterContext) -> Result<(), VmError> {
-        // Cleared here rather than where it is read, so the flag always describes
-        // *this* call. Only the tail-call path consults it; at an ordinary
-        // `ImportedFunctionCall` exit a redirected `rip` is already what the loop
-        // continues at, and a leftover flag would make the next tail call skip a
-        // return it really does have.
-        if let Some(state) = crate::thread::current() {
-            state.took_redirect();
-        }
+    ///
+    /// `jumped` says how control got here: a tail `jmp` to an import, which the
+    /// loop above recognises, or an intercepted `call`, which microlift exits
+    /// before the return address is pushed. Only a shim that stands in for the
+    /// transfer itself needs to know — see [`crate::objc::dispatch`] — and it is
+    /// passed rather than inferred because inferring it from `rip` would be a
+    /// coincidence that holds today.
+    fn service_import(&self, ctx: &mut RegisterContext, jumped: bool) -> Result<(), VmError> {
         let va = ctx.imported_function_va;
         let Some(site) = self.program.import_at(va) else {
             return Err(AbiError::NoSignature { symbol: format!("<unregistered {va:#x}>") }.into());
         };
+        self.service_site_as(site, ctx, jumped)
+    }
+
+    /// [`Vm::service_import`] for a site already looked up.
+    fn service_site_as(
+        &self,
+        site: &crate::program::ImportSite,
+        ctx: &mut RegisterContext,
+        jumped: bool,
+    ) -> Result<(), VmError> {
+        // Both flags are set here rather than read here, so each always
+        // describes *this* call. Only the tail-call path consults `redirected`;
+        // at an ordinary `ImportedFunctionCall` exit a redirected `rip` is
+        // already what the loop continues at, and a leftover flag would make the
+        // next tail call skip a return it really does have.
+        if let Some(state) = crate::thread::current() {
+            state.took_redirect();
+            state.set_entered_by_jump(jumped);
+        }
         self.call_site(site, ctx)
     }
 
@@ -691,7 +741,7 @@ impl Vm {
         // A pointer read out of an import slot: the same host function the
         // import would have reached, so service it identically.
         if self.program.import_at(callee).is_some() {
-            return self.service_import(ctx);
+            return self.service_import(ctx, false);
         }
 
         // One of our own thunks, handed out earlier and now called by the guest

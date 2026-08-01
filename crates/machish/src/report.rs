@@ -63,6 +63,15 @@ pub struct MissingSymbol {
     pub library: Option<String>,
     /// Slid VA of the slot left unwritten.
     pub slot_va: Word,
+    /// Slid VA of the `__stubs` entry fronting it, when there is one.
+    ///
+    /// Reported for the same reason [`BindingRecord::stub_va`] is, and it is the
+    /// *unresolved* case that needs it most. A recompiler told only about slots
+    /// follows `call rel32` into the six-byte stub, decodes `jmp qword
+    /// [rip+disp]` as guest code, and lands on the zero the binder wrote — so the
+    /// diagnostic a program gets for an import nobody satisfied is "no code at
+    /// 0x0" rather than the symbol's name. See `rosetta3::Program`.
+    pub stub_va: Option<Word>,
     /// Whether the image tolerates the absence.
     pub weak_import: bool,
 }

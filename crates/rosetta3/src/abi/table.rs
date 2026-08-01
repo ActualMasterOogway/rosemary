@@ -118,14 +118,52 @@ pub fn lookup(tag: u64, symbol: &str) -> Lookup {
     }
     let name = c_name(symbol);
     match lookup_exact(name) {
-        Lookup::Unknown => match name.split_once('$') {
-            // `_fts_open$INODE64` and friends: the variant only ever existed on
-            // x86, and its signature is the plain symbol's.
-            Some((base, _)) if !base.is_empty() => lookup_exact(base),
-            _ => Lookup::Unknown,
-        },
+        Lookup::Unknown => {
+            if let Some(reason) = data_family(name) {
+                return Lookup::Refused(reason);
+            }
+            match name.split_once('$') {
+                // `_fts_open$INODE64` and friends: the variant only ever existed
+                // on x86, and its signature is the plain symbol's.
+                Some((base, _)) if !base.is_empty() => lookup_exact(base),
+                _ => Lookup::Unknown,
+            }
+        }
         found => found,
     }
+}
+
+/// Data imports whose names carry a suffix, so [`REFUSED`] cannot list them.
+///
+/// Objective-C metadata is the only family in this shape: a class reference is
+/// `_OBJC_CLASS_$_NSString`, one name per class the guest mentions, and an image
+/// may mention hundreds. They are read through their slots and never called —
+/// `_OBJC_CLASS_$_NSObject` is the *superclass field* of a guest class, which
+/// [`crate::objc`] follows at registration — so refusing them by family says
+/// exactly what listing them one by one would, and stays true for a class nobody
+/// has heard of.
+///
+/// The alternative is that a real Objective-C program reports a dozen imports as
+/// [`Lookup::Unknown`], which is the audit's word for "nobody has described
+/// this" and would drown the one that really is undescribed.
+fn data_family(name: &str) -> Option<&'static str> {
+    const DATA: &str = "an Objective-C metadata import, read through its slot and never called";
+    let families = [
+        "OBJC_CLASS_$_",
+        "OBJC_METACLASS_$_",
+        "OBJC_IVAR_$_",
+        // The type object a `@catch` clause matches against, which is data for
+        // the same reason a C++ `type_info` is.
+        "OBJC_EHTYPE_",
+        "OBJC_PROTOCOL_$_",
+        "OBJC_LABEL_PROTOCOL_$_",
+        // The empty cache and vtable every `objc_class` the compiler emits
+        // points at, and the `isa` of a constant `@"..."` string.
+        "_objc_empty_cache",
+        "_objc_empty_vtable",
+        "__CFConstantStringClassReference",
+    ];
+    families.iter().any(|f| name.starts_with(f)).then_some(DATA)
 }
 
 fn lookup_exact(name: &str) -> Lookup {
@@ -584,7 +622,12 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("_ZTVN10__cxxabiv120__si_class_type_infoE", "a data import, read through its slot"),
     ("_ZTVN10__cxxabiv121__vmi_class_type_infoE", "a data import, read through its slot"),
     ("_ZTVSt9exception", "a data import, read through its slot and never called"),
+    // The personality routine a frame's LSDA names. Read as an address and
+    // never called: this runtime interprets the LSDA itself rather than handing
+    // it to libunwind, which is the whole of [`crate::unwind`].
+    ("__gxx_personality_v0", "a personality routine, named by an LSDA and never called"),
     ("__mb_cur_max", "a data import, read through its slot and never called"),
+    ("__objc_personality_v0", "a personality routine, named by an LSDA and never called"),
     ("__stack_chk_guard", "a data import, read through its slot and never called"),
     ("__stderrp", "a data import, read through its slot and never called"),
     ("__stdinp", "a data import, read through its slot and never called"),
@@ -652,6 +695,27 @@ mod tests {
         // whatever the plain name has to say.
         assert!(matches!(lookup(0, "_fts_open$INODE64"), Lookup::Known(abi) if abi.name == "fts_open"));
         assert_eq!(lookup(0, "_strtod$UNIX2003"), lookup(0, "_strtod"));
+    }
+
+    #[test]
+    fn objc_metadata_is_refused_as_data_rather_than_reported_unknown() {
+        // One name per class an image mentions, so this cannot be a list. The
+        // distinction that matters is refused-versus-unknown: unknown is the
+        // audit's word for a symbol nobody has described, and these are
+        // described exactly — they are never called.
+        for name in [
+            "_OBJC_CLASS_$_NSObject",
+            "_OBJC_METACLASS_$_NSObject",
+            "_OBJC_IVAR_$_Dog._weight",
+            "_OBJC_EHTYPE_id",
+            "__objc_empty_cache",
+            "___CFConstantStringClassReference",
+        ] {
+            assert!(matches!(lookup(0, name), Lookup::Refused(_)), "{name}");
+        }
+        // Not a blanket "anything starting with OBJC": the entry points are
+        // functions with signatures, and swallowing one here would hide it.
+        assert!(matches!(lookup(0, "_objc_msgSend"), Lookup::Unknown));
     }
 
     #[test]

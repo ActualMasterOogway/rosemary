@@ -1,0 +1,682 @@
+//! Messages sent *by* the guest: `objc_msgSend`, and the runtime it calls.
+//!
+//! [M6.2](../../../docs/ROADMAP.md) made a guest class real in the host's
+//! runtime, so the host can message a guest object. This is the other direction,
+//! and it is the one an Objective-C program spends its life in: until it exists,
+//! a Cocoa guest links cleanly and stops at its first message.
+//!
+//! ## Three cases, and only one of them is marshalling
+//!
+//! | Message | Mechanism |
+//! |---|---|
+//! | guest → guest | resolve the `IMP`, set `rip` to it |
+//! | guest → host | look up the method's type encoding, marshal by it |
+//! | host → guest | the host runtime calls the registered thunk (M6.2) |
+//!
+//! The first row is the pleasant one and it is also the common one: a message to
+//! a method the guest itself implements needs **no ABI knowledge whatsoever**.
+//! `objc_msgSend` is a tail-call trampoline — it does not build a frame, it jumps
+//! to the `IMP` with the registers exactly as its caller left them — so
+//! reproducing it means setting `rip` and nothing else. The guest's arguments are
+//! already the callee's arguments, in the guest's own convention, and neither
+//! side has to describe them.
+//!
+//! The second row is where the ABI comes due, and M6.1 found the thing that makes
+//! it answerable: a method carries its own type encoding. `objc_msgSend` has no
+//! signature — it has *whichever* signature the method has — so the alternative
+//! is a guess, and a guessed signature here does not fault, it returns plausible
+//! garbage. See [`super::encoding`].
+//!
+//! ## Which pointer means what
+//!
+//! A guest names its own class with `leaq _OBJC_CLASS_$_Greeter(%rip), %rdi` — a
+//! direct reference to the dead `objc_class` in its own `__objc_data`, with no
+//! slot anywhere to redirect at load time. The class the host runtime realized is
+//! a *different object*. So the translation happens here, where the pointer
+//! crosses: a class going out becomes the host's, a class coming back becomes the
+//! guest's. Both directions are needed and the second is the one that is easy to
+//! forget — a guest comparing `[obj class]` against `Greeter` must find them
+//! equal, and it can only do that if what it gets back is the address it already
+//! has.
+//!
+//! Nothing else needs translating. Objects are allocated by the host runtime and
+//! are host pointers on both sides; selectors are uniqued into the host's table
+//! by M6.2's rewrite of `__objc_selrefs`, so a guest `SEL` *is* a host `SEL`.
+//!
+//! ## Where the return address comes from
+//!
+//! Standing in for the trampoline means standing in for the transfer, and the
+//! guest's stack has to end up exactly as the real `objc_msgSend` would have left
+//! it. Microlift intercepts a `call` **before** it pushes a return address, and a
+//! compiler tail-jumps to `objc_msgSend` freely (`- (id)a { return [self b]; }`),
+//! where the return address is already on the stack. The two need opposite
+//! treatment and the difference is invisible in the register context, so the loop
+//! states which happened — see [`crate::thread::ThreadState::entered_by_jump`].
+//!
+//! ## Scope
+//!
+//! Refused by name, each because of something specific rather than for want of
+//! effort:
+//!
+//! - **`objc_msgSend_stret` / `_fpret`**, and any method whose encoding passes or
+//!   returns an aggregate: M2's "aggregates by value" refusal, arriving where the
+//!   roadmap said it would.
+//! - **Variadic methods** (`stringWithFormat:` and the rest). The encoding does
+//!   not record the ellipsis, and the two platforms disagree about where variadic
+//!   arguments live — SysV puts them in registers, Apple's arm64 ABI on the
+//!   stack. Passing the fixed arguments and hoping is exactly the silent wrong
+//!   answer this project refuses, so the ones a program actually reaches are
+//!   named. The list is necessarily incomplete: see [`VARIADIC_SELECTORS`].
+//! - **Forwarding.** A selector the receiver's class does not implement would go
+//!   to `forwardInvocation:`, which builds an `NSInvocation` describing a frame
+//!   this runtime does not have.
+//! - **`objc_exception_throw`**, which is [M5's unwinder](crate::unwind) with a
+//!   different personality routine.
+//! - **Anything not in [`RUNTIME`]**, which is a list of what programs import
+//!   rather than of everything `objc/runtime.h` declares. A guest importing
+//!   something else fails by name at the call, which is a work item that closes.
+
+use machish::resolve::SyntheticDylib;
+
+use microlift::arch::x86_64::context::RegisterContext;
+
+use crate::abi::marshal::{self, Convert};
+use crate::abi::{AbiError, ArgType as T, GuestMemory, Result};
+use crate::vm::Vm;
+
+use super::encoding::{self, Signature};
+use super::host;
+
+/// A runtime entry point the guest may call, and what crosses at it.
+///
+/// Every one of these is forwarded to the host's own `libobjc`: the runtime is
+/// the host's, and a guest asking it a question should get the host's answer.
+/// What the entry needs from a table is the two things bits cannot say — the
+/// signature, because a Mach-O records no types, and which of the pointers are
+/// classes.
+struct Runtime {
+    /// The C name, as `dlsym` spells it: no leading underscore.
+    name: &'static str,
+    /// `[0]` is the return type, `[1..]` the parameters, as everywhere else.
+    types: &'static [T],
+    /// Zero-based parameter indices holding a `Class`.
+    ///
+    /// An `id` parameter that a program plausibly passes a class to is marked
+    /// too — `objc_retain(Greeter)` is legal Objective-C — and marking one
+    /// wrongly costs nothing: the translation is a map lookup that leaves
+    /// anything but a registered guest class alone.
+    classes: &'static [u8],
+    /// Whether the return value is a `Class`.
+    class_return: bool,
+}
+
+/// `(ret, args...)`, with no class anywhere.
+macro_rules! rt {
+    ($name:literal, $ret:expr $(, $arg:expr)* $(,)?) => {
+        Runtime { name: $name, types: &[$ret $(, $arg)*], classes: &[], class_return: false }
+    };
+}
+
+/// As [`rt`], naming the parameters that are classes and whether the return is.
+macro_rules! rtc {
+    ([$($c:literal),* $(,)?] $(-> $ret_is_class:literal)?, $name:literal, $ret:expr $(, $arg:expr)* $(,)?) => {
+        Runtime {
+            name: $name,
+            types: &[$ret $(, $arg)*],
+            classes: &[$($c),*],
+            class_return: false $(|| $ret_is_class)?,
+        }
+    };
+}
+
+const V: T = T::None;
+const I32: T = T::SignedWord;
+const U64: T = T::UnsignedDoubleword;
+const U8: T = T::UnsignedByte;
+const P: T = T::Pointer;
+
+/// The runtime surface a guest reaches, **sorted by name**.
+///
+/// Not all of `objc/runtime.h`: the same posture as [`crate::abi::table`], which
+/// is that a table written for what programs import is honest and a table
+/// written for a header is a fiction nobody checked. `runtime_entries_are_sorted`
+/// keeps the order the lookup depends on.
+static RUNTIME: &[Runtime] = &[
+    rtc!([0], "class_conformsToProtocol", U8, P, P),
+    rtc!([0] -> true, "class_createInstance", P, P, U64),
+    rtc!([0], "class_getInstanceMethod", P, P, P),
+    rtc!([0], "class_getInstanceSize", U64, P),
+    rtc!([0], "class_getInstanceVariable", P, P, P),
+    rtc!([0], "class_getName", P, P),
+    rtc!([0] -> true, "class_getSuperclass", P, P),
+    rtc!([0], "class_isMetaClass", U8, P),
+    rtc!([0], "class_respondsToSelector", U8, P, P),
+    // ARC and the `objc_msgSend` optimisations clang emits at `-O` whether or
+    // not the file uses ARC: `[X alloc]` becomes `objc_alloc`, `[[X alloc]
+    // init]` becomes `objc_alloc_init`, `[X new]` becomes `objc_opt_new`. A
+    // runtime without these stops at the first object a program creates.
+    rtc!([0] -> true, "objc_alloc", P, P),
+    rtc!([0] -> true, "objc_allocWithZone", P, P),
+    rtc!([0], "objc_alloc_init", P, P),
+    rtc!([0], "objc_autorelease", P, P),
+    rt!("objc_autoreleasePoolPop", V, P),
+    rt!("objc_autoreleasePoolPush", P),
+    rtc!([0], "objc_autoreleaseReturnValue", P, P),
+    // `object_getClass` of a class is its metaclass, so the argument is
+    // translated as well as the result.
+    rtc!([0] -> true, "objc_getClass", P, P),
+    rtc!([] -> true, "objc_getMetaClass", P, P),
+    rt!("objc_getProtocol", P, P),
+    rtc!([] -> true, "objc_getRequiredClass", P, P),
+    rtc!([] -> true, "objc_lookUpClass", P, P),
+    rtc!([0] -> true, "objc_opt_class", P, P),
+    rtc!([0, 1], "objc_opt_isKindOfClass", U8, P, P),
+    rtc!([0], "objc_opt_new", P, P),
+    rtc!([0], "objc_opt_respondsToSelector", U8, P, P),
+    rtc!([0], "objc_opt_self", P, P),
+    rtc!([0], "objc_release", V, P),
+    rtc!([0], "objc_retain", P, P),
+    rtc!([0], "objc_retainAutorelease", P, P),
+    rtc!([0], "objc_retainAutoreleaseReturnValue", P, P),
+    rtc!([0], "objc_retainAutoreleasedReturnValue", P, P),
+    // `objc_storeStrong(id *location, id value)` writes through a guest pointer.
+    // The value it stores is an object, and an object is a host pointer on both
+    // sides — but a guest storing a *class* is legal, so it is translated.
+    rtc!([1], "objc_storeStrong", V, P, P),
+    // `@synchronized`. Passthrough is not a shortcut here: the host's
+    // implementation is a lock table keyed by the object's address, the object
+    // is a host allocation, and locking it here is locking the same thing the
+    // host would lock for its own code.
+    rtc!([0], "objc_sync_enter", I32, P),
+    rtc!([0], "objc_sync_exit", I32, P),
+    rt!("objc_terminate", V),
+    rtc!([0] -> true, "object_getClass", P, P),
+    rtc!([0], "object_getClassName", P, P),
+    rt!("protocol_getName", P, P),
+    rt!("sel_getName", P, P),
+    rt!("sel_getUid", P, P),
+    rt!("sel_isEqual", U8, P, P),
+    rt!("sel_registerName", P, P),
+];
+
+/// The `objc_msgSend` family, and what each spelling means here.
+///
+/// Listed rather than pattern-matched so that a spelling nobody thought about —
+/// `objc_msgSendSuper2_stret`, say — is an unresolved import that names itself
+/// rather than something quietly treated as an ordinary send.
+static MESSAGES: &[(&str, Message)] = &[
+    ("objc_msgSend", Message::Direct),
+    ("objc_msgSendSuper", Message::Super { skip_one: false }),
+    ("objc_msgSendSuper2", Message::Super { skip_one: true }),
+];
+
+/// Spellings that exist and are refused, with the reason attached.
+static REFUSED: &[(&str, &str)] = &[
+    ("objc_msgSend_fpret", "a long double return lives in st0, which has no arm64 counterpart"),
+    ("objc_msgSend_stret", "a method returning a struct by value cannot be marshalled (M2)"),
+    ("objc_msgSendSuper_stret", "a method returning a struct by value cannot be marshalled (M2)"),
+    ("objc_msgSendSuper2_stret", "a method returning a struct by value cannot be marshalled (M2)"),
+    ("objc_exception_throw", "an Objective-C exception needs a personality routine the guest \
+                              unwinder does not implement yet (M6)"),
+    ("objc_exception_rethrow", "as objc_exception_throw"),
+    ("objc_begin_catch", "as objc_exception_throw"),
+    ("objc_end_catch", "as objc_exception_throw"),
+    // Associated objects key host storage by the object's address, which would
+    // work — but the *policy* argument decides whether the value is copied, and
+    // copying sends `copyWithZone:` from inside the runtime with none of this
+    // runtime's state on the stack. Named rather than half-supported.
+    ("objc_setAssociatedObject", "associated objects may copy their value, which messages from \
+                                  inside the host runtime (M6)"),
+    ("objc_getAssociatedObject", "as objc_setAssociatedObject"),
+    ("objc_removeAssociatedObjects", "as objc_setAssociatedObject"),
+];
+
+/// Selectors whose methods are variadic, which no type encoding records.
+///
+/// The encoding for `+[NSString stringWithFormat:]` is `@32@0:8@16` — three
+/// arguments and no ellipsis — so a marshaller reading it passes the format
+/// string and drops every argument after it. On x86-64 those arguments are in
+/// registers and on arm64 they belong on the stack, so what the host would read
+/// is not merely incomplete, it is unrelated.
+///
+/// **This list is incomplete and cannot be otherwise**: any method may be
+/// variadic and nothing in the image says so. What it covers is the ones a
+/// program actually reaches, plus every selector ending in `Format:`, which is
+/// the naming convention Cocoa keeps to. A variadic method outside it is the
+/// known hole in M6.3, recorded in the roadmap rather than papered over.
+static VARIADIC_SELECTORS: &[&str] = &[
+    "arrayWithObjects:",
+    "dictionaryWithObjectsAndKeys:",
+    "initWithObjects:",
+    "initWithObjectsAndKeys:",
+    "orderedSetWithObjects:",
+    "setWithObjects:",
+];
+
+/// Which of the three sends a spelling asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Message {
+    /// `objc_msgSend(receiver, sel, ...)`.
+    Direct,
+    /// `objc_msgSendSuper[2](struct objc_super *, sel, ...)`.
+    ///
+    /// `skip_one` distinguishes the two: `objc_msgSendSuper2` names the class the
+    /// method is *in* and the search starts at its superclass, which is what
+    /// `[super foo]` compiles to today. `objc_msgSendSuper` names the class to
+    /// start at directly. One field, two meanings, and taking the wrong one sends
+    /// the message back to the method that is running — an infinite recursion
+    /// rather than a wrong answer.
+    Super { skip_one: bool },
+}
+
+/// Whether `name` (underscore already stripped) is one of this module's.
+pub fn shim_for(name: &str) -> Option<crate::jmpbuf::Shim> {
+    if MESSAGES.iter().any(|(n, _)| *n == name)
+        || REFUSED.iter().any(|(n, _)| *n == name)
+        || RUNTIME.binary_search_by_key(&name, |r| r.name).is_ok()
+    {
+        return Some(serve);
+    }
+    None
+}
+
+/// Symbols this runtime answers for, resolved to the host's own implementations.
+///
+/// Consulted before [`machish::resolve::NativeDylibProvider`], which denies the
+/// `_objc_`, `_class_`, `_sel_` and `_protocol_` families precisely so that a
+/// shim can claim them: passing them through unexamined would hand the host
+/// runtime guest class structures, which is the fastest route to a crash inside
+/// somebody else's `objc_msgSend`.
+///
+/// Every address here is the host's real function. That is true even of
+/// `objc_msgSend`, which is intercepted and never called through — an import
+/// slot holding the honest value is one fewer thing to explain when a crash dump
+/// is read, and a symbol the host does not export is left undefined so it stays
+/// an unresolved import that names itself.
+pub fn provider() -> SyntheticDylib {
+    let mut lib = SyntheticDylib::new("<rosetta3 objc runtime>");
+    // Flat, for the same reason the rest of the runtime's shims are: which
+    // library an image thinks `objc_msgSend` comes from is not the question.
+    lib.flat(true);
+    let names = RUNTIME
+        .iter()
+        .map(|r| r.name)
+        .chain(MESSAGES.iter().map(|(n, _)| *n))
+        .chain(REFUSED.iter().map(|(n, _)| *n));
+    for name in names {
+        if let Some(addr) = host_symbol(name) {
+            lib.define_fn(&format!("_{name}"), addr as usize as *const ());
+        }
+    }
+    lib
+}
+
+/// The host's own implementation of `name`, if this process has one.
+fn host_symbol(name: &str) -> Option<u64> {
+    let c = std::ffi::CString::new(name).ok()?;
+    // SAFETY: `RTLD_DEFAULT` is `(void *)-2` on macOS — search every loaded
+    // image — and `c` is a NUL-terminated string that outlives the call. A
+    // missing symbol is null, which is checked rather than dereferenced.
+    let ptr = unsafe { libc::dlsym(-2isize as *mut core::ffi::c_void, c.as_ptr()) };
+    (!ptr.is_null()).then_some(ptr as usize as u64)
+}
+
+/// Service one call into the Objective-C runtime.
+fn serve(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    if let Some((_, reason)) = REFUSED.iter().find(|(n, _)| *n == symbol) {
+        return Err(AbiError::Refused { symbol: symbol.to_string(), reason });
+    }
+    let vm = current_vm(symbol)?;
+    if let Some((_, message)) = MESSAGES.iter().find(|(n, _)| *n == symbol) {
+        return send(symbol, *message, vm, ctx, mem);
+    }
+    let Ok(i) = RUNTIME.binary_search_by_key(&symbol, |r| r.name) else {
+        return Err(AbiError::NoSignature { symbol: symbol.to_string() });
+    };
+    call_runtime(symbol, &RUNTIME[i], vm, ctx, mem)
+}
+
+/// Forward one runtime entry point, translating the classes that cross it.
+fn call_runtime(
+    symbol: &str,
+    entry: &Runtime,
+    vm: &Vm,
+    ctx: &mut RegisterContext,
+    mem: &dyn GuestMemory,
+) -> Result<()> {
+    let Some(host) = host_symbol(entry.name) else {
+        return Err(AbiError::Unsatisfied { symbol: symbol.to_string() });
+    };
+    let convert = Classes { vm, classes: entry.classes, class_return: entry.class_return };
+    marshal::call_types(symbol, entry.types, host, ctx, mem, &convert)
+}
+
+/// Class pointers, translated by parameter index.
+struct Classes<'a> {
+    vm: &'a Vm,
+    classes: &'a [u8],
+    class_return: bool,
+}
+
+impl Convert for Classes<'_> {
+    fn argument(&self, _symbol: &str, index: usize, raw: u64) -> Result<u64> {
+        match self.classes.contains(&(index as u8)) {
+            true => Ok(self.vm.objc_host_class(raw)),
+            false => Ok(raw),
+        }
+    }
+
+    fn result(&self, raw: u64) -> u64 {
+        match self.class_return {
+            true => self.vm.objc_guest_class(raw),
+            false => raw,
+        }
+    }
+}
+
+/// Send one message.
+///
+/// On success either `rip` is the guest `IMP` the message resolved to — the
+/// transfer performed, not a call made — or the host method has run and its
+/// result is in the guest's return register.
+fn send(
+    symbol: &str,
+    message: Message,
+    vm: &Vm,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let sel = ctx.rsi;
+
+    // Where the receiver is, and where the method search starts, which for a
+    // `super` send are two different classes.
+    let (receiver, search) = match message {
+        Message::Direct => (ctx.rdi, None),
+        Message::Super { skip_one } => {
+            let sup = ctx.rdi;
+            let receiver = (mem as &dyn GuestMemory).read_u64(sup, symbol)?;
+            let named = (mem as &dyn GuestMemory).read_u64(sup.wrapping_add(8), symbol)?;
+            let named = vm.objc_host_class(named) as host::Class;
+            // SAFETY: `named` is a `Class` — either the host's own, arrived
+            // through an ordinary bind, or one this runtime registered. A
+            // superclass query on one is what the runtime is for.
+            let start = match skip_one {
+                true => unsafe { host::class_getSuperclass(named) },
+                false => named,
+            };
+            (receiver, Some(start))
+        }
+    };
+
+    // Messaging nil is not an error, it is the language: the result is zero,
+    // in whichever register the caller reads. Both are cleared because the
+    // method's return type is exactly what is not known at this point — and it
+    // is not worth looking up, since nothing about a nil send depends on it.
+    if receiver == 0 {
+        ctx.rax = 0;
+        ctx.xmm[0] = [0, 0];
+        return Ok(());
+    }
+
+    // The receiver as the host runtime knows it. A guest *class* is the only
+    // thing that changes here; an object is a host allocation and is already
+    // itself.
+    let host_receiver = vm.objc_host_class(receiver);
+    // A receiver in guest memory is not automatically broken. A constant
+    // `@"..."` string is an object in the guest's own `__cfstring`, and the host
+    // runtime understands it perfectly: its `isa` is an ordinary bind of
+    // `___CFConstantStringClassReference`, so it points at a *host* class. What
+    // is broken is a guest **class** the runtime did not register, whose `isa` is
+    // the dead metaclass sitting beside it in `__objc_data` — messaging that
+    // means the host runtime walking a structure it never realized.
+    if vm.program.is_guest_address(host_receiver) {
+        let isa = vm.objc_host_class((mem as &dyn GuestMemory).read_u64(host_receiver, symbol)?);
+        if isa == 0 || vm.program.is_guest_address(isa) {
+            return Err(AbiError::Refused {
+                symbol: symbol.to_string(),
+                reason: "the receiver is a guest address whose class the runtime never realized",
+            });
+        }
+    }
+
+    // SAFETY: `host_receiver` is a pointer the host runtime owns — an object it
+    // allocated, or a class it realized — which is what `object_getClass` takes.
+    let class = match search {
+        Some(start) => start,
+        None => unsafe { host::object_getClass(host_receiver as host::Class) },
+    };
+    if class.is_null() {
+        return Err(AbiError::Refused {
+            symbol: symbol.to_string(),
+            reason: "the receiver's class could not be determined",
+        });
+    }
+
+    // One lookup for both halves of what a send needs. A class method is an
+    // instance method of the metaclass, and `class` is already the metaclass
+    // when the receiver is a class, so this answers for both.
+    //
+    // SAFETY: `class` is a `Class` and `sel` a uniqued `SEL` — M6.2 rewrote the
+    // guest's `__objc_selrefs` slots from string pointers into the host
+    // runtime's own selectors, so the value the guest loaded *is* one.
+    let method = unsafe { host::class_getInstanceMethod(class, sel as host::Sel) };
+    if method.is_null() {
+        return Err(unrecognised(symbol, class, sel));
+    }
+    // SAFETY: `method` is a `Method` the runtime just returned for `class`.
+    let imp = unsafe { host::method_getImplementation(method) } as u64;
+
+    // Guest → guest: the trampoline's whole job is the jump, and the guest's
+    // registers are already the callee's.
+    if let Some(guest_imp) = vm.guest_behind_thunk(imp) {
+        // A `super` send arrived with the `objc_super` structure in `rdi`, and
+        // the method is called with the receiver.
+        ctx.rdi = receiver;
+        return transfer(symbol, ctx, mem, guest_imp);
+    }
+
+    // Guest → host: the method's own type encoding is the signature.
+    let signature = signature_of(symbol, method, sel)?;
+    // Everything fallible happens before `rdi` moves, so a refusal leaves the
+    // guest context exactly as it was found — the guarantee every other refusal
+    // in this project makes.
+    ctx.rdi = host_receiver;
+    let convert = Classes { vm, classes: &signature.classes, class_return: signature.class_return };
+    marshal::call_types(symbol, &signature.types, imp, ctx, mem, &convert)
+}
+
+/// Continue the guest at `target`, as the trampoline would have.
+///
+/// The guest's stack has to look exactly as it would after a real
+/// `objc_msgSend`: the `IMP` returns to whoever called the message, not to
+/// anything of this runtime's. Where that return address comes from depends on
+/// how control reached the shim; see the module note.
+fn transfer(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    target: u64,
+) -> Result<()> {
+    let Some(state) = crate::thread::current() else {
+        return Err(AbiError::Refused {
+            symbol: symbol.to_string(),
+            reason: "a message sent outside a running guest thread",
+        });
+    };
+    if !state.entered_by_jump() {
+        // An intercepted `call`: microlift exits before the push, so the return
+        // address is this runtime's to write. `rip` is already the instruction
+        // after the call, which is precisely where the method must return to.
+        let rsp = ctx.rsp.wrapping_sub(8);
+        mem.write(rsp, &ctx.rip.to_le_bytes())
+            .map_err(|_| AbiError::Memory { symbol: symbol.to_string(), addr: rsp })?;
+        ctx.rsp = rsp;
+    }
+    ctx.rip = target;
+    // The live stack pointer moved without an exit reporting it, and `rip` is
+    // now a destination rather than a resume point: whoever serviced this call
+    // must not synthesize a return over it.
+    state.rsp.set(ctx.rsp);
+    state.redirect();
+    Ok(())
+}
+
+/// The method's type encoding, decoded, or a refusal naming what stopped it.
+fn signature_of(symbol: &str, method: host::Method, sel: u64) -> Result<Signature> {
+    // SAFETY: `method` is a `Method` the runtime returned; its encoding is a
+    // NUL-terminated string the runtime owns, read and copied before anything
+    // else happens.
+    let types = unsafe { host::method_getTypeEncoding(method) };
+    if types.is_null() {
+        return Err(AbiError::Refused {
+            symbol: symbol.to_string(),
+            reason: "the method carries no type encoding, so its signature is unknown",
+        });
+    }
+    // SAFETY: as above.
+    let types = unsafe { std::ffi::CStr::from_ptr(types) };
+    let Ok(types) = types.to_str() else {
+        return Err(AbiError::Refused {
+            symbol: symbol.to_string(),
+            reason: "the method's type encoding is not valid UTF-8",
+        });
+    };
+
+    if is_variadic(sel) {
+        return Err(AbiError::Refused {
+            symbol: symbol.to_string(),
+            reason: "a variadic method: the two ABIs disagree about where the arguments after \
+                     the format are, and no type encoding records that there are any",
+        });
+    }
+    encoding::signature(types)
+        .map_err(|reason| AbiError::Refused { symbol: symbol.to_string(), reason })
+}
+
+/// Whether the selector names a method that takes an ellipsis.
+///
+/// By name, because nothing else says so. See [`VARIADIC_SELECTORS`].
+fn is_variadic(sel: u64) -> bool {
+    let Some(name) = selector_name(sel) else { return false };
+    name.ends_with("Format:") || VARIADIC_SELECTORS.contains(&name.as_str())
+}
+
+/// A uniqued selector as its name, for a diagnostic or the variadic check.
+fn selector_name(sel: u64) -> Option<String> {
+    if sel == 0 {
+        return None;
+    }
+    // SAFETY: `sel` is a uniqued `SEL`, which the runtime interns for the
+    // process lifetime; `sel_getName` returns a string it owns.
+    let name = unsafe { host::sel_getName(sel as host::Sel) };
+    if name.is_null() {
+        return None;
+    }
+    // SAFETY: as above.
+    unsafe { std::ffi::CStr::from_ptr(name) }.to_str().ok().map(str::to_string)
+}
+
+/// "This class does not implement that selector", with both names in it.
+///
+/// Worth the lookup: the alternative diagnostic is an address, and the whole
+/// point of refusing rather than forwarding is that the reader can see which
+/// message was sent.
+fn unrecognised(symbol: &str, class: host::Class, sel: u64) -> AbiError {
+    // SAFETY: `class` is a `Class` the runtime owns; `class_getName` returns a
+    // string it owns.
+    let name = unsafe { host::class_getName(class) };
+    let name = match name.is_null() {
+        true => "<unnamed>".to_string(),
+        // SAFETY: as above.
+        false => unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned(),
+    };
+    let selector = selector_name(sel).unwrap_or_else(|| format!("<sel {sel:#x}>"));
+    AbiError::Nested {
+        symbol: symbol.to_string(),
+        reason: format!(
+            "{name} does not respond to {selector}; message forwarding builds an NSInvocation \
+             describing a frame this runtime does not have (M6)"
+        ),
+    }
+}
+
+/// The VM running this thread, which a message needs for the class maps and for
+/// entering guest code.
+fn current_vm(symbol: &str) -> Result<&'static Vm> {
+    crate::thunk::current().ok_or_else(|| AbiError::Refused {
+        symbol: symbol.to_string(),
+        reason: "messaging needs the JIT, and no VM is running on this thread",
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_entries_are_sorted_and_unique() {
+        for pair in RUNTIME.windows(2) {
+            assert!(
+                pair[0].name < pair[1].name,
+                "{} and {} are out of order; binary_search would miss one",
+                pair[0].name,
+                pair[1].name
+            );
+        }
+    }
+
+    #[test]
+    fn every_name_this_module_claims_is_one_it_can_serve() {
+        // The provider and the shim table are two lists that must agree: a
+        // symbol resolved but not shimmed would be *called* — the host's
+        // `objc_msgSend` with a guest class in `rdi` — and a symbol shimmed but
+        // not resolved would be an unsatisfied import.
+        for name in RUNTIME
+            .iter()
+            .map(|r| r.name)
+            .chain(MESSAGES.iter().map(|(n, _)| *n))
+            .chain(REFUSED.iter().map(|(n, _)| *n))
+        {
+            assert!(shim_for(name).is_some(), "{name} is claimed and not served");
+            assert!(
+                crate::shims::is_shimmed(&format!("_{name}")),
+                "{name} would be promoted to an inlined host call"
+            );
+        }
+    }
+
+    #[test]
+    fn the_host_really_exports_what_this_module_forwards_to() {
+        // Every entry in the table is a passthrough, so a name misspelled here
+        // is a program that stops with "unsatisfied import" at run time. `dlsym`
+        // answers the question now instead.
+        for entry in RUNTIME {
+            assert!(host_symbol(entry.name).is_some(), "libobjc has no {}", entry.name);
+        }
+    }
+
+    #[test]
+    fn a_refused_spelling_is_never_also_served_as_a_message() {
+        for (name, _) in REFUSED {
+            assert!(
+                !MESSAGES.iter().any(|(m, _)| m == name)
+                    && RUNTIME.binary_search_by_key(name, |r| r.name).is_err(),
+                "{name} is both refused and implemented"
+            );
+        }
+    }
+
+    #[test]
+    fn the_variadic_check_is_by_selector_name() {
+        // `sel_registerName` is the host's own, so this is checking the rule
+        // against real selectors rather than against a string.
+        // SAFETY: both are NUL-terminated literals.
+        let format = unsafe { host::sel_registerName(c"stringWithFormat:".as_ptr()) } as u64;
+        let objects = unsafe { host::sel_registerName(c"arrayWithObjects:".as_ptr()) } as u64;
+        let plain = unsafe { host::sel_registerName(c"count".as_ptr()) } as u64;
+        assert!(is_variadic(format));
+        assert!(is_variadic(objects));
+        assert!(!is_variadic(plain));
+        assert!(!is_variadic(0));
+    }
+}

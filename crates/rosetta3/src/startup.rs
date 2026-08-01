@@ -70,7 +70,10 @@ pub fn run(vm: &Vm) -> Result<i32, VmError> {
     // classes when the image is mapped, which is strictly before that image's
     // initializers run. A constructor may reference a class, and a `+load` --
     // which is itself a method -- certainly does.
-    vm.register_objc()?;
+    let objc = vm.register_objc()?;
+    // `+load` before the C constructors of the same image, which is dyld's
+    // order and the one a program that uses both depends on.
+    crate::objc::call_load_methods(vm, objc)?;
     run_initializers(vm)?;
     let entry = vm.program.entry().ok_or(VmError::NoCode { pc: 0 })?;
     let (argc, argv, envp, apple) = vm.main_args();
