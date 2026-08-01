@@ -108,12 +108,28 @@ struct Runtime {
     classes: &'static [u8],
     /// Whether the return value is a `Class`.
     class_return: bool,
+    /// Zero-based parameter indices that are **guest function pointers**, in
+    /// exactly the sense [`crate::abi::FunctionAbi::callbacks`] means.
+    ///
+    /// One entry point needs it. `method_setImplementation` installs an `IMP`
+    /// the host runtime will call as arm64 whenever anyone sends that message —
+    /// including Foundation, on a thread this runtime never made — so a guest
+    /// swizzling a method has to leave a thunk behind rather than its own
+    /// address. It is the same substitution `pthread_create`'s start routine
+    /// gets, arriving through a different door.
+    callbacks: &'static [u8],
 }
 
 /// `(ret, args...)`, with no class anywhere.
 macro_rules! rt {
     ($name:literal, $ret:expr $(, $arg:expr)* $(,)?) => {
-        Runtime { name: $name, types: &[$ret $(, $arg)*], classes: &[], class_return: false }
+        Runtime {
+            name: $name,
+            types: &[$ret $(, $arg)*],
+            classes: &[],
+            class_return: false,
+            callbacks: &[],
+        }
     };
 }
 
@@ -125,12 +141,27 @@ macro_rules! rtc {
             types: &[$ret $(, $arg)*],
             classes: &[$($c),*],
             class_return: false $(|| $ret_is_class)?,
+            callbacks: &[],
+        }
+    };
+}
+
+/// As [`rt`], naming the parameters that are guest function pointers.
+macro_rules! rtb {
+    ([$($b:literal),* $(,)?], $name:literal, $ret:expr $(, $arg:expr)* $(,)?) => {
+        Runtime {
+            name: $name,
+            types: &[$ret $(, $arg)*],
+            classes: &[],
+            class_return: false,
+            callbacks: &[$($b),*],
         }
     };
 }
 
 const V: T = T::None;
 const I32: T = T::SignedWord;
+const I64: T = T::SignedDoubleword;
 const U64: T = T::UnsignedDoubleword;
 const U8: T = T::UnsignedByte;
 const P: T = T::Pointer;
@@ -151,6 +182,16 @@ static RUNTIME: &[Runtime] = &[
     rtc!([0] -> true, "class_getSuperclass", P, P),
     rtc!([0], "class_isMetaClass", U8, P),
     rtc!([0], "class_respondsToSelector", U8, P, P),
+    // ## Ivars, reflectively
+    //
+    // A guest that reads an ivar through `object_getIvar` rather than through a
+    // compiled displacement is asking the *host* runtime where the ivar is, and
+    // gets the right answer for free — M6.2 registered the class, so the layout
+    // the host reports is the layout the object has. `ivar_getOffset` is what
+    // makes that answer usable from guest code, and it returns a `ptrdiff_t`.
+    rt!("ivar_getName", P, P),
+    rt!("ivar_getOffset", I64, P),
+    rtb!([1], "method_setImplementation", P, P, P),
     // ARC and the `objc_msgSend` optimisations clang emits at `-O` whether or
     // not the file uses ARC: `[X alloc]` becomes `objc_alloc`, `[[X alloc]
     // init]` becomes `objc_alloc_init`, `[X new]` becomes `objc_opt_new`. A
@@ -192,6 +233,10 @@ static RUNTIME: &[Runtime] = &[
     rt!("objc_terminate", V),
     rtc!([0] -> true, "object_getClass", P, P),
     rtc!([0], "object_getClassName", P, P),
+    rt!("object_getIndexedIvars", P, P),
+    rtc!([0] -> true, "object_getIvar", P, P, P),
+    rtc!([0, 2], "object_setIvar", V, P, P, P),
+    rt!("property_copyAttributeList", P, P, P),
     rt!("protocol_getName", P, P),
     rt!("sel_getName", P, P),
     rt!("sel_getUid", P, P),
@@ -379,6 +424,7 @@ fn call_runtime(
         vm,
         classes: entry.classes,
         class_return: entry.class_return,
+        callbacks: entry.callbacks,
     };
     marshal::call_types(symbol, entry.types, host, ctx, mem, &convert)
 }
@@ -388,10 +434,16 @@ struct Classes<'a> {
     vm: &'a Vm,
     classes: &'a [u8],
     class_return: bool,
+    /// See [`Runtime::callbacks`]. Empty for a message send, where the `IMP` on
+    /// the far side is the host's own and nothing of the guest's is installed.
+    callbacks: &'a [u8],
 }
 
 impl Convert for Classes<'_> {
-    fn argument(&self, _symbol: &str, index: usize, raw: u64) -> Result<u64> {
+    fn argument(&self, symbol: &str, index: usize, raw: u64) -> Result<u64> {
+        if self.callbacks.contains(&(index as u8)) {
+            return crate::abi::Callbacks::substitute(self.vm, symbol, raw);
+        }
         match self.classes.contains(&(index as u8)) {
             true => Ok(self.vm.objc_host_class(raw)),
             false => Ok(raw),
@@ -517,6 +569,7 @@ fn send(
         vm,
         classes: &signature.classes,
         class_return: signature.class_return,
+        callbacks: &[],
     };
     marshal::call_types(symbol, &signature.types, imp, ctx, mem, &convert)
 }

@@ -239,6 +239,161 @@ const U8: T = T::UnsignedByte;
 /// Variadics are interleaved rather than grouped, because the array is one
 /// sorted keyspace; `vsig!` marks them.
 pub static SIGNATURES: &[FunctionAbi] = &[
+    // ## CoreAudio and AudioUnit
+    //
+    // A GameMaker runner mixes its own audio and pushes it through a single
+    // output unit, so the render callback is the one that matters — it is
+    // installed as an `AURenderCallbackStruct` property rather than as an
+    // argument, which is why `AudioUnitSetProperty` is an ordinary pointer here
+    // and the callback problem shows up in [`crate::shims::audiounit`] instead.
+    sig!("AudioObjectGetPropertyData", I32, U32, P, U32, P, P, P),
+    sig!("AudioOutputUnitStart", I32, P),
+    sig!("AudioOutputUnitStop", I32, P),
+    sig!("AudioUnitGetProperty", I32, P, U32, U32, U32, P, P),
+    sig!("AudioUnitInitialize", I32, P),
+    sig!("AudioUnitRender", I32, P, P, P, U32, U32, P),
+    sig!("AudioUnitSetProperty", I32, P, U32, U32, U32, P, U32),
+    sig!("AudioUnitUninitialize", I32, P),
+    sig!("CC_MD5", P, P, U32, P),
+    sig!("CC_SHA1", P, P, U32, P),
+    // ## CoreFoundation and CFNetwork
+    //
+    // `CFIndex` is `long`, `Boolean` is `unsigned char`, and a `CFStringEncoding`
+    // is a `UInt32` — three narrow types that a "pointer or int64" guess would
+    // get wrong in the direction that does not fault.
+    sig!("CFArrayCreate", P, P, P, I64, P),
+    sig!("CFHTTPAuthenticationCopyMethod", P, P),
+    sig!("CFHTTPAuthenticationCopyRealm", P, P),
+    sig!("CFHTTPAuthenticationCreateFromResponse", P, P, P),
+    sig!("CFHTTPAuthenticationIsValid", U8, P, P),
+    sig!("CFHTTPAuthenticationRequiresAccountDomain", U8, P),
+    sig!("CFHTTPAuthenticationRequiresUserNameAndPassword", U8, P),
+    sig!("CFHTTPMessageApplyCredentialDictionary", U8, P, P, P, P),
+    sig!("CFHTTPMessageCopyAllHeaderFields", P, P),
+    sig!("CFHTTPMessageCopyResponseStatusLine", P, P),
+    sig!("CFHTTPMessageCopyVersion", P, P),
+    sig!("CFHTTPMessageCreateRequest", P, P, P, P, P),
+    sig!("CFHTTPMessageGetResponseStatusCode", I64, P),
+    sig!("CFHTTPMessageIsHeaderComplete", U8, P),
+    sig!("CFHTTPMessageSetHeaderFieldValue", V, P, P, P),
+    sig!("CFNetworkCopyProxiesForAutoConfigurationScript", P, P, P, P),
+    sig!("CFNetworkCopyProxiesForURL", P, P, P),
+    sig!("CFReadStreamCopyError", P, P),
+    sig!("CFReadStreamCopyProperty", P, P, P),
+    sig!("CFReadStreamCreateForHTTPRequest", P, P, P),
+    sig!("CFReadStreamCreateForStreamedHTTPRequest", P, P, P, P),
+    sig!("CFReadStreamHasBytesAvailable", U8, P),
+    sig!("CFReadStreamOpen", U8, P),
+    // The client callback is guest code the host calls back on the run loop;
+    // the fourth argument is a `CFStreamClientContext`, whose `retain`,
+    // `release` and `copyDescription` fields are function pointers a guest
+    // conventionally leaves null. A guest that fills them in would hand the host
+    // x86-64 addresses inside a structure this runtime never sees.
+    cbsig!([2], "CFReadStreamSetClient", U8, P, U64, P, P),
+    sig!("CFReadStreamSetProperty", U8, P, P, P),
+    sig!("CFRelease", V, P),
+    sig!("CFRetain", P, P),
+    sig!("CFRunLoopAddSource", V, P, P, P),
+    sig!("CFRunLoopGetCurrent", P),
+    // `CFTimeInterval` is a `double`, so this is the first entry in the table
+    // whose second argument is floating-point while its first and third are not
+    // — exactly the shape the two independent register counters exist for.
+    sig!("CFRunLoopRunInMode", I32, P, F64, U8),
+    sig!("CFStringAppendCharacters", V, P, P, I64),
+    sig!("CFStringConvertEncodingToIANACharSetName", P, U32),
+    sig!("CFStringConvertEncodingToNSStringEncoding", U64, U32),
+    sig!("CFStringConvertIANACharSetNameToEncoding", U32, P),
+    sig!("CFStringConvertNSStringEncodingToEncoding", U32, U64),
+    sig!("CFStringGetCStringPtr", P, P, U32),
+    sig!(
+        "CFURLCreateStringByAddingPercentEscapes",
+        P,
+        P,
+        P,
+        P,
+        P,
+        U32
+    ),
+    sig!("CFUUIDCreate", P, P),
+    sig!("CFUUIDCreateString", P, P, P),
+    sig!("CGEventPost", V, U32, P),
+    sig!("CGMainDisplayID", U32),
+    // ## CoreVideo
+    //
+    // The display-link callback is how a GameMaker runner paces its frames: the
+    // host calls it on CoreVideo's own thread, which is a thread this runtime
+    // never created, so it reaches the guest exactly the way a `pthread_create`
+    // start routine does — through a thunk, on a guest stack made on demand.
+    sig!("CVDisplayLinkCreateWithCGDisplay", I32, U32, P),
+    sig!("CVDisplayLinkGetActualOutputVideoRefreshPeriod", F64, P),
+    sig!("CVDisplayLinkSetCurrentCGDisplay", I32, P, U32),
+    cbsig!([1], "CVDisplayLinkSetOutputCallback", I32, P, P, P),
+    sig!("CVDisplayLinkStart", I32, P),
+    // ## The Carbon Component Manager, and `Gestalt`
+    //
+    // Removed from the SDK's headers years ago and still exported by
+    // CoreServices, which is why these signatures are written from the last
+    // published declarations rather than read out of a header. `OSErr` is
+    // `SInt16`; Apple's arm64 ABI requires a callee to extend a narrow return
+    // value to 32 bits, so reading `w0` as an `int` is safe where the guest
+    // reads only `ax`.
+    sig!("CloseComponent", I32, P),
+    sig!("FindNextComponent", P, P, P),
+    sig!("Gestalt", I32, U32, P),
+    // ## IOKit
+    //
+    // Every handle here — `mach_port_t`, `io_object_t`, `io_iterator_t`,
+    // `io_registry_entry_t` — is a 32-bit port name, not a pointer. Declaring
+    // one as `P` would pass 64 bits where the host reads 32, which happens to
+    // work until the upper half is not zero.
+    sig!("IOBSDNameMatching", P, U32, U32, P),
+    sig!("IOIteratorNext", U32, U32),
+    sig!("IOMasterPort", I32, U32, P),
+    sig!("IOObjectRelease", I32, U32),
+    sig!("IORegistryEntryCreateCFProperty", P, U32, P, P, U32),
+    sig!("IORegistryEntryGetParentEntry", I32, U32, P, P),
+    sig!("IOServiceGetMatchingServices", I32, U32, P, P),
+    // ## AppKit and Foundation's C surface
+    //
+    // `NSApplicationMain` is where an application stops being a program and
+    // becomes an event loop: it loads the main nib, creates `NSApp`, sends
+    // `applicationDidFinishLaunching:` to the guest's delegate, and does not
+    // return until the application terminates. Everything it does after that
+    // point reaches the guest through the Objective-C paths M6 built.
+    sig!("NSApplicationMain", I32, I32, P),
+    // `NSLog` takes an `NSString` format, not a C one, so even the rendering
+    // path the `printf` family uses needs a conversion first. Classified so it
+    // fails as "variadic, and no shim implements it" rather than as an
+    // undescribed symbol.
+    vsig!("NSLog", V, P),
+    sig!("NSSearchPathForDirectoriesInDomains", P, U64, U64, U8),
+    sig!("NSTemporaryDirectory", P),
+    sig!("OpenAComponent", I32, P, P),
+    sig!("SCDynamicStoreCopyProxies", P, P),
+    sig!("SCNetworkReachabilityCreateWithAddress", P, P, P),
+    sig!("SCNetworkReachabilityCreateWithName", P, P, P),
+    sig!("SCNetworkReachabilityGetFlags", U8, P, P),
+    sig!("SCNetworkReachabilityScheduleWithRunLoop", U8, P, P, P),
+    cbsig!([1], "SCNetworkReachabilitySetCallback", U8, P, P, P),
+    sig!("SCNetworkReachabilityUnscheduleFromRunLoop", U8, P, P, P),
+    sig!("SecCertificateGetData", I32, P, P),
+    sig!("SecKeychainItemCopyContent", I32, P, P, P, P, P),
+    sig!("SecKeychainItemFreeContent", I32, P, P),
+    sig!("SecKeychainOpen", I32, P, P),
+    sig!("SecKeychainSearchCopyNext", I32, P, P),
+    sig!("SecKeychainSearchCreateFromAttributes", I32, P, U32, P, P),
+    sig!("UTTypeCopyPreferredTagWithClass", P, P, P),
+    sig!("UTTypeCreatePreferredIdentifierForTag", P, P, P, P),
+    // ## Blocks
+    //
+    // Copying a block is a memory operation: `_Block_copy` moves a stack block
+    // to the heap and retains a heap one, and neither reads the `invoke` field.
+    // So the guest's blocks stay the guest's, correctly, and the refusal the
+    // roadmap records is about a block *argument* crossing to the host — which
+    // is a different call, and still refused.
+    sig!("_Block_copy", P, P),
+    sig!("_Block_object_assign", V, P, P, I32),
+    sig!("_Block_object_dispose", V, P, I32),
     // The C++ exception surface, all of it shimmed: see [`crate::unwind`] for
     // why none of it can reach the host's libc++abi. `_ZSt9terminatev` is the
     // exception to the exception — `std::terminate` really does mean "stop this
@@ -268,11 +423,14 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // substitutes it itself, because it must also replace the DSO handle.
     sig!("__cxa_atexit", I32, P, P, P),
     sig!("__cxa_begin_catch", P, P),
+    sig!("__cxa_call_unexpected", V, P),
     sig!("__cxa_end_catch", V),
     sig!("__cxa_free_exception", V, P),
+    sig!("__cxa_pure_virtual", V),
     sig!("__cxa_rethrow", V),
     sig!("__cxa_throw", V, P, P, P),
     sig!("__error", P),
+    sig!("__isnand", I32, F64),
     sig!("__maskrune", I32, I32, U64),
     sig!("__memcpy_chk", P, P, P, U64, U64),
     sig!("__memmove_chk", P, P, P, U64, U64),
@@ -288,6 +446,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("__strncpy_chk", P, P, P, U64, U64),
     sig!("__tolower", I32, I32),
     sig!("__toupper", I32, I32),
+    // The fortified `vsnprintf`; shimmed with the rest of the `va_list` family
+    // for the reason [`crate::shims::valist`] gives.
+    sig!("__vsnprintf_chk", I32, P, U64, I32, U64, P, P),
     // The Darwin spellings that skip the signal mask, imported as `__longjmp`
     // and `__setjmp`. One implementation serves both pairs: the distinction is
     // about a mask this runtime does not model yet. See [`crate::jmpbuf`].
@@ -301,6 +462,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("_tlv_bootstrap", P, P),
     sig!("abort", V),
     sig!("abs", I32, I32),
+    sig!("accept", I32, I32, P, P),
     sig!("access", I32, P, I32),
     sig!("acl_free", I32, P),
     sig!("acl_get_entry", I32, P, I32, P),
@@ -312,10 +474,14 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("acl_get_qualifier", P, P),
     sig!("acl_get_tag_type", I32, P, P),
     sig!("acos", F64, F64),
+    sig!("acosf", F32, F32),
     sig!("asin", F64, F64),
+    sig!("asinf", F32, F32),
     vsig!("asprintf", I32, P, P),
     sig!("atan", F64, F64),
     sig!("atan2", F64, F64, F64),
+    sig!("atan2f", F32, F32, F32),
+    sig!("atanf", F32, F32),
     // `atexit`, `bsearch`, `qsort` and `qsort_r` were refused until the
     // host->guest thunk existed. What changed is only that the pointer they
     // take can now be substituted; the signature was never in doubt.
@@ -325,16 +491,32 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("atol", I64, P),
     sig!("atoll", I64, P),
     sig!("bcmp", I32, P, P, U64),
+    sig!("bind", I32, I32, P, U32),
     cbsig!([4], "bsearch", P, P, P, U64, U64, P),
     sig!("bzero", V, P, U64),
     sig!("calloc", P, U64, U64),
     sig!("ceil", F64, F64),
+    sig!("ceilf", F32, F32),
     sig!("chdir", I32, P),
+    sig!("chmod", I32, P, U32),
     sig!("clearerr", V, P),
     sig!("close", I32, I32),
     sig!("closedir", I32, P),
     sig!("compat_mode", U8, P, P),
+    sig!("connect", I32, I32, P, U32),
     sig!("cos", F64, F64),
+    sig!("cosf", F32, F32),
+    // ## zlib
+    //
+    // `deflateInit_` and `inflateInit_` are the real entry points: `deflateInit`
+    // is a macro that passes `ZLIB_VERSION` and `sizeof(z_stream)`, so a program
+    // importing the underscore forms is one that used the ordinary API.
+    sig!("crc32", U64, U64, P, U32),
+    sig!("deflate", I32, P, I32),
+    sig!("deflateEnd", I32, P),
+    sig!("deflateInit2_", I32, P, I32, I32, I32, I32, I32, P, I32),
+    sig!("deflateInit_", I32, P, I32, P, I32),
+    sig!("deflateReset", I32, P),
     sig!("dlclose", I32, P),
     sig!("dlerror", P),
     sig!("dlopen", P, P, I32),
@@ -347,6 +529,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("exit", V, I32),
     sig!("exp", F64, F64),
     sig!("exp2", F64, F64),
+    sig!("expf", F32, F32),
     sig!("fabs", F64, F64),
     sig!("fabsf", F32, F32),
     sig!("fclose", I32, P),
@@ -357,6 +540,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("fflagstostr", P, U64),
     sig!("fflush", I32, P),
     sig!("fgetc", I32, P),
+    sig!("fgetpos", I32, P, P),
     sig!("fgets", P, P, I32, P),
     sig!("fileno", I32, P),
     sig!("floor", F64, F64),
@@ -364,16 +548,20 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("fmax", F64, F64, F64),
     sig!("fmin", F64, F64, F64),
     sig!("fmod", F64, F64, F64),
+    sig!("fmodf", F32, F32, F32),
     sig!("fopen", P, P, P),
     vsig!("fprintf", I32, P, P),
     sig!("fputc", I32, I32, P),
     sig!("fputs", I32, P, P),
     sig!("fread", U64, P, U64, U64, P),
     sig!("free", V, P),
+    sig!("freeaddrinfo", V, P),
     vsig!("fscanf", I32, P, P),
     sig!("fseek", I32, P, I64, I32),
+    sig!("fseeko", I32, P, I64, I32),
     sig!("fstat", I32, I32, P),
     sig!("ftell", I64, P),
+    sig!("ftello", I64, P),
     sig!("fts_children", P, P, I32),
     sig!("fts_close", I32, P),
     // The comparator takes `const FTSENT **`, which is still just a pointer:
@@ -383,20 +571,175 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("fts_read", P, P),
     sig!("fts_set", I32, P, P, I32),
     sig!("fwrite", U64, P, U64, U64, P),
+    sig!("gai_strerror", P, I32),
+    sig!("getaddrinfo", I32, P, P, P, P),
     sig!("getbsize", P, P, P),
+    sig!("getc", I32, P),
     sig!("getcwd", P, P, U64),
     sig!("getegid", U32),
     sig!("getenv", P, P),
     sig!("geteuid", U32),
     sig!("getgid", U32),
+    sig!("gethostbyname", P, P),
+    sig!("getnameinfo", I32, P, U32, P, U32, P, U32, I32),
     sig!("getopt", I32, I32, P, P),
     sig!("getopt_long", I32, I32, P, P, P, P),
+    sig!("getpeername", I32, I32, P, P),
     sig!("getpid", I32),
     sig!("getprogname", P),
+    sig!("getsockname", I32, I32, P, P),
+    sig!("getsockopt", I32, I32, I32, I32, P, P),
+    sig!("gettimeofday", I32, P, P),
     sig!("getuid", U32),
     sig!("getxattr", I64, P, P, P, U64, U32, I32),
+    // ## OpenGL
+    //
+    // The whole of what a GameMaker runner draws with, and the most mechanical
+    // block in this table: `GLenum`, `GLuint` and `GLbitfield` are `unsigned
+    // int`, `GLint` and `GLsizei` are `int`, `GLfloat` is `float`, `GLclampd`
+    // is `double`, and `GLboolean` is `unsigned char`. The distinction between
+    // `GLfloat` and `GLclampd` is the one worth checking rather than assuming:
+    // `glClearColor` takes four `float`s and `glClearDepth` one `double`, so a
+    // uniform "floating point is `f64`" rule silently mis-clears the screen.
+    sig!("glActiveTexture", V, U32),
+    sig!("glAttachShader", V, U32, U32),
+    sig!("glBegin", V, U32),
+    sig!("glBindBuffer", V, U32, U32),
+    sig!("glBindFramebuffer", V, U32, U32),
+    sig!("glBindFramebufferEXT", V, U32, U32),
+    sig!("glBindRenderbuffer", V, U32, U32),
+    sig!("glBindRenderbufferEXT", V, U32, U32),
+    sig!("glBindTexture", V, U32, U32),
+    sig!("glBlendFunc", V, U32, U32),
+    sig!("glBufferData", V, U32, I64, P, U32),
+    sig!("glCheckFramebufferStatus", U32, U32),
+    sig!("glCheckFramebufferStatusEXT", U32, U32),
+    sig!("glClear", V, U32),
+    sig!("glClearColor", V, F32, F32, F32, F32),
+    sig!("glClearDepth", V, F64),
+    sig!("glClearStencil", V, I32),
+    sig!("glColorMask", V, U8, U8, U8, U8),
+    sig!("glCompileShader", V, U32),
+    sig!("glCreateProgram", U32),
+    sig!("glCreateShader", U32, U32),
+    sig!("glDeleteBuffers", V, I32, P),
+    sig!("glDeleteFramebuffers", V, I32, P),
+    sig!("glDeleteFramebuffersEXT", V, I32, P),
+    sig!("glDeleteProgram", V, U32),
+    sig!("glDeleteRenderbuffers", V, I32, P),
+    sig!("glDeleteShader", V, U32),
+    sig!("glDeleteTextures", V, I32, P),
+    sig!("glDepthFunc", V, U32),
+    sig!("glDepthMask", V, U8),
+    sig!("glDepthRange", V, F64, F64),
+    sig!("glDisable", V, U32),
+    sig!("glDisableVertexAttribArray", V, U32),
+    sig!("glDrawArrays", V, U32, I32, I32),
+    sig!("glDrawBuffer", V, U32),
+    sig!("glDrawBuffers", V, I32, P),
+    sig!("glEnable", V, U32),
+    sig!("glEnableVertexAttribArray", V, U32),
+    sig!("glEnd", V),
+    sig!("glFinish", V),
+    sig!("glFlush", V),
+    sig!("glFramebufferRenderbuffer", V, U32, U32, U32, U32),
+    sig!("glFramebufferRenderbufferEXT", V, U32, U32, U32, U32),
+    sig!("glFramebufferTexture2D", V, U32, U32, U32, U32, I32),
+    sig!("glFramebufferTexture2DEXT", V, U32, U32, U32, U32, I32),
+    sig!("glFrontFace", V, U32),
+    sig!("glGenBuffers", V, I32, P),
+    sig!("glGenFramebuffers", V, I32, P),
+    sig!("glGenRenderbuffers", V, I32, P),
+    sig!("glGenRenderbuffersEXT", V, I32, P),
+    sig!("glGenTextures", V, I32, P),
+    sig!("glGetActiveUniform", V, U32, U32, I32, P, P, P, P),
+    sig!("glGetAttribLocation", I32, U32, P),
+    sig!("glGetBooleanv", V, U32, P),
+    sig!("glGetError", U32),
+    sig!("glGetFloatv", V, U32, P),
+    sig!("glGetIntegerv", V, U32, P),
+    sig!("glGetProgramInfoLog", V, U32, I32, P, P),
+    sig!("glGetProgramiv", V, U32, U32, P),
+    sig!("glGetShaderInfoLog", V, U32, I32, P, P),
+    sig!("glGetShaderiv", V, U32, U32, P),
+    sig!("glGetString", P, U32),
+    sig!("glGetUniformLocation", I32, U32, P),
+    sig!("glLinkProgram", V, U32),
+    sig!("glLoadIdentity", V),
+    sig!("glMatrixMode", V, U32),
+    sig!("glPixelStorei", V, U32, I32),
+    sig!("glPopMatrix", V),
+    sig!("glPushMatrix", V),
+    sig!("glReadPixels", V, I32, I32, I32, I32, U32, U32, P),
+    sig!("glRenderbufferStorage", V, U32, U32, I32, I32),
+    sig!("glRenderbufferStorageEXT", V, U32, U32, I32, I32),
+    sig!("glScissor", V, I32, I32, I32, I32),
+    sig!("glShaderSource", V, U32, I32, P, P),
+    sig!("glStencilFunc", V, U32, I32, U32),
+    sig!("glStencilMask", V, U32),
+    sig!("glStencilOp", V, U32, U32, U32),
+    sig!("glTexCoord2f", V, F32, F32),
+    // Nine integer arguments, which is one more than either the guest's six
+    // registers or the host's eight. See [`super::marshal`] for what carries the
+    // ninth: the guest spilled three to its stack and the host takes one on its
+    // own.
+    sig!("glTexImage2D", V, U32, I32, I32, I32, I32, I32, U32, U32, P),
+    sig!("glTexParameterf", V, U32, U32, F32),
+    sig!("glTexParameteri", V, U32, U32, I32),
+    sig!(
+        "glTexSubImage2D",
+        V,
+        U32,
+        I32,
+        I32,
+        I32,
+        I32,
+        I32,
+        U32,
+        U32,
+        P
+    ),
+    sig!("glUniform1f", V, I32, F32),
+    sig!("glUniform1fv", V, I32, I32, P),
+    sig!("glUniform1i", V, I32, I32),
+    sig!("glUniform1iv", V, I32, I32, P),
+    sig!("glUniform2fv", V, I32, I32, P),
+    sig!("glUniform2iv", V, I32, I32, P),
+    sig!("glUniform3fv", V, I32, I32, P),
+    sig!("glUniform3iv", V, I32, I32, P),
+    sig!("glUniform4fv", V, I32, I32, P),
+    sig!("glUniform4iv", V, I32, I32, P),
+    sig!("glUniformMatrix2fv", V, I32, I32, U8, P),
+    sig!("glUniformMatrix3fv", V, I32, I32, U8, P),
+    sig!("glUniformMatrix4fv", V, I32, I32, U8, P),
+    sig!("glUseProgram", V, U32),
+    sig!("glVertex2f", V, F32, F32),
+    sig!("glVertexAttribPointer", V, U32, I32, U32, U8, I32, P),
+    sig!("glViewport", V, I32, I32, I32, I32),
+    // `glob`'s error callback is guest code called once per unreadable
+    // directory. The import is spelled `_glob$INODE64`, and the `$`-suffix
+    // fallback is what finds this entry.
+    cbsig!([2], "glob", I32, P, I32, P, P),
+    sig!("gluOrtho2D", V, F64, F64, F64, F64),
+    sig!("gmtime", P, P),
     sig!("group_from_gid", P, U32, I32),
+    // `strhash.h`'s table, still exported by libSystem. The replace function is
+    // guest code, called when a key is already present.
+    sig!("hash_create", P, I32),
+    cbsig!([3], "hash_search", P, P, P, P, P),
     sig!("hypot", F64, F64, F64),
+    sig!("iconv", U64, P, P, P, P, P),
+    sig!("iconv_close", I32, P),
+    sig!("iconv_open", P, P, P),
+    sig!("if_nametoindex", U32, P),
+    sig!("inet_addr", U32, P),
+    sig!("inet_ntop", P, I32, P, P, U32),
+    sig!("inet_pton", I32, I32, P, P),
+    sig!("inflate", I32, P, I32),
+    sig!("inflateEnd", I32, P),
+    sig!("inflateInit2_", I32, P, I32, P, I32),
+    sig!("inflateInit_", I32, P, P, I32),
+    sig!("inflateReset", I32, P),
     vsig!("ioctl", I32, I32, U64),
     sig!("isalnum", I32, I32),
     sig!("isalpha", I32, I32),
@@ -411,6 +754,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("kill", I32, I32, I32),
     sig!("labs", I64, I64),
     sig!("ldexp", F64, F64, I32),
+    sig!("listen", I32, I32, I32),
     sig!("listxattr", I64, P, P, U64, I32),
     sig!("localtime", P, P),
     sig!("log", F64, F64),
@@ -422,10 +766,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // because it is what stops them being promoted to an inlined fast import and
     // what names them at an exit — see [`crate::jmpbuf`].
     sig!("longjmp", V, P, I32),
+    sig!("lrint", I64, F64),
     sig!("lseek", I64, I32, I64, I32),
     sig!("lstat", I32, P, P),
     sig!("malloc", P, U64),
     sig!("malloc_size", U64, P),
+    sig!("malloc_zone_statistics", V, P, P),
     sig!("mbrtowc", U64, P, P, U64, P),
     sig!("mbtowc", I32, P, P, U64),
     sig!("memchr", P, P, I32, U64),
@@ -433,7 +779,26 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("memcpy", P, P, P, U64),
     sig!("memmove", P, P, P, U64),
     sig!("memset", P, P, I32, U64),
+    sig!("memset_pattern16", V, P, P, U64),
     sig!("mkdir", I32, P, U32),
+    sig!("mkstemp", I32, P),
+    sig!("mktime", I64, P),
+    sig!("mlock", I32, P, U64),
+    // ## The memory-mapping group, and the page size
+    //
+    // Passthrough, with one caveat this runtime cannot hide: the guest was
+    // compiled expecting 4 KiB pages and Apple Silicon enforces 16 KiB, so a
+    // guest rounding a length or an address to *its* page size gets a request
+    // the kernel rounds again. Every use in a real program is either a whole
+    // allocation or a `mprotect` of a region the same program `mmap`ed, both of
+    // which survive the coarser granularity. A guest doing page arithmetic
+    // against `getpagesize` would not — see M7 in the roadmap.
+    sig!("mmap", P, P, U64, I32, I32, I32, I64),
+    sig!("modf", F64, F64, P),
+    sig!("modff", F32, F32, P),
+    sig!("mprotect", I32, P, U64, I32),
+    sig!("munmap", I32, P, U64),
+    sig!("nanosleep", I32, P, P),
     sig!("nl_langinfo", P, I32),
     vsig!("open", I32, P, I32),
     vsig!("openat", I32, I32, P, I32),
@@ -517,19 +882,31 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // any other: asynchronously, on whichever thread the kernel picks.
     sig!("raise", I32, I32),
     sig!("rand", I32),
+    sig!("random", I64),
     sig!("read", I64, I32, P, U64),
     sig!("readdir", P, P),
     sig!("readlink", I64, P, P, U64),
     sig!("realloc", P, P, U64),
     sig!("reallocf", P, P, U64),
+    sig!("recv", I64, I32, P, U64, I32),
+    sig!("recvfrom", I64, I32, P, U64, I32, P, P),
+    sig!("remove", I32, P),
+    sig!("rename", I32, P, P),
     sig!("rewind", V, P),
     sig!("rmdir", I32, P),
     sig!("round", F64, F64),
     vsig!("scanf", I32, P),
+    // The import is `_select$1050`, the variant with the 10.5 `fd_set`
+    // semantics; arm64 has only the one, and the `$`-suffix fallback finds it.
+    sig!("select", I32, I32, P, P, P, P),
+    sig!("send", I64, I32, P, U64, I32),
+    sig!("sendto", I64, I32, P, U64, I32, P, U32),
     sig!("setenv", I32, P, P, I32),
     sig!("setjmp", I32, P),
     sig!("setlocale", P, I32, P),
+    sig!("setsockopt", I32, I32, I32, I32, P, U32),
     sig!("setvbuf", I32, P, P, I32, U64),
+    sig!("shutdown", I32, I32, I32),
     // Shimmed, like the `setjmp` family and for a related reason: the handler
     // is a guest function pointer that crosses out as a thunk and comes *back*
     // in `signal`'s result and `sigaction`'s `oldact`. See [`crate::signal`].
@@ -538,8 +915,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("signal", P, I32, P),
     sig!("sigsetjmp", I32, P, I32),
     sig!("sin", F64, F64),
+    sig!("sinf", F32, F32),
     sig!("sleep", U32, U32),
     vsig!("snprintf", I32, P, U64, P),
+    sig!("socket", I32, I32, I32, I32),
     vsig!("sprintf", I32, P, P),
     sig!("sqrt", F64, F64),
     sig!("sqrtf", F32, F32),
@@ -571,21 +950,29 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("strspn", U64, P, P),
     sig!("strstr", P, P, P),
     sig!("strtod", F64, P, P),
+    sig!("strtof", F32, P, P),
     sig!("strtok", P, P, P),
     sig!("strtol", I64, P, P, I32),
     sig!("strtoll", I64, P, P, I32),
     sig!("strtonum", I64, P, I64, I64, P),
     sig!("strtoul", U64, P, P, I32),
     sig!("strtoull", U64, P, P, I32),
+    sig!("sysconf", I64, I32),
+    sig!("sysctl", I32, P, U32, P, P, P, U64),
     sig!("sysctlbyname", I32, P, P, P, P, U64),
     vsig!("syslog", V, I32, P),
     sig!("tan", F64, F64),
+    sig!("tanf", F32, F32),
+    sig!("tcgetattr", I32, I32, P),
+    sig!("tcsetattr", I32, I32, I32, P),
     sig!("tgetent", I32, P, P),
     sig!("tgetstr", P, P, P),
     sig!("tgoto", P, P, I32, I32),
     sig!("time", I64, P),
+    sig!("timegm", I64, P),
     // The other spelling; see `_tlv_bootstrap` above.
     sig!("tlv_bootstrap", P, P),
+    sig!("tmpfile", P),
     sig!("tolower", I32, I32),
     sig!("toupper", I32, I32),
     // The output function is called once per character: `tputs` is how a
@@ -600,10 +987,25 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("user_from_uid", P, U32, I32),
     sig!("usleep", I32, U32),
     sig!("uuid_unparse_upper", V, P, P),
+    // ## The `va_list` family
+    //
+    // Not variadic — each takes a `va_list` its caller already built — and still
+    // impossible to forward, for the mirror image of the reason a variadic is:
+    // the argument is a *guest* `va_list`, three fields and a register save area
+    // laid out by the SysV AMD64 ABI, and the host's `vsnprintf` would read it
+    // as whatever arm64's `va_list` happens to be. So these are shimmed and the
+    // signatures exist to name them at an exit. See [`crate::shims::valist`].
+    sig!("vasprintf", I32, P, P, P),
+    sig!("vfprintf", I32, P, P, P),
+    sig!("vprintf", I32, P, P),
+    sig!("vsnprintf", I32, P, U64, P, P),
+    sig!("vsprintf", I32, P, P, P),
     vsig!("warn", V, P),
     vsig!("warnx", V, P),
+    sig!("wcslen", U64, P),
     sig!("wcwidth", I32, I32),
     sig!("write", I64, I32, P, U64),
+    sig!("zError", P, I32),
 ];
 
 /// A symbol with no public declaration anywhere on this system.
@@ -614,40 +1016,74 @@ pub static SIGNATURES: &[FunctionAbi] = &[
 /// module exists not to do.
 const UNDECLARED: &str = "no public declaration; a guessed signature would fail silently";
 
+/// The commonest refusal by far, and the least interesting: a symbol that is a
+/// *variable*. An imported global is bound into a slot the guest loads from and
+/// is never the target of a call, so there is nothing to describe. Cocoa and
+/// CoreFoundation supply most of them — every `NSString *` notification name,
+/// every `CFStringRef` property key — and a program that talks to a framework
+/// imports dozens.
+const DATA: &str = "a data import, read through its slot and never called";
+
+/// The M2 refusal, arriving wherever a framework's geometry does.
+///
+/// A `CGRect` is four `double`s and a `CGPoint` two, and both SysV AMD64 and
+/// AAPCS64 shred them into individual registers by rules this marshaller does
+/// not implement. The two ABIs disagree about *which* registers, so passing one
+/// through would neither fault nor be right.
+const AGGREGATE: &str = "passes or returns a struct by value; aggregate marshalling is not built";
+
+/// The [`crate::jmpbuf`] refusal, one level further out.
+///
+/// `getcontext` and friends save the *machine's* registers and stack pointer.
+/// Forwarding one saves this runtime's arm64 frame, and `setcontext` would then
+/// resume the JIT rather than the guest — the same wrongness `setjmp` has, and
+/// without the excuse that a `jmp_buf`'s contents are private, because a
+/// `ucontext_t` has a documented layout a guest may read.
+const CONTEXT: &str =
+    "saves or restores a machine context, which here is the host's and not the guest's";
+
 /// Symbols that are described and deliberately not callable, **sorted by name**
 /// for the same reason as [`SIGNATURES`].
 pub static REFUSED: &[(&str, &str)] = &[
+    // The one CoreFoundation constructor whose *argument* is a table of
+    // callbacks rather than a callback: `CFRunLoopSourceContext` holds seven
+    // function pointers, all guest code, inside a structure the guest owns.
+    // Substituting them means rewriting the structure, which is the same work
+    // item a block argument is waiting for.
     (
-        "_DefaultRuneLocale",
-        "a data import, read through its slot and never called",
+        "CFRunLoopSourceCreate",
+        "its context structure holds guest function pointers the host would call as arm64",
     ),
+    ("CGEventCreateMouseEvent", AGGREGATE),
+    ("CGRectContainsPoint", AGGREGATE),
+    ("CGRectInset", AGGREGATE),
+    ("NSCalibratedRGBColorSpace", DATA),
+    ("NSDefaultRunLoopMode", DATA),
+    ("NSDeviceResolution", DATA),
+    ("NSLocaleCountryCode", DATA),
+    ("NSLocalizedDescriptionKey", DATA),
+    ("NSLocalizedFailureReasonErrorKey", DATA),
+    ("NSOSStatusErrorDomain", DATA),
+    ("NSPOSIXErrorDomain", DATA),
+    ("NSURLAuthenticationMethodDefault", DATA),
+    ("NSURLProtectionSpaceHTTPProxy", DATA),
+    ("NSUnderlyingErrorKey", DATA),
+    ("NSWindowDidMoveNotification", DATA),
+    ("NSWindowDidResizeNotification", DATA),
+    ("NSWindowWillCloseNotification", DATA),
+    ("_DefaultRuneLocale", DATA),
+    ("_NSConcreteGlobalBlock", DATA),
+    ("_NSConcreteStackBlock", DATA),
+    ("_ZTISt9bad_alloc", DATA),
     // A `type_info` and the vtable a guest's own `type_info` objects point at.
     // Both are read through their slots and compared by address, which is what
     // makes a `catch` clause decidable at all — see [`crate::unwind`].
-    (
-        "_ZTISt9exception",
-        "a data import, read through its slot and never called",
-    ),
-    (
-        "_ZTIi",
-        "a data import, read through its slot and never called",
-    ),
-    (
-        "_ZTVN10__cxxabiv117__class_type_infoE",
-        "a data import, read through its slot",
-    ),
-    (
-        "_ZTVN10__cxxabiv120__si_class_type_infoE",
-        "a data import, read through its slot",
-    ),
-    (
-        "_ZTVN10__cxxabiv121__vmi_class_type_infoE",
-        "a data import, read through its slot",
-    ),
-    (
-        "_ZTVSt9exception",
-        "a data import, read through its slot and never called",
-    ),
+    ("_ZTISt9exception", DATA),
+    ("_ZTIi", DATA),
+    ("_ZTVN10__cxxabiv117__class_type_infoE", DATA),
+    ("_ZTVN10__cxxabiv120__si_class_type_infoE", DATA),
+    ("_ZTVN10__cxxabiv121__vmi_class_type_infoE", DATA),
+    ("_ZTVSt9exception", DATA),
     // The personality routine a frame's LSDA names. Read as an address and
     // never called: this runtime interprets the LSDA itself rather than handing
     // it to libunwind, which is the whole of [`crate::unwind`].
@@ -655,60 +1091,74 @@ pub static REFUSED: &[(&str, &str)] = &[
         "__gxx_personality_v0",
         "a personality routine, named by an LSDA and never called",
     ),
-    (
-        "__mb_cur_max",
-        "a data import, read through its slot and never called",
-    ),
+    ("__mb_cur_max", DATA),
     (
         "__objc_personality_v0",
         "a personality routine, named by an LSDA and never called",
     ),
-    (
-        "__stack_chk_guard",
-        "a data import, read through its slot and never called",
-    ),
-    (
-        "__stderrp",
-        "a data import, read through its slot and never called",
-    ),
-    (
-        "__stdinp",
-        "a data import, read through its slot and never called",
-    ),
-    (
-        "__stdoutp",
-        "a data import, read through its slot and never called",
-    ),
+    ("__stack_chk_guard", DATA),
+    ("__stderrp", DATA),
+    ("__stdinp", DATA),
+    ("__stdoutp", DATA),
     (
         "dyld_stub_binder",
         "the lazy-binding entry point; every slot is bound eagerly",
     ),
-    (
-        "environ",
-        "a data import, read through its slot and never called",
-    ),
+    ("environ", DATA),
+    ("getcontext", CONTEXT),
     ("humanize_number", UNDECLARED),
+    ("inet_ntoa", AGGREGATE),
+    ("kCFAllocatorDefault", DATA),
+    ("kCFBooleanTrue", DATA),
+    ("kCFBundleIdentifierKey", DATA),
+    ("kCFCoreFoundationVersionNumber", DATA),
+    ("kCFErrorDomainCFNetwork", DATA),
+    ("kCFHTTPAuthenticationAccountDomain", DATA),
+    ("kCFHTTPAuthenticationPassword", DATA),
+    ("kCFHTTPAuthenticationSchemeBasic", DATA),
+    ("kCFHTTPAuthenticationSchemeNTLM", DATA),
+    ("kCFHTTPAuthenticationUsername", DATA),
+    ("kCFHTTPVersion1_0", DATA),
+    ("kCFHTTPVersion1_1", DATA),
+    ("kCFNull", DATA),
+    ("kCFProxyAutoConfigurationURLKey", DATA),
+    ("kCFProxyHostNameKey", DATA),
+    ("kCFProxyPortNumberKey", DATA),
+    ("kCFProxyTypeHTTP", DATA),
+    ("kCFProxyTypeKey", DATA),
+    ("kCFProxyTypeSOCKS", DATA),
+    ("kCFRunLoopDefaultMode", DATA),
+    ("kCFStreamErrorDomainHTTP", DATA),
+    ("kCFStreamPropertyHTTPAttemptPersistentConnection", DATA),
+    ("kCFStreamPropertyHTTPProxy", DATA),
+    ("kCFStreamPropertyHTTPProxyHost", DATA),
+    ("kCFStreamPropertyHTTPProxyPort", DATA),
+    ("kCFStreamPropertyHTTPRequestBytesWrittenCount", DATA),
+    ("kCFStreamPropertyHTTPResponseHeader", DATA),
+    ("kCFStreamPropertyHTTPSProxyHost", DATA),
+    ("kCFStreamPropertyHTTPSProxyPort", DATA),
+    ("kCFStreamPropertySOCKSProxy", DATA),
+    ("kCFStreamPropertySOCKSProxyHost", DATA),
+    ("kCFStreamPropertySOCKSProxyPort", DATA),
+    ("kCFStreamPropertySSLSettings", DATA),
+    ("kCFStreamSSLCertificates", DATA),
+    ("kCFStreamSSLPeerName", DATA),
+    ("kCFStreamSSLValidatesCertificateChain", DATA),
+    ("kCFTypeArrayCallBacks", DATA),
+    ("kUTTagClassFilenameExtension", DATA),
+    ("kUTTagClassMIMEType", DATA),
+    ("ldiv", AGGREGATE),
+    ("makecontext", CONTEXT),
     ("mbr_identifier_translate", UNDECLARED),
-    (
-        "optarg",
-        "a data import, read through its slot and never called",
-    ),
-    (
-        "opterr",
-        "a data import, read through its slot and never called",
-    ),
-    (
-        "optind",
-        "a data import, read through its slot and never called",
-    ),
-    (
-        "optopt",
-        "a data import, read through its slot and never called",
-    ),
+    ("optarg", DATA),
+    ("opterr", DATA),
+    ("optind", DATA),
+    ("optopt", DATA),
     (
         "pthread_cancel",
         "cancellation unwinds a stack the host's unwinder never saw (M5)",
     ),
+    ("setcontext", CONTEXT),
 ];
 
 #[cfg(test)]

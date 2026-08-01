@@ -569,6 +569,111 @@ static EIGHT_INTS: FunctionAbi = FunctionAbi {
     variadic: false,
 };
 
+/// Twelve integer arguments and two doubles: the case the wider prototype
+/// exists for, in the shape `glTexImage2D` has it.
+///
+/// Four of these arrive on the *host's* stack, which is the half no register
+/// prototype could reach before. The two doubles are here so the test also
+/// shows that overflowing the integer bank does not disturb the vector one —
+/// AAPCS64 counts them separately, and a marshaller that packed the stack in
+/// declaration order rather than by class would put `x` and `y` there too.
+unsafe extern "C" fn twelve_ints_two_doubles(
+    a: i64,
+    b: i64,
+    c: i64,
+    d: i64,
+    e: i64,
+    f: i64,
+    g: i64,
+    h: i64,
+    i: i64,
+    j: i64,
+    k: i64,
+    l: i64,
+    x: f64,
+    y: f64,
+) -> i64 {
+    let sum: i64 = [a, b, c, d, e, f, g, h, i, j, k, l]
+        .iter()
+        .enumerate()
+        .map(|(n, v)| v * (n as i64 + 1))
+        .sum();
+    sum + (x * y) as i64
+}
+
+static TWELVE_INTS: FunctionAbi = FunctionAbi {
+    name: "twelve_ints_two_doubles",
+    callbacks: &[],
+    types: &[
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::DoublePrecisionFp,
+        T::DoublePrecisionFp,
+    ],
+    variadic: false,
+};
+
+#[test]
+fn twelve_integer_arguments_reach_the_hosts_own_stack() {
+    let mut args: Vec<A> = (1..=12).map(|i| A::I(i as u64)).collect();
+    args.push(A::F64(3.0));
+    args.push(A::F64(4.0));
+    let mut mem = guest_stack();
+    let mut ctx = context_for(&args, &mut mem);
+
+    assert!(
+        marshal::is_marshallable(&TWELVE_INTS),
+        "twelve doubleword arguments must be marshallable"
+    );
+    marshal::call(
+        "twelve_ints_two_doubles",
+        &TWELVE_INTS,
+        twelve_ints_two_doubles as *const () as usize as u64,
+        &mut ctx,
+        &mem as &dyn GuestMemory,
+    )
+    .expect("twelve integer arguments are marshallable");
+
+    let want: i64 = (1..=12).map(|i| i * i).sum::<i64>() + 12;
+    assert_eq!(ctx.rax as i64, want);
+}
+
+#[test]
+fn a_narrow_argument_past_the_eighth_is_refused_rather_than_misplaced() {
+    // Apple packs a stack argument to its own width, so an `int` ninth argument
+    // is four bytes and everything after it moves. This marshaller writes eight,
+    // so it must say so rather than call.
+    static NINE_WITH_A_NARROW_TAIL: FunctionAbi = FunctionAbi {
+        name: "nine_with_a_narrow_tail",
+        callbacks: &[],
+        types: &[
+            T::SignedDoubleword,
+            T::SignedDoubleword,
+            T::SignedDoubleword,
+            T::SignedDoubleword,
+            T::SignedDoubleword,
+            T::SignedDoubleword,
+            T::SignedDoubleword,
+            T::SignedDoubleword,
+            T::SignedDoubleword,
+            T::SignedWord,
+        ],
+        variadic: false,
+    };
+    assert!(!marshal::is_marshallable(&NINE_WITH_A_NARROW_TAIL));
+}
+
 #[test]
 fn arguments_spilled_to_the_guest_stack_are_read_back() {
     let args: Vec<A> = (1..=8).map(|i| A::I(i as u64)).collect();

@@ -889,12 +889,23 @@ impl Vm {
 
     /// Record an error raised inside a host→guest callback, on the thread it
     /// happened on.
+    ///
+    /// **And say it out loud.** Parking alone was enough while the host frame in
+    /// the middle was `qsort`'s: it returns, control comes back to the runtime,
+    /// and [`Vm::take_pending`] raises the error where it can be reported. A
+    /// callback the *application frameworks* invoke has no such guarantee. A
+    /// guest `initWithFrame:` that fails returns nil to AppKit, AppKit raises an
+    /// `NSInvalidArgumentException` about a nil subview, and `libc++abi` ends
+    /// the process — with the real diagnostic still sitting in this slot,
+    /// unread. The parked copy is still what a caller acts on; this line is so
+    /// that the last failure before an abort is not silent.
     pub(crate) fn set_pending(&self, err: VmError) {
         let Some(state) = crate::thread::current() else {
             return;
         };
         let mut slot = state.pending.borrow_mut();
         if slot.is_none() {
+            eprintln!("rosetta3: in a guest callback: {err}");
             *slot = Some(err);
         }
     }

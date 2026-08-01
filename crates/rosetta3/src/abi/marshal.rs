@@ -14,11 +14,31 @@
 //! to the register that function expects. The extra registers hold values it
 //! never looks at.
 //!
+//! ## Past the eighth integer argument
+//!
+//! The ninth integer argument goes on the stack, and a prototype *can* put it
+//! there — by declaring more than eight, which is what
+//! [`MAX_INT_ARGS_TOTAL`] allows. AAPCS64 allocates in declaration order, so
+//! twelve `u64` followed by eight `f64` fills `x0`–`x7`, then four stack slots,
+//! then `v0`–`v7`; a callee with nine integer arguments and no more than eight
+//! floating-point ones reads its ninth from `[sp]`, which is where the ninth
+//! `u64` was put. `glTexImage2D` is why this exists — nine integer arguments,
+//! and a texture upload is not optional in a program that draws.
+//!
+//! **The catch is Apple's packing rule, and it is why this is not simply
+//! "widen to sixteen".** Unlike generic AAPCS64, Apple's arm64 ABI does not
+//! round a stack argument up to eight bytes: an `int` on the stack occupies
+//! four, and the argument after it starts at `[sp+4]`. A `u64` prototype would
+//! place that next argument at `[sp+8]` instead. So an overflowing argument is
+//! only reproducible when it is *already* eight bytes wide, and
+//! [`is_marshallable`] checks exactly that rather than assuming it. Both GL
+//! entry points that need this overflow a single pointer.
+//!
 //! That reasoning is the whole safety argument, and it is also the exact list
 //! of things this cannot do:
 //!
-//! - **More than eight arguments of a class.** The ninth would go on the stack,
-//!   where a wider prototype cannot put it. Refused
+//! - **More than twelve integer or eight floating-point arguments**, and any
+//!   overflowing integer argument narrower than a doubleword. Refused
 //!   ([`AbiError::Unmarshallable`]), not guessed.
 //! - **Aggregates by value.** A struct argument or return is passed by rules
 //!   ([`x8`], splitting across registers, memory) that no scalar prototype
@@ -59,6 +79,21 @@ use super::{AbiError, ArgType, FunctionAbi, GuestMemory, Result, guest_call_abi}
 const MAX_INT_ARGS: usize = 8;
 const MAX_FP_ARGS: usize = 8;
 
+/// Integer arguments the over-wide prototype declares, registers and stack
+/// together. The four past `MAX_INT_ARGS` land on the stack — see the module
+/// note for the rule that makes them reproducible.
+const MAX_INT_ARGS_TOTAL: usize = 12;
+
+/// Whether `ty` occupies a full eight bytes, which is what an argument past the
+/// eighth must do before this marshaller will place it. See the module note on
+/// Apple's stack packing.
+fn is_doubleword(ty: ArgType) -> bool {
+    matches!(
+        ty,
+        ArgType::Pointer | ArgType::SignedDoubleword | ArgType::UnsignedDoubleword
+    )
+}
+
 /// Whether [`call`] can express this signature at all.
 ///
 /// Checked separately from making the call so [`super::classify`] can answer
@@ -75,9 +110,21 @@ pub fn is_marshallable(abi: &FunctionAbi) -> bool {
     // Counted by argument *class*, not by where the guest put it: SysV has only
     // six integer registers, so a seventh integer argument arrives on the guest
     // stack and still goes out in `x6`.
-    let ints = placed.iter().filter(|(ty, _)| !is_fp(*ty)).count();
-    let fps = placed.len() - ints;
-    ints <= MAX_INT_ARGS && fps <= MAX_FP_ARGS
+    let integers: Vec<ArgType> = placed
+        .iter()
+        .map(|(ty, _)| *ty)
+        .filter(|ty| !is_fp(*ty))
+        .collect();
+    let fps = placed.len() - integers.len();
+    if integers.len() > MAX_INT_ARGS_TOTAL || fps > MAX_FP_ARGS {
+        return false;
+    }
+    // Everything the host will pass on its own stack has to be eight bytes
+    // wide, or Apple's packing puts the argument after it somewhere else.
+    integers
+        .iter()
+        .skip(MAX_INT_ARGS)
+        .all(|ty| is_doubleword(*ty))
 }
 
 /// Call `host` with the arguments `ctx` holds, and write the result back.
@@ -194,7 +241,7 @@ pub fn call_types(
 
     // Collected first, so a memory failure on the last stack argument still
     // leaves the guest context untouched.
-    let mut ints = [0u64; MAX_INT_ARGS];
+    let mut ints = [0u64; MAX_INT_ARGS_TOTAL];
     let mut fps = [0f64; MAX_FP_ARGS];
     let (mut n_int, mut n_fp) = (0usize, 0usize);
 
@@ -215,10 +262,18 @@ pub fn call_types(
             fps[n_fp] = fp_arg(*ty, raw);
             n_fp += 1;
         } else {
-            if n_int == MAX_INT_ARGS {
+            if n_int == MAX_INT_ARGS_TOTAL {
                 return Err(AbiError::Unmarshallable {
                     symbol: symbol.to_string(),
-                    reason: "more than eight integer arguments",
+                    reason: "more than twelve integer arguments",
+                });
+            }
+            if n_int >= MAX_INT_ARGS && !is_doubleword(*ty) {
+                // Apple packs a narrow argument into four stack bytes and this
+                // prototype would give it eight, moving everything after it.
+                return Err(AbiError::Unmarshallable {
+                    symbol: symbol.to_string(),
+                    reason: "an integer argument past the eighth is narrower than a doubleword",
                 });
             }
             ints[n_int] = int_arg(*ty, raw);
@@ -363,6 +418,10 @@ type IntFn = unsafe extern "C" fn(
     u64,
     u64,
     u64,
+    u64,
+    u64,
+    u64,
+    u64,
     f64,
     f64,
     f64,
@@ -374,6 +433,10 @@ type IntFn = unsafe extern "C" fn(
 ) -> u64;
 
 type F64Fn = unsafe extern "C" fn(
+    u64,
+    u64,
+    u64,
+    u64,
     u64,
     u64,
     u64,
@@ -401,6 +464,10 @@ type F32Fn = unsafe extern "C" fn(
     u64,
     u64,
     u64,
+    u64,
+    u64,
+    u64,
+    u64,
     f64,
     f64,
     f64,
@@ -414,31 +481,32 @@ type F32Fn = unsafe extern "C" fn(
 macro_rules! call_through {
     ($f:expr, $i:expr, $v:expr) => {
         $f(
-            $i[0], $i[1], $i[2], $i[3], $i[4], $i[5], $i[6], $i[7], $v[0], $v[1], $v[2], $v[3],
-            $v[4], $v[5], $v[6], $v[7],
+            $i[0], $i[1], $i[2], $i[3], $i[4], $i[5], $i[6], $i[7], $i[8], $i[9], $i[10], $i[11],
+            $v[0], $v[1], $v[2], $v[3], $v[4], $v[5], $v[6], $v[7],
         )
     };
 }
 
 /// # Safety
-/// `host` must be a native C function of at most eight integer and eight
-/// floating-point scalar arguments returning an integer or pointer. See the
-/// module note for why the wider prototype is ABI-compatible with it.
-unsafe fn call_int(host: u64, ints: &[u64; MAX_INT_ARGS], fps: &[f64; MAX_FP_ARGS]) -> u64 {
+/// `host` must be a native C function of at most twelve integer and eight
+/// floating-point scalar arguments returning an integer or pointer, with every
+/// integer argument past the eighth a full doubleword. See the module note for
+/// why the wider prototype is ABI-compatible with it.
+unsafe fn call_int(host: u64, ints: &[u64; MAX_INT_ARGS_TOTAL], fps: &[f64; MAX_FP_ARGS]) -> u64 {
     let f: IntFn = unsafe { core::mem::transmute(host as usize as *const ()) };
     unsafe { call_through!(f, ints, fps) }
 }
 
 /// # Safety
 /// As [`call_int`], for a callee returning `double`.
-unsafe fn call_f64(host: u64, ints: &[u64; MAX_INT_ARGS], fps: &[f64; MAX_FP_ARGS]) -> f64 {
+unsafe fn call_f64(host: u64, ints: &[u64; MAX_INT_ARGS_TOTAL], fps: &[f64; MAX_FP_ARGS]) -> f64 {
     let f: F64Fn = unsafe { core::mem::transmute(host as usize as *const ()) };
     unsafe { call_through!(f, ints, fps) }
 }
 
 /// # Safety
 /// As [`call_int`], for a callee returning `float`.
-unsafe fn call_f32(host: u64, ints: &[u64; MAX_INT_ARGS], fps: &[f64; MAX_FP_ARGS]) -> f32 {
+unsafe fn call_f32(host: u64, ints: &[u64; MAX_INT_ARGS_TOTAL], fps: &[f64; MAX_FP_ARGS]) -> f32 {
     let f: F32Fn = unsafe { core::mem::transmute(host as usize as *const ()) };
     unsafe { call_through!(f, ints, fps) }
 }
