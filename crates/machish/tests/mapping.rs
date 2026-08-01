@@ -6,17 +6,19 @@
 
 mod common;
 
-use machish::image::{map_segments, protect_segments, MachObject};
+use machish::image::{MachObject, map_segments, protect_segments};
 use machish::memory::{AddressSpace, BufferSpace, MmapSpace, Placement, ProtectionPolicy};
-use machish::spec::arch::X86_64;
 use machish::spec::MachSpec;
+use machish::spec::arch::X86_64;
 use machish::spec::constants::MH_MAGIC_64;
 
 const LS: &str = "/bin/ls";
 
 #[test]
 fn maps_a_real_executable_into_a_buffer() {
-    let Some(bytes) = common::system_binary(LS) else { skip!("{LS} not present") };
+    let Some(bytes) = common::system_binary(LS) else {
+        skip!("{LS} not present")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
 
     // A buffer has no existing mappings, so the preferred base is always
@@ -26,8 +28,14 @@ fn maps_a_real_executable_into_a_buffer() {
 
     let preferred = obj.preferred_base().unwrap();
     assert_eq!(mapped.base, preferred);
-    assert_eq!(mapped.slide, 0, "no slide when the preferred base is available");
-    assert_eq!(mapped.base, 0x1_0000_0000, "x86-64 executables load just past __PAGEZERO");
+    assert_eq!(
+        mapped.slide, 0,
+        "no slide when the preferred base is available"
+    );
+    assert_eq!(
+        mapped.base, 0x1_0000_0000,
+        "x86-64 executables load just past __PAGEZERO"
+    );
 
     // The mapped image begins with the Mach-O header, because __TEXT covers it.
     let mut magic = [0u8; 4];
@@ -35,7 +43,11 @@ fn maps_a_real_executable_into_a_buffer() {
     assert_eq!(u32::from_le_bytes(magic), MH_MAGIC_64);
 
     // __PAGEZERO was not mapped: the reservation is a few tens of KiB, not 4 GiB.
-    let pagezero = obj.segments.iter().find(|s| s.name == "__PAGEZERO").unwrap();
+    let pagezero = obj
+        .segments
+        .iter()
+        .find(|s| s.name == "__PAGEZERO")
+        .unwrap();
     assert_eq!(pagezero.vmsize, 0x1_0000_0000);
     assert!(
         (mapped.span as u64) < 0x100_0000,
@@ -45,14 +57,21 @@ fn maps_a_real_executable_into_a_buffer() {
 
     // Every mappable segment's file bytes really landed at its virtual address.
     for seg in obj.mappable_segments() {
-        let Some(range) = seg.file_range() else { continue };
+        let Some(range) = seg.file_range() else {
+            continue;
+        };
         let expect = &bytes[..];
         let thin = machish::fat::select(expect, &X86_64).unwrap();
         let src = &thin[range.clone()];
 
         let mut got = vec![0u8; src.len().min(64)];
         mem.read(seg.vmaddr + mapped.slide, &mut got).unwrap();
-        assert_eq!(&got[..], &src[..got.len()], "segment {} content mismatch", seg.name);
+        assert_eq!(
+            &got[..],
+            &src[..got.len()],
+            "segment {} content mismatch",
+            seg.name
+        );
     }
 
     assert!(mapped.entry.is_some());
@@ -65,7 +84,9 @@ fn maps_a_real_executable_into_a_buffer() {
 
 #[test]
 fn entry_point_resolves_through_the_slide() {
-    let Some(bytes) = common::system_binary(LS) else { skip!("{LS} not present") };
+    let Some(bytes) = common::system_binary(LS) else {
+        skip!("{LS} not present")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
 
     // Map somewhere other than the preferred base and confirm the entry point
@@ -78,7 +99,8 @@ fn entry_point_resolves_through_the_slide() {
     let mut b = BufferSpace::new(0);
     let span = unslid.span;
     let shifted = preferred + 0x1000_0000;
-    b.reserve(span, 0x1000, Placement::Preferred(shifted)).unwrap();
+    b.reserve(span, 0x1000, Placement::Preferred(shifted))
+        .unwrap();
 
     assert_eq!(unslid.slide, 0);
     let delta = shifted - preferred;
@@ -91,7 +113,9 @@ fn entry_point_resolves_through_the_slide() {
 
 #[test]
 fn maps_into_host_memory_without_execute_permission() {
-    let Some(bytes) = common::system_binary(LS) else { skip!("{LS} not present") };
+    let Some(bytes) = common::system_binary(LS) else {
+        skip!("{LS} not present")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
 
     let mut mem = MmapSpace::new();
@@ -99,7 +123,10 @@ fn maps_into_host_memory_without_execute_permission() {
 
     // The host may or may not have 0x1_0000_0000 free; either outcome is fine,
     // but the slide must be consistent with wherever it landed.
-    assert_eq!(mapped.base.wrapping_sub(obj.preferred_base().unwrap()), mapped.slide);
+    assert_eq!(
+        mapped.base.wrapping_sub(obj.preferred_base().unwrap()),
+        mapped.slide
+    );
 
     let mut magic = [0u8; 4];
     mem.read(mapped.base, &mut magic).unwrap();
@@ -111,7 +138,10 @@ fn maps_into_host_memory_without_execute_permission() {
     let conflicts = protect_segments(&obj, &mut mem, mapped.slide, ProtectionPolicy::Coalesce)
         .expect("coalesced protection must succeed");
 
-    assert!(!X86_64.natively_executable(), "an x86-64 guest is never host-executable");
+    assert!(
+        !X86_64.natively_executable(),
+        "an x86-64 guest is never host-executable"
+    );
 
     // On a 16 KiB host with a 4 KiB image, __TEXT and __DATA share a page, so
     // at least one conflict is expected and must be reported rather than hidden.
@@ -130,13 +160,14 @@ fn maps_into_host_memory_without_execute_permission() {
 
 #[test]
 fn protection_policy_none_is_a_no_op() {
-    let Some(bytes) = common::system_binary(LS) else { skip!("{LS} not present") };
+    let Some(bytes) = common::system_binary(LS) else {
+        skip!("{LS} not present")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
 
     let mut mem = MmapSpace::new();
     let mapped = map_segments(&obj, &mut mem).unwrap();
-    let conflicts =
-        protect_segments(&obj, &mut mem, mapped.slide, ProtectionPolicy::None).unwrap();
+    let conflicts = protect_segments(&obj, &mut mem, mapped.slide, ProtectionPolicy::None).unwrap();
     assert!(conflicts.is_empty());
 
     // Still writable, which is the point of the None policy for a guest whose
@@ -146,7 +177,9 @@ fn protection_policy_none_is_a_no_op() {
 
 #[test]
 fn strict_policy_refuses_a_misaligned_image() {
-    let Some(bytes) = common::system_binary(LS) else { skip!("{LS} not present") };
+    let Some(bytes) = common::system_binary(LS) else {
+        skip!("{LS} not present")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
 
     let mut mem = MmapSpace::new();
@@ -156,7 +189,10 @@ fn strict_policy_refuses_a_misaligned_image() {
     // to say so out loud rather than silently mis-protect.
     let result = protect_segments(&obj, &mut mem, mapped.slide, ProtectionPolicy::Strict);
     if mem.protect_granularity() > obj.spec().page_size() {
-        assert!(result.is_err(), "strict must reject a sub-granularity layout");
+        assert!(
+            result.is_err(),
+            "strict must reject a sub-granularity layout"
+        );
     }
 }
 

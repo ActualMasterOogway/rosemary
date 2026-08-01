@@ -18,7 +18,7 @@ use machish::fixups::decode_image;
 use machish::image::{MachObject, SymbolTable};
 use machish::loader::Loader;
 use machish::memory::{AddressSpace, BufferSpace};
-use machish::resolve::{eager_binding_shims, NativeDylibProvider, SymbolProvider};
+use machish::resolve::{NativeDylibProvider, SymbolProvider, eager_binding_shims};
 use machish::spec::arch::X86_64;
 
 /// A class with an ivar, a property, an instance method, a class method, and a
@@ -76,7 +76,11 @@ fn objc_of(name: &str, source: &str) -> Option<(Vec<u8>, u64, ObjcImage)> {
     let (bytes, report) = link(name, source)?;
     let img = report.root().unwrap();
     let slide = img.slide;
-    Some((bytes.clone(), slide, img.objc.clone().expect("the fixture declares classes")))
+    Some((
+        bytes.clone(),
+        slide,
+        img.objc.clone().expect("the fixture declares classes"),
+    ))
 }
 
 #[test]
@@ -85,7 +89,11 @@ fn a_class_is_decoded_whole() {
         skip!("cc -arch x86_64 with Foundation unavailable")
     };
 
-    assert!(objc.refusals.is_empty(), "unexpected refusals: {:?}", objc.refusals);
+    assert!(
+        objc.refusals.is_empty(),
+        "unexpected refusals: {:?}",
+        objc.refusals
+    );
 
     let g = objc
         .classes
@@ -104,10 +112,17 @@ fn a_class_is_decoded_whole() {
     let meta = g.meta.as_ref().expect("the metaclass is in this image");
     assert!(meta.ro.is_meta(), "the metaclass's ro must carry RO_META");
     assert_eq!(
-        meta.ro.methods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+        meta.ro
+            .methods
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect::<Vec<_>>(),
         ["zero"]
     );
-    assert_eq!(meta.ro.name, g.ro.name, "a metaclass shares its class's name");
+    assert_eq!(
+        meta.ro.name, g.ro.name,
+        "a metaclass shares its class's name"
+    );
 
     assert_eq!(g.ro.ivars.len(), 1);
     assert_eq!(g.ro.ivars[0].name, "_n");
@@ -124,14 +139,20 @@ fn a_class_is_decoded_whole() {
         .find(|p| p.name == "Doubling")
         .expect("the fixture defines the Doubling protocol");
     assert_eq!(
-        d.instance_methods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+        d.instance_methods
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect::<Vec<_>>(),
         ["twice:"]
     );
     // `@optional` is a separate list, and conflating the two would make every
     // optional method look required — which is a decision the runtime makes
     // differently.
     assert_eq!(
-        d.optional_instance_methods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+        d.optional_instance_methods
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect::<Vec<_>>(),
         ["maybe"]
     );
 }
@@ -147,17 +168,33 @@ fn every_method_carries_its_type_encoding() {
     let Some((_, _, objc)) = objc_of("objc_types", CLASS_SRC) else {
         skip!("cc -arch x86_64 with Foundation unavailable")
     };
-    let g = objc.classes.iter().find(|c| c.ro.name == "Greeter").unwrap();
+    let g = objc
+        .classes
+        .iter()
+        .find(|c| c.ro.name == "Greeter")
+        .unwrap();
 
     let twice = g.ro.methods.iter().find(|m| m.name == "twice:").unwrap();
     // `i` returned; `@` self, `:` the selector, `i` the argument. The digits are
     // frame offsets, which vary with the ABI and are not asserted on.
-    assert!(twice.types.starts_with('i'), "returns int, got {:?}", twice.types);
-    let letters: String = twice.types.chars().filter(|c| !c.is_ascii_digit()).collect();
+    assert!(
+        twice.types.starts_with('i'),
+        "returns int, got {:?}",
+        twice.types
+    );
+    let letters: String = twice
+        .types
+        .chars()
+        .filter(|c| !c.is_ascii_digit())
+        .collect();
     assert_eq!(letters, "i@:i");
 
     let set_n = g.ro.methods.iter().find(|m| m.name == "setN:").unwrap();
-    let letters: String = set_n.types.chars().filter(|c| !c.is_ascii_digit()).collect();
+    let letters: String = set_n
+        .types
+        .chars()
+        .filter(|c| !c.is_ascii_digit())
+        .collect();
     assert_eq!(letters, "v@:i", "a setter returns void and takes one int");
 
     for m in &g.ro.methods {
@@ -178,12 +215,19 @@ fn every_implementation_is_a_guest_text_address() {
         skip!("cc -arch x86_64 with Foundation unavailable")
     };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
-    let text: Vec<_> = obj.sections.iter().filter(|s| s.seg_name == "__TEXT").collect();
+    let text: Vec<_> = obj
+        .sections
+        .iter()
+        .filter(|s| s.seg_name == "__TEXT")
+        .collect();
 
     let mut n = 0;
     for imp in objc.implementations() {
         let unslid = imp.wrapping_sub(slide);
-        assert!(text.iter().any(|s| s.contains(unslid)), "imp {imp:#x} is not in __TEXT");
+        assert!(
+            text.iter().any(|s| s.contains(unslid)),
+            "imp {imp:#x} is not in __TEXT"
+        );
         n += 1;
     }
     assert_eq!(n, 4, "three instance methods and one class method");
@@ -196,12 +240,19 @@ fn a_category_on_a_host_class_names_a_host_address() {
     let Some((bytes, slide, objc)) = objc_of("objc_category", CATEGORY_SRC) else {
         skip!("cc -arch x86_64 with Foundation unavailable")
     };
-    assert!(objc.refusals.is_empty(), "unexpected refusals: {:?}", objc.refusals);
+    assert!(
+        objc.refusals.is_empty(),
+        "unexpected refusals: {:?}",
+        objc.refusals
+    );
 
     let cat = objc.categories.first().expect("a category on NSString");
     assert_eq!(cat.name, "Doubling");
     assert_eq!(
-        cat.instance_methods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+        cat.instance_methods
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect::<Vec<_>>(),
         ["doubledLength"]
     );
 
@@ -214,7 +265,10 @@ fn a_category_on_a_host_class_names_a_host_address() {
     );
     // And the method it adds is still ours.
     let imp = cat.instance_methods[0].imp;
-    assert!(obj.section_at(imp.wrapping_sub(slide)).is_some(), "the imp is guest code");
+    assert!(
+        obj.section_at(imp.wrapping_sub(slide)).is_some(),
+        "the imp is guest code"
+    );
 }
 
 /// The one pointer in a class that is *not* a pointer: `bits` carries three
@@ -226,16 +280,28 @@ fn the_class_ro_is_found_through_the_masked_bits_word() {
         skip!("cc -arch x86_64 with Foundation unavailable")
     };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
-    let g = objc.classes.iter().find(|c| c.ro.name == "Greeter").unwrap();
+    let g = objc
+        .classes
+        .iter()
+        .find(|c| c.ro.name == "Greeter")
+        .unwrap();
 
     // The `objc_class` itself is in `__objc_data`, its read-only half in
     // `__objc_const`. Two different sections, which is what makes this
     // checkable without knowing either address.
-    let class_sect = obj.section_at(g.va.wrapping_sub(slide)).expect("the class is in this image");
-    let ro_sect = obj.section_at(g.ro.va.wrapping_sub(slide)).expect("the ro is in this image");
+    let class_sect = obj
+        .section_at(g.va.wrapping_sub(slide))
+        .expect("the class is in this image");
+    let ro_sect = obj
+        .section_at(g.ro.va.wrapping_sub(slide))
+        .expect("the ro is in this image");
     assert_eq!(class_sect.sect_name, "__objc_data");
     assert_eq!(ro_sect.sect_name, "__objc_const");
-    assert_eq!(g.ro.va & 7, 0, "the ro pointer is aligned; no flag bits survived");
+    assert_eq!(
+        g.ro.va & 7,
+        0,
+        "the ro pointer is aligned; no flag bits survived"
+    );
 
     // A root class derives from nothing; Greeter does not, so its superclass is
     // the bound address of the host's NSObject.
@@ -270,13 +336,17 @@ fn selector_reference_slots_are_reported_by_address() {
 
     assert!(!objc.selector_refs.is_empty(), "the fixture sends messages");
     for &slot in &objc.selector_refs {
-        let sect = obj.section_at(slot.wrapping_sub(slide)).expect("slot is in this image");
+        let sect = obj
+            .section_at(slot.wrapping_sub(slide))
+            .expect("slot is in this image");
         assert_eq!(sect.sect_name, "__objc_selrefs");
     }
     // `[Greeter new]` reads the class from a classref slot rather than from a
     // symbol, which is why the runtime has to fix those up too.
     for &slot in &objc.class_refs {
-        let sect = obj.section_at(slot.wrapping_sub(slide)).expect("slot is in this image");
+        let sect = obj
+            .section_at(slot.wrapping_sub(slide))
+            .expect("slot is in this image");
         assert_eq!(sect.sect_name, "__objc_classrefs");
     }
 }
@@ -289,7 +359,9 @@ fn the_image_info_flag_decides_how_wide_a_category_is() {
     let Some((_, _, objc)) = objc_of("objc_imageinfo", CATEGORY_SRC) else {
         skip!("cc -arch x86_64 with Foundation unavailable")
     };
-    let info = objc.image_info.expect("any image with __objc_* has an imageinfo section");
+    let info = objc
+        .image_info
+        .expect("any image with __objc_* has an imageinfo section");
     assert!(
         info.has_category_class_properties(),
         "every current toolchain sets it; flags were {:#x}",
@@ -309,11 +381,9 @@ fn both_fixup_encodings_decode_to_the_same_metadata() {
     let Some(chained) = common::build_objc_x86_64("objc_chained", CLASS_SRC) else {
         skip!("cc -arch x86_64 with Foundation unavailable")
     };
-    let Some(classic) = common::build_objc_x86_64_flags(
-        "objc_classic",
-        CLASS_SRC,
-        &["-Wl,-no_fixup_chains"],
-    ) else {
+    let Some(classic) =
+        common::build_objc_x86_64_flags("objc_classic", CLASS_SRC, &["-Wl,-no_fixup_chains"])
+    else {
         skip!("this toolchain cannot emit LC_DYLD_INFO")
     };
 
@@ -367,8 +437,9 @@ fn a_plain_c_image_declares_nothing() {
     let shims = eager_binding_shims();
     let native = NativeDylibProvider::system();
     let providers: [&dyn SymbolProvider; 2] = [&shims, &native];
-    let report =
-        Loader::new(X86_64).link(&bytes, "/tmp/objc_none", &mut mem, &providers).unwrap();
+    let report = Loader::new(X86_64)
+        .link(&bytes, "/tmp/objc_none", &mut mem, &providers)
+        .unwrap();
     assert!(report.root().unwrap().objc.is_none());
 }
 
@@ -407,8 +478,7 @@ fn corrupting_the_metadata_never_panics() {
                 let native = NativeDylibProvider::system();
                 let providers: [&dyn SymbolProvider; 2] = [&shims, &native];
                 // Ok or Err, never a panic and never a hang.
-                let _ =
-                    Loader::new(X86_64).link(&corrupt, "/tmp/objc_fuzz", &mut mem, &providers);
+                let _ = Loader::new(X86_64).link(&corrupt, "/tmp/objc_fuzz", &mut mem, &providers);
             }
         }
     }
@@ -432,34 +502,51 @@ fn a_relative_method_list_is_refused_by_name() {
     let shims = eager_binding_shims();
     let native = NativeDylibProvider::system();
     let providers: [&dyn SymbolProvider; 2] = [&shims, &native];
-    let report =
-        Loader::new(X86_64).link(&bytes, "/tmp/objc_small", &mut mem, &providers).unwrap();
+    let report = Loader::new(X86_64)
+        .link(&bytes, "/tmp/objc_small", &mut mem, &providers)
+        .unwrap();
     let img = report.root().unwrap();
-    let g = img.objc.as_ref().unwrap().classes.iter().find(|c| c.ro.name == "Greeter").unwrap();
+    let g = img
+        .objc
+        .as_ref()
+        .unwrap()
+        .classes
+        .iter()
+        .find(|c| c.ro.name == "Greeter")
+        .unwrap();
 
     // `baseMethods` is at +32 in the `class_ro_t`; read the list's address out
     // of memory rather than recomputing it.
     let mut buf = [0u8; 8];
     mem.read(g.ro.va + 32, &mut buf).unwrap();
     let list_va = u64::from_le_bytes(buf);
-    let list_off = obj.vmaddr_to_off(list_va.wrapping_sub(img.slide)).expect("list is in the file");
+    let list_off = obj
+        .vmaddr_to_off(list_va.wrapping_sub(img.slide))
+        .expect("list is in the file");
 
     let mut corrupt = bytes.clone();
     corrupt[list_off + 3] |= 0x80;
 
     let mut mem = BufferSpace::new(0x1_0000_0000);
-    let report =
-        Loader::new(X86_64).link(&corrupt, "/tmp/objc_small", &mut mem, &providers).unwrap();
+    let report = Loader::new(X86_64)
+        .link(&corrupt, "/tmp/objc_small", &mut mem, &providers)
+        .unwrap();
     let objc = report.root().unwrap().objc.clone().unwrap();
 
     assert!(
-        objc.refusals.iter().any(|r| matches!(r, ObjcRefusal::SmallMethodList { .. })),
+        objc.refusals
+            .iter()
+            .any(|r| matches!(r, ObjcRefusal::SmallMethodList { .. })),
         "expected a named refusal, got {:?}",
         objc.refusals
     );
     // And the refusal is local: the class is still decoded, with its name and
     // its ivars, because one undecodable list must not lose the other forty.
-    let g = objc.classes.iter().find(|c| c.ro.name == "Greeter").unwrap();
+    let g = objc
+        .classes
+        .iter()
+        .find(|c| c.ro.name == "Greeter")
+        .unwrap();
     assert!(g.ro.methods.is_empty());
     assert_eq!(g.ro.ivars.len(), 1);
 }
@@ -515,7 +602,9 @@ fn the_metadata_pointers_are_all_rebases() {
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
     let (_, fixups) = decode_image(&obj).expect("the image has fixups");
     assert!(
-        fixups.iter().any(|f| !matches!(f, machish::fixups::Fixup::Bind { .. })),
+        fixups
+            .iter()
+            .any(|f| !matches!(f, machish::fixups::Fixup::Bind { .. })),
         "an Objective-C image is full of internal pointers, so it must rebase"
     );
 }

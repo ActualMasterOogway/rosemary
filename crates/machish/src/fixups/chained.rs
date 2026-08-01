@@ -40,8 +40,8 @@ use crate::error::{Error, Result};
 use crate::fixups::{BindKind, Fixup, FixupDecoder, LibraryRef, SymbolRef};
 use crate::image::MachObject;
 use crate::raw::{View, Word};
-use crate::spec::constants as c;
 use crate::spec::MachSpec;
+use crate::spec::constants as c;
 
 /// Ceiling on links followed in one page's chain. Every 64-bit format advances
 /// by at least four bytes per link, so a 16 KiB page holds at most 4096 — this
@@ -65,14 +65,20 @@ impl<S: MachSpec> FixupDecoder<S> for ChainedFixups {
     }
 
     fn decode<'a>(&self, obj: &MachObject<'a, S>, out: &mut Vec<Fixup<'a>>) -> Result<()> {
-        let Some(data) = obj.chained_fixups() else { return Ok(()) };
-        let Some(range) = data.range() else { return Ok(()) };
+        let Some(data) = obj.chained_fixups() else {
+            return Ok(());
+        };
+        let Some(range) = data.range() else {
+            return Ok(());
+        };
 
         // Narrow to the command's own extent up front, so every offset inside
         // is checked against the structure rather than against the file: a
         // `starts_offset` pointing into `__TEXT` is then a parse error instead
         // of a successful read of unrelated bytes.
-        let header = obj.view().subview(range.start, range.end - range.start, "chained fixups")?;
+        let header = obj
+            .view()
+            .subview(range.start, range.end - range.start, "chained fixups")?;
 
         let starts_offset = header.u32(4)? as usize;
         let imports_offset = header.u32(8)? as usize;
@@ -106,7 +112,9 @@ fn decode_starts<'a, S: MachSpec>(
 ) -> Result<()> {
     let seg_count = header.u32(starts_offset)? as usize;
     if seg_count > obj.segments.len() {
-        return Err(Error::BadLoadCommand { why: "chained starts segment count" });
+        return Err(Error::BadLoadCommand {
+            why: "chained starts segment count",
+        });
     }
 
     for i in 0..seg_count {
@@ -118,7 +126,9 @@ fn decode_starts<'a, S: MachSpec>(
         }
         let at = starts_offset
             .checked_add(seg_info)
-            .ok_or(Error::Truncated { what: "chained starts_in_segment" })?;
+            .ok_or(Error::Truncated {
+                what: "chained starts_in_segment",
+            })?;
         decode_segment(obj, header, at, i, imports, out)?;
     }
     Ok(())
@@ -145,7 +155,9 @@ fn decode_segment<'a, S: MachSpec>(
     let page_count = header.u16(at + 20)? as usize;
 
     if page_size == 0 || !page_size.is_power_of_two() {
-        return Err(Error::BadLoadCommand { why: "chained page size" });
+        return Err(Error::BadLoadCommand {
+            why: "chained page size",
+        });
     }
     if c::is_arm64e_pointer_format(pointer_format) {
         // Refused specifically. See the module note: the high bits are a PAC
@@ -155,17 +167,19 @@ fn decode_segment<'a, S: MachSpec>(
             value: u32::from(pointer_format),
         });
     }
-    if !matches!(pointer_format, c::DYLD_CHAINED_PTR_64 | c::DYLD_CHAINED_PTR_64_OFFSET) {
+    if !matches!(
+        pointer_format,
+        c::DYLD_CHAINED_PTR_64 | c::DYLD_CHAINED_PTR_64_OFFSET
+    ) {
         return Err(Error::UnknownFixup {
             format: "chained pointer format",
             value: u32::from(pointer_format),
         });
     }
 
-    let seg = obj
-        .segments
-        .get(seg_index)
-        .ok_or(Error::BadLoadCommand { why: "chained segment index out of range" })?;
+    let seg = obj.segments.get(seg_index).ok_or(Error::BadLoadCommand {
+        why: "chained segment index out of range",
+    })?;
     // `segment_offset` is from the image base, and is authoritative: trusting
     // the segment's own `vmaddr` instead would desynchronize on any image where
     // the two disagree, which is exactly the case worth catching.
@@ -181,7 +195,14 @@ fn decode_segment<'a, S: MachSpec>(
         let page_base = seg_start.wrapping_add(page as u64 * page_size);
 
         if start & c::DYLD_CHAINED_PTR_START_MULTI == 0 {
-            walk_chain(obj, page_base + u64::from(start), pointer_format, imports, seg, out)?;
+            walk_chain(
+                obj,
+                page_base + u64::from(start),
+                pointer_format,
+                imports,
+                seg,
+                out,
+            )?;
             continue;
         }
         // Overflow form: the low bits index further into the same array, where
@@ -190,7 +211,14 @@ fn decode_segment<'a, S: MachSpec>(
         loop {
             let entry = header.u16(starts_at + idx * 2)?;
             let offset = entry & !c::DYLD_CHAINED_PTR_START_LAST;
-            walk_chain(obj, page_base + u64::from(offset), pointer_format, imports, seg, out)?;
+            walk_chain(
+                obj,
+                page_base + u64::from(offset),
+                pointer_format,
+                imports,
+                seg,
+                out,
+            )?;
             if entry & c::DYLD_CHAINED_PTR_START_LAST != 0 {
                 break;
             }
@@ -246,7 +274,10 @@ fn walk_chain<'a, S: MachSpec>(
                 // `_64_OFFSET` stores an offset from the image base.
                 _ => image_base.wrapping_add(target),
             };
-            out.push(Fixup::RebaseTo { at, target: target | high8 << 56 });
+            out.push(Fixup::RebaseTo {
+                at,
+                target: target | high8 << 56,
+            });
         }
 
         let next = raw >> 51 & 0xfff;
@@ -280,7 +311,12 @@ impl<'a> ImportTable<'a> {
             c::DYLD_CHAINED_IMPORT => 4,
             c::DYLD_CHAINED_IMPORT_ADDEND => 8,
             c::DYLD_CHAINED_IMPORT_ADDEND64 => 16,
-            other => return Err(Error::UnknownFixup { format: "chained imports", value: other }),
+            other => {
+                return Err(Error::UnknownFixup {
+                    format: "chained imports",
+                    value: other,
+                });
+            }
         })
     }
 
@@ -293,7 +329,9 @@ impl<'a> ImportTable<'a> {
         let bytes = self
             .count
             .checked_mul(self.stride()?)
-            .ok_or(Error::Truncated { what: "chained imports" })?;
+            .ok_or(Error::Truncated {
+                what: "chained imports",
+            })?;
         self.header.slice(self.offset, bytes, "chained imports")?;
         Ok(())
     }
@@ -313,7 +351,12 @@ impl<'a> ImportTable<'a> {
         let (ordinal, weak_import, name_offset, addend) = match self.format {
             c::DYLD_CHAINED_IMPORT => {
                 let v = self.header.u32(at)?;
-                (i32::from((v & 0xff) as u8 as i8), v >> 8 & 1 != 0, (v >> 9) as usize, 0i64)
+                (
+                    i32::from((v & 0xff) as u8 as i8),
+                    v >> 8 & 1 != 0,
+                    (v >> 9) as usize,
+                    0i64,
+                )
             }
             c::DYLD_CHAINED_IMPORT_ADDEND => {
                 let v = self.header.u32(at)?;
@@ -337,13 +380,23 @@ impl<'a> ImportTable<'a> {
             }
         };
 
-        let name = self.header.cstr(
-            self.symbols
-                .checked_add(name_offset)
-                .ok_or(Error::Truncated { what: "chained import name" })?,
-        )?;
+        let name =
+            self.header.cstr(
+                self.symbols
+                    .checked_add(name_offset)
+                    .ok_or(Error::Truncated {
+                        what: "chained import name",
+                    })?,
+            )?;
 
-        Ok((SymbolRef { name, library: library_ref(obj, ordinal), weak_import }, addend))
+        Ok((
+            SymbolRef {
+                name,
+                library: library_ref(obj, ordinal),
+                weak_import,
+            },
+            addend,
+        ))
     }
 }
 

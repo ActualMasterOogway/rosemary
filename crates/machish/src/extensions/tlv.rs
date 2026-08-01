@@ -40,7 +40,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::error::Result;
-use crate::extensions::{read_words, Extension};
+use crate::extensions::{Extension, read_words};
 use crate::fixups::{Fixup, LibraryRef};
 use crate::image::MachObject;
 use crate::memory::AddressSpace;
@@ -84,7 +84,10 @@ impl TlvExtension {
 
     /// Enumerate descriptors but leave the fixup stream alone.
     pub fn observe_only() -> Self {
-        TlvExtension { redirect: Vec::new(), rename_to: None }
+        TlvExtension {
+            redirect: Vec::new(),
+            rename_to: None,
+        }
     }
 
     /// Also redirect `symbol`.
@@ -127,7 +130,9 @@ impl<S: MachSpec> Extension<S> for TlvExtension {
             return Ok(());
         }
         for f in fixups.iter_mut() {
-            let Fixup::Bind { symbol, .. } = f else { continue };
+            let Fixup::Bind { symbol, .. } = f else {
+                continue;
+            };
             if !self.wants(symbol.name) {
                 continue;
             }
@@ -192,7 +197,10 @@ fn leak_static(name: &str) -> &'static str {
     }
 
     let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
-    let node = Box::into_raw(Box::new(Node { name: leaked, next: HEAD.load(Ordering::Acquire) }));
+    let node = Box::into_raw(Box::new(Node {
+        name: leaked,
+        next: HEAD.load(Ordering::Acquire),
+    }));
     // A lost race duplicates one small allocation and is otherwise harmless:
     // both copies are valid `'static` strs with equal contents.
     loop {
@@ -243,7 +251,10 @@ pub fn tlv_template<S: MachSpec>(obj: &MachObject<'_, S>, slide: Word) -> Option
         // allocation could not honour it anyway: `align` is a log2 in the file
         // and nothing checks it, so a corrupt image must not become a shift
         // overflow here.
-        align: data.map_or(0, |s| s.align).max(bss.map_or(0, |s| s.align)).min(16),
+        align: data
+            .map_or(0, |s| s.align)
+            .max(bss.map_or(0, |s| s.align))
+            .min(16),
     })
 }
 
@@ -254,7 +265,11 @@ pub fn collect_thread_locals<S: MachSpec>(
     slide: Word,
 ) -> Result<Vec<ThreadLocalDescriptor>> {
     let mut out = Vec::new();
-    for sect in obj.sections.iter().filter(|s| s.is_thread_local_variables()) {
+    for sect in obj
+        .sections
+        .iter()
+        .filter(|s| s.is_thread_local_variables())
+    {
         let count = usize::try_from(sect.entry_count(DESCRIPTOR_SIZE)).unwrap_or(0);
         let base = sect.addr.wrapping_add(slide);
         let words = read_words(mem, base, count * DESCRIPTOR_WORDS as usize)?;

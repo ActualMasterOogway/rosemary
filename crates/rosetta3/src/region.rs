@@ -141,7 +141,9 @@ fn walk(bytes: &[u8], base: u64, start: u64, bound: u64) -> Option<Region> {
                 break;
             }
             budget -= 1;
-            let Ok(off) = usize::try_from(ip.wrapping_sub(base)) else { break };
+            let Ok(off) = usize::try_from(ip.wrapping_sub(base)) else {
+                break;
+            };
             if off >= bytes.len() {
                 break;
             }
@@ -178,9 +180,7 @@ fn walk(bytes: &[u8], base: u64, start: u64, bound: u64) -> Option<Region> {
 
                 // Nothing further is reachable without running the program,
                 // which is the JIT's job rather than this walk's.
-                FlowControl::Return
-                | FlowControl::IndirectBranch
-                | FlowControl::Exception => break,
+                FlowControl::Return | FlowControl::IndirectBranch | FlowControl::Exception => break,
             }
         }
     }
@@ -200,7 +200,10 @@ fn walk(bytes: &[u8], base: u64, start: u64, bound: u64) -> Option<Region> {
     }
     let end = end.min(base + bytes.len() as u64);
     let starts: Vec<u64> = covered.keys().copied().take_while(|&a| a < end).collect();
-    Some(Region { range: start..end, starts })
+    Some(Region {
+        range: start..end,
+        starts,
+    })
 }
 
 #[cfg(test)]
@@ -273,7 +276,10 @@ mod tests {
         // Entering at the `ret` still lifts from the function's first
         // instruction, so every entry shares one translation.
         let code = [0x31, 0xC0, 0xC3];
-        assert_eq!(range(&code, BASE + 2, Some(BASE..BASE + 3)), Some(BASE..BASE + 3));
+        assert_eq!(
+            range(&code, BASE + 2, Some(BASE..BASE + 3)),
+            Some(BASE..BASE + 3)
+        );
     }
 
     #[test]
@@ -292,7 +298,10 @@ mod tests {
         // `mov eax, imm32` is five bytes and the function is recorded as four,
         // so it belongs to whatever the record says comes next.
         let code = [0x90, 0xB8, 0x01, 0x00, 0x00, 0x00];
-        assert_eq!(range(&code, BASE, Some(BASE..BASE + 4)), Some(BASE..BASE + 1));
+        assert_eq!(
+            range(&code, BASE, Some(BASE..BASE + 4)),
+            Some(BASE..BASE + 1)
+        );
     }
 
     #[test]
@@ -341,6 +350,9 @@ mod tests {
         assert_eq!(r.range, BASE..BASE + 7);
         assert_eq!(r.starts, vec![BASE, BASE + 1, BASE + 6]);
         assert!(r.covers(BASE + 6));
-        assert!(!r.covers(BASE + 3), "an immediate byte is not an instruction");
+        assert!(
+            !r.covers(BASE + 3),
+            "an immediate byte is not an instruction"
+        );
     }
 }

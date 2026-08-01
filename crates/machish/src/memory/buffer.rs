@@ -24,7 +24,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
-use crate::memory::{align_up, AddressSpace, Placement, Prot};
+use crate::memory::{AddressSpace, Placement, Prot, align_up};
 use crate::raw::Word;
 
 /// One reserved region.
@@ -59,7 +59,10 @@ impl BufferSpace {
     /// to collide with, which is exactly what makes it useful for asserting
     /// that a fixup landed at the VA the file asked for.
     pub fn new(default_base: Word) -> Self {
-        BufferSpace { default_base, regions: Vec::new() }
+        BufferSpace {
+            default_base,
+            regions: Vec::new(),
+        }
     }
 
     /// Base address of the first region reserved.
@@ -84,7 +87,10 @@ impl BufferSpace {
     /// The region containing `addr`, as `(base, bytes)` — e.g. to hand an
     /// image's mapped contents to a recompiler.
     pub fn region_at(&self, addr: Word) -> Option<(Word, &[u8])> {
-        let r = self.regions.iter().find(|r| addr >= r.base && addr < r.end())?;
+        let r = self
+            .regions
+            .iter()
+            .find(|r| addr >= r.base && addr < r.end())?;
         Some((r.base, &r.mem))
     }
 
@@ -101,8 +107,12 @@ impl BufferSpace {
 
     fn find(&self, addr: Word, len: usize) -> Result<(usize, usize)> {
         for (i, r) in self.regions.iter().enumerate() {
-            let Some(off) = addr.checked_sub(r.base) else { continue };
-            let Ok(off) = usize::try_from(off) else { continue };
+            let Some(off) = addr.checked_sub(r.base) else {
+                continue;
+            };
+            let Ok(off) = usize::try_from(off) else {
+                continue;
+            };
             // `>=`, not `>`: an address exactly at one region's end is the
             // *next* region's first byte when they abut, and treating it as
             // belonging to this one would reject every access to the second
@@ -169,21 +179,32 @@ impl AddressSpace for BufferSpace {
                 if self.regions.iter().any(|r| r.overlaps(want, size)) {
                     // Slide rather than fail: `Preferred` is the image saying it
                     // tolerates being moved, and the loader records the slide.
-                    let highest =
-                        self.regions.iter().map(|r| r.end()).max().unwrap_or(self.default_base);
+                    let highest = self
+                        .regions
+                        .iter()
+                        .map(|r| r.end())
+                        .max()
+                        .unwrap_or(self.default_base);
                     self.first_free(highest, size, align)
                 } else {
                     want
                 }
             }
             Placement::Anywhere => {
-                let from =
-                    self.regions.iter().map(|r| r.end()).max().unwrap_or(self.default_base);
+                let from = self
+                    .regions
+                    .iter()
+                    .map(|r| r.end())
+                    .max()
+                    .unwrap_or(self.default_base);
                 self.first_free(from, size, align)
             }
         };
 
-        self.regions.push(Region { base, mem: vec![0u8; size] });
+        self.regions.push(Region {
+            base,
+            mem: vec![0u8; size],
+        });
         Ok(base)
     }
 
@@ -215,7 +236,9 @@ mod tests {
     #[test]
     fn honours_preferred_placement() {
         let mut mem = BufferSpace::new(0);
-        let base = mem.reserve(0x2000, 0x1000, Placement::Preferred(0x1_0000_0000)).unwrap();
+        let base = mem
+            .reserve(0x2000, 0x1000, Placement::Preferred(0x1_0000_0000))
+            .unwrap();
         assert_eq!(base, 0x1_0000_0000);
         assert_eq!(mem.base(), 0x1_0000_0000);
         assert_eq!(mem.len(), 0x2000);
@@ -261,10 +284,15 @@ mod tests {
     #[test]
     fn several_images_get_several_disjoint_regions() {
         let mut mem = BufferSpace::new(0x1_0000_0000);
-        let a = mem.reserve(0x2000, 0x1000, Placement::Preferred(0x1_0000_0000)).unwrap();
+        let a = mem
+            .reserve(0x2000, 0x1000, Placement::Preferred(0x1_0000_0000))
+            .unwrap();
         let b = mem.reserve(0x2000, 0x1000, Placement::Anywhere).unwrap();
         assert_eq!(a, 0x1_0000_0000);
-        assert!(b >= a + 0x2000, "the second region must not overlap the first");
+        assert!(
+            b >= a + 0x2000,
+            "the second region must not overlap the first"
+        );
         assert_eq!(mem.region_count(), 2);
 
         // Each addressable independently, with no bleed between them.
@@ -280,26 +308,41 @@ mod tests {
     #[test]
     fn a_preferred_placement_that_collides_slides_instead_of_failing() {
         let mut mem = BufferSpace::new(0);
-        let a = mem.reserve(0x2000, 0x1000, Placement::Fixed(0x1_0000_0000)).unwrap();
-        let b = mem.reserve(0x1000, 0x1000, Placement::Preferred(0x1_0000_0000)).unwrap();
+        let a = mem
+            .reserve(0x2000, 0x1000, Placement::Fixed(0x1_0000_0000))
+            .unwrap();
+        let b = mem
+            .reserve(0x1000, 0x1000, Placement::Preferred(0x1_0000_0000))
+            .unwrap();
         assert_eq!(a, 0x1_0000_0000);
-        assert!(b >= a + 0x2000, "a colliding preferred placement must slide");
+        assert!(
+            b >= a + 0x2000,
+            "a colliding preferred placement must slide"
+        );
     }
 
     #[test]
     fn a_fixed_placement_that_collides_is_an_error() {
         let mut mem = BufferSpace::new(0);
-        mem.reserve(0x2000, 0x1000, Placement::Fixed(0x1_0000_0000)).unwrap();
+        mem.reserve(0x2000, 0x1000, Placement::Fixed(0x1_0000_0000))
+            .unwrap();
         // A non-PIE image has its addresses baked into its code; sliding it
         // silently would produce something that links and jumps into nothing.
-        assert!(mem.reserve(0x1000, 0x1000, Placement::Fixed(0x1_0000_1000)).is_err());
+        assert!(
+            mem.reserve(0x1000, 0x1000, Placement::Fixed(0x1_0000_1000))
+                .is_err()
+        );
     }
 
     #[test]
     fn region_lookup_finds_the_right_backing_bytes() {
         let mut mem = BufferSpace::new(0);
-        let a = mem.reserve(0x1000, 0x1000, Placement::Fixed(0x1_0000_0000)).unwrap();
-        let b = mem.reserve(0x1000, 0x1000, Placement::Fixed(0x2_0000_0000)).unwrap();
+        let a = mem
+            .reserve(0x1000, 0x1000, Placement::Fixed(0x1_0000_0000))
+            .unwrap();
+        let b = mem
+            .reserve(0x1000, 0x1000, Placement::Fixed(0x2_0000_0000))
+            .unwrap();
         mem.write(b, &[0x77; 4]).unwrap();
 
         assert_eq!(mem.region_at(a).map(|(base, _)| base), Some(a));

@@ -38,8 +38,8 @@ use alloc::collections::BTreeMap;
 use crate::error::Result;
 use crate::image::{MachObject, SymbolTable};
 use crate::raw::Word;
-use crate::spec::constants as c;
 use crate::spec::MachSpec;
+use crate::spec::constants as c;
 
 /// Unslid slot VA to unslid stub VA, for every slot that has a stub.
 #[derive(Clone, Debug, Default)]
@@ -73,7 +73,9 @@ impl StubMap {
             }
             let stride = u64::from(sect.reserved2);
             for i in 0..sect.entry_count(stride) {
-                let Some(sym) = indirect_at(&table, sect.reserved1, i) else { continue };
+                let Some(sym) = indirect_at(&table, sect.reserved1, i) else {
+                    continue;
+                };
                 let va = sect.addr.wrapping_add(i * stride);
                 stub_of_symbol.entry(sym).or_insert(va);
             }
@@ -87,8 +89,12 @@ impl StubMap {
                 continue;
             }
             for j in 0..sect.entry_count(c::POINTER_SIZE) {
-                let Some(sym) = indirect_at(&table, sect.reserved1, j) else { continue };
-                let Some(&stub) = stub_of_symbol.get(&sym) else { continue };
+                let Some(sym) = indirect_at(&table, sect.reserved1, j) else {
+                    continue;
+                };
+                let Some(&stub) = stub_of_symbol.get(&sym) else {
+                    continue;
+                };
                 let slot = sect.addr.wrapping_add(j * c::POINTER_SIZE);
                 map.by_slot.insert(slot, stub);
             }

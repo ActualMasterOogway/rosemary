@@ -68,7 +68,14 @@ impl<'a> VarArgs<'a> {
         mem: &'a dyn GuestMemory,
         fixed_int: usize,
     ) -> Self {
-        VarArgs { symbol, ctx, mem, int: fixed_int, fp: 0, stack: 0 }
+        VarArgs {
+            symbol,
+            ctx,
+            mem,
+            int: fixed_int,
+            fp: 0,
+            stack: 0,
+        }
     }
 
     fn next_stack(&mut self) -> Result<u64> {
@@ -190,11 +197,19 @@ pub fn render(fmt: &[u8], args: &mut VarArgs<'_>) -> Result<Vec<u8>> {
         loop {
             match fmt.get(i) {
                 Some(b'h') => {
-                    len = if len == Len::Short { Len::Char } else { Len::Short };
+                    len = if len == Len::Short {
+                        Len::Char
+                    } else {
+                        Len::Short
+                    };
                     i += 1;
                 }
                 Some(b'l') => {
-                    len = if len == Len::Long { Len::LongLong } else { Len::Long };
+                    len = if len == Len::Long {
+                        Len::LongLong
+                    } else {
+                        Len::Long
+                    };
                     i += 1;
                 }
                 // `z`, `j`, `t` are all 64-bit here, and so is BSD's `q`
@@ -326,7 +341,11 @@ fn digits(mut v: u64, base: u64, upper: bool) -> Vec<u8> {
     if v == 0 {
         return vec![b'0'];
     }
-    let alphabet: &[u8] = if upper { b"0123456789ABCDEF" } else { b"0123456789abcdef" };
+    let alphabet: &[u8] = if upper {
+        b"0123456789ABCDEF"
+    } else {
+        b"0123456789abcdef"
+    };
     let mut out = Vec::new();
     while v > 0 {
         out.push(alphabet[(v % base) as usize]);
@@ -385,7 +404,11 @@ fn exponential(mag: f64, prec: usize, upper: bool) -> String {
     // does, the exponent is one larger and the mantissa is 1.0.
     let (mantissa, exp) = {
         let rounded = format!("{scaled:.prec$}");
-        if rounded.starts_with("10") { (format!("{:.prec$}", scaled / 10.0), exp + 1) } else { (rounded, exp) }
+        if rounded.starts_with("10") {
+            (format!("{:.prec$}", scaled / 10.0), exp + 1)
+        } else {
+            (rounded, exp)
+        }
     };
     let e = if upper { 'E' } else { 'e' };
     let sign = if exp < 0 { '-' } else { '+' };
@@ -402,7 +425,10 @@ fn decimal_exponent(mag: f64, sig: usize) -> i32 {
         return 0;
     }
     let s = format!("{:.*e}", sig.saturating_sub(1), mag);
-    s.split('e').nth(1).and_then(|e| e.parse::<i32>().ok()).unwrap_or(0)
+    s.split('e')
+        .nth(1)
+        .and_then(|e| e.parse::<i32>().ok())
+        .unwrap_or(0)
 }
 
 fn powi10(exp: i32) -> f64 {
@@ -529,7 +555,8 @@ pub fn sprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemor
     let mut out = format_from(symbol, ctx, &*mem, ctx.rsi, 2)?;
     let written = out.len();
     out.push(0);
-    mem.write(ctx.rdi, &out).map_err(|_| bad_pointer(symbol, ctx.rdi))?;
+    mem.write(ctx.rdi, &out)
+        .map_err(|_| bad_pointer(symbol, ctx.rdi))?;
     set_int_return(ctx, written as i32);
     Ok(())
 }

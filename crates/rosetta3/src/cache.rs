@@ -39,11 +39,11 @@ use std::sync::Arc;
 
 use machish::memory::Regions;
 
-use microlift::arch::x86_64::context::RegisterContext;
 use microlift::arch::x86_64::X86_64;
+use microlift::arch::x86_64::context::RegisterContext;
 use microlift::backend::CraneliftBackend;
 use microlift::core::exit::ExitReason;
-use microlift::core::{lift_to_function, LifterConfig};
+use microlift::core::{LifterConfig, lift_to_function};
 
 use crate::program::Program;
 use crate::vm::VmError;
@@ -129,7 +129,10 @@ impl CodeCache {
         // See the module note: without this, re-entering a region anywhere but
         // its first instruction quietly runs the wrong code.
         config.emit_resume_blocks = true;
-        CodeCache { regions: BTreeMap::new(), config }
+        CodeCache {
+            regions: BTreeMap::new(),
+            config,
+        }
     }
 
     /// How many regions have been translated.
@@ -158,7 +161,9 @@ impl CodeCache {
             .map_err(|source| VmError::Lift { pc, start, source })?;
         let mut backend =
             CraneliftBackend::new().map_err(|source| VmError::Lift { pc, start, source })?;
-        let code = backend.compile(func).map_err(|source| VmError::Lift { pc, start, source })?;
+        let code = backend
+            .compile(func)
+            .map_err(|source| VmError::Lift { pc, start, source })?;
 
         // SAFETY: `compile` returns the finalized entry of a function whose
         // signature the lifter fixed as `fn(*mut RegisterContext)` in the host
@@ -166,8 +171,13 @@ impl CodeCache {
         let entry: unsafe extern "C" fn(*mut RegisterContext) =
             unsafe { std::mem::transmute(code) };
 
-        let translation =
-            Arc::new(Translation { start, end, starts: region.starts, entry, _backend: backend });
+        let translation = Arc::new(Translation {
+            start,
+            end,
+            starts: region.starts,
+            entry,
+            _backend: backend,
+        });
         self.regions.insert(start, Arc::clone(&translation));
         Ok(translation)
     }
@@ -180,6 +190,10 @@ impl CodeCache {
         // So this asks each candidate whether `pc` is on *its* instruction
         // grid, nearest first, and a miss means lifting a region that starts at
         // `pc` rather than entering one that would run the wrong code.
-        self.regions.range(..=pc).rev().find(|(_, t)| t.covers(pc)).map(|(_, t)| Arc::clone(t))
+        self.regions
+            .range(..=pc)
+            .rev()
+            .find(|(_, t)| t.covers(pc))
+            .map(|(_, t)| Arc::clone(t))
     }
 }

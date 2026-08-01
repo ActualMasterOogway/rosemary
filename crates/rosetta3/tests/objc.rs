@@ -23,8 +23,8 @@ mod common;
 
 use std::ffi::CStr;
 
-use rosetta3::objc::{host, Refusal};
-use rosetta3::{startup, Program, Vm};
+use rosetta3::objc::{Refusal, host};
+use rosetta3::{Program, Vm, startup};
 
 /// Serializes every test that messages guest code.
 ///
@@ -55,8 +55,9 @@ fn vm_for(path: &str) -> &'static Vm {
     let program = Program::load_executable(path, &[])
         .unwrap_or_else(|e| panic!("linking {path} failed: {e}"));
     let args = [path.to_string()];
-    let vm: &'static Vm =
-        Box::leak(Box::new(Vm::new(program, path, &args).expect("a VM with a stack")));
+    let vm: &'static Vm = Box::leak(Box::new(
+        Vm::new(program, path, &args).expect("a VM with a stack"),
+    ));
     rosetta3::thunk::publish(vm);
     vm
 }
@@ -157,15 +158,24 @@ fn new_instance(cls: host::Class) -> host::Class {
 #[test]
 fn a_guest_class_is_visible_to_the_host_runtime_by_name() {
     let _lock = serialized();
-    let Some(vm) = fixture("Named") else { skip!("cannot build x86_64 Objective-C fixtures") };
+    let Some(vm) = fixture("Named") else {
+        skip!("cannot build x86_64 Objective-C fixtures")
+    };
     let rt = vm.register_objc().expect("registration");
-    assert!(rt.refusals().is_empty(), "unexpected refusals: {:?}", rt.refusals());
+    assert!(
+        rt.refusals().is_empty(),
+        "unexpected refusals: {:?}",
+        rt.refusals()
+    );
     assert_eq!(rt.stats().classes, 1);
 
     // The claim the milestone is named for: `NSClassFromString(@"Named")` is
     // `objc_getClass` underneath, so this is that gate.
     let cls = class_named("Named");
-    assert!(!cls.is_null(), "the host runtime does not know the guest's class");
+    assert!(
+        !cls.is_null(),
+        "the host runtime does not know the guest's class"
+    );
 
     // SAFETY: `cls` is a registered class.
     let back = unsafe { CStr::from_ptr(host::class_getName(cls)) };
@@ -181,7 +191,9 @@ fn a_guest_class_is_visible_to_the_host_runtime_by_name() {
 #[test]
 fn the_host_can_message_a_guest_instance_method() {
     let _lock = serialized();
-    let Some(vm) = fixture("Msg") else { skip!("cannot build x86_64 Objective-C fixtures") };
+    let Some(vm) = fixture("Msg") else {
+        skip!("cannot build x86_64 Objective-C fixtures")
+    };
     vm.register_objc().expect("registration");
 
     let obj = new_instance(class_named("Msg"));
@@ -189,7 +201,11 @@ fn the_host_can_message_a_guest_instance_method() {
 
     // SAFETY: `- (int)twice:(int)` is `i@:i`, which is this prototype.
     let twice: extern "C" fn(host::Class, host::Sel, i32) -> i32 = unsafe { msg_send() };
-    assert_eq!(twice(obj, sel("twice:"), 21), 42, "the guest's method did not run");
+    assert_eq!(
+        twice(obj, sel("twice:"), 21),
+        42,
+        "the guest's method did not run"
+    );
 
     // Twice over, because the second call re-enters an already-translated
     // region through the same thunk — the path a real program spends its time
@@ -203,7 +219,9 @@ fn the_host_can_message_a_guest_instance_method() {
 #[test]
 fn a_class_method_lands_on_the_metaclass() {
     let _lock = serialized();
-    let Some(vm) = fixture("Meta") else { skip!("cannot build x86_64 Objective-C fixtures") };
+    let Some(vm) = fixture("Meta") else {
+        skip!("cannot build x86_64 Objective-C fixtures")
+    };
     vm.register_objc().expect("registration");
 
     let cls = class_named("Meta");
@@ -215,7 +233,10 @@ fn a_class_method_lands_on_the_metaclass() {
     // mistake this test exists for.
     // SAFETY: `cls` is registered; a missing method returns null.
     let as_instance = unsafe { host::class_getInstanceMethod(cls, sel("answer")) };
-    assert!(as_instance.is_null(), "the class method was installed as an instance method");
+    assert!(
+        as_instance.is_null(),
+        "the class method was installed as an instance method"
+    );
 }
 
 /// Ivars: the host runtime lays the class out, and the guest compiled in its own
@@ -224,7 +245,9 @@ fn a_class_method_lands_on_the_metaclass() {
 #[test]
 fn ivar_offsets_match_what_the_guest_compiled() {
     let _lock = serialized();
-    let Some(vm) = fixture("Ivar") else { skip!("cannot build x86_64 Objective-C fixtures") };
+    let Some(vm) = fixture("Ivar") else {
+        skip!("cannot build x86_64 Objective-C fixtures")
+    };
     let rt = vm.register_objc().expect("registration");
     assert_eq!(rt.stats().ivars, 1);
 
@@ -246,7 +269,11 @@ fn ivar_offsets_match_what_the_guest_compiled() {
     let obj = new_instance(cls);
     // SAFETY: `- (int)ivarSum` is `i@:`.
     let sum: extern "C" fn(host::Class, host::Sel) -> i32 = unsafe { msg_send() };
-    assert_eq!(sum(obj, sel("ivarSum")), 8, "the guest and the host disagree about _n");
+    assert_eq!(
+        sum(obj, sel("ivarSum")),
+        8,
+        "the guest and the host disagree about _n"
+    );
 }
 
 /// The case the offset *writeback* exists for: a superclass in another image,
@@ -272,8 +299,16 @@ fn an_ivar_under_a_foundation_superclass_is_patched() {
     };
     let vm = vm_for(&path);
     let rt = vm.register_objc().expect("registration");
-    assert!(rt.refusals().is_empty(), "unexpected refusals: {:?}", rt.refusals());
-    assert_eq!(rt.stats().offsets_patched, 1, "the ivar offset word was not rewritten");
+    assert!(
+        rt.refusals().is_empty(),
+        "unexpected refusals: {:?}",
+        rt.refusals()
+    );
+    assert_eq!(
+        rt.stats().offsets_patched,
+        1,
+        "the ivar offset word was not rewritten"
+    );
 
     // NSFormatter is bigger than NSObject, so the guest's compile-time guess
     // would have been wrong had it made one. It did not: it loads the word this
@@ -301,7 +336,11 @@ fn an_ivar_under_a_foundation_superclass_is_patched() {
         let put: extern "C" fn(host::Class, host::Sel, i32) = msg_send();
         let get: extern "C" fn(host::Class, host::Sel) -> i32 = msg_send();
         put(obj, sel("put:"), 1234);
-        assert_eq!(get(obj, sel("get")), 1234, "the ivar offset was not patched");
+        assert_eq!(
+            get(obj, sel("get")),
+            1234,
+            "the ivar offset was not patched"
+        );
     }
 }
 
@@ -329,7 +368,11 @@ fn a_category_on_a_host_class_reaches_guest_code() {
     };
     let vm = vm_for(&path);
     let rt = vm.register_objc().expect("registration");
-    assert!(rt.refusals().is_empty(), "unexpected refusals: {:?}", rt.refusals());
+    assert!(
+        rt.refusals().is_empty(),
+        "unexpected refusals: {:?}",
+        rt.refusals()
+    );
     assert_eq!(rt.stats().categories, 1);
 
     // A genuine host `NSString`, built by the host's own Foundation.
@@ -338,7 +381,11 @@ fn a_category_on_a_host_class_reaches_guest_code() {
     let str_obj = unsafe {
         let f: extern "C" fn(host::Class, host::Sel, *const std::ffi::c_char) -> host::Class =
             msg_send();
-        f(class_named("NSString"), sel("stringWithUTF8String:"), s.as_ptr())
+        f(
+            class_named("NSString"),
+            sel("stringWithUTF8String:"),
+            s.as_ptr(),
+        )
     };
     assert!(!str_obj.is_null());
 
@@ -376,7 +423,11 @@ fn an_in_image_superclass_is_registered_first() {
     };
     let vm = vm_for(&path);
     let rt = vm.register_objc().expect("registration");
-    assert!(rt.refusals().is_empty(), "unexpected refusals: {:?}", rt.refusals());
+    assert!(
+        rt.refusals().is_empty(),
+        "unexpected refusals: {:?}",
+        rt.refusals()
+    );
     assert_eq!(rt.stats().classes, 2);
 
     let derived = class_named("ChainDerived");
@@ -391,7 +442,11 @@ fn an_in_image_superclass_is_registered_first() {
     // SAFETY: `- (int)derived` and `- (int)base` are both `i@:`.
     let f: extern "C" fn(host::Class, host::Sel) -> i32 = unsafe { msg_send() };
     assert_eq!(f(obj, sel("derived")), 11);
-    assert_eq!(f(obj, sel("base")), 10, "the inherited method was not found");
+    assert_eq!(
+        f(obj, sel("base")),
+        10,
+        "the inherited method was not found"
+    );
 }
 
 /// Selector uniquing rewrites the guest's own `__objc_selrefs` slots from
@@ -401,11 +456,16 @@ fn an_in_image_superclass_is_registered_first() {
 #[test]
 fn selector_reference_slots_are_uniqued_in_place() {
     let _lock = serialized();
-    let Some(vm) = fixture("Selref") else { skip!("cannot build x86_64 Objective-C fixtures") };
+    let Some(vm) = fixture("Selref") else {
+        skip!("cannot build x86_64 Objective-C fixtures")
+    };
 
     // Before: each slot holds a pointer to the name.
     let image = vm.program.report.images[0].objc.clone().unwrap();
-    assert!(!image.selector_refs.is_empty(), "the fixture references selectors");
+    assert!(
+        !image.selector_refs.is_empty(),
+        "the fixture references selectors"
+    );
 
     let rt = vm.register_objc().expect("registration");
     assert_eq!(rt.stats().selectors, image.selector_refs.len());
@@ -422,7 +482,11 @@ fn selector_reference_slots_are_uniqued_in_place() {
         // SAFETY: the slot now holds a `SEL` the host runtime interned, so
         // `sel_getName` is defined on it.
         let name = unsafe { CStr::from_ptr(host::sel_getName(value as host::Sel)) };
-        assert_eq!(value, sel(name.to_str().unwrap()) as u64, "slot {slot:#x} is not a SEL");
+        assert_eq!(
+            value,
+            sel(name.to_str().unwrap()) as u64,
+            "slot {slot:#x} is not a SEL"
+        );
     }
 }
 
@@ -430,7 +494,9 @@ fn selector_reference_slots_are_uniqued_in_place() {
 #[test]
 fn a_guest_protocol_is_registered_and_adopted() {
     let _lock = serialized();
-    let Some(vm) = fixture("Proto") else { skip!("cannot build x86_64 Objective-C fixtures") };
+    let Some(vm) = fixture("Proto") else {
+        skip!("cannot build x86_64 Objective-C fixtures")
+    };
     let rt = vm.register_objc().expect("registration");
     assert_eq!(rt.stats().protocols, 1);
 
@@ -453,7 +519,9 @@ fn a_guest_protocol_is_registered_and_adopted() {
 #[test]
 fn registration_is_idempotent() {
     let _lock = serialized();
-    let Some(vm) = fixture("Once") else { skip!("cannot build x86_64 Objective-C fixtures") };
+    let Some(vm) = fixture("Once") else {
+        skip!("cannot build x86_64 Objective-C fixtures")
+    };
     let first = vm.register_objc().expect("registration").stats().clone();
     let second = vm.register_objc().expect("registration").stats().clone();
     assert_eq!(first, second);
@@ -479,15 +547,25 @@ fn a_class_name_already_in_use_is_refused_by_name() {
     let second = vm_for(&path);
 
     let a = first.register_objc().expect("registration");
-    assert!(a.refusals().is_empty(), "the first load must succeed: {:?}", a.refusals());
+    assert!(
+        a.refusals().is_empty(),
+        "the first load must succeed: {:?}",
+        a.refusals()
+    );
 
     let b = second.register_objc().expect("registration");
     assert!(
-        b.refusals().iter().any(|r| matches!(r, Refusal::NameTaken { name } if name == "Dup")),
+        b.refusals()
+            .iter()
+            .any(|r| matches!(r, Refusal::NameTaken { name } if name == "Dup")),
         "expected a named refusal, got {:?}",
         b.refusals()
     );
-    assert_eq!(b.stats().classes, 0, "nothing was registered under the taken name");
+    assert_eq!(
+        b.stats().classes,
+        0,
+        "nothing was registered under the taken name"
+    );
 
     // The first load's class is intact and still answers, which is the half
     // that says the refusal did not damage what was already there. Republishing
@@ -506,7 +584,9 @@ fn a_class_name_already_in_use_is_refused_by_name() {
 #[test]
 fn a_plain_c_program_registers_nothing() {
     let _lock = serialized();
-    let Some(path) = common::hello() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::hello() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let vm = vm_for(&path);
     let rt = vm.register_objc().expect("registration");
     assert_eq!(rt.stats(), &rosetta3::objc::Stats::default());
@@ -543,7 +623,9 @@ fn an_objective_c_program_starts_and_exits() {
 #[test]
 fn classes_are_registered_before_initializers_run() {
     let _lock = serialized();
-    let Some(vm) = fixture("Ordered") else { skip!("cannot build x86_64 Objective-C fixtures") };
+    let Some(vm) = fixture("Ordered") else {
+        skip!("cannot build x86_64 Objective-C fixtures")
+    };
     assert!(vm.objc().is_none(), "nothing is registered before startup");
     startup::run_initializers(vm).expect("initializers run");
     // `run_initializers` alone does not register; `run` does, and in that order.

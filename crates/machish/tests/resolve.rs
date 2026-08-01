@@ -12,11 +12,11 @@ mod common;
 
 use std::ffi::CStr;
 
-use machish::fixups::{decode_image, Binder, Fixup, LibraryRef, StubMap, SymbolRef};
-use machish::image::{map_segments, MachObject};
+use machish::fixups::{Binder, Fixup, LibraryRef, StubMap, SymbolRef, decode_image};
+use machish::image::{MachObject, map_segments};
 use machish::memory::BufferSpace;
 use machish::resolve::{
-    eager_binding_shims, NativeDylibProvider, Resolved, SymbolProvider, SyntheticDylib,
+    NativeDylibProvider, Resolved, SymbolProvider, SyntheticDylib, eager_binding_shims,
 };
 use machish::spec::arch::X86_64;
 
@@ -35,18 +35,26 @@ fn dladdr(addr: u64) -> Option<(String, Option<String>)> {
     // SAFETY: on success `dladdr` sets `dli_fname` to a NUL-terminated string
     // owned by the dynamic linker and valid for the lifetime of the image;
     // `dli_sname` is either null (checked) or the same.
-    let fname = unsafe { CStr::from_ptr(info.dli_fname) }.to_string_lossy().into_owned();
+    let fname = unsafe { CStr::from_ptr(info.dli_fname) }
+        .to_string_lossy()
+        .into_owned();
     let sname = if info.dli_sname.is_null() {
         None
     } else {
-        Some(unsafe { CStr::from_ptr(info.dli_sname) }.to_string_lossy().into_owned())
+        Some(
+            unsafe { CStr::from_ptr(info.dli_sname) }
+                .to_string_lossy()
+                .into_owned(),
+        )
     };
     Some((fname, sname))
 }
 
 #[test]
 fn ls_links_against_the_host_and_every_address_is_real() {
-    let Some(bytes) = common::system_binary(LS) else { skip!("{LS} not present") };
+    let Some(bytes) = common::system_binary(LS) else {
+        skip!("{LS} not present")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
 
     let mut mem = BufferSpace::new(0x1_0000_0000);
@@ -61,9 +69,10 @@ fn ls_links_against_the_host_and_every_address_is_real() {
     // this is what virtualizing the simplest one looks like.
     static GUEST_STACK_GUARD: u64 = 0x0000_dead_beef_0000;
     let mut virtualized = SyntheticDylib::new("<test virtualization>");
-    virtualized
-        .flat(true)
-        .define_data("___stack_chk_guard", &raw const GUEST_STACK_GUARD as usize as u64);
+    virtualized.flat(true).define_data(
+        "___stack_chk_guard",
+        &raw const GUEST_STACK_GUARD as usize as u64,
+    );
 
     let shims = eager_binding_shims();
     let native = NativeDylibProvider::system();
@@ -96,12 +105,18 @@ fn ls_links_against_the_host_and_every_address_is_real() {
             continue;
         }
         let (image, _) = dladdr(b.resolved).unwrap_or_else(|| {
-            panic!("{} resolved to {:#x}, which is in no loaded image", b.symbol, b.resolved)
+            panic!(
+                "{} resolved to {:#x}, which is in no loaded image",
+                b.symbol, b.resolved
+            )
         });
         assert!(!image.is_empty());
         checked += 1;
     }
-    assert!(checked > 50, "expected {LS} to import many host functions, got {checked}");
+    assert!(
+        checked > 50,
+        "expected {LS} to import many host functions, got {checked}"
+    );
 }
 
 #[test]
@@ -110,7 +125,11 @@ fn resolved_addresses_are_the_hosts_own_arm64_implementations() {
     // written into the guest's slot for `_strlen` is the *same address* this
     // process would call for `strlen`.
     let native = NativeDylibProvider::system();
-    let sym = SymbolRef { name: "_strlen", library: LibraryRef::Flat, weak_import: false };
+    let sym = SymbolRef {
+        name: "_strlen",
+        library: LibraryRef::Flat,
+        weak_import: false,
+    };
     let r = native.resolve(&sym).expect("_strlen must resolve");
 
     let (image, name) = dladdr(r.addr).expect("resolved address is in no loaded image");
@@ -119,7 +138,10 @@ fn resolved_addresses_are_the_hosts_own_arm64_implementations() {
     // `dladdr` names is an implementation detail of the host's own libc. What
     // must hold is that we landed on *a* host strlen, in a system image.
     let name = name.expect("resolved address has no symbol");
-    assert!(name.contains("strlen"), "resolved to {name} in {image}, which is not a strlen");
+    assert!(
+        name.contains("strlen"),
+        "resolved to {name} in {image}, which is not a strlen"
+    );
     // And it is genuinely a *system* image, not something we loaded.
     assert!(
         image.contains("libsystem") || image.contains("libSystem") || image.contains("dyld"),
@@ -129,7 +151,9 @@ fn resolved_addresses_are_the_hosts_own_arm64_implementations() {
 
 #[test]
 fn a_synthetic_shim_layered_ahead_wins() {
-    let Some(bytes) = common::system_binary(LS) else { skip!("{LS} not present") };
+    let Some(bytes) = common::system_binary(LS) else {
+        skip!("{LS} not present")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
 
     // Pick a symbol the image actually imports, so the test cannot pass by
@@ -144,7 +168,8 @@ fn a_synthetic_shim_layered_ahead_wins() {
         .unwrap_or_else(|| skip_strlen());
 
     let mut shim = SyntheticDylib::new("shims");
-    shim.flat(true).define(target, Resolved::function(0x5150_0000).with_tag(99));
+    shim.flat(true)
+        .define(target, Resolved::function(0x5150_0000).with_tag(99));
     let native = NativeDylibProvider::system();
     let eager = eager_binding_shims();
     let providers: [&dyn SymbolProvider; 3] = [&shim, &eager, &native];
@@ -161,7 +186,11 @@ fn a_synthetic_shim_layered_ahead_wins() {
     .apply(&fixups, &mut mem, &stubs)
     .unwrap();
 
-    let bound: Vec<_> = outcome.bindings.iter().filter(|b| b.symbol == target).collect();
+    let bound: Vec<_> = outcome
+        .bindings
+        .iter()
+        .filter(|b| b.symbol == target)
+        .collect();
     assert!(!bound.is_empty());
     for b in bound {
         assert_eq!(b.resolved, 0x5150_0000, "the host's strlen beat the shim");
@@ -178,7 +207,9 @@ fn a_shim_claiming_the_wrong_install_name_does_not_satisfy_the_import() {
     // This is the whole reason `SymbolProvider` takes a `SymbolRef` rather than
     // a `&str`. Under a flat search this shim would win; under two-level
     // scoping it must not even be consulted.
-    let Some(bytes) = common::system_binary(LS) else { skip!("{LS} not present") };
+    let Some(bytes) = common::system_binary(LS) else {
+        skip!("{LS} not present")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
     let (_, fixups) = decode_image(&obj).unwrap();
 
@@ -191,10 +222,7 @@ fn a_shim_claiming_the_wrong_install_name_does_not_satisfy_the_import() {
     assert!(two_level, "{LS} should import _strlen from a named library");
 
     let mut impostor = SyntheticDylib::new("@rpath/libnotlibsystem.dylib");
-    impostor.define(
-        "_strlen",
-        Resolved::function(0xbad0_0000),
-    );
+    impostor.define("_strlen", Resolved::function(0xbad0_0000));
     let eager = eager_binding_shims();
     let native = NativeDylibProvider::system();
     let providers: [&dyn SymbolProvider; 3] = [&impostor, &eager, &native];
@@ -216,7 +244,10 @@ fn a_shim_claiming_the_wrong_install_name_does_not_satisfy_the_import() {
             b.resolved, 0xbad0_0000,
             "a shim claiming a different install name satisfied a two-level import"
         );
-        assert!(dladdr(b.resolved).is_some(), "_strlen should have fallen through to the host");
+        assert!(
+            dladdr(b.resolved).is_some(),
+            "_strlen should have fallen through to the host"
+        );
     }
 }
 
@@ -226,8 +257,17 @@ fn virtualization_candidates_do_not_reach_the_host() {
     // forced to shim them, rather than silently binding the guest to host state.
     let native = NativeDylibProvider::system();
     let providers: [&dyn SymbolProvider; 1] = [&native];
-    for name in ["_environ", "_objc_msgSend", "__tlv_bootstrap", "__dyld_image_count"] {
-        let sym = SymbolRef { name, library: LibraryRef::Flat, weak_import: false };
+    for name in [
+        "_environ",
+        "_objc_msgSend",
+        "__tlv_bootstrap",
+        "__dyld_image_count",
+    ] {
+        let sym = SymbolRef {
+            name,
+            library: LibraryRef::Flat,
+            weak_import: false,
+        };
         assert_eq!(
             machish::resolve::resolve_in(&providers, &sym),
             None,

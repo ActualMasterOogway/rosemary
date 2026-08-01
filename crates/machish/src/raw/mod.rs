@@ -13,7 +13,7 @@
 mod leb;
 mod view;
 
-pub use leb::{sleb128, uleb128, Cursor};
+pub use leb::{Cursor, sleb128, uleb128};
 pub use view::View;
 
 /// The universal address/offset type. Mach-O is 64-bit here by construction.

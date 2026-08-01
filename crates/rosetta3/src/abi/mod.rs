@@ -74,7 +74,10 @@ pub enum AbiError {
     /// Nothing in [`table`] describes this symbol.
     NoSignature { symbol: String },
     /// Known, and deliberately not callable — see the reason.
-    Refused { symbol: String, reason: &'static str },
+    Refused {
+        symbol: String,
+        reason: &'static str,
+    },
     /// Variadic, and no shim implements it. Variadics cannot be forwarded
     /// generically: SysV AMD64 passes them in registers with `al` holding the
     /// vector-register count, while Apple's arm64 ABI passes every variadic
@@ -82,7 +85,10 @@ pub enum AbiError {
     NoShim { symbol: String },
     /// The signature is known but this marshaller cannot express the call:
     /// more than eight integer or eight floating-point arguments.
-    Unmarshallable { symbol: String, reason: &'static str },
+    Unmarshallable {
+        symbol: String,
+        reason: &'static str,
+    },
     /// The import resolved to nothing — an unsatisfied weak import, whose slot
     /// holds zero. Calling it would jump to null.
     Unsatisfied { symbol: String },
@@ -174,8 +180,10 @@ impl dyn GuestMemory + '_ {
     /// Read one 64-bit little-endian word.
     pub fn read_u64(&self, va: u64, symbol: &str) -> Result<u64> {
         let mut buf = [0u8; 8];
-        self.read(va, &mut buf)
-            .map_err(|_| AbiError::Memory { symbol: symbol.to_string(), addr: va })?;
+        self.read(va, &mut buf).map_err(|_| AbiError::Memory {
+            symbol: symbol.to_string(),
+            addr: va,
+        })?;
         Ok(u64::from_le_bytes(buf))
     }
 
@@ -189,7 +197,10 @@ impl dyn GuestMemory + '_ {
         for i in 0..MAX_CSTR as u64 {
             let mut b = [0u8; 1];
             self.read(va.wrapping_add(i), &mut b)
-                .map_err(|_| AbiError::Memory { symbol: symbol.to_string(), addr: va })?;
+                .map_err(|_| AbiError::Memory {
+                    symbol: symbol.to_string(),
+                    addr: va,
+                })?;
             if b[0] == 0 {
                 return Ok(out);
             }
@@ -237,7 +248,9 @@ pub fn call_import_with(
     callbacks: &dyn Callbacks,
 ) -> Result<()> {
     if host == 0 {
-        return Err(AbiError::Unsatisfied { symbol: symbol.to_string() });
+        return Err(AbiError::Unsatisfied {
+            symbol: symbol.to_string(),
+        });
     }
     // Shims first, unconditionally: a shim exists precisely because passing the
     // call through would be wrong, so it must win over any table entry.
@@ -245,12 +258,17 @@ pub fn call_import_with(
         return result;
     }
     match table::lookup(tag, symbol) {
-        Lookup::Known(abi) if abi.variadic => Err(AbiError::NoShim { symbol: symbol.to_string() }),
+        Lookup::Known(abi) if abi.variadic => Err(AbiError::NoShim {
+            symbol: symbol.to_string(),
+        }),
         Lookup::Known(abi) => marshal::call_with(symbol, abi, host, ctx, mem, callbacks),
-        Lookup::Refused(reason) => {
-            Err(AbiError::Refused { symbol: symbol.to_string(), reason })
-        }
-        Lookup::Unknown => Err(AbiError::NoSignature { symbol: symbol.to_string() }),
+        Lookup::Refused(reason) => Err(AbiError::Refused {
+            symbol: symbol.to_string(),
+            reason,
+        }),
+        Lookup::Unknown => Err(AbiError::NoSignature {
+            symbol: symbol.to_string(),
+        }),
     }
 }
 

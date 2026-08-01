@@ -18,13 +18,13 @@
 //! loads breadth-first rather than reproducing dyld's upward-dependency pass.
 
 use crate::error::Result;
-use crate::extensions::{read_words, Extension};
+use crate::extensions::{Extension, read_words};
 use crate::image::MachObject;
 use crate::memory::AddressSpace;
 use crate::raw::Word;
 use crate::report::ImageReport;
-use crate::spec::constants::POINTER_SIZE;
 use crate::spec::MachSpec;
+use crate::spec::constants::POINTER_SIZE;
 
 /// Collects `__mod_init_func` and `__mod_term_func` into the report.
 #[derive(Copy, Clone, Debug, Default)]
@@ -36,7 +36,9 @@ impl<S: MachSpec> Extension<S> for InitializersExtension {
     }
 
     fn claims(&self, obj: &MachObject<'_, S>) -> bool {
-        obj.sections.iter().any(|s| s.is_initializers() || s.is_mod_term())
+        obj.sections
+            .iter()
+            .any(|s| s.is_initializers() || s.is_mod_term())
     }
 
     fn observe(

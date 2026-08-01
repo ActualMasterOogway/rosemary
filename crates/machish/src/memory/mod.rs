@@ -47,11 +47,31 @@ pub struct Prot {
 }
 
 impl Prot {
-    pub const NONE: Prot = Prot { read: false, write: false, exec: false };
-    pub const RO: Prot = Prot { read: true, write: false, exec: false };
-    pub const RW: Prot = Prot { read: true, write: true, exec: false };
-    pub const RX: Prot = Prot { read: true, write: false, exec: true };
-    pub const RWX: Prot = Prot { read: true, write: true, exec: true };
+    pub const NONE: Prot = Prot {
+        read: false,
+        write: false,
+        exec: false,
+    };
+    pub const RO: Prot = Prot {
+        read: true,
+        write: false,
+        exec: false,
+    };
+    pub const RW: Prot = Prot {
+        read: true,
+        write: true,
+        exec: false,
+    };
+    pub const RX: Prot = Prot {
+        read: true,
+        write: false,
+        exec: true,
+    };
+    pub const RWX: Prot = Prot {
+        read: true,
+        write: true,
+        exec: true,
+    };
 
     /// Decode a Mach-O `initprot`/`maxprot` field.
     pub fn from_vm_prot(vm_prot: i32) -> Prot {
@@ -75,7 +95,10 @@ impl Prot {
     /// This protection with `exec` cleared — what a guest image gets, since the
     /// host CPU cannot execute it anyway.
     pub fn without_exec(self) -> Prot {
-        Prot { exec: false, ..self }
+        Prot {
+            exec: false,
+            ..self
+        }
     }
 }
 

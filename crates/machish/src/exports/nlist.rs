@@ -28,7 +28,9 @@ use crate::spec::MachSpec;
 /// stripped image genuinely exports nothing this path can see, and that is a
 /// fact about the image rather than a parse failure.
 pub fn parse_nlist<S: MachSpec>(obj: &MachObject<'_, S>) -> Result<Vec<Export>> {
-    let Some(symtab) = obj.symtab() else { return Ok(Vec::new()) };
+    let Some(symtab) = obj.symtab() else {
+        return Ok(Vec::new());
+    };
     let table = SymbolTable::new(*obj.view(), symtab, obj.dysymtab())?;
 
     let mut out = Vec::new();
@@ -47,7 +49,10 @@ pub fn parse_nlist<S: MachSpec>(obj: &MachObject<'_, S>) -> Result<Vec<Export>> 
 
         let kind = if sym.is_absolute() {
             ExportKind::Absolute
-        } else if obj.section_at(sym.n_value).is_some_and(|s| s.is_thread_local()) {
+        } else if obj
+            .section_at(sym.n_value)
+            .is_some_and(|s| s.is_thread_local())
+        {
             ExportKind::ThreadLocal
         } else {
             ExportKind::Regular

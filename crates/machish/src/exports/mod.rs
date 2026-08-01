@@ -44,8 +44,8 @@ use alloc::vec::Vec;
 use crate::error::Result;
 use crate::image::MachObject;
 use crate::raw::Word;
-use crate::spec::constants as c;
 use crate::spec::MachSpec;
+use crate::spec::constants as c;
 
 /// What an exported symbol names, which determines what its address means.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -175,7 +175,10 @@ impl ExportTable {
 
     /// Look up an export by its full name, leading underscore included.
     pub fn get(&self, name: &str) -> Option<&Export> {
-        let i = self.entries.binary_search_by(|e| e.name.as_str().cmp(name)).ok()?;
+        let i = self
+            .entries
+            .binary_search_by(|e| e.name.as_str().cmp(name))
+            .ok()?;
         Some(&self.entries[i])
     }
 

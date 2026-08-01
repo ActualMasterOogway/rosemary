@@ -13,7 +13,7 @@
 
 use std::collections::BTreeSet;
 
-use rosetta3::{audit_call_targets, Program};
+use rosetta3::{Program, audit_call_targets};
 
 /// A classic `LC_DYLD_INFO_ONLY` image: `call rel32` -> `__stubs` ->
 /// `jmp [rip+disp]` -> `__la_symbol_ptr`, the shape the stub premise is about.
@@ -39,19 +39,33 @@ fn load(path: &str) -> Option<Program> {
 /// The audit with a chosen subset of addresses registered.
 fn audit(program: &Program, registered: BTreeSet<u64>) -> rosetta3::CallTargetAudit {
     let (text_va, text) = &program.text;
-    audit_call_targets(text, *text_va, &program.functions, program.text_range(), &registered)
+    audit_call_targets(
+        text,
+        *text_va,
+        &program.functions,
+        program.text_range(),
+        &registered,
+    )
 }
 
 #[test]
 fn every_call_out_of_text_is_interceptable() {
     for path in [LS, ECHO] {
-        let Some(program) = load(path) else { skip!("{path} not present") };
+        let Some(program) = load(path) else {
+            skip!("{path} not present")
+        };
 
         let registered: BTreeSet<u64> = program.import_addresses().collect();
         let a = audit(&program, registered);
 
-        assert!(a.functions_lifted > 0, "{path}: nothing lifted, so nothing was checked");
-        assert!(a.out_of_region > 0, "{path}: no calls leave __text, so the test proves nothing");
+        assert!(
+            a.functions_lifted > 0,
+            "{path}: nothing lifted, so nothing was checked"
+        );
+        assert!(
+            a.out_of_region > 0,
+            "{path}: no calls leave __text, so the test proves nothing"
+        );
         assert!(
             a.is_clean(),
             "{path}: {} call target(s) would become UnknownJump/DirectCall: {:x?}",
@@ -68,7 +82,9 @@ fn stub_addresses_are_load_bearing() {
     // one address per binding would give you — and watch the interception rate
     // collapse, because every `call rel32` targets a `__stubs` entry that is
     // now an unregistered address outside the lifted region.
-    let Some(program) = load(LS) else { skip!("{LS} not present") };
+    let Some(program) = load(LS) else {
+        skip!("{LS} not present")
+    };
 
     let with_stubs: BTreeSet<u64> = program.import_addresses().collect();
     let slots_only: BTreeSet<u64> = program
@@ -107,7 +123,9 @@ fn every_uninterceptable_call_in_the_crippled_audit_is_a_stub() {
     // addresses, they are exactly the `__stubs` entries. That is the mapping
     // `machish::fixups::stubs` claims to have recovered, checked from the other
     // side — through the lifter's own view of the guest's control flow.
-    let Some(program) = load(LS) else { skip!("{LS} not present") };
+    let Some(program) = load(LS) else {
+        skip!("{LS} not present")
+    };
 
     let slots_only: BTreeSet<u64> = program
         .imports
@@ -135,10 +153,16 @@ fn every_uninterceptable_call_in_the_crippled_audit_is_a_stub() {
 
 #[test]
 fn linking_reports_a_stub_for_every_lazy_binding() {
-    let Some(program) = load(LS) else { skip!("{LS} not present") };
+    let Some(program) = load(LS) else {
+        skip!("{LS} not present")
+    };
 
     let bindings = program.report.bindings().count();
-    let with_stub = program.report.bindings().filter(|b| b.stub_va.is_some()).count();
+    let with_stub = program
+        .report
+        .bindings()
+        .filter(|b| b.stub_va.is_some())
+        .count();
     assert!(with_stub > 0);
     // Not every binding has a stub — a data import like `___stdoutp` is read
     // through the slot and never called — so the claim is about lazy bindings.
@@ -147,13 +171,18 @@ fn linking_reports_a_stub_for_every_lazy_binding() {
         .bindings()
         .filter(|b| b.kind == machish::fixups::BindKind::Lazy)
         .count();
-    assert_eq!(with_stub, lazy, "every lazy binding, and only those, should have a stub");
+    assert_eq!(
+        with_stub, lazy,
+        "every lazy binding, and only those, should have a stub"
+    );
     assert!(bindings > lazy, "the fixture should also import some data");
 }
 
 #[test]
 fn the_lifter_config_registers_both_addresses_per_binding() {
-    let Some(program) = load(LS) else { skip!("{LS} not present") };
+    let Some(program) = load(LS) else {
+        skip!("{LS} not present")
+    };
     let config = program.lifter_config();
 
     for b in program.report.bindings() {

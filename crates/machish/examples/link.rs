@@ -18,7 +18,7 @@ use machish::loader::{LoadPolicy, Loader};
 use machish::memory::BufferSpace;
 use machish::namespace::FsDylibSource;
 use machish::report::LinkReport;
-use machish::resolve::{eager_binding_shims, NativeDylibProvider, SymbolProvider};
+use machish::resolve::{NativeDylibProvider, SymbolProvider, eager_binding_shims};
 use machish::spec::arch::X86_64;
 
 fn main() -> ExitCode {
@@ -47,18 +47,30 @@ fn main() -> ExitCode {
     let native = NativeDylibProvider::system();
     let providers: [&dyn SymbolProvider; 2] = [&shims, &native];
 
-    let policy = LoadPolicy { require_all_symbols: strict, ..LoadPolicy::default() };
-    let report =
-        match Loader::with_policy(X86_64, policy).link_with(&bytes, &path, &mut mem, &mut source, &providers) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("link: {path}: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
+    let policy = LoadPolicy {
+        require_all_symbols: strict,
+        ..LoadPolicy::default()
+    };
+    let report = match Loader::with_policy(X86_64, policy).link_with(
+        &bytes,
+        &path,
+        &mut mem,
+        &mut source,
+        &providers,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("link: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     print(&report, quiet);
-    if report.images.iter().any(|i| i.hard_missing().next().is_some()) {
+    if report
+        .images
+        .iter()
+        .any(|i| i.hard_missing().next().is_some())
+    {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
@@ -99,10 +111,18 @@ fn print(report: &LinkReport, quiet: bool) {
                     None => "     -      ".to_string(),
                 };
                 let library = b.library.as_deref().unwrap_or("<flat>");
-                let via = if is_system_path(library) { "native" } else { "image" };
+                let via = if is_system_path(library) {
+                    "native"
+                } else {
+                    "image"
+                };
                 println!(
                     "  bind {:#012x} stub {} {:<40} {:<32} -> {:#x} [{via}]",
-                    b.slot_va, stub, short(library), b.symbol, b.resolved
+                    b.slot_va,
+                    stub,
+                    short(library),
+                    b.symbol,
+                    b.resolved
                 );
             }
         }
@@ -135,8 +155,15 @@ fn print(report: &LinkReport, quiet: bool) {
                     c.ro.ivars.len(),
                     c.ro.protocols.len()
                 );
-                for m in c.ro.methods.iter().chain(c.meta.iter().flat_map(|m| &m.ro.methods)) {
-                    println!("    -[{} {}] {} imp {:#x}", c.ro.name, m.name, m.types, m.imp);
+                for m in
+                    c.ro.methods
+                        .iter()
+                        .chain(c.meta.iter().flat_map(|m| &m.ro.methods))
+                {
+                    println!(
+                        "    -[{} {}] {} imp {:#x}",
+                        c.ro.name, m.name, m.types, m.imp
+                    );
                 }
             }
             for c in &objc.categories {
@@ -174,7 +201,11 @@ fn print(report: &LinkReport, quiet: bool) {
                 m.symbol,
                 m.library.as_deref().unwrap_or("<flat>"),
                 m.slot_va,
-                if m.weak_import { " (weak, bound to zero)" } else { "" }
+                if m.weak_import {
+                    " (weak, bound to zero)"
+                } else {
+                    ""
+                }
             );
         }
         println!();

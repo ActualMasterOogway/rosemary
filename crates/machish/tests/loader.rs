@@ -17,7 +17,7 @@ use std::process::Command;
 use machish::loader::{LoadPolicy, Loader};
 use machish::memory::{AddressSpace, BufferSpace};
 use machish::namespace::FsDylibSource;
-use machish::resolve::{eager_binding_shims, NativeDylibProvider, SymbolProvider, SyntheticDylib};
+use machish::resolve::{NativeDylibProvider, SymbolProvider, SyntheticDylib, eager_binding_shims};
 use machish::spec::arch::X86_64;
 
 const MAIN_SRC: &str = r#"
@@ -48,7 +48,14 @@ fn build_program(name: &str) -> Option<(PathBuf, Vec<u8>)> {
     let lib_out = dir.join("libmath.dylib");
     std::fs::write(&lib_src, LIB_SRC).ok()?;
     let ok = Command::new("cc")
-        .args(["-arch", "x86_64", "-dynamiclib", "-install_name", "@rpath/libmath.dylib", "-o"])
+        .args([
+            "-arch",
+            "x86_64",
+            "-dynamiclib",
+            "-install_name",
+            "@rpath/libmath.dylib",
+            "-o",
+        ])
         .arg(&lib_out)
         .arg(&lib_src)
         .status()
@@ -90,12 +97,26 @@ fn a_bundled_dylib_satisfies_the_executables_import() {
     let providers: [&dyn SymbolProvider; 2] = [&shims, &native];
 
     let report = Loader::new(X86_64)
-        .link_with(&bytes, path.to_str().unwrap(), &mut mem, &mut source, &providers)
+        .link_with(
+            &bytes,
+            path.to_str().unwrap(),
+            &mut mem,
+            &mut source,
+            &providers,
+        )
         .unwrap();
 
     // Two images: the executable and the dylib `@rpath` found next to it.
-    assert_eq!(report.images.len(), 2, "expected main + libmath, got {:?}",
-        report.images.iter().map(|i| i.name.as_str()).collect::<Vec<_>>());
+    assert_eq!(
+        report.images.len(),
+        2,
+        "expected main + libmath, got {:?}",
+        report
+            .images
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>()
+    );
     assert!(report.images[1].name.contains("libmath"));
 
     // `mathish_add` must be bound, and bound to an address *inside libmath*,
@@ -105,7 +126,12 @@ fn a_bundled_dylib_satisfies_the_executables_import() {
         .find(|b| b.symbol == "_mathish_add")
         .expect("_mathish_add was never bound");
     let lib = &report.images[1];
-    let lib_end = lib.segments.iter().map(|s| s.vmaddr + s.vmsize).max().unwrap();
+    let lib_end = lib
+        .segments
+        .iter()
+        .map(|s| s.vmaddr + s.vmsize)
+        .max()
+        .unwrap();
     assert!(
         (lib.base..lib_end).contains(&add.resolved),
         "_mathish_add resolved to {:#x}, outside libmath [{:#x}, {:#x})",
@@ -122,7 +148,9 @@ fn a_bundled_dylib_satisfies_the_executables_import() {
     assert!((lib.base..lib_end).contains(&scale.resolved));
 
     // Nothing left unresolved anywhere.
-    report.require_all_resolved().unwrap_or_else(|e| panic!("{e}"));
+    report
+        .require_all_resolved()
+        .unwrap_or_else(|e| panic!("{e}"));
 }
 
 #[test]
@@ -138,7 +166,13 @@ fn system_libraries_are_declined_by_the_filesystem_source_and_answered_natively(
     let providers: [&dyn SymbolProvider; 2] = [&shims, &native];
 
     let report = Loader::new(X86_64)
-        .link_with(&bytes, path.to_str().unwrap(), &mut mem, &mut source, &providers)
+        .link_with(
+            &bytes,
+            path.to_str().unwrap(),
+            &mut mem,
+            &mut source,
+            &providers,
+        )
         .unwrap();
 
     // libSystem is a dependency, and it is *not* among the loaded images —
@@ -147,13 +181,27 @@ fn system_libraries_are_declined_by_the_filesystem_source_and_answered_natively(
         !report.images.iter().any(|i| i.name.contains("libSystem")),
         "/usr/lib should never be mapped from disk"
     );
-    let printf = report.bindings().find(|b| b.symbol == "_printf").expect("no _printf binding");
-    assert_eq!(printf.library.as_deref(), Some("/usr/lib/libSystem.B.dylib"));
-    assert!(printf.resolved != 0, "_printf should have resolved natively");
+    let printf = report
+        .bindings()
+        .find(|b| b.symbol == "_printf")
+        .expect("no _printf binding");
+    assert_eq!(
+        printf.library.as_deref(),
+        Some("/usr/lib/libSystem.B.dylib")
+    );
+    assert!(
+        printf.resolved != 0,
+        "_printf should have resolved natively"
+    );
 
     // A host address, not a guest one: the point of the whole design.
     let main = &report.images[0];
-    let main_end = main.segments.iter().map(|s| s.vmaddr + s.vmsize).max().unwrap();
+    let main_end = main
+        .segments
+        .iter()
+        .map(|s| s.vmaddr + s.vmsize)
+        .max()
+        .unwrap();
     assert!(
         !(main.base..main_end).contains(&printf.resolved),
         "_printf resolved inside the guest image"
@@ -173,14 +221,23 @@ fn the_dylib_is_actually_mapped_and_its_code_readable() {
     let providers: [&dyn SymbolProvider; 2] = [&shims, &native];
 
     let report = Loader::new(X86_64)
-        .link_with(&bytes, path.to_str().unwrap(), &mut mem, &mut source, &providers)
+        .link_with(
+            &bytes,
+            path.to_str().unwrap(),
+            &mut mem,
+            &mut source,
+            &providers,
+        )
         .unwrap();
 
     // The binding says `_mathish_add` lives at this address; the mapped bytes
     // there must be the function the compiler emitted, not zeroes. Reading a
     // nonzero first instruction is enough to distinguish "mapped" from
     // "reserved and never written".
-    let add = report.bindings().find(|b| b.symbol == "_mathish_add").unwrap();
+    let add = report
+        .bindings()
+        .find(|b| b.symbol == "_mathish_add")
+        .unwrap();
     let mut code = [0u8; 8];
     mem.read(add.resolved, &mut code).unwrap();
     assert_ne!(code, [0u8; 8], "libmath's __TEXT was never copied in");
@@ -188,9 +245,22 @@ fn the_dylib_is_actually_mapped_and_its_code_readable() {
     // The two images must not overlap.
     let a = &report.images[0];
     let b = &report.images[1];
-    let a_end = a.segments.iter().map(|s| s.vmaddr + s.vmsize).max().unwrap();
-    let b_end = b.segments.iter().map(|s| s.vmaddr + s.vmsize).max().unwrap();
-    assert!(a_end <= b.base || b_end <= a.base, "the two images overlap in the address space");
+    let a_end = a
+        .segments
+        .iter()
+        .map(|s| s.vmaddr + s.vmsize)
+        .max()
+        .unwrap();
+    let b_end = b
+        .segments
+        .iter()
+        .map(|s| s.vmaddr + s.vmsize)
+        .max()
+        .unwrap();
+    assert!(
+        a_end <= b.base || b_end <= a.base,
+        "the two images overlap in the address space"
+    );
 }
 
 #[test]
@@ -200,7 +270,10 @@ fn dependency_loading_can_be_turned_off() {
     };
 
     let mut mem = BufferSpace::new(0x1_0000_0000);
-    let policy = LoadPolicy { load_dependencies: false, ..LoadPolicy::default() };
+    let policy = LoadPolicy {
+        load_dependencies: false,
+        ..LoadPolicy::default()
+    };
     let native = NativeDylibProvider::system();
     let shims = eager_binding_shims();
     let providers: [&dyn SymbolProvider; 2] = [&shims, &native];
@@ -213,7 +286,9 @@ fn dependency_loading_can_be_turned_off() {
     // `_mathish_add` has nowhere to come from now, and must be reported as
     // missing rather than quietly bound to something.
     assert!(
-        report.images[0].hard_missing().any(|m| m.symbol == "_mathish_add"),
+        report.images[0]
+            .hard_missing()
+            .any(|m| m.symbol == "_mathish_add"),
         "_mathish_add should be unresolvable without libmath"
     );
     assert!(report.require_all_resolved().is_err());
@@ -241,7 +316,10 @@ fn a_strict_policy_fails_the_link_on_a_missing_symbol() {
     let machish::Error::UnresolvedSymbol(msg) = err else {
         panic!("expected UnresolvedSymbol, got {err}")
     };
-    assert!(msg.contains("more"), "expected a summary of several missing symbols, got {msg:?}");
+    assert!(
+        msg.contains("more"),
+        "expected a summary of several missing symbols, got {msg:?}"
+    );
 }
 
 #[test]
@@ -257,15 +335,25 @@ fn a_shim_can_take_priority_over_a_bundled_dylib() {
     let mut mem = BufferSpace::new(0x1_0000_0000);
     let mut source = FsDylibSource::new();
     let mut shim = SyntheticDylib::new("shims");
-    shim.flat(true).define_fn("_printf", 0x1234_5678 as *const ());
+    shim.flat(true)
+        .define_fn("_printf", 0x1234_5678 as *const ());
     let shims = eager_binding_shims();
     let native = NativeDylibProvider::system();
     let providers: [&dyn SymbolProvider; 3] = [&shim, &shims, &native];
 
     let report = Loader::new(X86_64)
-        .link_with(&bytes, path.to_str().unwrap(), &mut mem, &mut source, &providers)
+        .link_with(
+            &bytes,
+            path.to_str().unwrap(),
+            &mut mem,
+            &mut source,
+            &providers,
+        )
         .unwrap();
 
     let printf = report.bindings().find(|b| b.symbol == "_printf").unwrap();
-    assert_eq!(printf.resolved, 0x1234_5678, "the shim should have won over the host");
+    assert_eq!(
+        printf.resolved, 0x1234_5678,
+        "the shim should have won over the host"
+    );
 }

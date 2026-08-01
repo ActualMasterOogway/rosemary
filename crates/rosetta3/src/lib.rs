@@ -135,7 +135,7 @@ pub mod tls;
 pub mod unwind;
 pub mod vm;
 
-pub use abi::{call_import, AbiError, Classification};
-pub use audit::{audit_call_targets, CallTargetAudit, UnresolvedCall};
+pub use abi::{AbiError, Classification, call_import};
+pub use audit::{CallTargetAudit, UnresolvedCall, audit_call_targets};
 pub use program::{ImportPolicy, Program, ProgramError};
 pub use vm::{Vm, VmError};

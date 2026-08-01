@@ -5,12 +5,12 @@ use core::marker::PhantomData;
 
 use crate::error::{Error, Result};
 use crate::image::commands::{
-    is_dylib_command, Dependency, DyldInfo, Dysymtab, LinkeditData, LoadCommand, Symtab,
+    Dependency, DyldInfo, Dysymtab, LinkeditData, LoadCommand, Symtab, is_dylib_command,
 };
 use crate::image::{EntryPoint, Section, Segment};
 use crate::raw::{View, Word};
-use crate::spec::constants::{self as c, LOAD_COMMAND_SIZE, MACH_HEADER_64_SIZE, SECTION_64_SIZE};
 use crate::spec::MachSpec;
+use crate::spec::constants::{self as c, LOAD_COMMAND_SIZE, MACH_HEADER_64_SIZE, SECTION_64_SIZE};
 use crate::{fat, memory::align_up};
 
 /// A guard against a malformed `ncmds`. Real images carry a few dozen.
@@ -62,7 +62,10 @@ impl<'a, S: MachSpec> MachObject<'a, S> {
 
         let cputype = view.i32(4)?;
         if cputype != S::CPU_TYPE {
-            return Err(Error::WrongCpuType { expected: S::CPU_TYPE, found: cputype });
+            return Err(Error::WrongCpuType {
+                expected: S::CPU_TYPE,
+                found: cputype,
+            });
         }
         let cpusubtype = view.i32(8)?;
         let filetype = view.u32(12)?;
@@ -79,11 +82,16 @@ impl<'a, S: MachSpec> MachObject<'a, S> {
         }
         // Bound the walk by the declared extent *and* the file, so a command
         // chain can never wander past either.
-        let cmds_end = MACH_HEADER_64_SIZE
-            .checked_add(sizeofcmds)
-            .ok_or(Error::BadLoadCommand { why: "sizeofcmds overflow" })?;
+        let cmds_end =
+            MACH_HEADER_64_SIZE
+                .checked_add(sizeofcmds)
+                .ok_or(Error::BadLoadCommand {
+                    why: "sizeofcmds overflow",
+                })?;
         if cmds_end > bytes.len() {
-            return Err(Error::Truncated { what: "load commands" });
+            return Err(Error::Truncated {
+                what: "load commands",
+            });
         }
 
         let mut obj = MachObject {
@@ -116,7 +124,9 @@ impl<'a, S: MachSpec> MachObject<'a, S> {
 
         for _ in 0..ncmds {
             if off + LOAD_COMMAND_SIZE > cmds_end {
-                return Err(Error::BadLoadCommand { why: "command header past sizeofcmds" });
+                return Err(Error::BadLoadCommand {
+                    why: "command header past sizeofcmds",
+                });
             }
             let cmd = self.view.u32(off)?;
             let cmdsize = self.view.u32(off + 4)? as usize;
@@ -126,13 +136,19 @@ impl<'a, S: MachSpec> MachObject<'a, S> {
             // subsequent field, and an oversized one reads another command's
             // memory as this one's payload.
             if cmdsize == 0 {
-                return Err(Error::BadLoadCommand { why: "zero cmdsize" });
+                return Err(Error::BadLoadCommand {
+                    why: "zero cmdsize",
+                });
             }
             if !cmdsize.is_multiple_of(8) {
-                return Err(Error::BadLoadCommand { why: "unaligned cmdsize" });
+                return Err(Error::BadLoadCommand {
+                    why: "unaligned cmdsize",
+                });
             }
             if off + cmdsize > cmds_end {
-                return Err(Error::BadLoadCommand { why: "cmdsize past sizeofcmds" });
+                return Err(Error::BadLoadCommand {
+                    why: "cmdsize past sizeofcmds",
+                });
             }
             // A command must be large enough to hold its own fixed fields.
             // Without this, an undersized segment command is caught only when a
@@ -140,7 +156,9 @@ impl<'a, S: MachSpec> MachObject<'a, S> {
             // reports a confusing `Truncated` and would not fire at all for a
             // command sitting in the middle of a large image.
             if cmd == c::LC_SEGMENT_64 && cmdsize < c::SEGMENT_COMMAND_64_SIZE {
-                return Err(Error::BadLoadCommand { why: "segment command too small" });
+                return Err(Error::BadLoadCommand {
+                    why: "segment command too small",
+                });
             }
 
             if is_dylib_command(cmd) {
@@ -152,11 +170,15 @@ impl<'a, S: MachSpec> MachObject<'a, S> {
                 LoadCommand::Segment(mut seg) => {
                     let (_, nsects) = Segment::parse(&self.view, off)?;
                     let sects_off = Segment::sections_offset(off);
-                    let need = (nsects as usize)
-                        .checked_mul(SECTION_64_SIZE)
-                        .ok_or(Error::BadLoadCommand { why: "nsects overflow" })?;
+                    let need = (nsects as usize).checked_mul(SECTION_64_SIZE).ok_or(
+                        Error::BadLoadCommand {
+                            why: "nsects overflow",
+                        },
+                    )?;
                     if sects_off + need > off + cmdsize {
-                        return Err(Error::BadLoadCommand { why: "sections past segment command" });
+                        return Err(Error::BadLoadCommand {
+                            why: "sections past segment command",
+                        });
                     }
 
                     let start = self.sections.len();

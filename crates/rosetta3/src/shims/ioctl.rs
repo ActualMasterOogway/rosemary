@@ -68,10 +68,16 @@ mod tests {
 
     impl GuestMemory for NoMemory {
         fn read(&self, va: u64, out: &mut [u8]) -> core::result::Result<(), machish::Error> {
-            Err(machish::Error::OutOfBounds { addr: va, len: out.len() })
+            Err(machish::Error::OutOfBounds {
+                addr: va,
+                len: out.len(),
+            })
         }
         fn write(&mut self, va: u64, data: &[u8]) -> core::result::Result<(), machish::Error> {
-            Err(machish::Error::OutOfBounds { addr: va, len: data.len() })
+            Err(machish::Error::OutOfBounds {
+                addr: va,
+                len: data.len(),
+            })
         }
     }
 

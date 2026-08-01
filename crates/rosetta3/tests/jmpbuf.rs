@@ -44,7 +44,9 @@ guard gg len 255 trips 2 total 43
 
 #[test]
 fn a_longjmp_unwinds_three_guest_frames_and_execution_continues() {
-    let Some(path) = setjmp_fixture() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = setjmp_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let (status, out, err) = run_guest(&path, &[]);
 
     assert_eq!(status, Some(0), "stderr: {err}");
@@ -57,14 +59,23 @@ fn a_longjmp_unwinds_three_guest_frames_and_execution_continues() {
 
 #[test]
 fn the_translated_program_agrees_with_the_untranslated_one() {
-    let Some(path) = setjmp_fixture() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = setjmp_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let Some((native_status, native_out)) = run_native(&path) else {
         skip!("cannot run x86_64 binaries natively")
     };
     let (status, out, err) = run_guest(&path, &[]);
 
-    assert_eq!((status, out.as_str()), (native_status, native_out.as_str()), "stderr: {err}");
-    assert_eq!(native_out, EXPECTED, "the fixture's own expectations have drifted");
+    assert_eq!(
+        (status, out.as_str()),
+        (native_status, native_out.as_str()),
+        "stderr: {err}"
+    );
+    assert_eq!(
+        native_out, EXPECTED,
+        "the fixture's own expectations have drifted"
+    );
 }
 
 #[test]
@@ -72,9 +83,14 @@ fn a_longjmp_of_zero_arrives_as_one() {
     // The second trip jumps with 0 and `setjmp` must report 1 — the one place
     // `longjmp` is specified to change the value it was given, and the kind of
     // detail a hand-written implementation drops.
-    let Some(path) = setjmp_fixture() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = setjmp_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let (_, out, err) = run_guest(&path, &[]);
-    assert!(out.contains("came back with 1 (trip 2)"), "{out:?} (stderr: {err})");
+    assert!(
+        out.contains("came back with 1 (trip 2)"),
+        "{out:?} (stderr: {err})"
+    );
 }
 
 #[test]
@@ -82,10 +98,15 @@ fn both_darwin_spellings_reach_the_same_implementation() {
     // `_setjmp`/`_longjmp` are imported as `__setjmp`/`__longjmp` and
     // `sigsetjmp`/`siglongjmp` under their own names: three import pairs, one
     // shim. A table that knew only `_setjmp` would refuse two of them by name.
-    let Some(path) = setjmp_fixture() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = setjmp_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let (_, out, err) = run_guest(&path, &[]);
     assert!(out.contains("plain spelling ok"), "{out:?} (stderr: {err})");
-    assert!(out.contains("masked spelling ok"), "{out:?} (stderr: {err})");
+    assert!(
+        out.contains("masked spelling ok"),
+        "{out:?} (stderr: {err})"
+    );
 }
 
 #[test]
@@ -96,7 +117,9 @@ fn setjmp_is_never_promoted_to_an_inlined_import() {
     // and would not fault. `ImportPolicy` refuses to promote a shimmed symbol,
     // and this is that claim from the outside: the default (fast where possible)
     // and `--slow` produce the same output.
-    let Some(path) = setjmp_fixture() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = setjmp_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let (fast_status, fast_out, err) = run_guest(&path, &[]);
     let (slow_status, slow_out, slow_err) = run_guest_with(&["--slow"], &path, &[]);
 
@@ -114,12 +137,27 @@ fn a_longjmp_across_a_host_frame_is_refused_by_name() {
     // return through it — so the runtime stops and says which case it is. This
     // is the boundary of what is built, stated as a test rather than a comment,
     // and it is the test that must *change* when the guest unwinder lands.
-    let Some(path) = longjmp_across_fixture() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = longjmp_across_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let (status, out, err) = run_guest(&path, &[]);
 
-    assert_ne!(status, Some(0), "a longjmp across host frames should not succeed: {out}");
-    assert!(err.contains("longjmp"), "the refusal should name the symbol: {err}");
-    assert!(err.contains("unwind"), "the refusal should give the reason: {err}");
+    assert_ne!(
+        status,
+        Some(0),
+        "a longjmp across host frames should not succeed: {out}"
+    );
+    assert!(
+        err.contains("longjmp"),
+        "the refusal should name the symbol: {err}"
+    );
+    assert!(
+        err.contains("unwind"),
+        "the refusal should give the reason: {err}"
+    );
     // And it is a diagnostic, not a fault: the process exited on its own terms.
-    assert!(status.is_some(), "the guest crashed instead of being stopped: {err}");
+    assert!(
+        status.is_some(),
+        "the guest crashed instead of being stopped: {err}"
+    );
 }

@@ -75,7 +75,11 @@ impl Signature {
 pub fn signature(encoding: &str) -> Result<Signature, &'static str> {
     let bytes = encoding.as_bytes();
     let mut at = 0usize;
-    let mut sig = Signature { types: Vec::new(), classes: Vec::new(), class_return: false };
+    let mut sig = Signature {
+        types: Vec::new(),
+        classes: Vec::new(),
+        class_return: false,
+    };
 
     while at < bytes.len() {
         let start = at;
@@ -111,7 +115,10 @@ fn one(b: &[u8], at: &mut usize) -> Result<T, &'static str> {
     // Qualifiers: `const`, `in`, `inout`, `out`, `bycopy`, `byref`, `oneway`.
     // They describe how the argument is used, never how wide it is, so they are
     // skipped rather than recorded.
-    while matches!(b.get(*at), Some(b'r' | b'n' | b'N' | b'o' | b'O' | b'R' | b'V')) {
+    while matches!(
+        b.get(*at),
+        Some(b'r' | b'n' | b'N' | b'o' | b'O' | b'R' | b'V')
+    ) {
         // `r` is also nothing on its own: a bare `r` at the end of a string is
         // malformed, and stopping here keeps the caller's no-progress check able
         // to see it.
@@ -120,7 +127,9 @@ fn one(b: &[u8], at: &mut usize) -> Result<T, &'static str> {
         }
         *at += 1;
     }
-    let Some(&c) = b.get(*at) else { return Err("the type encoding ends mid-type") };
+    let Some(&c) = b.get(*at) else {
+        return Err("the type encoding ends mid-type");
+    };
     *at += 1;
     Ok(match c {
         b'v' => T::None,
@@ -241,7 +250,10 @@ mod tests {
     fn a_method_encoding_is_a_return_type_then_self_and_the_selector() {
         // `- (int)twice:(int)x`, verbatim from a compiled fixture.
         let sig = signature("i20@0:8i16").expect("twice:");
-        assert_eq!(sig.types, vec![T::SignedWord, T::Pointer, T::Pointer, T::SignedWord]);
+        assert_eq!(
+            sig.types,
+            vec![T::SignedWord, T::Pointer, T::Pointer, T::SignedWord]
+        );
         assert_eq!(sig.arity(), 3, "self and _cmd are arguments");
         assert!(sig.classes.is_empty());
     }
@@ -269,7 +281,10 @@ mod tests {
 
     #[test]
     fn qualifiers_and_object_class_names_do_not_shift_the_arguments() {
-        assert_eq!(types("v@:r*"), vec![T::None, T::Pointer, T::Pointer, T::Pointer]);
+        assert_eq!(
+            types("v@:r*"),
+            vec![T::None, T::Pointer, T::Pointer, T::Pointer]
+        );
         assert_eq!(
             types("@\"NSString\"16@0:8"),
             vec![T::Pointer, T::Pointer, T::Pointer],
@@ -279,26 +294,33 @@ mod tests {
 
     #[test]
     fn a_pointer_to_an_aggregate_is_a_pointer_and_a_nested_one_is_skipped_whole() {
-        assert_eq!(types("v@:^{CGRect={CGPoint=dd}{CGSize=dd}}"), vec![
-            T::None,
-            T::Pointer,
-            T::Pointer,
-            T::Pointer
-        ]);
-        assert_eq!(types("v@:^^i"), vec![T::None, T::Pointer, T::Pointer, T::Pointer]);
+        assert_eq!(
+            types("v@:^{CGRect={CGPoint=dd}{CGSize=dd}}"),
+            vec![T::None, T::Pointer, T::Pointer, T::Pointer]
+        );
+        assert_eq!(
+            types("v@:^^i"),
+            vec![T::None, T::Pointer, T::Pointer, T::Pointer]
+        );
         // The quoted field names structs carry contain no braces here, but they
         // may, and the scanner has to survive one that does.
-        assert_eq!(types("v@:^{S=\"}\"i}"), vec![T::None, T::Pointer, T::Pointer, T::Pointer]);
+        assert_eq!(
+            types("v@:^{S=\"}\"i}"),
+            vec![T::None, T::Pointer, T::Pointer, T::Pointer]
+        );
     }
 
     #[test]
     fn floating_point_widths_are_distinguished() {
-        assert_eq!(types("d@:f"), vec![
-            T::DoublePrecisionFp,
-            T::Pointer,
-            T::Pointer,
-            T::SinglePrecisionFp
-        ]);
+        assert_eq!(
+            types("d@:f"),
+            vec![
+                T::DoublePrecisionFp,
+                T::Pointer,
+                T::Pointer,
+                T::SinglePrecisionFp
+            ]
+        );
     }
 
     #[test]
@@ -323,7 +345,17 @@ mod tests {
     #[test]
     fn a_malformed_encoding_never_hangs_or_panics() {
         // Totality, as everywhere else: these strings come out of guest memory.
-        for encoding in ["^", "r", "@\"", "{", "}", "^^^^^^", "@?", ":::", "\u{1f600}"] {
+        for encoding in [
+            "^",
+            "r",
+            "@\"",
+            "{",
+            "}",
+            "^^^^^^",
+            "@?",
+            ":::",
+            "\u{1f600}",
+        ] {
             let _ = signature(encoding);
         }
     }

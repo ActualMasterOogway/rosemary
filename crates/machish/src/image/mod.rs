@@ -17,6 +17,6 @@ pub use entry::EntryPoint;
 pub use functions::{function_ranges, function_starts};
 pub use object::MachObject;
 pub use sections::Section;
+pub use segments::{MappedImage, PageConflict, Segment, map_segments, protect_segments};
 pub use symbols::{Nlist, SymbolTable};
 pub use unwind::{UnwindEntry, UnwindInfo};
-pub use segments::{map_segments, protect_segments, MappedImage, PageConflict, Segment};

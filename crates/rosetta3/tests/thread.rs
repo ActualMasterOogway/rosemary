@@ -37,7 +37,9 @@ fn lines(text: &str) -> Vec<&str> {
 
 #[test]
 fn a_thread_local_reads_its_own_value_and_not_a_neighbours() {
-    let Some(path) = common::tls_fixture() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::tls_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let (status, out, err) = run_guest(&path, &[]);
 
     assert_eq!(status, Some(0), "stderr: {err}");
@@ -49,7 +51,9 @@ fn a_thread_local_reads_its_own_value_and_not_a_neighbours() {
 
 #[test]
 fn four_threads_get_four_independent_thread_local_counters() {
-    let Some(path) = common::thread_fixture() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::thread_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let (status, out, err) = run_guest(&path, &[]);
 
     assert_eq!(status, Some(0), "stderr: {err}");
@@ -77,7 +81,9 @@ fn four_threads_get_four_independent_thread_local_counters() {
 /// the milestone is written in.
 #[test]
 fn a_join_returns_the_guest_start_routines_own_value() {
-    let Some(path) = common::thread_fixture() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::thread_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let (_, out, err) = run_guest(&path, &[]);
 
     // `counter * 100 + id`: the `id` half can only be right if the thunk passed
@@ -92,12 +98,17 @@ fn a_join_returns_the_guest_start_routines_own_value() {
     }
     // And no thread saw another's count.
     assert_eq!(out.matches("counter 10\n").count(), 4, "{out:?}");
-    assert!(out.contains("main counter 0\n"), "the main thread shared a block: {out:?}");
+    assert!(
+        out.contains("main counter 0\n"),
+        "the main thread shared a block: {out:?}"
+    );
 }
 
 #[test]
 fn a_guest_thread_sees_its_own_errno() {
-    let Some(path) = common::errno_fixture() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::errno_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let (status, out, err) = run_guest(&path, &[]);
 
     assert_eq!(status, Some(0), "stderr: {err}");
@@ -108,7 +119,10 @@ fn a_guest_thread_sees_its_own_errno() {
         out.contains("worker fd=-1 errno=2 (No such file or directory)\n"),
         "{out:?} (stderr: {err})"
     );
-    assert!(out.contains("main errno still 0\n"), "{out:?} (stderr: {err})");
+    assert!(
+        out.contains("main errno still 0\n"),
+        "{out:?} (stderr: {err})"
+    );
 }
 
 #[test]
@@ -121,7 +135,10 @@ fn mutexes_once_and_thread_specific_destructors_all_work() {
     assert_eq!(status, Some(0), "stderr: {err}");
     // 4000 exactly: a lost update under a mutex that is not really held would
     // give something smaller, essentially every run.
-    assert!(out.contains("shared=4000 inits=1\n"), "{out:?} (stderr: {err})");
+    assert!(
+        out.contains("shared=4000 inits=1\n"),
+        "{out:?} (stderr: {err})"
+    );
     for id in 1..=4 {
         assert!(out.contains(&format!("tsd {id}\n")), "{out:?}");
         assert!(
@@ -161,7 +178,9 @@ fn a_threaded_guest_agrees_with_the_same_binary_run_natively() {
 /// and points at the right symbol, which is the difference between the two.
 #[test]
 fn an_imports_resolved_address_maps_back_to_its_symbol() {
-    let Some(path) = common::tls_fixture() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::tls_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let program = rosetta3::Program::load(&path, &[]).expect("the fixture links");
 
     let bootstrap = program
@@ -169,7 +188,10 @@ fn an_imports_resolved_address_maps_back_to_its_symbol() {
         .bindings()
         .find(|b| b.symbol.ends_with("tlv_bootstrap"))
         .expect("a program with thread-locals imports a bootstrap");
-    assert_ne!(bootstrap.resolved, 0, "the runtime must supply __tlv_bootstrap itself");
+    assert_ne!(
+        bootstrap.resolved, 0,
+        "the runtime must supply __tlv_bootstrap itself"
+    );
 
     let site = program
         .import_by_target(bootstrap.resolved)
@@ -213,7 +235,12 @@ int main(void) {
     // The x86_64 build's sizes come from running it under this runtime, which is
     // also a small end-to-end check that `printf("%zu")` and the loader agree.
     let (_, guest_out, err) = run_guest(&guest, &[]);
-    let Some((_, host_out)) = run_native(&host) else { skip!("cannot run a native fixture") };
+    let Some((_, host_out)) = run_native(&host) else {
+        skip!("cannot run a native fixture")
+    };
 
-    assert_eq!(guest_out, host_out, "pthread types differ between architectures (stderr: {err})");
+    assert_eq!(
+        guest_out, host_out,
+        "pthread types differ between architectures (stderr: {err})"
+    );
 }

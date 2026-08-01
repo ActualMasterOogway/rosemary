@@ -103,7 +103,10 @@ pub struct LinkeditData {
 
 impl LinkeditData {
     pub fn parse(view: &View<'_>, off: usize) -> Result<Self> {
-        Ok(LinkeditData { dataoff: view.u32(off + 8)?, datasize: view.u32(off + 12)? })
+        Ok(LinkeditData {
+            dataoff: view.u32(off + 8)?,
+            datasize: view.u32(off + 12)?,
+        })
     }
 
     /// The byte range this refers to, or `None` if empty.
@@ -173,9 +176,12 @@ impl<'a> LoadCommand<'a> {
         // offset from the start of the command, not from the string field.
         let lc_str = |field: usize| -> Result<&'a str> {
             let str_off = view.u32(off + field)? as usize;
-            view.cstr(off.checked_add(str_off).ok_or(crate::Error::BadLoadCommand {
-                why: "string offset overflow",
-            })?)
+            view.cstr(
+                off.checked_add(str_off)
+                    .ok_or(crate::Error::BadLoadCommand {
+                        why: "string offset overflow",
+                    })?,
+            )
         };
 
         let parsed = match cmd {
@@ -258,7 +264,11 @@ impl<'a> LoadCommand<'a> {
                 LoadCommand::Uuid(uuid)
             }
 
-            _ => LoadCommand::Other { cmd, cmdsize, offset: off },
+            _ => LoadCommand::Other {
+                cmd,
+                cmdsize,
+                offset: off,
+            },
         };
 
         Ok((parsed, cmdsize))

@@ -106,10 +106,10 @@ int main(int argc, char **argv) {
 /// file while the other is writing it.
 pub fn hello() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    BUILT.get_or_init(|| build_x86_64("hello", HELLO_C, &[])).clone()
+    BUILT
+        .get_or_init(|| build_x86_64("hello", HELLO_C, &[]))
+        .clone()
 }
-
-
 
 /// Milestone 3's callback program: a guest comparator called by the *host's*
 /// `qsort`, and a guest handler called by the host's `exit`.
@@ -161,6 +161,35 @@ int main(void) {
     order[n] = 0;
     printf("order=%s\n", order);
     return n == 3 ? 0 : 1;
+}
+"#;
+
+/// The destructor program: `__cxa_atexit`, reached the way a real guest reaches
+/// it.
+///
+/// Nothing here mentions `__cxa_atexit` and that is deliberate — clang has not
+/// emitted `__mod_term_func` for years and registers a
+/// `__attribute__((destructor))` function with `__cxa_atexit` from a constructor
+/// instead, so this two-function C program imports exactly `_puts`,
+/// `_atexit` and `___cxa_atexit`.
+///
+/// The `atexit` call is what makes the output falsifiable rather than merely
+/// present. The destructor is registered before `main` and the handler during
+/// it, so one reversed list prints `atexit` first; a runtime keeping the guest's
+/// `__cxa_atexit` registrations in a list of its own, drained separately, gets
+/// the two lines the other way round.
+pub const DTOR_C: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+
+static void plain(void) { puts("atexit"); }
+
+__attribute__((destructor)) static void late(void) { puts("destructor"); }
+
+int main(void) {
+    atexit(plain);
+    puts("main");
+    return 0;
 }
 "#;
 
@@ -374,7 +403,9 @@ int main(void) {
 /// Build [`SETJMP_C`], or `None` if this host cannot.
 pub fn setjmp_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    BUILT.get_or_init(|| build_x86_64("setjmp", SETJMP_C, &[])).clone()
+    BUILT
+        .get_or_init(|| build_x86_64("setjmp", SETJMP_C, &[]))
+        .clone()
 }
 
 /// Milestone 5's refusal fixture: a `longjmp` out of a host→guest callback.
@@ -411,7 +442,9 @@ int main(void) {
 /// Build [`LONGJMP_ACROSS_C`], or `None` if this host cannot.
 pub fn longjmp_across_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    BUILT.get_or_init(|| build_x86_64("longjmp_across", LONGJMP_ACROSS_C, &[])).clone()
+    BUILT
+        .get_or_init(|| build_x86_64("longjmp_across", LONGJMP_ACROSS_C, &[]))
+        .clone()
 }
 
 /// Compile `source` as x86_64 C++ and return its path.
@@ -429,7 +462,11 @@ pub fn build_cpp(name: &str, source: &str) -> Option<String> {
 /// declares a root class: there is no `NSObject` to derive from without it, and
 /// a class with no superclass exercises a path real programs never take.
 pub fn build_objc(name: &str, source: &str) -> Option<String> {
-    build_x86_64(name, source, &["-x", "objective-c", "-framework", "Foundation"])
+    build_x86_64(
+        name,
+        source,
+        &["-x", "objective-c", "-framework", "Foundation"],
+    )
 }
 
 /// M6.3's message-sending program: an Objective-C guest that actually runs.
@@ -583,7 +620,9 @@ int main(int argc, char **argv) {
 /// Build [`OBJC_REFUSALS_M`], or `None` if this host cannot.
 pub fn objc_refusals_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    BUILT.get_or_init(|| build_objc("objc_refusals", OBJC_REFUSALS_M)).clone()
+    BUILT
+        .get_or_init(|| build_objc("objc_refusals", OBJC_REFUSALS_M))
+        .clone()
 }
 
 /// Milestone 5's exception program: everything about unwinding that works.
@@ -668,7 +707,9 @@ int main(void) {
 /// Build [`EXCEPTIONS_CPP`], or `None` if this host cannot.
 pub fn exceptions_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    BUILT.get_or_init(|| build_cpp("exceptions", EXCEPTIONS_CPP)).clone()
+    BUILT
+        .get_or_init(|| build_cpp("exceptions", EXCEPTIONS_CPP))
+        .clone()
 }
 
 /// Milestone 5's boundary program: the three throws that must be *refused*.
@@ -714,7 +755,9 @@ int main(int argc, char **argv) {
 /// Build [`UNWIND_REFUSALS_CPP`], or `None` if this host cannot.
 pub fn unwind_refusals_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    BUILT.get_or_init(|| build_cpp("unwind_refusals", UNWIND_REFUSALS_CPP)).clone()
+    BUILT
+        .get_or_init(|| build_cpp("unwind_refusals", UNWIND_REFUSALS_CPP))
+        .clone()
 }
 
 /// Milestone 5's signal program.
@@ -775,7 +818,9 @@ int main(void) {
 /// Build [`SIGNAL_C`], or `None` if this host cannot.
 pub fn signal_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    BUILT.get_or_init(|| build_x86_64("signals", SIGNAL_C, &[])).clone()
+    BUILT
+        .get_or_init(|| build_x86_64("signals", SIGNAL_C, &[]))
+        .clone()
 }
 
 /// Milestone 5's refusal fixture for signals: a handler wanting a `ucontext_t`.
@@ -808,31 +853,41 @@ int main(void) {
 /// Build [`SIGINFO_C`], or `None` if this host cannot.
 pub fn siginfo_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    BUILT.get_or_init(|| build_x86_64("siginfo", SIGINFO_C, &[])).clone()
+    BUILT
+        .get_or_init(|| build_x86_64("siginfo", SIGINFO_C, &[]))
+        .clone()
 }
 
 /// Build [`THREAD_C`], or `None` if this host cannot.
 pub fn thread_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    BUILT.get_or_init(|| build_x86_64("threads", THREAD_C, &[])).clone()
+    BUILT
+        .get_or_init(|| build_x86_64("threads", THREAD_C, &[]))
+        .clone()
 }
 
 /// Build [`ERRNO_C`], or `None` if this host cannot.
 pub fn errno_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    BUILT.get_or_init(|| build_x86_64("errno_thread", ERRNO_C, &[])).clone()
+    BUILT
+        .get_or_init(|| build_x86_64("errno_thread", ERRNO_C, &[]))
+        .clone()
 }
 
 /// Build [`PTHREAD_SYNC_C`], or `None` if this host cannot.
 pub fn pthread_sync_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    BUILT.get_or_init(|| build_x86_64("pthread_sync", PTHREAD_SYNC_C, &[])).clone()
+    BUILT
+        .get_or_init(|| build_x86_64("pthread_sync", PTHREAD_SYNC_C, &[]))
+        .clone()
 }
 
 /// Build [`TLS_C`], or `None` if this host cannot.
 pub fn tls_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    BUILT.get_or_init(|| build_x86_64("thread_locals", TLS_C, &[])).clone()
+    BUILT
+        .get_or_init(|| build_x86_64("thread_locals", TLS_C, &[]))
+        .clone()
 }
 
 /// Compile `source` for the **host's** architecture and return its path.
@@ -845,7 +900,12 @@ pub fn build_native(name: &str, source: &str) -> Option<String> {
     let out = dir.join(name);
     std::fs::write(&src, source).ok()?;
 
-    let status = Command::new("cc").arg("-o").arg(&out).arg(&src).status().ok()?;
+    let status = Command::new("cc")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .status()
+        .ok()?;
     status.success().then(|| out.to_string_lossy().into_owned())
 }
 
@@ -858,22 +918,36 @@ pub fn build_native(name: &str, source: &str) -> Option<String> {
 /// caller skips rather than fails.
 pub fn run_native(path: &str) -> Option<(Option<i32>, String)> {
     let out = Command::new(path).output().ok()?;
-    out.status
-        .code()
-        .is_some()
-        .then(|| (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned()))
+    out.status.code().is_some().then(|| {
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    })
 }
 
 /// Build [`QSORT_C`], or `None` if this host cannot.
 pub fn qsort_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    BUILT.get_or_init(|| build_x86_64("qsort_cb", QSORT_C, &[])).clone()
+    BUILT
+        .get_or_init(|| build_x86_64("qsort_cb", QSORT_C, &[]))
+        .clone()
 }
 
 /// Build [`CTOR_C`], or `None` if this host cannot.
 pub fn ctor_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    BUILT.get_or_init(|| build_x86_64("ctors", CTOR_C, &[])).clone()
+    BUILT
+        .get_or_init(|| build_x86_64("ctors", CTOR_C, &[]))
+        .clone()
+}
+
+/// Build [`DTOR_C`], or `None` if this host cannot.
+pub fn dtor_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("dtors", DTOR_C, &[]))
+        .clone()
 }
 
 /// Run a guest program under the driver, returning `(status, stdout, stderr)`.

@@ -135,8 +135,8 @@ impl SavedContext {
 
     fn to_bytes(self) -> [u8; RECORD] {
         let words = [
-            MAGIC, self.rip, self.rsp, self.rbx, self.rbp, self.r12, self.r13, self.r14,
-            self.r15, self.owner, self.entry,
+            MAGIC, self.rip, self.rsp, self.rbx, self.rbp, self.r12, self.r13, self.r14, self.r15,
+            self.owner, self.entry,
         ];
         let mut out = [0u8; RECORD];
         for (slot, word) in out.chunks_exact_mut(8).zip(words) {
@@ -182,7 +182,10 @@ pub fn setjmp(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory
     };
     let saved = SavedContext::capture(ctx, state as *const _ as u64, state.entry());
     mem.write(env, &saved.to_bytes())
-        .map_err(|_| AbiError::Memory { symbol: symbol.to_string(), addr: env })?;
+        .map_err(|_| AbiError::Memory {
+            symbol: symbol.to_string(),
+            addr: env,
+        })?;
     ctx.rax = 0;
     Ok(())
 }
@@ -215,8 +218,10 @@ fn longjmp_to(
     mem: &mut dyn GuestMemory,
 ) -> Result<()> {
     let mut bytes = [0u8; RECORD];
-    mem.read(env, &mut bytes)
-        .map_err(|_| AbiError::Memory { symbol: symbol.to_string(), addr: env })?;
+    mem.read(env, &mut bytes).map_err(|_| AbiError::Memory {
+        symbol: symbol.to_string(),
+        addr: env,
+    })?;
     let Some(saved) = SavedContext::from_bytes(&bytes) else {
         return Err(AbiError::Refused {
             symbol: symbol.to_string(),
@@ -334,7 +339,10 @@ mod tests {
 
     impl TestMem {
         fn new(base: u64) -> Self {
-            TestMem { base, bytes: vec![0; GUEST_JMP_BUF] }
+            TestMem {
+                base,
+                bytes: vec![0; GUEST_JMP_BUF],
+            }
         }
 
         fn at(&self, va: u64, len: usize) -> Option<std::ops::Range<usize>> {
@@ -345,17 +353,19 @@ mod tests {
 
     impl GuestMemory for TestMem {
         fn read(&self, va: u64, out: &mut [u8]) -> core::result::Result<(), machish::Error> {
-            let r = self
-                .at(va, out.len())
-                .ok_or(machish::Error::OutOfBounds { addr: va, len: out.len() })?;
+            let r = self.at(va, out.len()).ok_or(machish::Error::OutOfBounds {
+                addr: va,
+                len: out.len(),
+            })?;
             out.copy_from_slice(&self.bytes[r]);
             Ok(())
         }
 
         fn write(&mut self, va: u64, data: &[u8]) -> core::result::Result<(), machish::Error> {
-            let r = self
-                .at(va, data.len())
-                .ok_or(machish::Error::OutOfBounds { addr: va, len: data.len() })?;
+            let r = self.at(va, data.len()).ok_or(machish::Error::OutOfBounds {
+                addr: va,
+                len: data.len(),
+            })?;
             self.bytes[r].copy_from_slice(data);
             Ok(())
         }
@@ -405,7 +415,10 @@ mod tests {
         live.rcx = 0xbeef;
         live.rdi = 0xfeed;
         saved.restore(&mut live);
-        assert_eq!((live.rip, live.rsp, live.rbx, live.r15), (0x1_0000_1234, 0x7fff_0000, 0xb, 0xf));
+        assert_eq!(
+            (live.rip, live.rsp, live.rbx, live.r15),
+            (0x1_0000_1234, 0x7fff_0000, 0xb, 0xf)
+        );
         // Caller-saved registers are dead across a call by definition, and a
         // `longjmp` that resurrected stale ones would be inventing state.
         assert_eq!((live.rax, live.rcx, live.rdi), (0xdead, 0xbeef, 0xfeed));
@@ -432,7 +445,11 @@ mod tests {
         longjmp("_longjmp", &mut ctx, &mut mem).expect("longjmp");
 
         assert_eq!((ctx.rip, ctx.rsp), (0x1_0000_1234, 0x7fff_1000));
-        assert_eq!((ctx.rbx, ctx.r15), (0xb, 0xf), "callee-saved registers were not restored");
+        assert_eq!(
+            (ctx.rbx, ctx.r15),
+            (0xb, 0xf),
+            "callee-saved registers were not restored"
+        );
         assert_eq!(ctx.rax, 7, "setjmp must return what longjmp was given");
         // The stack pointer moved without an exit reporting it, and a callback
         // entered before the next one would otherwise start below a dead frame.
@@ -459,8 +476,14 @@ mod tests {
         ctx.rsi = 0;
         longjmp("_longjmp", &mut ctx, &mut mem).expect("longjmp");
         assert_eq!(ctx.rax, 1, "a longjmp of zero arrives as one");
-        assert!(state.took_redirect(), "a longjmp did not report the transfer");
-        assert!(!state.took_redirect(), "the flag must not survive being read");
+        assert!(
+            state.took_redirect(),
+            "a longjmp did not report the transfer"
+        );
+        assert!(
+            !state.took_redirect(),
+            "the flag must not survive being read"
+        );
         state.leave(entry);
     }
 
@@ -489,7 +512,10 @@ mod tests {
         assert!(format!("{err}").contains("unwind"), "{err}");
         // The guest context is untouched on a refusal, exactly as a missing
         // signature leaves it: a diagnostic, not half a jump.
-        assert_eq!((jumping.rip, jumping.rsp, jumping.rbx), (before.rip, before.rsp, before.rbx));
+        assert_eq!(
+            (jumping.rip, jumping.rsp, jumping.rbx),
+            (before.rip, before.rsp, before.rbx)
+        );
         assert!(!state.took_redirect());
 
         state.leave(inner);
@@ -519,7 +545,13 @@ mod tests {
         ctx.rax = 0xdead;
 
         let err = setjmp("_setjmp", &mut ctx, &mut mem).expect_err("should fail");
-        assert_eq!(err, AbiError::Memory { symbol: "_setjmp".into(), addr: 0x9_0000_0000 });
+        assert_eq!(
+            err,
+            AbiError::Memory {
+                symbol: "_setjmp".into(),
+                addr: 0x9_0000_0000
+            }
+        );
         // A `setjmp` that failed must not look like one that returned zero.
         assert_eq!(ctx.rax, 0xdead, "rax is untouched on failure");
         state.leave(entry);
@@ -527,12 +559,22 @@ mod tests {
 
     #[test]
     fn every_darwin_spelling_has_a_shim() {
-        for name in ["setjmp", "_setjmp", "sigsetjmp", "longjmp", "_longjmp", "siglongjmp"] {
+        for name in [
+            "setjmp",
+            "_setjmp",
+            "sigsetjmp",
+            "longjmp",
+            "_longjmp",
+            "siglongjmp",
+        ] {
             assert!(shim_for(name).is_some(), "{name} has no shim");
             // And the table agrees, so the audit does not report as refused
             // something that in fact runs.
             assert!(
-                matches!(crate::abi::table::lookup(0, name), crate::abi::Lookup::Known(_)),
+                matches!(
+                    crate::abi::table::lookup(0, name),
+                    crate::abi::Lookup::Known(_)
+                ),
                 "{name} is shimmed but not described"
             );
         }

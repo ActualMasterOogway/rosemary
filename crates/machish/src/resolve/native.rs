@@ -234,7 +234,10 @@ impl NativeDylibProvider {
     /// Whether `name` is refused by policy rather than merely absent.
     pub fn is_denied(&self, name: &str) -> bool {
         self.deny_exact.contains(name)
-            || self.deny_prefixes.iter().any(|p| name.starts_with(p.as_str()))
+            || self
+                .deny_prefixes
+                .iter()
+                .any(|p| name.starts_with(p.as_str()))
     }
 
     /// Try `dlsym` for `name`, then again with a legacy x86-only variant
@@ -261,7 +264,9 @@ impl NativeDylibProvider {
         if !self.autoload || !self.attempted.borrow_mut().insert(install_name.to_string()) {
             return false;
         }
-        let Ok(c) = std::ffi::CString::new(install_name) else { return false };
+        let Ok(c) = std::ffi::CString::new(install_name) else {
+            return false;
+        };
         // SAFETY: `c` is a valid NUL-terminated C string outliving the call.
         // The handle is intentionally never closed — see `autoload` — so there
         // is nothing to own and nothing to free.
@@ -282,8 +287,10 @@ impl NativeDylibProvider {
         let c = std::ffi::CString::new(bare).ok()?;
 
         // `RTLD_DEFAULT` is `(void *)-2` on macOS: search all loaded images.
-        let handle =
-            self.handle.as_ref().map_or(-2isize as *mut core::ffi::c_void, |h| h.0);
+        let handle = self
+            .handle
+            .as_ref()
+            .map_or(-2isize as *mut core::ffi::c_void, |h| h.0);
 
         // SAFETY: `handle` is either a live `dlopen` result owned by `self` or
         // the `RTLD_DEFAULT` sentinel, and `c` is a valid NUL-terminated string
@@ -297,7 +304,11 @@ impl NativeDylibProvider {
         // would be worse than declining to: `Function` is what a bind stream
         // overwhelmingly means, and an embedder that needs the distinction has
         // `dladdr` and the tag.
-        Some(Resolved { addr: ptr as usize as u64, kind: SymbolKind::Function, tag: 0 })
+        Some(Resolved {
+            addr: ptr as usize as u64,
+            kind: SymbolKind::Function,
+            tag: 0,
+        })
     }
 }
 
@@ -340,13 +351,19 @@ mod tests {
     use crate::fixups::LibraryRef;
 
     fn sym(name: &str) -> SymbolRef<'_> {
-        SymbolRef { name, library: LibraryRef::Flat, weak_import: false }
+        SymbolRef {
+            name,
+            library: LibraryRef::Flat,
+            weak_import: false,
+        }
     }
 
     #[test]
     fn resolves_a_libsystem_symbol_to_a_host_pointer() {
         let p = NativeDylibProvider::system();
-        let r = p.resolve(&sym("_strlen")).expect("_strlen must resolve via dlsym");
+        let r = p
+            .resolve(&sym("_strlen"))
+            .expect("_strlen must resolve via dlsym");
         assert_ne!(r.addr, 0);
         // Sanity: the same query twice must agree, which also exercises the
         // cache path rather than only the `dlsym` one.
@@ -382,10 +399,16 @@ mod tests {
         // `/bin/ls` really does import this name, and arm64 really does not
         // export it — the whole point of the fallback.
         let p = NativeDylibProvider::system();
-        let plain = p.resolve(&sym("_fts_open")).expect("_fts_open must resolve");
-        let variant =
-            p.resolve(&sym("_fts_open$INODE64")).expect("the $INODE64 variant must fall back");
-        assert_eq!(variant, plain, "the fallback must land on the same implementation");
+        let plain = p
+            .resolve(&sym("_fts_open"))
+            .expect("_fts_open must resolve");
+        let variant = p
+            .resolve(&sym("_fts_open$INODE64"))
+            .expect("the $INODE64 variant must fall back");
+        assert_eq!(
+            variant, plain,
+            "the fallback must land on the same implementation"
+        );
     }
 
     #[test]
@@ -407,14 +430,21 @@ mod tests {
         // Nothing in this test process links `libncurses`, so `RTLD_DEFAULT`
         // cannot see `_tputs` until the library named by the import is opened.
         let p = NativeDylibProvider::system();
-        assert_eq!(p.dlsym("_tputs"), None, "libncurses should not be loaded yet");
+        assert_eq!(
+            p.dlsym("_tputs"),
+            None,
+            "libncurses should not be loaded yet"
+        );
 
         let two_level = SymbolRef {
             name: "_tputs",
             library: LibraryRef::InstallName("/usr/lib/libncurses.5.4.dylib"),
             weak_import: false,
         };
-        assert!(p.resolve(&two_level).is_some(), "autoload should have opened libncurses");
+        assert!(
+            p.resolve(&two_level).is_some(),
+            "autoload should have opened libncurses"
+        );
     }
 
     #[test]
@@ -427,12 +457,18 @@ mod tests {
             weak_import: false,
         };
         assert_eq!(p.resolve(&two_level), None);
-        assert!(p.attempted.borrow().is_empty(), "autoload(false) must not dlopen anything");
+        assert!(
+            p.attempted.borrow().is_empty(),
+            "autoload(false) must not dlopen anything"
+        );
     }
 
     #[test]
     fn absent_symbols_resolve_to_nothing() {
         let p = NativeDylibProvider::system();
-        assert_eq!(p.resolve(&sym("_machish_definitely_not_a_real_symbol")), None);
+        assert_eq!(
+            p.resolve(&sym("_machish_definitely_not_a_real_symbol")),
+            None
+        );
     }
 }

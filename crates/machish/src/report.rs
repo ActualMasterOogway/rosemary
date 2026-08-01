@@ -134,7 +134,9 @@ impl ImageReport {
     /// message and "`_strlen` is missing" is forty round trips.
     pub fn require_all_resolved(&self) -> Result<()> {
         let mut it = self.hard_missing();
-        let Some(first) = it.next() else { return Ok(()) };
+        let Some(first) = it.next() else {
+            return Ok(());
+        };
         let rest = it.count();
         let mut msg = first.symbol.clone();
         if rest > 0 {

@@ -155,8 +155,10 @@ pub fn sigaction(
     let mut act = None;
     if act_va != 0 {
         let mut bytes = [0u8; SigAction::SIZE];
-        mem.read(act_va, &mut bytes)
-            .map_err(|_| AbiError::Memory { symbol: symbol.to_string(), addr: act_va })?;
+        mem.read(act_va, &mut bytes).map_err(|_| AbiError::Memory {
+            symbol: symbol.to_string(),
+            addr: act_va,
+        })?;
         let mut a = SigAction::from_bytes(bytes);
         if a.flags & SA_SIGINFO != 0 {
             return Err(AbiError::Refused {
@@ -177,15 +179,24 @@ pub fn sigaction(
     let rc = unsafe {
         libc::sigaction(
             signum,
-            act.as_ref().map_or(std::ptr::null(), |a| a as *const SigAction).cast(),
-            if old_va == 0 { std::ptr::null_mut() } else { (&raw mut old).cast() },
+            act.as_ref()
+                .map_or(std::ptr::null(), |a| a as *const SigAction)
+                .cast(),
+            if old_va == 0 {
+                std::ptr::null_mut()
+            } else {
+                (&raw mut old).cast()
+            },
         )
     };
 
     if rc == 0 && old_va != 0 {
         old.handler = inbound(old.handler, callbacks);
         mem.write(old_va, &old.to_bytes())
-            .map_err(|_| AbiError::Memory { symbol: symbol.to_string(), addr: old_va })?;
+            .map_err(|_| AbiError::Memory {
+                symbol: symbol.to_string(),
+                addr: old_va,
+            })?;
     }
     crate::shims::set_int_return(ctx, rc);
     Ok(())
@@ -196,8 +207,7 @@ pub fn sigaction(
 /// Wider than [`crate::jmpbuf::Shim`] by one parameter, and that parameter is
 /// the whole reason these are here: a signal disposition is a guest function
 /// pointer crossing in both directions.
-pub type Shim =
-    fn(&str, &mut RegisterContext, &mut dyn GuestMemory, &dyn Callbacks) -> Result<()>;
+pub type Shim = fn(&str, &mut RegisterContext, &mut dyn GuestMemory, &dyn Callbacks) -> Result<()>;
 
 /// Whether `name` (underscore already stripped) is one of this module's.
 pub fn shim_for(name: &str) -> Option<Shim> {
@@ -242,7 +252,10 @@ mod tests {
                     out.copy_from_slice(&self.bytes[off..e]);
                     Ok(())
                 }
-                None => Err(machish::Error::OutOfBounds { addr: va, len: out.len() }),
+                None => Err(machish::Error::OutOfBounds {
+                    addr: va,
+                    len: out.len(),
+                }),
             }
         }
 
@@ -254,22 +267,35 @@ mod tests {
                     self.bytes[off..e].copy_from_slice(data);
                     Ok(())
                 }
-                None => Err(machish::Error::OutOfBounds { addr: va, len: data.len() }),
+                None => Err(machish::Error::OutOfBounds {
+                    addr: va,
+                    len: data.len(),
+                }),
             }
         }
     }
 
     fn guest_memory() -> Bytes {
-        Bytes { base: 0x3_0000_0000, bytes: vec![0; 64] }
+        Bytes {
+            base: 0x3_0000_0000,
+            bytes: vec![0; 64],
+        }
     }
 
     #[test]
     fn the_struct_is_sixteen_bytes_of_the_shape_both_architectures_use() {
         assert_eq!(std::mem::size_of::<SigAction>(), SigAction::SIZE);
-        assert_eq!(std::mem::size_of::<SigAction>(), std::mem::size_of::<libc::sigaction>());
+        assert_eq!(
+            std::mem::size_of::<SigAction>(),
+            std::mem::size_of::<libc::sigaction>()
+        );
         // Round-tripping is what the shim relies on when it rewrites one field
         // and leaves the mask and flags exactly as the guest wrote them.
-        let a = SigAction { handler: 0x1_0000_1234, mask: 0xdead_beef, flags: 0x1234_5678 };
+        let a = SigAction {
+            handler: 0x1_0000_1234,
+            mask: 0xdead_beef,
+            flags: 0x1234_5678,
+        };
         let b = SigAction::from_bytes(a.to_bytes());
         assert_eq!((b.handler, b.mask, b.flags), (a.handler, a.mask, a.flags));
     }
@@ -283,7 +309,10 @@ mod tests {
             assert_eq!(outbound("_signal", sentinel, &Wrapping).unwrap(), sentinel);
             assert_eq!(inbound(sentinel, &Wrapping), sentinel);
         }
-        assert_eq!(outbound("_signal", 0x1_0000_1234, &Wrapping).unwrap(), 0x1_0000_1234 | WRAP);
+        assert_eq!(
+            outbound("_signal", 0x1_0000_1234, &Wrapping).unwrap(),
+            0x1_0000_1234 | WRAP
+        );
     }
 
     #[test]
@@ -292,7 +321,11 @@ mod tests {
         // disposition and restores it later must get back the pointer it gave,
         // not the arm64 trampoline standing in for it.
         let mut mem = guest_memory();
-        let act = SigAction { handler: 0x1_0000_1234, mask: 0, flags: 0 };
+        let act = SigAction {
+            handler: 0x1_0000_1234,
+            mask: 0,
+            flags: 0,
+        };
         mem.write(mem.base, &act.to_bytes()).unwrap();
 
         let mut ctx = RegisterContext::new();
@@ -323,7 +356,11 @@ mod tests {
     #[test]
     fn sa_siginfo_is_refused_by_name_with_its_reason() {
         let mut mem = guest_memory();
-        let act = SigAction { handler: 0x1_0000_1234, mask: 0, flags: SA_SIGINFO };
+        let act = SigAction {
+            handler: 0x1_0000_1234,
+            mask: 0,
+            flags: SA_SIGINFO,
+        };
         mem.write(mem.base, &act.to_bytes()).unwrap();
 
         let mut ctx = RegisterContext::new();
@@ -349,6 +386,12 @@ mod tests {
         ctx.rdi = libc::SIGUSR1 as u64;
         ctx.rsi = 0x9_0000_0000;
         let err = sigaction("_sigaction", &mut ctx, &mut mem, &Wrapping).expect_err("fail");
-        assert_eq!(err, AbiError::Memory { symbol: "_sigaction".into(), addr: 0x9_0000_0000 });
+        assert_eq!(
+            err,
+            AbiError::Memory {
+                symbol: "_sigaction".into(),
+                addr: 0x9_0000_0000
+            }
+        );
     }
 }

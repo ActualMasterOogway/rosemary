@@ -7,12 +7,12 @@ use machish::loader::Loader;
 use machish::memory::{BufferSpace, Regions};
 use machish::namespace::FsDylibSource;
 use machish::report::LinkReport;
-use machish::resolve::{eager_binding_shims, NativeDylibProvider, SymbolProvider};
+use machish::resolve::{NativeDylibProvider, SymbolProvider, eager_binding_shims};
 use machish::spec::arch::X86_64;
 
 use microlift::arch::x86_64::context::RegisterContext;
-use microlift::core::exit::MemorySegment;
 use microlift::core::LifterConfig;
+use microlift::core::exit::MemorySegment;
 
 use crate::abi::{AbiError, Classification, FunctionAbi, Lookup};
 
@@ -194,7 +194,12 @@ impl Program<machish::memory::MmapSpace> {
         extra: &[&dyn SymbolProvider],
     ) -> Result<Self, ProgramError> {
         let bytes = std::fs::read(path)?;
-        Self::load_into(bytes.as_slice(), path, extra, machish::memory::MmapSpace::new())
+        Self::load_into(
+            bytes.as_slice(),
+            path,
+            extra,
+            machish::memory::MmapSpace::new(),
+        )
     }
 }
 
@@ -233,7 +238,9 @@ impl<M: Regions> Program<M> {
         // rather than threading a `MachObject` out of the loader keeps the
         // report the only thing that crosses the boundary.
         let obj = machish::image::MachObject::parse_any(bytes, X86_64)?;
-        let text_sect = obj.section("__TEXT", "__text").ok_or(ProgramError::NoText)?;
+        let text_sect = obj
+            .section("__TEXT", "__text")
+            .ok_or(ProgramError::NoText)?;
         let slide = report.root().map_or(0, |i| i.slide);
         let text_va = text_sect.addr.wrapping_add(slide);
 
@@ -259,7 +266,13 @@ impl<M: Regions> Program<M> {
             };
             imports.insert(b.slot_va, site.clone());
             if let Some(stub) = b.stub_va {
-                imports.insert(stub, ImportSite { is_stub: true, ..site });
+                imports.insert(
+                    stub,
+                    ImportSite {
+                        is_stub: true,
+                        ..site
+                    },
+                );
             }
         }
 
@@ -284,7 +297,13 @@ impl<M: Regions> Program<M> {
                 };
                 imports.insert(m.slot_va, site.clone());
                 if let Some(stub) = m.stub_va {
-                    imports.insert(stub, ImportSite { is_stub: true, ..site });
+                    imports.insert(
+                        stub,
+                        ImportSite {
+                            is_stub: true,
+                            ..site
+                        },
+                    );
                 }
             }
         }
@@ -294,7 +313,9 @@ impl<M: Regions> Program<M> {
         let mut imports_by_target: BTreeMap<u64, ImportSite> = BTreeMap::new();
         for site in by_symbol {
             if site.resolved != 0 {
-                imports_by_target.entry(site.resolved).or_insert_with(|| site.clone());
+                imports_by_target
+                    .entry(site.resolved)
+                    .or_insert_with(|| site.clone());
             }
         }
 
@@ -341,7 +362,9 @@ impl<M: Regions> Program<M> {
         let mut config = LifterConfig::default();
 
         for (base, bytes) in self.memory.regions() {
-            config.segments.push(MemorySegment::new(base, bytes.to_vec(), false));
+            config
+                .segments
+                .push(MemorySegment::new(base, bytes.to_vec(), false));
         }
         for (&va, site) in &self.imports {
             match policy.promotion_for(site) {
@@ -380,7 +403,9 @@ impl<M: Regions> Program<M> {
     pub fn service_import_call(&mut self, ctx: &mut RegisterContext) -> Result<(), AbiError> {
         let va = ctx.imported_function_va;
         let Some(site) = self.imports.get(&va) else {
-            return Err(AbiError::NoSignature { symbol: format!("<unregistered {va:#x}>") });
+            return Err(AbiError::NoSignature {
+                symbol: format!("<unregistered {va:#x}>"),
+            });
         };
         let (symbol, tag, resolved) = (site.symbol.clone(), site.tag, site.resolved);
         crate::abi::call_import(&symbol, tag, resolved, ctx, &mut self.memory)
@@ -408,7 +433,9 @@ impl<M: Regions> Program<M> {
         let function = self.functions.iter().find(|f| f.contains(&va)).cloned();
         let region = crate::region::region_for(bytes, base, va, function)?;
         let start = usize::try_from(region.range.start - base).ok()?;
-        let end = usize::try_from(region.range.end - base).ok()?.min(bytes.len());
+        let end = usize::try_from(region.range.end - base)
+            .ok()?
+            .min(bytes.len());
         let code = bytes.get(start..end)?.to_vec();
         Some((region, code))
     }

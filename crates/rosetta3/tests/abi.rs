@@ -25,7 +25,7 @@ use microlift::arch::x86_64::context::RegisterContext;
 use microlift::function_traits::FunctionArgumentType as T;
 
 use rosetta3::abi::table::{self, FunctionAbi, Lookup};
-use rosetta3::abi::{marshal, AbiError, GuestMemory};
+use rosetta3::abi::{AbiError, GuestMemory, marshal};
 
 /// Where the synthetic guest stack lives. Nothing is mapped there for real —
 /// it is a `BufferSpace`, so only the marshaller's own reads go through it.
@@ -55,7 +55,9 @@ fn host_symbol(name: &str) -> Option<u64> {
 
 fn guest_stack() -> BufferSpace {
     let mut space = BufferSpace::new(STACK_BASE);
-    space.reserve(STACK_SIZE, 16, Placement::Fixed(STACK_BASE)).expect("reserve guest stack");
+    space
+        .reserve(STACK_SIZE, 16, Placement::Fixed(STACK_BASE))
+        .expect("reserve guest stack");
     space
 }
 
@@ -173,42 +175,87 @@ fn string_functions() {
     check_int!("_strnlen", [A::P(hello.as_ptr().cast()), A::I(3)], 3u64);
     // A negative `int` return, which only survives if `rax` is sign-extended —
     // the magnitude is libc's business, the sign is ours.
-    if let Some(ctx) = call("_strcmp", &[A::P(hello.as_ptr().cast()), A::P(world.as_ptr().cast())])
-    {
-        assert!((ctx.rax as i64) < 0, "strcmp(hello, world) returned {}", ctx.rax as i64);
+    if let Some(ctx) = call(
+        "_strcmp",
+        &[A::P(hello.as_ptr().cast()), A::P(world.as_ptr().cast())],
+    ) {
+        assert!(
+            (ctx.rax as i64) < 0,
+            "strcmp(hello, world) returned {}",
+            ctx.rax as i64
+        );
     }
-    check_int!("_strcmp", [A::P(hello.as_ptr().cast()), A::P(hello.as_ptr().cast())], 0u64);
+    check_int!(
+        "_strcmp",
+        [A::P(hello.as_ptr().cast()), A::P(hello.as_ptr().cast())],
+        0u64
+    );
     // The length argument is the third register; getting it wrong compares the
     // whole string and the answer flips.
     check_int!(
         "_strncmp",
-        [A::P(hello.as_ptr().cast()), A::P(hello2.as_ptr().cast()), A::I(5)],
+        [
+            A::P(hello.as_ptr().cast()),
+            A::P(hello2.as_ptr().cast()),
+            A::I(5)
+        ],
         0u64
     );
     check_int!(
         "_strcasecmp",
-        [A::P(cstr("HELLO").as_ptr().cast()), A::P(hello.as_ptr().cast())],
+        [
+            A::P(cstr("HELLO").as_ptr().cast()),
+            A::P(hello.as_ptr().cast())
+        ],
         0u64
     );
     check_int!(
         "_strncasecmp",
-        [A::P(cstr("HELLO!").as_ptr().cast()), A::P(hello.as_ptr().cast()), A::I(5)],
+        [
+            A::P(cstr("HELLO!").as_ptr().cast()),
+            A::P(hello.as_ptr().cast()),
+            A::I(5)
+        ],
         0u64
     );
     check_int!(
         "_memcmp",
-        [A::P(hello.as_ptr().cast()), A::P(hello.as_ptr().cast()), A::I(5)],
+        [
+            A::P(hello.as_ptr().cast()),
+            A::P(hello.as_ptr().cast()),
+            A::I(5)
+        ],
         0u64
     );
     // `bcmp` promises only "nonzero when they differ" — Apple's is `memcmp`.
-    if let Some(ctx) =
-        call("_bcmp", &[A::P(hello.as_ptr().cast()), A::P(world.as_ptr().cast()), A::I(5)])
-    {
+    if let Some(ctx) = call(
+        "_bcmp",
+        &[
+            A::P(hello.as_ptr().cast()),
+            A::P(world.as_ptr().cast()),
+            A::I(5),
+        ],
+    ) {
         assert_ne!(ctx.rax, 0);
     }
-    check_int!("_strspn", [A::P(hello.as_ptr().cast()), A::P(cstr("hel").as_ptr().cast())], 4u64);
-    check_int!("_strcspn", [A::P(hello.as_ptr().cast()), A::P(cstr("l").as_ptr().cast())], 2u64);
-    check_int!("_strcoll", [A::P(hello.as_ptr().cast()), A::P(hello.as_ptr().cast())], 0u64);
+    check_int!(
+        "_strspn",
+        [
+            A::P(hello.as_ptr().cast()),
+            A::P(cstr("hel").as_ptr().cast())
+        ],
+        4u64
+    );
+    check_int!(
+        "_strcspn",
+        [A::P(hello.as_ptr().cast()), A::P(cstr("l").as_ptr().cast())],
+        2u64
+    );
+    check_int!(
+        "_strcoll",
+        [A::P(hello.as_ptr().cast()), A::P(hello.as_ptr().cast())],
+        0u64
+    );
 }
 
 #[test]
@@ -218,26 +265,43 @@ fn functions_returning_pointers_into_their_arguments() {
 
     // A pointer return is only right if the whole 64 bits came back — a
     // truncated one would still be non-null and still look plausible.
-    if let Some(ctx) = call("_strchr", &[A::P(hello.as_ptr().cast()), A::I(u64::from(b','))]) {
+    if let Some(ctx) = call(
+        "_strchr",
+        &[A::P(hello.as_ptr().cast()), A::I(u64::from(b','))],
+    ) {
         assert_eq!(ctx.rax, base + 5);
     }
-    if let Some(ctx) = call("_strrchr", &[A::P(hello.as_ptr().cast()), A::I(u64::from(b'l'))]) {
+    if let Some(ctx) = call(
+        "_strrchr",
+        &[A::P(hello.as_ptr().cast()), A::I(u64::from(b'l'))],
+    ) {
         assert_eq!(ctx.rax, base + 10);
     }
-    if let Some(ctx) =
-        call("_strstr", &[A::P(hello.as_ptr().cast()), A::P(cstr("world").as_ptr().cast())])
-    {
+    if let Some(ctx) = call(
+        "_strstr",
+        &[
+            A::P(hello.as_ptr().cast()),
+            A::P(cstr("world").as_ptr().cast()),
+        ],
+    ) {
         assert_eq!(ctx.rax, base + 7);
     }
     if let Some(ctx) = call(
         "_memchr",
-        &[A::P(hello.as_ptr().cast()), A::I(u64::from(b'w')), A::I(hello.as_bytes().len() as u64)],
+        &[
+            A::P(hello.as_ptr().cast()),
+            A::I(u64::from(b'w')),
+            A::I(hello.as_bytes().len() as u64),
+        ],
     ) {
         assert_eq!(ctx.rax, base + 7);
     }
     // A miss returns null, and null is the value most likely to appear by
     // accident, so it is worth asserting separately.
-    if let Some(ctx) = call("_strchr", &[A::P(hello.as_ptr().cast()), A::I(u64::from(b'z'))]) {
+    if let Some(ctx) = call(
+        "_strchr",
+        &[A::P(hello.as_ptr().cast()), A::I(u64::from(b'z'))],
+    ) {
         assert_eq!(ctx.rax, 0);
     }
 }
@@ -248,7 +312,10 @@ fn functions_with_side_effects_on_a_buffer() {
     let ptr = buf.as_mut_ptr();
 
     if let Some(ctx) = call("_memset", &[A::P(ptr), A::I(u64::from(b'x')), A::I(4)]) {
-        assert_eq!(ctx.rax, ptr as usize as u64, "memset returns its destination");
+        assert_eq!(
+            ctx.rax, ptr as usize as u64,
+            "memset returns its destination"
+        );
         assert_eq!(&buf[..5], b"xxxx\xaa");
     }
 
@@ -268,7 +335,9 @@ fn functions_with_side_effects_on_a_buffer() {
     let mut ctx = context_for(&[A::P(ptr), A::I(8)], &mut mem);
     ctx.rax = 0xdead_beef;
     if let Some(host) = host_symbol("bzero") {
-        let Lookup::Known(abi) = table::lookup(0, "_bzero") else { unreachable!() };
+        let Lookup::Known(abi) = table::lookup(0, "_bzero") else {
+            unreachable!()
+        };
         marshal::call("_bzero", abi, host, &mut ctx, &mem as &dyn GuestMemory).unwrap();
         assert_eq!(ctx.rax, 0xdead_beef, "a void return must not clobber rax");
     }
@@ -276,16 +345,40 @@ fn functions_with_side_effects_on_a_buffer() {
 
 #[test]
 fn integer_conversions_and_narrow_returns() {
-    check_int!("_atoi", [A::P(cstr("-42").as_ptr().cast())], (-42i64) as u64);
-    check_int!("_atol", [A::P(cstr("9999999999").as_ptr().cast())], 9_999_999_999u64);
-    check_int!("_atoll", [A::P(cstr("-9999999999").as_ptr().cast())], (-9_999_999_999i64) as u64);
-    check_int!("_strtol", [A::P(cstr("ff").as_ptr().cast()), A::I(0), A::I(16)], 255u64);
-    check_int!("_strtoul", [A::P(cstr("-1").as_ptr().cast()), A::I(0), A::I(10)], u64::MAX);
+    check_int!(
+        "_atoi",
+        [A::P(cstr("-42").as_ptr().cast())],
+        (-42i64) as u64
+    );
+    check_int!(
+        "_atol",
+        [A::P(cstr("9999999999").as_ptr().cast())],
+        9_999_999_999u64
+    );
+    check_int!(
+        "_atoll",
+        [A::P(cstr("-9999999999").as_ptr().cast())],
+        (-9_999_999_999i64) as u64
+    );
+    check_int!(
+        "_strtol",
+        [A::P(cstr("ff").as_ptr().cast()), A::I(0), A::I(16)],
+        255u64
+    );
+    check_int!(
+        "_strtoul",
+        [A::P(cstr("-1").as_ptr().cast()), A::I(0), A::I(10)],
+        u64::MAX
+    );
     check_int!("_abs", [A::I((-7i32) as u32 as u64)], 7u64);
     // `abs(INT_MIN)` is undefined in C but must not be *misplaced*: the point
     // is that a 32-bit argument with dirty upper bits still arrives as an int.
     check_int!("_abs", [A::I(0xdead_beef_0000_0005)], 5u64);
-    check_int!("_labs", [A::I((-9_999_999_999i64) as u64)], 9_999_999_999u64);
+    check_int!(
+        "_labs",
+        [A::I((-9_999_999_999i64) as u64)],
+        9_999_999_999u64
+    );
 }
 
 #[test]
@@ -319,7 +412,11 @@ fn double_arguments_and_returns() {
     check_f64!("_sqrt", [A::F64(2.0)], std::f64::consts::SQRT_2);
     check_f64!("_pow", [A::F64(2.0), A::F64(10.0)], 1024.0);
     check_f64!("_fmod", [A::F64(10.5), A::F64(3.0)], 1.5);
-    check_f64!("_atan2", [A::F64(1.0), A::F64(1.0)], std::f64::consts::FRAC_PI_4);
+    check_f64!(
+        "_atan2",
+        [A::F64(1.0), A::F64(1.0)],
+        std::f64::consts::FRAC_PI_4
+    );
     check_f64!("_hypot", [A::F64(3.0), A::F64(4.0)], 5.0);
     check_f64!("_floor", [A::F64(-1.5)], -2.0);
     check_f64!("_ceil", [A::F64(-1.5)], -1.0);
@@ -340,7 +437,11 @@ fn double_arguments_and_returns() {
     check_f64!("_fmin", [A::F64(1.0), A::F64(2.0)], 1.0);
     check_f64!("_fmax", [A::F64(1.0), A::F64(2.0)], 2.0);
     check_f64!("_atof", [A::P(cstr("2.5").as_ptr().cast())], 2.5);
-    check_f64!("_strtod", [A::P(cstr("1.25e2").as_ptr().cast()), A::I(0)], 125.0);
+    check_f64!(
+        "_strtod",
+        [A::P(cstr("1.25e2").as_ptr().cast()), A::I(0)],
+        125.0
+    );
     // Mixed classes: the `int` goes to `x1` and the `double` to `d0`, from two
     // independent counters. A unified count would put the exponent in `x0`.
     check_f64!("_ldexp", [A::F64(1.5), A::I(4)], 24.0);
@@ -358,12 +459,18 @@ fn float_arguments_and_returns_use_the_low_half_of_the_register() {
 
 #[test]
 fn allocation_round_trips() {
-    let Some(malloc) = call("_malloc", &[A::I(64)]) else { return };
+    let Some(malloc) = call("_malloc", &[A::I(64)]) else {
+        return;
+    };
     let p = malloc.rax;
     assert_ne!(p, 0, "malloc returned null for 64 bytes");
 
     if let Some(ctx) = call("_malloc_size", &[A::I(p)]) {
-        assert!(ctx.rax >= 64, "malloc_size reported {} for a 64-byte block", ctx.rax);
+        assert!(
+            ctx.rax >= 64,
+            "malloc_size reported {} for a 64-byte block",
+            ctx.rax
+        );
     }
     if let Some(ctx) = call("_realloc", &[A::I(p), A::I(128)]) {
         assert_ne!(ctx.rax, 0);
@@ -418,7 +525,11 @@ fn process_and_environment_queries() {
         assert_eq!(got.to_bytes(), b"present");
     }
     if let Some(ctx) = call("_time", &[A::I(0)]) {
-        assert!(ctx.rax as i64 > 1_700_000_000, "time() returned {}", ctx.rax as i64);
+        assert!(
+            ctx.rax as i64 > 1_700_000_000,
+            "time() returned {}",
+            ctx.rax as i64
+        );
     }
 }
 
@@ -465,8 +576,14 @@ fn arguments_spilled_to_the_guest_stack_are_read_back() {
     let mut ctx = context_for(&args, &mut mem);
 
     let host: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64 = eight_ints;
-    marshal::call("eight_ints", &EIGHT_INTS, host as usize as u64, &mut ctx, &mem as &dyn GuestMemory)
-        .expect("eight integer arguments are marshallable");
+    marshal::call(
+        "eight_ints",
+        &EIGHT_INTS,
+        host as usize as u64,
+        &mut ctx,
+        &mem as &dyn GuestMemory,
+    )
+    .expect("eight integer arguments are marshallable");
 
     // 1*1 + 2*2 + ... + 8*8
     let want: i64 = (1..=8).map(|i| i * i).sum();
@@ -516,7 +633,10 @@ fn a_refused_symbol_says_why() {
     )
     .expect_err("cancellation walks frames the host cannot read");
     assert!(matches!(err, AbiError::Refused { .. }));
-    assert!(err.to_string().contains("M5"), "the reason should point at what is missing");
+    assert!(
+        err.to_string().contains("M5"),
+        "the reason should point at what is missing"
+    );
 }
 
 #[test]
@@ -528,8 +648,14 @@ fn a_callback_taker_is_refused_without_a_vm_rather_than_passed_through() {
     let mut mem = guest_stack();
     let mut ctx = RegisterContext::new();
     ctx.rcx = 0x1_0000_1234; // the comparator
-    let err = rosetta3::call_import("_qsort", 0, 0x1000, &mut ctx, &mut mem as &mut dyn GuestMemory)
-        .expect_err("there is nowhere for the guest function pointer to go");
+    let err = rosetta3::call_import(
+        "_qsort",
+        0,
+        0x1000,
+        &mut ctx,
+        &mut mem as &mut dyn GuestMemory,
+    )
+    .expect_err("there is nowhere for the guest function pointer to go");
     assert!(matches!(err, AbiError::Refused { .. }), "{err}");
     assert_eq!(ctx.rax, 0, "a refusal leaves the guest context alone");
 }
@@ -540,8 +666,14 @@ fn a_variadic_with_no_shim_is_refused_rather_than_forwarded() {
     // registers on the guest's side and on the stack on the host's.
     let mut mem = guest_stack();
     let mut ctx = RegisterContext::new();
-    let err = rosetta3::call_import("_err", 0, 0x1000, &mut ctx, &mut mem as &mut dyn GuestMemory)
-        .expect_err("an unshimmed variadic must not be forwarded");
+    let err = rosetta3::call_import(
+        "_err",
+        0,
+        0x1000,
+        &mut ctx,
+        &mut mem as &mut dyn GuestMemory,
+    )
+    .expect_err("an unshimmed variadic must not be forwarded");
     assert!(matches!(err, AbiError::NoShim { .. }), "got {err:?}");
 }
 

@@ -23,27 +23,39 @@ use common::{run_guest, run_guest_with};
 
 #[test]
 fn a_hello_world_prints_and_exits_zero() {
-    let Some(path) = common::hello() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::hello() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let (status, out, err) = run_guest(&path, &[]);
 
     assert_eq!(status, Some(0), "stderr: {err}");
-    assert_eq!(out, "Hello, world (5)! 1 1.50\ndone\ngoodbye\n", "stderr: {err}");
+    assert_eq!(
+        out, "Hello, world (5)! 1 1.50\ndone\ngoodbye\n",
+        "stderr: {err}"
+    );
 }
 
 #[test]
 fn a_guest_exit_status_reaches_the_shell() {
     // `main` returns `abs(argc) - 1`, so one argument makes it 1. A runtime
     // that always exited 0 would pass every other test here.
-    let Some(path) = common::hello() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::hello() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let (status, _, err) = run_guest(&path, &["someone"]);
     assert_eq!(status, Some(1), "stderr: {err}");
 }
 
 #[test]
 fn arguments_reach_the_guest() {
-    let Some(path) = common::hello() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::hello() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let (_, out, err) = run_guest(&path, &["rosetta"]);
-    assert!(out.starts_with("Hello, rosetta (7)! 2 1.50\n"), "{out:?} (stderr: {err})");
+    assert!(
+        out.starts_with("Hello, rosetta (7)! 2 1.50\n"),
+        "{out:?} (stderr: {err})"
+    );
 }
 
 #[test]
@@ -51,7 +63,9 @@ fn the_host_calls_a_guest_comparator_and_a_guest_exit_handler() {
     // The host→guest thunk, from both directions it is reached from: `qsort`
     // calls back during the call, `atexit`'s handler after `main` has returned
     // and from inside the host's own `exit`.
-    let Some(path) = common::qsort_fixture() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::qsort_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let (status, out, err) = run_guest(&path, &[]);
 
     assert_eq!(status, Some(0), "stderr: {err}");
@@ -60,11 +74,29 @@ fn the_host_calls_a_guest_comparator_and_a_guest_exit_handler() {
 
 #[test]
 fn initializers_run_before_main_and_in_order() {
-    let Some(path) = common::ctor_fixture() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::ctor_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let (status, out, err) = run_guest(&path, &[]);
 
     assert_eq!(status, Some(0), "stderr: {err}");
     assert_eq!(out, "order=abc\n", "stderr: {err}");
+}
+
+#[test]
+fn a_destructor_runs_at_exit_in_one_list_with_the_guests_atexit_handler() {
+    // `__cxa_atexit`, reached the way every real guest reaches it: the source
+    // says `__attribute__((destructor))` and clang registers it from a
+    // constructor. The order is the claim — the destructor is registered before
+    // `main`, the `atexit` handler during it, and one reversed list prints them
+    // in this order and no other.
+    let Some(path) = common::dtor_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
+    let (status, out, err) = run_guest(&path, &[]);
+
+    assert_eq!(status, Some(0), "stderr: {err}");
+    assert_eq!(out, "main\natexit\ndestructor\n", "stderr: {err}");
 }
 
 #[test]
@@ -73,7 +105,9 @@ fn fast_and_slow_imports_produce_the_same_program() {
     // form of that claim. `--slow` sends every import through a VM exit and the
     // marshaller, `--fast` (the default) lets the lifter inline the ones it can.
     // Any observable difference means one of the two paths is wrong.
-    let Some(path) = common::qsort_fixture() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::qsort_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
 
     let (fast_status, fast_out, _) = run_guest(&path, &[]);
     let (slow_status, slow_out, slow_err) = run_guest_with(&["--slow"], &path, &[]);

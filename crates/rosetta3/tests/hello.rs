@@ -26,11 +26,16 @@ fn load(path: &str) -> Program {
 
 #[test]
 fn every_import_of_the_fixture_is_classified() {
-    let Some(path) = common::hello() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::hello() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let program = load(&path);
 
     let classified = program.classify_imports();
-    assert!(!classified.is_empty(), "a program that imports nothing proves nothing");
+    assert!(
+        !classified.is_empty(),
+        "a program that imports nothing proves nothing"
+    );
 
     let unknown: Vec<&str> = classified
         .iter()
@@ -45,12 +50,17 @@ fn the_fixture_exercises_all_three_outcomes() {
     // Guards the test above against passing vacuously. A program whose every
     // import happened to be a simple `int f(void)` would classify perfectly and
     // say nothing about variadics or refusals.
-    let Some(path) = common::hello() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::hello() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let program = load(&path);
     let classified = program.classify_imports();
 
     let has = |want: fn(&Classification) -> bool| classified.values().any(want);
-    assert!(has(|c| matches!(c, Classification::Fast)), "no import is fast-callable");
+    assert!(
+        has(|c| matches!(c, Classification::Fast)),
+        "no import is fast-callable"
+    );
     assert!(
         has(|c| matches!(c, Classification::Slow)),
         "no import needs a VM exit, so the variadic path is untested"
@@ -81,7 +91,10 @@ fn every_import_of_bin_echo_is_classified() {
         .filter(|(_, c)| **c == Classification::Unknown)
         .map(|(s, _)| *s)
         .collect();
-    assert!(unknown.is_empty(), "unclassified import(s) in /bin/echo: {unknown:?}");
+    assert!(
+        unknown.is_empty(),
+        "unclassified import(s) in /bin/echo: {unknown:?}"
+    );
 }
 
 #[test]
@@ -89,13 +102,18 @@ fn a_known_signature_is_inlined_and_a_variadic_is_not() {
     // The promotion itself: microlift is told the ABI for `_puts` and told
     // nothing but the address for `_printf`, because the second cannot be
     // forwarded without parsing its format string.
-    let Some(path) = common::hello() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::hello() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let program = load(&path);
     let config = program.lifter_config();
 
     let mut fast = 0usize;
     for (va, site) in &program.imports {
-        let entry = config.imports.get(va).expect("every import address is registered");
+        let entry = config
+            .imports
+            .get(va)
+            .expect("every import address is registered");
         match abi::classify(site.tag, &site.symbol) {
             Classification::Fast => {
                 let import = entry.as_ref().unwrap_or_else(|| {
@@ -111,7 +129,10 @@ fn a_known_signature_is_inlined_and_a_variadic_is_not() {
             ),
         }
     }
-    assert!(fast > 0, "nothing was promoted, so the fast path is untested");
+    assert!(
+        fast > 0,
+        "nothing was promoted, so the fast path is untested"
+    );
 }
 
 #[test]
@@ -119,7 +140,9 @@ fn the_slow_policy_registers_the_same_addresses_and_no_metadata() {
     // Fast is an optimisation of slow: the two configurations must differ in
     // what microlift is *told*, and not in which call sites it intercepts —
     // that is what makes promotion safe to turn on or off.
-    let Some(path) = common::hello() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::hello() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let program = load(&path);
 
     let fast = program.lifter_config_with(ImportPolicy::FastWhenKnown);
@@ -140,7 +163,9 @@ fn servicing_an_import_exit_calls_the_host_function() {
     // The slow path end to end, driven the way the M3 loop will drive it: an
     // exit names an address, the program looks it up, and the host function
     // runs. Everything before this test checks a piece of that in isolation.
-    let Some(path) = common::hello() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::hello() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let mut program = load(&path);
 
     let (&va, _) = program
@@ -155,7 +180,9 @@ fn servicing_an_import_exit_calls_the_host_function() {
     ctx.rdi = text.as_ptr() as usize as u64;
     ctx.rip = 0x1234;
 
-    program.service_import_call(&mut ctx).expect("strlen is callable");
+    program
+        .service_import_call(&mut ctx)
+        .expect("strlen is callable");
 
     assert_eq!(ctx.rax, 12);
     // The call was intercepted before it executed, so neither the resume point
@@ -166,13 +193,20 @@ fn servicing_an_import_exit_calls_the_host_function() {
 
 #[test]
 fn servicing_an_unregistered_address_fails_rather_than_calling_it() {
-    let Some(path) = common::hello() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::hello() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let mut program = load(&path);
 
     let mut ctx = RegisterContext::new();
     ctx.imported_function_va = 0xdead_beef;
-    let err = program.service_import_call(&mut ctx).expect_err("that address is not an import");
-    assert!(err.to_string().contains("deadbeef"), "the diagnostic should name the address");
+    let err = program
+        .service_import_call(&mut ctx)
+        .expect_err("that address is not an import");
+    assert!(
+        err.to_string().contains("deadbeef"),
+        "the diagnostic should name the address"
+    );
 }
 
 #[test]
@@ -180,10 +214,14 @@ fn the_entry_function_still_lifts_with_imports_promoted() {
     // Promotion changes the IR the lifter emits for a call site, so the fixture
     // must still lift with it on — otherwise the acceptance above would be
     // describing a program the JIT cannot translate.
-    let Some(path) = common::hello() else { skip!("cannot build x86_64 fixtures") };
+    let Some(path) = common::hello() else {
+        skip!("cannot build x86_64 fixtures")
+    };
     let program = load(&path);
     let entry = program.entry().expect("an executable has an entry point");
-    let (region, bytes) = program.lift_region(entry).expect("entry is inside a known function");
+    let (region, bytes) = program
+        .lift_region(entry)
+        .expect("entry is inside a known function");
     let start = region.range.start;
 
     for policy in [ImportPolicy::FastWhenKnown, ImportPolicy::AlwaysSlow] {

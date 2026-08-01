@@ -1,9 +1,9 @@
 //! The x86-64 guest.
 
-use crate::spec::constants::{
-    subtype_of, CPU_SUBTYPE_X86_64_ALL, CPU_SUBTYPE_X86_64_H, CPU_TYPE_X86_64,
-};
 use crate::spec::MachSpec;
+use crate::spec::constants::{
+    CPU_SUBTYPE_X86_64_ALL, CPU_SUBTYPE_X86_64_H, CPU_TYPE_X86_64, subtype_of,
+};
 
 /// x86-64 Mach-O: 4 KiB segment granularity, and — on an Apple Silicon host —
 /// *not* natively executable. Its instructions are input to a recompiler, so

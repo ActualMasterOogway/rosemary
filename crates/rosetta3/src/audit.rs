@@ -56,7 +56,7 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 
 use microlift::arch::x86_64::X86_64;
-use microlift::core::{lift_to_function_with_call_targets, LifterConfig};
+use microlift::core::{LifterConfig, lift_to_function_with_call_targets};
 
 /// A call target the JIT would follow into rather than recognise.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -116,12 +116,17 @@ pub fn audit_call_targets(
         ) else {
             continue;
         };
-        let Some(bytes) = code.get(start..end.min(code.len())) else { continue };
+        let Some(bytes) = code.get(start..end.min(code.len())) else {
+            continue;
+        };
         if bytes.is_empty() {
             continue;
         }
 
-        let config = LifterConfig { analysis_mode: true, ..LifterConfig::default() };
+        let config = LifterConfig {
+            analysis_mode: true,
+            ..LifterConfig::default()
+        };
         match lift_to_function_with_call_targets::<X86_64>(bytes, f.start, config) {
             Ok((_func, targets)) => {
                 audit.functions_lifted += 1;

@@ -31,7 +31,11 @@ fn agrees(path: &str, args: &[&str]) -> Option<String> {
 
     let (status, stdout, stderr) = common::run_guest(path, args);
     assert_eq!(stdout, expected, "guest output differs; stderr: {stderr}");
-    assert_eq!(status, native.status.code(), "exit status differs; stderr: {stderr}");
+    assert_eq!(
+        status,
+        native.status.code(),
+        "exit status differs; stderr: {stderr}"
+    );
     Some(stdout)
 }
 
@@ -48,12 +52,20 @@ fn an_objective_c_program_sends_messages_and_prints_what_it_should() {
     let Some(path) = common::objc_messages_fixture("objc_messages", &[]) else {
         skip!("cannot build x86_64 Objective-C fixtures")
     };
-    let Some(out) = agrees(&path, &[]) else { skip!("cannot run x86_64 binaries natively") };
+    let Some(out) = agrees(&path, &[]) else {
+        skip!("cannot run x86_64 binaries natively")
+    };
 
     // Two lines carry claims that are easy to satisfy by accident, so they are
     // named as well as diffed.
-    assert!(out.contains("load 11\n"), "+load ran in the wrong order or not at all: {out}");
-    assert!(out.contains("identity 1 0\n"), "a class coming back was not the guest's: {out}");
+    assert!(
+        out.contains("load 11\n"),
+        "+load ran in the wrong order or not at all: {out}"
+    );
+    assert!(
+        out.contains("identity 1 0\n"),
+        "a class coming back was not the guest's: {out}"
+    );
 }
 
 /// The same program at `-O2`, where clang **tail-jumps** to `objc_msgSend`.
@@ -68,7 +80,9 @@ fn the_same_program_optimised_takes_the_tail_call_path() {
     let Some(path) = common::objc_messages_fixture("objc_messages_o2", &["-O2"]) else {
         skip!("cannot build x86_64 Objective-C fixtures")
     };
-    let Some(_) = agrees(&path, &[]) else { skip!("cannot run x86_64 binaries natively") };
+    let Some(_) = agrees(&path, &[]) else {
+        skip!("cannot run x86_64 binaries natively")
+    };
 }
 
 /// Every import an Objective-C program makes is described.
@@ -108,8 +122,17 @@ fn every_objective_c_import_is_classified() {
 fn the_message_send_family_is_never_promoted_to_a_fast_import() {
     use rosetta3::abi::Classification;
 
-    for symbol in ["_objc_msgSend", "_objc_msgSendSuper2", "_objc_alloc_init", "_class_getName"] {
-        assert_eq!(rosetta3::abi::classify(0, symbol), Classification::Slow, "{symbol}");
+    for symbol in [
+        "_objc_msgSend",
+        "_objc_msgSendSuper2",
+        "_objc_alloc_init",
+        "_class_getName",
+    ] {
+        assert_eq!(
+            rosetta3::abi::classify(0, symbol),
+            Classification::Slow,
+            "{symbol}"
+        );
     }
 }
 
@@ -132,13 +155,18 @@ fn each_refused_message_stops_with_a_reason() {
     assert_eq!(status, Some(0), "stderr: {stderr}");
     assert_eq!(stdout, "before\nafter\n");
 
-    for (which, needle) in
-        [("variadic", "variadic method"), ("aggregate", "aggregate"), ("throw", "personality")]
-    {
+    for (which, needle) in [
+        ("variadic", "variadic method"),
+        ("aggregate", "aggregate"),
+        ("throw", "personality"),
+    ] {
         let (status, stdout, stderr) = common::run_guest(&path, &[which]);
         assert_ne!(status, Some(0), "{which} was not refused");
         assert_eq!(stdout, "before\n", "{which} ran past the refusal");
-        assert!(stderr.contains(needle), "{which}: expected {needle:?}, got {stderr:?}");
+        assert!(
+            stderr.contains(needle),
+            "{which}: expected {needle:?}, got {stderr:?}"
+        );
     }
 }
 

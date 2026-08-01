@@ -190,7 +190,10 @@ impl UnwindError {
     }
 
     fn as_error(self, symbol: &str) -> AbiError {
-        AbiError::Refused { symbol: symbol.to_string(), reason: self.reason() }
+        AbiError::Refused {
+            symbol: symbol.to_string(),
+            reason: self.reason(),
+        }
     }
 }
 
@@ -280,15 +283,15 @@ impl<'a> Reader<'a> {
         }
         let base = self.at;
         let value = match encoding & 0x0f {
-            0x00 => self.u64()?,                    // absptr
-            0x01 => self.uleb128()?,                // uleb128
-            0x02 => u64::from(self.u16()?),         // udata2
-            0x03 => u64::from(self.u32()?),         // udata4
-            0x04 => self.u64()?,                    // udata8
-            0x09 => self.sleb128()? as u64,         // sleb128
+            0x00 => self.u64()?,                          // absptr
+            0x01 => self.uleb128()?,                      // uleb128
+            0x02 => u64::from(self.u16()?),               // udata2
+            0x03 => u64::from(self.u32()?),               // udata4
+            0x04 => self.u64()?,                          // udata8
+            0x09 => self.sleb128()? as u64,               // sleb128
             0x0a => i64::from(self.u16()? as i16) as u64, // sdata2
             0x0b => i64::from(self.u32()? as i32) as u64, // sdata4
-            0x0c => self.u64()?,                    // sdata8
+            0x0c => self.u64()?,                          // sdata8
             _ => return None,
         };
         // A zero *stored* value is a null pointer, whatever the encoding says
@@ -300,8 +303,8 @@ impl<'a> Reader<'a> {
             return Some(0);
         }
         let value = match encoding & 0x70 {
-            0x00 => value,                           // absolute
-            0x10 => base.wrapping_add(value),        // pcrel
+            0x00 => value,                    // absolute
+            0x10 => base.wrapping_add(value), // pcrel
             _ => return None,
         };
         // An indirect encoding stores the address of the address: a GOT slot,
@@ -578,7 +581,11 @@ impl Lsda {
             let action = r.uleb128().ok_or(bad)?;
             if offset >= start && offset < start.wrapping_add(length) {
                 return Ok(Some(Site {
-                    landing_pad: if pad == 0 { 0 } else { self.lp_start.wrapping_add(pad) },
+                    landing_pad: if pad == 0 {
+                        0
+                    } else {
+                        self.lp_start.wrapping_add(pad)
+                    },
                     action,
                 }));
             }
@@ -604,7 +611,9 @@ impl Lsda {
             return Ok(Outcome::Nothing);
         }
         if site.action == 0 {
-            return Ok(Outcome::Cleanup { landing_pad: site.landing_pad });
+            return Ok(Outcome::Cleanup {
+                landing_pad: site.landing_pad,
+            });
         }
 
         let mut at = self.action_table.wrapping_add(site.action - 1);
@@ -630,7 +639,7 @@ impl Lsda {
                             return Ok(Outcome::Handler {
                                 landing_pad: site.landing_pad,
                                 selector: f,
-                            })
+                            });
                         }
                         Match::No => {}
                         Match::Unknown => undecidable = true,
@@ -651,7 +660,9 @@ impl Lsda {
             return Ok(Outcome::Undecidable);
         }
         if cleanup {
-            return Ok(Outcome::Cleanup { landing_pad: site.landing_pad });
+            return Ok(Outcome::Cleanup {
+                landing_pad: site.landing_pad,
+            });
         }
         Ok(Outcome::Nothing)
     }
@@ -737,7 +748,9 @@ fn catches(vm: &Vm, catch_type: u64, thrown: u64, mem: &dyn GuestMemory) -> Matc
             return Match::Yes;
         }
         let mut r = Reader::new(mem, at);
-        let Some(vptr) = r.u64() else { return Match::Unknown };
+        let Some(vptr) = r.u64() else {
+            return Match::Unknown;
+        };
         if Some(vptr) == no_bases {
             return Match::No;
         }
@@ -891,7 +904,10 @@ fn enter_next_pad(
 ) -> core::result::Result<bool, UnwindError> {
     let mut regs = flight.at;
     if !first {
-        let entry = vm.program.unwind_entry(regs.rip).ok_or(UnwindError::NoEntry)?;
+        let entry = vm
+            .program
+            .unwind_entry(regs.rip)
+            .ok_or(UnwindError::NoEntry)?;
         step(&mut regs, &entry, mem)?;
     }
 
@@ -899,7 +915,9 @@ fn enter_next_pad(
         if regs.rip == crate::stack::RETURN_SENTINEL {
             return Ok(false);
         }
-        let Some(entry) = vm.program.unwind_entry(regs.rip) else { return Ok(false) };
+        let Some(entry) = vm.program.unwind_entry(regs.rip) else {
+            return Ok(false);
+        };
         let is_handler_frame = (regs.rip, regs.rsp) == flight.handler;
 
         if let Some(lsda) = entry.lsda.filter(|_| entry.can_handle()) {
@@ -1004,9 +1022,16 @@ pub fn throw(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory)
 
     let (object, thrown_type, destructor) = (ctx.rdi, ctx.rsi, ctx.rdx);
     let header = object.wrapping_sub(HEADER_SIZE);
-    ExceptionHeader { thrown_type, destructor, handlers: 0 }
-        .write(header, mem)
-        .ok_or(AbiError::Memory { symbol: symbol.to_string(), addr: header })?;
+    ExceptionHeader {
+        thrown_type,
+        destructor,
+        handlers: 0,
+    }
+    .write(header, mem)
+    .ok_or(AbiError::Memory {
+        symbol: symbol.to_string(),
+        addr: header,
+    })?;
 
     // The frame that threw, as it will be unwound from: the call was intercepted
     // before it pushed a return address, so `rip` is already the address the
@@ -1021,8 +1046,8 @@ pub fn throw(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory)
         at: regs,
         entry: state.entry(),
     };
-    let entered = enter_next_pad(vm, &mut flight, ctx, mem, true)
-        .map_err(|e| e.as_error(symbol))?;
+    let entered =
+        enter_next_pad(vm, &mut flight, ctx, mem, true).map_err(|e| e.as_error(symbol))?;
     if !entered {
         return Err(UnwindError::NoHandler.as_error(symbol));
     }
@@ -1073,12 +1098,15 @@ pub fn begin_catch(
     mem: &mut dyn GuestMemory,
 ) -> Result<()> {
     let header = ctx.rdi;
-    let mut record = ExceptionHeader::read(header, mem)
-        .ok_or(AbiError::Memory { symbol: symbol.to_string(), addr: header })?;
+    let mut record = ExceptionHeader::read(header, mem).ok_or(AbiError::Memory {
+        symbol: symbol.to_string(),
+        addr: header,
+    })?;
     record.handlers += 1;
-    record
-        .write(header, mem)
-        .ok_or(AbiError::Memory { symbol: symbol.to_string(), addr: header })?;
+    record.write(header, mem).ok_or(AbiError::Memory {
+        symbol: symbol.to_string(),
+        addr: header,
+    })?;
     if let Some(state) = crate::thread::current() {
         state.begin_catch(header);
         if state.in_flight().is_some_and(|f| f.header == header) {
@@ -1105,8 +1133,10 @@ pub fn rethrow(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemor
         symbol: symbol.to_string(),
         reason: "a rethrow with no exception being handled",
     })?;
-    let record = ExceptionHeader::read(header, mem)
-        .ok_or(AbiError::Memory { symbol: symbol.to_string(), addr: header })?;
+    let record = ExceptionHeader::read(header, mem).ok_or(AbiError::Memory {
+        symbol: symbol.to_string(),
+        addr: header,
+    })?;
 
     let regs = Registers::from_context(ctx);
     let handler =
@@ -1144,15 +1174,21 @@ pub fn end_catch(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMem
     // `__cxa_end_catch` is emitted on paths where nothing was caught — the
     // cleanup edge of a `try` whose handler never ran — so having no exception
     // to end is ordinary rather than an error.
-    let Some(header) = state.end_catch() else { return Ok(()) };
+    let Some(header) = state.end_catch() else {
+        return Ok(());
+    };
     let Some(mut record) = ExceptionHeader::read(header, mem) else {
-        return Err(AbiError::Memory { symbol: symbol.to_string(), addr: header });
+        return Err(AbiError::Memory {
+            symbol: symbol.to_string(),
+            addr: header,
+        });
     };
 
     record.handlers -= 1;
-    record
-        .write(header, mem)
-        .ok_or(AbiError::Memory { symbol: symbol.to_string(), addr: header })?;
+    record.write(header, mem).ok_or(AbiError::Memory {
+        symbol: symbol.to_string(),
+        addr: header,
+    })?;
 
     // A rethrown exception is being unwound *right now*, and this call is the
     // cleanup edge of the `catch` block it left. Destroying it here would free
@@ -1164,10 +1200,11 @@ pub fn end_catch(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMem
 
     if record.destructor != 0 {
         let object = header.wrapping_add(HEADER_SIZE);
-        vm.call(record.destructor, &[object]).map_err(|e| AbiError::Nested {
-            symbol: symbol.to_string(),
-            reason: format!("the thrown object's destructor could not be run: {e}"),
-        })?;
+        vm.call(record.destructor, &[object])
+            .map_err(|e| AbiError::Nested {
+                symbol: symbol.to_string(),
+                reason: format!("the thrown object's destructor could not be run: {e}"),
+            })?;
     }
     // SAFETY: `header` is what `allocate_exception` returned, minus the header
     // it added, and nothing can reach it now: the catch that owned it is over
@@ -1212,7 +1249,10 @@ mod tests {
 
     impl Stack {
         fn new(base: u64, len: usize) -> Self {
-            Stack { base, bytes: vec![0; len] }
+            Stack {
+                base,
+                bytes: vec![0; len],
+            }
         }
 
         fn put(&mut self, at: u64, value: u64) {
@@ -1224,29 +1264,46 @@ mod tests {
     impl GuestMemory for Stack {
         fn read(&self, va: u64, out: &mut [u8]) -> core::result::Result<(), machish::Error> {
             let off = va.wrapping_sub(self.base) as usize;
-            match off.checked_add(out.len()).filter(|e| *e <= self.bytes.len()) {
+            match off
+                .checked_add(out.len())
+                .filter(|e| *e <= self.bytes.len())
+            {
                 Some(end) => {
                     out.copy_from_slice(&self.bytes[off..end]);
                     Ok(())
                 }
-                None => Err(machish::Error::OutOfBounds { addr: va, len: out.len() }),
+                None => Err(machish::Error::OutOfBounds {
+                    addr: va,
+                    len: out.len(),
+                }),
             }
         }
 
         fn write(&mut self, va: u64, data: &[u8]) -> core::result::Result<(), machish::Error> {
             let off = va.wrapping_sub(self.base) as usize;
-            match off.checked_add(data.len()).filter(|e| *e <= self.bytes.len()) {
+            match off
+                .checked_add(data.len())
+                .filter(|e| *e <= self.bytes.len())
+            {
                 Some(end) => {
                     self.bytes[off..end].copy_from_slice(data);
                     Ok(())
                 }
-                None => Err(machish::Error::OutOfBounds { addr: va, len: data.len() }),
+                None => Err(machish::Error::OutOfBounds {
+                    addr: va,
+                    len: data.len(),
+                }),
             }
         }
     }
 
     fn entry(encoding: u32) -> UnwindEntry {
-        UnwindEntry { function: 0x1_0000_0000, encoding, personality_slot: None, lsda: None }
+        UnwindEntry {
+            function: 0x1_0000_0000,
+            encoding,
+            personality_slot: None,
+            lsda: None,
+        }
     }
 
     #[test]
@@ -1259,12 +1316,21 @@ mod tests {
         stack.put(rbp, caller_rbp);
         stack.put(rbp + 8, 0x1_0000_1234);
 
-        let mut regs = Registers { rip: 0x1_0000_5000, rsp: 0x70e0, rbp, ..Default::default() };
+        let mut regs = Registers {
+            rip: 0x1_0000_5000,
+            rsp: 0x70e0,
+            rbp,
+            ..Default::default()
+        };
         step(&mut regs, &entry(MODE_RBP_FRAME), &stack).expect("step");
 
         assert_eq!(regs.rip, 0x1_0000_1234, "the return address is at [rbp+8]");
         assert_eq!(regs.rbp, caller_rbp);
-        assert_eq!(regs.rsp, rbp + 16, "the caller's rsp is past both saved words");
+        assert_eq!(
+            regs.rsp,
+            rbp + 16,
+            "the caller's rsp is past both saved words"
+        );
     }
 
     #[test]
@@ -1280,11 +1346,13 @@ mod tests {
         stack.put(rbp - 8, 0xcccc); // second slot
 
         // offset 2 (registers start at rbp-16), slots: RBX then R12.
-        let encoding = MODE_RBP_FRAME
-            | (2 << 16)
-            | u32::from(REG_RBX)
-            | (u32::from(REG_R12) << 3);
-        let mut regs = Registers { rip: 0x1_0000_5000, rsp: 0x70e0, rbp, ..Default::default() };
+        let encoding = MODE_RBP_FRAME | (2 << 16) | u32::from(REG_RBX) | (u32::from(REG_R12) << 3);
+        let mut regs = Registers {
+            rip: 0x1_0000_5000,
+            rsp: 0x70e0,
+            rbp,
+            ..Default::default()
+        };
         step(&mut regs, &entry(encoding), &stack).expect("step");
 
         assert_eq!(regs.rbx, 0xbbbb);
@@ -1301,7 +1369,11 @@ mod tests {
         stack.put(rsp + size - 8, 0x1_0000_9999);
 
         let encoding = MODE_STACK_IMMD | (4 << 16);
-        let mut regs = Registers { rip: 0x1_0000_5000, rsp, ..Default::default() };
+        let mut regs = Registers {
+            rip: 0x1_0000_5000,
+            rsp,
+            ..Default::default()
+        };
         step(&mut regs, &entry(encoding), &stack).expect("step");
 
         assert_eq!(regs.rip, 0x1_0000_9999);
@@ -1321,7 +1393,11 @@ mod tests {
         // Permutation 0 of two registers is the first two in the numbering:
         // RBX and R12.
         let encoding = MODE_STACK_IMMD | (6 << 16) | (2 << 10);
-        let mut regs = Registers { rip: 0x1_0000_5000, rsp, ..Default::default() };
+        let mut regs = Registers {
+            rip: 0x1_0000_5000,
+            rsp,
+            ..Default::default()
+        };
         step(&mut regs, &entry(encoding), &stack).expect("step");
 
         assert_eq!((regs.rbx, regs.r12), (0x1111, 0x2222));
@@ -1332,8 +1408,14 @@ mod tests {
     fn a_dwarf_encoding_is_refused_rather_than_guessed_at() {
         let stack = Stack::new(0x7000, 0x100);
         let mut regs = Registers::default();
-        assert_eq!(step(&mut regs, &entry(MODE_DWARF), &stack), Err(UnwindError::NeedsDwarf));
-        assert_eq!(step(&mut regs, &entry(0), &stack), Err(UnwindError::NoEntry));
+        assert_eq!(
+            step(&mut regs, &entry(MODE_DWARF), &stack),
+            Err(UnwindError::NeedsDwarf)
+        );
+        assert_eq!(
+            step(&mut regs, &entry(0), &stack),
+            Err(UnwindError::NoEntry)
+        );
         // And the guest's registers are untouched by a refusal.
         assert_eq!(regs, Registers::default());
     }
@@ -1341,8 +1423,14 @@ mod tests {
     #[test]
     fn a_wild_frame_pointer_ends_the_walk_rather_than_the_process() {
         let stack = Stack::new(0x7000, 0x100);
-        let mut regs = Registers { rbp: 0xdead_beef, ..Default::default() };
-        assert_eq!(step(&mut regs, &entry(MODE_RBP_FRAME), &stack), Err(UnwindError::BadFrame));
+        let mut regs = Registers {
+            rbp: 0xdead_beef,
+            ..Default::default()
+        };
+        assert_eq!(
+            step(&mut regs, &entry(MODE_RBP_FRAME), &stack),
+            Err(UnwindError::BadFrame)
+        );
     }
 
     #[test]
@@ -1359,7 +1447,11 @@ mod tests {
                 let mut seen = regs.clone();
                 seen.sort_unstable();
                 seen.dedup();
-                assert_eq!(seen.len(), count, "permutation {permutation} of {count} repeats");
+                assert_eq!(
+                    seen.len(),
+                    count,
+                    "permutation {permutation} of {count} repeats"
+                );
                 assert!(regs.iter().all(|r| (1..=6).contains(r)));
             }
         }

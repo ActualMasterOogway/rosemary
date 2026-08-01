@@ -24,7 +24,7 @@ use crate::fixups::{BindKind, Fixup, LibraryRef, StubMap, SymbolRef};
 use crate::memory::AddressSpace;
 use crate::raw::Word;
 use crate::report::{BindingRecord, MissingSymbol};
-use crate::resolve::{resolve_in, Resolved, SymbolKind, SymbolProvider};
+use crate::resolve::{Resolved, SymbolKind, SymbolProvider, resolve_in};
 
 /// What applying a fixup stream produced.
 #[derive(Clone, Debug, Default)]
@@ -59,7 +59,12 @@ impl<'s> Binder<'s> {
     /// A binder with no providers and no exports; useful for applying a
     /// rebase-only stream.
     pub fn new(slide: Word) -> Self {
-        Binder { slide, providers: &[], self_exports: None, main_executable: None }
+        Binder {
+            slide,
+            providers: &[],
+            self_exports: None,
+            main_executable: None,
+        }
     }
 
     /// Resolve and write every fixup in `stream`.
@@ -85,7 +90,12 @@ impl<'s> Binder<'s> {
                     mem.write(at.wrapping_add(self.slide), &value.to_le_bytes())?;
                     out.rebases += 1;
                 }
-                Fixup::Bind { at, symbol, addend, kind } => {
+                Fixup::Bind {
+                    at,
+                    symbol,
+                    addend,
+                    kind,
+                } => {
                     self.bind(*at, symbol, *addend, *kind, mem, stubs, &mut out)?;
                 }
             }
@@ -164,9 +174,7 @@ impl<'s> Binder<'s> {
     /// Where a reference is looked up, which depends on which image it names.
     fn lookup(&self, symbol: &SymbolRef<'_>) -> Option<Resolved> {
         match symbol.library {
-            LibraryRef::SelfImage => {
-                lookup_export(self.self_exports?, symbol.name, self.slide)
-            }
+            LibraryRef::SelfImage => lookup_export(self.self_exports?, symbol.name, self.slide),
             LibraryRef::MainExecutable => {
                 let (exports, slide) = self.main_executable?;
                 lookup_export(exports, symbol.name, slide)

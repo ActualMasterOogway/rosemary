@@ -109,7 +109,9 @@ impl GuestStack {
             .map_err(|source| VmError::Stack { source })?;
         // Guard page: overflow faults instead of corrupting whatever the kernel
         // happened to map below us.
-        space.protect(base, page, Prot::NONE).map_err(|source| VmError::Stack { source })?;
+        space
+            .protect(base, page, Prot::NONE)
+            .map_err(|source| VmError::Stack { source })?;
 
         let top = (base + size as u64) & !0xf;
         Ok(GuestStack {
@@ -129,18 +131,15 @@ impl GuestStack {
     fn place_args(&mut self, exe_path: &str, args: &[String]) -> Result<(), VmError> {
         let env: Vec<CString> = std::env::vars_os()
             .filter_map(|(k, v)| {
-                CString::new(format!(
-                    "{}={}",
-                    k.to_string_lossy(),
-                    v.to_string_lossy()
-                ))
-                .ok()
+                CString::new(format!("{}={}", k.to_string_lossy(), v.to_string_lossy())).ok()
             })
             .collect();
-        let argv: Vec<CString> =
-            args.iter().filter_map(|a| CString::new(a.as_str()).ok()).collect();
-        let apple: Vec<CString> = std::iter::once(CString::new(exe_path).unwrap_or_default())
+        let argv: Vec<CString> = args
+            .iter()
+            .filter_map(|a| CString::new(a.as_str()).ok())
             .collect();
+        let apple: Vec<CString> =
+            std::iter::once(CString::new(exe_path).unwrap_or_default()).collect();
 
         // Strings first, growing downward from the top, then the arrays that
         // point at them. Order is not observable; adjacency is not promised.

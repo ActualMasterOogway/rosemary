@@ -33,14 +33,26 @@ fn lib(name: &str, extra: &[&str]) -> Option<Vec<u8>> {
 
 #[test]
 fn dylib_trie_enumerates_default_visibility_symbols() {
-    let Some(bytes) = lib("exports_trie_lib", &[]) else { skip!("cc -arch x86_64 unavailable") };
+    let Some(bytes) = lib("exports_trie_lib", &[]) else {
+        skip!("cc -arch x86_64 unavailable")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
-    assert!(obj.exports_trie().is_some(), "default toolchain should emit an exports trie");
+    assert!(
+        obj.exports_trie().is_some(),
+        "default toolchain should emit an exports trie"
+    );
 
     let table = ExportTable::parse(&obj).unwrap();
 
-    for want in ["_visible_one", "_visible_two", "_uses_private", "_exported_data"] {
-        let e = table.get(want).unwrap_or_else(|| panic!("{want} missing from the export trie"));
+    for want in [
+        "_visible_one",
+        "_visible_two",
+        "_uses_private",
+        "_exported_data",
+    ] {
+        let e = table
+            .get(want)
+            .unwrap_or_else(|| panic!("{want} missing from the export trie"));
         assert_eq!(e.kind, ExportKind::Regular);
         assert_eq!(e.value, ExportValue::Direct);
     }
@@ -51,7 +63,9 @@ fn dylib_trie_enumerates_default_visibility_symbols() {
 
 #[test]
 fn export_addresses_land_in_the_right_sections() {
-    let Some(bytes) = lib("exports_addr_lib", &[]) else { skip!("cc -arch x86_64 unavailable") };
+    let Some(bytes) = lib("exports_addr_lib", &[]) else {
+        skip!("cc -arch x86_64 unavailable")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
     let table = ExportTable::parse(&obj).unwrap();
 
@@ -59,17 +73,23 @@ fn export_addresses_land_in_the_right_sections() {
     // segment and the datum's in a writable one. Asserting the actual numbers
     // would bind the test to one version of the linker's layout.
     let f = table.get("_visible_one").unwrap();
-    let sect = obj.section_at(f.vmaddr).expect("_visible_one outside every section");
+    let sect = obj
+        .section_at(f.vmaddr)
+        .expect("_visible_one outside every section");
     assert_eq!(sect.seg_name, "__TEXT");
 
     let d = table.get("_exported_data").unwrap();
-    let sect = obj.section_at(d.vmaddr).expect("_exported_data outside every section");
+    let sect = obj
+        .section_at(d.vmaddr)
+        .expect("_exported_data outside every section");
     assert_eq!(sect.seg_name, "__DATA");
 }
 
 #[test]
 fn trie_and_nlist_agree_on_the_same_image() {
-    let Some(bytes) = lib("exports_both_lib", &[]) else { skip!("cc -arch x86_64 unavailable") };
+    let Some(bytes) = lib("exports_both_lib", &[]) else {
+        skip!("cc -arch x86_64 unavailable")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
 
     let trie = ExportTable::parse(&obj).unwrap();
@@ -86,7 +106,12 @@ fn trie_and_nlist_agree_on_the_same_image() {
         };
         assert_eq!(n.vmaddr, e.vmaddr, "address disagreement for {}", e.name);
         assert_eq!(n.kind, e.kind, "kind disagreement for {}", e.name);
-        assert_eq!(n.is_weak(), e.is_weak(), "weakness disagreement for {}", e.name);
+        assert_eq!(
+            n.is_weak(),
+            e.is_weak(),
+            "weakness disagreement for {}",
+            e.name
+        );
     }
 }
 
@@ -115,7 +140,10 @@ fn old_style_image_uses_the_dyld_info_export_offset() {
         skip!("cc -arch x86_64 unavailable")
     };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
-    assert!(obj.exports_trie().is_none(), "expected no LC_DYLD_EXPORTS_TRIE");
+    assert!(
+        obj.exports_trie().is_none(),
+        "expected no LC_DYLD_EXPORTS_TRIE"
+    );
     assert!(obj.dyld_info().is_some(), "expected LC_DYLD_INFO_ONLY");
 
     let table = ExportTable::parse(&obj).unwrap();
@@ -129,7 +157,9 @@ fn system_dylib_exports_are_enumerable() {
     // x86_64 slice of any universal *executable* still has a trie, and reading
     // one that we did not build proves the walker survives a real linker's
     // output rather than only our own fixtures'.
-    let Some(bytes) = common::system_binary("/bin/echo") else { skip!("/bin/echo not present") };
+    let Some(bytes) = common::system_binary("/bin/echo") else {
+        skip!("/bin/echo not present")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
 
     let table = ExportTable::parse(&obj).unwrap();

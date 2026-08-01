@@ -91,12 +91,20 @@ pub struct Resolved {
 impl Resolved {
     /// A function at `addr`, untagged.
     pub fn function(addr: Word) -> Self {
-        Resolved { addr, kind: SymbolKind::Function, tag: 0 }
+        Resolved {
+            addr,
+            kind: SymbolKind::Function,
+            tag: 0,
+        }
     }
 
     /// A datum at `addr`, untagged.
     pub fn data(addr: Word) -> Self {
-        Resolved { addr, kind: SymbolKind::Data, tag: 0 }
+        Resolved {
+            addr,
+            kind: SymbolKind::Data,
+            tag: 0,
+        }
     }
 
     /// Attach a provider-defined tag.

@@ -8,13 +8,13 @@
 
 mod common;
 
-use machish::extensions::tlv::TlvExtension;
 use machish::extensions::Extension;
-use machish::fixups::{decode_image, Fixup, LibraryRef};
+use machish::extensions::tlv::TlvExtension;
+use machish::fixups::{Fixup, LibraryRef, decode_image};
 use machish::image::MachObject;
 use machish::loader::Loader;
 use machish::memory::BufferSpace;
-use machish::resolve::{eager_binding_shims, NativeDylibProvider, SymbolProvider, SyntheticDylib};
+use machish::resolve::{NativeDylibProvider, SymbolProvider, SyntheticDylib, eager_binding_shims};
 use machish::spec::arch::X86_64;
 
 /// Three constructors with explicit priorities, a destructor, and two
@@ -44,7 +44,9 @@ fn link(name: &str, extra: &[&str]) -> Option<(Vec<u8>, machish::report::LinkRep
     // `__tlv_bootstrap` is denied by the native provider on purpose, so the
     // shim is not optional — it is the intended way to supply one.
     let mut tlv_shim = SyntheticDylib::new("<tlv shims>");
-    tlv_shim.flat(true).define_fn("__tlv_bootstrap", 0x7f00_0000 as *const ());
+    tlv_shim
+        .flat(true)
+        .define_fn("__tlv_bootstrap", 0x7f00_0000 as *const ());
     let native = NativeDylibProvider::system();
     let providers: [&dyn SymbolProvider; 3] = [&tlv_shim, &shims, &native];
 
@@ -79,7 +81,11 @@ fn initializers_are_collected_slid_and_in_section_order() {
 
     // Every entry must point into this image's `__TEXT`, slid. Structural, not
     // literal: the addresses are whatever the linker chose.
-    let text: Vec<_> = obj.sections.iter().filter(|s| s.seg_name == "__TEXT").collect();
+    let text: Vec<_> = obj
+        .sections
+        .iter()
+        .filter(|s| s.seg_name == "__TEXT")
+        .collect();
     for &init in &img.initializers {
         let unslid = init.wrapping_sub(img.slide);
         assert!(
@@ -93,7 +99,10 @@ fn initializers_are_collected_slid_and_in_section_order() {
     assert!(img.initializers.len() >= 3);
     let mut sorted = img.initializers.clone();
     sorted.sort_unstable();
-    assert_eq!(img.initializers, sorted, "initializers must stay in section order");
+    assert_eq!(
+        img.initializers, sorted,
+        "initializers must stay in section order"
+    );
 
     // And nothing was called: `main` was never entered, so the entry point is
     // merely reported.
@@ -113,18 +122,27 @@ fn terminators_match_the_section_and_never_leak_into_initializers() {
     // `__cxa_atexit` from a constructor rather than emitting `__mod_term_func`,
     // so the honest claim is that the report matches whatever the image
     // actually contains — which for a current toolchain is nothing.
-    let expected: u64 =
-        obj.sections.iter().filter(|s| s.is_mod_term()).map(|s| s.size / 8).sum();
+    let expected: u64 = obj
+        .sections
+        .iter()
+        .filter(|s| s.is_mod_term())
+        .map(|s| s.size / 8)
+        .sum();
     assert_eq!(img.terminators.len() as u64, expected);
 
     for t in &img.terminators {
-        assert!(!img.initializers.contains(t), "a terminator leaked into the initializer list");
+        assert!(
+            !img.initializers.contains(t),
+            "a terminator leaked into the initializer list"
+        );
     }
 }
 
 #[test]
 fn thread_local_descriptors_are_enumerated_with_their_three_words() {
-    let Some((bytes, report)) = link("ext_tlv", &[]) else { skip!("cc -arch x86_64 unavailable") };
+    let Some((bytes, report)) = link("ext_tlv", &[]) else {
+        skip!("cc -arch x86_64 unavailable")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
     let img = report.root().unwrap();
 
@@ -138,11 +156,17 @@ fn thread_local_descriptors_are_enumerated_with_their_three_words() {
         sect.size / 24,
         "one descriptor per 24-byte tlv_descriptor"
     );
-    assert!(img.thread_locals.len() >= 2, "the fixture declares two thread-locals");
+    assert!(
+        img.thread_locals.len() >= 2,
+        "the fixture declares two thread-locals"
+    );
 
     for d in &img.thread_locals {
         // The thunk is a bound import; after linking it is the shim's address.
-        assert_eq!(d.thunk, 0x7f00_0000, "the tlv thunk was not bound to the shim");
+        assert_eq!(
+            d.thunk, 0x7f00_0000,
+            "the tlv thunk was not bound to the shim"
+        );
         // The key is allocated by a runtime we deliberately do not provide.
         assert_eq!(d.key, 0, "no pthread key should have been allocated");
         assert!(sect.contains(d.at.wrapping_sub(img.slide)));
@@ -152,7 +176,11 @@ fn thread_local_descriptors_are_enumerated_with_their_three_words() {
     let mut offsets: Vec<u64> = img.thread_locals.iter().map(|d| d.offset).collect();
     offsets.sort_unstable();
     offsets.dedup();
-    assert_eq!(offsets.len(), img.thread_locals.len(), "two variables share an offset");
+    assert_eq!(
+        offsets.len(),
+        img.thread_locals.len(),
+        "two variables share an offset"
+    );
 }
 
 /// The fact the whole thread-local block layout rests on, checked against the
@@ -171,7 +199,9 @@ fn a_descriptor_offset_is_relative_to_the_start_of_the_thread_block() {
     };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
     let img = report.root().unwrap();
-    let template = img.tlv_template.expect("the fixture declares thread-locals");
+    let template = img
+        .tlv_template
+        .expect("the fixture declares thread-locals");
 
     // Where `ld64` actually put each variable's initial storage.
     let table = machish::image::SymbolTable::new(
@@ -193,7 +223,12 @@ fn a_descriptor_offset_is_relative_to_the_start_of_the_thread_block() {
     let mut described: Vec<u64> = img
         .thread_locals
         .iter()
-        .map(|d| template.initial_va.wrapping_sub(img.slide).wrapping_add(d.offset))
+        .map(|d| {
+            template
+                .initial_va
+                .wrapping_sub(img.slide)
+                .wrapping_add(d.offset)
+        })
         .collect();
     described.sort_unstable();
     assert_eq!(
@@ -205,8 +240,16 @@ fn a_descriptor_offset_is_relative_to_the_start_of_the_thread_block() {
     // is `__thread_data` alone — everything past it is zero, which is what lets
     // a bootstrap copy the template and zero the rest without re-reading the
     // section table.
-    let data = obj.sections.iter().find(|s| s.is_thread_local_data()).unwrap();
-    let bss = obj.sections.iter().find(|s| s.is_thread_local_bss()).unwrap();
+    let data = obj
+        .sections
+        .iter()
+        .find(|s| s.is_thread_local_data())
+        .unwrap();
+    let bss = obj
+        .sections
+        .iter()
+        .find(|s| s.is_thread_local_bss())
+        .unwrap();
     assert_eq!(template.initial_va.wrapping_sub(img.slide), data.addr);
     assert_eq!(template.initial_size, data.size);
     assert_eq!(template.total_size, bss.addr + bss.size - data.addr);
@@ -248,9 +291,14 @@ fn the_tlv_extension_redirects_bootstrap_imports_to_a_flat_lookup() {
             if symbol.name == "__tlv_bootstrap"
                 && matches!(symbol.library, LibraryRef::InstallName(_)))
     });
-    assert!(named_before, "the fixture should import __tlv_bootstrap two-level");
+    assert!(
+        named_before,
+        "the fixture should import __tlv_bootstrap two-level"
+    );
 
-    TlvExtension::new().transform_fixups(&obj, &mut fixups).unwrap();
+    TlvExtension::new()
+        .transform_fixups(&obj, &mut fixups)
+        .unwrap();
 
     // After: it is flat, so one shim can serve every image without knowing
     // which library each of them named.
@@ -277,7 +325,9 @@ fn the_tlv_extension_can_rename_the_import() {
 
     let renamed = fixups
         .iter()
-        .filter(|f| matches!(f, Fixup::Bind { symbol, .. } if symbol.name == "_machish_tlv_bootstrap"))
+        .filter(
+            |f| matches!(f, Fixup::Bind { symbol, .. } if symbol.name == "_machish_tlv_bootstrap"),
+        )
         .count();
     assert!(renamed > 0, "no import was renamed");
     assert!(

@@ -14,11 +14,11 @@ use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
 use crate::raw::View;
+use crate::spec::MachSpec;
 use crate::spec::constants::{
     FAT_ARCH_64_SIZE, FAT_ARCH_SIZE, FAT_HEADER_SIZE, FAT_MAGIC, FAT_MAGIC_64, MH_CIGAM,
     MH_CIGAM_64, MH_MAGIC, MH_MAGIC_64,
 };
-use crate::spec::MachSpec;
 
 /// A guard against absurd slice counts in a malformed header. Real universal
 /// binaries carry a handful; anything near this is an attack or a mis-parse.
@@ -100,7 +100,11 @@ pub fn slices(bytes: &[u8]) -> Result<Vec<Slice>> {
         let cputype = view.u32_be(off)? as i32;
         let cpusubtype = view.u32_be(off + 4)? as i32;
         let (offset, size, align) = if is_64 {
-            (view.u64_be(off + 8)?, view.u64_be(off + 16)?, view.u32_be(off + 24)?)
+            (
+                view.u64_be(off + 8)?,
+                view.u64_be(off + 16)?,
+                view.u32_be(off + 24)?,
+            )
         } else {
             (
                 u64::from(view.u32_be(off + 8)?),
@@ -117,7 +121,13 @@ pub fn slices(bytes: &[u8]) -> Result<Vec<Slice>> {
             return Err(Error::BadFatSlice);
         }
 
-        out.push(Slice { cputype, cpusubtype, offset, size, align });
+        out.push(Slice {
+            cputype,
+            cpusubtype,
+            offset,
+            size,
+            align,
+        });
     }
     Ok(out)
 }
@@ -140,7 +150,9 @@ pub fn select<'a, S: MachSpec>(bytes: &'a [u8], spec: &S) -> Result<&'a [u8]> {
         .iter()
         .filter(|s| s.cputype == S::CPU_TYPE && spec.accepts_subtype(s.cpusubtype))
         .max_by_key(|s| spec.subtype_rank(s.cpusubtype))
-        .ok_or(Error::NoMatchingSlice { wanted: S::CPU_TYPE })?;
+        .ok_or(Error::NoMatchingSlice {
+            wanted: S::CPU_TYPE,
+        })?;
     slice_bytes(bytes, best)
 }
 
@@ -179,7 +191,10 @@ mod tests {
     fn rejects_empty_and_garbage() {
         assert!(kind(&[]).is_err());
         assert!(kind(&[0, 1, 2, 3]).is_err());
-        assert_eq!(kind(&0xdead_beefu32.to_le_bytes()), Err(Error::BadMagic(0xdead_beef)));
+        assert_eq!(
+            kind(&0xdead_beefu32.to_le_bytes()),
+            Err(Error::BadMagic(0xdead_beef))
+        );
     }
 
     #[test]
@@ -201,7 +216,12 @@ mod tests {
     #[test]
     fn fat_slices_are_enumerated() {
         let mut v = fat_header(2);
-        v.extend(fat_arch(CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL, 0x1000, 0x10));
+        v.extend(fat_arch(
+            CPU_TYPE_X86_64,
+            CPU_SUBTYPE_X86_64_ALL,
+            0x1000,
+            0x10,
+        ));
         v.extend(fat_arch(CPU_TYPE_ARM64, 0, 0x2000, 0x20));
         v.resize(0x2020, 0);
 
@@ -216,7 +236,12 @@ mod tests {
     #[test]
     fn rejects_slice_running_past_end() {
         let mut v = fat_header(1);
-        v.extend(fat_arch(CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL, 0x1000, 0x10));
+        v.extend(fat_arch(
+            CPU_TYPE_X86_64,
+            CPU_SUBTYPE_X86_64_ALL,
+            0x1000,
+            0x10,
+        ));
         v.resize(0x100, 0); // far too short for the declared extent
         assert_eq!(slices(&v), Err(Error::BadFatSlice));
     }
@@ -262,7 +287,9 @@ mod tests {
         v.resize(0x1010, 0);
         assert_eq!(
             select(&v, &X86_64),
-            Err(Error::NoMatchingSlice { wanted: CPU_TYPE_X86_64 })
+            Err(Error::NoMatchingSlice {
+                wanted: CPU_TYPE_X86_64
+            })
         );
     }
 }

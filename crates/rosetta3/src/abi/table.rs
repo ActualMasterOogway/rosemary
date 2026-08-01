@@ -262,6 +262,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("__assert_rtn", V, P, P, I32, P),
     sig!("__bzero", V, P, U64),
     sig!("__cxa_allocate_exception", P, U64),
+    // Shimmed, and listed for the reasons `sigaction` is: the entry keeps it out
+    // of the audit's unknown list and off the fast path. The handler is a guest
+    // function pointer, but no `cbsig!` marks it — [`crate::shims::atexit`]
+    // substitutes it itself, because it must also replace the DSO handle.
+    sig!("__cxa_atexit", I32, P, P, P),
     sig!("__cxa_begin_catch", P, P),
     sig!("__cxa_end_catch", V),
     sig!("__cxa_free_exception", V, P),
@@ -612,35 +617,98 @@ const UNDECLARED: &str = "no public declaration; a guessed signature would fail 
 /// Symbols that are described and deliberately not callable, **sorted by name**
 /// for the same reason as [`SIGNATURES`].
 pub static REFUSED: &[(&str, &str)] = &[
-    ("_DefaultRuneLocale", "a data import, read through its slot and never called"),
+    (
+        "_DefaultRuneLocale",
+        "a data import, read through its slot and never called",
+    ),
     // A `type_info` and the vtable a guest's own `type_info` objects point at.
     // Both are read through their slots and compared by address, which is what
     // makes a `catch` clause decidable at all — see [`crate::unwind`].
-    ("_ZTISt9exception", "a data import, read through its slot and never called"),
-    ("_ZTIi", "a data import, read through its slot and never called"),
-    ("_ZTVN10__cxxabiv117__class_type_infoE", "a data import, read through its slot"),
-    ("_ZTVN10__cxxabiv120__si_class_type_infoE", "a data import, read through its slot"),
-    ("_ZTVN10__cxxabiv121__vmi_class_type_infoE", "a data import, read through its slot"),
-    ("_ZTVSt9exception", "a data import, read through its slot and never called"),
+    (
+        "_ZTISt9exception",
+        "a data import, read through its slot and never called",
+    ),
+    (
+        "_ZTIi",
+        "a data import, read through its slot and never called",
+    ),
+    (
+        "_ZTVN10__cxxabiv117__class_type_infoE",
+        "a data import, read through its slot",
+    ),
+    (
+        "_ZTVN10__cxxabiv120__si_class_type_infoE",
+        "a data import, read through its slot",
+    ),
+    (
+        "_ZTVN10__cxxabiv121__vmi_class_type_infoE",
+        "a data import, read through its slot",
+    ),
+    (
+        "_ZTVSt9exception",
+        "a data import, read through its slot and never called",
+    ),
     // The personality routine a frame's LSDA names. Read as an address and
     // never called: this runtime interprets the LSDA itself rather than handing
     // it to libunwind, which is the whole of [`crate::unwind`].
-    ("__gxx_personality_v0", "a personality routine, named by an LSDA and never called"),
-    ("__mb_cur_max", "a data import, read through its slot and never called"),
-    ("__objc_personality_v0", "a personality routine, named by an LSDA and never called"),
-    ("__stack_chk_guard", "a data import, read through its slot and never called"),
-    ("__stderrp", "a data import, read through its slot and never called"),
-    ("__stdinp", "a data import, read through its slot and never called"),
-    ("__stdoutp", "a data import, read through its slot and never called"),
-    ("dyld_stub_binder", "the lazy-binding entry point; every slot is bound eagerly"),
-    ("environ", "a data import, read through its slot and never called"),
+    (
+        "__gxx_personality_v0",
+        "a personality routine, named by an LSDA and never called",
+    ),
+    (
+        "__mb_cur_max",
+        "a data import, read through its slot and never called",
+    ),
+    (
+        "__objc_personality_v0",
+        "a personality routine, named by an LSDA and never called",
+    ),
+    (
+        "__stack_chk_guard",
+        "a data import, read through its slot and never called",
+    ),
+    (
+        "__stderrp",
+        "a data import, read through its slot and never called",
+    ),
+    (
+        "__stdinp",
+        "a data import, read through its slot and never called",
+    ),
+    (
+        "__stdoutp",
+        "a data import, read through its slot and never called",
+    ),
+    (
+        "dyld_stub_binder",
+        "the lazy-binding entry point; every slot is bound eagerly",
+    ),
+    (
+        "environ",
+        "a data import, read through its slot and never called",
+    ),
     ("humanize_number", UNDECLARED),
     ("mbr_identifier_translate", UNDECLARED),
-    ("optarg", "a data import, read through its slot and never called"),
-    ("opterr", "a data import, read through its slot and never called"),
-    ("optind", "a data import, read through its slot and never called"),
-    ("optopt", "a data import, read through its slot and never called"),
-    ("pthread_cancel", "cancellation unwinds a stack the host's unwinder never saw (M5)"),
+    (
+        "optarg",
+        "a data import, read through its slot and never called",
+    ),
+    (
+        "opterr",
+        "a data import, read through its slot and never called",
+    ),
+    (
+        "optind",
+        "a data import, read through its slot and never called",
+    ),
+    (
+        "optopt",
+        "a data import, read through its slot and never called",
+    ),
+    (
+        "pthread_cancel",
+        "cancellation unwinds a stack the host's unwinder never saw (M5)",
+    ),
 ];
 
 #[cfg(test)]
@@ -662,7 +730,12 @@ mod tests {
     #[test]
     fn refusals_are_sorted_and_unique() {
         for pair in REFUSED.windows(2) {
-            assert!(pair[0].0 < pair[1].0, "{} and {} are out of order", pair[0].0, pair[1].0);
+            assert!(
+                pair[0].0 < pair[1].0,
+                "{} and {} are out of order",
+                pair[0].0,
+                pair[1].0
+            );
         }
     }
 
@@ -670,7 +743,9 @@ mod tests {
     fn a_symbol_is_never_both_known_and_refused() {
         for abi in SIGNATURES {
             assert!(
-                REFUSED.binary_search_by_key(&abi.name, |(n, _)| *n).is_err(),
+                REFUSED
+                    .binary_search_by_key(&abi.name, |(n, _)| *n)
+                    .is_err(),
                 "{} is both described and refused",
                 abi.name
             );
@@ -693,7 +768,9 @@ mod tests {
         // `fts_open` is a signature now that the thunk exists, and the point
         // of this assertion is unchanged: the `$INODE64` spelling finds
         // whatever the plain name has to say.
-        assert!(matches!(lookup(0, "_fts_open$INODE64"), Lookup::Known(abi) if abi.name == "fts_open"));
+        assert!(
+            matches!(lookup(0, "_fts_open$INODE64"), Lookup::Known(abi) if abi.name == "fts_open")
+        );
         assert_eq!(lookup(0, "_strtod$UNIX2003"), lookup(0, "_strtod"));
     }
 
@@ -720,7 +797,9 @@ mod tests {
 
     #[test]
     fn a_variadic_carries_its_fixed_arguments_and_the_marker() {
-        let Lookup::Known(printf) = lookup(0, "_printf") else { panic!("no _printf") };
+        let Lookup::Known(printf) = lookup(0, "_printf") else {
+            panic!("no _printf")
+        };
         assert!(printf.variadic);
         assert_eq!(printf.params(), &[T::Pointer, T::VariadicList]);
     }

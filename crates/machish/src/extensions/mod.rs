@@ -91,7 +91,9 @@ pub struct ExtensionSet<S: MachSpec> {
 
 impl<S: MachSpec> Default for ExtensionSet<S> {
     fn default() -> Self {
-        ExtensionSet { extensions: Vec::new() }
+        ExtensionSet {
+            extensions: Vec::new(),
+        }
     }
 }
 
@@ -171,11 +173,7 @@ impl<S: MachSpec> ExtensionSet<S> {
 /// array of `n` words; give me the words". Reading through the address space
 /// rather than the file is what makes this correct for a chained-fixups image,
 /// where the file bytes are packed chain links rather than pointers.
-pub(crate) fn read_words(
-    mem: &dyn AddressSpace,
-    at: Word,
-    count: usize,
-) -> Result<Vec<Word>> {
+pub(crate) fn read_words(mem: &dyn AddressSpace, at: Word, count: usize) -> Result<Vec<Word>> {
     let mut out = Vec::with_capacity(count.min(1024));
     for i in 0..count {
         let mut buf = [0u8; 8];

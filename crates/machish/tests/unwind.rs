@@ -18,7 +18,7 @@
 
 mod common;
 
-use machish::image::{function_starts, MachObject, UnwindInfo};
+use machish::image::{MachObject, UnwindInfo, function_starts};
 use machish::spec::arch::X86_64;
 
 /// A C++ program with a `try` block, which is what puts a personality routine
@@ -39,14 +39,18 @@ fn cpp_fixture() -> Option<Vec<u8>> {
 
 #[test]
 fn every_entry_names_a_real_function_of_a_real_binary() {
-    let Some(bytes) = common::system_binary("/bin/ls") else { skip!("/bin/ls unavailable") };
+    let Some(bytes) = common::system_binary("/bin/ls") else {
+        skip!("/bin/ls unavailable")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).expect("parse");
     let info = UnwindInfo::parse(&obj, 0).expect("unwind info");
     let text = obj.section("__TEXT", "__text").expect("__text");
 
     assert!(!info.is_empty(), "/bin/ls has no __unwind_info");
-    let starts: std::collections::BTreeSet<u64> =
-        function_starts(&obj).expect("function starts").into_iter().collect();
+    let starts: std::collections::BTreeSet<u64> = function_starts(&obj)
+        .expect("function starts")
+        .into_iter()
+        .collect();
 
     for e in info.entries() {
         assert!(
@@ -56,18 +60,27 @@ fn every_entry_names_a_real_function_of_a_real_binary() {
         );
         // Two independent tables produced by the same linker from the same
         // facts: agreement is evidence neither decoder can give alone.
-        assert!(starts.contains(&e.function), "{:#x} is not a function start", e.function);
+        assert!(
+            starts.contains(&e.function),
+            "{:#x} is not a function start",
+            e.function
+        );
     }
 }
 
 #[test]
 fn entries_are_sorted_and_each_one_finds_itself() {
-    let Some(bytes) = common::system_binary("/bin/ls") else { skip!("/bin/ls unavailable") };
+    let Some(bytes) = common::system_binary("/bin/ls") else {
+        skip!("/bin/ls unavailable")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).expect("parse");
     let info = UnwindInfo::parse(&obj, 0).expect("unwind info");
 
     for pair in info.entries().windows(2) {
-        assert!(pair[0].function < pair[1].function, "entries are not sorted");
+        assert!(
+            pair[0].function < pair[1].function,
+            "entries are not sorted"
+        );
     }
     for e in info.entries() {
         assert_eq!(info.lookup(e.function), Some(e));
@@ -80,18 +93,30 @@ fn entries_are_sorted_and_each_one_finds_itself() {
 
 #[test]
 fn an_address_outside_the_covered_range_has_no_entry() {
-    let Some(bytes) = common::system_binary("/bin/ls") else { skip!("/bin/ls unavailable") };
+    let Some(bytes) = common::system_binary("/bin/ls") else {
+        skip!("/bin/ls unavailable")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).expect("parse");
     let info = UnwindInfo::parse(&obj, 0).expect("unwind info");
     let first = info.entries().first().expect("at least one entry").function;
 
-    assert_eq!(info.lookup(first - 1), None, "an address below the first function");
-    assert_eq!(info.lookup(0xffff_ffff_0000), None, "an address in nothing at all");
+    assert_eq!(
+        info.lookup(first - 1),
+        None,
+        "an address below the first function"
+    );
+    assert_eq!(
+        info.lookup(0xffff_ffff_0000),
+        None,
+        "an address in nothing at all"
+    );
 }
 
 #[test]
 fn the_slide_moves_every_address_and_nothing_else() {
-    let Some(bytes) = common::system_binary("/bin/ls") else { skip!("/bin/ls unavailable") };
+    let Some(bytes) = common::system_binary("/bin/ls") else {
+        skip!("/bin/ls unavailable")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).expect("parse");
     let unslid = UnwindInfo::parse(&obj, 0).expect("unwind info");
     let slid = UnwindInfo::parse(&obj, 0x1_0000).expect("unwind info");
@@ -109,13 +134,20 @@ fn the_slide_moves_every_address_and_nothing_else() {
 
 #[test]
 fn a_cpp_binary_carries_a_personality_and_an_lsda_and_a_c_one_does_not() {
-    let Some(bytes) = cpp_fixture() else { skip!("cannot build an x86_64 C++ fixture") };
+    let Some(bytes) = cpp_fixture() else {
+        skip!("cannot build an x86_64 C++ fixture")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).expect("parse");
     let info = UnwindInfo::parse(&obj, 0).expect("unwind info");
 
     let handlers: Vec<_> = info.entries().iter().filter(|e| e.can_handle()).collect();
-    assert!(!handlers.is_empty(), "a program with a try block has no LSDA");
-    let except = obj.section("__TEXT", "__gcc_except_tab").expect("__gcc_except_tab");
+    assert!(
+        !handlers.is_empty(),
+        "a program with a try block has no LSDA"
+    );
+    let except = obj
+        .section("__TEXT", "__gcc_except_tab")
+        .expect("__gcc_except_tab");
     for e in &handlers {
         let lsda = e.lsda.expect("can_handle implies an LSDA");
         assert!(
@@ -127,10 +159,15 @@ fn a_cpp_binary_carries_a_personality_and_an_lsda_and_a_c_one_does_not() {
     // The negative half: `/bin/ls` is C, so nothing in it catches anything, and
     // a decoder that invented an LSDA index would show up here rather than in a
     // fixture written to have one.
-    let Some(ls) = common::system_binary("/bin/ls") else { return };
+    let Some(ls) = common::system_binary("/bin/ls") else {
+        return;
+    };
     let ls = MachObject::parse_any(&ls, X86_64).expect("parse");
     let ls_info = UnwindInfo::parse(&ls, 0).expect("unwind info");
-    assert!(ls_info.entries().iter().all(|e| e.lsda.is_none()), "/bin/ls catches something?");
+    assert!(
+        ls_info.entries().iter().all(|e| e.lsda.is_none()),
+        "/bin/ls catches something?"
+    );
 }
 
 #[test]
@@ -139,7 +176,9 @@ fn a_personality_slot_is_a_pointer_the_linker_binds() {
     // lives in `__DATA_CONST,__got` and holds `___gxx_personality_v0` only
     // after binding. A decoder reporting the routine's address would have
     // nothing to report at all in an unbound image.
-    let Some(bytes) = cpp_fixture() else { skip!("cannot build an x86_64 C++ fixture") };
+    let Some(bytes) = cpp_fixture() else {
+        skip!("cannot build an x86_64 C++ fixture")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).expect("parse");
     let info = UnwindInfo::parse(&obj, 0).expect("unwind info");
 

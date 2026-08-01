@@ -29,7 +29,7 @@ use core::ffi::c_void;
 use core::ptr;
 
 use crate::error::{Error, Result};
-use crate::memory::{host_page_size, AddressSpace, Placement, Prot};
+use crate::memory::{AddressSpace, Placement, Prot, host_page_size};
 use crate::raw::Word;
 
 #[cfg(target_os = "macos")]
@@ -79,7 +79,11 @@ pub struct MmapSpace {
 
 impl MmapSpace {
     pub fn new() -> Self {
-        MmapSpace { regions: Vec::new(), want_exec: false, jit: false }
+        MmapSpace {
+            regions: Vec::new(),
+            want_exec: false,
+            jit: false,
+        }
     }
 
     /// Request memory the host CPU may execute.
@@ -133,7 +137,10 @@ impl MmapSpace {
                 libc::MAP_PRIVATE | libc::MAP_ANON | map_jit(),
             )
         } else {
-            (libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANON)
+            (
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+            )
         }
     }
 
@@ -141,7 +148,9 @@ impl MmapSpace {
     /// Mirrors `selfish/src/memory/host_mmap.rs:50-91`.
     fn reserve_anywhere(&mut self, size: usize, align: usize) -> Result<Word> {
         let align = align.max(1).next_power_of_two();
-        let over = size.checked_add(align).ok_or(Error::Memory("reserve overflow"))?;
+        let over = size
+            .checked_add(align)
+            .ok_or(Error::Memory("reserve overflow"))?;
         let (prot, flags) = self.mmap_flags();
 
         // SAFETY: standard anonymous mmap; the result is checked against MAP_FAILED.
@@ -163,7 +172,10 @@ impl MmapSpace {
             unsafe { libc::munmap((aligned + size) as *mut c_void, tail) };
         }
 
-        self.regions.push(Region { base: aligned as *mut u8, len: size });
+        self.regions.push(Region {
+            base: aligned as *mut u8,
+            len: size,
+        });
         Ok(aligned as Word)
     }
 
@@ -189,7 +201,10 @@ impl MmapSpace {
             return Ok(None);
         }
 
-        self.regions.push(Region { base: raw as *mut u8, len: size });
+        self.regions.push(Region {
+            base: raw as *mut u8,
+            len: size,
+        });
         Ok(Some(want))
     }
 }
@@ -197,12 +212,18 @@ impl MmapSpace {
 impl crate::memory::Regions for MmapSpace {
     fn region_at(&self, addr: Word) -> Option<(Word, &[u8])> {
         let a = usize::try_from(addr).ok()?;
-        let r = self.regions.iter().find(|r| a >= r.base as usize && a < r.base as usize + r.len)?;
+        let r = self
+            .regions
+            .iter()
+            .find(|r| a >= r.base as usize && a < r.base as usize + r.len)?;
         Some((r.base as Word, r.as_slice()))
     }
 
     fn regions(&self) -> Vec<(Word, &[u8])> {
-        self.regions.iter().map(|r| (r.base as Word, r.as_slice())).collect()
+        self.regions
+            .iter()
+            .map(|r| (r.base as Word, r.as_slice()))
+            .collect()
     }
 }
 
@@ -398,7 +419,9 @@ mod tests {
         first.write(base, b"sentinel").unwrap();
 
         let mut second = MmapSpace::new();
-        let got = second.reserve(0x4000, 0x1000, Placement::Preferred(base)).unwrap();
+        let got = second
+            .reserve(0x4000, 0x1000, Placement::Preferred(base))
+            .unwrap();
         assert_ne!(got, base, "the occupied range must not have been taken");
 
         let mut out = [0u8; 8];
@@ -413,7 +436,11 @@ mod tests {
         first.write(base, b"sentinel").unwrap();
 
         let mut second = MmapSpace::new();
-        assert!(second.reserve(0x4000, 0x1000, Placement::Fixed(base)).is_err());
+        assert!(
+            second
+                .reserve(0x4000, 0x1000, Placement::Fixed(base))
+                .is_err()
+        );
 
         let mut out = [0u8; 8];
         first.read(base, &mut out).unwrap();
@@ -476,7 +503,9 @@ mod tests {
         // and the second image would be written over the first.
         let mut mem = MmapSpace::new();
         let a = mem.reserve(0x8000, 0x4000, Placement::Anywhere).unwrap();
-        let b = mem.reserve(0x4000, 0x4000, Placement::Preferred(a)).unwrap();
+        let b = mem
+            .reserve(0x4000, 0x4000, Placement::Preferred(a))
+            .unwrap();
         assert_ne!(b, a, "a colliding preferred placement must slide");
 
         mem.write(a, &[0x11; 8]).unwrap();

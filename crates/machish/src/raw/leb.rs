@@ -151,7 +151,10 @@ impl<'a> Cursor<'a> {
 
     /// Advance by `n` bytes, erroring if that would leave the view.
     pub fn skip(&mut self, n: usize) -> Result<()> {
-        let next = self.pos.checked_add(n).ok_or(Error::Truncated { what: "skip" })?;
+        let next = self
+            .pos
+            .checked_add(n)
+            .ok_or(Error::Truncated { what: "skip" })?;
         if next > self.view.len() {
             return Err(Error::Truncated { what: "skip" });
         }

@@ -10,14 +10,14 @@
 //! polish. Several of these (a zero `cmdsize`, a load-command chain running past
 //! `sizeofcmds`) are bugs that have bitten real Mach-O loaders.
 
+use machish::Error;
 use machish::image::MachObject;
 use machish::spec::arch::X86_64;
 use machish::spec::constants::{
-    MH_CIGAM_64, MH_MAGIC, MH_MAGIC_64, MH_OBJECT, MH_EXECUTE, CPU_TYPE_X86_64, CPU_TYPE_ARM64,
-    LC_SEGMENT_64, LC_LOAD_DYLIB, LC_SOURCE_VERSION, MACH_HEADER_64_SIZE,
+    CPU_TYPE_ARM64, CPU_TYPE_X86_64, LC_LOAD_DYLIB, LC_SEGMENT_64, LC_SOURCE_VERSION,
+    MACH_HEADER_64_SIZE, MH_CIGAM_64, MH_EXECUTE, MH_MAGIC, MH_MAGIC_64, MH_OBJECT,
     SEGMENT_COMMAND_64_SIZE,
 };
-use machish::Error;
 
 /// Build a `mach_header_64` followed by raw command bytes.
 fn image(filetype: u32, ncmds: u32, sizeofcmds: u32, cmds: &[u8]) -> Vec<u8> {
@@ -72,7 +72,10 @@ fn distinguishes_wrong_file_from_unsupported_flavor() {
     // Byte-swapped 64-bit, likewise.
     let mut v = MH_CIGAM_64.to_le_bytes().to_vec();
     v.resize(64, 0);
-    assert_eq!(parse(&v).err(), Some(Error::UnsupportedMachOForm(MH_CIGAM_64)));
+    assert_eq!(
+        parse(&v).err(),
+        Some(Error::UnsupportedMachOForm(MH_CIGAM_64))
+    );
 }
 
 #[test]
@@ -88,7 +91,10 @@ fn rejects_wrong_cpu_type() {
     v[4..8].copy_from_slice(&CPU_TYPE_ARM64.to_le_bytes());
     assert_eq!(
         parse(&v).err(),
-        Some(Error::WrongCpuType { expected: CPU_TYPE_X86_64, found: CPU_TYPE_ARM64 })
+        Some(Error::WrongCpuType {
+            expected: CPU_TYPE_X86_64,
+            found: CPU_TYPE_ARM64
+        })
     );
 }
 
@@ -98,7 +104,12 @@ fn rejects_wrong_cpu_type() {
 fn zero_cmdsize_does_not_loop_forever() {
     let c = cmd(LC_SEGMENT_64, 0);
     let v = image(MH_EXECUTE, 1, 8, &c);
-    assert_eq!(parse(&v).err(), Some(Error::BadLoadCommand { why: "zero cmdsize" }));
+    assert_eq!(
+        parse(&v).err(),
+        Some(Error::BadLoadCommand {
+            why: "zero cmdsize"
+        })
+    );
 }
 
 #[test]
@@ -108,7 +119,12 @@ fn rejects_unaligned_cmdsize() {
     let mut c = cmd(LC_LOAD_DYLIB, 12);
     c.resize(12, 0);
     let v = image(MH_EXECUTE, 1, 12, &c);
-    assert_eq!(parse(&v).err(), Some(Error::BadLoadCommand { why: "unaligned cmdsize" }));
+    assert_eq!(
+        parse(&v).err(),
+        Some(Error::BadLoadCommand {
+            why: "unaligned cmdsize"
+        })
+    );
 }
 
 #[test]
@@ -118,7 +134,12 @@ fn rejects_command_running_past_sizeofcmds() {
     let mut c = cmd(LC_LOAD_DYLIB, 4096);
     c.resize(64, 0);
     let v = image(MH_EXECUTE, 1, 16, &c);
-    assert_eq!(parse(&v).err(), Some(Error::BadLoadCommand { why: "cmdsize past sizeofcmds" }));
+    assert_eq!(
+        parse(&v).err(),
+        Some(Error::BadLoadCommand {
+            why: "cmdsize past sizeofcmds"
+        })
+    );
 }
 
 #[test]
@@ -130,14 +151,21 @@ fn rejects_segment_command_too_small_for_its_own_fields() {
     let v = image(MH_EXECUTE, 1, 16, &c);
     assert_eq!(
         parse(&v).err(),
-        Some(Error::BadLoadCommand { why: "segment command too small" })
+        Some(Error::BadLoadCommand {
+            why: "segment command too small"
+        })
     );
 }
 
 #[test]
 fn rejects_sizeofcmds_past_end_of_file() {
     let v = image(MH_EXECUTE, 1, 0x1000, &cmd(LC_SEGMENT_64, 16));
-    assert_eq!(parse(&v).err(), Some(Error::Truncated { what: "load commands" }));
+    assert_eq!(
+        parse(&v).err(),
+        Some(Error::Truncated {
+            what: "load commands"
+        })
+    );
 }
 
 #[test]
@@ -157,7 +185,9 @@ fn rejects_more_commands_than_bytes() {
     let v = image(MH_EXECUTE, 10, 16, &c);
     assert_eq!(
         parse(&v).err(),
-        Some(Error::BadLoadCommand { why: "command header past sizeofcmds" })
+        Some(Error::BadLoadCommand {
+            why: "command header past sizeofcmds"
+        })
     );
 }
 
@@ -175,7 +205,9 @@ fn rejects_segment_whose_sections_overflow_its_command() {
     let v = image(MH_EXECUTE, 1, SEGMENT_COMMAND_64_SIZE as u32, &c);
     assert_eq!(
         parse(&v).err(),
-        Some(Error::BadLoadCommand { why: "sections past segment command" })
+        Some(Error::BadLoadCommand {
+            why: "sections past segment command"
+        })
     );
 }
 
@@ -189,7 +221,10 @@ fn rejects_dylib_string_offset_out_of_bounds() {
     c.resize(32, 0);
 
     let v = image(MH_EXECUTE, 1, 32, &c);
-    assert!(parse(&v).is_err(), "an out-of-range string offset must not panic");
+    assert!(
+        parse(&v).is_err(),
+        "an out-of-range string offset must not panic"
+    );
 }
 
 #[test]
@@ -223,7 +258,9 @@ fn image_with_no_mappable_segments_reports_it() {
 /// and it exercises nearly every bounds check in the parser.
 #[test]
 fn every_prefix_of_a_real_binary_fails_cleanly() {
-    let Ok(bytes) = std::fs::read("/bin/ls") else { return };
+    let Ok(bytes) = std::fs::read("/bin/ls") else {
+        return;
+    };
     let thin = match machish::fat::select(&bytes, &X86_64) {
         Ok(t) => t.to_vec(),
         Err(_) => return,
@@ -240,7 +277,9 @@ fn every_prefix_of_a_real_binary_fails_cleanly() {
 /// Flipping bytes in the load-command region must never panic either.
 #[test]
 fn corrupted_load_commands_fail_cleanly() {
-    let Ok(bytes) = std::fs::read("/bin/ls") else { return };
+    let Ok(bytes) = std::fs::read("/bin/ls") else {
+        return;
+    };
     let thin = match machish::fat::select(&bytes, &X86_64) {
         Ok(t) => t.to_vec(),
         Err(_) => return,
@@ -290,7 +329,9 @@ fn decode_everything(bytes: &[u8]) {
 #[test]
 fn decoders_survive_every_prefix_of_a_real_binary() {
     for path in ["/bin/ls", "/bin/echo"] {
-        let Some(thin) = thin_slice(path) else { continue };
+        let Some(thin) = thin_slice(path) else {
+            continue;
+        };
         // Step rather than walk every byte: a full sweep of a 100 KiB binary is
         // 100k full decodes, which turns a fast test into a slow one without
         // reaching a meaningfully different set of code paths.
@@ -304,7 +345,9 @@ fn decoders_survive_every_prefix_of_a_real_binary() {
 #[test]
 fn decoders_survive_single_byte_corruption() {
     for path in ["/bin/ls", "/bin/echo"] {
-        let Some(thin) = thin_slice(path) else { continue };
+        let Some(thin) = thin_slice(path) else {
+            continue;
+        };
         for i in (0..thin.len()).step_by(211) {
             for patch in [0x00u8, 0xff, 0x80] {
                 let mut corrupt = thin.clone();
@@ -319,9 +362,13 @@ fn decoders_survive_single_byte_corruption() {
 fn a_chained_fixups_command_pointing_at_nonsense_is_an_error() {
     // The chained decoder reads offsets out of its own header, so a header of
     // all-ones is the shortest path to every bounds check it has.
-    let Some(mut thin) = thin_slice("/bin/echo") else { return };
+    let Some(mut thin) = thin_slice("/bin/echo") else {
+        return;
+    };
     let Ok(obj) = parse(&thin) else { return };
-    let Some(cf) = obj.chained_fixups() else { return };
+    let Some(cf) = obj.chained_fixups() else {
+        return;
+    };
     let at = cf.dataoff as usize;
     if at + 32 > thin.len() {
         return;

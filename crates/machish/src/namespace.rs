@@ -127,11 +127,18 @@ impl DylibSource for FsDylibSource {
                 continue;
             }
             if let Ok(bytes) = std::fs::read(candidate) {
-                return Ok(Some(FetchedDylib { path: candidate.clone(), bytes }));
+                return Ok(Some(FetchedDylib {
+                    path: candidate.clone(),
+                    bytes,
+                }));
             }
         }
 
-        let base = request.install_name.rsplit('/').next().unwrap_or(request.install_name);
+        let base = request
+            .install_name
+            .rsplit('/')
+            .next()
+            .unwrap_or(request.install_name);
         for dir in &self.extra_search_paths {
             let path = join(dir, base);
             if let Ok(bytes) = std::fs::read(&path) {
@@ -214,8 +221,14 @@ impl Namespace {
         }
         let export = image.exports.get(name)?;
 
-        if let ExportValue::Reexport { ordinal, imported_name } = &export.value {
-            let target = image.dependencies.get(usize::from(*ordinal).checked_sub(1)?)?;
+        if let ExportValue::Reexport {
+            ordinal,
+            imported_name,
+        } = &export.value
+        {
+            let target = image
+                .dependencies
+                .get(usize::from(*ordinal).checked_sub(1)?)?;
             let next = self.find(target)?;
             let name = imported_name.as_deref().unwrap_or(name);
             return self.lookup(next, name, depth + 1);
@@ -250,7 +263,14 @@ impl SymbolProvider for Namespace {
         for image in &self.images {
             for e in image.exports.iter() {
                 if let Some(addr) = e.address(image.slide) {
-                    out(&e.name, Resolved { addr, kind: SymbolKind::Function, tag: 0 });
+                    out(
+                        &e.name,
+                        Resolved {
+                            addr,
+                            kind: SymbolKind::Function,
+                            tag: 0,
+                        },
+                    );
                 }
             }
         }
@@ -286,12 +306,7 @@ mod tests {
         }
     }
 
-    fn image(
-        install: &str,
-        exports: Vec<Export>,
-        deps: &[&str],
-        slide: Word,
-    ) -> NamespaceImage {
+    fn image(install: &str, exports: Vec<Export>, deps: &[&str], slide: Word) -> NamespaceImage {
         NamespaceImage {
             install_name: Some(install.to_string()),
             path: install.to_string(),
@@ -302,13 +317,22 @@ mod tests {
     }
 
     fn sym<'a>(name: &'a str, library: LibraryRef<'a>) -> SymbolRef<'a> {
-        SymbolRef { name, library, weak_import: false }
+        SymbolRef {
+            name,
+            library,
+            weak_import: false,
+        }
     }
 
     #[test]
     fn a_loaded_image_satisfies_a_two_level_import_and_the_slide_is_applied() {
         let mut ns = Namespace::new();
-        ns.push(image("libmath.dylib", vec![direct("_add", 0x1000)], &[], 0x4000));
+        ns.push(image(
+            "libmath.dylib",
+            vec![direct("_add", 0x1000)],
+            &[],
+            0x4000,
+        ));
 
         let r = ns.resolve(&sym("_add", LibraryRef::InstallName("libmath.dylib")));
         assert_eq!(r.map(|r| r.addr), Some(0x5000));
@@ -320,7 +344,10 @@ mod tests {
     fn the_wrong_library_is_not_satisfied() {
         let mut ns = Namespace::new();
         ns.push(image("libmath.dylib", vec![direct("_add", 0x1000)], &[], 0));
-        assert_eq!(ns.resolve(&sym("_add", LibraryRef::InstallName("libother.dylib"))), None);
+        assert_eq!(
+            ns.resolve(&sym("_add", LibraryRef::InstallName("libother.dylib"))),
+            None
+        );
         // ...but a flat reference finds it, which is the flat-namespace rule.
         assert!(ns.resolve(&sym("_add", LibraryRef::Flat)).is_some());
     }
@@ -328,11 +355,25 @@ mod tests {
     #[test]
     fn a_reexport_forwards_to_the_defining_image() {
         let mut ns = Namespace::new();
-        ns.push(image("libumbrella.dylib", vec![reexport("_add", 1, None)], &["libmath.dylib"], 0));
-        ns.push(image("libmath.dylib", vec![direct("_add", 0x1000)], &[], 0x2000));
+        ns.push(image(
+            "libumbrella.dylib",
+            vec![reexport("_add", 1, None)],
+            &["libmath.dylib"],
+            0,
+        ));
+        ns.push(image(
+            "libmath.dylib",
+            vec![direct("_add", 0x1000)],
+            &[],
+            0x2000,
+        ));
 
         let r = ns.resolve(&sym("_add", LibraryRef::InstallName("libumbrella.dylib")));
-        assert_eq!(r.map(|r| r.addr), Some(0x3000), "the umbrella must forward, not answer zero");
+        assert_eq!(
+            r.map(|r| r.addr),
+            Some(0x3000),
+            "the umbrella must forward, not answer zero"
+        );
     }
 
     #[test]
@@ -344,27 +385,56 @@ mod tests {
             &["libmath.dylib"],
             0,
         ));
-        ns.push(image("libmath.dylib", vec![direct("_internal_add", 0x1000)], &[], 0));
+        ns.push(image(
+            "libmath.dylib",
+            vec![direct("_internal_add", 0x1000)],
+            &[],
+            0,
+        ));
 
         let r = ns.resolve(&sym("_add", LibraryRef::InstallName("libumbrella.dylib")));
         assert_eq!(r.map(|r| r.addr), Some(0x1000));
         // The original name must not also be findable in the target.
-        assert_eq!(ns.resolve(&sym("_add", LibraryRef::InstallName("libmath.dylib"))), None);
+        assert_eq!(
+            ns.resolve(&sym("_add", LibraryRef::InstallName("libmath.dylib"))),
+            None
+        );
     }
 
     #[test]
     fn a_reexport_cycle_terminates() {
         let mut ns = Namespace::new();
-        ns.push(image("a.dylib", vec![reexport("_x", 1, None)], &["b.dylib"], 0));
-        ns.push(image("b.dylib", vec![reexport("_x", 1, None)], &["a.dylib"], 0));
-        assert_eq!(ns.resolve(&sym("_x", LibraryRef::InstallName("a.dylib"))), None);
+        ns.push(image(
+            "a.dylib",
+            vec![reexport("_x", 1, None)],
+            &["b.dylib"],
+            0,
+        ));
+        ns.push(image(
+            "b.dylib",
+            vec![reexport("_x", 1, None)],
+            &["a.dylib"],
+            0,
+        ));
+        assert_eq!(
+            ns.resolve(&sym("_x", LibraryRef::InstallName("a.dylib"))),
+            None
+        );
     }
 
     #[test]
     fn a_dangling_reexport_is_not_an_address() {
         let mut ns = Namespace::new();
-        ns.push(image("a.dylib", vec![reexport("_x", 1, None)], &["missing.dylib"], 0));
-        assert_eq!(ns.resolve(&sym("_x", LibraryRef::InstallName("a.dylib"))), None);
+        ns.push(image(
+            "a.dylib",
+            vec![reexport("_x", 1, None)],
+            &["missing.dylib"],
+            0,
+        ));
+        assert_eq!(
+            ns.resolve(&sym("_x", LibraryRef::InstallName("a.dylib"))),
+            None
+        );
         // Specifically: not `Some(0)`.
     }
 

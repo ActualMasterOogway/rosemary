@@ -26,8 +26,11 @@
 //!
 //! ## Scope
 //!
-//! Implemented: `printf`, `fprintf`, `sprintf`, `snprintf`, `ioctl`, and the
-//! `open`/`openat`/`fcntl` group. Three families live in modules of their own
+//! Implemented: `printf`, `fprintf`, `sprintf`, `snprintf`, `ioctl`, the
+//! `open`/`openat`/`fcntl` group, and `__cxa_atexit` — the last of which is not
+//! variadic and is here for the third reason a shim exists: one of its
+//! arguments describes an *image*, and the guest's answer is not one the host
+//! can be told. See [`atexit`]. Three families live in modules of their own
 //! and are reached from here: [`crate::jmpbuf`], [`crate::unwind`],
 //! [`crate::signal`], and [`crate::objc::dispatch`] — each because what it
 //! stands in for is a stack, a personality routine, a callback crossing back
@@ -40,6 +43,7 @@ use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{AbiError, GuestMemory, Result};
 
+pub mod atexit;
 pub mod ioctl;
 pub mod openat;
 pub mod printf;
@@ -88,10 +92,14 @@ pub fn dispatch(
             {
                 return Some(f(name, ctx, mem));
             }
-            // And the signal dispositions, which need one thing more than the
-            // rest: a guest function pointer crossing back *in*. See
-            // [`crate::signal`].
-            return crate::signal::shim_for(name).map(|f| f(name, ctx, mem, callbacks));
+            // And the two families that need one thing more than the rest: a
+            // guest function pointer the shim itself must substitute, because
+            // the marshaller is not the one placing it. See [`crate::signal`]
+            // for a disposition that also crosses back *in*, and [`atexit`] for
+            // a destructor whose third argument is a DSO handle that must not.
+            return crate::signal::shim_for(name)
+                .or_else(|| atexit::shim_for(name))
+                .map(|f| f(name, ctx, mem, callbacks));
         }
     };
     Some(f(name, ctx, mem))
@@ -108,6 +116,7 @@ pub fn is_shimmed(symbol: &str) -> bool {
         || crate::unwind::shim_for(name).is_some()
         || crate::objc::dispatch::shim_for(name).is_some()
         || crate::signal::shim_for(name).is_some()
+        || atexit::shim_for(name).is_some()
     {
         return true;
     }
@@ -133,5 +142,8 @@ pub(crate) fn set_int_return(ctx: &mut RegisterContext, value: i32) {
 
 /// Report a guest pointer that could not be followed.
 pub(crate) fn bad_pointer(symbol: &str, addr: u64) -> AbiError {
-    AbiError::Memory { symbol: symbol.to_string(), addr }
+    AbiError::Memory {
+        symbol: symbol.to_string(),
+        addr,
+    }
 }

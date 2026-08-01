@@ -92,7 +92,14 @@ impl SyntheticDylib {
     /// *here* rather than falling through to a later provider that would
     /// wrongly satisfy it.
     pub fn define_absent(&mut self, symbol: &str) -> &mut Self {
-        self.define(symbol, Resolved { addr: 0, kind: SymbolKind::Absent, tag: 0 })
+        self.define(
+            symbol,
+            Resolved {
+                addr: 0,
+                kind: SymbolKind::Absent,
+                tag: 0,
+            },
+        )
     }
 
     pub fn len(&self) -> usize {
@@ -129,7 +136,11 @@ mod tests {
     use crate::resolve::resolve_in;
 
     fn sym<'a>(name: &'a str, library: LibraryRef<'a>) -> SymbolRef<'a> {
-        SymbolRef { name, library, weak_import: false }
+        SymbolRef {
+            name,
+            library,
+            weak_import: false,
+        }
     }
 
     #[test]
@@ -138,12 +149,21 @@ mod tests {
         lib.define_fn("_write", 0x1234 as *const ());
         let providers: [&dyn SymbolProvider; 1] = [&lib];
 
-        let found = resolve_in(&providers, &sym("_write", LibraryRef::InstallName("/usr/lib/libSystem.B.dylib")));
+        let found = resolve_in(
+            &providers,
+            &sym(
+                "_write",
+                LibraryRef::InstallName("/usr/lib/libSystem.B.dylib"),
+            ),
+        );
         assert_eq!(found.map(|r| r.addr), Some(0x1234));
 
         // The whole point of two-level: the same name from a different library
         // is a different binding and must not be satisfied here.
-        let other = resolve_in(&providers, &sym("_write", LibraryRef::InstallName("@rpath/libmine.dylib")));
+        let other = resolve_in(
+            &providers,
+            &sym("_write", LibraryRef::InstallName("@rpath/libmine.dylib")),
+        );
         assert_eq!(other, None);
     }
 
@@ -175,7 +195,17 @@ mod tests {
         real.define_fn("_environ", 0xbbbb as *const ());
 
         let providers: [&dyn SymbolProvider; 2] = [&shim, &real];
-        let r = resolve_in(&providers, &sym("_environ", LibraryRef::InstallName("/usr/lib/libSystem.B.dylib")));
-        assert_eq!(r.map(|r| r.addr), Some(0xaaaa), "a flat shim must shadow the real library");
+        let r = resolve_in(
+            &providers,
+            &sym(
+                "_environ",
+                LibraryRef::InstallName("/usr/lib/libSystem.B.dylib"),
+            ),
+        );
+        assert_eq!(
+            r.map(|r| r.addr),
+            Some(0xaaaa),
+            "a flat shim must shadow the real library"
+        );
     }
 }

@@ -48,8 +48,10 @@ static STACK_CHK_GUARD: u64 = 0x00ff_dead_beef_c0de;
 /// `libSystem` for its canary, and the answer is not libSystem's to give.
 pub fn provider() -> SyntheticDylib {
     let mut lib = SyntheticDylib::new("<rosetta3 runtime>");
-    lib.flat(true)
-        .define_data("___stack_chk_guard", &STACK_CHK_GUARD as *const u64 as usize as u64);
+    lib.flat(true).define_data(
+        "___stack_chk_guard",
+        &STACK_CHK_GUARD as *const u64 as usize as u64,
+    );
     // Both spellings, because which one an image imports depends on its
     // toolchain's vintage and `machish`'s TLV extension redirects whichever it
     // finds to a flat lookup — which is this one. See [`crate::tls`] for why the

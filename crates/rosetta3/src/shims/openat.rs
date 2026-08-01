@@ -71,7 +71,11 @@ pub fn openat(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory
 pub fn fcntl(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
     let fd = ctx.rdi as i32;
     let cmd = ctx.rsi as i32;
-    let arg = if takes_third_argument(cmd) { ctx.rdx } else { 0 };
+    let arg = if takes_third_argument(cmd) {
+        ctx.rdx
+    } else {
+        0
+    };
 
     // SAFETY: the third parameter is a word-sized scalar or a pointer into the
     // guest, which is identity-mapped and so is a pointer here. Commands that
@@ -116,11 +120,7 @@ fn takes_third_argument(cmd: i32) -> bool {
 }
 
 /// Read a path argument out of the guest, as a C string this side owns.
-fn read_path(
-    symbol: &str,
-    va: u64,
-    mem: &dyn GuestMemory,
-) -> Result<std::ffi::CString> {
+fn read_path(symbol: &str, va: u64, mem: &dyn GuestMemory) -> Result<std::ffi::CString> {
     let bytes = mem.read_cstr(va, symbol)?;
     std::ffi::CString::new(bytes).map_err(|_| bad_pointer(symbol, va))
 }

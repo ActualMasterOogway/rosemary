@@ -220,7 +220,9 @@ fn personality_slots(view: &View<'_>, off: usize, count: usize, base: Word) -> R
     if count > MAX_ENTRIES {
         return Err(Error::TooDeep(SECT));
     }
-    (0..count).map(|i| Ok(base.wrapping_add(view.u32(off + i * 4)? as Word))).collect()
+    (0..count)
+        .map(|i| Ok(base.wrapping_add(view.u32(off + i * 4)? as Word)))
+        .collect()
 }
 
 fn encodings(view: &View<'_>, off: usize, count: usize) -> Result<Vec<u32>> {
@@ -265,9 +267,11 @@ fn read_page(
 ) -> Result<()> {
     let kind = view.u32(page_off)?;
     let (entries_off, count, page_encodings): (usize, usize, Vec<u32>) = match kind {
-        KIND_REGULAR => {
-            (view.u16(page_off + 4)? as usize, view.u16(page_off + 6)? as usize, Vec::new())
-        }
+        KIND_REGULAR => (
+            view.u16(page_off + 4)? as usize,
+            view.u16(page_off + 6)? as usize,
+            Vec::new(),
+        ),
         KIND_COMPRESSED => {
             let enc_off = view.u16(page_off + 8)? as usize;
             let enc_count = view.u16(page_off + 10)? as usize;
@@ -277,7 +281,11 @@ fn read_page(
                 encodings(view, page_off + enc_off, enc_count)?,
             )
         }
-        _ => return Err(Error::Custom("unknown __unwind_info second-level page kind")),
+        _ => {
+            return Err(Error::Custom(
+                "unknown __unwind_info second-level page kind",
+            ));
+        }
     };
     if count > MAX_ENTRIES {
         return Err(Error::TooDeep(SECT));
@@ -316,11 +324,9 @@ fn read_page(
             // 1-based: index zero means "no personality", so entry *n* is
             // `personalities[n - 1]`. Reading it as 0-based silently attributes
             // every function to the wrong routine.
-            n => Some(
-                *personalities
-                    .get(n as usize - 1)
-                    .ok_or(Error::Custom("__unwind_info personality index out of range"))?,
-            ),
+            n => Some(*personalities.get(n as usize - 1).ok_or(Error::Custom(
+                "__unwind_info personality index out of range",
+            ))?),
         };
         let lsda = (encoding & HAS_LSDA != 0)
             .then(|| lsdas.iter().find(|(f, _)| *f == function).map(|(_, l)| *l))

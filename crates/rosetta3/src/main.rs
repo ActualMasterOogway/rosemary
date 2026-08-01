@@ -14,7 +14,7 @@
 use std::collections::BTreeSet;
 use std::process::ExitCode;
 
-use rosetta3::{audit_call_targets, startup, Classification, ImportPolicy, Program, Vm};
+use rosetta3::{Classification, ImportPolicy, Program, Vm, audit_call_targets, startup};
 
 use microlift::arch::x86_64::X86_64;
 use microlift::core::lift_to_function;
@@ -127,7 +127,10 @@ fn main() -> ExitCode {
     let (text_va, text) = &program.text;
     println!("{path}");
     for img in &program.report.images {
-        println!("  image {} at {:#x} (slide {:#x})", img.name, img.base, img.slide);
+        println!(
+            "  image {} at {:#x} (slide {:#x})",
+            img.name, img.base, img.slide
+        );
     }
     println!(
         "  __text {:#x} + {:#x}, {} function(s)",
@@ -203,7 +206,10 @@ fn main() -> ExitCode {
         Some(entry) => match program.lift_region(entry) {
             Some((region, bytes)) => {
                 let start = region.range.start;
-                println!("  entry {entry:#x} in region {start:#x} + {:#x}", bytes.len());
+                println!(
+                    "  entry {entry:#x} in region {start:#x} + {:#x}",
+                    bytes.len()
+                );
                 match lift_to_function::<X86_64>(&bytes, start, config) {
                     Ok(func) => {
                         println!("  lifted to {} IR block(s)", func.dfg.num_blocks());
@@ -227,8 +233,13 @@ fn main() -> ExitCode {
     }
 
     let registered: BTreeSet<u64> = program.import_addresses().collect();
-    let audit =
-        audit_call_targets(text, *text_va, &program.functions, program.text_range(), &registered);
+    let audit = audit_call_targets(
+        text,
+        *text_va,
+        &program.functions,
+        program.text_range(),
+        &registered,
+    );
     println!(
         "\n  audit: {} of {} function(s) analysable ({} refused by the lifter)",
         audit.functions_lifted,
@@ -240,7 +251,10 @@ fn main() -> ExitCode {
         audit.direct_calls, audit.out_of_region, audit.intercepted
     );
     for u in &audit.unresolved {
-        println!("  audit: call to {:#x} would be followed into as guest code", u.target);
+        println!(
+            "  audit: call to {:#x} would be followed into as guest code",
+            u.target
+        );
     }
 
     if audit.is_clean() {

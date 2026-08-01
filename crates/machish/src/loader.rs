@@ -33,9 +33,9 @@ use alloc::vec::Vec;
 use crate::error::{Error, Result};
 use crate::exports::ExportTable;
 use crate::extensions::ExtensionSet;
-use crate::fixups::{decode_image, Binder, StubMap};
-use crate::image::{map_segments, protect_segments, DependencyKind, MachObject};
-use crate::install_name::{dirname, expand, PathContext};
+use crate::fixups::{Binder, StubMap, decode_image};
+use crate::image::{DependencyKind, MachObject, map_segments, protect_segments};
+use crate::install_name::{PathContext, dirname, expand};
 use crate::memory::{AddressSpace, ProtectionPolicy};
 use crate::namespace::{DylibRequest, DylibSource, Namespace, NamespaceImage, NoDylibSource};
 use crate::report::{ImageReport, LinkReport, SegmentReport};
@@ -117,16 +117,28 @@ impl<S: MachSpec + 'static> Loader<S> {
     /// A loader with this build's default extensions, which report
     /// initializers, terminators, and thread-local descriptors.
     pub fn new(spec: S) -> Self {
-        Loader { spec, policy: LoadPolicy::default(), extensions: ExtensionSet::defaults() }
+        Loader {
+            spec,
+            policy: LoadPolicy::default(),
+            extensions: ExtensionSet::defaults(),
+        }
     }
 
     pub fn with_policy(spec: S, policy: LoadPolicy) -> Self {
-        Loader { spec, policy, extensions: ExtensionSet::defaults() }
+        Loader {
+            spec,
+            policy,
+            extensions: ExtensionSet::defaults(),
+        }
     }
 
     /// A loader that runs no extensions at all.
     pub fn bare(spec: S) -> Self {
-        Loader { spec, policy: LoadPolicy::default(), extensions: ExtensionSet::empty() }
+        Loader {
+            spec,
+            policy: LoadPolicy::default(),
+            extensions: ExtensionSet::empty(),
+        }
     }
 
     /// The extension set, to add to or replace.
@@ -241,9 +253,7 @@ impl<S: MachSpec + 'static> Loader<S> {
                     loader_path: Some(&loader_path),
                 };
                 let Some(fetched) = source.fetch(&request)? else {
-                    if self.policy.require_all_dependencies
-                        && kind != DependencyKind::Weak
-                    {
+                    if self.policy.require_all_dependencies && kind != DependencyKind::Weak {
                         return Err(Error::Custom("required dependency not found"));
                     }
                     // Not an error: the import falls through to the providers,
@@ -395,7 +405,8 @@ impl<S: MachSpec + 'static> Loader<S> {
             // After binding, so that pointers read out of `__mod_init_func` and
             // `__thread_vars` are the resolved ones. See the extensions module
             // note for why reading them from the file would not do.
-            self.extensions.observe(&m.obj, mem, m.slide, &mut image_report)?;
+            self.extensions
+                .observe(&m.obj, mem, m.slide, &mut image_report)?;
             report.images.push(image_report);
         }
 

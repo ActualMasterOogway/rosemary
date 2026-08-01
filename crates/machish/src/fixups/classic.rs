@@ -29,8 +29,8 @@ use alloc::vec::Vec;
 use crate::error::{Error, Result};
 use crate::fixups::{BindKind, Fixup, FixupDecoder, LibraryRef, SymbolRef};
 use crate::image::{MachObject, Nlist, SymbolTable};
-use crate::spec::constants as c;
 use crate::spec::MachSpec;
+use crate::spec::constants as c;
 
 /// `n_desc` library ordinal meaning "search every image", the classic
 /// spelling of `BIND_SPECIAL_DYLIB_FLAT_LOOKUP`.
@@ -69,13 +69,18 @@ impl<S: MachSpec> FixupDecoder<S> for ClassicFixups {
             }
             let lazy = sect.is_lazy_pointers();
             for j in 0..sect.entry_count(c::POINTER_SIZE) {
-                let index = usize::try_from(u64::from(sect.reserved1) + j)
-                    .map_err(|_| Error::Truncated { what: "indirect symbol index" })?;
+                let index = usize::try_from(u64::from(sect.reserved1) + j).map_err(|_| {
+                    Error::Truncated {
+                        what: "indirect symbol index",
+                    }
+                })?;
                 // A `LOCAL`/`ABS` sentinel means the slot holds an address in
                 // this image rather than an import. In a classic image that is
                 // a relocation's job, and relocations are out of scope here —
                 // so skip rather than invent a fixup for it.
-                let Some(sym) = table.indirect_symbol(index)? else { continue };
+                let Some(sym) = table.indirect_symbol(index)? else {
+                    continue;
+                };
                 if !sym.is_undefined() {
                     continue;
                 }
@@ -92,7 +97,11 @@ impl<S: MachSpec> FixupDecoder<S> for ClassicFixups {
                     // image keeps, and it is exactly the distinction the
                     // embedder needs, so preserve it rather than flattening
                     // everything to `Indirect`.
-                    kind: if lazy { BindKind::Lazy } else { BindKind::Indirect },
+                    kind: if lazy {
+                        BindKind::Lazy
+                    } else {
+                        BindKind::Indirect
+                    },
                 });
             }
         }

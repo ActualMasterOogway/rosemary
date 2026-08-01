@@ -5,10 +5,10 @@ use core::ops::Range;
 
 use crate::error::{Error, Result};
 use crate::image::MachObject;
-use crate::memory::{align_down, align_up, AddressSpace, Placement, Prot, ProtectionPolicy};
+use crate::memory::{AddressSpace, Placement, Prot, ProtectionPolicy, align_down, align_up};
 use crate::raw::{View, Word};
-use crate::spec::constants::SEGMENT_COMMAND_64_SIZE;
 use crate::spec::MachSpec;
+use crate::spec::constants::SEGMENT_COMMAND_64_SIZE;
 
 /// One `LC_SEGMENT_64` record, with the range of [`Section`]s it owns.
 ///
@@ -160,7 +160,9 @@ pub fn map_segments<S: MachSpec, M: AddressSpace>(
         .map(|s| align_up(s.vmend(), gran))
         .max()
         .ok_or(Error::NoLoadableSegments)?;
-    let span_w = end.checked_sub(preferred).ok_or(Error::Memory("negative span"))?;
+    let span_w = end
+        .checked_sub(preferred)
+        .ok_or(Error::Memory("negative span"))?;
     let span = usize::try_from(span_w).map_err(|_| Error::Memory("span too large"))?;
 
     let placement = if obj.is_pie() {
@@ -174,11 +176,15 @@ pub fn map_segments<S: MachSpec, M: AddressSpace>(
 
     let bytes = obj.bytes();
     for seg in obj.mappable_segments() {
-        let Some(range) = seg.file_range() else { continue };
+        let Some(range) = seg.file_range() else {
+            continue;
+        };
         // A segment may legitimately declare more virtual than file size — the
         // remainder is zero-fill, already zero from `reserve`. It may not
         // declare more *file* size than the file has.
-        let src = bytes.get(range.clone()).ok_or(Error::Truncated { what: "segment contents" })?;
+        let src = bytes.get(range.clone()).ok_or(Error::Truncated {
+            what: "segment contents",
+        })?;
         mem.write(seg.vmaddr.wrapping_add(slide), src)?;
     }
 
@@ -220,8 +226,13 @@ pub fn protect_segments<'a, S: MachSpec, M: AddressSpace>(
             }
         }
         for seg in &segs {
-            let prot = if executable { seg.prot() } else { seg.prot().without_exec() };
-            let len = usize::try_from(seg.vmsize).map_err(|_| Error::Memory("segment too large"))?;
+            let prot = if executable {
+                seg.prot()
+            } else {
+                seg.prot().without_exec()
+            };
+            let len =
+                usize::try_from(seg.vmsize).map_err(|_| Error::Memory("segment too large"))?;
             mem.protect(seg.vmaddr.wrapping_add(slide), len, prot)?;
         }
         return Ok(Vec::new());
@@ -266,7 +277,11 @@ pub fn protect_segments<'a, S: MachSpec, M: AddressSpace>(
         if covering.len() > 1 {
             // More than one segment in this page: the permissions we apply are
             // necessarily weaker than any single segment asked for.
-            conflicts.push(PageConflict { page: start, applied: prot, segments: covering });
+            conflicts.push(PageConflict {
+                page: start,
+                applied: prot,
+                segments: covering,
+            });
         }
         match runs.last_mut() {
             Some(last) if last.1 == start && last.2 == prot => last.1 = end,

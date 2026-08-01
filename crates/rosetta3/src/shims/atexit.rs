@@ -1,0 +1,195 @@
+//! `__cxa_atexit`: the destructor registration every C++ guest reaches, and
+//! most C ones do too.
+//!
+//! ## What registers here, and why it is not a niche
+//!
+//! `__cxa_atexit(func, arg, dso)` is the Itanium ABI's `atexit`, taking an
+//! argument so a destructor can be told *which object* to destroy. A guest
+//! reaches it for a file-scope C++ object with a non-trivial destructor, and —
+//! the case that makes this unavoidable — for an ordinary C
+//! `__attribute__((destructor))` function: clang has not emitted
+//! `__mod_term_func` for years and registers those from a constructor instead,
+//! which the roadmap already records as correction 8. So a C program with one
+//! destructor imports exactly two symbols, `_puts` and `___cxa_atexit`, and
+//! without this it stops on the second before `main` has run.
+//!
+//! ## Why a shim rather than a table entry
+//!
+//! The handler is a guest function pointer, which is ordinary since M3: it
+//! crosses out as a [`crate::thunk`] like `atexit`'s, and a `cbsig!` entry could
+//! have said so. The third argument is what needs code. `dso` is the guest's
+//! `___dso_handle` — the address of *the guest image* — and it is the host's
+//! record of which image's unload should run this handler. Handing that address
+//! to the host's exit machinery would file a guest image among the host's own,
+//! which is a claim this runtime cannot support: no guest image is ever
+//! unloaded, and nothing on the host side knows what that address means.
+//!
+//! So the shim substitutes the runtime's own handle. The record then says what
+//! is true — these handlers belong to the image that compiled the thunks they
+//! point at — and the guest's handle stays on the guest's side of the seam,
+//! where it is only ever compared against itself.
+//!
+//! ## The list is the host's, and deliberately the same list
+//!
+//! The registration is forwarded to the host's `__cxa_atexit`, not kept in a
+//! list of our own, and that is the point rather than an economy. The guest's
+//! `atexit` handlers are already entries in the host's exit list (see the
+//! roadmap's "`atexit` is the host's list, and that has consequences"), and C
+//! requires the two registrations to be one sequence run in reverse order —
+//! `atexit(a)` after `__cxa_atexit(d, ...)` means `a` runs first. A second list
+//! drained separately would get that wrong for any program that uses both, and
+//! a guest with a static object and an `atexit` call is not exotic.
+//!
+//! It inherits the consequences too, which are the same three: the VM must
+//! outlive `main` and be published, the driver must call `exit` rather than
+//! return, and the handler is translated when its thunk is built rather than at
+//! exit, when compiling is no longer possible.
+
+use core::ffi::{c_int, c_void};
+
+use microlift::arch::x86_64::context::RegisterContext;
+
+use crate::abi::{Callbacks, GuestMemory, Result};
+
+unsafe extern "C" {
+    /// libsystem's own, spelled `___cxa_atexit` in the Mach-O.
+    ///
+    /// The handler is declared as a data pointer rather than as a Rust `fn`
+    /// because it is not one: it is an address this runtime compiled at run
+    /// time, and the two are the same eight bytes in an argument register on
+    /// every platform this crate builds for.
+    fn __cxa_atexit(func: *const (), arg: *mut c_void, dso: *const ()) -> c_int;
+}
+
+/// The DSO handle every guest destructor is registered against.
+///
+/// One `static`, so the address is stable for the process's life and every
+/// guest image shares it — which is right, because what it identifies here is
+/// this runtime, and this runtime is what will still be mapped when the
+/// handlers run. Its value is never read by anyone; a handle is compared, not
+/// dereferenced.
+static DSO_HANDLE: u8 = 0;
+
+/// `int __cxa_atexit(void (*func)(void *), void *arg, void *dso_handle)`
+pub fn cxa_atexit(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    _mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
+    // `arg` is passed through untouched. It is a guest pointer, and it is the
+    // *guest's* handler that will dereference it — this runtime never looks
+    // inside it, and the two share an address space, so there is nothing to
+    // translate. A null handler is passed through as null for the same reason
+    // `atexit(NULL)` is: it is the guest's error to have, and inventing a
+    // different answer here would hide it.
+    let handler = callbacks.substitute(symbol, ctx.rdi)?;
+    let arg = ctx.rsi as *mut c_void;
+
+    // SAFETY: `handler` is either null or an arm64 trampoline this runtime
+    // compiled and keeps mapped for the VM's lifetime — which is what
+    // `substitute` guarantees and what the published VM makes true past `main`.
+    // The DSO handle is our own static's address, so the host is never handed a
+    // guest one.
+    let rc = unsafe {
+        __cxa_atexit(
+            handler as *const (),
+            arg,
+            &raw const DSO_HANDLE as *const (),
+        )
+    };
+    super::set_int_return(ctx, rc);
+    Ok(())
+}
+
+/// One of this module's implementations, in the shape [`crate::shims`] wants.
+///
+/// The wider shape — the one carrying [`Callbacks`] — for the same reason
+/// [`crate::signal`]'s does: a guest function pointer crosses the seam, and the
+/// shim rather than the marshaller is what puts it there.
+pub type Shim = crate::signal::Shim;
+
+/// Whether `name` (underscore already stripped) is one of this module's.
+pub fn shim_for(name: &str) -> Option<Shim> {
+    match name {
+        "__cxa_atexit" => Some(cxa_atexit),
+        // `__cxa_thread_atexit` is *not* here. A thread-local destructor must
+        // run on the thread that registered it, at that thread's exit, and the
+        // roadmap keeps it with the rest of the thread-local work rather than
+        // letting it fall in by name-shape.
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A handler that is really callable, because this test's registrations
+    /// stay in the *test process's* exit list and run for real when it exits.
+    /// A fake address would turn a passing test into a crash after the suite
+    /// reported success.
+    extern "C" fn harmless(_arg: *mut c_void) {}
+
+    /// Answers with a real host function's address, and records what it was
+    /// asked to substitute.
+    struct Recording(std::cell::Cell<u64>);
+
+    impl Callbacks for Recording {
+        fn substitute(&self, _symbol: &str, va: u64) -> Result<u64> {
+            self.0.set(va);
+            Ok(harmless as *const () as u64)
+        }
+    }
+
+    struct NoMemory;
+
+    impl GuestMemory for NoMemory {
+        fn read(&self, va: u64, out: &mut [u8]) -> core::result::Result<(), machish::Error> {
+            Err(machish::Error::OutOfBounds {
+                addr: va,
+                len: out.len(),
+            })
+        }
+
+        fn write(&mut self, va: u64, data: &[u8]) -> core::result::Result<(), machish::Error> {
+            Err(machish::Error::OutOfBounds {
+                addr: va,
+                len: data.len(),
+            })
+        }
+    }
+
+    #[test]
+    fn the_handler_crosses_out_as_a_thunk_and_the_host_accepts_it() {
+        let callbacks = Recording(std::cell::Cell::new(0));
+        let mut ctx = RegisterContext::new();
+        ctx.rdi = 0x1_0000_1234; // the guest's destructor
+        ctx.rsi = 0x2_0000_5678; // the object it destroys
+        ctx.rdx = 0x1_0000_0000; // the guest's `___dso_handle`
+
+        cxa_atexit("___cxa_atexit", &mut ctx, &mut NoMemory, &callbacks).expect("register");
+
+        // What crossed out is the guest's own function pointer, and what the
+        // host got back is a success. A guest address reaching the host's exit
+        // list unsubstituted is the failure this direction exists to prevent.
+        assert_eq!(callbacks.0.get(), 0x1_0000_1234);
+        assert_eq!(ctx.rax as i32, 0);
+    }
+
+    #[test]
+    fn the_handle_registered_belongs_to_an_image_the_host_knows() {
+        // The property that makes substituting the guest's handle worth doing:
+        // ours is an address `dladdr` resolves to a real loaded image, so the
+        // host's record of "whose destructor is this" means something. A guest
+        // `___dso_handle` resolves to nothing at all — it names an image only
+        // this runtime has ever mapped.
+        let mut info = unsafe { std::mem::zeroed::<libc::Dl_info>() };
+        // SAFETY: a live static's address and a live local `Dl_info`.
+        let found = unsafe { libc::dladdr((&raw const DSO_HANDLE).cast(), &raw mut info) };
+        assert_ne!(
+            found, 0,
+            "the runtime's own DSO handle is not in any loaded image"
+        );
+    }
+}

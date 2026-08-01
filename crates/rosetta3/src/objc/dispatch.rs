@@ -212,12 +212,27 @@ static MESSAGES: &[(&str, Message)] = &[
 
 /// Spellings that exist and are refused, with the reason attached.
 static REFUSED: &[(&str, &str)] = &[
-    ("objc_msgSend_fpret", "a long double return lives in st0, which has no arm64 counterpart"),
-    ("objc_msgSend_stret", "a method returning a struct by value cannot be marshalled (M2)"),
-    ("objc_msgSendSuper_stret", "a method returning a struct by value cannot be marshalled (M2)"),
-    ("objc_msgSendSuper2_stret", "a method returning a struct by value cannot be marshalled (M2)"),
-    ("objc_exception_throw", "an Objective-C exception needs a personality routine the guest \
-                              unwinder does not implement yet (M6)"),
+    (
+        "objc_msgSend_fpret",
+        "a long double return lives in st0, which has no arm64 counterpart",
+    ),
+    (
+        "objc_msgSend_stret",
+        "a method returning a struct by value cannot be marshalled (M2)",
+    ),
+    (
+        "objc_msgSendSuper_stret",
+        "a method returning a struct by value cannot be marshalled (M2)",
+    ),
+    (
+        "objc_msgSendSuper2_stret",
+        "a method returning a struct by value cannot be marshalled (M2)",
+    ),
+    (
+        "objc_exception_throw",
+        "an Objective-C exception needs a personality routine the guest \
+                              unwinder does not implement yet (M6)",
+    ),
     ("objc_exception_rethrow", "as objc_exception_throw"),
     ("objc_begin_catch", "as objc_exception_throw"),
     ("objc_end_catch", "as objc_exception_throw"),
@@ -225,10 +240,16 @@ static REFUSED: &[(&str, &str)] = &[
     // work — but the *policy* argument decides whether the value is copied, and
     // copying sends `copyWithZone:` from inside the runtime with none of this
     // runtime's state on the stack. Named rather than half-supported.
-    ("objc_setAssociatedObject", "associated objects may copy their value, which messages from \
-                                  inside the host runtime (M6)"),
+    (
+        "objc_setAssociatedObject",
+        "associated objects may copy their value, which messages from \
+                                  inside the host runtime (M6)",
+    ),
     ("objc_getAssociatedObject", "as objc_setAssociatedObject"),
-    ("objc_removeAssociatedObjects", "as objc_setAssociatedObject"),
+    (
+        "objc_removeAssociatedObjects",
+        "as objc_setAssociatedObject",
+    ),
 ];
 
 /// Selectors whose methods are variadic, which no type encoding records.
@@ -324,14 +345,19 @@ fn host_symbol(name: &str) -> Option<u64> {
 /// Service one call into the Objective-C runtime.
 fn serve(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     if let Some((_, reason)) = REFUSED.iter().find(|(n, _)| *n == symbol) {
-        return Err(AbiError::Refused { symbol: symbol.to_string(), reason });
+        return Err(AbiError::Refused {
+            symbol: symbol.to_string(),
+            reason,
+        });
     }
     let vm = current_vm(symbol)?;
     if let Some((_, message)) = MESSAGES.iter().find(|(n, _)| *n == symbol) {
         return send(symbol, *message, vm, ctx, mem);
     }
     let Ok(i) = RUNTIME.binary_search_by_key(&symbol, |r| r.name) else {
-        return Err(AbiError::NoSignature { symbol: symbol.to_string() });
+        return Err(AbiError::NoSignature {
+            symbol: symbol.to_string(),
+        });
     };
     call_runtime(symbol, &RUNTIME[i], vm, ctx, mem)
 }
@@ -345,9 +371,15 @@ fn call_runtime(
     mem: &dyn GuestMemory,
 ) -> Result<()> {
     let Some(host) = host_symbol(entry.name) else {
-        return Err(AbiError::Unsatisfied { symbol: symbol.to_string() });
+        return Err(AbiError::Unsatisfied {
+            symbol: symbol.to_string(),
+        });
     };
-    let convert = Classes { vm, classes: entry.classes, class_return: entry.class_return };
+    let convert = Classes {
+        vm,
+        classes: entry.classes,
+        class_return: entry.class_return,
+    };
     marshal::call_types(symbol, entry.types, host, ctx, mem, &convert)
 }
 
@@ -481,7 +513,11 @@ fn send(
     // guest context exactly as it was found — the guarantee every other refusal
     // in this project makes.
     ctx.rdi = host_receiver;
-    let convert = Classes { vm, classes: &signature.classes, class_return: signature.class_return };
+    let convert = Classes {
+        vm,
+        classes: &signature.classes,
+        class_return: signature.class_return,
+    };
     marshal::call_types(symbol, &signature.types, imp, ctx, mem, &convert)
 }
 
@@ -509,7 +545,10 @@ fn transfer(
         // after the call, which is precisely where the method must return to.
         let rsp = ctx.rsp.wrapping_sub(8);
         mem.write(rsp, &ctx.rip.to_le_bytes())
-            .map_err(|_| AbiError::Memory { symbol: symbol.to_string(), addr: rsp })?;
+            .map_err(|_| AbiError::Memory {
+                symbol: symbol.to_string(),
+                addr: rsp,
+            })?;
         ctx.rsp = rsp;
     }
     ctx.rip = target;
@@ -549,15 +588,19 @@ fn signature_of(symbol: &str, method: host::Method, sel: u64) -> Result<Signatur
                      the format are, and no type encoding records that there are any",
         });
     }
-    encoding::signature(types)
-        .map_err(|reason| AbiError::Refused { symbol: symbol.to_string(), reason })
+    encoding::signature(types).map_err(|reason| AbiError::Refused {
+        symbol: symbol.to_string(),
+        reason,
+    })
 }
 
 /// Whether the selector names a method that takes an ellipsis.
 ///
 /// By name, because nothing else says so. See [`VARIADIC_SELECTORS`].
 fn is_variadic(sel: u64) -> bool {
-    let Some(name) = selector_name(sel) else { return false };
+    let Some(name) = selector_name(sel) else {
+        return false;
+    };
     name.ends_with("Format:") || VARIADIC_SELECTORS.contains(&name.as_str())
 }
 
@@ -573,7 +616,10 @@ fn selector_name(sel: u64) -> Option<String> {
         return None;
     }
     // SAFETY: as above.
-    unsafe { std::ffi::CStr::from_ptr(name) }.to_str().ok().map(str::to_string)
+    unsafe { std::ffi::CStr::from_ptr(name) }
+        .to_str()
+        .ok()
+        .map(str::to_string)
 }
 
 /// "This class does not implement that selector", with both names in it.
@@ -588,7 +634,9 @@ fn unrecognised(symbol: &str, class: host::Class, sel: u64) -> AbiError {
     let name = match name.is_null() {
         true => "<unnamed>".to_string(),
         // SAFETY: as above.
-        false => unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned(),
+        false => unsafe { std::ffi::CStr::from_ptr(name) }
+            .to_string_lossy()
+            .into_owned(),
     };
     let selector = selector_name(sel).unwrap_or_else(|| format!("<sel {sel:#x}>"));
     AbiError::Nested {
@@ -651,7 +699,11 @@ mod tests {
         // is a program that stops with "unsatisfied import" at run time. `dlsym`
         // answers the question now instead.
         for entry in RUNTIME {
-            assert!(host_symbol(entry.name).is_some(), "libobjc has no {}", entry.name);
+            assert!(
+                host_symbol(entry.name).is_some(),
+                "libobjc has no {}",
+                entry.name
+            );
         }
     }
 

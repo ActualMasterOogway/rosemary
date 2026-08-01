@@ -96,7 +96,10 @@ impl fmt::Display for Error {
             Error::Truncated { what } => write!(f, "truncated Mach-O while reading {what}"),
             Error::BadMagic(m) => write!(f, "not a Mach-O file (magic {m:#010x})"),
             Error::UnsupportedMachOForm(m) => {
-                write!(f, "unsupported Mach-O form (magic {m:#010x}); only 64-bit little-endian is loaded")
+                write!(
+                    f,
+                    "unsupported Mach-O form (magic {m:#010x}); only 64-bit little-endian is loaded"
+                )
             }
             Error::NoMatchingSlice { wanted } => {
                 write!(f, "no fat slice for cputype {wanted:#x}")

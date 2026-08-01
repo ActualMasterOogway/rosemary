@@ -21,7 +21,7 @@ use machish::memory::{AddressSpace, BufferSpace, Placement};
 use microlift::arch::x86_64::context::RegisterContext;
 
 use rosetta3::abi::GuestMemory;
-use rosetta3::shims::printf::{render, VarArgs};
+use rosetta3::shims::printf::{VarArgs, render};
 
 /// The guest's data and stack, in one region: the format string, any `%s`
 /// arguments, and the spilled variadic tail.
@@ -47,8 +47,12 @@ struct Guest {
 impl Guest {
     fn new() -> Self {
         let mut mem = BufferSpace::new(BASE);
-        mem.reserve(SIZE, 16, Placement::Fixed(BASE)).expect("reserve guest memory");
-        Guest { mem, next_string: BASE }
+        mem.reserve(SIZE, 16, Placement::Fixed(BASE))
+            .expect("reserve guest memory");
+        Guest {
+            mem,
+            next_string: BASE,
+        }
     }
 
     /// Copy a NUL-terminated string into guest memory and return its address.
@@ -85,8 +89,14 @@ impl Guest {
                     continue;
                 }
             } else if int < 6 {
-                *[&mut ctx.rdi, &mut ctx.rsi, &mut ctx.rdx, &mut ctx.rcx, &mut ctx.r8, &mut ctx.r9]
-                    [int] = bits;
+                *[
+                    &mut ctx.rdi,
+                    &mut ctx.rsi,
+                    &mut ctx.rdx,
+                    &mut ctx.rcx,
+                    &mut ctx.r8,
+                    &mut ctx.r9,
+                ][int] = bits;
                 int += 1;
                 continue;
             }
@@ -241,7 +251,14 @@ fn strings_and_characters() {
     same("[%-10s]", &[V::Str("hi")]);
     same("[%.2s]", &[V::Str("truncate me")]);
     same("[%10.3s]", &[V::Str("truncate me")]);
-    same("%c%c%c", &[V::Int(u64::from(b'a')), V::Int(u64::from(b'b')), V::Int(u64::from(b'c'))]);
+    same(
+        "%c%c%c",
+        &[
+            V::Int(u64::from(b'a')),
+            V::Int(u64::from(b'b')),
+            V::Int(u64::from(b'c')),
+        ],
+    );
     same("[%5c]", &[V::Int(u64::from(b'x'))]);
     same("100%%", &[]);
     same("no conversions at all", &[]);
@@ -249,7 +266,16 @@ fn strings_and_characters() {
 
 #[test]
 fn floats() {
-    for v in [0.0f64, 1.5, -1.5, std::f64::consts::PI, 1e10, 1e-10, -0.125, 12345.6789] {
+    for v in [
+        0.0f64,
+        1.5,
+        -1.5,
+        std::f64::consts::PI,
+        1e10,
+        1e-10,
+        -0.125,
+        12345.6789,
+    ] {
         same("%f", &[V::Double(v)]);
         same("%.0f", &[V::Double(v)]);
         same("%.2f", &[V::Double(v)]);
@@ -308,9 +334,14 @@ fn a_null_string_argument_prints_the_libc_placeholder() {
 fn a_malformed_format_string_is_total() {
     // A format string is guest data. Every one of these must produce bytes
     // rather than a panic, and must not consume arguments it cannot name.
-    for fmt in ["%", "%.", "%-", "%*", "%hh", "%l", "%q", "%n", "%!", "%.*", "%5", "abc%"] {
+    for fmt in [
+        "%", "%.", "%-", "%*", "%hh", "%l", "%q", "%n", "%!", "%.*", "%5", "abc%",
+    ] {
         let out = shimmed(fmt, &[V::Int(1)]);
-        assert!(!out.is_empty() || fmt.is_empty(), "{fmt:?} rendered nothing at all");
+        assert!(
+            !out.is_empty() || fmt.is_empty(),
+            "{fmt:?} rendered nothing at all"
+        );
     }
 }
 

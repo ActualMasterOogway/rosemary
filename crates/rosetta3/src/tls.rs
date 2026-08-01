@@ -56,7 +56,7 @@
 //! has none; a C++ thread-local with a non-trivial destructor is the case this
 //! would matter for, and it belongs with the rest of the C++ runtime work.
 
-use std::alloc::{alloc_zeroed, dealloc, Layout};
+use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -123,7 +123,9 @@ impl Drop for Block {
 pub fn register(report: &LinkReport) -> usize {
     let mut registered = 0;
     for image in &report.images {
-        let Some(t) = image.tlv_template else { continue };
+        let Some(t) = image.tlv_template else {
+            continue;
+        };
         if image.thread_locals.is_empty() || t.total_size == 0 || t.total_size > MAX_BLOCK {
             continue;
         }
@@ -147,7 +149,13 @@ pub fn register(report: &LinkReport) -> usize {
                 // guest rather than a wild write into the runtime's heap.
                 continue;
             }
-            slots.insert(d.at, Slot { image: index, offset: d.offset });
+            slots.insert(
+                d.at,
+                Slot {
+                    image: index,
+                    offset: d.offset,
+                },
+            );
             registered += 1;
         }
     }
@@ -179,7 +187,9 @@ pub extern "C" fn bootstrap(descriptor: *const u8) -> *mut u8 {
     BLOCKS.with(|blocks| {
         let mut blocks = blocks.borrow_mut();
         if let std::collections::btree_map::Entry::Vacant(slot) = blocks.entry(image) {
-            let Some(fresh) = allocate(image) else { return std::ptr::null_mut() };
+            let Some(fresh) = allocate(image) else {
+                return std::ptr::null_mut();
+            };
             slot.insert(fresh);
         }
         let block = &blocks[&image];
@@ -210,11 +220,7 @@ fn allocate(image: usize) -> Option<Block> {
         // `initial_size` was clamped to `total_size` at registration, so the
         // destination has room.
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                t.initial_va as usize as *const u8,
-                ptr,
-                t.initial_size,
-            );
+            std::ptr::copy_nonoverlapping(t.initial_va as usize as *const u8, ptr, t.initial_size);
         }
     }
     Some(Block { ptr, layout })

@@ -5,10 +5,10 @@
 //! native library's export trie to check whether it really defines a symbol
 //! before binding a guest import to it.
 
-use crate::spec::constants::{
-    subtype_of, CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_ARM64E, CPU_TYPE_ARM64,
-};
 use crate::spec::MachSpec;
+use crate::spec::constants::{
+    CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_ARM64E, CPU_TYPE_ARM64, subtype_of,
+};
 
 /// arm64 Mach-O: 16 KiB segment granularity.
 #[derive(Copy, Clone, Debug, Default)]
@@ -65,8 +65,7 @@ mod tests {
     #[test]
     fn prefers_baseline_over_arm64e() {
         assert!(
-            Arm64.subtype_rank(CPU_SUBTYPE_ARM64_ALL)
-                > Arm64.subtype_rank(0x8000_0002u32 as i32)
+            Arm64.subtype_rank(CPU_SUBTYPE_ARM64_ALL) > Arm64.subtype_rank(0x8000_0002u32 as i32)
         );
     }
 }

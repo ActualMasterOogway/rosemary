@@ -69,8 +69,9 @@ pub fn parse_trie(bytes: &[u8], image_base: Word) -> Result<Vec<Export>> {
 
         let mut cur = Cursor::at(view, node);
         let terminal_size = cur.uleb128()?;
-        let terminal_size =
-            usize::try_from(terminal_size).map_err(|_| Error::Truncated { what: "export node" })?;
+        let terminal_size = usize::try_from(terminal_size).map_err(|_| Error::Truncated {
+            what: "export node",
+        })?;
 
         // The children always start past the terminal payload, whether or not
         // we understood it — that framing is what lets dyld skip flag bits it
@@ -78,7 +79,9 @@ pub fn parse_trie(bytes: &[u8], image_base: Word) -> Result<Vec<Export>> {
         let children_at = cur
             .pos()
             .checked_add(terminal_size)
-            .ok_or(Error::Truncated { what: "export node" })?;
+            .ok_or(Error::Truncated {
+                what: "export node",
+            })?;
 
         if terminal_size != 0
             && let Some(export) = parse_terminal(&mut cur, &prefix, image_base)?
@@ -94,10 +97,13 @@ pub fn parse_trie(bytes: &[u8], image_base: Word) -> Result<Vec<Export>> {
         for _ in 0..nchildren {
             let suffix = cur.cstr()?;
             let child = cur.uleb128()?;
-            let child =
-                usize::try_from(child).map_err(|_| Error::Truncated { what: "export child" })?;
+            let child = usize::try_from(child).map_err(|_| Error::Truncated {
+                what: "export child",
+            })?;
             if child >= bytes.len() {
-                return Err(Error::Truncated { what: "export child" });
+                return Err(Error::Truncated {
+                    what: "export child",
+                });
             }
             let mut name = String::with_capacity(prefix.len() + suffix.len());
             name.push_str(&prefix);
@@ -126,7 +132,10 @@ fn parse_terminal(cur: &mut Cursor<'_>, name: &str, image_base: Word) -> Result<
         c::EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL => ExportKind::ThreadLocal,
         c::EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE => ExportKind::Absolute,
         other => {
-            return Err(Error::UnknownFixup { format: "export symbol kind", value: other });
+            return Err(Error::UnknownFixup {
+                format: "export symbol kind",
+                value: other,
+            });
         }
     };
 
@@ -138,22 +147,39 @@ fn parse_terminal(cur: &mut Cursor<'_>, name: &str, image_base: Word) -> Result<
         // one is a rename, which is how umbrellas republish under new names.
         let imported = cur.cstr()?;
         let imported_name = (!imported.is_empty()).then(|| imported.to_owned());
-        (0, ExportValue::Reexport { ordinal, imported_name })
+        (
+            0,
+            ExportValue::Reexport {
+                ordinal,
+                imported_name,
+            },
+        )
     } else if flags & c::EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER != 0 {
         let stub = cur.uleb128()?;
         let resolver = cur.uleb128()?;
         (
             rebase(stub, kind, image_base),
-            ExportValue::StubAndResolver { resolver: rebase(resolver, kind, image_base) },
+            ExportValue::StubAndResolver {
+                resolver: rebase(resolver, kind, image_base),
+            },
         )
     } else {
-        (rebase(cur.uleb128()?, kind, image_base), ExportValue::Direct)
+        (
+            rebase(cur.uleb128()?, kind, image_base),
+            ExportValue::Direct,
+        )
     };
 
     if name.is_empty() {
         return Ok(None);
     }
-    Ok(Some(Export { name: name.to_owned(), flags, kind, vmaddr, value }))
+    Ok(Some(Export {
+        name: name.to_owned(),
+        flags,
+        kind,
+        vmaddr,
+        value,
+    }))
 }
 
 /// Convert a trie-relative offset to an unslid VA. An absolute symbol's value
@@ -222,7 +248,11 @@ mod tests {
         let e = &parse_trie(&trie, 0x1_0000_0000).unwrap()[0];
         assert_eq!(e.kind, ExportKind::Absolute);
         assert_eq!(e.vmaddr, 0x2a);
-        assert_eq!(e.address(0x8000), Some(0x2a), "an absolute symbol must not slide");
+        assert_eq!(
+            e.address(0x8000),
+            Some(0x2a),
+            "an absolute symbol must not slide"
+        );
     }
 
     #[test]
@@ -234,9 +264,16 @@ mod tests {
 
         let e = &parse_trie(&trie, 0x1_0000_0000).unwrap()[0];
         assert!(e.is_reexport());
-        assert_eq!(e.address(0x1000), None, "a re-export must not look like address zero");
+        assert_eq!(
+            e.address(0x1000),
+            None,
+            "a re-export must not look like address zero"
+        );
         match &e.value {
-            ExportValue::Reexport { ordinal, imported_name } => {
+            ExportValue::Reexport {
+                ordinal,
+                imported_name,
+            } => {
                 assert_eq!(*ordinal, 2);
                 assert_eq!(imported_name.as_deref(), Some("_other"));
             }
@@ -248,7 +285,10 @@ mod tests {
     fn back_edge_is_rejected_rather_than_looped() {
         // A single node whose only child points back at the root.
         let trie = node(&[], &[("x", 0)]);
-        assert_eq!(parse_trie(&trie, 0), Err(Error::TooDeep("export trie cycle")));
+        assert_eq!(
+            parse_trie(&trie, 0),
+            Err(Error::TooDeep("export trie cycle"))
+        );
     }
 
     #[test]

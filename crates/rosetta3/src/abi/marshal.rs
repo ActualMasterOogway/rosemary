@@ -69,7 +69,9 @@ pub fn is_marshallable(abi: &FunctionAbi) -> bool {
     if abi.variadic {
         return false;
     }
-    let Some(placed) = guest_call_abi().place_args(abi.types) else { return false };
+    let Some(placed) = guest_call_abi().place_args(abi.types) else {
+        return false;
+    };
     // Counted by argument *class*, not by where the guest put it: SysV has only
     // six integer registers, so a seventh integer argument arrives on the guest
     // stack and still goes out in `x6`.
@@ -106,7 +108,14 @@ pub fn call_with(
     mem: &dyn GuestMemory,
     callbacks: &dyn super::Callbacks,
 ) -> Result<()> {
-    call_types(symbol, abi.types, host, ctx, mem, &ForCallbacks { abi, callbacks })
+    call_types(
+        symbol,
+        abi.types,
+        host,
+        ctx,
+        mem,
+        &ForCallbacks { abi, callbacks },
+    )
 }
 
 /// What a value means on the other side of the seam.
@@ -176,10 +185,12 @@ pub fn call_types(
     convert: &dyn Convert,
 ) -> Result<()> {
     let guest = guest_call_abi();
-    let placed = guest.place_args(types).ok_or_else(|| AbiError::Unmarshallable {
-        symbol: symbol.to_string(),
-        reason: "the guest ABI cannot place its arguments",
-    })?;
+    let placed = guest
+        .place_args(types)
+        .ok_or_else(|| AbiError::Unmarshallable {
+            symbol: symbol.to_string(),
+            reason: "the guest ABI cannot place its arguments",
+        })?;
 
     // Collected first, so a memory failure on the last stack argument still
     // leaves the guest context untouched.
@@ -258,17 +269,18 @@ fn read_location(
 ) -> Result<u64> {
     match loc {
         ArgLocation::IntReg(reg) => int_reg(symbol, ctx, reg),
-        ArgLocation::FpReg(i) => ctx.xmm.get(usize::from(i)).map(|x| x[0]).ok_or_else(|| {
-            AbiError::Unmarshallable {
-                symbol: symbol.to_string(),
-                reason: "vector argument register out of range",
-            }
-        }),
+        ArgLocation::FpReg(i) => {
+            ctx.xmm
+                .get(usize::from(i))
+                .map(|x| x[0])
+                .ok_or_else(|| AbiError::Unmarshallable {
+                    symbol: symbol.to_string(),
+                    reason: "vector argument register out of range",
+                })
+        }
         // See the module note: `rsp` is the pre-`CALL` value at an import exit,
         // which is the base these offsets are measured from.
-        ArgLocation::Stack(off) => {
-            mem.read_u64(ctx.rsp.wrapping_add(u64::from(off)), symbol)
-        }
+        ArgLocation::Stack(off) => mem.read_u64(ctx.rsp.wrapping_add(u64::from(off)), symbol),
     }
 }
 
@@ -437,11 +449,23 @@ mod tests {
 
     #[test]
     fn narrow_integer_arguments_are_extended_by_signedness() {
-        assert_eq!(int_arg(ArgType::SignedByte, 0xffff_ffff_ffff_ff80), u64::MAX - 127);
+        assert_eq!(
+            int_arg(ArgType::SignedByte, 0xffff_ffff_ffff_ff80),
+            u64::MAX - 127
+        );
         assert_eq!(int_arg(ArgType::UnsignedByte, 0xdead_beef_0000_0080), 0x80);
-        assert_eq!(int_arg(ArgType::SignedWord, 0x1234_5678_ffff_fffe), u64::MAX - 1);
-        assert_eq!(int_arg(ArgType::UnsignedWord, 0x1234_5678_ffff_fffe), 0xffff_fffe);
-        assert_eq!(int_arg(ArgType::Pointer, 0x1234_5678_9abc_def0), 0x1234_5678_9abc_def0);
+        assert_eq!(
+            int_arg(ArgType::SignedWord, 0x1234_5678_ffff_fffe),
+            u64::MAX - 1
+        );
+        assert_eq!(
+            int_arg(ArgType::UnsignedWord, 0x1234_5678_ffff_fffe),
+            0xffff_fffe
+        );
+        assert_eq!(
+            int_arg(ArgType::Pointer, 0x1234_5678_9abc_def0),
+            0x1234_5678_9abc_def0
+        );
     }
 
     #[test]

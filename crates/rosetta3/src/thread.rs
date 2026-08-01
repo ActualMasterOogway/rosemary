@@ -139,7 +139,8 @@ impl ThreadState {
     pub(crate) fn enter(&self) -> u64 {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let previous = self.entry.get();
-        self.entry.set(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        self.entry
+            .set(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
         previous
     }
 
@@ -219,7 +220,10 @@ fn key() -> libc::pthread_key_t {
         // SAFETY: `key` is a live local of the right type, and `release` matches
         // the destructor signature libpthread calls it with.
         let rc = unsafe { libc::pthread_key_create(&mut key, Some(release)) };
-        assert_eq!(rc, 0, "pthread_key_create failed; the runtime cannot run a guest thread");
+        assert_eq!(
+            rc, 0,
+            "pthread_key_create failed; the runtime cannot run a guest thread"
+        );
         key
     })
 }

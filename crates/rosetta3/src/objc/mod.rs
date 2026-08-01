@@ -103,7 +103,11 @@ pub enum Refusal {
     /// the wrong offset.
     IvarRejected { name: String, ivar: String },
     /// A method whose `IMP` could not be made callable from the host.
-    MethodRejected { name: String, method: String, reason: &'static str },
+    MethodRejected {
+        name: String,
+        method: String,
+        reason: &'static str,
+    },
     /// A Swift class, identified by the low bits of its `bits` word. Its
     /// metadata is not an `objc_class`.
     SwiftClass { name: String },
@@ -197,8 +201,14 @@ pub fn register(vm: &Vm) -> Result<ObjcRuntime, VmError> {
 
     // Dependencies before dependents, as `startup` runs initializers: an image
     // may subclass a class defined by one it links against.
-    let images: Vec<&ObjcImage> =
-        vm.program.report.images.iter().rev().filter_map(|i| i.objc.as_ref()).collect();
+    let images: Vec<&ObjcImage> = vm
+        .program
+        .report
+        .images
+        .iter()
+        .rev()
+        .filter_map(|i| i.objc.as_ref())
+        .collect();
 
     // Protocols first — a class adopts them as it is registered.
     for image in &images {
@@ -209,8 +219,11 @@ pub fn register(vm: &Vm) -> Result<ObjcRuntime, VmError> {
 
     // Then classes, superclass-first. The index is built across every image so
     // a subclass can find a superclass declared in another one.
-    let by_va: HashMap<u64, &ObjcClass> =
-        images.iter().flat_map(|i| i.classes.iter()).map(|c| (c.va, c)).collect();
+    let by_va: HashMap<u64, &ObjcClass> = images
+        .iter()
+        .flat_map(|i| i.classes.iter())
+        .map(|c| (c.va, c))
+        .collect();
     for image in &images {
         for c in &image.classes {
             let mut chain = HashSet::new();
@@ -264,10 +277,19 @@ pub fn register(vm: &Vm) -> Result<ObjcRuntime, VmError> {
 /// is this pass's, and a program relying on more than that would be relying on
 /// dyld's link order.
 pub fn call_load_methods(vm: &Vm, rt: &ObjcRuntime) -> Result<usize, VmError> {
-    let images: Vec<&ObjcImage> =
-        vm.program.report.images.iter().rev().filter_map(|i| i.objc.as_ref()).collect();
-    let by_va: HashMap<u64, &ObjcClass> =
-        images.iter().flat_map(|i| i.classes.iter()).map(|c| (c.va, c)).collect();
+    let images: Vec<&ObjcImage> = vm
+        .program
+        .report
+        .images
+        .iter()
+        .rev()
+        .filter_map(|i| i.objc.as_ref())
+        .collect();
+    let by_va: HashMap<u64, &ObjcClass> = images
+        .iter()
+        .flat_map(|i| i.classes.iter())
+        .map(|c| (c.va, c))
+        .collect();
 
     let mut done = HashSet::new();
     let mut called = 0;
@@ -314,7 +336,9 @@ fn load_class(
     if rt.host_class(class.va).is_none() {
         return Ok(called);
     }
-    let Some(meta) = &class.meta else { return Ok(called) };
+    let Some(meta) = &class.meta else {
+        return Ok(called);
+    };
     for m in &meta.ro.methods {
         if m.name == "load" && vm.program.is_guest_address(m.imp) {
             // `self` is the class as the *guest* names it, which is the rule
@@ -339,7 +363,10 @@ fn load_selector() -> u64 {
 /// Distinct from every other error here: the refusals above are facts about
 /// Objective-C, and this is a fact about memory.
 fn memory_error(addr: u64) -> VmError {
-    VmError::Abi(crate::abi::AbiError::Memory { symbol: "objc metadata".to_string(), addr })
+    VmError::Abi(crate::abi::AbiError::Memory {
+        symbol: "objc metadata".to_string(),
+        addr,
+    })
 }
 
 /// Create one class, registering its superclass first if that is also a guest's.
@@ -359,7 +386,9 @@ fn register_class(
         return Some(already);
     }
     if !chain.insert(class.va) {
-        rt.refusals.push(Refusal::SuperclassCycle { name: class.ro.name.clone() });
+        rt.refusals.push(Refusal::SuperclassCycle {
+            name: class.ro.name.clone(),
+        });
         return None;
     }
 
@@ -402,7 +431,10 @@ fn register_class(
         // to the host's own, which is exactly the class we want to derive from.
         class.superclass as host::Class
     } else {
-        rt.refusals.push(Refusal::SuperclassMissing { name, superclass: class.superclass });
+        rt.refusals.push(Refusal::SuperclassMissing {
+            name,
+            superclass: class.superclass,
+        });
         return None;
     };
 
@@ -428,8 +460,9 @@ fn register_class(
     let mut ivars = 0;
     for ivar in &class.ro.ivars {
         let (Some(n), Some(t)) = (host::c_string(&ivar.name), host::c_string(&ivar.types)) else {
-            rt.refusals
-                .push(Refusal::UnrepresentableName { name: format!("{name}.{}", ivar.name) });
+            rt.refusals.push(Refusal::UnrepresentableName {
+                name: format!("{name}.{}", ivar.name),
+            });
             // SAFETY: `cls` was allocated above and not yet registered, which is
             // exactly when disposing is allowed.
             unsafe { host::objc_disposeClassPair(cls) };
@@ -448,7 +481,10 @@ fn register_class(
             )
         };
         if !ok {
-            rt.refusals.push(Refusal::IvarRejected { name, ivar: ivar.name.clone() });
+            rt.refusals.push(Refusal::IvarRejected {
+                name,
+                ivar: ivar.name.clone(),
+            });
             // SAFETY: as above.
             unsafe { host::objc_disposeClassPair(cls) };
             return None;
@@ -470,7 +506,11 @@ fn register_class(
     // SAFETY: `cls` is a `Class`; `object_getClass` of one is its metaclass.
     let meta = unsafe { host::object_getClass(cls) };
     let no_class_methods: Vec<ObjcMethod> = Vec::new();
-    let class_methods = class.meta.as_ref().map(|m| &m.ro.methods).unwrap_or(&no_class_methods);
+    let class_methods = class
+        .meta
+        .as_ref()
+        .map(|m| &m.ro.methods)
+        .unwrap_or(&no_class_methods);
     let mut methods = 0;
     for (target, list) in [(cls, &class.ro.methods), (meta, class_methods)] {
         for m in list {
@@ -525,7 +565,9 @@ fn add_method(vm: &Vm, target: host::Class, m: &ObjcMethod) -> Result<(), &'stat
     if !vm.program.is_guest_address(m.imp) {
         return Err("the implementation is not a guest address");
     }
-    let imp = vm.thunk_for(m.imp).map_err(|_| "a host->guest thunk could not be built")?;
+    let imp = vm
+        .thunk_for(m.imp)
+        .map_err(|_| "a host->guest thunk could not be built")?;
 
     // SAFETY: both strings outlive the call; `imp` is an executable arm64
     // trampoline this runtime built and never frees.
@@ -534,7 +576,11 @@ fn add_method(vm: &Vm, target: host::Class, m: &ObjcMethod) -> Result<(), &'stat
     let ok = unsafe { host::class_addMethod(target, sel, imp as host::Imp, types.as_ptr()) };
     // `false` means the class already has the selector, which for a freshly
     // allocated class means the guest declared it twice.
-    if ok { Ok(()) } else { Err("the class already responds to that selector") }
+    if ok {
+        Ok(())
+    } else {
+        Err("the class already responds to that selector")
+    }
 }
 
 /// Recreate a protocol the guest declares.
@@ -545,7 +591,9 @@ fn add_method(vm: &Vm, target: host::Class, m: &ObjcMethod) -> Result<(), &'stat
 /// asked about.
 fn register_protocol(rt: &mut ObjcRuntime, p: &ObjcProtocol) {
     let Some(name) = host::c_string(&p.name) else {
-        rt.refusals.push(Refusal::UnrepresentableName { name: p.name.clone() });
+        rt.refusals.push(Refusal::UnrepresentableName {
+            name: p.name.clone(),
+        });
         return;
     };
     // SAFETY: `name` is NUL-terminated and outlives the call.
@@ -602,8 +650,10 @@ fn register_category(vm: &Vm, rt: &mut ObjcRuntime, cat: &ObjcCategory) {
     } else if cat.class != 0 && !vm.program.is_guest_address(cat.class) {
         cat.class as host::Class
     } else {
-        rt.refusals
-            .push(Refusal::CategoryTargetMissing { name: cat.name.clone(), class: cat.class });
+        rt.refusals.push(Refusal::CategoryTargetMissing {
+            name: cat.name.clone(),
+            class: cat.class,
+        });
         return;
     };
     // SAFETY: `target` is a `Class` — either the host's own or one registered
@@ -635,13 +685,17 @@ fn register_category(vm: &Vm, rt: &mut ObjcRuntime, cat: &ObjcCategory) {
 /// not, and for that one this write changes nothing — which is why the test
 /// asserts the two agree rather than that the write happened.
 fn patch_ivar_offsets(vm: &Vm, rt: &mut ObjcRuntime, class: &ObjcClass) -> Result<(), VmError> {
-    let Some(&cls) = rt.to_host.get(&class.va) else { return Ok(()) };
+    let Some(&cls) = rt.to_host.get(&class.va) else {
+        return Ok(());
+    };
     let mut view = vm.view();
     for ivar in &class.ro.ivars {
         if ivar.offset_va == 0 {
             continue;
         }
-        let Some(name) = host::c_string(&ivar.name) else { continue };
+        let Some(name) = host::c_string(&ivar.name) else {
+            continue;
+        };
         // SAFETY: `cls` is a registered `Class`; `name` outlives the call.
         let found = unsafe { host::class_getInstanceVariable(cls as host::Class, name.as_ptr()) };
         if found.is_null() {
@@ -653,7 +707,9 @@ fn patch_ivar_offsets(vm: &Vm, rt: &mut ObjcRuntime, class: &ObjcClass) -> Resul
         // The guest's word is 32 bits — `int32_t`, per `ivar_t` — and a negative
         // or oversized offset would mean the runtime laid out something this
         // does not understand, so it is refused rather than truncated.
-        let Ok(offset) = u32::try_from(offset) else { continue };
+        let Ok(offset) = u32::try_from(offset) else {
+            continue;
+        };
         view.write(ivar.offset_va, &offset.to_le_bytes())
             .map_err(|_| memory_error(ivar.offset_va))?;
         rt.stats.offsets_patched += 1;
@@ -685,11 +741,14 @@ fn unique_selectors(vm: &Vm, rt: &mut ObjcRuntime, image: &ObjcImage) -> Result<
         let Ok(bytes) = (&view as &dyn GuestMemory).read_cstr(name_va, "objc selector") else {
             continue;
         };
-        let Ok(name) = std::ffi::CString::new(bytes) else { continue };
+        let Ok(name) = std::ffi::CString::new(bytes) else {
+            continue;
+        };
         // SAFETY: `name` is NUL-terminated and outlives the call. The returned
         // `SEL` is interned by the runtime for the process lifetime.
         let sel = unsafe { host::sel_registerName(name.as_ptr()) };
-        view.write(slot, &(sel as u64).to_le_bytes()).map_err(|_| memory_error(slot))?;
+        view.write(slot, &(sel as u64).to_le_bytes())
+            .map_err(|_| memory_error(slot))?;
         rt.stats.selectors += 1;
     }
     Ok(())

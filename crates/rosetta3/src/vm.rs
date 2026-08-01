@@ -78,7 +78,11 @@ pub enum VmError {
     /// Microlift could not translate the region — an instruction it does not
     /// implement, or a compilation failure. Named with the region it was
     /// lifting, because that is the unit of work to look at.
-    Lift { pc: u64, start: u64, source: microlift::MicroliftError },
+    Lift {
+        pc: u64,
+        start: u64,
+        source: microlift::MicroliftError,
+    },
     /// An intercepted import could not be called. See [`AbiError`]: every
     /// variant names the symbol.
     Abi(AbiError),
@@ -93,7 +97,11 @@ pub enum VmError {
     Syscall { number: u64, pc: u64 },
     /// An exit the runtime has nothing to do about: an unimplemented or invalid
     /// instruction, a trap, a divide error.
-    Trap { reason: ExitReason, code: u32, pc: u64 },
+    Trap {
+        reason: ExitReason,
+        code: u32,
+        pc: u64,
+    },
     /// The guest stack could not be reserved or written.
     Stack { source: machish::Error },
     /// A host→guest thunk could not be built.
@@ -109,7 +117,10 @@ impl fmt::Display for VmError {
         match self {
             VmError::NoCode { pc } => write!(f, "no guest code at {pc:#x}"),
             VmError::Lift { pc, start, source } => {
-                write!(f, "lifting the region at {start:#x} (for pc {pc:#x}): {source}")
+                write!(
+                    f,
+                    "lifting the region at {start:#x} (for pc {pc:#x}): {source}"
+                )
             }
             VmError::Abi(e) => write!(f, "{e}"),
             VmError::UnknownIndirectCall { callee, resume } => write!(
@@ -226,12 +237,19 @@ impl GuestView {
         let page = machish::memory::host_page_size();
         let mut at = va & !(page - 1);
         while at < end {
-            let known = self.mapped.lock().unwrap_or_else(|e| e.into_inner()).contains(&at);
+            let known = self
+                .mapped
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&at);
             if !known {
                 if !page_is_mapped(at, page) {
                     return false;
                 }
-                self.mapped.lock().unwrap_or_else(|e| e.into_inner()).insert(at);
+                self.mapped
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(at);
             }
             at += page;
         }
@@ -241,13 +259,19 @@ impl GuestView {
 
 /// Whether the host has anything mapped at `[at, at+len)`.
 fn page_is_mapped(at: u64, len: u64) -> bool {
-    let Ok(addr) = usize::try_from(at) else { return false };
+    let Ok(addr) = usize::try_from(at) else {
+        return false;
+    };
     // SAFETY: `msync` inspects the process's own mappings and, for a private
     // anonymous one, has nothing to write back. An unmapped address is
     // reported as `ENOMEM` rather than faulting, which is the entire reason
     // for asking this way.
     let rc = unsafe {
-        libc::msync(addr as *mut libc::c_void, len as libc::size_t, libc::MS_ASYNC)
+        libc::msync(
+            addr as *mut libc::c_void,
+            len as libc::size_t,
+            libc::MS_ASYNC,
+        )
     };
     rc == 0
 }
@@ -256,7 +280,10 @@ impl GuestMemory for GuestView {
     fn read(&self, va: u64, out: &mut [u8]) -> Result<(), machish::Error> {
         let src = self
             .resolve(va, out.len())
-            .ok_or(machish::Error::OutOfBounds { addr: va, len: out.len() })?;
+            .ok_or(machish::Error::OutOfBounds {
+                addr: va,
+                len: out.len(),
+            })?;
         // SAFETY: `resolve` checked that `[va, va+len)` lies in a guest region
         // this VM keeps mapped, or in a page the host has mapped. Guest and
         // host share one address space by construction, so the address is the
@@ -268,7 +295,10 @@ impl GuestMemory for GuestView {
     fn write(&mut self, va: u64, data: &[u8]) -> Result<(), machish::Error> {
         let dst = self
             .resolve(va, data.len())
-            .ok_or(machish::Error::OutOfBounds { addr: va, len: data.len() })?;
+            .ok_or(machish::Error::OutOfBounds {
+                addr: va,
+                len: data.len(),
+            })?;
         // SAFETY: as for `read`. Writability is the guest's business: a store
         // to a page it made read-only faults exactly as it would have on x86.
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len()) };
@@ -357,8 +387,10 @@ const _: () = {
 impl Vm {
     /// Load `path`, identity-mapped, with a guest stack and `argv`.
     pub fn load(path: &str, args: &[String]) -> Result<Self, VmError> {
-        let program = Program::load_executable(path, &[])
-            .map_err(|e| VmError::Load { path: path.to_string(), reason: e.to_string() })?;
+        let program = Program::load_executable(path, &[]).map_err(|e| VmError::Load {
+            path: path.to_string(),
+            reason: e.to_string(),
+        })?;
         Self::new(program, path, args)
     }
 
@@ -481,7 +513,13 @@ impl Vm {
     /// one implementation.
     pub fn call(&self, entry: u64, args: &[u64]) -> Result<u64, VmError> {
         let mut ctx = RegisterContext::new();
-        let regs = [&mut ctx.rdi, &mut ctx.rsi, &mut ctx.rdx, &mut ctx.rcx, &mut ctx.r8];
+        let regs = [
+            &mut ctx.rdi,
+            &mut ctx.rsi,
+            &mut ctx.rdx,
+            &mut ctx.rcx,
+            &mut ctx.r8,
+        ];
         for (slot, &arg) in regs.into_iter().zip(args) {
             *slot = arg;
         }
@@ -504,9 +542,9 @@ impl Vm {
         // Below the innermost live frame, past the red zone the guest's ABI
         // lets a leaf function use without adjusting `rsp`.
         let rsp = ((state.rsp.get() - 128) & !0xf) - 8;
-        self.view().write(rsp, &RETURN_SENTINEL.to_le_bytes()).map_err(|source| {
-            VmError::Stack { source }
-        })?;
+        self.view()
+            .write(rsp, &RETURN_SENTINEL.to_le_bytes())
+            .map_err(|source| VmError::Stack { source })?;
         ctx.rsp = rsp;
         ctx.rip = entry;
 
@@ -558,8 +596,10 @@ impl Vm {
             // is one message (`- (id)a { return [self b]; }`) compiles to
             // exactly that. Following it means running the host's own
             // `objc_msgSend` on the guest's registers.
-            if let Some(site) =
-                self.program.import_at(pc).or_else(|| self.program.import_by_target(pc))
+            if let Some(site) = self
+                .program
+                .import_at(pc)
+                .or_else(|| self.program.import_by_target(pc))
             {
                 ctx.imported_function_va = pc;
                 self.service_site_as(site, ctx, true)?;
@@ -615,11 +655,7 @@ impl Vm {
     /// executed), while an unregistered direct call *has*. So the only arm that
     /// touches `rsp` is the indirect call to guest code, where the runtime is
     /// standing in for a `CALL` that microlift declined to perform.
-    fn step(
-        &self,
-        ctx: &mut RegisterContext,
-        exit: ExitReason,
-    ) -> Result<Option<u64>, VmError> {
+    fn step(&self, ctx: &mut RegisterContext, exit: ExitReason) -> Result<Option<u64>, VmError> {
         match exit {
             // The guest returned to the sentinel this VM pushed: the function
             // it called is finished. Any other `Return` is a return into a
@@ -666,11 +702,16 @@ impl Vm {
             // assembly. Translating the x86-64 numbering is the fallback, not
             // the main path, and it is not written until something needs it:
             // the number is reported instead of guessed at.
-            ExitReason::Syscall => {
-                Err(VmError::Syscall { number: ctx.rax, pc: ctx.rip })
-            }
+            ExitReason::Syscall => Err(VmError::Syscall {
+                number: ctx.rax,
+                pc: ctx.rip,
+            }),
 
-            _ => Err(VmError::Trap { reason: exit, code: ctx.exit_code, pc: ctx.rip }),
+            _ => Err(VmError::Trap {
+                reason: exit,
+                code: ctx.exit_code,
+                pc: ctx.rip,
+            }),
         }
     }
 
@@ -685,7 +726,10 @@ impl Vm {
     fn service_import(&self, ctx: &mut RegisterContext, jumped: bool) -> Result<(), VmError> {
         let va = ctx.imported_function_va;
         let Some(site) = self.program.import_at(va) else {
-            return Err(AbiError::NoSignature { symbol: format!("<unregistered {va:#x}>") }.into());
+            return Err(AbiError::NoSignature {
+                symbol: format!("<unregistered {va:#x}>"),
+            }
+            .into());
         };
         self.service_site_as(site, ctx, jumped)
     }
@@ -716,14 +760,7 @@ impl Vm {
         ctx: &mut RegisterContext,
     ) -> Result<(), VmError> {
         let mut mem = self.view();
-        crate::abi::call_import_with(
-            &site.symbol,
-            site.tag,
-            site.resolved,
-            ctx,
-            &mut mem,
-            self,
-        )?;
+        crate::abi::call_import_with(&site.symbol, site.tag, site.resolved, ctx, &mut mem, self)?;
         Ok(())
     }
 
@@ -789,13 +826,20 @@ impl Vm {
     /// for the VM's lifetime, so the host may compare two thunks for equality
     /// and get the answer the guest would have.
     pub fn thunk_for(&self, guest_va: u64) -> Result<u64, VmError> {
-        if let Some(existing) =
-            self.thunks.lock().unwrap_or_else(|e| e.into_inner()).host_for(guest_va)
+        if let Some(existing) = self
+            .thunks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .host_for(guest_va)
         {
             return Ok(existing);
         }
         let thunk = crate::thunk::build(guest_va)?;
-        let host = self.thunks.lock().unwrap_or_else(|e| e.into_inner()).insert(thunk);
+        let host = self
+            .thunks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(thunk);
 
         // Translate the callback now, while translating is possible.
         //
@@ -823,13 +867,18 @@ impl Vm {
 
     /// Whether `va` is a thunk this VM handed out.
     pub fn guest_behind_thunk(&self, va: u64) -> Option<u64> {
-        self.thunks.lock().unwrap_or_else(|e| e.into_inner()).guest_for(va)
+        self.thunks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .guest_for(va)
     }
 
     /// Record an error raised inside a host→guest callback, on the thread it
     /// happened on.
     pub(crate) fn set_pending(&self, err: VmError) {
-        let Some(state) = crate::thread::current() else { return };
+        let Some(state) = crate::thread::current() else {
+            return;
+        };
         let mut slot = state.pending.borrow_mut();
         if slot.is_none() {
             *slot = Some(err);

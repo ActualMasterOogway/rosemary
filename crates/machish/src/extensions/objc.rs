@@ -167,7 +167,11 @@ pub enum ObjcRefusal {
     /// not. Reported with both ends so the graph edge is identifiable.
     ForeignPointer { from: Word, to: Word },
     /// A structure whose declared size disagrees with the one this decodes.
-    UnexpectedSize { at: Word, declared: u32, expected: u32 },
+    UnexpectedSize {
+        at: Word,
+        declared: u32,
+        expected: u32,
+    },
 }
 
 /// `__objc_imageinfo`: two words the compiler writes about the whole image.
@@ -384,7 +388,9 @@ impl<S: MachSpec> Extension<S> for ObjcExtension {
     }
 
     fn claims(&self, obj: &MachObject<'_, S>) -> bool {
-        obj.sections.iter().any(|s| s.sect_name.starts_with("__objc_"))
+        obj.sections
+            .iter()
+            .any(|s| s.sect_name.starts_with("__objc_"))
     }
 
     fn observe(
@@ -405,7 +411,12 @@ pub fn decode<S: MachSpec>(
     mem: &dyn AddressSpace,
     slide: Word,
 ) -> Result<ObjcImage> {
-    let cx = Cx { obj: Img::new(obj), mem, slide, refusals: Vec::new() };
+    let cx = Cx {
+        obj: Img::new(obj),
+        mem,
+        slide,
+        refusals: Vec::new(),
+    };
     cx.run()
 }
 
@@ -532,7 +543,10 @@ impl Cx<'_> {
         if self.obj.contains(unslid) {
             Some(value)
         } else {
-            self.refusals.push(ObjcRefusal::ForeignPointer { from: at, to: value });
+            self.refusals.push(ObjcRefusal::ForeignPointer {
+                from: at,
+                to: value,
+            });
             None
         }
     }
@@ -610,7 +624,11 @@ impl Cx<'_> {
         }
         let entsize = entsize_and_flags & ENTSIZE_MASK;
         if entsize != expected {
-            self.refusals.push(ObjcRefusal::UnexpectedSize { at, declared: entsize, expected });
+            self.refusals.push(ObjcRefusal::UnexpectedSize {
+                at,
+                declared: entsize,
+                expected,
+            });
             return Ok(None);
         }
         let count = self.u32_at(at.wrapping_add(4))? as usize;
@@ -622,7 +640,9 @@ impl Cx<'_> {
 
     /// A method list at the pointer stored in `slot`.
     fn methods(&mut self, slot: Word) -> Result<Vec<ObjcMethod>> {
-        let Some(at) = self.follow(slot)? else { return Ok(Vec::new()) };
+        let Some(at) = self.follow(slot)? else {
+            return Ok(Vec::new());
+        };
         let Some((first, count)) = self.list_header(at, METHOD_SIZE as u32)? else {
             return Ok(Vec::new());
         };
@@ -639,7 +659,9 @@ impl Cx<'_> {
     }
 
     fn ivars(&mut self, slot: Word) -> Result<Vec<ObjcIvar>> {
-        let Some(at) = self.follow(slot)? else { return Ok(Vec::new()) };
+        let Some(at) = self.follow(slot)? else {
+            return Ok(Vec::new());
+        };
         let Some((first, count)) = self.list_header(at, IVAR_SIZE as u32)? else {
             return Ok(Vec::new());
         };
@@ -647,7 +669,11 @@ impl Cx<'_> {
         for i in 0..count {
             let e = first.wrapping_add(i as u64 * IVAR_SIZE);
             let offset_va = self.follow(e)?.unwrap_or(0);
-            let offset = if offset_va == 0 { 0 } else { self.u32_at(offset_va)? };
+            let offset = if offset_va == 0 {
+                0
+            } else {
+                self.u32_at(offset_va)?
+            };
             out.push(ObjcIvar {
                 offset_va,
                 offset,
@@ -661,7 +687,9 @@ impl Cx<'_> {
     }
 
     fn properties(&mut self, slot: Word) -> Result<Vec<ObjcProperty>> {
-        let Some(at) = self.follow(slot)? else { return Ok(Vec::new()) };
+        let Some(at) = self.follow(slot)? else {
+            return Ok(Vec::new());
+        };
         let Some((first, count)) = self.list_header(at, PROPERTY_SIZE as u32)? else {
             return Ok(Vec::new());
         };
@@ -681,7 +709,9 @@ impl Cx<'_> {
     /// The odd one out: a pointer-sized count, and entries that are also
     /// null-terminated. The count is authoritative; the terminator is not read.
     fn protocol_list(&mut self, slot: Word) -> Result<Vec<Word>> {
-        let Some(at) = self.follow(slot)? else { return Ok(Vec::new()) };
+        let Some(at) = self.follow(slot)? else {
+            return Ok(Vec::new());
+        };
         let count = self.word_at(at)?;
         if count > MAX_ENTRIES as u64 {
             return Err(Error::Custom("objc: protocol count out of range"));
@@ -733,7 +763,9 @@ impl Cx<'_> {
         if self.local(va, va).is_none() {
             return Ok(None);
         }
-        let Some(ro) = self.class_ro_of(va)? else { return Ok(None) };
+        let Some(ro) = self.class_ro_of(va)? else {
+            return Ok(None);
+        };
         let bits = self.word_at(va.wrapping_add(CLASS_BITS_OFF))?;
         let isa = self.word_at(va)?;
         let meta = match self.local(va, isa) {

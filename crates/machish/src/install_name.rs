@@ -181,7 +181,11 @@ mod tests {
     /// table makes an omission visible in a way scattered assertions do not.
     #[test]
     fn expansion_table() {
-        let rpaths = rp(&["@loader_path/../Frameworks", "/opt/lib", "@executable_path/lib"]);
+        let rpaths = rp(&[
+            "@loader_path/../Frameworks",
+            "/opt/lib",
+            "@executable_path/lib",
+        ]);
         let ctx = PathContext {
             executable: Some("/Apps/Demo.app/Contents/MacOS/Demo"),
             loader: Some("/Apps/Demo.app/Contents/Frameworks/Core.framework/Core"),
@@ -190,24 +194,24 @@ mod tests {
 
         let cases: &[(&str, &[&str])] = &[
             // Plain paths pass through untouched, absolute or not.
-            ("/usr/lib/libSystem.B.dylib", &["/usr/lib/libSystem.B.dylib"]),
+            (
+                "/usr/lib/libSystem.B.dylib",
+                &["/usr/lib/libSystem.B.dylib"],
+            ),
             ("libfoo.dylib", &["libfoo.dylib"]),
             ("../lib/libfoo.dylib", &["../lib/libfoo.dylib"]),
-
             // @executable_path is the executable's directory, regardless of
             // which image recorded the dependency.
             (
                 "@executable_path/../Frameworks/A.dylib",
                 &["/Apps/Demo.app/Contents/MacOS/../Frameworks/A.dylib"],
             ),
-
             // @loader_path is the *recording* image's directory, which is a
             // different answer for the same process.
             (
                 "@loader_path/libprivate.dylib",
                 &["/Apps/Demo.app/Contents/Frameworks/Core.framework/libprivate.dylib"],
             ),
-
             // @rpath is a search: one candidate per rpath entry, in order, with
             // each entry itself expanded first.
             (
@@ -226,16 +230,16 @@ mod tests {
                     "/Apps/Demo.app/Contents/MacOS/lib/Sub.framework/Sub",
                 ],
             ),
-
             // A prefix that merely *starts with* a magic token is not one.
             ("@rpathological/lib.dylib", &["@rpathological/lib.dylib"]),
             ("@loader_pathx/lib.dylib", &["@loader_pathx/lib.dylib"]),
             ("@executable_pathing", &["@executable_pathing"]),
-
             // A bare token with nothing after it expands to the directory.
-            ("@loader_path", &["/Apps/Demo.app/Contents/Frameworks/Core.framework"]),
+            (
+                "@loader_path",
+                &["/Apps/Demo.app/Contents/Frameworks/Core.framework"],
+            ),
             ("@executable_path", &["/Apps/Demo.app/Contents/MacOS"]),
-
             // Not a magic token at all.
             ("@unknown/lib.dylib", &["@unknown/lib.dylib"]),
             ("", &[""]),
@@ -255,7 +259,10 @@ mod tests {
         assert!(expand("@executable_path/lib.dylib", &empty).is_empty());
         assert!(expand("@rpath/lib.dylib", &empty).is_empty());
         // A plain path still works without any context at all.
-        assert_eq!(expand("/usr/lib/x.dylib", &empty), vec!["/usr/lib/x.dylib".to_string()]);
+        assert_eq!(
+            expand("/usr/lib/x.dylib", &empty),
+            vec!["/usr/lib/x.dylib".to_string()]
+        );
     }
 
     #[test]
@@ -264,8 +271,15 @@ mod tests {
         // keeping the second is the behaviour that lets a partially-specified
         // context still find the library.
         let rpaths = rp(&["@executable_path/lib", "/opt/lib"]);
-        let ctx = PathContext { executable: None, loader: None, rpaths: &rpaths };
-        assert_eq!(expand("@rpath/libz.dylib", &ctx), vec!["/opt/lib/libz.dylib".to_string()]);
+        let ctx = PathContext {
+            executable: None,
+            loader: None,
+            rpaths: &rpaths,
+        };
+        assert_eq!(
+            expand("@rpath/libz.dylib", &ctx),
+            vec!["/opt/lib/libz.dylib".to_string()]
+        );
     }
 
     #[test]
@@ -291,7 +305,9 @@ mod tests {
     #[test]
     fn system_paths_are_recognised() {
         assert!(is_system_path("/usr/lib/libSystem.B.dylib"));
-        assert!(is_system_path("/System/Library/Frameworks/Foundation.framework/Foundation"));
+        assert!(is_system_path(
+            "/System/Library/Frameworks/Foundation.framework/Foundation"
+        ));
         assert!(!is_system_path("/usr/local/lib/libz.dylib"));
         assert!(!is_system_path("@rpath/libmath.dylib"));
         assert!(!is_system_path("/Users/me/libmine.dylib"));
@@ -308,8 +324,14 @@ mod tests {
 
     #[test]
     fn a_pathological_rpath_stack_is_bounded() {
-        let rpaths: Vec<String> = (0..MAX_CANDIDATES * 2).map(|i| alloc::format!("/p{i}")).collect();
-        let ctx = PathContext { executable: None, loader: None, rpaths: &rpaths };
+        let rpaths: Vec<String> = (0..MAX_CANDIDATES * 2)
+            .map(|i| alloc::format!("/p{i}"))
+            .collect();
+        let ctx = PathContext {
+            executable: None,
+            loader: None,
+            rpaths: &rpaths,
+        };
         assert_eq!(expand("@rpath/x.dylib", &ctx).len(), MAX_CANDIDATES);
     }
 }

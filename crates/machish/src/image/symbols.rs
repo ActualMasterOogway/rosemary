@@ -95,22 +95,35 @@ impl<'a> SymbolTable<'a> {
     /// is a bounds check against a range already known to be inside the file,
     /// rather than a fresh chance to run off the end.
     pub fn new(view: View<'a>, symtab: Symtab, dysymtab: Option<Dysymtab>) -> Result<Self> {
-        let sym_bytes = (symtab.nsyms as usize)
-            .checked_mul(NLIST_64_SIZE)
-            .ok_or(Error::Truncated { what: "symbol table" })?;
+        let sym_bytes =
+            (symtab.nsyms as usize)
+                .checked_mul(NLIST_64_SIZE)
+                .ok_or(Error::Truncated {
+                    what: "symbol table",
+                })?;
         view.slice(symtab.symoff as usize, sym_bytes, "symbol table")?;
-        view.slice(symtab.stroff as usize, symtab.strsize as usize, "string table")?;
+        view.slice(
+            symtab.stroff as usize,
+            symtab.strsize as usize,
+            "string table",
+        )?;
 
         if let Some(dy) = dysymtab
             && dy.nindirectsyms != 0
         {
             let n = (dy.nindirectsyms as usize)
                 .checked_mul(4)
-                .ok_or(Error::Truncated { what: "indirect symbol table" })?;
+                .ok_or(Error::Truncated {
+                    what: "indirect symbol table",
+                })?;
             view.slice(dy.indirectsymoff as usize, n, "indirect symbol table")?;
         }
 
-        Ok(SymbolTable { view, symtab, dysymtab })
+        Ok(SymbolTable {
+            view,
+            symtab,
+            dysymtab,
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -124,7 +137,9 @@ impl<'a> SymbolTable<'a> {
     /// The `nlist_64` at `index`.
     pub fn nlist(&self, index: usize) -> Result<Nlist> {
         if index >= self.len() {
-            return Err(Error::Truncated { what: "symbol index" });
+            return Err(Error::Truncated {
+                what: "symbol index",
+            });
         }
         let off = self.symtab.symoff as usize + index * NLIST_64_SIZE;
         Ok(Nlist {
@@ -142,7 +157,9 @@ impl<'a> SymbolTable<'a> {
             // A `strx` past the table is how a truncated or crafted image gets
             // the reader to walk into unrelated `__LINKEDIT` bytes looking for
             // a NUL. Reject it against the *declared* extent, not the file's.
-            return Err(Error::Truncated { what: "string table index" });
+            return Err(Error::Truncated {
+                what: "string table index",
+            });
         }
         self.view.cstr(self.symtab.stroff as usize + strx as usize)
     }
@@ -174,7 +191,9 @@ impl<'a> SymbolTable<'a> {
     pub fn indirect(&self, index: usize) -> Result<u32> {
         let dy = self.dysymtab.ok_or(Error::Custom("no LC_DYSYMTAB"))?;
         if index >= dy.nindirectsyms as usize {
-            return Err(Error::Truncated { what: "indirect symbol index" });
+            return Err(Error::Truncated {
+                what: "indirect symbol index",
+            });
         }
         self.view.u32(dy.indirectsymoff as usize + index * 4)
     }

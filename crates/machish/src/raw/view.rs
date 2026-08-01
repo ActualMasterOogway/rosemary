@@ -44,7 +44,10 @@ impl<'a> View<'a> {
     }
 
     pub fn u8(&self, off: usize) -> Result<u8> {
-        self.bytes.get(off).copied().ok_or(Error::Truncated { what: "u8" })
+        self.bytes
+            .get(off)
+            .copied()
+            .ok_or(Error::Truncated { what: "u8" })
     }
 
     pub fn u16(&self, off: usize) -> Result<u16> {
@@ -63,7 +66,9 @@ impl<'a> View<'a> {
 
     pub fn u64(&self, off: usize) -> Result<u64> {
         let b = self.slice(off, 8, "u64")?;
-        Ok(u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+        Ok(u64::from_le_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
     }
 
     /// Big-endian `u32`. Needed for exactly one structure: the fat/universal
@@ -76,12 +81,17 @@ impl<'a> View<'a> {
     /// Big-endian `u64`, for `fat_arch_64`.
     pub fn u64_be(&self, off: usize) -> Result<u64> {
         let b = self.slice(off, 8, "u64_be")?;
-        Ok(u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+        Ok(u64::from_be_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
     }
 
     /// A NUL-terminated UTF-8 string starting at `off`, borrowed from the file.
     pub fn cstr(&self, off: usize) -> Result<&'a str> {
-        let rest = self.bytes.get(off..).ok_or(Error::Truncated { what: "cstr" })?;
+        let rest = self
+            .bytes
+            .get(off..)
+            .ok_or(Error::Truncated { what: "cstr" })?;
         let end = rest.iter().position(|&b| b == 0).ok_or(Error::BadString)?;
         core::str::from_utf8(&rest[..end]).map_err(|_| Error::BadString)
     }

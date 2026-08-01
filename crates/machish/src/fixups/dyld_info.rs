@@ -29,8 +29,8 @@ use crate::error::{Error, Result};
 use crate::fixups::{BindKind, Fixup, FixupDecoder, LibraryRef, SymbolRef};
 use crate::image::MachObject;
 use crate::raw::{Cursor, View, Word};
-use crate::spec::constants as c;
 use crate::spec::MachSpec;
+use crate::spec::constants as c;
 
 /// Ceiling on fixups decoded from one image. A run-length opcode takes a
 /// `uleb128` count, so a two-byte program can ask for 2^64 fixups; without a
@@ -53,14 +53,20 @@ impl<S: MachSpec> FixupDecoder<S> for DyldInfoFixups {
     }
 
     fn decode<'a>(&self, obj: &MachObject<'a, S>, out: &mut Vec<Fixup<'a>>) -> Result<()> {
-        let Some(info) = obj.dyld_info() else { return Ok(()) };
+        let Some(info) = obj.dyld_info() else {
+            return Ok(());
+        };
 
         if let Some(stream) = substream(obj, info.rebase_off, info.rebase_size)? {
             run_rebase(obj, stream, out)?;
         }
         for (off, size, kind) in [
             (info.bind_off, info.bind_size, BindKind::NonLazy),
-            (info.weak_bind_off, info.weak_bind_size, BindKind::WeakCoalesce),
+            (
+                info.weak_bind_off,
+                info.weak_bind_size,
+                BindKind::WeakCoalesce,
+            ),
             (info.lazy_bind_off, info.lazy_bind_size, BindKind::Lazy),
         ] {
             if let Some(stream) = substream(obj, off, size)? {
@@ -84,7 +90,11 @@ fn substream<'a, S: MachSpec>(
     if size == 0 {
         return Ok(None);
     }
-    Ok(Some(obj.view().subview(off as usize, size as usize, "dyld_info stream")?))
+    Ok(Some(obj.view().subview(
+        off as usize,
+        size as usize,
+        "dyld_info stream",
+    )?))
 }
 
 /// The register file both machines share.
@@ -103,19 +113,30 @@ impl<'a, S: MachSpec> Machine<'a, '_, S> {
     /// whole pointer inside the segment.
     fn address(&self) -> Result<Word> {
         if !self.positioned {
-            return Err(Error::UnknownFixup { format: "dyld_info", value: 0 });
+            return Err(Error::UnknownFixup {
+                format: "dyld_info",
+                value: 0,
+            });
         }
         let seg = self
             .obj
             .segments
             .get(self.seg_index)
-            .ok_or(Error::BadLoadCommand { why: "fixup segment index out of range" })?;
+            .ok_or(Error::BadLoadCommand {
+                why: "fixup segment index out of range",
+            })?;
         let end = self
             .seg_offset
             .checked_add(c::POINTER_SIZE)
-            .ok_or(Error::OutOfBounds { addr: self.seg_offset, len: 8 })?;
+            .ok_or(Error::OutOfBounds {
+                addr: self.seg_offset,
+                len: 8,
+            })?;
         if end > seg.vmsize {
-            return Err(Error::OutOfBounds { addr: seg.vmaddr.wrapping_add(self.seg_offset), len: 8 });
+            return Err(Error::OutOfBounds {
+                addr: seg.vmaddr.wrapping_add(self.seg_offset),
+                len: 8,
+            });
         }
         Ok(seg.vmaddr.wrapping_add(self.seg_offset))
     }
@@ -158,7 +179,12 @@ fn run_rebase<'a, S: MachSpec>(
     stream: View<'a>,
     out: &mut Vec<Fixup<'a>>,
 ) -> Result<()> {
-    let mut m = Machine { obj, seg_index: 0, seg_offset: 0, positioned: false };
+    let mut m = Machine {
+        obj,
+        seg_index: 0,
+        seg_offset: 0,
+        positioned: false,
+    };
     let mut cur = Cursor::new(stream);
 
     // Emit `count` pointer-sized rebases, advancing by `8 + skip` each time.
@@ -224,7 +250,10 @@ fn run_rebase<'a, S: MachSpec>(
             }
 
             other => {
-                return Err(Error::UnknownFixup { format: "rebase opcode", value: u32::from(other) })
+                return Err(Error::UnknownFixup {
+                    format: "rebase opcode",
+                    value: u32::from(other),
+                });
             }
         }
     }
@@ -239,7 +268,12 @@ fn run_bind<'a, S: MachSpec>(
     out: &mut Vec<Fixup<'a>>,
 ) -> Result<()> {
     let lazy = kind == BindKind::Lazy;
-    let mut m = Machine { obj, seg_index: 0, seg_offset: 0, positioned: false };
+    let mut m = Machine {
+        obj,
+        seg_index: 0,
+        seg_offset: 0,
+        positioned: false,
+    };
     let mut cur = Cursor::new(stream);
 
     let mut ordinal: i32 = 0;
@@ -252,12 +286,26 @@ fn run_bind<'a, S: MachSpec>(
         ($count:expr, $skip:expr) => {{
             let (count, skip): (u64, u64) = ($count, $skip);
             if !named {
-                return Err(Error::UnknownFixup { format: "bind without a symbol", value: 0 });
+                return Err(Error::UnknownFixup {
+                    format: "bind without a symbol",
+                    value: 0,
+                });
             }
-            let symbol =
-                SymbolRef { name, library: library_ref(obj, ordinal), weak_import };
+            let symbol = SymbolRef {
+                name,
+                library: library_ref(obj, ordinal),
+                weak_import,
+            };
             for _ in 0..count {
-                push(out, Fixup::Bind { at: m.address()?, symbol, addend, kind })?;
+                push(
+                    out,
+                    Fixup::Bind {
+                        at: m.address()?,
+                        symbol,
+                        addend,
+                        kind,
+                    },
+                )?;
                 m.advance(c::POINTER_SIZE.wrapping_add(skip));
             }
         }};
@@ -292,7 +340,11 @@ fn run_bind<'a, S: MachSpec>(
             c::BIND_OPCODE_SET_DYLIB_SPECIAL_IMM => {
                 // The special ordinals are negative, encoded as a sign-extended
                 // 4-bit field: immediate 0xf means -1, not 15.
-                ordinal = if imm == 0 { 0 } else { (imm | 0xf0) as i8 as i32 };
+                ordinal = if imm == 0 {
+                    0
+                } else {
+                    (imm | 0xf0) as i8 as i32
+                };
             }
 
             c::BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM => {
@@ -303,7 +355,10 @@ fn run_bind<'a, S: MachSpec>(
 
             c::BIND_OPCODE_SET_TYPE_IMM => {
                 if imm != c::BIND_TYPE_POINTER {
-                    return Err(Error::UnknownFixup { format: "bind type", value: u32::from(imm) });
+                    return Err(Error::UnknownFixup {
+                        format: "bind type",
+                        value: u32::from(imm),
+                    });
                 }
             }
 
@@ -344,7 +399,10 @@ fn run_bind<'a, S: MachSpec>(
             }
 
             other => {
-                return Err(Error::UnknownFixup { format: "bind opcode", value: u32::from(other) })
+                return Err(Error::UnknownFixup {
+                    format: "bind opcode",
+                    value: u32::from(other),
+                });
             }
         }
     }

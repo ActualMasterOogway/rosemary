@@ -19,8 +19,8 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use machish::fixups::{decode_image, BindKind, Binder, Fixup, LibraryRef, StubMap};
-use machish::image::{map_segments, MachObject};
+use machish::fixups::{BindKind, Binder, Fixup, LibraryRef, StubMap, decode_image};
+use machish::image::{MachObject, map_segments};
 use machish::memory::{AddressSpace, BufferSpace};
 use machish::report::BindingRecord;
 use machish::resolve::{Resolved, SymbolProvider, SyntheticDylib};
@@ -54,32 +54,57 @@ int main(int argc, char **argv) {
 
 #[test]
 fn dyld_info_decodes_lazy_bindings_into_la_symbol_ptr() {
-    let Some(bytes) = common::system_binary(LS) else { skip!("{LS} not present") };
+    let Some(bytes) = common::system_binary(LS) else {
+        skip!("{LS} not present")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
-    assert!(obj.dyld_info().is_some(), "{LS} should be an LC_DYLD_INFO_ONLY image");
+    assert!(
+        obj.dyld_info().is_some(),
+        "{LS} should be an LC_DYLD_INFO_ONLY image"
+    );
 
     let (encoding, fixups) = decode_image(&obj).unwrap();
     assert_eq!(encoding, "dyld_info");
 
-    let la = obj.section("__DATA", "__la_symbol_ptr").expect("no __la_symbol_ptr");
+    let la = obj
+        .section("__DATA", "__la_symbol_ptr")
+        .expect("no __la_symbol_ptr");
     let lazy: Vec<_> = fixups
         .iter()
-        .filter(|f| matches!(f, Fixup::Bind { kind: BindKind::Lazy, .. }))
+        .filter(|f| {
+            matches!(
+                f,
+                Fixup::Bind {
+                    kind: BindKind::Lazy,
+                    ..
+                }
+            )
+        })
         .collect();
 
     // Structural, not literal: one lazy binding per slot, every one inside the
     // section. The count follows from the section size, so a relaid-out `/bin/ls`
     // still passes.
     let slots = la.size / 8;
-    assert_eq!(lazy.len() as u64, slots, "expected one lazy bind per __la_symbol_ptr slot");
+    assert_eq!(
+        lazy.len() as u64,
+        slots,
+        "expected one lazy bind per __la_symbol_ptr slot"
+    );
     for f in &lazy {
-        assert!(la.contains(f.address()), "lazy bind at {:#x} outside __la_symbol_ptr", f.address());
+        assert!(
+            la.contains(f.address()),
+            "lazy bind at {:#x} outside __la_symbol_ptr",
+            f.address()
+        );
     }
 }
 
 #[test]
 fn bind_ordinals_name_a_real_load_command() {
-    let Some(bytes) = common::system_binary(LS) else { skip!("{LS} not present") };
+    let Some(bytes) = common::system_binary(LS) else {
+        skip!("{LS} not present")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
     let (_, fixups) = decode_image(&obj).unwrap();
 
@@ -88,10 +113,15 @@ fn bind_ordinals_name_a_real_load_command() {
 
     let mut two_level = 0;
     for f in &fixups {
-        let Fixup::Bind { symbol, .. } = f else { continue };
+        let Fixup::Bind { symbol, .. } = f else {
+            continue;
+        };
         match symbol.library {
             LibraryRef::InstallName(n) => {
-                assert!(deps.contains(&n), "{n} is not one of this image's dependencies");
+                assert!(
+                    deps.contains(&n),
+                    "{n} is not one of this image's dependencies"
+                );
                 two_level += 1;
             }
             LibraryRef::UnknownOrdinal(o) => panic!("bind referenced unknown ordinal {o}"),
@@ -106,14 +136,21 @@ fn bind_ordinals_name_a_real_load_command() {
             symbol.name
         );
     }
-    assert!(two_level > 0, "a two-level image should have two-level bindings");
+    assert!(
+        two_level > 0,
+        "a two-level image should have two-level bindings"
+    );
 }
 
 #[test]
 fn chained_fixups_decode_into_the_same_shape() {
-    let Some(bytes) = common::system_binary(ECHO) else { skip!("{ECHO} not present") };
+    let Some(bytes) = common::system_binary(ECHO) else {
+        skip!("{ECHO} not present")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
-    let Some(_) = obj.chained_fixups() else { skip!("{ECHO} is not a chained-fixups image") };
+    let Some(_) = obj.chained_fixups() else {
+        skip!("{ECHO} is not a chained-fixups image")
+    };
 
     let (encoding, fixups) = decode_image(&obj).unwrap();
     assert_eq!(encoding, "chained");
@@ -129,7 +166,10 @@ fn chained_fixups_decode_into_the_same_shape() {
         );
         // A chained rebase must carry its target: the packed word in the slot
         // is not a pointer, so `Rebase` would be silently wrong here.
-        assert!(!matches!(f, Fixup::Rebase { .. }), "chained decoder emitted a stored-value rebase");
+        assert!(
+            !matches!(f, Fixup::Rebase { .. }),
+            "chained decoder emitted a stored-value rebase"
+        );
     }
 }
 
@@ -139,15 +179,22 @@ fn arm64e_chained_pointers_are_refused_specifically() {
     // PAC-formatted chain. Parsing it as arm64 must fail at the pointer format
     // rather than decode into plausible nonsense.
     use machish::spec::arch::Arm64;
-    let Some(bytes) = common::system_binary(LS) else { skip!("{LS} not present") };
-    let Ok(obj) = MachObject::parse_any(&bytes, Arm64) else { skip!("no arm64 slice") };
+    let Some(bytes) = common::system_binary(LS) else {
+        skip!("{LS} not present")
+    };
+    let Ok(obj) = MachObject::parse_any(&bytes, Arm64) else {
+        skip!("no arm64 slice")
+    };
     if obj.chained_fixups().is_none() {
         skip!("arm64 slice does not use chained fixups");
     }
 
     match decode_image(&obj) {
         Err(machish::Error::UnknownFixup { format, .. }) => {
-            assert!(format.contains("arm64e"), "wrong rejection reason: {format}");
+            assert!(
+                format.contains("arm64e"),
+                "wrong rejection reason: {format}"
+            );
         }
         Err(other) => panic!("expected a specific arm64e rejection, got {other}"),
         Ok(_) => skip!("this arm64 slice is not arm64e"),
@@ -188,7 +235,11 @@ fn both_encodings_decode_to_the_same_stream() {
                 // not exist in that image rather than being missed by us.
                 Fixup::Bind { symbol, .. } if symbol.name != "dyld_stub_binder" => Some((
                     symbol.name.to_string(),
-                    symbol.library.install_name().unwrap_or("<flat>").to_string(),
+                    symbol
+                        .library
+                        .install_name()
+                        .unwrap_or("<flat>")
+                        .to_string(),
                 )),
                 _ => None,
             })
@@ -198,7 +249,10 @@ fn both_encodings_decode_to_the_same_stream() {
     let ba = binds(&a, &fa);
     let bb = binds(&b, &fb);
     assert!(!ba.is_empty(), "no imports decoded from the chained image");
-    assert_eq!(ba, bb, "the two encodings disagree about this image's imports");
+    assert_eq!(
+        ba, bb,
+        "the two encodings disagree about this image's imports"
+    );
 }
 
 /// `ADD_ADDR_ULEB` is a *signed* step spelled as an unsigned ULEB: a backwards
@@ -271,25 +325,42 @@ fn a_backwards_add_addr_uleb_wraps_instead_of_erroring() {
     let obj = MachObject::parse(&image, X86_64).unwrap();
     let (_, fixups) = decode_image(&obj).unwrap();
     let addrs: Vec<u64> = fixups.iter().map(Fixup::address).collect();
-    assert_eq!(addrs, vec![0x1100, 0x1000], "the backwards step did not land where dyld puts it");
+    assert_eq!(
+        addrs,
+        vec![0x1100, 0x1000],
+        "the backwards step did not land where dyld puts it"
+    );
 }
 
 // ------------------------------------------------------------ stub_va -------
 
 #[test]
 fn every_lazy_binding_carries_a_stub() {
-    let Some(bytes) = common::system_binary(LS) else { skip!("{LS} not present") };
+    let Some(bytes) = common::system_binary(LS) else {
+        skip!("{LS} not present")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
     let stubs = StubMap::build(&obj).unwrap();
     let (_, fixups) = decode_image(&obj).unwrap();
 
-    let stub_sect = obj.section("__TEXT", "__stubs").expect("no __stubs section");
+    let stub_sect = obj
+        .section("__TEXT", "__stubs")
+        .expect("no __stubs section");
     assert_eq!(stub_sect.reserved2, 6, "x86-64 stubs are six bytes");
 
     let mut checked = 0;
     for f in &fixups {
-        let Fixup::Bind { at, kind: BindKind::Lazy, .. } = f else { continue };
-        let stub = stubs.stub_for(*at).unwrap_or_else(|| panic!("no stub for slot {at:#x}"));
+        let Fixup::Bind {
+            at,
+            kind: BindKind::Lazy,
+            ..
+        } = f
+        else {
+            continue;
+        };
+        let stub = stubs
+            .stub_for(*at)
+            .unwrap_or_else(|| panic!("no stub for slot {at:#x}"));
         assert!(stub_sect.contains(stub), "stub {stub:#x} outside __stubs");
         assert_eq!(
             (stub - stub_sect.addr) % 6,
@@ -306,7 +377,9 @@ fn stub_addresses_actually_jump_through_their_slots() {
     // The claim being tested: `stub_va` is the address whose `jmp` lands on
     // `slot_va`. Decoding the instruction proves the pairing; comparing counts
     // or ranges would only show the two tables are the same size.
-    let Some(bytes) = common::system_binary(LS) else { skip!("{LS} not present") };
+    let Some(bytes) = common::system_binary(LS) else {
+        skip!("{LS} not present")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
     let stubs = StubMap::build(&obj).unwrap();
     assert!(!stubs.is_empty());
@@ -316,7 +389,11 @@ fn stub_addresses_actually_jump_through_their_slots() {
         let off = obj.vmaddr_to_off(stub).expect("stub has no file bytes");
         let code = &obj.bytes()[off..off + 6];
         // `ff 25 <rel32>` is `jmp qword [rip + rel32]`.
-        assert_eq!(&code[..2], &[0xff, 0x25], "stub at {stub:#x} is not an indirect jmp");
+        assert_eq!(
+            &code[..2],
+            &[0xff, 0x25],
+            "stub at {stub:#x} is not an indirect jmp"
+        );
         let rel = i32::from_le_bytes([code[2], code[3], code[4], code[5]]);
         let target = (stub + 6).wrapping_add(rel as i64 as u64);
         assert_eq!(
@@ -325,7 +402,10 @@ fn stub_addresses_actually_jump_through_their_slots() {
         );
         verified += 1;
     }
-    assert!(verified >= 80, "expected many stubs in {LS}, verified only {verified}");
+    assert!(
+        verified >= 80,
+        "expected many stubs in {LS}, verified only {verified}"
+    );
 }
 
 // ------------------------------------------------------------- binding ------
@@ -343,11 +423,16 @@ impl Counting {
         let mut expected = BTreeMap::new();
         let mut next = 0x7000_0000_0000u64;
         for f in fixups {
-            let Fixup::Bind { symbol, .. } = f else { continue };
+            let Fixup::Bind { symbol, .. } = f else {
+                continue;
+            };
             if expected.contains_key(symbol.name) {
                 continue;
             }
-            lib.define(symbol.name, Resolved::function(next).with_tag(expected.len() as u64));
+            lib.define(
+                symbol.name,
+                Resolved::function(next).with_tag(expected.len() as u64),
+            );
             expected.insert(symbol.name.to_string(), next);
             next += 0x1000;
         }
@@ -367,7 +452,9 @@ impl SymbolProvider for Counting {
 
 #[test]
 fn binding_writes_the_expected_pointer_into_every_slot() {
-    let Some(bytes) = common::system_binary(LS) else { skip!("{LS} not present") };
+    let Some(bytes) = common::system_binary(LS) else {
+        skip!("{LS} not present")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
 
     let mut mem = BufferSpace::new(0x1_0000_0000);
@@ -377,11 +464,23 @@ fn binding_writes_the_expected_pointer_into_every_slot() {
 
     let (provider, expected) = Counting::over(&obj, &fixups);
     let providers: [&dyn SymbolProvider; 1] = [&provider];
-    let binder = Binder { slide: mapped.slide, providers: &providers, self_exports: None, main_executable: None };
+    let binder = Binder {
+        slide: mapped.slide,
+        providers: &providers,
+        self_exports: None,
+        main_executable: None,
+    };
 
     let outcome = binder.apply(&fixups, &mut mem, &stubs).unwrap();
-    assert!(outcome.missing.is_empty(), "unexpectedly missing: {:?}", outcome.missing);
-    assert_eq!(outcome.bindings.len(), fixups.iter().filter(|f| f.is_bind()).count());
+    assert!(
+        outcome.missing.is_empty(),
+        "unexpectedly missing: {:?}",
+        outcome.missing
+    );
+    assert_eq!(
+        outcome.bindings.len(),
+        fixups.iter().filter(|f| f.is_bind()).count()
+    );
 
     // Slot by slot: read back what was written and check it is the address the
     // provider promised for that symbol.
@@ -389,14 +488,24 @@ fn binding_writes_the_expected_pointer_into_every_slot() {
         let mut buf = [0u8; 8];
         mem.read(b.slot_va, &mut buf).unwrap();
         let got = u64::from_le_bytes(buf);
-        assert_eq!(got, expected[&b.symbol], "wrong pointer in slot for {}", b.symbol);
-        assert_eq!(got, b.resolved, "the record disagrees with memory for {}", b.symbol);
+        assert_eq!(
+            got, expected[&b.symbol],
+            "wrong pointer in slot for {}",
+            b.symbol
+        );
+        assert_eq!(
+            got, b.resolved,
+            "the record disagrees with memory for {}",
+            b.symbol
+        );
     }
 }
 
 #[test]
 fn every_binding_record_is_fully_populated() {
-    let Some(bytes) = common::system_binary(LS) else { skip!("{LS} not present") };
+    let Some(bytes) = common::system_binary(LS) else {
+        skip!("{LS} not present")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
 
     let mut mem = BufferSpace::new(0x1_0000_0000);
@@ -406,9 +515,14 @@ fn every_binding_record_is_fully_populated() {
     let (provider, _) = Counting::over(&obj, &fixups);
     let providers: [&dyn SymbolProvider; 1] = [&provider];
 
-    let outcome = Binder { slide: mapped.slide, providers: &providers, self_exports: None, main_executable: None }
-        .apply(&fixups, &mut mem, &stubs)
-        .unwrap();
+    let outcome = Binder {
+        slide: mapped.slide,
+        providers: &providers,
+        self_exports: None,
+        main_executable: None,
+    }
+    .apply(&fixups, &mut mem, &stubs)
+    .unwrap();
 
     let stub_sect = obj.section("__TEXT", "__stubs").unwrap();
     let mut lazy = 0;
@@ -417,7 +531,9 @@ fn every_binding_record_is_fully_populated() {
         assert!(b.is_satisfied());
         if b.kind == BindKind::Lazy {
             lazy += 1;
-            let stub = b.stub_va.unwrap_or_else(|| panic!("lazy binding {} has no stub", b.symbol));
+            let stub = b
+                .stub_va
+                .unwrap_or_else(|| panic!("lazy binding {} has no stub", b.symbol));
             assert!(stub_sect.contains(stub.wrapping_sub(mapped.slide)));
         }
     }
@@ -427,13 +543,19 @@ fn every_binding_record_is_fully_populated() {
     // two bindings may claim the same slot.
     let mut seen = BTreeMap::new();
     for b in &outcome.bindings {
-        assert!(seen.insert(b.slot_va, &b.symbol).is_none(), "duplicate slot {:#x}", b.slot_va);
+        assert!(
+            seen.insert(b.slot_va, &b.symbol).is_none(),
+            "duplicate slot {:#x}",
+            b.slot_va
+        );
     }
 }
 
 #[test]
 fn an_unsatisfied_hard_import_is_reported_not_silently_zeroed() {
-    let Some(bytes) = common::system_binary(LS) else { skip!("{LS} not present") };
+    let Some(bytes) = common::system_binary(LS) else {
+        skip!("{LS} not present")
+    };
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
 
     let mut mem = BufferSpace::new(0x1_0000_0000);
@@ -446,12 +568,20 @@ fn an_unsatisfied_hard_import_is_reported_not_silently_zeroed() {
         .apply(&fixups, &mut mem, &StubMap::default())
         .unwrap();
     assert!(outcome.bindings.is_empty());
-    assert_eq!(outcome.missing.len(), fixups.iter().filter(|f| f.is_bind()).count());
+    assert_eq!(
+        outcome.missing.len(),
+        fixups.iter().filter(|f| f.is_bind()).count()
+    );
 
     for m in &outcome.missing {
         let mut buf = [0u8; 8];
         mem.read(m.slot_va, &mut buf).unwrap();
-        assert_eq!(u64::from_le_bytes(buf), 0, "{} left a stale pointer behind", m.symbol);
+        assert_eq!(
+            u64::from_le_bytes(buf),
+            0,
+            "{} left a stale pointer behind",
+            m.symbol
+        );
     }
 }
 
@@ -482,13 +612,21 @@ fn a_synthetic_dylib_satisfies_a_built_fixtures_imports() {
         }
     }
     let providers: [&dyn SymbolProvider; 1] = [&lib];
-    let outcome = Binder { slide: mapped.slide, providers: &providers, self_exports: None, main_executable: None }
-        .apply(&fixups, &mut mem, &stubs)
-        .unwrap();
+    let outcome = Binder {
+        slide: mapped.slide,
+        providers: &providers,
+        self_exports: None,
+        main_executable: None,
+    }
+    .apply(&fixups, &mut mem, &stubs)
+    .unwrap();
 
     assert!(outcome.missing.is_empty());
-    let strlen: Vec<&BindingRecord> =
-        outcome.bindings.iter().filter(|b| b.symbol == "_strlen").collect();
+    let strlen: Vec<&BindingRecord> = outcome
+        .bindings
+        .iter()
+        .filter(|b| b.symbol == "_strlen")
+        .collect();
     assert!(!strlen.is_empty(), "the fixture must import _strlen");
     for b in strlen {
         assert_eq!(b.resolved, 0xdead_0000);

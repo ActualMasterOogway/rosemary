@@ -67,7 +67,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use cranelift_codegen::ir::{
-    types, AbiParam, Function, InstBuilder, Signature, StackSlotData, StackSlotKind, UserFuncName,
+    AbiParam, Function, InstBuilder, Signature, StackSlotData, StackSlotKind, UserFuncName, types,
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 
@@ -115,7 +115,10 @@ pub struct ThunkTable {
 
 impl ThunkTable {
     pub fn new() -> Self {
-        ThunkTable { by_guest: BTreeMap::new(), by_host: BTreeMap::new() }
+        ThunkTable {
+            by_guest: BTreeMap::new(),
+            by_host: BTreeMap::new(),
+        }
     }
 
     /// The thunk for a guest address, if one has been built.
@@ -230,7 +233,10 @@ pub(crate) fn current() -> Option<&'static Vm> {
 /// Compile a trampoline that re-enters the guest at `guest_va`.
 pub(crate) fn build(guest_va: u64) -> Result<Thunk, VmError> {
     let conv = get_host_calling_conv();
-    let fail = |reason: String| VmError::Thunk { guest: guest_va, reason };
+    let fail = |reason: String| VmError::Thunk {
+        guest: guest_va,
+        reason,
+    };
 
     let mut sig = Signature::new(conv);
     for _ in 0..GUEST_INT_ARGS {
@@ -279,16 +285,24 @@ pub(crate) fn build(guest_va: u64) -> Result<Thunk, VmError> {
     callee_sig.params.push(AbiParam::new(types::I64));
     callee_sig.returns.push(AbiParam::new(types::I64));
     let callee_sig = b.import_signature(callee_sig);
-    let callee = b.ins().iconst(types::I64, thunk_entry as *const () as usize as i64);
+    let callee = b
+        .ins()
+        .iconst(types::I64, thunk_entry as *const () as usize as i64);
 
-    let call = b.ins().call_indirect(callee_sig, callee, &[guest, int_ptr, fp_ptr]);
+    let call = b
+        .ins()
+        .call_indirect(callee_sig, callee, &[guest, int_ptr, fp_ptr]);
     let result = b.inst_results(call)[0];
     b.ins().return_(&[result]);
     b.finalize();
 
     let mut backend = CraneliftBackend::new().map_err(|e| fail(e.to_string()))?;
     let code = backend.compile(func).map_err(|e| fail(e.to_string()))?;
-    Ok(Thunk { guest: guest_va, host: code as usize as u64, _backend: backend })
+    Ok(Thunk {
+        guest: guest_va,
+        host: code as usize as u64,
+        _backend: backend,
+    })
 }
 
 /// What every thunk calls. Not public: its only legitimate caller is code this

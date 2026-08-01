@@ -81,7 +81,9 @@ impl EntryPoint {
                 why: "thread state count overflow",
             })?;
             if state + state_bytes > end {
-                return Err(Error::BadLoadCommand { why: "thread state past command" });
+                return Err(Error::BadLoadCommand {
+                    why: "thread state past command",
+                });
             }
 
             let word = |i: usize| view.u64(state + i * 8);
@@ -102,6 +104,8 @@ impl EntryPoint {
             }
             p = state + state_bytes;
         }
-        Err(Error::BadLoadCommand { why: "no usable thread state" })
+        Err(Error::BadLoadCommand {
+            why: "no usable thread state",
+        })
     }
 }
