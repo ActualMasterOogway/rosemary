@@ -680,14 +680,34 @@ unsafe extern "C" fn typed_entry(
             // SAFETY: `out` is the calling trampoline's eight-byte slot.
             unsafe { *out = value };
         }
-        Ok(Err(e)) => vm.set_pending(VmError::Callback {
-            guest: guest_va,
-            reason: e.to_string(),
-        }),
+        Ok(Err(e)) => vm.set_pending(in_callback(guest_va, e)),
         Err(_) => vm.set_pending(VmError::Thunk {
             guest: guest_va,
             reason: "the guest callback panicked the runtime".into(),
         }),
+    }
+}
+
+/// Name a failure by the callback it happened in — once.
+///
+/// The entry point matters: a host framework may have any number of this
+/// runtime's thunks installed at once — a view's `initWithFrame:`, a display
+/// link, a signal handler — and "no guest code at 0x0" says nothing about which
+/// of them was running.
+///
+/// **Wrapping an already-named failure again does not.** A callback that fails
+/// inside a callback would otherwise render as "in the guest callback at X: in
+/// the guest callback at X: …", one prefix deeper per level, and a host that
+/// retries turns that into a log measured in gigabytes. The innermost frame is
+/// the one that failed and the one worth naming, so an error that already
+/// carries a callback's name passes through unchanged.
+fn in_callback(guest_va: u64, e: VmError) -> VmError {
+    match e {
+        already @ VmError::Callback { .. } => already,
+        e => VmError::Callback {
+            guest: guest_va,
+            reason: e.to_string(),
+        },
     }
 }
 
@@ -758,15 +778,7 @@ unsafe extern "C" fn thunk_entry(guest_va: u64, ints: *const u64, floats: *const
     match std::panic::catch_unwind(AssertUnwindSafe(|| vm.call_with(guest_va, ctx))) {
         Ok(Ok(rax)) => rax,
         Ok(Err(e)) => {
-            // Named by the callback's own entry point as well as by what went
-            // wrong. A host framework may have any number of this runtime's
-            // thunks installed at once — a view's `initWithFrame:`, a display
-            // link, a signal handler — and "no guest code at 0x0" says nothing
-            // about which of them was running.
-            vm.set_pending(VmError::Callback {
-                guest: guest_va,
-                reason: e.to_string(),
-            });
+            vm.set_pending(in_callback(guest_va, e));
             0
         }
         Err(_) => {

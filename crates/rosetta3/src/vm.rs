@@ -122,6 +122,50 @@ pub enum VmError {
     TooDeep { pc: u64 },
 }
 
+/// How many times the runtime will say the same thing before going quiet.
+///
+/// A parked failure is *taken* by the run loop and re-raised, so a host that
+/// keeps calling a failing callback — a run loop, a retry, a framework that
+/// treats nil as "try again" — produces one line per attempt. That is a
+/// diagnostic while it is a handful and a denial of service when it is not.
+const SAY_LIMIT: usize = 16;
+
+/// Report a failure once, and stop repeating yourself.
+///
+/// Written after a five-second run produced a **6.7 GB** log. Two things
+/// compounded, and the multiplication is the reason the number is that large:
+/// the message was reprinted for every attempt, and every attempt also made it
+/// *longer*, because a failure crossing a callback boundary was wrapped in
+/// another [`VmError::Callback`] that prefixed the previous rendering. Repeated
+/// *n* times that is O(n²) bytes. The wrapping is fixed at its source — see
+/// [`crate::thunk`] — and this is the other half.
+///
+/// Identical consecutive messages are dropped rather than counted, because the
+/// interesting event is the *first* one and everything after it is the host
+/// retrying.
+fn say(err: &VmError) {
+    use std::sync::Mutex;
+    static SAID: Mutex<(usize, String)> = Mutex::new((0, String::new()));
+
+    let text = err.to_string();
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    let (count, last) = &mut *said;
+    if *count > SAY_LIMIT || *last == text {
+        return;
+    }
+    *count += 1;
+    last.clear();
+    last.push_str(&text);
+    match *count > SAY_LIMIT {
+        // The cap is announced rather than silently applied: a run that simply
+        // stopped reporting would look like a run that stopped failing.
+        true => eprintln!(
+            "rosetta3: {SAY_LIMIT} failures reported; further ones are parked and not printed"
+        ),
+        false => eprintln!("rosetta3: {text}"),
+    }
+}
+
 /// How control reached the address that stopped the guest.
 ///
 /// Recorded by the run loop for one exit only — the one immediately before —
@@ -1084,7 +1128,7 @@ impl Vm {
         };
         let mut slot = state.pending.borrow_mut();
         if slot.is_none() {
-            eprintln!("rosetta3: {err}");
+            say(&err);
             *slot = Some(err);
         }
     }

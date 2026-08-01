@@ -42,6 +42,58 @@ use machish::resolve::SyntheticDylib;
 /// return address.
 static STACK_CHK_GUARD: u64 = 0x00ff_dead_beef_c0de;
 
+/// `int _NSGetExecutablePath(char *buf, uint32_t *bufsize)`.
+///
+/// Denied to the host by [`machish`] for a good reason — it is host process
+/// state, and the host process is `rosetta3` — but denied *and unanswered* it
+/// resolves to null, and a guest that calls it stops with "unsatisfied import"
+/// having asked a perfectly reasonable question.
+///
+/// The answer is available and it is the host's own path, because of
+/// [`crate::bundle`]: an application is re-executed from a mirror of its bundle,
+/// so this process really is running at
+/// `…/UNDERTALE.app/Contents/MacOS/Mac_Runner`. That is also the path the guest
+/// wants — it is what `mainBundle` resolves from and where its `Resources` are
+/// symlinked — so forwarding is not an approximation here, it is the right
+/// answer for the same reason the re-exec exists.
+///
+/// Written natively rather than through the marshaller because both arguments
+/// are pointers into guest memory and the guest is identity-mapped: the host's
+/// own `libc` writes into guest buffers on every forwarded call, and this is
+/// that, with the string chosen here.
+///
+/// # Safety
+///
+/// Called only through an import slot this module defines, with the two
+/// arguments the declaration gives it.
+unsafe extern "C" fn ns_get_executable_path(buf: *mut u8, bufsize: *mut u32) -> i32 {
+    if bufsize.is_null() {
+        return -1;
+    }
+    let path = std::env::current_exe().unwrap_or_default();
+    let path = path.to_string_lossy();
+    // The trailing NUL is part of what the caller must have room for, which is
+    // the detail the real implementation is precise about and a shim gets wrong
+    // by one byte.
+    let needed = path.len() + 1;
+    // SAFETY: `bufsize` is a guest `uint32_t *`, which the identity mapping
+    // makes directly addressable.
+    let available = unsafe { *bufsize } as usize;
+    if buf.is_null() || available < needed {
+        // The documented failure: report the size required and change nothing.
+        // SAFETY: as above.
+        unsafe { *bufsize = needed as u32 };
+        return -1;
+    }
+    // SAFETY: `buf` has at least `needed` bytes, just checked against the
+    // caller's own count.
+    unsafe {
+        std::ptr::copy_nonoverlapping(path.as_ptr(), buf, path.len());
+        *buf.add(path.len()) = 0;
+    }
+    0
+}
+
 /// Symbols the runtime supplies itself, consulted before the host.
 ///
 /// Flat, so it answers a two-level import naming any library: the guest asks
@@ -59,6 +111,9 @@ pub fn provider() -> SyntheticDylib {
     for name in machish::extensions::tlv::BOOTSTRAP_SYMBOLS {
         lib.define_fn(name, crate::tls::bootstrap as *const ());
     }
+    // Two underscores as the Mach-O spells it: one from C mangling, one from
+    // the identifier `_NSGetExecutablePath`.
+    lib.define_fn("__NSGetExecutablePath", ns_get_executable_path as *const ());
     lib
 }
 
@@ -72,5 +127,29 @@ mod tests {
             STACK_CHK_GUARD.to_le_bytes().contains(&0),
             "a canary without a zero byte can be copied back by a string overflow"
         );
+    }
+
+    #[test]
+    fn the_executable_path_round_trips_and_reports_the_size_it_needs() {
+        let expected = std::env::current_exe().unwrap();
+        let expected = expected.to_string_lossy();
+
+        // The documented failure first: too small a buffer must change nothing
+        // and report the size required, *including* the NUL. A shim off by one
+        // here hands back a path with its last character missing.
+        let mut size: u32 = 1;
+        // SAFETY: a null buffer with a size the function is being asked to grow.
+        let rc = unsafe { ns_get_executable_path(std::ptr::null_mut(), &mut size) };
+        assert_eq!(rc, -1);
+        assert_eq!(size as usize, expected.len() + 1);
+
+        let mut buf = vec![0xAAu8; size as usize + 8];
+        // SAFETY: `buf` is at least `size` bytes, which is what was just asked for.
+        let rc = unsafe { ns_get_executable_path(buf.as_mut_ptr(), &mut size) };
+        assert_eq!(rc, 0);
+        let end = buf.iter().position(|b| *b == 0).expect("NUL-terminated");
+        assert_eq!(&buf[..end], expected.as_bytes());
+        // Nothing written past the terminator the caller was promised.
+        assert!(buf[end + 1..].iter().all(|b| *b == 0xAA));
     }
 }

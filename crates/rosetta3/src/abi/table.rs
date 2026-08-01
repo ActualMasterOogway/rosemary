@@ -347,6 +347,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // one as `P` would pass 64 bits where the host reads 32, which happens to
     // work until the upper half is not zero.
     sig!("IOBSDNameMatching", P, U32, U32, P),
+    // `IOHIDManagerRef IOHIDManagerCreate(CFAllocatorRef, IOOptionBits)` —
+    // a null allocator is the default one, which is what a game passes.
+    sig!("IOHIDManagerCreate", P, P, U32),
     sig!("IOIteratorNext", U32, U32),
     sig!("IOMasterPort", I32, U32, P),
     sig!("IOObjectRelease", I32, U32),
@@ -394,6 +397,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("_Block_copy", P, P),
     sig!("_Block_object_assign", V, P, P, I32),
     sig!("_Block_object_dispose", V, P, I32),
+    // Answered by `crate::shims::runtime` rather than by the host, whose
+    // executable path is only the right answer because `crate::bundle` made it
+    // so. Two underscores in the Mach-O, one after `c_name` strips the mangling.
+    sig!("_NSGetExecutablePath", I32, P, P),
     // The C++ exception surface, all of it shimmed: see [`crate::unwind`] for
     // why none of it can reach the host's libc++abi. `_ZSt9terminatev` is the
     // exception to the exception — `std::terminate` really does mean "stop this
