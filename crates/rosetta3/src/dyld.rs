@@ -221,6 +221,22 @@ fn region_of(image: &'static Image, va: u64) -> Option<(u64, &'static [u8])> {
         .copied()
 }
 
+/// `va` as `image+offset`, for an image the guest loaded. See
+/// [`Program::locate`](crate::Program::locate).
+pub fn locate(va: u64) -> Option<String> {
+    for image in images() {
+        for report in &image.report.images {
+            for seg in &report.segments {
+                if va >= seg.vmaddr && va < seg.vmaddr.wrapping_add(seg.vmsize) {
+                    let name = report.name.rsplit('/').next().unwrap_or(&report.name);
+                    return Some(format!("{name}+{:#x}", va.wrapping_sub(report.slide)));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// How many images the guest has loaded.
 pub fn loaded() -> usize {
     IMAGES.lock().unwrap_or_else(|e| e.into_inner()).len()

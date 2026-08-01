@@ -154,7 +154,9 @@ impl CodeCache {
             return Ok(hit);
         }
 
-        let (region, bytes) = program.lift_region(pc).ok_or(VmError::NoCode { pc })?;
+        let (region, bytes) = program
+            .lift_region(pc)
+            .ok_or(VmError::NoCode { pc, from: None })?;
         let (start, end) = (region.range.start, region.range.end);
 
         let func = lift_to_function::<X86_64>(&bytes, start, self.config.clone())

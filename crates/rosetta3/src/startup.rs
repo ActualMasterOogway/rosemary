@@ -75,7 +75,10 @@ pub fn run(vm: &Vm) -> Result<i32, VmError> {
     // order and the one a program that uses both depends on.
     crate::objc::call_load_methods(vm, objc)?;
     run_initializers(vm)?;
-    let entry = vm.program.entry().ok_or(VmError::NoCode { pc: 0 })?;
+    let entry = vm
+        .program
+        .entry()
+        .ok_or(VmError::NoCode { pc: 0, from: None })?;
     let (argc, argv, envp, apple) = vm.main_args();
     let status = vm.call(entry, &[argc, argv, envp, apple])?;
     Ok((status & 0xff) as i32)

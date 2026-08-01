@@ -74,7 +74,13 @@ use crate::thunk::ThunkTable;
 #[derive(Debug)]
 pub enum VmError {
     /// Nothing at this address decodes as guest code, or it is not mapped.
-    NoCode { pc: u64 },
+    ///
+    /// `from` is how control got here, and it is the difference between an
+    /// address and a lead. A garbage `rip` reached by `Return` is a corrupted
+    /// return address — look at the stack. The same value reached by
+    /// `UnknownJump` is a computed branch — look at the lift. The address alone
+    /// cannot tell those apart, and they are not the same bug.
+    NoCode { pc: u64, from: Option<Transfer> },
     /// Microlift could not translate the region — an instruction it does not
     /// implement, or a compilation failure. Named with the region it was
     /// lifting, because that is the unit of work to look at.
@@ -116,10 +122,52 @@ pub enum VmError {
     TooDeep { pc: u64 },
 }
 
+/// How control reached the address that stopped the guest.
+///
+/// Recorded by the run loop for one exit only — the one immediately before —
+/// because that is what a lost `rip` needs and keeping more would be a trace
+/// rather than a diagnostic.
+#[derive(Debug, Clone)]
+pub struct Transfer {
+    /// The region control left, as a *slid* address.
+    pub pc: u64,
+    /// The exit that transferred it, and microlift's sub-code.
+    pub exit: ExitReason,
+    pub code: u32,
+    /// The guest stack pointer as the region left it. A `Return` to nonsense
+    /// with a plausible `rsp` is a wrong value written to the stack; one with an
+    /// implausible `rsp` is a lost frame.
+    pub rsp: u64,
+    /// `pc` as `image+offset`, filled in only on the error path.
+    ///
+    /// The mapping is chosen by `mmap` and moves every run, so a slid address is
+    /// not something two runs — or a run and a disassembler — can be compared
+    /// against. This is the form that can.
+    pub at: Option<String>,
+}
+
+impl fmt::Display for Transfer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "reached from {:#x}", self.pc)?;
+        if let Some(at) = &self.at {
+            write!(f, " ({at})")?;
+        }
+        write!(
+            f,
+            " by {} (code {:#x}), rsp {:#x}",
+            self.exit, self.code, self.rsp
+        )
+    }
+}
+
 impl fmt::Display for VmError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            VmError::NoCode { pc } => write!(f, "no guest code at {pc:#x}"),
+            VmError::NoCode { pc, from: None } => write!(f, "no guest code at {pc:#x}"),
+            VmError::NoCode {
+                pc,
+                from: Some(from),
+            } => write!(f, "no guest code at {pc:#x}: {from}"),
             VmError::Lift { pc, start, source } => {
                 write!(
                     f,
@@ -583,6 +631,9 @@ impl Vm {
         state: &crate::thread::ThreadState,
         ctx: &mut RegisterContext,
     ) -> Result<u64, VmError> {
+        // How control left the previous region, kept for exactly one step. It is
+        // what makes a lost `rip` diagnosable: see [`Transfer`].
+        let mut from: Option<Transfer> = None;
         loop {
             let pc = ctx.rip;
 
@@ -643,10 +694,29 @@ impl Vm {
                 .cache
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .get_or_lift(&self.program, pc)?;
+                .get_or_lift(&self.program, pc)
+                .map_err(|e| match e {
+                    VmError::NoCode { pc, from: None } => VmError::NoCode {
+                        pc,
+                        from: from.map(|mut t| {
+                            t.at = self.program.locate(t.pc);
+                            t
+                        }),
+                    },
+                    other => other,
+                })?;
             ctx.rip = pc;
             let exit = translation.enter(ctx);
             state.rsp.set(ctx.rsp);
+            from = Some(Transfer {
+                pc,
+                exit,
+                code: ctx.exit_code,
+                rsp: ctx.rsp,
+                // Left empty here: this runs on every exit, and rendering a name
+                // per exit would be a trace. Filled in where it is reported.
+                at: None,
+            });
 
             if let Some(done) = self.step(ctx, exit)? {
                 return Ok(done);

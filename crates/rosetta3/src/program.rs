@@ -498,6 +498,30 @@ impl<M: Regions> Program<M> {
         self.memory.region_at(va).is_some() || crate::dyld::contains(va)
     }
 
+    /// `va` as `image+offset`, in the image's *own* address space.
+    ///
+    /// Every address this runtime reports is slid by whatever `mmap` chose that
+    /// run, so two runs of the same failure name two different numbers and
+    /// neither can be looked up in a disassembler. This is the form that
+    /// survives: `Mac_Runner+0x1a3c50` is the same place every time, and it is
+    /// what `otool -arch x86_64 -tV` and a debugger both speak.
+    ///
+    /// Searched by segment rather than by mapped region, so the answer names the
+    /// image the address is *in* rather than whichever reservation happens to
+    /// contain it.
+    pub fn locate(&self, va: u64) -> Option<String> {
+        for image in &self.report.images {
+            for seg in &image.segments {
+                let start = seg.vmaddr;
+                if va >= start && va < start.wrapping_add(seg.vmsize) {
+                    let name = image.name.rsplit('/').next().unwrap_or(&image.name);
+                    return Some(format!("{name}+{:#x}", va.wrapping_sub(image.slide)));
+                }
+            }
+        }
+        crate::dyld::locate(va)
+    }
+
     /// The extent of `__text`, which is what counts as "inside the guest" when
     /// classifying a call target.
     pub fn text_range(&self) -> std::ops::Range<u64> {

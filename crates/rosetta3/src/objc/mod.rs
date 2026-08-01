@@ -102,6 +102,26 @@ pub enum Refusal {
     /// ivar is deliberate: a class one ivar short lays every later ivar out at
     /// the wrong offset.
     IvarRejected { name: String, ivar: String },
+    /// A method that is installed and works for a *guest* sender, but which the
+    /// **host** cannot call faithfully.
+    ///
+    /// The distinction is the whole point. A guest→guest send never touches a
+    /// thunk — [`dispatch`] jumps straight to the `IMP` with the guest's own
+    /// registers and stack — so `-[Dog weight]` returning a `double` is
+    /// perfectly callable from the guest and refusing to install it would break
+    /// a working program. What cannot happen is the *host* calling it: a thunk
+    /// carries six integer and eight floating-point registers and an integer
+    /// return, so an aggregate argument, a seventh integer, or a
+    /// floating-point return is read from somewhere nobody wrote.
+    ///
+    /// Listed rather than refused, because the method is genuinely usable on the
+    /// path most of them are used on, and because the list is the work item:
+    /// each entry closes when the thunk is built from the encoding.
+    MethodNotHostCallable {
+        name: String,
+        method: String,
+        reason: &'static str,
+    },
     /// A method whose `IMP` could not be made callable from the host.
     MethodRejected {
         name: String,
@@ -515,7 +535,16 @@ fn register_class(
     for (target, list) in [(cls, &class.ro.methods), (meta, class_methods)] {
         for m in list {
             match add_method(vm, target, m) {
-                Ok(()) => methods += 1,
+                Ok(carried) => {
+                    methods += 1;
+                    if let Some(reason) = carried {
+                        rt.refusals.push(Refusal::MethodNotHostCallable {
+                            name: name.to_string(),
+                            method: m.name.clone(),
+                            reason,
+                        });
+                    }
+                }
                 Err(reason) => {
                     rt.refusals.push(Refusal::MethodRejected {
                         name,
@@ -558,13 +587,29 @@ fn register_class(
 /// The thunk is the whole reason host→guest dispatch needs no interception: the
 /// host's own `objc_msgSend` finds this and calls it as native arm64, exactly
 /// as the host's `qsort` calls a guest comparator.
-fn add_method(vm: &Vm, target: host::Class, m: &ObjcMethod) -> Result<(), &'static str> {
+fn add_method(
+    vm: &Vm,
+    target: host::Class,
+    m: &ObjcMethod,
+) -> Result<Option<&'static str>, &'static str> {
     let (Some(name), Some(types)) = (host::c_string(&m.name), host::c_string(&m.types)) else {
         return Err("the selector or type encoding has an interior NUL");
     };
     if !vm.program.is_guest_address(m.imp) {
         return Err("the implementation is not a guest address");
     }
+    // The encoding is right here, and until now it was thrown away. A thunk
+    // carries what the *guest's* convention passes in registers and nothing
+    // else — see [`crate::thunk`] — so a method taking an `NSRect` by value is
+    // installed, called by the host, and reads its argument from a guest stack
+    // slot nobody wrote. That is the one failure mode this project refuses to
+    // produce: not a fault, not a diagnostic, just a garbage rectangle that
+    // becomes a garbage pointer somewhere further on.
+    //
+    // Checked rather than assumed, and refused by name. `-[YYGLView
+    // initWithFrame:]` is what found it: AppKit instantiates it from a nib,
+    // hands it four doubles in `v0`–`v3`, and the guest reads `0x10(%rbp)`.
+    let carried = thunk_can_carry(&m.types);
     let imp = vm
         .thunk_for(m.imp)
         .map_err(|_| "a host->guest thunk could not be built")?;
@@ -577,11 +622,74 @@ fn add_method(vm: &Vm, target: host::Class, m: &ObjcMethod) -> Result<(), &'stat
     // `false` means the class already has the selector, which for a freshly
     // allocated class means the guest declared it twice.
     if ok {
-        Ok(())
+        Ok(carried.err())
     } else {
         Err("the class already responds to that selector")
     }
 }
+
+/// Whether a host→guest thunk can carry this method's arguments and result.
+///
+/// [`crate::thunk`] states the shape: six integer arguments, eight
+/// floating-point ones, an integer return, and no knowledge of the callback's
+/// types. An Objective-C method is the one callback whose types this runtime
+/// *does* know — the encoding is in the class metadata — so the claim is
+/// checkable here, and a method outside the shape is refused rather than
+/// installed and mis-called.
+///
+/// What each refusal is waiting for is a thunk built from the encoding rather
+/// than one generic trampoline: the argument would be placed by the same
+/// [`crate::abi::aggregate`] rules that already carry it in the other
+/// direction. Until then this is a list of work items instead of a class of
+/// silent wrong answers.
+fn thunk_can_carry(encoding: &str) -> Result<(), &'static str> {
+    use crate::abi::ArgType as T;
+    use crate::abi::aggregate::Shape;
+
+    let signature = encoding::signature(encoding)?;
+    let Some((ret, params)) = signature.shapes.split_first() else {
+        return Err("the type encoding describes no return value");
+    };
+
+    // An aggregate return needs a hidden buffer on one side and `v0`–`v3` or
+    // `x8` on the other; a floating-point return needs a differently-typed
+    // trampoline. The generic one returns an integer.
+    match ret {
+        Shape::Struct(_) => {
+            return Err("returns an aggregate by value, which a thunk cannot carry");
+        }
+        Shape::Scalar(T::SinglePrecisionFp | T::DoublePrecisionFp) => {
+            return Err("returns a floating-point value, which a thunk cannot carry");
+        }
+        _ => {}
+    }
+
+    let mut integers = 0usize;
+    let mut floats = 0usize;
+    for shape in params {
+        match shape {
+            // Not "an aggregate is unsupported": an aggregate *is* its leaves as
+            // far as register placement goes, and the two sides disagree about
+            // which leaves go where. Refusing by name says which method.
+            Shape::Struct(_) => {
+                return Err("takes an aggregate by value, which a thunk cannot carry");
+            }
+            Shape::Scalar(T::SinglePrecisionFp | T::DoublePrecisionFp) => floats += 1,
+            Shape::Scalar(_) => integers += 1,
+        }
+    }
+    if integers > INT_ARG_REGISTERS {
+        return Err("takes more integer arguments than a thunk passes in registers");
+    }
+    if floats > FP_ARG_REGISTERS {
+        return Err("takes more floating-point arguments than a thunk passes in registers");
+    }
+    Ok(())
+}
+
+/// What [`crate::thunk`] places, named here so the two cannot drift apart.
+const INT_ARG_REGISTERS: usize = 6;
+const FP_ARG_REGISTERS: usize = 8;
 
 /// Recreate a protocol the guest declares.
 ///
@@ -664,7 +772,16 @@ fn register_category(vm: &Vm, rt: &mut ObjcRuntime, cat: &ObjcCategory) {
     for (on, list) in [(target, &cat.instance_methods), (meta, &cat.class_methods)] {
         for m in list {
             match add_method(vm, on, m) {
-                Ok(()) => added += 1,
+                Ok(carried) => {
+                    added += 1;
+                    if let Some(reason) = carried {
+                        rt.refusals.push(Refusal::MethodNotHostCallable {
+                            name: cat.name.clone(),
+                            method: m.name.clone(),
+                            reason,
+                        });
+                    }
+                }
                 Err(reason) => rt.refusals.push(Refusal::MethodRejected {
                     name: cat.name.clone(),
                     method: m.name.clone(),
