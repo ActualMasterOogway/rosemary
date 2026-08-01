@@ -45,6 +45,23 @@ fn run(path: &str, args: Vec<String>, policy: ImportPolicy) -> ExitCode {
     let vm: &'static Vm = Box::leak(Box::new(vm));
     rosetta3::thunk::publish(vm);
 
+    // Objective-C registration happens inside `startup::run`, in dyld's order.
+    // It is driven from here first only so that its refusals reach the user:
+    // a class the host runtime would not take is a program that will fail at
+    // its first message with nothing to point at, and the refusal names it.
+    // The call is idempotent, so doing it twice costs a map lookup.
+    match vm.register_objc() {
+        Ok(objc) => {
+            for r in objc.refusals() {
+                eprintln!("rosetta3: objc: {r:?}");
+            }
+        }
+        Err(e) => {
+            eprintln!("rosetta3: {path}: registering Objective-C classes: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     match startup::run(vm) {
         // `exit` rather than returning the status, and the difference is not
         // cosmetic. Returning goes back through Rust's own start-up shim, which

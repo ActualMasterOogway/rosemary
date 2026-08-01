@@ -122,6 +122,7 @@ pub mod abi;
 pub mod audit;
 pub mod cache;
 pub mod jmpbuf;
+pub mod objc;
 pub mod program;
 pub mod region;
 pub mod shims;

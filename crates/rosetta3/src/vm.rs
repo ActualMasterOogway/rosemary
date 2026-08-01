@@ -297,6 +297,14 @@ pub struct Vm {
     cache: Mutex<CodeCache>,
     thunks: Mutex<ThunkTable>,
     view: GuestView,
+    /// The guest's Objective-C classes, once realized in the host runtime.
+    ///
+    /// A `OnceLock` rather than a `Mutex`, because registration happens exactly
+    /// once — before any guest code runs, from [`crate::startup`] — and every
+    /// later use is a read from whichever thread is dispatching a message. That
+    /// is the same lifetime shape as the code cache's contents and a much
+    /// simpler one than its locking.
+    objc: std::sync::OnceLock<crate::objc::ObjcRuntime>,
 }
 
 /// A linked program, shareable between the threads running it.
@@ -400,7 +408,30 @@ impl Vm {
             cache: Mutex::new(cache),
             thunks: Mutex::new(ThunkTable::new()),
             view: GuestView::new(ranges),
+            objc: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Realize the guest's Objective-C classes in the host runtime.
+    ///
+    /// Idempotent, and deliberately *not* done in [`Vm::with_policy`]: it makes
+    /// guest function pointers callable from the host, which means building
+    /// thunks, which means compiling. A `Vm` that is only ever inspected should
+    /// not pay for that, and the audit path is exactly such a caller.
+    pub fn register_objc(&self) -> Result<&crate::objc::ObjcRuntime, VmError> {
+        if let Some(existing) = self.objc.get() {
+            return Ok(existing);
+        }
+        let rt = crate::objc::register(self)?;
+        // A racing caller's value wins and ours is dropped; both describe the
+        // same registration, because the host runtime interns by name.
+        let _ = self.objc.set(rt);
+        Ok(self.objc.get().expect("just set"))
+    }
+
+    /// The registered Objective-C classes, if [`Vm::register_objc`] has run.
+    pub fn objc(&self) -> Option<&crate::objc::ObjcRuntime> {
+        self.objc.get()
     }
 
     /// Guest memory, as a value a shim can hold.

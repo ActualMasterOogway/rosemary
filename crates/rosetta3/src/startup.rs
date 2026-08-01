@@ -66,6 +66,11 @@ pub fn run_initializers(vm: &Vm) -> Result<usize, VmError> {
 /// so a guest returning `-1` reports 255 here exactly as it would have to the
 /// shell.
 pub fn run(vm: &Vm) -> Result<i32, VmError> {
+    // Before any guest code, as dyld does it: `libobjc` realizes an image's
+    // classes when the image is mapped, which is strictly before that image's
+    // initializers run. A constructor may reference a class, and a `+load` --
+    // which is itself a method -- certainly does.
+    vm.register_objc()?;
     run_initializers(vm)?;
     let entry = vm.program.entry().ok_or(VmError::NoCode { pc: 0 })?;
     let (argc, argv, envp, apple) = vm.main_args();

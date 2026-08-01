@@ -423,6 +423,15 @@ pub fn build_cpp(name: &str, source: &str) -> Option<String> {
     build_x86_64(name, source, &["-x", "c++", "-lc++"])
 }
 
+/// Compile `source` as x86_64 Objective-C and return its path.
+///
+/// `-framework Foundation` is not optional even for a fixture that only
+/// declares a root class: there is no `NSObject` to derive from without it, and
+/// a class with no superclass exercises a path real programs never take.
+pub fn build_objc(name: &str, source: &str) -> Option<String> {
+    build_x86_64(name, source, &["-x", "objective-c", "-framework", "Foundation"])
+}
+
 /// Milestone 5's exception program: everything about unwinding that works.
 ///
 /// Each clause is a separate claim, and each one fails on its own:

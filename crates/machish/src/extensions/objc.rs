@@ -121,6 +121,11 @@ const PROPERTY_SIZE: u64 = 16;
 /// that way. They are not part of the address.
 const FAST_DATA_MASK: Word = 0x0000_7fff_ffff_fff8;
 
+/// `bits` low-bit markers. A class with either set is Swift, and what `bits`
+/// addresses is Swift metadata rather than a `class_ro_t`.
+const FAST_IS_SWIFT_LEGACY: Word = 1 << 0;
+const FAST_IS_SWIFT_STABLE: Word = 1 << 1;
+
 /// Set in a method list's entry-size word when entries are relative. See the
 /// scope note: an x86-64 image never sets it.
 const METHOD_LIST_IS_SMALL: u32 = 0x8000_0000;
@@ -253,10 +258,25 @@ pub struct ObjcClass {
     /// The superclass's address — **bound**, so for a class deriving from
     /// `NSObject` this is an address in the host's `libobjc`, not in the guest.
     pub superclass: Word,
+    /// The raw `class_data_bits_t`, before masking. Reported as well as
+    /// followed because the three low bits are the only thing that says a class
+    /// is Swift, and [`ro`](ObjcClass::ro) has them masked off by construction.
+    pub bits: Word,
     pub ro: ClassRo,
     /// The metaclass, decoded when it lies in this image. Its `ro` holds the
     /// class methods; a class's `+` methods live nowhere else.
     pub meta: Option<ObjcMetaclass>,
+}
+
+impl ObjcClass {
+    /// Whether `bits` carries one of the two Swift markers.
+    ///
+    /// A Swift class's `bits` does not point at a `class_ro_t` at all, so a
+    /// consumer that realizes classes must ask this before believing
+    /// [`ro`](ObjcClass::ro).
+    pub fn is_swift(&self) -> bool {
+        self.bits & (FAST_IS_SWIFT_LEGACY | FAST_IS_SWIFT_STABLE) != 0
+    }
 }
 
 /// A metaclass. Structurally an [`ObjcClass`] whose own `isa` is the root
@@ -714,6 +734,7 @@ impl Cx<'_> {
             return Ok(None);
         }
         let Some(ro) = self.class_ro_of(va)? else { return Ok(None) };
+        let bits = self.word_at(va.wrapping_add(CLASS_BITS_OFF))?;
         let isa = self.word_at(va)?;
         let meta = match self.local(va, isa) {
             Some(m) => self.class_ro_of(m)?.map(|ro| ObjcMetaclass {
@@ -728,6 +749,7 @@ impl Cx<'_> {
             va,
             isa,
             superclass: self.word_at(va.wrapping_add(8))?,
+            bits,
             ro,
             meta,
         }))
