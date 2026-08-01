@@ -56,6 +56,15 @@ pub struct VarArgs<'a> {
     int: usize,
     fp: usize,
     stack: u64,
+    /// How to render `%@`, for a format string that is an `NSString`.
+    ///
+    /// `None` for a C format string, where `%@` is not a conversion at all and
+    /// is emitted literally like any other unrecognised one. Cocoa's own
+    /// `NSLog` is the only caller that supplies it; see
+    /// [`super::nslog`], which is also where the answer comes from —
+    /// `[object description]` is a *message*, and this module knows nothing
+    /// about sending one.
+    object: Option<&'a dyn Fn(u64) -> Vec<u8>>,
 }
 
 impl<'a> VarArgs<'a> {
@@ -75,7 +84,22 @@ impl<'a> VarArgs<'a> {
             int: fixed_int,
             fp: 0,
             stack: 0,
+            object: None,
         }
+    }
+
+    /// As [`VarArgs::new`], for an `NSString` format, where `%@` prints an
+    /// object's description.
+    pub fn with_objects(
+        symbol: &'a str,
+        ctx: &'a RegisterContext,
+        mem: &'a dyn GuestMemory,
+        fixed_int: usize,
+        object: &'a dyn Fn(u64) -> Vec<u8>,
+    ) -> Self {
+        let mut args = VarArgs::new(symbol, ctx, mem, fixed_int);
+        args.object = Some(object);
+        args
     }
 
     fn next_stack(&mut self) -> Result<u64> {
@@ -236,6 +260,14 @@ pub fn render(fmt: &[u8], args: &mut VarArgs<'_>) -> Result<Vec<u8>> {
 
         match conv {
             b'%' => out.push(b'%'),
+            // Cocoa's object conversion. Not part of C, so it only exists when
+            // the caller said the format is an `NSString`; otherwise it falls
+            // through to the literal path with every other unknown conversion.
+            b'@' if args.object.is_some() => {
+                let obj = args.next_int()?;
+                let text = args.object.expect("checked")(obj);
+                pad_bytes(&mut out, &text, &spec);
+            }
             b'd' | b'i' => {
                 let v = sign_extend(args.next_int()?, len);
                 let neg = v < 0;

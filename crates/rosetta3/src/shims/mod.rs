@@ -45,6 +45,7 @@ use crate::abi::{AbiError, GuestMemory, Result};
 
 pub mod atexit;
 pub mod ioctl;
+pub mod nslog;
 pub mod openat;
 pub mod printf;
 pub mod runtime;
@@ -75,6 +76,7 @@ pub fn dispatch(
         "__snprintf_chk" => printf::snprintf_chk,
         // Variadic in its declaration and one argument wide in fact; see
         // [`ioctl`] for why that makes it forwardable when `printf` is not.
+        "NSLog" => nslog::nslog,
         "ioctl" => ioctl::ioctl,
         // Variadic in their declarations and one argument wide in fact, decided
         // by a flag word rather than a format string; see [`openat`].
@@ -122,7 +124,8 @@ pub fn is_shimmed(symbol: &str) -> bool {
     }
     matches!(
         name,
-        "printf"
+        "NSLog"
+            | "printf"
             | "fprintf"
             | "sprintf"
             | "snprintf"

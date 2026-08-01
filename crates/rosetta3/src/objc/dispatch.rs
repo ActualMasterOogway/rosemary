@@ -80,6 +80,7 @@ use machish::resolve::SyntheticDylib;
 
 use microlift::arch::x86_64::context::RegisterContext;
 
+use crate::abi::aggregate::{GuestClass, Shape};
 use crate::abi::marshal::{self, Convert};
 use crate::abi::{AbiError, ArgType as T, GuestMemory, Result};
 use crate::vm::Vm;
@@ -249,10 +250,56 @@ static RUNTIME: &[Runtime] = &[
 /// Listed rather than pattern-matched so that a spelling nobody thought about —
 /// `objc_msgSendSuper2_stret`, say — is an unresolved import that names itself
 /// rather than something quietly treated as an ordinary send.
-static MESSAGES: &[(&str, Message)] = &[
-    ("objc_msgSend", Message::Direct),
-    ("objc_msgSendSuper", Message::Super { skip_one: false }),
-    ("objc_msgSendSuper2", Message::Super { skip_one: true }),
+static MESSAGES: &[(&str, Send)] = &[
+    (
+        "objc_msgSend",
+        Send {
+            message: Message::Direct,
+            stret: false,
+        },
+    ),
+    (
+        "objc_msgSendSuper",
+        Send {
+            message: Message::Super { skip_one: false },
+            stret: false,
+        },
+    ),
+    (
+        "objc_msgSendSuper2",
+        Send {
+            message: Message::Super { skip_one: true },
+            stret: false,
+        },
+    ),
+    // The struct-returning spellings. Nothing about the *search* differs: what
+    // differs is that `rdi` holds a buffer the caller allocated, so every
+    // argument is one register along, and the result is written there rather
+    // than returned in a register. `place_shapes` derives the same shift
+    // independently from the method's own encoding, and `send` refuses if the
+    // two disagree — a guest calling the wrong trampoline for its method's
+    // return would otherwise read its receiver out of the buffer pointer.
+    (
+        "objc_msgSend_stret",
+        Send {
+            message: Message::Direct,
+            stret: true,
+        },
+    ),
+    (
+        "objc_msgSendSuper_stret",
+        Send {
+            message: Message::Super { skip_one: false },
+            stret: true,
+        },
+    ),
+    (
+        "objc_msgSendSuper2_stret",
+        Send {
+            message: Message::Super { skip_one: true },
+            stret: true,
+        },
+    ),
 ];
 
 /// Spellings that exist and are refused, with the reason attached.
@@ -260,18 +307,6 @@ static REFUSED: &[(&str, &str)] = &[
     (
         "objc_msgSend_fpret",
         "a long double return lives in st0, which has no arm64 counterpart",
-    ),
-    (
-        "objc_msgSend_stret",
-        "a method returning a struct by value cannot be marshalled (M2)",
-    ),
-    (
-        "objc_msgSendSuper_stret",
-        "a method returning a struct by value cannot be marshalled (M2)",
-    ),
-    (
-        "objc_msgSendSuper2_stret",
-        "a method returning a struct by value cannot be marshalled (M2)",
     ),
     (
         "objc_exception_throw",
@@ -335,6 +370,42 @@ enum Message {
     Super { skip_one: bool },
 }
 
+/// One message send's shape: which trampoline, and whether the caller left a
+/// hidden return buffer in the first integer register.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Send {
+    message: Message,
+    /// `objc_msgSend_stret`. The compiler emits it exactly when the method's
+    /// return is SysV MEMORY class, so the receiver is in `rsi` and the
+    /// selector in `rdx` — every argument shifted one register along by the
+    /// buffer pointer in `rdi`.
+    stret: bool,
+}
+
+impl Send {
+    /// Index of the integer register holding the receiver: `rdi` ordinarily,
+    /// `rsi` when a hidden buffer came first.
+    fn receiver_reg(self) -> usize {
+        usize::from(self.stret)
+    }
+}
+
+/// The SysV AMD64 integer argument registers, in order.
+fn arg_reg(ctx: &RegisterContext, i: usize) -> u64 {
+    [ctx.rdi, ctx.rsi, ctx.rdx, ctx.rcx, ctx.r8, ctx.r9][i]
+}
+
+fn set_arg_reg(ctx: &mut RegisterContext, i: usize, v: u64) {
+    *[
+        &mut ctx.rdi,
+        &mut ctx.rsi,
+        &mut ctx.rdx,
+        &mut ctx.rcx,
+        &mut ctx.r8,
+        &mut ctx.r9,
+    ][i] = v;
+}
+
 /// Whether `name` (underscore already stripped) is one of this module's.
 pub fn shim_for(name: &str) -> Option<crate::jmpbuf::Shim> {
     if MESSAGES.iter().any(|(n, _)| *n == name)
@@ -370,11 +441,44 @@ pub fn provider() -> SyntheticDylib {
         .chain(MESSAGES.iter().map(|(n, _)| *n))
         .chain(REFUSED.iter().map(|(n, _)| *n));
     for name in names {
-        if let Some(addr) = host_symbol(name) {
+        if let Some(addr) = host_symbol(name).or_else(|| absent(name)) {
             lib.define_fn(&format!("_{name}"), addr as usize as *const ());
         }
     }
     lib
+}
+
+/// An address for a trampoline the *host* does not have.
+///
+/// The three `_stret` spellings exist only on x86-64: AAPCS64 returns every
+/// struct through `x8`, so arm64's `libobjc` needs no separate entry point and
+/// `dlsym` answers null for all three. This runtime intercepts them by name and
+/// never calls the address — but an import has to resolve to *something*, and
+/// null is how this project spells "unsatisfied", which would refuse the call
+/// before the shim ever saw it.
+///
+/// Each gets a function of its own rather than sharing one, because
+/// `import_by_target` maps an address back to a symbol and a shared address
+/// would make a tail call to one of them arrive as another. Each panics if it
+/// is ever really entered, which is the honest thing for an address that is
+/// only ever meant to be a name.
+fn absent(name: &str) -> Option<u64> {
+    unsafe extern "C" fn stret() -> u64 {
+        unreachable!("objc_msgSend_stret was called rather than intercepted")
+    }
+    unsafe extern "C" fn super_stret() -> u64 {
+        unreachable!("objc_msgSendSuper_stret was called rather than intercepted")
+    }
+    unsafe extern "C" fn super2_stret() -> u64 {
+        unreachable!("objc_msgSendSuper2_stret was called rather than intercepted")
+    }
+    let f: unsafe extern "C" fn() -> u64 = match name {
+        "objc_msgSend_stret" => stret,
+        "objc_msgSendSuper_stret" => super_stret,
+        "objc_msgSendSuper2_stret" => super2_stret,
+        _ => return None,
+    };
+    Some(f as *const () as usize as u64)
 }
 
 /// The host's own implementation of `name`, if this process has one.
@@ -465,19 +569,20 @@ impl Convert for Classes<'_> {
 /// result is in the guest's return register.
 fn send(
     symbol: &str,
-    message: Message,
+    send: Send,
     vm: &Vm,
     ctx: &mut RegisterContext,
     mem: &mut dyn GuestMemory,
 ) -> Result<()> {
-    let sel = ctx.rsi;
+    let base = send.receiver_reg();
+    let sel = arg_reg(ctx, base + 1);
 
     // Where the receiver is, and where the method search starts, which for a
     // `super` send are two different classes.
-    let (receiver, search) = match message {
-        Message::Direct => (ctx.rdi, None),
+    let (receiver, search) = match send.message {
+        Message::Direct => (arg_reg(ctx, base), None),
         Message::Super { skip_one } => {
-            let sup = ctx.rdi;
+            let sup = arg_reg(ctx, base);
             let receiver = (mem as &dyn GuestMemory).read_u64(sup, symbol)?;
             let named = (mem as &dyn GuestMemory).read_u64(sup.wrapping_add(8), symbol)?;
             let named = vm.objc_host_class(named) as host::Class;
@@ -555,23 +660,47 @@ fn send(
     if let Some(guest_imp) = vm.guest_behind_thunk(imp) {
         // A `super` send arrived with the `objc_super` structure in `rdi`, and
         // the method is called with the receiver.
-        ctx.rdi = receiver;
+        set_arg_reg(ctx, base, receiver);
         return transfer(symbol, ctx, mem, guest_imp);
     }
 
     // Guest → host: the method's own type encoding is the signature.
-    let signature = signature_of(symbol, method, sel)?;
+    let signature = signature_of(symbol, method)?;
+    // A variadic method's arguments are in registers the encoding does not
+    // describe. The ones a program actually reaches all have the same shape —
+    // a trailing `NSString` format — so they are *rendered here* and the method
+    // is then sent with the result standing in for its format, which is a call
+    // the encoding does describe exactly. See [`render_variadic`].
+    if is_variadic(sel) {
+        render_variadic(symbol, &signature, base, ctx, mem)?;
+    }
+    // Two independent statements about the same fact, held to each other. The
+    // *guest* said "struct return" by calling the `_stret` trampoline; the
+    // *method* says so through its encoding. If they disagree, every argument
+    // is one register out — the receiver would be read from the buffer pointer
+    // — and nothing about the result would fault.
+    let by_encoding = matches!(
+        signature.shapes.first(),
+        Some(Shape::Struct(agg)) if agg.guest_class() == GuestClass::Memory
+    );
+    if by_encoding != send.stret {
+        return Err(AbiError::Refused {
+            symbol: symbol.to_string(),
+            reason: "the trampoline the guest called disagrees with the method's own \
+                     return class",
+        });
+    }
     // Everything fallible happens before `rdi` moves, so a refusal leaves the
     // guest context exactly as it was found — the guarantee every other refusal
     // in this project makes.
-    ctx.rdi = host_receiver;
+    set_arg_reg(ctx, base, host_receiver);
     let convert = Classes {
         vm,
         classes: &signature.classes,
         class_return: signature.class_return,
         callbacks: &[],
     };
-    marshal::call_types(symbol, &signature.types, imp, ctx, mem, &convert)
+    marshal::call_shapes(symbol, &signature.shapes, imp, ctx, mem, &convert)
 }
 
 /// Continue the guest at `target`, as the trampoline would have.
@@ -614,7 +743,7 @@ fn transfer(
 }
 
 /// The method's type encoding, decoded, or a refusal naming what stopped it.
-fn signature_of(symbol: &str, method: host::Method, sel: u64) -> Result<Signature> {
+fn signature_of(symbol: &str, method: host::Method) -> Result<Signature> {
     // SAFETY: `method` is a `Method` the runtime returned; its encoding is a
     // NUL-terminated string the runtime owns, read and copied before anything
     // else happens.
@@ -634,13 +763,6 @@ fn signature_of(symbol: &str, method: host::Method, sel: u64) -> Result<Signatur
         });
     };
 
-    if is_variadic(sel) {
-        return Err(AbiError::Refused {
-            symbol: symbol.to_string(),
-            reason: "a variadic method: the two ABIs disagree about where the arguments after \
-                     the format are, and no type encoding records that there are any",
-        });
-    }
     encoding::signature(types).map_err(|reason| AbiError::Refused {
         symbol: symbol.to_string(),
         reason,
@@ -656,6 +778,70 @@ fn is_variadic(sel: u64) -> bool {
     };
     name.ends_with("Format:") || VARIADIC_SELECTORS.contains(&name.as_str())
 }
+
+/// Turn a variadic format-style send into the non-variadic send of the rendered
+/// string, in place.
+///
+/// The trick is that every variadic method Cocoa has of this shape takes its
+/// format as the **last named parameter** — `stringWithFormat:`,
+/// `appendFormat:`, `initWithFormat:`, `raise:format:` — so rendering the
+/// conversions here and doubling the `%`s in the result produces a format with
+/// no conversions left. Re-sending the same selector with that string is the
+/// same call with the ellipsis empty, which the method's own encoding already
+/// describes. Nothing about where the *variadic* arguments live has to be told
+/// to the host at all, which is the whole difficulty going away rather than
+/// being solved.
+///
+/// The shapes this cannot do are still refused by name: a nil-terminated object
+/// list (`arrayWithObjects:`) has no format to render, and a format that is not
+/// the last argument, or fixed arguments that are not all integer-class, would
+/// put the variadic tail somewhere this does not look.
+fn render_variadic(
+    symbol: &str,
+    signature: &Signature,
+    base: usize,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let refuse = |reason: &'static str| {
+        Err(AbiError::Refused {
+            symbol: symbol.to_string(),
+            reason,
+        })
+    };
+    // Every named parameter must be integer-class, or the format is not in the
+    // register this computes and the variadic tail does not start after it.
+    let params = &signature.shapes[1..];
+    if !params.iter().all(|s| s.scalar() == Some(T::Pointer)) {
+        return refuse(
+            "a variadic method whose named parameters are not all objects; the format's \
+             register cannot be computed",
+        );
+    }
+    // `self`, `_cmd`, then the arguments — the format is the last of them, and
+    // `base` accounts for a hidden struct-return buffer ahead of all of it.
+    let Some(fmt_reg) = params.len().checked_sub(1).map(|i| i + base) else {
+        return refuse("a variadic method with no named format argument");
+    };
+    if fmt_reg >= SYSV_INT_REGS {
+        return refuse("a variadic method whose format is not in an argument register");
+    }
+    let Some(text) =
+        crate::shims::nslog::render_format(symbol, ctx, &*mem, arg_reg(ctx, fmt_reg), fmt_reg + 1)?
+    else {
+        // Not a readable string. Left alone rather than refused: the method
+        // will do to it whatever it does to any other argument.
+        return Ok(());
+    };
+    let Some(replacement) = crate::shims::nslog::escaped_string(&text) else {
+        return refuse("the rendered format could not be made into a string");
+    };
+    set_arg_reg(ctx, fmt_reg, replacement);
+    Ok(())
+}
+
+/// The SysV AMD64 integer argument registers there are.
+const SYSV_INT_REGS: usize = 6;
 
 /// A uniqued selector as its name, for a diagnostic or the variadic check.
 fn selector_name(sel: u64) -> Option<String> {

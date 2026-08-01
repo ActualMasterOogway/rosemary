@@ -571,6 +571,24 @@ int main(void) {
     printf("host %s %lu\n", [s UTF8String], (unsigned long)[s length]);
     printf("constant %s\n", [@"a constant string" UTF8String]);
     printf("nil %d %p\n", [(Dog *)nil legs], (void *)[(Dog *)nil says]);
+    /* Aggregates by value, in the three shapes the two ABIs disagree about
+       most. An NSRect is thirty-two bytes: the guest passes it on its *stack*
+       and returns it through a hidden buffer (`objc_msgSend_stret`), while the
+       host takes it in v0-v3 and returns it there. An NSPoint is two SSE
+       eightbytes on one side and a two-member HFA on the other. An NSRange is
+       two integer eightbytes and two `x` registers, which is the one case the
+       two conventions agree on — and is worth having next to the others so a
+       failure says which of the three broke. */
+    NSRect rc = [[NSValue valueWithRect:NSMakeRect(1.5, 2.5, 3.5, 4.5)] rectValue];
+    printf("rect %.1f %.1f %.1f %.1f\n", rc.origin.x, rc.origin.y, rc.size.width, rc.size.height);
+    NSPoint pt = [[NSValue valueWithPoint:NSMakePoint(6.5, 7.5)] pointValue];
+    printf("point %.1f %.1f\n", pt.x, pt.y);
+    NSRange rg = [[NSValue valueWithRange:NSMakeRange(8, 9)] rangeValue];
+    printf("range %lu %lu\n", (unsigned long)rg.location, (unsigned long)rg.length);
+    /* A variadic method, rendered by the runtime and re-sent with the result
+       standing in for its format — including `%@`, which is a message. */
+    printf("format %s\n",
+           [[NSString stringWithFormat:@"%d/%@/%.2f/%%", 42, @"x", 1.5] UTF8String]);
     @synchronized (d) { printf("synchronized\n"); }
     @autoreleasepool { printf("pool\n"); }
     return 0;

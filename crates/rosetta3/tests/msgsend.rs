@@ -136,16 +136,15 @@ fn the_message_send_family_is_never_promoted_to_a_fast_import() {
     }
 }
 
-/// The three messages that must be refused, each as a **named** stop.
+/// Two of the three former refusals now *work*, and the third still says why.
 ///
-/// Not failures to fix by trying harder: a variadic method's arguments are in
-/// places the encoding does not describe, an aggregate return is M2's refusal
-/// arriving on schedule, and `@throw` is M5's unwinder with a different
-/// personality routine. What this checks is that each one says so, with the
-/// program's output up to that point intact — a refusal that crashed instead
-/// would print nothing.
+/// This test used to assert all three were refused, and two of them moving is
+/// the whole of what [`rosetta3::abi::aggregate`] and the variadic re-send are
+/// for. What has not moved is `@throw`, which is M5's unwinder with a different
+/// personality routine — and what matters about it is unchanged: it says so,
+/// with the program's output up to that point intact, rather than crashing.
 #[test]
-fn each_refused_message_stops_with_a_reason() {
+fn an_aggregate_return_and_a_variadic_method_both_work_and_throw_still_names_itself() {
     let Some(path) = common::objc_refusals_fixture() else {
         skip!("cannot build x86_64 Objective-C fixtures")
     };
@@ -155,19 +154,27 @@ fn each_refused_message_stops_with_a_reason() {
     assert_eq!(status, Some(0), "stderr: {stderr}");
     assert_eq!(stdout, "before\nafter\n");
 
-    for (which, needle) in [
-        ("variadic", "variadic method"),
-        ("aggregate", "aggregate"),
-        ("throw", "personality"),
-    ] {
-        let (status, stdout, stderr) = common::run_guest(&path, &[which]);
-        assert_ne!(status, Some(0), "{which} was not refused");
-        assert_eq!(stdout, "before\n", "{which} ran past the refusal");
-        assert!(
-            stderr.contains(needle),
-            "{which}: expected {needle:?}, got {stderr:?}"
-        );
-    }
+    // `[s appendFormat:@"%d", 3]` — the format is rendered here and the method
+    // re-sent with the result, so the ellipsis the encoding never described is
+    // empty by the time the host sees the call.
+    let (status, stdout, stderr) = common::run_guest(&path, &["variadic"]);
+    assert_eq!(status, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "before\nappended 3\nafter\n");
+
+    // `-[NSString rangeOfString:]` returns an `NSRange` by value: two integer
+    // eightbytes to the guest, two `x` registers to the host. "world" begins at
+    // six, and a marshaller that returned the wrong register would say zero.
+    let (status, stdout, stderr) = common::run_guest(&path, &["aggregate"]);
+    assert_eq!(status, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "before\nrange 6\nafter\n");
+
+    let (status, stdout, stderr) = common::run_guest(&path, &["throw"]);
+    assert_ne!(status, Some(0), "throw was not refused");
+    assert_eq!(stdout, "before\n", "throw ran past the refusal");
+    assert!(
+        stderr.contains("personality"),
+        "throw: expected a personality-routine refusal, got {stderr:?}"
+    );
 }
 
 /// An import nothing satisfied fails **by name**, not by address.

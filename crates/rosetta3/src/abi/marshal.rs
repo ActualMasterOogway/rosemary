@@ -73,6 +73,7 @@ use microlift::arch::x86_64::abi::x86_reg;
 use microlift::arch::x86_64::context::RegisterContext;
 use microlift::core::abi::{ArgLocation, GuestReg};
 
+use super::aggregate::{self, Eightbyte, GuestClass, HostClass, Shape};
 use super::{AbiError, ArgType, FunctionAbi, GuestMemory, Result, guest_call_abi};
 
 /// Host argument registers of each class, per AAPCS64.
@@ -546,4 +547,590 @@ mod tests {
         assert_eq!(passed.to_bits() as u32, bits);
         assert_ne!(passed.to_bits(), (1.5f64).to_bits());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Aggregates
+// ---------------------------------------------------------------------------
+
+/// The most bytes an indirectly-returned aggregate may occupy.
+///
+/// A bound rather than a limit anybody will meet: the largest struct Cocoa
+/// returns by value is `CGAffineTransform` at forty-eight bytes. The buffer has
+/// to be a concrete Rust type for the callee to be given its address in `x8`,
+/// so it has to have *a* size, and this is one that no framework exceeds.
+const MAX_INDIRECT: usize = 256;
+
+/// Where the guest left one argument, in SysV AMD64's terms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Where {
+    /// Index into `rdi, rsi, rdx, rcx, r8, r9`.
+    Int(usize),
+    /// Index into `xmm0`…`xmm7`, of which only the low eight bytes are read.
+    Sse(usize),
+    /// Byte offset from `rsp`, which at an import exit is the pre-`CALL` value.
+    Stack(u64),
+}
+
+/// Where the guest left one whole argument.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Place {
+    Scalar(Where),
+    /// One [`Where`] per eightbyte, in order.
+    Parts(Vec<Where>),
+    /// `size` bytes at `rsp + offset`.
+    Memory {
+        offset: u64,
+        size: usize,
+    },
+}
+
+const SYSV_INT_REGS: usize = 6;
+const SYSV_SSE_REGS: usize = 8;
+
+/// Lay a signature out the way SysV AMD64 does, aggregates included.
+///
+/// Written here rather than taken from microlift's `CallAbi::place_args`
+/// because that one knows only scalars, and an aggregate does not merely
+/// occupy a slot — it consumes *two* registers of possibly different classes,
+/// or none at all and a run of stack instead. Everything an all-scalar
+/// signature does is unchanged, and
+/// `the_two_placers_agree_on_every_scalar_signature` holds the two to each
+/// other so this cannot drift from the path the rest of the project uses.
+fn place_shapes(shapes: &[Shape]) -> (Vec<Place>, Option<Where>) {
+    let mut int = 0usize;
+    let mut sse = 0usize;
+    let mut stack = 0u64;
+
+    // A MEMORY-class return takes the first integer register for its hidden
+    // buffer pointer, before any argument gets one. Everything after shifts,
+    // which is the whole of why `objc_msgSend_stret` is a separate trampoline.
+    let sret = match shapes.first() {
+        Some(Shape::Struct(agg)) if agg.guest_class() == GuestClass::Memory => {
+            int = 1;
+            Some(Where::Int(0))
+        }
+        _ => None,
+    };
+
+    let mut places = Vec::with_capacity(shapes.len().saturating_sub(1));
+    for shape in shapes.iter().skip(1) {
+        places.push(match shape {
+            Shape::Scalar(ty) if aggregate::is_fp(*ty) => {
+                let w = match sse < SYSV_SSE_REGS {
+                    true => Where::Sse(sse),
+                    false => Where::Stack(take_stack(&mut stack, 8)),
+                };
+                sse += usize::from(sse < SYSV_SSE_REGS);
+                Place::Scalar(w)
+            }
+            Shape::Scalar(_) => {
+                let w = match int < SYSV_INT_REGS {
+                    true => Where::Int(int),
+                    false => Where::Stack(take_stack(&mut stack, 8)),
+                };
+                int += usize::from(int < SYSV_INT_REGS);
+                Place::Scalar(w)
+            }
+            Shape::Struct(agg) => match agg.guest_class() {
+                GuestClass::Memory => Place::Memory {
+                    offset: take_stack(&mut stack, agg.size),
+                    size: agg.size,
+                },
+                GuestClass::Registers(classes) => {
+                    let need_int = classes.iter().filter(|c| **c == Eightbyte::Integer).count();
+                    let need_sse = classes.len() - need_int;
+                    // All or nothing: SysV puts the *whole* aggregate in memory
+                    // when the registers its eightbytes want are not all free.
+                    if int + need_int > SYSV_INT_REGS || sse + need_sse > SYSV_SSE_REGS {
+                        Place::Memory {
+                            offset: take_stack(&mut stack, agg.size),
+                            size: agg.size,
+                        }
+                    } else {
+                        let parts = classes
+                            .iter()
+                            .map(|c| match c {
+                                Eightbyte::Integer => {
+                                    int += 1;
+                                    Where::Int(int - 1)
+                                }
+                                Eightbyte::Sse => {
+                                    sse += 1;
+                                    Where::Sse(sse - 1)
+                                }
+                            })
+                            .collect();
+                        Place::Parts(parts)
+                    }
+                }
+            },
+        });
+    }
+    (places, sret)
+}
+
+/// Reserve `size` bytes of the guest's outgoing stack area, eight-aligned.
+fn take_stack(cursor: &mut u64, size: usize) -> u64 {
+    let at = *cursor;
+    *cursor += (size as u64).next_multiple_of(8);
+    at
+}
+
+/// The bytes the guest left for one aggregate argument.
+fn read_aggregate(
+    symbol: &str,
+    ctx: &RegisterContext,
+    mem: &dyn GuestMemory,
+    place: &Place,
+    size: usize,
+) -> Result<Vec<u8>> {
+    let mut buf = vec![0u8; size.next_multiple_of(8)];
+    match place {
+        Place::Memory { offset, .. } => {
+            let at = ctx.rsp.wrapping_add(*offset);
+            mem.read(at, &mut buf[..size])
+                .map_err(|_| AbiError::Memory {
+                    symbol: symbol.to_string(),
+                    addr: at,
+                })?;
+        }
+        Place::Parts(parts) => {
+            for (i, w) in parts.iter().enumerate() {
+                let word = read_where(symbol, ctx, mem, *w)?;
+                buf[i * 8..i * 8 + 8].copy_from_slice(&word.to_le_bytes());
+            }
+        }
+        Place::Scalar(_) => {
+            return Err(AbiError::Unmarshallable {
+                symbol: symbol.to_string(),
+                reason: "an aggregate placed as a scalar",
+            });
+        }
+    }
+    buf.truncate(size);
+    Ok(buf)
+}
+
+fn read_where(symbol: &str, ctx: &RegisterContext, mem: &dyn GuestMemory, w: Where) -> Result<u64> {
+    Ok(match w {
+        Where::Int(i) => [ctx.rdi, ctx.rsi, ctx.rdx, ctx.rcx, ctx.r8, ctx.r9][i],
+        Where::Sse(i) => ctx.xmm[i][0],
+        Where::Stack(off) => mem.read_u64(ctx.rsp.wrapping_add(off), symbol)?,
+    })
+}
+
+/// Read `width` bytes at `offset` as the scalar `ty`, zero-padded.
+fn leaf_bits(buf: &[u8], offset: usize, width: usize) -> u64 {
+    let mut word = [0u8; 8];
+    let end = (offset + width).min(buf.len());
+    if offset < end {
+        word[..end - offset].copy_from_slice(&buf[offset..end]);
+    }
+    u64::from_le_bytes(word)
+}
+
+/// Call `host` with a signature that may contain aggregates.
+///
+/// The general form of [`call_types`], and the one an Objective-C message takes
+/// whenever a method's own encoding names a struct. `shapes[0]` is the return.
+///
+/// The guarantee the rest of this module makes holds here too: **on any error
+/// `ctx` is untouched**. Every fallible step — placement, reading the guest's
+/// bytes, classifying the return — happens before the call, and the guest's
+/// registers are written only once the host function has returned.
+pub fn call_shapes(
+    symbol: &str,
+    shapes: &[Shape],
+    host: u64,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    convert: &dyn Convert,
+) -> Result<()> {
+    let unmarshallable = |reason: &'static str| AbiError::Unmarshallable {
+        symbol: symbol.to_string(),
+        reason,
+    };
+    let ret = shapes
+        .first()
+        .cloned()
+        .unwrap_or(Shape::Scalar(ArgType::None));
+    // Classified before anything is read, so an unsupported return costs a
+    // diagnostic rather than a half-made call.
+    let ret_host = match &ret {
+        Shape::Scalar(_) => None,
+        Shape::Struct(agg) => {
+            if agg.size > MAX_INDIRECT {
+                return Err(unmarshallable(
+                    "an aggregate return larger than this runtime buffers",
+                ));
+            }
+            Some(agg.host_class().map_err(unmarshallable)?)
+        }
+    };
+
+    let (places, sret) = place_shapes(shapes);
+
+    let mut ints = [0u64; MAX_INT_ARGS_TOTAL];
+    let mut fps = [0f64; MAX_FP_ARGS];
+    let (mut n_int, mut n_fp) = (0usize, 0usize);
+
+    let mut push_int = |v: u64, ty: ArgType, n_int: &mut usize| -> Result<()> {
+        if *n_int == MAX_INT_ARGS_TOTAL {
+            return Err(unmarshallable("more than twelve integer arguments"));
+        }
+        if *n_int >= MAX_INT_ARGS && !is_doubleword(ty) {
+            return Err(unmarshallable(
+                "an integer argument past the eighth is narrower than a doubleword",
+            ));
+        }
+        ints[*n_int] = v;
+        *n_int += 1;
+        Ok(())
+    };
+
+    for (index, (shape, place)) in shapes.iter().skip(1).zip(places.iter()).enumerate() {
+        match shape {
+            Shape::Scalar(ty) => {
+                let Place::Scalar(w) = place else {
+                    return Err(unmarshallable("a scalar placed as an aggregate"));
+                };
+                let raw = convert.argument(symbol, index, read_where(symbol, ctx, mem, *w)?)?;
+                if aggregate::is_fp(*ty) {
+                    if n_fp == MAX_FP_ARGS {
+                        return Err(unmarshallable("more than eight floating-point arguments"));
+                    }
+                    fps[n_fp] = fp_arg(*ty, raw);
+                    n_fp += 1;
+                } else {
+                    push_int(int_arg(*ty, raw), *ty, &mut n_int)?;
+                }
+            }
+            Shape::Struct(agg) => {
+                let bytes = read_aggregate(symbol, ctx, mem, place, agg.size)?;
+                match agg.host_class().map_err(unmarshallable)? {
+                    HostClass::Hfa { ty, count } => {
+                        if n_fp + count > MAX_FP_ARGS {
+                            return Err(unmarshallable("more than eight floating-point arguments"));
+                        }
+                        let width = aggregate::width_of(ty);
+                        for i in 0..count {
+                            fps[n_fp] = fp_arg(ty, leaf_bits(&bytes, i * width, width));
+                            n_fp += 1;
+                        }
+                    }
+                    HostClass::Integer { words } => {
+                        for i in 0..words {
+                            let w = leaf_bits(&bytes, i * 8, 8);
+                            push_int(w, ArgType::UnsignedDoubleword, &mut n_int)?;
+                        }
+                    }
+                    HostClass::Indirect => {
+                        return Err(unmarshallable(
+                            "an aggregate argument over sixteen bytes goes on the host's stack",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // Everything that can fail has failed by here.
+    let (out, scalar_ret) = call_returning(host, &ints, &fps, ret_host, &ret);
+    write_return(ctx, mem, symbol, &ret, sret, &out, scalar_ret, convert)
+}
+
+/// Make the call, choosing the prototype the *host's* return class needs.
+///
+/// Returns the aggregate's bytes when there are any, and the scalar result
+/// otherwise. One function rather than a `match` at the call site because every
+/// arm is `unsafe` for the same reason and the reason is worth stating once.
+fn call_returning(
+    host: u64,
+    ints: &[u64; MAX_INT_ARGS_TOTAL],
+    fps: &[f64; MAX_FP_ARGS],
+    ret_host: Option<HostClass>,
+    ret: &Shape,
+) -> (Vec<u8>, u64) {
+    // SAFETY: `host` is a native arm64 C function — a `dlsym` result or an
+    // Objective-C `IMP` the host runtime owns. The prototypes are wider than
+    // its own in the argument registers only, which AAPCS64 permits (see the
+    // module note), and the return variant matches the class computed from the
+    // callee's own type encoding. An HFA prototype wider than the callee's own
+    // return reads `v` registers the callee did not write, which is why only
+    // the first `count` members are taken.
+    unsafe {
+        match ret_host {
+            None => match ret.scalar() {
+                Some(ArgType::SinglePrecisionFp) => {
+                    (Vec::new(), u64::from(call_f32(host, ints, fps).to_bits()))
+                }
+                Some(ArgType::DoublePrecisionFp) => {
+                    (Vec::new(), call_f64(host, ints, fps).to_bits())
+                }
+                _ => (Vec::new(), call_int(host, ints, fps)),
+            },
+            Some(HostClass::Hfa { ty, count }) => {
+                let width = aggregate::width_of(ty);
+                let mut out = Vec::with_capacity(count * width);
+                if ty == ArgType::SinglePrecisionFp {
+                    let v = call_f32x4(host, ints, fps);
+                    for m in v.0.iter().take(count) {
+                        out.extend_from_slice(&m.to_le_bytes());
+                    }
+                } else {
+                    let v = call_f64x4(host, ints, fps);
+                    for m in v.0.iter().take(count) {
+                        out.extend_from_slice(&m.to_le_bytes());
+                    }
+                }
+                (out, 0)
+            }
+            Some(HostClass::Integer { words }) => {
+                let v = call_u64x2(host, ints, fps);
+                let mut out = Vec::with_capacity(words * 8);
+                for w in v.0.iter().take(words) {
+                    out.extend_from_slice(&w.to_le_bytes());
+                }
+                (out, 0)
+            }
+            Some(HostClass::Indirect) => {
+                let v = call_indirect(host, ints, fps);
+                (v.0.to_vec(), 0)
+            }
+        }
+    }
+}
+
+/// Put the result where the *guest's* convention says it goes.
+#[expect(clippy::too_many_arguments)]
+fn write_return(
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    symbol: &str,
+    ret: &Shape,
+    sret: Option<Where>,
+    bytes: &[u8],
+    scalar: u64,
+    convert: &dyn Convert,
+) -> Result<()> {
+    let agg = match ret {
+        Shape::Scalar(ArgType::SinglePrecisionFp) => {
+            ctx.xmm[0] = [scalar & 0xffff_ffff, 0];
+            return Ok(());
+        }
+        Shape::Scalar(ArgType::DoublePrecisionFp) => {
+            ctx.xmm[0] = [scalar, 0];
+            return Ok(());
+        }
+        Shape::Scalar(ArgType::None) => return Ok(()),
+        Shape::Scalar(ty) => {
+            ctx.rax = int_ret(*ty, convert.result(scalar));
+            return Ok(());
+        }
+        Shape::Struct(agg) => agg,
+    };
+
+    match agg.guest_class() {
+        // The hidden buffer the guest allocated, whose address it passed in the
+        // first integer register and expects back in `rax`. `objc_msgSend_stret`
+        // is the same convention with the trampoline's own name on it.
+        GuestClass::Memory => {
+            let Some(w) = sret else {
+                return Err(AbiError::Unmarshallable {
+                    symbol: symbol.to_string(),
+                    reason: "a memory-class return with no buffer register",
+                });
+            };
+            let dest = read_where(symbol, ctx, mem, w)?;
+            let n = bytes.len().min(agg.size);
+            mem.write(dest, &bytes[..n]).map_err(|_| AbiError::Memory {
+                symbol: symbol.to_string(),
+                addr: dest,
+            })?;
+            ctx.rax = dest;
+        }
+        GuestClass::Registers(classes) => {
+            let (mut n_int, mut n_sse) = (0usize, 0usize);
+            for (i, class) in classes.iter().enumerate() {
+                let word = leaf_bits(bytes, i * 8, 8);
+                match class {
+                    Eightbyte::Integer => {
+                        match n_int {
+                            0 => ctx.rax = word,
+                            _ => ctx.rdx = word,
+                        }
+                        n_int += 1;
+                    }
+                    Eightbyte::Sse => {
+                        ctx.xmm[n_sse] = [word, 0];
+                        n_sse += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Four doubles in `v0`–`v3`: what AAPCS64 returns a homogeneous float
+/// aggregate of up to four `double`s in. Declaring the widest is enough — a
+/// callee returning fewer writes fewer registers, and only its own members are
+/// read back.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct F64x4([f64; 4]);
+
+/// As [`F64x4`], for `float` members, which occupy `s0`–`s3`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct F32x4([f32; 4]);
+
+/// Two doublewords in `x0`/`x1`: a composite of at most sixteen bytes that is
+/// not a homogeneous float aggregate.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct U64x2([u64; 2]);
+
+/// A buffer the callee fills through `x8`. Over sixteen bytes and not an HFA,
+/// which is what makes AAPCS64 return it indirectly — and makes this a plain
+/// out-parameter rather than anything register-shaped.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Indirect([u8; MAX_INDIRECT]);
+
+type F64x4Fn = unsafe extern "C" fn(
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+) -> F64x4;
+
+/// # Safety
+/// As [`call_int`], for a callee whose return AAPCS64 places in `v0`–`v3`.
+unsafe fn call_f64x4(
+    host: u64,
+    ints: &[u64; MAX_INT_ARGS_TOTAL],
+    fps: &[f64; MAX_FP_ARGS],
+) -> F64x4 {
+    let f: F64x4Fn = unsafe { core::mem::transmute(host as usize as *const ()) };
+    unsafe { call_through!(f, ints, fps) }
+}
+
+type F32x4Fn = unsafe extern "C" fn(
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+) -> F32x4;
+
+/// # Safety
+/// As [`call_int`], for a callee whose return AAPCS64 places in `s0`–`s3`.
+unsafe fn call_f32x4(
+    host: u64,
+    ints: &[u64; MAX_INT_ARGS_TOTAL],
+    fps: &[f64; MAX_FP_ARGS],
+) -> F32x4 {
+    let f: F32x4Fn = unsafe { core::mem::transmute(host as usize as *const ()) };
+    unsafe { call_through!(f, ints, fps) }
+}
+
+type U64x2Fn = unsafe extern "C" fn(
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+) -> U64x2;
+
+/// # Safety
+/// As [`call_int`], for a callee whose return AAPCS64 places in `x0` and `x1`.
+unsafe fn call_u64x2(
+    host: u64,
+    ints: &[u64; MAX_INT_ARGS_TOTAL],
+    fps: &[f64; MAX_FP_ARGS],
+) -> U64x2 {
+    let f: U64x2Fn = unsafe { core::mem::transmute(host as usize as *const ()) };
+    unsafe { call_through!(f, ints, fps) }
+}
+
+type IndirectFn = unsafe extern "C" fn(
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+) -> Indirect;
+
+/// # Safety
+/// As [`call_int`], for a callee whose return AAPCS64 places in memory addressed by `x8`.
+unsafe fn call_indirect(
+    host: u64,
+    ints: &[u64; MAX_INT_ARGS_TOTAL],
+    fps: &[f64; MAX_FP_ARGS],
+) -> Indirect {
+    let f: IndirectFn = unsafe { core::mem::transmute(host as usize as *const ()) };
+    unsafe { call_through!(f, ints, fps) }
 }

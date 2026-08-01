@@ -50,6 +50,7 @@ use microlift::arch::x86_64::context::RegisterContext;
 use microlift::core::abi::CallAbi;
 pub use microlift::function_traits::{DynamicSymbol, FunctionArgumentType as ArgType};
 
+pub mod aggregate;
 pub mod marshal;
 pub mod table;
 
