@@ -44,11 +44,14 @@ use microlift::arch::x86_64::context::RegisterContext;
 use crate::abi::{AbiError, GuestMemory, Result};
 
 pub mod atexit;
+pub mod audiounit;
 pub mod ioctl;
+pub mod math;
 pub mod nslog;
 pub mod openat;
 pub mod printf;
 pub mod runtime;
+pub mod zlib;
 
 /// Run the shim for `symbol`, if there is one.
 ///
@@ -98,20 +101,26 @@ pub fn dispatch(
         // [`crate::jmpbuf`], which is a module of its own because a stack is not
         // a calling convention.
         _ => {
-            if let Some(f) = crate::jmpbuf::shim_for(name)
+            if let Some(f) = math::shim_for(name)
+                .or_else(|| crate::jmpbuf::shim_for(name))
                 .or_else(|| crate::unwind::shim_for(name))
                 .or_else(|| crate::objc::dispatch::shim_for(name))
                 .or_else(|| crate::dyld::shim_for(name))
             {
                 return Some(f(name, ctx, mem));
             }
-            // And the two families that need one thing more than the rest: a
+            // And the three families that need one thing more than the rest: a
             // guest function pointer the shim itself must substitute, because
             // the marshaller is not the one placing it. See [`crate::signal`]
-            // for a disposition that also crosses back *in*, and [`atexit`] for
-            // a destructor whose third argument is a DSO handle that must not.
+            // for a disposition that also crosses back *in*, [`atexit`] for a
+            // destructor whose third argument is a DSO handle that must not,
+            // and [`zlib`] and [`audiounit`] for pointers that are not
+            // arguments at all — they are fields of a structure the guest
+            // passes by address.
             return crate::signal::shim_for(name)
                 .or_else(|| atexit::shim_for(name))
+                .or_else(|| zlib::shim_for(name))
+                .or_else(|| audiounit::shim_for(name))
                 .map(|f| f(name, ctx, mem, callbacks));
         }
     };
@@ -125,12 +134,15 @@ pub fn dispatch(
 /// shim is that reaching the host function is wrong.
 pub fn is_shimmed(symbol: &str) -> bool {
     let name = symbol.strip_prefix('_').unwrap_or(symbol);
-    if crate::jmpbuf::shim_for(name).is_some()
+    if math::shim_for(name).is_some()
+        || crate::jmpbuf::shim_for(name).is_some()
         || crate::unwind::shim_for(name).is_some()
         || crate::objc::dispatch::shim_for(name).is_some()
         || crate::dyld::shim_for(name).is_some()
         || crate::signal::shim_for(name).is_some()
         || atexit::shim_for(name).is_some()
+        || zlib::shim_for(name).is_some()
+        || audiounit::shim_for(name).is_some()
     {
         return true;
     }

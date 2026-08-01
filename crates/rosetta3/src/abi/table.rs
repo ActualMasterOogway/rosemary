@@ -239,6 +239,9 @@ const U8: T = T::UnsignedByte;
 /// Variadics are interleaved rather than grouped, because the array is one
 /// sorted keyspace; `vsig!` marks them.
 pub static SIGNATURES: &[FunctionAbi] = &[
+    sig!("AudioComponentFindNext", P, P, P),
+    sig!("AudioComponentInstanceDispose", I32, P),
+    sig!("AudioComponentInstanceNew", I32, P, P),
     // ## CoreAudio and AudioUnit
     //
     // A GameMaker runner mixes its own audio and pushes it through a single
@@ -256,6 +259,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("AudioUnitUninitialize", I32, P),
     sig!("CC_MD5", P, P, U32, P),
     sig!("CC_SHA1", P, P, U32, P),
+    sig!("CC_SHA512_Final", I32, P, P),
+    sig!("CC_SHA512_Init", I32, P),
+    sig!("CC_SHA512_Update", I32, P, P, U32),
     // ## CoreFoundation and CFNetwork
     //
     // `CFIndex` is `long`, `Boolean` is `unsigned char`, and a `CFStringEncoding`
@@ -264,6 +270,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFArrayCreate", P, P, P, I64, P),
     sig!("CFArrayGetCount", I64, P),
     sig!("CFArrayGetValueAtIndex", P, P, I64),
+    sig!("CFBundleGetVersionNumber", U32, P),
     sig!("CFDictionaryCreate", P, P, P, P, I64, P, P),
     sig!("CFGetTypeID", U64, P),
     sig!("CFHTTPAuthenticationCopyMethod", P, P),
@@ -448,11 +455,76 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // exception to the exception — `std::terminate` really does mean "stop this
     // process", and the host's does that correctly.
     sig!("_Unwind_Resume", V, P),
+    sig!(
+        "_ZNKSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE7compareEmmPKcm",
+        I32,
+        P,
+        U64,
+        U64,
+        P,
+        U64
+    ),
     // What a guest class deriving from `std::exception` reaches: the base's
     // constructor and destructor, and `operator delete`. Ordinary host calls —
     // the object is guest memory the host writes a vtable pointer into, which
     // works for the same reason a `pthread_mutex_t` does.
     sig!("_ZNKSt9exception4whatEv", P, P),
+    sig!("_ZNSt11logic_errorC2EPKc", V, P, P),
+    sig!("_ZNSt12length_errorD1Ev", V, P),
+    sig!(
+        "_ZNSt13runtime_errorC1ERKNSt3__112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE",
+        V,
+        P,
+        P
+    ),
+    sig!("_ZNSt13runtime_errorD1Ev", V, P),
+    sig!("_ZNSt3__112__next_primeEm", U64, U64),
+    sig!(
+        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6appendEPKc",
+        P,
+        P,
+        P
+    ),
+    sig!(
+        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6appendEPKcm",
+        P,
+        P,
+        P,
+        U64
+    ),
+    sig!(
+        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6assignEPKc",
+        P,
+        P,
+        P
+    ),
+    sig!(
+        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE7reserveEm",
+        V,
+        P,
+        U64
+    ),
+    sig!(
+        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEC1ERKS5_",
+        V,
+        P,
+        P
+    ),
+    sig!(
+        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEC1ERKS5_mmRKS4_",
+        V,
+        P,
+        P,
+        U64,
+        U64,
+        P
+    ),
+    sig!(
+        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEaSERKS5_",
+        P,
+        P,
+        P
+    ),
     sig!("_ZNSt9exceptionC1Ev", V, P),
     sig!("_ZNSt9exceptionC2Ev", V, P),
     sig!("_ZNSt9exceptionD0Ev", V, P),
@@ -480,6 +552,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("__cxa_pure_virtual", V),
     sig!("__cxa_rethrow", V),
     sig!("__cxa_throw", V, P, P, P),
+    sig!("__darwin_check_fd_set_overflow", I32, I32, P, I32),
     sig!("__error", P),
     sig!("__isnand", I32, F64),
     sig!("__maskrune", I32, I32, U64),
@@ -500,6 +573,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // The fortified `vsnprintf`; shimmed with the rest of the `va_list` family
     // for the reason [`crate::shims::valist`] gives.
     sig!("__vsnprintf_chk", I32, P, U64, I32, U64, P, P),
+    sig!("_exit", V, I32),
     // The Darwin spellings that skip the signal mask, imported as `__longjmp`
     // and `__setjmp`. One implementation serves both pairs: the distinction is
     // about a mask this runtime does not model yet. See [`crate::jmpbuf`].
@@ -554,6 +628,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("close", I32, I32),
     sig!("closedir", I32, P),
     sig!("compat_mode", U8, P, P),
+    sig!("compress", I32, P, P, P, U64),
     sig!("connect", I32, I32, P, U32),
     sig!("cos", F64, F64),
     sig!("cosf", F32, F32),
@@ -568,6 +643,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("deflateInit2_", I32, P, I32, I32, I32, I32, I32, P, I32),
     sig!("deflateInit_", I32, P, I32, P, I32),
     sig!("deflateReset", I32, P),
+    cbsig!([2], "dispatch_once_f", V, P, P, P),
     sig!("dlclose", I32, P),
     sig!("dlerror", P),
     sig!("dlopen", P, P, I32),
@@ -611,6 +687,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("fseek", I32, P, I64, I32),
     sig!("fseeko", I32, P, I64, I32),
     sig!("fstat", I32, I32, P),
+    sig!("fstatfs", I32, I32, P),
+    sig!("fstatvfs", I32, I32, P),
     sig!("ftell", I64, P),
     sig!("ftello", I64, P),
     sig!("fts_children", P, P, I32),
@@ -636,8 +714,13 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("getopt", I32, I32, P, P),
     sig!("getopt_long", I32, I32, P, P, P, P),
     sig!("getpeername", I32, I32, P, P),
+    sig!("getpgid", I32, I32),
     sig!("getpid", I32),
+    sig!("getppid", I32),
+    sig!("getpriority", I32, I32, U32),
     sig!("getprogname", P),
+    sig!("getrusage", I32, I32, P),
+    sig!("getsid", I32, I32),
     sig!("getsockname", I32, I32, P, P),
     sig!("getsockopt", I32, I32, I32, I32, P, P),
     sig!("gettimeofday", I32, P, P),
@@ -662,6 +745,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("glBindRenderbufferEXT", V, U32, U32),
     sig!("glBindTexture", V, U32, U32),
     sig!("glBlendFunc", V, U32, U32),
+    sig!("glBlendFuncSeparate", V, U32, U32, U32, U32),
     sig!("glBufferData", V, U32, I64, P, U32),
     sig!("glCheckFramebufferStatus", U32, U32),
     sig!("glCheckFramebufferStatusEXT", U32, U32),
@@ -775,6 +859,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     cbsig!([2], "glob", I32, P, I32, P, P),
     sig!("gluOrtho2D", V, F64, F64, F64, F64),
     sig!("gmtime", P, P),
+    sig!("gmtime_r", P, P, P),
     sig!("group_from_gid", P, U32, I32),
     // `strhash.h`'s table, still exported by libSystem. The replace function is
     // guest code, called when a key is already present.
@@ -822,6 +907,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("lrint", I64, F64),
     sig!("lseek", I64, I32, I64, I32),
     sig!("lstat", I32, P, P),
+    sig!("mach_absolute_time", U64),
     sig!("malloc", P, U64),
     sig!("malloc_size", U64, P),
     sig!("malloc_zone_statistics", V, P, P),
@@ -861,6 +947,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("pow", F64, F64, F64),
     sig!("powf", F32, F32, F32),
     vsig!("printf", I32, P),
+    cbsig!([0, 1, 2], "pthread_atfork", I32, P, P, P),
     // ## The pthread family
     //
     // Passthrough is correct here for a reason worth stating rather than
@@ -966,6 +1053,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("sigaction", I32, I32, P, P),
     sig!("siglongjmp", V, P, I32),
     sig!("signal", P, I32, P),
+    sig!("sigpending", I32, P),
+    sig!("sigprocmask", I32, I32, P, P),
     sig!("sigsetjmp", I32, P, I32),
     sig!("sin", F64, F64),
     sig!("sinf", F32, F32),
@@ -978,6 +1067,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("srand", V, U32),
     vsig!("sscanf", I32, P, P),
     sig!("stat", I32, P, P),
+    sig!("statfs", I32, P, P),
+    sig!("statvfs", I32, P, P),
     sig!("strcasecmp", I32, P, P),
     sig!("strcat", P, P, P),
     sig!("strchr", P, P, I32),
@@ -1080,6 +1171,16 @@ const UNDECLARED: &str = "no public declaration; a guessed signature would fail 
 /// imports dozens.
 const DATA: &str = "a data import, read through its slot and never called";
 
+/// A libc++ entry point whose whole purpose is to `throw`.
+///
+/// Describing the signature would be easy and calling it would be wrong: the
+/// host's `throw` raises through the *host's* unwinder, which would walk out of
+/// the JIT's frames rather than the guest's. Guest exceptions are virtualized
+/// against the guest's own stack ([`crate::unwind`]), and there is no path from
+/// one to the other. A guest reaching one of these is already failing; saying so
+/// by name is strictly better than an unwind into recompiled code.
+const THROWS: &str = "throws a C++ exception, which cannot be raised across the JIT boundary";
+
 /// A struct by value, in a *C* function.
 ///
 /// [`crate::abi::aggregate`] marshals these, and an Objective-C method reaches
@@ -1121,6 +1222,7 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("NSCalibratedRGBColorSpace", DATA),
     ("NSDefaultRunLoopMode", DATA),
     ("NSDeviceResolution", DATA),
+    ("NSForegroundColorAttributeName", DATA),
     ("NSLocaleCountryCode", DATA),
     ("NSLocalizedDescriptionKey", DATA),
     ("NSLocalizedFailureReasonErrorKey", DATA),
@@ -1135,6 +1237,21 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("_DefaultRuneLocale", DATA),
     ("_NSConcreteGlobalBlock", DATA),
     ("_NSConcreteStackBlock", DATA),
+    (
+        "_ZNKSt3__120__vector_base_commonILb1EE20__throw_length_errorEv",
+        THROWS,
+    ),
+    (
+        "_ZNKSt3__121__basic_string_commonILb1EE20__throw_length_errorEv",
+        THROWS,
+    ),
+    ("_ZNSt3__19to_stringEi", AGGREGATE),
+    (
+        "_ZNSt3__1plIcNS_11char_traitsIcEENS_9allocatorIcEEEENS_12basic_stringIT_T0_T1_EEPKS6_RKS9_",
+        AGGREGATE,
+    ),
+    ("_ZTISt12length_error", DATA),
+    ("_ZTISt13runtime_error", DATA),
     ("_ZTISt9bad_alloc", DATA),
     // A `type_info` and the vtable a guest's own `type_info` objects point at.
     // Both are read through their slots and compared by address, which is what
@@ -1144,7 +1261,12 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("_ZTVN10__cxxabiv117__class_type_infoE", DATA),
     ("_ZTVN10__cxxabiv120__si_class_type_infoE", DATA),
     ("_ZTVN10__cxxabiv121__vmi_class_type_infoE", DATA),
+    ("_ZTVSt12length_error", DATA),
     ("_ZTVSt9exception", DATA),
+    // A *variable* holding a function pointer, not a function: libc calls it
+    // after `explicit_bzero` so a debugger can watch. Read through its slot and
+    // never called by the guest, which is what makes it data here.
+    ("__explicit_bzero_hook", DATA),
     // The personality routine a frame's LSDA names. Read as an address and
     // never called: this runtime interprets the LSDA itself rather than handing
     // it to libunwind, which is the whole of [`crate::unwind`].
