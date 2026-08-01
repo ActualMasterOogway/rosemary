@@ -203,6 +203,61 @@ impl Program<machish::memory::MmapSpace> {
     }
 }
 
+/// The provider chain every link in this runtime uses, in the order that makes
+/// it safe.
+///
+/// Order *is* the mechanism — see [`machish::resolve`]. Hand-written shims come
+/// ahead of the host's `dlsym` because the symbols they claim must be
+/// virtualized rather than passed through, and there is nothing in a name to say
+/// which those are.
+///
+/// It lives here, in one value, because there are now two callers: loading the
+/// program, and [`crate::dyld`] loading an image the *guest* asked for. Those
+/// two links must answer an import identically, and the only way to guarantee
+/// that is for them to be the same list.
+pub(crate) struct HostProviders {
+    /// `___stack_chk_guard` and `__tlv_bootstrap`: symbols the host declines to
+    /// export and every guest with an array on its stack dereferences in its
+    /// own prologue. See [`crate::shims::runtime`].
+    runtime: machish::resolve::SyntheticDylib,
+    /// The Objective-C runtime. The native provider denies the `_objc_`,
+    /// `_class_`, `_sel_` and `_protocol_` families precisely so a shim can
+    /// claim them: passing one through unexamined would hand the host runtime a
+    /// guest class. See [`crate::objc::dispatch`].
+    objc: machish::resolve::SyntheticDylib,
+    /// The `dl` family, which the host exports and cannot usefully answer for an
+    /// x86-64 file. See [`crate::dyld`].
+    dyld: machish::resolve::SyntheticDylib,
+    eager: machish::resolve::SyntheticDylib,
+    native: NativeDylibProvider,
+}
+
+impl HostProviders {
+    pub(crate) fn new() -> Self {
+        HostProviders {
+            runtime: crate::shims::runtime::provider(),
+            objc: crate::objc::dispatch::provider(),
+            dyld: crate::dyld::provider(),
+            eager: eager_binding_shims(),
+            native: NativeDylibProvider::system(),
+        }
+    }
+
+    /// The chain, with `extra` consulted ahead of everything.
+    pub(crate) fn chain<'a>(
+        &'a self,
+        extra: &[&'a dyn SymbolProvider],
+    ) -> Vec<&'a dyn SymbolProvider> {
+        let mut providers: Vec<&dyn SymbolProvider> = extra.to_vec();
+        providers.push(&self.runtime);
+        providers.push(&self.objc);
+        providers.push(&self.dyld);
+        providers.push(&self.eager);
+        providers.push(&self.native);
+        providers
+    }
+}
+
 impl<M: Regions> Program<M> {
     /// Load and link into a caller-supplied address space.
     pub fn load_into(
@@ -212,24 +267,8 @@ impl<M: Regions> Program<M> {
         mut memory: M,
     ) -> Result<Self, ProgramError> {
         let mut source = FsDylibSource::new();
-
-        let eager = eager_binding_shims();
-        let native = NativeDylibProvider::system();
-        // Ahead of the host: `___stack_chk_guard` is a symbol the host declines
-        // to export and every guest with an array on its stack dereferences in
-        // its own prologue. See `crate::shims::runtime`.
-        let runtime = crate::shims::runtime::provider();
-        // And the Objective-C runtime, for the same reason one step further out:
-        // the native provider denies the `_objc_`, `_class_`, `_sel_` and
-        // `_protocol_` families precisely so a shim can claim them, and passing
-        // one through unexamined would hand the host runtime a guest class. See
-        // [`crate::objc::dispatch`].
-        let objc = crate::objc::dispatch::provider();
-        let mut providers: Vec<&dyn SymbolProvider> = extra.to_vec();
-        providers.push(&runtime);
-        providers.push(&objc);
-        providers.push(&eager);
-        providers.push(&native);
+        let hosts = HostProviders::new();
+        let providers = hosts.chain(extra);
 
         let report =
             Loader::new(X86_64).link_with(bytes, path, &mut memory, &mut source, &providers)?;
@@ -432,7 +471,12 @@ impl<M: Regions> Program<M> {
     /// `None` when `va` is not in mapped guest memory, or when nothing there
     /// decodes.
     pub fn lift_region(&self, va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
-        let (base, bytes) = self.memory.region_at(va)?;
+        let Some((base, bytes)) = self.memory.region_at(va) else {
+            // Or an image the *guest* loaded, which is not in this `Program` and
+            // cannot be: a `Program` is immutable once linked, which is what
+            // `SharedProgram`'s `unsafe impl Sync` rests on. See [`crate::dyld`].
+            return crate::dyld::lift_region(va);
+        };
         let function = self.functions.iter().find(|f| f.contains(&va)).cloned();
         let region = crate::region::region_for(bytes, base, va, function)?;
         let start = usize::try_from(region.range.start - base).ok()?;
@@ -451,7 +495,7 @@ impl<M: Regions> Program<M> {
     /// entered, a host address must be called natively as arm64. Getting this
     /// backwards in either direction is a crash with no useful diagnostic.
     pub fn is_guest_address(&self, va: u64) -> bool {
-        self.memory.region_at(va).is_some()
+        self.memory.region_at(va).is_some() || crate::dyld::contains(va)
     }
 
     /// The extent of `__text`, which is what counts as "inside the guest" when
@@ -480,8 +524,15 @@ impl<M: Regions> Program<M> {
     /// `va` is whatever an exit named: a pointer slot or a `__stubs` entry,
     /// both of which are registered, which is why this is a lookup rather than
     /// a search through the bindings.
+    /// An image the guest loaded contributes its sites here too, and that is
+    /// what makes a call into one survivable. Its call sites were never
+    /// registered with the lifter — the config is built before the guest runs —
+    /// so a call to one of its `__stubs` entries arrives as an `UnknownJump`
+    /// rather than an `ImportedFunctionCall`, and answering it *here* is what
+    /// stops the recompiler decoding the trampoline and following it into the
+    /// host. See [`crate::dyld`].
     pub fn import_at(&self, va: u64) -> Option<&ImportSite> {
-        self.imports.get(&va)
+        self.imports.get(&va).or_else(|| crate::dyld::import_at(va))
     }
 
     /// What an imported symbol resolved to, by name.
@@ -504,7 +555,9 @@ impl<M: Regions> Program<M> {
     /// What an indirect call through a loaded function pointer needs: see
     /// [`Program::imports_by_target`](Program#structfield.imports_by_target).
     pub fn import_by_target(&self, host: u64) -> Option<&ImportSite> {
-        self.imports_by_target.get(&host)
+        self.imports_by_target
+            .get(&host)
+            .or_else(|| crate::dyld::import_by_target(host))
     }
 
     /// Every import address, in ascending order.

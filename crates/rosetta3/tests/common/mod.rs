@@ -1025,6 +1025,68 @@ pub fn valist_fixture() -> Option<String> {
         .clone()
 }
 
+/// A dylib the guest loads *itself*, after it has started running.
+///
+/// Three things in it are load-bearing, and each fails differently:
+///
+/// - **A constructor**, so the test can tell "mapped and bound" from "mapped,
+///   bound, and started" — `dlopen` must run initializers before it returns.
+/// - **A call to `strlen`**, which is the whole reason this is hard. This
+///   image's call sites were never registered with the lifter, so the call
+///   leaves microlift as an `UnknownJump` and is answered from the import table
+///   at the exit. Without that the recompiler decodes the `__stubs` trampoline
+///   as guest code and follows it into a native arm64 `strlen`.
+/// - **A function pointer handed back**, so the `dlsym` result is entered
+///   through the JIT rather than called as arm64.
+pub const PLUGIN_C: &str = r#"
+#include <stdio.h>
+#include <string.h>
+
+__attribute__((constructor)) static void plugin_init(void) { puts("plugin loaded"); }
+
+int plugin_len(const char *s) { return (int)strlen(s); }
+"#;
+
+/// The program that loads [`PLUGIN_C`], named without a directory — which is
+/// what a bundled application does, and what makes the search beside the
+/// executable load-bearing rather than a convenience.
+pub const DLOPEN_C: &str = r#"
+#include <dlfcn.h>
+#include <stdio.h>
+
+int main(void) {
+    void *h = dlopen("libplugin.dylib", RTLD_NOW);
+    if (!h) { printf("dlopen failed: %s\n", dlerror()); return 1; }
+    int (*len)(const char *) = (int (*)(const char *))dlsym(h, "plugin_len");
+    if (!len) { printf("dlsym failed: %s\n", dlerror()); return 2; }
+    printf("len=%d\n", len("abcdef"));
+    /* A name nothing defines must be null *and* leave a message behind. */
+    void *missing = dlsym(h, "plugin_no_such_symbol");
+    const char *why = dlerror();
+    printf("missing=%d reported=%d\n", missing == NULL, why != NULL);
+    dlclose(h);
+    return 0;
+}
+"#;
+
+/// Build [`DLOPEN_C`] and the plugin beside it, or `None` if this host cannot.
+///
+/// The dylib is built first and into the same directory, because the program
+/// finds it by name relative to its own path.
+pub fn dlopen_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            build_x86_64(
+                "libplugin.dylib",
+                PLUGIN_C,
+                &["-dynamiclib", "-install_name", "@rpath/libplugin.dylib"],
+            )?;
+            build_x86_64("dlopener", DLOPEN_C, &[])
+        })
+        .clone()
+}
+
 /// Run a guest program under the driver, returning `(status, stdout, stderr)`.
 ///
 /// Through the built binary rather than the library, because that is what the

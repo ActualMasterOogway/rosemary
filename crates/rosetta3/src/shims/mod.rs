@@ -101,6 +101,7 @@ pub fn dispatch(
             if let Some(f) = crate::jmpbuf::shim_for(name)
                 .or_else(|| crate::unwind::shim_for(name))
                 .or_else(|| crate::objc::dispatch::shim_for(name))
+                .or_else(|| crate::dyld::shim_for(name))
             {
                 return Some(f(name, ctx, mem));
             }
@@ -127,6 +128,7 @@ pub fn is_shimmed(symbol: &str) -> bool {
     if crate::jmpbuf::shim_for(name).is_some()
         || crate::unwind::shim_for(name).is_some()
         || crate::objc::dispatch::shim_for(name).is_some()
+        || crate::dyld::shim_for(name).is_some()
         || crate::signal::shim_for(name).is_some()
         || atexit::shim_for(name).is_some()
     {

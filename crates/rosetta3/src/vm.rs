@@ -437,6 +437,10 @@ impl Vm {
         // a line of guest code runs — an initializer may touch one. See
         // [`crate::tls`] for why the registry is global rather than a field.
         crate::tls::register(&program.report);
+        // Where `@executable_path` points, and where a guest `dlopen` of a bare
+        // library name looks. Recorded rather than derived, because the running
+        // executable is `rosetta3` — the same fact the bundle mirror exists for.
+        crate::dyld::set_executable_path(exe_path);
 
         let cache = CodeCache::new(program.lifter_config_with(policy));
         // The calling thread becomes the guest's main thread: this is the stack

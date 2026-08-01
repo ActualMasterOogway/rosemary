@@ -961,6 +961,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("sysctl", I32, P, U32, P, P, P, U64),
     sig!("sysctlbyname", I32, P, P, P, P, U64),
     vsig!("syslog", V, I32, P),
+    // The string is the guest's and the shell is the host's, which is exactly
+    // what a guest re-launching itself through `open steam://` wants.
+    sig!("system", I32, P),
     sig!("tan", F64, F64),
     sig!("tanf", F32, F32),
     sig!("tcgetattr", I32, I32, P),

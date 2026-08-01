@@ -122,6 +122,7 @@ pub mod abi;
 pub mod audit;
 pub mod bundle;
 pub mod cache;
+pub mod dyld;
 pub mod jmpbuf;
 pub mod objc;
 pub mod program;
