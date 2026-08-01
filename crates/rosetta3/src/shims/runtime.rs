@@ -94,6 +94,79 @@ unsafe extern "C" fn ns_get_executable_path(buf: *mut u8, bufsize: *mut u32) -> 
     0
 }
 
+/// C++'s global allocation operators, on `malloc` and `free`.
+///
+/// `libYoYoGamepad.dylib` is what needed them: DELTARUNE `dlopen`s it, it
+/// imports `operator new` two-level from `/usr/lib/libc++.1.dylib`, and that
+/// binding resolves to null. **Why it does is not explained** — the native
+/// provider is flat, the name matches no deny rule, and `dlsym` finds `_Znwm`
+/// in this process — so this is not a diagnosis, it is independence from one.
+///
+/// Supplying them is safe in a way most C++ interop is not, and the reason is
+/// worth stating rather than assuming. These are `extern "C"` in everything but
+/// name: the mangling encodes the signature and there is no `this`, no vtable,
+/// no exception object, no class layout. `operator new` is `void *(size_t)` in
+/// the plain SysV sense, so the marshaller already describes it exactly.
+///
+/// Mixing with the host's copies is also safe, and that is the part worth
+/// checking rather than hoping: the host's `operator new` is itself a `malloc`
+/// wrapper, so memory this allocates can be released by the host's
+/// `operator delete` and vice versa. What must never happen is `malloc`/`free`
+/// paired against a *different* allocator, and there is only one here.
+///
+/// The one honest gap is failure. `operator new` is specified to throw
+/// `std::bad_alloc`, and throwing a C++ exception from Rust across the JIT
+/// boundary is not something this runtime can do. It aborts with a message
+/// instead, which is what a guest with no handler would have done anyway and is
+/// at least attributable.
+mod cxx {
+    /// `operator new(size_t)` and `operator new[](size_t)`.
+    ///
+    /// # Safety
+    ///
+    /// Called only through an import slot this module defines.
+    pub unsafe extern "C" fn new(size: usize) -> *mut u8 {
+        // Zero is a legal request and must return a distinct, freeable pointer
+        // rather than null, which would look like the failure below.
+        let size = size.max(1);
+        // SAFETY: `size` is non-zero; the result is checked.
+        let p = unsafe { libc::malloc(size) } as *mut u8;
+        if p.is_null() {
+            eprintln!(
+                "rosetta3: the guest's operator new({size}) failed, and this runtime \
+                       cannot throw std::bad_alloc across the JIT boundary"
+            );
+            std::process::abort();
+        }
+        p
+    }
+
+    /// `operator delete(void *)` and its array and sized spellings.
+    ///
+    /// # Safety
+    ///
+    /// As above. A null pointer is explicitly a no-op, which the standard
+    /// requires and `free` already honours.
+    pub unsafe extern "C" fn delete(p: *mut u8) {
+        // SAFETY: `p` came from `new` above or from the host's `operator new`,
+        // which is also a `malloc` wrapper. See the module note.
+        unsafe { libc::free(p as *mut core::ffi::c_void) }
+    }
+
+    /// The sized deletes, `operator delete(void *, size_t)`.
+    ///
+    /// The size is what the compiler knew at the call site and is an
+    /// optimisation hint for a size-classed allocator; `free` does not want it.
+    ///
+    /// # Safety
+    ///
+    /// As above.
+    pub unsafe extern "C" fn delete_sized(p: *mut u8, _size: usize) {
+        // SAFETY: as `delete`.
+        unsafe { libc::free(p as *mut core::ffi::c_void) }
+    }
+}
+
 /// Symbols the runtime supplies itself, consulted before the host.
 ///
 /// Flat, so it answers a two-level import naming any library: the guest asks
@@ -114,6 +187,17 @@ pub fn provider() -> SyntheticDylib {
     // Two underscores as the Mach-O spells it: one from C mangling, one from
     // the identifier `_NSGetExecutablePath`.
     lib.define_fn("__NSGetExecutablePath", ns_get_executable_path as *const ());
+    // The global allocation operators. Two underscores as the Mach-O spells
+    // them: one from C mangling, one already in the Itanium mangled name.
+    for name in ["__Znwm", "__Znam"] {
+        lib.define_fn(name, cxx::new as *const ());
+    }
+    for name in ["__ZdlPv", "__ZdaPv"] {
+        lib.define_fn(name, cxx::delete as *const ());
+    }
+    for name in ["__ZdlPvm", "__ZdaPvm"] {
+        lib.define_fn(name, cxx::delete_sized as *const ());
+    }
     lib
 }
 

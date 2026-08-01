@@ -434,6 +434,31 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
         )
         .map_err(|e| format!("{resolved}: {e}"))?;
 
+    // Say what did not resolve, here, rather than letting the guest find out by
+    // calling it. A `dlopen`ed image links against a chain assembled at run time
+    // — the host, the main executable, images loaded before it — and an
+    // unsatisfied symbol is a fact about that chain, which is exactly the thing
+    // no later diagnostic can reconstruct.
+    let unresolved: Vec<&str> = report
+        .images
+        .iter()
+        .flat_map(|i| i.missing.iter())
+        .filter(|m| !m.weak_import)
+        .map(|m| m.symbol.as_str())
+        .collect();
+    if !unresolved.is_empty() {
+        eprintln!(
+            "rosetta3: dlopen({resolved}): {} unresolved: {}",
+            unresolved.len(),
+            unresolved
+                .iter()
+                .take(12)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+
     let root = report
         .root()
         .ok_or_else(|| format!("{resolved}: linked to no images"))?;
