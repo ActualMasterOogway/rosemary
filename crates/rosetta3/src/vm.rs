@@ -106,6 +106,10 @@ pub enum VmError {
     Stack { source: machish::Error },
     /// A host→guest thunk could not be built.
     Thunk { guest: u64, reason: String },
+    /// A guest callback the *host* invoked failed partway through. `guest` is
+    /// the address the thunk enters at, which is the only thing that says which
+    /// of a framework's many installed callbacks was running.
+    Callback { guest: u64, reason: String },
     /// The program could not be loaded or linked.
     Load { path: String, reason: String },
     /// Guest execution nested deeper than [`MAX_DEPTH`] host→guest callbacks.
@@ -137,6 +141,9 @@ impl fmt::Display for VmError {
             VmError::Stack { source } => write!(f, "guest stack: {source}"),
             VmError::Thunk { guest, reason } => {
                 write!(f, "no host->guest thunk for {guest:#x}: {reason}")
+            }
+            VmError::Callback { guest, reason } => {
+                write!(f, "in the guest callback at {guest:#x}: {reason}")
             }
             VmError::Load { path, reason } => write!(f, "{path}: {reason}"),
             VmError::TooDeep { pc } => {
@@ -905,7 +912,7 @@ impl Vm {
         };
         let mut slot = state.pending.borrow_mut();
         if slot.is_none() {
-            eprintln!("rosetta3: in a guest callback: {err}");
+            eprintln!("rosetta3: {err}");
             *slot = Some(err);
         }
     }

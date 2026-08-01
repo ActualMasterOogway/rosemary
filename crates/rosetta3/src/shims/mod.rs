@@ -74,6 +74,16 @@ pub fn dispatch(
         // fires for the programs that actually exist.
         "__sprintf_chk" => printf::sprintf_chk,
         "__snprintf_chk" => printf::snprintf_chk,
+        // The `v`-prefixed family. Not variadic — each is handed a `va_list`
+        // its caller built — and impossible to forward for the mirror-image
+        // reason: the structure is *SysV AMD64's*, and the host's would read it
+        // as arm64's. See [`printf::VaList`].
+        "vprintf" => printf::vprintf,
+        "vfprintf" => printf::vfprintf,
+        "vsprintf" => printf::vsprintf,
+        "vsnprintf" => printf::vsnprintf,
+        "vasprintf" => printf::vasprintf,
+        "__vsnprintf_chk" => printf::vsnprintf_chk,
         // Variadic in its declaration and one argument wide in fact; see
         // [`ioctl`] for why that makes it forwardable when `printf` is not.
         "NSLog" => nslog::nslog,
@@ -131,6 +141,12 @@ pub fn is_shimmed(symbol: &str) -> bool {
             | "snprintf"
             | "__sprintf_chk"
             | "__snprintf_chk"
+            | "vprintf"
+            | "vfprintf"
+            | "vsprintf"
+            | "vsnprintf"
+            | "vasprintf"
+            | "__vsnprintf_chk"
             | "ioctl"
             | "open"
             | "openat"

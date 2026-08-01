@@ -367,7 +367,15 @@ unsafe extern "C" fn thunk_entry(guest_va: u64, ints: *const u64, floats: *const
     match std::panic::catch_unwind(AssertUnwindSafe(|| vm.call_with(guest_va, ctx))) {
         Ok(Ok(rax)) => rax,
         Ok(Err(e)) => {
-            vm.set_pending(e);
+            // Named by the callback's own entry point as well as by what went
+            // wrong. A host framework may have any number of this runtime's
+            // thunks installed at once — a view's `initWithFrame:`, a display
+            // link, a signal handler — and "no guest code at 0x0" says nothing
+            // about which of them was running.
+            vm.set_pending(VmError::Callback {
+                guest: guest_va,
+                reason: e.to_string(),
+            });
             0
         }
         Err(_) => {

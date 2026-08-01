@@ -43,6 +43,10 @@ use super::{bad_pointer, set_int_return};
 
 /// SysV AMD64 integer argument registers, in order.
 const INT_REGS: usize = 6;
+/// Bytes of `va_list` register save area holding the six integer registers.
+const GP_SAVE_END: u32 = 48;
+/// …and the end of the eight 16-byte vector slots that follow them.
+const FP_SAVE_END: u32 = GP_SAVE_END + 8 * 16;
 /// SysV AMD64 vector argument registers, in order.
 const FP_REGS: usize = 8;
 /// One stack argument slot.
@@ -56,6 +60,15 @@ pub struct VarArgs<'a> {
     int: usize,
     fp: usize,
     stack: u64,
+    /// The `va_list` to read from, when the caller was handed one rather than
+    /// leaving its arguments in registers.
+    ///
+    /// The two are the same question asked of different storage: a variadic
+    /// *call* leaves its tail in the registers `ctx` holds, and a `v`-prefixed
+    /// function is handed a structure describing where its caller left them.
+    /// Everything above this — the whole of [`render`] — is indifferent to
+    /// which.
+    list: Option<VaList>,
     /// How to render `%@`, for a format string that is an `NSString`.
     ///
     /// `None` for a C format string, where `%@` is not a conversion at all and
@@ -84,8 +97,27 @@ impl<'a> VarArgs<'a> {
             int: fixed_int,
             fp: 0,
             stack: 0,
+            list: None,
             object: None,
         }
+    }
+
+    /// Read arguments from the guest `va_list` at `addr` rather than from the
+    /// register context.
+    pub fn from_list(
+        symbol: &'a str,
+        ctx: &'a RegisterContext,
+        mem: &'a dyn GuestMemory,
+        addr: u64,
+    ) -> Result<Self> {
+        let mut args = VarArgs::new(symbol, ctx, mem, 0);
+        args.list = Some(VaList::read(symbol, mem, addr)?);
+        Ok(args)
+    }
+
+    /// The `va_list` as it now stands, for a caller that must write it back.
+    pub fn list(&self) -> Option<VaList> {
+        self.list
     }
 
     /// As [`VarArgs::new`], for an `NSString` format, where `%@` prints an
@@ -110,6 +142,17 @@ impl<'a> VarArgs<'a> {
 
     /// The next integer or pointer argument.
     pub fn next_int(&mut self) -> Result<u64> {
+        if let Some(list) = self.list.as_mut() {
+            let (at, gp) = match list.gp_offset < GP_SAVE_END {
+                true => (list.reg_save.wrapping_add(u64::from(list.gp_offset)), true),
+                false => (list.overflow, false),
+            };
+            match gp {
+                true => list.gp_offset += 8,
+                false => list.overflow = list.overflow.wrapping_add(8),
+            }
+            return self.mem.read_u64(at, self.symbol);
+        }
         if self.int >= INT_REGS {
             return self.next_stack();
         }
@@ -122,12 +165,80 @@ impl<'a> VarArgs<'a> {
     /// The next floating-point argument. C promotes a variadic `float` to
     /// `double`, so the register always holds a `double`.
     pub fn next_fp(&mut self) -> Result<f64> {
+        if let Some(list) = self.list.as_mut() {
+            // A vector slot in the save area is sixteen bytes wide and holds a
+            // `double` in its low half; a spilled one is eight. Stepping by the
+            // wrong one reads every later argument from between two others.
+            let (at, in_regs) = match list.fp_offset < FP_SAVE_END {
+                true => (list.reg_save.wrapping_add(u64::from(list.fp_offset)), true),
+                false => (list.overflow, false),
+            };
+            match in_regs {
+                true => list.fp_offset += 16,
+                false => list.overflow = list.overflow.wrapping_add(8),
+            }
+            return Ok(f64::from_bits(self.mem.read_u64(at, self.symbol)?));
+        }
         if self.fp >= FP_REGS {
             return Ok(f64::from_bits(self.next_stack()?));
         }
         let v = self.ctx.xmm[self.fp][0];
         self.fp += 1;
         Ok(f64::from_bits(v))
+    }
+}
+
+/// The guest's `va_list`, as SysV AMD64 defines it.
+///
+/// Four fields and a register save area, and the reason a `v`-prefixed function
+/// cannot be forwarded to the host's: this layout is the *guest's*, and arm64's
+/// `va_list` is a bare pointer into a stack area. Handing one to the host's
+/// `vfprintf` makes it read `gp_offset` and `fp_offset` as the first eight bytes
+/// of an argument list — which is not a wrong number, it is a pointer made of
+/// two small integers, and the crash is inside `strlen` several frames away
+/// from anything that names the cause.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VaList {
+    /// Where the structure itself lives, so an updated copy can be written back.
+    pub addr: u64,
+    /// Bytes of the integer half of the save area already consumed.
+    pub gp_offset: u32,
+    /// …and of the vector half, which begins at [`GP_SAVE_END`].
+    pub fp_offset: u32,
+    /// The next argument that did not fit in a register.
+    pub overflow: u64,
+    /// The 176-byte block the callee's prologue spilled its registers into.
+    pub reg_save: u64,
+}
+
+impl VaList {
+    fn read(symbol: &str, mem: &dyn GuestMemory, addr: u64) -> Result<Self> {
+        if addr == 0 {
+            return Err(bad_pointer(symbol, 0));
+        }
+        let head = mem.read_u64(addr, symbol)?;
+        Ok(VaList {
+            addr,
+            gp_offset: head as u32,
+            fp_offset: (head >> 32) as u32,
+            overflow: mem.read_u64(addr.wrapping_add(8), symbol)?,
+            reg_save: mem.read_u64(addr.wrapping_add(16), symbol)?,
+        })
+    }
+
+    /// Store the walked state back where the guest keeps it.
+    ///
+    /// What the host's own `vsnprintf` does: the standard says a `va_list` is
+    /// indeterminate after being passed to one of these, and "indeterminate"
+    /// in practice means "advanced". A guest that copies with `va_copy` before
+    /// each call is unaffected either way; one that does not is relying on
+    /// undefined behaviour, and this at least makes it behave the way it would
+    /// have natively.
+    pub fn write_back(&self, symbol: &str, mem: &mut dyn GuestMemory) -> Result<()> {
+        let head = u64::from(self.gp_offset) | (u64::from(self.fp_offset) << 32);
+        mem.write(self.addr, &head.to_le_bytes())
+            .and_then(|()| mem.write(self.addr.wrapping_add(8), &self.overflow.to_le_bytes()))
+            .map_err(|_| bad_pointer(symbol, self.addr))
     }
 }
 
@@ -631,6 +742,106 @@ pub fn snprintf_chk(
 
 /// Write `out` to `dst`, truncated to `limit` bytes including the terminator,
 /// and leave the length the whole rendering would have had in `rax`.
+/// The `v`-prefixed family: the same rendering, from a `va_list` the caller
+/// already built.
+///
+/// Not forwardable, and the reason is worth stating where the code is: the
+/// structure at the guest's pointer is *SysV AMD64's* `va_list` — two offsets, a
+/// spill pointer and a register save area — while arm64's is a bare pointer into
+/// a stack area. The host's `vfprintf` would read the two offsets as the first
+/// eight bytes of something and follow them as an address. That is not a wrong
+/// number returned, it is a fault inside `strlen` with nothing on the stack
+/// naming the cause, which is how this was found.
+fn format_from_list(
+    symbol: &str,
+    ctx: &RegisterContext,
+    mem: &mut dyn GuestMemory,
+    fmt_ptr: u64,
+    list_ptr: u64,
+) -> Result<Vec<u8>> {
+    if fmt_ptr == 0 {
+        return Err(bad_pointer(symbol, 0));
+    }
+    let fmt = (&*mem).read_cstr(fmt_ptr, symbol)?;
+    let (out, walked) = {
+        let mut args = VarArgs::from_list(symbol, ctx, &*mem, list_ptr)?;
+        let out = render(&fmt, &mut args)?;
+        (out, args.list())
+    };
+    if let Some(list) = walked {
+        list.write_back(symbol, mem)?;
+    }
+    Ok(out)
+}
+
+pub fn vprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    let out = format_from_list(symbol, ctx, mem, ctx.rdi, ctx.rsi)?;
+    write_host(host_stdout(), &out);
+    set_int_return(ctx, out.len() as i32);
+    Ok(())
+}
+
+pub fn vfprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    let out = format_from_list(symbol, ctx, mem, ctx.rsi, ctx.rdx)?;
+    write_host(ctx.rdi as usize as *mut libc::FILE, &out);
+    set_int_return(ctx, out.len() as i32);
+    Ok(())
+}
+
+pub fn vsprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    let mut out = format_from_list(symbol, ctx, mem, ctx.rsi, ctx.rdx)?;
+    let written = out.len();
+    out.push(0);
+    let dst = ctx.rdi;
+    mem.write(dst, &out).map_err(|_| bad_pointer(symbol, dst))?;
+    set_int_return(ctx, written as i32);
+    Ok(())
+}
+
+pub fn vsnprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    let out = format_from_list(symbol, ctx, mem, ctx.rdx, ctx.rcx)?;
+    store_bounded(symbol, ctx, mem, ctx.rdi, ctx.rsi, out)
+}
+
+/// `__vsnprintf_chk(buf, maxlen, flag, os, fmt, ap)` — the fortified form, whose
+/// fourth argument is the destination's compile-time size. The tighter of the
+/// two bounds wins, as it does for `__snprintf_chk`.
+pub fn vsnprintf_chk(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let out = format_from_list(symbol, ctx, mem, ctx.r8, ctx.r9)?;
+    let limit = ctx.rsi.min(ctx.rcx);
+    store_bounded(symbol, ctx, mem, ctx.rdi, limit, out)
+}
+
+/// `vasprintf(char **ret, const char *fmt, va_list ap)`.
+///
+/// The buffer is the *host's* `malloc`, which is the guest's too: under
+/// high-level emulation a guest `free` reaches the same allocator, so a string
+/// handed back here is one the guest may release exactly as it would natively.
+pub fn vasprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    let out = format_from_list(symbol, ctx, mem, ctx.rsi, ctx.rdx)?;
+    // SAFETY: an ordinary allocation of a known size, checked for null before
+    // anything is written through it.
+    let buf = unsafe { libc::malloc(out.len() + 1) };
+    if buf.is_null() {
+        set_int_return(ctx, -1);
+        return Ok(());
+    }
+    // SAFETY: `buf` has `out.len() + 1` bytes and the two do not overlap.
+    unsafe {
+        std::ptr::copy_nonoverlapping(out.as_ptr(), buf.cast::<u8>(), out.len());
+        buf.cast::<u8>().add(out.len()).write(0);
+    }
+    let dst = ctx.rdi;
+    mem.write(dst, &(buf as usize as u64).to_le_bytes())
+        .map_err(|_| bad_pointer(symbol, dst))?;
+    set_int_return(ctx, out.len() as i32);
+    Ok(())
+}
+
 fn store_bounded(
     symbol: &str,
     ctx: &mut RegisterContext,

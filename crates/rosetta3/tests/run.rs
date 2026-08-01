@@ -165,3 +165,37 @@ fn an_untranslatable_stop_names_itself_instead_of_crashing() {
     assert!(out.is_empty());
     assert!(err.starts_with("rosetta3: /etc/hosts:"), "{err:?}");
 }
+
+/// The `v`-prefixed formatting family, checked against the same binary run
+/// natively.
+///
+/// The bug this exists to prevent was shipped and found by a real application:
+/// a signature was written for `vfprintf` and no shim, so the *guest's*
+/// `va_list` — SysV AMD64's two offsets, spill pointer and register save area —
+/// was handed to the host's `vfprintf`, which reads arm64's, which is a bare
+/// pointer. The result is not a wrong number, it is a fault inside `strlen`
+/// several frames from anything that names the cause. Comparing whole output
+/// against the native run is the only assertion worth making, for the same
+/// reason it is in `printf.rs`: the specification of `vsnprintf` is what a C
+/// library prints.
+#[test]
+fn the_va_list_family_prints_what_the_host_libc_prints() {
+    let Some(path) = common::valist_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
+    let Some((native_status, expected)) = common::run_native(&path) else {
+        skip!("cannot run x86_64 binaries natively")
+    };
+    let (status, out, err) = run_guest(&path, &[]);
+
+    assert_eq!(out, expected, "stderr: {err}");
+    assert_eq!(status, native_status, "stderr: {err}");
+    // Named as well as diffed: the ninth argument of each class is the one in
+    // the overflow area, and it is what a walker with the wrong step size gets
+    // wrong first.
+    assert!(out.contains("ints 1 2 3 4 5 6 7 8 9\n"), "{out}");
+    assert!(
+        out.contains("fps 1.5 2.5 3.5 4.5 5.5 6.5 7.5 8.5 9.5\n"),
+        "{out}"
+    );
+}

@@ -968,6 +968,63 @@ pub fn dtor_fixture() -> Option<String> {
         .clone()
 }
 
+/// The `v`-prefixed formatting family, against a guest-built `va_list`.
+///
+/// Nine of each class in one call is the point: SysV AMD64's register save area
+/// holds six integers and eight vectors, so the ninth of each is in the
+/// *overflow* area, reached by a different pointer that advances by a different
+/// step — eight bytes rather than the sixteen a saved vector slot occupies. A
+/// walker that used one step for both prints the later arguments from between
+/// two others, which looks like corruption rather than like an ABI bug.
+///
+/// The three destinations are here because each writes somewhere different: a
+/// stream, a bounded guest buffer that must truncate, and a host allocation
+/// whose pointer is written back through a guest pointer.
+pub const VALIST_C: &str = r#"
+#include <stdio.h>
+#include <stdarg.h>
+#include <stdlib.h>
+
+static void logline(const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    vfprintf(stdout, fmt, ap);
+    va_end(ap);
+}
+static void tobuf(char *out, size_t n, const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(out, n, fmt, ap);
+    va_end(ap);
+}
+static char *alloced(const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt); char *p = NULL;
+    vasprintf(&p, fmt, ap);
+    va_end(ap);
+    return p;
+}
+
+int main(void) {
+    logline("ints %d %d %d %d %d %d %d %d %d\n", 1, 2, 3, 4, 5, 6, 7, 8, 9);
+    logline("fps %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f\n",
+            1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5);
+    logline("mixed %s %d %.2f %s %d\n", "a", 7, 2.25, "b", 8);
+    char buf[16];
+    tobuf(buf, sizeof buf, "%s-%d-%s", "truncate", 42, "me");
+    printf("bounded %s\n", buf);
+    char *p = alloced("alloc %d %s", 5, "ok");
+    printf("%s\n", p);
+    free(p);
+    return 0;
+}
+"#;
+
+/// Build [`VALIST_C`], or `None` if this host cannot.
+pub fn valist_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("valist", VALIST_C, &[]))
+        .clone()
+}
+
 /// Run a guest program under the driver, returning `(status, stdout, stderr)`.
 ///
 /// Through the built binary rather than the library, because that is what the
