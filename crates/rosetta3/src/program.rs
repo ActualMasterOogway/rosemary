@@ -351,7 +351,13 @@ impl<M: Regions> Program<M> {
         by_symbol.sort_by(|a, b| a.symbol.cmp(&b.symbol));
         let mut imports_by_target: BTreeMap<u64, ImportSite> = BTreeMap::new();
         for site in by_symbol {
-            if site.resolved != 0 {
+            // Guest-resolved sites are excluded for the reason
+            // [`crate::dyld`] spells out: this map is consulted for every
+            // address the run loop is about to *enter*, so a guest function
+            // that is also some image's import would transfer to itself
+            // forever. A bundled dylib dependency is the case that reaches it
+            // here.
+            if site.resolved != 0 && memory.region_at(site.resolved).is_none() {
                 imports_by_target
                     .entry(site.resolved)
                     .or_insert_with(|| site.clone());

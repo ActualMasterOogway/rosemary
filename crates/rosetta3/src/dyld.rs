@@ -75,7 +75,7 @@ use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::ops::Range;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 use machish::exports::ExportTable;
 use machish::image::MachObject;
@@ -138,7 +138,23 @@ unsafe impl Sync for SharedSpace {}
 unsafe impl Send for SharedSpace {}
 
 /// Every image `dlopen` has produced, in load order.
+///
+/// Written under [`LOADING`] and read through [`VIEW`], which is what keeps the
+/// read path off a lock entirely.
 static IMAGES: Mutex<Vec<&'static Image>> = Mutex::new(Vec::new());
+
+/// The published, immutable view of [`IMAGES`]: a leaked slice, swapped whole.
+///
+/// The read path takes no lock, and that is not premature. These lookups are
+/// consulted at *every* import exit and every region entry — `sample` put
+/// DELTARUNE's game loop mostly inside `pthread_mutex_lock` underneath
+/// `import_at` — so the cost of answering "no" is the cost of the runtime.
+///
+/// Append-only and leaked makes the lock-free read sound: a `dlopen` builds a
+/// **new** slice, leaks it, and swaps the pointer, so a reader either sees the
+/// old slice or the new one and both stay valid forever. Nothing is ever freed,
+/// which is already this module's position on unloading.
+static VIEW: AtomicPtr<&'static [&'static Image]> = AtomicPtr::new(core::ptr::null_mut());
 
 /// The guest executable's path and slide.
 ///
@@ -281,14 +297,22 @@ static REGION_HI: AtomicU64 = AtomicU64::new(0);
 /// For `dlsym`, which searches them all and is called a handful of times in a
 /// process's life. [`find`] is what the hot paths use.
 fn snapshot() -> Vec<&'static Image> {
-    IMAGES.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    let view = VIEW.load(Ordering::Acquire);
+    if view.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: as in `find`.
+    unsafe { *view }.to_vec()
 }
 
 fn find<R>(mut f: impl FnMut(&'static Image) -> Option<R>) -> Option<R> {
-    if IMAGE_COUNT.load(Ordering::Relaxed) == 0 {
+    let view = VIEW.load(Ordering::Acquire);
+    if view.is_null() {
         return None;
     }
-    let images = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: non-null only after a `dlopen` stored a leaked slice, which is
+    // never freed and never mutated. See the note on `VIEW`.
+    let images: &'static [&'static Image] = unsafe { *view };
     images.iter().copied().find_map(&mut f)
 }
 
@@ -298,6 +322,13 @@ fn find<R>(mut f: impl FnMut(&'static Image) -> Option<R>) -> Option<R> {
 /// falls back to, so a call into a stub of an image the lifter never saw is
 /// serviced rather than decoded.
 pub fn import_at(va: u64) -> Option<&'static ImportSite> {
+    // A slot or stub of a loaded image is *inside* that image, so an address
+    // outside every dlopened mapping cannot be one. This is the question the run
+    // loop asks before entering any region, which makes it the hottest of the
+    // three.
+    if va < REGION_LO.load(Ordering::Relaxed) || va >= REGION_HI.load(Ordering::Relaxed) {
+        return None;
+    }
     find(|i| i.imports.get(&va))
 }
 
@@ -421,7 +452,15 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     };
 
     let exports = ExportTable::parse(&object).map_err(|e| format!("{resolved}: {e}"))?;
-    let (imports, imports_by_target) = collect_imports(&report);
+    // Everything mapped: this image, the ones loaded before it, and the program
+    // that started it all. See [`collect_imports`] for why the distinction is
+    // load-bearing.
+    let vm = crate::thunk::current();
+    let (imports, imports_by_target) = collect_imports(&report, |va| {
+        memory.region_at(va).is_some()
+            || contains(va)
+            || vm.is_some_and(|vm| vm.program.is_guest_address(va))
+    });
 
     // The space is leaked first so its regions really are `'static`; the image
     // then holds both the borrow and the thing borrowed from, which is legal
@@ -445,12 +484,15 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     {
         let mut images = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
         images.push(leaked);
-        // Published *after* the image is in the list, so a thread that observes
-        // a non-zero count finds the image behind it.
         for &(base, bytes) in &leaked.regions {
             REGION_LO.fetch_min(base, Ordering::Relaxed);
             REGION_HI.fetch_max(base + bytes.len() as u64, Ordering::Relaxed);
         }
+        // The extents go up before the view does, so a reader that sees the
+        // image also sees a range that contains it.
+        let published: &'static [&'static Image] = images.clone().leak();
+        let cell: &'static mut &'static [&'static Image] = Box::leak(Box::new(published));
+        VIEW.store(cell as *mut _, Ordering::Release);
         IMAGE_COUNT.store(images.len(), Ordering::Release);
     }
 
@@ -463,7 +505,10 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
 /// The same two maps [`crate::Program`] builds, built the same way and for the
 /// same reasons — including the unsatisfied imports, which are registered so a
 /// call to one is a named symbol rather than `no guest code at 0x0`.
-fn collect_imports(report: &LinkReport) -> (BTreeMap<u64, ImportSite>, BTreeMap<u64, ImportSite>) {
+fn collect_imports(
+    report: &LinkReport,
+    is_guest: impl Fn(u64) -> bool,
+) -> (BTreeMap<u64, ImportSite>, BTreeMap<u64, ImportSite>) {
     let mut imports: BTreeMap<u64, ImportSite> = BTreeMap::new();
     for b in report.bindings() {
         let site = ImportSite {
@@ -510,7 +555,21 @@ fn collect_imports(report: &LinkReport) -> (BTreeMap<u64, ImportSite>, BTreeMap<
     by_symbol.sort_by(|a, b| a.symbol.cmp(&b.symbol));
     let mut by_target: BTreeMap<u64, ImportSite> = BTreeMap::new();
     for site in by_symbol {
-        if site.resolved != 0 {
+        // A site that resolved into the **guest** must never appear here, and
+        // the reason is a two-billion-iteration livelock rather than a nicety.
+        //
+        // This map answers "the guest loaded a pointer and called it", so the
+        // run loop consults it for every address it is about to *enter*. When
+        // an import resolved to a guest function, that function's own address
+        // is the key — so entering it looks like calling the import, which
+        // transfers to it, which enters it again, with `rsp` never moving.
+        // `libYoYoGamepad.dylib` importing `GMGamePad::SetGamePadCount` out of
+        // `Mac_Runner` span there at 100% CPU with nothing to report.
+        //
+        // Nothing is lost by leaving it out: a guest address is directly
+        // executable, so there is no interception to arrange. Only the call
+        // *site* — the slot and the stub, in `imports` — needs one.
+        if site.resolved != 0 && !is_guest(site.resolved) {
             by_target
                 .entry(site.resolved)
                 .or_insert_with(|| site.clone());

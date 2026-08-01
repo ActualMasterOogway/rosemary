@@ -166,6 +166,19 @@ fn say(err: &VmError) {
     }
 }
 
+/// How often [`Vm::run_loop`] should report the guest's position, if at all.
+///
+/// Read once and cached, because the alternative is a `getenv` per region entry.
+fn trace_interval() -> Option<u64> {
+    static EVERY: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *EVERY.get_or_init(|| {
+        std::env::var("ROSETTA3_TRACE_PC")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|n| *n > 0)
+    })
+}
+
 /// How control reached the address that stopped the guest.
 ///
 /// Recorded by the run loop for one exit only — the one immediately before —
@@ -718,8 +731,39 @@ impl Vm {
         // How control left the previous region, kept for exactly one step. It is
         // what makes a lost `rip` diagnosable: see [`Transfer`].
         let mut from: Option<Transfer> = None;
+        let mut ticks: u64 = 0;
         loop {
             let pc = ctx.rip;
+
+            // `ROSETTA3_TRACE_PC=n` reports where the guest is every `n` region
+            // entries, as `image+offset`. Off unless set, and one compare when
+            // it is.
+            //
+            // It exists because "100% CPU and no frames" is not a failure this
+            // runtime can name: nothing refuses, nothing faults, the loop simply
+            // never comes back. A profile of the *host* shows the runtime's own
+            // overhead and says nothing about which guest code is repeating.
+            // This is the smallest thing that answers that.
+            if let Some(every) = trace_interval() {
+                ticks += 1;
+                if ticks.is_multiple_of(every) {
+                    let at = self
+                        .program
+                        .locate(pc)
+                        .unwrap_or_else(|| format!("{pc:#x}"));
+                    // The two lookups are reported because a *livelock* is what
+                    // this exists to find, and a livelock here is always one of
+                    // them matching an address it should not. An unchanging
+                    // `rsp` beside an unchanging `pc` is the signature.
+                    let by_site = self.program.import_at(pc).map(|s| s.symbol.as_str());
+                    let by_target = self.program.import_by_target(pc).map(|s| s.symbol.as_str());
+                    eprintln!(
+                        "rosetta3: trace {ticks}: {at} rsp={:#x} import_at={by_site:?} \
+                         by_target={by_target:?}",
+                        ctx.rsp
+                    );
+                }
+            }
 
             // Control *jumped* to an import rather than calling one: a tail
             // call, which compilers emit freely — `jmp _strcoll` where the
