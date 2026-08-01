@@ -217,3 +217,34 @@ fn the_slow_import_policy_sends_the_same_messages() {
     assert_eq!(fast, slow, "stderr: {stderr}");
     assert_eq!(fast_status, slow_status);
 }
+
+/// The **host** calls a guest method with an aggregate by value.
+///
+/// The direction every other aggregate test here has backwards. Guest→host is a
+/// marshaller reading the guest's registers; this is a compiled trampoline
+/// placing AAPCS64's `v0`–`v3` where SysV AMD64 expects an `NSRect` — which for
+/// thirty-two bytes is the guest's **stack**, not any register at all.
+///
+/// Checked against the same binary run natively, because the specification of
+/// "what does `setBounds:` receive" is what the platform does, not what this
+/// runtime believes. A trampoline forwarding registers only prints garbage for
+/// `bounds` and is right about everything else, which is exactly why the three
+/// shapes are separate lines.
+#[test]
+fn the_host_calls_a_guest_method_with_an_aggregate_by_value() {
+    let Some(path) = common::objc_host_aggregate_fixture() else {
+        skip!("cannot build x86_64 Objective-C fixtures")
+    };
+    let Some((native_status, expected)) = common::run_native(&path) else {
+        skip!("cannot run x86_64 binaries natively")
+    };
+    let (status, out, err) = common::run_guest(&path, &[]);
+
+    assert_eq!(out, expected, "stderr: {err}");
+    assert_eq!(status, native_status, "stderr: {err}");
+    // Named as well as diffed: an NSRect that never reached the guest's stack
+    // reads as whatever was there, and "0.0 0.0 0.0 0.0" is the usual answer.
+    assert!(out.contains("bounds 1.5 2.5 3.5 4.5\n"), "{out}");
+    assert!(out.contains("origin 6.5 7.5\n"), "{out}");
+    assert!(out.contains("scale 9.25\n"), "{out}");
+}

@@ -606,6 +606,88 @@ pub fn objc_messages_fixture(name: &str, extra: &[&str]) -> Option<String> {
     build_x86_64(name, OBJC_MESSAGES_M, &flags)
 }
 
+/// A guest method the **host** calls with an aggregate by value.
+///
+/// The direction M6.3 did not cover and DELTARUNE found. Every other aggregate
+/// test in this suite is guest→host — the guest sends `rectValue` and the
+/// runtime marshals the result back. This is the mirror, and it is a different
+/// piece of machinery: AAPCS64 hands a callback an `NSRect` in `v0`–`v3`, SysV
+/// AMD64 classifies the same rectangle MEMORY, and the guest therefore reads it
+/// from its own **stack** at `0x10(%rbp)`. A trampoline forwarding only
+/// registers gives it whatever was already there.
+///
+/// Key-value coding is what makes this reachable with Foundation alone.
+/// `setValue:forKey:` on a struct-typed property unwraps the `NSValue` and
+/// invokes the setter *from the host*, with the struct by value — which is
+/// exactly what AppKit does to `-[NSView initWithFrame:]` when it instantiates
+/// one from a nib, without needing a nib or a window server.
+///
+/// Three shapes, so a failure says which:
+///
+/// - **`NSRect`** — thirty-two bytes, MEMORY on the guest side and an HFA of
+///   four on the host's. The one that has to reach the guest's stack.
+/// - **`NSPoint`** — sixteen bytes: two SSE eightbytes in `xmm0`/`xmm1` for the
+///   guest, an HFA of two for the host. Registers on both sides, different
+///   registers.
+/// - **`double`** — a floating-point *return*, which comes back in `xmm0` and
+///   not in `rax`. A trampoline typed to return an integer reports whatever the
+///   last instruction left behind.
+pub const OBJC_HOST_AGGREGATE_M: &str = r#"
+#import <Foundation/Foundation.h>
+
+/* Ivars declared rather than synthesized: writing both accessors by hand
+   suppresses synthesis, and `bounds` collides with a Carbon typedef if the
+   compiler is left to guess. */
+@interface Canvas : NSObject {
+    NSRect _bounds;
+    NSPoint _origin;
+    double _scale;
+}
+@property (nonatomic) NSRect bounds;
+@property (nonatomic) NSPoint origin;
+@property (nonatomic) double scale;
+@end
+
+@implementation Canvas
+/* Written out rather than @synthesize'd so the setter is unambiguously a guest
+   method taking the struct by value, and so a reader can see the shape. */
+- (void)setBounds:(NSRect)r { _bounds = r; }
+- (NSRect)bounds { return _bounds; }
+- (void)setOrigin:(NSPoint)p { _origin = p; }
+- (NSPoint)origin { return _origin; }
+- (void)setScale:(double)s { _scale = s; }
+- (double)scale { return _scale; }
+@end
+
+int main(void) {
+    Canvas *c = [[Canvas alloc] init];
+
+    /* Host -> guest, struct by value: KVC invokes the setter itself. */
+    [c setValue:[NSValue valueWithRect:NSMakeRect(1.5, 2.5, 3.5, 4.5)] forKey:@"bounds"];
+    NSRect b = [c bounds];
+    printf("bounds %.1f %.1f %.1f %.1f\n", b.origin.x, b.origin.y, b.size.width, b.size.height);
+
+    [c setValue:[NSValue valueWithPoint:NSMakePoint(6.5, 7.5)] forKey:@"origin"];
+    NSPoint o = [c origin];
+    printf("origin %.1f %.1f\n", o.x, o.y);
+
+    /* Host -> guest with a floating-point *return*: KVC calls the getter and
+       boxes what it finds in `d0`. */
+    [c setValue:@(9.25) forKey:@"scale"];
+    printf("scale %.2f\n", [[c valueForKey:@"scale"] doubleValue]);
+
+    return 0;
+}
+"#;
+
+/// Build [`OBJC_HOST_AGGREGATE_M`], or `None` if this host cannot.
+pub fn objc_host_aggregate_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_objc("objc_host_aggregate", OBJC_HOST_AGGREGATE_M))
+        .clone()
+}
+
 /// M6.3's boundary program: the three messages that must be *refused*.
 ///
 /// One binary selected by argument, as [`UNWIND_REFUSALS_CPP`] is, and for the

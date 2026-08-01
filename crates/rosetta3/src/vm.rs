@@ -590,7 +590,35 @@ impl Vm {
 
     /// As [`Vm::call`], with the whole initial register context supplied — the
     /// form a thunk needs, since it has floating-point arguments to place too.
-    pub fn call_with(&self, entry: u64, mut ctx: RegisterContext) -> Result<u64, VmError> {
+    pub fn call_with(&self, entry: u64, ctx: RegisterContext) -> Result<u64, VmError> {
+        self.call_with_stack(entry, ctx, &[]).map(|(rax, _)| rax)
+    }
+
+    /// As [`Vm::call_with`], with arguments the guest's ABI puts on its *stack*.
+    ///
+    /// Registers alone cannot express every call, and the case that forces this
+    /// is not exotic: an `NSRect` is thirty-two bytes, SysV AMD64 classifies it
+    /// MEMORY, and `-[NSView initWithFrame:]` therefore reads it from
+    /// `0x10(%rbp)`. AAPCS64 hands the same rectangle to a callback in `v0`–`v3`,
+    /// so nothing about the host's call says where the guest expects to find it.
+    /// See [`crate::thunk`], which is the only caller that has the types to know.
+    ///
+    /// `stack` is placed exactly where a real `CALL` would have left it: at
+    /// `rsp+8` on entry, immediately above the return address. The alignment
+    /// matters and is easy to get subtly wrong — SysV requires `rsp % 16 == 0`
+    /// *at the call site*, so a callee sees `rsp % 16 == 8` and its first stack
+    /// argument sixteen-byte aligned, which is what `movaps 0x10(%rbp)` depends
+    /// on not faulting.
+    ///
+    /// Returns `(rax, xmm0)`: an integer result and a floating-point one come
+    /// back in different registers and the caller's type decides which is the
+    /// answer.
+    pub fn call_with_stack(
+        &self,
+        entry: u64,
+        mut ctx: RegisterContext,
+        stack: &[u8],
+    ) -> Result<(u64, u64), VmError> {
         // A thread the guest spawned reaches here first, through a thunk, with
         // no stack of its own yet.
         let state = crate::thread::ensure()?;
@@ -600,7 +628,17 @@ impl Vm {
 
         // Below the innermost live frame, past the red zone the guest's ABI
         // lets a leaf function use without adjusting `rsp`.
-        let rsp = ((state.rsp.get() - 128) & !0xf) - 8;
+        let top = (state.rsp.get() - 128) & !0xf;
+        // Padded to a multiple of sixteen so the return address below it leaves
+        // the callee at the alignment the ABI promises.
+        let padded = (stack.len() as u64).next_multiple_of(16);
+        let args_at = top - padded;
+        if !stack.is_empty() {
+            self.view()
+                .write(args_at, stack)
+                .map_err(|source| VmError::Stack { source })?;
+        }
+        let rsp = args_at - 8;
         self.view()
             .write(rsp, &RETURN_SENTINEL.to_le_bytes())
             .map_err(|source| VmError::Stack { source })?;
@@ -622,7 +660,9 @@ impl Vm {
         state.leave(outer_entry);
         state.depth.set(state.depth.get() - 1);
         state.rsp.set(saved_rsp);
-        result
+        // `xmm0` is read from the context the loop just finished with, which is
+        // where a `double`-returning guest function left its answer.
+        result.map(|rax| (rax, ctx.xmm[0][0]))
     }
 
     /// Enter regions and service exits until the call that started this returns.
@@ -909,7 +949,25 @@ impl Vm {
         // answer is the signature the import already has, and a host address
         // nothing imported is still `UnknownIndirectCall`.
         if let Some(site) = self.program.import_by_target(callee) {
-            return self.call_site(site, ctx);
+            // `service_site_as`, not `call_site`: the flags it sets describe
+            // *this* call, and a shim that stands in for the transfer itself
+            // reads them. `objc_msgSend` reached as `callq *%r12` — which is how
+            // clang compiles a send when it has already loaded the slot — is
+            // exactly that case, and going straight to `call_site` left
+            // `entered_by_jump` holding whatever the last *tail* call set.
+            //
+            // The consequence is not subtle once seen. `dispatch::transfer`
+            // skips pushing the return address when it believes it was entered
+            // by a jump, so a stale `true` sends the guest method off with `rsp`
+            // pointing at the caller's **stack arguments**: it reads the wrong
+            // one, and its `ret` pops an argument as a return address.
+            // `+[YYOpenGLUtility loadTextureData:width:height:bpp:into:]` is
+            // seven arguments wide, which is what made it visible.
+            //
+            // `false` because an indirect `call` is a call: microlift intercepts
+            // it before the push, so the return address is this runtime's to
+            // write.
+            return self.service_site_as(site, ctx, false);
         }
 
         Err(VmError::UnknownIndirectCall { callee, resume })
@@ -920,6 +978,46 @@ impl Vm {
     /// See [`crate::thunk`]. Created once per distinct guest pointer and kept
     /// for the VM's lifetime, so the host may compare two thunks for equality
     /// and get the answer the guest would have.
+    /// [`Vm::thunk_for`], for a callback whose types are known.
+    ///
+    /// The generic trampoline forwards six integer and eight floating-point
+    /// registers because a bare function pointer says nothing about its own
+    /// shape. An Objective-C method is the exception — its encoding is in the
+    /// class metadata — and this is what that knowledge buys: an aggregate
+    /// argument placed where the guest's ABI puts it, which for an `NSRect` is
+    /// the guest's stack. See [`crate::thunk::build_typed`].
+    ///
+    /// Identity is preserved the same way: one thunk per guest address, so a
+    /// pointer that already crossed out keeps the address the host may have
+    /// compared against.
+    pub fn typed_thunk_for(
+        &self,
+        guest_va: u64,
+        signature: crate::thunk::ThunkSignature,
+    ) -> Result<u64, VmError> {
+        if let Some(existing) = self
+            .thunks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .host_for(guest_va)
+        {
+            return Ok(existing);
+        }
+        let thunk = crate::thunk::build_typed(guest_va, signature)?;
+        let host = self
+            .thunks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(thunk);
+        // As in `thunk_for`: handing the pointer out is the demand signal.
+        let _ = self
+            .cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_lift(&self.program, guest_va);
+        Ok(host)
+    }
+
     pub fn thunk_for(&self, guest_va: u64) -> Result<u64, VmError> {
         if let Some(existing) = self
             .thunks

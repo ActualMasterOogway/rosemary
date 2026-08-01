@@ -598,21 +598,25 @@ fn add_method(
     if !vm.program.is_guest_address(m.imp) {
         return Err("the implementation is not a guest address");
     }
-    // The encoding is right here, and until now it was thrown away. A thunk
-    // carries what the *guest's* convention passes in registers and nothing
-    // else — see [`crate::thunk`] — so a method taking an `NSRect` by value is
-    // installed, called by the host, and reads its argument from a guest stack
-    // slot nobody wrote. That is the one failure mode this project refuses to
-    // produce: not a fault, not a diagnostic, just a garbage rectangle that
+    // The encoding is right here, and it is what makes this callback different
+    // from every other one: a bare function pointer says nothing about its own
+    // shape, but a method carries its types in the class metadata. Used, the
+    // trampoline places an `NSRect` argument on the guest's stack where SysV
+    // puts it. Unused — as it was — the guest reads a stack slot nobody wrote,
+    // which is not a fault and not a diagnostic, just a garbage rectangle that
     // becomes a garbage pointer somewhere further on.
     //
-    // Checked rather than assumed, and refused by name. `-[YYGLView
-    // initWithFrame:]` is what found it: AppKit instantiates it from a nib,
-    // hands it four doubles in `v0`–`v3`, and the guest reads `0x10(%rbp)`.
-    let carried = thunk_can_carry(&m.types);
-    let imp = vm
-        .thunk_for(m.imp)
-        .map_err(|_| "a host->guest thunk could not be built")?;
+    // A shape the typed trampoline still cannot express falls back to the
+    // generic one and is *listed*, because the guest calls it perfectly well
+    // even when the host cannot. See [`Refusal::MethodNotHostCallable`].
+    let (imp, carried) = match typed_thunk(vm, m) {
+        Ok(imp) => (imp, Ok(())),
+        Err(reason) => (
+            vm.thunk_for(m.imp)
+                .map_err(|_| "a host->guest thunk could not be built")?,
+            Err(reason),
+        ),
+    };
 
     // SAFETY: both strings outlive the call; `imp` is an executable arm64
     // trampoline this runtime built and never frees.
@@ -628,68 +632,40 @@ fn add_method(
     }
 }
 
-/// Whether a host→guest thunk can carry this method's arguments and result.
+/// Build a trampoline from the method's own type encoding.
 ///
-/// [`crate::thunk`] states the shape: six integer arguments, eight
-/// floating-point ones, an integer return, and no knowledge of the callback's
-/// types. An Objective-C method is the one callback whose types this runtime
-/// *does* know — the encoding is in the class metadata — so the claim is
-/// checkable here, and a method outside the shape is refused rather than
-/// installed and mis-called.
+/// `Err` is a `&'static str` in the register the rest of this project uses for
+/// refusals — it names what about *this* method could not be carried, so the
+/// listing says "returns an aggregate by value" rather than "unsupported".
 ///
-/// What each refusal is waiting for is a thunk built from the encoding rather
-/// than one generic trampoline: the argument would be placed by the same
-/// [`crate::abi::aggregate`] rules that already carry it in the other
-/// direction. Until then this is a list of work items instead of a class of
-/// silent wrong answers.
-fn thunk_can_carry(encoding: &str) -> Result<(), &'static str> {
-    use crate::abi::ArgType as T;
-    use crate::abi::aggregate::Shape;
-
-    let signature = encoding::signature(encoding)?;
-    let Some((ret, params)) = signature.shapes.split_first() else {
-        return Err("the type encoding describes no return value");
+/// What is still refused, and each is a work item rather than an unknown:
+///
+/// - **An aggregate return.** AAPCS64 sends a homogeneous float aggregate back
+///   in `v0`–`v3` while the guest returns through a hidden buffer, and "return
+///   four doubles in four vector registers" is not something Cranelift's return
+///   lowering promises to do the way the ABI specifies. Emitting it and hoping
+///   is precisely the plausible wrong answer this module exists to avoid.
+/// - **A block argument**, which is a structure with a guest function pointer
+///   inside it. Carrying one means building a second thunk for its invoke
+///   function at the offset the block ABI puts it, which is its own work.
+/// - **An aggregate too large for AAPCS64's registers**, which the host copies
+///   to its *own* stack; the trampoline would have to find it there.
+fn typed_thunk(vm: &Vm, m: &ObjcMethod) -> Result<u64, &'static str> {
+    let signature = encoding::signature(&m.types)?;
+    let (returns, params) = signature
+        .shapes
+        .split_first()
+        .ok_or("the type encoding describes no return value")?;
+    // `Scalar(None)` is how the decoder spells `void`; a thunk returning
+    // nothing declares no return rather than an ignored zero.
+    let returns = match returns {
+        crate::abi::aggregate::Shape::Scalar(crate::abi::ArgType::None) => None,
+        other => Some(other.clone()),
     };
-
-    // An aggregate return needs a hidden buffer on one side and `v0`–`v3` or
-    // `x8` on the other; a floating-point return needs a differently-typed
-    // trampoline. The generic one returns an integer.
-    match ret {
-        Shape::Struct(_) => {
-            return Err("returns an aggregate by value, which a thunk cannot carry");
-        }
-        Shape::Scalar(T::SinglePrecisionFp | T::DoublePrecisionFp) => {
-            return Err("returns a floating-point value, which a thunk cannot carry");
-        }
-        _ => {}
-    }
-
-    let mut integers = 0usize;
-    let mut floats = 0usize;
-    for shape in params {
-        match shape {
-            // Not "an aggregate is unsupported": an aggregate *is* its leaves as
-            // far as register placement goes, and the two sides disagree about
-            // which leaves go where. Refusing by name says which method.
-            Shape::Struct(_) => {
-                return Err("takes an aggregate by value, which a thunk cannot carry");
-            }
-            Shape::Scalar(T::SinglePrecisionFp | T::DoublePrecisionFp) => floats += 1,
-            Shape::Scalar(_) => integers += 1,
-        }
-    }
-    if integers > INT_ARG_REGISTERS {
-        return Err("takes more integer arguments than a thunk passes in registers");
-    }
-    if floats > FP_ARG_REGISTERS {
-        return Err("takes more floating-point arguments than a thunk passes in registers");
-    }
-    Ok(())
+    let signature = crate::thunk::ThunkSignature::new(params.to_vec(), returns)?;
+    vm.typed_thunk_for(m.imp, signature)
+        .map_err(|_| "a host->guest thunk could not be built")
 }
-
-/// What [`crate::thunk`] places, named here so the two cannot drift apart.
-const INT_ARG_REGISTERS: usize = 6;
-const FP_ARG_REGISTERS: usize = 8;
 
 /// Recreate a protocol the guest declares.
 ///
