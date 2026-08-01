@@ -1024,13 +1024,17 @@ const UNDECLARED: &str = "no public declaration; a guessed signature would fail 
 /// imports dozens.
 const DATA: &str = "a data import, read through its slot and never called";
 
-/// The M2 refusal, arriving wherever a framework's geometry does.
+/// A struct by value, in a *C* function.
 ///
-/// A `CGRect` is four `double`s and a `CGPoint` two, and both SysV AMD64 and
-/// AAPCS64 shred them into individual registers by rules this marshaller does
-/// not implement. The two ABIs disagree about *which* registers, so passing one
-/// through would neither fault nor be right.
-const AGGREGATE: &str = "passes or returns a struct by value; aggregate marshalling is not built";
+/// [`crate::abi::aggregate`] marshals these, and an Objective-C method reaches
+/// it — because a method carries its own type encoding, which describes the
+/// struct's members and their offsets. This table has no such vocabulary:
+/// [`FunctionAbi::types`] is a list of scalars, and there is nowhere to write
+/// down that an argument is four `double`s. Extending it is the work these
+/// refusals are waiting for, and it is a change to the table's shape rather
+/// than to the marshaller.
+const AGGREGATE: &str =
+    "passes or returns a struct by value, which this table has no way to describe";
 
 /// The [`crate::jmpbuf`] refusal, one level further out.
 ///

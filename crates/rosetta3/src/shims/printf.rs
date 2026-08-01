@@ -762,7 +762,7 @@ fn format_from_list(
     if fmt_ptr == 0 {
         return Err(bad_pointer(symbol, 0));
     }
-    let fmt = (&*mem).read_cstr(fmt_ptr, symbol)?;
+    let fmt = (*mem).read_cstr(fmt_ptr, symbol)?;
     let (out, walked) = {
         let mut args = VarArgs::from_list(symbol, ctx, &*mem, list_ptr)?;
         let out = render(&fmt, &mut args)?;

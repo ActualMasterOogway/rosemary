@@ -14,7 +14,7 @@
 use std::collections::BTreeSet;
 use std::process::ExitCode;
 
-use rosetta3::{Classification, ImportPolicy, Program, Vm, audit_call_targets, startup};
+use rosetta3::{Classification, ImportPolicy, Program, Vm, audit_call_targets, bundle, startup};
 
 use microlift::arch::x86_64::X86_64;
 use microlift::core::lift_to_function;
@@ -109,6 +109,18 @@ fn main() -> ExitCode {
             eprintln!("usage: rosetta3 run [--slow] <mach-o path> [args...]");
             return ExitCode::FAILURE;
         };
+        // A guest inside a `.app` needs the *process* to be inside one too,
+        // or `[NSBundle mainBundle]` is this binary's directory and the
+        // application loads no nib, finds no resources, and sits in its run
+        // loop having silently done nothing. See [`rosetta3::bundle`].
+        if let Some(mirror) = bundle::remirror(std::path::Path::new(&path)) {
+            eprintln!("rosetta3: re-executing from {}", mirror.display());
+            let e = bundle::reexec(&mirror);
+            // Only reached if `execv` failed, in which case running anyway is
+            // strictly better than not running: a program that never asks about
+            // its bundle does not care.
+            eprintln!("rosetta3: could not re-execute from the bundle mirror: {e}");
+        }
         return run(&path, args.collect(), policy);
     }
     let path = first;
