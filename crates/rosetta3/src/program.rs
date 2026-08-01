@@ -359,7 +359,10 @@ impl<M: Regions> Program<M> {
     /// both ways must differ in the number of VM exits and in nothing else. A
     /// test that can only run the fast path cannot check that.
     pub fn lifter_config_with(&self, policy: ImportPolicy) -> LifterConfig {
-        let mut config = LifterConfig::default();
+        let mut config = LifterConfig {
+            interpreter_fallback: true,
+            ..LifterConfig::default()
+        };
 
         for (base, bytes) in self.memory.regions() {
             config
