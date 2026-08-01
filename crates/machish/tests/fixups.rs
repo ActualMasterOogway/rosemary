@@ -585,6 +585,126 @@ fn an_unsatisfied_hard_import_is_reported_not_silently_zeroed() {
     }
 }
 
+/// A C++ dylib that allocates: `operator new` and `operator delete` are
+/// *coalesced* symbols, so `ld` binds each one twice — once in the ordinary
+/// bind stream, naming `libc++` by ordinal, and once in `weak_bind`, which asks
+/// only "does any loaded image override this".
+const COALESCED_SRC: &str = r#"
+    struct Box { int v; Box(int x) : v(x) {} };
+    extern "C" int make(int x) { Box *b = new Box(x); int v = b->v; delete b; return v; }
+"#;
+
+fn coalesced_fixture() -> Option<Vec<u8>> {
+    common::build_x86_64(
+        "weak_coalesce",
+        COALESCED_SRC,
+        &["-x", "c++", "-lc++", "-dynamiclib", "-Wl,-no_fixup_chains"],
+    )
+}
+
+#[test]
+fn a_weak_bind_is_a_flat_lookup_and_never_the_images_own_exports() {
+    let Some(bytes) = coalesced_fixture() else {
+        skip!("cc -arch x86_64 -x c++ unavailable")
+    };
+    let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
+    let (_, fixups) = decode_image(&obj).unwrap();
+
+    let weak: Vec<&Fixup<'_>> = fixups
+        .iter()
+        .filter(|f| {
+            matches!(
+                f,
+                Fixup::Bind {
+                    kind: BindKind::WeakCoalesce,
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert!(
+        !weak.is_empty(),
+        "the fixture must produce a weak_bind stream"
+    );
+
+    // The ordinal register is never set in this stream, so it reads back as
+    // zero — which is `BIND_SPECIAL_DYLIB_SELF`. Taking that at face value made
+    // every weak bind claim to be satisfied by the image's own exports.
+    for f in &weak {
+        let Fixup::Bind { symbol, .. } = f else {
+            unreachable!()
+        };
+        assert_eq!(
+            symbol.library,
+            LibraryRef::WeakLookup,
+            "{} in weak_bind must be a flat coalescing lookup",
+            symbol.name
+        );
+    }
+    assert!(
+        weak.iter()
+            .any(|f| matches!(f, Fixup::Bind { symbol, .. } if symbol.name == "__Znwm")),
+        "the fixture must coalesce operator new"
+    );
+}
+
+#[test]
+fn an_unsatisfied_weak_bind_leaves_the_ordinary_binding_alone() {
+    let Some(bytes) = coalesced_fixture() else {
+        skip!("cc -arch x86_64 -x c++ unavailable")
+    };
+    let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
+
+    let mut mem = BufferSpace::new(0x1_0000_0000);
+    let mapped = map_segments(&obj, &mut mem).unwrap();
+    let (_, fixups) = decode_image(&obj).unwrap();
+    let stubs = StubMap::build(&obj).unwrap();
+
+    // Two-level only, deliberately: this provider answers the ordinary bind of
+    // `__Znwm` from `libc++` and has nothing to say to a flat weak lookup. That
+    // is the shape a real host chain has, and the weak pass must not undo it.
+    let mut libcxx = SyntheticDylib::new("/usr/lib/libc++.1.dylib");
+    for f in &fixups {
+        if let Fixup::Bind { symbol, kind, .. } = f
+            && *kind != BindKind::WeakCoalesce
+        {
+            libcxx.define(symbol.name, Resolved::function(0xdead_0000));
+        }
+    }
+    let providers: [&dyn SymbolProvider; 1] = [&libcxx];
+    let outcome = Binder {
+        slide: mapped.slide,
+        providers: &providers,
+        self_exports: None,
+        main_executable: None,
+    }
+    .apply(&fixups, &mut mem, &stubs)
+    .unwrap();
+
+    // A weak lookup nobody answers is not an unsatisfied import; it is a symbol
+    // nobody overrode, and reporting it makes a healthy image look broken.
+    // (Other libraries' imports are genuinely missing here — this provider
+    // stands for `libc++` alone — so the claim is about the coalesced ones.)
+    assert!(
+        !outcome.missing.iter().any(|m| m.symbol == "__Znwm"),
+        "a weak lookup was reported as a missing import: {:?}",
+        outcome.missing
+    );
+
+    let new = outcome
+        .bindings
+        .iter()
+        .find(|b| b.symbol == "__Znwm")
+        .expect("the fixture must import operator new");
+    let mut buf = [0u8; 8];
+    mem.read(new.slot_va, &mut buf).unwrap();
+    assert_eq!(
+        u64::from_le_bytes(buf),
+        0xdead_0000,
+        "the weak pass zeroed a slot the bind stream had already resolved"
+    );
+}
+
 #[test]
 fn a_synthetic_dylib_satisfies_a_built_fixtures_imports() {
     // The end-to-end shape of `selfish/tests/aarch64_shim.rs:58-63`: build a

@@ -293,7 +293,20 @@ fn run_bind<'a, S: MachSpec>(
             }
             let symbol = SymbolRef {
                 name,
-                library: library_ref(obj, ordinal),
+                // In `weak_bind` the ordinal register is meaningless: a
+                // coalescing bind asks "does any loaded image define this
+                // name", which is a flat question by construction, and `ld`
+                // never emits a `SET_DYLIB_ORDINAL` into that stream. Reading
+                // the register anyway yields the reset value, zero, which is
+                // `BIND_SPECIAL_DYLIB_SELF` — so every weak bind claimed to be
+                // satisfied by the image's own exports, found nothing there,
+                // and **zeroed a slot the ordinary bind stream had already
+                // resolved correctly**. That is how `__Znwm` became null in a
+                // plugin that binds it twice.
+                library: match kind {
+                    BindKind::WeakCoalesce => LibraryRef::WeakLookup,
+                    _ => library_ref(obj, ordinal),
+                },
                 weak_import,
             };
             for _ in 0..count {

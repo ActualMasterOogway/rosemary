@@ -158,6 +158,24 @@ fn main() -> ExitCode {
     let missing: usize = program.report.images.iter().map(|i| i.missing.len()).sum();
     if missing > 0 {
         println!("  {missing} import(s) unresolved (need shims)");
+        // Which library each one names, because that is what decides where it
+        // was looked for — a two-level reference consults only the providers
+        // claiming that install name, and `<no library>` means a flat, self,
+        // main-executable or weak reference, which consults all of them.
+        for m in program
+            .report
+            .images
+            .iter()
+            .flat_map(|i| i.missing.iter())
+            .take(40)
+        {
+            println!(
+                "    unresolved {} from {}{}",
+                m.symbol,
+                m.library.as_deref().unwrap_or("<no library>"),
+                if m.weak_import { " (weak)" } else { "" }
+            );
+        }
     }
 
     // What it would take to *call* each of those imports, which is milestone 2.

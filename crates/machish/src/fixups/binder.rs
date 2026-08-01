@@ -140,11 +140,14 @@ impl<'s> Binder<'s> {
             // A weak-lookup bind is conditional by definition: it applies only
             // if some *other* image already defines the name. Unresolved, the
             // correct action is to leave the slot exactly as the linker wrote
-            // it, not to zero it.
-            if symbol.library != LibraryRef::WeakLookup {
-                let value: u64 = 0;
-                mem.write(slot_va, &value.to_le_bytes())?;
+            // it — or as the ordinary bind stream already wrote it, since a
+            // coalesced symbol is commonly bound twice — and to say nothing.
+            // It is not a missing symbol; it is a symbol nobody overrode.
+            if symbol.library == LibraryRef::WeakLookup {
+                return Ok(());
             }
+            let value: u64 = 0;
+            mem.write(slot_va, &value.to_le_bytes())?;
             out.missing.push(MissingSymbol {
                 symbol: symbol.name.to_string(),
                 library,

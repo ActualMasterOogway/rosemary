@@ -241,7 +241,16 @@ impl fmt::Display for VmError {
                 write!(f, "guest syscall {number:#x} at {pc:#x}: not translated")
             }
             VmError::Trap { reason, code, pc } => {
-                write!(f, "guest stopped at {pc:#x}: {reason} (code {code:#x})")
+                write!(f, "guest stopped at {pc:#x}: {reason} (code {code:#x}")?;
+                // For an unimplemented instruction the code *is* the decoder's
+                // identity for it, and a number alone leaves the reader with no
+                // way to find out which instruction the recompiler is missing —
+                // which is the only thing this diagnostic is for. Naming it
+                // costs one table lookup in a crate already linked in.
+                if let Some(name) = instruction_name(*reason, *code) {
+                    write!(f, ", {name}")?;
+                }
+                write!(f, ")")
             }
             VmError::Stack { source } => write!(f, "guest stack: {source}"),
             VmError::Thunk { guest, reason } => {
@@ -259,6 +268,23 @@ impl fmt::Display for VmError {
 }
 
 impl std::error::Error for VmError {}
+
+/// The decoder's name for the instruction an `UnimplementedInstruction` exit
+/// carries, or `None` for any other exit.
+///
+/// The lifter stores `iced_x86::Instruction::code()` in `exit_code`, so this is
+/// a total function of that number and needs no access to guest memory — which
+/// matters, because it is called from `Display` long after the guest is gone.
+fn instruction_name(reason: ExitReason, code: u32) -> Option<String> {
+    if reason != ExitReason::UnimplementedInstruction {
+        return None;
+    }
+    let code = iced_x86::Code::try_from(code as usize).ok()?;
+    // `Debug` is the enum variant, which is the mnemonic *plus* its operand
+    // shape — `Vsqrtsd_xmm_xmm_xmmm64` rather than just `vsqrtsd`. That is more
+    // useful here, not less: it says exactly which encoding to implement.
+    Some(format!("{code:?}"))
+}
 
 impl From<AbiError> for VmError {
     fn from(e: AbiError) -> Self {
