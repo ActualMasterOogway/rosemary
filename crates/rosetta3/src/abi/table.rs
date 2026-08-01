@@ -262,6 +262,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // is a `UInt32` — three narrow types that a "pointer or int64" guess would
     // get wrong in the direction that does not fault.
     sig!("CFArrayCreate", P, P, P, I64, P),
+    sig!("CFArrayGetCount", I64, P),
+    sig!("CFArrayGetValueAtIndex", P, P, I64),
+    sig!("CFDictionaryCreate", P, P, P, P, I64, P, P),
+    sig!("CFGetTypeID", U64, P),
     sig!("CFHTTPAuthenticationCopyMethod", P, P),
     sig!("CFHTTPAuthenticationCopyRealm", P, P),
     sig!("CFHTTPAuthenticationCreateFromResponse", P, P, P),
@@ -278,6 +282,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFHTTPMessageSetHeaderFieldValue", V, P, P, P),
     sig!("CFNetworkCopyProxiesForAutoConfigurationScript", P, P, P, P),
     sig!("CFNetworkCopyProxiesForURL", P, P, P),
+    sig!("CFNumberCreate", P, P, I64, P),
+    sig!("CFNumberGetTypeID", U64),
+    // `Boolean` is an `unsigned char`, not an `int`: the caller tests the low
+    // byte and a wider return would leave the rest of `rax` to be read as part
+    // of it.
+    sig!("CFNumberGetValue", U8, P, I64, P),
     sig!("CFReadStreamCopyError", P, P),
     sig!("CFReadStreamCopyProperty", P, P, P),
     sig!("CFReadStreamCreateForHTTPRequest", P, P, P),
@@ -305,6 +315,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFStringConvertIANACharSetNameToEncoding", U32, P),
     sig!("CFStringConvertNSStringEncodingToEncoding", U32, U64),
     sig!("CFStringGetCStringPtr", P, P, U32),
+    sig!("CFStringGetLength", I64, P),
+    sig!("CFStringGetTypeID", U64),
     sig!(
         "CFURLCreateStringByAddingPercentEscapes",
         P,
@@ -347,9 +359,39 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // one as `P` would pass 64 bits where the host reads 32, which happens to
     // work until the upper half is not zero.
     sig!("IOBSDNameMatching", P, U32, U32, P),
+    sig!("IOHIDDeviceCopyMatchingElements", P, P, P, U32),
+    sig!("IOHIDDeviceGetProperty", P, P, P),
+    // The host calls the callback with `(context, IOReturn, sender, value)`:
+    // four integer arguments and no result, which is the shape the generic
+    // trampoline was written for.
+    cbsig!([1], "IOHIDDeviceRegisterInputValueCallback", V, P, P, P),
+    sig!("IOHIDElementGetChildren", P, P),
+    sig!("IOHIDElementGetCookie", U32, P),
+    // `CFIndex` is a `long`, so these are sixty-four bits wide and signed —
+    // a logical minimum is routinely negative.
+    sig!("IOHIDElementGetLogicalMax", I64, P),
+    sig!("IOHIDElementGetLogicalMin", I64, P),
+    sig!("IOHIDElementGetType", U32, P),
+    sig!("IOHIDElementGetUsage", U32, P),
+    sig!("IOHIDElementGetUsagePage", U32, P),
     // `IOHIDManagerRef IOHIDManagerCreate(CFAllocatorRef, IOOptionBits)` —
     // a null allocator is the default one, which is what a game passes.
     sig!("IOHIDManagerCreate", P, P, U32),
+    sig!("IOHIDManagerOpen", I32, P, U32),
+    cbsig!(
+        [1],
+        "IOHIDManagerRegisterDeviceMatchingCallback",
+        V,
+        P,
+        P,
+        P
+    ),
+    cbsig!([1], "IOHIDManagerRegisterDeviceRemovalCallback", V, P, P, P),
+    sig!("IOHIDManagerScheduleWithRunLoop", V, P, P, P),
+    sig!("IOHIDManagerSetDeviceMatchingMultiple", V, P, P),
+    sig!("IOHIDValueGetElement", P, P),
+    sig!("IOHIDValueGetIntegerValue", I64, P),
+    sig!("IOHIDValueGetLength", I64, P),
     sig!("IOIteratorNext", U32, U32),
     sig!("IOMasterPort", I32, U32, P),
     sig!("IOObjectRelease", I32, U32),
@@ -1070,6 +1112,7 @@ pub static REFUSED: &[(&str, &str)] = &[
         "CFRunLoopSourceCreate",
         "its context structure holds guest function pointers the host would call as arm64",
     ),
+    ("CFStringGetBytes", AGGREGATE),
     ("CGEventCreateMouseEvent", AGGREGATE),
     ("CGRectContainsPoint", AGGREGATE),
     ("CGRectInset", AGGREGATE),

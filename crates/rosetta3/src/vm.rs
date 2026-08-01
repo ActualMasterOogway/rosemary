@@ -532,7 +532,7 @@ impl Vm {
         // Where `@executable_path` points, and where a guest `dlopen` of a bare
         // library name looks. Recorded rather than derived, because the running
         // executable is `rosetta3` — the same fact the bundle mirror exists for.
-        crate::dyld::set_executable_path(exe_path);
+        crate::dyld::set_executable_path(exe_path, program.report.root().map_or(0, |i| i.slide));
 
         let cache = CodeCache::new(program.lifter_config_with(policy));
         // The calling thread becomes the guest's main thread: this is the stack
@@ -938,8 +938,55 @@ impl Vm {
         site: &crate::program::ImportSite,
         ctx: &mut RegisterContext,
     ) -> Result<(), VmError> {
+        // An import that resolved into another **guest** image, which happens as
+        // soon as one exists: a `dlopen`ed plugin binds against the executable
+        // that loaded it, and DELTARUNE's `libYoYoGamepad.dylib` imports ninety
+        // of `GMGamePad`'s methods straight out of `Mac_Runner`.
+        //
+        // Every other import resolves to a host function and is marshalled.
+        // Marshalling this one would call x86-64 as arm64 — or, because it has
+        // no table entry, refuse with "no signature", which is a confusing thing
+        // to say about a C++ method the guest defines itself. It is not a call
+        // *out* at all; it is a call from one part of the guest to another, and
+        // the registers are already the callee's.
+        if site.resolved != 0 && self.program.is_guest_address(site.resolved) {
+            return self.transfer_to_guest(site.resolved, ctx);
+        }
         let mut mem = self.view();
         crate::abi::call_import_with(&site.symbol, site.tag, site.resolved, ctx, &mut mem, self)?;
+        Ok(())
+    }
+
+    /// Continue the guest at `target`, as the intercepted transfer would have.
+    ///
+    /// The same shape as [`crate::objc::dispatch`]'s, and for the same reason:
+    /// where the return address comes from depends on how control reached the
+    /// interception. An intercepted `call` has not pushed one — microlift exits
+    /// first — so it is this runtime's to write, and `rip` is already the
+    /// instruction after the call, which is exactly where the callee must
+    /// return. A tail `jmp` has the caller's return address on the stack
+    /// already and must not gain a second.
+    fn transfer_to_guest(&self, target: u64, ctx: &mut RegisterContext) -> Result<(), VmError> {
+        let Some(state) = crate::thread::current() else {
+            return Err(AbiError::Refused {
+                symbol: format!("<guest import at {target:#x}>"),
+                reason: "a guest-to-guest import outside a running guest thread",
+            }
+            .into());
+        };
+        if !state.entered_by_jump() {
+            let rsp = ctx.rsp.wrapping_sub(8);
+            self.view()
+                .write(rsp, &ctx.rip.to_le_bytes())
+                .map_err(|source| VmError::Stack { source })?;
+            ctx.rsp = rsp;
+        }
+        ctx.rip = target;
+        // The stack pointer moved without an exit reporting it, and `rip` is now
+        // a destination rather than a resume point: whoever serviced this call
+        // must not synthesize a return over it.
+        state.rsp.set(ctx.rsp);
+        state.redirect();
         Ok(())
     }
 

@@ -75,6 +75,7 @@ use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::ops::Range;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use machish::exports::ExportTable;
 use machish::image::MachObject;
@@ -139,9 +140,90 @@ unsafe impl Send for SharedSpace {}
 /// Every image `dlopen` has produced, in load order.
 static IMAGES: Mutex<Vec<&'static Image>> = Mutex::new(Vec::new());
 
-/// The guest executable's path, for `@executable_path` and for the search that
-/// finds a bundled dylib named without a directory.
-static EXECUTABLE: Mutex<Option<String>> = Mutex::new(None);
+/// The guest executable's path and slide.
+///
+/// The path answers `@executable_path` and the search that finds a bundled dylib
+/// named without a directory; the slide is what makes the executable's *exports*
+/// usable, which a `dlopen`ed plugin needs. See [`MainExports`].
+static EXECUTABLE: Mutex<Option<(String, u64)>> = Mutex::new(None);
+
+/// The main executable's export table, parsed once, on first use.
+static MAIN_EXPORTS: Mutex<Option<&'static MainExports>> = Mutex::new(None);
+
+/// The main executable, as something a `dlopen`ed image can bind against.
+///
+/// dyld resolves a newly loaded image against **everything already loaded**, the
+/// main executable included, and a plugin that calls back into its host depends
+/// on it. `libYoYoGamepad.dylib` is exactly that: DELTARUNE `dlopen`s it, and it
+/// imports `GMGamePad`'s methods — ninety of them — straight out of
+/// `Mac_Runner`, which exports them for the purpose.
+///
+/// Without this the plugin links, loads, runs its initializers, and stops at its
+/// first call back into the executable with "unsatisfied import".
+///
+/// The reference is spelled **flat** (`<flat-namespace>/__ZN9GMGamePad…`), which
+/// is why [`SymbolProvider::provides`] is not what answers here — that predicate
+/// is consulted only for a two-level reference. It is still implemented
+/// faithfully, so an image naming the executable explicitly is answered too and
+/// one naming `libSystem` is not.
+struct MainExports {
+    exports: ExportTable,
+    slide: u64,
+    /// The path the executable was loaded from, and its last component, which
+    /// are the two spellings a two-level reference could use.
+    path: String,
+}
+
+impl machish::resolve::SymbolProvider for MainExports {
+    fn provides(&self, install_name: &str) -> bool {
+        install_name == self.path
+            || Some(install_name) == self.path.rsplit('/').next()
+            || install_name == "@executable_path"
+    }
+
+    fn resolve(&self, sym: &machish::fixups::SymbolRef<'_>) -> Option<machish::resolve::Resolved> {
+        let export = self.exports.get(sym.name)?;
+        // A re-export forwards into another library and has no address of its
+        // own; answering zero would bind the caller to nothing and report
+        // success.
+        let addr = export.address(self.slide)?;
+        Some(machish::resolve::Resolved {
+            addr,
+            kind: match export.kind {
+                machish::exports::ExportKind::ThreadLocal => {
+                    machish::resolve::SymbolKind::ThreadLocal
+                }
+                _ => machish::resolve::SymbolKind::Function,
+            },
+            tag: 0,
+        })
+    }
+}
+
+/// The main executable's exports, parsed on first `dlopen` and kept.
+///
+/// Lazy rather than built at startup because a program that never calls
+/// `dlopen` should not pay to re-read and parse its own executable.
+fn main_exports() -> Option<&'static MainExports> {
+    let mut slot = MAIN_EXPORTS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(existing) = *slot {
+        return Some(existing);
+    }
+    let (path, slide) = EXECUTABLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()?;
+    let bytes = std::fs::read(&path).ok()?;
+    let object = MachObject::parse_any(&bytes, X86_64).ok()?;
+    let exports = ExportTable::parse(&object).ok()?;
+    let leaked: &'static MainExports = Box::leak(Box::new(MainExports {
+        exports,
+        slide,
+        path,
+    }));
+    *slot = Some(leaked);
+    Some(leaked)
+}
 
 /// The message `dlerror` will report, and the buffer it last handed out.
 ///
@@ -162,17 +244,52 @@ fn global_handle() -> u64 {
     &GLOBAL_TOKEN as *const u8 as usize as u64
 }
 
-/// Record where the guest executable came from, for `@executable_path`.
-pub fn set_executable_path(path: &str) {
+/// Record where the guest executable came from, and where it landed.
+pub fn set_executable_path(path: &str, slide: u64) {
     let canonical = std::fs::canonicalize(path)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| path.to_string());
-    *EXECUTABLE.lock().unwrap_or_else(|e| e.into_inner()) = Some(canonical);
+    *EXECUTABLE.lock().unwrap_or_else(|e| e.into_inner()) = Some((canonical, slide));
 }
 
-/// The loaded images, as a snapshot. The lock is held only for the copy.
-fn images() -> Vec<&'static Image> {
+/// How many images are loaded, and the address range they span.
+///
+/// Read without the lock, and that is the entire point. These lookups sit on the
+/// hot path — [`crate::Program::import_at`] and `import_by_target` are consulted
+/// at *every* import exit, and `is_guest_address` at every one that resolved
+/// somewhere — so what they cost when the answer is "no" is what the runtime
+/// costs. The first version of this cloned the image vector under a mutex per
+/// call, and a `sample` of DELTARUNE's game loop found the process spending most
+/// of its time in `malloc` underneath `import_by_target`.
+///
+/// A program that never calls `dlopen` now pays one relaxed atomic load, and a
+/// program that has pays that plus a range check before any lock is taken.
+/// Relaxed is sufficient: a stale zero can only be read by a thread that has not
+/// yet synchronised with the `dlopen` that stored it, and that thread cannot
+/// hold an address from the image it has not seen.
+static IMAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static REGION_LO: AtomicU64 = AtomicU64::new(u64::MAX);
+static REGION_HI: AtomicU64 = AtomicU64::new(0);
+
+/// Search the loaded images without copying the list.
+///
+/// Every `Image` is `&'static` — leaked at load, never freed — so a reference
+/// found inside the lock outlives it, and the guard is dropped before the caller
+/// does anything with the answer.
+/// Every loaded image, copied out.
+///
+/// For `dlsym`, which searches them all and is called a handful of times in a
+/// process's life. [`find`] is what the hot paths use.
+fn snapshot() -> Vec<&'static Image> {
     IMAGES.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn find<R>(mut f: impl FnMut(&'static Image) -> Option<R>) -> Option<R> {
+    if IMAGE_COUNT.load(Ordering::Relaxed) == 0 {
+        return None;
+    }
+    let images = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
+    images.iter().copied().find_map(&mut f)
 }
 
 /// The import registered at `va` in any dynamically loaded image.
@@ -181,36 +298,37 @@ fn images() -> Vec<&'static Image> {
 /// falls back to, so a call into a stub of an image the lifter never saw is
 /// serviced rather than decoded.
 pub fn import_at(va: u64) -> Option<&'static ImportSite> {
-    images().into_iter().find_map(|i| i.imports.get(&va))
+    find(|i| i.imports.get(&va))
 }
 
 /// The import of any dynamically loaded image that *resolved to* `host`.
 pub fn import_by_target(host: u64) -> Option<&'static ImportSite> {
-    images()
-        .into_iter()
-        .find_map(|i| i.imports_by_target.get(&host))
+    find(|i| i.imports_by_target.get(&host))
 }
 
 /// Whether `va` lies inside a dynamically loaded image.
 pub fn contains(va: u64) -> bool {
-    images().into_iter().any(|i| region_of(i, va).is_some())
+    // A host address is nowhere near a guest mapping, and this is the question
+    // asked most often and answered "no" almost every time. Rejecting it on two
+    // atomic loads keeps the lock off the path an ordinary import takes.
+    if va < REGION_LO.load(Ordering::Relaxed) || va >= REGION_HI.load(Ordering::Relaxed) {
+        return false;
+    }
+    find(|i| region_of(i, va).map(|_| ())).is_some()
 }
 
 /// The region to lift in order to execute `va`, if it is in a loaded image.
 pub fn lift_region(va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
-    for image in images() {
-        let Some((base, bytes)) = region_of(image, va) else {
-            continue;
-        };
+    find(|image| {
+        let (base, bytes) = region_of(image, va)?;
         let function = image.functions.iter().find(|f| f.contains(&va)).cloned();
         let region = crate::region::region_for(bytes, base, va, function)?;
         let start = usize::try_from(region.range.start - base).ok()?;
         let end = usize::try_from(region.range.end - base)
             .ok()?
             .min(bytes.len());
-        return Some((region, bytes.get(start..end)?.to_vec()));
-    }
-    None
+        Some((region, bytes.get(start..end)?.to_vec()))
+    })
 }
 
 fn region_of(image: &'static Image, va: u64) -> Option<(u64, &'static [u8])> {
@@ -224,7 +342,7 @@ fn region_of(image: &'static Image, va: u64) -> Option<(u64, &'static [u8])> {
 /// `va` as `image+offset`, for an image the guest loaded. See
 /// [`Program::locate`](crate::Program::locate).
 pub fn locate(va: u64) -> Option<String> {
-    for image in images() {
+    find(|image| {
         for report in &image.report.images {
             for seg in &report.segments {
                 if va >= seg.vmaddr && va < seg.vmaddr.wrapping_add(seg.vmsize) {
@@ -233,13 +351,13 @@ pub fn locate(va: u64) -> Option<String> {
                 }
             }
         }
-    }
-    None
+        None
+    })
 }
 
 /// How many images the guest has loaded.
 pub fn loaded() -> usize {
-    IMAGES.lock().unwrap_or_else(|e| e.into_inner()).len()
+    IMAGE_COUNT.load(Ordering::Acquire)
 }
 
 // ------------------------------------------------------------- loading ------
@@ -251,8 +369,8 @@ pub fn loaded() -> usize {
 pub fn open(path: &str) -> std::result::Result<u64, String> {
     let resolved = resolve_path(path).ok_or_else(|| format!("no such file: {path}"))?;
 
-    if let Some(existing) = images().into_iter().find(|i| i.path == resolved) {
-        return Ok(existing.handle);
+    if let Some(handle) = find(|i| (i.path == resolved).then_some(i.handle)) {
+        return Ok(handle);
     }
 
     let bytes = std::fs::read(&resolved).map_err(|e| format!("{resolved}: {e}"))?;
@@ -266,14 +384,22 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
 
     let mut memory = MmapSpace::new();
     let mut source = FsDylibSource::new();
-    let providers = HostProviders::new();
+    let hosts = HostProviders::new();
+    // The main executable ahead of everything: dyld resolves a newly loaded
+    // image against what is *already loaded*, and a plugin's host is the first
+    // thing that was. See [`MainExports`].
+    let main = main_exports();
+    let extra: Vec<&dyn machish::resolve::SymbolProvider> = main
+        .map(|m| m as &dyn machish::resolve::SymbolProvider)
+        .into_iter()
+        .collect();
     let report = Loader::new(X86_64)
         .link_with(
             &bytes,
             &resolved,
             &mut memory,
             &mut source,
-            &providers.chain(&[]),
+            &hosts.chain(&extra),
         )
         .map_err(|e| format!("{resolved}: {e}"))?;
 
@@ -316,10 +442,17 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
 
     // Published *before* the initializers run: an initializer is guest code in
     // this image, and lifting it needs the image to be findable.
-    IMAGES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(leaked);
+    {
+        let mut images = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
+        images.push(leaked);
+        // Published *after* the image is in the list, so a thread that observes
+        // a non-zero count finds the image behind it.
+        for &(base, bytes) in &leaked.regions {
+            REGION_LO.fetch_min(base, Ordering::Relaxed);
+            REGION_HI.fetch_max(base + bytes.len() as u64, Ordering::Relaxed);
+        }
+        IMAGE_COUNT.store(images.len(), Ordering::Release);
+    }
 
     run_initializers(leaked)?;
     Ok(leaked.handle)
@@ -418,7 +551,11 @@ fn run_initializers(image: &'static Image) -> std::result::Result<(), String> {
 /// in the two places a `.app` puts a bundled dylib, because a runner launched
 /// from anywhere still expects to find its own library.
 fn resolve_path(path: &str) -> Option<String> {
-    let executable = EXECUTABLE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let executable = EXECUTABLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .map(|(path, _)| path);
     let loader_dir = executable.as_deref().map(machish::loader::loader_directory);
 
     let mut candidates: Vec<String> = Vec::new();
@@ -473,13 +610,13 @@ fn rpaths_of(path: &str) -> Vec<String> {
 fn lookup(handle: u64, name: &str) -> Option<u64> {
     // `dlsym` takes the C identifier; a Mach-O export carries the underscore.
     let mangled = format!("_{name}");
-    let scoped: Vec<&'static Image> = match images().into_iter().find(|i| i.handle == handle) {
+    let scoped: Vec<&'static Image> = match snapshot().into_iter().find(|i| i.handle == handle) {
         Some(image) => vec![image],
         // Every pseudo-handle — `RTLD_DEFAULT`, `RTLD_SELF`, `RTLD_NEXT`, and
         // the token `dlopen(NULL)` returns — is treated as a global search.
         // Distinguishing them needs a caller's image, which a shim standing
         // outside the guest's frame does not have.
-        None => images(),
+        None => snapshot(),
     };
     for image in scoped {
         if let Some(export) = image.exports.get(&mangled)
