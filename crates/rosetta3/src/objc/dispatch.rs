@@ -204,6 +204,12 @@ static RUNTIME: &[Runtime] = &[
     rt!("objc_autoreleasePoolPop", V, P),
     rt!("objc_autoreleasePoolPush", P),
     rtc!([0], "objc_autoreleaseReturnValue", P, P),
+    // The hook the compiler emits inside every `for (x in collection)` loop, to
+    // be called when the collection changed underneath it. Its argument is the
+    // collection, not a class, and all it does is raise — so it needs none of
+    // the translation the rest of this table exists for, and the host's own is
+    // the right implementation.
+    rt!("objc_enumerationMutation", V, P),
     // `object_getClass` of a class is its metaclass, so the argument is
     // translated as well as the result.
     rtc!([0] -> true, "objc_getClass", P, P),

@@ -187,6 +187,74 @@ pub fn provider() -> SyntheticDylib {
     // Two underscores as the Mach-O spells it: one from C mangling, one from
     // the identifier `_NSGetExecutablePath`.
     lib.define_fn("__NSGetExecutablePath", ns_get_executable_path as *const ());
+    // The task port, for the same reason and with the same answer. `machish`
+    // denies it as host process state, which is right for a runtime that models
+    // a separate task and wrong for this one: under high-level emulation the
+    // guest's Mach task *is* this process's, because the guest's threads are
+    // this process's threads and its memory is this process's memory. A guest
+    // asking `mach_task_self()` while its slot is null asks the kernel about
+    // port 0 and gets `KERN_INVALID_ARGUMENT` from every call that takes one.
+    //
+    // The address, not the value: the symbol names a `mach_port_t` variable and
+    // `mach_task_self()` is a macro that reads it. Handing over the host's own
+    // variable keeps the two spellings agreeing for the life of the process.
+    if let Some(port) = crate::dyld::host_symbol("mach_task_self_") {
+        lib.define_data("_mach_task_self_", port);
+    }
+    // `mach_host_self` is denied for the same reason and answered the same way,
+    // as a *function* rather than a variable: it returns a send right to the
+    // host port, and there is one host. Steam's tier0 asks it for the machine's
+    // physical memory size, through `host_statistics`.
+    if let Some(f) = crate::dyld::host_symbol("mach_host_self") {
+        lib.define_fn("_mach_host_self", f as *const ());
+    }
+    // The rest of the process-state family, answered with the host's own.
+    //
+    // `machish` denies these so that a shim must decide, and here the decision
+    // is forced by something already true: `getenv`, `setenv` and `putenv` are
+    // passed through, so the environment the guest reads is the host's. A guest
+    // walking `environ` directly must see that same block or the two spellings
+    // disagree — and it is the right one anyway, since the variables a guest
+    // cares about (`SteamAppId`, `HOME`) were set for this process.
+    //
+    // Left null instead, each of these is a load from a slot the guest
+    // dereferences immediately, which is a fault with nothing naming a cause.
+    //
+    // `__NSGetArgv` is the one that is an approximation rather than an answer:
+    // it reports this process's command line, `run <path>` and all, where the
+    // guest's own vector is on its stack. That gap is not new — Foundation's
+    // `[[NSProcessInfo processInfo] arguments]` already reports the same thing,
+    // for the same reason — and it is tracked with the bundle work rather than
+    // half-closed here.
+    for (mach_o, host) in [
+        ("__NSGetEnviron", "_NSGetEnviron"),
+        ("__NSGetArgc", "_NSGetArgc"),
+        ("__NSGetArgv", "_NSGetArgv"),
+        // The host's image list, which is honestly what a crash reporter
+        // linked into the guest is asking about: this process's images are
+        // where its own frames are. Guest images are not in it, which is a
+        // partial answer and a great deal better than a null one.
+        ("__dyld_get_image_name", "_dyld_get_image_name"),
+    ] {
+        if let Some(f) = crate::dyld::host_symbol(host) {
+            lib.define_fn(mach_o, f as *const ());
+        }
+    }
+    // `environ` itself is a *variable*, so the slot takes its address rather
+    // than a function's. `_NSGetEnviron()` is how a dylib asks for that address
+    // on Darwin, which is the same reason the guest cannot simply be handed
+    // `dlsym("environ")`.
+    if let Some(f) = crate::dyld::host_symbol("_NSGetEnviron") {
+        // SAFETY: `_NSGetEnviron` is `char ***(void)` and takes no arguments.
+        // It is a pure accessor for the address of a libSystem global, so the
+        // pointer it returns is valid for the life of the process.
+        let get: unsafe extern "C" fn() -> *mut *mut *mut u8 =
+            unsafe { core::mem::transmute(f as usize as *const ()) };
+        let addr = unsafe { get() };
+        if !addr.is_null() {
+            lib.define_data("_environ", addr as usize as u64);
+        }
+    }
     // The global allocation operators. Two underscores as the Mach-O spells
     // them: one from C mangling, one already in the Itanium mangled name.
     for name in ["__Znwm", "__Znam"] {

@@ -713,7 +713,11 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
 }
 
 /// `dlsym` against the host process, for a symbol no guest image defines.
-fn host_symbol(name: &str) -> Option<u64> {
+///
+/// Also how [`crate::shims`] finds a host entry point without `#[link]`ing the
+/// library that exports it — see the note in [`crate::shims::audiounit`] about
+/// what linking one does to the process the guest starts in.
+pub(crate) fn host_symbol(name: &str) -> Option<u64> {
     let c = CString::new(name).ok()?;
     // SAFETY: `RTLD_DEFAULT` is a valid pseudo-handle and `c` outlives the call.
     // `dlsym` returns null for a name it does not know, which is checked.
