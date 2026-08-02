@@ -358,6 +358,11 @@ pub(crate) fn build_typed(guest_va: u64, signature: ThunkSignature) -> Result<Th
         sig.returns.push(AbiParam::new(t));
     }
 
+    // The host machine this trampoline is being built for. Cranelift's frontend
+    // is told rather than asked; see [`crate::jit::frontend_config`].
+    let frontend = crate::jit::frontend_config().map_err(|e| fail(e.to_string()))?;
+    let ptr = frontend.pointer_type();
+
     let mut func = Function::with_name_signature(UserFuncName::user(0, 0), sig);
     let mut fn_ctx = FunctionBuilderContext::new();
     let mut b = FunctionBuilder::new(&mut func, &mut fn_ctx);
@@ -380,7 +385,7 @@ pub(crate) fn build_typed(guest_va: u64, signature: ThunkSignature) -> Result<Th
 
     let params: Vec<_> = b.block_params(entry).to_vec();
     for (i, &v) in params.iter().enumerate() {
-        b.ins().stack_store(v, spill, (i * 8) as i32);
+        b.ins().stack_store(ptr, v, spill, (i * 8) as i32);
     }
 
     let desc = Box::leak(Box::new(signature)) as *const ThunkSignature;
@@ -402,14 +407,14 @@ pub(crate) fn build_typed(guest_va: u64, signature: ThunkSignature) -> Result<Th
 
     match ret_ty {
         Some(t) => {
-            let v = b.ins().stack_load(t, out, 0);
+            let v = b.ins().stack_load(ptr, t, out, 0);
             b.ins().return_(&[v]);
         }
         None => {
             b.ins().return_(&[]);
         }
     }
-    b.finalize();
+    b.finalize(frontend);
 
     let mut backend = crate::jit::backend().map_err(|e| fail(e.to_string()))?;
     let code = backend.compile(func).map_err(|e| fail(e.to_string()))?;
@@ -437,6 +442,9 @@ pub(crate) fn build(guest_va: u64) -> Result<Thunk, VmError> {
     }
     sig.returns.push(AbiParam::new(types::I64));
 
+    let frontend = crate::jit::frontend_config().map_err(|e| fail(e.to_string()))?;
+    let ptr = frontend.pointer_type();
+
     let mut func = Function::with_name_signature(UserFuncName::user(0, 0), sig);
     let mut fn_ctx = FunctionBuilderContext::new();
     let mut b = FunctionBuilder::new(&mut func, &mut fn_ctx);
@@ -459,10 +467,10 @@ pub(crate) fn build(guest_va: u64) -> Result<Thunk, VmError> {
 
     let params: Vec<_> = b.block_params(entry).to_vec();
     for (i, &v) in params.iter().take(GUEST_INT_ARGS).enumerate() {
-        b.ins().stack_store(v, ints, (i * 8) as i32);
+        b.ins().stack_store(ptr, v, ints, (i * 8) as i32);
     }
     for (i, &v) in params.iter().skip(GUEST_INT_ARGS).enumerate() {
-        b.ins().stack_store(v, floats, (i * 8) as i32);
+        b.ins().stack_store(ptr, v, floats, (i * 8) as i32);
     }
 
     let int_ptr = b.ins().stack_addr(types::I64, ints, 0);
@@ -484,7 +492,7 @@ pub(crate) fn build(guest_va: u64) -> Result<Thunk, VmError> {
         .call_indirect(callee_sig, callee, &[guest, int_ptr, fp_ptr]);
     let result = b.inst_results(call)[0];
     b.ins().return_(&[result]);
-    b.finalize();
+    b.finalize(frontend);
 
     let mut backend = crate::jit::backend().map_err(|e| fail(e.to_string()))?;
     let code = backend.compile(func).map_err(|e| fail(e.to_string()))?;

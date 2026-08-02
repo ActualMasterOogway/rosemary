@@ -28,7 +28,9 @@
 
 use std::sync::OnceLock;
 
+use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_codegen::settings::{self, Configurable};
+use microlift::MicroliftError;
 use microlift::backend::CraneliftBackend;
 
 /// The environment variable this module reads.
@@ -237,6 +239,7 @@ fn host_features() -> Vec<(&'static str, &'static str)> {
             // to, as single instructions instead of a load-exclusive loop.
             ("has_lse", value(has!("lse"))),
             ("has_fp16", value(has!("fp16"))),
+            ("has_dotprod", value(has!("dotprod"))),
         ]
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -289,6 +292,32 @@ pub fn isa_settings() -> &'static [(&'static str, &'static str)] {
 /// `CraneliftBackend::new()`, which would take Cranelift's unoptimised default.
 pub fn backend() -> microlift::Result<CraneliftBackend> {
     CraneliftBackend::with_flags(flags(), isa_settings())
+}
+
+/// How the frontend is told which machine a [`Function`] is being built for.
+///
+/// The IR this crate writes by hand — the trampolines in [`crate::thunk`] — is
+/// built with `cranelift_frontend::FunctionBuilder`, and since Cranelift 0.134
+/// the frontend no longer infers the target: the pointer type is an explicit
+/// argument to the stack-slot accessors and to `FunctionBuilder::finalize`.
+/// This is the answer, and it has to be the *host's*, because the pointer being
+/// described is the one the trampoline itself runs with — not the guest's,
+/// which happens to be the same width and is otherwise unrelated.
+///
+/// Built from `cranelift-native`, which is where microlift's
+/// [`CraneliftBackend`] gets its ISA too, so the function and the backend it is
+/// handed to cannot disagree about the machine. The ISA settings of
+/// [`isa_settings`] are deliberately not applied: they are target-*feature*
+/// knobs, and nothing in a frontend config — calling convention, pointer width,
+/// page size — is a function of which instructions the lowering may use.
+///
+/// [`Function`]: cranelift_codegen::ir::Function
+pub fn frontend_config() -> microlift::Result<TargetFrontendConfig> {
+    let isa = cranelift_native::builder()
+        .map_err(|e| MicroliftError::CraneliftError(e.to_string()))?
+        .finish(flags())
+        .map_err(|e| MicroliftError::CraneliftError(e.to_string()))?;
+    Ok(isa.frontend_config())
 }
 
 #[cfg(test)]
