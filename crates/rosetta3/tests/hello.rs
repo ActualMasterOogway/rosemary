@@ -183,6 +183,69 @@ fn the_slow_policy_registers_the_same_addresses_and_no_metadata() {
 }
 
 #[test]
+fn a_writable_segment_is_not_handed_to_the_lifter_as_constant_data() {
+    // The whole point of `LifterConfig::segments` is that microlift may fold a
+    // load from one to a constant, so a `__DATA` page described as read-only is
+    // a wrong value baked into the code — the guest stores to it at run time and
+    // the lift never sees that. Every mapped byte still has to be described, so
+    // this checks both halves: writability matches the image's own `initprot`,
+    // and the pieces still tile each mapped region exactly.
+    let Some(path) = common::hello() else {
+        skip!("cannot build x86_64 fixtures")
+    };
+    let program = load(&path);
+    let config = program.lifter_config();
+
+    let mut checked = 0;
+    for image in &program.report.images {
+        for seg in &image.segments {
+            // Zero-fill tails (`__bss`) are not mapped bytes, so only the part
+            // of a segment a region actually covers is described at all.
+            for va in [seg.vmaddr, seg.vmaddr + seg.vmsize.saturating_sub(1)] {
+                let Some(piece) = config.segments.iter().find(|s| s.contains(va)) else {
+                    continue;
+                };
+                assert_eq!(
+                    piece.writable, seg.writable,
+                    "{} {} at {va:#x} was described as writable={}",
+                    image.name, seg.name, piece.writable
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0, "no segment was described, so nothing is tested");
+    assert!(
+        program
+            .report
+            .images
+            .iter()
+            .flat_map(|i| &i.segments)
+            .any(|s| s.writable),
+        "the fixture has no writable segment, so the read-only case is vacuous"
+    );
+
+    // No byte lost and none described twice, which is what makes the split
+    // above equivalent to handing each region over whole.
+    let mut pieces: Vec<(u64, u64)> = config
+        .segments
+        .iter()
+        .map(|s| (s.address, s.address + s.data.len() as u64))
+        .collect();
+    pieces.sort_unstable();
+    for regions in program.memory.regions() {
+        let (base, bytes) = regions;
+        let end = base + bytes.len() as u64;
+        let mut at = base;
+        for &(start, stop) in pieces.iter().filter(|p| p.0 >= base && p.1 <= end) {
+            assert_eq!(start, at, "a gap or overlap at {at:#x}");
+            at = stop;
+        }
+        assert_eq!(at, end, "region {base:#x} is not fully described");
+    }
+}
+
+#[test]
 fn servicing_an_import_exit_calls_the_host_function() {
     // The slow path end to end, driven the way the M3 loop will drive it: an
     // exit names an address, the program looks it up, and the host function

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::ops::Range;
 
 use machish::loader::Loader;
 use machish::memory::{BufferSpace, Regions};
@@ -11,8 +12,8 @@ use machish::resolve::{NativeDylibProvider, SymbolProvider, eager_binding_shims}
 use machish::spec::arch::X86_64;
 
 use microlift::arch::x86_64::context::RegisterContext;
-use microlift::core::LifterConfig;
 use microlift::core::exit::MemorySegment;
+use microlift::core::{AddressMode, LifterConfig};
 
 use crate::abi::{AbiError, Classification, FunctionAbi, Lookup};
 
@@ -390,9 +391,11 @@ impl<M: Regions> Program<M> {
     ///
     /// **The guest's mapped images**, as a hint for microlift's value-set
     /// analysis: it lets a RIP-relative load from read-only data be folded to a
-    /// constant at lift time instead of becoming a runtime memory access.
-    /// Marked non-writable for exactly that reason — the lifter must not fold a
-    /// value the guest can later store over.
+    /// constant at lift time instead of becoming a runtime memory access. Each
+    /// piece carries the writability of the segment it comes from, because that
+    /// is the whole safety condition — the lifter must not fold a value the
+    /// guest can later store over, and a `__DATA` page handed over as read-only
+    /// is exactly that mistake. See [`Program::writable_ranges`].
     pub fn lifter_config(&self) -> LifterConfig {
         self.lifter_config_with(ImportPolicy::FastWhenKnown)
     }
@@ -412,7 +415,11 @@ impl<M: Regions> Program<M> {
             {
                 std::arch::is_aarch64_feature_detected!("neon")
             }
-            #[cfg(not(target_arch = "aarch64"))]
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            {
+                std::arch::is_x86_feature_detected!("sse2")
+            }
+            #[cfg(not(any(target_arch = "aarch64", target_arch = "x86", target_arch = "x86_64")))]
             {
                 false
             }
@@ -420,13 +427,35 @@ impl<M: Regions> Program<M> {
         let mut config = LifterConfig {
             interpreter_fallback: true,
             use_vector_xmm,
+            outline_helpers: true,
+            address_mode: AddressMode::Direct,
             ..LifterConfig::default()
         };
 
+        // A mapped region is a whole image's reservation, spanning segments of
+        // both kinds, so it is cut at the writable segments' edges rather than
+        // handed over whole.
+        let writable = self.writable_ranges();
         for (base, bytes) in self.memory.regions() {
-            config
-                .segments
-                .push(MemorySegment::new(base, bytes.to_vec(), false));
+            let end = base.wrapping_add(bytes.len() as u64);
+            let mut piece = |from: u64, to: u64, is_writable: bool| {
+                let (lo, hi) = ((from - base) as usize, (to - base) as usize);
+                config
+                    .segments
+                    .push(MemorySegment::new(from, bytes[lo..hi].to_vec(), is_writable));
+            };
+            let mut at = base;
+            for range in writable.iter().filter(|r| r.start < end && r.end > base) {
+                let (start, stop) = (range.start.max(base), range.end.min(end));
+                if at < start {
+                    piece(at, start, false);
+                }
+                piece(start, stop, true);
+                at = stop;
+            }
+            if at < end {
+                piece(at, end, false);
+            }
         }
         for (&va, site) in &self.imports {
             match policy.promotion_for(site) {
@@ -462,6 +491,35 @@ impl<M: Regions> Program<M> {
             config.set_indirect_call_bridge(crate::bridge::indirect_bridge());
         }
         config
+    }
+
+    /// Every VA range the guest may store to, merged and in address order.
+    ///
+    /// The loader records a segment's `initprot`, so this is the guest's own
+    /// answer rather than a guess from segment names: `__DATA`, `__DATA_DIRTY`
+    /// and a `__DATA_CONST` that chained fixups made writable all land here,
+    /// and so does anything an image invents. Overlaps are merged because two
+    /// images' segments can share a host page, and a range that is writable for
+    /// either one is writable.
+    fn writable_ranges(&self) -> Vec<Range<u64>> {
+        let mut ranges: Vec<Range<u64>> = self
+            .report
+            .images
+            .iter()
+            .flat_map(|image| &image.segments)
+            .filter(|seg| seg.writable)
+            .map(|seg| seg.vmaddr..seg.vmaddr.wrapping_add(seg.vmsize))
+            .filter(|r| r.start < r.end)
+            .collect();
+        ranges.sort_by_key(|r| r.start);
+        let mut merged: Vec<Range<u64>> = Vec::with_capacity(ranges.len());
+        for r in ranges {
+            match merged.last_mut() {
+                Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+                _ => merged.push(r),
+            }
+        }
+        merged
     }
 
     /// How every import of this program will be reached, by symbol.

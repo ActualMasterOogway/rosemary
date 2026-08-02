@@ -43,7 +43,7 @@ use microlift::arch::x86_64::X86_64;
 use microlift::arch::x86_64::context::RegisterContext;
 use microlift::backend::CraneliftBackend;
 use microlift::core::exit::ExitReason;
-use microlift::core::{LifterConfig, lift_to_function};
+use microlift::core::{LifterConfig, lift_to_code};
 
 use crate::program::Program;
 use crate::vm::VmError;
@@ -159,12 +159,12 @@ impl CodeCache {
             .ok_or(VmError::NoCode { pc, from: None })?;
         let (start, end) = (region.range.start, region.range.end);
 
-        let func = lift_to_function::<X86_64>(&bytes, start, self.config.clone())
+        let func = lift_to_code::<X86_64>(&bytes, start, self.config.clone())
             .map_err(|source| VmError::Lift { pc, start, source })?;
         let mut backend =
             crate::jit::backend().map_err(|source| VmError::Lift { pc, start, source })?;
         let code = backend
-            .compile(func)
+            .compile_lifted(func)
             .map_err(|source| VmError::Lift { pc, start, source })?;
 
         // SAFETY: `compile` returns the finalized entry of a function whose

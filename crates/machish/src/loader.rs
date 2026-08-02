@@ -382,6 +382,7 @@ impl<S: MachSpec + 'static> Loader<S> {
                     vmsize: seg.vmsize,
                     file_range: seg.file_range(),
                     executable: seg.prot().exec,
+                    writable: seg.prot().write,
                 })
                 .collect();
 

@@ -205,6 +205,10 @@ pub struct SegmentReport {
     pub file_range: Option<core::ops::Range<usize>>,
     /// Whether the segment holds code the recompiler should lift.
     pub executable: bool,
+    /// Whether the guest may store to the segment. A recompiler must not fold a
+    /// load from one of these to a constant: the bytes it reads at lift time are
+    /// not the bytes that will be there at run time.
+    pub writable: bool,
 }
 
 /// Every image linked together, in load order.
