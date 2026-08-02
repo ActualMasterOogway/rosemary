@@ -435,8 +435,31 @@ impl<M: Regions> Program<M> {
                     crate::abi::dynamic_symbol(abi, site.resolved),
                     crate::abi::guest_call_abi(),
                 ),
+                // Everything a fast import cannot express — a variadic, a
+                // callback taker, a shim, a signature the marshaller refuses —
+                // used to be a VM exit and is now a bridged call. The work is
+                // identical; what goes away is the round trip. See
+                // [`crate::bridge`].
+                None if policy != ImportPolicy::AlwaysSlow => {
+                    config.register_bridge_import(va, crate::bridge::import_bridge())
+                }
                 None => config.register_slow_import(va),
             }
+        }
+
+        // Only under the fast policy, because [`ImportPolicy::AlwaysSlow`] is
+        // the baseline the rest is measured against and a baseline with two
+        // kinds of inline call in it measures nothing. Both of these are
+        // *additions* to what the run loop already answers, not replacements:
+        // an address neither one recognises still arrives as the exit it always
+        // did.
+        if policy != ImportPolicy::AlwaysSlow {
+            // Sites that did not exist when this config was built — see
+            // [`crate::bridge::DynamicImports`] and [`crate::dyld`].
+            config.set_import_registry(crate::bridge::registry());
+            // And the calls whose target no lift-time question can answer: a
+            // `dlsym` result, a stored `objc_msgSend`, a `__tlv_bootstrap`.
+            config.set_indirect_call_bridge(crate::bridge::indirect_bridge());
         }
         config
     }

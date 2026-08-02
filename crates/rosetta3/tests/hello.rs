@@ -16,6 +16,7 @@
 mod common;
 
 use microlift::arch::x86_64::context::RegisterContext;
+use microlift::core::bridge::ImportKind;
 
 use rosetta3::abi::{self, Classification};
 use rosetta3::{ImportPolicy, Program};
@@ -116,15 +117,21 @@ fn a_known_signature_is_inlined_and_a_variadic_is_not() {
             .expect("every import address is registered");
         match abi::classify(site.tag, &site.symbol) {
             Classification::Fast => {
-                let import = entry.as_ref().unwrap_or_else(|| {
-                    panic!("{} is fast-callable but was registered slow", site.symbol)
-                });
+                let ImportKind::Fast(import) = entry else {
+                    panic!(
+                        "{} is fast-callable but was not registered fast",
+                        site.symbol
+                    )
+                };
                 assert_eq!(import.symbol.value as usize as u64, site.resolved);
                 fast += 1;
             }
+            // Not inlinable, and no longer an exit either: a symbol microlift
+            // cannot reproduce the call for is reached through the runtime's
+            // own bridge. See `rosetta3::bridge`.
             _ => assert!(
-                entry.is_none(),
-                "{} has no usable signature but was registered fast",
+                matches!(entry, ImportKind::Bridge(_)),
+                "{} has no usable signature but was not registered as a bridge",
                 site.symbol
             ),
         }
@@ -154,8 +161,25 @@ fn the_slow_policy_registers_the_same_addresses_and_no_metadata() {
         v
     };
     assert_eq!(addrs(&fast), addrs(&slow));
-    assert!(slow.imports.values().all(Option::is_none));
-    assert!(fast.imports.values().any(Option::is_some));
+    // The baseline is exits and nothing else — no inlined calls, no bridges,
+    // and none of the lift-time machinery either, or it would not be a baseline.
+    assert!(slow.imports.values().all(|k| matches!(k, ImportKind::Slow)));
+    assert!(slow.import_registry.is_none());
+    assert!(slow.indirect_call_bridge.is_none());
+
+    // Under the fast policy every site is reached without an exit: inlined
+    // where the signature allows, bridged where it does not.
+    assert!(
+        fast.imports
+            .values()
+            .any(|k| matches!(k, ImportKind::Fast(_)))
+    );
+    assert!(
+        !fast.imports.values().any(|k| matches!(k, ImportKind::Slow)),
+        "an import was left on the slow exit path"
+    );
+    assert!(fast.import_registry.is_some());
+    assert!(fast.indirect_call_bridge.is_some());
 }
 
 #[test]

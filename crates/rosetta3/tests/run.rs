@@ -211,9 +211,10 @@ fn the_va_list_family_prints_what_the_host_libc_prints() {
 ///   returned, which is what dyld guarantees and what a plugin depends on.
 /// - `len=6` — the `dlsym` result is a **guest** address the runtime entered
 ///   through the JIT, and the `strlen` inside it reached the host's. That second
-///   half is the one with no safety net: the plugin's call sites were never
-///   registered with the lifter, so the call arrives as an `UnknownJump` and is
-///   recognised at the exit or not at all. Not at all means decoding a `__stubs`
+///   half is the one with no safety net: the plugin did not exist when the
+///   lifter was configured, so its call sites are recognised by
+///   [`rosetta3::bridge::DynamicImports`] while the plugin is being lifted, or
+///   at the exit, or not at all. Not at all means decoding a `__stubs`
 ///   trampoline as guest code and disassembling native arm64 as x86-64.
 /// - `missing=1 reported=1` — a name nothing defines is null *and* leaves a
 ///   message, rather than being answered by the host's `dlsym` with some
@@ -230,4 +231,33 @@ fn the_guest_loads_an_intel_dylib_of_its_own_and_calls_into_it() {
         out, "plugin loaded\nlen=6\nmissing=1 reported=1\n",
         "stderr: {err}"
     );
+}
+
+#[test]
+fn a_dynamically_loaded_image_runs_the_same_bridged_and_exited() {
+    // The falsifiable half of the lift-time import registry, and the reason it
+    // is worth stating separately from the fixture's own expectations.
+    //
+    // Under `--slow` there is no registry and no bridge: the plugin's call sites
+    // are unknown to the lifter, so each one leaves microlift as an
+    // `UnknownJump` and is recognised by the run loop's own lookup before it
+    // enters the region. Under the default the same sites are recognised *while
+    // the plugin is lifted* and become inline calls to
+    // [`rosetta3::bridge::import_call`].
+    //
+    // Two entirely different routes to the same host function, which is exactly
+    // the shape a silent divergence would hide in — a stale register reloaded
+    // around the bridge, a return address pushed twice, a `dlsym`ed pointer
+    // dispatched as host code on one path and guest code on the other. The
+    // program is small enough that any of those changes what it prints.
+    let Some(path) = common::dlopen_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
+
+    let (fast_status, fast_out, fast_err) = run_guest(&path, &[]);
+    let (slow_status, slow_out, slow_err) = run_guest_with(&["--slow"], &path, &[]);
+
+    assert_eq!(fast_status, Some(0), "stderr: {fast_err}");
+    assert_eq!(slow_status, Some(0), "stderr: {slow_err}");
+    assert_eq!(fast_out, slow_out);
 }

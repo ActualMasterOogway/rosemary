@@ -137,6 +137,13 @@ fn a_longjmp_across_a_host_frame_is_refused_by_name() {
     // return through it — so the runtime stops and says which case it is. This
     // is the boundary of what is built, stated as a test rather than a comment,
     // and it is the test that must *change* when the guest unwinder lands.
+    //
+    // It is also, since imports became bridged calls, the test that holds
+    // [`rosetta3::bridge`] honest about parked failures. The comparator's
+    // refusal cannot be returned through the host's `qsort` frame, so it is left
+    // on the thread — and `qsort` itself is now an inline bridged call that
+    // produces no exit for the run loop to notice it at. A bridge that reported
+    // success without looking would let this program sort nothing and exit zero.
     let Some(path) = longjmp_across_fixture() else {
         skip!("cannot build x86_64 fixtures")
     };

@@ -927,6 +927,10 @@ impl Vm {
                 Ok(None)
             }
 
+            // The answer is discarded here and load-bearing in
+            // [`Vm::dispatch_indirect_bridged`]: at an exit the loop continues
+            // at `rip` whether the call was made or the target is guest code,
+            // and only a bridge has to tell those apart.
             ExitReason::IndirectCall => {
                 self.dispatch_indirect(ctx)?;
                 Ok(None)
@@ -981,6 +985,60 @@ impl Vm {
             .into());
         };
         self.service_site_as(site, ctx, jumped)
+    }
+
+    /// Service an import from a fast-call bridge rather than from an exit.
+    ///
+    /// The same work [`Vm::service_import`] does, with one thing added to the
+    /// answer: whether control was *redirected*. At an exit that question does
+    /// not arise, because the loop continues at `rip` either way. Inside a
+    /// bridge it decides everything — a serviced call returns to the instruction
+    /// after it, while a `longjmp` or a transfer into another guest image has
+    /// moved `rip` somewhere the lifted code cannot continue from. See
+    /// [`crate::bridge`].
+    ///
+    /// `jumped` is false even for an import reached by a tail `jmp`: microlift
+    /// pops the return address before calling the bridge and publishes it as
+    /// `rip`, so a shim standing in for the transfer finds exactly what it finds
+    /// at an intercepted `call` — the address the callee must return to, and a
+    /// stack with no return address on it.
+    pub(crate) fn service_bridged_import(
+        &self,
+        import_va: u64,
+        ctx: &mut RegisterContext,
+    ) -> Result<bool, VmError> {
+        let Some(site) = self.program.import_at(import_va) else {
+            return Err(AbiError::NoSignature {
+                symbol: format!("<unregistered {import_va:#x}>"),
+            }
+            .into());
+        };
+        self.service_site_as(site, ctx, false)?;
+        Ok(self.redirected())
+    }
+
+    /// [`Vm::dispatch_indirect`] from a fast-call bridge.
+    ///
+    /// `Ok(false)` means the call was made and the guest resumes inline;
+    /// `Ok(true)` means `rip` now names guest code, which can only be entered
+    /// through the JIT, so the run loop has to have it.
+    pub(crate) fn dispatch_indirect_bridged(
+        &self,
+        target: u64,
+        ctx: &mut RegisterContext,
+    ) -> Result<bool, VmError> {
+        // `dispatch_indirect` reads the callee from the context, and microlift
+        // has already parked it there. Set explicitly rather than relied upon:
+        // the two are the same value by contract, and this is the one line that
+        // says so.
+        ctx.imported_function_va = target;
+        self.dispatch_indirect(ctx)
+    }
+
+    /// Whether the call just serviced moved `rip` instead of returning a value,
+    /// clearing the flag.
+    fn redirected(&self) -> bool {
+        crate::thread::current().is_some_and(|s| s.took_redirect())
     }
 
     /// [`Vm::service_import`] for a site already looked up.
@@ -1067,14 +1125,19 @@ impl Vm {
     /// natively, and there is nothing in the pointer to say which. Getting it
     /// backwards in either direction is a crash with no useful diagnostic, so
     /// the answer is looked up rather than inferred from the value.
-    fn dispatch_indirect(&self, ctx: &mut RegisterContext) -> Result<(), VmError> {
+    ///
+    /// `Ok(true)` means control was transferred rather than a call being made:
+    /// `rip` names guest code, or a shim redirected. Only the bridge form reads
+    /// it — see [`Vm::dispatch_indirect_bridged`].
+    fn dispatch_indirect(&self, ctx: &mut RegisterContext) -> Result<bool, VmError> {
         let callee = ctx.imported_function_va;
         let resume = ctx.rip;
 
         // A pointer read out of an import slot: the same host function the
         // import would have reached, so service it identically.
         if self.program.import_at(callee).is_some() {
-            return self.service_import(ctx, false);
+            self.service_import(ctx, false)?;
+            return Ok(self.redirected());
         }
 
         // One of our own thunks, handed out earlier and now called by the guest
@@ -1095,7 +1158,7 @@ impl Vm {
                 .map_err(|source| VmError::Stack { source })?;
             ctx.rsp = rsp;
             ctx.rip = target;
-            return Ok(());
+            return Ok(true);
         }
 
         // A host address the guest *loaded from an import slot* and then called
@@ -1128,7 +1191,8 @@ impl Vm {
             // `false` because an indirect `call` is a call: microlift intercepts
             // it before the push, so the return address is this runtime's to
             // write.
-            return self.service_site_as(site, ctx, false);
+            self.service_site_as(site, ctx, false)?;
+            return Ok(self.redirected());
         }
 
         Err(VmError::UnknownIndirectCall { callee, resume })
@@ -1253,6 +1317,18 @@ impl Vm {
     /// Take whatever error a callback left behind on this thread.
     pub fn take_pending(&self) -> Option<VmError> {
         crate::thread::current().and_then(|s| s.pending.borrow_mut().take())
+    }
+
+    /// Whether a callback left an error behind, without taking it.
+    ///
+    /// [`Vm::run_loop`] takes the parked error after every region exit, which
+    /// was enough while every host call *was* one. A bridged call is not: it
+    /// returns inline, and a failure raised underneath it — a guest callback the
+    /// host invoked, which is where parked errors come from in the first place —
+    /// would sit in the slot unread until some later exit happened to notice, or
+    /// never. See [`crate::bridge`].
+    pub(crate) fn has_pending(&self) -> bool {
+        crate::thread::current().is_some_and(|s| s.pending.borrow().is_some())
     }
 }
 
