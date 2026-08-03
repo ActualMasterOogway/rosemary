@@ -72,6 +72,7 @@ pub mod host;
 use std::collections::{HashMap, HashSet};
 
 use machish::extensions::objc::{ObjcCategory, ObjcClass, ObjcImage, ObjcMethod, ObjcProtocol};
+use machish::report::LinkReport;
 
 use crate::abi::GuestMemory;
 use crate::vm::{Vm, VmError};
@@ -270,7 +271,7 @@ pub fn register(vm: &Vm) -> Result<ObjcRuntime, VmError> {
     // Selector uniquing, which is independent of all of the above: it rewrites
     // the guest's own `__objc_selrefs` slots from string pointers to `SEL`s.
     for image in &images {
-        unique_selectors(vm, &mut rt, image)?;
+        rt.stats.selectors += unique_selectors(vm, image)?;
     }
 
     Ok(rt)
@@ -820,7 +821,8 @@ fn patch_ivar_offsets(vm: &Vm, rt: &mut ObjcRuntime, class: &ObjcClass) -> Resul
 /// The slot's *current* contents are a pointer to the name — which is why this
 /// reads before it writes, rather than working from the decoded method lists:
 /// a selector may be referenced without any class in this image implementing it.
-fn unique_selectors(vm: &Vm, rt: &mut ObjcRuntime, image: &ObjcImage) -> Result<(), VmError> {
+fn unique_selectors(vm: &Vm, image: &ObjcImage) -> Result<usize, VmError> {
+    let mut uniqued = 0;
     let mut view = vm.view();
     for &slot in &image.selector_refs {
         let mut buf = [0u8; 8];
@@ -842,7 +844,38 @@ fn unique_selectors(vm: &Vm, rt: &mut ObjcRuntime, image: &ObjcImage) -> Result<
         let sel = unsafe { host::sel_registerName(name.as_ptr()) };
         view.write(slot, &(sel as u64).to_le_bytes())
             .map_err(|_| memory_error(slot))?;
-        rt.stats.selectors += 1;
+        uniqued += 1;
     }
-    Ok(())
+    Ok(uniqued)
+}
+
+/// Unique the selector references of an image the *guest* loaded, and nothing
+/// else about it.
+///
+/// [`register`] is the launch-time pass over the program's own images, and it
+/// does five things; this does one of them, for a `dlopen`ed image, because that
+/// one is separable and the other four are not.
+///
+/// **Why it cannot wait for the rest.** A selector reference is not metadata the
+/// runtime consults — it is a slot *guest code loads from*
+/// (`movq selref(%rip), %rsi`) on its way into `objc_msgSend`. Until it is
+/// rewritten it holds a `char *`, so every message a loaded image sends arrives
+/// with a string pointer where a `SEL` belongs, and the host runtime answers
+/// "that class does not respond to that selector" — for `+[NSProcessInfo
+/// processInfo]`, which of course it does. dyld's `libobjc` performs exactly
+/// this rewrite when it maps an image, so doing it here is matching the platform
+/// rather than working around it.
+///
+/// What is still not done for a loaded image is registration proper: its classes
+/// are not realized, its categories are not attached, and its `+load` does not
+/// run. Those are refused by name when reached ([`dispatch`]), which is a
+/// different failure from a message that should have worked — and this closes
+/// only the second kind. Messages *to Foundation*, which is what a library like
+/// `steamclient.dylib` actually sends, work after this and did not before.
+pub(crate) fn unique_loaded_selectors(vm: &Vm, report: &LinkReport) -> Result<usize, VmError> {
+    let mut uniqued = 0;
+    for image in report.images.iter().filter_map(|i| i.objc.as_ref()) {
+        uniqued += unique_selectors(vm, image)?;
+    }
+    Ok(uniqued)
 }

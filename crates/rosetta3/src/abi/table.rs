@@ -449,40 +449,29 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // Answered by `crate::shims::runtime` rather than by the host, whose
     // executable path is only the right answer because `crate::bundle` made it
     // so. Two underscores in the Mach-O, one after `c_name` strips the mangling.
+    // The rest of the process-state family [`crate::shims::runtime`] answers
+    // with the host's own. Resolving them was not enough: an import needs a
+    // signature to be *called*, and these had the resolution without one, which
+    // is a refusal by name rather than a wrong value — and is how steamclient's
+    // initializer reported it.
+    sig!("_NSGetArgc", P),
+    sig!("_NSGetArgv", P),
+    sig!("_NSGetEnviron", P),
     sig!("_NSGetExecutablePath", I32, P, P),
     // The C++ exception surface, all of it shimmed: see [`crate::unwind`] for
     // why none of it can reach the host's libc++abi. `_ZSt9terminatev` is the
     // exception to the exception — `std::terminate` really does mean "stop this
     // process", and the host's does that correctly.
     sig!("_Unwind_Resume", V, P),
-    // The `basic_string` surface Steam's own C++ reaches. Every one is a `this` pointer
-    // and scalars, returning a reference or a count — the string object itself is
-    // guest memory the host's libc++ rewrites in place, and none of these passes
-    // or returns one by value, which is what keeps them describable here.
-    sig!("_ZNKSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE2atEm", P, P, U64),
-    sig!(
-        "_ZNKSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE4findEcm",
-        U64,
-        P,
-        U8,
-        U64
-    ),
-    sig!(
-        "_ZNKSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE5rfindEcm",
-        U64,
-        P,
-        U8,
-        U64
-    ),
-    sig!(
-        "_ZNKSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE7compareEmmPKcm",
-        I32,
-        P,
-        U64,
-        U64,
-        P,
-        U64
-    ),
+    // The `basic_string` surface used to be described here, on the reasoning that
+    // every entry point is a `this` pointer and scalars and so the host's libc++
+    // could rewrite the guest's object in place. That reasoning was wrong, and
+    // wrongly in the way this table cannot see: the *layout* of a `basic_string`
+    // differs between x86-64 and arm64 macOS, so a correct signature still
+    // delivered the object to code that reads different fields out of it. All of
+    // it is now implemented against the guest's own layout in
+    // [`crate::shims::cxxstring`], which is also where the evidence is written
+    // down.
     // What a guest class deriving from `std::exception` reaches: the base's
     // constructor and destructor, and `operator delete`. Ordinary host calls —
     // the object is guest memory the host writes a vtable pointer into, which
@@ -490,177 +479,19 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("_ZNKSt9exception4whatEv", P, P),
     sig!("_ZNSt11logic_errorC2EPKc", V, P, P),
     sig!("_ZNSt12length_errorD1Ev", V, P),
-    sig!(
-        "_ZNSt13runtime_errorC1ERKNSt3__112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE",
-        V,
-        P,
-        P
-    ),
     sig!("_ZNSt13runtime_errorD1Ev", V, P),
     // `std::call_once`'s out-of-line half. The third argument is the guest's
     // own thunk-taking function pointer — libc++ calls it with the second as
     // its argument — so it crosses host->guest like any other callback.
     cbsig!([2], "_ZNSt3__111__call_onceERVmPvPFvS2_E", V, P, P, P),
     sig!("_ZNSt3__112__next_primeEm", U64, U64),
-    sig!("_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE2atEm", P, P, U64),
-    sig!(
-        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE5eraseEmm",
-        P,
-        P,
-        U64,
-        U64
-    ),
-    sig!(
-        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6__initEPKcm",
-        V,
-        P,
-        P,
-        U64
-    ),
-    sig!(
-        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6appendEPKc",
-        P,
-        P,
-        P
-    ),
-    sig!(
-        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6appendEPKcm",
-        P,
-        P,
-        P,
-        U64
-    ),
-    sig!(
-        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6appendERKS5_mm",
-        P,
-        P,
-        P,
-        U64,
-        U64
-    ),
-    sig!(
-        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6appendEmc",
-        P,
-        P,
-        U64,
-        U8
-    ),
-    sig!(
-        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6assignEPKc",
-        P,
-        P,
-        P
-    ),
-    sig!(
-        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6assignEPKcm",
-        P,
-        P,
-        P,
-        U64
-    ),
-    sig!(
-        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6insertEmPKc",
-        P,
-        P,
-        U64,
-        P
-    ),
-    sig!(
-        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6resizeEmc",
-        V,
-        P,
-        U64,
-        U8
-    ),
-    sig!(
-        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE7replaceEmmPKc",
-        P,
-        P,
-        U64,
-        U64,
-        P
-    ),
-    sig!(
-        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE7reserveEm",
-        V,
-        P,
-        U64
-    ),
-    // Seven integer arguments — the guest spills the last to its own stack and
-    // AAPCS64 still has a register free, which is the case `tests/abi.rs` covers.
-    sig!(
-        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE9__grow_byEmmmmmm",
-        V,
-        P,
-        U64,
-        U64,
-        U64,
-        U64,
-        U64,
-        U64
-    ),
-    sig!("_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE9push_backEc", V, P, U8),
-    sig!(
-        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEC1ERKS5_",
-        V,
-        P,
-        P
-    ),
-    sig!(
-        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEC1ERKS5_mmRKS4_",
-        V,
-        P,
-        P,
-        U64,
-        U64,
-        P
-    ),
-    sig!("_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEED1Ev", V, P),
-    sig!("_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEED2Ev", V, P),
-    sig!(
-        "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEaSERKS5_",
-        P,
-        P,
-        P
-    ),
+    // libc++'s per-thread bookkeeping block, constructed in place.
+    sig!("_ZNSt3__115__thread_structC1Ev", V, P),
+    sig!("_ZNSt3__115__thread_structD1Ev", V, P),
     // `condition_variable::__do_timed_wait(unique_lock<mutex> &, time_point)`.
     // The `time_point` is by value and is one `long long` — a single eightbyte
     // to SysV and a single doubleword composite to AAPCS64, which is the one
     // shape where the two ABIs agree without the aggregate marshaller.
-    // The `wchar_t` instantiation of the same. `wchar_t` is `int` on both.
-    sig!(
-        "_ZNSt3__112basic_stringIwNS_11char_traitsIwEENS_9allocatorIwEEE6__initEmw",
-        V,
-        P,
-        U64,
-        I32
-    ),
-    sig!(
-        "_ZNSt3__112basic_stringIwNS_11char_traitsIwEENS_9allocatorIwEEE6appendEPKwm",
-        P,
-        P,
-        P,
-        U64
-    ),
-    sig!(
-        "_ZNSt3__112basic_stringIwNS_11char_traitsIwEENS_9allocatorIwEEE6resizeEmw",
-        V,
-        P,
-        U64,
-        I32
-    ),
-    sig!("_ZNSt3__112basic_stringIwNS_11char_traitsIwEENS_9allocatorIwEEE9push_backEw", V, P, I32),
-    sig!("_ZNSt3__112basic_stringIwNS_11char_traitsIwEENS_9allocatorIwEEEC1ERKS5_", V, P, P),
-    sig!(
-        "_ZNSt3__112basic_stringIwNS_11char_traitsIwEENS_9allocatorIwEEEC1ERKS5_mmRKS4_",
-        V,
-        P,
-        P,
-        U64,
-        U64,
-        P
-    ),
-    sig!("_ZNSt3__112basic_stringIwNS_11char_traitsIwEENS_9allocatorIwEEED1Ev", V, P),
     sig!(
         "_ZNSt3__118condition_variable15__do_timed_waitERNS_11unique_lockINS_5mutexEEENS_6chrono10time_pointINS5_12system_clockENS5_8durationIxNS_5ratioILl1ELl1000000000EEEEEEE",
         V,
@@ -673,9 +504,26 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // with a vtable-free wrapper around them, and both of those are
     // byte-identical on the two architectures — the fact M4 rests on. So the
     // host's libc++ operates on the guest's object in place.
+    // `std::recursive_timed_mutex`, reached by a `steamclient.dylib`
+    // initializer. Passthrough for the same reason as `std::mutex` above:
+    // it is a `pthread_mutex_t`, a `pthread_cond_t`, a count and a thread id,
+    // and the first two are byte-identical on the two architectures.
+    // `try_lock` returns `bool`, which SysV leaves in `al`.
+    sig!("_ZNSt3__121recursive_timed_mutex4lockEv", V, P),
+    sig!("_ZNSt3__121recursive_timed_mutex6unlockEv", V, P),
+    sig!("_ZNSt3__121recursive_timed_mutex8try_lockEv", U8, P),
+    sig!("_ZNSt3__121recursive_timed_mutexC1Ev", V, P),
+    sig!("_ZNSt3__121recursive_timed_mutexC2Ev", V, P),
+    sig!("_ZNSt3__121recursive_timed_mutexD1Ev", V, P),
+    sig!("_ZNSt3__121recursive_timed_mutexD2Ev", V, P),
     sig!("_ZNSt3__15mutex4lockEv", V, P),
     sig!("_ZNSt3__15mutex6unlockEv", V, P),
     sig!("_ZNSt3__15mutexD1Ev", V, P),
+    // `chrono::{steady,system}_clock::now()`. A `time_point` is one `long long`,
+    // which is the same single-eightbyte shape `__do_timed_wait` takes one of —
+    // the one aggregate both ABIs agree about without the marshaller.
+    sig!("_ZNSt3__16chrono12steady_clock3nowEv", I64),
+    sig!("_ZNSt3__16chrono12system_clock3nowEv", I64),
     sig!("_ZNSt3__16thread4joinEv", V, P),
     sig!("_ZNSt3__16threadD1Ev", V, P),
     sig!("_ZNSt9exceptionC1Ev", V, P),
@@ -734,6 +582,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // The fortified `vsnprintf`; shimmed with the rest of the `va_list` family
     // for the reason [`crate::shims::valist`] gives.
     sig!("__vsnprintf_chk", I32, P, U64, I32, U64, P, P),
+    // `const char *_dyld_get_image_name(uint32_t)`, answered with the host's
+    // image list for the reason [`crate::shims::runtime`] gives.
+    sig!("_dyld_get_image_name", P, U32),
     sig!("_exit", V, I32),
     // The Darwin spellings that skip the signal mask, imported as `__longjmp`
     // and `__setjmp`. One implementation serves both pairs: the distinction is
@@ -839,6 +690,22 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("fgetpos", I32, P, P),
     sig!("fgets", P, P, I32, P),
     sig!("fileno", I32, P),
+    // ## The POSIX and BSD surface `steamclient.dylib`'s start-up walks
+    //
+    // `flock`, `fsync`, `ftruncate`, `gethostname`, `getifaddrs`/`freeifaddrs`,
+    // `getpagesize`, `getpwuid`, `getrlimit`, `inet_aton`, `mktemp`,
+    // `popen`/`pclose`, `pipe`, `pread`, `recvmsg`/`sendmsg`, `setsid`,
+    // `socketpair`, `symlink` and `uname`, scattered through this table by name.
+    // Each stopped an initializer by name and was added for it, which is how
+    // every entry here got here.
+    //
+    // Every one is scalar or writes through a pointer to a structure that was
+    // **checked** to be identical on both architectures rather than assumed to
+    // be: `rlimit`, `utsname`, `passwd`, `msghdr`, `ifaddrs`, `in_addr` and
+    // `Dl_info` were compiled both ways and their sizes and every field offset
+    // compared. That is the question `std::string` turned from a formality into
+    // a requirement — see [`crate::shims::cxxstring`].
+    sig!("flock", I32, I32, I32),
     sig!("floor", F64, F64),
     sig!("floorf", F32, F32),
     sig!("fmax", F64, F64, F64),
@@ -852,14 +719,17 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("fread", U64, P, U64, U64, P),
     sig!("free", V, P),
     sig!("freeaddrinfo", V, P),
+    sig!("freeifaddrs", V, P),
     vsig!("fscanf", I32, P, P),
     sig!("fseek", I32, P, I64, I32),
     sig!("fseeko", I32, P, I64, I32),
     sig!("fstat", I32, I32, P),
     sig!("fstatfs", I32, I32, P),
     sig!("fstatvfs", I32, I32, P),
+    sig!("fsync", I32, I32),
     sig!("ftell", I64, P),
     sig!("ftello", I64, P),
+    sig!("ftruncate", I32, I32, I64),
     sig!("fts_children", P, P, I32),
     sig!("fts_close", I32, P),
     // The comparator takes `const FTSENT **`, which is still just a pointer:
@@ -879,15 +749,23 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("geteuid", U32),
     sig!("getgid", U32),
     sig!("gethostbyname", P, P),
+    sig!("gethostname", I32, P, U64),
+    sig!("getifaddrs", I32, P),
     sig!("getnameinfo", I32, P, U32, P, U32, P, U32, I32),
     sig!("getopt", I32, I32, P, P),
     sig!("getopt_long", I32, I32, P, P, P, P),
+    sig!("getpagesize", I32),
     sig!("getpeername", I32, I32, P, P),
     sig!("getpgid", I32, I32),
     sig!("getpid", I32),
     sig!("getppid", I32),
     sig!("getpriority", I32, I32, U32),
     sig!("getprogname", P),
+    // `struct passwd` comes back as a pointer into libSystem's own storage,
+    // which the guest then reads directly — so this one depends on the layout
+    // check above in a way the writers-through-a-pointer do not.
+    sig!("getpwuid", P, U32),
+    sig!("getrlimit", I32, I32, P),
     sig!("getrusage", I32, I32, P),
     sig!("getsid", I32, I32),
     sig!("getsockname", I32, I32, P, P),
@@ -1045,6 +923,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("iconv_open", P, P, P),
     sig!("if_nametoindex", U32, P),
     sig!("inet_addr", U32, P),
+    sig!("inet_aton", I32, P, P),
     sig!("inet_ntop", P, I32, P, P, U32),
     sig!("inet_pton", I32, I32, P, P),
     sig!("inflate", I32, P, I32),
@@ -1063,12 +942,37 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("isspace", I32, I32),
     sig!("isupper", I32, I32),
     sig!("isxdigit", I32, I32),
+    // BSD event notification, which is how `steamclient.dylib` waits on its
+    // sockets and its pipe to the client. Passed straight through, and the
+    // reason is a check rather than an assumption: `struct kevent` is 32 bytes
+    // with `ident` at 0, `filter` at 8, `flags` at 10, `fflags` at 12, `data` at
+    // 16 and `udata` at 24 on **both** architectures, as are `kevent64_s` and
+    // `timespec`. That question — is the structure behind this pointer the same
+    // on both sides? — is the one `std::string` answered "no" to, and it is now
+    // asked of every pointer argument before one is described. See
+    // [`crate::shims::cxxstring`].
+    //
+    // `udata` is opaque to the kernel and comes back to the guest untouched, so
+    // it is not the [callback-inside-a-structure] hazard `zlib` and `audiounit`
+    // are: nothing ever calls it.
+    //
+    // [callback-inside-a-structure]: crate::shims::zlib
+    // (`kill` sorts between the two and is unrelated.)
+    sig!("kevent", I32, I32, P, I32, P, I32, P),
     sig!("kill", I32, I32, I32),
+    sig!("kqueue", I32),
     sig!("labs", I64, I64),
     sig!("ldexp", F64, F64, I32),
     sig!("listen", I32, I32, I32),
     sig!("listxattr", I64, P, P, U64, I32),
     sig!("localtime", P, P),
+    // `localtime_r` and `gmtime_r` above: the reentrant forms, which write into
+    // a `struct tm` the *caller* owns. That is 56 bytes with every field at the
+    // same offset on both architectures — `tm_gmtoff` at 40, `tm_zone` at 48 —
+    // so the host fills the guest's structure in place, the way it fills a
+    // `pthread_mutex_t`. Checked against the compiler, which is now the rule for
+    // every pointer argument; see the note on `kevent`.
+    sig!("localtime_r", P, P, P),
     sig!("log", F64, F64),
     sig!("log10", F64, F64),
     sig!("log2", F64, F64),
@@ -1106,6 +1010,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("memset_pattern16", V, P, P, U64),
     sig!("mkdir", I32, P, U32),
     sig!("mkstemp", I32, P),
+    sig!("mktemp", P, P),
     sig!("mktime", I64, P),
     sig!("mlock", I32, P, U64),
     // ## The memory-mapping group, and the page size
@@ -1127,7 +1032,14 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     vsig!("open", I32, P, I32),
     vsig!("openat", I32, I32, P, I32),
     sig!("opendir", P, P),
+    sig!("pclose", I32, P),
     sig!("perror", V, P),
+    // `int poll(struct pollfd *, nfds_t, int)`. `nfds_t` is `unsigned int` on
+    // Darwin, and `struct pollfd` is eight bytes laid out identically on both
+    // architectures — checked alongside `kevent` above, for the same reason.
+    sig!("pipe", I32, P),
+    sig!("poll", I32, P, U32, I32),
+    sig!("popen", P, P, P),
     sig!("posix_memalign", I32, P, U64, U64),
     // `posix_spawn` and its two attribute objects, which is how the Steam
     // client starts a helper process. Every argument is a pointer to guest
@@ -1146,6 +1058,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("posix_spawnattr_setsigmask", I32, P, P),
     sig!("pow", F64, F64, F64),
     sig!("powf", F32, F32, F32),
+    sig!("pread", I64, I32, P, U64, I64),
     vsig!("printf", I32, P),
     cbsig!([0, 1, 2], "pthread_atfork", I32, P, P, P),
     // ## The pthread family
@@ -1246,6 +1159,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("reallocf", P, P, U64),
     sig!("recv", I64, I32, P, U64, I32),
     sig!("recvfrom", I64, I32, P, U64, I32, P, P),
+    sig!("recvmsg", I64, I32, P, I32),
     sig!("remove", I32, P),
     sig!("rename", I32, P, P),
     sig!("rewind", V, P),
@@ -1273,10 +1187,16 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("sem_unlink", I32, P),
     sig!("sem_wait", I32, P),
     sig!("send", I64, I32, P, U64, I32),
+    sig!("sendmsg", I64, I32, P, I32),
     sig!("sendto", I64, I32, P, U64, I32, P, U32),
     sig!("setenv", I32, P, P, I32),
     sig!("setjmp", I32, P),
     sig!("setlocale", P, I32, P),
+    // `pid_t setsid(void)`. `setpgrp` is deliberately absent beside it: Darwin
+    // declares it twice — `pid_t setpgrp(void)` and the obsolete `int
+    // setpgrp(pid_t, pid_t)` — and which one a guest was compiled against is not
+    // something this table can tell. A program that needs it will say so.
+    sig!("setsid", I32),
     sig!("setsockopt", I32, I32, I32, I32, P, U32),
     sig!("setvbuf", I32, P, P, I32, U64),
     sig!("shutdown", I32, I32, I32),
@@ -1294,6 +1214,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("sleep", U32, U32),
     vsig!("snprintf", I32, P, U64, P),
     sig!("socket", I32, I32, I32, I32),
+    sig!("socketpair", I32, I32, I32, I32, P),
     vsig!("sprintf", I32, P, P),
     sig!("sqrt", F64, F64),
     sig!("sqrtf", F32, F32),
@@ -1337,6 +1258,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("strtonum", I64, P, I64, I64, P),
     sig!("strtoul", U64, P, P, I32),
     sig!("strtoull", U64, P, P, I32),
+    sig!("symlink", I32, P, P),
     sig!("sysconf", I64, I32),
     sig!("sysctl", I32, P, U32, P, P, P, U64),
     sig!("sysctlbyname", I32, P, P, P, P, U64),
@@ -1365,6 +1287,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     cbsig!([2], "tputs", I32, P, I32, P),
     sig!("trunc", F64, F64),
     sig!("umask", U32, U32),
+    sig!("uname", I32, P),
     sig!("ungetc", I32, I32, P),
     sig!("unlink", I32, P),
     sig!("unsetenv", I32, P),
@@ -1436,6 +1359,20 @@ const THROWS: &str = "throws a C++ exception, which cannot be raised across the 
 const AGGREGATE: &str =
     "passes or returns a struct by value, which this table has no way to describe";
 
+/// Takes a `std::string` and is not a string operation.
+///
+/// libc++ lays `basic_string` out differently on the two architectures — see
+/// [`crate::shims::cxxstring`], which is where that is written down and where
+/// the string's own entry points are implemented against the *guest's* layout.
+/// These are the calls that reach past that: the object they build belongs to
+/// the host (a `runtime_error`'s message, a `random_device`'s token), so
+/// answering them means more than reading a string correctly, and each is a work
+/// item of its own rather than a line in that module. Refused by name, which is
+/// what the shim exists to make possible — before it, this was a signature that
+/// looked right and returned garbage.
+const GUEST_STRING: &str =
+    "takes a std::string, whose layout differs between x86-64 and arm64 macOS";
+
 /// The [`crate::jmpbuf`] refusal, one level further out.
 ///
 /// `getcontext` and friends save the *machine's* registers and stack pointer.
@@ -1488,12 +1425,15 @@ pub static REFUSED: &[(&str, &str)] = &[
         "_ZNKSt3__121__basic_string_commonILb1EE20__throw_length_errorEv",
         THROWS,
     ),
-    ("_ZNSt3__120__throw_system_errorEiPKc", THROWS),
-    ("_ZNSt3__19to_stringEi", AGGREGATE),
     (
-        "_ZNSt3__1plIcNS_11char_traitsIcEENS_9allocatorIcEEEENS_12basic_stringIT_T0_T1_EEPKS6_RKS9_",
-        AGGREGATE,
+        "_ZNSt13runtime_errorC1ERKNSt3__112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE",
+        GUEST_STRING,
     ),
+    (
+        "_ZNSt3__113random_deviceC1ERKNS_12basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEE",
+        GUEST_STRING,
+    ),
+    ("_ZNSt3__120__throw_system_errorEiPKc", THROWS),
     ("_ZTISt12length_error", DATA),
     ("_ZTISt13runtime_error", DATA),
     ("_ZTISt9bad_alloc", DATA),

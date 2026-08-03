@@ -337,6 +337,23 @@ pub fn import_by_target(host: u64) -> Option<&'static ImportSite> {
     find(|i| i.imports_by_target.get(&host))
 }
 
+/// What `symbol` resolved to in any dynamically loaded image.
+///
+/// [`Program::resolved_symbol`](crate::Program::resolved_symbol) widened the
+/// same way [`import_at`] is, and for a caller with the same need: an answer
+/// read out of the *transcript* rather than looked up again. The case that
+/// forces it is `operator new` — a library the guest `dlopen`ed imports it, the
+/// main executable defines it, and so it appears in no import table but the
+/// loaded image's. See [`crate::shims::cxxstring`].
+pub fn resolved_symbol(symbol: &str) -> Option<u64> {
+    find(|i| {
+        i.imports
+            .values()
+            .find(|s| !s.is_stub && s.symbol == symbol && s.resolved != 0)
+            .map(|s| s.resolved)
+    })
+}
+
 /// Whether `va` lies inside a dynamically loaded image.
 pub fn contains(va: u64) -> bool {
     // A host address is nowhere near a guest mapping, and this is the question
@@ -519,6 +536,19 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
         let cell: &'static mut &'static [&'static Image] = Box::leak(Box::new(published));
         VIEW.store(cell as *mut _, Ordering::Release);
         IMAGE_COUNT.store(images.len(), Ordering::Release);
+    }
+
+    // Before any of this image's code runs, and after it is findable: rewrite
+    // its `__objc_selrefs` slots from string pointers into the host runtime's
+    // own selectors, which is what dyld's `libobjc` does when it maps an image.
+    // An initializer that sends a message — `steamclient.dylib` has one that
+    // asks `+[NSProcessInfo processInfo]` — loads a selector out of one of those
+    // slots on the way in, so the rewrite has to happen first or the message is
+    // sent with a `char *`. See [`crate::objc::unique_loaded_selectors`] for what
+    // this deliberately does *not* do.
+    if let Some(vm) = crate::thunk::current() {
+        crate::objc::unique_loaded_selectors(vm, &leaked.report)
+            .map_err(|e| format!("{resolved}: objc selectors: {e}"))?;
     }
 
     run_initializers(leaked)?;
@@ -740,7 +770,11 @@ fn clear_error() {
 
 /// Whether `name` (underscore already stripped) is one of this module's.
 pub fn shim_for(name: &str) -> Option<crate::jmpbuf::Shim> {
-    matches!(name, "dlopen" | "dlsym" | "dlclose" | "dlerror").then_some(serve)
+    matches!(
+        name,
+        "dlopen" | "dlsym" | "dlclose" | "dlerror" | "dladdr"
+    )
+    .then_some(serve)
 }
 
 fn serve(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
@@ -755,6 +789,7 @@ fn serve(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> 
             ctx.rax = 0;
             Ok(())
         }
+        "dladdr" => dladdr(symbol, ctx, mem),
         "dlerror" => {
             let taken = ERROR.lock().unwrap_or_else(|e| e.into_inner()).take();
             let mut reported = REPORTED.lock().unwrap_or_else(|e| e.into_inner());
@@ -805,6 +840,158 @@ fn dlsym(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> 
     Ok(())
 }
 
+/// `int dladdr(const void *addr, Dl_info *info)`
+///
+/// The host's cannot answer this one at all for the addresses that matter. A
+/// guest image is mapped by [`open`], not by dyld, so the host's loader has
+/// never heard of it: asked about an address inside `steamclient.dylib` it
+/// reports failure, or — worse — reports whichever *host* image happens to
+/// surround that address, and the caller believes it.
+///
+/// So the registry answers for anything it recognises and the host answers for
+/// everything else. `Dl_info` is four pointers, 32 bytes, laid out identically
+/// on both architectures, so the structure is filled in guest memory in place.
+///
+/// `dli_sname`/`dli_saddr` are the nearest export at or below `addr`, which is
+/// what `dladdr` documents them to be, and both are left null when the image
+/// exports nothing below it — a legal answer that Darwin's own `dladdr` gives
+/// for a static function. `dli_fname` points at the *guest image's* path string,
+/// which this module keeps for the process's lifetime; that is the field Steam's
+/// crash handler and `Sys_LoadModule` actually read.
+fn dladdr(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    let (addr, info) = (ctx.rdi, ctx.rsi);
+    let Some(found) = describe(addr) else {
+        // Not ours. The host knows its own images, and this is exactly the
+        // question it can answer.
+        let Some(host) = host_symbol("dladdr") else {
+            ctx.rax = 0;
+            return Ok(());
+        };
+        // SAFETY: `dladdr` is `int (const void *, Dl_info *)`, and `info` is a
+        // guest address — which is a real address in this process, since the
+        // guest is identity-mapped. The host writes 32 bytes there, which is
+        // what the guest allocated.
+        let f: extern "C" fn(u64, u64) -> i32 =
+            unsafe { core::mem::transmute::<u64, extern "C" fn(u64, u64) -> i32>(host) };
+        crate::shims::set_int_return(ctx, f(addr, info));
+        return Ok(());
+    };
+    if info == 0 {
+        ctx.rax = 0;
+        return Ok(());
+    }
+    let mut words = [0u8; 32];
+    words[0..8].copy_from_slice(&found.fname.to_le_bytes());
+    words[8..16].copy_from_slice(&found.fbase.to_le_bytes());
+    words[16..24].copy_from_slice(&found.sname.to_le_bytes());
+    words[24..32].copy_from_slice(&found.saddr.to_le_bytes());
+    mem.write_bytes(info, &words, symbol)?;
+    // Non-zero on success, unlike almost everything else in `<dlfcn.h>`.
+    crate::shims::set_int_return(ctx, 1);
+    Ok(())
+}
+
+/// What [`dladdr`] found: the four `Dl_info` fields, as host addresses.
+struct Described {
+    fname: u64,
+    fbase: u64,
+    sname: u64,
+    saddr: u64,
+}
+
+/// `addr` as an image and a symbol, if this runtime is the one that mapped it.
+///
+/// Covers both kinds of guest image — the program itself and anything [`open`]
+/// loaded — because a caller cannot tell them apart and neither should the
+/// answer.
+fn describe(addr: u64) -> Option<Described> {
+    if addr == 0 {
+        return None;
+    }
+    if let Some(found) = find(|i| {
+        region_of(i, addr).map(|_| {
+            let (sname, saddr) = nearest_export(&i.exports, i.slide, addr);
+            Described {
+                fname: path_cstr(&i.path),
+                fbase: i.handle,
+                sname,
+                saddr,
+            }
+        })
+    }) {
+        return Some(found);
+    }
+    // The main executable, which is a guest image with no `Image` record.
+    let vm = crate::thunk::current()?;
+    if !vm.program.is_guest_address(addr) {
+        return None;
+    }
+    let (path, slide) = EXECUTABLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()?;
+    let (sname, saddr) = main_exports()
+        .map(|m| nearest_export(&m.exports, slide, addr))
+        .unwrap_or((0, 0));
+    Some(Described {
+        fname: path_cstr(&path),
+        fbase: slide,
+        sname,
+        saddr,
+    })
+}
+
+/// The export at or below `addr`, as `(name, address)`, or `(0, 0)`.
+///
+/// A linear scan: `ExportTable` is sorted by *name*, and this is the one
+/// question that wants it sorted by address. It runs once per `dladdr` call,
+/// which a program makes when it is reporting a crash or logging a module path,
+/// so the scan is not on any path that repeats.
+fn nearest_export(exports: &ExportTable, slide: u64, addr: u64) -> (u64, u64) {
+    let mut best: Option<(&str, u64)> = None;
+    for e in exports.entries() {
+        let Some(at) = e.address(slide) else {
+            continue;
+        };
+        if at <= addr && best.is_none_or(|(_, b)| at > b) {
+            best = Some((e.name.as_str(), at));
+        }
+    }
+    match best {
+        Some((name, at)) => (symbol_cstr(name), at),
+        None => (0, 0),
+    }
+}
+
+/// A NUL-terminated copy of `text`, kept for the life of the process.
+///
+/// `dladdr` hands out pointers the caller may hold indefinitely — the
+/// specification says they are valid until the image is unloaded, and nothing
+/// here ever unloads — so these are interned rather than owned by the call.
+fn interned(text: &str) -> u64 {
+    static STRINGS: Mutex<Option<BTreeMap<String, &'static CString>>> = Mutex::new(None);
+    let mut map = STRINGS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = map.get_or_insert_with(BTreeMap::new);
+    if let Some(existing) = map.get(text) {
+        return existing.as_ptr() as usize as u64;
+    }
+    let Ok(owned) = CString::new(text) else {
+        return 0;
+    };
+    let leaked: &'static CString = Box::leak(Box::new(owned));
+    map.insert(text.to_string(), leaked);
+    leaked.as_ptr() as usize as u64
+}
+
+fn path_cstr(path: &str) -> u64 {
+    interned(path)
+}
+
+/// The symbol name as C sees it: `dladdr` reports `main`, not `_main`.
+fn symbol_cstr(name: &str) -> u64 {
+    interned(name.strip_prefix('_').unwrap_or(name))
+}
+
 /// The `dl` family, claimed ahead of the host's.
 ///
 /// The host exports all four and passing any of them through would be wrong for
@@ -815,7 +1002,7 @@ fn dlsym(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> 
 pub fn provider() -> SyntheticDylib {
     let mut lib = SyntheticDylib::new("<rosetta3 dyld>");
     lib.flat(true);
-    for name in ["dlopen", "dlsym", "dlclose", "dlerror"] {
+    for name in ["dlopen", "dlsym", "dlclose", "dlerror", "dladdr"] {
         if let Some(addr) = host_symbol(name) {
             lib.define_fn(&format!("_{name}"), addr as usize as *const ());
         }

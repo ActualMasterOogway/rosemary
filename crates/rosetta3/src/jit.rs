@@ -188,7 +188,7 @@ const TUNABLE_FEATURES: &[&str] = &[
 /// on macOS they are how the platform ABI wants return addresses signed, not a
 /// speed/size tradeoff, so no optimisation level gets to answer them.
 #[cfg(target_arch = "aarch64")]
-const TUNABLE_FEATURES: &[&str] = &["has_lse", "has_fp16"];
+const TUNABLE_FEATURES: &[&str] = &["has_lse", "has_fp16", "has_dotprod"];
 
 /// The host target features this crate has an opinion about.
 ///

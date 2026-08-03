@@ -188,6 +188,33 @@ impl dyn GuestMemory + '_ {
         Ok(u64::from_le_bytes(buf))
     }
 
+    /// Write one 64-bit little-endian word.
+    pub fn write_u64(&mut self, va: u64, value: u64, symbol: &str) -> Result<()> {
+        self.write(va, &value.to_le_bytes())
+            .map_err(|_| AbiError::Memory {
+                symbol: symbol.to_string(),
+                addr: va,
+            })
+    }
+
+    /// Read `len` bytes, or report which address could not be followed.
+    pub fn read_bytes(&self, va: u64, len: usize, symbol: &str) -> Result<Vec<u8>> {
+        let mut out = vec![0u8; len];
+        self.read(va, &mut out).map_err(|_| AbiError::Memory {
+            symbol: symbol.to_string(),
+            addr: va,
+        })?;
+        Ok(out)
+    }
+
+    /// Write `data`, or report which address could not be followed.
+    pub fn write_bytes(&mut self, va: u64, data: &[u8], symbol: &str) -> Result<()> {
+        self.write(va, data).map_err(|_| AbiError::Memory {
+            symbol: symbol.to_string(),
+            addr: va,
+        })
+    }
+
     /// Read a NUL-terminated string, capped at [`MAX_CSTR`] bytes.
     ///
     /// Reads a byte at a time rather than a block, because the string may end
