@@ -45,7 +45,6 @@ use crate::abi::{AbiError, GuestMemory, Result};
 
 pub mod atexit;
 pub mod audiounit;
-pub mod cxxstring;
 pub mod ioctl;
 pub mod math;
 pub mod nslog;
@@ -103,7 +102,6 @@ pub fn dispatch(
         // a calling convention.
         _ => {
             if let Some(f) = math::shim_for(name)
-                .or_else(|| cxxstring::shim_for(name))
                 .or_else(|| crate::jmpbuf::shim_for(name))
                 .or_else(|| crate::unwind::shim_for(name))
                 .or_else(|| crate::objc::dispatch::shim_for(name))
@@ -137,7 +135,6 @@ pub fn dispatch(
 pub fn is_shimmed(symbol: &str) -> bool {
     let name = symbol.strip_prefix('_').unwrap_or(symbol);
     if math::shim_for(name).is_some()
-        || cxxstring::shim_for(name).is_some()
         || crate::jmpbuf::shim_for(name).is_some()
         || crate::unwind::shim_for(name).is_some()
         || crate::objc::dispatch::shim_for(name).is_some()

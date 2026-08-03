@@ -41,22 +41,34 @@ const STRING_CPP: &str = r#"
 #include <cstring>
 #include <string>
 
-// Prints the object's own representation, deliberately leaving out the two
-// things that legitimately differ between any two runs of any program: the heap
-// address, and the bytes past the terminator, which libc++ never initializes.
-// What is left is exactly the layout — the long/short flag, the size and
-// capacity words where the guest's own inlined accessors read them, and, for a
-// short string, the characters in the object.
+// Prints the object's own representation, leaving out the three things that
+// legitimately differ and keeping everything that must not.
+//
+// Out: the heap address; the bytes past the terminator, which libc++ never
+// initializes; and `capacity()`, which is implementation-defined
+// ([string.capacity]) and really does differ — the vendored Intel libc++ rounds
+// its allocations to sixteen where the host's system copy rounds to eight, so a
+// 23-character string is `capacity() == 31` on one and `25` on the other. That
+// is a fact about two builds of libc++, not about this runtime, and asserting
+// on it would be asserting that they are the same build.
+//
+// In: the size, the long/short flag, the characters, and — for a short string —
+// the object's own bytes. Plus `consistent`, which is what the capacity column
+// was really guarding: that the capacity word round-trips through the bit the
+// long/short flag lives in. A capacity of exactly `__min_cap` would be stored
+// as an odd `cap+1` and read back one short, and that is a bug in *any*
+// implementation rather than a difference between two.
 static void dump(const char *tag, const std::string &s) {
     const unsigned char *p = (const unsigned char *)&s;
     int is_long = p[0] & 1;
-    printf("%-12s %-3zu %-4zu %d [%s]", tag, s.size(), s.capacity(), is_long, s.c_str());
-    if (is_long) {
-        unsigned long long cap, size;
-        memcpy(&cap, p, 8);
-        memcpy(&size, p + 8, 8);
-        printf(" cap=%016llx size=%016llx", cap, size);
-    } else {
+    unsigned long long cap, size;
+    memcpy(&cap, p, 8);
+    memcpy(&size, p + 8, 8);
+    int consistent = is_long
+        ? (s.capacity() == (cap & ~1ULL) - 1 && s.size() == size && s.capacity() >= s.size())
+        : (s.capacity() == 22 && s.size() == (p[0] >> 1));
+    printf("%-12s %-3zu %d %d [%s]", tag, s.size(), is_long, consistent, s.c_str());
+    if (!is_long) {
         for (size_t i = 0; i <= s.size() + 1; i++) printf(" %02x", p[i]);
     }
     printf("\n");
@@ -147,13 +159,13 @@ int main() {
     // wstring: the same code with four-byte characters, so the min_cap of 5 and
     // the data offset of 4 are exercised rather than assumed.
     std::wstring w(4, L'w');
-    printf("w-short %zu %zu\n", w.size(), w.capacity());
+    printf("w-short %zu %d\n", w.size(), w.capacity() >= w.size());
     std::wstring w2(9, L'w');
-    printf("w-long %zu %zu\n", w2.size(), w2.capacity());
+    printf("w-long %zu %d\n", w2.size(), w2.capacity() >= w2.size());
     w2.push_back(L'!');
     w2.append(L"abcdef", 6);
     w2.resize(40, L'.');
-    printf("w-grown %zu %zu %d\n", w2.size(), w2.capacity(), (int)w2[39]);
+    printf("w-grown %zu %d %d\n", w2.size(), w2.capacity() >= w2.size(), (int)w2[39]);
     std::wstring w3(w2);
     printf("w-copy %zu %d\n", w3.size(), (int)w3[0]);
     return 0;
@@ -209,28 +221,163 @@ fn the_slow_path_agrees_too() {
     assert_eq!(fast, slow, "--slow differs\n{fast_err}{slow_err}");
 }
 
-/// No string operation may be reported `Unknown`, and none may be `Fast`.
+/// Every `basic_string` entry point resolves into the **vendored libc++ image**,
+/// not to the host.
 ///
-/// The audit question from M2, asked of the surface this module owns. `Fast`
-/// would mean the lifter inlining a call into the host's libc++ — the original
-/// bug — so it is as much a failure here as `Unknown` is.
+/// The structural form of the fix, and the one assertion that would still fail
+/// if `crate::cxxlib` quietly stopped answering: `the_same_binary_agrees_with_itself`
+/// compares output, and output can agree for the wrong reason — the host's
+/// libc++ gets short strings right often enough to look fine. This checks
+/// *where the call goes*.
+///
+/// Note what it does not say. It does not say the symbol is shimmed; the shim
+/// that used to own this surface is gone, and a string operation is now
+/// guest→guest, dispatched inside a library the guest linked against. That is
+/// the whole change.
 #[test]
-fn every_string_import_is_serviced_at_an_exit() {
+fn every_string_call_lands_in_the_vendored_libcxx() {
     let Some(path) = fixture() else {
         skip!("no x86_64 C++ toolchain");
     };
     let program = rosetta3::Program::load(&path, &[]).expect("load");
+
+    // The image is present and is the one this crate supplies, under the name
+    // the guest asked for.
+    let libcxx = program
+        .report
+        .images
+        .iter()
+        .find(|i| rosetta3::cxxlib::is_libcxx(&i.name))
+        .expect("the fixture links libc++ and no libc++ image was loaded");
+    let extent: Vec<std::ops::Range<u64>> = libcxx
+        .segments
+        .iter()
+        .map(|s| s.vmaddr..s.vmaddr.wrapping_add(s.vmsize))
+        .collect();
+    assert!(!extent.is_empty(), "the libc++ image mapped no segments");
+
     let mut seen = 0;
-    for (symbol, class) in program.classify_imports() {
-        if !symbol.contains("basic_string") && !symbol.contains("to_string") {
+    for b in program.report.bindings() {
+        if !b.symbol.contains("basic_string") {
             continue;
         }
         seen += 1;
-        assert_eq!(
-            class,
-            rosetta3::abi::Classification::Slow,
-            "{symbol} is {class:?}, and every string entry point must be shimmed"
+        assert!(
+            extent.iter().any(|r| r.contains(&b.resolved)),
+            "{} resolved to {:#x}, which is outside the vendored libc++ — it went \
+             to the host, which is the bug this exists to prevent",
+            b.symbol,
+            b.resolved
         );
     }
     assert!(seen > 0, "the fixture imported no string entry points");
+}
+
+/// A C++ program reaching libc++ entry points that the signature table *does*
+/// describe, which is what makes them promotable.
+///
+/// `std::mutex::lock`/`unlock` are `sig!(V, P)` — one pointer, no return, no
+/// callback — so they classify `Fast`, and the vendored libc++ exports them, so
+/// they resolve into guest memory. That combination is the whole of
+/// [`no_inlined_import_targets_guest_memory`], and `STRING_CPP` does not produce
+/// it: `basic_string`'s entry points were removed from the table when the shim
+/// was, so nothing it imports is both described and guest-resolved.
+const MUTEX_CPP: &str = r#"
+#include <cstdio>
+#include <mutex>
+
+static std::mutex m;
+
+int main() {
+    m.lock();
+    m.unlock();
+    std::lock_guard<std::mutex> guard(m);
+    printf("locked and unlocked\n");
+    return 0;
+}
+"#;
+
+fn mutex_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_cpp("cxxmutex", MUTEX_CPP))
+        .clone()
+}
+
+/// **No inlined import may target guest memory.**
+///
+/// A fast import is an absolute native `call` the lifter bakes into the
+/// translation, so its address has to be native code. A guest image is mapped
+/// `r--` and never executable — the no-`MAP_JIT` decision — so an inlined call
+/// to one faults on instruction fetch with the PC *equal to* the fault address,
+/// from a frame the backtrace cannot name, and only when that call site is
+/// finally reached.
+///
+/// This was unreachable until libc++ became a guest image. Before that every
+/// import of the main program resolved to a host function, and the runtime's
+/// other two paths — `Vm::call_site` and `Vm::dispatch_indirect` — already asked
+/// `is_guest_address` before treating an address as native. Promotion was the
+/// one that did not, and the symptom was DELTARUNE dying a few seconds after its
+/// window appeared, inside a `num_get` virtual call, with `--slow` making it go
+/// away and therefore looking like a lifting bug.
+///
+/// Checked to fail without the guard, not merely to pass with it: the first
+/// version of this test used `STRING_CPP`, promoted nothing that resolved into
+/// libc++, and passed just as happily with the fix reverted.
+#[test]
+fn no_inlined_import_targets_guest_memory() {
+    let Some(path) = mutex_fixture() else {
+        skip!("no x86_64 C++ toolchain");
+    };
+    // `load_executable`, not `load`: the question is about real mappings, and
+    // the inspectable form places images nominally.
+    let program = rosetta3::Program::load_executable(&path, &[]).expect("load");
+    let config = program.lifter_config();
+
+    let mut promoted_into_libcxx = 0;
+    for (&site, kind) in &config.imports {
+        let microlift::core::bridge::ImportKind::Fast(import) = kind else {
+            continue;
+        };
+        let target = import.symbol.value as usize as u64;
+        assert!(
+            !program.is_guest_address(target),
+            "the call site at {site:#x} would inline a native call to {} at {target:#x}, \
+             which is guest memory and is not executable",
+            import.symbol.name
+        );
+        promoted_into_libcxx += 1;
+    }
+    assert!(
+        promoted_into_libcxx > 0,
+        "nothing was promoted at all; the test proves nothing"
+    );
+
+    // And the other half: the describable libc++ entry points really are
+    // present and really do resolve into the guest, so the assertion above had
+    // something to catch.
+    let guest_resolved = program
+        .report
+        .bindings()
+        .filter(|b| b.symbol.contains("5mutex") && program.is_guest_address(b.resolved))
+        .count();
+    assert!(
+        guest_resolved > 0,
+        "the fixture imported no guest-resolved std::mutex entry points, so this \
+         test cannot see the bug it exists for"
+    );
+}
+
+/// The fixture above must actually run, not merely link.
+#[test]
+fn the_mutex_fixture_agrees_with_itself() {
+    let Some(path) = mutex_fixture() else {
+        skip!("no x86_64 C++ toolchain");
+    };
+    let Some((native_status, native)) = run_native(&path) else {
+        skip!("cannot run an x86_64 binary natively");
+    };
+    let (status, stdout, stderr) = run_guest(&path, &[]);
+    assert_eq!(status, native_status, "exit status differs\n{stderr}");
+    assert_eq!(stdout, native, "output differs\n{stderr}");
 }

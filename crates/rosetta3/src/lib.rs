@@ -123,6 +123,7 @@ pub mod audit;
 pub mod bridge;
 pub mod bundle;
 pub mod cache;
+pub mod cxxlib;
 pub mod dyld;
 pub mod jit;
 pub mod jmpbuf;

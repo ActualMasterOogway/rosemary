@@ -6,7 +6,6 @@ use std::ops::Range;
 
 use machish::loader::Loader;
 use machish::memory::{BufferSpace, Regions};
-use machish::namespace::FsDylibSource;
 use machish::report::LinkReport;
 use machish::resolve::{NativeDylibProvider, SymbolProvider, eager_binding_shims};
 use machish::spec::arch::X86_64;
@@ -267,7 +266,8 @@ impl<M: Regions> Program<M> {
         extra: &[&dyn SymbolProvider],
         mut memory: M,
     ) -> Result<Self, ProgramError> {
-        let mut source = FsDylibSource::new();
+        // Vendored libc++ ahead of the filesystem; see [`crate::cxxlib`].
+        let mut source = crate::cxxlib::source();
         let hosts = HostProviders::new();
         let providers = hosts.chain(extra);
 
@@ -458,7 +458,26 @@ impl<M: Regions> Program<M> {
             }
         }
         for (&va, site) in &self.imports {
-            match policy.promotion_for(site) {
+            // A fast import is an **absolute native call** the lifter bakes into
+            // the translation, so the address had better be native code. Asked
+            // here rather than in `promotion_for` because it is the one question
+            // that needs the address space, and only a `Program` has it.
+            //
+            // What it catches: a symbol that resolved into *guest* memory. Guest
+            // pages are mapped `r--` and never executable — that is the
+            // no-`MAP_JIT` decision in the table above — so an inlined call to
+            // one faults on instruction fetch with the PC *equal to* the fault
+            // address, several frames below anything named, and only when that
+            // call site is finally reached. Everywhere else in the runtime the
+            // same case is handled: `Vm::call_site` transfers to guest code
+            // rather than marshalling it, and `dispatch_indirect` asks
+            // `is_guest_address` before treating a pointer as native. Promotion
+            // was the one path that did not ask, and `--slow` hid it by never
+            // promoting anything.
+            let promoted = policy
+                .promotion_for(site)
+                .filter(|_| !self.is_guest_address(site.resolved));
+            match promoted {
                 Some(abi) => config.register_fast_import(
                     va,
                     crate::abi::dynamic_symbol(abi, site.resolved),

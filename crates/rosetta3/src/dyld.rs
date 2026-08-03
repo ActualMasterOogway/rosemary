@@ -68,6 +68,14 @@
 //!   report; nothing does it yet, so a `+load` in a `dlopen`ed image does not
 //!   run and a message to one of its classes fails by name in
 //!   [`crate::objc::dispatch`] rather than silently.
+//!
+//!   Its **selector references** are the exception, and are uniqued at load by
+//!   [`crate::objc::unique_loaded_selectors`]. That is not registration; it is
+//!   the one part of it a loaded image cannot do without. A selector reference
+//!   is a slot guest code *loads from* on its way into `objc_msgSend`, so until
+//!   it is rewritten the image sends every message with a `char *` where a `SEL`
+//!   belongs — and the host runtime answers, correctly and uselessly, that
+//!   `NSProcessInfo` does not respond to `processInfo`.
 //! - **`dladdr`, `RTLD_NEXT`, and re-export chains.** Each is refused or
 //!   answered narrowly and says so, rather than being approximated.
 
@@ -82,7 +90,6 @@ use machish::image::MachObject;
 use machish::install_name::PathContext;
 use machish::loader::Loader;
 use machish::memory::{MmapSpace, Regions};
-use machish::namespace::FsDylibSource;
 use machish::report::LinkReport;
 use machish::resolve::SyntheticDylib;
 use machish::spec::arch::X86_64;
@@ -431,7 +438,8 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
         .map_err(|e| format!("{resolved}: not a loadable x86-64 Mach-O: {e}"))?;
 
     let mut memory = MmapSpace::new();
-    let mut source = FsDylibSource::new();
+    // Vendored libc++ ahead of the filesystem; see [`crate::cxxlib`].
+    let mut source = crate::cxxlib::source();
     let hosts = HostProviders::new();
     // The main executable ahead of everything: dyld resolves a newly loaded
     // image against what is *already loaded*, and a plugin's host is the first

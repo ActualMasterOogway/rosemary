@@ -538,6 +538,29 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("_ZdlPvm", V, P, U64),
     sig!("_Znam", P, U64),
     sig!("_Znwm", P, U64),
+    // ## The locale-aware C library, which the vendored libc++ actually calls
+    //
+    // The `_l` family — `___mb_cur_max_l`, `___tolower_l`, `___toupper_l`,
+    // `__maskrune_l`, `btowc_l`, `freelocale`, `localeconv_l`, `mbrlen_l`,
+    // `mbrtowc_l`, `mbsnrtowcs_l`, `mbsrtowcs_l`, `mbtowc_l`, `newlocale`,
+    // `nl_langinfo_l`, `strcoll_l`, `strftime_l`, `strtod_l`, `strtof_l`,
+    // `strxfrm_l`, `wcrtomb_l`, `wcscoll_l`, `wcsnrtombs_l`, `wcsxfrm_l` and
+    // `wctob_l`, scattered through this table by name — plus the wide-character
+    // calls libc++ reaches on the same paths.
+    //
+    // Every prototype was read out of the SDK headers (`xlocale/_ctype.h`,
+    // `xlocale/_stdlib.h`, `xlocale/_wchar.h`) rather than recalled, because
+    // `mbtowc_l` had been wrong in this table for as long as it had been in it
+    // and nothing found it — see its own note.
+    //
+    // `locale_t` is an opaque `struct _xlocale *` that the guest only ever
+    // obtains from `newlocale` (or as `LC_GLOBAL_LOCALE`) and hands straight
+    // back, so it crosses as a plain pointer and neither side reads the
+    // structure behind it. That is what makes this whole family passthrough
+    // rather than the [`crate::cxxlib`] problem again.
+    sig!("___mb_cur_max_l", I32, P),
+    sig!("___tolower_l", I32, I32, P),
+    sig!("___toupper_l", I32, I32, P),
     sig!("__assert_rtn", V, P, P, I32, P),
     sig!("__bzero", V, P, U64),
     sig!("__cxa_allocate_exception", P, U64),
@@ -565,6 +588,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("__error", P),
     sig!("__isnand", I32, F64),
     sig!("__maskrune", I32, I32, U64),
+    sig!("__maskrune_l", I32, I32, U64, P),
     sig!("__memcpy_chk", P, P, P, U64, U64),
     sig!("__memmove_chk", P, P, P, U64, U64),
     sig!("__memset_chk", P, P, I32, U64, U64),
@@ -612,6 +636,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("acl_get_tag_type", I32, P, P),
     sig!("acos", F64, F64),
     sig!("acosf", F32, F32),
+    sig!("arc4random", U32),
     sig!("asin", F64, F64),
     sig!("asinf", F32, F32),
     vsig!("asprintf", I32, P, P),
@@ -635,6 +660,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // mapping makes the out-parameter directly writable.
     sig!("bootstrap_look_up", I32, U32, P, P),
     cbsig!([4], "bsearch", P, P, P, U64, U64, P),
+    sig!("btowc_l", I32, I32, P),
     sig!("bzero", V, P, U64),
     sig!("calloc", P, U64, U64),
     sig!("ceil", F64, F64),
@@ -663,7 +689,35 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("deflateInit2_", I32, P, I32, I32, I32, I32, I32, P, I32),
     sig!("deflateInit_", I32, P, I32, P, I32),
     sig!("deflateReset", I32, P),
+    // ## Grand Central Dispatch, as `steamclient.dylib` uses it
+    //
+    // A dispatch object is opaque and reference-counted by libdispatch itself,
+    // so every one of these is a handle the guest received and hands back —
+    // nothing about the object crosses. Prototypes from `<dispatch/*.h>`;
+    // `dispatch_time_t` and `uintptr_t` are both `U64`, `intptr_t` is `I64`.
+    //
+    // The three `_f` forms take a **`dispatch_function_t`**, which is a guest
+    // function pointer libdispatch will call on a thread this runtime never
+    // created. `cbsig!` marks the parameter so it goes out as a thunk, the way
+    // `qsort`'s comparator and `pthread_create`'s start routine do — and it is
+    // what makes them slow imports rather than inlined ones, since substitution
+    // only exists at an exit. Without the marking libdispatch would call
+    // x86-64 as arm64, seconds later, on a thread with nothing of this
+    // runtime's on its stack.
+    sig!("dispatch_get_context", P, P),
+    sig!("dispatch_get_global_queue", P, I64, U64),
+    cbsig!([3], "dispatch_group_async_f", V, P, P, P, P),
+    sig!("dispatch_group_create", P),
+    sig!("dispatch_group_wait", I64, P, U64),
     cbsig!([2], "dispatch_once_f", V, P, P, P),
+    sig!("dispatch_release", V, P),
+    sig!("dispatch_resume", V, P),
+    sig!("dispatch_set_context", V, P, P),
+    sig!("dispatch_source_cancel", V, P),
+    sig!("dispatch_source_create", P, P, U64, U64, P),
+    cbsig!([1], "dispatch_source_set_cancel_handler_f", V, P, P),
+    cbsig!([1], "dispatch_source_set_event_handler_f", V, P, P),
+    sig!("dispatch_suspend", V, P),
     sig!("dlclose", I32, P),
     sig!("dlerror", P),
     sig!("dlopen", P, P, I32),
@@ -716,10 +770,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     vsig!("fprintf", I32, P, P),
     sig!("fputc", I32, I32, P),
     sig!("fputs", I32, P, P),
+    sig!("fputwc", I32, I32, P),
     sig!("fread", U64, P, U64, U64, P),
     sig!("free", V, P),
     sig!("freeaddrinfo", V, P),
     sig!("freeifaddrs", V, P),
+    sig!("freelocale", V, P),
     vsig!("fscanf", I32, P, P),
     sig!("fseek", I32, P, I64, I32),
     sig!("fseeko", I32, P, I64, I32),
@@ -772,6 +828,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("getsockopt", I32, I32, I32, I32, P, P),
     sig!("gettimeofday", I32, P, P),
     sig!("getuid", U32),
+    sig!("getwc", I32, P),
     sig!("getxattr", I64, P, P, P, U64, U32, I32),
     // ## OpenGL
     //
@@ -965,6 +1022,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("ldexp", F64, F64, I32),
     sig!("listen", I32, I32, I32),
     sig!("listxattr", I64, P, P, U64, I32),
+    sig!("localeconv_l", P, P),
     sig!("localtime", P, P),
     // `localtime_r` and `gmtime_r` above: the reentrant forms, which write into
     // a `struct tm` the *caller* owns. That is 56 bytes with every field at the
@@ -1000,8 +1058,28 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("malloc", P, U64),
     sig!("malloc_size", U64, P),
     sig!("malloc_zone_statistics", V, P, P),
+    sig!("mbrlen_l", U64, P, U64, P, P),
     sig!("mbrtowc", U64, P, P, U64, P),
+    sig!("mbrtowc_l", U64, P, P, U64, P, P),
+    sig!("mbsnrtowcs_l", U64, P, P, U64, U64, P, P),
+    sig!("mbsrtowcs_l", U64, P, P, U64, P, P),
     sig!("mbtowc", I32, P, P, U64),
+    // `int mbtowc_l(wchar_t *, const char *, size_t, locale_t)`.
+    //
+    // This entry used to read `sig!("mbtowc_l", P, P, U64, U64)` — a pointer
+    // return and *three* arguments, which is `mbtowc`'s shape with a `locale_t`
+    // pasted over the return type. The `locale_t` was therefore never passed,
+    // and the host read whatever was in `rcx`. It sat here harmlessly for as
+    // long as libc++ was the host's, because nothing in the guest ever called
+    // it; the first thing to do so was the *vendored* libc++
+    // ([`crate::cxxlib`]), whose locale set-up died writing through the garbage
+    // pointer into libsystem_c's own read-only data.
+    //
+    // Worth the paragraph because of what it says about the table rather than
+    // about this function: an entry that is never exercised is not evidence of
+    // anything, and there is no test that can find a wrong signature for a
+    // symbol no program calls.
+    sig!("mbtowc_l", I32, P, P, U64, P),
     sig!("memchr", P, P, I32, U64),
     sig!("memcmp", I32, P, P, U64),
     sig!("memcpy", P, P, P, U64),
@@ -1028,7 +1106,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("mprotect", I32, P, U64, I32),
     sig!("munmap", I32, P, U64),
     sig!("nanosleep", I32, P, P),
+    sig!("newlocale", P, I32, P, P),
     sig!("nl_langinfo", P, I32),
+    sig!("nl_langinfo_l", P, I32, P),
     vsig!("open", I32, P, I32),
     vsig!("openat", I32, I32, P, I32),
     sig!("opendir", P, P),
@@ -1189,6 +1269,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("send", I64, I32, P, U64, I32),
     sig!("sendmsg", I64, I32, P, I32),
     sig!("sendto", I64, I32, P, U64, I32, P, U32),
+    sig!("setbuf", V, P, P),
     sig!("setenv", I32, P, P, I32),
     sig!("setjmp", I32, P),
     sig!("setlocale", P, I32, P),
@@ -1228,11 +1309,14 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("strchr", P, P, I32),
     sig!("strcmp", I32, P, P),
     sig!("strcoll", I32, P, P),
+    sig!("strcoll_l", I32, P, P, P),
     sig!("strcpy", P, P, P),
     sig!("strcspn", U64, P, P),
     sig!("strdup", P, P),
     sig!("strerror", P, I32),
+    sig!("strerror_r", I32, I32, P, U64),
     sig!("strftime", U64, P, U64, P, P),
+    sig!("strftime_l", U64, P, U64, P, P, P),
     sig!("strlcat", U64, P, P, U64),
     sig!("strlcpy", U64, P, P, U64),
     sig!("strlen", U64, P),
@@ -1251,13 +1335,16 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("strspn", U64, P, P),
     sig!("strstr", P, P, P),
     sig!("strtod", F64, P, P),
+    sig!("strtod_l", F64, P, P, P),
     sig!("strtof", F32, P, P),
+    sig!("strtof_l", F32, P, P, P),
     sig!("strtok", P, P, P),
     sig!("strtol", I64, P, P, I32),
     sig!("strtoll", I64, P, P, I32),
     sig!("strtonum", I64, P, I64, I64, P),
     sig!("strtoul", U64, P, P, I32),
     sig!("strtoull", U64, P, P, I32),
+    sig!("strxfrm_l", U64, P, P, U64, P),
     sig!("symlink", I32, P, P),
     sig!("sysconf", I64, I32),
     sig!("sysctl", I32, P, U32, P, P, P, U64),
@@ -1289,6 +1376,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("umask", U32, U32),
     sig!("uname", I32, P),
     sig!("ungetc", I32, I32, P),
+    sig!("ungetwc", I32, I32, P),
     sig!("unlink", I32, P),
     sig!("unsetenv", I32, P),
     sig!("user_from_uid", P, U32, I32),
@@ -1309,14 +1397,24 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("vsprintf", I32, P, P, P),
     vsig!("warn", V, P),
     vsig!("warnx", V, P),
+    sig!("wcrtomb_l", U64, P, I32, P, P),
     sig!("wcscmp", I32, P, P),
+    sig!("wcscoll_l", I32, P, P, P),
     sig!("wcslen", U64, P),
     sig!("wcsncat", P, P, P, U64),
     sig!("wcsncpy", P, P, P, U64),
+    sig!("wcsnrtombs_l", U64, P, P, U64, U64, P, P),
+    sig!("wcstod", F64, P, P),
+    sig!("wcstof", F32, P, P),
     sig!("wcstol", I64, P, P, I32),
     sig!("wcstoll", I64, P, P, I32),
+    sig!("wcstoul", U64, P, P, I32),
     sig!("wcstoull", U64, P, P, I32),
+    sig!("wcsxfrm_l", U64, P, P, U64, P),
+    sig!("wctob_l", I32, I32, P),
     sig!("wcwidth", I32, I32),
+    sig!("wmemchr", P, P, I32, U64),
+    sig!("wmemcmp", I32, P, P, U64),
     sig!("write", I64, I32, P, U64),
     sig!("zError", P, I32),
 ];
