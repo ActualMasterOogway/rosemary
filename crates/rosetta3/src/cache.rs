@@ -181,6 +181,7 @@ impl CodeCache {
             _backend: backend,
         });
         self.regions.insert(start, Arc::clone(&translation));
+        //println!("MISS at {pc:#x} - regions: {}", self.len());
         Ok(translation)
     }
 

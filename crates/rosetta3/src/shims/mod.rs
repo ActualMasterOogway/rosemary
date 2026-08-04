@@ -51,6 +51,7 @@ pub mod nslog;
 pub mod openat;
 pub mod printf;
 pub mod runtime;
+pub mod sscanf;
 pub mod zlib;
 
 /// Run the shim for `symbol`, if there is one.
@@ -87,6 +88,7 @@ pub fn dispatch(
         "vsnprintf" => printf::vsnprintf,
         "vasprintf" => printf::vasprintf,
         "__vsnprintf_chk" => printf::vsnprintf_chk,
+        "sscanf" => sscanf::sscanf,
         // Variadic in its declaration and one argument wide in fact; see
         // [`ioctl`] for why that makes it forwardable when `printf` is not.
         "NSLog" => nslog::nslog,
@@ -103,7 +105,7 @@ pub fn dispatch(
         _ => {
             if let Some(f) = math::shim_for(name)
                 .or_else(|| crate::jmpbuf::shim_for(name))
-                .or_else(|| crate::unwind::shim_for(name))
+                // .or_else(|| crate::unwind::shim_for(name))
                 .or_else(|| crate::objc::dispatch::shim_for(name))
                 .or_else(|| crate::dyld::shim_for(name))
             {
@@ -161,6 +163,7 @@ pub fn is_shimmed(symbol: &str) -> bool {
             | "vsnprintf"
             | "vasprintf"
             | "__vsnprintf_chk"
+            | "sscanf"
             | "ioctl"
             | "open"
             | "openat"

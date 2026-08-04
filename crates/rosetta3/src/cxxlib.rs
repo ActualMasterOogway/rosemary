@@ -116,6 +116,8 @@ use machish::namespace::{DylibRequest, DylibSource, FetchedDylib};
 /// 2015-2020 Intel binary was linked against. `vendored_libcxx_is_the_abi_the_guest_expects`
 /// is that check.
 const LIBCXX: &[u8] = include_bytes!("../vendor/libs/intel/libc++.1.dylib");
+const LIBCXXABI: &[u8] = include_bytes!("../vendor/libs/intel/libc++abi.1.dylib");
+const LIBUNWIND: &[u8] = include_bytes!("../vendor/libs/intel/libunwind.1.dylib");
 
 /// The install names Apple's `libc++` answers to, and which this stands in for.
 ///
@@ -134,6 +136,20 @@ const NAMES: &[&str] = &[
     "@rpath/libc++.1.dylib",
 ];
 
+const CXXABI_NAMES: &[&str] = &[
+    "/usr/lib/libc++abi.1.dylib",
+    "/usr/lib/libc++abi.dylib",
+    "/usr/lib/libc++abi.1.0.dylib",
+    "@rpath/libc++abi.1.dylib",
+];
+
+const UNWIND_NAMES: &[&str] = &[
+    "/usr/lib/libunwind.1.dylib",
+    "/usr/lib/libunwind.dylib",
+    "/usr/lib/libunwind.1.0.dylib",
+    "@rpath/libunwind.1.dylib",
+];
+
 /// The path the vendored image is known by once loaded.
 ///
 /// The name the guest asked for rather than where the bytes came from, because
@@ -142,10 +158,20 @@ const NAMES: &[&str] = &[
 /// a diagnostic saying `/usr/lib/libc++.1.dylib` describes what this *is* better
 /// than a path inside this repository would.
 const AS_PATH: &str = "/usr/lib/libc++.1.dylib";
+const CXXABI_PATH: &str = "/usr/lib/libc++abi.1.dylib";
+const UNWIND_PATH: &str = "/usr/lib/libunwind.1.dylib";
 
 /// Whether `install_name` is a request for the C++ runtime.
 pub fn is_libcxx(install_name: &str) -> bool {
     NAMES.contains(&install_name)
+}
+
+pub fn is_libcxxabi(install_name: &str) -> bool {
+    CXXABI_NAMES.contains(&install_name)
+}
+
+pub fn is_libunwind(install_name: &str) -> bool {
+    UNWIND_NAMES.contains(&install_name)
 }
 
 /// A [`DylibSource`] that answers `/usr/lib/libc++` with a real Intel libc++,
@@ -171,6 +197,16 @@ impl<S: DylibSource> DylibSource for VendoredCxx<S> {
             return Ok(Some(FetchedDylib {
                 path: AS_PATH.to_string(),
                 bytes: LIBCXX.to_vec(),
+            }));
+        } else if is_libcxxabi(request.install_name) {
+            return Ok(Some(FetchedDylib {
+                path: CXXABI_PATH.to_string(),
+                bytes: LIBCXXABI.to_vec(),
+            }));
+        } else if is_libunwind(request.install_name) {
+            return Ok(Some(FetchedDylib {
+                path: UNWIND_PATH.to_string(),
+                bytes: LIBUNWIND.to_vec(),
             }));
         }
         self.inner.fetch(request)

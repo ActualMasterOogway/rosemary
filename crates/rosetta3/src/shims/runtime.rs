@@ -255,17 +255,6 @@ pub fn provider() -> SyntheticDylib {
             lib.define_data("_environ", addr as usize as u64);
         }
     }
-    // The global allocation operators. Two underscores as the Mach-O spells
-    // them: one from C mangling, one already in the Itanium mangled name.
-    for name in ["__Znwm", "__Znam"] {
-        lib.define_fn(name, cxx::new as *const ());
-    }
-    for name in ["__ZdlPv", "__ZdaPv"] {
-        lib.define_fn(name, cxx::delete as *const ());
-    }
-    for name in ["__ZdlPvm", "__ZdaPvm"] {
-        lib.define_fn(name, cxx::delete_sized as *const ());
-    }
     lib
 }
 

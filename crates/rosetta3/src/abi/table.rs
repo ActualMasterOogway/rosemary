@@ -226,6 +226,7 @@ const F32: T = T::SinglePrecisionFp;
 const F64: T = T::DoublePrecisionFp;
 const P: T = T::Pointer;
 const U8: T = T::UnsignedByte;
+const BOOL: T = U8;
 
 /// Known signatures, **sorted by name** — `signatures_are_sorted_and_unique`
 /// enforces it, because [`lookup_exact`] binary-searches and an out-of-order
@@ -270,6 +271,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFArrayCreate", P, P, P, I64, P),
     sig!("CFArrayGetCount", I64, P),
     sig!("CFArrayGetValueAtIndex", P, P, I64),
+    sig!("CFBundleCopyResourcesDirectoryURL", P, P),
+    sig!("CFBundleGetMainBundle", P),
     sig!("CFBundleGetVersionNumber", U32, P),
     sig!("CFDictionaryCreate", P, P, P, P, I64, P, P),
     sig!("CFGetTypeID", U64, P),
@@ -420,6 +423,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     vsig!("NSLog", V, P),
     sig!("NSSearchPathForDirectoriesInDomains", P, U64, U64, U8),
     sig!("NSTemporaryDirectory", P),
+    sig!("OSAtomicAdd32Barrier", BOOL, I32, P),
+    sig!("OSAtomicAdd64Barrier", BOOL, I64, P),
     sig!("OpenAComponent", I32, P, P),
     sig!("SCDynamicStoreCopyProxies", P, P),
     sig!("SCNetworkReachabilityCreateWithAddress", P, P, P),
@@ -462,7 +467,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // why none of it can reach the host's libc++abi. `_ZSt9terminatev` is the
     // exception to the exception — `std::terminate` really does mean "stop this
     // process", and the host's does that correctly.
-    sig!("_Unwind_Resume", V, P),
+    // sig!("_Unwind_Resume", V, P),
     // The `basic_string` surface used to be described here, on the reasoning that
     // every entry point is a `this` pointer and scalars and so the host's libc++
     // could rewrite the guest's object in place. That reasoning was wrong, and
@@ -476,30 +481,30 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // constructor and destructor, and `operator delete`. Ordinary host calls —
     // the object is guest memory the host writes a vtable pointer into, which
     // works for the same reason a `pthread_mutex_t` does.
-    sig!("_ZNKSt9exception4whatEv", P, P),
-    sig!("_ZNSt11logic_errorC2EPKc", V, P, P),
-    sig!("_ZNSt12length_errorD1Ev", V, P),
-    sig!("_ZNSt13runtime_errorD1Ev", V, P),
+    // sig!("_ZNKSt9exception4whatEv", P, P),
+    // sig!("_ZNSt11logic_errorC2EPKc", V, P, P),
+    // sig!("_ZNSt12length_errorD1Ev", V, P),
+    // sig!("_ZNSt13runtime_errorD1Ev", V, P),
     // `std::call_once`'s out-of-line half. The third argument is the guest's
     // own thunk-taking function pointer — libc++ calls it with the second as
     // its argument — so it crosses host->guest like any other callback.
-    cbsig!([2], "_ZNSt3__111__call_onceERVmPvPFvS2_E", V, P, P, P),
-    sig!("_ZNSt3__112__next_primeEm", U64, U64),
+    // cbsig!([2], "_ZNSt3__111__call_onceERVmPvPFvS2_E", V, P, P, P),
+    // sig!("_ZNSt3__112__next_primeEm", U64, U64),
     // libc++'s per-thread bookkeeping block, constructed in place.
-    sig!("_ZNSt3__115__thread_structC1Ev", V, P),
-    sig!("_ZNSt3__115__thread_structD1Ev", V, P),
+    // sig!("_ZNSt3__115__thread_structC1Ev", V, P),
+    // sig!("_ZNSt3__115__thread_structD1Ev", V, P),
     // `condition_variable::__do_timed_wait(unique_lock<mutex> &, time_point)`.
     // The `time_point` is by value and is one `long long` — a single eightbyte
     // to SysV and a single doubleword composite to AAPCS64, which is the one
     // shape where the two ABIs agree without the aggregate marshaller.
-    sig!(
-        "_ZNSt3__118condition_variable15__do_timed_waitERNS_11unique_lockINS_5mutexEEENS_6chrono10time_pointINS5_12system_clockENS5_8durationIxNS_5ratioILl1ELl1000000000EEEEEEE",
-        V,
-        P,
-        P,
-        I64
-    ),
-    sig!("_ZNSt3__119__thread_local_dataEv", P),
+    // sig!(
+    //     "_ZNSt3__118condition_variable15__do_timed_waitERNS_11unique_lockINS_5mutexEEENS_6chrono10time_pointINS5_12system_clockENS5_8durationIxNS_5ratioILl1ELl1000000000EEEEEEE",
+    //     V,
+    //     P,
+    //     P,
+    //     I64
+    // ),
+    // sig!("_ZNSt3__119__thread_local_dataEv", P),
     // `std::mutex` and `std::thread` are a `pthread_mutex_t` and a `pthread_t`
     // with a vtable-free wrapper around them, and both of those are
     // byte-identical on the two architectures — the fact M4 rests on. So the
@@ -509,35 +514,35 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // it is a `pthread_mutex_t`, a `pthread_cond_t`, a count and a thread id,
     // and the first two are byte-identical on the two architectures.
     // `try_lock` returns `bool`, which SysV leaves in `al`.
-    sig!("_ZNSt3__121recursive_timed_mutex4lockEv", V, P),
-    sig!("_ZNSt3__121recursive_timed_mutex6unlockEv", V, P),
-    sig!("_ZNSt3__121recursive_timed_mutex8try_lockEv", U8, P),
-    sig!("_ZNSt3__121recursive_timed_mutexC1Ev", V, P),
-    sig!("_ZNSt3__121recursive_timed_mutexC2Ev", V, P),
-    sig!("_ZNSt3__121recursive_timed_mutexD1Ev", V, P),
-    sig!("_ZNSt3__121recursive_timed_mutexD2Ev", V, P),
-    sig!("_ZNSt3__15mutex4lockEv", V, P),
-    sig!("_ZNSt3__15mutex6unlockEv", V, P),
-    sig!("_ZNSt3__15mutexD1Ev", V, P),
+    // sig!("_ZNSt3__121recursive_timed_mutex4lockEv", V, P),
+    // sig!("_ZNSt3__121recursive_timed_mutex6unlockEv", V, P),
+    // sig!("_ZNSt3__121recursive_timed_mutex8try_lockEv", U8, P),
+    // sig!("_ZNSt3__121recursive_timed_mutexC1Ev", V, P),
+    // sig!("_ZNSt3__121recursive_timed_mutexC2Ev", V, P),
+    // sig!("_ZNSt3__121recursive_timed_mutexD1Ev", V, P),
+    // sig!("_ZNSt3__121recursive_timed_mutexD2Ev", V, P),
+    // sig!("_ZNSt3__15mutex4lockEv", V, P),
+    // sig!("_ZNSt3__15mutex6unlockEv", V, P),
+    // sig!("_ZNSt3__15mutexD1Ev", V, P),
     // `chrono::{steady,system}_clock::now()`. A `time_point` is one `long long`,
     // which is the same single-eightbyte shape `__do_timed_wait` takes one of —
     // the one aggregate both ABIs agree about without the marshaller.
-    sig!("_ZNSt3__16chrono12steady_clock3nowEv", I64),
-    sig!("_ZNSt3__16chrono12system_clock3nowEv", I64),
-    sig!("_ZNSt3__16thread4joinEv", V, P),
-    sig!("_ZNSt3__16threadD1Ev", V, P),
-    sig!("_ZNSt9exceptionC1Ev", V, P),
-    sig!("_ZNSt9exceptionC2Ev", V, P),
-    sig!("_ZNSt9exceptionD0Ev", V, P),
-    sig!("_ZNSt9exceptionD1Ev", V, P),
-    sig!("_ZNSt9exceptionD2Ev", V, P),
-    sig!("_ZSt9terminatev", V),
-    sig!("_ZdaPv", V, P),
-    sig!("_ZdaPvm", V, P, U64),
-    sig!("_ZdlPv", V, P),
-    sig!("_ZdlPvm", V, P, U64),
-    sig!("_Znam", P, U64),
-    sig!("_Znwm", P, U64),
+    // sig!("_ZNSt3__16chrono12steady_clock3nowEv", I64),
+    // sig!("_ZNSt3__16chrono12system_clock3nowEv", I64),
+    // sig!("_ZNSt3__16thread4joinEv", V, P),
+    // sig!("_ZNSt3__16threadD1Ev", V, P),
+    // sig!("_ZNSt9exceptionC1Ev", V, P),
+    // sig!("_ZNSt9exceptionC2Ev", V, P),
+    // sig!("_ZNSt9exceptionD0Ev", V, P),
+    // sig!("_ZNSt9exceptionD1Ev", V, P),
+    // sig!("_ZNSt9exceptionD2Ev", V, P),
+    // sig!("_ZSt9terminatev", V),
+    // sig!("_ZdaPv", V, P),
+    // sig!("_ZdaPvm", V, P, U64),
+    // sig!("_ZdlPv", V, P),
+    // sig!("_ZdlPvm", V, P, U64),
+    // sig!("_Znam", P, U64),
+    // sig!("_Znwm", P, U64),
     // ## The locale-aware C library, which the vendored libc++ actually calls
     //
     // The `_l` family — `___mb_cur_max_l`, `___tolower_l`, `___toupper_l`,
@@ -563,27 +568,27 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("___toupper_l", I32, I32, P),
     sig!("__assert_rtn", V, P, P, I32, P),
     sig!("__bzero", V, P, U64),
-    sig!("__cxa_allocate_exception", P, U64),
+    // sig!("__cxa_allocate_exception", P, U64),
     // Shimmed, and listed for the reasons `sigaction` is: the entry keeps it out
     // of the audit's unknown list and off the fast path. The handler is a guest
     // function pointer, but no `cbsig!` marks it — [`crate::shims::atexit`]
     // substitutes it itself, because it must also replace the DSO handle.
     sig!("__cxa_atexit", I32, P, P, P),
-    sig!("__cxa_begin_catch", P, P),
-    sig!("__cxa_call_unexpected", V, P),
-    sig!("__cxa_end_catch", V),
-    sig!("__cxa_free_exception", V, P),
+    // sig!("__cxa_begin_catch", P, P),
+    // sig!("__cxa_call_unexpected", V, P),
+    // sig!("__cxa_end_catch", V),
+    // sig!("__cxa_free_exception", V, P),
     // The function-local static guards. The guard object is eight bytes of
     // *guest* memory and libc++abi operates on it in place, holding its own
     // process-wide lock while it does — the same in-place arrangement the
     // `pthread` types rest on, and for the same reason: there is one process
     // here, so one lock is the right number.
-    sig!("__cxa_guard_abort", V, P),
-    sig!("__cxa_guard_acquire", I32, P),
-    sig!("__cxa_guard_release", V, P),
-    sig!("__cxa_pure_virtual", V),
-    sig!("__cxa_rethrow", V),
-    sig!("__cxa_throw", V, P, P, P),
+    // sig!("__cxa_guard_abort", V, P),
+    // sig!("__cxa_guard_acquire", I32, P),
+    // sig!("__cxa_guard_release", V, P),
+    // sig!("__cxa_pure_virtual", V),
+    // sig!("__cxa_rethrow", V),
+    // sig!("__cxa_throw", V, P, P, P),
     sig!("__darwin_check_fd_set_overflow", I32, I32, P, I32),
     sig!("__error", P),
     sig!("__isnand", I32, F64),
@@ -712,6 +717,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     cbsig!([2], "dispatch_once_f", V, P, P, P),
     sig!("dispatch_release", V, P),
     sig!("dispatch_resume", V, P),
+    sig!("dispatch_semaphore_create", P, P),
     sig!("dispatch_set_context", V, P, P),
     sig!("dispatch_source_cancel", V, P),
     sig!("dispatch_source_create", P, P, U64, U64, P),
@@ -1055,6 +1061,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("mach_port_deallocate", I32, U32, U32),
     sig!("mach_port_mod_refs", I32, U32, U32, U32, I32),
     sig!("mach_port_type", I32, U32, U32, P),
+    sig!("madvise", U64, P, U64, I32),
     sig!("malloc", P, U64),
     sig!("malloc_size", U64, P),
     sig!("malloc_zone_statistics", V, P, P),

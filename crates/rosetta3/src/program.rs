@@ -12,7 +12,7 @@ use machish::spec::arch::X86_64;
 
 use microlift::arch::x86_64::context::RegisterContext;
 use microlift::core::exit::MemorySegment;
-use microlift::core::{AddressMode, LifterConfig};
+use microlift::core::{AddressMode, Atomic128Mode, LifterConfig};
 
 use crate::abi::{AbiError, Classification, FunctionAbi, Lookup};
 
@@ -424,11 +424,31 @@ impl<M: Regions> Program<M> {
                 false
             }
         };
+        let atomic128 = {
+            #[cfg(target_arch = "aarch64")]
+            {
+                Atomic128Mode::Emulated
+            }
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            {
+                if std::arch::is_x86_feature_detected!("cmpxchg16b") {
+                    Atomic128Mode::Native
+                } else {
+                    Atomic128Mode::Emulated
+                }
+            }
+            #[cfg(not(any(target_arch = "aarch64", target_arch = "x86", target_arch = "x86_64")))]
+            {
+                Atomic128Mode::Emulated
+            }
+        };
         let mut config = LifterConfig {
             interpreter_fallback: true,
             use_vector_xmm,
             outline_helpers: true,
             address_mode: AddressMode::Direct,
+            analyze_jump_tables: true,
+            atomic128,
             ..LifterConfig::default()
         };
 
