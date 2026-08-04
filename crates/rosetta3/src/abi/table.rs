@@ -336,6 +336,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
         P,
         U32
     ),
+    sig!("CFURLGetFileSystemRepresentation", U8, P, U8, P, I64),
     sig!("CFUUIDCreate", P, P),
     sig!("CFUUIDCreateString", P, P, P),
     sig!("CGEventPost", V, U32, P),
@@ -463,6 +464,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("_NSGetArgv", P),
     sig!("_NSGetEnviron", P),
     sig!("_NSGetExecutablePath", I32, P, P),
+    // Clang's stack-clash probe. It has no arguments and no result; it only
+    // touches the guest stack before the function's body continues.
+    sig!("___chkstk_darwin", V),
     // The C++ exception surface, all of it shimmed: see [`crate::unwind`] for
     // why none of it can reach the host's libc++abi. `_ZSt9terminatev` is the
     // exception to the exception — `std::terminate` really does mean "stop this

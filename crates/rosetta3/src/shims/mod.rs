@@ -52,6 +52,7 @@ pub mod openat;
 pub mod printf;
 pub mod runtime;
 pub mod sscanf;
+pub mod stackprobe;
 pub mod zlib;
 
 /// Run the shim for `symbol`, if there is one.
@@ -104,6 +105,7 @@ pub fn dispatch(
         // a calling convention.
         _ => {
             if let Some(f) = math::shim_for(name)
+                .or_else(|| stackprobe::shim_for(name))
                 .or_else(|| crate::jmpbuf::shim_for(name))
                 // .or_else(|| crate::unwind::shim_for(name))
                 .or_else(|| crate::objc::dispatch::shim_for(name))
@@ -137,6 +139,7 @@ pub fn dispatch(
 pub fn is_shimmed(symbol: &str) -> bool {
     let name = symbol.strip_prefix('_').unwrap_or(symbol);
     if math::shim_for(name).is_some()
+        || stackprobe::shim_for(name).is_some()
         || crate::jmpbuf::shim_for(name).is_some()
         || crate::unwind::shim_for(name).is_some()
         || crate::objc::dispatch::shim_for(name).is_some()
