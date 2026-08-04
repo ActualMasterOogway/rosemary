@@ -275,6 +275,15 @@ pub fn set_executable_path(path: &str, slide: u64) {
     *EXECUTABLE.lock().unwrap_or_else(|e| e.into_inner()) = Some((canonical, slide));
 }
 
+/// The path presented to guest process-introspection calls.
+pub fn executable_path() -> Option<String> {
+    EXECUTABLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|(path, _)| path.clone())
+}
+
 /// How many images are loaded, and the address range they span.
 ///
 /// Read without the lock, and that is the entire point. These lookups sit on the

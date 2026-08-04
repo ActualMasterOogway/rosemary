@@ -447,7 +447,6 @@ impl<M: Regions> Program<M> {
             use_vector_xmm,
             outline_helpers: true,
             address_mode: AddressMode::Direct,
-            analyze_jump_tables: true,
             atomic128,
             ..LifterConfig::default()
         };

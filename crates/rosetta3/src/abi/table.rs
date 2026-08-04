@@ -259,7 +259,13 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("AudioUnitSetProperty", I32, P, U32, U32, U32, P, U32),
     sig!("AudioUnitUninitialize", I32, P),
     sig!("CC_MD5", P, P, U32, P),
+    sig!("CC_MD5_Final", I32, P, P),
+    sig!("CC_MD5_Init", I32, P),
+    sig!("CC_MD5_Update", I32, P, P, U32),
     sig!("CC_SHA1", P, P, U32, P),
+    sig!("CC_SHA1_Final", I32, P, P),
+    sig!("CC_SHA1_Init", I32, P),
+    sig!("CC_SHA1_Update", I32, P, P, U32),
     sig!("CC_SHA512_Final", I32, P, P),
     sig!("CC_SHA512_Init", I32, P),
     sig!("CC_SHA512_Update", I32, P, P, U32),
@@ -290,6 +296,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFHTTPMessageGetResponseStatusCode", I64, P),
     sig!("CFHTTPMessageIsHeaderComplete", U8, P),
     sig!("CFHTTPMessageSetHeaderFieldValue", V, P, P, P),
+    sig!("CFLocaleCopyCurrent", P),
+    sig!("CFLocaleGetIdentifier", P, P),
+    sig!("CFLocaleGetValue", P, P, P),
     sig!("CFNetworkCopyProxiesForAutoConfigurationScript", P, P, P, P),
     sig!("CFNetworkCopyProxiesForURL", P, P, P),
     sig!("CFNumberCreate", P, P, I64, P),
@@ -315,17 +324,21 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFRetain", P, P),
     sig!("CFRunLoopAddSource", V, P, P, P),
     sig!("CFRunLoopGetCurrent", P),
+    sig!("CFRunLoopRun", V, P),
     // `CFTimeInterval` is a `double`, so this is the first entry in the table
     // whose second argument is floating-point while its first and third are not
     // — exactly the shape the two independent register counters exist for.
     sig!("CFRunLoopRunInMode", I32, P, F64, U8),
+    sig!("CFRunLoopStop", V, P),
     sig!("CFStringAppendCharacters", V, P, P, I64),
     sig!("CFStringConvertEncodingToIANACharSetName", P, U32),
     sig!("CFStringConvertEncodingToNSStringEncoding", U64, U32),
     sig!("CFStringConvertIANACharSetNameToEncoding", U32, P),
     sig!("CFStringConvertNSStringEncodingToEncoding", U32, U64),
+    sig!("CFStringGetCString", BOOL, P, P, U64),
     sig!("CFStringGetCStringPtr", P, P, U32),
     sig!("CFStringGetLength", I64, P),
+    sig!("CFStringGetMaximumSizeForEncoding", I64, I64, U32),
     sig!("CFStringGetTypeID", U64),
     sig!(
         "CFURLCreateStringByAddingPercentEscapes",
@@ -427,6 +440,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("OSAtomicAdd32Barrier", BOOL, I32, P),
     sig!("OSAtomicAdd64Barrier", BOOL, I64, P),
     sig!("OpenAComponent", I32, P, P),
+    sig!("OSAtomicCompareAndSwap32Barrier", BOOL, I32, I32, P),
+    sig!("OSAtomicCompareAndSwap64Barrier", BOOL, I64, I64, P),
     sig!("SCDynamicStoreCopyProxies", P, P),
     sig!("SCNetworkReachabilityCreateWithAddress", P, P, P),
     sig!("SCNetworkReachabilityCreateWithName", P, P, P),
@@ -604,6 +619,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     vsig!("__snprintf_chk", I32, P, U64, I32, U64, P),
     vsig!("__sprintf_chk", I32, P, I32, U64, P),
     sig!("__stack_chk_fail", V),
+    sig!("__stpcpy_chk", P, P, P, U64),
     sig!("__strcat_chk", P, P, P, U64),
     sig!("__strcpy_chk", P, P, P, U64),
     sig!("__strlcat_chk", U64, P, P, U64, U64),
@@ -615,6 +631,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // The fortified `vsnprintf`; shimmed with the rest of the `va_list` family
     // for the reason [`crate::shims::valist`] gives.
     sig!("__vsnprintf_chk", I32, P, U64, I32, U64, P, P),
+    vsig!("__vsprintf_chk", I32, P, I32, U64, P),
     // `const char *_dyld_get_image_name(uint32_t)`, answered with the host's
     // image list for the reason [`crate::shims::runtime`] gives.
     sig!("_dyld_get_image_name", P, U32),
@@ -645,14 +662,21 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("acl_get_tag_type", I32, P, P),
     sig!("acos", F64, F64),
     sig!("acosf", F32, F32),
+    sig!("acosh", F64, F64),
+    sig!("acoshf", F32, F32),
     sig!("arc4random", U32),
+    sig!("arc4random_buf", V, P, U64),
     sig!("asin", F64, F64),
     sig!("asinf", F32, F32),
+    sig!("asinh", F64, F64),
+    sig!("asinhf", F32, F32),
     vsig!("asprintf", I32, P, P),
     sig!("atan", F64, F64),
     sig!("atan2", F64, F64, F64),
     sig!("atan2f", F32, F32, F32),
     sig!("atanf", F32, F32),
+    sig!("atanh", F64, F64),
+    sig!("atanhf", F32, F32),
     // `atexit`, `bsearch`, `qsort` and `qsort_r` were refused until the
     // host->guest thunk existed. What changed is only that the pointer they
     // take can now be substituted; the signature was never in doubt.
@@ -672,6 +696,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("btowc_l", I32, I32, P),
     sig!("bzero", V, P, U64),
     sig!("calloc", P, U64, U64),
+    sig!("cbrt", F64, F64),
+    sig!("cbrtf", F32, F32),
     sig!("ceil", F64, F64),
     sig!("ceilf", F32, F32),
     sig!("chdir", I32, P),
@@ -679,6 +705,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("clearerr", V, P),
     // `struct timespec` is two 64-bit words on both architectures, and the
     // guest passes it by address, so the host fills it in place.
+    sig!("clock_get_time", I32, U32, P),
     sig!("clock_gettime", I32, U32, P),
     sig!("close", I32, I32),
     sig!("closedir", I32, P),
@@ -687,6 +714,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("connect", I32, I32, P, U32),
     sig!("cos", F64, F64),
     sig!("cosf", F32, F32),
+    sig!("cosh", F64, F64),
+    sig!("coshf", F32, F32),
     // ## zlib
     //
     // `deflateInit_` and `inflateInit_` are the real entry points: `deflateInit`
@@ -743,8 +772,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("expf", F32, F32),
     sig!("fabs", F64, F64),
     sig!("fabsf", F32, F32),
+    sig!("fchmod", I32, I32, U32),
     sig!("fclose", I32, P),
     vsig!("fcntl", I32, I32, I32),
+    sig!("fcopyfile", I32, I32, P, U32),
     sig!("fdopen", P, I32, P),
     sig!("feof", I32, P),
     sig!("ferror", I32, P),
@@ -772,6 +803,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("flock", I32, I32, I32),
     sig!("floor", F64, F64),
     sig!("floorf", F32, F32),
+    sig!("fma", F64, F64, F64, F64),
+    sig!("fmaf", F32, F32, F32, F32),
     sig!("fmax", F64, F64, F64),
     sig!("fmin", F64, F64, F64),
     sig!("fmod", F64, F64, F64),
@@ -982,6 +1015,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // Two `host_*` calls Valve's tier0 makes to size physical memory. The host
     // port they take is this process's, for the reason `mach_host_self` in
     // `shims::runtime` gives: there is one task here, and one host.
+    sig!("host_get_clock_service", I32, U32, U32, P),
     sig!("host_page_size", I32, U32, P),
     sig!("host_statistics", I32, U32, I32, P, P),
     sig!("hypot", F64, F64, F64),
@@ -989,6 +1023,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("iconv_close", I32, P),
     sig!("iconv_open", P, P, P),
     sig!("if_nametoindex", U32, P),
+    sig!("ilogb", I32, F64),
+    sig!("ilogbf", I32, F32),
     sig!("inet_addr", U32, P),
     sig!("inet_aton", I32, P, P),
     sig!("inet_ntop", P, I32, P, P, U32),
@@ -1001,6 +1037,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     vsig!("ioctl", I32, I32, U64),
     sig!("isalnum", I32, I32),
     sig!("isalpha", I32, I32),
+    sig!("isascii", I32, I32),
     sig!("isatty", I32, I32),
     sig!("isdigit", I32, I32),
     sig!("islower", I32, I32),
@@ -1043,7 +1080,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("localtime_r", P, P, P),
     sig!("log", F64, F64),
     sig!("log10", F64, F64),
+    sig!("log10f", F32, F32),
     sig!("log2", F64, F64),
+    sig!("log2f", F32, F32),
+    sig!("logf", F32, F32),
     // `longjmp` and `setjmp` are *shimmed*, not forwarded: the host's would save
     // and restore arm64 registers and the JIT's own stack frame, which is the
     // one kind of wrongness that does not fault. The signature is here anyway
@@ -1054,6 +1094,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("lseek", I64, I32, I64, I32),
     sig!("lstat", I32, P, P),
     sig!("mach_absolute_time", U64),
+    sig!("mach_host_self", U32),
     // The three Mach IPC calls `libsteam_api.dylib` makes to talk to the Steam
     // client. They need no translation at all: the guest's task is this
     // process's task (see the `_mach_task_self_` note in `shims::runtime`), and
@@ -1065,6 +1106,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("mach_port_deallocate", I32, U32, U32),
     sig!("mach_port_mod_refs", I32, U32, U32, U32, I32),
     sig!("mach_port_type", I32, U32, U32, P),
+    sig!("mach_timebase_info", I32, P),
     sig!("madvise", U64, P, U64, I32),
     sig!("malloc", P, U64),
     sig!("malloc_size", U64, P),
@@ -1151,6 +1193,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("powf", F32, F32, F32),
     sig!("pread", I64, I32, P, U64, I64),
     vsig!("printf", I32, P),
+    sig!("proc_pidpath", I32, I32, P, U32),
     cbsig!([0, 1, 2], "pthread_atfork", I32, P, P, P),
     // ## The pthread family
     //
@@ -1197,9 +1240,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // destructors still run, so this thread's guest stack and TLS blocks are
     // still released.
     sig!("pthread_exit", V, P),
+    sig!("pthread_get_stackaddr_np", P, U64),
+    sig!("pthread_get_stacksize_np", U64, U64),
     sig!("pthread_getname_np", I32, U64, P, U64),
     sig!("pthread_getschedparam", I32, U64, P, P),
     sig!("pthread_getspecific", P, U64),
+    sig!("pthread_jit_write_protect_np", I32, I32),
     sig!("pthread_join", I32, U64, P),
     // The destructor is guest code, called by libpthread on thread teardown.
     cbsig!([1], "pthread_key_create", I32, P, P),
@@ -1217,6 +1263,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("pthread_mutex_unlock", I32, P),
     sig!("pthread_mutexattr_destroy", I32, P),
     sig!("pthread_mutexattr_init", I32, P),
+    sig!("pthread_mutexattr_setprotocol", I32, P, I32),
     sig!("pthread_mutexattr_settype", I32, P, I32),
     // The initialiser is guest code, and `pthread_once` guarantees it runs
     // exactly once — a guarantee that survives thunking, since the thunk is
@@ -1259,6 +1306,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("rindex", P, P, I32),
     sig!("rmdir", I32, P),
     sig!("round", F64, F64),
+    sig!("scalbn", F64, F64, I32),
+    sig!("scalbnf", F32, F32, I32),
     vsig!("scanf", I32, P),
     sig!("sched_get_priority_max", I32, I32),
     sig!("sched_get_priority_min", I32, I32),
@@ -1284,6 +1333,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("setenv", I32, P, P, I32),
     sig!("setjmp", I32, P),
     sig!("setlocale", P, I32, P),
+    sig!("setrlimit", I32, I32, P),
     // `pid_t setsid(void)`. `setpgrp` is deliberately absent beside it: Darwin
     // declares it twice — `pid_t setpgrp(void)` and the obsolete `int
     // setpgrp(pid_t, pid_t)` — and which one a guest was compiled against is not
@@ -1303,6 +1353,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("sigsetjmp", I32, P, I32),
     sig!("sin", F64, F64),
     sig!("sinf", F32, F32),
+    sig!("sinh", F64, F64),
+    sig!("sinhf", F32, F32),
     sig!("sleep", U32, U32),
     vsig!("snprintf", I32, P, U64, P),
     sig!("socket", I32, I32, I32, I32),
@@ -1350,6 +1402,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("strtof", F32, P, P),
     sig!("strtof_l", F32, P, P, P),
     sig!("strtok", P, P, P),
+    sig!("strtok_r", P, P, P, P),
     sig!("strtol", I64, P, P, I32),
     sig!("strtoll", I64, P, P, I32),
     sig!("strtonum", I64, P, I64, I64, P),
@@ -1367,6 +1420,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("system", I32, P),
     sig!("tan", F64, F64),
     sig!("tanf", F32, F32),
+    sig!("tanh", F64, F64),
+    sig!("tanhf", F32, F32),
     sig!("tcgetattr", I32, I32, P),
     sig!("tcsetattr", I32, I32, I32, P),
     sig!("tgetent", I32, P, P),
