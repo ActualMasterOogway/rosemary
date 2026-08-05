@@ -550,6 +550,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("IORegistryEntryCreateCFProperty", P, U32, P, P, U32),
     sig!("IORegistryEntryGetParentEntry", I32, U32, P, P),
     sig!("IOServiceGetMatchingServices", I32, U32, P, P),
+    // `UInt8 LMGetKbdType(void)` — the low-memory global that still backs
+    // `UCKeyTranslate`'s keyboard-type argument.
+    sig!("LMGetKbdType", U8),
     // ## AppKit and Foundation's C surface
     //
     // `NSApplicationMain` is where an application stops being a program and
@@ -587,6 +590,14 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("SecKeychainOpen", I32, P, P),
     sig!("SecKeychainSearchCopyNext", I32, P, P),
     sig!("SecKeychainSearchCreateFromAttributes", I32, P, U32, P, P),
+    // ## Text input sources, for the keyboard layout
+    //
+    // SDL3 asks the current layout for its Unicode key-layout data so it can
+    // translate a virtual key code into characters. Passthrough, because the
+    // layout being asked about is the one the user has selected in this
+    // session — there is no guest-side keyboard for it to disagree with.
+    sig!("TISCopyCurrentKeyboardLayoutInputSource", P),
+    sig!("TISGetInputSourceProperty", P, P, P),
     sig!("UTTypeCopyPreferredTagWithClass", P, P, P),
     sig!("UTTypeCreatePreferredIdentifierForTag", P, P, P, P),
     // ## Blocks
