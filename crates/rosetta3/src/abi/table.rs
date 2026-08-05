@@ -226,6 +226,7 @@ const F32: T = T::SinglePrecisionFp;
 const F64: T = T::DoublePrecisionFp;
 const P: T = T::Pointer;
 const U8: T = T::UnsignedByte;
+const U16: T = T::UnsignedHalfword;
 const BOOL: T = U8;
 
 /// Known signatures, **sorted by name** — `signatures_are_sorted_and_unique`
@@ -598,6 +599,26 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // session — there is no guest-side keyboard for it to disagree with.
     sig!("TISCopyCurrentKeyboardLayoutInputSource", P),
     sig!("TISGetInputSourceProperty", P, P, P),
+    // `OSStatus UCKeyTranslate(const UCKeyboardLayout *, UInt16, UInt16,
+    // UInt32, UInt32, OptionBits, UInt32 *, UniCharCount, UniCharCount *,
+    // UniChar[])` — the call that turns a virtual key code into characters,
+    // read out of CarbonCore's `UnicodeUtilities.h`.
+    //
+    // **Ten integer arguments, two of them past AAPCS64's eighth**, which is
+    // exactly the case [`super::marshal`] documents its limits around. Both
+    // overflowing arguments — `actualStringLength` and `unicodeString` — are
+    // pointers, so both are already a doubleword wide, which is the condition
+    // Apple's stack-packing rule imposes: a narrower one would sit at `[sp+4]`
+    // where a `u64` prototype writes `[sp+8]`. `glTexImage2D` needed one such
+    // slot; this needs two, and they are the same shape.
+    //
+    // `UniCharCount` is `unsigned long`, so a doubleword, and the two `UInt16`s
+    // are halfwords rather than words — narrow arguments in registers, where
+    // the packing rule does not apply.
+    sig!(
+        "UCKeyTranslate",
+        I32, P, U16, U16, U32, U32, U32, P, U64, P, P
+    ),
     sig!("UTTypeCopyPreferredTagWithClass", P, P, P),
     sig!("UTTypeCreatePreferredIdentifierForTag", P, P, P, P),
     // ## Blocks
@@ -1934,6 +1955,33 @@ pub static REFUSED: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every signature in the table can actually be called.
+    ///
+    /// The table and [`super::marshal`] are written independently — one says
+    /// what a function's arguments are, the other says which shapes it can
+    /// place — and nothing forces them to agree. A signature the marshaller
+    /// refuses is not a compile error and not a wrong answer: it is a call that
+    /// fails by name at run time, months later, in whichever program first
+    /// reaches it.
+    ///
+    /// `UCKeyTranslate` is why this exists. Ten integer arguments, two of them
+    /// past AAPCS64's eighth, is the first entry to use more than one
+    /// stack slot, and whether it is marshallable turns on Apple's packing rule
+    /// — both overflowing arguments happen to be pointers, and a `UInt32` in
+    /// either position would silently have to be refused instead.
+    #[test]
+    fn every_signature_is_one_the_marshaller_can_place() {
+        let refused: Vec<&str> = SIGNATURES
+            .iter()
+            .filter(|abi| !abi.variadic && !crate::abi::marshal::is_marshallable(abi))
+            .map(|abi| abi.name)
+            .collect();
+        assert!(
+            refused.is_empty(),
+            "described but not callable: {refused:?}"
+        );
+    }
 
     #[test]
     fn signatures_are_sorted_and_unique() {
