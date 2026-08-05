@@ -1,12 +1,20 @@
-//! CoreGraphics entry points whose *return value* the signature table cannot
-//! name.
+//! CoreGraphics and CoreVideo entry points whose *return value* the signature
+//! table cannot name.
 //!
 //! [`crate::abi::table`] describes everything else in the display family — they
 //! are display IDs, mode handles and sizes, all scalars and pointers, and the
 //! host's implementation is the right one because the displays it is asked
-//! about are this machine's. `CGDisplayBounds` is the exception, for the same
-//! reason [`crate::shims::math`]'s pair are: it returns a **struct by value**,
-//! and the two architectures do not agree on how.
+//! about are this machine's. Two are exceptions, for the same reason
+//! [`crate::shims::math`]'s pair are: they return a **struct by value**, which
+//! is the one thing the table refuses to describe.
+//!
+//! The two are not the same problem, which is the point worth taking from
+//! having both. A `CGRect` is thirty-two bytes of floating point and the two
+//! ABIs disagree completely. A `CVTime` is sixteen bytes of integer and they
+//! **agree** — two integer registers each — and it still cannot be a table
+//! entry, because the marshaller's return path writes one register. The rule
+//! stays "check this struct against both ABIs"; what changes is that agreeing
+//! is not sufficient on its own.
 //!
 //! ## `CGRect` is thirty-two bytes, and that decides everything
 //!
@@ -22,6 +30,15 @@
 //! aggregate — which puts the compiler in charge of reading `v0`–`v3`, rather
 //! than this module guessing at register halves — and then writes the thirty-two
 //! bytes where the *guest's* ABI says they go.
+//!
+//! ## `CVTime` is sixteen bytes, and both sides return it in two registers
+//!
+//! `CVTime` is `{ int64_t timeValue; int32_t timeScale; int32_t flags; }`. SysV
+//! AMD64 classifies it as two INTEGER eightbytes and returns them in `rax` and
+//! `rdx`; AAPCS64 sees a sixteen-byte non-HFA aggregate and returns it in `x0`
+//! and `x1`. Same shape, same order, different register names — so the shim is
+//! two moves, and the reason it exists at all is that
+//! [`crate::abi::marshal`] returns a single value.
 //!
 //! ## Why not `#[link(kind = "framework")]`
 //!
@@ -96,6 +113,44 @@ fn rect_of_display(
     Ok(())
 }
 
+/// `CVTime`, as both ABIs return one: two integer registers.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct CvTime {
+    time_value: i64,
+    time_scale: i32,
+    flags: i32,
+}
+
+/// `CVTime CVDisplayLinkGetNominalOutputVideoRefreshPeriod(CVDisplayLinkRef)`
+///
+/// How long a frame is on the display the link is attached to, which is how
+/// SDL3 reports a refresh rate. The guest reads `rax` and `rdx`; the host
+/// returns `x0` and `x1`, holding the same two eightbytes in the same order.
+fn display_link_nominal_period(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    _mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let Some(host) = crate::dyld::host_symbol(symbol.strip_prefix('_').unwrap_or(symbol)) else {
+        return Err(AbiError::NoShim {
+            symbol: symbol.to_string(),
+        });
+    };
+    // SAFETY: the symbol [`shim_for`] matched, which is
+    // `CVTime (*)(CVDisplayLinkRef)`, resolved out of a CoreVideo this process
+    // has loaded. The argument is an opaque handle the guest got from
+    // `CVDisplayLinkCreateWithActiveCGDisplays`, so it is the host's own.
+    let f: extern "C" fn(u64) -> CvTime =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(u64) -> CvTime>(host) };
+    let time = f(ctx.rdi);
+    ctx.rax = time.time_value as u64;
+    // The second eightbyte is the two `int32`s packed low-then-high, which is
+    // what "one eightbyte" means for a pair of them.
+    ctx.rdx = u64::from(time.time_scale as u32) | (u64::from(time.flags as u32) << 32);
+    Ok(())
+}
+
 /// One of this module's implementations, in the shape [`crate::shims`] wants.
 pub type Shim = fn(&str, &mut RegisterContext, &mut dyn GuestMemory) -> Result<()>;
 
@@ -106,6 +161,7 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         // the global desktop coordinate space, which SDL asks for every display
         // it enumerates.
         "CGDisplayBounds" => Some(rect_of_display),
+        "CVDisplayLinkGetNominalOutputVideoRefreshPeriod" => Some(display_link_nominal_period),
         _ => None,
     }
 }
@@ -162,6 +218,39 @@ mod tests {
             f64::from_le_bytes(w)
         };
         assert!(read(2) > 0.0 && read(3) > 0.0, "a display has a size");
+    }
+
+    /// The packing claim, which is the whole of what this shim does with
+    /// `CVTime`'s second eightbyte: `timeScale` low, `flags` high.
+    #[test]
+    fn a_cvtime_second_eightbyte_is_the_two_int32s_low_then_high() {
+        assert_eq!(core::mem::size_of::<CvTime>(), 16);
+        let Some(_) = crate::dyld::host_symbol("CVDisplayLinkGetNominalOutputVideoRefreshPeriod")
+        else {
+            return;
+        };
+        // A null display link is the case CoreVideo answers without a display:
+        // it reports an indefinite time rather than faulting, which is enough to
+        // check the placement without depending on a monitor being attached.
+        let mut ctx = RegisterContext::new();
+        ctx.rdi = 0;
+        let mut mem = crate::vm::GuestView::new(Vec::new());
+        display_link_nominal_period(
+            "_CVDisplayLinkGetNominalOutputVideoRefreshPeriod",
+            &mut ctx,
+            &mut mem,
+        )
+        .expect("period");
+        // `kCVTimeIsIndefinite` is bit 0 of `flags`, which lives in the high
+        // half of `rdx`. Asserting the *scale* is in the low half is the
+        // placement claim; the value itself is CoreVideo's business.
+        let scale = ctx.rdx as u32;
+        let flags = (ctx.rdx >> 32) as u32;
+        assert!(
+            flags & 1 == 1 || scale != 0,
+            "a null link should be indefinite, or report a scale: rdx {:#x}",
+            ctx.rdx
+        );
     }
 
     fn host_main_display() -> u32 {

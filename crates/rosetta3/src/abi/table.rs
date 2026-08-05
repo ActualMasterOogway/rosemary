@@ -477,11 +477,22 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // host calls it on CoreVideo's own thread, which is a thread this runtime
     // never created, so it reaches the guest exactly the way a `pthread_create`
     // start routine does — through a thunk, on a guest stack made on demand.
+    sig!("CVDisplayLinkCreateWithActiveCGDisplays", I32, P),
     sig!("CVDisplayLinkCreateWithCGDisplay", I32, U32, P),
     sig!("CVDisplayLinkGetActualOutputVideoRefreshPeriod", F64, P),
+    // `CVTime` by value: sixteen bytes, both eightbytes integer, and the two
+    // ABIs *agree* — `rax`/`rdx` on one side, `x0`/`x1` on the other. It is
+    // still not a table entry, because [`super::marshal`]'s return path carries
+    // one register. The types here are a placeholder;
+    // [`crate::shims::coregraphics`] claims the name and never reads them.
+    sig!("CVDisplayLinkGetNominalOutputVideoRefreshPeriod", V, P),
+    sig!("CVDisplayLinkRelease", V, P),
+    sig!("CVDisplayLinkRetain", P, P),
     sig!("CVDisplayLinkSetCurrentCGDisplay", I32, P, U32),
+    sig!("CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext", I32, P, P, P),
     cbsig!([1], "CVDisplayLinkSetOutputCallback", I32, P, P, P),
     sig!("CVDisplayLinkStart", I32, P),
+    sig!("CVDisplayLinkStop", I32, P),
     // ## The Carbon Component Manager, and `Gestalt`
     //
     // Removed from the SDK's headers years ago and still exported by
