@@ -716,6 +716,13 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // guest passes it by address, so the host fills it in place.
     sig!("clock_get_time", I32, U32, P),
     sig!("clock_gettime", I32, U32, P),
+    // `kern_return_t clock_sleep(mach_port_t, sleep_type_t, mach_timespec_t,
+    // mach_timespec_t *)`. The third argument is a struct **by value**, and it
+    // is eight bytes of two `unsigned int` — one integer register under SysV
+    // AMD64 and one under AAPCS64 alike — so a `U64` places it correctly on both
+    // sides. That equivalence is the whole reason it can be a signature; a
+    // sixteen-byte aggregate could not be. See `semaphore_timedwait`.
+    sig!("clock_sleep", I32, U32, I32, U64, P),
     sig!("close", I32, I32),
     sig!("closedir", I32, P),
     sig!("compat_mode", U8, P, P),
@@ -875,6 +882,20 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("getpwuid", P, U32),
     sig!("getrlimit", I32, I32, P),
     sig!("getrusage", I32, I32, P),
+    // `const struct section_64 *getsectbynamefromheader_64(const struct
+    // mach_header_64 *, const char *seg, const char *sect)`.
+    //
+    // The one pointer argument that is a *Mach-O*, and that is what makes it
+    // passthrough rather than a shim: a `mach_header_64` and the load commands
+    // behind it are a **file format**, byte-identical whichever architecture the
+    // image is for — the `cputype` field is data, not layout. So libmacho's own
+    // implementation walks the guest's x86-64 header correctly, and the
+    // `section_64 *` it returns points into guest memory, which the guest can
+    // read because everything here is identity-mapped.
+    //
+    // Reached from a `_dyld_register_func_for_add_image` callback, which is the
+    // only way a guest gets a header to ask about; see [`crate::dyld`].
+    sig!("getsectbynamefromheader_64", P, P, P, P),
     sig!("getsid", I32, I32),
     sig!("getsockname", I32, I32, P, P),
     sig!("getsockopt", I32, I32, I32, I32, P, P),
@@ -1025,6 +1046,21 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // port they take is this process's, for the reason `mach_host_self` in
     // `shims::runtime` gives: there is one task here, and one host.
     sig!("host_get_clock_service", I32, U32, U32, P),
+    // ## The Mach kernel interface, and why it needs no translation
+    //
+    // Every entry below is a MIG routine: the arguments are `mach_port_t`,
+    // `integer_t` and friends — fixed-width 32-bit types by definition, not
+    // `long` — and the structures behind the pointers are arrays of those. There
+    // is nothing here whose layout can differ between the two architectures, and
+    // there is nothing to translate besides: **the guest's task is this task**,
+    // and the guest's threads are this process's threads, so a port name means
+    // the same thing on both sides of the seam. See the `mach_task_self_` note
+    // in `shims::runtime`.
+    //
+    // Terraria's embedded Mono is what reaches them, and reaches nearly all of
+    // them: Mach semaphores for its own synchronisation, the clock services for
+    // timing, and the task/thread introspection its garbage collector suspends
+    // the world with.
     sig!("host_page_size", I32, U32, P),
     sig!("host_statistics", I32, U32, I32, P, P),
     sig!("hypot", F64, F64, F64),
@@ -1115,6 +1151,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("mach_port_deallocate", I32, U32, U32),
     sig!("mach_port_mod_refs", I32, U32, U32, U32, I32),
     sig!("mach_port_type", I32, U32, U32, P),
+    sig!("mach_thread_self", U32),
     sig!("mach_timebase_info", I32, P),
     sig!("madvise", U64, P, U64, I32),
     sig!("malloc", P, U64),
@@ -1265,6 +1302,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // The thread's Mach port name. One task, one port namespace — see
     // `mach_task_self_` in `shims::runtime`.
     sig!("pthread_mach_thread_np", U32, U64),
+    sig!("pthread_main_np", I32),
     sig!("pthread_mutex_destroy", I32, P),
     sig!("pthread_mutex_init", I32, P, P),
     sig!("pthread_mutex_lock", I32, P),
@@ -1343,6 +1381,13 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // which of `int`, `struct semid_ds *` and `unsigned short *` its fourth
     // argument is depends on `cmd`, so there is nothing a fixed signature could
     // honestly say. It is refused by name until a program reaches it.
+    sig!("semaphore_create", I32, U32, P, I32, I32),
+    sig!("semaphore_destroy", I32, U32, U32),
+    sig!("semaphore_signal", I32, U32),
+    // The `mach_timespec_t` by value; see `clock_sleep` for why `U64` is the
+    // right placement rather than an approximation of one.
+    sig!("semaphore_timedwait", I32, U32, U64),
+    sig!("semaphore_wait", I32, U32),
     sig!("semget", I32, I32, I32, I32),
     sig!("semop", I32, I32, P, U64),
     sig!("send", I64, I32, P, U64, I32),
@@ -1441,11 +1486,30 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("tanf", F32, F32),
     sig!("tanh", F64, F64),
     sig!("tanhf", F32, F32),
+    sig!("task_for_pid", I32, U32, I32, P),
+    sig!("task_info", I32, U32, U32, P, P),
+    sig!("task_threads", I32, U32, P, P),
     sig!("tcgetattr", I32, I32, P),
     sig!("tcsetattr", I32, I32, I32, P),
     sig!("tgetent", I32, P, P),
     sig!("tgetstr", P, P, P),
     sig!("tgoto", P, P, I32, I32),
+    sig!("thread_abort", I32, U32),
+    sig!("thread_abort_safely", I32, U32),
+    // `thread_get_state` and `thread_set_state` pass through and will not do
+    // what a guest asking for `x86_THREAD_STATE64` means by them. The thread is
+    // a real arm64 thread running a Cranelift translation, so the kernel either
+    // refuses the flavour or answers with this CPU's registers — and the guest's
+    // x86-64 registers at that point are not recoverable, which is the same fact
+    // `SA_SIGINFO` is refused for in [`crate::signal`]. The kernel's own
+    // `KERN_INVALID_ARGUMENT` is a better diagnostic than a signature refusal
+    // would be, because it names the flavour; what a runtime must not do is
+    // synthesize an answer, and passing through does not.
+    sig!("thread_get_state", I32, U32, I32, P, P),
+    sig!("thread_info", I32, U32, U32, P, P),
+    sig!("thread_resume", I32, U32),
+    sig!("thread_set_state", I32, U32, I32, P, U32),
+    sig!("thread_suspend", I32, U32),
     sig!("time", I64, P),
     sig!("timegm", I64, P),
     // The other spelling; see `_tlv_bootstrap` above.

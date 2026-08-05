@@ -19,7 +19,7 @@
 //! Only the handler field is rewritten, and never in the guest's own struct: the
 //! guest may read its copy back.
 //!
-//! ## `SA_SIGINFO` is refused, and the reason is not laziness
+//! ## `SA_SIGINFO` is accepted and not delivered, and the reason is not laziness
 //!
 //! A three-argument handler is called with a `ucontext_t` describing **the
 //! machine state at the point the signal interrupted**. On this runtime that
@@ -28,12 +28,27 @@
 //! whatever registers or stack slots the compiler chose for that block, with no
 //! map back to `rax`, `rsp` and the rest. Synthesizing a plausible `mcontext64`
 //! would be exactly the failure this project refuses everywhere else — a wrong
-//! answer that does not fault.
+//! answer that does not fault. Recovering it is a *recompiler* work item — a
+//! deopt map from a translation's PC back to the guest register context — not a
+//! runtime one, which is the useful thing for the diagnostic to say.
 //!
-//! So installing an `SA_SIGINFO` handler stops with a named reason. Recovering
-//! it is a *recompiler* work item (a deopt map from a translation's PC back to
-//! the guest register context), not a runtime one, which is the useful thing for
-//! a refusal to say.
+//! Until M7.4 this **stopped the guest at installation**, on the grounds that a
+//! disposition that will not be honoured is a lie. Terraria is what showed that
+//! reasoning to be half right. It embeds Mono, and the first thing Mono's
+//! runtime does is install `SA_SIGINFO` handlers for `SIGSEGV`, `SIGBUS`,
+//! `SIGFPE` and friends — the standard trick of turning a hardware fault into a
+//! managed exception. Refusing at installation kills a program during start-up
+//! for a handler that, in a run that never faults, is never called: the
+//! *installation* is not the lie, the *delivery* would be.
+//!
+//! So the two are separated. The installation is accepted and recorded, `oldact`
+//! round-trips the guest's own struct so a program that saves and restores a
+//! disposition sees what it wrote, and **no host handler is installed** — the
+//! signal keeps whatever disposition it had, which for a fault signal means the
+//! process dies at the fault with a crash report naming the real instruction
+//! rather than vanishing into a handler that would read a synthesized
+//! `mcontext64`. Each signal is named once on stderr as it is accepted, so a run
+//! that depends on delivery says so in its log rather than going quiet.
 //!
 //! ## Two hazards a program can reach, written down rather than guarded
 //!
@@ -100,6 +115,36 @@ impl SigAction {
     }
 }
 
+/// The `SA_SIGINFO` dispositions this runtime accepted and did not install.
+///
+/// Keyed by signal number, holding the guest's *own* struct — the handler field
+/// as the guest wrote it, never a thunk — because the only thing this map is for
+/// is answering `oldact` with what the guest last said. See the module note.
+fn recorded() -> &'static std::sync::Mutex<std::collections::HashMap<i32, SigAction>> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<i32, SigAction>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(Default::default)
+}
+
+/// Say once, per signal, that a disposition was taken and will not be delivered.
+///
+/// Once per *signal* rather than once per call: a program that reinstalls the
+/// same handler around every operation would otherwise fill a log, and the
+/// interesting fact is which signals a run depends on, not how often.
+fn say_undeliverable(signum: i32) {
+    static SAID: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    if said.contains(&signum) {
+        return;
+    }
+    said.push(signum);
+    eprintln!(
+        "rosetta3: sigaction(signal {signum}): SA_SIGINFO handler recorded but not installed \
+         — a ucontext_t would need the guest's registers at an interrupted PC, which the \
+         recompiler cannot report; the signal keeps its previous disposition"
+    );
+}
+
 /// A guest handler on its way *out*: a thunk, unless it is a sentinel.
 fn outbound(symbol: &str, handler: u64, callbacks: &dyn Callbacks) -> Result<u64> {
     if is_sentinel(handler) {
@@ -160,15 +205,53 @@ pub fn sigaction(
             addr: act_va,
         })?;
         let mut a = SigAction::from_bytes(bytes);
-        if a.flags & SA_SIGINFO != 0 {
-            return Err(AbiError::Refused {
-                symbol: symbol.to_string(),
-                reason: "SA_SIGINFO: a handler taking a ucontext_t needs the guest's registers \
-                         at an interrupted PC, which the recompiler cannot yet report (M5)",
-            });
+        if a.flags & SA_SIGINFO != 0 && !is_sentinel(a.handler) {
+            // Accepted, recorded, and never installed. See the module note: the
+            // installation is honest, the delivery would not be.
+            say_undeliverable(signum);
+            let previous = recorded()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(signum, a);
+            if old_va != 0 {
+                let old = previous.unwrap_or_default();
+                mem.write(old_va, &old.to_bytes())
+                    .map_err(|_| AbiError::Memory {
+                        symbol: symbol.to_string(),
+                        addr: old_va,
+                    })?;
+            }
+            crate::shims::set_int_return(ctx, 0);
+            return Ok(());
         }
         a.handler = outbound(symbol, a.handler, callbacks)?;
         act = Some(a);
+    }
+
+    // A query — or an ordinary installation — for a signal whose last
+    // disposition this runtime took rather than installed. The host would answer
+    // with whatever was there before the guest spoke, which is not what the
+    // guest last said, so the recording answers instead.
+    if old_va != 0
+        && let Some(previous) = recorded()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&signum)
+    {
+        mem.write(old_va, &previous.to_bytes())
+            .map_err(|_| AbiError::Memory {
+                symbol: symbol.to_string(),
+                addr: old_va,
+            })?;
+        let rc = match act {
+            None => 0,
+            // SAFETY: as the call below — a live, correctly sized structure.
+            Some(a) => unsafe {
+                libc::sigaction(signum, (&raw const a).cast(), std::ptr::null_mut())
+            },
+        };
+        crate::shims::set_int_return(ctx, rc);
+        return Ok(());
     }
 
     let mut old = SigAction::default();
@@ -202,6 +285,89 @@ pub fn sigaction(
     Ok(())
 }
 
+/// `int sigaltstack(const stack_t *ss, stack_t *oss)`
+///
+/// Accepted and not installed, for the same reason and with the same shape as
+/// the `SA_SIGINFO` case above — and with one hazard of its own that makes
+/// passthrough worse than merely useless.
+///
+/// An alternate signal stack exists to run a handler installed with `SA_ONSTACK`.
+/// The guest's fault handlers are recorded and never installed, so the stack it
+/// is offering has nothing to run on it. But `sigaltstack` is a property of the
+/// **host thread**, and this process has an `SA_ONSTACK` handler of its own:
+/// Rust's `std` installs one for `SIGSEGV` so that a stack overflow prints
+/// "stack overflow" instead of dying silently. Forwarding the guest's request
+/// would move that handler onto a buffer the guest sized for itself, so the one
+/// case where the alternate stack is load-bearing is the one case it would be
+/// wrong.
+///
+/// `oss` is answered with `SS_DISABLE` and a null stack, which is what the guest
+/// would see if it had never asked — true, and the only self-consistent answer
+/// to give a caller that is about to be told its request succeeded.
+pub fn sigaltstack(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    _callbacks: &dyn Callbacks,
+) -> Result<()> {
+    /// `stack_t`: `{ void *ss_sp; size_t ss_size; int ss_flags; }` — 24 bytes
+    /// with the same layout on x86-64 and arm64 macOS.
+    const STACK_T_SIZE: usize = 24;
+    /// `SS_DISABLE`.
+    const SS_DISABLE: u32 = 0x0004;
+
+    let old_va = ctx.rsi;
+    if old_va != 0 {
+        let mut bytes = [0u8; STACK_T_SIZE];
+        bytes[16..20].copy_from_slice(&SS_DISABLE.to_le_bytes());
+        mem.write(old_va, &bytes).map_err(|_| AbiError::Memory {
+            symbol: symbol.to_string(),
+            addr: old_va,
+        })?;
+    }
+    crate::shims::set_int_return(ctx, 0);
+    Ok(())
+}
+
+/// `kern_return_t task_set_exception_ports(task, mask, port, behavior, flavor)`
+///
+/// The same fact as [`sigaction`]'s `SA_SIGINFO` case, reached through a
+/// different API. A Mach exception port is the *other* way a program asks to be
+/// told about a hardware fault, and it is the one Mono actually relies on: the
+/// handler is a thread that receives an exception message carrying a
+/// `thread_state` for the faulting thread. That thread state is this CPU's, and
+/// the faulting instruction is inside a Cranelift translation, so what the guest
+/// would receive is arm64 registers described as x86-64 ones — an answer that is
+/// wrong in the specific way that does not fault.
+///
+/// Accepted with `KERN_SUCCESS` and **not honoured**: the port is not set, so the
+/// process keeps its own exception handling and a real fault produces a real
+/// crash report naming the real instruction. Announced once, like the signal
+/// case, so a run that needed it says so.
+///
+/// It is a shim rather than a table entry for the same reason `sigaction` is:
+/// what the arguments *mean* — a port the guest will listen on — is the part
+/// that cannot cross, not how they are passed.
+pub fn task_set_exception_ports(
+    _symbol: &str,
+    ctx: &mut RegisterContext,
+    _mem: &mut dyn GuestMemory,
+    _callbacks: &dyn Callbacks,
+) -> Result<()> {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!(
+            "rosetta3: task_set_exception_ports(mask {:#x}) accepted but not honoured — a Mach \
+             exception message carries this CPU's thread state for a fault inside a translation, \
+             not the guest's registers",
+            ctx.rsi as u32
+        );
+    }
+    // KERN_SUCCESS. The guest asked to be told about faults and will not be.
+    ctx.rax = 0;
+    Ok(())
+}
+
 /// One of this module's implementations, in the shape [`crate::shims`] wants.
 ///
 /// Wider than [`crate::jmpbuf::Shim`] by one parameter, and that parameter is
@@ -214,6 +380,8 @@ pub fn shim_for(name: &str) -> Option<Shim> {
     Some(match name {
         "signal" => signal,
         "sigaction" => sigaction,
+        "sigaltstack" => sigaltstack,
+        "task_set_exception_ports" => task_set_exception_ports,
         _ => return None,
     })
 }
@@ -354,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn sa_siginfo_is_refused_by_name_with_its_reason() {
+    fn sa_siginfo_is_recorded_and_never_installed() {
         let mut mem = guest_memory();
         let act = SigAction {
             handler: 0x1_0000_1234,
@@ -366,17 +534,72 @@ mod tests {
         let mut ctx = RegisterContext::new();
         ctx.rdi = libc::SIGUSR2 as u64;
         ctx.rsi = mem.base;
-        let err = sigaction("_sigaction", &mut ctx, &mut mem, &Wrapping).expect_err("refuse");
+        sigaction("_sigaction", &mut ctx, &mut mem, &Wrapping).expect("accepted");
+        assert_eq!(ctx.rax as i32, 0, "the guest must be told it succeeded");
 
-        assert_eq!(err.symbol(), "_sigaction");
-        assert!(format!("{err}").contains("ucontext"), "{err}");
-        // Refused *before* anything was installed: the guest's disposition for
-        // that signal is untouched, which is the difference between a refusal
-        // and a half-performed call.
+        // Accepted and *not installed*: the host's disposition for that signal
+        // is untouched, which is the whole claim. A thunk here would mean a
+        // handler that will be entered with a synthesized machine state.
         let mut current = SigAction::default();
         // SAFETY: querying the current disposition into a live local.
         unsafe { libc::sigaction(libc::SIGUSR2, std::ptr::null(), (&raw mut current).cast()) };
-        assert_eq!(current.handler, 0, "the refusal installed something anyway");
+        assert_eq!(current.handler, 0, "a disposition was installed anyway");
+    }
+
+    #[test]
+    fn a_recorded_sa_siginfo_disposition_comes_back_through_oldact() {
+        // A program that saves a disposition and restores it later must see what
+        // it wrote, not what the host would report — which is the disposition
+        // from before the guest ever spoke.
+        let mut mem = guest_memory();
+        let first = SigAction {
+            handler: 0x1_0000_1234,
+            mask: 0,
+            flags: SA_SIGINFO,
+        };
+        mem.write(mem.base, &first.to_bytes()).unwrap();
+
+        let mut ctx = RegisterContext::new();
+        ctx.rdi = libc::SIGUSR2 as u64;
+        ctx.rsi = mem.base;
+        sigaction("_sigaction", &mut ctx, &mut mem, &Wrapping).expect("first");
+
+        let second = SigAction {
+            handler: 0x1_0000_5678,
+            mask: 0,
+            flags: SA_SIGINFO,
+        };
+        mem.write(mem.base, &second.to_bytes()).unwrap();
+        let mut ctx = RegisterContext::new();
+        ctx.rdi = libc::SIGUSR2 as u64;
+        ctx.rsi = mem.base;
+        ctx.rdx = mem.base + 16;
+        sigaction("_sigaction", &mut ctx, &mut mem, &Wrapping).expect("second");
+
+        let mut back = [0u8; SigAction::SIZE];
+        mem.read(mem.base + 16, &mut back).unwrap();
+        let back = SigAction::from_bytes(back);
+        assert_eq!(back.handler, 0x1_0000_1234, "the guest's own address, unwrapped");
+        assert_eq!(back.flags, SA_SIGINFO);
+    }
+
+    #[test]
+    fn sigaltstack_succeeds_and_reports_the_stack_disabled() {
+        // Accepted so a runtime that installs one can start; never forwarded,
+        // because the alternate stack belongs to the *host* thread. See the
+        // function's own note.
+        let mut mem = guest_memory();
+        let mut ctx = RegisterContext::new();
+        ctx.rdi = 0;
+        ctx.rdx = 0;
+        ctx.rsi = mem.base + 16;
+        sigaltstack("_sigaltstack", &mut ctx, &mut mem, &Wrapping).expect("accepted");
+        assert_eq!(ctx.rax as i32, 0);
+
+        let mut back = [0u8; 24];
+        mem.read(mem.base + 16, &mut back).unwrap();
+        assert_eq!(u64::from_le_bytes(back[0..8].try_into().unwrap()), 0);
+        assert_eq!(u32::from_le_bytes(back[16..20].try_into().unwrap()), 0x0004);
     }
 
     #[test]

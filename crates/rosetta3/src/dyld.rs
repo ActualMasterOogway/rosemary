@@ -267,6 +267,19 @@ fn global_handle() -> u64 {
     &GLOBAL_TOKEN as *const u8 as usize as u64
 }
 
+/// The main executable's `mach_header` as the guest can address it.
+///
+/// Recorded rather than derived for the same reason the path is: the running
+/// executable is `rosetta3`, so `_dyld_get_image_header(0)` describes this
+/// runtime and not the program. Zero means "not yet known", which is only true
+/// before [`set_executable_header`] runs.
+static MAIN_HEADER: AtomicU64 = AtomicU64::new(0);
+
+/// Record the main executable's mach header address.
+pub fn set_executable_header(va: u64) {
+    MAIN_HEADER.store(va, Ordering::Release);
+}
+
 /// Record where the guest executable came from, and where it landed.
 pub fn set_executable_path(path: &str, slide: u64) {
     let canonical = std::fs::canonicalize(path)
@@ -350,7 +363,7 @@ pub fn import_at(va: u64) -> Option<&'static ImportSite> {
 
 /// The import of any dynamically loaded image that *resolved to* `host`.
 pub fn import_by_target(host: u64) -> Option<&'static ImportSite> {
-    find(|i| i.imports_by_target.get(&host))
+    find(|i| i.imports_by_target.get(&host)).or_else(|| native_symbol_at(host))
 }
 
 /// What `symbol` resolved to in any dynamically loaded image.
@@ -577,6 +590,10 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
             .map_err(|e| format!("{resolved}: objc selectors: {e}"))?;
     }
 
+    // Every `_dyld_register_func_for_add_image` callback, before this image's
+    // own code runs. See [`announce`].
+    announce(leaked.handle, leaked.slide);
+
     run_initializers(leaked)?;
     Ok(leaked.handle)
 }
@@ -748,6 +765,21 @@ fn rpaths_of(path: &str) -> Vec<String> {
 /// answer otherwise — a program that `dlsym`s `"malloc"` out of the global
 /// handle is asking about libSystem, and libSystem here is the host's.
 fn lookup(handle: u64, name: &str) -> Option<u64> {
+    // A handle from the host's loader: the guest is asking a native library for
+    // a native symbol, and the answer is an arm64 function pointer it will call
+    // through a register. Recorded on the way out so that call can be serviced —
+    // see [`NATIVE_SYMBOLS`].
+    if let Some(path) = native_handle(handle) {
+        let c = CString::new(name).ok()?;
+        // SAFETY: a handle this module obtained from `dlopen` and never closed,
+        // and a null-terminated name.
+        let found = unsafe { libc::dlsym(handle as usize as *mut libc::c_void, c.as_ptr()) };
+        if found.is_null() {
+            return None;
+        }
+        return Some(remember_native_symbol(found as usize as u64, name, Some(path)));
+    }
+
     // `dlsym` takes the C identifier; a Mach-O export carries the underscore.
     let mangled = format!("_{name}");
     let scoped: Vec<&'static Image> = match snapshot().into_iter().find(|i| i.handle == handle) {
@@ -765,7 +797,10 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
             return Some(addr);
         }
     }
-    host_symbol(name)
+    // The global fallback, which is a *host* search: the guest asked every image
+    // this runtime loaded and none had it, so what is left is passthrough.
+    let addr = host_symbol(name)?;
+    Some(remember_native_symbol(addr, name, None))
 }
 
 /// `dlsym` against the host process, for a symbol no guest image defines.
@@ -782,6 +817,223 @@ pub(crate) fn host_symbol(name: &str) -> Option<u64> {
         true => None,
         false => Some(found as usize as u64),
     }
+}
+
+// ------------------------------------------------- native passthrough -------
+
+/// Handles the *host's* `dlopen` returned, and the paths they were asked for.
+///
+/// A guest that asks for `/usr/lib/libc.dylib` is not asking for a file. On this
+/// system there is no such file: every system library lives in the dyld shared
+/// cache, and the only thing that can open one is the host's own loader. This
+/// runtime's answer is the answer it gives to every other system interface —
+/// [pass it through](../../../../docs/ROADMAP.md) — and it arrives here as a
+/// *fallback*, after [`open`] has failed to find an x86-64 Mach-O on disk, so a
+/// dylib the guest ships with itself is still loaded and translated.
+///
+/// Mono is what forced it. Terraria's embedded runtime `dlopen`s
+/// `CoreFoundation` and `/usr/lib/libc.dylib` during start-up and asserts on the
+/// spot when either returns null — `w32file-unix.c:4952, condition 'libc_handle'
+/// not met` — which says nothing whatsoever about the shared cache.
+static NATIVE: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
+
+/// The import sites a native `dlsym` result has been given.
+///
+/// A host address is only callable from guest code if
+/// [`Program::import_by_target`](crate::Program::import_by_target) can name it:
+/// the run loop meets it as an `IndirectCall` to something that is not a guest
+/// address, and what it needs is the *signature*, which is looked up by symbol.
+/// A binding gets that from its image's import table; a `dlsym` result has no
+/// import table, so it is recorded here as it is handed out. The effect is that
+/// `dlsym(h, "strlen")` and an ordinary import of `_strlen` produce calls the
+/// marshaller cannot tell apart, which is the property that makes this safe:
+/// nothing is guessed, and a symbol with no signature is refused by name exactly
+/// as it would be anywhere else.
+static NATIVE_SYMBOLS: Mutex<BTreeMap<u64, &'static ImportSite>> = Mutex::new(BTreeMap::new());
+
+/// Open `path` with the host's loader, as a native arm64 library.
+///
+/// `RTLD_GLOBAL` and never closed, for the reason the native provider's own
+/// fallback is: closing it would dangle every pointer already written into a
+/// guest slot.
+fn open_native(path: &str) -> Option<u64> {
+    let c = CString::new(path).ok()?;
+    // SAFETY: a null-terminated path and the host's own loader. The handle is
+    // kept for the process; see the note above on why it is never closed.
+    let handle = unsafe { libc::dlopen(c.as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL) };
+    if handle.is_null() {
+        return None;
+    }
+    let handle = handle as usize as u64;
+    let mut native = NATIVE.lock().unwrap_or_else(|e| e.into_inner());
+    if !native.iter().any(|(h, _)| *h == handle) {
+        native.push((handle, path.to_string()));
+    }
+    Some(handle)
+}
+
+/// Whether `handle` came from [`open_native`], and the path it was opened as.
+fn native_handle(handle: u64) -> Option<String> {
+    NATIVE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(h, _)| *h == handle)
+        .map(|(_, path)| path.clone())
+}
+
+/// Record a host address handed to the guest by `dlsym`, so it can be called.
+///
+/// See [`NATIVE_SYMBOLS`]. Returns the address unchanged, so the caller reads as
+/// the pass-through it is.
+fn remember_native_symbol(addr: u64, name: &str, library: Option<String>) -> u64 {
+    let mut map = NATIVE_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner());
+    map.entry(addr).or_insert_with(|| {
+        Box::leak(Box::new(ImportSite {
+            // The Mach-O spelling, because that is what the signature table is
+            // keyed by — `dlsym` takes the C identifier and drops the underscore.
+            symbol: format!("_{name}"),
+            library,
+            resolved: addr,
+            tag: 0,
+            is_stub: false,
+        }))
+    });
+    addr
+}
+
+/// The import site for a host address the guest got from `dlsym`, if any.
+pub fn native_symbol_at(host: u64) -> Option<&'static ImportSite> {
+    NATIVE_SYMBOLS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&host)
+        .copied()
+}
+
+// ------------------------------------------------------- image notices ------
+
+/// The `add image` callbacks the guest has registered, as **thunks**.
+///
+/// Stored already substituted, because the whole point is to call them from host
+/// code — from [`open`], on whatever thread the `dlopen` happened on — where no
+/// `Callbacks` is in reach. Substituting once at registration is also what
+/// [`crate::Vm::thunk_for`] wants: a callback is translated when its thunk is
+/// built, so the guest function is compiled here rather than inside the notice.
+static ADD_IMAGE: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// Tell one callback about one image.
+///
+/// The two arguments are dyld's: the image's `mach_header` and its slide. Both
+/// are *guest* values — a guest address it can dereference and parse as the
+/// x86-64 Mach-O it is. Handing it the host's arm64 images instead would be the
+/// characteristic failure of this project: a structurally valid answer to a
+/// question about the wrong process.
+fn notify(thunk: u64, header: u64, slide: u64) {
+    if thunk == 0 || header == 0 {
+        return;
+    }
+    if std::env::var_os("ROSETTA3_TRACE_VM").is_some() {
+        eprintln!("rosetta3: add-image notice: header {header:#x}, slide {slide:#x}");
+    }
+    // SAFETY: `thunk` is a native arm64 trampoline this runtime compiled for a
+    // guest function of dyld's callback signature — two integer arguments, no
+    // return — which is inside the shape [`crate::thunk`] can carry.
+    let f: extern "C" fn(u64, u64) = unsafe { std::mem::transmute::<u64, _>(thunk) };
+    f(header, slide);
+}
+
+/// Announce `image` to every callback registered so far.
+///
+/// Called after the image is published and before its initializers run, which is
+/// the order dyld uses and the order a garbage collector needs: a callback that
+/// registers the image's `__DATA` as roots must have done so before any code in
+/// the image can allocate.
+fn announce(header: u64, slide: u64) {
+    let callbacks = ADD_IMAGE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    for thunk in callbacks {
+        notify(thunk, header, slide);
+    }
+}
+
+/// `void _dyld_register_func_for_add_image(void (*f)(const struct mach_header *, intptr_t))`
+///
+/// dyld calls the function once for every image already loaded, immediately, on
+/// the registering thread, and again for each one loaded afterwards. Both halves
+/// are reproduced here over the *guest's* images: the main executable, whatever
+/// it was linked against that this runtime mapped, and anything a later
+/// [`open`] adds.
+///
+/// It is a shim rather than a passthrough for the reason the rest of this module
+/// exists. The host's dyld knows about `rosetta3` and the arm64 system
+/// libraries; it has never heard of the guest, whose images are not in its list
+/// and never will be. A guest that walked what the host's dyld reports would
+/// find no image containing any address it holds.
+///
+/// ## Scope
+///
+/// The images this runtime *maps* are reported. The arm64 system libraries the
+/// guest's imports resolve into are not, and cannot be: their headers are arm64,
+/// so a guest that parsed one would read a Mach-O it was not compiled to
+/// understand. A guest looking for the image containing a passed-through
+/// libSystem pointer therefore finds none — the same narrowing `dladdr` already
+/// makes, for the same reason.
+fn register_func_for_add_image(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    _mem: &mut dyn GuestMemory,
+    callbacks: &dyn crate::abi::Callbacks,
+) -> Result<()> {
+    let thunk = match ctx.rdi {
+        0 => return Ok(()),
+        va => callbacks.substitute(symbol, va)?,
+    };
+
+    // Registered before the retrospective notices go out, so an image loaded by
+    // one of those notices — an initializer that `dlopen`s, which is exactly
+    // what a plugin host does — is announced rather than missed.
+    ADD_IMAGE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(thunk);
+
+    let mut already: Vec<(u64, u64)> = Vec::new();
+    if let Some((_, slide)) = EXECUTABLE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        already.push((MAIN_HEADER.load(Ordering::Acquire), slide));
+    }
+    already.extend(snapshot().iter().map(|i| (i.handle, i.slide)));
+    for (header, slide) in already {
+        notify(thunk, header, slide);
+    }
+    Ok(())
+}
+
+/// `void _dyld_register_func_for_remove_image(...)`
+///
+/// Recorded and never called, because nothing is ever unloaded — see the
+/// scope note on `dlclose`. Accepting it is honest in a way refusing would not
+/// be: the guest asked to be told when an image goes away, and none does.
+fn register_func_for_remove_image(
+    _symbol: &str,
+    _ctx: &mut RegisterContext,
+    _mem: &mut dyn GuestMemory,
+    _callbacks: &dyn crate::abi::Callbacks,
+) -> Result<()> {
+    Ok(())
+}
+
+/// Whether `name` is one of this module's callback-taking shims.
+///
+/// Separate from [`shim_for`] because these need the [`Callbacks`] the `dl`
+/// family does not: their argument is a guest function pointer.
+///
+/// [`Callbacks`]: crate::abi::Callbacks
+pub fn shim_for_callbacks(name: &str) -> Option<crate::signal::Shim> {
+    Some(match name {
+        "_dyld_register_func_for_add_image" => register_func_for_add_image,
+        "_dyld_register_func_for_remove_image" => register_func_for_remove_image,
+        _ => return None,
+    })
 }
 
 // --------------------------------------------------------------- shims ------
@@ -837,15 +1089,28 @@ fn dlopen(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) ->
     }
     let path = mem.read_cstr(ctx.rdi, symbol)?;
     let path = String::from_utf8_lossy(&path).into_owned();
+    if std::env::var_os("ROSETTA3_TRACE_VM").is_some() {
+        eprintln!("rosetta3: dlopen({path:?}, flags {:#x})", ctx.rsi as i32);
+    }
     match open(&path) {
         Ok(handle) => {
             clear_error();
             ctx.rax = handle;
         }
-        Err(reason) => {
-            set_error(format!("dlopen({path}): {reason}"));
-            ctx.rax = 0;
-        }
+        // No x86-64 Mach-O on disk under that name. On this system that is the
+        // *normal* case for a system library — they live in the shared cache and
+        // exist as no file at all — so the host's loader is asked before the
+        // failure is reported. See [`open_native`].
+        Err(reason) => match open_native(&path) {
+            Some(handle) => {
+                clear_error();
+                ctx.rax = handle;
+            }
+            None => {
+                set_error(format!("dlopen({path}): {reason}"));
+                ctx.rax = 0;
+            }
+        },
     }
     Ok(())
 }
@@ -1028,7 +1293,19 @@ fn symbol_cstr(name: &str) -> u64 {
 pub fn provider() -> SyntheticDylib {
     let mut lib = SyntheticDylib::new("<rosetta3 dyld>");
     lib.flat(true);
-    for name in ["dlopen", "dlsym", "dlclose", "dlerror", "dladdr"] {
+    for name in [
+        "dlopen",
+        "dlsym",
+        "dlclose",
+        "dlerror",
+        "dladdr",
+        // Spelled with the underscore the C identifier already carries: these
+        // are `_dyld_*`, so the `_{name}` below produces the `__dyld_*` a
+        // Mach-O binds against. They are on `machish`'s `_dyld_` denylist and
+        // resolve to null without this, which is how Terraria found them.
+        "_dyld_register_func_for_add_image",
+        "_dyld_register_func_for_remove_image",
+    ] {
         if let Some(addr) = host_symbol(name) {
             lib.define_fn(&format!("_{name}"), addr as usize as *const ());
         }
@@ -1051,7 +1328,10 @@ mod tests {
         assert!(!claimed.is_empty(), "the provider defines nothing");
         for name in claimed {
             let bare = name.strip_prefix('_').unwrap_or(&name);
-            assert!(shim_for(bare).is_some(), "{name} is claimed and not served");
+            assert!(
+                shim_for(bare).is_some() || shim_for_callbacks(bare).is_some(),
+                "{name} is claimed and not served"
+            );
             assert!(
                 crate::shims::is_shimmed(&name),
                 "{name} would be promoted to an inlined host call"

@@ -120,13 +120,18 @@ fn the_untranslated_binary_agrees_line_for_line() {
 }
 
 #[test]
-fn an_sa_siginfo_handler_is_refused_by_name() {
+fn an_sa_siginfo_handler_is_recorded_and_never_delivered() {
     // The boundary. A three-argument handler is called with the machine state at
     // the interrupted instruction, which here is inside a Cranelift-compiled
-    // translation with no map back to the guest's registers — so the runtime
-    // stops at *installation*, before anything could be delivered to it, rather
-    // than synthesizing a plausible `mcontext64`. The work item the message
-    // names belongs to the recompiler.
+    // translation with no map back to the guest's registers — so the handler is
+    // *recorded and not installed*, rather than being entered with a synthesized
+    // `mcontext64`. The work item the message names belongs to the recompiler.
+    //
+    // The installation succeeds, because refusing it kills a program during
+    // start-up for a handler a run that never faults never calls — Terraria's
+    // embedded Mono is the case that forced the distinction. What must not
+    // happen is *delivery*: this fixture raises the signal it installed for, so
+    // the default disposition takes it and `detailed` never prints.
     let Some(path) = siginfo_fixture() else {
         skip!("cannot build x86_64 fixtures")
     };
@@ -139,14 +144,18 @@ fn an_sa_siginfo_handler_is_refused_by_name() {
     );
     assert!(
         err.contains("sigaction"),
-        "the refusal should name the symbol: {err}"
+        "the diagnostic should name the symbol: {err}"
     );
     assert!(
         err.contains("ucontext"),
-        "the refusal should give the reason: {err}"
+        "the diagnostic should give the reason: {err}"
     );
     assert!(
         !out.contains("detailed"),
         "the handler must not have run: {out}"
+    );
+    assert!(
+        !out.contains("done"),
+        "the raised signal must not have been swallowed: {out}"
     );
 }

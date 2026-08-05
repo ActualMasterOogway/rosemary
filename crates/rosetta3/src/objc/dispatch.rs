@@ -160,6 +160,23 @@ macro_rules! rtb {
     };
 }
 
+/// As [`rtc`], also naming the parameters that are guest function pointers.
+///
+/// One entry needs both, and it is the one that creates a class at runtime:
+/// `class_addMethod` takes the class it is adding to *and* the `IMP` it is
+/// adding, which is guest code the host runtime will call as arm64.
+macro_rules! rtcb {
+    ([$($c:literal),* $(,)?], [$($b:literal),* $(,)?], $name:literal, $ret:expr $(, $arg:expr)* $(,)?) => {
+        Runtime {
+            name: $name,
+            types: &[$ret $(, $arg)*],
+            classes: &[$($c),*],
+            class_return: false,
+            callbacks: &[$($b),*],
+        }
+    };
+}
+
 const V: T = T::None;
 const I32: T = T::SignedWord;
 const I64: T = T::SignedDoubleword;
@@ -174,6 +191,23 @@ const P: T = T::Pointer;
 /// written for a header is a fiction nobody checked. `runtime_entries_are_sorted`
 /// keeps the order the lookup depends on.
 static RUNTIME: &[Runtime] = &[
+    // ## Making a class at runtime
+    //
+    // The other direction of [`crate::objc::register`]. That pass replays the
+    // classes a guest *declared* in its `__objc_data`; these three are a guest
+    // building one while it runs, and they need no replay at all — the class is
+    // the host runtime's from the moment it is allocated, so what the guest
+    // holds is already a real `Class` and the translation table has nothing to
+    // say about it.
+    //
+    // What does need saying is the `IMP`. It is guest code, and once the class
+    // is registered the host runtime will call it as arm64 from anywhere —
+    // Foundation, a delegate callback, a thread this runtime never made — so it
+    // leaves as a thunk exactly as `method_setImplementation`'s does.
+    //
+    // Terraria reaches all three: Mono's Objective-C bridge builds an
+    // `NSApplication` delegate class at start-up rather than declaring one.
+    rtcb!([0], [2], "class_addMethod", U8, P, P, P, P),
     rtc!([0], "class_conformsToProtocol", U8, P, P),
     rtc!([0] -> true, "class_createInstance", P, P, U64),
     rtc!([0], "class_getInstanceMethod", P, P, P),
@@ -200,6 +234,7 @@ static RUNTIME: &[Runtime] = &[
     rtc!([0] -> true, "objc_alloc", P, P),
     rtc!([0] -> true, "objc_allocWithZone", P, P),
     rtc!([0], "objc_alloc_init", P, P),
+    rtc!([0] -> true, "objc_allocateClassPair", P, P, P, U64),
     rtc!([0], "objc_autorelease", P, P),
     rt!("objc_autoreleasePoolPop", V, P),
     rt!("objc_autoreleasePoolPush", P),
@@ -222,6 +257,7 @@ static RUNTIME: &[Runtime] = &[
     rtc!([0], "objc_opt_new", P, P),
     rtc!([0], "objc_opt_respondsToSelector", U8, P, P),
     rtc!([0], "objc_opt_self", P, P),
+    rtc!([0], "objc_registerClassPair", V, P),
     rtc!([0], "objc_release", V, P),
     rtc!([0], "objc_retain", P, P),
     rtc!([0], "objc_retainAutorelease", P, P),

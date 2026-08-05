@@ -572,6 +572,16 @@ impl Vm {
         // library name looks. Recorded rather than derived, because the running
         // executable is `rosetta3` — the same fact the bundle mirror exists for.
         crate::dyld::set_executable_path(exe_path, program.report.root().map_or(0, |i| i.slide));
+        // Where the guest's own `mach_header` is, for the guest's own sake: a
+        // program that walks the loaded images must be told about itself, and
+        // `_dyld_get_image_header(0)` would describe `rosetta3`. See
+        // [`crate::dyld`]'s image notices.
+        // `ImageReport::base` is where the image *landed*, slide already
+        // applied — adding the slide again is a plausible address in the middle
+        // of nothing, which is what it produced.
+        if let Some(root) = program.report.root() {
+            crate::dyld::set_executable_header(root.base);
+        }
 
         let cache = CodeCache::new(program.lifter_config_with(policy));
         // The calling thread becomes the guest's main thread: this is the stack

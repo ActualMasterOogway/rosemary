@@ -57,6 +57,7 @@ pub mod runtime;
 pub mod sscanf;
 pub mod stackprobe;
 pub mod sysvsem;
+pub mod vmmap;
 pub mod zlib;
 
 /// Run the shim for `symbol`, if there is one.
@@ -114,6 +115,7 @@ pub fn dispatch(
                 .or_else(|| process::shim_for(name))
                 .or_else(|| stackprobe::shim_for(name))
                 .or_else(|| sysvsem::shim_for(name))
+                .or_else(|| vmmap::shim_for(name))
                 .or_else(|| crate::jmpbuf::shim_for(name))
                 // .or_else(|| crate::unwind::shim_for(name))
                 .or_else(|| crate::objc::dispatch::shim_for(name))
@@ -130,6 +132,7 @@ pub fn dispatch(
             // arguments at all — they are fields of a structure the guest
             // passes by address.
             return crate::signal::shim_for(name)
+                .or_else(|| crate::dyld::shim_for_callbacks(name))
                 .or_else(|| atexit::shim_for(name))
                 .or_else(|| zlib::shim_for(name))
                 .or_else(|| audiounit::shim_for(name))
@@ -152,11 +155,13 @@ pub fn is_shimmed(symbol: &str) -> bool {
         || process::shim_for(name).is_some()
         || stackprobe::shim_for(name).is_some()
         || sysvsem::shim_for(name).is_some()
+        || vmmap::shim_for(name).is_some()
         || crate::jmpbuf::shim_for(name).is_some()
         || crate::unwind::shim_for(name).is_some()
         || crate::objc::dispatch::shim_for(name).is_some()
         || crate::dyld::shim_for(name).is_some()
         || crate::signal::shim_for(name).is_some()
+        || crate::dyld::shim_for_callbacks(name).is_some()
         || atexit::shim_for(name).is_some()
         || zlib::shim_for(name).is_some()
         || audiounit::shim_for(name).is_some()
