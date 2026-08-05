@@ -50,17 +50,35 @@
 //! entry size and a 32-bit count. A **protocol list begins with a
 //! pointer-sized count** and its entries are null-terminated on top of that.
 //!
-//! ## Scope: no small method lists, deliberately
+//! ## Small method lists, which x86-64 *does* produce
 //!
-//! arm64 toolchains emit *relative* method lists — `__objc_methlist`, three
-//! 32-bit self-relative offsets per entry, with the selector reached through
-//! `__objc_selrefs` — and set `0x8000_0000` in a list's entry-size word to say
-//! so. An x86-64 toolchain does not: the same source built for both produces
-//! `__objc_methlist` for arm64 and pointer-based lists in `__objc_const` for
-//! x86-64. Since a *guest* image is x86-64 by definition, the relative form is
-//! not reachable here, and a list that claims it is
-//! [`ObjcError::SmallMethodList`] rather than a decode this module has no
-//! fixture for.
+//! This module was written believing the relative encoding was arm64's alone.
+//! That was checked, and it was checked on an **executable**. It is wrong for a
+//! dylib: `cc -arch x86_64 -dynamiclib` emits `__objc_methlist` and sets
+//! `0x8000_0000` in each list's entry-size word, while the identical source
+//! built as a program emits pointer-based lists in `__objc_const`. Two builds of
+//! one file, two encodings, and the difference is `-dynamiclib`.
+//!
+//! It matters because of *which* images are dylibs. A game ships its own
+//! libraries and `dlopen`s them, and their classes are exactly the ones a
+//! runtime has to realize — SDL3's Cocoa backend, a gamepad plugin. Refusing the
+//! list left a class registered with **no methods**, which is not a diagnostic:
+//! the message fails much later as "does not respond to that selector".
+//!
+//! A small entry is three self-relative `int32`s, twelve bytes, each measured
+//! from **its own address**:
+//!
+//! ```text
+//! name   -> a slot in __objc_selrefs, whose word is the name string
+//! types  -> the type encoding string itself
+//! imp    -> the function
+//! ```
+//!
+//! The indirection on `name` is the one that is easy to get wrong, and it is
+//! also why this decode has to run *after* fixups: the selector-reference slot
+//! holds a packed chained-fixup link until it is rebased. libobjc has a second
+//! form where `name` is the `SEL` directly, used only for images in the dyld
+//! shared cache — which a guest image never is.
 //!
 //! ## Scope: pointers are chased only within the image
 //!
@@ -127,8 +145,11 @@ const FAST_IS_SWIFT_LEGACY: Word = 1 << 0;
 const FAST_IS_SWIFT_STABLE: Word = 1 << 1;
 
 /// Set in a method list's entry-size word when entries are relative. See the
-/// scope note: an x86-64 image never sets it.
+/// scope note: an x86-64 **dylib** sets it and an x86-64 program does not.
 const METHOD_LIST_IS_SMALL: u32 = 0x8000_0000;
+
+/// `struct method_t::small`: three self-relative `int32`s.
+const SMALL_METHOD_SIZE: u64 = 12;
 
 /// The entry-size field's low bits are flags in every list header.
 const ENTSIZE_MASK: u32 = 0x0000_fffc;
@@ -160,8 +181,10 @@ const MAX_NAME: usize = 4096;
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ObjcRefusal {
-    /// A method list in the arm64 relative encoding. Not producible by an
-    /// x86-64 toolchain; see the module scope note.
+    /// A list in the relative encoding that is not a method list. Only method
+    /// lists have the small form; an ivar or property list claiming it is a
+    /// header this module has read wrongly or an image that is malformed, and
+    /// either way its entries cannot be twelve bytes of offsets.
     SmallMethodList { at: Word },
     /// A pointer that should have addressed this image's own metadata and did
     /// not. Reported with both ends so the graph edge is identifiable.
@@ -638,11 +661,18 @@ impl Cx<'_> {
         Ok(Some((at.wrapping_add(8), count)))
     }
 
-    /// A method list at the pointer stored in `slot`.
+    /// A method list at the pointer stored in `slot`, in either encoding.
     fn methods(&mut self, slot: Word) -> Result<Vec<ObjcMethod>> {
         let Some(at) = self.follow(slot)? else {
             return Ok(Vec::new());
         };
+        // Which encoding is stated by the list itself, so it is asked before the
+        // entry size is checked against anything: a small list's entries are
+        // twelve bytes and a pointer list's are twenty-four, and comparing
+        // against the wrong one refuses a list that is perfectly well formed.
+        if self.u32_at(at)? & METHOD_LIST_IS_SMALL != 0 {
+            return self.small_methods(at);
+        }
         let Some((first, count)) = self.list_header(at, METHOD_SIZE as u32)? else {
             return Ok(Vec::new());
         };
@@ -656,6 +686,65 @@ impl Cx<'_> {
             });
         }
         Ok(out)
+    }
+
+    /// A method list in the relative encoding — see the module scope note.
+    ///
+    /// Every offset is measured from **the field's own address**, not from the
+    /// entry's, which is the difference between reading `types` and reading four
+    /// bytes past it. `name` addresses a selector-reference slot rather than the
+    /// string, so it is one more indirection than the other two.
+    fn small_methods(&mut self, at: Word) -> Result<Vec<ObjcMethod>> {
+        let entsize = self.u32_at(at)? & ENTSIZE_MASK;
+        if entsize as u64 != SMALL_METHOD_SIZE {
+            self.refusals.push(ObjcRefusal::UnexpectedSize {
+                at,
+                declared: entsize,
+                expected: SMALL_METHOD_SIZE as u32,
+            });
+            return Ok(Vec::new());
+        }
+        let count = self.u32_at(at.wrapping_add(4))? as usize;
+        if count > MAX_ENTRIES {
+            return Err(Error::Custom("objc: list count out of range"));
+        }
+        let first = at.wrapping_add(8);
+        let mut out = Vec::with_capacity(count.min(64));
+        for i in 0..count {
+            let e = first.wrapping_add(i as u64 * SMALL_METHOD_SIZE);
+            // Each target is checked against this image the way a pointer-based
+            // list's is. An offset is a weaker claim than a pointer — any
+            // int32 addresses *something* — so the check is worth more here,
+            // not less.
+            let sel_slot = self.relative(e)?;
+            let types = self.relative(e.wrapping_add(4))?;
+            let imp = self.relative(e.wrapping_add(8))?;
+            out.push(ObjcMethod {
+                // The slot holds the name; `follow_str` is exactly the "read a
+                // pointer and chase it inside this image" step that a
+                // pointer-based list's `name` field takes.
+                name: match self.local(e, sel_slot) {
+                    Some(slot) => self.follow_str(slot)?,
+                    None => String::new(),
+                },
+                types: match self.local(e.wrapping_add(4), types) {
+                    Some(p) => self.cstr_at(p)?,
+                    None => String::new(),
+                },
+                imp: self.local(e.wrapping_add(8), imp).unwrap_or(0),
+            });
+        }
+        Ok(out)
+    }
+
+    /// The address a self-relative `int32` at `at` names.
+    ///
+    /// Signed, and relative to `at` itself. Wrapping, because the arithmetic is
+    /// on virtual addresses and a backwards offset is ordinary — a method's
+    /// `types` string is in `__TEXT` and the list is in `__DATA`.
+    fn relative(&mut self, at: Word) -> Result<Word> {
+        let delta = self.u32_at(at)? as i32;
+        Ok(at.wrapping_add(delta as i64 as Word))
     }
 
     fn ivars(&mut self, slot: Word) -> Result<Vec<ObjcIvar>> {

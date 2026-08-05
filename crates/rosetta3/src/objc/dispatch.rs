@@ -239,6 +239,22 @@ static RUNTIME: &[Runtime] = &[
     rt!("objc_autoreleasePoolPop", V, P),
     rt!("objc_autoreleasePoolPush", P),
     rtc!([0], "objc_autoreleaseReturnValue", P, P),
+    // ## `__weak`, which is a side table and not a pointer
+    //
+    // These four are the whole of ARC's weak-reference support that SDL3's Cocoa
+    // backend imports, and passthrough is right for a reason worth stating: a
+    // weak reference is an entry in the runtime's *own* side table, keyed by the
+    // address of the storage. That storage is in guest memory, which is a real
+    // address in this process because the guest is identity-mapped, and the
+    // object is a host allocation on both sides. So the host's table is already
+    // keyed and valued by exactly the things the guest holds — there is nothing
+    // to translate and nothing that could be kept coherent by a second table.
+    //
+    // `objc_storeWeak`'s *value* is the exception, and it is the ordinary one:
+    // a guest may legally weakly reference a class, and a class is the one
+    // pointer that means something different on each side.
+    rt!("objc_copyWeak", V, P, P),
+    rt!("objc_destroyWeak", V, P),
     // The hook the compiler emits inside every `for (x in collection)` loop, to
     // be called when the collection changed underneath it. Its argument is the
     // collection, not a class, and all it does is raise — so it needs none of
@@ -251,6 +267,9 @@ static RUNTIME: &[Runtime] = &[
     rtc!([] -> true, "objc_getMetaClass", P, P),
     rt!("objc_getProtocol", P, P),
     rtc!([] -> true, "objc_getRequiredClass", P, P),
+    // Whatever `objc_storeWeak` put in the table comes back out, so the return
+    // is translated for the same reason that call's argument is.
+    rtc!([] -> true, "objc_loadWeakRetained", P, P),
     rtc!([] -> true, "objc_lookUpClass", P, P),
     rtc!([0] -> true, "objc_opt_class", P, P),
     rtc!([0, 1], "objc_opt_isKindOfClass", U8, P, P),
@@ -267,6 +286,8 @@ static RUNTIME: &[Runtime] = &[
     // The value it stores is an object, and an object is a host pointer on both
     // sides — but a guest storing a *class* is legal, so it is translated.
     rtc!([1], "objc_storeStrong", V, P, P),
+    // `id objc_storeWeak(id *location, id obj)` — see the weak note above.
+    rtc!([1], "objc_storeWeak", P, P, P),
     // `@synchronized`. Passthrough is not a shortcut here: the host's
     // implementation is a lock table keyed by the object's address, the object
     // is a host allocation, and locking it here is locking the same thing the
@@ -274,6 +295,13 @@ static RUNTIME: &[Runtime] = &[
     rtc!([0], "objc_sync_enter", I32, P),
     rtc!([0], "objc_sync_exit", I32, P),
     rt!("objc_terminate", V),
+    // The `__unsafe_unretained` end of the autoreleased-return-value handshake:
+    // it claims the value the callee left in the optimisation's thread-local
+    // slot and does *not* retain it. Same shape as
+    // `objc_retainAutoreleasedReturnValue` above, and it has to be the host's
+    // own implementation for the same reason — the slot it reads is the one the
+    // host's `objc_autoreleaseReturnValue` wrote.
+    rtc!([0], "objc_unsafeClaimAutoreleasedReturnValue", P, P),
     rtc!([0] -> true, "object_getClass", P, P),
     rtc!([0], "object_getClassName", P, P),
     rt!("object_getIndexedIvars", P, P),

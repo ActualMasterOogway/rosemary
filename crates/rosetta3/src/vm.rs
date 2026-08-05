@@ -57,6 +57,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::ops::Range;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex};
 
 use machish::memory::{MmapSpace, Regions};
@@ -467,12 +468,20 @@ pub struct Vm {
     view: GuestView,
     /// The guest's Objective-C classes, once realized in the host runtime.
     ///
-    /// A `OnceLock` rather than a `Mutex`, because registration happens exactly
-    /// once — before any guest code runs, from [`crate::startup`] — and every
-    /// later use is a read from whichever thread is dispatching a message. That
-    /// is the same lifetime shape as the code cache's contents and a much
-    /// simpler one than its locking.
-    objc: std::sync::OnceLock<crate::objc::ObjcRuntime>,
+    /// A leaked snapshot behind an `AtomicPtr`, swapped whole, for the reason
+    /// [`crate::dyld`]'s image list is: registration is no longer one event.
+    /// It happens at launch over the program's own images and again inside every
+    /// `dlopen` that brings classes with it, while other threads are dispatching
+    /// messages through the maps — so the extending pass builds a **copy**,
+    /// leaks it, and publishes the pointer. A reader sees the old runtime or the
+    /// new one and both stay valid forever, which is what keeps the read path,
+    /// the hottest in [`crate::objc::dispatch`], off a lock entirely.
+    ///
+    /// A `OnceLock` was enough while only [`crate::startup`] registered.
+    objc: AtomicPtr<crate::objc::ObjcRuntime>,
+    /// Held across a registration pass, so two `dlopen`s cannot each extend the
+    /// same snapshot and publish one of the results.
+    objc_registration: Mutex<()>,
 }
 
 /// A linked program, shareable between the threads running it.
@@ -592,7 +601,8 @@ impl Vm {
             cache: Mutex::new(cache),
             thunks: Mutex::new(ThunkTable::new()),
             view: GuestView::new(ranges),
-            objc: std::sync::OnceLock::new(),
+            objc: AtomicPtr::new(core::ptr::null_mut()),
+            objc_registration: Mutex::new(()),
         })
     }
 
@@ -602,20 +612,73 @@ impl Vm {
     /// guest function pointers callable from the host, which means building
     /// thunks, which means compiling. A `Vm` that is only ever inspected should
     /// not pay for that, and the audit path is exactly such a caller.
-    pub fn register_objc(&self) -> Result<&crate::objc::ObjcRuntime, VmError> {
-        if let Some(existing) = self.objc.get() {
+    pub fn register_objc(&self) -> Result<&'static crate::objc::ObjcRuntime, VmError> {
+        let _guard = self
+            .objc_registration
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = self.objc() {
             return Ok(existing);
         }
-        let rt = crate::objc::register(self)?;
-        // A racing caller's value wins and ours is dropped; both describe the
-        // same registration, because the host runtime interns by name.
-        let _ = self.objc.set(rt);
-        Ok(self.objc.get().expect("just set"))
+        Ok(self.publish_objc(crate::objc::register(self)?))
+    }
+
+    /// Realize the classes of an image the guest `dlopen`ed, into the same
+    /// runtime.
+    ///
+    /// The extending half of [`Vm::register_objc`], and the reason the runtime
+    /// is a published snapshot rather than a `OnceLock`: SDL3's Cocoa backend
+    /// declares its own `NSApplication` subclass, and until this pass runs a
+    /// message to it is refused by name in [`crate::objc::dispatch`].
+    ///
+    /// Returns the number of `+load` methods called, which run here — after the
+    /// classes exist and before the image's C initializers — because that is
+    /// where dyld runs them.
+    ///
+    /// A `Vm` that has never registered at all is left alone: registering a
+    /// loaded image's classes without the program's would put a subclass of a
+    /// program class into the "superclass missing" list, and the audit path
+    /// deliberately never registers anything.
+    pub fn register_loaded_objc(
+        &self,
+        report: &machish::report::LinkReport,
+    ) -> Result<usize, VmError> {
+        let published = {
+            let _guard = self
+                .objc_registration
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let Some(current) = self.objc() else {
+                return Ok(0);
+            };
+            let mut extended = current.clone();
+            crate::objc::register_loaded(self, &mut extended, report)?;
+            self.publish_objc(extended)
+        };
+        // Outside the lock, deliberately. A `+load` is guest code, and guest
+        // code may `dlopen` — a plugin host's whole purpose — which arrives back
+        // here. Holding the registration lock across it is a deadlock waiting
+        // for a program that does the ordinary thing.
+        crate::objc::call_loaded_load_methods(self, published, report)
+    }
+
+    /// Leak `rt` and make it the runtime every dispatching thread reads.
+    fn publish_objc(&self, rt: crate::objc::ObjcRuntime) -> &'static crate::objc::ObjcRuntime {
+        let leaked: &'static crate::objc::ObjcRuntime = Box::leak(Box::new(rt));
+        self.objc.store(
+            leaked as *const _ as *mut crate::objc::ObjcRuntime,
+            Ordering::Release,
+        );
+        leaked
     }
 
     /// The registered Objective-C classes, if [`Vm::register_objc`] has run.
-    pub fn objc(&self) -> Option<&crate::objc::ObjcRuntime> {
-        self.objc.get()
+    pub fn objc(&self) -> Option<&'static crate::objc::ObjcRuntime> {
+        let published = self.objc.load(Ordering::Acquire);
+        // SAFETY: non-null only after `publish_objc` stored a leaked runtime,
+        // which is never freed and never mutated after publication — an
+        // extending pass builds a separate copy. See the field note.
+        (!published.is_null()).then(|| unsafe { &*published })
     }
 
     /// A class pointer on its way *out* to the host runtime.

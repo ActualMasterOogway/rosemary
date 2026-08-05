@@ -1169,6 +1169,100 @@ pub fn dlopen_fixture() -> Option<String> {
         .clone()
 }
 
+/// A dylib the guest loads itself, carrying **Objective-C classes of its own**.
+///
+/// The launch-time registration pass runs over the program's images, and an
+/// image mapped later is not one of them — so until [`crate::dyld::open`] runs
+/// the same pass, everything here fails, and each line fails differently:
+///
+/// - **`+load`** must run inside `dlopen`, before the C constructor of the same
+///   image, which is dyld's order. Printing both is how the order is checked
+///   rather than asserted.
+/// - **A message to the plugin's own class** — `[Plugin greet]` — is the case
+///   that was refused by name: the guest names its class by the dead
+///   `objc_class` in its own `__objc_data`, and until that class is realized
+///   there is nothing for the host runtime to look a method up on.
+/// - **A subclass of a Foundation class**, whose superclass is an ordinary bind
+///   the host answers, with an ivar read through the runtime's offset — the
+///   half of registration that writes back into the image.
+/// - **A message to Foundation**, which needs only the selectors uniqued and
+///   worked before any of this.
+pub const OBJC_PLUGIN_M: &str = r#"
+#import <Foundation/Foundation.h>
+#include <stdio.h>
+
+@interface Plugin : NSObject { int count; }
++ (void)load;
++ (int)greet;
+- (int)bump;
+@end
+
+@implementation Plugin
++ (void)load { puts("plugin +load"); }
++ (int)greet { return 41; }
+- (int)bump { count += 1; return count; }
+@end
+
+__attribute__((constructor)) static void plugin_init(void) { puts("plugin ctor"); }
+
+int plugin_run(void) {
+    Plugin *p = [[Plugin alloc] init];
+    int n = [Plugin greet] + [p bump];
+    NSString *s = [NSString stringWithUTF8String:"twelve"];
+    return n + (int)[s length];
+}
+"#;
+
+/// The program that loads [`OBJC_PLUGIN_M`] and calls into it.
+pub const OBJC_DLOPEN_M: &str = r#"
+#import <Foundation/Foundation.h>
+#include <dlfcn.h>
+#include <stdio.h>
+
+/* The program declares a class too, so the loaded image's registration has to
+   *extend* an existing runtime rather than build one. */
+@interface Host : NSObject
++ (int)base;
+@end
+@implementation Host
++ (int)base { return 100; }
+@end
+
+int main(void) {
+    printf("host=%d\n", [Host base]);
+    void *h = dlopen("@executable_path/libobjcplugin.dylib", RTLD_NOW);
+    if (!h) { printf("dlopen failed: %s\n", dlerror()); return 1; }
+    int (*run)(void) = (int (*)(void))dlsym(h, "plugin_run");
+    if (!run) { printf("dlsym failed: %s\n", dlerror()); return 2; }
+    printf("plugin=%d\n", run());
+    return 0;
+}
+"#;
+
+/// Build [`OBJC_DLOPEN_M`] and its plugin beside it, or `None` if this host
+/// cannot.
+pub fn objc_dlopen_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            build_x86_64(
+                "libobjcplugin.dylib",
+                OBJC_PLUGIN_M,
+                &[
+                    "-x",
+                    "objective-c",
+                    "-framework",
+                    "Foundation",
+                    "-dynamiclib",
+                    "-install_name",
+                    "@rpath/libobjcplugin.dylib",
+                ],
+            )?;
+            build_objc("objcdlopener", OBJC_DLOPEN_M)
+        })
+        .clone()
+}
+
 /// Run a guest program under the driver, returning `(status, stdout, stderr)`.
 ///
 /// Through the built binary rather than the library, because that is what the

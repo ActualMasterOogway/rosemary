@@ -248,3 +248,36 @@ fn the_host_calls_a_guest_method_with_an_aggregate_by_value() {
     assert!(out.contains("origin 6.5 7.5\n"), "{out}");
     assert!(out.contains("scale 9.25\n"), "{out}");
 }
+
+/// M7.4: a `dlopen`ed image's own Objective-C classes are realized too.
+///
+/// The launch-time registration pass runs over the program's images, and an
+/// image the guest maps afterwards is not one of them. Everything in the plugin
+/// therefore used to fail, and the failure that reached a real program first was
+/// the most direct one: SDL3's Cocoa backend declares its own `NSApplication`
+/// subclass, and Terraria's start-up messages it — which stopped with
+/// *"the receiver is a guest address whose class the runtime never realized"*.
+///
+/// Checked against the same binary run natively rather than against a
+/// transcript this runtime wrote down, because what `+load` prints and when is
+/// the platform's answer and not this project's. The order is the part worth
+/// having: `+load` runs inside `dlopen`, before the same image's C constructor.
+#[test]
+fn a_loaded_image_declares_classes_and_the_guest_messages_them() {
+    let Some(path) = common::objc_dlopen_fixture() else {
+        skip!("cannot build x86_64 Objective-C fixtures")
+    };
+    let Some((native_status, expected)) = common::run_native(&path) else {
+        skip!("cannot run x86_64 binaries natively")
+    };
+    let (status, out, err) = common::run_guest(&path, &[]);
+
+    assert_eq!(out, expected, "stderr: {err}");
+    assert_eq!(status, native_status, "stderr: {err}");
+    // Named as well as diffed, because each line fails for its own reason: the
+    // first two are the ordering claim, and `plugin=` is 41 + 1 + 6, so a
+    // message that silently returned zero is a different number rather than an
+    // absent line.
+    assert!(out.contains("plugin +load\nplugin ctor\n"), "{out}");
+    assert!(out.contains("plugin=48\n"), "{out}");
+}

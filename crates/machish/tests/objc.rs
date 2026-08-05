@@ -13,7 +13,7 @@
 
 mod common;
 
-use machish::extensions::objc::{ObjcImage, ObjcRefusal};
+use machish::extensions::objc::{ObjcClass, ObjcImage, ObjcMethod};
 use machish::fixups::decode_image;
 use machish::image::{MachObject, SymbolTable};
 use machish::loader::Loader;
@@ -489,66 +489,100 @@ fn corrupting_the_metadata_never_panics() {
 /// Forced by hand, because no x86-64 toolchain emits a relative method list —
 /// which is exactly why it is refused rather than decoded: there is no fixture
 /// that would keep a speculative decoder honest.
+/// The relative method-list encoding, which an x86-64 **dylib** really emits.
+///
+/// This module's scope note used to say the small form was arm64's alone. It
+/// was checked, on an executable, and it is wrong: the same `.m` built with
+/// `-dynamiclib` puts `__objc_methlist` in the image and sets `0x8000_0000` in
+/// every list header, while built as a program it emits pointer-based lists in
+/// `__objc_const`.
+///
+/// So the test is the one that argument deserves — **both builds of one source,
+/// compared** — rather than a decode of whichever this crate happened to have a
+/// fixture for. Agreement is evidence a single-encoding test cannot give, the
+/// same claim `both_fixup_encodings_decode_to_the_same_metadata` makes.
+///
+/// The encoding is asserted too, so a future toolchain that stopped emitting it
+/// fails here rather than passing this test vacuously.
 #[test]
-fn a_relative_method_list_is_refused_by_name() {
-    let Some(bytes) = common::build_objc_x86_64("objc_small", CLASS_SRC) else {
+fn both_method_list_encodings_decode_to_the_same_methods() {
+    let Some((_, _, program)) = objc_of("objc_lists_exe", CLASS_SRC) else {
         skip!("cc -arch x86_64 with Foundation unavailable")
     };
-    let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
-
-    // Find the class's own method list through a clean decode, then set the
-    // "entries are relative" bit in its header and decode again.
-    let mut mem = BufferSpace::new(0x1_0000_0000);
+    let Some(bytes) = common::build_objc_x86_64_flags(
+        "libobjc_lists.dylib",
+        CLASS_SRC,
+        &["-dynamiclib", "-install_name", "@rpath/libobjc_lists.dylib"],
+    ) else {
+        skip!("cc -arch x86_64 with Foundation unavailable")
+    };
+    let mut mem = BufferSpace::new(0x2_0000_0000);
     let shims = eager_binding_shims();
     let native = NativeDylibProvider::system();
     let providers: [&dyn SymbolProvider; 2] = [&shims, &native];
     let report = Loader::new(X86_64)
-        .link(&bytes, "/tmp/objc_small", &mut mem, &providers)
+        .link(&bytes, "/tmp/libobjc_lists.dylib", &mut mem, &providers)
         .unwrap();
     let img = report.root().unwrap();
-    let g = img
-        .objc
-        .as_ref()
-        .unwrap()
-        .classes
-        .iter()
-        .find(|c| c.ro.name == "Greeter")
-        .unwrap();
+    let dylib = img.objc.clone().expect("the fixture declares classes");
 
-    // `baseMethods` is at +32 in the `class_ro_t`; read the list's address out
-    // of memory rather than recomputing it.
-    let mut buf = [0u8; 8];
-    mem.read(g.ro.va + 32, &mut buf).unwrap();
-    let list_va = u64::from_le_bytes(buf);
-    let list_off = obj
-        .vmaddr_to_off(list_va.wrapping_sub(img.slide))
-        .expect("list is in the file");
-
-    let mut corrupt = bytes.clone();
-    corrupt[list_off + 3] |= 0x80;
-
-    let mut mem = BufferSpace::new(0x1_0000_0000);
-    let report = Loader::new(X86_64)
-        .link(&corrupt, "/tmp/objc_small", &mut mem, &providers)
-        .unwrap();
-    let objc = report.root().unwrap().objc.clone().unwrap();
-
-    assert!(
-        objc.refusals
+    let named = |o: &ObjcImage, name: &str| {
+        o.classes
             .iter()
-            .any(|r| matches!(r, ObjcRefusal::SmallMethodList { .. })),
-        "expected a named refusal, got {:?}",
-        objc.refusals
+            .find(|c| c.ro.name == name)
+            .unwrap_or_else(|| panic!("{name} is missing"))
+            .clone()
+    };
+    let (a, b) = (named(&program, "Greeter"), named(&dylib, "Greeter"));
+
+    // The dylib really is the encoding under test: `baseMethods` is at +32 in
+    // the `class_ro_t`, and the list's first word carries the flag.
+    let mut buf = [0u8; 8];
+    mem.read(b.ro.va + 32, &mut buf).unwrap();
+    let list_va = u64::from_le_bytes(buf);
+    let mut word = [0u8; 4];
+    mem.read(list_va, &mut word).unwrap();
+    assert_ne!(
+        u32::from_le_bytes(word) & 0x8000_0000,
+        0,
+        "the dylib was expected to carry relative method lists"
     );
-    // And the refusal is local: the class is still decoded, with its name and
-    // its ivars, because one undecodable list must not lose the other forty.
-    let g = objc
-        .classes
-        .iter()
-        .find(|c| c.ro.name == "Greeter")
-        .unwrap();
-    assert!(g.ro.methods.is_empty());
-    assert_eq!(g.ro.ivars.len(), 1);
+
+    // Selectors and type encodings must match exactly. The `imp` addresses
+    // cannot: the two images are different files, mapped at different bases.
+    fn names(methods: &[ObjcMethod]) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = methods
+            .iter()
+            .map(|m| (m.name.clone(), m.types.clone()))
+            .collect();
+        v.sort();
+        v
+    }
+    let class_methods = |c: &ObjcClass| c.meta.as_ref().map(|m| names(&m.ro.methods));
+    assert!(!names(&a.ro.methods).is_empty(), "the program decoded no methods");
+    assert_eq!(names(&a.ro.methods), names(&b.ro.methods));
+    assert_eq!(
+        class_methods(&a),
+        class_methods(&b),
+        "class methods differ"
+    );
+    assert!(dylib.refusals.is_empty(), "{:?}", dylib.refusals);
+
+    // And every relative `imp` really lands in the dylib's own `__text`, which
+    // is the offset arithmetic's only load-bearing claim.
+    let text = MachObject::parse_any(&bytes, X86_64)
+        .unwrap()
+        .section("__TEXT", "__text")
+        .map(|s| (s.addr + img.slide, s.size))
+        .expect("__text");
+    for m in b.ro.methods.iter().chain(b.meta.iter().flat_map(|x| x.ro.methods.iter())) {
+        assert!(
+            m.imp >= text.0 && m.imp < text.0 + text.1,
+            "{} resolved to {:#x}, outside __text",
+            m.name,
+            m.imp
+        );
+    }
 }
 
 /// Cross-check against the linker's own symbol table.

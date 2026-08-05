@@ -157,7 +157,14 @@ pub struct Stats {
 /// Held by the [`Vm`] because the maps outlive registration: every message the
 /// guest sends names a class by the address in its own `__objc_data`, and
 /// answering that is a lookup here.
-#[derive(Debug, Default)]
+///
+/// `Clone` because registration is no longer a single event. A `dlopen`ed image
+/// brings classes of its own — SDL3's Cocoa backend is nothing but that — and
+/// the [`Vm`] publishes an extended **copy** rather than mutating the one every
+/// dispatching thread is reading. See [`Vm::register_loaded_objc`].
+///
+/// [`Vm::register_loaded_objc`]: crate::Vm::register_loaded_objc
+#[derive(Clone, Debug, Default)]
 pub struct ObjcRuntime {
     /// Guest `objc_class` VA → the host `Class` standing for it.
     to_host: HashMap<u64, u64>,
@@ -219,22 +226,63 @@ impl ObjcRuntime {
 /// not be read, which is not a fact about Objective-C.
 pub fn register(vm: &Vm) -> Result<ObjcRuntime, VmError> {
     let mut rt = ObjcRuntime::default();
+    register_images(vm, &mut rt, &images_of(&vm.program.report))?;
+    Ok(rt)
+}
 
-    // Dependencies before dependents, as `startup` runs initializers: an image
-    // may subclass a class defined by one it links against.
-    let images: Vec<&ObjcImage> = vm
-        .program
-        .report
+/// Realize the metadata of an image the *guest* loaded, into an existing
+/// runtime.
+///
+/// The same five passes [`register`] runs, over a `dlopen`ed image's report
+/// instead of the program's. Nothing about them is specific to launch time — the
+/// only thing that was is the assumption that they run once, which is what
+/// [`ObjcRuntime`]'s `Clone` and the [`Vm`]'s published snapshot replace.
+///
+/// **What makes this necessary rather than tidy.** A class's superclass is an
+/// ordinary bind, so a library subclassing `NSView` names the host's own class
+/// and needs nothing from the program; but the guest names the class *it*
+/// defines by the address of the dead `objc_class` in its own `__objc_data`, and
+/// a message to that address is
+/// [refused by name](dispatch) until this pass has created the real class
+/// standing for it. SDL3's Cocoa backend declares eight such classes —
+/// `SDL3Application`, `SDL3AppDelegate`, `Cocoa_WindowListener` among them — and
+/// Terraria's start-up messages the first of them before it opens a window.
+///
+/// Ordering matches [`crate::dyld::open`]'s: the image is published and its
+/// selectors are uniqued before any of its code runs, and `+load` runs after
+/// this returns and before the C initializers, which is dyld's order.
+pub(crate) fn register_loaded(
+    vm: &Vm,
+    rt: &mut ObjcRuntime,
+    report: &LinkReport,
+) -> Result<(), VmError> {
+    register_images(vm, rt, &images_of(report))
+}
+
+/// Every image in `report` carrying Objective-C metadata, dependencies first.
+///
+/// Reversed for the reason [`crate::startup`] reverses initializers: an image
+/// may subclass a class defined by one it links against, and
+/// [`register_class`]'s `by_va` index only covers this pass.
+fn images_of(report: &LinkReport) -> Vec<&ObjcImage> {
+    report
         .images
         .iter()
         .rev()
         .filter_map(|i| i.objc.as_ref())
-        .collect();
+        .collect()
+}
 
+/// The five passes, in the order the runtime needs them.
+fn register_images(
+    vm: &Vm,
+    rt: &mut ObjcRuntime,
+    images: &[&ObjcImage],
+) -> Result<(), VmError> {
     // Protocols first — a class adopts them as it is registered.
-    for image in &images {
+    for image in images {
         for p in &image.protocols {
-            register_protocol(&mut rt, p);
+            register_protocol(rt, p);
         }
     }
 
@@ -245,36 +293,36 @@ pub fn register(vm: &Vm) -> Result<ObjcRuntime, VmError> {
         .flat_map(|i| i.classes.iter())
         .map(|c| (c.va, c))
         .collect();
-    for image in &images {
+    for image in images {
         for c in &image.classes {
             let mut chain = HashSet::new();
-            register_class(vm, &mut rt, &by_va, c, &mut chain);
+            register_class(vm, rt, &by_va, c, &mut chain);
         }
     }
 
     // Ivar offsets, once every class is realized and the runtime has laid them
     // out. Separate from registration because a class's own offsets are not
     // final until `objc_registerClassPair`.
-    for image in &images {
+    for image in images {
         for c in &image.classes {
-            patch_ivar_offsets(vm, &mut rt, c)?;
+            patch_ivar_offsets(vm, rt, c)?;
         }
     }
 
     // Categories last: one may extend a class registered above.
-    for image in &images {
+    for image in images {
         for c in &image.categories {
-            register_category(vm, &mut rt, c);
+            register_category(vm, rt, c);
         }
     }
 
     // Selector uniquing, which is independent of all of the above: it rewrites
     // the guest's own `__objc_selrefs` slots from string pointers to `SEL`s.
-    for image in &images {
+    for image in images {
         rt.stats.selectors += unique_selectors(vm, image)?;
     }
 
-    Ok(rt)
+    Ok(())
 }
 
 /// Call every `+load` the guest declares, superclass first.
@@ -298,14 +346,25 @@ pub fn register(vm: &Vm) -> Result<ObjcRuntime, VmError> {
 /// is this pass's, and a program relying on more than that would be relying on
 /// dyld's link order.
 pub fn call_load_methods(vm: &Vm, rt: &ObjcRuntime) -> Result<usize, VmError> {
-    let images: Vec<&ObjcImage> = vm
-        .program
-        .report
-        .images
-        .iter()
-        .rev()
-        .filter_map(|i| i.objc.as_ref())
-        .collect();
+    load_images(vm, rt, &images_of(&vm.program.report))
+}
+
+/// Every `+load` in an image the guest loaded.
+///
+/// dyld runs one as soon as the image's classes are realized and before its C
+/// constructors, which for a `dlopen`ed image is a point inside the `dlopen`
+/// call — so this sits between [`register_loaded`] and
+/// [`crate::dyld`]'s initializers, exactly where the launch-time pair sit in
+/// [`crate::startup`].
+pub(crate) fn call_loaded_load_methods(
+    vm: &Vm,
+    rt: &ObjcRuntime,
+    report: &LinkReport,
+) -> Result<usize, VmError> {
+    load_images(vm, rt, &images_of(report))
+}
+
+fn load_images(vm: &Vm, rt: &ObjcRuntime, images: &[&ObjcImage]) -> Result<usize, VmError> {
     let by_va: HashMap<u64, &ObjcClass> = images
         .iter()
         .flat_map(|i| i.classes.iter())
@@ -314,7 +373,7 @@ pub fn call_load_methods(vm: &Vm, rt: &ObjcRuntime) -> Result<usize, VmError> {
 
     let mut done = HashSet::new();
     let mut called = 0;
-    for image in &images {
+    for image in images {
         for class in &image.classes {
             called += load_class(vm, rt, &by_va, class, &mut done)?;
         }
@@ -322,7 +381,7 @@ pub fn call_load_methods(vm: &Vm, rt: &ObjcRuntime) -> Result<usize, VmError> {
     // A category's `+load` is a method on the target class's metaclass and is
     // called even when the class itself has one — both run, which is the one
     // place Objective-C does not collapse a category over a class.
-    for image in &images {
+    for image in images {
         for cat in &image.categories {
             for m in &cat.class_methods {
                 if m.name == "load" && vm.program.is_guest_address(m.imp) {
@@ -852,26 +911,18 @@ fn unique_selectors(vm: &Vm, image: &ObjcImage) -> Result<usize, VmError> {
 /// Unique the selector references of an image the *guest* loaded, and nothing
 /// else about it.
 ///
-/// [`register`] is the launch-time pass over the program's own images, and it
-/// does five things; this does one of them, for a `dlopen`ed image, because that
-/// one is separable and the other four are not.
+/// The one pass of [`register_loaded`]'s five that has to happen even when the
+/// rest cannot — when no `Vm` has registered anything yet, or when the image
+/// declares no classes at all.
 ///
-/// **Why it cannot wait for the rest.** A selector reference is not metadata the
-/// runtime consults — it is a slot *guest code loads from*
-/// (`movq selref(%rip), %rsi`) on its way into `objc_msgSend`. Until it is
-/// rewritten it holds a `char *`, so every message a loaded image sends arrives
-/// with a string pointer where a `SEL` belongs, and the host runtime answers
-/// "that class does not respond to that selector" — for `+[NSProcessInfo
-/// processInfo]`, which of course it does. dyld's `libobjc` performs exactly
-/// this rewrite when it maps an image, so doing it here is matching the platform
-/// rather than working around it.
-///
-/// What is still not done for a loaded image is registration proper: its classes
-/// are not realized, its categories are not attached, and its `+load` does not
-/// run. Those are refused by name when reached ([`dispatch`]), which is a
-/// different failure from a message that should have worked — and this closes
-/// only the second kind. Messages *to Foundation*, which is what a library like
-/// `steamclient.dylib` actually sends, work after this and did not before.
+/// A selector reference is not metadata the runtime consults; it is a slot
+/// *guest code loads from* (`movq selref(%rip), %rsi`) on its way into
+/// `objc_msgSend`. Until it is rewritten it holds a `char *`, so every message
+/// the image sends arrives with a string pointer where a `SEL` belongs, and the
+/// host runtime answers "that class does not respond to that selector" — for
+/// `+[NSProcessInfo processInfo]`, which of course it does. dyld's `libobjc`
+/// performs exactly this rewrite when it maps an image, so doing it here is
+/// matching the platform rather than working around it.
 pub(crate) fn unique_loaded_selectors(vm: &Vm, report: &LinkReport) -> Result<usize, VmError> {
     let mut uniqued = 0;
     for image in report.images.iter().filter_map(|i| i.objc.as_ref()) {

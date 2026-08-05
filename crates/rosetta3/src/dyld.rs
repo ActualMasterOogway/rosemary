@@ -223,6 +223,78 @@ impl machish::resolve::SymbolProvider for MainExports {
     }
 }
 
+/// Every image the guest has already loaded, as something a newly loaded one
+/// can bind against.
+///
+/// dyld resolves a new image against **everything already mapped**, and this is
+/// the half of that which is neither the host's libraries nor the main
+/// executable: one guest library linked against another guest library, both
+/// loaded by this runtime, in this process.
+///
+/// It is not a corner case, it is how a game ships its own stack. Terraria
+/// `dlopen`s `libSDL3.0.dylib`, then `libFNA3D.0.dylib`, then
+/// `libFAudio.0.dylib`; the second and third are linked against the first and
+/// name it `@rpath/libSDL3.0.dylib`, with an `LC_RPATH` pointing at the CI
+/// machine it was built on. Nothing on this disk answers that path, so the
+/// dependency cannot be fetched — correctly — and without this provider FNA3D
+/// reports 125 unresolved `_SDL_*` symbols and FAudio 71.
+///
+/// **Loading it again would be the wrong repair**, and is what a `DylibSource`
+/// that guessed harder would do: a second `libSDL3` mapped at its own addresses
+/// is a second set of SDL's statics, a second event queue and a second video
+/// subsystem, and the renderer would be initialising a library the window does
+/// not belong to. The image the guest already has is the one it means.
+///
+/// ## Matching
+///
+/// By **leaf name**, in both directions. An install name is whatever the
+/// producing link recorded — `@rpath/libSDL3.0.dylib` here, an absolute build
+/// path elsewhere — and the one part of it that survives being moved into an
+/// application bundle is the file name. `provides` is consulted only for a
+/// two-level reference, so this cannot cross-wire a flat lookup; and a
+/// two-level reference that names a *system* library is answered by the host
+/// providers ahead of this one, because [`open`] chains them first.
+struct LoadedImages;
+
+/// The file name of an install name or path, which is what both sides agree on.
+fn leaf(name: &str) -> &str {
+    name.rsplit('/').next().unwrap_or(name)
+}
+
+impl machish::resolve::SymbolProvider for LoadedImages {
+    fn provides(&self, install_name: &str) -> bool {
+        let wanted = leaf(install_name);
+        find(|i| (leaf(&i.path) == wanted).then_some(())).is_some()
+    }
+
+    fn resolve(&self, sym: &machish::fixups::SymbolRef<'_>) -> Option<machish::resolve::Resolved> {
+        // A two-level reference is a claim about *which* image defines the
+        // symbol, and honouring it is the whole reason `machish` carries the
+        // library through to here. Searching every loaded image for a name that
+        // was qualified would reintroduce exactly the cross-wiring the trait's
+        // note describes.
+        let named = sym.library.install_name().map(leaf);
+        find(|image| {
+            if named.is_some_and(|n| n != leaf(&image.path)) {
+                return None;
+            }
+            let export = image.exports.get(sym.name)?;
+            // A re-export has no address of its own; see [`MainExports`].
+            let addr = export.address(image.slide)?;
+            Some(machish::resolve::Resolved {
+                addr,
+                kind: match export.kind {
+                    machish::exports::ExportKind::ThreadLocal => {
+                        machish::resolve::SymbolKind::ThreadLocal
+                    }
+                    _ => machish::resolve::SymbolKind::Function,
+                },
+                tag: 0,
+            })
+        })
+    }
+}
+
 /// The main executable's exports, parsed on first `dlopen` and kept.
 ///
 /// Lazy rather than built at startup because a program that never calls
@@ -463,14 +535,17 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     // Vendored libc++ ahead of the filesystem; see [`crate::cxxlib`].
     let mut source = crate::cxxlib::source();
     let hosts = HostProviders::new();
-    // The main executable ahead of everything: dyld resolves a newly loaded
-    // image against what is *already loaded*, and a plugin's host is the first
-    // thing that was. See [`MainExports`].
+    // Everything already loaded, which is what dyld resolves a new image
+    // against: the main executable first, because a plugin's host is the first
+    // thing that was loaded (see [`MainExports`]), then the guest libraries this
+    // runtime has already mapped (see [`LoadedImages`]).
     let main = main_exports();
-    let extra: Vec<&dyn machish::resolve::SymbolProvider> = main
+    let loaded = LoadedImages;
+    let mut extra: Vec<&dyn machish::resolve::SymbolProvider> = main
         .map(|m| m as &dyn machish::resolve::SymbolProvider)
         .into_iter()
         .collect();
+    extra.push(&loaded as &dyn machish::resolve::SymbolProvider);
     let report = Loader::new(X86_64)
         .link_with(
             &bytes,
@@ -577,17 +652,35 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     // mapped later can join it.
     crate::tls::register(&leaked.report);
 
-    // Before any of this image's code runs, and after it is findable: rewrite
-    // its `__objc_selrefs` slots from string pointers into the host runtime's
-    // own selectors, which is what dyld's `libobjc` does when it maps an image.
-    // An initializer that sends a message — `steamclient.dylib` has one that
-    // asks `+[NSProcessInfo processInfo]` — loads a selector out of one of those
-    // slots on the way in, so the rewrite has to happen first or the message is
-    // sent with a `char *`. See [`crate::objc::unique_loaded_selectors`] for what
-    // this deliberately does *not* do.
+    // Before any of this image's code runs, and after it is findable: realize
+    // the Objective-C metadata it carries, which is what dyld hands `libobjc`
+    // when it maps an image. Two halves, and both have to be here:
+    //
+    // - Its `__objc_selrefs` slots hold string pointers until they are
+    //   rewritten, and an initializer that sends a message —
+    //   `steamclient.dylib` has one that asks `+[NSProcessInfo processInfo]` —
+    //   loads a selector out of one on the way in.
+    // - Its **classes** exist only as dead `objc_class` structures in its own
+    //   `__objc_data` until they are registered, and a message to one is refused
+    //   by name. SDL3's Cocoa backend is nothing but such classes.
+    //
+    // `register_loaded_objc` does both, and calls the image's `+load` methods
+    // between them and the initializers below, which is dyld's order.
     if let Some(vm) = crate::thunk::current() {
-        crate::objc::unique_loaded_selectors(vm, &leaked.report)
-            .map_err(|e| format!("{resolved}: objc selectors: {e}"))?;
+        match vm.objc() {
+            // Registered classes: extend that runtime, selectors included.
+            Some(_) => {
+                vm.register_loaded_objc(&leaked.report)
+                    .map_err(|e| format!("{resolved}: objc: {e}"))?;
+            }
+            // A program with no Objective-C of its own never registered, so
+            // there is no runtime to extend and no class of the program's a
+            // loaded image could subclass. The selectors are still its own.
+            None => {
+                crate::objc::unique_loaded_selectors(vm, &leaked.report)
+                    .map_err(|e| format!("{resolved}: objc selectors: {e}"))?;
+            }
+        }
     }
 
     // Every `_dyld_register_func_for_add_image` callback, before this image's
