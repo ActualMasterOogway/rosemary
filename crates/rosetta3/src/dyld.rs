@@ -707,6 +707,22 @@ fn run_initializers(image: &'static Image) -> std::result::Result<(), String> {
 /// for and what a real `dlopen` would try — and then beside the executable and
 /// in the two places a `.app` puts a bundled dylib, because a runner launched
 /// from anywhere still expects to find its own library.
+/// `name` under each directory of a colon-separated `dyld` search variable.
+///
+/// Empty when the variable is unset, which is the common case and the reason
+/// this costs nothing to consult.
+fn search_path(var: &str, name: &str) -> Vec<String> {
+    let Some(value) = std::env::var_os(var) else {
+        return Vec::new();
+    };
+    value
+        .to_string_lossy()
+        .split(':')
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| format!("{}/{name}", dir.trim_end_matches('/')))
+        .collect()
+}
+
 fn resolve_path(path: &str) -> Option<String> {
     let executable = EXECUTABLE
         .lock()
@@ -725,15 +741,52 @@ fn resolve_path(path: &str) -> Option<String> {
         };
         candidates.extend(machish::install_name::expand(path, &ctx));
     } else {
+        // `DYLD_LIBRARY_PATH` first, and `DYLD_FALLBACK_LIBRARY_PATH` after the
+        // ordinary candidates — the order the host's own loader uses. This shim
+        // *replaced* the host's `dlopen`, so a search rule it does not reproduce
+        // is a library the guest could have found and cannot.
+        //
+        // It is not an exotic rule. Terraria's launcher is a shell script whose
+        // entire job is `cd Contents/MacOS; export DYLD_LIBRARY_PATH=./osx/`,
+        // and `libSDL3.0.dylib` lives in that `osx` directory and nowhere else.
+        // Without this the game reaches its own `Main`, calls `SDL_GetVersion`,
+        // and dies with a managed `DllNotFoundException`.
+        let name = path.rsplit('/').next().unwrap_or(path);
+        candidates.extend(search_path("DYLD_LIBRARY_PATH", name));
         candidates.push(path.to_string());
         if !path.starts_with('/')
             && let Some(dir) = loader_dir
         {
-            let name = path.rsplit('/').next().unwrap_or(path);
             candidates.push(format!("{dir}/{name}"));
             candidates.push(format!("{dir}/../Frameworks/{name}"));
             candidates.push(format!("{dir}/../Resources/{name}"));
         }
+        // The executable's own `LC_RPATH` directories, searched by leaf name.
+        //
+        // An `LC_RPATH` is the image's statement of where *its* libraries live,
+        // and it is normally consulted only for an `@rpath/`-prefixed install
+        // name. A leaf name reaching this function has no such prefix — but it is
+        // the same question, asked by a program that constructed the name at run
+        // time instead of linking against it, and the image's answer is the same
+        // directory.
+        //
+        // Terraria is the case. Its executable declares
+        // `LC_RPATH @executable_path/osx`, `libSDL3.0.dylib` lives in that
+        // directory and nowhere else in the bundle, and Mono asks for it by leaf
+        // name because it comes from a managed `DllImport`. Without this the game
+        // reaches its own `Main`, calls `SDL_GetVersion`, and dies with a managed
+        // `DllNotFoundException` — a diagnostic that names the library and
+        // nothing about why it was not found.
+        if let Some(exe) = executable.as_deref() {
+            let rpaths = rpaths_of(exe);
+            let ctx = PathContext {
+                executable: Some(exe),
+                loader: Some(exe),
+                rpaths: &rpaths,
+            };
+            candidates.extend(machish::install_name::expand(&format!("@rpath/{name}"), &ctx));
+        }
+        candidates.extend(search_path("DYLD_FALLBACK_LIBRARY_PATH", name));
     }
 
     candidates
@@ -797,6 +850,27 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
             return Some(addr);
         }
     }
+    // The **main executable's** own exports, which a global search must include
+    // and which nothing above covers: [`snapshot`] holds the images `dlopen`
+    // produced, and the program itself is not one of them.
+    //
+    // This is not a corner. A `DllImport` naming a library that was *statically
+    // linked into the executable* resolves exactly this way, and it is how
+    // MonoKickstart ships .NET's `System.Native`: `Terraria.bin.osx` exports 136
+    // `SystemNative_*` functions and there is no `libSystem.Native.dylib`
+    // anywhere in the bundle. Without this the game runs its own
+    // `Terraria.Main..cctor` and dies with `EntryPointNotFoundException:
+    // SystemNative_LChflagsCanSetHiddenFlag`.
+    //
+    // Ahead of the host search, because a symbol the guest defines is the
+    // guest's — a host function of the same name would be a different function.
+    if let Some(main) = main_exports()
+        && let Some(export) = main.exports.get(&mangled)
+        && let Some(addr) = export.address(main.slide)
+    {
+        return Some(addr);
+    }
+
     // The global fallback, which is a *host* search: the guest asked every image
     // this runtime loaded and none had it, so what is left is passthrough.
     let addr = host_symbol(name)?;
@@ -933,7 +1007,7 @@ fn notify(thunk: u64, header: u64, slide: u64) {
     if thunk == 0 || header == 0 {
         return;
     }
-    if std::env::var_os("ROSETTA3_TRACE_VM").is_some() {
+    if crate::shims::vmmap::tracing() {
         eprintln!("rosetta3: add-image notice: header {header:#x}, slide {slide:#x}");
     }
     // SAFETY: `thunk` is a native arm64 trampoline this runtime compiled for a
@@ -1089,7 +1163,7 @@ fn dlopen(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) ->
     }
     let path = mem.read_cstr(ctx.rdi, symbol)?;
     let path = String::from_utf8_lossy(&path).into_owned();
-    if std::env::var_os("ROSETTA3_TRACE_VM").is_some() {
+    if crate::shims::vmmap::tracing() {
         eprintln!("rosetta3: dlopen({path:?}, flags {:#x})", ctx.rsi as i32);
     }
     match open(&path) {

@@ -74,6 +74,76 @@ use super::set_int_return;
 /// module exists to remove, so it is spelled out with the value from `mman.h`.
 const MAP_JIT: i32 = 0x0800;
 
+/// The ranges the guest asked to be executable.
+///
+/// ## Why this list is the right answer to "which bytes are code"
+///
+/// [The roadmap][r] states the problem in its smallest form — `__text` contains
+/// data, and no static rule separates the two — and this runtime's answer has
+/// always been to lift *from a PC*, demand-driven. A guest that generates code
+/// poses the same question one level out: given an address in anonymous memory,
+/// is it a function pointer to lift or a host pointer to call?
+///
+/// [r]: ../../../../docs/ROADMAP.md
+///
+/// The guest answers it itself, and it does so before the question is asked. A
+/// program that intends to execute a page requests `PROT_EXEC` for it — that is
+/// what the permission *means*, and it is a statement of intent this runtime
+/// intercepts anyway in order to strip. So the arenas are exactly the mappings
+/// the guest declared executable: no heuristic, no address-range guess, and
+/// nothing an ordinary data allocation can fall into. A guest that jumps into a
+/// page it never asked to execute is still `UnknownIndirectCall` by name, which
+/// is the right answer, because on real hardware it would have faulted.
+///
+/// Append-only and never removed, matching [`crate::dyld`]'s images and for the
+/// same reason: the code cache holds translations keyed by address, so a range
+/// that stopped being an arena would be one whose translations outlive it. See
+/// the scope note in the module header.
+static ARENAS: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());
+
+/// The lowest and highest arena address, for the question asked on the hot path.
+///
+/// [`crate::Program::is_guest_address`] is consulted at every indirect call, and
+/// answers "no" almost every time. Two relaxed loads reject a host address
+/// before any lock is taken — the same shape, and the same reasoning, as
+/// [`crate::dyld`]'s extents.
+static ARENA_LO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+static ARENA_HI: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Record `[base, base + len)` as memory the guest means to execute.
+fn remember_arena(base: u64, len: u64) {
+    use std::sync::atomic::Ordering;
+    if base == 0 || len == 0 {
+        return;
+    }
+    let mut arenas = ARENAS.lock().unwrap_or_else(|e| e.into_inner());
+    if arenas.iter().any(|&(b, l)| base >= b && base + len <= b + l) {
+        return;
+    }
+    arenas.push((base, len));
+    ARENA_LO.fetch_min(base, Ordering::Relaxed);
+    ARENA_HI.fetch_max(base + len, Ordering::Relaxed);
+}
+
+/// The arena containing `va`, if any.
+pub fn arena_at(va: u64) -> Option<(u64, u64)> {
+    use std::sync::atomic::Ordering;
+    if va < ARENA_LO.load(Ordering::Relaxed) || va >= ARENA_HI.load(Ordering::Relaxed) {
+        return None;
+    }
+    ARENAS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .copied()
+        .find(|&(base, len)| va >= base && va < base + len)
+}
+
+/// Whether `va` is in memory the guest declared executable.
+pub fn contains(va: u64) -> bool {
+    arena_at(va).is_some()
+}
+
 /// The shim for `name`, if this module has one.
 pub fn shim_for(
     name: &str,
@@ -122,6 +192,11 @@ fn mmap(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) ->
         )
     };
 
+    // The guest said it means to execute these bytes; see [`ARENAS`].
+    if prot & libc::PROT_EXEC != 0 && p != libc::MAP_FAILED {
+        remember_arena(p as usize as u64, len as u64);
+    }
+
     if tracing() {
         eprintln!(
             "rosetta3: mmap({addr:#x}, {len:#x}, {}, {}, {fd}, {off:#x}) as ({}, {}) -> {}",
@@ -144,6 +219,10 @@ fn mprotect(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory
     // SAFETY: the guest's own request, with executable permission removed.
     let rc = unsafe { libc::mprotect(addr as *mut libc::c_void, len, want_prot) };
 
+    if prot & libc::PROT_EXEC != 0 && rc == 0 {
+        remember_arena(addr as u64, len as u64);
+    }
+
     if tracing() {
         eprintln!(
             "rosetta3: mprotect({addr:#x}, {len:#x}, {}) as {} -> {}",
@@ -156,8 +235,18 @@ fn mprotect(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory
     Ok(())
 }
 
-/// Whether the guest's memory-mapping calls should be reported.
-fn tracing() -> bool {
+/// Whether `ROSETTA3_TRACE_VM` asked for the guest's use of memory to be
+/// reported: its mappings, the code it generates into them, the images it loads,
+/// and the regions this runtime declines to compile.
+///
+/// Read once and cached, because some of its callers sit on the path taken for
+/// *every* generated region and a `getenv` each time would be a cost paid by
+/// runs that never look at the output.
+///
+/// It lives here rather than in a diagnostics module because this is where the
+/// question starts: a JIT guest that goes wrong goes wrong about memory, and the
+/// mapping trace is the first thing worth seeing.
+pub fn tracing() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("ROSETTA3_TRACE_VM").is_some())
 }

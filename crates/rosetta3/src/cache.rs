@@ -157,15 +157,30 @@ impl CodeCache {
         let (region, bytes) = program
             .lift_region(pc)
             .ok_or(VmError::NoCode { pc, from: None })?;
-        let (start, end) = (region.range.start, region.range.end);
+        let start = region.range.start;
 
-        let func = lift_to_code::<X86_64>(&bytes, start, self.config.clone())
-            .map_err(|source| VmError::Lift { pc, start, source })?;
-        let mut backend =
-            crate::jit::backend().map_err(|source| VmError::Lift { pc, start, source })?;
-        let code = backend
-            .compile_lifted(func)
-            .map_err(|source| VmError::Lift { pc, start, source })?;
+        let (backend, code, region) = match compile_region(&self.config, &bytes, &region) {
+            Ok((backend, code)) => (backend, code, region),
+            // One instruction the recompiler cannot handle refuses the *whole*
+            // region, and it is often somewhere the guest will never execute.
+            // See [`longest_liftable_prefix`].
+            Err(source) => match self.longest_liftable_prefix(&bytes, &region, pc) {
+                Some((backend, code, region)) => (backend, code, region),
+                None => {
+                    if crate::shims::vmmap::tracing() {
+                        let head: Vec<String> =
+                            bytes.iter().take(64).map(|b| format!("{b:02x}")).collect();
+                        eprintln!(
+                            "rosetta3: region {start:#x}..{:#x} would not compile, bytes {}",
+                            region.range.end,
+                            head.join(" ")
+                        );
+                    }
+                    return Err(VmError::Lift { pc, start, source });
+                }
+            },
+        };
+        let end = region.range.end;
 
         // SAFETY: `compile` returns the finalized entry of a function whose
         // signature the lifter fixed as `fn(*mut RegisterContext)` in the host
@@ -185,6 +200,66 @@ impl CodeCache {
         Ok(translation)
     }
 
+    /// The longest prefix of `region` that lifts, if it still covers `pc`.
+    ///
+    /// ## Why a whole region can be lost to a byte nobody executes
+    ///
+    /// Microlift lifts a region as a unit and refuses all of it if any one
+    /// instruction is unsupported. For an image that is the right severity: the
+    /// bytes came from a compiler, so an instruction in the middle of a function
+    /// is one the function can reach, and translating around it would mean
+    /// executing a function with a hole in it.
+    ///
+    /// Generated code breaks that reasoning, and Terraria is where it broke.
+    /// Mono emits a call to a trampoline followed by **inline data** the
+    /// trampoline reads through the return address — so the bytes after the call
+    /// are an argument, not an instruction, and the trampoline does not return to
+    /// them. [`crate::region`]'s walk cannot know that: a `call` continues at its
+    /// resume point, because almost every call does. The data decodes as
+    /// whatever it happens to decode as, and one `mov ds, edx` in an eight-byte
+    /// pointer takes the entire method with it.
+    ///
+    /// So the region is bisected on its own instruction grid: the longest prefix
+    /// that lifts is kept, and everything past it is reached later from its own
+    /// PC if it is reachable at all — which is the same answer demand-driven
+    /// lifting gives to a jump table, and for the same reason.
+    ///
+    /// `O(log n)` lift attempts, and only on a path that was about to fail
+    /// outright. The prefix must still cover `pc`, since a translation that does
+    /// not contain the address it was made for is no use.
+    fn longest_liftable_prefix(
+        &self,
+        bytes: &[u8],
+        region: &crate::region::Region,
+        pc: u64,
+    ) -> Option<(microlift::backend::CraneliftBackend, *const u8, crate::region::Region)> {
+        let start = region.range.start;
+        // Candidate cut points, as counts of instructions kept. `starts` is
+        // ascending, so a larger index is a longer prefix.
+        let (mut lo, mut hi) = (0usize, region.starts.len());
+        let mut best = None;
+        while lo < hi {
+            let mid = lo + (hi - lo).div_ceil(2);
+            let Some(candidate) = region.truncated_to(mid) else {
+                break;
+            };
+            let len = usize::try_from(candidate.range.end - start).ok()?;
+            let attempt = bytes
+                .get(..len)
+                .and_then(|b| compile_region(&self.config, b, &candidate).ok());
+            match attempt {
+                Some((backend, code)) if candidate.covers(pc) => {
+                    best = Some((backend, code, candidate));
+                    lo = mid;
+                }
+                // Either it did not compile or it no longer reaches `pc`; either
+                // way this cut is too long.
+                _ => hi = mid - 1,
+            }
+        }
+        best
+    }
+
     /// An existing translation covering `pc`, if there is one.
     fn lookup(&self, pc: u64) -> Option<Arc<Translation>> {
         // Regions may overlap: the same bytes are reachable from two PCs when
@@ -199,4 +274,23 @@ impl CodeCache {
             .find(|(_, t)| t.covers(pc))
             .map(|(_, t)| Arc::clone(t))
     }
+}
+
+/// Lift and compile `region`'s `bytes` into native code.
+///
+/// The two halves are one operation for every caller's purposes, and keeping
+/// them together is what lets a region that *lifts* but does not *compile* be
+/// salvaged the same way as one that does not lift. The distinction is not
+/// academic: an instruction the lifter mistranslates into invalid IR is caught
+/// by Cranelift's verifier at compile time, which is a stage after the one the
+/// first version of this retried at.
+fn compile_region(
+    config: &microlift::core::LifterConfig,
+    bytes: &[u8],
+    region: &crate::region::Region,
+) -> microlift::Result<(microlift::backend::CraneliftBackend, *const u8)> {
+    let func = lift_to_code::<X86_64>(bytes, region.range.start, config.clone())?;
+    let mut backend = crate::jit::backend()?;
+    let code = backend.compile_lifted(func)?;
+    Ok((backend, code))
 }

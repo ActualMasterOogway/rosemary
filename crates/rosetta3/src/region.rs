@@ -29,6 +29,32 @@
 //!   following it would inline the whole program into one translation unit.
 //! - **`ret`, indirect jumps, `ud2`, `int3`**: stop. There is nothing further
 //!   to reach *statically*, which is precisely the case the JIT loop answers.
+//! - **A run of zero bytes**: stop. See below.
+//!
+//! ## Zeros are memory nobody has written, not an instruction
+//!
+//! `00 00` decodes cleanly as `add byte ptr [rax], al`, and a decoder walking
+//! forward through zero-filled memory therefore never stops: it produces a
+//! plausible instruction every two bytes until it runs out of buffer. In an
+//! image that is a nuisance — alignment padding is `int3` or `nop`, so it rarely
+//! comes up. In memory the guest **generates code into** it is fatal, and
+//! Terraria is where that showed.
+//!
+//! An anonymous mapping is zero-filled by the kernel, so a zero byte in a JIT
+//! arena is a byte the guest has not written *yet*. Mono emits one method, this
+//! runtime lifts a region at its entry, and the walk runs off the end of that
+//! method through a quarter-megabyte of untouched arena — 127,779 instructions,
+//! ending only at the mapping's edge. The translation is wasted work, which
+//! would be harmless. What is not harmless is that the region now *claims* every
+//! address in it: when Mono compiles its next method into that same arena and
+//! jumps to it, the code cache finds the earlier translation covering the
+//! address, and runs the zeros it decoded there instead of the method that has
+//! since been written.
+//!
+//! So an all-zero instruction ends the walk, exactly as an undecodable one does.
+//! No compiler emits `add [rax], al`, and treating it as the end of code costs
+//! nothing where it is wrong: the bytes past it are reached later from their own
+//! PC, which is what demand-driven lifting is for.
 //!
 //! Targets outside the buffer are dropped: they are somewhere else's region.
 //!
@@ -81,6 +107,32 @@ impl Region {
     pub fn covers(&self, pc: u64) -> bool {
         self.starts.binary_search(&pc).is_ok()
     }
+
+    /// This region cut down to its first `kept` instructions.
+    ///
+    /// The cut is on the instruction grid, never inside one, which is what makes
+    /// the result a region rather than a range: the bytes handed to the lifter
+    /// must end where an instruction ends, or the lifter's own linear decode of
+    /// them disagrees with [`starts`](Region::starts) about where the last one
+    /// begins.
+    ///
+    /// `None` for a cut that would leave nothing, and for one that keeps
+    /// everything — the caller wanting a shorter region has nothing to do with
+    /// the region it already has.
+    ///
+    /// Used by the code cache to salvage a region microlift refused; see
+    /// `CodeCache::longest_liftable_prefix`.
+    pub fn truncated_to(&self, kept: usize) -> Option<Region> {
+        if kept == 0 || kept >= self.starts.len() {
+            return None;
+        }
+        // The new end is where the first dropped instruction began.
+        let end = *self.starts.get(kept)?;
+        Some(Region {
+            range: self.range.start..end,
+            starts: self.starts[..kept].to_vec(),
+        })
+    }
 }
 
 /// The region to lift so that `pc` can execute.
@@ -118,6 +170,15 @@ pub fn region_for(
     walk(bytes, base, pc, bound)
 }
 
+/// Whether the `len` bytes of an instruction at `off` are all zero.
+///
+/// The end of what anyone has written; see the module note.
+fn is_all_zero(bytes: &[u8], off: usize, len: usize) -> bool {
+    bytes
+        .get(off..off + len)
+        .is_some_and(|b| b.iter().all(|&x| x == 0))
+}
+
 /// The contiguous decodable run beginning at `start`, stopping before `bound`.
 fn walk(bytes: &[u8], base: u64, start: u64, bound: u64) -> Option<Region> {
     let start_off = usize::try_from(start.checked_sub(base)?).ok()?;
@@ -150,7 +211,7 @@ fn walk(bytes: &[u8], base: u64, start: u64, bound: u64) -> Option<Region> {
             decoder.set_position(off).ok()?;
             decoder.set_ip(ip);
             decoder.decode_out(&mut instr);
-            if instr.is_invalid() {
+            if instr.is_invalid() || is_all_zero(bytes, off, instr.len()) {
                 break;
             }
             let next = instr.next_ip();
@@ -315,6 +376,31 @@ mod tests {
     fn undecodable_bytes_yield_nothing_rather_than_an_empty_region() {
         let code = [0x0F, 0xFF];
         assert_eq!(range(&code, BASE, None), None);
+    }
+
+    #[test]
+    fn a_run_of_zeros_ends_the_region_rather_than_decoding_forever() {
+        // `00 00` is `add byte ptr [rax], al`, so a walk through zero-filled
+        // memory never stops on its own. In a JIT arena those zeros are bytes
+        // the guest has not written yet, and a region that claimed them would be
+        // served from the cache after it *had* written them. See the module note.
+        let mut code = vec![0x48, 0x83, 0xEC, 0x08]; // sub rsp, 8
+        code.extend(std::iter::repeat_n(0u8, 64));
+        assert_eq!(
+            range(&code, BASE, None),
+            Some(BASE..BASE + 4),
+            "the region must stop where the written code does"
+        );
+    }
+
+    #[test]
+    fn a_zero_byte_inside_a_real_instruction_is_not_the_end() {
+        // The rule is about instructions that are *entirely* zero, not about
+        // zero bytes — an immediate or a displacement is full of them, and
+        // stopping there would truncate ordinary code.
+        // mov eax, 0x00000001 ; ret
+        let code = [0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3];
+        assert_eq!(range(&code, BASE, None), Some(BASE..BASE + 6));
     }
 
     #[test]

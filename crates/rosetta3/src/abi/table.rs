@@ -335,6 +335,31 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFStringConvertEncodingToNSStringEncoding", U64, U32),
     sig!("CFStringConvertIANACharSetNameToEncoding", U32, P),
     sig!("CFStringConvertNSStringEncodingToEncoding", U32, U64),
+    // ## `CFRange` is the aggregate that needs no vocabulary
+    //
+    // Refused as an aggregate until M7.4, and it is worth being precise about
+    // why it stopped being one. `CFStringGetBytes` takes a `CFRange` **by
+    // value**, and [`AGGREGATE`] is right that this table cannot say "an
+    // argument is a struct". It does not have to. A `CFRange` is two `CFIndex`
+    // — sixteen bytes, both integer — and SysV AMD64 and AAPCS64 *agree* on how
+    // to pass one: two consecutive integer registers. So the two members are
+    // written down as two arguments, and every register lands where the callee
+    // reads it.
+    //
+    // This is the same fact as `NSRange` in the Objective-C path, and it is
+    // exactly as narrow: `NSRect` does not agree, because SysV classifies
+    // anything over sixteen bytes as MEMORY while AAPCS64 sees a homogeneous
+    // float aggregate. The rule that survives is "check this struct against both
+    // ABIs", not "structs are fine now" — everything still in the aggregate
+    // refusal list is there because it was checked and does not agree.
+    //
+    // Nine integer arguments, one past the host's eight; see `glTexImage2D` for
+    // the precedent and [`super::marshal`] for what carries the ninth. Reached
+    // by Mono, which converts every managed string through it.
+    sig!(
+        "CFStringGetBytes",
+        I64, P, I64, I64, U32, U8, U8, P, I64, P
+    ),
     sig!("CFStringGetCString", BOOL, P, P, U64),
     sig!("CFStringGetCStringPtr", P, P, U32),
     sig!("CFStringGetLength", I64, P),
@@ -876,6 +901,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("getppid", I32),
     sig!("getpriority", I32, I32, U32),
     sig!("getprogname", P),
+    // `struct protoent` — a name, an alias vector and an `int` — comes back the
+    // same way `getpwuid`'s does, as a pointer into libSystem's storage, and has
+    // the same layout on both architectures.
+    sig!("getprotobyname", P, P),
     // `struct passwd` comes back as a pointer into libSystem's own storage,
     // which the guest then reads directly — so this one depends on the layout
     // check above in a way the writers-through-a-pointer do not.
@@ -1642,7 +1671,6 @@ pub static REFUSED: &[(&str, &str)] = &[
         "CFRunLoopSourceCreate",
         "its context structure holds guest function pointers the host would call as arm64",
     ),
-    ("CFStringGetBytes", AGGREGATE),
     ("CGEventCreateMouseEvent", AGGREGATE),
     ("CGRectContainsPoint", AGGREGATE),
     ("CGRectInset", AGGREGATE),

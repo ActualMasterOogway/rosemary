@@ -614,7 +614,10 @@ impl<M: Regions> Program<M> {
             // Or an image the *guest* loaded, which is not in this `Program` and
             // cannot be: a `Program` is immutable once linked, which is what
             // `SharedProgram`'s `unsafe impl Sync` rests on. See [`crate::dyld`].
-            return crate::dyld::lift_region(va);
+            return crate::dyld::lift_region(va)
+                // Or code the guest *wrote*, which is in no image at all — see
+                // [`crate::shims::vmmap`].
+                .or_else(|| lift_generated(va));
         };
         let function = self.functions.iter().find(|f| f.contains(&va)).cloned();
         let region = crate::region::region_for(bytes, base, va, function)?;
@@ -634,7 +637,12 @@ impl<M: Regions> Program<M> {
     /// entered, a host address must be called natively as arm64. Getting this
     /// backwards in either direction is a crash with no useful diagnostic.
     pub fn is_guest_address(&self, va: u64) -> bool {
-        self.memory.region_at(va).is_some() || crate::dyld::contains(va)
+        self.memory.region_at(va).is_some()
+            || crate::dyld::contains(va)
+            // Or memory the guest *generated* code into, which is in no image at
+            // all. See [`crate::shims::vmmap`] for why the set of such addresses
+            // is exactly the set the guest asked to be executable.
+            || crate::shims::vmmap::contains(va)
     }
 
     /// `va` as `image+offset`, in the image's *own* address space.
@@ -727,4 +735,69 @@ impl<M: Regions> Program<M> {
     pub fn import_addresses(&self) -> impl Iterator<Item = u64> + '_ {
         self.imports.keys().copied()
     }
+}
+
+/// The region to lift in order to execute `va`, when `va` is code the guest
+/// *wrote* rather than code it loaded.
+///
+/// ## Why this is not just another `region_at`
+///
+/// Every other lift in this runtime starts from an image: there is a mapping
+/// with known bounds, and usually a `LC_FUNCTION_STARTS` entry saying where the
+/// function containing `va` ends. Generated code has neither. Mono emits a method
+/// into the middle of a code manager's arena and nothing anywhere records its
+/// extent — there is no symbol table, no unwind table, no function-starts list,
+/// and the byte before the entry point belongs to a different method.
+///
+/// So the extent is *computed*, which is what [`crate::region`] has always done
+/// and what the roadmap's "which bytes are code" note argues is the only general
+/// answer. `region_for` is handed no function hint at all: the walk starts at
+/// `va` and stops where control provably leaves, and the arena's end is the only
+/// upper bound. That is the same discipline `/bin/ls`'s embedded jump table
+/// forced, applied where it is not an optimisation but the only option.
+///
+/// ## The bytes are copied, deliberately
+///
+/// The arena is live guest memory, and the guest's own JIT is still writing to
+/// it — possibly on another thread. Lifting from a borrowed slice would mean
+/// decoding bytes that change underneath the decoder. Copying the region's
+/// extent gives the translation a fixed input, which is the only way its
+/// instruction grid means anything afterwards.
+///
+/// ## Scope
+///
+/// The code cache never invalidates, so a guest that frees a method and emits a
+/// different one at the same address is served the first translation. Mono's
+/// code manager does reuse space, which makes this the next thing this path will
+/// need and not a theoretical concern — closing it means write-protecting arena
+/// pages and flushing the cache on fault, which is the standing self-modifying-code
+/// item in the roadmap.
+fn lift_generated(va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
+    let (base, len) = crate::shims::vmmap::arena_at(va)?;
+    let offset = usize::try_from(va - base).ok()?;
+    let len = usize::try_from(len).ok()?;
+
+    // SAFETY: `base` came from a successful `mmap` this runtime made on the
+    // guest's behalf and never unmapped — see [`crate::shims::vmmap`], where the
+    // arena is recorded — so the whole range is mapped and readable. The guest
+    // may be writing into it concurrently, which is why the bytes are copied
+    // here rather than borrowed: a torn read produces an instruction stream that
+    // fails to decode, not a dangling reference.
+    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(base as usize as *const u8, len) };
+
+    let region = crate::region::region_for(bytes, base, va, None)?;
+    if crate::shims::vmmap::tracing() {
+        let head = &bytes[offset..(offset + 64).min(len)];
+        eprintln!(
+            "rosetta3: lift generated {va:#x} in arena {base:#x}+{len:#x}, region {:#x}..{:#x}, {} starts, bytes {}",
+            region.range.start,
+            region.range.end,
+            region.starts.len(),
+            head.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+        );
+    }
+    let start = usize::try_from(region.range.start - base).ok()?;
+    let end = usize::try_from(region.range.end - base).ok()?.min(len);
+    debug_assert!(offset >= start && offset < end.max(offset + 1));
+    Some((region, bytes.get(start..end)?.to_vec()))
 }
