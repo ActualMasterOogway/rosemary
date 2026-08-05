@@ -661,6 +661,20 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // for the reason [`crate::shims::valist`] gives.
     sig!("__vsnprintf_chk", I32, P, U64, I32, U64, P, P),
     vsig!("__vsprintf_chk", I32, P, I32, U64, P),
+    // What `@available` / `__builtin_available` compiles to:
+    // `bool _availability_version_check(uint32_t count, dyld_build_version_t *)`.
+    // A `dyld_build_version_t` is two `uint32_t` — platform and version — so the
+    // array the guest passes is read identically on both architectures, and it
+    // travels by pointer rather than by value.
+    //
+    // Passthrough is the *right* answer here rather than a convenient one. The
+    // question is "is the OS running this process at least version X", and the
+    // OS running this process is the host's — an x86-64 binary asking it on
+    // Rosetta 2 gets the same answer from the same function. SDL3's Cocoa
+    // backend asks it before using anything version-gated, which is most of
+    // AppKit, and reached it from a *guest callback* — so a refusal surfaces on
+    // whatever thread AppKit was calling into rather than at start-up.
+    sig!("_availability_version_check", BOOL, U32, P),
     // `const char *_dyld_get_image_name(uint32_t)`, answered with the host's
     // image list for the reason [`crate::shims::runtime`] gives.
     sig!("_dyld_get_image_name", P, U32),
