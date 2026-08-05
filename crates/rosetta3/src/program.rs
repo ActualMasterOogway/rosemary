@@ -333,8 +333,15 @@ impl<M: Regions> Program<M> {
         let hosts = HostProviders::new();
         let providers = hosts.chain(extra);
 
-        let report =
+        let mut report =
             Loader::new(X86_64).link_with(bytes, path, &mut memory, &mut source, &providers)?;
+
+        // Before anything reads the report: the guest's landing pads call
+        // `_Unwind_Resume` through libSystem, which native passthrough answers
+        // with the *host's* unwinder, while `__cxa_throw` names libc++ and
+        // reaches the vendored guest one. One unwind, two unwinders. See
+        // [`crate::cxxlib::bind_unwinder_to_the_vendored_one`].
+        crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory)?;
 
         // The root image's `__text` is what the driver lifts. Re-parsing here
         // rather than threading a `MachObject` out of the loader keeps the

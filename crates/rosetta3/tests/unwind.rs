@@ -15,7 +15,7 @@
 
 mod common;
 
-use common::{exceptions_fixture, run_guest, run_native, unwind_refusals_fixture};
+use common::{exceptions_fixture, run_guest, run_native, run_native_with, unwind_refusals_fixture};
 
 /// What the fixture prints when unwinding works, and what the same binary prints
 /// natively. Every line is a separate claim; see [`common::EXCEPTIONS_CPP`].
@@ -162,23 +162,32 @@ fn a_thread_unwinds_its_own_stack() {
 }
 
 #[test]
-fn an_uncaught_exception_stops_without_running_destructors() {
+fn an_uncaught_exception_terminates_exactly_as_it_does_natively() {
     // C++ requires `std::terminate` with the stack *intact*, which is the whole
     // reason the search is a separate phase. `~uncaught` printing here would
     // mean the runtime unwound first and asked afterwards.
+    //
+    // Compared against the same binary run natively rather than against a
+    // message this project chose. That is now possible and was not before: the
+    // guest runs a **real** `libc++abi`, so what it prints when nothing catches
+    // is what the platform prints — `libc++abi: terminating due to uncaught
+    // exception of type Boom`, down to the type name — and the exit status is
+    // the same `SIGABRT`. The earlier version of this test asserted a
+    // rosetta3-authored diagnostic containing "terminate"; the real one says
+    // "terminating", which is how the improvement first showed up as a failure.
     let Some(path) = unwind_refusals_fixture() else {
         skip!("cannot build x86_64 C++ fixtures")
     };
+    let Some((native_status, expected)) = run_native_with(&path, &["uncaught"]) else {
+        skip!("cannot run x86_64 binaries natively")
+    };
     let (status, out, err) = run_guest(&path, &["uncaught"]);
 
-    assert_ne!(
-        status,
-        Some(0),
-        "an uncaught exception should not succeed: {out}"
-    );
+    assert_eq!(out, expected, "stderr: {err}");
+    assert_eq!(status, native_status, "stderr: {err}");
     assert!(
-        err.contains("terminate"),
-        "the stop should name the case: {err}"
+        err.contains("terminating due to uncaught exception"),
+        "the stop should be libc++abi's own: {err}"
     );
     assert!(
         !out.contains("~uncaught"),
@@ -190,12 +199,27 @@ fn an_uncaught_exception_stops_without_running_destructors() {
     );
 }
 
+/// A throw across a host frame still cannot be caught — and the diagnosis for it
+/// got **worse**, which is the honest cost of vendoring a real unwinder.
+///
+/// The comparator is called by the host's `qsort`, so the handler in `main` is
+/// on the far side of arm64 frames the guest's `libunwind` has never seen.
+/// Natively this works and prints `caught across a host frame`; here it does
+/// not, and that gap is unchanged.
+///
+/// What changed is what the guest is *told*. This project's own unwinder
+/// recognised the case and refused it by name — "unwinding host frames" — and
+/// the real `libc++abi` cannot, because from inside it there is nothing unusual
+/// happening: it searched, found no handler, and terminated exactly as the
+/// standard says. So the program now dies with `libc++abi: terminating due to
+/// uncaught exception`, which is indistinguishable from a genuinely uncaught
+/// throw.
+///
+/// This test records that rather than hiding it. Closing it means teaching
+/// [`rosetta3::unwind`]'s frame walk to recognise the boundary and say so, which
+/// is work the vendoring deliberately deferred.
 #[test]
-fn a_throw_across_a_host_frame_is_refused_by_name() {
-    // The comparator is called by the host's `qsort`, so the handler in `main`
-    // is on the far side of host frames. Unwinding them is the same problem
-    // `longjmp` refuses, and the message says which case it is rather than
-    // reporting the generic "nothing catches this".
+fn a_throw_across_a_host_frame_is_still_not_caught() {
     let Some(path) = unwind_refusals_fixture() else {
         skip!("cannot build x86_64 C++ fixtures")
     };
@@ -203,35 +227,41 @@ fn a_throw_across_a_host_frame_is_refused_by_name() {
 
     assert_ne!(status, Some(0), "{out}");
     assert!(
-        err.contains("host frames"),
-        "the refusal should name the case: {err}"
-    );
-    assert!(
         !out.contains("caught across"),
         "it cannot actually have been caught:\n{out}"
+    );
+    // Named as the *current* diagnosis, so that improving it fails here and is
+    // looked at rather than passing silently.
+    assert!(
+        err.contains("terminating due to uncaught exception"),
+        "expected libc++abi's terminate, got: {err}"
     );
 }
 
 #[test]
-fn a_catch_needing_multiple_inheritance_is_refused_rather_than_missed() {
-    // A base subobject at a non-zero offset would have to move the pointer the
-    // `catch` binds to. Reporting "nothing catches this" would be a lie of the
-    // most expensive kind — the program would terminate and the clause that
-    // should have run is right there in the source.
+fn a_catch_needing_multiple_inheritance_works() {
+    // A base subobject at a non-zero offset has to move the pointer the `catch`
+    // binds to. This project's own unwinder could not, and **refused by name**
+    // rather than reporting "nothing catches this" — which would have been a lie
+    // of the most expensive kind, terminating a program whose handler is right
+    // there in the source.
+    //
+    // Vendoring a real `libc++abi` closed it: the offset adjustment is exactly
+    // the sort of thing the Itanium ABI's own implementation does correctly, and
+    // this test now asserts the clause runs. It is the clearest single win from
+    // running the C++ runtime rather than reimplementing it, and it is checked
+    // against the native run rather than against a claim.
     let Some(path) = unwind_refusals_fixture() else {
         skip!("cannot build x86_64 C++ fixtures")
     };
-    let (status, _, err) = run_guest(&path, &["multiple"]);
+    let Some((native_status, expected)) = run_native_with(&path, &["multiple"]) else {
+        skip!("cannot run x86_64 binaries natively")
+    };
+    let (status, out, err) = run_guest(&path, &["multiple"]);
 
-    assert_ne!(status, Some(0));
-    assert!(
-        err.contains("type_info"),
-        "the refusal should name what is missing: {err}"
-    );
-    assert!(
-        !err.contains("std::terminate"),
-        "this is not 'nobody catches it': {err}"
-    );
+    assert_eq!(out, expected, "stderr: {err}");
+    assert_eq!(status, native_status, "stderr: {err}");
+    assert!(out.contains("multiple inheritance"), "{out}");
 }
 
 #[test]

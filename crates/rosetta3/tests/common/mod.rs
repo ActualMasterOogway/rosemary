@@ -1017,7 +1017,12 @@ pub fn build_native(name: &str, source: &str) -> Option<String> {
 /// than a recompilation of the same source — and when it is not available the
 /// caller skips rather than fails.
 pub fn run_native(path: &str) -> Option<(Option<i32>, String)> {
-    let out = Command::new(path).output().ok()?;
+    run_native_with(path, &[])
+}
+
+/// [`run_native`], with arguments — for a fixture that selects a case by one.
+pub fn run_native_with(path: &str, args: &[&str]) -> Option<(Option<i32>, String)> {
+    let out = Command::new(path).args(args).output().ok()?;
     out.status.code().is_some().then(|| {
         (
             out.status.code(),

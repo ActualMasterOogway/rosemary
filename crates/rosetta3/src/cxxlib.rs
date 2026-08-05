@@ -43,33 +43,42 @@
 //! answers exactly as it does for any other guest image. That is what makes this
 //! library specifically safe to run as guest code when libSystem is not.
 //!
-//! ## Why `libc++abi` is deliberately *not* vendored
+//! ## `libc++abi` and `libunwind` are vendored too, and that is the later answer
 //!
-//! An Intel `libc++abi.dylib` sits beside the vendored `libc++` and is not used,
-//! which is a decision rather than an omission.
+//! This module first vendored `libc++` alone, on the reasoning that
+//! `libc++abi` defines the `__cxa_*` family [`crate::unwind`] virtualizes and
+//! that a real unwinder would walk a stack whose frames do not exist. Both are
+//! vendored now, and the C++ runtime is guest code end to end.
 //!
-//! `libc++abi` defines `__cxa_throw`, `__cxa_begin_catch`, `__cxa_end_catch`,
-//! `__cxa_rethrow`, `__cxa_allocate_exception` and `_Unwind_Resume` — which is
-//! precisely the list [`crate::unwind`] **virtualizes**. It has to: a guest
-//! frame is not a machine frame. The guest's code is Cranelift-compiled arm64
-//! running on the host's stack, so there is nothing for a real unwinder to walk
-//! — and the real unwinder here would be `libunwind`, which `libc++abi` in turn
-//! depends on and which is not vendored either. Loading `libc++abi` as guest
-//! code would take `__cxa_throw` away from the shim and give it to code that
-//! then walks a stack whose frames do not exist, which is the one failure mode
-//! worse than not implementing exceptions at all.
+//! ## One unwind, one unwinder — and the linker splits them
 //!
-//! So the C++ *runtime* is guest code and the C++ *unwinder* stays virtualized,
-//! and the seam between them is exactly where it already was. What
-//! `libc++abi` would otherwise have supplied — `std::exception` and its `what`,
-//! `std::length_error`, `std::out_of_range`, `std::bad_array_new_length`,
-//! `std::terminate`, and their `typeinfo` and `vtable` objects, thirteen symbols
-//! in `steamclient.dylib`'s case — is answered by the host, for both the guest
-//! *and* the vendored `libc++`, so the two agree with each other. Those are the
-//! one part of the C++ runtime where agreement is plausible without checking:
-//! an exception object is a vtable pointer and a `const char *`, with no ABI
-//! switch on it, and [`crate::unwind`]'s `type_info` comparisons already work
-//! against the host's copies.
+//! Vendoring the unwinder exposes a problem that vendoring the library did not,
+//! and it is a fact about how a C++ program is *linked* rather than about
+//! either ABI. Two symbols, one exception:
+//!
+//! ```text
+//! (undefined) external ___cxa_throw    (from libc++)
+//! (undefined) external __Unwind_Resume (from libSystem)
+//! ```
+//!
+//! `__cxa_throw` names libc++, so it resolves into the vendored guest
+//! `libc++abi`. `_Unwind_Resume` — which the compiler emits at the bottom of
+//! every landing pad, in the *program's own* code — names **libSystem**, because
+//! that is where macOS re-exports libunwind from. Native passthrough answers
+//! libSystem, so it resolves to the **host's** unwinder.
+//!
+//! That splits one unwind across two implementations. The guest's `libc++abi`
+//! begins it by calling the guest `libunwind`'s `_Unwind_RaiseException`, which
+//! builds a `_Unwind_Exception` and walks the guest's frames; the landing pad
+//! then hands that object to the *host's* `_Unwind_Resume`, which reads a
+//! structure its own libunwind did not create and continues along a stack it has
+//! never seen. Nothing about that is detectable from a name, and it fails at the
+//! moment an exception is thrown.
+//!
+//! So [`bind_unwinder_to_the_vendored_one`] rewrites those slots after the link:
+//! any `_Unwind_*` binding that resolved outside the guest is pointed at the
+//! vendored `libunwind`'s own export. Which unwinder a program uses is decided
+//! by whoever raised the exception, and that is the guest's.
 //!
 //! ## What it costs
 //!
@@ -107,6 +116,7 @@
 
 use machish::error::Result;
 use machish::namespace::{DylibRequest, DylibSource, FetchedDylib};
+use machish::spec::arch::X86_64;
 
 /// A real x86-64 `libc++.1.dylib`, built for the ABI Apple's is built for.
 ///
@@ -211,6 +221,79 @@ impl<S: DylibSource> DylibSource for VendoredCxx<S> {
         }
         self.inner.fetch(request)
     }
+}
+
+/// Point every `_Unwind_*` binding at the **vendored** `libunwind`.
+///
+/// See the module note on why the linker splits one unwind across two
+/// unwinders. This is the repair, and it is a rebind rather than a provider for
+/// a reason worth stating: a [`SymbolProvider`] is built before
+/// [`Loader::link_with`] runs and cannot know where the loader will map
+/// `libunwind`, because the loader chooses that during mapping — which happens
+/// after the providers are assembled and before the bindings they answer are
+/// written. The address only exists once the link is done.
+///
+/// Slots are rewritten in guest memory *and* in the report, so everything built
+/// from the report afterwards — [`crate::Program`]'s import maps, the audit —
+/// describes what the slot actually holds.
+///
+/// A binding that already resolved into the guest is left alone: it named
+/// libc++ or libc++abi and reached the vendored image the ordinary way. So is
+/// one this vendored `libunwind` does not export, which is how a name that only
+/// looks like the family stays the host's.
+///
+/// [`SymbolProvider`]: machish::resolve::SymbolProvider
+/// [`Loader::link_with`]: machish::loader::Loader::link_with
+pub fn bind_unwinder_to_the_vendored_one<M: machish::memory::Regions>(
+    report: &mut machish::report::LinkReport,
+    memory: &mut M,
+) -> Result<usize> {
+    // Where the vendored `libunwind` landed, if this link wanted one at all. A
+    // C program does not, and neither does a C++ program that never throws.
+    let Some((base, slide)) = report
+        .images
+        .iter()
+        .find(|i| is_libunwind(&i.name))
+        .map(|i| (i.base, i.slide))
+    else {
+        return Ok(0);
+    };
+    let object = machish::image::MachObject::parse_any(LIBUNWIND, X86_64)?;
+    let exports = machish::exports::ExportTable::parse(&object)?;
+
+    let mut rebound = 0;
+    for image in &mut report.images {
+        // The vendored unwinder's own bindings are not rewritten: it is the
+        // thing being bound *to*, and its internal references are already its
+        // own.
+        if image.base == base {
+            continue;
+        }
+        for binding in &mut image.bindings {
+            // The Mach-O spelling carries a leading underscore, so the C
+            // identifier `_Unwind_Resume` arrives as `__Unwind_Resume`.
+            if !binding.symbol.starts_with("__Unwind_") {
+                continue;
+            }
+            let Some(export) = exports.get(&binding.symbol) else {
+                continue;
+            };
+            let Some(addr) = export.address(slide) else {
+                continue;
+            };
+            if binding.resolved == addr {
+                continue;
+            }
+            memory.write(binding.slot_va, &addr.to_le_bytes())?;
+            binding.resolved = addr;
+            // The tag is the *provider's*, and the provider that answered was
+            // the host's. Clearing it stops a stale index selecting a signature
+            // for a call that is now guest-to-guest.
+            binding.tag = 0;
+            rebound += 1;
+        }
+    }
+    Ok(rebound)
 }
 
 /// The source every link in this crate uses: vendored libc++ in front of the

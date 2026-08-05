@@ -887,6 +887,20 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("atoi", I32, P),
     sig!("atol", I64, P),
     sig!("atoll", I64, P),
+    // `<execinfo.h>`, and the reason a *crash handler* is the first thing a
+    // C++ game reaches: Starbound installs one before it does anything else, so
+    // this is in front of its start-up rather than after a fault.
+    //
+    // Passthrough walks the **host's** stack, which is this runtime's frames
+    // and not the guest's — a guest that prints the result gets a trace of the
+    // JIT rather than of itself. That is the honest answer available here and
+    // it is not a wrong one: the guest's own frames live on a guest stack the
+    // host unwinder has never heard of, and reporting them means walking it
+    // with [`crate::unwind`], which is a different piece of work. What matters
+    // for start-up is that installing a handler does not stop the program.
+    sig!("backtrace", I32, P, I32),
+    sig!("backtrace_symbols", P, P, I32),
+    sig!("backtrace_symbols_fd", V, P, I32, I32),
     sig!("bcmp", I32, P, P, U64),
     sig!("bind", I32, I32, P, U32),
     // `kern_return_t bootstrap_look_up(mach_port_t, const name_t, mach_port_t *)`.

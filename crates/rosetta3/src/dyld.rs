@@ -555,7 +555,7 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
         .into_iter()
         .collect();
     extra.push(&loaded as &dyn machish::resolve::SymbolProvider);
-    let report = Loader::new(X86_64)
+    let mut report = Loader::new(X86_64)
         .link_with(
             &bytes,
             &resolved,
@@ -564,6 +564,13 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
             &hosts.chain(&extra),
         )
         .map_err(|e| format!("{resolved}: {e}"))?;
+
+    // The same repair the program's own link needs, for the same reason: this
+    // image's landing pads name libSystem for `_Unwind_Resume` and would get
+    // the host's unwinder. See
+    // [`crate::cxxlib::bind_unwinder_to_the_vendored_one`].
+    crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory)
+        .map_err(|e| format!("{resolved}: unwinder: {e}"))?;
 
     // Say what did not resolve, here, rather than letting the guest find out by
     // calling it. A `dlopen`ed image links against a chain assembled at run time
@@ -1254,7 +1261,12 @@ fn clear_error() {
 pub fn shim_for(name: &str) -> Option<crate::jmpbuf::Shim> {
     matches!(
         name,
-        "dlopen" | "dlsym" | "dlclose" | "dlerror" | "dladdr"
+        "dlopen"
+            | "dlsym"
+            | "dlclose"
+            | "dlerror"
+            | "dladdr"
+            | "_dyld_find_unwind_sections"
     )
     .then_some(serve)
 }
@@ -1272,6 +1284,12 @@ fn serve(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> 
             Ok(())
         }
         "dladdr" => dladdr(symbol, ctx, mem),
+        // Spelled with one fewer underscore than [`shim_for`] matches on:
+        // the C identifier is `_dyld_find_unwind_sections`, the Mach-O symbol
+        // carries another, and `serve` strips one more before this match. The
+        // same two-spelling rule [`crate::shims::math`] records for
+        // `__sincos_stret`.
+        "dyld_find_unwind_sections" => find_unwind_sections(symbol, ctx, mem),
         "dlerror" => {
             let taken = ERROR.lock().unwrap_or_else(|e| e.into_inner()).take();
             let mut reported = REPORTED.lock().unwrap_or_else(|e| e.into_inner());
@@ -1384,6 +1402,148 @@ fn dladdr(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) ->
     // Non-zero on success, unlike almost everything else in `<dlfcn.h>`.
     crate::shims::set_int_return(ctx, 1);
     Ok(())
+}
+
+/// `bool _dyld_find_unwind_sections(void *addr, struct dyld_unwind_sections *)`
+///
+/// The question a C++ program's unwinder asks before it can throw anything:
+/// *which image is this return address in, and where are its unwind tables?*
+/// The host's dyld cannot answer it for a guest address — the image was mapped
+/// by [`open`] or by [`crate::Program`], not by dyld, so it has never heard of
+/// it — and answering `false` is what left every guest `throw` with no
+/// personality routine to consult.
+///
+/// This is the same "a loaded image needs what a program's images get for free"
+/// shape as the rest of this module, and it is the one the roadmap called the
+/// largest thing outstanding: `rosetta3`'s own `tests/unwind.rs` has been red on
+/// it since the commit that vendored a real `libunwind`.
+///
+/// ## The structure, read out of the caller
+///
+/// `dyld_priv.h` is not in any SDK on this system, so the layout comes from the
+/// vendored `libunwind` that calls it — the same method
+/// [`crate::abi::table`]'s `KBGetLayoutType` entry uses, and the same one this
+/// project uses to decide which bytes are code:
+///
+/// ```text
+/// leaq -0x300(%rbp), %rsi   ; the structure
+/// callq __dyld_find_unwind_sections
+/// testb %al, %al            ; bool, in al
+/// movq -0x300(%rbp), ...    ; +0x00  mach_header *
+/// movq -0x2f8(%rbp), ...    ; +0x08  dwarf_section
+/// movq -0x2f0(%rbp), ...    ; +0x10  dwarf_section_length
+/// movq -0x2e8(%rbp), ...    ; +0x18  compact_unwind_section
+/// movq -0x2e0(%rbp), ...    ; +0x20  compact_unwind_section_length
+/// ```
+///
+/// Five pointer-sized words, forty bytes, and pointer-sized means the same
+/// forty on both architectures.
+///
+/// ## Where the section bounds come from
+///
+/// The guest's own `mach_header`, walked by the **host's** libmacho. A
+/// `mach_header_64` and its load commands are a file format rather than a
+/// layout, so `getsectbynamefromheader_64` reads an x86-64 header correctly —
+/// the same fact the signature table already records for that function. What it
+/// returns is the link-time address, so the image's slide is added here.
+fn find_unwind_sections(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let (addr, out) = (ctx.rdi, ctx.rsi);
+    let Some((header, slide)) = guest_image_at(addr) else {
+        // Not ours. The host's dyld knows its own images, and a guest that
+        // unwinds through a *host* frame is asking about one of those — which
+        // is a case [`crate::unwind`] refuses further up, but the honest answer
+        // here is still the host's.
+        let Some(host) = host_symbol("_dyld_find_unwind_sections") else {
+            crate::shims::set_int_return(ctx, 0);
+            return Ok(());
+        };
+        // SAFETY: `bool (*)(void *, struct dyld_unwind_sections *)`, and `out`
+        // is a guest address, which is a real address in this process. The host
+        // writes forty bytes there, which is what the guest reserved.
+        let f: extern "C" fn(u64, u64) -> bool =
+            unsafe { core::mem::transmute::<u64, extern "C" fn(u64, u64) -> bool>(host) };
+        crate::shims::set_int_return(ctx, i32::from(f(addr, out)));
+        return Ok(());
+    };
+    if out == 0 {
+        crate::shims::set_int_return(ctx, 0);
+        return Ok(());
+    }
+
+    let mut words = [0u8; 40];
+    words[0..8].copy_from_slice(&header.to_le_bytes());
+    for (i, section) in ["__eh_frame", "__unwind_info"].into_iter().enumerate() {
+        let (at, len) = section_in(header, section).map_or((0, 0), |(addr, size)| {
+            (addr.wrapping_add(slide), size)
+        });
+        let base = 8 + i * 16;
+        words[base..base + 8].copy_from_slice(&at.to_le_bytes());
+        words[base + 8..base + 16].copy_from_slice(&len.to_le_bytes());
+    }
+    mem.write_bytes(out, &words, symbol)?;
+    // True even when both sections are absent, which is a real answer rather
+    // than a failure: the image *is* the one containing `addr`, and a C program
+    // with nothing to unwind has neither table. Reporting `false` would send
+    // libunwind off to its dynamic-registration path looking for another
+    // answer that does not exist.
+    crate::shims::set_int_return(ctx, 1);
+    Ok(())
+}
+
+/// `(mach_header VA, slide)` for the guest image containing `va`.
+///
+/// Both kinds: the program's own images — which includes anything it was linked
+/// against and this runtime mapped — and anything [`open`] loaded since. A
+/// caller cannot tell them apart and neither should the answer.
+fn guest_image_at(va: u64) -> Option<(u64, u64)> {
+    fn containing(report: &LinkReport, va: u64) -> Option<(u64, u64)> {
+        report
+            .images
+            .iter()
+            .find(|i| {
+                i.segments
+                    .iter()
+                    .any(|s| va >= s.vmaddr && va < s.vmaddr.wrapping_add(s.vmsize))
+            })
+            .map(|i| (i.base, i.slide))
+    }
+    if let Some(found) = find(|i| containing(&i.report, va)) {
+        return Some(found);
+    }
+    containing(&crate::thunk::current()?.program.report, va)
+}
+
+/// `(unslid addr, size)` of a section in the guest image at `header`.
+///
+/// Through the host's libmacho, for the reason the doc above gives. `None` when
+/// the image has no such section, which for `__eh_frame` is most C programs.
+fn section_in(header: u64, section: &str) -> Option<(u64, u64)> {
+    let host = host_symbol("getsectbynamefromheader_64")?;
+    let (seg, sect) = (CString::new("__TEXT").ok()?, CString::new(section).ok()?);
+    // SAFETY: `const struct section_64 *(*)(const struct mach_header_64 *,
+    // const char *, const char *)`. `header` is a guest image's mapped header,
+    // which is identity-mapped and therefore a real address here, and both
+    // strings outlive the call.
+    let f: extern "C" fn(u64, *const libc::c_char, *const libc::c_char) -> *const u8 =
+        unsafe { core::mem::transmute::<u64, _>(host) };
+    let found = f(header, seg.as_ptr(), sect.as_ptr());
+    if found.is_null() {
+        return None;
+    }
+    // `struct section_64`: two 16-byte names, then `addr` and `size`.
+    // SAFETY: libmacho returned a `section_64` inside the guest's own mapped
+    // load commands, so the thirty-two bytes at +32 are the image's.
+    let (addr, size) = unsafe {
+        (
+            found.add(32).cast::<u64>().read_unaligned(),
+            found.add(40).cast::<u64>().read_unaligned(),
+        )
+    };
+    Some((addr, size))
 }
 
 /// What [`dladdr`] found: the four `Dl_info` fields, as host addresses.
@@ -1509,6 +1669,11 @@ pub fn provider() -> SyntheticDylib {
         // resolve to null without this, which is how Terraria found them.
         "_dyld_register_func_for_add_image",
         "_dyld_register_func_for_remove_image",
+        // On `machish`'s `_dyld_` denylist like the two above, and the reason
+        // `tests/unwind.rs` has been red: a guest `libunwind` calls it before
+        // it can find a personality routine, and an unresolved slot is a null
+        // call at the moment an exception is being thrown.
+        "_dyld_find_unwind_sections",
     ] {
         if let Some(addr) = host_symbol(name) {
             lib.define_fn(&format!("_{name}"), addr as usize as *const ());
