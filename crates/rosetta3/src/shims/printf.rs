@@ -37,7 +37,7 @@
 
 use microlift::arch::x86_64::context::RegisterContext;
 
-use crate::abi::{GuestMemory, Result};
+use crate::abi::{AbiError, GuestMemory, Result};
 
 use super::{bad_pointer, set_int_return};
 
@@ -711,6 +711,83 @@ pub fn sprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemor
 pub fn snprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let out = format_from(symbol, ctx, &*mem, ctx.rdx, 3)?;
     store_bounded(symbol, ctx, mem, ctx.rdi, ctx.rsi, out)
+}
+
+/// `int snprintf_l(char *dst, size_t n, locale_t loc, const char *fmt, ...)`
+///
+/// The locale-aware form, and it is here because the **vendored libc++** uses
+/// it rather than because a game does: Starbound imports no `_l` function at
+/// all, and libc++ formats every number through this one so that
+/// `std::to_string` and `num_put` do not pick up whatever locale the program
+/// happens to have installed.
+///
+/// ## The locale is checked rather than ignored
+///
+/// This shim renders in Rust, which produces **C-locale** output — `.` for the
+/// radix point, no digit grouping. That is the right answer for the caller
+/// libc++ is, and the wrong one for a program that passes a locale where it is
+/// not: a German locale would want `1,5` and would silently get `1.5`.
+///
+/// So the locale is asked, through the host's own `querylocale`, and anything
+/// that is not `C` or `POSIX` is refused by name. A refusal is a work item; a
+/// plausible wrong number in a save file is not.
+pub fn snprintf_l(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    c_locale_or_refuse(symbol, ctx.rdx)?;
+    let out = format_from(symbol, ctx, &*mem, ctx.rcx, 4)?;
+    store_bounded(symbol, ctx, mem, ctx.rdi, ctx.rsi, out)
+}
+
+/// `int sprintf_l(char *dst, locale_t loc, const char *fmt, ...)`
+pub fn sprintf_l(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    c_locale_or_refuse(symbol, ctx.rsi)?;
+    let mut out = format_from(symbol, ctx, &*mem, ctx.rdx, 3)?;
+    let written = out.len();
+    out.push(0);
+    mem.write(ctx.rdi, &out)
+        .map_err(|_| bad_pointer(symbol, ctx.rdi))?;
+    set_int_return(ctx, written as i32);
+    Ok(())
+}
+
+/// Refuse unless `loc` formats numbers the way this renderer does.
+///
+/// `LC_NUMERIC` is the category that decides the radix point and the grouping,
+/// which is the whole of what a `printf` conversion reads a locale for. A null
+/// handle is the global locale, which `querylocale` answers for directly.
+fn c_locale_or_refuse(symbol: &str, loc: u64) -> Result<()> {
+    let Some(query) = crate::dyld::host_symbol("querylocale") else {
+        // No way to ask. Refusing is the same decision as below and for the
+        // same reason: rendering anyway would be a guess.
+        return Err(AbiError::Refused {
+            symbol: symbol.to_string(),
+            reason: "the locale cannot be inspected on this host",
+        });
+    };
+    // SAFETY: `const char *querylocale(int, locale_t)`. `loc` is either null —
+    // which the implementation reads as the global locale — or a `locale_t` the
+    // guest got from the host's own `newlocale`, since a locale object is
+    // opaque and passthrough on both sides.
+    let f: extern "C" fn(i32, u64) -> *const libc::c_char = unsafe {
+        core::mem::transmute::<u64, extern "C" fn(i32, u64) -> *const libc::c_char>(query)
+    };
+    let name = f(libc::LC_NUMERIC_MASK, loc);
+    // SAFETY: `querylocale` returns a NUL-terminated name owned by libc, or
+    // null for a handle it does not recognise.
+    let name = match name.is_null() {
+        true => None,
+        false => unsafe { core::ffi::CStr::from_ptr(name) }.to_str().ok(),
+    };
+    match name {
+        Some("C" | "POSIX") => Ok(()),
+        _ => Err(AbiError::Refused {
+            symbol: symbol.to_string(),
+            reason: "a locale whose numbers this renderer does not reproduce",
+        }),
+    }
 }
 
 /// `int __sprintf_chk(char *dst, int flag, size_t dstlen, const char *fmt, ...)`

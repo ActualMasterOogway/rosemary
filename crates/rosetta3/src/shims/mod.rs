@@ -78,6 +78,12 @@ pub fn dispatch(
         "fprintf" => printf::fprintf,
         "sprintf" => printf::sprintf,
         "snprintf" => printf::snprintf,
+        // The locale-aware pair, which the **vendored libc++** uses for every
+        // number it formats so that `std::to_string` does not pick up the
+        // program's locale. See [`printf::snprintf_l`] for why the locale is
+        // checked rather than ignored.
+        "snprintf_l" => printf::snprintf_l,
+        "sprintf_l" => printf::sprintf_l,
         // The `_FORTIFY_SOURCE` variants clang emits by default on macOS. They
         // are the *same call* with a compile-time destination size threaded
         // through, and a guest built with default flags imports these rather

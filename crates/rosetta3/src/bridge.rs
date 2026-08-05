@@ -128,6 +128,48 @@ fn publish_rsp(ctx: &RegisterContext) {
     }
 }
 
+/// Run `body`, turning a Rust **panic** into a parked [`VmError`].
+///
+/// The bridges are `extern "C"`, so a panic escaping one aborts the process
+/// with `panic in a function that cannot unwind` — a message naming this
+/// runtime's calling convention and nothing about the guest. That is the worst
+/// diagnostic in the project: no symbol, no address, no guest state, and the
+/// real panic's own message swallowed by the barrier.
+///
+/// A panic here is a bug in this runtime rather than something the guest did,
+/// which is exactly why it should be *reported* rather than aborted on: the
+/// guest is at a known address, the run loop can name it, and the report says
+/// which shim or dispatch broke instead of which ABI attribute forbade
+/// unwinding.
+///
+/// Starbound is what made this worth having: it reached
+/// `Application: Initializing SDL Video` and aborted inside
+/// [`indirect_call`] with those two words and no others.
+fn caught(vm: &crate::vm::Vm, what: &str, body: impl FnOnce() -> u32) -> u32 {
+    // `AssertUnwindSafe` because the only state crossing in is the guest's
+    // register context and this runtime's own locks, and a panic leaves both in
+    // the state the failing operation left them — which is what the parked
+    // error then reports on.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(code) => code,
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "a panic with no message".to_string());
+            vm.set_pending(
+                crate::abi::AbiError::Refused {
+                    symbol: what.to_string(),
+                    reason: Box::leak(format!("the runtime panicked: {detail}").into_boxed_str()),
+                }
+                .into(),
+            );
+            HANDLED
+        }
+    }
+}
+
 /// Service a call to a registered import.
 ///
 /// `import_va` is the slot or stub address the guest called, which microlift has
@@ -148,14 +190,16 @@ extern "C" fn import_call(ctx: *mut RegisterContext, import_va: u64) -> u32 {
         return defer(ctx);
     };
     publish_rsp(ctx);
-    match vm.service_bridged_import(import_va, ctx) {
-        Ok(false) => settle(vm, ctx),
-        Ok(true) => resume(ctx),
-        Err(err) => {
-            vm.set_pending(err);
-            resume(ctx)
+    caught(vm, "<bridged import call>", || {
+        match vm.service_bridged_import(import_va, ctx) {
+            Ok(false) => settle(vm, ctx),
+            Ok(true) => resume(ctx),
+            Err(err) => {
+                vm.set_pending(err);
+                resume(ctx)
+            }
         }
-    }
+    })
 }
 
 /// Decide what an indirect call through a runtime-computed address means, and
@@ -176,14 +220,16 @@ extern "C" fn indirect_call(ctx: *mut RegisterContext, target: u64) -> u32 {
         return defer(ctx);
     };
     publish_rsp(ctx);
-    match vm.dispatch_indirect_bridged(target, ctx) {
-        Ok(false) => settle(vm, ctx),
-        Ok(true) => resume(ctx),
-        Err(err) => {
-            vm.set_pending(err);
-            resume(ctx)
+    caught(vm, "<bridged indirect call>", || {
+        match vm.dispatch_indirect_bridged(target, ctx) {
+            Ok(false) => settle(vm, ctx),
+            Ok(true) => resume(ctx),
+            Err(err) => {
+                vm.set_pending(err);
+                resume(ctx)
+            }
         }
-    }
+    })
 }
 
 /// The address of a bridge function, as microlift wants it.

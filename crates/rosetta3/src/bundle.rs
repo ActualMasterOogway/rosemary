@@ -103,7 +103,12 @@ pub fn remirror(guest: &Path) -> Option<PathBuf> {
     let guest = std::fs::canonicalize(guest).ok()?;
     let app = enclosing(&guest)?;
     let host = std::env::current_exe().ok()?;
-    let mirror = cache_dir()?.join(key(&app, &host)?).join(app.file_name()?);
+    // The mirror reproduces the **shape** of the original tree, not just the
+    // `.app`: two levels of ancestor, each with its siblings linked in. See
+    // [`link_ancestors`] for why one level is not enough and why two is where
+    // it stops.
+    let root = cache_dir()?.join(key(&app, &host)?);
+    let mirror = link_ancestors(&app, &root)?;
     let exe_name = guest.file_name()?;
 
     let contents = mirror.join("Contents");
@@ -189,6 +194,57 @@ fn key(app: &Path, host: &Path) -> Option<String> {
 /// that cannot be made is skipped. A missing resource is the guest's problem to
 /// report in its own words, and a hard failure here would turn "this program
 /// cannot find its icon" into "this program will not start".
+/// Reproduce `app`'s last two ancestor directories under `root`, linking each
+/// one's other children, and return where the mirrored `.app` goes.
+///
+/// ## Why the mirror needs a shape and not just a directory
+///
+/// A game's data is not always inside its bundle, and a path relative to the
+/// executable is how it finds it. Starbound is the case: `sbinit.config`,
+/// `assets/`, `mods/` and `storage/` are **not** `Contents/Resources` entries.
+/// `sbinit.config` sits beside `Starbound.app` and names the others as
+/// `../assets/`, relative to itself.
+///
+/// So one level is not enough. Linking the `.app`'s siblings finds
+/// `sbinit.config` — the game got that far and then reported
+/// `Root: Skipping asset directory '../assets/', directory not found`, which is
+/// the same failure one directory further out. Two levels puts the mirror at
+/// `<key>/osx/Starbound.app`, so `../assets/` lands on `<key>/assets`, which is
+/// a link to the real one.
+///
+/// ## Why it stops at two
+///
+/// Because the cost is not symmetric. Each level links every child of a
+/// directory this runtime does not own, and the further out it goes the less
+/// that directory has to do with the guest — one more level for a game whose
+/// `.app` sits directly in its install directory would link every *other* game
+/// in `steamapps/common`. Two covers "data beside the app" and "data one above
+/// it", which is every layout observed. A guest that walks further up gets the
+/// same honest failure Starbound gave: its own diagnostic, naming its own file.
+///
+/// Symlinks throughout, so a twelve-gigabyte asset tree costs a handful of
+/// inodes.
+fn link_ancestors(app: &Path, root: &Path) -> Option<PathBuf> {
+    let app_name = app.file_name()?;
+    let Some(parent) = app.parent() else {
+        std::fs::create_dir_all(root).ok()?;
+        return Some(root.join(app_name));
+    };
+    let parent_name = parent.file_name()?;
+    let mirror_parent = root.join(parent_name);
+    std::fs::create_dir_all(&mirror_parent).ok()?;
+
+    // The grandparent's children beside the reproduced parent, then the
+    // parent's beside the reproduced `.app`. The directory being reproduced is
+    // excluded at each level: it is the one thing that must not be a link back
+    // to the original, because the mirror is the substitute for what is in it.
+    if let Some(grand) = parent.parent() {
+        link_children(grand, root, &[&parent_name.to_string_lossy()]);
+    }
+    link_children(parent, &mirror_parent, &[&app_name.to_string_lossy()]);
+    Some(mirror_parent.join(app_name))
+}
+
 fn link_children(from: &Path, to: &Path, except: &[&str]) {
     let Ok(entries) = std::fs::read_dir(from) else {
         return;
