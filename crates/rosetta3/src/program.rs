@@ -1,6 +1,6 @@
 //! A loaded guest program, ready to be lifted.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::ops::Range;
 
@@ -134,9 +134,71 @@ pub struct Program<M: Regions = BufferSpace> {
     /// resolve to (`bzero` and `__bzero` are one function) is the same on every
     /// run, rather than whichever binding the decoder happened to reach first.
     ///
+    /// A `HashMap` where [`imports`] is a `BTreeMap`, and the difference is
+    /// measured. The run loop asks this one about **every address it is about to
+    /// enter** and the answer is "no" almost every time, so what it costs is a
+    /// *miss*: a `BTreeMap` miss over the thousands of imports a real program
+    /// has is a dozen dependent loads with no locality, and a `sample` of
+    /// Terraria's start-up put 13% of the whole process in it. A hash miss is
+    /// one multiply and one cache line.
+    ///
+    /// A range rejection was tried first — two compares against the lowest and
+    /// highest key, which is what [`crate::dyld::import_at`] uses — and rejects
+    /// **nothing**, for a reason worth writing down: a key here is a host
+    /// address, but "host" includes this runtime's own shims, and the runtime is
+    /// mapped in the same part of the address space as the guest images. The two
+    /// populations interleave rather than separating.
+    ///
     /// [`imports`]: Program::imports
-    imports_by_target: BTreeMap<u64, ImportSite>,
+    imports_by_target: AddrMap<ImportSite>,
 }
+
+/// A hasher for maps keyed by a guest or host **address**.
+///
+/// Rust's default is SipHash-1-3, chosen to make `HashMap` safe against an
+/// attacker who controls the keys. That is the wrong trade for the two maps in
+/// this runtime that are consulted on the hottest path there is — once per
+/// region entry, by [`Program::import_by_target`] and its counterpart in
+/// [`crate::dyld`] — where the keys are addresses this runtime itself computed
+/// and every lookup is a miss. Replacing SipHash here took `dyld`'s share of a
+/// Terraria profile from 9.5% to noise.
+///
+/// The mixing is Fibonacci hashing: one multiply by the odd constant nearest
+/// 2^64/φ, then a shift to bring the high bits down, which is what
+/// `HashMap` reads. It is *not* a general-purpose hash and must not be used for
+/// anything an outside party chooses the keys of.
+#[derive(Clone, Copy, Default)]
+pub struct AddrHasher(u64);
+
+impl std::hash::Hasher for AddrHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        // Only reached if someone keys one of these maps by something other
+        // than an integer. Correct rather than fast, so that doing so is a
+        // performance mistake instead of a correctness one.
+        for &b in bytes {
+            self.write_u64(b as u64);
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0 ^ n).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        self.0 ^= self.0 >> 32;
+    }
+
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64);
+    }
+}
+
+/// [`AddrHasher`] as a `HashMap` may ask for one.
+pub type AddrHash = std::hash::BuildHasherDefault<AddrHasher>;
+
+/// A map from an address to whatever it names.
+pub type AddrMap<V> = HashMap<u64, V, AddrHash>;
 
 /// One address microlift should treat as a call out of the guest.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -350,7 +412,7 @@ impl<M: Regions> Program<M> {
 
         let mut by_symbol: Vec<&ImportSite> = imports.values().filter(|s| !s.is_stub).collect();
         by_symbol.sort_by(|a, b| a.symbol.cmp(&b.symbol));
-        let mut imports_by_target: BTreeMap<u64, ImportSite> = BTreeMap::new();
+        let mut imports_by_target: AddrMap<ImportSite> = AddrMap::default();
         for site in by_symbol {
             // Guest-resolved sites are excluded for the reason
             // [`crate::dyld`] spells out: this map is consulted for every

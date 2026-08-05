@@ -97,7 +97,7 @@ use machish::spec::arch::X86_64;
 use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{AbiError, GuestMemory, Result};
-use crate::program::{HostProviders, ImportSite};
+use crate::program::{AddrMap, HostProviders, ImportSite};
 
 /// An image this runtime loaded on the guest's behalf.
 ///
@@ -123,8 +123,10 @@ pub struct Image {
     /// `stub_va` — exactly as [`crate::Program`] keys its own.
     imports: BTreeMap<u64, ImportSite>,
     /// The same sites by the address they resolved to; see
-    /// [`Program::import_by_target`](crate::Program::import_by_target).
-    imports_by_target: BTreeMap<u64, ImportSite>,
+    /// [`Program::import_by_target`](crate::Program::import_by_target), which
+    /// also explains why this one is hashed and [`imports`](Image::imports) is
+    /// not.
+    imports_by_target: AddrMap<ImportSite>,
     /// Slid extents from `LC_FUNCTION_STARTS`, the hint [`lift_region`] uses.
     functions: Vec<Range<u64>>,
     exports: ExportTable,
@@ -435,6 +437,13 @@ pub fn import_at(va: u64) -> Option<&'static ImportSite> {
 
 /// The import of any dynamically loaded image that *resolved to* `host`.
 pub fn import_by_target(host: u64) -> Option<&'static ImportSite> {
+    // The same two-compare rejection [`import_at`] makes, for a colder version
+    // of the same problem: this is consulted for every address the run loop is
+    // about to enter, and a program that never called `dlopen` should not pay a
+    // lock and a map walk to be told so.
+    if IMAGE_COUNT.load(Ordering::Relaxed) == 0 {
+        return native_symbol_at(host);
+    }
     find(|i| i.imports_by_target.get(&host)).or_else(|| native_symbol_at(host))
 }
 
@@ -709,7 +718,7 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
 fn collect_imports(
     report: &LinkReport,
     is_guest: impl Fn(u64) -> bool,
-) -> (BTreeMap<u64, ImportSite>, BTreeMap<u64, ImportSite>) {
+) -> (BTreeMap<u64, ImportSite>, AddrMap<ImportSite>) {
     let mut imports: BTreeMap<u64, ImportSite> = BTreeMap::new();
     for b in report.bindings() {
         let site = ImportSite {
@@ -754,7 +763,7 @@ fn collect_imports(
 
     let mut by_symbol: Vec<&ImportSite> = imports.values().filter(|s| !s.is_stub).collect();
     by_symbol.sort_by(|a, b| a.symbol.cmp(&b.symbol));
-    let mut by_target: BTreeMap<u64, ImportSite> = BTreeMap::new();
+    let mut by_target: AddrMap<ImportSite> = AddrMap::default();
     for site in by_symbol {
         // A site that resolved into the **guest** must never appear here, and
         // the reason is a two-billion-iteration livelock rather than a nicety.
@@ -1028,6 +1037,15 @@ static NATIVE: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
 /// as it would be anywhere else.
 static NATIVE_SYMBOLS: Mutex<BTreeMap<u64, &'static ImportSite>> = Mutex::new(BTreeMap::new());
 
+/// How many entries [`NATIVE_SYMBOLS`] has, read without the lock.
+///
+/// The map is written a handful of times in a process's life — once per `dlsym`
+/// of a host symbol — and *read* at every region entry, from
+/// [`import_by_target`]. A `dlsym` result is a passthrough case most programs
+/// never reach, so the common answer is "the map is empty", and taking a mutex
+/// to discover that put this on a profile of Terraria's start-up.
+static NATIVE_SYMBOL_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 /// Open `path` with the host's loader, as a native arm64 library.
 ///
 /// `RTLD_GLOBAL` and never closed, for the reason the native provider's own
@@ -1065,6 +1083,7 @@ fn native_handle(handle: u64) -> Option<String> {
 /// the pass-through it is.
 fn remember_native_symbol(addr: u64, name: &str, library: Option<String>) -> u64 {
     let mut map = NATIVE_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner());
+    let before = map.len();
     map.entry(addr).or_insert_with(|| {
         Box::leak(Box::new(ImportSite {
             // The Mach-O spelling, because that is what the signature table is
@@ -1076,11 +1095,19 @@ fn remember_native_symbol(addr: u64, name: &str, library: Option<String>) -> u64
             is_stub: false,
         }))
     });
+    if map.len() != before {
+        // After the insert, and while the lock is still held: a reader that
+        // sees a non-zero count must find the entry that made it non-zero.
+        NATIVE_SYMBOL_COUNT.store(map.len(), Ordering::Release);
+    }
     addr
 }
 
 /// The import site for a host address the guest got from `dlsym`, if any.
 pub fn native_symbol_at(host: u64) -> Option<&'static ImportSite> {
+    if NATIVE_SYMBOL_COUNT.load(Ordering::Acquire) == 0 {
+        return None;
+    }
     NATIVE_SYMBOLS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
