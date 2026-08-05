@@ -971,6 +971,24 @@ impl Vm {
             ExitReason::Return if ctx.rip == RETURN_SENTINEL => Ok(Some(ctx.rax)),
             ExitReason::Return => Ok(None),
 
+            // Control fell out of the *bottom* of the region: the last
+            // instruction lifted was an ordinary fallthrough and the next
+            // address is past the bytes microlift was given. It sets `rip` to
+            // that address and exits with no reason, which is the whole of the
+            // protocol — there is nothing to service, and continuing at `rip`
+            // lifts the next region from it.
+            //
+            // Every region that does *not* end at a `ret`, an indirect jump or
+            // an undecodable byte ends this way, which until now meant every
+            // truncated region was a stop reading `guest stopped at …: none`.
+            // Three paths produce one: a region cut at
+            // [`MAX_REGION_INSTRUCTIONS`](crate::region), one cut at a hole the
+            // walk jumped over, and one salvaged by
+            // [`CodeCache::longest_liftable_prefix`](crate::cache). The first
+            // made it reachable on a program's very first big function; the
+            // other two were latent and just as wrong.
+            ExitReason::None => Ok(None),
+
             // Control left the region: a jump, a return into a region not yet
             // translated, or a call to one. The stack is already right in every
             // case — a direct call pushed its own return address — but *where*

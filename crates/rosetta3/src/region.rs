@@ -81,6 +81,53 @@ pub const MAX_REGION: u64 = 256 * 1024;
 /// Ceiling on how many instructions one walk may decode.
 const MAX_INSTRUCTIONS: usize = 200_000;
 
+/// Ceiling on how many instructions one region may *contain*.
+///
+/// Distinct from [`MAX_INSTRUCTIONS`], which is a totality bound on the walk.
+/// This one is about what happens afterwards: Cranelift's register allocator is
+/// **superlinear in live ranges**, so compile time is not proportional to region
+/// size — a big region is disproportionately expensive rather than
+/// proportionately so, and the outliers are extreme:
+///
+/// ```text
+/// 6314 instructions  ->   0.8s
+/// 8827 instructions  ->   1.8s
+/// 4841 instructions  ->  21.7s
+/// ```
+///
+/// The worst are in a **Mono code arena**: generated code has no
+/// `LC_FUNCTION_STARTS` to bound the walk and Mono packs methods back to back
+/// with nothing between them for it to stop on, so one region reached 141 KiB
+/// and 25,057 instructions — several hundred generated methods glued together.
+/// The same "a region claims more than it should" shape as
+/// [the zero-filled arena](self), costing time rather than correctness.
+///
+/// **What a cap costs is real and small.** The bytes past it are reached later
+/// from their own PC — which is how an embedded jump table has always been
+/// handled — so the price is one extra region entry at the boundary and the
+/// cross-block optimisation Cranelift would have done across it. On a program
+/// with no region this long it costs exactly nothing, because it never binds.
+///
+/// **The value is measured, not round.** Four minutes of Terraria's start-up,
+/// same binary, cap varied — time spent compiling, the single worst compile,
+/// and how far the guest got (regions lifted out of its own JIT arenas):
+///
+/// ```text
+/// cap        compiling   worst    progress
+/// none          96.2s    21.7s        6044
+/// 2048          59.2s     4.2s        6690
+/// 1024          33.7s     1.1s        6769
+///  512          15.2s     0.3s        6839
+/// ```
+///
+/// Progress flattens well before compile time does, which says execution is the
+/// bottleneck once the outliers are gone and that cutting further buys nothing
+/// *here*. So the choice is the largest value that removes them: real functions
+/// a compiler emits are hundreds of instructions, so 1024 is above essentially
+/// everything an ordinary program contains — leaving a hot game loop's regions
+/// whole, which this workload cannot measure — and below everything that hurt.
+const MAX_REGION_INSTRUCTIONS: usize = 1024;
+
 /// A region to lift: what to hand microlift, and where its instructions begin.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Region {
@@ -163,11 +210,24 @@ pub fn region_for(
 ) -> Option<Region> {
     let bound = function.as_ref().map_or(u64::MAX, |f| f.end);
     if let Some(f) = function.filter(|f| f.contains(&pc))
-        && let Some(r) = walk(bytes, base, f.start, bound).filter(|r| r.covers(pc))
+        && let Some(r) = walk(bytes, base, f.start, bound)
+            .map(capped)
+            .filter(|r| r.covers(pc))
     {
         return Some(r);
     }
-    walk(bytes, base, pc, bound)
+    // A region starting at `pc` always covers it — `pc` is its first
+    // instruction — so the cap can never make this one unusable, unlike the
+    // function-start attempt above, which falls through to here when the cut
+    // lands in front of `pc`.
+    walk(bytes, base, pc, bound).map(capped)
+}
+
+/// `region` cut down to [`MAX_REGION_INSTRUCTIONS`], if it is longer.
+fn capped(region: Region) -> Region {
+    region
+        .truncated_to(MAX_REGION_INSTRUCTIONS)
+        .unwrap_or(region)
 }
 
 /// Whether the `len` bytes of an instruction at `off` are all zero.
@@ -413,17 +473,66 @@ mod tests {
     #[test]
     fn a_long_run_of_code_stops_at_the_region_ceiling() {
         // Two-byte `xchg ax,ax` padding, so the byte ceiling is what stops the
-        // walk rather than the instruction budget.
+        // *walk* rather than the instruction budget. Asserted against `walk`
+        // because `region_for` now caps a region ahead of either totality
+        // bound — see `a_region_is_capped_at_a_compilable_length` — and a test
+        // that went through it would be checking the cap twice and these
+        // ceilings not at all.
         let code = [0x66u8, 0x90].repeat((MAX_REGION as usize / 2) + 8);
-        let r = range(&code, BASE, None).unwrap();
-        assert_eq!(r.end - r.start, MAX_REGION);
+        let r = walk(&code, BASE, BASE, u64::MAX).unwrap();
+        assert_eq!(r.range.end - r.range.start, MAX_REGION);
+    }
+
+    /// The cap `region_for` applies, and the two things it must not break.
+    #[test]
+    fn a_region_is_capped_at_a_compilable_length() {
+        // One-byte `nop`s, so instruction count and byte count agree and the
+        // cut is unambiguous.
+        let code = vec![0x90u8; MAX_REGION_INSTRUCTIONS * 2];
+        let r = region_for(&code, BASE, BASE, None).unwrap();
+        assert_eq!(r.starts.len(), MAX_REGION_INSTRUCTIONS);
+        assert_eq!(r.range, BASE..BASE + MAX_REGION_INSTRUCTIONS as u64);
+
+        // The cut is on the instruction grid, so the region can still be
+        // entered at its own addresses and nowhere between them.
+        assert!(r.covers(r.range.end - 1));
+        assert!(!r.covers(r.range.end));
+
+        // And an entry *past* the cut gets a region of its own that covers it,
+        // rather than the truncated one that does not. This is the whole reason
+        // capping is safe: the bytes past the cap are reached from their own PC.
+        let later = BASE + MAX_REGION_INSTRUCTIONS as u64 + 7;
+        let r = region_for(&code, BASE, later, None).unwrap();
+        assert_eq!(r.range.start, later);
+        assert!(r.covers(later));
+    }
+
+    /// A cap that lands in front of `pc` must not produce a region that cannot
+    /// execute it.
+    ///
+    /// `region_for` prefers to start at the enclosing function's first
+    /// instruction, so that every call site shares one translation. For a
+    /// function longer than the cap that preference is unsatisfiable, and the
+    /// failure it would cause is the silent one this module exists to prevent:
+    /// microlift enters a translation that does not cover the address at its
+    /// *first block* instead of failing.
+    #[test]
+    fn a_capped_region_that_would_miss_the_entry_starts_at_the_entry_instead() {
+        let code = vec![0x90u8; MAX_REGION_INSTRUCTIONS * 2];
+        let function = Some(BASE..BASE + code.len() as u64);
+        let pc = BASE + MAX_REGION_INSTRUCTIONS as u64 + 100;
+        let r = region_for(&code, BASE, pc, function).unwrap();
+        assert!(r.covers(pc), "{:#x?} does not cover {pc:#x}", r.range);
+        assert_eq!(r.range.start, pc);
     }
 
     #[test]
     fn an_unterminated_run_stops_at_the_instruction_budget() {
+        // Against `walk`, for the reason above: this is the totality bound, and
+        // `region_for`'s cap would stop it long before the budget did.
         let code = vec![0x90u8; MAX_INSTRUCTIONS + 16];
-        let r = range(&code, BASE, None).unwrap();
-        assert_eq!(r.end - r.start, MAX_INSTRUCTIONS as u64);
+        let r = walk(&code, BASE, BASE, u64::MAX).unwrap();
+        assert_eq!(r.range.end - r.range.start, MAX_INSTRUCTIONS as u64);
     }
 
     #[test]

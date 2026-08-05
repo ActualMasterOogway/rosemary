@@ -159,6 +159,22 @@ impl CodeCache {
             .ok_or(VmError::NoCode { pc, from: None })?;
         let start = region.range.start;
 
+        // How long one region took to compile, when tracing.
+        //
+        // Not curiosity. A big region is not slow in proportion to its size:
+        // Cranelift's register allocator is where the time goes, and it is
+        // superlinear in live ranges, so one function of a hundred thousand
+        // instructions can take *minutes* while ten thousand of a hundred take
+        // no time at all. Terraria has such a function — Mono's `mono_method_to_ir`
+        // is one enormous switch — and what it looks like from outside is a
+        // process at 100% CPU that has stopped: no output, no fault, and
+        // `ROSETTA3_TRACE_PC` silent, because the run loop has not entered a
+        // region in minutes and never will until this returns.
+        //
+        // A profile of the host says `regalloc2::ion::Env::run` and nothing
+        // about *which* guest function, which is the one thing needed.
+        let started = crate::shims::vmmap::tracing().then(std::time::Instant::now);
+
         let (backend, code, region) = match compile_region(&self.config, &bytes, &region) {
             Ok((backend, code)) => (backend, code, region),
             // One instruction the recompiler cannot handle refuses the *whole*
@@ -181,6 +197,23 @@ impl CodeCache {
             },
         };
         let end = region.range.end;
+
+        if let Some(started) = started {
+            let took = started.elapsed();
+            // Only the ones worth reading. A warm program lifts thousands of
+            // regions and a line each would bury the one that matters.
+            if took.as_millis() >= 50 {
+                eprintln!(
+                    "rosetta3: compiled {} ({start:#x}..{end:#x}, {} instruction(s), \
+                     {} byte(s)) in {took:.1?}",
+                    program
+                        .locate(start)
+                        .unwrap_or_else(|| "generated code".to_string()),
+                    region.starts.len(),
+                    end - start,
+                );
+            }
+        }
 
         // SAFETY: `compile` returns the finalized entry of a function whose
         // signature the lifter fixed as `fn(*mut RegisterContext)` in the host
