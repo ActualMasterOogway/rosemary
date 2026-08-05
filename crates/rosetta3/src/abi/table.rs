@@ -551,6 +551,25 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("IORegistryEntryCreateCFProperty", P, U32, P, P, U32),
     sig!("IORegistryEntryGetParentEntry", I32, U32, P, P),
     sig!("IOServiceGetMatchingServices", I32, U32, P, P),
+    // `KBGetLayoutType(SInt16) -> SInt32`, and the only Apple entry point in
+    // this table with **no header anywhere on the system** — it is private
+    // HIToolbox, present in `Carbon.tbd`'s export list and declared nowhere.
+    //
+    // So the shape comes from the image, which is this project's own rule for
+    // "which bytes are code" applied to a signature. libSDL3 calls it:
+    //
+    // ```text
+    // callq  _LMGetKbdType        ; UInt8 in al
+    // movzbl %al, %edi            ; one argument, 32 bits
+    // callq  _KBGetLayoutType
+    // cmpl   $0x49534f20, %eax    ; 32-bit result, against 'ISO '
+    // ```
+    //
+    // One integer in, one integer out, and that is the whole of what the
+    // marshaller needs: the guest puts a value in `edi` and reads `eax`, the
+    // host takes `w0` and returns `w0`. A wider prototype would be a guess
+    // about a function nobody documents; this is a reading of the caller.
+    sig!("KBGetLayoutType", I32, I32),
     // `UInt8 LMGetKbdType(void)` — the low-memory global that still backs
     // `UCKeyTranslate`'s keyboard-type argument.
     sig!("LMGetKbdType", U8),
