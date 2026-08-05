@@ -631,9 +631,13 @@ impl Vm {
     /// declares its own `NSApplication` subclass, and until this pass runs a
     /// message to it is refused by name in [`crate::objc::dispatch`].
     ///
-    /// Returns the number of `+load` methods called, which run here — after the
-    /// classes exist and before the image's C initializers — because that is
-    /// where dyld runs them.
+    /// Realizing the classes runs **no guest code**, which is why it is separate
+    /// from [`Vm::run_loaded_load_methods`]: a `+load` is guest code in the
+    /// image, and it must not run until the add-image notices have gone out. A
+    /// callback that registers the image's `__DATA` as garbage-collector roots —
+    /// which is what Boehm uses them for, and Mono ships Boehm — has to have
+    /// done so before anything in the image can allocate. See
+    /// [`crate::dyld::open`] for the order the two halves sit in.
     ///
     /// A `Vm` that has never registered at all is left alone: registering a
     /// loaded image's classes without the program's would put a subclass of a
@@ -642,24 +646,35 @@ impl Vm {
     pub fn register_loaded_objc(
         &self,
         report: &machish::report::LinkReport,
-    ) -> Result<usize, VmError> {
-        let published = {
-            let _guard = self
-                .objc_registration
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let Some(current) = self.objc() else {
-                return Ok(0);
-            };
-            let mut extended = current.clone();
-            crate::objc::register_loaded(self, &mut extended, report)?;
-            self.publish_objc(extended)
+    ) -> Result<(), VmError> {
+        let _guard = self
+            .objc_registration
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(current) = self.objc() else {
+            return Ok(());
         };
-        // Outside the lock, deliberately. A `+load` is guest code, and guest
-        // code may `dlopen` — a plugin host's whole purpose — which arrives back
-        // here. Holding the registration lock across it is a deadlock waiting
-        // for a program that does the ordinary thing.
-        crate::objc::call_loaded_load_methods(self, published, report)
+        let mut extended = current.clone();
+        crate::objc::register_loaded(self, &mut extended, report)?;
+        self.publish_objc(extended);
+        Ok(())
+    }
+
+    /// Call the `+load` methods of an image [`Vm::register_loaded_objc`] just
+    /// realized, returning how many ran.
+    ///
+    /// Deliberately outside that call's lock. A `+load` is guest code and guest
+    /// code may `dlopen` — a plugin host's whole purpose — which arrives back at
+    /// the registration lock. Holding it across one is a deadlock waiting for a
+    /// program that does the ordinary thing.
+    pub fn run_loaded_load_methods(
+        &self,
+        report: &machish::report::LinkReport,
+    ) -> Result<usize, VmError> {
+        match self.objc() {
+            Some(rt) => crate::objc::call_loaded_load_methods(self, rt, report),
+            None => Ok(0),
+        }
     }
 
     /// Leak `rt` and make it the runtime every dispatching thread reads.

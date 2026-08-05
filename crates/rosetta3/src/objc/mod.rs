@@ -248,9 +248,11 @@ pub fn register(vm: &Vm) -> Result<ObjcRuntime, VmError> {
 /// `SDL3Application`, `SDL3AppDelegate`, `Cocoa_WindowListener` among them — and
 /// Terraria's start-up messages the first of them before it opens a window.
 ///
-/// Ordering matches [`crate::dyld::open`]'s: the image is published and its
-/// selectors are uniqued before any of its code runs, and `+load` runs after
-/// this returns and before the C initializers, which is dyld's order.
+/// Runs **no guest code**, which is what lets [`crate::dyld::open`] put it in
+/// front of the add-image notices. `+load` is separate
+/// ([`call_loaded_load_methods`]) and runs after them, because a `+load`
+/// allocates and a garbage collector that has not been told about this image's
+/// `__DATA` collects what it allocates from.
 pub(crate) fn register_loaded(
     vm: &Vm,
     rt: &mut ObjcRuntime,

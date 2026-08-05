@@ -664,9 +664,10 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     //   `__objc_data` until they are registered, and a message to one is refused
     //   by name. SDL3's Cocoa backend is nothing but such classes.
     //
-    // `register_loaded_objc` does both, and calls the image's `+load` methods
-    // between them and the initializers below, which is dyld's order.
-    if let Some(vm) = crate::thunk::current() {
+    // Neither half runs any of this image's code, which is what lets both sit
+    // in front of the add-image notices below.
+    let vm = crate::thunk::current();
+    if let Some(vm) = vm {
         match vm.objc() {
             // Registered classes: extend that runtime, selectors included.
             Some(_) => {
@@ -686,6 +687,15 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     // Every `_dyld_register_func_for_add_image` callback, before this image's
     // own code runs. See [`announce`].
     announce(leaked.handle, leaked.slide);
+
+    // Now the image's own code, in dyld's order: `+load` before the C
+    // constructors of the same image, and both after the notices — a `+load`
+    // allocates, and a garbage collector that has not been told about this
+    // image's `__DATA` collects what it allocates from.
+    if let Some(vm) = vm {
+        vm.run_loaded_load_methods(&leaked.report)
+            .map_err(|e| format!("{resolved}: objc +load: {e}"))?;
+    }
 
     run_initializers(leaked)?;
     Ok(leaked.handle)
