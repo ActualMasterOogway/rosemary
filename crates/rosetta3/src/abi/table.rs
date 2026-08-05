@@ -377,8 +377,67 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFURLGetFileSystemRepresentation", U8, P, U8, P, I64),
     sig!("CFUUIDCreate", P, P),
     sig!("CFUUIDCreateString", P, P, P),
+    // ## CoreGraphics displays
+    //
+    // Everything SDL3's Cocoa backend asks about a screen: which displays exist,
+    // what modes each has, and which one is in use. Passthrough is right for the
+    // whole family because the displays being asked about are *this machine's* —
+    // there is no guest-side notion of a monitor for these to disagree with.
+    //
+    // Every type here is a scalar or a pointer, and each was read out of
+    // `<CoreGraphics/CGDirectDisplay.h>` rather than recalled: a
+    // `CGDirectDisplayID` is a `uint32_t`, a `CGError` and a `boolean_t` are
+    // `int32_t`, a `CGDisplayModeRef` and every `CF*Ref` is a pointer, and the
+    // sizes are `size_t`. `CGDisplayModeGetRefreshRate` returns a `double`,
+    // which is the only one that lands in a vector register.
+    //
+    // `CGDisplayBounds` is *not* here: it returns a `CGRect` by value, thirty-two
+    // bytes, which SysV AMD64 calls MEMORY and AAPCS64 returns in `v0`-`v3`. It
+    // is [`crate::shims::coregraphics`], for the reason `__sincos_stret` is a
+    // shim.
+    sig!("CGAcquireDisplayFadeReservation", I32, F32, P),
+    sig!("CGAssociateMouseAndMouseCursorPosition", I32, I32),
+    sig!("CGColorSpaceRelease", V, P),
+    sig!("CGDisplayCopyAllDisplayModes", P, U32, P),
+    sig!("CGDisplayCopyDisplayMode", P, U32),
+    // Seven floats and a flag, and the `boolean_t` at the end is the argument
+    // that makes the count worth checking: AAPCS64 allocates integer and
+    // floating-point arguments from *independent* counters, so `synchronous`
+    // is `x0` and not a ninth anything.
+    sig!("CGDisplayFade", I32, U32, F32, F32, F32, F32, F32, F32, I32),
+    sig!("CGDisplayIDToOpenGLDisplayMask", U32, U32),
+    sig!("CGDisplayIOServicePort", U32, U32),
+    sig!("CGDisplayIsMain", I32, U32),
+    sig!("CGDisplayMirrorsDisplay", U32, U32),
+    sig!("CGDisplayModeCopyPixelEncoding", P, P),
+    sig!("CGDisplayModeGetHeight", U64, P),
+    sig!("CGDisplayModeGetIOFlags", U32, P),
+    sig!("CGDisplayModeGetPixelHeight", U64, P),
+    sig!("CGDisplayModeGetPixelWidth", U64, P),
+    sig!("CGDisplayModeGetRefreshRate", F64, P),
+    sig!("CGDisplayModeGetWidth", U64, P),
+    sig!("CGDisplayModeIsUsableForDesktopGUI", BOOL, P),
+    sig!("CGDisplayModeRelease", V, P),
+    // `CGPoint` by value, which is the [`CFRange`] case rather than the
+    // `NSRect` one: two `double`s, sixteen bytes, and SysV AMD64 and AAPCS64
+    // **agree** — two SSE eightbytes on one side, a two-member homogeneous
+    // float aggregate on the other, both `xmm0`/`xmm1` and `v0`/`v1`. Written
+    // out as its members, so every register lands where the callee reads it.
+    sig!("CGDisplayMoveCursorToPoint", I32, U32, F64, F64),
+    sig!("CGDisplayPixelsHigh", U64, U32),
+    sig!("CGDisplayPixelsWide", U64, U32),
+    // The host calls these back on its own thread when a display is
+    // reconfigured, so the first argument leaves as a thunk like every other
+    // guest function pointer crossing the seam.
+    cbsig!([0], "CGDisplayRegisterReconfigurationCallback", I32, P, P),
+    cbsig!([0], "CGDisplayRemoveReconfigurationCallback", I32, P, P),
+    sig!("CGDisplaySetDisplayMode", I32, U32, P, P),
     sig!("CGEventPost", V, U32, P),
+    sig!("CGGetOnlineDisplayList", I32, U32, P, P),
     sig!("CGMainDisplayID", U32),
+    sig!("CGReleaseDisplayFadeReservation", I32, U32),
+    // `CGPoint` by value again; see `CGDisplayMoveCursorToPoint`.
+    sig!("CGWarpMouseCursorPosition", I32, F64, F64),
     // ## CoreVideo
     //
     // The display-link callback is how a GameMaker runner paces its frames: the

@@ -46,6 +46,7 @@ use crate::abi::{AbiError, GuestMemory, Result};
 pub mod atexit;
 pub mod audiounit;
 pub mod component;
+pub mod coregraphics;
 pub mod intdiv;
 pub mod ioctl;
 pub mod math;
@@ -111,6 +112,7 @@ pub fn dispatch(
         _ => {
             if let Some(f) = math::shim_for(name)
                 .or_else(|| intdiv::shim_for(name))
+                .or_else(|| coregraphics::shim_for(name))
                 .or_else(|| component::shim_for(name))
                 .or_else(|| process::shim_for(name))
                 .or_else(|| stackprobe::shim_for(name))
@@ -151,6 +153,7 @@ pub fn is_shimmed(symbol: &str) -> bool {
     let name = symbol.strip_prefix('_').unwrap_or(symbol);
     if math::shim_for(name).is_some()
         || intdiv::shim_for(name).is_some()
+        || coregraphics::shim_for(name).is_some()
         || component::shim_for(name).is_some()
         || process::shim_for(name).is_some()
         || stackprobe::shim_for(name).is_some()
