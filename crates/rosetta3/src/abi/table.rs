@@ -269,18 +269,37 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CC_SHA512_Final", I32, P, P),
     sig!("CC_SHA512_Init", I32, P),
     sig!("CC_SHA512_Update", I32, P, P, U32),
+    sig!("CFArrayAppendValue", V, P, P),
+    // `CFRange` by value, which is the case the roadmap already settled for
+    // `CFStringGetBytes`: two `CFIndex`, sixteen bytes and both integer, and
+    // SysV AMD64 and AAPCS64 agree on two consecutive integer registers. The
+    // members are written out, so every register lands where the callee reads
+    // it. The applier is guest code the host calls back per element.
+    cbsig!([3], "CFArrayApplyFunction", V, P, I64, I64, P, P),
     // ## CoreFoundation and CFNetwork
     //
     // `CFIndex` is `long`, `Boolean` is `unsigned char`, and a `CFStringEncoding`
     // is a `UInt32` — three narrow types that a "pointer or int64" guess would
     // get wrong in the direction that does not fault.
     sig!("CFArrayCreate", P, P, P, I64, P),
+    sig!("CFArrayCreateMutable", P, P, I64, P),
+    sig!("CFArrayExchangeValuesAtIndices", V, P, I64, I64),
     sig!("CFArrayGetCount", I64, P),
+    sig!("CFArrayGetTypeID", U64),
     sig!("CFArrayGetValueAtIndex", P, P, I64),
     sig!("CFBundleCopyResourcesDirectoryURL", P, P),
     sig!("CFBundleGetMainBundle", P),
     sig!("CFBundleGetVersionNumber", U32, P),
+    sig!("CFDataGetBytePtr", P, P),
+    sig!("CFDataGetLength", I64, P),
+    sig!("CFDataGetTypeID", U64),
     sig!("CFDictionaryCreate", P, P, P, P, I64, P, P),
+    sig!("CFDictionaryCreateMutable", P, P, I64, P, P),
+    sig!("CFDictionaryGetTypeID", U64),
+    sig!("CFDictionaryGetValue", P, P, P),
+    sig!("CFDictionaryGetValueIfPresent", BOOL, P, P, P),
+    sig!("CFDictionarySetValue", V, P, P, P),
+    sig!("CFEqual", BOOL, P, P),
     sig!("CFGetTypeID", U64, P),
     sig!("CFHTTPAuthenticationCopyMethod", P, P),
     sig!("CFHTTPAuthenticationCopyRealm", P, P),
@@ -324,17 +343,28 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFRetain", P, P),
     sig!("CFRunLoopAddSource", V, P, P, P),
     sig!("CFRunLoopGetCurrent", P),
+    sig!("CFRunLoopGetMain", P),
     sig!("CFRunLoopRun", V, P),
     // `CFTimeInterval` is a `double`, so this is the first entry in the table
     // whose second argument is floating-point while its first and third are not
     // — exactly the shape the two independent register counters exist for.
     sig!("CFRunLoopRunInMode", I32, P, F64, U8),
+    sig!("CFRunLoopSourceSignal", V, P),
     sig!("CFRunLoopStop", V, P),
+    sig!("CFRunLoopWakeUp", V, P),
+    sig!("CFSetGetCount", I64, P),
+    sig!("CFSetGetValues", V, P, P),
     sig!("CFStringAppendCharacters", V, P, P, I64),
+    // `CFComparisonResult` is a `CFIndex`, so a signed doubleword, and
+    // `CFStringCompareFlags` is a `CFOptionFlags` — both 64-bit on LP64. This
+    // is where SDL3 stopped: it compares a display mode's pixel encoding
+    // against `kIO32BitDirectPixels` and friends.
+    sig!("CFStringCompare", I64, P, P, U64),
     sig!("CFStringConvertEncodingToIANACharSetName", P, U32),
     sig!("CFStringConvertEncodingToNSStringEncoding", U64, U32),
     sig!("CFStringConvertIANACharSetNameToEncoding", U32, P),
     sig!("CFStringConvertNSStringEncodingToEncoding", U32, U64),
+    sig!("CFStringCreateWithCString", P, P, P, U32),
     // ## `CFRange` is the aggregate that needs no vocabulary
     //
     // Refused as an aggregate until M7.4, and it is worth being precise about
@@ -364,7 +394,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFStringGetCStringPtr", P, P, U32),
     sig!("CFStringGetLength", I64, P),
     sig!("CFStringGetMaximumSizeForEncoding", I64, I64, U32),
+    sig!("CFStringGetSystemEncoding", U32),
     sig!("CFStringGetTypeID", U64),
+    sig!("CFStringHasPrefix", BOOL, P, P),
     sig!(
         "CFURLCreateStringByAddingPercentEscapes",
         P,
@@ -374,6 +406,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
         P,
         U32
     ),
+    sig!("CFURLCreateWithBytes", P, P, P, I64, U32, P),
     sig!("CFURLGetFileSystemRepresentation", U8, P, U8, P, I64),
     sig!("CFUUIDCreate", P, P),
     sig!("CFUUIDCreateString", P, P, P),
