@@ -4,8 +4,8 @@
 //! [`crate::abi::table`] describes everything else in the display family — they
 //! are display IDs, mode handles and sizes, all scalars and pointers, and the
 //! host's implementation is the right one because the displays it is asked
-//! about are this machine's. The two here are the exception, and both for the
-//! same reason as [`crate::shims::math`]'s: they return a **struct by value**,
+//! about are this machine's. `CGDisplayBounds` is the exception, for the same
+//! reason [`crate::shims::math`]'s pair are: it returns a **struct by value**,
 //! and the two architectures do not agree on how.
 //!
 //! ## `CGRect` is thirty-two bytes, and that decides everything
@@ -68,14 +68,18 @@ impl CgRect {
 /// SysV AMD64 shifted everything along by one for the MEMORY return. `rax` gets
 /// the buffer back, which is what a SysV callee returning MEMORY must do and
 /// what a caller reading the result through `rax` depends on.
-fn rect_of_display(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+fn rect_of_display(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+) -> Result<()> {
     let Some(host) = crate::dyld::host_symbol(symbol.strip_prefix('_').unwrap_or(symbol)) else {
         return Err(AbiError::NoShim {
             symbol: symbol.to_string(),
         });
     };
     let (buffer, display) = (ctx.rdi, ctx.rsi as u32);
-    // SAFETY: the symbol is one of the two below, both of which really are
+    // SAFETY: the symbol is one [`shim_for`] matched, which really is
     // `CGRect (*)(CGDirectDisplayID)`, and `host_symbol` resolved it out of a
     // CoreGraphics this process has loaded.
     let f: extern "C" fn(u32) -> CgRect =
@@ -147,7 +151,8 @@ mod tests {
         // display ID this runtime made up would be refused by CoreGraphics and
         // return a zero rect, which the assertions below would catch.
         ctx.rsi = u64::from(host_main_display());
-        let mut mem = crate::vm::GuestView::new(vec![at..at + 32]);
+        let buffer_region = at..at + 32;
+        let mut mem = crate::vm::GuestView::new(vec![buffer_region]);
         rect_of_display("_CGDisplayBounds", &mut ctx, &mut mem).expect("bounds");
 
         assert_eq!(ctx.rax, at, "rax must return the hidden buffer");
