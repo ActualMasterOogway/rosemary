@@ -439,9 +439,13 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("NSTemporaryDirectory", P),
     sig!("OSAtomicAdd32Barrier", BOOL, I32, P),
     sig!("OSAtomicAdd64Barrier", BOOL, I64, P),
-    sig!("OpenAComponent", I32, P, P),
     sig!("OSAtomicCompareAndSwap32Barrier", BOOL, I32, I32, P),
     sig!("OSAtomicCompareAndSwap64Barrier", BOOL, I64, I64, P),
+    // Sorts *after* the `OSAtomic` family: lowercase `p` is above `S`, and the
+    // table is searched with `binary_search`, so an entry a reader would file
+    // one line earlier is an entry nothing can find. See `CloseComponent` for
+    // what the Component Manager is doing here at all.
+    sig!("OpenAComponent", I32, P, P),
     sig!("SCDynamicStoreCopyProxies", P, P),
     sig!("SCNetworkReachabilityCreateWithAddress", P, P, P),
     sig!("SCNetworkReachabilityCreateWithName", P, P, P),
@@ -664,6 +668,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("acosf", F32, F32),
     sig!("acosh", F64, F64),
     sig!("acoshf", F32, F32),
+    // C11's aligned allocation, reached because the vendored libc++abi uses it
+    // for an exception object with an over-aligned type in it. Its result is
+    // freed with the ordinary `free`, which is already passed through, so the
+    // two halves stay on the same heap.
+    sig!("aligned_alloc", P, U64, U64),
     sig!("arc4random", U32),
     sig!("arc4random_buf", V, P, U64),
     sig!("asin", F64, F64),
@@ -1326,6 +1335,16 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("sem_trywait", I32, P),
     sig!("sem_unlink", I32, P),
     sig!("sem_wait", I32, P),
+    // System V semaphores, which Steam's `libtier0` uses to name a lock across
+    // processes. `key_t` is a 32-bit `int` on both architectures, and `struct
+    // sembuf` is six bytes — `sem_num` at 0, `sem_op` at 2, `sem_flg` at 4, all
+    // fixed-width `short` — on both, compiled and compared rather than assumed;
+    // see the note on `kevent`. `semctl` is *not* here: it is variadic, and
+    // which of `int`, `struct semid_ds *` and `unsigned short *` its fourth
+    // argument is depends on `cmd`, so there is nothing a fixed signature could
+    // honestly say. It is refused by name until a program reaches it.
+    sig!("semget", I32, I32, I32, I32),
+    sig!("semop", I32, I32, P, U64),
     sig!("send", I64, I32, P, U64, I32),
     sig!("sendmsg", I64, I32, P, I32),
     sig!("sendto", I64, I32, P, U64, I32, P, U32),

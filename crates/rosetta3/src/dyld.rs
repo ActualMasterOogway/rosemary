@@ -555,6 +555,15 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
         IMAGE_COUNT.store(images.len(), Ordering::Release);
     }
 
+    // A loaded image's thread-locals are its own, and nothing else registers
+    // them: [`crate::tls::register`] runs over the *program's* images, so a
+    // `_Thread_local` in a `dlopen`ed image had no descriptor in the registry and
+    // `__tlv_bootstrap` answered null for it — correctly, by its own rule, and
+    // fatally, because the guest dereferences what it is handed. The registry is
+    // keyed by descriptor address and append-only precisely so that an image
+    // mapped later can join it.
+    crate::tls::register(&leaked.report);
+
     // Before any of this image's code runs, and after it is findable: rewrite
     // its `__objc_selrefs` slots from string pointers into the host runtime's
     // own selectors, which is what dyld's `libobjc` does when it maps an image.
