@@ -742,7 +742,7 @@ fn send(
     // is then sent with the result standing in for its format, which is a call
     // the encoding does describe exactly. See [`render_variadic`].
     if is_variadic(sel) {
-        render_variadic(symbol, &signature, base, ctx, mem)?;
+        render_variadic(symbol, sel, &signature, base, ctx, mem)?;
     }
     // Two independent statements about the same fact, held to each other. The
     // *guest* said "struct return" by calling the `_stret` trampoline; the
@@ -846,7 +846,48 @@ fn is_variadic(sel: u64) -> bool {
     let Some(name) = selector_name(sel) else {
         return false;
     };
-    name.ends_with("Format:") || VARIADIC_SELECTORS.contains(&name.as_str())
+    names_a_format(&name) || VARIADIC_SELECTORS.contains(&name.as_str())
+}
+
+/// Whether the selector's last keyword names a *format string* parameter.
+///
+/// "Ends in `Format:`" is the obvious reading of Cocoa's convention and it is
+/// too broad by one word: `-[NSOpenGLView initWithFrame:pixelFormat:]` ends in
+/// `Format:` and takes an `NSOpenGLPixelFormat *`, not a format. Treating it as
+/// variadic is not a near miss — its first parameter is an `NSRect`, so the
+/// register the format would be in cannot be computed and the send is refused,
+/// which is where Geometry Dash's window creation stopped.
+///
+/// So the rule reads the last keyword as camelCase words and asks what
+/// qualifies "Format": nothing (`raise:format:`), `with`
+/// (`stringWithFormat:`), or `append`/`appending` (`appendFormat:`,
+/// `stringByAppendingFormat:`). A `pixelFormat` is qualified by `pixel` and is
+/// a thing rather than a format. This is still a convention and still cannot be
+/// complete — nothing in an image says a method is variadic — but it is wrong
+/// in the direction of doing nothing rather than of refusing a call that was
+/// never variadic.
+fn names_a_format(selector: &str) -> bool {
+    let Some(last) = selector.strip_suffix(':').and_then(|s| s.rsplit(':').next()) else {
+        return false;
+    };
+    // Split camelCase: `stringByAppendingFormat` -> [string, By, Appending, Format].
+    let mut words = Vec::new();
+    let mut start = 0;
+    for (i, c) in last.char_indices() {
+        if c.is_ascii_uppercase() && i != 0 {
+            words.push(&last[start..i]);
+            start = i;
+        }
+    }
+    words.push(&last[start..]);
+    let mut words = words.iter().rev().map(|w| w.to_ascii_lowercase());
+    if words.next().as_deref() != Some("format") {
+        return false;
+    }
+    matches!(
+        words.next().as_deref(),
+        None | Some("with") | Some("append") | Some("appending")
+    )
 }
 
 /// Turn a variadic format-style send into the non-variadic send of the rendered
@@ -868,15 +909,21 @@ fn is_variadic(sel: u64) -> bool {
 /// put the variadic tail somewhere this does not look.
 fn render_variadic(
     symbol: &str,
+    sel: u64,
     signature: &Signature,
     base: usize,
     ctx: &mut RegisterContext,
     mem: &mut dyn GuestMemory,
 ) -> Result<()> {
-    let refuse = |reason: &'static str| {
-        Err(AbiError::Refused {
+    // Named, because "a variadic method this cannot render" is a work item and
+    // the selector is the whole of it — the reader otherwise learns only that
+    // *some* message was refused, on a list that cannot be enumerated from the
+    // image (see [`VARIADIC_SELECTORS`]).
+    let refuse = |reason: &str| {
+        let selector = selector_name(sel).unwrap_or_else(|| format!("<sel {sel:#x}>"));
+        Err(AbiError::Nested {
             symbol: symbol.to_string(),
-            reason,
+            reason: format!("{selector}: {reason}"),
         })
     };
     // Every named parameter must be integer-class, or the format is not in the
@@ -1039,5 +1086,33 @@ mod tests {
         assert!(is_variadic(objects));
         assert!(!is_variadic(plain));
         assert!(!is_variadic(0));
+    }
+
+    #[test]
+    fn a_format_keyword_is_a_word_not_a_suffix() {
+        for yes in [
+            "stringWithFormat:",
+            "initWithFormat:",
+            "localizedStringWithFormat:",
+            "appendFormat:",
+            "stringByAppendingFormat:",
+            "raise:format:",
+            "predicateWithFormat:",
+        ] {
+            assert!(names_a_format(yes), "{yes} should name a format");
+        }
+        // `initWithFrame:pixelFormat:` is the one that mattered: it ends in
+        // `Format:`, is not variadic, and takes an `NSRect` — so believing the
+        // suffix refuses the call that opens Geometry Dash's window.
+        for no in [
+            "initWithFrame:pixelFormat:",
+            "setPixelFormat:",
+            "audioFormat:",
+            "count",
+            "format",
+            "",
+        ] {
+            assert!(!names_a_format(no), "{no} should not name a format");
+        }
     }
 }

@@ -45,6 +45,7 @@ use crate::abi::{AbiError, GuestMemory, Result};
 
 pub mod atexit;
 pub mod audiounit;
+pub mod block;
 pub mod component;
 pub mod coregraphics;
 pub mod intdiv;
@@ -136,10 +137,11 @@ pub fn dispatch(
             // the marshaller is not the one placing it. See [`crate::signal`]
             // for a disposition that also crosses back *in*, [`atexit`] for a
             // destructor whose third argument is a DSO handle that must not,
-            // and [`zlib`] and [`audiounit`] for pointers that are not
-            // arguments at all — they are fields of a structure the guest
-            // passes by address.
+            // and [`zlib`], [`audiounit`] and [`block`] for pointers that are
+            // not arguments at all — they are fields of a structure the guest
+            // passes by address, or by literal.
             return crate::signal::shim_for(name)
+                .or_else(|| block::shim_for(name))
                 .or_else(|| crate::dyld::shim_for_callbacks(name))
                 .or_else(|| atexit::shim_for(name))
                 .or_else(|| zlib::shim_for(name))
@@ -170,6 +172,7 @@ pub fn is_shimmed(symbol: &str) -> bool {
         || crate::objc::dispatch::shim_for(name).is_some()
         || crate::dyld::shim_for(name).is_some()
         || crate::signal::shim_for(name).is_some()
+        || block::shim_for(name).is_some()
         || crate::dyld::shim_for_callbacks(name).is_some()
         || atexit::shim_for(name).is_some()
         || zlib::shim_for(name).is_some()

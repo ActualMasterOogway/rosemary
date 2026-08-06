@@ -251,7 +251,17 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // installed as an `AURenderCallbackStruct` property rather than as an
     // argument, which is why `AudioUnitSetProperty` is an ordinary pointer here
     // and the callback problem shows up in [`crate::shims::audiounit`] instead.
+    // `inListener` is a guest function pointer CoreAudio calls back on a
+    // property-change notification, not from inside this call — an ordinary
+    // callback taker, like `CVDisplayLinkSetOutputCallback` above.
+    cbsig!([2], "AudioObjectAddPropertyListener", I32, U32, P, P, P),
     sig!("AudioObjectGetPropertyData", I32, U32, P, U32, P, P, P),
+    sig!("AudioObjectGetPropertyDataSize", I32, U32, P, U32, P, P),
+    // The removal takes the same listener, and it must be the *same pointer* the
+    // host was given — so it goes out as a thunk too, and [`crate::thunk`]
+    // hands back the one already made for that guest address rather than a
+    // second trampoline CoreAudio would not recognise.
+    cbsig!([2], "AudioObjectRemovePropertyListener", I32, U32, P, P, P),
     sig!("AudioOutputUnitStart", I32, P),
     sig!("AudioOutputUnitStop", I32, P),
     sig!("AudioUnitGetProperty", I32, P, U32, U32, U32, P, P),
@@ -259,6 +269,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("AudioUnitRender", I32, P, P, P, U32, U32, P),
     sig!("AudioUnitSetProperty", I32, P, U32, U32, U32, P, U32),
     sig!("AudioUnitUninitialize", I32, P),
+    // `CCCrypt`: 11 integer-class arguments, within `MAX_INT_ARGS_TOTAL` — the
+    // three past the eighth spill to the host stack, all doubleword-wide.
+    sig!("CCCrypt", I32, U32, U32, U32, P, U64, P, P, U64, P, U64, P),
     sig!("CC_MD5", P, P, U32, P),
     sig!("CC_MD5_Final", I32, P, P),
     sig!("CC_MD5_Init", I32, P),
@@ -288,7 +301,14 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFArrayGetCount", I64, P),
     sig!("CFArrayGetTypeID", U64),
     sig!("CFArrayGetValueAtIndex", P, P, I64),
+    // The bundle these answer for is the *guest's*, because
+    // [`crate::bundle`]'s re-exec made the running executable the guest's own —
+    // so `CFBundleCopyExecutableURL(CFBundleGetMainBundle())` names a path
+    // inside the mirror rather than `rosetta3`'s.
+    sig!("CFBundleCopyExecutableURL", P, P),
+    sig!("CFBundleCopyPrivateFrameworksURL", P, P),
     sig!("CFBundleCopyResourcesDirectoryURL", P, P),
+    sig!("CFBundleCreate", P, P, P),
     sig!("CFBundleGetMainBundle", P),
     sig!("CFBundleGetVersionNumber", U32, P),
     sig!("CFDataGetBytePtr", P, P),
@@ -316,6 +336,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFHTTPMessageGetResponseStatusCode", I64, P),
     sig!("CFHTTPMessageIsHeaderComplete", U8, P),
     sig!("CFHTTPMessageSetHeaderFieldValue", V, P, P, P),
+    sig!("CFHash", U64, P),
     sig!("CFLocaleCopyCurrent", P),
     sig!("CFLocaleGetIdentifier", P, P),
     sig!("CFLocaleGetValue", P, P, P),
@@ -408,6 +429,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
         U32
     ),
     sig!("CFURLCreateWithBytes", P, P, P, I64, U32, P),
+    // A `CFURLPathStyle` is a `CFIndex`, not an `int`, and `isDirectory` is a
+    // `Boolean` — the two narrow types this family keeps getting wrong in the
+    // direction that does not fault.
+    sig!("CFURLCreateWithFileSystemPath", P, P, P, I64, BOOL),
     sig!("CFURLGetFileSystemRepresentation", U8, P, U8, P, I64),
     sig!("CFUUIDCreate", P, P),
     sig!("CFUUIDCreateString", P, P, P),
@@ -431,7 +456,21 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // shim.
     sig!("CGAcquireDisplayFadeReservation", I32, F32, P),
     sig!("CGAssociateMouseAndMouseCursorPosition", I32, I32),
+    // ## The bitmap context, which is how an image becomes texture bytes
+    //
+    // cocos2d-x decodes every texture the same way: a `CGImageSource` over the
+    // file's bytes produces a `CGImage`, a bitmap context is created over a
+    // buffer the *guest* allocated, and the image is drawn into it. Everything
+    // here is a `size_t`, a handle or a `CGBitmapInfo` (a `uint32_t`) except
+    // the two that take a `CGRect` by value, which are
+    // [`crate::shims::coregraphics`].
+    sig!("CGBitmapContextCreate", P, P, U64, U64, U64, U64, P, U32),
+    sig!("CGColorSpaceCreateDeviceRGB", P),
     sig!("CGColorSpaceRelease", V, P),
+    // `CGFloat` is `double` on both architectures, so the CTM translation is
+    // two ordinary vector arguments.
+    sig!("CGContextRelease", V, P),
+    sig!("CGContextTranslateCTM", V, P, F64, F64),
     sig!("CGDisplayCopyAllDisplayModes", P, U32, P),
     sig!("CGDisplayCopyDisplayMode", P, U32),
     // Seven floats and a flag, and the `boolean_t` at the end is the argument
@@ -439,6 +478,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // floating-point arguments from *independent* counters, so `synchronous`
     // is `x0` and not a ninth anything.
     sig!("CGDisplayFade", I32, U32, F32, F32, F32, F32, F32, F32, I32),
+    // Both take a `CGDirectDisplayID`, and both are reference-counted rather
+    // than absolute: a game hiding the cursor for a level must show it again.
+    sig!("CGDisplayHideCursor", I32, U32),
     sig!("CGDisplayIDToOpenGLDisplayMask", U32, U32),
     sig!("CGDisplayIOServicePort", U32, U32),
     sig!("CGDisplayIsMain", I32, U32),
@@ -466,8 +508,31 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     cbsig!([0], "CGDisplayRegisterReconfigurationCallback", I32, P, P),
     cbsig!([0], "CGDisplayRemoveReconfigurationCallback", I32, P, P),
     sig!("CGDisplaySetDisplayMode", I32, U32, P, P),
+    sig!("CGDisplayShowCursor", I32, U32),
+    // `CGEventCreate(CGEventSourceRef)` — a null source means the event
+    // describes the current input state, which is how a game asks where the
+    // pointer is without a window under it. `CGEventGetLocation` returns a
+    // `CGPoint` and is [`crate::shims::coregraphics`]; a `CGEventType` is a
+    // `uint32_t`.
+    sig!("CGEventCreate", P, P),
     sig!("CGEventPost", V, U32, P),
+    sig!("CGEventSetType", V, P, U32),
     sig!("CGGetOnlineDisplayList", I32, U32, P, P),
+    // ## Images, and the source that decodes one
+    //
+    // `CGImageGetWidth`/`Height`/`BitsPerComponent` are `size_t`; a
+    // `CGImageAlphaInfo` is a `uint32_t` enum; the index into a source is a
+    // `size_t`. The `options` dictionaries are ordinary `CFDictionaryRef`s the
+    // guest usually passes null for.
+    sig!("CGImageGetAlphaInfo", U32, P),
+    sig!("CGImageGetBitsPerComponent", U64, P),
+    sig!("CGImageGetColorSpace", P, P),
+    sig!("CGImageGetHeight", U64, P),
+    sig!("CGImageGetWidth", U64, P),
+    sig!("CGImageSourceCreateImageAtIndex", P, P, U64, P),
+    sig!("CGImageSourceCreateWithData", P, P, P),
+    sig!("CGLLockContext", I32, P),
+    sig!("CGLUnlockContext", I32, P),
     sig!("CGMainDisplayID", U32),
     sig!("CGReleaseDisplayFadeReservation", I32, U32),
     // `CGPoint` by value again; see `CGDisplayMoveCursorToPoint`.
@@ -793,6 +858,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // sig!("__cxa_throw", V, P, P, P),
     sig!("__darwin_check_fd_set_overflow", I32, I32, P, I32),
     sig!("__error", P),
+    sig!("__exp10f", F32, F32),
     sig!("__isnand", I32, F64),
     sig!("__maskrune", I32, I32, U64),
     sig!("__maskrune_l", I32, I32, U64, P),
@@ -923,6 +989,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // guest passes it by address, so the host fills it in place.
     sig!("clock_get_time", I32, U32, P),
     sig!("clock_gettime", I32, U32, P),
+    sig!("clock_gettime_nsec_np", U64, I32),
     // `kern_return_t clock_sleep(mach_port_t, sleep_type_t, mach_timespec_t,
     // mach_timespec_t *)`. The third argument is a struct **by value**, and it
     // is eight bytes of two `unsigned int` — one integer register under SysV
@@ -1051,6 +1118,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("fsync", I32, I32),
     sig!("ftell", I64, P),
     sig!("ftello", I64, P),
+    // `int ftime(struct timeb *)`, which is older than POSIX and still
+    // exported. `time_t` is eight bytes on both architectures and the three
+    // fields after it are `short`s, so the structure the guest passes by
+    // address is filled in place.
+    sig!("ftime", I32, P),
     sig!("ftruncate", I32, I32, I64),
     sig!("fts_children", P, P, I32),
     sig!("fts_close", I32, P),
@@ -1124,17 +1196,30 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `glClearColor` takes four `float`s and `glClearDepth` one `double`, so a
     // uniform "floating point is `f64`" rule silently mis-clears the screen.
     sig!("glActiveTexture", V, U32),
+    // A `GLclampf` is a `float`, so the reference value lands in a vector
+    // register while the comparison function does not.
+    sig!("glAlphaFunc", V, U32, F32),
     sig!("glAttachShader", V, U32, U32),
     sig!("glBegin", V, U32),
+    sig!("glBindAttribLocation", V, U32, U32, P),
     sig!("glBindBuffer", V, U32, U32),
     sig!("glBindFramebuffer", V, U32, U32),
     sig!("glBindFramebufferEXT", V, U32, U32),
     sig!("glBindRenderbuffer", V, U32, U32),
     sig!("glBindRenderbufferEXT", V, U32, U32),
     sig!("glBindTexture", V, U32, U32),
+    // The APPLE vertex-array-object extension, which is what an OpenGL 2.1
+    // context on macOS has instead of the core entry points — same shapes as
+    // `glGenVertexArrays`/`glBindVertexArray`/`glDeleteVertexArrays`.
+    sig!("glBindVertexArrayAPPLE", V, U32),
+    sig!("glBlendEquation", V, U32),
     sig!("glBlendFunc", V, U32, U32),
     sig!("glBlendFuncSeparate", V, U32, U32, U32, U32),
+    // A `GLsizeiptr` and a `GLintptr` are both `long`, not `int`: a buffer
+    // upload of more than 2 GiB is not the case that matters, but a *negative*
+    // narrow read of a legitimate size would be.
     sig!("glBufferData", V, U32, I64, P, U32),
+    sig!("glBufferSubData", V, U32, I64, I64, P),
     sig!("glCheckFramebufferStatus", U32, U32),
     sig!("glCheckFramebufferStatusEXT", U32, U32),
     sig!("glClear", V, U32),
@@ -1143,6 +1228,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("glClearStencil", V, I32),
     sig!("glColorMask", V, U8, U8, U8, U8),
     sig!("glCompileShader", V, U32),
+    // Eight integer arguments exactly, which is the guest's six registers plus
+    // two it spilled; the host takes all eight in `x0`–`x7`.
+    sig!("glCompressedTexImage2D", V, U32, I32, U32, I32, I32, I32, I32, P),
     sig!("glCreateProgram", U32),
     sig!("glCreateShader", U32, U32),
     sig!("glDeleteBuffers", V, I32, P),
@@ -1153,6 +1241,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("glDeleteRenderbuffersEXT", V, I32, P),
     sig!("glDeleteShader", V, U32),
     sig!("glDeleteTextures", V, I32, P),
+    sig!("glDeleteVertexArraysAPPLE", V, I32, P),
     sig!("glDepthFunc", V, U32),
     sig!("glDepthMask", V, U8),
     sig!("glDepthRange", V, F64, F64),
@@ -1161,6 +1250,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("glDrawArrays", V, U32, I32, I32),
     sig!("glDrawBuffer", V, U32),
     sig!("glDrawBuffers", V, I32, P),
+    // The last argument is a pointer *or* a byte offset into the bound element
+    // buffer, depending on whether one is bound — an integer either way, and
+    // identity mapping means a guest pointer needs no translation.
+    sig!("glDrawElements", V, U32, I32, U32, P),
     sig!("glEnable", V, U32),
     sig!("glEnableVertexAttribArray", V, U32),
     sig!("glEnd", V),
@@ -1177,6 +1270,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("glGenRenderbuffers", V, I32, P),
     sig!("glGenRenderbuffersEXT", V, I32, P),
     sig!("glGenTextures", V, I32, P),
+    sig!("glGenVertexArraysAPPLE", V, I32, P),
+    sig!("glGenerateMipmap", V, U32),
     sig!("glGetActiveUniform", V, U32, U32, I32, P, P, P, P),
     sig!("glGetAttribLocation", I32, U32, P),
     sig!("glGetBooleanv", V, U32, P),
@@ -1186,11 +1281,18 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("glGetProgramInfoLog", V, U32, I32, P, P),
     sig!("glGetProgramiv", V, U32, U32, P),
     sig!("glGetShaderInfoLog", V, U32, I32, P, P),
+    sig!("glGetShaderSource", V, U32, I32, P, P),
     sig!("glGetShaderiv", V, U32, U32, P),
     sig!("glGetString", P, U32),
     sig!("glGetUniformLocation", I32, U32, P),
+    sig!("glIsEnabled", U8, U32),
+    sig!("glLineWidth", V, F32),
     sig!("glLinkProgram", V, U32),
     sig!("glLoadIdentity", V),
+    // Returns a pointer into the driver's own mapping of a buffer object,
+    // which the guest then writes through — a host address in guest hands, which
+    // identity mapping makes ordinary.
+    sig!("glMapBuffer", P, U32, U32),
     sig!("glMatrixMode", V, U32),
     sig!("glPixelStorei", V, U32, I32),
     sig!("glPopMatrix", V),
@@ -1228,15 +1330,22 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("glUniform1fv", V, I32, I32, P),
     sig!("glUniform1i", V, I32, I32),
     sig!("glUniform1iv", V, I32, I32, P),
+    sig!("glUniform2f", V, I32, F32, F32),
     sig!("glUniform2fv", V, I32, I32, P),
+    sig!("glUniform2i", V, I32, I32, I32),
     sig!("glUniform2iv", V, I32, I32, P),
+    sig!("glUniform3f", V, I32, F32, F32, F32),
     sig!("glUniform3fv", V, I32, I32, P),
+    sig!("glUniform3i", V, I32, I32, I32, I32),
     sig!("glUniform3iv", V, I32, I32, P),
+    sig!("glUniform4f", V, I32, F32, F32, F32, F32),
     sig!("glUniform4fv", V, I32, I32, P),
+    sig!("glUniform4i", V, I32, I32, I32, I32, I32),
     sig!("glUniform4iv", V, I32, I32, P),
     sig!("glUniformMatrix2fv", V, I32, I32, U8, P),
     sig!("glUniformMatrix3fv", V, I32, I32, U8, P),
     sig!("glUniformMatrix4fv", V, I32, I32, U8, P),
+    sig!("glUnmapBuffer", U8, U32),
     sig!("glUseProgram", V, U32),
     sig!("glVertex2f", V, F32, F32),
     sig!("glVertexAttribPointer", V, U32, I32, U32, U8, I32, P),
@@ -1477,6 +1586,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // guest passes it by address — the same in-place arrangement every other
     // `pthread` type here rests on.
     sig!("pthread_attr_setschedparam", I32, P, P),
+    sig!("pthread_attr_setschedpolicy", I32, P, I32),
     sig!("pthread_attr_setstacksize", I32, P, U64),
     sig!("pthread_cond_broadcast", I32, P),
     sig!("pthread_cond_destroy", I32, P),
@@ -1536,6 +1646,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("pthread_setname_np", I32, P),
     sig!("pthread_setschedparam", I32, U64, I32, P),
     sig!("pthread_setspecific", I32, U64, P),
+    sig!("pthread_threadid_np", I32, U64, P),
     sig!("putc", I32, I32, P),
     sig!("putchar", I32, I32),
     sig!("puts", I32, P),
@@ -1856,15 +1967,25 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("CGEventCreateMouseEvent", AGGREGATE),
     ("CGRectContainsPoint", AGGREGATE),
     ("CGRectInset", AGGREGATE),
+    // `NSApp` is data like the rest of this block, and the least obvious of
+    // them: it reads as a function call in every program that uses it
+    // (`[NSApp run]`), and it is a global `id` the application object is stored
+    // in.
+    ("NSApp", DATA),
     ("NSCalibratedRGBColorSpace", DATA),
     ("NSDefaultRunLoopMode", DATA),
     ("NSDeviceResolution", DATA),
+    ("NSFontAttributeName", DATA),
     ("NSForegroundColorAttributeName", DATA),
     ("NSLocaleCountryCode", DATA),
+    ("NSLocaleLanguageCode", DATA),
     ("NSLocalizedDescriptionKey", DATA),
     ("NSLocalizedFailureReasonErrorKey", DATA),
     ("NSOSStatusErrorDomain", DATA),
     ("NSPOSIXErrorDomain", DATA),
+    ("NSParagraphStyleAttributeName", DATA),
+    ("NSPasteboardTypeString", DATA),
+    ("NSStringPboardType", DATA),
     ("NSURLAuthenticationMethodDefault", DATA),
     ("NSURLProtectionSpaceHTTPProxy", DATA),
     ("NSUnderlyingErrorKey", DATA),
@@ -1924,6 +2045,10 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("__stderrp", DATA),
     ("__stdinp", DATA),
     ("__stdoutp", DATA),
+    // `dispatch_get_main_queue()` is the *address* of this global rather than
+    // a call, so the main queue a guest hands [`crate::shims::block`] is
+    // libdispatch's own.
+    ("_dispatch_main_q", DATA),
     (
         "dyld_stub_binder",
         "the lazy-binding entry point; every slot is bound eagerly",

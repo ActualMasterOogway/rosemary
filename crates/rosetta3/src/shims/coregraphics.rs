@@ -1,20 +1,31 @@
-//! CoreGraphics and CoreVideo entry points whose *return value* the signature
-//! table cannot name.
+//! CoreGraphics and CoreVideo entry points that pass or return a **struct by
+//! value**, which is the one thing the signature table cannot name.
 //!
-//! [`crate::abi::table`] describes everything else in the display family — they
-//! are display IDs, mode handles and sizes, all scalars and pointers, and the
-//! host's implementation is the right one because the displays it is asked
-//! about are this machine's. Two are exceptions, for the same reason
-//! [`crate::shims::math`]'s pair are: they return a **struct by value**, which
-//! is the one thing the table refuses to describe.
+//! [`crate::abi::table`] describes everything else in the display and bitmap
+//! families — they are display IDs, mode handles, context handles and sizes,
+//! all scalars and pointers, and the host's implementation is the right one
+//! because the displays it is asked about are this machine's. What is here is
+//! what is left, for the same reason [`crate::shims::math`]'s pair are here.
 //!
-//! The two are not the same problem, which is the point worth taking from
-//! having both. A `CGRect` is thirty-two bytes of floating point and the two
-//! ABIs disagree completely. A `CVTime` is sixteen bytes of integer and they
-//! **agree** — two integer registers each — and it still cannot be a table
-//! entry, because the marshaller's return path writes one register. The rule
-//! stays "check this struct against both ABIs"; what changes is that agreeing
-//! is not sufficient on its own.
+//! No two of them are the same problem, which is the point worth taking from
+//! having several:
+//!
+//! - `CGDisplayBounds` **returns** a `CGRect` — thirty-two bytes of floating
+//!   point, and the two ABIs disagree completely.
+//! - `CGContextClearRect` and `CGContextDrawImage` **take** one, which is the
+//!   mirror image: SysV AMD64 puts a MEMORY-class argument on the caller's
+//!   stack and consumes no register for it, so the shim reads it out of the
+//!   guest's stack and hands it to the host by value.
+//! - `CGEventGetLocation` returns a `CGPoint` and
+//!   `CVDisplayLinkGetNominalOutputVideoRefreshPeriod` a `CVTime` — sixteen
+//!   bytes each, and the two ABIs **agree** about both, in floating-point
+//!   registers for one and integer registers for the other. They still cannot
+//!   be table entries, because the marshaller's return path writes one
+//!   register.
+//!
+//! The rule stays "check this struct against both ABIs"; what these add is that
+//! agreeing is not sufficient on its own, and that a struct going *in* is a
+//! different question from one coming out.
 //!
 //! ## `CGRect` is thirty-two bytes, and that decides everything
 //!
@@ -113,6 +124,125 @@ fn rect_of_display(
     Ok(())
 }
 
+/// Read the `CGRect` a guest passed by value, out of its own stack.
+///
+/// A MEMORY-class argument is *on the stack* under SysV AMD64, and microlift
+/// exits before the `CALL`, so `rsp` is still the pre-call value and the
+/// argument area starts at `rsp + 0` — the arrangement
+/// [`crate::abi::marshal`]'s stack path already rests on. `offset` is where in
+/// that area this rectangle begins, which is not always zero: a call with two
+/// MEMORY arguments, or with integer arguments spilled ahead of one, puts it
+/// further along.
+fn rect_argument(
+    symbol: &str,
+    ctx: &RegisterContext,
+    mem: &mut dyn GuestMemory,
+    offset: u64,
+) -> Result<CgRect> {
+    let at = ctx.rsp.wrapping_add(offset);
+    let mut bytes = [0u8; 32];
+    for (i, word) in bytes.chunks_exact_mut(8).enumerate() {
+        let value = mem.read_u64(at.wrapping_add(i as u64 * 8), symbol)?;
+        word.copy_from_slice(&value.to_le_bytes());
+    }
+    let field = |i: usize| {
+        let mut w = [0u8; 8];
+        w.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        f64::from_le_bytes(w)
+    };
+    Ok(CgRect {
+        x: field(0),
+        y: field(1),
+        width: field(2),
+        height: field(3),
+    })
+}
+
+/// `void CGContextClearRect(CGContextRef, CGRect)`
+///
+/// The rectangle is the guest's second argument and its first stack one; the
+/// context stays in `rdi`. Calling the host through a prototype that takes the
+/// aggregate by value puts the compiler in charge of the `v0`–`v3` placement,
+/// which is the same trick [`rect_of_display`] uses in the other direction.
+fn context_clear_rect(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let host = host_or_refuse(symbol)?;
+    let rect = rect_argument(symbol, ctx, mem, 0)?;
+    // SAFETY: the symbol [`shim_for`] matched, which is
+    // `void (*)(CGContextRef, CGRect)`, resolved out of a CoreGraphics this
+    // process has loaded. The context is an opaque handle the guest got from
+    // `CGBitmapContextCreate`, so it is the host's own.
+    let f: extern "C" fn(u64, CgRect) =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(u64, CgRect)>(host) };
+    f(ctx.rdi, rect);
+    Ok(())
+}
+
+/// `void CGContextDrawImage(CGContextRef, CGRect, CGImageRef)`
+///
+/// The one cocos2d-x decodes every texture through: a `CGImageSource` produces
+/// a `CGImage` and this draws it into a bitmap context the guest owns the
+/// backing store of. The MEMORY-class rectangle sits on the stack and the
+/// *image* takes the second integer register, because a MEMORY argument
+/// consumes no register at all — reading it out of `rdx` would pass the guest's
+/// third argument as its second, and the image would be whatever was left in
+/// `rdx`.
+fn context_draw_image(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let host = host_or_refuse(symbol)?;
+    let rect = rect_argument(symbol, ctx, mem, 0)?;
+    // SAFETY: as above, for `void (*)(CGContextRef, CGRect, CGImageRef)`.
+    let f: extern "C" fn(u64, CgRect, u64) =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(u64, CgRect, u64)>(host) };
+    f(ctx.rdi, rect, ctx.rsi);
+    Ok(())
+}
+
+/// `CGPoint CGEventGetLocation(CGEventRef)`
+///
+/// Sixteen bytes of two `double`s, which is the case the two ABIs **agree**
+/// about — SysV AMD64 returns two SSE eightbytes in `xmm0`/`xmm1`, AAPCS64
+/// returns a two-member homogeneous float aggregate in `v0`/`v1`. It is still
+/// not a table entry, for [`display_link_nominal_period`]'s reason: the
+/// marshaller's return path carries one register and this needs two.
+fn event_location(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    _mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let host = host_or_refuse(symbol)?;
+    // SAFETY: the symbol [`shim_for`] matched, which is
+    // `CGPoint (*)(CGEventRef)`; the event is one the host made.
+    let f: extern "C" fn(u64) -> CgPoint =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(u64) -> CgPoint>(host) };
+    let point = f(ctx.rdi);
+    ctx.xmm[0] = [point.x.to_bits(), 0];
+    ctx.xmm[1] = [point.y.to_bits(), 0];
+    Ok(())
+}
+
+/// `CGPoint`, as both ABIs return one: two floating-point registers.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct CgPoint {
+    x: f64,
+    y: f64,
+}
+
+/// The host's address for one of this module's names, or the refusal that says
+/// which one was missing.
+fn host_or_refuse(symbol: &str) -> Result<u64> {
+    crate::dyld::host_symbol(symbol.strip_prefix('_').unwrap_or(symbol)).ok_or(AbiError::NoShim {
+        symbol: symbol.to_string(),
+    })
+}
+
 /// `CVTime`, as both ABIs return one: two integer registers.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -161,6 +291,11 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         // the global desktop coordinate space, which SDL asks for every display
         // it enumerates.
         "CGDisplayBounds" => Some(rect_of_display),
+        // The bitmap-context pair, which is how a `CGImage` becomes texture
+        // bytes: a `CGRect` **argument**, passed on the guest's stack.
+        "CGContextClearRect" => Some(context_clear_rect),
+        "CGContextDrawImage" => Some(context_draw_image),
+        "CGEventGetLocation" => Some(event_location),
         "CVDisplayLinkGetNominalOutputVideoRefreshPeriod" => Some(display_link_nominal_period),
         _ => None,
     }

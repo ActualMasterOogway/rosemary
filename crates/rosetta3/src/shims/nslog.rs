@@ -191,8 +191,27 @@ fn percent_s() -> Option<*const c_void> {
 }
 
 /// The UTF-8 bytes of a `CFStringRef`/`NSString *`.
+///
+/// The class is checked first, and that check is load-bearing rather than
+/// defensive. `CFStringGetLength` is toll-free bridged: handed an object that
+/// is not a string it sends `length` to it, an object that does not implement
+/// `length` reaches `doesNotRecognizeSelector:`, and that **raises an
+/// `NSException`** — which unwinds out of here, through the `extern "C"`
+/// boundary this shim was entered across, and aborts the process with `Rust
+/// cannot catch foreign exceptions`. Not a wrong answer: no answer, and no
+/// diagnostic naming the format that caused it. Asking `isKindOfClass:` first
+/// turns that into the `None` this function's callers already handle.
+///
+/// A word that is not an object *at all* is still not survivable, and cannot
+/// be: `isKindOfClass:` dereferences its receiver like any other message. What
+/// is fixed here is the case that was observed — a real object of a class that
+/// is not a string — and the guard is placed where a `%@` conversion can meet
+/// one.
 fn cf_string_bytes(obj: u64) -> Option<Vec<u8>> {
     if obj == 0 {
+        return None;
+    }
+    if !is_kind_of(obj, c"NSString") {
         return None;
     }
     let get = dlsym("CFStringGetCString")?;
@@ -243,6 +262,14 @@ fn description_bytes(obj: u64) -> Option<Vec<u8>> {
         // empty field instead would look for the wrong bug.
         return Some(b"(null)".to_vec());
     }
+    // Every `NSObject` implements `description`, and not every object is an
+    // `NSObject` — a class built on `NSProxy`, or one of the few root classes
+    // Foundation keeps, answers `doesNotRecognizeSelector:` and raises. See
+    // [`cf_string_bytes`] for why a raise here is fatal rather than merely
+    // wrong.
+    if !responds_to(obj, c"description") {
+        return None;
+    }
     // SAFETY: `objc_msgSend` is taken as an address and called through the
     // prototype `- (NSString *)description` has, which is the same reasoning
     // [`crate::objc::dispatch`] uses and the reason `host::objc_msgSend` is
@@ -256,6 +283,52 @@ fn description_bytes(obj: u64) -> Option<Vec<u8>> {
     cf_string_bytes(text as usize as u64)
 }
 
+/// Whether `obj` is an instance of `class_name` or one of its subclasses.
+///
+/// `isKindOfClass:` rather than a `CFGetTypeID` comparison, because the
+/// receiver may be a *guest* class M6.2 realized as well as one of
+/// Foundation's, and the runtime answers for both. A class the process has
+/// never heard of answers `false`, which is the safe direction.
+fn is_kind_of(obj: u64, class_name: &CStr) -> bool {
+    // SAFETY: `objc_getClass` takes a C string and answers null for a name no
+    // class has, which is checked rather than passed on.
+    let class = unsafe { crate::objc::host::objc_getClass(class_name.as_ptr()) };
+    if class.is_null() {
+        return false;
+    }
+    // SAFETY: as [`responds_to`], through `- (BOOL)isKindOfClass:(Class)`.
+    unsafe {
+        let send: unsafe extern "C" fn(*const c_void, *const c_void, *const c_void) -> u8 =
+            core::mem::transmute(crate::objc::host::objc_msgSend as *const ());
+        let sel = crate::objc::host::sel_registerName(c"isKindOfClass:".as_ptr());
+        send(
+            obj as usize as *const c_void,
+            sel.cast(),
+            class.cast::<c_void>(),
+        ) != 0
+    }
+}
+
+/// Whether `obj`'s class implements `selector`.
+///
+/// Asked of the *class* rather than through `respondsToSelector:`, because
+/// `respondsToSelector:` is itself a message and a receiver that does not
+/// implement it raises exactly the way the message being guarded would.
+fn responds_to(obj: u64, selector: &CStr) -> bool {
+    // SAFETY: `obj` is an object pointer — the host runtime's own allocation,
+    // or a guest constant whose `isa` is a bind of a Foundation class — so
+    // `object_getClass` reads its first word, and `class_getInstanceMethod`
+    // answers null for a selector the class does not implement.
+    unsafe {
+        let class = crate::objc::host::object_getClass(obj as crate::objc::host::Class);
+        if class.is_null() {
+            return false;
+        }
+        let sel = crate::objc::host::sel_registerName(selector.as_ptr());
+        !crate::objc::host::class_getInstanceMethod(class, sel).is_null()
+    }
+}
+
 /// Resolve a symbol in an image this process has already loaded.
 fn dlsym(name: &str) -> Option<*mut c_void> {
     let c = CString::new(name).ok()?;
@@ -263,4 +336,77 @@ fn dlsym(name: &str) -> Option<*mut c_void> {
     // symbol nothing exports, which is checked rather than dereferenced.
     let p = unsafe { libc::dlsym(-2isize as *mut c_void, c.as_ptr()) };
     (!p.is_null()).then_some(p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Load Foundation, and say whether this host has one.
+    ///
+    /// The driver deliberately never links it — the roadmap records what a
+    /// framework's initializers do to the `errno` a guest then reads — so a
+    /// test binary has no `NSString` until it asks for one. Every test below
+    /// skips rather than fails without it, which is the house rule for a
+    /// fixture the host cannot supply.
+    fn foundation() -> bool {
+        // SAFETY: `dlopen` of an absolute path, answering null when absent.
+        let handle = unsafe {
+            libc::dlopen(
+                c"/System/Library/Frameworks/Foundation.framework/Foundation".as_ptr(),
+                libc::RTLD_LAZY | libc::RTLD_GLOBAL,
+            )
+        };
+        !handle.is_null()
+    }
+
+    /// The guard, against the host's own runtime: an object that is not a
+    /// string must come back as `None` rather than raise. Before the class
+    /// check, this test aborted the test binary — `CFStringGetLength` sends
+    /// `length`, `NSObject` does not implement it, and the resulting
+    /// `NSException` cannot cross a Rust frame.
+    #[test]
+    fn a_non_string_object_is_not_asked_for_its_bytes() {
+        if !foundation() {
+            return;
+        }
+        // SAFETY: `objc_getClass` answers null for a name no class has, which
+        // is what the skip below checks. A class object is an object.
+        let object_class = unsafe { crate::objc::host::objc_getClass(c"NSObject".as_ptr()) };
+        if object_class.is_null() {
+            return;
+        }
+        assert_eq!(cf_string_bytes(object_class as u64), None);
+    }
+
+    /// The other side of the same claim: a real string still renders, so the
+    /// guard is a filter rather than a wall.
+    #[test]
+    fn a_real_string_still_reads_back() {
+        if !foundation() {
+            return;
+        }
+        let Some(fmt) = percent_s() else {
+            return;
+        };
+        assert_eq!(cf_string_bytes(fmt as usize as u64).as_deref(), Some(&b"%s"[..]));
+    }
+
+    /// `description` is guarded the same way, and a class object answers it —
+    /// so the guard must not refuse the case it is meant to let through.
+    #[test]
+    fn a_class_describes_itself() {
+        if !foundation() {
+            return;
+        }
+        // SAFETY: as above.
+        let object_class = unsafe { crate::objc::host::objc_getClass(c"NSObject".as_ptr()) };
+        if object_class.is_null() {
+            return;
+        }
+        assert_eq!(
+            description_bytes(object_class as u64).as_deref(),
+            Some(&b"NSObject"[..])
+        );
+    }
 }
