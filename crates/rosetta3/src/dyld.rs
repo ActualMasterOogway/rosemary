@@ -476,11 +476,17 @@ pub fn contains(va: u64) -> bool {
 }
 
 /// The region to lift in order to execute `va`, if it is in a loaded image.
-pub fn lift_region(va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
+pub fn lift_region(
+    va: u64,
+    from_function_start: bool,
+) -> Option<(crate::region::Region, Vec<u8>)> {
     find(|image| {
         let (base, bytes) = region_of(image, va)?;
         let function = image.functions.iter().find(|f| f.contains(&va)).cloned();
-        let region = crate::region::region_for(bytes, base, va, function)?;
+        let region = match from_function_start {
+            true => crate::region::region_for(bytes, base, va, function)?,
+            false => crate::region::region_at(bytes, base, va, function)?,
+        };
         let start = usize::try_from(region.range.start - base).ok()?;
         let end = usize::try_from(region.range.end - base)
             .ok()?

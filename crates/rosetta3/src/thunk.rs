@@ -688,12 +688,66 @@ unsafe extern "C" fn typed_entry(
             // SAFETY: `out` is the calling trampoline's eight-byte slot.
             unsafe { *out = value };
         }
-        Ok(Err(e)) => vm.set_pending(in_callback(guest_va, e)),
-        Err(_) => vm.set_pending(VmError::Thunk {
-            guest: guest_va,
-            reason: "the guest callback panicked the runtime".into(),
-        }),
+        Ok(Err(e)) => park_or_die(vm, in_callback(guest_va, e)),
+        Err(_) => park_or_die(
+            vm,
+            VmError::Thunk {
+                guest: guest_va,
+                reason: "the guest callback panicked the runtime".into(),
+            },
+        ),
     }
+}
+
+/// The status a callback failure nothing can raise ends the process with.
+///
+/// `EX_SOFTWARE`, which is what it is: an internal error, not a usage error and
+/// not the guest's exit status.
+const CALLBACK_FAILURE_STATUS: i32 = 70;
+
+/// Park a callback's failure — or, when nothing will ever take it, say so and
+/// stop the process.
+///
+/// [`Vm::set_pending`] leaves the error on the thread for the run loop above to
+/// raise, and that is the right answer whenever there *is* one: a guest
+/// comparator that fails inside the host's `qsort` returns into a
+/// [`Vm::run_loop`] frame that takes the error two calls later and reports it
+/// against the guest that caused it.
+///
+/// A callback entered from the host with no guest frame underneath it has no
+/// such frame. CoreVideo calls a display link's thunk on its own thread; this
+/// runtime returns zero; CoreVideo calls it again on the next frame and it
+/// fails identically. The error is parked once, printed once, and from then on
+/// the process is *running* and drawing nothing — which is the worst diagnostic
+/// this project can produce, because it looks like a hang rather than like a
+/// failure. A missing signature reached from a render callback is exactly that
+/// shape, and it is how this was found.
+///
+/// So the outermost guest entry on a thread is fatal. Depth is the whole test:
+/// [`Vm::call_with_stack`] decrements it *before* returning, so zero here means
+/// there is no run loop above this thunk anywhere on this thread.
+///
+/// `_exit` rather than `exit`, for the reason the rest of the runtime avoids
+/// `exit` on a failure path: the guest's `atexit` handlers are translated code,
+/// and re-entering the JIT to run them underneath a failure already reported
+/// turns one diagnostic into two, the second of them misleading.
+fn park_or_die(vm: &Vm, err: VmError) {
+    if crate::thread::current().is_some_and(|s| s.depth.get() > 0) {
+        vm.set_pending(err);
+        return;
+    }
+    // Said here rather than through `set_pending`, which deduplicates and caps:
+    // the last thing printed before the process ends may not be suppressed.
+    eprintln!("rosetta3: {err}");
+    eprintln!(
+        "rosetta3: that was the outermost guest frame on this thread, so nothing \
+         will raise it — the callback would return to the host and this thread \
+         would go quiet. Exiting."
+    );
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    // SAFETY: `_exit` ends the process immediately. No invariant of this
+    // runtime has to survive it, which is the point of choosing it.
+    unsafe { libc::_exit(CALLBACK_FAILURE_STATUS) };
 }
 
 /// Name a failure by the callback it happened in — once.
@@ -786,14 +840,17 @@ unsafe extern "C" fn thunk_entry(guest_va: u64, ints: *const u64, floats: *const
     match std::panic::catch_unwind(AssertUnwindSafe(|| vm.call_with(guest_va, ctx))) {
         Ok(Ok(rax)) => rax,
         Ok(Err(e)) => {
-            vm.set_pending(in_callback(guest_va, e));
+            park_or_die(vm, in_callback(guest_va, e));
             0
         }
         Err(_) => {
-            vm.set_pending(VmError::Thunk {
-                guest: guest_va,
-                reason: "the guest callback panicked the runtime".into(),
-            });
+            park_or_die(
+                vm,
+                VmError::Thunk {
+                    guest: guest_va,
+                    reason: "the guest callback panicked the runtime".into(),
+                },
+            );
             0
         }
     }

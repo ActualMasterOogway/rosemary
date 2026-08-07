@@ -23,6 +23,7 @@ use microlift::core::lift_to_function;
 fn run(path: &str, args: Vec<String>, policy: ImportPolicy) -> ExitCode {
     let mut argv = vec![path.to_string()];
     argv.extend(args);
+    rosetta3::stats::start();
 
     let program = match Program::load_executable(path, &[]) {
         Ok(p) => p,

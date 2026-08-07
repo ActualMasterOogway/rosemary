@@ -904,6 +904,13 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // about a mask this runtime does not model yet. See [`crate::jmpbuf`].
     sig!("_longjmp", V, P, I32),
     sig!("_setjmp", I32, P),
+    // `void _tlv_atexit(void (*termfunc)(void *), void *objAddr)` — the
+    // destructor half of the thread-local family. Unlike the bootstrap below it
+    // is the *host's* own function (see [`crate::shims::runtime`]); what it
+    // needs from this table is the one thing a raw passthrough would get wrong,
+    // which is that `termfunc` is guest code dyld calls as arm64 at thread
+    // exit.
+    cbsig!([0], "_tlv_atexit", V, P, P),
     // Both spellings of the thread-local bootstrap. It is an ordinary host
     // function taking the descriptor's address and returning this thread's
     // address for the variable — see [`crate::tls`] — and it is reached through
@@ -985,6 +992,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("chdir", I32, P),
     sig!("chmod", I32, P, U32),
     sig!("clearerr", V, P),
+    // `clock_t clock(void)`. `clock_t` is `unsigned long` on Darwin — 64 bits on
+    // both architectures — so the value crosses whole; a narrower return would
+    // truncate a process that has run for more than an hour of CPU time.
+    sig!("clock", U64),
     // `struct timespec` is two 64-bit words on both architectures, and the
     // guest passes it by address, so the host fills it in place.
     sig!("clock_get_time", I32, U32, P),
@@ -1012,6 +1023,22 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // is a macro that passes `ZLIB_VERSION` and `sizeof(z_stream)`, so a program
     // importing the underscore forms is one that used the ordinary API.
     sig!("crc32", U64, U64, P, U32),
+    // ## libcurl
+    //
+    // Passthrough to `/usr/lib/libcurl.4.dylib`, which is the library the guest
+    // names in its own install path — so the host's copy *is* the one it asked
+    // for. Only the two setters need more than a signature: they are declared
+    // variadic, and their argument's type is named by the argument in front of
+    // it, one possibility being a function pointer. See
+    // [`crate::shims::curl`].
+    sig!("curl_easy_cleanup", V, P),
+    vsig!("curl_easy_getinfo", I32, P, I32),
+    sig!("curl_easy_init", P),
+    sig!("curl_easy_perform", I32, P),
+    sig!("curl_easy_reset", V, P),
+    vsig!("curl_easy_setopt", I32, P, I32),
+    sig!("curl_global_cleanup", V),
+    sig!("curl_global_init", I32, I64),
     sig!("deflate", I32, P, I32),
     sig!("deflateEnd", I32, P),
     sig!("deflateInit2_", I32, P, I32, I32, I32, I32, I32, P, I32),
@@ -1059,7 +1086,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("exit", V, I32),
     sig!("exp", F64, F64),
     sig!("exp2", F64, F64),
+    sig!("exp2f", F32, F32),
     sig!("expf", F32, F32),
+    sig!("expm1", F64, F64),
+    sig!("expm1f", F32, F32),
     sig!("fabs", F64, F64),
     sig!("fabsf", F32, F32),
     sig!("fchmod", I32, I32, U32),
@@ -1096,7 +1126,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("fma", F64, F64, F64, F64),
     sig!("fmaf", F32, F32, F32, F32),
     sig!("fmax", F64, F64, F64),
+    sig!("fmaxf", F32, F32, F32),
     sig!("fmin", F64, F64, F64),
+    sig!("fminf", F32, F32, F32),
     sig!("fmod", F64, F64, F64),
     sig!("fmodf", F32, F32, F32),
     sig!("fopen", P, P, P),
@@ -1384,6 +1416,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("host_page_size", I32, U32, P),
     sig!("host_statistics", I32, U32, I32, P, P),
     sig!("hypot", F64, F64, F64),
+    sig!("hypotf", F32, F32, F32),
     sig!("iconv", U64, P, P, P, P, P),
     sig!("iconv_close", I32, P),
     sig!("iconv_open", P, P, P),
@@ -1432,6 +1465,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("kqueue", I32),
     sig!("labs", I64, I64),
     sig!("ldexp", F64, F64, I32),
+    sig!("ldexpf", F32, F32, I32),
     sig!("listen", I32, I32, I32),
     sig!("listxattr", I64, P, P, U64, I32),
     sig!("localeconv_l", P, P),
@@ -1446,6 +1480,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("log", F64, F64),
     sig!("log10", F64, F64),
     sig!("log10f", F32, F32),
+    sig!("log1p", F64, F64),
+    sig!("log1pf", F32, F32),
     sig!("log2", F64, F64),
     sig!("log2f", F32, F32),
     sig!("logf", F32, F32),
@@ -1675,6 +1711,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("rindex", P, P, I32),
     sig!("rmdir", I32, P),
     sig!("round", F64, F64),
+    sig!("roundf", F32, F32),
     sig!("scalbn", F64, F64, I32),
     sig!("scalbnf", F32, F32, I32),
     vsig!("scanf", I32, P),
@@ -1834,7 +1871,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("thread_suspend", I32, U32),
     sig!("time", I64, P),
     sig!("timegm", I64, P),
-    // The other spelling; see `_tlv_bootstrap` above.
+    // The other spellings; see `_tlv_bootstrap` and `_tlv_atexit` above.
+    cbsig!([0], "tlv_atexit", V, P, P),
     sig!("tlv_bootstrap", P, P),
     sig!("tmpfile", P),
     sig!("tolower", I32, I32),
@@ -1844,6 +1882,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // it whenever its output is a terminal.
     cbsig!([2], "tputs", I32, P, I32, P),
     sig!("trunc", F64, F64),
+    sig!("truncf", F32, F32),
     sig!("umask", U32, U32),
     sig!("uname", I32, P),
     sig!("ungetc", I32, I32, P),

@@ -871,10 +871,15 @@ impl Vm {
                     // `rsp` beside an unchanging `pc` is the signature.
                     let by_site = self.program.import_at(pc).map(|s| s.symbol.as_str());
                     let by_target = self.program.import_by_target(pc).map(|s| s.symbol.as_str());
+                    // The previous exit is on the line because a livelock is
+                    // always a region that leaves the way it came, and which
+                    // exit it leaves by is the difference between "the guest is
+                    // spinning" and "this runtime is".
                     eprintln!(
                         "rosetta3: trace {ticks}: {at} rsp={:#x} import_at={by_site:?} \
-                         by_target={by_target:?}",
-                        ctx.rsp
+                         by_target={by_target:?} from={:?}",
+                        ctx.rsp,
+                        from.as_ref().map(|f| (f.exit, f.code, f.pc)),
                     );
                 }
             }
@@ -1018,6 +1023,17 @@ impl Vm {
             ExitReason::UnknownJump => match TransferKind::try_from(ctx.exit_code) {
                 Ok(TransferKind::DirectCall) => {
                     ctx.rip = ctx.imported_function_va;
+                    Ok(None)
+                }
+                // Two of the kinds are not about the guest's control flow at
+                // all — they are the translation saying it cannot serve this
+                // address, either because the instruction there runs past the
+                // bytes it was given or because its dispatch was never offered
+                // that address. `rip` already names it, so continuing lifts a
+                // region that starts there. Counted because a run full of them
+                // means the region policy is cutting in the wrong places.
+                Ok(TransferKind::RegionTail | TransferKind::NoResumePoint) => {
+                    crate::stats::record_tail_exit();
                     Ok(None)
                 }
                 Ok(_) => Ok(None),

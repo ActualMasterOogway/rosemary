@@ -111,6 +111,24 @@ pub fn provider() -> SyntheticDylib {
     for name in machish::extensions::tlv::BOOTSTRAP_SYMBOLS {
         lib.define_fn(name, crate::tls::bootstrap as *const ());
     }
+    // The *other* half of the thread-local family, and the one that is the
+    // host's rather than this runtime's. `__tlv_bootstrap` has to be
+    // reimplemented because it allocates a block from a descriptor the host's
+    // image state has never heard of; `_tlv_atexit` allocates nothing and
+    // decides nothing — it appends a destructor to the list dyld runs when
+    // *this* thread ends, and a guest thread is a host thread. So the host's
+    // own is the right implementation, and it is denied here only because the
+    // whole `__tlv_` prefix is.
+    //
+    // Its first argument is a guest function pointer dyld will call as arm64,
+    // long after this call, on a thread teardown path — so it must go out as a
+    // thunk, which is what the `cbsig!` entry in [`crate::abi::table`] says.
+    // Reached by a C++ guest with a `thread_local` whose type has a
+    // destructor, which is how it was found.
+    if let Some(f) = crate::dyld::host_symbol("_tlv_atexit") {
+        lib.define_fn("__tlv_atexit", f as *const ());
+        lib.define_fn("_tlv_atexit", f as *const ());
+    }
     // Two underscores as the Mach-O spells it: one from C mangling, one from
     // the identifier `_NSGetExecutablePath`.
     lib.define_fn("__NSGetExecutablePath", ns_get_executable_path as *const ());

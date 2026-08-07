@@ -65,11 +65,52 @@
 //! first byte after the start that no decoded instruction covers. Anything
 //! beyond the hole is reachable later, from its own PC, and lifting it as part
 //! of this region would mean decoding the hole.
+//!
+//! # The other policy: pages
+//!
+//! Everything above is a *prediction* — it reads bytes to decide which other
+//! bytes will be executed. [`Policy::Page`] declines to predict: a region is
+//! the run from `pc` to the end of the page `pc` is in, whatever is in it. The
+//! reasons to want that are real:
+//!
+//! - **Generated code is only knowable at the moment it runs.** A walk that
+//!   follows a branch into memory the guest has not finished writing lifts
+//!   whatever is there now, and the translation then *claims* those addresses
+//!   for the rest of the run — see the zero-filled-arena note above, which is a
+//!   symptom rather than the disease.
+//! - **It is one rule.** No function records, no branch following, no holes,
+//!   nothing that behaves differently for an image than for a JIT arena.
+//!
+//! And one reason not to, which is measured rather than argued
+//! ([`MAX_REGION_INSTRUCTIONS`] has the method). Cranelift's compile time is
+//! **superlinear in region size**, badly: over the same 128 KiB of a real
+//! program's `__text`, compiling it in 1 KiB pieces costs 6.4 ms/KiB, in 4 KiB
+//! pieces 14.8, and in 16 KiB pieces 81. Meanwhile the code a program actually
+//! reaches is *sparse* in the pages that hold it — UNDERTALE's first four
+//! thousand regions cover 655 KiB of bytes spread across 562 pages of 16 KiB,
+//! so a page policy hands the compiler 9.2 MiB to translate instead of 655 KiB.
+//! More bytes, each dearer. Measured end to end on that program, the first 2048
+//! regions cost 2.78s of compile time under the walk and 155.46s under the page
+//! policy, which is not a tuning gap.
+//!
+//! So the walk stays the default and the page policy is opt-in
+//! (`ROSETTA3_REGION=page`), where its correctness properties are worth more
+//! than its cost — a guest whose own JIT rewrites its arenas, most of all. Both
+//! policies are bounded by [`MAX_REGION_INSTRUCTIONS`], which is what keeps the
+//! page policy's worst case finite.
+//!
+//! The page policy needs microlift's side of the same bargain, since a region
+//! cut on an address grid lands inside an instruction about as often as not:
+//! `LifterConfig::region_tail_exit` turns the instruction straddling the cut
+//! into a resumable VM exit instead of an invalid-opcode fault. See
+//! [`crate::cache`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction};
+use microlift::arch::x86_64::X86_64;
+use microlift::core::LifterConfig;
 
 /// Ceiling on how far one region may run, in bytes.
 ///
@@ -127,6 +168,109 @@ const MAX_INSTRUCTIONS: usize = 200_000;
 /// everything an ordinary program contains — leaving a hot game loop's regions
 /// whole, which this workload cannot measure — and below everything that hurt.
 const MAX_REGION_INSTRUCTIONS: usize = 1024;
+
+/// How a region's extent is chosen. See the module note for the trade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Policy {
+    /// Follow the guest's control flow from the region start and lift what it
+    /// reaches. The default, and the cheaper one to compile.
+    #[default]
+    Walk,
+    /// Lift from `pc` to the end of its page, whatever is in between.
+    Page,
+}
+
+/// The environment variables this module reads.
+pub const POLICY_ENV: &str = "ROSETTA3_REGION";
+pub const PAGE_SIZE_ENV: &str = "ROSETTA3_PAGE_SIZE";
+pub const CAP_ENV: &str = "ROSETTA3_REGION_CAP";
+
+impl Policy {
+    /// Parse a `ROSETTA3_REGION` value. Case- and whitespace-insensitive.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "walk" => Some(Policy::Walk),
+            "page" => Some(Policy::Page),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Policy::Walk => "walk",
+            Policy::Page => "page",
+        }
+    }
+}
+
+/// The policy this run is using.
+///
+/// Read once and cached: two regions of one process choosing extents by
+/// different rules would produce a cache whose overlaps nobody could reason
+/// about.
+pub fn policy() -> Policy {
+    static POLICY: std::sync::OnceLock<Policy> = std::sync::OnceLock::new();
+    *POLICY.get_or_init(|| match std::env::var(POLICY_ENV) {
+        Err(_) => Policy::default(),
+        Ok(value) => Policy::parse(&value).unwrap_or_else(|| {
+            eprintln!(
+                "rosetta3: {POLICY_ENV}={value:?} is not one of walk, page; using {}",
+                Policy::default().as_str()
+            );
+            Policy::default()
+        }),
+    })
+}
+
+/// The page [`Policy::Page`] cuts on.
+///
+/// Defaults to the **host's** 16 KiB rather than the 4 KiB the guest was
+/// compiled for, and deliberately: the page here is a unit of translation, not
+/// a unit of protection, and the larger one means a quarter as many regions
+/// over the same code and a quarter as many boundaries for an instruction to
+/// straddle. Overridable because it is also the knob that trades that against
+/// how much of a page is lifted and never executed.
+pub fn page_size() -> u64 {
+    static SIZE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *SIZE.get_or_init(|| {
+        std::env::var(PAGE_SIZE_ENV)
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| n.is_power_of_two() && *n >= 4096)
+            .unwrap_or(16 * 1024)
+    })
+}
+
+/// The instruction cap in force, which is [`MAX_REGION_INSTRUCTIONS`] unless
+/// `ROSETTA3_REGION_CAP` says otherwise.
+///
+/// A knob because the measured value behind the constant was measured for the
+/// *walk*, where the cap is an outlier trimmer that rarely binds. Under
+/// [`Policy::Page`] it binds on nearly every region — a 16 KiB page of dense
+/// code is some four thousand instructions — so there it is the main control on
+/// how much a region costs to compile, and the right value is a property of the
+/// program rather than of this crate.
+pub fn max_instructions() -> usize {
+    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var(CAP_ENV)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(MAX_REGION_INSTRUCTIONS)
+    })
+}
+
+/// The lifter config knobs the current policy requires.
+///
+/// Applied to the cache's config once, at construction. It lives here because
+/// the two halves have to agree: a region cut on a page boundary is only safe
+/// to lift if microlift has been told to exit at the instruction the cut lands
+/// inside, and nothing else in the crate knows which policy is in force.
+pub fn configure(config: &mut LifterConfig) {
+    config.page_size = page_size();
+    config.region_tail_exit = policy() == Policy::Page;
+}
 
 /// A region to lift: what to hand microlift, and where its instructions begin.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -201,6 +345,10 @@ impl Region {
 ///   can decode straight into the neighbour on the wrong instruction grid, and
 ///   the resulting translation claims addresses it cannot correctly execute.
 ///
+/// Under [`Policy::Page`] neither half of the hint is consulted: a function
+/// record is a claim about which bytes are code, and declining to make that
+/// claim is the whole point of the policy.
+///
 /// `None` when `pc` is outside `bytes`, or when nothing at `pc` decodes.
 pub fn region_for(
     bytes: &[u8],
@@ -208,8 +356,110 @@ pub fn region_for(
     pc: u64,
     function: Option<Range<u64>>,
 ) -> Option<Region> {
+    match policy() {
+        Policy::Walk => walk_region_for(bytes, base, pc, function, true),
+        Policy::Page => page_region_for(bytes, base, pc),
+    }
+}
+
+/// [`region_for`], but the region **begins at `pc`** rather than at the
+/// enclosing function's first instruction.
+///
+/// The caller that wants this is the code cache, and the reason is that its
+/// translations are keyed by the address they start at. Preferring the function
+/// start means two entries into one function ask for two regions with the *same*
+/// key — so the second evicts the first, the first entry point misses, and the
+/// two lifts alternate forever re-translating the same function. Starting at
+/// `pc` gives the second translation a key of its own.
+///
+/// The function's recorded extent is still used as an upper bound, since that
+/// half of the hint is about where the code *ends* and is true whatever the
+/// region starts at.
+pub fn region_at(
+    bytes: &[u8],
+    base: u64,
+    pc: u64,
+    function: Option<Range<u64>>,
+) -> Option<Region> {
+    match policy() {
+        Policy::Walk => walk_region_for(bytes, base, pc, function, false),
+        // Already the answer: a page region always starts at `pc`.
+        Policy::Page => page_region_for(bytes, base, pc),
+    }
+}
+
+/// The run from `pc` to the end of its page, capped.
+///
+/// A plain linear decode — no branches followed, no function extent trusted,
+/// and the only thing that ends it early is the [zero rule](self), which is
+/// about memory nobody has written rather than about control flow.
+///
+/// The extent comes from [`LifterConfig::page_bounded_extent`] so that the rule
+/// deciding where a region stops is the same one microlift enforces when an
+/// instruction straddles it; see [`configure`].
+fn page_region_for(bytes: &[u8], base: u64, pc: u64) -> Option<Region> {
+    page_region_sized(bytes, base, pc, page_size(), max_instructions())
+}
+
+/// [`page_region_for`] with the page size and the cap named rather than read
+/// from the environment, which is what makes the policy testable at a size a
+/// test fixture can be written for — and what keeps such a test from asserting
+/// on whatever the environment happened to select.
+fn page_region_sized(
+    bytes: &[u8],
+    base: u64,
+    pc: u64,
+    page: u64,
+    cap: usize,
+) -> Option<Region> {
+    let config = LifterConfig {
+        page_size: page,
+        ..Default::default()
+    };
+    let available = base..base.saturating_add(bytes.len() as u64);
+    let extent = config.page_bounded_extent::<X86_64>(pc, available);
+    if extent.is_empty() {
+        return None;
+    }
+
+    let mut decoder = Decoder::with_ip(64, bytes, base, DecoderOptions::NONE);
+    decoder.set_position(usize::try_from(pc - base).ok()?).ok()?;
+    decoder.set_ip(pc);
+
+    let mut instr = Instruction::default();
+    let mut starts = Vec::new();
+    let mut end = pc;
+    while end < extent.end && starts.len() < cap {
+        decoder.decode_out(&mut instr);
+        let off = usize::try_from(end - base).ok()?;
+        // An instruction that runs past the page is left for microlift to
+        // exit on rather than trimmed away here: the two have to agree about
+        // where the region ends, and the region ends at the page.
+        if instr.is_invalid() && instr.next_ip() <= extent.end {
+            break;
+        }
+        if is_all_zero(bytes, off, instr.len()) {
+            break;
+        }
+        starts.push(end);
+        end = instr.next_ip().min(extent.end);
+    }
+    (end > pc).then_some(Region {
+        range: pc..end,
+        starts,
+    })
+}
+
+/// [`region_for`] under [`Policy::Walk`].
+fn walk_region_for(
+    bytes: &[u8],
+    base: u64,
+    pc: u64,
+    function: Option<Range<u64>>,
+    from_function_start: bool,
+) -> Option<Region> {
     let bound = function.as_ref().map_or(u64::MAX, |f| f.end);
-    if let Some(f) = function.filter(|f| f.contains(&pc))
+    if let Some(f) = function.filter(|_| from_function_start).filter(|f| f.contains(&pc))
         && let Some(r) = walk(bytes, base, f.start, bound)
             .map(capped)
             .filter(|r| r.covers(pc))
@@ -333,8 +583,18 @@ mod tests {
 
     const BASE: u64 = 0x1_0000;
 
+    /// The walk, asked directly rather than through [`region_for`].
+    ///
+    /// Going through `region_for` would make every test in this module a test of
+    /// whichever policy the *environment* selected, so a suite run under
+    /// `ROSETTA3_REGION=page` would report the walk as broken. Each policy is
+    /// tested against its own entry point; see the `page_policy` module below.
+    fn walked(bytes: &[u8], pc: u64, function: Option<Range<u64>>) -> Option<Region> {
+        walk_region_for(bytes, BASE, pc, function, true)
+    }
+
     fn range(bytes: &[u8], pc: u64, function: Option<Range<u64>>) -> Option<Range<u64>> {
-        region_for(bytes, BASE, pc, function).map(|r| r.range)
+        walked(bytes, pc, function).map(|r| r.range)
     }
 
     #[test]
@@ -353,6 +613,33 @@ mod tests {
             Some(BASE..BASE + 2),
             "the un-walked bytes are a hole, and a region has to be contiguous"
         );
+    }
+
+    /// The preference `region_at` gives up, and the half of the hint it keeps.
+    ///
+    /// Two entries into one function must be able to become two translations —
+    /// they are keyed by their start, so a second region sharing the first's
+    /// start replaces it rather than joining it. See [`region_at`] and
+    /// `CodeCache::get_or_lift`.
+    #[test]
+    fn a_region_can_be_made_to_start_at_the_pc_instead() {
+        // push rbp ; mov rbp,rsp ; xor eax,eax ; ret ; (next function) ret
+        let code = [0x55, 0x48, 0x89, 0xE5, 0x31, 0xC0, 0xC3, 0xC3];
+        let function = Some(BASE..BASE + 7);
+        let pc = BASE + 4;
+
+        // The default prefers the function's first instruction, so both entries
+        // would ask for a region starting at `BASE`.
+        assert_eq!(
+            walked(&code, pc, function.clone()).map(|r| r.range),
+            Some(BASE..BASE + 7)
+        );
+        // Asked to start at the PC, it does — and still stops at the end of the
+        // function, since that half of the record is true wherever the region
+        // began.
+        let r = walk_region_for(&code, BASE, pc, function, false).unwrap();
+        assert_eq!(r.range, pc..BASE + 7);
+        assert!(r.covers(pc));
     }
 
     #[test]
@@ -489,7 +776,7 @@ mod tests {
         // One-byte `nop`s, so instruction count and byte count agree and the
         // cut is unambiguous.
         let code = vec![0x90u8; MAX_REGION_INSTRUCTIONS * 2];
-        let r = region_for(&code, BASE, BASE, None).unwrap();
+        let r = walked(&code, BASE, None).unwrap();
         assert_eq!(r.starts.len(), MAX_REGION_INSTRUCTIONS);
         assert_eq!(r.range, BASE..BASE + MAX_REGION_INSTRUCTIONS as u64);
 
@@ -502,7 +789,7 @@ mod tests {
         // rather than the truncated one that does not. This is the whole reason
         // capping is safe: the bytes past the cap are reached from their own PC.
         let later = BASE + MAX_REGION_INSTRUCTIONS as u64 + 7;
-        let r = region_for(&code, BASE, later, None).unwrap();
+        let r = walked(&code, later, None).unwrap();
         assert_eq!(r.range.start, later);
         assert!(r.covers(later));
     }
@@ -521,7 +808,7 @@ mod tests {
         let code = vec![0x90u8; MAX_REGION_INSTRUCTIONS * 2];
         let function = Some(BASE..BASE + code.len() as u64);
         let pc = BASE + MAX_REGION_INSTRUCTIONS as u64 + 100;
-        let r = region_for(&code, BASE, pc, function).unwrap();
+        let r = walked(&code, pc, function).unwrap();
         assert!(r.covers(pc), "{:#x?} does not cover {pc:#x}", r.range);
         assert_eq!(r.range.start, pc);
     }
@@ -535,13 +822,130 @@ mod tests {
         assert_eq!(r.range.end - r.range.start, MAX_INSTRUCTIONS as u64);
     }
 
+    /// The page policy, at a page size a fixture can be written against. See the
+    /// module note for what it trades away and what it buys.
+    mod page_policy {
+        use super::*;
+
+        /// 4 KiB rather than the default 16, so a test fixture stays a fixture.
+        const PAGE: u64 = 4096;
+
+        /// The cap is named rather than read from the environment, so these
+        /// tests describe the *policy* and not whatever `ROSETTA3_REGION_CAP`
+        /// the suite happens to run under.
+        const CAP: usize = MAX_REGION_INSTRUCTIONS;
+
+        fn paged(bytes: &[u8], pc: u64) -> Option<Region> {
+            page_region_sized(bytes, BASE, pc, PAGE, CAP)
+        }
+
+        fn page_range(bytes: &[u8], pc: u64) -> Option<Range<u64>> {
+            paged(bytes, pc).map(|r| r.range)
+        }
+
+        /// The defining difference from the walk: a `ret` is not the end of
+        /// anything, because the policy makes no claim about control flow.
+        #[test]
+        fn a_terminator_does_not_end_the_region() {
+            // xor eax, eax ; ret ; inc eax ; ret
+            let code = [0x31, 0xC0, 0xC3, 0xFF, 0xC0, 0xC3];
+            assert_eq!(page_range(&code, BASE), Some(BASE..BASE + 6));
+        }
+
+        /// And neither does an indirect jump, which is what stops the walk in
+        /// front of an embedded jump table.
+        #[test]
+        fn an_indirect_jump_does_not_end_the_region() {
+            // jmp rax ; nop ; nop
+            let code = [0xFF, 0xE0, 0x90, 0x90];
+            assert_eq!(page_range(&code, BASE), Some(BASE..BASE + 4));
+        }
+
+        /// Eight bytes of `nop dword ptr [rax+rax*1+0]`, so a page of them is
+        /// 512 instructions and the [`max_instructions`] cap — which is about
+        /// compile cost rather than about pages — stays out of the way.
+        const WIDE_NOP: [u8; 8] = [0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+        fn page_of_nops() -> Vec<u8> {
+            WIDE_NOP.repeat(PAGE as usize / WIDE_NOP.len())
+        }
+
+        #[test]
+        fn a_region_starts_at_the_pc_and_ends_at_the_page() {
+            let code = page_of_nops();
+            let pc = BASE + 80;
+            assert_eq!(page_range(&code, pc), Some(pc..BASE + PAGE));
+        }
+
+        /// The instruction the page cut lands inside is *kept* in the region
+        /// rather than trimmed off it, because microlift is what turns it into a
+        /// resumable exit — and the two have to agree about where the region
+        /// ends for that to work. See `LifterConfig::region_tail_exit`.
+        #[test]
+        fn an_instruction_straddling_the_page_is_left_for_the_lifter() {
+            // Padding up to three bytes before the page ends, then a five-byte
+            // `mov eax, 1` that cannot fit.
+            let mut code = page_of_nops();
+            code.truncate(PAGE as usize - 16);
+            code.extend(std::iter::repeat_n(0x90u8, 13));
+            code.extend([0xB8, 0x01, 0x00, 0x00, 0x00]);
+            let r = paged(&code, BASE).unwrap();
+            assert_eq!(r.range.end, BASE + PAGE, "the region ends at the page");
+            assert_eq!(
+                r.starts.last(),
+                Some(&(BASE + PAGE - 3)),
+                "and the straddling instruction is still in it"
+            );
+        }
+
+        /// The termination property: a PC in the last few bytes of a page gets
+        /// an extent long enough to hold its own first instruction, so entering
+        /// there always makes progress.
+        #[test]
+        fn a_pc_at_the_end_of_a_page_still_gets_a_whole_instruction() {
+            let mut code = vec![0x90u8; PAGE as usize - 3];
+            code.extend([0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3]);
+            let pc = BASE + PAGE - 3;
+            let r = paged(&code, pc).unwrap();
+            assert!(
+                r.range.end >= pc + 5,
+                "{:#x?} cannot hold the `mov` at its own entry",
+                r.range
+            );
+            assert_eq!(r.starts.first(), Some(&pc));
+        }
+
+        /// The one rule the page policy keeps from the walk, and for the reason
+        /// the module note gives: zeros are memory nobody has written, and a
+        /// translation that claimed them would be served after they were.
+        #[test]
+        fn a_run_of_zeros_still_ends_the_region() {
+            let mut code = vec![0x48, 0x83, 0xEC, 0x08]; // sub rsp, 8
+            code.extend(std::iter::repeat_n(0u8, 256));
+            assert_eq!(page_range(&code, BASE), Some(BASE..BASE + 4));
+        }
+
+        #[test]
+        fn the_instruction_cap_bounds_the_region() {
+            let code = vec![0x90u8; PAGE as usize];
+            let r = paged(&code, BASE).unwrap();
+            assert_eq!(r.starts.len(), CAP.min(PAGE as usize));
+        }
+
+        #[test]
+        fn an_address_outside_the_image_has_no_region() {
+            let code = [0xC3];
+            assert_eq!(page_range(&code, BASE + 64), None);
+        }
+    }
+
     #[test]
     fn coverage_is_the_instruction_grid_and_not_the_range() {
         // nop ; mov eax, imm32 ; ret — the four immediate bytes are inside the
         // region and are not addresses it can be entered at. Answering "yes" to
         // one of them is what silently executes the wrong code.
         let code = [0x90, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3];
-        let r = region_for(&code, BASE, BASE, None).unwrap();
+        let r = walked(&code, BASE, None).unwrap();
         assert_eq!(r.range, BASE..BASE + 7);
         assert_eq!(r.starts, vec![BASE, BASE + 1, BASE + 6]);
         assert!(r.covers(BASE + 6));

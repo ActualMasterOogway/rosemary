@@ -402,26 +402,71 @@ static REFUSED: &[(&str, &str)] = &[
     ),
 ];
 
-/// Selectors whose methods are variadic, which no type encoding records.
+/// A nil-terminated object-list variadic, and the counted method that says the
+/// same thing without an ellipsis.
 ///
-/// The encoding for `+[NSString stringWithFormat:]` is `@32@0:8@16` — three
-/// arguments and no ellipsis — so a marshaller reading it passes the format
-/// string and drops every argument after it. On x86-64 those arguments are in
-/// registers and on arm64 they belong on the stack, so what the host would read
-/// is not merely incomplete, it is unrelated.
+/// These are the other half of what [`names_a_format`] covers, and the half
+/// that cannot be rendered: `+[NSDictionary dictionaryWithObjectsAndKeys:]` has
+/// no format string to fold its arguments into. What it has instead is a
+/// **counted twin** — every collection class Foundation ships declares one,
+/// because the same problem faces anyone bridging to a language without an
+/// ellipsis. So the list is walked here, on the guest's own terms, and the
+/// counted form is sent with an array this runtime owns.
 ///
-/// **This list is incomplete and cannot be otherwise**: any method may be
-/// variadic and nothing in the image says so. What it covers is the ones a
-/// program actually reaches, plus every selector ending in `Format:`, which is
-/// the naming convention Cocoa keeps to. A variadic method outside it is the
-/// known hole in M6.3, recorded in the roadmap rather than papered over.
-static VARIADIC_SELECTORS: &[&str] = &[
-    "arrayWithObjects:",
-    "dictionaryWithObjectsAndKeys:",
-    "initWithObjects:",
-    "initWithObjectsAndKeys:",
-    "orderedSetWithObjects:",
-    "setWithObjects:",
+/// The encoding for the variadic form is `@32@0:8@16` — three arguments and no
+/// ellipsis — so a marshaller reading it passes `firstObject` and leaves the
+/// rest of the list to whatever the host's `va_list` finds. That is not a
+/// truncated answer, it is an unterminated walk: Foundation reads registers and
+/// stack slots nobody wrote until it happens on a zero, and raises out through
+/// the `extern "C"` frame this shim was entered across.
+struct ObjectList {
+    /// The selector the guest sends.
+    variadic: &'static str,
+    /// The counted selector to send instead.
+    counted: &'static str,
+    /// Whether the list reads `object, key, object, key, …` rather than plain
+    /// objects — and so becomes *two* arrays rather than one.
+    pairs: bool,
+}
+
+/// The counted twin of each nil-terminated list a program reaches.
+///
+/// **Incomplete, and cannot be otherwise**, for the reason [`is_variadic`]
+/// gives: nothing in an image records an ellipsis. A list-taking selector
+/// outside this table is not refused, it is *not recognised as variadic at all*
+/// — which is the known hole in M6.3, recorded in the roadmap rather than
+/// papered over.
+static OBJECT_LISTS: &[ObjectList] = &[
+    ObjectList {
+        variadic: "arrayWithObjects:",
+        counted: "arrayWithObjects:count:",
+        pairs: false,
+    },
+    ObjectList {
+        variadic: "dictionaryWithObjectsAndKeys:",
+        counted: "dictionaryWithObjects:forKeys:count:",
+        pairs: true,
+    },
+    ObjectList {
+        variadic: "initWithObjects:",
+        counted: "initWithObjects:count:",
+        pairs: false,
+    },
+    ObjectList {
+        variadic: "initWithObjectsAndKeys:",
+        counted: "initWithObjects:forKeys:count:",
+        pairs: true,
+    },
+    ObjectList {
+        variadic: "orderedSetWithObjects:",
+        counted: "orderedSetWithObjects:count:",
+        pairs: false,
+    },
+    ObjectList {
+        variadic: "setWithObjects:",
+        counted: "setWithObjects:count:",
+        pairs: false,
+    },
 ];
 
 /// Which of the three sends a spelling asks for.
@@ -742,6 +787,24 @@ fn send(
     // is then sent with the result standing in for its format, which is a call
     // the encoding does describe exactly. See [`render_variadic`].
     if is_variadic(sel) {
+        // A nil-terminated object list has no format to fold its arguments
+        // into, so it is answered by sending the counted twin instead — which
+        // returns rather than falling through to the send below, because the
+        // selector that reaches the host is not the one the guest sent.
+        if let Some(list) = object_list(sel) {
+            return send_object_list(
+                vm,
+                symbol,
+                list,
+                &signature,
+                send,
+                class,
+                host_receiver,
+                base,
+                ctx,
+                mem,
+            );
+        }
         render_variadic(symbol, sel, &signature, base, ctx, mem)?;
     }
     // Two independent statements about the same fact, held to each other. The
@@ -841,12 +904,20 @@ fn signature_of(symbol: &str, method: host::Method) -> Result<Signature> {
 
 /// Whether the selector names a method that takes an ellipsis.
 ///
-/// By name, because nothing else says so. See [`VARIADIC_SELECTORS`].
+/// By name, because nothing else says so: the two conventions Cocoa keeps to
+/// are a trailing format string ([`names_a_format`]) and a nil-terminated
+/// object list ([`OBJECT_LISTS`]).
 fn is_variadic(sel: u64) -> bool {
     let Some(name) = selector_name(sel) else {
         return false;
     };
-    names_a_format(&name) || VARIADIC_SELECTORS.contains(&name.as_str())
+    names_a_format(&name) || OBJECT_LISTS.iter().any(|l| l.variadic == name)
+}
+
+/// The counted twin of a nil-terminated list selector, if this is one.
+fn object_list(sel: u64) -> Option<&'static ObjectList> {
+    let name = selector_name(sel)?;
+    OBJECT_LISTS.iter().find(|l| l.variadic == name)
 }
 
 /// Whether the selector's last keyword names a *format string* parameter.
@@ -959,6 +1030,168 @@ fn render_variadic(
 
 /// The SysV AMD64 integer argument registers there are.
 const SYSV_INT_REGS: usize = 6;
+
+/// How many objects a nil-terminated list may hold before this stops walking.
+///
+/// A list with no terminator is indistinguishable from a long one until the
+/// read faults, and the read need not fault: past the arguments lies the
+/// guest's own stack, which is mapped and full of non-zero words. So the walk
+/// is bounded and says so, rather than climbing the caller's frames until it
+/// leaves the mapping. Well past anything a program writes by hand.
+const OBJECT_LIST_CAP: usize = 4096;
+
+/// Send the counted twin of a nil-terminated object-list message.
+///
+/// The three questions this has to answer are all about *where the list is*,
+/// and SysV AMD64 answers each of them: an integer-class variadic argument
+/// continues in the argument registers after the named ones, and spills to the
+/// caller's stack at `rsp + 0` — which, because microlift exits before the
+/// `CALL`, is the same stack path [`crate::abi::marshal`] already reads
+/// MEMORY-class arguments from. `firstObject` is named rather than variadic and
+/// is the list's first element, so the walk starts at it.
+///
+/// The result is arrays this runtime owns, handed to a method with no ellipsis
+/// at all. Nothing about arm64's variadic convention has to be reproduced,
+/// which is the same move [`render_variadic`] makes for a format string and for
+/// the same reason: the difficulty goes away rather than being solved.
+///
+/// On any refusal `ctx` is untouched, as everywhere else — every fallible step
+/// happens before `rax` is written.
+#[allow(clippy::too_many_arguments)]
+fn send_object_list(
+    vm: &Vm,
+    symbol: &str,
+    list: &ObjectList,
+    signature: &Signature,
+    send: Send,
+    class: host::Class,
+    host_receiver: u64,
+    base: usize,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let refuse = |reason: String| {
+        Err(AbiError::Nested {
+            symbol: symbol.to_string(),
+            reason: format!("{}: {reason}", list.variadic),
+        })
+    };
+    // The guest called `objc_msgSend_stret` for a method returning an object.
+    // Every argument would be one register out, and the counted send would be
+    // built from the wrong words.
+    if send.stret {
+        return refuse("sent through the struct-return trampoline, which returns an object".into());
+    }
+    // `self`, `_cmd`, `firstObject`, each integer-class — which is what makes
+    // the register the list starts in computable at all.
+    let params = &signature.shapes[1..];
+    if params.len() != 3 || !params.iter().all(|s| s.scalar() == Some(T::Pointer)) {
+        return refuse(format!(
+            "expected a receiver, a selector and one named object, and the method's \
+             encoding describes {} named parameter(s)",
+            params.len().saturating_sub(2)
+        ));
+    }
+
+    // Walk it. `firstObject` is at the last named register; the ellipsis
+    // continues from the next one and spills to the stack after `r9`.
+    let mut items = Vec::new();
+    let mut reg = base + 2;
+    let mut spill = 0u64;
+    loop {
+        let raw = match reg < SYSV_INT_REGS {
+            true => arg_reg(ctx, reg),
+            false => {
+                let at = ctx.rsp.wrapping_add(spill);
+                spill += 8;
+                (mem as &dyn GuestMemory).read_u64(at, symbol)?
+            }
+        };
+        reg += 1;
+        if raw == 0 {
+            break;
+        }
+        if items.len() == OBJECT_LIST_CAP {
+            return refuse(format!(
+                "a list of more than {OBJECT_LIST_CAP} objects with no nil terminator found"
+            ));
+        }
+        // A guest class is legal in any of these — `@[SomeClass]` is an array
+        // of one object — and is the one pointer that has to be translated.
+        items.push(vm.objc_host_class(raw) as *mut std::ffi::c_void);
+    }
+
+    // The counted twin, looked up on the same class the variadic one was found
+    // on, so a receiver that does not have it is named rather than assumed.
+    let Some(name) = host::c_string(list.counted) else {
+        return refuse("the counted selector is not a C string".into());
+    };
+    // SAFETY: `name` is a NUL-terminated string that outlives the call, and
+    // `class` is a `Class` the runtime returned.
+    let counted = unsafe { host::sel_registerName(name.as_ptr()) };
+    // SAFETY: as above; `counted` is a uniqued `SEL`.
+    let method = unsafe { host::class_getInstanceMethod(class, counted) };
+    if method.is_null() {
+        return refuse(format!(
+            "the receiver's class does not implement {}",
+            list.counted
+        ));
+    }
+    // SAFETY: `method` is a `Method` the runtime just returned for `class`.
+    let imp = unsafe { host::method_getImplementation(method) };
+    // A guest class overriding the counted form would be re-entered as arm64.
+    // Nothing plausible does, and "nothing plausible does" is not a reason to
+    // find out at the call.
+    if vm.guest_behind_thunk(imp as u64).is_some() {
+        return refuse(format!("{} is implemented by the guest", list.counted));
+    }
+
+    let receiver = host_receiver as *mut std::ffi::c_void;
+    let result = match list.pairs {
+        false => {
+            // SAFETY: `imp` implements `…WithObjects:count:`, whose prototype
+            // is exactly this — an object array and its length. `items` is
+            // alive across the call and holds `items.len()` objects.
+            let f: extern "C" fn(
+                *mut std::ffi::c_void,
+                host::Sel,
+                *const *mut std::ffi::c_void,
+                usize,
+            ) -> u64 = unsafe { std::mem::transmute(imp) };
+            f(receiver, counted, items.as_ptr(), items.len())
+        }
+        true => {
+            // The list is `object, key, object, key, …`; an odd one is a guest
+            // bug, and Foundation's answer to it is a raise this cannot catch.
+            if items.len() % 2 != 0 {
+                return refuse(format!(
+                    "{} objects and keys, which is not a whole number of pairs",
+                    items.len()
+                ));
+            }
+            let (objects, keys): (Vec<_>, Vec<_>) =
+                items.chunks_exact(2).map(|p| (p[0], p[1])).unzip();
+            // SAFETY: as above, for `…Objects:forKeys:count:`. Both vectors
+            // hold `objects.len()` objects and are alive across the call.
+            let f: extern "C" fn(
+                *mut std::ffi::c_void,
+                host::Sel,
+                *const *mut std::ffi::c_void,
+                *const *mut std::ffi::c_void,
+                usize,
+            ) -> u64 = unsafe { std::mem::transmute(imp) };
+            f(
+                receiver,
+                counted,
+                objects.as_ptr(),
+                keys.as_ptr(),
+                objects.len(),
+            )
+        }
+    };
+    ctx.rax = result;
+    Ok(())
+}
 
 /// A uniqued selector as its name, for a diagnostic or the variadic check.
 fn selector_name(sel: u64) -> Option<String> {

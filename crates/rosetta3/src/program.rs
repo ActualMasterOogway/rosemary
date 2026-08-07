@@ -679,23 +679,67 @@ impl<M: Regions> Program<M> {
     /// `None` when `va` is not in mapped guest memory, or when nothing there
     /// decodes.
     pub fn lift_region(&self, va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
+        self.select_region(va, true)
+    }
+
+    /// [`lift_region`](Self::lift_region), but the region begins **at** `va`.
+    ///
+    /// What the code cache asks for when it already holds a translation starting
+    /// where the function-start preference would put this one; see
+    /// [`crate::region::region_at`] for why sharing a start is not sharing a
+    /// translation.
+    pub fn lift_region_at(&self, va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
+        self.select_region(va, false)
+    }
+
+    fn select_region(
+        &self,
+        va: u64,
+        from_function_start: bool,
+    ) -> Option<(crate::region::Region, Vec<u8>)> {
         let Some((base, bytes)) = self.memory.region_at(va) else {
             // Or an image the *guest* loaded, which is not in this `Program` and
             // cannot be: a `Program` is immutable once linked, which is what
             // `SharedProgram`'s `unsafe impl Sync` rests on. See [`crate::dyld`].
-            return crate::dyld::lift_region(va)
+            return crate::dyld::lift_region(va, from_function_start)
                 // Or code the guest *wrote*, which is in no image at all — see
                 // [`crate::shims::vmmap`].
                 .or_else(|| lift_generated(va));
         };
         let function = self.functions.iter().find(|f| f.contains(&va)).cloned();
-        let region = crate::region::region_for(bytes, base, va, function)?;
+        let region = match from_function_start {
+            true => crate::region::region_for(bytes, base, va, function)?,
+            false => crate::region::region_at(bytes, base, va, function)?,
+        };
         let start = usize::try_from(region.range.start - base).ok()?;
         let end = usize::try_from(region.range.end - base)
             .ok()?
             .min(bytes.len());
         let code = bytes.get(start..end)?.to_vec();
         Some((region, code))
+    }
+
+    /// The recorded function starts inside `range`, ascending.
+    ///
+    /// What a translation needs in order to be enterable at an address the guest
+    /// only ever reaches through a *pointer* — a vtable slot, a callback handed
+    /// to `qsort`, an Objective-C method. Such an address has no static
+    /// predecessor, so nothing in a lift discovers it, and a region that spans it
+    /// without offering it as a resume point forces a second translation of the
+    /// same bytes. See [`crate::cache`] on why the set of resume points is
+    /// declared rather than made universal.
+    ///
+    /// Only the root program's own records; an image the guest loaded answers
+    /// through [`crate::dyld`], and generated code has no records at all.
+    pub fn function_starts_in(&self, range: std::ops::Range<u64>) -> Vec<u64> {
+        let mut starts: Vec<u64> = self
+            .functions
+            .iter()
+            .map(|f| f.start)
+            .filter(|s| range.contains(s))
+            .collect();
+        starts.sort_unstable();
+        starts
     }
 
     /// Whether `va` lies inside a mapped guest image.

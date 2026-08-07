@@ -48,6 +48,7 @@ pub mod audiounit;
 pub mod block;
 pub mod component;
 pub mod coregraphics;
+pub mod curl;
 pub mod intdiv;
 pub mod ioctl;
 pub mod math;
@@ -146,6 +147,7 @@ pub fn dispatch(
                 .or_else(|| atexit::shim_for(name))
                 .or_else(|| zlib::shim_for(name))
                 .or_else(|| audiounit::shim_for(name))
+                .or_else(|| curl::shim_for(name))
                 .map(|f| f(name, ctx, mem, callbacks));
         }
     };
@@ -177,6 +179,7 @@ pub fn is_shimmed(symbol: &str) -> bool {
         || atexit::shim_for(name).is_some()
         || zlib::shim_for(name).is_some()
         || audiounit::shim_for(name).is_some()
+        || curl::shim_for(name).is_some()
     {
         return true;
     }

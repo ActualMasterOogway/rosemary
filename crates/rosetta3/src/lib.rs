@@ -134,6 +134,7 @@ pub mod shims;
 pub mod signal;
 pub mod stack;
 pub mod startup;
+pub mod stats;
 pub mod thread;
 pub mod thunk;
 pub mod tls;

@@ -11,12 +11,51 @@
 //! arrive at its first one: a `switch` case, the resume point after an
 //! intercepted call, the target of a backward branch. Microlift emits an entry
 //! dispatch that jumps to the block matching `ctx.rip`, so re-entry works — but
-//! only for addresses that are *block leaders*, and it silently falls back to
-//! the region's first block for anything else. Silently executing from the
-//! wrong address is the worst failure mode available here, so the cache lifts
-//! with [`LifterConfig::emit_resume_blocks`], which makes every instruction
-//! boundary a leader. Re-entry is then correct at any address the guest can
-//! actually name.
+//! only for addresses the dispatch was given an arm for, and by default it
+//! silently falls back to the region's first block for anything else. Silently
+//! executing from the wrong address is the worst failure mode available here,
+//! and closing it is what the two knobs below are for.
+//!
+//! The obvious answer — `LifterConfig::emit_resume_blocks`, which makes every
+//! instruction boundary an arm — is the one this cache used to take, and it is
+//! **the single most expensive thing the runtime did**. A resume point per
+//! instruction multiplies a region's block count by roughly the number of
+//! instructions per basic block, and Cranelift's register allocator is
+//! superlinear in the live ranges that produces. Measured over the same 128 KiB
+//! of a real program's `__text`, in 4 KiB pieces: 19.36s of compile time with a
+//! resume block per instruction, 1.42s without. Thirteen times, for a property
+//! that is only ever needed at the handful of addresses control actually
+//! arrives at from outside.
+//!
+//! So the cache instead **declares** those addresses
+//! ([`LifterConfig::resume_points`]) and asks microlift to *refuse* rather than
+//! guess at anything else ([`LifterConfig::strict_resume`]). Four sources, and
+//! only the first is this crate's to name — the rest are things microlift adds
+//! itself, because they are facts about the lift that a host cannot know
+//! without redoing it:
+//!
+//! - the enclosing image's recorded **function starts** inside the region,
+//!   which is where a call through a pointer lands;
+//! - the region's own entry, which is the PC it was lifted for;
+//! - the resume point after every call that leaves the region;
+//! - the resume point of every **VM exit that resumes** — the instruction after
+//!   a `CPUID`, `RDTSC`, `SYSCALL`, `INT`, or port-I/O access.
+//!
+//! Which is to say: what a translation offers is its *exit points*, and that is
+//! all a JIT ever needed. The instruction-boundary version was answering a
+//! question nobody asked.
+//!
+//! The set that comes back is [`LiftedCode::resume_points`], and it — not the
+//! region's instruction grid — is what [`Translation::covers`] answers from, so
+//! the cache never hands microlift a PC its dispatch would refuse. If one ever
+//! slipped through, the result is now an `UnknownJump` naming itself
+//! ([`TransferKind::NoResumePoint`]) rather than a program executing from the
+//! wrong address.
+//!
+//! [`LifterConfig::resume_points`]: microlift::core::LifterConfig::resume_points
+//! [`LifterConfig::strict_resume`]: microlift::core::LifterConfig::strict_resume
+//! [`LiftedCode::resume_points`]: microlift::core::LiftedCode::resume_points
+//! [`TransferKind::NoResumePoint`]: microlift::core::exit::TransferKind::NoResumePoint
 //!
 //! ## One module per translation
 //!
@@ -43,7 +82,7 @@ use microlift::arch::x86_64::X86_64;
 use microlift::arch::x86_64::context::RegisterContext;
 use microlift::backend::CraneliftBackend;
 use microlift::core::exit::ExitReason;
-use microlift::core::{LifterConfig, lift_to_code};
+use microlift::core::{LifterConfig, VmResumptionPoints, lift_to_code};
 
 use crate::program::Program;
 use crate::vm::VmError;
@@ -54,10 +93,13 @@ pub struct Translation {
     pub start: u64,
     /// One past the last guest byte it covers.
     pub end: u64,
-    /// The instruction boundaries inside it — the addresses it may be entered
-    /// at. See [`crate::region::Region::starts`] for why a range test is not
-    /// enough.
-    starts: Vec<u64>,
+    /// The addresses it may be entered at, ascending — microlift's own account
+    /// of which arms its entry dispatch has, not the region's instruction grid.
+    ///
+    /// A range test is not enough and neither is the grid: see the module note
+    /// on what a resume point costs and why there are far fewer of them than
+    /// there are instructions.
+    entries: Vec<u64>,
     /// The compiled entry point. Takes a pointer to the guest context and
     /// returns having written an exit reason into it.
     entry: unsafe extern "C" fn(*mut RegisterContext),
@@ -102,7 +144,7 @@ impl Translation {
 
     /// Whether this translation can be entered at `pc`.
     pub fn covers(&self, pc: u64) -> bool {
-        self.starts.binary_search(&pc).is_ok()
+        self.entries.binary_search(&pc).is_ok()
     }
 }
 
@@ -126,9 +168,9 @@ unsafe impl Send for CodeCache {}
 impl CodeCache {
     /// A cache that lifts with `config`.
     pub fn new(mut config: LifterConfig) -> Self {
-        // See the module note: without this, re-entering a region anywhere but
-        // its first instruction quietly runs the wrong code.
-        config.emit_resume_blocks = true;
+        config.resumption = VmResumptionPoints::ExitOnly;
+        config.strict_resume = true;
+        crate::region::configure(&mut config);
         CodeCache {
             regions: BTreeMap::new(),
             config,
@@ -154,9 +196,29 @@ impl CodeCache {
             return Ok(hit);
         }
 
-        let (region, bytes) = program
+        let selecting = crate::stats::enabled().then(std::time::Instant::now);
+        let mut selected = program
             .lift_region(pc)
             .ok_or(VmError::NoCode { pc, from: None })?;
+        // Region selection prefers to begin at the enclosing function's first
+        // instruction, so that the many call sites reaching one function share
+        // one translation. When `pc` is *not* that address and a translation
+        // already starts there, the preference has to be given up: translations
+        // are keyed by their start, so lifting a second one at the same key
+        // evicts the first, and two entry points into one function then take
+        // turns evicting each other's translation and re-compiling the function
+        // for every single entry. That is not a slow path, it is an unbounded
+        // one — thirty-six thousand regions where five thousand were needed,
+        // with the set of *bytes* translated having stopped growing long before.
+        if selected.0.range.start != pc && self.regions.contains_key(&selected.0.range.start) {
+            selected = program
+                .lift_region_at(pc)
+                .ok_or(VmError::NoCode { pc, from: None })?;
+        }
+        let (region, bytes) = selected;
+        if let Some(selecting) = selecting {
+            crate::stats::record_select(selecting.elapsed());
+        }
         let start = region.range.start;
 
         // How long one region took to compile, when tracing.
@@ -175,14 +237,33 @@ impl CodeCache {
         // about *which* guest function, which is the one thing needed.
         let started = crate::shims::vmmap::tracing().then(std::time::Instant::now);
 
-        let (backend, code, region) = match compile_region(&self.config, &bytes, &region) {
-            Ok((backend, code)) => (backend, code, region),
+        // Where control can arrive from outside without any lift knowing: a
+        // function reached only through a pointer. See the module note.
+        //
+        // `pc` is in the set unconditionally, and that is not belt and braces —
+        // it is what makes the loop terminate. A region is often lifted from the
+        // *enclosing function's* first instruction so that every call site
+        // shares one translation, which leaves `pc` somewhere in the middle with
+        // no guarantee of being a leader. Caching a translation that cannot be
+        // entered at the address it was made for would send the run loop back
+        // for the same `pc` forever.
+        let mut declared = program.function_starts_in(region.range.clone());
+        declared.push(pc);
+        declared.sort_unstable();
+        declared.dedup();
+
+        let (compiled, region) = match compile_region(&self.config, &bytes, &region, &declared) {
+            Ok(compiled) => (compiled, region),
             // One instruction the recompiler cannot handle refuses the *whole*
             // region, and it is often somewhere the guest will never execute.
             // See [`longest_liftable_prefix`].
-            Err(source) => match self.longest_liftable_prefix(&bytes, &region, pc) {
-                Some((backend, code, region)) => (backend, code, region),
+            Err(source) => match self.longest_liftable_prefix(&bytes, &region, pc, &declared) {
+                Some((compiled, region)) => {
+                    crate::stats::record_salvaged();
+                    (compiled, region)
+                }
                 None => {
+                    crate::stats::record_refused();
                     if crate::shims::vmmap::tracing() {
                         let head: Vec<String> =
                             bytes.iter().take(64).map(|b| format!("{b:02x}")).collect();
@@ -219,14 +300,19 @@ impl CodeCache {
         // signature the lifter fixed as `fn(*mut RegisterContext)` in the host
         // calling convention.
         let entry: unsafe extern "C" fn(*mut RegisterContext) =
-            unsafe { std::mem::transmute(code) };
+            unsafe { std::mem::transmute(compiled.code) };
 
+        debug_assert!(
+            compiled.entries.binary_search(&pc).is_ok(),
+            "translation {start:#x}..{end:#x} cannot be entered at the {pc:#x} \
+             it was lifted for"
+        );
         let translation = Arc::new(Translation {
             start,
             end,
-            starts: region.starts,
+            entries: compiled.entries,
             entry,
-            _backend: backend,
+            _backend: compiled.backend,
         });
         self.regions.insert(start, Arc::clone(&translation));
         //println!("MISS at {pc:#x} - regions: {}", self.len());
@@ -265,7 +351,8 @@ impl CodeCache {
         bytes: &[u8],
         region: &crate::region::Region,
         pc: u64,
-    ) -> Option<(microlift::backend::CraneliftBackend, *const u8, crate::region::Region)> {
+        declared: &[u64],
+    ) -> Option<(Compiled, crate::region::Region)> {
         let start = region.range.start;
         // Candidate cut points, as counts of instructions kept. `starts` is
         // ascending, so a larger index is a longer prefix.
@@ -279,10 +366,10 @@ impl CodeCache {
             let len = usize::try_from(candidate.range.end - start).ok()?;
             let attempt = bytes
                 .get(..len)
-                .and_then(|b| compile_region(&self.config, b, &candidate).ok());
+                .and_then(|b| compile_region(&self.config, b, &candidate, declared).ok());
             match attempt {
-                Some((backend, code)) if candidate.covers(pc) => {
-                    best = Some((backend, code, candidate));
+                Some(compiled) if candidate.covers(pc) => {
+                    best = Some((compiled, candidate));
                     lo = mid;
                 }
                 // Either it did not compile or it no longer reaches `pc`; either
@@ -317,13 +404,50 @@ impl CodeCache {
 /// academic: an instruction the lifter mistranslates into invalid IR is caught
 /// by Cranelift's verifier at compile time, which is a stage after the one the
 /// first version of this retried at.
+///
+/// `declared` are the addresses the host knows control can arrive at from
+/// outside — the recorded function starts within the region. See the module
+/// note on resume points.
 fn compile_region(
     config: &microlift::core::LifterConfig,
     bytes: &[u8],
     region: &crate::region::Region,
-) -> microlift::Result<(microlift::backend::CraneliftBackend, *const u8)> {
-    let func = lift_to_code::<X86_64>(bytes, region.range.start, config.clone())?;
+    declared: &[u64],
+) -> microlift::Result<Compiled> {
+    let clock = crate::stats::enabled().then(std::time::Instant::now);
+    crate::stats::record_extent(region.range.start, region.range.end);
+
+    let mut config = config.clone();
+    // Declared per region rather than once, because the answer is per region:
+    // which function starts fall inside these bytes. Microlift adds the
+    // region's entry and its call resume points to whatever is here.
+    config.resume_points = declared.to_vec();
+
+    let lifted = lift_to_code::<X86_64>(bytes, region.range.start, config)?;
+    let entries = lifted.resume_points.clone();
+    let lift_took = clock.map(|c| c.elapsed());
     let mut backend = crate::jit::backend()?;
-    let code = backend.compile_lifted(func)?;
-    Ok((backend, code))
+    let code = backend.compile_lifted(lifted)?;
+    if let (Some(clock), Some(lift)) = (clock, lift_took) {
+        crate::stats::record_lift(
+            region.starts.len(),
+            bytes.len(),
+            lift,
+            clock.elapsed() - lift,
+        );
+    }
+    Ok(Compiled {
+        backend,
+        code,
+        entries,
+    })
+}
+
+/// One region through the lifter and the compiler, with the one fact about it
+/// that only the lift knows.
+struct Compiled {
+    backend: microlift::backend::CraneliftBackend,
+    code: *const u8,
+    /// Where the compiled code may be entered — see [`Translation::covers`].
+    entries: Vec<u64>,
 }
