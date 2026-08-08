@@ -858,7 +858,43 @@ fn send(
         callbacks: &[],
         blocks: &signature.blocks,
     };
-    marshal::call_shapes(symbol, &signature.shapes, imp, ctx, mem, &convert)
+    // Named by the *message* when it fails. `objc_msgSend` is the name of every
+    // send in the program, so a refusal reported under it says which runtime
+    // entry point was reached and nothing about which call the guest made —
+    // which is the whole content of the failure. Built only on the error path.
+    marshal::call_shapes(symbol, &signature.shapes, imp, ctx, mem, &convert).map_err(|e| {
+        // `object_getClass` and `class_getName` are runtime calls rather than
+        // messages, which matters here: a message can raise, and raising out of
+        // a shim is fatal with no diagnostic — the last thing a diagnostic
+        // should do. See the roadmap's note on `CFStringGetLength`.
+        let class = class_of(host_receiver);
+        let sel = selector_name(sel).unwrap_or_else(|| format!("<sel {sel:#x}>"));
+        e.renaming(format!("{symbol} -[{class} {sel}]"))
+    })
+}
+
+/// The receiver's class name, for a diagnostic — never by messaging it.
+///
+/// Empty when the receiver is nil or the runtime has no name, because a
+/// diagnostic that fails to build is worse than one that is slightly thinner.
+fn class_of(receiver: u64) -> String {
+    if receiver == 0 {
+        return String::from("nil");
+    }
+    // SAFETY: `receiver` is an object pointer the guest passed and this shim
+    // has already substituted for the host's, so the host runtime owns its
+    // `isa`. Both calls read runtime metadata and send nothing.
+    unsafe {
+        let cls = host::object_getClass(receiver as host::Class);
+        if cls.is_null() {
+            return String::new();
+        }
+        let name = host::class_getName(cls);
+        if name.is_null() {
+            return String::new();
+        }
+        std::ffi::CStr::from_ptr(name).to_string_lossy().into_owned()
+    }
 }
 
 /// Continue the guest at `target`, as the trampoline would have.

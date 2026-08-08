@@ -31,28 +31,29 @@
 //! four, and the argument after it starts at `[sp+4]`. A `u64` prototype would
 //! place that next argument at `[sp+8]` instead.
 //!
-//! ## Declaring the overflow at its real width
+//! ## When widening the overflow is wrong, and when it is not
 //!
-//! For a while the answer was to refuse a narrow overflowing argument, on the
-//! grounds that one over-wide prototype could not place it — true of *one*
-//! prototype. What actually places a four-byte stack argument at four bytes is
-//! a prototype that says `u32`, and there is no reason the eight register slots
-//! and the stack tail have to be declared the same way. So the tail is
-//! declared at its own widths: eight `u64` for `x0`–`x7`, then one prototype
-//! per pattern of overflow widths, then the eight `f64` — which stay in
-//! `v0`–`v7` and never reach the stack, so putting them last changes nothing
-//! about where the tail lands.
+//! "An overflowing argument must already be eight bytes wide" was the rule
+//! here, and it is stricter than the ABI. Apple packs each stack argument at
+//! its own size *and its own alignment*, so a four-byte argument followed by a
+//! pointer still leaves the pointer on the next eight-byte boundary — exactly
+//! where a `u64` declaration puts it. A narrow argument only moves what follows
+//! when the next argument is narrow too and packs in beside it.
 //!
-//! [`NarrowTail`] enumerates the patterns, up to three overflowing arguments of
-//! four or eight bytes each. Three is not a principle, it is where the growth
-//! was stopped: `glTexSubImage3D` and `glCompressedTexSubImage3D` overflow
-//! three, `glTexImage3D` two, `glBlitFramebuffer` two and `glCopyTexSubImage3D`
-//! one, and a texture upload is not optional in a program that draws. A tail
-//! wider than that is still refused by name.
+//! [`widening_preserves_offsets`] is that test, and it is what lets
+//! `-[NSBitmapImageRep initWithBitmapDataPlanes:…bitsPerPixel:]` — whose
+//! `isPlanar:` is a one-byte `BOOL` on the stack with a pointer after it — go
+//! through the plain prototype unchanged.
 //!
-//! An all-doubleword tail keeps the original twelve-`u64` prototype, which
-//! reaches four rather than three — nothing about it was wrong, and
-//! `glTexImage2D` still goes through it.
+//! Where the test fails, the tail is declared at its real widths instead: eight
+//! `u64` for `x0`–`x7`, then one prototype per pattern of overflow widths, then
+//! the eight `f64` — which stay in `v0`–`v7` and never reach the stack, so
+//! putting them last changes nothing about where the tail lands. [`NarrowTail`]
+//! enumerates the patterns, up to three overflowing arguments. Three is not a
+//! principle, it is where the growth was stopped: `glTexSubImage3D` and
+//! `glCompressedTexSubImage3D` are the shapes that need it, and a texture
+//! upload is not optional in a program that draws. A longer mismatching tail is
+//! still refused by name.
 //!
 //! That reasoning is the whole safety argument, and it is also the exact list
 //! of things this cannot do:
@@ -104,18 +105,61 @@ const MAX_INT_ARGS: usize = 8;
 const MAX_FP_ARGS: usize = 8;
 
 /// Integer arguments the over-wide prototype declares, registers and stack
-/// together. The four past `MAX_INT_ARGS` land on the stack — see the module
+/// together. The eight past `MAX_INT_ARGS` land on the stack — see the module
 /// note for the rule that makes them reproducible.
-const MAX_INT_ARGS_TOTAL: usize = 12;
+///
+/// Twelve until `-[NSBitmapImageRep initWithBitmapDataPlanes:…bitsPerPixel:]`
+/// wanted thirteen. Eleven parameters plus `self` and `_cmd` is not an exotic
+/// selector — AppKit has a dozen of that shape — so the bank is sized to leave
+/// room rather than to the next program that asks.
+const MAX_INT_ARGS_TOTAL: usize = 16;
 
-/// Whether `ty` occupies a full eight bytes, which is what an argument past the
-/// eighth must do before this marshaller will place it. See the module note on
-/// Apple's stack packing.
+/// Whether `ty` occupies a full eight bytes.
 fn is_doubleword(ty: ArgType) -> bool {
     matches!(
         ty,
         ArgType::Pointer | ArgType::SignedDoubleword | ArgType::UnsignedDoubleword
     )
+}
+
+/// How many bytes `ty` occupies in a stack slot, which is also its alignment.
+fn stack_width(ty: ArgType) -> u64 {
+    match ty {
+        ArgType::SignedByte | ArgType::UnsignedByte => 1,
+        ArgType::SignedHalfword | ArgType::UnsignedHalfword => 2,
+        ArgType::SignedWord | ArgType::UnsignedWord | ArgType::SinglePrecisionFp => 4,
+        _ => 8,
+    }
+}
+
+/// Whether declaring every overflowing argument `u64` puts each of them where
+/// Apple's rule puts it.
+///
+/// This is the rule the module note used to state as "an overflowing argument
+/// must already be eight bytes wide", which is stricter than the ABI. Apple
+/// packs each stack argument at its own size *and its own alignment*, so a
+/// four-byte argument followed by a pointer still leaves the pointer at the
+/// next eight-byte boundary — exactly where a `u64` declaration would have put
+/// it. A narrow argument only moves what comes after it when the next argument
+/// is narrow too and packs in beside it.
+///
+/// Writing eight bytes into a four- or one-byte slot is harmless in the cases
+/// this accepts: the padding it covers belongs to no other argument, the callee
+/// reads the low bytes it declared, and the caller reserved eight because that
+/// is what the prototype says. Little-endian is doing the work, and it is worth
+/// saying that out loud because on a big-endian machine none of this would
+/// hold.
+fn widening_preserves_offsets(overflow: &[ArgType]) -> bool {
+    let mut packed = 0u64;
+    for (slot, ty) in overflow.iter().enumerate() {
+        let width = stack_width(*ty);
+        packed = packed.next_multiple_of(width);
+        if packed != slot as u64 * 8 {
+            return false;
+        }
+        packed += width;
+    }
+    true
 }
 
 /// Whether [`call`] can express this signature at all.
@@ -180,7 +224,7 @@ impl NarrowTail {
     /// both overflows and returns a `double` would silently take the
     /// doubleword-only path.
     fn of(overflow: &[ArgType], fp_return: bool) -> Option<Self> {
-        if overflow.iter().all(|ty| is_doubleword(*ty)) {
+        if widening_preserves_offsets(overflow) {
             return Some(NarrowTail::None);
         }
         if fp_return {
@@ -350,7 +394,7 @@ pub fn call_types(
             if n_int == MAX_INT_ARGS_TOTAL {
                 return Err(AbiError::Unmarshallable {
                     symbol: symbol.to_string(),
-                    reason: "more than twelve integer arguments",
+                    reason: "more than sixteen integer arguments",
                 });
             }
             if n_int >= MAX_INT_ARGS {
@@ -509,6 +553,10 @@ type IntFn = unsafe extern "C" fn(
     u64,
     u64,
     u64,
+    u64,
+    u64,
+    u64,
+    u64,
     f64,
     f64,
     f64,
@@ -520,6 +568,10 @@ type IntFn = unsafe extern "C" fn(
 ) -> u64;
 
 type F64Fn = unsafe extern "C" fn(
+    u64,
+    u64,
+    u64,
+    u64,
     u64,
     u64,
     u64,
@@ -555,6 +607,10 @@ type F32Fn = unsafe extern "C" fn(
     u64,
     u64,
     u64,
+    u64,
+    u64,
+    u64,
+    u64,
     f64,
     f64,
     f64,
@@ -568,8 +624,9 @@ type F32Fn = unsafe extern "C" fn(
 macro_rules! call_through {
     ($f:expr, $i:expr, $v:expr) => {
         $f(
-            $i[0], $i[1], $i[2], $i[3], $i[4], $i[5], $i[6], $i[7], $i[8], $i[9], $i[10], $i[11],
-            $v[0], $v[1], $v[2], $v[3], $v[4], $v[5], $v[6], $v[7],
+            $i[0], $i[1], $i[2], $i[3], $i[4], $i[5], $i[6], $i[7], $i[8], $i[9], $i[10],
+            $i[11], $i[12], $i[13], $i[14], $i[15], $v[0], $v[1], $v[2], $v[3], $v[4], $v[5],
+            $v[6], $v[7],
         )
     };
 }
@@ -947,7 +1004,7 @@ pub fn call_shapes(
                         overflow: &mut Vec<ArgType>|
      -> Result<()> {
         if *n_int == MAX_INT_ARGS_TOTAL {
-            return Err(unmarshallable("more than twelve integer arguments"));
+            return Err(unmarshallable("more than sixteen integer arguments"));
         }
         if *n_int >= MAX_INT_ARGS {
             overflow.push(ty);
@@ -1196,6 +1253,10 @@ type F64x4Fn = unsafe extern "C" fn(
     u64,
     u64,
     u64,
+    u64,
+    u64,
+    u64,
+    u64,
     f64,
     f64,
     f64,
@@ -1218,6 +1279,10 @@ unsafe fn call_f64x4(
 }
 
 type F32x4Fn = unsafe extern "C" fn(
+    u64,
+    u64,
+    u64,
+    u64,
     u64,
     u64,
     u64,
@@ -1264,6 +1329,10 @@ type U64x2Fn = unsafe extern "C" fn(
     u64,
     u64,
     u64,
+    u64,
+    u64,
+    u64,
+    u64,
     f64,
     f64,
     f64,
@@ -1286,6 +1355,10 @@ unsafe fn call_u64x2(
 }
 
 type IndirectFn = unsafe extern "C" fn(
+    u64,
+    u64,
+    u64,
+    u64,
     u64,
     u64,
     u64,

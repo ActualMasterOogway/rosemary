@@ -105,6 +105,26 @@ pub enum AbiError {
 }
 
 impl AbiError {
+    /// The same failure, said about `symbol` instead.
+    ///
+    /// A message send is serviced under the name of the trampoline the guest
+    /// called — `objc_msgSend` — which is the same name for every message in
+    /// the program and so tells a reader nothing about which one stopped.
+    /// [`crate::objc::dispatch`] uses this on the error path only, to put the
+    /// receiver's class and the selector in front of the reason. On the path
+    /// where nothing fails, no name is built and nothing is allocated.
+    pub fn renaming(self, symbol: String) -> Self {
+        match self {
+            AbiError::NoSignature { .. } => AbiError::NoSignature { symbol },
+            AbiError::Refused { reason, .. } => AbiError::Refused { symbol, reason },
+            AbiError::NoShim { .. } => AbiError::NoShim { symbol },
+            AbiError::Unmarshallable { reason, .. } => AbiError::Unmarshallable { symbol, reason },
+            AbiError::Unsatisfied { .. } => AbiError::Unsatisfied { symbol },
+            AbiError::Memory { addr, .. } => AbiError::Memory { symbol, addr },
+            AbiError::Nested { reason, .. } => AbiError::Nested { symbol, reason },
+        }
+    }
+
     /// The symbol the failure is about. Always present, by construction.
     pub fn symbol(&self) -> &str {
         match self {

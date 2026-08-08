@@ -796,13 +796,109 @@ fn a_single_narrow_overflow_is_placed_and_extended() {
     assert_eq!(ctx.rax as i64, want);
 }
 
+/// The shape `-[NSBitmapImageRep
+/// initWithBitmapDataPlanes:...bitsPerPixel:]` has: thirteen integer
+/// arguments, and the one that spills first is a one-byte `BOOL` with a
+/// pointer behind it.
+///
+/// Apple puts the `BOOL` at `[sp]` and realigns the pointer to `[sp+8]`, which
+/// is where a `u64` declaration would have put it anyway — so this must go
+/// through the plain prototype rather than being refused. It was refused, and
+/// that is what left Subnautica with no window.
+unsafe extern "C" fn thirteen_with_a_bool_on_the_stack(
+    a: i64,
+    b: i64,
+    c: i64,
+    d: i64,
+    e: i64,
+    f: i64,
+    g: i64,
+    planar: bool,
+    is_planar: bool,
+    name: *const i64,
+    format: u64,
+    row: i64,
+    depth: i64,
+) -> i64 {
+    let regs: i64 = [a, b, c, d, e, f, g]
+        .iter()
+        .enumerate()
+        .map(|(n, v)| v * (n as i64 + 1))
+        .sum();
+    // SAFETY: the test passes the address of a live local.
+    regs + i64::from(planar) * 10
+        + i64::from(is_planar) * 100
+        + unsafe { *name } * 1_000
+        + format as i64 * 10_000
+        + row * 100_000
+        + depth * 1_000_000
+}
+
+static THIRTEEN_INTS: FunctionAbi = FunctionAbi {
+    name: "thirteen_with_a_bool_on_the_stack",
+    callbacks: &[],
+    types: &[
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::UnsignedByte,
+        T::UnsignedByte,
+        T::Pointer,
+        T::UnsignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+    ],
+    variadic: false,
+};
+
+#[test]
+fn thirteen_integer_arguments_with_a_byte_among_them_are_placed() {
+    let behind: i64 = 6;
+    let args: Vec<A> = (1..=7)
+        .map(|i| A::I(i as u64))
+        .chain([
+            A::I(1),
+            A::I(1),
+            A::P(std::ptr::addr_of!(behind).cast()),
+            A::I(2),
+            A::I(3),
+            A::I(4),
+        ])
+        .collect();
+    let mut mem = guest_stack();
+    let mut ctx = context_for(&args, &mut mem);
+
+    assert!(
+        marshal::is_marshallable(&THIRTEEN_INTS),
+        "a byte that realigns to where widening puts it needs no special tail"
+    );
+    marshal::call(
+        "thirteen_with_a_bool_on_the_stack",
+        &THIRTEEN_INTS,
+        thirteen_with_a_bool_on_the_stack as *const () as usize as u64,
+        &mut ctx,
+        &mem as &dyn GuestMemory,
+    )
+    .expect("thirteen integer arguments are marshallable");
+
+    let want: i64 =
+        (1..=7).map(|i| i * i).sum::<i64>() + 10 + 100 + 6_000 + 20_000 + 300_000 + 4_000_000;
+    assert_eq!(ctx.rax as i64, want);
+}
+
 #[test]
 fn an_overflow_too_wide_to_place_is_still_refused_by_name() {
-    // Four overflowing arguments with a narrow one among them: past what
-    // `NarrowTail` enumerates, so it must refuse rather than reach for the
-    // doubleword prototype and misplace three of them.
-    static FOUR_OVER_WITH_A_NARROW: FunctionAbi = FunctionAbi {
-        name: "four_over_with_a_narrow",
+    // Four overflowing arguments beginning with two *adjacent* narrow ones.
+    // Adjacency is what makes widening wrong — the second packs in beside the
+    // first — and four is past what `NarrowTail` enumerates, so this must
+    // refuse rather than misplace the two doublewords behind them.
+    static ADJACENT_NARROWS_TOO_LONG: FunctionAbi = FunctionAbi {
+        name: "adjacent_narrows_too_long",
         callbacks: &[],
         types: &[
             T::SignedDoubleword,
@@ -815,13 +911,13 @@ fn an_overflow_too_wide_to_place_is_still_refused_by_name() {
             T::SignedDoubleword,
             T::SignedDoubleword,
             T::SignedWord,
-            T::SignedDoubleword,
+            T::SignedWord,
             T::SignedDoubleword,
             T::SignedDoubleword,
         ],
         variadic: false,
     };
-    assert!(!marshal::is_marshallable(&FOUR_OVER_WITH_A_NARROW));
+    assert!(!marshal::is_marshallable(&ADJACENT_NARROWS_TOO_LONG));
 }
 
 #[test]
