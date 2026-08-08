@@ -2,8 +2,8 @@
 
 use microlift::arch::x86_64::context::RegisterContext;
 
-use crate::abi::{GuestMemory, Result};
 use super::bad_pointer;
+use crate::abi::{GuestMemory, Result};
 
 /// `int proc_pidpath(int pid, void *buffer, uint32_t buffersize)`.
 ///

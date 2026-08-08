@@ -87,8 +87,12 @@ pub fn record_tail_exit() {
 /// covers everything in it. Which is cheaper depends entirely on how *dense*
 /// the reached code is within the pages that contain it — a figure that no
 /// amount of reasoning produces and one counter does.
-static PAGES: std::sync::Mutex<Option<(std::collections::BTreeSet<u64>, std::collections::BTreeSet<u64>)>> =
-    std::sync::Mutex::new(None);
+static PAGES: std::sync::Mutex<
+    Option<(
+        std::collections::BTreeSet<u64>,
+        std::collections::BTreeSet<u64>,
+    )>,
+> = std::sync::Mutex::new(None);
 
 /// Record which pages a region of `[start, end)` fell in.
 pub fn record_extent(start: u64, end: u64) {

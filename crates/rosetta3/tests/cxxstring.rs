@@ -217,7 +217,10 @@ fn the_slow_path_agrees_too() {
     };
     let (status, fast, fast_err) = run_guest(&path, &[]);
     let (slow_status, slow, slow_err) = common::run_guest_with(&["--slow"], &path, &[]);
-    assert_eq!(status, slow_status, "exit status differs\n{fast_err}{slow_err}");
+    assert_eq!(
+        status, slow_status,
+        "exit status differs\n{fast_err}{slow_err}"
+    );
     assert_eq!(fast, slow, "--slow differs\n{fast_err}{slow_err}");
 }
 

@@ -119,6 +119,19 @@ impl OptLevel {
         builder
             .set("opt_level", self.cranelift_opt_level())
             .expect("cranelift accepts its own opt_level values");
+        match self {
+            OptLevel::Speed | OptLevel::All => {
+                // Disabled for now because we prefer finding correctness issues even when running on all optimizations
+                // as we improve Microlift incrementally.
+                // builder.set("enable_verifier", "false").expect("couldn't disable verifier");
+                // We don't process this, so enabling it just wastes cycles.
+                builder.set("machine_code_cfg_info", "false").expect("failed to turn off machine code cfg info");
+                // These aren't necessary since the guest shares our entire address space anyway.
+                builder.set("enable_heap_access_spectre_mitigation", "false").expect("failed to turn off heap access pass");
+                builder.set("enable_table_access_spectre_mitigation", "false").expect("failed to turn off table access pass");
+            }
+            OptLevel::None => {}
+        };
         settings::Flags::new(builder)
     }
 

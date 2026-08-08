@@ -938,7 +938,10 @@ fn object_list(sel: u64) -> Option<&'static ObjectList> {
 /// in the direction of doing nothing rather than of refusing a call that was
 /// never variadic.
 fn names_a_format(selector: &str) -> bool {
-    let Some(last) = selector.strip_suffix(':').and_then(|s| s.rsplit(':').next()) else {
+    let Some(last) = selector
+        .strip_suffix(':')
+        .and_then(|s| s.rsplit(':').next())
+    else {
         return false;
     };
     // Split camelCase: `stringByAppendingFormat` -> [string, By, Appending, Format].

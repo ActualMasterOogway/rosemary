@@ -167,13 +167,53 @@ fn data_family(name: &str) -> Option<&'static str> {
 }
 
 fn lookup_exact(name: &str) -> Lookup {
-    if let Ok(i) = SIGNATURES.binary_search_by_key(&name, |abi| abi.name) {
-        return Lookup::Known(&SIGNATURES[i]);
+    match index().get(name) {
+        Some(Described::Known(abi)) => Lookup::Known(abi),
+        Some(Described::Refused(reason)) => Lookup::Refused(reason),
+        None => Lookup::Unknown,
     }
-    if let Ok(i) = REFUSED.binary_search_by_key(&name, |(n, _)| *n) {
-        return Lookup::Refused(REFUSED[i].1);
-    }
-    Lookup::Unknown
+}
+
+/// What the table says about one name: a callable signature, or a refusal.
+#[derive(Clone, Copy)]
+enum Described {
+    Known(&'static FunctionAbi),
+    Refused(&'static str),
+}
+
+/// [`SIGNATURES`] and [`REFUSED`], by name, built once.
+///
+/// The tables themselves are written in whatever order reads best — the C
+/// library's functions grouped by what they are for, an Objective-C family kept
+/// together with the paragraph explaining it — and this is what makes that
+/// possible. An earlier revision searched them with `binary_search`, which
+/// meant every entry had to be filed in `strcmp` order by hand: a
+/// misplaced entry did not fail to compile, it silently reported a described
+/// function as **unknown**, and the only thing standing between that and a
+/// program stopping at run time was a test asserting the whole array was
+/// sorted. Sorting a few hundred `&'static str`s once, on the first import
+/// call, costs less than the first region this runtime lifts.
+///
+/// A duplicate name is still a mistake, and it is still a *test*
+/// ([`tests::signatures_are_unique`]) rather than something this can detect —
+/// building a map is where a duplicate becomes invisible, so nothing here
+/// should ever be the thing that notices.
+fn index() -> &'static std::collections::HashMap<&'static str, Described> {
+    static INDEX: std::sync::OnceLock<std::collections::HashMap<&'static str, Described>> =
+        std::sync::OnceLock::new();
+    INDEX.get_or_init(|| {
+        let mut map = std::collections::HashMap::with_capacity(SIGNATURES.len() + REFUSED.len());
+        for (name, reason) in REFUSED {
+            map.insert(*name, Described::Refused(reason));
+        }
+        // Signatures last, so that if a name is somehow in both, the callable
+        // answer wins rather than the refusal — the same way the tables would
+        // be read in order by hand.
+        for abi in SIGNATURES {
+            map.insert(abi.name, Described::Known(abi));
+        }
+        map
+    })
 }
 
 /// Signatures reachable by a provider-assigned tag.
@@ -229,17 +269,17 @@ const U8: T = T::UnsignedByte;
 const U16: T = T::UnsignedHalfword;
 const BOOL: T = U8;
 
-/// Known signatures, **sorted by name** — `signatures_are_sorted_and_unique`
-/// enforces it, because [`lookup_exact`] binary-searches and an out-of-order
-/// entry would simply go missing rather than fail.
+/// Known signatures, in **no particular order** — [`index`] builds the lookup,
+/// so a new entry goes wherever it reads best. Names must still be unique;
+/// `signatures_are_unique` is what says so.
 ///
 /// Types are the C declarations, narrowed where C narrows: `size_t` is `U64`,
 /// `int` is `I32`, every pointer is `P` regardless of what it points at. A
 /// function whose real signature passes or returns a struct by value does not
 /// belong here at all — see [`super::marshal`].
 ///
-/// Variadics are interleaved rather than grouped, because the array is one
-/// sorted keyspace; `vsig!` marks them.
+/// Mostly alphabetical anyway, because that is how a reader finds one; where a
+/// family reads better together, it is together. `vsig!` marks a variadic.
 pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("AudioComponentFindNext", P, P, P),
     sig!("AudioComponentInstanceDispose", I32, P),
@@ -264,6 +304,33 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     cbsig!([2], "AudioObjectRemovePropertyListener", I32, U32, P, P, P),
     sig!("AudioOutputUnitStart", I32, P),
     sig!("AudioOutputUnitStop", I32, P),
+    // ## AudioQueue, which is the other way a program plays sound
+    //
+    // SDL's CoreAudio backend uses an audio queue rather than an output unit,
+    // and the difference that matters here is where the callback goes: an
+    // `AudioUnit` takes one inside a structure — the case
+    // [`crate::shims::audiounit`] exists for — while a queue takes one as an
+    // ordinary **argument**, so `cbsig!` describes it and the thunk is made at
+    // the seam like every other.
+    //
+    // The callback is `(void *userData, AudioQueueRef, AudioQueueBufferRef)`
+    // for output and four arguments for input, all integer and all `void`. It
+    // arrives on whichever run loop was named, or on a thread CoreAudio owns
+    // when that is null — which is the same "a host thread this runtime never
+    // created" case the render callback already is.
+    //
+    // Every other argument is a scalar or a pointer: an `OSStatus` and an
+    // `AudioQueuePropertyID` are 32-bit, a `Boolean` is a byte, and the format
+    // and timestamp structures are read by CoreAudio in place.
+    sig!("AudioQueueAllocateBuffer", I32, P, U32, P),
+    sig!("AudioQueueDispose", I32, P, BOOL),
+    sig!("AudioQueueEnqueueBuffer", I32, P, P, U32, P),
+    sig!("AudioQueueFreeBuffer", I32, P, P),
+    cbsig!([1], "AudioQueueNewInput", I32, P, P, P, P, P, U32, P),
+    cbsig!([1], "AudioQueueNewOutput", I32, P, P, P, P, P, U32, P),
+    sig!("AudioQueueSetProperty", I32, P, U32, P, U32),
+    sig!("AudioQueueStart", I32, P, P),
+    sig!("AudioQueueStop", I32, P, BOOL),
     sig!("AudioUnitGetProperty", I32, P, U32, U32, U32, P, P),
     sig!("AudioUnitInitialize", I32, P),
     sig!("AudioUnitRender", I32, P, P, P, U32, U32, P),
@@ -408,10 +475,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // Nine integer arguments, one past the host's eight; see `glTexImage2D` for
     // the precedent and [`super::marshal`] for what carries the ninth. Reached
     // by Mono, which converts every managed string through it.
-    sig!(
-        "CFStringGetBytes",
-        I64, P, I64, I64, U32, U8, U8, P, I64, P
-    ),
+    sig!("CFStringGetBytes", I64, P, I64, I64, U32, U8, U8, P, I64, P),
     sig!("CFStringGetCString", BOOL, P, P, U64),
     sig!("CFStringGetCStringPtr", P, P, U32),
     sig!("CFStringGetLength", I64, P),
@@ -465,6 +529,14 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // the two that take a `CGRect` by value, which are
     // [`crate::shims::coregraphics`].
     sig!("CGBitmapContextCreate", P, P, U64, U64, U64, U64, P, U32),
+    // ## Capturing a display, which is how a game takes exclusive fullscreen
+    //
+    // The whole-desktop forms take nothing and the per-display ones a
+    // `CGDirectDisplayID`; every one returns a `CGError`.
+    sig!("CGCaptureAllDisplays", I32),
+    sig!("CGReleaseAllDisplays", I32),
+    sig!("CGDisplayCapture", I32, U32),
+    sig!("CGDisplayRelease", I32, U32),
     sig!("CGColorSpaceCreateDeviceRGB", P),
     sig!("CGColorSpaceRelease", V, P),
     // `CGFloat` is `double` on both architectures, so the CTM translation is
@@ -494,6 +566,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGDisplayModeGetWidth", U64, P),
     sig!("CGDisplayModeIsUsableForDesktopGUI", BOOL, P),
     sig!("CGDisplayModeRelease", V, P),
+    sig!("CGDisplayModeRetain", P, P),
     // `CGPoint` by value, which is the [`CFRange`] case rather than the
     // `NSRect` one: two `double`s, sixteen bytes, and SysV AMD64 and AAPCS64
     // **agree** — two SSE eightbytes on one side, a two-member homogeneous
@@ -517,6 +590,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGEventCreate", P, P),
     sig!("CGEventPost", V, U32, P),
     sig!("CGEventSetType", V, P, U32),
+    // The gamma ramp, read and written. The tables are `float *` — arrays the
+    // caller owns — and the capacity and sample counts are `uint32_t`, so both
+    // are pointers and 32-bit integers even though what travels through them is
+    // floating point.
+    sig!("CGGetDisplayTransferByTable", I32, U32, U32, P, P, P, P),
+    sig!("CGSetDisplayTransferByTable", I32, U32, U32, P, P, P),
     sig!("CGGetOnlineDisplayList", I32, U32, P, P),
     // ## Images, and the source that decodes one
     //
@@ -535,8 +614,13 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGLUnlockContext", I32, P),
     sig!("CGMainDisplayID", U32),
     sig!("CGReleaseDisplayFadeReservation", I32, U32),
+    // A `CGWindowLevel` and a `CGWindowLevelKey` are both `int32_t`. The
+    // shielding level is what a fullscreen window is raised to so it sits above
+    // everything else the window server draws.
+    sig!("CGShieldingWindowLevel", I32),
     // `CGPoint` by value again; see `CGDisplayMoveCursorToPoint`.
     sig!("CGWarpMouseCursorPosition", I32, F64, F64),
+    sig!("CGWindowLevelForKey", I32, I32),
     // ## CoreVideo
     //
     // The display-link callback is how a GameMaker runner paces its frames: the
@@ -555,7 +639,13 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CVDisplayLinkRelease", V, P),
     sig!("CVDisplayLinkRetain", P, P),
     sig!("CVDisplayLinkSetCurrentCGDisplay", I32, P, U32),
-    sig!("CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext", I32, P, P, P),
+    sig!(
+        "CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext",
+        I32,
+        P,
+        P,
+        P
+    ),
     cbsig!([1], "CVDisplayLinkSetOutputCallback", I32, P, P, P),
     sig!("CVDisplayLinkStart", I32, P),
     sig!("CVDisplayLinkStop", I32, P),
@@ -577,12 +667,30 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // one as `P` would pass 64 bits where the host reads 32, which happens to
     // work until the upper half is not zero.
     sig!("IOBSDNameMatching", P, U32, U32, P),
+    // `CFDictionaryRef IODisplayCreateInfoDictionary(io_service_t, IOOptionBits)`
+    // — how SDL asks a framebuffer service for its display's localized name.
+    // Both arguments are 32-bit, per the note above; the result is an ordinary
+    // CoreFoundation object the caller owns.
+    sig!("IODisplayCreateInfoDictionary", P, U32, U32),
     sig!("IOHIDDeviceCopyMatchingElements", P, P, P, U32),
     sig!("IOHIDDeviceGetProperty", P, P, P),
+    // `IOHIDDeviceGetService` hands back the `io_service_t` behind a device,
+    // which is the 32-bit port name the registry calls are asked in terms of —
+    // the one place in this family where a handle *becomes* a port name.
+    sig!("IOHIDDeviceGetService", U32, P),
+    // `IOReturn IOHIDDeviceGetValue(IOHIDDeviceRef, IOHIDElementRef,
+    // IOHIDValueRef *)` — the polled counterpart to the value callback below.
+    sig!("IOHIDDeviceGetValue", I32, P, P, P),
     // The host calls the callback with `(context, IOReturn, sender, value)`:
     // four integer arguments and no result, which is the shape the generic
     // trampoline was written for.
     cbsig!([1], "IOHIDDeviceRegisterInputValueCallback", V, P, P, P),
+    // Removal is `IOHIDCallback(void *context, IOReturn, void *sender)`: the
+    // guest's function pointer leaves as a thunk like every other.
+    cbsig!([1], "IOHIDDeviceRegisterRemovalCallback", V, P, P, P),
+    // Both take the run loop and a mode string, and both are `void`.
+    sig!("IOHIDDeviceScheduleWithRunLoop", V, P, P, P),
+    sig!("IOHIDDeviceUnscheduleFromRunLoop", V, P, P, P),
     sig!("IOHIDElementGetChildren", P, P),
     sig!("IOHIDElementGetCookie", U32, P),
     // `CFIndex` is a `long`, so these are sixty-four bits wide and signed —
@@ -590,8 +698,13 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("IOHIDElementGetLogicalMax", I64, P),
     sig!("IOHIDElementGetLogicalMin", I64, P),
     sig!("IOHIDElementGetType", U32, P),
+    // A `CFTypeID` is an `unsigned long`, so sixty-four bits, and this takes
+    // nothing: it is how a caller checks that an unknown `CFTypeRef` is an
+    // element before treating it as one.
+    sig!("IOHIDElementGetTypeID", U64),
     sig!("IOHIDElementGetUsage", U32, P),
     sig!("IOHIDElementGetUsagePage", U32, P),
+    sig!("IOHIDManagerClose", I32, P, U32),
     // `IOHIDManagerRef IOHIDManagerCreate(CFAllocatorRef, IOOptionBits)` —
     // a null allocator is the default one, which is what a game passes.
     sig!("IOHIDManagerCreate", P, P, U32),
@@ -605,17 +718,52 @@ pub static SIGNATURES: &[FunctionAbi] = &[
         P
     ),
     cbsig!([1], "IOHIDManagerRegisterDeviceRemovalCallback", V, P, P, P),
+    // `IOHIDValueCallback(void *context, IOReturn, void *sender,
+    // IOHIDValueRef)` — four integer arguments and no result, delivered on
+    // whichever run loop the manager was scheduled on.
+    cbsig!([1], "IOHIDManagerRegisterInputValueCallback", V, P, P, P),
     sig!("IOHIDManagerScheduleWithRunLoop", V, P, P, P),
     sig!("IOHIDManagerSetDeviceMatchingMultiple", V, P, P),
+    sig!("IOHIDManagerUnscheduleFromRunLoop", V, P, P, P),
     sig!("IOHIDValueGetElement", P, P),
     sig!("IOHIDValueGetIntegerValue", I64, P),
     sig!("IOHIDValueGetLength", I64, P),
+    sig!("IOIteratorIsValid", I32, U32),
     sig!("IOIteratorNext", U32, U32),
     sig!("IOMasterPort", I32, U32, P),
+    sig!("IOObjectIsEqualTo", I32, U32, U32),
     sig!("IOObjectRelease", I32, U32),
+    sig!("IOObjectRetain", I32, U32),
+    // ### Power, which is two families that look like one
+    //
+    // An `IOPMAssertionID` is a `uint32_t`; the timeout in the middle of the
+    // creation call is a `CFTimeInterval`, a `double`, and it is the only
+    // floating-point argument in IOKit's whole surface here. AAPCS64 allocates
+    // it from the vector counter, so the two `CFStringRef`s after it are still
+    // integer arguments five and six rather than six and seven.
+    sig!(
+        "IOPMAssertionCreateWithDescription",
+        I32,
+        P,
+        P,
+        P,
+        P,
+        P,
+        F64,
+        P,
+        P
+    ),
+    sig!("IOPMAssertionRelease", I32, U32),
+    // The power-source family is pure CoreFoundation: an opaque blob, a list
+    // over it, and a dictionary per source. Every one is a `CFTypeRef`.
+    sig!("IOPSCopyPowerSourcesInfo", P),
+    sig!("IOPSCopyPowerSourcesList", P, P),
+    sig!("IOPSGetPowerSourceDescription", P, P, P),
+    sig!("IORegistryEntryCreateCFProperties", I32, U32, P, P, U32),
     sig!("IORegistryEntryCreateCFProperty", P, U32, P, P, U32),
     sig!("IORegistryEntryGetParentEntry", I32, U32, P, P),
     sig!("IOServiceGetMatchingServices", I32, U32, P, P),
+    sig!("IOServiceMatching", P, P),
     // `KBGetLayoutType(SInt16) -> SInt32`, and the only Apple entry point in
     // this table with **no header anywhere on the system** — it is private
     // HIToolbox, present in `Carbon.tbd`'s export list and declared nowhere.
@@ -657,10 +805,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("OSAtomicAdd64Barrier", BOOL, I64, P),
     sig!("OSAtomicCompareAndSwap32Barrier", BOOL, I32, I32, P),
     sig!("OSAtomicCompareAndSwap64Barrier", BOOL, I64, I64, P),
-    // Sorts *after* the `OSAtomic` family: lowercase `p` is above `S`, and the
-    // table is searched with `binary_search`, so an entry a reader would file
-    // one line earlier is an entry nothing can find. See `CloseComponent` for
-    // what the Component Manager is doing here at all.
+    // Filed after the `OSAtomic` family because lowercase `p` sorts above `S`,
+    // which is now a reader's convenience rather than a correctness condition —
+    // [`index`] finds it wherever it is. See `CloseComponent` for what the
+    // Component Manager is doing here at all.
     sig!("OpenAComponent", I32, P, P),
     sig!("SCDynamicStoreCopyProxies", P, P),
     sig!("SCNetworkReachabilityCreateWithAddress", P, P, P),
@@ -701,7 +849,17 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // the packing rule does not apply.
     sig!(
         "UCKeyTranslate",
-        I32, P, U16, U16, U32, U32, U32, P, U64, P, P
+        I32,
+        P,
+        U16,
+        U16,
+        U32,
+        U32,
+        U32,
+        P,
+        U64,
+        P,
+        P
     ),
     sig!("UTTypeCopyPreferredTagWithClass", P, P, P),
     sig!("UTTypeCreatePreferredIdentifierForTag", P, P, P, P),
@@ -974,6 +1132,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("backtrace", I32, P, I32),
     sig!("backtrace_symbols", P, P, I32),
     sig!("backtrace_symbols_fd", V, P, I32, I32),
+    // `basename` and `dirname` both hand back a pointer into a static buffer
+    // the host owns, which the guest only ever reads.
+    sig!("basename", P, P),
     sig!("bcmp", I32, P, P, U64),
     sig!("bind", I32, I32, P, U32),
     // `kern_return_t bootstrap_look_up(mach_port_t, const name_t, mach_port_t *)`.
@@ -1059,6 +1220,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // only exists at an exit. Without the marking libdispatch would call
     // x86-64 as arm64, seconds later, on a thread with nothing of this
     // runtime's on its stack.
+    // `double difftime(time_t, time_t)` — two 64-bit integers in, a `double`
+    // out, so the arguments and the result come from different register
+    // files.
+    sig!("difftime", F64, I64, I64),
+    sig!("dirname", P, P),
     sig!("dispatch_get_context", P, P),
     sig!("dispatch_get_global_queue", P, I64, U64),
     cbsig!([3], "dispatch_group_async_f", V, P, P, P, P),
@@ -1121,6 +1287,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // compared. That is the question `std::string` turned from a formality into
     // a requirement — see [`crate::shims::cxxstring`].
     sig!("flock", I32, I32, I32),
+    // The `FILE *` lock a guest takes around a run of unlocked reads. Both are
+    // `void`, and the lock is recursive per thread.
+    sig!("flockfile", V, P),
     sig!("floor", F64, F64),
     sig!("floorf", F32, F32),
     sig!("fma", F64, F64, F64, F64),
@@ -1141,6 +1310,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("freeaddrinfo", V, P),
     sig!("freeifaddrs", V, P),
     sig!("freelocale", V, P),
+    sig!("freopen", P, P, P, P),
+    // `double frexp(double, int *)` — the exponent goes to a pointer the
+    // guest owns and the mantissa comes back in a vector register.
+    sig!("frexp", F64, F64, P),
     vsig!("fscanf", I32, P, P),
     sig!("fseek", I32, P, I64, I32),
     sig!("fseeko", I32, P, I64, I32),
@@ -1164,6 +1337,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     cbsig!([2], "fts_open", P, P, I32, P),
     sig!("fts_read", P, P),
     sig!("fts_set", I32, P, P, I32),
+    sig!("funlockfile", V, P),
     sig!("fwrite", U64, P, U64, U64, P),
     sig!("gai_strerror", P, I32),
     sig!("getaddrinfo", I32, P, P, P, P),
@@ -1262,7 +1436,18 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("glCompileShader", V, U32),
     // Eight integer arguments exactly, which is the guest's six registers plus
     // two it spilled; the host takes all eight in `x0`–`x7`.
-    sig!("glCompressedTexImage2D", V, U32, I32, U32, I32, I32, I32, I32, P),
+    sig!(
+        "glCompressedTexImage2D",
+        V,
+        U32,
+        I32,
+        U32,
+        I32,
+        I32,
+        I32,
+        I32,
+        P
+    ),
     sig!("glCreateProgram", U32),
     sig!("glCreateShader", U32, U32),
     sig!("glDeleteBuffers", V, I32, P),
@@ -1468,6 +1653,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("ldexpf", F32, F32, I32),
     sig!("listen", I32, I32, I32),
     sig!("listxattr", I64, P, P, U64, I32),
+    // `struct lconv *localeconv(void)` — the current locale's numeric
+    // punctuation, which C++'s `num_put` reads on the way to formatting a
+    // number. A pointer to storage the host owns.
+    sig!("localeconv", P),
     sig!("localeconv_l", P, P),
     sig!("localtime", P, P),
     // `localtime_r` and `gmtime_r` above: the reentrant forms, which write into
@@ -1562,6 +1751,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("munmap", I32, P, U64),
     sig!("nanosleep", I32, P, P),
     sig!("newlocale", P, I32, P, P),
+    sig!("nextafter", F64, F64, F64),
     sig!("nl_langinfo", P, I32),
     sig!("nl_langinfo_l", P, I32, P),
     vsig!("open", I32, P, I32),
@@ -1679,14 +1869,26 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("pthread_rwlock_unlock", I32, P),
     sig!("pthread_rwlock_wrlock", I32, P),
     sig!("pthread_self", U64),
+    // Cancellation state and type are two `int`s in and the previous value out
+    // through a pointer. Nothing here is a guest callback: cancellation runs
+    // the *cleanup handlers*, which a guest pushes with `pthread_cleanup_push`
+    // and which is not an import at all.
+    sig!("pthread_setcancelstate", I32, I32, P),
+    sig!("pthread_setcanceltype", I32, I32, P),
     sig!("pthread_setname_np", I32, P),
     sig!("pthread_setschedparam", I32, U64, I32, P),
     sig!("pthread_setspecific", I32, U64, P),
+    // `sigset_t` is a `uint32_t` on both architectures — the fact
+    // `struct sigaction` rests on — so the two masks are pointers to four
+    // bytes the host reads and writes in place. This is `sigprocmask`'s
+    // per-thread form, and a game blocks a signal around a worker thread.
+    sig!("pthread_sigmask", I32, I32, P, P),
     sig!("pthread_threadid_np", I32, U64, P),
     sig!("putc", I32, I32, P),
     sig!("putchar", I32, I32),
     sig!("puts", I32, P),
     sig!("putwchar", I32, I32),
+    sig!("pwrite", I64, I32, P, U64, I64),
     cbsig!([3], "qsort", V, P, U64, U64, P),
     cbsig!([4], "qsort_r", V, P, U64, U64, P, P),
     // `raise` and `kill` deliver to this process, so a guest handler installed
@@ -1709,6 +1911,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `strrchr` under the name BSD gave it first. `libsteam_api.dylib` uses it
     // to take the directory off its own path while looking for the client.
     sig!("rindex", P, P, I32),
+    sig!("rint", F64, F64),
+    sig!("rintf", F32, F32),
     sig!("rmdir", I32, P),
     sig!("round", F64, F64),
     sig!("roundf", F32, F32),
@@ -1786,6 +1990,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("sqrt", F64, F64),
     sig!("sqrtf", F32, F32),
     sig!("srand", V, U32),
+    sig!("srandom", V, U32),
     vsig!("sscanf", I32, P, P),
     sig!("stat", I32, P, P),
     sig!("statfs", I32, P, P),
@@ -1991,8 +2196,8 @@ const GUEST_STRING: &str =
 const CONTEXT: &str =
     "saves or restores a machine context, which here is the host's and not the guest's";
 
-/// Symbols that are described and deliberately not callable, **sorted by name**
-/// for the same reason as [`SIGNATURES`].
+/// Symbols that are described and deliberately not callable, in no particular
+/// order for the same reason as [`SIGNATURES`].
 pub static REFUSED: &[(&str, &str)] = &[
     // The one CoreFoundation constructor whose *argument* is a table of
     // callbacks rather than a callback: `CFRunLoopSourceContext` holds seven
@@ -2180,37 +2385,34 @@ mod tests {
         );
     }
 
+    /// A name appears once, which is the one thing [`index`] cannot notice.
+    ///
+    /// Order stopped mattering when the lookup became a map; duplication did
+    /// not. Two entries for one name means one of them is dead — and the dead
+    /// one is whichever a reader is not looking at, so it stays wrong quietly.
     #[test]
-    fn signatures_are_sorted_and_unique() {
-        for pair in SIGNATURES.windows(2) {
-            assert!(
-                pair[0].name < pair[1].name,
-                "{} and {} are out of order; binary_search would miss one",
-                pair[0].name,
-                pair[1].name
-            );
+    fn signatures_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for abi in SIGNATURES {
+            assert!(seen.insert(abi.name), "{} is described twice", abi.name);
         }
     }
 
     #[test]
-    fn refusals_are_sorted_and_unique() {
-        for pair in REFUSED.windows(2) {
-            assert!(
-                pair[0].0 < pair[1].0,
-                "{} and {} are out of order",
-                pair[0].0,
-                pair[1].0
-            );
+    fn refusals_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for (name, _) in REFUSED {
+            assert!(seen.insert(*name), "{name} is refused twice");
         }
     }
 
     #[test]
     fn a_symbol_is_never_both_known_and_refused() {
+        let refused: std::collections::HashSet<&str> =
+            REFUSED.iter().map(|(name, _)| *name).collect();
         for abi in SIGNATURES {
             assert!(
-                REFUSED
-                    .binary_search_by_key(&abi.name, |(n, _)| *n)
-                    .is_err(),
+                !refused.contains(abi.name),
                 "{} is both described and refused",
                 abi.name
             );

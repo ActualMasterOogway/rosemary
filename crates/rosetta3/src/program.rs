@@ -528,9 +528,11 @@ impl<M: Regions> Program<M> {
             let end = base.wrapping_add(bytes.len() as u64);
             let mut piece = |from: u64, to: u64, is_writable: bool| {
                 let (lo, hi) = ((from - base) as usize, (to - base) as usize);
-                config
-                    .segments
-                    .push(MemorySegment::new(from, bytes[lo..hi].to_vec(), is_writable));
+                config.segments.push(MemorySegment::new(
+                    from,
+                    bytes[lo..hi].to_vec(),
+                    is_writable,
+                ));
             };
             let mut at = base;
             for range in writable.iter().filter(|r| r.start < end && r.end > base) {
@@ -906,7 +908,10 @@ fn lift_generated(va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
             region.range.start,
             region.range.end,
             region.starts.len(),
-            head.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+            head.iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
         );
     }
     let start = usize::try_from(region.range.start - base).ok()?;

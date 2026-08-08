@@ -389,7 +389,10 @@ mod tests {
         let Some(fmt) = percent_s() else {
             return;
         };
-        assert_eq!(cf_string_bytes(fmt as usize as u64).as_deref(), Some(&b"%s"[..]));
+        assert_eq!(
+            cf_string_bytes(fmt as usize as u64).as_deref(),
+            Some(&b"%s"[..])
+        );
     }
 
     /// `description` is guarded the same way, and a class object answers it —

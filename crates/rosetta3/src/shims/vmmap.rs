@@ -117,7 +117,10 @@ fn remember_arena(base: u64, len: u64) {
         return;
     }
     let mut arenas = ARENAS.lock().unwrap_or_else(|e| e.into_inner());
-    if arenas.iter().any(|&(b, l)| base >= b && base + len <= b + l) {
+    if arenas
+        .iter()
+        .any(|&(b, l)| base >= b && base + len <= b + l)
+    {
         return;
     }
     arenas.push((base, len));

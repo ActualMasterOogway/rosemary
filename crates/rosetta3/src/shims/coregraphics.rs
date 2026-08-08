@@ -72,11 +72,11 @@ use crate::abi::{AbiError, GuestMemory, Result};
 /// follows the platform ABI, so the compiler emits the `v0`–`v3` read.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-struct CgRect {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
+pub(crate) struct CgRect {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) width: f64,
+    pub(crate) height: f64,
 }
 
 impl CgRect {
@@ -133,7 +133,7 @@ fn rect_of_display(
 /// that area this rectangle begins, which is not always zero: a call with two
 /// MEMORY arguments, or with integer arguments spilled ahead of one, puts it
 /// further along.
-fn rect_argument(
+pub(crate) fn rect_argument(
     symbol: &str,
     ctx: &RegisterContext,
     mem: &mut dyn GuestMemory,
@@ -227,17 +227,39 @@ fn event_location(
     Ok(())
 }
 
+/// `CGSize CGDisplayScreenSize(CGDirectDisplayID)`
+///
+/// The display's physical size in millimetres, which is how a game computes a
+/// DPI. A `CGSize` is a `CGPoint` by another name — two `double`s — so it is
+/// [`event_location`]'s case with a 32-bit argument instead of a handle.
+fn screen_size_of_display(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    _mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let host = host_or_refuse(symbol)?;
+    // SAFETY: the symbol [`shim_for`] matched, which is
+    // `CGSize (*)(CGDirectDisplayID)`, resolved out of a CoreGraphics this
+    // process has loaded.
+    let f: extern "C" fn(u32) -> CgPoint =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(u32) -> CgPoint>(host) };
+    let size = f(ctx.rdi as u32);
+    ctx.xmm[0] = [size.x.to_bits(), 0];
+    ctx.xmm[1] = [size.y.to_bits(), 0];
+    Ok(())
+}
+
 /// `CGPoint`, as both ABIs return one: two floating-point registers.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-struct CgPoint {
-    x: f64,
-    y: f64,
+pub(crate) struct CgPoint {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
 }
 
 /// The host's address for one of this module's names, or the refusal that says
 /// which one was missing.
-fn host_or_refuse(symbol: &str) -> Result<u64> {
+pub(crate) fn host_or_refuse(symbol: &str) -> Result<u64> {
     crate::dyld::host_symbol(symbol.strip_prefix('_').unwrap_or(symbol)).ok_or(AbiError::NoShim {
         symbol: symbol.to_string(),
     })
@@ -291,6 +313,10 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         // the global desktop coordinate space, which SDL asks for every display
         // it enumerates.
         "CGDisplayBounds" => Some(rect_of_display),
+        // `CGSize CGDisplayScreenSize(CGDirectDisplayID)` — sixteen bytes rather
+        // than thirty-two, so it is the agreeing case rather than the
+        // disagreeing one, and it still cannot be a table entry.
+        "CGDisplayScreenSize" => Some(screen_size_of_display),
         // The bitmap-context pair, which is how a `CGImage` becomes texture
         // bytes: a `CGRect` **argument**, passed on the guest's stack.
         "CGContextClearRect" => Some(context_clear_rect),

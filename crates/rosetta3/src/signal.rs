@@ -579,7 +579,10 @@ mod tests {
         let mut back = [0u8; SigAction::SIZE];
         mem.read(mem.base + 16, &mut back).unwrap();
         let back = SigAction::from_bytes(back);
-        assert_eq!(back.handler, 0x1_0000_1234, "the guest's own address, unwrapped");
+        assert_eq!(
+            back.handler, 0x1_0000_1234,
+            "the guest's own address, unwrapped"
+        );
         assert_eq!(back.flags, SA_SIGINFO);
     }
 

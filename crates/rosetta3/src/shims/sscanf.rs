@@ -304,11 +304,7 @@ pub fn sscanf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory
                         .take(width)
                         .find(|&n| {
                             let yes = set[input[n] as usize];
-                            if invert {
-                                !yes
-                            } else {
-                                yes
-                            }
+                            if invert { !yes } else { yes }
                         })
                         .unwrap_or((ii + width).min(input.len()));
                     (end > ii).then(|| {

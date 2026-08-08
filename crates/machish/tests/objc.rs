@@ -559,13 +559,12 @@ fn both_method_list_encodings_decode_to_the_same_methods() {
         v
     }
     let class_methods = |c: &ObjcClass| c.meta.as_ref().map(|m| names(&m.ro.methods));
-    assert!(!names(&a.ro.methods).is_empty(), "the program decoded no methods");
-    assert_eq!(names(&a.ro.methods), names(&b.ro.methods));
-    assert_eq!(
-        class_methods(&a),
-        class_methods(&b),
-        "class methods differ"
+    assert!(
+        !names(&a.ro.methods).is_empty(),
+        "the program decoded no methods"
     );
+    assert_eq!(names(&a.ro.methods), names(&b.ro.methods));
+    assert_eq!(class_methods(&a), class_methods(&b), "class methods differ");
     assert!(dylib.refusals.is_empty(), "{:?}", dylib.refusals);
 
     // And every relative `imp` really lands in the dylib's own `__text`, which
@@ -575,7 +574,11 @@ fn both_method_list_encodings_decode_to_the_same_methods() {
         .section("__TEXT", "__text")
         .map(|s| (s.addr + img.slide, s.size))
         .expect("__text");
-    for m in b.ro.methods.iter().chain(b.meta.iter().flat_map(|x| x.ro.methods.iter())) {
+    for m in
+        b.ro.methods
+            .iter()
+            .chain(b.meta.iter().flat_map(|x| x.ro.methods.iter()))
+    {
         assert!(
             m.imp >= text.0 && m.imp < text.0 + text.1,
             "{} resolved to {:#x}, outside __text",

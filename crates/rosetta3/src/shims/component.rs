@@ -77,7 +77,8 @@ fn host_fn<T: Copy>(name: &core::ffi::CStr, cache: &std::sync::OnceLock<Option<T
         // result is either null or the framework's own function, and `T` is the
         // type `AudioComponent.h` declares for it.
         let sym = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
-        (!sym.is_null()).then(|| unsafe { core::mem::transmute_copy::<*mut core::ffi::c_void, T>(&sym) })
+        (!sym.is_null())
+            .then(|| unsafe { core::mem::transmute_copy::<*mut core::ffi::c_void, T>(&sym) })
     })
 }
 

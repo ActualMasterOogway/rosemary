@@ -276,11 +276,7 @@ fn images_of(report: &LinkReport) -> Vec<&ObjcImage> {
 }
 
 /// The five passes, in the order the runtime needs them.
-fn register_images(
-    vm: &Vm,
-    rt: &mut ObjcRuntime,
-    images: &[&ObjcImage],
-) -> Result<(), VmError> {
+fn register_images(vm: &Vm, rt: &mut ObjcRuntime, images: &[&ObjcImage]) -> Result<(), VmError> {
     // Protocols first — a class adopts them as it is registered.
     for image in images {
         for p in &image.protocols {

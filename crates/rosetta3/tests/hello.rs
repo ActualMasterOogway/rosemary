@@ -214,7 +214,10 @@ fn a_writable_segment_is_not_handed_to_the_lifter_as_constant_data() {
             }
         }
     }
-    assert!(checked > 0, "no segment was described, so nothing is tested");
+    assert!(
+        checked > 0,
+        "no segment was described, so nothing is tested"
+    );
     assert!(
         program
             .report

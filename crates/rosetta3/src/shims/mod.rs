@@ -43,6 +43,7 @@ use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{AbiError, GuestMemory, Result};
 
+pub mod appkit;
 pub mod atexit;
 pub mod audiounit;
 pub mod block;
@@ -121,6 +122,7 @@ pub fn dispatch(
             if let Some(f) = math::shim_for(name)
                 .or_else(|| intdiv::shim_for(name))
                 .or_else(|| coregraphics::shim_for(name))
+                .or_else(|| appkit::shim_for(name))
                 .or_else(|| component::shim_for(name))
                 .or_else(|| process::shim_for(name))
                 .or_else(|| stackprobe::shim_for(name))
@@ -164,6 +166,7 @@ pub fn is_shimmed(symbol: &str) -> bool {
     if math::shim_for(name).is_some()
         || intdiv::shim_for(name).is_some()
         || coregraphics::shim_for(name).is_some()
+        || appkit::shim_for(name).is_some()
         || component::shim_for(name).is_some()
         || process::shim_for(name).is_some()
         || stackprobe::shim_for(name).is_some()

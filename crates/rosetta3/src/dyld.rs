@@ -476,10 +476,7 @@ pub fn contains(va: u64) -> bool {
 }
 
 /// The region to lift in order to execute `va`, if it is in a loaded image.
-pub fn lift_region(
-    va: u64,
-    from_function_start: bool,
-) -> Option<(crate::region::Region, Vec<u8>)> {
+pub fn lift_region(va: u64, from_function_start: bool) -> Option<(crate::region::Region, Vec<u8>)> {
     find(|image| {
         let (base, bytes) = region_of(image, va)?;
         let function = image.functions.iter().find(|f| f.contains(&va)).cloned();
@@ -909,7 +906,10 @@ fn resolve_path(path: &str) -> Option<String> {
                 loader: Some(exe),
                 rpaths: &rpaths,
             };
-            candidates.extend(machish::install_name::expand(&format!("@rpath/{name}"), &ctx));
+            candidates.extend(machish::install_name::expand(
+                &format!("@rpath/{name}"),
+                &ctx,
+            ));
         }
         candidates.extend(search_path("DYLD_FALLBACK_LIBRARY_PATH", name));
     }
@@ -955,7 +955,11 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
         if found.is_null() {
             return None;
         }
-        return Some(remember_native_symbol(found as usize as u64, name, Some(path)));
+        return Some(remember_native_symbol(
+            found as usize as u64,
+            name,
+            Some(path),
+        ));
     }
 
     // `dlsym` takes the C identifier; a Mach-O export carries the underscore.
@@ -1267,12 +1271,7 @@ fn clear_error() {
 pub fn shim_for(name: &str) -> Option<crate::jmpbuf::Shim> {
     matches!(
         name,
-        "dlopen"
-            | "dlsym"
-            | "dlclose"
-            | "dlerror"
-            | "dladdr"
-            | "_dyld_find_unwind_sections"
+        "dlopen" | "dlsym" | "dlclose" | "dlerror" | "dladdr" | "_dyld_find_unwind_sections"
     )
     .then_some(serve)
 }
@@ -1483,9 +1482,8 @@ fn find_unwind_sections(
     let mut words = [0u8; 40];
     words[0..8].copy_from_slice(&header.to_le_bytes());
     for (i, section) in ["__eh_frame", "__unwind_info"].into_iter().enumerate() {
-        let (at, len) = section_in(header, section).map_or((0, 0), |(addr, size)| {
-            (addr.wrapping_add(slide), size)
-        });
+        let (at, len) = section_in(header, section)
+            .map_or((0, 0), |(addr, size)| (addr.wrapping_add(slide), size));
         let base = 8 + i * 16;
         words[base..base + 8].copy_from_slice(&at.to_le_bytes());
         words[base + 8..base + 16].copy_from_slice(&len.to_le_bytes());

@@ -375,12 +375,7 @@ pub fn region_for(
 /// The function's recorded extent is still used as an upper bound, since that
 /// half of the hint is about where the code *ends* and is true whatever the
 /// region starts at.
-pub fn region_at(
-    bytes: &[u8],
-    base: u64,
-    pc: u64,
-    function: Option<Range<u64>>,
-) -> Option<Region> {
+pub fn region_at(bytes: &[u8], base: u64, pc: u64, function: Option<Range<u64>>) -> Option<Region> {
     match policy() {
         Policy::Walk => walk_region_for(bytes, base, pc, function, false),
         // Already the answer: a page region always starts at `pc`.
@@ -405,13 +400,7 @@ fn page_region_for(bytes: &[u8], base: u64, pc: u64) -> Option<Region> {
 /// from the environment, which is what makes the policy testable at a size a
 /// test fixture can be written for — and what keeps such a test from asserting
 /// on whatever the environment happened to select.
-fn page_region_sized(
-    bytes: &[u8],
-    base: u64,
-    pc: u64,
-    page: u64,
-    cap: usize,
-) -> Option<Region> {
+fn page_region_sized(bytes: &[u8], base: u64, pc: u64, page: u64, cap: usize) -> Option<Region> {
     let config = LifterConfig {
         page_size: page,
         ..Default::default()
@@ -423,7 +412,9 @@ fn page_region_sized(
     }
 
     let mut decoder = Decoder::with_ip(64, bytes, base, DecoderOptions::NONE);
-    decoder.set_position(usize::try_from(pc - base).ok()?).ok()?;
+    decoder
+        .set_position(usize::try_from(pc - base).ok()?)
+        .ok()?;
     decoder.set_ip(pc);
 
     let mut instr = Instruction::default();
@@ -459,7 +450,9 @@ fn walk_region_for(
     from_function_start: bool,
 ) -> Option<Region> {
     let bound = function.as_ref().map_or(u64::MAX, |f| f.end);
-    if let Some(f) = function.filter(|_| from_function_start).filter(|f| f.contains(&pc))
+    if let Some(f) = function
+        .filter(|_| from_function_start)
+        .filter(|f| f.contains(&pc))
         && let Some(r) = walk(bytes, base, f.start, bound)
             .map(capped)
             .filter(|r| r.covers(pc))
