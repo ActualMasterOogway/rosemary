@@ -269,6 +269,14 @@ static RUNTIME: &[Runtime] = &[
     rtc!([] -> true, "objc_getRequiredClass", P, P),
     // Whatever `objc_storeWeak` put in the table comes back out, so the return
     // is translated for the same reason that call's argument is.
+    // `id objc_initWeak(id *location, id val)` is `objc_storeWeak` for a
+    // location that has never held a weak reference before — the compiler emits
+    // it for the *first* assignment to a `__weak` variable and `objc_storeWeak`
+    // for every one after. Same shape, same translation, and leaving it out
+    // does not fail where it is called: the slot stays zero, the guest's weak
+    // variable is never registered, and every later read of it comes back nil.
+    // Unity's `PlayerWindowView` keeps its backing layer in one.
+    rtc!([1], "objc_initWeak", P, P, P),
     rtc!([] -> true, "objc_loadWeakRetained", P, P),
     rtc!([] -> true, "objc_lookUpClass", P, P),
     rtc!([0] -> true, "objc_opt_class", P, P),
@@ -282,6 +290,13 @@ static RUNTIME: &[Runtime] = &[
     rtc!([0], "objc_retainAutorelease", P, P),
     rtc!([0], "objc_retainAutoreleaseReturnValue", P, P),
     rtc!([0], "objc_retainAutoreleasedReturnValue", P, P),
+    // `id objc_retainBlock(id)` is `_Block_copy` under another name, and needs
+    // nothing done to the block for the reason the roadmap records: a literal's
+    // `isa` is an ordinary bind of `_NSConcreteStackBlock`, so the host's own
+    // copy routine recognises the object and moves the right number of bytes.
+    // The guest code pointer inside it is substituted where the block *crosses*
+    // to a host API, which is [`crate::shims::block`]'s job and not this one's.
+    rt!("objc_retainBlock", P, P),
     // `objc_storeStrong(id *location, id value)` writes through a guest pointer.
     // The value it stores is an object, and an object is a host pointer on both
     // sides — but a guest storing a *class* is legal, so it is translated.
@@ -794,6 +809,27 @@ fn send(
     // SAFETY: `method` is a `Method` the runtime just returned for `class`.
     let imp = unsafe { host::method_getImplementation(method) } as u64;
 
+    // `ROSETTA3_TRACE_MSG` reports this send, if it names its selector. Placed
+    // *before* the guest/host split, because the first version of this was
+    // after it and so said nothing about the messages that matter most: a
+    // method the guest implements is transferred to rather than called, and
+    // tracing only the host half made a guest method that never ran look
+    // exactly like one that ran and did nothing.
+    let watching = traced(sel);
+    if let Some(name) = &watching {
+        eprintln!(
+            "rosetta3: msg -[{} {name}] {} args={:#x},{:#x},{:#x}",
+            class_of(host_receiver),
+            match vm.guest_behind_thunk(imp) {
+                Some(_) => "guest",
+                None => "host",
+            },
+            arg_reg(ctx, base + 2),
+            arg_reg(ctx, base + 3),
+            arg_reg(ctx, base + 4),
+        );
+    }
+
     // Guest → guest: the trampoline's whole job is the jump, and the guest's
     // registers are already the callee's.
     if let Some(guest_imp) = vm.guest_behind_thunk(imp) {
@@ -862,15 +898,46 @@ fn send(
     // send in the program, so a refusal reported under it says which runtime
     // entry point was reached and nothing about which call the guest made —
     // which is the whole content of the failure. Built only on the error path.
-    marshal::call_shapes(symbol, &signature.shapes, imp, ctx, mem, &convert).map_err(|e| {
-        // `object_getClass` and `class_getName` are runtime calls rather than
-        // messages, which matters here: a message can raise, and raising out of
-        // a shim is fatal with no diagnostic — the last thing a diagnostic
-        // should do. See the roadmap's note on `CFStringGetLength`.
-        let class = class_of(host_receiver);
-        let sel = selector_name(sel).unwrap_or_else(|| format!("<sel {sel:#x}>"));
-        e.renaming(format!("{symbol} -[{class} {sel}]"))
-    })
+    let result =
+        marshal::call_shapes(symbol, &signature.shapes, imp, ctx, mem, &convert).map_err(|e| {
+            // `object_getClass` and `class_getName` are runtime calls rather than
+            // messages, which matters here: a message can raise, and raising out of
+            // a shim is fatal with no diagnostic — the last thing a diagnostic
+            // should do. See the roadmap's note on `CFStringGetLength`.
+            let class = class_of(host_receiver);
+            let sel = selector_name(sel).unwrap_or_else(|| format!("<sel {sel:#x}>"));
+            e.renaming(format!("{symbol} -[{class} {sel}]"))
+        });
+    if let Some(name) = &watching
+        && result.is_ok()
+    {
+        eprintln!("rosetta3: msg -[? {name}] -> {:#x}", ctx.rax);
+    }
+    result
+}
+
+/// Whether `ROSETTA3_TRACE_MSG` asked for this selector, and its name.
+///
+/// A **list of selectors** rather than an all-or-nothing switch, because an
+/// Objective-C program sends millions of messages and the interesting one is
+/// always a handful of names known in advance: this exists for "the guest
+/// stored a layer and got nil back", where the question is what four specific
+/// sends returned. Tracing everything answers it too, at a hundred megabytes a
+/// second, on a run slow enough that the timing-sensitive bug stops happening.
+///
+/// `ROSETTA3_TRACE_MSG=layer,setLayer:,makeBackingLayer`
+fn traced(sel: u64) -> Option<String> {
+    static WANTED: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let wanted = WANTED.get_or_init(|| {
+        std::env::var("ROSETTA3_TRACE_MSG")
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_default()
+    });
+    if wanted.is_empty() {
+        return None;
+    }
+    let name = selector_name(sel)?;
+    wanted.contains(&name).then_some(name)
 }
 
 /// The receiver's class name, for a diagnostic — never by messaging it.

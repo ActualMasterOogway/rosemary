@@ -642,6 +642,18 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGGetDisplayTransferByTable", I32, U32, U32, P, P, P, P),
     sig!("CGSetDisplayTransferByTable", I32, U32, U32, P, P, P),
     sig!("CGGetOnlineDisplayList", I32, U32, P, P),
+    // `void CGGetLastMouseDelta(int32_t *dx, int32_t *dy)` — how a game reads
+    // relative mouse motion when the cursor is hidden and locked, which is
+    // every first-person camera. Both out-parameters are guest memory the host
+    // writes in place.
+    sig!("CGGetLastMouseDelta", V, P, P),
+    // `CGEventFlags` is a `uint64_t` of modifier bits; the source state id is
+    // an enum.
+    sig!("CGEventSourceFlagsState", U64, U32),
+    sig!("CGDisplayModelNumber", U32, U32),
+    sig!("CGDisplayVendorNumber", U32, U32),
+    sig!("CGDisplayRotation", F64, U32),
+    sig!("CGColorSpaceCreateWithName", P, P),
     sig!("CGGetActiveDisplayList", I32, U32, P, P),
     // ## CGL, which is what an OpenGL context is underneath
     //
@@ -951,6 +963,19 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // host takes `w0` and returns `w0`. A wider prototype would be a guess
     // about a function nobody documents; this is a reading of the caller.
     sig!("KBGetLayoutType", I32, I32),
+    // `EventTime GetCurrentEventTime(void)` is a `double` of seconds since
+    // boot, and `OSErr UpdateSystemActivity(UInt8)` is how a program that is
+    // busy but not touching the keyboard tells the system not to sleep — which
+    // a game does every frame. Both are Carbon, both are declared in headers
+    // the SDK still ships, and both return through the same convention the
+    // Component Manager entries above use: `OSErr` is a `SInt16` the callee
+    // extends to 32 bits.
+    sig!("GetCurrentEventTime", F64),
+    sig!("UpdateSystemActivity", I32, U8),
+    // The two error-string lookups beside them, which hand back a pointer into
+    // a static table.
+    sig!("GetMacOSStatusCommentString", P, I32),
+    sig!("GetMacOSStatusErrorString", P, I32),
     // `UInt8 LMGetKbdType(void)` — the low-memory global that still backs
     // `UCKeyTranslate`'s keyboard-type argument.
     sig!("LMGetKbdType", U8),
@@ -968,6 +993,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // undescribed symbol.
     vsig!("NSLog", V, P),
     sig!("NSHomeDirectory", P),
+    sig!("NSClassFromString", P, P),
+    // The handler is a guest function pointer the *runtime* calls, from inside
+    // whatever raised — so it goes out as a thunk like every other callback
+    // crossing the seam.
+    cbsig!([0], "NSSetUncaughtExceptionHandler", V, P),
     sig!("NSSearchPathForDirectoriesInDomains", P, U64, U64, U8),
     sig!("NSTemporaryDirectory", P),
     // The `Add` pair returns the value *after* adding, and the
@@ -1982,6 +2012,70 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("glGetUniformIndices", V, U32, I32, P, P),
     sig!("glInsertEventMarkerEXT", V, I32, P),
     sig!("glLabelObjectEXT", V, U32, U32, I32, P),
+    sig!("glGetObjectLabelEXT", V, U32, U32, I32, P, P),
+    // ### The draw calls, and the uniform setters beside them
+    //
+    // Added in bulk for a reason the render thread makes sharp: a refusal there
+    // is the *outermost* guest frame on that thread, so it exits the process
+    // rather than parking — one launch per missing entry point, and a launch is
+    // ninety seconds. `glDrawElementsBaseVertex` is what a Unity renderer
+    // issues for a mesh with a vertex offset, which is most of them.
+    sig!("glBlendColor", V, F32, F32, F32, F32),
+    sig!("glDrawElementsBaseVertex", V, U32, I32, U32, P, I32),
+    sig!(
+        "glDrawElementsInstancedBaseVertex",
+        V,
+        U32,
+        I32,
+        U32,
+        P,
+        I32,
+        I32
+    ),
+    sig!(
+        "glDrawRangeElementsBaseVertex",
+        V,
+        U32,
+        U32,
+        U32,
+        I32,
+        U32,
+        P,
+        I32
+    ),
+    sig!("glGetBooleani_v", V, U32, U32, P),
+    sig!("glGetFloati_v", V, U32, U32, P),
+    sig!("glGetIntegeri_v", V, U32, U32, P),
+    sig!("glGetUniformfv", V, U32, I32, P),
+    sig!("glGetUniformiv", V, U32, I32, P),
+    sig!("glLogicOp", V, U32),
+    sig!("glMultiDrawArrays", V, U32, P, P, I32),
+    sig!("glMultiDrawElements", V, U32, P, U32, P, I32),
+    sig!("glMultiDrawElementsBaseVertex", V, U32, P, U32, P, I32, P),
+    sig!("glPixelStoref", V, U32, F32),
+    sig!("glTexParameterfv", V, U32, U32, P),
+    sig!("glTexParameteriv", V, U32, U32, P),
+    sig!("glUniform1ui", V, I32, U32),
+    sig!("glUniform1uiv", V, I32, I32, P),
+    sig!("glUniform2ui", V, I32, U32, U32),
+    sig!("glUniform2uiv", V, I32, I32, P),
+    sig!("glUniform3ui", V, I32, U32, U32, U32),
+    sig!("glUniform3uiv", V, I32, I32, P),
+    sig!("glUniform4ui", V, I32, U32, U32, U32, U32),
+    sig!("glUniform4uiv", V, I32, I32, P),
+    sig!("glUniformMatrix2x3fv", V, I32, I32, U8, P),
+    sig!("glUniformMatrix2x4fv", V, I32, I32, U8, P),
+    sig!("glUniformMatrix3x2fv", V, I32, I32, U8, P),
+    sig!("glUniformMatrix3x4fv", V, I32, I32, U8, P),
+    sig!("glUniformMatrix4x2fv", V, I32, I32, U8, P),
+    sig!("glUniformMatrix4x3fv", V, I32, I32, U8, P),
+    sig!("glVertexAttrib1f", V, U32, F32),
+    sig!("glVertexAttrib2f", V, U32, F32, F32),
+    sig!("glVertexAttrib3f", V, U32, F32, F32, F32),
+    sig!("glVertexAttrib4f", V, U32, F32, F32, F32, F32),
+    sig!("glVertexAttrib4fv", V, U32, P),
+    sig!("glVertexAttribI4i", V, U32, I32, I32, I32, I32),
+    sig!("glVertexAttribI4ui", V, U32, U32, U32, U32, U32),
     sig!("glMinSampleShading", V, F32),
     sig!("glPatchParameterfv", V, U32, P),
     sig!("glPatchParameteri", V, U32, I32),
