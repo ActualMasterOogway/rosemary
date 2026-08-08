@@ -644,6 +644,7 @@ fn call_runtime(
         classes: entry.classes,
         class_return: entry.class_return,
         callbacks: entry.callbacks,
+        blocks: &[],
     };
     marshal::call_types(symbol, entry.types, host, ctx, mem, &convert)
 }
@@ -656,12 +657,35 @@ struct Classes<'a> {
     /// See [`Runtime::callbacks`]. Empty for a message send, where the `IMP` on
     /// the far side is the host's own and nothing of the guest's is installed.
     callbacks: &'a [u8],
+    /// Parameter indices holding a block, from the method's own encoding.
+    ///
+    /// Empty for the runtime entry points, none of which takes one.
+    blocks: &'a [u8],
 }
 
 impl Convert for Classes<'_> {
     fn argument(&self, symbol: &str, index: usize, raw: u64) -> Result<u64> {
         if self.callbacks.contains(&(index as u8)) {
             return crate::abi::Callbacks::substitute(self.vm, symbol, raw);
+        }
+        if self.blocks.contains(&(index as u8)) {
+            // A block is edited where it lies and travels unchanged, which is
+            // why this returns `raw` rather than a substitute — see
+            // [`crate::shims::block`] for why the thunk has to be written into
+            // the literal instead of kept beside it.
+            //
+            // A fresh view rather than the caller's `mem`: guest memory is
+            // identity-mapped and shared, so a second handle addresses the same
+            // bytes, and taking one here is what lets this hook edit memory at
+            // all without threading a mutable borrow through the marshaller.
+            //
+            // A null block is a guest passing `nil`, which is legal for every
+            // block parameter in Cocoa and means "no handler".
+            if raw != 0 {
+                let mut view = self.vm.view();
+                crate::shims::block::substitute_block(symbol, raw, &mut view, self.vm)?;
+            }
+            return Ok(raw);
         }
         match self.classes.contains(&(index as u8)) {
             true => Ok(self.vm.objc_host_class(raw)),
@@ -832,6 +856,7 @@ fn send(
         classes: &signature.classes,
         class_return: signature.class_return,
         callbacks: &[],
+        blocks: &signature.blocks,
     };
     marshal::call_shapes(symbol, &signature.shapes, imp, ctx, mem, &convert)
 }

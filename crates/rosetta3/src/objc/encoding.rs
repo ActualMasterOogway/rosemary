@@ -22,10 +22,6 @@
 //!   prototype cannot reproduce in either ABI, let alone across two. This is
 //!   M2's "aggregates by value" refusal coming due exactly where the roadmap
 //!   said it would.
-//! - **Blocks** (`@?`). A block is an object whose `invoke` field is a guest
-//!   function pointer the host would call as arm64. Substituting it means
-//!   rewriting a structure the guest owns, which is a different piece of work
-//!   from marshalling a call.
 //! - **`long double`** (`D`). x86-64 returns it in `st0`, which has no arm64
 //!   counterpart and no register in the guest context to read it from.
 //! - **Bitfields** (`b3`) and the unknown type (`?`), which are not describable
@@ -33,6 +29,15 @@
 //!
 //! Each is a `&'static str` reason that reaches the guest as a named stop, in
 //! the register the rest of the project uses.
+//!
+//! Blocks (`@?`) were on that list and are not any more. A block is an object
+//! whose `invoke` field is a guest function pointer the host would call as
+//! arm64, and answering it does mean rewriting a structure the guest owns —
+//! which is a different piece of work from marshalling a call, and was already
+//! done for `dispatch_async`. So the encoding now *records* which parameters
+//! are blocks rather than refusing them, and [`crate::objc::dispatch`] hands
+//! each to [`crate::shims::block`] on the way out. The pointer itself is
+//! unchanged: what crosses is the same literal, with thunks written into it.
 //!
 //! ## `l` is not `long`
 //!
@@ -57,6 +62,14 @@ pub struct Signature {
     /// The one kind of pointer that means something different on each side of
     /// the seam; see [`crate::objc`].
     pub classes: Vec<u8>,
+    /// Zero-based parameter indices encoded `@?`, i.e. holding a block.
+    ///
+    /// Kept apart from `classes` because the two are answered in opposite
+    /// ways: a class pointer is *replaced* on the way across, and a block is
+    /// left where it is and edited in place. Nothing here records a block
+    /// *return* — a method handing one back is handing back the host's, which
+    /// needs nothing done.
+    pub blocks: Vec<u8>,
     /// Whether the method returns a `Class`.
     pub class_return: bool,
 }
@@ -87,12 +100,17 @@ pub fn signature(encoding: &str) -> Result<Signature, &'static str> {
     let mut sig = Signature {
         shapes: Vec::new(),
         classes: Vec::new(),
+        blocks: Vec::new(),
         class_return: false,
     };
 
     while at < bytes.len() {
         let start = at;
         skip_qualifiers(bytes, &mut at);
+        // Where the type itself begins, qualifiers behind us. `start` is what
+        // the no-progress check below needs; this is what the `#` and `@?`
+        // tests need, and a qualified `rn#` would be missed by the former.
+        let ty = at;
         // An aggregate is recognised *here* rather than inside the scalar
         // decoder, because it is the one type whose whole layout matters and
         // not merely its width. See [`crate::abi::aggregate`].
@@ -111,11 +129,15 @@ pub fn signature(encoding: &str) -> Result<Signature, &'static str> {
         while bytes.get(at).is_some_and(u8::is_ascii_digit) {
             at += 1;
         }
-        if bytes[start] == b'#' {
+        if bytes[ty] == b'#' {
             match sig.shapes.is_empty() {
                 true => sig.class_return = true,
                 false => sig.classes.push((sig.shapes.len() - 1) as u8),
             }
+        }
+        // `@?` is a block; `@` alone, or `@"NSString"`, is an ordinary object.
+        if bytes[ty] == b'@' && bytes.get(ty + 1) == Some(&b'?') && !sig.shapes.is_empty() {
+            sig.blocks.push((sig.shapes.len() - 1) as u8);
         }
         sig.shapes.push(shape);
     }
@@ -172,10 +194,12 @@ pub fn scalar(b: &[u8], at: &mut usize) -> Result<T, &'static str> {
         b'*' | b'#' | b':' => T::Pointer,
         b'@' => {
             // `@?` is a block, and `@"NSString"` is an object whose class the
-            // compiler recorded. The second is an ordinary `id`; the first is
-            // not.
+            // compiler recorded. Both are one pointer wide and land in the same
+            // register; what makes a block different is what has to happen to
+            // the memory behind it, which [`signature`] records separately
+            // because this function classifies *width* and nothing else.
             match b.get(*at) {
-                Some(b'?') => return Err("a block argument carries a guest function pointer"),
+                Some(b'?') => *at += 1,
                 Some(b'"') => skip_quoted(b, at),
                 _ => {}
             }
@@ -534,7 +558,6 @@ mod tests {
         for (encoding, needle) in [
             ("v@:(u=id)", "union"),
             ("v@:{S=}", "no members"),
-            ("v@:@?", "block"),
             ("D@:", "long double"),
             ("v@:b3", "bitfield"),
             ("?@:", "unknown"),
@@ -545,6 +568,26 @@ mod tests {
             let err = signature(encoding).expect_err(encoding);
             assert!(err.contains(needle), "{encoding}: {err}");
         }
+    }
+
+    #[test]
+    fn a_block_is_a_pointer_that_says_it_is_a_block() {
+        // `- (void)run:(void (^)(void))block` — return, `self`, `_cmd`, then
+        // the block at parameter two. It is one pointer wide like any other
+        // object, and the whole difference is the index recorded beside it.
+        let sig = signature("v@:@?").expect("a block parameter decodes");
+        assert_eq!(sig.blocks, vec![2]);
+        assert_eq!(sig.types(), Some(vec![T::None, T::Pointer, T::Pointer, T::Pointer]));
+
+        // `@` and `@"NSString"` are objects and must not be mistaken for one,
+        // which is the failure that would substitute a thunk into a string.
+        let plain = signature("v@:@\"NSString\"@").expect("objects decode");
+        assert!(plain.blocks.is_empty());
+
+        // Two blocks, and an object between them, so the index is a position
+        // rather than a count.
+        let two = signature("v@:@?@@?").expect("two blocks decode");
+        assert_eq!(two.blocks, vec![2, 4]);
     }
 
     #[test]

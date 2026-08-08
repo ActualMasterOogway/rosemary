@@ -64,7 +64,13 @@ const BLOCK_HAS_COPY_DISPOSE: u32 = 1 << 25;
 ///
 /// A null `invoke` is not tolerated the way [`crate::shims::zlib`] tolerates a
 /// null allocator: zlib's field is optional and this one is the block itself.
-fn substitute_block(
+///
+/// Visible to the crate because a block does not only arrive as an argument to
+/// a C function: `-[NSNotificationCenter addObserverForName:…usingBlock:]` is a
+/// *message*, and [`crate::objc::dispatch`] needs exactly this and none of the
+/// rest of this module. The literal is edited where it lies, so the caller
+/// passes the same pointer on afterwards.
+pub(crate) fn substitute_block(
     symbol: &str,
     block: u64,
     mem: &mut dyn GuestMemory,

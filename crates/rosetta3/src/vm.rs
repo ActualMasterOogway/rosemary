@@ -873,6 +873,12 @@ impl Vm {
             .map_err(|source| VmError::Stack { source })?;
         ctx.rsp = rsp;
         ctx.rip = entry;
+        // The guest reads thread-specific data off `%gs` without calling
+        // anything, so the base has to be right before the first region runs and
+        // it is a fact about *this* thread — which is why it is set here, in the
+        // one place every entry into guest code passes through, rather than
+        // wherever a context happens to be built. See [`crate::thread`].
+        ctx.gs_base = crate::thread::tsd_base();
 
         let saved_rsp = state.rsp.get();
         state.rsp.set(rsp);

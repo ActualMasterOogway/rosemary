@@ -183,13 +183,25 @@ fn an_aggregate_return_and_a_variadic_method_both_work_and_throw_still_names_its
 /// binder zeroed was not registered, so the recompiler followed the `__stubs`
 /// trampoline into it. The whole content of the failure is a symbol name, and
 /// that is what it says now. Provoked with a symbol the native provider denies
-/// on purpose — the host's image list is not the guest's.
+/// on purpose — dyld introspection, which the whole `__dyld_` prefix refuses so
+/// that a shim has to decide what the guest is told.
+///
+/// The fixture used to call `_dyld_image_count`, and that stopped being a
+/// denied-and-unanswered symbol when [`rosetta3::shims::runtime`] began
+/// answering the image-list family for Unity's crash reporter. The example has
+/// to be one nothing has claimed *yet*, so it moved to the vmaddr slide — and
+/// if a program ever needs that one too, this test moves again rather than the
+/// shim being held back.
 #[test]
 fn an_unsatisfied_import_names_itself_when_it_is_called() {
     const SRC: &str = r#"
     #include <stdio.h>
     #include <mach-o/dyld.h>
-    int main(void) { printf("before\n"); printf("images %u\n", _dyld_image_count()); return 0; }
+    int main(void) {
+        printf("before\n");
+        printf("slide %ld\n", (long)_dyld_get_image_vmaddr_slide(0));
+        return 0;
+    }
     "#;
     let Some(path) = common::build_x86_64("unsatisfied", SRC, &[]) else {
         skip!("cannot build x86_64 fixtures")
@@ -197,7 +209,7 @@ fn an_unsatisfied_import_names_itself_when_it_is_called() {
     let (status, stdout, stderr) = common::run_guest(&path, &[]);
     assert_ne!(status, Some(0));
     assert_eq!(stdout, "before\n");
-    assert!(stderr.contains("_dyld_image_count"), "{stderr}");
+    assert!(stderr.contains("_dyld_get_image_vmaddr_slide"), "{stderr}");
     assert!(stderr.contains("unsatisfied import"), "{stderr}");
 }
 

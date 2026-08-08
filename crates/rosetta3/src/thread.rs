@@ -43,6 +43,24 @@
 //! destructor slot too, and libpthread does not say whose runs first. A guest
 //! destructor that runs after this one finds no state and gets a fresh stack,
 //! which is wasteful and not wrong.
+//!
+//! ## `%gs`, and why it is the host's own thread-specific data
+//!
+//! An x86-64 macOS program does not have to call `pthread_getspecific` to read a
+//! thread-specific value. `pthread_getspecific` *is* one instruction —
+//! `movq %gs:(,%rax,8), %rax` — and a compiler that can see the key inlines it,
+//! which Unity's allocator does for every temporary allocation it makes. So a
+//! guest reaches thread-specific data through the `%gs` segment base, and this
+//! runtime has to have one.
+//!
+//! It does, and it is not this runtime's to invent: the `%gs` base on x86-64
+//! Darwin and `TPIDRRO_EL0` on arm64 Darwin address the *same array* — one
+//! pointer per key, indexed by the key number, with the same reserved slots at
+//! the front. The guest got its key from the host's own `pthread_key_create`
+//! through native passthrough, so the number in its hand is already the host's.
+//! Pointing the guest's `%gs` at [`tsd_base`] therefore makes the guest's
+//! inlined read and the host's `pthread_getspecific` name one slot, rather than
+//! two that would have to be kept in step.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -369,6 +387,39 @@ pub fn install(state: ThreadState) -> &'static ThreadState {
     unsafe { libc::pthread_setspecific(key(), raw as *mut c_void) };
     // SAFETY: just stored, and nothing has run since that could free it.
     unsafe { &*raw }
+}
+
+/// The base of this host thread's thread-specific data array — the value a
+/// guest's `%gs` segment base must hold.
+///
+/// On arm64 Darwin the array's address is `TPIDRRO_EL0` with its low three bits
+/// masked off; the register's spare bits carry the CPU number, which is not part
+/// of the address. This is what libpthread's own `_os_tsd_get_base` does, and
+/// the reason it is open-coded here rather than called is that it is a static
+/// inline in a header no crate on this system exports.
+///
+/// Verified rather than assumed: `tests/tls.rs` checks that slot zero holds
+/// `pthread_self` and that a key created by `pthread_key_create` reads back
+/// through this base exactly what `pthread_getspecific` returns — including a
+/// key past 256, where the arrays could plausibly have diverged and do not.
+#[cfg(target_arch = "aarch64")]
+pub fn tsd_base() -> u64 {
+    let tpidrro: u64;
+    // SAFETY: `mrs` from `TPIDRRO_EL0` is unprivileged and readable from EL0 on
+    // every arm64 Apple Silicon core; it reads a register and touches no memory.
+    unsafe {
+        std::arch::asm!("mrs {}, tpidrro_el0", out(reg) tpidrro, options(nomem, nostack, preserves_flags))
+    };
+    tpidrro & !0b111
+}
+
+/// A host that is not arm64 has no `TPIDRRO_EL0`, and this runtime has no other
+/// host. Zero is what the guest context held before any of this existed, so a
+/// build elsewhere is no worse than it was: a `%gs`-relative access faults at a
+/// small address rather than reading a wrong one.
+#[cfg(not(target_arch = "aarch64"))]
+pub fn tsd_base() -> u64 {
+    0
 }
 
 /// Stack for a thread the guest spawned.

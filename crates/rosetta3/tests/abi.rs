@@ -649,13 +649,160 @@ fn twelve_integer_arguments_reach_the_hosts_own_stack() {
     assert_eq!(ctx.rax as i64, want);
 }
 
+/// The shape `glTexSubImage3D` has: eight arguments in `x0`–`x7`, then two
+/// four-byte arguments and a pointer on the stack.
+///
+/// Apple packs those three at `[sp]`, `[sp+4]` and `[sp+8]`. A prototype that
+/// declared them all `u64` would put them at `[sp]`, `[sp+8]` and `[sp+16]`,
+/// and every one of the three would be wrong — which is why `i`, `j` and the
+/// value behind `p` are weighted differently below: a single sum could be right
+/// by accident, and three distinguishable contributions cannot be.
+unsafe extern "C" fn eight_longs_int_int_ptr(
+    a: i64,
+    b: i64,
+    c: i64,
+    d: i64,
+    e: i64,
+    f: i64,
+    g: i64,
+    h: i64,
+    i: i32,
+    j: i32,
+    p: *const i64,
+) -> i64 {
+    let regs: i64 = [a, b, c, d, e, f, g, h]
+        .iter()
+        .enumerate()
+        .map(|(n, v)| v * (n as i64 + 1))
+        .sum();
+    // SAFETY: the test passes the address of a live local.
+    regs + i64::from(i) * 1_000 + i64::from(j) * 1_000_000 + unsafe { *p }
+}
+
+static NARROW_TAIL_4_4_8: FunctionAbi = FunctionAbi {
+    name: "eight_longs_int_int_ptr",
+    callbacks: &[],
+    types: &[
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedWord,
+        T::SignedWord,
+        T::Pointer,
+    ],
+    variadic: false,
+};
+
+/// One narrow argument past the eighth and nothing after it —
+/// `glCopyTexSubImage3D`'s shape, and the case where a wrong width is
+/// *invisible* unless the value has bits above 32.
+unsafe extern "C" fn eight_longs_int(
+    a: i64,
+    b: i64,
+    c: i64,
+    d: i64,
+    e: i64,
+    f: i64,
+    g: i64,
+    h: i64,
+    i: i32,
+) -> i64 {
+    let regs: i64 = [a, b, c, d, e, f, g, h]
+        .iter()
+        .enumerate()
+        .map(|(n, v)| v * (n as i64 + 1))
+        .sum();
+    regs + i64::from(i) * 1_000
+}
+
+static NARROW_TAIL_4: FunctionAbi = FunctionAbi {
+    name: "eight_longs_int",
+    callbacks: &[],
+    types: &[
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedDoubleword,
+        T::SignedWord,
+    ],
+    variadic: false,
+};
+
 #[test]
-fn a_narrow_argument_past_the_eighth_is_refused_rather_than_misplaced() {
-    // Apple packs a stack argument to its own width, so an `int` ninth argument
-    // is four bytes and everything after it moves. This marshaller writes eight,
-    // so it must say so rather than call.
-    static NINE_WITH_A_NARROW_TAIL: FunctionAbi = FunctionAbi {
-        name: "nine_with_a_narrow_tail",
+fn a_narrow_argument_past_the_eighth_lands_where_apple_packs_it() {
+    let behind: i64 = 7_000_000_000;
+    let args: Vec<A> = (1..=8)
+        .map(|i| A::I(i as u64))
+        .chain([
+            // A negative ninth, so a marshaller that zero-extended instead of
+            // sign-extending is caught as well as one that misplaced it.
+            A::I(-3i64 as u64),
+            A::I(5),
+            A::P(std::ptr::addr_of!(behind).cast()),
+        ])
+        .collect();
+    let mut mem = guest_stack();
+    let mut ctx = context_for(&args, &mut mem);
+
+    assert!(
+        marshal::is_marshallable(&NARROW_TAIL_4_4_8),
+        "a four/four/eight tail has a prototype"
+    );
+    marshal::call(
+        "eight_longs_int_int_ptr",
+        &NARROW_TAIL_4_4_8,
+        eight_longs_int_int_ptr as *const () as usize as u64,
+        &mut ctx,
+        &mem as &dyn GuestMemory,
+    )
+    .expect("a narrow tail is marshallable");
+
+    let want: i64 = (1..=8).map(|i| i * i).sum::<i64>() - 3_000 + 5_000_000 + behind;
+    assert_eq!(ctx.rax as i64, want);
+}
+
+#[test]
+fn a_single_narrow_overflow_is_placed_and_extended() {
+    let args: Vec<A> = (1..=8)
+        .map(|i| A::I(i as u64))
+        // Dirty upper bits: the guest's register holds more than the `int` the
+        // callee declares, and only the low half may reach the stack slot.
+        .chain([A::I(0xdead_beef_0000_0004)])
+        .collect();
+    let mut mem = guest_stack();
+    let mut ctx = context_for(&args, &mut mem);
+
+    marshal::call(
+        "eight_longs_int",
+        &NARROW_TAIL_4,
+        eight_longs_int as *const () as usize as u64,
+        &mut ctx,
+        &mem as &dyn GuestMemory,
+    )
+    .expect("a single narrow overflow is marshallable");
+
+    let want: i64 = (1..=8).map(|i| i * i).sum::<i64>() + 4_000;
+    assert_eq!(ctx.rax as i64, want);
+}
+
+#[test]
+fn an_overflow_too_wide_to_place_is_still_refused_by_name() {
+    // Four overflowing arguments with a narrow one among them: past what
+    // `NarrowTail` enumerates, so it must refuse rather than reach for the
+    // doubleword prototype and misplace three of them.
+    static FOUR_OVER_WITH_A_NARROW: FunctionAbi = FunctionAbi {
+        name: "four_over_with_a_narrow",
         callbacks: &[],
         types: &[
             T::SignedDoubleword,
@@ -668,10 +815,13 @@ fn a_narrow_argument_past_the_eighth_is_refused_rather_than_misplaced() {
             T::SignedDoubleword,
             T::SignedDoubleword,
             T::SignedWord,
+            T::SignedDoubleword,
+            T::SignedDoubleword,
+            T::SignedDoubleword,
         ],
         variadic: false,
     };
-    assert!(!marshal::is_marshallable(&NINE_WITH_A_NARROW_TAIL));
+    assert!(!marshal::is_marshallable(&FOUR_OVER_WITH_A_NARROW));
 }
 
 #[test]

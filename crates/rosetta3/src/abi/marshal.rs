@@ -29,16 +29,39 @@
 //! "widen to sixteen".** Unlike generic AAPCS64, Apple's arm64 ABI does not
 //! round a stack argument up to eight bytes: an `int` on the stack occupies
 //! four, and the argument after it starts at `[sp+4]`. A `u64` prototype would
-//! place that next argument at `[sp+8]` instead. So an overflowing argument is
-//! only reproducible when it is *already* eight bytes wide, and
-//! [`is_marshallable`] checks exactly that rather than assuming it. Both GL
-//! entry points that need this overflow a single pointer.
+//! place that next argument at `[sp+8]` instead.
+//!
+//! ## Declaring the overflow at its real width
+//!
+//! For a while the answer was to refuse a narrow overflowing argument, on the
+//! grounds that one over-wide prototype could not place it — true of *one*
+//! prototype. What actually places a four-byte stack argument at four bytes is
+//! a prototype that says `u32`, and there is no reason the eight register slots
+//! and the stack tail have to be declared the same way. So the tail is
+//! declared at its own widths: eight `u64` for `x0`–`x7`, then one prototype
+//! per pattern of overflow widths, then the eight `f64` — which stay in
+//! `v0`–`v7` and never reach the stack, so putting them last changes nothing
+//! about where the tail lands.
+//!
+//! [`NarrowTail`] enumerates the patterns, up to three overflowing arguments of
+//! four or eight bytes each. Three is not a principle, it is where the growth
+//! was stopped: `glTexSubImage3D` and `glCompressedTexSubImage3D` overflow
+//! three, `glTexImage3D` two, `glBlitFramebuffer` two and `glCopyTexSubImage3D`
+//! one, and a texture upload is not optional in a program that draws. A tail
+//! wider than that is still refused by name.
+//!
+//! An all-doubleword tail keeps the original twelve-`u64` prototype, which
+//! reaches four rather than three — nothing about it was wrong, and
+//! `glTexImage2D` still goes through it.
 //!
 //! That reasoning is the whole safety argument, and it is also the exact list
 //! of things this cannot do:
 //!
-//! - **More than twelve integer or eight floating-point arguments**, and any
-//!   overflowing integer argument narrower than a doubleword. Refused
+//! - **More than twelve integer or eight floating-point arguments**; more than
+//!   three overflowing arguments when any of them is narrow; and a narrow
+//!   overflow at all when the *return* is floating point, since only the
+//!   integer-returning prototypes were given tails and nothing on this system
+//!   both overflows and returns a `double`. Refused
 //!   ([`AbiError::Unmarshallable`]), not guessed.
 //! - **Aggregates by value.** A struct argument or return is passed by rules
 //!   ([`x8`], splitting across registers, memory) that no scalar prototype
@@ -120,12 +143,69 @@ pub fn is_marshallable(abi: &FunctionAbi) -> bool {
     if integers.len() > MAX_INT_ARGS_TOTAL || fps > MAX_FP_ARGS {
         return false;
     }
-    // Everything the host will pass on its own stack has to be eight bytes
-    // wide, or Apple's packing puts the argument after it somewhere else.
-    integers
-        .iter()
-        .skip(MAX_INT_ARGS)
-        .all(|ty| is_doubleword(*ty))
+    // Everything the host will pass on its own stack is placed at its own
+    // width, by a prototype chosen for the pattern those widths make.
+    let ret = abi.types.first().copied().unwrap_or(ArgType::None);
+    NarrowTail::of(&integers[MAX_INT_ARGS.min(integers.len())..], is_fp(ret)).is_some()
+}
+
+/// The prototype that places a run of overflowing arguments at their own
+/// widths.
+///
+/// `None` is not "no overflow" — it is "no *narrow* overflow", which the
+/// twelve-`u64` prototype already handles. A variant here exists only where
+/// that one would put an argument in the wrong place.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum NarrowTail {
+    /// Every overflowing argument is a full doubleword: the original prototype.
+    None,
+    W4,
+    W44,
+    W48,
+    W84,
+    W444,
+    W448,
+    W484,
+    W488,
+    W844,
+    W848,
+    W884,
+}
+
+impl NarrowTail {
+    /// Which prototype places `overflow`, or `None` if nothing here can.
+    ///
+    /// `fp_return` refuses the whole question rather than answering it wrong:
+    /// the tail prototypes below all return an integer, and a signature that
+    /// both overflows and returns a `double` would silently take the
+    /// doubleword-only path.
+    fn of(overflow: &[ArgType], fp_return: bool) -> Option<Self> {
+        if overflow.iter().all(|ty| is_doubleword(*ty)) {
+            return Some(NarrowTail::None);
+        }
+        if fp_return {
+            return None;
+        }
+        match overflow
+            .iter()
+            .map(|ty| if is_doubleword(*ty) { 8u8 } else { 4 })
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            [4] => Some(NarrowTail::W4),
+            [4, 4] => Some(NarrowTail::W44),
+            [4, 8] => Some(NarrowTail::W48),
+            [8, 4] => Some(NarrowTail::W84),
+            [4, 4, 4] => Some(NarrowTail::W444),
+            [4, 4, 8] => Some(NarrowTail::W448),
+            [4, 8, 4] => Some(NarrowTail::W484),
+            [4, 8, 8] => Some(NarrowTail::W488),
+            [8, 4, 4] => Some(NarrowTail::W844),
+            [8, 4, 8] => Some(NarrowTail::W848),
+            [8, 8, 4] => Some(NarrowTail::W884),
+            _ => None,
+        }
+    }
 }
 
 /// Call `host` with the arguments `ctx` holds, and write the result back.
@@ -245,6 +325,10 @@ pub fn call_types(
     let mut ints = [0u64; MAX_INT_ARGS_TOTAL];
     let mut fps = [0f64; MAX_FP_ARGS];
     let (mut n_int, mut n_fp) = (0usize, 0usize);
+    // The integer arguments past the eighth, in order. Their widths decide
+    // where each of them lands on the host's stack, and so which prototype
+    // makes the call.
+    let mut overflow: Vec<ArgType> = Vec::new();
 
     for (index, (ty, loc)) in placed.iter().enumerate() {
         // A pointer that means something different on the far side — a guest
@@ -269,13 +353,8 @@ pub fn call_types(
                     reason: "more than twelve integer arguments",
                 });
             }
-            if n_int >= MAX_INT_ARGS && !is_doubleword(*ty) {
-                // Apple packs a narrow argument into four stack bytes and this
-                // prototype would give it eight, moving everything after it.
-                return Err(AbiError::Unmarshallable {
-                    symbol: symbol.to_string(),
-                    reason: "an integer argument past the eighth is narrower than a doubleword",
-                });
+            if n_int >= MAX_INT_ARGS {
+                overflow.push(*ty);
             }
             ints[n_int] = int_arg(*ty, raw);
             n_int += 1;
@@ -283,6 +362,13 @@ pub fn call_types(
     }
 
     let ret = types.first().copied().unwrap_or(ArgType::None);
+    // Chosen after every argument is read and before anything is called, so a
+    // signature whose tail no prototype places costs a named refusal with the
+    // guest context untouched.
+    let tail = NarrowTail::of(&overflow, is_fp(ret)).ok_or_else(|| AbiError::Unmarshallable {
+        symbol: symbol.to_string(),
+        reason: "no prototype places this signature's overflowing arguments",
+    })?;
     match ret {
         // SAFETY: `host` is a host function address a `SymbolProvider` resolved
         // via `dlsym`, i.e. a real native arm64 C function. The prototypes below
@@ -302,10 +388,10 @@ pub fn call_types(
             ctx.xmm[0] = [v.to_bits(), 0];
         }
         ArgType::None => {
-            unsafe { call_int(host, &ints, &fps) };
+            unsafe { call_int_tail(host, &ints, &fps, tail) };
         }
         _ => {
-            let v = unsafe { call_int(host, &ints, &fps) };
+            let v = unsafe { call_int_tail(host, &ints, &fps, tail) };
             ctx.rax = int_ret(ret, convert.result(v));
         }
     }
@@ -486,6 +572,82 @@ macro_rules! call_through {
             $v[0], $v[1], $v[2], $v[3], $v[4], $v[5], $v[6], $v[7],
         )
     };
+}
+
+/// One prototype per overflow-width pattern.
+///
+/// Eight `u64` fill `x0`–`x7`; the tail types are what AAPCS64 then places on
+/// the stack, each at its own width and alignment; the eight `f64` occupy
+/// `v0`–`v7` and never reach the stack, which is why declaring them after the
+/// tail does not move it. See the module note.
+macro_rules! narrow_tail_call {
+    ($name:ident, $(($t:ty, $at:expr)),+) => {
+        /// # Safety
+        /// `host` must be a native C function whose overflowing arguments have
+        /// exactly the widths this variant names, returning an integer, a
+        /// pointer or nothing.
+        unsafe fn $name(
+            host: u64,
+            ints: &[u64; MAX_INT_ARGS_TOTAL],
+            fps: &[f64; MAX_FP_ARGS],
+        ) -> u64 {
+            type F = unsafe extern "C" fn(
+                u64, u64, u64, u64, u64, u64, u64, u64,
+                $($t),+,
+                f64, f64, f64, f64, f64, f64, f64, f64,
+            ) -> u64;
+            let f: F = unsafe { core::mem::transmute(host as usize as *const ()) };
+            unsafe {
+                f(
+                    ints[0], ints[1], ints[2], ints[3],
+                    ints[4], ints[5], ints[6], ints[7],
+                    $(ints[$at] as $t),+,
+                    fps[0], fps[1], fps[2], fps[3],
+                    fps[4], fps[5], fps[6], fps[7],
+                )
+            }
+        }
+    };
+}
+
+narrow_tail_call!(call_w4, (u32, 8));
+narrow_tail_call!(call_w44, (u32, 8), (u32, 9));
+narrow_tail_call!(call_w48, (u32, 8), (u64, 9));
+narrow_tail_call!(call_w84, (u64, 8), (u32, 9));
+narrow_tail_call!(call_w444, (u32, 8), (u32, 9), (u32, 10));
+narrow_tail_call!(call_w448, (u32, 8), (u32, 9), (u64, 10));
+narrow_tail_call!(call_w484, (u32, 8), (u64, 9), (u32, 10));
+narrow_tail_call!(call_w488, (u32, 8), (u64, 9), (u64, 10));
+narrow_tail_call!(call_w844, (u64, 8), (u32, 9), (u32, 10));
+narrow_tail_call!(call_w848, (u64, 8), (u32, 9), (u64, 10));
+narrow_tail_call!(call_w884, (u64, 8), (u64, 9), (u32, 10));
+
+/// Call `host` through whichever prototype places its overflowing arguments.
+///
+/// # Safety
+/// As [`call_int`], plus: `tail` must describe `host`'s real overflow widths.
+unsafe fn call_int_tail(
+    host: u64,
+    ints: &[u64; MAX_INT_ARGS_TOTAL],
+    fps: &[f64; MAX_FP_ARGS],
+    tail: NarrowTail,
+) -> u64 {
+    unsafe {
+        match tail {
+            NarrowTail::None => call_int(host, ints, fps),
+            NarrowTail::W4 => call_w4(host, ints, fps),
+            NarrowTail::W44 => call_w44(host, ints, fps),
+            NarrowTail::W48 => call_w48(host, ints, fps),
+            NarrowTail::W84 => call_w84(host, ints, fps),
+            NarrowTail::W444 => call_w444(host, ints, fps),
+            NarrowTail::W448 => call_w448(host, ints, fps),
+            NarrowTail::W484 => call_w484(host, ints, fps),
+            NarrowTail::W488 => call_w488(host, ints, fps),
+            NarrowTail::W844 => call_w844(host, ints, fps),
+            NarrowTail::W848 => call_w848(host, ints, fps),
+            NarrowTail::W884 => call_w884(host, ints, fps),
+        }
+    }
 }
 
 /// # Safety
@@ -775,14 +937,20 @@ pub fn call_shapes(
     let mut fps = [0f64; MAX_FP_ARGS];
     let (mut n_int, mut n_fp) = (0usize, 0usize);
 
-    let mut push_int = |v: u64, ty: ArgType, n_int: &mut usize| -> Result<()> {
+    // As in [`call_types`]: the integer arguments past the eighth decide which
+    // prototype places them. An Objective-C method reaches this — a selector
+    // with enough parameters is not rare, and one of Unity's is what found it.
+    let mut overflow: Vec<ArgType> = Vec::new();
+    let mut push_int = |v: u64,
+                        ty: ArgType,
+                        n_int: &mut usize,
+                        overflow: &mut Vec<ArgType>|
+     -> Result<()> {
         if *n_int == MAX_INT_ARGS_TOTAL {
             return Err(unmarshallable("more than twelve integer arguments"));
         }
-        if *n_int >= MAX_INT_ARGS && !is_doubleword(ty) {
-            return Err(unmarshallable(
-                "an integer argument past the eighth is narrower than a doubleword",
-            ));
+        if *n_int >= MAX_INT_ARGS {
+            overflow.push(ty);
         }
         ints[*n_int] = v;
         *n_int += 1;
@@ -803,7 +971,7 @@ pub fn call_shapes(
                     fps[n_fp] = fp_arg(*ty, raw);
                     n_fp += 1;
                 } else {
-                    push_int(int_arg(*ty, raw), *ty, &mut n_int)?;
+                    push_int(int_arg(*ty, raw), *ty, &mut n_int, &mut overflow)?;
                 }
             }
             Shape::Struct(agg) => {
@@ -822,7 +990,12 @@ pub fn call_shapes(
                     HostClass::Integer { words } => {
                         for i in 0..words {
                             let w = leaf_bits(&bytes, i * 8, 8);
-                            push_int(w, ArgType::UnsignedDoubleword, &mut n_int)?;
+                            push_int(
+                                w,
+                                ArgType::UnsignedDoubleword,
+                                &mut n_int,
+                                &mut overflow,
+                            )?;
                         }
                     }
                     HostClass::Indirect => {
@@ -835,8 +1008,18 @@ pub fn call_shapes(
         }
     }
 
+    // Only the integer-returning prototypes were given tails, so a narrow
+    // overflow is refused for anything else — an aggregate return included,
+    // since those go through their own prototypes and would silently take the
+    // doubleword one.
+    let plain_integer_return =
+        ret_host.is_none() && !matches!(ret.scalar(), Some(t) if aggregate::is_fp(t));
+    let tail = NarrowTail::of(&overflow, !plain_integer_return).ok_or_else(|| {
+        unmarshallable("no prototype places this signature's overflowing arguments")
+    })?;
+
     // Everything that can fail has failed by here.
-    let (out, scalar_ret) = call_returning(host, &ints, &fps, ret_host, &ret);
+    let (out, scalar_ret) = call_returning(host, &ints, &fps, ret_host, &ret, tail);
     write_return(ctx, mem, symbol, &ret, sret, &out, scalar_ret, convert)
 }
 
@@ -851,6 +1034,7 @@ fn call_returning(
     fps: &[f64; MAX_FP_ARGS],
     ret_host: Option<HostClass>,
     ret: &Shape,
+    tail: NarrowTail,
 ) -> (Vec<u8>, u64) {
     // SAFETY: `host` is a native arm64 C function — a `dlsym` result or an
     // Objective-C `IMP` the host runtime owns. The prototypes are wider than
@@ -868,7 +1052,7 @@ fn call_returning(
                 Some(ArgType::DoublePrecisionFp) => {
                     (Vec::new(), call_f64(host, ints, fps).to_bits())
                 }
-                _ => (Vec::new(), call_int(host, ints, fps)),
+                _ => (Vec::new(), call_int_tail(host, ints, fps, tail)),
             },
             Some(HostClass::Hfa { ty, count }) => {
                 let width = aggregate::width_of(ty);
