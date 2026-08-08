@@ -54,10 +54,9 @@
 //! their frames exactly as two nested calls sharing one *offset* would, and with
 //! as little to report about it afterwards.
 
-use std::collections::BTreeSet;
 use std::fmt;
 use std::ops::Range;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use machish::memory::{MmapSpace, Regions};
@@ -330,6 +329,20 @@ pub const MAX_DEPTH: usize = 64;
 /// a fault. It is not a guarantee. Results are cached per page, because
 /// `read_cstr` walks a byte at a time.
 ///
+/// ## Why the page cache is not a set behind a lock
+///
+/// It was, and `read_cstr`'s byte-at-a-time walk is what made that untenable:
+/// a `char *` on a spawned thread's stack is outside the region list, so every
+/// single byte of it took a process-wide mutex to ask whether its page had been
+/// probed before. What replaced it is a fixed direct-mapped table of atomics —
+/// one relaxed load to answer, one relaxed store to record — and the race it
+/// permits is the only one worth having: two threads may probe the same page
+/// twice, and `msync` is idempotent.
+///
+/// A colliding page evicts the previous occupant and is re-probed next time, so
+/// the table is a cache in the strict sense: correct when it hits, correct when
+/// it misses, and never consulted for anything but speed.
+///
 /// ## What is *not* in the region list
 ///
 /// The stacks of threads the guest spawned. Those are reserved per thread as
@@ -341,7 +354,44 @@ pub const MAX_DEPTH: usize = 64;
 #[derive(Clone)]
 pub struct GuestView {
     regions: Arc<Vec<Range<u64>>>,
-    mapped: Arc<Mutex<BTreeSet<u64>>>,
+    mapped: Arc<PageCache>,
+}
+
+/// Pages [`GuestView`] has already probed, direct-mapped and lock-free.
+///
+/// A zero slot is empty: page zero is never mapped, so it doubles as the
+/// vacancy marker without a second word.
+pub struct PageCache {
+    slots: Box<[std::sync::atomic::AtomicU64]>,
+}
+
+/// How many probed pages are remembered. A power of two, so the index is a mask.
+const PAGES: usize = 4096;
+
+impl PageCache {
+    fn new() -> Self {
+        PageCache {
+            slots: (0..PAGES)
+                .map(|_| std::sync::atomic::AtomicU64::new(0))
+                .collect(),
+        }
+    }
+
+    /// The slot a page-aligned address maps to. Shifted past the page offset
+    /// first, which is all zeros and would leave most of the table empty.
+    fn slot(page: u64) -> usize {
+        (page >> 12) as usize & (PAGES - 1)
+    }
+
+    /// Whether `page` is known to be mapped.
+    fn known(&self, page: u64) -> bool {
+        self.slots[Self::slot(page)].load(Ordering::Relaxed) == page
+    }
+
+    /// Record that it is.
+    fn remember(&self, page: u64) {
+        self.slots[Self::slot(page)].store(page, Ordering::Relaxed);
+    }
 }
 
 impl GuestView {
@@ -349,7 +399,7 @@ impl GuestView {
     pub fn new(regions: Vec<Range<u64>>) -> Self {
         GuestView {
             regions: Arc::new(regions),
-            mapped: Arc::new(Mutex::new(BTreeSet::new())),
+            mapped: Arc::new(PageCache::new()),
         }
     }
 
@@ -376,19 +426,11 @@ impl GuestView {
         let page = machish::memory::host_page_size();
         let mut at = va & !(page - 1);
         while at < end {
-            let known = self
-                .mapped
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains(&at);
-            if !known {
+            if !self.mapped.known(at) {
                 if !page_is_mapped(at, page) {
                     return false;
                 }
-                self.mapped
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(at);
+                self.mapped.remember(at);
             }
             at += page;
         }
@@ -465,6 +507,20 @@ pub struct Vm {
     pub program: SharedProgram,
     cache: Mutex<CodeCache>,
     thunks: Mutex<ThunkTable>,
+    /// The published, immutable half of `thunks` — see [`crate::thunk::ThunkView`].
+    ///
+    /// A leaked snapshot behind an `AtomicPtr`, swapped whole, exactly as
+    /// `objc` below is and for the same reason: the question it answers is
+    /// asked at every indirect call the guest makes, and asking it behind the
+    /// mutex made every guest thread queue for the answer "no".
+    thunk_view: AtomicPtr<crate::thunk::ThunkView>,
+    /// How many thunks exist, readable without the lock.
+    ///
+    /// Stored *after* `thunk_view`, under the same lock, so a reader that finds
+    /// the two equal knows its miss covers everything published. See
+    /// [`crate::thunk::ThunkView`] on why a stale miss is not acceptable here
+    /// when a stale translation is.
+    thunk_count: AtomicUsize,
     view: GuestView,
     /// The guest's Objective-C classes, once realized in the host runtime.
     ///
@@ -600,6 +656,8 @@ impl Vm {
             program: SharedProgram(program),
             cache: Mutex::new(cache),
             thunks: Mutex::new(ThunkTable::new()),
+            thunk_view: AtomicPtr::new(core::ptr::null_mut()),
+            thunk_count: AtomicUsize::new(0),
             view: GuestView::new(ranges),
             objc: AtomicPtr::new(core::ptr::null_mut()),
             objc_registration: Mutex::new(()),
@@ -934,24 +992,36 @@ impl Vm {
                 continue;
             }
 
-            // The lock is taken to look up or lift and released before guest
-            // code runs, which is what keeps a callback re-entering the VM on
-            // this same thread from deadlocking against its own caller.
-            let translation = self
-                .cache
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get_or_lift(&self.program, pc)
-                .map_err(|e| match e {
-                    VmError::NoCode { pc, from: None } => VmError::NoCode {
-                        pc,
-                        from: from.map(|mut t| {
-                            t.at = self.program.locate(t.pc);
-                            t
-                        }),
-                    },
-                    other => other,
-                })?;
+            // This thread's own answer first, which is the whole hot path: a
+            // PC it has already run needs no lock, no map walk and no
+            // comparison chain. See [`crate::thread::CodeWindow`] for why a
+            // remembered translation cannot go stale.
+            let translation = match state.code().get(pc) {
+                Some(hit) => hit,
+                None => {
+                    // The lock is taken to look up or lift and released before
+                    // guest code runs, which is what keeps a callback
+                    // re-entering the VM on this same thread from deadlocking
+                    // against its own caller.
+                    let lifted = self
+                        .cache
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get_or_lift(&self.program, pc)
+                        .map_err(|e| match e {
+                            VmError::NoCode { pc, from: None } => VmError::NoCode {
+                                pc,
+                                from: from.map(|mut t| {
+                                    t.at = self.program.locate(t.pc);
+                                    t
+                                }),
+                            },
+                            other => other,
+                        })?;
+                    state.code().put(pc, &lifted);
+                    lifted
+                }
+            };
             ctx.rip = pc;
             let exit = translation.enter(ctx);
             state.rsp.set(ctx.rsp);
@@ -1265,12 +1335,7 @@ impl Vm {
         // One of our own thunks, handed out earlier and now called by the guest
         // through a variable. Calling it would be correct and absurd — out to
         // arm64 and straight back in — so the wrapper is unwrapped.
-        let target = self
-            .thunks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .guest_for(callee)
-            .unwrap_or(callee);
+        let target = self.guest_behind_thunk(callee).unwrap_or(callee);
 
         if self.program.is_guest_address(target) {
             // Stand in for the `CALL` microlift declined to perform.
@@ -1342,20 +1407,11 @@ impl Vm {
         guest_va: u64,
         signature: crate::thunk::ThunkSignature,
     ) -> Result<u64, VmError> {
-        if let Some(existing) = self
-            .thunks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .host_for(guest_va)
-        {
+        if let Some(existing) = self.host_thunk_for(guest_va) {
             return Ok(existing);
         }
         let thunk = crate::thunk::build_typed(guest_va, signature)?;
-        let host = self
-            .thunks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(thunk);
+        let host = self.insert_thunk(thunk);
         // As in `thunk_for`: handing the pointer out is the demand signal.
         let _ = self
             .cache
@@ -1366,20 +1422,11 @@ impl Vm {
     }
 
     pub fn thunk_for(&self, guest_va: u64) -> Result<u64, VmError> {
-        if let Some(existing) = self
-            .thunks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .host_for(guest_va)
-        {
+        if let Some(existing) = self.host_thunk_for(guest_va) {
             return Ok(existing);
         }
         let thunk = crate::thunk::build(guest_va)?;
-        let host = self
-            .thunks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(thunk);
+        let host = self.insert_thunk(thunk);
 
         // Translate the callback now, while translating is possible.
         //
@@ -1407,10 +1454,60 @@ impl Vm {
 
     /// Whether `va` is a thunk this VM handed out.
     pub fn guest_behind_thunk(&self, va: u64) -> Option<u64> {
-        self.thunks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .guest_for(va)
+        self.ask_thunks(|view| view.guest_for(va), |table| table.guest_for(va))
+    }
+
+    /// The thunk already built for a guest address, if there is one.
+    fn host_thunk_for(&self, guest_va: u64) -> Option<u64> {
+        self.ask_thunks(
+            |view| view.host_for(guest_va),
+            |table| table.host_for(guest_va),
+        )
+    }
+
+    /// Ask the published snapshot, and fall back to the lock only when a miss
+    /// might be stale.
+    ///
+    /// The published half is what every indirect call consults; see
+    /// [`crate::thunk::ThunkView`] for why a miss cannot simply be believed.
+    /// `count` is loaded *after* the snapshot, so an insert that lands between
+    /// the two shows up as a disagreement and sends this one caller to the lock
+    /// rather than being missed.
+    fn ask_thunks(
+        &self,
+        from_view: impl Fn(&crate::thunk::ThunkView) -> Option<u64>,
+        from_table: impl Fn(&ThunkTable) -> Option<u64>,
+    ) -> Option<u64> {
+        let published = self.thunk_view.load(Ordering::Acquire);
+        if !published.is_null() {
+            // SAFETY: the pointer was leaked by `publish_thunks` and is never
+            // freed, so it stays valid for the life of the process.
+            let view = unsafe { &*published };
+            if let Some(hit) = from_view(view) {
+                return Some(hit);
+            }
+            if view.count == self.thunk_count.load(Ordering::Acquire) {
+                return None;
+            }
+        } else if self.thunk_count.load(Ordering::Acquire) == 0 {
+            // Nothing has ever crossed outward, which is the whole answer for a
+            // program that hands the host no function pointers at all.
+            return None;
+        }
+        from_table(&self.thunks.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Add a thunk and republish the snapshot, both under the one lock.
+    fn insert_thunk(&self, thunk: crate::thunk::Thunk) -> u64 {
+        let mut table = self.thunks.lock().unwrap_or_else(|e| e.into_inner());
+        let host = table.insert(thunk);
+        let view = Box::leak(Box::new(table.view()));
+        let count = view.count;
+        self.thunk_view.store(view, Ordering::Release);
+        // After the view, so a reader that sees this count has already had the
+        // chance to see the view that produced it.
+        self.thunk_count.store(count, Ordering::Release);
+        host
     }
 
     /// Record an error raised inside a host→guest callback, on the thread it

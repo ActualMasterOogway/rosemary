@@ -169,11 +169,73 @@ impl ThunkTable {
         self.by_guest.insert(guest, thunk);
         host
     }
+
+    /// A snapshot of both directions, for [`ThunkView`].
+    pub fn view(&self) -> ThunkView {
+        ThunkView {
+            by_guest: self.by_guest.iter().map(|(g, t)| (*g, t.host)).collect(),
+            by_host: self.by_host.iter().map(|(h, g)| (*h, *g)).collect(),
+            count: self.by_guest.len(),
+        }
+    }
 }
 
 impl Default for ThunkTable {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The read-only half of a [`ThunkTable`], published for lookups that must not
+/// take a lock.
+///
+/// ## Why the lookups could not stay behind the mutex
+///
+/// [`crate::vm::Vm::dispatch_indirect`] asks "is this callee one of ours?" at
+/// **every indirect call** a guest makes, and a C++ program dispatches through
+/// a vtable constantly. Asking behind a mutex means every guest thread queues
+/// up at one lock to be told "no" — which is the answer nearly every time, since
+/// the table holds the handful of pointers that have crossed *outward*, not the
+/// thousands of ordinary function pointers a program calls through.
+///
+/// So this is [`crate::dyld`]'s pattern, applied one layer up: an immutable
+/// snapshot, leaked, published behind an atomic pointer, and rebuilt whole on
+/// the rare occasion a thunk is created. Sorted vectors rather than maps —
+/// the table is small, a binary search over contiguous pairs beats a tree walk,
+/// and building one is a linear pass under a lock nobody is waiting on.
+///
+/// ## Why a miss still has to be checked
+///
+/// A stale snapshot answers "no" for a thunk another thread created a moment
+/// ago, and unlike a code translation that answer is not merely older — it is
+/// wrong, because unwrapping a thunk is what keeps a guest pointer comparing
+/// equal to itself. So `count` records how many thunks the snapshot was built
+/// from, and a caller that misses compares it against the live count
+/// ([`crate::vm::Vm::thunk_count`]): equal means the miss is authoritative,
+/// and anything else sends that one caller to the lock.
+pub struct ThunkView {
+    by_guest: Vec<(u64, u64)>,
+    by_host: Vec<(u64, u64)>,
+    /// How many thunks existed when this was built.
+    pub count: usize,
+}
+
+impl ThunkView {
+    /// The thunk for a guest address, if this snapshot has one.
+    pub fn host_for(&self, guest: u64) -> Option<u64> {
+        Self::find(&self.by_guest, guest)
+    }
+
+    /// The guest address behind a thunk, if this snapshot knows it.
+    pub fn guest_for(&self, host: u64) -> Option<u64> {
+        Self::find(&self.by_host, host)
+    }
+
+    fn find(pairs: &[(u64, u64)], key: u64) -> Option<u64> {
+        pairs
+            .binary_search_by_key(&key, |(k, _)| *k)
+            .ok()
+            .map(|i| pairs[i].1)
     }
 }
 

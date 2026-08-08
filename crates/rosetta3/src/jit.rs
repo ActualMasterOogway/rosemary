@@ -123,12 +123,14 @@ impl OptLevel {
             OptLevel::Speed | OptLevel::All => {
                 // Disabled for now because we prefer finding correctness issues even when running on all optimizations
                 // as we improve Microlift incrementally.
-                // builder.set("enable_verifier", "false").expect("couldn't disable verifier");
+                builder.set("enable_verifier", "false").expect("couldn't disable verifier");
                 // We don't process this, so enabling it just wastes cycles.
                 builder.set("machine_code_cfg_info", "false").expect("failed to turn off machine code cfg info");
                 // These aren't necessary since the guest shares our entire address space anyway.
                 builder.set("enable_heap_access_spectre_mitigation", "false").expect("failed to turn off heap access pass");
                 builder.set("enable_table_access_spectre_mitigation", "false").expect("failed to turn off table access pass");
+                // builder.set("enable_alias_analysis", "true").expect("couldn't enable alias analysis");
+                // builder.set("regalloc_algorithm", "backtracking").expect("couldn't enable alias analysis");
             }
             OptLevel::None => {}
         };

@@ -180,7 +180,10 @@ pub extern "C" fn bootstrap(descriptor: *const u8) -> *mut u8 {
         let slots = SLOTS.lock().unwrap_or_else(|e| e.into_inner());
         match slots.get(&at) {
             Some(slot) => (slot.image, slot.offset),
-            None => return std::ptr::null_mut(),
+            None => {
+                say_unregistered(at);
+                return std::ptr::null_mut();
+            }
         }
     };
 
@@ -197,6 +200,26 @@ pub extern "C" fn bootstrap(descriptor: *const u8) -> *mut u8 {
         // the block was allocated with exactly that many bytes.
         unsafe { block.ptr.add(offset as usize) }
     })
+}
+
+/// Name a descriptor this runtime has no block for, once each.
+///
+/// Null is the only value a C ABI with no error channel can return, and the
+/// guest's very next instruction dereferences it — so without this the failure
+/// arrives as a segfault inside guest code with nothing anywhere naming a
+/// thread-local. Which is how it did arrive: an image loaded after start-up has
+/// its own `__thread_vars`, and a `_Thread_local` in it reads as address zero.
+fn say_unregistered(at: u64) {
+    static SAID: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    if said.contains(&at) {
+        return;
+    }
+    said.push(at);
+    eprintln!(
+        "rosetta3: __tlv_bootstrap({at:#x}): no thread-local registered at that descriptor \
+         — the guest will read address zero"
+    );
 }
 
 /// A zeroed block for `image`, with its initialised prefix copied in.

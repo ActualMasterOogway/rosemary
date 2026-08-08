@@ -1113,23 +1113,49 @@ fn remember_native_symbol(addr: u64, name: &str, library: Option<String>) -> u64
         }))
     });
     if map.len() != before {
-        // After the insert, and while the lock is still held: a reader that
-        // sees a non-zero count must find the entry that made it non-zero.
+        // Publish the snapshot first, then the count, and both while the lock
+        // is still held: a reader that sees a non-zero count must find the
+        // entry that made it non-zero, in a view that is already visible.
+        let view: Vec<(u64, &'static ImportSite)> = map.iter().map(|(a, s)| (*a, *s)).collect();
+        NATIVE_SYMBOL_VIEW.store(Box::leak(Box::new(view)), Ordering::Release);
         NATIVE_SYMBOL_COUNT.store(map.len(), Ordering::Release);
     }
     addr
 }
+
+/// The published, immutable half of [`NATIVE_SYMBOLS`]: a leaked, sorted slice
+/// of `(address, site)`, swapped whole.
+///
+/// The count above kept the lock off this path only while the map was *empty*,
+/// which is most programs and is not Starbound: it `dlsym`s Steam's client
+/// library, and from that moment every region entry took a process-wide mutex
+/// to be told the address is not one of the half-dozen entries. The map is
+/// written a handful of times in a process's life and read millions, which is
+/// exactly the shape [`VIEW`] already has.
+static NATIVE_SYMBOL_VIEW: AtomicPtr<Vec<(u64, &'static ImportSite)>> =
+    AtomicPtr::new(core::ptr::null_mut());
 
 /// The import site for a host address the guest got from `dlsym`, if any.
 pub fn native_symbol_at(host: u64) -> Option<&'static ImportSite> {
     if NATIVE_SYMBOL_COUNT.load(Ordering::Acquire) == 0 {
         return None;
     }
-    NATIVE_SYMBOLS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&host)
-        .copied()
+    let published = NATIVE_SYMBOL_VIEW.load(Ordering::Acquire);
+    if published.is_null() {
+        return None;
+    }
+    // SAFETY: leaked by `remember_native_symbol` and never freed, so the slice
+    // stays valid for the life of the process — the same claim `VIEW` makes.
+    //
+    // A snapshot one `dlsym` behind can miss a site another thread has just
+    // recorded, and unlike a thunk that is harmless: the caller falls through to
+    // `UnknownIndirectCall`, which is what it would have got a microsecond
+    // earlier anyway, and the guest cannot have the address yet — `dlsym` has
+    // not returned it.
+    let view = unsafe { &*published };
+    view.binary_search_by_key(&host, |(a, _)| *a)
+        .ok()
+        .map(|i| view[i].1)
 }
 
 // ------------------------------------------------------- image notices ------

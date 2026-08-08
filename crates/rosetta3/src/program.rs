@@ -12,6 +12,7 @@ use machish::spec::arch::X86_64;
 
 use microlift::arch::x86_64::context::RegisterContext;
 use microlift::core::exit::MemorySegment;
+use microlift::core::specialize::Specialization;
 use microlift::core::{AddressMode, Atomic128Mode, LifterConfig};
 
 use crate::abi::{AbiError, Classification, FunctionAbi, Lookup};
@@ -517,6 +518,7 @@ impl<M: Regions> Program<M> {
             outline_helpers: true,
             address_mode: AddressMode::Direct,
             atomic128,
+            specialization: Specialization::host(),
             ..LifterConfig::default()
         };
 

@@ -66,6 +66,7 @@ pub fn run_initializers(vm: &Vm) -> Result<usize, VmError> {
 /// so a guest returning `-1` reports 255 here exactly as it would have to the
 /// shell.
 pub fn run(vm: &Vm) -> Result<i32, VmError> {
+    say_image_map(vm);
     // Before any guest code, as dyld does it: `libobjc` realizes an image's
     // classes when the image is mapped, which is strictly before that image's
     // initializers run. A constructor may reference a class, and a `+load` --
@@ -82,4 +83,32 @@ pub fn run(vm: &Vm) -> Result<i32, VmError> {
     let (argc, argv, envp, apple) = vm.main_args();
     let status = vm.call(entry, &[argc, argv, envp, apple])?;
     Ok((status & 0xff) as i32)
+}
+
+/// Where each image ended up, under `ROSETTA3_TRACE_VM`.
+///
+/// Every guest address this runtime reports is slid by whatever `mmap` chose
+/// that run, and a fault inside guest code is reported by a debugger — or by
+/// the guest's own crash handler — as a bare number. This is the table that
+/// turns one back into `image+offset`, printed before any guest code runs so
+/// it is above whatever the failure prints.
+fn say_image_map(vm: &Vm) {
+    if !crate::shims::vmmap::tracing() {
+        return;
+    }
+    for image in &vm.program.report.images {
+        for seg in &image.segments {
+            if seg.vmsize == 0 {
+                continue;
+            }
+            eprintln!(
+                "rosetta3: image {:#x}..{:#x} {} {} (slide {:#x})",
+                seg.vmaddr,
+                seg.vmaddr.wrapping_add(seg.vmsize),
+                seg.name,
+                image.name.rsplit('/').next().unwrap_or(&image.name),
+                image.slide,
+            );
+        }
+    }
 }

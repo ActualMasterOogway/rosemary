@@ -105,6 +105,9 @@ pub struct ThreadState {
     /// one this frame began", which is only answerable by remembering the order
     /// they began in.
     caught: RefCell<Vec<u64>>,
+    /// Translations this thread has already entered, by the PC it entered them
+    /// at. See [`CodeWindow`].
+    code: CodeWindow,
 }
 
 impl ThreadState {
@@ -121,7 +124,13 @@ impl ThreadState {
             entered_by_jump: Cell::new(false),
             unwinding: Cell::new(None),
             caught: RefCell::new(Vec::new()),
+            code: CodeWindow::new(),
         }
+    }
+
+    /// This thread's view of the code cache.
+    pub(crate) fn code(&self) -> &CodeWindow {
+        &self.code
     }
 
     /// The entry into guest code currently live on this thread, or zero when
@@ -208,6 +217,96 @@ impl ThreadState {
     /// The address range this thread's guest stack occupies.
     pub fn stack_range(&self) -> Range<u64> {
         self.stack.range()
+    }
+}
+
+/// One thread's window onto the code cache: the translations it has entered,
+/// keyed by the PC it entered them at.
+///
+/// ## Why the shared cache needed one in front of it
+///
+/// [`crate::cache::CodeCache`] lives behind a mutex, and the run loop asked it
+/// for a translation **on every region entry** — which is the most frequent
+/// thing this runtime does. Two costs came out of that, and a profile of
+/// Starbound showed both: the main thread spent a quarter of its samples inside
+/// the lookup itself (a `BTreeMap` walk down to `pc`, then a `covers` test per
+/// candidate), and a second guest thread spent *every* sample parked in
+/// `__psynch_mutexwait`, because one lock in front of every region entry makes
+/// a multi-threaded guest single-threaded.
+///
+/// So each thread keeps its own answers. A hit takes no lock, no comparison
+/// chain and no allocation — one mask, one load, one address compare — and the
+/// shared cache is consulted only when this thread has not run that PC before.
+///
+/// ## Why a stale entry is not a stale answer
+///
+/// The window is never invalidated, and it does not need to be, for the reason
+/// the cache itself is never invalidated: **guest code is assumed immutable**
+/// (see [`crate::cache`]). A translation that could be entered at `pc` once can
+/// be entered at `pc` forever. The shared cache may later lift a *different*
+/// translation covering the same address — regions overlap — and entering
+/// either is correct, so the two answers are interchangeable rather than one
+/// being fresher.
+///
+/// The `Arc` is what makes that literally true rather than nearly: a region
+/// re-lifted at a key that already had one *replaces* it in the shared map, and
+/// the strong reference held here keeps the old code mapped for as long as this
+/// thread might enter it.
+///
+/// ## Direct-mapped, and deliberately not more
+///
+/// One slot per index, no chaining, no eviction policy: a colliding PC simply
+/// takes the slot. Sizing it a few times larger than the working set makes
+/// collisions rare, and a collision costs exactly one trip to the shared cache
+/// — the thing that used to happen every time. Anything cleverer would be
+/// paying for a hit rate that is already in the high nineties, on the path
+/// where nothing may be paid for.
+pub(crate) struct CodeWindow {
+    slots: RefCell<Box<[Option<(u64, std::sync::Arc<crate::cache::Translation>)>]>>,
+}
+
+/// How many PCs one thread remembers. A power of two, so the index is a mask.
+///
+/// 8192 slots is 128 KiB of pointers per guest thread, against a warm working
+/// set that Starbound measures in the low thousands of regions.
+const WINDOW: usize = 8192;
+
+impl CodeWindow {
+    fn new() -> Self {
+        CodeWindow {
+            slots: RefCell::new(vec![None; WINDOW].into_boxed_slice()),
+        }
+    }
+
+    /// The slot a PC maps to.
+    ///
+    /// The low four bits are dropped before masking: guest functions are
+    /// aligned, so those bits are the least distinguishing ones an address has,
+    /// and using them would leave most of the table empty.
+    fn slot(pc: u64) -> usize {
+        (pc >> 4) as usize & (WINDOW - 1)
+    }
+
+    /// The translation this thread last entered at `pc`, if it still holds one.
+    pub(crate) fn get(&self, pc: u64) -> Option<std::sync::Arc<crate::cache::Translation>> {
+        match self.slots.borrow().get(Self::slot(pc)) {
+            Some(Some((at, translation))) if *at == pc => Some(std::sync::Arc::clone(translation)),
+            _ => None,
+        }
+    }
+
+    /// Remember that `translation` may be entered at `pc`.
+    pub(crate) fn put(&self, pc: u64, translation: &std::sync::Arc<crate::cache::Translation>) {
+        let slot = Self::slot(pc);
+        // `try_borrow_mut` rather than `borrow_mut`: this is reached from the
+        // run loop, and the run loop is re-entrant — a guest callback runs
+        // another one inside the first. Nothing here is `&mut` across a call
+        // into guest code, so a live borrow cannot actually overlap; refusing
+        // to record rather than panicking is the honest way to say that this is
+        // a cache and skipping it costs nothing.
+        if let Ok(mut slots) = self.slots.try_borrow_mut() {
+            slots[slot] = Some((pc, std::sync::Arc::clone(translation)));
+        }
     }
 }
 
