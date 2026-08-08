@@ -624,9 +624,8 @@ type F32Fn = unsafe extern "C" fn(
 macro_rules! call_through {
     ($f:expr, $i:expr, $v:expr) => {
         $f(
-            $i[0], $i[1], $i[2], $i[3], $i[4], $i[5], $i[6], $i[7], $i[8], $i[9], $i[10],
-            $i[11], $i[12], $i[13], $i[14], $i[15], $v[0], $v[1], $v[2], $v[3], $v[4], $v[5],
-            $v[6], $v[7],
+            $i[0], $i[1], $i[2], $i[3], $i[4], $i[5], $i[6], $i[7], $i[8], $i[9], $i[10], $i[11],
+            $i[12], $i[13], $i[14], $i[15], $v[0], $v[1], $v[2], $v[3], $v[4], $v[5], $v[6], $v[7],
         )
     };
 }
@@ -998,21 +997,18 @@ pub fn call_shapes(
     // prototype places them. An Objective-C method reaches this — a selector
     // with enough parameters is not rare, and one of Unity's is what found it.
     let mut overflow: Vec<ArgType> = Vec::new();
-    let mut push_int = |v: u64,
-                        ty: ArgType,
-                        n_int: &mut usize,
-                        overflow: &mut Vec<ArgType>|
-     -> Result<()> {
-        if *n_int == MAX_INT_ARGS_TOTAL {
-            return Err(unmarshallable("more than sixteen integer arguments"));
-        }
-        if *n_int >= MAX_INT_ARGS {
-            overflow.push(ty);
-        }
-        ints[*n_int] = v;
-        *n_int += 1;
-        Ok(())
-    };
+    let mut push_int =
+        |v: u64, ty: ArgType, n_int: &mut usize, overflow: &mut Vec<ArgType>| -> Result<()> {
+            if *n_int == MAX_INT_ARGS_TOTAL {
+                return Err(unmarshallable("more than sixteen integer arguments"));
+            }
+            if *n_int >= MAX_INT_ARGS {
+                overflow.push(ty);
+            }
+            ints[*n_int] = v;
+            *n_int += 1;
+            Ok(())
+        };
 
     for (index, (shape, place)) in shapes.iter().skip(1).zip(places.iter()).enumerate() {
         match shape {
@@ -1047,12 +1043,7 @@ pub fn call_shapes(
                     HostClass::Integer { words } => {
                         for i in 0..words {
                             let w = leaf_bits(&bytes, i * 8, 8);
-                            push_int(
-                                w,
-                                ArgType::UnsignedDoubleword,
-                                &mut n_int,
-                                &mut overflow,
-                            )?;
+                            push_int(w, ArgType::UnsignedDoubleword, &mut n_int, &mut overflow)?;
                         }
                     }
                     HostClass::Indirect => {

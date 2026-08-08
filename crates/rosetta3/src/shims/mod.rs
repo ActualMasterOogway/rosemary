@@ -52,6 +52,7 @@ pub mod coregraphics;
 pub mod curl;
 pub mod intdiv;
 pub mod ioctl;
+pub mod machthread;
 pub mod math;
 pub mod nslog;
 pub mod openat;
@@ -125,6 +126,7 @@ pub fn dispatch(
                 .or_else(|| appkit::shim_for(name))
                 .or_else(|| component::shim_for(name))
                 .or_else(|| process::shim_for(name))
+                .or_else(|| machthread::shim_for(name))
                 .or_else(|| stackprobe::shim_for(name))
                 .or_else(|| sysvsem::shim_for(name))
                 .or_else(|| vmmap::shim_for(name))
@@ -169,6 +171,7 @@ pub fn is_shimmed(symbol: &str) -> bool {
         || appkit::shim_for(name).is_some()
         || component::shim_for(name).is_some()
         || process::shim_for(name).is_some()
+        || machthread::shim_for(name).is_some()
         || stackprobe::shim_for(name).is_some()
         || sysvsem::shim_for(name).is_some()
         || vmmap::shim_for(name).is_some()

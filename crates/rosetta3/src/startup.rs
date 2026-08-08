@@ -74,6 +74,9 @@ pub fn run(vm: &Vm) -> Result<i32, VmError> {
     let objc = vm.register_objc()?;
     // `+load` before the C constructors of the same image, which is dyld's
     // order and the one a program that uses both depends on.
+    // Resolved before the guest can start a thread, let alone collect on one:
+    // see [`crate::shims::machthread::warm`] for why on demand is too late.
+    crate::shims::machthread::warm();
     crate::objc::call_load_methods(vm, objc)?;
     run_initializers(vm)?;
     let entry = vm

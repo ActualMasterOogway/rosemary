@@ -577,7 +577,10 @@ mod tests {
         // object, and the whole difference is the index recorded beside it.
         let sig = signature("v@:@?").expect("a block parameter decodes");
         assert_eq!(sig.blocks, vec![2]);
-        assert_eq!(sig.types(), Some(vec![T::None, T::Pointer, T::Pointer, T::Pointer]));
+        assert_eq!(
+            sig.types(),
+            Some(vec![T::None, T::Pointer, T::Pointer, T::Pointer])
+        );
 
         // `@` and `@"NSString"` are objects and must not be mistaken for one,
         // which is the failure that would substitute a thunk into a string.

@@ -893,7 +893,9 @@ fn class_of(receiver: u64) -> String {
         if name.is_null() {
             return String::new();
         }
-        std::ffi::CStr::from_ptr(name).to_string_lossy().into_owned()
+        std::ffi::CStr::from_ptr(name)
+            .to_string_lossy()
+            .into_owned()
     }
 }
 

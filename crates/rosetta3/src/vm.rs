@@ -889,9 +889,15 @@ impl Vm {
         // comparator above it — on the host's stack with nothing to return
         // through them. See [`crate::jmpbuf`].
         let outer_entry = state.enter();
+        // Publish the register context for the duration, for the same shape of
+        // reason and a different reader: a collector suspends this thread and
+        // asks the kernel for its registers, and only this runtime knows where
+        // the guest's are. See [`crate::thread::GuestThread`].
+        let outer_context = state.publish_context(&mut ctx);
         // Publish the VM for the duration: a thunk called from inside a host
         // function has no other way to find it. See `crate::thunk`.
         let result = crate::thunk::with_current(self, || self.run_loop(state, &mut ctx));
+        state.restore_context(outer_context);
         state.leave(outer_entry);
         state.depth.set(state.depth.get() - 1);
         state.rsp.set(saved_rsp);
@@ -912,6 +918,11 @@ impl Vm {
         let mut ticks: u64 = 0;
         loop {
             let pc = ctx.rip;
+            // How deep the guest has been, for a collector to scan from. One
+            // relaxed load and a compare per region entry; see
+            // [`crate::thread::GuestThread::watermark`] for why the live `rsp`
+            // is not the answer.
+            state.note_rsp(ctx.rsp);
 
             // `ROSETTA3_TRACE_PC=n` reports where the guest is every `n` region
             // entries, as `image+offset`. Off unless set, and one compare when

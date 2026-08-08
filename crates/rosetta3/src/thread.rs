@@ -61,17 +61,212 @@
 //! Pointing the guest's `%gs` at [`tsd_base`] therefore makes the guest's
 //! inlined read and the host's `pthread_getspecific` name one slot, rather than
 //! two that would have to be kept in step.
+//!
+//! ## What another thread is allowed to see
+//!
+//! Everything above is the owning thread's own business, and the `Cell`s say
+//! so. One thing is not: a **conservative garbage collector suspends every
+//! other thread and asks the kernel for its registers**, which for a guest
+//! thread is a question only this runtime can answer. Boehm — the collector
+//! inside `libmonobdwgc-2.0`, which is the one Unity ships — asks with
+//! `thread_get_state(x86_THREAD_STATE64)` and aborts the process if it fails.
+//!
+//! So the part of a guest thread another thread may read lives in
+//! [`GuestThread`], separately and in atomics, and [`registry`] maps a Mach
+//! thread port to it. `ThreadState` itself is never handed across a thread
+//! boundary: it holds `Cell`s and a `RefCell`, and sharing it would be a data
+//! race dressed up as a lookup.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ops::Range;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+
+use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::stack::GuestStack;
 use crate::vm::VmError;
 
+/// The part of a guest thread another thread may read, and the whole of it.
+///
+/// Atomics rather than `Cell`s because the reader is a collector running on
+/// somebody else's thread, usually with this one suspended. Nothing here is a
+/// lock: a suspended thread cannot release one, so a collector that took a lock
+/// to read a suspended thread's registers would deadlock the process it was
+/// trying to collect.
+pub struct GuestThread {
+    /// Address of the innermost live [`RegisterContext`] on this thread, or
+    /// zero when the thread is not inside guest code.
+    ///
+    /// The context is a local of [`crate::vm::Vm::call_with_stack`], so it is
+    /// live exactly while that frame is, which is what publishing and clearing
+    /// it around the call says.
+    context: AtomicU64,
+    /// The lowest `rsp` this thread has been seen at, at a region boundary.
+    ///
+    /// A conservative collector scans from a stack pointer upwards, so what it
+    /// needs is a bound it cannot be *below*. The live `rsp` is the obvious
+    /// answer and is not a safe one: the context is written at VM exits, and a
+    /// thread suspended in the middle of a region has pushed since. The
+    /// watermark is monotonic and always at or below the live value, so
+    /// scanning from it covers every frame the context knows about and every
+    /// one below them. It over-scans dead stack, which for a conservative
+    /// collector costs retention and never correctness.
+    watermark: AtomicU64,
+    /// The guest stack, which is *not* the host stack this thread was created
+    /// with — see [`crate::shims::machthread`] for why that matters to anything
+    /// asking `pthread_get_stackaddr_np`.
+    stack: Range<u64>,
+}
+
+impl GuestThread {
+    /// The guest's registers, as far as this runtime can state them.
+    ///
+    /// `None` when the thread is registered but has no live guest frame: it has
+    /// been inside guest code before and is not now, so there is nothing to
+    /// report and nothing on the guest stack to scan.
+    pub fn context(&self) -> Option<&RegisterContext> {
+        let at = self.context.load(Ordering::Acquire);
+        // SAFETY: non-zero means `call_with_stack` has published its own local
+        // and has not yet returned, so the context outlives this borrow. The
+        // reader is either this thread or one that has suspended this one,
+        // which is the only arrangement in which the value can be read at all.
+        (at != 0).then(|| unsafe { &*(at as *const RegisterContext) })
+    }
+
+    /// The deepest stack pointer to scan from.
+    pub fn watermark(&self) -> u64 {
+        self.watermark.load(Ordering::Relaxed)
+    }
+
+    /// Where this thread's guest frames live.
+    pub fn stack(&self) -> Range<u64> {
+        self.stack.clone()
+    }
+}
+
+/// One registry entry: a Mach thread port and the state behind it.
+struct Slot {
+    port: AtomicU32,
+    thread: AtomicPtr<GuestThread>,
+}
+
+/// Guest threads by Mach thread port, looked up **without taking a lock**.
+///
+/// The reason is the caller. A collector suspends every other thread and then
+/// asks about each one in turn, so anything it touches must be reachable while
+/// arbitrary threads are stopped mid-instruction. A `Mutex` here would deadlock
+/// the moment a thread was suspended between `lock` and `unlock` — a window of
+/// a few instructions, entered once per thread, which is exactly the kind of
+/// odds that turn into a hang after twenty minutes rather than a failure in
+/// testing.
+///
+/// A fixed table of slots, claimed by compare-exchange, scanned linearly. Five
+/// hundred and twelve is far more threads than a game has and the scan is
+/// half a kilobyte of atomics, which costs nothing next to the `mach_msg` the
+/// collector made to suspend everybody.
+///
+/// The one race left is a *miss*: a thread that has claimed its slot and not
+/// yet published its port is invisible for those few instructions. It is also a
+/// thread that has not yet entered guest code, so it has no guest frames to
+/// report — the answer it would have been given is the empty one.
+static TABLE: [Slot; SLOTS] = [const {
+    Slot {
+        port: AtomicU32::new(0),
+        thread: AtomicPtr::new(core::ptr::null_mut()),
+    }
+}; SLOTS];
+
+const SLOTS: usize = 512;
+
+/// Publish `thread` under `port`. The `Arc` is leaked into the table.
+///
+/// Leaked rather than reference-counted because the reader may be holding the
+/// pointer while this thread dies, and there is no way to hand a suspended
+/// thread a retain. A [`GuestThread`] is five words; the stack it describes,
+/// which is the eight megabytes worth freeing, is released as before.
+fn register(port: u32, thread: Arc<GuestThread>) {
+    let raw = Arc::into_raw(thread) as *mut GuestThread;
+    for slot in &TABLE {
+        // The slot is claimed by its *pointer* and published by its port, in
+        // that order, so a lookup that matches a port always finds a pointer.
+        if slot
+            .thread
+            .compare_exchange(
+                core::ptr::null_mut(),
+                raw,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            slot.port.store(port, Ordering::Release);
+            return;
+        }
+    }
+    // Out of slots. Not fatal and not silent: the thread runs, and a collector
+    // asking about it gets the host's answer, which is the behaviour before any
+    // of this existed.
+    eprintln!(
+        "rosetta3: more than {SLOTS} guest threads; thread {port} will not be          described to a collector"
+    );
+    // SAFETY: `raw` came from `Arc::into_raw` immediately above and no slot
+    // took it, so this is the only reference.
+    drop(unsafe { Arc::from_raw(raw) });
+}
+
+/// Withdraw `port`, freeing its slot for a thread created later.
+fn unregister(port: u32) {
+    for slot in &TABLE {
+        if slot.port.load(Ordering::Acquire) == port {
+            // Port first: a lookup racing this sees zero and misses, which is
+            // the right answer for a thread that is ending.
+            slot.port.store(0, Ordering::Release);
+            slot.thread.store(core::ptr::null_mut(), Ordering::Release);
+            return;
+        }
+    }
+}
+
+/// This host thread's Mach port name, which is what `thread_get_state` is given.
+///
+/// `pthread_mach_thread_np` rather than `mach_thread_self`, because the latter
+/// takes a *reference* on the port every call and would have to be balanced by
+/// a `mach_port_deallocate` that nothing here is placed to make. Both name the
+/// same port.
+fn mach_port() -> u32 {
+    // SAFETY: `pthread_self` is always valid on a running thread and
+    // `pthread_mach_thread_np` reads the port name out of it.
+    unsafe { libc::pthread_mach_thread_np(libc::pthread_self()) }
+}
+
+/// The guest thread registered under `port`, if it is one.
+///
+/// Returns a borrow rather than an `Arc` because the entry is leaked and so
+/// outlives every caller; cloning an `Arc` here would be a needless atomic on a
+/// path that runs with the world stopped.
+pub fn by_port(port: u32) -> Option<&'static GuestThread> {
+    if port == 0 {
+        return None;
+    }
+    for slot in &TABLE {
+        if slot.port.load(Ordering::Acquire) == port {
+            let raw = slot.thread.load(Ordering::Acquire);
+            // SAFETY: a non-null pointer in the table came from
+            // `Arc::into_raw` in `register` and is never freed — see the note
+            // there on why it is leaked.
+            return (!raw.is_null()).then(|| unsafe { &*raw });
+        }
+    }
+    None
+}
+
 /// Everything about executing guest code that belongs to one host thread.
 pub struct ThreadState {
+    /// The half of this state other threads read. Held here as well so the
+    /// owning thread updates it without going near the registry's lock.
+    published: Arc<GuestThread>,
     stack: GuestStack,
     /// Where the next nested guest entry should put its first frame.
     pub(crate) rsp: Cell<u64>,
@@ -132,7 +327,16 @@ impl ThreadState {
     /// Wrap a stack this thread will run the guest on.
     pub fn new(stack: GuestStack) -> Self {
         let rsp = stack.initial_rsp();
+        let published = Arc::new(GuestThread {
+            context: AtomicU64::new(0),
+            // The top of the stack until the guest has been anywhere: an empty
+            // range rather than the whole reservation, so a collector arriving
+            // before the first entry scans nothing instead of eight megabytes.
+            watermark: AtomicU64::new(rsp),
+            stack: stack.range(),
+        });
         ThreadState {
+            published,
             stack,
             rsp: Cell::new(rsp),
             depth: Cell::new(0),
@@ -143,6 +347,31 @@ impl ThreadState {
             unwinding: Cell::new(None),
             caught: RefCell::new(Vec::new()),
             code: CodeWindow::new(),
+        }
+    }
+
+    /// Publish `ctx` as this thread's live guest context, returning whatever
+    /// was published before so a nested entry can restore it.
+    pub(crate) fn publish_context(&self, ctx: *mut RegisterContext) -> u64 {
+        self.published
+            .context
+            .swap(ctx as usize as u64, Ordering::Release)
+    }
+
+    /// Restore what [`ThreadState::publish_context`] displaced.
+    pub(crate) fn restore_context(&self, previous: u64) {
+        self.published.context.store(previous, Ordering::Release);
+    }
+
+    /// Note a stack pointer the guest has reached.
+    ///
+    /// Called once per region entry, so it is on the hot path and is a load, a
+    /// compare and — almost never — a store. Monotonic downwards: a thread that
+    /// returns from a deep call keeps the deeper mark, because the stack it
+    /// used is still the stack it may use again before the next collection.
+    pub(crate) fn note_rsp(&self, rsp: u64) {
+        if rsp < self.published.watermark.load(Ordering::Relaxed) {
+            self.published.watermark.store(rsp, Ordering::Relaxed);
         }
     }
 
@@ -350,6 +579,11 @@ unsafe extern "C" fn release(value: *mut c_void) {
     if value.is_null() {
         return;
     }
+    // Unregistered first: after this the port may be reused by a thread created
+    // later, and an entry naming a freed stack is worse than no entry. The
+    // destructor runs on the thread that is ending, so `mach_port` is still its
+    // own.
+    unregister(mach_port());
     // SAFETY: the only thing ever stored under this key is a `Box::into_raw` of
     // a `ThreadState`, and libpthread calls this once, with the key cleared, so
     // the box is not reachable from anywhere else.
@@ -386,7 +620,12 @@ pub fn install(state: ThreadState) -> &'static ThreadState {
     // when the thread ends.
     unsafe { libc::pthread_setspecific(key(), raw as *mut c_void) };
     // SAFETY: just stored, and nothing has run since that could free it.
-    unsafe { &*raw }
+    let state = unsafe { &*raw };
+    // Registered under this thread's Mach port, which is how a collector on
+    // another thread finds it. Replacing rather than inserting, for the reason
+    // above: a second `Vm` on this thread is a new program.
+    register(mach_port(), Arc::clone(&state.published));
+    state
 }
 
 /// The base of this host thread's thread-specific data array — the value a
