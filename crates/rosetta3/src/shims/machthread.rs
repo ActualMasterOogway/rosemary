@@ -45,18 +45,35 @@
 //! For a thread suspended in the middle of a translated region it is not. The
 //! region keeps guest values in host registers between exits, so a pointer held
 //! only in a register there is invisible, and `rsp` is the value from the last
-//! exit rather than the live one. The stack half of that is answered by
-//! reporting the **watermark** instead of `rsp` — the deepest the thread has
-//! been, which is always at or below where it is now, so the scan covers every
-//! frame either way. The register half is not answerable without parking guest
-//! threads at safepoints, which is a larger piece of work and is recorded as
-//! such rather than papered over.
+//! exit rather than the live one.
 //!
-//! The consequence, stated plainly: a pointer whose *only* copy is in a guest
-//! register of a thread suspended mid-region can be missed, and a conservative
-//! collector that misses a root frees a live object. Nothing here makes that
-//! impossible. What it does is remove the case where every thread is missed and
-//! the process aborts before it can run at all.
+//! ## The over-scan that was tried, and why it is gone
+//!
+//! The first version reported a **watermark** instead — the deepest `rsp` the
+//! thread had ever been seen at, which is always at or below the live one, so
+//! the scan was guaranteed to cover every frame either way. The reasoning was
+//! that over-scanning dead stack costs a conservative collector retention and
+//! never correctness.
+//!
+//! That is true and it was still the wrong trade. The watermark is monotonic,
+//! so once a thread goes deep — and Mono's JIT and Unity's scene loading go
+//! very deep — *every* collection afterwards scans from there to the top of an
+//! eight-megabyte stack, on every thread, forever. Subnautica reached its main
+//! menu and then spent minutes at a hundred percent of a core inside
+//! `libmonobdwgc`, which reads from the outside as a deadlock rather than as a
+//! slow collector. Retention makes it worse on its own terms, too: scanned
+//! dead stack keeps garbage alive, which triggers the next collection sooner.
+//!
+//! So the live `rsp` it is. The register half is not answerable without parking
+//! guest threads at safepoints, which is a larger piece of work; the stack half
+//! now shares its precision.
+//!
+//! The consequence, stated plainly: a pointer whose only copy is in a guest
+//! register — or below the last synced `rsp` — of a thread suspended
+//! mid-region can be missed, and a conservative collector that misses a root
+//! frees a live object. Nothing here makes that impossible. What it does is
+//! remove the case where every thread is missed and the process aborts before
+//! it can run at all.
 //!
 //! ## Layouts
 //!
@@ -91,6 +108,10 @@ const KERN_SUCCESS: i32 = 0;
 const KERN_INVALID_ARGUMENT: i32 = 4;
 
 /// `x86_thread_state64_t`, in the order the header declares it.
+///
+/// `rsp` is passed separately rather than taken from `ctx` so the choice of
+/// *which* stack pointer to report is made in one place and is visible to the
+/// test — see the module note on the watermark that used to be reported here.
 ///
 /// Written as a list rather than a struct because that is exactly what it is:
 /// twenty-one doublewords, and the only thing that matters is which guest
@@ -148,7 +169,7 @@ fn thread_get_state(
 
     let bytes = match (flavor, thread.context()) {
         (X86_THREAD_STATE64, Some(guest)) => {
-            let state = thread_state64(guest, thread.watermark());
+            let state = thread_state64(guest, guest.rsp);
             let mut buf = Vec::with_capacity(state.len() * 8);
             for word in state {
                 buf.extend_from_slice(&word.to_le_bytes());
@@ -327,9 +348,8 @@ mod tests {
         ctx.r15 = 0xff;
         ctx.rip = 0xabcd;
 
-        // The stack pointer reported is the watermark, not `rsp`: that is the
-        // whole point of the field, and a test that passed `ctx.rsp` would not
-        // notice if the argument were dropped.
+        // A stack pointer distinct from `ctx.rsp`, so a version that ignored the
+        // argument and read the context would be caught.
         let state = thread_state64(&ctx, 0x1000);
         assert_eq!(state[0], 0x11, "rax");
         assert_eq!(state[1], 0x22, "rbx");

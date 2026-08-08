@@ -918,11 +918,6 @@ impl Vm {
         let mut ticks: u64 = 0;
         loop {
             let pc = ctx.rip;
-            // How deep the guest has been, for a collector to scan from. One
-            // relaxed load and a compare per region entry; see
-            // [`crate::thread::GuestThread::watermark`] for why the live `rsp`
-            // is not the answer.
-            state.note_rsp(ctx.rsp);
 
             // `ROSETTA3_TRACE_PC=n` reports where the guest is every `n` region
             // entries, as `image+offset`. Off unless set, and one compare when

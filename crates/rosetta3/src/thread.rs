@@ -103,17 +103,6 @@ pub struct GuestThread {
     /// live exactly while that frame is, which is what publishing and clearing
     /// it around the call says.
     context: AtomicU64,
-    /// The lowest `rsp` this thread has been seen at, at a region boundary.
-    ///
-    /// A conservative collector scans from a stack pointer upwards, so what it
-    /// needs is a bound it cannot be *below*. The live `rsp` is the obvious
-    /// answer and is not a safe one: the context is written at VM exits, and a
-    /// thread suspended in the middle of a region has pushed since. The
-    /// watermark is monotonic and always at or below the live value, so
-    /// scanning from it covers every frame the context knows about and every
-    /// one below them. It over-scans dead stack, which for a conservative
-    /// collector costs retention and never correctness.
-    watermark: AtomicU64,
     /// The guest stack, which is *not* the host stack this thread was created
     /// with — see [`crate::shims::machthread`] for why that matters to anything
     /// asking `pthread_get_stackaddr_np`.
@@ -133,11 +122,6 @@ impl GuestThread {
         // reader is either this thread or one that has suspended this one,
         // which is the only arrangement in which the value can be read at all.
         (at != 0).then(|| unsafe { &*(at as *const RegisterContext) })
-    }
-
-    /// The deepest stack pointer to scan from.
-    pub fn watermark(&self) -> u64 {
-        self.watermark.load(Ordering::Relaxed)
     }
 
     /// Where this thread's guest frames live.
@@ -329,10 +313,6 @@ impl ThreadState {
         let rsp = stack.initial_rsp();
         let published = Arc::new(GuestThread {
             context: AtomicU64::new(0),
-            // The top of the stack until the guest has been anywhere: an empty
-            // range rather than the whole reservation, so a collector arriving
-            // before the first entry scans nothing instead of eight megabytes.
-            watermark: AtomicU64::new(rsp),
             stack: stack.range(),
         });
         ThreadState {
@@ -361,18 +341,6 @@ impl ThreadState {
     /// Restore what [`ThreadState::publish_context`] displaced.
     pub(crate) fn restore_context(&self, previous: u64) {
         self.published.context.store(previous, Ordering::Release);
-    }
-
-    /// Note a stack pointer the guest has reached.
-    ///
-    /// Called once per region entry, so it is on the hot path and is a load, a
-    /// compare and — almost never — a store. Monotonic downwards: a thread that
-    /// returns from a deep call keeps the deeper mark, because the stack it
-    /// used is still the stack it may use again before the next collection.
-    pub(crate) fn note_rsp(&self, rsp: u64) {
-        if rsp < self.published.watermark.load(Ordering::Relaxed) {
-            self.published.watermark.store(rsp, Ordering::Relaxed);
-        }
     }
 
     /// This thread's view of the code cache.
