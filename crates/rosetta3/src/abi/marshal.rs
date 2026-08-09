@@ -82,14 +82,23 @@
 //! the mirror image, which is why there are three call variants rather than one
 //! with a cast.
 //!
-//! ## The stack pointer at an import exit
+//! ## The stack pointer at an import exit, which is not one answer
 //!
-//! Microlift exits *before* the `CALL` executes, so `rsp` still points where it
-//! did at the call site and no return address has been pushed. That is exactly
-//! the base [`ArgLocation::Stack`] offsets are measured from, so a spilled
-//! argument is at `rsp + offset` with no adjustment. (Nothing in the current
-//! table spills, but the path is here because getting it wrong later would look
-//! like a miscompile rather than an ABI bug.)
+//! Microlift exits *before* a `CALL` executes, so `rsp` still points where it
+//! did at the call site and no return address has been pushed: a spilled
+//! argument is at `rsp + offset`.
+//!
+//! A **tail `jmp` to an import is different**, and the difference is eight
+//! bytes. `return getnameinfo(sa, sl, h, hl, s, sl2, flags);` compiles to
+//! `jmp _getnameinfo` with the *original* return address still on the stack and
+//! the outgoing arguments in the incoming argument area above it — so the same
+//! spilled argument is at `rsp + 8 + offset`.
+//!
+//! Reading the wrong one does not fault. It takes the return address for an
+//! argument and shifts every stack argument after it by a slot, which is the
+//! silent wrong answer this module exists to refuse. [`stack_base`] is the
+//! adjustment, and `tests/tailcall.rs` is a guest that loses a flags word this
+//! way and gets a reverse DNS lookup it did not ask for.
 
 use iced_x86::Register;
 
@@ -466,7 +475,39 @@ fn read_location(
         }
         // See the module note: `rsp` is the pre-`CALL` value at an import exit,
         // which is the base these offsets are measured from.
-        ArgLocation::Stack(off) => mem.read_u64(ctx.rsp.wrapping_add(u64::from(off)), symbol),
+        ArgLocation::Stack(off) => mem.read_u64(
+            ctx.rsp
+                .wrapping_add(stack_base())
+                .wrapping_add(u64::from(off)),
+            symbol,
+        ),
+    }
+}
+
+/// Where the guest's outgoing stack arguments begin, relative to `rsp`.
+///
+/// Zero for an intercepted `call` and **eight for a tail `jmp`**, and the
+/// difference is not cosmetic. Microlift exits a `call` *before* the return
+/// address is pushed, so `rsp` points at the caller's outgoing argument area and
+/// the seventh integer argument is at `rsp+0`. A compiler that tail-jumps —
+/// `return getnameinfo(sa, sl, h, hl, s, sl2, flags);` compiles to exactly that
+/// — leaves the *original* return address on the stack and reuses the incoming
+/// argument area above it, so the same argument is at `rsp+8`.
+///
+/// Reading the wrong one does not fault. It reads the return address as an
+/// argument and shifts every stack argument after it by one slot, which is the
+/// silent wrong answer this module exists to refuse: `tests/tailcall.rs` is a
+/// guest that loses `NI_NUMERICHOST` this way and gets a reverse DNS lookup it
+/// did not ask for.
+///
+/// [`crate::thread::ThreadState::entered_by_jump`] is set by the run loop before
+/// any shim runs, so it always describes *this* call. Outside a guest thread —
+/// which is where this module's own tests run — there is no tail call to
+/// account for and the answer is zero.
+fn stack_base() -> u64 {
+    match crate::thread::current() {
+        Some(state) if state.entered_by_jump() => 8,
+        _ => 0,
     }
 }
 
@@ -906,7 +947,7 @@ fn read_aggregate(
     let mut buf = vec![0u8; size.next_multiple_of(8)];
     match place {
         Place::Memory { offset, .. } => {
-            let at = ctx.rsp.wrapping_add(*offset);
+            let at = ctx.rsp.wrapping_add(stack_base()).wrapping_add(*offset);
             mem.read(at, &mut buf[..size])
                 .map_err(|_| AbiError::Memory {
                     symbol: symbol.to_string(),
@@ -934,7 +975,9 @@ fn read_where(symbol: &str, ctx: &RegisterContext, mem: &dyn GuestMemory, w: Whe
     Ok(match w {
         Where::Int(i) => [ctx.rdi, ctx.rsi, ctx.rdx, ctx.rcx, ctx.r8, ctx.r9][i],
         Where::Sse(i) => ctx.xmm[i][0],
-        Where::Stack(off) => mem.read_u64(ctx.rsp.wrapping_add(off), symbol)?,
+        Where::Stack(off) => {
+            mem.read_u64(ctx.rsp.wrapping_add(stack_base()).wrapping_add(off), symbol)?
+        }
     })
 }
 

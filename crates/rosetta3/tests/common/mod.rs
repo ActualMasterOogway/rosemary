@@ -1108,6 +1108,61 @@ pub fn pthread_sync_fixture() -> Option<String> {
         .clone()
 }
 
+/// A guest that reaches an import by **tail jump**, with an argument on the
+/// stack.
+///
+/// `musttail` rather than trusting the optimiser: clang will not tail-call when
+/// the callee needs more outgoing stack than the caller was given, so the
+/// forwarding wrapper takes the same seven arguments it passes on. That is not a
+/// contrived shape — a forwarding wrapper is the ordinary reason a tail call to
+/// an import exists at all.
+///
+/// The seventh argument is the one that matters: SysV puts six integers in
+/// registers, so `flags` is on the stack, and at a tail `jmp` it sits one slot
+/// above where an intercepted `call` would leave it. Losing it turns
+/// `NI_NUMERICHOST | NI_NUMERICSERV` into zero, and the guest prints `localhost`
+/// and `http` where it asked for `127.0.0.1` and `80` — a wrong answer with no
+/// fault anywhere, which is exactly the failure this fixture exists to make
+/// loud.
+pub const TAILCALL_C: &str = r#"
+#include <netdb.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <string.h>
+
+__attribute__((noinline))
+static int fwd(const struct sockaddr *sa, socklen_t sl, char *h, socklen_t hl,
+               char *s, socklen_t sl2, int flags) {
+    __attribute__((musttail)) return getnameinfo(sa, sl, h, hl, s, sl2, flags);
+}
+
+static char host[128], serv[64];
+
+int main(int argc, char **argv) {
+    (void)argv;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_len = sizeof a;
+    a.sin_family = AF_INET;
+    a.sin_port = htons(80);
+    a.sin_addr.s_addr = htonl(0x7f000001);
+    /* Opaque to the optimiser, so the flags word really travels. */
+    int flags = argc > 99 ? 0 : (NI_NUMERICHOST | NI_NUMERICSERV);
+    int rc = fwd((struct sockaddr *)&a, sizeof a, host, sizeof host,
+                 serv, sizeof serv, flags);
+    printf("rc %d host %s serv %s\n", rc, host, serv);
+    return 0;
+}
+"#;
+
+/// Build [`TAILCALL_C`], or `None` if this host cannot.
+pub fn tailcall_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("tailcall", TAILCALL_C, &[]))
+        .clone()
+}
+
 /// A guest that shares a 128-bit location between threads, as Unity does.
 ///
 /// `__sync_bool_compare_and_swap` on a `__int128` with `-mcx16` compiles to
