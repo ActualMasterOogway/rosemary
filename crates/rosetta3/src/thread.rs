@@ -9,6 +9,15 @@
 //! thread rather than a comparator is that the host calls it on a stack this
 //! runtime has never seen.
 //!
+//! The one thing that is *not* nothing is [`spawn`], and it is one function
+//! deep. A thread has to be given its guest stack before it runs a line of
+//! guest code, and what stack it should get is something only the caller of
+//! `pthread_create` heard — so the request crosses the thread boundary in a
+//! box, and the trampoline underneath [`spawn`] does the installing before it
+//! calls the thunk. Any other way of making a guest thread — a Mach
+//! `thread_create`, an `NSThread`, whatever arrives next — needs a
+//! [`StackRequest`] and nothing else from this module.
+//!
 //! Which is exactly what has to be fixed here. Milestone 3's VM held one guest
 //! stack, one live stack pointer, one nesting depth and one parked error, on the
 //! reasonable assumption that there was one guest. Two host threads sharing
@@ -657,24 +666,161 @@ pub fn tsd_base() -> u64 {
     0
 }
 
-/// Stack for a thread the guest spawned.
+/// Stack for a guest thread that asked for no particular one.
 ///
-/// The guest's own `pthread_attr_setstacksize` is *not* consulted, and the
-/// reason is that it is not about this stack: the attribute sizes the stack the
-/// host gives the host thread, which the host duly honours and on which none of
-/// the guest's frames live. A guest that asks for a small stack still gets a
-/// small host stack; what it gets here is room for its own frames, and matching
-/// the main thread is the choice that cannot surprise it. Reservations are lazy,
-/// so the cost is address space.
+/// The main thread's size, which is the choice that cannot surprise a guest that
+/// never said: a thread created with a null `pthread_attr_t`, or one this
+/// runtime adopted because a host framework called a guest callback on a thread
+/// of its own. Reservations are lazy, so the cost is address space.
 pub const THREAD_STACK: usize = crate::stack::DEFAULT_STACK;
 
-/// This thread's state, creating one with a bare guest stack if it has none.
+/// Where a guest thread's frames are to live.
 ///
-/// The path a spawned guest thread takes: the host calls a thunk, the thunk
-/// enters the VM, and the VM finds no stack to enter on.
+/// The one thing a threading front end has to decide, and the reason it is a
+/// value rather than a constant: `pthread_attr_setstacksize` and
+/// `pthread_attr_setstack` are statements about *this* stack — the guest's own
+/// frames — and until [`crate::shims::pthread`] existed there was nowhere for
+/// either to be said. A front end for some other way of making a thread (a Mach
+/// `thread_create`, an `NSThread`, a guest coroutine library switching stacks)
+/// builds one of these and hands it to [`adopt`]; nothing else about the thread
+/// machinery has to know which one it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StackRequest {
+    /// Reserve [`THREAD_STACK`] bytes, the main thread's size.
+    ///
+    /// For a thread nothing asked about: one this runtime *adopted* because a
+    /// host framework called a guest callback on a worker of its own. A guest
+    /// calling `pthread_create(&t, NULL, ...)` does not land here — a null
+    /// attribute set means the host's defaults, which carry a size of their own
+    /// (512 KiB on Darwin), and honouring it is what makes the thread the size
+    /// the same program gets natively.
+    Default,
+    /// Reserve `bytes`, rounded up to a page. What the guest asked for through
+    /// `pthread_attr_setstacksize`.
+    Sized(usize),
+    /// Use memory the guest already owns: `top` is the highest address,
+    /// exclusive, matching `pthread_attr_getstackaddr`. See
+    /// [`GuestStack::supplied`].
+    Supplied { top: u64, size: u64 },
+}
+
+impl StackRequest {
+    /// Build the stack this asks for.
+    fn build(self) -> Result<GuestStack, VmError> {
+        match self {
+            StackRequest::Default => GuestStack::bare(THREAD_STACK),
+            // A page more than asked for, because what the guest asked for is
+            // the part it may use: libpthread puts a spawned thread's guard
+            // page *outside* the size the attribute names, and a guest that
+            // sets a size and reads it back with `pthread_get_stacksize_np`
+            // would otherwise be told it got a page less than it asked for. See
+            // [`GuestStack::bare`], which is where the other convention is.
+            StackRequest::Sized(bytes) => {
+                GuestStack::bare(bytes + machish::memory::host_page_size() as usize)
+            }
+            StackRequest::Supplied { top, size } => Ok(GuestStack::supplied(top, size)),
+        }
+    }
+}
+
+/// Make this host thread a guest thread with the stack `request` describes,
+/// replacing any state it already had.
+///
+/// The one entry point a threading front end needs. Called on the thread that
+/// is becoming a guest thread and nowhere else — a stack is only installable by
+/// its owner, which is what the thread-specific key underneath this says.
+pub fn adopt(request: StackRequest) -> Result<&'static ThreadState, VmError> {
+    Ok(install(ThreadState::new(request.build()?)))
+}
+
+/// What a new guest thread is to run, and on what.
+pub struct GuestStart {
+    /// The **thunk** for the guest's start routine, not the guest address: the
+    /// host is what calls it, so it has to be arm64 by the time it gets here.
+    /// See [`crate::thunk`].
+    pub entry: u64,
+    /// The `void *` the guest passed, untranslated. Only guest code ever
+    /// dereferences it, and the two sides share an address space.
+    pub arg: u64,
+    /// Where the guest's frames go.
+    pub stack: StackRequest,
+}
+
+/// Start a host thread that runs `start` as a guest thread.
+///
+/// `attr` is the **host's** attribute set and describes the host thread only —
+/// the thread that will run the JIT. It is the caller's to build, because
+/// translating a guest's `pthread_attr_t` into one is a `pthread` question and
+/// this module's business is threads rather than that API; see
+/// [`crate::shims::pthread`], which is where the two stacks are separated.
+///
+/// Returns the host `pthread_t`, which is also the guest's: every other
+/// `pthread` call the guest makes about the thread — `join`, `detach`, `equal`,
+/// `kill`, `get_stackaddr_np` — is the host's own, operating on the host's own
+/// thread. Nothing is invented here that the guest could compare against
+/// something real and find different.
+pub fn spawn(start: GuestStart, attr: &libc::pthread_attr_t) -> Result<libc::pthread_t, i32> {
+    let mut thread: libc::pthread_t = 0;
+    let boxed = Box::into_raw(Box::new(start)) as *mut c_void;
+    // SAFETY: `entry` is this module's own function; `boxed` is a live leaked
+    // allocation which the new thread takes ownership of, and which is
+    // reclaimed here if no thread is ever started to take it.
+    let rc = unsafe { libc::pthread_create(&mut thread, attr, entry, boxed) };
+    if rc != 0 {
+        // SAFETY: `pthread_create` failed, so nothing else holds the pointer.
+        drop(unsafe { Box::from_raw(boxed as *mut GuestStart) });
+        return Err(rc);
+    }
+    Ok(thread)
+}
+
+/// What libpthread calls on the new thread: install the guest state, then enter
+/// the guest.
+///
+/// The order is the whole point of routing a spawned thread through here rather
+/// than letting libpthread call the thunk directly. [`ensure`] would give this
+/// thread a stack too — that is what M4 did — but it would give it the
+/// *default* one, having no way to hear what the guest asked for. Installing
+/// first means the request survives the thread boundary, which is the only
+/// place it could have been lost.
+extern "C" fn entry(raw: *mut c_void) -> *mut c_void {
+    // Unboxed before the guest runs, and the fields copied out, because the
+    // guest's start routine may call `pthread_exit` — which ends this thread
+    // from underneath these Rust frames without unwinding them. A `Box` still
+    // live at that moment is a leak once per thread that exits that way.
+    // SAFETY: the pointer came from `Box::into_raw` in `spawn` and is handed to
+    // exactly one thread, which is this one.
+    let GuestStart { entry, arg, stack } = *unsafe { Box::from_raw(raw as *mut GuestStart) };
+
+    if let Err(e) = adopt(stack) {
+        // No error channel: the caller is libpthread, which has nowhere to put
+        // this, and the guest is already holding a `pthread_t` for a thread it
+        // believes is running. Said out loud, and the thread ends without
+        // entering the guest — a start routine that never ran is visible as a
+        // join returning null, which is at least a fact the guest can see.
+        eprintln!("rosetta3: a guest thread could not be given a stack: {e}");
+        return core::ptr::null_mut();
+    }
+
+    // SAFETY: `entry` is a thunk this runtime compiled — an arm64 function
+    // taking the guest's six integer argument registers and eight vector ones,
+    // of which a start routine reads the first. It stays mapped for the VM's
+    // lifetime, which outlives every thread that can reach it. See
+    // [`crate::thunk`].
+    let f: extern "C" fn(u64) -> u64 = unsafe { core::mem::transmute::<u64, _>(entry) };
+    f(arg) as *mut c_void
+}
+
+/// This thread's state, creating a default one if it has none.
+///
+/// The path a thread this runtime did not start takes: a host framework calls a
+/// guest callback on a worker of its own, the thunk enters the VM, and the VM
+/// finds no stack to enter on. A thread spawned through
+/// [`crate::shims::pthread`] has already been through [`adopt`] and is found
+/// here rather than built.
 pub fn ensure() -> Result<&'static ThreadState, VmError> {
     if let Some(existing) = current() {
         return Ok(existing);
     }
-    Ok(install(ThreadState::new(GuestStack::bare(THREAD_STACK)?)))
+    adopt(StackRequest::Default)
 }

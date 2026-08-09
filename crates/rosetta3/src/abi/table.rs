@@ -564,6 +564,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // is [`crate::shims::coregraphics`], for the reason `__sincos_stret` is a
     // shim.
     sig!("CGAcquireDisplayFadeReservation", I32, F32, P),
+    sig!("CGDirectDisplayCopyCurrentMetalDevice", P, I32),
+    sig!("MTLCreateSystemDefaultDevice", P),
     sig!("CGAssociateMouseAndMouseCursorPosition", I32, I32),
     // ## The bitmap context, which is how an image becomes texture bytes
     //
@@ -2540,11 +2542,16 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // translation at all. (`pthread_types_agree_across_architectures` checks
     // this rather than trusting it.)
     //
-    // What is *not* passthrough is the start routine, which is guest code and
-    // goes out as a thunk like any other callback — the difference being that
-    // the host calls it on a brand-new host thread, which is why M4 needed
-    // per-thread guest state before this entry could exist. See
-    // [`crate::thread`].
+    // What is *not* passthrough is `pthread_create`. The start routine is guest
+    // code and goes out as a thunk like any other callback — the difference
+    // being that the host calls it on a brand-new host thread, which is why M4
+    // needed per-thread guest state before this entry could exist. And the
+    // attribute set is the one place in the family where "the two layouts agree,
+    // so operate in place" stops being enough: a guest thread has two stacks,
+    // the host's for the JIT's frames and the guest's for its own, and every
+    // stack attribute here is about the second while passthrough applied it to
+    // the first. The entry stays for its signature and its callback index; the
+    // call is serviced by [`crate::shims::pthread`]. See [`crate::thread`].
     sig!("pthread_attr_destroy", I32, P),
     // Every getter in this family is `(const pthread_attr_t *, T *)` and every
     // setter takes its value directly, which is why the two halves do not read
@@ -2949,6 +2956,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("writev", I64, I32, P, I32),
     sig!("zError", P, I32),
     sig!("zlibVersion", P),
+    // Metal symbols
+    sig!("MTLCopyAllDevices", P),
 ];
 
 /// A symbol with no public declaration anywhere on this system.

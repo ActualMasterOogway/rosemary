@@ -148,6 +148,73 @@ fn mutexes_once_and_thread_specific_destructors_all_work() {
     }
 }
 
+/// The claims about *which* stack a guest thread's attributes describe, and
+/// about who may ask.
+///
+/// Stated line by line rather than only as native equality, because native
+/// equality is skipped on a host that cannot run x86-64 and these are the
+/// sentences the work is written in. See [`common::PTHREAD_STACK_C`] for what
+/// each field falsifies.
+#[test]
+fn a_guest_thread_runs_on_the_stack_its_attributes_asked_for() {
+    let Some(path) = common::pthread_stack_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
+    let (status, out, err) = run_guest(&path, &[]);
+    assert_eq!(status, Some(0), "stderr: {err}");
+
+    // The main thread is 8 MiB with its guard page inside that, exactly as the
+    // kernel gives a real one — so the number a guest reads is the native one
+    // rather than one page more.
+    assert!(
+        out.contains("main: size=8372224 inside=1\n"),
+        "{out:?} (stderr: {err})"
+    );
+    // A null attribute set is not "no size": it is libpthread's defaults, whose
+    // size is 512 KiB, and a guest thread gets what the same program would get
+    // natively rather than this runtime's idea of a good stack.
+    assert!(
+        out.contains("default: size=524288 local_inside=1 other_thread_agrees=1\n"),
+        "{out:?} (stderr: {err})"
+    );
+    assert!(
+        out.contains("initialised: size=524288 local_inside=1 other_thread_agrees=1\n"),
+        "{out:?} (stderr: {err})"
+    );
+    // The one the guest actually asked for. Before this, the request sized the
+    // *host* thread — the one running the JIT — and the guest's own frames went
+    // on a default stack it never mentioned.
+    assert!(
+        out.contains("sized: size=1048576 local_inside=1 other_thread_agrees=1\n"),
+        "{out:?} (stderr: {err})"
+    );
+    // And a stack the guest allocated and handed over is the stack its frames
+    // are on, at the address it named.
+    assert!(
+        out.contains("own: size=262144 local_inside=1 other_thread_agrees=1\n"),
+        "{out:?} (stderr: {err})"
+    );
+    assert!(out.contains("own: supplied=1\n"), "{out:?} (stderr: {err})");
+    // Every worker still ran and returned its argument, which is what says the
+    // stack it was given is one it could really run on.
+    assert_eq!(out.matches("joined 4660\n").count(), 4, "{out:?}");
+}
+
+/// The same program, run both ways.
+#[test]
+fn thread_stacks_agree_with_the_same_binary_run_natively() {
+    let Some(path) = common::pthread_stack_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
+    let Some((native_status, native_out)) = run_native(&path) else {
+        skip!("this host cannot run an x86_64 binary natively")
+    };
+    let (status, out, err) = run_guest(&path, &[]);
+
+    assert_eq!(status, native_status, "stderr: {err}");
+    assert_eq!(lines(&out), lines(&native_out), "stderr: {err}");
+}
+
 /// The strongest assertion available, and the only specification of `pthread`
 /// that is not a paraphrase: the same binary, run both ways, prints the same
 /// thing.

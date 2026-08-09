@@ -59,6 +59,7 @@ pub mod nslog;
 pub mod openat;
 pub mod printf;
 pub mod process;
+pub mod pthread;
 pub mod runtime;
 pub mod sscanf;
 pub mod stackprobe;
@@ -146,8 +147,12 @@ pub fn dispatch(
             // destructor whose third argument is a DSO handle that must not,
             // and [`zlib`], [`audiounit`] and [`block`] for pointers that are
             // not arguments at all — they are fields of a structure the guest
-            // passes by address, or by literal.
+            // passes by address, or by literal. [`pthread`] is the fourth: a
+            // start routine crosses out like any other callback, and what needs
+            // code is which of a guest thread's *two* stacks the guest's
+            // attributes were about.
             return crate::signal::shim_for(name)
+                .or_else(|| pthread::shim_for(name))
                 .or_else(|| block::shim_for(name))
                 .or_else(|| crate::dyld::shim_for_callbacks(name))
                 .or_else(|| atexit::shim_for(name))
@@ -183,6 +188,7 @@ pub fn is_shimmed(symbol: &str) -> bool {
         || crate::objc::dispatch::shim_for(name).is_some()
         || crate::dyld::shim_for(name).is_some()
         || crate::signal::shim_for(name).is_some()
+        || pthread::shim_for(name).is_some()
         || block::shim_for(name).is_some()
         || crate::dyld::shim_for_callbacks(name).is_some()
         || atexit::shim_for(name).is_some()

@@ -67,7 +67,9 @@ pub const RETURN_SENTINEL: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 
 /// A guest stack, with the process arguments written into its top.
 pub struct GuestStack {
-    space: MmapSpace,
+    /// The reservation this stack owns, or `None` when the *guest* supplied the
+    /// memory — `pthread_attr_setstack`. See [`GuestStack::supplied`].
+    space: Option<MmapSpace>,
     base: u64,
     size: usize,
     /// Highest usable address, 16-byte aligned.
@@ -99,25 +101,39 @@ impl GuestStack {
     /// called with one argument in `rdi` and has no `argc`, no `argv` and no
     /// `apple` — so laying them out again per thread would be building a second
     /// copy of the process's arguments that nothing can reach.
+    ///
+    /// `size` is the whole **reservation**, of which the lowest page is the
+    /// guard and the rest is stack. That is the kernel's arrangement for a main
+    /// thread — 8 MiB with the guard inside it, so `pthread_get_stacksize_np`
+    /// reports one page less — and it is deliberately *not* libpthread's
+    /// arrangement for a spawned thread, where the requested size is the usable
+    /// part and the guard is extra. Which of the two a caller wants is a
+    /// question about the API it is standing in for, so the caller adds the page
+    /// when it means the second: see
+    /// [`StackRequest`](crate::thread::StackRequest).
     pub fn bare(size: usize) -> Result<Self, VmError> {
         let page = machish::memory::host_page_size() as usize;
         let size = size.next_multiple_of(page).max(page * 4);
 
         let mut space = MmapSpace::new();
-        let base = space
+        let reservation = space
             .reserve(size, page, Placement::Anywhere)
             .map_err(|source| VmError::Stack { source })?;
         // Guard page: overflow faults instead of corrupting whatever the kernel
         // happened to map below us.
         space
-            .protect(base, page, Prot::NONE)
+            .protect(reservation, page, Prot::NONE)
             .map_err(|source| VmError::Stack { source })?;
 
-        let top = (base + size as u64) & !0xf;
+        let top = (reservation + size as u64) & !0xf;
         Ok(GuestStack {
-            space,
-            base,
-            size,
+            space: Some(space),
+            // The guard page is not stack, and saying so is what keeps
+            // `pthread_get_stacksize_np` agreeing with the host's answer for a
+            // thread of the same size — and what keeps the region list from
+            // offering a shim a pointer into a `PROT_NONE` page.
+            base: reservation + page as u64,
+            size: size - page,
             top,
             args_at: top,
             argc: 0,
@@ -127,8 +143,51 @@ impl GuestStack {
         })
     }
 
+    /// A stack over memory the **guest** already owns, running down from `top`.
+    ///
+    /// What `pthread_attr_setstack` and `pthread_attr_setstackaddr` describe: a
+    /// program that manages its own thread stacks — a scripting runtime placing
+    /// a coroutine's, a game pooling them — hands `pthread_create` a buffer it
+    /// allocated, and its frames belong *there*. Under this runtime the guest's
+    /// frames are the ones that count, so the buffer is used for exactly what
+    /// the guest asked it to be used for and the host thread keeps a stack of
+    /// its own for the JIT's frames. See [`crate::shims::pthread`].
+    ///
+    /// Nothing is reserved, protected or freed here, and all three are
+    /// deliberate: the memory is the guest's, it is already mapped, and a guard
+    /// page written over the page below it would be written over whatever the
+    /// guest put there. An overflow of a supplied stack corrupts the guest's own
+    /// memory, which is precisely what it does natively.
+    ///
+    /// `top` is exclusive — the highest address *above* the stack, which is what
+    /// Darwin's `pthread_get_stackaddr_np` reports and what
+    /// `pthread_attr_getstackaddr` reads back.
+    pub fn supplied(top: u64, size: u64) -> Self {
+        let top = top & !0xf;
+        let base = top.saturating_sub(size);
+        GuestStack {
+            space: None,
+            base,
+            size: (top - base) as usize,
+            top,
+            args_at: top,
+            argc: 0,
+            argv: 0,
+            envp: 0,
+            apple: 0,
+        }
+    }
+
     /// Write the strings and the three pointer arrays into the top of the stack.
+    ///
+    /// Only ever reached from [`GuestStack::new`], which builds a stack this
+    /// runtime reserved — a guest-supplied one is a `pthread` stack and has no
+    /// `argv` to lay out.
     fn place_args(&mut self, exe_path: &str, args: &[String]) -> Result<(), VmError> {
+        let space = self
+            .space
+            .as_mut()
+            .expect("argument material is only laid out on a stack this runtime reserved");
         let env: Vec<CString> = std::env::vars_os()
             .filter_map(|(k, v)| {
                 CString::new(format!("{}={}", k.to_string_lossy(), v.to_string_lossy())).ok()
@@ -153,22 +212,19 @@ impl GuestStack {
         let mut argv_ptrs = Vec::new();
         for s in &argv {
             argv_ptrs.push(
-                write_str(s, &mut cursor, &mut self.space)
-                    .map_err(|source| VmError::Stack { source })?,
+                write_str(s, &mut cursor, space).map_err(|source| VmError::Stack { source })?,
             );
         }
         let mut env_ptrs = Vec::new();
         for s in &env {
             env_ptrs.push(
-                write_str(s, &mut cursor, &mut self.space)
-                    .map_err(|source| VmError::Stack { source })?,
+                write_str(s, &mut cursor, space).map_err(|source| VmError::Stack { source })?,
             );
         }
         let mut apple_ptrs = Vec::new();
         for s in &apple {
             apple_ptrs.push(
-                write_str(s, &mut cursor, &mut self.space)
-                    .map_err(|source| VmError::Stack { source })?,
+                write_str(s, &mut cursor, space).map_err(|source| VmError::Stack { source })?,
             );
         }
 
@@ -184,11 +240,11 @@ impl GuestStack {
             this.write(*cursor, &buf).map(|()| *cursor)
         };
 
-        self.apple = write_array(&apple_ptrs, &mut cursor, &mut self.space)
+        self.apple = write_array(&apple_ptrs, &mut cursor, space)
             .map_err(|source| VmError::Stack { source })?;
-        self.envp = write_array(&env_ptrs, &mut cursor, &mut self.space)
+        self.envp = write_array(&env_ptrs, &mut cursor, space)
             .map_err(|source| VmError::Stack { source })?;
-        self.argv = write_array(&argv_ptrs, &mut cursor, &mut self.space)
+        self.argv = write_array(&argv_ptrs, &mut cursor, space)
             .map_err(|source| VmError::Stack { source })?;
         self.argc = argv_ptrs.len() as u64;
         self.args_at = cursor & !0xf;
@@ -216,18 +272,22 @@ impl GuestStack {
         self.base..self.base + self.size as u64
     }
 
-    /// Read/write access, for placing a return address or a spilled argument.
-    pub fn memory(&mut self) -> &mut MmapSpace {
-        &mut self.space
-    }
-
     /// Whether `va` is a stack address.
     pub fn contains(&self, va: u64) -> bool {
         self.range().contains(&va)
     }
 
     /// The stack's mapped bytes, for [`GuestView`](crate::vm::GuestView).
+    ///
+    /// Empty for a guest-supplied stack, which is not this runtime's mapping to
+    /// describe: it is already inside the guest's own memory, and
+    /// [`GuestView`](crate::vm::GuestView) reaches it the way it reaches every
+    /// other spawned thread's stack — by probing the page. See that type's note
+    /// on what is deliberately not in the region list.
     pub fn regions(&self) -> Vec<(u64, &[u8])> {
-        Regions::regions(&self.space)
+        self.space
+            .as_ref()
+            .map(Regions::regions)
+            .unwrap_or_default()
     }
 }

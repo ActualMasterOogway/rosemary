@@ -33,29 +33,18 @@ pub fn proc_pidpath(
     Ok(())
 }
 
-/// Return the high address of this thread's guest stack.
-pub fn pthread_get_stackaddr_np(
-    _symbol: &str,
-    ctx: &mut RegisterContext,
-    _mem: &mut dyn GuestMemory,
-) -> Result<()> {
-    ctx.rax = crate::thread::current()
-        .map(|state| state.stack_range().end)
-        .unwrap_or(0);
-    Ok(())
-}
-
-/// Return the size of this thread's guest stack, not the host callback stack.
-pub fn pthread_get_stacksize_np(
-    _symbol: &str,
-    ctx: &mut RegisterContext,
-    _mem: &mut dyn GuestMemory,
-) -> Result<()> {
-    ctx.rax = crate::thread::current()
-        .map(|state| state.stack_range().end - state.stack_range().start)
-        .unwrap_or(0);
-    Ok(())
-}
+// `pthread_get_stackaddr_np` and `pthread_get_stacksize_np` were here, and
+// answered about the **calling** thread whichever thread they were asked about.
+// That is right for the one call a program makes about itself and wrong for
+// every other one — and the caller that matters asks about other threads by
+// definition: a collector suspends the world and asks for each thread's stack in
+// turn, and got the collector's own back every time.
+//
+// They live in [`super::machthread`] now, beside `thread_get_state`, which the
+// same caller asks the same question of and which has the `pthread_t` → thread
+// lookup already. This module is consulted *before* that one, so the copies here
+// silently shadowed the answers there; the note stays so a third copy is not
+// written over the top of them again.
 
 /// The guest has no separately protected JIT mapping to toggle.
 pub fn pthread_jit_write_protect_np(
@@ -72,8 +61,6 @@ pub type Shim = fn(&str, &mut RegisterContext, &mut dyn GuestMemory) -> Result<(
 pub fn shim_for(name: &str) -> Option<Shim> {
     match name {
         "proc_pidpath" => Some(proc_pidpath),
-        "pthread_get_stackaddr_np" => Some(pthread_get_stackaddr_np),
-        "pthread_get_stacksize_np" => Some(pthread_get_stacksize_np),
         "pthread_jit_write_protect_np" => Some(pthread_jit_write_protect_np),
         _ => None,
     }

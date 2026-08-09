@@ -307,6 +307,124 @@ int main(void) {
 }
 "#;
 
+/// The stack half of the `pthread` surface: which stack a guest thread's
+/// attributes were about, and who is allowed to ask about it.
+///
+/// Every line is written to be *identical* to the native run, which is why no
+/// address is ever printed — only sizes, which the guest chose, and booleans
+/// about addresses it can compute for itself. What each one falsifies:
+///
+/// - **`size`** — the guest's `pthread_attr_setstacksize` reached the stack its
+///   own frames are on. A runtime that applied it to the host thread and gave
+///   the guest a default reports the default.
+/// - **`local_inside`** — a local variable of the start routine really is in
+///   the range the same thread is told its stack occupies. This is the one that
+///   catches a plausible-looking answer built out of the wrong mapping.
+/// - **`other_thread_agrees`** — the *main* thread asks about the worker, by
+///   `pthread_t`, and gets the worker's own answer. A shim that reads the
+///   calling thread's state answers with the main thread's stack, which is the
+///   bug this fixture exists for; it is also exactly what a garbage collector
+///   does, once per thread, with the world stopped.
+/// - **`supplied`** — a stack the guest allocated itself and handed over with
+///   `pthread_attr_setstack` is the stack the guest's frames end up on, at the
+///   size and address the guest named.
+///
+/// The main thread reports its own stack too, because "answers for the calling
+/// thread" and "answers for the thread asked about" agree there and nowhere
+/// else — a fixture that only ever asked from the worker would pass either way.
+pub const PTHREAD_STACK_C: &str = r#"
+#include <pthread.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <sys/mman.h>
+
+static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
+/* 0: worker running, 1: worker has reported, 2: main is done asking */
+static int state = 0;
+static void *w_addr;
+static size_t w_size;
+static int w_local_inside;
+
+static int inside(uintptr_t p, void *addr, size_t size) {
+    return p < (uintptr_t)addr && p >= (uintptr_t)addr - size;
+}
+
+static void *worker(void *arg) {
+    int local = 0;
+    void *addr = pthread_get_stackaddr_np(pthread_self());
+    size_t size = pthread_get_stacksize_np(pthread_self());
+    pthread_mutex_lock(&m);
+    w_addr = addr;
+    w_size = size;
+    w_local_inside = inside((uintptr_t)&local, addr, size);
+    state = 1;
+    pthread_cond_broadcast(&cv);
+    while (state != 2) pthread_cond_wait(&cv, &m);
+    pthread_mutex_unlock(&m);
+    return arg;
+}
+
+static void probe(const char *what, pthread_attr_t *a, void *supplied, size_t supplied_size) {
+    pthread_t t;
+    state = 0;
+    if (pthread_create(&t, a, worker, (void *)0x1234) != 0) {
+        printf("%s: create failed\n", what);
+        return;
+    }
+    pthread_mutex_lock(&m);
+    while (state != 1) pthread_cond_wait(&cv, &m);
+    pthread_mutex_unlock(&m);
+
+    /* From another thread entirely, by pthread_t. */
+    void *other_addr = pthread_get_stackaddr_np(t);
+    size_t other_size = pthread_get_stacksize_np(t);
+    printf("%s: size=%zu local_inside=%d other_thread_agrees=%d\n", what, w_size,
+           w_local_inside, other_addr == w_addr && other_size == w_size);
+    if (supplied) {
+        printf("%s: supplied=%d\n", what,
+               w_addr == (void *)((char *)supplied + supplied_size) && w_size == supplied_size);
+    }
+
+    pthread_mutex_lock(&m);
+    state = 2;
+    pthread_cond_broadcast(&cv);
+    pthread_mutex_unlock(&m);
+    void *r = 0;
+    pthread_join(t, &r);
+    printf("%s: joined %ld\n", what, (long)r);
+}
+
+int main(void) {
+    int local = 0;
+    void *addr = pthread_get_stackaddr_np(pthread_self());
+    printf("main: size=%zu inside=%d\n", pthread_get_stacksize_np(pthread_self()),
+           inside((uintptr_t)&local, addr, pthread_get_stacksize_np(pthread_self())));
+
+    probe("default", 0, 0, 0);
+
+    pthread_attr_t a;
+    pthread_attr_init(&a);
+    probe("initialised", &a, 0, 0);
+    pthread_attr_setstacksize(&a, 1024 * 1024);
+    probe("sized", &a, 0, 0);
+    pthread_attr_destroy(&a);
+
+    size_t size = 256 * 1024;
+    void *mem = mmap(0, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (mem == MAP_FAILED) {
+        printf("no mapping\n");
+        return 1;
+    }
+    pthread_attr_t b;
+    pthread_attr_init(&b);
+    pthread_attr_setstack(&b, mem, size);
+    probe("own", &b, mem, size);
+    pthread_attr_destroy(&b);
+    return 0;
+}
+"#;
+
 /// Milestone 4's single-threaded thread-local program.
 ///
 /// Separate from [`THREAD_C`] because it isolates a different failure: reading
@@ -971,6 +1089,14 @@ pub fn errno_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     BUILT
         .get_or_init(|| build_x86_64("errno_thread", ERRNO_C, &[]))
+        .clone()
+}
+
+/// Build [`PTHREAD_STACK_C`], or `None` if this host cannot.
+pub fn pthread_stack_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("pthread_stack", PTHREAD_STACK_C, &[]))
         .clone()
 }
 
