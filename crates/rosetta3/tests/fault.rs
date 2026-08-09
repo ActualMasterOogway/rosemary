@@ -16,9 +16,9 @@
 //! - **it reads the address as text when the address is text** — the branch
 //!   that turned `0x70536573556e6143` into `CanUseSp` and pointed at Unity's
 //!   serialized property names;
-//! - **it names the guest region**, which is the whole reason the module
-//!   exists: a host `pc` alone is not a work item and a guest range in a named
-//!   image is.
+//! - **it names the guest instruction**, which is the whole reason the module
+//!   exists: a host `pc` alone is not a work item, and a guest address in a
+//!   named image is.
 
 mod common;
 
@@ -48,6 +48,10 @@ fn a_faulting_guest_names_its_address_and_its_region() {
     // Named against the image it came from, so the range is `objdump` input
     // rather than a number needing a second run to interpret.
     assert!(err.contains("(guest_fault+0x"), "stderr: {err}");
+    // And the instruction itself, out of microlift's source locations. This is
+    // the difference between a work item and a search: the faulting store is
+    // one address, not a region to disassemble.
+    assert!(err.contains("guest instruction 0x"), "stderr: {err}");
 }
 
 #[test]

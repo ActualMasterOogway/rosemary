@@ -59,31 +59,99 @@
 //! - `SA_ONSTACK`, so a fault caused by *stack exhaustion* still has somewhere
 //!   to run — Rust's runtime has already given each thread an alternate stack.
 
+use microlift::core::srcloc::{GuestCodeMap, GuestCodeRange};
+
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
 /// One compiled translation, as a fault needs to see it.
-#[derive(Clone, Copy)]
 struct Placed {
+    /// Host address the compiled code begins at.
+    code: u64,
     /// Guest addresses the region covers.
     guest: (u64, u64),
     /// The guest `rip` the region was lifted to be entered at.
     lifted_for: u64,
+    /// Host offset → guest instruction, from microlift's own source locations.
+    ///
+    /// Plain `Copy` data, sorted by host offset and non-overlapping, which is
+    /// what makes it readable from a handler: the lookup is a binary search
+    /// over a slice and touches nothing else.
+    ///
+    /// Empty when the map budget was already spent — see [`MAP_BUDGET`]. The
+    /// report then gives the region and the offset, which is what it gave
+    /// before this field existed.
+    map: Vec<GuestCodeRange>,
+}
+
+impl Placed {
+    /// One past the last host byte any guest instruction was lifted into.
+    ///
+    /// Not the function's length: Cranelift attributes no source location to a
+    /// prologue, an epilogue, or the entry dispatch switch, so those are absent
+    /// from the map and this under-counts by however many bytes they take. It
+    /// is still the right bound to report against, because *under*-counting
+    /// makes a `pc` past the end say so rather than claim a region it may not
+    /// be in.
+    fn attributed_end(&self) -> u64 {
+        self.map.last().map_or(0, |r| self.code + u64::from(r.end))
+    }
 }
 
 /// Compiled translations by the host address of their entry point.
 ///
-/// Sorted, so a faulting `pc` finds the last translation at or below it. That
-/// is an *upper bound* on the answer and not the answer: a `Translation` records
-/// the guest bytes it covers and not how many host bytes Cranelift emitted for
-/// them, so a `pc` past the end of one translation matches it rather than
-/// matching nothing. The report prints the offset for exactly that reason —
-/// tens of bytes is inside, tens of thousands is "this is the nearest one".
+/// Sorted, so a faulting `pc` finds the last translation at or below it —
+/// which is a *candidate*, not an answer, and is checked against that
+/// translation's own extent before the report claims it.
 ///
 /// Global rather than per-thread even though the caches are per-thread: a fault
 /// handler has one question, and which thread compiled the code is not part of
 /// it.
-static PLACED: Mutex<Vec<(u64, Placed)>> = Mutex::new(Vec::new());
+static PLACED: Mutex<Vec<Placed>> = Mutex::new(Vec::new());
+
+/// How many host-to-guest ranges to keep across the whole process.
+///
+/// Sixteen bytes each, so this is a 64 MiB ceiling on the one thing here that
+/// grows with the program. A guest that generates its own code — which is the
+/// guest this module was built for — lifts tens of thousands of regions, and an
+/// unbounded map would be a memory leak wearing a diagnostic's clothes. Past
+/// the budget the maps stop being kept and the report degrades to naming the
+/// region, which is what it did before.
+const MAP_BUDGET: usize = 4 * 1024 * 1024;
+
+/// Ranges kept so far, against [`MAP_BUDGET`].
+static MAPPED: AtomicUsize = AtomicUsize::new(0);
+
+/// Note where a translation's compiled code went, and what it came from.
+///
+/// Called from [`crate::cache`] as each region is finalized. Insertion keeps the
+/// vector sorted, which for an append-mostly list — JIT modules come from
+/// `mmap`, so later ones are usually higher — is a `push` and a rare shift.
+pub fn placed(
+    code: u64,
+    guest_start: u64,
+    guest_end: u64,
+    lifted_for: u64,
+    map: &GuestCodeMap,
+) -> usize {
+    let ranges = map.ranges();
+    let keep = MAPPED.fetch_add(ranges.len(), Ordering::Relaxed) + ranges.len() <= MAP_BUDGET;
+    let entry = Placed {
+        code,
+        guest: (guest_start, guest_end),
+        lifted_for,
+        map: match keep {
+            true => ranges.to_vec(),
+            false => Vec::new(),
+        },
+    };
+    let mut placed = PLACED.lock().unwrap_or_else(|e| e.into_inner());
+    match placed.binary_search_by_key(&code, |p| p.code) {
+        Ok(i) => placed[i] = entry,
+        Err(i) => placed.insert(i, entry),
+    }
+    placed.len()
+}
 
 /// Whether [`install`] has run. Handlers are process-wide.
 static INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -134,23 +202,6 @@ pub fn note_images(report: &machish::report::LinkReport) {
         });
     }
     images.sort_by_key(|i| i.range.0);
-}
-
-/// Note where a translation's compiled code begins.
-///
-/// Called from [`crate::cache`] as each region is finalized. Insertion keeps the
-/// vector sorted, which for an append-mostly list — JIT modules come from
-/// `mmap`, so later ones are usually higher — is a `push` and a rare shift.
-pub fn placed(code: u64, guest_start: u64, guest_end: u64, lifted_for: u64) {
-    let entry = Placed {
-        guest: (guest_start, guest_end),
-        lifted_for,
-    };
-    let mut placed = PLACED.lock().unwrap_or_else(|e| e.into_inner());
-    match placed.binary_search_by_key(&code, |(at, _)| *at) {
-        Ok(i) => placed[i] = (code, entry),
-        Err(i) => placed.insert(i, (code, entry)),
-    }
 }
 
 /// Install the reporter for the faults a translation can raise.
@@ -267,24 +318,26 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
     restore(signal);
 }
 
-/// Name the translation the faulting `pc` fell in, as guest addresses.
+/// Name the translation the faulting `pc` fell in, and the guest instruction
+/// inside it when microlift's source locations reach that far.
 fn say_region(out: &mut Buffer, pc: u64) {
     let Ok(placed) = PLACED.try_lock() else {
         out.str("\n  guest region: unavailable (a thread holds the map)");
         return;
     };
-    let found = match placed.binary_search_by_key(&pc, |(at, _)| *at) {
-        Ok(i) => Some(placed[i]),
+    let found = match placed.binary_search_by_key(&pc, |p| p.code) {
+        Ok(i) => Some(&placed[i]),
         Err(0) => None,
-        Err(i) => Some(placed[i - 1]),
+        Err(i) => Some(&placed[i - 1]),
     };
-    let Some((code, entry)) = found else {
+    let Some(entry) = found else {
         out.str(
             "\n  guest region: none — the pc is below every translation, \
-                 so this fault is in host code",
+             so this fault is in host code",
         );
         return;
     };
+
     out.str("\n  guest region ");
     out.hex(entry.guest.0);
     out.str("..");
@@ -292,18 +345,53 @@ fn say_region(out: &mut Buffer, pc: u64) {
     say_image(out, entry.guest.0);
     out.str(", entered at ");
     out.hex(entry.lifted_for);
+
+    // The exact instruction, when the map has it. This is the whole point of
+    // carrying microlift's source locations: a guest *address* is a work item
+    // and a region is a search.
+    let offset = pc - entry.code;
+    if let Ok(offset) = u32::try_from(offset) {
+        if let Some(va) = lookup(&entry.map, offset) {
+            out.str("\n  guest instruction ");
+            out.hex(va);
+            say_image(out, va);
+            return;
+        }
+    }
+
     out.str("\n  host offset +");
-    out.hex(pc - code);
+    out.hex(offset);
     out.str(" into its compiled code");
-    // A translation's host length is not recorded, so a large offset means the
-    // lookup ran off the end of the nearest one rather than that the guest ran
-    // a long way into it. Saying so is cheaper than a wrong region.
-    if pc - code > 1 << 20 {
+    // A `pc` outside everything the map attributed is not necessarily inside
+    // this translation at all: the candidate is only "the nearest entry point
+    // at or below", so an offset past the end usually means the fault was in a
+    // *later* translation whose entry this list has not seen, or in host code
+    // between two of them. Saying which case it is beats claiming a region.
+    if entry.map.is_empty() {
+        out.str(" — no source map was kept for this region (map budget spent)");
+    } else if pc >= entry.attributed_end() {
         out.str(
-            " — larger than any region, so this is the nearest translation \
-                 below the pc and not necessarily the right one",
+            " — past every range this translation attributed to a guest \
+                 instruction, so the fault is probably not in it",
+        );
+    } else {
+        out.str(
+            " — inside it, but in code with no guest origin: a prologue, \
+                 an epilogue, or the entry dispatch",
         );
     }
+}
+
+/// The guest instruction covering a host offset, over microlift's own sorted,
+/// non-overlapping ranges.
+///
+/// Open-coded rather than calling [`GuestCodeMap::lookup`] because this runs in
+/// a signal handler over a slice the handler borrowed: rebuilding a
+/// `GuestCodeMap` to ask it a question would allocate.
+fn lookup(map: &[GuestCodeRange], offset: u32) -> Option<u64> {
+    let i = map.partition_point(|r| r.start <= offset);
+    let range = map.get(i.checked_sub(1)?)?;
+    range.contains(offset).then_some(range.guest_va)
 }
 
 /// Name the image a guest address is in, as `name+offset`.
@@ -498,20 +586,65 @@ mod tests {
         assert_eq!(ascii_word(0), None);
     }
 
+    /// A map with one range per guest instruction, laid out back to back.
+    fn map(guest_start: u64, instructions: u32) -> GuestCodeMap {
+        GuestCodeMap::from_ranges(
+            (0..instructions)
+                .map(|i| GuestCodeRange {
+                    start: i * 16,
+                    end: (i + 1) * 16,
+                    guest_va: guest_start + u64::from(i),
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_host_pc_resolves_to_the_guest_instruction_it_came_from() {
+        // The claim the whole module turns on. Without the source map the best
+        // available answer was "some address in this region", which for a
+        // sixty-byte function is a search and for a Mono method is a shrug.
+        placed(0x40_0000, 0x1_0000, 0x1_0010, 0x1_0000, &map(0x1_0000, 16));
+        let placed = PLACED.lock().unwrap();
+        let entry = placed.iter().find(|p| p.code == 0x40_0000).unwrap();
+
+        assert_eq!(lookup(&entry.map, 0), Some(0x1_0000));
+        assert_eq!(lookup(&entry.map, 15), Some(0x1_0000));
+        assert_eq!(lookup(&entry.map, 16), Some(0x1_0001));
+        assert_eq!(lookup(&entry.map, 0x57), Some(0x1_0005));
+        // Past everything attributed: a prologue, an epilogue, or another
+        // translation altogether. `None` is what makes the report say so
+        // instead of naming an instruction it cannot see.
+        assert_eq!(lookup(&entry.map, 16 * 16), None);
+    }
+
     #[test]
     fn the_nearest_translation_below_the_pc_is_the_one_reported() {
-        placed(0x4000, 0x1_0000, 0x1_0100, 0x1_0000);
-        placed(0x8000, 0x2_0000, 0x2_0080, 0x2_0040);
+        placed(0x4000, 0x1_0000, 0x1_0100, 0x1_0000, &map(0x1_0000, 4));
+        placed(0x8000, 0x2_0000, 0x2_0080, 0x2_0040, &map(0x2_0000, 4));
         let placed = PLACED.lock().unwrap();
-        let find = |pc: u64| match placed.binary_search_by_key(&pc, |(at, _)| *at) {
-            Ok(i) => Some(placed[i].1.guest),
+        let find = |pc: u64| match placed.binary_search_by_key(&pc, |p| p.code) {
+            Ok(i) => Some(placed[i].guest),
             Err(0) => None,
-            Err(i) => Some(placed[i - 1].1.guest),
+            Err(i) => Some(placed[i - 1].guest),
         };
         assert_eq!(find(0x3fff), None);
         assert_eq!(find(0x4000), Some((0x1_0000, 0x1_0100)));
         assert_eq!(find(0x4010), Some((0x1_0000, 0x1_0100)));
         assert_eq!(find(0x9000), Some((0x2_0000, 0x2_0080)));
+    }
+
+    #[test]
+    fn a_pc_past_everything_a_translation_covers_is_not_claimed_for_it() {
+        // The misattribution this replaced: `+0x57c` into a sixty-two-byte
+        // region was reported as if it were inside it. Four sixteen-byte ranges
+        // end at 0x40, so anything at or past that is outside.
+        placed(0x10_0000, 0x3_0000, 0x3_0004, 0x3_0000, &map(0x3_0000, 4));
+        let placed = PLACED.lock().unwrap();
+        let entry = placed.iter().find(|p| p.code == 0x10_0000).unwrap();
+        assert_eq!(entry.attributed_end(), 0x10_0040);
+        assert_eq!(lookup(&entry.map, 0x3f), Some(0x3_0003));
+        assert_eq!(lookup(&entry.map, 0x40), None);
     }
 
     #[test]

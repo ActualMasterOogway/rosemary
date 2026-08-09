@@ -310,7 +310,7 @@ impl CodeCache {
         // Where this region's compiled code went, so a fault inside it can be
         // named as a *guest* range rather than as an address in an anonymous
         // mapping. See [`crate::fault`].
-        crate::fault::placed(compiled.code as usize as u64, start, end, pc);
+        crate::fault::placed(compiled.code as usize as u64, start, end, pc, &compiled.map);
 
         let translation = Arc::new(Translation {
             start,
@@ -432,7 +432,7 @@ fn compile_region(
     let entries = lifted.resume_points.clone();
     let lift_took = clock.map(|c| c.elapsed());
     let mut backend = crate::jit::backend()?;
-    let code = backend.compile_lifted(lifted)?;
+    let (code, map) = backend.compile_lifted_with_map(lifted)?;
     if let (Some(clock), Some(lift)) = (clock, lift_took) {
         crate::stats::record_lift(
             region.starts.len(),
@@ -444,6 +444,7 @@ fn compile_region(
     Ok(Compiled {
         backend,
         code,
+        map,
         entries,
     })
 }
@@ -453,6 +454,9 @@ fn compile_region(
 struct Compiled {
     backend: microlift::backend::CraneliftBackend,
     code: *const u8,
+    /// Host offset → guest instruction, so a fault inside this code can name
+    /// the instruction rather than the region. See [`crate::fault`].
+    map: microlift::core::srcloc::GuestCodeMap,
     /// Where the compiled code may be entered — see [`Translation::covers`].
     entries: Vec<u64>,
 }
