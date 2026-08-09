@@ -1108,6 +1108,47 @@ pub fn pthread_sync_fixture() -> Option<String> {
         .clone()
 }
 
+/// A guest that divides 128-bit integers, which no machine here can do.
+///
+/// `unsigned __int128 / unsigned __int128` compiles to a call to compiler-rt's
+/// `__udivti3` on both architectures, and each argument spans a *register pair*
+/// — so a shim that read only the low half of each would answer plausibly and
+/// wrongly. The dividend is `2^100 + 12345` for exactly that reason: it does not
+/// fit in sixty-four bits, so losing the high half changes the answer rather
+/// than hiding in it.
+///
+/// The divisor comes from `argc` so the optimiser cannot fold the division away,
+/// and the signed forms are exercised too because they truncate toward zero and
+/// carry the numerator's sign into the remainder.
+pub const INT128_C: &str = r#"
+#include <stdio.h>
+
+static void show(const char *tag, unsigned __int128 v) {
+    printf("%s %llu:%llu\n", tag, (unsigned long long)(v >> 64), (unsigned long long)v);
+}
+
+int main(int argc, char **argv) {
+    (void)argv;
+    unsigned __int128 a = ((unsigned __int128)1 << 100) + 12345;
+    unsigned __int128 b = (unsigned __int128)argc * 3;
+    show("uq", a / b);
+    show("ur", a % b);
+    __int128 c = -(__int128)a;
+    __int128 d = (__int128)argc * 3;
+    show("sq", (unsigned __int128)(c / d));
+    show("sr", (unsigned __int128)(c % d));
+    return 0;
+}
+"#;
+
+/// Build [`INT128_C`], or `None` if this host cannot.
+pub fn int128_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("int128", INT128_C, &[]))
+        .clone()
+}
+
 /// A guest that converts a `CFString` to bytes the way Foundation callers do.
 ///
 /// `CFStringGetCString`'s last parameter is the encoding, and an entry that

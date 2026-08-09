@@ -17,6 +17,25 @@
 //! both the aggregate-return question and any question of what the host's own
 //! `ldiv` does.
 //!
+//! ## The 128-bit compiler-rt helpers
+//!
+//! `__udivti3` and its siblings are not C library functions at all — they are
+//! what a compiler emits for `unsigned __int128 / unsigned __int128` on a
+//! machine with no such instruction, and both x86-64 and arm64 are such
+//! machines. They are here rather than in the table for the same reason `ldiv`
+//! is, doubled: an `__int128` is *two* eightbytes going in and two coming back,
+//! so a single argument spans a register pair on both sides and the return is
+//! an aggregate by any other name.
+//!
+//! SysV AMD64 gives each `__int128` two consecutive integer registers — `rdi:rsi`
+//! for the first argument, `rdx:rcx` for the second, low half first — and
+//! returns in `rax:rdx`. That is the whole ABI here, and Rust has `u128`, so
+//! the arithmetic is one operator and nothing is forwarded.
+//!
+//! Below Zero reached `__udivti3` after its start screen loaded, which is the
+//! ordinary way one of these turns up: nothing imports them until some piece of
+//! generated or templated code divides a 128-bit value.
+//!
 //! ## Division by zero, and the one overflow
 //!
 //! C leaves both undefined, and on the guest's own hardware both are the same
@@ -41,8 +60,94 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         // platform: `long`, `long long` and `intmax_t` are all 64 bits, and all
         // three result structs are two of them.
         "ldiv" | "lldiv" | "imaxdiv" => Some(ldiv),
+        // The compiler-rt 128-bit helpers. Spelled with two leading
+        // underscores in C, which is three in the Mach-O and two by the time
+        // [`crate::shims`] has stripped the symbol's own.
+        "__udivti3" => Some(udivti3),
+        "__umodti3" => Some(umodti3),
+        "__divti3" => Some(divti3),
+        "__modti3" => Some(modti3),
+        "__udivmodti4" => Some(udivmodti4),
         _ => None,
     }
+}
+
+/// The two `__int128` arguments SysV puts in `rdi:rsi` and `rdx:rcx`.
+fn operands(ctx: &RegisterContext) -> (u128, u128) {
+    let a = u128::from(ctx.rdi) | (u128::from(ctx.rsi) << 64);
+    let b = u128::from(ctx.rdx) | (u128::from(ctx.rcx) << 64);
+    (a, b)
+}
+
+/// A 128-bit result, in the `rax:rdx` pair SysV returns one in.
+fn result(ctx: &mut RegisterContext, value: u128) {
+    ctx.rax = value as u64;
+    ctx.rdx = (value >> 64) as u64;
+}
+
+/// `unsigned __int128 __udivti3(unsigned __int128 a, unsigned __int128 b)`
+fn udivti3(symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
+    let (a, b) = operands(ctx);
+    let Some(q) = a.checked_div(b) else {
+        return Err(would_have_trapped(symbol));
+    };
+    result(ctx, q);
+    Ok(())
+}
+
+/// `unsigned __int128 __umodti3(unsigned __int128 a, unsigned __int128 b)`
+fn umodti3(symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
+    let (a, b) = operands(ctx);
+    let Some(r) = a.checked_rem(b) else {
+        return Err(would_have_trapped(symbol));
+    };
+    result(ctx, r);
+    Ok(())
+}
+
+/// `__int128 __divti3(__int128 a, __int128 b)` — signed, truncating toward
+/// zero, and `checked_div` refuses the one overflow (`i128::MIN / -1`) for the
+/// same reason `ldiv` does.
+fn divti3(symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
+    let (a, b) = operands(ctx);
+    let Some(q) = (a as i128).checked_div(b as i128) else {
+        return Err(would_have_trapped(symbol));
+    };
+    result(ctx, q as u128);
+    Ok(())
+}
+
+/// `__int128 __modti3(__int128 a, __int128 b)`
+fn modti3(symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
+    let (a, b) = operands(ctx);
+    let Some(r) = (a as i128).checked_rem(b as i128) else {
+        return Err(would_have_trapped(symbol));
+    };
+    result(ctx, r as u128);
+    Ok(())
+}
+
+/// `unsigned __int128 __udivmodti4(unsigned __int128 a, unsigned __int128 b,
+/// unsigned __int128 *rem)` — the quotient returned, the remainder written
+/// through the pointer in `r8`, which is the register after the two pairs.
+///
+/// A null `rem` is legal and means the caller wants only the quotient; the
+/// compiler emits that spelling when it has both uses and only needs one.
+fn udivmodti4(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    let (a, b) = operands(ctx);
+    let (Some(q), Some(r)) = (a.checked_div(b), a.checked_rem(b)) else {
+        return Err(would_have_trapped(symbol));
+    };
+    let at = ctx.r8;
+    if at != 0 {
+        mem.write(at, &r.to_le_bytes())
+            .map_err(|_| AbiError::Memory {
+                symbol: symbol.to_string(),
+                addr: at,
+            })?;
+    }
+    result(ctx, q);
+    Ok(())
 }
 
 /// `div_t div(int numer, int denom)` — eight bytes, so one eightbyte, so `rax`.
@@ -104,6 +209,56 @@ mod tests {
         ctx.rsi = denom;
         shim("div", &mut ctx, &mut NoMemory).expect("divides");
         (ctx.rax, ctx.rdx)
+    }
+
+    /// Call a 128-bit helper the way SysV would: `rdi:rsi`, then `rdx:rcx`.
+    fn call128(shim: Shim, a: u128, b: u128) -> (u128, RegisterContext) {
+        let mut ctx = RegisterContext::new();
+        ctx.rdi = a as u64;
+        ctx.rsi = (a >> 64) as u64;
+        ctx.rdx = b as u64;
+        ctx.rcx = (b >> 64) as u64;
+        shim("__udivti3", &mut ctx, &mut NoMemory).expect("divides");
+        (u128::from(ctx.rax) | (u128::from(ctx.rdx) << 64), ctx)
+    }
+
+    #[test]
+    fn a_128_bit_quotient_spans_the_register_pair() {
+        // A value that does not fit in 64 bits, so a shim that only looked at
+        // `rdi` and `rdx` would get a different answer rather than a wrong-
+        // looking one.
+        let a = 1u128 << 100;
+        let (q, _) = call128(udivti3, a, 3);
+        assert_eq!(q, a / 3);
+        let (r, _) = call128(umodti3, a, 3);
+        assert_eq!(r, a % 3);
+    }
+
+    #[test]
+    fn the_signed_forms_truncate_toward_zero() {
+        let a = -(1i128 << 100);
+        let (q, _) = call128(divti3, a as u128, 3);
+        assert_eq!(q as i128, a / 3);
+        let (r, _) = call128(modti3, a as u128, 3);
+        assert_eq!(r as i128, a % 3);
+    }
+
+    #[test]
+    fn a_zero_divisor_is_refused_rather_than_answered() {
+        for shim in [udivti3, umodti3, divti3, modti3, udivmodti4] {
+            let mut ctx = RegisterContext::new();
+            ctx.rdi = 1;
+            assert!(
+                shim("__udivti3", &mut ctx, &mut NoMemory).is_err(),
+                "a zero divisor answered"
+            );
+        }
+        // And the one signed overflow, which `idiv` traps on too.
+        let mut ctx = RegisterContext::new();
+        ctx.rsi = 1u64 << 63; // i128::MIN
+        ctx.rdx = u64::MAX;
+        ctx.rcx = u64::MAX; // -1
+        assert!(divti3("__divti3", &mut ctx, &mut NoMemory).is_err());
     }
 
     #[test]
