@@ -446,6 +446,23 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // byte and a wider return would leave the rest of `rax` to be read as part
     // of it.
     sig!("CFNumberGetValue", U8, P, I64, P),
+    // ## Preferences
+    //
+    // The three `UnityPlayer.dylib` imports, and no more: a guest reads its own
+    // defaults through these on start-up — Unity asks for the resolution, the
+    // fullscreen mode and the graphics API it was last told to use.
+    //
+    // `CFPreferencesCopyAppValue` returns a `CFPropertyListRef` the caller owns,
+    // which needs nothing from this runtime: it is a host allocation on both
+    // sides and `CFRelease` above already crosses.
+    //
+    // The two `GetApp*Value` forms take a `Boolean *keyExistsAndHasValidFormat`
+    // out-parameter, which the guest may pass as null and which is written
+    // through directly — a guest pointer is a real address here, so the host's
+    // own store lands where the guest reads it.
+    sig!("CFPreferencesCopyAppValue", P, P, P),
+    sig!("CFPreferencesGetAppBooleanValue", U8, P, P, P),
+    sig!("CFPreferencesGetAppIntegerValue", I64, P, P, P),
     sig!("CFReadStreamCopyError", P, P),
     sig!("CFReadStreamCopyProperty", P, P, P),
     sig!("CFReadStreamCreateForHTTPRequest", P, P, P),
