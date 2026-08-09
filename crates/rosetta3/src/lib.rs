@@ -119,6 +119,7 @@
 //! milestone and are not built yet; both are refused by name until they are.
 
 pub mod abi;
+pub mod atomic128;
 pub mod audit;
 pub mod bridge;
 pub mod bundle;

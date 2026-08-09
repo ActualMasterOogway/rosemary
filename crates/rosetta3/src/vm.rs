@@ -1173,6 +1173,20 @@ impl Vm {
                 pc: ctx.rip,
             }),
 
+            // The one unimplemented instruction this runtime implements. It is
+            // not lowered because no Cranelift backend but x64 can lower a
+            // 128-bit atomic, and it is not *emulated* because a guest that
+            // issues it is a guest with threads. See [`crate::atomic128`].
+            ExitReason::UnimplementedInstruction
+                if iced_x86::Code::try_from(ctx.exit_code as usize)
+                    .map(|c| c.mnemonic() == iced_x86::Mnemonic::Cmpxchg16b)
+                    .unwrap_or(false) =>
+            {
+                let mem = self.view();
+                crate::atomic128::service(ctx, &mem)?;
+                Ok(None)
+            }
+
             _ => Err(VmError::Trap {
                 reason: exit,
                 code: ctx.exit_code,

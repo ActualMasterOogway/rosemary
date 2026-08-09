@@ -502,10 +502,17 @@ impl<M: Regions> Program<M> {
                 false
             }
         };
+        // `CMPXCHG16B`, and the one setting here that is a correctness
+        // decision rather than a tuning one. `Emulated` is a load, a compare
+        // and a store — right for a single-threaded guest and a data race for
+        // any other — and Unity's job system pops a lock-free free list with it
+        // on every worker. `Exit` hands the instruction to
+        // [`crate::atomic128`], which does it atomically with the host's own
+        // exclusive pair. See that module for what the race cost.
         let atomic128 = {
             #[cfg(target_arch = "aarch64")]
             {
-                Atomic128Mode::Emulated
+                Atomic128Mode::Exit
             }
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             {

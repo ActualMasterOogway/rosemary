@@ -1108,6 +1108,59 @@ pub fn pthread_sync_fixture() -> Option<String> {
         .clone()
 }
 
+/// A guest that shares a 128-bit location between threads, as Unity does.
+///
+/// `__sync_bool_compare_and_swap` on a `__int128` with `-mcx16` compiles to
+/// `lock cmpxchg16b`, which is the instruction the whole of
+/// [`crate::atomic128`] exists for. Four threads each add one to the low half
+/// ten thousand times through the CAS, and the total is checked — so a
+/// non-atomic emulation loses updates and prints the wrong number rather than
+/// passing quietly.
+///
+/// The pair is also read back as *two* halves whose relationship must hold:
+/// the high half counts successful swaps, so `lo == hi` says no thread ever saw
+/// a torn pair. A load/compare/store emulation can produce equal-but-wrong
+/// totals under luck; it cannot keep both invariants across forty thousand
+/// contended swaps.
+pub const CMPXCHG16B_C: &str = r#"
+#include <pthread.h>
+#include <stdio.h>
+
+typedef struct { unsigned long lo, hi; } pair;
+static _Alignas(16) pair shared;
+
+static void *worker(void *unused) {
+    (void)unused;
+    for (int i = 0; i < 10000; i++) {
+        for (;;) {
+            pair seen = shared;
+            pair next = { seen.lo + 1, seen.hi + 1 };
+            __int128 want, give;
+            __builtin_memcpy(&want, &seen, 16);
+            __builtin_memcpy(&give, &next, 16);
+            if (__sync_bool_compare_and_swap((__int128 *)&shared, want, give)) break;
+        }
+    }
+    return 0;
+}
+
+int main(void) {
+    pthread_t t[4];
+    for (int i = 0; i < 4; i++) pthread_create(&t[i], 0, worker, 0);
+    for (int i = 0; i < 4; i++) pthread_join(t[i], 0);
+    printf("lo %lu hi %lu torn %d\n", shared.lo, shared.hi, shared.lo != shared.hi);
+    return 0;
+}
+"#;
+
+/// Build [`CMPXCHG16B_C`], or `None` if this host cannot.
+pub fn cmpxchg16b_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("cmpxchg16b", CMPXCHG16B_C, &["-mcx16"]))
+        .clone()
+}
+
 /// A guest that faults, on purpose, at an address it chose.
 ///
 /// The sentinel is ASCII on purpose too: `crate::fault`'s report says so when a
