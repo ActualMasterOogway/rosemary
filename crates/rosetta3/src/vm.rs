@@ -773,6 +773,15 @@ impl Vm {
         self.objc().map_or(host, |rt| rt.guest_or(host))
     }
 
+    /// A `Protocol *` on its way out to the host runtime.
+    ///
+    /// [`Vm::objc_host_class`] for protocols: `@protocol(Foo)` is a direct
+    /// reference to the guest's own `protocol_t`, which the host runtime has
+    /// never seen. See [`crate::objc::ObjcRuntime::host_protocol_or`].
+    pub fn objc_host_protocol(&self, va: u64) -> u64 {
+        self.objc().map_or(va, |rt| rt.host_protocol_or(va))
+    }
+
     /// Guest memory, as a value a shim can hold.
     pub fn view(&self) -> GuestView {
         self.view.clone()

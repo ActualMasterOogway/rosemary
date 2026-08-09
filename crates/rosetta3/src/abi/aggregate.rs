@@ -25,7 +25,9 @@
 //! - a homogeneous float aggregate of *n* members occupies `v0`…`v(n-1)`, which
 //!   is exactly where *n* consecutive floating-point arguments go;
 //! - a composite of at most sixteen bytes occupies one or two `x` registers,
-//!   which is exactly where one or two integer arguments go.
+//!   which is exactly where one or two integer arguments go;
+//! - a composite larger than that is passed as a *pointer to a copy the caller
+//!   made*, which is exactly where one pointer argument goes.
 //!
 //! So an aggregate argument is spliced into the existing slot arrays as its
 //! leaves and nothing else changes. What genuinely needed new code is the
@@ -34,10 +36,15 @@
 //!
 //! ## What is refused
 //!
-//! - **A composite over sixteen bytes that is not a homogeneous float
-//!   aggregate.** AAPCS64 copies it to the host's own stack, which a register
-//!   prototype cannot reach. `CGAffineTransform` — six doubles, one too many
-//!   for an HFA — is the shape that hits this.
+//! - Nothing about **a composite over sixteen bytes that is not a homogeneous
+//!   float aggregate**, which was refused here until Unity's Metal backend sent
+//!   `replaceRegion:…` with a six-word `MTLRegion` in it. The refusal rested on
+//!   a wrong reading of AAPCS64: its rule B.4 has the *caller* copy such an
+//!   argument to memory and pass **a pointer to the copy**, which is an
+//!   ordinary integer register and squarely inside what a register prototype
+//!   can express. [`super::marshal::call_shapes`] makes that copy.
+//!   `CGAffineTransform` — six doubles, one too many for an HFA — travels the
+//!   same way.
 //! - **Sixteen-byte alignment**, which makes AAPCS64 round the register number
 //!   up to an even one. Nothing in Cocoa has it; a `__int128` member would.
 //! - **Unions.** Their members overlap, so "the leaves in order" is not a
@@ -115,8 +122,9 @@ pub enum HostClass {
     Hfa { ty: T, count: usize },
     /// One or two `x` registers holding the raw bytes.
     Integer { words: usize },
-    /// Returned through the address in `x8`. Only ever a *return*: an argument
-    /// this large goes on the host's stack, which is refused.
+    /// Passed and returned through an address rather than in registers: a
+    /// return through the buffer in `x8`, an argument through a pointer to the
+    /// caller's own copy (AAPCS64 B.4).
     Indirect,
 }
 
@@ -312,7 +320,7 @@ mod tests {
     #[test]
     fn a_five_member_float_aggregate_is_not_homogeneous() {
         // The HFA rule is *at most four*, and `CGAffineTransform` is six. Over
-        // sixteen bytes and not an HFA is the one argument shape refused.
+        // sixteen bytes and not an HFA travels by pointer to a caller's copy.
         let transform = agg("{CGAffineTransform=dddddd}");
         assert_eq!(transform.size, 48);
         assert_eq!(transform.host_class(), Ok(HostClass::Indirect));

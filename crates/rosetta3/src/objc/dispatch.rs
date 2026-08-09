@@ -80,7 +80,7 @@ use machish::resolve::SyntheticDylib;
 
 use microlift::arch::x86_64::context::RegisterContext;
 
-use crate::abi::aggregate::{GuestClass, Shape};
+use crate::abi::aggregate::{self, Aggregate, GuestClass, Leaf, Shape};
 use crate::abi::marshal::{self, Convert};
 use crate::abi::{AbiError, ArgType as T, GuestMemory, Result};
 use crate::vm::Vm;
@@ -99,6 +99,9 @@ struct Runtime {
     /// The C name, as `dlsym` spells it: no leading underscore.
     name: &'static str,
     /// `[0]` is the return type, `[1..]` the parameters, as everywhere else.
+    ///
+    /// `[0]` is [`T::None`] when [`Runtime::struct_return`] describes the
+    /// return instead, because no scalar type spells a struct.
     types: &'static [T],
     /// Zero-based parameter indices holding a `Class`.
     ///
@@ -119,6 +122,23 @@ struct Runtime {
     /// address. It is the same substitution `pthread_create`'s start routine
     /// gets, arriving through a different door.
     callbacks: &'static [u8],
+    /// Zero-based parameter indices holding a `Protocol *`.
+    ///
+    /// A protocol needs the same translation a class does and for the same
+    /// reason: `@protocol(Foo)` compiles to a direct reference to the dead
+    /// `protocol_t` in the guest's own `__objc_const`, and the protocol
+    /// [`super::register_protocol`] built out of it is a different object.
+    /// Anything else — a `Protocol *` the guest got back from
+    /// `objc_getProtocol`, a null — is itself on both sides and is left alone,
+    /// exactly as an unregistered class pointer is.
+    protocols: &'static [u8],
+    /// The scalar members of a struct returned **by value**, in declaration
+    /// order, or `None` for the ordinary scalar return in `types[0]`.
+    ///
+    /// Written down here because there is nothing to read it from: a runtime
+    /// entry point is C, its return type lives in `objc/runtime.h`, and the
+    /// image carries no encoding for it the way a method does.
+    struct_return: Option<&'static [T]>,
 }
 
 /// `(ret, args...)`, with no class anywhere.
@@ -130,6 +150,8 @@ macro_rules! rt {
             classes: &[],
             class_return: false,
             callbacks: &[],
+            protocols: &[],
+            struct_return: None,
         }
     };
 }
@@ -143,6 +165,8 @@ macro_rules! rtc {
             classes: &[$($c),*],
             class_return: false $(|| $ret_is_class)?,
             callbacks: &[],
+            protocols: &[],
+            struct_return: None,
         }
     };
 }
@@ -156,6 +180,8 @@ macro_rules! rtb {
             classes: &[],
             class_return: false,
             callbacks: &[$($b),*],
+            protocols: &[],
+            struct_return: None,
         }
     };
 }
@@ -173,6 +199,8 @@ macro_rules! rtcb {
             classes: &[$($c),*],
             class_return: false,
             callbacks: &[$($b),*],
+            protocols: &[],
+            struct_return: None,
         }
     };
 }
@@ -208,7 +236,18 @@ static RUNTIME: &[Runtime] = &[
     // Terraria reaches all three: Mono's Objective-C bridge builds an
     // `NSApplication` delegate class at start-up rather than declaring one.
     rtcb!([0], [2], "class_addMethod", U8, P, P, P, P),
-    rtc!([0], "class_conformsToProtocol", U8, P, P),
+    // Spelled out rather than built by a macro, as every entry taking a
+    // protocol is: a fifth macro for one more index list would say less than
+    // the field name does.
+    Runtime {
+        name: "class_conformsToProtocol",
+        types: &[U8, P, P],
+        classes: &[0],
+        class_return: false,
+        callbacks: &[],
+        protocols: &[1],
+        struct_return: None,
+    },
     rtc!([0] -> true, "class_createInstance", P, P, U64),
     rtc!([0], "class_getInstanceMethod", P, P, P),
     rtc!([0], "class_getInstanceSize", U64, P),
@@ -323,7 +362,42 @@ static RUNTIME: &[Runtime] = &[
     rtc!([0] -> true, "object_getIvar", P, P, P),
     rtc!([0, 2], "object_setIvar", V, P, P, P),
     rt!("property_copyAttributeList", P, P, P),
-    rt!("protocol_getName", P, P),
+    // ## The one entry that returns a struct
+    //
+    // `struct objc_method_description protocol_getMethodDescription(Protocol *,
+    // SEL, BOOL isRequiredMethod, BOOL isInstanceMethod)` — two pointers, `{SEL
+    // name; char *types;}`, sixteen bytes of integer class. Both conventions
+    // return that in their first two integer registers, so nothing is copied
+    // anywhere: the host's `x0`/`x1` become the guest's `rax`/`rdx`, which is a
+    // path [`marshal::call_shapes`] already walks for a method whose encoding
+    // names a struct.
+    //
+    // Unity's Metal backend asks this of `MTLDevice` while it builds the device
+    // caps, which is the first thing after `Initializing Metal device caps` in
+    // the player log and where Subnautica Below Zero stopped.
+    //
+    // The `types` pointer that comes back belongs to the host's `libobjc`, and
+    // the guest reads it as a C string — which works for the reason every other
+    // host pointer does: the guest is identity-mapped into this process, so a
+    // host address is an address it can load from.
+    Runtime {
+        name: "protocol_getMethodDescription",
+        types: &[V, P, P, U8, U8],
+        classes: &[],
+        class_return: false,
+        callbacks: &[],
+        protocols: &[0],
+        struct_return: Some(&[P, P]),
+    },
+    Runtime {
+        name: "protocol_getName",
+        types: &[P, P],
+        classes: &[],
+        class_return: false,
+        callbacks: &[],
+        protocols: &[0],
+        struct_return: None,
+    },
     rt!("sel_getName", P, P),
     rt!("sel_getUid", P, P),
     rt!("sel_isEqual", U8, P, P),
@@ -647,7 +721,7 @@ fn call_runtime(
     entry: &Runtime,
     vm: &Vm,
     ctx: &mut RegisterContext,
-    mem: &dyn GuestMemory,
+    mem: &mut dyn GuestMemory,
 ) -> Result<()> {
     let Some(host) = host_symbol(entry.name) else {
         return Err(AbiError::Unsatisfied {
@@ -660,8 +734,44 @@ fn call_runtime(
         class_return: entry.class_return,
         callbacks: entry.callbacks,
         blocks: &[],
+        protocols: entry.protocols,
     };
-    marshal::call_types(symbol, entry.types, host, ctx, mem, &convert)
+    let Some(leaves) = entry.struct_return else {
+        return marshal::call_types(symbol, entry.types, host, ctx, mem, &convert);
+    };
+    // The general marshaller, for the one return a `&[ArgType]` cannot spell.
+    // `types[0]` is `None` in that case and the shape replaces it; the
+    // parameters are scalars like everyone else's.
+    let mut shapes = vec![Shape::Struct(packed(leaves))];
+    shapes.extend(entry.types.iter().skip(1).copied().map(Shape::Scalar));
+    marshal::call_shapes(symbol, &shapes, host, ctx, mem, &convert)
+}
+
+/// A C struct laid out from its members, each at its own alignment.
+///
+/// The full layout rule, not a shortcut for the one caller: a member sits at
+/// the next offset its own width divides, and the struct is padded to its
+/// widest member. That is all of C's layout for a struct without bitfields or
+/// `#pragma pack`, neither of which appears in `objc/runtime.h`.
+fn packed(members: &[T]) -> Aggregate {
+    let mut offset = 0usize;
+    let mut leaves = Vec::with_capacity(members.len());
+    for &ty in members {
+        let width = aggregate::width_of(ty);
+        offset = offset.next_multiple_of(width);
+        leaves.push(Leaf { ty, offset });
+        offset += width;
+    }
+    let align = members
+        .iter()
+        .map(|&ty| aggregate::width_of(ty))
+        .max()
+        .unwrap_or(1);
+    Aggregate {
+        size: offset.next_multiple_of(align),
+        align,
+        leaves,
+    }
 }
 
 /// Class pointers, translated by parameter index.
@@ -676,6 +786,11 @@ struct Classes<'a> {
     ///
     /// Empty for the runtime entry points, none of which takes one.
     blocks: &'a [u8],
+    /// See [`Runtime::protocols`]. Empty for a message send: a protocol reaches
+    /// a method as an ordinary `id`-typed argument, and translating one there
+    /// would need the encoding to distinguish `@protocol` from `@`, which it
+    /// does not.
+    protocols: &'a [u8],
 }
 
 impl Convert for Classes<'_> {
@@ -701,6 +816,9 @@ impl Convert for Classes<'_> {
                 crate::shims::block::substitute_block(symbol, raw, &mut view, self.vm)?;
             }
             return Ok(raw);
+        }
+        if self.protocols.contains(&(index as u8)) {
+            return Ok(self.vm.objc_host_protocol(raw));
         }
         match self.classes.contains(&(index as u8)) {
             true => Ok(self.vm.objc_host_class(raw)),
@@ -893,6 +1011,7 @@ fn send(
         class_return: signature.class_return,
         callbacks: &[],
         blocks: &signature.blocks,
+        protocols: &[],
     };
     // Named by the *message* when it fails. `objc_msgSend` is the name of every
     // send in the program, so a refusal reported under it says which runtime
@@ -1391,6 +1510,46 @@ mod tests {
                 "{} and {} are out of order; binary_search would miss one",
                 pair[0].name,
                 pair[1].name
+            );
+        }
+    }
+
+    #[test]
+    fn a_struct_return_lands_in_the_guests_two_registers() {
+        // `objc_method_description` is the shape the whole struct-return path
+        // exists for, and what makes it cheap is that *both* conventions put it
+        // in two integer registers. If either classification ever disagreed the
+        // guest would read `rax`/`rdx` the host never wrote, which is a wrong
+        // answer with no fault to report — so the agreement is asserted rather
+        // than assumed.
+        let agg = packed(&[P, P]);
+        assert_eq!(agg.size, 16);
+        assert_eq!(agg.align, 8);
+        assert_eq!(agg.leaves[1].offset, 8);
+        assert_eq!(
+            agg.guest_class(),
+            GuestClass::Registers(vec![
+                crate::abi::aggregate::Eightbyte::Integer,
+                crate::abi::aggregate::Eightbyte::Integer,
+            ])
+        );
+        assert_eq!(
+            agg.host_class(),
+            Ok(crate::abi::aggregate::HostClass::Integer { words: 2 })
+        );
+    }
+
+    #[test]
+    fn a_struct_returning_entry_leaves_its_scalar_return_empty() {
+        // `types[0]` is the return everywhere else in this table, so an entry
+        // that describes its return twice would have the marshaller write a
+        // scalar over the struct it just placed.
+        for entry in RUNTIME.iter().filter(|r| r.struct_return.is_some()) {
+            assert_eq!(
+                entry.types[0],
+                T::None,
+                "{}'s scalar return would overwrite its struct",
+                entry.name
             );
         }
     }

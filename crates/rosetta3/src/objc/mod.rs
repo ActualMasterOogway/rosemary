@@ -204,6 +204,18 @@ impl ObjcRuntime {
         self.guest_class(host).unwrap_or(host)
     }
 
+    /// The host `Protocol *` for a guest `protocol_t` address, leaving anything
+    /// that is not one of this pass's protocols alone.
+    ///
+    /// `host_or` for protocols, and needed for the same reason: `@protocol(Foo)`
+    /// names the guest's own dead `protocol_t`, and [`register_protocol`] built
+    /// a different object out of it. There is no reverse direction because
+    /// nothing compares a `Protocol *` the way a guest compares a `Class` —
+    /// `conformsToProtocol:` is asked, not answered, by the guest.
+    pub fn host_protocol_or(&self, va: u64) -> u64 {
+        self.protocols.get(&va).copied().unwrap_or(va)
+    }
+
     pub fn stats(&self) -> &Stats {
         &self.stats
     }

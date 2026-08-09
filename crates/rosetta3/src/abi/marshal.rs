@@ -993,6 +993,15 @@ pub fn call_shapes(
     let mut fps = [0f64; MAX_FP_ARGS];
     let (mut n_int, mut n_fp) = (0usize, 0usize);
 
+    // The copies AAPCS64 B.4 says the *caller* makes for an aggregate too large
+    // for registers. Held here so every one of them outlives the call: the
+    // callee is handed their addresses and reads through them.
+    //
+    // `u64` rather than `u8` so the allocation is eight-aligned, which is the
+    // most any aggregate reaching this point asks for — `host_class` refuses a
+    // sixteen-byte alignment before anything is copied.
+    let mut copies: Vec<Vec<u64>> = Vec::new();
+
     // As in [`call_types`]: the integer arguments past the eighth decide which
     // prototype places them. An Objective-C method reaches this — a selector
     // with enough parameters is not rare, and one of Unity's is what found it.
@@ -1046,10 +1055,24 @@ pub fn call_shapes(
                             push_int(w, ArgType::UnsignedDoubleword, &mut n_int, &mut overflow)?;
                         }
                     }
+                    // AAPCS64 B.4: a composite larger than sixteen bytes that is
+                    // not an HVA is *copied by the caller* and the argument is
+                    // replaced by a pointer to the copy — an ordinary integer
+                    // argument, in an ordinary integer register. So the
+                    // register prototype reaches it after all, which is why
+                    // this is a copy and not the refusal it used to be.
+                    //
+                    // `-[MTLTexture replaceRegion:…]` is what found it: an
+                    // `MTLRegion` is six `NSUInteger`s, and Unity's Metal
+                    // backend sends that message for every texture it uploads.
                     HostClass::Indirect => {
-                        return Err(unmarshallable(
-                            "an aggregate argument over sixteen bytes goes on the host's stack",
-                        ));
+                        let mut copy = vec![0u64; agg.size.div_ceil(8)];
+                        for (i, w) in copy.iter_mut().enumerate() {
+                            *w = leaf_bits(&bytes, i * 8, 8);
+                        }
+                        let addr = copy.as_ptr() as usize as u64;
+                        copies.push(copy);
+                        push_int(addr, ArgType::Pointer, &mut n_int, &mut overflow)?;
                     }
                 }
             }
@@ -1068,6 +1091,9 @@ pub fn call_shapes(
 
     // Everything that can fail has failed by here.
     let (out, scalar_ret) = call_returning(host, &ints, &fps, ret_host, &ret, tail);
+    // Said rather than left to scope: `ints` holds addresses into these, and the
+    // callee has finished reading through them only now.
+    drop(copies);
     write_return(ctx, mem, symbol, &ret, sret, &out, scalar_ret, convert)
 }
 
