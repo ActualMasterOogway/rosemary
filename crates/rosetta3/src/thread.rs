@@ -593,7 +593,35 @@ pub fn install(state: ThreadState) -> &'static ThreadState {
     // another thread finds it. Replacing rather than inserting, for the reason
     // above: a second `Vm` on this thread is a new program.
     register(mach_port(), Arc::clone(&state.published));
+    clear_errno();
     state
+}
+
+/// Hand this thread the `errno` a thread that has just started really has.
+///
+/// `errno` is the one piece of "guest" state that is not this runtime's to
+/// build: it is `__error()` on the host thread the guest is running on, and
+/// that is *correct* — a guest syscall is the host's libSystem call on the same
+/// thread, so the two agree with no work at all. See the crate note.
+///
+/// What passthrough does not get for free is the **initial** value. A real
+/// process reaches `main` with `errno` zero; this one reaches it with whatever
+/// dyld, libSystem and Rust's own pre-`main` start-up left on the thread, which
+/// on this machine is `EPERM` — set before a line of this runtime runs, so
+/// there is nothing here to stop doing. A guest that prints `errno` after a
+/// call that *succeeded* then reads a stale 1 where it would natively read 0.
+/// `tests/thread.rs`'s `errno` fixture is exactly that program.
+///
+/// Here rather than in [`crate::startup`] because it is a claim about a
+/// **thread**, not about a process, and this is the one place every thread that
+/// becomes a guest thread passes through: the main thread from
+/// [`Vm::with_policy`](crate::Vm::with_policy) and every spawned one from
+/// [`ensure`]. Once per thread, never on a re-entry, so an `errno` the guest is
+/// entitled to keep across a call out is never touched.
+fn clear_errno() {
+    // SAFETY: `__error()` returns this thread's own `errno` slot, which is
+    // live for as long as the thread is.
+    unsafe { *libc::__error() = 0 };
 }
 
 /// The base of this host thread's thread-specific data array — the value a
