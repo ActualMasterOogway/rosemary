@@ -534,7 +534,21 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // extend a narrow return to 32 bits, so reading `w0` is safe where the
     // guest reads only `ax`.
     sig!("CFStringGetCharacterAtIndex", U16, P, I64),
-    sig!("CFStringGetCString", BOOL, P, P, U64),
+    // `Boolean CFStringGetCString(CFStringRef, char *buffer, CFIndex
+    // bufferSize, CFStringEncoding encoding)` — **four** parameters. This entry
+    // had three, and the missing one was the last, so the host read whatever
+    // the guest happened to leave in `x3` as the encoding and answered `false`
+    // for an encoding it did not recognise.
+    //
+    // Nothing failed where it was called. The conversion simply produced an
+    // empty string, and Unity built a plugin path out of it: an executable name
+    // appended to `Contents/MacOS/` that was not there, so every `.bundle`
+    // plugin in the game — FMOD, Steam, the game's own — was `dlopen`ed as a
+    // directory and reported `DllNotFoundException`. See the roadmap's M7.13.
+    //
+    // `bufferSize` is a `CFIndex`, which is signed; the old entry called it
+    // `U64`, which passes the same bits and says the wrong thing.
+    sig!("CFStringGetCString", BOOL, P, P, I64, U32),
     sig!("CFStringGetCStringPtr", P, P, U32),
     sig!("CFStringGetLength", I64, P),
     sig!("CFStringGetMaximumSizeForEncoding", I64, I64, U32),

@@ -1108,6 +1108,43 @@ pub fn pthread_sync_fixture() -> Option<String> {
         .clone()
 }
 
+/// A guest that converts a `CFString` to bytes the way Foundation callers do.
+///
+/// `CFStringGetCString`'s last parameter is the encoding, and an entry that
+/// omitted it made the host read register garbage and answer `false` — an empty
+/// string, no error, no fault. Unity built a plugin path out of that empty
+/// string and every `.bundle` plugin in Below Zero failed to load.
+///
+/// The fixture prints the length, the buffer size and the result together,
+/// because each is a different failure: a wrong `CFStringGetLength` gives the
+/// wrong length, a wrong `CFStringGetMaximumSizeForEncoding` gives a buffer too
+/// small, and a wrong `CFStringGetCString` gives the empty string that was
+/// actually happening.
+pub const CFSTRING_C: &str = r#"
+#include <CoreFoundation/CoreFoundation.h>
+#include <stdio.h>
+
+int main(void) {
+    CFStringRef s = CFStringCreateWithCString(NULL, "fmodstudio", kCFStringEncodingUTF8);
+    CFIndex len = CFStringGetLength(s);
+    CFIndex max = CFStringGetMaximumSizeForEncoding(len, kCFStringEncodingUTF8);
+    char buf[256];
+    buf[0] = 0;
+    Boolean ok = CFStringGetCString(s, buf, max + 1, kCFStringEncodingUTF8);
+    printf("len %ld max %ld ok %d buf '%s'\n", (long)len, (long)max, (int)ok, buf);
+    CFRelease(s);
+    return 0;
+}
+"#;
+
+/// Build [`CFSTRING_C`], or `None` if this host cannot.
+pub fn cfstring_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("cfstring", CFSTRING_C, &["-framework", "CoreFoundation"]))
+        .clone()
+}
+
 /// A guest that reaches an import by **tail jump**, with an argument on the
 /// stack.
 ///
@@ -1261,6 +1298,15 @@ pub fn tls_fixture() -> Option<String> {
 /// The counterpart to [`build_x86_64`], for tests whose claim is that the two
 /// architectures agree about something.
 pub fn build_native(name: &str, source: &str) -> Option<String> {
+    build_native_with(name, source, &[])
+}
+
+/// [`build_native`], with extra compiler arguments.
+///
+/// A fixture that links a framework needs them, and a native build that quietly
+/// fails to link is worse than no comparison at all: the test that would have
+/// caught the difference skips instead, and reports success.
+pub fn build_native_with(name: &str, source: &str, extra: &[&str]) -> Option<String> {
     let dir = fixture_dir();
     let src = dir.join(format!("{name}.c"));
     let out = dir.join(name);
@@ -1270,6 +1316,7 @@ pub fn build_native(name: &str, source: &str) -> Option<String> {
         .arg("-o")
         .arg(&out)
         .arg(&src)
+        .args(extra)
         .status()
         .ok()?;
     status.success().then(|| out.to_string_lossy().into_owned())
