@@ -295,6 +295,28 @@ pub fn call_import_with(
     mem: &mut dyn GuestMemory,
     callbacks: &dyn Callbacks,
 ) -> Result<()> {
+    // `ROSETTA3_TRACE_CALL` reports this call, if it names its symbol. The
+    // whole seam funnels through here — bridged and slow alike — so one place
+    // sees every intercepted call. See [`crate::trace`] for the one exception
+    // it had to arrange for: an inlined import never arrives.
+    if !crate::trace::watching(symbol) {
+        return call_import_inner(symbol, tag, host, ctx, mem, callbacks);
+    }
+    crate::trace::entering(symbol, ctx);
+    let result = call_import_inner(symbol, tag, host, ctx, mem, callbacks);
+    crate::trace::leaving(symbol, ctx, &result);
+    result
+}
+
+/// [`call_import_with`], without the trace around it.
+fn call_import_inner(
+    symbol: &str,
+    tag: u64,
+    host: u64,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
     if host == 0 {
         return Err(AbiError::Unsatisfied {
             symbol: symbol.to_string(),

@@ -138,6 +138,7 @@ pub mod stats;
 pub mod thread;
 pub mod thunk;
 pub mod tls;
+pub mod trace;
 pub mod unwind;
 pub mod vm;
 

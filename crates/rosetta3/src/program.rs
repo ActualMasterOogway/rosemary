@@ -41,6 +41,14 @@ impl ImportPolicy {
         if crate::shims::is_shimmed(&site.symbol) {
             return None;
         }
+        // Nor a traced one. An inlined call never reaches the seam, so
+        // promoting a symbol the user asked to watch would silently trace
+        // nothing — and the symbols worth watching are exactly the ordinary,
+        // fully-signatured ones this would otherwise inline. See
+        // [`crate::trace`].
+        if crate::trace::watching(&site.symbol) {
+            return None;
+        }
         if crate::abi::classify(site.tag, &site.symbol) != Classification::Fast {
             return None;
         }
