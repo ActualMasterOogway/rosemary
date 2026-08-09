@@ -481,7 +481,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFRunLoopAddSource", V, P, P, P),
     sig!("CFRunLoopGetCurrent", P),
     sig!("CFRunLoopGetMain", P),
-    sig!("CFRunLoopRun", V, P),
+    // `void CFRunLoopRun(void)` — no parameters. This declared one, which is
+    // harmless in the direction it is wrong (the callee reads only what its own
+    // prototype declares, so an extra argument is ignored) and is still a lie
+    // the table should not tell. Found by `the_table_declares_the_parameters_
+    // these_functions_really_have`.
+    sig!("CFRunLoopRun", V),
     // `CFTimeInterval` is a `double`, so this is the first entry in the table
     // whose second argument is floating-point while its first and third are not
     // — exactly the shape the two independent register counters exist for.
@@ -3254,6 +3259,140 @@ mod tests {
             assert!(seen.insert(abi.name), "{} is described twice", abi.name);
         }
     }
+
+    /// Every entry declares the number of parameters the function really has.
+    ///
+    /// The bug this exists for is invisible by construction. `CFStringGetCString`
+    /// had three parameters where the function has four; the missing one was the
+    /// *last*, so the host read whatever the guest left in `x3` as the encoding,
+    /// answered `false`, and produced an empty string. Nothing faulted, nothing
+    /// was refused, and Unity built a plugin path out of the emptiness — see the
+    /// roadmap's M7.13. A trailing parameter is exactly the one a reader
+    /// transcribing a header drops, and exactly the one nothing notices.
+    ///
+    /// So the check is not a reading of the headers, it is a *compile* against
+    /// them: each entry becomes a call with as many arguments as the table
+    /// claims, and the C compiler is asked whether that is the right number.
+    /// Anything it does not declare — the Objective-C runtime, GL, private CF —
+    /// simply produces no diagnostic and is skipped, which is the honest scope:
+    /// this proves what it can reach and says nothing about the rest.
+    ///
+    /// Skips rather than fails when there is no compiler, as every fixture test
+    /// here does.
+    #[test]
+    fn the_table_declares_the_parameters_these_functions_really_have() {
+        // A struct passed by value is *split* across registers by this table —
+        // a `CFRange` is two `CFIndex`, a `double complex` is two `double` — so
+        // these declare more arguments than the prototype has, deliberately.
+        // Listed rather than pattern-matched, so a new one has to be thought
+        // about.
+        const SPLIT_AGGREGATES: &[&str] = &["CFArrayApplyFunction", "CFStringGetBytes", "cabs"];
+
+        let mut source = String::from(HEADERS);
+        source.push_str("void probe(void) {\n");
+        let mut at = HEADERS.lines().count() + 1;
+        let mut lines = std::collections::HashMap::new();
+        for abi in SIGNATURES {
+            // A `$`-suffixed spelling is not a C identifier, and a variadic's
+            // last "parameter" is the ellipsis its shim consumes.
+            if abi.name.contains('$') || abi.variadic || SPLIT_AGGREGATES.contains(&abi.name) {
+                continue;
+            }
+            let args = vec!["0"; abi.types.len() - 1].join(",");
+            source.push_str(&format!("  {}({});\n", abi.name, args));
+            at += 1;
+            lines.insert(at, abi.name);
+        }
+        source.push_str("}\n");
+
+        let dir = std::env::temp_dir().join("rosetta3-arity");
+        if std::fs::create_dir_all(&dir).is_err() {
+            eprintln!("skipping: no temp dir");
+            return;
+        }
+        let path = dir.join("probe.c");
+        if std::fs::write(&path, &source).is_err() {
+            eprintln!("skipping: cannot write the probe");
+            return;
+        }
+        let Ok(out) = std::process::Command::new("cc")
+            .args(["-fsyntax-only", "-Wno-everything", "-fno-caret-diagnostics"])
+            .arg(&path)
+            .output()
+        else {
+            eprintln!("skipping: no C compiler");
+            return;
+        };
+
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let mut wrong = Vec::new();
+        for line in stderr.lines() {
+            let Some(rest) = line.split("probe.c:").nth(1) else {
+                continue;
+            };
+            if !rest.contains("too few arguments") && !rest.contains("too many arguments") {
+                continue;
+            }
+            let Some(number) = rest.split(':').next().and_then(|n| n.parse::<usize>().ok()) else {
+                continue;
+            };
+            if let Some(name) = lines.get(&number) {
+                let how = match rest.contains("too few") {
+                    true => "too few",
+                    false => "too many",
+                };
+                wrong.push(format!("{name} ({how})"));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "these entries declare the wrong number of parameters: {}",
+            wrong.join(", ")
+        );
+    }
+
+    /// What the arity probe includes, which is every header this table's C
+    /// entries are declared in. A symbol that is not declared by any of them is
+    /// skipped rather than guessed at.
+    const HEADERS: &str = "\
+#include <CoreFoundation/CoreFoundation.h>
+#include <dirent.h>
+#include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <fts.h>
+#include <glob.h>
+#include <iconv.h>
+#include <langinfo.h>
+#include <locale.h>
+#include <math.h>
+#include <netdb.h>
+#include <poll.h>
+#include <pthread.h>
+#include <pwd.h>
+#include <sched.h>
+#include <semaphore.h>
+#include <setjmp.h>
+#include <signal.h>
+#include <spawn.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/sysctl.h>
+#include <sys/time.h>
+#include <sys/uio.h>
+#include <sys/wait.h>
+#include <termios.h>
+#include <time.h>
+#include <unistd.h>
+#include <wchar.h>
+#include <wctype.h>
+#include <zlib.h>
+";
 
     #[test]
     fn refusals_are_unique() {
