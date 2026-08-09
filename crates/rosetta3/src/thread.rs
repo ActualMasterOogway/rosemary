@@ -228,7 +228,7 @@ fn unregister(port: u32) {
 /// takes a *reference* on the port every call and would have to be balanced by
 /// a `mach_port_deallocate` that nothing here is placed to make. Both name the
 /// same port.
-fn mach_port() -> u32 {
+pub fn mach_port() -> u32 {
     // SAFETY: `pthread_self` is always valid on a running thread and
     // `pthread_mach_thread_np` reads the port name out of it.
     unsafe { libc::pthread_mach_thread_np(libc::pthread_self()) }
@@ -441,6 +441,15 @@ impl ThreadState {
     /// The address range this thread's guest stack occupies.
     pub fn stack_range(&self) -> Range<u64> {
         self.stack.range()
+    }
+
+    /// The guest stack pointer as of the last thing that moved it.
+    ///
+    /// For [`crate::fault`], which asks on a thread that is about to die and
+    /// wants the answer without a borrow it could not take: the field is a
+    /// `Cell` on the thread's own state, and the reader is that thread.
+    pub fn live_rsp(&self) -> u64 {
+        self.rsp.get()
     }
 }
 

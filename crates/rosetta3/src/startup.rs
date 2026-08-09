@@ -66,6 +66,8 @@ pub fn run_initializers(vm: &Vm) -> Result<usize, VmError> {
 /// so a guest returning `-1` reports 255 here exactly as it would have to the
 /// shell.
 pub fn run(vm: &Vm) -> Result<i32, VmError> {
+    // Before anything the guest can fault in, which is everything below.
+    crate::fault::install();
     say_image_map(vm);
     // Before any guest code, as dyld does it: `libobjc` realizes an image's
     // classes when the image is mapped, which is strictly before that image's

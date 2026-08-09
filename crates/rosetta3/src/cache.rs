@@ -307,6 +307,11 @@ impl CodeCache {
             "translation {start:#x}..{end:#x} cannot be entered at the {pc:#x} \
              it was lifted for"
         );
+        // Where this region's compiled code went, so a fault inside it can be
+        // named as a *guest* range rather than as an address in an anonymous
+        // mapping. See [`crate::fault`].
+        crate::fault::placed(compiled.code as usize as u64, start, end, pc);
+
         let translation = Arc::new(Translation {
             start,
             end,

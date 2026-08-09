@@ -1108,6 +1108,38 @@ pub fn pthread_sync_fixture() -> Option<String> {
         .clone()
 }
 
+/// A guest that faults, on purpose, at an address it chose.
+///
+/// The sentinel is ASCII on purpose too: `crate::fault`'s report says so when a
+/// faulting address is printable, because that is what turned Below Zero's
+/// crash from "a bad pointer" into "a pointer read out of a string". A fixture
+/// that only faulted at 1 would leave that branch untested.
+///
+/// `volatile` so the store is not folded away, and the pointer arrives through
+/// `strtoull` so nothing can constant-fold the dereference into a trap the
+/// compiler emits itself.
+pub const FAULT_C: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+    printf("about to fault\n");
+    fflush(stdout);
+    volatile long *p = (volatile long *)strtoull("0x4141414141414141", NULL, 16);
+    *p = 1;
+    printf("still here\n");
+    return 0;
+}
+"#;
+
+/// Build [`FAULT_C`], or `None` if this host cannot.
+pub fn fault_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("guest_fault", FAULT_C, &[]))
+        .clone()
+}
+
 /// Build [`TLS_C`], or `None` if this host cannot.
 pub fn tls_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
