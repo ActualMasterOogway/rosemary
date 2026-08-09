@@ -17,7 +17,8 @@
 //!   that turned `0x70536573556e6143` into `CanUseSp` and pointed at Unity's
 //!   serialized property names;
 //! - **it names the guest region**, which is the whole reason the module
-//!   exists: a host `pc` alone is not a work item and a guest range is.
+//!   exists: a host `pc` alone is not a work item and a guest range in a named
+//!   image is.
 
 mod common;
 
@@ -44,6 +45,9 @@ fn a_faulting_guest_names_its_address_and_its_region() {
     // The point of the whole module: a guest range, not just a host pc.
     assert!(err.contains("guest region 0x"), "stderr: {err}");
     assert!(err.contains("host pc 0x"), "stderr: {err}");
+    // Named against the image it came from, so the range is `objdump` input
+    // rather than a number needing a second run to interpret.
+    assert!(err.contains("(guest_fault+0x"), "stderr: {err}");
 }
 
 #[test]

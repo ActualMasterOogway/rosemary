@@ -88,6 +88,54 @@ static PLACED: Mutex<Vec<(u64, Placed)>> = Mutex::new(Vec::new());
 /// Whether [`install`] has run. Handlers are process-wide.
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
+/// Longest image name the report keeps. `libmonobdwgc-2.0.dylib` is 23.
+const NAME: usize = 48;
+
+/// One loaded guest image, flattened so a handler can search it.
+///
+/// A fixed byte array rather than a `String` because the search happens in a
+/// signal handler: the name has to be printable without touching the allocator,
+/// and a leaf name is what a reader wants anyway.
+struct Image {
+    range: (u64, u64),
+    name: [u8; NAME],
+    used: usize,
+}
+
+/// Where the guest's images landed. Filled once, before any guest code runs.
+static IMAGES: Mutex<Vec<Image>> = Mutex::new(Vec::new());
+
+/// Record the guest's image map, so a fault can name a guest address rather
+/// than only state it.
+///
+/// Without this the report's guest range is a number that needs a second run
+/// with `ROSETTA3_TRACE_VM` to interpret — and the whole reason this module
+/// exists is that the interesting crash is the one that does not come back.
+pub fn note_images(report: &machish::report::LinkReport) {
+    let mut images = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
+    images.clear();
+    for image in &report.images {
+        let end = image
+            .segments
+            .iter()
+            .filter(|s| s.vmsize != 0)
+            .map(|s| s.vmaddr.wrapping_add(s.vmsize))
+            .max();
+        let Some(end) = end else { continue };
+        let leaf = image.name.rsplit('/').next().unwrap_or(&image.name);
+        let bytes = leaf.as_bytes();
+        let used = bytes.len().min(NAME);
+        let mut name = [0u8; NAME];
+        name[..used].copy_from_slice(&bytes[..used]);
+        images.push(Image {
+            range: (image.base, end),
+            name,
+            used,
+        });
+    }
+    images.sort_by_key(|i| i.range.0);
+}
+
 /// Note where a translation's compiled code begins.
 ///
 /// Called from [`crate::cache`] as each region is finalized. Insertion keeps the
@@ -241,6 +289,7 @@ fn say_region(out: &mut Buffer, pc: u64) {
     out.hex(entry.guest.0);
     out.str("..");
     out.hex(entry.guest.1);
+    say_image(out, entry.guest.0);
     out.str(", entered at ");
     out.hex(entry.lifted_for);
     out.str("\n  host offset +");
@@ -255,6 +304,29 @@ fn say_region(out: &mut Buffer, pc: u64) {
                  below the pc and not necessarily the right one",
         );
     }
+}
+
+/// Name the image a guest address is in, as `name+offset`.
+///
+/// Silent when it is in none of them, which is not a gap: Mono writes its own
+/// code into memory it allocated, and a region lifted from there belongs to no
+/// image by construction. Saying nothing there is the honest answer, and it is
+/// also the answer that identifies generated code.
+fn say_image(out: &mut Buffer, addr: u64) {
+    let Ok(images) = IMAGES.try_lock() else {
+        return;
+    };
+    let Some(image) = images
+        .iter()
+        .find(|i| (i.range.0..i.range.1).contains(&addr))
+    else {
+        return;
+    };
+    out.str(" (");
+    out.bytes(&image.name[..image.used]);
+    out.str("+");
+    out.hex(addr - image.range.0);
+    out.str(")");
 }
 
 /// What this runtime knows about the faulting thread.
