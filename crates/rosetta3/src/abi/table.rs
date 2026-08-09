@@ -1081,12 +1081,26 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("SCNetworkReachabilityScheduleWithRunLoop", U8, P, P, P),
     cbsig!([1], "SCNetworkReachabilitySetCallback", U8, P, P, P),
     sig!("SCNetworkReachabilityUnscheduleFromRunLoop", U8, P, P, P),
+    // ## The two Security calls a player makes about certificates
+    //
+    // Unity's networking asks the system for its trust anchors before it
+    // validates anything, and copies each certificate's DER out to hand to
+    // whichever TLS implementation it was built against. Both are pointer in,
+    // pointer or `OSStatus` out; the `CFArrayRef *` and `CFDataRef` on either
+    // side are host allocations the guest only ever passes back to
+    // CoreFoundation, which already crosses.
+    //
+    // `SecCertificateCopyData` is the copying spelling of the deprecated
+    // `SecCertificateGetData` below it, and a program that has both imports
+    // both — this one does.
+    sig!("SecCertificateCopyData", P, P),
     sig!("SecCertificateGetData", I32, P, P),
     sig!("SecKeychainItemCopyContent", I32, P, P, P, P, P),
     sig!("SecKeychainItemFreeContent", I32, P, P),
     sig!("SecKeychainOpen", I32, P, P),
     sig!("SecKeychainSearchCopyNext", I32, P, P),
     sig!("SecKeychainSearchCreateFromAttributes", I32, P, U32, P, P),
+    sig!("SecTrustCopyAnchorCertificates", I32, P),
     // ## Text input sources, for the keyboard layout
     //
     // SDL3 asks the current layout for its Unicode key-layout data so it can
