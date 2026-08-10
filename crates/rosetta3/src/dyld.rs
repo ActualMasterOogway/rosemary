@@ -593,7 +593,7 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
             unresolved.len(),
             unresolved
                 .iter()
-                .take(12)
+                .take(20)
                 .copied()
                 .collect::<Vec<_>>()
                 .join(" ")

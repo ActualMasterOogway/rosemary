@@ -753,6 +753,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `CGPoint` by value again; see `CGDisplayMoveCursorToPoint`.
     sig!("CGWarpMouseCursorPosition", I32, F64, F64),
     sig!("CGWindowLevelForKey", I32, I32),
+    sig!("CGColorGetConstantColor", P, P),
+    sig!("CGColorCreateCopy", P, P),
+    sig!("CGColorRelease", V, P),
+    sig!("CGColorRetain", P, P),
     // ## CoreVideo
     //
     // The display-link callback is how a GameMaker runner paces its frames: the
@@ -902,6 +906,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // IOHIDValueRef)` — four integer arguments and no result, delivered on
     // whichever run loop the manager was scheduled on.
     cbsig!([1], "IOHIDManagerRegisterInputValueCallback", V, P, P, P),
+    sig!("IOHIDManagerSetDeviceMatching", V, P, P),
+    sig!("IONotificationPortCreate", P, I32),
+    sig!("IONotificationPortGetMachPort", I32, P),
     sig!("IOHIDManagerScheduleWithRunLoop", V, P, P, P),
     sig!("IOHIDManagerSetDeviceMatchingMultiple", V, P, P),
     sig!("IOHIDManagerUnscheduleFromRunLoop", V, P, P, P),
@@ -1556,6 +1563,14 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `OSAtomicAdd32Barrier`'s was.
     sig!("dispatch_semaphore_signal", I64, P),
     sig!("dispatch_semaphore_wait", I64, P, U64),
+    // Block-taking calls are handled by the block shim, which rewrites the
+    // guest invoke pointer before libdispatch sees it. This is essential for
+    // dispatch_sync: an uncallable guest block makes its caller wait forever.
+    // sig!("dispatch_async", V, P, P),
+    // sig!("dispatch_sync", V, P, P),
+    // sig!("dispatch_after", V, U64, P, P),
+    // sig!("dispatch_once", V, P, P),
+    // sig!("dispatch_data_create", P, P, U64, P, P),
     sig!("dispatch_set_context", V, P, P),
     sig!("dispatch_source_cancel", V, P),
     sig!("dispatch_source_create", P, P, U64, U64, P),
@@ -2714,6 +2729,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("random", I64),
     sig!("read", I64, I32, P, U64),
     sig!("readdir", P, P),
+    sig!("readdir_r", I32, P, P, P),
     sig!("readlink", I64, P, P, U64),
     sig!("readlinkat", I64, I32, P, P, U64),
     sig!("readv", I64, I32, P, I32),
@@ -2748,7 +2764,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // signature. Marked variadic here so it is refused by name rather than
     // called with two arguments it may not have been given.
     sig!("sem_close", I32, P),
-    vsig!("sem_open", P, P, I32),
+    // sem_open is a variadic function but its parameter count is known, making this safe to mark without vsig!
+    sig!("sem_open", P, P, I32, I32, U32),
     sig!("sem_post", I32, P),
     sig!("sem_trywait", I32, P),
     sig!("sem_unlink", I32, P),
@@ -2883,6 +2900,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // The string is the guest's and the shell is the host's, which is exactly
     // what a guest re-launching itself through `open steam://` wants.
     sig!("system", I32, P),
+    sig!("shm_open", I32, P, I32, I32),
+    sig!("shm_unlink", I32, P),
     sig!("tan", F64, F64),
     sig!("tanf", F32, F32),
     sig!("tanh", F64, F64),

@@ -53,6 +53,7 @@ pub mod coregraphics;
 pub mod curl;
 pub mod intdiv;
 pub mod ioctl;
+pub mod iokit;
 pub mod machthread;
 pub mod math;
 pub mod nslog;
@@ -153,6 +154,7 @@ pub fn dispatch(
             // attributes were about.
             return crate::signal::shim_for(name)
                 .or_else(|| pthread::shim_for(name))
+                .or_else(|| iokit::shim_for(name))
                 .or_else(|| block::shim_for(name))
                 .or_else(|| crate::dyld::shim_for_callbacks(name))
                 .or_else(|| atexit::shim_for(name))
@@ -178,6 +180,7 @@ pub fn is_shimmed(symbol: &str) -> bool {
         || cfuuid::shim_for(name).is_some()
         || appkit::shim_for(name).is_some()
         || component::shim_for(name).is_some()
+        || iokit::shim_for(name).is_some()
         || process::shim_for(name).is_some()
         || machthread::shim_for(name).is_some()
         || stackprobe::shim_for(name).is_some()

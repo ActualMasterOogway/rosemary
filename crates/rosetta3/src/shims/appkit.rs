@@ -11,7 +11,7 @@
 //!
 //! `NSRect` *is* `CGRect` on 64-bit macOS, and `NSPoint` is `CGPoint`, so the
 //! two structures come from [`super::coregraphics`] rather than being declared
-//! a second time. What is different here is the argument *order*: both of these
+//! a second time. What is different here is the argument *order*: these
 //! have the aggregate in front of a scalar, so the scalar is in `rdi` — the
 //! first integer register, not the second — because a MEMORY-class argument
 //! consumes no register at all.
@@ -51,6 +51,23 @@ fn mouse_in_rect(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMem
     Ok(())
 }
 
+/// `BOOL NSPointInRect(NSPoint aPoint, NSRect aRect)`
+fn point_in_rect(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    let host = host_or_refuse(symbol)?;
+    let point = CgPoint {
+        x: f64::from_bits(ctx.xmm[0][0]),
+        y: f64::from_bits(ctx.xmm[1][0]),
+    };
+    let rect = rect_argument(symbol, ctx, mem, 0)?;
+    // SAFETY: the symbol [`shim_for`] matched, which is
+    // `BOOL (*)(NSPoint, NSRect)`, resolved out of an AppKit this process has
+    // loaded — the guest's own window brought it in.
+    let f: extern "C" fn(CgPoint, CgRect) -> u8 =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(CgPoint, CgRect) -> u8>(host) };
+    ctx.rax = u64::from(f(point, rect));
+    Ok(())
+}
+
 /// `void NSRectFill(NSRect aRect)`
 ///
 /// Fills the rectangle in the current graphics context with the current colour.
@@ -69,6 +86,7 @@ fn rect_fill(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory)
 pub fn shim_for(name: &str) -> Option<super::coregraphics::Shim> {
     match name {
         "NSMouseInRect" => Some(mouse_in_rect),
+        "NSPointInRect" => Some(point_in_rect),
         "NSRectFill" => Some(rect_fill),
         _ => None,
     }

@@ -40,6 +40,8 @@
 //! no such fields at all (`BLOCK_HAS_COPY_DISPOSE` is clear), which is the
 //! common case and the one that never reaches the question.
 
+use core::ffi::c_void;
+
 use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{AbiError, Callbacks, GuestMemory, Result};
@@ -122,6 +124,29 @@ fn read_u32(symbol: &str, mem: &mut dyn GuestMemory, at: u64) -> Result<u32> {
     Ok(u32::from_le_bytes(buf))
 }
 
+/// Call a host libdispatch entry point after rewriting the guest block.
+///
+/// This deliberately does not hold any rosetta3 lock while libdispatch is
+/// running the block. In particular, `dispatch_sync` is allowed to call the
+/// runtime back on the same thread, and the block itself can call `dlopen` or
+/// register another callback. Keeping this helper limited to memory rewriting
+/// followed by the host call makes that re-entry explicit.
+fn call_block(symbol: &str, host: u64, args: &[u64]) {
+    // SAFETY: all block-taking dispatch functions handled here return void
+    // and receive only integer/pointer arguments. The host ABI ignores the
+    // unused argument registers, and the caller supplies the exact prefix for
+    // the selected function.
+    unsafe {
+        match args {
+            [a, b] => core::mem::transmute::<u64, extern "C" fn(u64, u64)>(host)(*a, *b),
+            [a, b, c] => {
+                core::mem::transmute::<u64, extern "C" fn(u64, u64, u64)>(host)(*a, *b, *c)
+            }
+            _ => unreachable!("unsupported block dispatch arity for {symbol}"),
+        }
+    }
+}
+
 /// `void dispatch_async(dispatch_queue_t queue, dispatch_block_t block)`
 ///
 /// The queue is the host's — `dispatch_get_main_queue()` is the address of
@@ -140,14 +165,82 @@ fn dispatch_async(
     }
     substitute_block(symbol, block, mem, callbacks)?;
     let host = host_or_refuse(symbol)?;
-    // SAFETY: the symbol [`shim_for`] matched, which is
-    // `void (*)(dispatch_queue_t, dispatch_block_t)`. Both arguments are
-    // pointers the host understands: the queue is libdispatch's own global, and
-    // the block is the guest's literal with an `isa` the host runtime owns and
-    // an `invoke` this shim has just made a native trampoline.
-    let f: extern "C" fn(u64, u64) =
-        unsafe { core::mem::transmute::<u64, extern "C" fn(u64, u64)>(host) };
-    f(queue, block);
+    call_block(symbol, host, &[queue, block]);
+    Ok(())
+}
+
+/// `void dispatch_sync(dispatch_queue_t queue, dispatch_block_t block)`
+fn dispatch_sync(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
+    let (queue, block) = (ctx.rdi, ctx.rsi);
+    if block == 0 {
+        return Err(bad_pointer(symbol, 0));
+    }
+    substitute_block(symbol, block, mem, callbacks)?;
+    call_block(symbol, host_or_refuse(symbol)?, &[queue, block]);
+    Ok(())
+}
+
+/// `void dispatch_after(dispatch_time_t when, dispatch_queue_t queue,
+/// dispatch_block_t block)`
+fn dispatch_after(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
+    let (when, queue, block) = (ctx.rdi, ctx.rsi, ctx.rdx);
+    if block == 0 {
+        return Err(bad_pointer(symbol, 0));
+    }
+    substitute_block(symbol, block, mem, callbacks)?;
+    call_block(symbol, host_or_refuse(symbol)?, &[when, queue, block]);
+    Ok(())
+}
+
+/// `void dispatch_once(dispatch_once_t *predicate, dispatch_block_t block)`
+fn dispatch_once(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
+    let (predicate, block) = (ctx.rdi, ctx.rsi);
+    if predicate == 0 || block == 0 {
+        return Err(bad_pointer(
+            symbol,
+            if predicate == 0 { predicate } else { block },
+        ));
+    }
+    substitute_block(symbol, block, mem, callbacks)?;
+    call_block(symbol, host_or_refuse(symbol)?, &[predicate, block]);
+    Ok(())
+}
+
+/// `dispatch_data_t dispatch_data_create(const void *buffer, size_t size,
+/// dispatch_queue_t queue, dispatch_block_t destructor)`
+fn dispatch_data_create(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
+    let destructor = ctx.rcx;
+    if destructor != 0 {
+        substitute_block(symbol, destructor, mem, callbacks)?;
+    }
+    let host = host_or_refuse(symbol)?;
+    // SAFETY: the symbol matched the exact four-pointer/integer libdispatch
+    // entry point. The data buffer and queue are host-visible identity-mapped
+    // values; the destructor has been rewritten to a native thunk above.
+    let f: extern "C" fn(*const c_void, u64, u64, u64) -> u64 = unsafe {
+        core::mem::transmute::<u64, extern "C" fn(*const c_void, u64, u64, u64) -> u64>(host)
+    };
+    ctx.rax = f(ctx.rdi as *const c_void, ctx.rsi, ctx.rdx, destructor);
     Ok(())
 }
 
@@ -164,15 +257,17 @@ pub type Shim = crate::signal::Shim;
 
 /// Whether `name` (underscore already stripped) is one of this module's.
 ///
-/// Only `dispatch_async` today, because it is the only one a program here has
-/// reached. Every other block-taking entry point — `dispatch_sync`,
-/// `dispatch_after`, `dispatch_once`, `-[NSNotificationCenter
-/// addObserverForName:object:queue:usingBlock:]` — is the same three lines with
-/// a different argument register, and each is added when a program asks for it
-/// rather than in advance.
+/// Block-taking dispatch entry points must all rewrite the block before handing
+/// it to libdispatch. Passing an x86-64 `invoke` pointer through unchanged is
+/// especially bad for `dispatch_sync`: the queue waits for a callback that can
+/// never execute correctly, which presents to the guest as a deadlock.
 pub fn shim_for(name: &str) -> Option<Shim> {
     match name {
         "dispatch_async" => Some(dispatch_async),
+        "dispatch_sync" => Some(dispatch_sync),
+        "dispatch_after" => Some(dispatch_after),
+        "dispatch_once" => Some(dispatch_once),
+        "dispatch_data_create" => Some(dispatch_data_create),
         _ => None,
     }
 }
