@@ -1,4 +1,5 @@
-//! The `sincos` pair, whose *return value* the signature table cannot name.
+//! Math helpers whose arguments or return values the signature table cannot
+//! name.
 //!
 //! ## Why these are here rather than in the table
 //!
@@ -22,6 +23,13 @@
 //! places them the way the guest's ABI says. That also removes the question of
 //! whether the host even exports these — they are Darwin-specific and this way
 //! the answer does not matter.
+//!
+//! `__divdc3` is compiler-rt's complex-double division helper. A complex
+//! double is two scalar doubles, so its arguments and return value are split
+//! across vector registers even though the signature table only describes
+//! scalar returns. It is implemented here rather than forwarded to the host:
+//! the host may not export compiler-rt's private spelling, and forwarding
+//! would leave the host with the guest's register layout.
 //!
 //! ## Accuracy
 //!
@@ -70,6 +78,62 @@ pub fn sincos_stret(
     Ok(())
 }
 
+/// `double _Complex __divdc3(double a, double b, double c, double d)`.
+///
+/// The guest calls this as `(a + ib) / (c + id)`. Scaling the denominator by
+/// its largest component keeps `c*c + d*d` from overflowing for ordinary
+/// finite inputs. The two complex values are passed as four consecutive
+/// doubles in `xmm0` through `xmm3`, and the result is returned in `xmm0` and
+/// `xmm1`.
+pub fn divdc3(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
+    let (a, b, c, d) = (
+        f64::from_bits(ctx.xmm[0][0]),
+        f64::from_bits(ctx.xmm[1][0]),
+        f64::from_bits(ctx.xmm[2][0]),
+        f64::from_bits(ctx.xmm[3][0]),
+    );
+
+    let scale = c.abs().max(d.abs());
+    let (cr, dr) = if scale.is_infinite() {
+        // inf / inf is NaN, but an infinite divisor is represented by its
+        // direction in the limiting quotient: an infinite component is ±1
+        // and a finite component is zero.
+        (c.signum(), d.signum())
+    } else if scale == 0.0 {
+        // Preserve the signed zero information for the correction below.
+        (c, d)
+    } else {
+        (c / scale, d / scale)
+    };
+
+    let (real, imag) = if scale == 0.0 {
+        // A non-zero numerator divided by zero has an infinite magnitude.
+        // This also avoids manufacturing NaNs from inf * 0 for the common
+        // real-only cases.
+        let real = if a == 0.0 && b == 0.0 {
+            f64::NAN
+        } else {
+            (a * c.signum() + b * d.signum()) * f64::INFINITY
+        };
+        let imag = if a == 0.0 && b == 0.0 {
+            f64::NAN
+        } else {
+            (b * c.signum() - a * d.signum()) * f64::INFINITY
+        };
+        (real, imag)
+    } else {
+        let denom = cr * cr + dr * dr;
+        (
+            (a * cr + b * dr) / denom / scale,
+            (b * cr - a * dr) / denom / scale,
+        )
+    };
+
+    ctx.xmm[0] = [real.to_bits(), 0];
+    ctx.xmm[1] = [imag.to_bits(), 0];
+    Ok(())
+}
+
 /// One of this module's implementations, in the shape [`crate::shims`] wants.
 pub type Shim = fn(&str, &mut RegisterContext, &mut dyn GuestMemory) -> Result<()>;
 
@@ -80,6 +144,7 @@ pub type Shim = fn(&str, &mut RegisterContext, &mut dyn GuestMemory) -> Result<(
 /// `___sincosf_stret` and one strip leaves two.
 pub fn shim_for(name: &str) -> Option<Shim> {
     match name {
+        "__divdc3" => Some(divdc3),
         "__sincosf_stret" => Some(sincosf_stret),
         "__sincos_stret" => Some(sincos_stret),
         _ => None,
@@ -137,11 +202,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn complex_division_uses_four_inputs_and_two_outputs() {
+        let mut ctx = RegisterContext::new();
+        for (slot, value) in [2.0_f64, 3.0, 4.0, -5.0].into_iter().enumerate() {
+            ctx.xmm[slot] = [value.to_bits(), 0];
+        }
+        divdc3("___divdc3", &mut ctx, &mut NoMemory).unwrap();
+
+        assert!((f64::from_bits(ctx.xmm[0][0]) + 7.0 / 41.0).abs() < 1e-15);
+        assert!((f64::from_bits(ctx.xmm[1][0]) - 22.0 / 41.0).abs() < 1e-15);
+        assert_eq!(ctx.xmm[0][1], 0);
+        assert_eq!(ctx.xmm[1][1], 0);
+    }
+
+    #[test]
+    fn complex_division_scales_a_large_denominator() {
+        let mut ctx = RegisterContext::new();
+        for (slot, value) in [1.0_f64, 1.0, 1e200, 1e200].into_iter().enumerate() {
+            ctx.xmm[slot] = [value.to_bits(), 0];
+        }
+        divdc3("___divdc3", &mut ctx, &mut NoMemory).unwrap();
+
+        let real = f64::from_bits(ctx.xmm[0][0]);
+        let imag = f64::from_bits(ctx.xmm[1][0]);
+        assert!((real - 1e-200).abs() < 1e-215);
+        assert!(imag.abs() < 1e-215);
+    }
+
     /// The Mach-O spelling is what reaches [`shim_for`] after one underscore is
     /// stripped, and getting that wrong means the shim silently never fires.
     #[test]
     fn the_mach_o_spelling_resolves() {
-        for symbol in ["___sincosf_stret", "___sincos_stret"] {
+        for symbol in ["___divdc3", "___sincosf_stret", "___sincos_stret"] {
             let name = symbol.strip_prefix('_').unwrap();
             assert!(shim_for(name).is_some(), "{symbol} is not claimed");
             assert!(crate::shims::is_shimmed(symbol), "{symbol} may be inlined");
