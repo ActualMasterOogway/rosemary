@@ -1675,11 +1675,8 @@ fn cpuid(leaf: u32, _subleaf: u32) -> [u32; 4] {
             let misc = 8 << 8;
             // FPU | TSC | CX8 | CMOV | SSE | SSE2.
             let edx = (1 << 0) | (1 << 4) | (1 << 8) | (1 << 15) | (1 << 25) | (1 << 26);
-            // Nothing in the `ecx` word is implemented, but bit 31 is not a
-            // feature: it is the hypervisor-present bit, and saying so is both
-            // true and useful — it is the one bit that tells a guest doing its
-            // own timing or cache measurement that the numbers are not real.
-            let ecx = 1 << 31;
+            // SSE3 | SSSE3 | SSE4.1 | SSE4.2 | Hypervisor
+            let ecx = (1 << 0) | (1 << 9) | (1 << 19) | (1 << 20) | (1 << 31);
             [version, misc, ecx, edx]
         }
 
