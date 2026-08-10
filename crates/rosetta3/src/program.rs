@@ -510,22 +510,23 @@ impl<M: Regions> Program<M> {
         // [`crate::atomic128`], which does it atomically with the host's own
         // exclusive pair. See that module for what the race cost.
         let atomic128 = {
-            #[cfg(target_arch = "aarch64")]
-            {
-                Atomic128Mode::Exit
-            }
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             {
                 if std::arch::is_x86_feature_detected!("cmpxchg16b") {
                     Atomic128Mode::Native
                 } else {
-                    Atomic128Mode::Emulated
+                    Atomic128Mode::Exit
                 }
             }
-            #[cfg(not(any(target_arch = "aarch64", target_arch = "x86", target_arch = "x86_64")))]
+            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
             {
-                Atomic128Mode::Emulated
+                Atomic128Mode::Exit
             }
+        };
+        let specialization = if crate::jit::opt_level().host_specific() {
+            Specialization::host()
+        } else {
+            Specialization::generic()
         };
         let mut config = LifterConfig {
             interpreter_fallback: true,
@@ -533,7 +534,8 @@ impl<M: Regions> Program<M> {
             outline_helpers: true,
             address_mode: AddressMode::Direct,
             atomic128,
-            specialization: Specialization::host(),
+            specialization,
+            eliminate_dead_flags: crate::jit::eliminate_dead_flags(),
             ..LifterConfig::default()
         };
 

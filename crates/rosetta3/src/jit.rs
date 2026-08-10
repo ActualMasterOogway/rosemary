@@ -13,6 +13,10 @@
 //! `ROSETTA3_JIT_OPT` picks the level; it is read once, on first use, and
 //! applies to a whole run. See [`OptLevel`] for the values.
 //!
+//! `ROSETTA3_JIT_VERIFY` is the other knob, and it is orthogonal to the level:
+//! whether Cranelift's IR verifier runs. See [`verify`] — it is the single
+//! largest thing this crate pays for translation.
+//!
 //! Three knobs, not one, and they sit at three different points in the
 //! pipeline. `opt_level` is a Cranelift *shared* setting and reaches the backend
 //! as a [`settings::Flags`]. The ISA settings ([`OptLevel::isa_settings`]) are
@@ -33,8 +37,10 @@ use cranelift_codegen::settings::{self, Configurable};
 use microlift::MicroliftError;
 use microlift::backend::CraneliftBackend;
 
-/// The environment variable this module reads.
+/// The environment variables this module reads.
 pub const OPT_ENV: &str = "ROSETTA3_JIT_OPT";
+pub const VERIFY_ENV: &str = "ROSETTA3_JIT_VERIFY";
+pub const DEAD_FLAGS_ENV: &str = "ROSETTA3_DEAD_FLAGS";
 
 /// What to ask of the JIT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -119,24 +125,29 @@ impl OptLevel {
         builder
             .set("opt_level", self.cranelift_opt_level())
             .expect("cranelift accepts its own opt_level values");
+        // Set at every level rather than inside the `Speed | All` arm below,
+        // because it is not an optimisation setting: it says whether this build
+        // checks microlift's output, and `none` is the level a lifter bug is
+        // bisected at, so it is the last one that should stop checking. See
+        // [`verify`].
+        builder
+            .set("enable_verifier", if verify() { "true" } else { "false" })
+            .expect("cranelift accepts its own enable_verifier values");
+        // We don't process this, so enabling it just wastes cycles.
+        builder
+            .set("machine_code_cfg_info", "false")
+            .expect("failed to turn off machine code cfg info");
+        // These aren't necessary since the guest shares our entire address space anyway.
+        builder
+            .set("enable_heap_access_spectre_mitigation", "false")
+            .expect("failed to turn off heap access pass");
+        builder
+            .set("enable_table_access_spectre_mitigation", "false")
+            .expect("failed to turn off table access pass");
         match self {
             OptLevel::Speed | OptLevel::All => {
-                // Disabled for now because we prefer finding correctness issues even when running on all optimizations
-                // as we improve Microlift incrementally.
-                // builder.set("enable_verifier", "false").expect("couldn't disable verifier");
-                // We don't process this, so enabling it just wastes cycles.
-                builder
-                    .set("machine_code_cfg_info", "false")
-                    .expect("failed to turn off machine code cfg info");
-                // These aren't necessary since the guest shares our entire address space anyway.
-                builder
-                    .set("enable_heap_access_spectre_mitigation", "false")
-                    .expect("failed to turn off heap access pass");
-                builder
-                    .set("enable_table_access_spectre_mitigation", "false")
-                    .expect("failed to turn off table access pass");
                 // builder.set("enable_alias_analysis", "true").expect("couldn't enable alias analysis");
-                // builder.set("regalloc_algorithm", "backtracking").expect("couldn't enable alias analysis");
+                // builder.set("regalloc_algorithm", "backtracking").expect("couldn't enable backtracking regalloc");
             }
             OptLevel::None => {}
         };
@@ -291,6 +302,96 @@ pub fn opt_level() -> OptLevel {
     })
 }
 
+/// Whether Cranelift's IR verifier runs on everything this crate compiles.
+///
+/// **This is the single most expensive thing translation does.** Cranelift runs
+/// the verifier at several points in a compile — after legalisation, after the
+/// egraph pass, after register allocation — and each run is a full walk of the
+/// function checking that every value is dominated by its definition, that
+/// types agree, that the CFG is consistent. Measured on a 600-function x86-64
+/// fixture, 601 regions and 39,085 guest instructions, same binary and machine:
+///
+/// ```text
+///                     verifier on   verifier off
+/// compile                 754 ms         405 ms
+/// wall, process start     821 ms         466 ms
+/// ```
+///
+/// **1.9× off the compile and 1.8× off the run**, for a check that says nothing
+/// about the guest program and everything about whether microlift emitted
+/// well-formed IR — which is a property of *microlift's source*, not of the
+/// bytes it was pointed at, and so is answered by the lifter's own test suite
+/// rather than by every region a shipped binary translates.
+///
+/// So the default is the build profile, which is exactly where FEX puts the
+/// same decision: its `IRValidation` pass is inserted by `PassManager` under
+/// `#if defined(ASSERTIONS_ENABLED)` and compiled out of a release build
+/// entirely (`FEXCore/Source/Interface/IR/PassManager.cpp`). A debug build —
+/// which is every `cargo test` in this workspace — verifies as it always has,
+/// so the suite that would catch an invalid lift is unchanged. A release build
+/// does not.
+///
+/// `ROSETTA3_JIT_VERIFY` overrides it in both directions, and both directions
+/// are wanted: `=1` on a release build is how a lifting bug that only appears
+/// in a long real-world run gets a diagnosis better than "wrong answer", and
+/// `=0` on a debug build is how translation-heavy debugging stays bearable.
+///
+/// Read once, for the same reason [`opt_level`] is: two regions of one process
+/// compiled under different rules is a difference nobody could later account
+/// for.
+pub fn verify() -> bool {
+    static VERIFY: OnceLock<bool> = OnceLock::new();
+    *VERIFY.get_or_init(|| match std::env::var(VERIFY_ENV) {
+        Err(_) => cfg!(debug_assertions),
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => {
+                // Not fatal, but not silent: a typo'd value that quietly fell
+                // back would look like the knob had no effect — and in the
+                // direction that matters, it would look like verification was
+                // on when it was not.
+                eprintln!(
+                    "rosetta3: {VERIFY_ENV}={value:?} is not a boolean; using {}",
+                    cfg!(debug_assertions)
+                );
+                cfg!(debug_assertions)
+            }
+        },
+    })
+}
+
+/// Whether microlift is asked to skip the IR for flag writes nothing reads.
+///
+/// `LifterConfig::eliminate_dead_flags` — microlift's port of FEX's
+/// `RedundantFlagCalculationElimination`. It is the lift-side half of the same
+/// problem [`verify`] is the compile-side half of: an `ADD` emits the IR for
+/// all six status flags, and the ones nothing reads are deleted by Cranelift
+/// only after being optimised and register-allocated first.
+///
+/// **Off by default, and this crate does not decide otherwise**, because
+/// microlift's own default is off and for a reason it states: soundness rests
+/// on a hand-audited table of what each instruction's handler does to the
+/// flags, and a wrong entry is a wrong answer rather than an error. The
+/// analysis around that table is conservative — a call, a return, an exit to
+/// this runtime, or an instruction nobody classified keeps every flag — so the
+/// exposure is the table and nothing else. `ROSETTA3_DEAD_FLAGS=1` is how a run
+/// opts in while that table earns its confidence.
+pub fn eliminate_dead_flags() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| match std::env::var(DEAD_FLAGS_ENV) {
+        Err(_) => false,
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => {
+                eprintln!("rosetta3: {DEAD_FLAGS_ENV}={value:?} is not a boolean; using false");
+                false
+            }
+        },
+    })
+}
+
 /// The Cranelift flags every backend in this process is built with.
 pub fn flags() -> settings::Flags {
     static FLAGS: OnceLock<settings::Flags> = OnceLock::new();
@@ -369,6 +470,37 @@ mod tests {
         assert!(OptLevel::None.flags().opt_level() == settings::OptLevel::None);
         assert!(OptLevel::Speed.flags().opt_level() == settings::OptLevel::Speed);
         assert!(OptLevel::All.flags().opt_level() == settings::OptLevel::Speed);
+    }
+
+    /// The verifier is a property of the build and not of the optimisation
+    /// level, so every level has to agree with [`verify`] about it — including
+    /// `none`, which is the level a lifting bug is bisected at and therefore the
+    /// one it would be worst to stop checking.
+    #[test]
+    fn the_verifier_is_the_same_answer_at_every_level() {
+        for level in [OptLevel::None, OptLevel::Speed, OptLevel::All] {
+            assert_eq!(
+                level.flags().enable_verifier(),
+                verify(),
+                "{} disagrees about the verifier",
+                level.as_str()
+            );
+        }
+    }
+
+    /// And with nothing in the environment, that answer is the build profile.
+    ///
+    /// The whole safety of turning the verifier off in a shipped binary is that
+    /// the suite which would catch an invalid lift still runs with it on — so
+    /// this pins the coupling rather than leaving it to be read off `flags()`.
+    /// A plain `cargo test` is a debug build and therefore verifies; `cargo test
+    /// --release` deliberately does not, which is how the *release* pipeline
+    /// gets exercised at all.
+    #[test]
+    fn the_default_is_the_build_profile() {
+        if std::env::var_os(VERIFY_ENV).is_none() {
+            assert_eq!(verify(), cfg!(debug_assertions));
+        }
     }
 
     /// A backend has to be constructible at every level, since an unknown ISA

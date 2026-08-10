@@ -5,9 +5,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[profile.release]
-lto = true
-
 [dependencies]
 machish.workspace = true
 # The shims call host libc directly (stdio for the `printf` family, `errno` for

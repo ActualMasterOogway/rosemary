@@ -759,22 +759,7 @@ pub fn sprintf_l(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMem
 /// which is the whole of what a `printf` conversion reads a locale for. A null
 /// handle is the global locale, which `querylocale` answers for directly.
 fn c_locale_or_refuse(symbol: &str, loc: u64) -> Result<()> {
-    let Some(query) = crate::dyld::host_symbol("querylocale") else {
-        // No way to ask. Refusing is the same decision as below and for the
-        // same reason: rendering anyway would be a guess.
-        return Err(AbiError::Refused {
-            symbol: symbol.to_string(),
-            reason: "the locale cannot be inspected on this host",
-        });
-    };
-    // SAFETY: `const char *querylocale(int, locale_t)`. `loc` is either null —
-    // which the implementation reads as the global locale — or a `locale_t` the
-    // guest got from the host's own `newlocale`, since a locale object is
-    // opaque and passthrough on both sides.
-    let f: extern "C" fn(i32, u64) -> *const libc::c_char = unsafe {
-        core::mem::transmute::<u64, extern "C" fn(i32, u64) -> *const libc::c_char>(query)
-    };
-    let name = f(libc::LC_NUMERIC_MASK, loc);
+    let name = unsafe { libc::querylocale(libc::LC_NUMERIC_MASK, loc as _) };
     // SAFETY: `querylocale` returns a NUL-terminated name owned by libc, or
     // null for a handle it does not recognise.
     let name = match name.is_null() {
