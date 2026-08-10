@@ -341,6 +341,75 @@ fn global_handle() -> u64 {
     &GLOBAL_TOKEN as *const u8 as usize as u64
 }
 
+/// Return the guest image at a dyld image-list index.
+///
+/// The executable is always index zero, followed by images loaded by this
+/// linker. Host dyld images are intentionally absent: their headers describe
+/// arm64 Mach-O files and are not part of the guest address space.
+fn indexed_image(index: u32) -> Option<(u64, u64, String)> {
+    if index == 0 {
+        let (path, slide) = EXECUTABLE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        let header = MAIN_HEADER.load(Ordering::Acquire);
+        return (header != 0).then_some((header, slide, path));
+    }
+    snapshot()
+        .get(index as usize - 1)
+        .map(|image| (image.handle, image.slide, image.path.clone()))
+}
+
+fn image_count() -> u32 {
+    u32::from(MAIN_HEADER.load(Ordering::Acquire) != 0)
+        .saturating_add(IMAGE_COUNT.load(Ordering::Acquire) as u32)
+}
+
+fn image_count_shim(
+    _symbol: &str,
+    ctx: &mut RegisterContext,
+    _mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    ctx.rax = image_count() as u64;
+    Ok(())
+}
+
+fn image_header_shim(
+    _symbol: &str,
+    ctx: &mut RegisterContext,
+    _mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    ctx.rax = indexed_image(ctx.rdi as u32).map_or(0, |(header, _, _)| header);
+    Ok(())
+}
+
+fn image_slide_shim(
+    _symbol: &str,
+    ctx: &mut RegisterContext,
+    _mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    ctx.rax = indexed_image(ctx.rdi as u32).map_or(0, |(_, slide, _)| slide);
+    Ok(())
+}
+
+fn image_name_shim(
+    _symbol: &str,
+    ctx: &mut RegisterContext,
+    _mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    ctx.rax = indexed_image(ctx.rdi as u32).map_or(0, |(_, _, path)| path_cstr(&path));
+    Ok(())
+}
+
+fn image_containing_shim(
+    _symbol: &str,
+    ctx: &mut RegisterContext,
+    _mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    ctx.rax = guest_image_at(ctx.rdi).map_or(0, |(header, _)| header);
+    Ok(())
+}
+
 /// The main executable's `mach_header` as the guest can address it.
 ///
 /// Recorded rather than derived for the same reason the path is: the running
@@ -1297,9 +1366,28 @@ fn clear_error() {
 pub fn shim_for(name: &str) -> Option<crate::jmpbuf::Shim> {
     matches!(
         name,
-        "dlopen" | "dlsym" | "dlclose" | "dlerror" | "dladdr" | "_dyld_find_unwind_sections"
+        "dlopen"
+            | "dlsym"
+            | "dlclose"
+            | "dlerror"
+            | "dladdr"
+            | "_dyld_image_count"
+            | "_dyld_get_image_header"
+            | "_dyld_get_image_vmaddr_slide"
+            | "_dyld_get_image_name"
+            | "_dyld_image_containing_address"
+            | "_dyld_find_unwind_sections"
     )
-    .then_some(serve)
+    .then_some(
+        |symbol, ctx, mem| match symbol.strip_prefix('_').unwrap_or(symbol) {
+            "dyld_image_count" => image_count_shim(symbol, ctx, mem),
+            "dyld_get_image_header" => image_header_shim(symbol, ctx, mem),
+            "dyld_get_image_vmaddr_slide" => image_slide_shim(symbol, ctx, mem),
+            "dyld_get_image_name" => image_name_shim(symbol, ctx, mem),
+            "dyld_image_containing_address" => image_containing_shim(symbol, ctx, mem),
+            _ => serve(symbol, ctx, mem),
+        },
+    )
 }
 
 fn serve(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
@@ -1693,6 +1781,11 @@ pub fn provider() -> SyntheticDylib {
         "dlclose",
         "dlerror",
         "dladdr",
+        "_dyld_image_count",
+        "_dyld_get_image_header",
+        "_dyld_get_image_vmaddr_slide",
+        "_dyld_get_image_name",
+        "_dyld_image_containing_address",
         // Spelled with the underscore the C identifier already carries: these
         // are `_dyld_*`, so the `_{name}` below produces the `__dyld_*` a
         // Mach-O binds against. They are on `machish`'s `_dyld_` denylist and
@@ -1763,6 +1856,23 @@ mod tests {
                 err.contains("x86-64") || err.contains("no such file"),
                 "{err}"
             );
+        }
+    }
+
+    #[test]
+    fn guest_image_apis_are_shims_not_host_calls() {
+        for name in [
+            "__dyld_image_count",
+            "__dyld_get_image_header",
+            "__dyld_get_image_vmaddr_slide",
+            "__dyld_get_image_name",
+            "__dyld_image_containing_address",
+        ] {
+            assert!(
+                shim_for(name.strip_prefix('_').unwrap()).is_some(),
+                "{name}"
+            );
+            assert!(crate::shims::is_shimmed(name), "{name} may be inlined");
         }
     }
 }

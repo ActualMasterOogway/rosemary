@@ -1345,15 +1345,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // AppKit, and reached it from a *guest callback* — so a refusal surfaces on
     // whatever thread AppKit was calling into rather than at start-up.
     sig!("_availability_version_check", BOOL, U32, P),
-    // `const char *_dyld_get_image_name(uint32_t)`, answered with the host's
-    // image list for the reason [`crate::shims::runtime`] gives.
+    // Guest dyld image introspection is served by [`crate::dyld`], which knows
+    // the x86-64 executable and libraries this linker mapped.
     sig!("_dyld_image_count", U32),
     sig!("_dyld_get_image_header", P, U32),
-    // Both take `void (*)(const struct mach_header *, intptr_t slide)`, and
-    // the header the host hands back describes a *host* image. A guest that
-    // walks it is reading arm64 load commands, which is the right answer —
-    // these exist so a crash reporter can enumerate what is loaded, and what is
-    // loaded is the host's images plus the guest's own.
+    sig!("_dyld_get_image_vmaddr_slide", U64, U32),
+    sig!("_dyld_image_containing_address", P, P),
     cbsig!([0], "_dyld_register_func_for_add_image", V, P),
     cbsig!([0], "_dyld_register_func_for_remove_image", V, P),
     sig!("_dyld_get_image_name", P, U32),

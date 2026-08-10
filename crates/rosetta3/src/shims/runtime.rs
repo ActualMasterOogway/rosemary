@@ -175,34 +175,12 @@ pub fn provider() -> SyntheticDylib {
         ("__NSGetEnviron", "_NSGetEnviron"),
         ("__NSGetArgc", "_NSGetArgc"),
         ("__NSGetArgv", "_NSGetArgv"),
-        // The host's image list, which is honestly what a crash reporter
-        // linked into the guest is asking about: this process's images are
-        // where its own frames are. Guest images are not in it, which is a
-        // partial answer and a great deal better than a null one.
-        //
-        // The name was answered here first and the other three followed the
-        // program that wanted them: Unity links PLCrashReporter, which walks
-        // the whole list — count, header, name — and registers for the images
-        // loaded later. Answering one of the four and denying the rest is the
-        // worst of both, because a walk that gets a name and no count is a walk
-        // that reads past the end.
-        ("__dyld_image_count", "_dyld_image_count"),
-        ("__dyld_get_image_header", "_dyld_get_image_header"),
-        ("__dyld_get_image_name", "_dyld_get_image_name"),
         // These two take a guest function pointer dyld will call as arm64,
         // once per image already loaded and again for every image loaded
         // afterwards. The thunk that carries it is asked for by the `cbsig!`
         // entries in [`crate::abi::table`] — the same division of labour
         // `_tlv_atexit` above has, where the shim supplies the address and the
         // table supplies the signature.
-        (
-            "__dyld_register_func_for_add_image",
-            "_dyld_register_func_for_add_image",
-        ),
-        (
-            "__dyld_register_func_for_remove_image",
-            "_dyld_register_func_for_remove_image",
-        ),
     ] {
         if let Some(f) = crate::dyld::host_symbol(host) {
             lib.define_fn(mach_o, f as *const ());
