@@ -544,15 +544,33 @@ pub fn contains(va: u64) -> bool {
     find(|i| region_of(i, va).map(|_| ())).is_some()
 }
 
+/// The recorded function starts inside `range`, for an image the *guest* loaded.
+///
+/// The other half of [`crate::program::Program::function_starts_in`], and it
+/// answers the same question for the same reason: a function reached only
+/// through a pointer — a vtable slot, a callback — has no static predecessor, so
+/// nothing in a lift discovers it, and a region spanning it without offering it
+/// as a resume point forces a second translation of the same bytes.
+pub fn function_starts_in(range: std::ops::Range<u64>) -> Vec<u64> {
+    find(|image| {
+        let mut starts: Vec<u64> = image
+            .functions
+            .iter()
+            .map(|f| f.start)
+            .filter(|s| range.contains(s))
+            .collect();
+        starts.sort_unstable();
+        (!starts.is_empty()).then_some(starts)
+    })
+    .unwrap_or_default()
+}
+
 /// The region to lift in order to execute `va`, if it is in a loaded image.
-pub fn lift_region(va: u64, from_function_start: bool) -> Option<(crate::region::Region, Vec<u8>)> {
+pub fn lift_region(va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
     find(|image| {
         let (base, bytes) = region_of(image, va)?;
-        let function = image.functions.iter().find(|f| f.contains(&va)).cloned();
-        let region = match from_function_start {
-            true => crate::region::region_for(bytes, base, va, function)?,
-            false => crate::region::region_at(bytes, base, va, function)?,
-        };
+        // A loaded image, so not memory the guest writes; see [`crate::region`].
+        let region = crate::region::region_for(bytes, base, va, false)?;
         let start = usize::try_from(region.range.start - base).ok()?;
         let end = usize::try_from(region.range.end - base)
             .ok()?

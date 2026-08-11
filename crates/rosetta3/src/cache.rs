@@ -170,7 +170,6 @@ impl CodeCache {
     pub fn new(mut config: LifterConfig) -> Self {
         config.resumption = VmResumptionPoints::ExitOnly;
         config.strict_resume = true;
-        crate::region::configure(&mut config);
         CodeCache {
             regions: BTreeMap::new(),
             config,
@@ -197,25 +196,15 @@ impl CodeCache {
         }
 
         let selecting = crate::stats::enabled().then(std::time::Instant::now);
-        let mut selected = program
+        // A region always begins at the address it was made for, so its cache
+        // key is `pc` and two entry points into one function are two keys. The
+        // previous design preferred to begin at the enclosing function's first
+        // instruction and had to detect and undo that preference here, because
+        // a second entry asking for a region with the *same* key evicted the
+        // first and the two then took turns re-compiling the function forever.
+        let (region, bytes) = program
             .lift_region(pc)
             .ok_or(VmError::NoCode { pc, from: None })?;
-        // Region selection prefers to begin at the enclosing function's first
-        // instruction, so that the many call sites reaching one function share
-        // one translation. When `pc` is *not* that address and a translation
-        // already starts there, the preference has to be given up: translations
-        // are keyed by their start, so lifting a second one at the same key
-        // evicts the first, and two entry points into one function then take
-        // turns evicting each other's translation and re-compiling the function
-        // for every single entry. That is not a slow path, it is an unbounded
-        // one — thirty-six thousand regions where five thousand were needed,
-        // with the set of *bytes* translated having stopped growing long before.
-        if selected.0.range.start != pc && self.regions.contains_key(&selected.0.range.start) {
-            selected = program
-                .lift_region_at(pc)
-                .ok_or(VmError::NoCode { pc, from: None })?;
-        }
-        let (region, bytes) = selected;
         if let Some(selecting) = selecting {
             crate::stats::record_select(selecting.elapsed());
         }
@@ -252,30 +241,28 @@ impl CodeCache {
         declared.sort_unstable();
         declared.dedup();
 
-        let (compiled, region) = match compile_region(&self.config, &bytes, &region, &declared) {
-            Ok(compiled) => (compiled, region),
-            // One instruction the recompiler cannot handle refuses the *whole*
-            // region, and it is often somewhere the guest will never execute.
-            // See [`longest_liftable_prefix`].
-            Err(source) => match self.longest_liftable_prefix(&bytes, &region, pc, &declared) {
-                Some((compiled, region)) => {
-                    crate::stats::record_salvaged();
-                    (compiled, region)
+        // A region that will not compile is refused outright. There used to be
+        // a prefix bisection here — up to a dozen extra lift-and-compile
+        // attempts, cutting the region shorter until one stuck — and what it
+        // existed for was Mono's inline call arguments being decoded as
+        // instructions. The region walk no longer decodes them: a non-entry
+        // block that will not decode is dropped, and in writable memory a call
+        // ends its block outright. See [`crate::region`].
+        let compiled = match compile_region(&self.config, &bytes, &region, &declared) {
+            Ok(compiled) => compiled,
+            Err(source) => {
+                crate::stats::record_refused();
+                if crate::shims::vmmap::tracing() {
+                    let head: Vec<String> =
+                        bytes.iter().take(64).map(|b| format!("{b:02x}")).collect();
+                    eprintln!(
+                        "rosetta3: region {start:#x}..{:#x} would not compile, bytes {}",
+                        region.range.end,
+                        head.join(" ")
+                    );
                 }
-                None => {
-                    crate::stats::record_refused();
-                    if crate::shims::vmmap::tracing() {
-                        let head: Vec<String> =
-                            bytes.iter().take(64).map(|b| format!("{b:02x}")).collect();
-                        eprintln!(
-                            "rosetta3: region {start:#x}..{:#x} would not compile, bytes {}",
-                            region.range.end,
-                            head.join(" ")
-                        );
-                    }
-                    return Err(VmError::Lift { pc, start, source });
-                }
-            },
+                return Err(VmError::Lift { pc, start, source });
+            }
         };
         let end = region.range.end;
 
@@ -290,7 +277,7 @@ impl CodeCache {
                     program
                         .locate(start)
                         .unwrap_or_else(|| "generated code".to_string()),
-                    region.starts.len(),
+                    region.instructions(),
                     end - start,
                 );
             }
@@ -334,67 +321,6 @@ impl CodeCache {
         Ok(translation)
     }
 
-    /// The longest prefix of `region` that lifts, if it still covers `pc`.
-    ///
-    /// ## Why a whole region can be lost to a byte nobody executes
-    ///
-    /// Microlift lifts a region as a unit and refuses all of it if any one
-    /// instruction is unsupported. For an image that is the right severity: the
-    /// bytes came from a compiler, so an instruction in the middle of a function
-    /// is one the function can reach, and translating around it would mean
-    /// executing a function with a hole in it.
-    ///
-    /// Generated code breaks that reasoning, and Terraria is where it broke.
-    /// Mono emits a call to a trampoline followed by **inline data** the
-    /// trampoline reads through the return address — so the bytes after the call
-    /// are an argument, not an instruction, and the trampoline does not return to
-    /// them. [`crate::region`]'s walk cannot know that: a `call` continues at its
-    /// resume point, because almost every call does. The data decodes as
-    /// whatever it happens to decode as, and one `mov ds, edx` in an eight-byte
-    /// pointer takes the entire method with it.
-    ///
-    /// So the region is bisected on its own instruction grid: the longest prefix
-    /// that lifts is kept, and everything past it is reached later from its own
-    /// PC if it is reachable at all — which is the same answer demand-driven
-    /// lifting gives to a jump table, and for the same reason.
-    ///
-    /// `O(log n)` lift attempts, and only on a path that was about to fail
-    /// outright. The prefix must still cover `pc`, since a translation that does
-    /// not contain the address it was made for is no use.
-    fn longest_liftable_prefix(
-        &self,
-        bytes: &[u8],
-        region: &crate::region::Region,
-        pc: u64,
-        declared: &[u64],
-    ) -> Option<(Compiled, crate::region::Region)> {
-        let start = region.range.start;
-        // Candidate cut points, as counts of instructions kept. `starts` is
-        // ascending, so a larger index is a longer prefix.
-        let (mut lo, mut hi) = (0usize, region.starts.len());
-        let mut best = None;
-        while lo < hi {
-            let mid = lo + (hi - lo).div_ceil(2);
-            let Some(candidate) = region.truncated_to(mid) else {
-                break;
-            };
-            let len = usize::try_from(candidate.range.end - start).ok()?;
-            let attempt = bytes
-                .get(..len)
-                .and_then(|b| compile_region(&self.config, b, &candidate, declared).ok());
-            match attempt {
-                Some(compiled) if candidate.covers(pc) => {
-                    best = Some((compiled, candidate));
-                    lo = mid;
-                }
-                // Either it did not compile or it no longer reaches `pc`; either
-                // way this cut is too long.
-                _ => hi = mid - 1,
-            }
-        }
-        best
-    }
-
     /// An existing translation covering `pc`, if there is one.
     fn lookup(&self, pc: u64) -> Option<Arc<Translation>> {
         // Regions may overlap: the same bytes are reachable from two PCs when
@@ -432,11 +358,21 @@ fn compile_region(
     let clock = crate::stats::enabled().then(std::time::Instant::now);
     crate::stats::record_extent(region.range.start, region.range.end);
 
+    // Cheap: the two fields with a program's worth of data in them — the
+    // import map and the immutable-memory segments — are behind `Arc`s, so this
+    // copies pointers rather than the guest's whole image. It did not always,
+    // and that clone was 7% of a process's wall clock; see
+    // `LifterConfig::segments`.
     let mut config = config.clone();
     // Declared per region rather than once, because the answer is per region:
     // which function starts fall inside these bytes. Microlift adds the
     // region's entry and its call resume points to whatever is here.
     config.resume_points = declared.to_vec();
+    // Which of these bytes are code. The slice spans the region's blocks and
+    // the holes between them — a jump table, alignment padding, a call's inline
+    // argument — and this is what keeps the holes out of the lift. See
+    // [`crate::region`].
+    config.block_ranges = region.blocks.clone();
 
     let lifted = lift_to_code::<X86_64>(bytes, region.range.start, config)?;
     let entries = lifted.resume_points.clone();
@@ -445,7 +381,7 @@ fn compile_region(
     let (code, map) = backend.compile_lifted_with_map(lifted)?;
     if let (Some(clock), Some(lift)) = (clock, lift_took) {
         crate::stats::record_lift(
-            region.starts.len(),
+            region.instructions(),
             bytes.len(),
             lift,
             clock.elapsed() - lift,

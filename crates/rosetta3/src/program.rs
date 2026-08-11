@@ -543,11 +543,12 @@ impl<M: Regions> Program<M> {
         // both kinds, so it is cut at the writable segments' edges rather than
         // handed over whole.
         let writable = self.writable_ranges();
+        let mut segments: Vec<MemorySegment> = Vec::new();
         for (base, bytes) in self.memory.regions() {
             let end = base.wrapping_add(bytes.len() as u64);
             let mut piece = |from: u64, to: u64, is_writable: bool| {
                 let (lo, hi) = ((from - base) as usize, (to - base) as usize);
-                config.segments.push(MemorySegment::new(
+                segments.push(MemorySegment::new(
                     from,
                     bytes[lo..hi].to_vec(),
                     is_writable,
@@ -566,6 +567,11 @@ impl<M: Regions> Program<M> {
                 piece(at, end, false);
             }
         }
+        // Set rather than pushed one by one, because the field is shared: a
+        // `MemorySegment` owns a copy of the bytes it describes, so this is the
+        // program's whole `__TEXT` and `__DATA`, and every lift clones the
+        // config it lives in. See `LifterConfig::segments`.
+        config.set_segments(segments);
         for (&va, site) in &self.imports {
             // A fast import is an **absolute native call** the lifter bakes into
             // the translation, so the address had better be native code. Asked
@@ -682,61 +688,34 @@ impl<M: Regions> Program<M> {
         crate::abi::call_import(&symbol, tag, resolved, ctx, &mut self.memory)
     }
 
-    /// The region a JIT should lift in order to execute `va`: where it starts,
-    /// and the bytes to hand microlift.
+    /// The region a JIT should lift in order to execute `va`: which bytes are
+    /// code, and the slice to hand microlift.
     ///
-    /// `LC_FUNCTION_STARTS` supplies a *hint* — the enclosing function's start,
-    /// so that every call site reaching one function shares one translation —
-    /// and nothing more. The extent is computed by walking the guest's control
-    /// flow from that start; see [`crate::region`] for why a function's recorded
-    /// extent cannot be handed to the lifter as-is, and what happens to the code
-    /// on the far side of an embedded jump table.
+    /// The region begins at `va` and its extent is computed by walking the
+    /// guest's control flow from there — `LC_FUNCTION_STARTS` is not consulted,
+    /// because a recorded extent is a claim about which bytes are code and the
+    /// walk answers that question better. See [`crate::region`].
     ///
     /// Any mapped image answers, not only the root's `__text`: a bundled dylib,
     /// an image whose function starts were stripped, and code the guest wrote at
-    /// run time all reach this the same way — the first by hint, the other two
-    /// with none.
+    /// run time all reach this the same way.
     ///
     /// `None` when `va` is not in mapped guest memory, or when nothing there
     /// decodes.
     pub fn lift_region(&self, va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
-        self.select_region(va, true)
-    }
-
-    /// [`lift_region`](Self::lift_region), but the region begins **at** `va`.
-    ///
-    /// What the code cache asks for when it already holds a translation starting
-    /// where the function-start preference would put this one; see
-    /// [`crate::region::region_at`] for why sharing a start is not sharing a
-    /// translation.
-    pub fn lift_region_at(&self, va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
-        self.select_region(va, false)
-    }
-
-    fn select_region(
-        &self,
-        va: u64,
-        from_function_start: bool,
-    ) -> Option<(crate::region::Region, Vec<u8>)> {
         let Some((base, bytes)) = self.memory.region_at(va) else {
             // Or an image the *guest* loaded, which is not in this `Program` and
             // cannot be: a `Program` is immutable once linked, which is what
             // `SharedProgram`'s `unsafe impl Sync` rests on. See [`crate::dyld`].
-            return crate::dyld::lift_region(va, from_function_start)
+            return crate::dyld::lift_region(va)
                 // Or code the guest *wrote*, which is in no image at all — see
                 // [`crate::shims::vmmap`].
                 .or_else(|| lift_generated(va));
         };
-        let function = self.functions.iter().find(|f| f.contains(&va)).cloned();
-        let region = match from_function_start {
-            true => crate::region::region_for(bytes, base, va, function)?,
-            false => crate::region::region_at(bytes, base, va, function)?,
-        };
-        let start = usize::try_from(region.range.start - base).ok()?;
-        let end = usize::try_from(region.range.end - base)
-            .ok()?
-            .min(bytes.len());
-        let code = bytes.get(start..end)?.to_vec();
+        // A loaded image is not memory the guest writes, so the Mono call rule
+        // does not apply to it. See [`crate::region`].
+        let region = crate::region::region_for(bytes, base, va, false)?;
+        let code = slice_of(bytes, base, &region)?;
         Some((region, code))
     }
 
@@ -758,8 +737,10 @@ impl<M: Regions> Program<M> {
             .iter()
             .map(|f| f.start)
             .filter(|s| range.contains(s))
+            .chain(crate::dyld::function_starts_in(range.clone()))
             .collect();
         starts.sort_unstable();
+        starts.dedup();
         starts
     }
 
@@ -871,24 +852,36 @@ impl<M: Regions> Program<M> {
     }
 }
 
+/// The bytes of a region, cut out of the mapping it was found in.
+///
+/// The slice spans the region's blocks and the holes between them; the lifter is
+/// told which is which separately (`LifterConfig::block_ranges`), and reads only
+/// the blocks. Handing it the span rather than the blocks keeps every guest
+/// address an index into one buffer, which is what makes a branch target mean
+/// the same thing to both sides.
+fn slice_of(bytes: &[u8], base: u64, region: &crate::region::Region) -> Option<Vec<u8>> {
+    let start = usize::try_from(region.range.start.checked_sub(base)?).ok()?;
+    let end = usize::try_from(region.range.end.checked_sub(base)?)
+        .ok()?
+        .min(bytes.len());
+    Some(bytes.get(start..end)?.to_vec())
+}
+
 /// The region to lift in order to execute `va`, when `va` is code the guest
 /// *wrote* rather than code it loaded.
 ///
-/// ## Why this is not just another `region_at`
+/// ## What is different about an arena
 ///
-/// Every other lift in this runtime starts from an image: there is a mapping
-/// with known bounds, and usually a `LC_FUNCTION_STARTS` entry saying where the
-/// function containing `va` ends. Generated code has neither. Mono emits a method
-/// into the middle of a code manager's arena and nothing anywhere records its
-/// extent — there is no symbol table, no unwind table, no function-starts list,
-/// and the byte before the entry point belongs to a different method.
+/// Only one thing, and it is the reason this function exists rather than being
+/// a call site of the image path: these bytes are **writable**, so the guest can
+/// and does rewrite them. That selects [`crate::region`]'s Mono rule — a call in
+/// writable executable memory ends its block and its resume point is not
+/// followed — which answers both of the things Mono does to a region walk: the
+/// inline argument it puts after a call, and the backpatching that makes any
+/// translation reaching past a call site stale the moment the call is patched.
 ///
-/// So the extent is *computed*, which is what [`crate::region`] has always done
-/// and what the roadmap's "which bytes are code" note argues is the only general
-/// answer. `region_for` is handed no function hint at all: the walk starts at
-/// `va` and stops where control provably leaves, and the arena's end is the only
-/// upper bound. That is the same discipline `/bin/ls`'s embedded jump table
-/// forced, applied where it is not an optimisation but the only option.
+/// Everything else is the same. The walk needs no function record here and asks
+/// for none anywhere; the arena's end is the only upper bound.
 ///
 /// ## The bytes are copied, deliberately
 ///
@@ -919,7 +912,7 @@ fn lift_generated(va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
     // fails to decode, not a dangling reference.
     let bytes: &[u8] = unsafe { std::slice::from_raw_parts(base as usize as *const u8, len) };
 
-    let region = crate::region::region_for(bytes, base, va, None)?;
+    let region = crate::region::region_for(bytes, base, va, true)?;
     if crate::shims::vmmap::tracing() {
         let head = &bytes[offset..(offset + 64).min(len)];
         eprintln!(
@@ -933,8 +926,6 @@ fn lift_generated(va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
                 .join(" ")
         );
     }
-    let start = usize::try_from(region.range.start - base).ok()?;
-    let end = usize::try_from(region.range.end - base).ok()?.min(len);
-    debug_assert!(offset >= start && offset < end.max(offset + 1));
-    Some((region, bytes.get(start..end)?.to_vec()))
+    let code = slice_of(bytes, base, &region)?;
+    Some((region, code))
 }

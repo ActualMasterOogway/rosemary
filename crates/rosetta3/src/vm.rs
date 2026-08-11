@@ -1089,15 +1089,12 @@ impl Vm {
             // protocol — there is nothing to service, and continuing at `rip`
             // lifts the next region from it.
             //
-            // Every region that does *not* end at a `ret`, an indirect jump or
+            // Every block that does *not* end at a `ret`, an indirect jump or
             // an undecodable byte ends this way, which until now meant every
             // truncated region was a stop reading `guest stopped at …: none`.
-            // Three paths produce one: a region cut at
-            // [`MAX_REGION_INSTRUCTIONS`](crate::region), one cut at a hole the
-            // walk jumped over, and one salvaged by
-            // [`CodeCache::longest_liftable_prefix`](crate::cache). The first
-            // made it reachable on a program's very first big function; the
-            // other two were latent and just as wrong.
+            // Two things produce one: a region cut at the instruction cap, and
+            // a block that ran into a hole — a jump table, alignment padding,
+            // the inline argument after a call. See [`crate::region`].
             ExitReason::None => Ok(None),
 
             // Control left the region: a jump, a return into a region not yet

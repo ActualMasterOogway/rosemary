@@ -338,7 +338,7 @@ fn no_inlined_import_targets_guest_memory() {
     let config = program.lifter_config();
 
     let mut promoted_into_libcxx = 0;
-    for (&site, kind) in &config.imports {
+    for (&site, kind) in config.imports.iter() {
         let microlift::core::bridge::ImportKind::Fast(import) = kind else {
             continue;
         };

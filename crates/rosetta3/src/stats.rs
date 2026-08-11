@@ -36,7 +36,7 @@ macro_rules! counters {
 counters! {
     REGIONS, INSTRUCTIONS, BYTES,
     SELECT_NS, LIFT_NS, COMPILE_NS,
-    SALVAGED, REFUSED, TAIL_EXITS,
+    REFUSED, TAIL_EXITS,
 }
 
 /// One completed region selection: how long it took to decide the extent.
@@ -63,30 +63,26 @@ pub fn record_lift(instructions: usize, bytes: usize, lift: Duration, compile: D
     }
 }
 
-/// A region microlift refused whole and that was salvaged as a prefix.
-pub fn record_salvaged() {
-    SALVAGED.fetch_add(1, Relaxed);
-}
-
 /// A region that could not be translated at all.
 pub fn record_refused() {
     REFUSED.fetch_add(1, Relaxed);
 }
 
-/// An exit taken because the next instruction would have run off the end of the
-/// lifted extent. See [`crate::region`]'s note on page-bounded lifting.
+/// An exit taken because the translation could not serve the PC it was entered
+/// at — either the instruction there runs past the bytes it was given, or its
+/// dispatch was never offered that address. A run full of them means the region
+/// walk is cutting in the wrong places; see [`crate::region`].
 pub fn record_tail_exit() {
     TAIL_EXITS.fetch_add(1, Relaxed);
 }
 
 /// The pages a lifted region touched, at both page sizes that matter.
 ///
-/// This is the number that decides whether page-bounded lifting can pay for
-/// itself. Under the control-flow walk a program lifts many small regions and
-/// re-lifts overlapping bytes; under a page policy it lifts each page once and
-/// covers everything in it. Which is cheaper depends entirely on how *dense*
-/// the reached code is within the pages that contain it — a figure that no
-/// amount of reasoning produces and one counter does.
+/// How *dense* the code a program actually reaches is within the pages holding
+/// it, which is a figure no amount of reasoning produces and one counter does.
+/// It decided against page-bounded lifting when that was a live option, and it
+/// is what says whether a persistent code cache keyed by page would be storing
+/// mostly code or mostly padding.
 static PAGES: std::sync::Mutex<
     Option<(
         std::collections::BTreeSet<u64>,
@@ -173,8 +169,7 @@ pub fn report() {
         share(total),
     );
     eprintln!(
-        "rosetta3: stats  {} salvaged, {} refused, {} tail exit(s)",
-        SALVAGED.load(Relaxed),
+        "rosetta3: stats  {} refused, {} tail exit(s)",
         REFUSED.load(Relaxed),
         TAIL_EXITS.load(Relaxed),
     );
