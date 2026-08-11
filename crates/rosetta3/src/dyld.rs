@@ -1465,7 +1465,9 @@ fn dlsym(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> 
             ctx.rax = addr;
         }
         None => {
-            set_error(format!("dlsym({name}): symbol not found"));
+            let err = format!("dlsym({name}): symbol not found");
+            eprintln!("symbol lookup failed: {err}");
+            set_error(err);
             ctx.rax = 0;
         }
     }

@@ -311,6 +311,16 @@ impl CodeCache {
         // named as a *guest* range rather than as an address in an anonymous
         // mapping. See [`crate::fault`].
         crate::fault::placed(compiled.code as usize as u64, start, end, pc, &compiled.map);
+        crate::lldb::register(
+            compiled.code as usize as u64,
+            start,
+            end,
+            &program
+                .locate(start)
+                .unwrap_or_else(|| "generated code".to_string()),
+            &compiled.guest_bytes,
+            &compiled.map,
+        );
 
         let translation = Arc::new(Translation {
             start,
@@ -445,6 +455,9 @@ fn compile_region(
         backend,
         code,
         map,
+        guest_bytes: crate::lldb::enabled()
+            .then(|| bytes.to_vec())
+            .unwrap_or_default(),
         entries,
     })
 }
@@ -457,6 +470,8 @@ struct Compiled {
     /// Host offset → guest instruction, so a fault inside this code can name
     /// the instruction rather than the region. See [`crate::fault`].
     map: microlift::core::srcloc::GuestCodeMap,
+    /// Guest bytes retained only so the opt-in LLDB listing can show x86-64.
+    guest_bytes: Vec<u8>,
     /// Where the compiled code may be entered — see [`Translation::covers`].
     entries: Vec<u64>,
 }

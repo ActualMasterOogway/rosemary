@@ -129,6 +129,7 @@ pub mod dyld;
 pub mod fault;
 pub mod jit;
 pub mod jmpbuf;
+pub mod lldb;
 pub mod objc;
 pub mod program;
 pub mod region;
