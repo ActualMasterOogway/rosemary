@@ -379,6 +379,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFBundleGetIdentifier", P, P),
     sig!("CFBundleGetMainBundle", P),
     sig!("CFBundleGetVersionNumber", U32, P),
+    sig!("CFBundleGetValueForInfoDictionaryKey", P, P, P),
+    sig!("CFStringGetCharactersPtr", P, P),
     sig!("CFDataGetBytePtr", P, P),
     sig!("CFDataGetLength", I64, P),
     sig!("CFDataGetTypeID", U64),
@@ -1108,6 +1110,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("SecKeychainSearchCopyNext", I32, P, P),
     sig!("SecKeychainSearchCreateFromAttributes", I32, P, U32, P, P),
     sig!("SecTrustCopyAnchorCertificates", I32, P),
+    sig!("SecStaticCodeCreateWithPath", I32, P, U64, P),
+    sig!("SecRequirementCreateWithString", I32, P, U64, P),
+    sig!("SecStaticCodeCheckValidityWithErrors", I32, P, U64, P, P),
     // ## Text input sources, for the keyboard layout
     //
     // SDL3 asks the current layout for its Unicode key-layout data so it can
@@ -1777,6 +1782,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("getuid", U32),
     sig!("getwc", I32, P),
     sig!("getxattr", I64, P, P, P, U64, U32, I32),
+    sig!("getentropy", I32, P, U64),
+    sig!("getattrlist", I32, P, P, P, U64, U64),
     // ## OpenGL
     //
     // The whole of what a GameMaker runner draws with, and the most mechanical
@@ -2555,8 +2562,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("nextafter", F64, F64, F64),
     sig!("nl_langinfo", P, I32),
     sig!("nl_langinfo_l", P, I32, P),
-    vsig!("open", I32, P, I32),
-    vsig!("openat", I32, I32, P, I32),
+    // `open` and `openat` are treated specially despite the fact that they're variadic functions.
+    // They have a predictable, stable ABI where the ellipsis is just for convenience and
+    // there is only one extra param.
+    sig!("open", I32, P, I32, I32),
+    sig!("openat", I32, I32, P, I32, I32),
     sig!("opendir", P, P),
     sig!("openlog", V, P, I32, I32),
     sig!("pathconf", I64, P, I32),
@@ -2998,6 +3008,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     vsig!("warnx", V, P),
     sig!("wcrtomb_l", U64, P, I32, P, P),
     sig!("wcscmp", I32, P, P),
+    sig!("wcscpy", I32, P, P),
+    sig!("wcsstr", I32, P, P),
     sig!("wcscoll_l", I32, P, P, P),
     sig!("wcslen", U64, P),
     sig!("wcsncat", P, P, P, U64),

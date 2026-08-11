@@ -115,8 +115,8 @@ pub fn dispatch(
         "ioctl" => ioctl::ioctl,
         // Variadic in their declarations and one argument wide in fact, decided
         // by a flag word rather than a format string; see [`openat`].
-        "open" => openat::open,
-        "openat" => openat::openat,
+        // "open" => openat::open,
+        // "openat" => openat::openat,
         "fcntl" => openat::fcntl,
         // Not variadic, and here for the same underlying reason: forwarding it
         // would operate on the *host's* registers and the host's stack. See
