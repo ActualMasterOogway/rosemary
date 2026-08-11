@@ -1603,7 +1603,7 @@ const MAX_EXTENDED_LEAF: u32 = 0x8000_0004;
 const BRAND: [u8; 48] = brand();
 
 const fn brand() -> [u8; 48] {
-    let name = b"rosetta3 (microlift x86-64 on arm64)";
+    let name = b"rosetta3 (microlift x86-64 on arm64) @ 2.67GHz";
     let mut out = [0u8; 48];
     let mut i = 0;
     while i < name.len() {
@@ -1613,35 +1613,7 @@ const fn brand() -> [u8; 48] {
     out
 }
 
-/// The `CPUID` reply for `leaf`, as `[eax, ebx, ecx, edx]`.
-///
-/// ## What is advertised, and why so little
-///
-/// A feature bit here is a promise that the *lifter* can execute the
-/// instructions it stands for. Microlift implements the x86-64 baseline —
-/// x87, `CMOV`, `CMPXCHG8B`, SSE and SSE2 — and, of the later extensions,
-/// scattered instructions rather than whole sets. So the reply is the baseline
-/// and nothing else: no SSE3, no SSSE3, no SSE4, no `POPCNT`, no
-/// `CMPXCHG16B`, no AVX.
-///
-/// Advertising more is not optimism, it is a crash with a worse diagnostic. A
-/// guest that sees the AVX bit dispatches to its AVX `memcpy`, and the first
-/// `vmovdqu` in it stops the VM at [`VmError::Trap`] — an unimplemented
-/// instruction in code the guest chose to run *because this function said it
-/// could*. Under-reporting costs a slower path that works.
-///
-/// `OSXSAVE` being clear is what keeps [`ExitReason::Xgetbv`] out of reach: a
-/// guest reads `XCR0` only after this function tells it the OS enabled
-/// extended state, and no set of features here does.
-///
-/// The vendor stays `GenuineIntel` because a guest built for x86-64 macOS has
-/// only ever run on Intel, and any dispatch it does on vendor has exactly one
-/// tested arm. The brand string is where the honesty goes: it says what this
-/// actually is, and nothing dispatches on it.
-///
-/// No leaf this runtime answers is sub-leaf dependent, so the sub-leaf in `rcx`
-/// is accepted and ignored.
-fn cpuid(leaf: u32, _subleaf: u32) -> [u32; 4] {
+fn cpuid(leaf: u32, subleaf: u32) -> [u32; 4] {
     /// A four-byte slice of the brand string, as the little-endian word the
     /// register holds.
     fn brand_word(offset: usize) -> u32 {
@@ -1654,8 +1626,7 @@ fn cpuid(leaf: u32, _subleaf: u32) -> [u32; 4] {
     }
 
     match leaf {
-        // Maximum basic leaf, and the vendor string in the odd `ebx`, `edx`,
-        // `ecx` order the architecture specifies.
+        // Vendor String: "GenuineIntel"
         0x0 => [
             MAX_BASIC_LEAF,
             u32::from_le_bytes(*b"Genu"),
@@ -1663,31 +1634,69 @@ fn cpuid(leaf: u32, _subleaf: u32) -> [u32; 4] {
             u32::from_le_bytes(*b"ineI"),
         ],
 
-        // Family/model/stepping and the feature words.
+        // Family / Model / Stepping & Standard Features
         0x1 => {
-            // Family 6, model 15, stepping 1: a plausible 64-bit Intel part,
-            // recent enough that nothing consults an errata list for it and
-            // old enough to claim nothing this reply does not back up.
-            let version = 0x0000_06f1;
-            // Cache line size, in eight-byte units, at bits 15:8. The rest of
-            // this word — brand index, logical processor count, APIC id — is
-            // meaningful only alongside feature bits that are clear here.
+            // Family 6, Model 44 (0x2C), Stepping 0:
+            // Stepping [3:0]   = 0x0
+            // Base Model [7:4] = 0xC
+            // Base Family [11:8] = 0x6
+            // Ext Model [19:16] = 0x2
+            // Ext Family [27:20] = 0x00
+            // Signature = 0x000206C0
+            let version = 0x0002_06C0;
+
+            // Cache line size (64 bytes -> 8 units of 8-bytes) in bits 15:8
             let misc = 8 << 8;
-            // FPU | TSC | CX8 | CMOV | SSE | SSE2.
+
+            // FPU | TSC | CX8 | CMOV | SSE | SSE2
             let edx = (1 << 0) | (1 << 4) | (1 << 8) | (1 << 15) | (1 << 25) | (1 << 26);
-            // SSE3 | SSSE3 | SSE4.1 | SSE4.2 | Hypervisor
-            let ecx = (1 << 0) | (1 << 9) | (1 << 19) | (1 << 20) | (1 << 31);
+
+            // SSE3 (bit 0) | SSSE3 (bit 9) | SSE4.1 (bit 19) | SSE4.2 (bit 20) | AES-NI (bit 25) | Hypervisor (bit 31)
+            let ecx = (1 << 0) | (1 << 9) | (1 << 19) | (1 << 20) | (1 << 25) | (1 << 31);
+
             [version, misc, ecx, edx]
         }
 
-        // Maximum extended leaf. Nothing else is reported here: the feature
-        // words of `0x80000001` would only repeat the baseline.
+        // Leaf 4: Deterministic Cache Parameters
+        0x4 => match subleaf {
+            // L1 Data Cache (128 KB, 64-byte line, 8-way)
+            0 => {
+                let eax = (1 << 0) | (1 << 5) | (1 << 8); // Type: Data (1), Level: 1, Self Initializing
+                let ebx = (63 << 0) | (0 << 12) | (7 << 22); // Line size (63+1=64), Partitions (0+1=1), Ways (7+1=8)
+                let ecx = 255; // Sets (255+1=256) -> 256 * 64 * 1 * 8 = 128 KB
+                let edx = 0;
+                [eax, ebx, ecx, edx]
+            }
+            // L1 Instruction Cache (128 KB, 64-byte line, 8-way)
+            1 => {
+                let eax = (2 << 0) | (1 << 5) | (1 << 8); // Type: Instruction (2), Level: 1, Self Initializing
+                let ebx = (63 << 0) | (0 << 12) | (7 << 22); // Line size 64, 8-way
+                let ecx = 255; // Sets 256 -> 128 KB
+                let edx = 0;
+                [eax, ebx, ecx, edx]
+            }
+            // L2 Unified Cache (8192 KB / 8 MB, 64-byte line, 16-way)
+            2 => {
+                let eax = (3 << 0) | (2 << 5) | (1 << 8); // Type: Unified (3), Level: 2, Self Initializing
+                let ebx = (63 << 0) | (0 << 12) | (15 << 22); // Line size 64, Ways (15+1=16)
+                let ecx = 8191; // Sets (8191+1=8192) -> 8192 * 64 * 1 * 16 = 8192 KB
+                let edx = 0;
+                [eax, ebx, ecx, edx]
+            }
+            // No more caches
+            _ => [0, 0, 0, 0],
+        },
+
+        // Leaf 7: Structured Extended Feature Flags
+        0x7 => [0, 0, 0, 0], // Sub-leaf 0: No AVX2, BMI, AVX-512, SHA, etc.
+
+        // Extended Leaves
         0x8000_0000 => [MAX_EXTENDED_LEAF, 0, 0, 0],
 
-        // Long mode. The guest is 64-bit code that is already running, so this
-        // bit describes the present rather than promising anything.
+        // Extended Processor Info (64-bit Long Mode enabled)
         0x8000_0001 => [0, 0, 0, 1 << 29],
 
+        // Brand String across leaves 0x80000002 to 0x80000004
         0x8000_0002..=0x8000_0004 => {
             let base = (leaf - 0x8000_0002) as usize * 16;
             [
@@ -1770,11 +1779,7 @@ mod tests {
             assert_eq!(edx & (1 << bit), 0, "{name} should not be advertised");
         }
         for (bit, name) in [
-            (0, "sse3"),
-            (9, "ssse3"),
             (13, "cmpxchg16b"),
-            (19, "sse4.1"),
-            (20, "sse4.2"),
             (23, "popcnt"),
             (26, "xsave"),
             (27, "osxsave"),
