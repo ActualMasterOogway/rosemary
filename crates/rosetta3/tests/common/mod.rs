@@ -1632,6 +1632,33 @@ pub fn run_guest(path: &str, args: &[&str]) -> (Option<i32>, String, String) {
     run_guest_with(&[], path, args)
 }
 
+/// [`run_guest`], with environment variables set for the driver.
+///
+/// Most of what this runtime can be asked to do differently is asked for that
+/// way — see `ROSETTA3_*` in `docs/ROADMAP.md`.
+pub fn run_guest_env(
+    env: &[(&str, &str)],
+    path: &str,
+    args: &[&str],
+) -> (Option<i32>, String, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rosetta3"));
+    command.arg("run").arg(path).args(args);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let out = command.output().expect("running the driver");
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// The driver binary, for a test that has to launch it itself.
+pub fn driver() -> &'static str {
+    env!("CARGO_BIN_EXE_rosetta3")
+}
+
 /// [`run_guest`], with extra driver flags before the program path.
 pub fn run_guest_with(flags: &[&str], path: &str, args: &[&str]) -> (Option<i32>, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_rosetta3"))

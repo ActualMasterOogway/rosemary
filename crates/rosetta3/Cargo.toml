@@ -7,8 +7,10 @@ license.workspace = true
 
 [dependencies]
 machish.workspace = true
+# DWARF for `crate::lldb`, which is the only thing here that writes any. The
+# Mach-O around it is hand-written — see that module for why an object-file
+# crate could not express it.
 gimli.workspace = true
-object.workspace = true
 # The shims call host libc directly (stdio for the `printf` family, `errno` for
 # diagnostics). `machish` keeps `libc` optional; the driver is `std`-only
 # anyway, so here it is unconditional.
@@ -16,6 +18,8 @@ libc.workspace = true
 # For `iced_x86::Register`, which is what a `microlift` `GuestReg` payload
 # actually is. Resolving one is how an `ArgLocation::IntReg` becomes a field of
 # the guest register context; the alternative is matching raw register numbers.
+# Its formatter is also what renders `crate::lldb`'s x86-64 listings, out of the
+# same decode `microlift` lifted from rather than a second disassembler's guess.
 iced-x86 = "1"
 # A path dependency, deliberately outside this workspace: `machish` must stay
 # publishable and free of any microlift coupling, so the two only ever meet
