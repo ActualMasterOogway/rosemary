@@ -292,7 +292,11 @@ fn mutex_lock(
         eprintln!(
             "rosetta3: {symbol}({at:#x}) failed with {rc}; first 16 bytes {}",
             match read {
-                true => head.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "),
+                true => head
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" "),
                 false => "unreadable".to_string(),
             }
         );

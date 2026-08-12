@@ -135,7 +135,12 @@ pub unsafe fn install(cls: Class, ctor: Imp, name: &str) -> Vec<Refusal> {
     // function of exactly the shape the encoding declares.
     let ok = unsafe {
         let sel = host::sel_registerName(sel_name.as_ptr());
-        host::class_addMethod(meta, sel, alloc_with_zone as *const c_void as Imp, types.as_ptr())
+        host::class_addMethod(
+            meta,
+            sel,
+            alloc_with_zone as *const c_void as Imp,
+            types.as_ptr(),
+        )
     };
     match ok {
         true => Vec::new(),
@@ -344,7 +349,11 @@ mod tests {
                 types.as_ptr()
             ));
             let refusals = install(cls, ctor as *const c_void as Imp, "Rosetta3CxxProbe2");
-            assert_eq!(refusals, Vec::new(), "the class declares no allocWithZone: of its own");
+            assert_eq!(
+                refusals,
+                Vec::new(),
+                "the class declares no allocWithZone: of its own"
+            );
             host::objc_registerClassPair(cls);
 
             // Through `objc_msgSend`, which is how everyone else reaches it.

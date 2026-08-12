@@ -10,22 +10,14 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-use gimli::write::{
-    Address, Dwarf, EndianVec, LineProgram, LineString, Sections, Unit,
-};
-use gimli::{
-    Encoding, Format, LineEncoding, LittleEndian, constants,
-};
+use gimli::write::{Address, Dwarf, EndianVec, LineProgram, LineString, Sections, Unit};
+use gimli::{Encoding, Format, LineEncoding, LittleEndian, constants};
 use microlift::arch::x86_64::decode::decode_region;
 use microlift::backend::ArtifactBackend;
 use microlift::core::srcloc::GuestCodeMap;
 
-use object::write::{
-    Object, Symbol, SymbolFlags, SymbolKind, SymbolScope, SymbolSection,
-};
-use object::{
-    Architecture, BinaryFormat, Endianness, SectionKind,
-};
+use object::write::{Object, Symbol, SymbolFlags, SymbolKind, SymbolScope, SymbolSection};
+use object::{Architecture, BinaryFormat, Endianness, SectionKind};
 
 /// The ABI LLDB calls the GDB JIT interface.
 ///
@@ -107,9 +99,7 @@ pub fn register(
         return;
     }
 
-    let Some(object) =
-        make_debug_object(code, guest_start, guest_end, image, bytes, map)
-    else {
+    let Some(object) = make_debug_object(code, guest_start, guest_end, image, bytes, map) else {
         return;
     };
 
@@ -165,8 +155,7 @@ fn make_debug_object(
     bytes: &[u8],
     map: &GuestCodeMap,
 ) -> Option<Vec<u8>> {
-    let (source_path, source_lines) =
-        write_listing(code, guest_start, image, bytes)?;
+    let (source_path, source_lines) = write_listing(code, guest_start, image, bytes)?;
 
     // Native extent, not guest extent.
     //
@@ -206,12 +195,7 @@ fn make_debug_object(
     let mut line_program = LineProgram::new(
         encoding,
         LineEncoding::default(),
-        LineString::String(
-            directory
-                .to_string_lossy()
-                .as_bytes()
-                .to_vec(),
-        ),
+        LineString::String(directory.to_string_lossy().as_bytes().to_vec()),
         None,
         LineString::String(filename.as_encoded_bytes().to_vec()),
         None,
@@ -259,9 +243,7 @@ fn make_debug_object(
 
     root.set(
         constants::DW_AT_name,
-        gimli::write::AttributeValue::String(
-            name.as_bytes().to_vec(),
-        ),
+        gimli::write::AttributeValue::String(name.as_bytes().to_vec()),
     );
 
     root.set(
@@ -273,23 +255,18 @@ fn make_debug_object(
     // Give LLDB a subprogram DIE so it can display a useful function name
     // rather than only a source location.
     //
-    let function =
-        unit.add(unit.root(), constants::DW_TAG_subprogram);
+    let function = unit.add(unit.root(), constants::DW_TAG_subprogram);
 
     let function_die = unit.get_mut(function);
 
     function_die.set(
         constants::DW_AT_name,
-        gimli::write::AttributeValue::String(
-            name.as_bytes().to_vec(),
-        ),
+        gimli::write::AttributeValue::String(name.as_bytes().to_vec()),
     );
 
     function_die.set(
         constants::DW_AT_low_pc,
-        gimli::write::AttributeValue::Address(
-            Address::Constant(code),
-        ),
+        gimli::write::AttributeValue::Address(Address::Constant(code)),
     );
 
     function_die.set(
@@ -301,8 +278,7 @@ fn make_debug_object(
 
     dwarf.units.add(unit);
 
-    let mut sections =
-        Sections::new(EndianVec::new(LittleEndian));
+    let mut sections = Sections::new(EndianVec::new(LittleEndian));
 
     dwarf.write(&mut sections).ok()?;
 
@@ -339,39 +315,18 @@ fn make_debug_object(
     // Mach-O's __DWARF/__debug_* sections rather than ELF-style sections.
     //
     for (name, data) in [
-        (
-            b"__debug_abbrev".as_slice(),
-            sections.debug_abbrev.slice(),
-        ),
-        (
-            b"__debug_info".as_slice(),
-            sections.debug_info.slice(),
-        ),
-        (
-            b"__debug_line".as_slice(),
-            sections.debug_line.slice(),
-        ),
-        (
-            b"__debug_str".as_slice(),
-            sections.debug_str.slice(),
-        ),
+        (b"__debug_abbrev".as_slice(), sections.debug_abbrev.slice()),
+        (b"__debug_info".as_slice(), sections.debug_info.slice()),
+        (b"__debug_line".as_slice(), sections.debug_line.slice()),
+        (b"__debug_str".as_slice(), sections.debug_str.slice()),
     ] {
         if data.is_empty() {
             continue;
         }
 
-        let section =
-            object.add_section(
-                Vec::new(),
-                name.to_vec(),
-                SectionKind::Debug,
-            );
+        let section = object.add_section(Vec::new(), name.to_vec(), SectionKind::Debug);
 
-        object.set_section_data(
-            section,
-            data.to_vec(),
-            1,
-        );
+        object.set_section_data(section, data.to_vec(), 1);
     }
 
     object.write().ok()
@@ -394,28 +349,14 @@ fn write_listing(
 
     let safe_image: String = image
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c
-            } else {
-                '_'
-            }
-        })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
 
-    let path = dir.join(format!(
-        "{safe_image}-{guest_start:x}.s"
-    ));
+    let path = dir.join(format!("{safe_image}-{guest_start:x}.s"));
 
-    let instructions =
-        decode_region(bytes, guest_start);
+    let instructions = decode_region(bytes, guest_start);
 
-    let disassembly =
-        ArtifactBackend::disassemble(
-            bytes,
-            Some("x86_64-apple-darwin"),
-        )
-        .ok()?;
+    let disassembly = ArtifactBackend::disassemble(bytes, Some("x86_64-apple-darwin")).ok()?;
 
     let mut disassembly = disassembly.lines();
 
@@ -434,10 +375,7 @@ fn write_listing(
         //
         let line = listing.lines().count() as u32 + 1;
 
-        listing.push_str(&format!(
-            "{:#x}: {text}\n",
-            instruction.ip()
-        ));
+        listing.push_str(&format!("{:#x}: {text}\n", instruction.ip()));
 
         lines.insert(instruction.ip(), line);
     }
