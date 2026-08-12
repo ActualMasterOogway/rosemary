@@ -76,6 +76,24 @@ pub struct MissingSymbol {
     pub weak_import: bool,
 }
 
+/// One `{ replacement, replacee }` pair from a `__DATA,__interpose` section,
+/// as both halves stand in memory once the image is bound.
+///
+/// The request it states is dyld's: *every* binding in every other image that
+/// resolved to `replacee` should resolve to `replacement` instead. Both are
+/// addresses rather than names on purpose — that is what makes an interposition
+/// catch a call the interposing image could not have named, such as one made
+/// through an alias.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Interposition {
+    /// Where calls should go: a function in the interposing image.
+    pub replacement: Word,
+    /// What is being replaced: whatever the interposer's own import of that
+    /// symbol resolved to, which is the address every other image's import of
+    /// it also resolved to.
+    pub replacee: Word,
+}
+
 /// Everything binding one image produced.
 #[derive(Clone, Debug, Default)]
 pub struct ImageReport {
@@ -98,6 +116,10 @@ pub struct ImageReport {
     pub initializers: Vec<Word>,
     /// Slid VAs of `S_MOD_TERM_FUNC_POINTERS` entries. Reported, never run.
     pub terminators: Vec<Word>,
+    /// What the image's `__DATA,__interpose` section asks for, decoded and not
+    /// acted on. Empty for the overwhelming majority of images, which declare no
+    /// such section at all.
+    pub interpositions: Vec<Interposition>,
     /// Thread-local descriptors, enumerated and not otherwise honoured.
     pub thread_locals: Vec<ThreadLocalDescriptor>,
     /// The image's thread-local block layout, if it has one. Present exactly

@@ -358,6 +358,12 @@ impl<M: Regions> Program<M> {
         // [`crate::cxxlib::bind_cxxabi_to_the_vendored_one`].
         crate::cxxlib::bind_cxxabi_to_the_vendored_one(&mut report, &mut memory)?;
 
+        // And last, because it is stated in terms of what everything above
+        // settled on: a guest image may declare `__DATA,__interpose` and take
+        // over a function the rest of the program calls. Roblox replaces the
+        // allocator this way. See [`crate::interpose`].
+        crate::interpose::apply(&mut report, &mut memory)?;
+
         // The root image's `__text` is what the driver lifts. Re-parsing here
         // rather than threading a `MachObject` out of the loader keeps the
         // report the only thing that crosses the boundary.

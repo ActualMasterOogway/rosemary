@@ -145,6 +145,9 @@ fn main() -> ExitCode {
             img.name, img.base, img.slide
         );
     }
+    for line in rosetta3::interpose::describe(&program.report) {
+        println!("  {line}");
+    }
     println!(
         "  __text {:#x} + {:#x}, {} function(s)",
         text_va,

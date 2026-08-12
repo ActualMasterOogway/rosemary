@@ -65,6 +65,7 @@
 //! either one of its thunks (a jump back into the guest) or a host method whose
 //! type encoding says how to call it.
 
+pub mod cxxivars;
 pub mod dispatch;
 pub mod encoding;
 pub mod host;
@@ -122,6 +123,13 @@ pub enum Refusal {
         name: String,
         method: String,
         reason: &'static str,
+    },
+    /// A class with C++ ivars whose constructors could not be arranged for.
+    /// See [`cxxivars`], which is also where the reason a class needs anything
+    /// arranging is.
+    CxxIvars {
+        name: String,
+        reason: cxxivars::Refusal,
     },
     /// A method whose `IMP` could not be made callable from the host.
     MethodRejected {
@@ -602,11 +610,28 @@ fn register_class(
         .map(|m| &m.ro.methods)
         .unwrap_or(&no_class_methods);
     let mut methods = 0;
+    // The `IMP` installed for `.cxx_construct`, if the class has one. Captured
+    // rather than looked up afterwards because the lookup that matters is
+    // *non-inherited* and this loop is the only place that distinction is free.
+    let mut cxx_construct: Option<host::Imp> = None;
     for (target, list) in [(cls, &class.ro.methods), (meta, class_methods)] {
         for m in list {
             match add_method(vm, target, m) {
                 Ok(carried) => {
                     methods += 1;
+                    if target == cls && m.name == cxxivars::CONSTRUCT {
+                        // SAFETY: the method was just installed on `cls`, so
+                        // asking the class for it answers what `add_method`
+                        // wrote — including the typed trampoline, when there
+                        // was one, which a saved copy of the raw thunk would
+                        // miss.
+                        cxx_construct = unsafe {
+                            host::c_string(&m.name)
+                                .map(|n| host::sel_registerName(n.as_ptr()))
+                                .map(|sel| host::class_getMethodImplementation(cls, sel))
+                                .filter(|imp| !imp.is_null())
+                        };
+                    }
                     if let Some(reason) = carried {
                         rt.refusals.push(Refusal::MethodNotHostCallable {
                             name: name.to_string(),
@@ -626,6 +651,21 @@ fn register_class(
                     return None;
                 }
             }
+        }
+    }
+
+    // C++ ivars, before the pair is registered because this adds two methods.
+    // A class the *compiler* built would have had these called for it by the
+    // runtime; one this runtime built gets neither unless it arranges it. See
+    // [`cxxivars`].
+    if let Some(ctor) = cxx_construct {
+        // SAFETY: `cls` is a class this pass allocated and has not registered,
+        // and `ctor` is the `IMP` it installed for `.cxx_construct` on it.
+        for reason in unsafe { cxxivars::install(cls, ctor, &name) } {
+            rt.refusals.push(Refusal::CxxIvars {
+                name: name.to_string(),
+                reason,
+            });
         }
     }
 

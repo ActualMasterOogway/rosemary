@@ -102,6 +102,18 @@ impl<'a> Section<'a> {
         self.is_mod_init() || self.is_init_offsets()
     }
 
+    /// `__interpose`: an array of `{ replacement, replacee }` pointer pairs.
+    ///
+    /// Identified by name rather than by an `S_*` type, because it has none —
+    /// the linker emits it as `S_REGULAR` and dyld recognizes the name. The
+    /// segment is `__DATA` in every image that has ever shipped one; it is
+    /// checked anyway so a `__TEXT,__interpose` — which could not be a table of
+    /// bound pointers — is not read as one.
+    pub fn is_interpose(&self) -> bool {
+        self.sect_name == "__interpose"
+            && (self.seg_name == "__DATA" || self.seg_name == "__DATA_CONST")
+    }
+
     /// `__mod_term_func`: destructors, run at unload.
     pub fn is_mod_term(&self) -> bool {
         self.section_type() == constants::S_MOD_TERM_FUNC_POINTERS

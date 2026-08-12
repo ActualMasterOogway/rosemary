@@ -61,6 +61,13 @@ unsafe extern "C" {
     pub fn class_addProtocol(cls: Class, protocol: Protocol) -> bool;
     pub fn class_getInstanceVariable(cls: Class, name: *const c_char) -> Ivar;
     pub fn class_getInstanceMethod(cls: Class, name: Sel) -> Method;
+    /// Allocate and **zero** an instance of `cls`. This is what `+alloc`
+    /// bottoms out in, and — for a class the *compiler* built — what calls the
+    /// C++ ivar constructors. See [`super::cxxivars`] for why a class this
+    /// runtime built gets neither.
+    pub fn class_createInstance(cls: Class, extra: usize) -> Class;
+    pub fn class_getClassMethod(cls: Class, name: Sel) -> Method;
+    pub fn class_getMethodImplementation(cls: Class, name: Sel) -> Imp;
 
     /// The `IMP` and the type encoding of a method, which together are the whole
     /// of what a message send needs to know.

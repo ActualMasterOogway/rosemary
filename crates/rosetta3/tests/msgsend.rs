@@ -188,10 +188,12 @@ fn an_aggregate_return_and_a_variadic_method_both_work_and_throw_still_names_its
 ///
 /// The fixture used to call `_dyld_image_count`, and that stopped being a
 /// denied-and-unanswered symbol when [`rosetta3::shims::runtime`] began
-/// answering the image-list family for Unity's crash reporter. The example has
-/// to be one nothing has claimed *yet*, so it moved to the vmaddr slide — and
-/// if a program ever needs that one too, this test moves again rather than the
-/// shim being held back.
+/// answering the image-list family for Unity's crash reporter. It moved to the
+/// vmaddr slide, and *that* stopped being one too — the whole image-list family
+/// is claimed now, because a guest crash reporter walks it. It is
+/// `_dyld_get_prog_image_header` today. **The test moving is the correct
+/// outcome each time**: the alternative is holding a shim back so a diagnostic
+/// keeps its example, which would be the tail wagging the dog.
 #[test]
 fn an_unsatisfied_import_names_itself_when_it_is_called() {
     const SRC: &str = r#"
@@ -199,7 +201,7 @@ fn an_unsatisfied_import_names_itself_when_it_is_called() {
     #include <mach-o/dyld.h>
     int main(void) {
         printf("before\n");
-        printf("slide %ld\n", (long)_dyld_get_image_vmaddr_slide(0));
+        printf("header %p\n", (const void *)_dyld_get_prog_image_header());
         return 0;
     }
     "#;
@@ -209,7 +211,7 @@ fn an_unsatisfied_import_names_itself_when_it_is_called() {
     let (status, stdout, stderr) = common::run_guest(&path, &[]);
     assert_ne!(status, Some(0));
     assert_eq!(stdout, "before\n");
-    assert!(stderr.contains("_dyld_get_image_vmaddr_slide"), "{stderr}");
+    assert!(stderr.contains("_dyld_get_prog_image_header"), "{stderr}");
     assert!(stderr.contains("unsatisfied import"), "{stderr}");
 }
 

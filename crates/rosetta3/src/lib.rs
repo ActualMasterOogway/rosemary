@@ -128,6 +128,7 @@ pub mod compat;
 pub mod cxxlib;
 pub mod dyld;
 pub mod fault;
+pub mod interpose;
 pub mod jit;
 pub mod jmpbuf;
 pub mod lldb;

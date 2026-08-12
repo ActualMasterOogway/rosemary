@@ -248,8 +248,57 @@ pub type Shim = crate::signal::Shim;
 pub fn shim_for(name: &str) -> Option<Shim> {
     match name {
         "pthread_create" => Some(pthread_create),
+        // Off unless asked for: this turns every lock in the program into a VM
+        // exit, which is not a price to pay for a diagnostic nobody is reading.
+        // `ROSETTA3_DEBUG_MUTEX=1` is for one question — *which* mutex, and what
+        // is in it — and a failed `pthread_mutex_lock` is otherwise invisible:
+        // libc++ turns it into a `std::system_error` whose message names no
+        // address, and a guest that does not catch it dies several frames later
+        // in its own terminate handler.
+        "pthread_mutex_lock" if debug_mutex() => Some(mutex_lock),
         _ => None,
     }
+}
+
+/// Whether `ROSETTA3_DEBUG_MUTEX` asked for the lock diagnostic. Read once, for
+/// [`crate::trace::watching`]'s reason: the lift-time decision and the run-time
+/// decision have to agree.
+fn debug_mutex() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("ROSETTA3_DEBUG_MUTEX").is_some())
+}
+
+/// `int pthread_mutex_lock(pthread_mutex_t *)`, reporting a failure by address.
+///
+/// The first eight bytes are printed because that is where the answer usually
+/// is: Darwin's `pthread_mutex_t` starts with a signature word, `EINVAL` means
+/// it is not one libpthread recognises, and the two interesting wrong values are
+/// **zero** — memory that was never constructed, or was `calloc`ed over a mutex
+/// — and anything else, which is a mutex something has written through.
+fn mutex_lock(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    _callbacks: &dyn Callbacks,
+) -> Result<()> {
+    let at = ctx.rdi;
+    // SAFETY: the mutex is guest memory, which is this process's memory, and
+    // `pthread_mutex_lock` is the host's own — the passthrough the table
+    // declares, performed here so its result can be looked at.
+    let rc = unsafe { libc::pthread_mutex_lock(at as *mut libc::pthread_mutex_t) };
+    if rc != 0 {
+        let mut head = [0u8; 16];
+        let read = mem.read(at, &mut head).is_ok();
+        eprintln!(
+            "rosetta3: {symbol}({at:#x}) failed with {rc}; first 16 bytes {}",
+            match read {
+                true => head.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "),
+                false => "unreadable".to_string(),
+            }
+        );
+    }
+    ctx.rax = rc as u32 as u64;
+    Ok(())
 }
 
 #[cfg(test)]

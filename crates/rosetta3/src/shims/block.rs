@@ -221,6 +221,51 @@ fn dispatch_once(
     Ok(())
 }
 
+/// `void *_Block_copy(const void *block)`
+///
+/// **`_Block_copy` runs the guest's code before it returns**, which is the whole
+/// reason this is a shim and not a signature. The table used to describe it as a
+/// plain two-pointer call on the argument that copying a block "does not read
+/// the `invoke` field" — true, and beside the point. When
+/// `BLOCK_HAS_COPY_DISPOSE` is set, `_Block_copy` calls the descriptor's **copy
+/// helper** on the new literal, immediately, to retain everything the block
+/// captured. That helper is guest code, and the host calls it as arm64: a
+/// `SIGBUS` inside `libsystem_blocks`' `_call_copy_helpers_excp`, with the
+/// faulting address equal to the pc, one frame below anything that names a
+/// block.
+///
+/// So the pointers are substituted first, exactly as they are for a block handed
+/// to libdispatch. A block that captures nothing has no helpers and reaches none
+/// of this — which is why the plain signature worked for four games.
+///
+/// `objc_retainBlock` is this function under another name and is fixed the same
+/// way, in [`crate::objc::dispatch`]'s table rather than here, because that is
+/// where the runtime's own entry points live.
+fn block_copy(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
+    let block = ctx.rdi;
+    // A null block is legal here in a way it is not for `dispatch_async`:
+    // `_Block_copy(NULL)` is defined to answer null, and ARC emits it on paths
+    // where the block is optional.
+    if block == 0 {
+        ctx.rax = 0;
+        return Ok(());
+    }
+    substitute_block(symbol, block, mem, callbacks)?;
+    let host = host_or_refuse(symbol)?;
+    // SAFETY: `host` is libsystem_blocks' own `_Block_copy`, whose prototype is
+    // one pointer in and one pointer out. The block's code pointers are thunks
+    // by the line above, so the copy helper this call runs is native.
+    let f: extern "C" fn(u64) -> u64 =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(u64) -> u64>(host) };
+    ctx.rax = f(block);
+    Ok(())
+}
+
 /// `dispatch_data_t dispatch_data_create(const void *buffer, size_t size,
 /// dispatch_queue_t queue, dispatch_block_t destructor)`
 fn dispatch_data_create(
@@ -268,6 +313,10 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         "dispatch_after" => Some(dispatch_after),
         "dispatch_once" => Some(dispatch_once),
         "dispatch_data_create" => Some(dispatch_data_create),
+        // Both spellings: the Mach-O symbol is `__Block_copy`, and `c_name`
+        // strips one underscore, so what arrives here still has the one the
+        // function's own name begins with.
+        "_Block_copy" | "Block_copy" => Some(block_copy),
         _ => None,
     }
 }

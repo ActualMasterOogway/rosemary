@@ -33,6 +33,8 @@
 
 #[cfg(feature = "ext-initializers")]
 pub mod initializers;
+#[cfg(feature = "ext-interpose")]
+pub mod interpose;
 #[cfg(feature = "ext-objc")]
 pub mod objc;
 #[cfg(feature = "ext-tlv")]
@@ -116,6 +118,8 @@ impl<S: MachSpec> ExtensionSet<S> {
         extensions.push(alloc::boxed::Box::new(initializers::InitializersExtension));
         #[cfg(feature = "ext-tlv")]
         extensions.push(alloc::boxed::Box::new(tlv::TlvExtension::new()));
+        #[cfg(feature = "ext-interpose")]
+        extensions.push(alloc::boxed::Box::new(interpose::InterposeExtension));
         #[cfg(feature = "ext-objc")]
         extensions.push(alloc::boxed::Box::new(objc::ObjcExtension));
         ExtensionSet { extensions }

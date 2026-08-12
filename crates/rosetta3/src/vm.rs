@@ -88,6 +88,16 @@ pub enum VmError {
         pc: u64,
         start: u64,
         source: microlift::MicroliftError,
+        /// `start` as `image+unslid-va`, the form a disassembler can be pointed
+        /// at.
+        ///
+        /// The same thing [`Transfer::at`] carries and for the same reason: the
+        /// mapping moves every run, so the slid address in this message is a
+        /// number no two runs agree on and no `objdump` invocation accepts. A
+        /// refused instruction is nearly always answered by *looking at the
+        /// bytes*, and without this that takes a second run with
+        /// `ROSETTA3_TRACE_VM` to find out where they are.
+        at: Option<String>,
     },
     /// An intercepted import could not be called. See [`AbiError`]: every
     /// variant names the symbol.
@@ -225,11 +235,17 @@ impl fmt::Display for VmError {
                 pc,
                 from: Some(from),
             } => write!(f, "no guest code at {pc:#x}: {from}"),
-            VmError::Lift { pc, start, source } => {
-                write!(
-                    f,
-                    "lifting the region at {start:#x} (for pc {pc:#x}): {source}"
-                )
+            VmError::Lift {
+                pc,
+                start,
+                source,
+                at,
+            } => {
+                write!(f, "lifting the region at {start:#x}")?;
+                if let Some(at) = at {
+                    write!(f, " ({at})")?;
+                }
+                write!(f, " (for pc {pc:#x}): {source}")
             }
             VmError::Abi(e) => write!(f, "{e}"),
             VmError::UnknownIndirectCall { callee, resume } => write!(
@@ -1124,6 +1140,40 @@ impl Vm {
                     crate::stats::record_tail_exit();
                     Ok(None)
                 }
+                // A tail `jmp` through a register or a memory operand, whose
+                // target may be **one of this runtime's own thunks**.
+                //
+                // [`Vm::dispatch_indirect`] has unwrapped that for an indirect
+                // *call* since M6: the guest stored a function pointer that
+                // crossed to the host, got a native trampoline back, and calling
+                // it would go out to arm64 and straight back in. The same
+                // pointer reached by a tail jump was not unwrapped, and the
+                // difference was invisible until a guest tail-jumped through
+                // one.
+                //
+                // Roblox does, and the shape is worth recording because nothing
+                // about it looks like a callback. A block literal's `invoke` is
+                // replaced in place when the block crosses to a host API — see
+                // [`crate::shims::block`] — and the block stays the guest's
+                // afterwards. `std::function` wrapping that block compiles its
+                // call to `mov rdi, [rdi]; jmp qword [rdi+0x10]`, a tail jump
+                // straight through the field this runtime rewrote. The guest
+                // lands on a thunk, the run loop tries to lift host memory, and
+                // the report is `no guest code at <a page-aligned address>` with
+                // nothing naming a block.
+                //
+                // Nothing is pushed, and that is the difference from the call
+                // form rather than an omission: a tail jump's return address is
+                // already on the stack, put there by whoever called the
+                // function being tail-jumped out of.
+                Ok(TransferKind::IndirectJump) => {
+                    if !self.program.is_guest_address(ctx.rip) {
+                        if let Some(guest) = self.guest_behind_thunk(ctx.rip) {
+                            ctx.rip = guest;
+                        }
+                    }
+                    Ok(None)
+                }
                 Ok(_) => Ok(None),
                 Err(()) => Err(VmError::Trap {
                     reason: exit,
@@ -1648,8 +1698,25 @@ fn cpuid(leaf: u32, subleaf: u32) -> [u32; 4] {
             // FPU | TSC | CX8 | CMOV | SSE | SSE2
             let edx = (1 << 0) | (1 << 4) | (1 << 8) | (1 << 15) | (1 << 25) | (1 << 26);
 
-            // SSE3 (bit 0) | SSSE3 (bit 9) | SSE4.1 (bit 19) | SSE4.2 (bit 20) | AES-NI (bit 25) | Hypervisor (bit 31)
-            let ecx = (1 << 0) | (1 << 9) | (1 << 19) | (1 << 20) | (1 << 25) | (1 << 31);
+            // SSE3 (bit 0) | SSSE3 (bit 9) | SSE4.1 (bit 19) | SSE4.2 (bit 20) | Hypervisor (bit 31)
+            //
+            // **AES-NI (bit 25) is deliberately absent, and this is the rule the
+            // whole word is written by: a feature is advertised when microlift
+            // can execute it, not when the host CPU can.** This CPU has AES
+            // instructions; the recompiler does not lift `AESENC` and friends
+            // yet, so a guest told otherwise stops at
+            // `unimplemented-instruction (Aeskeygenassist_xmm_xmmm128_imm8)` at
+            // the moment it first encrypts something. Roblox does, during its
+            // network handshake, and the failure is a dead process rather than
+            // a slow one.
+            //
+            // Not advertising it is not a loss of function: every library that
+            // uses AES-NI reaches it through a run-time `CPUID` check precisely
+            // so it can run on machines without it, and the software path it
+            // falls back to is code microlift already handles. This bit goes
+            // back the day microlift's x86-64 frontend grows the six AES
+            // instructions — CPUID is the only thing that needs to change.
+            let ecx = (1 << 0) | (1 << 9) | (1 << 19) | (1 << 20) | (1 << 31);
 
             [version, misc, ecx, edx]
         }
@@ -1778,6 +1845,11 @@ mod tests {
         for (bit, name) in [
             (13, "cmpxchg16b"),
             (23, "popcnt"),
+            // The host CPU has AES instructions and microlift does not lift
+            // them, which is the case this whole test is about: Roblox asks
+            // here before its network handshake and stops at an unimplemented
+            // `AESKEYGENASSIST` if the answer is yes.
+            (25, "aes"),
             (26, "xsave"),
             (27, "osxsave"),
             (28, "avx"),

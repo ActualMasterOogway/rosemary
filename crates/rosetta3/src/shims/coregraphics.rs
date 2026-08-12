@@ -204,6 +204,38 @@ fn context_draw_image(
     Ok(())
 }
 
+/// The eight `CGFloat CGRectGet…(CGRect)` accessors, which are one shim.
+///
+/// They are the smallest possible instance of this module's problem and the
+/// most common: a `CGRect` in, a `CGFloat` out. The rectangle is MEMORY class
+/// and is the *only* argument, so it is entirely on the guest's stack and no
+/// integer register is involved at all; the answer is a single `double`, which
+/// both ABIs return in the low half of the first vector register.
+///
+/// **Forwarded rather than computed**, though every one of them is two lines of
+/// arithmetic. `CGRectGetWidth` is not `rect.size.width` — it is the width of
+/// the *standardized* rectangle, so a negative width comes back positive, and
+/// `CGRectGetMidX` of an infinite rectangle is defined by CoreGraphics and not
+/// by the obvious expression. Reimplementing eight of those is eight chances to
+/// disagree with the framework the guest is being run against, for no gain: the
+/// host's own is right here and costs one call.
+fn rect_accessor(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let host = host_or_refuse(symbol)?;
+    let rect = rect_argument(symbol, ctx, mem, 0)?;
+    // SAFETY: every symbol [`shim_for`] routes here is `CGFloat (*)(CGRect)`,
+    // resolved out of a CoreGraphics this process has loaded. Passing the
+    // aggregate by value leaves the `v0`–`v3` placement to the compiler, as
+    // everywhere else in this module.
+    let f: extern "C" fn(CgRect) -> f64 =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(CgRect) -> f64>(host) };
+    ctx.xmm[0] = [f(rect).to_bits(), 0];
+    Ok(())
+}
+
 /// `CGPoint CGEventGetLocation(CGEventRef)`
 ///
 /// Sixteen bytes of two `double`s, which is the case the two ABIs **agree**
@@ -359,6 +391,13 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         // [`event_create_mouse`] for why that moves `mouseButton` a register.
         "CGEventCreateMouseEvent" => Some(event_create_mouse),
         "CVDisplayLinkGetNominalOutputVideoRefreshPeriod" => Some(display_link_nominal_period),
+        // The `CGRect` accessors: a rectangle in, a `CGFloat` out, all eight the
+        // same shape. Roblox asks for the height of its own content view during
+        // window set-up.
+        "CGRectGetHeight" | "CGRectGetWidth" | "CGRectGetMinX" | "CGRectGetMidX"
+        | "CGRectGetMaxX" | "CGRectGetMinY" | "CGRectGetMidY" | "CGRectGetMaxY" => {
+            Some(rect_accessor)
+        }
         _ => None,
     }
 }

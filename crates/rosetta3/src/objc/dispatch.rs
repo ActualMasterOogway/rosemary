@@ -122,6 +122,22 @@ struct Runtime {
     /// address. It is the same substitution `pthread_create`'s start routine
     /// gets, arriving through a different door.
     callbacks: &'static [u8],
+    /// Zero-based parameter indices holding a **block literal**.
+    ///
+    /// Distinct from [`Runtime::callbacks`], and the difference is the one
+    /// [`crate::shims::block`] opens with: a callback parameter *is* the code
+    /// pointer and is replaced outright, while a block parameter is a pointer to
+    /// a structure whose `invoke` field — and, when it captures something
+    /// retainable, whose descriptor's copy and dispose helpers — are the code.
+    /// Replacing the block itself would hand the host a trampoline to read an
+    /// `isa` out of.
+    ///
+    /// One entry point needs it, and needs it for a reason that is not obvious:
+    /// `objc_retainBlock` is `_Block_copy`, and `_Block_copy` **calls the
+    /// descriptor's copy helper before it returns**. So this is not a
+    /// precaution against the host invoking the block later; the guest's code
+    /// runs during the call.
+    blocks: &'static [u8],
     /// Zero-based parameter indices holding a `Protocol *`.
     ///
     /// A protocol needs the same translation a class does and for the same
@@ -150,6 +166,7 @@ macro_rules! rt {
             classes: &[],
             class_return: false,
             callbacks: &[],
+            blocks: &[],
             protocols: &[],
             struct_return: None,
         }
@@ -165,6 +182,7 @@ macro_rules! rtc {
             classes: &[$($c),*],
             class_return: false $(|| $ret_is_class)?,
             callbacks: &[],
+            blocks: &[],
             protocols: &[],
             struct_return: None,
         }
@@ -180,6 +198,7 @@ macro_rules! rtb {
             classes: &[],
             class_return: false,
             callbacks: &[$($b),*],
+            blocks: &[],
             protocols: &[],
             struct_return: None,
         }
@@ -199,6 +218,7 @@ macro_rules! rtcb {
             classes: &[$($c),*],
             class_return: false,
             callbacks: &[$($b),*],
+            blocks: &[],
             protocols: &[],
             struct_return: None,
         }
@@ -245,6 +265,7 @@ static RUNTIME: &[Runtime] = &[
         classes: &[0],
         class_return: false,
         callbacks: &[],
+        blocks: &[],
         protocols: &[1],
         struct_return: None,
     },
@@ -304,6 +325,27 @@ static RUNTIME: &[Runtime] = &[
     // translated as well as the result.
     rtc!([0] -> true, "objc_getClass", P, P),
     rtc!([] -> true, "objc_getMetaClass", P, P),
+    // ## The synthesized `@property` accessors
+    //
+    // A `@synthesize`d property does not compile to a load and a store. For
+    // anything `atomic` or `copy`, clang emits a call to one of these, which the
+    // runtime implements over a spinlock table keyed by the *address of the
+    // ivar* — guest memory, so the same address the host would compute — and, in
+    // the `copy` cases, a `-copyWithZone:` message to the new value.
+    //
+    // That message is why these belong in this table rather than in the C one:
+    // the value may be a guest object whose class is a guest class, and sending
+    // to it has to go through the host runtime with the class the runtime knows.
+    // It already will — the object is a host allocation (M6.2) — so what these
+    // need is the ordinary class substitution on any argument that could be a
+    // class, and nothing more.
+    //
+    // `offset` is a `ptrdiff_t` and `atomic`/`shouldCopy` are single bytes.
+    // **Argument order differs between `objc_setProperty` and its specialized
+    // spellings** — the general one takes `offset` third and the value fourth,
+    // and the four specializations take the value third and `offset` fourth.
+    // Getting that backwards stores an object pointer as an ivar offset.
+    rtc!([0], "objc_getProperty", P, P, P, I64, U8),
     rt!("objc_getProtocol", P, P),
     rtc!([] -> true, "objc_getRequiredClass", P, P),
     // Whatever `objc_storeWeak` put in the table comes back out, so the return
@@ -318,6 +360,11 @@ static RUNTIME: &[Runtime] = &[
     rtc!([1], "objc_initWeak", P, P, P),
     rtc!([] -> true, "objc_loadWeakRetained", P, P),
     rtc!([] -> true, "objc_lookUpClass", P, P),
+    // `void objc_moveWeak(id *dst, id *src)` — the third of the four weak
+    // primitives, alongside `objc_copyWeak` above. Passthrough for the same
+    // reason: both locations are guest memory, which is a real address in this
+    // process, and the side table is keyed by exactly those addresses.
+    rt!("objc_moveWeak", V, P, P),
     rtc!([0] -> true, "objc_opt_class", P, P),
     rtc!([0, 1], "objc_opt_isKindOfClass", U8, P, P),
     rtc!([0], "objc_opt_new", P, P),
@@ -329,13 +376,40 @@ static RUNTIME: &[Runtime] = &[
     rtc!([0], "objc_retainAutorelease", P, P),
     rtc!([0], "objc_retainAutoreleaseReturnValue", P, P),
     rtc!([0], "objc_retainAutoreleasedReturnValue", P, P),
-    // `id objc_retainBlock(id)` is `_Block_copy` under another name, and needs
-    // nothing done to the block for the reason the roadmap records: a literal's
-    // `isa` is an ordinary bind of `_NSConcreteStackBlock`, so the host's own
-    // copy routine recognises the object and moves the right number of bytes.
-    // The guest code pointer inside it is substituted where the block *crosses*
-    // to a host API, which is [`crate::shims::block`]'s job and not this one's.
-    rt!("objc_retainBlock", P, P),
+    // `id objc_retainBlock(id)` is `_Block_copy` under another name.
+    //
+    // Most of it needs nothing done, for the reason the roadmap records: a
+    // literal's `isa` is an ordinary bind of `_NSConcreteStackBlock`, so the
+    // host's own copy routine recognises the object and moves the right number
+    // of bytes. **What that argument missed is that copying is not only moving
+    // bytes.** A block that captured something retainable has
+    // `BLOCK_HAS_COPY_DISPOSE` set, and `_Block_copy` calls the descriptor's
+    // copy helper on the new literal before returning — guest code, run by the
+    // host, during this call. Roblox reaches it from inside a `dispatch_once`,
+    // and it presents as a `SIGBUS` in `libsystem_blocks` with the faulting
+    // address equal to the pc.
+    //
+    // So the block is declared, and [`crate::shims::block::substitute_block`]
+    // thunks `invoke` and both helpers before the call. The C spelling
+    // `_Block_copy` is the same function and gets the same treatment through a
+    // shim.
+    Runtime {
+        name: "objc_retainBlock",
+        types: &[P, P],
+        classes: &[],
+        class_return: false,
+        callbacks: &[],
+        blocks: &[0],
+        protocols: &[],
+        struct_return: None,
+    },
+    // See the note on `objc_getProperty` for why the argument order is not the
+    // same in the general entry point as in the four specialized ones.
+    rtc!([0, 3], "objc_setProperty", V, P, P, I64, P, U8, U8),
+    rtc!([0, 2], "objc_setProperty_atomic", V, P, P, P, I64),
+    rtc!([0, 2], "objc_setProperty_atomic_copy", V, P, P, P, I64),
+    rtc!([0, 2], "objc_setProperty_nonatomic", V, P, P, P, I64),
+    rtc!([0, 2], "objc_setProperty_nonatomic_copy", V, P, P, P, I64),
     // `objc_storeStrong(id *location, id value)` writes through a guest pointer.
     // The value it stores is an object, and an object is a host pointer on both
     // sides — but a guest storing a *class* is legal, so it is translated.
@@ -386,6 +460,7 @@ static RUNTIME: &[Runtime] = &[
         classes: &[],
         class_return: false,
         callbacks: &[],
+        blocks: &[],
         protocols: &[0],
         struct_return: Some(&[P, P]),
     },
@@ -395,6 +470,7 @@ static RUNTIME: &[Runtime] = &[
         classes: &[],
         class_return: false,
         callbacks: &[],
+        blocks: &[],
         protocols: &[0],
         struct_return: None,
     },
@@ -649,8 +725,30 @@ pub fn provider() -> SyntheticDylib {
             lib.define_fn(&format!("_{name}"), addr as usize as *const ());
         }
     }
+    for name in DATA {
+        if let Some(addr) = host_symbol(name) {
+            lib.define_data(&format!("_{name}"), addr);
+        }
+    }
     lib
 }
+
+/// Symbols in the `_objc_` family that are **data**, not entry points.
+///
+/// They have to be listed because the native provider denies the whole family
+/// so this one can claim it, and a name this file does not mention is left
+/// unresolved rather than passed through — which for a vtable means the slot
+/// stays zero.
+///
+/// `_objc_ehtype_vtable` is the vtable of `objc_exception_type_info`, the
+/// `std::type_info` subclass every `@catch (NSException *)` clause names. The
+/// guest's own `__objc_ehtype_*` records point **sixteen bytes into it**, which
+/// is where a vtable pointer points, so this is a data binding with an addend —
+/// the case [`crate::cxxlib`] records as having cost a suite. Defining it as a
+/// function would be wrong in exactly one way that matters: `define_fn` marks
+/// the symbol as something a call site could be intercepted at, and this address
+/// is only ever stored.
+const DATA: &[&str] = &["objc_ehtype_vtable"];
 
 /// An address for a trampoline the *host* does not have.
 ///
@@ -733,7 +831,7 @@ fn call_runtime(
         classes: entry.classes,
         class_return: entry.class_return,
         callbacks: entry.callbacks,
-        blocks: &[],
+        blocks: entry.blocks,
         objects: &[],
         object_return: false,
         protocols: entry.protocols,

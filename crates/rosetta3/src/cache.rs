@@ -261,7 +261,12 @@ impl CodeCache {
                         head.join(" ")
                     );
                 }
-                return Err(VmError::Lift { pc, start, source });
+                return Err(VmError::Lift {
+                    pc,
+                    start,
+                    source,
+                    at: program.locate(start),
+                });
             }
         };
         let end = region.range.end;
