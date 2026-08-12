@@ -3442,6 +3442,429 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("zlibVersion", P),
     // Metal symbols
     sig!("MTLCopyAllDevices", P),
+    // ## CoreAudio's hardware layer, and the clock underneath it
+    //
+    // Roblox does not use an output `AudioUnit` the way a GameMaker runner
+    // does. It talks to the *device* — `AudioObject` properties to enumerate
+    // and configure, an `AudioDeviceIOProcID` to register a render function,
+    // and `AudioDeviceStart`/`Stop` around it — which is the same shape one
+    // level down. Everything here is a scalar, an `AudioObjectID`, or a
+    // structure the host reads and writes in place through a pointer the guest
+    // owns, so the whole family is passthrough except for the one function that
+    // takes guest code.
+    //
+    // `AudioConvertHostTimeToNanos` and `AudioGetCurrentHostTime` are the pair
+    // an audio clock is built out of: the host time base is `mach_absolute_time`
+    // and its conversion is this machine's, which is the right answer precisely
+    // because the guest is being paced by this machine's audio hardware.
+    sig!("AudioConvertHostTimeToNanos", U64, U64),
+    sig!("AudioGetCurrentHostTime", U64),
+    // `AudioDeviceIOProcID` looks like a function pointer in the header — it is
+    // typedef'd as one — and is not a callback argument anywhere but the
+    // creating call. What `AudioDeviceCreateIOProcID` writes out through its
+    // fourth parameter is a token CoreAudio minted, so the guest hands *the
+    // host's own value* back to `Destroy`, `Start` and `Stop`. Marking it a
+    // callback there would substitute a thunk for a token and unregister
+    // nothing.
+    cbsig!([1], "AudioDeviceCreateIOProcID", I32, U32, P, P, P),
+    sig!("AudioDeviceDestroyIOProcID", I32, U32, P),
+    sig!("AudioDeviceStart", I32, U32, P),
+    sig!("AudioDeviceStop", I32, U32, P),
+    sig!("AudioHardwareUnload", I32),
+    sig!("AudioObjectHasProperty", BOOL, U32, P),
+    sig!("AudioObjectIsPropertySettable", I32, U32, P, P),
+    sig!("AudioObjectSetPropertyData", I32, U32, P, U32, P, U32, P),
+    sig!("AudioFormatGetProperty", I32, U32, U32, P, P, P),
+    // The converter family's remaining half. `AudioConverterNew` and
+    // `FillComplexBuffer` are described above; these are the property calls
+    // around them and the codec-specific constructor, whose `AudioClassDescription`
+    // array is read through a pointer.
+    sig!("AudioConverterNewSpecific", I32, P, P, U32, P, P),
+    sig!("AudioConverterGetProperty", I32, P, U32, P, P),
+    sig!("AudioConverterGetPropertyInfo", I32, P, U32, P, P),
+    sig!("AudioConverterSetProperty", I32, P, U32, U32, P),
+    // ## CoreMedia, CoreVideo and VideoToolbox
+    //
+    // Roblox decodes and encodes video — its own capture path and the H.264
+    // stream a game may play — and the three frameworks travel together. Almost
+    // all of it is handles and out-parameters. What is *not* here is the
+    // `CMTime` family, which passes a twenty-four byte struct by value and
+    // lives in [`crate::shims::coremedia`]; this is everything that does not.
+    sig!(
+        "CMBlockBufferCreateContiguous",
+        I32,
+        P,
+        P,
+        P,
+        P,
+        U64,
+        U64,
+        U32,
+        P
+    ),
+    sig!(
+        "CMBlockBufferCreateWithMemoryBlock",
+        I32,
+        P,
+        P,
+        U64,
+        P,
+        P,
+        U64,
+        U64,
+        U32,
+        P
+    ),
+    sig!("CMBlockBufferGetDataPointer", I32, P, U64, P, P, P),
+    sig!("CMCopyDictionaryOfAttachments", P, P, P, U32),
+    sig!("CMFormatDescriptionGetMediaSubType", U32, P),
+    // Twelve parameters, four past AAPCS64's eighth, and the fourth is guest
+    // code: `CMSampleBufferMakeDataReadyCallback` is called by CoreMedia when
+    // something downstream needs the samples before the producer said they were
+    // ready. A guest that passes null — the common case, and what a buffer built
+    // from an already-decoded frame does — reaches none of that, and the thunk
+    // substitution leaves null alone.
+    cbsig!(
+        [3],
+        "CMSampleBufferCreate",
+        I32,
+        P,
+        P,
+        BOOL,
+        P,
+        P,
+        P,
+        I64,
+        I64,
+        P,
+        I64,
+        P,
+        P
+    ),
+    sig!("CMSampleBufferDataIsReady", BOOL, P),
+    sig!("CMSampleBufferIsValid", BOOL, P),
+    sig!("CMSampleBufferGetDataBuffer", P, P),
+    sig!("CMSampleBufferGetFormatDescription", P, P),
+    sig!("CMSampleBufferGetImageBuffer", P, P),
+    sig!("CMSampleBufferGetNumSamples", I64, P),
+    sig!("CMSampleBufferGetSampleAttachmentsArray", P, P, BOOL),
+    sig!(
+        "CMVideoFormatDescriptionCreate",
+        I32,
+        P,
+        U32,
+        I32,
+        I32,
+        P,
+        P
+    ),
+    sig!(
+        "CMVideoFormatDescriptionCreateFromH264ParameterSets",
+        I32,
+        P,
+        U64,
+        P,
+        P,
+        I32,
+        P
+    ),
+    sig!(
+        "CMVideoFormatDescriptionCreateFromHEVCParameterSets",
+        I32,
+        P,
+        U64,
+        P,
+        P,
+        I32,
+        P,
+        P
+    ),
+    // `CMVideoDimensions` is two `int32_t` — **eight** bytes — which is the
+    // aggregate both ABIs agree about completely: one INTEGER eightbyte in
+    // `rax` under SysV AMD64, one eight-byte composite in `x0` under AAPCS64,
+    // same two halves in the same order. So it is a `U64` return and not a
+    // shim, unlike every other struct in this family. Its twenty-four byte
+    // sibling `CMTime` is exactly why the distinction has to be checked rather
+    // than assumed.
+    sig!("CMVideoFormatDescriptionGetDimensions", U64, P),
+    sig!(
+        "CMVideoFormatDescriptionGetH264ParameterSetAtIndex",
+        I32,
+        P,
+        U64,
+        P,
+        P,
+        P,
+        P
+    ),
+    sig!(
+        "CMVideoFormatDescriptionGetHEVCParameterSetAtIndex",
+        I32,
+        P,
+        U64,
+        P,
+        P,
+        P,
+        P
+    ),
+    sig!("CVMetalTextureCacheCreate", I32, P, P, P, P, P),
+    sig!(
+        "CVMetalTextureCacheCreateTextureFromImage",
+        I32,
+        P,
+        P,
+        P,
+        P,
+        U64,
+        U64,
+        U64,
+        U64,
+        P
+    ),
+    sig!("CVMetalTextureGetTexture", P, P),
+    sig!("CVPixelBufferCreate", I32, P, U64, U64, U32, P, P),
+    sig!("CVPixelBufferGetBaseAddressOfPlane", P, P, U64),
+    sig!("CVPixelBufferGetBytesPerRowOfPlane", U64, P, U64),
+    sig!("CVPixelBufferGetHeightOfPlane", U64, P, U64),
+    sig!("CVPixelBufferGetWidthOfPlane", U64, P, U64),
+    sig!("CVPixelBufferGetPixelFormatType", U32, P),
+    sig!("CVPixelBufferPoolCreatePixelBuffer", I32, P, P, P),
+    sig!("CVPixelBufferRelease", V, P),
+    // VideoToolbox. The compression session's output callback is an ordinary
+    // guest function pointer in the argument list; the *decompression* session's
+    // is inside a record structure, which is why that one is a shim.
+    cbsig!(
+        [7],
+        "VTCompressionSessionCreate",
+        I32,
+        P,
+        I32,
+        I32,
+        U32,
+        P,
+        P,
+        P,
+        P,
+        P,
+        P
+    ),
+    sig!("VTCompressionSessionGetPixelBufferPool", P, P),
+    sig!("VTCompressionSessionInvalidate", V, P),
+    sig!("VTCompressionSessionPrepareToEncodeFrames", I32, P),
+    sig!("VTCopyVideoEncoderList", I32, P, P),
+    sig!(
+        "VTDecompressionSessionCanAcceptFormatDescription",
+        BOOL,
+        P,
+        P
+    ),
+    sig!("VTDecompressionSessionDecodeFrame", I32, P, P, U32, P, P),
+    sig!("VTDecompressionSessionFinishDelayedFrames", I32, P),
+    sig!("VTDecompressionSessionInvalidate", V, P),
+    sig!("VTDecompressionSessionWaitForAsynchronousFrames", I32, P),
+    sig!("VTIsHardwareDecodeSupported", BOOL, U32),
+    sig!("VTRegisterSupplementalVideoDecoderIfAvailable", V, U32),
+    sig!("VTSessionCopyProperty", I32, P, P, P, P),
+    sig!("VTSessionSetProperty", I32, P, P, P),
+    // ## FSEvents
+    //
+    // A directory watcher, which Roblox uses to notice when its own content
+    // changes underneath it. `FSEventStreamCreate` takes the callback directly
+    // and a *context* structure beside it — and that structure holds `retain`,
+    // `release` and `copyDescription` function pointers, which a guest passing
+    // a plain refcon leaves null. Null is what the substitution sees and what it
+    // leaves alone; a guest that fills them in would need the same treatment
+    // `CFRunLoopSourceCreate` is refused for, and would fail by name there
+    // rather than here.
+    cbsig!([1], "FSEventStreamCreate", P, P, P, P, P, U64, F64, U32),
+    sig!("FSEventStreamSetDispatchQueue", V, P, P),
+    sig!("FSEventStreamStart", BOOL, P),
+    sig!("FSEventStreamStop", V, P),
+    sig!("FSEventStreamFlushSync", V, P),
+    sig!("FSEventStreamInvalidate", V, P),
+    sig!("FSEventStreamRelease", V, P),
+    // ## IOKit, and the rest of the framework odds and ends
+    //
+    // `IORegistryEntryIDMatching` and `IOServiceGetMatchingService` are how a
+    // program finds one device rather than iterating; `IOHIDDeviceCreate` wraps
+    // an `io_service_t` a match produced. All handles.
+    sig!("IOHIDDeviceCreate", P, P, U32),
+    sig!("IOHIDDeviceGetReport", I32, P, U32, I64, P, P),
+    sig!("IORegistryEntryGetRegistryEntryID", I32, U32, P),
+    sig!("IORegistryEntryIDMatching", P, U64),
+    sig!("IOServiceGetMatchingService", U32, U32, P),
+    sig!("CGColorGetTypeID", U64),
+    sig!("CTFontGetTypeID", U64),
+    sig!("CTRunGetTypeID", U64),
+    sig!("CGEventSourceKeyState", BOOL, I32, U16),
+    sig!("UTTypeConformsTo", BOOL, P, P),
+    // `UInt8 LMGetKbdLast(void)` — a Carbon low-memory accessor, which on a
+    // 64-bit system is an ordinary function reading a global the OS maintains.
+    sig!("LMGetKbdLast", U8),
+    // `CFDictionaryRef _CFCopySystemVersionDictionary(void)` — private CF, and
+    // the same question [`crate::compat`] answers for the SDK gates: the version
+    // it reports is *this machine's*, because that is what the guest is running
+    // on.
+    sig!("_CFCopySystemVersionDictionary", P),
+    // ## libdispatch's function-pointer half
+    //
+    // The `_f` suffix is libdispatch's pre-blocks spelling: a context pointer
+    // and a bare function, rather than a literal carrying both. That makes them
+    // ordinary `cbsig!` entries and *not* [`crate::shims::block`]'s problem —
+    // the thing being substituted is the argument itself.
+    cbsig!([2], "dispatch_async_f", V, P, P, P),
+    cbsig!([2], "dispatch_sync_f", V, P, P, P),
+    cbsig!([3], "dispatch_after_f", V, U64, P, P, P),
+    cbsig!([1], "dispatch_set_finalizer_f", V, P, P),
+    sig!("dispatch_group_enter", V, P),
+    sig!("dispatch_group_leave", V, P),
+    sig!("dispatch_queue_get_label", P, P),
+    // `dispatch_queue_create_with_target$V2` is the only spelling a modern
+    // compiler emits, and the `$`-suffix fallback in [`lookup`] finds this
+    // entry for it.
+    sig!("dispatch_queue_create_with_target", P, P, P, P),
+    // `void _os_log_impl(void *dso, os_log_t, os_log_type_t, const char *format,
+    // uint8_t *buf, uint32_t size)` — **not** variadic, which is the surprise.
+    // The compiler encodes the arguments into `buf` at the call site and this
+    // takes the finished blob, so what crosses is a pointer to bytes the guest
+    // laid out and a length. The encoding is a documented wire format rather
+    // than a register convention, so it needs no translation.
+    sig!("_os_log_impl", V, P, P, U8, P, P, U32),
+    sig!("os_log_create", P, P, P),
+    sig!("os_log_type_enabled", BOOL, P, U8),
+    sig!("os_release", V, P),
+    // ## Mach, and the ports a program keeps for itself
+    //
+    // The exception-port family is **not** here — it is in [`crate::signal`],
+    // for `task_set_exception_ports`' reason. What is left is bookkeeping: reply
+    // ports, port sets, dead-name notifications, and the two `mach_vm` calls
+    // `RobloxCrashHandler` reads another task's memory with.
+    sig!("mach_error_string", P, I32),
+    sig!("mach_port_insert_member", I32, U32, U32, U32),
+    sig!(
+        "mach_port_request_notification",
+        I32,
+        U32,
+        U32,
+        I32,
+        U32,
+        U32,
+        U32,
+        P
+    ),
+    sig!("mach_vm_read", I32, U32, U64, U64, P, P),
+    sig!("mach_vm_region_recurse", I32, U32, P, P, P, P, P),
+    sig!("mig_dealloc_reply_port", V, U32),
+    sig!("mig_get_reply_port", U32),
+    sig!("mig_put_reply_port", V, U32),
+    sig!("host_processor_info", I32, U32, I32, P, P, P),
+    sig!("semaphore_signal_all", I32, U32),
+    sig!("task_suspend", I32, U32),
+    sig!("task_resume", I32, U32),
+    sig!("pid_for_task", I32, U32, P),
+    sig!("bootstrap_check_in", I32, U32, P, P),
+    sig!("bootstrap_strerror", P, I32),
+    sig!("sys_icache_invalidate", V, P, U64),
+    // `int proc_get_wakemon_params(pid_t, int32_t *rate_hz, int32_t *flags)` —
+    // libproc SPI with no header on this system, read out of the kernel's own
+    // `proc_info` interface. Two out-parameters and a pid, which is the whole of
+    // it; a program asks so it can tell whether the OS is watching its wakeup
+    // rate.
+    sig!("proc_get_wakemon_params", I32, I32, P, P),
+    // ## The allocator's zone interface
+    //
+    // Imported by the **interposing mimalloc** rather than by Roblox itself
+    // (see the roadmap's M7.17), which is what makes most of it passthrough: a
+    // zone the guest got from `malloc_default_zone` is libsystem_malloc's own
+    // structure, and calling through it is the host allocating for itself. The
+    // two that hand the *host* a structure of **guest** function pointers —
+    // `malloc_zone_register` and `malloc_get_all_zones` — are refused, because
+    // that is the direction nothing here can fix.
+    sig!("malloc_default_zone", P),
+    sig!("malloc_default_purgeable_zone", P),
+    sig!("malloc_create_zone", P, U64, U32),
+    sig!("malloc_destroy_zone", V, P),
+    sig!("malloc_zone_from_ptr", P, P),
+    sig!("malloc_get_zone_name", P, P),
+    sig!("malloc_set_zone_name", V, P, P),
+    sig!("malloc_zone_malloc", P, P, U64),
+    sig!("malloc_zone_calloc", P, P, U64, U64),
+    sig!("malloc_zone_realloc", P, P, P, U64),
+    sig!("malloc_zone_valloc", P, P, U64),
+    sig!("malloc_zone_memalign", P, P, U64, U64),
+    sig!("malloc_zone_free", V, P, P),
+    sig!("malloc_zone_batch_malloc", U32, P, U64, P, U32),
+    sig!("malloc_zone_batch_free", V, P, P, U32),
+    sig!("malloc_zone_check", I32, P),
+    sig!("malloc_zone_log", V, P, P),
+    sig!("malloc_zone_print", V, P, I32),
+    sig!("malloc_zone_print_ptr_info", V, P),
+    sig!("malloc_zone_unregister", V, P),
+    sig!("malloc_good_size", U64, U64),
+    // `void *valloc(size_t)` and its private counterpart `vfree`, which
+    // libsystem_malloc exports without a header. mimalloc imports the pair
+    // together and they must stay together: a block from `valloc` is not one
+    // `free` may take.
+    sig!("valloc", P, U64),
+    sig!("vfree", V, P),
+    // `int malloc_jumpstart(int cookie)` — undocumented libsystem_malloc SPI
+    // taking and returning an `int`, called once during allocator start-up.
+    sig!("malloc_jumpstart", I32, I32),
+    // The three halves of the allocator's `pthread_atfork` handlers, which
+    // mimalloc calls directly because it installs its own. All `void (void)`.
+    sig!("_malloc_fork_prepare", V),
+    sig!("_malloc_fork_parent", V),
+    sig!("_malloc_fork_child", V),
+    // ## The remaining C library
+    //
+    // Ordinary scalars and pointers, each reached by Roblox and none of them
+    // interesting on its own.
+    sig!("_Exit", V, I32),
+    sig!("__exp10", F64, F64),
+    // `int __srget(FILE *)` and `int __swbuf(int, FILE *)` — the out-of-line
+    // halves of the `getc`/`putc` macros, which a guest inlines and which
+    // therefore *read the `FILE` structure's fields directly*. That works only
+    // because `struct __sFILE` has the same layout on both architectures — every
+    // member is a pointer or an `int` — so the `FILE` a guest got from the
+    // host's `fopen` is one its own inlined macro can walk.
+    sig!("__srget", I32, P),
+    sig!("__swbuf", I32, I32, P),
+    // `double __floattidf(__int128)`. A 128-bit integer argument is two integer
+    // registers under SysV AMD64 and two under AAPCS64, in the same order, so
+    // the two halves are written out as two `U64`s the way a `CFRange` is
+    // written out as two `CFIndex`.
+    sig!("__floattidf", F64, U64, U64),
+    // `char *realpath(const char *restrict path, char *restrict resolved)`.
+    // Roblox imports the `$DARWIN_EXTSN` spelling, which is the one that accepts
+    // a null buffer and allocates; [`lookup`]'s `$`-suffix fallback finds this
+    // entry for it, and the *address* it is bound to is the suffixed symbol the
+    // host really exports — so the extension is honoured by the resolver rather
+    // than approximated here.
+    sig!("realpath", P, P, P),
+    sig!("cfmakeraw", V, P),
+    sig!("chown", I32, P, U32, U32),
+    sig!("fchown", I32, I32, U32, U32),
+    sig!("lchown", I32, P, U32, U32),
+    sig!("fchmodat", I32, I32, P, U16, I32),
+    sig!("link", I32, P, P),
+    sig!("dirfd", I32, P),
+    sig!("fsctl", I32, P, U64, P, U32),
+    sig!("gethostuuid", I32, P, P),
+    sig!("uuid_generate", V, P),
+    sig!("setxattr", I32, P, P, P, U64, U32, I32),
+    sig!("removexattr", I32, P, P, I32),
+    sig!("sendfile", I32, I32, I32, I64, P, P, I32),
+    sig!("connectx", I32, I32, P, U32, U32, P, U32, P, P),
+    sig!("posix_spawnattr_setsigdefault", I32, P, P),
+    sig!("pthread_mutexattr_setpolicy_np", I32, P, I32),
+    sig!("pthread_rwlock_tryrdlock", I32, P),
+    sig!("pthread_rwlock_trywrlock", I32, P),
+    sig!("rand_r", I32, P),
+    sig!("srandomdev", V),
+    sig!("tzset", V),
+    sig!("frexpf", F32, F32, P),
+    sig!("res_9_init", I32),
+    sig!("res_9_close", V),
 ];
 
 /// A symbol with no public declaration anywhere on this system.
@@ -3505,6 +3928,15 @@ const GUEST_STRING: &str =
 /// `ucontext_t` has a documented layout a guest may read.
 const CONTEXT: &str =
     "saves or restores a machine context, which here is the host's and not the guest's";
+
+/// The one scalar the two architectures spell differently.
+///
+/// x86-64 macOS's `long double` is x87's 80-bit extended format; arm64's is
+/// IEEE binary128. A value has no common register and no lossless move between
+/// the two, so a forwarded call would return a plausible number with the
+/// precision the caller asked for silently gone.
+const LONG_DOUBLE: &str =
+    "takes or returns a long double, which is x87 80-bit on x86-64 and binary128 on arm64";
 
 /// Symbols that are described and deliberately not callable, in no particular
 /// order for the same reason as [`SIGNATURES`].
@@ -3679,6 +4111,67 @@ pub static REFUSED: &[(&str, &str)] = &[
         "cancellation unwinds a stack the host's unwinder never saw (M5)",
     ),
     ("setcontext", CONTEXT),
+    // ## `long double` is not one type
+    //
+    // The only family in this table where the two architectures disagree about
+    // an *ordinary scalar*. On x86-64 macOS a `long double` is the x87 80-bit
+    // extended format, sixteen bytes of storage with eleven of them meaningful,
+    // passed on the stack and returned in `st(0)`. On arm64 it is IEEE
+    // binary128, passed and returned in a `v` register. Neither is a widening of
+    // the other: the exponent ranges differ, the significands differ, and there
+    // is no register the value can simply be moved between.
+    //
+    // Narrowing through `double` would answer most calls plausibly and lose the
+    // eleven bits that are the entire reason a program asked for the type. So
+    // these are refused rather than approximated, which is the same choice
+    // [`crate::shims::math`] makes in the other direction for the cases it
+    // *can* compute exactly. Roblox reaches them through its C library's
+    // number formatting; nothing it does depends on the extra precision, which
+    // is a fact about Roblox rather than about the conversion.
+    ("powl", LONG_DOUBLE),
+    ("fmal", LONG_DOUBLE),
+    ("ldexpl", LONG_DOUBLE),
+    ("frexpl", LONG_DOUBLE),
+    ("strtold", LONG_DOUBLE),
+    // `pid_t audit_token_to_pid(audit_token_t)` — thirty-two bytes of
+    // `audit_token_t` **by value**. SysV AMD64 classifies it MEMORY and puts it
+    // on the caller's stack; AAPCS64 has the caller copy it and pass a pointer.
+    // Both are "in memory" and they are still not the same thing, so this is
+    // the aggregate refusal rather than a signature that happens to work.
+    ("audit_token_to_pid", AGGREGATE),
+    // `void IODispatchCalloutFromMessage(void *unused, mach_msg_header_t *msg,
+    // void *reference)` — the IOKit notification pump. Its whole job is to read
+    // a function pointer *out of the message* and call it, and that pointer is
+    // whatever the guest registered with `IOServiceAddInterestNotification`. The
+    // host would call it as arm64. This is `CFRunLoopSourceCreate`'s problem
+    // reached through a message instead of a structure, and it needs the same
+    // answer: a callback the substitution can find.
+    (
+        "IODispatchCalloutFromMessage",
+        "calls a guest function pointer carried inside a Mach message the host would read",
+    ),
+    // `void malloc_zone_register(malloc_zone_t *)` — hands libsystem_malloc a
+    // structure of **guest** function pointers and asks it to allocate through
+    // them. Every other call in the zone family goes the safe way round: the
+    // zone is the host's and the guest is calling into it. This one is the
+    // interposing allocator offering *itself* to the host, and the roadmap's
+    // M7.17 records that mimalloc reaches the guest's allocator through
+    // `__DATA,__interpose` instead — which is the path that works and the reason
+    // nothing has needed this yet.
+    (
+        "malloc_zone_register",
+        "registers a zone of guest function pointers the host would call as arm64",
+    ),
+    // `kern_return_t malloc_get_all_zones(task_t, memory_reader_t *,
+    // vm_address_t **, unsigned *)` — the same shape once removed. The reader is
+    // guest code the host calls back into for every zone it walks, and the
+    // addresses it answers with describe *another task's* address space. A
+    // thunk would carry the call; nothing would make the answers mean anything
+    // on this side.
+    (
+        "malloc_get_all_zones",
+        "walks another task's zones through a guest reader callback",
+    ),
 ];
 
 #[cfg(test)]
@@ -3751,7 +4244,17 @@ mod tests {
         // these declare more arguments than the prototype has, deliberately.
         // Listed rather than pattern-matched, so a new one has to be thought
         // about.
-        const SPLIT_AGGREGATES: &[&str] = &["CFArrayApplyFunction", "CFStringGetBytes", "cabs"];
+        const SPLIT_AGGREGATES: &[&str] = &[
+            "CFArrayApplyFunction",
+            "CFStringGetBytes",
+            "cabs",
+            // A `CGPoint` written out as its two `double`s. Invisible to this
+            // check until CoreGraphics.h joined [`HEADERS`], which is the point
+            // of adding a header: the entries it newly reaches are the ones
+            // nothing was verifying.
+            "CGDisplayMoveCursorToPoint",
+            "CGWarpMouseCursorPosition",
+        ];
 
         let mut source = String::from(HEADERS);
         source.push_str("void probe(void) {\n");
@@ -3821,7 +4324,28 @@ mod tests {
     /// skipped rather than guessed at.
     const HEADERS: &str = "\
 #include <CoreFoundation/CoreFoundation.h>
+#include <AudioToolbox/AudioToolbox.h>
+#include <CoreAudio/CoreAudio.h>
+#include <CoreAudio/HostTime.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <CoreMedia/CoreMedia.h>
+#include <CoreServices/CoreServices.h>
+#include <CoreText/CoreText.h>
+#include <CoreVideo/CoreVideo.h>
+#include <IOKit/IOKitLib.h>
+#include <IOKit/hid/IOHIDLib.h>
+#include <VideoToolbox/VideoToolbox.h>
+#include <bsm/libbsm.h>
 #include <dirent.h>
+#include <dispatch/dispatch.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <malloc/malloc.h>
+#include <os/log.h>
+#include <servers/bootstrap.h>
+#include <sys/xattr.h>
+#include <termios.h>
+#include <uuid/uuid.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>

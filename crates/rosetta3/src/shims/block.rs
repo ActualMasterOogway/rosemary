@@ -266,6 +266,63 @@ fn block_copy(
     Ok(())
 }
 
+/// `void dispatch_group_notify(dispatch_group_t group, dispatch_queue_t queue,
+/// dispatch_block_t block)`
+///
+/// [`dispatch_after`]'s shape with a group in front of the queue. The block runs
+/// once the group's last `dispatch_group_leave` lands, which may be on any
+/// thread and long after this returns — so the substitution has to be *in* the
+/// literal, not kept beside it.
+fn dispatch_group_notify(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
+    let (group, queue, block) = (ctx.rdi, ctx.rsi, ctx.rdx);
+    if block == 0 {
+        return Err(bad_pointer(symbol, 0));
+    }
+    substitute_block(symbol, block, mem, callbacks)?;
+    call_block(symbol, host_or_refuse(symbol)?, &[group, queue, block]);
+    Ok(())
+}
+
+/// `CFRunLoopObserverRef CFRunLoopObserverCreateWithHandler(CFAllocatorRef
+/// allocator, CFOptionFlags activities, Boolean repeats, CFIndex order,
+/// void (^block)(CFRunLoopObserverRef, CFRunLoopActivity))`
+///
+/// The block-taking half of CoreFoundation's run-loop observer pair, and the
+/// only entry point in this module that is not libdispatch's. Its sibling
+/// `CFRunLoopObserverCreate` takes a callback *and* a context structure and is
+/// `CFRunLoopSourceCreate`'s problem; this spelling puts everything in one
+/// literal, which is exactly the shape that can be answered.
+///
+/// The block is the fifth argument, so it is in `r8`, and unlike every
+/// `dispatch_*` above this one **returns** — the observer the guest will add to
+/// a run loop and later invalidate.
+fn run_loop_observer_create_with_handler(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
+    let block = ctx.r8;
+    if block == 0 {
+        return Err(bad_pointer(symbol, 0));
+    }
+    substitute_block(symbol, block, mem, callbacks)?;
+    let host = host_or_refuse(symbol)?;
+    // SAFETY: the symbol [`shim_for`] matched, whose declaration is the one
+    // above. `CFOptionFlags` and `CFIndex` are 64-bit and `Boolean` a byte, so
+    // every argument is one integer register; the block's code pointers are
+    // thunks by the line above.
+    let f: extern "C" fn(u64, u64, u8, i64, u64) -> u64 =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(u64, u64, u8, i64, u64) -> u64>(host) };
+    ctx.rax = f(ctx.rdi, ctx.rsi, ctx.rdx as u8, ctx.rcx as i64, block);
+    Ok(())
+}
+
 /// `dispatch_data_t dispatch_data_create(const void *buffer, size_t size,
 /// dispatch_queue_t queue, dispatch_block_t destructor)`
 fn dispatch_data_create(
@@ -313,6 +370,8 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         "dispatch_after" => Some(dispatch_after),
         "dispatch_once" => Some(dispatch_once),
         "dispatch_data_create" => Some(dispatch_data_create),
+        "dispatch_group_notify" => Some(dispatch_group_notify),
+        "CFRunLoopObserverCreateWithHandler" => Some(run_loop_observer_create_with_handler),
         // Both spellings: the Mach-O symbol is `__Block_copy`, and `c_name`
         // strips one underscore, so what arrives here still has the one the
         // function's own name begins with.

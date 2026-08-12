@@ -219,11 +219,7 @@ fn context_draw_image(
 /// by the obvious expression. Reimplementing eight of those is eight chances to
 /// disagree with the framework the guest is being run against, for no gain: the
 /// host's own is right here and costs one call.
-fn rect_accessor(
-    symbol: &str,
-    ctx: &mut RegisterContext,
-    mem: &mut dyn GuestMemory,
-) -> Result<()> {
+fn rect_accessor(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let host = host_or_refuse(symbol)?;
     let rect = rect_argument(symbol, ctx, mem, 0)?;
     // SAFETY: every symbol [`shim_for`] routes here is `CGFloat (*)(CGRect)`,
@@ -314,6 +310,40 @@ fn event_create_mouse(
     Ok(())
 }
 
+/// `NSRect NSInsetRect(NSRect aRect, CGFloat dX, CGFloat dY)`
+///
+/// An `NSRect` *and* a `CGRect`, in and out, which makes it the only function
+/// in this module with the thirty-two byte disagreement on both sides of the
+/// call at once: the hidden return buffer takes `rdi`, the rectangle argument
+/// takes the whole of the stack argument area and no register, and the two
+/// insets are `xmm0` and `xmm1`.
+///
+/// **Forwarded rather than computed** for [`rect_accessor`]'s reason. Foundation
+/// defines what insetting an infinite or empty rectangle produces, and it is not
+/// what subtracting twice the inset from the width produces.
+fn inset_rect(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    let host = host_or_refuse(symbol)?;
+    let rect = rect_argument(symbol, ctx, mem, 0)?;
+    let (dx, dy) = (f64::from_bits(ctx.xmm[0][0]), f64::from_bits(ctx.xmm[1][0]));
+    // SAFETY: the symbol [`shim_for`] matched, which is
+    // `NSRect (*)(NSRect, CGFloat, CGFloat)`, resolved out of a Foundation this
+    // process has loaded. Declaring the aggregate on both sides leaves the
+    // `v0`–`v3` placement to the compiler.
+    let f: extern "C" fn(CgRect, f64, f64) -> CgRect =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(CgRect, f64, f64) -> CgRect>(host) };
+    let out = f(rect, dx, dy);
+    let buffer = ctx.rdi;
+    if buffer == 0 {
+        return Err(AbiError::Memory {
+            symbol: symbol.to_string(),
+            addr: 0,
+        });
+    }
+    mem.write_bytes(buffer, &out.to_le_bytes(), symbol)?;
+    ctx.rax = buffer;
+    Ok(())
+}
+
 /// `CGPoint`, as both ABIs return one: two floating-point registers.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -387,6 +417,9 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         "CGContextClearRect" => Some(context_clear_rect),
         "CGContextDrawImage" => Some(context_draw_image),
         "CGEventGetLocation" => Some(event_location),
+        // A `CGRect` in *and* out. Roblox insets its content view's frame while
+        // laying out the window's title bar.
+        "NSInsetRect" => Some(inset_rect),
         // A `CGPoint` **argument** in the middle of three scalars; see
         // [`event_create_mouse`] for why that moves `mouseButton` a register.
         "CGEventCreateMouseEvent" => Some(event_create_mouse),

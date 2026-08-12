@@ -368,6 +368,111 @@ pub fn task_set_exception_ports(
     Ok(())
 }
 
+/// Say the exception-port sentence once, whichever entry point reached it.
+///
+/// Shared rather than repeated so that a program calling `task_set…` and then
+/// `thread_swap…` does not print it twice: what the guest needs to be told is
+/// that its exception ports are not honoured, not which of the six spellings it
+/// used.
+fn announce_exception_ports(symbol: &str, mask: u32) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!(
+            "rosetta3: {symbol}(mask {mask:#x}) accepted but not honoured — a Mach exception \
+             message carries this CPU's thread state for a fault inside a translation, not the \
+             guest's registers",
+        );
+    }
+}
+
+/// The `…_get_exception_ports` half of the family: `task`, `host`.
+///
+/// `kern_return_t task_get_exception_ports(task_t, exception_mask_t,
+/// exception_mask_array_t masks, mach_msg_type_number_t *masksCnt,
+/// exception_handler_array_t, exception_behavior_array_t,
+/// exception_flavor_array_t)` — seven parameters, five of them arrays the callee
+/// fills in and one a count it writes back.
+///
+/// Answered with **zero ports**, which is not a fudge: nothing was installed, so
+/// zero is what is there. The count is the only thing that has to be written —
+/// the three parallel arrays are read up to it, so leaving them untouched is
+/// correct and leaving the count untouched would have the guest read whatever
+/// was on its stack as a length.
+///
+/// The two spellings differ only in what the first argument names, and this
+/// treats neither as meaningful: a program asking a task or the host about its
+/// exception ports gets the same empty answer.
+fn get_exception_ports(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    _callbacks: &dyn Callbacks,
+) -> Result<()> {
+    // `masksCnt` is the fourth parameter.
+    write_port_count(symbol, ctx.rcx, mem)?;
+    crate::shims::set_int_return(ctx, 0);
+    Ok(())
+}
+
+/// The `…_swap_exception_ports` half: `task`, `host`, `thread`.
+///
+/// `kern_return_t task_swap_exception_ports(task_t, exception_mask_t,
+/// mach_port_t, exception_behavior_t, thread_state_flavor_t,
+/// exception_mask_array_t, mach_msg_type_number_t *masksCnt,
+/// exception_handler_array_t, exception_behavior_array_t,
+/// exception_flavor_array_t)` — a set and a get in one call, so it is both of
+/// the above: the new port is accepted and dropped, and the old ones come back
+/// empty.
+///
+/// **Ten parameters**, which puts `masksCnt` — the seventh — past SysV AMD64's
+/// six integer registers and onto the caller's stack. microlift exits before the
+/// `CALL`, so `rsp` is the pre-call value and the seventh argument is the first
+/// stack word, at `rsp + 0`. Reading it out of a register would write a count
+/// through whatever the guest last left there.
+fn swap_exception_ports(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    _callbacks: &dyn Callbacks,
+) -> Result<()> {
+    announce_exception_ports(symbol, ctx.rsi as u32);
+    let masks_count = mem.read_u64(ctx.rsp, symbol)?;
+    write_port_count(symbol, masks_count, mem)?;
+    crate::shims::set_int_return(ctx, 0);
+    Ok(())
+}
+
+/// `host_set_exception_ports`, which is [`task_set_exception_ports`] with a
+/// `host_priv_t` in front — and which a program without host privileges could
+/// not have used anyway.
+fn set_exception_ports(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    _mem: &mut dyn GuestMemory,
+    _callbacks: &dyn Callbacks,
+) -> Result<()> {
+    announce_exception_ports(symbol, ctx.rsi as u32);
+    crate::shims::set_int_return(ctx, 0);
+    Ok(())
+}
+
+/// Write "no exception ports" through a `mach_msg_type_number_t *`.
+///
+/// A null pointer is legal — a caller that does not want the old ports passes
+/// one — so it is not an error here.
+fn write_port_count(symbol: &str, at: u64, mem: &mut dyn GuestMemory) -> Result<()> {
+    if at == 0 {
+        return Ok(());
+    }
+    // `mach_msg_type_number_t` is `natural_t`, a 32-bit unsigned integer on
+    // both architectures.
+    mem.write(at, &0u32.to_le_bytes())
+        .map_err(|_| AbiError::Memory {
+            symbol: symbol.to_string(),
+            addr: at,
+        })
+}
+
 /// One of this module's implementations, in the shape [`crate::shims`] wants.
 ///
 /// Wider than [`crate::jmpbuf::Shim`] by one parameter, and that parameter is
@@ -382,6 +487,11 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         "sigaction" => sigaction,
         "sigaltstack" => sigaltstack,
         "task_set_exception_ports" => task_set_exception_ports,
+        "host_set_exception_ports" => set_exception_ports,
+        "task_get_exception_ports" | "host_get_exception_ports" => get_exception_ports,
+        "task_swap_exception_ports"
+        | "host_swap_exception_ports"
+        | "thread_swap_exception_ports" => swap_exception_ports,
         _ => return None,
     })
 }

@@ -51,13 +51,40 @@ done | sort -u | sed 's/^_//' > $work/defined
 # `dyld_stub_binder` are answered elsewhere by construction.
 grep -vE '^(_?_Z|objc_|_objc_|OBJC_|dyld_stub_binder)' $work/undefined > $work/candidates
 
-{
-  grep -ohE '(sig!|vsig!|cbsig!)[[:space:]]*\([[:space:]]*(\[[^]]*\][[:space:]]*,[[:space:]]*)?"[A-Za-z_0-9$]+"' \
-    "$root"/crates/rosetta3/src/abi/table.rs | grep -oE '"[A-Za-z_0-9$]+"$' | tr -d '"'
-  grep -rhoE '"[A-Za-z_][A-Za-z_0-9$]*"' "$root"/crates/rosetta3/src/shims/ | tr -d '"'
-} | sort -u > $work/known
+# Every quoted identifier in the table, the shims, and the loose handlers beside
+# them — *not* a pattern anchored on `sig!("Name"`.
+#
+# An entry with more than about six arguments is wrapped by `cargo fmt` onto its
+# own lines, which puts the name where a `sig!(`-anchored regex cannot see it:
+# `AudioConverterFillComplexBuffer`, `UCKeyTranslate` and fifteen others were
+# reported as missing while sitting in the table. A work queue that silently
+# includes finished work is worse than a long one, because nothing distinguishes
+# the wrong entries from the right ones until each is looked up by hand.
+#
+# The cost of casting this wide is the mirror image and much cheaper: a symbol
+# that merely *appears* in a comment or a diagnostic string is treated as known
+# and dropped from the queue. That under-reports by a name or two; the other way
+# round over-reported by seventeen.
+grep -rhoE '"[A-Za-z_][A-Za-z_0-9$]*"' \
+  "$root"/crates/rosetta3/src/abi/table.rs \
+  "$root"/crates/rosetta3/src/shims/ \
+  "$root"/crates/rosetta3/src/*.rs \
+  "$root"/crates/rosetta3/src/objc/ \
+  | tr -d '"' | sort -u > $work/known
 
-comm -23 $work/candidates $work/defined | comm -23 - $work/known > $work/unknown
+# A `$`-suffixed spelling is answered by the plain name, exactly as
+# `abi::table::lookup` answers it: an x86-only variant's signature is the plain
+# symbol's, and `fopen$DARWIN_EXTSN` is not a work item when `fopen` is
+# described. Dropping these by hand every run was how `realpath` — the one whose
+# base really was missing — stayed hidden among four that were not.
+comm -23 $work/candidates $work/defined | comm -23 - $work/known \
+  | while IFS= read -r sym; do
+      base=${sym%%\$*}
+      if [[ "$base" != "$sym" ]] && grep -qxF -- "$base" $work/known; then
+        continue
+      fi
+      print -r -- "$sym"
+    done > $work/unknown
 
 cat > $work/probe.c <<'PROBE'
 #include <stdio.h>

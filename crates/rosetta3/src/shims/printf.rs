@@ -742,6 +742,15 @@ fn host_stdout() -> *mut libc::FILE {
     unsafe { __stdoutp }
 }
 
+/// `stderr`, for the same reason [`host_stdout`] is written out by hand.
+fn host_stderr() -> *mut libc::FILE {
+    unsafe extern "C" {
+        static __stderrp: *mut libc::FILE;
+    }
+    // SAFETY: as `host_stdout`.
+    unsafe { __stderrp }
+}
+
 fn write_host(stream: *mut libc::FILE, bytes: &[u8]) {
     if stream.is_null() || bytes.is_empty() {
         return;
@@ -760,6 +769,26 @@ pub fn printf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory
     let out = format_from(symbol, ctx, &*mem, ctx.rdi, 1)?;
     write_host(host_stdout(), &out);
     set_int_return(ctx, out.len() as i32);
+    Ok(())
+}
+
+/// `void malloc_printf(const char *fmt, ...)`
+///
+/// libsystem_malloc's own diagnostic printer, which the interposing mimalloc
+/// calls when it wants to complain in the allocator's voice. It is [`printf`]
+/// with two differences that both matter to a caller: it writes to **stderr**
+/// rather than stdout, and it returns nothing — so nothing is placed in `eax`,
+/// where `printf` would leave a length.
+///
+/// Unbuffered for the reason the real one is: a program printing an allocator
+/// diagnostic is usually about to stop.
+pub fn malloc_printf(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let out = format_from(symbol, ctx, &*mem, ctx.rdi, 1)?;
+    write_host(host_stderr(), &out);
     Ok(())
 }
 
@@ -836,7 +865,7 @@ pub fn sprintf_l(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMem
 /// `LC_NUMERIC` is the category that decides the radix point and the grouping,
 /// which is the whole of what a `printf` conversion reads a locale for. A null
 /// handle is the global locale, which `querylocale` answers for directly.
-fn c_locale_or_refuse(symbol: &str, loc: u64) -> Result<()> {
+pub(crate) fn c_locale_or_refuse(symbol: &str, loc: u64) -> Result<()> {
     let name = unsafe { libc::querylocale(libc::LC_NUMERIC_MASK, loc as _) };
     // SAFETY: `querylocale` returns a NUL-terminated name owned by libc, or
     // null for a handle it does not recognise.

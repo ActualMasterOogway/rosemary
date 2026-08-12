@@ -50,6 +50,7 @@ pub mod block;
 pub mod cfuuid;
 pub mod component;
 pub mod coregraphics;
+pub mod coremedia;
 pub mod curl;
 pub mod intdiv;
 pub mod ioctl;
@@ -113,6 +114,13 @@ pub fn dispatch(
         "vasprintf" => printf::vasprintf,
         "__vsnprintf_chk" => printf::vsnprintf_chk,
         "sscanf" => sscanf::sscanf,
+        // The locale-aware and `va_list` spellings, which are the same parser
+        // reached with the destinations somewhere else. See [`sscanf::vsscanf`]
+        // for why the list cannot be handed to the host.
+        "sscanf_l" => sscanf::sscanf_l,
+        "vsscanf" => sscanf::vsscanf,
+        // libsystem_malloc's own printer, which the interposing mimalloc uses.
+        "malloc_printf" => printf::malloc_printf,
         // Variadic in its declaration and one argument wide in fact; see
         // [`ioctl`] for why that makes it forwardable when `printf` is not.
         "NSLog" => nslog::nslog,
@@ -133,6 +141,7 @@ pub fn dispatch(
             if let Some(f) = math::shim_for(name)
                 .or_else(|| intdiv::shim_for(name))
                 .or_else(|| coregraphics::shim_for(name))
+                .or_else(|| coremedia::shim_for(name))
                 .or_else(|| cfuuid::shim_for(name))
                 .or_else(|| appkit::shim_for(name))
                 .or_else(|| component::shim_for(name))
@@ -163,6 +172,7 @@ pub fn dispatch(
                 .or_else(|| pthread::shim_for(name))
                 .or_else(|| iokit::shim_for(name))
                 .or_else(|| block::shim_for(name))
+                .or_else(|| coremedia::callback_shim_for(name))
                 .or_else(|| crate::dyld::shim_for_callbacks(name))
                 .or_else(|| atexit::shim_for(name))
                 .or_else(|| zlib::shim_for(name))
@@ -184,6 +194,8 @@ pub fn is_shimmed(symbol: &str) -> bool {
     if math::shim_for(name).is_some()
         || intdiv::shim_for(name).is_some()
         || coregraphics::shim_for(name).is_some()
+        || coremedia::shim_for(name).is_some()
+        || coremedia::callback_shim_for(name).is_some()
         || cfuuid::shim_for(name).is_some()
         || appkit::shim_for(name).is_some()
         || component::shim_for(name).is_some()
@@ -226,6 +238,9 @@ pub fn is_shimmed(symbol: &str) -> bool {
             | "vasprintf"
             | "__vsnprintf_chk"
             | "sscanf"
+            | "sscanf_l"
+            | "vsscanf"
+            | "malloc_printf"
             | "ioctl"
             | "open"
             | "openat"

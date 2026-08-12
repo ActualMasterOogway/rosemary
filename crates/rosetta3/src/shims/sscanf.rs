@@ -146,11 +146,63 @@ fn scanset(format: &[u8], at: &mut usize) -> Option<(bool, [bool; 256])> {
     Some((inverted, set))
 }
 
+/// Where the conversions' destination pointers are to be read from.
+///
+/// The same question [`super::printf::VarArgs`] answers for rendering, and for
+/// the same reason: a variadic *call* left its tail in the registers `ctx`
+/// holds, while a `v`-prefixed function was handed a structure describing where
+/// its caller left them. Everything between here and the writes is indifferent
+/// to which.
+#[derive(Clone, Copy)]
+enum Tail {
+    /// A variadic call, after this many named integer parameters.
+    Registers(usize),
+    /// A guest `va_list` at this address.
+    List(u64),
+}
+
 /// `int sscanf(const char *input, const char *format, ...)`.
 pub fn sscanf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
-    let input = (*mem).read_cstr(ctx.rdi, symbol)?;
-    let format = (*mem).read_cstr(ctx.rsi, symbol)?;
-    let mut args = VarArgs::new(symbol, ctx, &*mem, 2);
+    scan(symbol, ctx, mem, ctx.rdi, ctx.rsi, Tail::Registers(2))
+}
+
+/// `int sscanf_l(const char *input, locale_t loc, const char *format, ...)`
+///
+/// The locale-aware spelling, imported by the **vendored libc++** for
+/// [`super::printf::snprintf_l`]'s reason: `num_get` parses every number
+/// through it so that `std::stoi` does not pick up the program's locale. The
+/// locale is checked rather than ignored, again for that function's reason —
+/// this parser reads a `.` radix point and no digit grouping, which is the C
+/// locale's answer and not every locale's.
+pub fn sscanf_l(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    super::printf::c_locale_or_refuse(symbol, ctx.rsi)?;
+    scan(symbol, ctx, mem, ctx.rdi, ctx.rdx, Tail::Registers(3))
+}
+
+/// `int vsscanf(const char *input, const char *format, va_list ap)`
+///
+/// Not variadic — its caller built the list — and impossible to forward for the
+/// mirror image of the reason this module exists at all: the structure is
+/// **SysV AMD64's**, three fields describing two register save areas and an
+/// overflow pointer, and the host's `vsscanf` would read it as arm64's.
+pub fn vsscanf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    scan(symbol, ctx, mem, ctx.rdi, ctx.rsi, Tail::List(ctx.rdx))
+}
+
+fn scan(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    input_va: u64,
+    format_va: u64,
+    tail: Tail,
+) -> Result<()> {
+    let input = (*mem).read_cstr(input_va, symbol)?;
+    let format = (*mem).read_cstr(format_va, symbol)?;
+    let mut args = match tail {
+        Tail::Registers(fixed) => VarArgs::new(symbol, ctx, &*mem, fixed),
+        Tail::List(at) => VarArgs::from_list(symbol, ctx, &*mem, at)?,
+    };
     let mut writes = Vec::new();
     let mut fi = 0;
     let mut ii = 0;

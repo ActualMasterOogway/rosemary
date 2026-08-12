@@ -134,6 +134,97 @@ pub fn divdc3(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemo
     Ok(())
 }
 
+/// `float _Complex __mulsc3(float a, float b, float c, float d)`.
+///
+/// [`divdc3`]'s sibling one size down and in the other operation, and its
+/// register story is the one interesting thing about it. A `float _Complex` is
+/// **eight** bytes, so SysV AMD64 makes it a single SSE eightbyte: both
+/// arguments of a complex value share one `xmm` register — real in the low half,
+/// imaginary in the high — and the result comes back packed the same way in
+/// `xmm0`. AAPCS64 sees a two-member homogeneous float aggregate and uses `s0`
+/// and `s1`. That is the `__sincosf_stret` disagreement, reached from
+/// compiler-rt instead of libm.
+///
+/// The multiplication itself is the C standard's Annex G recipe: the naive
+/// product first, then the recovery pass that turns the `inf * 0` NaNs an
+/// infinite operand produces back into the infinity the limit says it is.
+/// Skipping that is what makes a hand-rolled complex multiply wrong only for the
+/// inputs nobody tests with.
+pub fn mulsc3(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
+    let half = |reg: usize, high: bool| {
+        let word = ctx.xmm[reg][0];
+        f32::from_bits(if high {
+            (word >> 32) as u32
+        } else {
+            word as u32
+        })
+    };
+    let (a, b) = (half(0, false), half(0, true));
+    let (c, d) = (half(1, false), half(1, true));
+
+    let (ac, bd, ad, bc) = (a * c, b * d, a * d, b * c);
+    let mut real = ac - bd;
+    let mut imag = ad + bc;
+
+    if real.is_nan() && imag.is_nan() {
+        // One operand was infinite and the other had a zero component, so the
+        // naive product manufactured `inf * 0`. Annex G's recovery: treat the
+        // infinity as a direction, every NaN component of the *other* operand
+        // as a signed zero, and multiply again.
+        let mut recovered = false;
+        let (mut a, mut b, mut c, mut d) = (a, b, c, d);
+        /// An infinite component becomes a signed one and a finite one a signed
+        /// zero: the infinity's *direction*, which is what the limit depends on.
+        fn direction(x: f32) -> f32 {
+            let magnitude: f32 = if x.is_infinite() { 1.0 } else { 0.0 };
+            magnitude.copysign(x)
+        }
+        /// A NaN in the other operand carried no information, so it becomes a
+        /// signed zero and stops poisoning the product.
+        fn tame(x: f32) -> f32 {
+            match x.is_nan() {
+                true => 0.0f32.copysign(x),
+                false => x,
+            }
+        }
+        if a.is_infinite() || b.is_infinite() {
+            a = direction(a);
+            b = direction(b);
+            c = tame(c);
+            d = tame(d);
+            recovered = true;
+        }
+        if c.is_infinite() || d.is_infinite() {
+            c = direction(c);
+            d = direction(d);
+            a = tame(a);
+            b = tame(b);
+            recovered = true;
+        }
+        if !recovered
+            && (ac.is_infinite() || bd.is_infinite() || ad.is_infinite() || bc.is_infinite())
+        {
+            // The operands are finite but their products overflowed, which is
+            // an infinite result rather than an indeterminate one.
+            a = tame(a);
+            b = tame(b);
+            c = tame(c);
+            d = tame(d);
+            recovered = true;
+        }
+        if recovered {
+            real = f32::INFINITY * (a * c - b * d);
+            imag = f32::INFINITY * (a * d + b * c);
+        }
+    }
+
+    ctx.xmm[0] = [
+        u64::from(real.to_bits()) | (u64::from(imag.to_bits()) << 32),
+        0,
+    ];
+    Ok(())
+}
+
 /// One of this module's implementations, in the shape [`crate::shims`] wants.
 pub type Shim = fn(&str, &mut RegisterContext, &mut dyn GuestMemory) -> Result<()>;
 
@@ -145,6 +236,7 @@ pub type Shim = fn(&str, &mut RegisterContext, &mut dyn GuestMemory) -> Result<(
 pub fn shim_for(name: &str) -> Option<Shim> {
     match name {
         "__divdc3" => Some(divdc3),
+        "__mulsc3" => Some(mulsc3),
         "__sincosf_stret" => Some(sincosf_stret),
         "__sincos_stret" => Some(sincos_stret),
         _ => None,
