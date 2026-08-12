@@ -124,6 +124,7 @@ pub mod audit;
 pub mod bridge;
 pub mod bundle;
 pub mod cache;
+pub mod compat;
 pub mod cxxlib;
 pub mod dyld;
 pub mod fault;

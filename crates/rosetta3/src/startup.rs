@@ -71,6 +71,9 @@ pub fn run(vm: &Vm) -> Result<i32, VmError> {
     // with no image name is a number.
     crate::fault::install();
     crate::fault::note_images(&vm.program.report);
+    // Before any framework can ask a question about the main executable and get
+    // an answer about *this* binary rather than the guest. See [`crate::compat`].
+    crate::compat::install();
     say_image_map(vm);
     // Before any guest code, as dyld does it: `libobjc` realizes an image's
     // classes when the image is mapped, which is strictly before that image's

@@ -403,9 +403,32 @@ pub fn render(fmt: &[u8], args: &mut VarArgs<'_>) -> Result<Vec<u8>> {
                 let body = digits_with_precision(v, base, upper, spec.prec);
                 pad_number(&mut out, &body, false, &spec, prefix, spec.prec);
             }
+            // `%lc` and `%C` are a `wint_t` — a whole `wchar_t` rather than a
+            // byte — and come out as UTF-8 because that is what this renderer's
+            // output is. A value that is not a scalar value prints nothing,
+            // which is what Apple's libc does with an invalid wide character.
+            b'C' | b'c' if len == Len::Long || conv == b'C' => {
+                let v = args.next_int()? as u32;
+                let body = char::from_u32(v).map(String::from).unwrap_or_default();
+                pad_bytes(&mut out, body.as_bytes(), &spec);
+            }
             b'c' => {
                 let v = args.next_int()? as u8;
                 pad_bytes(&mut out, &[v], &spec);
+            }
+            // `%ls` and `%S` are a `wchar_t *`. Both spellings are C's, and both
+            // are reachable from a *narrow* format as well as a wide one — which
+            // is why they live here rather than in the wide entry points.
+            b'S' | b's' if len == Len::Long || conv == b'S' => {
+                let ptr = args.next_int()?;
+                let mut s = read_wide_string(args, ptr)?;
+                // A wide string's precision counts *characters*, so it is
+                // applied before the UTF-8 encoding rather than after.
+                if let Some(p) = spec.prec {
+                    s.truncate(p);
+                }
+                let body: String = s.into_iter().collect();
+                pad_bytes(&mut out, body.as_bytes(), &spec);
             }
             b's' => {
                 let ptr = args.next_int()?;
@@ -450,6 +473,61 @@ fn read_string(args: &VarArgs<'_>, ptr: u64) -> Result<Vec<u8>> {
         return Ok(b"(null)".to_vec());
     }
     args.mem.read_cstr(ptr, args.symbol)
+}
+
+/// Follow a `%ls` pointer into guest memory.
+///
+/// A `wchar_t` is four bytes on both sides of this seam, so the units need no
+/// conversion — only assembling, and bounding. The bound is [`MAX_WIDE`]'s and
+/// exists for [`crate::abi::MAX_CSTR`]'s reason: the pointer is guest data, and
+/// an unterminated buffer must cost a truncated field rather than a walk to the
+/// end of the address space.
+///
+/// A unit that is not a Unicode scalar value becomes `U+FFFD` rather than
+/// ending the string. That keeps a mis-encoded name printable, which is the
+/// point of printing it.
+fn read_wide_string(args: &VarArgs<'_>, ptr: u64) -> Result<Vec<char>> {
+    if ptr == 0 {
+        return Ok("(null)".chars().collect());
+    }
+    let mut out = Vec::new();
+    for i in 0..MAX_WIDE {
+        let unit = args
+            .mem
+            .read_u32(ptr.wrapping_add(i as u64 * 4), args.symbol)?;
+        if unit == 0 {
+            break;
+        }
+        out.push(char::from_u32(unit).unwrap_or('\u{fffd}'));
+    }
+    Ok(out)
+}
+
+/// How many `wchar_t` a wide string or format is followed for.
+const MAX_WIDE: usize = 64 * 1024;
+
+/// A wide format string, as the bytes [`render`] formats.
+///
+/// Every conversion specifier C defines is ASCII, so a wide format's *syntax*
+/// survives the encoding unchanged and only its literal text needs converting.
+/// UTF-8 is the encoding because that is what this renderer's output is —
+/// [`wide_from_utf8`] puts it back.
+fn wide_format(args: &VarArgs<'_>, ptr: u64) -> Result<Vec<u8>> {
+    let chars = read_wide_string(args, ptr)?;
+    Ok(chars.into_iter().collect::<String>().into_bytes())
+}
+
+/// A rendering, back as `wchar_t` units.
+///
+/// Lossy, and the loss is a guest `%s` whose bytes were not UTF-8 — the
+/// renderer's output is UTF-8 wherever it came from the format and raw guest
+/// bytes wherever it came from a narrow string conversion. `U+FFFD` in a
+/// formatted name is a visible defect; refusing to format is a stopped program.
+fn wide_from_utf8(bytes: &[u8]) -> Vec<u32> {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .map(u32::from)
+        .collect()
 }
 
 fn sign_extend(raw: u64, len: Len) -> i64 {
@@ -857,6 +935,53 @@ pub fn vsprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemo
     let dst = ctx.rdi;
     mem.write(dst, &out).map_err(|_| bad_pointer(symbol, dst))?;
     set_int_return(ctx, written as i32);
+    Ok(())
+}
+
+/// `int vswprintf(wchar_t *ws, size_t n, const wchar_t *fmt, va_list ap)`
+///
+/// The wide form, and the one Unreal Engine 3 formats *everything* through:
+/// `appGetVarArgs` is a `vswprintf` call, and every `FString` built from a
+/// format — every log line, every `appErrorf`, every UnrealScript `string`
+/// concatenation — arrives here.
+///
+/// ## Why the return value is not `snprintf`'s
+///
+/// `swprintf` and `snprintf` disagree about truncation, and the difference is
+/// load-bearing rather than pedantic. `snprintf` reports the length the whole
+/// rendering *would* have had; `swprintf` reports **-1** and leaves the buffer's
+/// contents unspecified. `appGetVarArgs` is written against that: it asks with a
+/// 128-character buffer, and on -1 doubles and asks again until the answer is
+/// not -1. Reporting the would-be length instead ends that loop on the first
+/// pass with a truncated string, and every long message in the game silently
+/// loses its tail.
+pub fn vswprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    let (fmt, list_ptr) = (ctx.rdx, ctx.rcx);
+    let (out, walked) = {
+        let mut args = VarArgs::from_list(symbol, ctx, &*mem, list_ptr)?;
+        let fmt = wide_format(&args, fmt)?;
+        let out = render(&fmt, &mut args)?;
+        (out, args.list())
+    };
+    if let Some(list) = walked {
+        list.write_back(symbol, mem)?;
+    }
+
+    let wide = wide_from_utf8(&out);
+    let (dst, limit) = (ctx.rdi, ctx.rsi);
+    // `n` counts wide characters including the terminator, so a rendering of
+    // exactly `n` units does not fit.
+    if limit == 0 || wide.len() as u64 >= limit {
+        set_int_return(ctx, -1);
+        return Ok(());
+    }
+    let mut buf = Vec::with_capacity((wide.len() + 1) * 4);
+    for unit in &wide {
+        buf.extend_from_slice(&unit.to_le_bytes());
+    }
+    buf.extend_from_slice(&0u32.to_le_bytes());
+    mem.write(dst, &buf).map_err(|_| bad_pointer(symbol, dst))?;
+    set_int_return(ctx, wide.len() as i32);
     Ok(())
 }
 

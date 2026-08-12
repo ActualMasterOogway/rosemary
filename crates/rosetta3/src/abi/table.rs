@@ -336,6 +336,53 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("AudioUnitRender", I32, P, P, P, U32, U32, P),
     sig!("AudioUnitSetProperty", I32, P, U32, U32, U32, P, U32),
     sig!("AudioUnitUninitialize", I32, P),
+    // ## `AUGraph`, which is the pre-`AVAudioEngine` way to wire units together
+    //
+    // A graph is an opaque `AUGraph`; a node is an `AUNode`, which is a bare
+    // `SInt32` and not a handle. Everything returns an `OSStatus`.
+    // `AUGraphAddNode`'s second argument is an `AudioComponentDescription *` —
+    // a pointer, because the modern form takes the description by address where
+    // the deprecated `AUGraphNewNode` took it by value.
+    sig!("NewAUGraph", I32, P),
+    sig!("DisposeAUGraph", I32, P),
+    sig!("AUGraphAddNode", I32, P, P, P),
+    sig!("AUGraphConnectNodeInput", I32, P, I32, U32, I32, U32),
+    sig!("AUGraphDisconnectNodeInput", I32, P, I32, U32),
+    sig!("AUGraphInitialize", I32, P),
+    // `AUGraphNodeInfo(AUGraph, AUNode, AudioComponentDescription *out,
+    // AudioUnit *out)` — both outputs optional.
+    sig!("AUGraphNodeInfo", I32, P, I32, P, P),
+    sig!("AUGraphOpen", I32, P),
+    sig!("AUGraphStart", I32, P),
+    sig!("AUGraphStop", I32, P),
+    // `AUGraphUpdate(AUGraph, Boolean *isUpdated)`, whose second argument is an
+    // optional output and not a flag.
+    sig!("AUGraphUpdate", I32, P, P),
+    // `AudioUnitSetParameter(AudioUnit, AudioUnitParameterID,
+    // AudioUnitParameterScope, AudioUnitElement, AudioUnitParameterValue,
+    // UInt32 bufferOffsetInFrames)` — the value is a `Float32`, so it arrives in
+    // `xmm0` while the four words before it are integers.
+    sig!("AudioUnitSetParameter", I32, P, U32, U32, U32, F32, U32),
+    // ## `AudioConverter`, which is how a stream is decoded
+    //
+    // `AudioConverterNew` takes two `AudioStreamBasicDescription *` and answers
+    // an opaque converter. `FillComplexBuffer`'s second argument is the guest's
+    // input callback — a function pointer the *host* calls, so it crosses as a
+    // thunk like every other callback.
+    sig!("AudioConverterNew", I32, P, P, P),
+    sig!("AudioConverterDispose", I32, P),
+    sig!("AudioConverterReset", I32, P),
+    cbsig!(
+        [1],
+        "AudioConverterFillComplexBuffer",
+        I32,
+        P,
+        P,
+        P,
+        P,
+        P,
+        P
+    ),
     // `CCCrypt`: 11 integer-class arguments, within `MAX_INT_ARGS_TOTAL` — the
     // three past the eighth spill to the host stack, all doubleword-wide.
     sig!("CCCrypt", I32, U32, U32, U32, P, U64, P, P, U64, P, U64, P),
@@ -375,6 +422,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFBundleCopyExecutableURL", P, P),
     sig!("CFBundleCopyPrivateFrameworksURL", P, P),
     sig!("CFBundleCopyResourcesDirectoryURL", P, P),
+    // `CFURLRef CFBundleCopyResourceURL(CFBundleRef, CFStringRef name,
+    // CFStringRef type, CFStringRef subDirName)` — three `CFStringRef`s, any of
+    // which may be null.
+    sig!("CFBundleCopyResourceURL", P, P, P, P, P),
     sig!("CFBundleCreate", P, P, P),
     sig!("CFBundleGetIdentifier", P, P),
     sig!("CFBundleGetMainBundle", P),
@@ -515,6 +566,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFStringConvertNSStringEncodingToEncoding", U32, U64),
     sig!("CFStringCreateWithCharacters", P, P, P, I64),
     sig!("CFStringCreateWithCString", P, P, P, U32),
+    // `CFStringRef CFStringCreateWithBytes(CFAllocatorRef, const UInt8 *bytes,
+    // CFIndex numBytes, CFStringEncoding, Boolean isExternalRepresentation)`.
+    // The form a program uses when its bytes are counted rather than terminated,
+    // which for Unreal Engine 3 is every one: a `TCHAR` string is UTF-32 and has
+    // no C terminator to find.
+    sig!("CFStringCreateWithBytes", P, P, P, I64, U32, BOOL),
     // ## `CFRange` is the aggregate that needs no vocabulary
     //
     // Refused as an aggregate until M7.4, and it is worth being precise about
@@ -605,6 +662,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGDirectDisplayCopyCurrentMetalDevice", P, I32),
     sig!("MTLCreateSystemDefaultDevice", P),
     sig!("CGAssociateMouseAndMouseCursorPosition", I32, I32),
+    // `boolean_t CGCursorIsVisible(void)` — an `int`, not a `CGError`, and the
+    // pair to `CGDisplayHideCursor`: a game that hides the cursor for mouse-look
+    // asks this before deciding whether it has to.
+    sig!("CGCursorIsVisible", I32),
     // ## The bitmap context, which is how an image becomes texture bytes
     //
     // cocos2d-x decodes every texture the same way: a `CGImageSource` over the
@@ -840,6 +901,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // CoreFoundation object the caller owns.
     sig!("IODisplayCreateInfoDictionary", P, U32, U32),
     sig!("IOHIDDeviceCopyMatchingElements", P, P, P, U32),
+    // `IOReturn IOHIDDeviceOpen(IOHIDDeviceRef, IOOptionBits)`, and its close.
+    sig!("IOHIDDeviceOpen", I32, P, U32),
+    sig!("IOHIDDeviceClose", I32, P, U32),
     sig!("IOHIDDeviceGetProperty", P, P, P),
     // `IOHIDDeviceGetService` hands back the `io_service_t` behind a device,
     // which is the 32-bit port name the registry calls are asked in terms of —
@@ -880,6 +944,23 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("IOHIDElementGetCookie", U32, P),
     // `CFIndex` is a `long`, so these are sixty-four bits wide and signed —
     // a logical minimum is routinely negative.
+    // The rest of the element's description, all of it read straight off the
+    // `IOHIDElement` and none of it a handle: the min/max pairs are `CFIndex`,
+    // the unit and its exponent `uint32_t`, and the predicates `Boolean`.
+    sig!("IOHIDElementGetCollectionType", U32, P),
+    sig!("IOHIDElementGetName", P, P),
+    sig!("IOHIDElementGetParent", P, P),
+    sig!("IOHIDElementGetPhysicalMax", I64, P),
+    sig!("IOHIDElementGetPhysicalMin", I64, P),
+    sig!("IOHIDElementGetUnit", U32, P),
+    sig!("IOHIDElementGetUnitExponent", U32, P),
+    sig!("IOHIDElementHasNullState", BOOL, P),
+    sig!("IOHIDElementHasPreferredState", BOOL, P),
+    sig!("IOHIDElementIsArray", BOOL, P),
+    sig!("IOHIDElementIsNonLinear", BOOL, P),
+    sig!("IOHIDElementIsRelative", BOOL, P),
+    sig!("IOHIDElementIsVirtual", BOOL, P),
+    sig!("IOHIDElementIsWrapping", BOOL, P),
     sig!("IOHIDElementGetLogicalMax", I64, P),
     sig!("IOHIDElementGetLogicalMin", I64, P),
     sig!("IOHIDElementGetType", U32, P),
@@ -1039,6 +1120,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // fails as "variadic, and no shim implements it" rather than as an
     // undescribed symbol.
     vsig!("NSLog", V, P),
+    // Shimmed, and listed for the reason `NSLog` is. The format is the *second*
+    // argument, so the entry names five pointers before the tail.
+    vsig!("NSRunAlertPanel", I64, P, P, P, P, P),
     sig!("NSHomeDirectory", P),
     sig!("NSClassFromString", P, P),
     // The handler is a guest function pointer the *runtime* calls, from inside
@@ -1315,6 +1399,26 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("__error", P),
     sig!("__exp10f", F32, F32),
     sig!("__isnand", I32, F64),
+    // The `float` twin, which clang emits for `isnan()` on a `float` — a
+    // different symbol from `__isnand` and not a variant of it, so a table with
+    // only the `double` form leaves it undescribed.
+    sig!("__isnanf", I32, F32),
+    // The rest of `<math.h>`'s classification macros, which are functions on
+    // Darwin. Each takes its argument in a floating-point register and answers an
+    // `int`, and each width is its own symbol: `f` is a `float`, the bare name a
+    // `double`, `l` a `long double` — which arrives as a `double` here, since
+    // `long double` on x86-64 is what [`crate::abi::table::REFUSED`] declines
+    // and clang emits the `d` form for anything narrower.
+    sig!("__isfinitef", I32, F32),
+    sig!("__isfinited", I32, F64),
+    sig!("__isinff", I32, F32),
+    sig!("__isinfd", I32, F64),
+    sig!("__isnormalf", I32, F32),
+    sig!("__isnormald", I32, F64),
+    sig!("__signbitf", I32, F32),
+    sig!("__signbitd", I32, F64),
+    sig!("__fpclassifyf", I32, F32),
+    sig!("__fpclassifyd", I32, F64),
     sig!("__maskrune", I32, I32, U64),
     sig!("__maskrune_l", I32, I32, U64, P),
     sig!("__memcpy_chk", P, P, P, U64, U64),
@@ -2093,6 +2197,32 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // issues for a mesh with a vertex offset, which is most of them.
     sig!("glBlendColor", V, F32, F32, F32, F32),
     sig!("glDrawElementsBaseVertex", V, U32, I32, U32, P, I32),
+    // ### The `ARB` and `APPLE` spellings, and the fixed-function leftovers
+    //
+    // Unreal Engine 3's OpenGL RHI predates these being core, so it resolves the
+    // *extension* names — same functions, different symbols, and a table that
+    // has only `glDrawArraysInstanced` does not answer `…InstancedARB`.
+    //
+    // `glVertexPointer`, `glTexCoordPointer` and the client-state pair are the
+    // compatibility-profile fixed-function path, which the engine still uses for
+    // its one-off screen quads. `glTexEnvf`'s third argument is a `GLfloat` and
+    // arrives in `xmm0` while the two before it are integers, which is the one
+    // entry here a wrong guess would place in the wrong register file.
+    sig!("glDrawArraysInstancedARB", V, U32, I32, I32, I32),
+    sig!("glDrawElementsInstancedARB", V, U32, I32, U32, P, I32),
+    sig!("glVertexAttribDivisorARB", V, U32, U32),
+    // `void glBufferParameteriAPPLE(GLenum target, GLenum pname, GLint param)`,
+    // which is how `APPLE_flush_buffer_range` turns off the driver's implicit
+    // flush, and `glFlushMappedBufferRangeAPPLE(target, offset, size)`, which is
+    // the explicit one — an offset and a size, both pointer-width.
+    sig!("glBufferParameteriAPPLE", V, U32, U32, I32),
+    sig!("glFlushMappedBufferRangeAPPLE", V, U32, I64, I64),
+    sig!("glGetQueryObjectiv", V, U32, U32, P),
+    sig!("glEnableClientState", V, U32),
+    sig!("glDisableClientState", V, U32),
+    sig!("glVertexPointer", V, I32, U32, I32, P),
+    sig!("glTexCoordPointer", V, I32, U32, I32, P),
+    sig!("glTexEnvf", V, U32, U32, F32),
     sig!(
         "glDrawElementsInstancedBaseVertex",
         V,
@@ -3000,6 +3130,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("vfprintf", I32, P, P, P),
     sig!("vprintf", I32, P, P),
     sig!("vsnprintf", I32, P, U64, P, P),
+    // Shimmed. The wide form, and the one every Unreal Engine 3 string is built
+    // by; see [`crate::shims::printf::vswprintf`].
+    sig!("vswprintf", I32, P, U64, P, P),
     sig!("vsprintf", I32, P, P, P),
     sig!("wait", I32, P),
     sig!("wait3", I32, P, I32, P),
@@ -3007,9 +3140,21 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     vsig!("warn", V, P),
     vsig!("warnx", V, P),
     sig!("wcrtomb_l", U64, P, I32, P, P),
+    sig!("wcscat", P, P, P),
+    // The second argument is a `wchar_t`, which is a 32-bit integer and not a
+    // pointer — the one member of this family whose scalar is easy to misread.
+    sig!("wcschr", P, P, I32),
     sig!("wcscmp", I32, P, P),
-    sig!("wcscpy", I32, P, P),
-    sig!("wcsstr", I32, P, P),
+    sig!("wcsncmp", I32, P, P, U64),
+    // `wcscpy` and `wcsstr` return `wchar_t *`, and both were `I32` — the same
+    // truncation `OSAtomicAdd32` above is about, in the other direction and one
+    // step worse, because the value is an address rather than a count. A Hat in
+    // Time's `FString::Replace` writes a NUL *through* `wcsstr`'s answer to cut
+    // the haystack at the match: with a 32-bit return the pointer came back with
+    // its top half gone, the null check passed, and the store faulted at an
+    // address that was the low word of a real one.
+    sig!("wcscpy", P, P, P),
+    sig!("wcsstr", P, P, P),
     sig!("wcscoll_l", I32, P, P, P),
     sig!("wcslen", U64, P),
     sig!("wcsncat", P, P, P, U64),
@@ -3112,7 +3257,6 @@ pub static REFUSED: &[(&str, &str)] = &[
         "CFRunLoopSourceCreate",
         "its context structure holds guest function pointers the host would call as arm64",
     ),
-    ("CGEventCreateMouseEvent", AGGREGATE),
     ("CGRectContainsPoint", AGGREGATE),
     ("CGRectInset", AGGREGATE),
     // `NSApp` is data like the rest of this block, and the least obvious of

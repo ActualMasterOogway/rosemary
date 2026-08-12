@@ -70,8 +70,27 @@ pub struct Signature {
     /// *return* — a method handing one back is handing back the host's, which
     /// needs nothing done.
     pub blocks: Vec<u8>,
+    /// Zero-based parameter indices encoded `@`, i.e. holding an `id` — blocks
+    /// excluded, since `@?` is its own list.
+    ///
+    /// Recorded because **a class is a legal `id`**, and the encoding does not
+    /// say which `id`s are. `+[NSThread detachNewThreadSelector:toTarget:...]`
+    /// is the case that made this necessary: Unreal Engine 3 starts its render
+    /// thread with a *class* as the target, the parameter is encoded `@` rather
+    /// than `#`, and a guest `objc_class` address handed to Foundation reaches
+    /// `objc_msgSend` as a receiver the host runtime has never realized — which
+    /// is `Attempt to use unknown class`, and a fatal one.
+    ///
+    /// Translating these is safe rather than a guess: the substitution is a
+    /// lookup in the table of classes *this runtime registered*, and a guest
+    /// object is a host allocation (M6.2), so an `id` holding a guest address
+    /// that is exactly a registered class's is a class.
+    pub objects: Vec<u8>,
     /// Whether the method returns a `Class`.
     pub class_return: bool,
+    /// Whether the method returns an `id` — the reverse of [`Signature::objects`],
+    /// for a class handed back where the encoding says only "object".
+    pub object_return: bool,
 }
 
 impl Signature {
@@ -101,7 +120,9 @@ pub fn signature(encoding: &str) -> Result<Signature, &'static str> {
         shapes: Vec::new(),
         classes: Vec::new(),
         blocks: Vec::new(),
+        objects: Vec::new(),
         class_return: false,
+        object_return: false,
     };
 
     while at < bytes.len() {
@@ -136,8 +157,14 @@ pub fn signature(encoding: &str) -> Result<Signature, &'static str> {
             }
         }
         // `@?` is a block; `@` alone, or `@"NSString"`, is an ordinary object.
-        if bytes[ty] == b'@' && bytes.get(ty + 1) == Some(&b'?') && !sig.shapes.is_empty() {
-            sig.blocks.push((sig.shapes.len() - 1) as u8);
+        if bytes[ty] == b'@' {
+            let block = bytes.get(ty + 1) == Some(&b'?');
+            match (block, sig.shapes.is_empty()) {
+                (true, false) => sig.blocks.push((sig.shapes.len() - 1) as u8),
+                (true, true) => {}
+                (false, true) => sig.object_return = true,
+                (false, false) => sig.objects.push((sig.shapes.len() - 1) as u8),
+            }
         }
         sig.shapes.push(shape);
     }

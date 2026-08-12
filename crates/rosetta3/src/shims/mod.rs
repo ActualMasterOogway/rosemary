@@ -106,12 +106,19 @@ pub fn dispatch(
         "vfprintf" => printf::vfprintf,
         "vsprintf" => printf::vsprintf,
         "vsnprintf" => printf::vsnprintf,
+        // The wide form, which is how Unreal Engine 3 formats every string it
+        // has. See [`printf::vswprintf`] for why its truncation return is not
+        // `vsnprintf`'s.
+        "vswprintf" => printf::vswprintf,
         "vasprintf" => printf::vasprintf,
         "__vsnprintf_chk" => printf::vsnprintf_chk,
         "sscanf" => sscanf::sscanf,
         // Variadic in its declaration and one argument wide in fact; see
         // [`ioctl`] for why that makes it forwardable when `printf` is not.
         "NSLog" => nslog::nslog,
+        // The other `NSString`-format variadic, and the one a Cocoa game
+        // reports a fatal error through. See [`nslog::run_alert_panel`].
+        "NSRunAlertPanel" => nslog::run_alert_panel,
         "ioctl" => ioctl::ioctl,
         // Variadic in their declarations and one argument wide in fact, decided
         // by a flag word rather than a format string; see [`openat`].
@@ -204,6 +211,7 @@ pub fn is_shimmed(symbol: &str) -> bool {
     matches!(
         name,
         "NSLog"
+            | "NSRunAlertPanel"
             | "printf"
             | "fprintf"
             | "sprintf"
@@ -214,6 +222,7 @@ pub fn is_shimmed(symbol: &str) -> bool {
             | "vfprintf"
             | "vsprintf"
             | "vsnprintf"
+            | "vswprintf"
             | "vasprintf"
             | "__vsnprintf_chk"
             | "sscanf"

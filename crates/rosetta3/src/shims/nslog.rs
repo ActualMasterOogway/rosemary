@@ -66,6 +66,70 @@ pub fn nslog(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory)
     Ok(())
 }
 
+/// Service `NSRunAlertPanel`.
+///
+/// `NSInteger NSRunAlertPanel(NSString *title, NSString *msgFormat,
+/// NSString *defaultButton, NSString *alternateButton, NSString *otherButton,
+/// ...)` — the same two complications as `NSLog` (variadic, `NSString` format)
+/// with the format in the *second* position rather than the first, so five
+/// integer registers are named rather than one.
+///
+/// It is worth having rather than refusing because of *what* calls it: this is
+/// how a Cocoa game reports a fatal error before it exits. Unreal's
+/// `appMsgf`/`appRequestExit` path ends here, and a runtime that cannot service
+/// the call turns "the game told you what was wrong" into "the game stopped".
+/// So the panel is shown — that is the guest's intent — and the text is also
+/// written to `stderr`, which is where whoever is debugging the guest is
+/// looking. The panel is modal, and that is the guest's decision too.
+pub fn run_alert_panel(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    // Five named parameters, and the format is the second. Everything after
+    // `otherButton` is the variadic tail the format consumes.
+    let out = render_format(symbol, ctx, &*mem, ctx.rsi, 5)?.unwrap_or_default();
+    let title = cf_string_bytes(ctx.rdi).unwrap_or_default();
+    eprintln!(
+        "rosetta3: guest alert: {}: {}",
+        String::from_utf8_lossy(&title),
+        String::from_utf8_lossy(&out)
+    );
+
+    let (Some(host), Some(message)) = (dlsym(symbol), escaped_string(&out)) else {
+        // Nothing to show it with, but the text is already out; the guest's
+        // caller sees the default button, which is what dismissing the panel
+        // would have returned.
+        ctx.rax = NS_ALERT_DEFAULT_RETURN;
+        return Ok(());
+    };
+    // SAFETY: `symbol` resolved in an AppKit this process has loaded — the
+    // guest's own window brought it in — and its declaration is the one above.
+    // Called through a *variadic* prototype with no variadic arguments, which
+    // is what the rendered format standing in for the guest's makes correct:
+    // there is nothing left for it to convert. The buttons are the guest's own
+    // `NSString`s, which outlive a modal call it is blocked in.
+    let n = unsafe {
+        let f: unsafe extern "C" fn(u64, u64, u64, u64, u64, ...) -> i64 =
+            core::mem::transmute(host as usize);
+        f(ctx.rdi, message, ctx.rdx, ctx.rcx, ctx.r8)
+    };
+    // Which button the panel came back with is part of the diagnostic: the
+    // guest branches on it, and a program that asks a question before it opens
+    // a window gets `NSAlertAlternateReturn` from an AppKit with no `NSApp` to
+    // run a modal in — no panel is shown, and the answer is "no".
+    eprintln!("rosetta3: guest alert: answered {n}");
+    // `NSInteger` is sixty-four bits wide, so the whole of `rax` carries it
+    // rather than [`super::set_int_return`]'s `int`.
+    ctx.rax = n as u64;
+    Ok(())
+}
+
+/// `NSAlertDefaultReturn`, which is what dismissing a panel with its default
+/// button gives — the answer a guest handles by definition, since that button
+/// is the one it always supplies.
+const NS_ALERT_DEFAULT_RETURN: u64 = 1;
+
 /// Render the `NSString` format at `fmt_obj` against the guest's variadic tail.
 ///
 /// `fixed_int` is how many integer argument registers the *named* parameters

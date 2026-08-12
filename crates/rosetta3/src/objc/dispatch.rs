@@ -734,6 +734,8 @@ fn call_runtime(
         class_return: entry.class_return,
         callbacks: entry.callbacks,
         blocks: &[],
+        objects: &[],
+        object_return: false,
         protocols: entry.protocols,
     };
     let Some(leaves) = entry.struct_return else {
@@ -786,6 +788,22 @@ struct Classes<'a> {
     ///
     /// Empty for the runtime entry points, none of which takes one.
     blocks: &'a [u8],
+    /// Parameter indices holding a plain `id`, from the method's own encoding.
+    ///
+    /// A class is a legal `id` and the encoding does not distinguish the two, so
+    /// these are offered the same substitution `classes` gets — which is a table
+    /// lookup, and therefore a no-op for the objects that are the usual case.
+    /// See [`crate::objc::encoding::Signature::objects`].
+    ///
+    /// Empty for the runtime entry points: each one's class parameters are
+    /// described exactly by [`RUNTIME`], and an `id` there is an object by the
+    /// function's own declaration rather than by an encoding that cannot say.
+    objects: &'a [u8],
+    /// Whether an `id` **return** gets the reverse substitution, for the reason
+    /// `objects` gets the forward one: `[NSThread currentThread].target` hands
+    /// back whatever went in, and a guest comparing it against its own class
+    /// can only compare against the address it has.
+    object_return: bool,
     /// See [`Runtime::protocols`]. Empty for a message send: a protocol reaches
     /// a method as an ordinary `id`-typed argument, and translating one there
     /// would need the encoding to distinguish `@protocol` from `@`, which it
@@ -820,14 +838,14 @@ impl Convert for Classes<'_> {
         if self.protocols.contains(&(index as u8)) {
             return Ok(self.vm.objc_host_protocol(raw));
         }
-        match self.classes.contains(&(index as u8)) {
+        match self.classes.contains(&(index as u8)) || self.objects.contains(&(index as u8)) {
             true => Ok(self.vm.objc_host_class(raw)),
             false => Ok(raw),
         }
     }
 
     fn result(&self, raw: u64) -> u64 {
-        match self.class_return {
+        match self.class_return || self.object_return {
             true => self.vm.objc_guest_class(raw),
             false => raw,
         }
@@ -1011,6 +1029,8 @@ fn send(
         class_return: signature.class_return,
         callbacks: &[],
         blocks: &signature.blocks,
+        objects: &signature.objects,
+        object_return: signature.object_return,
         protocols: &[],
     };
     // Named by the *message* when it fails. `objc_msgSend` is the name of every

@@ -208,6 +208,16 @@ impl dyn GuestMemory + '_ {
         Ok(u64::from_le_bytes(buf))
     }
 
+    /// Read one 32-bit little-endian word — a `wchar_t`, on both sides.
+    pub fn read_u32(&self, va: u64, symbol: &str) -> Result<u32> {
+        let mut buf = [0u8; 4];
+        self.read(va, &mut buf).map_err(|_| AbiError::Memory {
+            symbol: symbol.to_string(),
+            addr: va,
+        })?;
+        Ok(u32::from_le_bytes(buf))
+    }
+
     /// Write one 64-bit little-endian word.
     pub fn write_u64(&mut self, va: u64, value: u64, symbol: &str) -> Result<()> {
         self.write(va, &value.to_le_bytes())

@@ -352,6 +352,12 @@ impl<M: Regions> Program<M> {
         // [`crate::cxxlib::bind_unwinder_to_the_vendored_one`].
         crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory)?;
 
+        // And the same for the C++ ABI: a binary linked against `libstdc++`
+        // names *that* for `__cxa_guard_acquire` and the `type_info` vtables,
+        // which native passthrough answers with the host's. See
+        // [`crate::cxxlib::bind_cxxabi_to_the_vendored_one`].
+        crate::cxxlib::bind_cxxabi_to_the_vendored_one(&mut report, &mut memory)?;
+
         // The root image's `__text` is what the driver lifts. Re-parsing here
         // rather than threading a `MachObject` out of the loader keeps the
         // report the only thing that crosses the boundary.

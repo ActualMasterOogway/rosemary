@@ -249,6 +249,39 @@ fn screen_size_of_display(
     Ok(())
 }
 
+/// `CGEventRef CGEventCreateMouseEvent(CGEventSourceRef source,
+/// CGEventType mouseType, CGPoint mouseCursorPosition,
+/// CGMouseButton mouseButton)`
+///
+/// How a game *warps the cursor* while keeping the click state it already has —
+/// Unreal Engine 3 posts one of these for every mouse-look frame, which is why
+/// it is on the render path rather than in a settings dialog.
+///
+/// The `CGPoint` is the third argument and is what keeps this out of the table,
+/// and its position is the interesting part: it takes the two SSE eightbytes
+/// `xmm0`/`xmm1` and **no integer register**, so `mouseButton` — the fourth
+/// argument — is in `rdx`, the third integer register rather than the fourth.
+fn event_create_mouse(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    _mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let host = host_or_refuse(symbol)?;
+    let point = CgPoint {
+        x: f64::from_bits(ctx.xmm[0][0]),
+        y: f64::from_bits(ctx.xmm[1][0]),
+    };
+    // SAFETY: the symbol [`shim_for`] matched, whose declaration is the one
+    // above, resolved out of a CoreGraphics this process has loaded. `source` is
+    // an opaque handle the guest got from `CGEventSourceCreate` — or null, which
+    // is the documented "no source" and what a game that only warps the cursor
+    // passes.
+    let f: extern "C" fn(u64, u32, CgPoint, u32) -> u64 =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(u64, u32, CgPoint, u32) -> u64>(host) };
+    ctx.rax = f(ctx.rdi, ctx.rsi as u32, point, ctx.rdx as u32);
+    Ok(())
+}
+
 /// `CGPoint`, as both ABIs return one: two floating-point registers.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -322,6 +355,9 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         "CGContextClearRect" => Some(context_clear_rect),
         "CGContextDrawImage" => Some(context_draw_image),
         "CGEventGetLocation" => Some(event_location),
+        // A `CGPoint` **argument** in the middle of three scalars; see
+        // [`event_create_mouse`] for why that moves `mouseButton` a register.
+        "CGEventCreateMouseEvent" => Some(event_create_mouse),
         "CVDisplayLinkGetNominalOutputVideoRefreshPeriod" => Some(display_link_nominal_period),
         _ => None,
     }
