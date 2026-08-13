@@ -2893,11 +2893,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("nextafter", F64, F64, F64),
     sig!("nl_langinfo", P, I32),
     sig!("nl_langinfo_l", P, I32, P),
-    // `open` and `openat` are treated specially despite the fact that they're variadic functions.
-    // They have a predictable, stable ABI where the ellipsis is just for convenience and
-    // there is only one extra param.
-    sig!("open", I32, P, I32, I32),
-    sig!("openat", I32, I32, P, I32, I32),
+    vsig!("open", I32, P, I32),
+    vsig!("openat", I32, I32, P, I32),
     sig!("opendir", P, P),
     sig!("openlog", V, P, I32, I32),
     sig!("pathconf", I64, P, I32),
