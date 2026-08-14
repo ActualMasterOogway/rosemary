@@ -65,6 +65,8 @@ use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{AbiError, GuestMemory, Result};
 
+use super::host::host_or_refuse;
+
 /// `CGRect`, as AAPCS64 returns one.
 ///
 /// Four `double`s and nothing else, which is what makes it a homogeneous float
@@ -352,14 +354,6 @@ pub(crate) struct CgPoint {
     pub(crate) y: f64,
 }
 
-/// The host's address for one of this module's names, or the refusal that says
-/// which one was missing.
-pub(crate) fn host_or_refuse(symbol: &str) -> Result<u64> {
-    crate::dyld::host_symbol(symbol.strip_prefix('_').unwrap_or(symbol)).ok_or(AbiError::NoShim {
-        symbol: symbol.to_string(),
-    })
-}
-
 /// `CVTime`, as both ABIs return one: two integer registers.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -379,11 +373,7 @@ fn display_link_nominal_period(
     ctx: &mut RegisterContext,
     _mem: &mut dyn GuestMemory,
 ) -> Result<()> {
-    let Some(host) = crate::dyld::host_symbol(symbol.strip_prefix('_').unwrap_or(symbol)) else {
-        return Err(AbiError::NoShim {
-            symbol: symbol.to_string(),
-        });
-    };
+    let host = host_or_refuse(symbol)?;
     // SAFETY: the symbol [`shim_for`] matched, which is
     // `CVTime (*)(CVDisplayLinkRef)`, resolved out of a CoreVideo this process
     // has loaded. The argument is an opaque handle the guest got from

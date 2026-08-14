@@ -18,7 +18,8 @@
 
 use microlift::arch::x86_64::context::RegisterContext;
 
-use super::coregraphics::{CgPoint, CgRect, host_or_refuse, rect_argument};
+use super::coregraphics::{CgPoint, CgRect, rect_argument};
+use super::host::host_or_refuse;
 use crate::abi::{GuestMemory, Result};
 
 /// `BOOL NSMouseInRect(NSPoint aPoint, NSRect aRect, BOOL isFlipped)`

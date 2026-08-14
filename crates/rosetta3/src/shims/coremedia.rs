@@ -69,7 +69,8 @@ use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{Callbacks, GuestMemory, Result};
 
-use super::coregraphics::{CgPoint, host_or_refuse};
+use super::coregraphics::CgPoint;
+use super::host::host_or_refuse;
 
 /// `CMTime`, laid out the way both architectures lay it out.
 ///

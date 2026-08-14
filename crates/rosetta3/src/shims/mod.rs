@@ -52,6 +52,7 @@ pub mod component;
 pub mod coregraphics;
 pub mod coremedia;
 pub mod curl;
+mod host;
 pub mod intdiv;
 pub mod ioctl;
 pub mod iokit;

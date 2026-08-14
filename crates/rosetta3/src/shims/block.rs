@@ -44,9 +44,10 @@ use core::ffi::c_void;
 
 use microlift::arch::x86_64::context::RegisterContext;
 
-use crate::abi::{AbiError, Callbacks, GuestMemory, Result};
+use crate::abi::{Callbacks, GuestMemory, Result};
 
 use super::bad_pointer;
+use super::host::host_or_refuse;
 
 /// Byte offset of `invoke` in a `Block_layout`: `isa`, `flags`, `reserved`.
 const INVOKE_OFFSET: u64 = 16;
@@ -344,13 +345,6 @@ fn dispatch_data_create(
     };
     ctx.rax = f(ctx.rdi as *const c_void, ctx.rsi, ctx.rdx, destructor);
     Ok(())
-}
-
-/// The host's address for one of this module's names.
-fn host_or_refuse(symbol: &str) -> Result<u64> {
-    crate::dyld::host_symbol(symbol.strip_prefix('_').unwrap_or(symbol)).ok_or(AbiError::NoShim {
-        symbol: symbol.to_string(),
-    })
 }
 
 /// One of this module's implementations, in the shape [`crate::shims`] wants —

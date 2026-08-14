@@ -27,7 +27,9 @@
 
 use microlift::arch::x86_64::context::RegisterContext;
 
-use crate::abi::{AbiError, GuestMemory, Result};
+use crate::abi::{GuestMemory, Result};
+
+use super::host::host_or_refuse;
 
 /// Sixteen bytes as the two ABIs carry them: a pair of doublewords.
 ///
@@ -83,13 +85,6 @@ fn create_from_uuid_bytes(
         },
     );
     Ok(())
-}
-
-/// The host's address for one of this module's names.
-fn host_or_refuse(symbol: &str) -> Result<u64> {
-    crate::dyld::host_symbol(symbol.strip_prefix('_').unwrap_or(symbol)).ok_or(AbiError::NoShim {
-        symbol: symbol.to_string(),
-    })
 }
 
 pub type Shim = fn(&str, &mut RegisterContext, &mut dyn GuestMemory) -> Result<()>;
