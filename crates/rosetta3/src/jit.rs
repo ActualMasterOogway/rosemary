@@ -267,11 +267,10 @@ fn host_features() -> Vec<(&'static str, &'static str)> {
     {
         use std::arch::is_aarch64_feature_detected as has;
         vec![
-            // FEAT_LSE: the atomics a guest `lock`-prefixed instruction lowers
-            // to, as single instructions instead of a load-exclusive loop.
             ("has_lse", value(has!("lse"))),
             ("has_fp16", value(has!("fp16"))),
             ("has_dotprod", value(has!("dotprod"))),
+            ("has_i8mm", value(has!("i8mm"))),
         ]
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
