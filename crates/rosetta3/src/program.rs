@@ -530,7 +530,15 @@ impl<M: Regions> Program<M> {
                     Atomic128Mode::Exit
                 }
             }
-            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+            #[cfg(target_arch = "aarch64")]
+            {
+                if std::arch::is_aarch64_feature_detected!("lse") {
+                    Atomic128Mode::Native
+                } else {
+                    Atomic128Mode::Exit
+                }
+            }
+            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
             {
                 Atomic128Mode::Exit
             }

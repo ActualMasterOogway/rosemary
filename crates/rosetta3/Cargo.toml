@@ -30,13 +30,13 @@ microlift = { path = "../../../microlift", features = ["disasm"] }
 # argument moves is what keeps this crate free of hand-written arm64. Same
 # version as `microlift`'s, deliberately — the `Function` built here is handed
 # to `microlift::backend::CraneliftBackend`, so the two must be one crate.
-cranelift-codegen = "0.134.3"
-cranelift-frontend = "0.134.3"
+cranelift-codegen = { git = "https://github.com/microlift/wasmtime", branch = "aarch64_atomiccas_128", version = "0.136.0-dev" }
+cranelift-frontend = {git = "https://github.com/microlift/wasmtime", branch = "aarch64_atomiccas_128", version = "0.136.0-dev" }
 # Only for the host's `TargetFrontendConfig` (see `jit::frontend_config`), which
 # the frontend needs to describe the machine a `Function` is being built for.
 # The same crate microlift builds its ISA from, so the two agree by
 # construction.
-cranelift-native = "0.134.3"
+cranelift-native = { git = "https://github.com/microlift/wasmtime", branch = "aarch64_atomiccas_128", version = "0.136.0-dev" }
 
 [dev-dependencies]
 # The ABI tests call real host libSystem functions through the marshaller, and
