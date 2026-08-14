@@ -278,10 +278,68 @@ pub struct DynamicImports;
 
 impl ImportRegistry for DynamicImports {
     fn lookup(&self, va: u64) -> Option<ImportKind> {
+        // The synthetic address a [`crate::trampoline`] jumps to, which is the
+        // one kind of import that exists only because this runtime made it.
+        // Asked first because it is the cheapest question — two compares against
+        // one reservation — and because nothing else can answer it.
+        if let Some(kind) = crate::trampoline::import_kind(va) {
+            return Some(kind);
+        }
         // Consulted only for addresses absent from `LifterConfig::imports`, so
         // this never has to answer for the root program's own sites.
-        crate::dyld::import_at(va).map(|_| ImportKind::Bridge(import_bridge()))
+        let site = crate::dyld::import_at(va)?;
+        // A loaded image's imports were bridged wholesale, which is correct and
+        // leaves the best case on the table: an ordinary `strlen` imported by a
+        // `dlopen`ed dylib has exactly the signature that makes a fast import
+        // legal, and paying a bridge call plus a table lookup for it is the same
+        // cost this module was written to remove from the *root* program. The
+        // question is the one [`crate::ImportPolicy::promotion_for`] asks, and
+        // the answer has to be the same for a plugin as for the executable that
+        // loaded it.
+        Some(fast_import(site).unwrap_or_else(|| ImportKind::Bridge(import_bridge())))
     }
+}
+
+/// `site` as an inline call, if it is one an inline call can express.
+///
+/// The three exclusions are [`crate::ImportPolicy::promotion_for`]'s, and the
+/// fourth — an import that resolved into another **guest** image — is
+/// [`crate::Program::lifter_config`]'s: guest pages are never executable, so
+/// baking a native call to one faults on instruction fetch at a call site that
+/// may not be reached for hours.
+fn fast_import(site: &crate::program::ImportSite) -> Option<ImportKind> {
+    use microlift::core::FastImport;
+
+    if site.resolved == 0 || crate::trace::watching(&site.symbol) {
+        return None;
+    }
+    if crate::abi::classify(site.tag, &site.symbol) != crate::abi::Classification::Fast {
+        return None;
+    }
+    // Guest-resolved is the exclusion that cannot be skipped, and it is not
+    // hypothetical: a `dlopen`ed dylib binds against the executable that loaded
+    // it, so an import of a loaded image routinely resolves into *guest* memory
+    // — DELTARUNE's `libYoYoGamepad.dylib` takes ninety of `GMGamePad`'s methods
+    // straight out of `Mac_Runner`. Most of those have no signature and are
+    // excluded above, and the ones that do are exactly the dangerous case: a
+    // program that defines its own `malloc` (Roblox does) would get a native
+    // call baked into memory mapped `r--`.
+    //
+    // Asked of the running VM because only a `Program` knows where the root
+    // image landed. There is always one while lifting — lifting happens inside
+    // the run loop — and a `None` here declines to promote, which is the
+    // behaviour every one of these imports had before.
+    let vm = crate::thunk::current()?;
+    if vm.program.is_guest_address(site.resolved) {
+        return None;
+    }
+    let crate::abi::Lookup::Known(abi) = crate::abi::table::lookup(site.tag, &site.symbol) else {
+        return None;
+    };
+    Some(ImportKind::Fast(FastImport {
+        symbol: crate::abi::dynamic_symbol(abi, site.resolved),
+        abi: crate::abi::guest_call_abi(),
+    }))
 }
 
 /// The registry, as [`microlift::core::LifterConfig`] wants it.

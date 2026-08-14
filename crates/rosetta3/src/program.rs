@@ -730,7 +730,9 @@ impl<M: Regions> Program<M> {
             return crate::dyld::lift_region(va)
                 // Or code the guest *wrote*, which is in no image at all — see
                 // [`crate::shims::vmmap`].
-                .or_else(|| lift_generated(va));
+                .or_else(|| lift_generated(va))
+                // Or code *this runtime* wrote, which is in no image either.
+                .or_else(|| crate::trampoline::lift_region(va));
         };
         // A loaded image is not memory the guest writes, so the Mono call rule
         // does not apply to it. See [`crate::region`].
@@ -778,6 +780,9 @@ impl<M: Regions> Program<M> {
             // all. See [`crate::shims::vmmap`] for why the set of such addresses
             // is exactly the set the guest asked to be executable.
             || crate::shims::vmmap::contains(va)
+            // Or one of this runtime's own five-byte stubs, which is guest code
+            // by construction: it exists to be lifted. See [`crate::trampoline`].
+            || crate::trampoline::contains(va)
     }
 
     /// `va` as `image+offset`, in the image's *own* address space.
@@ -801,7 +806,43 @@ impl<M: Regions> Program<M> {
                 }
             }
         }
-        crate::dyld::locate(va)
+        crate::dyld::locate(va).or_else(|| crate::trampoline::locate(va))
+    }
+
+    /// Point this program's import slots at [trampolines](crate::trampoline).
+    ///
+    /// The **relocation** moves and the registration does not: a call site
+    /// microlift can see still becomes an inline call to the host function, and
+    /// what changes is the value a guest reads when it loads the pointer itself
+    /// and calls through a register. See [`crate::trampoline`] for why that is
+    /// the whole optimisation.
+    ///
+    /// Not done in [`Program::load_into`], and the reason is
+    /// [`ImportPolicy::AlwaysSlow`]: a trampoline's `jmp` reaches a synthetic
+    /// import address that only the [import
+    /// registry](crate::bridge::DynamicImports) can answer for, and the slow
+    /// policy deliberately installs no registry. Substituting a slot under it
+    /// would send the guest to an address nothing describes. So the caller that
+    /// knows the policy performs this — see [`crate::Vm::with_policy`] — and the
+    /// baseline stays a baseline.
+    ///
+    /// Returns how many slots were substituted.
+    pub fn install_trampolines(&mut self) -> usize {
+        // Collected first, because deciding needs `&self` (for
+        // `is_guest_address`) and writing needs `&mut self.memory`. A program
+        // has thousands of imports and this runs once.
+        let eligible: Vec<(u64, ImportSite)> = self
+            .imports
+            .iter()
+            .filter(|(_, site)| !site.is_stub && !self.is_guest_address(site.resolved))
+            .map(|(&va, site)| (va, site.clone()))
+            .collect();
+        crate::trampoline::install(
+            eligible.iter().map(|(va, site)| (*va, site)),
+            // Already filtered above, where the borrow was available.
+            &|_| false,
+            &mut self.memory,
+        )
     }
 
     /// The extent of `__text`, which is what counts as "inside the guest" when
@@ -838,7 +879,15 @@ impl<M: Regions> Program<M> {
     /// stops the recompiler decoding the trampoline and following it into the
     /// host. See [`crate::dyld`].
     pub fn import_at(&self, va: u64) -> Option<&ImportSite> {
-        self.imports.get(&va).or_else(|| crate::dyld::import_at(va))
+        self.imports
+            .get(&va)
+            .or_else(|| crate::dyld::import_at(va))
+            // And the synthetic addresses a trampoline jumps to. Nothing on the
+            // fast path arrives here — a registered fast import is inlined and
+            // never reaches the run loop — but if microlift ever declines to
+            // build one, the exit it falls back to should name the symbol rather
+            // than an address. See [`crate::trampoline::import_at`].
+            .or_else(|| crate::trampoline::import_at(va))
     }
 
     /// What an imported symbol resolved to, by name.

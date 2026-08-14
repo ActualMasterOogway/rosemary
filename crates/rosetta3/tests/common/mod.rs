@@ -1241,6 +1241,70 @@ pub fn tailcall_fixture() -> Option<String> {
         .clone()
 }
 
+/// A guest that calls host functions through **pointers** rather than at call
+/// sites, which is the shape [`rosetta3::trampoline`] exists for.
+///
+/// Every call here is one microlift cannot see: the value is loaded out of an
+/// import slot or handed back by `dlsym`, so nothing at the call site names a
+/// symbol. Each of the three answers a different thing:
+///
+/// - **The slot**, which is the value the loader wrote and this runtime
+///   substitutes.
+/// - **`dlsym` against the host's own namespace**, and the *identity* of the two
+///   answers. A program that resolves a symbol twice by two routes must get one
+///   pointer, and a substitution that produced a fresh stub per route would be
+///   observably wrong here rather than three months later.
+/// - **Seven arguments**, so a stack argument really travels. This is the whole
+///   correctness argument for encoding the stub as a tail `jmp` — the seventh
+///   integer argument of a SysV call is on the stack, and a stub that pushed a
+///   return address under it would shift every one of them by a slot. It is the
+///   same failure `TAILCALL_C` was written for, reached from the other side.
+pub const TRAMPOLINE_C: &str = r#"
+#include <arpa/inet.h>
+#include <dlfcn.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+
+/* `volatile`, so the call really goes through the pointer and clang does not
+   turn it back into a call site — which would test the path that already
+   worked. */
+static size_t (*volatile len_slot)(const char *) = strlen;
+static int (*volatile gni_slot)(const struct sockaddr *, socklen_t, char *,
+                                socklen_t, char *, socklen_t, int) = getnameinfo;
+
+int main(void) {
+    printf("slot len=%zu\n", len_slot("abcdef"));
+
+    size_t (*len_dl)(const char *) =
+        (size_t (*)(const char *))dlsym(RTLD_DEFAULT, "strlen");
+    printf("dlsym len=%zu same=%d\n", len_dl ? len_dl("abcdefgh") : 0,
+           (void *)len_dl == (void *)len_slot);
+
+    char host[64], serv[32];
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_len = sizeof a;
+    a.sin_family = AF_INET;
+    a.sin_port = htons(80);
+    a.sin_addr.s_addr = htonl(0x7f000001);
+    int rc = gni_slot((struct sockaddr *)&a, sizeof a, host, sizeof host,
+                      serv, sizeof serv, NI_NUMERICHOST | NI_NUMERICSERV);
+    printf("gni rc=%d host=%s serv=%s\n", rc, host, serv);
+    return 0;
+}
+"#;
+
+/// Build [`TRAMPOLINE_C`], or `None` if this host cannot.
+pub fn trampoline_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("trampoline", TRAMPOLINE_C, &[]))
+        .clone()
+}
+
 /// A guest that shares a 128-bit location between threads, as Unity does.
 ///
 /// `__sync_bool_compare_and_swap` on a `__int128` with `-mcx16` compiles to

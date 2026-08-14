@@ -711,11 +711,31 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     // that started it all. See [`collect_imports`] for why the distinction is
     // load-bearing.
     let vm = crate::thunk::current();
-    let (imports, imports_by_target) = collect_imports(&report, |va| {
+    let is_guest = |va: u64| {
         memory.region_at(va).is_some()
             || contains(va)
             || vm.is_some_and(|vm| vm.program.is_guest_address(va))
-    });
+    };
+    let (imports, imports_by_target) = collect_imports(&report, is_guest);
+
+    // The same substitution the program's own slots get — see
+    // [`crate::trampoline`] — and a `dlopen`ed plugin is where it pays most: a
+    // program dynamic enough to load one is usually dynamic enough to call
+    // through the pointers rather than the stubs. Done before the image is
+    // published, so no lift can have read a slot yet.
+    //
+    // Filtered before the write, because deciding reads `memory` and writing
+    // borrows it: the same split [`crate::Program::install_trampolines`] makes.
+    let eligible: Vec<(u64, ImportSite)> = imports
+        .iter()
+        .filter(|(_, site)| !site.is_stub && !is_guest(site.resolved))
+        .map(|(&va, site)| (va, site.clone()))
+        .collect();
+    crate::trampoline::install(
+        eligible.iter().map(|(va, site)| (*va, site)),
+        &|_| false,
+        &mut memory,
+    );
 
     // The space is leaked first so its regions really are `'static`; the image
     // then holds both the borrow and the thing borrowed from, which is legal
@@ -1190,7 +1210,7 @@ fn native_handle(handle: u64) -> Option<String> {
 fn remember_native_symbol(addr: u64, name: &str, library: Option<String>) -> u64 {
     let mut map = NATIVE_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner());
     let before = map.len();
-    map.entry(addr).or_insert_with(|| {
+    let site = *map.entry(addr).or_insert_with(|| {
         Box::leak(Box::new(ImportSite {
             // The Mach-O spelling, because that is what the signature table is
             // keyed by — `dlsym` takes the C identifier and drops the underscore.
@@ -1209,7 +1229,21 @@ fn remember_native_symbol(addr: u64, name: &str, library: Option<String>) -> u64
         NATIVE_SYMBOL_VIEW.store(Box::leak(Box::new(view)), Ordering::Release);
         NATIVE_SYMBOL_COUNT.store(map.len(), Ordering::Release);
     }
-    addr
+    drop(map);
+
+    // And the whole reason this passthrough is worth optimising at all: a
+    // program that resolves its host entry points with `dlsym` rather than
+    // importing them misses the fast-import path entirely, because there is no
+    // call site for microlift to match — the address only exists at run time.
+    // Roblox and Starbound are both built that way, and it is where most of
+    // their CPU time went.
+    //
+    // Handing back a trampoline puts them back on it: the guest calls a five-byte
+    // guest stub whose one instruction is a direct tail jump into a registered
+    // fast import. See [`crate::trampoline`], including why a symbol with no
+    // placeable signature — every data symbol, and every variadic — keeps the
+    // host address it has always been given.
+    crate::trampoline::for_site(site).unwrap_or(addr)
 }
 
 /// The published, immutable half of [`NATIVE_SYMBOLS`]: a leaked, sorted slice

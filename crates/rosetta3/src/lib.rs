@@ -144,6 +144,7 @@ pub mod thread;
 pub mod thunk;
 pub mod tls;
 pub mod trace;
+pub mod trampoline;
 pub mod unwind;
 pub mod vm;
 

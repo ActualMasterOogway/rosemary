@@ -173,6 +173,14 @@ pub fn report() {
         REFUSED.load(Relaxed),
         TAIL_EXITS.load(Relaxed),
     );
+    // Whether the import stubs did anything, which is three questions and not
+    // one. See [`crate::trampoline::counts`].
+    if let Some((made, substituted, reached)) = crate::trampoline::counts() {
+        eprintln!(
+            "rosetta3: stats  {made} trampoline(s), {substituted} slot(s) substituted, \
+             {reached} reached"
+        );
+    }
     if let Some((small, large)) = PAGES.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         eprintln!(
             "rosetta3: stats  footprint {} page(s) of 4 KiB, {} of 16 KiB \

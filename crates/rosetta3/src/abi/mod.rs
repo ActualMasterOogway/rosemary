@@ -62,7 +62,23 @@ pub use table::{FunctionAbi, Lookup};
 /// SysV AMD64 — and not of the machine this runs on. Named once here so the
 /// lifter registration and the slow-path marshaller cannot disagree about it.
 pub fn guest_call_abi() -> CallAbi {
-    CallAbi::sysv_amd64()
+    guest_call_abi_ref().clone()
+}
+
+/// [`guest_call_abi`] without building one.
+///
+/// A [`CallAbi`] owns two `Vec`s — six integer argument registers and eight
+/// vector ones — so constructing it is two heap allocations, and
+/// [`marshal::call_types`] did it *per intercepted call* purely to ask where
+/// the arguments are. That is a fixed cost on the path this runtime spends most
+/// of its time on when a program calls the host through pointers, and the value
+/// is a constant: the guest binary's convention does not change while it runs.
+///
+/// [`guest_call_abi`] stays, because [`microlift`]'s registration APIs take one
+/// by value and a clone at lift time is nothing.
+pub fn guest_call_abi_ref() -> &'static CallAbi {
+    static ABI: std::sync::OnceLock<CallAbi> = std::sync::OnceLock::new();
+    ABI.get_or_init(CallAbi::sysv_amd64)
 }
 
 /// Anything that stops an intercepted call from being made.

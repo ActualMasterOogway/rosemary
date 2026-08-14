@@ -107,7 +107,7 @@ use microlift::arch::x86_64::context::RegisterContext;
 use microlift::core::abi::{ArgLocation, GuestReg};
 
 use super::aggregate::{self, Eightbyte, GuestClass, HostClass, Shape};
-use super::{AbiError, ArgType, FunctionAbi, GuestMemory, Result, guest_call_abi};
+use super::{AbiError, ArgType, FunctionAbi, GuestMemory, Result, guest_call_abi_ref};
 
 /// Host argument registers of each class, per AAPCS64.
 const MAX_INT_ARGS: usize = 8;
@@ -181,7 +181,7 @@ pub fn is_marshallable(abi: &FunctionAbi) -> bool {
     if abi.variadic {
         return false;
     }
-    let Some(placed) = guest_call_abi().place_args(abi.types) else {
+    let Some(placed) = guest_call_abi_ref().place_args(abi.types) else {
         return false;
     };
     // Counted by argument *class*, not by where the guest put it: SysV has only
@@ -365,7 +365,7 @@ pub fn call_types(
     mem: &dyn GuestMemory,
     convert: &dyn Convert,
 ) -> Result<()> {
-    let guest = guest_call_abi();
+    let guest = guest_call_abi_ref();
     let placed = guest
         .place_args(types)
         .ok_or_else(|| AbiError::Unmarshallable {

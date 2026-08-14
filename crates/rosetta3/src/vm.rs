@@ -635,6 +635,21 @@ impl Vm {
         args: &[String],
         policy: crate::ImportPolicy,
     ) -> Result<Self, VmError> {
+        let mut program = program;
+        // Before anything reads the program's memory, and only under the fast
+        // policy: an import slot the guest *loads* should name a trampoline
+        // rather than the host function, so that calling through the pointer
+        // costs an inline call instead of a symbol lookup and a marshalling
+        // pass. See [`crate::trampoline`] — including why the slow baseline must
+        // not have this done to it.
+        match policy {
+            crate::ImportPolicy::AlwaysSlow => crate::trampoline::disarm(),
+            _ => {
+                program.install_trampolines();
+            }
+        }
+        let program = program;
+
         let stack = GuestStack::new(crate::stack::DEFAULT_STACK, exe_path, args)?;
 
         let mut ranges: Vec<Range<u64>> = program
@@ -1442,6 +1457,29 @@ impl Vm {
         // answer is the signature the import already has, and a host address
         // nothing imported is still `UnknownIndirectCall`.
         if let Some(site) = self.program.import_by_target(callee) {
+            // A host pointer that reached the guest by neither of the routes
+            // [`crate::trampoline`] substitutes — not out of a slot, not out of
+            // `dlsym`, but returned by some host function the guest then called
+            // through. Sending it through the trampoline puts it back on the
+            // path everything else takes: an inline call with the arguments
+            // where the guest's own ABI left them, instead of the per-call
+            // symbol lookup and marshalling below.
+            //
+            // Deliberately not applied to the two branches above. A registered
+            // slot or stub address is already a fast import wherever it can be,
+            // and a shim — `objc_msgSend` reached as `callq *%r12` is the one
+            // that matters — must never become a direct call to the host
+            // function it exists to stand in for. `for_site` refuses a shimmed
+            // symbol, so that is a property rather than an ordering.
+            if let Some(stub) = crate::trampoline::for_site(site) {
+                let rsp = ctx.rsp - 8;
+                self.view()
+                    .write(rsp, &resume.to_le_bytes())
+                    .map_err(|source| VmError::Stack { source })?;
+                ctx.rsp = rsp;
+                ctx.rip = stub;
+                return Ok(true);
+            }
             // `service_site_as`, not `call_site`: the flags it sets describe
             // *this* call, and a shim that stands in for the transfer itself
             // reads them. `objc_msgSend` reached as `callq *%r12` — which is how
@@ -1779,6 +1817,16 @@ impl crate::abi::Callbacks for Vm {
     fn substitute(&self, symbol: &str, va: u64) -> Result<u64, AbiError> {
         if va == 0 {
             return Ok(0);
+        }
+        // One of this runtime's own import stubs, which the guest is holding
+        // because a slot it loaded was substituted for one. The host wants the
+        // function that stub stands for: unwrapping restores the pointer the
+        // guest would have passed before [`crate::trampoline`] existed, which is
+        // both faster than a thunk around a stub around a call and the only
+        // answer a host that compares pointers can accept. Asked before the
+        // guest-address test, which a trampoline would otherwise pass.
+        if let Some(host) = crate::trampoline::host_behind(va) {
+            return Ok(host);
         }
         // Not guest code: a host pointer the guest is handing back, which the
         // host may compare against one it gave out. Wrapping it would be both
