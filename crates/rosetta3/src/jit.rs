@@ -41,6 +41,9 @@ use microlift::backend::CraneliftBackend;
 pub const OPT_ENV: &str = "ROSETTA3_JIT_OPT";
 pub const VERIFY_ENV: &str = "ROSETTA3_JIT_VERIFY";
 pub const DEAD_FLAGS_ENV: &str = "ROSETTA3_DEAD_FLAGS";
+/// Turns [`block_linking`] off. Named for what setting it does, since the
+/// feature itself is on by default.
+pub const NO_BLOCK_LINK_ENV: &str = "ROSETTA3_NO_BLOCK_LINK";
 
 /// What to ask of the JIT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -146,8 +149,8 @@ impl OptLevel {
             .expect("failed to turn off table access pass");
         match self {
             OptLevel::Speed | OptLevel::All => {
-                // builder.set("enable_alias_analysis", "true").expect("couldn't enable alias analysis");
-                // builder.set("regalloc_algorithm", "backtracking").expect("couldn't enable backtracking regalloc");
+                builder.set("enable_alias_analysis", "true").expect("couldn't enable alias analysis");
+                builder.set("regalloc_algorithm", "backtracking").expect("couldn't enable backtracking regalloc");
             }
             OptLevel::None => {}
         };
@@ -386,6 +389,37 @@ pub fn eliminate_dead_flags() -> bool {
             _ => {
                 eprintln!("rosetta3: {DEAD_FLAGS_ENV}={value:?} is not a boolean; using false");
                 false
+            }
+        },
+    })
+}
+
+/// Whether a translated region may resolve its own successor rather than
+/// returning to the run loop for it — microlift's `LifterConfig::block_link`.
+///
+/// **On by default**, unlike the two knobs above, because it is the answer to
+/// the largest single item in this runtime's profile rather than an experiment:
+/// fifteen million region entries a second, three quarters of which are a `ret`
+/// or a call whose entire servicing was "enter what is at `rip`". See
+/// `docs/HOTSPOTS.md`.
+///
+/// `ROSETTA3_NO_BLOCK_LINK=1` turns it off, and that is what it is for: the
+/// linked and unlinked runs of the same program must agree on everything except
+/// the number of entries that reached the run loop, and a claim like that is
+/// only worth making if it can be run both ways. It also makes bisecting a
+/// misbehaving program against the mechanism a variable rather than a rebuild.
+pub fn block_linking() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| match std::env::var(NO_BLOCK_LINK_ENV) {
+        Err(_) => true,
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => false,
+            "0" | "false" | "no" | "off" | "" => true,
+            _ => {
+                eprintln!(
+                    "rosetta3: {NO_BLOCK_LINK_ENV}={value:?} is not a boolean; linking stays on"
+                );
+                true
             }
         },
     })

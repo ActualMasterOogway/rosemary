@@ -86,13 +86,14 @@
 //! boundary: it holds `Cell`s and a `RefCell`, and sharing it would be a data
 //! race dressed up as a lookup.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, RefCell, UnsafeCell};
 use std::ffi::c_void;
 use std::ops::Range;
 use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use microlift::arch::x86_64::context::RegisterContext;
+use microlift::core::link::{BlockLinkConfig, BlockLinkEntry};
 
 use crate::stack::GuestStack;
 use crate::vm::VmError;
@@ -465,10 +466,21 @@ impl ThreadState {
     /// The guest stack pointer as of the last thing that moved it.
     ///
     /// For [`crate::fault`], which asks on a thread that is about to die and
-    /// wants the answer without a borrow it could not take: the field is a
-    /// `Cell` on the thread's own state, and the reader is that thread.
+    /// wants the answer without a borrow it could not take: both sources below
+    /// are plain reads of memory this thread owns, and the reader is that
+    /// thread.
+    ///
+    /// The **live context** is preferred, and that is not a refinement: every
+    /// region exit syncs `rsp` into it, while [`rsp`](Self::rsp) is set by the
+    /// run loop — and since regions link to each other, a whole chain of exits
+    /// can happen without the run loop seeing one. The `Cell` is the answer only
+    /// when there is no live context to ask, which is a thread that is not
+    /// inside guest code at all.
     pub fn live_rsp(&self) -> u64 {
-        self.rsp.get()
+        match self.published.context() {
+            Some(ctx) => ctx.rsp,
+            None => self.rsp.get(),
+        }
     }
 }
 
@@ -513,8 +525,43 @@ impl ThreadState {
 /// — the thing that used to happen every time. Anything cleverer would be
 /// paying for a hit rate that is already in the high nineties, on the path
 /// where nothing may be paid for.
+///
+/// ## The same window, readable by compiled code
+///
+/// [`links`](Self::links) is that map again in a second form: one
+/// [`BlockLinkEntry`] per slot, holding the same translation's *code address*
+/// rather than an `Arc` to it, laid out the way microlift's emitted probe reads
+/// it. The two are written together by [`put`](Self::put) and are the same
+/// answer — which is what makes the `Arc` in a slot the thing that keeps the
+/// code address in the row beside it mapped.
+///
+/// It exists because the run loop's lookup, cheap as it is, is still a `RefCell`
+/// borrow, an `Arc` clone and a return to Rust, per region entry, fifteen
+/// million times a second. Translated code can answer the same question in eight
+/// instructions without leaving. See [`microlift::core::link`] and
+/// `docs/HOTSPOTS.md`.
 pub(crate) struct CodeWindow {
     slots: RefCell<Box<[Option<(u64, std::sync::Arc<crate::cache::Translation>)>]>>,
+    /// The rows lifted code probes, one per [`slots`](Self::slots) index.
+    ///
+    /// An `UnsafeCell` rather than a `RefCell` because the readers are not Rust:
+    /// the address of this array is published in `ctx.link_table` and read by
+    /// compiled guest code, which no borrow flag can be checked against. The
+    /// discipline that makes it sound is stated once here —
+    ///
+    /// - **One thread.** A `CodeWindow` belongs to a [`ThreadState`], which is
+    ///   this thread's alone; nothing else reads or writes these rows.
+    /// - **Never while guest code runs.** The only writer is [`put`](Self::put),
+    ///   which the run loop calls between region entries. A nested entry (a host
+    ///   callback re-entering the guest) can write rows while an *outer* frame
+    ///   is suspended inside a region — but that frame is stopped in a shim, not
+    ///   executing the probe, and it re-reads the table when it resumes.
+    /// - **A row is never dangling.** It is replaced only together with the
+    ///   `Arc` in the same slot, and a replaced translation is retired rather
+    ///   than dropped ([`crate::cache::CodeCache`]).
+    /// - **A stale row is a correct row.** Same argument as the window's own:
+    ///   two translations covering an address are interchangeable.
+    links: UnsafeCell<Box<[BlockLinkEntry]>>,
 }
 
 /// How many PCs one thread remembers. A power of two, so the index is a mask.
@@ -523,10 +570,18 @@ pub(crate) struct CodeWindow {
 /// set that Starbound measures in the low thousands of regions.
 const WINDOW: usize = 8192;
 
+/// The table geometry, shared with the lifter so that the slot lifted code
+/// computes and the slot [`CodeWindow::put`] writes are the same arithmetic
+/// rather than two copies of it.
+pub fn link_config() -> BlockLinkConfig {
+    BlockLinkConfig::new(WINDOW as u32)
+}
+
 impl CodeWindow {
     fn new() -> Self {
         CodeWindow {
             slots: RefCell::new(vec![None; WINDOW].into_boxed_slice()),
+            links: UnsafeCell::new(vec![BlockLinkEntry::default(); WINDOW].into_boxed_slice()),
         }
     }
 
@@ -535,8 +590,23 @@ impl CodeWindow {
     /// The low four bits are dropped before masking: guest functions are
     /// aligned, so those bits are the least distinguishing ones an address has,
     /// and using them would leave most of the table empty.
+    ///
+    /// Deferred to [`link_config`] so that this and the shift-and-mask microlift
+    /// bakes into every region cannot drift apart: the link rows and the `Arc`s
+    /// share an index, and an index they disagreed on would be a row published
+    /// where nothing keeps its code mapped.
     fn slot(pc: u64) -> usize {
-        (pc >> 4) as usize & (WINDOW - 1)
+        link_config().slot(pc)
+    }
+
+    /// The address of the block-link table for this thread, as `ctx.link_table`
+    /// wants it.
+    pub(crate) fn link_table(&self) -> *mut BlockLinkEntry {
+        // SAFETY: taking the address of the allocation, not reading it. The
+        // `Box` is owned by this `CodeWindow` and never reallocated, so the
+        // address is stable for the life of the thread — which is what lets it
+        // be handed to compiled code at all.
+        unsafe { (*self.links.get()).as_mut_ptr() }
     }
 
     /// The translation this thread last entered at `pc`, if it still holds one.
@@ -558,6 +628,19 @@ impl CodeWindow {
         // a cache and skipping it costs nothing.
         if let Ok(mut slots) = self.slots.try_borrow_mut() {
             slots[slot] = Some((pc, std::sync::Arc::clone(translation)));
+            // The link row goes in with the `Arc`, and only with it: the
+            // reference held here is what keeps the code address in the row
+            // mapped, so a row published without one — or left behind when one
+            // is replaced — is the one way this could name freed pages. The
+            // borrow above is also what serialises this against a nested run
+            // loop writing the same slot.
+            //
+            // SAFETY: the only writer, on the thread that owns this window, at a
+            // point where this thread is in the run loop rather than inside a
+            // region. See the field's own note.
+            unsafe {
+                (*self.links.get())[slot] = translation.link_row(pc);
+            }
         }
     }
 }

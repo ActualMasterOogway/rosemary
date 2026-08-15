@@ -111,6 +111,44 @@ pub fn hello() -> Option<String> {
         .clone()
 }
 
+/// A program whose time goes into **leaving regions**, for the block-linking
+/// tests.
+///
+/// Every fixture above is dominated by start-up, where each region entry is the
+/// first one at that address and there is nothing yet to link to. This one runs
+/// a warm loop of a few hundred thousand iterations whose body is three
+/// transfers out of a region and back:
+///
+/// - a **direct call** to a `noinline` function, which the region walk puts in
+///   a region of its own (a callee is never followed — see `crate::region`);
+/// - the **`ret`** out of it, which is the commonest exit there is;
+/// - an **indirect call** through a `volatile` function pointer, which is where
+///   a C++ virtual call lands and which reaches the run loop by a different
+///   route (the indirect-call bridge).
+///
+/// The accumulator is printed so that a run which skipped iterations — or
+/// resumed one at the wrong address — differs in its output rather than only in
+/// its timing.
+pub const LINK_C: &str = r#"
+#include <stdio.h>
+
+long __attribute__((noinline)) step(long a) { return a * 3 + 1; }
+long __attribute__((noinline)) other(long a) { return a ^ 0x5a5a; }
+
+static long (* volatile through_a_pointer)(long) = other;
+
+int main(void) {
+    long acc = 1;
+    for (int i = 0; i < 400000; i++) {
+        acc = step(acc);
+        acc = through_a_pointer(acc);
+        acc &= 0xffffff;
+    }
+    printf("acc=%ld\n", acc);
+    return 0;
+}
+"#;
+
 /// Milestone 3's callback program: a guest comparator called by the *host's*
 /// `qsort`, and a guest handler called by the host's `exit`.
 ///
@@ -1497,6 +1535,18 @@ pub fn run_native_with(path: &str, args: &[&str]) -> Option<(Option<i32>, String
             String::from_utf8_lossy(&out.stdout).into_owned(),
         )
     })
+}
+
+/// Build [`LINK_C`], or `None` if this host cannot.
+///
+/// `-O1`, unlike most fixtures here: at `-O0` the calls this exists for are
+/// still there, but so is a stack frame's worth of spill around each of them,
+/// and the point is a loop whose cost is the transfers.
+pub fn link_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("blocklink", LINK_C, &["-O1"]))
+        .clone()
 }
 
 /// Build [`QSORT_C`], or `None` if this host cannot.

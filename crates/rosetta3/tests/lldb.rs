@@ -155,9 +155,27 @@ fn a_frame_in_translated_code_names_the_guest_it_came_from() {
 
     // And the frame below it is this runtime's own, which is what makes the
     // stop a place to work from rather than an island.
+    //
+    // Asserted as *the next frame in this module*, rather than by naming the
+    // function or the file it is in: which of `Translation::enter` and
+    // `Vm::run_loop` the caller resolves to is a matter of what the optimiser
+    // inlined into what, and it changed when the entry became a dispatch loop
+    // (see `Translation::enter`). What has to hold is that frame #1 is in
+    // rosetta3 at all — a translation whose caller could not be walked is the
+    // island this exists to rule out.
+    // Taken from the *last* `frame #0:` in the output: the stop announcement
+    // prints one and then the source listing around it, and `bt` prints the
+    // frames again below that.
+    let caller = text
+        .lines()
+        .collect::<Vec<_>>()
+        .rsplit(|line| line.contains("frame #0:"))
+        .next()
+        .and_then(|after| after.first().copied())
+        .unwrap_or_else(|| panic!("no frame below the translation; {text}"));
     assert!(
-        text.contains("rosetta3`") && text.contains("cache.rs"),
-        "the backtrace did not leave the translation; {text}"
+        caller.contains("frame #1:") && caller.contains("rosetta3`"),
+        "the backtrace did not leave the translation into this runtime; {caller}"
     );
 }
 

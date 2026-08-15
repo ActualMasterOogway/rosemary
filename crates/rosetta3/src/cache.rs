@@ -82,6 +82,7 @@ use microlift::arch::x86_64::X86_64;
 use microlift::arch::x86_64::context::RegisterContext;
 use microlift::backend::CraneliftBackend;
 use microlift::core::exit::ExitReason;
+use microlift::core::link::BlockLinkEntry;
 use microlift::core::{LifterConfig, VmResumptionPoints, lift_to_code};
 
 use crate::program::Program;
@@ -103,6 +104,11 @@ pub struct Translation {
     /// The compiled entry point. Takes a pointer to the guest context and
     /// returns having written an exit reason into it.
     entry: unsafe extern "C" fn(*mut RegisterContext),
+    /// The same address as [`entry`](Self::entry), as a plain integer, for the
+    /// per-thread block-link table — where a row is read by *compiled code* and
+    /// so cannot hold a Rust function pointer, only its bits. See
+    /// [`crate::thread::CodeWindow`].
+    code: u64,
     /// Keeps the JIT module — and therefore `entry`'s pages — mapped.
     _backend: CraneliftBackend,
 }
@@ -132,6 +138,7 @@ impl Translation {
     pub fn enter(&self, ctx: &mut RegisterContext) -> ExitReason {
         ctx.image_base = self.start;
         ctx.exit_reason = ExitReason::None as u32;
+        ctx.link_hit = 0;
         // SAFETY: `entry` is the finalized address of a Cranelift function whose
         // signature is `(*mut RegisterContext) -> ()` in the host C convention,
         // compiled by the backend this `Translation` owns and therefore still
@@ -139,18 +146,103 @@ impl Translation {
         // guest's own — the guest stack and its mapped images, all live for the
         // duration of the call.
         unsafe { (self.entry)(ctx as *mut RegisterContext) };
-        ExitReason::try_from(ctx.exit_reason).unwrap_or(ExitReason::None)
+        follow_links(ctx)
     }
 
     /// Whether this translation can be entered at `pc`.
     pub fn covers(&self, pc: u64) -> bool {
         self.entries.binary_search(&pc).is_ok()
     }
+
+    /// The row a block-link table needs to name this translation at `pc`.
+    ///
+    /// `image_base` is [`start`](Self::start) for the reason
+    /// [`enter`](Self::enter) sets it there: the entry dispatch reconciles the
+    /// PC against it, and the guest is identity-mapped.
+    ///
+    /// The caller is asserting [`covers`](Self::covers) — this does not check,
+    /// because it is called on the path a window `put` is already on and the
+    /// window's own key is where that guarantee comes from.
+    pub fn link_row(&self, pc: u64) -> BlockLinkEntry {
+        debug_assert!(
+            self.covers(pc),
+            "a link row would offer {pc:#x} to a translation that cannot be entered there"
+        );
+        BlockLinkEntry {
+            guest_pc: pc,
+            code: self.code,
+            image_base: self.start,
+            reserved: 0,
+        }
+    }
+}
+
+/// Run out the chain of regions the last exit resolved for itself, and report
+/// how the last one ended.
+///
+/// **This is the whole host side of block linking.** A region that ends in a
+/// `ret`, a jump or a call out of itself probes this thread's link table for the
+/// address it continues at (see [`microlift::core::link`]); when it finds a row,
+/// it names it in `link_hit` instead of leaving the host to look the address up.
+/// All that is left here is to believe it: set the `image_base` the row carries
+/// and call the code it names.
+///
+/// What is *not* done per link is the point of the exercise. The run loop's own
+/// answer to the same exit — a code-window probe with a reference count, an exit
+/// classification, the transfer bookkeeping, the pending-error check — was on
+/// the order of a hundred and seventy-five cycles, against a guest function that
+/// is frequently shorter than that. See `docs/HOTSPOTS.md`.
+///
+/// Which is also why the exits that *do* need the run loop must never be linked,
+/// and they are not: microlift emits no probe for an import call, a syscall, a
+/// fault or a return to the exit sentinel, and a bridge asks to be linked only
+/// when it has nothing parked (see [`crate::bridge`]). A link is therefore never
+/// a skipped step — it is a step that was only ever "enter what is at `rip`".
+fn follow_links(ctx: &mut RegisterContext) -> ExitReason {
+    while ctx.link_hit != 0 {
+        // SAFETY: `link_hit` holds an address lifted code read out of the table
+        // published in `ctx.link_table` — this thread's own, whose rows only
+        // this thread writes, and which is alive for as long as the thread is.
+        // A row's `code` is kept mapped by the `Arc` the window holds in the
+        // same slot, and by `CodeCache::retired` if that slot is ever replaced.
+        let row = unsafe { *(ctx.link_hit as *const BlockLinkEntry) };
+        debug_assert_eq!(
+            row.guest_pc, ctx.rip,
+            "a link was taken for an address the region did not commit"
+        );
+        // Both counters, so that the two figures `docs/HOTSPOTS.md` is written
+        // against — the entry *rate* and the exit *mix* — keep counting the
+        // events they always counted. An exit that linked is still an exit of
+        // some kind, and the mix is how this runtime decides what to work on
+        // next; measured only over the entries that reached the run loop it
+        // would describe the residue rather than the program.
+        crate::stats::record_exit(crate::vm::classify(
+            ExitReason::try_from(ctx.exit_reason).unwrap_or(ExitReason::None),
+            ctx.exit_code,
+        ));
+        crate::stats::record_linked_entry();
+        ctx.image_base = row.image_base;
+        ctx.exit_reason = ExitReason::None as u32;
+        ctx.link_hit = 0;
+        // SAFETY: `code` is the entry point of a compiled translation, of the
+        // same signature and with the same effects as `Translation::enter`'s
+        // own call; it is only ever written by `CodeWindow::put`, from the
+        // `Translation` that had already been entered at this address.
+        let code: unsafe extern "C" fn(*mut RegisterContext) =
+            unsafe { std::mem::transmute(row.code as usize as *const u8) };
+        unsafe { code(ctx as *mut RegisterContext) };
+    }
+    ExitReason::try_from(ctx.exit_reason).unwrap_or(ExitReason::None)
 }
 
 /// Translations, keyed by the guest address each begins at.
 pub struct CodeCache {
     regions: BTreeMap<u64, Arc<Translation>>,
+    /// Translations displaced from [`regions`](Self::regions) by a re-lift of
+    /// the same address, kept so their compiled code stays mapped. See the
+    /// insert in [`CodeCache::get_or_lift`] for why raw code addresses outlive
+    /// the map that produced them.
+    retired: Vec<Arc<Translation>>,
     /// Everything microlift needs to know before it lifts anything: the
     /// registered import addresses and the read-only segment hints. Built once,
     /// cloned per lift, because it does not change while a program runs.
@@ -172,6 +264,7 @@ impl CodeCache {
         config.strict_resume = true;
         CodeCache {
             regions: BTreeMap::new(),
+            retired: Vec::new(),
             config,
         }
     }
@@ -319,9 +412,19 @@ impl CodeCache {
             end,
             entries: compiled.entries,
             entry,
+            code: compiled.code as usize as u64,
             _backend: compiled.backend,
         });
-        self.regions.insert(start, Arc::clone(&translation));
+        // A replaced translation is *retired*, not dropped. Its code address may
+        // already be in some thread's block-link table, where it is a raw
+        // pointer with no reference count behind it — and where the only thing
+        // keeping the pages mapped is this `Arc`. Two translations of one
+        // address are interchangeable (see the module note), so nothing needs
+        // the old one to go away; it needs never to become unmapped while a
+        // table still names it.
+        if let Some(replaced) = self.regions.insert(start, Arc::clone(&translation)) {
+            self.retired.push(replaced);
+        }
         //eprintln!("MISS at {pc:#x} - regions: {}", self.len());
         Ok(translation)
     }

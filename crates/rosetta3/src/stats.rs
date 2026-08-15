@@ -37,7 +37,7 @@ counters! {
     REGIONS, INSTRUCTIONS, BYTES,
     SELECT_NS, LIFT_NS, COMPILE_NS,
     REFUSED, TAIL_EXITS,
-    ENTRIES, WINDOW_MISSES, TAIL_IMPORTS,
+    ENTRIES, WINDOW_MISSES, TAIL_IMPORTS, LINKED,
 }
 
 // ------------------------------------------------------------ the exit mix ---
@@ -149,6 +149,22 @@ pub fn record_entry(missed_window: bool) {
     if missed_window {
         WINDOW_MISSES.fetch_add(1, Relaxed);
     }
+}
+
+/// A region entry the run loop never saw: one region **linked** to the next,
+/// resolving the successor itself out of this thread's block-link table.
+///
+/// Counted into [`ENTRIES`] as well as separately, so that the entry *rate* —
+/// the figure `docs/HOTSPOTS.md` is written against — still counts the same
+/// event it always did, and stays comparable across the change that introduced
+/// linking. The separate counter is the new question: what share of entries
+/// never reached Rust.
+pub fn record_linked_entry() {
+    if !enabled() {
+        return;
+    }
+    ENTRIES.fetch_add(1, Relaxed);
+    LINKED.fetch_add(1, Relaxed);
 }
 
 /// A region entry that turned out to be a *tail call to an import*: the run
@@ -317,6 +333,15 @@ pub fn report() {
             100.0 * WINDOW_MISSES.load(Relaxed) as f64 / entries as f64,
             TAIL_IMPORTS.load(Relaxed),
             100.0 * TAIL_IMPORTS.load(Relaxed) as f64 / entries as f64,
+        );
+        // How many of those entries the run loop never saw. This is the figure
+        // block linking is judged on: an entry that linked paid a compare and an
+        // indirect call, and one that did not paid the run loop.
+        let linked = LINKED.load(Relaxed);
+        eprintln!(
+            "rosetta3: stats  {linked} linked ({:.2}%), {} through the run loop",
+            100.0 * linked as f64 / entries as f64,
+            entries - linked,
         );
         let mut mix: Vec<(u64, &str)> = Exit::ALL
             .iter()

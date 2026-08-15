@@ -65,6 +65,11 @@ fn main() {
         resumption: VmResumptionPoints::ExitOnly,
         strict_resume: true,
         use_vector_xmm: level.host_specific(),
+        // Including the link probe, which is a run-time cost like any other and
+        // the one a dump would otherwise not show. `ROSETTA3_NO_BLOCK_LINK=1`
+        // takes it out here exactly as it does in a run, which is how the two
+        // shapes of an exit stub can be read side by side.
+        block_link: rosetta3::jit::block_linking().then(rosetta3::thread::link_config),
         ..LifterConfig::default()
     };
 

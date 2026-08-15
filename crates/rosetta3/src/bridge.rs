@@ -62,7 +62,7 @@
 use std::sync::Arc;
 
 use microlift::arch::x86_64::context::RegisterContext;
-use microlift::core::bridge::{BridgeImport, ImportKind, ImportRegistry};
+use microlift::core::bridge::{BridgeImport, ImportKind, ImportRegistry, RESUME_LINKED};
 use microlift::core::exit::{ExitReason, TransferKind};
 
 /// The call was serviced; continue inline.
@@ -78,10 +78,30 @@ const EXIT: u32 = 1;
 /// the one exit [`crate::vm::Vm::step`] answers by simply carrying on at `rip` —
 /// which is exactly what a redirect wants, and exactly what a parked error wants
 /// too, since the loop checks for one immediately afterwards.
-fn resume(ctx: &mut RegisterContext) -> u32 {
+///
+/// ## Why the answer is sometimes [`RESUME_LINKED`]
+///
+/// "Continue at `rip` and service nothing" is the precise condition block
+/// linking asks about, so this is the one place in the runtime that can answer
+/// it for a bridged call — and a bridged indirect call into guest code is a
+/// quarter of all region exits in a real program (a C++ virtual call; see
+/// `docs/HOTSPOTS.md`).
+///
+/// The exception is the reason `pending` is a parameter. A **parked error** is
+/// serviced by the run loop and by nothing else: [`crate::vm::Vm::run_loop`]
+/// checks for one after every exit it sees, and an exit that linked is an exit
+/// it did not see. So a bridge with an error waiting takes the plain path, and
+/// the check is here — once, over every caller — rather than at the call sites,
+/// because the hazard is not that a caller might forget: `settle` already routes
+/// a parked error through this function on purpose, and an error can be parked
+/// by a *nested* guest callback under a call that returned `Ok`.
+fn resume(pending: bool, ctx: &mut RegisterContext) -> u32 {
     ctx.exit_reason = ExitReason::UnknownJump as u32;
     ctx.exit_code = TransferKind::IndirectJump as u32;
-    EXIT
+    match pending {
+        true => EXIT,
+        false => RESUME_LINKED,
+    }
 }
 
 /// Hand the call back to the run loop, exactly as if no bridge had been
@@ -108,7 +128,7 @@ fn defer(_ctx: &mut RegisterContext) -> u32 {
 /// this the program prints the answer for the sort that never happened.
 fn settle(vm: &crate::vm::Vm, ctx: &mut RegisterContext) -> u32 {
     match vm.has_pending() {
-        true => resume(ctx),
+        true => resume(true, ctx),
         false => HANDLED,
     }
 }
@@ -193,10 +213,10 @@ extern "C" fn import_call(ctx: *mut RegisterContext, import_va: u64) -> u32 {
     caught(vm, "<bridged import call>", || {
         match vm.service_bridged_import(import_va, ctx) {
             Ok(false) => settle(vm, ctx),
-            Ok(true) => resume(ctx),
+            Ok(true) => resume(vm.has_pending(), ctx),
             Err(err) => {
                 vm.set_pending(err);
-                resume(ctx)
+                resume(true, ctx)
             }
         }
     })
@@ -223,10 +243,10 @@ extern "C" fn indirect_call(ctx: *mut RegisterContext, target: u64) -> u32 {
     caught(vm, "<bridged indirect call>", || {
         match vm.dispatch_indirect_bridged(target, ctx) {
             Ok(false) => settle(vm, ctx),
-            Ok(true) => resume(ctx),
+            Ok(true) => resume(vm.has_pending(), ctx),
             Err(err) => {
                 vm.set_pending(err);
-                resume(ctx)
+                resume(true, ctx)
             }
         }
     })
@@ -357,7 +377,8 @@ mod tests {
     fn only_handled_is_zero() {
         let mut ctx = RegisterContext::new();
         assert_eq!(HANDLED, 0);
-        assert_ne!(resume(&mut ctx), 0);
+        assert_ne!(resume(false, &mut ctx), 0);
+        assert_ne!(resume(true, &mut ctx), 0);
         assert_ne!(defer(&mut ctx), 0);
     }
 
@@ -369,10 +390,27 @@ mod tests {
     #[test]
     fn resume_does_not_ask_for_the_call_to_be_repeated() {
         let mut ctx = RegisterContext::new();
-        resume(&mut ctx);
+        resume(false, &mut ctx);
         assert_eq!(ctx.exit_reason, ExitReason::UnknownJump as u32);
         assert_ne!(ctx.exit_code, TransferKind::DirectCall as u32);
         assert!(TransferKind::try_from(ctx.exit_code).is_ok());
+    }
+
+    /// The one difference a parked error makes: the same exit, but not a
+    /// linkable one. A linked exit is an exit [`crate::vm::Vm::run_loop`] never
+    /// sees, and the run loop is what raises a parked error — so linking one
+    /// would let the guest carry on past a failure nothing reported.
+    #[test]
+    fn a_parked_error_is_not_linkable() {
+        let mut clean = RegisterContext::new();
+        let mut parked = RegisterContext::new();
+        assert_eq!(resume(false, &mut clean), RESUME_LINKED);
+        assert_eq!(resume(true, &mut parked), EXIT);
+        // And the exit itself is identical either way: linkability is a
+        // statement about what the host still owes, not about the transfer.
+        assert_eq!(clean.exit_reason, parked.exit_reason);
+        assert_eq!(clean.exit_code, parked.exit_code);
+        assert_eq!(clean.rip, parked.rip);
     }
 
     /// `defer` leaves microlift's seeded exit intact; that is its whole content.

@@ -556,6 +556,13 @@ impl<M: Regions> Program<M> {
             atomic128,
             specialization,
             eliminate_dead_flags: crate::jit::eliminate_dead_flags(),
+            // Let a region resolve its own successor out of this thread's
+            // window instead of returning to the run loop to have the same
+            // address looked up. The geometry is the window's, because the two
+            // are the same table in two forms — see [`crate::thread::CodeWindow`]
+            // — and it is baked into every region compiled under it, which is
+            // why it is asked for here rather than chosen per lift.
+            block_link: crate::jit::block_linking().then(crate::thread::link_config),
             ..LifterConfig::default()
         };
 

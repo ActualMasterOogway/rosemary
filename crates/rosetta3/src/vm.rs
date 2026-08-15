@@ -309,7 +309,7 @@ fn instruction_name(reason: ExitReason, code: u32) -> Option<String> {
 /// *translation* could not serve, and a run where the second is large is a run
 /// where the region policy is cutting in the wrong places rather than one where
 /// the guest branches a lot. Two different work items behind one `ExitReason`.
-fn classify(exit: ExitReason, code: u32) -> crate::stats::Exit {
+pub(crate) fn classify(exit: ExitReason, code: u32) -> crate::stats::Exit {
     use crate::stats::Exit;
     match exit {
         ExitReason::Return => Exit::Return,
@@ -1163,6 +1163,14 @@ impl Vm {
                 }
             };
             ctx.rip = pc;
+            // Where a region that ends in a `ret`, a jump or a call out of
+            // itself looks its own successor up, instead of coming back here to
+            // have this loop do it. Published per entry rather than once per
+            // thread because the context is a local of whoever called into the
+            // guest, and a nested entry brings its own: see
+            // [`crate::thread::CodeWindow`] for what the table is, and
+            // [`crate::cache::Translation::enter`] for what happens on a hit.
+            ctx.link_table = state.code().link_table();
             crate::stats::record_entry(missed);
             let exit = translation.enter(ctx);
             state.rsp.set(ctx.rsp);
