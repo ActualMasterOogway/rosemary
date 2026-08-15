@@ -442,16 +442,46 @@ impl PageCache {
 
 impl GuestView {
     /// A view over `regions`, which must be identity-mapped host memory.
-    pub fn new(regions: Vec<Range<u64>>) -> Self {
+    ///
+    /// **Sorted here, once**, because [`GuestView::region_of`] is a binary
+    /// search and a linear one was measurable: this view answers a question for
+    /// every guest byte the *runtime* touches — the return address an indirect
+    /// call pushes, the return address the run loop pops, every byte of every
+    /// `read_cstr` — and A Hat in Time spent 1.2% of its running time walking
+    /// the list. See `docs/HOTSPOTS.md`.
+    pub fn new(mut regions: Vec<Range<u64>>) -> Self {
+        regions.sort_by_key(|r| r.start);
+        // The search below takes the last region beginning at or below `va` and
+        // checks only *its* end, which is the right answer exactly when the
+        // regions do not overlap — a `va` inside an enclosing region but past a
+        // nested one would be missed. They are separate `mmap`s plus the guest
+        // stack, so they do not; this says so where it is relied upon rather
+        // than leaving it as a property someone has to rediscover. Measured on A
+        // Hat in Time: six regions, no overlapping pairs.
+        debug_assert!(
+            regions.windows(2).all(|p| p[0].end <= p[1].start),
+            "GuestView's regions must not overlap"
+        );
         GuestView {
             regions: Arc::new(regions),
             mapped: Arc::new(PageCache::new()),
         }
     }
 
+    /// The mapped guest region holding `va`, if there is one.
+    ///
+    /// The regions are disjoint and sorted, so the candidate is the last one
+    /// beginning at or below `va` and the only thing left to check is its end.
+    fn region_of(&self, va: u64) -> Option<&Range<u64>> {
+        let at = self.regions.partition_point(|r| r.start <= va);
+        self.regions
+            .get(at.checked_sub(1)?)
+            .filter(|r| va < r.end)
+    }
+
     /// Whether `va` is inside a mapped guest region.
     pub fn contains(&self, va: u64) -> bool {
-        self.regions.iter().any(|r| r.contains(&va))
+        self.region_of(va).is_some()
     }
 
     /// Check `[va, va+len)` is addressable, and return the host pointer.
@@ -460,7 +490,7 @@ impl GuestView {
         if va == 0 {
             return None;
         }
-        let inside = self.regions.iter().any(|r| r.contains(&va) && end <= r.end);
+        let inside = self.region_of(va).is_some_and(|r| end <= r.end);
         if !inside && !self.host_readable(va, end) {
             return None;
         }
@@ -1024,66 +1054,91 @@ impl Vm {
                 }
             }
 
-            // Control *jumped* to an import rather than calling one: a tail
-            // call, which compilers emit freely — `jmp _strcoll` where the
-            // return value is the caller's. Microlift intercepts `CALL`s to a
-            // registered import and not `JMP`s, correctly: a jump to a stub is
-            // an ordinary transfer as far as the lifter is concerned. The
-            // runtime has to notice, because "lift the target" would decode the
-            // six-byte `__stubs` trampoline as guest code and follow it into
-            // the host address in its slot.
-            //
-            // A tail call is a call and a return, so both halves happen here.
-            //
-            // The pc may be the import's address or the address it *resolved
-            // to*, and the second is not an exotic case. A `jmp qword
-            // [rip+disp]` through the slot has no `rel32` for the lifter to
-            // match, so it folds the load instead — the slot lives in a region
-            // the config marks non-writable and was already bound when the
-            // snapshot was taken — and what arrives here is the host function.
-            // `objc_msgSend` is where that shows up, because a method whose body
-            // is one message (`- (id)a { return [self b]; }`) compiles to
-            // exactly that. Following it means running the host's own
-            // `objc_msgSend` on the guest's registers.
-            if let Some(site) = self
-                .program
-                .import_at(pc)
-                .or_else(|| self.program.import_by_target(pc))
-            {
-                crate::stats::record_tail_import();
-                ctx.imported_function_va = pc;
-                self.service_site_as(site, ctx, true)?;
-                // Unless the call transferred control instead of returning. A
-                // tail-called `jmp _longjmp` arrives here, and by the time the
-                // shim is done `rip` is the `setjmp` it restored — popping a
-                // return address over it would jump to the caller of the
-                // function that longjmped, which is precisely the frame the
-                // guest asked to leave. See [`crate::jmpbuf`].
-                if state.took_redirect() {
-                    continue;
-                }
-                let mut ret = [0u8; 8];
-                self.view()
-                    .read(ctx.rsp, &mut ret)
-                    .map_err(|source| VmError::Stack { source })?;
-                ctx.rsp = ctx.rsp.wrapping_add(8);
-                let ret = u64::from_le_bytes(ret);
-                if ret == RETURN_SENTINEL {
-                    return Ok(ctx.rax);
-                }
-                ctx.rip = ret;
-                continue;
-            }
-
             // This thread's own answer first, which is the whole hot path: a
             // PC it has already run needs no lock, no map walk and no
             // comparison chain. See [`crate::thread::CodeWindow`] for why a
             // remembered translation cannot go stale.
+            //
+            // **A window hit is also proof that this PC is not an import**, and
+            // that is what lets the two import questions below sit behind it
+            // rather than in front. The argument is inductive and short: an
+            // address only enters the window after it was lifted, and an address
+            // is only lifted after those questions were asked about it and both
+            // said no. So nothing that answers "yes" can ever be in the window,
+            // and asking first is asking every entry to pay for a case that
+            // reaches the miss path anyway.
+            //
+            // It is not a small saving. Measured on A Hat in Time: 15.2 million
+            // region entries a second, 1.4% of them missing the window, and
+            // `Program::import_at` alone was **15.6% of running time** —
+            // answering "yes" 5,826 times out of 3.04 billion. See
+            // `docs/HOTSPOTS.md`.
+            //
+            // A `dlopen` cannot break the induction either. It registers the new
+            // image's imports as part of loading it, and the addresses it
+            // registers are in mappings that did not exist when anything now in
+            // a window was lifted.
             let mut missed = false;
             let translation = match state.code().get(pc) {
                 Some(hit) => hit,
                 None => {
                     missed = true;
+
+                    // Control *jumped* to an import rather than calling one: a
+                    // tail call, which compilers emit freely — `jmp _strcoll`
+                    // where the return value is the caller's. Microlift
+                    // intercepts `CALL`s to a registered import and not `JMP`s,
+                    // correctly: a jump to a stub is an ordinary transfer as far
+                    // as the lifter is concerned. The runtime has to notice,
+                    // because "lift the target" would decode the six-byte
+                    // `__stubs` trampoline as guest code and follow it into the
+                    // host address in its slot.
+                    //
+                    // A tail call is a call and a return, so both halves happen
+                    // here.
+                    //
+                    // The pc may be the import's address or the address it
+                    // *resolved to*, and the second is not an exotic case. A
+                    // `jmp qword [rip+disp]` through the slot has no `rel32` for
+                    // the lifter to match, so it folds the load instead — the
+                    // slot lives in a region the config marks non-writable and
+                    // was already bound when the snapshot was taken — and what
+                    // arrives here is the host function. `objc_msgSend` is where
+                    // that shows up, because a method whose body is one message
+                    // (`- (id)a { return [self b]; }`) compiles to exactly that.
+                    // Following it means running the host's own `objc_msgSend`
+                    // on the guest's registers.
+                    if let Some(site) = self
+                        .program
+                        .import_at(pc)
+                        .or_else(|| self.program.import_by_target(pc))
+                    {
+                        crate::stats::record_tail_import();
+                        ctx.imported_function_va = pc;
+                        self.service_site_as(site, ctx, true)?;
+                        // Unless the call transferred control instead of
+                        // returning. A tail-called `jmp _longjmp` arrives here,
+                        // and by the time the shim is done `rip` is the `setjmp`
+                        // it restored — popping a return address over it would
+                        // jump to the caller of the function that longjmped,
+                        // which is precisely the frame the guest asked to leave.
+                        // See [`crate::jmpbuf`].
+                        if state.took_redirect() {
+                            continue;
+                        }
+                        let mut ret = [0u8; 8];
+                        self.view()
+                            .read(ctx.rsp, &mut ret)
+                            .map_err(|source| VmError::Stack { source })?;
+                        ctx.rsp = ctx.rsp.wrapping_add(8);
+                        let ret = u64::from_le_bytes(ret);
+                        if ret == RETURN_SENTINEL {
+                            return Ok(ctx.rax);
+                        }
+                        ctx.rip = ret;
+                        continue;
+                    }
+
                     // The lock is taken to look up or lift and released before
                     // guest code runs, which is what keeps a callback
                     // re-entering the VM on this same thread from deadlocking
@@ -1892,6 +1947,40 @@ impl crate::abi::Callbacks for Vm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The binary search must agree with the linear scan it replaced, including
+    /// on the two cases a `partition_point` is easy to get wrong: an address
+    /// exactly at a region's start, and one exactly at its end.
+    #[test]
+    fn a_region_is_found_by_search_wherever_a_scan_would_find_it() {
+        // Deliberately out of order on the way in, because `new` is what sorts
+        // them and a caller has never been asked to.
+        let ranges = vec![0x3000..0x3100, 0x1000..0x1100, 0x2000..0x2400];
+        let view = GuestView::new(ranges.clone());
+        for va in (0x0fff..0x3200u64).step_by(1) {
+            let scan = ranges.iter().any(|r| r.contains(&va));
+            assert_eq!(view.contains(va), scan, "disagreed at {va:#x}");
+        }
+        // And the ends specifically, spelled out so a regression names itself.
+        assert!(view.contains(0x1000), "a region includes its start");
+        assert!(!view.contains(0x1100), "a region excludes its end");
+        assert!(!view.contains(0x0fff));
+    }
+
+    /// Finding the region `va` is in is not the same as the whole span fitting
+    /// inside it. The linear scan tested both in one `any`; the search tests
+    /// them separately, and dropping the second half would let a read run off
+    /// the end of a mapping into whatever follows it.
+    #[test]
+    fn a_span_that_runs_past_its_region_does_not_count_as_inside_one() {
+        let view = GuestView::new(vec![0x1000..0x1100, 0x4000..0x4100]);
+        let fits = |va: u64, len: u64| view.region_of(va).is_some_and(|r| va + len <= r.end);
+        assert!(fits(0x10f8, 8), "eight bytes at 0x10f8 end exactly at 0x1100");
+        assert!(!fits(0x10f8, 9), "nine run past the end of the region");
+        // And a span may not bridge two regions, however close they look in a
+        // sorted list.
+        assert!(!fits(0x10ff, 0x2f02));
+    }
 
     /// A guest reads the vendor before it reads anything else, and it reads it
     /// out of three registers in an order that is easy to transpose.
