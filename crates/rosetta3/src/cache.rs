@@ -104,10 +104,17 @@ pub struct Translation {
     /// The compiled entry point. Takes a pointer to the guest context and
     /// returns having written an exit reason into it.
     entry: unsafe extern "C" fn(*mut RegisterContext),
-    /// The same address as [`entry`](Self::entry), as a plain integer, for the
-    /// per-thread block-link table — where a row is read by *compiled code* and
-    /// so cannot hold a Rust function pointer, only its bits. See
-    /// [`crate::thread::CodeWindow`].
+    /// The address a block-link row must name to reach this translation, as a
+    /// plain integer — a row is read by *compiled code* and so cannot hold a
+    /// Rust function pointer, only its bits. See [`crate::thread::CodeWindow`].
+    ///
+    /// The same address as [`entry`](Self::entry), **except under a pinned link
+    /// ABI** ([`crate::jit::pinned_link_abi`]), where a link enters the region's
+    /// tail-convention body with the guest registers already in place and
+    /// `entry` is the thunk that fills them from the context. Calling the body
+    /// or linking to the thunk would each be a wrong-code bug, which is why
+    /// microlift hands the two back separately rather than letting this be
+    /// derived.
     code: u64,
     /// Keeps the JIT module — and therefore `entry`'s pages — mapped.
     _backend: CraneliftBackend,
@@ -395,9 +402,20 @@ impl CodeCache {
         // Where this region's compiled code went, so a fault inside it can be
         // named as a *guest* range rather than as an address in an anonymous
         // mapping. See [`crate::fault`].
-        crate::fault::placed(compiled.code as usize as u64, start, end, pc, &compiled.map);
+        // The *body*, not the entry: under a pinned ABI those differ, and the
+        // map's host offsets are relative to the body, which is also where every
+        // guest instruction ended up. A fault inside the entry thunk - which
+        // does nothing but load and store the context - is then unattributed,
+        // which is the right trade for keeping every guest address nameable.
+        crate::fault::placed(
+            compiled.link_target as usize as u64,
+            start,
+            end,
+            pc,
+            &compiled.map,
+        );
         crate::lldb::register(
-            compiled.code as usize as u64,
+            compiled.link_target as usize as u64,
             start,
             end,
             &program
@@ -412,7 +430,7 @@ impl CodeCache {
             end,
             entries: compiled.entries,
             entry,
-            code: compiled.code as usize as u64,
+            code: compiled.link_target as usize as u64,
             _backend: compiled.backend,
         });
         // A replaced translation is *retired*, not dropped. Its code address may
@@ -486,7 +504,7 @@ fn compile_region(
     let entries = lifted.resume_points.clone();
     let lift_took = clock.map(|c| c.elapsed());
     let mut backend = crate::jit::backend()?;
-    let (code, map) = backend.compile_lifted_with_map(lifted)?;
+    let (region_code, map) = backend.compile_lifted_region(lifted)?;
     if let (Some(clock), Some(lift)) = (clock, lift_took) {
         crate::stats::record_lift(
             region.instructions(),
@@ -497,7 +515,8 @@ fn compile_region(
     }
     Ok(Compiled {
         backend,
-        code,
+        code: region_code.entry,
+        link_target: region_code.link_target,
         map,
         guest_bytes: crate::lldb::enabled()
             .then(|| bytes.to_vec())
@@ -511,6 +530,8 @@ fn compile_region(
 struct Compiled {
     backend: microlift::backend::CraneliftBackend,
     code: *const u8,
+    /// What a block-link row names — see [`Translation::code`].
+    link_target: *const u8,
     /// Host offset → guest instruction, so a fault inside this code can name
     /// the instruction rather than the region. See [`crate::fault`].
     map: microlift::core::srcloc::GuestCodeMap,

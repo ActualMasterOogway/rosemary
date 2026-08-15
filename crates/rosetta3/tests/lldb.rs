@@ -166,16 +166,26 @@ fn a_frame_in_translated_code_names_the_guest_it_came_from() {
     // Taken from the *last* `frame #0:` in the output: the stop announcement
     // prints one and then the source listing around it, and `bt` prints the
     // frames again below that.
-    let caller = text
+    //
+    // "A frame below", not "the frame below": under a pinned link ABI the host
+    // enters a region through an entry thunk (`microlift::core::pin`), and that
+    // thunk is a real frame carrying no guest instruction and no symbol of its
+    // own. So the walk out of the translation is one frame longer than it was,
+    // and what has to hold is unchanged — a translation whose caller could not
+    // be walked is the island this exists to rule out.
+    let below: Vec<&str> = text
         .lines()
         .collect::<Vec<_>>()
         .rsplit(|line| line.contains("frame #0:"))
         .next()
-        .and_then(|after| after.first().copied())
-        .unwrap_or_else(|| panic!("no frame below the translation; {text}"));
+        .map(|after| after.to_vec())
+        .unwrap_or_default();
     assert!(
-        caller.contains("frame #1:") && caller.contains("rosetta3`"),
-        "the backtrace did not leave the translation into this runtime; {caller}"
+        below
+            .iter()
+            .take_while(|line| line.contains("frame #"))
+            .any(|line| line.contains("rosetta3`")),
+        "the backtrace did not leave the translation into this runtime; {below:?}"
     );
 }
 

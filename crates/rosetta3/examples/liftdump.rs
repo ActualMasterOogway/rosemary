@@ -34,7 +34,9 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (bytes, va) = match args.first().map(String::as_str) {
         Some("--file") => {
-            let path = args.get(1).expect("usage: liftdump --file <raw> <va> [len]");
+            let path = args
+                .get(1)
+                .expect("usage: liftdump --file <raw> <va> [len]");
             let va = number(args.get(2).expect("a guest va"));
             let len = args.get(3).map(|v| number(v) as usize);
             let all = std::fs::read(path).expect("read the code");

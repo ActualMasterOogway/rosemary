@@ -608,9 +608,7 @@ fn rank(histogram: &HashMap<u64, u64>) -> Vec<Row> {
         .map(|(&va, &count)| Row {
             count,
             va,
-            located: vm
-                .and_then(|vm| vm.program.locate(va))
-                .unwrap_or_default(),
+            located: vm.and_then(|vm| vm.program.locate(va)).unwrap_or_default(),
         })
         .collect();
     // By count, then by address, so two runs of the same program print the
@@ -634,9 +632,8 @@ pub fn report() {
         .unwrap_or_default();
     let share = |n: u64| 100.0 * n as f64 / counts.running.max(1) as f64;
 
-    let translated = counts.guest.values().sum::<u64>()
-        + counts.translated_unnamed
-        + counts.translated_beyond;
+    let translated =
+        counts.guest.values().sum::<u64>() + counts.translated_unnamed + counts.translated_beyond;
     // The *achieved* rate, not the configured one. A timer that quietly
     // delivers a fraction of what it was asked for is the difference between a
     // thin profile and a wrong one, and the only way a reader can tell is if
@@ -652,7 +649,9 @@ pub fn report() {
     eprintln!(
         "rosetta3: profile  {achieved:.0} sweep(s)/s, {:.1?} per sweep in the sampler \
          ({:.2}% of one core)",
-        in_sweep.checked_div(sweeps.max(1) as u32).unwrap_or_default(),
+        in_sweep
+            .checked_div(sweeps.max(1) as u32)
+            .unwrap_or_default(),
         100.0 * in_sweep.as_secs_f64() / wall.as_secs_f64().max(f64::EPSILON),
     );
     eprintln!(
@@ -670,7 +669,11 @@ pub fn report() {
     let mut hosts: Vec<&HostSite> = counts.host.values().collect();
     hosts.sort_by(|a, b| b.count.cmp(&a.count).then(a.symbol.cmp(&b.symbol)));
 
-    say("guest regions, by share of running time", &regions[..], share);
+    say(
+        "guest regions, by share of running time",
+        &regions[..],
+        share,
+    );
     say("guest instructions", &instructions[..], share);
 
     eprintln!("rosetta3: profile  host symbols");
@@ -806,7 +809,10 @@ pub fn write_map(path: &str) -> std::io::Result<()> {
 
     let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
     writeln!(out, "# rosetta3 jit map, pid {}", std::process::id())?;
-    writeln!(out, "# R host_start host_end guest_start guest_end image+offset")?;
+    writeln!(
+        out,
+        "# R host_start host_end guest_start guest_end image+offset"
+    )?;
     writeln!(out, "# I host_start host_end guest_va image+offset")?;
 
     let mut error = None;

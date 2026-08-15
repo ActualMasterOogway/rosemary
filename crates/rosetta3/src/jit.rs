@@ -35,7 +35,9 @@ use std::sync::OnceLock;
 use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_codegen::settings::{self, Configurable};
 use microlift::MicroliftError;
+use microlift::arch::x86_64::pin;
 use microlift::backend::CraneliftBackend;
+use microlift::core::pin::PinnedAbi;
 
 /// The environment variables this module reads.
 pub const OPT_ENV: &str = "ROSETTA3_JIT_OPT";
@@ -44,6 +46,11 @@ pub const DEAD_FLAGS_ENV: &str = "ROSETTA3_DEAD_FLAGS";
 /// Turns [`block_linking`] off. Named for what setting it does, since the
 /// feature itself is on by default.
 pub const NO_BLOCK_LINK_ENV: &str = "ROSETTA3_NO_BLOCK_LINK";
+/// Turns [`pinned_link_abi`] off, leaving links resolved by the host.
+pub const NO_PINNED_LINK_ENV: &str = "ROSETTA3_NO_PINNED_LINK";
+/// Replaces the pinned register set: a comma-separated list of x86-64 register
+/// names, e.g. `ROSETTA3_PINNED_REGS=rsp,rax,rdi,rsi,rbp`.
+pub const PINNED_REGS_ENV: &str = "ROSETTA3_PINNED_REGS";
 
 /// What to ask of the JIT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -149,8 +156,12 @@ impl OptLevel {
             .expect("failed to turn off table access pass");
         match self {
             OptLevel::Speed | OptLevel::All => {
-                builder.set("enable_alias_analysis", "true").expect("couldn't enable alias analysis");
-                builder.set("regalloc_algorithm", "backtracking").expect("couldn't enable backtracking regalloc");
+                builder
+                    .set("enable_alias_analysis", "true")
+                    .expect("couldn't enable alias analysis");
+                builder
+                    .set("regalloc_algorithm", "backtracking")
+                    .expect("couldn't enable backtracking regalloc");
             }
             OptLevel::None => {}
         };
@@ -423,6 +434,119 @@ pub fn block_linking() -> bool {
             }
         },
     })
+}
+
+/// Which guest registers this runtime keeps in **host registers** across a
+/// link, or `None` to resolve links through the host as before.
+///
+/// This is the second shape of block linking (microlift's
+/// [`core::pin`](microlift::core::pin)): with an ABI declared, a region that
+/// resolves its own successor *branches* to it with these registers still in
+/// place, so the register-file fill and spill is paid once per chain of regions
+/// instead of once per region. `docs/HOTSPOTS.md` §5.1 is what that costs
+/// today — about ninety host instructions of fill and the same again of spill,
+/// at fifteen million region entries a second.
+///
+/// **The set is a policy and a guess, and it is deliberately overridable.**
+/// There are five slots to spend on this host (aarch64's tail convention passes
+/// six integer values and the context pointer takes one), and which five are
+/// worth it is a property of the guest program rather than of the mechanism.
+/// These are chosen for the profile in `docs/HOTSPOTS.md`, which is 92% calls
+/// and returns through a C++ engine:
+///
+/// - `RSP` — every `call`, `ret`, `push` and `pop` in the profile touches it.
+/// - `RDI` — the `this` pointer of every method call, and SysV argument 1.
+/// - `RAX` — the return value, so live across exactly the `ret` edges that link.
+/// - `RBP` — the frame pointer, which Apple's x86-64 ABI requires be maintained.
+/// - `RSI` — SysV argument 2.
+///
+/// `ROSETTA3_PINNED_REGS=rsp,rax,…` replaces the list wholesale, so the guess
+/// can be measured against alternatives without a rebuild;
+/// `ROSETTA3_NO_PINNED_LINK=1` returns to host-resolved links, which is the
+/// bisection knob between the two shapes of linking.
+pub fn pinned_link_abi() -> Option<PinnedAbi> {
+    static ABI: OnceLock<Option<PinnedAbi>> = OnceLock::new();
+    *ABI.get_or_init(|| {
+        if !boolean_env(NO_PINNED_LINK_ENV, false, "pinned links stay on") {
+            return None;
+        }
+        let abi = match std::env::var(PINNED_REGS_ENV) {
+            Err(_) => PinnedAbi::new()
+                .with(pin::RSP)
+                .with(pin::RDI)
+                .with(pin::RAX)
+                .with(pin::RBP)
+                .with(pin::RSI),
+            Ok(list) => match parse_pinned_regs(&list) {
+                Some(abi) => abi,
+                None => return None,
+            },
+        };
+        // A slot past the host's budget is not an error in microlift - it is a
+        // stack slot, which is slower than leaving the register in the context
+        // and invisible in anything but a profile. So it is an error here.
+        if let Err(e) = abi.check_host_budget() {
+            eprintln!("rosetta3: {e}; pinned links are off");
+            return None;
+        }
+        Some(abi)
+    })
+}
+
+/// Parse a `ROSETTA3_PINNED_REGS` list. `None` - with a message - for anything
+/// it does not recognise, since a silently shorter ABI would be measured as a
+/// result rather than as a typo.
+fn parse_pinned_regs(list: &str) -> Option<PinnedAbi> {
+    let mut abi = PinnedAbi::new();
+    for name in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let reg = match name.to_ascii_lowercase().as_str() {
+            "rax" => pin::RAX,
+            "rcx" => pin::RCX,
+            "rdx" => pin::RDX,
+            "rbx" => pin::RBX,
+            "rsp" => pin::RSP,
+            "rbp" => pin::RBP,
+            "rsi" => pin::RSI,
+            "rdi" => pin::RDI,
+            "r8" => pin::R8,
+            "r9" => pin::R9,
+            "r10" => pin::R10,
+            "r11" => pin::R11,
+            "r12" => pin::R12,
+            "r13" => pin::R13,
+            "r14" => pin::R14,
+            "r15" => pin::R15,
+            other => {
+                eprintln!(
+                    "rosetta3: {PINNED_REGS_ENV} names {other:?}, which is not an x86-64 \
+                     general-purpose register; pinned links are off"
+                );
+                return None;
+            }
+        };
+        if abi.contains(reg) {
+            eprintln!("rosetta3: {PINNED_REGS_ENV} names {name} twice; pinned links are off");
+            return None;
+        }
+        abi = abi.with(reg);
+    }
+    (!abi.is_empty()).then_some(abi)
+}
+
+/// Read a boolean environment variable that *disables* something, returning
+/// whether the thing stays on.
+fn boolean_env(name: &str, unset: bool, on_bad_value: &str) -> bool {
+    match std::env::var(name) {
+        Err(_) => !unset,
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => false,
+            "0" | "false" | "no" | "off" | "" => true,
+            _ => {
+                eprintln!("rosetta3: {name}={value:?} is not a boolean; {on_bad_value}");
+                true
+            }
+        },
+    }
 }
 
 /// The Cranelift flags every backend in this process is built with.

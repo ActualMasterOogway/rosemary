@@ -574,7 +574,14 @@ const WINDOW: usize = 8192;
 /// computes and the slot [`CodeWindow::put`] writes are the same arithmetic
 /// rather than two copies of it.
 pub fn link_config() -> BlockLinkConfig {
-    BlockLinkConfig::new(WINDOW as u32)
+    let config = BlockLinkConfig::new(WINDOW as u32);
+    // Which of the two shapes of linking this process runs: a row handed back
+    // to `cache::follow_links`, or a branch straight into the successor with
+    // the guest registers still in registers. See [`crate::jit::pinned_link_abi`].
+    match crate::jit::pinned_link_abi() {
+        Some(abi) => config.pinned(abi),
+        None => config,
+    }
 }
 
 impl CodeWindow {

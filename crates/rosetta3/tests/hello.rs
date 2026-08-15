@@ -316,7 +316,10 @@ fn the_entry_function_still_lifts_with_imports_promoted() {
 
     for policy in [ImportPolicy::FastWhenKnown, ImportPolicy::AlwaysSlow] {
         let config = program.lifter_config_with(policy);
-        microlift::core::lift_to_function::<microlift::arch::x86_64::X86_64>(&bytes, start, config)
+        // `lift_to_code`, not `lift_to_function`: under a pinned link ABI a lift
+        // is a region body *plus* the entry thunk that calls it, and the
+        // single-`Function` entry point refuses rather than dropping one.
+        microlift::core::lift_to_code::<microlift::arch::x86_64::X86_64>(&bytes, start, config)
             .unwrap_or_else(|e| panic!("{policy:?}: lifting the entry function failed: {e}"));
     }
 }

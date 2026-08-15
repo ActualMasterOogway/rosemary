@@ -337,12 +337,29 @@ pub fn report() {
         // How many of those entries the run loop never saw. This is the figure
         // block linking is judged on: an entry that linked paid a compare and an
         // indirect call, and one that did not paid the run loop.
-        let linked = LINKED.load(Relaxed);
-        eprintln!(
-            "rosetta3: stats  {linked} linked ({:.2}%), {} through the run loop",
-            100.0 * linked as f64 / entries as f64,
-            entries - linked,
-        );
+        //
+        // Under a **pinned** link ABI there is no such figure, and the reason is
+        // the mechanism working: a link is a branch inside translated code, so
+        // nothing on that path can count without putting a contended store on
+        // it. What `entries` then counts is *chains* — one host entry, however
+        // many regions ran inside it — and saying so is better than printing a
+        // zero that reads as "linking stopped happening". See
+        // [`crate::jit::pinned_link_abi`].
+        match crate::jit::pinned_link_abi() {
+            Some(abi) => eprintln!(
+                "rosetta3: stats  entries above are chains, not regions: links are branches \
+                 under a pinned ABI of {} register(s) and are not counted",
+                abi.len(),
+            ),
+            None => {
+                let linked = LINKED.load(Relaxed);
+                eprintln!(
+                    "rosetta3: stats  {linked} linked ({:.2}%), {} through the run loop",
+                    100.0 * linked as f64 / entries as f64,
+                    entries - linked,
+                );
+            }
+        }
         let mut mix: Vec<(u64, &str)> = Exit::ALL
             .iter()
             .map(|&e| (EXITS[e as usize].load(Relaxed), e.label()))

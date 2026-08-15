@@ -474,9 +474,7 @@ impl GuestView {
     /// beginning at or below `va` and the only thing left to check is its end.
     fn region_of(&self, va: u64) -> Option<&Range<u64>> {
         let at = self.regions.partition_point(|r| r.start <= va);
-        self.regions
-            .get(at.checked_sub(1)?)
-            .filter(|r| va < r.end)
+        self.regions.get(at.checked_sub(1)?).filter(|r| va < r.end)
     }
 
     /// Whether `va` is inside a mapped guest region.
@@ -1983,7 +1981,10 @@ mod tests {
     fn a_span_that_runs_past_its_region_does_not_count_as_inside_one() {
         let view = GuestView::new(vec![0x1000..0x1100, 0x4000..0x4100]);
         let fits = |va: u64, len: u64| view.region_of(va).is_some_and(|r| va + len <= r.end);
-        assert!(fits(0x10f8, 8), "eight bytes at 0x10f8 end exactly at 0x1100");
+        assert!(
+            fits(0x10f8, 8),
+            "eight bytes at 0x10f8 end exactly at 0x1100"
+        );
         assert!(!fits(0x10f8, 9), "nine run past the end of the region");
         // And a span may not bridge two regions, however close they look in a
         // sorted list.
