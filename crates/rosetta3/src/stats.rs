@@ -37,6 +37,135 @@ counters! {
     REGIONS, INSTRUCTIONS, BYTES,
     SELECT_NS, LIFT_NS, COMPILE_NS,
     REFUSED, TAIL_EXITS,
+    ENTRIES, WINDOW_MISSES, TAIL_IMPORTS,
+}
+
+// ------------------------------------------------------------ the exit mix ---
+
+/// How a region entry ended.
+///
+/// Translation time is one question and **exit rate** is the other, and until
+/// this existed only the first had an instrument. A profile of A Hat in Time
+/// put 44% of steady-state CPU in this runtime's own Rust with translation at
+/// 0.02% of it, which says the cost is the seam between regions rather than the
+/// code inside them — but *which* seam is a different question from *how much*,
+/// and the run loop's answer differs by more than an order of magnitude between
+/// these arms. A `Return` that leaves a leaf function is a lookup and a
+/// re-entry; an `Indirect` is that plus three map probes and a guest stack
+/// write.
+///
+/// Named here rather than reusing microlift's `ExitReason` on purpose: the
+/// interesting split is *inside* `UnknownJump`, whose `TransferKind` separates
+/// "the guest jumped somewhere" from "the translation could not serve this
+/// address", and those are not the same work item.
+#[derive(Clone, Copy)]
+pub enum Exit {
+    /// The translation's own terminating block: a `ret` to the sentinel this VM
+    /// pushed, or a return into a region already entered.
+    Return,
+    /// A `ret` that popped an address outside the region — the ordinary way a
+    /// leaf function ends, and one region entry each time.
+    ReturnOut,
+    /// An unconditional `jmp` to a static address outside the region.
+    DirectJump,
+    /// A conditional branch whose taken edge left the region.
+    CondJump,
+    /// Control ran off the bottom of the bytes the lifter was given.
+    Fallthrough,
+    /// A direct `call` to guest code that was not lifted into this region.
+    DirectCall,
+    /// The translation declined to serve the PC — a region cut mid-instruction,
+    /// or an entry point its dispatch was never offered. See
+    /// [`record_tail_exit`].
+    RegionTail,
+    /// A tail `jmp` through a register or a memory operand.
+    IndirectJump,
+    /// Any other transfer out of the region.
+    OtherJump,
+    /// An intercepted `call` to a registered import.
+    Import,
+    /// An indirect `call` — a virtual call, or a call through a pointer.
+    Indirect,
+    /// `cpuid`, `xgetbv`, and the rest of the resumable one-instruction exits.
+    Instruction,
+    /// Anything else, which is an error path.
+    Other,
+}
+
+impl Exit {
+    /// Every arm, in report order.
+    const ALL: [Exit; 13] = [
+        Exit::Return,
+        Exit::ReturnOut,
+        Exit::DirectJump,
+        Exit::CondJump,
+        Exit::Fallthrough,
+        Exit::DirectCall,
+        Exit::RegionTail,
+        Exit::IndirectJump,
+        Exit::OtherJump,
+        Exit::Import,
+        Exit::Indirect,
+        Exit::Instruction,
+        Exit::Other,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Exit::Return => "terminating block",
+            Exit::ReturnOut => "ret out of region",
+            Exit::DirectJump => "direct jmp",
+            Exit::CondJump => "conditional branch",
+            Exit::Fallthrough => "fallthrough",
+            Exit::DirectCall => "direct call",
+            Exit::RegionTail => "region tail",
+            Exit::IndirectJump => "indirect jmp",
+            Exit::OtherJump => "other jump",
+            Exit::Import => "import call",
+            Exit::Indirect => "indirect call",
+            Exit::Instruction => "instruction",
+            Exit::Other => "other",
+        }
+    }
+}
+
+/// One counter per [`Exit`]. A fixed array rather than a map because this is
+/// incremented once per region entry on every guest thread, and a lock there
+/// would be measuring the instrument.
+static EXITS: [AtomicU64; Exit::ALL.len()] = [const { AtomicU64::new(0) }; Exit::ALL.len()];
+
+/// One region entry: the event whose *rate* is the whole question.
+///
+/// Gated on [`enabled`] rather than counted always, and that is not a
+/// micro-optimisation. At the measured rate — millions a second across several
+/// guest threads — an unconditional `fetch_add` on one cache line is a
+/// contended store the guest threads would queue behind, which would slow the
+/// program by more than the thing being counted costs.
+pub fn record_entry(missed_window: bool) {
+    if !enabled() {
+        return;
+    }
+    ENTRIES.fetch_add(1, Relaxed);
+    if missed_window {
+        WINDOW_MISSES.fetch_add(1, Relaxed);
+    }
+}
+
+/// A region entry that turned out to be a *tail call to an import*: the run
+/// loop's first question, asked before every entry and answered "yes" only
+/// here. Its cost when the answer is "no" is what
+/// [`crate::Program::import_at`] is doing at the top of a profile.
+pub fn record_tail_import() {
+    if enabled() {
+        TAIL_IMPORTS.fetch_add(1, Relaxed);
+    }
+}
+
+/// How one region entry ended.
+pub fn record_exit(exit: Exit) {
+    if enabled() {
+        EXITS[exit as usize].fetch_add(1, Relaxed);
+    }
 }
 
 /// One completed region selection: how long it took to decide the extent.
@@ -173,6 +302,36 @@ pub fn report() {
         REFUSED.load(Relaxed),
         TAIL_EXITS.load(Relaxed),
     );
+    // The exit mix, which is the other half of "why is this slow" and the half
+    // translation time cannot answer. Printed as a rate as well as a count:
+    // a share says which arm to work on and a rate says whether any of them is
+    // worth working on at all.
+    let entries = ENTRIES.load(Relaxed);
+    if entries > 0 {
+        let per_second = entries as f64 / wall.as_secs_f64().max(f64::EPSILON);
+        eprintln!(
+            "rosetta3: stats  {entries} region entr(ies), {:.2}M/s, {} window miss(es) ({:.2}%), \
+             {} tail call(s) to an import ({:.2}%)",
+            per_second / 1e6,
+            WINDOW_MISSES.load(Relaxed),
+            100.0 * WINDOW_MISSES.load(Relaxed) as f64 / entries as f64,
+            TAIL_IMPORTS.load(Relaxed),
+            100.0 * TAIL_IMPORTS.load(Relaxed) as f64 / entries as f64,
+        );
+        let mut mix: Vec<(u64, &str)> = Exit::ALL
+            .iter()
+            .map(|&e| (EXITS[e as usize].load(Relaxed), e.label()))
+            .filter(|&(n, _)| n > 0)
+            .collect();
+        mix.sort_by_key(|&(n, _)| std::cmp::Reverse(n));
+        eprintln!(
+            "rosetta3: stats  exits by kind  {}",
+            mix.iter()
+                .map(|(n, l)| format!("{l} {:.1}%", 100.0 * *n as f64 / entries as f64))
+                .collect::<Vec<_>>()
+                .join("  "),
+        );
+    }
     // Whether the import stubs did anything, which is three questions and not
     // one. See [`crate::trampoline::counts`].
     if let Some((made, substituted, reached)) = crate::trampoline::counts() {

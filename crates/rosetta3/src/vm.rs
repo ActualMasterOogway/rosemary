@@ -302,6 +302,36 @@ fn instruction_name(reason: ExitReason, code: u32) -> Option<String> {
     Some(format!("{code:?}"))
 }
 
+/// An exit, as [`crate::stats`] counts them.
+///
+/// The mapping is not the identity, and the place it is not is `UnknownJump`:
+/// its `TransferKind` separates a transfer the *guest* made from one the
+/// *translation* could not serve, and a run where the second is large is a run
+/// where the region policy is cutting in the wrong places rather than one where
+/// the guest branches a lot. Two different work items behind one `ExitReason`.
+fn classify(exit: ExitReason, code: u32) -> crate::stats::Exit {
+    use crate::stats::Exit;
+    match exit {
+        ExitReason::Return => Exit::Return,
+        ExitReason::None => Exit::Fallthrough,
+        ExitReason::ImportedFunctionCall => Exit::Import,
+        ExitReason::IndirectCall => Exit::Indirect,
+        ExitReason::Cpuid | ExitReason::Syscall | ExitReason::UnimplementedInstruction => {
+            Exit::Instruction
+        }
+        ExitReason::UnknownJump => match TransferKind::try_from(code) {
+            Ok(TransferKind::DirectCall) => Exit::DirectCall,
+            Ok(TransferKind::RegionTail | TransferKind::NoResumePoint) => Exit::RegionTail,
+            Ok(TransferKind::IndirectJump) => Exit::IndirectJump,
+            Ok(TransferKind::Return) => Exit::ReturnOut,
+            Ok(TransferKind::DirectJump) => Exit::DirectJump,
+            Ok(TransferKind::ConditionalJump) => Exit::CondJump,
+            _ => Exit::OtherJump,
+        },
+        _ => Exit::Other,
+    }
+}
+
 impl From<AbiError> for VmError {
     fn from(e: AbiError) -> Self {
         VmError::Abi(e)
@@ -1020,6 +1050,7 @@ impl Vm {
                 .import_at(pc)
                 .or_else(|| self.program.import_by_target(pc))
             {
+                crate::stats::record_tail_import();
                 ctx.imported_function_va = pc;
                 self.service_site_as(site, ctx, true)?;
                 // Unless the call transferred control instead of returning. A
@@ -1048,9 +1079,11 @@ impl Vm {
             // PC it has already run needs no lock, no map walk and no
             // comparison chain. See [`crate::thread::CodeWindow`] for why a
             // remembered translation cannot go stale.
+            let mut missed = false;
             let translation = match state.code().get(pc) {
                 Some(hit) => hit,
                 None => {
+                    missed = true;
                     // The lock is taken to look up or lift and released before
                     // guest code runs, which is what keeps a callback
                     // re-entering the VM on this same thread from deadlocking
@@ -1075,8 +1108,10 @@ impl Vm {
                 }
             };
             ctx.rip = pc;
+            crate::stats::record_entry(missed);
             let exit = translation.enter(ctx);
             state.rsp.set(ctx.rsp);
+            crate::stats::record_exit(classify(exit, ctx.exit_code));
             from = Some(Transfer {
                 pc,
                 exit,
