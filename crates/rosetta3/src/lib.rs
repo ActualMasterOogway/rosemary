@@ -133,6 +133,7 @@ pub mod jit;
 pub mod jmpbuf;
 pub mod lldb;
 pub mod objc;
+pub mod profile;
 pub mod program;
 pub mod region;
 pub mod shims;

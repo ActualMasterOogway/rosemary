@@ -153,6 +153,125 @@ pub fn placed(
     placed.len()
 }
 
+/// What a host `pc` turned out to be, as far as the placed translations can say.
+///
+/// The crash path answers this question with [`say_region`], inside a signal
+/// handler, into a fixed buffer. [`crate::profile`] asks the same question a
+/// thousand times a second on an ordinary thread and wants a value back, so the
+/// lookup is written once here and worded twice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Attribution {
+    /// The `pc` is inside a translation, and microlift's source locations name
+    /// the guest instruction it was lifted from. The only answer that is a work
+    /// item on its own.
+    Instruction {
+        /// The guest address of the instruction.
+        guest_va: u64,
+        /// The first guest address of the region it belongs to, which is the
+        /// key a per-region rollup aggregates on.
+        region: u64,
+    },
+    /// Inside a translation, in code no guest instruction was attributed to: a
+    /// prologue, an epilogue, or the entry dispatch — or any of it, if this
+    /// region's map was dropped because the [budget](MAP_BUDGET) was spent.
+    Translated {
+        region: u64,
+        /// Whether the `pc` was past everything the map attributed, which is
+        /// the [slack](EPILOGUE_SLACK) case rather than the covered one.
+        ///
+        /// The two are worth counting apart. Inside the map's own extent the
+        /// region is certain and only the instruction is missing; past it, the
+        /// region itself is an inference from "the nearest entry point at or
+        /// below", and a profile in which that bucket is large is a profile
+        /// whose model of the process has a hole in it.
+        beyond: bool,
+    },
+    /// In no translation this process placed.
+    Elsewhere,
+}
+
+/// How far past a translation's last attributed byte still counts as that
+/// translation.
+///
+/// [`Placed::attributed_end`] deliberately under-counts — Cranelift attributes
+/// no source location to a prologue or an epilogue — so the true end of the
+/// compiled code is somewhere past it and nothing records where. A page is the
+/// granularity the code allocator hands out, so within one page of the last
+/// attributed byte the `pc` is still inside this region's own allocation;
+/// beyond it, claiming the region would be a guess.
+const EPILOGUE_SLACK: u64 = 4096;
+
+/// Which guest code a host `pc` is, if it is any.
+///
+/// Takes the lock rather than [`Mutex::try_lock`], because unlike the handler
+/// this has a thread of its own and blocking briefly against a compile is
+/// cheaper than dropping the sample.
+pub fn attribute(pc: u64) -> Attribution {
+    let placed = PLACED.lock().unwrap_or_else(|e| e.into_inner());
+    let found = match placed.binary_search_by_key(&pc, |p| p.code) {
+        Ok(i) => Some(&placed[i]),
+        Err(0) => None,
+        Err(i) => Some(&placed[i - 1]),
+    };
+    let Some(entry) = found else {
+        return Attribution::Elsewhere;
+    };
+    let region = entry.guest.0;
+    if let Ok(offset) = u32::try_from(pc - entry.code) {
+        if let Some(guest_va) = lookup(&entry.map, offset) {
+            return Attribution::Instruction { guest_va, region };
+        }
+    }
+    // Unattributed. Inside what the map covers it is certainly this
+    // translation; a little past the end it is this translation's epilogue;
+    // far past it, the nearest entry at or below is no longer evidence of
+    // anything and saying so beats naming a region.
+    let end = entry.attributed_end();
+    match pc < end.saturating_add(EPILOGUE_SLACK) {
+        true => Attribution::Translated {
+            region,
+            beyond: pc >= end,
+        },
+        false => Attribution::Elsewhere,
+    }
+}
+
+/// One placed translation, as anything outside this module may see it.
+///
+/// A view rather than a borrow of [`Placed`] because the vector is behind a
+/// mutex that must not escape: a caller holding a reference into it would be
+/// holding the lock every compile contends for.
+pub struct PlacedRegion {
+    /// Host address the compiled code begins at.
+    pub code: u64,
+    /// One past the last host byte attributed to a guest instruction — see
+    /// [`Placed::attributed_end`] for why this is not the code's length.
+    pub code_end: u64,
+    /// Guest addresses the region covers.
+    pub guest: (u64, u64),
+    /// The guest `rip` the region was lifted to be entered at.
+    pub lifted_for: u64,
+}
+
+/// Walk every translation placed so far, newest layout order (by host address).
+///
+/// The lock is held for the whole walk, so `f` must not compile anything. It is
+/// called with the region and its host-to-guest ranges, which together are the
+/// whole of what an *external* profiler needs to resolve a `pc` in an anonymous
+/// mapping — see [`crate::profile::write_map`].
+pub fn for_each_placed(mut f: impl FnMut(&PlacedRegion, &[GuestCodeRange])) {
+    let placed = PLACED.lock().unwrap_or_else(|e| e.into_inner());
+    for entry in placed.iter() {
+        let view = PlacedRegion {
+            code: entry.code,
+            code_end: entry.attributed_end(),
+            guest: entry.guest,
+            lifted_for: entry.lifted_for,
+        };
+        f(&view, &entry.map);
+    }
+}
+
 /// Whether [`install`] has run. Handlers are process-wide.
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 

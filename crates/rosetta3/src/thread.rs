@@ -255,6 +255,25 @@ pub fn by_port(port: u32) -> Option<&'static GuestThread> {
     None
 }
 
+/// Call `f` with the Mach port of every registered guest thread.
+///
+/// Takes no lock, for the reason the table itself takes none: the caller is a
+/// [profiler](crate::profile) that suspends each thread as it is named, and a
+/// lock held across a suspend is a lock the suspended thread can never be
+/// waiting on again.
+///
+/// A thread that ends mid-walk is reported and then fails to suspend, which is
+/// the ordinary race and is why the sampler treats a failed suspend as a miss
+/// rather than an error.
+pub fn each_port(mut f: impl FnMut(u32)) {
+    for slot in &TABLE {
+        let port = slot.port.load(Ordering::Acquire);
+        if port != 0 {
+            f(port);
+        }
+    }
+}
+
 /// Everything about executing guest code that belongs to one host thread.
 pub struct ThreadState {
     /// The half of this state other threads read. Held here as well so the

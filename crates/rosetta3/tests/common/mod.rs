@@ -1390,6 +1390,56 @@ pub fn fault_fixture() -> Option<String> {
         .clone()
 }
 
+/// A program with one loop the profiler has to find, and a second one it has to
+/// *not* attribute to the guest.
+///
+/// `spin` is arithmetic microlift translates, so its samples are in a
+/// translation and must resolve to a guest instruction inside this image.
+/// `chatty` leaves the guest on every iteration, so its cost belongs to the
+/// runtime and to the host's libraries and must not be counted as translated.
+/// A profiler that mixed the two would be answering the one question M8.2 was
+/// opened to ask — is this exit-bound or code-quality-bound — with a coin toss.
+///
+/// The iteration counts are chosen for about a second of work on an M-series
+/// host, which at the default rate is hundreds of samples: enough for a share
+/// to mean something, short enough to sit in a test suite.
+pub const PROFILE_C: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+
+static unsigned long spin(unsigned long n) {
+    unsigned long a = 1;
+    for (unsigned long i = 0; i < n; i++) {
+        a = a * 6364136223846793005UL + 1442695040888963407UL;
+        a ^= a >> 33;
+    }
+    return a;
+}
+
+static unsigned long chatty(unsigned long n) {
+    unsigned long a = 0;
+    char buf[32];
+    for (unsigned long i = 0; i < n; i++) {
+        snprintf(buf, sizeof buf, "%lu", i);
+        a += (unsigned long)atoi(buf);
+    }
+    return a;
+}
+
+int main(void) {
+    printf("%lu %lu\n", spin(200000000UL), chatty(100000UL));
+    return 0;
+}
+"#;
+
+/// Build [`PROFILE_C`], or `None` if this host cannot.
+pub fn profile_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("guest_profile", PROFILE_C, &["-O1"]))
+        .clone()
+}
+
 /// Build [`TLS_C`], or `None` if this host cannot.
 pub fn tls_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();

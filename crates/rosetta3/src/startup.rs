@@ -74,6 +74,11 @@ pub fn run(vm: &Vm) -> Result<i32, VmError> {
     // Before any framework can ask a question about the main executable and get
     // an answer about *this* binary rather than the guest. See [`crate::compat`].
     crate::compat::install();
+    // Beside the fault reporter and for the same reason: before any guest code,
+    // so the first initializer is as sampled as anything an hour in. A
+    // start-up that loads forty thousand shaders is a thing worth seeing the
+    // shape of. See [`crate::profile`].
+    crate::profile::start();
     say_image_map(vm);
     // Before any guest code, as dyld does it: `libobjc` realizes an image's
     // classes when the image is mapped, which is strictly before that image's
