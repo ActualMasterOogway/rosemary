@@ -448,14 +448,61 @@ fn attribute(counts: &mut Counts, pc: u64) {
 /// the same reason: before any guest code, so the first initializer is as
 /// sampled as anything an hour in.
 pub fn start() {
+    if configured_hz().is_some() {
+        set_sampling(true);
+    }
+}
+
+/// Whether the sampler is taking samples right now.
+///
+/// Distinct from "the thread exists": the thread, once started, runs for the
+/// life of the process and simply declines to sweep while this is false. A
+/// paused sampler costs one relaxed load per timer tick.
+static SAMPLING: AtomicBool = AtomicBool::new(false);
+
+/// Whether sampling is on at this instant.
+pub fn sampling() -> bool {
+    SAMPLING.load(Relaxed)
+}
+
+/// Start or stop sampling. Returns the state it is now in.
+///
+/// **Turning it on resets the histogram**, and that is the interesting decision
+/// rather than an implementation detail. A profile's every figure is a share of
+/// *running samples*, so a histogram that spanned a pause would answer "where
+/// did time go across the two windows I happened to sample", which is a question
+/// nobody has. Resetting makes every number mean "since you turned this on",
+/// which is what someone who just pressed a key is asking.
+///
+/// Turning it off keeps the counts, so the panel goes on showing the last
+/// window's answer rather than blanking.
+pub fn set_sampling(on: bool) -> bool {
+    if !on {
+        SAMPLING.store(false, Relaxed);
+        return false;
+    }
+    let mut guard = COUNTS.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(Counts::default());
+    *STARTED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+    SWEEPS.store(0, Relaxed);
+    SWEEP_NS.store(0, Relaxed);
+    drop(guard);
+    ensure_thread();
+    SAMPLING.store(true, Relaxed);
+    true
+}
+
+/// Start the sampler thread, once, whether or not the environment asked.
+///
+/// Separate from [`start`] because a run that never set `ROSETTA3_PROFILE` can
+/// still be asked for a profile from [`crate::gui`], and the rate it gets is the
+/// default one — there is no keystroke that could name a number.
+fn ensure_thread() {
     static RUNNING: AtomicBool = AtomicBool::new(false);
-    let Some(hz) = configured_hz() else { return };
     if RUNNING.swap(true, Relaxed) {
         return;
     }
-
-    *COUNTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(Counts::default());
-    *STARTED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+    let hz = configured_hz().unwrap_or(DEFAULT_HZ);
     install_exit_report();
 
     let period = Duration::from_nanos(1_000_000_000 / u64::from(hz));
@@ -511,9 +558,19 @@ fn sweep_forever(period: Duration, every: Option<Duration>) {
         // SAFETY: a deadline on the same absolute clock the value came from.
         unsafe { mach_wait_until(next + jitter.next() % spread) };
 
+        // Paused. The thread keeps its timer rather than exiting, because the
+        // key that turned sampling off is the same key that turns it back on and
+        // a sampler that had to be respawned would lose the first samples after
+        // it — which, on a keystroke, are the ones being asked for.
+        if !SAMPLING.load(Relaxed) {
+            continue;
+        }
+
         let began = Instant::now();
         let mut guard = COUNTS.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(counts) = guard.as_mut() else { return };
+        let Some(counts) = guard.as_mut() else {
+            continue;
+        };
         let mut found = 0;
         // The registry is scanned with the counts held, which is safe in the
         // one direction that matters: a sampled thread never takes this lock —
@@ -728,6 +785,130 @@ pub fn report() {
     // the point of being killed would otherwise print translation figures every
     // few seconds during start-up and nothing at all afterwards.
     crate::stats::report();
+}
+
+// -------------------------------------------------------------- snapshots ---
+
+/// One row of a ranked list, resolved and with its share already worked out.
+#[derive(Clone)]
+pub struct Entry {
+    pub count: u64,
+    pub share: f64,
+    /// The address, as the guest's own program sees it.
+    pub va: u64,
+    /// `image+offset`, or empty for code that belongs to no image — which is
+    /// code the guest generated, and is the honest answer for it.
+    pub located: String,
+}
+
+/// One host symbol the guest's threads were found inside.
+#[derive(Clone)]
+pub struct HostEntry {
+    pub count: u64,
+    pub share: f64,
+    pub image: String,
+    pub symbol: String,
+    /// This runtime, rather than one of the host's libraries. The distinction
+    /// the first performance question turns on, and the one every existing tool
+    /// paints the same colour.
+    pub runtime: bool,
+}
+
+/// What the sampler has seen, ranked, for a consumer that is not stderr.
+///
+/// [`report`] renders the same counts as prose. This hands them over as data so
+/// [`crate::gui`] can draw them, and it is deliberately a *copy*: the sampler's
+/// lock is held for the length of the ranking and not a moment longer, because
+/// every millisecond it is held is a sweep that does not happen.
+#[derive(Clone)]
+pub struct Snapshot {
+    /// Wall time since sampling started; the denominator for a rate.
+    pub wall: Duration,
+    /// Samples on a thread that was on a CPU. Every share below is of this.
+    pub running: u64,
+    /// Samples on a thread that was parked, kept out of the denominator.
+    pub blocked: u64,
+    /// Guest threads found in the registry on the most recent sweep.
+    pub threads: usize,
+    /// Sweeps completed, and the rate that works out to. The *achieved* rate,
+    /// which is the only one worth showing — see the module note.
+    pub sweeps: u64,
+    pub sweeps_per_second: f64,
+    /// Share of one core the sampler itself is costing.
+    pub sampler_share: f64,
+    /// Shares of running time, in the four buckets that decide what to work on.
+    pub translated: f64,
+    pub runtime: f64,
+    pub library: f64,
+    pub unaccounted: f64,
+    /// The two rankings, longest first. **Believe the first one**: Cranelift
+    /// attributes no source location to a prologue, an epilogue or to anything
+    /// its optimiser produced without one, so an instruction's share is a lead
+    /// rather than a measurement. See the module note.
+    pub regions: Vec<Entry>,
+    pub instructions: Vec<Entry>,
+    pub host: Vec<HostEntry>,
+}
+
+/// Rank everything the sampler has, keeping the top `top` of each list.
+///
+/// `None` when sampling was never asked for, which a caller must show as
+/// "`ROSETTA3_PROFILE` is not set" rather than as an empty profile: the two look
+/// identical in the data and mean opposite things.
+pub fn snapshot(top: usize) -> Option<Snapshot> {
+    let guard = COUNTS.lock().unwrap_or_else(|e| e.into_inner());
+    let counts = guard.as_ref()?;
+    let wall = STARTED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .map(|t| t.elapsed())
+        .unwrap_or_default();
+    let share = |n: u64| 100.0 * n as f64 / counts.running.max(1) as f64;
+    let translated =
+        counts.guest.values().sum::<u64>() + counts.translated_unnamed + counts.translated_beyond;
+    let sweeps = SWEEPS.load(Relaxed);
+    let in_sweep = Duration::from_nanos(SWEEP_NS.load(Relaxed));
+
+    let entries = |rows: Vec<Row>| -> Vec<Entry> {
+        rows.into_iter()
+            .take(top)
+            .map(|row| Entry {
+                count: row.count,
+                share: share(row.count),
+                va: row.va,
+                located: row.located,
+            })
+            .collect()
+    };
+    let mut hosts: Vec<&HostSite> = counts.host.values().collect();
+    hosts.sort_by(|a, b| b.count.cmp(&a.count).then(a.symbol.cmp(&b.symbol)));
+
+    Some(Snapshot {
+        wall,
+        running: counts.running,
+        blocked: counts.blocked,
+        threads: counts.threads,
+        sweeps,
+        sweeps_per_second: sweeps as f64 / wall.as_secs_f64().max(f64::EPSILON),
+        sampler_share: 100.0 * in_sweep.as_secs_f64() / wall.as_secs_f64().max(f64::EPSILON),
+        translated: share(translated),
+        runtime: share(counts.runtime),
+        library: share(counts.library),
+        unaccounted: share(counts.unknown),
+        regions: entries(rank(&counts.region)),
+        instructions: entries(rank(&counts.guest)),
+        host: hosts
+            .into_iter()
+            .take(top)
+            .map(|site| HostEntry {
+                count: site.count,
+                share: share(site.count),
+                image: site.image.clone(),
+                symbol: site.symbol.clone(),
+                runtime: site.runtime,
+            })
+            .collect(),
+    })
 }
 
 /// One ranked list on stderr, top [`TOP`] only.

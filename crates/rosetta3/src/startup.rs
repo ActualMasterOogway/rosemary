@@ -79,6 +79,12 @@ pub fn run(vm: &Vm) -> Result<i32, VmError> {
     // start-up that loads forty thousand shaders is a thing worth seeing the
     // shape of. See [`crate::profile`].
     crate::profile::start();
+    // And the overlay, which is the same figures where they can be read while
+    // the program is running. Installed here rather than lazily because what it
+    // installs is a *key binding*, and a binding that appears once the guest has
+    // drawn its first frame is one that does not work during a slow start-up —
+    // which is a window worth looking at. See [`crate::gui`].
+    crate::gui::install();
     say_image_map(vm);
     // Before any guest code, as dyld does it: `libobjc` realizes an image's
     // classes when the image is mapped, which is strictly before that image's

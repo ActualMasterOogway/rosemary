@@ -1016,6 +1016,13 @@ fn send(
         }
     }
 
+    // The overlay's seam. A frame ends at a `presentDrawable:` or a
+    // `flushBuffer`, and this is where those are seen — before the dispatch,
+    // because on both APIs there is nothing left to draw into afterwards. Costs
+    // a load and four integer compares when the overlay is idle; see
+    // [`crate::gui::hook`].
+    crate::gui::hook::before_send(sel, host_receiver, arg_reg(ctx, base + 2));
+
     // SAFETY: `host_receiver` is a pointer the host runtime owns — an object it
     // allocated, or a class it realized — which is what `object_getClass` takes.
     let class = match search {

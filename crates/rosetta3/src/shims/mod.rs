@@ -52,7 +52,7 @@ pub mod component;
 pub mod coregraphics;
 pub mod coremedia;
 pub mod curl;
-mod host;
+pub(crate) mod host;
 pub mod intdiv;
 pub mod ioctl;
 pub mod iokit;
@@ -155,6 +155,9 @@ pub fn dispatch(
                 // .or_else(|| crate::unwind::shim_for(name))
                 .or_else(|| crate::objc::dispatch::shim_for(name))
                 .or_else(|| crate::dyld::shim_for(name))
+                // The overlay's OpenGL seam. Only present when the overlay is on;
+                // see [`crate::gui::hook::shim_for`].
+                .or_else(|| crate::gui::hook::shim_for(name))
             {
                 return Some(f(name, ctx, mem));
             }
@@ -218,6 +221,7 @@ pub fn is_shimmed(symbol: &str) -> bool {
         || zlib::shim_for(name).is_some()
         || audiounit::shim_for(name).is_some()
         || curl::shim_for(name).is_some()
+        || crate::gui::hook::shim_for(name).is_some()
     {
         return true;
     }

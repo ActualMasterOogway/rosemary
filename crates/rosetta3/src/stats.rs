@@ -18,13 +18,64 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
-/// Whether `ROSETTA3_STATS` asked for translation to be accounted for.
+/// Whether the exit histogram is being counted, right now.
 ///
-/// Read once. The alternative is a `getenv` per lift, which would be a cost
-/// large enough to change what it is measuring.
+/// **Was `ROSETTA3_STATS`, read once into a `OnceLock`; is now a switch**, so
+/// that [`crate::gui`] can turn it on for the ten seconds someone wants a rate
+/// and off again. That matters more here than anywhere else in this runtime,
+/// because this is the counter that is *documented as perturbing the program it
+/// measures*: one relaxed `fetch_add` per region entry, at fifteen million
+/// entries a second, measured at 44% of a steady-state window in the runtime
+/// with it off and 61% with it on. A switch turns "quote shares from one run and
+/// rates from another" into two keystrokes in one run.
+///
+/// The read has to stay as cheap as the `OnceLock` deref it replaces, since it
+/// is on the region-entry path. It is: one relaxed load and a compare, with the
+/// environment consulted exactly once on the cold path.
+///
+/// What a caller must know: **counters do not rewind**. Time spent with this off
+/// is time the events happened and were not counted, so a rate differenced
+/// across a toggle is wrong for exactly one window. [`crate::gui::panel`] shows
+/// rates over its own half-second window, so it self-corrects; a reader of
+/// [`report`]'s cumulative totals has to know when it was on.
 pub fn enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("ROSETTA3_STATS").is_some())
+    match COUNTING.load(Relaxed) {
+        ON => true,
+        OFF => false,
+        _ => from_environment(),
+    }
+}
+
+const UNKNOWN: u8 = 0;
+const OFF: u8 = 1;
+const ON: u8 = 2;
+
+static COUNTING: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(UNKNOWN);
+
+/// The first read, which is what `ROSETTA3_STATS` decides.
+///
+/// Cold, and marked so: after it runs once every later [`enabled`] is a load.
+#[cold]
+fn from_environment() -> bool {
+    let on = std::env::var_os("ROSETTA3_STATS").is_some();
+    COUNTING.store(if on { ON } else { OFF }, Relaxed);
+    on
+}
+
+/// Turn the exit histogram on or off. Returns the state it is now in.
+///
+/// Bound to a hotkey. The translation counters — regions, lift and compile time —
+/// are not affected, because they are not gated: they cost one `fetch_add` per
+/// *translation*, which is rare, and a program in steady state has stopped
+/// translating altogether.
+pub fn set_enabled(on: bool) -> bool {
+    COUNTING.store(if on { ON } else { OFF }, Relaxed);
+    if on {
+        // A run that started without `ROSETTA3_STATS` never started the clock
+        // the report is a share of, and never installed the exit report.
+        start_inner();
+    }
+    on
 }
 
 macro_rules! counters {
@@ -110,7 +161,7 @@ impl Exit {
         Exit::Other,
     ];
 
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Exit::Return => "terminating block",
             Exit::ReturnOut => "ret out of region",
@@ -263,12 +314,19 @@ fn origin() -> Instant {
 /// late only makes the reported share pessimistic.
 pub fn start() {
     if enabled() {
-        origin();
-        // A run that ends in the guest's own `exit` never returns to the
-        // driver, and a report printed only on the way out would therefore be
-        // printed for almost no run at all.
-        install_exit_report();
+        start_inner();
     }
+}
+
+/// The half of [`start`] that is not the environment check, so that
+/// [`set_enabled`] can reach it when a run that was never asked to count is
+/// asked to, mid-flight.
+fn start_inner() {
+    origin();
+    // A run that ends in the guest's own `exit` never returns to the driver, and
+    // a report printed only on the way out would therefore be printed for almost
+    // no run at all.
+    install_exit_report();
 }
 
 /// Print the report when the process ends, however it ends.
@@ -391,5 +449,95 @@ pub fn report() {
             small.len() * 4096,
             large.len() * 16384,
         );
+    }
+}
+
+// -------------------------------------------------------------- snapshots ---
+
+/// Every counter above, read at one moment, for a consumer that is not stderr.
+///
+/// [`crate::gui`] is the reason this exists: an overlay refreshing a few times a
+/// second cannot parse [`report`]'s prose, and it wants **rates over its own
+/// window** rather than the cumulative totals the report prints — which it gets
+/// by differencing two of these against their [`wall`](Snapshot::wall) clocks.
+///
+/// The atomics are read one at a time and are being written by every guest
+/// thread, so a snapshot is not an instant: two counters here can be a few
+/// microseconds apart. That is the right trade for the reader — a lock on this
+/// path would be a lock on the reader's side of counters whose whole design is
+/// that the writers never take one.
+#[derive(Clone, Default)]
+pub struct Snapshot {
+    /// Whether `ROSETTA3_STATS` was set. When it was not, the four fields the
+    /// exit mix is made of are all zero because *nothing counted them* — not
+    /// because the events did not happen. A reader must say which of the two it
+    /// is looking at rather than drawing an empty chart.
+    pub counted: bool,
+    /// Time since the driver started translating; the denominator for a rate.
+    pub wall: Duration,
+    /// Translations, and what came out of them. Recorded whether or not
+    /// `ROSETTA3_STATS` was set — see [`record_lift`], which is not gated —
+    /// so these are honest in any run.
+    pub regions: u64,
+    pub instructions: u64,
+    pub bytes: u64,
+    pub select: Duration,
+    pub lift: Duration,
+    pub compile: Duration,
+    pub refused: u64,
+    pub tail_exits: u64,
+    /// Region entries and their shape. Zero unless [`enabled`].
+    pub entries: u64,
+    pub window_misses: u64,
+    pub tail_imports: u64,
+    pub linked: u64,
+    /// The width of the pinned block-link ABI, when there is one. Its presence
+    /// is what makes [`linked`](Snapshot::linked) meaningless — see
+    /// [`crate::jit::pinned_link_abi`] — and a reader has to say so rather than
+    /// draw a zero.
+    pub pinned_link_registers: Option<usize>,
+    /// Exit kinds with a non-zero count, most frequent first.
+    pub exits: Vec<(&'static str, u64)>,
+    /// `(made, substituted, reached)` from [`crate::trampoline::counts`].
+    pub trampolines: Option<(u64, u64, u64)>,
+    /// Distinct pages of lifted code, at 4 KiB and at 16 KiB.
+    pub pages: Option<(usize, usize)>,
+}
+
+/// Read every counter, once.
+pub fn snapshot() -> Snapshot {
+    let ns = |c: &AtomicU64| Duration::from_nanos(c.load(Relaxed));
+    let mut exits: Vec<(&'static str, u64)> = Exit::ALL
+        .iter()
+        .map(|&e| (e.label(), EXITS[e as usize].load(Relaxed)))
+        .filter(|&(_, n)| n > 0)
+        .collect();
+    exits.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+    Snapshot {
+        counted: enabled(),
+        wall: origin().elapsed(),
+        regions: REGIONS.load(Relaxed),
+        instructions: INSTRUCTIONS.load(Relaxed),
+        bytes: BYTES.load(Relaxed),
+        select: ns(&SELECT_NS),
+        lift: ns(&LIFT_NS),
+        compile: ns(&COMPILE_NS),
+        refused: REFUSED.load(Relaxed),
+        tail_exits: TAIL_EXITS.load(Relaxed),
+        entries: ENTRIES.load(Relaxed),
+        window_misses: WINDOW_MISSES.load(Relaxed),
+        tail_imports: TAIL_IMPORTS.load(Relaxed),
+        linked: LINKED.load(Relaxed),
+        pinned_link_registers: crate::jit::pinned_link_abi().map(|abi| abi.len()),
+        exits,
+        trampolines: crate::trampoline::counts(),
+        // Cloned rather than borrowed: the sets are behind a lock the lifter
+        // takes, and holding it across a caller's formatting would put a render
+        // thread in front of every translation.
+        pages: PAGES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|(small, large)| (small.len(), large.len())),
     }
 }
