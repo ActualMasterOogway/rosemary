@@ -751,6 +751,45 @@ fn clear_errno() {
     unsafe { *libc::__error() = 0 };
 }
 
+/// The guest's `errno`, put back exactly as it was.
+///
+/// The counterpart to [`clear_errno`], and the reason both exist is the same
+/// sentence: `errno` is passthrough, so it is *the guest's* `errno` that this
+/// runtime's own work runs on top of. Clearing it once per thread makes the
+/// initial value right; this makes every value after it right, by holding
+/// anything the runtime does between two guest instructions to leaving no trace.
+///
+/// **Not defensive tidying — a measured bug, twice.** `dlopen` of a framework
+/// this system does not have sets `ENOENT`, and [`crate::gui`]'s `sys` does
+/// exactly that on the main thread between [`clear_errno`] and the guest's
+/// `main`. So does Cranelift's CPU detection, in
+/// [`crate::jit::backend`]: `cranelift_native::builder()` probes for optional
+/// arm64 features with `sysctlbyname`, one of the names is absent on this
+/// machine, and the failed probe leaves `ENOENT` on whatever thread compiled the
+/// first region. That is the guest's *first* region — so the very first thing a
+/// guest could observe about `errno` was a 2 it did not cause, which is what
+/// `tests/thread.rs`'s `a_guest_thread_sees_its_own_errno` had been failing on.
+///
+/// The rule this expresses: a shim holds no guard, because a shim's `errno` *is*
+/// the guest's answer; everything the runtime does for its own reasons holds
+/// one.
+pub(crate) struct Errno(i32);
+
+impl Errno {
+    pub(crate) fn held() -> Errno {
+        // SAFETY: `__error()` returns this thread's own `errno` slot, live for
+        // as long as the thread is.
+        Errno(unsafe { *libc::__error() })
+    }
+}
+
+impl Drop for Errno {
+    fn drop(&mut self) {
+        // SAFETY: as above.
+        unsafe { *libc::__error() = self.0 };
+    }
+}
+
 /// The base of this host thread's thread-specific data array — the value a
 /// guest's `%gs` segment base must hold.
 ///
@@ -941,4 +980,34 @@ pub fn ensure() -> Result<&'static ThreadState, VmError> {
         return Ok(existing);
     }
     adopt(StackRequest::Default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The guard restores, rather than clearing.
+    ///
+    /// The distinction is the whole point: a guest that has just had a call fail
+    /// is entitled to keep the `errno` that failure set across whatever this
+    /// runtime does next, so a guard that zeroed would be as wrong as no guard
+    /// at all — differently wrong, and harder to see.
+    #[test]
+    fn a_held_errno_comes_back_exactly_as_it_was() {
+        // SAFETY: this thread's own slot, in a test that owns the thread.
+        unsafe { *libc::__error() = libc::EPIPE };
+        {
+            let _held = Errno::held();
+            unsafe { *libc::__error() = libc::ENOENT };
+        }
+        assert_eq!(unsafe { *libc::__error() }, libc::EPIPE);
+
+        // Including zero, which is the value the guest sees for most of a run.
+        unsafe { *libc::__error() = 0 };
+        {
+            let _held = Errno::held();
+            unsafe { *libc::__error() = libc::ENOENT };
+        }
+        assert_eq!(unsafe { *libc::__error() }, 0);
+    }
 }

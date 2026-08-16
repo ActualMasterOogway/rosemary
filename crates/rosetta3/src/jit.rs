@@ -569,7 +569,24 @@ pub fn isa_settings() -> &'static [(&'static str, &'static str)] {
 ///
 /// Everything that compiles goes through here rather than
 /// `CraneliftBackend::new()`, which would take Cranelift's unoptimised default.
+///
+/// ## Why it holds an `errno` guard
+///
+/// Compiling runs *on a guest thread*, between two guest instructions, and
+/// `errno` is passthrough — so anything this does to `errno` is something the
+/// guest reads as its own. Building the ISA does one thing to it: `cranelift-
+/// native` detects the host's optional arm64 features with `sysctlbyname`, and
+/// a probe for a name this machine does not have fails with `ENOENT`.
+///
+/// It happens once per process, because the feature detection underneath caches
+/// its answers — and once is enough to be exactly the worst case. The first
+/// region compiled is the first region *run*, so a guest whose `main` began
+/// `fd = open(...); printf("%d", errno)` saw a 2 before it had made a call that
+/// could have set one. See [`crate::thread::Errno`], and
+/// `tests/thread.rs`'s `a_guest_thread_sees_its_own_errno`, which is that
+/// program.
 pub fn backend() -> microlift::Result<CraneliftBackend> {
+    let _errno = crate::thread::Errno::held();
     CraneliftBackend::with_flags(flags(), isa_settings())
 }
 
@@ -592,6 +609,10 @@ pub fn backend() -> microlift::Result<CraneliftBackend> {
 ///
 /// [`Function`]: cranelift_codegen::ir::Function
 pub fn frontend_config() -> microlift::Result<TargetFrontendConfig> {
+    // The same guard, for the same reason and the same call: see [`backend`].
+    // This one is reached from [`crate::thunk`], which builds a trampoline while
+    // a guest thread is inside a host function waiting for its callback.
+    let _errno = crate::thread::Errno::held();
     let isa = cranelift_native::builder()
         .map_err(|e| MicroliftError::CraneliftError(e.to_string()))?
         .finish(flags())

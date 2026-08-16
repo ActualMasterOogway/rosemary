@@ -144,7 +144,7 @@ pub fn install() {
     if !enabled() {
         return;
     }
-    let _errno = Errno::held();
+    let _errno = crate::thread::Errno::held();
     hotkey::install();
     ARMED.store(true, Relaxed);
     // The panel, open from the first frame, without a keystroke.
@@ -163,51 +163,6 @@ pub fn install() {
     );
 }
 
-/// The guest's `errno`, put back exactly as it was.
-///
-/// **This is not defensive tidying, it is a bug that was measured.** `errno` is
-/// the one piece of guest state passthrough gets for free — it is `__error()` on
-/// the host thread the guest is running on, and a guest "syscall" is the host's
-/// libSystem call on that same thread, so the two agree with no work at all. See
-/// the crate note, and [`crate::thread`] on why the *initial* value still has to
-/// be cleared.
-///
-/// The consequence for anything this runtime does on a guest thread is that it
-/// must leave `errno` alone, and the overlay is full of calls that would not.
-/// `dlopen` of a framework this system does not have sets `ENOENT`; [`sys`] does
-/// exactly that on first use, on the main thread, between
-/// [`crate::thread`]'s `clear_errno` and the guest's own `main`. A guest that
-/// checks `errno` after a call that succeeded would then read a 2 it did not
-/// cause — which is the same failure the roadmap already records for a
-/// *framework's initializers*, arriving by a new route.
-///
-/// So every path from a guest thread into this module holds one of these. There
-/// are two: [`install`], on the main thread before the guest starts, and
-/// [`guarded`], which wraps every present hook and the hotkey handler.
-///
-/// Not proven by a test, and worth saying which one and why:
-/// `tests/thread.rs`'s `a_guest_thread_sees_its_own_errno` is the fixture that
-/// would catch this, and it fails on the unmodified tree as well — the guest
-/// reaches `main` with `errno` already 2 for a reason that is not the
-/// overlay's, and until that is found this guard is reasoned from
-/// [`crate::thread`]'s own argument rather than observed.
-struct Errno(i32);
-
-impl Errno {
-    fn held() -> Errno {
-        // SAFETY: `__error()` returns this thread's own `errno` slot, live for
-        // as long as the thread is.
-        Errno(unsafe { *libc::__error() })
-    }
-}
-
-impl Drop for Errno {
-    fn drop(&mut self) {
-        // SAFETY: as above.
-        unsafe { *libc::__error() = self.0 };
-    }
-}
-
 /// Run `body` on a guest's thread without leaving a trace on it.
 ///
 /// Two obligations, both about not being noticed by the program underneath.
@@ -219,9 +174,14 @@ impl Drop for Errno {
 /// shims, see [`crate::objc::dispatch`] on a message that raises. An overlay is
 /// never worth a process, so a failure disarms it and says so once.
 ///
-/// **It must not move `errno`.** See [`Errno`].
+/// **It must not move `errno`.** The overlay is full of calls that would —
+/// `dlopen` of a framework this system does not have sets `ENOENT`, and [`sys`]
+/// does exactly that on first use. Every path from a guest thread into this
+/// module holds a guard: [`install`], on the main thread before the guest
+/// starts, and this, which wraps every present hook and the hotkey handler. See
+/// [`crate::thread::Errno`].
 pub(crate) fn guarded(body: impl FnOnce()) {
-    let _errno = Errno::held();
+    let _errno = crate::thread::Errno::held();
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err() {
         ARMED.store(false, Relaxed);
         say_once("the overlay panicked and has been switched off for this run");
@@ -411,6 +371,28 @@ fn font_size(height: f32) -> f32 {
 mod tests {
     use super::*;
 
+    /// Serializes the tests that drive [`PANEL`].
+    ///
+    /// The panel's open flag is a process-global, correctly: there is one
+    /// overlay per process and a hotkey handler on a thread of Carbon's choosing
+    /// has to reach it. Three tests here set it, and `cargo test` runs them on
+    /// three threads at once — so `a_repeated_press_within_the_debounce_is_one_toggle`
+    /// closing the panel between another test's `store(true)` and its `compose`
+    /// made that test fail on roughly one run in six, with a message ("an open
+    /// panel produces a draw list") about the composer rather than about the
+    /// race.
+    ///
+    /// Serializing rather than making the flag per-test, because the flag being
+    /// global is the thing under test in the debounce case: a `PANEL` a test
+    /// could have to itself would no longer be the one the hotkey path toggles.
+    fn panel() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        // A panicking test leaves the flag wrong for the next one, which the
+        // `store` at the top of each of these already fixes; the lock itself
+        // only has to stay usable.
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Everything both backends share, exercised without a GPU.
     ///
     /// **This is the test that was missing**, and its absence cost two rounds of
@@ -426,6 +408,7 @@ mod tests {
     /// separately reported now.
     #[test]
     fn the_panel_produces_geometry_without_a_gpu() {
+        let _panel = panel();
         if font::atlas(13.0).is_none() {
             // No CoreText, no overlay — a supported configuration.
             return;
@@ -463,6 +446,7 @@ mod tests {
     /// content of a real panel rather than on a synthetic quad.
     #[test]
     fn a_scrolled_panel_draws_only_inside_itself() {
+        let _panel = panel();
         if font::atlas(13.0).is_none() {
             return;
         }
@@ -535,6 +519,7 @@ mod tests {
     /// the same press can arrive twice — and two toggles look exactly like none.
     #[test]
     fn a_repeated_press_within_the_debounce_is_one_toggle() {
+        let _panel = panel();
         PANEL.store(false, Relaxed);
         pressed(hotkey::Key::Statistics);
         assert!(
