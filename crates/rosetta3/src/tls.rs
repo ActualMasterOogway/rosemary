@@ -48,9 +48,33 @@
 //! dyld overwrites `descriptor->thunk` with a fast path after the first call,
 //! so later accesses go straight to the block. We leave the thunk alone and
 //! service every access, because the fast path would have to be *guest*-callable
-//! code and there is no guest code to point it at. The cost is a VM exit per
+//! code and there is no guest code to point it at. The cost is a call per
 //! thread-local access, which is slow and correct — the same trade the roadmap
 //! records for unresolved jump tables.
+//!
+//! ## Why the answer is cached per thread
+//!
+//! Servicing every access is only affordable if servicing one is cheap, and the
+//! first version of this was not: it took the process-global [`SLOTS`] mutex on
+//! the way in, so *every* thread-local read in the program serialised against
+//! every other one. That is invisible in a single-threaded guest and ruinous in
+//! Roblox, which reads thread-locals from a job-system thread pool — the lock is
+//! uncontended work with a contended cache line under it, and the more cores the
+//! guest gets the worse it does. The mutex was doing no useful work either: the
+//! map is written once per image at load and read forever after.
+//!
+//! What a descriptor resolves to is a pure function of the descriptor address
+//! *and the calling thread*, and it never changes for the life of either — so it
+//! is cached in the thread's own [`ThreadTls`], keyed by descriptor address, and
+//! a hit touches no shared memory at all. Only the first access to a given
+//! descriptor on a given thread reaches the registry, which is the number of
+//! lock acquisitions dropping from "per access" to "per thread, per variable".
+//!
+//! The one thing that *can* change the answer is a re-registration — a second
+//! program loaded over a first one's range, which the registry deliberately
+//! allows. [`EPOCH`] is bumped whenever that happens and stamped into each
+//! thread's cache, so a stale entry is discarded on the next access rather than
+//! handing the new program the old program's block.
 //!
 //! Thread-local destructors (`__cxa_thread_atexit`) are not run. C `_Thread_local`
 //! has none; a C++ thread-local with a non-trivial destructor is the case this
@@ -59,7 +83,8 @@
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, RwLock};
 
 use machish::report::LinkReport;
 
@@ -89,15 +114,65 @@ struct Slot {
 
 /// Every registered image's layout. Append-only; indices are handed out as
 /// `Slot::image` and must stay valid.
-static IMAGES: Mutex<Vec<Template>> = Mutex::new(Vec::new());
+///
+/// A lock read by many threads at once and written only while a program loads,
+/// which is what makes it an `RwLock` rather than a `Mutex`: the readers are
+/// guest threads touching a thread-local for the first time, and they have no
+/// reason to queue behind each other.
+static IMAGES: RwLock<Vec<Template>> = RwLock::new(Vec::new());
 
 /// Every known `tlv_descriptor`, by its own address.
-static SLOTS: Mutex<BTreeMap<u64, Slot>> = Mutex::new(BTreeMap::new());
+static SLOTS: RwLock<BTreeMap<u64, Slot>> = RwLock::new(BTreeMap::new());
 
-thread_local! {
+/// How many times the registry has changed.
+///
+/// Read on every access and written once per [`register`], so it is the cheapest
+/// shared thing in this module: one load off a line that is shared in every
+/// core's cache and never dirtied while the guest runs — which is the property
+/// the mutex it replaced did not have, since a lock dirties its line to be
+/// *taken*.
+static EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Entries in one thread's descriptor cache. A power of two so the index is a
+/// mask, and large enough that a program's whole working set of thread-locals
+/// fits — a miss is correct, just a lock acquisition.
+const CACHE: usize = 64;
+
+/// Which cache line a descriptor address falls on.
+///
+/// Descriptors are three words apart in `__thread_vars`, so the low bits alone
+/// would collide in runs; multiply-shift mixes the whole address before the
+/// mask takes six bits of it.
+fn line(at: u64) -> usize {
+    (at.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as usize & (CACHE - 1)
+}
+
+/// One thread's view of thread-local storage.
+struct ThreadTls {
+    /// The [`EPOCH`] `cache` was filled under. A mismatch means some image was
+    /// registered since, and every entry is discarded rather than trusted.
+    epoch: u64,
+    /// Direct-mapped descriptor address to this thread's address for it. A key
+    /// of zero is an empty entry, which costs nothing: address zero is not a
+    /// descriptor and is answered by the slow path anyway.
+    cache: [(u64, *mut u8); CACHE],
     /// This thread's blocks, one per image that has thread-locals, allocated on
     /// first touch and freed when the thread ends.
-    static BLOCKS: RefCell<BTreeMap<usize, Block>> = const { RefCell::new(BTreeMap::new()) };
+    blocks: BTreeMap<usize, Block>,
+}
+
+thread_local! {
+    /// Everything about thread-locals that belongs to *this* thread.
+    ///
+    /// The cache and the blocks are one object on purpose: the cached pointers
+    /// point *into* the blocks, so they must not be able to outlive them.
+    static TLS: RefCell<ThreadTls> = const {
+        RefCell::new(ThreadTls {
+            epoch: 0,
+            cache: [(0, std::ptr::null_mut()); CACHE],
+            blocks: BTreeMap::new(),
+        })
+    };
 }
 
 /// One thread's block for one image.
@@ -136,12 +211,12 @@ pub fn register(report: &LinkReport) -> usize {
             align: 1usize << t.align.min(16),
         };
 
-        let mut images = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
+        let mut images = IMAGES.write().unwrap_or_else(|e| e.into_inner());
         images.push(template);
         let index = images.len() - 1;
         drop(images);
 
-        let mut slots = SLOTS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slots = SLOTS.write().unwrap_or_else(|e| e.into_inner());
         for d in &image.thread_locals {
             if d.offset >= t.total_size {
                 // The descriptor indexes past the block the sections describe.
@@ -159,6 +234,11 @@ pub fn register(report: &LinkReport) -> usize {
             registered += 1;
         }
     }
+    // After the slots are visible, and released so that a thread which observes
+    // the new epoch cannot then read the map without seeing them. Bumped even
+    // when nothing was registered: this is cheap, happens once per program, and
+    // "no descriptors" is not something to reason about separately.
+    EPOCH.fetch_add(1, Ordering::Release);
     registered
 }
 
@@ -176,8 +256,46 @@ pub fn register(report: &LinkReport) -> usize {
 /// at the access rather than corrupting anything.
 pub extern "C" fn bootstrap(descriptor: *const u8) -> *mut u8 {
     let at = descriptor as usize as u64;
+    // `try_with` rather than `with`: this is reached from guest code, and a
+    // `thread_local` destructor that runs guest code — a C++ `thread_local` with
+    // a destructor, reached through `_tlv_atexit` — can touch a thread-local
+    // after this key has been destroyed. `with` panics there, and a panic out of
+    // an `extern "C"` frame called by the JIT aborts the process with nothing
+    // naming the cause. Null is the answer the C ABI has for it.
+    match TLS.try_with(|tls| resolve(&mut tls.borrow_mut(), at)) {
+        Ok(address) => address,
+        Err(_) => {
+            say_after_teardown(at);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// The body of [`bootstrap`], with this thread's storage already in hand.
+///
+/// The whole point of the split is the first six lines: a repeat access to a
+/// descriptor this thread has already touched reads two words of its own
+/// thread-local memory and one acquire load off a line no thread ever dirties,
+/// and takes no lock.
+fn resolve(tls: &mut ThreadTls, at: u64) -> *mut u8 {
+    // Acquire pairs with the release in `register`: observing the new epoch
+    // means observing the slots that came with it.
+    let epoch = EPOCH.load(Ordering::Acquire);
+    if tls.epoch != epoch {
+        // A program was registered since these were resolved. The blocks stay —
+        // image indices are append-only, so an old one still names its own
+        // template — but a descriptor address may now mean something else.
+        tls.cache = [(0, std::ptr::null_mut()); CACHE];
+        tls.epoch = epoch;
+    }
+
+    let line = line(at);
+    if at != 0 && tls.cache[line].0 == at {
+        return tls.cache[line].1;
+    }
+
     let (image, offset) = {
-        let slots = SLOTS.lock().unwrap_or_else(|e| e.into_inner());
+        let slots = SLOTS.read().unwrap_or_else(|e| e.into_inner());
         match slots.get(&at) {
             Some(slot) => (slot.image, slot.offset),
             None => {
@@ -187,19 +305,22 @@ pub extern "C" fn bootstrap(descriptor: *const u8) -> *mut u8 {
         }
     };
 
-    BLOCKS.with(|blocks| {
-        let mut blocks = blocks.borrow_mut();
-        if let std::collections::btree_map::Entry::Vacant(slot) = blocks.entry(image) {
-            let Some(fresh) = allocate(image) else {
-                return std::ptr::null_mut();
-            };
-            slot.insert(fresh);
-        }
-        let block = &blocks[&image];
-        // SAFETY: `offset` was checked against `total_size` at registration and
-        // the block was allocated with exactly that many bytes.
-        unsafe { block.ptr.add(offset as usize) }
-    })
+    if let std::collections::btree_map::Entry::Vacant(slot) = tls.blocks.entry(image) {
+        let Some(fresh) = allocate(image) else {
+            return std::ptr::null_mut();
+        };
+        slot.insert(fresh);
+    }
+    // SAFETY: `offset` was checked against `total_size` at registration and the
+    // block was allocated with exactly that many bytes.
+    let address = unsafe { tls.blocks[&image].ptr.add(offset as usize) };
+
+    // Cached only now, and only for an answer that came from a block: a failure
+    // is not a fact about this thread — it is a fact about what has been
+    // registered so far — and the diagnostic it goes through has its own
+    // once-each rule to keep it quiet.
+    tls.cache[line] = (at, address);
+    address
 }
 
 /// Name a descriptor this runtime has no block for, once each.
@@ -222,9 +343,26 @@ fn say_unregistered(at: u64) {
     );
 }
 
+/// Report a thread-local read that arrived after this thread's storage was
+/// destroyed, once for the process.
+///
+/// Not a hypothetical: it is where a C++ `thread_local` with a destructor ends
+/// up if the destructor reads another thread-local. The guest gets null, which
+/// faults at the access — but it faults with something in the log saying the
+/// access was late rather than unregistered, which are different bugs.
+fn say_after_teardown(at: u64) {
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| {
+        eprintln!(
+            "rosetta3: __tlv_bootstrap({at:#x}): this thread's thread-local storage is already \
+             torn down — the guest will read address zero"
+        );
+    });
+}
+
 /// A zeroed block for `image`, with its initialised prefix copied in.
 fn allocate(image: usize) -> Option<Block> {
-    let images = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
+    let images = IMAGES.read().unwrap_or_else(|e| e.into_inner());
     let t = images.get(image)?;
     let layout = Layout::from_size_align(t.total_size, t.align).ok()?;
 
@@ -257,5 +395,106 @@ mod tests {
     fn an_unregistered_descriptor_answers_null_rather_than_guessing() {
         assert!(bootstrap(0xdead_beef as *const u8).is_null());
         assert!(bootstrap(std::ptr::null()).is_null());
+    }
+
+    /// The cache must not turn a miss into a hit for a *different* descriptor
+    /// that happens to land on the same line, which is the one way a
+    /// direct-mapped cache can hand back someone else's variable.
+    #[test]
+    fn a_colliding_descriptor_is_not_mistaken_for_the_cached_one() {
+        // Two addresses on the same line, found rather than assumed: the mixing
+        // constant decides which ones collide.
+        let base = 0x1_0000u64;
+        let (a, b) = (base..base + 0x10_000)
+            .step_by(24)
+            .find_map(|a| {
+                (a + 24..a + 0x10_000)
+                    .step_by(24)
+                    .find(|&b| line(b) == line(a))
+                    .map(|b| (a, b))
+            })
+            .expect("two of ten thousand addresses share one of sixty-four lines");
+
+        let mut tls = ThreadTls {
+            epoch: EPOCH.load(Ordering::Relaxed),
+            cache: [(0, std::ptr::null_mut()); CACHE],
+            blocks: BTreeMap::new(),
+        };
+        let sentinel = 0x5eed_usize as *mut u8;
+        tls.cache[line(a)] = (a, sentinel);
+
+        assert_eq!(resolve(&mut tls, a), sentinel, "the cached entry is a hit");
+        assert!(
+            resolve(&mut tls, b).is_null(),
+            "a collision must consult the registry, not the line"
+        );
+    }
+
+    /// Two threads must not share a block, and a second access on one thread
+    /// must return what the first did — which is the pair of properties the
+    /// cache sits between, and the way it could break them is by being reached
+    /// from more than the thread it belongs to.
+    #[test]
+    fn a_block_is_per_thread_and_a_repeat_access_is_the_same_address() {
+        // Registered by hand rather than through a `LinkReport`, which needs an
+        // image: what is under test is the resolver, and its whole input is one
+        // slot and one template.
+        let at = 0x3_0000u64;
+        {
+            let mut images = IMAGES.write().unwrap();
+            images.push(Template {
+                initial_va: 0,
+                initial_size: 0,
+                total_size: 64,
+                align: 16,
+            });
+            let image = images.len() - 1;
+            drop(images);
+            SLOTS.write().unwrap().insert(at, Slot { image, offset: 8 });
+        }
+        EPOCH.fetch_add(1, Ordering::Release);
+
+        let mine = bootstrap(at as *const u8);
+        assert!(!mine.is_null(), "a registered descriptor has a block");
+        assert_eq!(
+            bootstrap(at as *const u8),
+            mine,
+            "the cached answer must be the answer"
+        );
+        // SAFETY: `mine` is eight bytes into a sixty-four byte block owned by
+        // this thread, so a byte write is in bounds and unshared.
+        unsafe { *mine = 0x5e };
+
+        let theirs = std::thread::spawn(move || {
+            let theirs = bootstrap(at as *const u8);
+            // SAFETY: as above, on the spawned thread's own block.
+            assert_eq!(unsafe { *theirs }, 0, "a fresh block is zeroed");
+            theirs as usize
+        })
+        .join()
+        .expect("the thread reads its own thread-local");
+        assert_ne!(
+            theirs, mine as usize,
+            "a second thread must get its own block, not this one's"
+        );
+    }
+
+    /// A registration invalidates what threads resolved before it, because a
+    /// descriptor address may now belong to a different program.
+    #[test]
+    fn a_new_epoch_discards_what_was_resolved_under_the_old_one() {
+        let at = 0x2_0000u64;
+        let mut tls = ThreadTls {
+            epoch: EPOCH.load(Ordering::Relaxed),
+            cache: [(0, std::ptr::null_mut()); CACHE],
+            blocks: BTreeMap::new(),
+        };
+        tls.cache[line(at)] = (at, 0x5eed_usize as *mut u8);
+
+        EPOCH.fetch_add(1, Ordering::Release);
+        assert!(
+            resolve(&mut tls, at).is_null(),
+            "the stale entry must not survive the epoch it was filled in"
+        );
     }
 }
