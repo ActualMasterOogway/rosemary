@@ -95,23 +95,23 @@ use super::host;
 /// What the entry needs from a table is the two things bits cannot say — the
 /// signature, because a Mach-O records no types, and which of the pointers are
 /// classes.
-struct Runtime {
+pub(super) struct Runtime {
     /// The C name, as `dlsym` spells it: no leading underscore.
-    name: &'static str,
+    pub(super) name: &'static str,
     /// `[0]` is the return type, `[1..]` the parameters, as everywhere else.
     ///
     /// `[0]` is [`T::None`] when [`Runtime::struct_return`] describes the
     /// return instead, because no scalar type spells a struct.
-    types: &'static [T],
+    pub(super) types: &'static [T],
     /// Zero-based parameter indices holding a `Class`.
     ///
     /// An `id` parameter that a program plausibly passes a class to is marked
     /// too — `objc_retain(Greeter)` is legal Objective-C — and marking one
     /// wrongly costs nothing: the translation is a map lookup that leaves
     /// anything but a registered guest class alone.
-    classes: &'static [u8],
+    pub(super) classes: &'static [u8],
     /// Whether the return value is a `Class`.
-    class_return: bool,
+    pub(super) class_return: bool,
     /// Zero-based parameter indices that are **guest function pointers**, in
     /// exactly the sense [`crate::abi::FunctionAbi::callbacks`] means.
     ///
@@ -121,7 +121,7 @@ struct Runtime {
     /// swizzling a method has to leave a thunk behind rather than its own
     /// address. It is the same substitution `pthread_create`'s start routine
     /// gets, arriving through a different door.
-    callbacks: &'static [u8],
+    pub(super) callbacks: &'static [u8],
     /// Zero-based parameter indices holding a **block literal**.
     ///
     /// Distinct from [`Runtime::callbacks`], and the difference is the one
@@ -137,7 +137,7 @@ struct Runtime {
     /// descriptor's copy helper before it returns**. So this is not a
     /// precaution against the host invoking the block later; the guest's code
     /// runs during the call.
-    blocks: &'static [u8],
+    pub(super) blocks: &'static [u8],
     /// Zero-based parameter indices holding a `Protocol *`.
     ///
     /// A protocol needs the same translation a class does and for the same
@@ -147,14 +147,14 @@ struct Runtime {
     /// Anything else — a `Protocol *` the guest got back from
     /// `objc_getProtocol`, a null — is itself on both sides and is left alone,
     /// exactly as an unregistered class pointer is.
-    protocols: &'static [u8],
+    pub(super) protocols: &'static [u8],
     /// The scalar members of a struct returned **by value**, in declaration
     /// order, or `None` for the ordinary scalar return in `types[0]`.
     ///
     /// Written down here because there is nothing to read it from: a runtime
     /// entry point is C, its return type lives in `objc/runtime.h`, and the
     /// image carries no encoding for it the way a method does.
-    struct_return: Option<&'static [T]>,
+    pub(super) struct_return: Option<&'static [T]>,
 }
 
 /// `(ret, args...)`, with no class anywhere.
@@ -238,7 +238,7 @@ const P: T = T::Pointer;
 /// is that a table written for what programs import is honest and a table
 /// written for a header is a fiction nobody checked. `runtime_entries_are_sorted`
 /// keeps the order the lookup depends on.
-static RUNTIME: &[Runtime] = &[
+pub(super) static RUNTIME: &[Runtime] = &[
     // ## Making a class at runtime
     //
     // The other direction of [`crate::objc::register`]. That pass replays the
@@ -784,7 +784,7 @@ fn absent(name: &str) -> Option<u64> {
 }
 
 /// The host's own implementation of `name`, if this process has one.
-fn host_symbol(name: &str) -> Option<u64> {
+pub(super) fn host_symbol(name: &str) -> Option<u64> {
     let c = std::ffi::CString::new(name).ok()?;
     // SAFETY: `RTLD_DEFAULT` is `(void *)-2` on macOS — search every loaded
     // image — and `c` is a NUL-terminated string that outlives the call. A

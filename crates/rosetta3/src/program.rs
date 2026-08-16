@@ -15,7 +15,7 @@ use microlift::core::exit::MemorySegment;
 use microlift::core::specialize::Specialization;
 use microlift::core::{AddressMode, Atomic128Mode, LifterConfig};
 
-use crate::abi::{AbiError, Classification, FunctionAbi, Lookup};
+use crate::abi::{AbiError, Classification, Lookup};
 
 /// Whether an import with a known signature is inlined by the lifter or left to
 /// a VM exit.
@@ -31,29 +31,48 @@ pub enum ImportPolicy {
 }
 
 impl ImportPolicy {
-    /// The signature to inline this site's call with, if any.
-    fn promotion_for(self, site: &ImportSite) -> Option<&'static FunctionAbi> {
+    /// The signature to inline this site's call with, and the address to inline
+    /// a call to.
+    ///
+    /// The address is the site's own for every ordinary import, and is a
+    /// parameter rather than an assumption because of one family: an
+    /// Objective-C runtime entry point whose shim is a class substitution is
+    /// promoted against a **function of this runtime's** that performs the
+    /// substitution and calls the host's. See [`crate::objc::fast`].
+    fn promotion_for(self, site: &ImportSite) -> Option<crate::objc::fast::Promotion> {
         if self == ImportPolicy::AlwaysSlow || site.resolved == 0 {
             return None;
         }
-        // A shimmed symbol must never be promoted: the whole reason it has a
-        // shim is that calling the host function directly would be wrong.
-        if crate::shims::is_shimmed(&site.symbol) {
-            return None;
-        }
-        // Nor a traced one. An inlined call never reaches the seam, so
-        // promoting a symbol the user asked to watch would silently trace
-        // nothing — and the symbols worth watching are exactly the ordinary,
-        // fully-signatured ones this would otherwise inline. See
-        // [`crate::trace`].
+        // A traced symbol is never promoted. An inlined call never reaches the
+        // seam, so promoting a symbol the user asked to watch would silently
+        // trace nothing — and the symbols worth watching are exactly the
+        // ordinary, fully-signatured ones this would otherwise inline. See
+        // [`crate::trace`]. Asked before the shim question, because it must
+        // hold of the promotable shims too.
         if crate::trace::watching(&site.symbol) {
             return None;
+        }
+        // A shimmed symbol must never be promoted: the whole reason it has a
+        // shim is that calling the host function directly would be wrong. The
+        // one exception is stated where it is decided — an Objective-C runtime
+        // entry point whose shim is a substitution keeps the substitution and
+        // loses the exit.
+        if crate::shims::is_shimmed(&site.symbol) {
+            let promotion = crate::objc::fast::promotion(&site.symbol, site.resolved)?;
+            // Classified as well as described, so a promoted entry passes the
+            // same marshallability test every other fast import passes rather
+            // than being taken on the table's word.
+            return (crate::abi::classify(site.tag, &site.symbol) == Classification::Fast)
+                .then_some(promotion);
         }
         if crate::abi::classify(site.tag, &site.symbol) != Classification::Fast {
             return None;
         }
         match crate::abi::table::lookup(site.tag, &site.symbol) {
-            Lookup::Known(abi) => Some(abi),
+            Lookup::Known(abi) => Some(crate::objc::fast::Promotion {
+                abi,
+                address: site.resolved,
+            }),
             _ => None,
         }
     }
@@ -620,9 +639,9 @@ impl<M: Regions> Program<M> {
                 .promotion_for(site)
                 .filter(|_| !self.is_guest_address(site.resolved));
             match promoted {
-                Some(abi) => config.register_fast_import(
+                Some(p) => config.register_fast_import(
                     va,
-                    crate::abi::dynamic_symbol(abi, site.resolved),
+                    crate::abi::dynamic_symbol(p.abi, p.address),
                     crate::abi::guest_call_abi(),
                 ),
                 // Everything a fast import cannot express — a variadic, a

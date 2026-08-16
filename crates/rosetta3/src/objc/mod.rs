@@ -68,9 +68,11 @@
 pub mod cxxivars;
 pub mod dispatch;
 pub mod encoding;
+pub mod fast;
 pub mod host;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 use machish::extensions::objc::{ObjcCategory, ObjcClass, ObjcImage, ObjcMethod, ObjcProtocol};
 use machish::report::LinkReport;
@@ -184,6 +186,37 @@ pub struct ObjcRuntime {
     protocols: HashMap<u64, u64>,
     stats: Stats,
     refusals: Vec<Refusal>,
+}
+
+/// The runtime the process has published, for a caller with no [`Vm`] in hand.
+///
+/// [`Vm::objc`] is the same answer, reached through the VM that owns the
+/// registration pass. This mirror exists for [`fast`], whose whole point is that
+/// it is called from **inlined** guest code: there is no register context, no
+/// exit, and nothing to look a `Vm` up from except thread-local storage, which
+/// is the cost the inlining was meant to remove.
+///
+/// A process-global is not a new constraint. Class names are global to the
+/// host's `libobjc`, so a process already runs at most one Objective-C guest —
+/// see the note at the top of `tests/objc.rs`. A second `Vm` that registers
+/// classes replaces this pointer, exactly as it replaces its own.
+static PUBLISHED: AtomicPtr<ObjcRuntime> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Record `rt` as the runtime a context-free caller should ask.
+///
+/// Called by [`Vm::publish_objc`] with the same leaked reference it stores in
+/// the VM, so the two never disagree about which snapshot is current.
+pub(crate) fn publish(rt: &'static ObjcRuntime) {
+    PUBLISHED.store(rt as *const _ as *mut ObjcRuntime, Ordering::Release);
+}
+
+/// The published runtime, or `None` before any registration pass has run.
+pub fn published() -> Option<&'static ObjcRuntime> {
+    let rt = PUBLISHED.load(Ordering::Acquire);
+    // SAFETY: non-null only after `publish` stored a leaked reference, which is
+    // never freed and never mutated after publication — an extending pass
+    // builds a separate copy and publishes that. Same argument as `Vm::objc`.
+    (!rt.is_null()).then(|| unsafe { &*rt })
 }
 
 impl ObjcRuntime {

@@ -115,22 +115,49 @@ fn every_objective_c_import_is_classified() {
 ///
 /// It has no signature to inline *with* — it has whichever signature the method
 /// has — so promoting it would call the host's own trampoline with the guest's
-/// registers, which is a crash inside somebody else's assembly. The rule that
-/// prevents it is that a shimmed symbol is never promoted, and this is the
-/// assertion that it really covers this family.
+/// registers, which is a crash inside somebody else's assembly.
+///
+/// `objc_alloc_init` is here for a different reason and it is the more subtle
+/// one: it *has* an ordinary `id(Class)` signature, and it still may not be
+/// inlined, because it sends `init` — which for a guest class is a thunk back
+/// into the JIT, entered against a
+/// [stale guest stack pointer](rosetta3::objc::fast). Nothing in its signature
+/// says so, which is why the rule is a list of names rather than a property of
+/// the types.
 #[test]
 fn the_message_send_family_is_never_promoted_to_a_fast_import() {
     use rosetta3::abi::Classification;
 
-    for symbol in [
-        "_objc_msgSend",
-        "_objc_msgSendSuper2",
-        "_objc_alloc_init",
-        "_class_getName",
-    ] {
+    for symbol in ["_objc_msgSend", "_objc_msgSendSuper2", "_objc_alloc_init"] {
         assert_eq!(
             rosetta3::abi::classify(0, symbol),
             Classification::Slow,
+            "{symbol}"
+        );
+    }
+}
+
+/// A runtime entry point that cannot reach guest code *is* inlined.
+///
+/// The other half of the rule above, and the reason it is worth having its own
+/// test: "shimmed" and "slow" used to be the same statement, and this is where
+/// they came apart. `class_getName` is shimmed because the native provider
+/// denies the whole `_class_` family so [`rosetta3::objc::dispatch`] can claim
+/// the sends — not because calling the host's would be wrong. It reads a name
+/// out of a class and cannot dispatch, so it is inlined against a substituting
+/// function that translates the class and calls the host's.
+///
+/// Named as a classification rather than as a benchmark, because the failure it
+/// guards against is silent: a runtime entry point that quietly went back to
+/// being a bridged call would print exactly the same output.
+#[test]
+fn a_runtime_entry_point_that_cannot_dispatch_is_a_fast_import() {
+    use rosetta3::abi::Classification;
+
+    for symbol in ["_class_getName", "_object_getClass", "_sel_registerName"] {
+        assert_eq!(
+            rosetta3::abi::classify(0, symbol),
+            Classification::Fast,
             "{symbol}"
         );
     }
@@ -294,4 +321,48 @@ fn a_loaded_image_declares_classes_and_the_guest_messages_them() {
     // absent line.
     assert!(out.contains("plugin +load\nplugin ctor\n"), "{out}");
     assert!(out.contains("plugin=48\n"), "{out}");
+}
+
+/// The promotion really fires on a linked program, not just in a unit test.
+///
+/// [`rosetta3::objc::fast::promotion`] declines unless the site resolved to
+/// *exactly* the address `dlsym` gives for the entry point — which is the whole
+/// equivalence argument, and which nothing in this repository can check without
+/// a real link. The synthetic provider defines these symbols from `dlsym`, so
+/// the two agree by construction; this is the test that says so rather than
+/// assuming it, because a provider that ever started wrapping one of them would
+/// silently make every promotion a call to the wrong function.
+///
+/// Asserts a non-empty intersection as well as the property, since a program
+/// that happened to import none of the promotable entries would pass a vacuous
+/// version of this and say nothing.
+#[test]
+fn a_linked_program_really_promotes_its_runtime_entry_points() {
+    let Some(path) = common::objc_messages_fixture("objc_promote", &[]) else {
+        skip!("cannot build x86_64 Objective-C fixtures")
+    };
+    let program = rosetta3::Program::load(&path, &[]).expect("linking");
+
+    let mut promoted = Vec::new();
+    for site in program.imports.values() {
+        if rosetta3::abi::classify(site.tag, &site.symbol) != rosetta3::abi::Classification::Fast {
+            continue;
+        }
+        let Some(p) = rosetta3::objc::fast::promotion(&site.symbol, site.resolved) else {
+            continue;
+        };
+        assert_ne!(p.address, 0, "{}", site.symbol);
+        promoted.push(site.symbol.clone());
+    }
+    promoted.sort();
+    promoted.dedup();
+    assert!(
+        !promoted.is_empty(),
+        "no runtime entry point was promoted; imports: {:?}",
+        program
+            .imports
+            .values()
+            .map(|s| &s.symbol)
+            .collect::<Vec<_>>()
+    );
 }

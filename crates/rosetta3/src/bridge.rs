@@ -353,11 +353,26 @@ fn fast_import(site: &crate::program::ImportSite) -> Option<ImportKind> {
     if vm.program.is_guest_address(site.resolved) {
         return None;
     }
-    let crate::abi::Lookup::Known(abi) = crate::abi::table::lookup(site.tag, &site.symbol) else {
-        return None;
+    // An Objective-C runtime entry point is inlined against a *substituting*
+    // address rather than the host's own; everything else against the host's.
+    // Asked in the same order [`crate::ImportPolicy::promotion_for`] asks it,
+    // because a plugin's imports must be promoted by the same rule as the
+    // executable's.
+    let promotion = match crate::objc::fast::promotion(&site.symbol, site.resolved) {
+        Some(promotion) => promotion,
+        None => {
+            let crate::abi::Lookup::Known(abi) = crate::abi::table::lookup(site.tag, &site.symbol)
+            else {
+                return None;
+            };
+            crate::objc::fast::Promotion {
+                abi,
+                address: site.resolved,
+            }
+        }
     };
     Some(ImportKind::Fast(FastImport {
-        symbol: crate::abi::dynamic_symbol(abi, site.resolved),
+        symbol: crate::abi::dynamic_symbol(promotion.abi, promotion.address),
         abi: crate::abi::guest_call_abi(),
     }))
 }

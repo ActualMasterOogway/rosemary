@@ -831,6 +831,10 @@ impl Vm {
             leaked as *const _ as *mut crate::objc::ObjcRuntime,
             Ordering::Release,
         );
+        // And the same reference where a caller with no `Vm` can find it: an
+        // inlined runtime entry point ([`crate::objc::fast`]) is reached from
+        // guest code with no context and nothing to look a VM up from.
+        crate::objc::publish(leaked);
         leaked
     }
 

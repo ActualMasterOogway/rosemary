@@ -449,8 +449,20 @@ pub fn classify(tag: u64, symbol: &str) -> Classification {
     // `int(void *)` signature and inlining it would call the *host's*. Asked
     // here as well as there so the audit reports how an import will really be
     // reached rather than how its types would allow.
+    //
+    // The exception is the Objective-C runtime surface, where the shim is a
+    // class substitution and nothing else, and the substitution can move into
+    // the address that is inlined. Reported as `Fast` here for the same reason
+    // everything else in this function is: the audit's job is to say how an
+    // import is really reached. See [`crate::objc::fast`].
     if crate::shims::is_shimmed(symbol) {
-        return Classification::Slow;
+        let Some(abi) = crate::objc::fast::abi_of(symbol) else {
+            return Classification::Slow;
+        };
+        return match guest_call_abi().can_fast_call(abi.types) && marshal::is_marshallable(abi) {
+            true => Classification::Fast,
+            false => Classification::Slow,
+        };
     }
     match table::lookup(tag, symbol) {
         Lookup::Known(abi) if abi.variadic => Classification::Slow,
