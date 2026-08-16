@@ -154,18 +154,23 @@ const SLOTS: usize = 8192;
 /// Bytes in each half of the reservation.
 const HALF: u64 = SLOTS as u64 * STRIDE;
 
-/// Base of the code half, or zero before the arena exists.
+/// Base of the whole reservation, or zero before the arena exists.
+///
+/// **One** atomic, not four, and that is a correctness property rather than
+/// tidiness. The two halves are adjacent and constant-sized, so every extent is
+/// `BASE`, `BASE + HALF` or `BASE + HALF * 2` — which means there is no window
+/// in which a reader can see a published low bound against an unpublished high
+/// one. Four separately-stored extents had exactly that window: [`contains`] is
+/// on the hot path and reads without a lock, so it could observe a non-zero
+/// `CODE_LO` and a still-zero `CODE_HI` and answer *no* for a trampoline the
+/// guest is holding — which is an `UnknownIndirectCall` on a pointer that was
+/// perfectly good.
 ///
 /// Read on [`contains`], which [`crate::Program::is_guest_address`] asks at
-/// every indirect call and answers "no" almost every time. Two relaxed loads
-/// reject a host address with no lock — the same shape as [`crate::dyld`]'s
+/// every indirect call and answers "no" almost every time. One relaxed load
+/// rejects a host address with no lock — the same shape as [`crate::dyld`]'s
 /// extents and [`crate::shims::vmmap`]'s.
-static CODE_LO: AtomicU64 = AtomicU64::new(0);
-static CODE_HI: AtomicU64 = AtomicU64::new(0);
-
-/// Base of the import half. Never read or written; see the module note.
-static IMPORT_LO: AtomicU64 = AtomicU64::new(0);
-static IMPORT_HI: AtomicU64 = AtomicU64::new(0);
+static BASE: AtomicU64 = AtomicU64::new(0);
 
 /// One trampolined symbol.
 struct Entry {
@@ -254,10 +259,13 @@ pub fn counts() -> Option<(u64, u64, u64)> {
 
 /// Whether `va` is a trampoline, and so guest code.
 ///
-/// The one question on the hot path, and it is two relaxed loads because
-/// [`crate::Program::is_guest_address`] asks it at every indirect call.
+/// The one question on the hot path, and it is a single relaxed load because
+/// [`crate::Program::is_guest_address`] asks it at every indirect call. The
+/// upper bound is arithmetic rather than a second load — see [`BASE`], where
+/// that is a correctness argument before it is a cost one.
 pub fn contains(va: u64) -> bool {
-    va >= CODE_LO.load(Ordering::Relaxed) && va < CODE_HI.load(Ordering::Relaxed)
+    let base = BASE.load(Ordering::Relaxed);
+    base != 0 && va >= base && va < base + HALF
 }
 
 /// Reserve the arena, once.
@@ -272,10 +280,19 @@ pub fn contains(va: u64) -> bool {
 /// is the same decision every guest mapping is made under. The import half is
 /// `PROT_NONE`: nothing must ever read it, and a stray transfer into it should
 /// fault at the address that named it rather than find zeroes.
-fn arena() -> Option<u64> {
-    let lo = CODE_LO.load(Ordering::Acquire);
-    if lo != 0 {
-        return Some(lo);
+///
+/// Called with [`STATE`] held, which is what makes "once" true. Unsynchronised,
+/// two threads whose first pointer-call landed together would each `mmap` an
+/// arena, each write entries into its own, and only one of them would be the one
+/// [`contains`] answers for — so the loser's trampolines are addresses nothing
+/// recognises as code, handed to the guest and stored in its slots. Two guest
+/// threads starting at once is not a corner: it is what a thread pool does, and
+/// [`crate::tls::bootstrap`] is reached on a new thread's first thread-local
+/// read.
+fn arena_locked() -> Option<u64> {
+    let base = BASE.load(Ordering::Relaxed);
+    if base != 0 {
+        return Some(base);
     }
     // SAFETY: an anonymous private mapping of a fixed size at an address of the
     // kernel's choosing. Nothing is assumed about where it lands beyond the two
@@ -310,12 +327,9 @@ fn arena() -> Option<u64> {
     // SAFETY: the code half of the mapping, writable and owned by this module.
     unsafe { std::ptr::write_bytes(base as usize as *mut u8, 0xCC, HALF as usize) };
 
-    IMPORT_LO.store(base + HALF, Ordering::Relaxed);
-    IMPORT_HI.store(base + HALF * 2, Ordering::Relaxed);
-    CODE_HI.store(base + HALF, Ordering::Relaxed);
-    // Published last: a reader that sees a non-zero `CODE_LO` must find the
-    // extent and the bytes already in place.
-    CODE_LO.store(base, Ordering::Release);
+    // Released after the fill: a reader that sees a non-zero base must find the
+    // bytes already in place.
+    BASE.store(base, Ordering::Release);
     Some(base)
 }
 
@@ -344,8 +358,10 @@ pub fn for_site(site: &ImportSite) -> Option<u64> {
         return None;
     };
 
-    let base = arena()?;
     let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    // Under the lock, so the reservation happens once however many threads
+    // arrive together. See [`arena_locked`].
+    let base = arena_locked()?;
     let state = guard.get_or_insert_with(|| State {
         entries: Vec::new(),
         by_target: AddrMap::default(),
@@ -398,16 +414,17 @@ fn code_slot(va: u64) -> Option<usize> {
     if !contains(va) {
         return None;
     }
-    let offset = va - CODE_LO.load(Ordering::Relaxed);
+    let offset = va - BASE.load(Ordering::Relaxed);
     (offset.is_multiple_of(STRIDE)).then_some((offset / STRIDE) as usize)
 }
 
 /// The slot the import address `va` belongs to.
 fn import_slot(va: u64) -> Option<usize> {
-    if va < IMPORT_LO.load(Ordering::Relaxed) || va >= IMPORT_HI.load(Ordering::Relaxed) {
+    let base = BASE.load(Ordering::Relaxed);
+    if base == 0 || va < base + HALF || va >= base + HALF * 2 {
         return None;
     }
-    let offset = va - IMPORT_LO.load(Ordering::Relaxed);
+    let offset = va - (base + HALF);
     (offset.is_multiple_of(STRIDE)).then_some((offset / STRIDE) as usize)
 }
 
@@ -636,6 +653,55 @@ mod tests {
         assert_eq!(region.range, va..va + 5);
         assert_eq!(code, vec![0xE9, code[1], code[2], code[3], code[4]]);
         assert_eq!(region.starts, vec![va]);
+    }
+
+    /// Threads arriving together must all get trampolines out of **one**
+    /// arena.
+    ///
+    /// The reservation used to be made outside the lock, so two first-callers
+    /// each mapped one and only the last to publish was the one `contains`
+    /// answered for. The loser's entries were then addresses that are not
+    /// trampolines by the runtime's own test — written into guest slots and
+    /// handed out by `dlsym`, to be met later as an indirect call to nothing.
+    /// Not a corner: a thread pool's first thread-local reads arrive exactly
+    /// this way, each through `dispatch_indirect`.
+    ///
+    /// Distinct symbols, so every thread has to *allocate* rather than hit
+    /// `by_target` — which is the case that races.
+    #[test]
+    fn concurrent_first_callers_share_one_arena() {
+        const NAMES: &[&str] = &[
+            "_strlen", "_strcmp", "_memcpy", "_memset", "_strchr", "_strrchr", "_abs", "_atoi",
+        ];
+        // A barrier, so "together" is a fact rather than a hope: without one
+        // the first thread usually finishes reserving before the second starts
+        // and the race the test is about does not happen.
+        let gate = std::sync::Barrier::new(NAMES.len());
+        let made: Vec<u64> = std::thread::scope(|s| {
+            let handles: Vec<_> = NAMES
+                .iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    let gate = &gate;
+                    s.spawn(move || {
+                        gate.wait();
+                        for_site(&site(name, 0x9000 + i as u64 * 0x10))
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|h| h.join().unwrap())
+                .collect()
+        });
+        assert!(!made.is_empty(), "these symbols are all in the table");
+        for va in made {
+            assert!(
+                contains(va),
+                "{va:#x} was handed out and is not in the arena `contains` answers for"
+            );
+            assert!(lift_region(va).is_some(), "and it must be liftable");
+        }
     }
 
     /// The padding inside an entry is not an entry point. A request to execute

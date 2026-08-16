@@ -98,7 +98,6 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 [[package]]
 name = "cranelift"
 version = "0.136.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -108,7 +107,6 @@ dependencies = [
 [[package]]
 name = "cranelift-assembler-x64"
 version = "0.136.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 dependencies = [
  "cranelift-assembler-x64-meta",
 ]
@@ -116,7 +114,6 @@ dependencies = [
 [[package]]
 name = "cranelift-assembler-x64-meta"
 version = "0.136.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 dependencies = [
  "cranelift-srcgen",
 ]
@@ -124,7 +121,6 @@ dependencies = [
 [[package]]
 name = "cranelift-bforest"
 version = "0.136.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 dependencies = [
  "cranelift-entity",
  "wasmtime-internal-core",
@@ -133,7 +129,6 @@ dependencies = [
 [[package]]
 name = "cranelift-bitset"
 version = "0.136.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 dependencies = [
  "wasmtime-internal-core",
 ]
@@ -141,7 +136,6 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen"
 version = "0.136.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 dependencies = [
  "bumpalo",
  "cranelift-assembler-x64",
@@ -168,7 +162,6 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen-meta"
 version = "0.136.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 dependencies = [
  "cranelift-assembler-x64-meta",
  "cranelift-codegen-shared",
@@ -180,12 +173,10 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen-shared"
 version = "0.136.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 
 [[package]]
 name = "cranelift-control"
 version = "0.136.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 dependencies = [
  "arbitrary",
 ]
@@ -193,7 +184,6 @@ dependencies = [
 [[package]]
 name = "cranelift-entity"
 version = "0.136.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 dependencies = [
  "cranelift-bitset",
  "wasmtime-internal-core",
@@ -202,7 +192,6 @@ dependencies = [
 [[package]]
 name = "cranelift-frontend"
 version = "0.136.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 dependencies = [
  "cranelift-codegen",
  "hashbrown 0.17.1",
@@ -214,12 +203,10 @@ dependencies = [
 [[package]]
 name = "cranelift-isle"
 version = "0.136.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 
 [[package]]
 name = "cranelift-jit"
 version = "0.136.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 dependencies = [
  "anyhow",
  "cranelift-codegen",
@@ -239,7 +226,6 @@ dependencies = [
 [[package]]
 name = "cranelift-module"
 version = "0.136.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 dependencies = [
  "anyhow",
  "cranelift-codegen",
@@ -249,7 +235,6 @@ dependencies = [
 [[package]]
 name = "cranelift-native"
 version = "0.136.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 dependencies = [
  "cranelift-codegen",
  "libc",
@@ -259,7 +244,6 @@ dependencies = [
 [[package]]
 name = "cranelift-object"
 version = "0.136.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 dependencies = [
  "anyhow",
  "cranelift-codegen",
@@ -274,7 +258,6 @@ dependencies = [
 [[package]]
 name = "cranelift-srcgen"
 version = "0.136.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 
 [[package]]
 name = "crc32fast"
@@ -524,7 +507,6 @@ dependencies = [
 [[package]]
 name = "pulley-interpreter"
 version = "49.0.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 dependencies = [
  "cranelift-bitset",
  "log",
@@ -534,7 +516,6 @@ dependencies = [
 [[package]]
 name = "pulley-macros"
 version = "49.0.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -743,7 +724,6 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 [[package]]
 name = "wasmtime-internal-core"
 version = "49.0.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 dependencies = [
  "hashbrown 0.17.1",
  "libm",
@@ -752,7 +732,6 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-jit-icache-coherence"
 version = "49.0.0-dev"
-source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#aa5dfacfb4fbc00a4d82dc3517bd631c57cc7226"
 dependencies = [
  "libc",
  "wasmtime-internal-core",

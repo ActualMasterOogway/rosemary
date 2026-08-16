@@ -487,6 +487,104 @@ int main(void) {
 }
 "#;
 
+/// A dylib with thread-locals of its own, for [`TLV_ROUTES_C`] to `dlopen`.
+///
+/// Its descriptors are not in the program's link report — the image did not
+/// exist when it was built — so they are registered and trampolined by
+/// [`rosetta3::dyld`] rather than at start-up. That is a second copy of the
+/// whole path, and it has failed independently before.
+pub const TLV_PLUGIN_C: &str = r#"
+_Thread_local int plug_a = 77;
+_Thread_local long plug_b;
+
+int plug_sum(void) { plug_b += 1; return plug_a + (int)plug_b; }
+"#;
+
+/// Every route a `_Thread_local` read can reach `__tlv_bootstrap` by.
+///
+/// [`TLS_C`] covers the ordinary one — a `callq *(%rdi)` on the main thread
+/// through a descriptor the loader bound. The three here are the ones that
+/// reach the bootstrap without going past anything the start-up path
+/// substituted, which is how a symbol quietly falls back to the marshaller:
+///
+/// - **A second thread**, which allocates its own block on first touch and is
+///   where the process-global lock this path used to take actually hurt.
+/// - **The thunk word called by hand**, through a `volatile` function pointer
+///   the compiler cannot fold away. This is the shape any program that stores
+///   a host pointer and calls it later has, and it arrives as an indirect call
+///   with nothing at the call site to match.
+/// - **A `dlopen`ed image's own thread-locals**, registered after the guest
+///   started running.
+///
+/// Every printed value is distinct so a block-layout error reads a neighbour
+/// rather than passing by luck, and the two `plug_sum` calls differ because the
+/// plugin's variable is written through.
+pub const TLV_ROUTES_C: &str = r#"
+#include <dlfcn.h>
+#include <pthread.h>
+#include <stdio.h>
+
+_Thread_local int a = 11;
+_Thread_local long c = 22;
+
+/* The descriptor as the ABI lays it out, under the same asm name the
+   `_Thread_local` above emits — so `desc_a.thunk` is the very word the
+   compiler's own `callq *(%rdi)` loads. */
+struct tlv_descriptor {
+    void *(*thunk)(struct tlv_descriptor *);
+    unsigned long key;
+    unsigned long offset;
+};
+extern struct tlv_descriptor desc_a __asm__("_a");
+
+static void *(*volatile indirect)(struct tlv_descriptor *);
+
+static void *worker(void *arg) {
+    (void)arg;
+    a += 100;
+    c += 200;
+    printf("worker a=%d c=%ld\n", a, c);
+    return NULL;
+}
+
+int main(void) {
+    printf("main a=%d c=%ld\n", a, c);
+
+    pthread_t t;
+    pthread_create(&t, NULL, worker, NULL);
+    pthread_join(t, NULL);
+    /* The worker wrote its own block, so this thread's values are untouched. */
+    printf("after a=%d c=%ld\n", a, c);
+
+    indirect = desc_a.thunk;
+    int *p = (int *)indirect(&desc_a);
+    printf("byhand a=%d\n", *p);
+
+    void *h = dlopen("libtlvplugin.dylib", RTLD_NOW);
+    if (!h) { printf("dlopen failed: %s\n", dlerror()); return 1; }
+    int (*plug_sum)(void) = (int (*)(void))dlsym(h, "plug_sum");
+    if (!plug_sum) { printf("dlsym failed: %s\n", dlerror()); return 2; }
+    printf("plug %d %d\n", plug_sum(), plug_sum());
+    return 0;
+}
+"#;
+
+/// Build [`TLV_ROUTES_C`] and its plugin beside it, or `None` if this host
+/// cannot.
+pub fn tlv_routes_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            build_x86_64(
+                "libtlvplugin.dylib",
+                TLV_PLUGIN_C,
+                &["-dynamiclib", "-install_name", "@rpath/libtlvplugin.dylib"],
+            )?;
+            build_x86_64("tlv_routes", TLV_ROUTES_C, &[])
+        })
+        .clone()
+}
+
 /// Milestone 5's `setjmp`/`longjmp` program.
 ///
 /// Written so that each claim fails on its own:
