@@ -2893,8 +2893,21 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("nextafter", F64, F64, F64),
     sig!("nl_langinfo", P, I32),
     sig!("nl_langinfo_l", P, I32, P),
-    vsig!("open", I32, P, I32),
-    vsig!("openat", I32, I32, P, I32),
+    // Variadic in their declarations and *fixed* in fact: the ellipsis is at
+    // most one `mode_t`, and `O_CREAT` in the flag word is what says whether it
+    // is there. So they are written out with the optional argument always
+    // present — the guest's own call placed a mode in that register or it did
+    // not, and which is which is decided where the argument is consumed rather
+    // than where it is passed.
+    //
+    // This is only sound because these names resolve to **this runtime's**
+    // wrappers rather than the host's `open`: the host's really are variadic,
+    // and Apple's arm64 ABI puts a variadic argument on the stack, so a fixed
+    // signature would leave the mode in a register no `va_arg` reads. The
+    // wrappers are ordinary C functions that take the mode as a parameter and
+    // apply the `O_CREAT` rule themselves. See [`crate::shims::openat`].
+    sig!("open", I32, P, I32, U32),
+    sig!("openat", I32, I32, P, I32, U32),
     sig!("opendir", P, P),
     sig!("openlog", V, P, I32, I32),
     sig!("pathconf", I64, P, I32),
@@ -3126,14 +3139,15 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // The import is `_select$1050`, the variant with the 10.5 `fd_set`
     // semantics; arm64 has only the one, and the `$`-suffix fallback finds it.
     sig!("select", I32, I32, P, P, P, P),
-    // The named-semaphore surface. `sem_open` is variadic — its mode and
-    // initial value arrive only with `O_CREAT`, so what its arguments *are* is
-    // decided by a flag word, which is why `open` needed a shim rather than a
-    // signature. Marked variadic here so it is refused by name rather than
-    // called with two arguments it may not have been given.
+    // The named-semaphore surface. `sem_open` is `open`'s shape exactly: a
+    // variadic whose ellipsis is a fixed pair — a `mode_t` and an `unsigned` —
+    // that arrives only with `O_CREAT` in the same flag word. So it is written
+    // out the same way, with both optional arguments always present, and for
+    // the same reason it is only sound because the name resolves to **this
+    // runtime's** wrapper rather than the host's. See
+    // [`crate::shims::openat`].
     sig!("sem_close", I32, P),
-    // sem_open is a variadic function but its parameter count is known, making this safe to mark without vsig!
-    sig!("sem_open", P, P, I32, I32, U32),
+    sig!("sem_open", P, P, I32, U32, U32),
     sig!("sem_post", I32, P),
     sig!("sem_trywait", I32, P),
     sig!("sem_unlink", I32, P),

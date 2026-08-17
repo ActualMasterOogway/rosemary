@@ -1110,8 +1110,16 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
     }
 
     // The global fallback, which is a *host* search: the guest asked every image
-    // this runtime loaded and none had it, so what is left is passthrough.
-    let addr = host_symbol(name)?;
+    // this runtime loaded and none had it, so what is left is passthrough — or,
+    // for the two names whose host copy is variadic and whose signature is not,
+    // the wrapper a binding of the same name would have resolved to. A `dlsym`
+    // result is called with the signature the table gives its *name*, so the two
+    // routes have to hand back the same function. See
+    // [`crate::shims::openat::provide`].
+    let addr = match crate::shims::openat::host_substitute(name) {
+        Some(wrapper) => wrapper,
+        None => host_symbol(name)?,
+    };
     Some(remember_native_symbol(addr, name, None))
 }
 

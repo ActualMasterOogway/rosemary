@@ -129,6 +129,14 @@ pub fn provider() -> SyntheticDylib {
         lib.define_fn("__tlv_atexit", f as *const ());
         lib.define_fn("_tlv_atexit", f as *const ());
     }
+    // `open` and `openat`, which the host exports perfectly well and still
+    // cannot be bound to: the host's are variadic, and Apple's arm64 ABI puts a
+    // variadic argument on the stack, so the fixed signature that makes them
+    // inlinable would leave the mode in a register no `va_arg` reads. These
+    // resolve to fixed-arity wrappers of this runtime's instead — the same
+    // "supplied here so a *signature* can be honest" case the `_tlv_` pair
+    // above is, reached from the other direction. See [`super::openat`].
+    super::openat::provide(&mut lib);
     // Two underscores as the Mach-O spells it: one from C mangling, one from
     // the identifier `_NSGetExecutablePath`.
     lib.define_fn("__NSGetExecutablePath", ns_get_executable_path as *const ());

@@ -8,11 +8,16 @@
 //! of vector registers used, while Apple's arm64 ABI passes every variadic
 //! argument on the **stack**. Forwarding one therefore means knowing how many
 //! arguments there are and of what type — which for `printf` means parsing the
-//! format string, and for `open`/`fcntl`/`ioctl` means interpreting the flag
-//! argument. There is no general answer, so each family is written out.
+//! format string, and for `fcntl`/`ioctl` means interpreting the flag argument.
+//! There is no general answer, so each family is written out.
 //!
 //! Microlift already demotes a variadic import to a slow VM exit, which is
 //! exactly the interception point these need.
+//!
+//! A variadic whose arity is decided by a *fixed* argument has a second way out,
+//! and `open` took it: the rule moves into a fixed-arity callee of this
+//! runtime's, the table describes that callee, and the call stops being a shim
+//! at all. See [`openat`] for what that requires and why `fcntl` cannot follow.
 //!
 //! ## Rendering rather than relaying
 //!
@@ -26,8 +31,8 @@
 //!
 //! ## Scope
 //!
-//! Implemented: `printf`, `fprintf`, `sprintf`, `snprintf`, `ioctl`, the
-//! `open`/`openat`/`fcntl` group, and `__cxa_atexit` — the last of which is not
+//! Implemented: `printf`, `fprintf`, `sprintf`, `snprintf`, `ioctl`, `fcntl`,
+//! and `__cxa_atexit` — the last of which is not
 //! variadic and is here for the third reason a shim exists: one of its
 //! arguments describes an *image*, and the guest's answer is not one the host
 //! can be told. See [`atexit`]. Three families live in modules of their own
@@ -129,10 +134,11 @@ pub fn dispatch(
         // reports a fatal error through. See [`nslog::run_alert_panel`].
         "NSRunAlertPanel" => nslog::run_alert_panel,
         "ioctl" => ioctl::ioctl,
-        // Variadic in their declarations and one argument wide in fact, decided
-        // by a flag word rather than a format string; see [`openat`].
-        "open" => openat::open,
-        "openat" => openat::openat,
+        // Variadic in its declaration and one argument wide in fact, decided by
+        // a command number rather than a format string; see [`openat`]. `open`
+        // and `openat` were here for the same reason and are not any more: their
+        // rule moved into a callee of this runtime's, which makes them ordinary
+        // fixed-arity imports the lifter inlines.
         "fcntl" => openat::fcntl,
         // Not variadic, and here for the same underlying reason: forwarding it
         // would operate on the *host's* registers and the host's stack. See
@@ -247,8 +253,6 @@ pub fn is_shimmed(symbol: &str) -> bool {
             | "vsscanf"
             | "malloc_printf"
             | "ioctl"
-            | "open"
-            | "openat"
             | "fcntl"
     )
 }

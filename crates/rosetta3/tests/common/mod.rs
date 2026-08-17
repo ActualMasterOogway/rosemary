@@ -304,6 +304,73 @@ int main(void) {
 }
 "#;
 
+/// `open` and `openat` creating files, which is the one thing about them a
+/// register cannot be observed to have carried any other way.
+///
+/// Both are declared variadic in C and described to the lifter as *fixed*, with
+/// the `mode_t` always present — so the guest's mode is placed in a register the
+/// callee reads as a parameter. See [`rosetta3::shims::openat`]. The
+/// falsifiable claim is the permission bits on disk: a mode that arrived in the
+/// wrong place, or was taken from a stale register, gives a file with
+/// permissions nobody asked for, and the two modes here are deliberately odd
+/// ones that no default produces.
+///
+/// `umask(0)` first, because the process's mask clears bits from whatever is
+/// passed and would otherwise make a wrong answer look merely restrictive.
+/// `argv[1]` is a directory the test owns.
+pub const OPEN_C: &str = r#"
+#include <stdio.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <string.h>
+#include <semaphore.h>
+
+int main(int argc, char **argv) {
+    if (argc < 2) return 2;
+    umask(0);
+
+    char path[1024];
+    strcpy(path, argv[1]);
+    strcat(path, "/created");
+    unlink(path);
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0604);
+    if (fd < 0) { perror("open"); return 1; }
+    close(fd);
+    printf("open ok\n");
+
+    // The same call without `O_CREAT`, whose third argument is not a mode at
+    // all — it must not reach the kernel, and the file it opens must keep the
+    // bits the call above gave it.
+    fd = open(path, O_RDONLY, 0777);
+    if (fd < 0) { perror("reopen"); return 1; }
+    close(fd);
+    printf("reopen ok\n");
+
+    int dirfd = open(argv[1], O_RDONLY);
+    if (dirfd < 0) { perror("opendir"); return 1; }
+    fd = openat(dirfd, "created-at", O_WRONLY | O_CREAT | O_EXCL, 0641);
+    if (fd < 0) { perror("openat"); return 1; }
+    close(fd);
+    close(dirfd);
+    printf("openat ok\n");
+
+    // `sem_open` is the same rule with the same flag and *two* optional
+    // arguments. The count is what says they arrived: a semaphore created with
+    // 2 gives two `sem_trywait`s and refuses the third.
+    char name[32];
+    snprintf(name, sizeof name, "/r3sem%d", getpid());
+    sem_unlink(name);
+    sem_t *sem = sem_open(name, O_CREAT | O_EXCL, 0600, 2);
+    if (sem == SEM_FAILED) { perror("sem_open"); return 1; }
+    printf("sem %d%d%d\n",
+           sem_trywait(sem) == 0, sem_trywait(sem) == 0, sem_trywait(sem) == 0);
+    sem_close(sem);
+    sem_unlink(name);
+    return 0;
+}
+"#;
+
 /// Milestone 4's synchronisation program: the rest of the pthread surface.
 ///
 /// A mutex-protected shared counter (four threads, a thousand increments each,
@@ -1225,6 +1292,14 @@ pub fn errno_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     BUILT
         .get_or_init(|| build_x86_64("errno_thread", ERRNO_C, &[]))
+        .clone()
+}
+
+/// Build [`OPEN_C`], or `None` if this host cannot.
+pub fn open_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("open_mode", OPEN_C, &[]))
         .clone()
 }
 

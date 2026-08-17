@@ -261,3 +261,56 @@ fn a_dynamically_loaded_image_runs_the_same_bridged_and_exited() {
     assert_eq!(slow_status, Some(0), "stderr: {slow_err}");
     assert_eq!(fast_out, slow_out);
 }
+
+/// The mode a guest passes to `open` is the mode the file gets — through the
+/// inlined call *and* through the bridged one.
+///
+/// `open`, `openat` and `sem_open` are described to the lifter as fixed-arity,
+/// with the arguments their ellipsis may carry always present, and are bound to
+/// wrappers of this runtime's that apply the `O_CREAT` rule themselves. See
+/// [`rosetta3::shims::openat`]. The permission bits on disk are what says the
+/// mode arrived where the signature claims: they are odd numbers no umask and no
+/// default produces, so a mode read from the wrong register — or from the stack,
+/// which is where a genuinely variadic callee would look — gives a file that
+/// fails this outright. The semaphore's count is the same claim for the pair of
+/// optional arguments.
+///
+/// `--slow` runs it a second time because the two routes place the same
+/// argument by different code: an absolute native call the lifter baked in, and
+/// the marshaller at a VM exit.
+#[test]
+fn the_mode_a_guest_opens_with_is_the_mode_the_file_gets() {
+    let Some(path) = common::open_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
+
+    for extra in [&[][..], &["--slow"][..]] {
+        let dir = std::env::temp_dir().join(format!("rosetta3-open-mode{}", extra.len()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory the guest can write to");
+
+        let (status, out, err) = run_guest_with(extra, &path, &[dir.to_str().unwrap()]);
+        assert_eq!(status, Some(0), "stdout: {out:?} stderr: {err}");
+        // `sem 110`: the semaphore was created holding exactly the two the
+        // guest asked for, which is the pair of optional arguments a variadic
+        // callee would have looked for on the stack.
+        assert_eq!(
+            out, "open ok\nreopen ok\nopenat ok\nsem 110\n",
+            "stderr: {err}"
+        );
+
+        assert_eq!(mode_of(&dir.join("created")), 0o604, "open's mode");
+        assert_eq!(mode_of(&dir.join("created-at")), 0o641, "openat's mode");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// A file's permission bits, as the guest's `umask(0)` left them.
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+        .permissions()
+        .mode()
+        & 0o7777
+}
