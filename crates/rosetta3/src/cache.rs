@@ -202,7 +202,7 @@ impl Translation {
 ///
 /// Which is also why the exits that *do* need the run loop must never be linked,
 /// and they are not: microlift emits no probe for an import call, a syscall, a
-/// fault or a return to the exit sentinel, and a bridge asks to be linked only
+/// fault or a breakpoint, and a bridge asks to be linked only
 /// when it has nothing parked (see [`crate::bridge`]). A link is therefore never
 /// a skipped step — it is a step that was only ever "enter what is at `rip`".
 fn follow_links(ctx: &mut RegisterContext) -> ExitReason {

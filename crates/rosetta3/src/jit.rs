@@ -30,14 +30,13 @@
 //!
 //! [`LifterConfig::use_vector_xmm`]: microlift::core::LifterConfig::use_vector_xmm
 
-use std::sync::OnceLock;
-
 use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_codegen::settings::{self, Configurable};
 use microlift::MicroliftError;
 use microlift::arch::x86_64::pin;
 use microlift::backend::CraneliftBackend;
 use microlift::core::pin::PinnedAbi;
+use static_init::dynamic;
 
 /// The environment variables this module reads.
 pub const OPT_ENV: &str = "ROSETTA3_JIT_OPT";
@@ -300,8 +299,8 @@ fn host_features() -> Vec<(&'static str, &'static str)> {
 /// the environment mid-run would let two regions in one process disagree about
 /// how they were compiled.
 pub fn opt_level() -> OptLevel {
-    static LEVEL: OnceLock<OptLevel> = OnceLock::new();
-    *LEVEL.get_or_init(|| match std::env::var(OPT_ENV) {
+    #[dynamic]
+    static LEVEL: OptLevel = match std::env::var(OPT_ENV) {
         Err(_) => OptLevel::default(),
         Ok(value) => OptLevel::parse(&value).unwrap_or_else(|| {
             // Not fatal, but not silent either: a typo'd level that quietly
@@ -312,7 +311,8 @@ pub fn opt_level() -> OptLevel {
             );
             OptLevel::default()
         }),
-    })
+    };
+    *LEVEL
 }
 
 /// Whether Cranelift's IR verifier runs on everything this crate compiles.
@@ -353,8 +353,8 @@ pub fn opt_level() -> OptLevel {
 /// compiled under different rules is a difference nobody could later account
 /// for.
 pub fn verify() -> bool {
-    static VERIFY: OnceLock<bool> = OnceLock::new();
-    *VERIFY.get_or_init(|| match std::env::var(VERIFY_ENV) {
+    #[dynamic]
+    static VERIFY: bool = match std::env::var(VERIFY_ENV) {
         Err(_) => cfg!(debug_assertions),
         Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => true,
@@ -371,7 +371,8 @@ pub fn verify() -> bool {
                 cfg!(debug_assertions)
             }
         },
-    })
+    };
+    *VERIFY
 }
 
 /// Whether microlift is asked to skip the IR for flag writes nothing reads.
@@ -391,8 +392,8 @@ pub fn verify() -> bool {
 /// exposure is the table and nothing else. `ROSETTA3_DEAD_FLAGS=1` is how a run
 /// opts in while that table earns its confidence.
 pub fn eliminate_dead_flags() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| match std::env::var(DEAD_FLAGS_ENV) {
+    #[dynamic]
+    static ON: bool = match std::env::var(DEAD_FLAGS_ENV) {
         Err(_) => false,
         Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => true,
@@ -402,7 +403,8 @@ pub fn eliminate_dead_flags() -> bool {
                 false
             }
         },
-    })
+    };
+    *ON
 }
 
 /// Whether a translated region may resolve its own successor rather than
@@ -420,8 +422,8 @@ pub fn eliminate_dead_flags() -> bool {
 /// only worth making if it can be run both ways. It also makes bisecting a
 /// misbehaving program against the mechanism a variable rather than a rebuild.
 pub fn block_linking() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| match std::env::var(NO_BLOCK_LINK_ENV) {
+    #[dynamic]
+    static ON: bool = match std::env::var(NO_BLOCK_LINK_ENV) {
         Err(_) => true,
         Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => false,
@@ -433,7 +435,8 @@ pub fn block_linking() -> bool {
                 true
             }
         },
-    })
+    };
+    *ON
 }
 
 /// Which guest registers this runtime keeps in **host registers** across a
@@ -465,8 +468,8 @@ pub fn block_linking() -> bool {
 /// `ROSETTA3_NO_PINNED_LINK=1` returns to host-resolved links, which is the
 /// bisection knob between the two shapes of linking.
 pub fn pinned_link_abi() -> Option<PinnedAbi> {
-    static ABI: OnceLock<Option<PinnedAbi>> = OnceLock::new();
-    *ABI.get_or_init(|| {
+    #[dynamic]
+    static ABI: Option<PinnedAbi> = {
         if !boolean_env(NO_PINNED_LINK_ENV, false, "pinned links stay on") {
             return None;
         }
@@ -490,7 +493,8 @@ pub fn pinned_link_abi() -> Option<PinnedAbi> {
             return None;
         }
         Some(abi)
-    })
+    };
+    *ABI
 }
 
 /// Parse a `ROSETTA3_PINNED_REGS` list. `None` - with a message - for anything
@@ -551,8 +555,9 @@ fn boolean_env(name: &str, unset: bool, on_bad_value: &str) -> bool {
 
 /// The Cranelift flags every backend in this process is built with.
 pub fn flags() -> settings::Flags {
-    static FLAGS: OnceLock<settings::Flags> = OnceLock::new();
-    FLAGS.get_or_init(|| opt_level().flags()).clone()
+    #[dynamic]
+    static FLAGS: settings::Flags = opt_level().flags();
+    FLAGS.clone()
 }
 
 /// The ISA settings every backend in this process is built with.
@@ -561,8 +566,9 @@ pub fn flags() -> settings::Flags {
 /// CPU detection, and detection that ran once cannot disagree with itself
 /// between two regions of the same run.
 pub fn isa_settings() -> &'static [(&'static str, &'static str)] {
-    static SETTINGS: OnceLock<Vec<(&'static str, &'static str)>> = OnceLock::new();
-    SETTINGS.get_or_init(|| opt_level().isa_settings())
+    #[dynamic]
+    static SETTINGS: Vec<(&'static str, &'static str)> = opt_level().isa_settings();
+    &SETTINGS
 }
 
 /// A JIT backend configured for this run.

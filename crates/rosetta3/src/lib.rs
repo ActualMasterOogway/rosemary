@@ -137,6 +137,7 @@ pub mod objc;
 pub mod profile;
 pub mod program;
 pub mod region;
+pub mod retstub;
 pub mod shims;
 pub mod signal;
 pub mod stack;

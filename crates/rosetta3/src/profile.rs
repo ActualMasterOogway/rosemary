@@ -94,6 +94,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
+use static_init::dynamic;
+
 use crate::fault::Attribution;
 
 // ---------------------------------------------------------- configuration ---
@@ -117,8 +119,8 @@ const TOP: usize = 15;
 ///
 /// Read once: a `getenv` per sample would be a cost inside the measurement.
 fn configured_hz() -> Option<u32> {
-    static HZ: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
-    *HZ.get_or_init(|| {
+    #[dynamic]
+    static HZ: Option<u32> = {
         let raw = std::env::var("ROSETTA3_PROFILE").ok()?;
         match raw.trim() {
             "" | "0" | "no" | "off" => None,
@@ -128,7 +130,8 @@ fn configured_hz() -> Option<u32> {
             "1" | "yes" | "on" => Some(DEFAULT_HZ),
             n => n.parse().ok().filter(|&hz| hz > 0),
         }
-    })
+    };
+    *HZ
 }
 
 /// Whether sampling was asked for.
@@ -199,15 +202,16 @@ unsafe extern "C" {
 /// profiler's timer has to do — a sampler that silently runs at a fifth of its
 /// stated rate is a sampler whose stated rate is a lie.
 fn ticks(nanos: u64) -> u64 {
-    static BASE: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
-    let (numer, denom) = *BASE.get_or_init(|| {
+    #[dynamic]
+    static BASE: (u32, u32) = {
         let mut base = Timebase { numer: 1, denom: 1 };
         // SAFETY: `base` is a live local of the type the call fills in.
         match unsafe { mach_timebase_info(&mut base) } == KERN_SUCCESS {
             true => (base.numer.max(1), base.denom.max(1)),
             false => (1, 1),
         }
-    });
+    };
+    let (numer, denom) = *BASE;
     // ticks = nanos * denom / numer. Widened, because on Apple silicon the
     // ratio is 125/3 and a run measured in seconds overflows sixty-four bits
     // of nanoseconds-times-three long before it overflows this.

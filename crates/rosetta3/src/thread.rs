@@ -89,11 +89,12 @@
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::ffi::c_void;
 use std::ops::Range;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
 
 use microlift::arch::x86_64::context::RegisterContext;
 use microlift::core::link::{BlockLinkConfig, BlockLinkEntry};
+use static_init::dynamic;
 
 use crate::stack::GuestStack;
 use crate::vm::VmError;
@@ -653,20 +654,22 @@ impl CodeWindow {
 }
 
 /// The key every thread's [`ThreadState`] hangs off.
-static KEY: OnceLock<libc::pthread_key_t> = OnceLock::new();
+#[dynamic]
+static KEY: libc::pthread_key_t = {
+    let mut key: libc::pthread_key_t = 0;
+    // SAFETY: `key` is a live local of the right type, and `release` matches
+    // the destructor signature libpthread calls it with.
+    let rc = unsafe { libc::pthread_key_create(&mut key, Some(release)) };
+    assert_eq!(
+        rc, 0,
+        "pthread_key_create failed; the runtime cannot run a guest thread"
+    );
+    key
+};
 
+#[inline(always)]
 fn key() -> libc::pthread_key_t {
-    *KEY.get_or_init(|| {
-        let mut key: libc::pthread_key_t = 0;
-        // SAFETY: `key` is a live local of the right type, and `release` matches
-        // the destructor signature libpthread calls it with.
-        let rc = unsafe { libc::pthread_key_create(&mut key, Some(release)) };
-        assert_eq!(
-            rc, 0,
-            "pthread_key_create failed; the runtime cannot run a guest thread"
-        );
-        key
-    })
+    *KEY
 }
 
 /// Free a finished thread's state. Never called on the main thread.

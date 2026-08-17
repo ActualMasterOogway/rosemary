@@ -55,6 +55,8 @@
 //! which knows exactly which function it handed back — must be able to name a
 //! signature without a string comparison.
 
+use static_init::dynamic;
+
 use super::ArgType as T;
 
 /// One function's signature, as microlift wants it.
@@ -199,9 +201,8 @@ enum Described {
 /// building a map is where a duplicate becomes invisible, so nothing here
 /// should ever be the thing that notices.
 fn index() -> &'static std::collections::HashMap<&'static str, Described> {
-    static INDEX: std::sync::OnceLock<std::collections::HashMap<&'static str, Described>> =
-        std::sync::OnceLock::new();
-    INDEX.get_or_init(|| {
+    #[dynamic]
+    static INDEX: std::collections::HashMap<&'static str, Described> = {
         let mut map = std::collections::HashMap::with_capacity(SIGNATURES.len() + REFUSED.len());
         for (name, reason) in REFUSED {
             map.insert(*name, Described::Refused(reason));
@@ -213,7 +214,8 @@ fn index() -> &'static std::collections::HashMap<&'static str, Described> {
             map.insert(abi.name, Described::Known(abi));
         }
         map
-    })
+    };
+    &INDEX
 }
 
 /// Signatures reachable by a provider-assigned tag.

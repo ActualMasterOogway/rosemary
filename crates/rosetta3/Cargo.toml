@@ -38,6 +38,8 @@ cranelift-frontend = {git = "https://github.com/microlift/wasmtime", branch = "m
 # construction.
 cranelift-native = { git = "https://github.com/microlift/wasmtime", branch = "microlift_experimental", version = "0.136.0-dev" }
 
+static_init = "1.0.4"
+
 [dev-dependencies]
 # The ABI tests call real host libSystem functions through the marshaller, and
 # `dlsym` them to find the addresses in the first place.

@@ -854,7 +854,7 @@ fn find_handler(
             }
         }
         step(&mut regs, &entry, mem)?;
-        if regs.rip == crate::stack::RETURN_SENTINEL {
+        if crate::retstub::is_exit(regs.rip) {
             return Err(edge_of_the_walk(undecidable));
         }
     }
@@ -912,7 +912,7 @@ fn enter_next_pad(
     }
 
     for _ in 0..MAX_FRAMES {
-        if regs.rip == crate::stack::RETURN_SENTINEL {
+        if crate::retstub::is_exit(regs.rip) {
             return Ok(false);
         }
         let Some(entry) = vm.program.unwind_entry(regs.rip) else {

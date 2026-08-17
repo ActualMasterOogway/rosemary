@@ -54,6 +54,7 @@ pub mod aggregate;
 pub mod marshal;
 pub mod table;
 
+use static_init::dynamic;
 pub use table::{FunctionAbi, Lookup};
 
 /// The convention the guest passes arguments in.
@@ -77,8 +78,9 @@ pub fn guest_call_abi() -> CallAbi {
 /// [`guest_call_abi`] stays, because [`microlift`]'s registration APIs take one
 /// by value and a clone at lift time is nothing.
 pub fn guest_call_abi_ref() -> &'static CallAbi {
-    static ABI: std::sync::OnceLock<CallAbi> = std::sync::OnceLock::new();
-    ABI.get_or_init(CallAbi::sysv_amd64)
+    #[dynamic]
+    static ABI: CallAbi = CallAbi::sysv_amd64();
+    &ABI
 }
 
 /// Anything that stops an intercepted call from being made.

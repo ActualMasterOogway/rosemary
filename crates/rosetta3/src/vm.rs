@@ -63,11 +63,12 @@ use machish::memory::{MmapSpace, Regions};
 
 use microlift::arch::x86_64::context::RegisterContext;
 use microlift::core::exit::{ExitReason, TransferKind};
+use static_init::dynamic;
 
 use crate::abi::{AbiError, GuestMemory};
 use crate::cache::CodeCache;
 use crate::program::Program;
-use crate::stack::{GuestStack, RETURN_SENTINEL};
+use crate::stack::GuestStack;
 use crate::thunk::ThunkTable;
 
 /// Anything that stops the guest.
@@ -180,13 +181,14 @@ fn say(err: &VmError) {
 ///
 /// Read once and cached, because the alternative is a `getenv` per region entry.
 fn trace_interval() -> Option<u64> {
-    static EVERY: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
-    *EVERY.get_or_init(|| {
+    #[dynamic]
+    static EVERY: Option<u64> = {
         std::env::var("ROSETTA3_TRACE_PC")
             .ok()
             .and_then(|v| v.parse().ok())
             .filter(|n| *n > 0)
-    })
+    };
+    *EVERY
 }
 
 /// How control reached the address that stopped the guest.
@@ -312,7 +314,10 @@ fn instruction_name(reason: ExitReason, code: u32) -> Option<String> {
 pub(crate) fn classify(exit: ExitReason, code: u32) -> crate::stats::Exit {
     use crate::stats::Exit;
     match exit {
-        ExitReason::Return => Exit::Return,
+        // The end of a call this runtime made — the `int3` in [`crate::retstub`]
+        // — and not a guest breakpoint, which does not come back from `step` at
+        // all.
+        ExitReason::Breakpoint => Exit::Return,
         ExitReason::None => Exit::Fallthrough,
         ExitReason::ImportedFunctionCall => Exit::Import,
         ExitReason::IndirectCall => Exit::Indirect,
@@ -899,7 +904,7 @@ impl Vm {
     ///
     /// This is the *only* way into guest code, from the entry point, from an
     /// initializer, and from a host→guest thunk alike — so the argument
-    /// placement, the sentinel return address, and the exit loop have exactly
+    /// placement, the return stub's address, and the exit loop have exactly
     /// one implementation.
     pub fn call(&self, entry: u64, args: &[u64]) -> Result<u64, VmError> {
         let mut ctx = RegisterContext::new();
@@ -971,7 +976,7 @@ impl Vm {
         }
         let rsp = args_at - 8;
         self.view()
-            .write(rsp, &RETURN_SENTINEL.to_le_bytes())
+            .write(rsp, &crate::retstub::address().to_le_bytes())
             .map_err(|source| VmError::Stack { source })?;
         ctx.rsp = rsp;
         ctx.rip = entry;
@@ -1134,7 +1139,7 @@ impl Vm {
                             .map_err(|source| VmError::Stack { source })?;
                         ctx.rsp = ctx.rsp.wrapping_add(8);
                         let ret = u64::from_le_bytes(ret);
-                        if ret == RETURN_SENTINEL {
+                        if crate::retstub::is_exit(ret) {
                             return Ok(ctx.rax);
                         }
                         ctx.rip = ret;
@@ -1207,11 +1212,28 @@ impl Vm {
     /// standing in for a `CALL` that microlift declined to perform.
     fn step(&self, ctx: &mut RegisterContext, exit: ExitReason) -> Result<Option<u64>, VmError> {
         match exit {
-            // The guest returned to the sentinel this VM pushed: the function
-            // it called is finished. Any other `Return` is a return into a
-            // region we simply have not translated yet.
-            ExitReason::Return if ctx.rip == RETURN_SENTINEL => Ok(Some(ctx.rax)),
-            ExitReason::Return => Ok(None),
+            // The guest returned to the stub this VM pushed and executed the
+            // one `int3` there: the function it called is finished. See
+            // [`crate::retstub`] for why the end of a call is a breakpoint and
+            // not microlift's own `ExitReason::Return`, which this runtime no
+            // longer asks for.
+            ExitReason::Breakpoint if crate::retstub::is_exit(ctx.rip) => Ok(Some(ctx.rax)),
+
+            // Any other breakpoint is the guest's own `int3` — a debugger trap,
+            // an assertion, a sanitizer's — and what it wants is a `SIGTRAP`
+            // delivered to a handler this runtime has no path to yet. Skipping
+            // past it would run code the guest expected to be stopped before,
+            // so it is reported here rather than silently resumed; the address
+            // test above is what will tell the two apart when there is
+            // somewhere to deliver one.
+            ExitReason::Breakpoint => panic!(
+                "rosetta3: guest breakpoint at {:#x}{}, which this runtime cannot deliver",
+                ctx.rip,
+                self.program
+                    .locate(ctx.rip)
+                    .map(|at| format!(" ({at})"))
+                    .unwrap_or_default()
+            ),
 
             // Control fell out of the *bottom* of the region: the last
             // instruction lifted was an ordinary fallthrough and the next

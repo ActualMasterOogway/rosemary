@@ -66,6 +66,7 @@
 //!   of a `qsort` comparator is refused.
 
 use microlift::arch::x86_64::context::RegisterContext;
+use static_init::dynamic;
 
 use crate::abi::{AbiError, Callbacks, GuestMemory, Result};
 
@@ -121,9 +122,9 @@ impl SigAction {
 /// as the guest wrote it, never a thunk — because the only thing this map is for
 /// is answering `oldact` with what the guest last said. See the module note.
 fn recorded() -> &'static std::sync::Mutex<std::collections::HashMap<i32, SigAction>> {
-    static MAP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<i32, SigAction>>> =
-        std::sync::OnceLock::new();
-    MAP.get_or_init(Default::default)
+    #[dynamic]
+    static MAP: std::sync::Mutex<std::collections::HashMap<i32, SigAction>> = Default::default();
+    &MAP
 }
 
 /// Say once, per signal, that a disposition was taken and will not be delivered.

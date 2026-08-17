@@ -114,6 +114,7 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction};
+use static_init::dynamic;
 
 /// Ceiling on how many instructions one region may contain, across all of its
 /// blocks. FEX's `MaxInstPerBlock` (`FEX_MAXINST`), whose default is 5000.
@@ -183,11 +184,12 @@ fn knob(name: &str, default: usize) -> usize {
 /// The instruction cap in force, which is [`MAX_REGION_INSTRUCTIONS`] unless
 /// `ROSETTA3_REGION_CAP` says otherwise.
 pub fn max_instructions() -> usize {
-    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CAP.get_or_init(|| match knob(CAP_ENV, MAX_REGION_INSTRUCTIONS) {
+    #[dynamic]
+    static CAP: usize = match knob(CAP_ENV, MAX_REGION_INSTRUCTIONS) {
         0 => MAX_REGION_INSTRUCTIONS,
         n => n,
-    })
+    };
+    *CAP
 }
 
 /// Whether a region may hold more than one basic block. FEX's `FEX_MULTIBLOCK`,
@@ -199,22 +201,25 @@ pub fn max_instructions() -> usize {
 /// runtime feels more sharply than FEX does — so the knob is worth having even
 /// though the default matches.
 fn multiblock() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| knob(MULTIBLOCK_ENV, 1) != 0)
+    #[dynamic]
+    static ON: bool = knob(MULTIBLOCK_ENV, 1) != 0;
+    *ON
 }
 
 /// How far forward a branch may point and still be followed, in bytes.
 /// [`MAX_FORWARD_BRANCH_DIST`] unless `ROSETTA3_REGION_FORWARD` says otherwise.
 fn forward_limit() -> u64 {
-    static DIST: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *DIST.get_or_init(|| knob(FORWARD_ENV, MAX_FORWARD_BRANCH_DIST as usize) as u64)
+    #[dynamic]
+    static DIST: u64 = knob(FORWARD_ENV, MAX_FORWARD_BRANCH_DIST as usize) as u64;
+    *DIST
 }
 
 /// Whether the Mono call rule applies in writable executable memory. On by
 /// default; see the module note for what it is and why FEX has it.
 fn mono_rule() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| knob(MONO_ENV, 1) != 0)
+    #[dynamic]
+    static ON: bool = knob(MONO_ENV, 1) != 0;
+    *ON
 }
 
 /// One basic block: a run of instructions entered at one address.

@@ -12,7 +12,6 @@ use machish::spec::arch::X86_64;
 
 use microlift::arch::x86_64::context::RegisterContext;
 use microlift::core::exit::MemorySegment;
-use microlift::core::optimize::{Optimization, Optimizations};
 use microlift::core::specialize::Specialization;
 use microlift::core::{AddressMode, Atomic128Mode, LifterConfig};
 
@@ -583,6 +582,12 @@ impl<M: Regions> Program<M> {
             // — and it is baked into every region compiled under it, which is
             // why it is asked for here rather than chosen per lift.
             block_link: crate::jit::block_linking().then(crate::thread::link_config),
+            // `exit_trampoline_address` is left at its default `None`, and that
+            // is a decision rather than an omission: naming a sentinel puts a
+            // 64-bit constant, a compare and a branch on every `ret` that leaves
+            // a region, and sends the matching one down the *unlinkable* exit.
+            // This runtime recognises the end of a call from the guest code the
+            // return address names instead — see [`crate::retstub`].
             ..LifterConfig::default()
         };
 
@@ -759,7 +764,11 @@ impl<M: Regions> Program<M> {
                 // [`crate::shims::vmmap`].
                 .or_else(|| lift_generated(va))
                 // Or code *this runtime* wrote, which is in no image either.
-                .or_else(|| crate::trampoline::lift_region(va));
+                .or_else(|| crate::trampoline::lift_region(va))
+                // Including the one instruction that ends a call: the return
+                // address every entry into guest code pushes. See
+                // [`crate::retstub`].
+                .or_else(|| crate::retstub::lift_region(va));
         };
         // A loaded image is not memory the guest writes, so the Mono call rule
         // does not apply to it. See [`crate::region`].
@@ -810,6 +819,10 @@ impl<M: Regions> Program<M> {
             // Or one of this runtime's own five-byte stubs, which is guest code
             // by construction: it exists to be lifted. See [`crate::trampoline`].
             || crate::trampoline::contains(va)
+            // Or the return stub, which is guest code for the same reason: a
+            // `ret` transfers to it and the run loop lifts it. See
+            // [`crate::retstub`].
+            || crate::retstub::contains(va)
     }
 
     /// `va` as `image+offset`, in the image's *own* address space.
@@ -833,7 +846,9 @@ impl<M: Regions> Program<M> {
                 }
             }
         }
-        crate::dyld::locate(va).or_else(|| crate::trampoline::locate(va))
+        crate::dyld::locate(va)
+            .or_else(|| crate::trampoline::locate(va))
+            .or_else(|| crate::retstub::locate(va))
     }
 
     /// Point this program's import slots at [trampolines](crate::trampoline).

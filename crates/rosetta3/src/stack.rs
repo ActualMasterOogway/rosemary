@@ -56,15 +56,6 @@ use crate::vm::VmError;
 /// Default guest stack, matching the 8 MiB macOS gives a main thread.
 pub const DEFAULT_STACK: usize = 8 * 1024 * 1024;
 
-/// The value a guest function's return address is set to before it is entered.
-///
-/// Microlift compares a popped return address against this and reports
-/// [`ExitReason::Return`](microlift::core::exit::ExitReason::Return) on a match,
-/// which is how the runtime tells "the function I called has finished" from
-/// "control left this region". It is fixed in the lifter, not configurable, so
-/// it is repeated here rather than derived.
-pub const RETURN_SENTINEL: u64 = 0xFFFF_FFFF_FFFF_FFFF;
-
 /// A guest stack, with the process arguments written into its top.
 pub struct GuestStack {
     /// The reservation this stack owns, or `None` when the *guest* supplied the

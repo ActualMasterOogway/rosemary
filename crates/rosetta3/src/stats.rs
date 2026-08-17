@@ -111,8 +111,9 @@ counters! {
 /// address", and those are not the same work item.
 #[derive(Clone, Copy)]
 pub enum Exit {
-    /// The translation's own terminating block: a `ret` to the sentinel this VM
-    /// pushed, or a return into a region already entered.
+    /// The end of a call this runtime made: the `int3` of the return stub the
+    /// entry pushed, reached by the callee's final `ret`. See
+    /// [`crate::retstub`].
     Return,
     /// A `ret` that popped an address outside the region — the ordinary way a
     /// leaf function ends, and one region entry each time.
