@@ -5,15 +5,11 @@ use std::ffi::{CString, c_char, c_void};
 
 /// The compatibility defaults this runtime registers, and why each is here.
 const DEFAULTS: &[(&str, bool)] = &[
-    // See the module note. Without this, any guest that drives its own
-    // `NSOpenGLContext` from a render thread is killed by AppKit on the first
-    // `setView:` — not a fault this runtime can report, an `_os_crash`.
+    // See the module note.
     ("NSOpenGLContextSuppressThreadAssertions", true),
 ];
 
 /// Apply every compatibility default this runtime needs.
-///
-/// Silent when the frameworks are not loaded.
 pub fn install() {
     let Some(rt) = Runtime::load() else {
         return;

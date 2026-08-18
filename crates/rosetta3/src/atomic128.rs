@@ -11,9 +11,6 @@ use crate::vm::VmError;
 const MAX_LEN: u64 = 15;
 
 /// Perform the `CMPXCHG16B` the guest exited on.
-///
-/// `ctx.rip` is already **past** the instruction, which is microlift's
-/// unimplemented-instruction contract.
 pub fn service(ctx: &mut RegisterContext, mem: &dyn GuestMemory) -> Result<(), VmError> {
     let at = ctx.rip;
     let instruction = decode_before(at, mem).ok_or(VmError::Trap {
@@ -57,11 +54,7 @@ pub fn service(ctx: &mut RegisterContext, mem: &dyn GuestMemory) -> Result<(), V
 
 /// A real 128-bit compare-and-swap, returning what was in memory.
 ///
-/// `ldaxp`/`stlxp` rather than LSE's `caspal`: the exclusive pair is ARMv8.0 and works
-/// on every arm64 this could run on, while `casp` needs the LSE extension.
-///
-/// Acquire on the load and release on the store, which is what the x86 `lock` prefix
-/// means:
+/// `ldaxp`/`stlxp` rather than LSE's `caspal`:
 ///
 /// # Safety
 ///
@@ -122,10 +115,6 @@ unsafe fn compare_exchange(at: *mut u128, expected: u128, desired: u128) -> u128
 }
 
 /// Find the instruction that ends at `end`.
-///
-/// The exit reports the PC *after* the instruction and nothing about its length, so the
-/// start is recovered by trying each length a `CMPXCHG16B` encoding can have and
-/// keeping the one that decodes to exactly this instruction ending exactly here.
 fn decode_before(end: u64, mem: &dyn GuestMemory) -> Option<Instruction> {
     let mut window = [0u8; MAX_LEN as usize];
     let start = end.checked_sub(MAX_LEN)?;
@@ -145,9 +134,6 @@ fn decode_before(end: u64, mem: &dyn GuestMemory) -> Option<Instruction> {
 }
 
 /// The address the memory operand names, from the guest's own registers.
-///
-/// `None` for a form this does not model — a segment override, or a base or index the
-/// context has no field for.
 fn effective_address(instruction: &Instruction, ctx: &RegisterContext) -> Option<u64> {
     if instruction.segment_prefix() != Register::None {
         return None;
@@ -219,8 +205,7 @@ mod tests {
     #[test]
     fn the_swap_is_atomic_across_threads() {
         // The whole point, and the property `Atomic128Mode::Emulated` does not
-        // have: eight threads each add one to the low half a thousand times
-        // through the CAS, and every increment has to survive.
+        // have.
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
 

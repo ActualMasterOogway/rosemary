@@ -49,10 +49,14 @@ fn run(path: &str, args: Vec<String>, policy: ImportPolicy) -> ExitCode {
     match startup::run(vm) {
         // `exit` rather than returning the status, and the difference is not
         // cosmetic.
+        // `exit` rather than returning the status. Returning goes back through
+        // Rust's start-up shim, which tears this thread's TLS down *before*
+        // calling `exit` — and the guest's `atexit` handlers run from inside
+        // `exit` and re-enter the JIT. Compiling a region needs live
+        // thread-locals (Cranelift's among them), so a handler whose code had
+        // not yet been translated would panic instead of running.
         Ok(status) => std::process::exit(status),
-        // A stop is a diagnostic, not a crash: every `VmError` names the
-        // address or the symbol that could not be handled, which is the whole
-        // reason the loop refuses rather than guesses.
+        // A stop is a diagnostic, not a crash.
         Err(e) => {
             eprintln!("rosetta3: {path}: {e}");
             ExitCode::FAILURE
@@ -68,9 +72,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
     if first == "run" {
-        // `--slow` turns every import into a VM exit. It is here rather than in
-        // a test harness because it is the falsifiable half of the
-        // claim.
+        // `--slow` turns every import into a VM exit.
         let mut policy = ImportPolicy::FastWhenKnown;
         let mut path = None;
         for arg in args.by_ref() {
@@ -94,8 +96,7 @@ fn main() -> ExitCode {
             eprintln!("rosetta3: re-executing from {}", mirror.display());
             let e = bundle::reexec(&mirror);
             // Only reached if `execv` failed, in which case running anyway is
-            // strictly better than not running: a program that never asks about
-            // its bundle does not care.
+            // strictly better than not running.
             eprintln!("rosetta3: could not re-execute from the bundle mirror: {e}");
         }
         return run(&path, args.collect(), policy);
@@ -158,9 +159,8 @@ fn main() -> ExitCode {
         }
     }
 
-    // What it would take to *call* each of those imports.
-    // An unknown symbol is the only entry that matters: it is the one that
-    // would become a wrong value in a register rather than a diagnostic.
+    // What it would take to *call* each of those imports. An unknown symbol is
+    // the only entry that matters.
     let classified = program.classify_imports();
     let count = |want: fn(&Classification) -> bool| classified.values().filter(|c| want(c)).count();
     println!(
@@ -178,9 +178,7 @@ fn main() -> ExitCode {
         }
     }
 
-    // What the guest declares to the Objective-C runtime. Decoded and nothing
-    // else — no class is realized, no selector uniqued, no category attached —
-    // so this is a description of the work left, printed as a count.
+    // What the guest declares to the Objective-C runtime.
     for img in &program.report.images {
         let Some(objc) = &img.objc else { continue };
         let methods: usize = objc.implementations().count();
@@ -209,8 +207,6 @@ fn main() -> ExitCode {
     }
 
     // One lift, on demand, of the region control would actually reach first.
-    // This is the execution model in miniature: a JIT repeats it, keyed on
-    // wherever the previous region exited to.
     let config = program.lifter_config();
     match program.entry() {
         Some(entry) => match program.lift_region(entry) {

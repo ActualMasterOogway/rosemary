@@ -72,8 +72,6 @@ pub fn lookup(tag: u64, symbol: &str) -> Lookup {
 }
 
 /// Data imports whose names carry a suffix, so [`REFUSED`] cannot list them.
-///
-/// Objective-C metadata is the only family in this shape.
 fn data_family(name: &str) -> Option<&'static str> {
     const DATA: &str = "an Objective-C metadata import, read through its slot and never called";
     let families = [
@@ -383,9 +381,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFNetworkCopyProxiesForURL", P, P, P),
     sig!("CFNumberCreate", P, P, I64, P),
     sig!("CFNumberGetTypeID", U64),
-    // `Boolean` is an `unsigned char`, not an `int`: the caller tests the low
-    // byte and a wider return would leave the rest of `rax` to be read as part
-    // of it.
+    // `Boolean` is an `unsigned char`, not an `int`.
     sig!("CFNumberGetValue", U8, P, I64, P),
     // ## Preferences
     //
@@ -434,8 +430,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFSetGetValues", V, P, P),
     sig!("CFStringAppendCharacters", V, P, P, I64),
     // `CFComparisonResult` is a `CFIndex`, so a signed doubleword, and
-    // `CFStringCompareFlags` is a `CFOptionFlags` — both 64-bit on LP64. This
-    // is where SDL3 stopped.
+    // `CFStringCompareFlags` is a `CFOptionFlags` — both 64-bit on LP64.
     sig!("CFStringCompare", I64, P, P, U64),
     sig!("CFStringConvertEncodingToIANACharSetName", P, U32),
     sig!("CFStringConvertEncodingToNSStringEncoding", U64, U32),
@@ -452,9 +447,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // AMD64 and AAPCS64 agree on passing one in two consecutive integer
     // registers.
     sig!("CFStringGetBytes", I64, P, I64, I64, U32, U8, U8, P, I64, P),
-    // A `UniChar` is a `UInt16`. Apple's arm64 ABI requires the callee to
-    // extend a narrow return to 32 bits, so reading `w0` is safe where the
-    // guest reads only `ax`.
+    // A `UniChar` is a `UInt16`.
     sig!("CFStringGetCharacterAtIndex", U16, P, I64),
     // `Boolean CFStringGetCString(CFStringRef, char *buffer, CFIndex
     // bufferSize, CFStringEncoding encoding)` — **four** parameters.
@@ -499,8 +492,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("MTLCreateSystemDefaultDevice", P),
     sig!("CGAssociateMouseAndMouseCursorPosition", I32, I32),
     // `boolean_t CGCursorIsVisible(void)` — an `int`, not a `CGError`, and the
-    // pair to `CGDisplayHideCursor`: a game that hides the cursor for mouse-look
-    // asks this before deciding whether it has to.
+    // pair to `CGDisplayHideCursor`.
     sig!("CGCursorIsVisible", I32),
     // ## The bitmap context, which is how an image becomes texture bytes
     //
@@ -622,9 +614,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGImageSourceCreateWithData", P, P, P),
     sig!("CGMainDisplayID", U32),
     sig!("CGReleaseDisplayFadeReservation", I32, U32),
-    // A `CGWindowLevel` and a `CGWindowLevelKey` are both `int32_t`. The
-    // shielding level is what a fullscreen window is raised to so it sits above
-    // everything else the window server draws.
+    // A `CGWindowLevel` and a `CGWindowLevelKey` are both `int32_t`.
     sig!("CGShieldingWindowLevel", I32),
     // `CGPoint` by value again; see `CGDisplayMoveCursorToPoint`.
     sig!("CGWarpMouseCursorPosition", I32, F64, F64),
@@ -731,9 +721,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `IOReturn IOHIDDeviceGetValue(IOHIDDeviceRef, IOHIDElementRef,
     // IOHIDValueRef *)` — the polled counterpart to the value callback below.
     sig!("IOHIDDeviceGetValue", I32, P, P, P),
-    // The host calls the callback with `(context, IOReturn, sender, value)`:
-    // four integer arguments and no result, which is the shape the generic
-    // trampoline was written for.
+    // The host calls the callback with `(context, IOReturn, sender, value)`.
     cbsig!([1], "IOHIDDeviceRegisterInputValueCallback", V, P, P, P),
     // Removal is `IOHIDCallback(void *context, IOReturn, void *sender)`: the
     // guest's function pointer leaves as a thunk like every other.
@@ -778,8 +766,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("IOHIDElementGetLogicalMin", I64, P),
     sig!("IOHIDElementGetType", U32, P),
     // A `CFTypeID` is an `unsigned long`, so sixty-four bits, and this takes
-    // nothing: it is how a caller checks that an unknown `CFTypeRef` is an
-    // element before treating it as one.
+    // nothing.
     sig!("IOHIDElementGetTypeID", U64),
     sig!("IOHIDElementGetUsage", U32, P),
     sig!("IOHIDElementGetUsagePage", U32, P),
@@ -867,8 +854,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("IORegistryEntryCreateCFProperties", I32, U32, P, P, U32),
     sig!("IORegistryEntryCreateCFProperty", P, U32, P, P, U32),
     // An iterator over the registry, and the two ways of naming a starting
-    // point. `IORegistryEntrySearchCFProperty` is the recursive form, and its
-    // `plane` is a C string rather than a `CFStringRef`.
+    // point.
     sig!("IORegistryEntryCreateIterator", I32, U32, P, U32, P),
     sig!("IORegistryEntryFromPath", U32, U32, P),
     sig!("IORegistryEntrySearchCFProperty", P, U32, P, P, P, U32),
@@ -1066,8 +1052,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // only the `double` form leaves it undescribed.
     sig!("__isnanf", I32, F32),
     // The rest of `<math.h>`'s classification macros, which are functions on
-    // Darwin. Each takes its argument in a floating-point register and answers
-    // an `int`, and each width is its own symbol.
+    // Darwin.
     sig!("__isfinitef", I32, F32),
     sig!("__isfinited", I32, F64),
     sig!("__isinff", I32, F32),
@@ -1096,8 +1081,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("__tolower", I32, I32),
     sig!("__toupper", I32, I32),
     // Darwin's futex, which is how a modern `libc++` blocks on
-    // `std::atomic::wait` and how mimalloc parks a contended thread. It passes
-    // through.
+    // `std::atomic::wait` and how mimalloc parks a contended thread.
     sig!("__ulock_wait", I32, U32, P, U64, U32),
     sig!("__ulock_wait2", I32, U32, P, U64, U64, U64),
     sig!("__ulock_wake", I32, U32, P, U64),
@@ -1119,8 +1103,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("_dyld_get_image_name", P, U32),
     sig!("_exit", V, I32),
     // The Darwin spellings that skip the signal mask, imported as `__longjmp`
-    // and `__setjmp`. One implementation serves both pairs: the distinction is
-    // about a mask this runtime does not model yet. See [`crate::jmpbuf`].
+    // and `__setjmp`.
     sig!("_longjmp", V, P, I32),
     sig!("_setjmp", I32, P),
     // `void _tlv_atexit(void (*termfunc)(void *), void *objAddr)` — the
@@ -1162,8 +1145,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("atanh", F64, F64),
     sig!("atanhf", F32, F32),
     // `atexit`, `bsearch`, `qsort` and `qsort_r` were refused until the
-    // host->guest thunk existed. What changed is only that the pointer they
-    // take can now be substituted; the signature was never in doubt.
+    // host->guest thunk existed.
     cbsig!([0], "atexit", I32, P),
     sig!("atof", F64, P),
     sig!("atoi", I32, P),
@@ -1184,8 +1166,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("bcopy", V, P, P, U64),
     sig!("bind", I32, I32, P, U32),
     // `kern_return_t bootstrap_look_up(mach_port_t, const name_t, mach_port_t
-    // *)`. How a guest finds a service registered with launchd — for UNDERTALE,
-    // the running Steam client.
+    // *)`.
     sig!("bootstrap_look_up", I32, U32, P, P),
     cbsig!([4], "bsearch", P, P, P, U64, U64, P),
     sig!("btowc_l", I32, I32, P),
@@ -1198,9 +1179,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("chdir", I32, P),
     sig!("chmod", I32, P, U32),
     sig!("clearerr", V, P),
-    // `clock_t clock(void)`. `clock_t` is `unsigned long` on Darwin — 64 bits on
-    // both architectures — so the value crosses whole; a narrower return would
-    // truncate a process that has run for more than an hour of CPU time.
+    // `clock_t clock(void)`.
     sig!("clock", U64),
     // `struct timespec` is two 64-bit words on both architectures, and the
     // guest passes it by address, so the host fills it in place.
@@ -1380,9 +1359,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("fmodf", F32, F32, F32),
     sig!("fnmatch", I32, P, P, I32),
     sig!("fopen", P, P, P),
-    // `fork` passes through, and what the child gets is this whole runtime: the
-    // code cache, the thunk table and the guest's memory, all copied by the
-    // kernel.
+    // `fork` passes through, and what the child gets is this whole runtime.
     sig!("fork", I32),
     sig!("fpathconf", I64, I32, I32),
     vsig!("fprintf", I32, P, P),
@@ -1414,9 +1391,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("ftruncate", I32, I32, I64),
     sig!("fts_children", P, P, I32),
     sig!("fts_close", I32, P),
-    // The comparator takes `const FTSENT **`, which is still just a pointer:
-    // `ls` sorts its output with one, so this is the entry that makes the
-    // acceptance binary produce output at all.
+    // The comparator takes `const FTSENT **`, which is still just a pointer.
     cbsig!([2], "fts_open", P, P, I32, P),
     sig!("fts_read", P, P),
     sig!("fts_set", I32, P, P, I32),
@@ -1515,9 +1490,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("glBlendEquation", V, U32),
     sig!("glBlendFunc", V, U32, U32),
     sig!("glBlendFuncSeparate", V, U32, U32, U32, U32),
-    // A `GLsizeiptr` and a `GLintptr` are both `long`, not `int`: a buffer
-    // upload of more than 2 GiB is not the case that matters, but a *negative*
-    // narrow read of a legitimate size would be.
+    // A `GLsizeiptr` and a `GLintptr` are both `long`, not `int`.
     sig!("glBufferData", V, U32, I64, P, U32),
     sig!("glBufferSubData", V, U32, I64, I64, P),
     sig!("glCheckFramebufferStatus", U32, U32),
@@ -1618,8 +1591,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("glStencilOp", V, U32, U32, U32),
     sig!("glTexCoord2f", V, F32, F32),
     // Nine integer arguments, which is one more than either the guest's six
-    // registers or the host's eight. See [`super::marshal`] for what carries
-    // the ninth.
+    // registers or the host's eight.
     sig!("glTexImage2D", V, U32, I32, I32, I32, I32, I32, U32, U32, P),
     // ### Sync objects
     //
@@ -2024,8 +1996,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("glVertexAttribPointer", V, U32, I32, U32, U8, I32, P),
     sig!("glViewport", V, I32, I32, I32, I32),
     // `glob`'s error callback is guest code called once per unreadable
-    // directory. The import is spelled `_glob$INODE64`, and the `$`-suffix
-    // fallback is what finds this entry.
+    // directory.
     cbsig!([2], "glob", I32, P, I32, P, P),
     sig!("gluOrtho2D", V, F64, F64, F64, F64),
     sig!("gmtime", P, P),
@@ -2036,9 +2007,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("hash_create", P, I32),
     cbsig!([3], "hash_search", P, P, P, P, P),
     sig!("herror", V, P),
-    // Two `host_*` calls Valve's tier0 makes to size physical memory. The host
-    // port they take is this process's, for the reason `mach_host_self` in
-    // `shims::runtime` gives: there is one task here, and one host.
+    // Two `host_*` calls Valve's tier0 makes to size physical memory.
     sig!("host_get_clock_service", I32, U32, U32, P),
     // ## The Mach kernel interface, and why it needs no translation
     //
@@ -2048,8 +2017,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("host_page_size", I32, U32, P),
     sig!("host_statistics", I32, U32, I32, P, P),
     // The 64-bit flavours, which differ from the pair above only in that the
-    // structure they fill has 64-bit counters. Same five arguments, same
-    // meaning.
+    // structure they fill has 64-bit counters.
     sig!("host_statistics64", I32, U32, I32, P, P),
     sig!("host_info", I32, U32, I32, P, P),
     sig!("hypot", F64, F64, F64),
@@ -2084,8 +2052,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("isupper", I32, I32),
     sig!("isxdigit", I32, I32),
     // BSD event notification, which is how `steamclient.dylib` waits on its
-    // sockets and its pipe to the client. Passed straight through, and the
-    // reason is a check rather than an assumption.
+    // sockets and its pipe to the client.
     sig!("kevent", I32, I32, P, I32, P, I32, P),
     sig!("kill", I32, I32, I32),
     sig!("kqueue", I32),
@@ -2118,16 +2085,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("logb", F64, F64),
     sig!("logbf", F32, F32),
     sig!("logf", F32, F32),
-    // The integer-returning rounding family. `long` and `long long` are both
-    // eight bytes on LP64, so `lrint`/`llrint` and `lround`/`llround` agree on
-    // both architectures and differ only in name.
+    // The integer-returning rounding family.
     sig!("llrint", I64, F64),
     sig!("llrintf", I64, F32),
     sig!("llround", I64, F64),
     sig!("llroundf", I64, F32),
-    // `longjmp` and `setjmp` are *shimmed*, not forwarded: the host's would
-    // save and restore arm64 registers and the JIT's own stack frame, which is
-    // the one kind of wrongness that does not fault.
+    // `longjmp` and `setjmp` are *shimmed*, not forwarded.
     sig!("longjmp", V, P, I32),
     sig!("lrint", I64, F64),
     sig!("lrintf", I64, F32),
@@ -2189,9 +2152,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // optimize it away.
     sig!("memset_s", I32, P, U64, I32, U64),
     sig!("memset_pattern16", V, P, P, U64),
-    // Answered honestly rather than usefully: `mincore` reports *residency* and
-    // succeeds for an address with nothing mapped at it, which is why
-    // [`crate::vm::GuestView`] probes with `msync` instead.
+    // Answered honestly rather than usefully.
     sig!("mincore", I32, P, U64, P),
     sig!("mkdir", I32, P, U32),
     sig!("mkdtemp", P, P),
@@ -2221,9 +2182,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("nextafter", F64, F64, F64),
     sig!("nl_langinfo", P, I32),
     sig!("nl_langinfo_l", P, I32, P),
-    // Variadic in their declarations and *fixed* in fact: the ellipsis is at
-    // most one `mode_t`, and `O_CREAT` in the flag word is what says whether it
-    // is there.
+    // Variadic in their declarations and *fixed* in fact.
     sig!("open", I32, P, I32, U32),
     sig!("openat", I32, I32, P, I32, U32),
     sig!("opendir", P, P),
@@ -2231,9 +2190,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("pathconf", I64, P, I32),
     sig!("pclose", I32, P),
     sig!("perror", V, P),
-    // `int poll(struct pollfd *, nfds_t, int)`. `nfds_t` is `unsigned int` on
-    // Darwin, and `struct pollfd` is eight bytes laid out identically on both
-    // architectures — checked alongside `kevent` above, for the same reason.
+    // `int poll(struct pollfd *, nfds_t, int)`.
     sig!("pipe", I32, P),
     sig!("poll", I32, P, U32, I32),
     sig!("popen", P, P, P),
@@ -2243,8 +2200,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // client starts a helper process.
     sig!("posix_spawn", I32, P, P, P, P, P, P),
     // `posix_spawnp` differs from `posix_spawn` only in searching `PATH`, so it
-    // takes the same six arguments. Crashpad — which is Roblox's crash reporter
-    // and starts before anything else — spawns its handler through this one.
+    // takes the same six arguments.
     sig!("posix_spawnp", I32, P, P, P, P, P, P),
     sig!("posix_spawn_file_actions_addchdir_np", I32, P, P),
     // `int posix_spawn_file_actions_addinherit_np(posix_spawn_file_actions_t *,
@@ -2431,9 +2387,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // The import is `_select$1050`, the variant with the 10.5 `fd_set`
     // semantics; arm64 has only the one, and the `$`-suffix fallback finds it.
     sig!("select", I32, I32, P, P, P, P),
-    // The named-semaphore surface. `sem_open` is `open`'s shape exactly: a
-    // variadic whose ellipsis is a fixed pair — a `mode_t` and an `unsigned` —
-    // that arrives only with `O_CREAT` in the same flag word.
+    // The named-semaphore surface. `sem_open` is `open`'s shape exactly.
     sig!("sem_close", I32, P),
     sig!("sem_open", P, P, I32, U32, U32),
     sig!("sem_post", I32, P),
@@ -2476,13 +2430,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("setusershell", V),
     sig!("setvbuf", I32, P, P, I32, U64),
     sig!("shutdown", I32, I32, I32),
-    // Shimmed, like the `setjmp` family and for a related reason: the handler
-    // is a guest function pointer that crosses out as a thunk and comes *back*
-    // in `signal`'s result and `sigaction`'s `oldact`. See [`crate::signal`].
+    // Shimmed, like the `setjmp` family and for a related reason.
     sig!("sigaction", I32, I32, P, P),
-    // Installed honestly and never used: this runtime delivers a signal on the
-    // guest's own stack through a thunk, so an alternate stack the guest asks
-    // for is one nothing will run on.
+    // Installed honestly and never used.
     sig!("sigaltstack", I32, P, P),
     sig!("siglongjmp", V, P, I32),
     sig!("signal", P, I32, P),
@@ -2603,9 +2553,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // means by them — unlike the register-state pair above.
     sig!("thread_policy_get", I32, U32, U32, P, P, P),
     sig!("thread_policy_set", I32, U32, U32, P, U32),
-    // The exception-port family. A guest crash reporter installs a handler here
-    // — Unity's does — and the ports are plain 32-bit names in arrays the
-    // caller owns.
+    // The exception-port family.
     sig!("thread_get_exception_ports", I32, U32, U32, P, P, P, P, P),
     sig!("thread_set_exception_ports", I32, U32, U32, U32, I32, I32),
     sig!("thread_resume", I32, U32),
@@ -2619,9 +2567,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("tmpfile", P),
     sig!("tolower", I32, I32),
     sig!("toupper", I32, I32),
-    // The output function is called once per character: `tputs` is how a
-    // terminal-aware program emits a capability string, and `/bin/ls` reaches
-    // it whenever its output is a terminal.
+    // The output function is called once per character.
     cbsig!([2], "tputs", I32, P, I32, P),
     sig!("trunc", F64, F64),
     sig!("truncate", I32, P, I64),
@@ -2856,9 +2802,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CVPixelBufferGetPixelFormatType", U32, P),
     sig!("CVPixelBufferPoolCreatePixelBuffer", I32, P, P, P),
     sig!("CVPixelBufferRelease", V, P),
-    // VideoToolbox. The compression session's output callback is an ordinary
-    // guest function pointer in the argument list; the *decompression* session's
-    // is inside a record structure, which is why that one is a shim.
+    // VideoToolbox.
     cbsig!(
         [7],
         "VTCompressionSessionCreate",
@@ -3009,8 +2953,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("malloc_zone_unregister", V, P),
     sig!("malloc_good_size", U64, U64),
     // `void *valloc(size_t)` and its private counterpart `vfree`, which
-    // libsystem_malloc exports without a header. mimalloc imports the pair
-    // together and they must stay together.
+    // libsystem_malloc exports without a header.
     sig!("valloc", P, U64),
     sig!("vfree", V, P),
     // `int malloc_jumpstart(int cookie)` — undocumented libsystem_malloc SPI
@@ -3063,8 +3006,6 @@ pub static SIGNATURES: &[FunctionAbi] = &[
 ];
 
 /// A symbol with no public declaration anywhere on this system.
-///
-/// The explicit unknown list, and the honest end of the refusal spectrum.
 const UNDECLARED: &str = "no public declaration; a guessed signature would fail silently";
 
 /// The commonest refusal by far, and the least interesting: a symbol that is a
@@ -3170,8 +3111,6 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("_ZTISt13runtime_error", DATA),
     ("_ZTISt9bad_alloc", DATA),
     // A `type_info` and the vtable a guest's own `type_info` objects point at.
-    // Both are read through their slots and compared by address, which is what
-    // makes a `catch` clause decidable at all — see [`crate::unwind`].
     ("_ZTISt9exception", DATA),
     ("_ZTIi", DATA),
     ("_ZTVN10__cxxabiv117__class_type_infoE", DATA),
@@ -3179,13 +3118,10 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("_ZTVN10__cxxabiv121__vmi_class_type_infoE", DATA),
     ("_ZTVSt12length_error", DATA),
     ("_ZTVSt9exception", DATA),
-    // A *variable* holding a function pointer, not a function: libc calls it
-    // after `explicit_bzero` so a debugger can watch. Read through its slot and
-    // never called by the guest, which is what makes it data here.
+    // A *variable* holding a function pointer, not a function.
     ("__explicit_bzero_hook", DATA),
     // The personality routine a frame's LSDA names. Read as an address and
-    // never called: this runtime interprets the LSDA itself rather than handing
-    // it to libunwind, which is the whole of [`crate::unwind`].
+    // never called.
     (
         "__gxx_personality_v0",
         "a personality routine, named by an LSDA and never called",
@@ -3277,7 +3213,9 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("frexpl", LONG_DOUBLE),
     ("strtold", LONG_DOUBLE),
     // `pid_t audit_token_to_pid(audit_token_t)` — thirty-two bytes of
-    // `audit_token_t` **by value**.
+    // `audit_token_t` **by value**. SysV AMD64 classifies it MEMORY and puts it
+    // on the caller's stack; AAPCS64 has the caller copy it and pass a pointer.
+    // Both are "in memory" and they are still not the same thing.
     ("audit_token_to_pid", AGGREGATE),
     // `void IODispatchCalloutFromMessage(void *unused, mach_msg_header_t *msg,
     // void *reference)` — the IOKit notification pump.
@@ -3305,12 +3243,6 @@ mod tests {
     use super::*;
 
     /// Every signature in the table can actually be called.
-    ///
-    /// The table and [`super::marshal`] are written independently — one says what a
-    /// function's arguments are, the other says which shapes it can place — and nothing
-    /// forces them to agree.
-    ///
-    /// `UCKeyTranslate` is why this exists.
     #[test]
     fn every_signature_is_one_the_marshaller_can_place() {
         let refused: Vec<&str> = SIGNATURES
@@ -3325,8 +3257,6 @@ mod tests {
     }
 
     /// A name appears once, which is the one thing [`index`] cannot notice.
-    ///
-    /// Order stopped mattering when the lookup became a map; duplication did not.
     #[test]
     fn signatures_are_unique() {
         let mut seen = std::collections::HashSet::new();
@@ -3347,9 +3277,7 @@ mod tests {
             "CFArrayApplyFunction",
             "CFStringGetBytes",
             "cabs",
-            // A `CGPoint` written out as its two `double`s. Invisible to this
-            // check until CoreGraphics.h joined [`HEADERS`], which is the point
-            // of adding a header.
+            // A `CGPoint` written out as its two `double`s.
             "CGDisplayMoveCursorToPoint",
             "CGWarpMouseCursorPosition",
         ];
@@ -3514,9 +3442,8 @@ mod tests {
         // never had `$INODE64`, so what is known about the variant is whatever
         // is known about the plain symbol — here, that it takes a comparator.
         assert_eq!(lookup(0, "_fts_open"), lookup(0, "_fts_open$INODE64"));
-        // `fts_open` is a signature now that the thunk exists, and the point
-        // of this assertion is unchanged: the `$INODE64` spelling finds
-        // whatever the plain name has to say.
+        // `fts_open` is a signature now that the thunk exists, and the point of
+        // this assertion is unchanged.
         assert!(
             matches!(lookup(0, "_fts_open$INODE64"), Lookup::Known(abi) if abi.name == "fts_open")
         );

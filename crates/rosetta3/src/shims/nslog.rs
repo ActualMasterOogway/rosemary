@@ -39,9 +39,6 @@ pub fn nslog(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory)
 /// two complications as `NSLog` (variadic, `NSString` format) with the format in the
 /// *second* position rather than the first, so five integer registers are named rather
 /// than one.
-///
-/// It is worth having rather than refusing because of *what* calls it: this is how a
-/// Cocoa game reports a fatal error before it exits.
 pub fn run_alert_panel(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -112,11 +109,6 @@ pub fn render_format(
 }
 
 /// `bytes` as an autoreleased `NSString`, with every `%` doubled.
-///
-/// The doubling is what makes this usable as a *replacement format*:
-///
-/// Autoreleased rather than owned, because the caller is standing in for a method that
-/// took a format it did not own either.
 pub fn escaped_string(bytes: &[u8]) -> Option<u64> {
     let mut escaped = Vec::with_capacity(bytes.len());
     for b in bytes {
@@ -175,9 +167,6 @@ fn emit(text: &[u8]) {
 type NsLogFn = unsafe extern "C" fn(*const c_void, ...);
 
 /// Foundation's `NSLog`, if this process has Foundation.
-///
-/// Looked up rather than linked, for the reason [`crate::objc::dispatch`] looks its
-/// runtime up.
 fn host_nslog() -> Option<NsLogFn> {
     static FOUND: OnceLock<Option<usize>> = OnceLock::new();
     let addr = *FOUND.get_or_init(|| dlsym("NSLog").map(|p| p as usize));
@@ -205,11 +194,7 @@ fn percent_s() -> Option<*const c_void> {
 
 /// The UTF-8 bytes of a `CFStringRef`/`NSString *`.
 ///
-/// The class is checked first, and that check is load-bearing rather than defensive.
-/// `CFStringGetLength` is toll-free bridged:
-///
-/// A word that is not an object *at all* is still not survivable, and cannot be:
-/// `isKindOfClass:` dereferences its receiver like any other message.
+/// A word that is not an object *at all* is still not survivable, and cannot be.
 fn cf_string_bytes(obj: u64) -> Option<Vec<u8>> {
     if obj == 0 {
         return None;
@@ -280,10 +265,6 @@ fn description_bytes(obj: u64) -> Option<Vec<u8>> {
 }
 
 /// Whether `obj` is an instance of `class_name` or one of its subclasses.
-///
-/// `isKindOfClass:` rather than a `CFGetTypeID` comparison, because the receiver may be
-/// a *guest* class this runtime realized as well as one of Foundation's, and the runtime
-/// answers for both.
 fn is_kind_of(obj: u64, class_name: &CStr) -> bool {
     // SAFETY: `objc_getClass` takes a C string and answers null for a name no
     // class has, which is checked rather than passed on.

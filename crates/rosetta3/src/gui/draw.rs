@@ -88,9 +88,6 @@ impl DrawList {
     }
 
     /// Restrict everything drawn from now on to `rect`, as `(x0, y0, x1, y1)`.
-    ///
-    /// **Clipped here rather than with a scissor rectangle**, and the reason is the
-    /// same one that made the draw list one pipeline.
     pub fn clip(&mut self, rect: (f32, f32, f32, f32)) {
         self.clip = rect;
     }
@@ -116,8 +113,7 @@ impl DrawList {
             return;
         }
         // Each edge trimmed by the fraction of the quad it cut off, and the
-        // texture coordinate trimmed by the same fraction. Guarded against a
-        // zero extent, which a degenerate rect can have.
+        // texture coordinate trimmed by the same fraction.
         let (w, h) = (x1 - x0, y1 - y0);
         if w > 0.0 {
             if x0 < cx0 {

@@ -61,17 +61,15 @@ pub fn provider() -> SyntheticDylib {
     // identifier `_NSGetExecutablePath`.
     lib.define_fn("__NSGetExecutablePath", ns_get_executable_path as *const ());
     // Under high-level emulation the guest's Mach task *is* this process's. The
-    // address, not the value: the symbol names a `mach_port_t` variable and
-    // `mach_task_self()` is a macro that reads it.
+    // address, not the value.
     if let Some(port) = crate::dyld::host_symbol("mach_task_self_") {
         lib.define_data("_mach_task_self_", port);
     }
     if let Some(f) = crate::dyld::host_symbol("mach_host_self") {
         lib.define_fn("_mach_host_self", f as *const ());
     }
-    // `getenv`/`setenv`/`putenv` are passed through, so a guest walking `environ`
-    // directly must see the host's block. `__NSGetArgv` is an approximation: it
-    // reports this process's command line, `run <path>` and all.
+    // `getenv`/`setenv`/`putenv` are passed through, so a guest walking
+    // `environ` directly must see the host's block.
     for (mach_o, host) in [
         ("__NSGetEnviron", "_NSGetEnviron"),
         ("__NSGetArgc", "_NSGetArgc"),

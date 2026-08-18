@@ -56,23 +56,19 @@ pub fn dispatch(
         // The `_FORTIFY_SOURCE` variants clang emits by default on macOS.
         "__sprintf_chk" => printf::sprintf_chk,
         "__snprintf_chk" => printf::snprintf_chk,
-        // The `v`-prefixed family. Not variadic — each is handed a `va_list`
-        // its caller built — and impossible to forward for the mirror-image
-        // reason.
+        // The `v`-prefixed family.
         "vprintf" => printf::vprintf,
         "vfprintf" => printf::vfprintf,
         "vsprintf" => printf::vsprintf,
         "vsnprintf" => printf::vsnprintf,
         // The wide form, which is how Unreal Engine 3 formats every string it
-        // has. See [`printf::vswprintf`] for why its truncation return is not
-        // `vsnprintf`'s.
+        // has.
         "vswprintf" => printf::vswprintf,
         "vasprintf" => printf::vasprintf,
         "__vsnprintf_chk" => printf::vsnprintf_chk,
         "sscanf" => sscanf::sscanf,
         // The locale-aware and `va_list` spellings, which are the same parser
-        // reached with the destinations somewhere else. See [`sscanf::vsscanf`]
-        // for why the list cannot be handed to the host.
+        // reached with the destinations somewhere else.
         "sscanf_l" => sscanf::sscanf_l,
         "vsscanf" => sscanf::vsscanf,
         // libsystem_malloc's own printer, which the interposing mimalloc uses.
@@ -112,9 +108,7 @@ pub fn dispatch(
             {
                 return Some(f(name, ctx, mem));
             }
-            // And the three families that need one thing more than the rest: a
-            // guest function pointer the shim itself must substitute, because
-            // the marshaller is not the one placing it.
+            // And the three families that need one thing more than the rest.
             return crate::signal::shim_for(name)
                 .or_else(|| pthread::shim_for(name))
                 .or_else(|| iokit::shim_for(name))
@@ -132,8 +126,6 @@ pub fn dispatch(
 }
 
 /// Whether [`dispatch`] would handle `symbol`.
-///
-/// Consulted by [`crate::ImportPolicy`] before promoting an import.
 pub fn is_shimmed(symbol: &str) -> bool {
     let name = symbol.strip_prefix('_').unwrap_or(symbol);
     if math::shim_for(name).is_some()

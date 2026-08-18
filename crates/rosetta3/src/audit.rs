@@ -78,9 +78,7 @@ pub fn audit_call_targets(
         }
     }
 
-    // Deduplicated: a function called from forty sites is one call target for
-    // this purpose, and counting it forty times would make the numbers say
-    // something about the guest's control flow rather than about coverage.
+    // Deduplicated.
     audit.direct_calls = distinct.len();
     for target in distinct {
         if region.contains(&target) {

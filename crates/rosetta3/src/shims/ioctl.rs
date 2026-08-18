@@ -15,8 +15,7 @@ pub fn ioctl(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemor
     let fd = ctx.rdi as i32;
     let request = ctx.rsi;
     // A `IOC_VOID` request with no payload takes no third argument, so `rdx`
-    // holds whatever the guest last left there. Passing that on would hand the
-    // kernel a wild pointer for requests that are declared to take none.
+    // holds whatever the guest last left there.
     let takes_argument = request & IOC_DIRMASK != IOC_VOID;
     let arg = if takes_argument { ctx.rdx } else { 0 };
 

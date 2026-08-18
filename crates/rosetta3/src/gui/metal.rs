@@ -109,9 +109,6 @@ static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
 
 /// The guest's own command queue, kept so that work of ours can be ordered against work
 /// of its.
-///
-/// **This is what makes `-[CAMetalDrawable present]` supportable**, which the first
-/// version of this file said it was not. That claim was half right.
 static QUEUE: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
@@ -154,8 +151,7 @@ pub unsafe fn note_queue(command_buffer: Id) {
 ///
 /// # Safety
 ///
-/// `drawable` must be a live object pointer on a thread that may message it. Whether it
-/// is a drawable is checked rather than assumed.
+/// `drawable` must be a live object pointer on a thread that may message it.
 pub unsafe fn present_standalone(drawable: Id) {
     use std::sync::atomic::Ordering::Acquire;
     // SAFETY: as above — the caller states the pointer is live, and whether it

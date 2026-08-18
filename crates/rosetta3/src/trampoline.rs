@@ -18,8 +18,6 @@ const ENV: &str = "ROSETTA3_TRAMPOLINES";
 const STRIDE: u64 = 16;
 
 /// How many symbols may be trampolined.
-///
-/// Sized to be forgettable rather than to a measurement.
 const SLOTS: usize = 8192;
 
 /// Bytes in each half of the reservation.
@@ -40,9 +38,8 @@ struct Entry {
 
 /// Everything that needs a lock: allocation, and the two directions of lookup.
 ///
-/// Written once per symbol in a process's life and read at lift time only, so
-/// a mutex is the whole of the concurrency design. The hot path — [`contains`]
-/// — never touches it.
+/// Written once per symbol in a process's life and read at lift time only, so a mutex
+/// is the whole of the concurrency design.
 struct State {
     /// Entries in slot order.
     entries: Vec<Entry>,
@@ -98,9 +95,6 @@ pub fn contains(va: u64) -> bool {
 }
 
 /// Reserve the arena, once.
-///
-/// Two adjacent halves from one `mmap`, which is what makes the `jmp`'s displacement a
-/// constant:
 ///
 /// The code half is readable and writable *by this runtime* and never executable — the
 /// guest is x86-64 and this CPU cannot run a byte of it, which is the same decision
@@ -201,6 +195,13 @@ pub fn for_site(site: &ImportSite) -> Option<u64> {
 /// The five bytes are written before the slot is published, and no other slot's
 /// bytes are touched, so a concurrent lift of a *different* trampoline reads
 /// only settled memory.
+///
+/// A tail `jmp` rather than `call S; ret`: a `CallAbi`'s `ArgLocation::Stack` offsets
+/// are measured from the guest stack pointer *before the call pushes anything*, so the
+/// seventh integer argument of a SysV call is at `rsp+0`. A `call` here would push a
+/// second return address underneath the arguments and put every one of them eight
+/// bytes off. Microlift pops the return address before the inline call, so a `jmp`
+/// leaves the stack exactly as a direct call site would.
 fn write_jmp(va: u64) {
     // `HALF` from the start of this entry, less the five bytes the instruction
     // itself occupies — a constant, since the two halves are the same size.
@@ -217,8 +218,7 @@ fn write_jmp(va: u64) {
 
 /// The slot `va` belongs to, if `va` is the entry point of a trampoline.
 ///
-/// Only the entry point, deliberately: the interior of an entry is padding, and a
-/// request to execute it is a bug this runtime should report rather than decode.
+/// Only the entry point, deliberately.
 fn code_slot(va: u64) -> Option<usize> {
     if !contains(va) {
         return None;
@@ -244,14 +244,9 @@ fn with_entry<T>(slot: usize, f: impl FnOnce(&Entry) -> T) -> Option<T> {
 }
 
 /// The region to lift in order to execute the trampoline at `va`.
-///
-/// The buffer handed to the walk is **the one entry**, not the arena. That is what
-/// keeps the `jmp`'s target out of the walk's reach without any special case.
 pub fn lift_region(va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
     let slot = code_slot(va)?;
-    // An address in the arena that has not been handed out is not code. Asked
-    // before the bytes are read so that `no guest code at …` stays the answer
-    // for an address this runtime never published.
+    // An address in the arena that has not been handed out is not code.
     with_entry(slot, |_| ())?;
     let mut bytes = [0u8; STRIDE as usize];
     // SAFETY: `code_slot` placed `va` at the start of a slot inside the code
@@ -261,9 +256,7 @@ pub fn lift_region(va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
     unsafe {
         std::ptr::copy_nonoverlapping(va as usize as *const u8, bytes.as_mut_ptr(), bytes.len())
     };
-    // Counted here rather than at every call: a region is lifted once and then
-    // cached, so this is "the guest reached this symbol through a pointer at
-    // least once", which is the question worth answering.
+    // Counted here rather than at every call.
     REACHED.fetch_add(1, Ordering::Relaxed);
     let region = crate::region::region_for(&bytes, va, va, false)?;
     let len = usize::try_from(region.range.end - va).ok()?;
@@ -283,27 +276,17 @@ pub fn import_kind(va: u64) -> Option<ImportKind> {
 
 /// The site behind a trampoline's import address.
 ///
-/// Nothing on the fast path needs this: a registered fast import is inlined and never
-/// reaches the run loop.
+/// Nothing on the fast path needs this.
 pub fn import_at(va: u64) -> Option<&'static ImportSite> {
     with_entry(import_slot(va)?, |entry| entry.site)
 }
 
 /// The host function a trampoline stands for, if `va` is one.
-///
-/// What makes substituting a slot's value invisible to everything that is not a guest
-/// call.
 pub fn host_behind(va: u64) -> Option<u64> {
     with_entry(code_slot(va)?, |entry| entry.site.resolved)
 }
 
 /// Point every eligible binding in `imports` at a trampoline, in `memory`.
-///
-/// Stub addresses are skipped — a `__stubs` entry is code, and overwriting the first
-/// bytes of one would be rewriting the program rather than its imports.
-///
-/// Returns how many bindings were substituted. A write that fails is skipped rather
-/// than reported.
 pub fn install<'a>(
     imports: impl IntoIterator<Item = (u64, &'a ImportSite)>,
     is_guest: &dyn Fn(u64) -> bool,
@@ -437,9 +420,7 @@ mod tests {
         const NAMES: &[&str] = &[
             "_strlen", "_strcmp", "_memcpy", "_memset", "_strchr", "_strrchr", "_abs", "_atoi",
         ];
-        // A barrier, so "together" is a fact rather than a hope: without one
-        // the first thread usually finishes reserving before the second starts
-        // and the race the test is about does not happen.
+        // A barrier, so "together" is a fact rather than a hope.
         let gate = std::sync::Barrier::new(NAMES.len());
         let made: Vec<u64> = std::thread::scope(|s| {
             let handles: Vec<_> = NAMES

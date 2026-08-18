@@ -14,8 +14,6 @@ fn is_sentinel(value: u64) -> bool {
 }
 
 /// `struct sigaction` as both architectures lay it out.
-///
-/// Sixteen bytes: a handler, a 4-byte mask, a 4-byte flag word.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct SigAction {
@@ -119,9 +117,7 @@ pub fn sigaction(
     let signum = ctx.rdi as u32 as i32;
     let (act_va, old_va) = (ctx.rsi, ctx.rdx);
 
-    // The guest's own struct is never rewritten: it may read its copy back, and
-    // finding one of this runtime's thunks in the field it wrote its own
-    // function into would be a lie it could observe.
+    // The guest's own struct is never rewritten.
     let mut act = None;
     if act_va != 0 {
         let mut bytes = [0u8; SigAction::SIZE];
@@ -210,8 +206,6 @@ pub fn sigaction(
 
 /// `int sigaltstack(const stack_t *ss, stack_t *oss)`
 ///
-/// An alternate signal stack exists to run a handler installed with `SA_ONSTACK`.
-///
 /// `oss` is answered with `SS_DISABLE` and a null stack, which is what the guest would
 /// see if it had never asked — true, and the only self-consistent answer to give a
 /// caller that is about to be told its request succeeded.
@@ -241,12 +235,6 @@ pub fn sigaltstack(
 }
 
 /// `kern_return_t task_set_exception_ports(task, mask, port, behavior, flavor)`
-///
-/// The same fact as [`sigaction`]'s `SA_SIGINFO` case, reached through a different API.
-///
-/// Accepted with `KERN_SUCCESS` and **not honoured**:
-///
-/// It is a shim rather than a table entry for the same reason `sigaction` is.
 pub fn task_set_exception_ports(
     _symbol: &str,
     ctx: &mut RegisterContext,
@@ -440,9 +428,7 @@ mod tests {
 
     #[test]
     fn the_kernels_sentinels_are_never_wrapped_in_a_thunk() {
-        // `SIG_DFL`, `SIG_IGN` and `SIG_ERR` are dispositions, not addresses. A
-        // thunk built for `SIG_IGN` would install a handler where the guest
-        // asked for the signal to be ignored — and it would run.
+        // `SIG_DFL`, `SIG_IGN` and `SIG_ERR` are dispositions, not addresses.
         for sentinel in [0u64, 1, u64::MAX] {
             assert_eq!(outbound("_signal", sentinel, &Wrapping).unwrap(), sentinel);
             assert_eq!(inbound(sentinel, &Wrapping), sentinel);
@@ -455,9 +441,7 @@ mod tests {
 
     #[test]
     fn a_handler_crosses_out_as_a_thunk_and_back_as_the_guests_own_pointer() {
-        // The direction that is easy to forget: a program that saves the old
-        // disposition and restores it later must get back the pointer it gave,
-        // not the arm64 trampoline standing in for it.
+        // The direction that is easy to forget.
         let mut mem = guest_memory();
         let act = SigAction {
             handler: 0x1_0000_1234,
@@ -508,8 +492,7 @@ mod tests {
         assert_eq!(ctx.rax as i32, 0, "the guest must be told it succeeded");
 
         // Accepted and *not installed*: the host's disposition for that signal
-        // is untouched, which is the whole claim. A thunk here would mean a
-        // handler that will be entered with a synthesized machine state.
+        // is untouched, which is the whole claim.
         let mut current = SigAction::default();
         // SAFETY: querying the current disposition into a live local.
         unsafe { libc::sigaction(libc::SIGUSR2, std::ptr::null(), (&raw mut current).cast()) };
@@ -559,8 +542,7 @@ mod tests {
     #[test]
     fn sigaltstack_succeeds_and_reports_the_stack_disabled() {
         // Accepted so a runtime that installs one can start; never forwarded,
-        // because the alternate stack belongs to the *host* thread. See the
-        // function's own note.
+        // because the alternate stack belongs to the *host* thread.
         let mut mem = guest_memory();
         let mut ctx = RegisterContext::new();
         ctx.rdi = 0;

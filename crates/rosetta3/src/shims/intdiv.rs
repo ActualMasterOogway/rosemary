@@ -13,12 +13,9 @@ pub fn shim_for(name: &str) -> Option<Shim> {
     match name {
         "div" => Some(div),
         // `lldiv` and `imaxdiv` are `ldiv` under other names on an LP64
-        // platform: `long`, `long long` and `intmax_t` are all 64 bits, and all
-        // three result structs are two of them.
+        // platform.
         "ldiv" | "lldiv" | "imaxdiv" => Some(ldiv),
-        // The compiler-rt 128-bit helpers. Spelled with two leading
-        // underscores in C, which is three in the Mach-O and two by the time
-        // [`crate::shims`] has stripped the symbol's own.
+        // The compiler-rt 128-bit helpers.
         "__udivti3" => Some(udivti3),
         "__umodti3" => Some(umodti3),
         "__divti3" => Some(divti3),

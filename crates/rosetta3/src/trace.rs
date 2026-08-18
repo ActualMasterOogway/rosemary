@@ -27,9 +27,6 @@ fn matches(wanted: &[String], symbol: &str) -> bool {
 }
 
 /// Report the call about to be serviced.
-///
-/// The first four integer arguments, unconditionally, without consulting the symbol's
-/// signature.
 pub fn entering(symbol: &str, ctx: &RegisterContext) {
     eprintln!(
         "rosetta3: call [{:#x}] {symbol}({:#x}, {:#x}, {:#x}, {:#x})",
@@ -42,8 +39,6 @@ pub fn entering(symbol: &str, ctx: &RegisterContext) {
 }
 
 /// Report what the call returned, or that it did not.
-///
-/// A refusal is printed too.
 pub fn leaving<T>(symbol: &str, ctx: &RegisterContext, result: &Result<T, crate::abi::AbiError>) {
     match result {
         Ok(_) => eprintln!(

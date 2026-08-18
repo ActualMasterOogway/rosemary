@@ -14,14 +14,6 @@ const EXIT: u32 = 1;
 
 /// Continue the guest wherever the context now says, without servicing anything
 /// further.
-///
-/// "Continue at `rip` and service nothing" is the precise condition block linking asks
-/// about, so this is the one place that can answer it for a bridged call — a quarter of
-/// all region exits in a real program.
-///
-/// `pending` is a parameter because a parked error is serviced by the run loop and by
-/// nothing else, and an exit that linked is an exit it did not see. An error can be
-/// parked by a *nested* guest callback under a call that returned `Ok`.
 fn resume(pending: bool, ctx: &mut RegisterContext) -> u32 {
     ctx.exit_reason = ExitReason::UnknownJump as u32;
     ctx.exit_code = TransferKind::IndirectJump as u32;
@@ -40,8 +32,6 @@ fn defer(_ctx: &mut RegisterContext) -> u32 {
 ///
 /// A host function this runtime forwards to may call *back* into the guest, and a
 /// failure there cannot be returned through the host frame in the middle.
-///
-/// `qsort` with a guest comparator that `longjmp`s out of itself is the shape.
 fn settle(vm: &crate::vm::Vm, ctx: &mut RegisterContext) -> u32 {
     match vm.has_pending() {
         true => resume(true, ctx),
@@ -152,8 +142,6 @@ pub fn indirect_bridge() -> BridgeImport {
 }
 
 /// The imports that did not exist when the [`LifterConfig`] was built.
-///
-/// Asked here instead, the same question is asked once per call site per lift.
 #[derive(Debug)]
 pub struct DynamicImports;
 
@@ -174,10 +162,6 @@ impl ImportRegistry for DynamicImports {
 }
 
 /// `site` as an inline call, if it is one an inline call can express.
-///
-/// The three exclusions are [`crate::ImportPolicy::promotion_for`]'s, and the fourth —
-/// an import that resolved into another **guest** image — is
-/// [`crate::Program::lifter_config`]'s.
 fn fast_import(site: &crate::program::ImportSite) -> Option<ImportKind> {
     use microlift::core::FastImport;
 

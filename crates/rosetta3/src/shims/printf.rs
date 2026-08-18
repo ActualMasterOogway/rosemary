@@ -27,8 +27,6 @@ pub struct VarArgs<'a> {
     stack: u64,
     /// The `va_list` to read from, when the caller was handed one rather than leaving
     /// its arguments in registers.
-    ///
-    /// The two are the same question asked of different storage.
     list: Option<VaList>,
     /// How to render `%@`, for a format string that is an `NSString`.
     object: Option<&'a dyn Fn(u64) -> Vec<u8>>,
@@ -121,8 +119,7 @@ impl<'a> VarArgs<'a> {
     pub fn next_fp(&mut self) -> Result<f64> {
         if let Some(list) = self.list.as_mut() {
             // A vector slot in the save area is sixteen bytes wide and holds a
-            // `double` in its low half; a spilled one is eight. Stepping by the
-            // wrong one reads every later argument from between two others.
+            // `double` in its low half; a spilled one is eight.
             let (at, in_regs) = match list.fp_offset < FP_SAVE_END {
                 true => (list.reg_save.wrapping_add(u64::from(list.fp_offset)), true),
                 false => (list.overflow, false),
@@ -176,10 +173,6 @@ impl VaList {
     }
 
     /// Store the walked state back where the guest keeps it.
-    ///
-    /// What the host's own `vsnprintf` does: the standard says a `va_list` is
-    /// indeterminate after being passed to one of these, and "indeterminate" in
-    /// practice means "advanced".
     pub fn write_back(&self, symbol: &str, mem: &mut dyn GuestMemory) -> Result<()> {
         let head = u64::from(self.gp_offset) | (u64::from(self.fp_offset) << 32);
         mem.write(self.addr, &head.to_le_bytes())
@@ -210,8 +203,6 @@ struct Spec {
 }
 
 /// Format `fmt` against `args`, exactly as C would print it.
-///
-/// Total on arbitrary bytes.
 pub fn render(fmt: &[u8], args: &mut VarArgs<'_>) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(fmt.len());
     let mut i = 0usize;
@@ -310,9 +301,7 @@ pub fn render(fmt: &[u8], args: &mut VarArgs<'_>) -> Result<Vec<u8>> {
 
         match conv {
             b'%' => out.push(b'%'),
-            // Cocoa's object conversion. Not part of C, so it only exists when
-            // the caller said the format is an `NSString`; otherwise it falls
-            // through to the literal path with every other unknown conversion.
+            // Cocoa's object conversion.
             b'@' if args.object.is_some() => {
                 let obj = args.next_int()?;
                 let text = args.object.expect("checked")(obj);
@@ -354,9 +343,7 @@ pub fn render(fmt: &[u8], args: &mut VarArgs<'_>) -> Result<Vec<u8>> {
                 let v = args.next_int()? as u8;
                 pad_bytes(&mut out, &[v], &spec);
             }
-            // `%ls` and `%S` are a `wchar_t *`. Both spellings are C's, and both
-            // are reachable from a *narrow* format as well as a wide one — which
-            // is why they live here rather than in the wide entry points.
+            // `%ls` and `%S` are a `wchar_t *`.
             b'S' | b's' if len == Len::Long || conv == b'S' => {
                 let ptr = args.next_int()?;
                 let mut s = read_wide_string(args, ptr)?;
@@ -370,9 +357,7 @@ pub fn render(fmt: &[u8], args: &mut VarArgs<'_>) -> Result<Vec<u8>> {
             }
             b's' => {
                 let ptr = args.next_int()?;
-                // Read to the NUL first and truncate after. C allows `%.3s` on
-                // a three-byte unterminated buffer; this reads further, which
-                // is why `read_cstr` is bounded rather than trusting.
+                // Read to the NUL first and truncate after.
                 let mut s = read_string(args, ptr)?;
                 if let Some(p) = spec.prec {
                     s.truncate(p);
@@ -412,9 +397,6 @@ fn read_string(args: &VarArgs<'_>, ptr: u64) -> Result<Vec<u8>> {
 }
 
 /// Follow a `%ls` pointer into guest memory.
-///
-/// A `wchar_t` is four bytes on both sides of this seam, so the units need no
-/// conversion — only assembling, and bounding.
 fn read_wide_string(args: &VarArgs<'_>, ptr: u64) -> Result<Vec<char>> {
     if ptr == 0 {
         return Ok("(null)".chars().collect());
@@ -633,8 +615,7 @@ fn pad_bytes(out: &mut Vec<u8>, body: &[u8], spec: &Spec) {
 /// The host stream a guest `printf` writes to.
 fn host_stdout() -> *mut libc::FILE {
     // Declared here rather than taken from the `libc` crate, which does not
-    // export it: on macOS the `stdout` macro expands to this global, and it is
-    // the same object the guest's own `___stdoutp` import resolved to.
+    // export it.
     unsafe extern "C" {
         static __stdoutp: *mut libc::FILE;
     }
@@ -715,9 +696,6 @@ pub fn snprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemo
 ///
 /// This shim renders in Rust, which produces **C-locale** output — `.` for the radix
 /// point, no digit grouping.
-///
-/// So the locale is asked, through the host's own `querylocale`, and anything that is
-/// not `C` or `POSIX` is refused by name.
 pub fn snprintf_l(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -759,8 +737,6 @@ pub(crate) fn c_locale_or_refuse(symbol: &str, loc: u64) -> Result<()> {
 }
 
 /// `int __sprintf_chk(char *dst, int flag, size_t dstlen, const char *fmt, ...)`
-///
-/// The fortified form.
 pub fn sprintf_chk(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -782,9 +758,7 @@ pub fn snprintf_chk(
 }
 
 /// Write `out` to `dst`, truncated to `limit` bytes including the terminator, and leave
-/// the length the whole rendering would have had in `rax`. The `v`-prefixed family:
-///
-/// Not forwardable, and the reason is worth stating where the code is.
+/// the length the whole rendering would have had in `rax`.
 fn format_from_list(
     symbol: &str,
     ctx: &RegisterContext,

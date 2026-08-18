@@ -8,8 +8,7 @@ use crate::vm::Vm;
 
 /// The callee-saved state a frame restores, plus where it resumes.
 ///
-/// Exactly SysV AMD64's callee-saved set. The caller-saved half needs no tracking for
-/// the same reason [`crate::jmpbuf`] does not save it.
+/// Exactly SysV AMD64's callee-saved set.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Registers {
     pub rip: u64,
@@ -100,9 +99,7 @@ pub enum UnwindError {
     BadLsda,
     /// The walk left the guest without finding a handler.
     NoHandler,
-    /// The walk reached the edge of a *nested* entry into guest code: the
-    /// throwing frame was called by the host, and the frames between it and any
-    /// handler are the host's own.
+    /// The walk reached the edge of a *nested* entry into guest code.
     AcrossHostFrame,
     /// A handler exists, but deciding it needs type relationships (a base class,
     /// a pointer conversion) that are not implemented.
@@ -487,9 +484,6 @@ impl Lsda {
     }
 
     /// The call site covering `ip`, if any.
-    ///
-    /// `ip` is a **return address**, so the instruction that is actually inside the
-    /// `try` range is the byte before it.
     pub fn site_for(
         &self,
         ip: u64,
@@ -624,10 +618,7 @@ const MAX_BASES: usize = 32;
 
 /// Does `catch_type` take something of `thrown_type`?
 ///
-/// Three answers, for the same reason [`crate::abi::table`] gives three:
-///
-/// - `catch (...)` — a null clause type — takes anything. - The same `type_info` object
-/// is an exact match.
+/// Three answers, for the same reason [`crate::abi::table`] gives three.
 fn catches(vm: &Vm, catch_type: u64, thrown: u64, mem: &dyn GuestMemory) -> Match {
     if catch_type == 0 {
         return Match::Yes;
@@ -648,9 +639,7 @@ fn catches(vm: &Vm, catch_type: u64, thrown: u64, mem: &dyn GuestMemory) -> Matc
             return Match::No;
         }
         if Some(vptr) != one_base {
-            // A vtable this image never imported: either multiple inheritance,
-            // or a `type_info` living entirely in the host's libc++ whose shape
-            // is not described by anything the guest bound.
+            // A vtable this image never imported.
             return Match::Unknown;
         }
         // `__si_class_type_info` is `{ vtable, name, base }`.
@@ -760,14 +749,10 @@ fn edge_of_the_walk(undecidable: bool) -> UnwindError {
 
 /// How many frames a walk will follow before calling the stack corrupt.
 ///
-/// Totality: a cycle in the frame chain — which a wild `rbp` produces — must end
-/// the walk rather than the process.
+/// Totality.
 const MAX_FRAMES: usize = 1024;
 
 /// Advance phase two to the next frame with something to run, and enter it.
-///
-/// `from` is the frame whose landing pad has just finished (or the throwing frame,
-/// unstepped, on the first call).
 fn enter_next_pad(
     vm: &Vm,
     flight: &mut InFlight,
@@ -801,10 +786,7 @@ fn enter_next_pad(
             {
                 flight.at = regs;
                 regs.apply(ctx);
-                // The landing pad's contract with its caller: `rax` is the value
-                // it will hand to `__cxa_begin_catch` or `_Unwind_Resume`, and
-                // `rdx` is the selector its `switch` compares against. A cleanup
-                // pad reads only `rax`.
+                // The landing pad's contract with its caller.
                 ctx.rax = flight.header;
                 ctx.rdx = match outcome {
                     Outcome::Handler { selector, .. } => selector as u64,
@@ -904,9 +886,7 @@ pub fn throw(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory)
         addr: header,
     })?;
 
-    // The frame that threw, as it will be unwound from: the call was intercepted
-    // before it pushed a return address, so `rip` is already the address the
-    // unwinder wants and `rsp` is already the frame's own.
+    // The frame that threw, as it will be unwound from.
     let regs = Registers::from_context(ctx);
     let handler = find_handler(vm, regs, thrown_type, mem).map_err(|e| e.as_error(symbol))?;
 
@@ -1045,8 +1025,7 @@ pub fn end_catch(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMem
     })?;
 
     // A rethrown exception is being unwound *right now*, and this call is the
-    // cleanup edge of the `catch` block it left. Destroying it here would free
-    // the object the next handler is about to bind to.
+    // cleanup edge of the `catch` block it left.
     if state.in_flight().is_some_and(|f| f.header == header) || record.handlers > 0 {
         ctx.rax = 0;
         return Ok(());
@@ -1162,9 +1141,7 @@ mod tests {
 
     #[test]
     fn an_rbp_frame_yields_its_callers_frame() {
-        // The layout `push %rbp; mov %rsp,%rbp` produces: the caller's `rbp` at
-        // `[rbp]`, the return address at `[rbp+8]`, and the caller's `rsp` just
-        // past both.
+        // The layout `push %rbp; mov %rsp,%rbp` produces.
         let mut stack = Stack::new(0x7000, 0x200);
         let (rbp, caller_rbp) = (0x7100u64, 0x7180u64);
         stack.put(rbp, caller_rbp);
@@ -1190,8 +1167,7 @@ mod tests {
     #[test]
     fn an_rbp_frame_restores_the_registers_it_spilled() {
         // Two registers spilled at `rbp - 8*offset`, in the order the three-bit
-        // slots name them. Getting the direction wrong reads the wrong words and
-        // does not fault, which is why this asserts values rather than success.
+        // slots name them.
         let mut stack = Stack::new(0x7000, 0x200);
         let rbp = 0x7100u64;
         stack.put(rbp, 0x7180);
@@ -1289,9 +1265,7 @@ mod tests {
 
     #[test]
     fn the_permutation_decodes_to_distinct_registers() {
-        // The property that matters: whatever the index, a register is named at
-        // most once — the encoding is a permutation, and a decoder that
-        // repeated one would restore a register from another's slot.
+        // The property that matters.
         for count in 1..=6usize {
             for permutation in 0..720u32 {
                 let regs = decode_permutation(permutation, count);
@@ -1316,8 +1290,7 @@ mod tests {
     #[test]
     fn an_uncatchable_exception_is_told_apart_from_an_unmatched_one() {
         // The two failures a search can end in, and they are different work
-        // items: nothing anywhere catches this, versus something might and the
-        // runtime cannot tell.
+        // items.
         assert!(UnwindError::NoHandler.reason().contains("terminate"));
         assert!(UnwindError::NeedsTypeGraph.reason().contains("type_info"));
         assert_ne!(UnwindError::NoHandler, UnwindError::NeedsTypeGraph);

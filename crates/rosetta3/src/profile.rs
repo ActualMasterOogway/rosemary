@@ -29,9 +29,7 @@ fn configured_hz() -> Option<u32> {
         let raw = std::env::var("ROSETTA3_PROFILE").ok()?;
         match raw.trim() {
             "" | "0" | "no" | "off" => None,
-            // `1` is "on", not "one sample a second": the variable is a switch
-            // first and a rate second, and every other `ROSETTA3_*` flag in
-            // this runtime is turned on by setting it to 1.
+            // `1` is "on", not "one sample a second".
             "1" | "yes" | "on" => Some(DEFAULT_HZ),
             n => n.parse().ok().filter(|&hz| hz > 0),
         }
@@ -95,9 +93,6 @@ unsafe extern "C" {
 }
 
 /// Nanoseconds as ticks of the absolute clock.
-///
-/// `std::thread::sleep` is not usable here and the reason is measured rather than
-/// assumed.
 fn ticks(nanos: u64) -> u64 {
     #[dynamic]
     static BASE: (u32, u32) = {
@@ -109,9 +104,7 @@ fn ticks(nanos: u64) -> u64 {
         }
     };
     let (numer, denom) = *BASE;
-    // ticks = nanos * denom / numer. Widened, because on Apple silicon the
-    // ratio is 125/3 and a run measured in seconds overflows sixty-four bits
-    // of nanoseconds-times-three long before it overflows this.
+    // ticks = nanos * denom / numer.
     (u128::from(nanos) * u128::from(denom) / u128::from(numer)) as u64
 }
 
@@ -137,9 +130,7 @@ fn sample_thread(port: u32) -> Option<(u64, bool)> {
     // `info_count` `int`s, which is what `THREAD_BASIC_INFO` writes.
     let got_info =
         unsafe { thread_info(port, THREAD_BASIC_INFO, info.as_mut_ptr(), &mut info_count) };
-    // A thread whose run state could not be read is counted as running:
-    // dropping the sample would understate the very thing being measured, and
-    // the failure is not one that has been seen.
+    // A thread whose run state could not be read is counted as running.
     let running = got_info != KERN_SUCCESS || info[RUN_STATE_WORD] == TH_STATE_RUNNING;
 
     // SAFETY: as above. A failed suspend leaves nothing to undo, which is why
@@ -217,8 +208,6 @@ static STARTED: Mutex<Option<Instant>> = Mutex::new(None);
 static SWEEPS: AtomicU64 = AtomicU64::new(0);
 
 /// Nanoseconds spent inside a sweep rather than waiting for the next one.
-///
-/// A profiler that does not report its own cost is asking to be believed.
 static SWEEP_NS: AtomicU64 = AtomicU64::new(0);
 
 
@@ -464,8 +453,7 @@ impl Xorshift {
 /// Print the report when the process ends, however it ends.
 fn install_exit_report() {
     // `atexit` rather than a `Drop` guard, for the reason [`crate::stats`]
-    // gives: the guest calls `exit`, which runs the host's handlers and never
-    // unwinds this crate's frames.
+    // gives.
     extern "C" fn report_at_exit() {
         report();
     }
@@ -550,6 +538,11 @@ pub fn report() {
     let mut hosts: Vec<&HostSite> = counts.host.values().collect();
     hosts.sort_by(|a, b| b.count.cmp(&a.count).then(a.symbol.cmp(&b.symbol)));
 
+    // Regions before instructions, and the regions are the ranking to believe:
+    // Cranelift attributes no source location to a prologue, an epilogue, the entry
+    // dispatch, or to anything its optimiser produced without one, measured between
+    // 2% and 47% of running samples on one fixture. Every sample still carries a
+    // region, so the rollup is complete and the instruction ranking is a lead.
     say(
         "guest regions, by share of running time",
         &regions[..],
@@ -627,16 +620,13 @@ pub struct HostEntry {
     pub share: f64,
     pub image: String,
     pub symbol: String,
-    /// This runtime, rather than one of the host's libraries. The distinction
-    /// the first performance question turns on, and the one every existing tool
-    /// paints the same colour.
+    /// This runtime, rather than one of the host's libraries.
     pub runtime: bool,
 }
 
 /// What the sampler has seen, ranked, for a consumer that is not stderr.
 ///
-/// [`report`] renders the same counts as prose. This hands them over as data so
-/// [`crate::gui`] can draw them, and it is deliberately a *copy*.
+/// [`report`] renders the same counts as prose.
 #[derive(Clone)]
 pub struct Snapshot {
     /// Wall time since sampling started; the denominator for a rate.
@@ -736,9 +726,7 @@ fn say(what: &str, rows: &[Row], share: impl Fn(u64) -> f64) {
             share(row.count),
             row.va,
             match row.located.is_empty() {
-                // Not a gap: a region lifted out of memory the guest generated
-                // code into belongs to no image by construction, and saying so
-                // is what identifies it as generated.
+                // Not a gap.
                 true => "(generated code)",
                 false => &row.located,
             },
@@ -839,9 +827,7 @@ mod tests {
 
     #[test]
     fn a_switch_is_a_switch_and_a_number_is_a_rate() {
-        // `ROSETTA3_PROFILE=1` must mean "on", not "one sample a second":
-        // every other flag in this runtime is turned on that way, and a
-        // one-hertz profile of a ten-second run is eleven samples.
+        // `ROSETTA3_PROFILE=1` must mean "on", not "one sample a second".
         let parse = |raw: &str| -> Option<u32> {
             match raw.trim() {
                 "" | "0" | "no" | "off" => None,

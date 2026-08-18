@@ -48,9 +48,6 @@ pub struct Image {
 }
 
 /// An [`MmapSpace`] shared across the threads running the guest.
-///
-/// The same claim [`SharedProgram`](crate::vm::SharedProgram) makes, confined the same
-/// way.
 struct SharedSpace(MmapSpace);
 
 // SAFETY: see the type note.
@@ -106,8 +103,6 @@ impl machish::resolve::SymbolProvider for MainExports {
 
 /// Every image the guest has already loaded, as something a newly loaded one can bind
 /// against.
-///
-/// It is not a corner case, it is how a game ships its own stack.
 ///
 /// **Loading it again would be the wrong repair**, and is what a `DylibSource` that
 /// guessed harder would do:
@@ -184,9 +179,6 @@ static ERROR: Mutex<Option<CString>> = Mutex::new(None);
 static REPORTED: Mutex<Option<CString>> = Mutex::new(None);
 
 /// A token for "the main executable and everything already loaded".
-///
-/// `dlopen(NULL, ...)` returns this, and `dlsym` treats it — and every negative
-/// pseudo-handle — as a global search.
 static GLOBAL_TOKEN: u8 = 0;
 
 fn global_handle() -> u64 {
@@ -194,9 +186,6 @@ fn global_handle() -> u64 {
 }
 
 /// Return the guest image at a dyld image-list index.
-///
-/// The executable is always index zero, followed by images loaded by this linker. Host
-/// dyld images are intentionally absent.
 fn indexed_image(index: u32) -> Option<(u64, u64, String)> {
     if index == 0 {
         let (path, slide) = EXECUTABLE
@@ -289,8 +278,7 @@ pub fn executable_path() -> Option<String> {
 /// How many images are loaded, and the address range they span.
 ///
 /// A program that never calls `dlopen` now pays one relaxed atomic load, and a program
-/// that has pays that plus a range check before any lock is taken. Relaxed is
-/// sufficient.
+/// that has pays that plus a range check before any lock is taken.
 static IMAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static REGION_LO: AtomicU64 = AtomicU64::new(u64::MAX);
 static REGION_HI: AtomicU64 = AtomicU64::new(0);
@@ -321,8 +309,6 @@ fn find<R>(mut f: impl FnMut(&'static Image) -> Option<R>) -> Option<R> {
 }
 
 /// The import registered at `va` in any dynamically loaded image.
-///
-/// The widening described in the module note.
 pub fn import_at(va: u64) -> Option<&'static ImportSite> {
     // A slot or stub of a loaded image is *inside* that image, so an address
     // outside every dlopened mapping cannot be one.
@@ -355,8 +341,7 @@ pub fn resolved_symbol(symbol: &str) -> Option<u64> {
 /// Whether `va` lies inside a dynamically loaded image.
 pub fn contains(va: u64) -> bool {
     // A host address is nowhere near a guest mapping, and this is the question
-    // asked most often and answered "no" almost every time. Rejecting it on two
-    // atomic loads keeps the lock off the path an ordinary import takes.
+    // asked most often and answered "no" almost every time.
     if va < REGION_LO.load(Ordering::Relaxed) || va >= REGION_HI.load(Ordering::Relaxed) {
         return false;
     }
@@ -432,8 +417,7 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
 
     let bytes = std::fs::read(&resolved).map_err(|e| format!("{resolved}: {e}"))?;
     // `parse_any` narrows a fat file to the x86-64 slice, and fails when there
-    // is none — which is the case a *native* arm64 dylib takes. That is not
-    // something this path can load.
+    // is none — which is the case a *native* arm64 dylib takes.
     let object = MachObject::parse_any(&bytes, X86_64)
         .map_err(|e| format!("{resolved}: not a loadable x86-64 Mach-O: {e}"))?;
 
@@ -460,9 +444,7 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
         )
         .map_err(|e| format!("{resolved}: {e}"))?;
 
-    // The same repair the program's own link needs, for the same reason: this
-    // image's landing pads name libSystem for `_Unwind_Resume` and would get
-    // the host's unwinder.
+    // The same repair the program's own link needs, for the same reason.
     crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory)
         .map_err(|e| format!("{resolved}: unwinder: {e}"))?;
     crate::cxxlib::bind_cxxabi_to_the_vendored_one(&mut report, &mut memory)
@@ -501,16 +483,13 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
             .into_iter()
             .map(|r| r.start.wrapping_add(slide)..r.end.wrapping_add(slide))
             .collect(),
-        // No `__text` is not a refusal here the way it is for a program: a
-        // resource-only bundle is a legal thing to `dlopen`, and a stripped
-        // image simply has no hints to offer [`lift_region`].
+        // No `__text` is not a refusal here the way it is for a program.
         None => Vec::new(),
     };
 
     let exports = ExportTable::parse(&object).map_err(|e| format!("{resolved}: {e}"))?;
     // Everything mapped: this image, the ones loaded before it, and the program
-    // that started it all. See [`collect_imports`] for why the distinction is
-    // load-bearing.
+    // that started it all.
     let vm = crate::thunk::current();
     let is_guest = |va: u64| {
         memory.region_at(va).is_some()
@@ -570,9 +549,7 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     // them.
     crate::tls::register(&leaked.report);
 
-    // Before any of this image's code runs, and after it is findable: realize
-    // the Objective-C metadata it carries, which is what dyld hands `libobjc`
-    // when it maps an image.
+    // Before any of this image's code runs, and after it is findable.
     let vm = crate::thunk::current();
     if let Some(vm) = vm {
         match vm.objc() {
@@ -767,9 +744,7 @@ fn rpaths_of(path: &str) -> Vec<String> {
 
 /// The address `name` has in `handle`, as `dlsym` reports it.
 fn lookup(handle: u64, name: &str) -> Option<u64> {
-    // A handle from the host's loader: the guest is asking a native library for
-    // a native symbol, and the answer is an arm64 function pointer it will call
-    // through a register.
+    // A handle from the host's loader.
     if let Some(path) = native_handle(handle) {
         let c = CString::new(name).ok()?;
         // SAFETY: a handle this module obtained from `dlopen` and never closed,
@@ -801,8 +776,7 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
         }
     }
     // The **main executable's** own exports, which a global search must include
-    // and which nothing above covers: [`snapshot`] holds the images `dlopen`
-    // produced, and the program itself is not one of them.
+    // and which nothing above covers.
     if let Some(main) = main_exports()
         && let Some(export) = main.exports.get(&mangled)
         && let Some(addr) = export.address(main.slide)
@@ -832,21 +806,12 @@ pub(crate) fn host_symbol(name: &str) -> Option<u64> {
 
 
 /// Handles the *host's* `dlopen` returned, and the paths they were asked for.
-///
-/// A guest that asks for `/usr/lib/libc.dylib` is not asking for a file. On this system
-/// there is no such file.
 static NATIVE: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
 
 /// The import sites a native `dlsym` result has been given.
-///
-/// A host address is only callable from guest code if
-/// [`Program::import_by_target`](crate::Program::import_by_target) can name it.
 static NATIVE_SYMBOLS: Mutex<BTreeMap<u64, &'static ImportSite>> = Mutex::new(BTreeMap::new());
 
 /// How many entries [`NATIVE_SYMBOLS`] has, read without the lock.
-///
-/// The map is written a handful of times in a process's life — once per `dlsym` of a
-/// host symbol — and *read* at every region entry, from [`import_by_target`].
 static NATIVE_SYMBOL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Open `path` with the host's loader, as a native arm64 library.
@@ -896,8 +861,7 @@ fn remember_native_symbol(addr: u64, name: &str, library: Option<String>) -> u64
     });
     if map.len() != before {
         // Publish the snapshot first, then the count, and both while the lock
-        // is still held: a reader that sees a non-zero count must find the
-        // entry that made it non-zero, in a view that is already visible.
+        // is still held.
         let view: Vec<(u64, &'static ImportSite)> = map.iter().map(|(a, s)| (*a, *s)).collect();
         NATIVE_SYMBOL_VIEW.store(Box::leak(Box::new(view)), Ordering::Release);
         NATIVE_SYMBOL_COUNT.store(map.len(), Ordering::Release);
@@ -942,9 +906,7 @@ static ADD_IMAGE: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
 /// Tell one callback about one image.
 ///
-/// The two arguments are dyld's: the image's `mach_header` and its slide. Both are
-/// *guest* values — a guest address it can dereference and parse as the x86-64 Mach-O
-/// it is.
+/// The two arguments are dyld's: the image's `mach_header` and its slide.
 fn notify(thunk: u64, header: u64, slide: u64) {
     if thunk == 0 || header == 0 {
         return;
@@ -960,9 +922,6 @@ fn notify(thunk: u64, header: u64, slide: u64) {
 }
 
 /// Announce `image` to every callback registered so far.
-///
-/// Called after the image is published and before its initializers run, which is the
-/// order dyld uses and the order a garbage collector needs.
 fn announce(header: u64, slide: u64) {
     let callbacks = ADD_IMAGE.lock().unwrap_or_else(|e| e.into_inner()).clone();
     for thunk in callbacks {
@@ -973,13 +932,9 @@ fn announce(header: u64, slide: u64) {
 /// `void _dyld_register_func_for_add_image(void (*f)(const struct mach_header *,
 /// intptr_t))`
 ///
-/// It is a shim rather than a passthrough for the reason the rest of this module
-/// exists.
-///
 /// ## Scope
 ///
-/// The images this runtime *maps* are reported. The arm64 system libraries the guest's
-/// imports resolve into are not, and cannot be.
+/// The images this runtime *maps* are reported.
 fn register_func_for_add_image(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -1076,16 +1031,13 @@ fn serve(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> 
         "dlsym" => dlsym(symbol, ctx, mem),
         "dlclose" => {
             // No unloading; see the scope note. Zero is success, which is the
-            // honest answer: the guest asked for the library to stop being
-            // needed, and it has.
+            // honest answer.
             clear_error();
             ctx.rax = 0;
             Ok(())
         }
         "dladdr" => dladdr(symbol, ctx, mem),
-        // Spelled with one fewer underscore than [`shim_for`] matches on: the C
-        // identifier is `_dyld_find_unwind_sections`, the Mach-O symbol carries
-        // another, and `serve` strips one more before this match.
+        // Spelled with one fewer underscore than [`shim_for`] matches on.
         "dyld_find_unwind_sections" => find_unwind_sections(symbol, ctx, mem),
         "dlerror" => {
             let taken = ERROR.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -1151,16 +1103,7 @@ fn dlsym(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> 
 
 /// `int dladdr(const void *addr, Dl_info *info)`
 ///
-/// The host's cannot answer this one at all for the addresses that matter. A guest
-/// image is mapped by [`open`], not by dyld, so the host's loader has never heard of
-/// it:
-///
-/// So the registry answers for anything it recognises and the host answers for
-/// everything else.
-///
-/// `dli_sname`/`dli_saddr` are the nearest export at or below `addr`, which is what
-/// `dladdr` documents them to be, and both are left null when the image exports nothing
-/// below it — a legal answer that Darwin's own `dladdr` gives for a static function.
+/// The host's cannot answer this one at all for the addresses that matter.
 fn dladdr(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let (addr, info) = (ctx.rdi, ctx.rsi);
     let Some(found) = describe(addr) else {
@@ -1195,8 +1138,6 @@ fn dladdr(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) ->
 }
 
 /// `bool _dyld_find_unwind_sections(void *addr, struct dyld_unwind_sections *)`
-///
-/// The question a C++ program's unwinder asks before it can throw anything:
 ///
 /// ## The structure, read out of the caller
 ///
@@ -1255,16 +1196,12 @@ fn find_unwind_sections(
     }
     mem.write_bytes(out, &words, symbol)?;
     // True even when both sections are absent, which is a real answer rather
-    // than a failure: the image *is* the one containing `addr`, and a C program
-    // with nothing to unwind has neither table.
+    // than a failure.
     crate::shims::set_int_return(ctx, 1);
     Ok(())
 }
 
 /// `(mach_header VA, slide)` for the guest image containing `va`.
-///
-/// Both kinds: the program's own images — which includes anything it was linked against
-/// and this runtime mapped — and anything [`open`] loaded since.
 fn guest_image_at(va: u64) -> Option<(u64, u64)> {
     fn containing(report: &LinkReport, va: u64) -> Option<(u64, u64)> {
         report
@@ -1359,9 +1296,6 @@ fn describe(addr: u64) -> Option<Described> {
 }
 
 /// The export at or below `addr`, as `(name, address)`, or `(0, 0)`.
-///
-/// A linear scan: `ExportTable` is sorted by *name*, and this is the one question that
-/// wants it sorted by address.
 fn nearest_export(exports: &ExportTable, slide: u64, addr: u64) -> (u64, u64) {
     let mut best: Option<(&str, u64)> = None;
     for e in exports.entries() {
@@ -1422,9 +1356,7 @@ pub fn provider() -> SyntheticDylib {
         "_dyld_get_image_vmaddr_slide",
         "_dyld_get_image_name",
         "_dyld_image_containing_address",
-        // Spelled with the underscore the C identifier already carries: these
-        // are `_dyld_*`, so the `_{name}` below produces the `__dyld_*` a
-        // Mach-O binds against.
+        // Spelled with the underscore the C identifier already carries.
         "_dyld_register_func_for_add_image",
         "_dyld_register_func_for_remove_image",
         // On `machish`'s `_dyld_` denylist like the two above, and the reason
@@ -1444,9 +1376,7 @@ mod tests {
 
     #[test]
     fn every_name_the_provider_claims_is_one_this_module_serves() {
-        // Two lists that must agree: a symbol resolved here but not shimmed
-        // would be *called* — the host's `dlopen`, handed a guest path, refusing
-        // an x86-64 file for exactly the reason this module exists.
+        // Two lists that must agree.
         use machish::resolve::SymbolProvider;
         let mut claimed = Vec::new();
         SymbolProvider::enumerate(&provider(), &mut |name, _| claimed.push(name.to_string()));
@@ -1479,9 +1409,7 @@ mod tests {
 
     #[test]
     fn a_native_arm64_image_is_refused_by_name() {
-        // The mirror of the failure this module exists for: an image with no
-        // x86-64 slice cannot be loaded as guest code, and saying so is better
-        // than mapping half of it.
+        // The mirror of the failure this module exists for.
         let host_dylib = "/usr/lib/libSystem.B.dylib";
         if std::path::Path::new(host_dylib).exists() {
             let err = open(host_dylib).unwrap_err();

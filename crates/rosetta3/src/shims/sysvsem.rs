@@ -91,9 +91,7 @@ mod tests {
 
     #[test]
     fn a_semaphore_set_can_be_made_read_and_removed_through_the_shim() {
-        // The whole path, against the real kernel: create a set, `SETVAL` a
-        // value into it, `GETVAL` it back, and `IPC_RMID` it — one command with
-        // a fourth argument, one without, and one that destroys.
+        // The whole path, against the real kernel.
         let key = libc::IPC_PRIVATE;
         // SAFETY: `IPC_PRIVATE` always makes a fresh set, owned by this process.
         let id = unsafe { libc::semget(key, 1, 0o600 | libc::IPC_CREAT) };

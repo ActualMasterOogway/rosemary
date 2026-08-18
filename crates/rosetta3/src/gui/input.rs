@@ -281,9 +281,7 @@ fn handle(event: Id) -> bool {
     let at = cursor(event);
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
 
-    // A press decides what the drag is; a release ends it. Both are swallowed
-    // only when they were the panel's, so a click in the game is a click in the
-    // game.
+    // A press decides what the drag is; a release ends it.
     match kind {
         TYPE_LEFT_MOUSE_DOWN => {
             state.holding = at.and_then(|(x, y)| state.grip_at(x, y));

@@ -141,9 +141,6 @@ fn scanset(format: &[u8], at: &mut usize) -> Option<(bool, [bool; 256])> {
 }
 
 /// Where the conversions' destination pointers are to be read from.
-///
-/// The same question [`super::printf::VarArgs`] answers for rendering, and for the same
-/// reason.
 #[derive(Clone, Copy)]
 enum Tail {
     /// A variadic call, after this many named integer parameters.
@@ -164,9 +161,6 @@ pub fn sscanf_l(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemo
 }
 
 /// `int vsscanf(const char *input, const char *format, va_list ap)`
-///
-/// Not variadic — its caller built the list — and impossible to forward for the mirror
-/// image of the reason this module exists at all.
 pub fn vsscanf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     scan(symbol, ctx, mem, ctx.rdi, ctx.rsi, Tail::List(ctx.rdx))
 }

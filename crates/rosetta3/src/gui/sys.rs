@@ -50,8 +50,7 @@ pub fn symbol(name: &str) -> Option<*mut c_void> {
 /// # Safety
 ///
 /// The caller states that `name` has the signature `F`. Nothing checks it and nothing
-/// can: a `dlsym` result is an address. Every call site names the header declaration it
-/// was checked against.
+/// can.
 pub unsafe fn function<F: Copy>(name: &str) -> Option<F> {
     const {
         assert!(
@@ -74,10 +73,6 @@ pub type CfRef = *mut c_void;
 pub type CgFloat = f64;
 
 /// `CGPoint`, `CGSize` and `CGRect` from `<CoreGraphics/CGGeometry.h>`.
-///
-/// Declared again rather than reused from [`crate::shims::coregraphics`] because that
-/// module's copies exist to describe what the *guest* passes, and these describe what
-/// this runtime passes to the host.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Point {

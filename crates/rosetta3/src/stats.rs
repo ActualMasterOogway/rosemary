@@ -5,11 +5,12 @@ use std::time::{Duration, Instant};
 
 /// Whether the exit histogram is being counted, right now.
 ///
-/// **Was `ROSETTA3_STATS`, read once into a `OnceLock`; is now a switch**, so that
-/// [`crate::gui`] can turn it on for the ten seconds someone wants a rate and off
-/// again.
-///
 /// What a caller must know: **counters do not rewind**.
+///
+/// A switch rather than a `OnceLock`, because this is the counter documented as
+/// perturbing the program it measures: one relaxed `fetch_add` per region entry, at
+/// fifteen million entries a second, measured at 44% of a steady-state window with it
+/// off and 61% with it on. The read stays one relaxed load and a compare.
 pub fn enabled() -> bool {
     match COUNTING.load(Relaxed) {
         ON => true,
@@ -58,9 +59,6 @@ counters! {
 
 
 /// How a region entry ended.
-///
-/// Translation time is one question and **exit rate** is the other, and until this
-/// existed only the first had an instrument.
 #[derive(Clone, Copy)]
 pub enum Exit {
     /// The end of a call this runtime made: the `int3` of the return stub the entry
@@ -145,12 +143,7 @@ pub fn record_entry(missed_window: bool) {
     }
 }
 
-/// A region entry the run loop never saw: one region **linked** to the next, resolving
-/// the successor itself out of this thread's block-link table.
-///
-/// Counted into [`ENTRIES`] as well as separately, so that the entry *rate* — the
-/// figure `docs/HOTSPOTS.md` is written against — still counts the same event it always
-/// did, and stays comparable across the change that introduced linking.
+/// A region entry the run loop never saw.
 pub fn record_linked_entry() {
     if !enabled() {
         return;
@@ -315,8 +308,7 @@ pub fn report() {
             100.0 * TAIL_IMPORTS.load(Relaxed) as f64 / entries as f64,
         );
         // How many of those entries the run loop never saw. This is the figure
-        // block linking is judged on: an entry that linked paid a compare and
-        // an indirect call, and one that did not paid the run loop.
+        // block linking is judged on.
         match crate::jit::pinned_link_abi() {
             Some(abi) => eprintln!(
                 "rosetta3: stats  entries above are chains, not regions: links are branches \
@@ -368,20 +360,13 @@ pub fn report() {
 
 
 /// Every counter above, read at one moment, for a consumer that is not stderr.
-///
-/// [`crate::gui`] is the reason this exists:
-///
-/// The atomics are read one at a time and are being written by every guest thread, so a
-/// snapshot is not an instant: two counters here can be a few microseconds apart.
 #[derive(Clone, Default)]
 pub struct Snapshot {
     /// Whether `ROSETTA3_STATS` was set.
     pub counted: bool,
     /// Time since the driver started translating; the denominator for a rate.
     pub wall: Duration,
-    /// Translations, and what came out of them. Recorded whether or not
-    /// `ROSETTA3_STATS` was set — see [`record_lift`], which is not gated —
-    /// so these are honest in any run.
+    /// Translations, and what came out of them.
     pub regions: u64,
     pub instructions: u64,
     pub bytes: u64,
@@ -432,9 +417,7 @@ pub fn snapshot() -> Snapshot {
         pinned_link_registers: crate::jit::pinned_link_abi().map(|abi| abi.len()),
         exits,
         trampolines: crate::trampoline::counts(),
-        // Cloned rather than borrowed: the sets are behind a lock the lifter
-        // takes, and holding it across a caller's formatting would put a render
-        // thread in front of every translation.
+        // Cloned rather than borrowed.
         pages: PAGES
             .lock()
             .unwrap_or_else(|e| e.into_inner())

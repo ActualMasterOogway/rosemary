@@ -14,9 +14,6 @@ use super::encoding::{self, Signature};
 use super::host;
 
 /// A runtime entry point the guest may call, and what crosses at it.
-///
-/// Every one of these is forwarded to the host's own `libobjc`: the runtime is the
-/// host's, and a guest asking it a question should get the host's answer.
 pub(super) struct Runtime {
     /// The C name, as `dlsym` spells it: no leading underscore.
     pub(super) name: &'static str,
@@ -28,8 +25,6 @@ pub(super) struct Runtime {
     pub(super) class_return: bool,
     /// Zero-based parameter indices that are **guest function pointers**, in exactly
     /// the sense [`crate::abi::FunctionAbi::callbacks`] means.
-    ///
-    /// One entry point needs it.
     pub(super) callbacks: &'static [u8],
     /// Zero-based parameter indices holding a **block literal**.
     pub(super) blocks: &'static [u8],
@@ -89,8 +84,6 @@ macro_rules! rtb {
 }
 
 /// As [`rtc`], also naming the parameters that are guest function pointers.
-///
-/// One entry needs both, and it is the one that creates a class at runtime.
 macro_rules! rtcb {
     ([$($c:literal),* $(,)?], [$($b:literal),* $(,)?], $name:literal, $ret:expr $(, $arg:expr)* $(,)?) => {
         Runtime {
@@ -114,8 +107,6 @@ const U8: T = T::UnsignedByte;
 const P: T = T::Pointer;
 
 /// The runtime surface a guest reaches, **sorted by name**.
-///
-/// Not all of `objc/runtime.h`.
 pub(super) static RUNTIME: &[Runtime] = &[
     // ## Making a class at runtime
     //
@@ -135,8 +126,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
     // `NSApplication` delegate class at start-up rather than declaring one.
     rtcb!([0], [2], "class_addMethod", U8, P, P, P, P),
     // Spelled out rather than built by a macro, as every entry taking a
-    // protocol is: a fifth macro for one more index list would say less than
-    // the field name does.
+    // protocol is.
     Runtime {
         name: "class_conformsToProtocol",
         types: &[U8, P, P],
@@ -227,8 +217,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
     rtc!([] -> true, "objc_loadWeakRetained", P, P),
     rtc!([] -> true, "objc_lookUpClass", P, P),
     // `void objc_moveWeak(id *dst, id *src)` — the third of the four weak
-    // primitives, alongside `objc_copyWeak` above. Passthrough for the same
-    // reason.
+    // primitives, alongside `objc_copyWeak` above.
     rt!("objc_moveWeak", V, P, P),
     rtc!([0] -> true, "objc_opt_class", P, P),
     rtc!([0, 1], "objc_opt_isKindOfClass", U8, P, P),
@@ -260,9 +249,8 @@ pub(super) static RUNTIME: &[Runtime] = &[
     rtc!([0, 2], "objc_setProperty_atomic_copy", V, P, P, P, I64),
     rtc!([0, 2], "objc_setProperty_nonatomic", V, P, P, P, I64),
     rtc!([0, 2], "objc_setProperty_nonatomic_copy", V, P, P, P, I64),
-    // `objc_storeStrong(id *location, id value)` writes through a guest pointer.
-    // The value it stores is an object, and an object is a host pointer on both
-    // sides — but a guest storing a *class* is legal, so it is translated.
+    // `objc_storeStrong(id *location, id value)` writes through a guest
+    // pointer.
     rtc!([1], "objc_storeStrong", V, P, P),
     // `id objc_storeWeak(id *location, id obj)` — see the weak note above.
     rtc!([1], "objc_storeWeak", P, P, P),
@@ -270,9 +258,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
     rtc!([0], "objc_sync_enter", I32, P),
     rtc!([0], "objc_sync_exit", I32, P),
     rt!("objc_terminate", V),
-    // The `__unsafe_unretained` end of the autoreleased-return-value handshake:
-    // it claims the value the callee left in the optimisation's thread-local
-    // slot and does *not* retain it.
+    // The `__unsafe_unretained` end of the autoreleased-return-value handshake.
     rtc!([0], "objc_unsafeClaimAutoreleasedReturnValue", P, P),
     rtc!([0] -> true, "object_getClass", P, P),
     rtc!([0], "object_getClassName", P, P),
@@ -405,11 +391,7 @@ static REFUSED: &[(&str, &str)] = &[
 /// thing without an ellipsis.
 ///
 /// These are the other half of what [`names_a_format`] covers, and the half that cannot
-/// be rendered:
-///
-/// The encoding for the variadic form is `@32@0:8@16` — three arguments and no ellipsis
-/// — so a marshaller reading it passes `firstObject` and leaves the rest of the list to
-/// whatever the host's `va_list` finds.
+/// be rendered.
 struct ObjectList {
     /// The selector the guest sends.
     variadic: &'static str,
@@ -422,8 +404,7 @@ struct ObjectList {
 
 /// The counted twin of each nil-terminated list a program reaches.
 ///
-/// **Incomplete, and cannot be otherwise**, for the reason [`is_variadic`] gives:
-/// nothing in an image records an ellipsis.
+/// **Incomplete, and cannot be otherwise**, for the reason [`is_variadic`] gives.
 static OBJECT_LISTS: &[ObjectList] = &[
     ObjectList {
         variadic: "arrayWithObjects:",
@@ -463,8 +444,6 @@ enum Message {
     /// `objc_msgSend(receiver, sel, ...)`.
     Direct,
     /// `objc_msgSendSuper[2](struct objc_super *, sel, ...)`.
-    ///
-    /// `skip_one` distinguishes the two.
     Super { skip_one: bool },
 }
 
@@ -513,12 +492,6 @@ pub fn shim_for(name: &str) -> Option<crate::jmpbuf::Shim> {
 }
 
 /// Symbols this runtime answers for, resolved to the host's own implementations.
-///
-/// Consulted before [`machish::resolve::NativeDylibProvider`], which denies the
-/// `_objc_`, `_class_`, `_sel_` and `_protocol_` families precisely so that a shim can
-/// claim them:
-///
-/// Every address here is the host's real function.
 pub fn provider() -> SyntheticDylib {
     let mut lib = SyntheticDylib::new("<rosetta3 objc runtime>");
     // Flat, for the same reason the rest of the runtime's shims are: which
@@ -543,9 +516,6 @@ pub fn provider() -> SyntheticDylib {
 }
 
 /// Symbols in the `_objc_` family that are **data**, not entry points.
-///
-/// `_objc_ehtype_vtable` is the vtable of `objc_exception_type_info`, the
-/// `std::type_info` subclass every `@catch (NSException *)` clause names.
 const DATA: &[&str] = &["objc_ehtype_vtable"];
 
 /// An address for a trampoline the *host* does not have.
@@ -627,8 +597,6 @@ fn call_runtime(
         return marshal::call_types(symbol, entry.types, host, ctx, mem, &convert);
     };
     // The general marshaller, for the one return a `&[ArgType]` cannot spell.
-    // `types[0]` is `None` in that case and the shape replaces it; the
-    // parameters are scalars like everyone else's.
     let mut shapes = vec![Shape::Struct(packed(leaves))];
     shapes.extend(entry.types.iter().skip(1).copied().map(Shape::Scalar));
     marshal::call_shapes(symbol, &shapes, host, ctx, mem, &convert)
@@ -636,8 +604,7 @@ fn call_runtime(
 
 /// A C struct laid out from its members, each at its own alignment.
 ///
-/// The full layout rule, not a shortcut for the one caller: a member sits at the next
-/// offset its own width divides, and the struct is padded to its widest member.
+/// The full layout rule, not a shortcut for the one caller.
 fn packed(members: &[T]) -> Aggregate {
     let mut offset = 0usize;
     let mut leaves = Vec::with_capacity(members.len());
@@ -670,8 +637,6 @@ struct Classes<'a> {
     /// Parameter indices holding a block, from the method's own encoding.
     blocks: &'a [u8],
     /// Parameter indices holding a plain `id`, from the method's own encoding.
-    ///
-    /// Empty for the runtime entry points.
     objects: &'a [u8],
     /// Whether an `id` **return** gets the reverse substitution, for the reason
     /// `objects` gets the forward one.
@@ -756,13 +721,9 @@ fn send(
         return Ok(());
     }
 
-    // The receiver as the host runtime knows it. A guest *class* is the only
-    // thing that changes here; an object is a host allocation and is already
-    // itself.
+    // The receiver as the host runtime knows it.
     let host_receiver = vm.objc_host_class(receiver);
-    // A receiver in guest memory is not automatically broken. A constant
-    // `@"..."` string is an object in the guest's own `__cfstring`, and the
-    // host runtime understands it perfectly.
+    // A receiver in guest memory is not automatically broken.
     if vm.program.is_guest_address(host_receiver) {
         let isa = vm.objc_host_class((mem as &dyn GuestMemory).read_u64(host_receiver, symbol)?);
         if isa == 0 || vm.program.is_guest_address(isa) {
@@ -773,9 +734,7 @@ fn send(
         }
     }
 
-    // The overlay's seam. A frame ends at a `presentDrawable:` or a
-    // `flushBuffer`, and this is where those are seen — before the dispatch,
-    // because on both APIs there is nothing left to draw into afterwards.
+    // The overlay's seam.
     crate::gui::hook::before_send(sel, host_receiver, arg_reg(ctx, base + 2));
 
     // SAFETY: `host_receiver` is a pointer the host runtime owns — an object it
@@ -855,9 +814,7 @@ fn send(
         }
         render_variadic(symbol, sel, &signature, base, ctx, mem)?;
     }
-    // Two independent statements about the same fact, held to each other. The
-    // *guest* said "struct return" by calling the `_stret` trampoline; the
-    // *method* says so through its encoding.
+    // Two independent statements about the same fact, held to each other.
     let by_encoding = matches!(
         signature.shapes.first(),
         Some(Shape::Struct(agg)) if agg.guest_class() == GuestClass::Memory
@@ -901,10 +858,6 @@ fn send(
 }
 
 /// Whether `ROSETTA3_TRACE_MSG` asked for this selector, and its name.
-///
-/// A **list of selectors** rather than an all-or-nothing switch, because an Objective-C
-/// program sends millions of messages and the interesting one is always a handful of
-/// names known in advance.
 fn traced(sel: u64) -> Option<String> {
     #[dynamic]
     static WANTED: Vec<String> = {
@@ -958,8 +911,7 @@ fn transfer(
     };
     if !state.entered_by_jump() {
         // An intercepted `call`: microlift exits before the push, so the return
-        // address is this runtime's to write. `rip` is already the instruction
-        // after the call, which is precisely where the method must return to.
+        // address is this runtime's to write.
         let rsp = ctx.rsp.wrapping_sub(8);
         mem.write(rsp, &ctx.rip.to_le_bytes())
             .map_err(|_| AbiError::Memory {
@@ -970,8 +922,7 @@ fn transfer(
     }
     ctx.rip = target;
     // The live stack pointer moved without an exit reporting it, and `rip` is
-    // now a destination rather than a resume point: whoever serviced this call
-    // must not synthesize a return over it.
+    // now a destination rather than a resume point.
     state.rsp.set(ctx.rsp);
     state.redirect();
     Ok(())
@@ -1019,12 +970,6 @@ fn object_list(sel: u64) -> Option<&'static ObjectList> {
 }
 
 /// Whether the selector's last keyword names a *format string* parameter.
-///
-/// "Ends in `Format:`" is the obvious reading of Cocoa's convention and it is too broad
-/// by one word:
-///
-/// So the rule reads the last keyword as camelCase words and asks what qualifies
-/// "Format".
 fn names_a_format(selector: &str) -> bool {
     let Some(last) = selector
         .strip_suffix(':')
@@ -1118,9 +1063,7 @@ const OBJECT_LIST_CAP: usize = 4096;
 /// Send the counted twin of a nil-terminated object-list message.
 ///
 /// The three questions this has to answer are all about *where the list is*, and SysV
-/// AMD64 answers each of them:
-///
-/// The result is arrays this runtime owns, handed to a method with no ellipsis at all.
+/// AMD64 answers each of them.
 #[allow(clippy::too_many_arguments)]
 fn send_object_list(
     vm: &Vm,
@@ -1141,8 +1084,6 @@ fn send_object_list(
         })
     };
     // The guest called `objc_msgSend_stret` for a method returning an object.
-    // Every argument would be one register out, and the counted send would be
-    // built from the wrong words.
     if send.stret {
         return refuse("sent through the struct-return trampoline, which returns an object".into());
     }
@@ -1204,8 +1145,6 @@ fn send_object_list(
     // SAFETY: `method` is a `Method` the runtime just returned for `class`.
     let imp = unsafe { host::method_getImplementation(method) };
     // A guest class overriding the counted form would be re-entered as arm64.
-    // Nothing plausible does, and "nothing plausible does" is not a reason to
-    // find out at the call.
     if vm.guest_behind_thunk(imp as u64).is_some() {
         return refuse(format!("{} is implemented by the guest", list.counted));
     }
@@ -1379,8 +1318,7 @@ mod tests {
     #[test]
     fn the_host_really_exports_what_this_module_forwards_to() {
         // Every entry in the table is a passthrough, so a name misspelled here
-        // is a program that stops with "unsatisfied import" at run time. `dlsym`
-        // answers the question now instead.
+        // is a program that stops with "unsatisfied import" at run time.
         for entry in RUNTIME {
             assert!(
                 host_symbol(entry.name).is_some(),
@@ -1428,9 +1366,7 @@ mod tests {
         ] {
             assert!(names_a_format(yes), "{yes} should name a format");
         }
-        // `initWithFrame:pixelFormat:` is the one that mattered: it ends in
-        // `Format:`, is not variadic, and takes an `NSRect` — so believing the
-        // suffix refuses the call that opens Geometry Dash's window.
+        // `initWithFrame:pixelFormat:` is the one that mattered.
         for no in [
             "initWithFrame:pixelFormat:",
             "setPixelFormat:",

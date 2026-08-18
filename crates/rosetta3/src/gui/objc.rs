@@ -12,8 +12,7 @@ pub type Sel = *const c_void;
 
 /// A class by name, or null if this process has not loaded it.
 ///
-/// Null is the ordinary answer rather than an error: a guest that draws with
-/// OpenGL has never loaded Metal, and asking is how the overlay finds that out.
+/// Null is the ordinary answer rather than an error.
 pub fn class(name: &str) -> Id {
     let Ok(c) = CString::new(name) else {
         return std::ptr::null_mut();

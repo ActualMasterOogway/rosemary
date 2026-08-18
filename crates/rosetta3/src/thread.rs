@@ -14,9 +14,6 @@ use crate::stack::GuestStack;
 use crate::vm::VmError;
 
 /// The part of a guest thread another thread may read, and the whole of it.
-///
-/// Atomics rather than `Cell`s because the reader is a collector running on somebody
-/// else's thread, usually with this one suspended. Nothing here is a lock.
 pub struct GuestThread {
     /// Address of the innermost live [`RegisterContext`] on this thread, or zero when
     /// the thread is not inside guest code.
@@ -52,10 +49,7 @@ struct Slot {
 
 /// Guest threads by Mach thread port, looked up **without taking a lock**.
 ///
-/// The reason is the caller.
-///
-/// The one race left is a *miss*: a thread that has claimed its slot and not yet
-/// published its port is invisible for those few instructions.
+/// The one race left is a *miss*.
 static TABLE: [Slot; SLOTS] = [const {
     Slot {
         port: AtomicU32::new(0),
@@ -85,9 +79,7 @@ fn register(port: u32, thread: Arc<GuestThread>) {
             return;
         }
     }
-    // Out of slots. Not fatal and not silent: the thread runs, and a collector
-    // asking about it gets the host's answer, which is the behaviour before any
-    // of this existed.
+    // Out of slots. Not fatal and not silent.
     eprintln!(
         "rosetta3: more than {SLOTS} guest threads; thread {port} will not be          described to a collector"
     );
@@ -135,8 +127,6 @@ pub fn by_port(port: u32) -> Option<&'static GuestThread> {
 
 /// Call `f` with the Mach port of every registered guest thread.
 ///
-/// Takes no lock, for the reason the table itself takes none:
-///
 /// A thread that ends mid-walk is reported and then fails to suspend, which is the
 /// ordinary race and is why the sampler treats a failed suspend as a miss rather than
 /// an error.
@@ -163,16 +153,10 @@ pub struct ThreadState {
     /// the host function that caused it.
     pub(crate) pending: RefCell<Option<VmError>>,
     /// Which entry into guest code is live on this thread.
-    ///
-    /// Nesting depth would not do: entries at the same depth are different entries, and
-    /// the question this answers is identity, not distance.
     entry: Cell<u64>,
     /// Whether the call being serviced set `rip` itself instead of returning.
     redirected: Cell<bool>,
     /// Whether the import being serviced was reached by a **jump** rather than a call.
-    ///
-    /// The mirror image of `redirected`, and it exists for the one shim that has to
-    /// stand in for the call itself.
     entered_by_jump: Cell<bool>,
     /// The exception being unwound on this thread, if any.
     unwinding: Cell<Option<crate::unwind::InFlight>>,
@@ -319,21 +303,12 @@ impl ThreadState {
     }
 }
 
-/// One thread's window onto the code cache: the translations it has entered, keyed by
-/// the PC it entered them at.
+/// One thread's window onto the code cache:
 ///
-/// Never invalidated, for the reason the cache itself is never invalidated: guest code
-/// is assumed immutable.
-///
-/// Direct-mapped — one slot per index, no chaining, no eviction. A colliding PC takes
-/// the slot, and a collision costs exactly one trip to the shared cache. Sizing it a
-/// few times larger than the working set keeps the hit rate in the high nineties.
+/// Never invalidated, for the reason the cache itself is never invalidated.
 pub(crate) struct CodeWindow {
     slots: RefCell<Box<[Option<(u64, std::sync::Arc<crate::cache::Translation>)>]>>,
     /// The rows lifted code probes, one per [`slots`](Self::slots) index.
-    ///
-    /// - **One thread.** A `CodeWindow` belongs to a [`ThreadState`], which is this
-    /// thread's alone; nothing else reads or writes these rows.
     links: UnsafeCell<Box<[BlockLinkEntry]>>,
 }
 
@@ -348,9 +323,7 @@ const WINDOW: usize = 8192;
 /// rather than two copies of it.
 pub fn link_config() -> BlockLinkConfig {
     let config = BlockLinkConfig::new(WINDOW as u32);
-    // Which of the two shapes of linking this process runs: a row handed back
-    // to `cache::follow_links`, or a branch straight into the successor with
-    // the guest registers still in registers. See [`crate::jit::pinned_link_abi`].
+    // Which of the two shapes of linking this process runs.
     match crate::jit::pinned_link_abi() {
         Some(abi) => config.pinned(abi),
         None => config,
@@ -394,9 +367,7 @@ impl CodeWindow {
     /// Remember that `translation` may be entered at `pc`.
     pub(crate) fn put(&self, pc: u64, translation: &std::sync::Arc<crate::cache::Translation>) {
         let slot = Self::slot(pc);
-        // `try_borrow_mut` rather than `borrow_mut`: this is reached from the
-        // run loop, and the run loop is re-entrant — a guest callback runs
-        // another one inside the first.
+        // `try_borrow_mut` rather than `borrow_mut`.
         if let Ok(mut slots) = self.slots.try_borrow_mut() {
             slots[slot] = Some((pc, std::sync::Arc::clone(translation)));
             // The link row goes in with the `Arc`, and only with it: the
@@ -417,6 +388,13 @@ impl CodeWindow {
 }
 
 /// The key every thread's [`ThreadState`] hangs off.
+///
+/// A raw pthread key, not `thread_local!`. Rust's is thread-specific data with a
+/// "destroyed" flag in front of it, and macOS trips that flag on the main thread
+/// *inside* `exit` — precisely when the guest's `atexit` handlers run and re-enter the
+/// JIT. A raw key has no such flag: the value stays readable until the thread ends.
+/// The destructor frees a *secondary* thread's stack, so a guest that spawns and joins
+/// in a loop does not accumulate an 8 MiB reservation per thread.
 #[dynamic]
 static KEY: libc::pthread_key_t = {
     let mut key: libc::pthread_key_t = 0;
@@ -477,18 +455,13 @@ pub fn install(state: ThreadState) -> &'static ThreadState {
     // SAFETY: just stored, and nothing has run since that could free it.
     let state = unsafe { &*raw };
     // Registered under this thread's Mach port, which is how a collector on
-    // another thread finds it. Replacing rather than inserting, for the reason
-    // above: a second `Vm` on this thread is a new program.
+    // another thread finds it.
     register(mach_port(), Arc::clone(&state.published));
     clear_errno();
     state
 }
 
 /// Hand this thread the `errno` a thread that has just started really has.
-///
-/// Here rather than in [`crate::startup`] because it is a claim about a **thread**, not
-/// about a process, and this is the one place every thread that becomes a guest thread
-/// passes through.
 fn clear_errno() {
     // SAFETY: `__error()` returns this thread's own `errno` slot, which is
     // live for as long as the thread is.
@@ -550,9 +523,6 @@ pub const THREAD_STACK: usize = crate::stack::DEFAULT_STACK;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StackRequest {
     /// Reserve [`THREAD_STACK`] bytes, the main thread's size.
-    ///
-    /// For a thread nothing asked about: one this runtime *adopted* because a host
-    /// framework called a guest callback on a worker of its own.
     Default,
     /// Reserve `bytes`, rounded up to a page. What the guest asked for through
     /// `pthread_attr_setstacksize`.
@@ -585,9 +555,7 @@ pub fn adopt(request: StackRequest) -> Result<&'static ThreadState, VmError> {
 
 /// What a new guest thread is to run, and on what.
 pub struct GuestStart {
-    /// The **thunk** for the guest's start routine, not the guest address: the
-    /// host is what calls it, so it has to be arm64 by the time it gets here.
-    /// See [`crate::thunk`].
+    /// The **thunk** for the guest's start routine, not the guest address.
     pub entry: u64,
     /// The `void *` the guest passed, untranslated. Only guest code ever
     /// dereferences it, and the two sides share an address space.
@@ -624,9 +592,7 @@ extern "C" fn entry(raw: *mut c_void) -> *mut c_void {
     let GuestStart { entry, arg, stack } = *unsafe { Box::from_raw(raw as *mut GuestStart) };
 
     if let Err(e) = adopt(stack) {
-        // No error channel: the caller is libpthread, which has nowhere to put
-        // this, and the guest is already holding a `pthread_t` for a thread it
-        // believes is running.
+        // No error channel.
         eprintln!("rosetta3: a guest thread could not be given a stack: {e}");
         return core::ptr::null_mut();
     }
@@ -653,8 +619,6 @@ mod tests {
     use super::*;
 
     /// The guard restores, rather than clearing.
-    ///
-    /// The distinction is the whole point.
     #[test]
     fn a_held_errno_comes_back_exactly_as_it_was() {
         // SAFETY: this thread's own slot, in a test that owns the thread.

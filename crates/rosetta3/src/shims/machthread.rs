@@ -25,8 +25,6 @@ const KERN_SUCCESS: i32 = 0;
 const KERN_INVALID_ARGUMENT: i32 = 4;
 
 /// `x86_thread_state64_t`, in the order the header declares it.
-///
-/// Written as a list rather than a struct because that is exactly what it is.
 fn thread_state64(ctx: &RegisterContext, rsp: u64) -> [u64; 21] {
     [
         ctx.rax, ctx.rbx, ctx.rcx, ctx.rdx, ctx.rdi, ctx.rsi, ctx.rbp, rsp, ctx.r8, ctx.r9,
@@ -38,9 +36,6 @@ fn thread_state64(ctx: &RegisterContext, rsp: u64) -> [u64; 21] {
 
 /// `kern_return_t thread_get_state(thread_act_t, thread_state_flavor_t, thread_state_t,
 /// mach_msg_type_number_t *)`
-///
-/// Answers for a *guest* thread and passes everything else through, including every
-/// flavour but the two a collector asks for.
 fn thread_get_state(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -96,9 +91,6 @@ fn thread_get_state(
 
 /// `x86_float_state64_t`, with the sixteen `xmm` registers filled in and everything
 /// else zero.
-///
-/// The x87 stack, the control and status words and the reserved tail are not modelled
-/// by the recompiler and are not read by anything that asks for this.
 fn float_state64(guest: Option<&RegisterContext>) -> Vec<u8> {
     /// The `MXCSR` a process starts with: all exceptions masked, round to
     /// nearest.
@@ -164,10 +156,6 @@ fn guest_thread_of(pthread: u64) -> Option<&'static crate::thread::GuestThread> 
 
 /// The host's own implementation of each name this module claims, resolved **before**
 /// any of them can be called.
-///
-/// `dlsym` takes dyld's global lock, and this module's whole reason for existing is
-/// that it is called with every other thread suspended — including, possibly, one
-/// holding that lock.
 static HOST: std::sync::OnceLock<[Option<u64>; 3]> = std::sync::OnceLock::new();
 
 /// Resolve this module's host entry points. Called once, before the guest runs.

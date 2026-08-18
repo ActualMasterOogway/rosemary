@@ -146,9 +146,7 @@ mod tests {
 
     #[test]
     fn the_default_output_unit_is_found_where_the_legacy_call_finds_nothing() {
-        // The finding this module exists for, asserted rather than described:
-        // the same description through the modern registry produces a
-        // component.
+        // The finding this module exists for, asserted rather than described.
         if !framework_loaded() {
             return;
         }

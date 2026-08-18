@@ -7,9 +7,6 @@ use std::time::Instant;
 use super::draw::{Color, Ui, color, duration};
 
 /// The template recorded when nothing else is asked for.
-///
-/// `Time Profiler` rather than `Processor Trace`, and that is a finding rather than a
-/// preference.
 const DEFAULT_TEMPLATE: &str = "Time Profiler";
 
 /// A recording in flight.
@@ -60,9 +57,7 @@ pub fn toast() -> Option<(String, Color)> {
 
 fn say(state: &mut State, message: impl Into<String>, colour: Color) {
     let message = message.into();
-    // On stderr as well as on screen. A run being measured is a run whose
-    // terminal is being watched, and the path a trace landed at is a thing to
-    // copy and paste rather than read off a game.
+    // On stderr as well as on screen.
     eprintln!("rosetta3: gui  {message}");
     state.said = Some((Instant::now(), message, colour));
 }
@@ -80,9 +75,7 @@ fn start(state: &mut State) {
         std::env::var("ROSETTA3_GUI_TEMPLATE").unwrap_or_else(|_| DEFAULT_TEMPLATE.to_string());
     let output = output_path();
 
-    // `--attach` rather than `--launch`: the process to record is this one, and
-    // it has been running for as long as it takes to get to the scene worth
-    // recording.
+    // `--attach` rather than `--launch`.
     let child = Command::new(xctrace)
         .arg("record")
         .arg("--template")
@@ -127,8 +120,7 @@ fn stop(state: &mut State) {
     let status = recording.child.wait();
 
     // The map, from the run that was just recorded, beside the trace it belongs
-    // to. Written after the recording stops so that every region translated
-    // during it is in the table.
+    // to.
     let map = format!("{}.map", recording.output.trim_end_matches(".trace"));
     let map_note = match crate::profile::write_map(&map) {
         Ok(()) => format!(", map at {map}"),
@@ -145,9 +137,7 @@ fn stop(state: &mut State) {
             ),
             color::GUEST,
         ),
-        // A non-zero exit is where the two well-known refusals land: no
-        // `get-task-allow` on the driver, and Processor Trace not enabled in
-        // System Settings.
+        // A non-zero exit is where the two well-known refusals land.
         Ok(status) => say(
             state,
             format!("xctrace exited {status}: see its message above, and docs/PROFILING.md"),

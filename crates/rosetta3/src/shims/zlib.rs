@@ -84,8 +84,7 @@ fn substitute_allocators(
     Ok(())
 }
 
-/// Everything the four entry points share: check the size the guest claims, substitute,
-/// and hand the host its own version string.
+/// Everything the four entry points share:
 ///
 /// The version string is deliberately **not** the guest's.
 fn init_with(

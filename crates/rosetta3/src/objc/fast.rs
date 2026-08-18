@@ -40,8 +40,7 @@ pub fn promotion(name: &str, resolved: u64) -> Option<Promotion> {
     let address = match through(name) {
         Some(t) if t.matches(entry) => t.call,
         // A substituting entry whose declared mask disagrees with its row is a
-        // bug in this file, caught by a test. Declining here rather than
-        // debug-asserting keeps the release build's answer the safe one.
+        // bug in this file, caught by a test.
         Some(_) => return None,
         None if is_identity(entry) => host,
         None => return None,
@@ -72,8 +71,6 @@ pub fn abi_of(name: &str) -> Option<&'static FunctionAbi> {
 }
 
 /// The entry points that **cannot cause the host runtime to call an `IMP`**.
-///
-/// **An allowlist, not a denylist**, because the default has to be safe.
 static NEVER_DISPATCHES: &[&str] = &[
     "class_getInstanceSize",
     "class_getInstanceVariable",
@@ -119,9 +116,6 @@ fn is_identity(entry: &Runtime) -> bool {
 }
 
 /// The [`FunctionAbi`] for `RUNTIME[i]`, built once.
-///
-/// Built lazily rather than written out a second time, because a table that repeats a
-/// signature is a table that will eventually disagree with itself.
 fn abi_for(i: usize) -> &'static FunctionAbi {
     #[dynamic]
     static ABIS: Vec<FunctionAbi> = {
@@ -143,9 +137,8 @@ struct Through {
     name: &'static str,
     /// The function to inline a call to. Its signature is the entry's own.
     call: u64,
-    /// One entry per parameter, in order: whether this function translates it
-    /// as a class. Held against [`Runtime::classes`] by a test, and by
-    /// [`Through::matches`] at run time.
+    /// One entry per parameter, in order: whether this function translates it as a
+    /// class.
     classes: &'static [bool],
     /// Whether it translates the return value back.
     class_return: bool,
@@ -188,8 +181,6 @@ fn guest_class(host: u64) -> u64 {
 }
 
 /// The host function `name` names, cached.
-///
-/// Reached from inlined guest code, so it may not fail.
 fn host_of(cache: &AtomicU64, name: &str) -> u64 {
     let cached = cache.load(Ordering::Relaxed);
     if cached != 0 {
@@ -238,8 +229,6 @@ macro_rules! is_class {
 /// Each parameter is written `class` or `plain`, which is both the code that runs and
 /// the mask [`Through::matches`] holds against the `RUNTIME` row — so the declaration
 /// cannot drift from the behaviour, and neither can drift from the table.
-///
-/// The types are the row's own, spelled at their real widths rather than as `u64`.
 macro_rules! through {
     ($( $f:ident, $host:literal, ( $($k:ident $a:ident : $t:ty),* ) -> $rk:ident $r:ty ; )*) => {
         $(
@@ -305,8 +294,6 @@ mod tests {
     use super::*;
 
     /// The two tables are one table.
-    ///
-    /// This is the test that makes the module safe to extend.
     #[test]
     fn every_through_entry_matches_its_table_row() {
         for t in through_table() {
@@ -352,9 +339,7 @@ mod tests {
                     through(name).is_none(),
                     "{name} is both a passthrough and a substitution"
                 );
-                // Promotable exactly when it also cannot dispatch: the identity
-                // rows that are excluded are excluded by `NEVER_DISPATCHES` and
-                // by nothing else, which is the property worth pinning.
+                // Promotable exactly when it also cannot dispatch.
                 assert_eq!(
                     abi_of(name).is_some(),
                     NEVER_DISPATCHES.binary_search(&name).is_ok(),

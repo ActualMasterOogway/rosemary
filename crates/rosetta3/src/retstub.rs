@@ -31,10 +31,6 @@ pub fn contains(va: u64) -> bool {
 }
 
 /// The region to lift in order to execute the stub at `va`.
-///
-/// One byte, copied out rather than borrowed, so the walk's upper bound is the
-/// instruction itself and nothing follows it. Every other address in the page is
-/// refused.
 pub fn lift_region(va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
     if !is_exit(va) {
         return None;

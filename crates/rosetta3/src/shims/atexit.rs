@@ -9,17 +9,10 @@ use crate::abi::{Callbacks, GuestMemory, Result};
 
 unsafe extern "C" {
     /// libsystem's own, spelled `___cxa_atexit` in the Mach-O.
-    ///
-    /// The handler is declared as a data pointer rather than as a Rust `fn` because it
-    /// is not one.
     fn __cxa_atexit(func: *const (), arg: *mut c_void, dso: *const ()) -> c_int;
 }
 
 /// The DSO handle every guest destructor is registered against.
-///
-/// One `static`, so the address is stable for the process's life and every guest image
-/// shares it — which is right, because what it identifies here is this runtime, and
-/// this runtime is what will still be mapped when the handlers run.
 static DSO_HANDLE: u8 = 0;
 
 /// `int __cxa_atexit(void (*func)(void *), void *arg, void *dso_handle)`
@@ -109,17 +102,14 @@ mod tests {
         cxa_atexit("___cxa_atexit", &mut ctx, &mut NoMemory, &callbacks).expect("register");
 
         // What crossed out is the guest's own function pointer, and what the
-        // host got back is a success. A guest address reaching the host's exit
-        // list unsubstituted is the failure this direction exists to prevent.
+        // host got back is a success.
         assert_eq!(callbacks.0.get(), 0x1_0000_1234);
         assert_eq!(ctx.rax as i32, 0);
     }
 
     #[test]
     fn the_handle_registered_belongs_to_an_image_the_host_knows() {
-        // The property that makes substituting the guest's handle worth doing:
-        // ours is an address `dladdr` resolves to a real loaded image, so the
-        // host's record of "whose destructor is this" means something.
+        // The property that makes substituting the guest's handle worth doing.
         let mut info = unsafe { std::mem::zeroed::<libc::Dl_info>() };
         // SAFETY: a live static's address and a live local `Dl_info`.
         let found = unsafe { libc::dladdr((&raw const DSO_HANDLE).cast(), &raw mut info) };

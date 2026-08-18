@@ -7,10 +7,6 @@ use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction};
 use static_init::dynamic;
 
 /// Ceiling on how many instructions one region may contain, across all of its blocks.
-/// FEX's `MaxInstPerBlock` (`FEX_MAXINST`), whose default is 5000.
-///
-/// It is 1024 here, and the gap is not a disagreement about region shape — it is the
-/// backend.
 ///
 /// ```text
 /// cap        compiling   worst    progress
@@ -230,9 +226,7 @@ impl<'a> Walk<'a> {
 
             budget_spent = self.decode_block(succ, entry_block);
 
-            // A block that decoded nothing is not a block. This is also how a
-            // non-entry block that hit garbage disappears — `decode_block` has
-            // already rolled its instructions back.
+            // A block that decoded nothing is not a block.
             if self.blocks[succ].starts.is_empty() {
                 self.blocks.remove(succ);
             } else {
@@ -251,9 +245,7 @@ impl<'a> Walk<'a> {
         let entry = self.blocks[idx].range.start;
         let mut at = entry;
         loop {
-            // Zeros are memory nobody has written. Exempting the region's own
-            // first instruction is what makes the walk make progress; see the
-            // module note on why the exemption is that narrow.
+            // Zeros are memory nobody has written.
             if !(entry_block && at == entry) && self.is_zero_run(at) {
                 break;
             }
@@ -266,8 +258,7 @@ impl<'a> Walk<'a> {
             let next = self.instr.next_ip();
 
             // The instruction would run into a block that is already claimed,
-            // so it belongs to whoever claimed it. FEX leaves the few bytes
-            // before the boundary as a hole rather than decoding them twice.
+            // so it belongs to whoever claimed it.
             if next > self.next_block_start {
                 break;
             }
@@ -275,9 +266,7 @@ impl<'a> Walk<'a> {
             if self.instr.is_invalid() {
                 if entry_block {
                     // The bytes the region was made for are not code. Nothing
-                    // to salvage and nothing to hide: the entry block keeps
-                    // whatever it decoded, and if that is nothing the region
-                    // does not exist.
+                    // to salvage and nothing to hide.
                     break;
                 }
                 // Anywhere else this is a mispredicted edge — an embedded jump
@@ -310,16 +299,12 @@ impl<'a> Walk<'a> {
     /// `InstCanContinue`.
     fn can_continue(&self, next: u64) -> bool {
         if next == self.next_block_start {
-            // Straight into the next block. It gets decoded on its own turn and
-            // the two abut, so the lifter sees one run of bytes and puts the
-            // fallthrough edge in.
+            // Straight into the next block.
             return false;
         }
         match self.instr.flow_control() {
             FlowControl::Next => true,
-            // A `call` to the very next instruction is not a call: it is how
-            // 32-bit position-independent code reads its own address. FEX
-            // special-cases it and so does microlift's dispatch.
+            // A `call` to the very next instruction is not a call.
             FlowControl::Call if self.instr.near_branch_target() == next => true,
             _ => false,
         }
@@ -369,9 +354,7 @@ impl<'a> Walk<'a> {
         if let Some(prev) = succ.checked_sub(1)
             && self.blocks[prev].range.end > target
         {
-            // The target is inside a block already decoded. Split it there, so
-            // the target becomes an entry of this region instead of the start of
-            // a second translation over the same bytes.
+            // The target is inside a block already decoded.
             if let Ok(i) = self.blocks[prev].starts.binary_search(&target)
                 && i != 0
             {
@@ -386,9 +369,7 @@ impl<'a> Walk<'a> {
                     },
                 );
             }
-            // Split or not, the bytes at `target` have been dealt with: either
-            // they are now a block of their own, or the target is off the grid
-            // and the branch simply leaves the region.
+            // Split or not, the bytes at `target` have been dealt with.
             self.visited.insert(target);
             return;
         }
@@ -401,12 +382,11 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// Whether the two bytes at `at` are zero and can be judged. See the module
-    /// note; this is FEX's rule, including the page condition.
+    /// Whether the two bytes at `at` are zero and can be judged.
     ///
-    /// The condition is that a whole maximal instruction starting here stays
-    /// within one page, which is FEX declining to call bytes garbage when it
-    /// cannot see all of the encoding they might belong to.
+    /// The condition is that a whole maximal instruction starting here stays within one
+    /// page, which is FEX declining to call bytes garbage when it cannot see all of the
+    /// encoding they might belong to.
     fn is_zero_run(&self, at: u64) -> bool {
         let last = at.saturating_add(MAX_INSTRUCTION_LEN);
         if at / GUEST_PAGE != last / GUEST_PAGE {
@@ -639,8 +619,7 @@ mod tests {
     #[test]
     fn a_run_of_zeros_ends_a_block_rather_than_decoding_forever() {
         // `00 00` is `add byte ptr [rax], al`, so a walk through zero-filled
-        // memory never stops on its own. In a JIT arena those zeros are bytes
-        // the guest has not written yet. See the module note.
+        // memory never stops on its own.
         let mut code = vec![0x48, 0x83, 0xEC, 0x08]; // sub rsp, 8
         code.extend(std::iter::repeat_n(0u8, 64));
         assert_eq!(
@@ -662,9 +641,8 @@ mod tests {
 
     #[test]
     fn a_zero_byte_inside_a_real_instruction_is_not_the_end() {
-        // The rule is about a run of zeros where an instruction would start, not
-        // about zero bytes — an immediate is full of them.
-        // mov eax, 0x00000001 ; ret
+        // The rule is about a run of zeros where an instruction would start,
+        // not about zero bytes — an immediate is full of them.
         let code = [0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3];
         assert_eq!(blocks(&code, BASE), Some(vec![BASE..BASE + 6]));
     }

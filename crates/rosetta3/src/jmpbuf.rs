@@ -5,13 +5,9 @@ use microlift::arch::x86_64::context::RegisterContext;
 use crate::abi::{AbiError, GuestMemory, Result};
 
 /// Bytes an x86-64 Darwin guest sets aside for a `jmp_buf` (`int[37]`).
-///
-/// A `sigjmp_buf` is one `int` longer.
 pub const GUEST_JMP_BUF: usize = 148;
 
 /// The magic word a buffer this runtime wrote begins with.
-///
-/// Not decoration.
 const MAGIC: u64 = 0x524f_5345_5454_4133; // "ROSETTA3"
 
 /// A guest context, as `setjmp` records it.
@@ -55,8 +51,7 @@ impl SavedContext {
 
     /// Put the guest back where [`SavedContext::capture`] found it.
     ///
-    /// Callee-saved registers and the stack only: see the module note on why the
-    /// caller-saved half is already dead.
+    /// Callee-saved registers and the stack only.
     pub fn restore(&self, ctx: &mut RegisterContext) {
         ctx.rip = self.rip;
         ctx.rsp = self.rsp;
@@ -104,8 +99,7 @@ impl SavedContext {
 
 /// `int setjmp(jmp_buf)` and every spelling of it.
 ///
-/// Returns zero, as a first return must. The second return is [`longjmp`]'s business,
-/// and it does not come back through here at all.
+/// Returns zero, as a first return must.
 pub fn setjmp(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let env = ctx.rdi;
     let Some(state) = crate::thread::current() else {
@@ -127,9 +121,7 @@ pub fn setjmp(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory
 /// `void longjmp(jmp_buf, int)`, and every spelling of it.
 pub fn longjmp(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let env = ctx.rdi;
-    // C: a `longjmp` with zero makes `setjmp` return one, because zero is
-    // reserved for the first return and a guest asking for it means "any
-    // non-first return".
+    // C.
     let value = ctx.esi_as_int();
     longjmp_to(symbol, env, if value == 0 { 1 } else { value }, ctx, mem)
 }
@@ -184,9 +176,7 @@ fn longjmp_to(
     // host->guest callback entered before the next exit would otherwise start
     // below a frame that no longer exists.
     state.rsp.set(ctx.rsp);
-    // `rip` is now the destination, not a return address: whoever serviced this
-    // call must not synthesize a return over it. This is what a tail-called
-    // `jmp _longjmp` would otherwise do — see [`crate::vm::Vm::run_loop`].
+    // `rip` is now the destination, not a return address.
     state.redirect();
     Ok(())
 }

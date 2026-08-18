@@ -66,8 +66,6 @@ pub static mut __jit_debug_descriptor: JitDescriptor = JitDescriptor {
 };
 
 /// LLDB puts a breakpoint on this symbol and examines the descriptor when it fires.
-///
-/// Do not inline or remove it.
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub extern "C" fn __jit_debug_register_code() {
@@ -148,9 +146,7 @@ pub fn register(
     unsafe {
         let descriptor = &raw mut __jit_debug_descriptor;
 
-        // Prepended, and kept: a debugger that attaches later walks the list
-        // from `first_entry` and registers everything on it, which is the only
-        // way a translation compiled before the attach is ever seen.
+        // Prepended, and kept.
         entry.next = (*descriptor).first_entry;
         if !entry.next.is_null() {
             (*entry.next).prev = entry;
@@ -276,8 +272,7 @@ fn dwarf(
     program.begin_sequence(Some(Address::Constant(code)));
 
     // Rows are emitted in host-address order, which is the order `ranges` is
-    // already in. Consecutive ranges resolving to the same line collapse into
-    // one row.
+    // already in.
     let mut previous = None;
     let mut rows = 0usize;
 
@@ -302,8 +297,6 @@ fn dwarf(
     }
 
     // `end_sequence` takes an offset from the last address set, not an address.
-    // Setting the address first makes that offset zero and the intent obvious;
-    // passing the absolute end here would advance the sequence past everything.
     program.set_address(Address::Constant(code + native_size));
     program.end_sequence(0);
 
@@ -472,9 +465,7 @@ fn listing(image: &str, guest_start: u64, guest_end: u64, bytes: &[u8]) -> Optio
     text.push('\n');
     line += 1;
 
-    // Written straight through rather than buffered: LLDB opens this file at
-    // display time, which may be the next instant or an hour later, and a
-    // buffer that has not been flushed is a listing that does not exist.
+    // Written straight through rather than buffered.
     listing.file.write_all(text.as_bytes()).ok()?;
     listing.next_line = line;
 

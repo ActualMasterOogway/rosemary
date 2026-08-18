@@ -32,8 +32,7 @@ pub fn proc_pidpath(
 }
 
 // `pthread_get_stackaddr_np` and `pthread_get_stacksize_np` live in
-// [`super::machthread`], which has the `pthread_t` -> thread lookup. This module
-// is consulted first, so a copy here would silently shadow them.
+// [`super::machthread`], which has the `pthread_t` -> thread lookup.
 
 /// The guest has no separately protected JIT mapping to toggle.
 pub fn pthread_jit_write_protect_np(

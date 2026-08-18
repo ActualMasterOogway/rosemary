@@ -39,9 +39,6 @@ impl GuestStack {
     }
 
     /// Reserve `size` bytes with nothing laid out on them.
-    ///
-    /// `size` is the whole **reservation**, of which the lowest page is the guard and
-    /// the rest is stack.
     pub fn bare(size: usize) -> Result<Self, VmError> {
         let page = machish::memory::host_page_size() as usize;
         let size = size.next_multiple_of(page).max(page * 4);
@@ -76,8 +73,6 @@ impl GuestStack {
     }
 
     /// A stack over memory the **guest** already owns, running down from `top`.
-    ///
-    /// Nothing is reserved, protected or freed here, and all three are deliberate.
     pub fn supplied(top: u64, size: u64) -> Self {
         let top = top & !0xf;
         let base = top.saturating_sub(size);
@@ -114,8 +109,7 @@ impl GuestStack {
             std::iter::once(CString::new(exe_path).unwrap_or_default()).collect();
 
         // Strings first, growing downward from the top, then the arrays that
-        // point at them. The strings' order is not observable, but the arrays'
-        // **is**.
+        // point at them.
         let mut cursor = self.top;
         let write_str = |s: &CString, cursor: &mut u64, this: &mut MmapSpace| {
             let bytes = s.as_bytes_with_nul();
@@ -214,9 +208,6 @@ impl GuestStack {
     }
 
     /// The stack's mapped bytes, for [`GuestView`](crate::vm::GuestView).
-    ///
-    /// Empty for a guest-supplied stack, which is not this runtime's mapping to
-    /// describe.
     pub fn regions(&self) -> Vec<(u64, &[u8])> {
         self.space
             .as_ref()
@@ -241,9 +232,7 @@ mod tests {
         u64::from_le_bytes(buf)
     }
 
-    /// The frame an `LC_UNIXTHREAD` entry point walks, walked the same way it walks it:
-    /// `argc` at `rsp`, `argv` above it, `envp` past `argv`'s terminator, `apple` past
-    /// `envp`'s.
+    /// The frame an `LC_UNIXTHREAD` entry point walks, walked the same way it walks it.
     #[test]
     fn the_kernel_frame_is_what_start_walks() {
         let args = ["prog".to_string(), "one".to_string(), "two".to_string()];

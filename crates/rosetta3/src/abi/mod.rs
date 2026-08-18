@@ -35,9 +35,6 @@ pub fn guest_call_abi_ref() -> &'static CallAbi {
 }
 
 /// Anything that stops an intercepted call from being made.
-///
-/// Every variant names the symbol, because the whole point of refusing is that the
-/// failure is legible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AbiError {
     /// Nothing in [`table`] describes this symbol.
@@ -141,8 +138,7 @@ impl<S: AddressSpace> GuestMemory for S {
 
 /// Longest C string a shim will follow before giving up.
 ///
-/// Totality, not policy: a `%s` argument pointing at unterminated bytes must end the
-/// read rather than the process.
+/// Totality, not policy.
 pub const MAX_CSTR: usize = 64 * 1024;
 
 impl dyn GuestMemory + '_ {
@@ -217,13 +213,6 @@ impl dyn GuestMemory + '_ {
 }
 
 /// Service one intercepted call.
-///
-/// `symbol` is the imported name with its leading underscore, as the Mach-O spells it;
-/// `tag` is the provider's verbatim echo (see the crate note on why the seam is a
-/// `u64`); `host` is the address the import resolved to.
-///
-/// **On any error `ctx` is unmodified.** That is the guarantee that makes refusal
-/// useful.
 pub fn call_import(
     symbol: &str,
     tag: u64,
@@ -235,8 +224,6 @@ pub fn call_import(
 }
 
 /// [`call_import`], with somewhere for a guest function pointer to go.
-///
-/// The extra parameter is what makes `qsort` callable.
 pub fn call_import_with(
     symbol: &str,
     tag: u64,
@@ -245,9 +232,7 @@ pub fn call_import_with(
     mem: &mut dyn GuestMemory,
     callbacks: &dyn Callbacks,
 ) -> Result<()> {
-    // `ROSETTA3_TRACE_CALL` reports this call, if it names its symbol. The
-    // whole seam funnels through here — bridged and slow alike — so one place
-    // sees every intercepted call.
+    // `ROSETTA3_TRACE_CALL` reports this call, if it names its symbol.
     if !crate::trace::watching(symbol) {
         return call_import_inner(symbol, tag, host, ctx, mem, callbacks);
     }
@@ -295,9 +280,6 @@ fn call_import_inner(
 pub trait Callbacks {
     /// What to pass the host in place of the guest's function-pointer argument `va`,
     /// while servicing `symbol`.
-    ///
-    /// One method rather than a "is it guest code" predicate and a builder, because the
-    /// decision and the substitution have to be made together.
     fn substitute(&self, symbol: &str, va: u64) -> Result<u64>;
 
     /// The guest address behind `va`, if `va` is a thunk this runtime handed out; `va`
@@ -312,9 +294,6 @@ pub trait Callbacks {
 
 /// The bridge for a caller that has no JIT to re-enter — the marshaller's own tests,
 /// and [`call_import`] itself.
-///
-/// It refuses rather than passing the pointer through, which keeps the behaviour
-/// exactly.
 pub struct NoCallbacks;
 
 impl Callbacks for NoCallbacks {
@@ -331,9 +310,7 @@ impl Callbacks for NoCallbacks {
 
 /// How an import will be reached, once classified.
 ///
-/// The summary the driver prints, and the shape of the acceptance question:
-/// every import of a program must be one of these and none may be
-/// [`Classification::Unknown`].
+/// The summary the driver prints, and the shape of the acceptance question.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Classification {
     /// Signature known and marshallable: inlined by the lifter, no VM exit.
@@ -351,8 +328,7 @@ pub enum Classification {
 /// Decide how `symbol` will be reached, without calling anything.
 pub fn classify(tag: u64, symbol: &str) -> Classification {
     // A shimmed symbol is slow whatever its signature says, because
-    // [`crate::ImportPolicy`] refuses to promote one: `setjmp` has an ordinary
-    // `int(void *)` signature and inlining it would call the *host's*.
+    // [`crate::ImportPolicy`] refuses to promote one.
     if crate::shims::is_shimmed(symbol) {
         let Some(abi) = crate::objc::fast::abi_of(symbol) else {
             return Classification::Slow;

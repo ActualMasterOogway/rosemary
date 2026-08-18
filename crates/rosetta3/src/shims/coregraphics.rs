@@ -8,9 +8,6 @@ use crate::abi::{AbiError, GuestMemory, Result};
 use super::host::host_or_refuse;
 
 /// `CGRect`, as AAPCS64 returns one.
-///
-/// Four `double`s and nothing else, which is what makes it a homogeneous float
-/// aggregate. Declaring it as such is the whole trick.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub(crate) struct CgRect {
@@ -113,10 +110,6 @@ fn context_clear_rect(
 }
 
 /// `void CGContextDrawImage(CGContextRef, CGRect, CGImageRef)`
-///
-/// The one cocos2d-x decodes every texture through: a `CGImageSource` produces a
-/// `CGImage` and this draws it into a bitmap context the guest owns the backing store
-/// of.
 fn context_draw_image(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -132,9 +125,6 @@ fn context_draw_image(
 }
 
 /// The eight `CGFloat CGRectGet…(CGRect)` accessors, which are one shim.
-///
-/// They are the smallest possible instance of this module's problem and the most
-/// common: a `CGRect` in, a `CGFloat` out.
 fn rect_accessor(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let host = host_or_refuse(symbol)?;
     let rect = rect_argument(symbol, ctx, mem, 0)?;
@@ -189,9 +179,6 @@ fn screen_size_of_display(
 
 /// `CGEventRef CGEventCreateMouseEvent(CGEventSourceRef source, CGEventType mouseType,
 /// CGPoint mouseCursorPosition, CGMouseButton mouseButton)`
-///
-/// The `CGPoint` is the third argument and is what keeps this out of the table, and its
-/// position is the interesting part.
 fn event_create_mouse(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -214,9 +201,6 @@ fn event_create_mouse(
 }
 
 /// `NSRect NSInsetRect(NSRect aRect, CGFloat dX, CGFloat dY)`
-///
-/// An `NSRect` *and* a `CGRect`, in and out, which makes it the only function in this
-/// module with the thirty-two byte disagreement on both sides of the call at once.
 fn inset_rect(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let host = host_or_refuse(symbol)?;
     let rect = rect_argument(symbol, ctx, mem, 0)?;
@@ -304,9 +288,8 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         // [`event_create_mouse`] for why that moves `mouseButton` a register.
         "CGEventCreateMouseEvent" => Some(event_create_mouse),
         "CVDisplayLinkGetNominalOutputVideoRefreshPeriod" => Some(display_link_nominal_period),
-        // The `CGRect` accessors: a rectangle in, a `CGFloat` out, all eight the
-        // same shape. Roblox asks for the height of its own content view during
-        // window set-up.
+        // The `CGRect` accessors: a rectangle in, a `CGFloat` out, all eight
+        // the same shape.
         "CGRectGetHeight" | "CGRectGetWidth" | "CGRectGetMinX" | "CGRectGetMidX"
         | "CGRectGetMaxX" | "CGRectGetMinY" | "CGRectGetMidY" | "CGRectGetMaxY" => {
             Some(rect_accessor)
@@ -376,9 +359,7 @@ mod tests {
         else {
             return;
         };
-        // A null display link is the case CoreVideo answers without a display:
-        // it reports an indefinite time rather than faulting, which is enough to
-        // check the placement without depending on a monitor being attached.
+        // A null display link is the case CoreVideo answers without a display.
         let mut ctx = RegisterContext::new();
         ctx.rdi = 0;
         let mut mem = crate::vm::GuestView::new(Vec::new());
@@ -389,8 +370,7 @@ mod tests {
         )
         .expect("period");
         // `kCVTimeIsIndefinite` is bit 0 of `flags`, which lives in the high
-        // half of `rdx`. Asserting the *scale* is in the low half is the
-        // placement claim; the value itself is CoreVideo's business.
+        // half of `rdx`.
         let scale = ctx.rdx as u32;
         let flags = (ctx.rdx >> 32) as u32;
         assert!(

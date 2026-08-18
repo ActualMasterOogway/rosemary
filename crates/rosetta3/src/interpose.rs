@@ -7,8 +7,6 @@ use machish::memory::Regions;
 use machish::report::LinkReport;
 
 /// Apply every interposition the link's images declare.
-///
-/// Returns how many bindings moved, which is worth printing once.
 pub fn apply<M: Regions>(report: &mut LinkReport, memory: &mut M) -> Result<usize, machish::Error> {
     // Gathered before the loop because the loop mutates `report.images`, and
     // because an image may interpose a function another image also interposes —
@@ -59,9 +57,6 @@ pub fn apply<M: Regions>(report: &mut LinkReport, memory: &mut M) -> Result<usiz
 
 /// Bindings that name a symbol some *other* binding had interposed, and were left
 /// pointing at the host anyway.
-///
-/// This is the one failure mode a partial interposition has, and it is silent. An
-/// interposed allocator only works if it is the allocator **everywhere**.
 fn missed(
     report: &LinkReport,
     moved: &BTreeSet<String>,

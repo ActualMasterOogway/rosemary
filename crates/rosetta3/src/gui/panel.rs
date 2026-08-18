@@ -11,9 +11,7 @@ const RANK: usize = 8;
 /// How often the snapshots behind the panel are rebuilt.
 const REFRESH: Duration = Duration::from_millis(500);
 
-/// Frames kept for the frame-time graph. About two seconds at sixty hertz,
-/// which is long enough to show a hitch and short enough that the graph is
-/// about the scene on screen.
+/// Frames kept for the frame-time graph.
 const FRAMES: usize = 120;
 
 
@@ -61,9 +59,6 @@ impl Default for Model {
 
 impl Model {
     /// One presented frame.
-    ///
-    /// Called from the present hook on the guest's render thread, whether or not the
-    /// panel is visible.
     pub fn note_frame(&mut self) {
         let now = Instant::now();
         if let Some(last) = self.last_present.replace(now) {
@@ -150,9 +145,8 @@ fn resident_bytes() -> u64 {
         fn task_info(task: u32, flavor: u32, out: *mut Basic, count: *mut u32) -> i32;
     }
 
-    // `mach_task_self()` is a macro over a global the kernel filled in, which is
-    // why this is a symbol lookup and not a call. Same fact
-    // [`crate::shims::runtime`] hands to the guest, read here for ourselves.
+    // `mach_task_self()` is a macro over a global the kernel filled in, which
+    // is why this is a symbol lookup and not a call.
     let Some(slot) = crate::dyld::host_symbol("mach_task_self_") else {
         return 0;
     };
@@ -172,18 +166,14 @@ fn resident_bytes() -> u64 {
 /// Draw the statistics panel into `list`.
 pub fn statistics(list: &mut DrawList, model: &Model) {
     let em = list.atlas().advance;
-    // The first size the panel ever has: wide enough for the longest thing on
-    // it — a share, a sixteen-digit address, and an `image+offset` with room
-    // for a real name — and as tall as the surface allows.
+    // The first size the panel ever has.
     super::input::size_defaults(
         (em * 72.0).min(list.width - 24.0),
         (list.height - 24.0).max(120.0),
     );
     let (x, y, width, height, scroll) = super::input::view();
 
-    // Kept reachable however far it has been dragged: eight characters of it
-    // stay on screen in every direction, because a panel dragged off the edge
-    // would need a key to get it back and there is no key for it.
+    // Kept reachable however far it has been dragged.
     let margin = em * 8.0;
     let width = width.clamp(em * 16.0, list.width.max(em * 16.0));
     let height = height.clamp(4.0 * list.atlas().line_h, list.height.max(40.0));
@@ -257,8 +247,6 @@ fn grip(list: &mut DrawList, x: f32, y: f32, width: f32, height: f32) {
 }
 
 /// Lay the panel out against a throwaway list to learn its height.
-///
-/// The vertices produced here are discarded.
 fn measure(ui: &mut Ui, model: &Model) -> f32 {
     let start = ui.y;
     let mark = ui.list.vertices.len();
@@ -286,8 +274,7 @@ fn header(ui: &mut Ui, _model: &Model) {
     ui.run("rosetta3", color::HEADING);
     ui.run("  ", color::LABEL);
     // The first image in the link report is the main executable, which is the
-    // name the person watching recognises. Its leaf, because a bundle's
-    // executable path is a hundred characters of `Contents/MacOS`.
+    // name the person watching recognises.
     let name = crate::thunk::current()
         .and_then(|vm| vm.program.report.images.first())
         .map(|image| image.name.rsplit('/').next().unwrap_or(&image.name))
@@ -520,9 +507,7 @@ fn rows(ui: &mut Ui, title: &str, entries: &[profile::Entry], colour: Color, cav
         ui.column(29.0);
         ui.run(
             match entry.located.is_empty() {
-                // Not a gap. A region lifted out of memory the guest generated
-                // code into belongs to no image by construction, and saying so
-                // is what identifies it as generated.
+                // Not a gap.
                 true => "(generated code)",
                 false => &entry.located,
             },
@@ -706,8 +691,6 @@ fn footprint(ui: &mut Ui, model: &Model) {
 
 
 /// The badge shown when the panel is closed but something is happening.
-///
-/// Only ever drawn for a recording in progress and for the few seconds after a hotkey.
 pub fn badge(list: &mut DrawList, text: &str, colour: Color) {
     let line = list.atlas().line_h;
     let w = list.measure(text) + 20.0;

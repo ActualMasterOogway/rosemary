@@ -33,9 +33,7 @@ pub fn pthread_create(
         return Ok(());
     }
 
-    // The guest's attributes, read before anything is created: a refusal here
-    // costs a return code, and a refusal after the thread exists costs a thread
-    // running with the wrong stack.
+    // The guest's attributes, read before anything is created.
     let Some(mut host_attr) = read_attr(symbol, attr, mem)? else {
         set_int_return(ctx, EINVAL);
         return Ok(());
@@ -163,8 +161,6 @@ fn debug_mutex() -> bool {
 }
 
 /// `int pthread_mutex_lock(pthread_mutex_t *)`, reporting a failure by address.
-///
-/// The first eight bytes are printed because that is where the answer usually is.
 fn mutex_lock(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -221,9 +217,7 @@ mod tests {
 
     #[test]
     fn a_default_attribute_set_asks_for_the_size_darwin_would_give() {
-        // Not `Default`: an initialised attribute set really does carry a size
-        // — 512 KiB on Darwin — and honouring it is what makes a guest thread's
-        // stack the size the same program gets natively.
+        // Not `Default`.
         let a = attr();
         assert!(
             matches!(stack_request(&a), StackRequest::Sized(n) if n >= 16 * 1024),
@@ -239,12 +233,11 @@ mod tests {
         assert_eq!(stack_request(&a), StackRequest::Sized(1024 * 1024));
     }
 
-    /// The measurement the module note rests on, kept as a test: both ways of
-    /// supplying a stack name the same top, and it is the *high* address.
+    /// The measurement the module note rests on, kept as a test:
     ///
-    /// If a future libpthread ever disagreed, a guest's thread would run its
-    /// frames below the buffer it supplied — silently, on somebody else's
-    /// memory — so this is checked against the host rather than assumed.
+    /// If a future libpthread ever disagreed, a guest's thread would run its frames
+    /// below the buffer it supplied — silently, on somebody else's memory — so this is
+    /// checked against the host rather than assumed.
     #[test]
     fn a_supplied_stack_is_read_as_its_high_address_whichever_setter_named_it() {
         let page = machish::memory::host_page_size();

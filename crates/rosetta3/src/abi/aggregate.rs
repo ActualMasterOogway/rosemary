@@ -14,8 +14,6 @@ pub struct Leaf {
 }
 
 /// A struct or array passed or returned by value.
-///
-/// Flattened.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Aggregate {
     pub size: usize,
@@ -157,8 +155,7 @@ mod tests {
     #[test]
     fn a_nested_struct_flattens_to_its_leaves() {
         // `NSRect`, verbatim from `method_getTypeEncoding`. Four doubles, which
-        // is the whole point: the nesting is the source language's and the
-        // registers do not have it.
+        // is the whole point.
         let rect = agg("{CGRect={CGPoint=dd}{CGSize=dd}}");
         assert_eq!(rect.size, 32);
         assert_eq!(rect.align, 8);
@@ -171,9 +168,7 @@ mod tests {
 
     #[test]
     fn nsrect_is_memory_to_the_guest_and_registers_to_the_host() {
-        // The disagreement this module exists for, as one assertion. A guess
-        // that the two ABIs merely name the same registers differently is
-        // wrong here by thirty-two bytes and four registers.
+        // The disagreement this module exists for, as one assertion.
         let rect = agg("{CGRect={CGPoint=dd}{CGSize=dd}}");
         assert_eq!(rect.guest_class(), GuestClass::Memory);
         assert_eq!(
@@ -211,8 +206,6 @@ mod tests {
     #[test]
     fn one_integer_member_moves_its_whole_eightbyte_to_a_general_register() {
         // `{S=fi}` is eight bytes: a float and an int sharing one eightbyte.
-        // Classifying per *member* would say SSE for the first four bytes;
-        // SysV classifies per eightbyte, and one integer in it decides.
         let mixed = agg("{S=fi}");
         assert_eq!(mixed.size, 8);
         assert_eq!(
@@ -225,9 +218,7 @@ mod tests {
 
     #[test]
     fn padding_disqualifies_a_homogeneous_aggregate() {
-        // `{S=dfd}` is 24 bytes with four bytes of padding after the float. Its
-        // members are not all the same type, so it is not an HFA — and it is
-        // over sixteen bytes, so the host returns it indirectly.
+        // `{S=dfd}` is 24 bytes with four bytes of padding after the float.
         let padded = agg("{S=dfd}");
         assert_eq!(padded.size, 24);
         assert_eq!(padded.host_class(), Ok(HostClass::Indirect));
@@ -263,9 +254,7 @@ mod tests {
 
     #[test]
     fn a_nested_group_starts_at_its_own_alignment_not_its_first_members() {
-        // `struct { char c; struct { int i; double d; } t; }`. `t` is aligned
-        // to eight because `d` is, so it starts at 8 and not at 4 where
-        // rounding to `i`'s width would put it.
+        // `struct { char c; struct { int i; double d; } t; }`.
         let s = agg("{S=c{T=id}}");
         assert_eq!(
             s.leaves.iter().map(|l| l.offset).collect::<Vec<_>>(),

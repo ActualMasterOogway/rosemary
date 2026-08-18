@@ -52,8 +52,7 @@ pub fn divdc3(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemo
     let scale = c.abs().max(d.abs());
     let (cr, dr) = if scale.is_infinite() {
         // inf / inf is NaN, but an infinite divisor is represented by its
-        // direction in the limiting quotient: an infinite component is ±1
-        // and a finite component is zero.
+        // direction in the limiting quotient.
         (c.signum(), d.signum())
     } else if scale == 0.0 {
         // Preserve the signed zero information for the correction below.
@@ -64,8 +63,6 @@ pub fn divdc3(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemo
 
     let (real, imag) = if scale == 0.0 {
         // A non-zero numerator divided by zero has an infinite magnitude.
-        // This also avoids manufacturing NaNs from inf * 0 for the common
-        // real-only cases.
         let real = if a == 0.0 && b == 0.0 {
             f64::NAN
         } else {
@@ -94,8 +91,6 @@ pub fn divdc3(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemo
 ///
 /// [`divdc3`]'s sibling one size down and in the other operation, and its register
 /// story is the one interesting thing about it.
-///
-/// The multiplication itself is the C standard's Annex G recipe.
 pub fn mulsc3(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
     let half = |reg: usize, high: bool| {
         let word = ctx.xmm[reg][0];

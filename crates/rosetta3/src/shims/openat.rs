@@ -88,10 +88,6 @@ pub(crate) fn provide(lib: &mut SyntheticDylib) {
 
 /// The wrapper for a host symbol name, for a `dlsym` that would otherwise hand the
 /// guest the host's variadic copy.
-///
-/// [`crate::dyld`]'s global fallback records a `dlsym` result so it can be called
-/// later, and calls it with the signature the table gives its *name* — which for these
-/// two is now a fixed one.
 pub(crate) fn host_substitute(name: &str) -> Option<u64> {
     match name.strip_prefix('_').unwrap_or(name) {
         "open" => Some(open_with_mode as *const () as u64),
@@ -257,9 +253,6 @@ mod tests {
 
     /// The named semaphore the guest asked for, with the mode *and* the count it asked
     /// for.
-    ///
-    /// The count is the falsifiable half and the reason this test is here rather than
-    /// in a signature's word.
     #[test]
     fn a_named_semaphore_gets_the_mode_and_the_count_it_was_opened_with() {
         // Darwin caps a semaphore name at `PSEMNAMLEN` (31) and wants a leading

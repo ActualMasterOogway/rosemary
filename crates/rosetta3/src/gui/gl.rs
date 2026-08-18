@@ -10,8 +10,7 @@ use super::sys;
 
 
 // `<OpenGL/gl.h>`, `<OpenGL/gl3.h>`. Spelled out rather than pulled from a
-// binding crate: this is thirty constants against a dependency, and the values
-// have been fixed since 1997.
+// binding crate.
 const NO_ERROR: u32 = 0;
 const RENDERER: u32 = 0x1f01;
 const VERSION: u32 = 0x1f02;
@@ -265,9 +264,6 @@ impl Profile {
 
 /// Whether this context will actually accept a vertex array object call.
 ///
-/// **`gl.BindVertexArray` being `Some` proves nothing**, and this module's own note
-/// says so:
-///
 /// # Safety
 ///
 /// A context must be current, and this consumes the error flag.
@@ -338,8 +334,7 @@ macro_rules! step {
 unsafe fn drain(gl: &Gl) -> u32 {
     let mut first = NO_ERROR;
     // Bounded, because a driver that returns errors forever would otherwise
-    // hang the render thread inside an overlay. Sixteen is far past the depth
-    // any implementation queues.
+    // hang the render thread inside an overlay.
     for _ in 0..16 {
         // SAFETY: the caller's obligation.
         let error = unsafe { (gl.GetError)() };
@@ -520,9 +515,7 @@ pub fn present(context: usize) {
         );
         saved.restore(gl, profile);
 
-        // Whatever happened above stays here. See [`drain`]: an error the
-        // overlay left is an error the guest reports against its own next call,
-        // which is how this was found.
+        // Whatever happened above stays here. See [`drain`].
         let error = drain(gl);
         if error != NO_ERROR {
             report(gl, resources, error);
@@ -558,21 +551,13 @@ unsafe fn announce(gl: &Gl, profile: Profile, vao_usable: bool) {
     };
 }
 
-/// An error the overlay caused. Said once, with enough to act on — and then the overlay
-/// **keeps drawing**.
-///
-/// The first version of this abandoned the context, on the reasoning that an overlay
-/// leaving errors in somebody's game is worse than no overlay.
-///
-/// So: an error is a diagnostic, printed once, and not a verdict.
+/// An error the overlay caused.
 ///
 /// # Safety
 ///
 /// A context must be current.
 unsafe fn report(gl: &Gl, resources: &Resources, error: u32) {
-    // Once: at sixty hertz, printing per frame buries the log it is trying to
-    // inform — the same mistake, in the reporting, that `Setup::Failed` stops in
-    // the retrying.
+    // Once.
     static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return;
@@ -658,12 +643,6 @@ struct Saved {
     /// what take touched.
     vao_usable: bool,
     /// Whether the attribute stacks actually accepted the push.
-    ///
-    /// **A pop that is not matched by a push is a catastrophe, not an error.**
-    /// `glPushAttrib` fails with `GL_STACK_OVERFLOW` when the stack is full — it is
-    /// only sixteen deep, and it belongs to the guest — and if the overlay popped
-    /// anyway it would restore *the guest's own saved state* on top of the guest's
-    /// current state, or underflow.
     pushed: bool,
 }
 
@@ -837,8 +816,7 @@ const UNPACK_DEFAULTS: [(u32, i32); 6] = [
     (UNPACK_SKIP_ROWS, 0),
     (UNPACK_SKIP_PIXELS, 0),
     // One, because the atlas is one byte per texel and as wide as it needs to
-    // be — which is very often not a multiple of four. Without this the driver
-    // reads each row from the wrong offset and every glyph shears.
+    // be — which is very often not a multiple of four.
     (UNPACK_ALIGNMENT, 1),
 ];
 
@@ -913,9 +891,7 @@ unsafe fn upload_atlas(gl: &Gl, resources: &mut Resources, list: &DrawList, prof
             (gl.PixelStorei)(token, value);
         }
 
-        // A single-channel texture, spelled the way each profile spells it:
-        // `GL_ALPHA` is not a legal format in core, and `GL_RED` is not a
-        // legal one in 2.1's fixed function pipeline.
+        // A single-channel texture, spelled the way each profile spells it.
         let (internal, format) = match profile {
             Profile::Core => (R8 as i32, RED),
             Profile::Legacy => (ALPHA as i32, ALPHA),
@@ -1049,8 +1025,7 @@ unsafe fn draw_legacy(gl: &Gl, resources: &mut Resources, list: &DrawList) {
         );
 
         // Client arrays read from our memory, which means no buffer may be
-        // bound. The binding is inside the client attribute stack that was
-        // pushed, so clearing it here is undone on the way out.
+        // bound.
         if let Some(bind_buffer) = gl.BindBuffer {
             step!(
                 gl,

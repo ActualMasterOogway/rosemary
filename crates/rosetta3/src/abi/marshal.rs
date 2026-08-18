@@ -39,9 +39,7 @@ fn stack_width(ty: ArgType) -> u64 {
 ///
 /// Apple packs each stack argument at its own size *and its own alignment*, so a
 /// four-byte argument followed by a pointer still leaves the pointer at the next
-/// eight-byte boundary — exactly where a `u64` declaration would put it. A narrow
-/// argument only moves what comes after it when the next argument is narrow too and
-/// packs in beside it.
+/// eight-byte boundary — exactly where a `u64` declaration would put it.
 fn widening_preserves_offsets(overflow: &[ArgType]) -> bool {
     let mut packed = 0u64;
     for (slot, ty) in overflow.iter().enumerate() {
@@ -63,9 +61,7 @@ pub fn is_marshallable(abi: &FunctionAbi) -> bool {
     let Some(placed) = guest_call_abi_ref().place_args(abi.types) else {
         return false;
     };
-    // Counted by argument *class*, not by where the guest put it: SysV has only
-    // six integer registers, so a seventh integer argument arrives on the guest
-    // stack and still goes out in `x6`.
+    // Counted by argument *class*, not by where the guest put it.
     let integers: Vec<ArgType> = placed
         .iter()
         .map(|(ty, _)| *ty)
@@ -82,9 +78,6 @@ pub fn is_marshallable(abi: &FunctionAbi) -> bool {
 }
 
 /// The prototype that places a run of overflowing arguments at their own widths.
-///
-/// `None` is not "no overflow" — it is "no *narrow* overflow", which the twelve-`u64`
-/// prototype already handles.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum NarrowTail {
     /// Every overflowing argument is a full doubleword: the original prototype.
@@ -147,9 +140,6 @@ pub fn call(
 }
 
 /// [`call`], with a bridge for the arguments [`FunctionAbi::callbacks`] names.
-///
-/// Substitution happens here rather than in the caller because *here* is where an
-/// argument's parameter index is known.
 pub fn call_with(
     symbol: &str,
     abi: &FunctionAbi,
@@ -170,17 +160,13 @@ pub fn call_with(
 
 /// What a value means on the other side of the seam.
 ///
-/// The marshaller moves *bits*, and for almost every argument that is the whole job.
-///
 /// By index rather than by value, because *which* arguments are special is stated by a
 /// signature and cannot be recovered from the bits.
 pub trait Convert {
     /// The value the host should receive for parameter `index`.
     fn argument(&self, symbol: &str, index: usize, raw: u64) -> Result<u64>;
 
-    /// The value the guest should receive back from an integer or pointer
-    /// return. The default is the identity, which is right for everything that
-    /// returns a plain scalar.
+    /// The value the guest should receive back from an integer or pointer return.
     fn result(&self, raw: u64) -> u64 {
         raw
     }
@@ -234,9 +220,7 @@ pub fn call_types(
     let mut ints = [0u64; MAX_INT_ARGS_TOTAL];
     let mut fps = [0f64; MAX_FP_ARGS];
     let (mut n_int, mut n_fp) = (0usize, 0usize);
-    // The integer arguments past the eighth, in order. Their widths decide
-    // where each of them lands on the host's stack, and so which prototype
-    // makes the call.
+    // The integer arguments past the eighth, in order.
     let mut overflow: Vec<ArgType> = Vec::new();
 
     for (index, (ty, loc)) in placed.iter().enumerate() {
@@ -627,9 +611,7 @@ mod tests {
 
     #[test]
     fn a_float_argument_moves_bits_rather_than_widening_the_value() {
-        // The callee reads `s_n`, the low half of the register. Passing
-        // `1.5f32 as f64` would leave the low half holding the low bits of the
-        // double — which is not 1.5f32 and not any nearby float.
+        // The callee reads `s_n`, the low half of the register.
         let bits = 1.5f32.to_bits();
         let passed = fp_arg(ArgType::SinglePrecisionFp, u64::from(bits));
         assert_eq!(passed.to_bits() as u32, bits);
@@ -681,8 +663,7 @@ fn place_shapes(shapes: &[Shape]) -> (Vec<Place>, Option<Where>) {
     let mut stack = 0u64;
 
     // A MEMORY-class return takes the first integer register for its hidden
-    // buffer pointer, before any argument gets one. Everything after shifts,
-    // which is the whole of why `objc_msgSend_stret` is a separate trampoline.
+    // buffer pointer, before any argument gets one.
     let sret = match shapes.first() {
         Some(Shape::Struct(agg)) if agg.guest_class() == GuestClass::Memory => {
             int = 1;
@@ -811,9 +792,6 @@ fn leaf_bits(buf: &[u8], offset: usize, width: usize) -> u64 {
 }
 
 /// Call `host` with a signature that may contain aggregates.
-///
-/// The guarantee the rest of this module makes holds here too: **on any error `ctx` is
-/// untouched**.
 pub fn call_shapes(
     symbol: &str,
     shapes: &[Shape],
@@ -851,13 +829,11 @@ pub fn call_shapes(
     let (mut n_int, mut n_fp) = (0usize, 0usize);
 
     // The copies AAPCS64 B.4 says the *caller* makes for an aggregate too large
-    // for registers. Held here so every one of them outlives the call: the
-    // callee is handed their addresses and reads through them.
+    // for registers.
     let mut copies: Vec<Vec<u64>> = Vec::new();
 
     // As in [`call_types`]: the integer arguments past the eighth decide which
-    // prototype places them. An Objective-C method reaches this — a selector
-    // with enough parameters is not rare, and one of Unity's is what found it.
+    // prototype places them.
     let mut overflow: Vec<ArgType> = Vec::new();
     let mut push_int =
         |v: u64, ty: ArgType, n_int: &mut usize, overflow: &mut Vec<ArgType>| -> Result<()> {
@@ -942,8 +918,6 @@ pub fn call_shapes(
 }
 
 /// Make the call, choosing the prototype the *host's* return class needs.
-///
-/// Returns the aggregate's bytes when there are any, and the scalar result otherwise.
 fn call_returning(
     host: u64,
     ints: &[u64; MAX_INT_ARGS_TOTAL],
@@ -1033,8 +1007,7 @@ fn write_return(
 
     match agg.guest_class() {
         // The hidden buffer the guest allocated, whose address it passed in the
-        // first integer register and expects back in `rax`. `objc_msgSend_stret`
-        // is the same convention with the trampoline's own name on it.
+        // first integer register and expects back in `rax`.
         GuestClass::Memory => {
             let Some(w) = sret else {
                 return Err(AbiError::Unmarshallable {

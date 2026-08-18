@@ -26,8 +26,7 @@ impl Placed {
 
 /// Compiled translations by the host address of their entry point.
 ///
-/// Global rather than per-thread even though the caches are per-thread: a fault handler
-/// has one question, and which thread compiled the code is not part of it.
+/// Global rather than per-thread even though the caches are per-thread.
 static PLACED: Mutex<Vec<Placed>> = Mutex::new(Vec::new());
 
 /// How many host-to-guest ranges to keep across the whole process.
@@ -72,9 +71,8 @@ pub fn placed(
 /// into a fixed buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Attribution {
-    /// The `pc` is inside a translation, and microlift's source locations name
-    /// the guest instruction it was lifted from. The only answer that is a work
-    /// item on its own.
+    /// The `pc` is inside a translation, and microlift's source locations name the
+    /// guest instruction it was lifted from.
     Instruction {
         /// The guest address of the instruction.
         guest_va: u64,
@@ -267,12 +265,9 @@ fn saved_for(signal: i32) -> &'static Saved {
 }
 
 /// The handler. Prints, restores the previous disposition, and returns.
-///
-/// Returning is what makes the faulting instruction run again.
 extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc::c_void) {
     // A fault *inside* this handler would recurse until the alternate stack ran
-    // out, which would replace one unexplained crash with another. One report
-    // is all that is wanted anyway.
+    // out, which would replace one unexplained crash with another.
     static REPORTING: AtomicBool = AtomicBool::new(false);
     if REPORTING.swap(true, Ordering::SeqCst) {
         restore(signal);
@@ -340,8 +335,7 @@ fn say_region(out: &mut Buffer, pc: u64) {
     out.hex(entry.lifted_for);
 
     // The exact instruction, when the map has it. This is the whole point of
-    // carrying microlift's source locations: a guest *address* is a work item
-    // and a region is a search.
+    // carrying microlift's source locations.
     let offset = pc - entry.code;
     if let Ok(offset) = u32::try_from(offset) {
         if let Some(va) = lookup(&entry.map, offset) {
@@ -381,8 +375,6 @@ fn lookup(map: &[GuestCodeRange], offset: u32) -> Option<u64> {
 }
 
 /// Name the image a guest address is in, as `name+offset`.
-///
-/// Silent when it is in none of them, which is not a gap.
 fn say_image(out: &mut Buffer, addr: u64) {
     let Ok(images) = IMAGES.try_lock() else {
         return;
@@ -574,9 +566,7 @@ mod tests {
 
     #[test]
     fn a_host_pc_resolves_to_the_guest_instruction_it_came_from() {
-        // The claim the whole module turns on. Without the source map the best
-        // available answer was "some address in this region", which for a
-        // sixty-byte function is a search and for a Mono method is a shrug.
+        // The claim the whole module turns on.
         placed(0x40_0000, 0x1_0000, 0x1_0010, 0x1_0000, &map(0x1_0000, 16));
         let placed = PLACED.lock().unwrap();
         let entry = placed.iter().find(|p| p.code == 0x40_0000).unwrap();
@@ -586,8 +576,7 @@ mod tests {
         assert_eq!(lookup(&entry.map, 16), Some(0x1_0001));
         assert_eq!(lookup(&entry.map, 0x57), Some(0x1_0005));
         // Past everything attributed: a prologue, an epilogue, or another
-        // translation altogether. `None` is what makes the report say so
-        // instead of naming an instruction it cannot see.
+        // translation altogether.
         assert_eq!(lookup(&entry.map, 16 * 16), None);
     }
 
@@ -610,8 +599,7 @@ mod tests {
     #[test]
     fn a_pc_past_everything_a_translation_covers_is_not_claimed_for_it() {
         // The misattribution this replaced: `+0x57c` into a sixty-two-byte
-        // region was reported as if it were inside it. Four sixteen-byte ranges
-        // end at 0x40, so anything at or past that is outside.
+        // region was reported as if it were inside it.
         placed(0x10_0000, 0x3_0000, 0x3_0004, 0x3_0000, &map(0x3_0000, 4));
         let placed = PLACED.lock().unwrap();
         let entry = placed.iter().find(|p| p.code == 0x10_0000).unwrap();

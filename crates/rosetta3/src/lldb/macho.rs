@@ -47,8 +47,6 @@ pub struct Sym {
 }
 
 /// Serialize `sections` and `syms` into a Mach-O object.
-///
-/// Section order is preserved and it matters.
 pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
     let sizeofcmds =
         SEGMENT_COMMAND_SIZE + SECTION_SIZE * sections.len() as u32 + SYMTAB_COMMAND_SIZE;

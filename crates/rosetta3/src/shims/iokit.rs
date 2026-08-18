@@ -45,9 +45,7 @@ fn add_matching_notification(
         });
     };
 
-    // The callback is the fourth argument. `notificationType`, `matching`,
-    // `refCon`, and the output iterator are opaque/identity-mapped values and
-    // are passed through unchanged.
+    // The callback is the fourth argument.
     let callback = callbacks.substitute(symbol, ctx.rcx)?;
     let status = unsafe {
         host(

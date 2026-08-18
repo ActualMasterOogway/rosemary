@@ -204,8 +204,6 @@ struct CaFrameRateRange {
 
 /// `CAFrameRateRange CAFrameRateRangeMake(float minimum, float maximum, float
 /// preferred)`
-///
-/// How a program asks CoreAnimation for a variable refresh rate.
 fn frame_rate_range_make(
     symbol: &str,
     ctx: &mut RegisterContext,

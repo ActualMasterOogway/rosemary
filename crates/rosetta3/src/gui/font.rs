@@ -7,9 +7,6 @@ use std::sync::Mutex;
 use super::sys::{self, CfRef, CgFloat, Point, Rect, Size};
 
 /// The first and last character the atlas covers: printable ASCII.
-///
-/// Everything this overlay prints is a number, a symbol name or a path, and those are
-/// ASCII in every case that matters.
 const FIRST: u8 = 0x20;
 const LAST: u8 = 0x7e;
 
@@ -151,9 +148,7 @@ fn rasterize(size: f32) -> Option<Atlas> {
         )
     };
 
-    // One advance stands for all of them: the face is monospaced, and asking
-    // for `M` rather than averaging is what keeps the columns of a table lined
-    // up with each other.
+    // One advance stands for all of them.
     let mut advances = vec![Size::default(); chars.len()];
     // SAFETY: as above, with a destination of the same length.
     unsafe {
@@ -170,9 +165,7 @@ fn rasterize(size: f32) -> Option<Atlas> {
     // SAFETY: `font` is a live `CTFontRef`.
     let (up, down) = unsafe { (ascent(font), descent(font)) };
 
-    // A texel of pad on every side of a cell. Without it a linear filter at a
-    // non-integral scale samples across the cell boundary and every glyph
-    // acquires a faint copy of its neighbour's edge.
+    // A texel of pad on every side of a cell.
     const PAD: usize = 1;
     let cell_w = advance.ceil() as usize + PAD * 2;
     let cell_h = (up + down).ceil() as usize + PAD * 2;
@@ -268,8 +261,6 @@ fn rasterize(size: f32) -> Option<Atlas> {
 
 
 /// Atlases already built, keyed by the pixel size that produced them.
-///
-/// A `'static` reference is handed out rather than an `Arc`.
 static ATLASES: Mutex<Option<HashMap<u32, &'static Atlas>>> = Mutex::new(None);
 
 /// The atlas for `size` pixels, building it if this is the first ask.

@@ -6,7 +6,11 @@ use machish::spec::arch::X86_64;
 
 /// A real x86-64 `libc++.1.dylib`, built for the ABI Apple's is built for.
 ///
-/// Checked rather than assumed to be the right vintage.
+/// libc++ selects `_LIBCPP_ABI_ALTERNATE_STRING_LAYOUT` on arm64 and not on x86-64, so
+/// the same twenty-four bytes of a `std::string` mean different things on the two
+/// sides: the data pointer is at `+16` for the guest and `+0` for the host. An import
+/// described *correctly* still hands the object to code that reads different fields out
+/// of it, which is why the guest runs a real Intel libc++ rather than the host's.
 const LIBCXX: &[u8] = include_bytes!("../vendor/libs/intel/libc++.1.dylib");
 const LIBCXXABI: &[u8] = include_bytes!("../vendor/libs/intel/libc++abi.1.dylib");
 const LIBUNWIND: &[u8] = include_bytes!("../vendor/libs/intel/libunwind.1.dylib");
@@ -101,14 +105,9 @@ impl<S: DylibSource> DylibSource for VendoredCxx<S> {
 
 /// Point every `_Unwind_*` binding at the **vendored** `libunwind`.
 ///
-/// See the module note on why the linker splits one unwind across two unwinders. This
-/// is the repair, and it is a rebind rather than a provider for a reason worth stating:
-///
 /// Slots are rewritten in guest memory *and* in the report, so everything built from
 /// the report afterwards — [`crate::Program`]'s import maps, the audit — describes what
 /// the slot actually holds.
-///
-/// A binding that already resolved into the guest is left alone.
 pub fn bind_unwinder_to_the_vendored_one<M: machish::memory::Regions>(
     report: &mut machish::report::LinkReport,
     memory: &mut M,
@@ -122,9 +121,6 @@ pub fn bind_unwinder_to_the_vendored_one<M: machish::memory::Regions>(
 
 /// Point every C++ ABI binding at the **vendored** `libc++abi`.
 ///
-/// The same repair as [`bind_unwinder_to_the_vendored_one`] and for the same reason,
-/// applied to the other library that gets split — see the module note on `libstdc++`.
-///
 /// [`is_cxx_abi_symbol`] is deliberately a family test rather than "anything the
 /// vendored `libc++abi` exports".
 pub fn bind_cxxabi_to_the_vendored_one<M: machish::memory::Regions>(
@@ -137,9 +133,7 @@ pub fn bind_cxxabi_to_the_vendored_one<M: machish::memory::Regions>(
 /// Whether `symbol` is part of the Itanium C++ ABI *runtime interface* — the half of
 /// `libstdc++` that the vendored `libc++abi` is a drop-in for.
 ///
-/// The three prefixes are the ABI's own namespaces:
-///
-/// What is **excluded** is the point.
+/// The three prefixes are the ABI's own namespaces.
 fn is_cxx_abi_symbol(symbol: &str) -> bool {
     /// The handler interface, which is spelled in `std::` rather than
     /// `__cxxabiv1::` but is defined by the ABI all the same.
@@ -185,8 +179,7 @@ fn rebind_to_vendored<M: machish::memory::Regions>(
     let exports = machish::exports::ExportTable::parse(&object)?;
 
     // Every address the loader mapped, which is what "already in the guest"
-    // means. Asking the ranges rather than comparing against the export's own
-    // address is the load-bearing part.
+    // means.
     let guest: Vec<(u64, u64)> = report
         .images
         .iter()
@@ -218,8 +211,7 @@ fn rebind_to_vendored<M: machish::memory::Regions>(
             memory.write(binding.slot_va, &addr.to_le_bytes())?;
             binding.resolved = addr;
             // The tag is the *provider's*, and the provider that answered was
-            // the host's. Clearing it stops a stale index selecting a signature
-            // for a call that is now guest-to-guest.
+            // the host's.
             binding.tag = 0;
             rebound += 1;
         }
@@ -252,10 +244,6 @@ mod tests {
     }
 
     /// The vintage check.
-    ///
-    /// Both of these were deleted from libc++ years ago — `__grow_by` when the growth
-    /// path was reworked, `__basic_string_common` when the throwing helpers moved into
-    /// the header.
     #[test]
     fn vendored_libcxx_is_the_abi_the_guest_expects() {
         let exports = ExportTable::parse(&parsed()).expect("exports");
@@ -287,8 +275,6 @@ mod tests {
     }
 
     /// A `libstdc++` request loads the vendored `libc++abi`, **under its own name**.
-    ///
-    /// Both halves matter and they pull in opposite directions.
     #[test]
     fn a_libstdcxx_request_gets_the_cxxabi_bytes_under_the_cxxabi_name() {
         let mut source = VendoredCxx::new(machish::namespace::NoDylibSource);

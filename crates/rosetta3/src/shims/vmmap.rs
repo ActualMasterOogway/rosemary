@@ -19,8 +19,6 @@ const MAP_JIT: i32 = 0x0800;
 /// and no static rule separates the two — and this runtime's answer has always been to
 /// lift *from a PC*, demand-driven.
 ///
-/// The guest answers it itself, and it does so before the question is asked.
-///
 /// Append-only and never removed, matching [`crate::dyld`]'s images and for the same
 /// reason.
 static ARENAS: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());
@@ -158,9 +156,6 @@ fn mprotect(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory
 /// Read once and cached, because some of its callers sit on the path taken for *every*
 /// generated region and a `getenv` each time would be a cost paid by runs that never
 /// look at the output.
-///
-/// It lives here rather than in a diagnostics module because this is where the question
-/// starts.
 #[inline(always)]
 pub fn tracing() -> bool {
     #[dynamic]

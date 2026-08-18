@@ -72,9 +72,7 @@ pub fn set_property(
         });
     };
 
-    // Every other property is bytes, and bytes are identity-mapped: the guest's
-    // buffer *is* a host pointer to the same bytes. Only a structure with a
-    // code pointer in it needs anything done.
+    // Every other property is bytes, and bytes are identity-mapped.
     if !carries_a_callback(id) || data == 0 {
         // SAFETY: `data` is either null or a guest address, which under identity
         // mapping is a readable host address for the `size` bytes the guest
@@ -190,9 +188,7 @@ mod tests {
 
     fn ctx_for(id: u32, callback: &[u64; 2], size: u32) -> RegisterContext {
         let mut ctx = RegisterContext::new();
-        // A null unit: every call below is refused by the framework before it
-        // touches anything, which is what makes the *substitution* the thing
-        // under test rather than CoreAudio's behaviour.
+        // A null unit.
         ctx.rdi = 0;
         ctx.rsi = u64::from(id);
         ctx.rdx = 0;

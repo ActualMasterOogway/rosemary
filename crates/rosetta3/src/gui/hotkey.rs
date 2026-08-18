@@ -110,10 +110,7 @@ struct EventType {
 type EventRef = *mut c_void;
 type TargetRef = *mut c_void;
 
-/// The Carbon handler. Runs on whichever thread the event loop is on, which for a Cocoa
-/// application is the main thread.
-///
-/// Returns `noErr` unconditionally.
+/// The Carbon handler.
 extern "C" fn handler(_call: *mut c_void, event: EventRef, _user: *mut c_void) -> i32 {
     type GetParameter =
         unsafe extern "C" fn(EventRef, u32, u32, *mut u32, usize, *mut usize, *mut c_void) -> i32;
@@ -261,9 +258,6 @@ fn poll() {
 }
 
 /// Whether a Carbon hot-key event has ever actually arrived.
-///
-/// **Registration succeeding is not the same as the handler firing**, and that
-/// distinction is the reason both mechanisms now run.
 static CARBON_WORKS: AtomicBool = AtomicBool::new(false);
 
 /// Take the hotkeys, by both routes.

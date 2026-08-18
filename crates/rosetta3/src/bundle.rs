@@ -25,9 +25,6 @@ pub fn enclosing(exe: &Path) -> Option<PathBuf> {
 
 /// Build a mirror of the guest's bundle around this executable and return the path to
 /// run instead of the current one.
-///
-/// `None` when there is nothing to do — the guest is not in a bundle, this process is
-/// already the re-executed one, or the mirror could not be built.
 pub fn remirror(guest: &Path) -> Option<PathBuf> {
     if std::env::var_os(GUARD).is_some() {
         return None;
@@ -47,8 +44,7 @@ pub fn remirror(guest: &Path) -> Option<PathBuf> {
     std::fs::create_dir_all(&macos).ok()?;
 
     // `Info.plist` is a real file; see the module note on why it cannot be a
-    // symlink. Everything else in `Contents` is the guest's own, reached
-    // through a link, so a bundle with a gigabyte of resources costs nothing.
+    // symlink.
     let plist = app.join("Contents/Info.plist");
     copy_if_newer(&plist, &contents.join("Info.plist"))?;
     link_children(&app.join("Contents"), &contents, &["Info.plist", "MacOS"]);
@@ -116,10 +112,7 @@ fn key(app: &Path, host: &Path) -> Option<String> {
 
 /// Symlink every entry of `from` into `to`, skipping `except`.
 ///
-/// Best-effort throughout: a link that already exists is left alone, and one that
-/// cannot be made is skipped.
-///
-/// It stops at two levels, because the cost is not symmetric.
+/// Best-effort throughout.
 fn link_ancestors(app: &Path, root: &Path) -> Option<PathBuf> {
     let app_name = app.file_name()?;
     let Some(parent) = app.parent() else {
@@ -131,8 +124,7 @@ fn link_ancestors(app: &Path, root: &Path) -> Option<PathBuf> {
     std::fs::create_dir_all(&mirror_parent).ok()?;
 
     // The grandparent's children beside the reproduced parent, then the
-    // parent's beside the reproduced `.app`. The directory being reproduced is
-    // excluded at each level.
+    // parent's beside the reproduced `.app`.
     if let Some(grand) = parent.parent() {
         link_children(grand, root, &[&parent_name.to_string_lossy()]);
     }

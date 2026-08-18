@@ -26,13 +26,7 @@ pub const PINNED_REGS_ENV: &str = "ROSETTA3_PINNED_REGS";
 pub enum OptLevel {
     /// `none` — emit what the lifter produced, unoptimised.
     ///
-    /// Slowest by a wide margin. It is here as a bisection tool: if a region misbehaves
-    /// at `speed` and behaves at `none`, the fault is in the lowering rather than the
-    /// lift.
-    ///
-    /// It also pins the ISA to its architectural baseline (see
-    /// [`OptLevel::isa_settings`]), which makes the same bisection available one level
-    /// down.
+    /// Slowest by a wide margin. It is here as a bisection tool.
     None,
     /// `speed` — Cranelift's `opt_level=speed`.
     Speed,
@@ -115,9 +109,6 @@ impl OptLevel {
     }
 
     /// The ISA-specific `(name, value)` pairs to build a backend with.
-    ///
-    /// - [`OptLevel::None`] forces every tunable feature off, leaving the architectural
-    /// baseline the un-inferred ISA would have used.
     pub fn isa_settings(self) -> Vec<(&'static str, &'static str)> {
         match self {
             OptLevel::None => TUNABLE_FEATURES.iter().map(|&f| (f, "false")).collect(),
@@ -152,8 +143,6 @@ const TUNABLE_FEATURES: &[&str] = &[
 ];
 
 /// The host target features this crate has an opinion about.
-///
-/// `has_pauth` and the `sign_return_address*` settings are absent on purpose.
 #[cfg(target_arch = "aarch64")]
 const TUNABLE_FEATURES: &[&str] = &["has_lse", "has_fp16", "has_dotprod", "has_i8mm"];
 
@@ -244,9 +233,6 @@ pub fn opt_level() -> OptLevel {
 /// which is a property of *microlift's source*, not of the bytes it was pointed at, and
 /// so is answered by the lifter's own test suite rather than by every region a shipped
 /// binary translates.
-///
-/// `ROSETTA3_JIT_VERIFY` overrides it in both directions, and both directions are
-/// wanted.
 pub fn verify() -> bool {
     #[dynamic]
     static VERIFY: bool = match std::env::var(VERIFY_ENV) {
@@ -255,10 +241,7 @@ pub fn verify() -> bool {
             "1" | "true" | "yes" | "on" => true,
             "0" | "false" | "no" | "off" => false,
             _ => {
-                // Not fatal, but not silent: a typo'd value that quietly fell
-                // back would look like the knob had no effect — and in the
-                // direction that matters, it would look like verification was
-                // on when it was not.
+                // Not fatal, but not silent.
                 eprintln!(
                     "rosetta3: {VERIFY_ENV}={value:?} is not a boolean; using {}",
                     cfg!(debug_assertions)
@@ -271,12 +254,6 @@ pub fn verify() -> bool {
 }
 
 /// Whether microlift is asked to skip the IR for flag writes nothing reads.
-///
-/// `LifterConfig::eliminate_dead_flags` — microlift's port of FEX's
-/// `RedundantFlagCalculationElimination`.
-///
-/// **Off by default, and this crate does not decide otherwise**, because microlift's
-/// own default is off and for a reason it states.
 pub fn eliminate_dead_flags() -> bool {
     #[dynamic]
     static ON: bool = match std::env::var(DEAD_FLAGS_ENV) {
@@ -295,8 +272,6 @@ pub fn eliminate_dead_flags() -> bool {
 
 /// Whether a translated region may resolve its own successor rather than returning to
 /// the run loop for it — microlift's `LifterConfig::block_link`.
-///
-/// `ROSETTA3_NO_BLOCK_LINK=1` turns it off, and that is what it is for.
 pub fn block_linking() -> bool {
     #[dynamic]
     static ON: bool = match std::env::var(NO_BLOCK_LINK_ENV) {
@@ -318,16 +293,12 @@ pub fn block_linking() -> bool {
 /// Which guest registers this runtime keeps in **host registers** across a link, or
 /// `None` to resolve links through the host as before.
 ///
-/// This is the second shape of block linking (microlift's
-/// [`core::pin`](microlift::core::pin)):
-///
 /// **The set is a policy and a guess, and it is deliberately overridable.** There are
 /// five slots to spend on this host (aarch64's tail convention passes six integer
 /// values and the context pointer takes one), and which five are worth it is a property
 /// of the guest program rather than of the mechanism.
 ///
-/// - `RSP` — every `call`, `ret`, `push` and `pop` in the profile touches it. - `RDI` —
-/// the `this` pointer of every method call, and SysV argument 1.
+/// - `RSP` — every `call`, `ret`, `push` and `pop` in the profile touches it.
 pub fn pinned_link_abi() -> Option<PinnedAbi> {
     #[dynamic]
     static ABI: Option<PinnedAbi> = {
@@ -420,8 +391,6 @@ pub fn flags() -> settings::Flags {
 }
 
 /// The ISA settings every backend in this process is built with.
-///
-/// Cached for the same reason as [`flags`], plus one of its own.
 pub fn isa_settings() -> &'static [(&'static str, &'static str)] {
     #[dynamic]
     static SETTINGS: Vec<(&'static str, &'static str)> = opt_level().isa_settings();
@@ -447,8 +416,6 @@ pub fn backend() -> microlift::Result<CraneliftBackend> {
 /// the machine.
 pub fn frontend_config() -> microlift::Result<TargetFrontendConfig> {
     // The same guard, for the same reason and the same call: see [`backend`].
-    // This one is reached from [`crate::thunk`], which builds a trampoline while
-    // a guest thread is inside a host function waiting for its callback.
     let _errno = crate::thread::Errno::held();
     let isa = cranelift_native::builder()
         .map_err(|e| MicroliftError::CraneliftError(e.to_string()))?

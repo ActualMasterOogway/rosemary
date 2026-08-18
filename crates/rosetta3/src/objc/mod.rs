@@ -22,9 +22,7 @@ use crate::vm::{Vm, VmError};
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Refusal {
-    /// The host runtime already has a class of this name. Registering over it
-    /// is not possible and shadowing it would make which one a name resolves to
-    /// depend on link order.
+    /// The host runtime already has a class of this name.
     NameTaken { name: String },
     /// The superclass is neither a host class nor a guest class this pass registered —
     /// an unsatisfied weak import, or a class whose own registration was refused.
@@ -35,22 +33,17 @@ pub enum Refusal {
     /// `objc_allocateClassPair` declined, which it does for a name already in
     /// use and little else.
     AllocationFailed { name: String },
-    /// An ivar the runtime would not add. Refusing the class rather than the
-    /// ivar is deliberate: a class one ivar short lays every later ivar out at
-    /// the wrong offset.
+    /// An ivar the runtime would not add. Refusing the class rather than the ivar is
+    /// deliberate.
     IvarRejected { name: String, ivar: String },
     /// A method that is installed and works for a *guest* sender, but which the
     /// **host** cannot call faithfully.
-    ///
-    /// The distinction is the whole point.
     MethodNotHostCallable {
         name: String,
         method: String,
         reason: &'static str,
     },
     /// A class with C++ ivars whose constructors could not be arranged for.
-    /// See [`cxxivars`], which is also where the reason a class needs anything
-    /// arranging is.
     CxxIvars {
         name: String,
         reason: cxxivars::Refusal,
@@ -99,11 +92,6 @@ pub struct ObjcRuntime {
 }
 
 /// The runtime the process has published, for a caller with no [`Vm`] in hand.
-///
-/// [`Vm::objc`] is the same answer, reached through the VM that owns the registration
-/// pass.
-///
-/// A process-global is not a new constraint.
 static PUBLISHED: AtomicPtr<ObjcRuntime> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Record `rt` as the runtime a context-free caller should ask.
@@ -136,9 +124,7 @@ impl ObjcRuntime {
 
     /// [`ObjcRuntime::host_class`], leaving anything that is not a guest class alone.
     ///
-    /// The form the seam actually wants: a pointer crossing out is a class or it is
-    /// not, and an object — which is a host allocation on both sides — must pass
-    /// through untouched.
+    /// The form the seam actually wants.
     pub fn host_or(&self, va: u64) -> u64 {
         self.host_class(va).unwrap_or(va)
     }
@@ -169,8 +155,6 @@ impl ObjcRuntime {
 }
 
 /// Register every image's Objective-C metadata with the host runtime.
-///
-/// Returns `Ok` with refusals inside rather than failing.
 pub fn register(vm: &Vm) -> Result<ObjcRuntime, VmError> {
     let mut rt = ObjcRuntime::default();
     register_images(vm, &mut rt, &images_of(&vm.program.report))?;
@@ -223,8 +207,7 @@ fn register_images(vm: &Vm, rt: &mut ObjcRuntime, images: &[&ObjcImage]) -> Resu
     }
 
     // Ivar offsets, once every class is realized and the runtime has laid them
-    // out. Separate from registration because a class's own offsets are not
-    // final until `objc_registerClassPair`.
+    // out.
     for image in images {
         for c in &image.classes {
             patch_ivar_offsets(vm, rt, c)?;
@@ -248,12 +231,6 @@ fn register_images(vm: &Vm, rt: &mut ObjcRuntime, images: &[&ObjcImage]) -> Resu
 }
 
 /// Call every `+load` the guest declares, superclass first.
-///
-/// The one Objective-C method that runs *because the image was loaded* rather than
-/// because somebody sent a message.
-///
-/// A class's `+load` runs after its superclass's, which is the only ordering guarantee
-/// the language makes. Categories come last. Beyond that the order is this pass's.
 pub fn call_load_methods(vm: &Vm, rt: &ObjcRuntime) -> Result<usize, VmError> {
     load_images(vm, rt, &images_of(&vm.program.report))
 }
@@ -313,9 +290,7 @@ fn load_class(
     if let Some(parent) = by_va.get(&class.superclass).copied() {
         called += load_class(vm, rt, by_va, parent, done)?;
     }
-    // Only a class this pass registered: a refused class has no realized
-    // metaclass, and running its `+load` would be running a method of an object
-    // that does not exist.
+    // Only a class this pass registered.
     if rt.host_class(class.va).is_none() {
         return Ok(called);
     }
@@ -325,8 +300,7 @@ fn load_class(
     for m in &meta.ro.methods {
         if m.name == "load" && vm.program.is_guest_address(m.imp) {
             // `self` is the class as the *guest* names it, which is the rule
-            // everywhere: guest code sees guest addresses, and a `+load` that
-            // messages `self` gets it translated at the seam like any other.
+            // everywhere.
             vm.call(m.imp, &[class.va, load_selector()])?;
             called += 1;
         }
@@ -343,8 +317,7 @@ fn load_selector() -> u64 {
 
 /// A failed write into the guest's own metadata, named with the address.
 ///
-/// Distinct from every other error here: the refusals above are facts about
-/// Objective-C, and this is a fact about memory.
+/// Distinct from every other error here.
 fn memory_error(addr: u64) -> VmError {
     VmError::Abi(crate::abi::AbiError::Memory {
         symbol: "objc metadata".to_string(),
@@ -353,9 +326,6 @@ fn memory_error(addr: u64) -> VmError {
 }
 
 /// Create one class, registering its superclass first if that is also a guest's.
-///
-/// `chain` is the set of classes already being registered further up this recursion,
-/// which is what makes a cycle a named refusal rather than a stack overflow.
 fn register_class(
     vm: &Vm,
     rt: &mut ObjcRuntime,
@@ -491,9 +461,7 @@ fn register_class(
         .map(|m| &m.ro.methods)
         .unwrap_or(&no_class_methods);
     let mut methods = 0;
-    // The `IMP` installed for `.cxx_construct`, if the class has one. Captured
-    // rather than looked up afterwards because the lookup that matters is
-    // *non-inherited* and this loop is the only place that distinction is free.
+    // The `IMP` installed for `.cxx_construct`, if the class has one.
     let mut cxx_construct: Option<host::Imp> = None;
     for (target, list) in [(cls, &class.ro.methods), (meta, class_methods)] {
         for m in list {
@@ -567,8 +535,6 @@ fn register_class(
 }
 
 /// Install one guest method on `target`, with a thunk in place of its `IMP`.
-///
-/// The thunk is the whole reason host→guest dispatch needs no interception.
 fn add_method(
     vm: &Vm,
     target: host::Class,
@@ -727,9 +693,6 @@ fn register_category(vm: &Vm, rt: &mut ObjcRuntime, cat: &ObjcCategory) {
 }
 
 /// Write the runtime's ivar offsets back into the guest's own `__objc_ivar`.
-///
-/// The fixup dyld performs, and the reason `offset_va` is decoded rather than just
-/// the offset.
 fn patch_ivar_offsets(vm: &Vm, rt: &mut ObjcRuntime, class: &ObjcClass) -> Result<(), VmError> {
     let Some(&cls) = rt.to_host.get(&class.va) else {
         return Ok(());

@@ -119,8 +119,7 @@ mod tests {
             assert!(is_function_option(option), "{option} is a function option");
         }
         // CURLOPT_URL = 10002 is an object pointer, VERBOSE = 41 a long, and
-        // INFILESIZE_LARGE = 30115 an off_t. None of them is a callback, and
-        // substituting one would hand curl a trampoline in place of a string.
+        // INFILESIZE_LARGE = 30115 an off_t.
         for option in [41, 10_002, 30_115, 40_043, 0] {
             assert!(
                 !is_function_option(option),

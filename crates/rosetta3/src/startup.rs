@@ -3,8 +3,6 @@
 use crate::vm::{Vm, VmError};
 
 /// Run every initializer, in order.
-///
-/// Called with the same `(argc, argv, envp, apple)` as `main`.
 pub fn run_initializers(vm: &Vm) -> Result<usize, VmError> {
     let (argc, argv, envp, apple) = vm.main_args();
     let mut ran = 0;
@@ -27,8 +25,7 @@ pub fn run_initializers(vm: &Vm) -> Result<usize, VmError> {
 /// Run initializers and then the entry point, returning `main`'s status.
 pub fn run(vm: &Vm) -> Result<i32, VmError> {
     // Before anything the guest can fault in, which is everything below. The
-    // image map goes with it: a fault reports a guest address, and an address
-    // with no image name is a number.
+    // image map goes with it.
     crate::fault::install();
     crate::fault::note_images(&vm.program.report);
     // Before any framework can ask a question about the main executable and get
@@ -41,13 +38,10 @@ pub fn run(vm: &Vm) -> Result<i32, VmError> {
     // the program is running.
     crate::gui::install();
     say_image_map(vm);
-    // Before any guest code, as dyld does it: `libobjc` realizes an image's
-    // classes when the image is mapped, which is strictly before that image's
-    // initializers run.
+    // Before any guest code, as dyld does it.
     let objc = vm.register_objc()?;
     // `+load` before the C constructors of the same image, which is dyld's
-    // order and the one a program that uses both depends on. Resolved before
-    // the guest can start a thread, let alone collect on one.
+    // order and the one a program that uses both depends on.
     crate::shims::machthread::warm();
     crate::objc::call_load_methods(vm, objc)?;
     run_initializers(vm)?;
@@ -57,8 +51,7 @@ pub fn run(vm: &Vm) -> Result<i32, VmError> {
         .ok_or(VmError::NoCode { pc: 0, from: None })?;
     let (argc, argv, envp, apple) = vm.main_args();
     // Which of the two entry-point encodings the root image used decides how it
-    // is reached, and the difference is not cosmetic. An `LC_MAIN` entry is a C
-    // function and takes its four arguments in registers.
+    // is reached, and the difference is not cosmetic.
     let status = if vm.program.entry_reads_stack() {
         let sp = vm
             .kernel_sp()

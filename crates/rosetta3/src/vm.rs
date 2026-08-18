@@ -21,9 +21,6 @@ use crate::thunk::ThunkTable;
 #[derive(Debug)]
 pub enum VmError {
     /// Nothing at this address decodes as guest code, or it is not mapped.
-    ///
-    /// `from` is how control got here, and it is the difference between an address and
-    /// a lead.
     NoCode { pc: u64, from: Option<Transfer> },
     /// Microlift could not translate the region — an instruction it does not implement,
     /// or a compilation failure.
@@ -197,14 +194,11 @@ fn instruction_name(reason: ExitReason, code: u32) -> Option<String> {
     }
     let code = iced_x86::Code::try_from(code as usize).ok()?;
     // `Debug` is the enum variant, which is the mnemonic *plus* its operand
-    // shape — `Vsqrtsd_xmm_xmm_xmmm64` rather than just `vsqrtsd`. That is more
-    // useful here, not less: it says exactly which encoding to implement.
+    // shape — `Vsqrtsd_xmm_xmm_xmmm64` rather than just `vsqrtsd`.
     Some(format!("{code:?}"))
 }
 
 /// An exit, as [`crate::stats`] counts them.
-///
-/// The mapping is not the identity, and the place it is not is `UnknownJump`.
 pub(crate) fn classify(exit: ExitReason, code: u32) -> crate::stats::Exit {
     use crate::stats::Exit;
     match exit {
@@ -242,15 +236,9 @@ pub const MAX_DEPTH: usize = 64;
 
 /// Guest memory, as a value that can be handed to a shim without borrowing the VM.
 ///
-/// The guest is identity-mapped, so this is nothing but a bounds check in front of a
-/// raw pointer — which is the whole point:
-///
 /// ## Addresses outside the guest are permitted, and why
 ///
 /// A guest under high-level emulation routinely holds pointers to *host* memory:
-///
-/// So an address outside every guest region is read as a host pointer, after checking
-/// that anything is mapped there at all.
 ///
 /// It answers "is anything here", not "may I read this", which is enough to turn the
 /// common bug — a null or wild pointer — into a named error instead of a fault.
@@ -258,9 +246,6 @@ pub const MAX_DEPTH: usize = 64;
 /// ## Why the page cache is not a set behind a lock
 ///
 /// It was, and `read_cstr`'s byte-at-a-time walk is what made that untenable:
-///
-/// A colliding page evicts the previous occupant and is re-probed next time, so the
-/// table is a cache in the strict sense:
 ///
 /// ## What is *not* in the region list
 ///
@@ -273,8 +258,7 @@ pub struct GuestView {
 
 /// Pages [`GuestView`] has already probed, direct-mapped and lock-free.
 ///
-/// A zero slot is empty: page zero is never mapped, so it doubles as the
-/// vacancy marker without a second word.
+/// A zero slot is empty.
 pub struct PageCache {
     slots: Box<[std::sync::atomic::AtomicU64]>,
 }
@@ -311,8 +295,9 @@ impl PageCache {
 impl GuestView {
     /// A view over `regions`, which must be identity-mapped host memory.
     ///
-    /// **Sorted here, once**, because [`GuestView::region_of`] is a binary search and a
-    /// linear one was measurable.
+    /// Sorted here, once, because [`GuestView::region_of`] is a binary search and this
+    /// answers a question for every guest byte the *runtime* touches. A Hat in Time
+    /// spent 1.2% of its running time walking the list unsorted.
     pub fn new(mut regions: Vec<Range<u64>>) -> Self {
         regions.sort_by_key(|r| r.start);
         // The search below takes the last region beginning at or below `va` and
@@ -502,9 +487,6 @@ impl Vm {
     }
 
     /// As [`Vm::new`], choosing how imports reach the host.
-    ///
-    /// [`ImportPolicy::AlwaysSlow`](crate::ImportPolicy::AlwaysSlow) is what makes
-    /// the claim testable *end to end* rather than by inspection.
     pub fn with_policy(
         program: Program<MmapSpace>,
         exe_path: &str,
@@ -533,16 +515,12 @@ impl Vm {
         ranges.push(stack.range());
 
         // Every `_Thread_local` in the program becomes addressable here, before
-        // a line of guest code runs — an initializer may touch one. See
-        // [`crate::tls`] for why the registry is global rather than a field.
+        // a line of guest code runs — an initializer may touch one.
         crate::tls::register(&program.report);
         // Where `@executable_path` points, and where a guest `dlopen` of a bare
-        // library name looks. Recorded rather than derived, because the running
-        // executable is `rosetta3` — the same fact the bundle mirror exists for.
+        // library name looks.
         crate::dyld::set_executable_path(exe_path, program.report.root().map_or(0, |i| i.slide));
-        // Where the guest's own `mach_header` is, for the guest's own sake: a
-        // program that walks the loaded images must be told about itself, and
-        // `_dyld_get_image_header(0)` would describe `rosetta3`.
+        // Where the guest's own `mach_header` is, for the guest's own sake.
         if let Some(root) = program.report.root() {
             crate::dyld::set_executable_header(root.base);
         }
@@ -579,9 +557,6 @@ impl Vm {
 
     /// Realize the classes of an image the guest `dlopen`ed, into the same runtime.
     ///
-    /// Realizing the classes runs **no guest code**, which is why it is separate from
-    /// [`Vm::run_loaded_load_methods`]:
-    ///
     /// A `Vm` that has never registered at all is left alone.
     pub fn register_loaded_objc(
         &self,
@@ -603,9 +578,7 @@ impl Vm {
     /// Call the `+load` methods of an image [`Vm::register_loaded_objc`] just realized,
     /// returning how many ran.
     ///
-    /// Deliberately outside that call's lock. A `+load` is guest code and guest code
-    /// may `dlopen` — a plugin host's whole purpose — which arrives back at the
-    /// registration lock.
+    /// Deliberately outside that call's lock.
     pub fn run_loaded_load_methods(
         &self,
         report: &machish::report::LinkReport,
@@ -623,9 +596,7 @@ impl Vm {
             leaked as *const _ as *mut crate::objc::ObjcRuntime,
             Ordering::Release,
         );
-        // And the same reference where a caller with no `Vm` can find it: an
-        // inlined runtime entry point ([`crate::objc::fast`]) is reached from
-        // guest code with no context and nothing to look a VM up from.
+        // And the same reference where a caller with no `Vm` can find it.
         crate::objc::publish(leaked);
         leaked
     }
@@ -645,16 +616,13 @@ impl Vm {
     }
 
     /// A class pointer on its way back *in*.
-    ///
-    /// Not symmetry for its own sake.
     pub fn objc_guest_class(&self, host: u64) -> u64 {
         self.objc().map_or(host, |rt| rt.guest_or(host))
     }
 
     /// A `Protocol *` on its way out to the host runtime.
     ///
-    /// [`Vm::objc_host_class`] for protocols: `@protocol(Foo)` is a direct reference to
-    /// the guest's own `protocol_t`, which the host runtime has never seen.
+    /// [`Vm::objc_host_class`] for protocols.
     pub fn objc_host_protocol(&self, va: u64) -> u64 {
         self.objc().map_or(va, |rt| rt.host_protocol_or(va))
     }
@@ -674,11 +642,10 @@ impl Vm {
         crate::thread::current().map_or((0, 0, 0, 0), |t| t.main_args())
     }
 
-    /// The `rsp` an `LC_UNIXTHREAD` entry point is entered with — the word
-    /// holding `argc`, with `argv`, `envp` and `apple` laid out above it.
+    /// The `rsp` an `LC_UNIXTHREAD` entry point is entered with — the word holding
+    /// `argc`, with `argv`, `envp` and `apple` laid out above it.
     ///
     /// Same thread restriction as [`Vm::main_args`], and for the same reason.
-    /// See [`crate::stack`] for the layout and [`Vm::jump_to`] for the entry.
     pub fn kernel_sp(&self) -> Option<u64> {
         crate::thread::current().and_then(|t| t.kernel_sp())
     }
@@ -714,11 +681,7 @@ impl Vm {
     /// Registers alone cannot express every call, and the case that forces this is not
     /// exotic:
     ///
-    /// `stack` is placed exactly where a real `CALL` would have left it: at `rsp+8` on
-    /// entry, immediately above the return address.
-    ///
-    /// Returns `(rax, xmm0)`: an integer result and a floating-point one come back in
-    /// different registers and the caller's type decides which is the answer.
+    /// Returns `(rax, xmm0)`.
     pub fn call_with_stack(
         &self,
         entry: u64,
@@ -749,11 +712,7 @@ impl Vm {
     }
 
     /// Enter guest code at `entry` with `rsp` exactly as given, and **no return
-    /// address**: the caller owns the word `rsp` points at.
-    ///
-    /// So there is nothing for the guest to return *to*. That is not a gap being
-    /// papered over: `crt1.o`'s `start` ends in `exit` and a `hlt`, and it is the one
-    /// caller.
+    /// address**.
     pub fn jump_to(
         &self,
         entry: u64,
@@ -824,8 +783,7 @@ impl Vm {
             let pc = ctx.rip;
 
             // `ROSETTA3_TRACE_PC=n` reports where the guest is every `n` region
-            // entries, as `image+offset`. Off unless set, and one compare when
-            // it is.
+            // entries, as `image+offset`.
             if let Some(every) = trace_interval() {
                 ticks += 1;
                 if ticks.is_multiple_of(every) {
@@ -851,18 +809,23 @@ impl Vm {
                 }
             }
 
-            // This thread's own answer first, which is the whole hot path: a PC
-            // it has already run needs no lock, no map walk and no comparison
-            // chain.
+            // This thread's own answer first, which is the whole hot path. The
+            // import lookups sit behind it because a code-window hit proves the
+            // PC is not an import: nothing that answers "yes" can ever be in the
+            // window, so asking first makes every entry pay for a case that
+            // reaches the miss path anyway. Measured on A Hat in Time: 15.2
+            // million region entries a second, 1.4% of them missing the window,
+            // and `Program::import_at` alone was 15.6% of running time —
+            // answering "yes" 5,826 times out of 3.04 billion. A `dlopen` cannot
+            // break the induction, because it registers the new image's imports
+            // as part of loading it. See `docs/HOTSPOTS.md`.
             let mut missed = false;
             let translation = match state.code().get(pc) {
                 Some(hit) => hit,
                 None => {
                     missed = true;
 
-                    // Control *jumped* to an import rather than calling one: a
-                    // tail call, which compilers emit freely — `jmp _strcoll`
-                    // where the return value is the caller's.
+                    // Control *jumped* to an import rather than calling one.
                     if let Some(site) = self
                         .program
                         .import_at(pc)
@@ -963,9 +926,7 @@ impl Vm {
                     .unwrap_or_default()
             ),
 
-            // Control fell out of the *bottom* of the region: the last
-            // instruction lifted was an ordinary fallthrough and the next
-            // address is past the bytes microlift was given.
+            // Control fell out of the *bottom* of the region.
             ExitReason::None => Ok(None),
 
             // Control left the region: a jump, a return into a region not yet
@@ -986,8 +947,6 @@ impl Vm {
                 }
                 // A tail `jmp` through a register or a memory operand, whose
                 // target may be **one of this runtime's own thunks**.
-                // [`Vm::dispatch_indirect`] has unwrapped that for an indirect
-                // *call*.
                 Ok(TransferKind::IndirectJump) => {
                     if !self.program.is_guest_address(ctx.rip) {
                         if let Some(guest) = self.guest_behind_thunk(ctx.rip) {
@@ -1016,9 +975,7 @@ impl Vm {
                 Ok(None)
             }
 
-            // The guest asked what CPU it is running on. There is no honest
-            // answer — it is running on arm64 — so the runtime answers for the
-            // machine microlift actually presents.
+            // The guest asked what CPU it is running on.
             ExitReason::Cpuid => {
                 let [eax, ebx, ecx, edx] = cpuid(ctx.rax as u32, ctx.rcx as u32);
                 // `CPUID` writes the 32-bit registers, which zero-extend.
@@ -1069,11 +1026,6 @@ impl Vm {
     }
 
     /// Service an import from a fast-call bridge rather than from an exit.
-    ///
-    /// The same work [`Vm::service_import`] does, with one thing added to the answer:
-    /// whether control was *redirected*.
-    ///
-    /// `jumped` is false even for an import reached by a tail `jmp`.
     pub(crate) fn service_bridged_import(
         &self,
         import_va: u64,
@@ -1140,9 +1092,6 @@ impl Vm {
     }
 
     /// Continue the guest at `target`, as the intercepted transfer would have.
-    ///
-    /// The same shape as [`crate::objc::dispatch`]'s, and for the same reason: where
-    /// the return address comes from depends on how control reached the interception.
     fn transfer_to_guest(&self, target: u64, ctx: &mut RegisterContext) -> Result<(), VmError> {
         let Some(state) = crate::thread::current() else {
             return Err(AbiError::Refused {
@@ -1159,17 +1108,14 @@ impl Vm {
             ctx.rsp = rsp;
         }
         ctx.rip = target;
-        // The stack pointer moved without an exit reporting it, and `rip` is now
-        // a destination rather than a resume point: whoever serviced this call
-        // must not synthesize a return over it.
+        // The stack pointer moved without an exit reporting it, and `rip` is
+        // now a destination rather than a resume point.
         state.rsp.set(ctx.rsp);
         state.redirect();
         Ok(())
     }
 
     /// Decide what an indirect call through a runtime-computed address means.
-    ///
-    /// The question the identity mapping forces on every one of them.
     fn dispatch_indirect(&self, ctx: &mut RegisterContext) -> Result<bool, VmError> {
         let callee = ctx.imported_function_va;
         let resume = ctx.rip;
@@ -1182,8 +1128,7 @@ impl Vm {
         }
 
         // One of our own thunks, handed out earlier and now called by the guest
-        // through a variable. Calling it would be correct and absurd — out to
-        // arm64 and straight back in — so the wrapper is unwrapped.
+        // through a variable.
         let target = self.guest_behind_thunk(callee).unwrap_or(callee);
 
         if self.program.is_guest_address(target) {
@@ -1214,9 +1159,7 @@ impl Vm {
                 ctx.rip = stub;
                 return Ok(true);
             }
-            // `service_site_as`, not `call_site`: the flags it sets describe
-            // *this* call, and a shim that stands in for the transfer itself
-            // reads them.
+            // `service_site_as`, not `call_site`.
             self.service_site_as(site, ctx, false)?;
             return Ok(self.redirected());
         }
@@ -1325,9 +1268,6 @@ impl Vm {
 
     /// Record an error raised inside a host→guest callback, on the thread it happened
     /// on.
-    ///
-    /// **And say it out loud.** Parking alone was enough while the host frame in the
-    /// middle was `qsort`'s.
     pub(crate) fn set_pending(&self, err: VmError) {
         let Some(state) = crate::thread::current() else {
             return;
@@ -1345,9 +1285,6 @@ impl Vm {
     }
 
     /// Whether a callback left an error behind, without taking it.
-    ///
-    /// [`Vm::run_loop`] takes the parked error after every region exit, which was
-    /// enough while every host call *was* one. A bridged call is not.
     pub(crate) fn has_pending(&self) -> bool {
         crate::thread::current().is_some_and(|s| s.pending.borrow().is_some())
     }
@@ -1397,9 +1334,7 @@ fn cpuid(leaf: u32, subleaf: u32) -> [u32; 4] {
 
         // Family / Model / Stepping & Standard Features
         0x1 => {
-            // Family 6, Model 44 (0x2C), Stepping 0: Stepping [3:0] = 0x0 Base
-            // Model [7:4] = 0xC Base Family [11:8] = 0x6 Ext Model [19:16] =
-            // 0x2 Ext Family [27:20] = 0x00 Signature = 0x000206C0
+            // Family 6, Model 44 (0x2C), Stepping 0.
             let version = 0x0002_06C0;
 
             // Cache line size (64 bytes -> 8 units of 8-bytes) in bits 15:8
@@ -1476,14 +1411,12 @@ impl crate::abi::Callbacks for Vm {
             return Ok(0);
         }
         // One of this runtime's own import stubs, which the guest is holding
-        // because a slot it loaded was substituted for one. The host wants the
-        // function that stub stands for.
+        // because a slot it loaded was substituted for one.
         if let Some(host) = crate::trampoline::host_behind(va) {
             return Ok(host);
         }
         // Not guest code: a host pointer the guest is handing back, which the
-        // host may compare against one it gave out. Wrapping it would be both
-        // slower and observably wrong.
+        // host may compare against one it gave out.
         if !self.program.is_guest_address(va) {
             return Ok(va);
         }
@@ -1497,8 +1430,6 @@ impl crate::abi::Callbacks for Vm {
     }
 
     /// A thunk handed back by host code becomes the guest pointer it stands for.
-    ///
-    /// `signal` is what needs this.
     fn unsubstitute(&self, va: u64) -> u64 {
         self.guest_behind_thunk(va).unwrap_or(va)
     }

@@ -41,11 +41,6 @@ unsafe impl Send for Thunk {}
 unsafe impl Sync for Thunk {}
 
 /// Every thunk handed out, both ways round.
-///
-/// The reverse direction is needed because a host function may hand a pointer *back* —
-/// `signal` returns the previous handler, `atexit` hands nothing back but a dispatch
-/// table might — and because the guest can call its own function pointer after it has
-/// been through a thunk.
 pub struct ThunkTable {
     by_guest: BTreeMap<u64, Thunk>,
     by_host: BTreeMap<u64, u64>,
@@ -104,7 +99,6 @@ impl Default for ThunkTable {
 /// The read-only half of a [`ThunkTable`], published for lookups that must not take a
 /// lock.
 ///
-///
 /// A stale snapshot answers "no" for a thunk another thread created a moment ago, and
 /// unlike a code translation that answer is not merely older — it is wrong, because
 /// unwrapping a thunk is what keeps a guest pointer comparing equal to itself.
@@ -161,8 +155,7 @@ pub fn publish(vm: &'static Vm) {
 
 /// The VM this thread is executing, if any.
 ///
-/// Also how [`crate::unwind`] reaches the guest's tables: an unwinding shim is
-/// handed a register context and guest memory, and needs the program itself.
+/// Also how [`crate::unwind`] reaches the guest's tables.
 pub(crate) fn current() -> Option<&'static Vm> {
     // `try_with`, not `with`: at process exit this thread's TLS has been
     // destroyed and reading it would panic inside a host `atexit` handler.
@@ -213,7 +206,6 @@ impl ThunkSignature {
                     }
                     // AAPCS64 copies an argument this large to the *caller's*
                     // stack, and the trampoline would have to find it there.
-                    // Refused rather than read from the wrong place.
                     HostClass::Indirect => {
                         return Err("takes an aggregate too large for AAPCS64's registers");
                     }
@@ -486,8 +478,7 @@ impl GuestArgs {
 /// Rebuild an aggregate's bytes from the scalars AAPCS64 delivered.
 ///
 /// An HFA arrives as its members, one per `v` register, so each goes back at its own
-/// offset. A small composite arrives as raw words and its bytes are already the
-/// struct's.
+/// offset.
 fn reassemble(agg: &Aggregate, host: HostClass, words: &[u64]) -> Vec<u8> {
     let mut raw = vec![0u8; agg.size];
     match host {
@@ -665,9 +656,7 @@ unsafe extern "C" fn thunk_entry(guest_va: u64, ints: *const u64, floats: *const
         return 0;
     };
 
-    // The VM that answered may not be the one that built this thunk: a process
-    // can run more than one, and the process-lifetime fallback holds whichever
-    // was published last.
+    // The VM that answered may not be the one that built this thunk.
     if !vm.program.is_guest_address(guest_va) {
         return 0;
     }

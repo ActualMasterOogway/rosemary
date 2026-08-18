@@ -111,22 +111,12 @@ pub struct Program<M: Regions = BufferSpace> {
     /// it: both `slot_va` and `stub_va` for each binding.
     pub imports: BTreeMap<u64, ImportSite>,
     /// How to leave each function of the root image, from `__unwind_info`.
-    ///
-    /// Read at load for the same reason [`functions`](Program::functions) is.
     pub unwind: machish::image::UnwindInfo,
     /// The same sites, keyed by the address they *resolved to*.
-    ///
-    /// A `HashMap` where [`imports`] is a `BTreeMap`, and the difference is measured.
     imports_by_target: AddrMap<ImportSite>,
 }
 
 /// A hasher for maps keyed by a guest or host **address**.
-///
-/// Rust's default is SipHash-1-3, chosen to make `HashMap` safe against an attacker who
-/// controls the keys.
-///
-/// The mixing is Fibonacci hashing: one multiply by the odd constant nearest 2^64/φ,
-/// then a shift to bring the high bits down, which is what `HashMap` reads.
 #[derive(Clone, Copy, Default)]
 pub struct AddrHasher(u64);
 
@@ -137,8 +127,7 @@ impl std::hash::Hasher for AddrHasher {
 
     fn write(&mut self, bytes: &[u8]) {
         // Only reached if someone keys one of these maps by something other
-        // than an integer. Correct rather than fast, so that doing so is a
-        // performance mistake instead of a correctness one.
+        // than an integer.
         for &b in bytes {
             self.write_u64(b as u64);
         }
@@ -198,8 +187,7 @@ impl Program<BufferSpace> {
 impl Program<machish::memory::MmapSpace> {
     /// Load and link `path` into **host memory at the guest's own addresses**.
     ///
-    /// The mapping is never executable. The guest is x86-64; this CPU cannot run a byte
-    /// of it under any protection, and the recompiler reads it as data.
+    /// The mapping is never executable.
     pub fn load_executable(
         path: &str,
         extra: &[&dyn SymbolProvider],
@@ -215,11 +203,6 @@ impl Program<machish::memory::MmapSpace> {
 }
 
 /// The provider chain every link in this runtime uses, in the order that makes it safe.
-///
-/// Order *is* the mechanism — see [`machish::resolve`].
-///
-/// It lives here, in one value, because there are now two callers: loading the program,
-/// and [`crate::dyld`] loading an image the *guest* asked for.
 pub(crate) struct HostProviders {
     /// `___stack_chk_guard` and `__tlv_bootstrap`: symbols the host declines to export
     /// and every guest with an array on its stack dereferences in its own prologue.
@@ -279,19 +262,14 @@ impl<M: Regions> Program<M> {
         // Before anything reads the report.
         crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory)?;
 
-        // And the same for the C++ ABI: a binary linked against `libstdc++`
-        // names *that* for `__cxa_guard_acquire` and the `type_info` vtables,
-        // which native passthrough answers with the host's.
+        // And the same for the C++ ABI.
         crate::cxxlib::bind_cxxabi_to_the_vendored_one(&mut report, &mut memory)?;
 
         // And last, because it is stated in terms of what everything above
-        // settled on: a guest image may declare `__DATA,__interpose` and take
-        // over a function the rest of the program calls.
+        // settled on.
         crate::interpose::apply(&mut report, &mut memory)?;
 
-        // The root image's `__text` is what the driver lifts. Re-parsing here
-        // rather than threading a `MachObject` out of the loader keeps the
-        // report the only thing that crosses the boundary.
+        // The root image's `__text` is what the driver lifts.
         let obj = machish::image::MachObject::parse_any(bytes, X86_64)?;
         let text_sect = obj
             .section("__TEXT", "__text")
@@ -380,20 +358,14 @@ impl<M: Regions> Program<M> {
     }
 
     /// The shared [`LifterConfig`] every on-demand lift is performed with.
-    ///
-    /// **The guest's mapped images**, as a hint for microlift's value-set analysis.
     pub fn lifter_config(&self) -> LifterConfig {
         self.lifter_config_with(ImportPolicy::FastWhenKnown)
     }
 
     /// [`Program::lifter_config`], with the promotion decision made explicitly.
-    ///
-    /// [`ImportPolicy::AlwaysSlow`] exists because it is the falsifiable half of the
-    /// claim.
     pub fn lifter_config_with(&self, policy: ImportPolicy) -> LifterConfig {
         // Host-specific, so it is the half of the optimisation setting that
         // belongs to the lift rather than to the lowering — see [`crate::jit`].
-        // Below `all` the guest's vector registers stay scalar lo/hi pairs.
         let use_vector_xmm = crate::jit::opt_level().host_specific() && {
             #[cfg(target_arch = "aarch64")]
             {
@@ -543,8 +515,6 @@ impl<M: Regions> Program<M> {
     }
 
     /// How every import of this program will be reached, by symbol.
-    ///
-    /// The acceptance question in one call.
     pub fn classify_imports(&self) -> BTreeMap<&str, Classification> {
         let mut out = BTreeMap::new();
         for b in self.report.bindings() {
@@ -565,15 +535,13 @@ impl<M: Regions> Program<M> {
         crate::abi::call_import(&symbol, tag, resolved, ctx, &mut self.memory)
     }
 
-    /// The region a JIT should lift in order to execute `va`: which bytes are code, and
-    /// the slice to hand microlift.
+    /// The region a JIT should lift in order to execute `va`:
     ///
     /// `None` when `va` is not in mapped guest memory, or when nothing there decodes.
     pub fn lift_region(&self, va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
         let Some((base, bytes)) = self.memory.region_at(va) else {
-            // Or an image the *guest* loaded, which is not in this `Program` and
-            // cannot be: a `Program` is immutable once linked, which is what
-            // `SharedProgram`'s `unsafe impl Sync` rests on. See [`crate::dyld`].
+            // Or an image the *guest* loaded, which is not in this `Program`
+            // and cannot be.
             return crate::dyld::lift_region(va)
                 // Or code the guest *wrote*, which is in no image at all — see
                 // [`crate::shims::vmmap`].
@@ -581,8 +549,7 @@ impl<M: Regions> Program<M> {
                 // Or code *this runtime* wrote, which is in no image either.
                 .or_else(|| crate::trampoline::lift_region(va))
                 // Including the one instruction that ends a call: the return
-                // address every entry into guest code pushes. See
-                // [`crate::retstub`].
+                // address every entry into guest code pushes.
                 .or_else(|| crate::retstub::lift_region(va));
         };
         // A loaded image is not memory the guest writes, so the Mono call rule
@@ -607,29 +574,20 @@ impl<M: Regions> Program<M> {
     }
 
     /// Whether `va` lies inside a mapped guest image.
-    ///
-    /// The question every `ExitReason::IndirectCall` has to answer.
     pub fn is_guest_address(&self, va: u64) -> bool {
         self.memory.region_at(va).is_some()
             || crate::dyld::contains(va)
-            // Or memory the guest *generated* code into, which is in no image at
-            // all. See [`crate::shims::vmmap`] for why the set of such addresses
-            // is exactly the set the guest asked to be executable.
+            // Or memory the guest *generated* code into, which is in no image
+            // at all.
             || crate::shims::vmmap::contains(va)
             // Or one of this runtime's own five-byte stubs, which is guest code
             // by construction: it exists to be lifted. See [`crate::trampoline`].
             || crate::trampoline::contains(va)
-            // Or the return stub, which is guest code for the same reason: a
-            // `ret` transfers to it and the run loop lifts it. See
-            // [`crate::retstub`].
+            // Or the return stub, which is guest code for the same reason.
             || crate::retstub::contains(va)
     }
 
     /// `va` as `image+offset`, in the image's *own* address space.
-    ///
-    /// Every address this runtime reports is slid by whatever `mmap` chose that run, so
-    /// two runs of the same failure name two different numbers and neither can be
-    /// looked up in a disassembler.
     pub fn locate(&self, va: u64) -> Option<String> {
         for image in &self.report.images {
             for seg in &image.segments {
@@ -646,15 +604,9 @@ impl<M: Regions> Program<M> {
     }
 
     /// Point this program's import slots at [trampolines](crate::trampoline).
-    ///
-    /// The **relocation** moves and the registration does not:
-    ///
-    /// Not done in [`Program::load_into`], and the reason is
-    /// [`ImportPolicy::AlwaysSlow`].
     pub fn install_trampolines(&mut self) -> usize {
         // Collected first, because deciding needs `&self` (for
-        // `is_guest_address`) and writing needs `&mut self.memory`. A program
-        // has thousands of imports and this runs once.
+        // `is_guest_address`) and writing needs `&mut self.memory`.
         let eligible: Vec<(u64, ImportSite)> = self
             .imports
             .iter()
@@ -697,8 +649,6 @@ impl<M: Regions> Program<M> {
     }
 
     /// The import registered at `va`, if any.
-    ///
-    /// `va` is whatever an exit named.
     pub fn import_at(&self, va: u64) -> Option<&ImportSite> {
         self.imports
             .get(&va)
@@ -708,8 +658,6 @@ impl<M: Regions> Program<M> {
     }
 
     /// What an imported symbol resolved to, by name.
-    ///
-    /// The reverse of the usual question, and it has one caller.
     pub fn resolved_symbol(&self, symbol: &str) -> Option<u64> {
         self.imports
             .values()

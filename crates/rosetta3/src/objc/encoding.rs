@@ -13,11 +13,7 @@ pub struct Signature {
     pub classes: Vec<u8>,
     /// Zero-based parameter indices encoded `@?`, i.e. holding a block.
     pub blocks: Vec<u8>,
-    /// Zero-based parameter indices encoded `@`, i.e. holding an `id` — blocks
-    /// excluded, since `@?` is its own list.
-    ///
-    /// Recorded because **a class is a legal `id`**, and the encoding does not say
-    /// which `id`s are.
+    /// Zero-based parameter indices encoded `@`, i.e.
     pub objects: Vec<u8>,
     /// Whether the method returns a `Class`.
     pub class_return: bool,
@@ -39,8 +35,6 @@ impl Signature {
 }
 
 /// Decode a method type encoding.
-///
-/// `Err` is a reason in the shape a refusal wants.
 pub fn signature(encoding: &str) -> Result<Signature, &'static str> {
     let bytes = encoding.as_bytes();
     let mut at = 0usize;
@@ -56,9 +50,7 @@ pub fn signature(encoding: &str) -> Result<Signature, &'static str> {
     while at < bytes.len() {
         let start = at;
         skip_qualifiers(bytes, &mut at);
-        // Where the type itself begins, qualifiers behind us. `start` is what
-        // the no-progress check below needs; this is what the `#` and `@?`
-        // tests need, and a qualified `rn#` would be missed by the former.
+        // Where the type itself begins, qualifiers behind us.
         let ty = at;
         // An aggregate is recognised *here* rather than inside the scalar
         // decoder, because it is the one type whose whole layout matters and
@@ -72,9 +64,7 @@ pub fn signature(encoding: &str) -> Result<Signature, &'static str> {
             // the difference between a refusal and a hang.
             return Err("the type encoding contains a byte this decoder cannot advance past");
         }
-        // The frame offset the encoding records after each type. A relic of a
-        // calling convention nobody uses, and skipped rather than read: where an
-        // argument really lives is `place_shapes`'s answer, not this number's.
+        // The frame offset the encoding records after each type.
         while bytes.get(at).is_some_and(u8::is_ascii_digit) {
             at += 1;
         }
@@ -240,8 +230,7 @@ pub fn aggregate(b: &[u8], at: &mut usize) -> Result<Aggregate, &'static str> {
 
 /// The most leaves any aggregate this runtime will describe may have.
 ///
-/// Totality: an encoding comes out of guest memory, and `[999999999i]` must cost a
-/// refusal rather than a gigabyte.
+/// Totality.
 const MAX_LEAVES: usize = 64;
 
 /// How deep a nested aggregate may go before this decoder gives up.
@@ -393,9 +382,7 @@ mod tests {
 
     #[test]
     fn the_frame_offsets_are_skipped_rather_than_believed() {
-        // The offsets describe a calling convention from the 32-bit era. Where an
-        // argument really is comes from `place_args`; a decoder that used these
-        // would read the second argument out of the first's register.
+        // The offsets describe a calling convention from the 32-bit era.
         assert_eq!(types("v24@0:8@16"), types("v@:@"));
     }
 
@@ -406,9 +393,7 @@ mod tests {
         let sig = signature("#@:#").expect("class");
         assert!(sig.class_return);
         assert_eq!(sig.classes, vec![2]);
-        // A class *receiver* is `@` in the encoding, not `#`: the runtime types
-        // `self` as `id` even in a class method, which is why the substitution
-        // of a receiver is the message shim's job and not this decoder's.
+        // A class *receiver* is `@` in the encoding, not `#`.
         assert!(signature("v@:").expect("plain").classes.is_empty());
     }
 
@@ -497,8 +482,7 @@ mod tests {
     #[test]
     fn a_block_is_a_pointer_that_says_it_is_a_block() {
         // `- (void)run:(void (^)(void))block` — return, `self`, `_cmd`, then
-        // the block at parameter two. It is one pointer wide like any other
-        // object, and the whole difference is the index recorded beside it.
+        // the block at parameter two.
         let sig = signature("v@:@?").expect("a block parameter decodes");
         assert_eq!(sig.blocks, vec![2]);
         assert_eq!(

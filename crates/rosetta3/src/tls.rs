@@ -9,8 +9,6 @@ use std::sync::{Mutex, RwLock};
 use machish::report::LinkReport;
 
 /// Largest thread block this will allocate.
-///
-/// Totality, not policy.
 const MAX_BLOCK: u64 = 64 * 1024 * 1024;
 
 /// One image's block layout, as [`machish`] described it.
@@ -67,8 +65,7 @@ struct ThreadTls {
 thread_local! {
     /// Everything about thread-locals that belongs to *this* thread.
     ///
-    /// The cache and the blocks are one object on purpose: the cached pointers
-    /// point *into* the blocks, so they must not be able to outlive them.
+    /// The cache and the blocks are one object on purpose.
     static TLS: RefCell<ThreadTls> = const {
         RefCell::new(ThreadTls {
             epoch: 0,
@@ -119,8 +116,6 @@ pub fn register(report: &LinkReport) -> usize {
         for d in &image.thread_locals {
             if d.offset >= t.total_size {
                 // The descriptor indexes past the block the sections describe.
-                // Skipping it makes the access fail as a null dereference in the
-                // guest rather than a wild write into the runtime's heap.
                 continue;
             }
             slots.insert(
@@ -134,8 +129,7 @@ pub fn register(report: &LinkReport) -> usize {
         }
     }
     // After the slots are visible, and released so that a thread which observes
-    // the new epoch cannot then read the map without seeing them. Bumped even
-    // when nothing was registered.
+    // the new epoch cannot then read the map without seeing them.
     EPOCH.fetch_add(1, Ordering::Release);
     registered
 }
@@ -161,16 +155,12 @@ pub extern "C" fn bootstrap(descriptor: *const u8) -> *mut u8 {
 }
 
 /// The body of [`bootstrap`], with this thread's storage already in hand.
-///
-/// The whole point of the split is the first six lines.
 fn resolve(tls: &mut ThreadTls, at: u64) -> *mut u8 {
     // Acquire pairs with the release in `register`: observing the new epoch
     // means observing the slots that came with it.
     let epoch = EPOCH.load(Ordering::Acquire);
     if tls.epoch != epoch {
-        // A program was registered since these were resolved. The blocks stay —
-        // image indices are append-only, so an old one still names its own
-        // template — but a descriptor address may now mean something else.
+        // A program was registered since these were resolved.
         tls.cache = [(0, std::ptr::null_mut()); CACHE];
         tls.epoch = epoch;
     }
@@ -226,9 +216,6 @@ fn say_unregistered(at: u64) {
 
 /// Report a thread-local read that arrived after this thread's storage was destroyed,
 /// once for the process.
-///
-/// Not a hypothetical: it is where a C++ `thread_local` with a destructor ends up if
-/// the destructor reads another thread-local.
 fn say_after_teardown(at: u64) {
     static SAID: std::sync::Once = std::sync::Once::new();
     SAID.call_once(|| {
@@ -316,8 +303,7 @@ mod tests {
     #[test]
     fn a_block_is_per_thread_and_a_repeat_access_is_the_same_address() {
         // Registered by hand rather than through a `LinkReport`, which needs an
-        // image: what is under test is the resolver, and its whole input is one
-        // slot and one template.
+        // image.
         let at = 0x3_0000u64;
         {
             let mut images = IMAGES.write().unwrap();

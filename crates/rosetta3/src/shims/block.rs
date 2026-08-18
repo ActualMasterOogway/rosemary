@@ -167,9 +167,6 @@ fn dispatch_once(
 }
 
 /// `void *_Block_copy(const void *block)`
-///
-/// **`_Block_copy` runs the guest's code before it returns**, which is the whole reason
-/// this is a shim and not a signature.
 fn block_copy(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -177,9 +174,7 @@ fn block_copy(
     callbacks: &dyn Callbacks,
 ) -> Result<()> {
     let block = ctx.rdi;
-    // A null block is legal here in a way it is not for `dispatch_async`:
-    // `_Block_copy(NULL)` is defined to answer null, and ARC emits it on paths
-    // where the block is optional.
+    // A null block is legal here in a way it is not for `dispatch_async`.
     if block == 0 {
         ctx.rax = 0;
         return Ok(());
@@ -277,9 +272,7 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         "dispatch_data_create" => Some(dispatch_data_create),
         "dispatch_group_notify" => Some(dispatch_group_notify),
         "CFRunLoopObserverCreateWithHandler" => Some(run_loop_observer_create_with_handler),
-        // Both spellings: the Mach-O symbol is `__Block_copy`, and `c_name`
-        // strips one underscore, so what arrives here still has the one the
-        // function's own name begins with.
+        // Both spellings.
         "_Block_copy" | "Block_copy" => Some(block_copy),
         _ => None,
     }

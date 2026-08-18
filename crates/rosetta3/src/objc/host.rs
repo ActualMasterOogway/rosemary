@@ -41,9 +41,7 @@ unsafe extern "C" {
     pub fn class_addProtocol(cls: Class, protocol: Protocol) -> bool;
     pub fn class_getInstanceVariable(cls: Class, name: *const c_char) -> Ivar;
     pub fn class_getInstanceMethod(cls: Class, name: Sel) -> Method;
-    /// Allocate and **zero** an instance of `cls`. This is what `+alloc` bottoms out
-    /// in, and — for a class the *compiler* built — what calls the C++ ivar
-    /// constructors.
+    /// Allocate and **zero** an instance of `cls`.
     pub fn class_createInstance(cls: Class, extra: usize) -> Class;
     pub fn class_getClassMethod(cls: Class, name: Sel) -> Method;
     pub fn class_getMethodImplementation(cls: Class, name: Sel) -> Imp;
@@ -59,9 +57,6 @@ unsafe extern "C" {
     pub fn sel_getName(sel: Sel) -> *const c_char;
 
     /// Declared with no parameters on purpose.
-    ///
-    /// `objc_msgSend` has no signature of its own — it has whichever signature the
-    /// method has, which is the fact this turns on.
     pub fn objc_msgSend();
 
     pub fn objc_getProtocol(name: *const c_char) -> Protocol;
@@ -78,8 +73,6 @@ unsafe extern "C" {
 }
 
 /// A `&str` as a NUL-terminated C string, for a call that borrows it.
-///
-/// Returns `None` for a name with an interior NUL rather than truncating.
 pub fn c_string(s: &str) -> Option<std::ffi::CString> {
     std::ffi::CString::new(s).ok()
 }

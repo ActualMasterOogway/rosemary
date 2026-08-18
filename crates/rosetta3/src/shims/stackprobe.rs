@@ -9,8 +9,7 @@ const GUEST_PAGE: u64 = 4096;
 
 /// Probe the pages the guest will occupy after its following `sub rsp, rax`.
 ///
-/// Reading is sufficient: the guest stack is already mapped, and the purpose of this
-/// routine is to fault before the allocation if it crosses the guard page.
+/// Reading is sufficient.
 pub fn chkstk(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let size = ctx.rax;
     if size == 0 {

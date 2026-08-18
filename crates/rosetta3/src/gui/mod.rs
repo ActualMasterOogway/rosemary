@@ -30,8 +30,6 @@ pub fn enabled() -> bool {
 }
 
 /// Whether the present hooks should do anything.
-///
-/// Distinct from [`enabled`].
 static ARMED: AtomicBool = AtomicBool::new(false);
 
 /// Whether the statistics panel is open.
@@ -144,9 +142,7 @@ pub(crate) fn pressed(key: hotkey::Key) {
 pub(crate) fn compose(width: f32, height: f32) -> Option<DrawList> {
     let mut guard = MODEL.lock().unwrap_or_else(|e| e.into_inner());
     let model = guard.get_or_insert_with(Model::default);
-    // Before the early return: frame timing is kept whether or not anyone is
-    // looking, so that opening the panel shows the frame rate of the last two
-    // seconds instead of starting a graph from nothing.
+    // Before the early return.
     model.note_frame();
 
     let panel_open = PANEL.load(Relaxed);
@@ -199,9 +195,6 @@ pub(crate) fn debugging() -> bool {
 }
 
 /// The overlay reached a backend and put geometry in front of the guest.
-///
-/// **The single most useful line this thing prints**, and it is printed once,
-/// unconditionally.
 pub(crate) fn drew(backend: &str, width: f32, height: f32, vertices: usize) {
     static SAID: AtomicBool = AtomicBool::new(false);
     if !SAID.swap(true, Relaxed) {
@@ -226,9 +219,6 @@ mod tests {
     use super::*;
 
     /// Serializes the tests that drive [`PANEL`].
-    ///
-    /// The panel's open flag is a process-global, correctly: there is one overlay per
-    /// process and a hotkey handler on a thread of Carbon's choosing has to reach it.
     fn panel() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         // A panicking test leaves the flag wrong for the next one, which the
@@ -238,9 +228,6 @@ mod tests {
     }
 
     /// Everything both backends share, exercised without a GPU.
-    ///
-    /// **This is the test that was missing**, and its absence cost two rounds of
-    /// guessing at a real game.
     #[test]
     fn the_panel_produces_geometry_without_a_gpu() {
         let _panel = panel();
