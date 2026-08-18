@@ -1,49 +1,5 @@
-//! `div`, `ldiv`, `lldiv` and `imaxdiv`: quotient and remainder, returned as a
-//! struct by value.
-//!
-//! ## Why these are here rather than in the table
-//!
-//! The same reason as [`math`](super::math)'s `sincos` pair, one class of
-//! register over: a struct by value is the one thing [`crate::abi::table`]
-//! refuses to describe. `ldiv_t` is `{ long quot; long rem; }`, which SysV
-//! AMD64 classifies as two INTEGER eightbytes and returns in `rax` and `rdx`,
-//! while AAPCS64 returns in `x0` and `x1` — so forwarding the call and copying
-//! `x0` back would deliver the quotient and lose the remainder. `div_t` is two
-//! `int`s, eight bytes, so it is a *single* eightbyte and arrives entirely in
-//! `rax`: quotient in the low half, remainder in the high one.
-//!
-//! And as with `sincos`, the shim does not forward the call at all. Integer
-//! division truncated toward zero is two operators; computing it here removes
-//! both the aggregate-return question and any question of what the host's own
-//! `ldiv` does.
-//!
-//! ## The 128-bit compiler-rt helpers
-//!
-//! `__udivti3` and its siblings are not C library functions at all — they are
-//! what a compiler emits for `unsigned __int128 / unsigned __int128` on a
-//! machine with no such instruction, and both x86-64 and arm64 are such
-//! machines. They are here rather than in the table for the same reason `ldiv`
-//! is, doubled: an `__int128` is *two* eightbytes going in and two coming back,
-//! so a single argument spans a register pair on both sides and the return is
-//! an aggregate by any other name.
-//!
-//! SysV AMD64 gives each `__int128` two consecutive integer registers — `rdi:rsi`
-//! for the first argument, `rdx:rcx` for the second, low half first — and
-//! returns in `rax:rdx`. That is the whole ABI here, and Rust has `u128`, so
-//! the arithmetic is one operator and nothing is forwarded.
-//!
-//! Below Zero reached `__udivti3` after its start screen loaded, which is the
-//! ordinary way one of these turns up: nothing imports them until some piece of
-//! generated or templated code divides a 128-bit value.
-//!
-//! ## Division by zero, and the one overflow
-//!
-//! C leaves both undefined, and on the guest's own hardware both are the same
-//! event: `idiv` raises `#DE` for a zero divisor *and* for `LONG_MIN / -1`,
-//! whose quotient is not representable. There is nothing to compute in either
-//! case and no way to raise the guest's own trap from here, so both are refused
-//! by name — which says what happened instead of returning a number nobody can
-//! justify.
+//! `div`, `ldiv`, `lldiv` and `imaxdiv`: quotient and remainder, returned as a struct
+//! by value.
 
 use microlift::arch::x86_64::context::RegisterContext;
 
@@ -127,12 +83,9 @@ fn modti3(symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -
     Ok(())
 }
 
-/// `unsigned __int128 __udivmodti4(unsigned __int128 a, unsigned __int128 b,
-/// unsigned __int128 *rem)` — the quotient returned, the remainder written
-/// through the pointer in `r8`, which is the register after the two pairs.
-///
-/// A null `rem` is legal and means the caller wants only the quotient; the
-/// compiler emits that spelling when it has both uses and only needs one.
+/// `unsigned __int128 __udivmodti4(unsigned __int128 a, unsigned __int128 b, unsigned
+/// __int128 *rem)` — the quotient returned, the remainder written through the pointer
+/// in `r8`, which is the register after the two pairs.
 fn udivmodti4(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let (a, b) = operands(ctx);
     let (Some(q), Some(r)) = (a.checked_div(b), a.checked_rem(b)) else {

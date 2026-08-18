@@ -1,39 +1,4 @@
 //! `semctl`: a variadic whose fourth argument is a union one word wide.
-//!
-//! Steam's `libtier0` names a lock across processes with System V semaphores.
-//! `semget` and `semop` are ordinary signatures in [`crate::abi::table`] —
-//! scalars and a `struct sembuf *` whose layout was compiled both ways and
-//! compared. `semctl` cannot be one:
-//!
-//! ```c
-//! int semctl(int semid, int semnum, int cmd, ... /* union semun arg */);
-//! ```
-//!
-//! It is variadic, so the guest passed the fourth argument in `rcx` while the
-//! host's own `semctl` will look for it *on the stack* — Apple's arm64 ABI
-//! passes every variadic argument there. A signature cannot express that; a
-//! shim can, because Rust calls a variadic `extern "C"` function by the
-//! platform's rules. This is the same shape as [`fcntl`](super::openat), and
-//! for the same reason it is a **list of commands** rather than a blanket
-//! forward: `cmd` decides not just whether the argument exists but what it is.
-//!
-//! ## What the fourth argument may be, and why one word carries all of it
-//!
-//! `union semun` is `{ int val; struct semid_ds *buf; unsigned short *array; }`
-//! — an `int`, or one of two pointers. Every member fits in a register, and the
-//! callee's own use of it narrows the word, so the whole word is passed for
-//! every command that takes one and a zero for every command that does not.
-//! Withholding an argument a command needs is fatal; passing one it ignores is
-//! not.
-//!
-//! Both pointer forms address guest memory, which is identity-mapped, so no
-//! translation is needed — provided the structure behind the pointer is the same
-//! on both architectures. It is: `struct semid_ds` is 72 bytes with `sem_base`
-//! at 24, `sem_nsems` at 28, `sem_otime` at 32 and `sem_ctime` at 44, and
-//! `struct ipc_perm` inside it is 24 with `_key` at 20 and `_seq` at 18, on
-//! x86-64 and arm64 alike — compiled both ways and compared, which is the rule
-//! every pointer argument is now held to. `unsigned short *` is an array of
-//! fixed-width values and cannot differ.
 
 use microlift::arch::x86_64::context::RegisterContext;
 
@@ -72,11 +37,6 @@ fn semctl(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) 
 }
 
 /// Whether `cmd` reads a fourth argument.
-///
-/// Written the opposite way round from [`fcntl`](super::openat)'s list: the
-/// `semctl` commands are a short closed set, all ten of them named, so the ones
-/// that take an argument can be listed directly and an unrecognised command
-/// passes none. There is no command outside this set for a program to reach.
 fn takes_fourth_argument(cmd: i32) -> bool {
     matches!(
         cmd,

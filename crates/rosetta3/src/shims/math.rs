@@ -1,42 +1,4 @@
-//! Math helpers whose arguments or return values the signature table cannot
-//! name.
-//!
-//! ## Why these are here rather than in the table
-//!
-//! `__sincosf_stret` and `__sincos_stret` are Darwin's fused sine-and-cosine,
-//! and clang emits a call to one whenever a program computes both of an angle —
-//! which for a game engine is every frame. Both return **two values**, in a
-//! struct, and that is the whole difficulty: a struct by value is the one thing
-//! [`crate::abi::table`] refuses to describe, because the two architectures
-//! classify it differently and a guess returns plausible garbage rather than
-//! faulting.
-//!
-//! Here the difference is concrete and small enough to write out. SysV AMD64
-//! classifies `__float2` — two `float`s, eight bytes — as a single SSE
-//! eightbyte, so the guest expects `sinf` in `xmm0[31:0]` and `cosf` in
-//! `xmm0[63:32]`. AAPCS64 sees a two-member homogeneous float aggregate and
-//! returns it in `s0` and `s1`, two separate registers. `__double2` is the same
-//! story one size up: `xmm0` and `xmm1` on the guest's side, `d0` and `d1` on
-//! the host's.
-//!
-//! So the shim does not forward the *call*; it computes the two values and
-//! places them the way the guest's ABI says. That also removes the question of
-//! whether the host even exports these — they are Darwin-specific and this way
-//! the answer does not matter.
-//!
-//! `__divdc3` is compiler-rt's complex-double division helper. A complex
-//! double is two scalar doubles, so its arguments and return value are split
-//! across vector registers even though the signature table only describes
-//! scalar returns. It is implemented here rather than forwarded to the host:
-//! the host may not export compiler-rt's private spelling, and forwarding
-//! would leave the host with the guest's register layout.
-//!
-//! ## Accuracy
-//!
-//! `sin` and `cos` are the host libm's, called separately. The `_stret` entry
-//! points exist to share argument reduction, which is a *performance*
-//! guarantee, not an accuracy one: the results are those of `sin(x)` and
-//! `cos(x)`, which is what the C library documents them to be.
+//! Math helpers whose arguments or return values the signature table cannot name.
 
 use microlift::arch::x86_64::context::RegisterContext;
 
@@ -79,12 +41,6 @@ pub fn sincos_stret(
 }
 
 /// `double _Complex __divdc3(double a, double b, double c, double d)`.
-///
-/// The guest calls this as `(a + ib) / (c + id)`. Scaling the denominator by
-/// its largest component keeps `c*c + d*d` from overflowing for ordinary
-/// finite inputs. The two complex values are passed as four consecutive
-/// doubles in `xmm0` through `xmm3`, and the result is returned in `xmm0` and
-/// `xmm1`.
 pub fn divdc3(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
     let (a, b, c, d) = (
         f64::from_bits(ctx.xmm[0][0]),
@@ -136,20 +92,10 @@ pub fn divdc3(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemo
 
 /// `float _Complex __mulsc3(float a, float b, float c, float d)`.
 ///
-/// [`divdc3`]'s sibling one size down and in the other operation, and its
-/// register story is the one interesting thing about it. A `float _Complex` is
-/// **eight** bytes, so SysV AMD64 makes it a single SSE eightbyte: both
-/// arguments of a complex value share one `xmm` register — real in the low half,
-/// imaginary in the high — and the result comes back packed the same way in
-/// `xmm0`. AAPCS64 sees a two-member homogeneous float aggregate and uses `s0`
-/// and `s1`. That is the `__sincosf_stret` disagreement, reached from
-/// compiler-rt instead of libm.
+/// [`divdc3`]'s sibling one size down and in the other operation, and its register
+/// story is the one interesting thing about it.
 ///
-/// The multiplication itself is the C standard's Annex G recipe: the naive
-/// product first, then the recovery pass that turns the `inf * 0` NaNs an
-/// infinite operand produces back into the infinity the limit says it is.
-/// Skipping that is what makes a hand-rolled complex multiply wrong only for the
-/// inputs nobody tests with.
+/// The multiplication itself is the C standard's Annex G recipe:
 pub fn mulsc3(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
     let half = |reg: usize, high: bool| {
         let word = ctx.xmm[reg][0];
@@ -168,9 +114,7 @@ pub fn mulsc3(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemo
 
     if real.is_nan() && imag.is_nan() {
         // One operand was infinite and the other had a zero component, so the
-        // naive product manufactured `inf * 0`. Annex G's recovery: treat the
-        // infinity as a direction, every NaN component of the *other* operand
-        // as a signed zero, and multiply again.
+        // naive product manufactured `inf * 0`. Annex G's recovery:
         let mut recovered = false;
         let (mut a, mut b, mut c, mut d) = (a, b, c, d);
         /// An infinite component becomes a signed one and a finite one a signed
@@ -229,10 +173,6 @@ pub fn mulsc3(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemo
 pub type Shim = fn(&str, &mut RegisterContext, &mut dyn GuestMemory) -> Result<()>;
 
 /// Whether `name` (underscore already stripped) is one of this module's.
-///
-/// Both spellings are here because the Mach-O name carries a leading underscore
-/// of its own: the C identifier is `__sincosf_stret`, so the import is
-/// `___sincosf_stret` and one strip leaves two.
 pub fn shim_for(name: &str) -> Option<Shim> {
     match name {
         "__divdc3" => Some(divdc3),

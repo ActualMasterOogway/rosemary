@@ -1,63 +1,4 @@
 //! What a crashing guest says on its way out.
-//!
-//! ## The problem this exists for
-//!
-//! A guest that faults inside translated code produces a crash report naming a
-//! `pc` in an anonymous mapping and nothing else. There is no image to resolve
-//! it against — every translation is its own Cranelift module in its own
-//! reservation — so the one fact worth having, *which guest instruction was
-//! running*, is exactly the fact missing. Both Subnauticas end that way, and
-//! [M7.7](../../../docs/ROADMAP.md) recorded "make the crash survive being
-//! observed" as the step everything else waits on: under `lldb` the fault does
-//! not reproduce, so the postmortem cannot come from a debugger.
-//!
-//! So this runtime reports the fault itself, from a handler, and then gets out
-//! of the way.
-//!
-//! ## What it can say, and what it cannot
-//!
-//! Three things, and the third is the one that was missing:
-//!
-//! - **the fault**: signal, faulting address, and whether that address is
-//!   mapped at all;
-//! - **the thread**: its Mach port, and whether it was inside guest code;
-//! - **the guest region**: the translation whose compiled code contains the
-//!   faulting `pc`, reported as the *guest* address range it was lifted from,
-//!   plus the guest `rip` the run loop entered it at.
-//!
-//! What it deliberately does not claim is the exact guest instruction. Microlift
-//! emits no host-to-guest line table, so the honest answer is the region and the
-//! host offset into it — `objdump` over the guest bytes of a named range is a
-//! minute's work, and a guessed instruction would be a lie that reads like a
-//! fact.
-//!
-//! ## Why it hands the signal back rather than handling it
-//!
-//! This is a *reporter*, not a recovery mechanism, and the difference matters
-//! for two reasons. A guest fault is not this runtime's to swallow — Mono
-//! installs `SIGSEGV` handlers of its own for null checks, and
-//! [`crate::signal`] records them without installing them precisely because a
-//! `ucontext_t` describing guest registers is not something the recompiler can
-//! build. And the crash report the system writes is *evidence*: the run that
-//! produced [M7.9](../../../docs/ROADMAP.md)'s `.ips` is where the ASCII
-//! faulting address came from.
-//!
-//! So the handler prints, restores whatever disposition was in place before it
-//! (Rust's own, which turns a stack overflow into a sentence, or the default),
-//! and returns. The faulting instruction re-executes, faults again, and the
-//! process dies exactly as it would have — with one paragraph more on stderr.
-//!
-//! ## Signal-handler discipline
-//!
-//! Everything here runs in a signal handler on a faulting thread, which rules
-//! out allocation, formatting machinery, and blocking. So:
-//!
-//! - the message is assembled in a fixed stack buffer and written with one
-//!   `write(2)`, rather than through `eprintln!`;
-//! - the region map is consulted with `try_lock`, and the report says
-//!   "unavailable" rather than deadlocking against a thread that was compiling;
-//! - `SA_ONSTACK`, so a fault caused by *stack exhaustion* still has somewhere
-//!   to run — Rust's runtime has already given each thread an alternate stack.
 
 use microlift::core::srcloc::{GuestCodeMap, GuestCodeRange};
 
@@ -73,26 +14,11 @@ struct Placed {
     /// The guest `rip` the region was lifted to be entered at.
     lifted_for: u64,
     /// Host offset → guest instruction, from microlift's own source locations.
-    ///
-    /// Plain `Copy` data, sorted by host offset and non-overlapping, which is
-    /// what makes it readable from a handler: the lookup is a binary search
-    /// over a slice and touches nothing else.
-    ///
-    /// Empty when the map budget was already spent — see [`MAP_BUDGET`]. The
-    /// report then gives the region and the offset, which is what it gave
-    /// before this field existed.
     map: Vec<GuestCodeRange>,
 }
 
 impl Placed {
     /// One past the last host byte any guest instruction was lifted into.
-    ///
-    /// Not the function's length: Cranelift attributes no source location to a
-    /// prologue, an epilogue, or the entry dispatch switch, so those are absent
-    /// from the map and this under-counts by however many bytes they take. It
-    /// is still the right bound to report against, because *under*-counting
-    /// makes a `pc` past the end say so rather than claim a region it may not
-    /// be in.
     fn attributed_end(&self) -> u64 {
         self.map.last().map_or(0, |r| self.code + u64::from(r.end))
     }
@@ -100,33 +26,20 @@ impl Placed {
 
 /// Compiled translations by the host address of their entry point.
 ///
-/// Sorted, so a faulting `pc` finds the last translation at or below it —
-/// which is a *candidate*, not an answer, and is checked against that
-/// translation's own extent before the report claims it.
-///
-/// Global rather than per-thread even though the caches are per-thread: a fault
-/// handler has one question, and which thread compiled the code is not part of
-/// it.
+/// Global rather than per-thread even though the caches are per-thread: a fault handler
+/// has one question, and which thread compiled the code is not part of it.
 static PLACED: Mutex<Vec<Placed>> = Mutex::new(Vec::new());
 
 /// How many host-to-guest ranges to keep across the whole process.
 ///
-/// Sixteen bytes each, so this is a 64 MiB ceiling on the one thing here that
-/// grows with the program. A guest that generates its own code — which is the
-/// guest this module was built for — lifts tens of thousands of regions, and an
-/// unbounded map would be a memory leak wearing a diagnostic's clothes. Past
-/// the budget the maps stop being kept and the report degrades to naming the
-/// region, which is what it did before.
+/// Sixteen bytes each, so this is a 64 MiB ceiling on the one thing here that grows
+/// with the program.
 const MAP_BUDGET: usize = 4 * 1024 * 1024;
 
 /// Ranges kept so far, against [`MAP_BUDGET`].
 static MAPPED: AtomicUsize = AtomicUsize::new(0);
 
 /// Note where a translation's compiled code went, and what it came from.
-///
-/// Called from [`crate::cache`] as each region is finalized. Insertion keeps the
-/// vector sorted, which for an append-mostly list — JIT modules come from
-/// `mmap`, so later ones are usually higher — is a `push` and a rare shift.
 pub fn placed(
     code: u64,
     guest_start: u64,
@@ -155,10 +68,8 @@ pub fn placed(
 
 /// What a host `pc` turned out to be, as far as the placed translations can say.
 ///
-/// The crash path answers this question with [`say_region`], inside a signal
-/// handler, into a fixed buffer. [`crate::profile`] asks the same question a
-/// thousand times a second on an ordinary thread and wants a value back, so the
-/// lookup is written once here and worded twice.
+/// The crash path answers this question with [`say_region`], inside a signal handler,
+/// into a fixed buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Attribution {
     /// The `pc` is inside a translation, and microlift's source locations name
@@ -171,41 +82,25 @@ pub enum Attribution {
         /// key a per-region rollup aggregates on.
         region: u64,
     },
-    /// Inside a translation, in code no guest instruction was attributed to: a
-    /// prologue, an epilogue, or the entry dispatch — or any of it, if this
-    /// region's map was dropped because the [budget](MAP_BUDGET) was spent.
+    /// Inside a translation, in code no guest instruction was attributed to:
     Translated {
         region: u64,
-        /// Whether the `pc` was past everything the map attributed, which is
-        /// the [slack](EPILOGUE_SLACK) case rather than the covered one.
-        ///
-        /// The two are worth counting apart. Inside the map's own extent the
-        /// region is certain and only the instruction is missing; past it, the
-        /// region itself is an inference from "the nearest entry point at or
-        /// below", and a profile in which that bucket is large is a profile
-        /// whose model of the process has a hole in it.
+        /// Whether the `pc` was past everything the map attributed, which is the
+        /// [slack](EPILOGUE_SLACK) case rather than the covered one.
         beyond: bool,
     },
     /// In no translation this process placed.
     Elsewhere,
 }
 
-/// How far past a translation's last attributed byte still counts as that
-/// translation.
+/// How far past a translation's last attributed byte still counts as that translation.
 ///
-/// [`Placed::attributed_end`] deliberately under-counts — Cranelift attributes
-/// no source location to a prologue or an epilogue — so the true end of the
-/// compiled code is somewhere past it and nothing records where. A page is the
-/// granularity the code allocator hands out, so within one page of the last
-/// attributed byte the `pc` is still inside this region's own allocation;
-/// beyond it, claiming the region would be a guess.
+/// [`Placed::attributed_end`] deliberately under-counts — Cranelift attributes no
+/// source location to a prologue or an epilogue — so the true end of the compiled code
+/// is somewhere past it and nothing records where.
 const EPILOGUE_SLACK: u64 = 4096;
 
 /// Which guest code a host `pc` is, if it is any.
-///
-/// Takes the lock rather than [`Mutex::try_lock`], because unlike the handler
-/// this has a thread of its own and blocking briefly against a compile is
-/// cheaper than dropping the sample.
 pub fn attribute(pc: u64) -> Attribution {
     let placed = PLACED.lock().unwrap_or_else(|e| e.into_inner());
     let found = match placed.binary_search_by_key(&pc, |p| p.code) {
@@ -222,10 +117,7 @@ pub fn attribute(pc: u64) -> Attribution {
             return Attribution::Instruction { guest_va, region };
         }
     }
-    // Unattributed. Inside what the map covers it is certainly this
-    // translation; a little past the end it is this translation's epilogue;
-    // far past it, the nearest entry at or below is no longer evidence of
-    // anything and saying so beats naming a region.
+    // Unattributed.
     let end = entry.attributed_end();
     match pc < end.saturating_add(EPILOGUE_SLACK) {
         true => Attribution::Translated {
@@ -238,9 +130,8 @@ pub fn attribute(pc: u64) -> Attribution {
 
 /// One placed translation, as anything outside this module may see it.
 ///
-/// A view rather than a borrow of [`Placed`] because the vector is behind a
-/// mutex that must not escape: a caller holding a reference into it would be
-/// holding the lock every compile contends for.
+/// A view rather than a borrow of [`Placed`] because the vector is behind a mutex that
+/// must not escape:
 pub struct PlacedRegion {
     /// Host address the compiled code begins at.
     pub code: u64,
@@ -255,10 +146,7 @@ pub struct PlacedRegion {
 
 /// Walk every translation placed so far, newest layout order (by host address).
 ///
-/// The lock is held for the whole walk, so `f` must not compile anything. It is
-/// called with the region and its host-to-guest ranges, which together are the
-/// whole of what an *external* profiler needs to resolve a `pc` in an anonymous
-/// mapping — see [`crate::profile::write_map`].
+/// The lock is held for the whole walk, so `f` must not compile anything.
 pub fn for_each_placed(mut f: impl FnMut(&PlacedRegion, &[GuestCodeRange])) {
     let placed = PLACED.lock().unwrap_or_else(|e| e.into_inner());
     for entry in placed.iter() {
@@ -279,10 +167,6 @@ static INSTALLED: AtomicBool = AtomicBool::new(false);
 const NAME: usize = 48;
 
 /// One loaded guest image, flattened so a handler can search it.
-///
-/// A fixed byte array rather than a `String` because the search happens in a
-/// signal handler: the name has to be printable without touching the allocator,
-/// and a leaf name is what a reader wants anyway.
 struct Image {
     range: (u64, u64),
     name: [u8; NAME],
@@ -354,13 +238,10 @@ pub fn install() {
     }
 }
 
-/// The disposition [`install`] displaced, taken apart into fields a handler may
-/// read without a lock.
+/// The disposition [`install`] displaced, taken apart into fields a handler may read
+/// without a lock.
 ///
 /// A `sigaction` in a `static mut` would be the obvious shape and the wrong one:
-/// a handler runs on any thread at any moment, so the saved value has to be
-/// published by the same rules everything else shared between threads is. Three
-/// atomics carry the whole of what `sigaction` takes back.
 struct Saved {
     handler: AtomicUsize,
     mask: AtomicU32,
@@ -387,14 +268,11 @@ fn saved_for(signal: i32) -> &'static Saved {
 
 /// The handler. Prints, restores the previous disposition, and returns.
 ///
-/// Returning is what makes the faulting instruction run again: the second fault
-/// meets whatever was installed before this and the process ends the way it
-/// always did, with the system's crash report intact.
+/// Returning is what makes the faulting instruction run again:
 extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc::c_void) {
-    // A fault *inside* this handler would recurse until the alternate stack
-    // ran out, which would replace one unexplained crash with another. One
-    // report is all that is wanted anyway: the first fault is the interesting
-    // one.
+    // A fault *inside* this handler would recurse until the alternate stack ran
+    // out, which would replace one unexplained crash with another. One report
+    // is all that is wanted anyway:
     static REPORTING: AtomicBool = AtomicBool::new(false);
     if REPORTING.swap(true, Ordering::SeqCst) {
         restore(signal);
@@ -415,10 +293,6 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
     out.str(" at ");
     out.hex(addr);
     if let Some(text) = ascii_word(addr) {
-        // The clue that named M7.9's crash. A faulting address whose bytes are
-        // printable is not a pointer that went stale; it is a pointer that was
-        // never one, and knowing *what text* it is has repeatedly been the
-        // fastest way to the structure it was read out of.
         out.str(" (ascii \"");
         out.bytes(&text);
         out.str("\")");
@@ -482,10 +356,7 @@ fn say_region(out: &mut Buffer, pc: u64) {
     out.hex(offset);
     out.str(" into its compiled code");
     // A `pc` outside everything the map attributed is not necessarily inside
-    // this translation at all: the candidate is only "the nearest entry point
-    // at or below", so an offset past the end usually means the fault was in a
-    // *later* translation whose entry this list has not seen, or in host code
-    // between two of them. Saying which case it is beats claiming a region.
+    // this translation at all:
     if entry.map.is_empty() {
         out.str(" — no source map was kept for this region (map budget spent)");
     } else if pc >= entry.attributed_end() {
@@ -503,10 +374,6 @@ fn say_region(out: &mut Buffer, pc: u64) {
 
 /// The guest instruction covering a host offset, over microlift's own sorted,
 /// non-overlapping ranges.
-///
-/// Open-coded rather than calling [`GuestCodeMap::lookup`] because this runs in
-/// a signal handler over a slice the handler borrowed: rebuilding a
-/// `GuestCodeMap` to ask it a question would allocate.
 fn lookup(map: &[GuestCodeRange], offset: u32) -> Option<u64> {
     let i = map.partition_point(|r| r.start <= offset);
     let range = map.get(i.checked_sub(1)?)?;
@@ -515,10 +382,7 @@ fn lookup(map: &[GuestCodeRange], offset: u32) -> Option<u64> {
 
 /// Name the image a guest address is in, as `name+offset`.
 ///
-/// Silent when it is in none of them, which is not a gap: Mono writes its own
-/// code into memory it allocated, and a region lifted from there belongs to no
-/// image by construction. Saying nothing there is the honest answer, and it is
-/// also the answer that identifies generated code.
+/// Silent when it is in none of them, which is not a gap:
 fn say_image(out: &mut Buffer, addr: u64) {
     let Ok(images) = IMAGES.try_lock() else {
         return;
@@ -576,15 +440,11 @@ fn restore(signal: i32) {
 
 /// The faulting `pc`, out of the `ucontext_t` the kernel passed.
 ///
-/// The layout is Darwin's `_STRUCT_UCONTEXT` and `_STRUCT_ARM_THREAD_STATE64`,
-/// which the `libc` crate does not declare for Apple platforms. Rather than
-/// guess at the offsets, they were **measured** with `offsetof` against this
-/// system's `<sys/ucontext.h>`: `uc_mcontext` at 48 in a 56-byte `ucontext_t`,
-/// the thread state at 16 inside the `mcontext`, and `__pc` at 256 inside that —
-/// after `__x[29]`, `__fp`, `__lr` and `__sp`.
+/// The layout is Darwin's `_STRUCT_UCONTEXT` and `_STRUCT_ARM_THREAD_STATE64`, which
+/// the `libc` crate does not declare for Apple platforms.
 ///
-/// `None` on any null, because a handler that dereferences its way to a second
-/// fault has destroyed the evidence it was called to preserve.
+/// `None` on any null, because a handler that dereferences its way to a second fault
+/// has destroyed the evidence it was called to preserve.
 fn host_pc(context: *mut libc::c_void) -> Option<u64> {
     /// Byte offset of `uc_mcontext` within `ucontext_t`.
     const UC_MCONTEXT: usize = 48;
@@ -620,11 +480,6 @@ fn ascii_word(addr: u64) -> Option<[u8; 8]> {
 }
 
 /// A fixed message buffer, written out in one `write(2)`.
-///
-/// No allocation, no `core::fmt`: both are reachable from a signal handler only
-/// by assuming things about what the faulting thread was doing, and the whole
-/// point of this module is to work on the thread that was doing the worst
-/// thing.
 struct Buffer {
     bytes: [u8; 1024],
     used: usize,
@@ -638,9 +493,8 @@ impl Buffer {
         }
     }
 
-    /// Append what fits. Truncation is silent because the alternative — a
-    /// handler that reports its own overflow — is not more useful than a
-    /// shorter sentence.
+    /// Append what fits. Truncation is silent because the alternative — a handler that
+    /// reports its own overflow — is not more useful than a shorter sentence.
     fn bytes(&mut self, data: &[u8]) {
         let room = self.bytes.len() - self.used;
         let n = data.len().min(room);
@@ -698,7 +552,7 @@ mod tests {
 
     #[test]
     fn an_ascii_address_is_recognised_and_an_ordinary_one_is_not() {
-        // The word M7.9's crash faulted on. Recognising it is what turned that
+        // The word the crash faulted on. Recognising it is what turned that
         // report from "a bad pointer" into "a pointer read out of text".
         assert_eq!(ascii_word(0x70536573556e6143), Some(*b"CanUseSp"));
         assert_eq!(ascii_word(0x1383bf610), None);

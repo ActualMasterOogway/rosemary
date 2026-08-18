@@ -1,36 +1,4 @@
 //! `NSLog`, which is `printf` with two Cocoa-shaped complications.
-//!
-//! It is variadic, so it lands here for the reason every variadic does: SysV
-//! AMD64 leaves the arguments in registers and Apple's arm64 ABI wants them on
-//! the stack, and nothing bridges that generically. What makes it a module of
-//! its own rather than another entry in [`super::printf`] is the other two:
-//!
-//! - **The format is an `NSString`, not a `char *`.** There is no C string to
-//!   read at `rdi`; there is an object, and getting its bytes means asking the
-//!   host's CoreFoundation.
-//! - **`%@` is a conversion**, and rendering it means sending `description` to
-//!   whatever the guest passed. A message, from inside a shim — which works,
-//!   because the receiver is a host object either way: a guest object is a host
-//!   allocation (M6.2) and a guest class becomes the host's before it crosses.
-//!
-//! ## Why it forwards rather than prints
-//!
-//! Rendering here and writing to `stderr` would be a line that looks like
-//! `NSLog`'s and is not one: the real thing timestamps, names the process, and
-//! goes to the unified log as well as to the terminal. A guest's log line is
-//! something a *person* reads next to the host's own, so it is worth being the
-//! same thing. The rendered text is handed to the host's own `NSLog` through a
-//! `%s` format, which is the narrowest possible use of it — one C string, no
-//! conversion left for it to reinterpret, and no chance of a `%` in guest data
-//! being read as a conversion twice.
-//!
-//! ## Scope
-//!
-//! The conversions are [`super::printf`]'s, plus `%@`. `%C` and `%S` — Cocoa's
-//! wide-character forms — are not implemented, and are emitted literally like
-//! any other unrecognised conversion. An object whose `description` is not a
-//! string, or a format that is not one, renders as an empty field rather than
-//! failing the call: a logging call must not be the thing that stops a program.
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::OnceLock;
@@ -46,12 +14,10 @@ use super::set_int_return;
 /// CoreFoundation *interface*, and one that has never changed.
 const UTF8: u32 = 0x0800_0100;
 
-/// The largest rendering of one object or format this shim will read back out
-/// of CoreFoundation.
+/// The largest rendering of one object or format this shim will read back out of
+/// CoreFoundation.
 ///
-/// Totality, in the same spirit as [`crate::abi::MAX_CSTR`]: the string comes
-/// from a guest object's `description`, and a runaway one must cost a truncated
-/// log line rather than the process.
+/// Totality, in the same spirit as [`crate::abi::MAX_CSTR`]:
 const MAX_TEXT: usize = 64 * 1024;
 
 /// Service `NSLog`.
@@ -68,19 +34,14 @@ pub fn nslog(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory)
 
 /// Service `NSRunAlertPanel`.
 ///
-/// `NSInteger NSRunAlertPanel(NSString *title, NSString *msgFormat,
-/// NSString *defaultButton, NSString *alternateButton, NSString *otherButton,
-/// ...)` — the same two complications as `NSLog` (variadic, `NSString` format)
-/// with the format in the *second* position rather than the first, so five
-/// integer registers are named rather than one.
+/// `NSInteger NSRunAlertPanel(NSString *title, NSString *msgFormat, NSString
+/// *defaultButton, NSString *alternateButton, NSString *otherButton, ...)` — the same
+/// two complications as `NSLog` (variadic, `NSString` format) with the format in the
+/// *second* position rather than the first, so five integer registers are named rather
+/// than one.
 ///
-/// It is worth having rather than refusing because of *what* calls it: this is
-/// how a Cocoa game reports a fatal error before it exits. Unreal's
-/// `appMsgf`/`appRequestExit` path ends here, and a runtime that cannot service
-/// the call turns "the game told you what was wrong" into "the game stopped".
-/// So the panel is shown — that is the guest's intent — and the text is also
-/// written to `stderr`, which is where whoever is debugging the guest is
-/// looking. The panel is modal, and that is the guest's decision too.
+/// It is worth having rather than refusing because of *what* calls it: this is how a
+/// Cocoa game reports a fatal error before it exits.
 pub fn run_alert_panel(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -114,10 +75,7 @@ pub fn run_alert_panel(
             core::mem::transmute(host as usize);
         f(ctx.rdi, message, ctx.rdx, ctx.rcx, ctx.r8)
     };
-    // Which button the panel came back with is part of the diagnostic: the
-    // guest branches on it, and a program that asks a question before it opens
-    // a window gets `NSAlertAlternateReturn` from an AppKit with no `NSApp` to
-    // run a modal in — no panel is shown, and the answer is "no".
+    // Which button the panel came back with is part of the diagnostic:
     eprintln!("rosetta3: guest alert: answered {n}");
     // `NSInteger` is sixty-four bits wide, so the whole of `rax` carries it
     // rather than [`super::set_int_return`]'s `int`.
@@ -132,14 +90,12 @@ const NS_ALERT_DEFAULT_RETURN: u64 = 1;
 
 /// Render the `NSString` format at `fmt_obj` against the guest's variadic tail.
 ///
-/// `fixed_int` is how many integer argument registers the *named* parameters
-/// have already used, exactly as [`VarArgs::new`] means it: one for `NSLog`,
-/// and for a method as many as `self`, `_cmd` and the arguments up to and
-/// including the format itself.
+/// `fixed_int` is how many integer argument registers the *named* parameters have
+/// already used, exactly as [`VarArgs::new`] means it:
 ///
-/// `Ok(None)` means the format was not a readable string, which is the guest's
-/// error and not this runtime's — a logging or formatting call must not be the
-/// thing that stops a program.
+/// `Ok(None)` means the format was not a readable string, which is the guest's error
+/// and not this runtime's — a logging or formatting call must not be the thing that
+/// stops a program.
 pub fn render_format(
     symbol: &str,
     ctx: &RegisterContext,
@@ -157,15 +113,10 @@ pub fn render_format(
 
 /// `bytes` as an autoreleased `NSString`, with every `%` doubled.
 ///
-/// The doubling is what makes this usable as a *replacement format*: a variadic
-/// method whose arguments have already been rendered is re-sent with the result
-/// standing in for its format string, and a `%` that came out of guest data
-/// must not be read as a conversion a second time.
+/// The doubling is what makes this usable as a *replacement format*:
 ///
-/// Autoreleased rather than owned, because the caller is standing in for a
-/// method that took a format it did not own either. A string created `+1` here
-/// and never released would leak once per formatted message, which for a
-/// program that formats in a draw loop is every frame.
+/// Autoreleased rather than owned, because the caller is standing in for a method that
+/// took a format it did not own either.
 pub fn escaped_string(bytes: &[u8]) -> Option<u64> {
     let mut escaped = Vec::with_capacity(bytes.len());
     for b in bytes {
@@ -225,10 +176,8 @@ type NsLogFn = unsafe extern "C" fn(*const c_void, ...);
 
 /// Foundation's `NSLog`, if this process has Foundation.
 ///
-/// Looked up rather than linked, for the reason
-/// [`crate::objc::dispatch`] looks its runtime up: a guest that never touches
-/// Cocoa should not drag Foundation into the process because this file exists.
-/// A guest that calls `NSLog` has loaded it by definition.
+/// Looked up rather than linked, for the reason [`crate::objc::dispatch`] looks its
+/// runtime up:
 fn host_nslog() -> Option<NsLogFn> {
     static FOUND: OnceLock<Option<usize>> = OnceLock::new();
     let addr = *FOUND.get_or_init(|| dlsym("NSLog").map(|p| p as usize));
@@ -256,21 +205,11 @@ fn percent_s() -> Option<*const c_void> {
 
 /// The UTF-8 bytes of a `CFStringRef`/`NSString *`.
 ///
-/// The class is checked first, and that check is load-bearing rather than
-/// defensive. `CFStringGetLength` is toll-free bridged: handed an object that
-/// is not a string it sends `length` to it, an object that does not implement
-/// `length` reaches `doesNotRecognizeSelector:`, and that **raises an
-/// `NSException`** — which unwinds out of here, through the `extern "C"`
-/// boundary this shim was entered across, and aborts the process with `Rust
-/// cannot catch foreign exceptions`. Not a wrong answer: no answer, and no
-/// diagnostic naming the format that caused it. Asking `isKindOfClass:` first
-/// turns that into the `None` this function's callers already handle.
+/// The class is checked first, and that check is load-bearing rather than defensive.
+/// `CFStringGetLength` is toll-free bridged:
 ///
-/// A word that is not an object *at all* is still not survivable, and cannot
-/// be: `isKindOfClass:` dereferences its receiver like any other message. What
-/// is fixed here is the case that was observed — a real object of a class that
-/// is not a string — and the guard is placed where a `%@` conversion can meet
-/// one.
+/// A word that is not an object *at all* is still not survivable, and cannot be:
+/// `isKindOfClass:` dereferences its receiver like any other message.
 fn cf_string_bytes(obj: u64) -> Option<Vec<u8>> {
     if obj == 0 {
         return None;
@@ -315,11 +254,6 @@ fn cf_string_bytes(obj: u64) -> Option<Vec<u8>> {
 }
 
 /// `[obj description]`, as UTF-8.
-///
-/// The one place this runtime sends a message with nothing of the guest's
-/// involved: `description` is answered by the host runtime, and if the receiver
-/// is a guest object it is answered by the guest's own `IMP` through the thunk
-/// M6.2 registered — which is exactly what `NSLog("%@", myObject)` means.
 fn description_bytes(obj: u64) -> Option<Vec<u8>> {
     if obj == 0 {
         // Cocoa prints `(null)` for a nil object, and a reader who sees an
@@ -328,9 +262,7 @@ fn description_bytes(obj: u64) -> Option<Vec<u8>> {
     }
     // Every `NSObject` implements `description`, and not every object is an
     // `NSObject` — a class built on `NSProxy`, or one of the few root classes
-    // Foundation keeps, answers `doesNotRecognizeSelector:` and raises. See
-    // [`cf_string_bytes`] for why a raise here is fatal rather than merely
-    // wrong.
+    // Foundation keeps, answers `doesNotRecognizeSelector:` and raises.
     if !responds_to(obj, c"description") {
         return None;
     }
@@ -349,10 +281,9 @@ fn description_bytes(obj: u64) -> Option<Vec<u8>> {
 
 /// Whether `obj` is an instance of `class_name` or one of its subclasses.
 ///
-/// `isKindOfClass:` rather than a `CFGetTypeID` comparison, because the
-/// receiver may be a *guest* class M6.2 realized as well as one of
-/// Foundation's, and the runtime answers for both. A class the process has
-/// never heard of answers `false`, which is the safe direction.
+/// `isKindOfClass:` rather than a `CFGetTypeID` comparison, because the receiver may be
+/// a *guest* class this runtime realized as well as one of Foundation's, and the runtime
+/// answers for both.
 fn is_kind_of(obj: u64, class_name: &CStr) -> bool {
     // SAFETY: `objc_getClass` takes a C string and answers null for a name no
     // class has, which is checked rather than passed on.
@@ -374,10 +305,6 @@ fn is_kind_of(obj: u64, class_name: &CStr) -> bool {
 }
 
 /// Whether `obj`'s class implements `selector`.
-///
-/// Asked of the *class* rather than through `respondsToSelector:`, because
-/// `respondsToSelector:` is itself a message and a receiver that does not
-/// implement it raises exactly the way the message being guarded would.
 fn responds_to(obj: u64, selector: &CStr) -> bool {
     // SAFETY: `obj` is an object pointer — the host runtime's own allocation,
     // or a guest constant whose `isa` is a bind of a Foundation class — so
@@ -408,11 +335,9 @@ mod tests {
 
     /// Load Foundation, and say whether this host has one.
     ///
-    /// The driver deliberately never links it — the roadmap records what a
-    /// framework's initializers do to the `errno` a guest then reads — so a
-    /// test binary has no `NSString` until it asks for one. Every test below
-    /// skips rather than fails without it, which is the house rule for a
-    /// fixture the host cannot supply.
+    /// The driver deliberately never links it — the roadmap records what a framework's
+    /// initializers do to the `errno` a guest then reads — so a test binary has no
+    /// `NSString` until it asks for one.
     fn foundation() -> bool {
         // SAFETY: `dlopen` of an absolute path, answering null when absent.
         let handle = unsafe {
@@ -424,11 +349,8 @@ mod tests {
         !handle.is_null()
     }
 
-    /// The guard, against the host's own runtime: an object that is not a
-    /// string must come back as `None` rather than raise. Before the class
-    /// check, this test aborted the test binary — `CFStringGetLength` sends
-    /// `length`, `NSObject` does not implement it, and the resulting
-    /// `NSException` cannot cross a Rust frame.
+    /// The guard, against the host's own runtime: an object that is not a string must
+    /// come back as `None` rather than raise.
     #[test]
     fn a_non_string_object_is_not_asked_for_its_bytes() {
         if !foundation() {

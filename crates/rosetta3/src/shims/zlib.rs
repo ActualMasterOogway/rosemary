@@ -1,50 +1,4 @@
-//! zlib's four initialisers: the guest function pointers that travel *inside* a
-//! struct.
-//!
-//! ## Why the marshaller cannot do this
-//!
-//! Every other host→guest crossing in this runtime happens in an **argument**.
-//! `qsort`'s comparator, `pthread_create`'s start routine, an `atexit` handler,
-//! a signal disposition: each is a register the marshaller can point at, which
-//! is what a `cbsig!` entry names. zlib's are not. `z_stream` carries its own
-//! allocator — `zalloc`, `zfree` and an `opaque` cookie — and the guest fills
-//! those fields in before calling `inflateInit_`, so what crosses the seam is a
-//! pointer to a structure with two guest code pointers eleven and twelve fields
-//! deep. A signature has no way to say that.
-//!
-//! What made it worth writing rather than refusing: libpng does exactly this,
-//! unconditionally. `png_create_read_struct` sets `zalloc = png_zalloc` and
-//! `zfree = png_zfree` and hands the stream straight to `inflateInit_`, so the
-//! host's zlib allocates its inflate state by calling *guest* code — with
-//! nothing of this runtime's on the stack and no thunk anywhere. It faults
-//! inside `inflateInit_` on a non-executable page, several frames from anything
-//! naming the cause, and it is on the path of every program that decodes a PNG.
-//!
-//! ## Substituted in place, and why that is safe here
-//!
-//! The shim writes the thunks back into the guest's own `z_stream`, the way
-//! [`crate::signal`] hands a disposition out. That is the only place they can
-//! go: zlib reads `strm->zalloc` again at every allocation and at
-//! `inflateEnd`, long after this call has returned, so a substitution kept on
-//! the side would be read straight past.
-//!
-//! The guest can therefore observe a pointer it did not write. It is safe for
-//! the same reason the field exists: `zalloc` is a *callee*, and nothing reads
-//! it back to compare — libpng writes it and never looks at it again. A caller
-//! that did would be handed a trampoline, which is the same trade
-//! [`crate::signal`] makes and, unlike `signal`, has no returning direction to
-//! undo it on.
-//!
-//! ## The layout is not translated, and that is checked rather than assumed
-//!
-//! `z_stream` is pointers, `uInt`s and `uLong`s, all of which agree between
-//! x86-64 and arm64 macOS — the same fact the `pthread` types rest on. So the
-//! guest's stream is operated on *in place* by the host's zlib and only the two
-//! code pointers need anything done to them. The one thing that would break
-//! silently is a wrong field offset, so the offsets below are asserted against
-//! the host's own `sizeof` in the tests: `stream_size`, which every one of these
-//! entry points takes as an argument, is the guest's own statement of the
-//! structure's size, and it must equal the host's.
+//! zlib's four initialisers: the guest function pointers that travel *inside* a struct.
 
 use core::ffi::{c_char, c_int, c_void};
 
@@ -107,13 +61,8 @@ unsafe extern "C" {
     fn inflateEnd(strm: *mut c_void) -> c_int;
 }
 
-/// Replace the guest allocator pointers in the `z_stream` at `strm` with
-/// thunks, in place.
-///
-/// A null field is left null, which is how a program asks zlib for its default
-/// allocator and is much the commoner case; only a program that supplies one —
-/// libpng, and anything else pooling its allocations — reaches the substitution
-/// at all.
+/// Replace the guest allocator pointers in the `z_stream` at `strm` with thunks, in
+/// place.
 fn substitute_allocators(
     symbol: &str,
     strm: u64,
@@ -135,14 +84,10 @@ fn substitute_allocators(
     Ok(())
 }
 
-/// Everything the four entry points share: check the size the guest claims,
-/// substitute, and hand the host its own version string.
+/// Everything the four entry points share: check the size the guest claims, substitute,
+/// and hand the host its own version string.
 ///
-/// The version string is deliberately **not** the guest's. zlib compares it
-/// only against its own first character — a compatibility check between a
-/// caller and the library it was compiled against — and the guest was compiled
-/// against a different copy of zlib than the one about to run. Passing the
-/// host's own answer is what makes that check mean what it is for.
+/// The version string is deliberately **not** the guest's.
 fn init_with(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -212,15 +157,10 @@ pub fn deflate_init(
     })
 }
 
-/// `int deflateInit2_(z_streamp strm, int level, int method, int windowBits,
-/// int memLevel, int strategy, const char *version, int stream_size)`
+/// `int deflateInit2_(z_streamp strm, int level, int method, int windowBits, int
+/// memLevel, int strategy, const char *version, int stream_size)`
 ///
-/// Eight arguments: six in the guest's registers, and the last two on its
-/// stack. Only the seventh is a pointer, and it is the version string this shim
-/// replaces anyway — so the one that has to be read back is `stream_size`, the
-/// second spilled word. Microlift exits *before* the `CALL`, so `rsp` is still
-/// the pre-call value and the first spilled argument is at `[rsp]`, not past a
-/// return address. See [`crate::abi::marshal`].
+/// Eight arguments: six in the guest's registers, and the last two on its stack.
 pub fn deflate_init2(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -265,10 +205,7 @@ pub type Shim = crate::signal::Shim;
 
 /// Whether `name` (underscore already stripped) is one of this module's.
 ///
-/// `inflate`, `inflateEnd`, `deflate` and the rest are deliberately **not**
-/// here: they read the allocator out of the stream this shim has already
-/// patched, so they are ordinary calls with an ordinary signature. Only the
-/// four entry points that *capture* the pointers need to see them.
+/// `inflate`, `inflateEnd`, `deflate` and the rest are deliberately **not** here:
 pub fn shim_for(name: &str) -> Option<Shim> {
     match name {
         "inflateInit_" => Some(inflate_init),
@@ -308,10 +245,7 @@ struct ZStream {
 mod tests {
     use super::*;
 
-    /// The offsets this module writes at must be the ones the host's zlib
-    /// reads at. Checked structurally against the layout rather than asserted,
-    /// because a wrong offset here corrupts a neighbouring field instead of
-    /// failing.
+    /// The offsets this module writes at must be the ones the host's zlib reads at.
     #[test]
     fn the_stream_offsets_are_the_hosts() {
         assert_eq!(core::mem::size_of::<ZStream>(), Z_STREAM_SIZE as usize);
@@ -319,9 +253,8 @@ mod tests {
         assert_eq!(core::mem::offset_of!(ZStream, zfree) as u64, ZFREE_OFFSET);
     }
 
-    /// A guest allocator that is really callable from the host, standing in for
-    /// what a thunk would be. Returning real memory matters: `inflateInit_`
-    /// allocates its state through it and then uses it.
+    /// A guest allocator that is really callable from the host, standing in for what a
+    /// thunk would be. Returning real memory matters:
     extern "C" fn host_alloc(_opaque: *mut c_void, items: u32, size: u32) -> *mut c_void {
         // SAFETY: a plain allocation of a non-zero size, freed by `host_free`.
         unsafe { libc::calloc(items as usize, size as usize) }
@@ -414,11 +347,9 @@ mod tests {
         assert_eq!(rc, 0);
     }
 
-    /// A guest that supplies no allocator must reach zlib's own — and zlib
-    /// **writes its defaults back into the stream**, which is the fact that
-    /// makes re-initialising the same stream safe: the fields it left behind are
-    /// host pointers, and `substitute` passes a host pointer through unchanged
-    /// rather than wrapping it a second time.
+    /// A guest that supplies no allocator must reach zlib's own — and zlib **writes its
+    /// defaults back into the stream**, which is the fact that makes re-initialising
+    /// the same stream safe:
     #[test]
     fn a_default_allocator_reaches_zlibs_own_and_is_not_wrapped() {
         let mut strm = ZStream::default();

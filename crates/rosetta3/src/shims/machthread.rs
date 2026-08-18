@@ -1,87 +1,4 @@
 //! A guest thread's registers, and the stack they belong to.
-//!
-//! ## Why a garbage collector asks the kernel
-//!
-//! A conservative collector has to find every pointer that is live, and a
-//! pointer can be in a register or on a stack. It cannot ask a running thread,
-//! so it suspends every other thread and asks the *kernel* for the registers
-//! and the stack pointer of each one. On Darwin that is `thread_get_state`, and
-//! Boehm — `libmonobdwgc-2.0`, the collector Unity ships — aborts the process
-//! outright if it fails:
-//!
-//! ```text
-//! if (result != KERN_SUCCESS) ABORT("thread_get_state failed");
-//! ```
-//!
-//! Which it does, for a guest thread, and not by accident. The thread really is
-//! a native arm64 thread; asking it for `x86_THREAD_STATE64` is asking the
-//! kernel a question about a register file the CPU does not have. The guest's
-//! registers are in a [`RegisterContext`] this runtime owns, and the guest's
-//! frames are on a [`crate::stack::GuestStack`] that no `pthread` call knows
-//! about. Neither is the kernel's to report.
-//!
-//! [`crate::thread`] already knows both. This module is the part that answers.
-//!
-//! ## The two halves, and why both are needed
-//!
-//! A collector needs a *range* and it builds one from two sources, so shimming
-//! either alone produces a scan of the wrong memory rather than a diagnostic:
-//!
-//! - **`thread_get_state`** gives it the low end — a stack pointer — and the
-//!   register roots.
-//! - **`pthread_get_stackaddr_np`** and **`pthread_get_stacksize_np`** give it
-//!   the high end. Passed through, they describe the *host* stack the thread
-//!   was created with, which under this runtime holds the JIT's frames and none
-//!   of the guest's. A collector handed the host stack and a guest stack
-//!   pointer computes a range spanning two unrelated mappings.
-//!
-//! ## What is honest here and what is approximate
-//!
-//! The registers are the context's, and the context is written at every VM
-//! exit. For a thread parked in a host call — which is where a collector finds
-//! almost all of them, since Unity's workers sit in `semaphore_wait` — that is
-//! exact: the last exit *was* the call it is parked in.
-//!
-//! For a thread suspended in the middle of a translated region it is not. The
-//! region keeps guest values in host registers between exits, so a pointer held
-//! only in a register there is invisible, and `rsp` is the value from the last
-//! exit rather than the live one.
-//!
-//! ## The over-scan that was tried, and why it is gone
-//!
-//! The first version reported a **watermark** instead — the deepest `rsp` the
-//! thread had ever been seen at, which is always at or below the live one, so
-//! the scan was guaranteed to cover every frame either way. The reasoning was
-//! that over-scanning dead stack costs a conservative collector retention and
-//! never correctness.
-//!
-//! That is true and it was still the wrong trade. The watermark is monotonic,
-//! so once a thread goes deep — and Mono's JIT and Unity's scene loading go
-//! very deep — *every* collection afterwards scans from there to the top of an
-//! eight-megabyte stack, on every thread, forever. Subnautica reached its main
-//! menu and then spent minutes at a hundred percent of a core inside
-//! `libmonobdwgc`, which reads from the outside as a deadlock rather than as a
-//! slow collector. Retention makes it worse on its own terms, too: scanned
-//! dead stack keeps garbage alive, which triggers the next collection sooner.
-//!
-//! So the live `rsp` it is. The register half is not answerable without parking
-//! guest threads at safepoints, which is a larger piece of work; the stack half
-//! now shares its precision.
-//!
-//! The consequence, stated plainly: a pointer whose only copy is in a guest
-//! register — or below the last synced `rsp` — of a thread suspended
-//! mid-region can be missed, and a conservative collector that misses a root
-//! frees a live object. Nothing here makes that impossible. What it does is
-//! remove the case where every thread is missed and the process aborts before
-//! it can run at all.
-//!
-//! ## Layouts
-//!
-//! `x86_thread_state64_t` is twenty-one doublewords and
-//! `x86_float_state64_t` is 524 bytes with `xmm0` at 168. Both are read out of
-//! the x86-64 SDK headers by `tests/machthread.rs`, which compiles a fixture
-//! with `-arch x86_64` and compares — the host's own headers describe arm64 and
-//! cannot be asked.
 
 use microlift::arch::x86_64::context::RegisterContext;
 
@@ -109,32 +26,21 @@ const KERN_INVALID_ARGUMENT: i32 = 4;
 
 /// `x86_thread_state64_t`, in the order the header declares it.
 ///
-/// `rsp` is passed separately rather than taken from `ctx` so the choice of
-/// *which* stack pointer to report is made in one place and is visible to the
-/// test — see the module note on the watermark that used to be reported here.
-///
 /// Written as a list rather than a struct because that is exactly what it is:
-/// twenty-one doublewords, and the only thing that matters is which guest
-/// register goes in each slot.
 fn thread_state64(ctx: &RegisterContext, rsp: u64) -> [u64; 21] {
     [
         ctx.rax, ctx.rbx, ctx.rcx, ctx.rdx, ctx.rdi, ctx.rsi, ctx.rbp, rsp, ctx.r8, ctx.r9,
         ctx.r10, ctx.r11, ctx.r12, ctx.r13, ctx.r14, ctx.r15, ctx.rip,
-        // `rflags`, `cs`, `fs`, `gs`. The flags are not modelled as a word by
-        // the recompiler and nothing that asks for this state reads them; the
-        // segment selectors are meaningless in 64-bit mode, where `%gs` is a
-        // base rather than a selector — and the base is not what this field
-        // holds.
+        // `rflags`, `cs`, `fs`, `gs`.
         0, 0, 0, 0,
     ]
 }
 
-/// `kern_return_t thread_get_state(thread_act_t, thread_state_flavor_t,
-/// thread_state_t, mach_msg_type_number_t *)`
+/// `kern_return_t thread_get_state(thread_act_t, thread_state_flavor_t, thread_state_t,
+/// mach_msg_type_number_t *)`
 ///
-/// Answers for a *guest* thread and passes everything else through, including
-/// every flavour but the two a collector asks for. A thread this runtime has
-/// never run guest code on is the host's to describe.
+/// Answers for a *guest* thread and passes everything else through, including every
+/// flavour but the two a collector asks for.
 fn thread_get_state(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -150,9 +56,7 @@ fn thread_get_state(
     }
 
     // The count is in-out: the caller states its buffer's capacity in 32-bit
-    // words and the callee overwrites it with what it wrote. Refusing a short
-    // buffer rather than truncating is what the kernel does, and a collector
-    // that got a truncated state would read a stack pointer out of padding.
+    // words and the callee overwrites it with what it wrote.
     let mut capacity = [0u8; 4];
     mem.read(count_at, &mut capacity)
         .map_err(|_| bad_pointer(symbol, count_at))?;
@@ -177,10 +81,7 @@ fn thread_get_state(
             buf
         }
         // Registered, and not inside guest code: it has entered before and
-        // returned. There are no guest frames to scan and no guest registers to
-        // report, and a zeroed state says exactly that — a null stack pointer
-        // is what a collector reads as "nothing here", where a stale one would
-        // send it into a stack that is no longer in use.
+        // returned.
         (X86_THREAD_STATE64, None) => vec![0u8; X86_THREAD_STATE64_COUNT as usize * 4],
         (_, guest) => float_state64(guest),
     };
@@ -193,16 +94,11 @@ fn thread_get_state(
     Ok(())
 }
 
-/// `x86_float_state64_t`, with the sixteen `xmm` registers filled in and
-/// everything else zero.
+/// `x86_float_state64_t`, with the sixteen `xmm` registers filled in and everything
+/// else zero.
 ///
-/// The x87 stack, the control and status words and the reserved tail are not
-/// modelled by the recompiler and are not read by anything that asks for this:
-/// a collector wants the `xmm` registers because a pointer can be spilled into
-/// one, and nothing else in the structure can hold a root. `mxcsr` is set to
-/// the ABI's initial value rather than zero, because zero is a *valid* control
-/// word that unmasks every exception, and a crash reporter printing it would
-/// otherwise report a state the guest never had.
+/// The x87 stack, the control and status words and the reserved tail are not modelled
+/// by the recompiler and are not read by anything that asks for this:
 fn float_state64(guest: Option<&RegisterContext>) -> Vec<u8> {
     /// The `MXCSR` a process starts with: all exceptions masked, round to
     /// nearest.
@@ -266,15 +162,12 @@ fn guest_thread_of(pthread: u64) -> Option<&'static crate::thread::GuestThread> 
     crate::thread::by_port(port)
 }
 
-/// The host's own implementation of each name this module claims, resolved
-/// **before** any of them can be called.
+/// The host's own implementation of each name this module claims, resolved **before**
+/// any of them can be called.
 ///
-/// `dlsym` takes dyld's global lock, and this module's whole reason for
-/// existing is that it is called with every other thread suspended — including,
-/// possibly, one holding that lock. Resolving on demand would therefore
-/// deadlock exactly as a `Mutex` in [`crate::thread`]'s registry would, and for
-/// the same reason. So [`warm`] does the lookups at start-up, on one thread,
-/// with nothing suspended.
+/// `dlsym` takes dyld's global lock, and this module's whole reason for existing is
+/// that it is called with every other thread suspended — including, possibly, one
+/// holding that lock.
 static HOST: std::sync::OnceLock<[Option<u64>; 3]> = std::sync::OnceLock::new();
 
 /// Resolve this module's host entry points. Called once, before the guest runs.

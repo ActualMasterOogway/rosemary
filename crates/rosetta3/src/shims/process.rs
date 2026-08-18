@@ -7,9 +7,7 @@ use crate::abi::{GuestMemory, Result};
 
 /// `int proc_pidpath(int pid, void *buffer, uint32_t buffersize)`.
 ///
-/// The host implementation would identify the arm64 mirror executable. The
-/// guest must see the path it was loaded from, which is also the path used by
-/// the guest's dyld namespace and bundle resources.
+/// The host implementation would identify the arm64 mirror executable.
 pub fn proc_pidpath(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -33,18 +31,9 @@ pub fn proc_pidpath(
     Ok(())
 }
 
-// `pthread_get_stackaddr_np` and `pthread_get_stacksize_np` were here, and
-// answered about the **calling** thread whichever thread they were asked about.
-// That is right for the one call a program makes about itself and wrong for
-// every other one — and the caller that matters asks about other threads by
-// definition: a collector suspends the world and asks for each thread's stack in
-// turn, and got the collector's own back every time.
-//
-// They live in [`super::machthread`] now, beside `thread_get_state`, which the
-// same caller asks the same question of and which has the `pthread_t` → thread
-// lookup already. This module is consulted *before* that one, so the copies here
-// silently shadowed the answers there; the note stays so a third copy is not
-// written over the top of them again.
+// `pthread_get_stackaddr_np` and `pthread_get_stacksize_np` live in
+// [`super::machthread`], which has the `pthread_t` -> thread lookup. This module
+// is consulted first, so a copy here would silently shadow them.
 
 /// The guest has no separately protected JIT mapping to toggle.
 pub fn pthread_jit_write_protect_np(

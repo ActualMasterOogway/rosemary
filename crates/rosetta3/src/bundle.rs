@@ -1,73 +1,12 @@
 //! Making the guest's `.app` the process's main bundle.
-//!
-//! ## The problem, which nothing in the loader can fix
-//!
-//! Everything else this runtime does is a question about the *guest image*:
-//! where its segments go, what its imports resolve to, how its calls are
-//! marshalled. This is a question about the **process**, and the process is
-//! ours.
-//!
-//! `[NSBundle mainBundle]` is derived from the running executable's path — walk
-//! up from `<X>.app/Contents/MacOS/<exe>` and you have `<X>.app`. Under this
-//! runtime the running executable is `rosetta3`, wherever it was built, so
-//! `mainBundle` is not an application bundle at all. `NSApplicationMain` then
-//! finds no `Info.plist`, loads no `NSMainNibFile`, creates no window and no
-//! delegate, and the program sits in `[NSApp run]` forever having done nothing.
-//! No diagnostic anywhere: an application with no nib is a legal application.
-//!
-//! Everything downstream inherits it. `[[NSBundle mainBundle] pathForResource:]`
-//! is how a bundled program finds its own data — a GameMaker runner loads
-//! `game.ios` that way — and `@executable_path` in a bundled dylib's install
-//! name resolves against the same directory.
-//!
-//! ## What is done about it
-//!
-//! The process re-executes itself from inside a *mirror* of the guest's bundle:
-//! a directory whose `Contents/Info.plist` is the guest's, whose `Resources`
-//! and every other `Contents` entry are symlinks to the guest's, and whose
-//! `Contents/MacOS/<exe>` is a copy of this binary. From there `mainBundle` is
-//! the guest's bundle in every respect a program can observe, because it *is*
-//! the guest's bundle everywhere except the one file that has to be arm64.
-//!
-//! Three details, each of which was a failure before it was a line of code:
-//!
-//! - **`Info.plist` is copied, not symlinked.** `CFBundle` follows the symlink
-//!   happily; `codesign` and the kernel's signature check do not, and a bundle
-//!   whose `Info.plist` is a symlink cannot be signed at all.
-//! - **The executable is written to a fresh path, never over an existing one.**
-//!   Overwriting a Mach-O that the kernel has already seen leaves a signature
-//!   that no longer matches its contents, and the *next* execution dies with
-//!   `SIGKILL` and no message whatsoever. Writing to a temporary name and
-//!   renaming it into place gives the kernel a file it has never validated.
-//! - **The mirror is keyed by the host binary's identity**, so a rebuilt
-//!   `rosetta3` does not reuse the previous copy.
-//!
-//! ## What this is not
-//!
-//! Not a sandbox, not an installer, and not a modification of the guest's
-//! bundle: nothing is ever written inside the application. The mirror lives in
-//! this user's cache directory and is disposable — deleting it costs one file
-//! copy on the next launch.
-//!
-//! A guest that is not inside a `.app` needs none of this and gets none of it:
-//! [`remirror`] answers `None` and the driver runs the program directly, which
-//! is every test fixture in this repository and every command-line binary.
 
 use std::path::{Path, PathBuf};
 
 /// Set in the re-executed process, so it never re-executes again.
-///
-/// The guard is an environment variable rather than a check on our own path
-/// because the check would have to be "am I already inside a bundle", which is
-/// true for a `rosetta3` that someone installed into one.
 const GUARD: &str = "ROSETTA3_BUNDLED";
 
 /// The bundle a path is the main executable of: `<X>.app` for
 /// `<X>.app/Contents/MacOS/<exe>`.
-///
-/// Shape rather than name: `CFBundle`'s own rule is the directory two levels
-/// above an executable in `Contents/MacOS`, and it does not care what the
-/// executable is called or whether it matches `CFBundleExecutable`.
 pub fn enclosing(exe: &Path) -> Option<PathBuf> {
     let macos = exe.parent()?;
     if macos.file_name()? != "MacOS" {
@@ -84,29 +23,21 @@ pub fn enclosing(exe: &Path) -> Option<PathBuf> {
         .then(|| app.to_path_buf())
 }
 
-/// Build a mirror of the guest's bundle around this executable and return the
-/// path to run instead of the current one.
+/// Build a mirror of the guest's bundle around this executable and return the path to
+/// run instead of the current one.
 ///
-/// `None` when there is nothing to do — the guest is not in a bundle, this
-/// process is already the re-executed one, or the mirror could not be built.
-/// The last of those is deliberately not an error: a program that does not
-/// consult its bundle runs perfectly without one, and refusing to start would
-/// turn a cosmetic problem into a fatal one.
+/// `None` when there is nothing to do — the guest is not in a bundle, this process is
+/// already the re-executed one, or the mirror could not be built.
 pub fn remirror(guest: &Path) -> Option<PathBuf> {
     if std::env::var_os(GUARD).is_some() {
         return None;
     }
-    // Canonical first: a guest launched as `./Mac_Runner` from inside its own
-    // `Contents/MacOS` has `.` for a parent, and the shape test would say it is
-    // not in a bundle — which is how a program launched the most natural way of
-    // all would have been the one case this never fired for.
+    // Canonical first:
     let guest = std::fs::canonicalize(guest).ok()?;
     let app = enclosing(&guest)?;
     let host = std::env::current_exe().ok()?;
     // The mirror reproduces the **shape** of the original tree, not just the
-    // `.app`: two levels of ancestor, each with its siblings linked in. See
-    // [`link_ancestors`] for why one level is not enough and why two is where
-    // it stops.
+    // `.app`: two levels of ancestor, each with its siblings linked in.
     let root = cache_dir()?.join(key(&app, &host)?);
     let mirror = link_ancestors(&app, &root)?;
     let exe_name = guest.file_name()?;
@@ -137,11 +68,6 @@ pub fn remirror(guest: &Path) -> Option<PathBuf> {
 }
 
 /// Replace this process with `exe`, keeping the arguments.
-///
-/// Returns only on failure: a successful `execv` does not come back. The
-/// argument vector is this process's own, so the re-executed copy sees exactly
-/// the command line the user typed — including the guest path, which is still
-/// the *real* one and not the mirror's, so nothing about loading changes.
 pub fn reexec(exe: &Path) -> std::io::Error {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -190,40 +116,14 @@ fn key(app: &Path, host: &Path) -> Option<String> {
 
 /// Symlink every entry of `from` into `to`, skipping `except`.
 ///
-/// Best-effort throughout: a link that already exists is left alone, and one
-/// that cannot be made is skipped. A missing resource is the guest's problem to
-/// report in its own words, and a hard failure here would turn "this program
-/// cannot find its icon" into "this program will not start".
-/// Reproduce `app`'s last two ancestor directories under `root`, linking each
-/// one's other children, and return where the mirrored `.app` goes.
+/// Best-effort throughout: a link that already exists is left alone, and one that
+/// cannot be made is skipped.
 ///
 /// ## Why the mirror needs a shape and not just a directory
 ///
-/// A game's data is not always inside its bundle, and a path relative to the
-/// executable is how it finds it. Starbound is the case: `sbinit.config`,
-/// `assets/`, `mods/` and `storage/` are **not** `Contents/Resources` entries.
-/// `sbinit.config` sits beside `Starbound.app` and names the others as
-/// `../assets/`, relative to itself.
-///
-/// So one level is not enough. Linking the `.app`'s siblings finds
-/// `sbinit.config` — the game got that far and then reported
-/// `Root: Skipping asset directory '../assets/', directory not found`, which is
-/// the same failure one directory further out. Two levels puts the mirror at
-/// `<key>/osx/Starbound.app`, so `../assets/` lands on `<key>/assets`, which is
-/// a link to the real one.
-///
 /// ## Why it stops at two
 ///
-/// Because the cost is not symmetric. Each level links every child of a
-/// directory this runtime does not own, and the further out it goes the less
-/// that directory has to do with the guest — one more level for a game whose
-/// `.app` sits directly in its install directory would link every *other* game
-/// in `steamapps/common`. Two covers "data beside the app" and "data one above
-/// it", which is every layout observed. A guest that walks further up gets the
-/// same honest failure Starbound gave: its own diagnostic, naming its own file.
-///
-/// Symlinks throughout, so a twelve-gigabyte asset tree costs a handful of
-/// inodes.
+/// Because the cost is not symmetric.
 fn link_ancestors(app: &Path, root: &Path) -> Option<PathBuf> {
     let app_name = app.file_name()?;
     let Some(parent) = app.parent() else {
@@ -236,8 +136,7 @@ fn link_ancestors(app: &Path, root: &Path) -> Option<PathBuf> {
 
     // The grandparent's children beside the reproduced parent, then the
     // parent's beside the reproduced `.app`. The directory being reproduced is
-    // excluded at each level: it is the one thing that must not be a link back
-    // to the original, because the mirror is the substitute for what is in it.
+    // excluded at each level:
     if let Some(grand) = parent.parent() {
         link_children(grand, root, &[&parent_name.to_string_lossy()]);
     }

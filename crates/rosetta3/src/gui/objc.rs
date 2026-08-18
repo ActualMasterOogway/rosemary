@@ -1,21 +1,4 @@
 //! Sending messages, from this runtime rather than for the guest.
-//!
-//! [`crate::objc::dispatch`] is the guest's side of Objective-C: it takes a
-//! message the *guest* sent, works out the signature from the method's type
-//! encoding, and calls through. Nothing here needs any of that. The overlay
-//! sends a fixed, small set of messages whose signatures are in Apple's headers
-//! and are known at compile time, so what it wants is the plain thing: an
-//! `objc_msgSend` cast to the prototype the header gives and called.
-//!
-//! ## Why arm64 makes this short
-//!
-//! On x86-64 a message returning a large struct goes to `objc_msgSend_stret`
-//! and one returning a `long double` to `objc_msgSend_fpret`, so a wrapper has
-//! to know the return type's class before it can pick an entry point. AAPCS64
-//! has neither: a large return is an indirect result in `x8`, which is an
-//! ordinary calling-convention detail Rust already emits, and **every** message
-//! goes through `objc_msgSend`. So one transmute per arity covers everything the
-//! overlay sends, including the one that returns a `CGRect`.
 
 use std::ffi::{CString, c_void};
 
@@ -53,24 +36,9 @@ pub fn sel(name: &str) -> Sel {
 
 /// Whether `object` implements `selector`.
 ///
-/// **Not politeness — the alternative is fatal.** Sending a selector a class
-/// does not implement raises `NSInvalidArgumentException`, and a foreign
-/// exception unwinding out of this runtime aborts the process with no
-/// diagnostic. The overlay identifies objects by the messages the guest sends
-/// *about* them, so it is regularly holding something it believes is a drawable
-/// or a command buffer on the strength of one selector, and asking first is what
-/// makes that belief safe to act on.
-///
-/// Asked of the runtime's method tables rather than by sending
-/// `respondsToSelector:`, because that is itself a message and the receiver
-/// might not be an object at all.
-///
 /// # Safety
 ///
-/// `object` must be null or a live object pointer. That is a weaker obligation
-/// than it looks — the whole point is that nothing about the object's *class* is
-/// assumed — but it is not nothing: a pointer to freed memory is read here just
-/// as it would be by the send this is protecting.
+/// `object` must be null or a live object pointer.
 pub unsafe fn responds(object: Id, selector: Sel) -> bool {
     if object.is_null() || selector.is_null() {
         return false;
@@ -95,10 +63,8 @@ macro_rules! sender {
         ///
         /// # Safety
         ///
-        /// `R` and the argument types must be the method's actual signature, as
-        /// its framework header declares it, and `receiver` must respond to
-        /// `selector`. Nothing checks either — this is `objc_msgSend`, which has
-        /// no signature of its own and takes whichever one the method has.
+        /// `R` and the argument types must be the method's actual signature, as its
+        /// framework header declares it, and `receiver` must respond to `selector`.
         #[allow(clippy::missing_safety_doc, non_snake_case)]
         pub unsafe fn $name<R, $($arg),*>(receiver: Id, selector: Sel, $($arg: $arg),*) -> R {
             // SAFETY: `entry` is `objc_msgSend`'s address, and the caller has
@@ -124,13 +90,6 @@ sender!(send3, A, B, C);
 sender!(send4, A, B, C, D);
 
 /// Push an autorelease pool, returning the token that pops it.
-///
-/// The overlay runs inside the guest's render loop, and a render loop that
-/// presents through a `CAMetalLayer` may or may not have a pool on the stack —
-/// SDL's does, a hand-written `CVDisplayLink` callback often does not. Every
-/// per-frame object the Metal backend creates is autoreleased, so without a pool
-/// of its own the overlay would leak a render pass descriptor and an encoder per
-/// frame in exactly the programs least able to afford it.
 ///
 /// # Safety
 ///

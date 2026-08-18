@@ -1,48 +1,4 @@
 //! The Carbon Component Manager, answered by the AudioComponent registry.
-//!
-//! ## The finding
-//!
-//! `FindNextComponent`, `OpenAComponent` and `CloseComponent` are the
-//! pre-10.6 way to reach an audio unit, and UNDERTALE's runner — built against
-//! the 10.13 SDK but carrying much older code — still uses them. All three are
-//! still **exported** by arm64 CoreServices, so native passthrough resolves
-//! them and they were ordinary signatures in [`crate::abi::table`]. They are
-//! also **empty**: a `FindNextComponent` for `auou/def /appl` returns null on
-//! this host while an `AudioComponentFindNext` for the identical description
-//! returns a component. Checked by compiling both calls into one arm64 program
-//! and running it, because "the symbol resolves" and "the call works" are
-//! different claims and only the first one is visible from a link.
-//!
-//! The guest then says so itself — "FindNextComponent unable to find a default
-//! audio output device" — and carries on with no sound. That is a *correct*
-//! forward of a call that does nothing, which is the worst shape a passthrough
-//! can take: nothing refuses and nothing faults.
-//!
-//! ## Why substituting the modern API is sound and not a guess
-//!
-//! The two registries are the same registry with two front doors, and the
-//! types on either side are the same types:
-//!
-//! - `ComponentDescription` and `AudioComponentDescription` are both five
-//!   32-bit fields in the same order — type, subtype, manufacturer, flags,
-//!   flags mask — so the guest's descriptor is passed through by address.
-//! - `Component` and `AudioComponent` are both opaque pointers, as are
-//!   `ComponentInstance` and `AudioComponentInstance`.
-//! - Everything the guest does *after* opening — `AudioUnitSetProperty`,
-//!   `AudioUnitInitialize`, `AudioOutputUnitStart` — takes that instance and is
-//!   already passed through, and takes it under both spellings.
-//!
-//! So the only difference between the two APIs is the error type: the modern
-//! calls return `OSStatus` where `OpenAComponent` returns one too and
-//! `FindNextComponent` returns the component itself. Nothing is translated
-//! here; the calls are renamed.
-//!
-//! ## What is deliberately not here
-//!
-//! `GetComponentInfo`, `CountComponents` and the rest of the Component Manager.
-//! They have modern counterparts as well, and no program has reached one — the
-//! rule this project follows is that an entry no program exercises is not
-//! evidence of anything.
 
 use microlift::arch::x86_64::context::RegisterContext;
 
@@ -63,14 +19,8 @@ pub fn shim_for(name: &str) -> Option<Shim> {
     }
 }
 
-/// The three modern entry points, found by `dlsym` rather than linked — the
-/// same care [`audiounit`](super::audiounit) takes and for the same reason:
-/// linking AudioToolbox runs its initializers before the guest starts, and they
-/// leave `errno` set for a guest that reads the host's.
-///
-/// `RTLD_DEFAULT` is enough. This shim runs only because the guest imported a
-/// Component Manager entry point, and resolving *that* import is what loaded
-/// CoreServices and AudioToolbox behind it.
+/// The three modern entry points, found by `dlsym` rather than linked — the same care
+/// [`audiounit`](super::audiounit) takes and for the same reason:
 fn host_fn<T: Copy>(name: &core::ffi::CStr, cache: &std::sync::OnceLock<Option<T>>) -> Option<T> {
     *cache.get_or_init(|| {
         // SAFETY: a NUL-terminated name and a well-known pseudo-handle. The
@@ -171,9 +121,7 @@ mod tests {
     }
 
     /// The shim finds AudioToolbox with `RTLD_DEFAULT`, which in a real run is
-    /// satisfied by the guest's own import having loaded it. A test process has
-    /// no guest, so it loads the framework itself — which keeps the whole path
-    /// under test, the real registry included.
+    /// satisfied by the guest's own import having loaded it.
     fn framework_loaded() -> bool {
         static LOADED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *LOADED.get_or_init(|| {
@@ -200,8 +148,7 @@ mod tests {
     fn the_default_output_unit_is_found_where_the_legacy_call_finds_nothing() {
         // The finding this module exists for, asserted rather than described:
         // the same description through the modern registry produces a
-        // component. If this ever starts failing, the substitution is no longer
-        // the right answer and the module should say so instead.
+        // component.
         if !framework_loaded() {
             return;
         }

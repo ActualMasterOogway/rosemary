@@ -1,51 +1,4 @@
 //! Objective-C type encodings, read as signatures.
-//!
-//! Every other import in this project needs a signature the embedder wrote down
-//! by hand ([`crate::abi::table`]), because a Mach-O records names and not
-//! types. An Objective-C method is the one call whose signature the *image*
-//! answers: `method_t::types` is `i20@0:8i16` for `- (int)twice:(int)x` — the
-//! return type, then `self`, the selector, and each argument, each followed by
-//! the frame offset a long-dead calling convention would have put it at.
-//!
-//! That is what makes `objc_msgSend` marshallable at all. It has no signature of
-//! its own — it has *whichever* signature the selector's method declares — so
-//! the alternative to reading the encoding is guessing, which is the one thing
-//! this project refuses everywhere else. For a *host* method the same string
-//! comes back from `method_getTypeEncoding`, so both directions are described by
-//! the same source.
-//!
-//! ## What is refused, and why each refusal is not laziness
-//!
-//! - **Aggregates** (`{CGRect=...}`, `[4i]`, `(u=...)`). Passing or returning a
-//!   struct by value is decided by rules — splitting across registers, the
-//!   indirect-result register, memory — that [`crate::abi::marshal`]'s scalar
-//!   prototype cannot reproduce in either ABI, let alone across two. This is
-//!   M2's "aggregates by value" refusal coming due exactly where the roadmap
-//!   said it would.
-//! - **`long double`** (`D`). x86-64 returns it in `st0`, which has no arm64
-//!   counterpart and no register in the guest context to read it from.
-//! - **Bitfields** (`b3`) and the unknown type (`?`), which are not describable
-//!   rather than not implemented.
-//!
-//! Each is a `&'static str` reason that reaches the guest as a named stop, in
-//! the register the rest of the project uses.
-//!
-//! Blocks (`@?`) were on that list and are not any more. A block is an object
-//! whose `invoke` field is a guest function pointer the host would call as
-//! arm64, and answering it does mean rewriting a structure the guest owns —
-//! which is a different piece of work from marshalling a call, and was already
-//! done for `dispatch_async`. So the encoding now *records* which parameters
-//! are blocks rather than refusing them, and [`crate::objc::dispatch`] hands
-//! each to [`crate::shims::block`] on the way out. The pointer itself is
-//! unchanged: what crosses is the same literal, with thunks written into it.
-//!
-//! ## `l` is not `long`
-//!
-//! On LP64 clang encodes `long` as `q`, not `l` — `l` is the 32-bit spelling
-//! that survives from 32-bit Darwin. Reading `l` as 64 bits would sign-extend
-//! from the wrong bit for a negative value and produce a plausible wrong number,
-//! so it is read as the `int32_t` it is. `a_long_is_encoded_q_on_lp64` checks
-//! that against the compiler rather than against the documentation.
 
 use crate::abi::ArgType as T;
 use crate::abi::aggregate::{Aggregate, Leaf, Shape, width_of};
@@ -53,38 +6,18 @@ use crate::abi::aggregate::{Aggregate, Leaf, Shape, width_of};
 /// A method signature, as [`crate::abi::marshal::call_shapes`] wants it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Signature {
-    /// `[0]` is the return type, `[1..]` the parameters — `self` and the
-    /// selector included, because those are the first two arguments a method
-    /// really takes.
+    /// `[0]` is the return type, `[1..]` the parameters — `self` and the selector
+    /// included, because those are the first two arguments a method really takes.
     pub shapes: Vec<Shape>,
     /// Zero-based parameter indices encoded `#`, i.e. holding a `Class`.
-    ///
-    /// The one kind of pointer that means something different on each side of
-    /// the seam; see [`crate::objc`].
     pub classes: Vec<u8>,
     /// Zero-based parameter indices encoded `@?`, i.e. holding a block.
-    ///
-    /// Kept apart from `classes` because the two are answered in opposite
-    /// ways: a class pointer is *replaced* on the way across, and a block is
-    /// left where it is and edited in place. Nothing here records a block
-    /// *return* — a method handing one back is handing back the host's, which
-    /// needs nothing done.
     pub blocks: Vec<u8>,
     /// Zero-based parameter indices encoded `@`, i.e. holding an `id` — blocks
     /// excluded, since `@?` is its own list.
     ///
-    /// Recorded because **a class is a legal `id`**, and the encoding does not
-    /// say which `id`s are. `+[NSThread detachNewThreadSelector:toTarget:...]`
-    /// is the case that made this necessary: Unreal Engine 3 starts its render
-    /// thread with a *class* as the target, the parameter is encoded `@` rather
-    /// than `#`, and a guest `objc_class` address handed to Foundation reaches
-    /// `objc_msgSend` as a receiver the host runtime has never realized — which
-    /// is `Attempt to use unknown class`, and a fatal one.
-    ///
-    /// Translating these is safe rather than a guess: the substitution is a
-    /// lookup in the table of classes *this runtime registered*, and a guest
-    /// object is a host allocation (M6.2), so an `id` holding a guest address
-    /// that is exactly a registered class's is a class.
+    /// Recorded because **a class is a legal `id`**, and the encoding does not say
+    /// which `id`s are.
     pub objects: Vec<u8>,
     /// Whether the method returns a `Class`.
     pub class_return: bool,
@@ -100,9 +33,6 @@ impl Signature {
     }
 
     /// The scalar types, for a signature that has only scalars.
-    ///
-    /// Tests and the fast-path checks want the old flat view; a signature
-    /// naming an aggregate has no such view and says so.
     pub fn types(&self) -> Option<Vec<T>> {
         self.shapes.iter().map(Shape::scalar).collect()
     }
@@ -110,9 +40,7 @@ impl Signature {
 
 /// Decode a method type encoding.
 ///
-/// `Err` is a reason in the shape a refusal wants: a `&'static str` naming what
-/// about *this* method cannot be called, so the diagnostic says "returns a
-/// struct by value" rather than "unsupported".
+/// `Err` is a reason in the shape a refusal wants:
 pub fn signature(encoding: &str) -> Result<Signature, &'static str> {
     let bytes = encoding.as_bytes();
     let mut at = 0usize;
@@ -177,10 +105,8 @@ pub fn signature(encoding: &str) -> Result<Signature, &'static str> {
 
 /// Skip `const`, `in`, `inout`, `out`, `bycopy`, `byref`, `oneway`.
 ///
-/// They describe how an argument is used, never how wide it is, so they are
-/// skipped rather than recorded. A bare `r` at the end of a string is
-/// malformed, and stopping on it keeps the caller's no-progress check able to
-/// see it.
+/// They describe how an argument is used, never how wide it is, so they are skipped
+/// rather than recorded.
 fn skip_qualifiers(b: &[u8], at: &mut usize) {
     while matches!(
         b.get(*at),
@@ -194,10 +120,6 @@ fn skip_qualifiers(b: &[u8], at: &mut usize) {
 }
 
 /// One *scalar* type, advancing `at` past it.
-///
-/// Split out because [`aggregate`] needs exactly this and nothing else: a
-/// struct's members are scalars or nested groups, and the group case is the
-/// caller's to recognise before it gets here.
 pub fn scalar(b: &[u8], at: &mut usize) -> Result<T, &'static str> {
     skip_qualifiers(b, at);
     let Some(&c) = b.get(*at) else {
@@ -221,10 +143,7 @@ pub fn scalar(b: &[u8], at: &mut usize) -> Result<T, &'static str> {
         b'*' | b'#' | b':' => T::Pointer,
         b'@' => {
             // `@?` is a block, and `@"NSString"` is an object whose class the
-            // compiler recorded. Both are one pointer wide and land in the same
-            // register; what makes a block different is what has to happen to
-            // the memory behind it, which [`signature`] records separately
-            // because this function classifies *width* and nothing else.
+            // compiler recorded.
             match b.get(*at) {
                 Some(b'?') => *at += 1,
                 Some(b'"') => skip_quoted(b, at),
@@ -247,9 +166,6 @@ pub fn scalar(b: &[u8], at: &mut usize) -> Result<T, &'static str> {
 }
 
 /// Advance past one whole type without classifying it.
-///
-/// Only reached for a pointee, where the *shape* matters and the type does not:
-/// `^{CGRect=dddd}` is a pointer, and getting there means matching the brace.
 fn skip_one(b: &[u8], at: &mut usize) -> Result<(), &'static str> {
     let Some(&c) = b.get(*at) else { return Ok(()) };
     match c {
@@ -273,11 +189,6 @@ fn skip_one(b: &[u8], at: &mut usize) -> Result<(), &'static str> {
 }
 
 /// Advance past a balanced `{...}`, `(...)` or `[...]`, quoted names included.
-///
-/// Depth-counted rather than scanning for the closing byte: a struct's fields
-/// are themselves encodings and nest arbitrarily, and a scanner that stopped at
-/// the first `}` would leave the cursor inside `{A={B=i}i}` and read the rest of
-/// the struct as arguments.
 fn skip_group(b: &[u8], at: &mut usize) -> Result<(), &'static str> {
     let mut depth = 0usize;
     while let Some(&c) = b.get(*at) {
@@ -313,19 +224,12 @@ fn skip_quoted(b: &[u8], at: &mut usize) {
     }
 }
 
-/// Decode an aggregate encoding — `{Name=fields}` or `[N type]` — starting at
-/// `b[*at]`, which must be the opening delimiter.
-///
-/// Advances `at` past the closing delimiter, so a caller decoding an argument
-/// list continues at the next type.
+/// Decode an aggregate encoding — `{Name=fields}` or `[N type]` — starting at `b[*at]`,
+/// which must be the opening delimiter.
 ///
 /// Offsets come out **flattened and absolute**, because that is what
-/// [`Aggregate::guest_class`] needs and because nesting is a property of the
-/// source language rather than of the registers. A nested group is decoded on
-/// its own and then spliced in at an offset aligned to *its* alignment, which
-/// is the rule C actually applies — laying its members out inline, each rounded
-/// to its own width, gets `{S=c{T=id}}` wrong by four bytes, because `T` starts
-/// at eight and its first member is only four wide.
+/// [`Aggregate::guest_class`] needs and because nesting is a property of the source
+/// language rather than of the registers.
 pub fn aggregate(b: &[u8], at: &mut usize) -> Result<Aggregate, &'static str> {
     let agg = group(b, at, 0)?;
     if agg.leaves.is_empty() {
@@ -336,16 +240,11 @@ pub fn aggregate(b: &[u8], at: &mut usize) -> Result<Aggregate, &'static str> {
 
 /// The most leaves any aggregate this runtime will describe may have.
 ///
-/// Totality: an encoding comes out of guest memory, and `[999999999i]` must
-/// cost a refusal rather than a gigabyte. Anything legitimately wider than this
-/// is refused a step later anyway, being neither a homogeneous float aggregate
-/// nor sixteen bytes.
+/// Totality: an encoding comes out of guest memory, and `[999999999i]` must cost a
+/// refusal rather than a gigabyte.
 const MAX_LEAVES: usize = 64;
 
 /// How deep a nested aggregate may go before this decoder gives up.
-///
-/// Recursion on guest data, so the bound is the difference between a refusal
-/// and a blown stack.
 const MAX_DEPTH: usize = 16;
 
 /// One `{...}` or `[...]`, with offsets relative to its own start.
@@ -561,8 +460,6 @@ mod tests {
     fn an_aggregate_argument_is_decoded_rather_than_refused() {
         // `- (id)initWithFrame:(NSRect)frame`, verbatim. The refusal this
         // replaces is the one that stopped every Cocoa view from being built:
-        // `NSCustomView` instantiating a guest view got nil back and AppKit
-        // raised on the nil subview.
         let sig = signature("@24@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16").expect("initWithFrame:");
         assert_eq!(sig.arity(), 3);
         assert!(

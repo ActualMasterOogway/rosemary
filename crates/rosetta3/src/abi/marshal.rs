@@ -1,104 +1,4 @@
 //! Reading arguments out of a guest register context and making the host call.
-//!
-//! ## The call itself, and why it is legal
-//!
-//! There is no libffi here and no assembly. The host is arm64, where AAPCS64
-//! allocates the first eight integer/pointer arguments to `x0`–`x7` and the
-//! first eight floating-point arguments to `v0`–`v7`, from two *independent*
-//! counters. A callee reads only the registers its own prototype declares and
-//! ignores the rest.
-//!
-//! So one over-wide prototype — eight `u64` followed by eight `f64` — places
-//! values in exactly those sixteen registers, and calling any C function of at
-//! most eight integer and eight FP arguments through it delivers each argument
-//! to the register that function expects. The extra registers hold values it
-//! never looks at.
-//!
-//! ## Past the eighth integer argument
-//!
-//! The ninth integer argument goes on the stack, and a prototype *can* put it
-//! there — by declaring more than eight, which is what
-//! [`MAX_INT_ARGS_TOTAL`] allows. AAPCS64 allocates in declaration order, so
-//! twelve `u64` followed by eight `f64` fills `x0`–`x7`, then four stack slots,
-//! then `v0`–`v7`; a callee with nine integer arguments and no more than eight
-//! floating-point ones reads its ninth from `[sp]`, which is where the ninth
-//! `u64` was put. `glTexImage2D` is why this exists — nine integer arguments,
-//! and a texture upload is not optional in a program that draws.
-//!
-//! **The catch is Apple's packing rule, and it is why this is not simply
-//! "widen to sixteen".** Unlike generic AAPCS64, Apple's arm64 ABI does not
-//! round a stack argument up to eight bytes: an `int` on the stack occupies
-//! four, and the argument after it starts at `[sp+4]`. A `u64` prototype would
-//! place that next argument at `[sp+8]` instead.
-//!
-//! ## When widening the overflow is wrong, and when it is not
-//!
-//! "An overflowing argument must already be eight bytes wide" was the rule
-//! here, and it is stricter than the ABI. Apple packs each stack argument at
-//! its own size *and its own alignment*, so a four-byte argument followed by a
-//! pointer still leaves the pointer on the next eight-byte boundary — exactly
-//! where a `u64` declaration puts it. A narrow argument only moves what follows
-//! when the next argument is narrow too and packs in beside it.
-//!
-//! [`widening_preserves_offsets`] is that test, and it is what lets
-//! `-[NSBitmapImageRep initWithBitmapDataPlanes:…bitsPerPixel:]` — whose
-//! `isPlanar:` is a one-byte `BOOL` on the stack with a pointer after it — go
-//! through the plain prototype unchanged.
-//!
-//! Where the test fails, the tail is declared at its real widths instead: eight
-//! `u64` for `x0`–`x7`, then one prototype per pattern of overflow widths, then
-//! the eight `f64` — which stay in `v0`–`v7` and never reach the stack, so
-//! putting them last changes nothing about where the tail lands. [`NarrowTail`]
-//! enumerates the patterns, up to three overflowing arguments. Three is not a
-//! principle, it is where the growth was stopped: `glTexSubImage3D` and
-//! `glCompressedTexSubImage3D` are the shapes that need it, and a texture
-//! upload is not optional in a program that draws. A longer mismatching tail is
-//! still refused by name.
-//!
-//! That reasoning is the whole safety argument, and it is also the exact list
-//! of things this cannot do:
-//!
-//! - **More than twelve integer or eight floating-point arguments**; more than
-//!   three overflowing arguments when any of them is narrow; and a narrow
-//!   overflow at all when the *return* is floating point, since only the
-//!   integer-returning prototypes were given tails and nothing on this system
-//!   both overflows and returns a `double`. Refused
-//!   ([`AbiError::Unmarshallable`]), not guessed.
-//! - **Aggregates by value.** A struct argument or return is passed by rules
-//!   ([`x8`], splitting across registers, memory) that no scalar prototype
-//!   reproduces. The table simply does not describe such functions, so they are
-//!   refused as unknown — see [`super::table`].
-//! - **Variadics.** Apple's arm64 ABI passes every variadic argument on the
-//!   *stack*, so a register prototype cannot reach them at all. They belong to
-//!   [`crate::shims`].
-//!
-//! ## `f32` through an `f64` slot
-//!
-//! A single-precision argument lives in `s_n`, which aliases the low 32 bits of
-//! `v_n` — the same register an `f64` argument uses. Passing
-//! `f64::from_bits(bits32 as u64)` therefore puts precisely the right 32 bits
-//! where the callee looks, whereas passing `value as f64` would widen the
-//! *value* and leave the callee reading the low half of a double. Returns are
-//! the mirror image, which is why there are three call variants rather than one
-//! with a cast.
-//!
-//! ## The stack pointer at an import exit, which is not one answer
-//!
-//! Microlift exits *before* a `CALL` executes, so `rsp` still points where it
-//! did at the call site and no return address has been pushed: a spilled
-//! argument is at `rsp + offset`.
-//!
-//! A **tail `jmp` to an import is different**, and the difference is eight
-//! bytes. `return getnameinfo(sa, sl, h, hl, s, sl2, flags);` compiles to
-//! `jmp _getnameinfo` with the *original* return address still on the stack and
-//! the outgoing arguments in the incoming argument area above it — so the same
-//! spilled argument is at `rsp + 8 + offset`.
-//!
-//! Reading the wrong one does not fault. It takes the return address for an
-//! argument and shifts every stack argument after it by a slot, which is the
-//! silent wrong answer this module exists to refuse. [`stack_base`] is the
-//! adjustment, and `tests/tailcall.rs` is a guest that loses a flags word this
-//! way and gets a reverse DNS lookup it did not ask for.
 
 use iced_x86::Register;
 
@@ -113,14 +13,7 @@ use super::{AbiError, ArgType, FunctionAbi, GuestMemory, Result, guest_call_abi_
 const MAX_INT_ARGS: usize = 8;
 const MAX_FP_ARGS: usize = 8;
 
-/// Integer arguments the over-wide prototype declares, registers and stack
-/// together. The eight past `MAX_INT_ARGS` land on the stack — see the module
-/// note for the rule that makes them reproducible.
-///
-/// Twelve until `-[NSBitmapImageRep initWithBitmapDataPlanes:…bitsPerPixel:]`
-/// wanted thirteen. Eleven parameters plus `self` and `_cmd` is not an exotic
-/// selector — AppKit has a dozen of that shape — so the bank is sized to leave
-/// room rather than to the next program that asks.
+/// Integer arguments the over-wide prototype declares, registers and stack together.
 const MAX_INT_ARGS_TOTAL: usize = 16;
 
 /// Whether `ty` occupies a full eight bytes.
@@ -141,23 +34,14 @@ fn stack_width(ty: ArgType) -> u64 {
     }
 }
 
-/// Whether declaring every overflowing argument `u64` puts each of them where
-/// Apple's rule puts it.
+/// Whether declaring every overflowing argument `u64` puts each of them where Apple's
+/// rule puts it.
 ///
-/// This is the rule the module note used to state as "an overflowing argument
-/// must already be eight bytes wide", which is stricter than the ABI. Apple
-/// packs each stack argument at its own size *and its own alignment*, so a
-/// four-byte argument followed by a pointer still leaves the pointer at the
-/// next eight-byte boundary — exactly where a `u64` declaration would have put
-/// it. A narrow argument only moves what comes after it when the next argument
-/// is narrow too and packs in beside it.
-///
-/// Writing eight bytes into a four- or one-byte slot is harmless in the cases
-/// this accepts: the padding it covers belongs to no other argument, the callee
-/// reads the low bytes it declared, and the caller reserved eight because that
-/// is what the prototype says. Little-endian is doing the work, and it is worth
-/// saying that out loud because on a big-endian machine none of this would
-/// hold.
+/// Apple packs each stack argument at its own size *and its own alignment*, so a
+/// four-byte argument followed by a pointer still leaves the pointer at the next
+/// eight-byte boundary — exactly where a `u64` declaration would put it. A narrow
+/// argument only moves what comes after it when the next argument is narrow too and
+/// packs in beside it.
 fn widening_preserves_offsets(overflow: &[ArgType]) -> bool {
     let mut packed = 0u64;
     for (slot, ty) in overflow.iter().enumerate() {
@@ -172,11 +56,6 @@ fn widening_preserves_offsets(overflow: &[ArgType]) -> bool {
 }
 
 /// Whether [`call`] can express this signature at all.
-///
-/// Checked separately from making the call so [`super::classify`] can answer
-/// the question statically, at load time, for every import in a program at
-/// once — which is what turns "this will fail" from a runtime surprise into a
-/// line in the linking report.
 pub fn is_marshallable(abi: &FunctionAbi) -> bool {
     if abi.variadic {
         return false;
@@ -202,12 +81,10 @@ pub fn is_marshallable(abi: &FunctionAbi) -> bool {
     NarrowTail::of(&integers[MAX_INT_ARGS.min(integers.len())..], is_fp(ret)).is_some()
 }
 
-/// The prototype that places a run of overflowing arguments at their own
-/// widths.
+/// The prototype that places a run of overflowing arguments at their own widths.
 ///
-/// `None` is not "no overflow" — it is "no *narrow* overflow", which the
-/// twelve-`u64` prototype already handles. A variant here exists only where
-/// that one would put an argument in the wrong place.
+/// `None` is not "no overflow" — it is "no *narrow* overflow", which the twelve-`u64`
+/// prototype already handles.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum NarrowTail {
     /// Every overflowing argument is a full doubleword: the original prototype.
@@ -229,9 +106,6 @@ impl NarrowTail {
     /// Which prototype places `overflow`, or `None` if nothing here can.
     ///
     /// `fp_return` refuses the whole question rather than answering it wrong:
-    /// the tail prototypes below all return an integer, and a signature that
-    /// both overflows and returns a `double` would silently take the
-    /// doubleword-only path.
     fn of(overflow: &[ArgType], fp_return: bool) -> Option<Self> {
         if widening_preserves_offsets(overflow) {
             return Some(NarrowTail::None);
@@ -262,9 +136,6 @@ impl NarrowTail {
 }
 
 /// Call `host` with the arguments `ctx` holds, and write the result back.
-///
-/// `ctx` is left untouched unless the call is actually made. Guest function
-/// pointers are refused; see [`call_with`].
 pub fn call(
     symbol: &str,
     abi: &FunctionAbi,
@@ -277,10 +148,8 @@ pub fn call(
 
 /// [`call`], with a bridge for the arguments [`FunctionAbi::callbacks`] names.
 ///
-/// Substitution happens here rather than in the caller because *here* is where
-/// an argument's parameter index is known: `place_args` returns locations in
-/// declaration order, so the `i`-th of them is parameter `i` whatever registers
-/// or stack slots it happened to land in.
+/// Substitution happens here rather than in the caller because *here* is where an
+/// argument's parameter index is known:
 pub fn call_with(
     symbol: &str,
     abi: &FunctionAbi,
@@ -301,16 +170,10 @@ pub fn call_with(
 
 /// What a value means on the other side of the seam.
 ///
-/// The marshaller moves *bits*, and for almost every argument that is the whole
-/// job. Two kinds of value mean something different on each side and have to be
-/// translated as they cross: a guest function pointer, which the host would call
-/// as arm64 (see [`super::Callbacks`]), and an Objective-C `Class`, which the
-/// guest names by the address of the dead `objc_class` in its own `__objc_data`
-/// (see [`crate::objc`]). Both are "this pointer is not what the other side
-/// thinks it is", so both go through one hook rather than two mechanisms.
+/// The marshaller moves *bits*, and for almost every argument that is the whole job.
 ///
-/// By index rather than by value, because *which* arguments are special is
-/// stated by a signature and cannot be recovered from the bits.
+/// By index rather than by value, because *which* arguments are special is stated by a
+/// signature and cannot be recovered from the bits.
 pub trait Convert {
     /// The value the host should receive for parameter `index`.
     fn argument(&self, symbol: &str, index: usize, raw: u64) -> Result<u64>;
@@ -350,13 +213,6 @@ impl Convert for ForCallbacks<'_> {
 }
 
 /// [`call_with`], for a signature that is not in the table.
-///
-/// The same marshaller driven by a `&[ArgType]` computed at run time rather than
-/// by a `&'static FunctionAbi`. There is exactly one such signature source and
-/// it is the reason M6.3 is possible at all: an Objective-C method carries its
-/// own type encoding, so `objc_msgSend` — which has no signature of its own —
-/// has *whichever* signature the selector's method declares. See
-/// [`crate::objc::encoding`].
 pub fn call_types(
     symbol: &str,
     types: &[ArgType],
@@ -386,9 +242,7 @@ pub fn call_types(
     for (index, (ty, loc)) in placed.iter().enumerate() {
         // A pointer that means something different on the far side — a guest
         // function address the host would call as arm64, or a guest class the
-        // host runtime has never realized. Translated before anything else looks
-        // at it, and a refusal here still leaves the guest context untouched:
-        // nothing has been called yet.
+        // host runtime has never realized.
         let raw = convert.argument(symbol, index, read_location(symbol, ctx, mem, *loc)?)?;
         if is_fp(*ty) {
             if n_fp == MAX_FP_ARGS {
@@ -486,24 +340,7 @@ fn read_location(
 
 /// Where the guest's outgoing stack arguments begin, relative to `rsp`.
 ///
-/// Zero for an intercepted `call` and **eight for a tail `jmp`**, and the
-/// difference is not cosmetic. Microlift exits a `call` *before* the return
-/// address is pushed, so `rsp` points at the caller's outgoing argument area and
-/// the seventh integer argument is at `rsp+0`. A compiler that tail-jumps —
-/// `return getnameinfo(sa, sl, h, hl, s, sl2, flags);` compiles to exactly that
-/// — leaves the *original* return address on the stack and reuses the incoming
-/// argument area above it, so the same argument is at `rsp+8`.
-///
-/// Reading the wrong one does not fault. It reads the return address as an
-/// argument and shifts every stack argument after it by one slot, which is the
-/// silent wrong answer this module exists to refuse: `tests/tailcall.rs` is a
-/// guest that loses `NI_NUMERICHOST` this way and gets a reverse DNS lookup it
-/// did not ask for.
-///
-/// [`crate::thread::ThreadState::entered_by_jump`] is set by the run loop before
-/// any shim runs, so it always describes *this* call. Outside a guest thread —
-/// which is where this module's own tests run — there is no tail call to
-/// account for and the answer is zero.
+/// Reading the wrong one does not fault.
 fn stack_base() -> u64 {
     match crate::thread::current() {
         Some(state) if state.entered_by_jump() => 8,
@@ -543,12 +380,11 @@ fn int_reg(symbol: &str, ctx: &RegisterContext, reg: GuestReg) -> Result<u64> {
     })
 }
 
-/// Narrow the guest's 64-bit register down to the declared argument type, then
-/// widen it back the way the host expects to receive it.
+/// Narrow the guest's 64-bit register down to the declared argument type, then widen it
+/// back the way the host expects to receive it.
 ///
-/// Apple's arm64 ABI makes the *caller* extend arguments narrower than 32 bits,
-/// so this is not cosmetic: passing a raw `rdi` where the callee declares `char`
-/// hands it whatever the guest happened to leave in the upper bits.
+/// Apple's arm64 ABI makes the *caller* extend arguments narrower than 32 bits, so this
+/// is not cosmetic:
 fn int_arg(ty: ArgType, raw: u64) -> u64 {
     match ty {
         ArgType::SignedByte => raw as u8 as i8 as i64 as u64,
@@ -572,11 +408,8 @@ fn fp_arg(ty: ArgType, raw: u64) -> f64 {
 
 /// What the guest should find in `rax`.
 ///
-/// x86-64 leaves only the declared width defined (a function returning `int`
-/// defines `eax`), and the host leaves only the declared width defined in `x0`.
-/// Extending here means the guest reading the full `rax` — which a translated
-/// region may well do — sees the value's own sign rather than the host's
-/// leftovers.
+/// x86-64 leaves only the declared width defined (a function returning `int` defines
+/// `eax`), and the host leaves only the declared width defined in `x0`.
 fn int_ret(ty: ArgType, raw: u64) -> u64 {
     int_arg(ty, raw)
 }
@@ -673,16 +506,14 @@ macro_rules! call_through {
 
 /// One prototype per overflow-width pattern.
 ///
-/// Eight `u64` fill `x0`–`x7`; the tail types are what AAPCS64 then places on
-/// the stack, each at its own width and alignment; the eight `f64` occupy
-/// `v0`–`v7` and never reach the stack, which is why declaring them after the
-/// tail does not move it. See the module note.
+/// Eight `u64` fill `x0`–`x7`; the tail types are what AAPCS64 then places on the
+/// stack, each at its own width and alignment; the eight `f64` occupy `v0`–`v7` and
+/// never reach the stack, which is why declaring them after the tail does not move it.
 macro_rules! narrow_tail_call {
     ($name:ident, $(($t:ty, $at:expr)),+) => {
-        /// # Safety
-        /// `host` must be a native C function whose overflowing arguments have
-        /// exactly the widths this variant names, returning an integer, a
-        /// pointer or nothing.
+        /// # Safety `host` must be a native C function whose overflowing arguments have
+        /// exactly the widths this variant names, returning an integer, a pointer or
+        /// nothing.
         unsafe fn $name(
             host: u64,
             ints: &[u64; MAX_INT_ARGS_TOTAL],
@@ -747,11 +578,9 @@ unsafe fn call_int_tail(
     }
 }
 
-/// # Safety
-/// `host` must be a native C function of at most twelve integer and eight
-/// floating-point scalar arguments returning an integer or pointer, with every
-/// integer argument past the eighth a full doubleword. See the module note for
-/// why the wider prototype is ABI-compatible with it.
+/// # Safety `host` must be a native C function of at most twelve integer and eight
+/// floating-point scalar arguments returning an integer or pointer, with every integer
+/// argument past the eighth a full doubleword.
 unsafe fn call_int(host: u64, ints: &[u64; MAX_INT_ARGS_TOTAL], fps: &[f64; MAX_FP_ARGS]) -> u64 {
     let f: IntFn = unsafe { core::mem::transmute(host as usize as *const ()) };
     unsafe { call_through!(f, ints, fps) }
@@ -808,16 +637,9 @@ mod tests {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Aggregates
-// ---------------------------------------------------------------------------
 
 /// The most bytes an indirectly-returned aggregate may occupy.
-///
-/// A bound rather than a limit anybody will meet: the largest struct Cocoa
-/// returns by value is `CGAffineTransform` at forty-eight bytes. The buffer has
-/// to be a concrete Rust type for the callee to be given its address in `x8`,
-/// so it has to have *a* size, and this is one that no framework exceeds.
 const MAX_INDIRECT: usize = 256;
 
 /// Where the guest left one argument, in SysV AMD64's terms.
@@ -849,13 +671,10 @@ const SYSV_SSE_REGS: usize = 8;
 
 /// Lay a signature out the way SysV AMD64 does, aggregates included.
 ///
-/// Written here rather than taken from microlift's `CallAbi::place_args`
-/// because that one knows only scalars, and an aggregate does not merely
-/// occupy a slot — it consumes *two* registers of possibly different classes,
-/// or none at all and a run of stack instead. Everything an all-scalar
-/// signature does is unchanged, and
-/// `the_two_placers_agree_on_every_scalar_signature` holds the two to each
-/// other so this cannot drift from the path the rest of the project uses.
+/// Written here rather than taken from microlift's `CallAbi::place_args` because that
+/// one knows only scalars, and an aggregate does not merely occupy a slot — it consumes
+/// *two* registers of possibly different classes, or none at all and a run of stack
+/// instead.
 fn place_shapes(shapes: &[Shape]) -> (Vec<Place>, Option<Where>) {
     let mut int = 0usize;
     let mut sse = 0usize;
@@ -993,13 +812,8 @@ fn leaf_bits(buf: &[u8], offset: usize, width: usize) -> u64 {
 
 /// Call `host` with a signature that may contain aggregates.
 ///
-/// The general form of [`call_types`], and the one an Objective-C message takes
-/// whenever a method's own encoding names a struct. `shapes[0]` is the return.
-///
-/// The guarantee the rest of this module makes holds here too: **on any error
-/// `ctx` is untouched**. Every fallible step — placement, reading the guest's
-/// bytes, classifying the return — happens before the call, and the guest's
-/// registers are written only once the host function has returned.
+/// The guarantee the rest of this module makes holds here too: **on any error `ctx` is
+/// untouched**.
 pub fn call_shapes(
     symbol: &str,
     shapes: &[Shape],
@@ -1039,10 +853,6 @@ pub fn call_shapes(
     // The copies AAPCS64 B.4 says the *caller* makes for an aggregate too large
     // for registers. Held here so every one of them outlives the call: the
     // callee is handed their addresses and reads through them.
-    //
-    // `u64` rather than `u8` so the allocation is eight-aligned, which is the
-    // most any aggregate reaching this point asks for — `host_class` refuses a
-    // sixteen-byte alignment before anything is copied.
     let mut copies: Vec<Vec<u64>> = Vec::new();
 
     // As in [`call_types`]: the integer arguments past the eighth decide which
@@ -1098,16 +908,7 @@ pub fn call_shapes(
                             push_int(w, ArgType::UnsignedDoubleword, &mut n_int, &mut overflow)?;
                         }
                     }
-                    // AAPCS64 B.4: a composite larger than sixteen bytes that is
-                    // not an HVA is *copied by the caller* and the argument is
-                    // replaced by a pointer to the copy — an ordinary integer
-                    // argument, in an ordinary integer register. So the
-                    // register prototype reaches it after all, which is why
-                    // this is a copy and not the refusal it used to be.
-                    //
-                    // `-[MTLTexture replaceRegion:…]` is what found it: an
-                    // `MTLRegion` is six `NSUInteger`s, and Unity's Metal
-                    // backend sends that message for every texture it uploads.
+                    // AAPCS64 B.4:
                     HostClass::Indirect => {
                         let mut copy = vec![0u64; agg.size.div_ceil(8)];
                         for (i, w) in copy.iter_mut().enumerate() {
@@ -1142,9 +943,7 @@ pub fn call_shapes(
 
 /// Make the call, choosing the prototype the *host's* return class needs.
 ///
-/// Returns the aggregate's bytes when there are any, and the scalar result
-/// otherwise. One function rather than a `match` at the call site because every
-/// arm is `unsafe` for the same reason and the reason is worth stating once.
+/// Returns the aggregate's bytes when there are any, and the scalar result otherwise.
 fn call_returning(
     host: u64,
     ints: &[u64; MAX_INT_ARGS_TOTAL],
@@ -1274,10 +1073,8 @@ fn write_return(
     Ok(())
 }
 
-/// Four doubles in `v0`–`v3`: what AAPCS64 returns a homogeneous float
-/// aggregate of up to four `double`s in. Declaring the widest is enough — a
-/// callee returning fewer writes fewer registers, and only its own members are
-/// read back.
+/// Four doubles in `v0`–`v3`: what AAPCS64 returns a homogeneous float aggregate of up
+/// to four `double`s in.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct F64x4([f64; 4]);
@@ -1293,9 +1090,7 @@ struct F32x4([f32; 4]);
 #[derive(Clone, Copy)]
 struct U64x2([u64; 2]);
 
-/// A buffer the callee fills through `x8`. Over sixteen bytes and not an HFA,
-/// which is what makes AAPCS64 return it indirectly — and makes this a plain
-/// out-parameter rather than anything register-shaped.
+/// A buffer the callee fills through `x8`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Indirect([u8; MAX_INDIRECT]);

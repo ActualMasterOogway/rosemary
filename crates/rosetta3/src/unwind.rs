@@ -1,61 +1,4 @@
 //! Unwinding a guest stack: C++ exceptions, without the host's unwinder.
-//!
-//! ## Why none of this can be forwarded
-//!
-//! A guest `throw` compiles to `__cxa_allocate_exception`, a constructor call,
-//! and `__cxa_throw`. Passed through to the host's libc++abi, `__cxa_throw`
-//! calls the host's `_Unwind_RaiseException`, which walks the *host's* stack —
-//! Cranelift-compiled translations and the runtime's own Rust frames, none of
-//! which carry a personality routine or a landing pad, because the guest's are
-//! in the guest's `__unwind_info` and `__gcc_except_tab`. libunwind finds no
-//! handler and calls `std::terminate`. Every guest exception, always.
-//!
-//! Interposing further in is no better: the host's `___gxx_personality_v0` reads
-//! its context through libunwind's *own* `_Unwind_GetIP` and friends, bound
-//! inside libSystem where nothing here can reach them. Handing it a context of
-//! our own shape would have it read fields that mean something else.
-//!
-//! So the whole Itanium C++ ABI surface a guest touches is implemented here:
-//! allocation, the throw, the stack walk, the personality decision, entering
-//! landing pads, `_Unwind_Resume`, and the catch bookkeeping. What that buys is
-//! that *every* frame in the walk is a guest frame, described by tables the
-//! guest image carries, and every landing pad is entered through the JIT.
-//!
-//! ## Two phases, because the standard is observable
-//!
-//! Phase one walks the frames looking for a handler and runs nothing. Phase two
-//! walks them again, entering each landing pad. The distinction matters for a
-//! program that throws something nobody catches: C++ says `std::terminate` is
-//! called *without* unwinding, so the destructors between the throw and the top
-//! of the stack must not run. A single-phase implementation would run them and
-//! then abort, which is a different program.
-//!
-//! ## The walk is table-driven, and the tables are the guest's
-//!
-//! [`machish::image::UnwindInfo`] decodes `__unwind_info` into one compact
-//! encoding per function; [`step`] interprets an encoding as x86-64 semantics —
-//! where the return address is, which callee-saved registers were spilled where.
-//! [`Lsda`] parses `__gcc_except_tab` for the frame's `try` ranges and catch
-//! types. Between them, "leave this frame" is arithmetic on the guest's own
-//! stack, and no host frame is involved at any point.
-//!
-//! ## Scope, stated where it will be read
-//!
-//! - **Compact unwind only.** A function whose encoding selects DWARF names an
-//!   offset into `__eh_frame`, which is not parsed. Refused by name. Clang emits
-//!   DWARF mode for frames a compact encoding cannot describe — very large
-//!   frames, and anything with dynamic stack adjustment.
-//! - **Exact type matches and `catch (...)`.** A catch clause naming a base
-//!   class of the thrown type, or a pointer conversion, needs the guest's
-//!   `type_info` inheritance graph walked. Not done: instead, a search that
-//!   finds no handler *and* saw a clause it could not decide reports that, so
-//!   the failure names the missing mechanism rather than terminating.
-//! - **One exception in flight per thread**, which is what a program without
-//!   nested throws-during-unwinding has. A second throw while one is live is
-//!   refused rather than mis-nested.
-//! - **A throw may not cross a host frame**, for the reason
-//!   [`crate::jmpbuf`] gives about `longjmp`: the frames between would never be
-//!   returned through.
 
 use machish::image::UnwindEntry;
 use microlift::arch::x86_64::context::RegisterContext;
@@ -65,9 +8,8 @@ use crate::vm::Vm;
 
 /// The callee-saved state a frame restores, plus where it resumes.
 ///
-/// Exactly SysV AMD64's callee-saved set. The caller-saved half needs no
-/// tracking for the same reason [`crate::jmpbuf`] does not save it: it is dead
-/// across the call this frame is suspended at.
+/// Exactly SysV AMD64's callee-saved set. The caller-saved half needs no tracking for
+/// the same reason [`crate::jmpbuf`] does not save it:
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Registers {
     pub rip: u64,
@@ -274,9 +216,6 @@ impl<'a> Reader<'a> {
     }
 
     /// A DWARF-encoded pointer, of the subset clang emits for x86-64 Mach-O.
-    ///
-    /// The `pcrel` base is the address of the *value*, which is why it is taken
-    /// before reading rather than after.
     fn encoded(&mut self, encoding: u8) -> Option<u64> {
         if encoding == DW_EH_PE_OMIT {
             return None;
@@ -295,10 +234,7 @@ impl<'a> Reader<'a> {
             _ => return None,
         };
         // A zero *stored* value is a null pointer, whatever the encoding says
-        // about relocating it. This is not a special case invented here: it is
-        // how `catch (...)` is written down — a type-table slot of zero — and
-        // adding a pcrel base to it would produce the address of the slot
-        // itself, which is a plausible address and the wrong one.
+        // about relocating it. This is not a special case invented here:
         if value == 0 {
             return Some(0);
         }
@@ -308,9 +244,7 @@ impl<'a> Reader<'a> {
             _ => return None,
         };
         // An indirect encoding stores the address of the address: a GOT slot,
-        // because the value is only known after binding. Following it here is
-        // what makes a catch type comparable with a thrown type — both end up as
-        // the address the linker actually bound.
+        // because the value is only known after binding.
         if encoding & DW_EH_PE_INDIRECT != 0 {
             if value == 0 {
                 return Some(0);
@@ -346,11 +280,7 @@ pub fn step(
     };
 
     match encoding & MODE_MASK {
-        // The ordinary frame: `push %rbp; mov %rsp,%rbp`. The return address is
-        // one word above the saved frame pointer, the caller's `rbp` is at it,
-        // and any callee-saved registers are in five 3-bit slots at a fixed
-        // negative offset — the encoding is exactly this shape because most
-        // functions are.
+        // The ordinary frame: `push %rbp; mov %rsp,%rbp`.
         MODE_RBP_FRAME => {
             let offset = u64::from((encoding & RBP_OFFSET) >> 16);
             let mut locations = encoding & RBP_REGISTERS;
@@ -371,11 +301,8 @@ pub fn step(
             Ok(())
         }
 
-        // Frameless: the frame is a known number of bytes and the return address
-        // sits at the top of it. `STACK_IND` differs only in where the size comes
-        // from — the encoding names the *offset of the immediate* in the
-        // function's own `subq $N,%rsp`, because the number did not fit in the
-        // eight bits the encoding has for it.
+        // Frameless: the frame is a known number of bytes and the return
+        // address sits at the top of it.
         mode @ (MODE_STACK_IMMD | MODE_STACK_IND) => {
             let size_field = u64::from((encoding & FRAMELESS_SIZE) >> 16);
             let adjust = u64::from((encoding & FRAMELESS_ADJUST) >> 13);
@@ -413,10 +340,9 @@ pub fn step(
 
 /// Which registers a frameless function pushed, in the order it pushed them.
 ///
-/// The linker stores the *permutation index* of the register list rather than
-/// the list, because up to six registers out of six named values fit in ten bits
-/// that way and would not otherwise. Decoding is the inverse: recover each
-/// register's rank among those not yet used, then map ranks back to registers.
+/// The linker stores the *permutation index* of the register list rather than the list,
+/// because up to six registers out of six named values fit in ten bits that way and
+/// would not otherwise.
 fn decode_permutation(mut permutation: u32, count: usize) -> Vec<u8> {
     let mut ranks = [0u32; 6];
     match count {
@@ -562,10 +488,8 @@ impl Lsda {
 
     /// The call site covering `ip`, if any.
     ///
-    /// `ip` is a **return address**, so the instruction that is actually inside
-    /// the `try` range is the byte before it. Searching with `ip` itself finds
-    /// the wrong record whenever a call is the last instruction of a range,
-    /// which for a `try` block ending in a call is every time.
+    /// `ip` is a **return address**, so the instruction that is actually inside the
+    /// `try` range is the byte before it.
     pub fn site_for(
         &self,
         ip: u64,
@@ -594,11 +518,6 @@ impl Lsda {
     }
 
     /// Walk a site's action chain and decide what this frame does.
-    ///
-    /// The chain is a list of `(filter, next)` pairs. A positive filter is a
-    /// 1-based index *backwards* from the end of the type table; zero is a
-    /// cleanup; a negative one is an exception specification, which this does
-    /// not implement and reports rather than mistaking for a catch.
     pub fn outcome(
         &self,
         vm: &Vm,
@@ -630,10 +549,7 @@ impl Lsda {
                 f if f > 0 => {
                     let catch_type = self.catch_type(f, mem)?;
                     // A null entry is `catch (...)`, which takes anything. An
-                    // exact address match is the same object: both the thrown
-                    // type and the catch type are read through the bindings the
-                    // linker made, so a `type_info` the guest defined and one it
-                    // imported from libc++ both compare correctly.
+                    // exact address match is the same object:
                     match catches(vm, catch_type, thrown_type, mem) {
                         Match::Yes => {
                             return Ok(Outcome::Handler {
@@ -699,17 +615,7 @@ enum Match {
 
 /// Vtable symbols libc++abi exports, one per shape of class the ABI describes.
 ///
-/// A `type_info` object's first word points at one of these — sixteen bytes in,
-/// past the offset-to-top and RTTI words every Itanium vtable begins with. That
-/// is how a runtime tells "a class with no bases" from "a class with one base"
-/// without a header: the *shape* is in the object, and the shapes are named.
-///
-/// The sixteen is never written down here, and deliberately. A guest's
-/// `type_info` gets its first word from a bind of `vtable + 0x10`, and
-/// [`machish::report::BindingRecord::resolved`] is the value that bind *wrote* —
-/// symbol address plus addend. So the address to compare against is already the
-/// one the guest stored, by the same arithmetic, and a toolchain that ever
-/// chose a different prefix would still agree.
+/// The sixteen is never written down here, and deliberately.
 const TI_NO_BASES: &str = "__ZTVN10__cxxabiv117__class_type_infoE";
 const TI_ONE_BASE: &str = "__ZTVN10__cxxabiv120__si_class_type_infoE";
 
@@ -718,23 +624,10 @@ const MAX_BASES: usize = 32;
 
 /// Does `catch_type` take something of `thrown_type`?
 ///
-/// Three answers, for the same reason [`crate::abi::table`] gives three: a
-/// definite no is as useful as a definite yes, and "cannot tell" must never be
-/// silently rendered as either. The cases:
+/// Three answers, for the same reason [`crate::abi::table`] gives three:
 ///
-/// - `catch (...)` — a null clause type — takes anything.
-/// - The same `type_info` object is an exact match. Both sides are addresses the
-///   linker bound, so a type the guest defined and one it imported from libc++
-///   compare correctly without knowing which is which.
-/// - A class with a **single non-virtual base** has its base subobject at offset
-///   zero, so `catch (Base &)` binds to the very pointer that was thrown and the
-///   chain can simply be walked. `MyError : std::exception` is this case, and so
-///   is every plain `struct Derived : Base`.
-/// - A class the ABI describes as having **no** bases cannot be anything else,
-///   which makes a mismatch a definite *no* rather than a shrug.
-/// - Multiple or virtual inheritance moves the base subobject, so a match would
-///   have to adjust the pointer the `catch` binds to. Not implemented, and
-///   reported as unknown rather than answered.
+/// - `catch (...)` — a null clause type — takes anything. - The same `type_info` object
+/// is an exact match.
 fn catches(vm: &Vm, catch_type: u64, thrown: u64, mem: &dyn GuestMemory) -> Match {
     if catch_type == 0 {
         return Match::Yes;
@@ -771,11 +664,7 @@ fn catches(vm: &Vm, catch_type: u64, thrown: u64, mem: &dyn GuestMemory) -> Matc
 
 /// The exception header this runtime puts in front of a thrown object.
 ///
-/// The Itanium ABI leaves the layout to the implementation: the guest only ever
-/// receives the *object* pointer, and the header address travels through `rax`
-/// into `__cxa_begin_catch`, both of which are this module's. So the fields are
-/// what the runtime needs, in host memory the identity mapping makes the guest
-/// able to address.
+/// The Itanium ABI leaves the layout to the implementation:
 #[derive(Clone, Copy, Debug)]
 struct ExceptionHeader {
     thrown_type: u64,
@@ -784,9 +673,6 @@ struct ExceptionHeader {
 }
 
 /// Bytes reserved in front of every thrown object.
-///
-/// Sixteen-byte aligned, because the object behind it is whatever the guest
-/// threw and C++ requires it be suitably aligned for its type.
 const HEADER_SIZE: u64 = 32;
 
 impl ExceptionHeader {
@@ -815,9 +701,8 @@ pub struct InFlight {
     /// Our header; the guest's object is [`HEADER_SIZE`] bytes past it.
     pub header: u64,
     pub thrown_type: u64,
-    /// The frame phase one found a handler in, identified by where it resumes
-    /// and how deep its stack is. Both, because a recursive function's frames
-    /// share a `rip`.
+    /// The frame phase one found a handler in, identified by where it resumes and how
+    /// deep its stack is. Both, because a recursive function's frames share a `rip`.
     handler: (u64, u64),
     /// Where phase two has got to: the frame whose landing pad is running.
     at: Registers,
@@ -827,9 +712,6 @@ pub struct InFlight {
 }
 
 /// Walk from `regs` to the frame that will catch `thrown_type`.
-///
-/// Phase one: nothing is entered and no destructor runs, because C++ requires
-/// that an exception nobody catches terminates with the stack *intact*.
 fn find_handler(
     vm: &Vm,
     mut regs: Registers,
@@ -863,15 +745,8 @@ fn find_handler(
 
 /// What it means that the walk ran out of guest frames.
 ///
-/// Three different failures share this edge, and telling them apart is the
-/// difference between a bug report and a work item:
-///
-/// - the throwing frame was entered *from host code* — a `qsort` comparator, a
-///   signal handler, a `pthread` start routine — so the frames a handler would
-///   be in are the host's, and unwinding them is the same problem
-///   [`crate::jmpbuf`] refuses for a `longjmp`;
-/// - a clause was seen that could not be decided, which is the type-graph gap;
-/// - or nothing anywhere catches this, which is what `std::terminate` is for.
+/// Three different failures share this edge, and telling them apart is the difference
+/// between a bug report and a work item:
 fn edge_of_the_walk(undecidable: bool) -> UnwindError {
     let nested = crate::thread::current().is_some_and(|s| s.depth.get() > 1);
     if nested {
@@ -891,10 +766,8 @@ const MAX_FRAMES: usize = 1024;
 
 /// Advance phase two to the next frame with something to run, and enter it.
 ///
-/// `from` is the frame whose landing pad has just finished (or the throwing
-/// frame, unstepped, on the first call). Returns `false` when the exception has
-/// nowhere left to go, which cannot happen after a successful phase one and is
-/// reported rather than assumed.
+/// `from` is the frame whose landing pad has just finished (or the throwing frame,
+/// unstepped, on the first call).
 fn enter_next_pad(
     vm: &Vm,
     flight: &mut InFlight,
@@ -962,9 +835,7 @@ fn pad_of(outcome: Outcome) -> Option<u64> {
 
 /// `void *__cxa_allocate_exception(size_t)`
 ///
-/// Host memory, which the identity mapping makes guest-addressable: the object
-/// must outlive the frames being unwound, so it cannot live on the guest stack,
-/// and the runtime frees it in `__cxa_end_catch`.
+/// Host memory, which the identity mapping makes guest-addressable:
 pub fn allocate_exception(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -1058,9 +929,6 @@ pub fn throw(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory)
 }
 
 /// `void _Unwind_Resume(_Unwind_Exception *)`
-///
-/// What a cleanup landing pad calls when its destructors are done. Continues the
-/// walk from the frame that just finished.
 pub fn resume(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let vm = current_vm(symbol)?;
     let state = crate::thread::current().ok_or_else(|| AbiError::Refused {
@@ -1088,10 +956,6 @@ pub fn resume(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory
 }
 
 /// `void *__cxa_begin_catch(_Unwind_Exception *)`
-///
-/// Returns the thrown object, which is what the `catch` clause binds to. The
-/// exception stops being "in flight" here: it is now *caught*, which is a
-/// different state and the one `__cxa_rethrow` puts back.
 pub fn begin_catch(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -1118,11 +982,6 @@ pub fn begin_catch(
 }
 
 /// `void __cxa_rethrow()`
-///
-/// A bare `throw;` inside a `catch` block. The exception is the one this frame
-/// caught, so nothing is allocated and no type is re-read — the search simply
-/// starts again from *this* frame, which is what makes an outer handler the next
-/// candidate rather than the one that just ran.
 pub fn rethrow(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let vm = current_vm(symbol)?;
     let state = crate::thread::current().ok_or_else(|| AbiError::Refused {
@@ -1160,11 +1019,6 @@ pub fn rethrow(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemor
 }
 
 /// `void __cxa_end_catch()`
-///
-/// The end of the `catch` block: the exception is finished with, so its
-/// destructor runs and the allocation goes back. The destructor is *guest* code,
-/// so this is a host→guest call in the middle of a shim — legal for the same
-/// reason a `qsort` comparator is, and reached the same way.
 pub fn end_catch(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let vm = current_vm(symbol)?;
     let state = crate::thread::current().ok_or_else(|| AbiError::Refused {

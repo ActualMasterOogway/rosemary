@@ -1,88 +1,5 @@
-//! `open`, `openat`, `sem_open` and `fcntl`: the variadics whose arity a flag
-//! word decides.
-//!
-//! ## Why these can be shimmed and `printf` cannot
-//!
-//! Same reason as [`ioctl`](super::ioctl), reached a different way. `printf`'s
-//! argument list is arbitrarily long and its shape lives in a string, so
-//! forwarding one means rendering it. These take a **fixed, tiny** number of
-//! variadic arguments, and a fixed argument says whether they are there:
-//!
-//! - `int open(const char *path, int flags, ... /* mode_t */)` — the `mode`
-//!   argument is read only when `flags` contains `O_CREAT`. POSIX says so, and
-//!   passing a mode when `O_CREAT` is absent is harmless anyway, which is why
-//!   the check is about not reading a register the guest never wrote rather than
-//!   about the callee.
-//! - `sem_t *sem_open(const char *name, int oflag, ... /* mode_t, unsigned */)`
-//!   — the same rule with the same flag, and *two* arguments rather than one.
-//! - `int fcntl(int fd, int cmd, ...)` — the third argument is an `int`, a
-//!   pointer, or absent, entirely according to `cmd`. That one *is* a list of
-//!   facts, and it is written out below.
-//!
-//! ## Why `open`, `openat` and `sem_open` are no longer exits at all
-//!
-//! Everything above says their argument list is *known*, and a known argument
-//! list is exactly what [`crate::abi::table`] describes and the lifter inlines.
-//! What kept them at a VM exit was not the arity — it was that "the arity
-//! depends on a flag" cannot be written in a signature, so both were marked
-//! variadic and every `open` in the guest paid a register-file spill and fill, a
-//! bridge, a symbol lookup and a generic marshaller.
-//!
-//! The flag rule does not have to live at the seam. It can live in the
-//! **callee**, and then the seam has nothing left to decide: the table declares
-//! `int open(const char *, int, unsigned)` with the mode always present, the
-//! lifter bakes in an absolute call, and [`open_with_mode`] below applies the
-//! `O_CREAT` rule with the same three lines the shim used to.
-//!
-//! The callee has to be one of ours. The host's `open` is genuinely variadic,
-//! and Apple's arm64 ABI passes a variadic argument **on the stack** while a
-//! fixed one goes in a register — so inlining a fixed 3-argument call to the
-//! host's `open` would put the mode in `x2`, where the callee's `va_arg` never
-//! looks, and a created file would get whatever the stack happened to hold.
-//! That is why [`provide`] claims these names ahead of the native provider: the
-//! address the guest binds to, promoted or bridged or trampolined, is this
-//! module's wrapper, and the wrapper's mode is an ordinary parameter.
-//!
-//! `sem_open` is the one where a *signature alone* was already wrong. It was
-//! spelled with its optional arguments present and still bound to the host's
-//! variadic copy, so a guest creating a named semaphore handed the mode and the
-//! initial value in `x2`/`x3` and the host read two `va_arg`s off the stack:
-//! a semaphore with arbitrary permissions and an arbitrary count, or `EINVAL`
-//! from a value above `SEM_VALUE_MAX`. The wrapper is what makes that signature
-//! true, and it is the reason a wrapper is the *mechanism* here rather than an
-//! optimisation.
-//!
-//! `fcntl` stays a shim. Its third argument is sometimes an `int`, sometimes a
-//! `struct flock *` and sometimes absent, and the list below is what decides
-//! which — a rule about a *register that may not have been written*, which is
-//! not something a callee can recover once the call has been placed.
-//!
-//! ## What is no longer read through [`GuestMemory`]
-//!
-//! The path. A shim copied it out of guest memory to hold a `CString`; the
-//! wrappers take the guest's pointer as a pointer, which is what every other
-//! `P` argument in the table already does — the guest is identity-mapped, so the
-//! host's own `open` reads the guest's bytes in place. A pointer the guest got
-//! wrong now returns `EFAULT` from the kernel instead of an `AbiError`, which is
-//! what the guest's own libc would have done for it.
-//!
-//! ## Why the third argument is passed as a word either way
-//!
-//! For `fcntl` the argument is sometimes `int` and sometimes `struct flock *`,
-//! and the two disagree about the high half of the register. Passing the whole
-//! word is right for the pointer commands and right for the integer ones too,
-//! because the callee's own prototype narrows it — the guest's SysV convention
-//! and the host's AAPCS64 both leave a narrow argument's high bits undefined,
-//! and neither callee reads them.
-//!
-//! ## What is not translated
-//!
-//! Nothing needs to be. `mode_t`, `off_t`, `int` and every pointed-at structure
-//! these commands take (`struct flock`, `struct radvisory`, `struct log2phys`)
-//! have identical layouts on x86-64 and arm64 macOS, so the guest's buffer is
-//! passed through by address. A command whose structure ever differed would need
-//! translating *here*, by number, which is why this is a list rather than a
-//! blanket forward.
+//! `open`, `openat`, `sem_open` and `fcntl`: the variadics whose arity a flag word
+//! decides.
 
 use machish::resolve::SyntheticDylib;
 
@@ -92,18 +9,13 @@ use crate::abi::{GuestMemory, Result};
 
 use super::set_int_return;
 
-/// `int open(const char *path, int flags, unsigned mode)`, as the guest's own
-/// `open` with the ellipsis spelled out.
+/// `int open(const char *path, int flags, unsigned mode)`, as the guest's own `open`
+/// with the ellipsis spelled out.
 ///
-/// The mode is a parameter here and was a register at the seam; nothing else
-/// about the call changed. `flags` still decides whether it is read, because
-/// that is a fact about `open` and not about how the call arrived.
+/// The mode is a parameter here and was a register at the seam; nothing else about the
+/// call changed.
 ///
 /// # Safety
-///
-/// Called only through an import slot [`provide`] defines, so `path` is the
-/// guest's own `const char *` — addressable in this process, since the guest is
-/// identity-mapped — and the other two arguments are scalars.
 pub unsafe extern "C" fn open_with_mode(
     path: *const libc::c_char,
     flags: libc::c_int,
@@ -117,8 +29,6 @@ pub unsafe extern "C" fn open_with_mode(
 /// `int openat(int fd, const char *path, int flags, unsigned mode)`.
 ///
 /// # Safety
-///
-/// As [`open_with_mode`].
 pub unsafe extern "C" fn openat_with_mode(
     dirfd: libc::c_int,
     path: *const libc::c_char,
@@ -129,21 +39,13 @@ pub unsafe extern "C" fn openat_with_mode(
     unsafe { libc::openat(dirfd, path, flags, mode_for(flags, mode as u64)) }
 }
 
-/// `sem_t *sem_open(const char *name, int oflag, unsigned mode, unsigned value)`,
-/// with the ellipsis spelled out.
+/// `sem_t *sem_open(const char *name, int oflag, unsigned mode, unsigned value)`, with
+/// the ellipsis spelled out.
 ///
-/// Two optional arguments rather than one, and the same `O_CREAT` deciding
-/// them — but unlike `open`'s mode, these cannot simply be passed on regardless.
-/// A `value` above `SEM_VALUE_MAX` is `EINVAL` even where POSIX says the
-/// argument is not there, so the flagless call has to be a genuinely
-/// two-argument one. Which is what this is: the host's `sem_open` is variadic,
-/// so calling it with two arguments and calling it with four are different
-/// calls, and Rust makes both by the platform's own rules.
+/// Two optional arguments rather than one, and the same `O_CREAT` deciding them — but
+/// unlike `open`'s mode, these cannot simply be passed on regardless.
 ///
 /// # Safety
-///
-/// Called only through an import slot [`provide`] defines, so `name` is the
-/// guest's own `const char *` and the rest are scalars.
 pub unsafe extern "C" fn sem_open_with_mode(
     name: *const libc::c_char,
     oflag: libc::c_int,
@@ -169,26 +71,18 @@ pub unsafe extern "C" fn sem_open_with_mode(
 }
 
 /// Claim `_open`, `_openat` and `_sem_open` for this module's wrappers.
-///
-/// Called from [`super::runtime::provider`], which sits ahead of the native
-/// provider in [`crate::program::HostProviders`] — so a guest binding these
-/// names gets a fixed-arity function whose `mode` is a parameter, which is the
-/// whole reason they can be inlined at all. A guest image that defines its own
-/// `open` still wins: loaded images are resolved before any provider.
 pub(crate) fn provide(lib: &mut SyntheticDylib) {
     lib.define_fn("_open", open_with_mode as *const ());
     lib.define_fn("_openat", openat_with_mode as *const ());
     lib.define_fn("_sem_open", sem_open_with_mode as *const ());
 }
 
-/// The wrapper for a host symbol name, for a `dlsym` that would otherwise hand
-/// the guest the host's variadic copy.
+/// The wrapper for a host symbol name, for a `dlsym` that would otherwise hand the
+/// guest the host's variadic copy.
 ///
-/// [`crate::dyld`]'s global fallback records a `dlsym` result so it can be
-/// called later, and calls it with the signature the table gives its *name* —
-/// which for these two is now a fixed one. Handing back the host's `open` there
-/// would reintroduce exactly the register-versus-stack mismatch [`provide`]
-/// exists to avoid, in the one path that does not go through a binding.
+/// [`crate::dyld`]'s global fallback records a `dlsym` result so it can be called
+/// later, and calls it with the signature the table gives its *name* — which for these
+/// two is now a fixed one.
 pub(crate) fn host_substitute(name: &str) -> Option<u64> {
     match name.strip_prefix('_').unwrap_or(name) {
         "open" => Some(open_with_mode as *const () as u64),
@@ -219,11 +113,8 @@ pub fn fcntl(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemor
 
 /// The `mode` argument, or zero when the guest passed none.
 ///
-/// Without `O_CREAT` the argument holds whatever the guest last left in the
-/// register the signature reads it from. A stale mode cannot make `open` fault,
-/// but it can make a *created* file appear with permissions nobody asked for the
-/// moment the flag word is misread, so the zero is the honest value rather than
-/// a defensive one.
+/// Without `O_CREAT` the argument holds whatever the guest last left in the register
+/// the signature reads it from.
 fn mode_for(flags: i32, register: u64) -> libc::c_int {
     if flags & libc::O_CREAT != 0 {
         register as libc::mode_t as libc::c_int
@@ -233,10 +124,6 @@ fn mode_for(flags: i32, register: u64) -> libc::c_int {
 }
 
 /// Whether `cmd` reads a third argument.
-///
-/// The commands with no argument are the ones listed here; anything else is
-/// assumed to take one, because passing a word to a command that ignores it is
-/// harmless while withholding one it needs is not.
 fn takes_third_argument(cmd: i32) -> bool {
     !matches!(
         cmd,
@@ -288,8 +175,7 @@ mod tests {
 
         // `0o604` is a mode with a hole in it — nothing for the group, a read
         // for everyone else — so neither a zero nor the usual `0o666` can be
-        // mistaken for it. `umask` can only clear bits, so what survives it is
-        // what the test can insist on.
+        // mistaken for it.
         assert_eq!(
             permissions(&path) & 0o604,
             0o604 & !umask(),
@@ -299,9 +185,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// And without `O_CREAT` there is no mode, whatever the register held. A
-    /// wrapper that passed it on regardless would be indistinguishable here —
-    /// which is why the file is created first, with a mode of its own.
+    /// And without `O_CREAT` there is no mode, whatever the register held.
     #[test]
     fn a_mode_passed_without_o_creat_changes_nothing() {
         let dir = std::env::temp_dir().join("rosetta3-openat-shim");
@@ -362,14 +246,11 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// The named semaphore the guest asked for, with the mode *and* the count
-    /// it asked for.
+    /// The named semaphore the guest asked for, with the mode *and* the count it asked
+    /// for.
     ///
-    /// The count is the falsifiable half and the reason this test is here rather
-    /// than in a signature's word: `sem_open` was already described with its
-    /// optional arguments present while still bound to the host's variadic copy,
-    /// so the two arrived in registers and the host read the stack. Two
-    /// successful `sem_trywait`s and a third that fails say the value was 2.
+    /// The count is the falsifiable half and the reason this test is here rather than
+    /// in a signature's word:
     #[test]
     fn a_named_semaphore_gets_the_mode_and_the_count_it_was_opened_with() {
         // Darwin caps a semaphore name at `PSEMNAMLEN` (31) and wants a leading
@@ -417,9 +298,8 @@ mod tests {
         }
     }
 
-    /// The point of the whole rewrite, asked of the classifier the lifter reads:
-    /// each is `Fast`, which is what makes the call an inlined one. A `vsig!`
-    /// entry or a re-added shim would answer `Slow` here.
+    /// The point of the whole rewrite, asked of the classifier the lifter reads: each
+    /// is `Fast`, which is what makes the call an inlined one.
     #[test]
     fn both_names_classify_as_fast_imports() {
         for name in ["_open", "_openat", "_sem_open"] {

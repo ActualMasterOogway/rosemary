@@ -1,68 +1,4 @@
 //! `mmap` and `mprotect`: a guest that generates its own code.
-//!
-//! ## Why these cannot be passthrough
-//!
-//! Everything else about memory mapping survives the seam untouched — a guest
-//! allocation is a host allocation at the same address. Executable permission
-//! does not, and the reason is the whole shape of this runtime: **guest code is
-//! never executed by this CPU.** It is x86-64; it reaches the recompiler as
-//! *data*, exactly as [the no-`MAP_JIT` decision] says of a loaded image. A page
-//! the guest calls executable is a page this runtime will *read* and lift.
-//!
-//! [the no-`MAP_JIT` decision]: ../../../../docs/ROADMAP.md
-//!
-//! So `PROT_EXEC` is not merely unnecessary here, it is actively harmful, and
-//! Terraria is where that stops being theory. It embeds Mono, whose JIT asks for
-//! code memory twice:
-//!
-//! ```text
-//! mmap(0, 0x4000,  WRITE|EXEC,      PRIVATE|ANON)      -> EACCES
-//! mmap(0, 0x40000, READ|WRITE|EXEC, PRIVATE|ANON|JIT)  -> 0x10b67c000
-//! ```
-//!
-//! The first is refused because Apple Silicon does not hand out W^X memory
-//! without `MAP_JIT`. The second succeeds — and then the guest's very first
-//! store into it takes `SIGBUS`, `KERN_PROTECTION_FAILURE`, with no diagnostic
-//! naming any of this. A `MAP_JIT` region on this architecture starts
-//! *write-protected* for the calling thread, and is made writable by
-//! `pthread_jit_write_protect_np(0)` — which the **x86-64** Mono never calls,
-//! because on the Intel hardware it was compiled for `MAP_JIT` memory is plainly
-//! readable, writable and executable and the toggle is an arm64 intrinsic that
-//! does not exist there. The guest is not wrong; it is running on a CPU it was
-//! not built for, which is this project's entire premise.
-//!
-//! ## What the shim does
-//!
-//! Drops `PROT_EXEC` from the request and `MAP_JIT` from the flags, so the guest
-//! is handed ordinary anonymous memory it can write without ceremony. Because a
-//! page the guest means to execute is one this runtime must be able to *read*,
-//! `PROT_EXEC` is translated to `PROT_READ` rather than simply erased — a
-//! `WRITE|EXEC` request that would otherwise yield write-only memory the lifter
-//! could not decode. Read and write permission are otherwise passed through
-//! exactly as asked, so a guest that `mprotect`s its code read-only after
-//! emitting it still gets memory it cannot write.
-//!
-//! With `MAP_JIT` gone the first request above succeeds on its own terms and the
-//! fallback is never taken, which is the more direct answer as well as the
-//! working one. It also makes the claim in
-//! [`pthread_jit_write_protect_np`](super::process::pthread_jit_write_protect_np)
-//! — "the guest has no separately protected JIT mapping to toggle" — true rather
-//! than merely convenient: it is this shim that removes the mapping the guest
-//! would otherwise have to toggle, and a guest toggle reaching the host would
-//! unprotect *microlift's* pages, not the guest's.
-//!
-//! ## Scope
-//!
-//! What is *in* those pages afterwards is a separate question this shim does not
-//! answer. The code cache never invalidates a translation, so a guest that
-//! regenerates code at an address it already ran is served the stale one — see
-//! the self-modifying-code note in the roadmap. This module is about being able
-//! to write the bytes at all.
-//!
-//! `ROSETTA3_TRACE_VM=1` prints every request, its rewrite, and its result. The
-//! trace is how the two lines above were obtained rather than guessed at, and a
-//! JIT that stops working is the case where seeing them again is the whole
-//! diagnosis.
 
 use microlift::arch::x86_64::context::RegisterContext;
 use static_init::dynamic;
@@ -79,35 +15,17 @@ const MAP_JIT: i32 = 0x0800;
 ///
 /// ## Why this list is the right answer to "which bytes are code"
 ///
-/// [The roadmap][r] states the problem in its smallest form — `__text` contains
-/// data, and no static rule separates the two — and this runtime's answer has
-/// always been to lift *from a PC*, demand-driven. A guest that generates code
-/// poses the same question one level out: given an address in anonymous memory,
-/// is it a function pointer to lift or a host pointer to call?
+/// [The roadmap][r] states the problem in its smallest form — `__text` contains data,
+/// and no static rule separates the two — and this runtime's answer has always been to
+/// lift *from a PC*, demand-driven.
 ///
-/// [r]: ../../../../docs/ROADMAP.md
+/// The guest answers it itself, and it does so before the question is asked.
 ///
-/// The guest answers it itself, and it does so before the question is asked. A
-/// program that intends to execute a page requests `PROT_EXEC` for it — that is
-/// what the permission *means*, and it is a statement of intent this runtime
-/// intercepts anyway in order to strip. So the arenas are exactly the mappings
-/// the guest declared executable: no heuristic, no address-range guess, and
-/// nothing an ordinary data allocation can fall into. A guest that jumps into a
-/// page it never asked to execute is still `UnknownIndirectCall` by name, which
-/// is the right answer, because on real hardware it would have faulted.
-///
-/// Append-only and never removed, matching [`crate::dyld`]'s images and for the
-/// same reason: the code cache holds translations keyed by address, so a range
-/// that stopped being an arena would be one whose translations outlive it. See
-/// the scope note in the module header.
+/// Append-only and never removed, matching [`crate::dyld`]'s images and for the same
+/// reason:
 static ARENAS: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());
 
 /// The lowest and highest arena address, for the question asked on the hot path.
-///
-/// [`crate::Program::is_guest_address`] is consulted at every indirect call, and
-/// answers "no" almost every time. Two relaxed loads reject a host address
-/// before any lock is taken — the same shape, and the same reasoning, as
-/// [`crate::dyld`]'s extents.
 static ARENA_LO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 static ARENA_HI: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -160,10 +78,6 @@ pub fn shim_for(
 }
 
 /// The protection to actually request for a guest's `prot`.
-///
-/// `PROT_EXEC` becomes `PROT_READ` — the permission this runtime needs to lift
-/// the page — and every other bit is passed through. Kept separate from the
-/// calls so it can be tested without mapping anything.
 pub(crate) fn host_prot(prot: i32) -> i32 {
     match prot & libc::PROT_EXEC {
         0 => prot,
@@ -239,17 +153,14 @@ fn mprotect(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory
     Ok(())
 }
 
-/// Whether `ROSETTA3_TRACE_VM` asked for the guest's use of memory to be
-/// reported: its mappings, the code it generates into them, the images it loads,
-/// and the regions this runtime declines to compile.
+/// Whether `ROSETTA3_TRACE_VM` asked for the guest's use of memory to be reported:
 ///
-/// Read once and cached, because some of its callers sit on the path taken for
-/// *every* generated region and a `getenv` each time would be a cost paid by
-/// runs that never look at the output.
+/// Read once and cached, because some of its callers sit on the path taken for *every*
+/// generated region and a `getenv` each time would be a cost paid by runs that never
+/// look at the output.
 ///
-/// It lives here rather than in a diagnostics module because this is where the
-/// question starts: a JIT guest that goes wrong goes wrong about memory, and the
-/// mapping trace is the first thing worth seeing.
+/// It lives here rather than in a diagnostics module because this is where the question
+/// starts:
 #[inline(always)]
 pub fn tracing() -> bool {
     #[dynamic]
@@ -339,8 +250,6 @@ mod tests {
     }
 
     /// The fault this module exists for, reproduced and then not reproduced:
-    /// a `MAP_JIT` region cannot be written by a thread that has not turned its
-    /// write protection off, and the rewritten request yields memory that can.
     #[test]
     fn the_rewritten_request_yields_memory_the_guest_can_write() {
         let (prot, flags) = (

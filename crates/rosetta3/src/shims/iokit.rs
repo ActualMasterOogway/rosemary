@@ -1,10 +1,4 @@
 //! IOKit registrations whose callbacks must cross back into the guest.
-//!
-//! `IOServiceAddMatchingNotification` is an ordinary-looking C function, but
-//! its callback is retained by IOKit and called later from a run loop.  The
-//! generic ABI table can describe the call, but this shim makes the lifetime
-//! boundary explicit and ensures the guest callback is replaced before IOKit
-//! stores it.
 
 use core::ffi::c_void;
 
@@ -14,9 +8,8 @@ use crate::abi::{Callbacks, GuestMemory, Result};
 
 use super::set_int_return;
 
-/// `kern_return_t IOServiceAddMatchingNotification(
-/// IONotificationPortRef, const io_name_t, CFDictionaryRef,
-/// IOServiceMatchingCallback, void *, io_iterator_t *)`
+/// `kern_return_t IOServiceAddMatchingNotification( IONotificationPortRef, const
+/// io_name_t, CFDictionaryRef, IOServiceMatchingCallback, void *, io_iterator_t *)`
 type AddMatchingNotificationFn = unsafe extern "C" fn(
     *mut c_void,
     *const c_void,

@@ -1,46 +1,4 @@
 //! The ABI seam: what it takes to *call* an intercepted import.
-//!
-//! Milestone 1 left an import as an address and nothing else. That is enough to
-//! stop the recompiler walking into a `__stubs` entry, and not nearly enough to
-//! service the resulting exit: at an `ExitReason::ImportedFunctionCall` the
-//! runtime holds a guest register context and a host function pointer, and has
-//! to decide which of those registers are arguments, of what type, and where
-//! the result goes. No Mach-O records that. A symbol table has a name and no
-//! types, so the information has to come from a table the embedder writes —
-//! which is exactly what [`machish::report::BindingRecord::tag`] exists to
-//! index, and why `function_traits` enters here and never in `machish`.
-//!
-//! ## Refusing is the design decision
-//!
-//! The tempting default is a guess: forward six integer registers and eight
-//! vector registers, take an integer return. It is right for most of libSystem
-//! and silently wrong for anything passing or returning a struct by value, and
-//! *wrong here does not fault* — the host reads a register that happens to hold
-//! something, and the guest gets plausible garbage back. A wrong answer that
-//! looks like a right one is worse than no answer, so an import with no
-//! signature is **refused by name** ([`AbiError::NoSignature`]) and the guest
-//! register context is left untouched. See [`table`] for what is known and what
-//! is deliberately refused.
-//!
-//! ## Two consumers, one table
-//!
-//! - [`crate::Program::lifter_config`] promotes an import with a known
-//!   non-variadic signature to `LifterConfig::register_fast_import`, so the
-//!   lifter inlines the call and reads arguments from wherever the *guest's*
-//!   ABI put them. No VM exit at all.
-//! - [`call_import`] services the slow path for everything else.
-//!
-//! Fast is an optimisation of slow: both read the same [`FunctionAbi`], and a
-//! slow import is *correct*, merely slower. That is why the marshaller here is
-//! the thing tested against real host functions — if it is right, promoting an
-//! import cannot change behaviour, only cost.
-//!
-//! ## The guest's convention, not the host's
-//!
-//! [`guest_call_abi`] is SysV AMD64 because the *guest binary* was compiled for
-//! it. The host is arm64 and its convention is Cranelift's business (fast path)
-//! or [`marshal`]'s (slow path). Keeping the two named separately is what makes
-//! the seam readable.
 
 use core::fmt;
 
@@ -59,24 +17,17 @@ pub use table::{FunctionAbi, Lookup};
 
 /// The convention the guest passes arguments in.
 ///
-/// A property of the binary being translated — an Intel macOS executable is
-/// SysV AMD64 — and not of the machine this runs on. Named once here so the
-/// lifter registration and the slow-path marshaller cannot disagree about it.
+/// A property of the binary being translated — an Intel macOS executable is SysV AMD64
+/// — and not of the machine this runs on.
 pub fn guest_call_abi() -> CallAbi {
     guest_call_abi_ref().clone()
 }
 
 /// [`guest_call_abi`] without building one.
 ///
-/// A [`CallAbi`] owns two `Vec`s — six integer argument registers and eight
-/// vector ones — so constructing it is two heap allocations, and
-/// [`marshal::call_types`] did it *per intercepted call* purely to ask where
-/// the arguments are. That is a fixed cost on the path this runtime spends most
-/// of its time on when a program calls the host through pointers, and the value
-/// is a constant: the guest binary's convention does not change while it runs.
-///
-/// [`guest_call_abi`] stays, because [`microlift`]'s registration APIs take one
-/// by value and a clone at lift time is nothing.
+/// A [`CallAbi`] owns two `Vec`s — six integer argument registers and eight vector ones
+/// — so constructing it is two heap allocations, and [`marshal::call_types`] did it
+/// *per intercepted call* purely to ask where the arguments are.
 pub fn guest_call_abi_ref() -> &'static CallAbi {
     #[dynamic]
     static ABI: CallAbi = CallAbi::sysv_amd64();
@@ -85,9 +36,8 @@ pub fn guest_call_abi_ref() -> &'static CallAbi {
 
 /// Anything that stops an intercepted call from being made.
 ///
-/// Every variant names the symbol, because the whole point of refusing is that
-/// the failure is legible: "`_fts_open$INODE64` has no signature" is a work
-/// item, and a corrupted register is a week of bisecting.
+/// Every variant names the symbol, because the whole point of refusing is that the
+/// failure is legible:
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AbiError {
     /// Nothing in [`table`] describes this symbol.
@@ -97,10 +47,7 @@ pub enum AbiError {
         symbol: String,
         reason: &'static str,
     },
-    /// Variadic, and no shim implements it. Variadics cannot be forwarded
-    /// generically: SysV AMD64 passes them in registers with `al` holding the
-    /// vector-register count, while Apple's arm64 ABI passes every variadic
-    /// argument on the stack. See [`crate::shims`].
+    /// Variadic, and no shim implements it. Variadics cannot be forwarded generically:
     NoShim { symbol: String },
     /// The signature is known but this marshaller cannot express the call:
     /// more than eight integer or eight floating-point arguments.
@@ -114,23 +61,13 @@ pub enum AbiError {
     /// A guest memory access failed: a stack argument or a string argument
     /// pointing outside anything mapped.
     Memory { symbol: String, addr: u64 },
-    /// A shim called *into the guest* and that call failed. The payload is the
-    /// inner failure, rendered: a thrown object's destructor that imports
-    /// something undescribed fails one level below the symbol being serviced,
-    /// and reporting only the outer name would send the reader to the wrong
-    /// place entirely.
+    /// A shim called *into the guest* and that call failed. The payload is the inner
+    /// failure, rendered:
     Nested { symbol: String, reason: String },
 }
 
 impl AbiError {
     /// The same failure, said about `symbol` instead.
-    ///
-    /// A message send is serviced under the name of the trampoline the guest
-    /// called — `objc_msgSend` — which is the same name for every message in
-    /// the program and so tells a reader nothing about which one stopped.
-    /// [`crate::objc::dispatch`] uses this on the error path only, to put the
-    /// receiver's class and the selector in front of the reason. On the path
-    /// where nothing fails, no name is built and nothing is allocated.
     pub fn renaming(self, symbol: String) -> Self {
         match self {
             AbiError::NoSignature { .. } => AbiError::NoSignature { symbol },
@@ -187,12 +124,6 @@ impl std::error::Error for AbiError {}
 pub type Result<T> = core::result::Result<T, AbiError>;
 
 /// The guest's memory, as the marshaller and the shims need it.
-///
-/// Narrower than [`AddressSpace`] on purpose: nothing on this path reserves or
-/// protects, and stating that keeps a shim from quietly gaining the ability to
-/// re-map the guest. Errors carry the symbol being serviced, which
-/// [`AddressSpace`]'s own error type has no room for, so this is also where the
-/// two error vocabularies meet.
 pub trait GuestMemory {
     fn read(&self, va: u64, out: &mut [u8]) -> core::result::Result<(), machish::Error>;
     fn write(&mut self, va: u64, data: &[u8]) -> core::result::Result<(), machish::Error>;
@@ -210,9 +141,8 @@ impl<S: AddressSpace> GuestMemory for S {
 
 /// Longest C string a shim will follow before giving up.
 ///
-/// Totality, not policy: a `%s` argument pointing at unterminated bytes must
-/// end the read rather than the process. Anything legitimately longer than this
-/// is a bug in the guest or a wrong pointer.
+/// Totality, not policy: a `%s` argument pointing at unterminated bytes must end the
+/// read rather than the process.
 pub const MAX_CSTR: usize = 64 * 1024;
 
 impl dyn GuestMemory + '_ {
@@ -288,15 +218,12 @@ impl dyn GuestMemory + '_ {
 
 /// Service one intercepted call.
 ///
-/// `symbol` is the imported name with its leading underscore, as the Mach-O
-/// spells it; `tag` is the provider's verbatim echo (see the crate note on why
-/// the seam is a `u64`); `host` is the address the import resolved to. On
-/// success the guest's return-value register has been written and `ctx` is
-/// ready to resume at its `rip`.
+/// `symbol` is the imported name with its leading underscore, as the Mach-O spells it;
+/// `tag` is the provider's verbatim echo (see the crate note on why the seam is a
+/// `u64`); `host` is the address the import resolved to.
 ///
-/// **On any error `ctx` is unmodified.** That is the guarantee that makes
-/// refusal useful: a missing signature costs a diagnostic, not a wrong value in
-/// `rax` that surfaces three functions later.
+/// **On any error `ctx` is unmodified.** That is the guarantee that makes refusal
+/// useful:
 pub fn call_import(
     symbol: &str,
     tag: u64,
@@ -309,12 +236,7 @@ pub fn call_import(
 
 /// [`call_import`], with somewhere for a guest function pointer to go.
 ///
-/// The extra parameter is what makes `qsort` callable. Its argument is a guest
-/// address the host would call as arm64, so it has to be replaced with a thunk
-/// — and building one means entering the JIT, which is knowledge this module
-/// must not have. Hence a trait: the ABI layer knows *which* arguments are
-/// callbacks (from [`FunctionAbi::callbacks`]) and the VM knows what to do
-/// about them.
+/// The extra parameter is what makes `qsort` callable.
 pub fn call_import_with(
     symbol: &str,
     tag: u64,
@@ -325,8 +247,7 @@ pub fn call_import_with(
 ) -> Result<()> {
     // `ROSETTA3_TRACE_CALL` reports this call, if it names its symbol. The
     // whole seam funnels through here — bridged and slow alike — so one place
-    // sees every intercepted call. See [`crate::trace`] for the one exception
-    // it had to arrange for: an inlined import never arrives.
+    // sees every intercepted call.
     if !crate::trace::watching(symbol) {
         return call_import_inner(symbol, tag, host, ctx, mem, callbacks);
     }
@@ -371,46 +292,29 @@ fn call_import_inner(
 }
 
 /// How a guest function pointer becomes something the host can call.
-///
-/// Implemented by [`crate::vm::Vm`]; see [`crate::thunk`] for what the answer
-/// actually is.
 pub trait Callbacks {
-    /// What to pass the host in place of the guest's function-pointer argument
-    /// `va`, while servicing `symbol`.
+    /// What to pass the host in place of the guest's function-pointer argument `va`,
+    /// while servicing `symbol`.
     ///
-    /// One method rather than a "is it guest code" predicate and a builder,
-    /// because the decision and the substitution have to be made together: an
-    /// implementation that cannot build a thunk must **refuse**, not pass the
-    /// pointer through. A null stays null (`atexit(NULL)` is the guest's error
-    /// to have), and a pointer that is already a host address is passed
-    /// unchanged — a program may hand back a callback it was given, and
-    /// wrapping that would break the pointer equality the host can observe.
+    /// One method rather than a "is it guest code" predicate and a builder, because the
+    /// decision and the substitution have to be made together:
     fn substitute(&self, symbol: &str, va: u64) -> Result<u64>;
 
-    /// The guest address behind `va`, if `va` is a thunk this runtime handed
-    /// out; `va` otherwise.
+    /// The guest address behind `va`, if `va` is a thunk this runtime handed out; `va`
+    /// otherwise.
     ///
-    /// The direction [`Callbacks::substitute`] alone cannot express, and it is
-    /// not symmetry for its own sake: a signal disposition, unlike a `qsort`
-    /// comparator, comes *back* — `signal` returns the previous handler and
-    /// `sigaction` writes it into the guest's `oldact`. A program that saves one
-    /// and restores it later would otherwise be handed an arm64 trampoline and
-    /// pass it around as if it were its own function.
-    ///
-    /// The default is the identity, which is right for every caller that hands
-    /// nothing out: an address that is not a thunk is a host function the guest
-    /// can only ever pass back.
+    /// The direction [`Callbacks::substitute`] alone cannot express, and it is not
+    /// symmetry for its own sake:
     fn unsubstitute(&self, va: u64) -> u64 {
         va
     }
 }
 
-/// The bridge for a caller that has no JIT to re-enter — the marshaller's own
-/// tests, and [`call_import`] itself.
+/// The bridge for a caller that has no JIT to re-enter — the marshaller's own tests,
+/// and [`call_import`] itself.
 ///
-/// It refuses rather than passing the pointer through, which keeps the M2
-/// behaviour exactly: a callback-taking import is a diagnostic naming the
-/// symbol, not a host calling x86-64 as arm64.
+/// It refuses rather than passing the pointer through, which keeps the behaviour
+/// exactly:
 pub struct NoCallbacks;
 
 impl Callbacks for NoCallbacks {
@@ -427,7 +331,7 @@ impl Callbacks for NoCallbacks {
 
 /// How an import will be reached, once classified.
 ///
-/// The summary the driver prints, and the shape of the M2 acceptance question:
+/// The summary the driver prints, and the shape of the acceptance question:
 /// every import of a program must be one of these and none may be
 /// [`Classification::Unknown`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -438,7 +342,7 @@ pub enum Classification {
     /// a signature this marshaller cannot inline.
     Slow,
     /// Known and deliberately not callable: data read through its slot, or a
-    /// callback whose shape the host→guest thunk cannot carry (M4, M5).
+    /// callback whose shape the host→guest thunk cannot carry.
     Refused(&'static str),
     /// Nothing describes it. The one outcome the acceptance test forbids.
     Unknown,
@@ -448,15 +352,7 @@ pub enum Classification {
 pub fn classify(tag: u64, symbol: &str) -> Classification {
     // A shimmed symbol is slow whatever its signature says, because
     // [`crate::ImportPolicy`] refuses to promote one: `setjmp` has an ordinary
-    // `int(void *)` signature and inlining it would call the *host's*. Asked
-    // here as well as there so the audit reports how an import will really be
-    // reached rather than how its types would allow.
-    //
-    // The exception is the Objective-C runtime surface, where the shim is a
-    // class substitution and nothing else, and the substitution can move into
-    // the address that is inlined. Reported as `Fast` here for the same reason
-    // everything else in this function is: the audit's job is to say how an
-    // import is really reached. See [`crate::objc::fast`].
+    // `int(void *)` signature and inlining it would call the *host's*.
     if crate::shims::is_shimmed(symbol) {
         let Some(abi) = crate::objc::fast::abi_of(symbol) else {
             return Classification::Slow;
@@ -470,8 +366,7 @@ pub fn classify(tag: u64, symbol: &str) -> Classification {
         Lookup::Known(abi) if abi.variadic => Classification::Slow,
         // A fast import is inlined by the lifter, which passes the guest's
         // registers straight through — including the function pointer that has
-        // to become a thunk first. Substitution only exists at an exit, so a
-        // callback taker is slow by construction, not by preference.
+        // to become a thunk first.
         Lookup::Known(abi) if !abi.callbacks.is_empty() => Classification::Slow,
         Lookup::Known(abi) => {
             if guest_call_abi().can_fast_call(abi.types) && marshal::is_marshallable(abi) {
@@ -486,11 +381,6 @@ pub fn classify(tag: u64, symbol: &str) -> Classification {
 }
 
 /// The `DynamicSymbol` microlift wants for a fast import.
-///
-/// `name` is `&'static str` on microlift's side and a `String` on `machish`'s
-/// (see the crate note) — the table's own static name is what bridges them, and
-/// is the reason a fast import is reached through the table rather than through
-/// the binding record's string.
 pub fn dynamic_symbol(abi: &FunctionAbi, host: u64) -> DynamicSymbol {
     DynamicSymbol {
         name: abi.name,

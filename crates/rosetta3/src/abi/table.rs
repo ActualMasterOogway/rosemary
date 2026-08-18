@@ -1,26 +1,4 @@
 //! What the runtime knows about the functions a guest imports.
-//!
-//! A Mach-O symbol table records names, not types, so a signature has to come
-//! from here. The table is written for the symbols real programs import, and it
-//! grows when something fails, because a failure names the symbol.
-//!
-//! [`lookup`] distinguishes *unknown* from *refused*. [`REFUSED`] holds three
-//! kinds of thing:
-//!
-//! - **Data**, imported through a slot and read, never called.
-//! - **Callback takers whose callback a thunk cannot carry** — a signal
-//!   handler, which would be entered with a *host* `ucontext_t`.
-//! - **Stack walkers**, where passthrough is not unimplemented but wrong: the
-//!   host's unwinder cannot walk guest frames, so `pthread_cancel` is refused.
-//!
-//! Keys are spelled without the leading underscore a Mach-O adds, so `_strlen`
-//! is looked up as `strlen` and `___stdoutp` as `__stdoutp`. [`lookup`] also
-//! retries with an x86-only variant suffix removed — `$INODE64`, `$UNIX2003`,
-//! `$1050` — because arm64 never had the variant and the signature is the plain
-//! one's.
-//!
-//! `tag` is the provider's verbatim echo. No provider assigns one yet, so every
-//! tag is zero and lookup falls through to the name.
 use static_init::dynamic;
 
 use super::ArgType as T;
@@ -34,19 +12,14 @@ pub struct FunctionAbi {
     /// `[0]` is the return type, `[1..]` the parameters — the layout
     /// `DynamicSymbol::arg_types` uses, so no reshuffling happens at the seam.
     pub types: &'static [T],
-    /// C-variadic. Never fast-called, and only callable if [`crate::shims`]
-    /// implements it: the two platforms disagree about where variadic arguments
-    /// live, so there is no generic forwarding path.
+    /// C-variadic. Never fast-called, and only callable if [`crate::shims`] implements
+    /// it:
     pub variadic: bool,
     /// Zero-based parameter indices that are **guest function pointers**.
     ///
-    /// A pointer is a pointer to the marshaller; this is the one place the
-    /// distinction matters, because handing the host an x86-64 address it will
-    /// call as arm64 is the failure mode host→guest thunks exist to prevent.
-    /// Each listed argument is substituted with a thunk on its way out — see
-    /// [`crate::thunk`] — which is also why a signature carrying one can never
-    /// be a *fast* import: the lifter would inline the call and pass the raw
-    /// pointer.
+    /// A pointer is a pointer to the marshaller; this is the one place the distinction
+    /// matters, because handing the host an x86-64 address it will call as arm64 is the
+    /// failure mode host→guest thunks exist to prevent.
     pub callbacks: &'static [u8],
 }
 
@@ -70,9 +43,6 @@ pub enum Lookup {
 }
 
 /// Strip the leading underscore a Mach-O import carries.
-///
-/// Exactly one, not all of them: `___stdoutp` is the C identifier `__stdoutp`,
-/// and eating every underscore would collide it with `_stdoutp`.
 fn c_name(symbol: &str) -> &str {
     symbol.strip_prefix('_').unwrap_or(symbol)
 }
@@ -103,17 +73,7 @@ pub fn lookup(tag: u64, symbol: &str) -> Lookup {
 
 /// Data imports whose names carry a suffix, so [`REFUSED`] cannot list them.
 ///
-/// Objective-C metadata is the only family in this shape: a class reference is
-/// `_OBJC_CLASS_$_NSString`, one name per class the guest mentions, and an image
-/// may mention hundreds. They are read through their slots and never called —
-/// `_OBJC_CLASS_$_NSObject` is the *superclass field* of a guest class, which
-/// [`crate::objc`] follows at registration — so refusing them by family says
-/// exactly what listing them one by one would, and stays true for a class nobody
-/// has heard of.
-///
-/// The alternative is that a real Objective-C program reports a dozen imports as
-/// [`Lookup::Unknown`], which is the audit's word for "nobody has described
-/// this" and would drown the one that really is undescribed.
+/// Objective-C metadata is the only family in this shape:
 fn data_family(name: &str) -> Option<&'static str> {
     const DATA: &str = "an Objective-C metadata import, read through its slot and never called";
     let families = [
@@ -150,10 +110,6 @@ enum Described {
 }
 
 /// [`SIGNATURES`] and [`REFUSED`], by name, built once.
-///
-/// A map, so the tables can be written in whatever order reads best rather than
-/// filed in `strcmp` order by hand. A duplicate name is a mistake a map makes
-/// invisible, so [`tests::signatures_are_unique`] is what catches it.
 fn index() -> &'static std::collections::HashMap<&'static str, Described> {
     #[dynamic]
     static INDEX: std::collections::HashMap<&'static str, Described> = {
@@ -220,12 +176,8 @@ const U8: T = T::UnsignedByte;
 const U16: T = T::UnsignedHalfword;
 const BOOL: T = U8;
 
-/// Known signatures, in no particular order — [`index`] builds the lookup.
-/// Names must be unique; `signatures_are_unique` says so.
-///
-/// Types are the C declarations, narrowed where C narrows: `size_t` is `U64`,
-/// `int` is `I32`, every pointer is `P`. A function passing or returning a
-/// struct by value does not belong here — see [`super::marshal`].
+/// Known signatures, in no particular order — [`index`] builds the lookup. Names must
+/// be unique; `signatures_are_unique` says so.
 pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("AudioComponentFindNext", P, P, P),
     sig!("AudioComponentInstanceDispose", I32, P),
@@ -955,7 +907,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("NSHomeDirectory", P),
     sig!("NSClassFromString", P, P),
     // `SEL NSSelectorFromString(NSString *)` — two pointers, and the reason it
-    // needs no translation is [M6.2](../../../docs/ROADMAP.md)'s:
+    // needs no translation is:
     sig!("NSSelectorFromString", P, P),
     // The handler is a guest function pointer the *runtime* calls, from inside
     // whatever raised — so it goes out as a thunk like every other callback
@@ -1464,7 +1416,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("fts_close", I32, P),
     // The comparator takes `const FTSENT **`, which is still just a pointer:
     // `ls` sorts its output with one, so this is the entry that makes the
-    // milestone-1 acceptance binary produce output at all.
+    // acceptance binary produce output at all.
     cbsig!([2], "fts_open", P, P, I32, P),
     sig!("fts_read", P, P),
     sig!("fts_set", I32, P, P, I32),
@@ -3112,72 +3064,44 @@ pub static SIGNATURES: &[FunctionAbi] = &[
 
 /// A symbol with no public declaration anywhere on this system.
 ///
-/// The milestone's "explicit unknown list", and the honest end of the refusal
-/// spectrum: these are private SPI whose argument list cannot be read out of a
-/// header, so the choice is to guess or to say so. Guessing is what the whole
-/// module exists not to do.
+/// The explicit unknown list, and the honest end of the refusal spectrum:
 const UNDECLARED: &str = "no public declaration; a guessed signature would fail silently";
 
 /// The commonest refusal by far, and the least interesting: a symbol that is a
-/// *variable*. An imported global is bound into a slot the guest loads from and
-/// is never the target of a call, so there is nothing to describe. Cocoa and
-/// CoreFoundation supply most of them — every `NSString *` notification name,
-/// every `CFStringRef` property key — and a program that talks to a framework
-/// imports dozens.
+/// *variable*.
 const DATA: &str = "a data import, read through its slot and never called";
 
 /// A libc++ entry point whose whole purpose is to `throw`.
 ///
-/// Describing the signature would be easy and calling it would be wrong: the
-/// host's `throw` raises through the *host's* unwinder, which would walk out of
-/// the JIT's frames rather than the guest's. Guest exceptions are virtualized
-/// against the guest's own stack ([`crate::unwind`]), and there is no path from
-/// one to the other. A guest reaching one of these is already failing; saying so
-/// by name is strictly better than an unwind into recompiled code.
+/// Describing the signature would be easy and calling it would be wrong:
 const THROWS: &str = "throws a C++ exception, which cannot be raised across the JIT boundary";
 
 /// A struct by value, in a *C* function.
 ///
-/// [`crate::abi::aggregate`] marshals these, and an Objective-C method reaches
-/// it — because a method carries its own type encoding, which describes the
-/// struct's members and their offsets. This table has no such vocabulary:
-/// [`FunctionAbi::types`] is a list of scalars, and there is nowhere to write
-/// down that an argument is four `double`s. Extending it is the work these
-/// refusals are waiting for, and it is a change to the table's shape rather
-/// than to the marshaller.
+/// [`crate::abi::aggregate`] marshals these, and an Objective-C method reaches it —
+/// because a method carries its own type encoding, which describes the struct's members
+/// and their offsets.
 const AGGREGATE: &str =
     "passes or returns a struct by value, which this table has no way to describe";
 
 /// Takes a `std::string` and is not a string operation.
 ///
 /// libc++ lays `basic_string` out differently on the two architectures — see
-/// [`crate::shims::cxxstring`], which is where that is written down and where
-/// the string's own entry points are implemented against the *guest's* layout.
-/// These are the calls that reach past that: the object they build belongs to
-/// the host (a `runtime_error`'s message, a `random_device`'s token), so
-/// answering them means more than reading a string correctly, and each is a work
-/// item of its own rather than a line in that module. Refused by name, which is
-/// what the shim exists to make possible — before it, this was a signature that
-/// looked right and returned garbage.
+/// [`crate::shims::cxxstring`], which is where that is written down and where the
+/// string's own entry points are implemented against the *guest's* layout.
 const GUEST_STRING: &str =
     "takes a std::string, whose layout differs between x86-64 and arm64 macOS";
 
 /// The [`crate::jmpbuf`] refusal, one level further out.
 ///
 /// `getcontext` and friends save the *machine's* registers and stack pointer.
-/// Forwarding one saves this runtime's arm64 frame, and `setcontext` would then
-/// resume the JIT rather than the guest — the same wrongness `setjmp` has, and
-/// without the excuse that a `jmp_buf`'s contents are private, because a
-/// `ucontext_t` has a documented layout a guest may read.
 const CONTEXT: &str =
     "saves or restores a machine context, which here is the host's and not the guest's";
 
 /// The one scalar the two architectures spell differently.
 ///
-/// x86-64 macOS's `long double` is x87's 80-bit extended format; arm64's is
-/// IEEE binary128. A value has no common register and no lossless move between
-/// the two, so a forwarded call would return a plausible number with the
-/// precision the caller asked for silently gone.
+/// x86-64 macOS's `long double` is x87's 80-bit extended format; arm64's is IEEE
+/// binary128.
 const LONG_DOUBLE: &str =
     "takes or returns a long double, which is x87 80-bit on x86-64 and binary128 on arm64";
 
@@ -3353,9 +3277,7 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("frexpl", LONG_DOUBLE),
     ("strtold", LONG_DOUBLE),
     // `pid_t audit_token_to_pid(audit_token_t)` — thirty-two bytes of
-    // `audit_token_t` **by value**. SysV AMD64 classifies it MEMORY and puts it
-    // on the caller's stack; AAPCS64 has the caller copy it and pass a pointer.
-    // Both are "in memory" and they are still not the same thing.
+    // `audit_token_t` **by value**.
     ("audit_token_to_pid", AGGREGATE),
     // `void IODispatchCalloutFromMessage(void *unused, mach_msg_header_t *msg,
     // void *reference)` — the IOKit notification pump.
@@ -3384,18 +3306,11 @@ mod tests {
 
     /// Every signature in the table can actually be called.
     ///
-    /// The table and [`super::marshal`] are written independently — one says
-    /// what a function's arguments are, the other says which shapes it can
-    /// place — and nothing forces them to agree. A signature the marshaller
-    /// refuses is not a compile error and not a wrong answer: it is a call that
-    /// fails by name at run time, months later, in whichever program first
-    /// reaches it.
+    /// The table and [`super::marshal`] are written independently — one says what a
+    /// function's arguments are, the other says which shapes it can place — and nothing
+    /// forces them to agree.
     ///
-    /// `UCKeyTranslate` is why this exists. Ten integer arguments, two of them
-    /// past AAPCS64's eighth, is the first entry to use more than one
-    /// stack slot, and whether it is marshallable turns on Apple's packing rule
-    /// — both overflowing arguments happen to be pointers, and a `UInt32` in
-    /// either position would silently have to be refused instead.
+    /// `UCKeyTranslate` is why this exists.
     #[test]
     fn every_signature_is_one_the_marshaller_can_place() {
         let refused: Vec<&str> = SIGNATURES
@@ -3411,9 +3326,7 @@ mod tests {
 
     /// A name appears once, which is the one thing [`index`] cannot notice.
     ///
-    /// Order stopped mattering when the lookup became a map; duplication did
-    /// not. Two entries for one name means one of them is dead — and the dead
-    /// one is whichever a reader is not looking at, so it stays wrong quietly.
+    /// Order stopped mattering when the lookup became a map; duplication did not.
     #[test]
     fn signatures_are_unique() {
         let mut seen = std::collections::HashSet::new();
@@ -3424,23 +3337,7 @@ mod tests {
 
     /// Every entry declares the number of parameters the function really has.
     ///
-    /// The bug this exists for is invisible by construction. `CFStringGetCString`
-    /// had three parameters where the function has four; the missing one was the
-    /// *last*, so the host read whatever the guest left in `x3` as the encoding,
-    /// answered `false`, and produced an empty string. Nothing faulted, nothing
-    /// was refused, and Unity built a plugin path out of the emptiness — see the
-    /// roadmap's M7.13. A trailing parameter is exactly the one a reader
-    /// transcribing a header drops, and exactly the one nothing notices.
-    ///
-    /// So the check is not a reading of the headers, it is a *compile* against
-    /// them: each entry becomes a call with as many arguments as the table
-    /// claims, and the C compiler is asked whether that is the right number.
-    /// Anything it does not declare — the Objective-C runtime, GL, private CF —
-    /// simply produces no diagnostic and is skipped, which is the honest scope:
-    /// this proves what it can reach and says nothing about the rest.
-    ///
-    /// Skips rather than fails when there is no compiler, as every fixture test
-    /// here does.
+    /// The bug this exists for is invisible by construction.
     #[test]
     fn the_table_declares_the_parameters_these_functions_really_have() {
         // A struct passed by value is *split* across registers by this table —
@@ -3520,9 +3417,8 @@ mod tests {
         );
     }
 
-    /// What the arity probe includes, which is every header this table's C
-    /// entries are declared in. A symbol that is not declared by any of them is
-    /// skipped rather than guessed at.
+    /// What the arity probe includes, which is every header this table's C entries are
+    /// declared in.
     const HEADERS: &str = "\
 #include <CoreFoundation/CoreFoundation.h>
 #include <AudioToolbox/AudioToolbox.h>

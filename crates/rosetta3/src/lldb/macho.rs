@@ -1,23 +1,7 @@
-//! A Mach-O `MH_OBJECT` writer with exactly one customer: the symfile this
-//! runtime hands LLDB for a translated region.
-//!
-//! This exists because the `object` crate cannot express the one thing the
-//! whole mechanism turns on. Its Mach-O writer lays sections out itself —
-//! `vmaddr: 0` on the segment, and section addresses assigned sequentially from
-//! zero (`object-0.36/src/write/macho.rs`, the `section_offsets[index].address`
-//! loop) — with no way for a caller to say where a section really lives. For an
-//! ordinary relocatable object that is right; here it is fatal, because the
-//! address of `__TEXT,__text` *is* the message. See [the module
-//! note](super) for why LLDB reads it.
-//!
-//! What it emits is the smallest thing LLDB will parse: a header, one
-//! `LC_SEGMENT_64` holding every section, and an `LC_SYMTAB`. No relocations
-//! (the addresses are already final), no `LC_BUILD_VERSION`, no dyld info —
-//! this object is never linked and never loaded, only read.
+//! A Mach-O `MH_OBJECT` writer with exactly one customer: the symfile this runtime
+//! hands LLDB for a translated region.
 
-/// Section attributes. `S_ATTR_PURE_INSTRUCTIONS` is what makes LLDB treat the
-/// section as code rather than data, which is what gets a frame symbolicated
-/// instead of merely named.
+/// Section attributes.
 pub const S_ATTR_PURE_INSTRUCTIONS: u32 = 0x8000_0000;
 pub const S_ATTR_SOME_INSTRUCTIONS: u32 = 0x0000_0400;
 /// `S_ATTR_DEBUG`, which is how a Mach-O section says "DWARF, not program
@@ -64,9 +48,7 @@ pub struct Sym {
 
 /// Serialize `sections` and `syms` into a Mach-O object.
 ///
-/// Section order is preserved and it matters: LLDB places sections in file
-/// order against a running high-water mark, so the section whose address must
-/// survive has to come first. See [the module note](super).
+/// Section order is preserved and it matters:
 pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
     let sizeofcmds =
         SEGMENT_COMMAND_SIZE + SECTION_SIZE * sections.len() as u32 + SYMTAB_COMMAND_SIZE;
@@ -98,7 +80,6 @@ pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
 
     let mut out = Vec::with_capacity(stroff + strtab.len());
 
-    // ---------------------------------------------------------- header ------
 
     out.extend_from_slice(&MH_MAGIC_64.to_le_bytes());
     out.extend_from_slice(&CPU_TYPE_ARM64.to_le_bytes());
@@ -109,13 +90,9 @@ pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
     out.extend_from_slice(&0u32.to_le_bytes()); // flags
     out.extend_from_slice(&0u32.to_le_bytes()); // reserved
 
-    // ------------------------------------------------- LC_SEGMENT_64 --------
 
     // An `MH_OBJECT` has exactly one, unnamed, segment; the section records
-    // carry the segment names, and they carry the addresses too. The segment's
-    // own `vmaddr` stays at the zero every relocatable object has: a reader of
-    // one of these takes each section's address from the section, which is the
-    // property this whole file depends on.
+    // carry the segment names, and they carry the addresses too.
     let payload = (data_end - commands_end) as u64;
 
     out.extend_from_slice(&LC_SEGMENT_64.to_le_bytes());
@@ -145,7 +122,6 @@ pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
         out.extend_from_slice(&[0u8; 12]); // reserved1..3
     }
 
-    // ----------------------------------------------------- LC_SYMTAB --------
 
     out.extend_from_slice(&LC_SYMTAB.to_le_bytes());
     out.extend_from_slice(&SYMTAB_COMMAND_SIZE.to_le_bytes());
@@ -156,7 +132,6 @@ pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
 
     debug_assert_eq!(out.len(), commands_end, "load commands are mis-sized");
 
-    // ------------------------------------------------------- payload --------
 
     for (section, &offset) in sections.iter().zip(&offsets) {
         out.resize(offset as usize, 0);
@@ -176,9 +151,8 @@ pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
     out
 }
 
-/// Mach-O's fixed-width, NUL-padded, *not* necessarily NUL-terminated name
-/// field. Names longer than sixteen bytes are truncated rather than rejected:
-/// every name this module writes is a compile-time constant well under it.
+/// Mach-O's fixed-width, NUL-padded, *not* necessarily NUL-terminated name field. Names
+/// longer than sixteen bytes are truncated rather than rejected:
 fn name16(name: &str) -> [u8; 16] {
     let mut buf = [0u8; 16];
     let bytes = name.as_bytes();

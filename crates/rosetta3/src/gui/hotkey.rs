@@ -1,45 +1,11 @@
 //! Two global hotkeys, and why they are Carbon's.
-//!
-//! ## The three ways to take a keystroke, and what each one costs
-//!
-//! - **`CGEventTap`** sees everything, everywhere, and needs the user to grant
-//!   Accessibility permission in System Settings. A compatibility runtime that
-//!   asks for the permission to read every keystroke on the machine, in order to
-//!   show a frame-rate counter, has asked for the wrong thing.
-//! - **`NSEvent` monitors** need no permission and need a *block*, which from
-//!   Rust means synthesizing an Objective-C block literal. They also only fire
-//!   once AppKit's event loop is running and only while this app is frontmost,
-//!   which is the right scope but arrives late.
-//! - **`RegisterEventHotKey`** — Carbon's, still present, still supported, and
-//!   the API every "global hotkey" library on this platform is built on. No
-//!   permission prompt, a plain C callback, and it can be registered before
-//!   `NSApplication` exists. The keystroke is **consumed**, so the guest never
-//!   sees the F6 that opened a profiler panel, which is what stops shift+F7
-//!   from also being a weapon swap.
-//!
-//! The third one, then. Its one requirement is that the process runs a Cocoa or
-//! Carbon event loop, which every guest with a window does by definition — and
-//! a guest without a window has nothing to draw an overlay on.
-//!
-//! ## The fallback, and its honest limitation
-//!
-//! If registration fails — a headless run, a process the window server will not
-//! talk to — a poller reads the key state directly at thirty hertz. That path
-//! does *not* consume the keystroke, so the guest sees the F-key as well, and
-//! on a recent macOS reading key state for a window that is not this one needs
-//! Input Monitoring. It exists so that the keys work in the cases the primary
-//! path cannot reach, and it says so rather than pretending to be the same
-//! thing.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 use super::sys;
 
-/// `kVK_F6` and `kVK_F7` from `<Carbon/HIToolbox/Events.h>`. Virtual key codes
-/// are positional and layout-independent, so these are the same two keys on
-/// every keyboard layout — which is the property a hotkey wants and a character
-/// does not have.
+/// `kVK_F6` and `kVK_F7` from `<Carbon/HIToolbox/Events.h>`.
 const VK_F6: u32 = 0x61;
 const VK_F7: u32 = 0x62;
 const VK_F8: u32 = 0x64;
@@ -65,9 +31,7 @@ const HOT_KEY_PRESSED: u32 = 5;
 const PARAM_DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"----");
 const TYPE_HOT_KEY_ID: u32 = u32::from_be_bytes(*b"hkid");
 
-/// The signature this runtime's hotkeys are registered under. Four characters,
-/// by Carbon's convention, and unique enough that a guest registering its own
-/// hotkeys cannot collide with these.
+/// The signature this runtime's hotkeys are registered under.
 const SIGNATURE: u32 = u32::from_be_bytes(*b"ro3g");
 
 /// Which of the two was pressed.
@@ -146,12 +110,10 @@ struct EventType {
 type EventRef = *mut c_void;
 type TargetRef = *mut c_void;
 
-/// The Carbon handler. Runs on whichever thread the event loop is on, which for
-/// a Cocoa application is the main thread.
+/// The Carbon handler. Runs on whichever thread the event loop is on, which for a Cocoa
+/// application is the main thread.
 ///
-/// Returns `noErr` unconditionally: a hotkey handler that returns
-/// `eventNotHandledErr` hands the keystroke on to the next handler, and the
-/// point of registering it was that the guest must not see it.
+/// Returns `noErr` unconditionally:
 extern "C" fn handler(_call: *mut c_void, event: EventRef, _user: *mut c_void) -> i32 {
     type GetParameter =
         unsafe extern "C" fn(EventRef, u32, u32, *mut u32, usize, *mut usize, *mut c_void) -> i32;
@@ -257,10 +219,6 @@ fn register() -> bool {
 }
 
 /// The fallback: read the keys directly, thirty times a second.
-///
-/// Edge-triggered, so holding a key does not toggle the panel repeatedly. The
-/// keystroke reaches the guest as well, which is the difference between this and
-/// the registered path and is why it is a fallback.
 fn poll() {
     type KeyState = unsafe extern "C" fn(u32, u16) -> u8;
     type FlagsState = unsafe extern "C" fn(u32) -> u64;
@@ -305,16 +263,7 @@ fn poll() {
 /// Whether a Carbon hot-key event has ever actually arrived.
 ///
 /// **Registration succeeding is not the same as the handler firing**, and that
-/// distinction is the reason both mechanisms now run. `RegisterEventHotKey` is
-/// installed on `GetApplicationEventTarget()` before the guest has an
-/// `NSApplication` — which is the only moment this runtime is in control — and a
-/// registration that the window server accepts can still never dispatch, in a
-/// process whose event loop turns out not to be the one it was registered
-/// against, or in a game that takes the keyboard exclusively.
-///
-/// So the poller runs alongside rather than instead, and goes quiet for good the
-/// first time a Carbon event lands. The overlap is at most one keystroke, and
-/// [`super::pressed`]'s debounce is what stops that one from toggling twice.
+/// distinction is the reason both mechanisms now run.
 static CARBON_WORKS: AtomicBool = AtomicBool::new(false);
 
 /// Take the hotkeys, by both routes.

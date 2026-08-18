@@ -1,10 +1,4 @@
 //! Shared lookup for host functions used by hand-written shims.
-//!
-//! Successful lookups are cached in an immutable snapshot published through
-//! an atomic pointer. Reads therefore do not take a lock, which matters because
-//! these helpers sit on the slow-but-frequently-reached shim path. A miss may
-//! briefly take the writer lock to publish a larger snapshot; misses already
-//! in flight can harmlessly race and perform the same `dlsym`.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;

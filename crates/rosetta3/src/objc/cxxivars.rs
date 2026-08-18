@@ -1,66 +1,4 @@
 //! `.cxx_construct`: the C++ members of a guest Objective-C class.
-//!
-//! An Objective-C class may have C++ ivars — a `std::mutex`, a `std::string`, a
-//! `shared_ptr`. The compiler emits two methods for it, `.cxx_construct` and
-//! `.cxx_destruct`, and sets a bit in the class's `class_ro_t` saying they
-//! exist. The runtime reads that bit at realization and calls the constructor
-//! from `class_createInstance`, superclass-first, on every instance.
-//!
-//! **A class this runtime builds gets neither.** [`super::register_class`]
-//! creates it with `objc_allocateClassPair` and fills it with
-//! `class_addMethod`, and neither of those sets the bit — `objc_allocateClassPair`
-//! builds a `class_ro_t` with empty flags, and `class_addMethod` does not go back
-//! and look at what it just added. The methods are installed, findable, and
-//! never called. Verified rather than reasoned about: a native probe that builds
-//! a class pair, adds both selectors and allocates an instance sees neither run.
-//!
-//! ## What that costs, and why it is not a leak
-//!
-//! The instance is `calloc`ed, so every C++ member is zero. For most of them
-//! that is a bomb rather than a fault — a zeroed `std::string` reads as empty,
-//! a zeroed `shared_ptr` as null — and the program runs until something
-//! notices. Roblox notices with a `pthread_mutex_t`: a mutex whose signature
-//! word is zero is not one libpthread recognises, `pthread_mutex_lock` answers
-//! `EINVAL`, libc++ turns that into
-//! `std::system_error: mutex lock failed: Invalid argument`, and the guest's
-//! terminate handler ends the process four frames from anything that mentions a
-//! class. `RobloxPlayerAppDelegate` is the class; twenty-odd others in the same
-//! program have C++ ivars too.
-//!
-//! ## The repair, and why it is `+allocWithZone:`
-//!
-//! The bit cannot be set through public API, so the constructors are called from
-//! somewhere this runtime *does* control: a native `+allocWithZone:` installed
-//! on the class, which allocates through whatever would have allocated anyway
-//! and then walks the chain.
-//!
-//! Allocation rather than `-init` is the load-bearing choice. **The allocation is
-//! very often not the guest's**: AppKit instantiates the guest's view classes
-//! out of a nib, `NSApplication` creates its delegate, and a category or a
-//! framework may `[[cls alloc] init]` without the guest being on the stack at
-//! all. Anything hung off `init` would miss every one of those. A method on the
-//! class is found by the host's own dispatch no matter who sends it.
-//!
-//! The chain is walked **root-first**, which is the order `object_cxxConstructFromClass`
-//! uses, and each class's `.cxx_construct` is looked up **non-inherited** — a
-//! subclass that declares none must not run its superclass's twice. That is what
-//! [`CONSTRUCTORS`] is: the lookup is by exact class, populated as classes
-//! register, so no `class_copyMethodList` allocation happens on an allocation
-//! path.
-//!
-//! ## What this does not do
-//!
-//! **`.cxx_destruct` is still never called.** The runtime calls it from
-//! `object_dispose`, below `-[NSObject dealloc]`, which is the end of a chain
-//! this runtime cannot get underneath without replacing `dealloc` on the guest's
-//! own classes and taking over an ordering that ARC and the guest both have
-//! opinions about. The consequence is a **leak** — a `std::string` ivar's buffer
-//! is never freed — and a leak is what a constructed-but-not-destructed object
-//! looks like, where the previous behaviour looked like a crash. It is the
-//! right next piece of work and it is not this one.
-//!
-//! A guest class that declares `+allocWithZone:` *itself* is
-//! [refused](Refusal::AlreadyDefined) rather than having its override replaced.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -75,39 +13,23 @@ pub const CONSTRUCT: &str = ".cxx_construct";
 #[allow(dead_code)]
 pub const DESTRUCT: &str = ".cxx_destruct";
 
-/// Host `Class` → the `.cxx_construct` this runtime installed **on that exact
-/// class**.
-///
-/// Not a per-`ObjcRuntime` map, and the difference matters: the entry is read
-/// from a native `+alloc` that the *host* calls, on any thread, with no context
-/// but the receiver. It is process-global for the same reason
-/// [`crate::thunk::publish`] is.
-///
-/// `RwLock` rather than a published snapshot because writes stop early —
-/// registration happens at load and at `dlopen` — and reads are one map lookup
-/// per class in a chain, on a path that is already a `calloc`.
+/// Host `Class` → the `.cxx_construct` this runtime installed **on that exact class**.
 static CONSTRUCTORS: RwLock<Option<HashMap<usize, usize>>> = RwLock::new(None);
 
 /// Why a class could not be given constructors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// `class_addMethod` declined, which for a freshly built class means the
-    /// guest declared `+allocWithZone:` itself. Nothing here can chain onto
-    /// that without deciding what the guest's override is for.
+    /// `class_addMethod` declined, which for a freshly built class means the guest
+    /// declared `+allocWithZone:` itself.
     AlreadyDefined { class: String, selector: String },
 }
 
-/// Record that `cls` has a `.cxx_construct`, and give it somewhere to be called
-/// from.
-///
-/// Called once per class, from registration, **after** the guest's own methods
-/// are installed and before `objc_registerClassPair`. Returns the refusals so
-/// they reach the same list every other registration refusal does.
+/// Record that `cls` has a `.cxx_construct`, and give it somewhere to be called from.
 ///
 /// # Safety
 ///
-/// `cls` must be a class this runtime allocated and has not yet registered, and
-/// `ctor` an `IMP` it installed for [`CONSTRUCT`] on that class.
+/// `cls` must be a class this runtime allocated and has not yet registered, and `ctor`
+/// an `IMP` it installed for [`CONSTRUCT`] on that class.
 pub unsafe fn install(cls: Class, ctor: Imp, name: &str) -> Vec<Refusal> {
     {
         let mut map = CONSTRUCTORS.write().unwrap_or_else(|e| e.into_inner());
@@ -116,13 +38,7 @@ pub unsafe fn install(cls: Class, ctor: Imp, name: &str) -> Vec<Refusal> {
     }
 
     // **Only `+allocWithZone:`**, and `+alloc` follows from it rather than
-    // needing its own. `NSObject`'s `+alloc` has a fast path that skips
-    // `+allocWithZone:` entirely for a class that does not override it — and
-    // `class_addMethod` clears exactly that optimisation when the method it
-    // adds is this one. So adding the zone form is what makes `+alloc`, `+new`
-    // and every framework's `[[cls alloc] init]` route through here; adding
-    // `+alloc` as well would mean two entry points to keep agreeing about
-    // whether the constructors have already run.
+    // needing its own.
     let meta = {
         // SAFETY: `object_getClass` of a class is its metaclass.
         unsafe { host::object_getClass(cls) }
@@ -157,17 +73,6 @@ const ALLOC_WITH_ZONE: &str = "allocWithZone:";
 const ALLOC_WITH_ZONE_TYPES: &str = "@24@0:8^v16";
 
 /// `+[cls allocWithZone:]`, for every guest class with C++ ivars.
-///
-/// Allocates through **whatever would have allocated if this were not here**,
-/// then runs the constructors. Finding that allocator at call time rather than
-/// recording it at install time is what makes a guest class inheriting from
-/// `NSTextView` work: `NSTextView` overrides `+allocWithZone:`, and calling
-/// `class_createInstance` instead would skip whatever it does.
-///
-/// It also makes a guest class inheriting from *another* guest class with C++
-/// ivars work, which recording the superclass's `IMP` would not: the recorded
-/// one would be this same function, and the chain would be constructed once per
-/// level.
 extern "C" fn alloc_with_zone(cls: Class, cmd: Sel, zone: *mut c_void) -> Class {
     // SAFETY: `cls` is the receiver of a class method, so it is a class.
     let Some(real) = (unsafe { inherited_allocator(cls) }) else {
@@ -216,10 +121,6 @@ unsafe fn inherited_allocator(cls: Class) -> Option<Imp> {
 }
 
 /// Call every `.cxx_construct` in `cls`'s chain, **root-first**.
-///
-/// The order is the runtime's own (`object_cxxConstructFromClass` recurses into
-/// the superclass before calling its own) and it is not arbitrary: a subclass's
-/// constructor may read a member the superclass constructed.
 ///
 /// # Safety
 ///
@@ -276,12 +177,8 @@ fn reset() {
 mod tests {
     use super::*;
 
-    /// The claim the whole module rests on, checked against the runtime rather
-    /// than believed: a class built the way this runtime builds one does **not**
-    /// get its `.cxx_construct` called.
-    ///
-    /// If this ever starts failing, `objc4` has learned to notice a dynamically
-    /// added structor and this module should be deleted rather than kept.
+    /// The claim the whole module rests on, checked against the runtime rather than
+    /// believed:
     #[test]
     fn the_runtime_does_not_call_a_dynamically_added_constructor() {
         use std::sync::atomic::{AtomicUsize, Ordering};

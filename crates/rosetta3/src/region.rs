@@ -1,114 +1,4 @@
 //! Which bytes to lift, given an address control is about to reach.
-//!
-//! This is a port of FEX-Emu's `FEXCore::Frontend::Decoder`
-//! (`FEXCore/Source/Interface/Core/Frontend.cpp`,
-//! `DecodeInstructionsAtEntry` and the three functions around it). The rules
-//! below are its rules, and where this file departs from them the comment says
-//! so and why.
-//!
-//! ## A region is a set of basic blocks, not an interval
-//!
-//! That is the whole of the redesign, and everything else follows from it.
-//!
-//! The previous version of this module walked control flow, collected the
-//! instructions it reached, and then **trimmed the answer to the first
-//! contiguous run** — because the lifter took one byte slice and a slice cannot
-//! have holes in it. So a jump table in the middle of a function ended the
-//! region in front of it, and the switch's case bodies past the table became a
-//! separate translation each, reached one at a time through `UnknownJump`.
-//! Alignment padding between two blocks did the same. So did Mono's inline call
-//! arguments, except worse: those *do* decode, into whatever they happen to
-//! mean, and one `mov ds, edx` inside an eight-byte pointer refused the whole
-//! region — which is what [`crate::cache`]'s prefix bisection existed to
-//! salvage, at up to a dozen extra lift-and-compile attempts each.
-//!
-//! FEX has no such trim, because its decoder hands the IR generator a *vector of
-//! blocks* and the bytes between them are simply not in it. Microlift now takes
-//! the same thing ([`LifterConfig::block_ranges`]), so this module can too: the
-//! holes are named, never decoded, and an edge into one is an ordinary
-//! out-of-region exit the runtime answers with a region of its own — the same
-//! answer it already gave for an edge past the end.
-//!
-//! [`LifterConfig::block_ranges`]: microlift::core::LifterConfig::block_ranges
-//!
-//! ## The walk
-//!
-//! A worklist of block entries, lowest address first, starting at `pc`. Each is
-//! decoded forward until something ends the block, and what ends one is:
-//!
-//! - **A terminator.** `ret`, an indirect jump, `ud2`. Nothing further is
-//!   statically reachable, which is precisely the case the JIT loop answers.
-//! - **A branch**, whose targets are added to the worklist. Both edges of a
-//!   conditional; the single target of an unconditional near jump.
-//! - **A call**, whose *resume point* is added — never the callee, which is a
-//!   region of its own. The resume point also becomes a declared entry point.
-//! - **Running into the next known block**, which is what
-//!   [`Walk::next_block_start`] tracks. Two blocks never overlap and no
-//!   instruction is decoded twice.
-//! - **An instruction that will not decode.** In a non-entry block this
-//!   *deletes the block* and the walk carries on; only the entry block's own
-//!   bytes have to be code. FEX's comment on that line is "Improves
-//!   compile-times", and it is also what makes garbage reachable from a
-//!   mispredicted edge cost nothing.
-//! - **The instruction budget**, [`max_instructions`], counted across the whole
-//!   region rather than per block.
-//!
-//! A branch *backwards* into a block already decoded splits that block in two at
-//! the target, so the target becomes a block entry rather than a second
-//! translation ([`Walk::add_branch_target`]). If the target is not on that
-//! block's instruction grid it is left alone and becomes an edge out of the
-//! region, which is the honest answer: those bytes mean something different read
-//! from there.
-//!
-//! ## The two bounds that keep a region local
-//!
-//! Neither is a correctness property. Both are about what a compiler is asked to
-//! swallow at once.
-//!
-//! - **Nothing before the entry.** A target below `pc` is not followed. FEX's
-//!   `TargetRIP >= EntryPoint`.
-//! - **[`MAX_FORWARD_BRANCH_DIST`], four guest pages.** A branch further forward
-//!   than that is not followed either. FEX's note on this is worth repeating
-//!   verbatim, because the reasoning is not obvious: it makes "the cost code
-//!   better match the guest code layout, avoiding massive (range-wise) code
-//!   blocks in highly fragmented guest code. Such branches are often not-taken
-//!   branches to garbage in obfuscated code."
-//!
-//! ## Zeros are memory nobody has written, not an instruction
-//!
-//! `00 00` decodes cleanly as `add byte ptr [rax], al`, so a decoder walking
-//! forward through zero-filled memory never stops on its own: it produces a
-//! plausible instruction every two bytes until it runs out of buffer. In an
-//! image that is a nuisance — padding is `int3` or `nop`, so it rarely comes up.
-//! In memory the guest **generates code into** it is fatal, and Terraria is
-//! where that showed: an anonymous mapping is zero-filled, so a zero byte in a
-//! Mono arena is a byte the guest has not written *yet*. One region ran off the
-//! end of a freshly emitted method through a quarter-megabyte of untouched
-//! arena, and then *claimed* every address in it — so when Mono compiled its
-//! next method into that space and jumped to it, the cache served the zeros.
-//!
-//! FEX stops on two consecutive zero bytes, and this does too. The one
-//! difference is where: FEX exempts its whole entry block, this exempts only the
-//! entry *instruction*. Exempting the instruction is what guarantees progress
-//! (a region always holds at least the instruction it was made for); exempting
-//! the whole block would leave the zero-filled-arena case open, since the run
-//! into the zeros is usually a fallthrough inside the entry block itself.
-//!
-//! ## Mono, and calls in memory the guest can write
-//!
-//! FEX carries one deliberate hack for Mono and this port carries it: **in
-//! writable executable memory, a call ends its block and its resume point is not
-//! followed.** FEX's reasoning is that "Mono generated code often contains
-//! noreturn calls with garbage following them, and calls are always backpatched
-//! after CIL compilation leading to n recompiles for a multiblock with n calls",
-//! and it chooses "to minimize stutters over raw performance".
-//!
-//! Both halves apply here. The garbage after a call is Mono's inline argument —
-//! read by the trampoline through its own return address, never executed — and
-//! it is exactly what used to refuse a whole region and send it through prefix
-//! bisection. The backpatching is worse and was invisible: every time Mono
-//! rewrites a call site, a region that decoded past it is stale, and a region
-//! that stops at it is not.
 
 use std::collections::BTreeSet;
 use std::ops::Range;
@@ -116,26 +6,11 @@ use std::ops::Range;
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction};
 use static_init::dynamic;
 
-/// Ceiling on how many instructions one region may contain, across all of its
-/// blocks. FEX's `MaxInstPerBlock` (`FEX_MAXINST`), whose default is 5000.
+/// Ceiling on how many instructions one region may contain, across all of its blocks.
+/// FEX's `MaxInstPerBlock` (`FEX_MAXINST`), whose default is 5000.
 ///
-/// It is 1024 here, and the gap is not a disagreement about region shape — it is
-/// the backend. FEX emits arm64 from its own IR in roughly a microsecond per
-/// guest instruction; this runtime measures ~24 µs through Cranelift, whose
-/// register allocator is moreover **superlinear in live ranges**, so a big
-/// region is disproportionately expensive rather than proportionately so. The
-/// outliers that produces are extreme — 4841 instructions once cost 21.7s — and
-/// they are all in generated code, where nothing bounds a walk the way a
-/// function's end does.
-///
-/// **What a cap costs is small.** The bytes past it are reached later from their
-/// own PC, so the price is one extra region at the boundary and the
-/// cross-block optimisation Cranelift would have done across it. On a program
-/// with no region this long it costs exactly nothing.
-///
-/// **The value is measured.** Four minutes of Terraria's start-up, same binary,
-/// cap varied — time spent compiling, the single worst compile, and how far the
-/// guest got:
+/// It is 1024 here, and the gap is not a disagreement about region shape — it is the
+/// backend.
 ///
 /// ```text
 /// cap        compiling   worst    progress
@@ -144,19 +19,9 @@ use static_init::dynamic;
 /// 1024          33.7s     1.1s        6769
 ///  512          15.2s     0.3s        6839
 /// ```
-///
-/// Progress flattens well before compile time does, which says execution is the
-/// bottleneck once the outliers are gone. So the choice is the largest value
-/// that removes them: real functions a compiler emits are hundreds of
-/// instructions, so 1024 is above essentially everything an ordinary program
-/// contains and below everything that hurt.
 const MAX_REGION_INSTRUCTIONS: usize = 1024;
 
 /// How far forward a branch may point and still be followed.
-///
-/// FEX's `MAX_FORWARD_BRANCH_DIST`, `FEX_PAGE_SIZE * 4`, and the guest's page is
-/// the one that matters: this is a claim about how the *guest's compiler* laid
-/// its code out, not about how the host maps it.
 const MAX_FORWARD_BRANCH_DIST: u64 = 4 * 4096;
 
 /// The guest page the zero-byte rule is confined to. See the module note.
@@ -165,9 +30,7 @@ const GUEST_PAGE: u64 = 4096;
 /// The longest an x86-64 encoding can be. FEX's `MAX_INST_SIZE`.
 const MAX_INSTRUCTION_LEN: u64 = 15;
 
-/// The environment variables this module reads. FEX has the first two as
-/// `FEX_MAXINST` and `FEX_MULTIBLOCK`; the rest are constants there, and are
-/// knobs here because the backend they are being tuned against is not FEX's.
+/// The environment variables this module reads.
 pub const CAP_ENV: &str = "ROSETTA3_REGION_CAP";
 pub const MULTIBLOCK_ENV: &str = "ROSETTA3_MULTIBLOCK";
 pub const FORWARD_ENV: &str = "ROSETTA3_REGION_FORWARD";
@@ -192,14 +55,8 @@ pub fn max_instructions() -> usize {
     *CAP
 }
 
-/// Whether a region may hold more than one basic block. FEX's `FEX_MULTIBLOCK`,
-/// on by default there and here.
-///
-/// Off, a region is exactly one block: it ends at the first branch, call or
-/// return and follows nothing. FEX's own note on the option is that multiblock
-/// "can cause long JIT compilation times and stutter", which is the trade this
-/// runtime feels more sharply than FEX does — so the knob is worth having even
-/// though the default matches.
+/// Whether a region may hold more than one basic block. FEX's `FEX_MULTIBLOCK`, on by
+/// default there and here.
 fn multiblock() -> bool {
     #[dynamic]
     static ON: bool = knob(MULTIBLOCK_ENV, 1) != 0;
@@ -235,29 +92,16 @@ struct DecodedBlock {
 /// A region to lift: which bytes are code, and where its instructions begin.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Region {
-    /// The span the blocks live in — the first block's entry to the last one's
-    /// end. What the caller slices out of the image to hand the lifter.
-    ///
-    /// **Not** a claim that everything in it is code; see [`blocks`](Self::blocks).
+    /// The span the blocks live in — the first block's entry to the last one's end.
+    /// What the caller slices out of the image to hand the lifter.
     pub range: Range<u64>,
-    /// The blocks, ascending and disjoint. Everything in [`range`](Self::range)
-    /// and not in one of these is a hole, which the lifter is told about
-    /// explicitly. See the module note.
+    /// The blocks, ascending and disjoint. Everything in [`range`](Self::range) and not
+    /// in one of these is a hole, which the lifter is told about explicitly.
     pub blocks: Vec<Range<u64>>,
     /// Every instruction start in every block, ascending.
-    ///
-    /// "Does this translation cover that address" is not a range test, and under
-    /// this design it is not even a *block* test: microlift's entry dispatch can
-    /// resume at a block leader and refuses anything else, so an address inside
-    /// a block but not on its grid is not an entry. Kept for the region's own
-    /// accounting and for [`covers`](Self::covers).
     pub starts: Vec<u64>,
-    /// Where control can arrive from outside: the address the region was made
-    /// for, and the resume point after every call that leaves it.
-    ///
-    /// FEX's `DecodedBlockInformation::EntryPoints`. Handed to the lifter as
-    /// declared resume points, so returning into the middle of this region
-    /// enters *this* translation rather than forcing a second one.
+    /// Where control can arrive from outside: the address the region was made for, and
+    /// the resume point after every call that leaves it.
     pub entries: Vec<u64>,
 }
 
@@ -275,21 +119,8 @@ impl Region {
 
 /// The region to lift so that `pc` can execute.
 ///
-/// `bytes` are the containing mapping's contents and `base` the address of their
-/// first byte; the mapping's end is the only upper bound on the walk, which is
-/// FEX's `SectionMaxAddress`.
-///
-/// `writable` says whether these bytes are memory the guest can write — an
-/// executable mapping it asked for rather than an image this runtime loaded. It
-/// selects the Mono call rule; see the module note.
-///
-/// The region always begins **at `pc`**, as FEX's does. There is no attempt to
-/// start at the enclosing function's first instruction: a call reaching that
-/// function arrives at its entry and gets a region there anyway, so the sharing
-/// that preference bought happens without it — and paying for it meant two
-/// entries into one function competing for a single cache key.
-///
-/// `None` when `pc` is outside `bytes`, or when nothing at `pc` decodes.
+/// `writable` says whether these bytes are memory the guest can write — an executable
+/// mapping it asked for rather than an image this runtime loaded.
 pub fn region_for(bytes: &[u8], base: u64, pc: u64, writable: bool) -> Option<Region> {
     Walk::new(bytes, base, pc, writable).run()
 }
@@ -451,8 +282,7 @@ impl<'a> Walk<'a> {
                 }
                 // Anywhere else this is a mispredicted edge — an embedded jump
                 // table read as instructions, a `call`'s inline argument, the
-                // cold side of a branch into padding. FEX drops the block and
-                // carries on, and says why: it improves compile times.
+                // cold side of a branch into padding.
                 self.total -= self.blocks[idx].starts.len();
                 self.blocks[idx].starts.clear();
                 self.blocks[idx].range.end = entry;
@@ -497,8 +327,6 @@ impl<'a> Walk<'a> {
 
     /// Queue whatever the block's terminator reaches. FEX's
     /// `BranchTargetInMultiblockRange`.
-    ///
-    /// `next` is the address after the terminator.
     fn branch_targets(&mut self, next: u64) {
         if !self.multiblock {
             return;
@@ -506,12 +334,7 @@ impl<'a> Walk<'a> {
         let (target, conditional) = match self.instr.flow_control() {
             FlowControl::Call | FlowControl::IndirectCall => {
                 // The callee is a region of its own — following it would inline
-                // the program into one translation unit. Only the resume point
-                // is ours, and it is an entry point because control arrives
-                // there from outside, when the callee returns.
-                //
-                // Except in memory the guest writes, where a call is where a
-                // block ends. See the module note on Mono.
+                // the program into one translation unit.
                 if !(self.writable && mono_rule()) {
                     self.add_branch_target(next, next);
                     self.entries.insert(next);
@@ -538,9 +361,6 @@ impl<'a> Walk<'a> {
     }
 
     /// Queue `target` as a block entry. FEX's `AddBranchTarget`.
-    ///
-    /// `after` is the address just past the instruction that named it, which is
-    /// only used to decide whether the target can bound the *current* block.
     fn add_branch_target(&mut self, target: u64, after: u64) {
         if self.visited.contains(&target) {
             return;
@@ -568,8 +388,7 @@ impl<'a> Walk<'a> {
             }
             // Split or not, the bytes at `target` have been dealt with: either
             // they are now a block of their own, or the target is off the grid
-            // and the branch simply leaves the region. Marking it visited stops
-            // this from being reconsidered on every edge that names it.
+            // and the branch simply leaves the region.
             self.visited.insert(target);
             return;
         }
@@ -621,9 +440,7 @@ impl<'a> Walk<'a> {
             .collect();
         debug_assert!(starts.windows(2).all(|w| w[0] < w[1]), "blocks overlap");
         // A region has to be enterable at the address it was made for, or the
-        // run loop asks for the same `pc` forever. The entry block is decoded
-        // first and from `pc`, so this holds by construction — but it is the one
-        // property whose failure is an infinite loop rather than an error.
+        // run loop asks for the same `pc` forever.
         debug_assert_eq!(first, self.entry_point);
 
         let mut entries: Vec<u64> = self.entries.into_iter().collect();

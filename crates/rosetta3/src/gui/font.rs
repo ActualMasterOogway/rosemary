@@ -1,33 +1,4 @@
 //! The font atlas, rasterized by CoreText at the size the window asks for.
-//!
-//! ## Why a real font and not a baked one
-//!
-//! An overlay needs glyphs and there are two ways to have them: bake a bitmap
-//! font into the binary, or ask the system to draw one. Overlays generally bake,
-//! because they run on platforms where "the system" is not a given. This one
-//! runs on exactly one platform, whose text engine is present in every process
-//! that has a window, and the numbers on the panel are **addresses and
-//! percentages that get read carefully and typed into a disassembler**. A 5×7
-//! bitmap font at retina scale is not the tool for that, and a baked font would
-//! also be a kilobyte table nobody can review.
-//!
-//! So: CoreText, into a `CGBitmapContext`, once per size, kept forever.
-//!
-//! ## What comes out
-//!
-//! An 8-bit **alpha** image and a grid. The font is monospaced — Menlo, falling
-//! back to whatever CoreText substitutes — so the grid is uniform and a glyph's
-//! cell is found by arithmetic rather than by a per-glyph table. The last cell
-//! is filled solid, which is what lets a panel background and a line of text be
-//! the *same draw call*: a rectangle is a quad sampling an opaque texel, and the
-//! backends never have to switch texture or pipeline between the two.
-//!
-//! ## Which sizes exist
-//!
-//! One atlas per distinct pixel size, cached. A window that changes scale — a
-//! drag between a retina display and a 1× one — asks for a size that is not in
-//! the cache and gets a new atlas built on the render thread, which costs a few
-//! milliseconds once and then never again for that size.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -37,10 +8,8 @@ use super::sys::{self, CfRef, CgFloat, Point, Rect, Size};
 
 /// The first and last character the atlas covers: printable ASCII.
 ///
-/// Everything this overlay prints is a number, a symbol name or a path, and
-/// those are ASCII in every case that matters. A character outside the range is
-/// drawn as `?` rather than dropped, so a stray byte in a symbol name shows as a
-/// mark instead of silently shortening the line.
+/// Everything this overlay prints is a number, a symbol name or a path, and those are
+/// ASCII in every case that matters.
 const FIRST: u8 = 0x20;
 const LAST: u8 = 0x7e;
 
@@ -60,9 +29,8 @@ pub struct Atlas {
     pub pixels: Vec<u8>,
     pub width: usize,
     pub height: usize,
-    /// Cell size in texels, and the advance a character contributes to a line.
-    /// The advance is smaller than the cell: the cell has a pad so that linear
-    /// filtering cannot pull a neighbour's ink into a glyph.
+    /// Cell size in texels, and the advance a character contributes to a line. The
+    /// advance is smaller than the cell:
     pub cell_w: usize,
     pub cell_h: usize,
     pub advance: f32,
@@ -87,9 +55,6 @@ impl Atlas {
     }
 
     /// The single opaque texel a filled rectangle samples.
-    ///
-    /// The exact centre of the solid cell, so that no filter kernel at any size
-    /// can reach the transparent cell beside it.
     pub fn solid(&self) -> (f32, f32) {
         let (u0, v0, u1, v1) = self.cell(SOLID);
         ((u0 + u1) / 2.0, (v0 + v1) / 2.0)
@@ -112,11 +77,9 @@ impl Atlas {
     }
 }
 
-// ------------------------------------------------------------- the raster ---
 
-/// `kCGImageAlphaOnly`. One byte per texel and no colour at all, which is
-/// exactly what a coverage mask is and saves converting one out of an RGBA
-/// bitmap afterwards.
+/// `kCGImageAlphaOnly`. One byte per texel and no colour at all, which is exactly what
+/// a coverage mask is and saves converting one out of an RGBA bitmap afterwards.
 const ALPHA_ONLY: u32 = 7;
 
 /// `kCTFontOrientationDefault`.
@@ -127,10 +90,6 @@ const ORIENTATION_DEFAULT: u32 = 0;
 const FACE: &str = "Menlo-Regular";
 
 /// Build the atlas for `size`, or `None` if CoreText is not reachable.
-///
-/// `None` is not a failure to handle loudly — it is a system without CoreText,
-/// which is a system where the overlay simply does not draw. The caller reports
-/// it once.
 fn rasterize(size: f32) -> Option<Atlas> {
     type FontCreate = unsafe extern "C" fn(CfRef, CgFloat, *const c_void) -> CfRef;
     type GetGlyphs = unsafe extern "C" fn(CfRef, *const u16, *mut u16, isize) -> u8;
@@ -254,10 +213,7 @@ fn rasterize(size: f32) -> Option<Atlas> {
         set_gray(ctx, 1.0, 1.0);
     }
 
-    // Where each glyph goes. Cell `i` is at column `i % COLUMNS` of row
-    // `i / COLUMNS`, counted from the top of the image, so its baseline sits
-    // `descent + PAD` above the cell's bottom edge in the context's own
-    // bottom-up coordinates.
+    // Where each glyph goes.
     let positions: Vec<Point> = (0..glyphs.len())
         .map(|i| {
             let (col, row) = (i % COLUMNS, i / COLUMNS);
@@ -310,21 +266,13 @@ fn rasterize(size: f32) -> Option<Atlas> {
     })
 }
 
-// -------------------------------------------------------------- the cache ---
 
 /// Atlases already built, keyed by the pixel size that produced them.
 ///
-/// A `'static` reference is handed out rather than an `Arc`: an atlas is a few
-/// hundred kilobytes, there are at most a handful of distinct sizes in a run,
-/// and the alternative is reference counting on the render thread's hot path
-/// for memory that is never going to be freed anyway.
+/// A `'static` reference is handed out rather than an `Arc`:
 static ATLASES: Mutex<Option<HashMap<u32, &'static Atlas>>> = Mutex::new(None);
 
 /// The atlas for `size` pixels, building it if this is the first ask.
-///
-/// The size is rounded to whole texels — a font asked for at 13.0001 pixels is
-/// the font at 13, and treating them as different would build two identical
-/// atlases.
 pub fn atlas(size: f32) -> Option<&'static Atlas> {
     let key = size.round().clamp(6.0, 96.0) as u32;
     let mut guard = ATLASES.lock().unwrap_or_else(|e| e.into_inner());
@@ -357,11 +305,7 @@ mod tests {
 
     /// CoreText draws, and draws where this module says it does.
     ///
-    /// The three assertions are the three ways the atlas can be wrong without
-    /// failing: nothing drawn at all, glyphs drawn at the wrong cell, and the
-    /// solid texel — which every filled rectangle in the overlay samples — not
-    /// actually being solid. Each of those produces a blank or garbled panel
-    /// with no error anywhere, which is the failure this test exists to name.
+    /// The three assertions are the three ways the atlas can be wrong without failing:
     #[test]
     fn rasterizes_into_the_cells_it_claims() {
         let Some(atlas) = atlas(16.0) else {

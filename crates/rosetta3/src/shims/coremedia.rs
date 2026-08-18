@@ -1,69 +1,5 @@
-//! CoreMedia, VideoToolbox and the two frameworks beside them, where a
-//! **`CMTime` travels by value**.
-//!
-//! [`crate::abi::table`] describes the rest of Roblox's video path — sample
-//! buffers, block buffers, format descriptions, pixel buffers, sessions — and
-//! every one of those is a handle or an out-parameter. What is here is the
-//! remainder, and it is one struct's worth of trouble plus three unrelated
-//! neighbours that happen to have the same shape of problem.
-//!
-//! ## `CMTime` is twenty-four bytes, which is the disagreeing size
-//!
-//! `CMTime` is `{ CMTimeValue value; CMTimeScale timescale; CMTimeFlags flags;
-//! CMTimeEpoch epoch; }` — an `int64`, two 32-bit words packed into one
-//! eightbyte, and another `int64`. Twenty-four bytes, all integer, no floating
-//! point anywhere in it.
-//!
-//! Both ABIs put it "in memory" and they mean different things by that:
-//!
-//! - **SysV AMD64** classifies anything over sixteen bytes as MEMORY and copies
-//!   the bytes onto the **caller's stack**, consuming no register at all. A
-//!   MEMORY *return* is a hidden buffer pointer in `rdi`, with every real
-//!   argument shifted along by one, and the callee hands the same pointer back
-//!   in `rax`.
-//! - **AAPCS64** has the caller copy the argument somewhere and pass **a
-//!   pointer to the copy** in an ordinary integer register; a return of this
-//!   size goes through the indirect-result register `x8`.
-//!
-//! So there is no register arrangement that satisfies both, and — unlike
-//! `CMVideoDimensions`, which is eight bytes and passes identically on the two
-//! sides — this cannot be a table entry with the members written out. Each
-//! function here reads the twenty-four bytes out of the guest's stack, or
-//! writes them into the guest's hidden buffer, and lets the Rust compiler place
-//! the host's copy by declaring the aggregate in the prototype. That is
-//! [`crate::shims::coregraphics`]'s trick, applied to an integer struct rather
-//! than a floating-point one.
-//!
-//! ## Which stack slot, and why the integer registers still shift
-//!
-//! A MEMORY argument consumes **no** integer register, so the arguments after
-//! it are *not* pushed along. `VTCompressionSessionEncodeFrame` is the case
-//! that makes this concrete: two `CMTime`s in the middle of its seven
-//! parameters, so `frameProperties` — the fifth — arrives in `rdx`, the third
-//! integer register. Reading it out of `r8` because it is the fifth parameter
-//! would pass a stale register as a dictionary.
-//!
-//! The times themselves are consecutive on the caller's stack, in declaration
-//! order, at `rsp + 0` and `rsp + 24` — microlift exits before the `CALL`, so
-//! `rsp` is still the pre-call value and the argument area begins there. Same
-//! arrangement [`crate::shims::coregraphics::rect_argument`] rests on.
-//!
-//! ## The three neighbours
-//!
-//! - `CAFrameRateRangeMake` returns three `float`s, which SysV AMD64 packs into
-//!   `xmm0` and `xmm1` (two SSE eightbytes, the first holding two members) and
-//!   AAPCS64 returns as a three-member homogeneous float aggregate in `s0`–`s2`.
-//!   Twelve bytes, under the sixteen-byte line, and *still* not the same
-//!   placement — which is the clearest small argument for checking a struct
-//!   against both ABIs rather than against its size.
-//! - `CVImageBufferGetEncodedSize` returns a `CGSize`, where the two agree and
-//!   the entry is still not a table one because the marshaller's return path
-//!   carries a single register.
-//! - `VTDecompressionSessionCreate` takes its output callback **inside a
-//!   record**: two words, a function pointer and a refcon. That is the shape
-//!   `CFRunLoopSourceCreate` is refused for, at its smallest — one pointer to
-//!   substitute — so here it is answered rather than refused, by building the
-//!   host's copy of the record with a thunk in it.
+//! CoreMedia, VideoToolbox and the two frameworks beside them, where a **`CMTime`
+//! travels by value**.
 
 use microlift::arch::x86_64::context::RegisterContext;
 
@@ -73,10 +9,6 @@ use super::coregraphics::CgPoint;
 use super::host::host_or_refuse;
 
 /// `CMTime`, laid out the way both architectures lay it out.
-///
-/// The members are identical on the two sides — the disagreement is entirely
-/// about *where the struct goes*, not what is in it — so one Rust declaration
-/// serves for reading the guest's bytes and for handing the host a value.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct CmTime {
@@ -165,10 +97,8 @@ fn time_make(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory)
 
 /// `Float64 CMTimeGetSeconds(CMTime time)`
 ///
-/// The time is the only argument and is entirely on the guest's stack, so no
-/// integer register is involved at all. **Forwarded rather than divided**:
-/// `CMTimeGetSeconds` of an indefinite or infinite time is defined by CoreMedia
-/// through the flags word, and `value / timescale` is only the valid case.
+/// The time is the only argument and is entirely on the guest's stack, so no integer
+/// register is involved at all. **Forwarded rather than divided**:
 fn time_get_seconds(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -224,17 +154,14 @@ fn complete_frames(
 
 /// `OSStatus VTCompressionSessionEncodeFrame(VTCompressionSessionRef session,
 /// CVImageBufferRef imageBuffer, CMTime presentationTimeStamp, CMTime duration,
-/// CFDictionaryRef frameProperties, void *sourceFrameRefcon,
-/// VTEncodeInfoFlags *infoFlagsOut)`
+/// CFDictionaryRef frameProperties, void *sourceFrameRefcon, VTEncodeInfoFlags
+/// *infoFlagsOut)`
 ///
-/// Seven parameters, two of them twenty-four bytes on the stack, and the reason
-/// the register mapping is written out here rather than left to a reader: the
-/// two times take **no** integer register, so the last three arguments arrive in
-/// `rdx`, `rcx` and `r8` — the third, fourth and fifth — rather than the fifth,
-/// sixth and seventh.
+/// Seven parameters, two of them twenty-four bytes on the stack, and the reason the
+/// register mapping is written out here rather than left to a reader:
 ///
-/// `sourceFrameRefcon` is an opaque token VideoToolbox hands straight back to
-/// the output callback and never dereferences, so it crosses as it is.
+/// `sourceFrameRefcon` is an opaque token VideoToolbox hands straight back to the
+/// output callback and never dereferences, so it crosses as it is.
 fn encode_frame(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let host = host_or_refuse(symbol)?;
     let pts = time_argument(symbol, ctx, mem, 0)?;
@@ -253,10 +180,6 @@ fn encode_frame(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemo
 }
 
 /// `CGSize CVImageBufferGetEncodedSize(CVImageBufferRef imageBuffer)`
-///
-/// Two `double`s, which is the case the two ABIs agree about — `xmm0`/`xmm1` on
-/// one side, `v0`/`v1` on the other. Here for
-/// [`crate::shims::coregraphics::CgPoint`]'s reason rather than for `CMTime`'s.
 fn encoded_size(symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
     let host = host_or_refuse(symbol)?;
     // SAFETY: the symbol [`shim_for`] matched, which is
@@ -279,19 +202,10 @@ struct CaFrameRateRange {
     preferred: f32,
 }
 
-/// `CAFrameRateRange CAFrameRateRangeMake(float minimum, float maximum,
-/// float preferred)`
+/// `CAFrameRateRange CAFrameRateRangeMake(float minimum, float maximum, float
+/// preferred)`
 ///
-/// How a program asks CoreAnimation for a variable refresh rate. Twelve bytes
-/// of floating point, which SysV AMD64 splits into two SSE eightbytes —
-/// `minimum` and `maximum` packed into `xmm0`, `preferred` alone in the low half
-/// of `xmm1` — and AAPCS64 returns as three separate registers. The three
-/// arguments agree: `xmm0`–`xmm2` and `s0`–`s2` are the same places.
-///
-/// **Forwarded rather than constructed**, though the function is three stores.
-/// It is `CA_EXTERN` rather than `static inline`, so the framework owns what a
-/// `CAFrameRateRange` is, and a future member would be filled in by the host's
-/// copy and missed by ours.
+/// How a program asks CoreAnimation for a variable refresh rate.
 fn frame_rate_range_make(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -323,27 +237,19 @@ struct OutputCallbackRecord {
 }
 
 /// `OSStatus VTDecompressionSessionCreate(CFAllocatorRef allocator,
-/// CMVideoFormatDescriptionRef videoFormatDescription,
-/// CFDictionaryRef videoDecoderSpecification,
-/// CFDictionaryRef destinationImageBufferAttributes,
-/// const VTDecompressionOutputCallbackRecord *outputCallback,
-/// VTDecompressionSessionRef *decompressionSessionOut)`
+/// CMVideoFormatDescriptionRef videoFormatDescription, CFDictionaryRef
+/// videoDecoderSpecification, CFDictionaryRef destinationImageBufferAttributes, const
+/// VTDecompressionOutputCallbackRecord *outputCallback, VTDecompressionSessionRef
+/// *decompressionSessionOut)`
 ///
-/// The compression side takes its callback as an ordinary argument and is a
-/// `cbsig!` entry; this one takes it *inside a two-word record*, which the
-/// marshaller's per-argument substitution cannot see into — it would replace the
-/// **record pointer** with a thunk and VideoToolbox would read a trampoline's
-/// first eight bytes as the callback.
+/// The compression side takes its callback as an ordinary argument and is a `cbsig!`
+/// entry; this one takes it *inside a two-word record*, which the marshaller's
+/// per-argument substitution cannot see into — it would replace the **record pointer**
+/// with a thunk and VideoToolbox would read a trampoline's first eight bytes as the
+/// callback.
 ///
-/// So the record is read out of guest memory, its callback replaced with a
-/// thunk, and the host handed a copy that lives here rather than in the guest's
-/// address space. Copying is safe in a way it is not for a block: VideoToolbox
-/// documents the record as read at creation time and stores the two words in the
-/// session, so nothing keeps a pointer to the bytes.
-///
-/// A null record is legal — it means the frames are collected synchronously
-/// through `VTDecompressionSessionDecodeFrameWithOutputHandler` instead — and
-/// crosses unchanged.
+/// So the record is read out of guest memory, its callback replaced with a thunk, and
+/// the host handed a copy that lives here rather than in the guest's address space.
 fn decompression_session_create(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -413,9 +319,8 @@ pub fn callback_shim_for(name: &str) -> Option<crate::signal::Shim> {
 mod tests {
     use super::*;
 
-    /// The layout claim every function here rests on, which a wrong answer
-    /// would violate silently: twenty-four bytes, `value` `timescale` `flags`
-    /// `epoch`, with the two 32-bit members sharing the middle eightbyte.
+    /// The layout claim every function here rests on, which a wrong answer would
+    /// violate silently:
     #[test]
     fn cm_time_is_the_layout_both_architectures_use() {
         assert_eq!(core::mem::size_of::<CmTime>(), CM_TIME_SIZE);

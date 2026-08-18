@@ -1,59 +1,4 @@
 //! Structs by value, across two conventions that disagree about them.
-//!
-//! Every other argument in this project is a scalar, and a scalar is the same
-//! thing on both sides: sixty-four bits in a register, and the only question is
-//! which register. An aggregate is not. `NSRect` is four doubles, and
-//!
-//! - **SysV AMD64** — the guest's convention — classifies anything over sixteen
-//!   bytes as MEMORY and passes it *on the stack*;
-//! - **AAPCS64** — the host's — sees a homogeneous float aggregate of four
-//!   members and passes it in `v0`–`v3`.
-//!
-//! Neither is a special case of the other, and there is no width to widen. So
-//! this module answers three questions that the scalar path never has to ask:
-//! where did the guest put these bytes, what are the scalar leaves inside them,
-//! and which host registers does the callee read them from.
-//!
-//! ## Why the leaves are enough
-//!
-//! The whole marshaller rests on one prototype trick ([`super::marshal`]): a
-//! function declared with more scalar arguments than the callee takes puts each
-//! value in the register the callee reads. That trick extends to aggregates
-//! *for free* in the two cases that matter, because an aggregate's host
-//! placement is indistinguishable from its leaves':
-//!
-//! - a homogeneous float aggregate of *n* members occupies `v0`…`v(n-1)`, which
-//!   is exactly where *n* consecutive floating-point arguments go;
-//! - a composite of at most sixteen bytes occupies one or two `x` registers,
-//!   which is exactly where one or two integer arguments go;
-//! - a composite larger than that is passed as a *pointer to a copy the caller
-//!   made*, which is exactly where one pointer argument goes.
-//!
-//! So an aggregate argument is spliced into the existing slot arrays as its
-//! leaves and nothing else changes. What genuinely needed new code is the
-//! *guest* side — finding the bytes — and the return, where the two ABIs choose
-//! different registers for the same struct.
-//!
-//! ## What is refused
-//!
-//! - Nothing about **a composite over sixteen bytes that is not a homogeneous
-//!   float aggregate**, which was refused here until Unity's Metal backend sent
-//!   `replaceRegion:…` with a six-word `MTLRegion` in it. The refusal rested on
-//!   a wrong reading of AAPCS64: its rule B.4 has the *caller* copy such an
-//!   argument to memory and pass **a pointer to the copy**, which is an
-//!   ordinary integer register and squarely inside what a register prototype
-//!   can express. [`super::marshal::call_shapes`] makes that copy.
-//!   `CGAffineTransform` — six doubles, one too many for an HFA — travels the
-//!   same way.
-//! - **Sixteen-byte alignment**, which makes AAPCS64 round the register number
-//!   up to an even one. Nothing in Cocoa has it; a `__int128` member would.
-//! - **Unions.** Their members overlap, so "the leaves in order" is not a
-//!   description of anything, and the eightbyte classification would have to
-//!   merge overlapping members rather than list them.
-//! - **Bitfields** and the unknown type, for the reason
-//!   [`super::super::objc::encoding`] gives.
-//!
-//! Each is a `&'static str` that reaches the guest as a named stop.
 
 use super::ArgType as T;
 
@@ -70,9 +15,7 @@ pub struct Leaf {
 
 /// A struct or array passed or returned by value.
 ///
-/// Flattened: nesting is a property of the source language and not of the
-/// registers, so `{CGRect={CGPoint=dd}{CGSize=dd}}` and `{R=dddd}` are the same
-/// thing here and are treated as one.
+/// Flattened:
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Aggregate {
     pub size: usize,
@@ -108,9 +51,8 @@ pub enum Eightbyte {
 pub enum GuestClass {
     /// One or two eightbytes, in the argument registers of the named classes.
     Registers(Vec<Eightbyte>),
-    /// On the stack, eight-byte aligned. For a return, this is the hidden
-    /// pointer convention: the caller passes a buffer in the first integer
-    /// register and the callee returns that same pointer.
+    /// On the stack, eight-byte aligned. For a return, this is the hidden pointer
+    /// convention:
     Memory,
 }
 
@@ -122,23 +64,15 @@ pub enum HostClass {
     Hfa { ty: T, count: usize },
     /// One or two `x` registers holding the raw bytes.
     Integer { words: usize },
-    /// Passed and returned through an address rather than in registers: a
-    /// return through the buffer in `x8`, an argument through a pointer to the
-    /// caller's own copy (AAPCS64 B.4).
+    /// Passed and returned through an address rather than in registers:
     Indirect,
 }
 
 impl Aggregate {
     /// SysV AMD64's classification.
     ///
-    /// The real algorithm merges the classes of every field overlapping each
-    /// eightbyte and has a post-merge pass for `SSEUP` and for structs with
-    /// unaligned members. Neither is reachable here: unaligned members come
-    /// only from `#pragma pack`, which no framework type uses, and `SSEUP`
-    /// belongs to vector types this decoder refuses. What is left is the rule
-    /// that matters — **an eightbyte is SSE only if everything in it is
-    /// floating-point** — because one integer member anywhere in it moves the
-    /// whole eightbyte to a general register.
+    /// The real algorithm merges the classes of every field overlapping each eightbyte
+    /// and has a post-merge pass for `SSEUP` and for structs with unaligned members.
     pub fn guest_class(&self) -> GuestClass {
         if self.size > 2 * EIGHTBYTE {
             return GuestClass::Memory;
@@ -329,10 +263,9 @@ mod tests {
 
     #[test]
     fn a_nested_group_starts_at_its_own_alignment_not_its_first_members() {
-        // `struct { char c; struct { int i; double d; } t; }`. `t` is aligned to
-        // eight because `d` is, so it starts at 8 and not at 4 where rounding to
-        // `i`'s width would put it. Getting this wrong shifts every leaf after
-        // the first nested struct, and the eightbyte classification with them.
+        // `struct { char c; struct { int i; double d; } t; }`. `t` is aligned
+        // to eight because `d` is, so it starts at 8 and not at 4 where
+        // rounding to `i`'s width would put it.
         let s = agg("{S=c{T=id}}");
         assert_eq!(
             s.leaves.iter().map(|l| l.offset).collect::<Vec<_>>(),

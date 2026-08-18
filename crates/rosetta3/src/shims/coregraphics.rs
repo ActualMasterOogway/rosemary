@@ -1,65 +1,5 @@
-//! CoreGraphics and CoreVideo entry points that pass or return a **struct by
-//! value**, which is the one thing the signature table cannot name.
-//!
-//! [`crate::abi::table`] describes everything else in the display and bitmap
-//! families — they are display IDs, mode handles, context handles and sizes,
-//! all scalars and pointers, and the host's implementation is the right one
-//! because the displays it is asked about are this machine's. What is here is
-//! what is left, for the same reason [`crate::shims::math`]'s pair are here.
-//!
-//! No two of them are the same problem, which is the point worth taking from
-//! having several:
-//!
-//! - `CGDisplayBounds` **returns** a `CGRect` — thirty-two bytes of floating
-//!   point, and the two ABIs disagree completely.
-//! - `CGContextClearRect` and `CGContextDrawImage` **take** one, which is the
-//!   mirror image: SysV AMD64 puts a MEMORY-class argument on the caller's
-//!   stack and consumes no register for it, so the shim reads it out of the
-//!   guest's stack and hands it to the host by value.
-//! - `CGEventGetLocation` returns a `CGPoint` and
-//!   `CVDisplayLinkGetNominalOutputVideoRefreshPeriod` a `CVTime` — sixteen
-//!   bytes each, and the two ABIs **agree** about both, in floating-point
-//!   registers for one and integer registers for the other. They still cannot
-//!   be table entries, because the marshaller's return path writes one
-//!   register.
-//!
-//! The rule stays "check this struct against both ABIs"; what these add is that
-//! agreeing is not sufficient on its own, and that a struct going *in* is a
-//! different question from one coming out.
-//!
-//! ## `CGRect` is thirty-two bytes, and that decides everything
-//!
-//! `CGRect` is `{ CGPoint origin; CGSize size; }` — four `double`s. SysV AMD64
-//! classifies anything over sixteen bytes as MEMORY: the caller passes a hidden
-//! buffer pointer in `rdi`, every real argument shifts along by one, and the
-//! callee returns that same pointer in `rax`. AAPCS64 sees a four-member
-//! homogeneous float aggregate and returns it in `v0`–`v3`, with no buffer
-//! anywhere. This is the `NSRect` disagreement the roadmap records, met from the
-//! C side instead of the Objective-C one.
-//!
-//! So the shim calls the host function with a Rust prototype that returns the
-//! aggregate — which puts the compiler in charge of reading `v0`–`v3`, rather
-//! than this module guessing at register halves — and then writes the thirty-two
-//! bytes where the *guest's* ABI says they go.
-//!
-//! ## `CVTime` is sixteen bytes, and both sides return it in two registers
-//!
-//! `CVTime` is `{ int64_t timeValue; int32_t timeScale; int32_t flags; }`. SysV
-//! AMD64 classifies it as two INTEGER eightbytes and returns them in `rax` and
-//! `rdx`; AAPCS64 sees a sixteen-byte non-HFA aggregate and returns it in `x0`
-//! and `x1`. Same shape, same order, different register names — so the shim is
-//! two moves, and the reason it exists at all is that
-//! [`crate::abi::marshal`] returns a single value.
-//!
-//! ## Why not `#[link(kind = "framework")]`
-//!
-//! Declaring one of these with a `#[link]` attribute pulls CoreGraphics into the
-//! driver, and the roadmap records what that does: a framework's initializers
-//! run before the guest starts and leave `errno` set, which the guest then reads
-//! because `errno` is passthrough. The address comes from
-//! [`crate::dyld::host_symbol`] instead, which is `dlsym` against a process that
-//! has loaded CoreGraphics for its own reasons by the time a guest asks about a
-//! display.
+//! CoreGraphics and CoreVideo entry points that pass or return a **struct by value**,
+//! which is the one thing the signature table cannot name.
 
 use microlift::arch::x86_64::context::RegisterContext;
 
@@ -70,8 +10,7 @@ use super::host::host_or_refuse;
 /// `CGRect`, as AAPCS64 returns one.
 ///
 /// Four `double`s and nothing else, which is what makes it a homogeneous float
-/// aggregate. Declaring it as such is the whole trick: Rust's `extern "C"`
-/// follows the platform ABI, so the compiler emits the `v0`–`v3` read.
+/// aggregate. Declaring it as such is the whole trick:
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub(crate) struct CgRect {
@@ -94,10 +33,8 @@ impl CgRect {
 
 /// Call a host `CGRect f(u32)` and place the result the guest's way.
 ///
-/// `rdi` is the hidden return buffer and `esi` the first real argument, because
-/// SysV AMD64 shifted everything along by one for the MEMORY return. `rax` gets
-/// the buffer back, which is what a SysV callee returning MEMORY must do and
-/// what a caller reading the result through `rax` depends on.
+/// `rdi` is the hidden return buffer and `esi` the first real argument, because SysV
+/// AMD64 shifted everything along by one for the MEMORY return.
 fn rect_of_display(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -128,13 +65,10 @@ fn rect_of_display(
 
 /// Read the `CGRect` a guest passed by value, out of its own stack.
 ///
-/// A MEMORY-class argument is *on the stack* under SysV AMD64, and microlift
-/// exits before the `CALL`, so `rsp` is still the pre-call value and the
-/// argument area starts at `rsp + 0` — the arrangement
-/// [`crate::abi::marshal`]'s stack path already rests on. `offset` is where in
-/// that area this rectangle begins, which is not always zero: a call with two
-/// MEMORY arguments, or with integer arguments spilled ahead of one, puts it
-/// further along.
+/// A MEMORY-class argument is *on the stack* under SysV AMD64, and microlift exits
+/// before the `CALL`, so `rsp` is still the pre-call value and the argument area starts
+/// at `rsp + 0` — the arrangement [`crate::abi::marshal`]'s stack path already rests
+/// on.
 pub(crate) fn rect_argument(
     symbol: &str,
     ctx: &RegisterContext,
@@ -161,11 +95,6 @@ pub(crate) fn rect_argument(
 }
 
 /// `void CGContextClearRect(CGContextRef, CGRect)`
-///
-/// The rectangle is the guest's second argument and its first stack one; the
-/// context stays in `rdi`. Calling the host through a prototype that takes the
-/// aggregate by value puts the compiler in charge of the `v0`–`v3` placement,
-/// which is the same trick [`rect_of_display`] uses in the other direction.
 fn context_clear_rect(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -185,13 +114,9 @@ fn context_clear_rect(
 
 /// `void CGContextDrawImage(CGContextRef, CGRect, CGImageRef)`
 ///
-/// The one cocos2d-x decodes every texture through: a `CGImageSource` produces
-/// a `CGImage` and this draws it into a bitmap context the guest owns the
-/// backing store of. The MEMORY-class rectangle sits on the stack and the
-/// *image* takes the second integer register, because a MEMORY argument
-/// consumes no register at all — reading it out of `rdx` would pass the guest's
-/// third argument as its second, and the image would be whatever was left in
-/// `rdx`.
+/// The one cocos2d-x decodes every texture through: a `CGImageSource` produces a
+/// `CGImage` and this draws it into a bitmap context the guest owns the backing store
+/// of.
 fn context_draw_image(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -208,19 +133,8 @@ fn context_draw_image(
 
 /// The eight `CGFloat CGRectGet…(CGRect)` accessors, which are one shim.
 ///
-/// They are the smallest possible instance of this module's problem and the
-/// most common: a `CGRect` in, a `CGFloat` out. The rectangle is MEMORY class
-/// and is the *only* argument, so it is entirely on the guest's stack and no
-/// integer register is involved at all; the answer is a single `double`, which
-/// both ABIs return in the low half of the first vector register.
-///
-/// **Forwarded rather than computed**, though every one of them is two lines of
-/// arithmetic. `CGRectGetWidth` is not `rect.size.width` — it is the width of
-/// the *standardized* rectangle, so a negative width comes back positive, and
-/// `CGRectGetMidX` of an infinite rectangle is defined by CoreGraphics and not
-/// by the obvious expression. Reimplementing eight of those is eight chances to
-/// disagree with the framework the guest is being run against, for no gain: the
-/// host's own is right here and costs one call.
+/// They are the smallest possible instance of this module's problem and the most
+/// common: a `CGRect` in, a `CGFloat` out.
 fn rect_accessor(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let host = host_or_refuse(symbol)?;
     let rect = rect_argument(symbol, ctx, mem, 0)?;
@@ -236,11 +150,9 @@ fn rect_accessor(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMem
 
 /// `CGPoint CGEventGetLocation(CGEventRef)`
 ///
-/// Sixteen bytes of two `double`s, which is the case the two ABIs **agree**
-/// about — SysV AMD64 returns two SSE eightbytes in `xmm0`/`xmm1`, AAPCS64
-/// returns a two-member homogeneous float aggregate in `v0`/`v1`. It is still
-/// not a table entry, for [`display_link_nominal_period`]'s reason: the
-/// marshaller's return path carries one register and this needs two.
+/// Sixteen bytes of two `double`s, which is the case the two ABIs **agree** about —
+/// SysV AMD64 returns two SSE eightbytes in `xmm0`/`xmm1`, AAPCS64 returns a two-member
+/// homogeneous float aggregate in `v0`/`v1`.
 fn event_location(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -258,10 +170,6 @@ fn event_location(
 }
 
 /// `CGSize CGDisplayScreenSize(CGDirectDisplayID)`
-///
-/// The display's physical size in millimetres, which is how a game computes a
-/// DPI. A `CGSize` is a `CGPoint` by another name — two `double`s — so it is
-/// [`event_location`]'s case with a 32-bit argument instead of a handle.
 fn screen_size_of_display(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -279,18 +187,11 @@ fn screen_size_of_display(
     Ok(())
 }
 
-/// `CGEventRef CGEventCreateMouseEvent(CGEventSourceRef source,
-/// CGEventType mouseType, CGPoint mouseCursorPosition,
-/// CGMouseButton mouseButton)`
+/// `CGEventRef CGEventCreateMouseEvent(CGEventSourceRef source, CGEventType mouseType,
+/// CGPoint mouseCursorPosition, CGMouseButton mouseButton)`
 ///
-/// How a game *warps the cursor* while keeping the click state it already has —
-/// Unreal Engine 3 posts one of these for every mouse-look frame, which is why
-/// it is on the render path rather than in a settings dialog.
-///
-/// The `CGPoint` is the third argument and is what keeps this out of the table,
-/// and its position is the interesting part: it takes the two SSE eightbytes
-/// `xmm0`/`xmm1` and **no integer register**, so `mouseButton` — the fourth
-/// argument — is in `rdx`, the third integer register rather than the fourth.
+/// The `CGPoint` is the third argument and is what keeps this out of the table, and its
+/// position is the interesting part:
 fn event_create_mouse(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -314,15 +215,8 @@ fn event_create_mouse(
 
 /// `NSRect NSInsetRect(NSRect aRect, CGFloat dX, CGFloat dY)`
 ///
-/// An `NSRect` *and* a `CGRect`, in and out, which makes it the only function
-/// in this module with the thirty-two byte disagreement on both sides of the
-/// call at once: the hidden return buffer takes `rdi`, the rectangle argument
-/// takes the whole of the stack argument area and no register, and the two
-/// insets are `xmm0` and `xmm1`.
-///
-/// **Forwarded rather than computed** for [`rect_accessor`]'s reason. Foundation
-/// defines what insetting an infinite or empty rectangle produces, and it is not
-/// what subtracting twice the inset from the width produces.
+/// An `NSRect` *and* a `CGRect`, in and out, which makes it the only function in this
+/// module with the thirty-two byte disagreement on both sides of the call at once:
 fn inset_rect(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let host = host_or_refuse(symbol)?;
     let rect = rect_argument(symbol, ctx, mem, 0)?;
@@ -364,10 +258,6 @@ struct CvTime {
 }
 
 /// `CVTime CVDisplayLinkGetNominalOutputVideoRefreshPeriod(CVDisplayLinkRef)`
-///
-/// How long a frame is on the display the link is attached to, which is how
-/// SDL3 reports a refresh rate. The guest reads `rax` and `rdx`; the host
-/// returns `x0` and `x1`, holding the same two eightbytes in the same order.
 fn display_link_nominal_period(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -429,9 +319,8 @@ pub fn shim_for(name: &str) -> Option<Shim> {
 mod tests {
     use super::*;
 
-    /// The layout claim, which is the only thing this module asserts about
-    /// `CGRect` and the thing a wrong answer would silently violate: four
-    /// doubles in declaration order, thirty-two bytes, no padding.
+    /// The layout claim, which is the only thing this module asserts about `CGRect` and
+    /// the thing a wrong answer would silently violate:
     #[test]
     fn a_rect_is_four_doubles_in_order() {
         assert_eq!(core::mem::size_of::<CgRect>(), 32);
@@ -449,9 +338,8 @@ mod tests {
         }
     }
 
-    /// Against the host, so the claim is about CoreGraphics rather than about
-    /// this module's arithmetic: the main display's bounds must be a plausible
-    /// rectangle, and `rax` must come back as the buffer the guest passed.
+    /// Against the host, so the claim is about CoreGraphics rather than about this
+    /// module's arithmetic:
     #[test]
     fn the_main_displays_bounds_land_in_the_guests_buffer() {
         let Some(_) = crate::dyld::host_symbol("CGDisplayBounds") else {

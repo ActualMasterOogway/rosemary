@@ -1,29 +1,4 @@
-//! `CFUUIDBytes`: sixteen bytes both ABIs agree about, and neither table can
-//! name.
-//!
-//! ```c
-//! CFUUIDBytes CFUUIDGetUUIDBytes(CFUUIDRef uuid);
-//! CFUUIDRef   CFUUIDCreateFromUUIDBytes(CFAllocatorRef alloc, CFUUIDBytes bytes);
-//! ```
-//!
-//! A `CFUUIDBytes` is sixteen `UInt8`s. SysV AMD64 classifies sixteen bytes of
-//! integers as INTEGER,INTEGER — `rax`/`rdx` returning, and the next two
-//! argument registers going out. AAPCS64 sees a sixteen-byte non-floating
-//! aggregate and does the same in `x0`/`x1`. **The two ABIs agree**, which is
-//! the unusual case here and the reason this is six lines rather than the
-//! `NSRect` problem.
-//!
-//! What they agree about still cannot be written in [`crate::abi::table`],
-//! whose entries are scalars: `sig!` has no way to say "two eightbytes returned
-//! in a pair of registers", and an entry claiming `U64` would take the low half
-//! and leave the high half whatever the last instruction wrote. That is the
-//! same gap [`super::math`]'s `sincos` and [`super::coregraphics`]'s
-//! `CGDisplayScreenSize` fall through, and this is the third instance of it —
-//! the shape is now common enough to be worth naming rather than rediscovering.
-//!
-//! Reached by Unity's analytics, which identifies an install with a UUID and
-//! asks for its bytes to hash. It is not optional: the call is on the path
-//! between the window opening and the first frame.
+//! `CFUUIDBytes`: sixteen bytes both ABIs agree about, and neither table can name.
 
 use microlift::arch::x86_64::context::RegisterContext;
 
@@ -33,11 +8,9 @@ use super::host::host_or_refuse;
 
 /// Sixteen bytes as the two ABIs carry them: a pair of doublewords.
 ///
-/// `#[repr(C)]` and exactly two `u64`s, so Rust returns it in `x0`/`x1` and
-/// passes it in the next two integer registers, which is what the host's own
-/// declaration does with the `unsigned char [16]` it really is. Little-endian
-/// is why the byte order needs no thought: the guest reads the same sixteen
-/// bytes back out of `rax`/`rdx` in the order the host wrote them.
+/// `#[repr(C)]` and exactly two `u64`s, so Rust returns it in `x0`/`x1` and passes it
+/// in the next two integer registers, which is what the host's own declaration does
+/// with the `unsigned char [16]` it really is.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct Bytes {
@@ -65,9 +38,6 @@ fn get_uuid_bytes(
 }
 
 /// `CFUUIDRef CFUUIDCreateFromUUIDBytes(CFAllocatorRef, CFUUIDBytes)`
-///
-/// The mirror image: the allocator is the first integer argument and the
-/// sixteen bytes are the second and third, on both sides.
 fn create_from_uuid_bytes(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -104,10 +74,8 @@ mod tests {
 
     /// The round trip, through the host's own CoreFoundation.
     ///
-    /// Checked rather than asserted, because the whole claim is that sixteen
-    /// bytes survive a pair of registers in both directions: a wrong half would
-    /// still produce a `CFUUIDRef`, and only comparing the bytes back out
-    /// catches it.
+    /// Checked rather than asserted, because the whole claim is that sixteen bytes
+    /// survive a pair of registers in both directions:
     #[test]
     fn sixteen_bytes_survive_the_round_trip() {
         let Some(create) = crate::dyld::host_symbol("CFUUIDCreateFromUUIDBytes") else {

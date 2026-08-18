@@ -1,84 +1,4 @@
 //! Thread-local storage: `__tlv_bootstrap`, and the per-thread block behind it.
-//!
-//! ## What the guest actually compiles to
-//!
-//! A `_Thread_local int x` is not an address. It is a three-word
-//! `tlv_descriptor` in `__DATA,__thread_vars` — `{ thunk, key, offset }` — and
-//! reading the variable compiles to
-//!
-//! ```text
-//! leaq _x(%rip), %rdi     ; the descriptor
-//! callq *(%rdi)           ; call its thunk, which returns this thread's address
-//! ```
-//!
-//! `thunk` is an import. dyld binds it to `__tlv_bootstrap`, which allocates the
-//! calling thread's block on first touch and returns `block + offset`. That is
-//! the whole protocol, and it is why milestone 1 could enumerate descriptors and
-//! go no further: the block is *per thread*, so allocating one means having
-//! decided what a guest thread is.
-//!
-//! ## Why the block is host memory and not a guest mapping
-//!
-//! The guest is identity-mapped, so an ordinary host allocation is already
-//! something guest code can load and store through — the lifted arm64 does a
-//! real dereference of a real address. Nothing about a thread block needs to be
-//! at a guest virtual address: no fixup points at it, it is not in any segment,
-//! and the descriptor's `offset` is relative to the block rather than absolute.
-//! Allocating it here means it is freed when the thread ends, which is the
-//! lifetime the guest expects and one no guest mapping would give.
-//!
-//! Shims reach it through [`GuestView`](crate::vm::GuestView), which permits
-//! host addresses after probing that something is mapped — the same path a
-//! `strerror` result already takes.
-//!
-//! ## Why the registry is process-global
-//!
-//! [`bootstrap`] is called by *guest* code through a pointer in a descriptor,
-//! with no argument that could carry a VM and no thread-local to find one on:
-//! it may be the first thing a brand-new guest thread does. What it is given is
-//! the descriptor's address, and because the guest is identity-mapped that
-//! address is unique in this process — so it is a usable key on its own. The
-//! registry is therefore global and keyed by descriptor address, and a
-//! re-registration at the same address replaces the older entry, which is what
-//! makes a second program loaded over a first one's unmapped range correct
-//! rather than stale.
-//!
-//! ## What is deliberately not done
-//!
-//! dyld overwrites `descriptor->thunk` with a fast path after the first call,
-//! so later accesses go straight to the block. We leave the thunk alone and
-//! service every access, because the fast path would have to be *guest*-callable
-//! code and there is no guest code to point it at. The cost is a call per
-//! thread-local access, which is slow and correct — the same trade the roadmap
-//! records for unresolved jump tables.
-//!
-//! ## Why the answer is cached per thread
-//!
-//! Servicing every access is only affordable if servicing one is cheap, and the
-//! first version of this was not: it took the process-global [`SLOTS`] mutex on
-//! the way in, so *every* thread-local read in the program serialised against
-//! every other one. That is invisible in a single-threaded guest and ruinous in
-//! Roblox, which reads thread-locals from a job-system thread pool — the lock is
-//! uncontended work with a contended cache line under it, and the more cores the
-//! guest gets the worse it does. The mutex was doing no useful work either: the
-//! map is written once per image at load and read forever after.
-//!
-//! What a descriptor resolves to is a pure function of the descriptor address
-//! *and the calling thread*, and it never changes for the life of either — so it
-//! is cached in the thread's own [`ThreadTls`], keyed by descriptor address, and
-//! a hit touches no shared memory at all. Only the first access to a given
-//! descriptor on a given thread reaches the registry, which is the number of
-//! lock acquisitions dropping from "per access" to "per thread, per variable".
-//!
-//! The one thing that *can* change the answer is a re-registration — a second
-//! program loaded over a first one's range, which the registry deliberately
-//! allows. [`EPOCH`] is bumped whenever that happens and stamped into each
-//! thread's cache, so a stale entry is discarded on the next access rather than
-//! handing the new program the old program's block.
-//!
-//! Thread-local destructors (`__cxa_thread_atexit`) are not run. C `_Thread_local`
-//! has none; a C++ thread-local with a non-trivial destructor is the case this
-//! would matter for, and it belongs with the rest of the C++ runtime work.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::cell::RefCell;
@@ -90,9 +10,7 @@ use machish::report::LinkReport;
 
 /// Largest thread block this will allocate.
 ///
-/// Totality, not policy: `total_size` is arithmetic over two section headers
-/// from an untrusted file, and a corrupt image must fail to allocate rather
-/// than ask the allocator for a petabyte on every thread the guest spawns.
+/// Totality, not policy:
 const MAX_BLOCK: u64 = 64 * 1024 * 1024;
 
 /// One image's block layout, as [`machish`] described it.
@@ -114,11 +32,6 @@ struct Slot {
 
 /// Every registered image's layout. Append-only; indices are handed out as
 /// `Slot::image` and must stay valid.
-///
-/// A lock read by many threads at once and written only while a program loads,
-/// which is what makes it an `RwLock` rather than a `Mutex`: the readers are
-/// guest threads touching a thread-local for the first time, and they have no
-/// reason to queue behind each other.
 static IMAGES: RwLock<Vec<Template>> = RwLock::new(Vec::new());
 
 /// Every known `tlv_descriptor`, by its own address.
@@ -126,23 +39,14 @@ static SLOTS: RwLock<BTreeMap<u64, Slot>> = RwLock::new(BTreeMap::new());
 
 /// How many times the registry has changed.
 ///
-/// Read on every access and written once per [`register`], so it is the cheapest
-/// shared thing in this module: one load off a line that is shared in every
-/// core's cache and never dirtied while the guest runs — which is the property
-/// the mutex it replaced did not have, since a lock dirties its line to be
-/// *taken*.
+/// Read on every access and written once per [`register`], so it is the cheapest shared
+/// thing in this module:
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 
-/// Entries in one thread's descriptor cache. A power of two so the index is a
-/// mask, and large enough that a program's whole working set of thread-locals
-/// fits — a miss is correct, just a lock acquisition.
+/// Entries in one thread's descriptor cache.
 const CACHE: usize = 64;
 
 /// Which cache line a descriptor address falls on.
-///
-/// Descriptors are three words apart in `__thread_vars`, so the low bits alone
-/// would collide in runs; multiply-shift mixes the whole address before the
-/// mask takes six bits of it.
 fn line(at: u64) -> usize {
     (at.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as usize & (CACHE - 1)
 }
@@ -152,9 +56,8 @@ struct ThreadTls {
     /// The [`EPOCH`] `cache` was filled under. A mismatch means some image was
     /// registered since, and every entry is discarded rather than trusted.
     epoch: u64,
-    /// Direct-mapped descriptor address to this thread's address for it. A key
-    /// of zero is an empty entry, which costs nothing: address zero is not a
-    /// descriptor and is answered by the slow path anyway.
+    /// Direct-mapped descriptor address to this thread's address for it. A key of zero
+    /// is an empty entry, which costs nothing:
     cache: [(u64, *mut u8); CACHE],
     /// This thread's blocks, one per image that has thread-locals, allocated on
     /// first touch and freed when the thread ends.
@@ -191,10 +94,6 @@ impl Drop for Block {
 }
 
 /// Make every thread-local in `report` addressable.
-///
-/// Called once per program, before any guest code runs. Returns how many
-/// descriptors were registered, which is what a test can assert on without
-/// reaching into the registry.
 pub fn register(report: &LinkReport) -> usize {
     let mut registered = 0;
     for image in &report.images {
@@ -236,32 +135,22 @@ pub fn register(report: &LinkReport) -> usize {
     }
     // After the slots are visible, and released so that a thread which observes
     // the new epoch cannot then read the map without seeing them. Bumped even
-    // when nothing was registered: this is cheap, happens once per program, and
-    // "no descriptors" is not something to reason about separately.
+    // when nothing was registered:
     EPOCH.fetch_add(1, Ordering::Release);
     registered
 }
 
-/// `void *__tlv_bootstrap(struct tlv_descriptor *)` — this thread's address for
-/// the variable `descriptor` describes.
+/// `void *__tlv_bootstrap(struct tlv_descriptor *)` — this thread's address for the
+/// variable `descriptor` describes.
 ///
-/// A real native arm64 function, which is the point: it is bound into the
-/// guest's descriptor like any other import, and the guest's `call *(%rdi)`
-/// reaches it through the ordinary indirect-call path
-/// ([`Vm::dispatch_indirect`](crate::vm::Vm)) with the signature the table
-/// records. Nothing about it needs a JIT.
+/// A real native arm64 function, which is the point:
 ///
-/// Returns null for a descriptor nobody registered, which is the only answer
-/// available inside a C ABI with no error channel — and it faults in the guest
-/// at the access rather than corrupting anything.
+/// Returns null for a descriptor nobody registered, which is the only answer available
+/// inside a C ABI with no error channel — and it faults in the guest at the access
+/// rather than corrupting anything.
 pub extern "C" fn bootstrap(descriptor: *const u8) -> *mut u8 {
     let at = descriptor as usize as u64;
-    // `try_with` rather than `with`: this is reached from guest code, and a
-    // `thread_local` destructor that runs guest code — a C++ `thread_local` with
-    // a destructor, reached through `_tlv_atexit` — can touch a thread-local
-    // after this key has been destroyed. `with` panics there, and a panic out of
-    // an `extern "C"` frame called by the JIT aborts the process with nothing
-    // naming the cause. Null is the answer the C ABI has for it.
+    // `try_with` rather than `with`:
     match TLS.try_with(|tls| resolve(&mut tls.borrow_mut(), at)) {
         Ok(address) => address,
         Err(_) => {
@@ -273,10 +162,7 @@ pub extern "C" fn bootstrap(descriptor: *const u8) -> *mut u8 {
 
 /// The body of [`bootstrap`], with this thread's storage already in hand.
 ///
-/// The whole point of the split is the first six lines: a repeat access to a
-/// descriptor this thread has already touched reads two words of its own
-/// thread-local memory and one acquire load off a line no thread ever dirties,
-/// and takes no lock.
+/// The whole point of the split is the first six lines:
 fn resolve(tls: &mut ThreadTls, at: u64) -> *mut u8 {
     // Acquire pairs with the release in `register`: observing the new epoch
     // means observing the slots that came with it.
@@ -315,21 +201,16 @@ fn resolve(tls: &mut ThreadTls, at: u64) -> *mut u8 {
     // block was allocated with exactly that many bytes.
     let address = unsafe { tls.blocks[&image].ptr.add(offset as usize) };
 
-    // Cached only now, and only for an answer that came from a block: a failure
-    // is not a fact about this thread — it is a fact about what has been
-    // registered so far — and the diagnostic it goes through has its own
-    // once-each rule to keep it quiet.
+    // Cached only now, and only for an answer that came from a block:
     tls.cache[line] = (at, address);
     address
 }
 
 /// Name a descriptor this runtime has no block for, once each.
 ///
-/// Null is the only value a C ABI with no error channel can return, and the
-/// guest's very next instruction dereferences it — so without this the failure
-/// arrives as a segfault inside guest code with nothing anywhere naming a
-/// thread-local. Which is how it did arrive: an image loaded after start-up has
-/// its own `__thread_vars`, and a `_Thread_local` in it reads as address zero.
+/// Null is the only value a C ABI with no error channel can return, and the guest's
+/// very next instruction dereferences it — so without this the failure arrives as a
+/// segfault inside guest code with nothing anywhere naming a thread-local.
 fn say_unregistered(at: u64) {
     static SAID: Mutex<Vec<u64>> = Mutex::new(Vec::new());
     let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
@@ -343,13 +224,11 @@ fn say_unregistered(at: u64) {
     );
 }
 
-/// Report a thread-local read that arrived after this thread's storage was
-/// destroyed, once for the process.
+/// Report a thread-local read that arrived after this thread's storage was destroyed,
+/// once for the process.
 ///
-/// Not a hypothetical: it is where a C++ `thread_local` with a destructor ends
-/// up if the destructor reads another thread-local. The guest gets null, which
-/// faults at the access — but it faults with something in the log saying the
-/// access was late rather than unregistered, which are different bugs.
+/// Not a hypothetical: it is where a C++ `thread_local` with a destructor ends up if
+/// the destructor reads another thread-local.
 fn say_after_teardown(at: u64) {
     static SAID: std::sync::Once = std::sync::Once::new();
     SAID.call_once(|| {

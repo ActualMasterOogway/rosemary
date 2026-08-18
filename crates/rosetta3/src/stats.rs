@@ -1,43 +1,15 @@
 //! Where translation time actually goes.
-//!
-//! "Recompiling is slow" is not a thing this runtime can act on. Lifting a
-//! region is four distinct costs — deciding which bytes to hand the lifter,
-//! decoding them into IR, letting Cranelift compile that IR, and the cache
-//! lookups around all of it — and they differ by more than an order of
-//! magnitude from each other. A change that halves the first is invisible if
-//! the third is 95% of the total, and the only way to know which is which is to
-//! measure them separately.
-//!
-//! `ROSETTA3_STATS=1` turns this on. Everything here is atomics behind one
-//! cached `bool`, so it costs a relaxed load per region entry when off.
-//!
-//! The counters are process-global rather than per-`Vm` for the same reason the
-//! code cache's registry is: guest threads lift into the same cache, and a
-//! per-thread total would answer a question nobody asked.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
 /// Whether the exit histogram is being counted, right now.
 ///
-/// **Was `ROSETTA3_STATS`, read once into a `OnceLock`; is now a switch**, so
-/// that [`crate::gui`] can turn it on for the ten seconds someone wants a rate
-/// and off again. That matters more here than anywhere else in this runtime,
-/// because this is the counter that is *documented as perturbing the program it
-/// measures*: one relaxed `fetch_add` per region entry, at fifteen million
-/// entries a second, measured at 44% of a steady-state window in the runtime
-/// with it off and 61% with it on. A switch turns "quote shares from one run and
-/// rates from another" into two keystrokes in one run.
+/// **Was `ROSETTA3_STATS`, read once into a `OnceLock`; is now a switch**, so that
+/// [`crate::gui`] can turn it on for the ten seconds someone wants a rate and off
+/// again.
 ///
-/// The read has to stay as cheap as the `OnceLock` deref it replaces, since it
-/// is on the region-entry path. It is: one relaxed load and a compare, with the
-/// environment consulted exactly once on the cold path.
-///
-/// What a caller must know: **counters do not rewind**. Time spent with this off
-/// is time the events happened and were not counted, so a rate differenced
-/// across a toggle is wrong for exactly one window. [`crate::gui::panel`] shows
-/// rates over its own half-second window, so it self-corrects; a reader of
-/// [`report`]'s cumulative totals has to know when it was on.
+/// What a caller must know: **counters do not rewind**.
 pub fn enabled() -> bool {
     match COUNTING.load(Relaxed) {
         ON => true,
@@ -53,8 +25,6 @@ const ON: u8 = 2;
 static COUNTING: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(UNKNOWN);
 
 /// The first read, which is what `ROSETTA3_STATS` decides.
-///
-/// Cold, and marked so: after it runs once every later [`enabled`] is a load.
 #[cold]
 fn from_environment() -> bool {
     let on = std::env::var_os("ROSETTA3_STATS").is_some();
@@ -63,11 +33,6 @@ fn from_environment() -> bool {
 }
 
 /// Turn the exit histogram on or off. Returns the state it is now in.
-///
-/// Bound to a hotkey. The translation counters — regions, lift and compile time —
-/// are not affected, because they are not gated: they cost one `fetch_add` per
-/// *translation*, which is rare, and a program in steady state has stopped
-/// translating altogether.
 pub fn set_enabled(on: bool) -> bool {
     COUNTING.store(if on { ON } else { OFF }, Relaxed);
     if on {
@@ -91,29 +56,15 @@ counters! {
     ENTRIES, WINDOW_MISSES, TAIL_IMPORTS, LINKED,
 }
 
-// ------------------------------------------------------------ the exit mix ---
 
 /// How a region entry ended.
 ///
-/// Translation time is one question and **exit rate** is the other, and until
-/// this existed only the first had an instrument. A profile of A Hat in Time
-/// put 44% of steady-state CPU in this runtime's own Rust with translation at
-/// 0.02% of it, which says the cost is the seam between regions rather than the
-/// code inside them — but *which* seam is a different question from *how much*,
-/// and the run loop's answer differs by more than an order of magnitude between
-/// these arms. A `Return` that leaves a leaf function is a lookup and a
-/// re-entry; an `Indirect` is that plus three map probes and a guest stack
-/// write.
-///
-/// Named here rather than reusing microlift's `ExitReason` on purpose: the
-/// interesting split is *inside* `UnknownJump`, whose `TransferKind` separates
-/// "the guest jumped somewhere" from "the translation could not serve this
-/// address", and those are not the same work item.
+/// Translation time is one question and **exit rate** is the other, and until this
+/// existed only the first had an instrument.
 #[derive(Clone, Copy)]
 pub enum Exit {
-    /// The end of a call this runtime made: the `int3` of the return stub the
-    /// entry pushed, reached by the callee's final `ret`. See
-    /// [`crate::retstub`].
+    /// The end of a call this runtime made: the `int3` of the return stub the entry
+    /// pushed, reached by the callee's final `ret`. See [`crate::retstub`].
     Return,
     /// A `ret` that popped an address outside the region — the ordinary way a
     /// leaf function ends, and one region entry each time.
@@ -126,9 +77,8 @@ pub enum Exit {
     Fallthrough,
     /// A direct `call` to guest code that was not lifted into this region.
     DirectCall,
-    /// The translation declined to serve the PC — a region cut mid-instruction,
-    /// or an entry point its dispatch was never offered. See
-    /// [`record_tail_exit`].
+    /// The translation declined to serve the PC — a region cut mid-instruction, or an
+    /// entry point its dispatch was never offered. See [`record_tail_exit`].
     RegionTail,
     /// A tail `jmp` through a register or a memory operand.
     IndirectJump,
@@ -181,18 +131,10 @@ impl Exit {
     }
 }
 
-/// One counter per [`Exit`]. A fixed array rather than a map because this is
-/// incremented once per region entry on every guest thread, and a lock there
-/// would be measuring the instrument.
+/// One counter per [`Exit`].
 static EXITS: [AtomicU64; Exit::ALL.len()] = [const { AtomicU64::new(0) }; Exit::ALL.len()];
 
 /// One region entry: the event whose *rate* is the whole question.
-///
-/// Gated on [`enabled`] rather than counted always, and that is not a
-/// micro-optimisation. At the measured rate — millions a second across several
-/// guest threads — an unconditional `fetch_add` on one cache line is a
-/// contended store the guest threads would queue behind, which would slow the
-/// program by more than the thing being counted costs.
 pub fn record_entry(missed_window: bool) {
     if !enabled() {
         return;
@@ -203,14 +145,12 @@ pub fn record_entry(missed_window: bool) {
     }
 }
 
-/// A region entry the run loop never saw: one region **linked** to the next,
-/// resolving the successor itself out of this thread's block-link table.
+/// A region entry the run loop never saw: one region **linked** to the next, resolving
+/// the successor itself out of this thread's block-link table.
 ///
-/// Counted into [`ENTRIES`] as well as separately, so that the entry *rate* —
-/// the figure `docs/HOTSPOTS.md` is written against — still counts the same
-/// event it always did, and stays comparable across the change that introduced
-/// linking. The separate counter is the new question: what share of entries
-/// never reached Rust.
+/// Counted into [`ENTRIES`] as well as separately, so that the entry *rate* — the
+/// figure `docs/HOTSPOTS.md` is written against — still counts the same event it always
+/// did, and stays comparable across the change that introduced linking.
 pub fn record_linked_entry() {
     if !enabled() {
         return;
@@ -219,10 +159,8 @@ pub fn record_linked_entry() {
     LINKED.fetch_add(1, Relaxed);
 }
 
-/// A region entry that turned out to be a *tail call to an import*: the run
-/// loop's first question, asked before every entry and answered "yes" only
-/// here. Its cost when the answer is "no" is what
-/// [`crate::Program::import_at`] is doing at the top of a profile.
+/// A region entry that turned out to be a *tail call to an import*: the run loop's
+/// first question, asked before every entry and answered "yes" only here.
 pub fn record_tail_import() {
     if enabled() {
         TAIL_IMPORTS.fetch_add(1, Relaxed);
@@ -242,10 +180,6 @@ pub fn record_select(took: Duration) {
 }
 
 /// How many regions between progress reports.
-///
-/// A run that is killed rather than exiting — which is every measured run, since
-/// a game does not finish — would otherwise report nothing at all, and a single
-/// figure at the end could not show *when* the cost was paid anyway.
 const REPORT_EVERY: u64 = 2048;
 
 /// One completed translation.
@@ -265,21 +199,14 @@ pub fn record_refused() {
     REFUSED.fetch_add(1, Relaxed);
 }
 
-/// An exit taken because the translation could not serve the PC it was entered
-/// at — either the instruction there runs past the bytes it was given, or its
-/// dispatch was never offered that address. A run full of them means the region
-/// walk is cutting in the wrong places; see [`crate::region`].
+/// An exit taken because the translation could not serve the PC it was entered at —
+/// either the instruction there runs past the bytes it was given, or its dispatch was
+/// never offered that address.
 pub fn record_tail_exit() {
     TAIL_EXITS.fetch_add(1, Relaxed);
 }
 
 /// The pages a lifted region touched, at both page sizes that matter.
-///
-/// How *dense* the code a program actually reaches is within the pages holding
-/// it, which is a figure no amount of reasoning produces and one counter does.
-/// It decided against page-bounded lifting when that was a live option, and it
-/// is what says whether a persistent code cache keyed by page would be storing
-/// mostly code or mostly padding.
 static PAGES: std::sync::Mutex<
     Option<(
         std::collections::BTreeSet<u64>,
@@ -310,18 +237,14 @@ fn origin() -> Instant {
 }
 
 /// Start the clock the report is a share of.
-///
-/// Called from the driver before the guest runs. Idempotent, and calling it
-/// late only makes the reported share pessimistic.
 pub fn start() {
     if enabled() {
         start_inner();
     }
 }
 
-/// The half of [`start`] that is not the environment check, so that
-/// [`set_enabled`] can reach it when a run that was never asked to count is
-/// asked to, mid-flight.
+/// The half of [`start`] that is not the environment check, so that [`set_enabled`] can
+/// reach it when a run that was never asked to count is asked to, mid-flight.
 fn start_inner() {
     origin();
     // A run that ends in the guest's own `exit` never returns to the driver, and
@@ -379,8 +302,6 @@ pub fn report() {
     );
     // The exit mix, which is the other half of "why is this slow" and the half
     // translation time cannot answer. Printed as a rate as well as a count:
-    // a share says which arm to work on and a rate says whether any of them is
-    // worth working on at all.
     let entries = ENTRIES.load(Relaxed);
     if entries > 0 {
         let per_second = entries as f64 / wall.as_secs_f64().max(f64::EPSILON);
@@ -394,16 +315,8 @@ pub fn report() {
             100.0 * TAIL_IMPORTS.load(Relaxed) as f64 / entries as f64,
         );
         // How many of those entries the run loop never saw. This is the figure
-        // block linking is judged on: an entry that linked paid a compare and an
-        // indirect call, and one that did not paid the run loop.
-        //
-        // Under a **pinned** link ABI there is no such figure, and the reason is
-        // the mechanism working: a link is a branch inside translated code, so
-        // nothing on that path can count without putting a contended store on
-        // it. What `entries` then counts is *chains* — one host entry, however
-        // many regions ran inside it — and saying so is better than printing a
-        // zero that reads as "linking stopped happening". See
-        // [`crate::jit::pinned_link_abi`].
+        // block linking is judged on: an entry that linked paid a compare and
+        // an indirect call, and one that did not paid the run loop.
         match crate::jit::pinned_link_abi() {
             Some(abi) => eprintln!(
                 "rosetta3: stats  entries above are chains, not regions: links are branches \
@@ -453,26 +366,16 @@ pub fn report() {
     }
 }
 
-// -------------------------------------------------------------- snapshots ---
 
 /// Every counter above, read at one moment, for a consumer that is not stderr.
 ///
-/// [`crate::gui`] is the reason this exists: an overlay refreshing a few times a
-/// second cannot parse [`report`]'s prose, and it wants **rates over its own
-/// window** rather than the cumulative totals the report prints — which it gets
-/// by differencing two of these against their [`wall`](Snapshot::wall) clocks.
+/// [`crate::gui`] is the reason this exists:
 ///
-/// The atomics are read one at a time and are being written by every guest
-/// thread, so a snapshot is not an instant: two counters here can be a few
-/// microseconds apart. That is the right trade for the reader — a lock on this
-/// path would be a lock on the reader's side of counters whose whole design is
-/// that the writers never take one.
+/// The atomics are read one at a time and are being written by every guest thread, so a
+/// snapshot is not an instant: two counters here can be a few microseconds apart.
 #[derive(Clone, Default)]
 pub struct Snapshot {
-    /// Whether `ROSETTA3_STATS` was set. When it was not, the four fields the
-    /// exit mix is made of are all zero because *nothing counted them* — not
-    /// because the events did not happen. A reader must say which of the two it
-    /// is looking at rather than drawing an empty chart.
+    /// Whether `ROSETTA3_STATS` was set.
     pub counted: bool,
     /// Time since the driver started translating; the denominator for a rate.
     pub wall: Duration,
@@ -492,10 +395,7 @@ pub struct Snapshot {
     pub window_misses: u64,
     pub tail_imports: u64,
     pub linked: u64,
-    /// The width of the pinned block-link ABI, when there is one. Its presence
-    /// is what makes [`linked`](Snapshot::linked) meaningless — see
-    /// [`crate::jit::pinned_link_abi`] — and a reader has to say so rather than
-    /// draw a zero.
+    /// The width of the pinned block-link ABI, when there is one.
     pub pinned_link_registers: Option<usize>,
     /// Exit kinds with a non-zero count, most frequent first.
     pub exits: Vec<(&'static str, u64)>,

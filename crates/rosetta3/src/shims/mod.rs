@@ -1,48 +1,4 @@
 //! Hand-written implementations for imports that cannot be passed through.
-//!
-//! ## Why variadics need code rather than a mechanism
-//!
-//! Everything else in [`crate::abi`] is one marshaller and a table. A variadic
-//! call cannot join it, and not for want of effort: SysV AMD64 passes variadic
-//! arguments in the *same registers* as fixed ones with `al` holding the count
-//! of vector registers used, while Apple's arm64 ABI passes every variadic
-//! argument on the **stack**. Forwarding one therefore means knowing how many
-//! arguments there are and of what type — which for `printf` means parsing the
-//! format string, and for `fcntl`/`ioctl` means interpreting the flag argument.
-//! There is no general answer, so each family is written out.
-//!
-//! Microlift already demotes a variadic import to a slow VM exit, which is
-//! exactly the interception point these need.
-//!
-//! A variadic whose arity is decided by a *fixed* argument has a second way out,
-//! and `open` took it: the rule moves into a fixed-arity callee of this
-//! runtime's, the table describes that callee, and the call stops being a shim
-//! at all. See [`openat`] for what that requires and why `fcntl` cannot follow.
-//!
-//! ## Rendering rather than relaying
-//!
-//! The `printf` family formats *here*, in Rust, and hands the host only the
-//! finished bytes. Relaying to the host's `vsnprintf` would mean synthesizing
-//! an arm64 `va_list`, whose layout is an implementation detail we would be
-//! guessing at from the outside; rendering makes the conversion specification
-//! the C standard rather than a struct layout. The cost is that the supported
-//! conversions are the ones written in [`printf`], and anything else renders
-//! literally — see that module's scope note.
-//!
-//! ## Scope
-//!
-//! Implemented: `printf`, `fprintf`, `sprintf`, `snprintf`, `ioctl`, `fcntl`,
-//! and `__cxa_atexit` — the last of which is not
-//! variadic and is here for the third reason a shim exists: one of its
-//! arguments describes an *image*, and the guest's answer is not one the host
-//! can be told. See [`atexit`]. Three families live in modules of their own
-//! and are reached from here: [`crate::jmpbuf`], [`crate::unwind`],
-//! [`crate::signal`], and [`crate::objc::dispatch`] — each because what it
-//! stands in for is a stack, a personality routine, a callback crossing back
-//! in, or a message, rather than a calling convention.
-//! Everything else variadic is *classified* by [`crate::abi::table`] and refused by name with
-//! [`AbiError::NoShim`] until someone needs it — a refusal that names the
-//! symbol is a work item; a guess is a bug report from a user.
 
 use microlift::arch::x86_64::context::RegisterContext;
 
@@ -94,21 +50,15 @@ pub fn dispatch(
         "snprintf" => printf::snprintf,
         // The locale-aware pair, which the **vendored libc++** uses for every
         // number it formats so that `std::to_string` does not pick up the
-        // program's locale. See [`printf::snprintf_l`] for why the locale is
-        // checked rather than ignored.
+        // program's locale.
         "snprintf_l" => printf::snprintf_l,
         "sprintf_l" => printf::sprintf_l,
-        // The `_FORTIFY_SOURCE` variants clang emits by default on macOS. They
-        // are the *same call* with a compile-time destination size threaded
-        // through, and a guest built with default flags imports these rather
-        // than the plain names — so leaving them out would mean the shim never
-        // fires for the programs that actually exist.
+        // The `_FORTIFY_SOURCE` variants clang emits by default on macOS.
         "__sprintf_chk" => printf::sprintf_chk,
         "__snprintf_chk" => printf::snprintf_chk,
         // The `v`-prefixed family. Not variadic — each is handed a `va_list`
         // its caller built — and impossible to forward for the mirror-image
-        // reason: the structure is *SysV AMD64's*, and the host's would read it
-        // as arm64's. See [`printf::VaList`].
+        // reason:
         "vprintf" => printf::vprintf,
         "vfprintf" => printf::vfprintf,
         "vsprintf" => printf::vsprintf,
@@ -135,15 +85,10 @@ pub fn dispatch(
         "NSRunAlertPanel" => nslog::run_alert_panel,
         "ioctl" => ioctl::ioctl,
         // Variadic in its declaration and one argument wide in fact, decided by
-        // a command number rather than a format string; see [`openat`]. `open`
-        // and `openat` were here for the same reason and are not any more: their
-        // rule moved into a callee of this runtime's, which makes them ordinary
-        // fixed-arity imports the lifter inlines.
+        // a command number rather than a format string; see [`openat`].
         "fcntl" => openat::fcntl,
         // Not variadic, and here for the same underlying reason: forwarding it
-        // would operate on the *host's* registers and the host's stack. See
-        // [`crate::jmpbuf`], which is a module of its own because a stack is not
-        // a calling convention.
+        // would operate on the *host's* registers and the host's stack.
         _ => {
             if let Some(f) = math::shim_for(name)
                 .or_else(|| intdiv::shim_for(name))
@@ -169,15 +114,7 @@ pub fn dispatch(
             }
             // And the three families that need one thing more than the rest: a
             // guest function pointer the shim itself must substitute, because
-            // the marshaller is not the one placing it. See [`crate::signal`]
-            // for a disposition that also crosses back *in*, [`atexit`] for a
-            // destructor whose third argument is a DSO handle that must not,
-            // and [`zlib`], [`audiounit`] and [`block`] for pointers that are
-            // not arguments at all — they are fields of a structure the guest
-            // passes by address, or by literal. [`pthread`] is the fourth: a
-            // start routine crosses out like any other callback, and what needs
-            // code is which of a guest thread's *two* stacks the guest's
-            // attributes were about.
+            // the marshaller is not the one placing it.
             return crate::signal::shim_for(name)
                 .or_else(|| pthread::shim_for(name))
                 .or_else(|| iokit::shim_for(name))
@@ -196,9 +133,7 @@ pub fn dispatch(
 
 /// Whether [`dispatch`] would handle `symbol`.
 ///
-/// Consulted by [`crate::ImportPolicy`] before promoting an import: a shimmed
-/// symbol must never be inlined by the lifter, because the whole reason it has a
-/// shim is that reaching the host function is wrong.
+/// Consulted by [`crate::ImportPolicy`] before promoting an import:
 pub fn is_shimmed(symbol: &str) -> bool {
     let name = symbol.strip_prefix('_').unwrap_or(symbol);
     if math::shim_for(name).is_some()

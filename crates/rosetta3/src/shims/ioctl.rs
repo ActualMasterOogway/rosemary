@@ -1,33 +1,4 @@
 //! `ioctl`, the variadic whose argument list is one value wide.
-//!
-//! ## Why this one can be shimmed generically and `printf` cannot
-//!
-//! `printf`'s argument list is arbitrarily long and its shape is encoded in a
-//! string, so forwarding one means rendering it. `ioctl` is the opposite:
-//! `int ioctl(int fd, unsigned long request, ...)` takes **at most one**
-//! variadic argument, and the request number says whether it is there and how
-//! big it is. That is not a convention — it is the `_IOC` encoding, which packs
-//! a direction (`IOC_VOID`, `IOC_IN`, `IOC_OUT`) and a payload size into the
-//! request's top bits, and it is why `ioctl` can be forwarded without knowing
-//! which request was asked for.
-//!
-//! So the shim reads the third argument out of the register SysV put it in and
-//! passes it on. When the request is `IOC_VOID` with no payload the guest
-//! passed nothing and the register holds whatever was left there, so a zero is
-//! passed instead of a value the callee might dereference.
-//!
-//! ## What is *not* translated
-//!
-//! The payload. A request whose structure differs between x86-64 and arm64
-//! macOS would need its buffer rewritten in both directions, and this passes
-//! the guest's buffer through untouched. That is correct for the fixed-layout
-//! requests programs actually use — `TIOCGWINSZ`'s `struct winsize` is four
-//! `unsigned short`s on both — and it is the reason this module is a list of
-//! facts rather than a memcpy: if a request ever needs translating, it needs
-//! translating *here*, by number.
-//!
-//! `/bin/ls` is the reason this exists: it asks the terminal how wide it is
-//! before deciding to print in columns.
 
 use microlift::arch::x86_64::context::RegisterContext;
 
@@ -93,9 +64,7 @@ mod tests {
     #[test]
     fn the_shim_answers_what_the_host_answers() {
         // `TIOCGWINSZ` on something that is not a terminal: both sides must
-        // report the same failure. Comparing against the host's own `ioctl` is
-        // the only assertion worth making — the specification of `ioctl` is
-        // what the kernel does.
+        // report the same failure.
         const TIOCGWINSZ: u64 = 0x4008_7468;
         let mut ws = [0u16; 4];
 
@@ -109,9 +78,7 @@ mod tests {
     #[test]
     fn a_void_request_does_not_pass_the_register_on() {
         // `IOC_VOID` takes no third argument, so whatever the guest last left
-        // in `rdx` must not reach the kernel as a pointer. `FIOCLEX` on a
-        // closed descriptor fails either way; what this pins down is that a
-        // wild value in `rdx` cannot make it fault.
+        // in `rdx` must not reach the kernel as a pointer.
         const FIOCLEX: u64 = 0x2000_6601;
         assert_eq!(FIOCLEX & IOC_DIRMASK, IOC_VOID);
         let rc = call(-1, FIOCLEX, 0xdead_beef_dead_beef);

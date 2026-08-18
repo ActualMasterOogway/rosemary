@@ -1,69 +1,4 @@
 //! Realizing the guest's Objective-C classes, in the host's runtime.
-//!
-//! [M6.1](../../../docs/ROADMAP.md) decoded what the guest declares. This runs
-//! it: every class the guest defines is created in the host's `libobjc` through
-//! the public runtime API, with every `IMP` replaced by an
-//! [M3 thunk](crate::thunk) so that the host calls arm64 and lands in the JIT.
-//!
-//! ## Why replay, and not registration
-//!
-//! dyld hands `libobjc` a `mach_header` and the runtime walks the image's
-//! `__objc_*` sections itself. Doing that here would mean private entry points
-//! and a host runtime willing to read metadata in a format
-//! *it never sees* — the two architectures' encodings differ, so an arm64
-//! `libobjc` has no reason to have a working path for an x86-64 image, and
-//! "seems to work" is not a claim this project makes about somebody else's
-//! parser.
-//!
-//! Replaying through `objc_allocateClassPair` and friends asks the runtime to
-//! do only what it already does for every other caller of those functions. What
-//! it costs is that the class the runtime creates is a **different object** from
-//! the `objc_class` in the guest's `__objc_data`, and the guest holds the
-//! latter: `[Greeter alloc]` compiles to
-//! `leaq _OBJC_CLASS_$_Greeter(%rip), %rdi`, a direct reference with no slot to
-//! redirect. Hence [`ObjcRuntime::host_class`] and the substitution at the ABI
-//! boundary — the same shape as [`Callbacks::substitute`], and for the same
-//! reason: a pointer that means one thing on each side of the seam.
-//!
-//! [`Callbacks::substitute`]: crate::abi::Callbacks::substitute
-//!
-//! ## Ivar offsets, and the case that needs no help
-//!
-//! A guest method reads an ivar one of two ways, and which one is a decision
-//! clang made at compile time:
-//!
-//! - **A hardcoded displacement** — `movl 0x8(%rax), %eax` — when the whole
-//!   superclass chain's layout was known, which for a direct `NSObject`
-//!   subclass it always is.
-//! - **A load from `_OBJC_IVAR_$_Class._name`** — when it was not, which is
-//!   what "non-fragile ivars" buys and is what a subclass of a Foundation class
-//!   compiles to.
-//!
-//! The first needs the host runtime to lay the class out exactly as the guest's
-//! compiler assumed, and it does, because both start after the superclass's
-//! instance size and `NSObject` is eight bytes on both architectures. The
-//! second needs the runtime's answer written back into the guest's own
-//! `__objc_ivar` word, which is what [`ObjcRuntime`] does with
-//! [`ObjcIvar::offset_va`] — the fixup dyld would have performed. Both are
-//! checked rather than assumed: `ivar_offsets_match_what_the_guest_compiled`
-//! compares the two.
-//!
-//! [`ObjcIvar::offset_va`]: machish::extensions::objc::ObjcIvar::offset_va
-//!
-//! ## Scope
-//!
-//! Classes, their instance and class methods, ivars, protocols and categories
-//! are registered. Everything a class *cannot* be given faithfully is a
-//! [`Refusal`] naming it, never a partial registration: a class missing one
-//! method is a class that crashes on one message, which is strictly worse than
-//! a class that was never created. Swift classes are refused outright — a Swift
-//! metadata record is not an `objc_class` and this reads it as one.
-//!
-//! Dispatch — `objc_msgSend` and its variants, entered from *guest* code — is
-//! [`dispatch`], which is the other direction and needs everything here first:
-//! a message resolves an `IMP` through the class this module realized, and finds
-//! either one of its thunks (a jump back into the guest) or a host method whose
-//! type encoding says how to call it.
 
 pub mod cxxivars;
 pub mod dispatch;
@@ -82,9 +17,8 @@ use crate::vm::{Vm, VmError};
 
 /// Something the guest declared that could not be reproduced faithfully.
 ///
-/// Each is a named stop with the guest's own name in it, in the register the
-/// rest of this project uses for refusals: a work item that closes, rather than
-/// a silent omission that becomes a crash in somebody's application.
+/// Each is a named stop with the guest's own name in it, in the register the rest of
+/// this project uses for refusals:
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Refusal {
@@ -92,9 +26,8 @@ pub enum Refusal {
     /// is not possible and shadowing it would make which one a name resolves to
     /// depend on link order.
     NameTaken { name: String },
-    /// The superclass is neither a host class nor a guest class this pass
-    /// registered — an unsatisfied weak import, or a class whose own
-    /// registration was refused.
+    /// The superclass is neither a host class nor a guest class this pass registered —
+    /// an unsatisfied weak import, or a class whose own registration was refused.
     SuperclassMissing { name: String, superclass: u64 },
     /// A superclass chain that comes back to itself. Not producible by a
     /// compiler; guarded because this walks a graph read out of guest memory.
@@ -109,18 +42,7 @@ pub enum Refusal {
     /// A method that is installed and works for a *guest* sender, but which the
     /// **host** cannot call faithfully.
     ///
-    /// The distinction is the whole point. A guest→guest send never touches a
-    /// thunk — [`dispatch`] jumps straight to the `IMP` with the guest's own
-    /// registers and stack — so `-[Dog weight]` returning a `double` is
-    /// perfectly callable from the guest and refusing to install it would break
-    /// a working program. What cannot happen is the *host* calling it: a thunk
-    /// carries six integer and eight floating-point registers and an integer
-    /// return, so an aggregate argument, a seventh integer, or a
-    /// floating-point return is read from somewhere nobody wrote.
-    ///
-    /// Listed rather than refused, because the method is genuinely usable on the
-    /// path most of them are used on, and because the list is the work item:
-    /// each entry closes when the thunk is built from the encoding.
+    /// The distinction is the whole point.
     MethodNotHostCallable {
         name: String,
         method: String,
@@ -163,24 +85,12 @@ pub struct Stats {
 }
 
 /// The guest's classes, as the host runtime now knows them.
-///
-/// Held by the [`Vm`] because the maps outlive registration: every message the
-/// guest sends names a class by the address in its own `__objc_data`, and
-/// answering that is a lookup here.
-///
-/// `Clone` because registration is no longer a single event. A `dlopen`ed image
-/// brings classes of its own — SDL3's Cocoa backend is nothing but that — and
-/// the [`Vm`] publishes an extended **copy** rather than mutating the one every
-/// dispatching thread is reading. See [`Vm::register_loaded_objc`].
-///
-/// [`Vm::register_loaded_objc`]: crate::Vm::register_loaded_objc
 #[derive(Clone, Debug, Default)]
 pub struct ObjcRuntime {
     /// Guest `objc_class` VA → the host `Class` standing for it.
     to_host: HashMap<u64, u64>,
-    /// The reverse, so a `Class` coming *back* from the host runtime can be
-    /// handed to the guest as the address the guest already has. Without it a
-    /// guest comparing `[obj class]` against `Greeter` finds them unequal.
+    /// The reverse, so a `Class` coming *back* from the host runtime can be handed to
+    /// the guest as the address the guest already has.
     to_guest: HashMap<u64, u64>,
     /// Guest `protocol_t` VA → host `Protocol *`.
     protocols: HashMap<u64, u64>,
@@ -190,16 +100,10 @@ pub struct ObjcRuntime {
 
 /// The runtime the process has published, for a caller with no [`Vm`] in hand.
 ///
-/// [`Vm::objc`] is the same answer, reached through the VM that owns the
-/// registration pass. This mirror exists for [`fast`], whose whole point is that
-/// it is called from **inlined** guest code: there is no register context, no
-/// exit, and nothing to look a `Vm` up from except thread-local storage, which
-/// is the cost the inlining was meant to remove.
+/// [`Vm::objc`] is the same answer, reached through the VM that owns the registration
+/// pass.
 ///
-/// A process-global is not a new constraint. Class names are global to the
-/// host's `libobjc`, so a process already runs at most one Objective-C guest —
-/// see the note at the top of `tests/objc.rs`. A second `Vm` that registers
-/// classes replaces this pointer, exactly as it replaces its own.
+/// A process-global is not a new constraint.
 static PUBLISHED: AtomicPtr<ObjcRuntime> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Record `rt` as the runtime a context-free caller should ask.
@@ -230,12 +134,11 @@ impl ObjcRuntime {
         self.to_guest.get(&host).copied()
     }
 
-    /// [`ObjcRuntime::host_class`], leaving anything that is not a guest class
-    /// alone.
+    /// [`ObjcRuntime::host_class`], leaving anything that is not a guest class alone.
     ///
-    /// The form the seam actually wants: a pointer crossing out is a class or it
-    /// is not, and an object — which is a host allocation on both sides — must
-    /// pass through untouched. See [`dispatch`].
+    /// The form the seam actually wants: a pointer crossing out is a class or it is
+    /// not, and an object — which is a host allocation on both sides — must pass
+    /// through untouched.
     pub fn host_or(&self, va: u64) -> u64 {
         self.host_class(va).unwrap_or(va)
     }
@@ -245,14 +148,8 @@ impl ObjcRuntime {
         self.guest_class(host).unwrap_or(host)
     }
 
-    /// The host `Protocol *` for a guest `protocol_t` address, leaving anything
-    /// that is not one of this pass's protocols alone.
-    ///
-    /// `host_or` for protocols, and needed for the same reason: `@protocol(Foo)`
-    /// names the guest's own dead `protocol_t`, and [`register_protocol`] built
-    /// a different object out of it. There is no reverse direction because
-    /// nothing compares a `Protocol *` the way a guest compares a `Class` —
-    /// `conformsToProtocol:` is asked, not answered, by the guest.
+    /// The host `Protocol *` for a guest `protocol_t` address, leaving anything that is
+    /// not one of this pass's protocols alone.
     pub fn host_protocol_or(&self, va: u64) -> u64 {
         self.protocols.get(&va).copied().unwrap_or(va)
     }
@@ -273,39 +170,17 @@ impl ObjcRuntime {
 
 /// Register every image's Objective-C metadata with the host runtime.
 ///
-/// Returns `Ok` with refusals inside rather than failing: one class the runtime
-/// would not take should not stop a program whose other forty are fine, and the
-/// refusal names it. A hard `Err` is reserved for a guest whose memory could
-/// not be read, which is not a fact about Objective-C.
+/// Returns `Ok` with refusals inside rather than failing:
 pub fn register(vm: &Vm) -> Result<ObjcRuntime, VmError> {
     let mut rt = ObjcRuntime::default();
     register_images(vm, &mut rt, &images_of(&vm.program.report))?;
     Ok(rt)
 }
 
-/// Realize the metadata of an image the *guest* loaded, into an existing
-/// runtime.
+/// Realize the metadata of an image the *guest* loaded, into an existing runtime.
 ///
-/// The same five passes [`register`] runs, over a `dlopen`ed image's report
-/// instead of the program's. Nothing about them is specific to launch time — the
-/// only thing that was is the assumption that they run once, which is what
-/// [`ObjcRuntime`]'s `Clone` and the [`Vm`]'s published snapshot replace.
-///
-/// **What makes this necessary rather than tidy.** A class's superclass is an
-/// ordinary bind, so a library subclassing `NSView` names the host's own class
-/// and needs nothing from the program; but the guest names the class *it*
-/// defines by the address of the dead `objc_class` in its own `__objc_data`, and
-/// a message to that address is
-/// [refused by name](dispatch) until this pass has created the real class
-/// standing for it. SDL3's Cocoa backend declares eight such classes —
-/// `SDL3Application`, `SDL3AppDelegate`, `Cocoa_WindowListener` among them — and
-/// Terraria's start-up messages the first of them before it opens a window.
-///
-/// Runs **no guest code**, which is what lets [`crate::dyld::open`] put it in
-/// front of the add-image notices. `+load` is separate
-/// ([`call_loaded_load_methods`]) and runs after them, because a `+load`
-/// allocates and a garbage collector that has not been told about this image's
-/// `__DATA` collects what it allocates from.
+/// The same five passes [`register`] runs, over a `dlopen`ed image's report instead of
+/// the program's.
 pub(crate) fn register_loaded(
     vm: &Vm,
     rt: &mut ObjcRuntime,
@@ -315,10 +190,6 @@ pub(crate) fn register_loaded(
 }
 
 /// Every image in `report` carrying Objective-C metadata, dependencies first.
-///
-/// Reversed for the reason [`crate::startup`] reverses initializers: an image
-/// may subclass a class defined by one it links against, and
-/// [`register_class`]'s `by_va` index only covers this pass.
 fn images_of(report: &LinkReport) -> Vec<&ObjcImage> {
     report
         .images
@@ -378,35 +249,15 @@ fn register_images(vm: &Vm, rt: &mut ObjcRuntime, images: &[&ObjcImage]) -> Resu
 
 /// Call every `+load` the guest declares, superclass first.
 ///
-/// The one Objective-C method that runs *because the image was loaded* rather
-/// than because somebody sent a message, and programs use it for exactly that:
-/// registering a class with a factory, installing a swizzle, setting a flag a
-/// later `main` reads. Nothing else calls it, so a runtime that skips it runs a
-/// program whose setup silently did not happen.
-///
-/// Called from [`crate::startup`] between registration and the initializers,
-/// which is dyld's order: `+load` runs as soon as its image's classes are
-/// realized, before any C constructor in the same image.
+/// The one Objective-C method that runs *because the image was loaded* rather than
+/// because somebody sent a message, and programs use it for exactly that:
 ///
 /// ## Order, as far as it is defined
-///
-/// A class's `+load` runs after its superclass's, which is the only ordering
-/// guarantee the language makes and the only one worth reproducing — a subclass
-/// whose superclass has not been prepared is the case programs actually depend
-/// on. Categories come last, as they do on a real launch. Beyond that the order
-/// is this pass's, and a program relying on more than that would be relying on
-/// dyld's link order.
 pub fn call_load_methods(vm: &Vm, rt: &ObjcRuntime) -> Result<usize, VmError> {
     load_images(vm, rt, &images_of(&vm.program.report))
 }
 
 /// Every `+load` in an image the guest loaded.
-///
-/// dyld runs one as soon as the image's classes are realized and before its C
-/// constructors, which for a `dlopen`ed image is a point inside the `dlopen`
-/// call — so this sits between [`register_loaded`] and
-/// [`crate::dyld`]'s initializers, exactly where the launch-time pair sit in
-/// [`crate::startup`].
 pub(crate) fn call_loaded_load_methods(
     vm: &Vm,
     rt: &ObjcRuntime,
@@ -502,10 +353,8 @@ fn memory_error(addr: u64) -> VmError {
 
 /// Create one class, registering its superclass first if that is also a guest's.
 ///
-/// `chain` is the set of classes already being registered further up this
-/// recursion, which is what makes a cycle a named refusal rather than a stack
-/// overflow. The graph is read out of guest memory, so it is not the compiler's
-/// word that it is acyclic.
+/// `chain` is the set of classes already being registered further up this recursion,
+/// which is what makes a cycle a named refusal rather than a stack overflow.
 fn register_class(
     vm: &Vm,
     rt: &mut ObjcRuntime,
@@ -526,9 +375,7 @@ fn register_class(
     let name = class.ro.name.clone();
 
     // A Swift class's `bits` carries one of the two Swift markers, and what it
-    // points at is Swift metadata rather than a `class_ro_t`. M6.1 decodes it
-    // as one regardless, because a decoder that guessed would be worse;
-    // refusing here is the honest end of that.
+    // points at is Swift metadata rather than a `class_ro_t`.
     if class.is_swift() {
         rt.refusals.push(Refusal::SwiftClass { name });
         return None;
@@ -688,9 +535,6 @@ fn register_class(
     }
 
     // C++ ivars, before the pair is registered because this adds two methods.
-    // A class the *compiler* built would have had these called for it by the
-    // runtime; one this runtime built gets neither unless it arranges it. See
-    // [`cxxivars`].
     if let Some(ctor) = cxx_construct {
         // SAFETY: `cls` is a class this pass allocated and has not registered,
         // and `ctor` is the `IMP` it installed for `.cxx_construct` on it.
@@ -709,11 +553,7 @@ fn register_class(
     let host_va = cls as u64;
     rt.to_host.insert(class.va, host_va);
     rt.to_guest.insert(host_va, class.va);
-    // The metaclass is a class the guest names too. `[super description]` inside
-    // a `+` method puts the guest's *metaclass* address in the `objc_super`
-    // struct, and a message send that could not translate it would look a method
-    // up on a structure the host runtime has never realized. It costs one map
-    // entry to make the pair total over both halves of a class.
+    // The metaclass is a class the guest names too.
     if let Some(declared) = &class.meta {
         rt.to_host.insert(declared.va, meta as u64);
         rt.to_guest.insert(meta as u64, declared.va);
@@ -727,9 +567,7 @@ fn register_class(
 
 /// Install one guest method on `target`, with a thunk in place of its `IMP`.
 ///
-/// The thunk is the whole reason host→guest dispatch needs no interception: the
-/// host's own `objc_msgSend` finds this and calls it as native arm64, exactly
-/// as the host's `qsort` calls a guest comparator.
+/// The thunk is the whole reason host→guest dispatch needs no interception:
 fn add_method(
     vm: &Vm,
     target: host::Class,
@@ -742,16 +580,7 @@ fn add_method(
         return Err("the implementation is not a guest address");
     }
     // The encoding is right here, and it is what makes this callback different
-    // from every other one: a bare function pointer says nothing about its own
-    // shape, but a method carries its types in the class metadata. Used, the
-    // trampoline places an `NSRect` argument on the guest's stack where SysV
-    // puts it. Unused — as it was — the guest reads a stack slot nobody wrote,
-    // which is not a fault and not a diagnostic, just a garbage rectangle that
-    // becomes a garbage pointer somewhere further on.
-    //
-    // A shape the typed trampoline still cannot express falls back to the
-    // generic one and is *listed*, because the guest calls it perfectly well
-    // even when the host cannot. See [`Refusal::MethodNotHostCallable`].
+    // from every other one:
     let (imp, carried) = match typed_thunk(vm, m) {
         Ok(imp) => (imp, Ok(())),
         Err(reason) => (
@@ -777,22 +606,14 @@ fn add_method(
 
 /// Build a trampoline from the method's own type encoding.
 ///
-/// `Err` is a `&'static str` in the register the rest of this project uses for
-/// refusals — it names what about *this* method could not be carried, so the
-/// listing says "returns an aggregate by value" rather than "unsupported".
+/// `Err` is a `&'static str` in the register the rest of this project uses for refusals
+/// — it names what about *this* method could not be carried, so the listing says
+/// "returns an aggregate by value" rather than "unsupported".
 ///
-/// What is still refused, and each is a work item rather than an unknown:
-///
-/// - **An aggregate return.** AAPCS64 sends a homogeneous float aggregate back
-///   in `v0`–`v3` while the guest returns through a hidden buffer, and "return
-///   four doubles in four vector registers" is not something Cranelift's return
-///   lowering promises to do the way the ABI specifies. Emitting it and hoping
-///   is precisely the plausible wrong answer this module exists to avoid.
-/// - **A block argument**, which is a structure with a guest function pointer
-///   inside it. Carrying one means building a second thunk for its invoke
-///   function at the offset the block ABI puts it, which is its own work.
-/// - **An aggregate too large for AAPCS64's registers**, which the host copies
-///   to its *own* stack; the trampoline would have to find it there.
+/// - **An aggregate return.** AAPCS64 sends a homogeneous float aggregate back in
+/// `v0`–`v3` while the guest returns through a hidden buffer, and "return four doubles
+/// in four vector registers" is not something Cranelift's return lowering promises to
+/// do the way the ABI specifies.
 fn typed_thunk(vm: &Vm, m: &ObjcMethod) -> Result<u64, &'static str> {
     let signature = encoding::signature(&m.types)?;
     let (returns, params) = signature
@@ -811,11 +632,6 @@ fn typed_thunk(vm: &Vm, m: &ObjcMethod) -> Result<u64, &'static str> {
 }
 
 /// Recreate a protocol the guest declares.
-///
-/// A protocol the *host* already has (`NSCopying`) is reused rather than
-/// recreated: `objc_allocateProtocol` returns null for a name in use, and two
-/// protocols of one name would make `conformsToProtocol:` depend on which was
-/// asked about.
 fn register_protocol(rt: &mut ObjcRuntime, p: &ObjcProtocol) {
     let Some(name) = host::c_string(&p.name) else {
         rt.refusals.push(Refusal::UnrepresentableName {
@@ -867,10 +683,6 @@ fn register_protocol(rt: &mut ObjcRuntime, p: &ObjcProtocol) {
 }
 
 /// Attach a category's methods to its target class.
-///
-/// The target is a bind, so a category on `NSString` names the host's class and
-/// needs no translation at all — `class_addMethod` on it is precisely what the
-/// runtime would have done. Only the `IMP` is ours.
 fn register_category(vm: &Vm, rt: &mut ObjcRuntime, cat: &ObjcCategory) {
     let target = if let Some(&registered) = rt.to_host.get(&cat.class) {
         registered as host::Class
@@ -915,11 +727,8 @@ fn register_category(vm: &Vm, rt: &mut ObjcRuntime, cat: &ObjcCategory) {
 
 /// Write the runtime's ivar offsets back into the guest's own `__objc_ivar`.
 ///
-/// The fixup dyld performs, and the reason M6.1 decoded `offset_va` rather than
-/// just the offset. A guest whose superclass came from another image loads its
-/// ivar offsets from these words; one whose layout was statically known does
-/// not, and for that one this write changes nothing — which is why the test
-/// asserts the two agree rather than that the write happened.
+/// The fixup dyld performs, and the reason `offset_va` is decoded rather than just
+/// the offset.
 fn patch_ivar_offsets(vm: &Vm, rt: &mut ObjcRuntime, class: &ObjcClass) -> Result<(), VmError> {
     let Some(&cls) = rt.to_host.get(&class.va) else {
         return Ok(());
@@ -954,15 +763,6 @@ fn patch_ivar_offsets(vm: &Vm, rt: &mut ObjcRuntime, class: &ObjcClass) -> Resul
 }
 
 /// Turn every `__objc_selrefs` slot from a string pointer into a `SEL`.
-///
-/// Guest code loads a selector straight out of one of these slots
-/// (`movq selref(%rip), %rsi`) and passes it to `objc_msgSend`, so until this
-/// runs the guest is passing a `char *` where the runtime expects a uniqued
-/// selector. On a real launch dyld's `libobjc` does exactly this rewrite.
-///
-/// The slot's *current* contents are a pointer to the name — which is why this
-/// reads before it writes, rather than working from the decoded method lists:
-/// a selector may be referenced without any class in this image implementing it.
 fn unique_selectors(vm: &Vm, image: &ObjcImage) -> Result<usize, VmError> {
     let mut uniqued = 0;
     let mut view = vm.view();
@@ -991,21 +791,12 @@ fn unique_selectors(vm: &Vm, image: &ObjcImage) -> Result<usize, VmError> {
     Ok(uniqued)
 }
 
-/// Unique the selector references of an image the *guest* loaded, and nothing
-/// else about it.
+/// Unique the selector references of an image the *guest* loaded, and nothing else
+/// about it.
 ///
-/// The one pass of [`register_loaded`]'s five that has to happen even when the
-/// rest cannot — when no `Vm` has registered anything yet, or when the image
-/// declares no classes at all.
-///
-/// A selector reference is not metadata the runtime consults; it is a slot
-/// *guest code loads from* (`movq selref(%rip), %rsi`) on its way into
-/// `objc_msgSend`. Until it is rewritten it holds a `char *`, so every message
-/// the image sends arrives with a string pointer where a `SEL` belongs, and the
-/// host runtime answers "that class does not respond to that selector" — for
-/// `+[NSProcessInfo processInfo]`, which of course it does. dyld's `libobjc`
-/// performs exactly this rewrite when it maps an image, so doing it here is
-/// matching the platform rather than working around it.
+/// The one pass of [`register_loaded`]'s five that has to happen even when the rest
+/// cannot — when no `Vm` has registered anything yet, or when the image declares no
+/// classes at all.
 pub(crate) fn unique_loaded_selectors(vm: &Vm, report: &LinkReport) -> Result<usize, VmError> {
     let mut uniqued = 0;
     for image in report.images.iter().filter_map(|i| i.objc.as_ref()) {

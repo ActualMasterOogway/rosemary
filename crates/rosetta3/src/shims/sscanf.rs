@@ -1,10 +1,4 @@
 //! The `sscanf` shim.
-//!
-//! The arguments after the format are all pointers, but they are still laid
-//! out using the guest's SysV variadic convention.  Consequently the parser
-//! deliberately uses [`super::printf::VarArgs`] rather than attempting to call
-//! the host's `vsscanf`: the latter would interpret a guest `va_list` with the
-//! host ABI.
 
 use microlift::arch::x86_64::context::RegisterContext;
 
@@ -148,11 +142,8 @@ fn scanset(format: &[u8], at: &mut usize) -> Option<(bool, [bool; 256])> {
 
 /// Where the conversions' destination pointers are to be read from.
 ///
-/// The same question [`super::printf::VarArgs`] answers for rendering, and for
-/// the same reason: a variadic *call* left its tail in the registers `ctx`
-/// holds, while a `v`-prefixed function was handed a structure describing where
-/// its caller left them. Everything between here and the writes is indifferent
-/// to which.
+/// The same question [`super::printf::VarArgs`] answers for rendering, and for the same
+/// reason:
 #[derive(Clone, Copy)]
 enum Tail {
     /// A variadic call, after this many named integer parameters.
@@ -167,13 +158,6 @@ pub fn sscanf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory
 }
 
 /// `int sscanf_l(const char *input, locale_t loc, const char *format, ...)`
-///
-/// The locale-aware spelling, imported by the **vendored libc++** for
-/// [`super::printf::snprintf_l`]'s reason: `num_get` parses every number
-/// through it so that `std::stoi` does not pick up the program's locale. The
-/// locale is checked rather than ignored, again for that function's reason —
-/// this parser reads a `.` radix point and no digit grouping, which is the C
-/// locale's answer and not every locale's.
 pub fn sscanf_l(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     super::printf::c_locale_or_refuse(symbol, ctx.rsi)?;
     scan(symbol, ctx, mem, ctx.rdi, ctx.rdx, Tail::Registers(3))
@@ -181,10 +165,8 @@ pub fn sscanf_l(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemo
 
 /// `int vsscanf(const char *input, const char *format, va_list ap)`
 ///
-/// Not variadic — its caller built the list — and impossible to forward for the
-/// mirror image of the reason this module exists at all: the structure is
-/// **SysV AMD64's**, three fields describing two register save areas and an
-/// overflow pointer, and the host's `vsscanf` would read it as arm64's.
+/// Not variadic — its caller built the list — and impossible to forward for the mirror
+/// image of the reason this module exists at all:
 pub fn vsscanf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     scan(symbol, ctx, mem, ctx.rdi, ctx.rsi, Tail::List(ctx.rdx))
 }

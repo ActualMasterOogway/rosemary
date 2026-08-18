@@ -1,64 +1,4 @@
 //! Opt-in LLDB support for translated guest code.
-//!
-//! A translated region is machine code in an anonymous mapping with no image,
-//! no symbol and no line table, so a debugger stopped inside one has nothing to
-//! say beyond a hexadecimal `pc`. [`crate::fault`] answers that from *inside*
-//! the process for the crash case. This module answers it for the live case:
-//! it publishes each translation to LLDB as it is compiled, so a frame in
-//! generated code names the guest function it came from and resolves to a line
-//! of x86-64.
-//!
-//! Nothing here is active unless `ROSETTA3_LLDB` is set to a non-zero value.
-//!
-//! # Three things have to be true, and the first one is not ours
-//!
-//! **LLDB has to be listening.** The transport is the GDB JIT interface: a
-//! well-known descriptor ([`__jit_debug_descriptor`]) and a well-known function
-//! ([`__jit_debug_register_code`]) that a debugger breakpoints. LLDB implements
-//! it in `JITLoaderGDB` — and that plugin's `enable` setting defaults to
-//! `default`, which its own enumerator documents as "Enable JIT compilation
-//! interface for all platforms **except macOS**". On an Apple target the loader
-//! is therefore never even constructed: no breakpoint is set, the descriptor is
-//! never read, and a runtime doing everything else perfectly is talking to
-//! nobody. There is no way to switch it on from inside the debuggee, so the
-//! only fix is to make the user aware of it — hence the notice [`enabled`]
-//! prints, and `tools/rosetta3.lldbinit`.
-//!
-//! ```text
-//! (lldb) settings set plugin.jit-loader.gdb.enable on
-//! ```
-//!
-//! **The symfile has to place the code.** LLDB reads the registered object out
-//! of the debuggee's memory and then has to decide where its sections live.
-//! For a Mach-O it uses `updateSectionLoadAddress`, whose rule is one line
-//! long: a section whose file address is greater than a running high-water mark
-//! is loaded *at that file address*, and any other section is dumped at
-//! `symfile_addr + file_offset`. That rule is the entire interface. Give
-//! `__TEXT,__text` the live address of the compiled code and LLDB puts it
-//! exactly there, because the high-water mark starts at zero and a heap address
-//! trivially exceeds it; give the DWARF sections address zero and they fall
-//! into the second case, which is harmless because a debug section's address
-//! means nothing.
-//!
-//! The previous implementation instead emitted an *absolute* symbol
-//! (`SymbolSection::Absolute`) and no `__text` at all. LLDB parsed that object
-//! happily and produced a module whose only symbol had no load address, which
-//! is indistinguishable from having published nothing. The reason it could not
-//! do better is that the `object` crate's Mach-O writer assigns section
-//! addresses itself, from zero — so [`macho`] is written here instead.
-//!
-//! **There has to be somewhere for a line to point.** The generated code is
-//! arm64; the program is x86-64. So each region is disassembled back into a
-//! listing file, one file per guest image, and the DWARF line program maps host
-//! code ranges onto lines of it. Stopping in a translation then shows the guest
-//! instruction, in guest addresses, which is the form the rest of this project
-//! talks in.
-//!
-//! # What it costs
-//!
-//! Everything below runs per compiled region, and a warm game compiles tens of
-//! thousands of them: a disassembly, a DWARF unit, a Mach-O, and a debugger
-//! stop for each. This is a diagnostic, not something to leave on.
 
 mod macho;
 
@@ -76,7 +16,6 @@ use microlift::arch::x86_64::decode::decode_region;
 use microlift::core::srcloc::GuestCodeMap;
 use static_init::dynamic;
 
-// ------------------------------------------------------- the JIT ABI --------
 
 /// The layout LLDB expects, from `JITLoaderGDB.cpp`:
 ///
@@ -126,25 +65,17 @@ pub static mut __jit_debug_descriptor: JitDescriptor = JitDescriptor {
     first_entry: std::ptr::null_mut(),
 };
 
-/// LLDB puts a breakpoint on this symbol and examines the descriptor when it
-/// fires.
+/// LLDB puts a breakpoint on this symbol and examines the descriptor when it fires.
 ///
-/// Do not inline or remove it: its address is the external ABI, and it must be
-/// found by name as `eSymbolTypeCode` — which is why it is `extern "C"` and not
-/// merely `#[no_mangle]`.
+/// Do not inline or remove it:
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub extern "C" fn __jit_debug_register_code() {
     std::hint::black_box(());
 }
 
-// ---------------------------------------------------------- the switch ------
 
 /// Whether this module does anything, and the one place that says so out loud.
-///
-/// The notice is not decoration. A user who sets `ROSETTA3_LLDB=1`, attaches
-/// LLDB and sees nothing has hit the macOS default described in the [module
-/// note](self), and there is no signal anywhere else that would tell them.
 #[inline(always)]
 pub fn enabled() -> bool {
     #[dynamic]
@@ -167,7 +98,6 @@ pub fn enabled() -> bool {
     *ENABLED
 }
 
-// -------------------------------------------------------- registration ------
 
 static REGISTER: Mutex<()> = Mutex::new(());
 
@@ -196,9 +126,7 @@ pub fn register(
 
     // LLDB needs the object to stay readable for as long as the entry is
     // registered, and entries are never withdrawn — a translation lives as long
-    // as the process. So both are leaked, deliberately: the alternative is
-    // owning them here and unregistering on drop, which buys nothing when
-    // nothing is ever dropped.
+    // as the process. So both are leaked, deliberately:
     let object = Box::leak(object.into_boxed_slice());
 
     let entry = Box::leak(Box::new(JitCodeEntry {
@@ -239,7 +167,6 @@ pub fn register(
     }
 }
 
-// ------------------------------------------------------------- symfile ------
 
 /// Build the Mach-O LLDB will read out of this process's memory.
 fn symfile(
@@ -250,11 +177,7 @@ fn symfile(
     bytes: &[u8],
     map: &GuestCodeMap,
 ) -> Option<Vec<u8>> {
-    // The extent of the generated code, as the source locations see it. The
-    // last attributed byte is not quite the end of the function — a prologue
-    // and an epilogue carry no guest origin — but it is the last address this
-    // object can honestly claim, and claiming more would mean overlapping
-    // whatever Cranelift placed next.
+    // The extent of the generated code, as the source locations see it.
     let native_size = map.ranges().iter().map(|r| u64::from(r.end)).max()?;
     if native_size == 0 {
         return None;
@@ -263,10 +186,7 @@ fn symfile(
     let listing = listing(image, guest_start, guest_end, bytes)?;
     let dwarf = dwarf(code, native_size, image, &listing, map)?;
 
-    // `__text` first, and this is not cosmetic: LLDB walks sections in file
-    // order against a high-water mark that starts at zero, and only a section
-    // it reaches while the mark is still low keeps its own address. See the
-    // [module note](self).
+    // `__text` first, and this is not cosmetic:
     let mut sections = vec![macho::Section {
         segname: "__TEXT",
         sectname: "__text",
@@ -314,9 +234,7 @@ fn symfile(
     Some(macho::write(&sections, &syms))
 }
 
-/// The DWARF for one region: a compilation unit covering the generated code,
-/// one subprogram named after the guest region, and a line program mapping host
-/// addresses onto lines of the x86-64 listing.
+/// The DWARF for one region:
 fn dwarf(
     code: u64,
     native_size: u64,
@@ -359,8 +277,7 @@ fn dwarf(
 
     // Rows are emitted in host-address order, which is the order `ranges` is
     // already in. Consecutive ranges resolving to the same line collapse into
-    // one row: a line table row covers everything up to the next row anyway, so
-    // the extra rows would only make the table bigger.
+    // one row:
     let mut previous = None;
     let mut rows = 0usize;
 
@@ -454,15 +371,12 @@ fn dwarf(
     Some(sections)
 }
 
-// ------------------------------------------------------------ listings ------
 
 /// Where a region's guest instructions ended up in its image's listing.
 #[derive(Clone)]
 struct Listed {
     path: Arc<PathBuf>,
-    /// Guest VA → line number. Only instructions that survived into machine
-    /// code are ever looked up, but every decoded one is listed, so reading the
-    /// file around a stop shows the region rather than only its live parts.
+    /// Guest VA → line number.
     lines: Arc<HashMap<u64, u32>>,
 }
 
@@ -476,23 +390,15 @@ struct Listing {
 #[derive(Default)]
 struct Listings {
     images: HashMap<String, Listing>,
-    /// Regions already listed. Each guest thread has its own `CodeCache`, so
-    /// the same region really is compiled more than once; without this, the
-    /// second compile would append a duplicate copy of the same disassembly.
+    /// Regions already listed.
     regions: HashMap<(String, u64), Listed>,
 }
 
 /// One lock over all of it, held across the decode and the append.
-///
-/// That serializes compilation between guest threads for as long as a region is
-/// being listed, which would be indefensible on the hot path and is fine here:
-/// nothing in this module runs unless someone asked for a debugger's view, and
-/// the alternative is two threads interleaving their disassembly into one file.
 static LISTINGS: Mutex<Option<Listings>> = Mutex::new(None);
 
-/// Where listings go: under the temp directory, in a per-process subdirectory
-/// so two runs cannot interleave into one file and so a stale set is obviously
-/// stale.
+/// Where listings go: under the temp directory, in a per-process subdirectory so two
+/// runs cannot interleave into one file and so a stale set is obviously stale.
 fn listing_dir() -> PathBuf {
     std::env::temp_dir()
         .join("rosetta3-lldb")

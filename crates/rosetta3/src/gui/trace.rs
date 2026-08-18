@@ -1,47 +1,4 @@
 //! Driving Apple's system tracer from inside the process it is tracing.
-//!
-//! ## What shift+F6 is for
-//!
-//! The in-process sampler answers *which guest instruction*. It cannot answer
-//! *cycles*, *branch mispredictions* or *cache misses*, and `docs/PROFILING.md`
-//! is explicit that those are what separate "this guest loop is hot because it
-//! runs a lot" from "this guest loop is hot because its translation mispredicts
-//! every iteration" — two findings with nothing in common as work items. Only
-//! Apple's own tooling can see them.
-//!
-//! Until now getting that meant `tools/guest-trace.sh`, which *launches* the
-//! guest under `xctrace`. That works and has one hard limitation: the window
-//! being recorded is decided before the program starts. A game's interesting
-//! seconds are forty minutes in, in one particular scene, and a trace that
-//! started at the launch screen is forty minutes of menu.
-//!
-//! So this **attaches** instead, on a keystroke, to the process it is running
-//! inside. The recording is the seconds someone chose to record.
-//!
-//! ## The map, and why it comes from the same run
-//!
-//! A trace records host addresses in whatever anonymous mappings the JIT got
-//! *this* time. [`crate::profile::write_map`] is the table that says what those
-//! addresses were lifted from, and it is only meaningful for the run that
-//! produced it — so the map is written when the recording stops, beside the
-//! trace, from the process that was recorded. `tools/guest-symbolicate.py` joins
-//! the two afterwards.
-//!
-//! ## What will stop you
-//!
-//! Both of the conditions `docs/PROFILING.md` lists for the launch path apply
-//! here, and one more that is specific to attaching:
-//!
-//! - **The full Xcode**, not the Command Line Tools. `/usr/bin/xctrace` exists
-//!   either way and fails with "requires Xcode" in the second case, so this
-//!   tests it by *running* it rather than by looking for the file.
-//! - **`get-task-allow`** on the driver, or `xctrace` cannot open the task. A
-//!   `cargo`-built binary is linker-signed with no entitlements. See the
-//!   `codesign` line in `docs/PROFILING.md`.
-//! - **Attaching needs the recording to outlive the keystroke**, which means
-//!   `xctrace` is a child process this one does not wait for. It is stopped
-//!   with `SIGINT`, which is what makes `xctrace` finalize the trace rather than
-//!   discard it — killing it any other way leaves an unreadable bundle.
 
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -51,12 +8,8 @@ use super::draw::{Color, Ui, color, duration};
 
 /// The template recorded when nothing else is asked for.
 ///
-/// `Time Profiler` rather than `Processor Trace`, and that is a finding rather
-/// than a preference: a Processor Trace's locations are `(binary UUID, Mach-O
-/// offset)` pairs symbolicated at record time, so every translation folds into
-/// one all-zero sentinel and the map has nothing to join against. Time Profiler
-/// carries `<frame addr="0x…">`, which is an address, which is what a map
-/// resolves. See `docs/PROFILING.md`, "What Processor Trace turned out to be".
+/// `Time Profiler` rather than `Processor Trace`, and that is a finding rather than a
+/// preference:
 const DEFAULT_TEMPLATE: &str = "Time Profiler";
 
 /// A recording in flight.
@@ -129,9 +82,7 @@ fn start(state: &mut State) {
 
     // `--attach` rather than `--launch`: the process to record is this one, and
     // it has been running for as long as it takes to get to the scene worth
-    // recording. Output is inherited so that `xctrace`'s own progress and its
-    // errors — which are the interesting half when this does not work — reach
-    // the same terminal as everything else this runtime prints.
+    // recording.
     let child = Command::new(xctrace)
         .arg("record")
         .arg("--template")
@@ -196,8 +147,7 @@ fn stop(state: &mut State) {
         ),
         // A non-zero exit is where the two well-known refusals land: no
         // `get-task-allow` on the driver, and Processor Trace not enabled in
-        // System Settings. `xctrace`'s own message went to the terminal, which
-        // says which — the panel cannot, so it points at where it is.
+        // System Settings.
         Ok(status) => say(
             state,
             format!("xctrace exited {status}: see its message above, and docs/PROFILING.md"),
@@ -213,10 +163,8 @@ fn stop(state: &mut State) {
 
 /// Where this recording goes.
 ///
-/// The working directory, named for the guest and the process, so that two runs
-/// and two recordings inside one run never collide. `ROSETTA3_GUI_TRACE_DIR`
-/// moves it, for the ordinary case of a game whose working directory is inside
-/// its own read-only bundle.
+/// The working directory, named for the guest and the process, so that two runs and two
+/// recordings inside one run never collide.
 fn output_path() -> String {
     let program = crate::thunk::current()
         .and_then(|vm| vm.program.report.images.first())
@@ -232,10 +180,6 @@ fn output_path() -> String {
 }
 
 /// A working `xctrace`, found by running one.
-///
-/// Presence is not the test. On a machine with the Command Line Tools selected
-/// `/usr/bin/xctrace` exists, is executable, and fails with "requires Xcode" —
-/// the same trap `tools/guest-trace.sh` documents, answered the same way.
 fn xctrace() -> Option<&'static str> {
     static FOUND: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
     *FOUND.get_or_init(|| {
@@ -255,7 +199,6 @@ fn xctrace() -> Option<&'static str> {
     })
 }
 
-// -------------------------------------------------------------- the panel ---
 
 /// The panel's trace section.
 pub fn describe(ui: &mut Ui) {

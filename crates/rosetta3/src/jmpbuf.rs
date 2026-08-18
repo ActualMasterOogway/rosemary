@@ -1,52 +1,4 @@
-//! `setjmp` and `longjmp`, virtualized — the first half of milestone 5.
-//!
-//! ## Why passthrough is not merely unimplemented but wrong
-//!
-//! Every other libSystem entry point in this runtime is forwarded: the host's
-//! `strlen` reads the guest's bytes, the host's `pthread_mutex_lock` locks the
-//! guest's mutex in place, and `errno` needs no work at all because the guest
-//! thread *is* the host thread. That works because those functions operate on
-//! *memory*, and the guest and the host share an address space.
-//!
-//! `setjmp` operates on **registers and a stack**, and there the two sides stop
-//! agreeing. The host's `setjmp` would save arm64 callee-saved registers and the
-//! *host's* stack pointer — the JIT's own arm64 frame, one level below whichever
-//! translation happened to be running. The host's `longjmp` would then restore
-//! that frame, resuming inside the recompiler at a point the guest knows nothing
-//! about, with the guest's own `rsp`, `rbx` and `rip` untouched. It does not
-//! fault; it simply runs the wrong program. So both halves are implemented here,
-//! against the guest's register context, and the pair must be intercepted
-//! together: half of it forwarded would be worse than neither.
-//!
-//! ## The buffer's layout is ours, and that is the point
-//!
-//! A `jmp_buf` is opaque by specification. The guest allocates 148 bytes
-//! (`int[37]` on x86-64 Darwin; a `sigjmp_buf` is 152) and hands their address to
-//! `setjmp` and later to `longjmp` — it never reads a field, because there are no
-//! documented fields to read. Since this runtime implements *both* ends, the
-//! contents are its own format, and nothing here has to reproduce libSystem's.
-//! [`SavedContext`] is therefore what the *guest* needs restored, plus what it
-//! takes to notice a jump that cannot be performed, and it is checked against
-//! [`GUEST_JMP_BUF`] so it can never outgrow the space the guest set aside.
-//!
-//! ## What is saved, and why so little
-//!
-//! SysV AMD64 makes `rbx`, `rbp`, `r12`–`r15` and `rsp` callee-saved; everything
-//! else is caller-saved and therefore already dead across a call by the time
-//! `setjmp` returns. `rip` is the resume point. Nothing else is restored, and the
-//! reason is that a compiler must treat `setjmp` as `returns_twice`: it spills
-//! anything live across the call to the stack rather than trusting a register, so
-//! the callee-saved set plus the stack *is* the observable state. The one real
-//! omission is the x87 control word and `MXCSR`, which the host's `_setjmp` does
-//! save — see the scope note at the bottom.
-//!
-//! ## Interception is exact, not approximate
-//!
-//! Microlift intercepts a registered import **before** the `CALL` executes, so
-//! at the exit `ctx.rsp` is already the value it will have when `setjmp`
-//! returns, and `ctx.rip` is already the return point. Saving the two verbatim is
-//! not an approximation of what the guest would have done — it is what the guest
-//! would have done, one instruction early.
+//! `setjmp` and `longjmp`, virtualized.
 
 use microlift::arch::x86_64::context::RegisterContext;
 
@@ -54,23 +6,15 @@ use crate::abi::{AbiError, GuestMemory, Result};
 
 /// Bytes an x86-64 Darwin guest sets aside for a `jmp_buf` (`int[37]`).
 ///
-/// A `sigjmp_buf` is one `int` longer. The smaller of the two is the budget,
-/// because a record that fits both is the only one that cannot overrun a guest
-/// allocation it was handed the address of.
+/// A `sigjmp_buf` is one `int` longer.
 pub const GUEST_JMP_BUF: usize = 148;
 
 /// The magic word a buffer this runtime wrote begins with.
 ///
-/// Not decoration: a `longjmp` through a buffer that no `setjmp` of ours ever
-/// wrote is a guest that saved its context some other way, and it must be a named
-/// refusal rather than a jump to whatever those bytes happen to say. Uninitialised
-/// stack is the common case and it is *usually* not this value, which is the most
-/// a magic number can promise.
+/// Not decoration:
 const MAGIC: u64 = 0x524f_5345_5454_4133; // "ROSETTA3"
 
 /// A guest context, as `setjmp` records it.
-///
-/// Field order is the serialised order; see [`SavedContext::to_bytes`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SavedContext {
     /// Where the guest resumes: the instruction after the `call _setjmp`.
@@ -83,11 +27,6 @@ pub struct SavedContext {
     pub r14: u64,
     pub r15: u64,
     /// The [`crate::thread::ThreadState`] that saved this, as an integer.
-    ///
-    /// A `jmp_buf` is only meaningful on the thread that filled it — C says so,
-    /// and here it is checkable rather than merely said, because a jump onto
-    /// another thread's guest stack would corrupt a stack that thread is still
-    /// running on.
     pub owner: u64,
     /// Which VM entry was live when this was saved. See [`longjmp_to`].
     pub entry: u64,
@@ -99,9 +38,6 @@ const _: () = assert!(RECORD <= GUEST_JMP_BUF);
 
 impl SavedContext {
     /// Everything `setjmp` must record, taken from a live exit context.
-    ///
-    /// `ctx.rsp` and `ctx.rip` are already the post-return values — the call was
-    /// intercepted before it pushed anything — so this is a copy, not a fix-up.
     pub fn capture(ctx: &RegisterContext, owner: u64, entry: u64) -> Self {
         SavedContext {
             rip: ctx.rip,
@@ -120,8 +56,7 @@ impl SavedContext {
     /// Put the guest back where [`SavedContext::capture`] found it.
     ///
     /// Callee-saved registers and the stack only: see the module note on why the
-    /// caller-saved half is already dead. `rax` is the `longjmp` value and is
-    /// written by the caller, because the C rule about zero belongs there.
+    /// caller-saved half is already dead.
     pub fn restore(&self, ctx: &mut RegisterContext) {
         ctx.rip = self.rip;
         ctx.rsp = self.rsp;
@@ -169,9 +104,8 @@ impl SavedContext {
 
 /// `int setjmp(jmp_buf)` and every spelling of it.
 ///
-/// Returns zero, as a first return must. The second return is [`longjmp`]'s
-/// business, and it does not come back through here at all: it restores `rip`
-/// directly, so the guest resumes at the same instruction with a different `rax`.
+/// Returns zero, as a first return must. The second return is [`longjmp`]'s business,
+/// and it does not come back through here at all:
 pub fn setjmp(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let env = ctx.rdi;
     let Some(state) = crate::thread::current() else {
@@ -191,12 +125,6 @@ pub fn setjmp(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory
 }
 
 /// `void longjmp(jmp_buf, int)`, and every spelling of it.
-///
-/// On success `ctx` has been replaced wholesale and the guest resumes at the
-/// `setjmp` that filled the buffer. Nothing returns from here in the guest's
-/// sense — which is why the runtime is told, through
-/// [`ThreadState::redirect`](crate::thread::ThreadState::redirect), that this
-/// call transferred control rather than returned.
 pub fn longjmp(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let env = ctx.rdi;
     // C: a `longjmp` with zero makes `setjmp` return one, because zero is
@@ -207,9 +135,6 @@ pub fn longjmp(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemor
 }
 
 /// The half of [`longjmp`] that is about the buffer rather than the value.
-///
-/// Separated because a `siglongjmp` and a future signal-frame return want the
-/// same restore with a different story about the value.
 fn longjmp_to(
     symbol: &str,
     env: u64,
@@ -237,10 +162,6 @@ fn longjmp_to(
 
     // Two refusals, and neither is an implementation shortcut that could be
     // dropped by trying harder here.
-    //
-    // A buffer from another thread names a stack that thread is still running
-    // on; jumping onto it would corrupt a live stack rather than fail. C calls
-    // this undefined and this runtime can see it, so it says so.
     if saved.owner != state as *const _ as u64 {
         return Err(AbiError::Refused {
             symbol: symbol.to_string(),
@@ -249,10 +170,7 @@ fn longjmp_to(
     }
     // A buffer from an outer VM entry names a guest frame that is *below* host
     // frames — the host's `qsort`, or `pthread_once`, with a guest callback
-    // above it. Restoring the guest context would leave those host frames on the
-    // host's stack with nothing ever returning through them. Getting there needs
-    // the guest unwinder the rest of M5 is about, so for now it is a refusal
-    // that names the case rather than a jump that half-performs it.
+    // above it.
     if saved.entry != state.entry() {
         return Err(AbiError::Refused {
             symbol: symbol.to_string(),
@@ -274,12 +192,6 @@ fn longjmp_to(
 }
 
 /// `int sigsetjmp(sigjmp_buf, int savemask)`.
-///
-/// The `savemask` argument is accepted and ignored, and the ignoring is the
-/// honest part: saving a signal mask would mean this runtime had one to save.
-/// Signal delivery is not virtualized yet (the other half of M5), so a guest's
-/// mask is the host thread's mask and is neither changed nor restored by
-/// anything here. When signals arrive, this is the function that grows a field.
 pub fn sigsetjmp(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     setjmp(symbol, ctx, mem)
 }
@@ -308,11 +220,6 @@ impl SecondArgument for RegisterContext {
 pub type Shim = fn(&str, &mut RegisterContext, &mut dyn GuestMemory) -> Result<()>;
 
 /// Whether `name` (underscore already stripped) is one of this module's.
-///
-/// Both Darwin spellings of each: `setjmp`/`_setjmp` differ in whether the
-/// *host's* implementation saves the signal mask, which is a distinction about a
-/// mask this runtime does not model — so they are one implementation here, and
-/// the scope note says so rather than the code pretending otherwise.
 pub fn shim_for(name: &str) -> Option<Shim> {
     Some(match name {
         "setjmp" | "_setjmp" => setjmp,
@@ -329,9 +236,7 @@ mod tests {
 
     /// A flat span of guest memory at a known base.
     ///
-    /// Enough for a `jmp_buf` and nothing else, deliberately: these tests are
-    /// about the record and the refusals, and a real address space would put a
-    /// loader between the assertion and what it is asserting.
+    /// Enough for a `jmp_buf` and nothing else, deliberately:
     struct TestMem {
         base: u64,
         bytes: Vec<u8>,
@@ -459,10 +364,7 @@ mod tests {
 
     #[test]
     fn a_longjmp_says_it_transferred_control_rather_than_returned() {
-        // What the tail-call path in [`crate::vm`] consults. A compiler is free
-        // to emit `jmp _longjmp`, and finishing that call the ordinary way —
-        // popping a return address over `rip` — would land in the caller of the
-        // function that jumped, which is the one frame the guest asked to leave.
+        // What the tail-call path in [`crate::vm`] consults.
         let state = on_a_guest_thread();
         let entry = state.enter();
         let mut mem = TestMem::new(0x2_0000_0000);
@@ -490,9 +392,7 @@ mod tests {
     #[test]
     fn a_longjmp_into_an_outer_entry_is_refused_with_its_reason() {
         // The `setjmp` happens in one entry and the `longjmp` in a nested one —
-        // which is what a guest callback called by the host's `qsort` is. The
-        // host frames between them cannot be unwound yet, so this must be a
-        // named refusal rather than a restore that abandons them.
+        // which is what a guest callback called by the host's `qsort` is.
         let state = on_a_guest_thread();
         let outer = state.enter();
         let mut mem = TestMem::new(0x2_0000_0000);

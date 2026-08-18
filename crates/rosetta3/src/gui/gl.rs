@@ -1,74 +1,4 @@
 //! The OpenGL backend: the overlay, drawn just before the guest's buffer swap.
-//!
-//! ## Where it draws
-//!
-//! An OpenGL program ends its frame by flushing the drawable — `CGLFlushDrawable`
-//! underneath, `-[NSOpenGLContext flushBuffer]` on top — and [`super::hook`]
-//! catches both. At that moment the guest's context is current on this thread
-//! and the back buffer holds the finished frame, so the overlay is exactly a few
-//! more triangles into the same buffer before it is shown. No extra context, no
-//! shared surface, no second thread.
-//!
-//! ## What makes this the long backend
-//!
-//! Metal's encoder state dies at `-endEncoding`; OpenGL's state is one global
-//! machine belonging to the guest, and every bit of it the overlay changes it
-//! must change back. A guest that comes back from its swap with `GL_BLEND`
-//! enabled when it left it disabled does not crash — it draws its next frame
-//! wrong, intermittently, in a way that looks like a bug in the guest. So the
-//! save-and-restore here is exhaustive and is the bulk of the file.
-//!
-//! **Reading that state wrongly is just as bad as leaving it changed**, and is
-//! harder to see. Two of them have their own notes because each was a real
-//! failure: [`Unpack`], where a buffer the guest left bound turns the atlas
-//! upload's pointer into an offset, and [`drain`], where an error the overlay
-//! caused is an error the *guest* reports against one of its own calls.
-//!
-//! ## Two OpenGLs
-//!
-//! macOS offers a program either a **2.1 legacy** context or a **3.2+ core**
-//! one, and nothing in between: there is no compatibility profile. They are
-//! different enough to be two code paths rather than one with branches —
-//! fixed-function with client arrays on one side, a shader and a vertex array
-//! object on the other. Which one a context is, is asked of the driver rather
-//! than parsed out of `GL_VERSION` (see [`Profile::of`]), and it cannot be
-//! decided by probing for an entry point, because on macOS every entry point
-//! exists in the framework whether or not the current context will accept it.
-//!
-//! Getting it wrong is not a cosmetic failure: every call on the legacy path is
-//! *illegal* in a core context, so a misdetection is a flood of errors and a
-//! blank overlay.
-//!
-//! Both are needed. A Unity player from before Metal is core 3.2; a cocos2d-x
-//! game — see the roadmap on Geometry Dash — is 2.1.
-//!
-//! **The profile is not the only such question**, and the others cannot be
-//! answered by a version number either. A 2.1 context may or may not accept a
-//! vertex array object, and `dlsym` finding `glBindVertexArray` says nothing
-//! about it — [`vao_usable`] calls the function and reads the error flag,
-//! because that is the only thing that actually answers.
-//!
-//! ## When it does not appear
-//!
-//! `ROSETTA3_GUI_DEBUG=1` prints the context's version, renderer, GLSL version,
-//! which path was chosen and what it can do, once per context. Without it, what
-//! still prints is a **failure** — every step that declines names itself,
-//! because a silent `None` here is indistinguishable from a draw that produced
-//! nothing visible, and telling those apart from outside the process is
-//! impossible.
-//!
-//! An **error** is a diagnostic, printed once, and the overlay carries on: see
-//! [`report`] for why abandoning the context on the first one was the wrong
-//! answer to the right worry. A step that genuinely cannot draw — a shader that
-//! will not build — is what marks a context [`Setup::Failed`].
-//!
-//! ## What is never assumed
-//!
-//! The **size of the surface**. The current viewport is the guest's, and a guest
-//! that renders its world to an offscreen target at half resolution leaves it set
-//! to that. So the size comes from the context's own view, in backing pixels,
-//! and the viewport is only the fallback for a context that has no view — which
-//! is the `CGLFlushDrawable` case in a program that made its context by hand.
 
 use std::collections::HashMap;
 use std::ffi::{CString, c_void};
@@ -78,7 +8,6 @@ use super::draw::{DrawList, Vertex};
 use super::objc::{Id, class, send0, send1};
 use super::sys;
 
-// ------------------------------------------------------------- the tokens ---
 
 // `<OpenGL/gl.h>`, `<OpenGL/gl3.h>`. Spelled out rather than pulled from a
 // binding crate: this is thirty constants against a dependency, and the values
@@ -149,13 +78,8 @@ const MODULATE: i32 = 0x2100;
 const ALL_ATTRIB_BITS: u32 = 0x000f_ffff;
 const CLIENT_ALL_ATTRIB_BITS: u32 = 0xffff_ffff;
 
-// ------------------------------------------------------- the entry points ---
 
 /// Every OpenGL function the overlay calls, resolved once.
-///
-/// `Option` per entry rather than one all-or-nothing load: the legacy half and
-/// the core half are disjoint, and a system that somehow lacked one should still
-/// be able to run the other rather than turning the whole backend off.
 #[allow(non_snake_case)]
 struct Gl {
     GetString: unsafe extern "C" fn(u32) -> *const u8,
@@ -296,7 +220,6 @@ fn gl() -> Option<&'static Gl> {
     .as_ref()
 }
 
-// ---------------------------------------------------------- which OpenGL ----
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Profile {
@@ -310,26 +233,13 @@ enum Profile {
 impl Profile {
     /// Which profile the current context is.
     ///
-    /// **Asked of the driver, not of a string.** The first version of this
-    /// parsed `GL_VERSION`, and getting it wrong is not a cosmetic failure: the
-    /// legacy path's every call — `glPushAttrib`, `glMatrixMode`,
-    /// `glEnableClientState`, `glTexEnvi` — is *illegal* in a core context, so a
-    /// misdetection is a flood of errors and a blank overlay, which is
-    /// [exactly what A Hat in Time showed](../../../docs/ROADMAP.md#m87).
-    ///
-    /// `GL_MAJOR_VERSION` is the definitive test because it was added in 3.0: a
-    /// 2.1 context answers `GL_INVALID_ENUM` and a core one answers its major
-    /// version. That is a fact about the enumerator rather than a guess about
-    /// how a vendor spells its version string.
-    ///
-    /// `None` means no context is current — every entry point returns nothing
-    /// and every call is a no-op — and a caller that draws anyway would be
-    /// issuing commands into nowhere.
+    /// **Asked of the driver, not of a string.** The first version of this parsed
+    /// `GL_VERSION`, and getting it wrong is not a cosmetic failure:
     ///
     /// # Safety
     ///
-    /// Must be called with the guest's context current, and with no error
-    /// pending that the caller wanted to keep: this consumes the error flag.
+    /// Must be called with the guest's context current, and with no error pending that
+    /// the caller wanted to keep: this consumes the error flag.
     unsafe fn of(gl: &Gl) -> Option<Profile> {
         // SAFETY: the caller's obligation. `glGetString(GL_VERSION)` returns a
         // NUL-terminated string owned by the implementation, or null when there
@@ -355,18 +265,8 @@ impl Profile {
 
 /// Whether this context will actually accept a vertex array object call.
 ///
-/// **`gl.BindVertexArray` being `Some` proves nothing**, and this module's own
-/// note says so: on macOS every entry point exists in `OpenGL.framework`
-/// whether or not the current context will accept it. A 2.1 context answers
-/// `glBindVertexArray` with `GL_INVALID_OPERATION` unless it has the extension,
-/// and that is precisely the error A Hat in Time reported — introduced by the
-/// fix for the *previous* bug, which needed the guest's VAO unbound before a
-/// fixed-function draw.
-///
-/// So the probe calls the function it intends to use, rather than asking about
-/// a version or a string. It also puts the binding back: this runs on the first
-/// frame, before [`Saved`] has captured anything, so it is the one place that
-/// has to restore its own disturbance.
+/// **`gl.BindVertexArray` being `Some` proves nothing**, and this module's own note
+/// says so:
 ///
 /// # Safety
 ///
@@ -394,15 +294,6 @@ unsafe fn vao_usable(gl: &Gl) -> bool {
 }
 
 /// Name the call that just failed, once per call site.
-///
-/// **The tool that ends a guessing game.** An error drained at the end of a
-/// frame says only that one of forty calls was rejected, and four rounds of this
-/// overlay have been spent narrowing exactly that kind of statement by
-/// reasoning. Under `ROSETTA3_GUI_DEBUG` every call in the per-frame path checks
-/// itself and says its own name.
-///
-/// Costs a `glGetError` per call when asked for, which is a full pipeline
-/// synchronisation on some drivers — hence debug only, and hence not left on.
 ///
 /// # Safety
 ///
@@ -438,18 +329,8 @@ macro_rules! step {
 
 /// Read the error flag until it is clear, returning the first error found.
 ///
-/// **The overlay must not leave an error behind it**, and that is the whole
-/// reason this exists. OpenGL keeps one error per context until something reads
-/// it, so an error the overlay caused is an error the *guest* finds at its next
-/// check — attributed to whichever call the guest happened to make next. A Hat
-/// in Time reports `OpenGL error in glGenQueries: 1281` for a `glGenQueries`
-/// that is entirely fine; the 1281 was ours.
-///
-/// The cost is stated rather than hidden: draining also discards an error the
-/// guest had set and not yet read. That window is one buffer swap wide, and a
-/// program that checks `glGetError` at all — which is the only kind that can
-/// notice either way — checks it after the call it is about, not across a frame
-/// boundary.
+/// **The overlay must not leave an error behind it**, and that is the whole reason this
+/// exists.
 ///
 /// # Safety
 ///
@@ -516,16 +397,13 @@ const FRAGMENT_SHADER_SOURCE: &str = "#version 150\n\
         Fragment = vec4(vColor.rgb, vColor.a * coverage);\n\
     }\n";
 
-// ------------------------------------------------------------- resources ----
 
 /// How far one context has got.
 ///
-/// **The reason this is a state and not a `bool` is a bug this had.** The first
-/// version retried `build_program` whenever `program` was still zero, which is
-/// every frame after a failure — so one shader that would not compile became
-/// sixty compile attempts a second, each leaving an error flag for the guest to
-/// find. A failure has to be terminal for the context, and it has to say so
-/// once. See [`drain`] for the other half of the same lesson.
+/// **The reason this is a state and not a `bool` is a bug this had.** The first version
+/// retried `build_program` whenever `program` was still zero, which is every frame
+/// after a failure — so one shader that would not compile became sixty compile attempts
+/// a second, each leaving an error flag for the guest to find.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Setup {
     #[default]
@@ -539,9 +417,7 @@ enum Setup {
 #[derive(Default)]
 struct Resources {
     setup: Setup,
-    /// Decided once, from the driver rather than from a version string, and
-    /// kept: it cannot change for the life of a context, and asking per frame
-    /// was a `glGetString` and a parse on the render thread.
+    /// Decided once, from the driver rather than from a version string, and kept:
     profile: Option<Profile>,
     /// Whether this context accepts vertex array object calls at all. Probed,
     /// not assumed — see [`vao_usable`].
@@ -559,20 +435,6 @@ struct Resources {
 static CONTEXTS: Mutex<Option<HashMap<usize, Resources>>> = Mutex::new(None);
 
 /// The context that is actually current on this thread.
-///
-/// **Not the same question as "which context was the flush about".** A texture
-/// name belongs to the context that generated it, and the one this thread will
-/// issue commands into is the *current* one — which a program with a second,
-/// shared context for loading need not have made equal to the one it is
-/// flushing. Keying the overlay's resources by the flush's argument and then
-/// using those names against a different current context would hand
-/// `glTexImage2D` a name that, in this context, belongs to **the guest** — and
-/// respecifying one of a renderer's textures with an 8-bit alpha atlas is
-/// exactly the shape of an engine asserting that a surface's format is not what
-/// it recorded.
-///
-/// So the key is the current context, and the flush's argument is only a
-/// fallback for a system with no `CGLGetCurrentContext` at all.
 fn current_context(fallback: usize) -> usize {
     type GetCurrent = unsafe extern "C" fn() -> *mut c_void;
     // SAFETY: `CGLGetCurrentContext`'s prototype from `<OpenGL/CGLCurrent.h>`;
@@ -588,10 +450,6 @@ fn current_context(fallback: usize) -> usize {
 }
 
 /// Draw the overlay into whatever is current, immediately before the swap.
-///
-/// `context` is what the guest's flush named. The resources are keyed by
-/// whichever context is *current*, which is not always the same thing — see
-/// [`current_context`].
 pub fn present(context: usize) {
     let Some(gl) = gl() else {
         return;
@@ -641,9 +499,7 @@ pub fn present(context: usize) {
     let saved = unsafe { Saved::take(gl, profile, resources.vao_usable) };
     unsafe {
         // Nothing is drawn if the guest's state could not be saved, because
-        // every call below changes state that would then never be put back. An
-        // overlay that skips a frame is a missing panel; one that leaves the
-        // renderer reconfigured is a bug in the game.
+        // every call below changes state that would then never be put back.
         if !saved.can_draw(profile) {
             saved.restore(gl, profile);
             return;
@@ -676,10 +532,6 @@ pub fn present(context: usize) {
 
 /// Say what context the overlay decided it was drawing into.
 ///
-/// Once per context, on stderr, under `ROSETTA3_GUI_GL` — because when the
-/// overlay does not appear the *first* question is which of the two paths it
-/// took, and answering that from the outside is otherwise impossible.
-///
 /// # Safety
 ///
 /// A context must be current.
@@ -706,30 +558,21 @@ unsafe fn announce(gl: &Gl, profile: Profile, vao_usable: bool) {
     };
 }
 
-/// An error the overlay caused. Said once, with enough to act on — and then the
-/// overlay **keeps drawing**.
+/// An error the overlay caused. Said once, with enough to act on — and then the overlay
+/// **keeps drawing**.
 ///
-/// The first version of this abandoned the context, on the reasoning that an
-/// overlay leaving errors in somebody's game is worse than no overlay. That was
-/// wrong, and the way it was wrong is worth keeping: the harm being reasoned
-/// about was the *guest* finding our error and reporting it against one of its
-/// own calls, and [`drain`] already prevents that completely. Disabling on top
-/// of it did nothing for the guest and everything to the overlay — one
-/// `GL_INVALID_OPERATION` from a single misplaced call switched the panel off
-/// after one frame, which at sixty hertz is indistinguishable from never drawing
-/// at all.
+/// The first version of this abandoned the context, on the reasoning that an overlay
+/// leaving errors in somebody's game is worse than no overlay.
 ///
-/// So: an error is a diagnostic, printed once, and not a verdict. A step that
-/// genuinely cannot draw — a shader that will not build — still marks the
-/// context [`Setup::Failed`], because that one is a verdict.
+/// So: an error is a diagnostic, printed once, and not a verdict.
 ///
 /// # Safety
 ///
 /// A context must be current.
 unsafe fn report(gl: &Gl, resources: &Resources, error: u32) {
-    // Once. The previous version printed per frame, which at sixty hertz buries
-    // the log it is trying to inform — the same mistake, in the reporting, that
-    // `Setup::Failed` was invented to stop in the retrying.
+    // Once: at sixty hertz, printing per frame buries the log it is trying to
+    // inform — the same mistake, in the reporting, that `Setup::Failed` stops in
+    // the retrying.
     static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return;
@@ -753,11 +596,9 @@ unsafe fn report(gl: &Gl, resources: &Resources, error: u32) {
 
 /// The drawable's size in pixels.
 ///
-/// The context's own view first, converted to backing pixels so that a retina
-/// window reports 2560×1600 rather than 1280×800 — the overlay is in pixels and
-/// half-size text on a retina display is the bug this avoids. The viewport is
-/// the fallback, and it is a fallback rather than the answer because a guest
-/// mid-frame may have it set to an offscreen target.
+/// The context's own view first, converted to backing pixels so that a retina window
+/// reports 2560×1600 rather than 1280×800 — the overlay is in pixels and half-size text
+/// on a retina display is the bug this avoids.
 fn surface(gl: &Gl) -> Option<(f32, f32)> {
     let ns_context = class("NSOpenGLContext");
     if !ns_context.is_null() {
@@ -795,15 +636,8 @@ fn surface(gl: &Gl) -> Option<(f32, f32)> {
     }
 }
 
-// --------------------------------------------------------- save and restore --
 
 /// The guest's state, as it was before the overlay touched anything.
-///
-/// Under the legacy profile this is almost empty, because `glPushAttrib` and
-/// `glPushClientAttrib` already say everything: the driver saves the state it
-/// knows it has, which is more complete than any list written here could be.
-/// Under the core profile those calls do not exist, so every binding the overlay
-/// changes is read back one at a time.
 #[derive(Default)]
 struct Saved {
     program: i32,
@@ -826,13 +660,10 @@ struct Saved {
     /// Whether the attribute stacks actually accepted the push.
     ///
     /// **A pop that is not matched by a push is a catastrophe, not an error.**
-    /// `glPushAttrib` fails with `GL_STACK_OVERFLOW` when the stack is full —
-    /// it is only sixteen deep, and it belongs to the guest — and if the
-    /// overlay popped anyway it would restore *the guest's own saved state* on
-    /// top of the guest's current state, or underflow. Either one silently
-    /// rewrites the renderer's configuration mid-frame, which is indis­
-    /// tinguishable from the driver going wrong and is the worst failure this
-    /// file could have.
+    /// `glPushAttrib` fails with `GL_STACK_OVERFLOW` when the stack is full — it is
+    /// only sixteen deep, and it belongs to the guest — and if the overlay popped
+    /// anyway it would restore *the guest's own saved state* on top of the guest's
+    /// current state, or underflow.
     pushed: bool,
 }
 
@@ -864,17 +695,8 @@ impl Saved {
             (gl.GetIntegerv)(VIEWPORT, saved.viewport.as_mut_ptr());
             // **Before the profile split, because the attribute stacks do not
             // cover these.** `glPushAttrib` saves the fixed-function machine —
-            // enables, blend, the texture environment — and `glPushClientAttrib`
-            // saves the array pointers. Neither saves the **bound program**, and
-            // neither saves the **vertex array object**: a program object is not
-            // in any attribute group, and VAOs postdate the mechanism entirely.
-            //
-            // That is not a completeness worry, it is the bug A Hat in Time
-            // showed. Its context reports 2.1 with GLSL 1.20 and it has a
-            // program bound when it swaps, so a fixed-function draw issued
-            // underneath it never reaches the fixed-function pipeline at all —
-            // the guest's vertex shader runs on the overlay's vertices instead.
-            // No error, no output, nothing to see.
+            // enables, blend, the texture environment — and
+            // `glPushClientAttrib` saves the array pointers.
             saved.program = integer(gl, CURRENT_PROGRAM);
             if vao_usable {
                 saved.vao = integer(gl, VERTEX_ARRAY_BINDING);
@@ -917,9 +739,6 @@ impl Saved {
     }
 
     /// Whether the overlay may touch this context's state at all.
-    ///
-    /// False only when the legacy path could not push the attribute stacks, in
-    /// which case nothing it changed could be put back. See [`Saved::pushed`].
     fn can_draw(&self, profile: Profile) -> bool {
         profile != Profile::Legacy || self.pushed
     }
@@ -995,25 +814,11 @@ impl Saved {
     }
 }
 
-// ------------------------------------------------------------- the atlas ----
 
 /// Every piece of *pixel unpack* state a texture upload reads, saved.
 ///
-/// **A client pointer is not the only thing `glTexImage2D` can mean.** If the
-/// guest has a buffer bound to `GL_PIXEL_UNPACK_BUFFER` — which is how any
-/// engine that streams textures uploads them, Unreal included — then the last
-/// argument stops being an address and becomes an *offset into that buffer*.
-/// The overlay's atlas pointer is a heap address, so as an offset it is
-/// astronomically out of range: `GL_INVALID_VALUE`, no texture, and a blank
-/// overlay. Nothing about that failure names the buffer binding.
-///
-/// The same applies, more quietly, to the row-length and skip parameters: a
-/// guest that left `GL_UNPACK_ROW_LENGTH` set uploads the atlas sheared, with
-/// no error at all.
-///
-/// So the upload sets all of it and puts it back. This is the shape of every
-/// bug this backend has: OpenGL's state is the guest's, and reading it wrong is
-/// silent.
+/// So the upload sets all of it and puts it back. This is the shape of every bug this
+/// backend has: OpenGL's state is the guest's, and reading it wrong is silent.
 struct Unpack {
     buffer: i32,
     swap_bytes: i32,
@@ -1135,7 +940,6 @@ unsafe fn upload_atlas(gl: &Gl, resources: &mut Resources, list: &DrawList, prof
     resources.atlas_key = key;
 }
 
-// ------------------------------------------------------------ 2.1: legacy ---
 
 /// # Safety
 ///
@@ -1179,13 +983,7 @@ unsafe fn draw_legacy(gl: &Gl, resources: &mut Resources, list: &DrawList) {
         // context can still have a program bound — A Hat in Time's has one, at
         // GLSL 1.20 — and while it is bound the matrices, the texture
         // environment and the client arrays set up here are all inputs to a
-        // pipeline that is switched off. Dropping to program zero is what makes
-        // this the *fixed-function* path it is written as.
-        //
-        // Same for the vertex array object: with one bound, the client array
-        // pointers below would be recorded into the guest's VAO rather than
-        // used. Both are restored by [`Saved`], which saves them outside the
-        // attribute stacks precisely because the stacks do not.
+        // pipeline that is switched off.
         if let Some(use_program) = gl.UseProgram {
             step!(gl, "glUseProgram(0)", use_program(0));
         }
@@ -1299,7 +1097,6 @@ unsafe fn draw_legacy(gl: &Gl, resources: &mut Resources, list: &DrawList) {
     }
 }
 
-// --------------------------------------------------------------- 3.2: core --
 
 /// # Safety
 ///
@@ -1307,9 +1104,6 @@ unsafe fn draw_legacy(gl: &Gl, resources: &mut Resources, list: &DrawList) {
 unsafe fn draw_core(gl: &Gl, resources: &mut Resources, list: &DrawList) {
     // Built once per context, and **once** is the operative word: a failure
     // marks the context [`Setup::Failed`] and nothing is issued into it again.
-    // Retrying was the first version of this and it is what turned one shader
-    // that would not compile into sixty compile attempts a second, each leaving
-    // an error flag for the guest to trip over. See [`Setup`].
     if resources.setup == Setup::Untried {
         // SAFETY: the caller's obligation.
         resources.setup = match unsafe { build_program(gl, resources) } {
@@ -1373,15 +1167,10 @@ unsafe fn draw_core(gl: &Gl, resources: &mut Resources, list: &DrawList) {
 
 /// A shader's or a program's info log.
 ///
-/// One function for both because `glGetShaderInfoLog` and
-/// `glGetProgramInfoLog` have the same shape, as do the `iv` queries that size
-/// them — and a second copy of this would be a second place for the
-/// off-by-one on the NUL to live.
-///
 /// # Safety
 ///
-/// A context must be current and `object` must be of the kind the two function
-/// pointers are for.
+/// A context must be current and `object` must be of the kind the two function pointers
+/// are for.
 unsafe fn info_log(
     get_log: Option<unsafe extern "C" fn(u32, i32, *mut i32, *mut u8)>,
     get_iv: Option<unsafe extern "C" fn(u32, u32, *mut i32)>,
@@ -1475,11 +1264,7 @@ unsafe fn build_program(gl: &Gl, resources: &mut Resources) -> bool {
             if ok != 0 {
                 return shader;
             }
-            // The driver's own account of what was wrong with the source. This
-            // is the difference between "the shaders would not compile" and a
-            // line and column, and it is worth the twenty lines because the
-            // reader has no other way to see a shader compiled inside somebody
-            // else's process.
+            // The driver's own account of what was wrong with the source.
             eprintln!(
                 "rosetta3: gui  the overlay's {} shader would not compile on GLSL {}:\n{}",
                 match kind == VERTEX_SHADER {

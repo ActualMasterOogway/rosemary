@@ -1,86 +1,4 @@
 //! Host→guest calls: a native arm64 trampoline per guest function pointer.
-//!
-//! ## The direction that gets forgotten
-//!
-//! Import interception handles guest→host. The mirror of it is not optional and
-//! has no static call sites to intercept: whenever a guest function pointer is
-//! handed *out* to a host function, the host will later call it as if it were
-//! native arm64 code. `qsort`'s comparator, `atexit`'s handler,
-//! `pthread_create`'s start routine, `sigaction`'s handler, and — later and
-//! pervasively — every Objective-C `IMP`.
-//!
-//! The thunk is also the whole of what a guest *thread* is. Milestone 4 added no
-//! mechanism here: `pthread_create`'s start routine crosses out as an ordinary
-//! callback, and the only thing that makes it a thread rather than a comparator
-//! is that libpthread calls it on a new host thread — where the VM comes from
-//! `PUBLISHED` and the guest stack is made on demand. See [`crate::thread`].
-//!
-//! Passing the raw pointer through cannot work: it is x86-64, and this CPU will
-//! decode it as arm64 and do something arbitrary. So every guest pointer
-//! crossing into a host argument is substituted with a **thunk** — a real arm64
-//! function which, when the host calls it, places the arguments where the
-//! guest's ABI expects them and re-enters the JIT at the guest address.
-//!
-//! ## Why the trampoline is compiled rather than assembled
-//!
-//! The obvious implementation is a hand-written arm64 stub that stashes an
-//! index in a scratch register and jumps to a common entry. It needs assembly
-//! (nothing in Rust can read `x16`), it needs a second stub to spill `x0`–`x7`
-//! and `v0`–`v7` somewhere the Rust side can find them, and it has to be right
-//! about the frame it builds.
-//!
-//! Cranelift is already here, compiling guest code. A thunk is a two-instruction
-//! idea expressed as IR — spill the argument registers to a stack slot, call a
-//! Rust function with the guest address and the two spill areas — and Cranelift
-//! emits the prologue, the register moves, and the frame. No assembly, no
-//! platform-specific frame layout, and the guest address is a constant baked
-//! into each thunk rather than a table index to look up.
-//!
-//! ## What a thunk can carry, and why there are two kinds
-//!
-//! A bare function pointer in an argument slot says nothing about its own
-//! shape, so [`build`] emits the one that is right for every C callback anyone
-//! actually writes: six integer arguments and eight floating-point ones —
-//! exactly what the *guest's* SysV AMD64 convention passes in registers — and
-//! an integer return. That is a real limit, not a convenience. A seventh
-//! integer argument arrives on the host's stack, an aggregate by value may
-//! belong on the *guest's*, and a `double` return comes back in `xmm0` rather
-//! than `rax`. A callback outside the shape is a wrong answer rather than a
-//! diagnostic, which is the one thing this project refuses to produce
-//! elsewhere.
-//!
-//! An **Objective-C method is the exception**, and it is the exception for a
-//! specific reason: its argument and return types are written down in the class
-//! metadata, so the runtime is not guessing. [`build_typed`] uses them.
-//! `-[NSView initWithFrame:]` is the case that forces it — AppKit hands a
-//! callback an `NSRect` in `v0`–`v3` per AAPCS64, SysV AMD64 classifies the same
-//! thirty-two bytes MEMORY, and the guest therefore reads it from its own
-//! **stack** at `0x10(%rbp)`. A trampoline forwarding registers gives it
-//! whatever was already there.
-//!
-//! What makes the typed trampoline expressible at all is the observation the
-//! guest→host direction already rests on, used backwards: an aggregate's *host*
-//! placement is indistinguishable from its leaves'. An HFA of four doubles
-//! occupies the same registers as four `double` arguments, so the trampoline
-//! declares a signature of plain scalars, lets AAPCS64 fill them, and
-//! reassembles the struct in Rust before placing it the way the guest expects.
-//!
-//! Two shapes are still refused by name rather than emitted and hoped for: an
-//! aggregate *return*, because AAPCS64 sends an HFA back in `v0`–`v3` and
-//! Cranelift's return lowering does not promise to do that, and a block
-//! argument, which carries a guest function pointer inside a structure and
-//! needs a second thunk for its invoke function. See [`crate::objc`], which
-//! lists every method in the guest that hits one.
-//!
-//! ## Identity
-//!
-//! One thunk per distinct guest address, kept for the VM's lifetime. Host code
-//! compares function pointers — `atexit` deduplicates, a dispatch table is
-//! checked against a sentinel — so handing out two thunks for one guest
-//! function would answer a question the guest can ask, wrongly. Nothing is ever
-//! freed: a released thunk whose address the host still holds is a wrong call,
-//! and the roadmap's note stands — a leaked thunk is a slow leak, a stale one
-//! is a bug.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -124,13 +42,10 @@ unsafe impl Sync for Thunk {}
 
 /// Every thunk handed out, both ways round.
 ///
-/// The reverse direction is needed because a host function may hand a pointer
-/// *back* — `signal` returns the previous handler, `atexit` hands nothing back
-/// but a dispatch table might — and because the guest can call its own function
-/// pointer after it has been through a thunk. Unwrapping it is not an
-/// optimisation: entering arm64 code that immediately re-enters the JIT would
-/// work, and the guest would see a pointer that is not equal to the one it
-/// passed in.
+/// The reverse direction is needed because a host function may hand a pointer *back* —
+/// `signal` returns the previous handler, `atexit` hands nothing back but a dispatch
+/// table might — and because the guest can call its own function pointer after it has
+/// been through a thunk.
 pub struct ThunkTable {
     by_guest: BTreeMap<u64, Thunk>,
     by_host: BTreeMap<u64, u64>,
@@ -186,33 +101,16 @@ impl Default for ThunkTable {
     }
 }
 
-/// The read-only half of a [`ThunkTable`], published for lookups that must not
-/// take a lock.
+/// The read-only half of a [`ThunkTable`], published for lookups that must not take a
+/// lock.
 ///
 /// ## Why the lookups could not stay behind the mutex
 ///
-/// [`crate::vm::Vm::dispatch_indirect`] asks "is this callee one of ours?" at
-/// **every indirect call** a guest makes, and a C++ program dispatches through
-/// a vtable constantly. Asking behind a mutex means every guest thread queues
-/// up at one lock to be told "no" — which is the answer nearly every time, since
-/// the table holds the handful of pointers that have crossed *outward*, not the
-/// thousands of ordinary function pointers a program calls through.
-///
-/// So this is [`crate::dyld`]'s pattern, applied one layer up: an immutable
-/// snapshot, leaked, published behind an atomic pointer, and rebuilt whole on
-/// the rare occasion a thunk is created. Sorted vectors rather than maps —
-/// the table is small, a binary search over contiguous pairs beats a tree walk,
-/// and building one is a linear pass under a lock nobody is waiting on.
-///
 /// ## Why a miss still has to be checked
 ///
-/// A stale snapshot answers "no" for a thunk another thread created a moment
-/// ago, and unlike a code translation that answer is not merely older — it is
-/// wrong, because unwrapping a thunk is what keeps a guest pointer comparing
-/// equal to itself. So `count` records how many thunks the snapshot was built
-/// from, and a caller that misses compares it against the live count
-/// ([`crate::vm::Vm::thunk_count`]): equal means the miss is authoritative,
-/// and anything else sends that one caller to the lock.
+/// A stale snapshot answers "no" for a thunk another thread created a moment ago, and
+/// unlike a code translation that answer is not merely older — it is wrong, because
+/// unwrapping a thunk is what keeps a guest pointer comparing equal to itself.
 pub struct ThunkView {
     by_guest: Vec<(u64, u64)>,
     by_host: Vec<(u64, u64)>,
@@ -240,36 +138,15 @@ impl ThunkView {
 }
 
 // The VM the current thread is executing, for the duration of a guest call.
-//
-// A thunk is called by *host* code — the host's `qsort`, deep inside a call the
-// runtime made — so there is no argument to pass the VM through. It has to be
-// found. A thread-local is the whole of the mechanism, and it is also the
-// statement of a limit: one VM per thread.
-//
-// M4 did not change that and did not need to. A thread the guest spawned starts
-// inside libpthread, where this is empty and `PUBLISHED` answers instead; from
-// then on `with_current` fills it in for the duration of every guest call on
-// that thread, exactly as on the first one. What is per-thread is the guest
-// *state* — a stack, a stack pointer, a nesting depth — and that lives in
-// `crate::thread` rather than here.
 thread_local! {
     static CURRENT: Cell<*const Vm> = const { Cell::new(std::ptr::null()) };
 }
 
-// The VM to fall back on when the thread-local cannot answer.
-//
-// It exists for exactly one moment: process exit. The guest's `atexit`
-// handlers run from the host's exit list, by which time Rust has already torn
-// this thread's TLS down — reading the thread-local there is not merely empty,
-// it panics. A process-lifetime pointer survives that, which is the whole
-// requirement. `publish` is what sets it, and only a VM that will outlive the
-// process's main function may be published.
+// The VM to fall back on when the thread-local cannot answer. It exists for
+// exactly one moment: process exit.
 static PUBLISHED: AtomicPtr<Vm> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Run `f` with `vm` reachable from a thunk on this thread.
-///
-/// Restores the previous value rather than clearing it, so nesting works: a
-/// callback that itself calls out and back finds the same VM.
 pub(crate) fn with_current<R>(vm: &Vm, f: impl FnOnce() -> R) -> R {
     let previous = CURRENT.with(|c| c.replace(vm as *const Vm));
     let out = f();
@@ -279,20 +156,8 @@ pub(crate) fn with_current<R>(vm: &Vm, f: impl FnOnce() -> R) -> R {
 
 /// Publish `vm` for the rest of the process's life, and for every thread.
 ///
-/// Two things need this, and the second arrived with milestone 4.
-///
-/// The guest's `atexit` handlers are entries in the **host's** exit list — that
-/// is what forwarding `atexit` with a thunk means — so they fire during `exit`,
-/// after `main` has returned and the runtime has stopped driving anything. They
-/// still have to find a VM.
-///
-/// And a thread the guest spawned is started by the *host's* libpthread, which
-/// calls a thunk on a thread that has never been inside [`with_current`]. The
-/// thread-local is empty there by construction, so a guest that calls
-/// `pthread_create` runs its start routines only if a VM has been published.
-///
-/// In both cases the VM has to outlive the call, which is what [`Box::leak`] is
-/// for; nothing is reclaimed at process exit in any case.
+/// And a thread the guest spawned is started by the *host's* libpthread, which calls a
+/// thunk on a thread that has never been inside [`with_current`].
 pub fn publish(vm: &'static Vm) {
     PUBLISHED.store(vm as *const Vm as *mut Vm, Ordering::Release);
 }
@@ -315,12 +180,8 @@ pub(crate) fn current() -> Option<&'static Vm> {
     (!p.is_null()).then(|| unsafe { &*p })
 }
 
-/// A callback whose argument and return types are known, as the emitted
-/// trampoline and the Rust entry both need them.
-///
-/// Leaked and passed to [`typed_entry`] as a constant, because the trampoline is
-/// compiled once per callback and the descriptor has to outlive every call the
-/// host will ever make through it.
+/// A callback whose argument and return types are known, as the emitted trampoline and
+/// the Rust entry both need them.
 pub struct ThunkSignature {
     /// `self` and `_cmd` included: these are the arguments the guest really
     /// takes, in order.
@@ -328,8 +189,7 @@ pub struct ThunkSignature {
     /// `None` for `void`.
     returns: Option<Shape>,
     /// How each parameter arrives from the *host*, flattened to the scalars the
-    /// trampoline's own signature declares. Computed once at build time so the
-    /// entry does not re-derive AAPCS64 placement per call.
+    /// trampoline's own signature declares.
     host_leaves: Vec<Vec<T>>,
 }
 
@@ -339,12 +199,11 @@ type Unsupported = &'static str;
 impl ThunkSignature {
     /// Decide the host-side shape of every argument, or say what stopped it.
     ///
-    /// An aggregate's host placement is indistinguishable from its leaves' — an
-    /// HFA of *n* occupies the same registers as *n* floating-point arguments,
-    /// and a composite of at most sixteen bytes the same as one or two integer
-    /// ones — which is what lets the trampoline declare a signature of plain
-    /// scalars and still be called correctly by AAPCS64. It is the same
-    /// observation the guest→host direction rests on, used backwards.
+    /// An aggregate's host placement is indistinguishable from its leaves' — an HFA of
+    /// *n* occupies the same registers as *n* floating-point arguments, and a composite
+    /// of at most sixteen bytes the same as one or two integer ones — which is what
+    /// lets the trampoline declare a signature of plain scalars and still be called
+    /// correctly by AAPCS64.
     pub fn new(params: Vec<Shape>, returns: Option<Shape>) -> Result<Self, Unsupported> {
         let mut host_leaves = Vec::with_capacity(params.len());
         for shape in &params {
@@ -366,9 +225,8 @@ impl ThunkSignature {
         }
         // An HFA return comes back in `v0`–`v3` while the guest returns through
         // a hidden buffer, and expressing "return four doubles in four vector
-        // registers" is not something Cranelift's return lowering promises to do
-        // the way AAPCS64 specifies. Left refused rather than emitted and hoped
-        // for.
+        // registers" is not something Cranelift's return lowering promises to
+        // do the way AAPCS64 specifies.
         if let Some(Shape::Struct(_)) = &returns {
             return Err("returns an aggregate by value, which a thunk cannot carry");
         }
@@ -389,15 +247,11 @@ impl ThunkSignature {
     }
 }
 
-/// Compile a trampoline that re-enters the guest at `guest_va`, placing
-/// arguments by `signature` rather than by the generic shape.
+/// Compile a trampoline that re-enters the guest at `guest_va`, placing arguments by
+/// `signature` rather than by the generic shape.
 ///
-/// The generic thunk takes six integer and eight floating-point registers
-/// because it has no types to work from. An Objective-C method does have them,
-/// and the difference is not an optimisation: `-[YYGLView initWithFrame:]`
-/// receives an `NSRect` in `v0`–`v3` from AppKit and reads it from its own
-/// *stack*, so a trampoline that only forwards registers hands it whatever was
-/// already there. See [`crate::objc`].
+/// The generic thunk takes six integer and eight floating-point registers because it
+/// has no types to work from.
 pub(crate) fn build_typed(guest_va: u64, signature: ThunkSignature) -> Result<Thunk, VmError> {
     let conv = get_host_calling_conv();
     let fail = |reason: String| VmError::Thunk {
@@ -567,11 +421,9 @@ pub(crate) fn build(guest_va: u64) -> Result<Thunk, VmError> {
 
 /// The guest's argument registers, being filled.
 ///
-/// SysV AMD64 allocates them in declaration order and — the rule that matters
-/// for aggregates — moves the *whole* aggregate to memory if the registers it
-/// needs are not all still free. Half of one in registers and half on the stack
-/// is not a thing the ABI produces, and a marshaller that does it anyway
-/// produces a value that looks plausible.
+/// SysV AMD64 allocates them in declaration order and — the rule that matters for
+/// aggregates — moves the *whole* aggregate to memory if the registers it needs are not
+/// all still free.
 #[derive(Default)]
 struct GuestArgs {
     ints: Vec<u64>,
@@ -636,10 +488,9 @@ impl GuestArgs {
 
 /// Rebuild an aggregate's bytes from the scalars AAPCS64 delivered.
 ///
-/// An HFA arrives as its members, one per `v` register, so each goes back at its
-/// own offset. A small composite arrives as raw words and its bytes are already
-/// the struct's. The two are different reassemblies of the same struct, and
-/// which one applies is [`Aggregate::host_class`]'s answer, not a guess.
+/// An HFA arrives as its members, one per `v` register, so each goes back at its own
+/// offset. A small composite arrives as raw words and its bytes are already the
+/// struct's.
 fn reassemble(agg: &Aggregate, host: HostClass, words: &[u64]) -> Vec<u8> {
     let mut raw = vec![0u8; agg.size];
     match host {
@@ -667,12 +518,8 @@ fn reassemble(agg: &Aggregate, host: HostClass, words: &[u64]) -> Vec<u8> {
     raw
 }
 
-/// What a typed trampoline calls. Not public: its only legitimate caller is code
-/// this module emitted.
-///
-/// `spill` is one word per host-side leaf in declaration order; `out` is eight
-/// bytes for the result. Both are stack slots of the frame calling this, and
-/// both are described by `desc`.
+/// What a typed trampoline calls. Not public: its only legitimate caller is code this
+/// module emitted.
 unsafe extern "C" fn typed_entry(
     guest_va: u64,
     desc: *const ThunkSignature,
@@ -740,9 +587,7 @@ unsafe extern "C" fn typed_entry(
     match result {
         Ok(Ok((rax, xmm0))) => {
             // Which register holds the answer is the *return type's* question,
-            // not something to infer from the value. A guest returning a
-            // `double` left it in `xmm0` and `rax` is whatever the last
-            // instruction happened to leave there.
+            // not something to infer from the value.
             let value = match signature.returns.as_ref().and_then(Shape::scalar) {
                 Some(t) if crate::abi::aggregate::is_fp(t) => xmm0,
                 _ => rax,
@@ -762,37 +607,10 @@ unsafe extern "C" fn typed_entry(
 }
 
 /// The status a callback failure nothing can raise ends the process with.
-///
-/// `EX_SOFTWARE`, which is what it is: an internal error, not a usage error and
-/// not the guest's exit status.
 const CALLBACK_FAILURE_STATUS: i32 = 70;
 
-/// Park a callback's failure — or, when nothing will ever take it, say so and
-/// stop the process.
-///
-/// [`Vm::set_pending`] leaves the error on the thread for the run loop above to
-/// raise, and that is the right answer whenever there *is* one: a guest
-/// comparator that fails inside the host's `qsort` returns into a
-/// [`Vm::run_loop`] frame that takes the error two calls later and reports it
-/// against the guest that caused it.
-///
-/// A callback entered from the host with no guest frame underneath it has no
-/// such frame. CoreVideo calls a display link's thunk on its own thread; this
-/// runtime returns zero; CoreVideo calls it again on the next frame and it
-/// fails identically. The error is parked once, printed once, and from then on
-/// the process is *running* and drawing nothing — which is the worst diagnostic
-/// this project can produce, because it looks like a hang rather than like a
-/// failure. A missing signature reached from a render callback is exactly that
-/// shape, and it is how this was found.
-///
-/// So the outermost guest entry on a thread is fatal. Depth is the whole test:
-/// [`Vm::call_with_stack`] decrements it *before* returning, so zero here means
-/// there is no run loop above this thunk anywhere on this thread.
-///
-/// `_exit` rather than `exit`, for the reason the rest of the runtime avoids
-/// `exit` on a failure path: the guest's `atexit` handlers are translated code,
-/// and re-entering the JIT to run them underneath a failure already reported
-/// turns one diagnostic into two, the second of them misleading.
+/// Park a callback's failure — or, when nothing will ever take it, say so and stop the
+/// process.
 fn park_or_die(vm: &Vm, err: VmError) {
     if crate::thread::current().is_some_and(|s| s.depth.get() > 0) {
         vm.set_pending(err);
@@ -813,18 +631,6 @@ fn park_or_die(vm: &Vm, err: VmError) {
 }
 
 /// Name a failure by the callback it happened in — once.
-///
-/// The entry point matters: a host framework may have any number of this
-/// runtime's thunks installed at once — a view's `initWithFrame:`, a display
-/// link, a signal handler — and "no guest code at 0x0" says nothing about which
-/// of them was running.
-///
-/// **Wrapping an already-named failure again does not.** A callback that fails
-/// inside a callback would otherwise render as "in the guest callback at X: in
-/// the guest callback at X: …", one prefix deeper per level, and a host that
-/// retries turns that into a log measured in gigabytes. The innermost frame is
-/// the one that failed and the one worth naming, so an error that already
-/// carries a callback's name passes through unchanged.
 fn in_callback(guest_va: u64, e: VmError) -> VmError {
     match e {
         already @ VmError::Callback { .. } => already,
@@ -847,32 +653,24 @@ fn report_no_vm(guest_va: u64) {
     });
 }
 
-/// What every thunk calls. Not public: its only legitimate caller is code this
-/// module emitted.
+/// What every thunk calls. Not public: its only legitimate caller is code this module
+/// emitted.
 ///
-/// An error here cannot be returned — the host function in the middle
-/// (`qsort`, say) has no way to express one — so it is parked on the VM and
-/// raised the moment control is back in the runtime. Same for a panic, which
-/// must not cross this boundary at all.
+/// An error here cannot be returned — the host function in the middle (`qsort`, say)
+/// has no way to express one — so it is parked on the VM and raised the moment control
+/// is back in the runtime.
 unsafe extern "C" fn thunk_entry(guest_va: u64, ints: *const u64, floats: *const f64) -> u64 {
     let Some(vm) = current() else {
-        // Nowhere to report this — the caller is `qsort`, or libpthread's thread
-        // start, and neither has an error channel — so it is said out loud once
-        // and the callback returns zero. M3 could leave this silent because the
-        // only way to reach it was to drop a VM that was still handing out
-        // thunks. M4 adds a second way that is easy to hit by accident: a
-        // *spawned* thread has no thread-local to find a VM on and depends
-        // entirely on `publish`, so an embedder that forgets it would otherwise
-        // see every guest thread do nothing at all, successfully.
+        // Nowhere to report this — the caller is `qsort`, or libpthread's
+        // thread start, and neither has an error channel — so it is said out
+        // loud once and the callback returns zero.
         report_no_vm(guest_va);
         return 0;
     };
 
     // The VM that answered may not be the one that built this thunk: a process
     // can run more than one, and the process-lifetime fallback holds whichever
-    // was published last. Entering it at an address it does not own would
-    // execute whatever happens to be there, so a thunk that finds the wrong VM
-    // declines rather than guesses.
+    // was published last.
     if !vm.program.is_guest_address(guest_va) {
         return 0;
     }

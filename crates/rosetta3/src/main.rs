@@ -1,15 +1,4 @@
-//! `rosetta3 run [--slow] <path> [args...]` — run an Intel Mach-O on this
-//! arm64 host.
-//!
-//! `rosetta3 <path>` without `run` inspects instead: it links the image, prints
-//! the transcript, and performs one on-demand lift of the entry point's region
-//! — the evidence that a runtime *could* run it, which is what milestone 1
-//! stopped at and what remains the useful view when something does not work.
-//!
-//! `--audit` additionally runs the whole-section call-target diagnostic. That is
-//! a static analysis and deliberately *not* how the program would execute; see
-//! [`rosetta3::audit`] for why a diagnostic is allowed to look at code the JIT
-//! would never translate up front.
+//! `rosetta3 run [--slow] <path> [args...]` — run an Intel Mach-O on this arm64 host.
 
 use std::collections::BTreeSet;
 use std::process::ExitCode;
@@ -39,18 +28,12 @@ fn run(path: &str, args: Vec<String>, policy: ImportPolicy) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // Deliberately leaked, and published for the rest of the process. The
-    // guest's `atexit` handlers are entries in the host's exit list and run
-    // *after* this function returns; they re-enter the JIT, so the VM has to
-    // still be there. Nothing is reclaimed at process exit in any case.
+    // Deliberately leaked, and published for the rest of the process.
     let vm: &'static Vm = Box::leak(Box::new(vm));
     rosetta3::thunk::publish(vm);
 
     // Objective-C registration happens inside `startup::run`, in dyld's order.
     // It is driven from here first only so that its refusals reach the user:
-    // a class the host runtime would not take is a program that will fail at
-    // its first message with nothing to point at, and the refusal names it.
-    // The call is idempotent, so doing it twice costs a map lookup.
     match vm.register_objc() {
         Ok(objc) => {
             for r in objc.refusals() {
@@ -65,13 +48,7 @@ fn run(path: &str, args: Vec<String>, policy: ImportPolicy) -> ExitCode {
 
     match startup::run(vm) {
         // `exit` rather than returning the status, and the difference is not
-        // cosmetic. Returning goes back through Rust's own start-up shim, which
-        // tears this thread's TLS down *before* calling `exit` — and the guest's
-        // `atexit` handlers, which run from inside `exit`, re-enter the JIT.
-        // Compiling a region needs live thread-locals (Cranelift's own, among
-        // others), so a handler whose code had not yet been translated would
-        // panic instead of running. Exiting from here keeps the runtime intact
-        // for the handlers that are about to use it.
+        // cosmetic.
         Ok(status) => std::process::exit(status),
         // A stop is a diagnostic, not a crash: every `VmError` names the
         // address or the symbol that could not be handled, which is the whole
@@ -91,10 +68,9 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
     if first == "run" {
-        // `--slow` turns every import into a VM exit. It is here rather than
-        // in a test harness because it is the falsifiable half of milestone
-        // 2's claim: fast imports are an optimisation of slow ones, so the
-        // same program run both ways must print the same thing.
+        // `--slow` turns every import into a VM exit. It is here rather than in
+        // a test harness because it is the falsifiable half of the
+        // claim:
         let mut policy = ImportPolicy::FastWhenKnown;
         let mut path = None;
         for arg in args.by_ref() {
@@ -182,7 +158,7 @@ fn main() -> ExitCode {
         }
     }
 
-    // What it would take to *call* each of those imports, which is milestone 2.
+    // What it would take to *call* each of those imports.
     // An unknown symbol is the only entry that matters: it is the one that
     // would become a wrong value in a register rather than a diagnostic.
     let classified = program.classify_imports();
@@ -204,7 +180,7 @@ fn main() -> ExitCode {
 
     // What the guest declares to the Objective-C runtime. Decoded and nothing
     // else — no class is realized, no selector uniqued, no category attached —
-    // so this is a description of the work M6 has to do, printed as a count.
+    // so this is a description of the work left, printed as a count.
     for img in &program.report.images {
         let Some(objc) = &img.objc else { continue };
         let methods: usize = objc.implementations().count();

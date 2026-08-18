@@ -1,9 +1,4 @@
 //! The x86-64 stack probe emitted by Clang for large dynamic frames.
-//!
-//! `___chkstk_darwin` is not an ordinary leaf function in this runtime. The
-//! guest calls it with the allocation size in `rax`, and then subtracts the
-//! returned value from its guest `rsp`. Passing it through would make Apple's
-//! arm64 implementation probe the host stack instead of the guest stack.
 
 use microlift::arch::x86_64::context::RegisterContext;
 
@@ -14,9 +9,8 @@ const GUEST_PAGE: u64 = 4096;
 
 /// Probe the pages the guest will occupy after its following `sub rsp, rax`.
 ///
-/// Reading is sufficient: the guest stack is already mapped, and the purpose
-/// of this routine is to fault before the allocation if it crosses the guard
-/// page. The size remains in `rax`, as the real probe's ABI requires.
+/// Reading is sufficient: the guest stack is already mapped, and the purpose of this
+/// routine is to fault before the allocation if it crosses the guard page.
 pub fn chkstk(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let size = ctx.rax;
     if size == 0 {

@@ -1,39 +1,4 @@
 //! The `printf` family: walking a SysV variadic argument list and rendering it.
-//!
-//! ## Two halves
-//!
-//! [`VarArgs`] answers "where is the next variadic argument", which is a pure
-//! ABI question: SysV AMD64 continues filling the same six integer and eight
-//! vector registers the fixed arguments started on, then spills to the stack in
-//! argument order. At an `ImportedFunctionCall` exit `rsp` is still the
-//! pre-`CALL` value, so a spilled argument is at `rsp + offset` — see
-//! [`crate::abi::marshal`] for why.
-//!
-//! [`render`] answers "what does this conversion print", which is a C question,
-//! and is where the format string is *parsed* rather than relayed. It has to
-//! be: the number and class of the variadic arguments is encoded only in that
-//! string, so nothing can be fetched until it is read.
-//!
-//! ## Scope
-//!
-//! Conversions: `d i u o x X c s p f F e E g G %`, with the `- + space # 0`
-//! flags, `*`-or-literal width and precision, and the `hh h l ll z j t L`
-//! length modifiers, plus BSD's `q`. Everything else is emitted **literally**,
-//! including the
-//! `%`, which is the failure mode that shows up in output rather than in a
-//! register.
-//!
-//! Deliberately not implemented:
-//!
-//! - **`%n`**, which writes through a guest pointer. It is a write primitive
-//!   driven by a format string; refusing is the same call every modern libc
-//!   made.
-//! - **Wide characters** (`%lc`, `%ls`) — treated as their narrow forms, which
-//!   is wrong for non-ASCII and needs the guest's locale to be right.
-//! - **Hex floats** (`%a`) and locale-dependent grouping (`%'d`).
-//!
-//! Rounding follows Rust's formatter, which is round-half-to-even on the
-//! decimal digit — the same rule glibc and Apple's libc use for `%f`.
 
 use microlift::arch::x86_64::context::RegisterContext;
 
@@ -60,23 +25,12 @@ pub struct VarArgs<'a> {
     int: usize,
     fp: usize,
     stack: u64,
-    /// The `va_list` to read from, when the caller was handed one rather than
-    /// leaving its arguments in registers.
+    /// The `va_list` to read from, when the caller was handed one rather than leaving
+    /// its arguments in registers.
     ///
-    /// The two are the same question asked of different storage: a variadic
-    /// *call* leaves its tail in the registers `ctx` holds, and a `v`-prefixed
-    /// function is handed a structure describing where its caller left them.
-    /// Everything above this — the whole of [`render`] — is indifferent to
-    /// which.
+    /// The two are the same question asked of different storage:
     list: Option<VaList>,
     /// How to render `%@`, for a format string that is an `NSString`.
-    ///
-    /// `None` for a C format string, where `%@` is not a conversion at all and
-    /// is emitted literally like any other unrecognised one. Cocoa's own
-    /// `NSLog` is the only caller that supplies it; see
-    /// [`super::nslog`], which is also where the answer comes from —
-    /// `[object description]` is a *message*, and this module knows nothing
-    /// about sending one.
     object: Option<&'a dyn Fn(u64) -> Vec<u8>>,
 }
 
@@ -190,13 +144,8 @@ impl<'a> VarArgs<'a> {
 
 /// The guest's `va_list`, as SysV AMD64 defines it.
 ///
-/// Four fields and a register save area, and the reason a `v`-prefixed function
-/// cannot be forwarded to the host's: this layout is the *guest's*, and arm64's
-/// `va_list` is a bare pointer into a stack area. Handing one to the host's
-/// `vfprintf` makes it read `gp_offset` and `fp_offset` as the first eight bytes
-/// of an argument list — which is not a wrong number, it is a pointer made of
-/// two small integers, and the crash is inside `strlen` several frames away
-/// from anything that names the cause.
+/// Four fields and a register save area, and the reason a `v`-prefixed function cannot
+/// be forwarded to the host's:
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VaList {
     /// Where the structure itself lives, so an updated copy can be written back.
@@ -229,11 +178,8 @@ impl VaList {
     /// Store the walked state back where the guest keeps it.
     ///
     /// What the host's own `vsnprintf` does: the standard says a `va_list` is
-    /// indeterminate after being passed to one of these, and "indeterminate"
-    /// in practice means "advanced". A guest that copies with `va_copy` before
-    /// each call is unaffected either way; one that does not is relying on
-    /// undefined behaviour, and this at least makes it behave the way it would
-    /// have natively.
+    /// indeterminate after being passed to one of these, and "indeterminate" in
+    /// practice means "advanced".
     pub fn write_back(&self, symbol: &str, mem: &mut dyn GuestMemory) -> Result<()> {
         let head = u64::from(self.gp_offset) | (u64::from(self.fp_offset) << 32);
         mem.write(self.addr, &head.to_le_bytes())
@@ -265,10 +211,7 @@ struct Spec {
 
 /// Format `fmt` against `args`, exactly as C would print it.
 ///
-/// Total on arbitrary bytes: an unterminated or nonsensical conversion is
-/// copied out literally rather than panicking or consuming an argument, because
-/// a format string is guest data and a malformed one must not be able to end
-/// the process.
+/// Total on arbitrary bytes:
 pub fn render(fmt: &[u8], args: &mut VarArgs<'_>) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(fmt.len());
     let mut i = 0usize;
@@ -349,10 +292,6 @@ pub fn render(fmt: &[u8], args: &mut VarArgs<'_>) -> Result<Vec<u8>> {
                 }
                 // `z`, `j`, `t` are all 64-bit here, and so is BSD's `q`
                 // ("quad") — which is not a historical curiosity to skip:
-                // `/bin/ls` prints its `total` line with `%qu`, and a shim that
-                // does not know the modifier emits the conversion literally
-                // rather than a number. `L` only qualifies a `long double`,
-                // which arrives promoted like any other double.
                 Some(b'z') | Some(b'j') | Some(b't') | Some(b'q') => {
                     len = Len::Size;
                     i += 1;
@@ -405,8 +344,7 @@ pub fn render(fmt: &[u8], args: &mut VarArgs<'_>) -> Result<Vec<u8>> {
             }
             // `%lc` and `%C` are a `wint_t` — a whole `wchar_t` rather than a
             // byte — and come out as UTF-8 because that is what this renderer's
-            // output is. A value that is not a scalar value prints nothing,
-            // which is what Apple's libc does with an invalid wide character.
+            // output is.
             b'C' | b'c' if len == Len::Long || conv == b'C' => {
                 let v = args.next_int()? as u32;
                 let body = char::from_u32(v).map(String::from).unwrap_or_default();
@@ -457,9 +395,7 @@ pub fn render(fmt: &[u8], args: &mut VarArgs<'_>) -> Result<Vec<u8>> {
             }
             // Everything unhandled — `%n` included — comes out verbatim and
             // fetches no argument of its own, so the rest of the format still
-            // lines up with the rest of the arguments. (A `*` width earlier in
-            // the same conversion has already consumed one, which is what C
-            // would have done too.)
+            // lines up with the rest of the arguments.
             _ => out.extend_from_slice(&fmt[start..i]),
         }
     }
@@ -478,14 +414,7 @@ fn read_string(args: &VarArgs<'_>, ptr: u64) -> Result<Vec<u8>> {
 /// Follow a `%ls` pointer into guest memory.
 ///
 /// A `wchar_t` is four bytes on both sides of this seam, so the units need no
-/// conversion — only assembling, and bounding. The bound is [`MAX_WIDE`]'s and
-/// exists for [`crate::abi::MAX_CSTR`]'s reason: the pointer is guest data, and
-/// an unterminated buffer must cost a truncated field rather than a walk to the
-/// end of the address space.
-///
-/// A unit that is not a Unicode scalar value becomes `U+FFFD` rather than
-/// ending the string. That keeps a mis-encoded name printable, which is the
-/// point of printing it.
+/// conversion — only assembling, and bounding.
 fn read_wide_string(args: &VarArgs<'_>, ptr: u64) -> Result<Vec<char>> {
     if ptr == 0 {
         return Ok("(null)".chars().collect());
@@ -507,22 +436,12 @@ fn read_wide_string(args: &VarArgs<'_>, ptr: u64) -> Result<Vec<char>> {
 const MAX_WIDE: usize = 64 * 1024;
 
 /// A wide format string, as the bytes [`render`] formats.
-///
-/// Every conversion specifier C defines is ASCII, so a wide format's *syntax*
-/// survives the encoding unchanged and only its literal text needs converting.
-/// UTF-8 is the encoding because that is what this renderer's output is —
-/// [`wide_from_utf8`] puts it back.
 fn wide_format(args: &VarArgs<'_>, ptr: u64) -> Result<Vec<u8>> {
     let chars = read_wide_string(args, ptr)?;
     Ok(chars.into_iter().collect::<String>().into_bytes())
 }
 
 /// A rendering, back as `wchar_t` units.
-///
-/// Lossy, and the loss is a guest `%s` whose bytes were not UTF-8 — the
-/// renderer's output is UTF-8 wherever it came from the format and raw guest
-/// bytes wherever it came from a narrow string conversion. `U+FFFD` in a
-/// formatted name is a visible defect; refusing to format is a stopped program.
 fn wide_from_utf8(bytes: &[u8]) -> Vec<u32> {
     String::from_utf8_lossy(bytes)
         .chars()
@@ -548,9 +467,8 @@ fn zero_extend(raw: u64, len: Len) -> u64 {
     }
 }
 
-/// As [`digits`], except that zero with an explicit precision of zero prints
-/// *nothing* — the one place C's integer precision changes the digits rather
-/// than padding them.
+/// As [`digits`], except that zero with an explicit precision of zero prints *nothing*
+/// — the one place C's integer precision changes the digits rather than padding them.
 fn digits_with_precision(v: u64, base: u64, upper: bool, prec: Option<usize>) -> Vec<u8> {
     if v == 0 && prec == Some(0) {
         return Vec::new();
@@ -577,9 +495,6 @@ fn digits(mut v: u64, base: u64, upper: bool) -> Vec<u8> {
 }
 
 /// Render a float's magnitude, C-style, returning `(body, negative)`.
-///
-/// The sign is split out so [`pad_number`] can place it before any zero
-/// padding, which is where C puts it.
 fn format_float(v: f64, conv: u8, spec: &Spec) -> (String, bool) {
     let upper = conv.is_ascii_uppercase();
     let neg = v.is_sign_negative();
@@ -637,10 +552,6 @@ fn exponential(mag: f64, prec: usize, upper: bool) -> String {
 }
 
 /// The base-10 exponent of `mag` rounded to `sig` significant digits.
-///
-/// Computed from the printed form rather than from `log10`, because `log10` is
-/// off by one at exact powers of ten often enough to matter and the rounding
-/// has to agree with what is printed anyway.
 fn decimal_exponent(mag: f64, sig: usize) -> i32 {
     if mag == 0.0 || !mag.is_finite() {
         return 0;
@@ -669,11 +580,6 @@ fn strip_trailing_zeros(s: &str) -> String {
 }
 
 /// Place sign, prefix, precision zeros and field padding around a number.
-///
-/// `min_digits` is an *integer* conversion's precision, which is a minimum
-/// digit count and suppresses the `0` flag. A float's precision counts decimal
-/// places instead and does not suppress it, so it passes `None` — the two rules
-/// look alike and are not, and conflating them zero-pads `%012.3f` with spaces.
 fn pad_number(
     out: &mut Vec<u8>,
     body: &[u8],
@@ -725,11 +631,6 @@ fn pad_bytes(out: &mut Vec<u8>, body: &[u8], spec: &Spec) {
 }
 
 /// The host stream a guest `printf` writes to.
-///
-/// The guest's `stdout` *is* the host's: under high-level emulation the guest's
-/// `___stdoutp` import resolved to the host's own, so writing through the host's
-/// stdio keeps the guest's output interleaved correctly with anything the guest
-/// wrote through a passed-through `fwrite`.
 fn host_stdout() -> *mut libc::FILE {
     // Declared here rather than taken from the `libc` crate, which does not
     // export it: on macOS the `stdout` macro expands to this global, and it is
@@ -773,15 +674,6 @@ pub fn printf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory
 }
 
 /// `void malloc_printf(const char *fmt, ...)`
-///
-/// libsystem_malloc's own diagnostic printer, which the interposing mimalloc
-/// calls when it wants to complain in the allocator's voice. It is [`printf`]
-/// with two differences that both matter to a caller: it writes to **stderr**
-/// rather than stdout, and it returns nothing — so nothing is placed in `eax`,
-/// where `printf` would leave a length.
-///
-/// Unbuffered for the reason the real one is: a program printing an allocator
-/// diagnostic is usually about to stop.
 pub fn malloc_printf(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -812,9 +704,6 @@ pub fn sprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemor
 }
 
 /// `int snprintf(char *dst, size_t n, const char *fmt, ...)`
-///
-/// Returns the length the *whole* rendering would have had, per C — which is
-/// why the truncation happens after the render and not during it.
 pub fn snprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let out = format_from(symbol, ctx, &*mem, ctx.rdx, 3)?;
     store_bounded(symbol, ctx, mem, ctx.rdi, ctx.rsi, out)
@@ -822,22 +711,13 @@ pub fn snprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemo
 
 /// `int snprintf_l(char *dst, size_t n, locale_t loc, const char *fmt, ...)`
 ///
-/// The locale-aware form, and it is here because the **vendored libc++** uses
-/// it rather than because a game does: Starbound imports no `_l` function at
-/// all, and libc++ formats every number through this one so that
-/// `std::to_string` and `num_put` do not pick up whatever locale the program
-/// happens to have installed.
-///
 /// ## The locale is checked rather than ignored
 ///
-/// This shim renders in Rust, which produces **C-locale** output — `.` for the
-/// radix point, no digit grouping. That is the right answer for the caller
-/// libc++ is, and the wrong one for a program that passes a locale where it is
-/// not: a German locale would want `1,5` and would silently get `1.5`.
+/// This shim renders in Rust, which produces **C-locale** output — `.` for the radix
+/// point, no digit grouping.
 ///
-/// So the locale is asked, through the host's own `querylocale`, and anything
-/// that is not `C` or `POSIX` is refused by name. A refusal is a work item; a
-/// plausible wrong number in a save file is not.
+/// So the locale is asked, through the host's own `querylocale`, and anything that is
+/// not `C` or `POSIX` is refused by name.
 pub fn snprintf_l(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -861,10 +741,6 @@ pub fn sprintf_l(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMem
 }
 
 /// Refuse unless `loc` formats numbers the way this renderer does.
-///
-/// `LC_NUMERIC` is the category that decides the radix point and the grouping,
-/// which is the whole of what a `printf` conversion reads a locale for. A null
-/// handle is the global locale, which `querylocale` answers for directly.
 pub(crate) fn c_locale_or_refuse(symbol: &str, loc: u64) -> Result<()> {
     let name = unsafe { libc::querylocale(libc::LC_NUMERIC_MASK, loc as _) };
     // SAFETY: `querylocale` returns a NUL-terminated name owned by libc, or
@@ -884,11 +760,7 @@ pub(crate) fn c_locale_or_refuse(symbol: &str, loc: u64) -> Result<()> {
 
 /// `int __sprintf_chk(char *dst, int flag, size_t dstlen, const char *fmt, ...)`
 ///
-/// The fortified form. `dstlen` is the compile-time size of the destination;
-/// the real implementation aborts on overflow, and so does this — but by
-/// truncating and reporting the would-be length rather than by calling
-/// `__chk_fail`, because the guest's abort path is guest code we cannot yet
-/// enter. A truncated string is a visible bug; a silent overflow is not.
+/// The fortified form.
 pub fn sprintf_chk(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -909,18 +781,10 @@ pub fn snprintf_chk(
     store_bounded(symbol, ctx, mem, ctx.rdi, limit, out)
 }
 
-/// Write `out` to `dst`, truncated to `limit` bytes including the terminator,
-/// and leave the length the whole rendering would have had in `rax`.
-/// The `v`-prefixed family: the same rendering, from a `va_list` the caller
-/// already built.
+/// Write `out` to `dst`, truncated to `limit` bytes including the terminator, and leave
+/// the length the whole rendering would have had in `rax`. The `v`-prefixed family:
 ///
-/// Not forwardable, and the reason is worth stating where the code is: the
-/// structure at the guest's pointer is *SysV AMD64's* `va_list` — two offsets, a
-/// spill pointer and a register save area — while arm64's is a bare pointer into
-/// a stack area. The host's `vfprintf` would read the two offsets as the first
-/// eight bytes of something and follow them as an address. That is not a wrong
-/// number returned, it is a fault inside `strlen` with nothing on the stack
-/// naming the cause, which is how this was found.
+/// Not forwardable, and the reason is worth stating where the code is:
 fn format_from_list(
     symbol: &str,
     ctx: &RegisterContext,
@@ -969,21 +833,10 @@ pub fn vsprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemo
 
 /// `int vswprintf(wchar_t *ws, size_t n, const wchar_t *fmt, va_list ap)`
 ///
-/// The wide form, and the one Unreal Engine 3 formats *everything* through:
-/// `appGetVarArgs` is a `vswprintf` call, and every `FString` built from a
-/// format — every log line, every `appErrorf`, every UnrealScript `string`
-/// concatenation — arrives here.
-///
 /// ## Why the return value is not `snprintf`'s
 ///
 /// `swprintf` and `snprintf` disagree about truncation, and the difference is
-/// load-bearing rather than pedantic. `snprintf` reports the length the whole
-/// rendering *would* have had; `swprintf` reports **-1** and leaves the buffer's
-/// contents unspecified. `appGetVarArgs` is written against that: it asks with a
-/// 128-character buffer, and on -1 doubles and asks again until the answer is
-/// not -1. Reporting the would-be length instead ends that loop on the first
-/// pass with a truncated string, and every long message in the game silently
-/// loses its tail.
+/// load-bearing rather than pedantic.
 pub fn vswprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let (fmt, list_ptr) = (ctx.rdx, ctx.rcx);
     let (out, walked) = {
@@ -1019,9 +872,8 @@ pub fn vsnprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMem
     store_bounded(symbol, ctx, mem, ctx.rdi, ctx.rsi, out)
 }
 
-/// `__vsnprintf_chk(buf, maxlen, flag, os, fmt, ap)` — the fortified form, whose
-/// fourth argument is the destination's compile-time size. The tighter of the
-/// two bounds wins, as it does for `__snprintf_chk`.
+/// `__vsnprintf_chk(buf, maxlen, flag, os, fmt, ap)` — the fortified form, whose fourth
+/// argument is the destination's compile-time size.
 pub fn vsnprintf_chk(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -1033,10 +885,6 @@ pub fn vsnprintf_chk(
 }
 
 /// `vasprintf(char **ret, const char *fmt, va_list ap)`.
-///
-/// The buffer is the *host's* `malloc`, which is the guest's too: under
-/// high-level emulation a guest `free` reaches the same allocator, so a string
-/// handed back here is one the guest may release exactly as it would natively.
 pub fn vasprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let out = format_from_list(symbol, ctx, mem, ctx.rsi, ctx.rdx)?;
     // SAFETY: an ordinary allocation of a known size, checked for null before

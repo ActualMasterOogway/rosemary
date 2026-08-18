@@ -1,44 +1,12 @@
 //! The draw list, and the two-hundred-line immediate-mode UI built on it.
-//!
-//! ## One buffer, one texture, one pipeline
-//!
-//! Everything the overlay draws is a textured quad: a filled rectangle samples
-//! the atlas's opaque texel, a character samples its glyph's cell. So a frame is
-//! **one vertex buffer and one draw call**, and the backends in
-//! [`super::metal`] and [`super::gl`] have nothing to decide — no batching, no
-//! state changes between primitives, no ordering rules beyond the order the
-//! quads were appended in.
-//!
-//! That is worth more here than it would be in a general UI toolkit. The
-//! overlay draws inside the guest's own frame, on the guest's own device, with
-//! the guest's own state around it, and every piece of state the overlay touches
-//! is a piece it has to put back. One pipeline is the smallest possible answer
-//! to that.
-//!
-//! ## Coordinates
-//!
-//! Pixels, with the origin at the **top left**, which is the direction the text
-//! flows and the direction a panel grows. The projection to clip space is the
-//! backends' problem and both do it the same way, in the vertex shader, so
-//! nothing here has to know which graphics API is underneath.
-//!
-//! ## Why immediate mode
-//!
-//! The panel's contents change completely between one frame and the next — a
-//! ranked list reorders, a counter's digit count changes, a section appears when
-//! a trace starts. Retaining a widget tree to describe that would be a tree
-//! rebuilt every frame. [`Ui`] is a cursor and a stack of columns, the panel
-//! code reads top to bottom, and the whole of it is regenerated per frame at a
-//! cost of a few thousand vertices.
 
 use super::font::Atlas;
 
 /// One vertex, in the layout both backends declare to their shaders.
 ///
-/// `repr(C, align(16))` because the Metal side receives this as a `device`
-/// array of a struct whose `float4` member forces sixteen-byte alignment; the
-/// OpenGL side reads the same bytes through `glVertexAttribPointer` and does not
-/// care. Aligning to the stricter of the two is what lets one buffer serve both.
+/// `repr(C, align(16))` because the Metal side receives this as a `device` array of a
+/// struct whose `float4` member forces sixteen-byte alignment; the OpenGL side reads
+/// the same bytes through `glVertexAttribPointer` and does not care.
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Default)]
 pub struct Vertex {
@@ -50,9 +18,8 @@ pub struct Vertex {
 /// A colour, straight (not premultiplied) alpha.
 pub type Color = [f32; 4];
 
-/// The palette. Deliberately dark and low-contrast except where a number is
-/// meant to be read: an overlay that is easier to look at than the game behind
-/// it is an overlay that gets left on by accident during a measurement.
+/// The palette. Deliberately dark and low-contrast except where a number is meant to be
+/// read:
 pub mod color {
     use super::Color;
 
@@ -122,18 +89,8 @@ impl DrawList {
 
     /// Restrict everything drawn from now on to `rect`, as `(x0, y0, x1, y1)`.
     ///
-    /// **Clipped here rather than with a scissor rectangle**, and the reason is
-    /// the same one that made the draw list one pipeline: a scissor is *state*,
-    /// and state on the OpenGL side is state to save, set and put back on a
-    /// global machine belonging to the guest — which is where every bug in
-    /// [`super::gl`] has come from. Clipping the geometry costs a few
-    /// comparisons per quad, needs nothing of either backend, and is the same
-    /// code on both.
-    ///
-    /// A quad is axis-aligned and its texture coordinates are linear in its
-    /// position, so trimming an edge is a proportional trim of the matching
-    /// texture coordinate. That is exact, not an approximation — a glyph clipped
-    /// halfway down shows its top half, not a squashed whole.
+    /// **Clipped here rather than with a scissor rectangle**, and the reason is the
+    /// same one that made the draw list one pipeline:
     pub fn clip(&mut self, rect: (f32, f32, f32, f32)) {
         self.clip = rect;
     }
@@ -215,11 +172,6 @@ impl DrawList {
     }
 
     /// A string, with its top-left corner at `(x, y)`. Returns the width drawn.
-    ///
-    /// Bytes rather than characters: the panel prints addresses, percentages
-    /// and symbol names, and a symbol name from a stripped library can contain
-    /// anything at all. Treating it as bytes means a non-ASCII one draws as a
-    /// mark of the same width instead of shifting the rest of the line.
     pub fn text(&mut self, x: f32, y: f32, s: &str, color: Color) -> f32 {
         let (cw, ch) = (self.atlas.cell_w as f32, self.atlas.cell_h as f32);
         let advance = self.atlas.advance;
@@ -235,20 +187,8 @@ impl DrawList {
     }
 }
 
-// ------------------------------------------------------------ the layout ----
 
 /// A cursor over a [`DrawList`], and the handful of widgets the panels need.
-///
-/// Not a general toolkit. There is no focus, no hit testing and no widget that
-/// responds to being pointed at: the panel is scrolled and dragged as a whole,
-/// by [`super::input`], and nothing inside it is clickable. That is a deliberate
-/// limit rather than an unfinished one. Every control the overlay has is a
-/// **key**, because a control that had to be aimed at would be a control
-/// competing with the guest for the mouse — in a process whose entire purpose is
-/// that the guest does not notice it is being emulated.
-///
-/// Even the scrolling is opt-in for that reason: while [`super::input::focused`]
-/// is false the guest gets every mouse event untouched.
 pub struct Ui<'a> {
     pub list: &'a mut DrawList,
     /// Where the next row goes, and the left edge rows return to.
@@ -298,10 +238,7 @@ impl<'a> Ui<'a> {
 
     /// Move the cursor to a column, measured in characters from the left edge.
     ///
-    /// Never backwards: a value that would overlap the label it belongs to is
-    /// pushed one space past it instead, which keeps a long name readable at the
-    /// cost of that one row's alignment. The alternative — truncating the label
-    /// — hides exactly the thing a ranked list is read for.
+    /// Never backwards:
     pub fn column(&mut self, chars: f32) {
         self.x = self.x.max(self.left + chars * self.em);
     }
@@ -336,10 +273,6 @@ impl<'a> Ui<'a> {
     }
 
     /// A label, a value, and a proportional bar filling the rest of the row.
-    ///
-    /// `share` is a percentage, not a fraction: every figure the profiler
-    /// produces is already one, and converting at each call site is where an
-    /// off-by-a-hundred lives.
     pub fn bar(&mut self, label: &str, value: &str, share: f64, color: Color) {
         self.run(label, color::LABEL);
         self.column(22.0);
@@ -356,7 +289,6 @@ impl<'a> Ui<'a> {
     }
 }
 
-// ------------------------------------------------------------ formatting ----
 
 /// A count with thousands separators, which is the difference between reading
 /// `3041548651` and reading `3,041,548,651` off a moving screen.
@@ -400,9 +332,7 @@ pub fn duration(d: std::time::Duration) -> String {
         s if s >= 1.0 => format!("{s:.1}s"),
         s if s >= 1e-3 => format!("{:.1}ms", s * 1e3),
         // `us` rather than `µs`: the atlas is printable ASCII, and a multi-byte
-        // character would draw as two question marks. Spelled out here rather
-        // than widened there — the alternative is a Unicode-capable atlas for
-        // one glyph in one unit.
+        // character would draw as two question marks.
         s if s >= 1e-6 => format!("{:.1}us", s * 1e6),
         s => format!("{:.0}ns", s * 1e9),
     }

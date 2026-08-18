@@ -1,34 +1,4 @@
 //! How hard Cranelift is asked to work on the code it emits.
-//!
-//! Every native instruction this crate runs comes out of Cranelift — the lifted
-//! guest regions in [`crate::cache`] and the host→guest trampolines in
-//! [`crate::thunk`] — and Cranelift's own default is `opt_level=none`. That
-//! default is wrong here for a specific reason: microlift models an
-//! instruction's side effects as SSA variables (flags, the parts of a vector
-//! register, the intermediate values a semantic handler writes), so a *lot* of
-//! what a region lifts to is dead the moment the next instruction overwrites
-//! it. Optimising is not a few percent on top of the emulation, it is what
-//! removes the emulation nobody asked for.
-//!
-//! `ROSETTA3_JIT_OPT` picks the level; it is read once, on first use, and
-//! applies to a whole run. See [`OptLevel`] for the values.
-//!
-//! `ROSETTA3_JIT_VERIFY` is the other knob, and it is orthogonal to the level:
-//! whether Cranelift's IR verifier runs. See [`verify`] — it is the single
-//! largest thing this crate pays for translation.
-//!
-//! Three knobs, not one, and they sit at three different points in the
-//! pipeline. `opt_level` is a Cranelift *shared* setting and reaches the backend
-//! as a [`settings::Flags`]. The ISA settings ([`OptLevel::isa_settings`]) are
-//! per-architecture target-feature knobs and decide which instructions the
-//! lowering is allowed to reach for. The third is a *lifter* decision —
-//! [`LifterConfig::use_vector_xmm`] makes an `xmm` register one `I64X2` SSA
-//! variable instead of a scalar lo/hi pair, which is only worth doing when the
-//! host has the vector unit to lower it onto. All three are answered from the
-//! same setting so that one environment variable describes the whole pipeline
-//! rather than a third of it.
-//!
-//! [`LifterConfig::use_vector_xmm`]: microlift::core::LifterConfig::use_vector_xmm
 
 use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_codegen::settings::{self, Configurable};
@@ -56,35 +26,17 @@ pub const PINNED_REGS_ENV: &str = "ROSETTA3_PINNED_REGS";
 pub enum OptLevel {
     /// `none` — emit what the lifter produced, unoptimised.
     ///
-    /// Slowest by a wide margin. It is here as a bisection tool: if a region
-    /// misbehaves at `speed` and behaves at `none`, the fault is in the
-    /// lowering rather than the lift. That is the unlikely outcome — by the
-    /// time code is lowered, a lifter bug is already baked into the IR and no
-    /// optimisation level will hide or reveal it — but it is not a question
-    /// that can be answered without the level existing.
+    /// Slowest by a wide margin. It is here as a bisection tool: if a region misbehaves
+    /// at `speed` and behaves at `none`, the fault is in the lowering rather than the
+    /// lift.
     ///
     /// It also pins the ISA to its architectural baseline (see
-    /// [`OptLevel::isa_settings`]), which makes the same bisection available one
-    /// level down: a region that only misbehaves once the host's target features
-    /// are switched on is a bug in a feature-specific lowering rule, not in the
-    /// lift.
+    /// [`OptLevel::isa_settings`]), which makes the same bisection available one level
+    /// down:
     None,
     /// `speed` — Cranelift's `opt_level=speed`.
-    ///
-    /// The level microlift's IR is shaped for: dead-code elimination over the
-    /// SSA variables standing in for guest side effects is where most of the
-    /// per-instruction emulation goes away.
-    ///
-    /// Target features are left as `cranelift-native` detected them: this level
-    /// asks for fast code without rosetta3 having an opinion about the host.
     Speed,
     /// `all` — `speed`, plus host-specific choices. The default.
-    ///
-    /// Two of them. The ISA settings become rosetta3's own reading of the host
-    /// CPU rather than a dependency's ([`OptLevel::isa_settings`]), and the
-    /// lifter is allowed to keep `xmm` state vectorial when the host has the
-    /// unit to lower it onto. The second changes the IR itself, so this is the
-    /// one level that is not purely a lowering decision.
     #[default]
     All,
 }
@@ -111,9 +63,7 @@ impl OptLevel {
 
     /// The Cranelift `opt_level` setting this level maps to.
     ///
-    /// `All` deliberately maps to `speed` and not `speed_and_size`: the
-    /// difference between the two is a size/speed tradeoff, and what `all` adds
-    /// over `speed` is host-specific *lifting*, not a different tradeoff.
+    /// `All` deliberately maps to `speed` and not `speed_and_size`:
     fn cranelift_opt_level(self) -> &'static str {
         match self {
             OptLevel::None => "none",
@@ -135,10 +85,7 @@ impl OptLevel {
             .set("opt_level", self.cranelift_opt_level())
             .expect("cranelift accepts its own opt_level values");
         // Set at every level rather than inside the `Speed | All` arm below,
-        // because it is not an optimisation setting: it says whether this build
-        // checks microlift's output, and `none` is the level a lifter bug is
-        // bisected at, so it is the last one that should stop checking. See
-        // [`verify`].
+        // because it is not an optimisation setting:
         builder
             .set("enable_verifier", if verify() { "true" } else { "false" })
             .expect("cranelift accepts its own enable_verifier values");
@@ -169,31 +116,8 @@ impl OptLevel {
 
     /// The ISA-specific `(name, value)` pairs to build a backend with.
     ///
-    /// These are the target-feature knobs of the host architecture — `has_avx`,
-    /// `has_lse`, and friends — and they decide which instructions the lowering
-    /// may reach for. They are *overrides*: microlift builds the ISA from
-    /// `cranelift-native`, which has already inferred these from the running
-    /// CPU, so a pair here overrules that inference rather than adding to a bare
-    /// baseline. Which is why the three levels differ in what they say and not
-    /// just in how much:
-    ///
-    /// - [`OptLevel::None`] forces every tunable feature off, leaving the
-    ///   architectural baseline the un-inferred ISA would have used. Only
-    ///   features are cleared — knobs that are ABI or correctness decisions
-    ///   rather than tuning (`has_cmpxchg16b`, the pointer-authentication and
-    ///   return-address-signing settings macOS requires) are never touched at
-    ///   any level, since turning those off would change what the code *means*.
-    /// - [`OptLevel::Speed`] says nothing and keeps the inference.
-    /// - [`OptLevel::All`] states each feature explicitly, from this crate's own
-    ///   detection ([`host_features`]). The values agree with the inference on
-    ///   any host where both look at the same bit; the point is that at the
-    ///   level whose job is to exploit the host, what was exploited is decided
-    ///   and auditable here rather than inherited from a dependency's idea of
-    ///   the machine.
-    ///
-    /// Only pairs valid for the host architecture are produced — an unknown
-    /// name is an error from `CraneliftBackend::with_flags`, not a no-op — so
-    /// every list here is built under `cfg(target_arch)`.
+    /// - [`OptLevel::None`] forces every tunable feature off, leaving the architectural
+    /// baseline the un-inferred ISA would have used.
     pub fn isa_settings(self) -> Vec<(&'static str, &'static str)> {
         match self {
             OptLevel::None => TUNABLE_FEATURES.iter().map(|&f| (f, "false")).collect(),
@@ -230,24 +154,14 @@ const TUNABLE_FEATURES: &[&str] = &[
 /// The host target features this crate has an opinion about.
 ///
 /// `has_pauth` and the `sign_return_address*` settings are absent on purpose:
-/// on macOS they are how the platform ABI wants return addresses signed, not a
-/// speed/size tradeoff, so no optimisation level gets to answer them.
 #[cfg(target_arch = "aarch64")]
 const TUNABLE_FEATURES: &[&str] = &["has_lse", "has_fp16", "has_dotprod", "has_i8mm"];
 
 /// The host target features this crate has an opinion about.
-///
-/// Empty on architectures microlift is not built to JIT for: the ISA settings
-/// are per-architecture names, and naming one the host does not have is an
-/// error rather than a setting that gets ignored.
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 const TUNABLE_FEATURES: &[&str] = &[];
 
 /// [`TUNABLE_FEATURES`], each paired with whether this CPU has it.
-///
-/// Runtime detection, not `cfg!(target_feature)`: the binary is built once for
-/// a whole architecture, and the point is to compile for the machine that is
-/// running rather than for the one that compiled.
 fn host_features() -> Vec<(&'static str, &'static str)> {
     /// Both spellings Cranelift accepts for a boolean setting.
     fn value(present: bool) -> &'static str {
@@ -294,10 +208,6 @@ fn host_features() -> Vec<(&'static str, &'static str)> {
 }
 
 /// The level this run is using.
-///
-/// Read once and cached: a backend is built per translated region, and rereading
-/// the environment mid-run would let two regions in one process disagree about
-/// how they were compiled.
 pub fn opt_level() -> OptLevel {
     #[dynamic]
     static LEVEL: OptLevel = match std::env::var(OPT_ENV) {
@@ -317,12 +227,11 @@ pub fn opt_level() -> OptLevel {
 
 /// Whether Cranelift's IR verifier runs on everything this crate compiles.
 ///
-/// **This is the single most expensive thing translation does.** Cranelift runs
-/// the verifier at several points in a compile — after legalisation, after the
-/// egraph pass, after register allocation — and each run is a full walk of the
-/// function checking that every value is dominated by its definition, that
-/// types agree, that the CFG is consistent. Measured on a 600-function x86-64
-/// fixture, 601 regions and 39,085 guest instructions, same binary and machine:
+/// **This is the single most expensive thing translation does.** Cranelift runs the
+/// verifier at several points in a compile — after legalisation, after the egraph pass,
+/// after register allocation — and each run is a full walk of the function checking
+/// that every value is dominated by its definition, that types agree, that the CFG is
+/// consistent.
 ///
 /// ```text
 ///                     verifier on   verifier off
@@ -330,28 +239,14 @@ pub fn opt_level() -> OptLevel {
 /// wall, process start     821 ms         466 ms
 /// ```
 ///
-/// **1.9× off the compile and 1.8× off the run**, for a check that says nothing
-/// about the guest program and everything about whether microlift emitted
-/// well-formed IR — which is a property of *microlift's source*, not of the
-/// bytes it was pointed at, and so is answered by the lifter's own test suite
-/// rather than by every region a shipped binary translates.
+/// **1.9× off the compile and 1.8× off the run**, for a check that says nothing about
+/// the guest program and everything about whether microlift emitted well-formed IR —
+/// which is a property of *microlift's source*, not of the bytes it was pointed at, and
+/// so is answered by the lifter's own test suite rather than by every region a shipped
+/// binary translates.
 ///
-/// So the default is the build profile, which is exactly where FEX puts the
-/// same decision: its `IRValidation` pass is inserted by `PassManager` under
-/// `#if defined(ASSERTIONS_ENABLED)` and compiled out of a release build
-/// entirely (`FEXCore/Source/Interface/IR/PassManager.cpp`). A debug build —
-/// which is every `cargo test` in this workspace — verifies as it always has,
-/// so the suite that would catch an invalid lift is unchanged. A release build
-/// does not.
-///
-/// `ROSETTA3_JIT_VERIFY` overrides it in both directions, and both directions
-/// are wanted: `=1` on a release build is how a lifting bug that only appears
-/// in a long real-world run gets a diagnosis better than "wrong answer", and
-/// `=0` on a debug build is how translation-heavy debugging stays bearable.
-///
-/// Read once, for the same reason [`opt_level`] is: two regions of one process
-/// compiled under different rules is a difference nobody could later account
-/// for.
+/// `ROSETTA3_JIT_VERIFY` overrides it in both directions, and both directions are
+/// wanted:
 pub fn verify() -> bool {
     #[dynamic]
     static VERIFY: bool = match std::env::var(VERIFY_ENV) {
@@ -378,19 +273,10 @@ pub fn verify() -> bool {
 /// Whether microlift is asked to skip the IR for flag writes nothing reads.
 ///
 /// `LifterConfig::eliminate_dead_flags` — microlift's port of FEX's
-/// `RedundantFlagCalculationElimination`. It is the lift-side half of the same
-/// problem [`verify`] is the compile-side half of: an `ADD` emits the IR for
-/// all six status flags, and the ones nothing reads are deleted by Cranelift
-/// only after being optimised and register-allocated first.
+/// `RedundantFlagCalculationElimination`.
 ///
-/// **Off by default, and this crate does not decide otherwise**, because
-/// microlift's own default is off and for a reason it states: soundness rests
-/// on a hand-audited table of what each instruction's handler does to the
-/// flags, and a wrong entry is a wrong answer rather than an error. The
-/// analysis around that table is conservative — a call, a return, an exit to
-/// this runtime, or an instruction nobody classified keeps every flag — so the
-/// exposure is the table and nothing else. `ROSETTA3_DEAD_FLAGS=1` is how a run
-/// opts in while that table earns its confidence.
+/// **Off by default, and this crate does not decide otherwise**, because microlift's
+/// own default is off and for a reason it states:
 pub fn eliminate_dead_flags() -> bool {
     #[dynamic]
     static ON: bool = match std::env::var(DEAD_FLAGS_ENV) {
@@ -407,20 +293,10 @@ pub fn eliminate_dead_flags() -> bool {
     *ON
 }
 
-/// Whether a translated region may resolve its own successor rather than
-/// returning to the run loop for it — microlift's `LifterConfig::block_link`.
+/// Whether a translated region may resolve its own successor rather than returning to
+/// the run loop for it — microlift's `LifterConfig::block_link`.
 ///
-/// **On by default**, unlike the two knobs above, because it is the answer to
-/// the largest single item in this runtime's profile rather than an experiment:
-/// fifteen million region entries a second, three quarters of which are a `ret`
-/// or a call whose entire servicing was "enter what is at `rip`". See
-/// `docs/HOTSPOTS.md`.
-///
-/// `ROSETTA3_NO_BLOCK_LINK=1` turns it off, and that is what it is for: the
-/// linked and unlinked runs of the same program must agree on everything except
-/// the number of entries that reached the run loop, and a claim like that is
-/// only worth making if it can be run both ways. It also makes bisecting a
-/// misbehaving program against the mechanism a variable rather than a rebuild.
+/// `ROSETTA3_NO_BLOCK_LINK=1` turns it off, and that is what it is for:
 pub fn block_linking() -> bool {
     #[dynamic]
     static ON: bool = match std::env::var(NO_BLOCK_LINK_ENV) {
@@ -439,34 +315,19 @@ pub fn block_linking() -> bool {
     *ON
 }
 
-/// Which guest registers this runtime keeps in **host registers** across a
-/// link, or `None` to resolve links through the host as before.
+/// Which guest registers this runtime keeps in **host registers** across a link, or
+/// `None` to resolve links through the host as before.
 ///
 /// This is the second shape of block linking (microlift's
-/// [`core::pin`](microlift::core::pin)): with an ABI declared, a region that
-/// resolves its own successor *branches* to it with these registers still in
-/// place, so the register-file fill and spill is paid once per chain of regions
-/// instead of once per region. `docs/HOTSPOTS.md` §5.1 is what that costs
-/// today — about ninety host instructions of fill and the same again of spill,
-/// at fifteen million region entries a second.
+/// [`core::pin`](microlift::core::pin)):
 ///
-/// **The set is a policy and a guess, and it is deliberately overridable.**
-/// There are five slots to spend on this host (aarch64's tail convention passes
-/// six integer values and the context pointer takes one), and which five are
-/// worth it is a property of the guest program rather than of the mechanism.
-/// These are chosen for the profile in `docs/HOTSPOTS.md`, which is 92% calls
-/// and returns through a C++ engine:
+/// **The set is a policy and a guess, and it is deliberately overridable.** There are
+/// five slots to spend on this host (aarch64's tail convention passes six integer
+/// values and the context pointer takes one), and which five are worth it is a property
+/// of the guest program rather than of the mechanism.
 ///
-/// - `RSP` — every `call`, `ret`, `push` and `pop` in the profile touches it.
-/// - `RDI` — the `this` pointer of every method call, and SysV argument 1.
-/// - `RAX` — the return value, so live across exactly the `ret` edges that link.
-/// - `RBP` — the frame pointer, which Apple's x86-64 ABI requires be maintained.
-/// - `RSI` — SysV argument 2.
-///
-/// `ROSETTA3_PINNED_REGS=rsp,rax,…` replaces the list wholesale, so the guess
-/// can be measured against alternatives without a rebuild;
-/// `ROSETTA3_NO_PINNED_LINK=1` returns to host-resolved links, which is the
-/// bisection knob between the two shapes of linking.
+/// - `RSP` — every `call`, `ret`, `push` and `pop` in the profile touches it. - `RDI` —
+/// the `this` pointer of every method call, and SysV argument 1.
 pub fn pinned_link_abi() -> Option<PinnedAbi> {
     #[dynamic]
     static ABI: Option<PinnedAbi> = {
@@ -497,9 +358,7 @@ pub fn pinned_link_abi() -> Option<PinnedAbi> {
     *ABI
 }
 
-/// Parse a `ROSETTA3_PINNED_REGS` list. `None` - with a message - for anything
-/// it does not recognise, since a silently shorter ABI would be measured as a
-/// result rather than as a typo.
+/// Parse a `ROSETTA3_PINNED_REGS` list.
 fn parse_pinned_regs(list: &str) -> Option<PinnedAbi> {
     let mut abi = PinnedAbi::new();
     for name in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -562,9 +421,7 @@ pub fn flags() -> settings::Flags {
 
 /// The ISA settings every backend in this process is built with.
 ///
-/// Cached for the same reason as [`flags`], plus one of its own: the values are
-/// CPU detection, and detection that ran once cannot disagree with itself
-/// between two regions of the same run.
+/// Cached for the same reason as [`flags`], plus one of its own:
 pub fn isa_settings() -> &'static [(&'static str, &'static str)] {
     #[dynamic]
     static SETTINGS: Vec<(&'static str, &'static str)> = opt_level().isa_settings();
@@ -573,24 +430,11 @@ pub fn isa_settings() -> &'static [(&'static str, &'static str)] {
 
 /// A JIT backend configured for this run.
 ///
-/// Everything that compiles goes through here rather than
-/// `CraneliftBackend::new()`, which would take Cranelift's unoptimised default.
-///
 /// ## Why it holds an `errno` guard
 ///
-/// Compiling runs *on a guest thread*, between two guest instructions, and
-/// `errno` is passthrough — so anything this does to `errno` is something the
-/// guest reads as its own. Building the ISA does one thing to it: `cranelift-
-/// native` detects the host's optional arm64 features with `sysctlbyname`, and
-/// a probe for a name this machine does not have fails with `ENOENT`.
-///
-/// It happens once per process, because the feature detection underneath caches
-/// its answers — and once is enough to be exactly the worst case. The first
-/// region compiled is the first region *run*, so a guest whose `main` began
-/// `fd = open(...); printf("%d", errno)` saw a 2 before it had made a call that
-/// could have set one. See [`crate::thread::Errno`], and
-/// `tests/thread.rs`'s `a_guest_thread_sees_its_own_errno`, which is that
-/// program.
+/// Compiling runs *on a guest thread*, between two guest instructions, and `errno` is
+/// passthrough — so anything this does to `errno` is something the guest reads as its
+/// own.
 pub fn backend() -> microlift::Result<CraneliftBackend> {
     let _errno = crate::thread::Errno::held();
     CraneliftBackend::with_flags(flags(), isa_settings())
@@ -598,22 +442,9 @@ pub fn backend() -> microlift::Result<CraneliftBackend> {
 
 /// How the frontend is told which machine a [`Function`] is being built for.
 ///
-/// The IR this crate writes by hand — the trampolines in [`crate::thunk`] — is
-/// built with `cranelift_frontend::FunctionBuilder`, and since Cranelift 0.134
-/// the frontend no longer infers the target: the pointer type is an explicit
-/// argument to the stack-slot accessors and to `FunctionBuilder::finalize`.
-/// This is the answer, and it has to be the *host's*, because the pointer being
-/// described is the one the trampoline itself runs with — not the guest's,
-/// which happens to be the same width and is otherwise unrelated.
-///
-/// Built from `cranelift-native`, which is where microlift's
-/// [`CraneliftBackend`] gets its ISA too, so the function and the backend it is
-/// handed to cannot disagree about the machine. The ISA settings of
-/// [`isa_settings`] are deliberately not applied: they are target-*feature*
-/// knobs, and nothing in a frontend config — calling convention, pointer width,
-/// page size — is a function of which instructions the lowering may use.
-///
-/// [`Function`]: cranelift_codegen::ir::Function
+/// Built from `cranelift-native`, which is where microlift's [`CraneliftBackend`] gets
+/// its ISA too, so the function and the backend it is handed to cannot disagree about
+/// the machine.
 pub fn frontend_config() -> microlift::Result<TargetFrontendConfig> {
     // The same guard, for the same reason and the same call: see [`backend`].
     // This one is reached from [`crate::thunk`], which builds a trampoline while
@@ -674,12 +505,9 @@ mod tests {
 
     /// And with nothing in the environment, that answer is the build profile.
     ///
-    /// The whole safety of turning the verifier off in a shipped binary is that
-    /// the suite which would catch an invalid lift still runs with it on — so
-    /// this pins the coupling rather than leaving it to be read off `flags()`.
-    /// A plain `cargo test` is a debug build and therefore verifies; `cargo test
-    /// --release` deliberately does not, which is how the *release* pipeline
-    /// gets exercised at all.
+    /// The whole safety of turning the verifier off in a shipped binary is that the
+    /// suite which would catch an invalid lift still runs with it on — so this pins the
+    /// coupling rather than leaving it to be read off `flags()`.
     #[test]
     fn the_default_is_the_build_profile() {
         if std::env::var_os(VERIFY_ENV).is_none() {
@@ -687,11 +515,8 @@ mod tests {
         }
     }
 
-    /// A backend has to be constructible at every level, since an unknown ISA
-    /// flag combination fails at `finish()` rather than at `set()`. This is also
-    /// what catches a name in [`TUNABLE_FEATURES`] that the host's Cranelift
-    /// backend does not have — `set()` rejects those, and it is the only check
-    /// that the lists are spelled the way Cranelift spells them.
+    /// A backend has to be constructible at every level, since an unknown ISA flag
+    /// combination fails at `finish()` rather than at `set()`.
     #[test]
     fn every_level_builds_a_backend() {
         for level in [OptLevel::None, OptLevel::Speed, OptLevel::All] {
@@ -754,9 +579,7 @@ mod tests {
         }
     }
 
-    /// Detection is per-run state, so it must be the *same* per-run state
-    /// everywhere: a region compiled with AVX and one compiled without, in one
-    /// process, is a bug that would only show up as a mismatched trace.
+    /// Detection is per-run state, so it must be the *same* per-run state everywhere:
     #[test]
     fn the_cached_settings_are_the_level_settings() {
         assert_eq!(isa_settings(), opt_level().isa_settings().as_slice());

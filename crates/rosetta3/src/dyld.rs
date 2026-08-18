@@ -1,83 +1,5 @@
-//! Guest-initiated `dlopen`/`dlsym`: loading an Intel image after the guest has
-//! started running.
-//!
-//! ## Why the host's `dlopen` cannot be forwarded
-//!
-//! Every other libSystem entry point in this runtime is passed through, and the
-//! reason it works is that the host's implementation operates on *memory* the
-//! two sides share. `dlopen` operates on a **Mach-O file**, and the file is
-//! x86-64. The host's loader looks at it, finds no arm64 slice, and refuses —
-//! *"fat file, but missing compatible architecture (have 'i386,x86_64', need
-//! 'arm64')"*. That is not a bug to work around; it is the correct answer to the
-//! question the host was asked, and it is the wrong question. The image has to
-//! be loaded the way the root image was: through [`machish`], into this process
-//! at its own addresses, with its imports answered by the same provider chain.
-//!
-//! UNDERTALE's GameMaker runner is what forced this. It `dlopen`s
-//! `libsteam_api.dylib` out of its own bundle, and when that fails it calls a
-//! function pointer Steam never filled in — so the failure surfaces four frames
-//! later as `no guest code at 0x0`, which says nothing at all about `dlopen`.
-//!
-//! ## What the lifter is not told, and why that is survivable
-//!
-//! A [`LifterConfig`](microlift::core::LifterConfig) is built once, before the
-//! guest runs, and it carries the registered import addresses. An image loaded
-//! *after* that has none of its call sites registered, and there is no
-//! supported way to add them to translations that already exist.
-//!
-//! The consequence is precisely stated in the crate note on `stub_va`: an
-//! unregistered call to a `__stubs` entry is followed *as guest code*, decoding
-//! the six-byte trampoline, chasing its `jmp qword [rip+disp]` into the pointer
-//! slot, and finding a native arm64 host address there to disassemble as
-//! x86-64. So the registration has to happen somewhere.
-//!
-//! It happens at the exit instead of at lift time. An unregistered direct call
-//! leaves microlift as `ExitReason::UnknownJump` with `TransferKind::DirectCall`,
-//! and the runtime's loop already asks [`Program::import_at`] about the target
-//! before lifting it — that question is what catches a tail `jmp` to an import.
-//! Widening it to consult this module is the whole of the mechanism: a call into
-//! a dynamically loaded image's stub is answered by the same marshaller an
-//! `ImportedFunctionCall` exit is answered by, from an [`ImportSite`] that says
-//! the same things. The cost is one VM exit per call that a registered import
-//! would have inlined, which is the same trade a slow import already makes.
-//!
-//! [`Program::lift_region`] and [`Program::is_guest_address`] are widened for
-//! the same reason and in the same direction, which is what makes a `dlsym`
-//! result callable: a guest address, entered through the JIT, and turned into a
-//! thunk by [`Callbacks::substitute`](crate::abi::Callbacks::substitute) on its
-//! way out to a host argument.
-//!
-//! ## The registry is process-global
-//!
-//! For the reason [`crate::tls`]'s is. `dlopen` is reached from a shim, which is
-//! handed a register context and guest memory and no VM; the VM is found on the
-//! thread. But [`Program::lift_region`] is called with only a `&Program`, and
-//! the image a `dlopen` produced is not in it and cannot be — a `Program` is
-//! immutable once loaded, which is the claim `SharedProgram`'s `unsafe impl
-//! Sync` rests on. A separate global registry keeps that claim intact rather
-//! than quietly widening it.
-//!
-//! ## What is deliberately not done
-//!
-//! - **Unloading.** `dlclose` succeeds and does nothing. A translation cache
-//!   with no invalidation cannot survive an image being unmapped and another
-//!   landing on its addresses, and a leaked mapping is the honest cost of that.
-//! - **The dynamically loaded image's Objective-C classes.**
-//!   [`crate::objc::register`] realizes the *root* program's metadata. An image
-//!   loaded later carrying its own classes would need the same pass run over its
-//!   report; nothing does it yet, so a `+load` in a `dlopen`ed image does not
-//!   run and a message to one of its classes fails by name in
-//!   [`crate::objc::dispatch`] rather than silently.
-//!
-//!   Its **selector references** are the exception, and are uniqued at load by
-//!   [`crate::objc::unique_loaded_selectors`]. That is not registration; it is
-//!   the one part of it a loaded image cannot do without. A selector reference
-//!   is a slot guest code *loads from* on its way into `objc_msgSend`, so until
-//!   it is rewritten the image sends every message with a `char *` where a `SEL`
-//!   belongs — and the host runtime answers, correctly and uselessly, that
-//!   `NSProcessInfo` does not respond to `processInfo`.
-//! - **`dladdr`, `RTLD_NEXT`, and re-export chains.** Each is refused or
-//!   answered narrowly and says so, rather than being approximated.
+//! Guest-initiated `dlopen`/`dlsym`: loading an Intel image after the guest has started
+//! running.
 
 use std::collections::BTreeMap;
 use std::ffi::CString;
@@ -100,22 +22,15 @@ use crate::abi::{AbiError, GuestMemory, Result};
 use crate::program::{AddrMap, HostProviders, ImportSite};
 
 /// An image this runtime loaded on the guest's behalf.
-///
-/// Leaked once built, so every lookup can hand out a `&'static` reference while
-/// the registry's lock is held only long enough to copy a pointer. That is the
-/// same lifetime the mapping already has — see the scope note on unloading —
-/// rather than a shortcut around one.
 pub struct Image {
     /// The path actually opened, after `@`-prefix expansion.
     pub path: String,
     /// What `dlopen` returned. The image's base address, which is unique in this
-    /// process by construction and is the one value a crash dump can be read
-    /// against.
+    /// process by construction and is the one value a crash dump can be read against.
     pub handle: u64,
     pub report: LinkReport,
-    /// The mapping, kept alive for the process. Leaked separately from the
-    /// `Image` so that [`regions`](Image::regions) can borrow from it: the
-    /// slices have to outlive the load, and they only can if the space does.
+    /// The mapping, kept alive for the process. Leaked separately from the `Image` so
+    /// that [`regions`](Image::regions) can borrow from it:
     _memory: &'static SharedSpace,
     /// The mapped extents, for [`contains`] and [`lift_region`].
     regions: Vec<(u64, &'static [u8])>,
@@ -123,9 +38,8 @@ pub struct Image {
     /// `stub_va` — exactly as [`crate::Program`] keys its own.
     imports: BTreeMap<u64, ImportSite>,
     /// The same sites by the address they resolved to; see
-    /// [`Program::import_by_target`](crate::Program::import_by_target), which
-    /// also explains why this one is hashed and [`imports`](Image::imports) is
-    /// not.
+    /// [`Program::import_by_target`](crate::Program::import_by_target), which also
+    /// explains why this one is hashed and [`imports`](Image::imports) is not.
     imports_by_target: AddrMap<ImportSite>,
     /// Slid extents from `LC_FUNCTION_STARTS`, the hint [`lift_region`] uses.
     functions: Vec<Range<u64>>,
@@ -135,11 +49,8 @@ pub struct Image {
 
 /// An [`MmapSpace`] shared across the threads running the guest.
 ///
-/// The same claim [`SharedProgram`](crate::vm::SharedProgram) makes, confined
-/// the same way: what makes an `MmapSpace` `!Sync` automatically is the raw
-/// pointers to its mappings, and those are read-only handles to memory that
-/// lives as long as the process. The guest's races inside that memory are the
-/// guest's own.
+/// The same claim [`SharedProgram`](crate::vm::SharedProgram) makes, confined the same
+/// way:
 struct SharedSpace(MmapSpace);
 
 // SAFETY: see the type note.
@@ -147,50 +58,18 @@ unsafe impl Sync for SharedSpace {}
 unsafe impl Send for SharedSpace {}
 
 /// Every image `dlopen` has produced, in load order.
-///
-/// Written under [`LOADING`] and read through [`VIEW`], which is what keeps the
-/// read path off a lock entirely.
 static IMAGES: Mutex<Vec<&'static Image>> = Mutex::new(Vec::new());
 
 /// The published, immutable view of [`IMAGES`]: a leaked slice, swapped whole.
-///
-/// The read path takes no lock, and that is not premature. These lookups are
-/// consulted at *every* import exit and every region entry — `sample` put
-/// DELTARUNE's game loop mostly inside `pthread_mutex_lock` underneath
-/// `import_at` — so the cost of answering "no" is the cost of the runtime.
-///
-/// Append-only and leaked makes the lock-free read sound: a `dlopen` builds a
-/// **new** slice, leaks it, and swaps the pointer, so a reader either sees the
-/// old slice or the new one and both stay valid forever. Nothing is ever freed,
-/// which is already this module's position on unloading.
 static VIEW: AtomicPtr<&'static [&'static Image]> = AtomicPtr::new(core::ptr::null_mut());
 
 /// The guest executable's path and slide.
-///
-/// The path answers `@executable_path` and the search that finds a bundled dylib
-/// named without a directory; the slide is what makes the executable's *exports*
-/// usable, which a `dlopen`ed plugin needs. See [`MainExports`].
 static EXECUTABLE: Mutex<Option<(String, u64)>> = Mutex::new(None);
 
 /// The main executable's export table, parsed once, on first use.
 static MAIN_EXPORTS: Mutex<Option<&'static MainExports>> = Mutex::new(None);
 
 /// The main executable, as something a `dlopen`ed image can bind against.
-///
-/// dyld resolves a newly loaded image against **everything already loaded**, the
-/// main executable included, and a plugin that calls back into its host depends
-/// on it. `libYoYoGamepad.dylib` is exactly that: DELTARUNE `dlopen`s it, and it
-/// imports `GMGamePad`'s methods — ninety of them — straight out of
-/// `Mac_Runner`, which exports them for the purpose.
-///
-/// Without this the plugin links, loads, runs its initializers, and stops at its
-/// first call back into the executable with "unsatisfied import".
-///
-/// The reference is spelled **flat** (`<flat-namespace>/__ZN9GMGamePad…`), which
-/// is why [`SymbolProvider::provides`] is not what answers here — that predicate
-/// is consulted only for a two-level reference. It is still implemented
-/// faithfully, so an image naming the executable explicitly is answered too and
-/// one naming `libSystem` is not.
 struct MainExports {
     exports: ExportTable,
     slide: u64,
@@ -225,37 +104,17 @@ impl machish::resolve::SymbolProvider for MainExports {
     }
 }
 
-/// Every image the guest has already loaded, as something a newly loaded one
-/// can bind against.
+/// Every image the guest has already loaded, as something a newly loaded one can bind
+/// against.
 ///
-/// dyld resolves a new image against **everything already mapped**, and this is
-/// the half of that which is neither the host's libraries nor the main
-/// executable: one guest library linked against another guest library, both
-/// loaded by this runtime, in this process.
+/// It is not a corner case, it is how a game ships its own stack.
 ///
-/// It is not a corner case, it is how a game ships its own stack. Terraria
-/// `dlopen`s `libSDL3.0.dylib`, then `libFNA3D.0.dylib`, then
-/// `libFAudio.0.dylib`; the second and third are linked against the first and
-/// name it `@rpath/libSDL3.0.dylib`, with an `LC_RPATH` pointing at the CI
-/// machine it was built on. Nothing on this disk answers that path, so the
-/// dependency cannot be fetched — correctly — and without this provider FNA3D
-/// reports 125 unresolved `_SDL_*` symbols and FAudio 71.
-///
-/// **Loading it again would be the wrong repair**, and is what a `DylibSource`
-/// that guessed harder would do: a second `libSDL3` mapped at its own addresses
-/// is a second set of SDL's statics, a second event queue and a second video
-/// subsystem, and the renderer would be initialising a library the window does
-/// not belong to. The image the guest already has is the one it means.
+/// **Loading it again would be the wrong repair**, and is what a `DylibSource` that
+/// guessed harder would do:
 ///
 /// ## Matching
 ///
-/// By **leaf name**, in both directions. An install name is whatever the
-/// producing link recorded — `@rpath/libSDL3.0.dylib` here, an absolute build
-/// path elsewhere — and the one part of it that survives being moved into an
-/// application bundle is the file name. `provides` is consulted only for a
-/// two-level reference, so this cannot cross-wire a flat lookup; and a
-/// two-level reference that names a *system* library is answered by the host
-/// providers ahead of this one, because [`open`] chains them first.
+/// By **leaf name**, in both directions.
 struct LoadedImages;
 
 /// The file name of an install name or path, which is what both sides agree on.
@@ -272,9 +131,7 @@ impl machish::resolve::SymbolProvider for LoadedImages {
     fn resolve(&self, sym: &machish::fixups::SymbolRef<'_>) -> Option<machish::resolve::Resolved> {
         // A two-level reference is a claim about *which* image defines the
         // symbol, and honouring it is the whole reason `machish` carries the
-        // library through to here. Searching every loaded image for a name that
-        // was qualified would reintroduce exactly the cross-wiring the trait's
-        // note describes.
+        // library through to here.
         let named = sym.library.install_name().map(leaf);
         find(|image| {
             if named.is_some_and(|n| n != leaf(&image.path)) {
@@ -323,18 +180,13 @@ fn main_exports() -> Option<&'static MainExports> {
 }
 
 /// The message `dlerror` will report, and the buffer it last handed out.
-///
-/// Two slots because `dlerror` returns a `char *` the guest may hold across the
-/// call that clears the error. Keeping the previous string alive until the next
-/// `dlerror` is what the specification's "valid until the next call" means.
 static ERROR: Mutex<Option<CString>> = Mutex::new(None);
 static REPORTED: Mutex<Option<CString>> = Mutex::new(None);
 
 /// A token for "the main executable and everything already loaded".
 ///
 /// `dlopen(NULL, ...)` returns this, and `dlsym` treats it — and every negative
-/// pseudo-handle — as a global search. The address of a `static` rather than a
-/// small integer so it can never collide with an image base.
+/// pseudo-handle — as a global search.
 static GLOBAL_TOKEN: u8 = 0;
 
 fn global_handle() -> u64 {
@@ -343,9 +195,8 @@ fn global_handle() -> u64 {
 
 /// Return the guest image at a dyld image-list index.
 ///
-/// The executable is always index zero, followed by images loaded by this
-/// linker. Host dyld images are intentionally absent: their headers describe
-/// arm64 Mach-O files and are not part of the guest address space.
+/// The executable is always index zero, followed by images loaded by this linker. Host
+/// dyld images are intentionally absent:
 fn indexed_image(index: u32) -> Option<(u64, u64, String)> {
     if index == 0 {
         let (path, slide) = EXECUTABLE
@@ -411,11 +262,6 @@ fn image_containing_shim(
 }
 
 /// The main executable's `mach_header` as the guest can address it.
-///
-/// Recorded rather than derived for the same reason the path is: the running
-/// executable is `rosetta3`, so `_dyld_get_image_header(0)` describes this
-/// runtime and not the program. Zero means "not yet known", which is only true
-/// before [`set_executable_header`] runs.
 static MAIN_HEADER: AtomicU64 = AtomicU64::new(0);
 
 /// Record the main executable's mach header address.
@@ -442,32 +288,18 @@ pub fn executable_path() -> Option<String> {
 
 /// How many images are loaded, and the address range they span.
 ///
-/// Read without the lock, and that is the entire point. These lookups sit on the
-/// hot path — [`crate::Program::import_at`] and `import_by_target` are consulted
-/// at *every* import exit, and `is_guest_address` at every one that resolved
-/// somewhere — so what they cost when the answer is "no" is what the runtime
-/// costs. The first version of this cloned the image vector under a mutex per
-/// call, and a `sample` of DELTARUNE's game loop found the process spending most
-/// of its time in `malloc` underneath `import_by_target`.
-///
-/// A program that never calls `dlopen` now pays one relaxed atomic load, and a
-/// program that has pays that plus a range check before any lock is taken.
-/// Relaxed is sufficient: a stale zero can only be read by a thread that has not
-/// yet synchronised with the `dlopen` that stored it, and that thread cannot
-/// hold an address from the image it has not seen.
+/// A program that never calls `dlopen` now pays one relaxed atomic load, and a program
+/// that has pays that plus a range check before any lock is taken. Relaxed is
+/// sufficient:
 static IMAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static REGION_LO: AtomicU64 = AtomicU64::new(u64::MAX);
 static REGION_HI: AtomicU64 = AtomicU64::new(0);
 
 /// Search the loaded images without copying the list.
 ///
-/// Every `Image` is `&'static` — leaked at load, never freed — so a reference
-/// found inside the lock outlives it, and the guard is dropped before the caller
-/// does anything with the answer.
-/// Every loaded image, copied out.
-///
-/// For `dlsym`, which searches them all and is called a handful of times in a
-/// process's life. [`find`] is what the hot paths use.
+/// Every `Image` is `&'static` — leaked at load, never freed — so a reference found
+/// inside the lock outlives it, and the guard is dropped before the caller does
+/// anything with the answer.
 fn snapshot() -> Vec<&'static Image> {
     let view = VIEW.load(Ordering::Acquire);
     if view.is_null() {
@@ -490,14 +322,10 @@ fn find<R>(mut f: impl FnMut(&'static Image) -> Option<R>) -> Option<R> {
 
 /// The import registered at `va` in any dynamically loaded image.
 ///
-/// The widening described in the module note: what [`crate::Program::import_at`]
-/// falls back to, so a call into a stub of an image the lifter never saw is
-/// serviced rather than decoded.
+/// The widening described in the module note:
 pub fn import_at(va: u64) -> Option<&'static ImportSite> {
     // A slot or stub of a loaded image is *inside* that image, so an address
-    // outside every dlopened mapping cannot be one. This is the question the run
-    // loop asks before entering any region, which makes it the hottest of the
-    // three.
+    // outside every dlopened mapping cannot be one.
     if va < REGION_LO.load(Ordering::Relaxed) || va >= REGION_HI.load(Ordering::Relaxed) {
         return None;
     }
@@ -507,9 +335,7 @@ pub fn import_at(va: u64) -> Option<&'static ImportSite> {
 /// The import of any dynamically loaded image that *resolved to* `host`.
 pub fn import_by_target(host: u64) -> Option<&'static ImportSite> {
     // The same two-compare rejection [`import_at`] makes, for a colder version
-    // of the same problem: this is consulted for every address the run loop is
-    // about to enter, and a program that never called `dlopen` should not pay a
-    // lock and a map walk to be told so.
+    // of the same problem:
     if IMAGE_COUNT.load(Ordering::Relaxed) == 0 {
         return native_symbol_at(host);
     }
@@ -517,13 +343,6 @@ pub fn import_by_target(host: u64) -> Option<&'static ImportSite> {
 }
 
 /// What `symbol` resolved to in any dynamically loaded image.
-///
-/// [`Program::resolved_symbol`](crate::Program::resolved_symbol) widened the
-/// same way [`import_at`] is, and for a caller with the same need: an answer
-/// read out of the *transcript* rather than looked up again. The case that
-/// forces it is `operator new` — a library the guest `dlopen`ed imports it, the
-/// main executable defines it, and so it appears in no import table but the
-/// loaded image's. See [`crate::shims::cxxstring`].
 pub fn resolved_symbol(symbol: &str) -> Option<u64> {
     find(|i| {
         i.imports
@@ -545,12 +364,6 @@ pub fn contains(va: u64) -> bool {
 }
 
 /// The recorded function starts inside `range`, for an image the *guest* loaded.
-///
-/// The other half of [`crate::program::Program::function_starts_in`], and it
-/// answers the same question for the same reason: a function reached only
-/// through a pointer — a vtable slot, a callback — has no static predecessor, so
-/// nothing in a lift discovers it, and a region spanning it without offering it
-/// as a resume point forces a second translation of the same bytes.
 pub fn function_starts_in(range: std::ops::Range<u64>) -> Vec<u64> {
     find(|image| {
         let mut starts: Vec<u64> = image
@@ -608,12 +421,8 @@ pub fn loaded() -> usize {
     IMAGE_COUNT.load(Ordering::Acquire)
 }
 
-// ------------------------------------------------------------- loading ------
 
 /// Load `path` as a guest image, or return the handle it already has.
-///
-/// Idempotent by resolved path, which is what makes a program that `dlopen`s
-/// the same library from two places get one image and one set of initializers.
 pub fn open(path: &str) -> std::result::Result<u64, String> {
     let resolved = resolve_path(path).ok_or_else(|| format!("no such file: {path}"))?;
 
@@ -624,9 +433,7 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     let bytes = std::fs::read(&resolved).map_err(|e| format!("{resolved}: {e}"))?;
     // `parse_any` narrows a fat file to the x86-64 slice, and fails when there
     // is none — which is the case a *native* arm64 dylib takes. That is not
-    // something this path can load: its code is already this machine's, and
-    // calling into it means describing every entry point the guest will reach.
-    // Refused by name rather than half-loaded.
+    // something this path can load:
     let object = MachObject::parse_any(&bytes, X86_64)
         .map_err(|e| format!("{resolved}: not a loadable x86-64 Mach-O: {e}"))?;
 
@@ -635,9 +442,7 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     let mut source = crate::cxxlib::source();
     let hosts = HostProviders::new();
     // Everything already loaded, which is what dyld resolves a new image
-    // against: the main executable first, because a plugin's host is the first
-    // thing that was loaded (see [`MainExports`]), then the guest libraries this
-    // runtime has already mapped (see [`LoadedImages`]).
+    // against:
     let main = main_exports();
     let loaded = LoadedImages;
     let mut extra: Vec<&dyn machish::resolve::SymbolProvider> = main
@@ -657,18 +462,14 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
 
     // The same repair the program's own link needs, for the same reason: this
     // image's landing pads name libSystem for `_Unwind_Resume` and would get
-    // the host's unwinder. See
-    // [`crate::cxxlib::bind_unwinder_to_the_vendored_one`].
+    // the host's unwinder.
     crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory)
         .map_err(|e| format!("{resolved}: unwinder: {e}"))?;
     crate::cxxlib::bind_cxxabi_to_the_vendored_one(&mut report, &mut memory)
         .map_err(|e| format!("{resolved}: cxxabi: {e}"))?;
 
     // Say what did not resolve, here, rather than letting the guest find out by
-    // calling it. A `dlopen`ed image links against a chain assembled at run time
-    // — the host, the main executable, images loaded before it — and an
-    // unsatisfied symbol is a fact about that chain, which is exactly the thing
-    // no later diagnostic can reconstruct.
+    // calling it.
     let unresolved: Vec<&str> = report
         .images
         .iter()
@@ -719,13 +520,7 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     let (imports, imports_by_target) = collect_imports(&report, is_guest);
 
     // The same substitution the program's own slots get — see
-    // [`crate::trampoline`] — and a `dlopen`ed plugin is where it pays most: a
-    // program dynamic enough to load one is usually dynamic enough to call
-    // through the pointers rather than the stubs. Done before the image is
-    // published, so no lift can have read a slot yet.
-    //
-    // Filtered before the write, because deciding reads `memory` and writing
-    // borrows it: the same split [`crate::Program::install_trampolines`] makes.
+    // [`crate::trampoline`] — and a `dlopen`ed plugin is where it pays most:
     let eligible: Vec<(u64, ImportSite)> = imports
         .iter()
         .filter(|(_, site)| !site.is_stub && !is_guest(site.resolved))
@@ -772,28 +567,12 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     }
 
     // A loaded image's thread-locals are its own, and nothing else registers
-    // them: [`crate::tls::register`] runs over the *program's* images, so a
-    // `_Thread_local` in a `dlopen`ed image had no descriptor in the registry and
-    // `__tlv_bootstrap` answered null for it — correctly, by its own rule, and
-    // fatally, because the guest dereferences what it is handed. The registry is
-    // keyed by descriptor address and append-only precisely so that an image
-    // mapped later can join it.
+    // them:
     crate::tls::register(&leaked.report);
 
     // Before any of this image's code runs, and after it is findable: realize
     // the Objective-C metadata it carries, which is what dyld hands `libobjc`
-    // when it maps an image. Two halves, and both have to be here:
-    //
-    // - Its `__objc_selrefs` slots hold string pointers until they are
-    //   rewritten, and an initializer that sends a message —
-    //   `steamclient.dylib` has one that asks `+[NSProcessInfo processInfo]` —
-    //   loads a selector out of one on the way in.
-    // - Its **classes** exist only as dead `objc_class` structures in its own
-    //   `__objc_data` until they are registered, and a message to one is refused
-    //   by name. SDL3's Cocoa backend is nothing but such classes.
-    //
-    // Neither half runs any of this image's code, which is what lets both sit
-    // in front of the add-image notices below.
+    // when it maps an image.
     let vm = crate::thunk::current();
     if let Some(vm) = vm {
         match vm.objc() {
@@ -816,10 +595,7 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     // own code runs. See [`announce`].
     announce(leaked.handle, leaked.slide);
 
-    // Now the image's own code, in dyld's order: `+load` before the C
-    // constructors of the same image, and both after the notices — a `+load`
-    // allocates, and a garbage collector that has not been told about this
-    // image's `__DATA` collects what it allocates from.
+    // Now the image's own code, in dyld's order:
     if let Some(vm) = vm {
         vm.run_loaded_load_methods(&leaked.report)
             .map_err(|e| format!("{resolved}: objc +load: {e}"))?;
@@ -830,10 +606,6 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
 }
 
 /// Every address a call site in `report` might name, both directions.
-///
-/// The same two maps [`crate::Program`] builds, built the same way and for the
-/// same reasons — including the unsatisfied imports, which are registered so a
-/// call to one is a named symbol rather than `no guest code at 0x0`.
 fn collect_imports(
     report: &LinkReport,
     is_guest: impl Fn(u64) -> bool,
@@ -886,18 +658,6 @@ fn collect_imports(
     for site in by_symbol {
         // A site that resolved into the **guest** must never appear here, and
         // the reason is a two-billion-iteration livelock rather than a nicety.
-        //
-        // This map answers "the guest loaded a pointer and called it", so the
-        // run loop consults it for every address it is about to *enter*. When
-        // an import resolved to a guest function, that function's own address
-        // is the key — so entering it looks like calling the import, which
-        // transfers to it, which enters it again, with `rsp` never moving.
-        // `libYoYoGamepad.dylib` importing `GMGamePad::SetGamePadCount` out of
-        // `Mac_Runner` span there at 100% CPU with nothing to report.
-        //
-        // Nothing is lost by leaving it out: a guest address is directly
-        // executable, so there is no interception to arrange. Only the call
-        // *site* — the slot and the stub, in `imports` — needs one.
         if site.resolved != 0 && !is_guest(site.resolved) {
             by_target
                 .entry(site.resolved)
@@ -908,10 +668,6 @@ fn collect_imports(
 }
 
 /// Run the image's constructors, as dyld does before `dlopen` returns.
-///
-/// Reverse load order, matching [`crate::startup::run_initializers`]:
-/// dependencies before dependents. The arguments are the guest's own
-/// `(argc, argv, envp, apple)`, which a constructor may legally take.
 fn run_initializers(image: &'static Image) -> std::result::Result<(), String> {
     let Some(vm) = crate::thunk::current() else {
         return Err("no VM is running on this thread".to_string());
@@ -932,16 +688,6 @@ fn run_initializers(image: &'static Image) -> std::result::Result<(), String> {
 }
 
 /// Where a `dlopen` argument actually points.
-///
-/// The `@`-prefixed forms are Mach-O's own and are expanded by [`machish`]. A
-/// bare or relative name is tried as given first — that is what the guest asked
-/// for and what a real `dlopen` would try — and then beside the executable and
-/// in the two places a `.app` puts a bundled dylib, because a runner launched
-/// from anywhere still expects to find its own library.
-/// `name` under each directory of a colon-separated `dyld` search variable.
-///
-/// Empty when the variable is unset, which is the common case and the reason
-/// this costs nothing to consult.
 fn search_path(var: &str, name: &str) -> Vec<String> {
     let Some(value) = std::env::var_os(var) else {
         return Vec::new();
@@ -973,15 +719,7 @@ fn resolve_path(path: &str) -> Option<String> {
         candidates.extend(machish::install_name::expand(path, &ctx));
     } else {
         // `DYLD_LIBRARY_PATH` first, and `DYLD_FALLBACK_LIBRARY_PATH` after the
-        // ordinary candidates — the order the host's own loader uses. This shim
-        // *replaced* the host's `dlopen`, so a search rule it does not reproduce
-        // is a library the guest could have found and cannot.
-        //
-        // It is not an exotic rule. Terraria's launcher is a shell script whose
-        // entire job is `cd Contents/MacOS; export DYLD_LIBRARY_PATH=./osx/`,
-        // and `libSDL3.0.dylib` lives in that `osx` directory and nowhere else.
-        // Without this the game reaches its own `Main`, calls `SDL_GetVersion`,
-        // and dies with a managed `DllNotFoundException`.
+        // ordinary candidates — the order the host's own loader uses.
         let name = path.rsplit('/').next().unwrap_or(path);
         candidates.extend(search_path("DYLD_LIBRARY_PATH", name));
         candidates.push(path.to_string());
@@ -993,21 +731,6 @@ fn resolve_path(path: &str) -> Option<String> {
             candidates.push(format!("{dir}/../Resources/{name}"));
         }
         // The executable's own `LC_RPATH` directories, searched by leaf name.
-        //
-        // An `LC_RPATH` is the image's statement of where *its* libraries live,
-        // and it is normally consulted only for an `@rpath/`-prefixed install
-        // name. A leaf name reaching this function has no such prefix — but it is
-        // the same question, asked by a program that constructed the name at run
-        // time instead of linking against it, and the image's answer is the same
-        // directory.
-        //
-        // Terraria is the case. Its executable declares
-        // `LC_RPATH @executable_path/osx`, `libSDL3.0.dylib` lives in that
-        // directory and nowhere else in the bundle, and Mono asks for it by leaf
-        // name because it comes from a managed `DllImport`. Without this the game
-        // reaches its own `Main`, calls `SDL_GetVersion`, and dies with a managed
-        // `DllNotFoundException` — a diagnostic that names the library and
-        // nothing about why it was not found.
         if let Some(exe) = executable.as_deref() {
             let rpaths = rpaths_of(exe);
             let ctx = PathContext {
@@ -1031,9 +754,6 @@ fn resolve_path(path: &str) -> Option<String> {
 }
 
 /// The `LC_RPATH` entries of the image at `path`, for `@rpath` expansion.
-///
-/// Read from the file rather than kept on the [`crate::Program`], because this
-/// is the only caller and a `dlopen` is already doing file I/O.
 fn rpaths_of(path: &str) -> Vec<String> {
     let Ok(bytes) = std::fs::read(path) else {
         return Vec::new();
@@ -1044,18 +764,12 @@ fn rpaths_of(path: &str) -> Vec<String> {
     object.rpaths().map(|r| r.to_string()).collect()
 }
 
-// --------------------------------------------------------------- dlsym ------
 
 /// The address `name` has in `handle`, as `dlsym` reports it.
-///
-/// A guest address for a symbol one of our images defines, and the *host's*
-/// answer otherwise — a program that `dlsym`s `"malloc"` out of the global
-/// handle is asking about libSystem, and libSystem here is the host's.
 fn lookup(handle: u64, name: &str) -> Option<u64> {
     // A handle from the host's loader: the guest is asking a native library for
     // a native symbol, and the answer is an arm64 function pointer it will call
-    // through a register. Recorded on the way out so that call can be serviced —
-    // see [`NATIVE_SYMBOLS`].
+    // through a register.
     if let Some(path) = native_handle(handle) {
         let c = CString::new(name).ok()?;
         // SAFETY: a handle this module obtained from `dlopen` and never closed,
@@ -1077,8 +791,6 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
         Some(image) => vec![image],
         // Every pseudo-handle — `RTLD_DEFAULT`, `RTLD_SELF`, `RTLD_NEXT`, and
         // the token `dlopen(NULL)` returns — is treated as a global search.
-        // Distinguishing them needs a caller's image, which a shim standing
-        // outside the guest's frame does not have.
         None => snapshot(),
     };
     for image in scoped {
@@ -1091,17 +803,6 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
     // The **main executable's** own exports, which a global search must include
     // and which nothing above covers: [`snapshot`] holds the images `dlopen`
     // produced, and the program itself is not one of them.
-    //
-    // This is not a corner. A `DllImport` naming a library that was *statically
-    // linked into the executable* resolves exactly this way, and it is how
-    // MonoKickstart ships .NET's `System.Native`: `Terraria.bin.osx` exports 136
-    // `SystemNative_*` functions and there is no `libSystem.Native.dylib`
-    // anywhere in the bundle. Without this the game runs its own
-    // `Terraria.Main..cctor` and dies with `EntryPointNotFoundException:
-    // SystemNative_LChflagsCanSetHiddenFlag`.
-    //
-    // Ahead of the host search, because a symbol the guest defines is the
-    // guest's — a host function of the same name would be a different function.
     if let Some(main) = main_exports()
         && let Some(export) = main.exports.get(&mangled)
         && let Some(addr) = export.address(main.slide)
@@ -1109,13 +810,7 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
         return Some(addr);
     }
 
-    // The global fallback, which is a *host* search: the guest asked every image
-    // this runtime loaded and none had it, so what is left is passthrough — or,
-    // for the two names whose host copy is variadic and whose signature is not,
-    // the wrapper a binding of the same name would have resolved to. A `dlsym`
-    // result is called with the signature the table gives its *name*, so the two
-    // routes have to hand back the same function. See
-    // [`crate::shims::openat::provide`].
+    // The global fallback, which is a *host* search:
     let addr = match crate::shims::openat::host_substitute(name) {
         Some(wrapper) => wrapper,
         None => host_symbol(name)?,
@@ -1124,10 +819,6 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
 }
 
 /// `dlsym` against the host process, for a symbol no guest image defines.
-///
-/// Also how [`crate::shims`] finds a host entry point without `#[link]`ing the
-/// library that exports it — see the note in [`crate::shims::audiounit`] about
-/// what linking one does to the process the guest starts in.
 pub(crate) fn host_symbol(name: &str) -> Option<u64> {
     let c = CString::new(name).ok()?;
     // SAFETY: `RTLD_DEFAULT` is a valid pseudo-handle and `c` outlives the call.
@@ -1139,52 +830,29 @@ pub(crate) fn host_symbol(name: &str) -> Option<u64> {
     }
 }
 
-// ------------------------------------------------- native passthrough -------
 
 /// Handles the *host's* `dlopen` returned, and the paths they were asked for.
 ///
-/// A guest that asks for `/usr/lib/libc.dylib` is not asking for a file. On this
-/// system there is no such file: every system library lives in the dyld shared
-/// cache, and the only thing that can open one is the host's own loader. This
-/// runtime's answer is the answer it gives to every other system interface —
-/// [pass it through](../../../../docs/ROADMAP.md) — and it arrives here as a
-/// *fallback*, after [`open`] has failed to find an x86-64 Mach-O on disk, so a
-/// dylib the guest ships with itself is still loaded and translated.
-///
-/// Mono is what forced it. Terraria's embedded runtime `dlopen`s
-/// `CoreFoundation` and `/usr/lib/libc.dylib` during start-up and asserts on the
-/// spot when either returns null — `w32file-unix.c:4952, condition 'libc_handle'
-/// not met` — which says nothing whatsoever about the shared cache.
+/// A guest that asks for `/usr/lib/libc.dylib` is not asking for a file. On this system
+/// there is no such file:
 static NATIVE: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
 
 /// The import sites a native `dlsym` result has been given.
 ///
 /// A host address is only callable from guest code if
 /// [`Program::import_by_target`](crate::Program::import_by_target) can name it:
-/// the run loop meets it as an `IndirectCall` to something that is not a guest
-/// address, and what it needs is the *signature*, which is looked up by symbol.
-/// A binding gets that from its image's import table; a `dlsym` result has no
-/// import table, so it is recorded here as it is handed out. The effect is that
-/// `dlsym(h, "strlen")` and an ordinary import of `_strlen` produce calls the
-/// marshaller cannot tell apart, which is the property that makes this safe:
-/// nothing is guessed, and a symbol with no signature is refused by name exactly
-/// as it would be anywhere else.
 static NATIVE_SYMBOLS: Mutex<BTreeMap<u64, &'static ImportSite>> = Mutex::new(BTreeMap::new());
 
 /// How many entries [`NATIVE_SYMBOLS`] has, read without the lock.
 ///
-/// The map is written a handful of times in a process's life — once per `dlsym`
-/// of a host symbol — and *read* at every region entry, from
-/// [`import_by_target`]. A `dlsym` result is a passthrough case most programs
-/// never reach, so the common answer is "the map is empty", and taking a mutex
-/// to discover that put this on a profile of Terraria's start-up.
+/// The map is written a handful of times in a process's life — once per `dlsym` of a
+/// host symbol — and *read* at every region entry, from [`import_by_target`].
 static NATIVE_SYMBOL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Open `path` with the host's loader, as a native arm64 library.
 ///
-/// `RTLD_GLOBAL` and never closed, for the reason the native provider's own
-/// fallback is: closing it would dangle every pointer already written into a
-/// guest slot.
+/// `RTLD_GLOBAL` and never closed, for the reason the native provider's own fallback
+/// is: closing it would dangle every pointer already written into a guest slot.
 fn open_native(path: &str) -> Option<u64> {
     let c = CString::new(path).ok()?;
     // SAFETY: a null-terminated path and the host's own loader. The handle is
@@ -1212,9 +880,6 @@ fn native_handle(handle: u64) -> Option<String> {
 }
 
 /// Record a host address handed to the guest by `dlsym`, so it can be called.
-///
-/// See [`NATIVE_SYMBOLS`]. Returns the address unchanged, so the caller reads as
-/// the pass-through it is.
 fn remember_native_symbol(addr: u64, name: &str, library: Option<String>) -> u64 {
     let mut map = NATIVE_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner());
     let before = map.len();
@@ -1239,30 +904,12 @@ fn remember_native_symbol(addr: u64, name: &str, library: Option<String>) -> u64
     }
     drop(map);
 
-    // And the whole reason this passthrough is worth optimising at all: a
-    // program that resolves its host entry points with `dlsym` rather than
-    // importing them misses the fast-import path entirely, because there is no
-    // call site for microlift to match — the address only exists at run time.
-    // Roblox and Starbound are both built that way, and it is where most of
-    // their CPU time went.
-    //
-    // Handing back a trampoline puts them back on it: the guest calls a five-byte
-    // guest stub whose one instruction is a direct tail jump into a registered
-    // fast import. See [`crate::trampoline`], including why a symbol with no
-    // placeable signature — every data symbol, and every variadic — keeps the
-    // host address it has always been given.
+    // And the whole reason this passthrough is worth optimising at all:
     crate::trampoline::for_site(site).unwrap_or(addr)
 }
 
-/// The published, immutable half of [`NATIVE_SYMBOLS`]: a leaked, sorted slice
-/// of `(address, site)`, swapped whole.
-///
-/// The count above kept the lock off this path only while the map was *empty*,
-/// which is most programs and is not Starbound: it `dlsym`s Steam's client
-/// library, and from that moment every region entry took a process-wide mutex
-/// to be told the address is not one of the half-dozen entries. The map is
-/// written a handful of times in a process's life and read millions, which is
-/// exactly the shape [`VIEW`] already has.
+/// The published, immutable half of [`NATIVE_SYMBOLS`]: a leaked, sorted slice of
+/// `(address, site)`, swapped whole.
 static NATIVE_SYMBOL_VIEW: AtomicPtr<Vec<(u64, &'static ImportSite)>> =
     AtomicPtr::new(core::ptr::null_mut());
 
@@ -1289,24 +936,15 @@ pub fn native_symbol_at(host: u64) -> Option<&'static ImportSite> {
         .map(|i| view[i].1)
 }
 
-// ------------------------------------------------------- image notices ------
 
 /// The `add image` callbacks the guest has registered, as **thunks**.
-///
-/// Stored already substituted, because the whole point is to call them from host
-/// code — from [`open`], on whatever thread the `dlopen` happened on — where no
-/// `Callbacks` is in reach. Substituting once at registration is also what
-/// [`crate::Vm::thunk_for`] wants: a callback is translated when its thunk is
-/// built, so the guest function is compiled here rather than inside the notice.
 static ADD_IMAGE: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
 /// Tell one callback about one image.
 ///
-/// The two arguments are dyld's: the image's `mach_header` and its slide. Both
-/// are *guest* values — a guest address it can dereference and parse as the
-/// x86-64 Mach-O it is. Handing it the host's arm64 images instead would be the
-/// characteristic failure of this project: a structurally valid answer to a
-/// question about the wrong process.
+/// The two arguments are dyld's: the image's `mach_header` and its slide. Both are
+/// *guest* values — a guest address it can dereference and parse as the x86-64 Mach-O
+/// it is.
 fn notify(thunk: u64, header: u64, slide: u64) {
     if thunk == 0 || header == 0 {
         return;
@@ -1323,10 +961,8 @@ fn notify(thunk: u64, header: u64, slide: u64) {
 
 /// Announce `image` to every callback registered so far.
 ///
-/// Called after the image is published and before its initializers run, which is
-/// the order dyld uses and the order a garbage collector needs: a callback that
-/// registers the image's `__DATA` as roots must have done so before any code in
-/// the image can allocate.
+/// Called after the image is published and before its initializers run, which is the
+/// order dyld uses and the order a garbage collector needs:
 fn announce(header: u64, slide: u64) {
     let callbacks = ADD_IMAGE.lock().unwrap_or_else(|e| e.into_inner()).clone();
     for thunk in callbacks {
@@ -1334,28 +970,16 @@ fn announce(header: u64, slide: u64) {
     }
 }
 
-/// `void _dyld_register_func_for_add_image(void (*f)(const struct mach_header *, intptr_t))`
-///
-/// dyld calls the function once for every image already loaded, immediately, on
-/// the registering thread, and again for each one loaded afterwards. Both halves
-/// are reproduced here over the *guest's* images: the main executable, whatever
-/// it was linked against that this runtime mapped, and anything a later
-/// [`open`] adds.
+/// `void _dyld_register_func_for_add_image(void (*f)(const struct mach_header *,
+/// intptr_t))`
 ///
 /// It is a shim rather than a passthrough for the reason the rest of this module
-/// exists. The host's dyld knows about `rosetta3` and the arm64 system
-/// libraries; it has never heard of the guest, whose images are not in its list
-/// and never will be. A guest that walked what the host's dyld reports would
-/// find no image containing any address it holds.
+/// exists.
 ///
 /// ## Scope
 ///
-/// The images this runtime *maps* are reported. The arm64 system libraries the
-/// guest's imports resolve into are not, and cannot be: their headers are arm64,
-/// so a guest that parsed one would read a Mach-O it was not compiled to
-/// understand. A guest looking for the image containing a passed-through
-/// libSystem pointer therefore finds none — the same narrowing `dladdr` already
-/// makes, for the same reason.
+/// The images this runtime *maps* are reported. The arm64 system libraries the guest's
+/// imports resolve into are not, and cannot be:
 fn register_func_for_add_image(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -1388,9 +1012,8 @@ fn register_func_for_add_image(
 
 /// `void _dyld_register_func_for_remove_image(...)`
 ///
-/// Recorded and never called, because nothing is ever unloaded — see the
-/// scope note on `dlclose`. Accepting it is honest in a way refusing would not
-/// be: the guest asked to be told when an image goes away, and none does.
+/// Recorded and never called, because nothing is ever unloaded — see the scope note on
+/// `dlclose`. Accepting it is honest in a way refusing would not be:
 fn register_func_for_remove_image(
     _symbol: &str,
     _ctx: &mut RegisterContext,
@@ -1402,9 +1025,6 @@ fn register_func_for_remove_image(
 
 /// Whether `name` is one of this module's callback-taking shims.
 ///
-/// Separate from [`shim_for`] because these need the [`Callbacks`] the `dl`
-/// family does not: their argument is a guest function pointer.
-///
 /// [`Callbacks`]: crate::abi::Callbacks
 pub fn shim_for_callbacks(name: &str) -> Option<crate::signal::Shim> {
     Some(match name {
@@ -1414,7 +1034,6 @@ pub fn shim_for_callbacks(name: &str) -> Option<crate::signal::Shim> {
     })
 }
 
-// --------------------------------------------------------------- shims ------
 
 fn set_error(message: String) {
     *ERROR.lock().unwrap_or_else(|e| e.into_inner()) = CString::new(message).ok();
@@ -1465,11 +1084,9 @@ fn serve(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> 
             Ok(())
         }
         "dladdr" => dladdr(symbol, ctx, mem),
-        // Spelled with one fewer underscore than [`shim_for`] matches on:
-        // the C identifier is `_dyld_find_unwind_sections`, the Mach-O symbol
-        // carries another, and `serve` strips one more before this match. The
-        // same two-spelling rule [`crate::shims::math`] records for
-        // `__sincos_stret`.
+        // Spelled with one fewer underscore than [`shim_for`] matches on: the C
+        // identifier is `_dyld_find_unwind_sections`, the Mach-O symbol carries
+        // another, and `serve` strips one more before this match.
         "dyld_find_unwind_sections" => find_unwind_sections(symbol, ctx, mem),
         "dlerror" => {
             let taken = ERROR.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -1500,10 +1117,7 @@ fn dlopen(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) ->
             clear_error();
             ctx.rax = handle;
         }
-        // No x86-64 Mach-O on disk under that name. On this system that is the
-        // *normal* case for a system library — they live in the shared cache and
-        // exist as no file at all — so the host's loader is asked before the
-        // failure is reported. See [`open_native`].
+        // No x86-64 Mach-O on disk under that name.
         Err(reason) => match open_native(&path) {
             Some(handle) => {
                 clear_error();
@@ -1538,22 +1152,16 @@ fn dlsym(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> 
 
 /// `int dladdr(const void *addr, Dl_info *info)`
 ///
-/// The host's cannot answer this one at all for the addresses that matter. A
-/// guest image is mapped by [`open`], not by dyld, so the host's loader has
-/// never heard of it: asked about an address inside `steamclient.dylib` it
-/// reports failure, or — worse — reports whichever *host* image happens to
-/// surround that address, and the caller believes it.
+/// The host's cannot answer this one at all for the addresses that matter. A guest
+/// image is mapped by [`open`], not by dyld, so the host's loader has never heard of
+/// it:
 ///
 /// So the registry answers for anything it recognises and the host answers for
-/// everything else. `Dl_info` is four pointers, 32 bytes, laid out identically
-/// on both architectures, so the structure is filled in guest memory in place.
+/// everything else.
 ///
-/// `dli_sname`/`dli_saddr` are the nearest export at or below `addr`, which is
-/// what `dladdr` documents them to be, and both are left null when the image
-/// exports nothing below it — a legal answer that Darwin's own `dladdr` gives
-/// for a static function. `dli_fname` points at the *guest image's* path string,
-/// which this module keeps for the process's lifetime; that is the field Steam's
-/// crash handler and `Sys_LoadModule` actually read.
+/// `dli_sname`/`dli_saddr` are the nearest export at or below `addr`, which is what
+/// `dladdr` documents them to be, and both are left null when the image exports nothing
+/// below it — a legal answer that Darwin's own `dladdr` gives for a static function.
 fn dladdr(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let (addr, info) = (ctx.rdi, ctx.rsi);
     let Some(found) = describe(addr) else {
@@ -1590,23 +1198,13 @@ fn dladdr(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) ->
 /// `bool _dyld_find_unwind_sections(void *addr, struct dyld_unwind_sections *)`
 ///
 /// The question a C++ program's unwinder asks before it can throw anything:
-/// *which image is this return address in, and where are its unwind tables?*
-/// The host's dyld cannot answer it for a guest address — the image was mapped
-/// by [`open`] or by [`crate::Program`], not by dyld, so it has never heard of
-/// it — and answering `false` is what left every guest `throw` with no
-/// personality routine to consult.
-///
-/// This is the same "a loaded image needs what a program's images get for free"
-/// shape as the rest of this module, and it is the one the roadmap called the
-/// largest thing outstanding: `rosetta3`'s own `tests/unwind.rs` has been red on
-/// it since the commit that vendored a real `libunwind`.
 ///
 /// ## The structure, read out of the caller
 ///
 /// `dyld_priv.h` is not in any SDK on this system, so the layout comes from the
-/// vendored `libunwind` that calls it — the same method
-/// [`crate::abi::table`]'s `KBGetLayoutType` entry uses, and the same one this
-/// project uses to decide which bytes are code:
+/// vendored `libunwind` that calls it — the same method [`crate::abi::table`]'s
+/// `KBGetLayoutType` entry uses, and the same one this project uses to decide which
+/// bytes are code:
 ///
 /// ```text
 /// leaq -0x300(%rbp), %rsi   ; the structure
@@ -1619,16 +1217,9 @@ fn dladdr(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) ->
 /// movq -0x2e0(%rbp), ...    ; +0x20  compact_unwind_section_length
 /// ```
 ///
-/// Five pointer-sized words, forty bytes, and pointer-sized means the same
-/// forty on both architectures.
-///
 /// ## Where the section bounds come from
 ///
-/// The guest's own `mach_header`, walked by the **host's** libmacho. A
-/// `mach_header_64` and its load commands are a file format rather than a
-/// layout, so `getsectbynamefromheader_64` reads an x86-64 header correctly —
-/// the same fact the signature table already records for that function. What it
-/// returns is the link-time address, so the image's slide is added here.
+/// The guest's own `mach_header`, walked by the **host's** libmacho.
 fn find_unwind_sections(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -1636,10 +1227,7 @@ fn find_unwind_sections(
 ) -> Result<()> {
     let (addr, out) = (ctx.rdi, ctx.rsi);
     let Some((header, slide)) = guest_image_at(addr) else {
-        // Not ours. The host's dyld knows its own images, and a guest that
-        // unwinds through a *host* frame is asking about one of those — which
-        // is a case [`crate::unwind`] refuses further up, but the honest answer
-        // here is still the host's.
+        // Not ours.
         let Some(host) = host_symbol("_dyld_find_unwind_sections") else {
             crate::shims::set_int_return(ctx, 0);
             return Ok(());
@@ -1669,18 +1257,15 @@ fn find_unwind_sections(
     mem.write_bytes(out, &words, symbol)?;
     // True even when both sections are absent, which is a real answer rather
     // than a failure: the image *is* the one containing `addr`, and a C program
-    // with nothing to unwind has neither table. Reporting `false` would send
-    // libunwind off to its dynamic-registration path looking for another
-    // answer that does not exist.
+    // with nothing to unwind has neither table.
     crate::shims::set_int_return(ctx, 1);
     Ok(())
 }
 
 /// `(mach_header VA, slide)` for the guest image containing `va`.
 ///
-/// Both kinds: the program's own images — which includes anything it was linked
-/// against and this runtime mapped — and anything [`open`] loaded since. A
-/// caller cannot tell them apart and neither should the answer.
+/// Both kinds: the program's own images — which includes anything it was linked against
+/// and this runtime mapped — and anything [`open`] loaded since.
 fn guest_image_at(va: u64) -> Option<(u64, u64)> {
     fn containing(report: &LinkReport, va: u64) -> Option<(u64, u64)> {
         report
@@ -1700,9 +1285,6 @@ fn guest_image_at(va: u64) -> Option<(u64, u64)> {
 }
 
 /// `(unslid addr, size)` of a section in the guest image at `header`.
-///
-/// Through the host's libmacho, for the reason the doc above gives. `None` when
-/// the image has no such section, which for `__eh_frame` is most C programs.
 fn section_in(header: u64, section: &str) -> Option<(u64, u64)> {
     let host = host_symbol("getsectbynamefromheader_64")?;
     let (seg, sect) = (CString::new("__TEXT").ok()?, CString::new(section).ok()?);
@@ -1738,9 +1320,8 @@ struct Described {
 
 /// `addr` as an image and a symbol, if this runtime is the one that mapped it.
 ///
-/// Covers both kinds of guest image — the program itself and anything [`open`]
-/// loaded — because a caller cannot tell them apart and neither should the
-/// answer.
+/// Covers both kinds of guest image — the program itself and anything [`open`] loaded —
+/// because a caller cannot tell them apart and neither should the answer.
 fn describe(addr: u64) -> Option<Described> {
     if addr == 0 {
         return None;
@@ -1780,10 +1361,8 @@ fn describe(addr: u64) -> Option<Described> {
 
 /// The export at or below `addr`, as `(name, address)`, or `(0, 0)`.
 ///
-/// A linear scan: `ExportTable` is sorted by *name*, and this is the one
-/// question that wants it sorted by address. It runs once per `dladdr` call,
-/// which a program makes when it is reporting a crash or logging a module path,
-/// so the scan is not on any path that repeats.
+/// A linear scan: `ExportTable` is sorted by *name*, and this is the one question that
+/// wants it sorted by address.
 fn nearest_export(exports: &ExportTable, slide: u64, addr: u64) -> (u64, u64) {
     let mut best: Option<(&str, u64)> = None;
     for e in exports.entries() {
@@ -1801,10 +1380,6 @@ fn nearest_export(exports: &ExportTable, slide: u64, addr: u64) -> (u64, u64) {
 }
 
 /// A NUL-terminated copy of `text`, kept for the life of the process.
-///
-/// `dladdr` hands out pointers the caller may hold indefinitely — the
-/// specification says they are valid until the image is unloaded, and nothing
-/// here ever unloads — so these are interned rather than owned by the call.
 fn interned(text: &str) -> u64 {
     static STRINGS: Mutex<Option<BTreeMap<String, &'static CString>>> = Mutex::new(None);
     let mut map = STRINGS.lock().unwrap_or_else(|e| e.into_inner());
@@ -1831,11 +1406,9 @@ fn symbol_cstr(name: &str) -> u64 {
 
 /// The `dl` family, claimed ahead of the host's.
 ///
-/// The host exports all four and passing any of them through would be wrong for
-/// the reason in the module note, so they are claimed here and the addresses are
-/// never called. Each resolves to the host's own function anyway — an import
-/// slot holding the honest value is one fewer thing to explain in a crash dump,
-/// and it keeps the slot from being the null this project spells "unsatisfied".
+/// The host exports all four and passing any of them through would be wrong for the
+/// reason in the module note, so they are claimed here and the addresses are never
+/// called.
 pub fn provider() -> SyntheticDylib {
     let mut lib = SyntheticDylib::new("<rosetta3 dyld>");
     lib.flat(true);
@@ -1852,14 +1425,11 @@ pub fn provider() -> SyntheticDylib {
         "_dyld_image_containing_address",
         // Spelled with the underscore the C identifier already carries: these
         // are `_dyld_*`, so the `_{name}` below produces the `__dyld_*` a
-        // Mach-O binds against. They are on `machish`'s `_dyld_` denylist and
-        // resolve to null without this, which is how Terraria found them.
+        // Mach-O binds against.
         "_dyld_register_func_for_add_image",
         "_dyld_register_func_for_remove_image",
         // On `machish`'s `_dyld_` denylist like the two above, and the reason
-        // `tests/unwind.rs` has been red: a guest `libunwind` calls it before
-        // it can find a personality routine, and an unresolved slot is a null
-        // call at the moment an exception is being thrown.
+        // `tests/unwind.rs` has been red:
         "_dyld_find_unwind_sections",
     ] {
         if let Some(addr) = host_symbol(name) {

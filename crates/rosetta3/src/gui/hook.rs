@@ -1,41 +1,4 @@
 //! Where a frame ends, on both graphics APIs a Mac program uses.
-//!
-//! ## The one thing an overlay has to find
-//!
-//! Not the window, and not the swap chain: the **moment the guest has finished
-//! drawing and has not yet shown it**. There is exactly one such moment per API
-//! and both of them are calls the guest makes out of itself, which is the kind
-//! of thing this runtime already intercepts for a living.
-//!
-//! | API | the call | how it is caught |
-//! |---|---|---|
-//! | Metal | `-[MTLCommandBuffer presentDrawable:]` | a selector, in [`crate::objc::dispatch`] |
-//! | OpenGL | `-[NSOpenGLContext flushBuffer]` | the same |
-//! | OpenGL | `CGLFlushDrawable` | a shim, in [`crate::shims`] |
-//!
-//! Both OpenGL entry points are needed and they are not alternatives: AppKit's
-//! wrapper is what a Cocoa program calls, and a Unity player written before
-//! Metal talks to CGL directly — which is the same split
-//! [`crate::abi::table`] already documents around the `CGL*` family.
-//!
-//! ## What this costs when the overlay is doing nothing
-//!
-//! For the shim: nothing measurable, because it is one call per frame. For the
-//! selector hook: a load of a cached array and at most four integer compares,
-//! per message the guest sends. That is a real cost on a real hot path, so it
-//! is paid in the cheapest form there is — the selectors are **uniqued
-//! pointers**, compared as integers, rather than names compared as strings. A
-//! `sel_getName` here would be a string comparison per message and would be
-//! indefensible.
-//!
-//! ## What is not caught, and why that is stated rather than fixed
-//!
-//! `-[CAMetalDrawable present]`, sent directly rather than through a command
-//! buffer. At that point the guest's command buffer has already been committed
-//! and there is nothing left to encode into: drawing would need a command
-//! buffer of this runtime's own, racing the guest for the same texture with no
-//! ordering between them. A program that presents that way gets no overlay, and
-//! that is the correct outcome rather than a corrupted frame.
 
 use microlift::arch::x86_64::context::RegisterContext;
 
@@ -43,10 +6,6 @@ use crate::abi::{GuestMemory, Result};
 use crate::shims::coregraphics::Shim;
 
 /// The selectors a present goes through, uniqued once.
-///
-/// Registering a selector *creates* it if the runtime has not seen it, which is
-/// harmless — a selector is a string in a table — and means this works the same
-/// whether or not the guest has ever sent one.
 struct Selectors {
     /// The three spellings that carry a command buffer *and* a drawable.
     present_drawable: [u64; 3],
@@ -80,20 +39,7 @@ fn selectors() -> &'static Selectors {
     })
 }
 
-/// Selectors reported the first time the guest sends one, under
-/// `ROSETTA3_GUI_DEBUG`.
-///
-/// **Written because a guest that draws nothing tells you nothing.** Roblox
-/// produced no overlay and no diagnostic at all, which narrowed the problem to
-/// one thing — the hook was not firing — and left the actual question wide open:
-/// *what is it sending instead?* From outside the process that is unanswerable,
-/// and the guess this file had already committed to in prose ("a program that
-/// presents that way gets no overlay") was worth exactly as much as any other
-/// guess.
-///
-/// So the debug build watches the whole family and says which spellings a guest
-/// really uses. Pointer comparisons against uniqued selectors, so it costs a
-/// dozen integer compares per message and only when asked for.
+/// Selectors reported the first time the guest sends one, under `ROSETTA3_GUI_DEBUG`.
 const WATCHED: &[&str] = &[
     "presentDrawable:",
     "presentDrawable:atTime:",
@@ -136,16 +82,6 @@ fn observe(sel: u64) {
 }
 
 /// Called for every message the guest sends, before it is dispatched.
-///
-/// `receiver` is the receiver as the *host* runtime knows it, and `argument` is
-/// the first argument — the drawable, for the Metal spellings, and unused for
-/// `flushBuffer`. Both are already in the caller's hands at the point this is
-/// reached, so the hook costs no work of its own to obtain them.
-///
-/// Before, rather than after, and for a different reason on each API. Metal: the
-/// command buffer is still open, so an encoder appended here runs before the
-/// present the guest just scheduled. OpenGL: the back buffer still holds the
-/// frame, and after the flush it does not.
 pub fn before_send(sel: u64, receiver: u64, argument: u64) {
     if !super::armed() {
         return;
@@ -201,15 +137,8 @@ pub fn before_send(sel: u64, receiver: u64, argument: u64) {
     }
 }
 
-// ------------------------------------------------------------- the C path ---
 
 /// `CGLError CGLFlushDrawable(CGLContextObj ctx)`
-///
-/// Shimmed rather than passed through, which has one consequence worth naming:
-/// [`crate::shims::is_shimmed`] refuses to let the lifter promote a shimmed
-/// import, so this call now takes a slow VM exit where it used to be a fast
-/// one. Once per frame, against a call that is about to block on the display,
-/// which is the cheapest place in a program to spend an exit.
 fn flush_drawable(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -231,11 +160,6 @@ fn flush_drawable(
 }
 
 /// Whether `name` (underscore already stripped) is one of this module's.
-///
-/// Only when the overlay is switched on. A run with `ROSETTA3_GUI=0` leaves the
-/// import exactly as it was — classified by the table, promotable by the
-/// lifter — because an instrument that changes the program's translation when
-/// it is turned off is an instrument nobody can trust.
 pub fn shim_for(name: &str) -> Option<Shim> {
     if !super::enabled() {
         return None;

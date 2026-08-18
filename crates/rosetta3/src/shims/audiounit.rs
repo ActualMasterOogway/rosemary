@@ -1,35 +1,4 @@
 //! `AudioUnitSetProperty`: a guest function pointer installed as a *property*.
-//!
-//! ## The same problem as [`super::zlib`], one level further out
-//!
-//! An AudioUnit's render callback is not an argument. It is
-//! `AURenderCallbackStruct { AURenderCallback inputProc; void *inputProcRefCon; }`,
-//! handed to `AudioUnitSetProperty` as an opaque `const void *inData` with a
-//! byte count — so the signature that describes the call correctly is
-//! `(P, U32, U32, U32, P, U32)` and says nothing whatsoever about the function
-//! pointer sixteen bytes away. Only the *property id* says the structure is
-//! there at all, which is why this is a list of ids rather than a rule.
-//!
-//! What it costs to get wrong is the most alarming failure this runtime
-//! produces. CoreAudio does not call the callback on the thread that installed
-//! it; it calls it from `HALC_ProxyIOContext::IOWorkLoop` on
-//! `com.apple.audio.IOThread.client`, a real-time thread this runtime never
-//! created and knows nothing about. An unsubstituted guest pointer therefore
-//! faults on a non-executable page *on another thread*, several seconds after
-//! the call that installed it, with a stack that is entirely CoreAudio's.
-//!
-//! That the crossing works at all is [`crate::thunk`]'s doing: a thunk is a
-//! process-global native trampoline, and it makes a guest stack for whatever
-//! thread arrives on it. The audio IO thread is exactly the "host → guest on a
-//! new thread" case, arriving without warning.
-//!
-//! ## Copied, not patched in place
-//!
-//! Unlike a `z_stream`, the property structure is *copied* by
-//! `AudioUnitSetProperty` — it is `const void *` with a length, and the unit
-//! owns what it keeps. So the substitution goes into a temporary of this
-//! runtime's and the guest's own memory is never written. That is the better of
-//! the two shapes, and it is available here only because the callee copies.
 
 use core::ffi::c_void;
 
@@ -61,16 +30,6 @@ const INVALID_PROPERTY_VALUE: i32 = -10851;
 /// The framework's own entry point, found by `dlsym` rather than linked.
 ///
 /// Deliberately not `#[link(name = "AudioToolbox", kind = "framework")]`.
-/// Linking it pulls AudioToolbox — and the whole of CoreAudio behind it — into
-/// *every* run of this driver, including a `/bin/ls`, and its initializers run
-/// before the guest does. That is not just startup cost: they leave `errno`
-/// set, and `errno` is passthrough here, so the guest's first read of it sees a
-/// value from a library the guest never called. A fixture that checks
-/// `errno == 0` at start-up caught it.
-///
-/// `RTLD_DEFAULT` is enough and needs no fallback: this shim runs only because
-/// the guest imported `AudioUnitSetProperty`, and resolving that import is what
-/// loaded the framework.
 type SetPropertyFn = unsafe extern "C" fn(*mut c_void, u32, u32, u32, *const c_void, u32) -> i32;
 
 fn host_set_property() -> Option<SetPropertyFn> {
@@ -172,11 +131,7 @@ pub type Shim = crate::signal::Shim;
 
 /// Whether `name` (underscore already stripped) is one of this module's.
 ///
-/// `AudioUnitGetProperty` is deliberately absent. It can hand a callback struct
-/// *back*, and undoing the substitution needs the same care `signal`'s return
-/// value gets — but nothing observed reads one back, and a shim written for a
-/// case nobody exercises is a guess. It stays an ordinary table entry until
-/// something needs otherwise.
+/// `AudioUnitGetProperty` is deliberately absent.
 pub fn shim_for(name: &str) -> Option<Shim> {
     match name {
         "AudioUnitSetProperty" => Some(set_property),
@@ -189,10 +144,7 @@ mod tests {
     use super::*;
 
     /// The shim finds the framework with `RTLD_DEFAULT`, which in a real run is
-    /// satisfied by the guest's own import having loaded it. A test process has
-    /// no guest, so it loads the framework itself — and doing that rather than
-    /// stubbing the call keeps the whole path under test, the real
-    /// `AudioUnitSetProperty` included.
+    /// satisfied by the guest's own import having loaded it.
     fn framework_loaded() -> bool {
         static LOADED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *LOADED.get_or_init(|| {

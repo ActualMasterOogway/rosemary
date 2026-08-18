@@ -1,36 +1,4 @@
 //! What the overlay actually says.
-//!
-//! ## The two questions, on one screen
-//!
-//! `docs/PROFILING.md` opens by splitting the instruments in two: a *share*
-//! says where time goes, a *rate* says how often the thing that costs it
-//! happens, and neither is readable without the other. Until now they arrived
-//! as two blocks of stderr, printed on a ten-second timer, from a run that was
-//! killed rather than exited — so reading them meant scrolling back through a
-//! game's own logging to find two reports near each other in time and
-//! subtracting by hand.
-//!
-//! This panel is those two blocks side by side, in the window, updating, with
-//! the rates **differenced over the last second** rather than accumulated since
-//! the process started. That last part is the whole reason it is worth
-//! building: a cumulative counter answers "what has this run cost", and the
-//! question in front of someone watching a game stutter is "what is it costing
-//! *now*, in this scene, while I do this".
-//!
-//! ## Honesty rules it inherits
-//!
-//! Three of them, taken straight from the modules it reads, because a panel
-//! that lost them would be a prettier way to be wrong:
-//!
-//! - **A counter that is off reads zero, and that means nothing.** Everything
-//!   gated on `ROSETTA3_STATS` and `ROSETTA3_PROFILE` says so in place of its
-//!   figures rather than drawing an empty bar.
-//! - **Regions are a measurement, instructions are a lead.** The instruction
-//!   ranking is drawn dimmer and labelled, because Cranelift attributes no
-//!   source location to a prologue, an epilogue, or to most of what its
-//!   optimiser produces.
-//! - **Blocked samples are not running samples.** They are shown as their own
-//!   number and never folded into a share.
 
 use std::time::{Duration, Instant};
 
@@ -41,14 +9,6 @@ use crate::{profile, stats};
 const RANK: usize = 8;
 
 /// How often the snapshots behind the panel are rebuilt.
-///
-/// Not per frame, and the reason is a measurement rather than caution:
-/// [`profile::snapshot`] resolves every ranked address through the program's
-/// image map, which walks segments and allocates a string per row, and it does
-/// it with the *sampler's* lock held. At sixty hertz that is a lock the sampler
-/// waits on sixty times a second, which would make the overlay a cost inside the
-/// thing it is measuring. Twice a second is faster than a reader can follow and
-/// slow enough to be free.
 const REFRESH: Duration = Duration::from_millis(500);
 
 /// Frames kept for the frame-time graph. About two seconds at sixty hertz,
@@ -56,7 +16,6 @@ const REFRESH: Duration = Duration::from_millis(500);
 /// about the scene on screen.
 const FRAMES: usize = 120;
 
-// ------------------------------------------------------------- the model ----
 
 /// Everything the panel draws, sampled off the hot path.
 pub struct Model {
@@ -103,10 +62,8 @@ impl Default for Model {
 impl Model {
     /// One presented frame.
     ///
-    /// Called from the present hook on the guest's render thread, whether or not
-    /// the panel is visible: frame timing that only exists while someone is
-    /// looking at it cannot show what the overlay itself costs, and that is a
-    /// number this thing has to be able to answer for.
+    /// Called from the present hook on the guest's render thread, whether or not the
+    /// panel is visible:
     pub fn note_frame(&mut self) {
         let now = Instant::now();
         if let Some(last) = self.last_present.replace(now) {
@@ -126,9 +83,7 @@ impl Model {
             return;
         }
         // The snapshot about to be replaced becomes the one the next window is
-        // differenced against. Taken before the new one is read so that the two
-        // are a whole refresh interval apart and the rate is over a window that
-        // actually elapsed.
+        // differenced against.
         if let Some(at) = self.refreshed {
             self.window = now.duration_since(at);
             self.previous = Some((at, std::mem::take(&mut self.stats)));
@@ -160,9 +115,7 @@ impl Model {
             .fold(0.0, f32::max)
     }
 
-    /// A counter's increase over the last window, and the rate that works out
-    /// to. `None` when there is no previous snapshot to difference against,
-    /// which is the first half second of the panel being open.
+    /// A counter's increase over the last window, and the rate that works out to.
     fn per_second(&self, of: impl Fn(&stats::Snapshot) -> u64) -> Option<f64> {
         let (_, previous) = self.previous.as_ref()?;
         let delta = of(&self.stats).saturating_sub(of(previous));
@@ -172,10 +125,9 @@ impl Model {
 
 /// This process's resident size, or zero.
 ///
-/// The guest's memory and this runtime's are the same footprint and there is no
-/// way to separate them from inside — every translation, every thunk and every
-/// guest page is in one task. So this is reported as the one number it is,
-/// rather than split into a guess.
+/// The guest's memory and this runtime's are the same footprint and there is no way to
+/// separate them from inside — every translation, every thunk and every guest page is
+/// in one task.
 fn resident_bytes() -> u64 {
     /// `MACH_TASK_BASIC_INFO`, and its size in 32-bit words: two `mach_vm_size_t`
     /// and a third, two `time_value_t`, then `policy` and `suspend_count`.
@@ -216,15 +168,13 @@ fn resident_bytes() -> u64 {
     }
 }
 
-// ------------------------------------------------------------- the panel ----
 
 /// Draw the statistics panel into `list`.
 pub fn statistics(list: &mut DrawList, model: &Model) {
     let em = list.atlas().advance;
     // The first size the panel ever has: wide enough for the longest thing on
     // it — a share, a sixteen-digit address, and an `image+offset` with room
-    // for a real name — and as tall as the surface allows. After that the
-    // numbers belong to whoever last dragged an edge.
+    // for a real name — and as tall as the surface allows.
     super::input::size_defaults(
         (em * 72.0).min(list.width - 24.0),
         (list.height - 24.0).max(120.0),
@@ -291,11 +241,9 @@ pub fn statistics(list: &mut DrawList, model: &Model) {
 
 /// The corner that says the panel can be resized.
 ///
-/// Drawn only while the mouse is the panel's, because it is an affordance for
-/// something that cannot be done otherwise — and an overlay that advertises a
-/// control the reader has no way to reach is worse than one that stays quiet.
-/// Three diagonal ticks, which is the convention every resizable corner on this
-/// platform has used for thirty years.
+/// Drawn only while the mouse is the panel's, because it is an affordance for something
+/// that cannot be done otherwise — and an overlay that advertises a control the reader
+/// has no way to reach is worse than one that stays quiet.
 fn grip(list: &mut DrawList, x: f32, y: f32, width: f32, height: f32) {
     if !super::input::focused() {
         return;
@@ -310,9 +258,7 @@ fn grip(list: &mut DrawList, x: f32, y: f32, width: f32, height: f32) {
 
 /// Lay the panel out against a throwaway list to learn its height.
 ///
-/// The vertices produced here are discarded. That is two passes over a few
-/// thousand quads twice a second, which is not a cost worth avoiding with a
-/// second, separate description of the layout that could then disagree with it.
+/// The vertices produced here are discarded.
 fn measure(ui: &mut Ui, model: &Model) -> f32 {
     let start = ui.y;
     let mark = ui.list.vertices.len();
@@ -360,10 +306,6 @@ fn header(ui: &mut Ui, _model: &Model) {
 }
 
 /// What each key does, and what state it is in.
-///
-/// On the panel rather than only in the documentation, because three of the five
-/// keys now *change what is being measured* — and a reader looking at a share
-/// has to be able to see whether the counter behind it is even running.
 fn keys(ui: &mut Ui) {
     ui.heading("KEYS");
     for (key, what, state, colour) in [
@@ -447,10 +389,6 @@ fn frames(ui: &mut Ui, model: &Model) {
 }
 
 /// The last two seconds of frame intervals, as bars.
-///
-/// Scaled to the worst frame in the window rather than to a fixed ceiling, so a
-/// hitch is always visible and a steady sixty is always flat. The line at the
-/// display's own period is what says whether flat means fast.
 fn graph(ui: &mut Ui, model: &Model, worst: f32) {
     if model.frames_seen == 0 {
         return;
@@ -633,8 +571,7 @@ fn entries(ui: &mut Ui, model: &Model) {
     match s.pinned_link_registers {
         // Under a pinned link ABI a link is a branch inside translated code, so
         // nothing on that path can count without putting a contended store on
-        // it — and what `entries` then counts is chains, not regions. Printing
-        // a zero here would read as "linking stopped happening".
+        // it — and what `entries` then counts is chains, not regions.
         Some(n) => {
             ui.row(
                 "block linking",
@@ -767,14 +704,10 @@ fn footprint(ui: &mut Ui, model: &Model) {
     );
 }
 
-// --------------------------------------------------------------- the HUD ----
 
 /// The badge shown when the panel is closed but something is happening.
 ///
-/// Only ever drawn for a recording in progress and for the few seconds after a
-/// hotkey. An overlay that records the user's process without saying so on
-/// screen is not one worth shipping, and an overlay that is *always* visible is
-/// one that ends up in a screenshot of a bug report.
+/// Only ever drawn for a recording in progress and for the few seconds after a hotkey.
 pub fn badge(list: &mut DrawList, text: &str, colour: Color) {
     let line = list.atlas().line_h;
     let w = list.measure(text) + 20.0;

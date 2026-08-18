@@ -1,22 +1,4 @@
 //! Host frameworks, resolved at the moment the overlay first needs them.
-//!
-//! Everything this module reaches for — CoreGraphics, CoreText, OpenGL,
-//! HIToolbox — is a framework present on every macOS system, and every one of
-//! them is found with `dlsym` rather than linked. That is a deliberate
-//! difference from [`crate::objc::host`], which links `libobjc` because this
-//! crate's Objective-C support is not optional and the linker should check it.
-//!
-//! The overlay *is* optional, and more than that it is **inert until a hotkey
-//! is pressed**. Linking CoreText would pull CoreGraphics, ApplicationServices
-//! and their initializers into the address space of every run, including the
-//! console programs and the test fixtures that will never draw anything, and
-//! this runtime's whole posture is that the process it builds should look like
-//! the guest's process and not like a toolkit's. So the frameworks load on
-//! first use and a run that never shows the overlay never sees them.
-//!
-//! [`symbol`] tries `RTLD_DEFAULT` first for the same reason: in a guest that
-//! draws, CoreGraphics is already loaded — its window brought it in — and the
-//! `dlopen` is only for the case where it is not.
 
 use std::ffi::{CString, c_void};
 
@@ -35,11 +17,6 @@ const FRAMEWORKS: &[&str] = &[
 ];
 
 /// Bring the frameworks in, once.
-///
-/// Failures are silent and are meant to be: a system without OpenGL is a system
-/// where the OpenGL backend will find no entry points and say so through
-/// [`symbol`] returning `None`, which is a better diagnostic than a message at
-/// load time about a framework nothing has asked for yet.
 fn load_frameworks() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -54,11 +31,6 @@ fn load_frameworks() {
 }
 
 /// A host function by name, or `None` if this system does not export it.
-///
-/// Two attempts, in this order: the images already loaded, then the frameworks
-/// above. The first is what answers in a guest that draws — a program with a
-/// Metal layer has CoreGraphics mapped long before it presents a frame — and
-/// the second is the console case, where nothing has needed a font yet.
 pub fn symbol(name: &str) -> Option<*mut c_void> {
     let c = CString::new(name).ok()?;
     // SAFETY: `RTLD_DEFAULT` is a valid pseudo-handle, `c` outlives the call,
@@ -76,11 +48,6 @@ pub fn symbol(name: &str) -> Option<*mut c_void> {
 /// A host function as a typed pointer, or `None`.
 ///
 /// # Safety
-///
-/// The caller states that `name` has the signature `F`. Nothing checks it and
-/// nothing can: a `dlsym` result is an address, and the only record of what it
-/// expects is the framework's header. Every call site here names the header
-/// declaration it was checked against.
 pub unsafe fn function<F: Copy>(name: &str) -> Option<F> {
     const {
         assert!(
@@ -95,7 +62,6 @@ pub unsafe fn function<F: Copy>(name: &str) -> Option<F> {
     Some(unsafe { std::mem::transmute_copy::<*mut c_void, F>(&raw) })
 }
 
-// -------------------------------------------------- CoreFoundation shapes ---
 
 /// An opaque `CFTypeRef`. Never dereferenced here.
 pub type CfRef = *mut c_void;
@@ -105,11 +71,9 @@ pub type CgFloat = f64;
 
 /// `CGPoint`, `CGSize` and `CGRect` from `<CoreGraphics/CGGeometry.h>`.
 ///
-/// Declared again rather than reused from [`crate::shims::coregraphics`]
-/// because that module's copies exist to describe what the *guest* passes, and
-/// these describe what this runtime passes to the host. The two are the same
-/// shape today and are answers to different questions; joining them would make
-/// a change to the guest's ABI silently a change to the overlay's.
+/// Declared again rather than reused from [`crate::shims::coregraphics`] because that
+/// module's copies exist to describe what the *guest* passes, and these describe what
+/// this runtime passes to the host.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Point {
