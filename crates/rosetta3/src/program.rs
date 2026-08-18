@@ -899,6 +899,16 @@ impl<M: Regions> Program<M> {
         self.report.root().and_then(|i| i.entry)
     }
 
+    /// Whether the root image's entry point is an `LC_UNIXTHREAD` one — which
+    /// is to say whether it reads the process arguments off its own stack
+    /// instead of taking them in registers. See [`crate::stack`].
+    pub fn entry_reads_stack(&self) -> bool {
+        matches!(
+            self.report.root().and_then(|i| i.entry_command),
+            Some(machish::image::EntryPoint::UnixThread { .. })
+        )
+    }
+
     /// How to leave the function containing `va`.
     ///
     /// The unwinder's only question about the image, and it is a lookup rather

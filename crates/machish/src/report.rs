@@ -140,6 +140,10 @@ pub struct ImageReport {
     pub segments: Vec<SegmentReport>,
     /// Entry point, if the image declares one.
     pub entry: Option<Word>,
+    /// Which of the two entry-point commands declared it. Kept because the
+    /// address alone does not say how the process arguments are meant to
+    /// arrive: see [`MappedImage::entry_command`](crate::image::MappedImage::entry_command).
+    pub entry_command: Option<crate::image::EntryPoint>,
 }
 
 impl ImageReport {

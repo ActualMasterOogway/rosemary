@@ -79,6 +79,7 @@
 use machish::resolve::SyntheticDylib;
 
 use microlift::arch::x86_64::context::RegisterContext;
+use static_init::dynamic;
 
 use crate::abi::aggregate::{self, Aggregate, GuestClass, Leaf, Shape};
 use crate::abi::marshal::{self, Convert};
@@ -1171,12 +1172,13 @@ fn send(
 ///
 /// `ROSETTA3_TRACE_MSG=layer,setLayer:,makeBackingLayer`
 fn traced(sel: u64) -> Option<String> {
-    static WANTED: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    let wanted = WANTED.get_or_init(|| {
+    #[dynamic]
+    static WANTED: Vec<String> = {
         std::env::var("ROSETTA3_TRACE_MSG")
             .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
             .unwrap_or_default()
-    });
+    };
+    let wanted = &WANTED;
     if wanted.is_empty() {
         return None;
     }

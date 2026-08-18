@@ -118,6 +118,12 @@ pub struct MappedImage {
     pub span: usize,
     /// Absolute entry point, if the image declares one.
     pub entry: Option<Word>,
+    /// The entry-point command as declared, kept alongside the resolved address
+    /// because the two encodings do not agree on how the process arguments
+    /// reach the entry point: an `LC_MAIN` entry is a C function taking them in
+    /// registers, while an `LC_UNIXTHREAD` entry expects the kernel's frame on
+    /// the stack. Resolving to an address alone loses that.
+    pub entry_command: Option<crate::image::EntryPoint>,
 }
 
 /// A host page whose protection had to be widened because several segments with
@@ -193,6 +199,7 @@ pub fn map_segments<S: MachSpec, M: AddressSpace>(
         slide,
         span,
         entry: obj.entry().map(|e| e.address(base, slide)),
+        entry_command: obj.entry(),
     })
 }
 

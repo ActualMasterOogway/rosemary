@@ -67,13 +67,14 @@ use std::fmt::Write as _;
 use std::fs::File;
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use gimli::write::{Address, Dwarf, EndianVec, LineProgram, LineString, Sections, Unit};
 use gimli::{Encoding, Format, LineEncoding, LittleEndian, constants};
 use iced_x86::{Formatter, IntelFormatter};
 use microlift::arch::x86_64::decode::decode_region;
 use microlift::core::srcloc::GuestCodeMap;
+use static_init::dynamic;
 
 // ------------------------------------------------------- the JIT ABI --------
 
@@ -139,15 +140,15 @@ pub extern "C" fn __jit_debug_register_code() {
 
 // ---------------------------------------------------------- the switch ------
 
-static ENABLED: OnceLock<bool> = OnceLock::new();
-
 /// Whether this module does anything, and the one place that says so out loud.
 ///
 /// The notice is not decoration. A user who sets `ROSETTA3_LLDB=1`, attaches
 /// LLDB and sees nothing has hit the macOS default described in the [module
 /// note](self), and there is no signal anywhere else that would tell them.
+#[inline(always)]
 pub fn enabled() -> bool {
-    *ENABLED.get_or_init(|| {
+    #[dynamic]
+    static ENABLED: bool = {
         let on = std::env::var_os("ROSETTA3_LLDB").is_some_and(|value| {
             let value = value.to_string_lossy();
             !value.is_empty() && value != "0"
@@ -162,7 +163,8 @@ pub fn enabled() -> bool {
             );
         }
         on
-    })
+    };
+    *ENABLED
 }
 
 // -------------------------------------------------------- registration ------

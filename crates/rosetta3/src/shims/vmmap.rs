@@ -65,6 +65,7 @@
 //! diagnosis.
 
 use microlift::arch::x86_64::context::RegisterContext;
+use static_init::dynamic;
 
 use crate::abi::{GuestMemory, Result};
 
@@ -249,9 +250,11 @@ fn mprotect(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory
 /// It lives here rather than in a diagnostics module because this is where the
 /// question starts: a JIT guest that goes wrong goes wrong about memory, and the
 /// mapping trace is the first thing worth seeing.
+#[inline(always)]
 pub fn tracing() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("ROSETTA3_TRACE_VM").is_some())
+    #[dynamic]
+    static ON: bool = std::env::var_os("ROSETTA3_TRACE_VM").is_some();
+    *ON
 }
 
 /// A return value, with `errno` when it is a failure.

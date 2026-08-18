@@ -84,6 +84,7 @@ use core::ffi::c_void;
 use core::mem::MaybeUninit;
 
 use microlift::arch::x86_64::context::RegisterContext;
+use static_init::dynamic;
 
 use crate::abi::{Callbacks, GuestMemory, Result};
 use crate::thread::{GuestStart, StackRequest};
@@ -264,8 +265,9 @@ pub fn shim_for(name: &str) -> Option<Shim> {
 /// [`crate::trace::watching`]'s reason: the lift-time decision and the run-time
 /// decision have to agree.
 fn debug_mutex() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("ROSETTA3_DEBUG_MUTEX").is_some())
+    #[dynamic]
+    static ON: bool = std::env::var_os("ROSETTA3_DEBUG_MUTEX").is_some();
+    *ON
 }
 
 /// `int pthread_mutex_lock(pthread_mutex_t *)`, reporting a failure by address.

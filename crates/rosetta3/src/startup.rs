@@ -103,7 +103,25 @@ pub fn run(vm: &Vm) -> Result<i32, VmError> {
         .entry()
         .ok_or(VmError::NoCode { pc: 0, from: None })?;
     let (argc, argv, envp, apple) = vm.main_args();
-    let status = vm.call(entry, &[argc, argv, envp, apple])?;
+    // Which of the two entry-point encodings the root image used decides how it
+    // is reached, and the difference is not cosmetic. An `LC_MAIN` entry is a C
+    // function and takes its four arguments in registers. An `LC_UNIXTHREAD`
+    // entry is `crt1.o`'s `start`, which dyld reaches with a `jmp` after putting
+    // `rsp` back on the kernel's frame — it reads `argc` out of the word `rsp`
+    // points at and derives the rest from it. See [`crate::stack`].
+    let status = if vm.program.entry_reads_stack() {
+        let sp = vm
+            .kernel_sp()
+            .expect("an LC_UNIXTHREAD program starts on the stack its arguments were laid out on");
+        vm.jump_to(
+            entry,
+            microlift::arch::x86_64::context::RegisterContext::new(),
+            sp,
+        )?
+        .0
+    } else {
+        vm.call(entry, &[argc, argv, envp, apple])?
+    };
     Ok((status & 0xff) as i32)
 }
 

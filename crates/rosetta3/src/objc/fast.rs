@@ -93,6 +93,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use static_init::dynamic;
+
 use crate::abi::table::FunctionAbi;
 
 use super::dispatch::{RUNTIME, Runtime, host_symbol};
@@ -268,8 +270,8 @@ fn is_identity(entry: &Runtime) -> bool {
 /// nothing in `RUNTIME` takes an ellipsis, and an entry with a callback is
 /// never promotable.
 fn abi_for(i: usize) -> &'static FunctionAbi {
-    static ABIS: std::sync::OnceLock<Vec<FunctionAbi>> = std::sync::OnceLock::new();
-    &ABIS.get_or_init(|| {
+    #[dynamic]
+    static ABIS: Vec<FunctionAbi> = {
         RUNTIME
             .iter()
             .map(|r| FunctionAbi {
@@ -279,7 +281,8 @@ fn abi_for(i: usize) -> &'static FunctionAbi {
                 callbacks: &[],
             })
             .collect()
-    })[i]
+    };
+    &ABIS[i]
 }
 
 /// A substituting function, and the substitution it performs.

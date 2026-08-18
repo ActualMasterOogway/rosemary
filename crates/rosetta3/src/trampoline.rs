@@ -132,6 +132,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use microlift::core::FastImport;
 use microlift::core::bridge::ImportKind;
+use static_init::dynamic;
 
 use crate::abi::{Classification, FunctionAbi, Lookup};
 use crate::program::{AddrMap, ImportSite};
@@ -218,15 +219,15 @@ pub fn disarm() {
 
 /// Whether trampolines are in use.
 fn enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    ARMED.load(Ordering::Relaxed)
-        && *ON.get_or_init(|| {
-            std::env::var(ENV)
-                .ok()
-                .and_then(|v| v.trim().parse::<usize>().ok())
-                .unwrap_or(1)
-                != 0
-        })
+    #[dynamic]
+    static ON: bool = {
+        std::env::var(ENV)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(1)
+            != 0
+    };
+    ARMED.load(Ordering::Relaxed) && *ON
 }
 
 /// Entries made, slots substituted, and entries the guest actually reached.

@@ -899,6 +899,15 @@ impl Vm {
         crate::thread::current().map_or((0, 0, 0, 0), |t| t.main_args())
     }
 
+    /// The `rsp` an `LC_UNIXTHREAD` entry point is entered with — the word
+    /// holding `argc`, with `argv`, `envp` and `apple` laid out above it.
+    ///
+    /// Same thread restriction as [`Vm::main_args`], and for the same reason.
+    /// See [`crate::stack`] for the layout and [`Vm::jump_to`] for the entry.
+    pub fn kernel_sp(&self) -> Option<u64> {
+        crate::thread::current().and_then(|t| t.kernel_sp())
+    }
+
     /// Call a guest function with up to six integer arguments, and return
     /// whatever it leaves in `rax`.
     ///
@@ -952,15 +961,12 @@ impl Vm {
     pub fn call_with_stack(
         &self,
         entry: u64,
-        mut ctx: RegisterContext,
+        ctx: RegisterContext,
         stack: &[u8],
     ) -> Result<(u64, u64), VmError> {
         // A thread the guest spawned reaches here first, through a thunk, with
         // no stack of its own yet.
         let state = crate::thread::ensure()?;
-        if state.depth.get() >= MAX_DEPTH {
-            return Err(VmError::TooDeep { pc: entry });
-        }
 
         // Below the innermost live frame, past the red zone the guest's ABI
         // lets a leaf function use without adjusting `rsp`.
@@ -978,6 +984,49 @@ impl Vm {
         self.view()
             .write(rsp, &crate::retstub::address().to_le_bytes())
             .map_err(|source| VmError::Stack { source })?;
+        self.enter(state, entry, ctx, rsp)
+    }
+
+    /// Enter guest code at `entry` with `rsp` exactly as given, and **no return
+    /// address**: the caller owns the word `rsp` points at.
+    ///
+    /// The one thing that needs this is an `LC_UNIXTHREAD` entry point, where
+    /// that word is `argc` — dyld reaches such an entry point with a `jmp`, not
+    /// a `call`, and the frame below it is the kernel's rather than a caller's.
+    /// See [`crate::stack`] and [`crate::startup`].
+    ///
+    /// So there is nothing for the guest to return *to*. That is not a gap
+    /// being papered over: `crt1.o`'s `start` ends in `exit` and a `hlt`, and it
+    /// is the one caller. A guest that returned anyway would pop `argc` as an
+    /// address and fault, which is the honest report of a program that did
+    /// something no such program does.
+    pub fn jump_to(
+        &self,
+        entry: u64,
+        ctx: RegisterContext,
+        rsp: u64,
+    ) -> Result<(u64, u64), VmError> {
+        let state = crate::thread::ensure()?;
+        self.enter(state, entry, ctx, rsp)
+    }
+
+    /// Run the guest from `entry` with `rsp`, and service its exits until the
+    /// entry this made is finished.
+    ///
+    /// Where the per-entry bookkeeping lives — depth, the published register
+    /// context, the `setjmp` identity — so that the two ways in, a call with a
+    /// return address and a jump without one, differ only in who wrote the word
+    /// at `rsp`.
+    fn enter(
+        &self,
+        state: &crate::thread::ThreadState,
+        entry: u64,
+        mut ctx: RegisterContext,
+        rsp: u64,
+    ) -> Result<(u64, u64), VmError> {
+        if state.depth.get() >= MAX_DEPTH {
+            return Err(VmError::TooDeep { pc: entry });
+        }
         ctx.rsp = rsp;
         ctx.rip = entry;
         // The guest reads thread-specific data off `%gs` without calling

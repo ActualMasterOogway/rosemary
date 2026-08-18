@@ -111,6 +111,7 @@ struct Mapped<'a, S: MachSpec> {
     base: crate::raw::Word,
     slide: crate::raw::Word,
     entry: Option<crate::raw::Word>,
+    entry_command: Option<crate::image::EntryPoint>,
 }
 
 impl<S: MachSpec + 'static> Loader<S> {
@@ -305,6 +306,7 @@ impl<S: MachSpec + 'static> Loader<S> {
                 base: mapped.base,
                 slide: mapped.slide,
                 entry: mapped.entry,
+                entry_command: mapped.entry_command,
             });
         }
         Ok(out)
@@ -403,6 +405,7 @@ impl<S: MachSpec + 'static> Loader<S> {
                 objc: None,
                 segments,
                 entry: m.entry,
+                entry_command: m.entry_command,
             };
             // After binding, so that pointers read out of `__mod_init_func` and
             // `__thread_vars` are the resolved ones. See the extensions module

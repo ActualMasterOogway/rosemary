@@ -459,6 +459,13 @@ impl ThreadState {
         self.stack.main_args()
     }
 
+    /// The `rsp` an `LC_UNIXTHREAD` entry point is entered with, for the same
+    /// stack and with the same restriction: only the thread that started the
+    /// program has one.
+    pub fn kernel_sp(&self) -> Option<u64> {
+        self.stack.kernel_sp()
+    }
+
     /// The address range this thread's guest stack occupies.
     pub fn stack_range(&self) -> Range<u64> {
         self.stack.range()
