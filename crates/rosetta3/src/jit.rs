@@ -409,7 +409,7 @@ pub fn backend() -> microlift::Result<CraneliftBackend> {
     CraneliftBackend::with_flags(flags(), isa_settings())
 }
 
-/// How the frontend is told which machine a [`Function`] is being built for.
+/// How the frontend is told which machine a `Function` is being built for.
 ///
 /// Built from `cranelift-native`, which is where microlift's [`CraneliftBackend`] gets
 /// its ISA too, so the function and the backend it is handed to cannot disagree about

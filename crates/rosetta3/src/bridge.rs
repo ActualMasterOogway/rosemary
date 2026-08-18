@@ -141,7 +141,7 @@ pub fn indirect_bridge() -> BridgeImport {
     BridgeImport::direct("rosetta3-indirect", entry(indirect_call))
 }
 
-/// The imports that did not exist when the [`LifterConfig`] was built.
+/// The imports that did not exist when the `LifterConfig` was built.
 #[derive(Debug)]
 pub struct DynamicImports;
 
