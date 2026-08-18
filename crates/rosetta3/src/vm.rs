@@ -435,18 +435,12 @@ pub struct Vm {
 /// the guest view — still has to convince the compiler on its own.
 pub struct SharedProgram(Program<MmapSpace>);
 
-// SAFETY: two claims, and the second is the interesting one.
-//
-// First, a `Program` is not mutated after construction. What makes it `!Sync`
-// automatically is the raw pointers inside its `MmapSpace`, and those are
-// read-only handles to mappings that live exactly as long as the `Vm`.
-//
-// Second, guest *memory* is shared and unsynchronised — deliberately. The guest
-// is identity-mapped, its threads run in one address space, and two guest
-// threads racing on a guest variable is a race the guest wrote and would have
-// had on Intel too. Serialising it would be both impossible and wrong. What this
-// runtime owes is that its *own* structures survive concurrent use, which is
-// what the mutexes beside this field are for.
+// SAFETY: a `Program` is not mutated after construction; what makes it `!Sync` is
+// the raw pointers inside its `MmapSpace`, which are read-only handles to mappings
+// living exactly as long as the `Vm`. Guest memory is shared and unsynchronised
+// deliberately — two guest threads racing on a guest variable is a race the guest
+// wrote and would have had on Intel. What this runtime owes is that its own
+// structures survive concurrent use, which is what the mutexes are for.
 unsafe impl Sync for SharedProgram {}
 unsafe impl Send for SharedProgram {}
 

@@ -40,17 +40,12 @@ pub struct Translation {
     _backend: CraneliftBackend,
 }
 
-// SAFETY: a `Translation` is immutable once built, and what the guest's threads
-// do with one is run it — which is what threads do with any function. `enter`
-// touches only the caller's own `RegisterContext` and guest memory, whose races
-// are the guest's own (see the note on `Vm`). `_backend` is never read after
-// construction; it is held so the code stays mapped, and its `Drop` runs once,
-// when the last `Arc` goes, by which time no thread can be inside the code.
-//
-// The reason this is written out rather than derived is that `CraneliftBackend`
-// is neither `Send` nor `Sync` — it is a JIT module, built on one thread and, in
-// microlift's intended use, used there. We use it as a finished artefact, which
-// is a narrower thing than the type allows and so has to be asserted.
+// SAFETY: a `Translation` is immutable once built. `enter` touches only the
+// caller's own `RegisterContext` and guest memory, whose races are the guest's own.
+// `_backend` is held so the code stays mapped and its `Drop` runs once, when the
+// last `Arc` goes, by which time no thread can be inside the code. Written out
+// rather than derived because `CraneliftBackend` is neither `Send` nor `Sync`: we
+// use it as a finished artefact, which is narrower than the type allows.
 unsafe impl Send for Translation {}
 unsafe impl Sync for Translation {}
 
