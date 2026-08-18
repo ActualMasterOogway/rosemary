@@ -94,7 +94,7 @@ impl Translation {
 /// last one ended.
 ///
 /// Which is also why the exits that *do* need the run loop must never be linked, and
-/// they are not:
+/// they are not.
 fn follow_links(ctx: &mut RegisterContext) -> ExitReason {
     while ctx.link_hit != 0 {
         // SAFETY: `link_hit` holds an address lifted code read out of the table
@@ -191,7 +191,7 @@ impl CodeCache {
         let start = region.range.start;
 
         // How long one region took to compile, when tracing. Not curiosity. A
-        // big region is not slow in proportion to its size:
+        // big region is not slow in proportion to its size.
         let started = crate::shims::vmmap::tracing().then(std::time::Instant::now);
 
         // Where control can arrive from outside without any lift knowing: a
@@ -255,7 +255,7 @@ impl CodeCache {
         );
         // Where this region's compiled code went, so a fault inside it can be
         // named as a *guest* range rather than as an address in an anonymous
-        // mapping. See [`crate::fault`]. The *body*, not the entry:
+        // mapping. See [`crate::fault`]. The *body*, not the entry.
         crate::fault::placed(
             compiled.link_target as usize as u64,
             start,

@@ -104,9 +104,6 @@ impl Default for ThunkTable {
 /// The read-only half of a [`ThunkTable`], published for lookups that must not take a
 /// lock.
 ///
-/// ## Why the lookups could not stay behind the mutex
-///
-/// ## Why a miss still has to be checked
 ///
 /// A stale snapshot answers "no" for a thunk another thread created a moment ago, and
 /// unlike a code translation that answer is not merely older — it is wrong, because

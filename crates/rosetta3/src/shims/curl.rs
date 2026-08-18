@@ -9,7 +9,7 @@ use crate::abi::{Callbacks, GuestMemory, Result};
 use super::set_int_return;
 
 /// One of this module's implementations, in the shape [`crate::shims`] wants — the
-/// wider one, carrying [`Callbacks`]:
+/// wider one, carrying [`Callbacks`].
 pub type Shim = crate::signal::Shim;
 
 // The host's own libcurl — `/usr/lib/libcurl.4.dylib`, which is the same

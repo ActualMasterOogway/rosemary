@@ -8,7 +8,7 @@ use crate::abi::{GuestMemory, Result};
 
 /// `BOOL NSMouseInRect(NSPoint aPoint, NSRect aRect, BOOL isFlipped)`
 ///
-/// The guest's registers are the whole reason this is not a table entry:
+/// The guest's registers are the whole reason this is not a table entry.
 fn mouse_in_rect(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let host = host_or_refuse(symbol)?;
     let point = CgPoint {

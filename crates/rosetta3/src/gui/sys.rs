@@ -48,6 +48,10 @@ pub fn symbol(name: &str) -> Option<*mut c_void> {
 /// A host function as a typed pointer, or `None`.
 ///
 /// # Safety
+///
+/// The caller states that `name` has the signature `F`. Nothing checks it and nothing
+/// can: a `dlsym` result is an address. Every call site names the header declaration it
+/// was checked against.
 pub unsafe fn function<F: Copy>(name: &str) -> Option<F> {
     const {
         assert!(

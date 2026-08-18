@@ -30,7 +30,7 @@ pub struct Atlas {
     pub width: usize,
     pub height: usize,
     /// Cell size in texels, and the advance a character contributes to a line. The
-    /// advance is smaller than the cell:
+    /// advance is smaller than the cell.
     pub cell_w: usize,
     pub cell_h: usize,
     pub advance: f32,
@@ -269,7 +269,7 @@ fn rasterize(size: f32) -> Option<Atlas> {
 
 /// Atlases already built, keyed by the pixel size that produced them.
 ///
-/// A `'static` reference is handed out rather than an `Arc`:
+/// A `'static` reference is handed out rather than an `Arc`.
 static ATLASES: Mutex<Option<HashMap<u32, &'static Atlas>>> = Mutex::new(None);
 
 /// The atlas for `size` pixels, building it if this is the first ask.
@@ -305,7 +305,7 @@ mod tests {
 
     /// CoreText draws, and draws where this module says it does.
     ///
-    /// The three assertions are the three ways the atlas can be wrong without failing:
+    /// The three assertions are the three ways the atlas can be wrong without failing.
     #[test]
     fn rasterizes_into_the_cells_it_claims() {
         let Some(atlas) = atlas(16.0) else {

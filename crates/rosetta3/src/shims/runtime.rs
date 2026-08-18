@@ -8,6 +8,9 @@ static STACK_CHK_GUARD: u64 = 0x00ff_dead_beef_c0de;
 /// `int _NSGetExecutablePath(char *buf, uint32_t *bufsize)`.
 ///
 /// # Safety
+///
+/// Called only through an import slot this module defines, with the two arguments the
+/// declaration gives it.
 unsafe extern "C" fn ns_get_executable_path(buf: *mut u8, bufsize: *mut u32) -> i32 {
     if bufsize.is_null() {
         return -1;

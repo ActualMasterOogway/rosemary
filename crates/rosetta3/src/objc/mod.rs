@@ -18,7 +18,7 @@ use crate::vm::{Vm, VmError};
 /// Something the guest declared that could not be reproduced faithfully.
 ///
 /// Each is a named stop with the guest's own name in it, in the register the rest of
-/// this project uses for refusals:
+/// this project uses for refusals.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Refusal {
@@ -170,7 +170,7 @@ impl ObjcRuntime {
 
 /// Register every image's Objective-C metadata with the host runtime.
 ///
-/// Returns `Ok` with refusals inside rather than failing:
+/// Returns `Ok` with refusals inside rather than failing.
 pub fn register(vm: &Vm) -> Result<ObjcRuntime, VmError> {
     let mut rt = ObjcRuntime::default();
     register_images(vm, &mut rt, &images_of(&vm.program.report))?;
@@ -250,9 +250,10 @@ fn register_images(vm: &Vm, rt: &mut ObjcRuntime, images: &[&ObjcImage]) -> Resu
 /// Call every `+load` the guest declares, superclass first.
 ///
 /// The one Objective-C method that runs *because the image was loaded* rather than
-/// because somebody sent a message, and programs use it for exactly that:
+/// because somebody sent a message.
 ///
-/// ## Order, as far as it is defined
+/// A class's `+load` runs after its superclass's, which is the only ordering guarantee
+/// the language makes. Categories come last. Beyond that the order is this pass's.
 pub fn call_load_methods(vm: &Vm, rt: &ObjcRuntime) -> Result<usize, VmError> {
     load_images(vm, rt, &images_of(&vm.program.report))
 }
@@ -567,7 +568,7 @@ fn register_class(
 
 /// Install one guest method on `target`, with a thunk in place of its `IMP`.
 ///
-/// The thunk is the whole reason host→guest dispatch needs no interception:
+/// The thunk is the whole reason host→guest dispatch needs no interception.
 fn add_method(
     vm: &Vm,
     target: host::Class,
@@ -580,7 +581,7 @@ fn add_method(
         return Err("the implementation is not a guest address");
     }
     // The encoding is right here, and it is what makes this callback different
-    // from every other one:
+    // from every other one.
     let (imp, carried) = match typed_thunk(vm, m) {
         Ok(imp) => (imp, Ok(())),
         Err(reason) => (

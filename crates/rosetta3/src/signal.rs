@@ -246,7 +246,7 @@ pub fn sigaltstack(
 ///
 /// Accepted with `KERN_SUCCESS` and **not honoured**:
 ///
-/// It is a shim rather than a table entry for the same reason `sigaction` is:
+/// It is a shim rather than a table entry for the same reason `sigaction` is.
 pub fn task_set_exception_ports(
     _symbol: &str,
     ctx: &mut RegisterContext,

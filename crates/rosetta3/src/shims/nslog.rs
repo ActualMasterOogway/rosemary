@@ -17,7 +17,7 @@ const UTF8: u32 = 0x0800_0100;
 /// The largest rendering of one object or format this shim will read back out of
 /// CoreFoundation.
 ///
-/// Totality, in the same spirit as [`crate::abi::MAX_CSTR`]:
+/// Totality, in the same spirit as [`crate::abi::MAX_CSTR`].
 const MAX_TEXT: usize = 64 * 1024;
 
 /// Service `NSLog`.
@@ -75,7 +75,7 @@ pub fn run_alert_panel(
             core::mem::transmute(host as usize);
         f(ctx.rdi, message, ctx.rdx, ctx.rcx, ctx.r8)
     };
-    // Which button the panel came back with is part of the diagnostic:
+    // Which button the panel came back with is part of the diagnostic.
     eprintln!("rosetta3: guest alert: answered {n}");
     // `NSInteger` is sixty-four bits wide, so the whole of `rax` carries it
     // rather than [`super::set_int_return`]'s `int`.
@@ -177,7 +177,7 @@ type NsLogFn = unsafe extern "C" fn(*const c_void, ...);
 /// Foundation's `NSLog`, if this process has Foundation.
 ///
 /// Looked up rather than linked, for the reason [`crate::objc::dispatch`] looks its
-/// runtime up:
+/// runtime up.
 fn host_nslog() -> Option<NsLogFn> {
     static FOUND: OnceLock<Option<usize>> = OnceLock::new();
     let addr = *FOUND.get_or_init(|| dlsym("NSLog").map(|p| p as usize));

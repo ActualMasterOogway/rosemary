@@ -29,7 +29,7 @@ fn matches(wanted: &[String], symbol: &str) -> bool {
 /// Report the call about to be serviced.
 ///
 /// The first four integer arguments, unconditionally, without consulting the symbol's
-/// signature:
+/// signature.
 pub fn entering(symbol: &str, ctx: &RegisterContext) {
     eprintln!(
         "rosetta3: call [{:#x}] {symbol}({:#x}, {:#x}, {:#x}, {:#x})",

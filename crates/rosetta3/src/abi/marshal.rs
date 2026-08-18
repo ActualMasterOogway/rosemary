@@ -105,7 +105,7 @@ enum NarrowTail {
 impl NarrowTail {
     /// Which prototype places `overflow`, or `None` if nothing here can.
     ///
-    /// `fp_return` refuses the whole question rather than answering it wrong:
+    /// `fp_return` refuses the whole question rather than answering it wrong.
     fn of(overflow: &[ArgType], fp_return: bool) -> Option<Self> {
         if widening_preserves_offsets(overflow) {
             return Some(NarrowTail::None);
@@ -149,7 +149,7 @@ pub fn call(
 /// [`call`], with a bridge for the arguments [`FunctionAbi::callbacks`] names.
 ///
 /// Substitution happens here rather than in the caller because *here* is where an
-/// argument's parameter index is known:
+/// argument's parameter index is known.
 pub fn call_with(
     symbol: &str,
     abi: &FunctionAbi,
@@ -384,7 +384,7 @@ fn int_reg(symbol: &str, ctx: &RegisterContext, reg: GuestReg) -> Result<u64> {
 /// back the way the host expects to receive it.
 ///
 /// Apple's arm64 ABI makes the *caller* extend arguments narrower than 32 bits, so this
-/// is not cosmetic:
+/// is not cosmetic.
 fn int_arg(ty: ArgType, raw: u64) -> u64 {
     match ty {
         ArgType::SignedByte => raw as u8 as i8 as i64 as u64,
@@ -908,7 +908,7 @@ pub fn call_shapes(
                             push_int(w, ArgType::UnsignedDoubleword, &mut n_int, &mut overflow)?;
                         }
                     }
-                    // AAPCS64 B.4:
+                    // AAPCS64 B.4.
                     HostClass::Indirect => {
                         let mut copy = vec![0u64; agg.size.div_ceil(8)];
                         for (i, w) in copy.iter_mut().enumerate() {

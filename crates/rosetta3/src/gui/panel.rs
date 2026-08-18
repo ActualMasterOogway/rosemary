@@ -63,7 +63,7 @@ impl Model {
     /// One presented frame.
     ///
     /// Called from the present hook on the guest's render thread, whether or not the
-    /// panel is visible:
+    /// panel is visible.
     pub fn note_frame(&mut self) {
         let now = Instant::now();
         if let Some(last) = self.last_present.replace(now) {

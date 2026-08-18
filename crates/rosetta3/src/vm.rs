@@ -40,7 +40,7 @@ pub enum VmError {
     /// An indirect call to an address that is neither guest code nor anything
     /// the runtime can describe well enough to call.
     UnknownIndirectCall { callee: u64, resume: u64 },
-    /// The guest executed a `syscall` instruction. A stop rather than a passthrough:
+    /// The guest executed a `syscall` instruction. A stop rather than a passthrough.
     Syscall { number: u64, pc: u64 },
     /// An exit the runtime has nothing to do about: an unimplemented or invalid
     /// instruction, a trap, a divide error.
@@ -204,7 +204,7 @@ fn instruction_name(reason: ExitReason, code: u32) -> Option<String> {
 
 /// An exit, as [`crate::stats`] counts them.
 ///
-/// The mapping is not the identity, and the place it is not is `UnknownJump`:
+/// The mapping is not the identity, and the place it is not is `UnknownJump`.
 pub(crate) fn classify(exit: ExitReason, code: u32) -> crate::stats::Exit {
     use crate::stats::Exit;
     match exit {
@@ -312,7 +312,7 @@ impl GuestView {
     /// A view over `regions`, which must be identity-mapped host memory.
     ///
     /// **Sorted here, once**, because [`GuestView::region_of`] is a binary search and a
-    /// linear one was measurable:
+    /// linear one was measurable.
     pub fn new(mut regions: Vec<Range<u64>>) -> Self {
         regions.sort_by_key(|r| r.start);
         // The search below takes the last region beginning at or below `va` and
@@ -424,7 +424,7 @@ impl GuestMemory for GuestView {
 /// ## What is shared between guest threads, and what is not
 ///
 /// Everything in this struct is shared, because everything in it is either immutable or
-/// genuinely common to every thread:
+/// genuinely common to every thread.
 pub struct Vm {
     /// The linked guest, identity-mapped. Immutable once loaded: guest *memory*
     /// changes constantly, but through [`GuestView`], not through this.
@@ -504,7 +504,7 @@ impl Vm {
     /// As [`Vm::new`], choosing how imports reach the host.
     ///
     /// [`ImportPolicy::AlwaysSlow`](crate::ImportPolicy::AlwaysSlow) is what makes
-    /// the claim testable *end to end* rather than by inspection:
+    /// the claim testable *end to end* rather than by inspection.
     pub fn with_policy(
         program: Program<MmapSpace>,
         exe_path: &str,
@@ -513,7 +513,7 @@ impl Vm {
     ) -> Result<Self, VmError> {
         let mut program = program;
         // Before anything reads the program's memory, and only under the fast
-        // policy:
+        // policy.
         match policy {
             crate::ImportPolicy::AlwaysSlow => crate::trampoline::disarm(),
             _ => {
@@ -565,7 +565,7 @@ impl Vm {
 
     /// Realize the guest's Objective-C classes in the host runtime.
     ///
-    /// Idempotent, and deliberately *not* done in [`Vm::with_policy`]:
+    /// Idempotent, and deliberately *not* done in [`Vm::with_policy`].
     pub fn register_objc(&self) -> Result<&'static crate::objc::ObjcRuntime, VmError> {
         let _guard = self
             .objc_registration
@@ -582,7 +582,7 @@ impl Vm {
     /// Realizing the classes runs **no guest code**, which is why it is separate from
     /// [`Vm::run_loaded_load_methods`]:
     ///
-    /// A `Vm` that has never registered at all is left alone:
+    /// A `Vm` that has never registered at all is left alone.
     pub fn register_loaded_objc(
         &self,
         report: &machish::report::LinkReport,
@@ -646,7 +646,7 @@ impl Vm {
 
     /// A class pointer on its way back *in*.
     ///
-    /// Not symmetry for its own sake:
+    /// Not symmetry for its own sake.
     pub fn objc_guest_class(&self, host: u64) -> u64 {
         self.objc().map_or(host, |rt| rt.guest_or(host))
     }
@@ -793,10 +793,10 @@ impl Vm {
         state.rsp.set(rsp);
         state.depth.set(state.depth.get() + 1);
         // This entry gets an identity of its own, which `setjmp` records and
-        // `longjmp` checks:
+        // `longjmp` checks.
         let outer_entry = state.enter();
         // Publish the register context for the duration, for the same shape of
-        // reason and a different reader:
+        // reason and a different reader.
         let outer_context = state.publish_context(&mut ctx);
         // Publish the VM for the duration: a thunk called from inside a host
         // function has no other way to find it. See `crate::thunk`.
@@ -944,7 +944,7 @@ impl Vm {
     ///
     /// ## What each arm assumes about the stack
     ///
-    /// Microlift leaves the guest stack exactly as the instruction would have:
+    /// Microlift leaves the guest stack exactly as the instruction would have.
     fn step(&self, ctx: &mut RegisterContext, exit: ExitReason) -> Result<Option<u64>, VmError> {
         match exit {
             // The guest returned to the stub this VM pushed and executed the
@@ -987,7 +987,7 @@ impl Vm {
                 // A tail `jmp` through a register or a memory operand, whose
                 // target may be **one of this runtime's own thunks**.
                 // [`Vm::dispatch_indirect`] has unwrapped that for an indirect
-                // *call*:
+                // *call*.
                 Ok(TransferKind::IndirectJump) => {
                     if !self.program.is_guest_address(ctx.rip) {
                         if let Some(guest) = self.guest_behind_thunk(ctx.rip) {
@@ -1010,7 +1010,7 @@ impl Vm {
             }
 
             // The answer is discarded here and load-bearing in
-            // [`Vm::dispatch_indirect_bridged`]:
+            // [`Vm::dispatch_indirect_bridged`].
             ExitReason::IndirectCall => {
                 self.dispatch_indirect(ctx)?;
                 Ok(None)
@@ -1073,7 +1073,7 @@ impl Vm {
     /// The same work [`Vm::service_import`] does, with one thing added to the answer:
     /// whether control was *redirected*.
     ///
-    /// `jumped` is false even for an import reached by a tail `jmp`:
+    /// `jumped` is false even for an import reached by a tail `jmp`.
     pub(crate) fn service_bridged_import(
         &self,
         import_va: u64,
@@ -1096,7 +1096,7 @@ impl Vm {
         ctx: &mut RegisterContext,
     ) -> Result<bool, VmError> {
         // `dispatch_indirect` reads the callee from the context, and microlift
-        // has already parked it there. Set explicitly rather than relied upon:
+        // has already parked it there. Set explicitly rather than relied upon.
         ctx.imported_function_va = target;
         self.dispatch_indirect(ctx)
     }
@@ -1130,7 +1130,7 @@ impl Vm {
         ctx: &mut RegisterContext,
     ) -> Result<(), VmError> {
         // An import that resolved into another **guest** image, which happens
-        // as soon as one exists:
+        // as soon as one exists.
         if site.resolved != 0 && self.program.is_guest_address(site.resolved) {
             return self.transfer_to_guest(site.resolved, ctx);
         }
@@ -1169,7 +1169,7 @@ impl Vm {
 
     /// Decide what an indirect call through a runtime-computed address means.
     ///
-    /// The question the identity mapping forces on every one of them:
+    /// The question the identity mapping forces on every one of them.
     fn dispatch_indirect(&self, ctx: &mut RegisterContext) -> Result<bool, VmError> {
         let callee = ctx.imported_function_va;
         let resume = ctx.rip;
@@ -1199,7 +1199,7 @@ impl Vm {
 
         // A host address the guest *loaded from an import slot* and then called
         // through a register, rather than at a `call` site the lifter could
-        // match. `_Thread_local` access is the case that forces this:
+        // match. `_Thread_local` access is the case that forces this.
         if let Some(site) = self.program.import_by_target(callee) {
             // A host pointer that reached the guest by neither of the routes
             // [`crate::trampoline`] substitutes — not out of a slot, not out of
@@ -1327,7 +1327,7 @@ impl Vm {
     /// on.
     ///
     /// **And say it out loud.** Parking alone was enough while the host frame in the
-    /// middle was `qsort`'s:
+    /// middle was `qsort`'s.
     pub(crate) fn set_pending(&self, err: VmError) {
         let Some(state) = crate::thread::current() else {
             return;
@@ -1347,7 +1347,7 @@ impl Vm {
     /// Whether a callback left an error behind, without taking it.
     ///
     /// [`Vm::run_loop`] takes the parked error after every region exit, which was
-    /// enough while every host call *was* one. A bridged call is not:
+    /// enough while every host call *was* one. A bridged call is not.
     pub(crate) fn has_pending(&self) -> bool {
         crate::thread::current().is_some_and(|s| s.pending.borrow().is_some())
     }
@@ -1410,7 +1410,7 @@ fn cpuid(leaf: u32, subleaf: u32) -> [u32; 4] {
 
             // SSE3 (bit 0) | SSSE3 (bit 9) | SSE4.1 (bit 19) | SSE4.2 (bit 20)
             // | Hypervisor (bit 31) **AES-NI (bit 25) is deliberately absent,
-            // and this is the rule the whole word is written by:
+            // and this is the rule the whole word is written by.
             let ecx = (1 << 0) | (1 << 9) | (1 << 19) | (1 << 20) | (1 << 31);
 
             [version, misc, ecx, edx]
@@ -1477,7 +1477,7 @@ impl crate::abi::Callbacks for Vm {
         }
         // One of this runtime's own import stubs, which the guest is holding
         // because a slot it loaded was substituted for one. The host wants the
-        // function that stub stands for:
+        // function that stub stands for.
         if let Some(host) = crate::trampoline::host_behind(va) {
             return Ok(host);
         }
@@ -1498,7 +1498,7 @@ impl crate::abi::Callbacks for Vm {
 
     /// A thunk handed back by host code becomes the guest pointer it stands for.
     ///
-    /// `signal` is what needs this:
+    /// `signal` is what needs this.
     fn unsubstitute(&self, va: u64) -> u64 {
         self.guest_behind_thunk(va).unwrap_or(va)
     }
@@ -1509,7 +1509,7 @@ mod tests {
     use super::*;
 
     /// The binary search must agree with the linear scan it replaced, including on the
-    /// two cases a `partition_point` is easy to get wrong:
+    /// two cases a `partition_point` is easy to get wrong.
     #[test]
     fn a_region_is_found_by_search_wherever_a_scan_would_find_it() {
         // Deliberately out of order on the way in, because `new` is what sorts
@@ -1576,7 +1576,7 @@ mod tests {
             (13, "cmpxchg16b"),
             (23, "popcnt"),
             // The host CPU has AES instructions and microlift does not lift
-            // them, which is the case this whole test is about:
+            // them, which is the case this whole test is about.
             (25, "aes"),
             (26, "xsave"),
             (27, "osxsave"),

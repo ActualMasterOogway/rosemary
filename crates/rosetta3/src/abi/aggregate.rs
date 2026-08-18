@@ -15,7 +15,7 @@ pub struct Leaf {
 
 /// A struct or array passed or returned by value.
 ///
-/// Flattened:
+/// Flattened.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Aggregate {
     pub size: usize,
@@ -52,7 +52,7 @@ pub enum GuestClass {
     /// One or two eightbytes, in the argument registers of the named classes.
     Registers(Vec<Eightbyte>),
     /// On the stack, eight-byte aligned. For a return, this is the hidden pointer
-    /// convention:
+    /// convention.
     Memory,
 }
 
@@ -64,7 +64,7 @@ pub enum HostClass {
     Hfa { ty: T, count: usize },
     /// One or two `x` registers holding the raw bytes.
     Integer { words: usize },
-    /// Passed and returned through an address rather than in registers:
+    /// Passed and returned through an address rather than in registers.
     Indirect,
 }
 

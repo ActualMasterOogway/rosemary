@@ -73,7 +73,7 @@ pub fn abi_of(name: &str) -> Option<&'static FunctionAbi> {
 
 /// The entry points that **cannot cause the host runtime to call an `IMP`**.
 ///
-/// **An allowlist, not a denylist**, because the default has to be safe:
+/// **An allowlist, not a denylist**, because the default has to be safe.
 static NEVER_DISPATCHES: &[&str] = &[
     "class_getInstanceSize",
     "class_getInstanceVariable",
@@ -189,7 +189,7 @@ fn guest_class(host: u64) -> u64 {
 
 /// The host function `name` names, cached.
 ///
-/// Reached from inlined guest code, so it may not fail:
+/// Reached from inlined guest code, so it may not fail.
 fn host_of(cache: &AtomicU64, name: &str) -> u64 {
     let cached = cache.load(Ordering::Relaxed);
     if cached != 0 {
@@ -239,7 +239,7 @@ macro_rules! is_class {
 /// the mask [`Through::matches`] holds against the `RUNTIME` row — so the declaration
 /// cannot drift from the behaviour, and neither can drift from the table.
 ///
-/// The types are the row's own, spelled at their real widths rather than as `u64`:
+/// The types are the row's own, spelled at their real widths rather than as `u64`.
 macro_rules! through {
     ($( $f:ident, $host:literal, ( $($k:ident $a:ident : $t:ty),* ) -> $rk:ident $r:ty ; )*) => {
         $(
@@ -279,7 +279,7 @@ macro_rules! through {
 }
 
 // The substituting half of the table, in `RUNTIME`'s order. Read each line
-// against the row it stands for:
+// against the row it stands for.
 through! {
     class_get_instance_size, "class_getInstanceSize", (class cls: u64) -> plain u64;
     class_get_instance_variable, "class_getInstanceVariable", (class cls: u64, plain name: u64) -> plain u64;
@@ -306,7 +306,7 @@ mod tests {
 
     /// The two tables are one table.
     ///
-    /// This is the test that makes the module safe to extend:
+    /// This is the test that makes the module safe to extend.
     #[test]
     fn every_through_entry_matches_its_table_row() {
         for t in through_table() {
@@ -342,7 +342,7 @@ mod tests {
         }
     }
 
-    /// The two populations partition the promotable table:
+    /// The two populations partition the promotable table.
     #[test]
     fn the_two_populations_do_not_overlap() {
         for entry in RUNTIME {

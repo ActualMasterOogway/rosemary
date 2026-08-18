@@ -90,7 +90,7 @@ macro_rules! rtb {
 
 /// As [`rtc`], also naming the parameters that are guest function pointers.
 ///
-/// One entry needs both, and it is the one that creates a class at runtime:
+/// One entry needs both, and it is the one that creates a class at runtime.
 macro_rules! rtcb {
     ([$($c:literal),* $(,)?], [$($b:literal),* $(,)?], $name:literal, $ret:expr $(, $arg:expr)* $(,)?) => {
         Runtime {
@@ -115,7 +115,7 @@ const P: T = T::Pointer;
 
 /// The runtime surface a guest reaches, **sorted by name**.
 ///
-/// Not all of `objc/runtime.h`:
+/// Not all of `objc/runtime.h`.
 pub(super) static RUNTIME: &[Runtime] = &[
     // ## Making a class at runtime
     //
@@ -166,7 +166,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
     rt!("ivar_getOffset", I64, P),
     rtb!([1], "method_setImplementation", P, P, P),
     // ARC and the `objc_msgSend` optimisations clang emits at `-O` whether or
-    // not the file uses ARC:
+    // not the file uses ARC.
     rtc!([0] -> true, "objc_alloc", P, P),
     rtc!([0] -> true, "objc_allocWithZone", P, P),
     rtc!([0], "objc_alloc_init", P, P),
@@ -228,7 +228,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
     rtc!([] -> true, "objc_lookUpClass", P, P),
     // `void objc_moveWeak(id *dst, id *src)` — the third of the four weak
     // primitives, alongside `objc_copyWeak` above. Passthrough for the same
-    // reason:
+    // reason.
     rt!("objc_moveWeak", V, P, P),
     rtc!([0] -> true, "objc_opt_class", P, P),
     rtc!([0, 1], "objc_opt_isKindOfClass", U8, P, P),
@@ -242,7 +242,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
     rtc!([0], "objc_retainAutoreleaseReturnValue", P, P),
     rtc!([0], "objc_retainAutoreleasedReturnValue", P, P),
     // `id objc_retainBlock(id)` is `_Block_copy` under another name. Most of it
-    // needs nothing done, for the reason the roadmap records:
+    // needs nothing done, for the reason the roadmap records.
     Runtime {
         name: "objc_retainBlock",
         types: &[P, P],
@@ -266,7 +266,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
     rtc!([1], "objc_storeStrong", V, P, P),
     // `id objc_storeWeak(id *location, id obj)` — see the weak note above.
     rtc!([1], "objc_storeWeak", P, P, P),
-    // `@synchronized`. Passthrough is not a shortcut here:
+    // `@synchronized`. Passthrough is not a shortcut here.
     rtc!([0], "objc_sync_enter", I32, P),
     rtc!([0], "objc_sync_exit", I32, P),
     rt!("objc_terminate", V),
@@ -347,7 +347,7 @@ static MESSAGES: &[(&str, Send)] = &[
             stret: false,
         },
     ),
-    // The struct-returning spellings. Nothing about the *search* differs:
+    // The struct-returning spellings. Nothing about the *search* differs.
     (
         "objc_msgSend_stret",
         Send {
@@ -464,7 +464,7 @@ enum Message {
     Direct,
     /// `objc_msgSendSuper[2](struct objc_super *, sel, ...)`.
     ///
-    /// `skip_one` distinguishes the two:
+    /// `skip_one` distinguishes the two.
     Super { skip_one: bool },
 }
 
@@ -550,7 +550,7 @@ const DATA: &[&str] = &["objc_ehtype_vtable"];
 
 /// An address for a trampoline the *host* does not have.
 ///
-/// The three `_stret` spellings exist only on x86-64:
+/// The three `_stret` spellings exist only on x86-64.
 fn absent(name: &str) -> Option<u64> {
     unsafe extern "C" fn stret() -> u64 {
         unreachable!("objc_msgSend_stret was called rather than intercepted")
@@ -671,12 +671,12 @@ struct Classes<'a> {
     blocks: &'a [u8],
     /// Parameter indices holding a plain `id`, from the method's own encoding.
     ///
-    /// Empty for the runtime entry points:
+    /// Empty for the runtime entry points.
     objects: &'a [u8],
     /// Whether an `id` **return** gets the reverse substitution, for the reason
-    /// `objects` gets the forward one:
+    /// `objects` gets the forward one.
     object_return: bool,
-    /// See [`Runtime::protocols`]. Empty for a message send:
+    /// See [`Runtime::protocols`]. Empty for a message send.
     protocols: &'a [u8],
 }
 
@@ -762,7 +762,7 @@ fn send(
     let host_receiver = vm.objc_host_class(receiver);
     // A receiver in guest memory is not automatically broken. A constant
     // `@"..."` string is an object in the guest's own `__cfstring`, and the
-    // host runtime understands it perfectly:
+    // host runtime understands it perfectly.
     if vm.program.is_guest_address(host_receiver) {
         let isa = vm.objc_host_class((mem as &dyn GuestMemory).read_u64(host_receiver, symbol)?);
         if isa == 0 || vm.program.is_guest_address(isa) {
@@ -887,7 +887,7 @@ fn send(
     let result =
         marshal::call_shapes(symbol, &signature.shapes, imp, ctx, mem, &convert).map_err(|e| {
             // `object_getClass` and `class_getName` are runtime calls rather
-            // than messages, which matters here:
+            // than messages, which matters here.
             let class = class_of(host_receiver);
             let sel = selector_name(sel).unwrap_or_else(|| format!("<sel {sel:#x}>"));
             e.renaming(format!("{symbol} -[{class} {sel}]"))
@@ -904,7 +904,7 @@ fn send(
 ///
 /// A **list of selectors** rather than an all-or-nothing switch, because an Objective-C
 /// program sends millions of messages and the interesting one is always a handful of
-/// names known in advance:
+/// names known in advance.
 fn traced(sel: u64) -> Option<String> {
     #[dynamic]
     static WANTED: Vec<String> = {
@@ -1024,7 +1024,7 @@ fn object_list(sel: u64) -> Option<&'static ObjectList> {
 /// by one word:
 ///
 /// So the rule reads the last keyword as camelCase words and asks what qualifies
-/// "Format":
+/// "Format".
 fn names_a_format(selector: &str) -> bool {
     let Some(last) = selector
         .strip_suffix(':')
@@ -1055,7 +1055,7 @@ fn names_a_format(selector: &str) -> bool {
 /// Turn a variadic format-style send into the non-variadic send of the rendered string,
 /// in place.
 ///
-/// The shapes this cannot do are still refused by name:
+/// The shapes this cannot do are still refused by name.
 fn render_variadic(
     symbol: &str,
     sel: u64,
@@ -1112,7 +1112,7 @@ const SYSV_INT_REGS: usize = 6;
 /// How many objects a nil-terminated list may hold before this stops walking.
 ///
 /// A list with no terminator is indistinguishable from a long one until the read
-/// faults, and the read need not fault:
+/// faults, and the read need not fault.
 const OBJECT_LIST_CAP: usize = 4096;
 
 /// Send the counted twin of a nil-terminated object-list message.
@@ -1361,7 +1361,7 @@ mod tests {
 
     #[test]
     fn every_name_this_module_claims_is_one_it_can_serve() {
-        // The provider and the shim table are two lists that must agree:
+        // The provider and the shim table are two lists that must agree.
         for name in RUNTIME
             .iter()
             .map(|r| r.name)

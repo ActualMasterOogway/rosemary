@@ -77,7 +77,7 @@ impl GuestStack {
 
     /// A stack over memory the **guest** already owns, running down from `top`.
     ///
-    /// Nothing is reserved, protected or freed here, and all three are deliberate:
+    /// Nothing is reserved, protected or freed here, and all three are deliberate.
     pub fn supplied(top: u64, size: u64) -> Self {
         let top = top & !0xf;
         let base = top.saturating_sub(size);
@@ -115,7 +115,7 @@ impl GuestStack {
 
         // Strings first, growing downward from the top, then the arrays that
         // point at them. The strings' order is not observable, but the arrays'
-        // **is**:
+        // **is**.
         let mut cursor = self.top;
         let write_str = |s: &CString, cursor: &mut u64, this: &mut MmapSpace| {
             let bytes = s.as_bytes_with_nul();
@@ -216,7 +216,7 @@ impl GuestStack {
     /// The stack's mapped bytes, for [`GuestView`](crate::vm::GuestView).
     ///
     /// Empty for a guest-supplied stack, which is not this runtime's mapping to
-    /// describe:
+    /// describe.
     pub fn regions(&self) -> Vec<(u64, &[u8])> {
         self.space
             .as_ref()

@@ -205,7 +205,7 @@ pub type Shim = crate::signal::Shim;
 
 /// Whether `name` (underscore already stripped) is one of this module's.
 ///
-/// `inflate`, `inflateEnd`, `deflate` and the rest are deliberately **not** here:
+/// `inflate`, `inflateEnd`, `deflate` and the rest are deliberately **not** here.
 pub fn shim_for(name: &str) -> Option<Shim> {
     match name {
         "inflateInit_" => Some(inflate_init),
@@ -254,7 +254,7 @@ mod tests {
     }
 
     /// A guest allocator that is really callable from the host, standing in for what a
-    /// thunk would be. Returning real memory matters:
+    /// thunk would be. Returning real memory matters.
     extern "C" fn host_alloc(_opaque: *mut c_void, items: u32, size: u32) -> *mut c_void {
         // SAFETY: a plain allocation of a non-zero size, freed by `host_free`.
         unsafe { libc::calloc(items as usize, size as usize) }
@@ -349,7 +349,7 @@ mod tests {
 
     /// A guest that supplies no allocator must reach zlib's own — and zlib **writes its
     /// defaults back into the stream**, which is the fact that makes re-initialising
-    /// the same stream safe:
+    /// the same stream safe.
     #[test]
     fn a_default_allocator_reaches_zlibs_own_and_is_not_wrapped() {
         let mut strm = ZStream::default();

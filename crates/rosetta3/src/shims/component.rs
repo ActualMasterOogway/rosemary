@@ -20,7 +20,7 @@ pub fn shim_for(name: &str) -> Option<Shim> {
 }
 
 /// The three modern entry points, found by `dlsym` rather than linked — the same care
-/// [`audiounit`](super::audiounit) takes and for the same reason:
+/// [`audiounit`](super::audiounit) takes and for the same reason.
 fn host_fn<T: Copy>(name: &core::ffi::CStr, cache: &std::sync::OnceLock<Option<T>>) -> Option<T> {
     *cache.get_or_init(|| {
         // SAFETY: a NUL-terminated name and a well-known pseudo-handle. The

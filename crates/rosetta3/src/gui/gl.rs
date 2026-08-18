@@ -417,7 +417,7 @@ enum Setup {
 #[derive(Default)]
 struct Resources {
     setup: Setup,
-    /// Decided once, from the driver rather than from a version string, and kept:
+    /// Decided once, from the driver rather than from a version string, and kept.
     profile: Option<Profile>,
     /// Whether this context accepts vertex array object calls at all. Probed,
     /// not assumed — see [`vao_usable`].

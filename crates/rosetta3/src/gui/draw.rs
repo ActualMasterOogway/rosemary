@@ -19,7 +19,7 @@ pub struct Vertex {
 pub type Color = [f32; 4];
 
 /// The palette. Deliberately dark and low-contrast except where a number is meant to be
-/// read:
+/// read.
 pub mod color {
     use super::Color;
 
@@ -90,7 +90,7 @@ impl DrawList {
     /// Restrict everything drawn from now on to `rect`, as `(x0, y0, x1, y1)`.
     ///
     /// **Clipped here rather than with a scissor rectangle**, and the reason is the
-    /// same one that made the draw list one pipeline:
+    /// same one that made the draw list one pipeline.
     pub fn clip(&mut self, rect: (f32, f32, f32, f32)) {
         self.clip = rect;
     }
@@ -238,7 +238,7 @@ impl<'a> Ui<'a> {
 
     /// Move the cursor to a column, measured in characters from the left edge.
     ///
-    /// Never backwards:
+    /// Never backwards.
     pub fn column(&mut self, chars: f32) {
         self.x = self.x.max(self.left + chars * self.em);
     }

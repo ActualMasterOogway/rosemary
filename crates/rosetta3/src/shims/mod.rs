@@ -58,7 +58,7 @@ pub fn dispatch(
         "__snprintf_chk" => printf::snprintf_chk,
         // The `v`-prefixed family. Not variadic — each is handed a `va_list`
         // its caller built — and impossible to forward for the mirror-image
-        // reason:
+        // reason.
         "vprintf" => printf::vprintf,
         "vfprintf" => printf::vfprintf,
         "vsprintf" => printf::vsprintf,
@@ -133,7 +133,7 @@ pub fn dispatch(
 
 /// Whether [`dispatch`] would handle `symbol`.
 ///
-/// Consulted by [`crate::ImportPolicy`] before promoting an import:
+/// Consulted by [`crate::ImportPolicy`] before promoting an import.
 pub fn is_shimmed(symbol: &str) -> bool {
     let name = symbol.strip_prefix('_').unwrap_or(symbol);
     if math::shim_for(name).is_some()

@@ -301,7 +301,7 @@ pub fn report() {
         TAIL_EXITS.load(Relaxed),
     );
     // The exit mix, which is the other half of "why is this slow" and the half
-    // translation time cannot answer. Printed as a rate as well as a count:
+    // translation time cannot answer. Printed as a rate as well as a count.
     let entries = ENTRIES.load(Relaxed);
     if entries > 0 {
         let per_second = entries as f64 / wall.as_secs_f64().max(f64::EPSILON);

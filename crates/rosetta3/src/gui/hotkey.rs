@@ -113,7 +113,7 @@ type TargetRef = *mut c_void;
 /// The Carbon handler. Runs on whichever thread the event loop is on, which for a Cocoa
 /// application is the main thread.
 ///
-/// Returns `noErr` unconditionally:
+/// Returns `noErr` unconditionally.
 extern "C" fn handler(_call: *mut c_void, event: EventRef, _user: *mut c_void) -> i32 {
     type GetParameter =
         unsafe extern "C" fn(EventRef, u32, u32, *mut u32, usize, *mut usize, *mut c_void) -> i32;

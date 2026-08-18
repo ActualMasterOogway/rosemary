@@ -10,7 +10,7 @@ use machish::report::LinkReport;
 
 /// Largest thread block this will allocate.
 ///
-/// Totality, not policy:
+/// Totality, not policy.
 const MAX_BLOCK: u64 = 64 * 1024 * 1024;
 
 /// One image's block layout, as [`machish`] described it.
@@ -40,7 +40,7 @@ static SLOTS: RwLock<BTreeMap<u64, Slot>> = RwLock::new(BTreeMap::new());
 /// How many times the registry has changed.
 ///
 /// Read on every access and written once per [`register`], so it is the cheapest shared
-/// thing in this module:
+/// thing in this module.
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 
 /// Entries in one thread's descriptor cache.
@@ -57,7 +57,7 @@ struct ThreadTls {
     /// registered since, and every entry is discarded rather than trusted.
     epoch: u64,
     /// Direct-mapped descriptor address to this thread's address for it. A key of zero
-    /// is an empty entry, which costs nothing:
+    /// is an empty entry, which costs nothing.
     cache: [(u64, *mut u8); CACHE],
     /// This thread's blocks, one per image that has thread-locals, allocated on
     /// first touch and freed when the thread ends.
@@ -135,7 +135,7 @@ pub fn register(report: &LinkReport) -> usize {
     }
     // After the slots are visible, and released so that a thread which observes
     // the new epoch cannot then read the map without seeing them. Bumped even
-    // when nothing was registered:
+    // when nothing was registered.
     EPOCH.fetch_add(1, Ordering::Release);
     registered
 }
@@ -150,7 +150,7 @@ pub fn register(report: &LinkReport) -> usize {
 /// rather than corrupting anything.
 pub extern "C" fn bootstrap(descriptor: *const u8) -> *mut u8 {
     let at = descriptor as usize as u64;
-    // `try_with` rather than `with`:
+    // `try_with` rather than `with`.
     match TLS.try_with(|tls| resolve(&mut tls.borrow_mut(), at)) {
         Ok(address) => address,
         Err(_) => {
@@ -162,7 +162,7 @@ pub extern "C" fn bootstrap(descriptor: *const u8) -> *mut u8 {
 
 /// The body of [`bootstrap`], with this thread's storage already in hand.
 ///
-/// The whole point of the split is the first six lines:
+/// The whole point of the split is the first six lines.
 fn resolve(tls: &mut ThreadTls, at: u64) -> *mut u8 {
     // Acquire pairs with the release in `register`: observing the new epoch
     // means observing the slots that came with it.
@@ -201,7 +201,7 @@ fn resolve(tls: &mut ThreadTls, at: u64) -> *mut u8 {
     // block was allocated with exactly that many bytes.
     let address = unsafe { tls.blocks[&image].ptr.add(offset as usize) };
 
-    // Cached only now, and only for an answer that came from a block:
+    // Cached only now, and only for an answer that came from a block.
     tls.cache[line] = (at, address);
     address
 }

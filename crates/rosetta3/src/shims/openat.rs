@@ -16,6 +16,10 @@ use super::set_int_return;
 /// call changed.
 ///
 /// # Safety
+///
+/// Called only through an import slot [`provide`] defines, so `path` is the guest's own
+/// `const char *` — addressable, since the guest is identity-mapped — and the other two
+/// arguments are scalars.
 pub unsafe extern "C" fn open_with_mode(
     path: *const libc::c_char,
     flags: libc::c_int,
@@ -29,6 +33,8 @@ pub unsafe extern "C" fn open_with_mode(
 /// `int openat(int fd, const char *path, int flags, unsigned mode)`.
 ///
 /// # Safety
+///
+/// As [`open_with_mode`].
 pub unsafe extern "C" fn openat_with_mode(
     dirfd: libc::c_int,
     path: *const libc::c_char,
@@ -46,6 +52,9 @@ pub unsafe extern "C" fn openat_with_mode(
 /// unlike `open`'s mode, these cannot simply be passed on regardless.
 ///
 /// # Safety
+///
+/// Called only through an import slot [`provide`] defines, so `name` is the guest's own
+/// `const char *` and the rest are scalars.
 pub unsafe extern "C" fn sem_open_with_mode(
     name: *const libc::c_char,
     oflag: libc::c_int,
@@ -250,7 +259,7 @@ mod tests {
     /// for.
     ///
     /// The count is the falsifiable half and the reason this test is here rather than
-    /// in a signature's word:
+    /// in a signature's word.
     #[test]
     fn a_named_semaphore_gets_the_mode_and_the_count_it_was_opened_with() {
         // Darwin caps a semaphore name at `PSEMNAMLEN` (31) and wants a leading

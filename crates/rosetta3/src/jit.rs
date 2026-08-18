@@ -32,7 +32,7 @@ pub enum OptLevel {
     ///
     /// It also pins the ISA to its architectural baseline (see
     /// [`OptLevel::isa_settings`]), which makes the same bisection available one level
-    /// down:
+    /// down.
     None,
     /// `speed` — Cranelift's `opt_level=speed`.
     Speed,
@@ -63,7 +63,7 @@ impl OptLevel {
 
     /// The Cranelift `opt_level` setting this level maps to.
     ///
-    /// `All` deliberately maps to `speed` and not `speed_and_size`:
+    /// `All` deliberately maps to `speed` and not `speed_and_size`.
     fn cranelift_opt_level(self) -> &'static str {
         match self {
             OptLevel::None => "none",
@@ -85,7 +85,7 @@ impl OptLevel {
             .set("opt_level", self.cranelift_opt_level())
             .expect("cranelift accepts its own opt_level values");
         // Set at every level rather than inside the `Speed | All` arm below,
-        // because it is not an optimisation setting:
+        // because it is not an optimisation setting.
         builder
             .set("enable_verifier", if verify() { "true" } else { "false" })
             .expect("cranelift accepts its own enable_verifier values");
@@ -153,7 +153,7 @@ const TUNABLE_FEATURES: &[&str] = &[
 
 /// The host target features this crate has an opinion about.
 ///
-/// `has_pauth` and the `sign_return_address*` settings are absent on purpose:
+/// `has_pauth` and the `sign_return_address*` settings are absent on purpose.
 #[cfg(target_arch = "aarch64")]
 const TUNABLE_FEATURES: &[&str] = &["has_lse", "has_fp16", "has_dotprod", "has_i8mm"];
 
@@ -246,7 +246,7 @@ pub fn opt_level() -> OptLevel {
 /// binary translates.
 ///
 /// `ROSETTA3_JIT_VERIFY` overrides it in both directions, and both directions are
-/// wanted:
+/// wanted.
 pub fn verify() -> bool {
     #[dynamic]
     static VERIFY: bool = match std::env::var(VERIFY_ENV) {
@@ -276,7 +276,7 @@ pub fn verify() -> bool {
 /// `RedundantFlagCalculationElimination`.
 ///
 /// **Off by default, and this crate does not decide otherwise**, because microlift's
-/// own default is off and for a reason it states:
+/// own default is off and for a reason it states.
 pub fn eliminate_dead_flags() -> bool {
     #[dynamic]
     static ON: bool = match std::env::var(DEAD_FLAGS_ENV) {
@@ -296,7 +296,7 @@ pub fn eliminate_dead_flags() -> bool {
 /// Whether a translated region may resolve its own successor rather than returning to
 /// the run loop for it — microlift's `LifterConfig::block_link`.
 ///
-/// `ROSETTA3_NO_BLOCK_LINK=1` turns it off, and that is what it is for:
+/// `ROSETTA3_NO_BLOCK_LINK=1` turns it off, and that is what it is for.
 pub fn block_linking() -> bool {
     #[dynamic]
     static ON: bool = match std::env::var(NO_BLOCK_LINK_ENV) {
@@ -421,7 +421,7 @@ pub fn flags() -> settings::Flags {
 
 /// The ISA settings every backend in this process is built with.
 ///
-/// Cached for the same reason as [`flags`], plus one of its own:
+/// Cached for the same reason as [`flags`], plus one of its own.
 pub fn isa_settings() -> &'static [(&'static str, &'static str)] {
     #[dynamic]
     static SETTINGS: Vec<(&'static str, &'static str)> = opt_level().isa_settings();
@@ -579,7 +579,7 @@ mod tests {
         }
     }
 
-    /// Detection is per-run state, so it must be the *same* per-run state everywhere:
+    /// Detection is per-run state, so it must be the *same* per-run state everywhere.
     #[test]
     fn the_cached_settings_are_the_level_settings() {
         assert_eq!(isa_settings(), opt_level().isa_settings().as_slice());

@@ -178,7 +178,7 @@ mod tests {
     use super::*;
 
     /// The claim the whole module rests on, checked against the runtime rather than
-    /// believed:
+    /// believed.
     #[test]
     fn the_runtime_does_not_call_a_dynamically_added_constructor() {
         use std::sync::atomic::{AtomicUsize, Ordering};

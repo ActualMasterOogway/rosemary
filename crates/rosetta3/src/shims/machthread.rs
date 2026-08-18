@@ -26,7 +26,7 @@ const KERN_INVALID_ARGUMENT: i32 = 4;
 
 /// `x86_thread_state64_t`, in the order the header declares it.
 ///
-/// Written as a list rather than a struct because that is exactly what it is:
+/// Written as a list rather than a struct because that is exactly what it is.
 fn thread_state64(ctx: &RegisterContext, rsp: u64) -> [u64; 21] {
     [
         ctx.rax, ctx.rbx, ctx.rcx, ctx.rdx, ctx.rdi, ctx.rsi, ctx.rbp, rsp, ctx.r8, ctx.r9,
@@ -98,7 +98,7 @@ fn thread_get_state(
 /// else zero.
 ///
 /// The x87 stack, the control and status words and the reserved tail are not modelled
-/// by the recompiler and are not read by anything that asks for this:
+/// by the recompiler and are not read by anything that asks for this.
 fn float_state64(guest: Option<&RegisterContext>) -> Vec<u8> {
     /// The `MXCSR` a process starts with: all exceptions masked, round to
     /// nearest.

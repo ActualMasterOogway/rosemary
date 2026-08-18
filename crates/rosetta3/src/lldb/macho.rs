@@ -48,7 +48,7 @@ pub struct Sym {
 
 /// Serialize `sections` and `syms` into a Mach-O object.
 ///
-/// Section order is preserved and it matters:
+/// Section order is preserved and it matters.
 pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
     let sizeofcmds =
         SEGMENT_COMMAND_SIZE + SECTION_SIZE * sections.len() as u32 + SYMTAB_COMMAND_SIZE;
@@ -152,7 +152,7 @@ pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
 }
 
 /// Mach-O's fixed-width, NUL-padded, *not* necessarily NUL-terminated name field. Names
-/// longer than sixteen bytes are truncated rather than rejected:
+/// longer than sixteen bytes are truncated rather than rejected.
 fn name16(name: &str) -> [u8; 16] {
     let mut buf = [0u8; 16];
     let bytes = name.as_bytes();

@@ -16,7 +16,7 @@ use crate::vm::VmError;
 /// The part of a guest thread another thread may read, and the whole of it.
 ///
 /// Atomics rather than `Cell`s because the reader is a collector running on somebody
-/// else's thread, usually with this one suspended. Nothing here is a lock:
+/// else's thread, usually with this one suspended. Nothing here is a lock.
 pub struct GuestThread {
     /// Address of the innermost live [`RegisterContext`] on this thread, or zero when
     /// the thread is not inside guest code.
@@ -172,7 +172,7 @@ pub struct ThreadState {
     /// Whether the import being serviced was reached by a **jump** rather than a call.
     ///
     /// The mirror image of `redirected`, and it exists for the one shim that has to
-    /// stand in for the call itself:
+    /// stand in for the call itself.
     entered_by_jump: Cell<bool>,
     /// The exception being unwound on this thread, if any.
     unwinding: Cell<Option<crate::unwind::InFlight>>,
@@ -310,7 +310,7 @@ impl ThreadState {
     /// The guest stack pointer as of the last thing that moved it.
     ///
     /// For [`crate::fault`], which asks on a thread that is about to die and wants the
-    /// answer without a borrow it could not take:
+    /// answer without a borrow it could not take.
     pub fn live_rsp(&self) -> u64 {
         match self.published.context() {
             Some(ctx) => ctx.rsp,
@@ -322,16 +322,12 @@ impl ThreadState {
 /// One thread's window onto the code cache: the translations it has entered, keyed by
 /// the PC it entered them at.
 ///
-/// ## Why the shared cache needed one in front of it
+/// Never invalidated, for the reason the cache itself is never invalidated: guest code
+/// is assumed immutable.
 ///
-/// ## Why a stale entry is not a stale answer
-///
-/// The window is never invalidated, and it does not need to be, for the reason the
-/// cache itself is never invalidated:
-///
-/// ## Direct-mapped, and deliberately not more
-///
-/// ## The same window, readable by compiled code
+/// Direct-mapped — one slot per index, no chaining, no eviction. A colliding PC takes
+/// the slot, and a collision costs exactly one trip to the shared cache. Sizing it a
+/// few times larger than the working set keeps the hit rate in the high nineties.
 pub(crate) struct CodeWindow {
     slots: RefCell<Box<[Option<(u64, std::sync::Arc<crate::cache::Translation>)>]>>,
     /// The rows lifted code probes, one per [`slots`](Self::slots) index.
@@ -372,7 +368,7 @@ impl CodeWindow {
     /// The slot a PC maps to.
     ///
     /// Deferred to [`link_config`] so that this and the shift-and-mask microlift bakes
-    /// into every region cannot drift apart:
+    /// into every region cannot drift apart.
     fn slot(pc: u64) -> usize {
         link_config().slot(pc)
     }
@@ -492,7 +488,7 @@ pub fn install(state: ThreadState) -> &'static ThreadState {
 ///
 /// Here rather than in [`crate::startup`] because it is a claim about a **thread**, not
 /// about a process, and this is the one place every thread that becomes a guest thread
-/// passes through:
+/// passes through.
 fn clear_errno() {
     // SAFETY: `__error()` returns this thread's own `errno` slot, which is
     // live for as long as the thread is.
@@ -547,7 +543,7 @@ pub fn tsd_base() -> u64 {
 /// Stack for a guest thread that asked for no particular one.
 ///
 /// The main thread's size, which is the choice that cannot surprise a guest that never
-/// said:
+/// said.
 pub const THREAD_STACK: usize = crate::stack::DEFAULT_STACK;
 
 /// Where a guest thread's frames are to live.
@@ -572,7 +568,7 @@ impl StackRequest {
         match self {
             StackRequest::Default => GuestStack::bare(THREAD_STACK),
             // A page more than asked for, because what the guest asked for is
-            // the part it may use:
+            // the part it may use.
             StackRequest::Sized(bytes) => {
                 GuestStack::bare(bytes + machish::memory::host_page_size() as usize)
             }
@@ -658,7 +654,7 @@ mod tests {
 
     /// The guard restores, rather than clearing.
     ///
-    /// The distinction is the whole point:
+    /// The distinction is the whole point.
     #[test]
     fn a_held_errno_comes_back_exactly_as_it_was() {
         // SAFETY: this thread's own slot, in a test that owns the thread.

@@ -98,10 +98,6 @@ impl From<machish::Error> for ProgramError {
 }
 
 /// An Intel Mach-O loaded, linked against the host, and ready for the lifter.
-///
-/// ## Which address space, and why it is a parameter
-///
-/// [`MmapSpace`]: machish::memory::MmapSpace
 pub struct Program<M: Regions = BufferSpace> {
     /// The full linking transcript.
     pub report: LinkReport,
@@ -116,7 +112,7 @@ pub struct Program<M: Regions = BufferSpace> {
     pub imports: BTreeMap<u64, ImportSite>,
     /// How to leave each function of the root image, from `__unwind_info`.
     ///
-    /// Read at load for the same reason [`functions`](Program::functions) is:
+    /// Read at load for the same reason [`functions`](Program::functions) is.
     pub unwind: machish::image::UnwindInfo,
     /// The same sites, keyed by the address they *resolved to*.
     ///
@@ -229,7 +225,7 @@ pub(crate) struct HostProviders {
     /// and every guest with an array on its stack dereferences in its own prologue.
     runtime: machish::resolve::SyntheticDylib,
     /// The Objective-C runtime. The native provider denies the `_objc_`, `_class_`,
-    /// `_sel_` and `_protocol_` families precisely so a shim can claim them:
+    /// `_sel_` and `_protocol_` families precisely so a shim can claim them.
     objc: machish::resolve::SyntheticDylib,
     /// The `dl` family, which the host exports and cannot usefully answer for an
     /// x86-64 file. See [`crate::dyld`].
@@ -280,7 +276,7 @@ impl<M: Regions> Program<M> {
         let mut report =
             Loader::new(X86_64).link_with(bytes, path, &mut memory, &mut source, &providers)?;
 
-        // Before anything reads the report:
+        // Before anything reads the report.
         crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory)?;
 
         // And the same for the C++ ABI: a binary linked against `libstdc++`
@@ -364,7 +360,7 @@ impl<M: Regions> Program<M> {
         let mut imports_by_target: AddrMap<ImportSite> = AddrMap::default();
         for site in by_symbol {
             // Guest-resolved sites are excluded for the reason [`crate::dyld`]
-            // spells out:
+            // spells out.
             if site.resolved != 0 && memory.region_at(site.resolved).is_none() {
                 imports_by_target
                     .entry(site.resolved)
@@ -385,7 +381,7 @@ impl<M: Regions> Program<M> {
 
     /// The shared [`LifterConfig`] every on-demand lift is performed with.
     ///
-    /// **The guest's mapped images**, as a hint for microlift's value-set analysis:
+    /// **The guest's mapped images**, as a hint for microlift's value-set analysis.
     pub fn lifter_config(&self) -> LifterConfig {
         self.lifter_config_with(ImportPolicy::FastWhenKnown)
     }
@@ -393,7 +389,7 @@ impl<M: Regions> Program<M> {
     /// [`Program::lifter_config`], with the promotion decision made explicitly.
     ///
     /// [`ImportPolicy::AlwaysSlow`] exists because it is the falsifiable half of the
-    /// claim:
+    /// claim.
     pub fn lifter_config_with(&self, policy: ImportPolicy) -> LifterConfig {
         // Host-specific, so it is the half of the optimisation setting that
         // belongs to the lift rather than to the lowering — see [`crate::jit`].
@@ -454,7 +450,7 @@ impl<M: Regions> Program<M> {
             // address looked up.
             block_link: crate::jit::block_linking().then(crate::thread::link_config),
             // `exit_trampoline_address` is left at its default `None`, and that
-            // is a decision rather than an omission:
+            // is a decision rather than an omission.
             ..LifterConfig::default()
         };
 
@@ -486,7 +482,7 @@ impl<M: Regions> Program<M> {
                 piece(at, end, false);
             }
         }
-        // Set rather than pushed one by one, because the field is shared:
+        // Set rather than pushed one by one, because the field is shared.
         config.set_segments(segments);
         for (&va, site) in &self.imports {
             // A fast import is an **absolute native call** the lifter bakes
@@ -502,6 +498,7 @@ impl<M: Regions> Program<M> {
                 ),
                 // Everything a fast import cannot express — a variadic, a
                 // callback taker, a shim, a signature the marshaller refuses —
+                // becomes a bridged call. See [`crate::bridge`].
                 None if policy != ImportPolicy::AlwaysSlow => {
                     config.register_bridge_import(va, crate::bridge::import_bridge())
                 }
@@ -547,7 +544,7 @@ impl<M: Regions> Program<M> {
 
     /// How every import of this program will be reached, by symbol.
     ///
-    /// The acceptance question in one call:
+    /// The acceptance question in one call.
     pub fn classify_imports(&self) -> BTreeMap<&str, Classification> {
         let mut out = BTreeMap::new();
         for b in self.report.bindings() {
@@ -653,7 +650,7 @@ impl<M: Regions> Program<M> {
     /// The **relocation** moves and the registration does not:
     ///
     /// Not done in [`Program::load_into`], and the reason is
-    /// [`ImportPolicy::AlwaysSlow`]:
+    /// [`ImportPolicy::AlwaysSlow`].
     pub fn install_trampolines(&mut self) -> usize {
         // Collected first, because deciding needs `&self` (for
         // `is_guest_address`) and writing needs `&mut self.memory`. A program
@@ -701,7 +698,7 @@ impl<M: Regions> Program<M> {
 
     /// The import registered at `va`, if any.
     ///
-    /// `va` is whatever an exit named:
+    /// `va` is whatever an exit named.
     pub fn import_at(&self, va: u64) -> Option<&ImportSite> {
         self.imports
             .get(&va)
@@ -712,7 +709,7 @@ impl<M: Regions> Program<M> {
 
     /// What an imported symbol resolved to, by name.
     ///
-    /// The reverse of the usual question, and it has one caller:
+    /// The reverse of the usual question, and it has one caller.
     pub fn resolved_symbol(&self, symbol: &str) -> Option<u64> {
         self.imports
             .values()

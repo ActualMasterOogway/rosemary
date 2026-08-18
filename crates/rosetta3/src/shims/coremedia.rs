@@ -98,7 +98,7 @@ fn time_make(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory)
 /// `Float64 CMTimeGetSeconds(CMTime time)`
 ///
 /// The time is the only argument and is entirely on the guest's stack, so no integer
-/// register is involved at all. **Forwarded rather than divided**:
+/// register is involved at all. **Forwarded rather than divided**.
 fn time_get_seconds(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -320,7 +320,7 @@ mod tests {
     use super::*;
 
     /// The layout claim every function here rests on, which a wrong answer would
-    /// violate silently:
+    /// violate silently.
     #[test]
     fn cm_time_is_the_layout_both_architectures_use() {
         assert_eq!(core::mem::size_of::<CmTime>(), CM_TIME_SIZE);

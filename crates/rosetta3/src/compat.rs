@@ -13,7 +13,7 @@ const DEFAULTS: &[(&str, bool)] = &[
 
 /// Apply every compatibility default this runtime needs.
 ///
-/// Silent when the frameworks are not loaded:
+/// Silent when the frameworks are not loaded.
 pub fn install() {
     let Some(rt) = Runtime::load() else {
         return;

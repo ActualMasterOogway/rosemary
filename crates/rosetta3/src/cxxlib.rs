@@ -6,7 +6,7 @@ use machish::spec::arch::X86_64;
 
 /// A real x86-64 `libc++.1.dylib`, built for the ABI Apple's is built for.
 ///
-/// Checked rather than assumed to be the right vintage:
+/// Checked rather than assumed to be the right vintage.
 const LIBCXX: &[u8] = include_bytes!("../vendor/libs/intel/libc++.1.dylib");
 const LIBCXXABI: &[u8] = include_bytes!("../vendor/libs/intel/libc++abi.1.dylib");
 const LIBUNWIND: &[u8] = include_bytes!("../vendor/libs/intel/libunwind.1.dylib");
@@ -108,7 +108,7 @@ impl<S: DylibSource> DylibSource for VendoredCxx<S> {
 /// the report afterwards — [`crate::Program`]'s import maps, the audit — describes what
 /// the slot actually holds.
 ///
-/// A binding that already resolved into the guest is left alone:
+/// A binding that already resolved into the guest is left alone.
 pub fn bind_unwinder_to_the_vendored_one<M: machish::memory::Regions>(
     report: &mut machish::report::LinkReport,
     memory: &mut M,
@@ -139,7 +139,7 @@ pub fn bind_cxxabi_to_the_vendored_one<M: machish::memory::Regions>(
 ///
 /// The three prefixes are the ABI's own namespaces:
 ///
-/// What is **excluded** is the point:
+/// What is **excluded** is the point.
 fn is_cxx_abi_symbol(symbol: &str) -> bool {
     /// The handler interface, which is spelled in `std::` rather than
     /// `__cxxabiv1::` but is defined by the ABI all the same.
@@ -186,7 +186,7 @@ fn rebind_to_vendored<M: machish::memory::Regions>(
 
     // Every address the loader mapped, which is what "already in the guest"
     // means. Asking the ranges rather than comparing against the export's own
-    // address is the load-bearing part:
+    // address is the load-bearing part.
     let guest: Vec<(u64, u64)> = report
         .images
         .iter()

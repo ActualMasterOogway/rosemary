@@ -50,7 +50,7 @@ pub fn pthread_create(
     // `read_attr` checked before returning it.
     unsafe {
         libc::pthread_attr_setstacksize(&mut host_attr, HOST_THREAD_STACK);
-        // Only when the guest supplied an address, and only then:
+        // Only when the guest supplied an address, and only then.
         if matches!(stack, StackRequest::Supplied { .. }) {
             libc::pthread_attr_setstackaddr(&mut host_attr, core::ptr::null_mut());
         }
@@ -82,7 +82,7 @@ pub fn pthread_create(
 /// The guest's attribute set, copied into one the host may be handed.
 ///
 /// A copy rather than the guest's pointer, though the layouts are identical and the
-/// memory is identity-mapped:
+/// memory is identity-mapped.
 fn read_attr(
     symbol: &str,
     attr: u64,
@@ -155,7 +155,7 @@ pub fn shim_for(name: &str) -> Option<Shim> {
 }
 
 /// Whether `ROSETTA3_DEBUG_MUTEX` asked for the lock diagnostic. Read once, for
-/// [`crate::trace::watching`]'s reason:
+/// [`crate::trace::watching`]'s reason.
 fn debug_mutex() -> bool {
     #[dynamic]
     static ON: bool = std::env::var_os("ROSETTA3_DEBUG_MUTEX").is_some();
@@ -164,7 +164,7 @@ fn debug_mutex() -> bool {
 
 /// `int pthread_mutex_lock(pthread_mutex_t *)`, reporting a failure by address.
 ///
-/// The first eight bytes are printed because that is where the answer usually is:
+/// The first eight bytes are printed because that is where the answer usually is.
 fn mutex_lock(
     symbol: &str,
     ctx: &mut RegisterContext,

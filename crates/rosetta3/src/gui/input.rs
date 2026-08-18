@@ -224,7 +224,7 @@ impl State {
 
 /// The handler, called by AppKit for every event in [`MASK`].
 ///
-/// Returns the event to let it through, or nil to swallow it. Never unwinds:
+/// Returns the event to let it through, or nil to swallow it. Never unwinds.
 extern "C" fn on_event(_block: *mut c_void, event: Id) -> Id {
     if event.is_null() || !focused() {
         return event;
@@ -443,7 +443,7 @@ mod tests {
     }
 
     /// Where a press lands decides what a drag does, and the boundaries are the whole
-    /// of it:
+    /// of it.
     #[test]
     fn a_press_is_classified_by_where_it_lands() {
         let state = panel();

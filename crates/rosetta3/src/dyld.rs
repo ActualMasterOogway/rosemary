@@ -30,7 +30,7 @@ pub struct Image {
     pub handle: u64,
     pub report: LinkReport,
     /// The mapping, kept alive for the process. Leaked separately from the `Image` so
-    /// that [`regions`](Image::regions) can borrow from it:
+    /// that [`regions`](Image::regions) can borrow from it.
     _memory: &'static SharedSpace,
     /// The mapped extents, for [`contains`] and [`lift_region`].
     regions: Vec<(u64, &'static [u8])>,
@@ -50,7 +50,7 @@ pub struct Image {
 /// An [`MmapSpace`] shared across the threads running the guest.
 ///
 /// The same claim [`SharedProgram`](crate::vm::SharedProgram) makes, confined the same
-/// way:
+/// way.
 struct SharedSpace(MmapSpace);
 
 // SAFETY: see the type note.
@@ -196,7 +196,7 @@ fn global_handle() -> u64 {
 /// Return the guest image at a dyld image-list index.
 ///
 /// The executable is always index zero, followed by images loaded by this linker. Host
-/// dyld images are intentionally absent:
+/// dyld images are intentionally absent.
 fn indexed_image(index: u32) -> Option<(u64, u64, String)> {
     if index == 0 {
         let (path, slide) = EXECUTABLE
@@ -290,7 +290,7 @@ pub fn executable_path() -> Option<String> {
 ///
 /// A program that never calls `dlopen` now pays one relaxed atomic load, and a program
 /// that has pays that plus a range check before any lock is taken. Relaxed is
-/// sufficient:
+/// sufficient.
 static IMAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static REGION_LO: AtomicU64 = AtomicU64::new(u64::MAX);
 static REGION_HI: AtomicU64 = AtomicU64::new(0);
@@ -322,7 +322,7 @@ fn find<R>(mut f: impl FnMut(&'static Image) -> Option<R>) -> Option<R> {
 
 /// The import registered at `va` in any dynamically loaded image.
 ///
-/// The widening described in the module note:
+/// The widening described in the module note.
 pub fn import_at(va: u64) -> Option<&'static ImportSite> {
     // A slot or stub of a loaded image is *inside* that image, so an address
     // outside every dlopened mapping cannot be one.
@@ -335,7 +335,7 @@ pub fn import_at(va: u64) -> Option<&'static ImportSite> {
 /// The import of any dynamically loaded image that *resolved to* `host`.
 pub fn import_by_target(host: u64) -> Option<&'static ImportSite> {
     // The same two-compare rejection [`import_at`] makes, for a colder version
-    // of the same problem:
+    // of the same problem.
     if IMAGE_COUNT.load(Ordering::Relaxed) == 0 {
         return native_symbol_at(host);
     }
@@ -433,7 +433,7 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     let bytes = std::fs::read(&resolved).map_err(|e| format!("{resolved}: {e}"))?;
     // `parse_any` narrows a fat file to the x86-64 slice, and fails when there
     // is none — which is the case a *native* arm64 dylib takes. That is not
-    // something this path can load:
+    // something this path can load.
     let object = MachObject::parse_any(&bytes, X86_64)
         .map_err(|e| format!("{resolved}: not a loadable x86-64 Mach-O: {e}"))?;
 
@@ -442,7 +442,7 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     let mut source = crate::cxxlib::source();
     let hosts = HostProviders::new();
     // Everything already loaded, which is what dyld resolves a new image
-    // against:
+    // against.
     let main = main_exports();
     let loaded = LoadedImages;
     let mut extra: Vec<&dyn machish::resolve::SymbolProvider> = main
@@ -520,7 +520,7 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     let (imports, imports_by_target) = collect_imports(&report, is_guest);
 
     // The same substitution the program's own slots get — see
-    // [`crate::trampoline`] — and a `dlopen`ed plugin is where it pays most:
+    // [`crate::trampoline`] — and a `dlopen`ed plugin is where it pays most.
     let eligible: Vec<(u64, ImportSite)> = imports
         .iter()
         .filter(|(_, site)| !site.is_stub && !is_guest(site.resolved))
@@ -567,7 +567,7 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     }
 
     // A loaded image's thread-locals are its own, and nothing else registers
-    // them:
+    // them.
     crate::tls::register(&leaked.report);
 
     // Before any of this image's code runs, and after it is findable: realize
@@ -595,7 +595,7 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     // own code runs. See [`announce`].
     announce(leaked.handle, leaked.slide);
 
-    // Now the image's own code, in dyld's order:
+    // Now the image's own code, in dyld's order.
     if let Some(vm) = vm {
         vm.run_loaded_load_methods(&leaked.report)
             .map_err(|e| format!("{resolved}: objc +load: {e}"))?;
@@ -810,7 +810,7 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
         return Some(addr);
     }
 
-    // The global fallback, which is a *host* search:
+    // The global fallback, which is a *host* search.
     let addr = match crate::shims::openat::host_substitute(name) {
         Some(wrapper) => wrapper,
         None => host_symbol(name)?,
@@ -834,13 +834,13 @@ pub(crate) fn host_symbol(name: &str) -> Option<u64> {
 /// Handles the *host's* `dlopen` returned, and the paths they were asked for.
 ///
 /// A guest that asks for `/usr/lib/libc.dylib` is not asking for a file. On this system
-/// there is no such file:
+/// there is no such file.
 static NATIVE: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
 
 /// The import sites a native `dlsym` result has been given.
 ///
 /// A host address is only callable from guest code if
-/// [`Program::import_by_target`](crate::Program::import_by_target) can name it:
+/// [`Program::import_by_target`](crate::Program::import_by_target) can name it.
 static NATIVE_SYMBOLS: Mutex<BTreeMap<u64, &'static ImportSite>> = Mutex::new(BTreeMap::new());
 
 /// How many entries [`NATIVE_SYMBOLS`] has, read without the lock.
@@ -904,7 +904,7 @@ fn remember_native_symbol(addr: u64, name: &str, library: Option<String>) -> u64
     }
     drop(map);
 
-    // And the whole reason this passthrough is worth optimising at all:
+    // And the whole reason this passthrough is worth optimising at all.
     crate::trampoline::for_site(site).unwrap_or(addr)
 }
 
@@ -962,7 +962,7 @@ fn notify(thunk: u64, header: u64, slide: u64) {
 /// Announce `image` to every callback registered so far.
 ///
 /// Called after the image is published and before its initializers run, which is the
-/// order dyld uses and the order a garbage collector needs:
+/// order dyld uses and the order a garbage collector needs.
 fn announce(header: u64, slide: u64) {
     let callbacks = ADD_IMAGE.lock().unwrap_or_else(|e| e.into_inner()).clone();
     for thunk in callbacks {
@@ -979,7 +979,7 @@ fn announce(header: u64, slide: u64) {
 /// ## Scope
 ///
 /// The images this runtime *maps* are reported. The arm64 system libraries the guest's
-/// imports resolve into are not, and cannot be:
+/// imports resolve into are not, and cannot be.
 fn register_func_for_add_image(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -1013,7 +1013,7 @@ fn register_func_for_add_image(
 /// `void _dyld_register_func_for_remove_image(...)`
 ///
 /// Recorded and never called, because nothing is ever unloaded — see the scope note on
-/// `dlclose`. Accepting it is honest in a way refusing would not be:
+/// `dlclose`. Accepting it is honest in a way refusing would not be.
 fn register_func_for_remove_image(
     _symbol: &str,
     _ctx: &mut RegisterContext,
@@ -1025,7 +1025,6 @@ fn register_func_for_remove_image(
 
 /// Whether `name` is one of this module's callback-taking shims.
 ///
-/// [`Callbacks`]: crate::abi::Callbacks
 pub fn shim_for_callbacks(name: &str) -> Option<crate::signal::Shim> {
     Some(match name {
         "_dyld_register_func_for_add_image" => register_func_for_add_image,
@@ -1429,7 +1428,7 @@ pub fn provider() -> SyntheticDylib {
         "_dyld_register_func_for_add_image",
         "_dyld_register_func_for_remove_image",
         // On `machish`'s `_dyld_` denylist like the two above, and the reason
-        // `tests/unwind.rs` has been red:
+        // `tests/unwind.rs` has been red.
         "_dyld_find_unwind_sections",
     ] {
         if let Some(addr) = host_symbol(name) {

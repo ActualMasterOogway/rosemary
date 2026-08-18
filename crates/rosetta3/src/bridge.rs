@@ -15,7 +15,13 @@ const EXIT: u32 = 1;
 /// Continue the guest wherever the context now says, without servicing anything
 /// further.
 ///
-/// ## Why the answer is sometimes [`RESUME_LINKED`]
+/// "Continue at `rip` and service nothing" is the precise condition block linking asks
+/// about, so this is the one place that can answer it for a bridged call — a quarter of
+/// all region exits in a real program.
+///
+/// `pending` is a parameter because a parked error is serviced by the run loop and by
+/// nothing else, and an exit that linked is an exit it did not see. An error can be
+/// parked by a *nested* guest callback under a call that returned `Ok`.
 fn resume(pending: bool, ctx: &mut RegisterContext) -> u32 {
     ctx.exit_reason = ExitReason::UnknownJump as u32;
     ctx.exit_code = TransferKind::IndirectJump as u32;
@@ -35,7 +41,7 @@ fn defer(_ctx: &mut RegisterContext) -> u32 {
 /// A host function this runtime forwards to may call *back* into the guest, and a
 /// failure there cannot be returned through the host frame in the middle.
 ///
-/// `qsort` with a guest comparator that `longjmp`s out of itself is the shape:
+/// `qsort` with a guest comparator that `longjmp`s out of itself is the shape.
 fn settle(vm: &crate::vm::Vm, ctx: &mut RegisterContext) -> u32 {
     match vm.has_pending() {
         true => resume(true, ctx),
@@ -57,7 +63,7 @@ fn publish_rsp(ctx: &RegisterContext) {
 /// convention and nothing about the guest.
 ///
 /// A panic here is a bug in this runtime rather than something the guest did, which is
-/// exactly why it should be *reported* rather than aborted on:
+/// exactly why it should be *reported* rather than aborted on.
 fn caught(vm: &crate::vm::Vm, what: &str, body: impl FnOnce() -> u32) -> u32 {
     // `AssertUnwindSafe` because the only state crossing in is the guest's
     // register context and this runtime's own locks, and a panic leaves both in
@@ -162,7 +168,7 @@ impl ImportRegistry for DynamicImports {
         // this never has to answer for the root program's own sites.
         let site = crate::dyld::import_at(va)?;
         // A loaded image's imports were bridged wholesale, which is correct and
-        // leaves the best case on the table:
+        // leaves the best case on the table.
         Some(fast_import(site).unwrap_or_else(|| ImportKind::Bridge(import_bridge())))
     }
 }
@@ -171,7 +177,7 @@ impl ImportRegistry for DynamicImports {
 ///
 /// The three exclusions are [`crate::ImportPolicy::promotion_for`]'s, and the fourth —
 /// an import that resolved into another **guest** image — is
-/// [`crate::Program::lifter_config`]'s:
+/// [`crate::Program::lifter_config`]'s.
 fn fast_import(site: &crate::program::ImportSite) -> Option<ImportKind> {
     use microlift::core::FastImport;
 
@@ -182,7 +188,7 @@ fn fast_import(site: &crate::program::ImportSite) -> Option<ImportKind> {
         return None;
     }
     // Guest-resolved is the exclusion that cannot be skipped, and it is not
-    // hypothetical:
+    // hypothetical.
     let vm = crate::thunk::current()?;
     if vm.program.is_guest_address(site.resolved) {
         return None;

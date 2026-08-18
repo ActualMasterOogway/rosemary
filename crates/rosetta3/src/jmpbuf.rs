@@ -11,7 +11,7 @@ pub const GUEST_JMP_BUF: usize = 148;
 
 /// The magic word a buffer this runtime wrote begins with.
 ///
-/// Not decoration:
+/// Not decoration.
 const MAGIC: u64 = 0x524f_5345_5454_4133; // "ROSETTA3"
 
 /// A guest context, as `setjmp` records it.
@@ -105,7 +105,7 @@ impl SavedContext {
 /// `int setjmp(jmp_buf)` and every spelling of it.
 ///
 /// Returns zero, as a first return must. The second return is [`longjmp`]'s business,
-/// and it does not come back through here at all:
+/// and it does not come back through here at all.
 pub fn setjmp(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let env = ctx.rdi;
     let Some(state) = crate::thread::current() else {
@@ -236,7 +236,7 @@ mod tests {
 
     /// A flat span of guest memory at a known base.
     ///
-    /// Enough for a `jmp_buf` and nothing else, deliberately:
+    /// Enough for a `jmp_buf` and nothing else, deliberately.
     struct TestMem {
         base: u64,
         bytes: Vec<u8>,

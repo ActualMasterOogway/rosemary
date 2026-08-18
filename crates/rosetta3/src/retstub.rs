@@ -34,7 +34,7 @@ pub fn contains(va: u64) -> bool {
 ///
 /// One byte, copied out rather than borrowed, so the walk's upper bound is the
 /// instruction itself and nothing follows it. Every other address in the page is
-/// refused:
+/// refused.
 pub fn lift_region(va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
     if !is_exit(va) {
         return None;
@@ -52,7 +52,7 @@ pub fn locate(va: u64) -> Option<String> {
 /// Map the page and fill it with breakpoints.
 ///
 /// Readable and writable by this runtime and never executable, which is the decision
-/// every guest mapping is made under:
+/// every guest mapping is made under.
 fn map() -> Option<u64> {
     let size = machish::memory::host_page_size() as usize;
     // SAFETY: an anonymous private mapping of one page at an address of the
@@ -79,7 +79,7 @@ fn map() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     /// The address is stable and the byte behind it is the breakpoint every part of
-    /// this rests on:
+    /// this rests on.
     #[test]
     fn the_stub_is_one_breakpoint_at_a_stable_address() {
         let va = super::address();

@@ -10,7 +10,7 @@ use super::host::host_or_refuse;
 /// `CGRect`, as AAPCS64 returns one.
 ///
 /// Four `double`s and nothing else, which is what makes it a homogeneous float
-/// aggregate. Declaring it as such is the whole trick:
+/// aggregate. Declaring it as such is the whole trick.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub(crate) struct CgRect {
@@ -191,7 +191,7 @@ fn screen_size_of_display(
 /// CGPoint mouseCursorPosition, CGMouseButton mouseButton)`
 ///
 /// The `CGPoint` is the third argument and is what keeps this out of the table, and its
-/// position is the interesting part:
+/// position is the interesting part.
 fn event_create_mouse(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -216,7 +216,7 @@ fn event_create_mouse(
 /// `NSRect NSInsetRect(NSRect aRect, CGFloat dX, CGFloat dY)`
 ///
 /// An `NSRect` *and* a `CGRect`, in and out, which makes it the only function in this
-/// module with the thirty-two byte disagreement on both sides of the call at once:
+/// module with the thirty-two byte disagreement on both sides of the call at once.
 fn inset_rect(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let host = host_or_refuse(symbol)?;
     let rect = rect_argument(symbol, ctx, mem, 0)?;
@@ -320,7 +320,7 @@ mod tests {
     use super::*;
 
     /// The layout claim, which is the only thing this module asserts about `CGRect` and
-    /// the thing a wrong answer would silently violate:
+    /// the thing a wrong answer would silently violate.
     #[test]
     fn a_rect_is_four_doubles_in_order() {
         assert_eq!(core::mem::size_of::<CgRect>(), 32);
@@ -339,7 +339,7 @@ mod tests {
     }
 
     /// Against the host, so the claim is about CoreGraphics rather than about this
-    /// module's arithmetic:
+    /// module's arithmetic.
     #[test]
     fn the_main_displays_bounds_land_in_the_guests_buffer() {
         let Some(_) = crate::dyld::host_symbol("CGDisplayBounds") else {

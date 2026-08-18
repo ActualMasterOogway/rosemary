@@ -97,7 +97,7 @@ unsafe extern "C" {
 /// Nanoseconds as ticks of the absolute clock.
 ///
 /// `std::thread::sleep` is not usable here and the reason is measured rather than
-/// assumed:
+/// assumed.
 fn ticks(nanos: u64) -> u64 {
     #[dynamic]
     static BASE: (u32, u32) = {
@@ -182,7 +182,7 @@ struct Counts {
     /// Samples taken on a thread that was on a CPU. The denominator every share
     /// below is a share of.
     running: u64,
-    /// Samples taken on a thread that was parked. Counted and reported, never mixed in:
+    /// Samples taken on a thread that was parked. Counted and reported, never mixed in.
     blocked: u64,
     /// Guest instruction address → samples. The histogram this module exists
     /// for.
@@ -191,7 +191,7 @@ struct Counts {
     /// the parts no guest instruction was attributed to.
     region: HashMap<u64, u64>,
     /// Samples inside a translation's own attributed extent that no guest instruction
-    /// covered:
+    /// covered.
     translated_unnamed: u64,
     /// Samples past everything a translation attributed but close enough to be its
     /// epilogue.
@@ -307,7 +307,7 @@ fn attribute(counts: &mut Counts, pc: u64) {
 /// Start sampling, if `ROSETTA3_PROFILE` asked for it. Idempotent.
 ///
 /// Called from [`crate::startup::run`] beside [`crate::fault::install`] and for the
-/// same reason:
+/// same reason.
 pub fn start() {
     if configured_hz().is_some() {
         set_sampling(true);
@@ -411,7 +411,7 @@ fn sweep_forever(period: Duration, every: Option<Duration>) {
         };
         let mut found = 0;
         // The registry is scanned with the counts held, which is safe in the
-        // one direction that matters:
+        // one direction that matters.
         crate::thread::each_port(|port| {
             if port == mine {
                 return;
@@ -603,7 +603,7 @@ pub fn report() {
     }
 
     // And [`crate::stats`], which has the same problem this module solves and
-    // one fewer way to solve it:
+    // one fewer way to solve it.
     crate::stats::report();
 }
 
@@ -636,7 +636,7 @@ pub struct HostEntry {
 /// What the sampler has seen, ranked, for a consumer that is not stderr.
 ///
 /// [`report`] renders the same counts as prose. This hands them over as data so
-/// [`crate::gui`] can draw them, and it is deliberately a *copy*:
+/// [`crate::gui`] can draw them, and it is deliberately a *copy*.
 #[derive(Clone)]
 pub struct Snapshot {
     /// Wall time since sampling started; the denominator for a rate.
@@ -658,7 +658,7 @@ pub struct Snapshot {
     pub runtime: f64,
     pub library: f64,
     pub unaccounted: f64,
-    /// The two rankings, longest first. **Believe the first one**:
+    /// The two rankings, longest first. **Believe the first one**.
     pub regions: Vec<Entry>,
     pub instructions: Vec<Entry>,
     pub host: Vec<HostEntry>,
@@ -667,7 +667,7 @@ pub struct Snapshot {
 /// Rank everything the sampler has, keeping the top `top` of each list.
 ///
 /// `None` when sampling was never asked for, which a caller must show as
-/// "`ROSETTA3_PROFILE` is not set" rather than as an empty profile:
+/// "`ROSETTA3_PROFILE` is not set" rather than as an empty profile.
 pub fn snapshot(top: usize) -> Option<Snapshot> {
     let guard = COUNTS.lock().unwrap_or_else(|e| e.into_inner());
     let counts = guard.as_ref()?;

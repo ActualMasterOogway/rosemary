@@ -289,7 +289,7 @@ pub fn shim_for(name: &str) -> Option<Shim> {
 mod tests {
     use super::*;
 
-    /// The layout claim, which is what a wrong answer would violate silently:
+    /// The layout claim, which is what a wrong answer would violate silently.
     #[test]
     fn the_offsets_are_the_blocks_abi_layout() {
         #[repr(C)]

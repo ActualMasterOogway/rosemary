@@ -13,7 +13,7 @@ const MAX_LEN: u64 = 15;
 /// Perform the `CMPXCHG16B` the guest exited on.
 ///
 /// `ctx.rip` is already **past** the instruction, which is microlift's
-/// unimplemented-instruction contract:
+/// unimplemented-instruction contract.
 pub fn service(ctx: &mut RegisterContext, mem: &dyn GuestMemory) -> Result<(), VmError> {
     let at = ctx.rip;
     let instruction = decode_before(at, mem).ok_or(VmError::Trap {

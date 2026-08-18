@@ -9,7 +9,7 @@ use crate::vm::Vm;
 /// The callee-saved state a frame restores, plus where it resumes.
 ///
 /// Exactly SysV AMD64's callee-saved set. The caller-saved half needs no tracking for
-/// the same reason [`crate::jmpbuf`] does not save it:
+/// the same reason [`crate::jmpbuf`] does not save it.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Registers {
     pub rip: u64,
@@ -234,7 +234,7 @@ impl<'a> Reader<'a> {
             _ => return None,
         };
         // A zero *stored* value is a null pointer, whatever the encoding says
-        // about relocating it. This is not a special case invented here:
+        // about relocating it. This is not a special case invented here.
         if value == 0 {
             return Some(0);
         }
@@ -549,7 +549,7 @@ impl Lsda {
                 f if f > 0 => {
                     let catch_type = self.catch_type(f, mem)?;
                     // A null entry is `catch (...)`, which takes anything. An
-                    // exact address match is the same object:
+                    // exact address match is the same object.
                     match catches(vm, catch_type, thrown_type, mem) {
                         Match::Yes => {
                             return Ok(Outcome::Handler {
@@ -664,7 +664,7 @@ fn catches(vm: &Vm, catch_type: u64, thrown: u64, mem: &dyn GuestMemory) -> Matc
 
 /// The exception header this runtime puts in front of a thrown object.
 ///
-/// The Itanium ABI leaves the layout to the implementation:
+/// The Itanium ABI leaves the layout to the implementation.
 #[derive(Clone, Copy, Debug)]
 struct ExceptionHeader {
     thrown_type: u64,
@@ -746,7 +746,7 @@ fn find_handler(
 /// What it means that the walk ran out of guest frames.
 ///
 /// Three different failures share this edge, and telling them apart is the difference
-/// between a bug report and a work item:
+/// between a bug report and a work item.
 fn edge_of_the_walk(undecidable: bool) -> UnwindError {
     let nested = crate::thread::current().is_some_and(|s| s.depth.get() > 1);
     if nested {
@@ -835,7 +835,7 @@ fn pad_of(outcome: Outcome) -> Option<u64> {
 
 /// `void *__cxa_allocate_exception(size_t)`
 ///
-/// Host memory, which the identity mapping makes guest-addressable:
+/// Host memory, which the identity mapping makes guest-addressable.
 pub fn allocate_exception(
     symbol: &str,
     ctx: &mut RegisterContext,

@@ -19,7 +19,7 @@ const STRIDE: u64 = 16;
 
 /// How many symbols may be trampolined.
 ///
-/// Sized to be forgettable rather than to a measurement:
+/// Sized to be forgettable rather than to a measurement.
 const SLOTS: usize = 8192;
 
 /// Bytes in each half of the reservation.
@@ -32,7 +32,7 @@ static BASE: AtomicU64 = AtomicU64::new(0);
 struct Entry {
     /// The site the entry stands for, leaked so it can be handed out with a `'static`
     /// lifetime — the same thing [`crate::dyld`] does with a `dlsym` result, and for
-    /// the same reason:
+    /// the same reason.
     site: &'static ImportSite,
     /// Its signature, resolved once when the entry was made.
     abi: &'static FunctionAbi,
@@ -158,7 +158,7 @@ pub fn for_site(site: &ImportSite) -> Option<u64> {
         return None;
     }
     // The same three questions `ImportPolicy::promotion_for` asks of a static
-    // call site, asked here because the answer must be the same:
+    // call site, asked here because the answer must be the same.
     if crate::trace::watching(&site.symbol) {
         return None;
     }
@@ -246,7 +246,7 @@ fn with_entry<T>(slot: usize, f: impl FnOnce(&Entry) -> T) -> Option<T> {
 /// The region to lift in order to execute the trampoline at `va`.
 ///
 /// The buffer handed to the walk is **the one entry**, not the arena. That is what
-/// keeps the `jmp`'s target out of the walk's reach without any special case:
+/// keeps the `jmp`'s target out of the walk's reach without any special case.
 pub fn lift_region(va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
     let slot = code_slot(va)?;
     // An address in the arena that has not been handed out is not code. Asked
@@ -303,7 +303,7 @@ pub fn host_behind(va: u64) -> Option<u64> {
 /// bytes of one would be rewriting the program rather than its imports.
 ///
 /// Returns how many bindings were substituted. A write that fails is skipped rather
-/// than reported:
+/// than reported.
 pub fn install<'a>(
     imports: impl IntoIterator<Item = (u64, &'a ImportSite)>,
     is_guest: &dyn Fn(u64) -> bool,

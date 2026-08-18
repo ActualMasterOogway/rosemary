@@ -28,7 +28,7 @@ pub struct VarArgs<'a> {
     /// The `va_list` to read from, when the caller was handed one rather than leaving
     /// its arguments in registers.
     ///
-    /// The two are the same question asked of different storage:
+    /// The two are the same question asked of different storage.
     list: Option<VaList>,
     /// How to render `%@`, for a format string that is an `NSString`.
     object: Option<&'a dyn Fn(u64) -> Vec<u8>>,
@@ -145,7 +145,7 @@ impl<'a> VarArgs<'a> {
 /// The guest's `va_list`, as SysV AMD64 defines it.
 ///
 /// Four fields and a register save area, and the reason a `v`-prefixed function cannot
-/// be forwarded to the host's:
+/// be forwarded to the host's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VaList {
     /// Where the structure itself lives, so an updated copy can be written back.
@@ -211,7 +211,7 @@ struct Spec {
 
 /// Format `fmt` against `args`, exactly as C would print it.
 ///
-/// Total on arbitrary bytes:
+/// Total on arbitrary bytes.
 pub fn render(fmt: &[u8], args: &mut VarArgs<'_>) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(fmt.len());
     let mut i = 0usize;
@@ -291,7 +291,7 @@ pub fn render(fmt: &[u8], args: &mut VarArgs<'_>) -> Result<Vec<u8>> {
                     i += 1;
                 }
                 // `z`, `j`, `t` are all 64-bit here, and so is BSD's `q`
-                // ("quad") — which is not a historical curiosity to skip:
+                // ("quad") — which is not a historical curiosity to skip.
                 Some(b'z') | Some(b'j') | Some(b't') | Some(b'q') => {
                     len = Len::Size;
                     i += 1;
@@ -784,7 +784,7 @@ pub fn snprintf_chk(
 /// Write `out` to `dst`, truncated to `limit` bytes including the terminator, and leave
 /// the length the whole rendering would have had in `rax`. The `v`-prefixed family:
 ///
-/// Not forwardable, and the reason is worth stating where the code is:
+/// Not forwardable, and the reason is worth stating where the code is.
 fn format_from_list(
     symbol: &str,
     ctx: &RegisterContext,

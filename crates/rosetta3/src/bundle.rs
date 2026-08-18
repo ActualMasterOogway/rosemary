@@ -32,7 +32,7 @@ pub fn remirror(guest: &Path) -> Option<PathBuf> {
     if std::env::var_os(GUARD).is_some() {
         return None;
     }
-    // Canonical first:
+    // Canonical first.
     let guest = std::fs::canonicalize(guest).ok()?;
     let app = enclosing(&guest)?;
     let host = std::env::current_exe().ok()?;
@@ -119,11 +119,7 @@ fn key(app: &Path, host: &Path) -> Option<String> {
 /// Best-effort throughout: a link that already exists is left alone, and one that
 /// cannot be made is skipped.
 ///
-/// ## Why the mirror needs a shape and not just a directory
-///
-/// ## Why it stops at two
-///
-/// Because the cost is not symmetric.
+/// It stops at two levels, because the cost is not symmetric.
 fn link_ancestors(app: &Path, root: &Path) -> Option<PathBuf> {
     let app_name = app.file_name()?;
     let Some(parent) = app.parent() else {
@@ -136,7 +132,7 @@ fn link_ancestors(app: &Path, root: &Path) -> Option<PathBuf> {
 
     // The grandparent's children beside the reproduced parent, then the
     // parent's beside the reproduced `.app`. The directory being reproduced is
-    // excluded at each level:
+    // excluded at each level.
     if let Some(grand) = parent.parent() {
         link_children(grand, root, &[&parent_name.to_string_lossy()]);
     }

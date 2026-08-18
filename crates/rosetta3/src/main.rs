@@ -33,7 +33,7 @@ fn run(path: &str, args: Vec<String>, policy: ImportPolicy) -> ExitCode {
     rosetta3::thunk::publish(vm);
 
     // Objective-C registration happens inside `startup::run`, in dyld's order.
-    // It is driven from here first only so that its refusals reach the user:
+    // It is driven from here first only so that its refusals reach the user.
     match vm.register_objc() {
         Ok(objc) => {
             for r in objc.refusals() {
@@ -70,7 +70,7 @@ fn main() -> ExitCode {
     if first == "run" {
         // `--slow` turns every import into a VM exit. It is here rather than in
         // a test harness because it is the falsifiable half of the
-        // claim:
+        // claim.
         let mut policy = ImportPolicy::FastWhenKnown;
         let mut path = None;
         for arg in args.by_ref() {

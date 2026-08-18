@@ -30,10 +30,10 @@ const BLEND_ONE_MINUS_SRC_ALPHA: u64 = 5;
 const STORAGE_SHARED: u64 = 0;
 
 /// Buffers in the ring. Metal's own recommendation, and the reason is exactly the
-/// situation here:
+/// situation here.
 const RING: usize = 3;
 
-/// `MTLRegion`:
+/// `MTLRegion`.
 #[repr(C)]
 struct Region {
     x: u64,
@@ -111,7 +111,7 @@ static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
 /// of its.
 ///
 /// **This is what makes `-[CAMetalDrawable present]` supportable**, which the first
-/// version of this file said it was not. That claim was half right:
+/// version of this file said it was not. That claim was half right.
 static QUEUE: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
@@ -195,7 +195,7 @@ pub unsafe fn present_standalone(drawable: Id) {
 /// # Safety
 ///
 /// `command_buffer` must be a live, un-committed `MTLCommandBuffer` and `drawable` a
-/// `CAMetalDrawable`, on the thread that is presenting. Two call sites satisfy that:
+/// `CAMetalDrawable`, on the thread that is presenting. Two call sites satisfy that.
 pub unsafe fn present(command_buffer: Id, drawable: Id) {
     if command_buffer.is_null() || drawable.is_null() {
         return;

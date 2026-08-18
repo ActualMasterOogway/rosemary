@@ -75,7 +75,7 @@ mod tests {
     /// The round trip, through the host's own CoreFoundation.
     ///
     /// Checked rather than asserted, because the whole claim is that sixteen bytes
-    /// survive a pair of registers in both directions:
+    /// survive a pair of registers in both directions.
     #[test]
     fn sixteen_bytes_survive_the_round_trip() {
         let Some(create) = crate::dyld::host_symbol("CFUUIDCreateFromUUIDBytes") else {

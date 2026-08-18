@@ -37,7 +37,7 @@ pub fn guest_call_abi_ref() -> &'static CallAbi {
 /// Anything that stops an intercepted call from being made.
 ///
 /// Every variant names the symbol, because the whole point of refusing is that the
-/// failure is legible:
+/// failure is legible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AbiError {
     /// Nothing in [`table`] describes this symbol.
@@ -47,7 +47,7 @@ pub enum AbiError {
         symbol: String,
         reason: &'static str,
     },
-    /// Variadic, and no shim implements it. Variadics cannot be forwarded generically:
+    /// Variadic, and no shim implements it. Variadics cannot be forwarded generically.
     NoShim { symbol: String },
     /// The signature is known but this marshaller cannot express the call:
     /// more than eight integer or eight floating-point arguments.
@@ -62,7 +62,7 @@ pub enum AbiError {
     /// pointing outside anything mapped.
     Memory { symbol: String, addr: u64 },
     /// A shim called *into the guest* and that call failed. The payload is the inner
-    /// failure, rendered:
+    /// failure, rendered.
     Nested { symbol: String, reason: String },
 }
 
@@ -223,7 +223,7 @@ impl dyn GuestMemory + '_ {
 /// `u64`); `host` is the address the import resolved to.
 ///
 /// **On any error `ctx` is unmodified.** That is the guarantee that makes refusal
-/// useful:
+/// useful.
 pub fn call_import(
     symbol: &str,
     tag: u64,
@@ -297,14 +297,14 @@ pub trait Callbacks {
     /// while servicing `symbol`.
     ///
     /// One method rather than a "is it guest code" predicate and a builder, because the
-    /// decision and the substitution have to be made together:
+    /// decision and the substitution have to be made together.
     fn substitute(&self, symbol: &str, va: u64) -> Result<u64>;
 
     /// The guest address behind `va`, if `va` is a thunk this runtime handed out; `va`
     /// otherwise.
     ///
     /// The direction [`Callbacks::substitute`] alone cannot express, and it is not
-    /// symmetry for its own sake:
+    /// symmetry for its own sake.
     fn unsubstitute(&self, va: u64) -> u64 {
         va
     }
@@ -314,7 +314,7 @@ pub trait Callbacks {
 /// and [`call_import`] itself.
 ///
 /// It refuses rather than passing the pointer through, which keeps the behaviour
-/// exactly:
+/// exactly.
 pub struct NoCallbacks;
 
 impl Callbacks for NoCallbacks {

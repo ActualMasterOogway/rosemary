@@ -13,7 +13,7 @@ pub struct FunctionAbi {
     /// `DynamicSymbol::arg_types` uses, so no reshuffling happens at the seam.
     pub types: &'static [T],
     /// C-variadic. Never fast-called, and only callable if [`crate::shims`] implements
-    /// it:
+    /// it.
     pub variadic: bool,
     /// Zero-based parameter indices that are **guest function pointers**.
     ///
@@ -73,7 +73,7 @@ pub fn lookup(tag: u64, symbol: &str) -> Lookup {
 
 /// Data imports whose names carry a suffix, so [`REFUSED`] cannot list them.
 ///
-/// Objective-C metadata is the only family in this shape:
+/// Objective-C metadata is the only family in this shape.
 fn data_family(name: &str) -> Option<&'static str> {
     const DATA: &str = "an Objective-C metadata import, read through its slot and never called";
     let families = [
@@ -276,7 +276,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CC_SHA512_Update", I32, P, P, U32),
     sig!("CFArrayAppendValue", V, P, P),
     // `CFRange` by value, which is the case the roadmap already settled for
-    // `CFStringGetBytes`:
+    // `CFStringGetBytes`.
     cbsig!([3], "CFArrayApplyFunction", V, P, I64, I64, P, P),
     // ## CoreFoundation and CFNetwork
     //
@@ -321,7 +321,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFBooleanGetValue", BOOL, P),
     // `CFDataRef CFDataCreate(CFAllocatorRef, const UInt8 *, CFIndex)` — the
     // bytes are read out of guest memory and copied into the host's object,
-    // which is what makes the copy the right one:
+    // which is what makes the copy the right one.
     sig!("CFDataCreate", P, P, P, I64),
     sig!("CFDataCreateCopy", P, P, P),
     sig!("CFDataGetBytePtr", P, P),
@@ -435,7 +435,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFStringAppendCharacters", V, P, P, I64),
     // `CFComparisonResult` is a `CFIndex`, so a signed doubleword, and
     // `CFStringCompareFlags` is a `CFOptionFlags` — both 64-bit on LP64. This
-    // is where SDL3 stopped:
+    // is where SDL3 stopped.
     sig!("CFStringCompare", I64, P, P, U64),
     sig!("CFStringConvertEncodingToIANACharSetName", P, U32),
     sig!("CFStringConvertEncodingToNSStringEncoding", U64, U32),
@@ -525,7 +525,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGDisplayCopyAllDisplayModes", P, U32, P),
     sig!("CGDisplayCopyDisplayMode", P, U32),
     // Seven floats and a flag, and the `boolean_t` at the end is the argument
-    // that makes the count worth checking:
+    // that makes the count worth checking.
     sig!("CGDisplayFade", I32, U32, F32, F32, F32, F32, F32, F32, I32),
     // Both take a `CGDirectDisplayID`, and both are reference-counted rather
     // than absolute: a game hiding the cursor for a level must show it again.
@@ -545,7 +545,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGDisplayModeRelease", V, P),
     sig!("CGDisplayModeRetain", P, P),
     // `CGPoint` by value, which is the [`CFRange`] case rather than the
-    // `NSRect` one:
+    // `NSRect` one.
     sig!("CGDisplayMoveCursorToPoint", I32, U32, F64, F64),
     sig!("CGDisplayPixelsHigh", U64, U32),
     sig!("CGDisplayPixelsWide", U64, U32),
@@ -907,7 +907,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("NSHomeDirectory", P),
     sig!("NSClassFromString", P, P),
     // `SEL NSSelectorFromString(NSString *)` — two pointers, and the reason it
-    // needs no translation is:
+    // needs no translation is.
     sig!("NSSelectorFromString", P, P),
     // The handler is a guest function pointer the *runtime* calls, from inside
     // whatever raised — so it goes out as a thunk like every other callback
@@ -932,7 +932,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("OSMemoryBarrier", V),
     // `OSSpinLock` is a bare `int32_t` the guest allocates itself, and the
     // host's implementation operates on it in place — the same arrangement as
-    // `pthread_mutex_t`, and true for the same checked reason:
+    // `pthread_mutex_t`, and true for the same checked reason.
     sig!("OSSpinLockLock", V, P),
     sig!("OSSpinLockTry", BOOL, P),
     sig!("OSSpinLockUnlock", V, P),
@@ -1055,7 +1055,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("__assert_rtn", V, P, P, I32, P),
     sig!("__bzero", V, P, U64),
     // Listed to keep it off the fast path and out of the audit's unknown list.
-    // The handler is a guest function pointer, but no `cbsig!` marks it:
+    // The handler is a guest function pointer, but no `cbsig!` marks it.
     sig!("__cxa_atexit", I32, P, P, P),
     sig!("__darwin_check_fd_set_overflow", I32, I32, P, I32),
     sig!("__error", P),
@@ -1067,7 +1067,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("__isnanf", I32, F32),
     // The rest of `<math.h>`'s classification macros, which are functions on
     // Darwin. Each takes its argument in a floating-point register and answers
-    // an `int`, and each width is its own symbol:
+    // an `int`, and each width is its own symbol.
     sig!("__isfinitef", I32, F32),
     sig!("__isfinited", I32, F64),
     sig!("__isinff", I32, F32),
@@ -1097,7 +1097,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("__toupper", I32, I32),
     // Darwin's futex, which is how a modern `libc++` blocks on
     // `std::atomic::wait` and how mimalloc parks a contended thread. It passes
-    // through:
+    // through.
     sig!("__ulock_wait", I32, U32, P, U64, U32),
     sig!("__ulock_wait2", I32, U32, P, U64, U64, U64),
     sig!("__ulock_wake", I32, U32, P, U64),
@@ -1170,7 +1170,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("atol", I64, P),
     sig!("atoll", I64, P),
     // `<execinfo.h>`, and the reason a *crash handler* is the first thing a C++
-    // game reaches:
+    // game reaches.
     sig!("backtrace", I32, P, I32),
     sig!("backtrace_symbols", P, P, I32),
     sig!("backtrace_symbols_fd", V, P, I32, I32),
@@ -1227,7 +1227,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("adler32", U64, U64, P, U32),
     sig!("alarm", U32, U32),
     // `double cabs(double complex)`. A `double complex` is two doubles, and it
-    // is one of the aggregates the two ABIs agree about:
+    // is one of the aggregates the two ABIs agree about.
     sig!("cabs", F64, F64, F64),
     sig!("cfsetispeed", I32, P, U64),
     sig!("cfsetospeed", I32, P, U64),
@@ -1619,7 +1619,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("glTexCoord2f", V, F32, F32),
     // Nine integer arguments, which is one more than either the guest's six
     // registers or the host's eight. See [`super::marshal`] for what carries
-    // the ninth:
+    // the ninth.
     sig!("glTexImage2D", V, U32, I32, I32, I32, I32, I32, U32, U32, P),
     // ### Sync objects
     //
@@ -2049,7 +2049,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("host_statistics", I32, U32, I32, P, P),
     // The 64-bit flavours, which differ from the pair above only in that the
     // structure they fill has 64-bit counters. Same five arguments, same
-    // meaning:
+    // meaning.
     sig!("host_statistics64", I32, U32, I32, P, P),
     sig!("host_info", I32, U32, I32, P, P),
     sig!("hypot", F64, F64, F64),
@@ -2085,7 +2085,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("isxdigit", I32, I32),
     // BSD event notification, which is how `steamclient.dylib` waits on its
     // sockets and its pipe to the client. Passed straight through, and the
-    // reason is a check rather than an assumption:
+    // reason is a check rather than an assumption.
     sig!("kevent", I32, I32, P, I32, P, I32, P),
     sig!("kill", I32, I32, I32),
     sig!("kqueue", I32),
@@ -2139,7 +2139,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("mach_absolute_time", U64),
     sig!("mach_host_self", U32),
     // The three Mach IPC calls `libsteam_api.dylib` makes to talk to the Steam
-    // client. They need no translation at all:
+    // client. They need no translation at all.
     sig!("mach_msg", I32, P, I32, U32, U32, U32, U32, U32),
     sig!("mach_msg_destroy", V, P),
     sig!("mach_port_allocate", I32, U32, U32, P),
@@ -2270,7 +2270,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("proc_name", I32, I32, P, U32),
     // `int proc_pidinfo(int pid, int flavour, uint64_t arg, void *buffer, int
     // buffersize)` — the general form of `proc_pidpath` above, and how a
-    // program asks the kernel about its own task:
+    // program asks the kernel about its own task.
     sig!("proc_pidinfo", I32, I32, I32, U64, P, I32),
     sig!("proc_pidpath", I32, I32, P, U32),
     sig!("psignal", V, U32, P),
@@ -2294,7 +2294,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("pthread_attr_destroy", I32, P),
     // Every getter in this family is `(const pthread_attr_t *, T *)` and every
     // setter takes its value directly, which is why the two halves do not read
-    // symmetrically:
+    // symmetrically.
     sig!("pthread_attr_getdetachstate", I32, P, P),
     sig!("pthread_attr_getguardsize", I32, P, P),
     sig!("pthread_attr_getinheritsched", I32, P, P),
@@ -2375,7 +2375,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("pthread_rwlock_wrlock", I32, P),
     sig!("pthread_self", U64),
     // Cancellation state and type are two `int`s in and the previous value out
-    // through a pointer. Nothing here is a guest callback:
+    // through a pointer. Nothing here is a guest callback.
     sig!("pthread_set_qos_class_self_np", I32, U32, I32),
     sig!("pthread_setcancelstate", I32, I32, P),
     sig!("pthread_setcanceltype", I32, I32, P),
@@ -2468,7 +2468,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("setpriority", I32, I32, U32, I32),
     sig!("setpwent", V),
     sig!("setrlimit", I32, I32, P),
-    // `pid_t setsid(void)`. `setpgrp` is deliberately absent beside it:
+    // `pid_t setsid(void)`. `setpgrp` is deliberately absent beside it.
     sig!("setsid", I32),
     sig!("setsockopt", I32, I32, I32, I32, P, U32),
     sig!("settimeofday", I32, P, P),
@@ -2536,7 +2536,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("strptime", P, P, P, P),
     sig!("strrchr", P, P, I32),
     sig!("strspn", U64, P, P),
-    // `char *strsignal(int)`. A **pointer** return, and the reason to say so:
+    // `char *strsignal(int)`. A **pointer** return, and the reason to say so.
     sig!("strsignal", P, I32),
     // ## Vouchers
     //
@@ -2754,7 +2754,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CMCopyDictionaryOfAttachments", P, P, P, U32),
     sig!("CMFormatDescriptionGetMediaSubType", U32, P),
     // Twelve parameters, four past AAPCS64's eighth, and the fourth is guest
-    // code:
+    // code.
     cbsig!(
         [3],
         "CMSampleBufferCreate",
@@ -2811,7 +2811,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
         P
     ),
     // `CMVideoDimensions` is two `int32_t` — **eight** bytes — which is the
-    // aggregate both ABIs agree about completely:
+    // aggregate both ABIs agree about completely.
     sig!("CMVideoFormatDescriptionGetDimensions", U64, P),
     sig!(
         "CMVideoFormatDescriptionGetH264ParameterSetAtIndex",
@@ -2922,7 +2922,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // 64-bit system is an ordinary function reading a global the OS maintains.
     sig!("LMGetKbdLast", U8),
     // `CFDictionaryRef _CFCopySystemVersionDictionary(void)` — private CF, and
-    // the same question [`crate::compat`] answers for the SDK gates:
+    // the same question [`crate::compat`] answers for the SDK gates.
     sig!("_CFCopySystemVersionDictionary", P),
     // ## libdispatch's function-pointer half
     //
@@ -3010,7 +3010,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("malloc_good_size", U64, U64),
     // `void *valloc(size_t)` and its private counterpart `vfree`, which
     // libsystem_malloc exports without a header. mimalloc imports the pair
-    // together and they must stay together:
+    // together and they must stay together.
     sig!("valloc", P, U64),
     sig!("vfree", V, P),
     // `int malloc_jumpstart(int cookie)` — undocumented libsystem_malloc SPI
@@ -3064,7 +3064,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
 
 /// A symbol with no public declaration anywhere on this system.
 ///
-/// The explicit unknown list, and the honest end of the refusal spectrum:
+/// The explicit unknown list, and the honest end of the refusal spectrum.
 const UNDECLARED: &str = "no public declaration; a guessed signature would fail silently";
 
 /// The commonest refusal by far, and the least interesting: a symbol that is a
@@ -3073,7 +3073,7 @@ const DATA: &str = "a data import, read through its slot and never called";
 
 /// A libc++ entry point whose whole purpose is to `throw`.
 ///
-/// Describing the signature would be easy and calling it would be wrong:
+/// Describing the signature would be easy and calling it would be wrong.
 const THROWS: &str = "throws a C++ exception, which cannot be raised across the JIT boundary";
 
 /// A struct by value, in a *C* function.
@@ -3109,7 +3109,7 @@ const LONG_DOUBLE: &str =
 /// order for the same reason as [`SIGNATURES`].
 pub static REFUSED: &[(&str, &str)] = &[
     // The one CoreFoundation constructor whose *argument* is a table of
-    // callbacks rather than a callback:
+    // callbacks rather than a callback.
     (
         "CFRunLoopSourceCreate",
         "its context structure holds guest function pointers the host would call as arm64",
@@ -3124,7 +3124,7 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("CGRectContainsPoint", AGGREGATE),
     ("CGRectInset", AGGREGATE),
     // `NSApp` is data like the rest of this block, and the least obvious of
-    // them:
+    // them.
     ("NSApp", DATA),
     ("NSCalibratedRGBColorSpace", DATA),
     ("NSDefaultRunLoopMode", DATA),
@@ -3349,7 +3349,7 @@ mod tests {
             "cabs",
             // A `CGPoint` written out as its two `double`s. Invisible to this
             // check until CoreGraphics.h joined [`HEADERS`], which is the point
-            // of adding a header:
+            // of adding a header.
             "CGDisplayMoveCursorToPoint",
             "CGWarpMouseCursorPosition",
         ];
@@ -3526,7 +3526,7 @@ mod tests {
     #[test]
     fn objc_metadata_is_refused_as_data_rather_than_reported_unknown() {
         // One name per class an image mentions, so this cannot be a list. The
-        // distinction that matters is refused-versus-unknown:
+        // distinction that matters is refused-versus-unknown.
         for name in [
             "_OBJC_CLASS_$_NSObject",
             "_OBJC_METACLASS_$_NSObject",

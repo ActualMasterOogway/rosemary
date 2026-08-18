@@ -9,7 +9,7 @@ use super::draw::{Color, Ui, color, duration};
 /// The template recorded when nothing else is asked for.
 ///
 /// `Time Profiler` rather than `Processor Trace`, and that is a finding rather than a
-/// preference:
+/// preference.
 const DEFAULT_TEMPLATE: &str = "Time Profiler";
 
 /// A recording in flight.

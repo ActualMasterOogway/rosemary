@@ -95,7 +95,7 @@ pub fn divdc3(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemo
 /// [`divdc3`]'s sibling one size down and in the other operation, and its register
 /// story is the one interesting thing about it.
 ///
-/// The multiplication itself is the C standard's Annex G recipe:
+/// The multiplication itself is the C standard's Annex G recipe.
 pub fn mulsc3(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
     let half = |reg: usize, high: bool| {
         let word = ctx.xmm[reg][0];
@@ -114,7 +114,7 @@ pub fn mulsc3(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemo
 
     if real.is_nan() && imag.is_nan() {
         // One operand was infinite and the other had a zero component, so the
-        // naive product manufactured `inf * 0`. Annex G's recovery:
+        // naive product manufactured `inf * 0`. Annex G's recovery.
         let mut recovered = false;
         let (mut a, mut b, mut c, mut d) = (a, b, c, d);
         /// An infinite component becomes a signed one and a finite one a signed

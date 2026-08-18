@@ -67,7 +67,7 @@ pub static mut __jit_debug_descriptor: JitDescriptor = JitDescriptor {
 
 /// LLDB puts a breakpoint on this symbol and examines the descriptor when it fires.
 ///
-/// Do not inline or remove it:
+/// Do not inline or remove it.
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub extern "C" fn __jit_debug_register_code() {
@@ -126,7 +126,7 @@ pub fn register(
 
     // LLDB needs the object to stay readable for as long as the entry is
     // registered, and entries are never withdrawn — a translation lives as long
-    // as the process. So both are leaked, deliberately:
+    // as the process. So both are leaked, deliberately.
     let object = Box::leak(object.into_boxed_slice());
 
     let entry = Box::leak(Box::new(JitCodeEntry {
@@ -186,7 +186,7 @@ fn symfile(
     let listing = listing(image, guest_start, guest_end, bytes)?;
     let dwarf = dwarf(code, native_size, image, &listing, map)?;
 
-    // `__text` first, and this is not cosmetic:
+    // `__text` first, and this is not cosmetic.
     let mut sections = vec![macho::Section {
         segname: "__TEXT",
         sectname: "__text",
@@ -234,7 +234,7 @@ fn symfile(
     Some(macho::write(&sections, &syms))
 }
 
-/// The DWARF for one region:
+/// The DWARF for one region.
 fn dwarf(
     code: u64,
     native_size: u64,
@@ -277,7 +277,7 @@ fn dwarf(
 
     // Rows are emitted in host-address order, which is the order `ranges` is
     // already in. Consecutive ranges resolving to the same line collapse into
-    // one row:
+    // one row.
     let mut previous = None;
     let mut rows = 0usize;
 

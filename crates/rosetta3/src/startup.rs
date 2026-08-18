@@ -4,7 +4,7 @@ use crate::vm::{Vm, VmError};
 
 /// Run every initializer, in order.
 ///
-/// Called with the same `(argc, argv, envp, apple)` as `main`:
+/// Called with the same `(argc, argv, envp, apple)` as `main`.
 pub fn run_initializers(vm: &Vm) -> Result<usize, VmError> {
     let (argc, argv, envp, apple) = vm.main_args();
     let mut ran = 0;
@@ -47,7 +47,7 @@ pub fn run(vm: &Vm) -> Result<i32, VmError> {
     let objc = vm.register_objc()?;
     // `+load` before the C constructors of the same image, which is dyld's
     // order and the one a program that uses both depends on. Resolved before
-    // the guest can start a thread, let alone collect on one:
+    // the guest can start a thread, let alone collect on one.
     crate::shims::machthread::warm();
     crate::objc::call_load_methods(vm, objc)?;
     run_initializers(vm)?;

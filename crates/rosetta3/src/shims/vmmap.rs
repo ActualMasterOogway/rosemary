@@ -22,7 +22,7 @@ const MAP_JIT: i32 = 0x0800;
 /// The guest answers it itself, and it does so before the question is asked.
 ///
 /// Append-only and never removed, matching [`crate::dyld`]'s images and for the same
-/// reason:
+/// reason.
 static ARENAS: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());
 
 /// The lowest and highest arena address, for the question asked on the hot path.
@@ -160,7 +160,7 @@ fn mprotect(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory
 /// look at the output.
 ///
 /// It lives here rather than in a diagnostics module because this is where the question
-/// starts:
+/// starts.
 #[inline(always)]
 pub fn tracing() -> bool {
     #[dynamic]
@@ -249,7 +249,7 @@ mod tests {
         assert_eq!(host_flags(flags), flags);
     }
 
-    /// The fault this module exists for, reproduced and then not reproduced:
+    /// The fault this module exists for, reproduced and then not reproduced.
     #[test]
     fn the_rewritten_request_yields_memory_the_guest_can_write() {
         let (prot, flags) = (

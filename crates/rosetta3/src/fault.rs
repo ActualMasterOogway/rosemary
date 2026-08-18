@@ -82,7 +82,7 @@ pub enum Attribution {
         /// key a per-region rollup aggregates on.
         region: u64,
     },
-    /// Inside a translation, in code no guest instruction was attributed to:
+    /// Inside a translation, in code no guest instruction was attributed to.
     Translated {
         region: u64,
         /// Whether the `pc` was past everything the map attributed, which is the
@@ -131,7 +131,7 @@ pub fn attribute(pc: u64) -> Attribution {
 /// One placed translation, as anything outside this module may see it.
 ///
 /// A view rather than a borrow of [`Placed`] because the vector is behind a mutex that
-/// must not escape:
+/// must not escape.
 pub struct PlacedRegion {
     /// Host address the compiled code begins at.
     pub code: u64,
@@ -241,7 +241,7 @@ pub fn install() {
 /// The disposition [`install`] displaced, taken apart into fields a handler may read
 /// without a lock.
 ///
-/// A `sigaction` in a `static mut` would be the obvious shape and the wrong one:
+/// A `sigaction` in a `static mut` would be the obvious shape and the wrong one.
 struct Saved {
     handler: AtomicUsize,
     mask: AtomicU32,
@@ -268,11 +268,11 @@ fn saved_for(signal: i32) -> &'static Saved {
 
 /// The handler. Prints, restores the previous disposition, and returns.
 ///
-/// Returning is what makes the faulting instruction run again:
+/// Returning is what makes the faulting instruction run again.
 extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc::c_void) {
     // A fault *inside* this handler would recurse until the alternate stack ran
     // out, which would replace one unexplained crash with another. One report
-    // is all that is wanted anyway:
+    // is all that is wanted anyway.
     static REPORTING: AtomicBool = AtomicBool::new(false);
     if REPORTING.swap(true, Ordering::SeqCst) {
         restore(signal);
@@ -356,7 +356,7 @@ fn say_region(out: &mut Buffer, pc: u64) {
     out.hex(offset);
     out.str(" into its compiled code");
     // A `pc` outside everything the map attributed is not necessarily inside
-    // this translation at all:
+    // this translation at all.
     if entry.map.is_empty() {
         out.str(" — no source map was kept for this region (map budget spent)");
     } else if pc >= entry.attributed_end() {
@@ -382,7 +382,7 @@ fn lookup(map: &[GuestCodeRange], offset: u32) -> Option<u64> {
 
 /// Name the image a guest address is in, as `name+offset`.
 ///
-/// Silent when it is in none of them, which is not a gap:
+/// Silent when it is in none of them, which is not a gap.
 fn say_image(out: &mut Buffer, addr: u64) {
     let Ok(images) = IMAGES.try_lock() else {
         return;

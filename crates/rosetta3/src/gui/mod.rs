@@ -31,7 +31,7 @@ pub fn enabled() -> bool {
 
 /// Whether the present hooks should do anything.
 ///
-/// Distinct from [`enabled`]:
+/// Distinct from [`enabled`].
 static ARMED: AtomicBool = AtomicBool::new(false);
 
 /// Whether the statistics panel is open.

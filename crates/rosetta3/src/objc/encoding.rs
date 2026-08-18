@@ -40,7 +40,7 @@ impl Signature {
 
 /// Decode a method type encoding.
 ///
-/// `Err` is a reason in the shape a refusal wants:
+/// `Err` is a reason in the shape a refusal wants.
 pub fn signature(encoding: &str) -> Result<Signature, &'static str> {
     let bytes = encoding.as_bytes();
     let mut at = 0usize;
@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn an_aggregate_argument_is_decoded_rather_than_refused() {
         // `- (id)initWithFrame:(NSRect)frame`, verbatim. The refusal this
-        // replaces is the one that stopped every Cocoa view from being built:
+        // replaces is the one that stopped every Cocoa view from being built.
         let sig = signature("@24@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16").expect("initWithFrame:");
         assert_eq!(sig.arity(), 3);
         assert!(

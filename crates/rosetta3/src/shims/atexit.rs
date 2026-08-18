@@ -11,7 +11,7 @@ unsafe extern "C" {
     /// libsystem's own, spelled `___cxa_atexit` in the Mach-O.
     ///
     /// The handler is declared as a data pointer rather than as a Rust `fn` because it
-    /// is not one:
+    /// is not one.
     fn __cxa_atexit(func: *const (), arg: *mut c_void, dso: *const ()) -> c_int;
 }
 
