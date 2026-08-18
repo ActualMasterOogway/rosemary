@@ -3,17 +3,15 @@
 //! suite, where it lets every mapping and fixup be asserted on without giving
 //! the guest a single real page.
 //!
-//! Note what this deliberately does *not* need: sparse backing. An image's
+//! Note what this deliberately does not need: sparse backing. An image's
 //! preferred base is `0x1_0000_0000` on x86-64 macOS, which looks like it would
-//! demand a 4 GiB allocation — but only because `__PAGEZERO` occupies
+//! demand a 4 GiB allocation - but only because `__PAGEZERO` occupies
 //! `[0, 0x1_0000_0000)`, and the loader never maps `__PAGEZERO`. The reserved
 //! span starts at the first real segment, so each region is the size of the
 //! actual image and its base absorbs the rest.
 //!
-//! ## Several regions, not one
-//!
 //! A space holds one region per [`reserve`](AddressSpace::reserve), because a
-//! link maps one region per *image* and a program with a bundled dylib has more
+//! link maps one region per image and a program with a bundled dylib has more
 //! than one. Regions are allocated separately and are disjoint: a single
 //! contiguous buffer spanning them would have to cover the gap between an
 //! executable at `0x1_0000_0000` and a dylib the allocator placed elsewhere,
@@ -27,7 +25,6 @@ use crate::error::{Error, Result};
 use crate::memory::{AddressSpace, Placement, Prot, align_up};
 use crate::raw::Word;
 
-/// One reserved region.
 struct Region {
     base: Word,
     mem: Vec<u8>,
@@ -43,7 +40,6 @@ impl Region {
     }
 }
 
-/// An owned, byte-addressable set of regions.
 pub struct BufferSpace {
     /// Where to place a region when [`Placement::Anywhere`] leaves it to us.
     /// Later unconstrained regions follow the highest one already placed.
@@ -55,7 +51,7 @@ impl BufferSpace {
     /// A space that will place an unconstrained image at `default_base`.
     ///
     /// A [`Placement::Preferred`] or [`Placement::Fixed`] request wins over
-    /// this whenever the range is free — a buffer has no pre-existing mappings
+    /// this whenever the range is free - a buffer has no pre-existing mappings
     /// to collide with, which is exactly what makes it useful for asserting
     /// that a fixup landed at the VA the file asked for.
     pub fn new(default_base: Word) -> Self {
@@ -84,7 +80,7 @@ impl BufferSpace {
         self.regions.len()
     }
 
-    /// The region containing `addr`, as `(base, bytes)` — e.g. to hand an
+    /// The region containing `addr`, as `(base, bytes)` - e.g. to hand an
     /// image's mapped contents to a recompiler.
     pub fn region_at(&self, addr: Word) -> Option<(Word, &[u8])> {
         let r = self
@@ -138,7 +134,7 @@ impl BufferSpace {
     /// The lowest address at or above `from` where `len` bytes are free.
     fn first_free(&self, from: Word, len: usize, align: Word) -> Word {
         let mut base = align_up(from, align);
-        // Regions are few — one per image — so rescanning after each bump is
+        // Regions are few - one per image - so rescanning after each bump is
         // cheaper than maintaining sorted state.
         loop {
             match self.regions.iter().find(|r| r.overlaps(base, len)) {

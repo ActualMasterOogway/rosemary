@@ -1,37 +1,4 @@
-//! `dlopen`/`dlsym`-backed resolution: the high-level-emulation path.
-//!
-//! This is where the crate's central bet is cashed. macOS ships no
-//! `/usr/lib/libSystem.B.dylib` file on disk — the system libraries live only
-//! in the dyld shared cache — but the *arm64* libSystem is already loaded into
-//! this very process and exports the same C names the guest is asking for. So
-//! `dlsym(RTLD_DEFAULT, "strlen")` hands back a native arm64 `strlen`, the
-//! loader writes that pointer into the guest's `__la_symbol_ptr` slot, and the
-//! recompiler turns the guest's call into a native one. No Intel library code
-//! is ever translated.
-//!
-//! ## The underscore
-//!
-//! Mach-O symbol names carry a leading `_` that is part of the C ABI's name
-//! mangling, not part of the C identifier. `dlsym` wants the identifier. This
-//! is the *only* place in the crate that strips it, and it does so at the last
-//! possible moment, because every other layer needs the name to round-trip
-//! against an export table that also spells it with the underscore.
-//!
-//! ## Why a denylist exists at all
-//!
-//! Blanket passthrough is wrong, and quietly so. `_environ` is a pointer to the
-//! *host's* environment block; `___stack_chk_guard` is the host's stack
-//! canary; `_mach_task_self_` is the host's task port; the `_dyld_*` family
-//! answers questions about the host's image list. Binding a guest to any of
-//! them wires guest state to host state in a way that produces no error and no
-//! crash — just a program that observes the wrong process. Those symbols need
-//! virtualization, and the only safe default is to refuse to answer for them
-//! and let an earlier [`SyntheticDylib`](crate::resolve::SyntheticDylib) do the
-//! job.
-//!
-//! The list here is a floor, not a ceiling. It is deliberately conservative: a
-//! refused symbol surfaces as a loud unresolved import, while a wrongly
-//! passed-through one surfaces as a bug in an application months later.
+//! `dlopen`/`dlsym`-backed resolution
 
 use alloc::borrow::ToOwned;
 use alloc::collections::{BTreeMap, BTreeSet};

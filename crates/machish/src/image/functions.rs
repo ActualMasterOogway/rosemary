@@ -1,19 +1,3 @@
-//! `LC_FUNCTION_STARTS`: where each function in `__TEXT` begins.
-//!
-//! A ULEB128 delta list — the first entry is an offset from the image base, each
-//! subsequent one an offset from the previous function's start, terminated by a
-//! zero delta. It exists for the unwinder and the debugger, and it is the
-//! cheapest exact answer to a question a recompiler has to ask: *where does one
-//! function end and the next begin?*
-//!
-//! That matters more here than it would in a native loader. `__text` is not one
-//! function; it is dozens, separated by alignment padding and sometimes by
-//! read-only data. Handing a lifter the whole section and a single start address
-//! makes it decode straight through those gaps, where alignment bytes decode as
-//! real instructions — `0xfb` is `sti`, `0x00 0x00` is `add [rax], al` — and the
-//! failure surfaces as a bogus "unsupported instruction" far from the actual
-//! problem. Lifting function by function avoids the question entirely.
-
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
@@ -26,7 +10,7 @@ const MAX_FUNCTIONS: usize = 1 << 22;
 
 /// Unslid virtual addresses of every function start, in ascending order.
 ///
-/// Empty — not an error — for an image with no `LC_FUNCTION_STARTS`, which is a
+/// Empty - not an error - for an image with no `LC_FUNCTION_STARTS`, which is a
 /// stripped binary rather than a malformed one.
 pub fn function_starts<S: MachSpec>(obj: &MachObject<'_, S>) -> Result<Vec<Word>> {
     let Some(data) = obj.function_starts_data() else {
@@ -66,7 +50,7 @@ pub fn function_starts<S: MachSpec>(obj: &MachObject<'_, S>) -> Result<Vec<Word>
 ///
 /// The last function in the range ends at `end`, since the delta list records
 /// starts only. That is exact for a function that runs to the end of `__text`
-/// and an over-estimate for one followed by padding — which is harmless, since
+/// and an over-estimate for one followed by padding - which is harmless, since
 /// a lifter stops at the function's `ret` either way and never reaches the slack.
 pub fn function_ranges<S: MachSpec>(
     obj: &MachObject<'_, S>,

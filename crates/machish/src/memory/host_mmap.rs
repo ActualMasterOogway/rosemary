@@ -1,29 +1,3 @@
-//! Host-memory address space backed by `mmap`.
-//!
-//! Two things here differ from `selfish/src/memory/host_mmap.rs`, and both are
-//! deliberate.
-//!
-//! **No `MAP_JIT` for a guest image.** `selfish` maps `RWX | MAP_JIT` on macOS
-//! and toggles `pthread_jit_write_protect_np` around every store
-//! (`host_mmap.rs:58-65, 93-109`), because it loads aarch64 code that this CPU
-//! will execute, and Apple Silicon refuses to make an ever-writable page
-//! executable. Our situation is categorically different: the guest image is
-//! x86-64, so the arm64 CPU cannot execute a byte of it under any protection —
-//! it is *input data* to a recompiler, which emits its own arm64 into its own
-//! buffer, where W^X is already handled. Opting into `MAP_JIT` anyway would
-//! cost an entitlement, make every write depend on a *per-thread* protection
-//! toggle, and — decisively — force `protect` to become a no-op
-//! (`host_mmap.rs:118-125`), destroying any ability to model guest protection.
-//! So the guest path is plain `mmap` + `mprotect`. [`MmapSpace::executable`]
-//! re-enables the `selfish` behaviour for the one case that wants it: loading a
-//! *native* arm64 image to call directly.
-//!
-//! **Never `MAP_FIXED`.** A Mach-O carries a preferred `vmaddr` and the
-//! recompiler is identity-mapped, so the loader really does want a specific
-//! address — but `MAP_FIXED` silently unmaps whatever is already there, which
-//! on a collision would blow a hole in the host's own libraries. The address is
-//! passed as an advisory hint instead and the result is checked.
-
 use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::ptr;
@@ -37,7 +11,6 @@ unsafe extern "C" {
     fn sys_icache_invalidate(start: *mut c_void, len: usize);
 }
 
-/// One `mmap`ed region.
 struct Region {
     base: *mut u8,
     len: usize,
@@ -55,7 +28,7 @@ impl Region {
 
     /// The region's bytes.
     ///
-    /// The slice aliases memory the guest may be executing against — see
+    /// The slice aliases memory the guest may be executing against - see
     /// [`Regions`](crate::memory::Regions) for why that is inherent to an
     /// identity-mapped space rather than something this could guard.
     fn as_slice(&self) -> &[u8] {
@@ -182,13 +155,13 @@ impl MmapSpace {
     /// Try to map `size` bytes exactly at `want`, without `MAP_FIXED`.
     ///
     /// Returns `Ok(None)` if the kernel placed us elsewhere, having already
-    /// released the mapping it gave us — the caller decides whether that is a
+    /// released the mapping it gave us - the caller decides whether that is a
     /// slide to accept or an error.
     fn try_reserve_at(&mut self, size: usize, want: Word) -> Result<Option<Word>> {
         let hint = usize::try_from(want).map_err(|_| Error::Memory("placement too high"))?;
         let (prot, flags) = self.mmap_flags();
 
-        // SAFETY: anonymous mmap with an *advisory* hint — no MAP_FIXED, so the
+        // SAFETY: anonymous mmap with an *advisory* hint - no MAP_FIXED, so the
         // kernel relocates us rather than unmapping anything already at `hint`.
         // The result is checked against MAP_FAILED before use.
         let raw = unsafe { libc::mmap(hint as *mut c_void, size, prot, flags, -1, 0) };
@@ -238,7 +211,7 @@ impl AddressSpace for MmapSpace {
 
         // Guard our own regions before asking the kernel. Without this a second
         // image preferring the same address as the first would get the hint
-        // honoured — the range is genuinely mapped, just by us — and the two
+        // honoured - the range is genuinely mapped, just by us - and the two
         // images would be written over each other.
         if let Some(want) = placement.wanted()
             && let Ok(want) = usize::try_from(want)
@@ -413,7 +386,7 @@ mod tests {
     fn preferred_placement_falls_back_without_clobbering() {
         // Reserve a region, then ask a second space to land on top of it. The
         // request must be denied and relocated, and the first space must be
-        // completely intact afterward — that is the MAP_FIXED hazard.
+        // completely intact afterward - that is the MAP_FIXED hazard.
         let mut first = MmapSpace::new();
         let base = first.reserve(0x4000, 0x1000, Placement::Anywhere).unwrap();
         first.write(base, b"sentinel").unwrap();
@@ -451,7 +424,7 @@ mod tests {
     fn fixed_placement_when_it_succeeds_is_exact() {
         // 0x1_0000_0000 is where an x86-64 Mach-O executable wants to land, and
         // in a normal host process that range is free. Whether it *is* free is
-        // not ours to guarantee, so the assertion is conditional — but the
+        // not ours to guarantee, so the assertion is conditional - but the
         // guarantee that matters is unconditional: `Fixed` either lands on the
         // exact address or fails. It must never quietly slide, because a
         // non-PIE image bound to a slid base would be silently wrong.
@@ -479,7 +452,7 @@ mod tests {
     #[test]
     fn several_reservations_coexist_without_clobbering_each_other() {
         // The multi-image case. Two reservations must both stay live and stay
-        // independently addressable — a second `reserve` replacing the first
+        // independently addressable - a second `reserve` replacing the first
         // would leak one mapping and make every address in it invalid.
         let mut mem = MmapSpace::new();
         let a = mem.reserve(0x8000, 0x4000, Placement::Anywhere).unwrap();
@@ -499,7 +472,7 @@ mod tests {
     #[test]
     fn a_second_image_preferring_an_address_we_already_hold_slides() {
         // Without the self-collision check this is the dangerous case: the
-        // kernel would honour the hint, because the range *is* mapped — by us —
+        // kernel would honour the hint, because the range *is* mapped - by us -
         // and the second image would be written over the first.
         let mut mem = MmapSpace::new();
         let a = mem.reserve(0x8000, 0x4000, Placement::Anywhere).unwrap();

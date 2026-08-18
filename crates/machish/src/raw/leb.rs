@@ -1,23 +1,8 @@
-//! LEB128 decoding, and the sequential [`Cursor`] built on it.
-//!
-//! All three Mach-O fixup encodings are LEB-soaked: the `LC_DYLD_INFO`
-//! rebase/bind opcode streams take their operands as ULEB/SLEB, the export trie
-//! encodes every node field as ULEB, and `LC_DYLD_CHAINED_FIXUPS` uses ULEB for
-//! import addends. So decoding is a shared primitive rather than a detail of any
-//! one decoder.
-//!
-//! Both decoders reject over-long and overflowing encodings rather than
-//! truncating silently. That strictness matters because the input is an
-//! untrusted binary and a runaway LEB is a cheap way to spin a decoder forever.
-
 use crate::error::{Error, Result};
 use crate::raw::View;
 
-/// The most bytes a well-formed 64-bit LEB128 can occupy: nine 7-bit groups
-/// plus a tenth carrying the top bit.
 const MAX_LEB_BYTES: u32 = 10;
 
-/// Decode an unsigned LEB128 at `*pos`, advancing `pos` past it.
 pub fn uleb128(view: &View<'_>, pos: &mut usize) -> Result<u64> {
     let mut result: u64 = 0;
     let mut shift: u32 = 0;
@@ -50,7 +35,6 @@ pub fn uleb128(view: &View<'_>, pos: &mut usize) -> Result<u64> {
     }
 }
 
-/// Decode a signed LEB128 at `*pos`, advancing `pos` past it.
 pub fn sleb128(view: &View<'_>, pos: &mut usize) -> Result<i64> {
     let mut result: i64 = 0;
     let mut shift: u32 = 0;
@@ -60,12 +44,6 @@ pub fn sleb128(view: &View<'_>, pos: &mut usize) -> Result<i64> {
         *pos += 1;
 
         if shift >= 63 {
-            // At shift 63 only bit 0 of the payload lands inside the i64; the
-            // remaining six bits fall off the top. The only encodings where
-            // that is lossless are a pure sign extension of bit 63, so a tenth
-            // byte must be all-zero or all-one payload. (Note this is where the
-            // check has to live: a well-formed 64-bit SLEB is at most ten bytes,
-            // so `shift` reaches 63 but never 64.)
             let payload = byte & 0x7f;
             if payload != 0x00 && payload != 0x7f {
                 return Err(Error::BadLeb);
@@ -91,10 +69,6 @@ pub fn sleb128(view: &View<'_>, pos: &mut usize) -> Result<i64> {
     Ok(result)
 }
 
-/// A sequential reader over a [`View`], tracking its own position.
-///
-/// The opcode VMs and the trie walker both consume their input strictly
-/// forwards, so threading a `&mut usize` through every call would be noise.
 #[derive(Copy, Clone)]
 pub struct Cursor<'a> {
     view: View<'a>,

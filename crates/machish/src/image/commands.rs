@@ -1,24 +1,8 @@
-//! The typed load-command union.
-//!
-//! This is where the shape diverges most visibly from `selfish`. ELF's dynamic
-//! section is a flat `(tag, value)` array, so `ElfObject` can store
-//! `Vec<DynEntry>` and answer questions with `dyn_val(tag)`
-//! (`selfish/src/image/object.rs:29-36`). Mach-O load commands are a tagged
-//! union of differently-shaped records, several of which carry variable-length
-//! payloads. Decoding them once into a typed enum keeps every later consumer
-//! from re-walking raw bytes with its own offset arithmetic.
-//!
-//! Commands the loader has no use for are kept as [`LoadCommand::Other`] rather
-//! than dropped, so an embedder can inspect them and so round-trip diagnostics
-//! stay honest about what a file contained.
-
 use crate::error::Result;
 use crate::image::{EntryPoint, Segment};
 use crate::raw::View;
 use crate::spec::constants as c;
 
-/// How a dependency is linked, which determines what an unresolved symbol from
-/// it means.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum DependencyKind {
     /// `LC_LOAD_DYLIB`: required.
@@ -27,7 +11,7 @@ pub enum DependencyKind {
     /// zero rather than failing.
     Weak,
     /// `LC_REEXPORT_DYLIB`: this image republishes the dependency's exports as
-    /// its own, so a two-level lookup against *this* image must search it.
+    /// its own, so a two-level lookup against this image must search it.
     Reexport,
     /// `LC_LOAD_UPWARD_DYLIB`: a deliberate dependency cycle, used by system
     /// umbrellas.

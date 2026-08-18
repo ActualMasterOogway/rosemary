@@ -1,14 +1,14 @@
-//! The linking **transcript**.
+//! The linking transcript.
 //!
 //! `selfish` returns a `LoadedImage` and stops (`selfish/src/loader.rs:133-139`),
 //! which is the right answer when the loaded code just runs: the CPU follows
 //! the pointers the linker wrote and nobody needs to know what they were.
 //!
-//! Rosetta 3 needs the opposite. Guest code is *recompiled*, and every call
+//! Rosetta 3 needs the opposite. Guest code is recompiled, and every call
 //! into a host shim has to be recognized at lift time and turned into a native
 //! call rather than followed into bytes the lifter would try to translate. That
 //! means the loader must report not just that binding succeeded but, for each
-//! binding, every address a call site might name — which is what
+//! binding, every address a call site might name - which is what
 //! [`BindingRecord`] is.
 
 use alloc::string::String;
@@ -18,11 +18,6 @@ use crate::error::{Error, Result};
 use crate::fixups::BindKind;
 use crate::raw::Word;
 
-/// One import, resolved.
-///
-/// Two addresses, not one, and the second is the load-bearing one. See
-/// [`crate::fixups::stubs`] for why a classic x86-64 image reports zero
-/// intercepted call sites if only `slot_va` is published.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BindingRecord {
     /// Slid VA of the pointer slot that was written. Pass this to
@@ -39,9 +34,7 @@ pub struct BindingRecord {
     /// Symbol name, leading underscore preserved.
     pub symbol: String,
     /// The address written into the slot. Zero for a weak import that no
-    /// provider satisfied — a legitimate outcome, and the reason
-    /// [`BindingRecord::is_satisfied`] exists rather than a `resolved != 0`
-    /// check scattered through callers.
+    /// provider satisfied.
     pub resolved: Word,
     pub kind: BindKind,
     pub weak_import: bool,
@@ -66,9 +59,9 @@ pub struct MissingSymbol {
     /// Slid VA of the `__stubs` entry fronting it, when there is one.
     ///
     /// Reported for the same reason [`BindingRecord::stub_va`] is, and it is the
-    /// *unresolved* case that needs it most. A recompiler told only about slots
+    /// unresolved case that needs it most. A recompiler told only about slots
     /// follows `call rel32` into the six-byte stub, decodes `jmp qword
-    /// [rip+disp]` as guest code, and lands on the zero the binder wrote — so the
+    /// [rip+disp]` as guest code, and lands on the zero the binder wrote - so the
     /// diagnostic a program gets for an import nobody satisfied is "no code at
     /// 0x0" rather than the symbol's name. See `rosetta3::Program`.
     pub stub_va: Option<Word>,
@@ -81,7 +74,7 @@ pub struct MissingSymbol {
 ///
 /// The request it states is dyld's: *every* binding in every other image that
 /// resolved to `replacee` should resolve to `replacement` instead. Both are
-/// addresses rather than names on purpose — that is what makes an interposition
+/// addresses rather than names on purpose - that is what makes an interposition
 /// catch a call the interposing image could not have named, such as one made
 /// through an alias.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -111,7 +104,7 @@ pub struct ImageReport {
     /// How many pointers were slid.
     pub rebases: usize,
     /// Slid VAs of `S_MOD_INIT_FUNC_POINTERS` entries, in section order.
-    /// Collected, never called — running them means executing guest code, which
+    /// Collected, never called - running them means executing guest code, which
     /// is the driver's job.
     pub initializers: Vec<Word>,
     /// Slid VAs of `S_MOD_TERM_FUNC_POINTERS` entries. Reported, never run.
@@ -129,7 +122,7 @@ pub struct ImageReport {
     /// What the image declares to the Objective-C runtime, decoded and
     /// otherwise untouched: no class is realized, no selector uniqued, no
     /// category attached. `None` when the image carries no `__objc_*` sections
-    /// — an image that declares nothing is distinct from one not looked at.
+    /// - an image that declares nothing is distinct from one not looked at.
     ///
     /// Gated on the decoder's own feature: without it there is nothing that
     /// could fill this in.
@@ -155,7 +148,7 @@ impl ImageReport {
     /// `Err` if any non-weak import went unresolved.
     ///
     /// Separate from binding itself so the caller sees the *whole* list rather
-    /// than whichever symbol happened to be decoded first — with a shim table
+    /// than whichever symbol happened to be decoded first - with a shim table
     /// under construction, "these forty symbols are missing" is the useful
     /// message and "`_strlen` is missing" is forty round trips.
     pub fn require_all_resolved(&self) -> Result<()> {
@@ -178,7 +171,7 @@ impl ImageReport {
 ///
 /// A `tlv_descriptor`'s `offset` is a byte offset into a block the runtime
 /// allocates per thread, and the block is the image's `__thread_data` followed
-/// by its `__thread_bss` — which is why an offset alone is not enough to honour
+/// by its `__thread_bss` - which is why an offset alone is not enough to honour
 /// one. This is the rest: where the initial values live and how big the whole
 /// block has to be.
 ///
@@ -198,8 +191,8 @@ pub struct TlvTemplate {
     pub total_size: Word,
     /// Byte alignment the block must be allocated at, as `1 << align`.
     ///
-    /// Reported because a thread-local may be over-aligned — `_Thread_local
-    /// __attribute__((aligned(64)))` is legal — and an allocator's default
+    /// Reported because a thread-local may be over-aligned - `_Thread_local
+    /// __attribute__((aligned(64)))` is legal - and an allocator's default
     /// alignment would satisfy the common case and silently not the declared
     /// one.
     pub align: u32,

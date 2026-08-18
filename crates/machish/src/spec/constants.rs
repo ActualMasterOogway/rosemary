@@ -1,8 +1,3 @@
-//! Mach-O on-disk constants, named as they are in `<mach-o/loader.h>` so the
-//! parser reads like the format specification.
-
-// ---------------------------------------------------------------- magic ----
-
 /// 64-bit Mach-O, host-endian (little). The only form this crate accepts.
 pub const MH_MAGIC_64: u32 = 0xfeed_facf;
 /// 64-bit Mach-O, byte-swapped. Recognized only so the error can be specific.
@@ -17,17 +12,15 @@ pub const FAT_MAGIC: u32 = 0xcafe_babe;
 /// Fat/universal archive header, 64-bit offsets.
 pub const FAT_MAGIC_64: u32 = 0xcafe_babf;
 
-// ------------------------------------------------------------- cpu type ----
-
 pub const CPU_ARCH_ABI64: i32 = 0x0100_0000;
 pub const CPU_TYPE_X86: i32 = 7;
 pub const CPU_TYPE_X86_64: i32 = CPU_TYPE_X86 | CPU_ARCH_ABI64;
 pub const CPU_TYPE_ARM: i32 = 12;
 pub const CPU_TYPE_ARM64: i32 = CPU_TYPE_ARM | CPU_ARCH_ABI64;
 
-/// The capability/feature bits of a `cpusubtype`, occupying the **top** byte.
+/// The capability/feature bits of a `cpusubtype`, occupying the top byte.
 /// `CPU_SUBTYPE_LIB64` is `0x8000_0000`, and `arm64e` slices carry `0x80` in
-/// that byte to mark the pointer-authentication ABI version — so `/bin/ls`'s
+/// that byte to mark the pointer-authentication ABI version - so `/bin/ls`'s
 /// arm64e slice reports `cpusubtype` as `0x8000_0002`, not `2`.
 pub const CPU_SUBTYPE_FEATURE_MASK: u32 = 0xff00_0000;
 
@@ -42,15 +35,11 @@ pub const CPU_SUBTYPE_X86_64_H: i32 = 8;
 pub const CPU_SUBTYPE_ARM64_ALL: i32 = 0;
 pub const CPU_SUBTYPE_ARM64E: i32 = 2;
 
-// ------------------------------------------------------------- filetype ----
-
 pub const MH_OBJECT: u32 = 0x1;
 pub const MH_EXECUTE: u32 = 0x2;
 pub const MH_DYLIB: u32 = 0x6;
 pub const MH_DYLINKER: u32 = 0x7;
 pub const MH_BUNDLE: u32 = 0x8;
-
-// ---------------------------------------------------------------- flags ----
 
 /// Two-level namespace: imports are keyed by (library ordinal, name).
 pub const MH_TWOLEVEL: u32 = 0x0000_0080;
@@ -60,8 +49,6 @@ pub const MH_FORCE_FLAT: u32 = 0x0000_0100;
 pub const MH_PIE: u32 = 0x0020_0000;
 /// The image's fixups are `LC_DYLD_CHAINED_FIXUPS` style.
 pub const MH_DYLDLINK: u32 = 0x0000_0004;
-
-// -------------------------------------------------------- load commands ----
 
 /// Set on commands the loader must understand or refuse to run the image.
 pub const LC_REQ_DYLD: u32 = 0x8000_0000;
@@ -92,13 +79,9 @@ pub const LC_DYLD_INFO_ONLY: u32 = 0x22 | LC_REQ_DYLD;
 pub const LC_DYLD_EXPORTS_TRIE: u32 = 0x33 | LC_REQ_DYLD;
 pub const LC_DYLD_CHAINED_FIXUPS: u32 = 0x34 | LC_REQ_DYLD;
 
-// ------------------------------------------------------------ vm protect ----
-
 pub const VM_PROT_READ: i32 = 0x1;
 pub const VM_PROT_WRITE: i32 = 0x2;
 pub const VM_PROT_EXECUTE: i32 = 0x4;
-
-// ------------------------------------------------------ section  types -----
 
 /// `flags & SECTION_TYPE` isolates the type from the attribute bits.
 pub const SECTION_TYPE: u32 = 0x0000_00ff;
@@ -110,8 +93,8 @@ pub const S_LAZY_SYMBOL_POINTERS: u8 = 0x7;
 /// `reserved1` indexes the indirect symbol table; `reserved2` is the stub size.
 pub const S_SYMBOL_STUBS: u8 = 0x8;
 pub const S_MOD_INIT_FUNC_POINTERS: u8 = 0x9;
-/// `__TEXT,__init_offsets`: initializers as **32-bit offsets from the image
-/// base** rather than as pointers. What a current `ld64` emits in place of
+/// `__TEXT,__init_offsets`: initializers as 32-bit offsets from the image
+/// base rather than as pointers. What a current `ld64` emits in place of
 /// `__mod_init_func`, and the reason is worth knowing: an offset table needs no
 /// rebasing, so it can live in read-only `__TEXT` instead of in writable
 /// `__DATA` where a function-pointer array is an attractive target to overwrite.
@@ -122,8 +105,6 @@ pub const S_THREAD_LOCAL_ZEROFILL: u8 = 0x12;
 pub const S_THREAD_LOCAL_VARIABLES: u8 = 0x13;
 pub const S_THREAD_LOCAL_VARIABLE_POINTERS: u8 = 0x14;
 pub const S_THREAD_LOCAL_INIT_FUNCTION_POINTERS: u8 = 0x15;
-
-// ---------------------------------------------------- rebase  opcodes -----
 
 /// Every opcode byte splits into a 4-bit opcode and a 4-bit immediate.
 pub const REBASE_OPCODE_MASK: u8 = 0xf0;
@@ -142,8 +123,6 @@ pub const REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB: u8 = 0x80;
 /// The only rebase/bind type a 64-bit image uses: an 8-byte pointer slot.
 /// `TEXT_ABSOLUTE32` (2) and `TEXT_PCREL32` (3) exist for 32-bit images only.
 pub const REBASE_TYPE_POINTER: u8 = 1;
-
-// ------------------------------------------------------ bind  opcodes -----
 
 pub const BIND_OPCODE_MASK: u8 = 0xf0;
 pub const BIND_IMMEDIATE_MASK: u8 = 0x0f;
@@ -180,8 +159,6 @@ pub const BIND_SYMBOL_FLAGS_NON_WEAK_DEFINITION: u8 = 0x8;
 
 /// Size of a pointer slot in a 64-bit image.
 pub const POINTER_SIZE: u64 = 8;
-
-// ------------------------------------------------- chained  fixups -------
 
 /// `dyld_chained_ptr_format` values.
 pub const DYLD_CHAINED_PTR_ARM64E: u16 = 1;
@@ -229,8 +206,6 @@ pub const DYLD_CHAINED_IMPORT_ADDEND64: u32 = 3;
 /// Chain links are counted in 4-byte units for every 64-bit format.
 pub const CHAINED_NEXT_STRIDE: u64 = 4;
 
-// --------------------------------------------------- export trie flags ----
-
 /// `flags & EXPORT_SYMBOL_FLAGS_KIND_MASK` isolates what sort of thing the
 /// symbol names, which changes what its address *means*.
 pub const EXPORT_SYMBOL_FLAGS_KIND_MASK: u32 = 0x03;
@@ -248,8 +223,6 @@ pub const EXPORT_SYMBOL_FLAGS_REEXPORT: u32 = 0x08;
 pub const EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER: u32 = 0x10;
 /// A static resolver, emitted by newer toolchains alongside the stub form.
 pub const EXPORT_SYMBOL_FLAGS_STATIC_RESOLVER: u32 = 0x20;
-
-// -------------------------------------------------------- symbol table ----
 
 /// Debug-symbol entries, which a loader ignores entirely.
 pub const N_STAB: u8 = 0xe0;
@@ -274,8 +247,6 @@ pub const N_WEAK_REF: u16 = 0x0040;
 /// Sentinels appearing in the indirect symbol table in place of a real index.
 pub const INDIRECT_SYMBOL_LOCAL: u32 = 0x8000_0000;
 pub const INDIRECT_SYMBOL_ABS: u32 = 0x4000_0000;
-
-// ----------------------------------------------------- structure  sizes ----
 
 pub const MACH_HEADER_64_SIZE: usize = 32;
 pub const LOAD_COMMAND_SIZE: usize = 8;

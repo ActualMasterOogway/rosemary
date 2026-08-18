@@ -1,7 +1,8 @@
 //! Entry-point extraction.
 //!
-//! Mach-O has two incompatible encodings, and the difference is not cosmetic:
-//! `LC_MAIN` gives a **file offset** that must be added to the image's base,
+//! Mach-O has two incompatible encodings.
+//!
+//! `LC_MAIN` gives a file offset that must be added to the image's base,
 //! while `LC_UNIXTHREAD` gives a complete initial register set whose `rip` is
 //! already a virtual address. Conflating them puts the entry point off by the
 //! header size, which fails in a confusing way much later.
@@ -27,18 +28,18 @@ const ARM64_PC_INDEX: usize = 32;
 /// How an image says where to start.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum EntryPoint {
-    /// `LC_MAIN`. `entryoff` is an offset from the start of the *file*, which
-    /// for a loaded image means an offset from its base address — the Mach-O
+    /// `LC_MAIN`: `entryoff` is an offset from the start of the file, which
+    /// for a loaded image means an offset from its base address - the Mach-O
     /// header is mapped, so file offset and image offset coincide.
     ///
     /// An `LC_MAIN` image expects libSystem's initializer to have run first:
-    /// the real entry sequence is dyld → `libSystem` → `main`.
+    /// the real entry sequence is dyld -> `libSystem` -> `main`.
     Main {
         entryoff: u64,
         /// Requested main-thread stack size, or 0 for the default.
         stacksize: u64,
     },
-    /// `LC_UNIXTHREAD`. A full initial register state; `pc` is a virtual
+    /// `LC_UNIXTHREAD`: A full initial register state; `pc` is a virtual
     /// address that already includes the image's preferred base. Used by
     /// pre-10.8 executables and by `dyld` itself.
     UnixThread { pc: Word, sp: Word },
@@ -66,7 +67,7 @@ impl EntryPoint {
     /// Parse an `LC_UNIXTHREAD` payload at `off`.
     ///
     /// The command carries `(flavor, count, state...)` triples. Only the first
-    /// recognized thread-state flavor is read — no real executable carries more
+    /// recognized thread-state flavor is read - no real executable carries more
     /// than one, and the flavor is self-describing, so this does not need the
     /// architecture threaded in from the spec.
     pub fn parse_unix_thread(view: &View<'_>, off: usize, cmdsize: usize) -> Result<Self> {

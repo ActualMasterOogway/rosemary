@@ -1,39 +1,3 @@
-//! `LC_DYLD_CHAINED_FIXUPS`: the modern encoding.
-//!
-//! Where [`dyld_info`](super::dyld_info) stores fixups as a *program* in
-//! `__LINKEDIT`, chained fixups store them **in the slots themselves**. Each
-//! pointer that needs fixing holds a packed word — a target or an import
-//! ordinal, plus a 12-bit offset to the next such word — so the fixups form a
-//! singly-linked list threaded through the data segments, one chain per page.
-//! `__LINKEDIT` carries only the chain heads and an import table.
-//!
-//! The trade is size for indirection, and it changes what "decode" means: this
-//! decoder reads the *image's own bytes* rather than a side table, so the
-//! values it unpacks are only correct before anything has written over them.
-//! Decode before binding, always.
-//!
-//! ## Structure
-//!
-//! ```text
-//! dyld_chained_fixups_header
-//!   -> dyld_chained_starts_in_image      (one entry per segment)
-//!        -> dyld_chained_starts_in_segment (page size, pointer format, starts)
-//!             -> per-page chain of packed pointers
-//!   -> dyld_chained_import[]             (ordinal, weak flag, name offset)
-//!   -> symbol string pool
-//! ```
-//!
-//! ## Scope
-//!
-//! `DYLD_CHAINED_PTR_64` and `DYLD_CHAINED_PTR_64_OFFSET` are supported; those
-//! are what an x86-64 dylib and executable respectively emit. Every
-//! `ARM64E` format is **refused by name** rather than decoded, because arm64e
-//! means pointer authentication: the high bits of a chained arm64e pointer are
-//! a signing key, discriminator, and addend, and reading them as a target
-//! produces a plausible-looking address that is wrong. The guest is x86-64, so
-//! the only way to reach that code is by pointing this loader at a host binary,
-//! and a specific error is the useful outcome.
-
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
@@ -44,7 +8,7 @@ use crate::spec::MachSpec;
 use crate::spec::constants as c;
 
 /// Ceiling on links followed in one page's chain. Every 64-bit format advances
-/// by at least four bytes per link, so a 16 KiB page holds at most 4096 — this
+/// by at least four bytes per link, so a 16 KiB page holds at most 4096 - this
 /// is a wide margin that still turns a corrupt `next` into an error.
 const MAX_CHAIN_LINKS: usize = 1 << 16;
 
@@ -147,7 +111,7 @@ fn decode_segment<'a, S: MachSpec>(
     //   u32 size; u16 page_size; u16 pointer_format; u64 segment_offset;
     //   u32 max_valid_pointer; u16 page_count; u16 page_start[page_count];
     // so `page_count` is at +20 and the array at +22. Reading `page_count` from
-    // +16 lands on `max_valid_pointer`, which is zero in every userland image —
+    // +16 lands on `max_valid_pointer`, which is zero in every userland image -
     // giving a page count of zero, an empty decode, and no error at all.
     let page_size = u64::from(header.u16(at + 4)?);
     let pointer_format = header.u16(at + 6)?;
@@ -288,7 +252,7 @@ fn walk_chain<'a, S: MachSpec>(
             .checked_add(next * c::CHAINED_NEXT_STRIDE)
             .ok_or(Error::OutOfBounds { addr: at, len: 8 })?;
     }
-    // `next` is always positive here, so a chain cannot literally loop — but it
+    // `next` is always positive here, so a chain cannot literally loop - but it
     // can be made absurdly long, and the segment bounds check above only stops
     // it once it wanders out. Cap it.
     Err(Error::TooDeep("chained fixup chain"))

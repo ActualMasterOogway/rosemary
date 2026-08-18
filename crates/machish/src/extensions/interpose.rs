@@ -1,37 +1,20 @@
 //! `__DATA,__interpose`: an image that replaces a function everyone else calls.
 //!
-//! An image built with `DYLD_INTERPOSE` — or with clang's
+//! An image built with `DYLD_INTERPOSE` - or with clang's
 //! `__attribute__((used)) static const struct { const void *r; const void *o; }`
-//! idiom that expands to the same thing — carries a section of **pairs**:
+//! idiom that expands to the same thing - carries a section of pairs:
 //! `{ replacement, replacee }`, sixteen bytes each. dyld reads it and rewrites
-//! every binding, in every *other* image, whose target is `replacee` to point at
+//! every binding, in every other image, whose target is `replacee` to point at
 //! `replacement` instead. That is how a program drops in a different allocator
 //! without any of its libraries being rebuilt.
 //!
-//! This is not a curiosity. Roblox ships mimalloc as an interposing dylib: the
-//! program calls `mi_malloc` directly for its own allocations and then frees
-//! them with plain `free`, which is only correct because `free` *is* `mi_free`
-//! by the time anything runs. A loader that ignores the section links the
-//! program successfully, runs it for a minute, and aborts inside the system
-//! allocator on a pointer it never handed out.
+//! As an example, `mimalloc` uses this feature to ensure that memory allocator implementations
+//! do not conflict.
 //!
-//! ## Collected, not applied
-//!
-//! Same posture as [`initializers`](super::initializers): the section is
-//! *decoded* here and the rewrite belongs to whoever owns the bindings. In this
-//! workspace that is `rosetta3`, and the reason is specific to it rather than
-//! stylistic — an interposed binding stops resolving to a host function pointer
-//! and starts naming guest code, so applying one changes how the recompiler must
-//! treat every call site that reaches it. Only the driver knows that.
-//!
-//! ## Why it reads from memory
-//!
-//! Both halves of a pair are fixups. The replacement is a rebase (the
-//! interposer's own function) and the replacee is a **bind** — `_free` imported
-//! from `libSystem` — so in the file bytes they are a chain link and a symbol
-//! index, and in memory, after binding, they are the two addresses the rewrite
-//! is stated in terms of. Reading the file would get the right answer for
-//! neither.
+//! The section is decoded here and the rewrite belongs to whoever owns the bindings. An interposed binding
+//! stops resolving to a host function pointer and starts naming guest code, so applying one changes how the
+//! driver must treat every call site that reaches it, therefore it is best to let the driver decide
+//! how to handle symbol interposition.
 
 use crate::error::Result;
 use crate::extensions::{Extension, read_words};
@@ -41,7 +24,6 @@ use crate::raw::Word;
 use crate::report::{ImageReport, Interposition};
 use crate::spec::MachSpec;
 
-/// Collects `__interpose` tuples into the report.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct InterposeExtension;
 
@@ -68,11 +50,6 @@ impl<S: MachSpec> Extension<S> for InterposeExtension {
 
 /// Every `{ replacement, replacee }` pair the image declares, as it stands in
 /// memory after binding.
-///
-/// A pair with either half zero is dropped. That is not defensiveness: the
-/// replacee is a bind, and a *weak* bind nothing satisfied leaves a zero — which
-/// would otherwise mean "rewrite every binding that resolved to nothing", i.e.
-/// every unsatisfied weak import in the program, to this replacement.
 pub fn collect_interpositions<S: MachSpec>(
     obj: &MachObject<'_, S>,
     mem: &dyn AddressSpace,

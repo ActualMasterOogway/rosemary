@@ -1,18 +1,4 @@
 //! A library the caller populates by hand.
-//!
-//! Mirrors `selfish/src/resolve/synthetic.rs:21-66` and gains three things the
-//! flat-namespace original had no need for:
-//!
-//! - an **install name that participates in matching**, so a shim can stand for
-//!   `/usr/lib/libSystem.B.dylib` specifically rather than for every image;
-//! - [`alias`](SyntheticDylib::alias), because Mach-O umbrellas re-export
-//!   aggressively and one host implementation genuinely does back several
-//!   install names (`libSystem.B.dylib`, `libsystem_c.dylib`, `libsystem_kernel
-//!   .dylib` — the same functions, three names);
-//! - [`flat`](SyntheticDylib::flat), which opts out of install-name matching
-//!   entirely. That is what a shim table for symbols that must be virtualized
-//!   wants: `_environ` has to be intercepted no matter which library the image
-//!   thinks it is importing from.
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -65,14 +51,14 @@ impl SyntheticDylib {
     /// Whether to answer regardless of which library an import names.
     ///
     /// A flat provider placed first in the chain shadows every two-level
-    /// binding of the names it defines, which is the point: it is how a symbol
-    /// that *must* be virtualized is guaranteed not to reach `dlsym`.
+    /// binding of the names it defines, which is the point. It is how a symbol
+    /// that must be virtualized is guaranteed not to reach the host.
     pub fn flat(&mut self, flat: bool) -> &mut Self {
         self.flat = flat;
         self
     }
 
-    /// Define `symbol` — leading underscore included, as the image spells it.
+    /// Define `symbol` - leading underscore included, as the image spells it.
     pub fn define(&mut self, symbol: &str, resolved: Resolved) -> &mut Self {
         self.symbols.insert(symbol.to_string(), resolved);
         self
@@ -89,7 +75,7 @@ impl SyntheticDylib {
     }
 
     /// Define `symbol` as deliberately absent, so a weak import binds to zero
-    /// *here* rather than falling through to a later provider that would
+    /// here rather than falling through to a later provider that would
     /// wrongly satisfy it.
     pub fn define_absent(&mut self, symbol: &str) -> &mut Self {
         self.define(

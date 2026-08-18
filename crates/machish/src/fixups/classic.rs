@@ -5,24 +5,6 @@
 //! this symbol-pointer section binds to symbol `indirect[reserved1 + j]`", and
 //! that is the whole encoding. It is the same table [`super::stubs`] already
 //! reads to pair slots with stubs, walked for a different purpose.
-//!
-//! ## Scope: binds only
-//!
-//! A classic image expresses **rebases** through `LC_DYSYMTAB`'s local and
-//! external relocation tables, in `relocation_info` records, and those are not
-//! decoded here. The reason is a judgement about where correctness comes from
-//! rather than about effort: no toolchain shipping today can produce such a
-//! file — `ld64` has emitted `LC_DYLD_INFO` since Mac OS X 10.6 and chained
-//! fixups since Big Sur — so a relocation decoder would be code that only ever
-//! runs against inputs nobody can generate, tested only against fixtures this
-//! crate wrote itself. That is a worse position than being explicit about the
-//! gap.
-//!
-//! What that costs, concretely: a pre-10.6 non-PIE image binds correctly,
-//! because a non-PIE image is loaded at its preferred base and has nothing to
-//! slide. A pre-10.6 PIE image loaded at a slide would bind its imports and
-//! leave its internal pointers unrebased. If one ever turns up, this is the
-//! module to extend.
 
 use alloc::vec::Vec;
 
@@ -32,13 +14,12 @@ use crate::image::{MachObject, Nlist, SymbolTable};
 use crate::spec::MachSpec;
 use crate::spec::constants as c;
 
-/// `n_desc` library ordinal meaning "search every image", the classic
-/// spelling of `BIND_SPECIAL_DYLIB_FLAT_LOOKUP`.
+/// `n_desc` library ordinal meaning "search every image", equivalent
+/// to `BIND_SPECIAL_DYLIB_FLAT_LOOKUP`.
 const DYNAMIC_LOOKUP_ORDINAL: u16 = 0xfe;
 /// `n_desc` library ordinal naming the main executable.
 const EXECUTABLE_ORDINAL: u16 = 0xff;
 
-/// The classic indirect-symbol decoder.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct ClassicFixups;
 
@@ -47,9 +28,6 @@ impl<S: MachSpec> FixupDecoder<S> for ClassicFixups {
         "classic"
     }
 
-    /// Claims only images carrying *neither* modern encoding. This decoder is
-    /// last in the chain anyway, but claiming narrowly means a hybrid image
-    /// cannot be double-bound if that order ever changes.
     fn claims(&self, obj: &MachObject<'_, S>) -> bool {
         obj.dyld_info().is_none()
             && obj.chained_fixups().is_none()
@@ -76,7 +54,7 @@ impl<S: MachSpec> FixupDecoder<S> for ClassicFixups {
                 })?;
                 // A `LOCAL`/`ABS` sentinel means the slot holds an address in
                 // this image rather than an import. In a classic image that is
-                // a relocation's job, and relocations are out of scope here —
+                // a relocation's job, and relocations are out of scope here -
                 // so skip rather than invent a fixup for it.
                 let Some(sym) = table.indirect_symbol(index)? else {
                     continue;
@@ -93,10 +71,6 @@ impl<S: MachSpec> FixupDecoder<S> for ClassicFixups {
                         weak_import: sym.is_weak_reference(),
                     },
                     addend: 0,
-                    // The section type is the only record of laziness a classic
-                    // image keeps, and it is exactly the distinction the
-                    // embedder needs, so preserve it rather than flattening
-                    // everything to `Indirect`.
                     kind: if lazy {
                         BindKind::Lazy
                     } else {
@@ -109,8 +83,6 @@ impl<S: MachSpec> FixupDecoder<S> for ClassicFixups {
     }
 }
 
-/// Where a classic undefined symbol says its definition lives: the high byte of
-/// `n_desc`, under a two-level namespace.
 fn library_ref<'a, S: MachSpec>(obj: &MachObject<'a, S>, sym: &Nlist) -> LibraryRef<'a> {
     if !obj.is_two_level() {
         return LibraryRef::Flat;

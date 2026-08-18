@@ -1,37 +1,4 @@
 //! Recovering the `__stubs` entry that fronts each bound pointer slot.
-//!
-//! This is not decoration. Classic x86-64 Mach-O compiles a call to an imported
-//! function as
-//!
-//! ```text
-//!     call   rel32              ; -> __stubs entry
-//! __stubs:
-//!     jmp    qword [rip + disp] ; -> __la_symbol_ptr slot
-//! ```
-//!
-//! and the recompiler this crate feeds matches a registered import against
-//! *either* a `call rel32` target or a `call [rip+disp]` displacement
-//! (`microlift/src/arch/x86_64/semantics/control_flow.rs:139-142`). Report only
-//! the slot address and every one of `/bin/ls`'s eighty-four import call sites
-//! goes uninterceptied: the lifter follows the `call rel32` into a six-byte
-//! stub and takes an `UnknownJump`. The stub address is the *only* thing that
-//! makes the common call shape interceptable, so recovering it is part of
-//! binding rather than a nicety layered on top.
-//!
-//! ## How the pairing is recovered
-//!
-//! Neither section points at the other. Both point at the **indirect symbol
-//! table**: a `S_SYMBOL_STUBS` section's `reserved1` is the index where its
-//! stubs' symbol indices begin, and a symbol-pointer section's `reserved1` is
-//! the same for its slots. So stub *i* and slot *j* correspond exactly when
-//! `indirect[stubs.reserved1 + i] == indirect[pointers.reserved1 + j]`.
-//!
-//! Matching through the symbol index rather than by position is deliberate. The
-//! two tables are parallel and equal-length in every binary observed — 84 and
-//! 84 in `/bin/ls` — but that is a fact about one linker's output, not a
-//! guarantee of the format, and a positional match would silently mis-pair
-//! every entry after the first divergence rather than dropping the ones it
-//! cannot place.
 
 use alloc::collections::BTreeMap;
 
@@ -51,8 +18,8 @@ impl StubMap {
     /// Pair every symbol-pointer slot with its `__stubs` entry.
     ///
     /// Returns an empty map, not an error, for an image with no stubs or no
-    /// `LC_DYSYMTAB`. Plenty of images legitimately have neither — a dylib that
-    /// imports only data, for one — and the absence of stubs is not a defect.
+    /// `LC_DYSYMTAB`. Plenty of images legitimately have neither - a dylib that
+    /// imports only data, for one - and the absence of stubs is not a defect.
     pub fn build<S: MachSpec>(obj: &MachObject<'_, S>) -> Result<Self> {
         let mut map = StubMap::default();
 
@@ -124,7 +91,7 @@ impl StubMap {
 /// Indirect table entry `base + i`, or `None` for a sentinel or a bad index.
 ///
 /// A `LOCAL`/`ABS` sentinel means the slot holds a local address rather than an
-/// imported symbol — a rebase, not a bind — and has no stub by construction.
+/// imported symbol - a rebase, not a bind - and has no stub by construction.
 fn indirect_at(table: &SymbolTable<'_>, base: u32, i: u64) -> Option<u32> {
     let index = usize::try_from(u64::from(base).checked_add(i)?).ok()?;
     let raw = table.indirect(index).ok()?;

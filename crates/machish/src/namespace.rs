@@ -1,28 +1,3 @@
-//! Where dependencies come from, and how loaded images satisfy each other.
-//!
-//! Two halves:
-//!
-//! - [`DylibSource`] — produces the *bytes* of a dependency. Replaces
-//!   `selfish`'s `LibrarySource` (`selfish/src/namespace.rs:27-31`), which took
-//!   a bare soname. That signature cannot work here: `@rpath/libmath.dylib`
-//!   means different files depending on which image is loading it and what
-//!   `LC_RPATH` entries are in scope, so the request has to carry the context,
-//!   not just the name.
-//! - [`Namespace`] — the [`SymbolProvider`] over images already loaded, which
-//!   is what makes a bundled dylib satisfy the executable that ships it, and
-//!   what follows re-export edges.
-//!
-//! ## Why `FsDylibSource` refuses `/usr/lib` and `/System`
-//!
-//! Those files **do not exist** on modern macOS; the system libraries live only
-//! inside the dyld shared cache. A filesystem source that tried anyway would
-//! either fail with a confusing "no such file" for something the guest is
-//! entitled to expect, or — worse on a machine with old SDK leftovers — succeed
-//! and load a stale *x86-64* copy, which is precisely the code this crate
-//! exists to avoid running. Declining sends the import to a
-//! [`SymbolProvider`](crate::resolve::SymbolProvider) instead, which is the
-//! high-level-emulation path and the correct answer.
-
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -71,7 +46,7 @@ pub struct FetchedDylib {
 
 /// Something that can produce a dependency's bytes.
 ///
-/// Returning `Ok(None)` means "not mine, and that is fine" — the import falls
+/// Returning `Ok(None)` means "not mine, and that is fine" - the import falls
 /// through to the provider chain. Reserve `Err` for a source that found the
 /// library and could not read it, which is a real failure.
 pub trait DylibSource {
@@ -213,7 +188,7 @@ impl Namespace {
     ///
     /// Following them is not optional. A system umbrella defines almost nothing
     /// itself, and an image that binds against one gets a table of forwarding
-    /// edges — treating a re-export as a definition would bind every such
+    /// edges - treating a re-export as a definition would bind every such
     /// import to address zero and report success.
     fn lookup(&self, image: &NamespaceImage, name: &str, depth: usize) -> Option<Resolved> {
         if depth > MAX_REEXPORT_DEPTH {

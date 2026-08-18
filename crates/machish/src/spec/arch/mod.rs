@@ -1,5 +1,3 @@
-//! Built-in architecture specs.
-
 #[cfg(feature = "arch-arm64")]
 mod arm64;
 #[cfg(feature = "arch-x86_64")]

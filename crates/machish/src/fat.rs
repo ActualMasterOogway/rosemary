@@ -1,15 +1,3 @@
-//! Fat (universal) archive demultiplexing.
-//!
-//! A fat file is a thin big-endian directory prepended to several complete
-//! Mach-O images. It has no ELF analogue, and it sits *below* the spec layer:
-//! choosing a slice happens before there is an image to parse, so this module
-//! deliberately does not take a [`MachSpec`](crate::spec::MachSpec) for its
-//! enumeration path — an embedder listing what architectures a bundle supports
-//! should not have to pick one first.
-//!
-//! Note the endianness: `fat_header` and `fat_arch` are big-endian on disk even
-//! on little-endian targets, a NeXT-era decision that outlived its reason.
-
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};

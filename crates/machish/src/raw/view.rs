@@ -1,10 +1,3 @@
-//! A bounds-checked cursor over the raw Mach-O bytes. Every read returns a
-//! [`Result`] so malformed or truncated inputs surface as errors rather than
-//! panics — the input is an untrusted third-party binary.
-//!
-//! Ported from `selfish/src/raw/view.rs:10-52`, dropping the `Endian` type
-//! parameter: every integer here is little-endian.
-
 use crate::error::{Error, Result};
 
 /// An immutable, bounds-checked view over a Mach-O file's bytes.

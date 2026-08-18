@@ -1,5 +1,3 @@
-//! Parsing a Mach-O image: header, load commands, segments, and sections.
-
 mod commands;
 mod entry;
 mod functions;

@@ -1,41 +1,3 @@
-//! Thread-local variables: `S_THREAD_LOCAL_VARIABLES` descriptors.
-//!
-//! A `__thread` variable in a Mach-O compiles to a three-word `tlv_descriptor`
-//! in `__thread_vars`:
-//!
-//! ```text
-//! struct tlv_descriptor {
-//!     void *(*thunk)(struct tlv_descriptor *);  // an import: __tlv_bootstrap
-//!     unsigned long key;                        // pthread key, 0 until set up
-//!     unsigned long offset;                     // offset in the thread block
-//! };
-//! ```
-//!
-//! Reading the variable compiles to loading `thunk` and calling it with the
-//! descriptor's own address. dyld binds `thunk` to `__tlv_bootstrap`, which on
-//! first use allocates the thread's block, replaces `thunk` with a fast path,
-//! and returns the address.
-//!
-//! ## Scope: describe, and let the embedder allocate
-//!
-//! This crate parses the descriptors and the block layout they index into, and
-//! does nothing else — no per-thread blocks, no `pthread_key_create`, no
-//! `__tlv_bootstrap` implementation. That is the posture `selfish` takes with
-//! `PT_TLS`, which it parses into a `TlsImage` and stops
-//! (`selfish/src/extensions/tls.rs:16-40`), and for the same reason: allocating
-//! a block means deciding how *guest* threads map onto *host* threads, and that
-//! is a question about the execution model rather than about the file format.
-//!
-//! What the loader can honestly say is *what a block would have to look like*,
-//! which is why [`tlv_template`] is here and the allocation is not: a
-//! descriptor's `offset` is meaningless without the base it is an offset from,
-//! and finding that base is section arithmetic — exactly this crate's job. The
-//! embedder supplies the memory and the per-thread lifetime.
-//!
-//! [`TlvExtension`] additionally rewrites the bootstrap imports to flat
-//! references, so that shim can claim them without having to know which library
-//! each image imported them from.
-
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -48,17 +10,11 @@ use crate::raw::Word;
 use crate::report::{ImageReport, ThreadLocalDescriptor, TlvTemplate};
 use crate::spec::MachSpec;
 
-/// Words per `tlv_descriptor`.
 const DESCRIPTOR_WORDS: u64 = 3;
-/// Bytes per `tlv_descriptor`.
 const DESCRIPTOR_SIZE: u64 = DESCRIPTOR_WORDS * 8;
 
-/// The bootstrap thunks a `__thread` access goes through. Both spellings are
-/// emitted, depending on toolchain vintage.
 pub const BOOTSTRAP_SYMBOLS: &[&str] = &["__tlv_bootstrap", "_tlv_bootstrap"];
 
-/// Enumerates thread-local descriptors and makes their bootstrap imports
-/// claimable by a flat shim.
 #[derive(Clone, Debug)]
 pub struct TlvExtension {
     /// Symbols whose bind is rewritten to a flat lookup.
@@ -96,12 +52,6 @@ impl TlvExtension {
         self
     }
 
-    /// Rewrite every redirected import to ask for `name` instead.
-    ///
-    /// Renaming, rather than substituting an address, is what keeps this a
-    /// *transformation* of the stream: the loader still resolves the result
-    /// through the normal provider chain, so an embedder's shim table remains
-    /// the single place addresses come from.
     pub fn rename_to(&mut self, name: &str) -> &mut Self {
         self.rename_to = Some(name.to_string());
         self
@@ -136,14 +86,7 @@ impl<S: MachSpec> Extension<S> for TlvExtension {
             if !self.wants(symbol.name) {
                 continue;
             }
-            // A flat reference is consulted against every provider rather than
-            // only the one whose install name matches, which is what lets one
-            // shim serve every image without knowing where each of them thinks
-            // `__tlv_bootstrap` lives.
             symbol.library = LibraryRef::Flat;
-            // The rename cannot borrow from the image — the new name is not in
-            // the file — so it is only applied when the caller supplied a
-            // `'static` one via `rename_to`.
             if let Some(new) = &self.rename_to {
                 symbol.name = leak_static(new);
             }
@@ -164,15 +107,6 @@ impl<S: MachSpec> Extension<S> for TlvExtension {
     }
 }
 
-/// Interned rename targets.
-///
-/// `SymbolRef::name` borrows the *image*, and a rename introduces a name that is
-/// not in the image, so it needs to live at least as long as the fixup stream.
-/// Interning is the honest way to get that: renames come from configuration and
-/// are a handful of distinct strings for the process's whole life, so the set
-/// never grows with input. The alternative — an owned `String` in `SymbolRef` —
-/// would allocate on every one of an image's tens of thousands of binds to
-/// serve a feature almost nobody uses.
 fn leak_static(name: &str) -> &'static str {
     use alloc::boxed::Box;
     use core::sync::atomic::{AtomicPtr, Ordering};
@@ -219,21 +153,15 @@ fn leak_static(name: &str) -> &'static str {
 /// How big one thread's block for this image must be, and where its initial
 /// bytes come from.
 ///
-/// The link editor lays a descriptor's `offset` out relative to the start of
-/// `__thread_data`, and places `__thread_bss` after it — so the block is those
-/// two sections back to back, padding included, and `offset` indexes straight
-/// into it. Verified against a fixture rather than assumed: see
-/// `tests/extensions.rs`.
-///
 /// `None` when the image has neither section, which is also when it has no
 /// descriptors to index into one.
 pub fn tlv_template<S: MachSpec>(obj: &MachObject<'_, S>, slide: Word) -> Option<TlvTemplate> {
     let data = obj.sections.iter().find(|s| s.is_thread_local_data());
     let bss = obj.sections.iter().find(|s| s.is_thread_local_bss());
 
-    // Byte zero of the block is `__thread_data`'s first byte, or — for an image
+    // Byte zero of the block is `__thread_data`'s first byte, or - for an image
     // whose thread-locals are all zero-initialised, which has no `__thread_data`
-    // at all — `__thread_bss`'s.
+    // at all - `__thread_bss`'s.
     let start = data.or(bss)?.addr;
     let end = bss
         .or(data)
@@ -258,7 +186,6 @@ pub fn tlv_template<S: MachSpec>(obj: &MachObject<'_, S>, slide: Word) -> Option
     })
 }
 
-/// Every `tlv_descriptor` in the image, read as it stands in memory.
 pub fn collect_thread_locals<S: MachSpec>(
     obj: &MachObject<'_, S>,
     mem: &dyn AddressSpace,

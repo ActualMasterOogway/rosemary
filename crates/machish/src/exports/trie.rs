@@ -1,25 +1,21 @@
-//! The `LC_DYLD_EXPORTS_TRIE` / `LC_DYLD_INFO.export_off` walker.
-//!
 //! The trie is a prefix tree over symbol names. Each node holds an optional
 //! terminal payload (this node's own name is an export) followed by a child
-//! count and, per child, a name *suffix* and the absolute offset of the child
+//! count and, per child, a name suffix and the absolute offset of the child
 //! node within the trie. A symbol's name is the concatenation of the edge
 //! labels from the root, which is why `_foo` and `_foobar` share one node's
 //! worth of storage.
 //!
-//! ## Totality
+//! The walk is iterative with an explicit stack rather than recursive.
+//! Since child offsets might be attacker-controlled `uleb128`s
+//! that may point anywhere in the trie, including at an ancestor, a
+//! recursive walker on a hostile file overflows the host stack. For this reason,
+//! we harden extensively against hostile input with the following mitigations:
 //!
-//! The walk is iterative with an explicit stack rather than recursive. That is
-//! not a style preference: child offsets are attacker-controlled `uleb128`s
-//! that may point anywhere in the trie, including at an ancestor, so a
-//! recursive walker on a hostile file overflows the *host* stack — an abort no
-//! `Result` can catch. Three guards bound it instead:
-//!
-//! - a **visited set**, which is what actually rejects a back-edge. A trie has
+//! - a visited set, which is what actually rejects a back-edge. A trie has
 //!   exactly one path to each node, so any second visit to an offset means the
 //!   structure is not a trie;
-//! - a **depth cap**, which bounds a legitimately deep but degenerate chain;
-//! - an **export cap**, so a wide file cannot make us allocate without bound.
+//! - a depth cap, which bounds a legitimately deep but degenerate chain;
+//! - an export cap, so a wide file cannot make us allocate without bound.
 
 use alloc::borrow::ToOwned;
 use alloc::collections::BTreeSet;

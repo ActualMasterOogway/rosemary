@@ -1,11 +1,3 @@
-//! `section_64` records and the `S_*` type classification.
-//!
-//! ELF loading never reads the section table — `selfish` parses program headers
-//! and the dynamic array only. Mach-O loading cannot avoid it: initializers,
-//! thread-local storage, symbol stubs, and the lazy/non-lazy pointer tables are
-//! all identified by section *type*, and the stub table in particular is what
-//! makes call-site interception possible at all.
-
 use crate::error::Result;
 use crate::raw::{View, Word};
 use crate::spec::constants::{self, SECTION_TYPE};
@@ -104,11 +96,11 @@ impl<'a> Section<'a> {
 
     /// `__interpose`: an array of `{ replacement, replacee }` pointer pairs.
     ///
-    /// Identified by name rather than by an `S_*` type, because it has none —
+    /// Identified by name rather than by an `S_*` type, because it has none -
     /// the linker emits it as `S_REGULAR` and dyld recognizes the name. The
     /// segment is `__DATA` in every image that has ever shipped one; it is
-    /// checked anyway so a `__TEXT,__interpose` — which could not be a table of
-    /// bound pointers — is not read as one.
+    /// checked anyway so a `__TEXT,__interpose` - which could not be a table of
+    /// bound pointers - is not read as one.
     pub fn is_interpose(&self) -> bool {
         self.sect_name == "__interpose"
             && (self.seg_name == "__DATA" || self.seg_name == "__DATA_CONST")

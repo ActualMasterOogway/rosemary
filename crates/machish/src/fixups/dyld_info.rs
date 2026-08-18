@@ -1,28 +1,3 @@
-//! The `LC_DYLD_INFO(_ONLY)` opcode virtual machines.
-//!
-//! Four independent bytecode streams — `rebase`, `bind`, `weak_bind`,
-//! `lazy_bind` — each a program for a tiny stack-free machine whose registers
-//! are `(segment index, segment offset, library ordinal, symbol name, type,
-//! addend)`. The instruction set is a run-length encoder: `DO_BIND` emits one
-//! fixup at the current address, and the `..._ULEB_TIMES_SKIPPING_ULEB` forms
-//! emit a strided run, which is how a table of a hundred pointer slots
-//! compresses to about four bytes.
-//!
-//! The three bind streams share one machine because they *are* one machine with
-//! one difference: what a `DO_BIND` means. `bind` produces load-time bindings,
-//! `weak_bind` produces coalescing candidates, and `lazy_bind` produces what
-//! dyld would have bound on first call. We bind all three eagerly, so the
-//! distinction survives only as [`BindKind`], which is what the embedder needs
-//! to decide how to intercept the call site.
-//!
-//! ## Where `lazy_bind` differs in shape
-//!
-//! `lazy_bind` is not one program but a concatenation of independent ones, each
-//! entered at a byte offset baked into a `__stub_helper` entry. So it resets
-//! its registers at every `DONE` rather than stopping — a machine that halted
-//! at the first `DONE`, as the other three streams do, would decode exactly one
-//! of `/bin/ls`'s eighty-four lazy bindings and report success.
-
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
@@ -81,7 +56,7 @@ impl<S: MachSpec> FixupDecoder<S> for DyldInfoFixups {
 ///
 /// Narrowing the view rather than passing offsets is what makes an opcode's
 /// operand physically unable to read another stream's bytes: a runaway ULEB
-/// hits the end of *this* stream and errors.
+/// hits the end of this stream and errors.
 fn substream<'a, S: MachSpec>(
     obj: &MachObject<'a, S>,
     off: u32,
@@ -97,7 +72,6 @@ fn substream<'a, S: MachSpec>(
     )?))
 }
 
-/// The register file both machines share.
 struct Machine<'a, 'o, S: MachSpec> {
     obj: &'o MachObject<'a, S>,
     seg_index: usize,
@@ -147,19 +121,15 @@ impl<'a, S: MachSpec> Machine<'a, '_, S> {
         self.positioned = true;
     }
 
-    /// Move the cursor by `by` bytes, **wrapping**.
+    /// Move the cursor by `by` bytes, wrapping.
     ///
     /// `ADD_ADDR_ULEB` is spelled unsigned but is used signed: `ld` emits a
     /// backwards step as a ULEB of the two's-complement value, so a jump back
     /// 232 bytes arrives here as `0xffff_ffff_ffff_ff18`. dyld adds it into a
-    /// `uintptr_t` and lets it wrap, and images in the wild depend on that —
-    /// DELTARUNE's runner binds a `__DATA` slot below the one before it dozens
-    /// of times. Rejecting the overflow refused the whole image before it ran.
+    /// `uintptr_t` and lets it wrap. This was genuinely such a fumble on Apple's part.
     ///
-    /// Wrapping is safe because it is not what makes the address legal:
-    /// [`Self::address`] re-checks segment bounds at every fixup, so a step that
-    /// wraps past zero (or a genuinely runaway one) lands out of range and
-    /// errors there, with the offending address in the diagnostic.
+    /// Dear Apple: How did you manage to make such a contradictory opcode in something as simple
+    /// as a glorified pointer arithmetic machine?
     fn advance(&mut self, by: u64) {
         self.seg_offset = self.seg_offset.wrapping_add(by);
     }
@@ -173,7 +143,6 @@ fn push<'a>(out: &mut Vec<Fixup<'a>>, fixup: Fixup<'a>) -> Result<()> {
     Ok(())
 }
 
-/// The rebase machine: slide every pointer whose address it walks over.
 fn run_rebase<'a, S: MachSpec>(
     obj: &MachObject<'a, S>,
     stream: View<'a>,
@@ -210,7 +179,7 @@ fn run_rebase<'a, S: MachSpec>(
                 // A 64-bit image only ever rebases pointers. The 32-bit
                 // `TEXT_ABSOLUTE32`/`TEXT_PCREL32` types would need us to patch
                 // instruction immediates, which for a guest image being handed
-                // to a recompiler is a different operation entirely — better to
+                // to a recompiler is a different operation entirely - better to
                 // refuse than to write eight bytes over four bytes of code.
                 if imm != c::REBASE_TYPE_POINTER {
                     return Err(Error::UnknownFixup {
@@ -260,7 +229,6 @@ fn run_rebase<'a, S: MachSpec>(
     Ok(())
 }
 
-/// The bind machine, shared by all three bind streams.
 fn run_bind<'a, S: MachSpec>(
     obj: &MachObject<'a, S>,
     stream: View<'a>,
@@ -298,11 +266,10 @@ fn run_bind<'a, S: MachSpec>(
                 // name", which is a flat question by construction, and `ld`
                 // never emits a `SET_DYLIB_ORDINAL` into that stream. Reading
                 // the register anyway yields the reset value, zero, which is
-                // `BIND_SPECIAL_DYLIB_SELF` — so every weak bind claimed to be
+                // `BIND_SPECIAL_DYLIB_SELF` - so every weak bind claimed to be
                 // satisfied by the image's own exports, found nothing there,
-                // and **zeroed a slot the ordinary bind stream had already
-                // resolved correctly**. That is how `__Znwm` became null in a
-                // plugin that binds it twice.
+                // and zeroed a slot the ordinary bind stream had already
+                // resolved correctly.
                 library: match kind {
                     BindKind::WeakCoalesce => LibraryRef::WeakLookup,
                     _ => library_ref(obj, ordinal),

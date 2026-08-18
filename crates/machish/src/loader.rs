@@ -1,32 +1,3 @@
-//! The whole pipeline: fetch, map, bind, report.
-//!
-//! Mirrors `selfish/src/loader.rs:70-90` in shape — the spec is bound to the
-//! loader, while the address space, providers, and sources are per-call — and
-//! `selfish/src/loader.rs:152-214` in structure: **map everything, then bind
-//! everything**. Two phases rather than one is not an implementation detail. A
-//! dependency's exports are not known until it has a base address, and images
-//! may reference each other in either direction (and, via
-//! `LC_LOAD_UPWARD_DYLIB`, deliberately in both), so binding as you go would
-//! make the outcome depend on load order.
-//!
-//! ## Three phases, not two
-//!
-//! There is an extra phase here that `selfish` does not need, and it exists
-//! because of Rust's borrow rules rather than because of Mach-O:
-//!
-//! 1. **Collect.** Walk the dependency graph, fetching bytes. Each image is
-//!    parsed from a temporary to read its dependency names and `LC_RPATH`
-//!    entries, which are copied out as owned strings. Nothing is retained.
-//! 2. **Map.** With the byte buffers final and no longer moving, parse each
-//!    image for real, map its segments, and read its export table.
-//! 3. **Bind.** Build the [`Namespace`] over every mapped image and apply each
-//!    image's fixups against it plus the caller's providers.
-//!
-//! Phase 1 parses each image twice. That is a real cost and a deliberate one:
-//! the alternative is a self-referential structure holding `MachObject<'a>`
-//! borrows into a buffer that is still growing, which is a `Pin`-and-`unsafe`
-//! problem in exchange for saving a header walk on a handful of files.
-
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -79,13 +50,6 @@ impl Default for LoadPolicy {
 }
 
 /// Loads and links Mach-O images of one architecture.
-///
-/// The spec and the extension set are bound to the loader; the address space,
-/// dylib source, and providers are per-call. That split is
-/// `selfish/src/loader.rs:70-90`'s, and it holds for the same reason: which
-/// architecture you load and which optional passes you run are properties of a
-/// configuration, while where an image lands and what its imports mean are
-/// properties of one particular link.
 pub struct Loader<S: MachSpec> {
     spec: S,
     policy: LoadPolicy,
@@ -184,8 +148,6 @@ impl<S: MachSpec + 'static> Loader<S> {
         let mapped = self.map_all(&collected, mem)?;
         self.bind_all(&collected, &mapped, mem, providers)
     }
-
-    // ------------------------------------------------------ phase 1 -------
 
     /// Walk the dependency graph breadth-first, fetching bytes.
     ///
@@ -286,8 +248,6 @@ impl<S: MachSpec + 'static> Loader<S> {
         Ok(images)
     }
 
-    // ------------------------------------------------------ phase 2 -------
-
     /// Parse and map every collected image.
     fn map_all<'a, M: AddressSpace>(
         &self,
@@ -312,9 +272,6 @@ impl<S: MachSpec + 'static> Loader<S> {
         Ok(out)
     }
 
-    // ------------------------------------------------------ phase 3 -------
-
-    /// Resolve and apply every image's fixups, then protect.
     fn bind_all<M: AddressSpace>(
         &self,
         collected: &[Collected],
@@ -322,15 +279,11 @@ impl<S: MachSpec + 'static> Loader<S> {
         mem: &mut M,
         providers: &[&dyn SymbolProvider],
     ) -> Result<LinkReport> {
-        // The namespace has to exist in full before any image binds, or an
-        // image would resolve against a partially-populated process.
         let mut namespace = Namespace::new();
         for (c, m) in collected.iter().zip(mapped) {
             namespace.push(NamespaceImage {
                 // Prefer the image's own `LC_ID_DYLIB`, but fall back to the
-                // name its dependent used: a dylib built without an install
-                // name is still depended on by *some* name, and without this
-                // it would answer to nothing.
+                // name its dependent used.
                 install_name: m
                     .obj
                     .install_name()
@@ -349,8 +302,7 @@ impl<S: MachSpec + 'static> Loader<S> {
         }
 
         // Loaded images come first, so a bundled dylib beats the host's copy of
-        // the same name. That is the ordering dyld uses and the one an embedder
-        // shipping its own library expects.
+        // the same name.
         let mut chain: Vec<&dyn SymbolProvider> = alloc::vec![&namespace];
         chain.extend_from_slice(providers);
 
@@ -407,17 +359,11 @@ impl<S: MachSpec + 'static> Loader<S> {
                 entry: m.entry,
                 entry_command: m.entry_command,
             };
-            // After binding, so that pointers read out of `__mod_init_func` and
-            // `__thread_vars` are the resolved ones. See the extensions module
-            // note for why reading them from the file would not do.
             self.extensions
                 .observe(&m.obj, mem, m.slide, &mut image_report)?;
             report.images.push(image_report);
         }
 
-        // Protection last: fixups have to be able to write to `__DATA`, and
-        // `__DATA_CONST` is read-only once it has been fixed up. Doing it
-        // before binding would fault on the first bind into a const segment.
         for m in mapped {
             protect_segments(&m.obj, mem, m.slide, self.policy.protection)?;
         }
@@ -429,8 +375,6 @@ impl<S: MachSpec + 'static> Loader<S> {
     }
 }
 
-/// Path of the directory an image was loaded from — what `@loader_path` means
-/// for its own dependencies.
 pub fn loader_directory(image_path: &str) -> &str {
     dirname(image_path)
 }

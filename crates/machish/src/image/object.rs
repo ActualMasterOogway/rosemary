@@ -1,5 +1,3 @@
-//! The parsed Mach-O image: header validation and the load-command walk.
-
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
@@ -44,7 +42,7 @@ pub struct MachObject<'a, S: MachSpec> {
 }
 
 impl<'a, S: MachSpec> MachObject<'a, S> {
-    /// Parse a *thin* Mach-O image, validating it against `spec`.
+    /// Parse a thin Mach-O image, validating it against `spec`.
     pub fn parse(bytes: &'a [u8], spec: S) -> Result<Self> {
         let view = View::new(bytes);
 
@@ -80,7 +78,7 @@ impl<'a, S: MachSpec> MachObject<'a, S> {
         if ncmds > MAX_LOAD_COMMANDS {
             return Err(Error::TooDeep("load command count"));
         }
-        // Bound the walk by the declared extent *and* the file, so a command
+        // Bound the walk by the declared extent and the file, so a command
         // chain can never wander past either.
         let cmds_end =
             MACH_HEADER_64_SIZE
@@ -152,7 +150,7 @@ impl<'a, S: MachSpec> MachObject<'a, S> {
             }
             // A command must be large enough to hold its own fixed fields.
             // Without this, an undersized segment command is caught only when a
-            // field read happens to run off the end of the *file*, which
+            // field read happens to run off the end of the file, which
             // reports a confusing `Truncated` and would not fire at all for a
             // command sitting in the middle of a large image.
             if cmd == c::LC_SEGMENT_64 && cmdsize < c::SEGMENT_COMMAND_64_SIZE {
@@ -299,7 +297,7 @@ impl<'a, S: MachSpec> MachObject<'a, S> {
         })
     }
 
-    /// `LC_RPATH` entries, in file order — the order they are searched.
+    /// `LC_RPATH` entries, in file order - the order they are searched.
     pub fn rpaths(&self) -> impl Iterator<Item = &'a str> + '_ {
         self.commands.iter().filter_map(|cmd| match cmd {
             LoadCommand::Rpath(p) => Some(*p),

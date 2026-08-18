@@ -8,10 +8,8 @@
 use alloc::string::String;
 use core::fmt;
 
-/// Result alias used throughout the crate.
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// Everything that can go wrong while parsing, mapping, or linking a Mach-O.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {

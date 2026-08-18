@@ -1,10 +1,3 @@
-//! The arm64 host architecture.
-//!
-//! Present not to *run* arm64 images — the host's own dyld does that — but to
-//! inspect them: enumerating the slices of a fat bundle dylib, or reading a
-//! native library's export trie to check whether it really defines a symbol
-//! before binding a guest import to it.
-
 use crate::spec::MachSpec;
 use crate::spec::constants::{
     CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_ARM64E, CPU_TYPE_ARM64, subtype_of,
@@ -26,10 +19,6 @@ impl MachSpec for Arm64 {
     }
 
     fn accepts_subtype(&self, cpusubtype: i32) -> bool {
-        // `arm64e` is accepted for *parsing* only. Its pointer-authenticated
-        // chained fixups are rejected by the fixup decoder, which is the right
-        // place for that refusal: reading an arm64e dylib's exports is useful,
-        // applying its fixups is not something we can do correctly.
         matches!(
             subtype_of(cpusubtype),
             CPU_SUBTYPE_ARM64_ALL | CPU_SUBTYPE_ARM64E
@@ -51,7 +40,7 @@ mod tests {
 
     #[test]
     fn accepts_arm64e_with_capability_bits_set() {
-        // Regression: the capability bits live in the *top* byte of
+        // Regression: the capability bits live in the top byte of
         // `cpusubtype`, not bits 16-23. `/bin/ls`'s arm64e slice reports
         // 0x8000_0002 (ABI version 0x80 | CPU_SUBTYPE_ARM64E), and masking the
         // wrong byte made it compare unequal to CPU_SUBTYPE_ARM64E, so the

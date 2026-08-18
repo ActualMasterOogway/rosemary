@@ -62,8 +62,8 @@ impl<'a> Segment<'a> {
     /// it in the span computation would ask the address space to reserve four
     /// gigabytes and would put the image's base at zero.
     ///
-    /// A convenient accident makes skipping it free rather than lossy: on arm64
-    /// macOS the *host* process's own `__PAGEZERO` already covers exactly that
+    /// A convenient accident makes skipping it free rather than lossy. On arm64
+    /// macOS the host process's own `__PAGEZERO` already covers exactly that
     /// range, so a guest null dereference faults for the same reason it would
     /// have natively, with nothing mapped on our part. Do not "fix" this by
     /// mapping the segment.
@@ -276,7 +276,7 @@ pub fn protect_segments<'a, S: MachSpec, M: AddressSpace>(
         if covering.is_empty() {
             continue;
         }
-        // Strip exec *before* recording the conflict, so `applied` is literally
+        // Strip exec before recording the conflict, so `applied` is literally
         // the protection that gets applied rather than an intermediate value.
         if !executable {
             prot = prot.without_exec();

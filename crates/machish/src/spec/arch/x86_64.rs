@@ -1,11 +1,9 @@
-//! The x86-64 guest.
-
 use crate::spec::MachSpec;
 use crate::spec::constants::{
     CPU_SUBTYPE_X86_64_ALL, CPU_SUBTYPE_X86_64_H, CPU_TYPE_X86_64, subtype_of,
 };
 
-/// x86-64 Mach-O: 4 KiB segment granularity, and — on an Apple Silicon host —
+/// x86-64 Mach-O: 4 KiB segment granularity, and - on an Apple Silicon host -
 /// *not* natively executable. Its instructions are input to a recompiler, so
 /// the loader treats the image as data throughout.
 #[derive(Copy, Clone, Debug, Default)]
@@ -30,8 +28,8 @@ impl MachSpec for X86_64 {
     }
 
     fn subtype_rank(&self, cpusubtype: i32) -> u32 {
-        // Prefer the baseline slice. `x86_64h` assumes Haswell — AVX2, BMI1/2,
-        // FMA — and the lifter implements none of those yet, so picking it when
+        // Prefer the baseline slice. `x86_64h` assumes Haswell - AVX2, BMI1/2,
+        // FMA - and the lifter implements none of those yet, so picking it when
         // a baseline slice exists would trade working code for a decode error.
         if subtype_of(cpusubtype) == CPU_SUBTYPE_X86_64_ALL {
             1

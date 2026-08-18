@@ -1,33 +1,3 @@
-//! `@executable_path`, `@loader_path`, and `@rpath` expansion.
-//!
-//! A pure string algorithm with no I/O, in its own module for one reason: it is
-//! the single most common cause of "why won't this application load", and a
-//! function that can be exhaustively tested from a table is worth far more than
-//! the same logic threaded through a loader that needs a filesystem to
-//! exercise.
-//!
-//! The three prefixes answer three different questions:
-//!
-//! - **`@executable_path`** — relative to the *main executable*, no matter
-//!   which image records the dependency. An app bundle's frameworks are found
-//!   this way, and the answer is the same for every image in the process.
-//! - **`@loader_path`** — relative to the image that *records* the dependency.
-//!   A framework that ships its own private dylibs uses this, and the answer
-//!   differs per image, which is exactly why expansion cannot be done once up
-//!   front.
-//! - **`@rpath`** — not a path at all but a *search*: substitute each entry of
-//!   the `LC_RPATH` stack in turn and try them in order. An `LC_RPATH` entry may
-//!   itself begin with `@executable_path` or `@loader_path`, so expansion is
-//!   two levels deep.
-//!
-//! ## What this deliberately does not model
-//!
-//! `DYLD_LIBRARY_PATH`, `DYLD_FRAMEWORK_PATH`, and the rest of the `DYLD_*`
-//! override family. They exist to let a *user* redirect a process's libraries,
-//! and a compatibility layer that honoured the host's copy of them would let
-//! the host environment reach into guest linking in ways nothing here models.
-//! An embedder that wants them can prepend candidates itself.
-
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -44,13 +14,13 @@ pub const RPATH: &str = "@rpath";
 /// Everything an install name needs in order to become a set of real paths.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct PathContext<'a> {
-    /// Path of the **main executable**, not its directory. The directory is
+    /// Path of the main executable, not its directory. The directory is
     /// taken here, so callers pass the path they already have rather than
     /// remembering which of the two each field wants.
     pub executable: Option<&'a str>,
     /// Path of the image that records the dependency being expanded.
     pub loader: Option<&'a str>,
-    /// `LC_RPATH` entries in search order — the loading image's own, then any
+    /// `LC_RPATH` entries in search order - the loading image's own, then any
     /// inherited from the images that loaded it.
     pub rpaths: &'a [String],
 }
@@ -58,8 +28,8 @@ pub struct PathContext<'a> {
 /// Expand `install_name` into the paths to try, in search order.
 ///
 /// A name with no `@` prefix expands to itself: it is already a path, whether
-/// absolute or relative. A name whose prefix cannot be expanded — `@loader_path`
-/// with no loader, `@rpath` with an empty stack — yields **nothing**, which is
+/// absolute or relative. A name whose prefix cannot be expanded - `@loader_path`
+/// with no loader, `@rpath` with an empty stack - yields **nothing**, which is
 /// the honest answer. Returning the unexpanded name as a candidate would send
 /// the caller looking for a directory literally named `@rpath`, and turn a
 /// missing-context bug into a missing-file error pointing at the wrong thing.
@@ -107,7 +77,7 @@ fn expand_base(path: &str, ctx: &PathContext<'_>) -> Vec<String> {
 /// Strip `prefix` when it is followed by `/` or is the whole string.
 ///
 /// The `/`-or-end check is what stops `@rpathological/lib.dylib` from being
-/// treated as an `@rpath` reference — a prefix match alone would.
+/// treated as an `@rpath` reference - a prefix match alone would.
 fn strip_prefix_dir<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
     let rest = path.strip_prefix(prefix)?;
     match rest.as_bytes().first() {
@@ -149,12 +119,6 @@ pub fn dirname(path: &str) -> &str {
 }
 
 /// Whether an install name refers to the OS's own libraries.
-///
-/// These do **not** exist as files on modern macOS — they live only in the dyld
-/// shared cache — so a filesystem source must decline them and let a
-/// [`SymbolProvider`](crate::resolve::SymbolProvider) answer instead. A source
-/// that tried to open them would either fail confusingly or, worse, find a
-/// stale copy left over from an older OS.
 pub fn is_system_path(install_name: &str) -> bool {
     install_name.starts_with("/usr/lib/")
         || install_name.starts_with("/System/")

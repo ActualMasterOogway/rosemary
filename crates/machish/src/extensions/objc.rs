@@ -1,95 +1,3 @@
-//! `__objc_*`: the Objective-C metadata an image carries, decoded.
-//!
-//! ## What this is for
-//!
-//! An Objective-C class is not code. It is a graph of structures in `__DATA`
-//! and `__DATA_CONST` — a class object pointing at a read-only half, which
-//! points at method, ivar, property and protocol lists — that dyld hands to
-//! `libobjc`, which *realizes* it into a live class. Nothing in the file is
-//! usable until that happens: the method lists hold unsorted selector
-//! **strings** rather than selectors, the ivar offsets are the compiler's
-//! guesses, and the superclass is a symbol that has not been bound.
-//!
-//! This module decodes the graph and stops there, which is the posture
-//! [`tlv`](super::tlv) takes with thread-local descriptors and for the same
-//! reason: realizing a class means deciding whose runtime owns it — the host's
-//! `libobjc`, reached through public API, or a virtualized one — and that is a
-//! question about the execution model rather than about the file format. What a
-//! loader can honestly say is *what the image declares*, and that is what
-//! [`ObjcImage`] is.
-//!
-//! ## Why this reads memory rather than file bytes
-//!
-//! Every edge in the graph is a pointer, and in a chained-fixups image a
-//! pointer in the file is a packed chain link. So this runs as an
-//! [`Extension::observe`] pass, against the address space and after binding,
-//! exactly as the initializer and thread-local passes do. Reading the file
-//! bytes would decode correctly for an `LC_DYLD_INFO` image and return garbage
-//! for a modern one.
-//!
-//! ## The structures, and where the sizes come from
-//!
-//! Each of these was checked against a linked fixture by differencing the
-//! addresses `ld64` gave adjacent metadata symbols, not taken from a header:
-//!
-//! ```text
-//! objc_class      40  isa, superclass, cache[2 words], bits
-//! class_ro_t      72  flags, instanceStart, instanceSize, reserved,
-//!                     ivarLayout, name, baseMethods, baseProtocols,
-//!                     ivars, weakIvarLayout, baseProperties
-//! method_t        24  name, types, imp
-//! ivar_t          32  offset, name, type, alignment, size
-//! property_t      16  name, attributes
-//! category_t      48  name, cls, instanceMethods, classMethods,
-//!                     protocols, instanceProperties  (+8 for classProperties)
-//! ```
-//!
-//! The three list headers are *not* uniform, which is the detail worth writing
-//! down because a decoder that assumes they are reads one word off for the
-//! whole graph. Method, ivar and property lists begin with a 32-bit
-//! entry size and a 32-bit count. A **protocol list begins with a
-//! pointer-sized count** and its entries are null-terminated on top of that.
-//!
-//! ## Small method lists, which x86-64 *does* produce
-//!
-//! This module was written believing the relative encoding was arm64's alone.
-//! That was checked, and it was checked on an **executable**. It is wrong for a
-//! dylib: `cc -arch x86_64 -dynamiclib` emits `__objc_methlist` and sets
-//! `0x8000_0000` in each list's entry-size word, while the identical source
-//! built as a program emits pointer-based lists in `__objc_const`. Two builds of
-//! one file, two encodings, and the difference is `-dynamiclib`.
-//!
-//! It matters because of *which* images are dylibs. A game ships its own
-//! libraries and `dlopen`s them, and their classes are exactly the ones a
-//! runtime has to realize — SDL3's Cocoa backend, a gamepad plugin. Refusing the
-//! list left a class registered with **no methods**, which is not a diagnostic:
-//! the message fails much later as "does not respond to that selector".
-//!
-//! A small entry is three self-relative `int32`s, twelve bytes, each measured
-//! from **its own address**:
-//!
-//! ```text
-//! name   -> a slot in __objc_selrefs, whose word is the name string
-//! types  -> the type encoding string itself
-//! imp    -> the function
-//! ```
-//!
-//! The indirection on `name` is the one that is easy to get wrong, and it is
-//! also why this decode has to run *after* fixups: the selector-reference slot
-//! holds a packed chained-fixup link until it is rebased. libobjc has a second
-//! form where `name` is the `SEL` directly, used only for images in the dyld
-//! shared cache — which a guest image never is.
-//!
-//! ## Scope: pointers are chased only within the image
-//!
-//! A class's `superclass` is an ordinary bind, so in a linked image it holds a
-//! **host** address — `_OBJC_CLASS_$_NSObject` resolves into the host's
-//! `libobjc`. That is a correct value and an uninspectable one: it is not this
-//! image's memory and its contents are the host runtime's business. Every
-//! pointer is therefore chased only when it lands in a section of this image,
-//! and reported verbatim otherwise. The same rule keeps a corrupt pointer from
-//! turning into a read of arbitrary host memory.
-
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -134,8 +42,8 @@ const PROPERTY_SIZE: u64 = 16;
 
 /// Mask isolating the `class_ro_t` pointer inside `class_data_bits_t`.
 ///
-/// The low three bits are the runtime's own flags — two Swift markers and
-/// "has default retain/release" — set on a class the compiler could describe
+/// The low three bits are the runtime's own flags - two Swift markers and
+/// "has default retain/release" - set on a class the compiler could describe
 /// that way. They are not part of the address.
 const FAST_DATA_MASK: Word = 0x0000_7fff_ffff_fff8;
 
@@ -144,8 +52,7 @@ const FAST_DATA_MASK: Word = 0x0000_7fff_ffff_fff8;
 const FAST_IS_SWIFT_LEGACY: Word = 1 << 0;
 const FAST_IS_SWIFT_STABLE: Word = 1 << 1;
 
-/// Set in a method list's entry-size word when entries are relative. See the
-/// scope note: an x86-64 **dylib** sets it and an x86-64 program does not.
+/// Set in a method list's entry-size word when entries are relative.
 const METHOD_LIST_IS_SMALL: u32 = 0x8000_0000;
 
 /// `struct method_t::small`: three self-relative `int32`s.
@@ -173,11 +80,6 @@ const MAX_ENTRIES: usize = 1 << 20;
 /// Ceiling on a NUL-terminated name.
 const MAX_NAME: usize = 4096;
 
-/// What a decode can refuse, distinct from a malformed-image [`Error`].
-///
-/// These are reported rather than returned, because one class the runtime
-/// cannot describe should not make an image's other forty undecodable. A
-/// consumer that needs all of them checks [`ObjcImage::refusals`] is empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ObjcRefusal {
@@ -282,7 +184,7 @@ pub struct ObjcClass {
     pub va: Word,
     /// The metaclass's address.
     pub isa: Word,
-    /// The superclass's address — **bound**, so for a class deriving from
+    /// The superclass's address - bound so for a class deriving from
     /// `NSObject` this is an address in the host's `libobjc`, not in the guest.
     pub superclass: Word,
     /// The raw `class_data_bits_t`, before masking. Reported as well as
@@ -320,7 +222,7 @@ pub struct ObjcMetaclass {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjcCategory {
     pub va: Word,
-    /// The category's own name — `Extra` in `@interface Greeter (Extra)`.
+    /// The category's own name - `Extra` in `@interface Greeter (Extra)`.
     pub name: String,
     /// The class it extends. A bind, so a category on a host class holds a host
     /// address here.
@@ -359,10 +261,9 @@ pub struct ObjcImage {
     pub non_lazy_categories: Vec<Word>,
     pub protocols: Vec<ObjcProtocol>,
     /// Addresses of the `__objc_selrefs` slots. Each holds a pointer to a
-    /// selector *string* until the runtime uniques it and writes back a `SEL`,
-    /// which is why the slot addresses and not their contents are what matters.
+    /// selector string until the runtime uniques it and writes back a `SEL`.
     pub selector_refs: Vec<Word>,
-    /// `__objc_classrefs` slot addresses — where `[Greeter new]` reads the
+    /// `__objc_classrefs` slot addresses - where `[Greeter new]` reads the
     /// class from.
     pub class_refs: Vec<Word>,
     /// `__objc_superrefs` slot addresses, used by `[super ...]`.
@@ -446,7 +347,7 @@ pub fn decode<S: MachSpec>(
 /// This image's sections, by name and extent.
 ///
 /// Copied out rather than borrowed so `Cx` does not carry the object's lifetime
-/// into every helper — the decode is a few hundred reads against memory, and a
+/// into every helper - the decode is a few hundred reads against memory, and a
 /// section table is a few dozen entries.
 struct Img {
     /// `(name, unslid addr, size)`, zero-sized sections dropped.
@@ -519,8 +420,6 @@ impl Cx<'_> {
             refusals: self.refusals,
         })
     }
-
-    // ---- primitives -------------------------------------------------------
 
     fn u32_at(&self, va: Word) -> Result<u32> {
         let mut b = [0u8; 4];
@@ -635,8 +534,6 @@ impl Cx<'_> {
         }))
     }
 
-    // ---- lists ------------------------------------------------------------
-
     /// Decode a `{u32 entsize, u32 count}` list header, returning the first
     /// entry's address and the count.
     fn list_header(&mut self, at: Word, expected: u32) -> Result<Option<(Word, usize)>> {
@@ -688,12 +585,6 @@ impl Cx<'_> {
         Ok(out)
     }
 
-    /// A method list in the relative encoding — see the module scope note.
-    ///
-    /// Every offset is measured from **the field's own address**, not from the
-    /// entry's, which is the difference between reading `types` and reading four
-    /// bytes past it. `name` addresses a selector-reference slot rather than the
-    /// string, so it is one more indirection than the other two.
     fn small_methods(&mut self, at: Word) -> Result<Vec<ObjcMethod>> {
         let entsize = self.u32_at(at)? & ENTSIZE_MASK;
         if entsize as u64 != SMALL_METHOD_SIZE {
@@ -713,8 +604,8 @@ impl Cx<'_> {
         for i in 0..count {
             let e = first.wrapping_add(i as u64 * SMALL_METHOD_SIZE);
             // Each target is checked against this image the way a pointer-based
-            // list's is. An offset is a weaker claim than a pointer — any
-            // int32 addresses *something* — so the check is worth more here,
+            // list's is. An offset is a weaker claim than a pointer - any
+            // int32 addresses something - so the check is worth more here,
             // not less.
             let sel_slot = self.relative(e)?;
             let types = self.relative(e.wrapping_add(4))?;
@@ -740,7 +631,7 @@ impl Cx<'_> {
     /// The address a self-relative `int32` at `at` names.
     ///
     /// Signed, and relative to `at` itself. Wrapping, because the arithmetic is
-    /// on virtual addresses and a backwards offset is ordinary — a method's
+    /// on virtual addresses and a backwards offset is ordinary - a method's
     /// `types` string is in `__TEXT` and the list is in `__DATA`.
     fn relative(&mut self, at: Word) -> Result<Word> {
         let delta = self.u32_at(at)? as i32;
@@ -815,8 +706,6 @@ impl Cx<'_> {
         Ok(out)
     }
 
-    // ---- structures -------------------------------------------------------
-
     fn class_ro(&mut self, at: Word) -> Result<ClassRo> {
         Ok(ClassRo {
             va: at,
@@ -835,9 +724,9 @@ impl Cx<'_> {
 
     /// The `class_ro_t` a class's `bits` word points at.
     ///
-    /// Before realization `bits` *is* the pointer, with the runtime's three
+    /// Before realization `bits` is the pointer, with the runtime's three
     /// fast flags in the low bits. After realization it would be a `class_rw_t`
-    /// instead — which is why this is only ever run against an image the host
+    /// instead - which is why this is only ever run against an image the host
     /// runtime has not been told about.
     fn class_ro_of(&mut self, class_va: Word) -> Result<Option<ClassRo>> {
         let bits = self.word_at(class_va.wrapping_add(CLASS_BITS_OFF))?;
@@ -915,8 +804,6 @@ impl Cx<'_> {
 }
 
 const _: () = {
-    // The class structure's fields are read by absolute offset above; this ties
-    // those offsets to the size the module documents.
     assert!(CLASS_BITS_OFF + 8 == CLASS_SIZE);
     assert!(CLASS_RO_SIZE == 16 + 7 * 8);
 };

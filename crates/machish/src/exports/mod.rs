@@ -1,37 +1,3 @@
-//! What an image *offers*: the export table.
-//!
-//! Mach-O splits the two halves of dynamic linking across data structures that
-//! share nothing. Imports arrive as a bytecode stream (or a pointer chain);
-//! exports arrive as a **prefix trie** keyed on the symbol name, with each node
-//! carrying ULEB-encoded flags and an address. That asymmetry is why this is its
-//! own module rather than being fused with import lookup the way
-//! `selfish/src/link/symbol.rs` fuses them — ELF's `.dynsym` answers both
-//! questions from one table, and Mach-O's does not.
-//!
-//! Two sources, in preference order:
-//!
-//! - [`trie`] — `LC_DYLD_EXPORTS_TRIE`, or `LC_DYLD_INFO.export_off` on older
-//!   images. Authoritative, and the only source that records re-export edges.
-//! - [`nlist`] — `LC_SYMTAB`, for images carrying neither. Recovers names and
-//!   addresses but not re-export targets, because the classic symbol table has
-//!   nowhere to put them.
-//!
-//! ## Why the flags are surfaced rather than flattened
-//!
-//! A `BTreeMap<String, Word>` would be enough to satisfy a direct import, and
-//! wrong for everything else. A re-export node has *no* address — it names
-//! another library's symbol, and resolving it means continuing the search
-//! there, which is what M1.8's two-level lookup has to do. A weak definition
-//! must lose to a strong one. An absolute symbol must not be slid. Discarding
-//! that information here would mean recovering it nowhere.
-//!
-//! ## Addresses
-//!
-//! Trie nodes store an offset from the image's base; `nlist` entries store a
-//! virtual address. [`Export::vmaddr`] is normalized to the **unslid virtual
-//! address** in both cases, so the two parsers are directly comparable and the
-//! consumer adds the slide exactly once.
-
 mod nlist;
 mod trie;
 
@@ -47,7 +13,6 @@ use crate::raw::Word;
 use crate::spec::MachSpec;
 use crate::spec::constants as c;
 
-/// What an exported symbol names, which determines what its address means.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ExportKind {
     /// An ordinary function or data address.
@@ -55,7 +20,7 @@ pub enum ExportKind {
     /// A thread-local variable; the address is of its `tlv_descriptor`, not of
     /// any thread's copy.
     ThreadLocal,
-    /// An absolute value that must **not** be slid.
+    /// An absolute value that must not be slid.
     Absolute,
 }
 
@@ -64,7 +29,7 @@ pub enum ExportKind {
 pub enum ExportValue {
     /// A definition in this image, at [`Export::vmaddr`].
     Direct,
-    /// This image republishes another's symbol. Resolution continues in the
+    /// This image re-exports another's symbol. Resolution continues in the
     /// dependency at `ordinal`, under `imported_name` if the name was changed.
     ///
     /// There is no address: a re-export is a forwarding edge, and treating one

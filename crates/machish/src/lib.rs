@@ -2,25 +2,11 @@
 //! high-level emulation of macOS binaries.
 //!
 //! It is the Mach-O counterpart to [`selfish`](https://github.com/V3L0C1T13S/selfish),
-//! and shares its central bet: that a loader whose *every* interaction with
+//! and shares its primary design: that a loader whose every interaction with
 //! memory, symbol resolution, and control transfer goes through a trait can
-//! serve a compatibility layer as readily as it serves native execution. The
-//! immediate consumer is Rosetta 3, which runs Intel macOS applications on
-//! Apple Silicon — so the guest image is x86-64 data being fed to a recompiler,
-//! never code this CPU executes, and an "imported function" resolves to a
-//! *native arm64 host pointer*.
+//! serve a compatibility layer as readily as it serves native execution.
 //!
-//! Three seams carry that design:
-//!
-//! - [`memory::AddressSpace`] — all mapping and fixup application. Host memory,
-//!   a plain buffer, or anything else.
-//! - [`resolve::SymbolProvider`] — what an import *means*. Answering with a host
-//!   function pointer is what makes this high-level emulation rather than
-//!   translation.
-//! - [`exec::Executor`] — how a resolved address is called. Natively, or by
-//!   handing it to an emulator.
-//!
-//! Unlike a real dyld, linking here produces a **transcript** as well as a
+//! Unlike a real dyld, linking here produces a transcript as well as a
 //! result: [`report::LinkReport`] records every binding's slot address, stub
 //! address, source library, and resolved value, which is what an embedder needs
 //! to install native call-site intercepts.

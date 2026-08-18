@@ -1,15 +1,4 @@
 //! Link a Mach-O and print the transcript.
-//!
-//! ```sh
-//! cargo run -p machish --example link -- /bin/ls
-//! ```
-//!
-//! This is the crate's own diagnostic, and it exists because
-//! [`LinkReport`](machish::report::LinkReport) is the product — not a debug
-//! aid. An embedder consumes exactly what this prints: for each binding, the
-//! slot address, the stub address, the library, the symbol, and what it
-//! resolved to. If the interception the driver installs is wrong, the answer is
-//! visible here first.
 
 use std::process::ExitCode;
 
@@ -39,8 +28,6 @@ fn main() -> ExitCode {
         }
     };
 
-    // The default host configuration: bundled dylibs from disk, `/usr/lib`
-    // declined and answered natively.
     let mut mem = BufferSpace::new(0x1_0000_0000);
     let mut source = FsDylibSource::new();
     let shims = eager_binding_shims();
@@ -103,9 +90,6 @@ fn print(report: &LinkReport, quiet: bool) {
 
         if !quiet {
             for b in &img.bindings {
-                // The stub column is the load-bearing one: it is the address a
-                // `call rel32` actually targets, and the only handle an
-                // interception has on the common call shape.
                 let stub = match b.stub_va {
                     Some(s) => format!("{s:#012x}"),
                     None => "     -      ".to_string(),

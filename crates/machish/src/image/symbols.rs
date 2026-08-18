@@ -1,23 +1,8 @@
-//! `LC_SYMTAB` and the `LC_DYSYMTAB` indirect table.
-//!
-//! Classic Mach-O's answer to `.dynsym`, and the only symbol source for images
-//! carrying no export trie. It also carries something the trie does not: the
-//! **indirect symbol table**, a flat array of symbol indices parallel to the
-//! entries of every stub and symbol-pointer section. That array is what turns
-//! "slot 17 of `__la_symbol_ptr`" back into a name, and so is the whole basis
-//! of the classic fixup path ([`crate::fixups::classic`]) and of `stub_va`
-//! recovery in every path.
-//!
-//! Entries are read lazily rather than materialized into a `Vec`. A system
-//! dylib's symbol table runs to tens of thousands of entries, of which a bind
-//! stream touches a few dozen, and every consumer here is index-driven.
-
 use crate::error::{Error, Result};
 use crate::image::commands::{Dysymtab, Symtab};
 use crate::raw::{View, Word};
 use crate::spec::constants::{self as c, NLIST_64_SIZE};
 
-/// One `nlist_64` record.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Nlist {
     /// Offset into the string table. Zero means the empty name.
@@ -89,11 +74,6 @@ pub struct SymbolTable<'a> {
 }
 
 impl<'a> SymbolTable<'a> {
-    /// Open the tables described by `symtab`/`dysymtab` over the image bytes.
-    ///
-    /// Validates the declared extents up front so that every later indexed read
-    /// is a bounds check against a range already known to be inside the file,
-    /// rather than a fresh chance to run off the end.
     pub fn new(view: View<'a>, symtab: Symtab, dysymtab: Option<Dysymtab>) -> Result<Self> {
         let sym_bytes =
             (symtab.nsyms as usize)
@@ -154,9 +134,6 @@ impl<'a> SymbolTable<'a> {
     /// A string-table entry by offset, with its leading underscore intact.
     pub fn string(&self, strx: u32) -> Result<&'a str> {
         if strx as usize >= self.symtab.strsize as usize {
-            // A `strx` past the table is how a truncated or crafted image gets
-            // the reader to walk into unrelated `__LINKEDIT` bytes looking for
-            // a NUL. Reject it against the *declared* extent, not the file's.
             return Err(Error::Truncated {
                 what: "string table index",
             });

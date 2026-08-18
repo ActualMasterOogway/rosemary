@@ -1,56 +1,3 @@
-//! `__TEXT,__unwind_info`: how to leave a frame, one entry per function.
-//!
-//! ## What this is for
-//!
-//! Everything else this crate reads describes how to *start* a program. This
-//! describes how to leave a function that is already running, and it exists here
-//! for the same reason [`function_starts`](super::function_starts) does: it is
-//! image metadata, decoded from bytes, with an exact format and no execution in
-//! it. What the encodings *mean* — which register sits at which offset, where
-//! the return address is — is the guest architecture's business and belongs to
-//! whoever unwinds.
-//!
-//! ## The shape of the table, and why it is two levels
-//!
-//! `__unwind_info` is a compression of what `__eh_frame` says. A linker sorts
-//! every function by address and observes that almost all of them unwind
-//! identically — "standard frame pointer, no saved registers" describes most of
-//! a program — so it stores a *compact encoding*, one 32-bit word per function,
-//! and shares the common ones through an index.
-//!
-//! The result is a first-level index of address ranges, each pointing at a
-//! second-level page holding that range's functions in one of two forms:
-//!
-//! - **regular** (kind 2): `(function offset, encoding)` pairs, 8 bytes each.
-//! - **compressed** (kind 3): one 32-bit word per function — 24 bits of offset
-//!   relative to the page's own base address, and 8 bits selecting an encoding
-//!   from either the section-wide common array or the page's own.
-//!
-//! Both are searched by address, and both are here because a linker emits
-//! whichever is smaller for the page — a program that only handled compressed
-//! pages would work until a function needed an encoding the common array had no
-//! room for.
-//!
-//! ## Personality and LSDA
-//!
-//! Two things hang off an entry, and they are what makes this more than a
-//! stack-walk table. The encoding's personality field is a **1-based index**
-//! into a section-wide array of GOT slots, each holding the address of a
-//! language-specific personality routine. The LSDA — the language-specific data
-//! area, which for C++ is the table of `try` ranges and catch types — is found
-//! in a *separate* sorted index, present only for the functions that have one.
-//!
-//! Both are reported as slid virtual addresses, and the personality one is the
-//! address *of the pointer*, not of the routine: the slot is bound like any
-//! other import, so the routine's address is only known after linking.
-//!
-//! ## Scope
-//!
-//! Version 1 of the section, which is the only version any macOS toolchain has
-//! emitted. An entry whose encoding selects DWARF unwinding names an offset into
-//! `__eh_frame` and is reported verbatim: this module does not parse
-//! `__eh_frame`, and a caller that meets one should say so rather than guess.
-
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
@@ -81,16 +28,15 @@ pub struct UnwindEntry {
     /// The architecture-specific compact encoding. Interpreting it is the
     /// unwinder's job; see the module note.
     pub encoding: u32,
-    /// Slid VA of the *pointer* to this function's personality routine, or
-    /// `None`. A GOT slot, bound like any other import — which is why this is
-    /// the slot's address and not the routine's.
+    /// Slid VA of the pointer to this function's personality routine, or
+    /// `None`.
     pub personality_slot: Option<Word>,
     /// Slid VA of the language-specific data area, or `None`.
     pub lsda: Option<Word>,
 }
 
 impl UnwindEntry {
-    /// Whether this function has a personality routine *and* a `try` table,
+    /// Whether this function has a personality routine and a `try` table,
     /// which together are what make it capable of catching anything.
     pub fn can_handle(&self) -> bool {
         self.personality_slot.is_some() && self.lsda.is_some()
@@ -112,11 +58,6 @@ pub struct UnwindInfo {
 }
 
 impl UnwindInfo {
-    /// Parse `__TEXT,__unwind_info`, sliding every address by `slide`.
-    ///
-    /// An image without the section yields an empty table — a fact about the
-    /// image, not an error. So does an image whose section is present and holds
-    /// no entries.
     pub fn parse<S: MachSpec>(obj: &MachObject<'_, S>, slide: Word) -> Result<Self> {
         let Some(sect) = obj.section("__TEXT", "__unwind_info") else {
             return Ok(UnwindInfo::default());
@@ -184,13 +125,6 @@ impl UnwindInfo {
         Ok(UnwindInfo { entries, end })
     }
 
-    /// The entry describing the function containing `va`, if any.
-    ///
-    /// The table records starts, so the containing function is the last entry at
-    /// or below `va` — and `va` must still be inside the range the section
-    /// covers, or the answer would be "the last function in the image", which is
-    /// wrong in the one case it matters: an address that is not in this image at
-    /// all.
     pub fn lookup(&self, va: Word) -> Option<&UnwindEntry> {
         if self.entries.is_empty() || va >= self.end {
             return None;
@@ -231,8 +165,8 @@ fn encodings(view: &View<'_>, off: usize, count: usize) -> Result<Vec<u32>> {
 
 /// The `(function, lsda)` pairs covering one first-level entry.
 ///
-/// The array is shared across the section and sliced by the *next* first-level
-/// entry's offset, which is why this takes both ends.
+/// The array is shared across the section and sliced by the next first-level
+/// entry's offset.
 fn lsda_index(view: &View<'_>, from: usize, to: usize, base: Word) -> Result<Vec<(Word, Word)>> {
     if to <= from {
         return Ok(Vec::new());

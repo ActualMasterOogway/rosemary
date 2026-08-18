@@ -1,29 +1,3 @@
-//! The templating layer: a [`MachSpec`] fixes which architecture's images the
-//! loader accepts and at what granularity it lays them out.
-//!
-//! This is deliberately much thinner than `selfish`'s `ElfSpec`
-//! (`selfish/src/spec/mod.rs:20-68`). That trait carries `type Class`, `type
-//! Endian`, and `type Reloc` because ELF genuinely ships 32- and 64-bit, big-
-//! and little-endian, with per-architecture relocation arithmetic. Mach-O as we
-//! care about it is always `MH_MAGIC_64` little-endian, and its fixups are
-//! whole-file encodings rather than per-entry kinds (see [`crate::fixups`]), so
-//! none of those three associated types would earn their keep.
-//!
-//! What *does* vary, and is therefore what remains:
-//!
-//! - **Page size.** x86_64 images are laid out on 4 KiB boundaries, arm64 on
-//!   16 KiB. Unlike ELF — where page size is a property of the running kernel —
-//!   this is a fact about the file.
-//! - **Slice selection.** Which `cpusubtype`s of a fat file we accept, and which
-//!   we prefer.
-//! - **Whether the host can execute the image.** For a guest architecture the
-//!   answer is no: the bytes are *input* to a recompiler, so asking the address
-//!   space for `exec` permission would be meaningless.
-//!
-//! Keeping the trait also means `MachObject<'_, X86_64>` and
-//! `MachObject<'_, Arm64>` are distinct types, which is what stops a fat-file
-//! mix-up from silently handing an arm64 slice to an x86 lifter.
-
 pub mod arch;
 pub mod constants;
 
