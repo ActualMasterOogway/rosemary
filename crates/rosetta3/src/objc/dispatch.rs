@@ -552,33 +552,49 @@ pub(super) fn host_symbol(name: &str) -> Option<u64> {
 
 /// Service one call into the Objective-C runtime.
 fn serve(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    if let Some((_, message)) = MESSAGES.iter().find(|(n, _)| *n == symbol) {
+        return send(symbol, *message, current_vm(symbol)?, ctx, mem);
+    }
+    if let Ok(i) = RUNTIME.binary_search_by_key(&symbol, |r| r.name) {
+        return call_runtime(symbol, i, current_vm(symbol)?, ctx, mem);
+    }
     if let Some((_, reason)) = REFUSED.iter().find(|(n, _)| *n == symbol) {
         return Err(AbiError::Refused {
             symbol: symbol.to_string(),
             reason,
         });
     }
-    let vm = current_vm(symbol)?;
-    if let Some((_, message)) = MESSAGES.iter().find(|(n, _)| *n == symbol) {
-        return send(symbol, *message, vm, ctx, mem);
-    }
-    let Ok(i) = RUNTIME.binary_search_by_key(&symbol, |r| r.name) else {
-        return Err(AbiError::NoSignature {
-            symbol: symbol.to_string(),
-        });
+    current_vm(symbol)?;
+    Err(AbiError::NoSignature {
+        symbol: symbol.to_string(),
+    })
+}
+
+/// The host address of every entry in [`RUNTIME`], resolved once.
+///
+/// `dlsym` takes the loader's lock and hashes the name: 208ns, paid inside every
+/// `objc_retain` and `objc_release` the guest issued.
+fn host_address(i: usize) -> Option<u64> {
+    #[dynamic]
+    static ADDRS: Vec<u64> = {
+        RUNTIME
+            .iter()
+            .map(|r| host_symbol(r.name).unwrap_or(0))
+            .collect()
     };
-    call_runtime(symbol, &RUNTIME[i], vm, ctx, mem)
+    (ADDRS[i] != 0).then_some(ADDRS[i])
 }
 
 /// Forward one runtime entry point, translating the classes that cross it.
 fn call_runtime(
     symbol: &str,
-    entry: &Runtime,
+    i: usize,
     vm: &Vm,
     ctx: &mut RegisterContext,
     mem: &mut dyn GuestMemory,
 ) -> Result<()> {
-    let Some(host) = host_symbol(entry.name) else {
+    let entry = &RUNTIME[i];
+    let Some(host) = host_address(i) else {
         return Err(AbiError::Unsatisfied {
             symbol: symbol.to_string(),
         });
@@ -750,19 +766,7 @@ fn send(
         });
     }
 
-    // One lookup for both halves of what a send needs. A class method is an
-    // instance method of the metaclass, and `class` is already the metaclass
-    // when the receiver is a class, so this answers for both.
-    //
-    // SAFETY: `class` is a `Class` and `sel` a uniqued `SEL` — class realization rewrote the
-    // guest's `__objc_selrefs` slots from string pointers into the host
-    // runtime's own selectors, so the value the guest loaded *is* one.
-    let method = unsafe { host::class_getInstanceMethod(class, sel as host::Sel) };
-    if method.is_null() {
-        return Err(unrecognised(symbol, class, sel));
-    }
-    // SAFETY: `method` is a `Method` the runtime just returned for `class`.
-    let imp = unsafe { host::method_getImplementation(method) } as u64;
+    let plan = plan_for(symbol, vm, class, sel)?;
 
     // `ROSETTA3_TRACE_MSG` reports this send, if it names its selector.
     let watching = traced(sel);
@@ -770,9 +774,9 @@ fn send(
         eprintln!(
             "rosetta3: msg -[{} {name}] {} args={:#x},{:#x},{:#x}",
             class_of(host_receiver),
-            match vm.guest_behind_thunk(imp) {
-                Some(_) => "guest",
-                None => "host",
+            match plan.to {
+                Target::Guest(_) => "guest",
+                Target::Host { .. } => "host",
             },
             arg_reg(ctx, base + 2),
             arg_reg(ctx, base + 3),
@@ -780,30 +784,36 @@ fn send(
         );
     }
 
-    // Guest → guest: the trampoline's whole job is the jump, and the guest's
-    // registers are already the callee's.
-    if let Some(guest_imp) = vm.guest_behind_thunk(imp) {
-        // A `super` send arrived with the `objc_super` structure in `rdi`, and
-        // the method is called with the receiver.
-        set_arg_reg(ctx, base, receiver);
-        return transfer(symbol, ctx, mem, guest_imp);
-    }
+    let (imp, signature, variadic, stret) = match &plan.to {
+        // Guest → guest: the trampoline's whole job is the jump, and the
+        // guest's registers are already the callee's. A `super` send arrived
+        // with the `objc_super` structure in `rdi`, and the method is called
+        // with the receiver.
+        Target::Guest(guest_imp) => {
+            set_arg_reg(ctx, base, receiver);
+            return transfer(symbol, ctx, mem, *guest_imp);
+        }
+        Target::Host {
+            imp,
+            signature,
+            variadic,
+            stret,
+        } => (*imp, signature, *variadic, *stret),
+    };
 
-    // Guest → host: the method's own type encoding is the signature.
-    let signature = signature_of(symbol, method)?;
-    // A variadic method's arguments are in registers the encoding does not
-    // describe.
-    if is_variadic(sel) {
+    // Guest → host, with the arguments the method's own encoding does not
+    // describe dealt with first.
+    match variadic {
         // A nil-terminated object list has no format to fold its arguments
         // into, so it is answered by sending the counted twin instead — which
         // returns rather than falling through to the send below, because the
         // selector that reaches the host is not the one the guest sent.
-        if let Some(list) = object_list(sel) {
+        Variadic::List(list) => {
             return send_object_list(
                 vm,
                 symbol,
                 list,
-                &signature,
+                signature,
                 send,
                 class,
                 host_receiver,
@@ -812,14 +822,11 @@ fn send(
                 mem,
             );
         }
-        render_variadic(symbol, sel, &signature, base, ctx, mem)?;
+        Variadic::Format => render_variadic(symbol, sel, signature, base, ctx, mem)?,
+        Variadic::No => {}
     }
     // Two independent statements about the same fact, held to each other.
-    let by_encoding = matches!(
-        signature.shapes.first(),
-        Some(Shape::Struct(agg)) if agg.guest_class() == GuestClass::Memory
-    );
-    if by_encoding != send.stret {
+    if stret != send.stret {
         return Err(AbiError::Refused {
             symbol: symbol.to_string(),
             reason: "the trampoline the guest called disagrees with the method's own \
@@ -855,6 +862,127 @@ fn send(
         eprintln!("rosetta3: msg -[? {name}] -> {:#x}", ctx.rax);
     }
     result
+}
+
+/// What a message to one class and selector resolves to.
+///
+/// Everything here is derived from the class, the selector and the method's own type
+/// encoding, none of which changes between two sends — so it is derived once. Release,
+/// per host-bound send to `-[NSString stringByAppendingString:]`: 105ns in
+/// `class_getInstanceMethod`, 61ns parsing `@24@0:8@16`, 89ns rebuilding the selector's
+/// name for the variadic check, against 12ns for a validated hit.
+struct Plan {
+    /// The answer [`host::class_getMethodImplementation`] gave when this was built.
+    ///
+    /// Checked against a fresh one on every hit, which is what makes the entry safe to
+    /// keep: swizzling a method — `method_setImplementation`, a category loaded later,
+    /// an override added to a subclass — installs a different `IMP`, and that
+    /// difference is the invalidation.
+    probe: u64,
+    to: Target,
+}
+
+/// Where a resolved message goes, and what the crossing needs to know.
+enum Target {
+    /// The `IMP` is one of this runtime's thunks, and the message is a jump to the
+    /// guest address behind it.
+    ///
+    /// **The method's type encoding is not decoded for one of these, and must not be.**
+    /// [`add_method`] deliberately installs a guest method whose encoding this decoder
+    /// refuses — recording `MethodNotHostCallable` and moving on — precisely so that a
+    /// *guest* sender can still reach it. Decoding here made a union in a guest
+    /// method's signature refuse a send that never needed it.
+    ///
+    /// Safe to keep alongside `probe` because a thunk's address never comes to mean a
+    /// different guest function, and a new thunk is a fresh address in the arena rather
+    /// than one already installed as an `IMP`.
+    Guest(u64),
+    /// A host `IMP`, and everything the marshaller needs in front of it.
+    Host {
+        imp: u64,
+        signature: Signature,
+        variadic: Variadic,
+        /// Whether the method's own encoding returns MEMORY-class, i.e. `_stret`.
+        stret: bool,
+    },
+}
+
+/// Which of the two things an ellipsis means here, decided from the selector.
+#[derive(Clone, Copy)]
+enum Variadic {
+    No,
+    /// Arguments to fold into a format string.
+    Format,
+    /// A nil-terminated object list, and the counted selector to send instead.
+    List(&'static ObjectList),
+}
+
+/// The resolutions made so far, keyed by `(class, selector)`.
+fn plans() -> &'static std::sync::RwLock<std::collections::HashMap<(u64, u64), &'static Plan>> {
+    static PLANS: std::sync::OnceLock<
+        std::sync::RwLock<std::collections::HashMap<(u64, u64), &'static Plan>>,
+    > = std::sync::OnceLock::new();
+    PLANS.get_or_init(Default::default)
+}
+
+/// Resolve one message, from the cache when the class still answers it the same way.
+fn plan_for(symbol: &str, vm: &Vm, class: host::Class, sel: u64) -> Result<&'static Plan> {
+    // The lookup `objc_msgSend` itself performs, so it is answered out of the
+    // class's own method cache: 6ns, against 105ns for the
+    // `class_getInstanceMethod` below, which walks the superclass chain under
+    // the runtime lock.
+    //
+    // SAFETY: `class` is a `Class` and `sel` a uniqued `SEL` — class realization
+    // rewrote the guest's `__objc_selrefs` slots from string pointers into the
+    // host runtime's own selectors, so the value the guest loaded *is* one.
+    let probe = unsafe { host::class_getMethodImplementation(class, sel as host::Sel) } as u64;
+    let key = (class as u64, sel);
+    if let Some(&plan) = plans().read().unwrap_or_else(|e| e.into_inner()).get(&key)
+        && plan.probe == probe
+    {
+        return Ok(plan);
+    }
+
+    // One lookup for both halves of what a send needs. A class method is an
+    // instance method of the metaclass, and `class` is already the metaclass
+    // when the receiver is a class, so this answers for both.
+    //
+    // SAFETY: as above.
+    let method = unsafe { host::class_getInstanceMethod(class, sel as host::Sel) };
+    if method.is_null() {
+        return Err(unrecognised(symbol, class, sel));
+    }
+    // SAFETY: `method` is a `Method` the runtime just returned for `class`.
+    let imp = unsafe { host::method_getImplementation(method) } as u64;
+    let to = match vm.guest_behind_thunk(imp) {
+        Some(guest_imp) => Target::Guest(guest_imp),
+        None => {
+            let signature = signature_of(symbol, method)?;
+            Target::Host {
+                imp,
+                stret: matches!(
+                    signature.shapes.first(),
+                    Some(Shape::Struct(agg)) if agg.guest_class() == GuestClass::Memory
+                ),
+                variadic: match (is_variadic(sel), object_list(sel)) {
+                    (true, Some(list)) => Variadic::List(list),
+                    (true, None) => Variadic::Format,
+                    (false, _) => Variadic::No,
+                },
+                signature,
+            }
+        }
+    };
+    let plan = Plan { probe, to };
+    // Leaked rather than reference-counted: a plan is read on every send and
+    // there is one per method a program actually messages, plus one more each
+    // time a method is swizzled underneath it.
+    let plan: &'static Plan = Box::leak(Box::new(plan));
+    plans()
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key, plan);
+    Ok(plan)
 }
 
 /// Whether `ROSETTA3_TRACE_MSG` asked for this selector, and its name.
@@ -957,44 +1085,47 @@ fn signature_of(symbol: &str, method: host::Method) -> Result<Signature> {
 
 /// Whether the selector names a method that takes an ellipsis.
 fn is_variadic(sel: u64) -> bool {
-    let Some(name) = selector_name(sel) else {
+    let Some(name) = selector_bytes(sel) else {
         return false;
     };
-    names_a_format(&name) || OBJECT_LISTS.iter().any(|l| l.variadic == name)
+    names_a_format(name) || OBJECT_LISTS.iter().any(|l| l.variadic.as_bytes() == name)
 }
 
 /// The counted twin of a nil-terminated list selector, if this is one.
 fn object_list(sel: u64) -> Option<&'static ObjectList> {
-    let name = selector_name(sel)?;
-    OBJECT_LISTS.iter().find(|l| l.variadic == name)
+    let name = selector_bytes(sel)?;
+    OBJECT_LISTS.iter().find(|l| l.variadic.as_bytes() == name)
 }
 
 /// Whether the selector's last keyword names a *format string* parameter.
-fn names_a_format(selector: &str) -> bool {
-    let Some(last) = selector
-        .strip_suffix(':')
-        .and_then(|s| s.rsplit(':').next())
-    else {
+fn names_a_format(selector: &[u8]) -> bool {
+    let Some(stripped) = selector.strip_suffix(b":") else {
         return false;
     };
-    // Split camelCase: `stringByAppendingFormat` -> [string, By, Appending, Format].
-    let mut words = Vec::new();
-    let mut start = 0;
-    for (i, c) in last.char_indices() {
-        if c.is_ascii_uppercase() && i != 0 {
-            words.push(&last[start..i]);
-            start = i;
-        }
-    }
-    words.push(&last[start..]);
-    let mut words = words.iter().rev().map(|w| w.to_ascii_lowercase());
-    if words.next().as_deref() != Some("format") {
+    let last = match stripped.iter().rposition(|&c| c == b':') {
+        Some(i) => &stripped[i + 1..],
+        None => stripped,
+    };
+    let (before, word) = last_word(last);
+    if !word.eq_ignore_ascii_case(b"format") {
         return false;
     }
-    matches!(
-        words.next().as_deref(),
-        None | Some("with") | Some("append") | Some("appending")
-    )
+    if before.is_empty() {
+        return true;
+    }
+    let (_, previous) = last_word(before);
+    [b"with".as_slice(), b"append", b"appending"]
+        .iter()
+        .any(|w| previous.eq_ignore_ascii_case(w))
+}
+
+/// Split one camelCase word off the end: `stringByAppending` -> `(stringBy, Appending)`.
+fn last_word(s: &[u8]) -> (&[u8], &[u8]) {
+    let start = (1..s.len())
+        .rev()
+        .find(|&i| s[i].is_ascii_uppercase())
+        .unwrap_or(0);
+    s.split_at(start)
 }
 
 /// Turn a variadic format-style send into the non-variadic send of the rendered string,
@@ -1196,22 +1327,28 @@ fn send_object_list(
     Ok(())
 }
 
-/// A uniqued selector as its name, for a diagnostic or the variadic check.
-fn selector_name(sel: u64) -> Option<String> {
+/// A uniqued selector's name, borrowed from the runtime rather than copied.
+///
+/// The `'static` is the runtime's own promise: a `SEL` and its name are interned for
+/// the life of the process. Borrowing matters because the variadic check runs on every
+/// send, and copying the name there was an allocation per message.
+fn selector_bytes(sel: u64) -> Option<&'static [u8]> {
     if sel == 0 {
         return None;
     }
-    // SAFETY: `sel` is a uniqued `SEL`, which the runtime interns for the
-    // process lifetime; `sel_getName` returns a string it owns.
+    // SAFETY: `sel` is a uniqued `SEL`; `sel_getName` returns a NUL-terminated
+    // string the runtime owns and never frees.
     let name = unsafe { host::sel_getName(sel as host::Sel) };
     if name.is_null() {
         return None;
     }
     // SAFETY: as above.
-    unsafe { std::ffi::CStr::from_ptr(name) }
-        .to_str()
-        .ok()
-        .map(str::to_string)
+    Some(unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes())
+}
+
+/// A uniqued selector as its name, for a diagnostic.
+fn selector_name(sel: u64) -> Option<String> {
+    selector_bytes(sel).map(|b| String::from_utf8_lossy(b).into_owned())
 }
 
 /// "This class does not implement that selector", with both names in it.
@@ -1364,7 +1501,7 @@ mod tests {
             "raise:format:",
             "predicateWithFormat:",
         ] {
-            assert!(names_a_format(yes), "{yes} should name a format");
+            assert!(names_a_format(yes.as_bytes()), "{yes} should name a format");
         }
         // `initWithFrame:pixelFormat:` is the one that mattered.
         for no in [
@@ -1375,7 +1512,70 @@ mod tests {
             "format",
             "",
         ] {
-            assert!(!names_a_format(no), "{no} should not name a format");
+            assert!(
+                !names_a_format(no.as_bytes()),
+                "{no} should not name a format"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plan_can_be_validated_by_the_cheap_lookup() {
+        // `class_getMethodImplementation` answers out of the class's own method
+        // cache; `class_getInstanceMethod` walks the superclass chain under the
+        // runtime lock. The plan cache keeps the second's answer and re-checks
+        // it with the first, which only works while the two agree.
+        // SAFETY: NUL-terminated literals; every pointer is checked before use.
+        unsafe {
+            for (class, selector) in [
+                (c"NSString".as_ptr(), c"stringByAppendingString:".as_ptr()),
+                (c"NSString".as_ptr(), c"length".as_ptr()),
+                (c"NSObject".as_ptr(), c"description".as_ptr()),
+                (c"NSMutableArray".as_ptr(), c"addObject:".as_ptr()),
+            ] {
+                let cls = host::objc_getClass(class);
+                assert!(!cls.is_null());
+                let sel = host::sel_registerName(selector);
+                let method = host::class_getInstanceMethod(cls, sel);
+                assert!(!method.is_null());
+                assert_eq!(
+                    host::method_getImplementation(method),
+                    host::class_getMethodImplementation(cls, sel),
+                    "the two lookups disagree, so no plan would ever be reused"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn swizzling_changes_the_answer_a_plan_is_checked_against() {
+        // The whole of the cache's invalidation: a method replaced underneath a
+        // resolved plan must make the cheap lookup report something else.
+        unsafe extern "C" fn original() {}
+        unsafe extern "C" fn replacement() {}
+
+        // SAFETY: NUL-terminated literals, and a class this test allocates and
+        // registers itself, so the method being replaced is its own.
+        unsafe {
+            let cls = host::objc_allocateClassPair(
+                host::objc_getClass(c"NSObject".as_ptr()),
+                c"Rosetta3SwizzleProbe".as_ptr(),
+                0,
+            );
+            assert!(!cls.is_null());
+            let sel = host::sel_registerName(c"probe".as_ptr());
+            assert!(host::class_addMethod(
+                cls,
+                sel,
+                original as *const std::ffi::c_void,
+                c"v16@0:8".as_ptr(),
+            ));
+            host::objc_registerClassPair(cls);
+
+            let before = host::class_getMethodImplementation(cls, sel);
+            let method = host::class_getInstanceMethod(cls, sel);
+            host::method_setImplementation(method, replacement as *const std::ffi::c_void);
+            assert_ne!(before, host::class_getMethodImplementation(cls, sel));
         }
     }
 }

@@ -50,6 +50,7 @@ unsafe extern "C" {
     /// what a message send needs to know.
     pub fn method_getImplementation(method: Method) -> Imp;
     pub fn method_getTypeEncoding(method: Method) -> *const c_char;
+    pub fn method_setImplementation(method: Method, imp: Imp) -> Imp;
 
     pub fn ivar_getOffset(ivar: Ivar) -> isize;
 

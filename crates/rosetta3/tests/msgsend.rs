@@ -290,6 +290,28 @@ fn the_host_calls_a_guest_method_with_an_aggregate_by_value() {
     assert!(out.contains("scale 9.25\n"), "{out}");
 }
 
+/// A guest method the *encoding decoder* cannot classify is still reachable from the
+/// guest.
+///
+/// The send path may decode a method's type encoding only once it knows the `IMP` is
+/// not the guest's own. Decoding it first refuses every send of a guest method carrying
+/// a union — which is a method this runtime installs on purpose, because a guest sender
+/// never needed the signature.
+#[test]
+fn a_guest_method_whose_encoding_is_undecidable_is_still_sent() {
+    let Some(path) = common::objc_guest_union_fixture() else {
+        skip!("cannot build x86_64 Objective-C fixtures")
+    };
+    let Some((native_status, expected)) = common::run_native(&path) else {
+        skip!("cannot run x86_64 binaries natively")
+    };
+    let (status, out, err) = common::run_guest(&path, &[]);
+
+    assert_eq!(out, expected, "stderr: {err}");
+    assert_eq!(status, native_status, "stderr: {err}");
+    assert!(out.contains("1.50 7 9 2.25\n"), "{out}");
+}
+
 /// M7.4: a `dlopen`ed image's own Objective-C classes are realized too.
 ///
 /// The launch-time registration pass runs over the program's images, and an

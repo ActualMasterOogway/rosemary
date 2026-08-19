@@ -1009,6 +1009,68 @@ pub fn objc_host_aggregate_fixture() -> Option<String> {
         .clone()
 }
 
+/// A guest method whose encoding this runtime's decoder refuses, sent guest→guest.
+///
+/// `encoding::signature` will not classify a union — its members overlap, so its
+/// eightbytes are undecidable — and [`crate::objc::add_method`] installs such a method
+/// anyway, recording `MethodNotHostCallable` and moving on. That is only sound while
+/// the send path leaves the encoding alone when the `IMP` is the guest's own, which is
+/// what this fixture is: a union returned by value, from one guest method to another.
+///
+/// Roblox's `AppDelegate` is where the encoding was decoded eagerly and the send
+/// refused.
+pub const OBJC_GUEST_UNION_M: &str = r#"
+#import <Foundation/Foundation.h>
+
+union Word {
+    double d;
+    struct { int lo; int hi; } halves;
+};
+
+/* Large enough to be MEMORY-class on both conventions, so the send is
+   `objc_msgSend_stret` rather than the ordinary trampoline. */
+struct Wide {
+    union Word a;
+    union Word b;
+    union Word c;
+};
+
+@interface Packer : NSObject
+- (struct Wide)wide;
+- (NSString *)describe;
+@end
+
+@implementation Packer
+- (struct Wide)wide {
+    struct Wide w;
+    w.a.d = 1.5;
+    w.b.halves.lo = 7;
+    w.b.halves.hi = 9;
+    w.c.d = 2.25;
+    return w;
+}
+/* Guest -> guest: the sender and `wide` are both this class's. */
+- (NSString *)describe {
+    struct Wide w = [self wide];
+    return [NSString stringWithFormat:@"%.2f %d %d %.2f",
+            w.a.d, w.b.halves.lo, w.b.halves.hi, w.c.d];
+}
+@end
+
+int main(void) {
+    printf("%s\n", [[[Packer alloc] init] describe].UTF8String);
+    return 0;
+}
+"#;
+
+/// Build [`OBJC_GUEST_UNION_M`], or `None` if this host cannot.
+pub fn objc_guest_union_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_objc("objc_guest_union", OBJC_GUEST_UNION_M))
+        .clone()
+}
+
 /// M6.3's boundary program: the three messages that must be *refused*.
 ///
 /// One binary selected by argument, as [`UNWIND_REFUSALS_CPP`] is, and for the

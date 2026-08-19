@@ -78,7 +78,7 @@ pub struct Stats {
 }
 
 /// The guest's classes, as the host runtime now knows them.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ObjcRuntime {
     /// Guest `objc_class` VA → the host `Class` standing for it.
     to_host: HashMap<u64, u64>,
@@ -87,8 +87,30 @@ pub struct ObjcRuntime {
     to_guest: HashMap<u64, u64>,
     /// Guest `protocol_t` VA → host `Protocol *`.
     protocols: HashMap<u64, u64>,
+    /// The half-open bounds of `to_host`'s keys, and of `to_guest`'s.
+    ///
+    /// Every pointer crossing the seam asks one of these maps, and almost every
+    /// one of them is an ordinary object that is in neither. Two compares
+    /// answer that without hashing.
+    guest_bounds: (u64, u64),
+    host_bounds: (u64, u64),
     stats: Stats,
     refusals: Vec<Refusal>,
+}
+
+impl Default for ObjcRuntime {
+    fn default() -> Self {
+        Self {
+            to_host: HashMap::new(),
+            to_guest: HashMap::new(),
+            protocols: HashMap::new(),
+            // Empty, so every range test fails.
+            guest_bounds: (u64::MAX, 0),
+            host_bounds: (u64::MAX, 0),
+            stats: Stats::default(),
+            refusals: Vec::new(),
+        }
+    }
 }
 
 /// The runtime the process has published, for a caller with no [`Vm`] in hand.
@@ -126,12 +148,28 @@ impl ObjcRuntime {
     ///
     /// The form the seam actually wants.
     pub fn host_or(&self, va: u64) -> u64 {
+        if va < self.guest_bounds.0 || va >= self.guest_bounds.1 {
+            return va;
+        }
         self.host_class(va).unwrap_or(va)
     }
 
     /// [`ObjcRuntime::guest_class`], with the same rule for the other direction.
     pub fn guest_or(&self, host: u64) -> u64 {
+        if host < self.host_bounds.0 || host >= self.host_bounds.1 {
+            return host;
+        }
         self.guest_class(host).unwrap_or(host)
+    }
+
+    /// Record that `host` stands for the guest class at `guest_va`, both ways.
+    fn link(&mut self, guest_va: u64, host: u64) {
+        self.to_host.insert(guest_va, host);
+        self.to_guest.insert(host, guest_va);
+        self.guest_bounds.0 = self.guest_bounds.0.min(guest_va);
+        self.guest_bounds.1 = self.guest_bounds.1.max(guest_va + 1);
+        self.host_bounds.0 = self.host_bounds.0.min(host);
+        self.host_bounds.1 = self.host_bounds.1.max(host + 1);
     }
 
     /// The host `Protocol *` for a guest `protocol_t` address, leaving anything that is
@@ -520,12 +558,10 @@ fn register_class(
     unsafe { host::objc_registerClassPair(cls) };
 
     let host_va = cls as u64;
-    rt.to_host.insert(class.va, host_va);
-    rt.to_guest.insert(host_va, class.va);
+    rt.link(class.va, host_va);
     // The metaclass is a class the guest names too.
     if let Some(declared) = &class.meta {
-        rt.to_host.insert(declared.va, meta as u64);
-        rt.to_guest.insert(meta as u64, declared.va);
+        rt.link(declared.va, meta as u64);
     }
     rt.stats.classes += 1;
     rt.stats.methods += methods;
