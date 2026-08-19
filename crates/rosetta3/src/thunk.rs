@@ -18,6 +18,10 @@ use crate::abi::ArgType as T;
 use crate::abi::aggregate::{Aggregate, Eightbyte, GuestClass, HostClass, Shape};
 use crate::vm::{Vm, VmError};
 
+/// The result slot a trampoline gives [`typed_entry`] to fill: four doubles, the
+/// widest thing AAPCS64 returns in registers.
+const RESULT_BYTES: usize = 32;
+
 /// Integer argument registers the guest's convention uses.
 const GUEST_INT_ARGS: usize = 6;
 /// Vector argument registers the guest's convention uses.
@@ -212,17 +216,43 @@ impl ThunkSignature {
                 },
             });
         }
-        // An HFA return comes back in `v0`–`v3` while the guest returns through
-        // a hidden buffer, and expressing "return four doubles in four vector
-        // registers" is not something Cranelift's return lowering promises to
-        // do the way AAPCS64 specifies.
-        if let Some(Shape::Struct(_)) = &returns {
-            return Err("returns an aggregate by value, which a thunk cannot carry");
+        // A multi-value return lands where AAPCS64 puts an aggregate's members —
+        // `v0`–`v3` for an HFA, `x0`/`x1` for a composite — which is what lets a
+        // trampoline declare scalars and still return a struct. Larger than that
+        // the callee fills a buffer through `x8`, a register Cranelift's return
+        // lowering gives no way to declare.
+        if let Some(Shape::Struct(agg)) = &returns
+            && agg.host_class()? == HostClass::Indirect
+        {
+            return Err("returns an aggregate too large for AAPCS64's registers");
         }
         Ok(ThunkSignature {
             params,
             returns,
             host_leaves,
+        })
+    }
+
+    /// What the trampoline declares it returns, and the offset in [`RESULT_BYTES`]
+    /// each value is read from.
+    fn return_leaves(&self) -> Result<Vec<(types::Type, i32)>, Unsupported> {
+        Ok(match self.returns.as_ref() {
+            None | Some(Shape::Scalar(T::None)) => Vec::new(),
+            Some(Shape::Scalar(t)) => vec![(Self::cl_type(*t), 0)],
+            Some(Shape::Struct(agg)) => match agg.host_class()? {
+                HostClass::Hfa { ty, count } => {
+                    let width = crate::abi::aggregate::width_of(ty) as i32;
+                    (0..count as i32)
+                        .map(|i| (Self::cl_type(ty), i * width))
+                        .collect()
+                }
+                HostClass::Integer { words } => {
+                    (0..words as i32).map(|i| (types::I64, i * 8)).collect()
+                }
+                HostClass::Indirect => {
+                    return Err("returns an aggregate too large for AAPCS64's registers");
+                }
+            },
         })
     }
 
@@ -253,14 +283,9 @@ pub(crate) fn build_typed(guest_va: u64, signature: ThunkSignature) -> Result<Th
     for &t in &leaves {
         sig.params.push(AbiParam::new(ThunkSignature::cl_type(t)));
     }
-    let ret_ty = signature
-        .returns
-        .as_ref()
-        .and_then(Shape::scalar)
-        .filter(|t| *t != T::None)
-        .map(ThunkSignature::cl_type);
-    if let Some(t) = ret_ty {
-        sig.returns.push(AbiParam::new(t));
+    let ret_leaves = signature.return_leaves().map_err(|e| fail(e.to_string()))?;
+    for (ty, _) in &ret_leaves {
+        sig.returns.push(AbiParam::new(*ty));
     }
 
     // The host machine this trampoline is being built for. Cranelift's frontend
@@ -281,7 +306,11 @@ pub(crate) fn build_typed(guest_va: u64, signature: ThunkSignature) -> Result<Th
     ));
     // Where the entry writes the result, so a floating-point return does not
     // have to travel back through an integer register.
-    let out = b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
+    let out = b.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        RESULT_BYTES as u32,
+        3,
+    ));
 
     let entry = b.create_block();
     b.append_block_params_for_function_params(entry);
@@ -310,15 +339,11 @@ pub(crate) fn build_typed(guest_va: u64, signature: ThunkSignature) -> Result<Th
     b.ins()
         .call_indirect(callee_sig, callee, &[guest, desc, spill_ptr, out_ptr]);
 
-    match ret_ty {
-        Some(t) => {
-            let v = b.ins().stack_load(ptr, t, out, 0);
-            b.ins().return_(&[v]);
-        }
-        None => {
-            b.ins().return_(&[]);
-        }
-    }
+    let rets: Vec<_> = ret_leaves
+        .iter()
+        .map(|(ty, offset)| b.ins().stack_load(ptr, *ty, out, *offset))
+        .collect();
+    b.ins().return_(&rets);
     b.finalize(frontend);
 
     let mut backend = crate::jit::backend().map_err(|e| fail(e.to_string()))?;
@@ -506,16 +531,51 @@ fn reassemble(agg: &Aggregate, host: HostClass, words: &[u64]) -> Vec<u8> {
     raw
 }
 
+/// The aggregate a returning guest call left behind, as its own bytes.
+///
+/// `buffer` is what a MEMORY-class return was given to fill; for the register
+/// classes it is untouched and the eightbytes come back by class, `rax`/`rdx` for
+/// the integer ones and `xmm0`/`xmm1` for the SSE ones.
+fn returned_aggregate(agg: &Aggregate, regs: &crate::vm::Returned, buffer: &[u8]) -> Vec<u8> {
+    let classes = match agg.guest_class() {
+        GuestClass::Memory => return buffer[..agg.size.min(buffer.len())].to_vec(),
+        GuestClass::Registers(classes) => classes,
+    };
+    let mut raw = vec![0u8; classes.len() * 8];
+    let (mut ints, mut sse) = (0usize, 0usize);
+    for (i, class) in classes.iter().enumerate() {
+        let word = match class {
+            Eightbyte::Integer => {
+                ints += 1;
+                match ints {
+                    1 => regs.rax,
+                    _ => regs.rdx,
+                }
+            }
+            Eightbyte::Sse => {
+                sse += 1;
+                match sse {
+                    1 => regs.xmm0,
+                    _ => regs.xmm1,
+                }
+            }
+        };
+        raw[i * 8..i * 8 + 8].copy_from_slice(&word.to_le_bytes());
+    }
+    raw.truncate(agg.size);
+    raw
+}
+
 /// What a typed trampoline calls. Not public: its only legitimate caller is code this
 /// module emitted.
 unsafe extern "C" fn typed_entry(
     guest_va: u64,
     desc: *const ThunkSignature,
     spill: *const u64,
-    out: *mut u64,
+    out: *mut u8,
 ) {
-    // SAFETY: `out` is an eight-byte stack slot of the calling trampoline.
-    unsafe { *out = 0 };
+    // SAFETY: `out` is a `RESULT_BYTES` stack slot of the calling trampoline.
+    unsafe { std::ptr::write_bytes(out, 0, RESULT_BYTES) };
     let Some(vm) = current() else {
         report_no_vm(guest_va);
         return;
@@ -532,7 +592,28 @@ unsafe extern "C" fn typed_entry(
         (signature, std::slice::from_raw_parts(spill, n))
     };
 
+    // An aggregate SysV classifies MEMORY comes back through a buffer whose
+    // address the *caller* passes in the first integer register, ahead of
+    // `self` — so this is pushed before any argument is read.
+    let sret = match signature.returns.as_ref() {
+        Some(Shape::Struct(agg)) if agg.guest_class() == GuestClass::Memory => {
+            // Not reachable through `ThunkSignature::new`, which takes only the
+            // classes AAPCS64 returns in registers, none of them wider.
+            if agg.size > RESULT_BYTES {
+                return;
+            }
+            true
+        }
+        _ => false,
+    };
+    let mut buffer = [0u8; RESULT_BYTES];
+
     let mut args = GuestArgs::default();
+    if sret {
+        // Guest and host share one address space, so a host local is an address
+        // the guest can store through. See `GuestView`.
+        args.push_int(buffer.as_mut_ptr() as usize as u64);
+    }
     let mut at = 0usize;
     for (shape, leaves) in signature.params.iter().zip(&signature.host_leaves) {
         let words = &spill[at..at + leaves.len()];
@@ -573,15 +654,24 @@ unsafe extern "C" fn typed_entry(
         vm.call_with_stack(guest_va, ctx, &args.stack)
     }));
     match result {
-        Ok(Ok((rax, xmm0))) => {
+        Ok(Ok(regs)) => {
             // Which register holds the answer is the *return type's* question,
             // not something to infer from the value.
-            let value = match signature.returns.as_ref().and_then(Shape::scalar) {
-                Some(t) if crate::abi::aggregate::is_fp(t) => xmm0,
-                _ => rax,
+            let raw = match signature.returns.as_ref() {
+                Some(Shape::Struct(agg)) => returned_aggregate(agg, &regs, &buffer),
+                other => {
+                    let value = match other.and_then(|s| s.scalar()) {
+                        Some(t) if crate::abi::aggregate::is_fp(t) => regs.xmm0,
+                        _ => regs.rax,
+                    };
+                    value.to_le_bytes().to_vec()
+                }
             };
-            // SAFETY: `out` is the calling trampoline's eight-byte slot.
-            unsafe { *out = value };
+            let n = raw.len().min(RESULT_BYTES);
+            // SAFETY: `out` is the calling trampoline's `RESULT_BYTES` slot, and
+            // the members it loads sit at the offsets `return_leaves` named —
+            // which are the aggregate's own, so its bytes go across unrearranged.
+            unsafe { std::ptr::copy_nonoverlapping(raw.as_ptr(), out, n) };
         }
         Ok(Err(e)) => park_or_die(vm, in_callback(guest_va, e)),
         Err(_) => park_or_die(

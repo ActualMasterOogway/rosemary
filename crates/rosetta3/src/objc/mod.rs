@@ -615,10 +615,8 @@ fn add_method(
 /// — it names what about *this* method could not be carried, so the listing says
 /// "returns an aggregate by value" rather than "unsupported".
 ///
-/// - **An aggregate return.** AAPCS64 sends a homogeneous float aggregate back in
-/// `v0`–`v3` while the guest returns through a hidden buffer, and "return four doubles
-/// in four vector registers" is not something Cranelift's return lowering promises to
-/// do the way the ABI specifies.
+/// - **An aggregate return too large for AAPCS64's registers.** The callee fills a
+/// buffer through `x8`, and a trampoline has no way to declare that register.
 fn typed_thunk(vm: &Vm, m: &ObjcMethod) -> Result<u64, &'static str> {
     let signature = encoding::signature(&m.types)?;
     let (returns, params) = signature

@@ -634,3 +634,65 @@ fn classes_are_registered_before_initializers_run() {
     let rt = vm.register_objc().expect("registration");
     assert!(rt.stats().classes > 0);
 }
+
+/// A guest method that returns a struct by value, which the two conventions
+/// disagree about in both directions at once.
+///
+/// The three cases are the three the classifications produce, and DELTARUNE's
+/// `-[Mac_RunnerAppDelegate windowWillResize:toSize:]` is the first: AppKit
+/// reads the answer from `v0`/`v1`, so a thunk that returned only an integer
+/// left the window a NaN size and AppKit trapped mid-resize.
+///
+/// - `NSSize` — two SSE eightbytes to the guest, an HFA of two to the host.
+/// - `NSRect` — MEMORY to the guest, so it fills a hidden buffer; an HFA of four
+///   in `v0`–`v3` to the host.
+/// - `NSRange` — two integer eightbytes in `rax`/`rdx`, two `x` registers.
+#[test]
+fn a_guest_method_returns_a_struct_the_host_reads_from_registers() {
+    let _lock = serialized();
+    const SRC: &str = r#"
+    #import <Foundation/Foundation.h>
+    @interface RosettaShapes : NSObject
+    - (NSSize)shapeSize;
+    - (NSRect)shapeRect;
+    - (NSRange)shapeRange;
+    @end
+    @implementation RosettaShapes
+    - (NSSize)shapeSize { return NSMakeSize(640, 480); }
+    - (NSRect)shapeRect { return NSMakeRect(1, 2, 3, 4); }
+    - (NSRange)shapeRange { return NSMakeRange(7, 9); }
+    @end
+    int main(void) { return 0; }
+    "#;
+    let Some(path) = common::build_objc("objc_shapes", SRC) else {
+        skip!("cannot build x86_64 Objective-C fixtures")
+    };
+    let vm = vm_for(&path);
+    let rt = vm.register_objc().expect("registration");
+    assert!(
+        rt.refusals().is_empty(),
+        "unexpected refusals: {:?}",
+        rt.refusals()
+    );
+
+    #[repr(C)]
+    #[derive(Debug, PartialEq)]
+    struct Size(f64, f64);
+    #[repr(C)]
+    #[derive(Debug, PartialEq)]
+    struct Rect(f64, f64, f64, f64);
+    #[repr(C)]
+    #[derive(Debug, PartialEq)]
+    struct Range(u64, u64);
+
+    let obj = new_instance(class_named("RosettaShapes"));
+    // SAFETY: each prototype is the selector's own, `(id, SEL)` first.
+    unsafe {
+        let size: extern "C" fn(host::Class, host::Sel) -> Size = msg_send();
+        assert_eq!(size(obj, sel("shapeSize")), Size(640.0, 480.0));
+        let rect: extern "C" fn(host::Class, host::Sel) -> Rect = msg_send();
+        assert_eq!(rect(obj, sel("shapeRect")), Rect(1.0, 2.0, 3.0, 4.0));
+        let range: extern "C" fn(host::Class, host::Sel) -> Range = msg_send();
+        assert_eq!(range(obj, sel("shapeRange")), Range(7, 9));
+    }
+}

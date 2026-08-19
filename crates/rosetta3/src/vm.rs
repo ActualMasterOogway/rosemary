@@ -127,6 +127,18 @@ impl fmt::Display for Transfer {
     }
 }
 
+/// The registers a returning guest call can have left its answer in.
+///
+/// SysV AMD64 splits a two-eightbyte aggregate across `rax`/`rdx` and
+/// `xmm0`/`xmm1` by class, so a caller that knows only `rax` cannot read one back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Returned {
+    pub rax: u64,
+    pub rdx: u64,
+    pub xmm0: u64,
+    pub xmm1: u64,
+}
+
 impl fmt::Display for VmError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -670,21 +682,19 @@ impl Vm {
     /// As [`Vm::call`], with the whole initial register context supplied — the
     /// form a thunk needs, since it has floating-point arguments to place too.
     pub fn call_with(&self, entry: u64, ctx: RegisterContext) -> Result<u64, VmError> {
-        self.call_with_stack(entry, ctx, &[]).map(|(rax, _)| rax)
+        self.call_with_stack(entry, ctx, &[]).map(|r| r.rax)
     }
 
     /// As [`Vm::call_with`], with arguments the guest's ABI puts on its *stack*.
     ///
     /// Registers alone cannot express every call, and the case that forces this is not
-    /// exotic:
-    ///
-    /// Returns `(rax, xmm0)`.
+    /// exotic: an aggregate SysV classifies MEMORY travels there.
     pub fn call_with_stack(
         &self,
         entry: u64,
         ctx: RegisterContext,
         stack: &[u8],
-    ) -> Result<(u64, u64), VmError> {
+    ) -> Result<Returned, VmError> {
         // A thread the guest spawned reaches here first, through a thunk, with
         // no stack of its own yet.
         let state = crate::thread::ensure()?;
@@ -715,7 +725,7 @@ impl Vm {
         entry: u64,
         ctx: RegisterContext,
         rsp: u64,
-    ) -> Result<(u64, u64), VmError> {
+    ) -> Result<Returned, VmError> {
         let state = crate::thread::ensure()?;
         self.enter(state, entry, ctx, rsp)
     }
@@ -732,7 +742,7 @@ impl Vm {
         entry: u64,
         mut ctx: RegisterContext,
         rsp: u64,
-    ) -> Result<(u64, u64), VmError> {
+    ) -> Result<Returned, VmError> {
         if state.depth.get() >= MAX_DEPTH {
             return Err(VmError::TooDeep { pc: entry });
         }
@@ -761,9 +771,14 @@ impl Vm {
         state.leave(outer_entry);
         state.depth.set(state.depth.get() - 1);
         state.rsp.set(saved_rsp);
-        // `xmm0` is read from the context the loop just finished with, which is
-        // where a `double`-returning guest function left its answer.
-        result.map(|rax| (rax, ctx.xmm[0][0]))
+        // Everything but `rax` is read from the context the loop just finished
+        // with, which is where the guest left it.
+        result.map(|rax| Returned {
+            rax,
+            rdx: ctx.rdx,
+            xmm0: ctx.xmm[0][0],
+            xmm1: ctx.xmm[1][0],
+        })
     }
 
     /// Enter regions and service exits until the call that started this returns.
@@ -1437,7 +1452,7 @@ impl crate::exec::Execution for Vm {
             let sp = self
                 .kernel_sp()
                 .expect("an LC_UNIXTHREAD program starts on the stack its arguments were laid out on");
-            return Ok(self.jump_to(entry, RegisterContext::new(), sp)?.0);
+            return Ok(self.jump_to(entry, RegisterContext::new(), sp)?.rax);
         }
         let (argc, argv, envp, apple) = Vm::main_args(self);
         Vm::call(self, entry, &[argc, argv, envp, apple])
