@@ -56,6 +56,8 @@ pub enum VmError {
     Load { path: String, reason: String },
     /// Guest execution nested deeper than [`MAX_DEPTH`] host→guest callbacks.
     TooDeep { pc: u64 },
+    /// The selected execution backend does not implement what this image needs.
+    Unsupported { what: String },
 }
 
 /// How many times the runtime will say the same thing before going quiet.
@@ -176,6 +178,7 @@ impl fmt::Display for VmError {
             VmError::TooDeep { pc } => {
                 write!(f, "guest re-entered {MAX_DEPTH} deep at {pc:#x}")
             }
+            VmError::Unsupported { what } => write!(f, "not supported by this backend: {what}"),
         }
     }
 }
@@ -1396,6 +1399,48 @@ fn cpuid(leaf: u32, subleaf: u32) -> [u32; 4] {
         }
 
         _ => [0, 0, 0, 0],
+    }
+}
+
+impl crate::exec::Execution for Vm {
+    fn report(&self) -> &machish::report::LinkReport {
+        &self.program.report
+    }
+
+    fn main_args(&self) -> (u64, u64, u64, u64) {
+        Vm::main_args(self)
+    }
+
+    fn call(&self, entry: u64, args: &[u64]) -> Result<u64, VmError> {
+        Vm::call(self, entry, args)
+    }
+
+    fn prepare(&self) -> Result<(), VmError> {
+        crate::profile::start();
+        crate::gui::install();
+        let objc = self.register_objc()?;
+        // `+load` before the C constructors of the same image, which is dyld's
+        // order and the one a program that uses both depends on.
+        crate::shims::machthread::warm();
+        crate::objc::call_load_methods(self, objc)?;
+        Ok(())
+    }
+
+    fn enter_main(&self) -> Result<u64, VmError> {
+        let entry = self
+            .program
+            .entry()
+            .ok_or(VmError::NoCode { pc: 0, from: None })?;
+        // Which of the two entry-point encodings the root image used decides how it
+        // is reached, and the difference is not cosmetic.
+        if self.program.entry_reads_stack() {
+            let sp = self
+                .kernel_sp()
+                .expect("an LC_UNIXTHREAD program starts on the stack its arguments were laid out on");
+            return Ok(self.jump_to(entry, RegisterContext::new(), sp)?.0);
+        }
+        let (argc, argv, envp, apple) = Vm::main_args(self);
+        Vm::call(self, entry, &[argc, argv, envp, apple])
     }
 }
 

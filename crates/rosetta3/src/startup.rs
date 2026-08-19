@@ -1,70 +1,41 @@
-//! Starting the guest: initializers, then `main`.
+//! Starting the program: initializers, then `main`.
 
-use crate::vm::{Vm, VmError};
+use crate::exec::Execution;
+use crate::vm::VmError;
 
 /// Run every initializer, in order.
-pub fn run_initializers(vm: &Vm) -> Result<usize, VmError> {
-    let (argc, argv, envp, apple) = vm.main_args();
+pub fn run_initializers(exec: &dyn Execution) -> Result<usize, VmError> {
+    let (argc, argv, envp, apple) = exec.main_args();
     let mut ran = 0;
     // Reverse load order: see the module note.
-    let initializers: Vec<u64> = vm
-        .program
-        .report
+    let initializers: Vec<u64> = exec
+        .report()
         .images
         .iter()
         .rev()
         .flat_map(|image| image.initializers.iter().copied())
         .collect();
     for init in initializers {
-        vm.call(init, &[argc, argv, envp, apple])?;
+        exec.call(init, &[argc, argv, envp, apple])?;
         ran += 1;
     }
     Ok(ran)
 }
 
 /// Run initializers and then the entry point, returning `main`'s status.
-pub fn run(vm: &Vm) -> Result<i32, VmError> {
-    // Before anything the guest can fault in, which is everything below. The
+pub fn run(exec: &dyn Execution) -> Result<i32, VmError> {
+    // Before anything the program can fault in, which is everything below. The
     // image map goes with it.
     crate::fault::install();
-    crate::fault::note_images(&vm.program.report);
+    crate::fault::note_images(exec.report());
     // Before any framework can ask a question about the main executable and get
-    // an answer about *this* binary rather than the guest. See [`crate::compat`].
+    // an answer about this binary rather than the program's. See [`crate::compat`].
     crate::compat::install();
-    // Beside the fault reporter and for the same reason: before any guest code,
-    // so the first initializer is as sampled as anything an hour in.
-    crate::profile::start();
-    // And the overlay, which is the same figures where they can be read while
-    // the program is running.
-    crate::gui::install();
-    say_image_map(vm);
-    // Before any guest code, as dyld does it.
-    let objc = vm.register_objc()?;
-    // `+load` before the C constructors of the same image, which is dyld's
-    // order and the one a program that uses both depends on.
-    crate::shims::machthread::warm();
-    crate::objc::call_load_methods(vm, objc)?;
-    run_initializers(vm)?;
-    let entry = vm
-        .program
-        .entry()
-        .ok_or(VmError::NoCode { pc: 0, from: None })?;
-    let (argc, argv, envp, apple) = vm.main_args();
-    // Which of the two entry-point encodings the root image used decides how it
-    // is reached, and the difference is not cosmetic.
-    let status = if vm.program.entry_reads_stack() {
-        let sp = vm
-            .kernel_sp()
-            .expect("an LC_UNIXTHREAD program starts on the stack its arguments were laid out on");
-        vm.jump_to(
-            entry,
-            microlift::arch::x86_64::context::RegisterContext::new(),
-            sp,
-        )?
-        .0
-    } else {
-        vm.call(entry, &[argc, argv, envp, apple])?
-    };
+    say_image_map(exec);
+    // Whatever this backend must do before any of the program's own code runs.
+    exec.prepare()?;
+    run_initializers(exec)?;
+    let status = exec.enter_main()?;
     Ok((status & 0xff) as i32)
 }
 
@@ -73,11 +44,11 @@ pub fn run(vm: &Vm) -> Result<i32, VmError> {
 /// Every guest address this runtime reports is slid by whatever `mmap` chose that run,
 /// and a fault inside guest code is reported by a debugger — or by the guest's own
 /// crash handler — as a bare number.
-fn say_image_map(vm: &Vm) {
+fn say_image_map(exec: &dyn Execution) {
     if !crate::shims::vmmap::tracing() {
         return;
     }
-    for image in &vm.program.report.images {
+    for image in &exec.report().images {
         for seg in &image.segments {
             if seg.vmsize == 0 {
                 continue;

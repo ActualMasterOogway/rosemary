@@ -1740,11 +1740,13 @@ pub fn build_native_with(name: &str, source: &str, extra: &[&str]) -> Option<Str
     let out = dir.join(name);
     std::fs::write(&src, source).ok()?;
 
+    // Before the source, as [`build_x86_64`] has them: `cc` ignores a `-x c++`
+    // that comes after the last input file, and says so only as a warning.
     let status = Command::new("cc")
+        .args(extra)
         .arg("-o")
         .arg(&out)
         .arg(&src)
-        .args(extra)
         .status()
         .ok()?;
     status.success().then(|| out.to_string_lossy().into_owned())

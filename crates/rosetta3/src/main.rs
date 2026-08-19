@@ -1,54 +1,49 @@
-//! `rosetta3 run [--slow] <path> [args...]` — run an Intel Mach-O on this arm64 host.
+//! `rosetta3 run [--slow] [--native|--emulated] <path> [args...]`.
 
 use std::collections::BTreeSet;
 use std::process::ExitCode;
 
-use rosetta3::{Classification, ImportPolicy, Program, Vm, audit_call_targets, bundle, startup};
+use rosetta3::{
+    Classification, Engine, Execution, ImportPolicy, Native, Program, Vm, audit_call_targets,
+    bundle, startup,
+};
 
 use microlift::arch::x86_64::X86_64;
 use microlift::core::lift_to_function;
 
 /// Load and execute, with `argv[0]` the path as the guest will see it.
-fn run(path: &str, args: Vec<String>, policy: ImportPolicy) -> ExitCode {
+fn run(path: &str, args: Vec<String>, policy: ImportPolicy, forced: Option<Engine>) -> ExitCode {
     let mut argv = vec![path.to_string()];
     argv.extend(args);
     rosetta3::stats::start();
 
-    let program = match Program::load_executable(path, &[]) {
-        Ok(p) => p,
+    let engine = match choose(path, forced) {
+        Ok(engine) => engine,
         Err(e) => {
             eprintln!("rosetta3: {path}: {e}");
             return ExitCode::FAILURE;
         }
     };
-    let vm = match Vm::with_policy(program, path, &argv, policy) {
-        Ok(vm) => vm,
-        Err(e) => {
-            eprintln!("rosetta3: {path}: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    // Deliberately leaked, and published for the rest of the process.
-    let vm: &'static Vm = Box::leak(Box::new(vm));
-    rosetta3::thunk::publish(vm);
 
-    // Objective-C registration happens inside `startup::run`, in dyld's order.
-    // It is driven from here first only so that its refusals reach the user.
-    match vm.register_objc() {
-        Ok(objc) => {
-            for r in objc.refusals() {
-                eprintln!("rosetta3: objc: {r:?}");
+    let exec: &'static dyn Execution = match engine {
+        // Deliberately leaked: the program's mappings must outlive `main`.
+        Engine::Native => match Native::load(path, &argv) {
+            Ok(native) => Box::leak(Box::new(native)),
+            Err(e) => {
+                eprintln!("rosetta3: {path}: {e}");
+                return ExitCode::FAILURE;
             }
-        }
-        Err(e) => {
-            eprintln!("rosetta3: {path}: registering Objective-C classes: {e}");
-            return ExitCode::FAILURE;
-        }
-    }
+        },
+        Engine::Emulated => match emulated(path, &argv, policy) {
+            Ok(vm) => vm,
+            Err(e) => {
+                eprintln!("rosetta3: {path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
 
-    match startup::run(vm) {
-        // `exit` rather than returning the status, and the difference is not
-        // cosmetic.
+    match startup::run(exec) {
         // `exit` rather than returning the status. Returning goes back through
         // Rust's start-up shim, which tears this thread's TLS down *before*
         // calling `exit` — and the guest's `atexit` handlers run from inside
@@ -64,20 +59,57 @@ fn run(path: &str, args: Vec<String>, policy: ImportPolicy) -> ExitCode {
     }
 }
 
+/// The backend for `path`: what was asked for, or what the file's slices allow.
+fn choose(path: &str, forced: Option<Engine>) -> Result<Engine, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    match forced {
+        Some(engine) => match engine.refusal(&bytes) {
+            Some(why) => Err(why),
+            None => Ok(engine),
+        },
+        None => Engine::select(&bytes)
+            .ok_or_else(|| "no slice this runtime can run or recompile".to_string()),
+    }
+}
+
+/// The emulated backend, published for the rest of the process.
+fn emulated(
+    path: &str,
+    argv: &[String],
+    policy: ImportPolicy,
+) -> Result<&'static Vm, Box<dyn std::error::Error>> {
+    let program = Program::load_executable(path, &[])?;
+    let vm = Vm::with_policy(program, path, argv, policy)?;
+    // Deliberately leaked, and published for the rest of the process.
+    let vm: &'static Vm = Box::leak(Box::new(vm));
+    rosetta3::thunk::publish(vm);
+
+    // Objective-C registration happens inside `startup::run`, in dyld's order.
+    // It is driven from here first only so that its refusals reach the user.
+    for r in vm.register_objc()?.refusals() {
+        eprintln!("rosetta3: objc: {r:?}");
+    }
+    Ok(vm)
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let Some(first) = args.next() else {
-        eprintln!("usage: rosetta3 run <mach-o path> [args...]");
+        eprintln!("usage: rosetta3 run [--native|--emulated] <mach-o path> [args...]");
         eprintln!("       rosetta3 <mach-o path> [--audit] [--ir]");
         return ExitCode::FAILURE;
     };
     if first == "run" {
-        // `--slow` turns every import into a VM exit.
+        // `--slow` turns every import into a VM exit; `--native`/`--emulated`
+        // force a backend the file's own slices would not have chosen.
         let mut policy = ImportPolicy::FastWhenKnown;
+        let mut engine = None;
         let mut path = None;
         for arg in args.by_ref() {
             match arg.as_str() {
                 "--slow" if path.is_none() => policy = ImportPolicy::AlwaysSlow,
+                "--native" if path.is_none() => engine = Some(Engine::Native),
+                "--emulated" if path.is_none() => engine = Some(Engine::Emulated),
                 _ => {
                     path = Some(arg);
                     break;
@@ -85,7 +117,7 @@ fn main() -> ExitCode {
             }
         }
         let Some(path) = path else {
-            eprintln!("usage: rosetta3 run [--slow] <mach-o path> [args...]");
+            eprintln!("usage: rosetta3 run [--slow] [--native|--emulated] <mach-o path> [args...]");
             return ExitCode::FAILURE;
         };
         // A guest inside a `.app` needs the *process* to be inside one too,
@@ -99,7 +131,7 @@ fn main() -> ExitCode {
             // strictly better than not running.
             eprintln!("rosetta3: could not re-execute from the bundle mirror: {e}");
         }
-        return run(&path, args.collect(), policy);
+        return run(&path, args.collect(), policy, engine);
     }
     let path = first;
     let rest: Vec<String> = args.collect();

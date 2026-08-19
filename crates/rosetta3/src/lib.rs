@@ -31,6 +31,7 @@ pub mod cache;
 pub mod compat;
 pub mod cxxlib;
 pub mod dyld;
+pub mod exec;
 pub mod fault;
 pub mod gui;
 pub mod interpose;
@@ -57,5 +58,6 @@ pub mod vm;
 
 pub use abi::{AbiError, Classification, call_import};
 pub use audit::{CallTargetAudit, UnresolvedCall, audit_call_targets};
+pub use exec::{Engine, Execution, Native};
 pub use program::{ImportPolicy, Program, ProgramError};
 pub use vm::{Vm, VmError};
