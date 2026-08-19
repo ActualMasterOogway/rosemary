@@ -323,7 +323,7 @@ mod tests {
     fn the_substituted_address_is_never_the_hosts() {
         for name in ["open", "openat", "sem_open"] {
             let wrapper = host_substitute(name).expect("a wrapper for the name");
-            assert_ne!(Some(wrapper), crate::dyld::host_symbol(name));
+            assert_ne!(Some(wrapper), crate::host::symbol(name));
         }
         assert_eq!(host_substitute("openlog"), None);
     }

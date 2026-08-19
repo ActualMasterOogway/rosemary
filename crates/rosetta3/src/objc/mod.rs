@@ -5,6 +5,8 @@ pub mod dispatch;
 pub mod encoding;
 pub mod fast;
 pub mod host;
+pub mod native;
+pub mod send;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicPtr, Ordering};

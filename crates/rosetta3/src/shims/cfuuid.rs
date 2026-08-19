@@ -78,10 +78,10 @@ mod tests {
     /// survive a pair of registers in both directions.
     #[test]
     fn sixteen_bytes_survive_the_round_trip() {
-        let Some(create) = crate::dyld::host_symbol("CFUUIDCreateFromUUIDBytes") else {
+        let Some(create) = crate::host::symbol("CFUUIDCreateFromUUIDBytes") else {
             return;
         };
-        let Some(get) = crate::dyld::host_symbol("CFUUIDGetUUIDBytes") else {
+        let Some(get) = crate::host::symbol("CFUUIDGetUUIDBytes") else {
             return;
         };
         let want = Bytes {

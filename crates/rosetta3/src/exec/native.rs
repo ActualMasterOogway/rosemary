@@ -150,6 +150,7 @@ impl Execution for Native {
     }
 
     fn prepare(&self) -> Result<(), VmError> {
+        crate::objc::native::map_images(&self.report);
         Ok(())
     }
 

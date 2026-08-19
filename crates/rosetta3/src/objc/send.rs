@@ -2,7 +2,7 @@
 
 use std::ffi::{CString, c_void};
 
-use crate::objc::host;
+use super::host;
 
 /// An object pointer. Opaque, and never dereferenced.
 pub type Id = *mut c_void;
@@ -31,6 +31,20 @@ pub fn sel(name: &str) -> Sel {
     };
     // SAFETY: a NUL-terminated name; the runtime copies it.
     unsafe { host::sel_registerName(c.as_ptr()) as Sel }
+}
+
+/// The result of a nullary class method — `+[NSUserDefaults standardUserDefaults]`
+/// and `+[NSMutableDictionary dictionary]` are both this shape.
+///
+/// Null when this process has not loaded the class.
+pub fn class_method(class_name: &str, name: &str) -> Id {
+    let cls = class(class_name);
+    if cls.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: a nullary class method returning an object, which is what every
+    // caller of this asks for.
+    unsafe { send0::<Id>(cls, sel(name)) }
 }
 
 /// Whether `object` implements `selector`.

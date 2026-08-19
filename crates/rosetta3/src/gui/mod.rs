@@ -10,10 +10,13 @@ pub mod hook;
 pub mod hotkey;
 pub mod input;
 pub mod metal;
-pub mod objc;
 pub mod panel;
 pub mod sys;
 pub mod trace;
+
+/// Message sending lives in [`crate::objc::send`]; the overlay is only its
+/// heaviest user.
+pub(crate) use crate::objc::send as objc;
 
 use draw::{DrawList, color};
 use panel::Model;

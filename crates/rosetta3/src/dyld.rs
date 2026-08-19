@@ -787,23 +787,10 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
     // The global fallback, which is a *host* search.
     let addr = match crate::shims::openat::host_substitute(name) {
         Some(wrapper) => wrapper,
-        None => host_symbol(name)?,
+        None => crate::host::symbol(name)?,
     };
     Some(remember_native_symbol(addr, name, None))
 }
-
-/// `dlsym` against the host process, for a symbol no guest image defines.
-pub(crate) fn host_symbol(name: &str) -> Option<u64> {
-    let c = CString::new(name).ok()?;
-    // SAFETY: `RTLD_DEFAULT` is a valid pseudo-handle and `c` outlives the call.
-    // `dlsym` returns null for a name it does not know, which is checked.
-    let found = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c.as_ptr()) };
-    match found.is_null() {
-        true => None,
-        false => Some(found as usize as u64),
-    }
-}
-
 
 /// Handles the *host's* `dlopen` returned, and the paths they were asked for.
 static NATIVE: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
@@ -1109,7 +1096,7 @@ fn dladdr(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) ->
     let Some(found) = describe(addr) else {
         // Not ours. The host knows its own images, and this is exactly the
         // question it can answer.
-        let Some(host) = host_symbol("dladdr") else {
+        let Some(host) = crate::host::symbol("dladdr") else {
             ctx.rax = 0;
             return Ok(());
         };
@@ -1168,7 +1155,7 @@ fn find_unwind_sections(
     let (addr, out) = (ctx.rdi, ctx.rsi);
     let Some((header, slide)) = guest_image_at(addr) else {
         // Not ours.
-        let Some(host) = host_symbol("_dyld_find_unwind_sections") else {
+        let Some(host) = crate::host::symbol("_dyld_find_unwind_sections") else {
             crate::shims::set_int_return(ctx, 0);
             return Ok(());
         };
@@ -1222,7 +1209,7 @@ fn guest_image_at(va: u64) -> Option<(u64, u64)> {
 
 /// `(unslid addr, size)` of a section in the guest image at `header`.
 fn section_in(header: u64, section: &str) -> Option<(u64, u64)> {
-    let host = host_symbol("getsectbynamefromheader_64")?;
+    let host = crate::host::symbol("getsectbynamefromheader_64")?;
     let (seg, sect) = (CString::new("__TEXT").ok()?, CString::new(section).ok()?);
     // SAFETY: `const struct section_64 *(*)(const struct mach_header_64 *,
     // const char *, const char *)`. `header` is a guest image's mapped header,
@@ -1363,7 +1350,7 @@ pub fn provider() -> SyntheticDylib {
         // `tests/unwind.rs` has been red.
         "_dyld_find_unwind_sections",
     ] {
-        if let Some(addr) = host_symbol(name) {
+        if let Some(addr) = crate::host::symbol(name) {
             lib.define_fn(&format!("_{name}"), addr as usize as *const ());
         }
     }

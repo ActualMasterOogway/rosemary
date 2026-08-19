@@ -34,6 +34,7 @@ pub mod dyld;
 pub mod exec;
 pub mod fault;
 pub mod gui;
+pub mod host;
 pub mod interpose;
 pub mod jit;
 pub mod jmpbuf;

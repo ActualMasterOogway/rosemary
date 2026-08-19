@@ -147,7 +147,7 @@ fn resident_bytes() -> u64 {
 
     // `mach_task_self()` is a macro over a global the kernel filled in, which
     // is why this is a symbol lookup and not a call.
-    let Some(slot) = crate::dyld::host_symbol("mach_task_self_") else {
+    let Some(slot) = crate::host::symbol("mach_task_self_") else {
         return 0;
     };
     // SAFETY: the symbol is `mach_port_t mach_task_self_`, a live global in

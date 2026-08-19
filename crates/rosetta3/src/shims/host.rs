@@ -24,7 +24,7 @@ pub(crate) fn host_or_refuse(symbol: &str) -> Result<u64> {
         }
     }
 
-    let address = crate::dyld::host_symbol(name).ok_or_else(|| AbiError::NoShim {
+    let address = crate::host::symbol(name).ok_or_else(|| AbiError::NoShim {
         symbol: symbol.to_string(),
     })?;
 

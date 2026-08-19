@@ -49,7 +49,7 @@ pub fn provider() -> SyntheticDylib {
     // The host's own `_tlv_atexit` is the right implementation — it appends a
     // destructor to the list dyld runs when this thread ends, and a guest thread
     // is a host thread. It is denied only because the whole `__tlv_` prefix is.
-    if let Some(f) = crate::dyld::host_symbol("_tlv_atexit") {
+    if let Some(f) = crate::host::symbol("_tlv_atexit") {
         lib.define_fn("__tlv_atexit", f as *const ());
         lib.define_fn("_tlv_atexit", f as *const ());
     }
@@ -62,10 +62,10 @@ pub fn provider() -> SyntheticDylib {
     lib.define_fn("__NSGetExecutablePath", ns_get_executable_path as *const ());
     // Under high-level emulation the guest's Mach task *is* this process's. The
     // address, not the value.
-    if let Some(port) = crate::dyld::host_symbol("mach_task_self_") {
+    if let Some(port) = crate::host::symbol("mach_task_self_") {
         lib.define_data("_mach_task_self_", port);
     }
-    if let Some(f) = crate::dyld::host_symbol("mach_host_self") {
+    if let Some(f) = crate::host::symbol("mach_host_self") {
         lib.define_fn("_mach_host_self", f as *const ());
     }
     // `getenv`/`setenv`/`putenv` are passed through, so a guest walking
@@ -75,13 +75,13 @@ pub fn provider() -> SyntheticDylib {
         ("__NSGetArgc", "_NSGetArgc"),
         ("__NSGetArgv", "_NSGetArgv"),
     ] {
-        if let Some(f) = crate::dyld::host_symbol(host) {
+        if let Some(f) = crate::host::symbol(host) {
             lib.define_fn(mach_o, f as *const ());
         }
     }
     // `environ` is a variable, so the slot takes its address, which on Darwin is
     // what `_NSGetEnviron()` is for.
-    if let Some(f) = crate::dyld::host_symbol("_NSGetEnviron") {
+    if let Some(f) = crate::host::symbol("_NSGetEnviron") {
         // SAFETY: `_NSGetEnviron` is `char ***(void)`, a pure accessor for a
         // libSystem global, so its result is valid for the life of the process.
         let get: unsafe extern "C" fn() -> *mut *mut *mut u8 =

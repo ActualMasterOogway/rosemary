@@ -37,7 +37,7 @@ fn rect_of_display(
     ctx: &mut RegisterContext,
     mem: &mut dyn GuestMemory,
 ) -> Result<()> {
-    let Some(host) = crate::dyld::host_symbol(symbol.strip_prefix('_').unwrap_or(symbol)) else {
+    let Some(host) = crate::host::symbol(symbol.strip_prefix('_').unwrap_or(symbol)) else {
         return Err(AbiError::NoShim {
             symbol: symbol.to_string(),
         });
@@ -325,7 +325,7 @@ mod tests {
     /// module's arithmetic.
     #[test]
     fn the_main_displays_bounds_land_in_the_guests_buffer() {
-        let Some(_) = crate::dyld::host_symbol("CGDisplayBounds") else {
+        let Some(_) = crate::host::symbol("CGDisplayBounds") else {
             // A headless builder has no CoreGraphics to ask.
             return;
         };
@@ -355,7 +355,7 @@ mod tests {
     #[test]
     fn a_cvtime_second_eightbyte_is_the_two_int32s_low_then_high() {
         assert_eq!(core::mem::size_of::<CvTime>(), 16);
-        let Some(_) = crate::dyld::host_symbol("CVDisplayLinkGetNominalOutputVideoRefreshPeriod")
+        let Some(_) = crate::host::symbol("CVDisplayLinkGetNominalOutputVideoRefreshPeriod")
         else {
             return;
         };
@@ -381,7 +381,7 @@ mod tests {
     }
 
     fn host_main_display() -> u32 {
-        let Some(f) = crate::dyld::host_symbol("CGMainDisplayID") else {
+        let Some(f) = crate::host::symbol("CGMainDisplayID") else {
             return 0;
         };
         // SAFETY: `CGMainDisplayID` is `CGDirectDisplayID (*)(void)`.

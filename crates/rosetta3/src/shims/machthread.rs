@@ -162,9 +162,9 @@ static HOST: std::sync::OnceLock<[Option<u64>; 3]> = std::sync::OnceLock::new();
 pub fn warm() {
     HOST.get_or_init(|| {
         [
-            crate::dyld::host_symbol("thread_get_state"),
-            crate::dyld::host_symbol("pthread_get_stackaddr_np"),
-            crate::dyld::host_symbol("pthread_get_stacksize_np"),
+            crate::host::symbol("thread_get_state"),
+            crate::host::symbol("pthread_get_stackaddr_np"),
+            crate::host::symbol("pthread_get_stacksize_np"),
         ]
     });
 }

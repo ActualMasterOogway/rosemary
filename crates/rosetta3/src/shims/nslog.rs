@@ -5,6 +5,8 @@ use std::sync::OnceLock;
 
 use microlift::arch::x86_64::context::RegisterContext;
 
+use crate::host::symbol_ptr as dlsym;
+use crate::objc::send::{Id, class, responds, sel, send0, send1};
 use crate::abi::{GuestMemory, Result};
 
 use super::printf::{VarArgs, render};
@@ -199,7 +201,7 @@ fn cf_string_bytes(obj: u64) -> Option<Vec<u8>> {
     if obj == 0 {
         return None;
     }
-    if !is_kind_of(obj, c"NSString") {
+    if !is_kind_of(obj, "NSString") {
         return None;
     }
     let get = dlsym("CFStringGetCString")?;
@@ -248,66 +250,31 @@ fn description_bytes(obj: u64) -> Option<Vec<u8>> {
     // Every `NSObject` implements `description`, and not every object is an
     // `NSObject` — a class built on `NSProxy`, or one of the few root classes
     // Foundation keeps, answers `doesNotRecognizeSelector:` and raises.
-    if !responds_to(obj, c"description") {
+    if !responds_to(obj, "description") {
         return None;
     }
-    // SAFETY: `objc_msgSend` is taken as an address and called through the
-    // prototype `- (NSString *)description` has, which is the same reasoning
-    // [`crate::objc::dispatch`] uses and the reason `host::objc_msgSend` is
-    // declared with no parameters.
-    let text = unsafe {
-        let send: unsafe extern "C" fn(*const c_void, *const c_void) -> *const c_void =
-            core::mem::transmute(crate::objc::host::objc_msgSend as *const ());
-        let sel = crate::objc::host::sel_registerName(c"description".as_ptr());
-        send(obj as usize as *const c_void, sel.cast())
-    };
+    // SAFETY: the prototype `- (NSString *)description` has, against an object
+    // that was just shown to respond to it.
+    let text = unsafe { send0::<Id>(obj as usize as Id, sel("description")) };
     cf_string_bytes(text as usize as u64)
 }
 
 /// Whether `obj` is an instance of `class_name` or one of its subclasses.
-fn is_kind_of(obj: u64, class_name: &CStr) -> bool {
-    // SAFETY: `objc_getClass` takes a C string and answers null for a name no
-    // class has, which is checked rather than passed on.
-    let class = unsafe { crate::objc::host::objc_getClass(class_name.as_ptr()) };
-    if class.is_null() {
+fn is_kind_of(obj: u64, class_name: &str) -> bool {
+    let cls = class(class_name);
+    if cls.is_null() {
         return false;
     }
-    // SAFETY: as [`responds_to`], through `- (BOOL)isKindOfClass:(Class)`.
-    unsafe {
-        let send: unsafe extern "C" fn(*const c_void, *const c_void, *const c_void) -> u8 =
-            core::mem::transmute(crate::objc::host::objc_msgSend as *const ());
-        let sel = crate::objc::host::sel_registerName(c"isKindOfClass:".as_ptr());
-        send(
-            obj as usize as *const c_void,
-            sel.cast(),
-            class.cast::<c_void>(),
-        ) != 0
-    }
+    // SAFETY: `- (BOOL)isKindOfClass:(Class)`, whose argument is the class just
+    // looked up. A `BOOL` is one byte.
+    unsafe { send1::<u8, Id>(obj as usize as Id, sel("isKindOfClass:"), cls) != 0 }
 }
 
 /// Whether `obj`'s class implements `selector`.
-fn responds_to(obj: u64, selector: &CStr) -> bool {
+fn responds_to(obj: u64, selector: &str) -> bool {
     // SAFETY: `obj` is an object pointer — the host runtime's own allocation,
-    // or a guest constant whose `isa` is a bind of a Foundation class — so
-    // `object_getClass` reads its first word, and `class_getInstanceMethod`
-    // answers null for a selector the class does not implement.
-    unsafe {
-        let class = crate::objc::host::object_getClass(obj as crate::objc::host::Class);
-        if class.is_null() {
-            return false;
-        }
-        let sel = crate::objc::host::sel_registerName(selector.as_ptr());
-        !crate::objc::host::class_getInstanceMethod(class, sel).is_null()
-    }
-}
-
-/// Resolve a symbol in an image this process has already loaded.
-fn dlsym(name: &str) -> Option<*mut c_void> {
-    let c = CString::new(name).ok()?;
-    // SAFETY: `RTLD_DEFAULT` (-2) searches loaded images and answers null for a
-    // symbol nothing exports, which is checked rather than dereferenced.
-    let p = unsafe { libc::dlsym(-2isize as *mut c_void, c.as_ptr()) };
-    (!p.is_null()).then_some(p)
+    // or a guest constant whose `isa` is a bind of a Foundation class.
+    unsafe { responds(obj as usize as Id, sel(selector)) }
 }
 
 #[cfg(test)]
