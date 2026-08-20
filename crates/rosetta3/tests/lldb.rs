@@ -31,13 +31,16 @@ use std::process::{Command, Stdio};
 
 use common::{build_x86_64, driver, fault_fixture};
 
-/// Whether this host has an `lldb` that can debug what we just built.
+/// Whether this host has an `lldb` that can debug what we just built, and the
+/// test was opted in: attaching triggers a macOS prompt for developer tools
+/// access, which a non-interactive test run cannot answer.
 fn have_lldb() -> bool {
-    Command::new("lldb")
-        .arg("--version")
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+    std::env::var_os("ROSETTA3_ENABLE_PRIVILEGED_TESTS").is_some()
+        && Command::new("lldb")
+            .arg("--version")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
 }
 
 /// Run the driver under `lldb` on the faulting fixture, with `commands` issued
