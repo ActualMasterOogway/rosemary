@@ -184,7 +184,7 @@ fn register() -> bool {
         kind: HOT_KEY_PRESSED,
     }];
     // SAFETY: `types` is one live `EventTypeSpec` and the count says so. The
-    // handler reference is discarded deliberately — nothing here ever removes
+    // handler reference is discarded deliberately - nothing here ever removes
     // the handler, because the overlay lives as long as the process.
     let installed = unsafe {
         install(

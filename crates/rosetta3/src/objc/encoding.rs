@@ -6,7 +6,7 @@ use crate::abi::aggregate::{Aggregate, Leaf, Shape, width_of};
 /// A method signature, as [`crate::abi::marshal::call_shapes`] wants it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Signature {
-    /// `[0]` is the return type, `[1..]` the parameters — `self` and the selector
+    /// `[0]` is the return type, `[1..]` the parameters - `self` and the selector
     /// included, because those are the first two arguments a method really takes.
     pub shapes: Vec<Shape>,
     /// Zero-based parameter indices encoded `#`, i.e. holding a `Class`.
@@ -17,7 +17,7 @@ pub struct Signature {
     pub objects: Vec<u8>,
     /// Whether the method returns a `Class`.
     pub class_return: bool,
-    /// Whether the method returns an `id` — the reverse of [`Signature::objects`],
+    /// Whether the method returns an `id` - the reverse of [`Signature::objects`],
     /// for a class handed back where the encoding says only "object".
     pub object_return: bool,
 }
@@ -214,7 +214,7 @@ fn skip_quoted(b: &[u8], at: &mut usize) {
     }
 }
 
-/// Decode an aggregate encoding — `{Name=fields}` or `[N type]` — starting at `b[*at]`,
+/// Decode an aggregate encoding - `{Name=fields}` or `[N type]` - starting at `b[*at]`,
 /// which must be the opening delimiter.
 ///
 /// Offsets come out **flattened and absolute**, because that is what
@@ -284,7 +284,7 @@ fn group(b: &[u8], at: &mut usize, depth: usize) -> Result<Aggregate, &'static s
         return Ok(agg);
     }
 
-    // `{Name=` — the name runs to the first `=`, and may be absent (`{?=...}`).
+    // `{Name=` - the name runs to the first `=`, and may be absent (`{?=...}`).
     loop {
         let Some(&c) = b.get(*at) else {
             return Err("an unterminated aggregate in the type encoding");
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn a_class_argument_is_marked_by_index_and_the_return_separately() {
-        // `+ (Class)classForThing:(Class)c` — self is parameter 0, so the
+        // `+ (Class)classForThing:(Class)c` - self is parameter 0, so the
         // explicit argument is 2.
         let sig = signature("#@:#").expect("class");
         assert!(sig.class_return);
@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn a_block_is_a_pointer_that_says_it_is_a_block() {
-        // `- (void)run:(void (^)(void))block` — return, `self`, `_cmd`, then
+        // `- (void)run:(void (^)(void))block` - return, `self`, `_cmd`, then
         // the block at parameter two.
         let sig = signature("v@:@?").expect("a block parameter decodes");
         assert_eq!(sig.blocks, vec![2]);

@@ -13,7 +13,7 @@ pub const DEFAULT_STACK: usize = 8 * 1024 * 1024;
 /// A guest stack, with the process arguments written into its top.
 pub struct GuestStack {
     /// The reservation this stack owns, or `None` when the *guest* supplied the
-    /// memory — `pthread_attr_setstack`. See [`GuestStack::supplied`].
+    /// memory - `pthread_attr_setstack`. See [`GuestStack::supplied`].
     space: Option<MmapSpace>,
     base: u64,
     size: usize,
@@ -58,7 +58,7 @@ impl GuestStack {
             space: Some(space),
             // The guard page is not stack, and saying so is what keeps
             // `pthread_get_stacksize_np` agreeing with the host's answer for a
-            // thread of the same size — and what keeps the region list from
+            // thread of the same size - and what keeps the region list from
             // offering a shim a pointer into a `PROT_NONE` page.
             base: reservation + page as u64,
             size: size - page,
@@ -191,7 +191,7 @@ impl GuestStack {
     /// The stack pointer a guest function should be entered with.
     ///
     /// SysV AMD64 requires `rsp + 8` to be 16-byte aligned at a function's first
-    /// instruction — that is, the `call` that got there pushed eight bytes onto a
+    /// instruction - that is, the `call` that got there pushed eight bytes onto a
     /// 16-byte-aligned stack.
     pub fn initial_rsp(&self) -> u64 {
         (self.args_at & !0xf) - 8
@@ -251,7 +251,7 @@ mod tests {
         let argv = sp + 8;
         assert_eq!(argv, rec_argv);
 
-        // `envp = argv + (argc + 1) * 8` — computed, not searched for, so the
+        // `envp = argv + (argc + 1) * 8` - computed, not searched for, so the
         // terminator has to be exactly there.
         assert_eq!(word(&stack, argv + argc * 8), 0, "argv is terminated");
         let envp = argv + (argc + 1) * 8;
@@ -284,7 +284,7 @@ mod tests {
     }
 
     /// A spawned thread's stack has no arguments on it, so it has no frame to
-    /// report — and reporting one would be a second copy of the process's
+    /// report - and reporting one would be a second copy of the process's
     /// arguments that nothing can reach. See [`GuestStack::bare`].
     #[test]
     fn a_bare_stack_has_no_kernel_frame() {

@@ -35,7 +35,7 @@ pub fn service(ctx: &mut RegisterContext, mem: &dyn GuestMemory) -> Result<(), V
     let desired = u128::from(ctx.rbx) | (u128::from(ctx.rcx) << 64);
 
     // SAFETY: `address` is sixteen-byte aligned and inside the guest's own
-    // mapped memory, which is identity-mapped into this process and writable —
+    // mapped memory, which is identity-mapped into this process and writable -
     // a `lock cmpxchg16b` the guest issued is a write it is entitled to make.
     // Concurrency is the point rather than a hazard: every guest `CMPXCHG16B`
     // reaches this function, so the exclusive monitor sees all of them.
@@ -68,7 +68,7 @@ unsafe fn compare_exchange(at: *mut u128, expected: u128, desired: u128) -> u128
     // SAFETY: the caller's guarantee about `at`. The loop is the standard
     // exclusive-pair CAS: load the pair with acquire, compare, and either store
     // the new pair with release or break out having *cleared* the monitor with
-    // `clrex` — leaving it set would make an unrelated later `stxp` on this core
+    // `clrex` - leaving it set would make an unrelated later `stxp` on this core
     // succeed when it should not.
     unsafe {
         std::arch::asm!(
@@ -141,7 +141,7 @@ fn effective_address(instruction: &Instruction, ctx: &RegisterContext) -> Option
     let base = match instruction.memory_base() {
         Register::None => 0,
         // RIP-relative, where iced has already folded the displacement against
-        // the IP the decoder was given — which is why `decode_before` sets it.
+        // the IP the decoder was given - which is why `decode_before` sets it.
         Register::RIP => return Some(instruction.memory_displacement64()),
         reg => read(reg, ctx)?,
     };

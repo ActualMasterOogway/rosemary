@@ -18,11 +18,11 @@ fn mouse_in_rect(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMem
     let rect = rect_argument(symbol, ctx, mem, 0)?;
     // SAFETY: the symbol [`shim_for`] matched, which is
     // `BOOL (*)(NSPoint, NSRect, BOOL)`, resolved out of an AppKit this process
-    // has loaded — the guest's own window brought it in.
+    // has loaded - the guest's own window brought it in.
     let f: extern "C" fn(CgPoint, CgRect, u8) -> u8 =
         unsafe { core::mem::transmute::<u64, extern "C" fn(CgPoint, CgRect, u8) -> u8>(host) };
     // A `BOOL` is a signed char, so only the low byte of `rdi` carries it and
-    // only the low byte of `rax` may be written back — the rest of `rax` is
+    // only the low byte of `rax` may be written back - the rest of `rax` is
     // whatever the guest's caller will ignore, and zeroing it is the honest
     // answer for a byte-wide return.
     ctx.rax = u64::from(f(point, rect, ctx.rdi as u8));
@@ -39,7 +39,7 @@ fn point_in_rect(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMem
     let rect = rect_argument(symbol, ctx, mem, 0)?;
     // SAFETY: the symbol [`shim_for`] matched, which is
     // `BOOL (*)(NSPoint, NSRect)`, resolved out of an AppKit this process has
-    // loaded — the guest's own window brought it in.
+    // loaded - the guest's own window brought it in.
     let f: extern "C" fn(CgPoint, CgRect) -> u8 =
         unsafe { core::mem::transmute::<u64, extern "C" fn(CgPoint, CgRect) -> u8>(host) };
     ctx.rax = u64::from(f(point, rect));

@@ -91,7 +91,7 @@ fn parses_the_structure_of_a_real_executable() {
     assert_eq!(pagezero.vmaddr, 0);
 
     // The preferred base is the first *mappable* segment, i.e. just past
-    // __PAGEZERO — the whole reason __PAGEZERO is excluded from the span.
+    // __PAGEZERO - the whole reason __PAGEZERO is excluded from the span.
     let text = obj.segments.iter().find(|s| s.name == "__TEXT").unwrap();
     assert_eq!(obj.preferred_base().unwrap(), text.vmaddr);
     assert_ne!(obj.preferred_base().unwrap(), 0);
@@ -205,7 +205,7 @@ fn locally_built_binary_parses_in_both_fixup_encodings() {
         "-no_fixup_chains produces LC_DYLD_INFO"
     );
 
-    // Both link against libSystem — there is no -nostdlib on macOS, which is
+    // Both link against libSystem - there is no -nostdlib on macOS, which is
     // why the provider chain is exercised from the very first fixup test.
     for obj in [&a, &b] {
         assert!(
@@ -260,7 +260,7 @@ fn load_commands_round_trip_to_recognized_variants() {
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
 
     // Every segment command must have been decoded as a Segment, not dropped
-    // into Other — a silent fallthrough here would lose part of the image.
+    // into Other - a silent fallthrough here would lose part of the image.
     let segment_cmds = obj
         .commands
         .iter()
@@ -306,7 +306,7 @@ fn vmaddr_translation_agrees_with_the_section_table() {
     // An address in no segment has no file offset.
     assert!(obj.vmaddr_to_off(0xdead_0000_0000).is_none());
 
-    // The header itself is mapped, which is what makes LC_MAIN's entryoff —
-    // a *file* offset — usable directly as an offset from the image base.
+    // The header itself is mapped, which is what makes LC_MAIN's entryoff -
+    // a *file* offset - usable directly as an offset from the image base.
     assert_eq!(obj.vmaddr_to_off(obj.preferred_base().unwrap()), Some(0));
 }

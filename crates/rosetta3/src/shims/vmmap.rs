@@ -15,8 +15,8 @@ const MAP_JIT: i32 = 0x0800;
 ///
 /// ## Why this list is the right answer to "which bytes are code"
 ///
-/// [The roadmap][r] states the problem in its smallest form — `__text` contains data,
-/// and no static rule separates the two — and this runtime's answer has always been to
+/// [The roadmap][r] states the problem in its smallest form - `__text` contains data,
+/// and no static rule separates the two - and this runtime's answer has always been to
 /// lift *from a PC*, demand-driven.
 ///
 /// Append-only and never removed, matching [`crate::dyld`]'s images and for the same

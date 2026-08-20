@@ -6,7 +6,7 @@
 //!
 //! The assertion that matters most is equality with the *untranslated* binary.
 //! There is no other specification of what a C++ exception does that is worth
-//! writing into a test — every clause of the fixture is a sentence from the
+//! writing into a test - every clause of the fixture is a sentence from the
 //! standard, and the machine already knows how to say it.
 //!
 //! The refusals are tested just as hard as the successes. Each names a case the
@@ -76,8 +76,8 @@ fn the_translated_program_agrees_with_the_untranslated_one() {
 #[test]
 fn destructors_run_in_order_before_the_handler() {
     // The whole of phase two in one assertion. A runtime that entered the
-    // handler directly would print the cleanups late, in the wrong order, or —
-    // most likely — not at all, and the array's own order is the claim.
+    // handler directly would print the cleanups late, in the wrong order, or -
+    // most likely - not at all, and the array's own order is the claim.
     let Some(path) = exceptions_fixture() else {
         skip!("cannot build x86_64 C++ fixtures")
     };
@@ -170,8 +170,8 @@ fn an_uncaught_exception_terminates_exactly_as_it_does_natively() {
     // Compared against the same binary run natively rather than against a
     // message this project chose. That is now possible and was not before: the
     // guest runs a **real** `libc++abi`, so what it prints when nothing catches
-    // is what the platform prints — `libc++abi: terminating due to uncaught
-    // exception of type Boom`, down to the type name — and the exit status is
+    // is what the platform prints - `libc++abi: terminating due to uncaught
+    // exception of type Boom`, down to the type name - and the exit status is
     // the same `SIGABRT`. The earlier version of this test asserted a
     // rosetta3-authored diagnostic containing "terminate"; the real one says
     // "terminating", which is how the improvement first showed up as a failure.
@@ -199,7 +199,7 @@ fn an_uncaught_exception_terminates_exactly_as_it_does_natively() {
     );
 }
 
-/// A throw across a host frame still cannot be caught — and the diagnosis for it
+/// A throw across a host frame still cannot be caught - and the diagnosis for it
 /// got **worse**, which is the honest cost of vendoring a real unwinder.
 ///
 /// The comparator is called by the host's `qsort`, so the handler in `main` is
@@ -208,7 +208,7 @@ fn an_uncaught_exception_terminates_exactly_as_it_does_natively() {
 /// not, and that gap is unchanged.
 ///
 /// What changed is what the guest is *told*. This project's own unwinder
-/// recognised the case and refused it by name — "unwinding host frames" — and
+/// recognised the case and refused it by name - "unwinding host frames" - and
 /// the real `libc++abi` cannot, because from inside it there is nothing unusual
 /// happening: it searched, found no handler, and terminated exactly as the
 /// standard says. So the program now dies with `libc++abi: terminating due to
@@ -242,7 +242,7 @@ fn a_throw_across_a_host_frame_is_still_not_caught() {
 fn a_catch_needing_multiple_inheritance_works() {
     // A base subobject at a non-zero offset has to move the pointer the `catch`
     // binds to. This project's own unwinder could not, and **refused by name**
-    // rather than reporting "nothing catches this" — which would have been a lie
+    // rather than reporting "nothing catches this" - which would have been a lie
     // of the most expensive kind, terminating a program whose handler is right
     // there in the source.
     //

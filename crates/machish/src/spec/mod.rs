@@ -85,7 +85,7 @@ impl<S: MachSpec> MachSpec for PageSized<S> {
 /// Wraps any [`MachSpec`] to declare its images host-executable, re-enabling
 /// the paths that assume loaded code can be called directly.
 ///
-/// Only meaningful when the spec's architecture *is* the host's — loading a
+/// Only meaningful when the spec's architecture *is* the host's - loading a
 /// native arm64 image on Apple Silicon. The guest path never wants this.
 #[derive(Copy, Clone, Debug)]
 pub struct NativelyExecutable<S>(pub S);

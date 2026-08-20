@@ -8,11 +8,11 @@ use crate::abi::{Callbacks, GuestMemory, Result};
 
 use super::set_int_return;
 
-/// One of this module's implementations, in the shape [`crate::shims`] wants — the
+/// One of this module's implementations, in the shape [`crate::shims`] wants - the
 /// wider one, carrying [`Callbacks`].
 pub type Shim = crate::signal::Shim;
 
-// The host's own libcurl — `/usr/lib/libcurl.4.dylib`, which is the same
+// The host's own libcurl - `/usr/lib/libcurl.4.dylib`, which is the same
 // library the guest links against by install name, so this is the passthrough
 // the rest of the runtime performs through a slot, reached here by name.
 #[link(name = "curl")]
@@ -27,7 +27,7 @@ const CURLOPTTYPE_FUNCTIONPOINT: c_int = 20_000;
 const CURLOPTTYPE_OFF_T: c_int = 30_000;
 
 /// `CURLE_BAD_FUNCTION_ARGUMENT`, which is curl's own answer to a call it
-/// cannot make sense of — so a guest that reaches a refusal here gets the error
+/// cannot make sense of - so a guest that reaches a refusal here gets the error
 /// its own library would have given it rather than a plausible success.
 const CURLE_BAD_FUNCTION_ARGUMENT: i32 = 43;
 
@@ -82,7 +82,7 @@ pub fn easy_getinfo(
         return Ok(());
     }
     // Nothing in `CURLINFO_*` is a function pointer, so there is nothing to
-    // substitute — and a guest that found one would be handed a raw guest
+    // substitute - and a guest that found one would be handed a raw guest
     // address rather than a thunk, silently. Checked rather than assumed.
     if is_function_option(info) {
         set_int_return(ctx, CURLE_BAD_FUNCTION_ARGUMENT);
@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn a_function_option_is_the_twenty_thousands() {
         // CURLOPT_WRITEFUNCTION = 20011, HEADERFUNCTION = 20079,
-        // XFERINFOFUNCTION = 20219 — the ones a program installs.
+        // XFERINFOFUNCTION = 20219 - the ones a program installs.
         for option in [20_011, 20_079, 20_219, 20_000, 29_999] {
             assert!(is_function_option(option), "{option} is a function option");
         }

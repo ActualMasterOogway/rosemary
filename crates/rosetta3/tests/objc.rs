@@ -2,7 +2,7 @@
 //!
 //! The direction under test is **host → guest**, and that is the whole point.
 //! Every assertion here messages a guest class from *this* process's own
-//! `objc_msgSend` — the host runtime looks the selector up, finds an `IMP`, and
+//! `objc_msgSend` - the host runtime looks the selector up, finds an `IMP`, and
 //! calls it as native arm64. That `IMP` is one of this runtime's thunks, so an
 //! answer coming back at all means realization, selector uniquing, method
 //! installation and the JIT re-entry all worked together.
@@ -30,7 +30,7 @@ use rosetta3::{Program, Vm, startup};
 ///
 /// Not a convenience. A guest `IMP` is reached from the host runtime with
 /// nothing on the stack belonging to this runtime, so the thunk finds its VM
-/// through the process-wide pointer [`rosetta3::thunk::publish`] sets — there is
+/// through the process-wide pointer [`rosetta3::thunk::publish`] sets - there is
 /// exactly one, and it is the last one published. Two tests publishing
 /// different VMs in parallel would have each other's thunks decline, which is
 /// the runtime behaving correctly and the test failing for an unrelated reason.
@@ -42,7 +42,7 @@ static PUBLISHED: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// A VM that outlives the test, published for the process.
 ///
 /// Both halves are required. Leaking, because registration installs thunks as
-/// `IMP`s in the *host's* runtime, which now holds code owned by this VM —
+/// `IMP`s in the *host's* runtime, which now holds code owned by this VM -
 /// dropping it would unmap the trampolines while `libobjc` still has them in a
 /// method list, and unlike an `atexit` handler a method can be reached by any
 /// later message.
@@ -208,13 +208,13 @@ fn the_host_can_message_a_guest_instance_method() {
     );
 
     // Twice over, because the second call re-enters an already-translated
-    // region through the same thunk — the path a real program spends its time
+    // region through the same thunk - the path a real program spends its time
     // on, and one a first-call-only test would never take.
     assert_eq!(twice(obj, sel("twice:"), -3), -6);
 }
 
 /// A class method has to land on the *metaclass*. Added to the class instead it
-/// becomes an instance method, and `[Klass answer]` then finds nothing — which
+/// becomes an instance method, and `[Klass answer]` then finds nothing - which
 /// is a wrong program with no diagnostic anywhere.
 #[test]
 fn a_class_method_lands_on_the_metaclass() {
@@ -514,7 +514,7 @@ fn a_guest_protocol_is_registered_and_adopted() {
 
 /// Registration happens once. A second call must return the same maps rather
 /// than trying to allocate every class again, which the runtime would refuse
-/// for a name already in use — turning an idempotency bug into a pile of
+/// for a name already in use - turning an idempotency bug into a pile of
 /// refusals rather than a crash, but a bug either way.
 #[test]
 fn registration_is_idempotent() {
@@ -533,7 +533,7 @@ fn registration_is_idempotent() {
 /// order, which is not a question this runtime should be answering.
 ///
 /// Provoked by loading one guest *twice* rather than by writing a fixture that
-/// redeclares a Foundation class — clang rejects that outright, and the two
+/// redeclares a Foundation class - clang rejects that outright, and the two
 /// cases are the same one to `objc_allocateClassPair`. It also documents a real
 /// limit: two guests in one process cannot both define a class name, because
 /// there is one host runtime between them.
@@ -595,7 +595,7 @@ fn a_plain_c_program_registers_nothing() {
 
 /// End to end, through the built driver: an Objective-C guest starts, registers,
 /// runs its initializers and its `main`, and exits with its own status. Nothing
-/// here sends a message from guest code — that is M6.3 — but everything up to
+/// here sends a message from guest code - that is M6.3 - but everything up to
 /// the point where it could is exercised as a process.
 #[test]
 fn an_objective_c_program_starts_and_exits() {
@@ -643,10 +643,10 @@ fn classes_are_registered_before_initializers_run() {
 /// reads the answer from `v0`/`v1`, so a thunk that returned only an integer
 /// left the window a NaN size and AppKit trapped mid-resize.
 ///
-/// - `NSSize` — two SSE eightbytes to the guest, an HFA of two to the host.
-/// - `NSRect` — MEMORY to the guest, so it fills a hidden buffer; an HFA of four
+/// - `NSSize` - two SSE eightbytes to the guest, an HFA of two to the host.
+/// - `NSRect` - MEMORY to the guest, so it fills a hidden buffer; an HFA of four
 ///   in `v0`–`v3` to the host.
-/// - `NSRange` — two integer eightbytes in `rax`/`rdx`, two `x` registers.
+/// - `NSRange` - two integer eightbytes in `rax`/`rdx`, two `x` registers.
 #[test]
 fn a_guest_method_returns_a_struct_the_host_reads_from_registers() {
     let _lock = serialized();

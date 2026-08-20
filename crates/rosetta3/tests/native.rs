@@ -1,13 +1,13 @@
 //! The native backend: a host-architecture program, loaded by machish and run.
 //!
-//! Every claim here is differential — the same binary run twice, once by the
-//! kernel and once by this runtime — because that is the only comparison that
+//! Every claim here is differential - the same binary run twice, once by the
+//! kernel and once by this runtime - because that is the only comparison that
 //! cannot be satisfied by a loader which merely does not crash.
 //!
-//! - **hello** — the link produced something callable, and `argv` reached it.
-//! - **constructors** — `__mod_init_func` ran, in order, before `main`.
-//! - **C++** — the host's own libc++ was reached, not the vendored guest copy.
-//! - **selection** — a binary goes to the backend that can actually run it,
+//! - **hello** - the link produced something callable, and `argv` reached it.
+//! - **constructors** - `__mod_init_func` ran, in order, before `main`.
+//! - **C++** - the host's own libc++ was reached, not the vendored guest copy.
+//! - **selection** - a binary goes to the backend that can actually run it,
 //!   `/bin/ls`'s arm64e slice included.
 
 mod common;
@@ -38,7 +38,7 @@ fn a_native_exit_status_reaches_the_shell() {
     let Some(path) = build_native("native_hello", common::HELLO_C) else {
         skip!("cannot build native fixtures")
     };
-    // `main` returns `abs(argc) - 1`, so one argument makes it 1 — and a
+    // `main` returns `abs(argc) - 1`, so one argument makes it 1 - and a
     // runtime that dropped the status would report 0 for both.
     let (status, _, err) = run(&path, &["one"]);
     assert_eq!(status, Some(1), "stderr: {err}");

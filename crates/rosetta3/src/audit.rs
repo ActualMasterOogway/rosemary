@@ -20,7 +20,7 @@ pub struct CallTargetAudit {
     pub direct_calls: usize,
     /// Of those, how many left the region.
     pub out_of_region: usize,
-    /// Of those, how many were registered imports — the intercepted ones.
+    /// Of those, how many were registered imports - the intercepted ones.
     pub intercepted: usize,
     /// Out-of-section targets microlift was not told about, which the JIT would
     /// therefore follow into as guest code. Empty is the acceptance condition.

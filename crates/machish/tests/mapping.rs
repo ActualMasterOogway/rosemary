@@ -22,7 +22,7 @@ fn maps_a_real_executable_into_a_buffer() {
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
 
     // A buffer has no existing mappings, so the preferred base is always
-    // honoured — which makes it the right place to assert on exact addresses.
+    // honoured - which makes it the right place to assert on exact addresses.
     let mut mem = BufferSpace::new(0);
     let mapped = map_segments(&obj, &mut mem).unwrap();
 

@@ -19,7 +19,7 @@ pub fn shim_for(name: &str) -> Option<Shim> {
     }
 }
 
-/// The three modern entry points, found by `dlsym` rather than linked — the same care
+/// The three modern entry points, found by `dlsym` rather than linked - the same care
 /// [`audiounit`](super::audiounit) takes and for the same reason.
 fn host_fn<T: Copy>(name: &core::ffi::CStr, cache: &std::sync::OnceLock<Option<T>>) -> Option<T> {
     *cache.get_or_init(|| {
@@ -37,7 +37,7 @@ type InstanceNewFn = unsafe extern "C" fn(*mut u8, *mut *mut u8) -> i32;
 type InstanceDisposeFn = unsafe extern "C" fn(*mut u8) -> i32;
 
 /// The refusal for a host that does not export the modern registry, which no
-/// macOS running arm64 code is — but a missing symbol answered with a null call
+/// macOS running arm64 code is - but a missing symbol answered with a null call
 /// is the one outcome worse than saying so.
 fn no_audio_component(symbol: &str) -> crate::abi::AbiError {
     crate::abi::AbiError::Refused {
@@ -57,7 +57,7 @@ fn find_next_component(
     let Some(f) = host_fn(c"AudioComponentFindNext", &FOUND) else {
         return Err(no_audio_component(symbol));
     };
-    // SAFETY: both arguments are opaque to this runtime — a component handle
+    // SAFETY: both arguments are opaque to this runtime - a component handle
     // the previous call returned, and a twenty-byte descriptor in guest memory,
     // which is identity-mapped. Neither is dereferenced here.
     let found = unsafe { f(ctx.rdi as *mut core::ffi::c_void, ctx.rsi as *const u8) };
@@ -132,7 +132,7 @@ mod tests {
         })
     }
 
-    /// `{ 'auou', 'def ', 'appl', 0, 0 }` — the default output unit, laid out as
+    /// `{ 'auou', 'def ', 'appl', 0, 0 }` - the default output unit, laid out as
     /// the guest's twenty-byte `ComponentDescription`.
     fn default_output_description() -> [u32; 5] {
         [

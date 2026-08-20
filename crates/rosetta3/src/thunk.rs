@@ -31,7 +31,7 @@ const GUEST_FP_ARGS: usize = 8;
 pub struct Thunk {
     /// The guest function it re-enters.
     pub guest: u64,
-    /// Its own address — what the host is given.
+    /// Its own address - what the host is given.
     pub host: u64,
     /// Keeps the JIT module, and therefore `host`'s pages, mapped.
     _backend: CraneliftBackend,
@@ -104,7 +104,7 @@ impl Default for ThunkTable {
 /// lock.
 ///
 /// A stale snapshot answers "no" for a thunk another thread created a moment ago, and
-/// unlike a code translation that answer is not merely older — it is wrong, because
+/// unlike a code translation that answer is not merely older - it is wrong, because
 /// unwrapping a thunk is what keeps a guest pointer comparing equal to itself.
 pub struct ThunkView {
     by_guest: Vec<(u64, u64)>,
@@ -168,7 +168,7 @@ pub(crate) fn current() -> Option<&'static Vm> {
         _ => PUBLISHED.load(Ordering::Acquire) as *const Vm,
     };
     // SAFETY: non-null only between `with_current`'s replace and restore, during
-    // which the `&Vm` it was given is alive and borrowed immutably — which is
+    // which the `&Vm` it was given is alive and borrowed immutably - which is
     // what makes re-entering it here legal. The `'static` is a lie the private
     // scope contains: the reference never escapes `thunk_entry`.
     (!p.is_null()).then(|| unsafe { &*p })
@@ -193,9 +193,9 @@ type Unsupported = &'static str;
 impl ThunkSignature {
     /// Decide the host-side shape of every argument, or say what stopped it.
     ///
-    /// An aggregate's host placement is indistinguishable from its leaves' — an HFA of
+    /// An aggregate's host placement is indistinguishable from its leaves' - an HFA of
     /// *n* occupies the same registers as *n* floating-point arguments, and a composite
-    /// of at most sixteen bytes the same as one or two integer ones — which is what
+    /// of at most sixteen bytes the same as one or two integer ones - which is what
     /// lets the trampoline declare a signature of plain scalars and still be called
     /// correctly by AAPCS64.
     pub fn new(params: Vec<Shape>, returns: Option<Shape>) -> Result<Self, Unsupported> {
@@ -216,8 +216,8 @@ impl ThunkSignature {
                 },
             });
         }
-        // A multi-value return lands where AAPCS64 puts an aggregate's members —
-        // `v0`–`v3` for an HFA, `x0`/`x1` for a composite — which is what lets a
+        // A multi-value return lands where AAPCS64 puts an aggregate's members -
+        // `v0`–`v3` for an HFA, `x0`/`x1` for a composite - which is what lets a
         // trampoline declare scalars and still return a struct. Larger than that
         // the callee fills a buffer through `x8`, a register Cranelift's return
         // lowering gives no way to declare.
@@ -435,8 +435,8 @@ pub(crate) fn build(guest_va: u64) -> Result<Thunk, VmError> {
 
 /// The guest's argument registers, being filled.
 ///
-/// SysV AMD64 allocates them in declaration order and — the rule that matters for
-/// aggregates — moves the *whole* aggregate to memory if the registers it needs are not
+/// SysV AMD64 allocates them in declaration order and - the rule that matters for
+/// aggregates - moves the *whole* aggregate to memory if the registers it needs are not
 /// all still free.
 #[derive(Default)]
 struct GuestArgs {
@@ -594,7 +594,7 @@ unsafe extern "C" fn typed_entry(
 
     // An aggregate SysV classifies MEMORY comes back through a buffer whose
     // address the *caller* passes in the first integer register, ahead of
-    // `self` — so this is pushed before any argument is read.
+    // `self` - so this is pushed before any argument is read.
     let sret = match signature.returns.as_ref() {
         Some(Shape::Struct(agg)) if agg.guest_class() == GuestClass::Memory => {
             // Not reachable through `ThunkSignature::new`, which takes only the
@@ -669,7 +669,7 @@ unsafe extern "C" fn typed_entry(
             };
             let n = raw.len().min(RESULT_BYTES);
             // SAFETY: `out` is the calling trampoline's `RESULT_BYTES` slot, and
-            // the members it loads sit at the offsets `return_leaves` named —
+            // the members it loads sit at the offsets `return_leaves` named -
             // which are the aggregate's own, so its bytes go across unrearranged.
             unsafe { std::ptr::copy_nonoverlapping(raw.as_ptr(), out, n) };
         }
@@ -687,7 +687,7 @@ unsafe extern "C" fn typed_entry(
 /// The status a callback failure nothing can raise ends the process with.
 const CALLBACK_FAILURE_STATUS: i32 = 70;
 
-/// Park a callback's failure — or, when nothing will ever take it, say so and stop the
+/// Park a callback's failure - or, when nothing will ever take it, say so and stop the
 /// process.
 fn park_or_die(vm: &Vm, err: VmError) {
     if crate::thread::current().is_some_and(|s| s.depth.get() > 0) {
@@ -699,7 +699,7 @@ fn park_or_die(vm: &Vm, err: VmError) {
     eprintln!("rosetta3: {err}");
     eprintln!(
         "rosetta3: that was the outermost guest frame on this thread, so nothing \
-         will raise it — the callback would return to the host and this thread \
+         will raise it - the callback would return to the host and this thread \
          would go quiet. Exiting."
     );
     let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -708,7 +708,7 @@ fn park_or_die(vm: &Vm, err: VmError) {
     unsafe { libc::_exit(CALLBACK_FAILURE_STATUS) };
 }
 
-/// Name a failure by the callback it happened in — once.
+/// Name a failure by the callback it happened in - once.
 fn in_callback(guest_va: u64, e: VmError) -> VmError {
     match e {
         already @ VmError::Callback { .. } => already,
@@ -734,13 +734,13 @@ fn report_no_vm(guest_va: u64) {
 /// What every thunk calls. Not public: its only legitimate caller is code this module
 /// emitted.
 ///
-/// An error here cannot be returned — the host function in the middle (`qsort`, say)
-/// has no way to express one — so it is parked on the VM and raised the moment control
+/// An error here cannot be returned - the host function in the middle (`qsort`, say)
+/// has no way to express one - so it is parked on the VM and raised the moment control
 /// is back in the runtime.
 unsafe extern "C" fn thunk_entry(guest_va: u64, ints: *const u64, floats: *const f64) -> u64 {
     let Some(vm) = current() else {
-        // Nowhere to report this — the caller is `qsort`, or libpthread's
-        // thread start, and neither has an error channel — so it is said out
+        // Nowhere to report this - the caller is `qsort`, or libpthread's
+        // thread start, and neither has an error channel - so it is said out
         // loud once and the callback returns zero.
         report_no_vm(guest_va);
         return 0;

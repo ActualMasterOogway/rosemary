@@ -8,7 +8,7 @@ use super::host::{self, Class, Imp, Sel};
 
 /// The selector the compiler emits for a class with C++ ivars.
 pub const CONSTRUCT: &str = ".cxx_construct";
-/// Its counterpart, named here so the gap has a name — see the module note on
+/// Its counterpart, named here so the gap has a name - see the module note on
 /// why it is not called.
 #[allow(dead_code)]
 pub const DESTRUCT: &str = ".cxx_destruct";
@@ -156,7 +156,7 @@ unsafe fn construct(cls: Class, obj: Class) {
             continue;
         };
         // SAFETY: `imp` is the `IMP` this runtime installed for
-        // `.cxx_construct` on exactly this class — a thunk that enters guest
+        // `.cxx_construct` on exactly this class - a thunk that enters guest
         // code with the method's own signature, which for `.cxx_construct` is
         // `id (*)(id, SEL)`. `obj` is an instance of a subclass of `at`, which
         // is what the runtime would pass.
@@ -211,13 +211,13 @@ mod tests {
             assert_eq!(
                 CALLS.load(Ordering::SeqCst),
                 0,
-                "objc4 now calls a dynamically added .cxx_construct — delete this module"
+                "objc4 now calls a dynamically added .cxx_construct - delete this module"
             );
         }
     }
 
     /// And that this module's own path does call it, on an instance the *host*
-    /// allocated through `+alloc` rather than one the test made — which is the
+    /// allocated through `+alloc` rather than one the test made - which is the
     /// case the module exists for.
     #[test]
     fn installing_makes_alloc_run_the_constructor() {

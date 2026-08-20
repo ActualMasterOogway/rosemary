@@ -123,8 +123,8 @@ pub unsafe fn note_queue(command_buffer: Id) {
         return;
     }
     let selector = se("commandQueue");
-    // SAFETY: the caller's obligation is exactly this function's — a live object
-    // pointer — and `responds` asks the runtime rather than the object.
+    // SAFETY: the caller's obligation is exactly this function's - a live object
+    // pointer - and `responds` asks the runtime rather than the object.
     if !unsafe { super::objc::responds(command_buffer, selector) } {
         return;
     }
@@ -154,7 +154,7 @@ pub unsafe fn note_queue(command_buffer: Id) {
 /// `drawable` must be a live object pointer on a thread that may message it.
 pub unsafe fn present_standalone(drawable: Id) {
     use std::sync::atomic::Ordering::Acquire;
-    // SAFETY: as above — the caller states the pointer is live, and whether it
+    // SAFETY: as above - the caller states the pointer is live, and whether it
     // is a drawable is what this asks.
     if drawable.is_null() || !unsafe { super::objc::responds(drawable, se("texture")) } {
         return;
@@ -224,7 +224,7 @@ pub unsafe fn present(command_buffer: Id, drawable: Id) {
     // [`super::objc::pool_push`] for why the guest's cannot be assumed.
     //
     // SAFETY: pushed and popped on this thread, once, with nothing between them
-    // that can unwind — every call in the body is an `extern "C"` message send.
+    // that can unwind - every call in the body is an `extern "C"` message send.
     let pool = unsafe { pool_push() };
     encode(command_buffer, texture, device, format, &list);
     super::drew("Metal", list.width, list.height, list.vertices.len());
@@ -301,7 +301,7 @@ fn encode(command_buffer: Id, texture: Id, device: Id, format: u64, list: &DrawL
     let count = list.vertices.len() as u64;
     // SAFETY: the encoder is live until `endEncoding`, the pipeline came from
     // this device, the buffer holds `count` vertices in the layout the shader
-    // declares, and `setVertexBytes:length:atIndex:` copies its argument — which
+    // declares, and `setVertexBytes:length:atIndex:` copies its argument - which
     // is why a stack local is a legal source for it.
     unsafe {
         send1::<(), Id>(encoder, se("setRenderPipelineState:"), resources.pipeline);
@@ -444,7 +444,7 @@ fn upload_atlas(device: Id, resources: &mut Resources, list: &DrawList) {
 
     // SAFETY: `+texture2DDescriptorWithPixelFormat:width:height:mipmapped:` is
     // `MTLTextureDescriptor`'s, and returns an autoreleased descriptor whose
-    // default usage is shader read — which is the only use here.
+    // default usage is shader read - which is the only use here.
     let descriptor = unsafe {
         send4::<Id, u64, u64, u64, u8>(
             class("MTLTextureDescriptor"),
@@ -503,7 +503,7 @@ fn upload_vertices(device: Id, resources: &mut Resources, list: &DrawList) -> Op
         // The old one in this slot is dropped without a release, deliberately:
         // the GPU may still be reading it, there is no completion handler here
         // to release it from, and a buffer is reallocated at most a handful of
-        // times in a run — when the panel first opens, and if it grows.
+        // times in a run - when the panel first opens, and if it grows.
         let buffer = unsafe {
             send2::<Id, u64, u64>(
                 device,

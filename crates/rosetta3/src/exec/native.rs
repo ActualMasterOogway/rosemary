@@ -52,7 +52,7 @@ pub type HostSpec = HostRunnable<NativelyExecutable<machish::spec::arch::X86_64>
 #[cfg(not(target_arch = "aarch64"))]
 pub const HOST_SPEC: HostSpec = HostRunnable(NativelyExecutable(machish::spec::arch::X86_64));
 
-/// Whether the native backend can run this slice — the same question the
+/// Whether the native backend can run this slice - the same question the
 /// loader will ask when it selects one.
 pub fn runnable(slice: &machish::fat::Slice) -> bool {
     slice.cputype == HostSpec::CPU_TYPE && HOST_SPEC.accepts_subtype(slice.cpusubtype)
@@ -89,7 +89,7 @@ impl Native {
         // the toggle on, the first `__DATA` write is a SIGBUS, and with it off
         // this thread has no W^X and any thread the program starts has the
         // fault back. A plain mapping plus the loader's own `mprotect` gives
-        // `__TEXT` RX and `__DATA` RW, which is what the image asked for —
+        // `__TEXT` RX and `__DATA` RW, which is what the image asked for -
         // measured on this host: an anonymous RW mapping does become RX.
         let mut memory = MmapSpace::new();
         let mut source = FsDylibSource::new();

@@ -48,7 +48,7 @@ struct Descriptor {
 }
 
 // SAFETY: both structures are plain data whose pointers are to process-lifetime
-// objects — a class object from libSystem, a leaked descriptor, and a `'static`
+// objects - a class object from libSystem, a leaked descriptor, and a `'static`
 // byte string. They are written once, before publication, and only read after.
 unsafe impl Sync for Block {}
 unsafe impl Sync for Descriptor {}
@@ -76,11 +76,11 @@ struct State {
     /// The size the panel has been dragged to, or zero for "not yet sized".
     ///
     /// Zero rather than an `Option` because the panel is the only thing that can
-    /// work out a sensible first size — it depends on the font and the surface —
+    /// work out a sensible first size - it depends on the font and the surface -
     /// and it does that on its first layout through [`size_defaults`].
     width: f32,
     height: f32,
-    /// How far the panel *can* be scrolled, which only the panel knows — it is the
+    /// How far the panel *can* be scrolled, which only the panel knows - it is the
     /// content's height less the room there is for it.
     reach: f32,
     /// Where the panel was last actually drawn, as `(x, y, w, h)`.
@@ -197,7 +197,7 @@ impl State {
             }) => {
                 // A left or top edge moves the origin and takes the same amount
                 // off the size, which is what makes the *opposite* edge stay
-                // where it is — the property that distinguishes resizing from
+                // where it is - the property that distinguishes resizing from
                 // moving-and-growing.
                 if left {
                     let width = (self.width - dx).max(MIN_WIDTH);
@@ -243,7 +243,7 @@ fn cursor(event: Id) -> Option<(f32, f32)> {
     // SAFETY: each is a documented `NSEvent`, `NSWindow` or `NSView` method
     // with the prototype its header gives. `NSPoint` and `NSRect` are
     // homogeneous aggregates of `CGFloat`, which AAPCS64 returns in the vector
-    // registers — Rust's `extern "C"` does that correctly for a `repr(C)`
+    // registers - Rust's `extern "C"` does that correctly for a `repr(C)`
     // struct of `f64`, which is why there is no `_stret` question here.
     unsafe {
         let window = send0::<Id>(event, sel("window"));
@@ -317,7 +317,7 @@ fn handle(event: Id) -> bool {
                 true => delta * row / 14.0,
                 false => delta * row * 3.0,
             };
-            // Scrolling *down* — a negative delta — reveals content further
+            // Scrolling *down* - a negative delta - reveals content further
             // down, which is a larger offset.
             state.scroll = (state.scroll - pixels).clamp(0.0, state.reach);
             true
@@ -362,7 +362,7 @@ fn install() {
     type AsyncF = unsafe extern "C" fn(*mut c_void, *mut c_void, extern "C" fn(*mut c_void));
     // SAFETY: `dispatch_async_f`'s prototype from `<dispatch/queue.h>`, and
     // `_dispatch_main_q` is the object `dispatch_get_main_queue()` is a macro
-    // for — its *address* is the queue.
+    // for - its *address* is the queue.
     let (Some(async_f), Some(main_queue)) = (unsafe {
         (
             sys::function::<AsyncF>("dispatch_async_f"),
@@ -404,7 +404,7 @@ extern "C" fn install_on_main(_context: *mut c_void) {
         // SAFETY: `+addLocalMonitorForEventsMatchingMask:handler:` is
         // `NSEvent`'s, takes an `NSEventMask` and a block, and returns the
         // monitor object. The block is a correctly formed global block, leaked,
-        // so it outlives the monitor — which is never removed, because the
+        // so it outlives the monitor - which is never removed, because the
         // overlay lives as long as the process.
         let monitor = unsafe {
             send2::<Id, u64, *const Block>(

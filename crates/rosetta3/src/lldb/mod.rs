@@ -123,7 +123,7 @@ pub fn register(
     };
 
     // LLDB needs the object to stay readable for as long as the entry is
-    // registered, and entries are never withdrawn — a translation lives as long
+    // registered, and entries are never withdrawn - a translation lives as long
     // as the process. So both are leaked, deliberately.
     let object = Box::leak(object.into_boxed_slice());
 
@@ -190,7 +190,7 @@ fn symfile(
         align: 2,
         flags: macho::S_ATTR_PURE_INSTRUCTIONS | macho::S_ATTR_SOME_INSTRUCTIONS,
         // A copy of the live code. LLDB reads the running process for a loaded
-        // section, so this is only ever the fallback — but a `__text` with no
+        // section, so this is only ever the fallback - but a `__text` with no
         // contents is a section a reader is entitled to refuse.
         //
         // SAFETY: `code..code + native_size` is inside the buffer Cranelift

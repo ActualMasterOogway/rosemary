@@ -20,7 +20,7 @@ struct Recording {
 #[derive(Default)]
 struct State {
     recording: Option<Recording>,
-    /// The last outcome, and when — shown on the panel and as a badge for a few
+    /// The last outcome, and when - shown on the panel and as a badge for a few
     /// seconds, because a keystroke that silently did nothing is worse than no
     /// keystroke at all.
     said: Option<(Instant, String, Color)>,
@@ -96,7 +96,7 @@ fn start(state: &mut State) {
             });
             say(
                 state,
-                format!("recording '{template}' to {output} — shift+F6 stops"),
+                format!("recording '{template}' to {output} - shift+F6 stops"),
                 color::ALERT,
             );
         }

@@ -18,7 +18,7 @@ use super::set_int_return;
 /// # Safety
 ///
 /// Called only through an import slot [`provide`] defines, so `path` is the guest's own
-/// `const char *` — addressable, since the guest is identity-mapped — and the other two
+/// `const char *` - addressable, since the guest is identity-mapped - and the other two
 /// arguments are scalars.
 pub unsafe extern "C" fn open_with_mode(
     path: *const libc::c_char,
@@ -48,7 +48,7 @@ pub unsafe extern "C" fn openat_with_mode(
 /// `sem_t *sem_open(const char *name, int oflag, unsigned mode, unsigned value)`, with
 /// the ellipsis spelled out.
 ///
-/// Two optional arguments rather than one, and the same `O_CREAT` deciding them — but
+/// Two optional arguments rather than one, and the same `O_CREAT` deciding them - but
 /// unlike `open`'s mode, these cannot simply be passed on regardless.
 ///
 /// # Safety
@@ -64,7 +64,7 @@ pub unsafe extern "C" fn sem_open_with_mode(
     match oflag & libc::O_CREAT != 0 {
         // SAFETY: the caller's guarantee, above. The mode is narrowed to the
         // `mode_t` the callee will read and re-promoted, exactly as `mode_for`
-        // does — a guest register's spare bits are not permissions.
+        // does - a guest register's spare bits are not permissions.
         true => unsafe {
             libc::sem_open(
                 name,
@@ -165,7 +165,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
 
-        // SAFETY: a NUL-terminated path this test owns, and two scalars — the
+        // SAFETY: a NUL-terminated path this test owns, and two scalars - the
         // arguments the import slot supplies.
         let fd = unsafe {
             open_with_mode(
@@ -178,8 +178,8 @@ mod tests {
         // SAFETY: a descriptor this test just opened.
         unsafe { libc::close(fd) };
 
-        // `0o604` is a mode with a hole in it — nothing for the group, a read
-        // for everyone else — so neither a zero nor the usual `0o666` can be
+        // `0o604` is a mode with a hole in it - nothing for the group, a read
+        // for everyone else - so neither a zero nor the usual `0o666` can be
         // mistaken for it.
         assert_eq!(
             permissions(&path) & 0o604,

@@ -44,8 +44,8 @@ impl SigAction {
 
 /// The `SA_SIGINFO` dispositions this runtime accepted and did not install.
 ///
-/// Keyed by signal number, holding the guest's *own* struct — the handler field
-/// as the guest wrote it, never a thunk — because the only thing this map is for
+/// Keyed by signal number, holding the guest's *own* struct - the handler field
+/// as the guest wrote it, never a thunk - because the only thing this map is for
 /// is answering `oldact` with what the guest last said. See the module note.
 fn recorded() -> &'static std::sync::Mutex<std::collections::HashMap<i32, SigAction>> {
     #[dynamic]
@@ -63,7 +63,7 @@ fn say_undeliverable(signum: i32) {
     said.push(signum);
     eprintln!(
         "rosetta3: sigaction(signal {signum}): SA_SIGINFO handler recorded but not installed \
-         — a ucontext_t would need the guest's registers at an interrupted PC, which the \
+         - a ucontext_t would need the guest's registers at an interrupted PC, which the \
          recompiler cannot report; the signal keeps its previous disposition"
     );
 }
@@ -79,8 +79,8 @@ fn outbound(symbol: &str, handler: u64, callbacks: &dyn Callbacks) -> Result<u64
 /// A handler on its way *back in*: the guest address behind a thunk, if it is
 /// one of ours.
 ///
-/// A disposition the guest never installed — one this process set up before the
-/// guest ran — is returned unchanged, because it is what the kernel will really
+/// A disposition the guest never installed - one this process set up before the
+/// guest ran - is returned unchanged, because it is what the kernel will really
 /// call and the guest can only ever pass it back.
 fn inbound(handler: u64, callbacks: &dyn Callbacks) -> u64 {
     if is_sentinel(handler) {
@@ -100,7 +100,7 @@ pub fn signal(
     let handler = outbound(symbol, ctx.rsi, callbacks)?;
 
     // SAFETY: `signal` takes an `int` and a function pointer the host will call
-    // as arm64 — which is what `outbound` just guaranteed it is, either a thunk
+    // as arm64 - which is what `outbound` just guaranteed it is, either a thunk
     // this runtime compiled or one of the kernel's own sentinels.
     let previous = unsafe { libc::signal(signum, handler as libc::sighandler_t) } as u64;
     ctx.rax = inbound(previous, callbacks);
@@ -149,7 +149,7 @@ pub fn sigaction(
         act = Some(a);
     }
 
-    // A query — or an ordinary installation — for a signal whose last
+    // A query - or an ordinary installation - for a signal whose last
     // disposition this runtime took rather than installed.
     if old_va != 0
         && let Some(previous) = recorded()
@@ -164,7 +164,7 @@ pub fn sigaction(
             })?;
         let rc = match act {
             None => 0,
-            // SAFETY: as the call below — a live, correctly sized structure.
+            // SAFETY: as the call below - a live, correctly sized structure.
             Some(a) => unsafe {
                 libc::sigaction(signum, (&raw const a).cast(), std::ptr::null_mut())
             },
@@ -175,7 +175,7 @@ pub fn sigaction(
 
     let mut old = SigAction::default();
     // SAFETY: both pointers are to live, correctly sized local structures with
-    // the layout this platform's `sigaction` expects — the same sixteen bytes on
+    // the layout this platform's `sigaction` expects - the same sixteen bytes on
     // either architecture, which `tests/signal.rs` checks by compilation rather
     // than by assertion.
     let rc = unsafe {
@@ -207,7 +207,7 @@ pub fn sigaction(
 /// `int sigaltstack(const stack_t *ss, stack_t *oss)`
 ///
 /// `oss` is answered with `SS_DISABLE` and a null stack, which is what the guest would
-/// see if it had never asked — true, and the only self-consistent answer to give a
+/// see if it had never asked - true, and the only self-consistent answer to give a
 /// caller that is about to be told its request succeeded.
 pub fn sigaltstack(
     symbol: &str,
@@ -215,7 +215,7 @@ pub fn sigaltstack(
     mem: &mut dyn GuestMemory,
     _callbacks: &dyn Callbacks,
 ) -> Result<()> {
-    /// `stack_t`: `{ void *ss_sp; size_t ss_size; int ss_flags; }` — 24 bytes
+    /// `stack_t`: `{ void *ss_sp; size_t ss_size; int ss_flags; }` - 24 bytes
     /// with the same layout on x86-64 and arm64 macOS.
     const STACK_T_SIZE: usize = 24;
     /// `SS_DISABLE`.
@@ -244,7 +244,7 @@ pub fn task_set_exception_ports(
     static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
         eprintln!(
-            "rosetta3: task_set_exception_ports(mask {:#x}) accepted but not honoured — a Mach \
+            "rosetta3: task_set_exception_ports(mask {:#x}) accepted but not honoured - a Mach \
              exception message carries this CPU's thread state for a fault inside a translation, \
              not the guest's registers",
             ctx.rsi as u32
@@ -260,7 +260,7 @@ fn announce_exception_ports(symbol: &str, mask: u32) {
     static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
         eprintln!(
-            "rosetta3: {symbol}(mask {mask:#x}) accepted but not honoured — a Mach exception \
+            "rosetta3: {symbol}(mask {mask:#x}) accepted but not honoured - a Mach exception \
              message carries this CPU's thread state for a fault inside a translation, not the \
              guest's registers",
         );
@@ -282,7 +282,7 @@ fn get_exception_ports(
 
 /// The `…_swap_exception_ports` half: `task`, `host`, `thread`.
 ///
-/// **Ten parameters**, which puts `masksCnt` — the seventh — past SysV AMD64's six
+/// **Ten parameters**, which puts `masksCnt` - the seventh - past SysV AMD64's six
 /// integer registers and onto the caller's stack.
 fn swap_exception_ports(
     symbol: &str,
@@ -298,7 +298,7 @@ fn swap_exception_ports(
 }
 
 /// `host_set_exception_ports`, which is [`task_set_exception_ports`] with a
-/// `host_priv_t` in front — and which a program without host privileges could
+/// `host_priv_t` in front - and which a program without host privileges could
 /// not have used anyway.
 fn set_exception_ports(
     symbol: &str,
@@ -349,7 +349,7 @@ mod tests {
     use super::*;
 
     /// Records what crossed, and pretends a thunk is the guest address with its
-    /// top bit set — enough to tell the two directions apart in an assertion.
+    /// top bit set - enough to tell the two directions apart in an assertion.
     struct Wrapping;
 
     const WRAP: u64 = 0x8000_0000_0000_0000;
@@ -502,7 +502,7 @@ mod tests {
     #[test]
     fn a_recorded_sa_siginfo_disposition_comes_back_through_oldact() {
         // A program that saves a disposition and restores it later must see what
-        // it wrote, not what the host would report — which is the disposition
+        // it wrote, not what the host would report - which is the disposition
         // from before the guest ever spoke.
         let mut mem = guest_memory();
         let first = SigAction {

@@ -28,7 +28,7 @@ fn defer(_ctx: &mut RegisterContext) -> u32 {
     EXIT
 }
 
-/// Continue inline — unless something failed underneath the call.
+/// Continue inline - unless something failed underneath the call.
 ///
 /// A host function this runtime forwards to may call *back* into the guest, and a
 /// failure there cannot be returned through the host frame in the middle.
@@ -49,7 +49,7 @@ fn publish_rsp(ctx: &RegisterContext) {
 /// Run `body`, turning a Rust **panic** into a parked [`VmError`].
 ///
 /// The bridges are `extern "C"`, so a panic escaping one aborts the process with `panic
-/// in a function that cannot unwind` — a message naming this runtime's calling
+/// in a function that cannot unwind` - a message naming this runtime's calling
 /// convention and nothing about the guest.
 ///
 /// A panic here is a bug in this runtime rather than something the guest did, which is
@@ -57,7 +57,7 @@ fn publish_rsp(ctx: &RegisterContext) {
 fn caught(vm: &crate::vm::Vm, what: &str, body: impl FnOnce() -> u32) -> u32 {
     // `AssertUnwindSafe` because the only state crossing in is the guest's
     // register context and this runtime's own locks, and a panic leaves both in
-    // the state the failing operation left them — which is what the parked
+    // the state the failing operation left them - which is what the parked
     // error then reports on.
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(code) => code,
@@ -263,7 +263,7 @@ mod tests {
     }
 
     /// Nothing is a dynamic import before anything is `dlopen`ed, and the
-    /// registry is consulted per call site while lifting — so the empty answer
+    /// registry is consulted per call site while lifting - so the empty answer
     /// is the one that has to be cheap and correct.
     #[test]
     fn the_registry_is_empty_until_something_is_loaded() {

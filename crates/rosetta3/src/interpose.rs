@@ -9,7 +9,7 @@ use machish::report::LinkReport;
 /// Apply every interposition the link's images declare.
 pub fn apply<M: Regions>(report: &mut LinkReport, memory: &mut M) -> Result<usize, machish::Error> {
     // Gathered before the loop because the loop mutates `report.images`, and
-    // because an image may interpose a function another image also interposes —
+    // because an image may interpose a function another image also interposes -
     // in which case dyld applies both, in load order, and so does this.
     let requests: Vec<(u64, machish::report::Interposition)> = report
         .images
@@ -22,7 +22,7 @@ pub fn apply<M: Regions>(report: &mut LinkReport, memory: &mut M) -> Result<usiz
 
     let mut rebound = 0;
     // Which symbols actually moved. Kept so the split check below can ask the
-    // one question that matters about a partial interposition — see [`missed`].
+    // one question that matters about a partial interposition - see [`missed`].
     let mut moved: BTreeSet<String> = BTreeSet::new();
     for (from, pair) in requests {
         for image in &mut report.images {
@@ -80,7 +80,7 @@ fn missed(
                 continue;
             }
             out.push(format!(
-                "{} in {} still resolves to {:#x}, outside the guest — \
+                "{} in {} still resolves to {:#x}, outside the guest - \
                  this program has two allocators",
                 binding.symbol,
                 image.name.rsplit('/').next().unwrap_or(&image.name),

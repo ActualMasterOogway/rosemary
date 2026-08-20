@@ -106,7 +106,7 @@ impl<S: DylibSource> DylibSource for VendoredCxx<S> {
 /// Point every `_Unwind_*` binding at the **vendored** `libunwind`.
 ///
 /// Slots are rewritten in guest memory *and* in the report, so everything built from
-/// the report afterwards — [`crate::Program`]'s import maps, the audit — describes what
+/// the report afterwards - [`crate::Program`]'s import maps, the audit - describes what
 /// the slot actually holds.
 pub fn bind_unwinder_to_the_vendored_one<M: machish::memory::Regions>(
     report: &mut machish::report::LinkReport,
@@ -130,7 +130,7 @@ pub fn bind_cxxabi_to_the_vendored_one<M: machish::memory::Regions>(
     rebind_to_vendored(report, memory, LIBCXXABI, &is_libcxxabi, is_cxx_abi_symbol)
 }
 
-/// Whether `symbol` is part of the Itanium C++ ABI *runtime interface* — the half of
+/// Whether `symbol` is part of the Itanium C++ ABI *runtime interface* - the half of
 /// `libstdc++` that the vendored `libc++abi` is a drop-in for.
 ///
 /// The three prefixes are the ABI's own namespaces.
@@ -265,7 +265,7 @@ mod tests {
         assert!(is_libcxx("/usr/lib/libc++.dylib"));
         assert!(is_libcxx("@rpath/libc++.1.dylib"));
         // libc++abi and libstdc++ are answered too, but by their own arms and
-        // with their own bytes — `is_libcxx` deciding either would hand a
+        // with their own bytes - `is_libcxx` deciding either would hand a
         // C++-ABI request the library instead.
         assert!(!is_libcxx("/usr/lib/libc++abi.dylib"));
         assert!(is_libcxxabi("/usr/lib/libc++abi.dylib"));
@@ -323,7 +323,7 @@ mod tests {
     /// What the family test must *not* claim.
     ///
     /// `std::runtime_error`'s destructor is exported by the vendored `libc++abi` and by
-    /// `libstdc++`, and they are not the same object — see [`is_cxx_abi_symbol`].
+    /// `libstdc++`, and they are not the same object - see [`is_cxx_abi_symbol`].
     #[test]
     fn the_family_excludes_the_exception_types_and_the_containers() {
         assert!(!is_cxx_abi_symbol("__ZNSt13runtime_errorD1Ev"));

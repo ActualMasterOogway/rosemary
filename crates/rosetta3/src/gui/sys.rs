@@ -6,7 +6,7 @@ use std::ffi::{CString, c_void};
 ///
 /// A path rather than a leaf name, because `dlopen("CoreText.framework")` is
 /// answered by the loader's search paths and this must not depend on what the
-/// guest has set in its environment — the guest sets `DYLD_*` variables and it
+/// guest has set in its environment - the guest sets `DYLD_*` variables and it
 /// is not this module's business to be affected by them.
 const FRAMEWORKS: &[&str] = &[
     "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
@@ -23,7 +23,7 @@ fn load_frameworks() {
         for path in FRAMEWORKS {
             let Ok(c) = CString::new(*path) else { continue };
             // SAFETY: a NUL-terminated path and a valid mode. The handle is
-            // deliberately dropped — these are process-lifetime frameworks and
+            // deliberately dropped - these are process-lifetime frameworks and
             // nothing here ever closes one.
             unsafe { libc::dlopen(c.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
         }
@@ -99,12 +99,12 @@ pub const CF_UTF8: u32 = 0x0800_0100;
 
 /// A `CFStringRef` for `s`, or null.
 ///
-/// The caller owns it and must `CFRelease` it — a `Create` function is +1 by
+/// The caller owns it and must `CFRelease` it - a `Create` function is +1 by
 /// the Core Foundation naming rule, and the overlay creates a handful of these
 /// exactly once, so they are kept rather than released.
 pub fn cf_string(s: &str) -> CfRef {
     // `CFStringCreateWithBytes(CFAllocatorRef, const UInt8*, CFIndex,
-    //  CFStringEncoding, Boolean)` — bytes rather than a C string so a `&str`
+    //  CFStringEncoding, Boolean)` - bytes rather than a C string so a `&str`
     // does not have to be copied into a `CString` first.
     type Create = unsafe extern "C" fn(CfRef, *const u8, isize, u32, u8) -> CfRef;
     // SAFETY: the declaration above is `<CoreFoundation/CFString.h>`'s.

@@ -43,7 +43,7 @@ pub fn pthread_create(
     // thread gets this runtime's own. Both are set explicitly, because the copy
     // above carries the guest's answers for them.
     //
-    // SAFETY: `host_attr` is a live, initialised attribute set — a byte copy of
+    // SAFETY: `host_attr` is a live, initialised attribute set - a byte copy of
     // one the host's own `pthread_attr_init` produced, which is what
     // `read_attr` checked before returning it.
     unsafe {
@@ -63,7 +63,7 @@ pub fn pthread_create(
     }
 
     let result = crate::thread::spawn(GuestStart { entry, arg, stack }, &host_attr);
-    // SAFETY: as above, and nothing holds a reference to it past this point —
+    // SAFETY: as above, and nothing holds a reference to it past this point -
     // `pthread_create` copies what it needs out of an attribute set.
     unsafe { libc::pthread_attr_destroy(&mut host_attr) };
 
@@ -89,7 +89,7 @@ fn read_attr(
     let mut copy = MaybeUninit::<libc::pthread_attr_t>::uninit();
     if attr == 0 {
         // No attributes: the host's own defaults, which is what libpthread
-        // would have used — including its default *size*, 512 KiB on Darwin.
+        // would have used - including its default *size*, 512 KiB on Darwin.
         // Reading it back out of a freshly initialised set rather than writing
         // that number down here is what makes a guest thread's stack the size
         // the same program gets natively, without this runtime having an
@@ -169,7 +169,7 @@ fn mutex_lock(
 ) -> Result<()> {
     let at = ctx.rdi;
     // SAFETY: the mutex is guest memory, which is this process's memory, and
-    // `pthread_mutex_lock` is the host's own — the passthrough the table
+    // `pthread_mutex_lock` is the host's own - the passthrough the table
     // declares, performed here so its result can be looked at.
     let rc = unsafe { libc::pthread_mutex_lock(at as *mut libc::pthread_mutex_t) };
     if rc != 0 {
@@ -197,7 +197,7 @@ mod tests {
 
     unsafe extern "C" {
         /// Not in the `libc` crate, and one of the two setters this module's
-        /// claim about "which end of the range" is about — so the test that
+        /// claim about "which end of the range" is about - so the test that
         /// measures it has to declare it.
         fn pthread_attr_setstack(
             attr: *mut libc::pthread_attr_t,
@@ -236,7 +236,7 @@ mod tests {
     /// The measurement the module note rests on, kept as a test:
     ///
     /// If a future libpthread ever disagreed, a guest's thread would run its frames
-    /// below the buffer it supplied — silently, on somebody else's memory — so this is
+    /// below the buffer it supplied - silently, on somebody else's memory - so this is
     /// checked against the host rather than assumed.
     #[test]
     fn a_supplied_stack_is_read_as_its_high_address_whichever_setter_named_it() {
@@ -308,8 +308,8 @@ mod tests {
             "a null attr is the defaults, which is what the host does"
         );
 
-        // Zeroed bytes are not an initialised attribute set — the signature
-        // word is wrong — and `EINVAL` is what the host answers for one.
+        // Zeroed bytes are not an initialised attribute set - the signature
+        // word is wrong - and `EINVAL` is what the host answers for one.
         assert!(
             read_attr("pthread_create", AT, &Bytes(bytes.clone()))
                 .expect("the bytes are readable")
@@ -318,7 +318,7 @@ mod tests {
         );
 
         // The same bytes, initialised by the host: accepted, and carrying what
-        // the guest set — which is the whole claim that the layouts agree.
+        // the guest set - which is the whole claim that the layouts agree.
         let mut initialised = attr();
         unsafe { libc::pthread_attr_setstacksize(&mut initialised, 512 * 1024) };
         let raw =

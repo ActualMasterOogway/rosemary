@@ -8,13 +8,13 @@
 //!
 //! What each test would falsify:
 //!
-//! - **the flags word survives the tail call** — it is the seventh integer
+//! - **the flags word survives the tail call** - it is the seventh integer
 //!   argument, so SysV spills it, and reading the return address in its place
 //!   turns `NI_NUMERICHOST | NI_NUMERICSERV` into something else entirely;
-//! - **through the marshaller specifically** — `--slow` refuses the promotion
+//! - **through the marshaller specifically** - `--slow` refuses the promotion
 //!   that would let microlift place the arguments itself, which is what made
 //!   this invisible: on the fast path the lifter already got it right;
-//! - **and the ordinary `call` still works** — the fix is an adjustment for one
+//! - **and the ordinary `call` still works** - the fix is an adjustment for one
 //!   case, so the other case is the one it could break.
 
 mod common;

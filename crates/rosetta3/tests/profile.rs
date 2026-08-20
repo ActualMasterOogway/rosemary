@@ -9,7 +9,7 @@
 //!
 //! What each test would falsify:
 //!
-//! - **it samples at all** — a sampler that never started, or one whose timer
+//! - **it samples at all** - a sampler that never started, or one whose timer
 //!   thread died, prints nothing, and a report with zero samples is the same
 //!   observation as no report;
 //! - **it names guest instructions in the guest's own image**, which is the
@@ -22,7 +22,7 @@
 //! - **it costs nothing when it is off**, so leaving the code in the runtime is
 //!   not a tax on every run;
 //! - **the map it writes is joinable**, which is what makes Apple's own
-//!   tooling — `xctrace`, and Processor Trace in particular — usable against
+//!   tooling - `xctrace`, and Processor Trace in particular - usable against
 //!   JIT code at all.
 
 mod common;
@@ -146,7 +146,7 @@ fn the_ranking_written_to_a_file_agrees_with_the_one_printed() {
 
     // The map is the half that makes an external trace readable, and the one
     // property it must have is that its host ranges are ordered, non-empty and
-    // inside the region they belong to — otherwise a lookup by host address
+    // inside the region they belong to - otherwise a lookup by host address
     // resolves to the wrong guest instruction, silently.
     let text = std::fs::read_to_string(&map).expect(&format!("no {map:?}; stderr: {err}"));
     let hex = |s: &str| u64::from_str_radix(s.trim_start_matches("0x"), 16).unwrap();

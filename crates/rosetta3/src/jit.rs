@@ -26,13 +26,13 @@ pub const PINNED_REGS_ENV: &str = "ROSETTA3_PINNED_REGS";
 /// What to ask of the JIT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OptLevel {
-    /// `none` — emit what the lifter produced, unoptimised.
+    /// `none` - emit what the lifter produced, unoptimised.
     ///
     /// Slowest by a wide margin. It is here as a bisection tool.
     None,
-    /// `speed` — Cranelift's `opt_level=speed`.
+    /// `speed` - Cranelift's `opt_level=speed`.
     Speed,
-    /// `all` — `speed`, plus host-specific choices. The default.
+    /// `all` - `speed`, plus host-specific choices. The default.
     #[default]
     All,
 }
@@ -219,8 +219,8 @@ pub fn opt_level() -> OptLevel {
 /// Whether Cranelift's IR verifier runs on everything this crate compiles.
 ///
 /// **This is the single most expensive thing translation does.** Cranelift runs the
-/// verifier at several points in a compile — after legalisation, after the egraph pass,
-/// after register allocation — and each run is a full walk of the function checking
+/// verifier at several points in a compile - after legalisation, after the egraph pass,
+/// after register allocation - and each run is a full walk of the function checking
 /// that every value is dominated by its definition, that types agree, that the CFG is
 /// consistent.
 ///
@@ -231,7 +231,7 @@ pub fn opt_level() -> OptLevel {
 /// ```
 ///
 /// **1.9× off the compile and 1.8× off the run**, for a check that says nothing about
-/// the guest program and everything about whether microlift emitted well-formed IR —
+/// the guest program and everything about whether microlift emitted well-formed IR -
 /// which is a property of *microlift's source*, not of the bytes it was pointed at, and
 /// so is answered by the lifter's own test suite rather than by every region a shipped
 /// binary translates.
@@ -273,7 +273,7 @@ pub fn eliminate_dead_flags() -> bool {
 }
 
 /// Whether a translated region may resolve its own successor rather than returning to
-/// the run loop for it — microlift's `LifterConfig::block_link`.
+/// the run loop for it - microlift's `LifterConfig::block_link`.
 pub fn block_linking() -> bool {
     #[dynamic]
     static ON: bool = match std::env::var(NO_BLOCK_LINK_ENV) {
@@ -292,7 +292,7 @@ pub fn block_linking() -> bool {
     *ON
 }
 
-/// Whether each exit site carries its own probe — microlift's
+/// Whether each exit site carries its own probe - microlift's
 /// `LifterConfig::inline_link_probes`.
 ///
 /// **Off**, because it was measured and it did not pay: it folds the probe's slot
@@ -314,7 +314,7 @@ pub fn inline_link_probes() -> bool {
 /// values and the context pointer takes one), and which five are worth it is a property
 /// of the guest program rather than of the mechanism.
 ///
-/// - `RSP` — every `call`, `ret`, `push` and `pop` in the profile touches it.
+/// - `RSP` - every `call`, `ret`, `push` and `pop` in the profile touches it.
 pub fn pinned_link_abi() -> Option<PinnedAbi> {
     #[dynamic]
     static ABI: Option<PinnedAbi> = {
@@ -418,7 +418,7 @@ pub fn isa_settings() -> &'static [(&'static str, &'static str)] {
 /// ## Why it holds an `errno` guard
 ///
 /// Compiling runs *on a guest thread*, between two guest instructions, and `errno` is
-/// passthrough — so anything this does to `errno` is something the guest reads as its
+/// passthrough - so anything this does to `errno` is something the guest reads as its
 /// own.
 pub fn backend() -> microlift::Result<CraneliftBackend> {
     let _errno = crate::thread::Errno::held();
@@ -471,7 +471,7 @@ mod tests {
     }
 
     /// The verifier is a property of the build and not of the optimisation
-    /// level, so every level has to agree with [`verify`] about it — including
+    /// level, so every level has to agree with [`verify`] about it - including
     /// `none`, which is the level a lifting bug is bisected at and therefore the
     /// one it would be worst to stop checking.
     #[test]
@@ -489,7 +489,7 @@ mod tests {
     /// And with nothing in the environment, that answer is the build profile.
     ///
     /// The whole safety of turning the verifier off in a shipped binary is that the
-    /// suite which would catch an invalid lift still runs with it on — so this pins the
+    /// suite which would catch an invalid lift still runs with it on - so this pins the
     /// coupling rather than leaving it to be read off `flags()`.
     #[test]
     fn the_default_is_the_build_profile() {
@@ -539,7 +539,7 @@ mod tests {
     }
 
     /// The knobs that are ABI or correctness decisions stay out of the tuning,
-    /// at every level — a JIT that stopped signing return addresses because the
+    /// at every level - a JIT that stopped signing return addresses because the
     /// user asked for `none` would be a different ABI, not a slower one.
     #[test]
     fn abi_settings_are_not_tunable() {

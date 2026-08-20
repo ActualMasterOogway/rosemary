@@ -147,7 +147,7 @@ pub struct PageConflict<'a> {
 ///
 /// Placement follows the image: a PIE tolerates a slide and asks for
 /// [`Placement::Preferred`], while a non-PIE image has absolute addresses baked
-/// into its code and must use [`Placement::Fixed`] — a silent slide there would
+/// into its code and must use [`Placement::Fixed`] - a silent slide there would
 /// produce an image that links cleanly and jumps into nothing.
 pub fn map_segments<S: MachSpec, M: AddressSpace>(
     obj: &MachObject<'_, S>,
@@ -159,7 +159,7 @@ pub fn map_segments<S: MachSpec, M: AddressSpace>(
     // Reserve to the coarser of the image's own page size and the host's
     // protection granularity. An x86_64 image is laid out at 4 KiB while Apple
     // Silicon protects at 16 KiB, so the protection sweep rounds segment ends
-    // up to 16 KiB — and would then run past a reservation sized only to 4 KiB.
+    // up to 16 KiB - and would then run past a reservation sized only to 4 KiB.
     let gran = page.max(mem.protect_granularity()).max(1);
     let end = obj
         .mappable_segments()
@@ -185,7 +185,7 @@ pub fn map_segments<S: MachSpec, M: AddressSpace>(
         let Some(range) = seg.file_range() else {
             continue;
         };
-        // A segment may legitimately declare more virtual than file size — the
+        // A segment may legitimately declare more virtual than file size - the
         // remainder is zero-fill, already zero from `reserve`. It may not
         // declare more *file* size than the file has.
         let src = bytes.get(range.clone()).ok_or(Error::Truncated {

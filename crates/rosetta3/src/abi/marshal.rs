@@ -39,7 +39,7 @@ fn stack_width(ty: ArgType) -> u64 {
 ///
 /// Apple packs each stack argument at its own size *and its own alignment*, so a
 /// four-byte argument followed by a pointer still leaves the pointer at the next
-/// eight-byte boundary — exactly where a `u64` declaration would put it.
+/// eight-byte boundary - exactly where a `u64` declaration would put it.
 fn widening_preserves_offsets(overflow: &[ArgType]) -> bool {
     let mut packed = 0u64;
     for (slot, ty) in overflow.iter().enumerate() {
@@ -224,7 +224,7 @@ pub fn call_types(
     let mut overflow: Vec<ArgType> = Vec::new();
 
     for (index, (ty, loc)) in placed.iter().enumerate() {
-        // A pointer that means something different on the far side — a guest
+        // A pointer that means something different on the far side - a guest
         // function address the host would call as arm64, or a guest class the
         // host runtime has never realized.
         let raw = convert.argument(symbol, index, read_location(symbol, ctx, mem, *loc)?)?;
@@ -266,7 +266,7 @@ pub fn call_types(
         // are wider than its own in the argument registers only, which AAPCS64
         // permits (see the module note); the return variant is chosen to match
         // the class the table declares. Signatures with stack arguments or
-        // aggregates never reach here — `is_marshallable` and the loop above
+        // aggregates never reach here - `is_marshallable` and the loop above
         // reject them.
         ArgType::SinglePrecisionFp => {
             let bits = unsafe { call_f32(host, &ints, &fps) }.to_bits();
@@ -335,7 +335,7 @@ fn stack_base() -> u64 {
 /// Resolve a [`GuestReg`] to the field of the context that holds it.
 ///
 /// A `GuestReg` payload *is* an `iced_x86::Register` discriminant, so this goes
-/// through microlift's own accessor rather than matching raw numbers — the
+/// through microlift's own accessor rather than matching raw numbers - the
 /// numbering is iced's to change.
 fn int_reg(symbol: &str, ctx: &RegisterContext, reg: GuestReg) -> Result<u64> {
     let unsupported = || AbiError::Unmarshallable {
@@ -654,7 +654,7 @@ const SYSV_SSE_REGS: usize = 8;
 /// Lay a signature out the way SysV AMD64 does, aggregates included.
 ///
 /// Written here rather than taken from microlift's `CallAbi::place_args` because that
-/// one knows only scalars, and an aggregate does not merely occupy a slot — it consumes
+/// one knows only scalars, and an aggregate does not merely occupy a slot - it consumes
 /// *two* registers of possibly different classes, or none at all and a run of stack
 /// instead.
 fn place_shapes(shapes: &[Shape]) -> (Vec<Place>, Option<Where>) {
@@ -900,7 +900,7 @@ pub fn call_shapes(
     }
 
     // Only the integer-returning prototypes were given tails, so a narrow
-    // overflow is refused for anything else — an aggregate return included,
+    // overflow is refused for anything else - an aggregate return included,
     // since those go through their own prototypes and would silently take the
     // doubleword one.
     let plain_integer_return =
@@ -926,7 +926,7 @@ fn call_returning(
     ret: &Shape,
     tail: NarrowTail,
 ) -> (Vec<u8>, u64) {
-    // SAFETY: `host` is a native arm64 C function — a `dlsym` result or an
+    // SAFETY: `host` is a native arm64 C function - a `dlsym` result or an
     // Objective-C `IMP` the host runtime owns. The prototypes are wider than
     // its own in the argument registers only, which AAPCS64 permits (see the
     // module note), and the return variant matches the class computed from the

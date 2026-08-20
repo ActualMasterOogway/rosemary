@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 machish.workspace = true
 # DWARF for `crate::lldb`, which is the only thing here that writes any. The
-# Mach-O around it is hand-written — see that module for why an object-file
+# Mach-O around it is hand-written - see that module for why an object-file
 # crate could not express it.
 gimli.workspace = true
 # The shims call host libc directly (stdio for the `printf` family, `errno` for
@@ -28,7 +28,7 @@ microlift = { path = "../../../microlift", features = ["disasm"] }
 # Host->guest thunks are compiled, not assembled: a trampoline is a handful of
 # Cranelift IR instructions, and letting the compiler emit the prologue and the
 # argument moves is what keeps this crate free of hand-written arm64. Same
-# version as `microlift`'s, deliberately — the `Function` built here is handed
+# version as `microlift`'s, deliberately - the `Function` built here is handed
 # to `microlift::backend::CraneliftBackend`, so the two must be one crate.
 # `timing` is left out of the default features on purpose: it is the only one
 # carrying a `thread_local!`, and macOS destroys the main thread's TLS inside

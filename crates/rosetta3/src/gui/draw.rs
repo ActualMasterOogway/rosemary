@@ -23,7 +23,7 @@ pub type Color = [f32; 4];
 pub mod color {
     use super::Color;
 
-    /// Panel background. Dark and mostly opaque — a profiler's numbers have to
+    /// Panel background. Dark and mostly opaque - a profiler's numbers have to
     /// be legible over a bright sky as well as a dark cave.
     pub const PANEL: Color = [0.04, 0.05, 0.07, 0.88];
     /// The one-pixel edge that separates the panel from the frame behind it.

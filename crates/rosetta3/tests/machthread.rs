@@ -1,7 +1,7 @@
 //! The Mach thread-state layouts, checked against the x86-64 SDK headers.
 //!
 //! [`rosetta3::shims::machthread`] writes an `x86_thread_state64_t` and an
-//! `x86_float_state64_t` into guest memory from constants — a flavour number, a
+//! `x86_float_state64_t` into guest memory from constants - a flavour number, a
 //! word count, and the offset of `__fpu_xmm0`. Nothing on this machine can
 //! verify those by inspection: the host's own `<mach/thread_status.h>`
 //! describes **arm64**, and asking it about `x86_thread_state64_t` is a
@@ -9,8 +9,8 @@
 //!
 //! So the fixture is built with `-arch x86_64`, which is the same trick every
 //! other cross-architecture claim in this suite rests on, and it prints what
-//! the headers say. A constant copied from the wrong architecture — or from
-//! memory — fails here rather than as a collector reading a stack pointer out
+//! the headers say. A constant copied from the wrong architecture - or from
+//! memory - fails here rather than as a collector reading a stack pointer out
 //! of padding.
 
 mod common;

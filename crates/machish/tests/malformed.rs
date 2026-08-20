@@ -4,7 +4,7 @@
 
 //! Hostile and malformed input.
 //!
-//! Every case here must produce a specific [`Error`] — never a panic, never a
+//! Every case here must produce a specific [`Error`] - never a panic, never a
 //! hang, never an unbounded allocation. The input to this crate is an untrusted
 //! third-party binary, so totality is a correctness requirement rather than
 //! polish. Several of these (a zero `cmdsize`, a load-command chain running past
@@ -300,8 +300,8 @@ fn corrupted_load_commands_fail_cleanly() {
 // --------------------------------------------- decoders on hostile input ----
 //
 // The parser's totality is only half the requirement. The fixup decoders and
-// the export trie walker read `__LINKEDIT` — offsets and counts that the header
-// checks never look at — so they need their own sweep. Each case below asserts
+// the export trie walker read `__LINKEDIT` - offsets and counts that the header
+// checks never look at - so they need their own sweep. Each case below asserts
 // only "does not panic and does not hang"; whether a particular corruption
 // happens to produce an error or a plausible-looking decode is not something
 // worth pinning down, and pinning it down would make the test a change

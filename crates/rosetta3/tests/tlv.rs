@@ -1,6 +1,6 @@
 //! `__tlv_bootstrap` must never be reached through the argument marshaller.
 //!
-//! A `_Thread_local` read is `leaq _x(%rip), %rdi; callq *(%rdi)` — the hottest
+//! A `_Thread_local` read is `leaq _x(%rip), %rdi; callq *(%rdi)` - the hottest
 //! shape of indirect call a real program has, and the one with no call site for
 //! the lifter to match. Every route to it is checked here.
 
@@ -28,7 +28,7 @@ fn the_bootstrap_classifies_fast_under_every_spelling() {
     );
 }
 
-/// The descriptor's `thunk` word — the pointer the guest actually calls — must
+/// The descriptor's `thunk` word - the pointer the guest actually calls - must
 /// hold a trampoline once the program is running, so the call is an inline
 /// fast import rather than an `ImportedFunctionCall` exit.
 #[test]
@@ -135,7 +135,7 @@ fn the_answers_are_the_same_without_trampolines() {
 /// The one that says the fast path was actually taken.
 ///
 /// Without it the pair above would pass just as happily with every access
-/// serviced by the marshaller — which is exactly the regression this file
+/// serviced by the marshaller - which is exactly the regression this file
 /// exists to catch, since it is invisible in the output and shows up only as
 /// the program being slow. `reached` counts trampolines the guest entered, and
 /// a `_Thread_local` program has no other reason to enter one.

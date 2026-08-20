@@ -9,7 +9,7 @@
 //! Two things are being checked at once, and they fail differently:
 //!
 //! - **Placement.** An argument read from the wrong register gives a wrong
-//!   answer — `strncmp` comparing the wrong length, `ldexp` scaling by
+//!   answer - `strncmp` comparing the wrong length, `ldexp` scaling by
 //!   garbage.
 //! - **Width.** A narrow argument or return that is not extended gives a
 //!   *right* answer for small values and a wrong one at the edges, which is why
@@ -27,7 +27,7 @@ use microlift::function_traits::FunctionArgumentType as T;
 use rosetta3::abi::table::{self, FunctionAbi, Lookup};
 use rosetta3::abi::{AbiError, GuestMemory, marshal};
 
-/// Where the synthetic guest stack lives. Nothing is mapped there for real —
+/// Where the synthetic guest stack lives. Nothing is mapped there for real -
 /// it is a `BufferSpace`, so only the marshaller's own reads go through it.
 const STACK_BASE: u64 = 0x2_0000_0000;
 const STACK_SIZE: usize = 0x1000;
@@ -65,7 +65,7 @@ fn guest_stack() -> BufferSpace {
 ///
 /// Written independently of `CallAbi::place_args` on purpose: if both sides
 /// consulted the same placement code, agreeing would prove only that the code
-/// is deterministic. This is the convention as the psABI states it — integer
+/// is deterministic. This is the convention as the psABI states it - integer
 /// and vector registers counted separately, the overflow going to the stack in
 /// argument order.
 fn context_for(args: &[A], mem: &mut BufferSpace) -> RegisterContext {
@@ -173,7 +173,7 @@ fn string_functions() {
     check_int!("_strlen", [A::P(hello.as_ptr().cast())], 5u64);
     check_int!("_strlen", [A::P(empty.as_ptr().cast())], 0u64);
     check_int!("_strnlen", [A::P(hello.as_ptr().cast()), A::I(3)], 3u64);
-    // A negative `int` return, which only survives if `rax` is sign-extended —
+    // A negative `int` return, which only survives if `rax` is sign-extended -
     // the magnitude is libc's business, the sign is ours.
     if let Some(ctx) = call(
         "_strcmp",
@@ -227,7 +227,7 @@ fn string_functions() {
         ],
         0u64
     );
-    // `bcmp` promises only "nonzero when they differ" — Apple's is `memcmp`.
+    // `bcmp` promises only "nonzero when they differ" - Apple's is `memcmp`.
     if let Some(ctx) = call(
         "_bcmp",
         &[
@@ -263,7 +263,7 @@ fn functions_returning_pointers_into_their_arguments() {
     let hello = cstr("hello, world");
     let base = hello.as_ptr() as usize as u64;
 
-    // A pointer return is only right if the whole 64 bits came back — a
+    // A pointer return is only right if the whole 64 bits came back - a
     // truncated one would still be non-null and still look plausible.
     if let Some(ctx) = call(
         "_strchr",
@@ -507,7 +507,7 @@ fn process_and_environment_queries() {
         assert_eq!(ctx.rax as u32, unsafe { libc::getuid() });
     }
     // `__error` is how `errno` is reached, and the whole passthrough story
-    // depends on it being the *host's* thread-local — the same pointer the
+    // depends on it being the *host's* thread-local - the same pointer the
     // host's own libc hands out.
     if let Some(ctx) = call("___error", &[]) {
         assert_eq!(ctx.rax as usize as *mut i32, unsafe { libc::__error() });
@@ -574,7 +574,7 @@ static EIGHT_INTS: FunctionAbi = FunctionAbi {
 ///
 /// Four of these arrive on the *host's* stack, which is the half no register
 /// prototype could reach before. The two doubles are here so the test also
-/// shows that overflowing the integer bank does not disturb the vector one —
+/// shows that overflowing the integer bank does not disturb the vector one -
 /// AAPCS64 counts them separately, and a marshaller that packed the stack in
 /// declaration order rather than by class would put `x` and `y` there too.
 unsafe extern "C" fn twelve_ints_two_doubles(
@@ -654,7 +654,7 @@ fn twelve_integer_arguments_reach_the_hosts_own_stack() {
 ///
 /// Apple packs those three at `[sp]`, `[sp+4]` and `[sp+8]`. A prototype that
 /// declared them all `u64` would put them at `[sp]`, `[sp+8]` and `[sp+16]`,
-/// and every one of the three would be wrong — which is why `i`, `j` and the
+/// and every one of the three would be wrong - which is why `i`, `j` and the
 /// value behind `p` are weighted differently below: a single sum could be right
 /// by accident, and three distinguishable contributions cannot be.
 unsafe extern "C" fn eight_longs_int_int_ptr(
@@ -699,7 +699,7 @@ static NARROW_TAIL_4_4_8: FunctionAbi = FunctionAbi {
     variadic: false,
 };
 
-/// One narrow argument past the eighth and nothing after it —
+/// One narrow argument past the eighth and nothing after it -
 /// `glCopyTexSubImage3D`'s shape, and the case where a wrong width is
 /// *invisible* unless the value has bits above 32.
 unsafe extern "C" fn eight_longs_int(
@@ -802,7 +802,7 @@ fn a_single_narrow_overflow_is_placed_and_extended() {
 /// pointer behind it.
 ///
 /// Apple puts the `BOOL` at `[sp]` and realigns the pointer to `[sp+8]`, which
-/// is where a `u64` declaration would have put it anyway — so this must go
+/// is where a `u64` declaration would have put it anyway - so this must go
 /// through the plain prototype rather than being refused. It was refused, and
 /// that is what left Subnautica with no window.
 unsafe extern "C" fn thirteen_with_a_bool_on_the_stack(
@@ -894,8 +894,8 @@ fn thirteen_integer_arguments_with_a_byte_among_them_are_placed() {
 #[test]
 fn an_overflow_too_wide_to_place_is_still_refused_by_name() {
     // Four overflowing arguments beginning with two *adjacent* narrow ones.
-    // Adjacency is what makes widening wrong — the second packs in beside the
-    // first — and four is past what `NarrowTail` enumerates, so this must
+    // Adjacency is what makes widening wrong - the second packs in beside the
+    // first - and four is past what `NarrowTail` enumerates, so this must
     // refuse rather than misplace the two doublewords behind them.
     static ADJACENT_NARROWS_TOO_LONG: FunctionAbi = FunctionAbi {
         name: "adjacent_narrows_too_long",
@@ -943,8 +943,8 @@ fn arguments_spilled_to_the_guest_stack_are_read_back() {
 
 #[test]
 fn a_symbol_with_no_signature_fails_by_name_and_changes_nothing() {
-    // The design decision, as a test. Refusing has to be *cheap* — a
-    // diagnostic naming the symbol — and it has to leave the guest exactly as
+    // The design decision, as a test. Refusing has to be *cheap* - a
+    // diagnostic naming the symbol - and it has to leave the guest exactly as
     // it was, or a caller that logs the error and continues is corrupted.
     let mut mem = guest_stack();
     let mut ctx = context_for(&[A::I(1), A::I(2)], &mut mem);
@@ -993,7 +993,7 @@ fn a_refused_symbol_says_why() {
 #[test]
 fn a_callback_taker_is_refused_without_a_vm_rather_than_passed_through() {
     // `qsort` has a signature and a marked callback argument, so it is callable
-    // — but only by something that can build a thunk. Reached through
+    // - but only by something that can build a thunk. Reached through
     // `call_import`, which has no JIT behind it, the guest pointer must not be
     // handed to the host's `qsort` to be called as arm64.
     let mut mem = guest_stack();

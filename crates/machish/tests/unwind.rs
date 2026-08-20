@@ -7,13 +7,13 @@
 //!
 //! What each test would catch:
 //!
-//! - **coverage** — a first-level index walked with the wrong stride, or a
+//! - **coverage** - a first-level index walked with the wrong stride, or a
 //!   second-level page decoded with the wrong base, produces entries at
 //!   addresses that are not functions. Cross-checking against
 //!   `LC_FUNCTION_STARTS` is the independent expression of the same fact.
-//! - **lookup** — the table records starts, so the entry for an address is the
+//! - **lookup** - the table records starts, so the entry for an address is the
 //!   last one at or below it, and an address past the covered range has none.
-//! - **personality and LSDA** — the pair that makes a function able to catch
+//! - **personality and LSDA** - the pair that makes a function able to catch
 //!   something. A C++ binary must have them; a C one must not.
 
 mod common;

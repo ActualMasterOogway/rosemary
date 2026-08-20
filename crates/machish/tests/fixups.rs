@@ -257,7 +257,7 @@ fn both_encodings_decode_to_the_same_stream() {
 
 /// `ADD_ADDR_ULEB` is a *signed* step spelled as an unsigned ULEB: a backwards
 /// jump is encoded two's-complement, which dyld adds into a `uintptr_t` and
-/// lets wrap. Real images rely on it — DELTARUNE's Mac runner steps back
+/// lets wrap. Real images rely on it - DELTARUNE's Mac runner steps back
 /// dozens of times in its bind stream, and rejecting the overflow refused the
 /// whole binary with `access out of bounds: addr=0x87558 len=0`.
 ///
@@ -586,7 +586,7 @@ fn an_unsatisfied_hard_import_is_reported_not_silently_zeroed() {
 }
 
 /// A C++ dylib that allocates: `operator new` and `operator delete` are
-/// *coalesced* symbols, so `ld` binds each one twice — once in the ordinary
+/// *coalesced* symbols, so `ld` binds each one twice - once in the ordinary
 /// bind stream, naming `libc++` by ordinal, and once in `weak_bind`, which asks
 /// only "does any loaded image override this".
 const COALESCED_SRC: &str = r#"
@@ -628,7 +628,7 @@ fn a_weak_bind_is_a_flat_lookup_and_never_the_images_own_exports() {
     );
 
     // The ordinal register is never set in this stream, so it reads back as
-    // zero — which is `BIND_SPECIAL_DYLIB_SELF`. Taking that at face value made
+    // zero - which is `BIND_SPECIAL_DYLIB_SELF`. Taking that at face value made
     // every weak bind claim to be satisfied by the image's own exports.
     for f in &weak {
         let Fixup::Bind { symbol, .. } = f else {
@@ -683,8 +683,8 @@ fn an_unsatisfied_weak_bind_leaves_the_ordinary_binding_alone() {
 
     // A weak lookup nobody answers is not an unsatisfied import; it is a symbol
     // nobody overrode, and reporting it makes a healthy image look broken.
-    // (Other libraries' imports are genuinely missing here — this provider
-    // stands for `libc++` alone — so the claim is about the coalesced ones.)
+    // (Other libraries' imports are genuinely missing here - this provider
+    // stands for `libc++` alone - so the claim is about the coalesced ones.)
     assert!(
         !outcome.missing.iter().any(|m| m.symbol == "__Znwm"),
         "a weak lookup was reported as a missing import: {:?}",

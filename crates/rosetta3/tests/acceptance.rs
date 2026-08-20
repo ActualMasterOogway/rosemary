@@ -2,7 +2,7 @@
 //!
 //! The claim, stated as a test: after `machish` links an Intel Mach-O against
 //! the host, **every static call out of `__text` is an address microlift was
-//! told about** — so none of them becomes an `ExitReason::UnknownJump` with
+//! told about** - so none of them becomes an `ExitReason::UnknownJump` with
 //! `TransferKind::DirectCall`.
 //!
 //! [`stub_addresses_are_load_bearing`] is what makes this worth writing rather
@@ -78,8 +78,8 @@ fn every_call_out_of_text_is_interceptable() {
 
 #[test]
 fn stub_addresses_are_load_bearing() {
-    // The falsification. Register only `slot_va` — what a loader that reported
-    // one address per binding would give you — and watch the interception rate
+    // The falsification. Register only `slot_va` - what a loader that reported
+    // one address per binding would give you - and watch the interception rate
     // collapse, because every `call rel32` targets a `__stubs` entry that is
     // now an unregistered address outside the lifted region.
     let Some(program) = load(LS) else {
@@ -122,7 +122,7 @@ fn every_uninterceptable_call_in_the_crippled_audit_is_a_stub() {
     // Sharpens the previous test: the calls that break are not merely *some*
     // addresses, they are exactly the `__stubs` entries. That is the mapping
     // `machish::fixups::stubs` claims to have recovered, checked from the other
-    // side — through the lifter's own view of the guest's control flow.
+    // side - through the lifter's own view of the guest's control flow.
     let Some(program) = load(LS) else {
         skip!("{LS} not present")
     };
@@ -164,8 +164,8 @@ fn linking_reports_a_stub_for_every_lazy_binding() {
         .filter(|b| b.stub_va.is_some())
         .count();
     assert!(with_stub > 0);
-    // Not every binding has a stub — a data import like `___stdoutp` is read
-    // through the slot and never called — so the claim is about lazy bindings.
+    // Not every binding has a stub - a data import like `___stdoutp` is read
+    // through the slot and never called - so the claim is about lazy bindings.
     let lazy = program
         .report
         .bindings()

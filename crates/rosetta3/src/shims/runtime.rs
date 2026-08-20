@@ -46,7 +46,7 @@ pub fn provider() -> SyntheticDylib {
     for name in machish::extensions::tlv::BOOTSTRAP_SYMBOLS {
         lib.define_fn(name, crate::tls::bootstrap as *const ());
     }
-    // The host's own `_tlv_atexit` is the right implementation — it appends a
+    // The host's own `_tlv_atexit` is the right implementation - it appends a
     // destructor to the list dyld runs when this thread ends, and a guest thread
     // is a host thread. It is denied only because the whole `__tlv_` prefix is.
     if let Some(f) = crate::host::symbol("_tlv_atexit") {
@@ -54,7 +54,7 @@ pub fn provider() -> SyntheticDylib {
         lib.define_fn("_tlv_atexit", f as *const ());
     }
     // The host's `open`/`openat` are variadic, and Apple's arm64 ABI puts a
-    // variadic argument on the stack — so a fixed signature would leave the mode
+    // variadic argument on the stack - so a fixed signature would leave the mode
     // in a register no `va_arg` reads. These bind to fixed-arity wrappers instead.
     super::openat::provide(&mut lib);
     // Two underscores as the Mach-O spells it: one from C mangling, one from the

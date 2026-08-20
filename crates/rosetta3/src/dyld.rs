@@ -34,8 +34,8 @@ pub struct Image {
     _memory: &'static SharedSpace,
     /// The mapped extents, for [`contains`] and [`lift_region`].
     regions: Vec<(u64, &'static [u8])>,
-    /// Every address a call site in this image might name — both `slot_va` and
-    /// `stub_va` — exactly as [`crate::Program`] keys its own.
+    /// Every address a call site in this image might name - both `slot_va` and
+    /// `stub_va` - exactly as [`crate::Program`] keys its own.
     imports: BTreeMap<u64, ImportSite>,
     /// The same sites by the address they resolved to; see
     /// [`Program::import_by_target`](crate::Program::import_by_target), which also
@@ -285,7 +285,7 @@ static REGION_HI: AtomicU64 = AtomicU64::new(0);
 
 /// Search the loaded images without copying the list.
 ///
-/// Every `Image` is `&'static` — leaked at load, never freed — so a reference found
+/// Every `Image` is `&'static` - leaked at load, never freed - so a reference found
 /// inside the lock outlives it, and the guard is dropped before the caller does
 /// anything with the answer.
 fn snapshot() -> Vec<&'static Image> {
@@ -417,7 +417,7 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
 
     let bytes = std::fs::read(&resolved).map_err(|e| format!("{resolved}: {e}"))?;
     // `parse_any` narrows a fat file to the x86-64 slice, and fails when there
-    // is none — which is the case a *native* arm64 dylib takes.
+    // is none - which is the case a *native* arm64 dylib takes.
     let object = MachObject::parse_any(&bytes, X86_64)
         .map_err(|e| format!("{resolved}: not a loadable x86-64 Mach-O: {e}"))?;
 
@@ -498,8 +498,8 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     };
     let (imports, imports_by_target) = collect_imports(&report, is_guest);
 
-    // The same substitution the program's own slots get — see
-    // [`crate::trampoline`] — and a `dlopen`ed plugin is where it pays most.
+    // The same substitution the program's own slots get - see
+    // [`crate::trampoline`] - and a `dlopen`ed plugin is where it pays most.
     let eligible: Vec<(u64, ImportSite)> = imports
         .iter()
         .filter(|(_, site)| !site.is_stub && !is_guest(site.resolved))
@@ -696,7 +696,7 @@ fn resolve_path(path: &str) -> Option<String> {
         candidates.extend(machish::install_name::expand(path, &ctx));
     } else {
         // `DYLD_LIBRARY_PATH` first, and `DYLD_FALLBACK_LIBRARY_PATH` after the
-        // ordinary candidates — the order the host's own loader uses.
+        // ordinary candidates - the order the host's own loader uses.
         let name = path.rsplit('/').next().unwrap_or(path);
         candidates.extend(search_path("DYLD_LIBRARY_PATH", name));
         candidates.push(path.to_string());
@@ -764,8 +764,8 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
     let mangled = format!("_{name}");
     let scoped: Vec<&'static Image> = match snapshot().into_iter().find(|i| i.handle == handle) {
         Some(image) => vec![image],
-        // Every pseudo-handle — `RTLD_DEFAULT`, `RTLD_SELF`, `RTLD_NEXT`, and
-        // the token `dlopen(NULL)` returns — is treated as a global search.
+        // Every pseudo-handle - `RTLD_DEFAULT`, `RTLD_SELF`, `RTLD_NEXT`, and
+        // the token `dlopen(NULL)` returns - is treated as a global search.
         None => snapshot(),
     };
     for image in scoped {
@@ -838,7 +838,7 @@ fn remember_native_symbol(addr: u64, name: &str, library: Option<String>) -> u64
     let site = *map.entry(addr).or_insert_with(|| {
         Box::leak(Box::new(ImportSite {
             // The Mach-O spelling, because that is what the signature table is
-            // keyed by — `dlsym` takes the C identifier and drops the underscore.
+            // keyed by - `dlsym` takes the C identifier and drops the underscore.
             symbol: format!("_{name}"),
             library,
             resolved: addr,
@@ -874,12 +874,12 @@ pub fn native_symbol_at(host: u64) -> Option<&'static ImportSite> {
         return None;
     }
     // SAFETY: leaked by `remember_native_symbol` and never freed, so the slice
-    // stays valid for the life of the process — the same claim `VIEW` makes.
+    // stays valid for the life of the process - the same claim `VIEW` makes.
     //
     // A snapshot one `dlsym` behind can miss a site another thread has just
     // recorded, and unlike a thunk that is harmless: the caller falls through to
     // `UnknownIndirectCall`, which is what it would have got a microsecond
-    // earlier anyway, and the guest cannot have the address yet — `dlsym` has
+    // earlier anyway, and the guest cannot have the address yet - `dlsym` has
     // not returned it.
     let view = unsafe { &*published };
     view.binary_search_by_key(&host, |(a, _)| *a)
@@ -902,8 +902,8 @@ fn notify(thunk: u64, header: u64, slide: u64) {
         eprintln!("rosetta3: add-image notice: header {header:#x}, slide {slide:#x}");
     }
     // SAFETY: `thunk` is a native arm64 trampoline this runtime compiled for a
-    // guest function of dyld's callback signature — two integer arguments, no
-    // return — which is inside the shape [`crate::thunk`] can carry.
+    // guest function of dyld's callback signature - two integer arguments, no
+    // return - which is inside the shape [`crate::thunk`] can carry.
     let f: extern "C" fn(u64, u64) = unsafe { std::mem::transmute::<u64, _>(thunk) };
     f(header, slide);
 }
@@ -934,8 +934,8 @@ fn register_func_for_add_image(
     };
 
     // Registered before the retrospective notices go out, so an image loaded by
-    // one of those notices — an initializer that `dlopen`s, which is exactly
-    // what a plugin host does — is announced rather than missed.
+    // one of those notices - an initializer that `dlopen`s, which is exactly
+    // what a plugin host does - is announced rather than missed.
     ADD_IMAGE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -954,7 +954,7 @@ fn register_func_for_add_image(
 
 /// `void _dyld_register_func_for_remove_image(...)`
 ///
-/// Recorded and never called, because nothing is ever unloaded — see the scope note on
+/// Recorded and never called, because nothing is ever unloaded - see the scope note on
 /// `dlclose`. Accepting it is honest in a way refusing would not be.
 fn register_func_for_remove_image(
     _symbol: &str,
@@ -1101,7 +1101,7 @@ fn dladdr(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) ->
             return Ok(());
         };
         // SAFETY: `dladdr` is `int (const void *, Dl_info *)`, and `info` is a
-        // guest address — which is a real address in this process, since the
+        // guest address - which is a real address in this process, since the
         // guest is identity-mapped. The host writes 32 bytes there, which is
         // what the guest allocated.
         let f: extern "C" fn(u64, u64) -> i32 =
@@ -1129,7 +1129,7 @@ fn dladdr(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) ->
 /// ## The structure, read out of the caller
 ///
 /// `dyld_priv.h` is not in any SDK on this system, so the layout comes from the
-/// vendored `libunwind` that calls it — the same method [`crate::abi::table`]'s
+/// vendored `libunwind` that calls it - the same method [`crate::abi::table`]'s
 /// `KBGetLayoutType` entry uses, and the same one this project uses to decide which
 /// bytes are code:
 ///
@@ -1243,7 +1243,7 @@ struct Described {
 
 /// `addr` as an image and a symbol, if this runtime is the one that mapped it.
 ///
-/// Covers both kinds of guest image — the program itself and anything [`open`] loaded —
+/// Covers both kinds of guest image - the program itself and anything [`open`] loaded -
 /// because a caller cannot tell them apart and neither should the answer.
 fn describe(addr: u64) -> Option<Described> {
     if addr == 0 {

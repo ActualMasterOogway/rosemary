@@ -14,7 +14,7 @@ use rosetta3::abi::GuestMemory;
 /// A VM that outlives the test, deliberately.
 ///
 /// Every one of these fixtures registers an `atexit` handler, and forwarding
-/// `atexit` means the *host's* exit list now holds a thunk — code owned by this
+/// `atexit` means the *host's* exit list now holds a thunk - code owned by this
 /// VM, pointing at guest memory owned by this VM. Dropping it would unmap both
 /// and leave the process to call them on the way out. So a VM that has run a
 /// guest is not droppable while the process lives, which is a fact about the
@@ -24,7 +24,7 @@ fn vm_for(path: &str) -> &'static Vm {
     let program = Program::load_executable(path, &[])
         .unwrap_or_else(|e| panic!("linking {path} failed: {e}"));
     // Two arguments, so `argc` and `argv` agree: a guest handed an `argc` its
-    // `argv` cannot back reads past the array's NULL and dereferences it — its
+    // `argv` cannot back reads past the array's NULL and dereferences it - its
     // own behaviour, correctly reproduced, and not a failure worth
     // manufacturing in a test.
     let args = [path.to_string(), "one".to_string()];
@@ -72,8 +72,8 @@ fn a_region_is_translated_once_and_reused() {
 
 #[test]
 fn one_guest_pointer_gets_exactly_one_thunk() {
-    // Host code compares function pointers — `atexit` deduplicates, a dispatch
-    // table is checked against a sentinel — so two thunks for one guest
+    // Host code compares function pointers - `atexit` deduplicates, a dispatch
+    // table is checked against a sentinel - so two thunks for one guest
     // function would answer a question the guest can ask, wrongly.
     let Some(path) = common::qsort_fixture() else {
         skip!("cannot build x86_64 fixtures")
@@ -115,7 +115,7 @@ fn a_thunk_is_a_native_function_the_host_can_call() {
     rosetta3::thunk::publish(vm);
 
     // SAFETY: `thunk` is the address of a trampoline this VM compiled, whose
-    // prototype is six integer arguments and an integer return — see
+    // prototype is six integer arguments and an integer return - see
     // `rosetta3::thunk`. Passing fewer than six is what AAPCS64 permits and
     // what every C caller does.
     let f: extern "C" fn(u64, u64, u64, u64) -> u64 = unsafe { std::mem::transmute(thunk) };
@@ -129,7 +129,7 @@ fn a_thunk_is_a_native_function_the_host_can_call() {
 #[test]
 fn the_guest_stack_is_readable_guest_memory() {
     // Shims bounds-check the pointers they are handed, and a `char buf[64]` is
-    // on the stack — so a stack that is not part of the guest's memory would
+    // on the stack - so a stack that is not part of the guest's memory would
     // make every `snprintf` into a buffer fail.
     let Some(path) = common::hello() else {
         skip!("cannot build x86_64 fixtures")

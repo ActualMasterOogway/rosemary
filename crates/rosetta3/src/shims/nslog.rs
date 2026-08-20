@@ -37,7 +37,7 @@ pub fn nslog(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory)
 /// Service `NSRunAlertPanel`.
 ///
 /// `NSInteger NSRunAlertPanel(NSString *title, NSString *msgFormat, NSString
-/// *defaultButton, NSString *alternateButton, NSString *otherButton, ...)` — the same
+/// *defaultButton, NSString *alternateButton, NSString *otherButton, ...)` - the same
 /// two complications as `NSLog` (variadic, `NSString` format) with the format in the
 /// *second* position rather than the first, so five integer registers are named rather
 /// than one.
@@ -63,8 +63,8 @@ pub fn run_alert_panel(
         ctx.rax = NS_ALERT_DEFAULT_RETURN;
         return Ok(());
     };
-    // SAFETY: `symbol` resolved in an AppKit this process has loaded — the
-    // guest's own window brought it in — and its declaration is the one above.
+    // SAFETY: `symbol` resolved in an AppKit this process has loaded - the
+    // guest's own window brought it in - and its declaration is the one above.
     // Called through a *variadic* prototype with no variadic arguments, which
     // is what the rendered format standing in for the guest's makes correct:
     // there is nothing left for it to convert. The buttons are the guest's own
@@ -83,7 +83,7 @@ pub fn run_alert_panel(
 }
 
 /// `NSAlertDefaultReturn`, which is what dismissing a panel with its default
-/// button gives — the answer a guest handles by definition, since that button
+/// button gives - the answer a guest handles by definition, since that button
 /// is the one it always supplies.
 const NS_ALERT_DEFAULT_RETURN: u64 = 1;
 
@@ -93,7 +93,7 @@ const NS_ALERT_DEFAULT_RETURN: u64 = 1;
 /// already used, exactly as [`VarArgs::new`] means it:
 ///
 /// `Ok(None)` means the format was not a readable string, which is the guest's error
-/// and not this runtime's — a logging or formatting call must not be the thing that
+/// and not this runtime's - a logging or formatting call must not be the thing that
 /// stops a program.
 pub fn render_format(
     symbol: &str,
@@ -158,7 +158,7 @@ fn emit(text: &[u8]) {
         return;
     };
     // SAFETY: `nslog` is Foundation's own `NSLog`, called through a *variadic*
-    // prototype — which is the load-bearing part, since Apple's arm64 ABI
+    // prototype - which is the load-bearing part, since Apple's arm64 ABI
     // passes a variadic argument on the stack and a fixed prototype would put
     // `c` in `x1` where the callee never looks. `fmt` is a `CFStringRef` this
     // module created and keeps alive for the process, and `c` outlives the
@@ -207,7 +207,7 @@ fn cf_string_bytes(obj: u64) -> Option<Vec<u8>> {
     let get = dlsym("CFStringGetCString")?;
     let length = dlsym("CFStringGetLength")?;
     // SAFETY: both are CoreFoundation's own, called with their declared
-    // signatures. `obj` is a `CFStringRef` — either the host's, or a constant
+    // signatures. `obj` is a `CFStringRef` - either the host's, or a constant
     // `@"..."` in the guest's `__cfstring` whose `isa` is a bind of
     // `___CFConstantStringClassReference` and which the host runtime therefore
     // understands (see the roadmap).
@@ -248,7 +248,7 @@ fn description_bytes(obj: u64) -> Option<Vec<u8>> {
         return Some(b"(null)".to_vec());
     }
     // Every `NSObject` implements `description`, and not every object is an
-    // `NSObject` — a class built on `NSProxy`, or one of the few root classes
+    // `NSObject` - a class built on `NSProxy`, or one of the few root classes
     // Foundation keeps, answers `doesNotRecognizeSelector:` and raises.
     if !responds_to(obj, "description") {
         return None;
@@ -272,7 +272,7 @@ fn is_kind_of(obj: u64, class_name: &str) -> bool {
 
 /// Whether `obj`'s class implements `selector`.
 fn responds_to(obj: u64, selector: &str) -> bool {
-    // SAFETY: `obj` is an object pointer — the host runtime's own allocation,
+    // SAFETY: `obj` is an object pointer - the host runtime's own allocation,
     // or a guest constant whose `isa` is a bind of a Foundation class.
     unsafe { responds(obj as usize as Id, sel(selector)) }
 }
@@ -283,8 +283,8 @@ mod tests {
 
     /// Load Foundation, and say whether this host has one.
     ///
-    /// The driver deliberately never links it — the roadmap records what a framework's
-    /// initializers do to the `errno` a guest then reads — so a test binary has no
+    /// The driver deliberately never links it - the roadmap records what a framework's
+    /// initializers do to the `errno` a guest then reads - so a test binary has no
     /// `NSString` until it asks for one.
     fn foundation() -> bool {
         // SAFETY: `dlopen` of an absolute path, answering null when absent.
@@ -329,7 +329,7 @@ mod tests {
         );
     }
 
-    /// `description` is guarded the same way, and a class object answers it —
+    /// `description` is guarded the same way, and a class object answers it -
     /// so the guard must not refuse the case it is meant to let through.
     #[test]
     fn a_class_describes_itself() {

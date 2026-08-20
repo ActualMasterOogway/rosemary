@@ -19,7 +19,7 @@ pub struct GuestThread {
     /// the thread is not inside guest code.
     context: AtomicU64,
     /// The guest stack, which is *not* the host stack this thread was created
-    /// with — see [`crate::shims::machthread`] for why that matters to anything
+    /// with - see [`crate::shims::machthread`] for why that matters to anything
     /// asking `pthread_get_stackaddr_np`.
     stack: Range<u64>,
 }
@@ -117,7 +117,7 @@ pub fn by_port(port: u32) -> Option<&'static GuestThread> {
         if slot.port.load(Ordering::Acquire) == port {
             let raw = slot.thread.load(Ordering::Acquire);
             // SAFETY: a non-null pointer in the table came from
-            // `Arc::into_raw` in `register` and is never freed — see the note
+            // `Arc::into_raw` in `register` and is never freed - see the note
             // there on why it is leaked.
             return (!raw.is_null()).then(|| unsafe { &*raw });
         }
@@ -357,7 +357,7 @@ impl CodeWindow {
     pub(crate) fn link_table(&self) -> *mut BlockLinkEntry {
         // SAFETY: taking the address of the allocation, not reading it. The
         // `Box` is owned by this `CodeWindow` and never reallocated, so the
-        // address is stable for the life of the thread — which is what lets it
+        // address is stable for the life of the thread - which is what lets it
         // be handed to compiled code at all.
         unsafe { (*self.links.get()).as_mut_ptr() }
     }
@@ -378,8 +378,8 @@ impl CodeWindow {
             slots[slot] = Some((pc, std::sync::Arc::clone(translation)));
             // The link row goes in with the `Arc`, and only with it: the
             // reference held here is what keeps the code address in the row
-            // mapped, so a row published without one — or left behind when one
-            // is replaced — is the one way this could name freed pages. The
+            // mapped, so a row published without one - or left behind when one
+            // is replaced - is the one way this could name freed pages. The
             // borrow above is also what serialises this against a nested run
             // loop writing the same slot.
             //
@@ -397,7 +397,7 @@ impl CodeWindow {
 ///
 /// A raw pthread key, not `thread_local!`. Rust's is thread-specific data with a
 /// "destroyed" flag in front of it, and macOS trips that flag on the main thread
-/// *inside* `exit` — precisely when the guest's `atexit` handlers run and re-enter the
+/// *inside* `exit` - precisely when the guest's `atexit` handlers run and re-enter the
 /// JIT. A raw key has no such flag: the value stays readable until the thread ends.
 /// The destructor frees a *secondary* thread's stack, so a guest that spawns and joins
 /// in a loop does not accumulate an 8 MiB reservation per thread.
@@ -476,7 +476,7 @@ fn clear_errno() {
 
 /// The guest's `errno`, put back exactly as it was.
 ///
-/// **Not defensive tidying — a measured bug, twice.** `dlopen` of a framework this
+/// **Not defensive tidying - a measured bug, twice.** `dlopen` of a framework this
 /// system does not have sets `ENOENT`, and [`crate::gui`]'s `sys` does exactly that on
 /// the main thread between [`clear_errno`] and the guest's `main`.
 pub(crate) struct Errno(i32);
@@ -496,7 +496,7 @@ impl Drop for Errno {
     }
 }
 
-/// The base of this host thread's thread-specific data array — the value a guest's
+/// The base of this host thread's thread-specific data array - the value a guest's
 /// `%gs` segment base must hold.
 ///
 /// On arm64 Darwin the array's address is `TPIDRRO_EL0` with its low three bits masked
@@ -590,7 +590,7 @@ pub fn spawn(start: GuestStart, attr: &libc::pthread_attr_t) -> Result<libc::pth
 /// guest.
 extern "C" fn entry(raw: *mut c_void) -> *mut c_void {
     // Unboxed before the guest runs, and the fields copied out, because the
-    // guest's start routine may call `pthread_exit` — which ends this thread
+    // guest's start routine may call `pthread_exit` - which ends this thread
     // from underneath these Rust frames without unwinding them. A `Box` still
     // live at that moment is a leak once per thread that exits that way.
     // SAFETY: the pointer came from `Box::into_raw` in `spawn` and is handed to
@@ -603,7 +603,7 @@ extern "C" fn entry(raw: *mut c_void) -> *mut c_void {
         return core::ptr::null_mut();
     }
 
-    // SAFETY: `entry` is a thunk this runtime compiled — an arm64 function
+    // SAFETY: `entry` is a thunk this runtime compiled - an arm64 function
     // taking the guest's six integer argument registers and eight vector ones,
     // of which a start routine reads the first. It stays mapped for the VM's
     // lifetime, which outlives every thread that can reach it. See

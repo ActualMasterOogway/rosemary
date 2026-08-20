@@ -7,8 +7,8 @@
 //! prints the same thing with the substitution and without it.
 //!
 //! `ROSETTA3_TRAMPOLINES=0` is the without. It is a real baseline rather than a
-//! debug switch — every path it turns off is a path that worked before this
-//! existed — which is what lets the two runs be compared line for line.
+//! debug switch - every path it turns off is a path that worked before this
+//! existed - which is what lets the two runs be compared line for line.
 
 mod common;
 
@@ -16,8 +16,8 @@ use common::{run_guest, run_guest_env};
 
 /// What the fixture must print, whichever way the pointers were reached.
 ///
-/// `same=1` is the load-bearing one: two routes to `strlen` — the import slot
-/// and `dlsym` — must produce one pointer. A substitution that made a stub per
+/// `same=1` is the load-bearing one: two routes to `strlen` - the import slot
+/// and `dlsym` - must produce one pointer. A substitution that made a stub per
 /// route would be observably wrong here, and nowhere else for a long time.
 fn expect(out: &str, err: &str) {
     assert!(out.contains("slot len=6\n"), "{out:?} (stderr: {err})");

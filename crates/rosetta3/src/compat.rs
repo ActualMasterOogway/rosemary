@@ -31,7 +31,7 @@ pub fn install() {
     unsafe { send1::<Id, Id>(defaults, sel("registerDefaults:"), dict) };
 }
 
-/// `+[NSNumber numberWithBool:]`, whose argument is a `BOOL` — one byte, in the
+/// `+[NSNumber numberWithBool:]`, whose argument is a `BOOL` - one byte, in the
 /// low bits of the third argument register.
 fn number(value: bool) -> Id {
     let cls = class("NSNumber");

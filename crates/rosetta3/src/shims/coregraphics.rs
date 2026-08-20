@@ -64,7 +64,7 @@ fn rect_of_display(
 ///
 /// A MEMORY-class argument is *on the stack* under SysV AMD64, and microlift exits
 /// before the `CALL`, so `rsp` is still the pre-call value and the argument area starts
-/// at `rsp + 0` — the arrangement [`crate::abi::marshal`]'s stack path already rests
+/// at `rsp + 0` - the arrangement [`crate::abi::marshal`]'s stack path already rests
 /// on.
 pub(crate) fn rect_argument(
     symbol: &str,
@@ -140,7 +140,7 @@ fn rect_accessor(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMem
 
 /// `CGPoint CGEventGetLocation(CGEventRef)`
 ///
-/// Sixteen bytes of two `double`s, which is the case the two ABIs **agree** about —
+/// Sixteen bytes of two `double`s, which is the case the two ABIs **agree** about -
 /// SysV AMD64 returns two SSE eightbytes in `xmm0`/`xmm1`, AAPCS64 returns a two-member
 /// homogeneous float aggregate in `v0`/`v1`.
 fn event_location(
@@ -191,7 +191,7 @@ fn event_create_mouse(
     };
     // SAFETY: the symbol [`shim_for`] matched, whose declaration is the one
     // above, resolved out of a CoreGraphics this process has loaded. `source` is
-    // an opaque handle the guest got from `CGEventSourceCreate` — or null, which
+    // an opaque handle the guest got from `CGEventSourceCreate` - or null, which
     // is the documented "no source" and what a game that only warps the cursor
     // passes.
     let f: extern "C" fn(u64, u32, CgPoint, u32) -> u64 =
@@ -268,11 +268,11 @@ pub type Shim = fn(&str, &mut RegisterContext, &mut dyn GuestMemory) -> Result<(
 /// Whether `name` (underscore already stripped) is one of this module's.
 pub fn shim_for(name: &str) -> Option<Shim> {
     match name {
-        // `CGRect CGDisplayBounds(CGDirectDisplayID)` — where a display sits in
+        // `CGRect CGDisplayBounds(CGDirectDisplayID)` - where a display sits in
         // the global desktop coordinate space, which SDL asks for every display
         // it enumerates.
         "CGDisplayBounds" => Some(rect_of_display),
-        // `CGSize CGDisplayScreenSize(CGDirectDisplayID)` — sixteen bytes rather
+        // `CGSize CGDisplayScreenSize(CGDirectDisplayID)` - sixteen bytes rather
         // than thirty-two, so it is the agreeing case rather than the
         // disagreeing one, and it still cannot be a table entry.
         "CGDisplayScreenSize" => Some(screen_size_of_display),

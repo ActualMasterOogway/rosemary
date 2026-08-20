@@ -23,14 +23,14 @@ pub struct Translation {
     pub start: u64,
     /// One past the last guest byte it covers.
     pub end: u64,
-    /// The addresses it may be entered at, ascending — microlift's own account of which
+    /// The addresses it may be entered at, ascending - microlift's own account of which
     /// arms its entry dispatch has, not the region's instruction grid.
     entries: Vec<u64>,
     /// The compiled entry point. Takes a pointer to the guest context and
     /// returns having written an exit reason into it.
     entry: unsafe extern "C" fn(*mut RegisterContext),
     /// The address a block-link row must name to reach this translation, as a plain
-    /// integer — a row is read by *compiled code* and so cannot hold a Rust function
+    /// integer - a row is read by *compiled code* and so cannot hold a Rust function
     /// pointer, only its bits.
     ///
     /// The same address as [`entry`](Self::entry), **except under a pinned link ABI**
@@ -38,7 +38,7 @@ pub struct Translation {
     /// tail-convention body with the guest registers already in place and `entry` is
     /// the thunk that fills them from the context.
     code: u64,
-    /// Keeps the JIT module — and therefore `entry`'s pages — mapped.
+    /// Keeps the JIT module - and therefore `entry`'s pages - mapped.
     _backend: CraneliftBackend,
 }
 
@@ -61,7 +61,7 @@ impl Translation {
         // signature is `(*mut RegisterContext) -> ()` in the host C convention,
         // compiled by the backend this `Translation` owns and therefore still
         // mapped. The lifted code's only memory effects outside `ctx` are the
-        // guest's own — the guest stack and its mapped images, all live for the
+        // guest's own - the guest stack and its mapped images, all live for the
         // duration of the call.
         unsafe { (self.entry)(ctx as *mut RegisterContext) };
         // Under a pinned ABI a link is a branch: `link_hit` is never written and
@@ -108,7 +108,7 @@ fn host_resolved_links() -> bool {
 fn follow_links(ctx: &mut RegisterContext) -> ExitReason {
     while ctx.link_hit != 0 {
         // SAFETY: `link_hit` holds an address lifted code read out of the table
-        // published in `ctx.link_table` — this thread's own, whose rows only
+        // published in `ctx.link_table` - this thread's own, whose rows only
         // this thread writes, and which is alive for as long as the thread is.
         // A row's `code` is kept mapped by the `Arc` the window holds in the
         // same slot, and by `CodeCache::retired` if that slot is ever replaced.
@@ -118,7 +118,7 @@ fn follow_links(ctx: &mut RegisterContext) -> ExitReason {
             "a link was taken for an address the region did not commit"
         );
         // Both counters, so that the two figures `docs/HOTSPOTS.md` is written
-        // against — the entry *rate* and the exit *mix* — keep counting the
+        // against - the entry *rate* and the exit *mix* - keep counting the
         // events they always counted.
         if crate::stats::enabled() {
             crate::stats::record_exit(crate::vm::classify(
@@ -245,7 +245,7 @@ impl EntryIndex {
     }
 
     /// A translation that can be entered at `pc`, or `None` if this table does not
-    /// know of one — which a caller must read as "ask the regions", not as "there is
+    /// know of one - which a caller must read as "ask the regions", not as "there is
     /// none": a lift racing this probe publishes after it.
     fn get(&self, pc: u64) -> Option<*const Translation> {
         self.table().get(pc)
@@ -291,7 +291,7 @@ impl EntryIndex {
 /// Translations, keyed by the guest address each begins at.
 ///
 /// A hit is a read and a lift is a write, at a ratio of thousands to one, so the map
-/// is behind an `RwLock` rather than a mutex — and a compile runs outside the lock
+/// is behind an `RwLock` rather than a mutex - and a compile runs outside the lock
 /// entirely, which is what lets two guest threads lift at once instead of one waiting
 /// out the other's Cranelift run.
 pub struct CodeCache {
@@ -309,7 +309,7 @@ struct Published {
     regions: BTreeMap<u64, Arc<Translation>>,
     /// The widest `end - start` any translation in [`regions`](Self::regions) has,
     /// which is how far below `pc` [`CodeCache::lookup`] has to look. Without it
-    /// the scan for an address no region covers — the case that then lifts — walks
+    /// the scan for an address no region covers - the case that then lifts - walks
     /// every region below it, and that walk is 2.2% of `docs/HOTSPOTS.md`.
     max_span: u64,
     /// Translations displaced from [`regions`](Self::regions) by a re-lift of the same
@@ -318,7 +318,7 @@ struct Published {
 }
 
 // SAFETY: the one thing keeping a cache off a second thread is the raw pointer
-// inside `LifterConfig`'s `DynamicSymbol`s — the *host address* a fast import
+// inside `LifterConfig`'s `DynamicSymbol`s - the *host address* a fast import
 // resolved to. It is a function address, cloned into each lift and never
 // dereferenced on this side; the code that eventually calls it is compiled arm64
 // doing what any thread may do with a function pointer. The translations beside
@@ -488,7 +488,7 @@ impl CodeCache {
     fn lookup(&self, pc: u64) -> Option<Arc<Translation>> {
         if let Some(hit) = self.index.get(pc) {
             // SAFETY: the pointer was taken from an `Arc` this cache put in
-            // `regions`, and neither `regions` nor `retired` ever gives one up — a
+            // `regions`, and neither `regions` nor `retired` ever gives one up - a
             // replaced translation is retired, not dropped. So the strong count is at
             // least one for as long as `&self` is borrowed, which is what makes an
             // increment off a bare pointer legal here and nowhere else.
@@ -502,12 +502,12 @@ impl CodeCache {
 
     /// [`lookup`](Self::lookup) the authoritative way: what the index is a cache of.
     ///
-    /// Only a miss reaches this, and a miss is on its way to a lift — except for the
+    /// Only a miss reaches this, and a miss is on its way to a lift - except for the
     /// one race the index cannot cover, a probe that overtook another thread's
     /// publish.
     fn scan(&self, pc: u64) -> Option<Arc<Translation>> {
         let published = self.read();
-        // Regions may overlap, so the answer is not `range(..=pc).next_back()` —
+        // Regions may overlap, so the answer is not `range(..=pc).next_back()` -
         // but a region that could cover `pc` begins no earlier than `max_span`
         // before it, which bounds the walk.
         published
@@ -569,14 +569,14 @@ fn compile_region(
 struct Compiled {
     backend: microlift::backend::CraneliftBackend,
     code: *const u8,
-    /// What a block-link row names — see [`Translation::code`].
+    /// What a block-link row names - see [`Translation::code`].
     link_target: *const u8,
     /// Host offset → guest instruction, so a fault inside this code can name
     /// the instruction rather than the region. See [`crate::fault`].
     map: microlift::core::srcloc::GuestCodeMap,
     /// Guest bytes retained only so the opt-in LLDB listing can show x86-64.
     guest_bytes: Vec<u8>,
-    /// Where the compiled code may be entered — see [`Translation::covers`].
+    /// Where the compiled code may be entered - see [`Translation::covers`].
     entries: Vec<u64>,
 }
 

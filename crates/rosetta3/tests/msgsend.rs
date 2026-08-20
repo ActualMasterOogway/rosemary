@@ -11,7 +11,7 @@
 //! **same binary prints natively**. That is the only specification of an
 //! Objective-C program worth having: the runtime is the host's either way, so
 //! any divergence is this runtime's doing. Rosetta 2 is still present, so the
-//! comparison is against the identical x86_64 file rather than a recompilation —
+//! comparison is against the identical x86_64 file rather than a recompilation -
 //! and when it is not available the test skips rather than inventing an expected
 //! string.
 //!
@@ -42,7 +42,7 @@ fn agrees(path: &str, args: &[&str]) -> Option<String> {
 /// The gate: an Objective-C program that sends messages runs, and prints what it
 /// prints natively.
 ///
-/// Sixteen claims in one process — see [`common::OBJC_MESSAGES_M`] for what each
+/// Sixteen claims in one process - see [`common::OBJC_MESSAGES_M`] for what each
 /// line is for. Comparing the whole output rather than asserting line by line is
 /// deliberate: a runtime that got `super` wrong or resolved an override on the
 /// wrong class produces *plausible* output, and only the diff against the real
@@ -90,7 +90,7 @@ fn the_same_program_optimised_takes_the_tail_call_path() {
 /// The milestone-2 claim, applied to the family M6.3 added: nothing may be
 /// [`Classification::Unknown`], because unknown is the one outcome that becomes a
 /// wrong value in a register rather than a diagnostic. The Objective-C surface is
-/// where this is easiest to lose — a class reference is one import per class the
+/// where this is easiest to lose - a class reference is one import per class the
 /// program mentions.
 ///
 /// [`Classification::Unknown`]: rosetta3::abi::Classification
@@ -113,13 +113,13 @@ fn every_objective_c_import_is_classified() {
 
 /// `objc_msgSend` is never inlined by the lifter.
 ///
-/// It has no signature to inline *with* — it has whichever signature the method
-/// has — so promoting it would call the host's own trampoline with the guest's
+/// It has no signature to inline *with* - it has whichever signature the method
+/// has - so promoting it would call the host's own trampoline with the guest's
 /// registers, which is a crash inside somebody else's assembly.
 ///
 /// `objc_alloc_init` is here for a different reason and it is the more subtle
 /// one: it *has* an ordinary `id(Class)` signature, and it still may not be
-/// inlined, because it sends `init` — which for a guest class is a thunk back
+/// inlined, because it sends `init` - which for a guest class is a thunk back
 /// into the JIT, entered against a
 /// [stale guest stack pointer](rosetta3::objc::fast). Nothing in its signature
 /// says so, which is why the rule is a list of names rather than a property of
@@ -143,7 +143,7 @@ fn the_message_send_family_is_never_promoted_to_a_fast_import() {
 /// test: "shimmed" and "slow" used to be the same statement, and this is where
 /// they came apart. `class_getName` is shimmed because the native provider
 /// denies the whole `_class_` family so [`rosetta3::objc::dispatch`] can claim
-/// the sends — not because calling the host's would be wrong. It reads a name
+/// the sends - not because calling the host's would be wrong. It reads a name
 /// out of a class and cannot dispatch, so it is inlined against a substituting
 /// function that translates the class and calls the host's.
 ///
@@ -168,7 +168,7 @@ fn a_runtime_entry_point_that_cannot_dispatch_is_a_fast_import() {
 /// This test used to assert all three were refused, and two of them moving is
 /// the whole of what [`rosetta3::abi::aggregate`] and the variadic re-send are
 /// for. What has not moved is `@throw`, which is M5's unwinder with a different
-/// personality routine — and what matters about it is unchanged: it says so,
+/// personality routine - and what matters about it is unchanged: it says so,
 /// with the program's output up to that point intact, rather than crashing.
 #[test]
 fn an_aggregate_return_and_a_variadic_method_both_work_and_throw_still_names_itself() {
@@ -181,7 +181,7 @@ fn an_aggregate_return_and_a_variadic_method_both_work_and_throw_still_names_its
     assert_eq!(status, Some(0), "stderr: {stderr}");
     assert_eq!(stdout, "before\nafter\n");
 
-    // `[s appendFormat:@"%d", 3]` — the format is rendered here and the method
+    // `[s appendFormat:@"%d", 3]` - the format is rendered here and the method
     // re-sent with the result, so the ellipsis the encoding never described is
     // empty by the time the host sees the call.
     let (status, stdout, stderr) = common::run_guest(&path, &["variadic"]);
@@ -210,13 +210,13 @@ fn an_aggregate_return_and_a_variadic_method_both_work_and_throw_still_names_its
 /// binder zeroed was not registered, so the recompiler followed the `__stubs`
 /// trampoline into it. The whole content of the failure is a symbol name, and
 /// that is what it says now. Provoked with a symbol the native provider denies
-/// on purpose — dyld introspection, which the whole `__dyld_` prefix refuses so
+/// on purpose - dyld introspection, which the whole `__dyld_` prefix refuses so
 /// that a shim has to decide what the guest is told.
 ///
 /// The fixture used to call `_dyld_image_count`, and that stopped being a
 /// denied-and-unanswered symbol when [`rosetta3::shims::runtime`] began
 /// answering the image-list family for Unity's crash reporter. It moved to the
-/// vmaddr slide, and *that* stopped being one too — the whole image-list family
+/// vmaddr slide, and *that* stopped being one too - the whole image-list family
 /// is claimed now, because a guest crash reporter walks it. It is
 /// `_dyld_get_prog_image_header` today. **The test moving is the correct
 /// outcome each time**: the alternative is holding a shim back so a diagnostic
@@ -245,8 +245,8 @@ fn an_unsatisfied_import_names_itself_when_it_is_called() {
 /// The slow-import policy takes the same program to the same place.
 ///
 /// M2's falsifiable claim, applied to M6.3: fast imports are an optimisation of
-/// slow ones. Message sending is unaffected either way — `objc_msgSend` is
-/// shimmed, so it is a VM exit under both policies — and this says the rest of
+/// slow ones. Message sending is unaffected either way - `objc_msgSend` is
+/// shimmed, so it is a VM exit under both policies - and this says the rest of
 /// the program's imports really are interchangeable.
 #[test]
 fn the_slow_import_policy_sends_the_same_messages() {
@@ -263,7 +263,7 @@ fn the_slow_import_policy_sends_the_same_messages() {
 ///
 /// The direction every other aggregate test here has backwards. Guest→host is a
 /// marshaller reading the guest's registers; this is a compiled trampoline
-/// placing AAPCS64's `v0`–`v3` where SysV AMD64 expects an `NSRect` — which for
+/// placing AAPCS64's `v0`–`v3` where SysV AMD64 expects an `NSRect` - which for
 /// thirty-two bytes is the guest's **stack**, not any register at all.
 ///
 /// Checked against the same binary run natively, because the specification of
@@ -295,7 +295,7 @@ fn the_host_calls_a_guest_method_with_an_aggregate_by_value() {
 ///
 /// The send path may decode a method's type encoding only once it knows the `IMP` is
 /// not the guest's own. Decoding it first refuses every send of a guest method carrying
-/// a union — which is a method this runtime installs on purpose, because a guest sender
+/// a union - which is a method this runtime installs on purpose, because a guest sender
 /// never needed the signature.
 #[test]
 fn a_guest_method_whose_encoding_is_undecidable_is_still_sent() {
@@ -318,7 +318,7 @@ fn a_guest_method_whose_encoding_is_undecidable_is_still_sent() {
 /// image the guest maps afterwards is not one of them. Everything in the plugin
 /// therefore used to fail, and the failure that reached a real program first was
 /// the most direct one: SDL3's Cocoa backend declares its own `NSApplication`
-/// subclass, and Terraria's start-up messages it — which stopped with
+/// subclass, and Terraria's start-up messages it - which stopped with
 /// *"the receiver is a guest address whose class the runtime never realized"*.
 ///
 /// Checked against the same binary run natively rather than against a
@@ -348,7 +348,7 @@ fn a_loaded_image_declares_classes_and_the_guest_messages_them() {
 /// The promotion really fires on a linked program, not just in a unit test.
 ///
 /// [`rosetta3::objc::fast::promotion`] declines unless the site resolved to
-/// *exactly* the address `dlsym` gives for the entry point — which is the whole
+/// *exactly* the address `dlsym` gives for the entry point - which is the whole
 /// equivalence argument, and which nothing in this repository can check without
 /// a real link. The synthetic provider defines these symbols from `dlsym`, so
 /// the two agree by construction; this is the test that says so rather than

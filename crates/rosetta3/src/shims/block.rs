@@ -255,7 +255,7 @@ fn dispatch_data_create(
     Ok(())
 }
 
-/// One of this module's implementations, in the shape [`crate::shims`] wants —
+/// One of this module's implementations, in the shape [`crate::shims`] wants -
 /// the wider one, carrying [`Callbacks`].
 pub type Shim = crate::signal::Shim;
 

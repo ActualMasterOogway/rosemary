@@ -17,7 +17,7 @@ const COLUMNS: usize = 16;
 /// The number of cells: one per character, plus one filled solid.
 const CELLS: usize = (LAST - FIRST) as usize + 2;
 
-/// The index of the solid cell — the one a rectangle samples.
+/// The index of the solid cell - the one a rectangle samples.
 const SOLID: usize = CELLS - 1;
 
 /// A rasterized font at one size.
@@ -44,7 +44,7 @@ impl Atlas {
         let index = match (FIRST..=LAST).contains(&c) {
             true => (c - FIRST) as usize,
             // A byte outside the range is a question mark, deliberately drawn
-            // rather than skipped — a line that silently loses a character is a
+            // rather than skipped - a line that silently loses a character is a
             // line whose columns no longer align with the one above it.
             false => (b'?' - FIRST) as usize,
         };
@@ -101,7 +101,7 @@ fn rasterize(size: f32) -> Option<Atlas> {
     type ContextFillRect = unsafe extern "C" fn(CfRef, Rect);
 
     // SAFETY of every `function` below: each type above is transcribed from the
-    // framework header that declares the symbol — `<CoreText/CTFont.h>` for the
+    // framework header that declares the symbol - `<CoreText/CTFont.h>` for the
     // `CTFont*` family and `<CoreGraphics/CGBitmapContext.h>` and
     // `<CoreGraphics/CGContext.h>` for the rest. They are public API, and have
     // been since 10.5.
@@ -121,7 +121,7 @@ fn rasterize(size: f32) -> Option<Atlas> {
 
     let name = sys::cf_string(FACE);
     // SAFETY: `name` is a `CFStringRef` or null, both of which
-    // `CTFontCreateWithName` accepts — null asks for the system font, which is
+    // `CTFontCreateWithName` accepts - null asks for the system font, which is
     // the right answer if Menlo has somehow been removed. A null matrix means
     // the identity.
     let font = unsafe { font_create(name, CgFloat::from(size), std::ptr::null()) };
@@ -133,12 +133,12 @@ fn rasterize(size: f32) -> Option<Atlas> {
         return None;
     }
 
-    // The characters, as UTF-16 — which for printable ASCII is the code point.
+    // The characters, as UTF-16 - which for printable ASCII is the code point.
     let chars: Vec<u16> = (FIRST..=LAST).map(u16::from).collect();
     let mut glyphs = vec![0u16; chars.len()];
     // SAFETY: both slices are live and of the length passed. A `false` return
-    // means some character had no glyph, which leaves that entry zero — the
-    // missing-glyph glyph — and is drawn as such rather than refused.
+    // means some character had no glyph, which leaves that entry zero - the
+    // missing-glyph glyph - and is drawn as such rather than refused.
     unsafe {
         get_glyphs(
             font,
@@ -221,7 +221,7 @@ fn rasterize(size: f32) -> Option<Atlas> {
     unsafe { draw_glyphs(font, glyphs.as_ptr(), positions.as_ptr(), glyphs.len(), ctx) };
 
     // The solid cell, filled through the same context so that it is opaque by
-    // the same definition the glyphs are — a memset here would be a second
+    // the same definition the glyphs are - a memset here would be a second
     // statement about what "fully covered" means.
     let (col, row) = (SOLID % COLUMNS, SOLID / COLUMNS);
     // SAFETY: `ctx` is live and the rectangle is inside it.
@@ -241,8 +241,8 @@ fn rasterize(size: f32) -> Option<Atlas> {
         )
     };
 
-    // SAFETY: the context is done with — every drawing call above has already
-    // written into `pixels` — and both objects came from `Create` functions.
+    // SAFETY: the context is done with - every drawing call above has already
+    // written into `pixels` - and both objects came from `Create` functions.
     unsafe {
         context_release(ctx);
         cf_release(font);

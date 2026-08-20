@@ -1,7 +1,7 @@
 //! Milestone 2's acceptance gate.
 //!
 //! The claim: for a program we compiled and can therefore describe completely,
-//! **every import is classified** — each one is either callable with a known
+//! **every import is classified** - each one is either callable with a known
 //! signature, serviced by a shim, or refused by name with a reason. Nothing is
 //! unknown, because an unknown symbol is precisely the case that becomes a
 //! plausible-looking wrong value in a register instead of a diagnostic.
@@ -145,7 +145,7 @@ fn a_known_signature_is_inlined_and_a_variadic_is_not() {
 #[test]
 fn the_slow_policy_registers_the_same_addresses_and_no_metadata() {
     // Fast is an optimisation of slow: the two configurations must differ in
-    // what microlift is *told*, and not in which call sites it intercepts —
+    // what microlift is *told*, and not in which call sites it intercepts -
     // that is what makes promotion safe to turn on or off.
     let Some(path) = common::hello() else {
         skip!("cannot build x86_64 fixtures")
@@ -161,7 +161,7 @@ fn the_slow_policy_registers_the_same_addresses_and_no_metadata() {
         v
     };
     assert_eq!(addrs(&fast), addrs(&slow));
-    // The baseline is exits and nothing else — no inlined calls, no bridges,
+    // The baseline is exits and nothing else - no inlined calls, no bridges,
     // and none of the lift-time machinery either, or it would not be a baseline.
     assert!(slow.imports.values().all(|k| matches!(k, ImportKind::Slow)));
     assert!(slow.import_registry.is_none());
@@ -186,7 +186,7 @@ fn the_slow_policy_registers_the_same_addresses_and_no_metadata() {
 fn a_writable_segment_is_not_handed_to_the_lifter_as_constant_data() {
     // The whole point of `LifterConfig::segments` is that microlift may fold a
     // load from one to a constant, so a `__DATA` page described as read-only is
-    // a wrong value baked into the code — the guest stores to it at run time and
+    // a wrong value baked into the code - the guest stores to it at run time and
     // the lift never sees that. Every mapped byte still has to be described, so
     // this checks both halves: writability matches the image's own `initprot`,
     // and the pieces still tile each mapped region exactly.
@@ -302,7 +302,7 @@ fn servicing_an_unregistered_address_fails_rather_than_calling_it() {
 #[test]
 fn the_entry_function_still_lifts_with_imports_promoted() {
     // Promotion changes the IR the lifter emits for a call site, so the fixture
-    // must still lift with it on — otherwise the acceptance above would be
+    // must still lift with it on - otherwise the acceptance above would be
     // describing a program the JIT cannot translate.
     let Some(path) = common::hello() else {
         skip!("cannot build x86_64 fixtures")

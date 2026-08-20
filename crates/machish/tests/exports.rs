@@ -4,7 +4,7 @@
 //! The load-bearing test here is [`trie_and_nlist_agree`]. The two parsers are
 //! independent readings of the same intent from two unrelated on-disk
 //! structures, so agreement between them is evidence neither has a systematic
-//! error — which no single-parser test against a fixture can give you, since
+//! error - which no single-parser test against a fixture can give you, since
 //! the fixture is only ever what the toolchain happened to emit.
 
 mod common;

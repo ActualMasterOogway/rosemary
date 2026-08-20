@@ -7,7 +7,7 @@
 //!
 //! Milestone 1's acceptance test uses `/bin/ls`. Milestone 2 uses a fixture we
 //! compile, because the ABI question is about *which symbols a program calls*
-//! and a locally built program lets the test state exactly that — and because
+//! and a locally built program lets the test state exactly that - and because
 //! `/bin/ls` embeds a jump table in `__text` that two of its functions do not
 //! lift past, which would put an unrelated microlift gap in the middle of an
 //! ABI test.
@@ -80,7 +80,7 @@ pub fn build_x86_64(name: &str, source: &str, extra: &[&str]) -> Option<String> 
 /// No `<math.h>`, and the `%f` argument is a constant: `sqrt` compiles to
 /// `sqrtsd` and `argc * 1.5` to `cvtsi2sd`, neither of which microlift lifts
 /// yet. A lifting gap inside an ABI fixture would be a red suite about the
-/// wrong thing — the gap is real and it belongs to the recompiler.
+/// wrong thing - the gap is real and it belongs to the recompiler.
 pub const HELLO_C: &str = r#"
 #include <stdio.h>
 #include <string.h>
@@ -120,14 +120,14 @@ pub fn hello() -> Option<String> {
 /// transfers out of a region and back:
 ///
 /// - a **direct call** to a `noinline` function, which the region walk puts in
-///   a region of its own (a callee is never followed — see `crate::region`);
+///   a region of its own (a callee is never followed - see `crate::region`);
 /// - the **`ret`** out of it, which is the commonest exit there is;
 /// - an **indirect call** through a `volatile` function pointer, which is where
 ///   a C++ virtual call lands and which reaches the run loop by a different
 ///   route (the indirect-call bridge).
 ///
-/// The accumulator is printed so that a run which skipped iterations — or
-/// resumed one at the wrong address — differs in its output rather than only in
+/// The accumulator is printed so that a run which skipped iterations - or
+/// resumed one at the wrong address - differs in its output rather than only in
 /// its timing. `argv[1]` scales the loop: the tests want a second, a measurement
 /// wants a minute.
 pub const LINK_C: &str = r#"
@@ -220,7 +220,7 @@ int main(int argc, char **argv) {
 /// Both are host→guest calls, and both are falsifiable: a comparator that is
 /// never really called leaves the array unsorted, and a thunk that is called
 /// with the wrong arguments sorts it wrongly. `atexit` additionally pins down
-/// *when* — its output has to come after `main`'s.
+/// *when* - its output has to come after `main`'s.
 pub const QSORT_C: &str = r#"
 #include <stdio.h>
 #include <stdlib.h>
@@ -249,7 +249,7 @@ int main(void) {
 ///
 /// Three constructors with explicit priorities, so the test can check the order
 /// rather than only that they ran, and a `main` that observes their combined
-/// effect — which is the part that proves they ran *before* it.
+/// effect - which is the part that proves they ran *before* it.
 pub const CTOR_C: &str = r#"
 #include <stdio.h>
 
@@ -270,7 +270,7 @@ int main(void) {
 /// The destructor program: `__cxa_atexit`, reached the way a real guest reaches
 /// it.
 ///
-/// Nothing here mentions `__cxa_atexit` and that is deliberate — clang has not
+/// Nothing here mentions `__cxa_atexit` and that is deliberate - clang has not
 /// emitted `__mod_term_func` for years and registers a
 /// `__attribute__((destructor))` function with `__cxa_atexit` from a constructor
 /// instead, so this two-function C program imports exactly `_puts`,
@@ -298,8 +298,8 @@ int main(void) {
 
 /// A guest callback the runtime first sees *inside* the host's `exit`.
 ///
-/// `by_value` is called from nowhere but the exit handler, so its thunk — and
-/// the translation behind it — is made after macOS has torn the main thread's
+/// `by_value` is called from nowhere but the exit handler, so its thunk - and
+/// the translation behind it - is made after macOS has torn the main thread's
 /// TLS down. Anything in the compile path holding a Rust `thread_local!` panics
 /// there, which is what
 /// [`a_callback_is_translated_after_the_main_threads_tls_is_gone`] fails on.
@@ -333,7 +333,7 @@ int main(void) {
 /// - `main` prints its *own* counter afterwards. A runtime that gave the main
 ///   thread a spawned thread's block would print something other than zero.
 /// - Each start routine returns a value derived from both its counter and its
-///   argument, and `pthread_join` is asserted to deliver it — the argument
+///   argument, and `pthread_join` is asserted to deliver it - the argument
 ///   proves the thunk passed `rdi` through, the counter proves it ran on the
 ///   right block.
 ///
@@ -369,7 +369,7 @@ int main(void) {
 ///
 /// `errno` is the case where passthrough is *correct* rather than merely
 /// unimplemented: it is `__error()` returning a thread-local pointer, and a
-/// guest "syscall" is really the host's libSystem call on the same host thread —
+/// guest "syscall" is really the host's libSystem call on the same host thread -
 /// so the two agree without any work. What this checks is that they really do,
 /// including that a failure on a spawned thread does not disturb the main
 /// thread's value.
@@ -402,7 +402,7 @@ int main(void) {
 /// register cannot be observed to have carried any other way.
 ///
 /// Both are declared variadic in C and described to the lifter as *fixed*, with
-/// the `mode_t` always present — so the guest's mode is placed in a register the
+/// the `mode_t` always present - so the guest's mode is placed in a register the
 /// callee reads as a parameter. See [`rosetta3::shims::openat`]. The
 /// falsifiable claim is the permission bits on disk: a mode that arrived in the
 /// wrong place, or was taken from a stale register, gives a file with
@@ -434,7 +434,7 @@ int main(int argc, char **argv) {
     printf("open ok\n");
 
     // The same call without `O_CREAT`, whose third argument is not a mode at
-    // all — it must not reach the kernel, and the file it opens must keep the
+    // all - it must not reach the kernel, and the file it opens must keep the
     // bits the call above gave it.
     fd = open(path, O_RDONLY, 0777);
     if (fd < 0) { perror("reopen"); return 1; }
@@ -470,7 +470,7 @@ int main(int argc, char **argv) {
 /// A mutex-protected shared counter (four threads, a thousand increments each,
 /// so a lost update shows up as a wrong total), `pthread_once` with a guest
 /// initialiser, and `pthread_key_create` with a guest destructor that libpthread
-/// calls on thread teardown — three host→guest callbacks the host invokes at
+/// calls on thread teardown - three host→guest callbacks the host invokes at
 /// three quite different moments.
 pub const PTHREAD_SYNC_C: &str = r#"
 #include <pthread.h>
@@ -510,27 +510,27 @@ int main(void) {
 /// attributes were about, and who is allowed to ask about it.
 ///
 /// Every line is written to be *identical* to the native run, which is why no
-/// address is ever printed — only sizes, which the guest chose, and booleans
+/// address is ever printed - only sizes, which the guest chose, and booleans
 /// about addresses it can compute for itself. What each one falsifies:
 ///
-/// - **`size`** — the guest's `pthread_attr_setstacksize` reached the stack its
+/// - **`size`** - the guest's `pthread_attr_setstacksize` reached the stack its
 ///   own frames are on. A runtime that applied it to the host thread and gave
 ///   the guest a default reports the default.
-/// - **`local_inside`** — a local variable of the start routine really is in
+/// - **`local_inside`** - a local variable of the start routine really is in
 ///   the range the same thread is told its stack occupies. This is the one that
 ///   catches a plausible-looking answer built out of the wrong mapping.
-/// - **`other_thread_agrees`** — the *main* thread asks about the worker, by
+/// - **`other_thread_agrees`** - the *main* thread asks about the worker, by
 ///   `pthread_t`, and gets the worker's own answer. A shim that reads the
 ///   calling thread's state answers with the main thread's stack, which is the
 ///   bug this fixture exists for; it is also exactly what a garbage collector
 ///   does, once per thread, with the world stopped.
-/// - **`supplied`** — a stack the guest allocated itself and handed over with
+/// - **`supplied`** - a stack the guest allocated itself and handed over with
 ///   `pthread_attr_setstack` is the stack the guest's frames end up on, at the
 ///   size and address the guest named.
 ///
 /// The main thread reports its own stack too, because "answers for the calling
 /// thread" and "answers for the thread asked about" agree there and nowhere
-/// else — a fixture that only ever asked from the worker would pass either way.
+/// else - a fixture that only ever asked from the worker would pass either way.
 pub const PTHREAD_STACK_C: &str = r#"
 #include <pthread.h>
 #include <stdio.h>
@@ -628,7 +628,7 @@ int main(void) {
 ///
 /// Separate from [`THREAD_C`] because it isolates a different failure: reading
 /// a `_Thread_local` at all. It compiles to `leaq _x(%rip), %rdi; callq *(%rdi)`
-/// — an indirect call through a descriptor — and every value here is distinct
+/// - an indirect call through a descriptor - and every value here is distinct
 /// and non-zero, so an off-by-one in the block layout reads a neighbour rather
 /// than passing by luck. The zero-initialised variable is the one that must come
 /// out of the `__thread_bss` half.
@@ -650,8 +650,8 @@ int main(void) {
 
 /// A dylib with thread-locals of its own, for [`TLV_ROUTES_C`] to `dlopen`.
 ///
-/// Its descriptors are not in the program's link report — the image did not
-/// exist when it was built — so they are registered and trampolined by
+/// Its descriptors are not in the program's link report - the image did not
+/// exist when it was built - so they are registered and trampolined by
 /// [`rosetta3::dyld`] rather than at start-up. That is a second copy of the
 /// whole path, and it has failed independently before.
 pub const TLV_PLUGIN_C: &str = r#"
@@ -663,7 +663,7 @@ int plug_sum(void) { plug_b += 1; return plug_a + (int)plug_b; }
 
 /// Every route a `_Thread_local` read can reach `__tlv_bootstrap` by.
 ///
-/// [`TLS_C`] covers the ordinary one — a `callq *(%rdi)` on the main thread
+/// [`TLS_C`] covers the ordinary one - a `callq *(%rdi)` on the main thread
 /// through a descriptor the loader bound. The three here are the ones that
 /// reach the bootstrap without going past anything the start-up path
 /// substituted, which is how a symbol quietly falls back to the marshaller:
@@ -689,7 +689,7 @@ _Thread_local int a = 11;
 _Thread_local long c = 22;
 
 /* The descriptor as the ABI lays it out, under the same asm name the
-   `_Thread_local` above emits — so `desc_a.thunk` is the very word the
+   `_Thread_local` above emits - so `desc_a.thunk` is the very word the
    compiler's own `callq *(%rdi)` loads. */
 struct tlv_descriptor {
     void *(*thunk)(struct tlv_descriptor *);
@@ -775,7 +775,7 @@ static jmp_buf env;
 static sigjmp_buf senv;
 
 /* File scope, not locals: a non-volatile local modified between `setjmp` and
-   `longjmp` has an indeterminate value afterwards — C says so — and a fixture
+   `longjmp` has an indeterminate value afterwards - C says so - and a fixture
    whose expected output depends on undefined behaviour tests the compiler, not
    the runtime. */
 static int trips = 0, total = 0;
@@ -827,7 +827,7 @@ pub fn setjmp_fixture() -> Option<String> {
 ///
 /// The comparator is called by the *host's* `qsort`, so the `setjmp` it jumps
 /// back to is in an outer VM entry with host frames in between. Restoring the
-/// guest context would abandon them silently, so the runtime refuses — and this
+/// guest context would abandon them silently, so the runtime refuses - and this
 /// program is how the refusal is checked to be a named diagnostic rather than a
 /// crash. It runs natively; under the driver it must stop and say why.
 pub const LONGJMP_ACROSS_C: &str = r#"
@@ -894,7 +894,7 @@ pub fn build_objc(name: &str, source: &str) -> Option<String> {
 /// - **guest → guest** dispatch, which is a jump rather than a call
 ///   (`legs`, `says`).
 /// - **overriding**, where `[d says]` and `[[Animal alloc] ...] says]` must
-///   differ — a runtime that resolved the `IMP` on the wrong class prints the
+///   differ - a runtime that resolved the `IMP` on the wrong class prints the
 ///   same string twice.
 /// - **`super`**, twice over: `Dog`'s initialiser calls `Animal`'s, which calls
 ///   `NSObject`'s. `objc_msgSendSuper2` naming the wrong class recurses forever.
@@ -992,7 +992,7 @@ int main(void) {
        host takes it in v0-v3 and returns it there. An NSPoint is two SSE
        eightbytes on one side and a two-member HFA on the other. An NSRange is
        two integer eightbytes and two `x` registers, which is the one case the
-       two conventions agree on — and is worth having next to the others so a
+       two conventions agree on - and is worth having next to the others so a
        failure says which of the three broke. */
     NSRect rc = [[NSValue valueWithRect:NSMakeRect(1.5, 2.5, 3.5, 4.5)] rectValue];
     printf("rect %.1f %.1f %.1f %.1f\n", rc.origin.x, rc.origin.y, rc.size.width, rc.size.height);
@@ -1001,7 +1001,7 @@ int main(void) {
     NSRange rg = [[NSValue valueWithRange:NSMakeRange(8, 9)] rangeValue];
     printf("range %lu %lu\n", (unsigned long)rg.location, (unsigned long)rg.length);
     /* A variadic method, rendered by the runtime and re-sent with the result
-       standing in for its format — including `%@`, which is a message. */
+       standing in for its format - including `%@`, which is a message. */
     printf("format %s\n",
            [[NSString stringWithFormat:@"%d/%@/%.2f/%%", 42, @"x", 1.5] UTF8String]);
     @synchronized (d) { printf("synchronized\n"); }
@@ -1013,7 +1013,7 @@ int main(void) {
 /// Build [`OBJC_MESSAGES_M`], or `None` if this host cannot.
 ///
 /// `extra` is threaded so the same source can be built at `-O2`, where clang
-/// tail-jumps to `objc_msgSend` instead of calling it — a different path through
+/// tail-jumps to `objc_msgSend` instead of calling it - a different path through
 /// the runtime for identical output.
 pub fn objc_messages_fixture(name: &str, extra: &[&str]) -> Option<String> {
     let mut flags = vec!["-x", "objective-c", "-framework", "Foundation"];
@@ -1024,7 +1024,7 @@ pub fn objc_messages_fixture(name: &str, extra: &[&str]) -> Option<String> {
 /// A guest method the **host** calls with an aggregate by value.
 ///
 /// The direction M6.3 did not cover and DELTARUNE found. Every other aggregate
-/// test in this suite is guest→host — the guest sends `rectValue` and the
+/// test in this suite is guest→host - the guest sends `rectValue` and the
 /// runtime marshals the result back. This is the mirror, and it is a different
 /// piece of machinery: AAPCS64 hands a callback an `NSRect` in `v0`–`v3`, SysV
 /// AMD64 classifies the same rectangle MEMORY, and the guest therefore reads it
@@ -1033,18 +1033,18 @@ pub fn objc_messages_fixture(name: &str, extra: &[&str]) -> Option<String> {
 ///
 /// Key-value coding is what makes this reachable with Foundation alone.
 /// `setValue:forKey:` on a struct-typed property unwraps the `NSValue` and
-/// invokes the setter *from the host*, with the struct by value — which is
+/// invokes the setter *from the host*, with the struct by value - which is
 /// exactly what AppKit does to `-[NSView initWithFrame:]` when it instantiates
 /// one from a nib, without needing a nib or a window server.
 ///
 /// Three shapes, so a failure says which:
 ///
-/// - **`NSRect`** — thirty-two bytes, MEMORY on the guest side and an HFA of
+/// - **`NSRect`** - thirty-two bytes, MEMORY on the guest side and an HFA of
 ///   four on the host's. The one that has to reach the guest's stack.
-/// - **`NSPoint`** — sixteen bytes: two SSE eightbytes in `xmm0`/`xmm1` for the
+/// - **`NSPoint`** - sixteen bytes: two SSE eightbytes in `xmm0`/`xmm1` for the
 ///   guest, an HFA of two for the host. Registers on both sides, different
 ///   registers.
-/// - **`double`** — a floating-point *return*, which comes back in `xmm0` and
+/// - **`double`** - a floating-point *return*, which comes back in `xmm0` and
 ///   not in `rax`. A trampoline typed to return an integer reports whatever the
 ///   last instruction left behind.
 pub const OBJC_HOST_AGGREGATE_M: &str = r#"
@@ -1105,8 +1105,8 @@ pub fn objc_host_aggregate_fixture() -> Option<String> {
 
 /// A guest method whose encoding this runtime's decoder refuses, sent guest→guest.
 ///
-/// `encoding::signature` will not classify a union — its members overlap, so its
-/// eightbytes are undecidable — and [`crate::objc::add_method`] installs such a method
+/// `encoding::signature` will not classify a union - its members overlap, so its
+/// eightbytes are undecidable - and [`crate::objc::add_method`] installs such a method
 /// anyway, recording `MethodNotHostCallable` and moving on. That is only sound while
 /// the send path leaves the encoding alone when the `IMP` is the guest's own, which is
 /// what this fixture is: a union returned by value, from one guest method to another.
@@ -1206,22 +1206,22 @@ pub fn objc_refusals_fixture() -> Option<String> {
 ///
 /// Each clause is a separate claim, and each one fails on its own:
 ///
-/// - **three frames and their destructors** — the walk itself. `~level3`,
+/// - **three frames and their destructors** - the walk itself. `~level3`,
 ///   `~level2`, `~level1` must appear in that order and before the handler: a
 ///   runtime that entered the handler without the cleanups prints them late or
 ///   not at all.
-/// - **the object's own destructor** — run by `__cxa_end_catch`, which is a
+/// - **the object's own destructor** - run by `__cxa_end_catch`, which is a
 ///   host→guest call from inside a shim.
-/// - **nested `try`** — the inner handler must *not* take an exception of the
+/// - **nested `try`** - the inner handler must *not* take an exception of the
 ///   wrong type, which is the difference between matching a type and matching
 ///   the first clause found.
-/// - **`catch (...)`** — a null type-table entry, and the one case where a
+/// - **`catch (...)`** - a null type-table entry, and the one case where a
 ///   pc-relative decode of zero would produce a plausible wrong address.
-/// - **base classes** — both a guest base and `std::exception`, whose
+/// - **base classes** - both a guest base and `std::exception`, whose
 ///   `type_info` lives in the host's libc++.
-/// - **rethrow** — `throw;` continues the *same* exception past the handler that
+/// - **rethrow** - `throw;` continues the *same* exception past the handler that
 ///   caught it, without freeing it at the end of that handler.
-/// - **a second thread** — its own stack, its own walk, its own in-flight state.
+/// - **a second thread** - its own stack, its own walk, its own in-flight state.
 pub const EXCEPTIONS_CPP: &str = r#"
 #include <cstdio>
 #include <exception>
@@ -1291,7 +1291,7 @@ pub fn exceptions_fixture() -> Option<String> {
 
 /// Milestone 5's boundary program: the three throws that must be *refused*.
 ///
-/// One binary, selected by argument, because each case ends the process — and
+/// One binary, selected by argument, because each case ends the process - and
 /// because a refusal is only worth anything if the program that provokes it runs
 /// correctly everywhere else, which the shared `main` here demonstrates.
 pub const UNWIND_REFUSALS_CPP: &str = r#"
@@ -1340,7 +1340,7 @@ pub fn unwind_refusals_fixture() -> Option<String> {
 /// Milestone 5's signal program.
 ///
 /// The kernel calling a guest function, which is the third distinct caller of a
-/// host→guest thunk after `qsort` and `pthread_create` — and the first that
+/// host→guest thunk after `qsort` and `pthread_create` - and the first that
 /// arrives without the runtime being anywhere nearby.
 ///
 /// - Both installers, because they substitute the handler differently:
@@ -1479,7 +1479,7 @@ pub fn pthread_sync_fixture() -> Option<String> {
 ///
 /// `unsigned __int128 / unsigned __int128` compiles to a call to compiler-rt's
 /// `__udivti3` on both architectures, and each argument spans a *register pair*
-/// — so a shim that read only the low half of each would answer plausibly and
+/// - so a shim that read only the low half of each would answer plausibly and
 /// wrongly. The dividend is `2^100 + 12345` for exactly that reason: it does not
 /// fit in sixty-four bits, so losing the high half changes the answer rather
 /// than hiding in it.
@@ -1519,7 +1519,7 @@ pub fn int128_fixture() -> Option<String> {
 /// A guest that converts a `CFString` to bytes the way Foundation callers do.
 ///
 /// `CFStringGetCString`'s last parameter is the encoding, and an entry that
-/// omitted it made the host read register garbage and answer `false` — an empty
+/// omitted it made the host read register garbage and answer `false` - an empty
 /// string, no error, no fault. Unity built a plugin path out of that empty
 /// string and every `.bundle` plugin in Below Zero failed to load.
 ///
@@ -1559,14 +1559,14 @@ pub fn cfstring_fixture() -> Option<String> {
 /// `musttail` rather than trusting the optimiser: clang will not tail-call when
 /// the callee needs more outgoing stack than the caller was given, so the
 /// forwarding wrapper takes the same seven arguments it passes on. That is not a
-/// contrived shape — a forwarding wrapper is the ordinary reason a tail call to
+/// contrived shape - a forwarding wrapper is the ordinary reason a tail call to
 /// an import exists at all.
 ///
 /// The seventh argument is the one that matters: SysV puts six integers in
 /// registers, so `flags` is on the stack, and at a tail `jmp` it sits one slot
 /// above where an intercepted `call` would leave it. Losing it turns
 /// `NI_NUMERICHOST | NI_NUMERICSERV` into zero, and the guest prints `localhost`
-/// and `http` where it asked for `127.0.0.1` and `80` — a wrong answer with no
+/// and `http` where it asked for `127.0.0.1` and `80` - a wrong answer with no
 /// fault anywhere, which is exactly the failure this fixture exists to make
 /// loud.
 pub const TAILCALL_C: &str = r#"
@@ -1622,7 +1622,7 @@ pub fn tailcall_fixture() -> Option<String> {
 ///   pointer, and a substitution that produced a fresh stub per route would be
 ///   observably wrong here rather than three months later.
 /// - **Seven arguments**, so a stack argument really travels. This is the whole
-///   correctness argument for encoding the stub as a tail `jmp` — the seventh
+///   correctness argument for encoding the stub as a tail `jmp` - the seventh
 ///   integer argument of a SysV call is on the stack, and a stub that pushed a
 ///   return address under it would shift every one of them by a slot. It is the
 ///   same failure `TAILCALL_C` was written for, reached from the other side.
@@ -1636,7 +1636,7 @@ pub const TRAMPOLINE_C: &str = r#"
 #include <sys/socket.h>
 
 /* `volatile`, so the call really goes through the pointer and clang does not
-   turn it back into a call site — which would test the path that already
+   turn it back into a call site - which would test the path that already
    worked. */
 static size_t (*volatile len_slot)(const char *) = strlen;
 static int (*volatile gni_slot)(const struct sockaddr *, socklen_t, char *,
@@ -1677,7 +1677,7 @@ pub fn trampoline_fixture() -> Option<String> {
 /// `__sync_bool_compare_and_swap` on a `__int128` with `-mcx16` compiles to
 /// `lock cmpxchg16b`, which is the instruction the whole of
 /// [`crate::atomic128`] exists for. Four threads each add one to the low half
-/// ten thousand times through the CAS, and the total is checked — so a
+/// ten thousand times through the CAS, and the total is checked - so a
 /// non-atomic emulation loses updates and prints the wrong number rather than
 /// passing quietly.
 ///
@@ -1765,7 +1765,7 @@ pub fn fault_fixture() -> Option<String> {
 /// `chatty` leaves the guest on every iteration, so its cost belongs to the
 /// runtime and to the host's libraries and must not be counted as translated.
 /// A profiler that mixed the two would be answering the one question M8.2 was
-/// opened to ask — is this exit-bound or code-quality-bound — with a coin toss.
+/// opened to ask - is this exit-bound or code-quality-bound - with a coin toss.
 ///
 /// The iteration counts are chosen for about a second of work on an M-series
 /// host, which at the default rate is hundreds of samples: enough for a share
@@ -1851,13 +1851,13 @@ pub fn build_native_with(name: &str, source: &str, extra: &[&str]) -> Option<Str
 /// The only assertion worth making about a pthread or `errno` fixture: what the
 /// program prints on this machine when nothing translates it. Rosetta 2 runs the
 /// x86_64 build directly, so the comparison is against the same binary rather
-/// than a recompilation of the same source — and when it is not available the
+/// than a recompilation of the same source - and when it is not available the
 /// caller skips rather than fails.
 pub fn run_native(path: &str) -> Option<(Option<i32>, String)> {
     run_native_with(path, &[])
 }
 
-/// [`run_native`], with arguments — for a fixture that selects a case by one.
+/// [`run_native`], with arguments - for a fixture that selects a case by one.
 pub fn run_native_with(path: &str, args: &[&str]) -> Option<(Option<i32>, String)> {
     let out = Command::new(path).args(args).output().ok()?;
     out.status.code().is_some().then(|| {
@@ -1927,7 +1927,7 @@ pub fn late_callback_fixture() -> Option<String> {
 /// Nine of each class in one call is the point: SysV AMD64's register save area
 /// holds six integers and eight vectors, so the ninth of each is in the
 /// *overflow* area, reached by a different pointer that advances by a different
-/// step — eight bytes rather than the sixteen a saved vector slot occupies. A
+/// step - eight bytes rather than the sixteen a saved vector slot occupies. A
 /// walker that used one step for both prints the later arguments from between
 /// two others, which looks like corruption rather than like an ABI bug.
 ///
@@ -1984,7 +1984,7 @@ pub fn valist_fixture() -> Option<String> {
 /// Three things in it are load-bearing, and each fails differently:
 ///
 /// - **A constructor**, so the test can tell "mapped and bound" from "mapped,
-///   bound, and started" — `dlopen` must run initializers before it returns.
+///   bound, and started" - `dlopen` must run initializers before it returns.
 /// - **A call to `strlen`**, which is the whole reason this is hard. This
 ///   image's call sites were never registered with the lifter, so the call
 ///   leaves microlift as an `UnknownJump` and is answered from the import table
@@ -2001,7 +2001,7 @@ __attribute__((constructor)) static void plugin_init(void) { puts("plugin loaded
 int plugin_len(const char *s) { return (int)strlen(s); }
 "#;
 
-/// The program that loads [`PLUGIN_C`], named without a directory — which is
+/// The program that loads [`PLUGIN_C`], named without a directory - which is
 /// what a bundled application does, and what makes the search beside the
 /// executable load-bearing rather than a convenience.
 pub const DLOPEN_C: &str = r#"
@@ -2044,18 +2044,18 @@ pub fn dlopen_fixture() -> Option<String> {
 /// A dylib the guest loads itself, carrying **Objective-C classes of its own**.
 ///
 /// The launch-time registration pass runs over the program's images, and an
-/// image mapped later is not one of them — so until [`crate::dyld::open`] runs
+/// image mapped later is not one of them - so until [`crate::dyld::open`] runs
 /// the same pass, everything here fails, and each line fails differently:
 ///
 /// - **`+load`** must run inside `dlopen`, before the C constructor of the same
 ///   image, which is dyld's order. Printing both is how the order is checked
 ///   rather than asserted.
-/// - **A message to the plugin's own class** — `[Plugin greet]` — is the case
+/// - **A message to the plugin's own class** - `[Plugin greet]` - is the case
 ///   that was refused by name: the guest names its class by the dead
 ///   `objc_class` in its own `__objc_data`, and until that class is realized
 ///   there is nothing for the host runtime to look a method up on.
 /// - **A subclass of a Foundation class**, whose superclass is an ordinary bind
-///   the host answers, with an ivar read through the runtime's offset — the
+///   the host answers, with an ivar read through the runtime's offset - the
 ///   half of registration that writes back into the image.
 /// - **A message to Foundation**, which needs only the selectors uniqued and
 ///   worked before any of this.
@@ -2139,7 +2139,7 @@ pub fn objc_dlopen_fixture() -> Option<String> {
 ///
 /// Through the built binary rather than the library, because that is what the
 /// milestone claims: a program *runs*, exits with its own status, and its
-/// `atexit` handlers fire from the host's exit — none of which is observable
+/// `atexit` handlers fire from the host's exit - none of which is observable
 /// from inside a test that only calls `Vm::call`.
 pub fn run_guest(path: &str, args: &[&str]) -> (Option<i32>, String, String) {
     run_guest_with(&[], path, args)
@@ -2148,7 +2148,7 @@ pub fn run_guest(path: &str, args: &[&str]) -> (Option<i32>, String, String) {
 /// [`run_guest`], with environment variables set for the driver.
 ///
 /// Most of what this runtime can be asked to do differently is asked for that
-/// way — see `ROSETTA3_*` in `docs/ROADMAP.md`.
+/// way - see `ROSETTA3_*` in `docs/ROADMAP.md`.
 pub fn run_guest_env(
     env: &[(&str, &str)],
     path: &str,

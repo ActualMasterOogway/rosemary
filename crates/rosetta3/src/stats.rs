@@ -64,7 +64,7 @@ pub enum Exit {
     /// The end of a call this runtime made: the `int3` of the return stub the entry
     /// pushed, reached by the callee's final `ret`. See [`crate::retstub`].
     Return,
-    /// A `ret` that popped an address outside the region — the ordinary way a
+    /// A `ret` that popped an address outside the region - the ordinary way a
     /// leaf function ends, and one region entry each time.
     ReturnOut,
     /// An unconditional `jmp` to a static address outside the region.
@@ -75,7 +75,7 @@ pub enum Exit {
     Fallthrough,
     /// A direct `call` to guest code that was not lifted into this region.
     DirectCall,
-    /// The translation declined to serve the PC — a region cut mid-instruction, or an
+    /// The translation declined to serve the PC - a region cut mid-instruction, or an
     /// entry point its dispatch was never offered. See [`record_tail_exit`].
     RegionTail,
     /// A tail `jmp` through a register or a memory operand.
@@ -84,7 +84,7 @@ pub enum Exit {
     OtherJump,
     /// An intercepted `call` to a registered import.
     Import,
-    /// An indirect `call` — a virtual call, or a call through a pointer.
+    /// An indirect `call` - a virtual call, or a call through a pointer.
     Indirect,
     /// `cpuid`, `xgetbv`, and the rest of the resumable one-instruction exits.
     Instruction,
@@ -193,12 +193,12 @@ pub fn record_exit(exit: Exit) {
     }
 }
 
-/// An exit that could have linked and did not — because its probe declined, or
+/// An exit that could have linked and did not - because its probe declined, or
 /// because `ROSETTA3_NO_BLOCK_LINK` meant it carried none.
 ///
 /// Free, and it is the figure block linking is actually judged on. A linked exit
 /// never reaches the run loop, so counting the ones that do needs no counter on
-/// the path the mechanism exists to shorten — which is why this can be per kind
+/// the path the mechanism exists to shorten - which is why this can be per kind
 /// where [`record_linked_entry`] cannot be at all under a pinned ABI.
 pub fn record_probe_miss(exit: Exit) {
     if exit.linkable() && enabled() {
@@ -231,7 +231,7 @@ pub fn record_refused() {
     REFUSED.fetch_add(1, Relaxed);
 }
 
-/// An exit taken because the translation could not serve the PC it was entered at —
+/// An exit taken because the translation could not serve the PC it was entered at -
 /// either the instruction there runs past the bytes it was given, or its dispatch was
 /// never offered that address.
 pub fn record_tail_exit() {
@@ -379,7 +379,7 @@ pub fn report() {
         // Per kind, because a whole-program share hides the failure that matters: a
         // change that stops `ret` linking while leaving direct calls alone still
         // reads well in aggregate. The *denominator* is what a pinned ABI cannot
-        // supply — `EXITS` then counts only what came back, so a share would read
+        // supply - `EXITS` then counts only what came back, so a share would read
         // 100% and mean nothing. Counts there, shares where they are real.
         let mut declined: Vec<(u64, u64, &str)> = Exit::ALL
             .iter()

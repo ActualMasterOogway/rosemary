@@ -26,7 +26,7 @@ ext-dyld = ["ext-initializers", "ext-tlv", "ext-objc", "ext-interpose"]
 
 # The example links a real binary against the host, so it needs both the host
 # frontend and the guest architecture. Declared here so `--no-default-features`
-# still builds — that configuration is what proves the `no_std` core.
+# still builds - that configuration is what proves the `no_std` core.
 [[example]]
 name = "link"
 required-features = ["std", "arch-x86_64"]

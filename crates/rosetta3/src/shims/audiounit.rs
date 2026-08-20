@@ -22,7 +22,7 @@ const OUTPUT_SET_INPUT_CALLBACK: u32 = 2005;
 const CALLBACK_STRUCT_SIZE: u32 = 16;
 
 /// `kAudioUnitErr_InvalidPropertyValue`, which is what the framework answers a
-/// caller whose property data is the wrong size — so a guest handing over a
+/// caller whose property data is the wrong size - so a guest handing over a
 /// structure this shim would misread gets its own framework's error rather than
 /// a silently truncated read.
 const INVALID_PROPERTY_VALUE: i32 = -10851;
@@ -64,7 +64,7 @@ pub fn set_property(
     let (element, data, size) = (ctx.rcx as u32, ctx.r8, ctx.r9 as u32);
 
     // The guest cannot have reached this call without the framework being
-    // loaded, so a miss is a fact about the host rather than about the guest —
+    // loaded, so a miss is a fact about the host rather than about the guest -
     // reported by name, like any other unsatisfied import.
     let Some(set) = host_set_property() else {
         return Err(crate::abi::AbiError::Unsatisfied {
@@ -123,7 +123,7 @@ pub fn set_property(
     Ok(())
 }
 
-/// One of this module's implementations, in the shape [`crate::shims`] wants —
+/// One of this module's implementations, in the shape [`crate::shims`] wants -
 /// the wider one, carrying [`Callbacks`].
 pub type Shim = crate::signal::Shim;
 
@@ -221,7 +221,7 @@ mod tests {
                 vec![0x1_0000_1234],
                 "property {id}: the proc, and only the proc, must be substituted"
             );
-            // The guest's own structure is untouched — the framework copies.
+            // The guest's own structure is untouched - the framework copies.
             assert_eq!(cb, [0x1_0000_1234, 0x2_0000_5678]);
         }
     }

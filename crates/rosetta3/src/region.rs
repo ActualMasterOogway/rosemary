@@ -88,7 +88,7 @@ struct DecodedBlock {
 /// A region to lift: which bytes are code, and where its instructions begin.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Region {
-    /// The span the blocks live in — the first block's entry to the last one's end.
+    /// The span the blocks live in - the first block's entry to the last one's end.
     /// What the caller slices out of the image to hand the lifter.
     pub range: Range<u64>,
     /// The blocks, ascending and disjoint. Everything in [`range`](Self::range) and not
@@ -115,7 +115,7 @@ impl Region {
 
 /// The region to lift so that `pc` can execute.
 ///
-/// `writable` says whether these bytes are memory the guest can write — an executable
+/// `writable` says whether these bytes are memory the guest can write - an executable
 /// mapping it asked for rather than an image this runtime loaded.
 pub fn region_for(bytes: &[u8], base: u64, pc: u64, writable: bool) -> Option<Region> {
     Walk::new(bytes, base, pc, writable).run()
@@ -141,7 +141,7 @@ struct Walk<'a> {
     /// twice.
     visited: BTreeSet<u64>,
     /// Targets found while decoding the current block, merged into
-    /// [`to_decode`](Self::to_decode) once it finishes — because a block that
+    /// [`to_decode`](Self::to_decode) once it finishes - because a block that
     /// turns out to be garbage takes its targets with it.
     current_targets: BTreeSet<u64>,
     /// Where control can arrive from outside. See [`Region::entries`].
@@ -269,7 +269,7 @@ impl<'a> Walk<'a> {
                     // to salvage and nothing to hide.
                     break;
                 }
-                // Anywhere else this is a mispredicted edge — an embedded jump
+                // Anywhere else this is a mispredicted edge - an embedded jump
                 // table read as instructions, a `call`'s inline argument, the
                 // cold side of a branch into padding.
                 self.total -= self.blocks[idx].starts.len();
@@ -318,7 +318,7 @@ impl<'a> Walk<'a> {
         }
         let (target, conditional) = match self.instr.flow_control() {
             FlowControl::Call | FlowControl::IndirectCall => {
-                // The callee is a region of its own — following it would inline
+                // The callee is a region of its own - following it would inline
                 // the program into one translation unit.
                 if !(self.writable && mono_rule()) {
                     self.add_branch_target(next, next);
@@ -492,7 +492,7 @@ mod tests {
     }
 
     /// An embedded jump table is unreachable as an instruction, so it is not in
-    /// any block — and unlike before, the case bodies past it still are.
+    /// any block - and unlike before, the case bodies past it still are.
     #[test]
     fn an_embedded_jump_table_is_a_hole_and_not_the_end() {
         // je +6 ; jmp rax ; four bytes of table ; ret
@@ -507,7 +507,7 @@ mod tests {
 
     #[test]
     fn a_call_does_not_pull_in_its_callee_but_does_resume_after_it() {
-        // call +1 ; ret ; ret   — the callee at BASE+6 is someone else's region.
+        // call +1 ; ret ; ret   - the callee at BASE+6 is someone else's region.
         let code = [0xE8, 0x01, 0x00, 0x00, 0x00, 0xC3, 0xC3];
         let r = region(&code, BASE).unwrap();
         assert_eq!(r.blocks, vec![BASE..BASE + 5, BASE + 5..BASE + 6]);
@@ -609,7 +609,7 @@ mod tests {
     /// bytes have to be code.
     #[test]
     fn a_non_entry_block_that_will_not_decode_is_dropped() {
-        // je +2 ; ret ; 0f ff — the taken edge is garbage, the region is not.
+        // je +2 ; ret ; 0f ff - the taken edge is garbage, the region is not.
         let code = [0x74, 0x01, 0xC3, 0x0F, 0xFF];
         let r = region(&code, BASE).unwrap();
         assert_eq!(r.blocks, vec![BASE..BASE + 2, BASE + 2..BASE + 3]);
@@ -642,7 +642,7 @@ mod tests {
     #[test]
     fn a_zero_byte_inside_a_real_instruction_is_not_the_end() {
         // The rule is about a run of zeros where an instruction would start,
-        // not about zero bytes — an immediate is full of them.
+        // not about zero bytes - an immediate is full of them.
         let code = [0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3];
         assert_eq!(blocks(&code, BASE), Some(vec![BASE..BASE + 6]));
     }
@@ -667,7 +667,7 @@ mod tests {
     /// block stops in front of one already claimed.
     #[test]
     fn two_blocks_never_claim_the_same_byte() {
-        // je +4 ; nop ; nop ; nop ; nop ; ret — the taken edge lands inside the
+        // je +4 ; nop ; nop ; nop ; nop ; ret - the taken edge lands inside the
         // fallthrough run, so the fallthrough block must stop there.
         let code = [0x74, 0x04, 0x90, 0x90, 0x90, 0x90, 0xC3];
         let r = region(&code, BASE).unwrap();
@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn coverage_is_the_instruction_grid_and_not_the_range() {
-        // nop ; mov eax, imm32 ; ret — the four immediate bytes are inside the
+        // nop ; mov eax, imm32 ; ret - the four immediate bytes are inside the
         // region and are not addresses it can be entered at.
         let code = [0x90, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3];
         let r = region(&code, BASE).unwrap();

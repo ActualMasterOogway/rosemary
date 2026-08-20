@@ -3,7 +3,7 @@
 //!
 //! Every assertion here is about what the loader *reports*, never about what it
 //! runs. Nothing in this file calls a guest function, and nothing allocates a
-//! thread block — the milestone's whole claim is that the loader can hand a
+//! thread block - the milestone's whole claim is that the loader can hand a
 //! driver an exact list and stop.
 
 mod common;
@@ -18,7 +18,7 @@ use machish::resolve::{NativeDylibProvider, SymbolProvider, SyntheticDylib, eage
 use machish::spec::arch::X86_64;
 
 /// Three constructors with explicit priorities, a destructor, and two
-/// thread-locals — enough that ordering and count are both checkable.
+/// thread-locals - enough that ordering and count are both checkable.
 const SRC: &str = r#"
 #include <stdio.h>
 
@@ -42,7 +42,7 @@ fn link(name: &str, extra: &[&str]) -> Option<(Vec<u8>, machish::report::LinkRep
     let mut mem = BufferSpace::new(0x1_0000_0000);
     let shims = eager_binding_shims();
     // `__tlv_bootstrap` is denied by the native provider on purpose, so the
-    // shim is not optional — it is the intended way to supply one.
+    // shim is not optional - it is the intended way to supply one.
     let mut tlv_shim = SyntheticDylib::new("<tlv shims>");
     tlv_shim
         .flat(true)
@@ -64,7 +64,7 @@ fn initializers_are_collected_slid_and_in_section_order() {
     let obj = MachObject::parse_any(&bytes, X86_64).unwrap();
     let img = report.root().unwrap();
 
-    // Either encoding is acceptable — which one appears depends on the
+    // Either encoding is acceptable - which one appears depends on the
     // toolchain's vintage, and both must be read.
     let sect = obj
         .sections
@@ -121,7 +121,7 @@ fn terminators_match_the_section_and_never_leak_into_initializers() {
     // Clang registers `__attribute__((destructor))` functions with
     // `__cxa_atexit` from a constructor rather than emitting `__mod_term_func`,
     // so the honest claim is that the report matches whatever the image
-    // actually contains — which for a current toolchain is nothing.
+    // actually contains - which for a current toolchain is nothing.
     let expected: u64 = obj
         .sections
         .iter()
@@ -172,7 +172,7 @@ fn thread_local_descriptors_are_enumerated_with_their_three_words() {
         assert!(sect.contains(d.at.wrapping_sub(img.slide)));
     }
 
-    // The offsets must be distinct — two variables in one thread block.
+    // The offsets must be distinct - two variables in one thread block.
     let mut offsets: Vec<u64> = img.thread_locals.iter().map(|d| d.offset).collect();
     offsets.sort_unstable();
     offsets.dedup();
@@ -187,7 +187,7 @@ fn thread_local_descriptors_are_enumerated_with_their_three_words() {
 /// link editor rather than assumed from its documentation.
 ///
 /// A descriptor says "offset 0x8" and nothing about what it is an offset from.
-/// The claim is that it is relative to the start of `__thread_data` — so for
+/// The claim is that it is relative to the start of `__thread_data` - so for
 /// each thread-local, `template.initial_va + offset` must be the address `ld64`
 /// gave that variable's storage, which it records under the name
 /// `_<var>$tlv$init`. Getting this wrong by one section would produce a runtime
@@ -237,7 +237,7 @@ fn a_descriptor_offset_is_relative_to_the_start_of_the_thread_block() {
     );
 
     // The block has to hold the last variable whole, and the initialised prefix
-    // is `__thread_data` alone — everything past it is zero, which is what lets
+    // is `__thread_data` alone - everything past it is zero, which is what lets
     // a bootstrap copy the template and zero the rest without re-reading the
     // section table.
     let data = obj

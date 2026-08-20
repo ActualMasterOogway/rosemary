@@ -2,7 +2,7 @@
 
 use std::ffi::c_char;
 
-/// An opaque `Class`. A pointer, and never dereferenced here — the whole argument for
+/// An opaque `Class`. A pointer, and never dereferenced here - the whole argument for
 /// using the public API is that the layout stays the runtime's business.
 pub type Class = *mut std::ffi::c_void;
 /// An opaque `Protocol *`.

@@ -161,7 +161,7 @@ fn longjmp_to(
         });
     }
     // A buffer from an outer VM entry names a guest frame that is *below* host
-    // frames — the host's `qsort`, or `pthread_once`, with a guest callback
+    // frames - the host's `qsort`, or `pthread_once`, with a guest callback
     // above it.
     if saved.entry != state.entry() {
         return Err(AbiError::Refused {
@@ -186,7 +186,7 @@ pub fn sigsetjmp(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMem
     setjmp(symbol, ctx, mem)
 }
 
-/// `void siglongjmp(sigjmp_buf, int)` — [`longjmp`], with the same caveat.
+/// `void siglongjmp(sigjmp_buf, int)` - [`longjmp`], with the same caveat.
 pub fn siglongjmp(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn a_longjmp_into_an_outer_entry_is_refused_with_its_reason() {
-        // The `setjmp` happens in one entry and the `longjmp` in a nested one —
+        // The `setjmp` happens in one entry and the `longjmp` in a nested one -
         // which is what a guest callback called by the host's `qsort` is.
         let state = on_a_guest_thread();
         let outer = state.enter();

@@ -8,12 +8,12 @@
 //!
 //! What each test would falsify:
 //!
-//! - **the handler fires at all** — the process still dies of `SIGSEGV`, so a
+//! - **the handler fires at all** - the process still dies of `SIGSEGV`, so a
 //!   reporter that silently swallowed the signal, or one that never ran, both
 //!   show up here;
 //! - **it names the faulting address**, which is the guest's own bad pointer
 //!   and not something of the runtime's;
-//! - **it reads the address as text when the address is text** — the branch
+//! - **it reads the address as text when the address is text** - the branch
 //!   that turned `0x70536573556e6143` into `CanUseSp` and pointed at Unity's
 //!   serialized property names;
 //! - **it names the guest instruction**, which is the whole reason the module

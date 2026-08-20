@@ -6,7 +6,7 @@
 #
 # The GDB JIT interface is how a JIT tells a debugger about code it just
 # generated. LLDB implements it, but the plugin's default is "every platform
-# except macOS" — on an Apple target it is never even constructed, so no
+# except macOS" - on an Apple target it is never even constructed, so no
 # breakpoint is set and the registrations go nowhere. Nothing the debuggee does
 # can change that; it has to be turned on here.
 settings set plugin.jit-loader.gdb.enable on
@@ -15,6 +15,6 @@ settings set plugin.jit-loader.gdb.enable on
 # through generated code readable rather than a column of raw addresses.
 settings set frame-format "frame #${frame.index}: ${frame.pc}{ ${module.file.basename}`${function.name-with-args}}{ at ${line.file.basename}:${line.number}}\n"
 
-# Uncomment to watch registrations as they happen — this is where a symfile
+# Uncomment to watch registrations as they happen - this is where a symfile
 # LLDB refuses to parse shows up, as "failed to load module for JIT entry".
 # log enable lldb jit

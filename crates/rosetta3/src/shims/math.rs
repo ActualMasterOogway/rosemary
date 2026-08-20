@@ -7,7 +7,7 @@ use crate::abi::{GuestMemory, Result};
 /// `__float2 __sincosf_stret(float x)`
 ///
 /// The argument arrives in `xmm0[31:0]` and both results leave in `xmm0`, low
-/// half first — one register in, one register out, because eight bytes of
+/// half first - one register in, one register out, because eight bytes of
 /// floating point is a single SSE eightbyte on the way in and on the way back.
 pub fn sincosf_stret(
     _symbol: &str,
@@ -26,7 +26,7 @@ pub fn sincosf_stret(
 /// `__double2 __sincos_stret(double x)`
 ///
 /// Sixteen bytes, so SysV AMD64 splits it across `xmm0` and `xmm1` rather than
-/// calling it memory — the boundary that makes this the *last* aggregate return
+/// calling it memory - the boundary that makes this the *last* aggregate return
 /// expressible in registers at all.
 pub fn sincos_stret(
     _symbol: &str,

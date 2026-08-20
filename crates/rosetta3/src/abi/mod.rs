@@ -17,16 +17,16 @@ pub use table::{FunctionAbi, Lookup};
 
 /// The convention the guest passes arguments in.
 ///
-/// A property of the binary being translated — an Intel macOS executable is SysV AMD64
-/// — and not of the machine this runs on.
+/// A property of the binary being translated - an Intel macOS executable is SysV AMD64
+/// - and not of the machine this runs on.
 pub fn guest_call_abi() -> CallAbi {
     guest_call_abi_ref().clone()
 }
 
 /// [`guest_call_abi`] without building one.
 ///
-/// A [`CallAbi`] owns two `Vec`s — six integer argument registers and eight vector ones
-/// — so constructing it is two heap allocations, and [`marshal::call_types`] did it
+/// A [`CallAbi`] owns two `Vec`s - six integer argument registers and eight vector ones
+/// - so constructing it is two heap allocations, and [`marshal::call_types`] did it
 /// *per intercepted call* purely to ask where the arguments are.
 pub fn guest_call_abi_ref() -> &'static CallAbi {
     #[dynamic]
@@ -39,7 +39,7 @@ pub fn guest_call_abi_ref() -> &'static CallAbi {
 pub enum AbiError {
     /// Nothing in [`table`] describes this symbol.
     NoSignature { symbol: String },
-    /// Known, and deliberately not callable — see the reason.
+    /// Known, and deliberately not callable - see the reason.
     Refused {
         symbol: String,
         reason: &'static str,
@@ -52,7 +52,7 @@ pub enum AbiError {
         symbol: String,
         reason: &'static str,
     },
-    /// The import resolved to nothing — an unsatisfied weak import, whose slot
+    /// The import resolved to nothing - an unsatisfied weak import, whose slot
     /// holds zero. Calling it would jump to null.
     Unsatisfied { symbol: String },
     /// A guest memory access failed: a stack argument or a string argument
@@ -152,7 +152,7 @@ impl dyn GuestMemory + '_ {
         Ok(u64::from_le_bytes(buf))
     }
 
-    /// Read one 32-bit little-endian word — a `wchar_t`, on both sides.
+    /// Read one 32-bit little-endian word - a `wchar_t`, on both sides.
     pub fn read_u32(&self, va: u64, symbol: &str) -> Result<u32> {
         let mut buf = [0u8; 4];
         self.read(va, &mut buf).map_err(|_| AbiError::Memory {
@@ -292,7 +292,7 @@ pub trait Callbacks {
     }
 }
 
-/// The bridge for a caller that has no JIT to re-enter — the marshaller's own tests,
+/// The bridge for a caller that has no JIT to re-enter - the marshaller's own tests,
 /// and [`call_import`] itself.
 pub struct NoCallbacks;
 
@@ -315,7 +315,7 @@ impl Callbacks for NoCallbacks {
 pub enum Classification {
     /// Signature known and marshallable: inlined by the lifter, no VM exit.
     Fast,
-    /// Serviced at an `ImportedFunctionCall` exit — a variadic with a shim, or
+    /// Serviced at an `ImportedFunctionCall` exit - a variadic with a shim, or
     /// a signature this marshaller cannot inline.
     Slow,
     /// Known and deliberately not callable: data read through its slot, or a
@@ -341,7 +341,7 @@ pub fn classify(tag: u64, symbol: &str) -> Classification {
     match table::lookup(tag, symbol) {
         Lookup::Known(abi) if abi.variadic => Classification::Slow,
         // A fast import is inlined by the lifter, which passes the guest's
-        // registers straight through — including the function pointer that has
+        // registers straight through - including the function pointer that has
         // to become a thunk first.
         Lookup::Known(abi) if !abi.callbacks.is_empty() => Classification::Slow,
         Lookup::Known(abi) => {

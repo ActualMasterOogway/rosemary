@@ -2,7 +2,7 @@
 //!
 //! Every one of these drives the `lldb` on this machine, because the previous
 //! implementation of this feature passed every test that did not: it built a
-//! Mach-O, it filled in DWARF, it walked the JIT ABI correctly — and LLDB
+//! Mach-O, it filled in DWARF, it walked the JIT ABI correctly - and LLDB
 //! showed nothing whatsoever, for two reasons neither of which is observable
 //! from inside the process. The plugin that reads the JIT interface is off by
 //! default on macOS, and the object named its code with an absolute symbol,
@@ -11,16 +11,16 @@
 //! So the assertions here are about what a debugger *says*, not about what this
 //! crate emitted. What each would falsify:
 //!
-//! - **the plugin's macOS default is still what it is** — the test that turns
+//! - **the plugin's macOS default is still what it is** - the test that turns
 //!   it on and the one that leaves it off, together, are the reason the notice
 //!   `crate::lldb` prints exists; if Apple ever flips the default, the second
 //!   test fails and the notice can go;
-//! - **LLDB parses the symfile** — anything malformed shows up as "failed to
+//! - **LLDB parses the symfile** - anything malformed shows up as "failed to
 //!   load module for JIT entry", which is what the object crate's output
 //!   *avoided* while still being useless;
 //! - **the code gets a load address**, which is the bug that made the previous
 //!   version report nothing;
-//! - **a frame in translated code is symbolicated** — the entire point: a stop
+//! - **a frame in translated code is symbolicated** - the entire point: a stop
 //!   inside a lift names the guest function and a line of x86-64, instead of a
 //!   bare `pc` in an anonymous mapping.
 
@@ -164,7 +164,7 @@ fn a_frame_in_translated_code_names_the_guest_it_came_from() {
     // `Vm::run_loop` the caller resolves to is a matter of what the optimiser
     // inlined into what, and it changed when the entry became a dispatch loop
     // (see `Translation::enter`). What has to hold is that frame #1 is in
-    // rosetta3 at all — a translation whose caller could not be walked is the
+    // rosetta3 at all - a translation whose caller could not be walked is the
     // island this exists to rule out.
     // Taken from the *last* `frame #0:` in the output: the stop announcement
     // prints one and then the source listing around it, and `bt` prints the
@@ -174,7 +174,7 @@ fn a_frame_in_translated_code_names_the_guest_it_came_from() {
     // enters a region through an entry thunk (`microlift::core::pin`), and that
     // thunk is a real frame carrying no guest instruction and no symbol of its
     // own. So the walk out of the translation is one frame longer than it was,
-    // and what has to hold is unchanged — a translation whose caller could not
+    // and what has to hold is unchanged - a translation whose caller could not
     // be walked is the island this exists to rule out.
     let below: Vec<&str> = text
         .lines()

@@ -101,7 +101,7 @@ impl Model {
         }
     }
 
-    /// The worst frame in the ring — the number a stutter shows up in, and the
+    /// The worst frame in the ring - the number a stutter shows up in, and the
     /// one a mean hides completely.
     fn worst_frame(&self) -> f32 {
         self.frames[..self.frames_seen]
@@ -121,7 +121,7 @@ impl Model {
 /// This process's resident size, or zero.
 ///
 /// The guest's memory and this runtime's are the same footprint and there is no way to
-/// separate them from inside — every translation, every thunk and every guest page is
+/// separate them from inside - every translation, every thunk and every guest page is
 /// in one task.
 fn resident_bytes() -> u64 {
     /// `MACH_TASK_BASIC_INFO`, and its size in 32-bit words: two `mach_vm_size_t`
@@ -190,7 +190,7 @@ pub fn statistics(list: &mut DrawList, model: &Model) {
     let content = measure(&mut ui, model);
 
     // The panel is as tall as it was dragged to, but never taller than the room
-    // below it — and never taller than it has content for, so a panel dragged
+    // below it - and never taller than it has content for, so a panel dragged
     // huge over a short list does not become a large empty box.
     let room = (list.height - y - 12.0).max(0.0);
     let outer = height.min(room).min(content + 16.0);
@@ -232,7 +232,7 @@ pub fn statistics(list: &mut DrawList, model: &Model) {
 /// The corner that says the panel can be resized.
 ///
 /// Drawn only while the mouse is the panel's, because it is an affordance for something
-/// that cannot be done otherwise — and an overlay that advertises a control the reader
+/// that cannot be done otherwise - and an overlay that advertises a control the reader
 /// has no way to reach is worse than one that stays quiet.
 fn grip(list: &mut DrawList, x: f32, y: f32, width: f32, height: f32) {
     if !super::input::focused() {
@@ -283,7 +283,7 @@ fn header(ui: &mut Ui, _model: &Model) {
     ui.column(50.0);
     match super::input::focused() {
         // Said in the loudest colour on the panel, because while this is on the
-        // guest is being denied its scroll wheel and its left button — and a
+        // guest is being denied its scroll wheel and its left button - and a
         // game that has silently stopped responding to the mouse is a bug
         // report about the game.
         true => ui.run("shift+F8 releases the mouse", color::ALERT),
@@ -526,7 +526,7 @@ fn entries(ui: &mut Ui, model: &Model) {
             color::MUTED,
         );
         ui.line(
-            "it costs measurably — quote shares from a run with it off",
+            "it costs measurably - quote shares from a run with it off",
             color::MUTED,
         );
         return;
@@ -556,7 +556,7 @@ fn entries(ui: &mut Ui, model: &Model) {
     match s.pinned_link_registers {
         // Under a pinned link ABI a link is a branch inside translated code, so
         // nothing on that path can count without putting a contended store on
-        // it — and what `entries` then counts is chains, not regions.
+        // it - and what `entries` then counts is chains, not regions.
         Some(n) => {
             ui.row(
                 "block linking",
@@ -603,7 +603,7 @@ fn translation(ui: &mut Ui, model: &Model) {
         color::VALUE,
     );
     // A rate, because the question a live panel answers is whether the program
-    // has *stopped* translating — steady state is what every other figure here
+    // has *stopped* translating - steady state is what every other figure here
     // is worth reading in.
     if let Some(per_second) = model.per_second(|s| s.regions) {
         ui.row(

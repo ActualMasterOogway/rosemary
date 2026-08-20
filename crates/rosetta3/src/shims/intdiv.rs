@@ -58,7 +58,7 @@ fn umodti3(symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) 
     Ok(())
 }
 
-/// `__int128 __divti3(__int128 a, __int128 b)` — signed, truncating toward
+/// `__int128 __divti3(__int128 a, __int128 b)` - signed, truncating toward
 /// zero, and `checked_div` refuses the one overflow (`i128::MIN / -1`) for the
 /// same reason `ldiv` does.
 fn divti3(symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
@@ -81,7 +81,7 @@ fn modti3(symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -
 }
 
 /// `unsigned __int128 __udivmodti4(unsigned __int128 a, unsigned __int128 b, unsigned
-/// __int128 *rem)` — the quotient returned, the remainder written through the pointer
+/// __int128 *rem)` - the quotient returned, the remainder written through the pointer
 /// in `r8`, which is the register after the two pairs.
 fn udivmodti4(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let (a, b) = operands(ctx);
@@ -100,7 +100,7 @@ fn udivmodti4(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory
     Ok(())
 }
 
-/// `div_t div(int numer, int denom)` — eight bytes, so one eightbyte, so `rax`.
+/// `div_t div(int numer, int denom)` - eight bytes, so one eightbyte, so `rax`.
 fn div(symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
     let (numer, denom) = (ctx.rdi as i32, ctx.rsi as i32);
     let (quot, rem) = match (numer.checked_div(denom), numer.checked_rem(denom)) {
@@ -111,7 +111,7 @@ fn div(symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> R
     Ok(())
 }
 
-/// `ldiv_t ldiv(long numer, long denom)` — sixteen bytes, so `rax` and `rdx`.
+/// `ldiv_t ldiv(long numer, long denom)` - sixteen bytes, so `rax` and `rdx`.
 fn ldiv(symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
     let (numer, denom) = (ctx.rdi as i64, ctx.rsi as i64);
     let (quot, rem) = match (numer.checked_div(denom), numer.checked_rem(denom)) {
@@ -127,7 +127,7 @@ fn ldiv(symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> 
 fn would_have_trapped(symbol: &str) -> AbiError {
     AbiError::Refused {
         symbol: symbol.to_string(),
-        reason: "a divisor of zero, or a quotient too large to represent — the \
+        reason: "a divisor of zero, or a quotient too large to represent - the \
                  division the guest asked for is the one its own hardware traps on",
     }
 }

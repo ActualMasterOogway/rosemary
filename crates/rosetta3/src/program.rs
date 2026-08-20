@@ -22,7 +22,7 @@ use crate::abi::{AbiError, Classification, Lookup};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ImportPolicy {
     /// Inline every call whose signature is known and marshallable; everything
-    /// else — variadics, refusals, unknowns — stays a slow exit.
+    /// else - variadics, refusals, unknowns - stays a slow exit.
     #[default]
     FastWhenKnown,
     /// Every import is a slow exit. Correct, and the baseline the fast path is
@@ -186,7 +186,7 @@ impl Program<BufferSpace> {
     /// Load and link `path` against the host, with no guest system libraries.
     ///
     /// `extra` is consulted *before* the native provider, which is how a symbol that
-    /// must be virtualized rather than passed through gets intercepted — see
+    /// must be virtualized rather than passed through gets intercepted - see
     /// [`machish::resolve`] for why ordering is the mechanism.
     pub fn load(path: &str, extra: &[&dyn SymbolProvider]) -> Result<Self, ProgramError> {
         let bytes = std::fs::read(path)?;
@@ -267,11 +267,11 @@ impl HostProviders {
 /// resumption settings.
 ///
 /// One definition rather than two, because a tool that dumps translations has to
-/// lift under the same settings a run does — and a copy of this list that drifts on
+/// lift under the same settings a run does - and a copy of this list that drifts on
 /// `address_mode` produces code no run of this runtime executes.
 pub fn lifter_config_base() -> LifterConfig {
     // Host-specific, so it is the half of the optimisation setting that
-    // belongs to the lift rather than to the lowering — see [`crate::jit`].
+    // belongs to the lift rather than to the lowering - see [`crate::jit`].
     let use_vector_xmm = crate::jit::opt_level().host_specific() && {
         #[cfg(target_arch = "aarch64")]
         {
@@ -506,8 +506,8 @@ impl<M: Regions> Program<M> {
                     crate::abi::dynamic_symbol(p.abi, p.address),
                     crate::abi::guest_call_abi(),
                 ),
-                // Everything a fast import cannot express — a variadic, a
-                // callback taker, a shim, a signature the marshaller refuses —
+                // Everything a fast import cannot express - a variadic, a
+                // callback taker, a shim, a signature the marshaller refuses -
                 // becomes a bridged call. See [`crate::bridge`].
                 None if policy != ImportPolicy::AlwaysSlow => {
                     config.register_bridge_import(va, crate::bridge::import_bridge())
@@ -520,7 +520,7 @@ impl<M: Regions> Program<M> {
         // the baseline the rest is measured against and a baseline with two
         // kinds of inline call in it measures nothing.
         if policy != ImportPolicy::AlwaysSlow {
-            // Sites that did not exist when this config was built — see
+            // Sites that did not exist when this config was built - see
             // [`crate::bridge::DynamicImports`] and [`crate::dyld`].
             config.set_import_registry(crate::bridge::registry());
             // And the calls whose target no lift-time question can answer: a
@@ -581,7 +581,7 @@ impl<M: Regions> Program<M> {
             // Or an image the *guest* loaded, which is not in this `Program`
             // and cannot be.
             return crate::dyld::lift_region(va)
-                // Or code the guest *wrote*, which is in no image at all — see
+                // Or code the guest *wrote*, which is in no image at all - see
                 // [`crate::shims::vmmap`].
                 .or_else(|| lift_generated(va))
                 // Or code *this runtime* wrote, which is in no image either.
@@ -671,7 +671,7 @@ impl<M: Regions> Program<M> {
         self.report.root().and_then(|i| i.entry)
     }
 
-    /// Whether the root image's entry point is an `LC_UNIXTHREAD` one — which
+    /// Whether the root image's entry point is an `LC_UNIXTHREAD` one - which
     /// is to say whether it reads the process arguments off its own stack
     /// instead of taking them in registers. See [`crate::stack`].
     pub fn entry_reads_stack(&self) -> bool {
@@ -743,7 +743,7 @@ fn slice_of(bytes: &[u8], base: u64, region: &crate::region::Region) -> Option<V
 ///
 /// ## The bytes are copied, deliberately
 ///
-/// The arena is live guest memory, and the guest's own JIT is still writing to it —
+/// The arena is live guest memory, and the guest's own JIT is still writing to it -
 /// possibly on another thread.
 ///
 /// ## Scope
@@ -756,8 +756,8 @@ fn lift_generated(va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
     let len = usize::try_from(len).ok()?;
 
     // SAFETY: `base` came from a successful `mmap` this runtime made on the
-    // guest's behalf and never unmapped — see [`crate::shims::vmmap`], where the
-    // arena is recorded — so the whole range is mapped and readable. The guest
+    // guest's behalf and never unmapped - see [`crate::shims::vmmap`], where the
+    // arena is recorded - so the whole range is mapped and readable. The guest
     // may be writing into it concurrently, which is why the bytes are copied
     // here rather than borrowed: a torn read produces an instruction stream that
     // fails to decode, not a dangling reference.

@@ -17,8 +17,8 @@ pub fn class(name: &str) -> Id {
     let Ok(c) = CString::new(name) else {
         return std::ptr::null_mut();
     };
-    // SAFETY: a NUL-terminated name. `objc_lookUpClass` — rather than
-    // `objc_getClass` — because it does *not* call the class handler, and a
+    // SAFETY: a NUL-terminated name. `objc_lookUpClass` - rather than
+    // `objc_getClass` - because it does *not* call the class handler, and a
     // class this process has genuinely never loaded should come back null
     // instead of causing a lazy load of a framework nothing asked for.
     unsafe { host::objc_lookUpClass(c.as_ptr()) }
@@ -33,7 +33,7 @@ pub fn sel(name: &str) -> Sel {
     unsafe { host::sel_registerName(c.as_ptr()) as Sel }
 }
 
-/// The result of a nullary class method — `+[NSUserDefaults standardUserDefaults]`
+/// The result of a nullary class method - `+[NSUserDefaults standardUserDefaults]`
 /// and `+[NSMutableDictionary dictionary]` are both this shape.
 ///
 /// Null when this process has not loaded the class.
@@ -82,7 +82,7 @@ macro_rules! sender {
         pub unsafe fn $name<R, $($arg),*>(receiver: Id, selector: Sel, $($arg: $arg),*) -> R {
             // SAFETY: `entry` is `objc_msgSend`'s address, and the caller has
             // stated the prototype. Transmuting the address rather than the
-            // declaration is the documented way to call it — see
+            // declaration is the documented way to call it - see
             // [`crate::objc::host::objc_msgSend`], which is declared with no
             // parameters for exactly this reason.
             let f = unsafe {

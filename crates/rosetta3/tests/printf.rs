@@ -1,7 +1,7 @@
 //! The `printf` shim, against the host's own `snprintf`.
 //!
-//! Every case renders the same format and arguments twice — once through the
-//! shim, once through the C library this process links against — and requires
+//! Every case renders the same format and arguments twice - once through the
+//! shim, once through the C library this process links against - and requires
 //! the bytes to be identical. That is the only assertion worth making here: the
 //! specification of `printf` is "what a C library prints", and a hand-written
 //! table of expected strings would only be testing this file's author against
@@ -122,7 +122,7 @@ fn shimmed(fmt: &str, args: &[V]) -> String {
 /// What the host's own C library prints for the same call.
 ///
 /// Built with an explicit `snprintf` per argument shape rather than a loop,
-/// because the whole point is to go through a real C variadic call — anything
+/// because the whole point is to go through a real C variadic call - anything
 /// clever here would be reimplementing the thing under test.
 fn native(fmt: &str, args: &[V]) -> String {
     let cfmt = CString::new(fmt).unwrap();
@@ -213,7 +213,7 @@ fn integers() {
         same("[% d]", &[V::Int(v as u64)]);
         same("[%.5d]", &[V::Int(v as u64)]);
         same("[%8.5d]", &[V::Int(v as u64)]);
-        // `%.0d` of zero prints nothing at all — the one case where an
+        // `%.0d` of zero prints nothing at all - the one case where an
         // integer precision changes the digits instead of padding them.
         same("[%.0d]", &[V::Int(v as u64)]);
     }

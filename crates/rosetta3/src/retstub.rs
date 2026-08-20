@@ -14,12 +14,12 @@ static STUB: u64 = map().expect("rosetta3: could not map the guest return stub")
 /// Mapped on first use and never unmapped:
 ///
 /// Panics if the page cannot be mapped, which is a process that cannot run a single
-/// guest call — there is no return address to push and nothing further to try.
+/// guest call - there is no return address to push and nothing further to try.
 pub fn address() -> u64 {
     *STUB
 }
 
-/// Whether `va` is the return stub — that is, whether a breakpoint there is the
+/// Whether `va` is the return stub - that is, whether a breakpoint there is the
 /// end of a call this runtime made.
 #[inline(always)]
 pub fn is_exit(va: u64) -> bool {

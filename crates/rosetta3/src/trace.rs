@@ -21,7 +21,7 @@ fn wanted(value: Option<&str>) -> Vec<String> {
         .collect()
 }
 
-/// Whether `symbol` — as the Mach-O spells it — is one of `wanted`.
+/// Whether `symbol` - as the Mach-O spells it - is one of `wanted`.
 fn matches(wanted: &[String], symbol: &str) -> bool {
     !wanted.is_empty() && wanted.iter().any(|w| w == symbol.trim_start_matches('_'))
 }
@@ -77,7 +77,7 @@ mod tests {
 
     #[test]
     fn a_prefix_is_not_a_match() {
-        // `open` must not draw in `opendir` — a trace that watches more than it
+        // `open` must not draw in `opendir` - a trace that watches more than it
         // was asked to is a trace nobody can read.
         let list = wanted(Some("open"));
         assert!(!matches(&list, "_opendir"));

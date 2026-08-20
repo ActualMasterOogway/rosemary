@@ -134,13 +134,13 @@ pub fn register(report: &LinkReport) -> usize {
     registered
 }
 
-/// `void *__tlv_bootstrap(struct tlv_descriptor *)` — this thread's address for the
+/// `void *__tlv_bootstrap(struct tlv_descriptor *)` - this thread's address for the
 /// variable `descriptor` describes.
 ///
 /// A real native arm64 function, which is the point:
 ///
 /// Returns null for a descriptor nobody registered, which is the only answer available
-/// inside a C ABI with no error channel — and it faults in the guest at the access
+/// inside a C ABI with no error channel - and it faults in the guest at the access
 /// rather than corrupting anything.
 pub extern "C" fn bootstrap(descriptor: *const u8) -> *mut u8 {
     let at = descriptor as usize as u64;
@@ -158,7 +158,7 @@ pub extern "C" fn bootstrap(descriptor: *const u8) -> *mut u8 {
 /// caller.
 ///
 /// dyld's `_tlv_get_addr` saves x1-x16 and q0-q7 around its slow path and the
-/// compiler counts on it — Roblox's allocator holds a live pointer in x8 across
+/// compiler counts on it - Roblox's allocator holds a live pointer in x8 across
 /// the `blr` through the descriptor. An ordinary C function clobbers all of
 /// them, so a native image's descriptors point here instead.
 #[cfg(target_arch = "aarch64")]
@@ -243,7 +243,7 @@ fn resolve(tls: &mut ThreadTls, at: u64) -> *mut u8 {
 /// Name a descriptor this runtime has no block for, once each.
 ///
 /// Null is the only value a C ABI with no error channel can return, and the guest's
-/// very next instruction dereferences it — so without this the failure arrives as a
+/// very next instruction dereferences it - so without this the failure arrives as a
 /// segfault inside guest code with nothing anywhere naming a thread-local.
 fn say_unregistered(at: u64) {
     static SAID: Mutex<Vec<u64>> = Mutex::new(Vec::new());
@@ -254,7 +254,7 @@ fn say_unregistered(at: u64) {
     said.push(at);
     eprintln!(
         "rosetta3: __tlv_bootstrap({at:#x}): no thread-local registered at that descriptor \
-         — the guest will read address zero"
+         - the guest will read address zero"
     );
 }
 
@@ -265,7 +265,7 @@ fn say_after_teardown(at: u64) {
     SAID.call_once(|| {
         eprintln!(
             "rosetta3: __tlv_bootstrap({at:#x}): this thread's thread-local storage is already \
-             torn down — the guest will read address zero"
+             torn down - the guest will read address zero"
         );
     });
 }
@@ -276,8 +276,8 @@ fn allocate(image: usize) -> Option<Block> {
     let t = images.get(image)?;
     let layout = Layout::from_size_align(t.total_size, t.align).ok()?;
 
-    // SAFETY: the layout is non-zero-sized — `register` rejects `total_size` of
-    // zero — and `alloc_zeroed` is the whole of the "and the rest is zero" half
+    // SAFETY: the layout is non-zero-sized - `register` rejects `total_size` of
+    // zero - and `alloc_zeroed` is the whole of the "and the rest is zero" half
     // of the block's contract.
     let ptr = unsafe { alloc_zeroed(layout) };
     if ptr.is_null() {
@@ -341,7 +341,7 @@ mod tests {
     }
 
     /// Two threads must not share a block, and a second access on one thread
-    /// must return what the first did — which is the pair of properties the
+    /// must return what the first did - which is the pair of properties the
     /// cache sits between, and the way it could break them is by being reached
     /// from more than the thread it belongs to.
     #[test]

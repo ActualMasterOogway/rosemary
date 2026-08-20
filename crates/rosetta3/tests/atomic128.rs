@@ -5,16 +5,16 @@
 //! load, a compare and a store is a data race, and Unity's job system pops a
 //! lock-free free list with it on every worker thread. Three of
 //! [`rosetta3::fault`]'s reports on Subnautica Below Zero were the downstream
-//! symptom — a node popped twice, freed, reused, and dereferenced.
+//! symptom - a node popped twice, freed, reused, and dereferenced.
 //!
 //! What each test would falsify:
 //!
-//! - **updates are not lost** — four threads, ten thousand contended swaps
+//! - **updates are not lost** - four threads, ten thousand contended swaps
 //!   each. A non-atomic CAS drops some, and the total says so.
-//! - **the pair never tears** — both halves are advanced together, so a run
+//! - **the pair never tears** - both halves are advanced together, so a run
 //!   where one half moved without the other is a 128-bit operation that was not
 //!   one.
-//! - **both architectures agree** — the same source built for arm64 and run
+//! - **both architectures agree** - the same source built for arm64 and run
 //!   natively prints the same line, which is what says this is emulation and
 //!   not a different program.
 

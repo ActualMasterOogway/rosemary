@@ -48,8 +48,8 @@ guest="$1"; shift
 [ -n "$out" ] || out="$(basename "$guest").$$"
 
 # `xctrace` needs the *full* Xcode to be the selected developer directory. On a
-# machine with the Command Line Tools selected — which is the ordinary state,
-# and this one — `/usr/bin/xctrace` exists, is executable, and fails with
+# machine with the Command Line Tools selected - which is the ordinary state,
+# and this one - `/usr/bin/xctrace` exists, is executable, and fails with
 # "requires Xcode". So presence is not the test: running it is.
 xctrace=''
 for candidate in xctrace /Applications/Xcode.app/Contents/Developer/usr/bin/xctrace; do

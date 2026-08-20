@@ -27,7 +27,7 @@ pub fn cxa_atexit(
     let arg = ctx.rsi as *mut c_void;
 
     // SAFETY: `handler` is either null or an arm64 trampoline this runtime
-    // compiled and keeps mapped for the VM's lifetime — which is what
+    // compiled and keeps mapped for the VM's lifetime - which is what
     // `substitute` guarantees and what the published VM makes true past `main`.
     // The DSO handle is our own static's address, so the host is never handed a
     // guest one.

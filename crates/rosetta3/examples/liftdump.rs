@@ -3,7 +3,7 @@
 //! A profile names a hot guest instruction and stops there. Whether that
 //! instruction is hot because the guest runs it a lot or because its
 //! translation is bad is a different question, and the only thing that answers
-//! it is the host code — which lives in an anonymous mapping, in a process that
+//! it is the host code - which lives in an anonymous mapping, in a process that
 //! is busy, and is gone when the run ends.
 //!
 //! This lifts raw guest bytes with the same [`LifterConfig`] and the same

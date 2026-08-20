@@ -46,7 +46,7 @@ fn run(path: &str, args: Vec<String>, policy: ImportPolicy, forced: Option<Engin
     match startup::run(exec) {
         // `exit` rather than returning the status. Returning goes back through
         // Rust's start-up shim, which tears this thread's TLS down *before*
-        // calling `exit` — and the guest's `atexit` handlers run from inside
+        // calling `exit` - and the guest's `atexit` handlers run from inside
         // `exit` and re-enter the JIT. Compiling a region needs live
         // thread-locals (Cranelift's among them), so a handler whose code had
         // not yet been translated would panic instead of running.
@@ -172,7 +172,7 @@ fn main() -> ExitCode {
     if missing > 0 {
         println!("  {missing} import(s) unresolved (need shims)");
         // Which library each one names, because that is what decides where it
-        // was looked for — a two-level reference consults only the providers
+        // was looked for - a two-level reference consults only the providers
         // claiming that install name, and `<no library>` means a flat, self,
         // main-executable or weak reference, which consults all of them.
         for m in program

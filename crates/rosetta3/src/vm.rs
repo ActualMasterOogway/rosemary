@@ -22,7 +22,7 @@ use crate::thunk::ThunkTable;
 pub enum VmError {
     /// Nothing at this address decodes as guest code, or it is not mapped.
     NoCode { pc: u64, from: Option<Transfer> },
-    /// Microlift could not translate the region — an instruction it does not implement,
+    /// Microlift could not translate the region - an instruction it does not implement,
     /// or a compilation failure.
     Lift {
         pc: u64,
@@ -172,7 +172,7 @@ impl fmt::Display for VmError {
                 write!(f, "guest stopped at {pc:#x}: {reason} (code {code:#x}")?;
                 // For an unimplemented instruction the code *is* the decoder's
                 // identity for it, and a number alone leaves the reader with no
-                // way to find out which instruction the recompiler is missing —
+                // way to find out which instruction the recompiler is missing -
                 // which is the only thing this diagnostic is for.
                 if let Some(name) = instruction_name(*reason, *code) {
                     write!(f, ", {name}")?;
@@ -201,7 +201,7 @@ impl std::error::Error for VmError {}
 /// carries, or `None` for any other exit.
 ///
 /// The lifter stores `iced_x86::Instruction::code()` in `exit_code`, so this is
-/// a total function of that number and needs no access to guest memory — which
+/// a total function of that number and needs no access to guest memory - which
 /// matters, because it is called from `Display` long after the guest is gone.
 fn instruction_name(reason: ExitReason, code: u32) -> Option<String> {
     if reason != ExitReason::UnimplementedInstruction {
@@ -209,7 +209,7 @@ fn instruction_name(reason: ExitReason, code: u32) -> Option<String> {
     }
     let code = iced_x86::Code::try_from(code as usize).ok()?;
     // `Debug` is the enum variant, which is the mnemonic *plus* its operand
-    // shape — `Vsqrtsd_xmm_xmm_xmmm64` rather than just `vsqrtsd`.
+    // shape - `Vsqrtsd_xmm_xmm_xmmm64` rather than just `vsqrtsd`.
     Some(format!("{code:?}"))
 }
 
@@ -217,8 +217,8 @@ fn instruction_name(reason: ExitReason, code: u32) -> Option<String> {
 pub(crate) fn classify(exit: ExitReason, code: u32) -> crate::stats::Exit {
     use crate::stats::Exit;
     match exit {
-        // The end of a call this runtime made — the `int3` in [`crate::retstub`]
-        // — and not a guest breakpoint, which does not come back from `step` at
+        // The end of a call this runtime made - the `int3` in [`crate::retstub`]
+        // - and not a guest breakpoint, which does not come back from `step` at
         // all.
         ExitReason::Breakpoint => Exit::Return,
         ExitReason::None => Exit::Fallthrough,
@@ -256,7 +256,7 @@ pub const MAX_DEPTH: usize = 64;
 /// A guest under high-level emulation routinely holds pointers to *host* memory:
 ///
 /// It answers "is anything here", not "may I read this", which is enough to turn the
-/// common bug — a null or wild pointer — into a named error instead of a fault.
+/// common bug - a null or wild pointer - into a named error instead of a fault.
 ///
 /// ## Why the page cache is not a set behind a lock
 ///
@@ -317,7 +317,7 @@ impl GuestView {
         regions.sort_by_key(|r| r.start);
         // The search below takes the last region beginning at or below `va` and
         // checks only *its* end, which is the right answer exactly when the
-        // regions do not overlap — a `va` inside an enclosing region but past a
+        // regions do not overlap - a `va` inside an enclosing region but past a
         // nested one would be missed.
         debug_assert!(
             regions.windows(2).all(|p| p[0].end <= p[1].start),
@@ -431,7 +431,7 @@ pub struct Vm {
     pub program: SharedProgram,
     cache: CodeCache,
     thunks: RwLock<ThunkTable>,
-    /// The published, immutable half of `thunks` — see [`crate::thunk::ThunkView`].
+    /// The published, immutable half of `thunks` - see [`crate::thunk::ThunkView`].
     thunk_view: AtomicPtr<crate::thunk::ThunkView>,
     /// How many thunks exist, readable without the lock.
     thunk_count: AtomicUsize,
@@ -446,14 +446,14 @@ pub struct Vm {
 /// A linked program, shareable between the threads running it.
 ///
 /// The `unsafe impl` is deliberately confined to this one field rather than asserted
-/// over the whole [`Vm`], so that everything else — the code cache, the thunk table,
-/// the guest view — still has to convince the compiler on its own.
+/// over the whole [`Vm`], so that everything else - the code cache, the thunk table,
+/// the guest view - still has to convince the compiler on its own.
 pub struct SharedProgram(Program<MmapSpace>);
 
 // SAFETY: a `Program` is not mutated after construction; what makes it `!Sync` is
 // the raw pointers inside its `MmapSpace`, which are read-only handles to mappings
 // living exactly as long as the `Vm`. Guest memory is shared and unsynchronised
-// deliberately — two guest threads racing on a guest variable is a race the guest
+// deliberately - two guest threads racing on a guest variable is a race the guest
 // wrote and would have had on Intel. What this runtime owes is that its own
 // structures survive concurrent use, which is what the mutexes are for.
 unsafe impl Sync for SharedProgram {}
@@ -467,8 +467,8 @@ impl std::ops::Deref for SharedProgram {
     }
 }
 
-// A `Vm` is reached from more than one thread — through
-// [`crate::thunk::publish`], which is how a thread the guest spawned finds it —
+// A `Vm` is reached from more than one thread - through
+// [`crate::thunk::publish`], which is how a thread the guest spawned finds it -
 // and nothing in the type system was demanding it be sound, because a published
 // VM travels through an `AtomicPtr` and a raw pointer carries no bounds.
 const _: () = {
@@ -524,7 +524,7 @@ impl Vm {
         ranges.push(stack.range());
 
         // Every `_Thread_local` in the program becomes addressable here, before
-        // a line of guest code runs — an initializer may touch one.
+        // a line of guest code runs - an initializer may touch one.
         crate::tls::register(&program.report);
         // Where `@executable_path` points, and where a guest `dlopen` of a bare
         // library name looks.
@@ -614,7 +614,7 @@ impl Vm {
     pub fn objc(&self) -> Option<&'static crate::objc::ObjcRuntime> {
         let published = self.objc.load(Ordering::Acquire);
         // SAFETY: non-null only after `publish_objc` stored a leaked runtime,
-        // which is never freed and never mutated after publication — an
+        // which is never freed and never mutated after publication - an
         // extending pass builds a separate copy. See the field note.
         (!published.is_null()).then(|| unsafe { &*published })
     }
@@ -651,7 +651,7 @@ impl Vm {
         crate::thread::current().map_or((0, 0, 0, 0), |t| t.main_args())
     }
 
-    /// The `rsp` an `LC_UNIXTHREAD` entry point is entered with — the word holding
+    /// The `rsp` an `LC_UNIXTHREAD` entry point is entered with - the word holding
     /// `argc`, with `argv`, `envp` and `apple` laid out above it.
     ///
     /// Same thread restriction as [`Vm::main_args`], and for the same reason.
@@ -679,7 +679,7 @@ impl Vm {
         self.call_with(entry, ctx)
     }
 
-    /// As [`Vm::call`], with the whole initial register context supplied — the
+    /// As [`Vm::call`], with the whole initial register context supplied - the
     /// form a thunk needs, since it has floating-point arguments to place too.
     pub fn call_with(&self, entry: u64, ctx: RegisterContext) -> Result<u64, VmError> {
         self.call_with_stack(entry, ctx, &[]).map(|r| r.rax)
@@ -733,8 +733,8 @@ impl Vm {
     /// Run the guest from `entry` with `rsp`, and service its exits until the entry
     /// this made is finished.
     ///
-    /// Where the per-entry bookkeeping lives — depth, the published register context,
-    /// the `setjmp` identity — so that the two ways in, a call with a return address
+    /// Where the per-entry bookkeeping lives - depth, the published register context,
+    /// the `setjmp` identity - so that the two ways in, a call with a return address
     /// and a jump without one, differ only in who wrote the word at `rsp`.
     fn enter(
         &self,
@@ -750,7 +750,7 @@ impl Vm {
         ctx.rip = entry;
         // The guest reads thread-specific data off `%gs` without calling
         // anything, so the base has to be right before the first region runs and
-        // it is a fact about *this* thread — which is why it is set here, in the
+        // it is a fact about *this* thread - which is why it is set here, in the
         // one place every entry into guest code passes through, rather than
         // wherever a context happens to be built. See [`crate::thread`].
         ctx.gs_base = crate::thread::tsd_base();
@@ -827,7 +827,7 @@ impl Vm {
             // window, so asking first makes every entry pay for a case that
             // reaches the miss path anyway. Measured on A Hat in Time: 15.2
             // million region entries a second, 1.4% of them missing the window,
-            // and `Program::import_at` alone was 15.6% of running time —
+            // and `Program::import_at` alone was 15.6% of running time -
             // answering "yes" 5,826 times out of 3.04 billion. A `dlopen` cannot
             // break the induction, because it registers the new image's imports
             // as part of loading it. See `docs/HOTSPOTS.md`.
@@ -927,8 +927,8 @@ impl Vm {
             // one `int3` there: the function it called is finished.
             ExitReason::Breakpoint if crate::retstub::is_exit(ctx.rip) => Ok(Some(ctx.rax)),
 
-            // Any other breakpoint is the guest's own `int3` — a debugger trap,
-            // an assertion, a sanitizer's — and what it wants is a `SIGTRAP`
+            // Any other breakpoint is the guest's own `int3` - a debugger trap,
+            // an assertion, a sanitizer's - and what it wants is a `SIGTRAP`
             // delivered to a handler this runtime has no path to yet.
             ExitReason::Breakpoint => panic!(
                 "rosetta3: guest breakpoint at {:#x}{}, which this runtime cannot deliver",
@@ -950,7 +950,7 @@ impl Vm {
                     Ok(None)
                 }
                 // Two of the kinds are not about the guest's control flow at
-                // all — they are the translation saying it cannot serve this
+                // all - they are the translation saying it cannot serve this
                 // address, either because the instruction there runs past the
                 // bytes it was given or because its dispatch was never offered
                 // that address.
@@ -1160,7 +1160,7 @@ impl Vm {
         // match. `_Thread_local` access is the case that forces this.
         if let Some(site) = self.program.import_by_target(callee) {
             // A host pointer that reached the guest by neither of the routes
-            // [`crate::trampoline`] substitutes — not out of a slot, not out of
+            // [`crate::trampoline`] substitutes - not out of a slot, not out of
             // `dlsym`, but returned by some host function the guest then called
             // through.
             if let Some(stub) = crate::trampoline::for_site(site) {

@@ -3,8 +3,8 @@
 
 Instruments symbolicates a host address against the *loaded images*, and a
 translated region is in none of them: every one is its own Cranelift module in
-its own anonymous mapping. So a frame in translated code — which is where a
-working translation spends most of its time — comes back as a bare hexadecimal
+its own anonymous mapping. So a frame in translated code - which is where a
+working translation spends most of its time - comes back as a bare hexadecimal
 address, and the half of the profile that matters is blank. There is no Darwin
 equivalent of a jitdump for Instruments to read, so the join is done afterwards
 and this is the thing that does it.
@@ -19,7 +19,7 @@ reason.
 How a JIT frame is recognised: an Instruments `<frame>` inside a real image
 carries a `<binary>` child naming it, and one that could not be symbolicated
 does not. That is the whole test, and it holds across every backtrace-bearing
-schema — `time-profile`, `cpu-counters`, `processor-trace` — because the
+schema - `time-profile`, `cpu-counters`, `processor-trace` - because the
 backtrace representation is shared between them.
 
 Only the standard library is used, because a diagnostic that needs installing
@@ -50,12 +50,12 @@ BACKTRACE_SCHEMAS = (
 )
 
 # Processor Trace is deliberately not in that list, and the reason is a measured
-# one rather than an oversight — see `docs/PROFILING.md`. Its tables do not
+# one rather than an oversight - see `docs/PROFILING.md`. Its tables do not
 # carry runtime addresses at all. A location in `processor-trace-intervals` is a
 # `<text-location>` holding a **binary UUID and a Mach-O vm offset**, which is a
 # symbol resolved at record time and not an address this map could be joined
 # against. In a 1.5-million-row trace of a translated program, all 6010 distinct
-# locations carried a UUID and exactly one was the all-zero sentinel — which is
+# locations carried a UUID and exactly one was the all-zero sentinel - which is
 # where everything Instruments could not place, including every translation,
 # ends up indistinguishably.
 PROCESSOR_TRACE_SCHEMAS = ("processor-trace-intervals", "processor-trace-points")
@@ -120,7 +120,7 @@ class Map:
                 e.append(hi)
                 w.append(payload)
         if not rows and not rrows:
-            sys.exit(f"{path}: no R or I lines — was ROSETTA3_PROFILE_MAP set?")
+            sys.exit(f"{path}: no R or I lines - was ROSETTA3_PROFILE_MAP set?")
 
     @staticmethod
     def _find(starts, ends, what, addr):
@@ -134,7 +134,7 @@ class Map:
 
         Tried at `addr` and at `addr - 1`: Instruments reports a *return*
         address for every frame but the leaf, and a return address is one past
-        the call — which for the last instruction of a range lands in the next
+        the call - which for the last instruction of a range lands in the next
         one, or past the end.
         """
         for probe in (addr, addr - 1):
@@ -170,7 +170,7 @@ def frames(xml_path):
     a tool that gets killed instead of answering.
 
     Instruments orders a backtrace leaf-first, so the first frame of each is
-    where the sample actually was — the distinction between self time and
+    where the sample actually was - the distinction between self time and
     inclusive time, which for "is this translation hot" is the whole question.
     """
     for event, element in ET.iterparse(xml_path, events=("end",)):
@@ -209,7 +209,7 @@ def main():
             sys.exit(
                 "this is a Processor Trace, and it cannot be joined to a guest map.\n"
                 "Its locations are (binary UUID, Mach-O offset) pairs resolved when the\n"
-                "trace was recorded, not runtime addresses — so there is nothing here to\n"
+                "trace was recorded, not runtime addresses - so there is nothing here to\n"
                 "look up, and every translation is folded into one unnamed sentinel.\n"
                 "Record 'Time Profiler' or 'CPU Counters' to join, and use\n"
                 "ROSETTA3_PROFILE=1 for guest-attributed time. See docs/PROFILING.md.")
@@ -245,7 +245,7 @@ def main():
             self_time[va] += 1
 
     if not totals["frames"]:
-        sys.exit("the exported table had no backtraces — try another --xpath")
+        sys.exit("the exported table had no backtraces - try another --xpath")
 
     print()
     for key in ("frames", "in an image", "unsymbolicated", "resolved to guest"):
@@ -256,7 +256,7 @@ def main():
     if unmatched:
         # Not a failure to hide. An unsymbolicated address in no translation is
         # a host library's own generated code, or a trace and a map from
-        # different runs — and those two want opposite responses.
+        # different runs - and those two want opposite responses.
         top = ", ".join(f"{a:#x}" for a, _ in unmatched.most_common(3))
         print(f"  {sum(unmatched.values()):>9}  unsymbolicated and in no "
               f"translation ({len(unmatched)} distinct, e.g. {top})")

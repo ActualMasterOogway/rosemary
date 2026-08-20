@@ -94,7 +94,7 @@ pub fn before_send(sel: u64, receiver: u64, argument: u64) {
         super::guarded(|| {
             // SAFETY: this is the `presentDrawable:` the guest is sending, on
             // the thread sending it, so the receiver is its command buffer and
-            // the argument is the drawable — which is exactly what
+            // the argument is the drawable - which is exactly what
             // [`super::metal::present`] requires.
             unsafe { super::metal::present(receiver as *mut _, argument as *mut _) };
         });
@@ -103,7 +103,7 @@ pub fn before_send(sel: u64, receiver: u64, argument: u64) {
     if selectors.present_self.contains(&sel) {
         super::guarded(|| {
             // SAFETY: a live receiver on the thread messaging it, which is all
-            // `present_standalone` asks — it checks for itself whether the
+            // `present_standalone` asks - it checks for itself whether the
             // receiver is really a drawable, because `present` is a common
             // enough name that some other class may have one.
             unsafe { super::metal::present_standalone(receiver as *mut _) };
@@ -120,7 +120,7 @@ pub fn before_send(sel: u64, receiver: u64, argument: u64) {
     }
     if sel == selectors.flush_buffer {
         // The context's identity is its `CGLContextObj`, which is also what the
-        // `CGLFlushDrawable` path has — so a program that uses both spellings
+        // `CGLFlushDrawable` path has - so a program that uses both spellings
         // for one context shares one set of overlay resources rather than
         // building two.
         //
@@ -150,7 +150,7 @@ fn flush_drawable(
     }
     let host = crate::shims::host::host_or_refuse(symbol)?;
     // SAFETY: the symbol [`shim_for`] matched, whose declaration in
-    // `<OpenGL/CGLCurrent.h>` is `CGLError (*)(CGLContextObj)` — one pointer in,
+    // `<OpenGL/CGLCurrent.h>` is `CGLError (*)(CGLContextObj)` - one pointer in,
     // an `int` back. Resolved out of an OpenGL framework this process has
     // loaded, which the guest's own context brought in.
     let f: extern "C" fn(u64) -> i32 =

@@ -175,7 +175,7 @@ fn system_libraries_are_declined_by_the_filesystem_source_and_answered_natively(
         )
         .unwrap();
 
-    // libSystem is a dependency, and it is *not* among the loaded images —
+    // libSystem is a dependency, and it is *not* among the loaded images -
     // it was declined, exactly as intended, and satisfied symbol by symbol.
     assert!(
         !report.images.iter().any(|i| i.name.contains("libSystem")),
@@ -325,7 +325,7 @@ fn a_strict_policy_fails_the_link_on_a_missing_symbol() {
 #[test]
 fn a_shim_can_take_priority_over_a_bundled_dylib() {
     // Provider order is the mechanism, and the loaded-image namespace comes
-    // first by design — so overriding a bundled export needs the *namespace*
+    // first by design - so overriding a bundled export needs the *namespace*
     // not to contain it. This checks the complementary case: a symbol the
     // bundled dylib does not export still reaches the caller's shims.
     let Some((path, bytes)) = build_program("loader_shim") else {

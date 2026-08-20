@@ -61,7 +61,7 @@ fn time_argument(
 /// Place a `CMTime` the way a SysV AMD64 MEMORY return is placed.
 ///
 /// The buffer is the hidden first argument the guest passed in `rdi`, and `rax`
-/// gets it back — which is what a MEMORY-returning callee must do and what a
+/// gets it back - which is what a MEMORY-returning callee must do and what a
 /// caller reading the result through `rax` depends on.
 fn return_time(
     symbol: &str,
@@ -81,7 +81,7 @@ fn return_time(
 /// `CMTime CMTimeMake(int64_t value, int32_t timescale)`
 ///
 /// The hidden return buffer takes `rdi`, so `value` is in `rsi` and `timescale`
-/// in `edx` — one register along from where a reader counting parameters would
+/// in `edx` - one register along from where a reader counting parameters would
 /// look for them.
 fn time_make(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let host = host_or_refuse(symbol)?;
@@ -135,7 +135,7 @@ fn presentation_time_stamp(
 /// `OSStatus VTCompressionSessionCompleteFrames(VTCompressionSessionRef session,
 /// CMTime completeUntilPresentationTimeStamp)`
 ///
-/// The session keeps `rdi` — a MEMORY argument consumes no register — and the
+/// The session keeps `rdi` - a MEMORY argument consumes no register - and the
 /// time is the whole of the stack argument area.
 fn complete_frames(
     symbol: &str,
@@ -226,7 +226,7 @@ fn frame_rate_range_make(
     Ok(())
 }
 
-/// `VTDecompressionOutputCallbackRecord` — a function pointer and its refcon.
+/// `VTDecompressionOutputCallbackRecord` - a function pointer and its refcon.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct OutputCallbackRecord {
@@ -242,7 +242,7 @@ struct OutputCallbackRecord {
 ///
 /// The compression side takes its callback as an ordinary argument and is a `cbsig!`
 /// entry; this one takes it *inside a two-word record*, which the marshaller's
-/// per-argument substitution cannot see into — it would replace the **record pointer**
+/// per-argument substitution cannot see into - it would replace the **record pointer**
 /// with a thunk and VideoToolbox would read a trampoline's first eight bytes as the
 /// callback.
 ///
@@ -276,7 +276,7 @@ fn decompression_session_create(
     };
     // SAFETY: the symbol [`shim_for`] matched, whose declaration is the one
     // above. The record's callback is a native thunk by the lines above, and the
-    // record itself outlives the call — which is all VideoToolbox reads it for.
+    // record itself outlives the call - which is all VideoToolbox reads it for.
     let f: extern "C" fn(u64, u64, u64, u64, *const OutputCallbackRecord, u64) -> i32 = unsafe {
         core::mem::transmute::<
             u64,
@@ -341,7 +341,7 @@ mod tests {
     }
 
     /// Twelve bytes and three members, which is what makes the SysV return
-    /// packing — two members in `xmm0`, one in `xmm1` — the right arrangement.
+    /// packing - two members in `xmm0`, one in `xmm1` - the right arrangement.
     #[test]
     fn a_frame_rate_range_is_three_floats() {
         assert_eq!(core::mem::size_of::<CaFrameRateRange>(), 12);

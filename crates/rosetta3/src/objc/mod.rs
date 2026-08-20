@@ -26,7 +26,7 @@ use crate::vm::{Vm, VmError};
 pub enum Refusal {
     /// The host runtime already has a class of this name.
     NameTaken { name: String },
-    /// The superclass is neither a host class nor a guest class this pass registered —
+    /// The superclass is neither a host class nor a guest class this pass registered -
     /// an unsatisfied weak import, or a class whose own registration was refused.
     SuperclassMissing { name: String, superclass: u64 },
     /// A superclass chain that comes back to itself. Not producible by a
@@ -130,7 +130,7 @@ pub(crate) fn publish(rt: &'static ObjcRuntime) {
 pub fn published() -> Option<&'static ObjcRuntime> {
     let rt = PUBLISHED.load(Ordering::Acquire);
     // SAFETY: non-null only after `publish` stored a leaked reference, which is
-    // never freed and never mutated after publication — an extending pass
+    // never freed and never mutated after publication - an extending pass
     // builds a separate copy and publishes that. Same argument as `Vm::objc`.
     (!rt.is_null()).then(|| unsafe { &*rt })
 }
@@ -225,7 +225,7 @@ fn images_of(report: &LinkReport) -> Vec<&ObjcImage> {
 
 /// The five passes, in the order the runtime needs them.
 fn register_images(vm: &Vm, rt: &mut ObjcRuntime, images: &[&ObjcImage]) -> Result<(), VmError> {
-    // Protocols first — a class adopts them as it is registered.
+    // Protocols first - a class adopts them as it is registered.
     for image in images {
         for p in &image.protocols {
             register_protocol(rt, p);
@@ -299,7 +299,7 @@ fn load_images(vm: &Vm, rt: &ObjcRuntime, images: &[&ObjcImage]) -> Result<usize
         }
     }
     // A category's `+load` is a method on the target class's metaclass and is
-    // called even when the class itself has one — both run, which is the one
+    // called even when the class itself has one - both run, which is the one
     // place Objective-C does not collapse a category over a class.
     for image in images {
         for cat in &image.categories {
@@ -511,7 +511,7 @@ fn register_class(
                     if target == cls && m.name == cxxivars::CONSTRUCT {
                         // SAFETY: the method was just installed on `cls`, so
                         // asking the class for it answers what `add_method`
-                        // wrote — including the typed trampoline, when there
+                        // wrote - including the typed trampoline, when there
                         // was one, which a saved copy of the raw thunk would
                         // miss.
                         cxx_construct = unsafe {
@@ -535,7 +535,7 @@ fn register_class(
                         method: m.name.clone(),
                         reason,
                     });
-                    // SAFETY: as above — still unregistered.
+                    // SAFETY: as above - still unregistered.
                     unsafe { host::objc_disposeClassPair(cls) };
                     return None;
                 }
@@ -612,7 +612,7 @@ fn add_method(
 /// Build a trampoline from the method's own type encoding.
 ///
 /// `Err` is a `&'static str` in the register the rest of this project uses for refusals
-/// — it names what about *this* method could not be carried, so the listing says
+/// - it names what about *this* method could not be carried, so the listing says
 /// "returns an aggregate by value" rather than "unsupported".
 ///
 /// - **An aggregate return too large for AAPCS64's registers.** The callee fills a
@@ -698,8 +698,8 @@ fn register_category(vm: &Vm, rt: &mut ObjcRuntime, cat: &ObjcCategory) {
         });
         return;
     };
-    // SAFETY: `target` is a `Class` — either the host's own or one registered
-    // above — so its metaclass is what `object_getClass` returns.
+    // SAFETY: `target` is a `Class` - either the host's own or one registered
+    // above - so its metaclass is what `object_getClass` returns.
     let meta = unsafe { host::object_getClass(target) };
 
     let mut added = 0;
@@ -749,7 +749,7 @@ fn patch_ivar_offsets(vm: &Vm, rt: &mut ObjcRuntime, class: &ObjcClass) -> Resul
         // SAFETY: `found` is an `Ivar` the runtime just returned for `cls`.
         let offset = unsafe { host::ivar_getOffset(found) };
 
-        // The guest's word is 32 bits — `int32_t`, per `ivar_t` — and a negative
+        // The guest's word is 32 bits - `int32_t`, per `ivar_t` - and a negative
         // or oversized offset would mean the runtime laid out something this
         // does not understand, so it is refused rather than truncated.
         let Ok(offset) = u32::try_from(offset) else {
@@ -795,7 +795,7 @@ fn unique_selectors(vm: &Vm, image: &ObjcImage) -> Result<usize, VmError> {
 /// about it.
 ///
 /// The one pass of [`register_loaded`]'s five that has to happen even when the rest
-/// cannot — when no `Vm` has registered anything yet, or when the image declares no
+/// cannot - when no `Vm` has registered anything yet, or when the image declares no
 /// classes at all.
 pub(crate) fn unique_loaded_selectors(vm: &Vm, report: &LinkReport) -> Result<usize, VmError> {
     let mut uniqued = 0;

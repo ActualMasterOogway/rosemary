@@ -93,8 +93,8 @@ pub enum Attribution {
 
 /// How far past a translation's last attributed byte still counts as that translation.
 ///
-/// [`Placed::attributed_end`] deliberately under-counts — Cranelift attributes no
-/// source location to a prologue or an epilogue — so the true end of the compiled code
+/// [`Placed::attributed_end`] deliberately under-counts - Cranelift attributes no
+/// source location to a prologue or an epilogue - so the true end of the compiled code
 /// is somewhere past it and nothing records where.
 const EPILOGUE_SLACK: u64 = 4096;
 
@@ -133,7 +133,7 @@ pub fn attribute(pc: u64) -> Attribution {
 pub struct PlacedRegion {
     /// Host address the compiled code begins at.
     pub code: u64,
-    /// One past the last host byte attributed to a guest instruction — see
+    /// One past the last host byte attributed to a guest instruction - see
     /// [`Placed::attributed_end`] for why this is not the code's length.
     pub code_end: u64,
     /// Guest addresses the region covers.
@@ -178,7 +178,7 @@ static IMAGES: Mutex<Vec<Image>> = Mutex::new(Vec::new());
 /// than only state it.
 ///
 /// Without this the report's guest range is a number that needs a second run
-/// with `ROSETTA3_TRACE_VM` to interpret — and the whole reason this module
+/// with `ROSETTA3_TRACE_VM` to interpret - and the whole reason this module
 /// exists is that the interesting crash is the one that does not come back.
 pub fn note_images(report: &machish::report::LinkReport) {
     let mut images = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
@@ -207,7 +207,7 @@ pub fn note_images(report: &machish::report::LinkReport) {
 
 /// Install the reporter for the faults a translation can raise.
 ///
-/// Idempotent, and safe to call before any guest code runs — which is where
+/// Idempotent, and safe to call before any guest code runs - which is where
 /// [`crate::startup`] calls it, because a fault during the first initializer is
 /// as much worth naming as one an hour in.
 pub fn install() {
@@ -320,7 +320,7 @@ fn say_region(out: &mut Buffer, pc: u64) {
     };
     let Some(entry) = found else {
         out.str(
-            "\n  guest region: none — the pc is below every translation, \
+            "\n  guest region: none - the pc is below every translation, \
              so this fault is in host code",
         );
         return;
@@ -352,15 +352,15 @@ fn say_region(out: &mut Buffer, pc: u64) {
     // A `pc` outside everything the map attributed is not necessarily inside
     // this translation at all.
     if entry.map.is_empty() {
-        out.str(" — no source map was kept for this region (map budget spent)");
+        out.str(" - no source map was kept for this region (map budget spent)");
     } else if pc >= entry.attributed_end() {
         out.str(
-            " — past every range this translation attributed to a guest \
+            " - past every range this translation attributed to a guest \
                  instruction, so the fault is probably not in it",
         );
     } else {
         out.str(
-            " — inside it, but in code with no guest origin: a prologue, \
+            " - inside it, but in code with no guest origin: a prologue, \
                  an epilogue, or the entry dispatch",
         );
     }
@@ -397,7 +397,7 @@ fn say_thread(out: &mut Buffer) {
     out.str("\n  thread ");
     out.hex(u64::from(crate::thread::mach_port()));
     let Some(state) = crate::thread::current() else {
-        out.str(" — not a guest thread; the fault is in this runtime or in a host library");
+        out.str(" - not a guest thread; the fault is in this runtime or in a host library");
         return;
     };
     out.str(", guest rsp ");
@@ -410,7 +410,7 @@ fn say_thread(out: &mut Buffer) {
     out.str("..");
     out.hex(stack.end);
     if !stack.contains(&state.live_rsp()) {
-        out.str(" — rsp is outside it");
+        out.str(" - rsp is outside it");
     }
 }
 
@@ -461,7 +461,7 @@ fn host_pc(context: *mut libc::c_void) -> Option<u64> {
 
 /// The address's own bytes, when every one of them is printable.
 ///
-/// Little-endian, so the low byte is the first character — which is the order
+/// Little-endian, so the low byte is the first character - which is the order
 /// the text was written in memory.
 fn ascii_word(addr: u64) -> Option<[u8; 8]> {
     let bytes = addr.to_le_bytes();
@@ -485,8 +485,8 @@ impl Buffer {
         }
     }
 
-    /// Append what fits. Truncation is silent because the alternative — a handler that
-    /// reports its own overflow — is not more useful than a shorter sentence.
+    /// Append what fits. Truncation is silent because the alternative - a handler that
+    /// reports its own overflow - is not more useful than a shorter sentence.
     fn bytes(&mut self, data: &[u8]) {
         let room = self.bytes.len() - self.used;
         let n = data.len().min(room);

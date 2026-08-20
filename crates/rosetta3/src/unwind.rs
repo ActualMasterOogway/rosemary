@@ -696,7 +696,7 @@ pub struct InFlight {
     /// Where phase two has got to: the frame whose landing pad is running.
     at: Registers,
     /// Which VM entry threw. A landing pad in an outer entry would be reached
-    /// across host frames — see the module note.
+    /// across host frames - see the module note.
     entry: u64,
 }
 
@@ -1005,8 +1005,8 @@ pub fn end_catch(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMem
         symbol: symbol.to_string(),
         reason: "an end_catch outside a running guest thread",
     })?;
-    // `__cxa_end_catch` is emitted on paths where nothing was caught — the
-    // cleanup edge of a `try` whose handler never ran — so having no exception
+    // `__cxa_end_catch` is emitted on paths where nothing was caught - the
+    // cleanup edge of a `try` whose handler never ran - so having no exception
     // to end is ordinary rather than an error.
     let Some(header) = state.end_catch() else {
         return Ok(());

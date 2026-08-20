@@ -5,7 +5,7 @@
 //! imports can be satisfied by *native arm64 host functions* already loaded in
 //! this process, with no Intel library code translated and no system dylib on
 //! disk. [`ls_links_against_the_host_and_every_address_is_real`] is where that
-//! is checked rather than asserted — every resolved address is fed back to
+//! is checked rather than asserted - every resolved address is fed back to
 //! `dladdr`, which answers only for addresses inside a genuinely loaded image.
 
 mod common;
@@ -65,7 +65,7 @@ fn ls_links_against_the_host_and_every_address_is_real() {
     // The denylist refuses `___stack_chk_guard` on purpose: it is the *host's*
     // stack canary, and handing the guest a pointer to it wires two unrelated
     // programs' stack-smashing detection together. Supplying our own is the
-    // whole intended workflow — a refused symbol is a prompt to virtualize, and
+    // whole intended workflow - a refused symbol is a prompt to virtualize, and
     // this is what virtualizing the simplest one looks like.
     static GUEST_STACK_GUARD: u64 = 0x0000_dead_beef_0000;
     let mut virtualized = SyntheticDylib::new("<test virtualization>");

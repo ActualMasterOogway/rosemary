@@ -11,7 +11,7 @@ use super::{bad_pointer, set_int_return};
 /// Byte offset of `zalloc` in a `z_stream`.
 ///
 /// `next_in`, `avail_in` (+4 padding), `total_in`, `next_out`, `avail_out`
-/// (+4), `total_out`, `msg`, `state` — eight fields, 64 bytes.
+/// (+4), `total_out`, `msg`, `state` - eight fields, 64 bytes.
 const ZALLOC_OFFSET: u64 = 0x40;
 /// Byte offset of `zfree`, immediately after `zalloc`.
 const ZFREE_OFFSET: u64 = 0x48;
@@ -20,14 +20,14 @@ const ZFREE_OFFSET: u64 = 0x48;
 const Z_STREAM_SIZE: c_int = 112;
 
 /// `Z_VERSION_ERROR`, which is what zlib itself answers a caller whose
-/// `stream_size` does not match — so a guest built against a different
+/// `stream_size` does not match - so a guest built against a different
 /// `z_stream` gets the error its own library would have given it rather than a
 /// silent write past the end of its structure.
 const Z_VERSION_ERROR: i32 = -6;
 /// `Z_STREAM_ERROR`, for a stream pointer that cannot be read or written.
 const Z_STREAM_ERROR: i32 = -2;
 
-// The host's own zlib — the same copy the native provider would have resolved
+// The host's own zlib - the same copy the native provider would have resolved
 // the guest's import to, reached here by name instead of through a slot.
 #[link(name = "z")]
 unsafe extern "C" {
@@ -107,7 +107,7 @@ fn init_with(
     substitute_allocators(symbol, strm, mem, callbacks)?;
 
     // SAFETY: `strm` is a guest address, and the guest is identity-mapped, so
-    // it is a valid host pointer to at least `Z_STREAM_SIZE` bytes — which the
+    // it is a valid host pointer to at least `Z_STREAM_SIZE` bytes - which the
     // read and write above have just demonstrated by touching the middle of it.
     // The version string is the host library's own.
     let rc = unsafe { call(strm as *mut c_void, zlibVersion()) };
@@ -197,7 +197,7 @@ fn stack_argument(
     Ok(u64::from_le_bytes(buf))
 }
 
-/// One of this module's implementations, in the shape [`crate::shims`] wants —
+/// One of this module's implementations, in the shape [`crate::shims`] wants -
 /// the wider one, carrying [`Callbacks`], because a guest function pointer
 /// crosses the seam here and the marshaller is not what places it.
 pub type Shim = crate::signal::Shim;
@@ -265,7 +265,7 @@ mod tests {
     }
 
     /// Substitutes any address with the corresponding real host function, and
-    /// records what it was asked about — the two claims this shim makes.
+    /// records what it was asked about - the two claims this shim makes.
     struct Substituting(std::cell::RefCell<Vec<u64>>);
 
     impl Callbacks for Substituting {
@@ -346,7 +346,7 @@ mod tests {
         assert_eq!(rc, 0);
     }
 
-    /// A guest that supplies no allocator must reach zlib's own — and zlib **writes its
+    /// A guest that supplies no allocator must reach zlib's own - and zlib **writes its
     /// defaults back into the stream**, which is the fact that makes re-initialising
     /// the same stream safe.
     #[test]

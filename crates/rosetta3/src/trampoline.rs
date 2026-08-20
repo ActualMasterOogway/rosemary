@@ -29,7 +29,7 @@ static BASE: AtomicU64 = AtomicU64::new(0);
 /// One trampolined symbol.
 struct Entry {
     /// The site the entry stands for, leaked so it can be handed out with a `'static`
-    /// lifetime — the same thing [`crate::dyld`] does with a `dlsym` result, and for
+    /// lifetime - the same thing [`crate::dyld`] does with a `dlsym` result, and for
     /// the same reason.
     site: &'static ImportSite,
     /// Its signature, resolved once when the entry was made.
@@ -96,7 +96,7 @@ pub fn contains(va: u64) -> bool {
 
 /// Reserve the arena, once.
 ///
-/// The code half is readable and writable *by this runtime* and never executable — the
+/// The code half is readable and writable *by this runtime* and never executable - the
 /// guest is x86-64 and this CPU cannot run a byte of it, which is the same decision
 /// every guest mapping is made under.
 fn arena_locked() -> Option<u64> {
@@ -145,7 +145,7 @@ fn arena_locked() -> Option<u64> {
 
 /// The trampoline standing for `site`, creating it if this is the first ask.
 ///
-/// `None` — meaning "call it the way you always did" — for every symbol a fast import
+/// `None` - meaning "call it the way you always did" - for every symbol a fast import
 /// cannot express, which is the list in the module note.
 pub fn for_site(site: &ImportSite) -> Option<u64> {
     if !enabled() || site.resolved == 0 {
@@ -204,14 +204,14 @@ pub fn for_site(site: &ImportSite) -> Option<u64> {
 /// leaves the stack exactly as a direct call site would.
 fn write_jmp(va: u64) {
     // `HALF` from the start of this entry, less the five bytes the instruction
-    // itself occupies — a constant, since the two halves are the same size.
+    // itself occupies - a constant, since the two halves are the same size.
     let rel = (HALF - 5) as u32;
     let mut bytes = [0u8; 5];
     bytes[0] = 0xE9;
     bytes[1..].copy_from_slice(&rel.to_le_bytes());
     // SAFETY: `va` is the start of an unused slot in the code half of the arena
     // this module mapped read/write, so five bytes from it are in bounds and
-    // owned here. No guest thread can hold this address yet — it is published by
+    // owned here. No guest thread can hold this address yet - it is published by
     // the caller after this returns.
     unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), va as usize as *mut u8, bytes.len()) };
 }
@@ -361,7 +361,7 @@ mod tests {
     }
 
     /// The entry is one `jmp rel32` whose displacement lands on the import
-    /// address the registry answers for — which is the entire contract between
+    /// address the registry answers for - which is the entire contract between
     /// the two halves of the arena.
     #[test]
     fn the_jump_lands_on_the_registered_import() {
@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// The lifted region is the `jmp` and nothing else — in particular the walk
+    /// The lifted region is the `jmp` and nothing else - in particular the walk
     /// must not follow it into the import half, which is unreadable.
     #[test]
     fn the_region_is_the_jump_alone() {

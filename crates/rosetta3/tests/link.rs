@@ -90,7 +90,7 @@ fn one_answer(path: &str) -> String {
 /// A guest calling back into itself through a host `qsort`, every way.
 ///
 /// The interesting one: the comparator is entered from *inside* a host
-/// function, so the run loop is re-entered underneath a bridged call — which is
+/// function, so the run loop is re-entered underneath a bridged call - which is
 /// exactly the arrangement where a link that should not have been taken would
 /// resume the wrong frame.
 #[test]
@@ -104,8 +104,8 @@ fn a_host_callback_into_guest_code_is_unaffected() {
 
 /// `setjmp`/`longjmp`, every way.
 ///
-/// A `longjmp` is a bridged call that moves `rip` instead of returning — the
-/// case that asks to be linked (see `bridge::resume`) — and its whole content
+/// A `longjmp` is a bridged call that moves `rip` instead of returning - the
+/// case that asks to be linked (see `bridge::resume`) - and its whole content
 /// is that execution continues somewhere the runtime chose. If linking resumed
 /// the address the bridge was *entered* at rather than the one it left behind,
 /// this is the program that would say so.
@@ -122,7 +122,7 @@ fn a_longjmp_out_of_a_bridged_call_is_unaffected() {
 ///
 /// The link table is per thread and published into a context that is a local of
 /// whoever entered the guest, so a program with four of them is what says the
-/// two are actually paired — a table shared between threads would show up as
+/// two are actually paired - a table shared between threads would show up as
 /// one thread entering another's translation at the wrong address.
 #[test]
 fn guest_threads_are_unaffected() {
@@ -265,8 +265,8 @@ fn every_linkable_exit_kind_finds_its_successor() {
 ///
 /// Asserted as a *share* rather than a count because the count is a property of
 /// the program and the share is a property of the mechanism. Anything above a
-/// clear majority means the ordinary exits — a `ret` out of a region, a call to
-/// one — are being answered in translated code, which is the whole claim.
+/// clear majority means the ordinary exits - a `ret` out of a region, a call to
+/// one - are being answered in translated code, which is the whole claim.
 ///
 /// The fixture is the one whose time goes into leaving regions ([`LINK_C`]);
 /// asking this of a start-up-dominated program would measure how much of it is
@@ -294,7 +294,7 @@ fn most_region_entries_never_reach_the_run_loop() {
         "only {share}% of region entries linked; {line}"
     );
 
-    // And with the mechanism off, none of them do — which is what says the
+    // And with the mechanism off, none of them do - which is what says the
     // number above is measuring linking rather than counting entries.
     let (_, _, err) = run_guest_env(&[("ROSETTA3_STATS", "1"), OFF, UNPINNED], &path, &[]);
     let line = err

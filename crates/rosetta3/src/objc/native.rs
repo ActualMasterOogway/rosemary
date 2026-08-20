@@ -8,12 +8,12 @@ unsafe extern "C" {
     /// `void _objc_map_images(unsigned, const char *const [], const struct mach_header *const [])`
     ///
     /// dyld's own `mapped` notification, exported. Everything a compiled image
-    /// needs done to it — selectors uniqued, class names published, categories
-    /// attached, protocols interned — happens in here, against real arm64
+    /// needs done to it - selectors uniqued, class names published, categories
+    /// attached, protocols interned - happens in here, against real arm64
     /// metadata, so none of [`crate::objc`]'s reconstruction applies.
     fn _objc_map_images(count: u32, paths: *const *const c_char, mhdrs: *const *const c_void);
 
-    /// `void _objc_load_image(const char *, const struct mach_header *)` — the
+    /// `void _objc_load_image(const char *, const struct mach_header *)` - the
     /// `init` notification, which is what runs `+load`.
     fn _objc_load_image(path: *const c_char, mh: *const c_void);
 }

@@ -42,8 +42,8 @@ pub fn run(exec: &dyn Execution) -> Result<i32, VmError> {
 /// Where each image ended up, under `ROSETTA3_TRACE_VM`.
 ///
 /// Every guest address this runtime reports is slid by whatever `mmap` chose that run,
-/// and a fault inside guest code is reported by a debugger — or by the guest's own
-/// crash handler — as a bare number.
+/// and a fault inside guest code is reported by a debugger - or by the guest's own
+/// crash handler - as a bare number.
 fn say_image_map(exec: &dyn Execution) {
     if !crate::shims::vmmap::tracing() {
         return;

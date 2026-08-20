@@ -52,7 +52,7 @@ pub fn can_build_x86_64() -> bool {
 
 /// Compile `source` into an x86_64 Mach-O and return its bytes.
 ///
-/// `extra` supplies additional linker/compiler flags — notably
+/// `extra` supplies additional linker/compiler flags - notably
 /// `-Wl,-no_fixup_chains`, which is how a modern toolchain is made to emit
 /// `LC_DYLD_INFO_ONLY` instead of chained fixups.
 pub fn build_x86_64(name: &str, source: &str, extra: &[&str]) -> Option<Vec<u8>> {
@@ -98,7 +98,7 @@ pub fn build_objc_x86_64(name: &str, source: &str) -> Option<Vec<u8>> {
     build_objc_x86_64_flags(name, source, &[])
 }
 
-/// [`build_objc_x86_64`] with extra flags — `-Wl,-no_fixup_chains` above all,
+/// [`build_objc_x86_64`] with extra flags - `-Wl,-no_fixup_chains` above all,
 /// which is how a modern toolchain is made to emit `LC_DYLD_INFO_ONLY`.
 pub fn build_objc_x86_64_flags(name: &str, source: &str, extra: &[&str]) -> Option<Vec<u8>> {
     if !can_build_x86_64() {

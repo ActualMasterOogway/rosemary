@@ -248,7 +248,7 @@ impl Profile {
         }
         let mut major = 0i32;
         // SAFETY: as above. The query is expected to fail on 2.1, which is the
-        // signal being read — so the error flag is cleared first, so that a
+        // signal being read - so the error flag is cleared first, so that a
         // *pending* error is not mistaken for this query's, and drained after.
         let major_is_known = unsafe {
             drain(gl);
@@ -397,7 +397,7 @@ const FRAGMENT_SHADER_SOURCE: &str = "#version 150\n\
 ///
 /// **The reason this is a state and not a `bool` is a bug this had.** The first version
 /// retried `build_program` whenever `program` was still zero, which is every frame
-/// after a failure — so one shader that would not compile became sixty compile attempts
+/// after a failure - so one shader that would not compile became sixty compile attempts
 /// a second, each leaving an error flag for the guest to find.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Setup {
@@ -415,7 +415,7 @@ struct Resources {
     /// Decided once, from the driver rather than from a version string, and kept.
     profile: Option<Profile>,
     /// Whether this context accepts vertex array object calls at all. Probed,
-    /// not assumed — see [`vao_usable`].
+    /// not assumed - see [`vao_usable`].
     vao_usable: bool,
     atlas: u32,
     atlas_key: (usize, usize),
@@ -488,7 +488,7 @@ pub fn present(context: usize) {
     };
 
     // SAFETY of everything below: the guest's context is current on this
-    // thread — the hook is on its own flush — and every call is made with the
+    // thread - the hook is on its own flush - and every call is made with the
     // arguments its prototype declares. The state the calls change is saved
     // first and restored last, which is the invariant this whole file is about.
     let saved = unsafe { Saved::take(gl, profile, resources.vao_usable) };
@@ -582,14 +582,14 @@ unsafe fn report(gl: &Gl, resources: &Resources, error: u32) {
 /// The drawable's size in pixels.
 ///
 /// The context's own view first, converted to backing pixels so that a retina window
-/// reports 2560×1600 rather than 1280×800 — the overlay is in pixels and half-size text
+/// reports 2560×1600 rather than 1280×800 - the overlay is in pixels and half-size text
 /// on a retina display is the bug this avoids.
 fn surface(gl: &Gl) -> Option<(f32, f32)> {
     let ns_context = class("NSOpenGLContext");
     if !ns_context.is_null() {
         // SAFETY: `+currentContext`, `-view` and `-bounds`/`-convertRectToBacking:`
         // are documented AppKit methods with these prototypes. `-bounds` and the
-        // conversion return a `CGRect`, which AAPCS64 returns in registers —
+        // conversion return a `CGRect`, which AAPCS64 returns in registers -
         // there is no `_stret` on this architecture.
         let current = unsafe { send0::<Id>(ns_context, super::objc::sel("currentContext")) };
         let view = match current.is_null() {
@@ -651,7 +651,7 @@ struct Saved {
 /// # Safety
 ///
 /// A context must be current, and `token` must be one that writes exactly one
-/// integer — every token this file passes is.
+/// integer - every token this file passes is.
 unsafe fn integer(gl: &Gl, token: u32) -> i32 {
     let mut value = 0i32;
     // SAFETY: the caller's obligation, and `value` is a live local.
@@ -673,8 +673,8 @@ impl Saved {
         unsafe {
             (gl.GetIntegerv)(VIEWPORT, saved.viewport.as_mut_ptr());
             // **Before the profile split, because the attribute stacks do not
-            // cover these.** `glPushAttrib` saves the fixed-function machine —
-            // enables, blend, the texture environment — and
+            // cover these.** `glPushAttrib` saves the fixed-function machine -
+            // enables, blend, the texture environment - and
             // `glPushClientAttrib` saves the array pointers.
             saved.program = integer(gl, CURRENT_PROGRAM);
             if vao_usable {
@@ -683,7 +683,7 @@ impl Saved {
             saved.array_buffer = integer(gl, ARRAY_BUFFER_BINDING);
             if profile == Profile::Legacy {
                 // The driver's own save for everything that *is* covered, which
-                // is more complete than a list written here could be — provided
+                // is more complete than a list written here could be - provided
                 // it took it. See [`Saved::pushed`].
                 if let (Some(push), Some(push_client)) = (gl.PushAttrib, gl.PushClientAttrib) {
                     drain(gl);
@@ -816,7 +816,7 @@ const UNPACK_DEFAULTS: [(u32, i32); 6] = [
     (UNPACK_SKIP_ROWS, 0),
     (UNPACK_SKIP_PIXELS, 0),
     // One, because the atlas is one byte per texel and as wide as it needs to
-    // be — which is very often not a multiple of four.
+    // be - which is very often not a multiple of four.
     (UNPACK_ALIGNMENT, 1),
 ];
 
@@ -956,8 +956,8 @@ unsafe fn draw_legacy(gl: &Gl, resources: &mut Resources, list: &DrawList) {
     // and no buffer is bound to intercept them.
     unsafe {
         // **First, because nothing below has any effect otherwise.** A 2.1
-        // context can still have a program bound — A Hat in Time's has one, at
-        // GLSL 1.20 — and while it is bound the matrices, the texture
+        // context can still have a program bound - A Hat in Time's has one, at
+        // GLSL 1.20 - and while it is bound the matrices, the texture
         // environment and the client arrays set up here are all inputs to a
         // pipeline that is switched off.
         if let Some(use_program) = gl.UseProgram {
@@ -1016,7 +1016,7 @@ unsafe fn draw_legacy(gl: &Gl, resources: &mut Resources, list: &DrawList) {
             (gl.BindTexture)(TEXTURE_2D, resources.atlas)
         );
         // `GL_MODULATE` over a `GL_ALPHA` texture leaves the fragment colour
-        // alone and multiplies its alpha by the coverage — which is the fixed
+        // alone and multiplies its alpha by the coverage - which is the fixed
         // function spelling of the core profile's fragment shader.
         step!(
             gl,
@@ -1109,7 +1109,7 @@ unsafe fn draw_core(gl: &Gl, resources: &mut Resources, list: &DrawList) {
     };
 
     // SAFETY: the caller's obligation. The buffer is respecified whole with
-    // `glBufferData`, which is the orphaning idiom — the driver hands back new
+    // `glBufferData`, which is the orphaning idiom - the driver hands back new
     // storage rather than waiting for the previous frame's draw to finish.
     unsafe {
         (gl.Viewport)(0, 0, list.width as i32, list.height as i32);
@@ -1227,7 +1227,7 @@ unsafe fn build_program(gl: &Gl, resources: &mut Resources) -> bool {
             let shader = create_shader(kind);
             if shader == 0 {
                 // Zero is not a shader name, and passing it to the three calls
-                // below would be three `GL_INVALID_VALUE`s — which is how this
+                // below would be three `GL_INVALID_VALUE`s - which is how this
                 // failure reached the guest's error checking in the first place.
                 return 0;
             }

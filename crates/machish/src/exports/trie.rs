@@ -70,7 +70,7 @@ pub fn parse_trie(bytes: &[u8], image_base: Word) -> Result<Vec<Export>> {
         })?;
 
         // The children always start past the terminal payload, whether or not
-        // we understood it — that framing is what lets dyld skip flag bits it
+        // we understood it - that framing is what lets dyld skip flag bits it
         // does not know, and we honour it for the same reason.
         let children_at = cur
             .pos()
@@ -212,7 +212,7 @@ mod tests {
         assert!(parse_trie(&[], 0).unwrap().is_empty());
     }
 
-    /// Root with a single labelled edge to one terminal leaf — the shape every
+    /// Root with a single labelled edge to one terminal leaf - the shape every
     /// terminal-decoding test below wants, with the child offset patched to
     /// wherever the leaf actually landed.
     fn one_export(label: &str, terminal: &[u8]) -> Vec<u8> {

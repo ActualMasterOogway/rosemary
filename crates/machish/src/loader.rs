@@ -233,7 +233,7 @@ impl<S: MachSpec + 'static> Loader<S> {
                 let obj = MachObject::parse_any(&fetched.bytes, self.spec)?;
                 obj.check_not_encrypted()?;
                 // The dependency's own rpaths come first, then those inherited
-                // from the image loading it — dyld's search order.
+                // from the image loading it - dyld's search order.
                 let mut inherited: Vec<String> = obj.rpaths().map(|r| r.to_string()).collect();
                 inherited.extend(rpaths.iter().cloned());
 

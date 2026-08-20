@@ -6,17 +6,17 @@
 //!
 //! What each test would falsify:
 //!
-//! - **the round trip** — the whole mechanism, checked against what the same
+//! - **the round trip** - the whole mechanism, checked against what the same
 //!   binary prints with nothing translating it. A `longjmp` that did not jump
 //!   prints the `BUG:` lines the fixture plants after every call that must not
 //!   return; one that jumped without restoring `rsp` runs `main`'s tail on a
 //!   dead frame and the guard array says so.
-//! - **the value** — including C's rule that a zero arrives as one.
-//! - **both spellings** — `__setjmp` and `_sigsetjmp` are separate imports, and
+//! - **the value** - including C's rule that a zero arrives as one.
+//! - **both spellings** - `__setjmp` and `_sigsetjmp` are separate imports, and
 //!   a runtime that shimmed only `_setjmp` would refuse them by name.
-//! - **the refusal** — a `longjmp` out of a host→guest callback names the case
+//! - **the refusal** - a `longjmp` out of a host→guest callback names the case
 //!   instead of restoring a context over host frames that would never unwind.
-//! - **slow and fast agree** — `--slow` sends every promotable import through
+//! - **slow and fast agree** - `--slow` sends every promotable import through
 //!   the marshaller. `setjmp` must be a VM exit under *both* policies, because
 //!   an inlined `setjmp` would call the host's and save arm64 registers.
 
@@ -80,7 +80,7 @@ fn the_translated_program_agrees_with_the_untranslated_one() {
 
 #[test]
 fn a_longjmp_of_zero_arrives_as_one() {
-    // The second trip jumps with 0 and `setjmp` must report 1 — the one place
+    // The second trip jumps with 0 and `setjmp` must report 1 - the one place
     // `longjmp` is specified to change the value it was given, and the kind of
     // detail a hand-written implementation drops.
     let Some(path) = setjmp_fixture() else {
@@ -112,7 +112,7 @@ fn both_darwin_spellings_reach_the_same_implementation() {
 #[test]
 fn setjmp_is_never_promoted_to_an_inlined_import() {
     // `int setjmp(jmp_buf)` is an ordinary marshallable signature, so nothing
-    // about its *types* keeps the lifter from inlining a call to the host's —
+    // about its *types* keeps the lifter from inlining a call to the host's -
     // which would save arm64 callee-saved registers and the JIT's own frame,
     // and would not fault. `ImportPolicy` refuses to promote a shimmed symbol,
     // and this is that claim from the outside: the default (fast where possible)
@@ -134,14 +134,14 @@ fn a_longjmp_across_a_host_frame_is_refused_by_name() {
     // The comparator is called by the host's `qsort`, so its `setjmp` lives in
     // an outer VM entry with host frames in between. Restoring the guest context
     // there would leave `qsort`'s arm64 frame on the host stack with nothing to
-    // return through it — so the runtime stops and says which case it is. This
+    // return through it - so the runtime stops and says which case it is. This
     // is the boundary of what is built, stated as a test rather than a comment,
     // and it is the test that must *change* when the guest unwinder lands.
     //
     // It is also, since imports became bridged calls, the test that holds
     // [`rosetta3::bridge`] honest about parked failures. The comparator's
     // refusal cannot be returned through the host's `qsort` frame, so it is left
-    // on the thread — and `qsort` itself is now an inline bridged call that
+    // on the thread - and `qsort` itself is now an inline bridged call that
     // produces no exit for the run loop to notice it at. A bridge that reported
     // success without looking would let this program sort nothing and exit zero.
     let Some(path) = longjmp_across_fixture() else {

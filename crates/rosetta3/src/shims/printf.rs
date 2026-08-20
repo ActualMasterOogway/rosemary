@@ -34,7 +34,7 @@ pub struct VarArgs<'a> {
 
 impl<'a> VarArgs<'a> {
     /// Start after `fixed_int` integer arguments have already been consumed by
-    /// the named parameters — one for `printf`'s format, two for `fprintf`'s
+    /// the named parameters - one for `printf`'s format, two for `fprintf`'s
     /// stream and format, three for `snprintf`.
     pub fn new(
         symbol: &'a str,
@@ -282,7 +282,7 @@ pub fn render(fmt: &[u8], args: &mut VarArgs<'_>) -> Result<Vec<u8>> {
                     i += 1;
                 }
                 // `z`, `j`, `t` are all 64-bit here, and so is BSD's `q`
-                // ("quad") — which is not a historical curiosity to skip.
+                // ("quad") - which is not a historical curiosity to skip.
                 Some(b'z') | Some(b'j') | Some(b't') | Some(b'q') => {
                     len = Len::Size;
                     i += 1;
@@ -331,8 +331,8 @@ pub fn render(fmt: &[u8], args: &mut VarArgs<'_>) -> Result<Vec<u8>> {
                 let body = digits_with_precision(v, base, upper, spec.prec);
                 pad_number(&mut out, &body, false, &spec, prefix, spec.prec);
             }
-            // `%lc` and `%C` are a `wint_t` — a whole `wchar_t` rather than a
-            // byte — and come out as UTF-8 because that is what this renderer's
+            // `%lc` and `%C` are a `wint_t` - a whole `wchar_t` rather than a
+            // byte - and come out as UTF-8 because that is what this renderer's
             // output is.
             b'C' | b'c' if len == Len::Long || conv == b'C' => {
                 let v = args.next_int()? as u32;
@@ -378,7 +378,7 @@ pub fn render(fmt: &[u8], args: &mut VarArgs<'_>) -> Result<Vec<u8>> {
                 let (body, neg) = format_float(v, conv, &spec);
                 pad_number(&mut out, body.as_bytes(), neg, &spec, "", None);
             }
-            // Everything unhandled — `%n` included — comes out verbatim and
+            // Everything unhandled - `%n` included - comes out verbatim and
             // fetches no argument of its own, so the rest of the format still
             // lines up with the rest of the arguments.
             _ => out.extend_from_slice(&fmt[start..i]),
@@ -450,7 +450,7 @@ fn zero_extend(raw: u64, len: Len) -> u64 {
 }
 
 /// As [`digits`], except that zero with an explicit precision of zero prints *nothing*
-/// — the one place C's integer precision changes the digits rather than padding them.
+/// - the one place C's integer precision changes the digits rather than padding them.
 fn digits_with_precision(v: u64, base: u64, upper: bool, prec: Option<usize>) -> Vec<u8> {
     if v == 0 && prec == Some(0) {
         return Vec::new();
@@ -638,7 +638,7 @@ fn write_host(stream: *mut libc::FILE, bytes: &[u8]) {
         return;
     }
     // SAFETY: `bytes` is a live slice of `len` bytes and `stream` is a host
-    // `FILE*` — either the host's own stdout or a pointer the guest obtained
+    // `FILE*` - either the host's own stdout or a pointer the guest obtained
     // from a passed-through `fopen`/`___stdoutp`, both of which are host
     // pointers by construction of the native provider.
     unsafe {
@@ -694,7 +694,7 @@ pub fn snprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemo
 ///
 /// ## The locale is checked rather than ignored
 ///
-/// This shim renders in Rust, which produces **C-locale** output — `.` for the radix
+/// This shim renders in Rust, which produces **C-locale** output - `.` for the radix
 /// point, no digit grouping.
 pub fn snprintf_l(
     symbol: &str,
@@ -846,7 +846,7 @@ pub fn vsnprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMem
     store_bounded(symbol, ctx, mem, ctx.rdi, ctx.rsi, out)
 }
 
-/// `__vsnprintf_chk(buf, maxlen, flag, os, fmt, ap)` — the fortified form, whose fourth
+/// `__vsnprintf_chk(buf, maxlen, flag, os, fmt, ap)` - the fortified form, whose fourth
 /// argument is the destination's compile-time size.
 pub fn vsnprintf_chk(
     symbol: &str,

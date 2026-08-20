@@ -5,17 +5,17 @@
 //! the kernel pushes a frame onto whichever thread it picked and calls the
 //! handler. What each test would falsify:
 //!
-//! - **the handler runs** — installed through both `signal` and `sigaction`, and
+//! - **the handler runs** - installed through both `signal` and `sigaction`, and
 //!   counted, so a handler that never fired is a wrong number rather than a
 //!   missing line.
-//! - **a disposition comes back** — the direction a runtime that only
+//! - **a disposition comes back** - the direction a runtime that only
 //!   substituted outbound pointers gets wrong. The guest compares what `signal`
 //!   returned against its own function and restores it.
-//! - **sentinels are not addresses** — `SIG_IGN` installed as a thunk would run
+//! - **sentinels are not addresses** - `SIG_IGN` installed as a thunk would run
 //!   a handler where the program asked for silence.
-//! - **`SA_SIGINFO` is refused by name** — the boundary, for a reason that
+//! - **`SA_SIGINFO` is refused by name** - the boundary, for a reason that
 //!   belongs to the recompiler rather than to this runtime.
-//! - **both architectures agree** — the same source built for arm64 and run
+//! - **both architectures agree** - the same source built for arm64 and run
 //!   natively prints the same thing, which is what says `struct sigaction`
 //!   needs no translation.
 
@@ -82,7 +82,7 @@ fn sig_ign_is_installed_as_a_disposition_and_not_as_a_handler() {
 fn the_two_architectures_lay_struct_sigaction_out_the_same_way() {
     // `sigaction`'s struct is passed to the host by copying sixteen bytes the
     // guest wrote. That is only sound because the layout is identical on both
-    // architectures — so the same source is compiled for the *host* and run,
+    // architectures - so the same source is compiled for the *host* and run,
     // and its whole output must match the translated x86_64 build's. The first
     // line is the sizes; the rest is the behaviour they enable.
     let Some(guest) = signal_fixture() else {
@@ -123,12 +123,12 @@ fn the_untranslated_binary_agrees_line_for_line() {
 fn an_sa_siginfo_handler_is_recorded_and_never_delivered() {
     // The boundary. A three-argument handler is called with the machine state at
     // the interrupted instruction, which here is inside a Cranelift-compiled
-    // translation with no map back to the guest's registers — so the handler is
+    // translation with no map back to the guest's registers - so the handler is
     // *recorded and not installed*, rather than being entered with a synthesized
     // `mcontext64`. The work item the message names belongs to the recompiler.
     //
     // The installation succeeds, because refusing it kills a program during
-    // start-up for a handler a run that never faults never calls — Terraria's
+    // start-up for a handler a run that never faults never calls - Terraria's
     // embedded Mono is the case that forced the distinction. What must not
     // happen is *delivery*: this fixture raises the signal it installed for, so
     // the default disposition takes it and `detailed` never prints.

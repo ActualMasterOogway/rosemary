@@ -3,21 +3,21 @@
 //! Through the built driver, for the reason `run.rs` gives: the claims are about
 //! a process. A thread that never really started, or one that shared the main
 //! thread's stack, is not visible from inside a test that only calls
-//! [`Vm::call`](rosetta3::Vm::call) — it is visible as wrong output, or as a
+//! [`Vm::call`](rosetta3::Vm::call) - it is visible as wrong output, or as a
 //! crash.
 //!
 //! Each test names what would be false if it failed:
 //!
-//! - **thread-locals** — a `_Thread_local` read reaches a per-thread block at
+//! - **thread-locals** - a `_Thread_local` read reaches a per-thread block at
 //!   the right offset. This is the one that fails as *plausible neighbouring
 //!   values* rather than as a fault, which is why the fixture's values are all
 //!   distinct.
-//! - **four threads, four counts** — the blocks really are per thread.
-//! - **join** — the start routine ran on its own guest stack and its return
+//! - **four threads, four counts** - the blocks really are per thread.
+//! - **join** - the start routine ran on its own guest stack and its return
 //!   value came back.
-//! - **`errno`** — the passthrough claim: a guest thread's `errno` is the host
+//! - **`errno`** - the passthrough claim: a guest thread's `errno` is the host
 //!   thread's, because they are the same thread.
-//! - **the pthread surface** — mutexes, `pthread_once`, and a guest destructor
+//! - **the pthread surface** - mutexes, `pthread_once`, and a guest destructor
 //!   libpthread calls on teardown.
 //!
 //! Where a native run is possible the assertion is byte equality with it, which
@@ -45,7 +45,7 @@ fn a_thread_local_reads_its_own_value_and_not_a_neighbours() {
     assert_eq!(status, Some(0), "stderr: {err}");
     // 11 from `__thread_data`, 33 stored into a `__thread_bss` variable, 22 from
     // `__thread_data` again at a non-zero offset, and both ends of a 100-byte
-    // array — an off-by-one block base gets at most one of these right.
+    // array - an off-by-one block base gets at most one of these right.
     assert_eq!(out, "11 33 22 z 0\n", "stderr: {err}");
 }
 
@@ -164,7 +164,7 @@ fn a_guest_thread_runs_on_the_stack_its_attributes_asked_for() {
     assert_eq!(status, Some(0), "stderr: {err}");
 
     // The main thread is 8 MiB with its guard page inside that, exactly as the
-    // kernel gives a real one — so the number a guest reads is the native one
+    // kernel gives a real one - so the number a guest reads is the native one
     // rather than one page more.
     assert!(
         out.contains("main: size=8372224 inside=1\n"),
@@ -182,7 +182,7 @@ fn a_guest_thread_runs_on_the_stack_its_attributes_asked_for() {
         "{out:?} (stderr: {err})"
     );
     // The one the guest actually asked for. Before this, the request sized the
-    // *host* thread — the one running the JIT — and the guest's own frames went
+    // *host* thread - the one running the JIT - and the guest's own frames went
     // on a default stack it never mentioned.
     assert!(
         out.contains("sized: size=1048576 local_inside=1 other_thread_agrees=1\n"),
@@ -220,7 +220,7 @@ fn thread_stacks_agree_with_the_same_binary_run_natively() {
 /// thing.
 ///
 /// Skipped rather than failed when the host cannot execute an x86_64 binary
-/// natively — that is a property of the machine, not of this runtime.
+/// natively - that is a property of the machine, not of this runtime.
 #[test]
 fn a_threaded_guest_agrees_with_the_same_binary_run_natively() {
     let Some(path) = common::pthread_sync_fixture() else {
@@ -240,7 +240,7 @@ fn a_threaded_guest_agrees_with_the_same_binary_run_natively() {
 ///
 /// A `_Thread_local` read is `leaq _x(%rip), %rdi; callq *(%rdi)`. There is no
 /// displacement for the lifter to match, so the call arrives as an
-/// `IndirectCall` naming the resolved `__tlv_bootstrap` address — and before M4
+/// `IndirectCall` naming the resolved `__tlv_bootstrap` address - and before M4
 /// that was `UnknownIndirectCall`, a stop. This asserts the reverse map exists
 /// and points at the right symbol, which is the difference between the two.
 #[test]
@@ -277,7 +277,7 @@ fn an_imports_resolved_address_maps_back_to_its_symbol() {
 /// is why a guest's `pthread_mutex_t` can be handed to the host's libpthread in
 /// place with no translation at all. If a future SDK ever changed one, every
 /// signature in `abi::table`'s pthread block would silently start corrupting a
-/// guest's stack — so the sizes are compared by compiling the same program for
+/// guest's stack - so the sizes are compared by compiling the same program for
 /// both architectures.
 #[test]
 fn pthread_types_agree_across_architectures() {

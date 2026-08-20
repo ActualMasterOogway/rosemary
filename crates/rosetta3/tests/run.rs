@@ -1,18 +1,18 @@
 //! Milestone 3's acceptance gate: Intel programs that actually run.
 //!
 //! Everything here goes through the built driver rather than the library, and
-//! that is the point. The claims are about a *process* — it prints, it exits
-//! with its own status, its `atexit` handlers fire from the host's exit — and
+//! that is the point. The claims are about a *process* - it prints, it exits
+//! with its own status, its `atexit` handlers fire from the host's exit - and
 //! none of those are visible from inside a test that only calls
 //! [`Vm::call`](rosetta3::Vm::call).
 //!
 //! Each test names what would be false if it failed:
 //!
-//! - **hello** — the loop works at all: lift, enter, service an import, resume.
-//! - **qsort** — the host called *back into* the guest. Falsifiable: a
+//! - **hello** - the loop works at all: lift, enter, service an import, resume.
+//! - **qsort** - the host called *back into* the guest. Falsifiable: a
 //!   comparator that is not really run leaves the array unsorted.
-//! - **constructors** — initializers ran, in order, before `main`.
-//! - **`/bin/ls`** — a real system binary agrees with the host's own, byte for
+//! - **constructors** - initializers ran, in order, before `main`.
+//! - **`/bin/ls`** - a real system binary agrees with the host's own, byte for
 //!   byte, which is the claim no fixture can make on its own.
 
 mod common;
@@ -87,7 +87,7 @@ fn initializers_run_before_main_and_in_order() {
 fn a_destructor_runs_at_exit_in_one_list_with_the_guests_atexit_handler() {
     // `__cxa_atexit`, reached the way every real guest reaches it: the source
     // says `__attribute__((destructor))` and clang registers it from a
-    // constructor. The order is the claim — the destructor is registered before
+    // constructor. The order is the claim - the destructor is registered before
     // `main`, the `atexit` handler during it, and one reversed list prints them
     // in this order and no other.
     let Some(path) = common::dtor_fixture() else {
@@ -104,7 +104,7 @@ fn a_callback_is_translated_after_the_main_threads_tls_is_gone() {
     // macOS destroys the main thread's TLS inside `exit`, so an exit handler
     // that hands the host a callback it has never seen makes the runtime lift
     // and compile from a thread where every Rust `thread_local!` is already
-    // gone. Cranelift's `timing` feature is one — hence the feature list in
+    // gone. Cranelift's `timing` feature is one - hence the feature list in
     // `Cargo.toml`. Failure is exit status 70 and no `late=` line.
     let Some(path) = common::late_callback_fixture() else {
         skip!("cannot build x86_64 fixtures")
@@ -138,7 +138,7 @@ fn bin_ls_agrees_with_the_hosts_own_ls() {
         skip!("/bin/ls not present");
     }
     // A directory with entries of both kinds, and content that is stable while
-    // the test runs — `ls` of anything shared would race with the rest of the
+    // the test runs - `ls` of anything shared would race with the rest of the
     // system.
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ls-fixture");
     let _ = std::fs::remove_dir_all(&dir);
@@ -174,7 +174,7 @@ fn bin_ls_agrees_with_the_hosts_own_ls() {
 fn an_untranslatable_stop_names_itself_instead_of_crashing() {
     // The other half of "it runs": when it does not, the reason is a sentence.
     // `/usr/bin/true` is not a Mach-O this loader accepts on every system, so
-    // the case chosen is one that is always available and always wrong — a
+    // the case chosen is one that is always available and always wrong - a
     // path that is not an executable at all.
     let (status, out, err) = run_guest("/etc/hosts", &[]);
     assert_eq!(status, Some(1));
@@ -187,7 +187,7 @@ fn an_untranslatable_stop_names_itself_instead_of_crashing() {
 ///
 /// The bug this exists to prevent was shipped and found by a real application:
 /// a signature was written for `vfprintf` and no shim, so the *guest's*
-/// `va_list` — SysV AMD64's two offsets, spill pointer and register save area —
+/// `va_list` - SysV AMD64's two offsets, spill pointer and register save area -
 /// was handed to the host's `vfprintf`, which reads arm64's, which is a bare
 /// pointer. The result is not a wrong number, it is a fault inside `strlen`
 /// several frames from anything that names the cause. Comparing whole output
@@ -219,20 +219,20 @@ fn the_va_list_family_prints_what_the_host_libc_prints() {
 /// The guest loads an Intel dylib of its own, mid-run, and calls into it.
 ///
 /// The host's `dlopen` cannot answer this: it looks at the file, finds no arm64
-/// slice, and refuses — correctly, to the wrong question. So the image is loaded
+/// slice, and refuses - correctly, to the wrong question. So the image is loaded
 /// through `machish` into this process, and everything downstream of that has to
 /// follow. What each line of the expected output would falsify:
 ///
-/// - `plugin loaded` — the constructor ran, and it ran *before* `dlopen`
+/// - `plugin loaded` - the constructor ran, and it ran *before* `dlopen`
 ///   returned, which is what dyld guarantees and what a plugin depends on.
-/// - `len=6` — the `dlsym` result is a **guest** address the runtime entered
+/// - `len=6` - the `dlsym` result is a **guest** address the runtime entered
 ///   through the JIT, and the `strlen` inside it reached the host's. That second
 ///   half is the one with no safety net: the plugin did not exist when the
 ///   lifter was configured, so its call sites are recognised by
 ///   [`rosetta3::bridge::DynamicImports`] while the plugin is being lifted, or
 ///   at the exit, or not at all. Not at all means decoding a `__stubs`
 ///   trampoline as guest code and disassembling native arm64 as x86-64.
-/// - `missing=1 reported=1` — a name nothing defines is null *and* leaves a
+/// - `missing=1 reported=1` - a name nothing defines is null *and* leaves a
 ///   message, rather than being answered by the host's `dlsym` with some
 ///   unrelated libSystem address.
 #[test]
@@ -262,7 +262,7 @@ fn a_dynamically_loaded_image_runs_the_same_bridged_and_exited() {
     // [`rosetta3::bridge::import_call`].
     //
     // Two entirely different routes to the same host function, which is exactly
-    // the shape a silent divergence would hide in — a stale register reloaded
+    // the shape a silent divergence would hide in - a stale register reloaded
     // around the bridge, a return address pushed twice, a `dlsym`ed pointer
     // dispatched as host code on one path and guest code on the other. The
     // program is small enough that any of those changes what it prints.
@@ -278,7 +278,7 @@ fn a_dynamically_loaded_image_runs_the_same_bridged_and_exited() {
     assert_eq!(fast_out, slow_out);
 }
 
-/// The mode a guest passes to `open` is the mode the file gets — through the
+/// The mode a guest passes to `open` is the mode the file gets - through the
 /// inlined call *and* through the bridged one.
 ///
 /// `open`, `openat` and `sem_open` are described to the lifter as fixed-arity,
@@ -286,8 +286,8 @@ fn a_dynamically_loaded_image_runs_the_same_bridged_and_exited() {
 /// wrappers of this runtime's that apply the `O_CREAT` rule themselves. See
 /// [`rosetta3::shims::openat`]. The permission bits on disk are what says the
 /// mode arrived where the signature claims: they are odd numbers no umask and no
-/// default produces, so a mode read from the wrong register — or from the stack,
-/// which is where a genuinely variadic callee would look — gives a file that
+/// default produces, so a mode read from the wrong register - or from the stack,
+/// which is where a genuinely variadic callee would look - gives a file that
 /// fails this outright. The semaphore's count is the same claim for the pair of
 /// optional arguments.
 ///

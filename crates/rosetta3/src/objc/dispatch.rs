@@ -112,14 +112,14 @@ pub(super) static RUNTIME: &[Runtime] = &[
     //
     // The other direction of [`crate::objc::register`]. That pass replays the
     // classes a guest *declared* in its `__objc_data`; these three are a guest
-    // building one while it runs, and they need no replay at all — the class is
+    // building one while it runs, and they need no replay at all - the class is
     // the host runtime's from the moment it is allocated, so what the guest
     // holds is already a real `Class` and the translation table has nothing to
     // say about it.
     //
     // What does need saying is the `IMP`. It is guest code, and once the class
-    // is registered the host runtime will call it as arm64 from anywhere —
-    // Foundation, a delegate callback, a thread this runtime never made — so it
+    // is registered the host runtime will call it as arm64 from anywhere -
+    // Foundation, a delegate callback, a thread this runtime never made - so it
     // leaves as a thunk exactly as `method_setImplementation`'s does.
     //
     // Terraria reaches all three: Mono's Objective-C bridge builds an
@@ -149,7 +149,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
     //
     // A guest that reads an ivar through `object_getIvar` rather than through a
     // compiled displacement is asking the *host* runtime where the ivar is, and
-    // gets the right answer for free — the class is registered, so the layout
+    // gets the right answer for free - the class is registered, so the layout
     // the host reports is the layout the object has. `ivar_getOffset` is what
     // makes that answer usable from guest code, and it returns a `ptrdiff_t`.
     rt!("ivar_getName", P, P),
@@ -173,7 +173,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
     // address of the storage. That storage is in guest memory, which is a real
     // address in this process because the guest is identity-mapped, and the
     // object is a host allocation on both sides. So the host's table is already
-    // keyed and valued by exactly the things the guest holds — there is nothing
+    // keyed and valued by exactly the things the guest holds - there is nothing
     // to translate and nothing that could be kept coherent by a second table.
     //
     // `objc_storeWeak`'s *value* is the exception, and it is the ordinary one:
@@ -193,19 +193,19 @@ pub(super) static RUNTIME: &[Runtime] = &[
     // A `@synthesize`d property does not compile to a load and a store. For
     // anything `atomic` or `copy`, clang emits a call to one of these, which the
     // runtime implements over a spinlock table keyed by the *address of the
-    // ivar* — guest memory, so the same address the host would compute — and, in
+    // ivar* - guest memory, so the same address the host would compute - and, in
     // the `copy` cases, a `-copyWithZone:` message to the new value.
     //
     // That message is why these belong in this table rather than in the C one:
     // the value may be a guest object whose class is a guest class, and sending
     // to it has to go through the host runtime with the class the runtime knows.
-    // It already will — the object is a host allocation — so what these
+    // It already will - the object is a host allocation - so what these
     // need is the ordinary class substitution on any argument that could be a
     // class, and nothing more.
     //
     // `offset` is a `ptrdiff_t` and `atomic`/`shouldCopy` are single bytes.
     // **Argument order differs between `objc_setProperty` and its specialized
-    // spellings** — the general one takes `offset` third and the value fourth,
+    // spellings** - the general one takes `offset` third and the value fourth,
     // and the four specializations take the value third and `offset` fourth.
     // Getting that backwards stores an object pointer as an ivar offset.
     rtc!([0], "objc_getProperty", P, P, P, I64, U8),
@@ -216,7 +216,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
     rtc!([1], "objc_initWeak", P, P, P),
     rtc!([] -> true, "objc_loadWeakRetained", P, P),
     rtc!([] -> true, "objc_lookUpClass", P, P),
-    // `void objc_moveWeak(id *dst, id *src)` — the third of the four weak
+    // `void objc_moveWeak(id *dst, id *src)` - the third of the four weak
     // primitives, alongside `objc_copyWeak` above.
     rt!("objc_moveWeak", V, P, P),
     rtc!([0] -> true, "objc_opt_class", P, P),
@@ -252,7 +252,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
     // `objc_storeStrong(id *location, id value)` writes through a guest
     // pointer.
     rtc!([1], "objc_storeStrong", V, P, P),
-    // `id objc_storeWeak(id *location, id obj)` — see the weak note above.
+    // `id objc_storeWeak(id *location, id obj)` - see the weak note above.
     rtc!([1], "objc_storeWeak", P, P, P),
     // `@synchronized`. Passthrough is not a shortcut here.
     rtc!([0], "objc_sync_enter", I32, P),
@@ -269,7 +269,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
     // ## The one entry that returns a struct
     //
     // `struct objc_method_description protocol_getMethodDescription(Protocol *,
-    // SEL, BOOL isRequiredMethod, BOOL isInstanceMethod)` — two pointers, `{SEL
+    // SEL, BOOL isRequiredMethod, BOOL isInstanceMethod)` - two pointers, `{SEL
     // name; char *types;}`, sixteen bytes of integer class. Both conventions
     // return that in their first two integer registers, so nothing is copied
     // anywhere: the host's `x0`/`x1` become the guest's `rax`/`rdx`, which is a
@@ -281,7 +281,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
     // the player log and where Subnautica Below Zero stopped.
     //
     // The `types` pointer that comes back belongs to the host's `libobjc`, and
-    // the guest reads it as a C string — which works for the reason every other
+    // the guest reads it as a C string - which works for the reason every other
     // host pointer does: the guest is identity-mapped into this process, so a
     // host address is an address it can load from.
     Runtime {
@@ -372,7 +372,7 @@ static REFUSED: &[(&str, &str)] = &[
     ("objc_begin_catch", "as objc_exception_throw"),
     ("objc_end_catch", "as objc_exception_throw"),
     // Associated objects key host storage by the object's address, which would
-    // work — but the *policy* argument decides whether the value is copied, and
+    // work - but the *policy* argument decides whether the value is copied, and
     // copying sends `copyWithZone:` from inside the runtime with none of this
     // runtime's state on the stack. Named rather than half-supported.
     (
@@ -398,7 +398,7 @@ struct ObjectList {
     /// The counted selector to send instead.
     counted: &'static str,
     /// Whether the list reads `object, key, object, key, …` rather than plain
-    /// objects — and so becomes *two* arrays rather than one.
+    /// objects - and so becomes *two* arrays rather than one.
     pairs: bool,
 }
 
@@ -543,8 +543,8 @@ fn absent(name: &str) -> Option<u64> {
 /// The host's own implementation of `name`, if this process has one.
 pub(super) fn host_symbol(name: &str) -> Option<u64> {
     let c = std::ffi::CString::new(name).ok()?;
-    // SAFETY: `RTLD_DEFAULT` is `(void *)-2` on macOS — search every loaded
-    // image — and `c` is a NUL-terminated string that outlives the call. A
+    // SAFETY: `RTLD_DEFAULT` is `(void *)-2` on macOS - search every loaded
+    // image - and `c` is a NUL-terminated string that outlives the call. A
     // missing symbol is null, which is checked rather than dereferenced.
     let ptr = unsafe { libc::dlsym(-2isize as *mut core::ffi::c_void, c.as_ptr()) };
     (!ptr.is_null()).then_some(ptr as usize as u64)
@@ -668,7 +668,7 @@ impl Convert for Classes<'_> {
         }
         if self.blocks.contains(&(index as u8)) {
             // A block is edited where it lies and travels unchanged, which is
-            // why this returns `raw` rather than a substitute — see
+            // why this returns `raw` rather than a substitute - see
             // [`crate::shims::block`] for why the thunk has to be written into
             // the literal instead of kept beside it.
             if raw != 0 {
@@ -696,8 +696,8 @@ impl Convert for Classes<'_> {
 
 /// Send one message.
 ///
-/// On success either `rip` is the guest `IMP` the message resolved to — the
-/// transfer performed, not a call made — or the host method has run and its
+/// On success either `rip` is the guest `IMP` the message resolved to - the
+/// transfer performed, not a call made - or the host method has run and its
 /// result is in the guest's return register.
 fn send(
     symbol: &str,
@@ -718,7 +718,7 @@ fn send(
             let receiver = (mem as &dyn GuestMemory).read_u64(sup, symbol)?;
             let named = (mem as &dyn GuestMemory).read_u64(sup.wrapping_add(8), symbol)?;
             let named = vm.objc_host_class(named) as host::Class;
-            // SAFETY: `named` is a `Class` — either the host's own, arrived
+            // SAFETY: `named` is a `Class` - either the host's own, arrived
             // through an ordinary bind, or one this runtime registered. A
             // superclass query on one is what the runtime is for.
             let start = match skip_one {
@@ -753,8 +753,8 @@ fn send(
     // The overlay's seam.
     crate::gui::hook::before_send(sel, host_receiver, arg_reg(ctx, base + 2));
 
-    // SAFETY: `host_receiver` is a pointer the host runtime owns — an object it
-    // allocated, or a class it realized — which is what `object_getClass` takes.
+    // SAFETY: `host_receiver` is a pointer the host runtime owns - an object it
+    // allocated, or a class it realized - which is what `object_getClass` takes.
     let class = match search {
         Some(start) => start,
         None => unsafe { host::object_getClass(host_receiver as host::Class) },
@@ -805,7 +805,7 @@ fn send(
     // describe dealt with first.
     match variadic {
         // A nil-terminated object list has no format to fold its arguments
-        // into, so it is answered by sending the counted twin instead — which
+        // into, so it is answered by sending the counted twin instead - which
         // returns rather than falling through to the send below, because the
         // selector that reaches the host is not the one the guest sent.
         Variadic::List(list) => {
@@ -834,7 +834,7 @@ fn send(
         });
     }
     // Everything fallible happens before `rdi` moves, so a refusal leaves the
-    // guest context exactly as it was found — the guarantee every other refusal
+    // guest context exactly as it was found - the guarantee every other refusal
     // in this project makes.
     set_arg_reg(ctx, base, host_receiver);
     let convert = Classes {
@@ -867,7 +867,7 @@ fn send(
 /// What a message to one class and selector resolves to.
 ///
 /// Everything here is derived from the class, the selector and the method's own type
-/// encoding, none of which changes between two sends — so it is derived once. Release,
+/// encoding, none of which changes between two sends - so it is derived once. Release,
 /// per host-bound send to `-[NSString stringByAppendingString:]`: 105ns in
 /// `class_getInstanceMethod`, 61ns parsing `@24@0:8@16`, 89ns rebuilding the selector's
 /// name for the variadic check, against 12ns for a validated hit.
@@ -875,8 +875,8 @@ struct Plan {
     /// The answer [`host::class_getMethodImplementation`] gave when this was built.
     ///
     /// Checked against a fresh one on every hit, which is what makes the entry safe to
-    /// keep: swizzling a method — `method_setImplementation`, a category loaded later,
-    /// an override added to a subclass — installs a different `IMP`, and that
+    /// keep: swizzling a method - `method_setImplementation`, a category loaded later,
+    /// an override added to a subclass - installs a different `IMP`, and that
     /// difference is the invalidation.
     probe: u64,
     to: Target,
@@ -889,7 +889,7 @@ enum Target {
     ///
     /// **The method's type encoding is not decoded for one of these, and must not be.**
     /// [`add_method`] deliberately installs a guest method whose encoding this decoder
-    /// refuses — recording `MethodNotHostCallable` and moving on — precisely so that a
+    /// refuses - recording `MethodNotHostCallable` and moving on - precisely so that a
     /// *guest* sender can still reach it. Decoding here made a union in a guest
     /// method's signature refuse a send that never needed it.
     ///
@@ -932,7 +932,7 @@ fn plan_for(symbol: &str, vm: &Vm, class: host::Class, sel: u64) -> Result<&'sta
     // `class_getInstanceMethod` below, which walks the superclass chain under
     // the runtime lock.
     //
-    // SAFETY: `class` is a `Class` and `sel` a uniqued `SEL` — class realization
+    // SAFETY: `class` is a `Class` and `sel` a uniqued `SEL` - class realization
     // rewrote the guest's `__objc_selrefs` slots from string pointers into the
     // host runtime's own selectors, so the value the guest loaded *is* one.
     let probe = unsafe { host::class_getMethodImplementation(class, sel as host::Sel) } as u64;
@@ -1001,7 +1001,7 @@ fn traced(sel: u64) -> Option<String> {
     wanted.contains(&name).then_some(name)
 }
 
-/// The receiver's class name, for a diagnostic — never by messaging it.
+/// The receiver's class name, for a diagnostic - never by messaging it.
 fn class_of(receiver: u64) -> String {
     if receiver == 0 {
         return String::from("nil");
@@ -1141,7 +1141,7 @@ fn render_variadic(
     mem: &mut dyn GuestMemory,
 ) -> Result<()> {
     // Named, because "a variadic method this cannot render" is a work item and
-    // the selector is the whole of it — the reader otherwise learns only that
+    // the selector is the whole of it - the reader otherwise learns only that
     // *some* message was refused, on a list that cannot be enumerated from the
     // image (see [`VARIADIC_SELECTORS`]).
     let refuse = |reason: &str| {
@@ -1160,7 +1160,7 @@ fn render_variadic(
              register cannot be computed",
         );
     }
-    // `self`, `_cmd`, then the arguments — the format is the last of them, and
+    // `self`, `_cmd`, then the arguments - the format is the last of them, and
     // `base` accounts for a hidden struct-return buffer ahead of all of it.
     let Some(fmt_reg) = params.len().checked_sub(1).map(|i| i + base) else {
         return refuse("a variadic method with no named format argument");
@@ -1218,7 +1218,7 @@ fn send_object_list(
     if send.stret {
         return refuse("sent through the struct-return trampoline, which returns an object".into());
     }
-    // `self`, `_cmd`, `firstObject`, each integer-class — which is what makes
+    // `self`, `_cmd`, `firstObject`, each integer-class - which is what makes
     // the register the list starts in computable at all.
     let params = &signature.shapes[1..];
     if params.len() != 3 || !params.iter().all(|s| s.scalar() == Some(T::Pointer)) {
@@ -1252,8 +1252,8 @@ fn send_object_list(
                 "a list of more than {OBJECT_LIST_CAP} objects with no nil terminator found"
             ));
         }
-        // A guest class is legal in any of these — `@[SomeClass]` is an array
-        // of one object — and is the one pointer that has to be translated.
+        // A guest class is legal in any of these - `@[SomeClass]` is an array
+        // of one object - and is the one pointer that has to be translated.
         items.push(vm.objc_host_class(raw) as *mut std::ffi::c_void);
     }
 
@@ -1284,7 +1284,7 @@ fn send_object_list(
     let result = match list.pairs {
         false => {
             // SAFETY: `imp` implements `…WithObjects:count:`, whose prototype
-            // is exactly this — an object array and its length. `items` is
+            // is exactly this - an object array and its length. `items` is
             // alive across the call and holds `items.len()` objects.
             let f: extern "C" fn(
                 *mut std::ffi::c_void,

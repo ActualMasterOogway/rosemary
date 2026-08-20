@@ -18,7 +18,7 @@ pub enum Error {
         /// What was being read (e.g. `"mach_header"`, `"load_command"`).
         what: &'static str,
     },
-    /// The magic was not any Mach-O or fat magic — this is not a Mach-O file.
+    /// The magic was not any Mach-O or fat magic - this is not a Mach-O file.
     BadMagic(u32),
     /// The file *is* a Mach-O, but of a form this crate does not load: 32-bit
     /// or byte-swapped. Both died with PowerPC and are deliberately out of

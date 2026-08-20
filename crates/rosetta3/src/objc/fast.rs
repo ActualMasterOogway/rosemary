@@ -164,7 +164,7 @@ impl Through {
 /// A class pointer on its way out, for a caller with no [`crate::vm::Vm`].
 ///
 /// [`crate::vm::Vm::objc_host_class`] with the VM looked up from the process rather
-/// than from a register context — see [`super::published`].
+/// than from a register context - see [`super::published`].
 fn host_class(va: u64) -> u64 {
     match super::published() {
         Some(rt) => rt.host_or(va),
@@ -227,7 +227,7 @@ macro_rules! is_class {
 /// Define a substituting function and its table entry.
 ///
 /// Each parameter is written `class` or `plain`, which is both the code that runs and
-/// the mask [`Through::matches`] holds against the `RUNTIME` row — so the declaration
+/// the mask [`Through::matches`] holds against the `RUNTIME` row - so the declaration
 /// cannot drift from the behaviour, and neither can drift from the table.
 macro_rules! through {
     ($( $f:ident, $host:literal, ( $($k:ident $a:ident : $t:ty),* ) -> $rk:ident $r:ty ; )*) => {
@@ -236,7 +236,7 @@ macro_rules! through {
                 static HOST: AtomicU64 = AtomicU64::new(0);
                 // SAFETY: `host_of` answers with the address `dlsym` gave for
                 // this exact C name, and the prototype below is the row's own
-                // signature — the same one `marshal::call_types` would have
+                // signature - the same one `marshal::call_types` would have
                 // placed arguments for. Aborting rather than returning zero is
                 // what makes the transmute's precondition hold.
                 let f: unsafe extern "C" fn($($t),*) -> $r =

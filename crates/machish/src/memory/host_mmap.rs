@@ -207,8 +207,8 @@ impl AddressSpace for MmapSpace {
         }
         // MAP_JIT from the start, because a page that was ever writable cannot
         // later become executable under the hardened runtime. Without it the
-        // transition does work — measured on Apple Silicon, an anonymous RW
-        // mapping takes `mprotect(PROT_READ|PROT_EXEC)` and runs — which is why
+        // transition does work - measured on Apple Silicon, an anonymous RW
+        // mapping takes `mprotect(PROT_READ|PROT_EXEC)` and runs - which is why
         // a loaded program, whose data segments it must keep writable, asks
         // for a plain space instead and protects per segment.
         self.jit = self.want_exec && cfg!(target_os = "macos");

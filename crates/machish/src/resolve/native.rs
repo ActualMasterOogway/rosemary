@@ -57,7 +57,7 @@ const DENY_PREFIXES: &[&str] = &[
 /// `_fts_open$INODE64` because on x86-64 macOS `fts_open` came in two flavours,
 /// one with a 32-bit `ino_t` and one with 64. arm64 has only ever had the
 /// 64-bit one, so it exports the plain name and `dlsym("fts_open$INODE64")`
-/// returns null — five of `/bin/ls`'s imports, unresolvable, over a suffix.
+/// returns null - five of `/bin/ls`'s imports, unresolvable, over a suffix.
 ///
 /// Stripping is a *fallback*, tried only after the exact name misses, because
 /// `$NOCANCEL` variants genuinely do exist on arm64 and the exact match is
@@ -85,8 +85,8 @@ pub struct NativeDylibProvider {
     /// Install names already passed to `dlopen`, successfully or not, so a
     /// library that cannot be opened is not retried once per import.
     attempted: RefCell<BTreeSet<String>>,
-    /// Bind streams repeat names heavily — `/bin/ls` asks for `_strlen` from
-    /// several slots — and `dlsym` walks the whole image list each time.
+    /// Bind streams repeat names heavily - `/bin/ls` asks for `_strlen` from
+    /// several slots - and `dlsym` walks the whole image list each time.
     ///
     /// Keyed by name alone, which is correct for the two configurations this
     /// type offers: [`system`](Self::system) answers flatly, and
@@ -149,7 +149,7 @@ impl NativeDylibProvider {
     /// `dlopen` a specific library and answer only for `install_name`.
     ///
     /// Returns `None` if the library cannot be opened, which on modern macOS is
-    /// the expected answer for most of `/usr/lib` — those paths resolve inside
+    /// the expected answer for most of `/usr/lib` - those paths resolve inside
     /// the shared cache, and a `dlopen` of the *guest's* copy would be the
     /// wrong architecture anyway.
     pub fn open(path: &str, install_name: &str) -> Option<Self> {
@@ -188,7 +188,7 @@ impl NativeDylibProvider {
     /// Drop the default denylist.
     ///
     /// Only correct when an earlier provider in the chain already claims every
-    /// symbol that needs virtualizing — otherwise this is how a guest ends up
+    /// symbol that needs virtualizing - otherwise this is how a guest ends up
     /// reading the host's environment. Provided because "I have a complete shim
     /// table and want the default out of my way" is a legitimate position, and
     /// hiding it would just get the field edited.
@@ -235,7 +235,7 @@ impl NativeDylibProvider {
             return false;
         };
         // SAFETY: `c` is a valid NUL-terminated C string outliving the call.
-        // The handle is intentionally never closed — see `autoload` — so there
+        // The handle is intentionally never closed - see `autoload` - so there
         // is nothing to own and nothing to free.
         unsafe {
             libc::dlopen(c.as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL);
@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn a_legacy_x86_variant_suffix_falls_back_to_the_plain_name() {
         // `/bin/ls` really does import this name, and arm64 really does not
-        // export it — the whole point of the fallback.
+        // export it - the whole point of the fallback.
         let p = NativeDylibProvider::system();
         let plain = p
             .resolve(&sym("_fts_open"))

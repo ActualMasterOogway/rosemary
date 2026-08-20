@@ -1,6 +1,6 @@
 //! `std::string` across the seam: the guest's layout, not the host's.
 //!
-//! The bug these exist for is recorded in `shims::cxxstring` — libc++ lays
+//! The bug these exist for is recorded in `shims::cxxstring` - libc++ lays
 //! `basic_string` out differently on x86-64 and arm64 macOS, so an import that
 //! was described *correctly* still handed the object to code reading different
 //! fields out of it.
@@ -9,7 +9,7 @@
 //! identical x86-64 executable, run through this runtime and run directly (under
 //! Rosetta 2), must print the same bytes. That is the only oracle worth having
 //! here, because the specification of `std::string` is what libc++ does with it,
-//! and it is falsifiable in the exact way the original bug was not — the fixture
+//! and it is falsifiable in the exact way the original bug was not - the fixture
 //! prints the *object's own bytes*, so a layout that disagrees shows up as a
 //! diff rather than as a crash three functions later.
 
@@ -30,7 +30,7 @@ use common::{build_cpp, run_guest, run_native};
 ///   a wrong size or capacity word breaks;
 /// - **the twenty-four bytes of the object itself**, which is the only one of
 ///   the three that catches a representation that is self-consistent and still
-///   not libc++'s — a short string stored long, or a capacity that lost its low
+///   not libc++'s - a short string stored long, or a capacity that lost its low
 ///   bit to the long/short flag.
 ///
 /// The crossings from short to long and back are what the sizes are chosen
@@ -46,13 +46,13 @@ const STRING_CPP: &str = r#"
 //
 // Out: the heap address; the bytes past the terminator, which libc++ never
 // initializes; and `capacity()`, which is implementation-defined
-// ([string.capacity]) and really does differ — the vendored Intel libc++ rounds
+// ([string.capacity]) and really does differ - the vendored Intel libc++ rounds
 // its allocations to sixteen where the host's system copy rounds to eight, so a
 // 23-character string is `capacity() == 31` on one and `25` on the other. That
 // is a fact about two builds of libc++, not about this runtime, and asserting
 // on it would be asserting that they are the same build.
 //
-// In: the size, the long/short flag, the characters, and — for a short string —
+// In: the size, the long/short flag, the characters, and - for a short string -
 // the object's own bytes. Plus `consistent`, which is what the capacity column
 // was really guarding: that the capacity word round-trips through the bit the
 // long/short flag lives in. A capacity of exactly `__min_cap` would be stored
@@ -229,7 +229,7 @@ fn the_slow_path_agrees_too() {
 ///
 /// The structural form of the fix, and the one assertion that would still fail
 /// if `crate::cxxlib` quietly stopped answering: `the_same_binary_agrees_with_itself`
-/// compares output, and output can agree for the wrong reason — the host's
+/// compares output, and output can agree for the wrong reason - the host's
 /// libc++ gets short strings right often enough to look fine. This checks
 /// *where the call goes*.
 ///
@@ -267,7 +267,7 @@ fn every_string_call_lands_in_the_vendored_libcxx() {
         seen += 1;
         assert!(
             extent.iter().any(|r| r.contains(&b.resolved)),
-            "{} resolved to {:#x}, which is outside the vendored libc++ — it went \
+            "{} resolved to {:#x}, which is outside the vendored libc++ - it went \
              to the host, which is the bug this exists to prevent",
             b.symbol,
             b.resolved
@@ -279,8 +279,8 @@ fn every_string_call_lands_in_the_vendored_libcxx() {
 /// A C++ program reaching libc++ entry points that the signature table *does*
 /// describe, which is what makes them promotable.
 ///
-/// `std::mutex::lock`/`unlock` are `sig!(V, P)` — one pointer, no return, no
-/// callback — so they classify `Fast`, and the vendored libc++ exports them, so
+/// `std::mutex::lock`/`unlock` are `sig!(V, P)` - one pointer, no return, no
+/// callback - so they classify `Fast`, and the vendored libc++ exports them, so
 /// they resolve into guest memory. That combination is the whole of
 /// [`no_inlined_import_targets_guest_memory`], and `STRING_CPP` does not produce
 /// it: `basic_string`'s entry points were removed from the table when the shim
@@ -311,14 +311,14 @@ fn mutex_fixture() -> Option<String> {
 ///
 /// A fast import is an absolute native `call` the lifter bakes into the
 /// translation, so its address has to be native code. A guest image is mapped
-/// `r--` and never executable — the no-`MAP_JIT` decision — so an inlined call
+/// `r--` and never executable - the no-`MAP_JIT` decision - so an inlined call
 /// to one faults on instruction fetch with the PC *equal to* the fault address,
 /// from a frame the backtrace cannot name, and only when that call site is
 /// finally reached.
 ///
 /// This was unreachable until libc++ became a guest image. Before that every
 /// import of the main program resolved to a host function, and the runtime's
-/// other two paths — `Vm::call_site` and `Vm::dispatch_indirect` — already asked
+/// other two paths - `Vm::call_site` and `Vm::dispatch_indirect` - already asked
 /// `is_guest_address` before treating an address as native. Promotion was the
 /// one that did not, and the symptom was DELTARUNE dying a few seconds after its
 /// window appeared, inside a `num_get` virtual call, with `--slow` making it go

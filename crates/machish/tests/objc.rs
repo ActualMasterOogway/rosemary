@@ -2,7 +2,7 @@
 //! M6.1 acceptance: the Objective-C metadata an image declares, decoded.
 //!
 //! Every assertion here is about what the loader *reports*. Nothing realizes a
-//! class, uniques a selector, or attaches a category — the milestone's claim is
+//! class, uniques a selector, or attaches a category - the milestone's claim is
 //! that a driver can be handed an exact description of what the guest declares,
 //! and the whole point of decoding it here is that the decision about whose
 //! runtime owns it is made somewhere else.
@@ -22,7 +22,7 @@ use machish::resolve::{NativeDylibProvider, SymbolProvider, eager_binding_shims}
 use machish::spec::arch::X86_64;
 
 /// A class with an ivar, a property, an instance method, a class method, and a
-/// protocol — one of each thing a `class_ro_t` can point at, so a decoder that
+/// protocol - one of each thing a `class_ro_t` can point at, so a decoder that
 /// reads one field at the wrong offset cannot pass by having nothing there.
 const CLASS_SRC: &str = r#"
 #import <Foundation/Foundation.h>
@@ -146,7 +146,7 @@ fn a_class_is_decoded_whole() {
         ["twice:"]
     );
     // `@optional` is a separate list, and conflating the two would make every
-    // optional method look required — which is a decision the runtime makes
+    // optional method look required - which is a decision the runtime makes
     // differently.
     assert_eq!(
         d.optional_instance_methods
@@ -161,7 +161,7 @@ fn a_class_is_decoded_whole() {
 /// type encoding is the only signature information a Mach-O records anywhere.
 ///
 /// Everything else in this crate reports an import that the *embedder* must
-/// then find a signature for — see the ABI table in `rosetta3`. A method is the
+/// then find a signature for - see the ABI table in `rosetta3`. A method is the
 /// one case where the image answers the question itself.
 #[test]
 fn every_method_carries_its_type_encoding() {
@@ -206,7 +206,7 @@ fn every_method_carries_its_type_encoding() {
 ///
 /// This is the assertion the driver's whole substitution story rests on. An
 /// `IMP` handed to the host runtime is called as native arm64, so each one has
-/// to be recognisable as a *guest* address — and one that decoded to a host
+/// to be recognisable as a *guest* address - and one that decoded to a host
 /// address, or to a data section, would be a silent wrong answer rather than a
 /// diagnostic.
 #[test]
@@ -234,7 +234,7 @@ fn every_implementation_is_a_guest_text_address() {
 }
 
 /// A category's target class is a *bind*, so on a host class it resolves to a
-/// host address — and the decoder must report it rather than chase it.
+/// host address - and the decoder must report it rather than chase it.
 #[test]
 fn a_category_on_a_host_class_names_a_host_address() {
     let Some((bytes, slide, objc)) = objc_of("objc_category", CATEGORY_SRC) else {
@@ -486,7 +486,7 @@ fn corrupting_the_metadata_never_panics() {
 
 /// A refusal is a named stop with the address in it, not a silent omission.
 ///
-/// Forced by hand, because no x86-64 toolchain emits a relative method list —
+/// Forced by hand, because no x86-64 toolchain emits a relative method list -
 /// which is exactly why it is refused rather than decoded: there is no fixture
 /// that would keep a speculative decoder honest.
 /// The relative method-list encoding, which an x86-64 **dylib** really emits.
@@ -497,8 +497,8 @@ fn corrupting_the_metadata_never_panics() {
 /// every list header, while built as a program it emits pointer-based lists in
 /// `__objc_const`.
 ///
-/// So the test is the one that argument deserves — **both builds of one source,
-/// compared** — rather than a decode of whichever this crate happened to have a
+/// So the test is the one that argument deserves - **both builds of one source,
+/// compared** - rather than a decode of whichever this crate happened to have a
 /// fixture for. Agreement is evidence a single-encoding test cannot give, the
 /// same claim `both_fixup_encodings_decode_to_the_same_metadata` makes.
 ///
@@ -592,7 +592,7 @@ fn both_method_list_encodings_decode_to_the_same_methods() {
 ///
 /// Two things the same `ld64` wrote from the same facts: `_OBJC_CLASS_$_Greeter`
 /// names the `objc_class`, and `__objc_classlist` points at it. Agreement is
-/// evidence no single-source test can give — the same argument
+/// evidence no single-source test can give - the same argument
 /// `trie_and_nlist_agree_on_the_same_image` makes for exports.
 #[test]
 fn the_class_list_agrees_with_the_symbol_table() {

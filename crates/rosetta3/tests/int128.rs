@@ -8,7 +8,7 @@
 //!
 //! What each test would falsify:
 //!
-//! - **both halves of each argument arrive** — an `__int128` spans a register
+//! - **both halves of each argument arrive** - an `__int128` spans a register
 //!   pair, and the dividend here does not fit in sixty-four bits, so a shim
 //!   reading only the low halves gets a different number rather than a
 //!   suspicious one;

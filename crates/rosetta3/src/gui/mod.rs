@@ -70,7 +70,7 @@ pub fn install() {
 /// thread inside a `presentDrawable:` the guest is in the middle of, or inside a Carbon
 /// event handler.
 ///
-/// **It must not move `errno`.** The overlay is full of calls that would — `dlopen` of
+/// **It must not move `errno`.** The overlay is full of calls that would - `dlopen` of
 /// a framework this system does not have sets `ENOENT`, and [`sys`] does exactly that
 /// on first use.
 pub(crate) fn guarded(body: impl FnOnce()) {
@@ -116,14 +116,14 @@ pub(crate) fn pressed(key: hotkey::Key) {
         hotkey::Key::Stats => eprintln!(
             "rosetta3: gui  region-entry counting {} (ROSETTA3_STATS)",
             match crate::stats::set_enabled(!crate::stats::enabled()) {
-                true => "on — this costs the guest measurably; see docs/PROFILING.md",
+                true => "on - this costs the guest measurably; see docs/PROFILING.md",
                 false => "off",
             },
         ),
         hotkey::Key::Profile => eprintln!(
             "rosetta3: gui  sampling {} (ROSETTA3_PROFILE)",
             match crate::profile::set_sampling(!crate::profile::sampling()) {
-                true => "on — the histogram starts again from here",
+                true => "on - the histogram starts again from here",
                 false => "off",
             },
         ),
@@ -235,7 +235,7 @@ mod tests {
     fn the_panel_produces_geometry_without_a_gpu() {
         let _panel = panel();
         if font::atlas(13.0).is_none() {
-            // No CoreText, no overlay — a supported configuration.
+            // No CoreText, no overlay - a supported configuration.
             return;
         }
         // Closed, there is nothing to draw and that is not a failure.
@@ -250,7 +250,7 @@ mod tests {
             list.vertices.len(),
         );
         // Every vertex inside the surface, because a projection that is off by a
-        // factor — the retina case — puts the panel off-screen rather than
+        // factor - the retina case - puts the panel off-screen rather than
         // making it look wrong, and off-screen is indistinguishable from not
         // drawn.
         for vertex in &list.vertices {
@@ -265,7 +265,7 @@ mod tests {
 
     /// A scrolled panel stays inside its own rectangle.
     ///
-    /// Scrolling without clipping does not look like a scrolling bug — it looks like
+    /// Scrolling without clipping does not look like a scrolling bug - it looks like
     /// the overlay is drawing over the game, in rows that appear above the panel and
     /// never go away.
     #[test]
@@ -292,7 +292,7 @@ mod tests {
     /// Clipping trims the texture along with the geometry.
     ///
     /// A quad whose position is clipped but whose texture coordinates are not shows a
-    /// *squashed* glyph rather than a cropped one — legible enough to pass a glance and
+    /// *squashed* glyph rather than a cropped one - legible enough to pass a glance and
     /// wrong everywhere it matters.
     #[test]
     fn a_clipped_quad_trims_its_texture_by_the_same_fraction() {
@@ -339,7 +339,7 @@ mod tests {
     /// One keystroke is one toggle, however many mechanisms deliver it.
     ///
     /// [`hotkey`] deliberately runs Carbon's hot keys and a poller at once, so
-    /// the same press can arrive twice — and two toggles look exactly like none.
+    /// the same press can arrive twice - and two toggles look exactly like none.
     #[test]
     fn a_repeated_press_within_the_debounce_is_one_toggle() {
         let _panel = panel();

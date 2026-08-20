@@ -9,7 +9,7 @@ pub struct FunctionAbi {
     /// The name *without* the Mach-O underscore, and `&'static str` because
     /// that is what `DynamicSymbol` requires.
     pub name: &'static str,
-    /// `[0]` is the return type, `[1..]` the parameters — the layout
+    /// `[0]` is the return type, `[1..]` the parameters - the layout
     /// `DynamicSymbol::arg_types` uses, so no reshuffling happens at the seam.
     pub types: &'static [T],
     /// C-variadic. Never fast-called, and only callable if [`crate::shims`] implements
@@ -174,7 +174,7 @@ const U8: T = T::UnsignedByte;
 const U16: T = T::UnsignedHalfword;
 const BOOL: T = U8;
 
-/// Known signatures, in no particular order — [`index`] builds the lookup. Names must
+/// Known signatures, in no particular order - [`index`] builds the lookup. Names must
 /// be unique; `signatures_are_unique` says so.
 pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("AudioComponentFindNext", P, P, P),
@@ -190,7 +190,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("AudioObjectGetPropertyData", I32, U32, P, U32, P, P, P),
     sig!("AudioObjectGetPropertyDataSize", I32, U32, P, U32, P, P),
     // The removal takes the same listener, and it must be the *same pointer* the
-    // host was given — so it goes out as a thunk too, and [`crate::thunk`]
+    // host was given - so it goes out as a thunk too, and [`crate::thunk`]
     // hands back the one already made for that guest address rather than a
     // second trampoline CoreAudio would not recognise.
     cbsig!([2], "AudioObjectRemovePropertyListener", I32, U32, P, P, P),
@@ -199,7 +199,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // ## AudioQueue, which is the other way a program plays sound
     //
     // A queue takes its callback as an ordinary argument, where an
-    // `AudioUnit` takes one inside a structure — so `cbsig!` describes it and
+    // `AudioUnit` takes one inside a structure - so `cbsig!` describes it and
     // the thunk is made at the seam.
     sig!("AudioQueueAllocateBuffer", I32, P, U32, P),
     sig!("AudioQueueDispose", I32, P, BOOL),
@@ -227,7 +227,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("AUGraphDisconnectNodeInput", I32, P, I32, U32),
     sig!("AUGraphInitialize", I32, P),
     // `AUGraphNodeInfo(AUGraph, AUNode, AudioComponentDescription *out,
-    // AudioUnit *out)` — both outputs optional.
+    // AudioUnit *out)` - both outputs optional.
     sig!("AUGraphNodeInfo", I32, P, I32, P, P),
     sig!("AUGraphOpen", I32, P),
     sig!("AUGraphStart", I32, P),
@@ -237,7 +237,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("AUGraphUpdate", I32, P, P),
     // `AudioUnitSetParameter(AudioUnit, AudioUnitParameterID,
     // AudioUnitParameterScope, AudioUnitElement, AudioUnitParameterValue,
-    // UInt32 bufferOffsetInFrames)` — the value is a `Float32`, so it arrives in
+    // UInt32 bufferOffsetInFrames)` - the value is a `Float32`, so it arrives in
     // `xmm0` while the four words before it are integers.
     sig!("AudioUnitSetParameter", I32, P, U32, U32, U32, F32, U32),
     // ## `AudioConverter`, which is how a stream is decoded
@@ -258,7 +258,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
         P,
         P
     ),
-    // `CCCrypt`: 11 integer-class arguments, within `MAX_INT_ARGS_TOTAL` — the
+    // `CCCrypt`: 11 integer-class arguments, within `MAX_INT_ARGS_TOTAL` - the
     // three past the eighth spill to the host stack, all doubleword-wide.
     sig!("CCCrypt", I32, U32, U32, U32, P, U64, P, P, U64, P, U64, P),
     sig!("CC_MD5", P, P, U32, P),
@@ -279,7 +279,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // ## CoreFoundation and CFNetwork
     //
     // `CFIndex` is `long`, `Boolean` is `unsigned char`, `CFStringEncoding` is a
-    // `UInt32` — three narrow types a "pointer or int64" guess gets wrong in the
+    // `UInt32` - three narrow types a "pointer or int64" guess gets wrong in the
     // direction that does not fault.
     sig!("CFArrayCreate", P, P, P, I64, P),
     sig!("CFArrayCreateMutable", P, P, I64, P),
@@ -288,14 +288,14 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFArrayGetTypeID", U64),
     sig!("CFArrayGetValueAtIndex", P, P, I64),
     // The bundle these answer for is the *guest's*, because
-    // [`crate::bundle`]'s re-exec made the running executable the guest's own —
+    // [`crate::bundle`]'s re-exec made the running executable the guest's own -
     // so `CFBundleCopyExecutableURL(CFBundleGetMainBundle())` names a path
     // inside the mirror rather than `rosetta3`'s.
     sig!("CFBundleCopyExecutableURL", P, P),
     sig!("CFBundleCopyPrivateFrameworksURL", P, P),
     sig!("CFBundleCopyResourcesDirectoryURL", P, P),
     // `CFURLRef CFBundleCopyResourceURL(CFBundleRef, CFStringRef name,
-    // CFStringRef type, CFStringRef subDirName)` — three `CFStringRef`s, any of
+    // CFStringRef type, CFStringRef subDirName)` - three `CFStringRef`s, any of
     // which may be null.
     sig!("CFBundleCopyResourceURL", P, P, P, P, P),
     sig!("CFBundleCreate", P, P, P),
@@ -317,7 +317,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFURLGetTypeID", U64),
     sig!("CFUUIDGetTypeID", U64),
     sig!("CFBooleanGetValue", BOOL, P),
-    // `CFDataRef CFDataCreate(CFAllocatorRef, const UInt8 *, CFIndex)` — the
+    // `CFDataRef CFDataCreate(CFAllocatorRef, const UInt8 *, CFIndex)` - the
     // bytes are read out of guest memory and copied into the host's object,
     // which is what makes the copy the right one.
     sig!("CFDataCreate", P, P, P, I64),
@@ -359,7 +359,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     //
     // The callback is argument two and the host calls it on whatever thread
     // posts, so it goes out as a thunk. `CFNotificationSuspensionBehavior` is a
-    // `CF_ENUM(CFIndex, ...)` — a doubleword, not the `uint32_t` it looks like.
+    // `CF_ENUM(CFIndex, ...)` - a doubleword, not the `uint32_t` it looks like.
     cbsig!(
         [2],
         "CFNotificationCenterAddObserver",
@@ -412,17 +412,17 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFRunLoopAddSource", V, P, P, P),
     sig!("CFRunLoopGetCurrent", P),
     sig!("CFRunLoopGetMain", P),
-    // `void CFRunLoopRun(void)` — no parameters.
+    // `void CFRunLoopRun(void)` - no parameters.
     sig!("CFRunLoopRun", V),
     // `CFTimeInterval` is a `double`, so this is the first entry in the table
     // whose second argument is floating-point while its first and third are not
-    // — exactly the shape the two independent register counters exist for.
+    // - exactly the shape the two independent register counters exist for.
     sig!("CFRunLoopRunInMode", I32, P, F64, U8),
     sig!("CFRunLoopSourceSignal", V, P),
     sig!("CFRunLoopStop", V, P),
     sig!("CFRunLoopWakeUp", V, P),
     // `CFSetApplierFunction(const void *value, void *context)`, called once
-    // per member before the call returns — so unlike most callbacks here it is
+    // per member before the call returns - so unlike most callbacks here it is
     // reached on the guest's own thread, and unlike most it must still go out
     // as a thunk, because CoreFoundation is what calls it.
     cbsig!([1], "CFSetApplyFunction", V, P, P, P),
@@ -430,7 +430,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFSetGetValues", V, P, P),
     sig!("CFStringAppendCharacters", V, P, P, I64),
     // `CFComparisonResult` is a `CFIndex`, so a signed doubleword, and
-    // `CFStringCompareFlags` is a `CFOptionFlags` — both 64-bit on LP64.
+    // `CFStringCompareFlags` is a `CFOptionFlags` - both 64-bit on LP64.
     sig!("CFStringCompare", I64, P, P, U64),
     sig!("CFStringConvertEncodingToIANACharSetName", P, U32),
     sig!("CFStringConvertEncodingToNSStringEncoding", U64, U32),
@@ -443,14 +443,14 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFStringCreateWithBytes", P, P, P, I64, U32, BOOL),
     // ## `CFRange` is the aggregate that needs no vocabulary
     //
-    // A `CFRange` is two `CFIndex` — sixteen bytes, both integer — and SysV
+    // A `CFRange` is two `CFIndex` - sixteen bytes, both integer - and SysV
     // AMD64 and AAPCS64 agree on passing one in two consecutive integer
     // registers.
     sig!("CFStringGetBytes", I64, P, I64, I64, U32, U8, U8, P, I64, P),
     // A `UniChar` is a `UInt16`.
     sig!("CFStringGetCharacterAtIndex", U16, P, I64),
     // `Boolean CFStringGetCString(CFStringRef, char *buffer, CFIndex
-    // bufferSize, CFStringEncoding encoding)` — **four** parameters.
+    // bufferSize, CFStringEncoding encoding)` - **four** parameters.
     sig!("CFStringCreateMutableCopy", P, P, I64, P),
     sig!("CFStringUppercase", V, P, P),
     sig!("CFTimeZoneCopyDefault", P),
@@ -473,11 +473,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     ),
     // `CFURLPathStyle` is a `CF_ENUM(CFIndex, ...)`, so the style is a
     // doubleword and not the `uint32_t` the neighbouring encoding arguments
-    // are — the two look interchangeable in a header and are not.
+    // are - the two look interchangeable in a header and are not.
     sig!("CFURLCopyFileSystemPath", P, P, I64),
     sig!("CFURLCreateWithBytes", P, P, P, I64, U32, P),
     // A `CFURLPathStyle` is a `CFIndex`, not an `int`, and `isDirectory` is a
-    // `Boolean` — the two narrow types this family keeps getting wrong in the
+    // `Boolean` - the two narrow types this family keeps getting wrong in the
     // direction that does not fault.
     sig!("CFURLCreateWithFileSystemPath", P, P, P, I64, BOOL),
     sig!("CFURLGetFileSystemRepresentation", U8, P, U8, P, I64),
@@ -491,7 +491,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGDirectDisplayCopyCurrentMetalDevice", P, I32),
     sig!("MTLCreateSystemDefaultDevice", P),
     sig!("CGAssociateMouseAndMouseCursorPosition", I32, I32),
-    // `boolean_t CGCursorIsVisible(void)` — an `int`, not a `CGError`, and the
+    // `boolean_t CGCursorIsVisible(void)` - an `int`, not a `CGError`, and the
     // pair to `CGDisplayHideCursor`.
     sig!("CGCursorIsVisible", I32),
     // ## The bitmap context, which is how an image becomes texture bytes
@@ -548,7 +548,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     cbsig!([0], "CGDisplayRemoveReconfigurationCallback", I32, P, P),
     sig!("CGDisplaySetDisplayMode", I32, U32, P, P),
     sig!("CGDisplayShowCursor", I32, U32),
-    // `CGEventCreate(CGEventSourceRef)` — a null source means the event
+    // `CGEventCreate(CGEventSourceRef)` - a null source means the event
     // describes the current input state, which is how a game asks where the
     // pointer is without a window under it.
     sig!("CGEventCreate", P, P),
@@ -558,7 +558,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGGetDisplayTransferByTable", I32, U32, U32, P, P, P, P),
     sig!("CGSetDisplayTransferByTable", I32, U32, U32, P, P, P),
     sig!("CGGetOnlineDisplayList", I32, U32, P, P),
-    // `void CGGetLastMouseDelta(int32_t *dx, int32_t *dy)` — how a game reads
+    // `void CGGetLastMouseDelta(int32_t *dx, int32_t *dy)` - how a game reads
     // relative mouse motion when the cursor is hidden and locked, which is
     // every first-person camera.
     sig!("CGGetLastMouseDelta", V, P, P),
@@ -651,7 +651,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CVDisplayLinkCreateWithCGDisplay", I32, U32, P),
     sig!("CVDisplayLinkGetActualOutputVideoRefreshPeriod", F64, P),
     // `CVTime` by value: sixteen bytes, both eightbytes integer, and the two
-    // ABIs *agree* — `rax`/`rdx` on one side, `x0`/`x1` on the other.
+    // ABIs *agree* - `rax`/`rdx` on one side, `x0`/`x1` on the other.
     sig!("CVDisplayLinkGetNominalOutputVideoRefreshPeriod", V, P),
     sig!("CVDisplayLinkRelease", V, P),
     sig!("CVDisplayLinkRetain", P, P),
@@ -702,11 +702,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("Gestalt", I32, U32, P),
     // ## IOKit
     //
-    // Every handle here — `mach_port_t`, `io_object_t`, `io_iterator_t`,
-    // `io_registry_entry_t` — is a 32-bit port name, not a pointer.
+    // Every handle here - `mach_port_t`, `io_object_t`, `io_iterator_t`,
+    // `io_registry_entry_t` - is a 32-bit port name, not a pointer.
     sig!("IOBSDNameMatching", P, U32, U32, P),
     // `CFDictionaryRef IODisplayCreateInfoDictionary(io_service_t,
-    // IOOptionBits)` — how SDL asks a framebuffer service for its display's
+    // IOOptionBits)` - how SDL asks a framebuffer service for its display's
     // localized name.
     sig!("IODisplayCreateInfoDictionary", P, U32, U32),
     sig!("IOHIDDeviceCopyMatchingElements", P, P, P, U32),
@@ -715,11 +715,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("IOHIDDeviceClose", I32, P, U32),
     sig!("IOHIDDeviceGetProperty", P, P, P),
     // `IOHIDDeviceGetService` hands back the `io_service_t` behind a device,
-    // which is the 32-bit port name the registry calls are asked in terms of —
+    // which is the 32-bit port name the registry calls are asked in terms of -
     // the one place in this family where a handle *becomes* a port name.
     sig!("IOHIDDeviceGetService", U32, P),
     // `IOReturn IOHIDDeviceGetValue(IOHIDDeviceRef, IOHIDElementRef,
-    // IOHIDValueRef *)` — the polled counterpart to the value callback below.
+    // IOHIDValueRef *)` - the polled counterpart to the value callback below.
     sig!("IOHIDDeviceGetValue", I32, P, P, P),
     // The host calls the callback with `(context, IOReturn, sender, value)`.
     cbsig!([1], "IOHIDDeviceRegisterInputValueCallback", V, P, P, P),
@@ -746,7 +746,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("IOHIDElementGetChildren", P, P),
     sig!("IOHIDElementGetDevice", P, P),
     sig!("IOHIDElementGetCookie", U32, P),
-    // `CFIndex` is a `long`, so these are sixty-four bits wide and signed — a
+    // `CFIndex` is a `long`, so these are sixty-four bits wide and signed - a
     // logical minimum is routinely negative.
     sig!("IOHIDElementGetCollectionType", U32, P),
     sig!("IOHIDElementGetName", P, P),
@@ -771,7 +771,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("IOHIDElementGetUsage", U32, P),
     sig!("IOHIDElementGetUsagePage", U32, P),
     sig!("IOHIDManagerClose", I32, P, U32),
-    // `IOHIDManagerRef IOHIDManagerCreate(CFAllocatorRef, IOOptionBits)` —
+    // `IOHIDManagerRef IOHIDManagerCreate(CFAllocatorRef, IOOptionBits)` -
     // a null allocator is the default one, which is what a game passes.
     sig!("IOHIDManagerCopyDevices", P, P),
     sig!("IOHIDManagerCreate", P, P, U32),
@@ -786,7 +786,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     ),
     cbsig!([1], "IOHIDManagerRegisterDeviceRemovalCallback", V, P, P, P),
     // `IOHIDValueCallback(void *context, IOReturn, void *sender,
-    // IOHIDValueRef)` — four integer arguments and no result, delivered on
+    // IOHIDValueRef)` - four integer arguments and no result, delivered on
     // whichever run loop the manager was scheduled on.
     cbsig!([1], "IOHIDManagerRegisterInputValueCallback", V, P, P, P),
     sig!("IOHIDManagerSetDeviceMatching", V, P, P),
@@ -847,7 +847,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("IOPSCopyPowerSourcesList", P, P),
     sig!("IOPSGetPowerSourceDescription", P, P, P),
     // `CFRunLoopSourceRef IOPSNotificationCreateRunLoopSource(
-    // IOPowerSourceCallbackType callback, void *context)` — the callback is
+    // IOPowerSourceCallbackType callback, void *context)` - the callback is
     // guest code the host invokes from the run loop when the battery changes,
     // so it is substituted like any other.
     cbsig!([0], "IOPSNotificationCreateRunLoopSource", P, P, P),
@@ -862,12 +862,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("IOServiceGetMatchingServices", I32, U32, P, P),
     sig!("IOServiceMatching", P, P),
     // `KBGetLayoutType(SInt16) -> SInt32`, and the only Apple entry point in
-    // this table with **no header anywhere on the system** — it is private
+    // this table with **no header anywhere on the system** - it is private
     // HIToolbox, present in `Carbon.tbd`'s export list and declared nowhere.
     sig!("KBGetLayoutType", I32, I32),
     // `EventTime GetCurrentEventTime(void)` is a `double` of seconds since
     // boot, and `OSErr UpdateSystemActivity(UInt8)` is how a program that is
-    // busy but not touching the keyboard tells the system not to sleep — which
+    // busy but not touching the keyboard tells the system not to sleep - which
     // a game does every frame.
     sig!("GetCurrentEventTime", F64),
     sig!("UpdateSystemActivity", I32, U8),
@@ -875,7 +875,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // a static table.
     sig!("GetMacOSStatusCommentString", P, I32),
     sig!("GetMacOSStatusErrorString", P, I32),
-    // `UInt8 LMGetKbdType(void)` — the low-memory global that still backs
+    // `UInt8 LMGetKbdType(void)` - the low-memory global that still backs
     // `UCKeyTranslate`'s keyboard-type argument.
     sig!("LMGetKbdType", U8),
     // ## AppKit and Foundation's C surface
@@ -892,11 +892,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     vsig!("NSRunAlertPanel", I64, P, P, P, P, P),
     sig!("NSHomeDirectory", P),
     sig!("NSClassFromString", P, P),
-    // `SEL NSSelectorFromString(NSString *)` — two pointers, and the reason it
+    // `SEL NSSelectorFromString(NSString *)` - two pointers, and the reason it
     // needs no translation is.
     sig!("NSSelectorFromString", P, P),
     // The handler is a guest function pointer the *runtime* calls, from inside
-    // whatever raised — so it goes out as a thunk like every other callback
+    // whatever raised - so it goes out as a thunk like every other callback
     // crossing the seam.
     cbsig!([0], "NSSetUncaughtExceptionHandler", V, P),
     sig!("NSSearchPathForDirectoriesInDomains", P, U64, U64, U8),
@@ -917,13 +917,13 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("OSAtomicCompareAndSwapPtrBarrier", BOOL, P, P, P),
     sig!("OSMemoryBarrier", V),
     // `OSSpinLock` is a bare `int32_t` the guest allocates itself, and the
-    // host's implementation operates on it in place — the same arrangement as
+    // host's implementation operates on it in place - the same arrangement as
     // `pthread_mutex_t`, and true for the same checked reason.
     sig!("OSSpinLockLock", V, P),
     sig!("OSSpinLockTry", BOOL, P),
     sig!("OSSpinLockUnlock", V, P),
     // Filed after the `OSAtomic` family because lowercase `p` sorts above `S`,
-    // which is now a reader's convenience rather than a correctness condition —
+    // which is now a reader's convenience rather than a correctness condition -
     // [`index`] finds it wherever it is.
     sig!("OpenAComponent", I32, P, P),
     sig!("SCDynamicStoreCopyProxies", P, P),
@@ -943,7 +943,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `SCDynamicStoreCreate`'s third argument is a callback the host invokes on
     // the run loop when a watched key changes; its fourth is an
     // `SCDynamicStoreContext`, carrying the same `retain`/`release`/
-    // `copyDescription` triple as `CFStreamClientContext` and the same caveat —
+    // `copyDescription` triple as `CFStreamClientContext` and the same caveat -
     // a guest filling those in would hand the host x86-64 addresses inside a
     // structure this runtime never sees. Conventionally they are null.
     cbsig!([2], "SCDynamicStoreCreate", P, P, P, P, P),
@@ -986,7 +986,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("TISGetInputSourceProperty", P, P, P),
     // `OSStatus UCKeyTranslate(const UCKeyboardLayout *, UInt16, UInt16,
     // UInt32, UInt32, OptionBits, UInt32 *, UniCharCount, UniCharCount *,
-    // UniChar[])` — the call that turns a virtual key code into characters,
+    // UniChar[])` - the call that turns a virtual key code into characters,
     // read out of CarbonCore's `UnicodeUtilities.h`.
     sig!(
         "UCKeyTranslate",
@@ -1006,7 +1006,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("UTTypeCreatePreferredIdentifierForTag", P, P, P, P),
     // ## Blocks
     //
-    // `_Block_copy` is **shimmed** — see [`crate::shims::block::block_copy`].
+    // `_Block_copy` is **shimmed** - see [`crate::shims::block::block_copy`].
     // The signature stays for [`longjmp`]'s reason: it is what stops the site
     // being promoted to an inlined fast import and what names it at an exit.
     sig!("_Block_copy", P, P),
@@ -1047,7 +1047,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("__error", P),
     sig!("__exp10f", F32, F32),
     sig!("__isnand", I32, F64),
-    // The `float` twin, which clang emits for `isnan()` on a `float` — a
+    // The `float` twin, which clang emits for `isnan()` on a `float` - a
     // different symbol from `__isnand` and not a variant of it, so a table with
     // only the `double` form leaves it undescribed.
     sig!("__isnanf", I32, F32),
@@ -1106,7 +1106,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // and `__setjmp`.
     sig!("_longjmp", V, P, I32),
     sig!("_setjmp", I32, P),
-    // `void _tlv_atexit(void (*termfunc)(void *), void *objAddr)` — the
+    // `void _tlv_atexit(void (*termfunc)(void *), void *objAddr)` - the
     // destructor half of the thread-local family.
     cbsig!([0], "_tlv_atexit", V, P, P),
     // Both spellings of the thread-local bootstrap.
@@ -1160,7 +1160,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // the host owns, which the guest only ever reads.
     sig!("basename", P, P),
     sig!("bcmp", I32, P, P, U64),
-    // `void bcopy(const void *src, void *dst, size_t n)` — the BSD spelling,
+    // `void bcopy(const void *src, void *dst, size_t n)` - the BSD spelling,
     // and the one place in this table where the two pointers are the other way
     // round from `memcpy`.
     sig!("bcopy", V, P, P, U64),
@@ -1219,7 +1219,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // ## libcurl
     //
     // Passthrough to `/usr/lib/libcurl.4.dylib`, which is the library the
-    // guest names in its own install path — so the host's copy *is* the one
+    // guest names in its own install path - so the host's copy *is* the one
     // it asked for.
     sig!("curl_easy_cleanup", V, P),
     vsig!("curl_easy_getinfo", I32, P, I32),
@@ -1238,7 +1238,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     //
     // A dispatch object is opaque and reference-counted by libdispatch
     // itself, so every one of these is a handle the guest received and hands
-    // back — nothing about the object crosses.
+    // back - nothing about the object crosses.
     sig!("difftime", F64, I64, I64),
     sig!("dirname", P, P),
     sig!("dispatch_get_context", P, P),
@@ -1256,7 +1256,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("dispatch_semaphore_signal", I64, P),
     sig!("dispatch_semaphore_wait", I64, P, U64),
     // Block-taking calls go through the block shim, which rewrites the guest
-    // invoke pointer before libdispatch sees it — essential for `dispatch_sync`,
+    // invoke pointer before libdispatch sees it - essential for `dispatch_sync`,
     // where an uncallable guest block makes its caller wait forever.
     sig!("dispatch_set_context", V, P, P),
     sig!("dispatch_source_cancel", V, P),
@@ -1265,7 +1265,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     cbsig!([1], "dispatch_source_set_event_handler_f", V, P, P),
     sig!("dispatch_source_set_timer", V, P, U64, U64, U64),
     sig!("dispatch_suspend", V, P),
-    // `dispatch_time(dispatch_time_t base, int64_t delta)` — the base is an
+    // `dispatch_time(dispatch_time_t base, int64_t delta)` - the base is an
     // opaque absolute time and the delta is signed nanoseconds, which is why
     // the two arguments are not the same type despite both being doublewords.
     sig!("dispatch_time", U64, U64, I64),
@@ -1372,7 +1372,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("freeifaddrs", V, P),
     sig!("freelocale", V, P),
     sig!("freopen", P, P, P, P),
-    // `double frexp(double, int *)` — the exponent goes to a pointer the
+    // `double frexp(double, int *)` - the exponent goes to a pointer the
     // guest owns and the mantissa comes back in a vector register.
     sig!("frexp", F64, F64, P),
     vsig!("fscanf", I32, P, P),
@@ -1434,7 +1434,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("getppid", I32),
     sig!("getpriority", I32, I32, U32),
     sig!("getprogname", P),
-    // `struct protoent` — a name, an alias vector and an `int` — comes back the
+    // `struct protoent` - a name, an alias vector and an `int` - comes back the
     // same way `getpwuid`'s does, as a pointer into libSystem's storage, and has
     // the same layout on both architectures.
     sig!("getprotobyname", P, P),
@@ -1442,7 +1442,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("getpwnam", P, P),
     sig!("getpwnam_r", I32, P, P, P, U64, P),
     // `struct passwd` comes back as a pointer into libSystem's own storage,
-    // which the guest then reads directly — so this one depends on the layout
+    // which the guest then reads directly - so this one depends on the layout
     // check above in a way the writers-through-a-pointer do not.
     sig!("getpwuid", P, U32),
     sig!("getpwuid_r", I32, U32, P, P, U64, P),
@@ -1484,7 +1484,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("glBindRenderbufferEXT", V, U32, U32),
     sig!("glBindTexture", V, U32, U32),
     // The APPLE vertex-array-object extension, which is what an OpenGL 2.1
-    // context on macOS has instead of the core entry points — same shapes as
+    // context on macOS has instead of the core entry points - same shapes as
     // `glGenVertexArrays`/`glBindVertexArray`/`glDeleteVertexArrays`.
     sig!("glBindVertexArrayAPPLE", V, U32),
     sig!("glBlendEquation", V, U32),
@@ -1535,7 +1535,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("glDrawBuffer", V, U32),
     sig!("glDrawBuffers", V, I32, P),
     // The last argument is a pointer *or* a byte offset into the bound element
-    // buffer, depending on whether one is bound — an integer either way, and
+    // buffer, depending on whether one is bound - an integer either way, and
     // identity mapping means a guest pointer needs no translation.
     sig!("glDrawElements", V, U32, I32, U32, P),
     sig!("glEnable", V, U32),
@@ -1574,7 +1574,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("glLinkProgram", V, U32),
     sig!("glLoadIdentity", V),
     // Returns a pointer into the driver's own mapping of a buffer object,
-    // which the guest then writes through — a host address in guest hands, which
+    // which the guest then writes through - a host address in guest hands, which
     // identity mapping makes ordinary.
     sig!("glMapBuffer", P, U32, U32),
     sig!("glMatrixMode", V, U32),
@@ -1673,7 +1673,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("glGetQueryObjectui64v", V, U32, U32, P),
     sig!("glGetQueryObjectuiv", V, U32, U32, P),
     sig!("glGetRenderbufferParameteriv", V, U32, U32, P),
-    // `const GLubyte *glGetStringi(GLenum name, GLuint index)` — how a core
+    // `const GLubyte *glGetStringi(GLenum name, GLuint index)` - how a core
     // context enumerates its extensions, since `glGetString(GL_EXTENSIONS)` is
     // an error there.
     sig!("glGetStringi", P, U32, U32),
@@ -1734,14 +1734,14 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // ### The draw calls, and the uniform setters beside them
     //
     // Added in bulk because a refusal on the render thread is the *outermost* guest
-    // frame there, so it exits the process rather than parking — one launch per
+    // frame there, so it exits the process rather than parking - one launch per
     // missing entry point, and a launch is ninety seconds.
     sig!("glBlendColor", V, F32, F32, F32, F32),
     sig!("glDrawElementsBaseVertex", V, U32, I32, U32, P, I32),
     // ### The `ARB` and `APPLE` spellings, and the fixed-function leftovers
     //
     // Unreal Engine 3's OpenGL RHI predates these being core, so it resolves
-    // the *extension* names — same functions, different symbols, and a table
+    // the *extension* names - same functions, different symbols, and a table
     // that has only `glDrawArraysInstanced` does not answer `…InstancedARB`.
     sig!("glDrawArraysInstancedARB", V, U32, I32, I32, I32),
     sig!("glDrawElementsInstancedARB", V, U32, I32, U32, P, I32),
@@ -1749,7 +1749,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `void glBufferParameteriAPPLE(GLenum target, GLenum pname, GLint param)`,
     // which is how `APPLE_flush_buffer_range` turns off the driver's implicit
     // flush, and `glFlushMappedBufferRangeAPPLE(target, offset, size)`, which is
-    // the explicit one — an offset and a size, both pointer-width.
+    // the explicit one - an offset and a size, both pointer-width.
     sig!("glBufferParameteriAPPLE", V, U32, U32, I32),
     sig!("glFlushMappedBufferRangeAPPLE", V, U32, I64, I64),
     sig!("glGetQueryObjectiv", V, U32, U32, P),
@@ -2063,8 +2063,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // ## The Mach kernel interface, and why it needs no translation
     //
     // Every entry below is a MIG routine: the arguments are `mach_port_t`,
-    // `integer_t` and friends — fixed-width 32-bit types by definition, not
-    // `long` — and the structures behind the pointers are arrays of those.
+    // `integer_t` and friends - fixed-width 32-bit types by definition, not
+    // `long` - and the structures behind the pointers are arrays of those.
     sig!("host_page_size", I32, U32, P),
     sig!("host_statistics", I32, U32, I32, P, P),
     // The 64-bit flavours, which differ from the pair above only in that the
@@ -2112,7 +2112,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("ldexpf", F32, F32, I32),
     sig!("listen", I32, I32, I32),
     sig!("listxattr", I64, P, P, U64, I32),
-    // `struct lconv *localeconv(void)` — the current locale's numeric
+    // `struct lconv *localeconv(void)` - the current locale's numeric
     // punctuation, which C++'s `num_put` reads on the way to formatting a
     // number. A pointer to storage the host owns.
     sig!("localeconv", P),
@@ -2122,7 +2122,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // a `struct tm` the *caller* owns.
     sig!("localtime_r", P, P, P),
     sig!("lockf", I32, I32, I32, I64),
-    // `const char *locale_charset(void)` — libiconv's, not libc's, and the way
+    // `const char *locale_charset(void)` - libiconv's, not libc's, and the way
     // Mono asks what encoding the current locale uses before it converts a
     // managed string.
     sig!("locale_charset", P),
@@ -2160,7 +2160,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("mach_port_deallocate", I32, U32, U32),
     // `kern_return_t mach_port_extract_right(ipc_space_t, mach_port_name_t,
     // mach_msg_type_name_t, mach_port_t *poly, mach_msg_type_name_t *polyPoly)`
-    // — the two out-parameters are a 32-bit port name and a 32-bit type name,
+    // - the two out-parameters are a 32-bit port name and a 32-bit type name,
     // written through pointers the guest owns.
     sig!("mach_port_extract_right", I32, U32, U32, U32, P, P),
     sig!("mach_port_insert_right", I32, U32, U32, U32, U32),
@@ -2198,7 +2198,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("memcpy", P, P, P, U64),
     sig!("memmove", P, P, P, U64),
     sig!("memset", P, P, I32, U64),
-    // `errno_t memset_s(void *s, rsize_t smax, int c, rsize_t n)` — Annex K's
+    // `errno_t memset_s(void *s, rsize_t smax, int c, rsize_t n)` - Annex K's
     // memset, and the reason a program uses it is that the compiler may not
     // optimize it away.
     sig!("memset_s", I32, P, U64, I32, U64),
@@ -2255,7 +2255,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("posix_spawnp", I32, P, P, P, P, P, P),
     sig!("posix_spawn_file_actions_addchdir_np", I32, P, P),
     // `int posix_spawn_file_actions_addinherit_np(posix_spawn_file_actions_t *,
-    // int)` — "keep this descriptor open across the spawn", which is how a game
+    // int)` - "keep this descriptor open across the spawn", which is how a game
     // hands its crash handler the pipe it will report on.
     sig!("posix_spawn_file_actions_addinherit_np", I32, P, I32),
     sig!("posix_spawn_file_actions_adddup2", I32, P, I32, I32),
@@ -2276,7 +2276,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     vsig!("printf", I32, P),
     sig!("proc_name", I32, I32, P, U32),
     // `int proc_pidinfo(int pid, int flavour, uint64_t arg, void *buffer, int
-    // buffersize)` — the general form of `proc_pidpath` above, and how a
+    // buffersize)` - the general form of `proc_pidpath` above, and how a
     // program asks the kernel about its own task.
     sig!("proc_pidinfo", I32, I32, I32, U64, P, I32),
     sig!("proc_pidpath", I32, I32, P, U32),
@@ -2294,8 +2294,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `pthread_create` is the exception. Its start routine goes out as a thunk,
     // and the host calls it on a brand-new host thread. The attribute set is
     // where "the layouts agree, so operate in place" stops being enough: a guest
-    // thread has two stacks — the host's for the JIT's frames and the guest's
-    // for its own — and every stack attribute is about the second while
+    // thread has two stacks - the host's for the JIT's frames and the guest's
+    // for its own - and every stack attribute is about the second while
     // passthrough applied it to the first. The entry stays for its signature and
     // its callback index; the call is serviced by [`crate::shims::pthread`].
     sig!("pthread_attr_destroy", I32, P),
@@ -2319,7 +2319,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("pthread_attr_setstack", I32, P, P, U64),
     sig!("pthread_attr_setstackaddr", I32, P, P),
     // `struct sched_param` is `int sched_priority` and an opaque tail, and the
-    // guest passes it by address — the same in-place arrangement every other
+    // guest passes it by address - the same in-place arrangement every other
     // `pthread` type here rests on. The QoS surface.
     sig!("pthread_attr_set_qos_class_np", I32, P, U32, I32),
     sig!("pthread_attr_get_qos_class_np", I32, P, P, P),
@@ -2335,7 +2335,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("pthread_cond_wait", I32, P, P),
     sig!("pthread_condattr_destroy", I32, P),
     sig!("pthread_condattr_init", I32, P),
-    // `int pthread_cpu_number_np(size_t *)` — how mimalloc, which Roblox links
+    // `int pthread_cpu_number_np(size_t *)` - how mimalloc, which Roblox links
     // as its allocator, picks a per-CPU heap.
     sig!("pthread_cpu_number_np", I32, P),
     cbsig!([2], "pthread_create", I32, P, P, P, P),
@@ -2358,7 +2358,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // Signals a *host* thread, which is what a guest thread is here, so the
     // disposition it reaches is the one `shims::signal` installed.
     sig!("pthread_kill", I32, U64, I32),
-    // The thread's Mach port name. One task, one port namespace — see
+    // The thread's Mach port name. One task, one port namespace - see
     // `mach_task_self_` in `shims::runtime`.
     sig!("pthread_mach_thread_np", U32, U64),
     sig!("pthread_main_np", I32),
@@ -2372,7 +2372,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("pthread_mutexattr_setprotocol", I32, P, I32),
     sig!("pthread_mutexattr_settype", I32, P, I32),
     // The initialiser is guest code, and `pthread_once` guarantees it runs
-    // exactly once — a guarantee that survives thunking, since the thunk is
+    // exactly once - a guarantee that survives thunking, since the thunk is
     // stable per guest address.
     cbsig!([1], "pthread_once", I32, P, P),
     sig!("pthread_rwlock_destroy", I32, P),
@@ -2389,8 +2389,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("pthread_setname_np", I32, P),
     sig!("pthread_setschedparam", I32, U64, I32, P),
     sig!("pthread_setspecific", I32, U64, P),
-    // `sigset_t` is a `uint32_t` on both architectures — the fact `struct
-    // sigaction` rests on — so the two masks are pointers to four bytes the
+    // `sigset_t` is a `uint32_t` on both architectures - the fact `struct
+    // sigaction` rests on - so the two masks are pointers to four bytes the
     // host reads and writes in place.
     sig!("pthread_sigmask", I32, I32, P, P),
     sig!("pthread_threadid_np", I32, U64, P),
@@ -2542,8 +2542,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // ## Vouchers
     //
     // A voucher is an opaque kernel object carried alongside a Mach message
-    // so that work done on the receiving side is attributed — for QoS, for
-    // activity tracing — to whoever asked for it.
+    // so that work done on the receiving side is attributed - for QoS, for
+    // activity tracing - to whoever asked for it.
     sig!("voucher_mach_msg_set", I32, P),
     sig!("voucher_mach_msg_clear", V, P),
     sig!("voucher_mach_msg_adopt", P, P),
@@ -2601,7 +2601,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("thread_get_state", I32, U32, I32, P, P),
     sig!("thread_info", I32, U32, U32, P, P),
     // The scheduling policies, which pass through and *do* mean what the guest
-    // means by them — unlike the register-state pair above.
+    // means by them - unlike the register-state pair above.
     sig!("thread_policy_get", I32, U32, U32, P, P, P),
     sig!("thread_policy_set", I32, U32, U32, P, U32),
     // The exception-port family.
@@ -2638,7 +2638,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("uuid_unparse_upper", V, P, P),
     // ## The `va_list` family
     //
-    // Not variadic — each takes a `va_list` its caller already built — and still
+    // Not variadic - each takes a `va_list` its caller already built - and still
     // impossible to forward: the argument is a *guest* `va_list`, three fields and a
     // register save area laid out by SysV AMD64, and the host's `vsnprintf` would
     // read it as whatever arm64's happens to be. Shimmed; the signatures exist to
@@ -2659,11 +2659,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("wcrtomb_l", U64, P, I32, P, P),
     sig!("wcscat", P, P, P),
     // The second argument is a `wchar_t`, which is a 32-bit integer and not a
-    // pointer — the one member of this family whose scalar is easy to misread.
+    // pointer - the one member of this family whose scalar is easy to misread.
     sig!("wcschr", P, P, I32),
     sig!("wcscmp", I32, P, P),
     sig!("wcsncmp", I32, P, P, U64),
-    // `wcscpy` and `wcsstr` return `wchar_t *`, and both were `I32` — the same
+    // `wcscpy` and `wcsstr` return `wchar_t *`, and both were `I32` - the same
     // truncation `OSAtomicAdd32` above is about, in the other direction and one
     // step worse, because the value is an address rather than a count.
     sig!("wcscpy", P, P, P),
@@ -2700,8 +2700,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // does.
     sig!("AudioConvertHostTimeToNanos", U64, U64),
     sig!("AudioGetCurrentHostTime", U64),
-    // `AudioDeviceIOProcID` looks like a function pointer in the header — it is
-    // typedef'd as one — and is not a callback argument anywhere but the
+    // `AudioDeviceIOProcID` looks like a function pointer in the header - it is
+    // typedef'd as one - and is not a callback argument anywhere but the
     // creating call.
     cbsig!([1], "AudioDeviceCreateIOProcID", I32, U32, P, P, P),
     sig!("AudioDeviceDestroyIOProcID", I32, U32, P),
@@ -2719,8 +2719,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("AudioConverterSetProperty", I32, P, U32, U32, P),
     // ## CoreMedia, CoreVideo and VideoToolbox
     //
-    // Roblox decodes and encodes video — its own capture path and the H.264
-    // stream a game may play — and the three frameworks travel together.
+    // Roblox decodes and encodes video - its own capture path and the H.264
+    // stream a game may play - and the three frameworks travel together.
     // Almost all of it is handles and out-parameters.
     sig!(
         "CMBlockBufferCreateContiguous",
@@ -2807,7 +2807,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
         P,
         P
     ),
-    // `CMVideoDimensions` is two `int32_t` — **eight** bytes — which is the
+    // `CMVideoDimensions` is two `int32_t` - **eight** bytes - which is the
     // aggregate both ABIs agree about completely.
     sig!("CMVideoFormatDescriptionGetDimensions", U64, P),
     sig!(
@@ -2913,10 +2913,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CTRunGetTypeID", U64),
     sig!("CGEventSourceKeyState", BOOL, I32, U16),
     sig!("UTTypeConformsTo", BOOL, P, P),
-    // `UInt8 LMGetKbdLast(void)` — a Carbon low-memory accessor, which on a
+    // `UInt8 LMGetKbdLast(void)` - a Carbon low-memory accessor, which on a
     // 64-bit system is an ordinary function reading a global the OS maintains.
     sig!("LMGetKbdLast", U8),
-    // `CFDictionaryRef _CFCopySystemVersionDictionary(void)` — private CF, and
+    // `CFDictionaryRef _CFCopySystemVersionDictionary(void)` - private CF, and
     // the same question [`crate::compat`] answers for the SDK gates.
     sig!("_CFCopySystemVersionDictionary", P),
     // ## libdispatch's function-pointer half
@@ -2935,7 +2935,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // entry for it.
     sig!("dispatch_queue_create_with_target", P, P, P, P),
     // `void _os_log_impl(void *dso, os_log_t, os_log_type_t, const char
-    // *format, uint8_t *buf, uint32_t size)` — **not** variadic, which is the
+    // *format, uint8_t *buf, uint32_t size)` - **not** variadic, which is the
     // surprise.
     sig!("_os_log_impl", V, P, P, U8, P, P, U32),
     sig!("os_log_create", P, P, P),
@@ -2943,7 +2943,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("os_release", V, P),
     // ## Mach, and the ports a program keeps for itself
     //
-    // The exception-port family is **not** here — it is in [`crate::signal`],
+    // The exception-port family is **not** here - it is in [`crate::signal`],
     // for `task_set_exception_ports`' reason.
     sig!("mach_error_string", P, I32),
     sig!("mach_port_insert_member", I32, U32, U32, U32),
@@ -2971,7 +2971,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("bootstrap_check_in", I32, U32, P, P),
     sig!("bootstrap_strerror", P, I32),
     sig!("sys_icache_invalidate", V, P, U64),
-    // `int proc_get_wakemon_params(pid_t, int32_t *rate_hz, int32_t *flags)` —
+    // `int proc_get_wakemon_params(pid_t, int32_t *rate_hz, int32_t *flags)` -
     // libproc SPI with no header on this system, read out of the kernel's own
     // `proc_info` interface.
     sig!("proc_get_wakemon_params", I32, I32, P, P),
@@ -2980,7 +2980,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // Imported by the interposing mimalloc rather than by the guest itself, which is
     // what makes most of it passthrough: a zone from `malloc_default_zone` is
     // libsystem_malloc's own structure, so calling through it is the host allocating
-    // for itself. `malloc_zone_register` and `malloc_get_all_zones` are refused —
+    // for itself. `malloc_zone_register` and `malloc_get_all_zones` are refused -
     // they hand the host a structure of *guest* function pointers.
     sig!("malloc_default_zone", P),
     sig!("malloc_default_purgeable_zone", P),
@@ -3007,7 +3007,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // libsystem_malloc exports without a header.
     sig!("valloc", P, U64),
     sig!("vfree", V, P),
-    // `int malloc_jumpstart(int cookie)` — undocumented libsystem_malloc SPI
+    // `int malloc_jumpstart(int cookie)` - undocumented libsystem_malloc SPI
     // taking and returning an `int`, called once during allocator start-up.
     sig!("malloc_jumpstart", I32, I32),
     // The three halves of the allocator's `pthread_atfork` handlers, which
@@ -3021,7 +3021,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // interesting on its own.
     sig!("_Exit", V, I32),
     sig!("__exp10", F64, F64),
-    // `int __srget(FILE *)` and `int __swbuf(int, FILE *)` — the out-of-line
+    // `int __srget(FILE *)` and `int __swbuf(int, FILE *)` - the out-of-line
     // halves of the `getc`/`putc` macros, which a guest inlines and which
     // therefore *read the `FILE` structure's fields directly*.
     sig!("__srget", I32, P),
@@ -3070,7 +3070,7 @@ const THROWS: &str = "throws a C++ exception, which cannot be raised across the 
 
 /// A struct by value, in a *C* function.
 ///
-/// [`crate::abi::aggregate`] marshals these, and an Objective-C method reaches it —
+/// [`crate::abi::aggregate`] marshals these, and an Objective-C method reaches it -
 /// because a method carries its own type encoding, which describes the struct's members
 /// and their offsets.
 const AGGREGATE: &str =
@@ -3078,7 +3078,7 @@ const AGGREGATE: &str =
 
 /// Takes a `std::string` and is not a string operation.
 ///
-/// libc++ lays `basic_string` out differently on the two architectures — see
+/// libc++ lays `basic_string` out differently on the two architectures - see
 /// [`crate::shims::cxxstring`], which is where that is written down and where the
 /// string's own entry points are implemented against the *guest's* layout.
 const GUEST_STRING: &str =
@@ -3269,18 +3269,18 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("ldexpl", LONG_DOUBLE),
     ("frexpl", LONG_DOUBLE),
     ("strtold", LONG_DOUBLE),
-    // `pid_t audit_token_to_pid(audit_token_t)` — thirty-two bytes of
+    // `pid_t audit_token_to_pid(audit_token_t)` - thirty-two bytes of
     // `audit_token_t` **by value**. SysV AMD64 classifies it MEMORY and puts it
     // on the caller's stack; AAPCS64 has the caller copy it and pass a pointer.
     // Both are "in memory" and they are still not the same thing.
     ("audit_token_to_pid", AGGREGATE),
     // `void IODispatchCalloutFromMessage(void *unused, mach_msg_header_t *msg,
-    // void *reference)` — the IOKit notification pump.
+    // void *reference)` - the IOKit notification pump.
     (
         "IODispatchCalloutFromMessage",
         "calls a guest function pointer carried inside a Mach message the host would read",
     ),
-    // `void malloc_zone_register(malloc_zone_t *)` — hands libsystem_malloc a
+    // `void malloc_zone_register(malloc_zone_t *)` - hands libsystem_malloc a
     // structure of **guest** function pointers and asks it to allocate through
     // them.
     (
@@ -3288,7 +3288,7 @@ pub static REFUSED: &[(&str, &str)] = &[
         "registers a zone of guest function pointers the host would call as arm64",
     ),
     // `kern_return_t malloc_get_all_zones(task_t, memory_reader_t *,
-    // vm_address_t **, unsigned *)` — the same shape once removed.
+    // vm_address_t **, unsigned *)` - the same shape once removed.
     (
         "malloc_get_all_zones",
         "walks another task's zones through a guest reader callback",
@@ -3327,8 +3327,8 @@ mod tests {
     /// The bug this exists for is invisible by construction.
     #[test]
     fn the_table_declares_the_parameters_these_functions_really_have() {
-        // A struct passed by value is *split* across registers by this table —
-        // a `CFRange` is two `CFIndex`, a `double complex` is two `double` — so
+        // A struct passed by value is *split* across registers by this table -
+        // a `CFRange` is two `CFIndex`, a `double complex` is two `double` - so
         // these declare more arguments than the prototype has, deliberately.
         const SPLIT_AGGREGATES: &[&str] = &[
             "CFArrayApplyFunction",
@@ -3497,7 +3497,7 @@ mod tests {
     fn an_x86_only_variant_falls_back_to_the_plain_symbol() {
         // The same fallback machish applies when resolving the address; arm64
         // never had `$INODE64`, so what is known about the variant is whatever
-        // is known about the plain symbol — here, that it takes a comparator.
+        // is known about the plain symbol - here, that it takes a comparator.
         assert_eq!(lookup(0, "_fts_open"), lookup(0, "_fts_open$INODE64"));
         // `fts_open` is a signature now that the thunk exists, and the point of
         // this assertion is unchanged.

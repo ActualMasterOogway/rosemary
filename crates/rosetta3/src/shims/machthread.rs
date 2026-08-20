@@ -111,7 +111,7 @@ fn float_state64(guest: Option<&RegisterContext>) -> Vec<u8> {
     buf
 }
 
-/// `void *pthread_get_stackaddr_np(pthread_t)` — the *highest* address of the
+/// `void *pthread_get_stackaddr_np(pthread_t)` - the *highest* address of the
 /// stack, which is where a stack that grows down begins.
 fn pthread_get_stackaddr_np(
     symbol: &str,
@@ -146,7 +146,7 @@ fn guest_thread_of(pthread: u64) -> Option<&'static crate::thread::GuestThread> 
     if pthread == 0 {
         return None;
     }
-    // SAFETY: `pthread` is a `pthread_t` the guest holds — from
+    // SAFETY: `pthread` is a `pthread_t` the guest holds - from
     // `pthread_self` or `pthread_create`, both of which are the host's own, so
     // the value is one libpthread issued. `pthread_mach_thread_np` reads the
     // port name out of it and sends nothing.
@@ -172,7 +172,7 @@ pub fn warm() {
 /// Forward to the host's own implementation, unshimmed.
 ///
 /// Reached for every thread this runtime has not run guest code on, and for
-/// every flavour but the two above — a guest crash reporter asking for
+/// every flavour but the two above - a guest crash reporter asking for
 /// `THREAD_IDENTIFIER_INFO` is asking something the kernel can answer.
 fn passthrough(symbol: &str, ctx: &mut RegisterContext) -> Result<()> {
     let name = symbol.strip_prefix('_').unwrap_or(symbol);
@@ -189,7 +189,7 @@ fn passthrough(symbol: &str, ctx: &mut RegisterContext) -> Result<()> {
         })?;
     // SAFETY: each of the three symbols this module claims takes at most four
     // integer arguments and returns one, and the host's own declaration is
-    // narrower than this prototype in the argument registers only — the same
+    // narrower than this prototype in the argument registers only - the same
     // over-wide-prototype argument [`crate::abi::marshal`] rests on.
     let f: extern "C" fn(u64, u64, u64, u64) -> u64 =
         unsafe { core::mem::transmute::<u64, extern "C" fn(u64, u64, u64, u64) -> u64>(host) };

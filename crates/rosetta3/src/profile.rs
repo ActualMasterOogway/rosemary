@@ -58,7 +58,7 @@ const KERN_SUCCESS: i32 = 0;
 const ARM_THREAD_STATE64: i32 = 6;
 
 /// `arm_thread_state64_t` in 32-bit words: `__x[29]`, `__fp`, `__lr`, `__sp`,
-/// `__pc` — thirty-three doublewords — then `__cpsr` and its padding.
+/// `__pc` - thirty-three doublewords - then `__cpsr` and its padding.
 const ARM_THREAD_STATE64_COUNT: u32 = 68;
 
 /// Index of `__pc` within that state, in doublewords. Twenty-nine `__x` registers, then
@@ -73,7 +73,7 @@ const THREAD_BASIC_INFO_COUNT: u32 = 10;
 /// `int` each), `cpu_usage`, `policy`, then `run_state`.
 const RUN_STATE_WORD: usize = 6;
 
-/// `TH_STATE_RUNNING`. Everything else — waiting, stopped, halted — is a thread
+/// `TH_STATE_RUNNING`. Everything else - waiting, stopped, halted - is a thread
 /// that is not consuming the CPU this is trying to account for.
 const TH_STATE_RUNNING: i32 = 1;
 
@@ -121,7 +121,7 @@ unsafe extern "C" {
 
 /// One thread's `pc`, and whether it was on a CPU when it was read.
 ///
-/// `None` when the thread could not be stopped — it has exited between the registry
+/// `None` when the thread could not be stopped - it has exited between the registry
 /// naming its port and this call, which is the ordinary race and not an error.
 fn sample_thread(port: u32) -> Option<(u64, bool)> {
     let mut info = [0i32; THREAD_BASIC_INFO_COUNT as usize];
@@ -251,7 +251,7 @@ fn attribute(counts: &mut Counts, pc: u64) {
         }
         // Keyed by the symbol's own address so two samples in one function are
         // one row, and by the image's base when the symbol table could not name
-        // it — which buckets a whole stripped library into one row rather than
+        // it - which buckets a whole stripped library into one row rather than
         // one row per sampled address.
         let key = match info.dli_saddr.is_null() {
             false => info.dli_saddr as u64,
@@ -332,7 +332,7 @@ pub fn set_sampling(on: bool) -> bool {
 ///
 /// Separate from [`start`] because a run that never set `ROSETTA3_PROFILE` can
 /// still be asked for a profile from [`crate::gui`], and the rate it gets is the
-/// default one — there is no keystroke that could name a number.
+/// default one - there is no keystroke that could name a number.
 fn ensure_thread() {
     static RUNNING: AtomicBool = AtomicBool::new(false);
     if RUNNING.swap(true, Relaxed) {
@@ -380,7 +380,7 @@ fn sweep_forever(period: Duration, every: Option<Duration>) {
         // SAFETY: as above.
         let now = unsafe { mach_absolute_time() };
         // A sweep that took longer than its own period has nothing to make up
-        // by spinning — the samples it missed are gone — so the deadline is
+        // by spinning - the samples it missed are gone - so the deadline is
         // moved to now rather than chased.
         if next < now {
             next = now;
@@ -467,7 +467,7 @@ struct Row {
     count: u64,
     /// The address, as the guest's own program sees it.
     va: u64,
-    /// `image+offset`, or empty for code that belongs to no image — which is
+    /// `image+offset`, or empty for code that belongs to no image - which is
     /// code the guest generated, and is the honest answer for it.
     located: String,
 }
@@ -608,7 +608,7 @@ pub struct Entry {
     pub share: f64,
     /// The address, as the guest's own program sees it.
     pub va: u64,
-    /// `image+offset`, or empty for code that belongs to no image — which is
+    /// `image+offset`, or empty for code that belongs to no image - which is
     /// code the guest generated, and is the honest answer for it.
     pub located: String,
 }
@@ -638,7 +638,7 @@ pub struct Snapshot {
     /// Guest threads found in the registry on the most recent sweep.
     pub threads: usize,
     /// Sweeps completed, and the rate that works out to. The *achieved* rate,
-    /// which is the only one worth showing — see the module note.
+    /// which is the only one worth showing - see the module note.
     pub sweeps: u64,
     pub sweeps_per_second: f64,
     /// Share of one core the sampler itself is costing.
