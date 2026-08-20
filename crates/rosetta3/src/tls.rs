@@ -154,6 +154,50 @@ pub extern "C" fn bootstrap(descriptor: *const u8) -> *mut u8 {
     }
 }
 
+/// [`bootstrap`] behind the register discipline a `tlv_descriptor` thunk owes its
+/// caller.
+///
+/// dyld's `_tlv_get_addr` saves x1-x16 and q0-q7 around its slow path and the
+/// compiler counts on it — Roblox's allocator holds a live pointer in x8 across
+/// the `blr` through the descriptor. An ordinary C function clobbers all of
+/// them, so a native image's descriptors point here instead.
+#[cfg(target_arch = "aarch64")]
+#[unsafe(naked)]
+pub unsafe extern "C" fn bootstrap_thunk(_descriptor: *const u8) -> *mut u8 {
+    core::arch::naked_asm!(
+        "stp x29, x30, [sp, #-16]!",
+        "mov x29, sp",
+        "stp x1, x2, [sp, #-16]!",
+        "stp x3, x4, [sp, #-16]!",
+        "stp x5, x6, [sp, #-16]!",
+        "stp x7, x8, [sp, #-16]!",
+        "stp x9, x10, [sp, #-16]!",
+        "stp x11, x12, [sp, #-16]!",
+        "stp x13, x14, [sp, #-16]!",
+        "stp x15, x16, [sp, #-16]!",
+        "stp q0, q1, [sp, #-32]!",
+        "stp q2, q3, [sp, #-32]!",
+        "stp q4, q5, [sp, #-32]!",
+        "stp q6, q7, [sp, #-32]!",
+        "bl {bootstrap}",
+        "ldp q6, q7, [sp], #32",
+        "ldp q4, q5, [sp], #32",
+        "ldp q2, q3, [sp], #32",
+        "ldp q0, q1, [sp], #32",
+        "ldp x15, x16, [sp], #16",
+        "ldp x13, x14, [sp], #16",
+        "ldp x11, x12, [sp], #16",
+        "ldp x9, x10, [sp], #16",
+        "ldp x7, x8, [sp], #16",
+        "ldp x5, x6, [sp], #16",
+        "ldp x3, x4, [sp], #16",
+        "ldp x1, x2, [sp], #16",
+        "ldp x29, x30, [sp], #16",
+        "ret",
+        bootstrap = sym bootstrap,
+    )
+}
+
 /// The body of [`bootstrap`], with this thread's storage already in hand.
 fn resolve(tls: &mut ThreadTls, at: u64) -> *mut u8 {
     // Acquire pairs with the release in `register`: observing the new epoch

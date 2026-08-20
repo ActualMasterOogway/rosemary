@@ -5,7 +5,7 @@ use machish::loader::Loader;
 use machish::memory::MmapSpace;
 use machish::namespace::FsDylibSource;
 use machish::report::LinkReport;
-use machish::resolve::{NativeDylibProvider, SymbolProvider, eager_binding_shims};
+use machish::resolve::{NativeDylibProvider, SymbolProvider, SyntheticDylib, eager_binding_shims};
 use machish::spec::constants::{CPU_SUBTYPE_ARM64E, subtype_of};
 use machish::spec::{MachSpec, NativelyExecutable};
 
@@ -99,16 +99,26 @@ impl Native {
         let mut host = NativeDylibProvider::system();
         host.allow_everything();
         let eager = eager_binding_shims();
-        let providers: Vec<&dyn SymbolProvider> = vec![&eager, &host];
+        let tlv = tlv_provider();
+        let providers: Vec<&dyn SymbolProvider> = vec![&eager, &tlv, &host];
 
-        let report = Loader::new(HOST_SPEC)
+        let mut report = Loader::new(HOST_SPEC)
             .link_with(&bytes, path, &mut memory, &mut source, &providers)
             .map_err(|e| VmError::Load {
                 path: path.to_string(),
                 reason: e.to_string(),
             })?;
 
+        // `libmimalloc.3.dylib` replaces `free` for every image that binds it,
+        // and a `malloc` from one allocator freed by the other aborts inside
+        // libmalloc rather than anywhere near the allocation.
+        crate::interpose::apply(&mut report, &mut memory).map_err(|e| VmError::Load {
+            path: path.to_string(),
+            reason: e.to_string(),
+        })?;
+
         flush_icache(&report);
+        crate::tls::register(&report);
 
         let stack = GuestStack::new(crate::stack::DEFAULT_STACK, path, args)?;
         Ok(Native {
@@ -167,6 +177,21 @@ impl Execution for Native {
         let (argc, argv, envp, apple) = self.main_args();
         self.call(entry, &[argc, argv, envp, apple])
     }
+}
+
+/// `__tlv_bootstrap`, from this runtime rather than from dyld.
+///
+/// dyld initialises the descriptors of the images *it* loaded; these were loaded
+/// here, so their thunks still hold the bootstrap pointer and dyld's own
+/// implementation aborts the process through `_tlv_bootstrap_error` on the first
+/// thread-local read. Flat, so it answers a two-level import naming libSystem.
+fn tlv_provider() -> SyntheticDylib {
+    let mut lib = SyntheticDylib::new("<rosetta3 tlv>");
+    lib.flat(true);
+    for name in machish::extensions::tlv::BOOTSTRAP_SYMBOLS {
+        lib.define_fn(name, crate::tls::bootstrap_thunk as *const ());
+    }
+    lib
 }
 
 unsafe extern "C" {
