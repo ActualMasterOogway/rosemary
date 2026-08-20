@@ -10,7 +10,7 @@ Rosetta 3 is relatively fast, though not up to speed with Rosetta 2 in all cases
 
 Rosetta 3, like many other high level emulators, implements Block Linking, a feature that makes jumping between different unknown blocks at lift time possible directly in the recompiled code via a jump table and a pinned register ABI. Microlift exposes the core of this functionality, and Rosetta 3 acts as the runtime that implements it. 
 
-## Differences form Rosetta 2
+## Differences from Rosetta 2
 
 Rosetta 3 diverges from Rosetta 2 in a few ways at the moment - in particular, these are the differences that will likely be most impactful:
 
