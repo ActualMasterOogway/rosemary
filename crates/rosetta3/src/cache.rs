@@ -1,7 +1,7 @@
 //! The code cache: guest addresses to native translations.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use machish::memory::Regions;
 use static_init::dynamic;
@@ -141,19 +141,30 @@ fn follow_links(ctx: &mut RegisterContext) -> ExitReason {
 }
 
 /// Translations, keyed by the guest address each begins at.
+///
+/// A hit is a read and a lift is a write, at a ratio of thousands to one, so the map
+/// is behind an `RwLock` rather than a mutex — and a compile runs outside the lock
+/// entirely, which is what lets two guest threads lift at once instead of one waiting
+/// out the other's Cranelift run.
 pub struct CodeCache {
+    published: RwLock<Published>,
+    /// Everything microlift needs to know before it lifts anything: the registered
+    /// import addresses and the read-only segment hints. Immutable, so a lift reads it
+    /// without taking anything.
+    config: LifterConfig,
+}
+
+/// The half of the cache a lift mutates.
+struct Published {
     regions: BTreeMap<u64, Arc<Translation>>,
     /// The widest `end - start` any translation in [`regions`](Self::regions) has,
-    /// which is how far below `pc` [`lookup`](Self::lookup) has to look. Without it
+    /// which is how far below `pc` [`CodeCache::lookup`] has to look. Without it
     /// the scan for an address no region covers — the case that then lifts — walks
     /// every region below it, and that walk is 2.2% of `docs/HOTSPOTS.md`.
     max_span: u64,
     /// Translations displaced from [`regions`](Self::regions) by a re-lift of the same
     /// address, kept so their compiled code stays mapped.
     retired: Vec<Arc<Translation>>,
-    /// Everything microlift needs to know before it lifts anything: the registered
-    /// import addresses and the read-only segment hints.
-    config: LifterConfig,
 }
 
 // SAFETY: the one thing keeping a cache off a second thread is the raw pointer
@@ -161,32 +172,44 @@ pub struct CodeCache {
 // resolved to. It is a function address, cloned into each lift and never
 // dereferenced on this side; the code that eventually calls it is compiled arm64
 // doing what any thread may do with a function pointer. The translations beside
-// it carry their own claim (see `Translation` above).
+// it carry their own claim (see `Translation` above). `Sync` on top of `Send`
+// because the lock is now inside the cache: threads share one by reference.
 unsafe impl Send for CodeCache {}
+unsafe impl Sync for CodeCache {}
 
 impl CodeCache {
     /// A cache that lifts with `config`.
     pub fn new(config: LifterConfig) -> Self {
         CodeCache {
-            regions: BTreeMap::new(),
-            max_span: 0,
-            retired: Vec::new(),
+            published: RwLock::new(Published {
+                regions: BTreeMap::new(),
+                max_span: 0,
+                retired: Vec::new(),
+            }),
             config,
         }
     }
 
     /// How many regions have been translated.
     pub fn len(&self) -> usize {
-        self.regions.len()
+        self.read().regions.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.regions.is_empty()
+        self.read().regions.is_empty()
+    }
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Published> {
+        self.published.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Published> {
+        self.published.write().unwrap_or_else(|e| e.into_inner())
     }
 
     /// The translation that can execute `pc`, lifting one if necessary.
     pub fn get_or_lift<M: Regions>(
-        &mut self,
+        &self,
         program: &Program<M>,
         pc: u64,
     ) -> Result<Arc<Translation>, VmError> {
@@ -297,22 +320,26 @@ impl CodeCache {
             code: compiled.link_target as usize as u64,
             _backend: compiled.backend,
         });
-        self.max_span = self.max_span.max(end.saturating_sub(start));
-        // A replaced translation is *retired*, not dropped.
-        if let Some(replaced) = self.regions.insert(start, Arc::clone(&translation)) {
-            self.retired.push(replaced);
+        // Two threads that missed on the same address both compiled it; the loser's
+        // translation is retired rather than dropped, because its code has already
+        // been handed to `crate::fault` and `crate::lldb` and must stay mapped.
+        let mut published = self.write();
+        published.max_span = published.max_span.max(end.saturating_sub(start));
+        if let Some(replaced) = published.regions.insert(start, Arc::clone(&translation)) {
+            published.retired.push(replaced);
         }
-        //eprintln!("MISS at {pc:#x} - regions: {}", self.len());
         Ok(translation)
     }
 
     /// An existing translation covering `pc`, if there is one.
     fn lookup(&self, pc: u64) -> Option<Arc<Translation>> {
+        let published = self.read();
         // Regions may overlap, so the answer is not `range(..=pc).next_back()` —
         // but a region that could cover `pc` begins no earlier than `max_span`
         // before it, which bounds the walk.
-        self.regions
-            .range(pc.saturating_sub(self.max_span)..=pc)
+        published
+            .regions
+            .range(pc.saturating_sub(published.max_span)..=pc)
             .rev()
             .find(|(_, t)| t.covers(pc))
             .map(|(_, t)| Arc::clone(t))

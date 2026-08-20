@@ -139,8 +139,8 @@ pub fn register(
     // SAFETY:
     //
     // * `entry` and `object` are leaked, so their addresses stay valid.
-    // * `REGISTER` serializes every mutation of the global list, and guest
-    //   threads compile concurrently — each has its own `CodeCache`.
+    // * `REGISTER` serializes every mutation of the global list, which guest
+    //   threads reach concurrently: a lift runs outside the code cache's lock.
     // * LLDB reads this state from the stop inside `__jit_debug_register_code`,
     //   so the list is consistent for the whole time it is observable.
     unsafe {

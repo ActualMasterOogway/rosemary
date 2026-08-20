@@ -21,11 +21,13 @@ pub fn address() -> u64 {
 
 /// Whether `va` is the return stub — that is, whether a breakpoint there is the
 /// end of a call this runtime made.
+#[inline(always)]
 pub fn is_exit(va: u64) -> bool {
     *STUB == va
 }
 
 /// Whether `va` is guest code this module owns.
+#[inline(always)]
 pub fn contains(va: u64) -> bool {
     is_exit(va)
 }

@@ -1,6 +1,6 @@
 //! Five bytes of x86-64 that turn a host function pointer back into an import.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use microlift::core::FastImport;
@@ -48,7 +48,7 @@ struct State {
     by_target: AddrMap<u64>,
 }
 
-static STATE: Mutex<Option<State>> = Mutex::new(None);
+static STATE: RwLock<Option<State>> = RwLock::new(None);
 
 /// Whether the run this is part of wants trampolines at all.
 static ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -163,7 +163,7 @@ pub fn for_site(site: &ImportSite) -> Option<u64> {
         return None;
     };
 
-    let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = STATE.write().unwrap_or_else(|e| e.into_inner());
     // Under the lock, so the reservation happens once however many threads
     // arrive together. See [`arena_locked`].
     let base = arena_locked()?;
@@ -239,7 +239,7 @@ fn import_slot(va: u64) -> Option<usize> {
 
 /// Whatever `f` says about the entry in `slot`, if there is one.
 fn with_entry<T>(slot: usize, f: impl FnOnce(&Entry) -> T) -> Option<T> {
-    let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = STATE.read().unwrap_or_else(|e| e.into_inner());
     guard.as_ref()?.entries.get(slot).map(f)
 }
 

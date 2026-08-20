@@ -3,7 +3,7 @@
 use std::fmt;
 use std::ops::Range;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use machish::memory::{MmapSpace, Regions};
 
@@ -429,8 +429,8 @@ pub struct Vm {
     /// The linked guest, identity-mapped. Immutable once loaded: guest *memory*
     /// changes constantly, but through [`GuestView`], not through this.
     pub program: SharedProgram,
-    cache: Mutex<CodeCache>,
-    thunks: Mutex<ThunkTable>,
+    cache: CodeCache,
+    thunks: RwLock<ThunkTable>,
     /// The published, immutable half of `thunks` — see [`crate::thunk::ThunkView`].
     thunk_view: AtomicPtr<crate::thunk::ThunkView>,
     /// How many thunks exist, readable without the lock.
@@ -540,8 +540,8 @@ impl Vm {
         crate::thread::install(crate::thread::ThreadState::new(stack));
         Ok(Vm {
             program: SharedProgram(program),
-            cache: Mutex::new(cache),
-            thunks: Mutex::new(ThunkTable::new()),
+            cache,
+            thunks: RwLock::new(ThunkTable::new()),
             thunk_view: AtomicPtr::new(core::ptr::null_mut()),
             thunk_count: AtomicUsize::new(0),
             view: GuestView::new(ranges),
@@ -643,7 +643,7 @@ impl Vm {
 
     /// How many regions have been translated so far.
     pub fn translated(&self) -> usize {
-        self.cache.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.cache.len()
     }
 
     /// `(argc, argv, envp, apple)` for the entry point and the initializers.
@@ -864,14 +864,11 @@ impl Vm {
                         continue;
                     }
 
-                    // The lock is taken to look up or lift and released before
-                    // guest code runs, which is what keeps a callback
-                    // re-entering the VM on this same thread from deadlocking
-                    // against its own caller.
+                    // The lock is dropped before guest code runs, which is
+                    // what keeps a callback re-entering the VM on this same
+                    // thread from deadlocking against its own caller.
                     let lifted = self
                         .cache
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
                         .get_or_lift(&self.program, pc)
                         .map_err(|e| match e {
                             VmError::NoCode { pc, from: None } => VmError::NoCode {
@@ -1198,11 +1195,7 @@ impl Vm {
         let thunk = crate::thunk::build_typed(guest_va, signature)?;
         let host = self.insert_thunk(thunk);
         // As in `thunk_for`: handing the pointer out is the demand signal.
-        let _ = self
-            .cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get_or_lift(&self.program, guest_va);
+        let _ = self.cache.get_or_lift(&self.program, guest_va);
         Ok(host)
     }
 
@@ -1214,17 +1207,13 @@ impl Vm {
         let host = self.insert_thunk(thunk);
 
         // Translate the callback now, while translating is possible.
-        let _ = self
-            .cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get_or_lift(&self.program, guest_va);
+        let _ = self.cache.get_or_lift(&self.program, guest_va);
         Ok(host)
     }
 
     /// How many guest function pointers have been handed to host code.
     pub fn thunks(&self) -> usize {
-        self.thunks.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.thunks.read().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Whether `va` is a thunk this VM handed out.
@@ -1266,12 +1255,12 @@ impl Vm {
             // program that hands the host no function pointers at all.
             return None;
         }
-        from_table(&self.thunks.lock().unwrap_or_else(|e| e.into_inner()))
+        from_table(&self.thunks.read().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// Add a thunk and republish the snapshot, both under the one lock.
     fn insert_thunk(&self, thunk: crate::thunk::Thunk) -> u64 {
-        let mut table = self.thunks.lock().unwrap_or_else(|e| e.into_inner());
+        let mut table = self.thunks.write().unwrap_or_else(|e| e.into_inner());
         let host = table.insert(thunk);
         let view = Box::leak(Box::new(table.view()));
         let count = view.count;
