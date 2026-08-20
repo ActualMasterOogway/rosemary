@@ -895,7 +895,11 @@ impl Vm {
             crate::stats::record_entry(missed);
             let exit = translation.enter(ctx);
             state.rsp.set(ctx.rsp);
-            crate::stats::record_exit(classify(exit, ctx.exit_code));
+            // Reaching here at all is what makes this a probe miss: a linked exit
+            // continues in guest code and never comes back to this loop.
+            let kind = classify(exit, ctx.exit_code);
+            crate::stats::record_exit(kind);
+            crate::stats::record_probe_miss(kind);
             from = Some(Transfer {
                 pc,
                 exit,

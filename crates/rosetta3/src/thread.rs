@@ -322,12 +322,16 @@ const WINDOW: usize = 8192;
 /// computes and the slot [`CodeWindow::put`] writes are the same arithmetic
 /// rather than two copies of it.
 pub fn link_config() -> BlockLinkConfig {
-    let config = BlockLinkConfig::new(WINDOW as u32);
-    // Which of the two shapes of linking this process runs.
-    match crate::jit::pinned_link_abi() {
-        Some(abi) => config.pinned(abi),
-        None => config,
-    }
+    #[dynamic]
+    static CONFIG: BlockLinkConfig = {
+        let config = BlockLinkConfig::new(WINDOW as u32);
+        // Which of the two shapes of linking this process runs.
+        match crate::jit::pinned_link_abi() {
+            Some(abi) => config.pinned(abi),
+            None => config,
+        }
+    };
+    *CONFIG
 }
 
 impl CodeWindow {
@@ -341,7 +345,9 @@ impl CodeWindow {
     /// The slot a PC maps to.
     ///
     /// Deferred to [`link_config`] so that this and the shift-and-mask microlift bakes
-    /// into every region cannot drift apart.
+    /// into every region cannot drift apart. Read from the static rather than rebuilt:
+    /// this runs twice per run-loop entry, and building a `BlockLinkConfig` runs a
+    /// power-of-two assert and reads the pinned-ABI decision to get to two constants.
     fn slot(pc: u64) -> usize {
         link_config().slot(pc)
     }

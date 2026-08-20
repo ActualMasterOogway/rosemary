@@ -4,13 +4,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use machish::memory::Regions;
+use static_init::dynamic;
 
 use microlift::arch::x86_64::X86_64;
 use microlift::arch::x86_64::context::RegisterContext;
 use microlift::backend::CraneliftBackend;
 use microlift::core::exit::ExitReason;
 use microlift::core::link::BlockLinkEntry;
-use microlift::core::{LifterConfig, VmResumptionPoints, lift_to_code};
+use microlift::core::{LifterConfig, lift_to_code};
 
 use crate::program::Program;
 use crate::vm::VmError;
@@ -62,7 +63,12 @@ impl Translation {
         // guest's own — the guest stack and its mapped images, all live for the
         // duration of the call.
         unsafe { (self.entry)(ctx as *mut RegisterContext) };
-        follow_links(ctx)
+        // Under a pinned ABI a link is a branch: `link_hit` is never written and
+        // the chain has already run itself out by the time this returns.
+        match host_resolved_links() {
+            true => follow_links(ctx),
+            false => ExitReason::try_from(ctx.exit_reason).unwrap_or(ExitReason::None),
+        }
     }
 
     /// Whether this translation can be entered at `pc`.
@@ -85,6 +91,14 @@ impl Translation {
     }
 }
 
+/// Whether a link comes back here to be taken, rather than being a branch the host
+/// never sees. Read once; the ABI is fixed for the process.
+fn host_resolved_links() -> bool {
+    #[dynamic]
+    static HOST_RESOLVED: bool = crate::jit::pinned_link_abi().is_none();
+    *HOST_RESOLVED
+}
+
 /// Run out the chain of regions the last exit resolved for itself, and report how the
 /// last one ended.
 ///
@@ -105,11 +119,13 @@ fn follow_links(ctx: &mut RegisterContext) -> ExitReason {
         // Both counters, so that the two figures `docs/HOTSPOTS.md` is written
         // against — the entry *rate* and the exit *mix* — keep counting the
         // events they always counted.
-        crate::stats::record_exit(crate::vm::classify(
-            ExitReason::try_from(ctx.exit_reason).unwrap_or(ExitReason::None),
-            ctx.exit_code,
-        ));
-        crate::stats::record_linked_entry();
+        if crate::stats::enabled() {
+            crate::stats::record_exit(crate::vm::classify(
+                ExitReason::try_from(ctx.exit_reason).unwrap_or(ExitReason::None),
+                ctx.exit_code,
+            ));
+            crate::stats::record_linked_entry();
+        }
         ctx.image_base = row.image_base;
         ctx.exit_reason = ExitReason::None as u32;
         ctx.link_hit = 0;
@@ -127,6 +143,11 @@ fn follow_links(ctx: &mut RegisterContext) -> ExitReason {
 /// Translations, keyed by the guest address each begins at.
 pub struct CodeCache {
     regions: BTreeMap<u64, Arc<Translation>>,
+    /// The widest `end - start` any translation in [`regions`](Self::regions) has,
+    /// which is how far below `pc` [`lookup`](Self::lookup) has to look. Without it
+    /// the scan for an address no region covers — the case that then lifts — walks
+    /// every region below it, and that walk is 2.2% of `docs/HOTSPOTS.md`.
+    max_span: u64,
     /// Translations displaced from [`regions`](Self::regions) by a re-lift of the same
     /// address, kept so their compiled code stays mapped.
     retired: Vec<Arc<Translation>>,
@@ -145,14 +166,10 @@ unsafe impl Send for CodeCache {}
 
 impl CodeCache {
     /// A cache that lifts with `config`.
-    pub fn new(mut config: LifterConfig) -> Self {
-        config.resumption = VmResumptionPoints::ExitOnly;
-        // Declaring the few entry addresses rather than making every instruction
-        // boundary an arm: over the same 128 KiB of a real program's `__text`, in
-        // 4 KiB pieces, that is 1.42s of compile time against 19.36s.
-        config.strict_resume = true;
+    pub fn new(config: LifterConfig) -> Self {
         CodeCache {
             regions: BTreeMap::new(),
+            max_span: 0,
             retired: Vec::new(),
             config,
         }
@@ -280,6 +297,7 @@ impl CodeCache {
             code: compiled.link_target as usize as u64,
             _backend: compiled.backend,
         });
+        self.max_span = self.max_span.max(end.saturating_sub(start));
         // A replaced translation is *retired*, not dropped.
         if let Some(replaced) = self.regions.insert(start, Arc::clone(&translation)) {
             self.retired.push(replaced);
@@ -290,9 +308,11 @@ impl CodeCache {
 
     /// An existing translation covering `pc`, if there is one.
     fn lookup(&self, pc: u64) -> Option<Arc<Translation>> {
-        // Regions may overlap.
+        // Regions may overlap, so the answer is not `range(..=pc).next_back()` —
+        // but a region that could cover `pc` begins no earlier than `max_span`
+        // before it, which bounds the walk.
         self.regions
-            .range(..=pc)
+            .range(pc.saturating_sub(self.max_span)..=pc)
             .rev()
             .find(|(_, t)| t.covers(pc))
             .map(|(_, t)| Arc::clone(t))

@@ -28,7 +28,7 @@
 
 use microlift::arch::x86_64::X86_64;
 use microlift::backend::ArtifactBackend;
-use microlift::core::{LifterConfig, VmResumptionPoints, lift_to_code};
+use microlift::core::lift_to_code;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -60,20 +60,10 @@ fn main() {
         }
     };
 
-    // The lifter is configured the way `cache::lift` configures it, because a
-    // dump of code compiled some other way answers a question nobody asked.
+    // The one definition of what a run lifts with, not a copy of it: a dump taken
+    // under some other configuration answers a question nobody asked.
     let level = rosetta3::jit::opt_level();
-    let config = LifterConfig {
-        resumption: VmResumptionPoints::ExitOnly,
-        strict_resume: true,
-        use_vector_xmm: level.host_specific(),
-        // Including the link probe, which is a run-time cost like any other and
-        // the one a dump would otherwise not show. `ROSETTA3_NO_BLOCK_LINK=1`
-        // takes it out here exactly as it does in a run, which is how the two
-        // shapes of an exit stub can be read side by side.
-        block_link: rosetta3::jit::block_linking().then(rosetta3::thread::link_config),
-        ..LifterConfig::default()
-    };
+    let config = rosetta3::program::lifter_config_base();
 
     let lifted = lift_to_code::<X86_64>(&bytes, va, config).expect("lift");
     let (code, map) =

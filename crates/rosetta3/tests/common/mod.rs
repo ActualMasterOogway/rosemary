@@ -128,20 +128,85 @@ pub fn hello() -> Option<String> {
 ///
 /// The accumulator is printed so that a run which skipped iterations — or
 /// resumed one at the wrong address — differs in its output rather than only in
-/// its timing.
+/// its timing. `argv[1]` scales the loop: the tests want a second, a measurement
+/// wants a minute.
 pub const LINK_C: &str = r#"
 #include <stdio.h>
+#include <stdlib.h>
 
 long __attribute__((noinline)) step(long a) { return a * 3 + 1; }
 long __attribute__((noinline)) other(long a) { return a ^ 0x5a5a; }
 
 static long (* volatile through_a_pointer)(long) = other;
 
-int main(void) {
+int main(int argc, char **argv) {
+    long n = argc > 1 ? atol(argv[1]) : 400000;
     long acc = 1;
-    for (int i = 0; i < 400000; i++) {
+    for (long i = 0; i < n; i++) {
         acc = step(acc);
         acc = through_a_pointer(acc);
+        acc &= 0xffffff;
+    }
+    printf("acc=%ld\n", acc);
+    return 0;
+}
+"#;
+
+/// The fixture [`LINK_C`] cannot be: a region whose exits do not all go to the
+/// same place.
+///
+/// `LINK_C` has one successor per exit site, so its links are perfectly predicted
+/// whether they are dispatched from one branch or from four. That is the best case
+/// of the mechanism and it is what M8.5 and M8.6 were measured on. Three loops
+/// here, each isolating one thing:
+///
+/// - `fan_out` is **one region with four out-of-region direct calls**, whose
+///   targets are constants. Under one probe per region all four successors are
+///   reached through a single `br`; under one probe per exit site each call is its
+///   own branch with its own target.
+/// - `leaf` is called from four sites in a row, so its single `ret` exit has four
+///   successors *at one site*. Per-site probes cannot help this, and it is here so
+///   that the half the change does not fix is measured beside the half it does.
+/// - `ladder` is thirty-odd blocks ending in a `ret`, which is what the range check
+///   in front of a region's in-block switch is about: leaving it should cost two
+///   compares rather than a binary search over every block.
+///
+/// The accumulator is printed, so a run that skipped an iteration or resumed at the
+/// wrong address differs in output and not only in timing. `argv[1]` scales the loop:
+/// the tests want a second, a measurement wants a minute.
+pub const POLYLINK_C: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+
+long __attribute__((noinline)) a(long x) { return x * 3 + 1; }
+long __attribute__((noinline)) b(long x) { return x ^ 0x5a5a; }
+long __attribute__((noinline)) c(long x) { return x + 7; }
+long __attribute__((noinline)) d(long x) { return x - 11; }
+
+long __attribute__((noinline)) fan_out(long x, int k) {
+    if (k == 0) return a(x);
+    if (k == 1) return b(x);
+    if (k == 2) return c(x);
+    return d(x);
+}
+
+long __attribute__((noinline)) leaf(long x) { return (x | 1) * 5; }
+
+long __attribute__((noinline)) ladder(long x) {
+    for (int i = 0; i < 16; i++) {
+        if (x & 1) x = x * 3 + 1; else x >>= 1;
+        if (x & 2) x ^= 0x2b; else x += 3;
+    }
+    return x;
+}
+
+int main(int argc, char **argv) {
+    long n = argc > 1 ? atol(argv[1]) : 200000;
+    long acc = 1;
+    for (long i = 0; i < n; i++) {
+        acc = fan_out(acc, (int)(i & 3));
+        acc = leaf(acc) + leaf(acc >> 1) + leaf(acc >> 2) + leaf(acc >> 3);
+        acc = ladder(acc);
         acc &= 0xffffff;
     }
     printf("acc=%ld\n", acc);
@@ -1783,6 +1848,16 @@ pub fn link_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     BUILT
         .get_or_init(|| build_x86_64("blocklink", LINK_C, &["-O1"]))
+        .clone()
+}
+
+/// Build [`POLYLINK_C`], or `None` if this host cannot.
+///
+/// `-O1` for the same reason [`link_fixture`] uses it.
+pub fn polylink_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("polylink", POLYLINK_C, &["-O1"]))
         .clone()
 }
 

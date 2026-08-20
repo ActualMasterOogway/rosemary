@@ -19,20 +19,22 @@
 //! introduces silently. The counters say how many entries never reached the run
 //! loop, so the second claim is one number.
 //!
-//! There are **two** shapes of linking to hold to those claims, and the default
-//! is the second: a host-resolved link (`ROSETTA3_NO_PINNED_LINK=1`) hands the
-//! successor back to `cache::follow_links`, and a pinned link branches straight
-//! into it with part of the guest register file still in host registers
-//! (`rosetta3::jit::pinned_link_abi`). The first claim is asserted for both -
-//! and *between* them, since a pinned ABI moves where a guest register lives and
-//! is the change most able to corrupt one. The second is asserted of the
-//! host-resolved shape only, because a pinned link is a branch inside translated
-//! code and deliberately increments nothing.
+//! There are **three** shapes of linking to hold to those claims. A host-resolved
+//! link (`ROSETTA3_NO_PINNED_LINK=1`) hands the successor back to
+//! `cache::follow_links`; a pinned link branches straight into it with part of the
+//! guest register file still in host registers (`rosetta3::jit::pinned_link_abi`),
+//! and is the default; and either resolves its successor from a probe shared by
+//! the region or from one per exit site (`ROSETTA3_INLINE_LINK_PROBES=1`). The
+//! first claim is asserted for all of them and *between* them, since a pinned ABI
+//! moves where a guest register lives and a per-site probe moves where a successor
+//! is resolved - the two changes most able to corrupt one. The second is asserted
+//! of the host-resolved shape only, because a pinned link is a branch inside
+//! translated code and deliberately increments nothing.
 
 mod common;
 
 use common::{
-    link_fixture, qsort_fixture, run_guest, run_guest_env, setjmp_fixture, thread_fixture,
+    link_fixture, polylink_fixture, qsort_fixture, run_guest_env, setjmp_fixture, thread_fixture,
 };
 
 /// The environment that turns the mechanism off. See `rosetta3::jit`.
@@ -42,39 +44,50 @@ const OFF: (&str, &str) = ("ROSETTA3_NO_BLOCK_LINK", "1");
 /// linking was built in, and the one whose entries are countable.
 const UNPINNED: (&str, &str) = ("ROSETTA3_NO_PINNED_LINK", "1");
 
-/// Run `path` all three ways - pinned links (the default), host-resolved links,
-/// and no linking at all - and return the three outputs in that order.
+/// One probe per exit site rather than one shared by the region.
+const PER_SITE: (&str, &str) = ("ROSETTA3_INLINE_LINK_PROBES", "1");
+
+/// Every shape of the mechanism, named, as the environment that selects it.
 ///
-/// Three rather than two because there are two mechanisms to hold to the same
-/// claim, and they fail differently: an unlinked-vs-linked disagreement is about
-/// *who decides* what runs next, and a host-resolved-vs-pinned one is about
-/// *where a guest register lives* while it does.
-fn three_ways(path: &str) -> (String, String, String) {
-    let (pinned_status, pinned, err) = run_guest(path, &[]);
-    assert_eq!(pinned_status, Some(0), "pinned run failed; stderr: {err}");
-    let (host_status, host_resolved, err) = run_guest_env(&[UNPINNED], path, &[]);
-    assert_eq!(
-        host_status,
-        Some(0),
-        "host-resolved run failed; stderr: {err}"
-    );
-    let (plain_status, plain, err) = run_guest_env(&[OFF], path, &[]);
-    assert_eq!(plain_status, Some(0), "unlinked run failed; stderr: {err}");
-    (pinned, host_resolved, plain)
+/// Four rather than two because each pair fails differently: unlinked against
+/// linked is about *who decides* what runs next, host-resolved against pinned is
+/// about *where a guest register lives* while it does, and shared against per-site
+/// is about *which branch* carries a region's successors.
+const WAYS: [(&str, &[(&str, &str)]); 4] = [
+    ("pinned links, one probe per region", &[]),
+    ("pinned links, a probe per exit site", &[PER_SITE]),
+    ("host-resolved links", &[UNPINNED]),
+    ("no linking", &[OFF]),
+];
+
+/// Run `path` every way, and return each run's output beside the name of the shape
+/// that produced it.
+fn every_way(path: &str) -> Vec<(&'static str, String)> {
+    WAYS.iter()
+        .map(|&(name, env)| {
+            let (status, out, err) = run_guest_env(env, path, &[]);
+            assert_eq!(status, Some(0), "the {name} run failed; stderr: {err}");
+            (name, out)
+        })
+        .collect()
 }
 
-/// [`three_ways`] for a program whose output is deterministic: all three runs
-/// must be byte-identical.
-fn both_ways(path: &str) -> (String, String) {
-    let (pinned, host_resolved, plain) = three_ways(path);
-    assert_eq!(
-        pinned, host_resolved,
-        "a pinned link and a host-resolved link disagreed about the program"
-    );
-    (pinned, plain)
+/// [`every_way`] for a program whose output is deterministic: every run must be
+/// byte-identical. Returns that output.
+fn one_answer(path: &str) -> String {
+    let runs = every_way(path);
+    let (first, rest) = runs.split_first().expect("WAYS is not empty");
+    for (name, out) in rest {
+        assert_eq!(
+            &first.1, out,
+            "{name} disagreed with {} about the program",
+            first.0
+        );
+    }
+    first.1.clone()
 }
 
-/// A guest calling back into itself through a host `qsort`, both ways.
+/// A guest calling back into itself through a host `qsort`, every way.
 ///
 /// The interesting one: the comparator is entered from *inside* a host
 /// function, so the run loop is re-entered underneath a bridged call — which is
@@ -85,12 +98,11 @@ fn a_host_callback_into_guest_code_is_unaffected() {
     let Some(path) = qsort_fixture() else {
         skip!("cannot build x86_64 fixtures")
     };
-    let (linked, plain) = both_ways(&path);
-    assert_eq!(linked, plain);
-    assert!(linked.contains("12345789 calls=yes"), "{linked:?}");
+    let out = one_answer(&path);
+    assert!(out.contains("12345789 calls=yes"), "{out:?}");
 }
 
-/// `setjmp`/`longjmp`, both ways.
+/// `setjmp`/`longjmp`, every way.
 ///
 /// A `longjmp` is a bridged call that moves `rip` instead of returning — the
 /// case that asks to be linked (see `bridge::resume`) — and its whole content
@@ -102,12 +114,11 @@ fn a_longjmp_out_of_a_bridged_call_is_unaffected() {
     let Some(path) = setjmp_fixture() else {
         skip!("cannot build x86_64 fixtures")
     };
-    let (linked, plain) = both_ways(&path);
-    assert_eq!(linked, plain);
-    assert!(!linked.is_empty(), "the fixture printed nothing");
+    let out = one_answer(&path);
+    assert!(!out.is_empty(), "the fixture printed nothing");
 }
 
-/// Several guest threads, both ways.
+/// Several guest threads, every way.
 ///
 /// The link table is per thread and published into a context that is a local of
 /// whoever entered the guest, so a program with four of them is what says the
@@ -118,21 +129,129 @@ fn guest_threads_are_unaffected() {
     let Some(path) = thread_fixture() else {
         skip!("cannot build x86_64 fixtures")
     };
-    let (linked, host_resolved, plain) = three_ways(&path);
+    let runs = every_way(&path);
     // As *sets* of lines: four threads print as they finish, so which order the
     // `thread N counter` lines come out in is the scheduler's business and not
-    // this runtime's. Everything else about the three runs still has to match.
+    // this runtime's. Everything else about the runs still has to match.
     let lines = |text: &str| {
         let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
         lines.sort();
         lines
     };
-    assert_eq!(lines(&linked), lines(&plain));
-    assert_eq!(lines(&linked), lines(&host_resolved));
+    let (first, rest) = runs.split_first().expect("WAYS is not empty");
+    for (name, out) in rest {
+        assert_eq!(
+            lines(&first.1),
+            lines(out),
+            "{name} disagreed with {} about the program",
+            first.0
+        );
+    }
     for id in 0..4 {
         assert!(
-            linked.contains(&format!("joined {id} -> 100{id}\n")),
-            "{linked:?}"
+            first.1.contains(&format!("joined {id} -> 100{id}\n")),
+            "{:?}",
+            first.1
+        );
+    }
+}
+
+/// A region whose exits do **not** all go to the same place, every way.
+///
+/// [`LINK_C`] has one successor per exit site, so it agrees with itself whether a
+/// region's successors are reached through one branch or four. `POLYLINK_C` is the
+/// fixture where that distinction exists at all, which makes it the one that can
+/// catch a per-site probe resuming at the wrong address.
+///
+/// [`LINK_C`]: common::LINK_C
+/// [`POLYLINK_C`]: common::POLYLINK_C
+#[test]
+fn a_region_with_four_successors_is_unaffected() {
+    let Some(path) = polylink_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
+    let out = one_answer(&path);
+    assert!(out.starts_with("acc="), "{out:?}");
+}
+
+/// The probes on a polymorphic region are taken, and taken for every kind of exit
+/// it has.
+///
+/// Stated per kind because a whole-program share hides the interesting failure: a
+/// change that stopped `ret` linking while leaving direct calls alone would still
+/// show a high aggregate.
+///
+/// Asked of the **host-resolved** shape for the same reason
+/// [`most_region_entries_never_reach_the_run_loop`] is: counting the exits that
+/// declined is free either way, but the denominator - every exit of that kind - is
+/// only counted when the host sees each link. Under a pinned ABI the report prints
+/// the counts and no share, and this asks the question of the shape that can
+/// answer it. Both probe shapes are checked, because the decline *rate* is a
+/// property of the table and must not move when only the branch does.
+#[test]
+fn every_linkable_exit_kind_finds_its_successor() {
+    let Some(path) = polylink_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
+
+    // `rosetta3: stats  probes declined  <kind> P% of N  <kind> P% of N ...`
+    let declined = |env: &[(&str, &str)]| -> Vec<(String, f64)> {
+        let (status, _, err) = run_guest_env(env, &path, &[]);
+        assert_eq!(status, Some(0), "stderr: {err}");
+        let line = err
+            .lines()
+            .find(|line| line.contains(" probes declined  "))
+            .unwrap_or_else(|| panic!("no probes-declined line in the stats; {err}"))
+            .split_once(" probes declined  ")
+            .expect("just matched")
+            .1
+            .to_owned();
+        // Items are two spaces apart; a label may hold single ones.
+        line.split("  ")
+            .map(|item| {
+                let (head, _total) = item
+                    .rsplit_once(" of ")
+                    .unwrap_or_else(|| panic!("malformed item {item:?} in {line:?}"));
+                let (kind, share) = head
+                    .rsplit_once(' ')
+                    .unwrap_or_else(|| panic!("malformed item {item:?} in {line:?}"));
+                let share: f64 = share
+                    .trim_end_matches('%')
+                    .parse()
+                    .unwrap_or_else(|_| panic!("malformed share in {item:?}"));
+                (kind.to_owned(), share)
+            })
+            .collect()
+    };
+
+    for (name, env) in [
+        (
+            "one probe per region",
+            vec![("ROSETTA3_STATS", "1"), UNPINNED],
+        ),
+        (
+            "a probe per exit site",
+            vec![("ROSETTA3_STATS", "1"), UNPINNED, PER_SITE],
+        ),
+    ] {
+        let kinds = declined(&env);
+        assert!(!kinds.is_empty(), "{name}: no linkable exits were counted");
+        for (kind, share) in &kinds {
+            assert!(
+                *share < 25.0,
+                "{name}: {share}% of `{kind}` exits declined their probe; {kinds:?}"
+            );
+        }
+    }
+
+    // With the mechanism off every linkable exit declines, which is what says the
+    // numbers above measure linking rather than counting exits.
+    let off = declined(&[("ROSETTA3_STATS", "1"), UNPINNED, OFF]);
+    assert!(!off.is_empty(), "no linkable exits were counted");
+    for (kind, share) in &off {
+        assert!(
+            (*share - 100.0).abs() < 0.01,
+            "linking is off but only {share}% of `{kind}` exits declined; {off:?}"
         );
     }
 }

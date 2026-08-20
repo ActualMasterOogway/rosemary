@@ -110,6 +110,28 @@ impl Exit {
         Exit::Other,
     ];
 
+    /// Whether a region ending this way carries a link probe.
+    ///
+    /// The exits that do not are the ones the host owes work before anything can
+    /// continue at a guest address: an import call, an unregistered indirect call,
+    /// a `cpuid` or a syscall, the `int3` of a return stub, an error. Everything
+    /// else is answered by *entering whatever covers `rip`*, which is what a link
+    /// does. Kept in step with the `emit_exit` call sites in
+    /// `microlift::core` and `microlift::arch::x86_64::semantics`.
+    pub fn linkable(self) -> bool {
+        matches!(
+            self,
+            Exit::ReturnOut
+                | Exit::DirectJump
+                | Exit::CondJump
+                | Exit::Fallthrough
+                | Exit::DirectCall
+                | Exit::RegionTail
+                | Exit::IndirectJump
+                | Exit::OtherJump
+        )
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Exit::Return => "terminating block",
@@ -131,6 +153,10 @@ impl Exit {
 
 /// One counter per [`Exit`].
 static EXITS: [AtomicU64; Exit::ALL.len()] = [const { AtomicU64::new(0) }; Exit::ALL.len()];
+
+/// The same histogram, restricted to exits that carried a probe and came back
+/// anyway. See [`record_probe_miss`].
+static PROBE_MISSES: [AtomicU64; Exit::ALL.len()] = [const { AtomicU64::new(0) }; Exit::ALL.len()];
 
 /// One region entry: the event whose *rate* is the whole question.
 pub fn record_entry(missed_window: bool) {
@@ -164,6 +190,19 @@ pub fn record_tail_import() {
 pub fn record_exit(exit: Exit) {
     if enabled() {
         EXITS[exit as usize].fetch_add(1, Relaxed);
+    }
+}
+
+/// An exit that could have linked and did not — because its probe declined, or
+/// because `ROSETTA3_NO_BLOCK_LINK` meant it carried none.
+///
+/// Free, and it is the figure block linking is actually judged on. A linked exit
+/// never reaches the run loop, so counting the ones that do needs no counter on
+/// the path the mechanism exists to shorten — which is why this can be per kind
+/// where [`record_linked_entry`] cannot be at all under a pinned ABI.
+pub fn record_probe_miss(exit: Exit) {
+    if exit.linkable() && enabled() {
+        PROBE_MISSES[exit as usize].fetch_add(1, Relaxed);
     }
 }
 
@@ -337,6 +376,41 @@ pub fn report() {
                 .collect::<Vec<_>>()
                 .join("  "),
         );
+        // Per kind, because a whole-program share hides the failure that matters: a
+        // change that stops `ret` linking while leaving direct calls alone still
+        // reads well in aggregate. The *denominator* is what a pinned ABI cannot
+        // supply — `EXITS` then counts only what came back, so a share would read
+        // 100% and mean nothing. Counts there, shares where they are real.
+        let mut declined: Vec<(u64, u64, &str)> = Exit::ALL
+            .iter()
+            .filter(|e| e.linkable())
+            .map(|&e| {
+                (
+                    PROBE_MISSES[e as usize].load(Relaxed),
+                    EXITS[e as usize].load(Relaxed),
+                    e.label(),
+                )
+            })
+            .filter(|&(missed, total, _)| missed > 0 || total > 0)
+            .collect();
+        declined.sort_by_key(|&(_, total, _)| std::cmp::Reverse(total));
+        if !declined.is_empty() {
+            let shares = crate::jit::pinned_link_abi().is_none();
+            eprintln!(
+                "rosetta3: stats  probes declined  {}",
+                declined
+                    .iter()
+                    .map(|(missed, total, l)| match shares {
+                        true => format!(
+                            "{l} {:.2}% of {total}",
+                            100.0 * *missed as f64 / (*total).max(1) as f64
+                        ),
+                        false => format!("{l} {missed}"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("  "),
+            );
+        }
     }
     // Whether the import stubs did anything, which is three questions and not
     // one. See [`crate::trampoline::counts`].

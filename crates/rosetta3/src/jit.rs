@@ -17,6 +17,8 @@ pub const DEAD_FLAGS_ENV: &str = "ROSETTA3_DEAD_FLAGS";
 pub const NO_BLOCK_LINK_ENV: &str = "ROSETTA3_NO_BLOCK_LINK";
 /// Turns [`pinned_link_abi`] off, leaving links resolved by the host.
 pub const NO_PINNED_LINK_ENV: &str = "ROSETTA3_NO_PINNED_LINK";
+/// Gives each exit site its own link probe instead of sharing one per region.
+pub const INLINE_LINK_PROBES_ENV: &str = "ROSETTA3_INLINE_LINK_PROBES";
 /// Replaces the pinned register set: a comma-separated list of x86-64 register
 /// names, e.g. `ROSETTA3_PINNED_REGS=rsp,rax,rdi,rsi,rbp`.
 pub const PINNED_REGS_ENV: &str = "ROSETTA3_PINNED_REGS";
@@ -287,6 +289,20 @@ pub fn block_linking() -> bool {
             }
         },
     };
+    *ON
+}
+
+/// Whether each exit site carries its own probe — microlift's
+/// `LifterConfig::inline_link_probes`.
+///
+/// **Off**, because it was measured and it did not pay: it folds the probe's slot
+/// arithmetic into an immediate but leaves the wall clock where it was, and costs
+/// 2.0% more host code. See the field's own note in microlift. The knob is here
+/// because the reason it did not pay is a property of this host's indirect
+/// predictor, which a program with a larger working set could contradict.
+pub fn inline_link_probes() -> bool {
+    #[dynamic]
+    static ON: bool = !boolean_env(INLINE_LINK_PROBES_ENV, false, "probes stay shared");
     *ON
 }
 

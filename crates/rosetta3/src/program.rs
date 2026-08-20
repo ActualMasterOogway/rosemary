@@ -13,7 +13,7 @@ use machish::spec::arch::X86_64;
 use microlift::arch::x86_64::context::RegisterContext;
 use microlift::core::exit::MemorySegment;
 use microlift::core::specialize::Specialization;
-use microlift::core::{AddressMode, Atomic128Mode, LifterConfig};
+use microlift::core::{AddressMode, Atomic128Mode, LifterConfig, VmResumptionPoints};
 
 use crate::abi::{AbiError, Classification, Lookup};
 
@@ -243,6 +243,83 @@ impl HostProviders {
     }
 }
 
+/// Everything a lift is configured with that does not depend on which program is
+/// being lifted: the host's own capabilities, this runtime's knobs, and the two
+/// resumption settings.
+///
+/// One definition rather than two, because a tool that dumps translations has to
+/// lift under the same settings a run does — and a copy of this list that drifts on
+/// `address_mode` produces code no run of this runtime executes.
+pub fn lifter_config_base() -> LifterConfig {
+    // Host-specific, so it is the half of the optimisation setting that
+    // belongs to the lift rather than to the lowering — see [`crate::jit`].
+    let use_vector_xmm = crate::jit::opt_level().host_specific() && {
+        #[cfg(target_arch = "aarch64")]
+        {
+            std::arch::is_aarch64_feature_detected!("neon")
+        }
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            std::arch::is_x86_feature_detected!("sse2")
+        }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86", target_arch = "x86_64")))]
+        {
+            false
+        }
+    };
+    // `CMPXCHG16B`, and the one setting here that is a correctness decision
+    // rather than a tuning one.
+    let atomic128 = {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            if std::arch::is_x86_feature_detected!("cmpxchg16b") {
+                Atomic128Mode::Native
+            } else {
+                Atomic128Mode::Exit
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("lse") {
+                Atomic128Mode::Native
+            } else {
+                Atomic128Mode::Exit
+            }
+        }
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            Atomic128Mode::Exit
+        }
+    };
+    let specialization = if crate::jit::opt_level().host_specific() {
+        Specialization::host()
+    } else {
+        Specialization::generic()
+    };
+    LifterConfig {
+        interpreter_fallback: true,
+        use_vector_xmm,
+        outline_helpers: true,
+        address_mode: AddressMode::Direct,
+        atomic128,
+        specialization,
+        eliminate_dead_flags: crate::jit::eliminate_dead_flags(),
+        resumption: VmResumptionPoints::ExitOnly,
+        // Declaring the few entry addresses rather than making every instruction
+        // boundary an arm: over the same 128 KiB of a real program's `__text`, in
+        // 4 KiB pieces, that is 1.42s of compile time against 19.36s.
+        strict_resume: true,
+        // Let a region resolve its own successor out of this thread's
+        // window instead of returning to the run loop to have the same
+        // address looked up.
+        block_link: crate::jit::block_linking().then(crate::thread::link_config),
+        inline_link_probes: crate::jit::inline_link_probes(),
+        // `exit_trampoline_address` is left at its default `None`, and that
+        // is a decision rather than an omission.
+        ..LifterConfig::default()
+    }
+}
+
 impl<M: Regions> Program<M> {
     /// Load and link into a caller-supplied address space.
     pub fn load_into(
@@ -364,68 +441,7 @@ impl<M: Regions> Program<M> {
 
     /// [`Program::lifter_config`], with the promotion decision made explicitly.
     pub fn lifter_config_with(&self, policy: ImportPolicy) -> LifterConfig {
-        // Host-specific, so it is the half of the optimisation setting that
-        // belongs to the lift rather than to the lowering — see [`crate::jit`].
-        let use_vector_xmm = crate::jit::opt_level().host_specific() && {
-            #[cfg(target_arch = "aarch64")]
-            {
-                std::arch::is_aarch64_feature_detected!("neon")
-            }
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            {
-                std::arch::is_x86_feature_detected!("sse2")
-            }
-            #[cfg(not(any(target_arch = "aarch64", target_arch = "x86", target_arch = "x86_64")))]
-            {
-                false
-            }
-        };
-        // `CMPXCHG16B`, and the one setting here that is a correctness decision
-        // rather than a tuning one.
-        let atomic128 = {
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            {
-                if std::arch::is_x86_feature_detected!("cmpxchg16b") {
-                    Atomic128Mode::Native
-                } else {
-                    Atomic128Mode::Exit
-                }
-            }
-            #[cfg(target_arch = "aarch64")]
-            {
-                if std::arch::is_aarch64_feature_detected!("lse") {
-                    Atomic128Mode::Native
-                } else {
-                    Atomic128Mode::Exit
-                }
-            }
-            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
-            {
-                Atomic128Mode::Exit
-            }
-        };
-        let specialization = if crate::jit::opt_level().host_specific() {
-            Specialization::host()
-        } else {
-            Specialization::generic()
-        };
-        let mut config = LifterConfig {
-            interpreter_fallback: true,
-            use_vector_xmm,
-            outline_helpers: true,
-            address_mode: AddressMode::Direct,
-            atomic128,
-            specialization,
-            eliminate_dead_flags: crate::jit::eliminate_dead_flags(),
-            // Let a region resolve its own successor out of this thread's
-            // window instead of returning to the run loop to have the same
-            // address looked up.
-            block_link: crate::jit::block_linking().then(crate::thread::link_config),
-            // `exit_trampoline_address` is left at its default `None`, and that
-            // is a decision rather than an omission.
-            ..LifterConfig::default()
-        };
-
+        let mut config = lifter_config_base();
         // A mapped region is a whole image's reservation, spanning segments of
         // both kinds, so it is cut at the writable segments' edges rather than
         // handed over whole.
