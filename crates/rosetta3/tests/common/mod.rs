@@ -2148,7 +2148,7 @@ pub fn run_guest(path: &str, args: &[&str]) -> (Option<i32>, String, String) {
 /// [`run_guest`], with environment variables set for the driver.
 ///
 /// Most of what this runtime can be asked to do differently is asked for that
-/// way - see `ROSETTA3_*` in `docs/ROADMAP.md`.
+/// way, through a `ROSETTA3_*` variable.
 pub fn run_guest_env(
     env: &[(&str, &str)],
     path: &str,

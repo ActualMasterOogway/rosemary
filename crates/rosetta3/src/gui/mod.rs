@@ -116,7 +116,7 @@ pub(crate) fn pressed(key: hotkey::Key) {
         hotkey::Key::Stats => eprintln!(
             "rosetta3: gui  region-entry counting {} (ROSETTA3_STATS)",
             match crate::stats::set_enabled(!crate::stats::enabled()) {
-                true => "on - this costs the guest measurably; see docs/PROFILING.md",
+                true => "on - this costs the guest measurably",
                 false => "off",
             },
         ),

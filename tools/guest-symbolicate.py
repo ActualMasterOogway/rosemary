@@ -50,7 +50,7 @@ BACKTRACE_SCHEMAS = (
 )
 
 # Processor Trace is deliberately not in that list, and the reason is a measured
-# one rather than an oversight - see `docs/PROFILING.md`. Its tables do not
+# one rather than an oversight. Its tables do not
 # carry runtime addresses at all. A location in `processor-trace-intervals` is a
 # `<text-location>` holding a **binary UUID and a Mach-O vm offset**, which is a
 # symbol resolved at record time and not an address this map could be joined
@@ -212,7 +212,7 @@ def main():
                 "trace was recorded, not runtime addresses - so there is nothing here to\n"
                 "look up, and every translation is folded into one unnamed sentinel.\n"
                 "Record 'Time Profiler' or 'CPU Counters' to join, and use\n"
-                "ROSETTA3_PROFILE=1 for guest-attributed time. See docs/PROFILING.md.")
+                "ROSETTA3_PROFILE=1 for guest-attributed time.")
         if not schema:
             sys.exit("no backtrace-bearing table in this trace; pass --xpath. "
                      f"It has: {', '.join(sorted(set(have)))}")

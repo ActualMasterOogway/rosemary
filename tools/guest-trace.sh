@@ -23,8 +23,7 @@
 #                     so every translation folds into one unnamed sentinel. It
 #                     also needs Enable Processor Trace in System Settings ->
 #                     Privacy & Security -> Developer Tools, and the driver
-#                     re-signed with tools/get-task-allow.plist. See
-#                     docs/PROFILING.md before spending time on it.
+#                     re-signed with tools/get-task-allow.plist.
 #
 # None of them symbolicate JIT code, which is the whole reason the map exists.
 

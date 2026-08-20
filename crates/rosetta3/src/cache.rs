@@ -117,9 +117,8 @@ fn follow_links(ctx: &mut RegisterContext) -> ExitReason {
             row.guest_pc, ctx.rip,
             "a link was taken for an address the region did not commit"
         );
-        // Both counters, so that the two figures `docs/HOTSPOTS.md` is written
-        // against - the entry *rate* and the exit *mix* - keep counting the
-        // events they always counted.
+        // Both counters, so that the entry *rate* and the exit *mix* keep
+        // counting the events they always counted.
         if crate::stats::enabled() {
             crate::stats::record_exit(crate::vm::classify(
                 ExitReason::try_from(ctx.exit_reason).unwrap_or(ExitReason::None),
@@ -310,7 +309,8 @@ struct Published {
     /// The widest `end - start` any translation in [`regions`](Self::regions) has,
     /// which is how far below `pc` [`CodeCache::lookup`] has to look. Without it
     /// the scan for an address no region covers - the case that then lifts - walks
-    /// every region below it, and that walk is 2.2% of `docs/HOTSPOTS.md`.
+    /// every region below it, and that walk is 2.2% of a steady-state A Hat in
+    /// Time profile.
     max_span: u64,
     /// Translations displaced from [`regions`](Self::regions) by a re-lift of the same
     /// address, kept so their compiled code stays mapped.

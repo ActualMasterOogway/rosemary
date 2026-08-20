@@ -830,7 +830,7 @@ impl Vm {
             // and `Program::import_at` alone was 15.6% of running time -
             // answering "yes" 5,826 times out of 3.04 billion. A `dlopen` cannot
             // break the induction, because it registers the new image's imports
-            // as part of loading it. See `docs/HOTSPOTS.md`.
+            // as part of loading it.
             let mut missed = false;
             let translation = match state.code().get(pc) {
                 Some(hit) => hit,

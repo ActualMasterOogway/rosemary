@@ -23,7 +23,7 @@ libc.workspace = true
 iced-x86 = "1"
 # A path dependency, deliberately outside this workspace: `machish` must stay
 # publishable and free of any microlift coupling, so the two only ever meet
-# here. See `docs/ROADMAP.md`, "the microlift seam".
+# here.
 microlift = { path = "../../../microlift", features = ["disasm"] }
 # Host->guest thunks are compiled, not assembled: a trampoline is a handful of
 # Cranelift IR instructions, and letting the compiler emit the prologue and the

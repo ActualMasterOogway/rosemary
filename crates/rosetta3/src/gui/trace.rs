@@ -140,7 +140,7 @@ fn stop(state: &mut State) {
         // A non-zero exit is where the two well-known refusals land.
         Ok(status) => say(
             state,
-            format!("xctrace exited {status}: see its message above, and docs/PROFILING.md"),
+            format!("xctrace exited {status}: see its message above"),
             color::ALERT,
         ),
         Err(e) => say(

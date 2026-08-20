@@ -1,11 +1,10 @@
 //! A running guest says where its time went, in guest addresses.
 //!
-//! The gap this closes is the one [M8.1](../../../docs/ROADMAP.md) ended on: a
-//! 2.4× microbenchmark win that the application it was built for could not
-//! detect, because a sample inside translated code lands in an anonymous
-//! mapping with no image, no symbol and nothing to attribute it to. Every
-//! remaining performance candidate was a plausible story with no measurement
-//! behind it.
+//! The gap this closes is the one M8.1 ended on: a 2.4x microbenchmark win
+//! that the application it was built for could not detect, because a sample
+//! inside translated code lands in an anonymous mapping with no image, no
+//! symbol and nothing to attribute it to. Every remaining performance
+//! candidate was a plausible story with no measurement behind it.
 //!
 //! What each test would falsify:
 //!
