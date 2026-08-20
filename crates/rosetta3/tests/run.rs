@@ -100,6 +100,22 @@ fn a_destructor_runs_at_exit_in_one_list_with_the_guests_atexit_handler() {
 }
 
 #[test]
+fn a_callback_is_translated_after_the_main_threads_tls_is_gone() {
+    // macOS destroys the main thread's TLS inside `exit`, so an exit handler
+    // that hands the host a callback it has never seen makes the runtime lift
+    // and compile from a thread where every Rust `thread_local!` is already
+    // gone. Cranelift's `timing` feature is one — hence the feature list in
+    // `Cargo.toml`. Failure is exit status 70 and no `late=` line.
+    let Some(path) = common::late_callback_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
+    let (status, out, err) = run_guest(&path, &[]);
+
+    assert_eq!(status, Some(0), "stderr: {err}");
+    assert_eq!(out, "main\nlate=12345\n", "stderr: {err}");
+}
+
+#[test]
 fn fast_and_slow_imports_produce_the_same_program() {
     // Milestone 2 claimed promotion is an optimisation; this is the end-to-end
     // form of that claim. `--slow` sends every import through a VM exit and the

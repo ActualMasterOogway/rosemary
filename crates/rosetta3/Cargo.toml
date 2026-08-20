@@ -30,7 +30,11 @@ microlift = { path = "../../../microlift", features = ["disasm"] }
 # argument moves is what keeps this crate free of hand-written arm64. Same
 # version as `microlift`'s, deliberately — the `Function` built here is handed
 # to `microlift::backend::CraneliftBackend`, so the two must be one crate.
-cranelift-codegen = { git = "https://github.com/microlift/wasmtime", branch = "microlift_experimental", version = "0.136.0-dev" }
+# `timing` is left out of the default features on purpose: it is the only one
+# carrying a `thread_local!`, and macOS destroys the main thread's TLS inside
+# `exit`, so a pass timer read from a guest `atexit` handler panics. Features
+# unify across the graph, so `microlift` drops it too.
+cranelift-codegen = { git = "https://github.com/microlift/wasmtime", branch = "microlift_experimental", version = "0.136.0-dev", default-features = false, features = ["std", "unwind", "host-arch"] }
 cranelift-frontend = {git = "https://github.com/microlift/wasmtime", branch = "microlift_experimental", version = "0.136.0-dev" }
 # Only for the host's `TargetFrontendConfig` (see `jit::frontend_config`), which
 # the frontend needs to describe the machine a `Function` is being built for.

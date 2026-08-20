@@ -296,6 +296,35 @@ int main(void) {
 }
 "#;
 
+/// A guest callback the runtime first sees *inside* the host's `exit`.
+///
+/// `by_value` is called from nowhere but the exit handler, so its thunk — and
+/// the translation behind it — is made after macOS has torn the main thread's
+/// TLS down. Anything in the compile path holding a Rust `thread_local!` panics
+/// there, which is what
+/// [`a_callback_is_translated_after_the_main_threads_tls_is_gone`] fails on.
+pub const LATE_CALLBACK_C: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+
+static int by_value(const void *a, const void *b) {
+    int x = *(const int *)a, y = *(const int *)b;
+    return (x > y) - (x < y);
+}
+
+static void late(void) {
+    int v[5] = {4, 2, 5, 1, 3};
+    qsort(v, 5, sizeof v[0], by_value);
+    printf("late=%d%d%d%d%d\n", v[0], v[1], v[2], v[3], v[4]);
+}
+
+int main(void) {
+    atexit(late);
+    puts("main");
+    return 0;
+}
+"#;
+
 /// Milestone 4's thread program, written so each claim can fail on its own.
 ///
 /// - Four threads each increment a `_Thread_local` ten times and print what
@@ -1882,6 +1911,14 @@ pub fn dtor_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     BUILT
         .get_or_init(|| build_x86_64("dtors", DTOR_C, &[]))
+        .clone()
+}
+
+/// Build [`LATE_CALLBACK_C`], or `None` if this host cannot.
+pub fn late_callback_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("late_callback", LATE_CALLBACK_C, &[]))
         .clone()
 }
 
