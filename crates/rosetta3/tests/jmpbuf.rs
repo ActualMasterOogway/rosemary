@@ -14,7 +14,7 @@
 //! - **the value** - including C's rule that a zero arrives as one.
 //! - **both spellings** - `__setjmp` and `_sigsetjmp` are separate imports, and
 //!   a runtime that shimmed only `_setjmp` would refuse them by name.
-//! - **the refusal** - a `longjmp` out of a host→guest callback names the case
+//! - **the refusal** - a `longjmp` out of a host->guest callback names the case
 //!   instead of restoring a context over host frames that would never unwind.
 //! - **slow and fast agree** - `--slow` sends every promotable import through
 //!   the marshaller. `setjmp` must be a VM exit under *both* policies, because

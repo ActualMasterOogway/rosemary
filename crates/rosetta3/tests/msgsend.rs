@@ -261,7 +261,7 @@ fn the_slow_import_policy_sends_the_same_messages() {
 
 /// The **host** calls a guest method with an aggregate by value.
 ///
-/// The direction every other aggregate test here has backwards. Guest→host is a
+/// The direction every other aggregate test here has backwards. Guest->host is a
 /// marshaller reading the guest's registers; this is a compiled trampoline
 /// placing AAPCS64's `v0`–`v3` where SysV AMD64 expects an `NSRect` - which for
 /// thirty-two bytes is the guest's **stack**, not any register at all.

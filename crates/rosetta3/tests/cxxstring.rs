@@ -235,7 +235,7 @@ fn the_slow_path_agrees_too() {
 ///
 /// Note what it does not say. It does not say the symbol is shimmed; the shim
 /// that used to own this surface is gone, and a string operation is now
-/// guest→guest, dispatched inside a library the guest linked against. That is
+/// guest->guest, dispatched inside a library the guest linked against. That is
 /// the whole change.
 #[test]
 fn every_string_call_lands_in_the_vendored_libcxx() {

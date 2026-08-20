@@ -147,9 +147,9 @@ pub struct ThreadState {
     stack: GuestStack,
     /// Where the next nested guest entry should put its first frame.
     pub(crate) rsp: Cell<u64>,
-    /// How many host→guest callbacks are live on this thread.
+    /// How many host->guest callbacks are live on this thread.
     pub(crate) depth: Cell<usize>,
-    /// An error raised inside a host→guest callback, which cannot be returned through
+    /// An error raised inside a host->guest callback, which cannot be returned through
     /// the host function that caused it.
     pub(crate) pending: RefCell<Option<VmError>>,
     /// Which entry into guest code is live on this thread.

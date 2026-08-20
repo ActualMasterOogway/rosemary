@@ -785,7 +785,7 @@ fn send(
     }
 
     let (imp, signature, variadic, stret) = match &plan.to {
-        // Guest → guest: the trampoline's whole job is the jump, and the
+        // Guest -> guest: the trampoline's whole job is the jump, and the
         // guest's registers are already the callee's. A `super` send arrived
         // with the `objc_super` structure in `rdi`, and the method is called
         // with the receiver.
@@ -801,7 +801,7 @@ fn send(
         } => (*imp, signature, *variadic, *stret),
     };
 
-    // Guest → host, with the arguments the method's own encoding does not
+    // Guest -> host, with the arguments the method's own encoding does not
     // describe dealt with first.
     match variadic {
         // A nil-terminated object list has no format to fold its arguments

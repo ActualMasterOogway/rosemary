@@ -74,7 +74,7 @@ pub fn build_x86_64(name: &str, source: &str, extra: &[&str]) -> Option<String> 
 ///   mechanism (and, at default `-D_FORTIFY_SOURCE`, they are imported under
 ///   their `___chk` names, which is what a real guest looks like).
 /// - `atexit` takes a **guest function pointer**, so it must be refused until
-///   the host→guest thunk exists in M3.
+///   the host->guest thunk exists in M3.
 /// - `strlen`, `abs`, `puts` are the ordinary fast-callable case.
 ///
 /// No `<math.h>`, and the `%f` argument is a constant: `sqrt` compiles to
@@ -217,7 +217,7 @@ int main(int argc, char **argv) {
 /// Milestone 3's callback program: a guest comparator called by the *host's*
 /// `qsort`, and a guest handler called by the host's `exit`.
 ///
-/// Both are host→guest calls, and both are falsifiable: a comparator that is
+/// Both are host->guest calls, and both are falsifiable: a comparator that is
 /// never really called leaves the array unsorted, and a thunk that is called
 /// with the wrong arguments sorts it wrongly. `atexit` additionally pins down
 /// *when* - its output has to come after `main`'s.
@@ -470,7 +470,7 @@ int main(int argc, char **argv) {
 /// A mutex-protected shared counter (four threads, a thousand increments each,
 /// so a lost update shows up as a wrong total), `pthread_once` with a guest
 /// initialiser, and `pthread_key_create` with a guest destructor that libpthread
-/// calls on thread teardown - three host→guest callbacks the host invokes at
+/// calls on thread teardown - three host->guest callbacks the host invokes at
 /// three quite different moments.
 pub const PTHREAD_SYNC_C: &str = r#"
 #include <pthread.h>
@@ -823,7 +823,7 @@ pub fn setjmp_fixture() -> Option<String> {
         .clone()
 }
 
-/// Milestone 5's refusal fixture: a `longjmp` out of a host→guest callback.
+/// Milestone 5's refusal fixture: a `longjmp` out of a host->guest callback.
 ///
 /// The comparator is called by the *host's* `qsort`, so the `setjmp` it jumps
 /// back to is in an outer VM entry with host frames in between. Restoring the
@@ -891,7 +891,7 @@ pub fn build_objc(name: &str, source: &str) -> Option<String> {
 ///
 /// - **`+load`** runs before `main`, superclass first, and the counter says so:
 ///   11 means both ran and in that order, 10 means the superclass's did not.
-/// - **guest → guest** dispatch, which is a jump rather than a call
+/// - **guest -> guest** dispatch, which is a jump rather than a call
 ///   (`legs`, `says`).
 /// - **overriding**, where `[d says]` and `[[Animal alloc] ...] says]` must
 ///   differ - a runtime that resolved the `IMP` on the wrong class prints the
@@ -900,7 +900,7 @@ pub fn build_objc(name: &str, source: &str) -> Option<String> {
 ///   `NSObject`'s. `objc_msgSendSuper2` naming the wrong class recurses forever.
 /// - **a `double` return and a pointer argument**, so the marshaller is
 ///   exercised in both register classes.
-/// - **guest → host** dispatch by type encoding: `isKindOfClass:`,
+/// - **guest -> host** dispatch by type encoding: `isKindOfClass:`,
 ///   `respondsToSelector:`, `stringWithUTF8String:`, `UTF8String`, `length`.
 /// - **class identity in both directions**: `[d class] == [Dog class]` is only
 ///   true if a host `Class` coming back is translated to the address the guest
@@ -1024,7 +1024,7 @@ pub fn objc_messages_fixture(name: &str, extra: &[&str]) -> Option<String> {
 /// A guest method the **host** calls with an aggregate by value.
 ///
 /// The direction M6.3 did not cover and DELTARUNE found. Every other aggregate
-/// test in this suite is guest→host - the guest sends `rectValue` and the
+/// test in this suite is guest->host - the guest sends `rectValue` and the
 /// runtime marshals the result back. This is the mirror, and it is a different
 /// piece of machinery: AAPCS64 hands a callback an `NSRect` in `v0`–`v3`, SysV
 /// AMD64 classifies the same rectangle MEMORY, and the guest therefore reads it
@@ -1103,7 +1103,7 @@ pub fn objc_host_aggregate_fixture() -> Option<String> {
         .clone()
 }
 
-/// A guest method whose encoding this runtime's decoder refuses, sent guest→guest.
+/// A guest method whose encoding this runtime's decoder refuses, sent guest->guest.
 ///
 /// `encoding::signature` will not classify a union - its members overlap, so its
 /// eightbytes are undecidable - and [`crate::objc::add_method`] installs such a method
@@ -1211,7 +1211,7 @@ pub fn objc_refusals_fixture() -> Option<String> {
 ///   runtime that entered the handler without the cleanups prints them late or
 ///   not at all.
 /// - **the object's own destructor** - run by `__cxa_end_catch`, which is a
-///   host→guest call from inside a shim.
+///   host->guest call from inside a shim.
 /// - **nested `try`** - the inner handler must *not* take an exception of the
 ///   wrong type, which is the difference between matching a type and matching
 ///   the first clause found.
@@ -1340,7 +1340,7 @@ pub fn unwind_refusals_fixture() -> Option<String> {
 /// Milestone 5's signal program.
 ///
 /// The kernel calling a guest function, which is the third distinct caller of a
-/// host→guest thunk after `qsort` and `pthread_create` - and the first that
+/// host->guest thunk after `qsort` and `pthread_create` - and the first that
 /// arrives without the runtime being anywhere nearby.
 ///
 /// - Both installers, because they substitute the handler differently:

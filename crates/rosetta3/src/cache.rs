@@ -571,7 +571,7 @@ struct Compiled {
     code: *const u8,
     /// What a block-link row names - see [`Translation::code`].
     link_target: *const u8,
-    /// Host offset → guest instruction, so a fault inside this code can name
+    /// Host offset -> guest instruction, so a fault inside this code can name
     /// the instruction rather than the region. See [`crate::fault`].
     map: microlift::core::srcloc::GuestCodeMap,
     /// Guest bytes retained only so the opt-in LLDB listing can show x86-64.

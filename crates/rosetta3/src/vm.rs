@@ -48,13 +48,13 @@ pub enum VmError {
     },
     /// The guest stack could not be reserved or written.
     Stack { source: machish::Error },
-    /// A host→guest thunk could not be built.
+    /// A host->guest thunk could not be built.
     Thunk { guest: u64, reason: String },
     /// A guest callback the *host* invoked failed partway through.
     Callback { guest: u64, reason: String },
     /// The program could not be loaded or linked.
     Load { path: String, reason: String },
-    /// Guest execution nested deeper than [`MAX_DEPTH`] host→guest callbacks.
+    /// Guest execution nested deeper than [`MAX_DEPTH`] host->guest callbacks.
     TooDeep { pc: u64 },
     /// The selected execution backend does not implement what this image needs.
     Unsupported { what: String },
@@ -246,7 +246,7 @@ impl From<AbiError> for VmError {
     }
 }
 
-/// How many host→guest callbacks may nest before the runtime calls it runaway.
+/// How many host->guest callbacks may nest before the runtime calls it runaway.
 pub const MAX_DEPTH: usize = 64;
 
 /// Guest memory, as a value that can be handed to a shim without borrowing the VM.
@@ -1271,7 +1271,7 @@ impl Vm {
         host
     }
 
-    /// Record an error raised inside a host→guest callback, on the thread it happened
+    /// Record an error raised inside a host->guest callback, on the thread it happened
     /// on.
     pub(crate) fn set_pending(&self, err: VmError) {
         let Some(state) = crate::thread::current() else {

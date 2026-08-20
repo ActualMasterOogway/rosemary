@@ -13,7 +13,7 @@ pub const CONSTRUCT: &str = ".cxx_construct";
 #[allow(dead_code)]
 pub const DESTRUCT: &str = ".cxx_destruct";
 
-/// Host `Class` → the `.cxx_construct` this runtime installed **on that exact class**.
+/// Host `Class` -> the `.cxx_construct` this runtime installed **on that exact class**.
 static CONSTRUCTORS: RwLock<Option<HashMap<usize, usize>>> = RwLock::new(None);
 
 /// Why a class could not be given constructors.

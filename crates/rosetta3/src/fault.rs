@@ -13,7 +13,7 @@ struct Placed {
     guest: (u64, u64),
     /// The guest `rip` the region was lifted to be entered at.
     lifted_for: u64,
-    /// Host offset → guest instruction, from microlift's own source locations.
+    /// Host offset -> guest instruction, from microlift's own source locations.
     map: Vec<GuestCodeRange>,
 }
 

@@ -1,6 +1,6 @@
 //! Milestone 5: signal dispositions, and the kernel calling a guest function.
 //!
-//! The third distinct caller of a host→guest thunk after `qsort` and
+//! The third distinct caller of a host->guest thunk after `qsort` and
 //! `pthread_create`, and the first that arrives with the runtime nowhere nearby:
 //! the kernel pushes a frame onto whichever thread it picked and calls the
 //! handler. What each test would falsify:

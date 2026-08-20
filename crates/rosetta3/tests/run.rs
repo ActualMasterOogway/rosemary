@@ -60,7 +60,7 @@ fn arguments_reach_the_guest() {
 
 #[test]
 fn the_host_calls_a_guest_comparator_and_a_guest_exit_handler() {
-    // The host→guest thunk, from both directions it is reached from: `qsort`
+    // The host->guest thunk, from both directions it is reached from: `qsort`
     // calls back during the call, `atexit`'s handler after `main` has returned
     // and from inside the host's own `exit`.
     let Some(path) = common::qsort_fixture() else {

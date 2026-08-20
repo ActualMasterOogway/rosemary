@@ -104,7 +104,7 @@ static REGISTER: Mutex<()> = Mutex::new(());
 /// `code` is where the compiled arm64 landed, `guest_start..guest_end` the
 /// x86-64 it was lifted from, `image` that region named against its image (the
 /// `libfoo.dylib+0x1234` [`crate::program::Program::locate`] produces), `bytes`
-/// the guest instructions themselves, and `map` microlift's host-offset →
+/// the guest instructions themselves, and `map` microlift's host-offset ->
 /// guest-address table.
 pub fn register(
     code: u64,
@@ -369,7 +369,7 @@ fn dwarf(
 #[derive(Clone)]
 struct Listed {
     path: Arc<PathBuf>,
-    /// Guest VA → line number.
+    /// Guest VA -> line number.
     lines: Arc<HashMap<u64, u32>>,
 }
 

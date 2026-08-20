@@ -1,6 +1,6 @@
 //! M6.2 acceptance: the guest's classes, realized in the host's runtime.
 //!
-//! The direction under test is **host → guest**, and that is the whole point.
+//! The direction under test is **host -> guest**, and that is the whole point.
 //! Every assertion here messages a guest class from *this* process's own
 //! `objc_msgSend` - the host runtime looks the selector up, finds an `IMP`, and
 //! calls it as native arm64. That `IMP` is one of this runtime's thunks, so an

@@ -1,4 +1,4 @@
-//! Host→guest calls: a native arm64 trampoline per guest function pointer.
+//! Host->guest calls: a native arm64 trampoline per guest function pointer.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;

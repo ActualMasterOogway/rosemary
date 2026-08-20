@@ -19,7 +19,7 @@ pub struct FunctionAbi {
     ///
     /// A pointer is a pointer to the marshaller; this is the one place the distinction
     /// matters, because handing the host an x86-64 address it will call as arm64 is the
-    /// failure mode host→guest thunks exist to prevent.
+    /// failure mode host->guest thunks exist to prevent.
     pub callbacks: &'static [u8],
 }
 

@@ -175,10 +175,10 @@ struct Counts {
     running: u64,
     /// Samples taken on a thread that was parked. Counted and reported, never mixed in.
     blocked: u64,
-    /// Guest instruction address → samples. The histogram this module exists
+    /// Guest instruction address -> samples. The histogram this module exists
     /// for.
     guest: HashMap<u64, u64>,
-    /// First guest address of a region → samples anywhere in its translation, including
+    /// First guest address of a region -> samples anywhere in its translation, including
     /// the parts no guest instruction was attributed to.
     region: HashMap<u64, u64>,
     /// Samples inside a translation's own attributed extent that no guest instruction
@@ -190,7 +190,7 @@ struct Counts {
     /// Samples in executable memory belonging to neither a loaded image nor a
     /// translation.
     unknown: u64,
-    /// Host symbol start address → what was found there.
+    /// Host symbol start address -> what was found there.
     host: HashMap<u64, HostSite>,
     /// Samples in this runtime's own code, and in the host's libraries.
     runtime: u64,

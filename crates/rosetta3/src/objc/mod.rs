@@ -82,12 +82,12 @@ pub struct Stats {
 /// The guest's classes, as the host runtime now knows them.
 #[derive(Clone, Debug)]
 pub struct ObjcRuntime {
-    /// Guest `objc_class` VA → the host `Class` standing for it.
+    /// Guest `objc_class` VA -> the host `Class` standing for it.
     to_host: HashMap<u64, u64>,
     /// The reverse, so a `Class` coming *back* from the host runtime can be handed to
     /// the guest as the address the guest already has.
     to_guest: HashMap<u64, u64>,
-    /// Guest `protocol_t` VA → host `Protocol *`.
+    /// Guest `protocol_t` VA -> host `Protocol *`.
     protocols: HashMap<u64, u64>,
     /// The half-open bounds of `to_host`'s keys, and of `to_guest`'s.
     ///

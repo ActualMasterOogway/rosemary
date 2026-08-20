@@ -319,7 +319,7 @@ pub enum Classification {
     /// a signature this marshaller cannot inline.
     Slow,
     /// Known and deliberately not callable: data read through its slot, or a
-    /// callback whose shape the host→guest thunk cannot carry.
+    /// callback whose shape the host->guest thunk cannot carry.
     Refused(&'static str),
     /// Nothing describes it. The one outcome the acceptance test forbids.
     Unknown,
