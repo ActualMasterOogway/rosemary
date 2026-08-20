@@ -114,6 +114,8 @@ pub struct Program<M: Regions = BufferSpace> {
     pub unwind: machish::image::UnwindInfo,
     /// The same sites, keyed by the address they *resolved to*.
     imports_by_target: AddrMap<ImportSite>,
+    /// One bit per hashed key of [`imports`](Self::imports)
+    import_filter: Box<[u64]>,
 }
 
 /// A hasher for maps keyed by a guest or host **address**.
@@ -148,6 +150,23 @@ pub type AddrHash = std::hash::BuildHasherDefault<AddrHasher>;
 
 /// A map from an address to whatever it names.
 pub type AddrMap<V> = HashMap<u64, V, AddrHash>;
+
+/// The bit `va` claims in a filter of `words` words.
+fn filter_bit(va: u64, words: usize) -> usize {
+    let mixed = va.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 24;
+    (mixed as usize) & (words * 64 - 1)
+}
+
+/// A filter over `keys`, sized to eight bits per key.
+fn build_import_filter(keys: impl Iterator<Item = u64>, count: usize) -> Box<[u64]> {
+    let words = (count.max(1) / 8 + 1).next_power_of_two();
+    let mut filter = vec![0u64; words];
+    for va in keys {
+        let bit = filter_bit(va, words);
+        filter[bit / 64] |= 1 << (bit % 64);
+    }
+    filter.into_boxed_slice()
+}
 
 /// One address microlift should treat as a call out of the guest.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -423,6 +442,8 @@ impl<M: Regions> Program<M> {
             }
         }
 
+        let import_filter = build_import_filter(imports.keys().copied(), imports.len());
+
         Ok(Program {
             report,
             memory,
@@ -431,6 +452,7 @@ impl<M: Regions> Program<M> {
             unwind,
             imports,
             imports_by_target,
+            import_filter,
         })
     }
 
@@ -666,11 +688,19 @@ impl<M: Regions> Program<M> {
 
     /// The import registered at `va`, if any.
     pub fn import_at(&self, va: u64) -> Option<&ImportSite> {
-        self.imports
-            .get(&va)
-            .or_else(|| crate::dyld::import_at(va))
+        if let Some(site) = self.may_import(va).then(|| self.imports.get(&va)).flatten() {
+            return Some(site);
+        }
+        crate::dyld::import_at(va)
             // And the synthetic addresses a trampoline jumps to.
             .or_else(|| crate::trampoline::import_at(va))
+    }
+
+    /// Whether [`import_filter`](Self::import_filter) has heard of `va`. A yes may be
+    /// a collision; a no is final.
+    fn may_import(&self, va: u64) -> bool {
+        let bit = filter_bit(va, self.import_filter.len());
+        self.import_filter[bit / 64] >> (bit % 64) & 1 != 0
     }
 
     /// What an imported symbol resolved to, by name.
@@ -749,4 +779,42 @@ fn lift_generated(va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
     }
     let code = slice_of(bytes, base, &region)?;
     Some((region, code))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_import_filter, filter_bit};
+
+    #[test]
+    fn the_filter_never_says_no_to_a_key() {
+        // Slot and stub addresses as they land: two clusters, one per section.
+        let keys: Vec<u64> = (0..8192u64)
+            .map(|n| 0x1_0000_2000 + n * 8)
+            .chain((0..8192u64).map(|n| 0x1_0100_0000 + n * 6))
+            .collect();
+        let filter = build_import_filter(keys.iter().copied(), keys.len());
+        for &va in &keys {
+            let bit = filter_bit(va, filter.len());
+            assert!(filter[bit / 64] >> (bit % 64) & 1 != 0, "{va:#x}");
+        }
+        // And says no often enough to be worth having.
+        let misses = (0..100_000u64)
+            .map(|n| 0x2_0000_0000 + n * 4)
+            .filter(|&va| {
+                let bit = filter_bit(va, filter.len());
+                filter[bit / 64] >> (bit % 64) & 1 == 0
+            })
+            .count();
+        assert!(
+            misses > 80_000,
+            "only {misses} of 100,000 non-imports rejected"
+        );
+    }
+
+    #[test]
+    fn a_program_with_no_imports_still_has_a_filter() {
+        let filter = build_import_filter(std::iter::empty(), 0);
+        assert!(!filter.is_empty());
+        assert_eq!(filter_bit(0x1234, filter.len()) / 64, 0);
+    }
 }

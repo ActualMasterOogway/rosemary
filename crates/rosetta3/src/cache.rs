@@ -1,6 +1,7 @@
 //! The code cache: guest addresses to native translations.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use machish::memory::Regions;
@@ -140,6 +141,153 @@ fn follow_links(ctx: &mut RegisterContext) -> ExitReason {
     ExitReason::try_from(ctx.exit_reason).unwrap_or(ExitReason::None)
 }
 
+/// Every address a published translation can be entered at, as an open-addressed
+/// table read without taking the cache's lock.
+///
+/// It stands in for a walk. Regions overlap, so a map keyed by start address can only
+/// answer "who can execute `pc`" by scanning back as far as the widest region reaches
+/// and asking each candidate, and one wide region makes that scan thousands of entries
+/// long: on Roblox the scan and the `BTreeMap` navigation under it were 27% of running
+/// time. A probe here is one dependent load.
+struct EntryIndex {
+    table: AtomicPtr<Table>,
+    /// Addresses in the live table. Written only by a lift, which holds the cache's
+    /// write lock and is therefore the only writer.
+    live: AtomicUsize,
+}
+
+struct Table {
+    mask: u64,
+    slots: Box<[Slot]>,
+}
+
+struct Slot {
+    pc: AtomicU64,
+    translation: AtomicPtr<Translation>,
+}
+
+/// A slot nothing has been written to. No guest address is `u64::MAX`.
+const EMPTY: u64 = u64::MAX;
+
+/// Guest addresses are page- and instruction-aligned in the low bits and identical in
+/// the high ones, so the index is taken from the *middle* of a multiply.
+fn mix(pc: u64) -> u64 {
+    pc.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 24
+}
+
+impl Table {
+    fn empty(capacity: usize) -> Box<Table> {
+        let capacity = capacity.next_power_of_two();
+        let mut slots = Vec::with_capacity(capacity);
+        slots.resize_with(capacity, || Slot {
+            pc: AtomicU64::new(EMPTY),
+            translation: AtomicPtr::new(std::ptr::null_mut()),
+        });
+        Box::new(Table {
+            mask: capacity as u64 - 1,
+            slots: slots.into_boxed_slice(),
+        })
+    }
+
+    fn get(&self, pc: u64) -> Option<*const Translation> {
+        let mut at = mix(pc) & self.mask;
+        loop {
+            let slot = &self.slots[at as usize];
+            match slot.pc.load(Ordering::Acquire) {
+                EMPTY => return None,
+                seen if seen == pc => {
+                    return Some(slot.translation.load(Ordering::Acquire).cast_const());
+                }
+                _ => at = (at + 1) & self.mask,
+            }
+        }
+    }
+
+    /// Write `pc`, reporting whether the address was new. Writer side only.
+    fn put(&self, pc: u64, translation: *const Translation) -> bool {
+        let mut at = mix(pc) & self.mask;
+        loop {
+            let slot = &self.slots[at as usize];
+            match slot.pc.load(Ordering::Relaxed) {
+                EMPTY => {
+                    // The pointer goes in first, so a reader that sees the address
+                    // sees a translation to go with it.
+                    slot.translation
+                        .store(translation as *mut Translation, Ordering::Release);
+                    slot.pc.store(pc, Ordering::Release);
+                    return true;
+                }
+                // A re-lift of the same address. Either pointer answers for it.
+                seen if seen == pc => {
+                    slot.translation
+                        .store(translation as *mut Translation, Ordering::Release);
+                    return false;
+                }
+                _ => at = (at + 1) & self.mask,
+            }
+        }
+    }
+}
+
+impl EntryIndex {
+    fn new() -> Self {
+        EntryIndex {
+            table: AtomicPtr::new(Box::into_raw(Table::empty(1024))),
+            live: AtomicUsize::new(0),
+        }
+    }
+
+    fn table(&self) -> &'static Table {
+        // SAFETY: every table this pointer has ever held was leaked by `Box::into_raw`
+        // and is never freed, precisely so that a reader still probing the table a
+        // grow displaced keeps reading a live allocation.
+        unsafe { &*self.table.load(Ordering::Acquire) }
+    }
+
+    /// A translation that can be entered at `pc`, or `None` if this table does not
+    /// know of one — which a caller must read as "ask the regions", not as "there is
+    /// none": a lift racing this probe publishes after it.
+    fn get(&self, pc: u64) -> Option<*const Translation> {
+        self.table().get(pc)
+    }
+
+    /// Publish `translation` under every address it may be entered at.
+    ///
+    /// The caller holds the cache's write lock, which is what makes the stores below
+    /// the only ones in flight.
+    fn publish(&self, entries: &[u64], translation: *const Translation) {
+        self.grow_for(entries.len());
+        let table = self.table();
+        let mut added = 0;
+        for &pc in entries {
+            added += usize::from(table.put(pc, translation));
+        }
+        self.live.fetch_add(added, Ordering::Relaxed);
+    }
+
+    /// Keep the table under half full, so a probe of a missing address always reaches
+    /// an empty slot rather than running the whole array.
+    fn grow_for(&self, extra: usize) {
+        let table = self.table();
+        let wanted = self.live.load(Ordering::Relaxed) + extra;
+        if wanted * 2 <= table.slots.len() {
+            return;
+        }
+        let bigger = Table::empty(wanted * 4);
+        // Rehashed out of the old table rather than rebuilt from the regions: nothing
+        // is ever removed from either, so the old table is exactly the set to keep.
+        for slot in &table.slots {
+            let pc = slot.pc.load(Ordering::Relaxed);
+            if pc != EMPTY {
+                bigger.put(pc, slot.translation.load(Ordering::Relaxed));
+            }
+        }
+        // The displaced table is leaked. Capacity quadruples, so everything ever
+        // leaked together is a third of the live table.
+        self.table.store(Box::into_raw(bigger), Ordering::Release);
+    }
+}
+
 /// Translations, keyed by the guest address each begins at.
 ///
 /// A hit is a read and a lift is a write, at a ratio of thousands to one, so the map
@@ -148,6 +296,8 @@ fn follow_links(ctx: &mut RegisterContext) -> ExitReason {
 /// out the other's Cranelift run.
 pub struct CodeCache {
     published: RwLock<Published>,
+    /// The lock-free half of [`published`](Self::published): what a hit reads.
+    index: EntryIndex,
     /// Everything microlift needs to know before it lifts anything: the registered
     /// import addresses and the read-only segment hints. Immutable, so a lift reads it
     /// without taking anything.
@@ -186,6 +336,7 @@ impl CodeCache {
                 max_span: 0,
                 retired: Vec::new(),
             }),
+            index: EntryIndex::new(),
             config,
         }
     }
@@ -328,11 +479,33 @@ impl CodeCache {
         if let Some(replaced) = published.regions.insert(start, Arc::clone(&translation)) {
             published.retired.push(replaced);
         }
+        self.index
+            .publish(&translation.entries, Arc::as_ptr(&translation));
         Ok(translation)
     }
 
     /// An existing translation covering `pc`, if there is one.
     fn lookup(&self, pc: u64) -> Option<Arc<Translation>> {
+        if let Some(hit) = self.index.get(pc) {
+            // SAFETY: the pointer was taken from an `Arc` this cache put in
+            // `regions`, and neither `regions` nor `retired` ever gives one up — a
+            // replaced translation is retired, not dropped. So the strong count is at
+            // least one for as long as `&self` is borrowed, which is what makes an
+            // increment off a bare pointer legal here and nowhere else.
+            return Some(unsafe {
+                Arc::increment_strong_count(hit);
+                Arc::from_raw(hit)
+            });
+        }
+        self.scan(pc)
+    }
+
+    /// [`lookup`](Self::lookup) the authoritative way: what the index is a cache of.
+    ///
+    /// Only a miss reaches this, and a miss is on its way to a lift — except for the
+    /// one race the index cannot cover, a probe that overtook another thread's
+    /// publish.
+    fn scan(&self, pc: u64) -> Option<Arc<Translation>> {
         let published = self.read();
         // Regions may overlap, so the answer is not `range(..=pc).next_back()` —
         // but a region that could cover `pc` begins no earlier than `max_span`
@@ -405,4 +578,42 @@ struct Compiled {
     guest_bytes: Vec<u8>,
     /// Where the compiled code may be entered — see [`Translation::covers`].
     entries: Vec<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The table never dereferences what it stores, so a test may store anything.
+    fn marker(n: u64) -> *const Translation {
+        n as usize as *const Translation
+    }
+
+    #[test]
+    fn probes_find_every_published_address() {
+        let index = EntryIndex::new();
+        // Page-aligned and closely spaced, the two shapes real entry points take.
+        let addresses: Vec<u64> = (0..4096u64)
+            .map(|n| 0x1_0000_0000 + n * 0x1000)
+            .chain((0..4096u64).map(|n| 0x2_0000_0000 + n * 16))
+            .collect();
+        for (n, &pc) in addresses.iter().enumerate() {
+            index.publish(&[pc], marker(n as u64 + 1));
+        }
+        for (n, &pc) in addresses.iter().enumerate() {
+            assert_eq!(index.get(pc), Some(marker(n as u64 + 1)), "{pc:#x}");
+        }
+        assert_eq!(index.get(0x3_0000_0000), None);
+        assert_eq!(index.get(0x1_0000_0000 + 8), None);
+    }
+
+    #[test]
+    fn a_relift_replaces_the_address_rather_than_filling_a_second_slot() {
+        let index = EntryIndex::new();
+        index.publish(&[0x1000, 0x2000], marker(1));
+        index.publish(&[0x1000], marker(2));
+        assert_eq!(index.get(0x1000), Some(marker(2)));
+        assert_eq!(index.get(0x2000), Some(marker(1)));
+        assert_eq!(index.live.load(Ordering::Relaxed), 2);
+    }
 }
