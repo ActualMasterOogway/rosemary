@@ -8,7 +8,9 @@ Rosetta 3 builds its CPU emulation using the Microlift binary lifter as a base.
 
 Rosetta 3 is relatively fast, though not up to speed with Rosetta 2 in all cases. Rosetta 2 largely outperforms Rosetta 3 in binaries that make heavy use of Objective C, as our trampoline layer for Objective C shimming carries quite a bit of overhead at the moment. We are working out quirks and investigating alternatives that will allow us to achieve equivalent performance from Rosetta 2.
 
-Rosetta 3, like many other high level emulators, implements Block Linking, a feature that makes jumping between different unknown blocks at lift time possible directly in the recompiled code via a jump table and a pinned register ABI. Microlift exposes the core of this functionality, and Rosetta 3 acts as the runtime that implements it. 
+Rosetta 3, like many other high level emulators, implements Block Linking, a feature that makes jumping between different unknown blocks at lift time possible directly in the recompiled code via a jump table and a pinned register ABI. Microlift exposes the core of this functionality, and Rosetta 3 acts as the runtime that implements it.
+
+Rosetta 3 can optionally use Microlift's automatic flag analysis to optimize overflow and carry flag calculation via native hardware support. It is disabled by default out of accuracy concerns, following the same suit as Microlift (accuracy first, performance second). In most applications, leaving it off should not have a substantial performance impact.
 
 ## Differences from Rosetta 2
 

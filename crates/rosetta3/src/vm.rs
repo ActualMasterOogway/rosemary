@@ -657,6 +657,15 @@ impl Vm {
         self.cache.cell_counts()
     }
 
+    /// Record `n` successors reached without this loop being asked.
+    ///
+    /// Counted here rather than inside the chain because the counter is the shared
+    /// cache's and the chain runs guest code - see
+    /// [`microlift::runtime::Entered::links`].
+    pub fn note_links_followed(&self, n: usize) {
+        self.cache.note_links_followed(n);
+    }
+
     /// `(argc, argv, envp, apple)` for the entry point and the initializers.
     pub fn main_args(&self) -> (u64, u64, u64, u64) {
         crate::thread::current().map_or((0, 0, 0, 0), |t| t.main_args())
@@ -765,18 +774,17 @@ impl Vm {
         // one place every entry into guest code passes through, rather than
         // wherever a context happens to be built. See [`crate::thread`].
         ctx.gs_base = crate::thread::tsd_base();
-        // The ring a `call` pushes its return address onto and a `RET` pops it from,
-        // for the same reason and in the same place as `gs_base`: it is a fact about
-        // this thread, and this is the one point every entry into guest code passes
-        // through. Null when returns are not predicted, which the emitted push and pop
-        // test for and which is therefore not a special case here.
-        ctx.callret_base = state.code().callret_base();
+        // The two tables lifted code reads: the block-link rows a probe hashes into
+        // and the ring a `call` pushes its return address onto. Facts about *this
+        // thread*, for the same reason and in the same place as `gs_base`, and set
+        // through microlift's own `ThreadLinks::attach` so that a field added to the
+        // pair is not a store this crate has to remember to add.
+        state.code().attach(&mut ctx);
         // Resumed where the entry below this one left off rather than at the top, so a
         // callback's first `call` does not overwrite the frame its caller will return
         // through. Read from that entry's own context, which is still the published
-        // one here - `publish_context` below is what displaces it. See
-        // [`crate::thread::ThreadState::live_callret_off`].
-        ctx.callret_off = state.live_callret_off();
+        // one here - `publish_context` below is what displaces it.
+        microlift::runtime::ThreadLinks::resume_call_return(&mut ctx, state.published_context());
 
         let saved_rsp = state.rsp.get();
         state.rsp.set(rsp);

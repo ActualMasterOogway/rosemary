@@ -623,7 +623,6 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGColorCreateCopy", P, P),
     sig!("CGColorRelease", V, P),
     sig!("CGColorRetain", P, P),
-    sig!("SCDynamicStoreCopyValue", P, P, P),
     sig!("SCDynamicStoreCopyMultiple", P, P, P, P),
     sig!("SCDynamicStoreCopyKeyList", P, P, P),
     sig!("SCDynamicStoreGetTypeID", U64),
@@ -967,7 +966,6 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // structure this runtime never sees. Conventionally they are null.
     cbsig!([2], "SCDynamicStoreCreate", P, P, P, P, P),
     sig!("SCDynamicStoreCopyValue", P, P, P),
-    sig!("SCDynamicStoreKeyCreateNetworkGlobalEntity", P, P, P, P),
     sig!("SCNetworkInterfaceGetInterfaceType", P, P),
     sig!("SCNetworkServiceCopy", P, P, P),
     sig!("SCNetworkServiceGetInterface", P, P),

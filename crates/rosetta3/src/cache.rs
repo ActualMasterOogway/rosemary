@@ -4,12 +4,10 @@ use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use machish::memory::Regions;
-use static_init::dynamic;
 
 use microlift::arch::x86_64::X86_64;
 use microlift::arch::x86_64::context::RegisterContext;
 use microlift::core::exit::ExitReason;
-use microlift::core::link::BlockLinkEntry;
 use microlift::core::{LifterConfig, lift_to_code};
 
 use crate::program::Program;
@@ -19,80 +17,47 @@ use crate::vm::VmError;
 pub use microlift::runtime::Translation;
 
 /// Enter `translation`, resuming at `ctx.rip`, and report how it left.
-pub fn enter(translation: &Translation, ctx: &mut RegisterContext) -> ExitReason {
-    ctx.image_base = translation.image_base;
-    ctx.exit_reason = ExitReason::None as u32;
-    // Cleared here rather than by a probe that missed, so the store is on the
-    // once-per-entry path instead of the once-per-exit one.
-    ctx.link_hit = 0;
-    // SAFETY: `entry` is the finalized address of a Cranelift function whose
-    // signature is `(*mut RegisterContext) -> ()` in the host C convention,
-    // compiled into the module this `Translation` owns and therefore still
-    // mapped. It is `entry` and never `link_target`: under a pinned ABI those
-    // are different functions and the second one is not callable from Rust.
-    // The lifted code's only memory effects outside `ctx` are the guest's own -
-    // the guest stack and its mapped images, all live for the duration.
-    let entry: unsafe extern "C" fn(*mut RegisterContext) =
-        unsafe { std::mem::transmute(translation.entry) };
-    unsafe { entry(ctx as *mut RegisterContext) };
-    // Under a pinned ABI a link is a branch: `link_hit` is never written and
-    // the chain has already run itself out by the time this returns.
-    match host_resolved_links() {
-        true => follow_links(ctx),
-        false => ExitReason::try_from(ctx.exit_reason).unwrap_or(ExitReason::None),
-    }
-}
-
-/// Whether a link comes back here to be taken, rather than being a branch the host
-/// never sees. Read once; the ABI is fixed for the process.
-fn host_resolved_links() -> bool {
-    #[dynamic]
-    static HOST_RESOLVED: bool = crate::jit::pinned_link_abi().is_none();
-    *HOST_RESOLVED
-}
-
-/// Run out the chain of regions the last exit resolved for itself, and report how the
-/// last one ended.
 ///
-/// Which is also why the exits that *do* need the run loop must never be linked, and
-/// they are not.
-fn follow_links(ctx: &mut RegisterContext) -> ExitReason {
-    while ctx.link_hit != 0 {
-        // SAFETY: `link_hit` holds the address of a `BlockLinkEntry` lifted code
-        // resolved for itself - either a row of the table published in
-        // `ctx.link_table`, which is this thread's own and which only this thread
-        // writes, or a link cell in some region's own array, which the shared cache
-        // writes under its lock. Both are alive here: a table row is written with the
-        // `Arc` the window holds beside it, a cell is written through a `CellRef`
-        // holding the owning region's, and this cache retires rather than drops (see
-        // [`Published::retained`]).
-        let row = unsafe { *(ctx.link_hit as *const BlockLinkEntry) };
-        debug_assert_eq!(
-            row.guest_pc, ctx.rip,
-            "a link was taken for an address the region did not commit"
-        );
-        // Both counters, so that the entry *rate* and the exit *mix* keep
-        // counting the events they always counted.
-        if crate::stats::enabled() {
-            crate::stats::record_exit(crate::vm::classify(
-                ExitReason::try_from(ctx.exit_reason).unwrap_or(ExitReason::None),
-                ctx.exit_code,
-            ));
-            crate::stats::record_linked_entry();
-        }
-        ctx.image_base = row.image_base;
-        ctx.exit_reason = ExitReason::None as u32;
-        ctx.link_hit = 0;
-        // SAFETY: `code` is a translation's `link_target`, of the same signature
-        // and with the same effects as the call in [`enter`] - under a host-resolved
-        // ABI, which is the only ABI that reaches this loop, `link_target` and
-        // `entry` are the same function. It was written by `Translation::row`,
-        // through either `CodeWindow::put` or the shared cache's cell install.
-        let code: unsafe extern "C" fn(*mut RegisterContext) =
-            unsafe { std::mem::transmute(row.code as usize as *const u8) };
-        unsafe { code(ctx as *mut RegisterContext) };
+/// A thin wrapper over [`microlift::runtime::enter`], which is where the sequence
+/// itself lives: the fields an entry owes a region, the call, and the chain of
+/// successors the region and its successors resolve for themselves. What this adds
+/// is the accounting, which is this crate's - a linked entry is an entry that never
+/// reached the run loop, and both counters have to keep counting the events they
+/// always counted or a profile stops comparing against older ones.
+///
+/// The exits that *do* need the run loop must never be linked, and they are not.
+pub fn enter(translation: &Translation, ctx: &mut RegisterContext) -> ExitReason {
+    // SAFETY: `translation` was compiled by this process's own `CodeCache` for this
+    // `RegisterContext` layout and this thread's table geometry, and every row
+    // reachable from `ctx.link_table` names code the cache keeps mapped for the life
+    // of the process - see [`Published::retained`]. That is microlift's trust model,
+    // and past the address compare lifted code checks none of it.
+    let entered = unsafe {
+        microlift::runtime::enter_with(translation, ctx, |exit, ctx| {
+            // Once per hop, with the exit of the region that resolved it. Both
+            // counters, so that the entry *rate* and the exit *mix* keep counting
+            // what they always did.
+            if crate::stats::enabled() {
+                crate::stats::record_exit(crate::vm::classify(exit, ctx.exit_code));
+                crate::stats::record_linked_entry();
+            }
+        })
+    };
+    // The shared cache's counter, taken from the count rather than bumped inside the
+    // chain: reaching it from in there would hold the cache's lock across the
+    // execution of guest code.
+    //
+    // Guarded on there being something to count, which is not a micro-optimisation:
+    // finding the VM is a TLS read, this runs once per entry into guest code, and
+    // under a pinned ABI the answer is *always* zero because a link is a branch the
+    // host never sees. So the guard removes the read entirely from the default
+    // configuration rather than saving an add in it.
+    if entered.links > 0
+        && let Some(vm) = crate::thunk::current()
+    {
+        vm.note_links_followed(entered.links);
     }
-    ExitReason::try_from(ctx.exit_reason).unwrap_or(ExitReason::None)
+    entered.exit
 }
 
 /// Every address a published translation can be entered at, as an open-addressed
@@ -310,19 +275,29 @@ impl CodeCache {
         }
     }
 
-    /// How many regions have been translated.
+    /// How many distinct regions have been translated.
+    ///
+    /// Microlift's count and not `retained.len()`: that one counts inserts, and two
+    /// threads that missed on the same address both compiled it - see
+    /// [`Published::retained`]. A caller watching this number grow wants regions, not
+    /// races.
     pub fn len(&self) -> usize {
-        self.read().retained.len()
+        self.read().cache.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.read().retained.is_empty()
+        self.read().cache.is_empty()
     }
 
     /// What the shared cache has been asked to do, and how much of it block linking
     /// spared it. See [`microlift::runtime::CacheStats`].
     pub fn stats(&self) -> microlift::runtime::CacheStats {
         self.read().cache.stats()
+    }
+
+    /// Record `n` successors reached without a host lookup.
+    pub fn note_links_followed(&self, n: usize) {
+        self.read().cache.note_links_followed(n);
     }
 
     /// `(installed, pending)` link cells.
@@ -416,11 +391,6 @@ impl CodeCache {
             }
         }
 
-        debug_assert!(
-            compiled.resume_points.binary_search(&pc).is_ok(),
-            "translation {start:#x}..{end:#x} cannot be entered at the {pc:#x} \
-             it was lifted for"
-        );
         // Where this region's compiled code went, so a fault inside it can be
         // named as a *guest* range rather than as an address in an anonymous
         // mapping. See [`crate::fault`]. The *body*, not the entry.
@@ -453,6 +423,11 @@ impl CodeCache {
             compiled.link_sites,
             compiled.backend,
         );
+        debug_assert!(
+            translation.covers(pc),
+            "translation {start:#x}..{end:#x} cannot be entered at the {pc:#x} \
+             it was lifted for"
+        );
 
         // Two threads that missed on the same address both compiled it. The loser is
         // displaced from microlift's map but not dropped - see [`Published::retained`].
@@ -482,7 +457,7 @@ impl CodeCache {
         // The one race the index cannot cover: a probe that overtook another thread's
         // publish. Counted by microlift as a host dispatch, which it is - the index
         // hits above are the ones that never became one.
-        self.write().cache.lookup(pc)
+        self.read().cache.lookup(pc)
     }
 }
 

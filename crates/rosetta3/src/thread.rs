@@ -7,9 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use microlift::arch::x86_64::context::RegisterContext;
-use microlift::core::callret::CallRetEntry;
 use microlift::core::link::{BlockLinkConfig, BlockLinkEntry};
-use microlift::runtime::{CallRetStack, LinkTable};
+use microlift::runtime::ThreadLinks;
 use static_init::dynamic;
 
 use crate::stack::GuestStack;
@@ -304,17 +303,15 @@ impl ThreadState {
         }
     }
 
-    /// How deep into the call-return ring the entry below this one is.
+    /// The register context of the entry below this one, if there is one.
     ///
-    /// The ring is per *thread* and a `RegisterContext` is per *entry*, so a nested
-    /// entry starting at zero would push its first frame over the outermost frame of
-    /// the entry that called it. That is not a correctness problem - a clobbered frame
-    /// fails its `guest_pc` compare and falls back to the probe - but it costs the
-    /// outer chain its predictions for no reason, and the live offset is right there
-    /// in the context the outer entry published. Zero when there is no outer entry,
-    /// which is where an untouched ring starts.
-    pub(crate) fn live_callret_off(&self) -> u64 {
-        self.published.context().map_or(0, |ctx| ctx.callret_off)
+    /// Published by [`publish_context`](Self::publish_context) for the duration of an
+    /// entry, so during the *setup* of a nested one it is still the outer entry's -
+    /// which is what
+    /// [`ThreadLinks::resume_call_return`](microlift::runtime::ThreadLinks::resume_call_return)
+    /// wants, and the only reader that needs it before the swap.
+    pub(crate) fn published_context(&self) -> Option<&RegisterContext> {
+        self.published.context()
     }
 }
 
@@ -323,16 +320,14 @@ impl ThreadState {
 /// Never invalidated, for the reason the cache itself is never invalidated.
 pub(crate) struct CodeWindow {
     slots: RefCell<Box<[Option<(u64, std::sync::Arc<crate::cache::Translation>)>]>>,
-    /// The rows lifted code probes. Microlift's own table rather than a bare array,
-    /// so the slot a probe computes and the slot a publish writes are the same
-    /// function called twice and not two copies of the same arithmetic.
-    links: UnsafeCell<LinkTable>,
-    /// The `<return address, link cell>` frames a `call` pushes and a `RET` pops, or
-    /// `None` when this run predicts returns through the table like any other exit.
+    /// The two tables lifted code reads: the rows a probe hashes into, and the
+    /// `<return address, link cell>` frames a `call` pushes and a `RET` pops.
     ///
-    /// Boxed inside the `UnsafeCell` for the same reason the table is: the pointer
-    /// handed to `ctx.callret_base` must outlive every region entered with it.
-    callret: Option<UnsafeCell<CallRetStack>>,
+    /// Microlift's own type rather than a pair of bare arrays, so that the slot a
+    /// probe computes and the slot a publish writes are the same function called
+    /// twice, and so that "which pointers a context owes a region" is stated in one
+    /// place instead of here as well. See [`ThreadLinks`].
+    links: UnsafeCell<ThreadLinks>,
 }
 
 /// How many PCs one thread remembers. A power of two, so the index is a mask.
@@ -361,9 +356,10 @@ impl CodeWindow {
     fn new() -> Self {
         CodeWindow {
             slots: RefCell::new(vec![None; WINDOW].into_boxed_slice()),
-            links: UnsafeCell::new(LinkTable::new(link_config())),
-            callret: crate::jit::call_return_stack()
-                .map(|config| UnsafeCell::new(CallRetStack::new(config))),
+            links: UnsafeCell::new(ThreadLinks::new(
+                link_config(),
+                crate::jit::call_return_stack(),
+            )),
         }
     }
 
@@ -384,19 +380,16 @@ impl CodeWindow {
         // table is owned by this `CodeWindow` and never reallocated, so the
         // address is stable for the life of the thread - which is what lets it
         // be handed to compiled code at all.
-        unsafe { (*self.links.get()).as_mut_ptr() }
+        unsafe { (*self.links.get()).link_table_ptr() }
     }
 
-    /// The address of this thread's call-return ring, or null when it has none -
-    /// which is not a special case: a null `ctx.callret_base` is what every emitted
-    /// push and pop tests first, and it means "do not predict".
-    pub(crate) fn callret_base(&self) -> *mut CallRetEntry {
-        match &self.callret {
-            // SAFETY: as `link_table` - the address of an allocation this
-            // `CodeWindow` owns for the life of the thread.
-            Some(stack) => unsafe { (*stack.get()).as_mut_ptr() },
-            None => core::ptr::null_mut(),
-        }
+    /// Point `ctx` at both tables, so it may enter lifted code on this thread.
+    ///
+    /// One call rather than a store per field, and microlift's own, so a field
+    /// added to the pair is not a store this crate has to remember to add.
+    pub(crate) fn attach(&self, ctx: &mut RegisterContext) {
+        // SAFETY: as `link_table`.
+        unsafe { (*self.links.get()).attach(ctx) };
     }
 
     /// The translation this thread last entered at `pc`, if it still holds one.
@@ -432,12 +425,7 @@ impl CodeWindow {
             // SAFETY: the only writer, on the thread that owns this window, at a
             // point where this thread is in the run loop rather than inside a
             // region. See the field's own note.
-            unsafe {
-                let table = &mut *self.links.get();
-                for &at in &translation.resume_points {
-                    table.publish(translation.row(at));
-                }
-            }
+            unsafe { (*self.links.get()).publish(translation) };
         }
     }
 }

@@ -1551,8 +1551,19 @@ mod tests {
     fn swizzling_changes_the_answer_a_plan_is_checked_against() {
         // The whole of the cache's invalidation: a method replaced underneath a
         // resolved plan must make the cheap lookup report something else.
-        unsafe extern "C" fn original() {}
-        unsafe extern "C" fn replacement() {}
+        //
+        // The two bodies differ, and must. Empty ones are identical machine code,
+        // and the linker folds identical functions together at `--release` - so
+        // both `as *const c_void` casts yield the *same* address, the swizzle
+        // becomes unobservable, and this test fails without anything being wrong
+        // with the code it is about. `black_box` of a distinct value is the
+        // cheapest thing the folder cannot see through.
+        unsafe extern "C" fn original() {
+            std::hint::black_box(0u8);
+        }
+        unsafe extern "C" fn replacement() {
+            std::hint::black_box(1u8);
+        }
 
         // SAFETY: NUL-terminated literals, and a class this test allocates and
         // registers itself, so the method being replaced is its own.

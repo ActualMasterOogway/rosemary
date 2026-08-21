@@ -21,7 +21,7 @@
 //!
 //! There are several shapes of linking to hold to those claims, and they are
 //! independent knobs rather than levels. A host-resolved link
-//! (`ROSETTA3_NO_PINNED_LINK=1`) hands the successor back to `cache::follow_links`;
+//! (`ROSETTA3_NO_PINNED_LINK=1`) hands the successor back to `microlift::runtime::follow_links`;
 //! a pinned link branches straight into it with part of the guest register file
 //! still in host registers (`rosetta3::jit::pinned_link_abi`), and is the default.
 //! Either resolves a successor from a probe shared by the region or from one per
