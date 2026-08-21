@@ -1,9 +1,81 @@
-//! What the overlay actually says.
+//! What the overlay actually says, and the windows it says it in.
 
 use std::time::{Duration, Instant};
 
 use super::draw::{Color, DrawList, Ui, bytes, color, duration, grouped, rate};
 use crate::{profile, stats};
+
+/// One window's worth of the overlay.
+///
+/// The enumeration is the whole catalogue: [`super::dock`] arranges these and
+/// the Windows menu lists them, so a new section is a variant and a `body` arm
+/// and nothing else.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum View {
+    Frames,
+    Time,
+    Regions,
+    Instructions,
+    HostSymbols,
+    Entries,
+    Translation,
+    Footprint,
+    Trace,
+    Keys,
+}
+
+impl View {
+    /// Every view, in the order the Windows menu lists them.
+    pub const ALL: [View; 10] = [
+        View::Frames,
+        View::Time,
+        View::Regions,
+        View::Instructions,
+        View::HostSymbols,
+        View::Entries,
+        View::Translation,
+        View::Footprint,
+        View::Trace,
+        View::Keys,
+    ];
+
+    /// What the tab says.
+    pub fn title(self) -> &'static str {
+        match self {
+            View::Frames => "FPS",
+            View::Time => "Time Profiling",
+            View::Regions => "Guest Regions",
+            View::Instructions => "Guest Instructions",
+            View::HostSymbols => "Host Symbols",
+            View::Entries => "Region Entries",
+            View::Translation => "Translation",
+            View::Footprint => "Footprint",
+            View::Trace => "xctrace",
+            View::Keys => "Keys",
+        }
+    }
+
+    /// Its slot in the array the hidden flags live in.
+    pub fn slot(self) -> usize {
+        View::ALL.iter().position(|v| *v == self).unwrap_or(0)
+    }
+}
+
+/// Draw one view's contents at the cursor.
+pub fn body(ui: &mut Ui, model: &Model, view: View) {
+    match view {
+        View::Frames => frames(ui, model),
+        View::Time => where_time_goes(ui, model),
+        View::Regions => regions(ui, model),
+        View::Instructions => instructions(ui, model),
+        View::HostSymbols => host_symbols(ui, model),
+        View::Entries => entries(ui, model),
+        View::Translation => translation(ui, model),
+        View::Footprint => footprint(ui, model),
+        View::Trace => super::trace::window(ui),
+        View::Keys => keys(ui),
+    }
+}
 
 /// How many entries of each ranked list to ask the profiler for.
 const RANK: usize = 8;
@@ -13,7 +85,6 @@ const REFRESH: Duration = Duration::from_millis(500);
 
 /// Frames kept for the frame-time graph.
 const FRAMES: usize = 120;
-
 
 /// Everything the panel draws, sampled off the hot path.
 pub struct Model {
@@ -162,136 +233,6 @@ fn resident_bytes() -> u64 {
     }
 }
 
-
-/// Draw the statistics panel into `list`.
-pub fn statistics(list: &mut DrawList, model: &Model) {
-    let em = list.atlas().advance;
-    // The first size the panel ever has.
-    super::input::size_defaults(
-        (em * 72.0).min(list.width - 24.0),
-        (list.height - 24.0).max(120.0),
-    );
-    let (x, y, width, height, scroll) = super::input::view();
-
-    // Kept reachable however far it has been dragged.
-    let margin = em * 8.0;
-    let width = width.clamp(em * 16.0, list.width.max(em * 16.0));
-    let height = height.clamp(4.0 * list.atlas().line_h, list.height.max(40.0));
-    let x = x.clamp(
-        (8.0 - width + margin).min(8.0),
-        (list.width - margin).max(8.0),
-    );
-    let y = y.clamp(8.0, (list.height - 40.0).max(8.0));
-
-    // Laid out once against a throwaway list to learn how tall its *content*
-    // wants to be, then again for real. See [`measure`].
-    let mut ui = Ui::new(list, x + 10.0, y + 8.0, width - 20.0);
-    super::input::set_row_height(ui.leading);
-    let content = measure(&mut ui, model);
-
-    // The panel is as tall as it was dragged to, but never taller than the room
-    // below it - and never taller than it has content for, so a panel dragged
-    // huge over a short list does not become a large empty box.
-    let room = (list.height - y - 12.0).max(0.0);
-    let outer = height.min(room).min(content + 16.0);
-    let visible = (outer - 16.0).max(0.0);
-    super::input::set_reach(content - visible);
-    super::input::set_rect(x, y, width, outer);
-    let scroll = scroll.clamp(0.0, (content - visible).max(0.0));
-
-    list.rect(x, y, width, outer, color::PANEL);
-    list.frame(x, y, width, outer, color::EDGE);
-    // Everything from here is confined to the panel, so a row scrolled past the
-    // top does not draw over the guest's frame above it.
-    list.clip((x, y + 1.0, x + width, y + outer - 1.0));
-    let mut ui = Ui::new(list, x + 10.0, y + 8.0 - scroll, width - 20.0);
-    body(&mut ui, model);
-    list.unclip();
-
-    // A scrollbar, but only when there is something to scroll. Drawn after the
-    // clip is released because it belongs to the frame rather than the content.
-    if content > visible && visible > 0.0 {
-        let thumb = (outer * visible / content).max(12.0);
-        let travel = outer - thumb;
-        let at = scroll / (content - visible);
-        list.rect(x + width - 4.0, y, 3.0, outer, color::TRACK);
-        list.rect(
-            x + width - 4.0,
-            y + travel * at,
-            3.0,
-            thumb,
-            match super::input::focused() {
-                true => color::HEADING,
-                false => color::EDGE,
-            },
-        );
-    }
-    grip(list, x, y, width, outer);
-}
-
-/// The corner that says the panel can be resized.
-///
-/// Drawn only while the mouse is the panel's, because it is an affordance for something
-/// that cannot be done otherwise - and an overlay that advertises a control the reader
-/// has no way to reach is worse than one that stays quiet.
-fn grip(list: &mut DrawList, x: f32, y: f32, width: f32, height: f32) {
-    if !super::input::focused() {
-        return;
-    }
-    let corner = (x + width - 3.0, y + height - 3.0);
-    for tick in 1..=3 {
-        let span = tick as f32 * 4.0;
-        list.rect(corner.0 - span, corner.1 - 1.0, span, 1.0, color::EDGE);
-        list.rect(corner.0 - 1.0, corner.1 - span, 1.0, span, color::EDGE);
-    }
-}
-
-/// Lay the panel out against a throwaway list to learn its height.
-fn measure(ui: &mut Ui, model: &Model) -> f32 {
-    let start = ui.y;
-    let mark = ui.list.vertices.len();
-    body(ui, model);
-    ui.list.vertices.truncate(mark);
-    let height = ui.y - start;
-    ui.y = start;
-    ui.x = ui.left;
-    height
-}
-
-fn body(ui: &mut Ui, model: &Model) {
-    header(ui, model);
-    frames(ui, model);
-    where_time_goes(ui, model);
-    ranked(ui, model);
-    entries(ui, model);
-    translation(ui, model);
-    footprint(ui, model);
-    super::trace::describe(ui);
-    keys(ui);
-}
-
-fn header(ui: &mut Ui, _model: &Model) {
-    ui.run("rosetta3", color::HEADING);
-    ui.run("  ", color::LABEL);
-    // The first image in the link report is the main executable, which is the
-    // name the person watching recognises.
-    let name = crate::thunk::current()
-        .and_then(|vm| vm.program.report.images.first())
-        .map(|image| image.name.rsplit('/').next().unwrap_or(&image.name))
-        .unwrap_or("no program");
-    ui.run(name, color::VALUE);
-    ui.column(50.0);
-    match super::input::focused() {
-        // Said in the loudest colour on the panel, because while this is on the
-        // guest is being denied its scroll wheel and its left button - and a
-        // game that has silently stopped responding to the mouse is a bug
-        // report about the game.
-        true => ui.run("shift+F8 releases the mouse", color::ALERT),
-        false => ui.run("shift+F7 closes", color::MUTED),
-    }
-    ui.newline();
-}
-
 /// What each key does, and what state it is in.
 fn keys(ui: &mut Ui) {
     ui.heading("KEYS");
@@ -305,10 +246,10 @@ fn keys(ui: &mut Ui) {
             },
             color::VALUE,
         ),
-        ("shift+F7", "this panel", "open", color::VALUE),
+        ("shift+F7", "the whole overlay", "open", color::VALUE),
         (
             "shift+F8",
-            "give the mouse to the panel",
+            "give the mouse to the overlay",
             match super::input::focused() {
                 true => "the panel has the mouse",
                 false => "the guest has the mouse",
@@ -406,10 +347,7 @@ fn graph(ui: &mut Ui, model: &Model, worst: f32) {
 fn where_time_goes(ui: &mut Ui, model: &Model) {
     ui.heading("TIME PROFILING");
     let Some(p) = model.profile.as_ref() else {
-        ui.line(
-            "the in-process sampler is off: ROSETTA3_PROFILE=1 turns it on",
-            color::MUTED,
-        );
+        sampler_off(ui);
         return;
     };
     if p.running == 0 {
@@ -460,24 +398,38 @@ fn where_time_goes(ui: &mut Ui, model: &Model) {
     );
 }
 
-fn ranked(ui: &mut Ui, model: &Model) {
+fn regions(ui: &mut Ui, model: &Model) {
+    match model.profile.as_ref() {
+        Some(p) => rows(ui, "GUEST REGIONS", &p.regions, color::GUEST, None),
+        None => sampler_off(ui),
+    }
+}
+
+fn instructions(ui: &mut Ui, model: &Model) {
+    match model.profile.as_ref() {
+        Some(p) => rows(
+            ui,
+            "GUEST INSTRUCTIONS",
+            &p.instructions,
+            color::MUTED,
+            // The caveat is on the panel rather than in the documentation because
+            // this is the ranking someone reads at three in the morning and acts on.
+            Some("source symbols likely not available"),
+        ),
+        None => sampler_off(ui),
+    }
+}
+
+fn host_symbols(ui: &mut Ui, model: &Model) {
+    ui.heading("HOST SYMBOLS");
     let Some(p) = model.profile.as_ref() else {
+        ui.line(SAMPLER_OFF, color::MUTED);
         return;
     };
-    rows(ui, "GUEST REGIONS", &p.regions, color::GUEST, None);
-    rows(
-        ui,
-        "GUEST INSTRUCTIONS",
-        &p.instructions,
-        color::MUTED,
-        // The caveat is on the panel rather than in the documentation because
-        // this is the ranking someone reads at three in the morning and acts on.
-        Some("source symbols likely not available"),
-    );
     if p.host.is_empty() {
+        ui.line("no host samples yet", color::MUTED);
         return;
     }
-    ui.heading("HOST SYMBOLS");
     for site in &p.host {
         ui.run(&format!("{:>6.2}%", site.share), color::VALUE);
         ui.column(9.0);
@@ -492,11 +444,19 @@ fn ranked(ui: &mut Ui, model: &Model) {
     }
 }
 
+/// What every sampled view says when the sampler is off.
+const SAMPLER_OFF: &str = "the in-process sampler is off: shift+F10, or ROSETTA3_PROFILE=1";
+
+fn sampler_off(ui: &mut Ui) {
+    ui.line(SAMPLER_OFF, color::MUTED);
+}
+
 fn rows(ui: &mut Ui, title: &str, entries: &[profile::Entry], colour: Color, caveat: Option<&str>) {
+    ui.heading(title);
     if entries.is_empty() {
+        ui.line("no samples yet", color::MUTED);
         return;
     }
-    ui.heading(title);
     if let Some(note) = caveat {
         ui.line(note, color::MUTED);
     }
@@ -688,7 +648,6 @@ fn footprint(ui: &mut Ui, model: &Model) {
         color::VALUE,
     );
 }
-
 
 /// The badge shown when the panel is closed but something is happening.
 pub fn badge(list: &mut DrawList, text: &str, colour: Color) {

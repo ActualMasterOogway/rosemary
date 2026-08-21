@@ -10,14 +10,19 @@ use super::sys;
 /// `NSEventType`, from `<AppKit/NSEvent.h>`. A mask bit is `1 << type`.
 const TYPE_LEFT_MOUSE_DOWN: u64 = 1;
 const TYPE_LEFT_MOUSE_UP: u64 = 2;
+const TYPE_MOUSE_MOVED: u64 = 5;
 const TYPE_LEFT_MOUSE_DRAGGED: u64 = 6;
+const TYPE_KEY_DOWN: u64 = 10;
 const TYPE_SCROLL_WHEEL: u64 = 22;
 
-/// The events the monitor asks for: a scroll for the panel's contents, and the
-/// press-drag-release that moves or resizes it.
+/// The events the monitor asks for: the pointer, the press-drag-release that
+/// moves windows about, a wheel for their contents, and keys for the one text
+/// box the overlay has.
 const MASK: u64 = (1 << TYPE_LEFT_MOUSE_DOWN)
     | (1 << TYPE_LEFT_MOUSE_UP)
+    | (1 << TYPE_MOUSE_MOVED)
     | (1 << TYPE_LEFT_MOUSE_DRAGGED)
+    | (1 << TYPE_KEY_DOWN)
     | (1 << TYPE_SCROLL_WHEEL);
 
 /// `BLOCK_IS_GLOBAL` and `BLOCK_HAS_SIGNATURE`, from `Block_private.h`.
@@ -53,62 +58,36 @@ struct Descriptor {
 unsafe impl Sync for Block {}
 unsafe impl Sync for Descriptor {}
 
-
 /// Whether the overlay is taking the mouse.
 static FOCUSED: AtomicBool = AtomicBool::new(false);
 
-/// How far the panel's contents are scrolled, and where the panel sits.
-static STATE: Mutex<State> = Mutex::new(State {
-    scroll: 0.0,
-    x: 12.0,
-    y: 12.0,
-    width: 0.0,
-    height: 0.0,
-    reach: 0.0,
-    rect: (0.0, 0.0, 0.0, 0.0),
-    holding: None,
+/// What has happened since the last frame drew.
+///
+/// The monitor runs on the main thread and the overlay draws on a render
+/// thread, so events are accumulated here and acted on once, where the layout
+/// they landed on is known.
+#[derive(Default)]
+struct Pending {
+    at: Option<(f32, f32)>,
+    press: Option<(f32, f32)>,
+    released: bool,
+    delta: (f32, f32),
+    wheel: Option<(f32, f32, f32)>,
+    keys: Vec<u8>,
+    /// Whether the press that is down was one the overlay took. A drag whose
+    /// press went to the guest belongs to the guest for its whole length.
+    holding: bool,
+}
+
+static PENDING: Mutex<Pending> = Mutex::new(Pending {
+    at: None,
+    press: None,
+    released: false,
+    delta: (0.0, 0.0),
+    wheel: None,
+    keys: Vec::new(),
+    holding: false,
 });
-
-struct State {
-    scroll: f32,
-    x: f32,
-    y: f32,
-    /// The size the panel has been dragged to, or zero for "not yet sized".
-    ///
-    /// Zero rather than an `Option` because the panel is the only thing that can
-    /// work out a sensible first size - it depends on the font and the surface -
-    /// and it does that on its first layout through [`size_defaults`].
-    width: f32,
-    height: f32,
-    /// How far the panel *can* be scrolled, which only the panel knows - it is the
-    /// content's height less the room there is for it.
-    reach: f32,
-    /// Where the panel was last actually drawn, as `(x, y, w, h)`.
-    rect: (f32, f32, f32, f32),
-    /// What the current drag is doing, decided once when the button went down.
-    holding: Option<Grip>,
-}
-
-/// What part of the panel a press landed on.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Grip {
-    /// The body: the whole panel moves.
-    Move,
-    /// An edge or a corner: the panel resizes, in the directions named.
-    Edge {
-        left: bool,
-        right: bool,
-        top: bool,
-        bottom: bool,
-    },
-}
-
-/// How close to an edge counts as grabbing it.
-const GRIP: f32 = 8.0;
-
-/// The smallest the panel may be dragged to.
-const MIN_WIDTH: f32 = 120.0;
-const MIN_HEIGHT: f32 = 48.0;
 
 /// Whether the mouse belongs to the overlay right now.
 pub fn focused() -> bool {
@@ -118,109 +97,43 @@ pub fn focused() -> bool {
 /// Take the mouse, or give it back. Bound to shift+F8.
 pub fn toggle_focus() -> bool {
     let focused = !FOCUSED.fetch_xor(true, Relaxed);
-    if focused {
-        install();
+    match focused {
+        true => install(),
+        // Anything half-done goes with the mouse, so the overlay does not come
+        // back mid-drag.
+        false => {
+            *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Pending::default();
+            super::dock::abandon();
+        }
     }
     focused
 }
 
-/// Where the panel wants to be, how big, and how far scrolled.
-pub fn view() -> (f32, f32, f32, f32, f32) {
-    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    (state.x, state.y, state.width, state.height, state.scroll)
-}
-
-/// Give the panel a size, if it has never had one.
-///
-/// The panel works this out from its font and the surface on its first layout;
-/// after that the numbers belong to whoever last dragged an edge.
-pub fn size_defaults(width: f32, height: f32) {
-    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    if state.width <= 0.0 {
-        state.width = width;
+/// Everything that has happened since the last frame, cleared as it is taken.
+pub fn drain() -> super::dock::Events {
+    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    let events = super::dock::Events {
+        at: pending.at,
+        press: pending.press.take(),
+        released: std::mem::take(&mut pending.released),
+        delta: std::mem::replace(&mut pending.delta, (0.0, 0.0)),
+        wheel: pending.wheel.take(),
+        keys: std::mem::take(&mut pending.keys),
+    };
+    if !focused() {
+        return super::dock::Events::default();
     }
-    if state.height <= 0.0 {
-        state.height = height;
-    }
+    events
 }
 
-/// Record where the panel actually ended up, for hit testing.
-pub fn set_rect(x: f32, y: f32, width: f32, height: f32) {
-    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    state.rect = (x, y, width, height);
+/// The panel's row height in pixels, so the wheel can scroll in rows and a drag
+/// in points can be turned into one in pixels.
+static ROW_HEIGHT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(16);
+
+/// Tell the input layer how tall a row is.
+pub fn set_row_height(pixels: f32) {
+    ROW_HEIGHT.store(pixels.max(1.0) as u32, Relaxed);
 }
-
-/// Tell the input layer how much there is to scroll through.
-pub fn set_reach(reach: f32) {
-    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    state.reach = reach.max(0.0);
-    state.scroll = state.scroll.clamp(0.0, state.reach);
-}
-
-impl State {
-    /// Which part of the panel `(x, y)` is over, if any.
-    fn grip_at(&self, x: f32, y: f32) -> Option<Grip> {
-        let (px, py, pw, ph) = self.rect;
-        if pw <= 0.0 || ph <= 0.0 {
-            return None;
-        }
-        // A margin outside the panel counts too, so that the edge of a panel
-        // flush against the window edge is still grabbable.
-        if x < px - GRIP || x > px + pw + GRIP || y < py - GRIP || y > py + ph + GRIP {
-            return None;
-        }
-        let (left, right) = (x <= px + GRIP, x >= px + pw - GRIP);
-        let (top, bottom) = (y <= py + GRIP, y >= py + ph - GRIP);
-        match left || right || top || bottom {
-            true => Some(Grip::Edge {
-                left,
-                right,
-                top,
-                bottom,
-            }),
-            false => Some(Grip::Move),
-        }
-    }
-
-    /// Apply one drag step.
-    fn drag(&mut self, dx: f32, dy: f32) {
-        match self.holding {
-            Some(Grip::Move) => {
-                self.x += dx;
-                self.y += dy;
-            }
-            Some(Grip::Edge {
-                left,
-                right,
-                top,
-                bottom,
-            }) => {
-                // A left or top edge moves the origin and takes the same amount
-                // off the size, which is what makes the *opposite* edge stay
-                // where it is - the property that distinguishes resizing from
-                // moving-and-growing.
-                if left {
-                    let width = (self.width - dx).max(MIN_WIDTH);
-                    self.x += self.width - width;
-                    self.width = width;
-                }
-                if right {
-                    self.width = (self.width + dx).max(MIN_WIDTH);
-                }
-                if top {
-                    let height = (self.height - dy).max(MIN_HEIGHT);
-                    self.y += self.height - height;
-                    self.height = height;
-                }
-                if bottom {
-                    self.height = (self.height + dy).max(MIN_HEIGHT);
-                }
-            }
-            None => {}
-        }
-    }
-}
-
 
 /// The handler, called by AppKit for every event in [`MASK`].
 ///
@@ -272,34 +185,93 @@ fn cursor(event: Id) -> Option<(f32, f32)> {
     }
 }
 
+/// The characters a key event carries, as the ASCII the atlas can draw.
+fn typed(event: Id) -> Vec<u8> {
+    let sel = super::objc::sel;
+    // SAFETY: `-characters` is `NSEvent`'s and returns an autoreleased
+    // `NSString`; `-UTF8String` is `NSString`'s and returns a C string owned by
+    // that string, read before this scope ends.
+    unsafe {
+        let string = send0::<Id>(event, sel("characters"));
+        if string.is_null() {
+            return Vec::new();
+        }
+        let bytes = send0::<*const libc::c_char>(string, sel("UTF8String"));
+        if bytes.is_null() {
+            return Vec::new();
+        }
+        std::ffi::CStr::from_ptr(bytes).to_bytes().to_vec()
+    }
+}
+
 /// Act on one event. Returns whether the guest should be denied it.
 fn handle(event: Id) -> bool {
     // SAFETY: `-type` is `NSEvent`'s, takes nothing and returns an
-    // `NSEventType`, which is an `NSUInteger`. The receiver is the event AppKit
-    // handed to the monitor.
+    // `NSEventType`, which is an `NSUInteger`.
     let kind = unsafe { send0::<u64>(event, super::objc::sel("type")) };
-    let at = cursor(event);
-    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
 
-    // A press decides what the drag is; a release ends it.
-    match kind {
-        TYPE_LEFT_MOUSE_DOWN => {
-            state.holding = at.and_then(|(x, y)| state.grip_at(x, y));
-            return state.holding.is_some();
-        }
-        TYPE_LEFT_MOUSE_UP => {
-            return state.holding.take().is_some();
-        }
-        TYPE_LEFT_MOUSE_DRAGGED if state.holding.is_none() => return false,
-        // A wheel outside the panel belongs to the guest.
-        TYPE_SCROLL_WHEEL if !at.is_some_and(|(x, y)| state.grip_at(x, y).is_some()) => {
+    if kind == TYPE_KEY_DOWN {
+        // Only while a text box is open, so the guest keeps its keyboard.
+        if !super::dock::typing() {
             return false;
         }
-        _ => {}
+        let keys = typed(event);
+        let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+        pending.keys.extend(keys);
+        return true;
     }
 
+    let at = cursor(event);
+    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(at) = at {
+        pending.at = Some(at);
+    }
+    // Where the pointer is decides whose event this is, and the answer is the
+    // rectangles the overlay drew last frame.
+    let over = at.is_some_and(|(x, y)| super::dock::occupied(x, y));
+
     match kind {
+        TYPE_MOUSE_MOVED => false,
+        TYPE_LEFT_MOUSE_DOWN => {
+            pending.holding = over;
+            if over {
+                pending.press = at;
+            }
+            over
+        }
+        TYPE_LEFT_MOUSE_UP => {
+            let held = std::mem::take(&mut pending.holding);
+            if held {
+                pending.released = true;
+            }
+            held
+        }
+        TYPE_LEFT_MOUSE_DRAGGED => {
+            if !pending.holding {
+                return false;
+            }
+            // SAFETY: `-deltaX` and `-deltaY` are `NSEvent`'s, taking nothing
+            // and returning `CGFloat`. Deltas rather than the absolute cursor:
+            // a drag driven by deltas cannot drift away from where the grab
+            // started, and a resize driven by absolute positions would jump the
+            // first time a conversion was a pixel out.
+            let (dx, dy) = unsafe {
+                (
+                    send0::<f64>(event, super::objc::sel("deltaX")) as f32,
+                    send0::<f64>(event, super::objc::sel("deltaY")) as f32,
+                )
+            };
+            // The deltas are in points and the windows are in pixels. The ratio
+            // is whatever the drawable's is, which the row height carries.
+            let scale = (ROW_HEIGHT.load(Relaxed) as f32 / 16.0).clamp(1.0, 3.0);
+            pending.delta.0 += dx * scale;
+            pending.delta.1 += dy * scale;
+            true
+        }
         TYPE_SCROLL_WHEEL => {
+            if !over {
+                return false;
+            }
             // SAFETY: `-scrollingDeltaY` and `-hasPreciseScrollingDeltas` are
             // `NSEvent`'s, taking nothing and returning a `CGFloat` and a
             // `BOOL`.
@@ -317,40 +289,13 @@ fn handle(event: Id) -> bool {
                 true => delta * row / 14.0,
                 false => delta * row * 3.0,
             };
-            // Scrolling *down* - a negative delta - reveals content further
-            // down, which is a larger offset.
-            state.scroll = (state.scroll - pixels).clamp(0.0, state.reach);
-            true
-        }
-        TYPE_LEFT_MOUSE_DRAGGED => {
-            // SAFETY: `-deltaX` and `-deltaY` are `NSEvent`'s, taking nothing
-            // and returning `CGFloat`. Deltas rather than the absolute cursor,
-            // even though [`cursor`] now provides one: a drag driven by deltas
-            // cannot drift away from where the grab started, and a resize driven
-            // by absolute positions would jump the first time a conversion was
-            // a pixel out.
-            let (dx, dy) = unsafe {
-                (
-                    send0::<f64>(event, super::objc::sel("deltaX")) as f32,
-                    send0::<f64>(event, super::objc::sel("deltaY")) as f32,
-                )
-            };
-            // The deltas are in points and the panel is in pixels. The ratio is
-            // whatever the drawable's is, which the row height carries.
-            let scale = (ROW_HEIGHT.load(Relaxed) as f32 / 16.0).clamp(1.0, 3.0);
-            state.drag(dx * scale, dy * scale);
+            let (x, y) = at.unwrap_or_default();
+            let carried = pending.wheel.map(|(.., p)| p).unwrap_or(0.0);
+            pending.wheel = Some((x, y, carried + pixels));
             true
         }
         _ => false,
     }
-}
-
-/// The panel's row height in pixels, so the wheel can scroll in rows.
-static ROW_HEIGHT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(16);
-
-/// Tell the input layer how tall a row is, for the wheel's benefit.
-pub fn set_row_height(pixels: f32) {
-    ROW_HEIGHT.store(pixels.max(1.0) as u32, Relaxed);
 }
 
 /// Put the monitor in, once, from the main thread.
@@ -427,114 +372,41 @@ extern "C" fn install_on_main(_context: *mut c_void) {
 mod tests {
     use super::*;
 
-    fn panel() -> State {
-        State {
-            scroll: 0.0,
-            x: 100.0,
-            y: 100.0,
-            width: 400.0,
-            height: 300.0,
-            reach: 0.0,
-            rect: (100.0, 100.0, 400.0, 300.0),
-            holding: None,
+    /// Both of these drive [`FOCUSED`], which is one flag for the process.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Draining twice does not deliver the same press twice.
+    ///
+    /// A press acted on in two consecutive frames is a window that jumps to the
+    /// front twice, or a button pressed twice - and the second one is invisible.
+    #[test]
+    fn a_press_is_delivered_once() {
+        let _serial = serial();
+        FOCUSED.store(true, Relaxed);
+        {
+            let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+            *pending = Pending::default();
+            pending.press = Some((10.0, 20.0));
+            pending.at = Some((10.0, 20.0));
         }
+        assert_eq!(drain().press, Some((10.0, 20.0)));
+        assert_eq!(drain().press, None);
+        FOCUSED.store(false, Relaxed);
     }
 
-    /// Where a press lands decides what a drag does, and the boundaries are the whole
-    /// of it.
+    /// Nothing is delivered while the guest has the mouse.
     #[test]
-    fn a_press_is_classified_by_where_it_lands() {
-        let state = panel();
-        assert!(
-            state.grip_at(300.0, 250.0) == Some(Grip::Move),
-            "the middle"
-        );
-        assert!(state.grip_at(1000.0, 1000.0).is_none(), "well outside");
-
-        let Some(Grip::Edge { right, bottom, .. }) = state.grip_at(499.0, 399.0) else {
-            panic!("the bottom-right corner is not a resize grip");
-        };
-        assert!(right && bottom, "the corner resizes in one direction only");
-
-        let Some(Grip::Edge {
-            left,
-            top,
-            right,
-            bottom,
-        }) = state.grip_at(101.0, 250.0)
-        else {
-            panic!("the left edge is not a resize grip");
-        };
-        assert!(left && !right && !top && !bottom, "the left edge alone");
-    }
-
-    /// **The property that makes a resize a resize.** Dragging the left edge
-    /// must leave the *right* edge exactly where it was; a version that only
-    /// changed the width would move the panel instead, and a version that only
-    /// changed the origin would drag it.
-    #[test]
-    fn resizing_an_edge_leaves_the_opposite_edge_alone() {
-        for (grip, dx, dy) in [
-            (
-                Grip::Edge {
-                    left: true,
-                    right: false,
-                    top: false,
-                    bottom: false,
-                },
-                40.0,
-                0.0,
-            ),
-            (
-                Grip::Edge {
-                    left: false,
-                    right: false,
-                    top: true,
-                    bottom: false,
-                },
-                0.0,
-                40.0,
-            ),
-        ] {
-            let mut state = panel();
-            let (right, bottom) = (state.x + state.width, state.y + state.height);
-            state.holding = Some(grip);
-            state.drag(dx, dy);
-            assert!(
-                (state.x + state.width - right).abs() < 1e-3,
-                "the right edge moved from {right} to {}",
-                state.x + state.width,
-            );
-            assert!(
-                (state.y + state.height - bottom).abs() < 1e-3,
-                "the bottom edge moved from {bottom} to {}",
-                state.y + state.height,
-            );
+    fn an_unfocused_overlay_gets_nothing() {
+        let _serial = serial();
+        FOCUSED.store(false, Relaxed);
+        {
+            let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+            pending.press = Some((10.0, 20.0));
         }
-    }
-
-    /// A panel cannot be dragged smaller than it can be grabbed again.
-    #[test]
-    fn a_resize_stops_at_the_minimum() {
-        let mut state = panel();
-        state.holding = Some(Grip::Edge {
-            left: false,
-            right: true,
-            top: false,
-            bottom: true,
-        });
-        state.drag(-10_000.0, -10_000.0);
-        assert_eq!(state.width, MIN_WIDTH);
-        assert_eq!(state.height, MIN_HEIGHT);
-    }
-
-    /// Moving changes neither dimension.
-    #[test]
-    fn moving_does_not_resize() {
-        let mut state = panel();
-        state.holding = Some(Grip::Move);
-        state.drag(25.0, -15.0);
-        assert_eq!((state.x, state.y), (125.0, 85.0));
-        assert_eq!((state.width, state.height), (400.0, 300.0));
+        let events = drain();
+        assert!(events.press.is_none() && events.at.is_none());
     }
 }

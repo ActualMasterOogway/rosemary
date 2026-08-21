@@ -3,6 +3,7 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
+pub mod dock;
 pub mod draw;
 pub mod font;
 pub mod gl;
@@ -35,7 +36,7 @@ pub fn enabled() -> bool {
 /// Whether the present hooks should do anything.
 static ARMED: AtomicBool = AtomicBool::new(false);
 
-/// Whether the statistics panel is open.
+/// Whether the overlay's windows are on screen at all.
 static PANEL: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn armed() -> bool {
@@ -60,7 +61,7 @@ pub fn install() {
         PANEL.store(true, Relaxed);
     }
     eprintln!(
-        "rosetta3: gui  shift+F7 statistics, F6 record, F8 mouse, F9 entry counts, F10 sampling"
+        "rosetta3: gui  shift+F7 windows, F6 record, F8 mouse, F9 entry counts, F10 sampling"
     );
 }
 
@@ -131,7 +132,7 @@ pub(crate) fn pressed(key: hotkey::Key) {
             let open = !PANEL.fetch_xor(true, Relaxed);
             // On stderr too.
             eprintln!(
-                "rosetta3: gui  statistics panel {}",
+                "rosetta3: gui  the overlay's windows are {}",
                 match open {
                     true => "opened",
                     false => "closed",
@@ -151,6 +152,9 @@ pub(crate) fn compose(width: f32, height: f32) -> Option<DrawList> {
     let panel_open = PANEL.load(Relaxed);
     let recording = trace::recording_for();
     let toast = trace::toast();
+    if !panel_open {
+        dock::dismiss();
+    }
     if !panel_open && recording.is_none() && toast.is_none() {
         return None;
     }
@@ -163,9 +167,10 @@ pub(crate) fn compose(width: f32, height: f32) -> Option<DrawList> {
         );
         return None;
     };
+    input::set_row_height((atlas.line_h * 1.25).round());
     let mut list = DrawList::new(width, height, atlas);
     if panel_open {
-        panel::statistics(&mut list, model);
+        dock::run(&mut list, model, input::drain());
     }
     // A recording always shows, panel or no panel. An overlay that records the
     // user's process without saying so on screen is not one worth having.
@@ -182,7 +187,7 @@ pub(crate) fn compose(width: f32, height: f32) -> Option<DrawList> {
         }
     }
     if list.is_empty() {
-        say_once("the panel produced no geometry, which is a bug in the panel");
+        say_once("the windows produced no geometry, which is a bug in the layout");
         return None;
     }
     Some(list)
@@ -221,13 +226,14 @@ fn font_size(height: f32) -> f32 {
 mod tests {
     use super::*;
 
-    /// Serializes the tests that drive [`PANEL`].
+    /// Serializes the tests that drive [`PANEL`], and the ones in [`dock`] that
+    /// reach the same windows from the other side.
+    ///
+    /// A panicking test leaves the flag wrong for the next one, which the
+    /// `store` at the top of each of these already fixes; the lock itself only
+    /// has to stay usable.
     fn panel() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: Mutex<()> = Mutex::new(());
-        // A panicking test leaves the flag wrong for the next one, which the
-        // `store` at the top of each of these already fixes; the lock itself
-        // only has to stay usable.
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        dock::serial()
     }
 
     /// Everything both backends share, exercised without a GPU.
@@ -243,10 +249,11 @@ mod tests {
         assert!(compose(1920.0, 1080.0).is_none());
 
         PANEL.store(true, Relaxed);
-        let list = compose(1920.0, 1080.0).expect("an open panel produces a draw list");
+        dock::reset();
+        let list = compose(1920.0, 1080.0).expect("an open overlay produces a draw list");
         assert!(
             list.vertices.len() > 600,
-            "the panel drew only {} vertices, which is too few to be the panel",
+            "the overlay drew only {} vertices, which is too few to be the windows",
             list.vertices.len(),
         );
         // Every vertex inside the surface, because a projection that is off by a
@@ -263,27 +270,26 @@ mod tests {
         PANEL.store(false, Relaxed);
     }
 
-    /// A scrolled panel stays inside its own rectangle.
+    /// Every window stays inside the surface, however short it is.
     ///
-    /// Scrolling without clipping does not look like a scrolling bug - it looks like
-    /// the overlay is drawing over the game, in rows that appear above the panel and
-    /// never go away.
+    /// Drawing outside does not look like a layout bug - it looks like the
+    /// overlay is scribbling over the game, in rows that never go away.
     #[test]
-    fn a_scrolled_panel_draws_only_inside_itself() {
+    fn the_windows_draw_only_inside_the_surface() {
         let _panel = panel();
         if font::atlas(13.0).is_none() {
             return;
         }
+        dock::reset();
         PANEL.store(true, Relaxed);
-        // A surface short enough that the panel certainly overflows it, which is
-        // the only case scrolling exists for.
-        let list = compose(1280.0, 320.0).expect("an open panel produces a draw list");
-        let (x, y, ..) = input::view();
+        // A surface short enough that the windows certainly overflow it, which
+        // is the only case scrolling exists for.
+        let list = compose(1280.0, 320.0).expect("an open overlay produces a draw list");
         for vertex in &list.vertices {
-            let [vx, vy] = vertex.pos;
+            let [x, y] = vertex.pos;
             assert!(
-                vx >= x - 1.0 && vy >= y - 1.0 && vy <= 320.0,
-                "a vertex at ({vx}, {vy}) escaped a panel at ({x}, {y}) on a 1280x320 surface",
+                (0.0..=1280.0).contains(&x) && (0.0..=320.0).contains(&y),
+                "a vertex at ({x}, {y}) escaped a 1280x320 surface",
             );
         }
         PANEL.store(false, Relaxed);
@@ -347,12 +353,12 @@ mod tests {
         pressed(hotkey::Key::Statistics);
         assert!(
             PANEL.load(Relaxed),
-            "the first press did not open the panel"
+            "the first press did not open the overlay"
         );
         pressed(hotkey::Key::Statistics);
         assert!(
             PANEL.load(Relaxed),
-            "a duplicate delivery of one press closed the panel again",
+            "a duplicate delivery of one press closed the overlay again",
         );
         PANEL.store(false, Relaxed);
     }

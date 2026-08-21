@@ -4,6 +4,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Instant;
 
+use super::dock::Field;
 use super::draw::{Color, Ui, color, duration};
 
 /// The template recorded when nothing else is asked for.
@@ -27,6 +28,36 @@ struct State {
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
+
+/// Where recordings are written, once anyone has said.
+///
+/// Its own lock rather than a field of [`State`]: the panel reads it while it
+/// is drawing, and the editor writes it from the event thread.
+static DIRECTORY: Mutex<Option<String>> = Mutex::new(None);
+
+/// The directory recordings go to: what the panel set, else the environment,
+/// else the working directory.
+pub fn directory() -> String {
+    if let Some(set) = DIRECTORY.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        return set.clone();
+    }
+    std::env::var("ROSETTA3_GUI_TRACE_DIR").unwrap_or_else(|_| ".".into())
+}
+
+/// Point recordings somewhere else. An empty path means the working directory.
+pub fn set_directory(path: &str) {
+    let path = path.trim();
+    let mut guard = DIRECTORY.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(match path.is_empty() {
+        true => ".".to_string(),
+        false => path.trim_end_matches('/').to_string(),
+    });
+}
+
+/// The template being recorded.
+fn template() -> String {
+    std::env::var("ROSETTA3_GUI_TEMPLATE").unwrap_or_else(|_| DEFAULT_TEMPLATE.to_string())
+}
 
 /// How long a message stays on screen after the keystroke that produced it.
 const TOAST: std::time::Duration = std::time::Duration::from_secs(6);
@@ -71,8 +102,7 @@ fn start(state: &mut State) {
         );
         return;
     };
-    let template =
-        std::env::var("ROSETTA3_GUI_TEMPLATE").unwrap_or_else(|_| DEFAULT_TEMPLATE.to_string());
+    let template = template();
     let output = output_path();
 
     // `--attach` rather than `--launch`.
@@ -165,13 +195,40 @@ fn output_path() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or_default();
-    let directory = std::env::var("ROSETTA3_GUI_TRACE_DIR").unwrap_or_else(|_| ".".into());
+    let directory = directory();
     format!("{directory}/{program}.{}.{stamp}.trace", std::process::id())
+}
+
+/// What the search for a usable `xctrace` found, once it has run.
+static FOUND: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+
+/// The answer, if it is already known. Never blocks.
+///
+/// The search runs `xctrace version`, and spawning a process is not something a
+/// render thread can be made to wait for: the panel asks this every frame and
+/// says nothing until [`probe`] has an answer.
+fn found() -> Option<Option<&'static str>> {
+    FOUND.get().copied()
+}
+
+/// Start the search, off the render thread, at most once.
+fn probe() {
+    static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if ASKED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("rosetta3-gui-xctrace".into())
+        .spawn(|| {
+            xctrace();
+        });
+    if spawned.is_err() {
+        super::say_once("could not look for xctrace: the probe thread would not start");
+    }
 }
 
 /// A working `xctrace`, found by running one.
 fn xctrace() -> Option<&'static str> {
-    static FOUND: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
     *FOUND.get_or_init(|| {
         [
             "xctrace",
@@ -189,43 +246,90 @@ fn xctrace() -> Option<&'static str> {
     })
 }
 
+/// The xctrace window: where recordings go, and the button that takes one.
+pub fn window(ui: &mut Ui) {
+    ui.heading("XCTRACE");
 
-/// The panel's trace section.
-pub fn describe(ui: &mut Ui) {
-    ui.heading("INSTRUMENTS");
-    let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    let state = guard.as_ref();
-    match state.and_then(|s| s.recording.as_ref()) {
-        Some(recording) => {
-            ui.row(
-                "recording",
-                &format!(
-                    "{} into {}",
-                    duration(recording.started.elapsed()),
-                    recording.output
-                ),
-                color::ALERT,
-            );
-            ui.line(
-                "shift+F6 stops it and writes the map beside it",
-                color::MUTED,
-            );
+    // The buffer while it is being typed into, so a half-typed path is not
+    // written to the setting behind it on every keystroke.
+    let editing = super::dock::editing(Field::TraceDir);
+    let shown = editing.clone().unwrap_or_else(directory);
+    if ui.field("trace directory", &shown, editing.is_some()) {
+        match editing {
+            // A second click on the box being edited keeps the caret there.
+            Some(_) => {}
+            None => super::dock::begin_edit(Field::TraceDir, &shown),
+        }
+    }
+    match editing.is_some() {
+        true => ui.line("return keeps it, escape puts it back", color::MUTED),
+        false => ui.line("click the box to type a path", color::MUTED),
+    }
+    ui.row("template", &template(), color::VALUE);
+
+    let (recording, output) = {
+        let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref().and_then(|s| s.recording.as_ref()) {
+            Some(r) => (Some(r.started.elapsed()), r.output.clone()),
+            None => (None, String::new()),
+        }
+    };
+
+    ui.gap(0.4);
+    let pressed = match recording {
+        Some(_) => ui.button("stop recording", true),
+        None => ui.button("start recording", false),
+    };
+    ui.newline();
+    ui.gap(0.3);
+    if pressed {
+        toggle();
+    }
+
+    match recording {
+        Some(elapsed) => {
+            ui.row("recording", &duration(elapsed), color::ALERT);
+            ui.row("into", &output, color::VALUE);
+            ui.line("the map is written beside it when this stops", color::MUTED);
         }
         None => {
             ui.row(
-                "shift+F6",
-                "attach xctrace and record cycles, branch misses, cache misses",
+                "attaches to",
+                &format!("pid {}", std::process::id()),
                 color::VALUE,
+            );
+            ui.line(
+                "records cycles, branch misses and cache misses",
+                color::MUTED,
             );
             ui.line(
                 "needs the full Xcode, and the driver signed with get-task-allow",
                 color::MUTED,
             );
+            probe();
+            match found() {
+                Some(None) => ui.line(
+                    "no working xctrace: this needs Xcode, not the Command Line Tools",
+                    color::ALERT,
+                ),
+                Some(Some(path)) => ui.row("xctrace", path, color::MUTED),
+                None => ui.line("looking for xctrace", color::MUTED),
+            }
         }
     }
-    if let Some((at, message, colour)) = state.and_then(|s| s.said.as_ref())
-        && at.elapsed() < TOAST
-    {
-        ui.line(message, *colour);
+
+    // The last outcome, kept on screen a little after the keystroke that
+    // produced it: a button that silently did nothing is worse than no button.
+    let said = {
+        let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .and_then(|s| s.said.as_ref())
+            .filter(|(at, ..)| at.elapsed() < TOAST)
+            .map(|(_, message, colour)| (message.clone(), *colour))
+    };
+    if let Some((message, colour)) = said {
+        ui.gap(0.3);
+        ui.line(&message, colour);
     }
 }
