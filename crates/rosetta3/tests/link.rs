@@ -19,17 +19,22 @@
 //! introduces silently. The counters say how many entries never reached the run
 //! loop, so the second claim is one number.
 //!
-//! There are **three** shapes of linking to hold to those claims. A host-resolved
-//! link (`ROSETTA3_NO_PINNED_LINK=1`) hands the successor back to
-//! `cache::follow_links`; a pinned link branches straight into it with part of the
-//! guest register file still in host registers (`rosetta3::jit::pinned_link_abi`),
-//! and is the default; and either resolves its successor from a probe shared by
-//! the region or from one per exit site (`ROSETTA3_INLINE_LINK_PROBES=1`). The
-//! first claim is asserted for all of them and *between* them, since a pinned ABI
-//! moves where a guest register lives and a per-site probe moves where a successor
-//! is resolved - the two changes most able to corrupt one. The second is asserted
-//! of the host-resolved shape only, because a pinned link is a branch inside
-//! translated code and deliberately increments nothing.
+//! There are several shapes of linking to hold to those claims, and they are
+//! independent knobs rather than levels. A host-resolved link
+//! (`ROSETTA3_NO_PINNED_LINK=1`) hands the successor back to `cache::follow_links`;
+//! a pinned link branches straight into it with part of the guest register file
+//! still in host registers (`rosetta3::jit::pinned_link_abi`), and is the default.
+//! Either resolves a successor from a probe shared by the region or from one per
+//! exit site (`ROSETTA3_INLINE_LINK_PROBES=1`). And either resolves it out of the
+//! shared table or out of a table the run loop never touches: a **link cell** for a
+//! destination the lift already knew (`ROSETTA3_NO_LINK_CELLS=1`), and the
+//! **call-return ring** for the one exit that has no constant to specialize on
+//! (`ROSETTA3_NO_CALL_RETURN=1`). The first claim is asserted for all of them and
+//! *between* them, since each moves a different thing - where a guest register
+//! lives, which branch carries a successor, which table it comes out of - and each
+//! is a way to arrive somewhere the guest did not go. The second is asserted of the
+//! host-resolved shape only, because a pinned link is a branch inside translated
+//! code and deliberately increments nothing.
 
 mod common;
 
@@ -47,16 +52,30 @@ const UNPINNED: (&str, &str) = ("ROSETTA3_NO_PINNED_LINK", "1");
 /// One probe per exit site rather than one shared by the region.
 const PER_SITE: (&str, &str) = ("ROSETTA3_INLINE_LINK_PROBES", "1");
 
+/// Static edges hashed into the shared table rather than taken through a cell of
+/// the region's own. See `rosetta3::jit::link_cells`.
+const NO_CELLS: (&str, &str) = ("ROSETTA3_NO_LINK_CELLS", "1");
+
+/// A `RET` hashed into the table like any other exit, rather than popped off the
+/// call-return ring. See `rosetta3::jit::call_return_stack`.
+const NO_CALLRET: (&str, &str) = ("ROSETTA3_NO_CALL_RETURN", "1");
+
 /// Every shape of the mechanism, named, as the environment that selects it.
 ///
-/// Four rather than two because each pair fails differently: unlinked against
-/// linked is about *who decides* what runs next, host-resolved against pinned is
-/// about *where a guest register lives* while it does, and shared against per-site
-/// is about *which branch* carries a region's successors.
-const WAYS: [(&str, &[(&str, &str)]); 4] = [
+/// Six rather than two because each pair fails differently: unlinked against linked
+/// is about *who decides* what runs next, host-resolved against pinned is about
+/// *where a guest register lives* while it does, shared against per-site is about
+/// *which branch* carries a region's successors, and the last two are about *which
+/// table an exit resolves out of* - a cell of the region's own for a destination the
+/// lift already knew, and the call-return ring for the one exit that has no constant
+/// to know. All four of those are ways to arrive at the wrong successor, and a
+/// program that agrees with itself across all six is one where none of them did.
+const WAYS: [(&str, &[(&str, &str)]); 6] = [
     ("pinned links, one probe per region", &[]),
     ("pinned links, a probe per exit site", &[PER_SITE]),
     ("host-resolved links", &[UNPINNED]),
+    ("static edges through the shared table", &[NO_CELLS]),
+    ("returns through the shared table", &[NO_CALLRET]),
     ("no linking", &[OFF]),
 ];
 
@@ -338,4 +357,59 @@ fn a_pinned_abi_turns_entries_into_chains() {
         "a pinned run entered translated code {pinned} times against the host-resolved \
          run's {host_resolved}; links are not being taken as branches"
     );
+}
+
+/// A destination the lift already knew is reached through a **cell**, and a `RET`
+/// through the **call-return ring** - the two things the switch to microlift's
+/// runtime is for.
+///
+/// Counted rather than timed. A cell is installed by the shared cache at the moment
+/// the target is compiled, so "how many are live" is a number the runtime already
+/// keeps, and it is the one number that separates the mechanism working from the
+/// mechanism being compiled in and never filled. `cells N live, M waiting` is that
+/// line; `M` is what would be non-zero if cells were being allocated for targets
+/// nothing ever translated, which is a different failure from allocating none.
+///
+/// The fixture is the polymorphic one, because a region with a single successor
+/// would pass this with one cell and say nothing about de-duplication by target.
+#[test]
+fn a_static_edge_is_taken_through_a_cell_of_its_own() {
+    let Some(path) = polylink_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
+
+    // `rosetta3: stats  cache ...  cells N live, M waiting (...)  links ...`
+    let cells = |env: &[(&str, &str)]| -> (usize, usize) {
+        let (status, _, err) = run_guest_env(env, &path, &[]);
+        assert_eq!(status, Some(0), "stderr: {err}");
+        let line = err
+            .lines()
+            .find(|line| line.contains(" cells "))
+            .unwrap_or_else(|| panic!("no cache line in the stats; {err}"));
+        let after = line.split_once(" cells ").expect("just matched").1;
+        let (live, rest) = after.split_once(" live, ").expect("malformed cells item");
+        let (waiting, _) = rest.split_once(" waiting").expect("malformed cells item");
+        (
+            live.parse().unwrap_or_else(|_| panic!("{line:?}")),
+            waiting.parse().unwrap_or_else(|_| panic!("{line:?}")),
+        )
+    };
+
+    let (live, waiting) = cells(&[("ROSETTA3_STATS", "1")]);
+    assert!(live > 0, "no link cells were installed");
+    assert_eq!(waiting, 0, "{waiting} cell(s) never found their target");
+
+    // Without the ring, the `CallReturn` cells are never allocated and the count
+    // drops to the static edges alone. That the two knobs move the same number in
+    // the same direction is what says the ring is really riding on cells.
+    let (without_ring, _) = cells(&[("ROSETTA3_STATS", "1"), NO_CALLRET]);
+    assert!(
+        without_ring < live,
+        "turning the call-return ring off left all {live} cell(s) in place; \
+         returns are not being predicted"
+    );
+
+    // And with cells off there are none at all - which is what says the numbers
+    // above measure the mechanism rather than counting exits.
+    assert_eq!(cells(&[("ROSETTA3_STATS", "1"), NO_CELLS]), (0, 0));
 }

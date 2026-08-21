@@ -333,6 +333,13 @@ pub fn lifter_config_base() -> LifterConfig {
         // address looked up.
         block_link: crate::jit::block_linking().then(crate::thread::link_config),
         inline_link_probes: crate::jit::inline_link_probes(),
+        // A cell of its own for every exit whose destination the lift already
+        // knows, so a static edge is a load and a branch rather than a hash of an
+        // address that was a constant all along.
+        link_cells: crate::jit::link_cells(),
+        // And a ring of `<return address, cell>` frames for the exit that has no
+        // constant to specialize on. See [`crate::jit::call_return_stack`].
+        call_return_stack: crate::jit::call_return_stack(),
         // `exit_trampoline_address` is left at its default `None`, and that
         // is a decision rather than an omission.
         ..LifterConfig::default()

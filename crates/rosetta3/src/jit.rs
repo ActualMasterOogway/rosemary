@@ -5,6 +5,7 @@ use cranelift_codegen::settings::{self, Configurable};
 use microlift::MicroliftError;
 use microlift::arch::x86_64::pin;
 use microlift::backend::CraneliftBackend;
+use microlift::core::callret::CallRetConfig;
 use microlift::core::pin::PinnedAbi;
 use static_init::dynamic;
 
@@ -19,6 +20,12 @@ pub const NO_BLOCK_LINK_ENV: &str = "ROSETTA3_NO_BLOCK_LINK";
 pub const NO_PINNED_LINK_ENV: &str = "ROSETTA3_NO_PINNED_LINK";
 /// Gives each exit site its own link probe instead of sharing one per region.
 pub const INLINE_LINK_PROBES_ENV: &str = "ROSETTA3_INLINE_LINK_PROBES";
+/// Turns [`link_cells`] off, leaving every exit to the shared table probe.
+pub const NO_LINK_CELLS_ENV: &str = "ROSETTA3_NO_LINK_CELLS";
+/// Turns [`call_return_stack`] off, leaving `RET` to the table probe.
+pub const NO_CALL_RETURN_ENV: &str = "ROSETTA3_NO_CALL_RETURN";
+/// How many frames the per-thread call-return ring holds. A power of two.
+pub const CALLRET_FRAMES_ENV: &str = "ROSETTA3_CALLRET_FRAMES";
 /// Replaces the pinned register set: a comma-separated list of x86-64 register
 /// names, e.g. `ROSETTA3_PINNED_REGS=rsp,rax,rdi,rsi,rbp`.
 pub const PINNED_REGS_ENV: &str = "ROSETTA3_PINNED_REGS";
@@ -304,6 +311,73 @@ pub fn inline_link_probes() -> bool {
     #[dynamic]
     static ON: bool = !boolean_env(INLINE_LINK_PROBES_ENV, false, "probes stay shared");
     *ON
+}
+
+/// Whether an exit whose destination is known at lift time gets a cell of its own -
+/// microlift's `LifterConfig::link_cells`.
+///
+/// The cell is a fast path in front of the table probe, not a replacement for it: a
+/// load and a branch against the probe's shift, mask, scale, add, load and compare,
+/// and - the part that is not a constant factor - a lookup that *cannot collide*.
+/// Two hot targets sixteen bytes apart share a table row and evict each other
+/// forever; two cells cannot. The cost is region size, which microlift measures at
+/// +28 bytes of aarch64 `.text` per exit plus 32 bytes of data per distinct target.
+///
+/// Inert unless [`block_linking`] is on, which is what the `&&` says.
+pub fn link_cells() -> bool {
+    #[dynamic]
+    static ON: bool = block_linking() && boolean_env(NO_LINK_CELLS_ENV, false, "cells stay on");
+    *ON
+}
+
+/// The per-thread call-return ring, or `None` to hash every `RET` into the shared
+/// table like any other exit - microlift's `LifterConfig::call_return_stack`.
+///
+/// A `RET` is the most common linkable exit a real program has and the one the table
+/// probe serves worst, because the popped address is a runtime value with nothing to
+/// specialize. A frame pushed at each `call` names the cell to enter on the way back,
+/// which turns the return into one load and one compare.
+///
+/// [`CALLRET_FRAMES`] frames deep by default. Deeper than the guest recurses costs
+/// nothing but memory; shallower costs the oldest frames a probe on the way out, which
+/// is a hit rate and never a wrong answer - see microlift's `core::callret`.
+pub fn call_return_stack() -> Option<CallRetConfig> {
+    #[dynamic]
+    static CONFIG: Option<CallRetConfig> = {
+        // Cells first: a frame names a cell, so there is nothing for one to hold
+        // without them.
+        if !link_cells() || !boolean_env(NO_CALL_RETURN_ENV, false, "the ring stays on") {
+            return None;
+        }
+        Some(CallRetConfig::new(callret_frames()))
+    };
+    *CONFIG
+}
+
+/// How deep the call-return ring is, unless [`CALLRET_FRAMES_ENV`] says otherwise.
+///
+/// 1024 frames is 16 KiB a thread, against a call depth that a program which is not
+/// recursing spends its life in the low tens.
+pub const CALLRET_FRAMES: u32 = 1024;
+
+/// The frame count this run uses.
+fn callret_frames() -> u32 {
+    let Ok(value) = std::env::var(CALLRET_FRAMES_ENV) else {
+        return CALLRET_FRAMES;
+    };
+    match value.trim().parse::<u32>() {
+        // A non-power-of-two would panic inside `CallRetConfig::new`, and a
+        // zero-frame ring is a mask of `-1`. Both are refused here, where the
+        // variable that caused it can be named.
+        Ok(frames) if frames.is_power_of_two() => frames,
+        _ => {
+            eprintln!(
+                "rosetta3: {CALLRET_FRAMES_ENV}={value:?} is not a power of two; \
+                 using {CALLRET_FRAMES}"
+            );
+            CALLRET_FRAMES
+        }
+    }
 }
 
 /// Which guest registers this runtime keeps in **host registers** across a link, or

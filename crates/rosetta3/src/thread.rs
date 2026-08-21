@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use microlift::arch::x86_64::context::RegisterContext;
+use microlift::core::callret::CallRetEntry;
 use microlift::core::link::{BlockLinkConfig, BlockLinkEntry};
+use microlift::runtime::{CallRetStack, LinkTable};
 use static_init::dynamic;
 
 use crate::stack::GuestStack;
@@ -163,7 +165,7 @@ pub struct ThreadState {
     /// Exception headers whose `catch` blocks are running, innermost last.
     caught: RefCell<Vec<u64>>,
     /// Translations this thread has already entered, by the PC it entered them
-    /// at. See [`CodeWindow`].
+    /// at, plus the two tables lifted code reads. See [`CodeWindow`].
     code: CodeWindow,
 }
 
@@ -301,15 +303,36 @@ impl ThreadState {
             None => self.rsp.get(),
         }
     }
+
+    /// How deep into the call-return ring the entry below this one is.
+    ///
+    /// The ring is per *thread* and a `RegisterContext` is per *entry*, so a nested
+    /// entry starting at zero would push its first frame over the outermost frame of
+    /// the entry that called it. That is not a correctness problem - a clobbered frame
+    /// fails its `guest_pc` compare and falls back to the probe - but it costs the
+    /// outer chain its predictions for no reason, and the live offset is right there
+    /// in the context the outer entry published. Zero when there is no outer entry,
+    /// which is where an untouched ring starts.
+    pub(crate) fn live_callret_off(&self) -> u64 {
+        self.published.context().map_or(0, |ctx| ctx.callret_off)
+    }
 }
 
-/// One thread's window onto the code cache:
+/// One thread's window onto the code cache, and the two tables lifted code reads.
 ///
 /// Never invalidated, for the reason the cache itself is never invalidated.
 pub(crate) struct CodeWindow {
     slots: RefCell<Box<[Option<(u64, std::sync::Arc<crate::cache::Translation>)>]>>,
-    /// The rows lifted code probes, one per [`slots`](Self::slots) index.
-    links: UnsafeCell<Box<[BlockLinkEntry]>>,
+    /// The rows lifted code probes. Microlift's own table rather than a bare array,
+    /// so the slot a probe computes and the slot a publish writes are the same
+    /// function called twice and not two copies of the same arithmetic.
+    links: UnsafeCell<LinkTable>,
+    /// The `<return address, link cell>` frames a `call` pushes and a `RET` pops, or
+    /// `None` when this run predicts returns through the table like any other exit.
+    ///
+    /// Boxed inside the `UnsafeCell` for the same reason the table is: the pointer
+    /// handed to `ctx.callret_base` must outlive every region entered with it.
+    callret: Option<UnsafeCell<CallRetStack>>,
 }
 
 /// How many PCs one thread remembers. A power of two, so the index is a mask.
@@ -338,7 +361,9 @@ impl CodeWindow {
     fn new() -> Self {
         CodeWindow {
             slots: RefCell::new(vec![None; WINDOW].into_boxed_slice()),
-            links: UnsafeCell::new(vec![BlockLinkEntry::default(); WINDOW].into_boxed_slice()),
+            links: UnsafeCell::new(LinkTable::new(link_config())),
+            callret: crate::jit::call_return_stack()
+                .map(|config| UnsafeCell::new(CallRetStack::new(config))),
         }
     }
 
@@ -356,10 +381,22 @@ impl CodeWindow {
     /// wants it.
     pub(crate) fn link_table(&self) -> *mut BlockLinkEntry {
         // SAFETY: taking the address of the allocation, not reading it. The
-        // `Box` is owned by this `CodeWindow` and never reallocated, so the
+        // table is owned by this `CodeWindow` and never reallocated, so the
         // address is stable for the life of the thread - which is what lets it
         // be handed to compiled code at all.
         unsafe { (*self.links.get()).as_mut_ptr() }
+    }
+
+    /// The address of this thread's call-return ring, or null when it has none -
+    /// which is not a special case: a null `ctx.callret_base` is what every emitted
+    /// push and pop tests first, and it means "do not predict".
+    pub(crate) fn callret_base(&self) -> *mut CallRetEntry {
+        match &self.callret {
+            // SAFETY: as `link_table` - the address of an allocation this
+            // `CodeWindow` owns for the life of the thread.
+            Some(stack) => unsafe { (*stack.get()).as_mut_ptr() },
+            None => core::ptr::null_mut(),
+        }
     }
 
     /// The translation this thread last entered at `pc`, if it still holds one.
@@ -370,24 +407,36 @@ impl CodeWindow {
         }
     }
 
-    /// Remember that `translation` may be entered at `pc`.
+    /// Remember that `translation` may be entered at `pc`, and make it linkable from
+    /// this thread at **every** address it can be resumed at.
+    ///
+    /// Not just at `pc`: publishing the whole set is what lets a link to an address
+    /// this thread has never entered hit anyway, and it is the protocol microlift's
+    /// own `ThreadRuntime::publish` states - a row must exist at exactly the resume
+    /// points and nowhere else, since an address that is not one either runs the
+    /// region from the top or exits having made no progress.
+    ///
+    /// A row for an address whose slot is taken evicts the row that was there. That
+    /// costs a lookup and nothing else, which is what makes publishing the extra rows
+    /// safe to do unconditionally.
     pub(crate) fn put(&self, pc: u64, translation: &std::sync::Arc<crate::cache::Translation>) {
         let slot = Self::slot(pc);
         // `try_borrow_mut` rather than `borrow_mut`.
         if let Ok(mut slots) = self.slots.try_borrow_mut() {
             slots[slot] = Some((pc, std::sync::Arc::clone(translation)));
-            // The link row goes in with the `Arc`, and only with it: the
-            // reference held here is what keeps the code address in the row
-            // mapped, so a row published without one - or left behind when one
-            // is replaced - is the one way this could name freed pages. The
-            // borrow above is also what serialises this against a nested run
-            // loop writing the same slot.
+            // The rows go in with the `Arc`, and only with it: a row names code
+            // that must stay mapped, and the cache is what keeps it so - see
+            // `Published::retained`. The borrow above is also what serialises this
+            // against a nested run loop writing the same slot.
             //
             // SAFETY: the only writer, on the thread that owns this window, at a
             // point where this thread is in the run loop rather than inside a
             // region. See the field's own note.
             unsafe {
-                (*self.links.get())[slot] = translation.link_row(pc);
+                let table = &mut *self.links.get();
+                for &at in &translation.resume_points {
+                    table.publish(translation.row(at));
+                }
             }
         }
     }

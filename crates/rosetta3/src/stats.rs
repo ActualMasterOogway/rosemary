@@ -319,6 +319,29 @@ pub fn report() {
         BYTES.load(Relaxed),
         instructions as f64 / regions as f64,
     );
+    // What the *shared* cache saw, which is the other half of the linking story: the
+    // counters above say how often the run loop was entered, and these say how often
+    // it had to look an address up to do it. `miss_rate` is over the lookups that
+    // reached the cache at all - a hit in this thread's window or in the lock-free
+    // index never becomes one, which is the point.
+    if let Some(vm) = crate::thunk::current() {
+        let cache = vm.cache_stats();
+        let (installed, pending) = vm.cell_counts();
+        eprintln!(
+            "rosetta3: stats  cache {} lookup(s), {} hit(s){}  \
+             cells {installed} live, {pending} waiting ({} filled, {} retracted)  \
+             links {} followed",
+            cache.lookups,
+            cache.hits,
+            cache
+                .miss_rate()
+                .map(|rate| format!(" ({:.1}% missed)", 100.0 * rate))
+                .unwrap_or_default(),
+            cache.cells_installed,
+            cache.cells_retracted,
+            cache.links_followed,
+        );
+    }
     eprintln!(
         "rosetta3: stats  select {select:.2?} ({:.1}%)  lift {lift:.2?} ({:.1}%)  \
          compile {compile:.2?} ({:.1}%)  total {total:.2?} ({:.1}%) of {wall:.2?}",

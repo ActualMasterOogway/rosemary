@@ -646,6 +646,17 @@ impl Vm {
         self.cache.len()
     }
 
+    /// What the shared code cache has been asked to do, and how much of it block
+    /// linking spared it.
+    pub fn cache_stats(&self) -> microlift::runtime::CacheStats {
+        self.cache.stats()
+    }
+
+    /// `(installed, pending)` link cells. See [`crate::cache::CodeCache::cell_counts`].
+    pub fn cell_counts(&self) -> (usize, usize) {
+        self.cache.cell_counts()
+    }
+
     /// `(argc, argv, envp, apple)` for the entry point and the initializers.
     pub fn main_args(&self) -> (u64, u64, u64, u64) {
         crate::thread::current().map_or((0, 0, 0, 0), |t| t.main_args())
@@ -754,6 +765,18 @@ impl Vm {
         // one place every entry into guest code passes through, rather than
         // wherever a context happens to be built. See [`crate::thread`].
         ctx.gs_base = crate::thread::tsd_base();
+        // The ring a `call` pushes its return address onto and a `RET` pops it from,
+        // for the same reason and in the same place as `gs_base`: it is a fact about
+        // this thread, and this is the one point every entry into guest code passes
+        // through. Null when returns are not predicted, which the emitted push and pop
+        // test for and which is therefore not a special case here.
+        ctx.callret_base = state.code().callret_base();
+        // Resumed where the entry below this one left off rather than at the top, so a
+        // callback's first `call` does not overwrite the frame its caller will return
+        // through. Read from that entry's own context, which is still the published
+        // one here - `publish_context` below is what displaces it. See
+        // [`crate::thread::ThreadState::live_callret_off`].
+        ctx.callret_off = state.live_callret_off();
 
         let saved_rsp = state.rsp.get();
         state.rsp.set(rsp);
@@ -890,7 +913,7 @@ impl Vm {
             // have this loop do it.
             ctx.link_table = state.code().link_table();
             crate::stats::record_entry(missed);
-            let exit = translation.enter(ctx);
+            let exit = crate::cache::enter(&translation, ctx);
             state.rsp.set(ctx.rsp);
             // Reaching here at all is what makes this a probe miss: a linked exit
             // continues in guest code and never comes back to this loop.
