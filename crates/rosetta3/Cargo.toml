@@ -7,44 +7,15 @@ license.workspace = true
 
 [dependencies]
 machish.workspace = true
-# DWARF for `crate::lldb`, which is the only thing here that writes any. The
-# Mach-O around it is hand-written - see that module for why an object-file
-# crate could not express it.
 gimli.workspace = true
-# The shims call host libc directly (stdio for the `printf` family, `errno` for
-# diagnostics). `machish` keeps `libc` optional; the driver is `std`-only
-# anyway, so here it is unconditional.
 libc.workspace = true
-# For `iced_x86::Register`, which is what a `microlift` `GuestReg` payload
-# actually is. Resolving one is how an `ArgLocation::IntReg` becomes a field of
-# the guest register context; the alternative is matching raw register numbers.
-# Its formatter is also what renders `crate::lldb`'s x86-64 listings, out of the
-# same decode `microlift` lifted from rather than a second disassembler's guess.
 iced-x86 = "1"
-# A path dependency, deliberately outside this workspace: `machish` must stay
-# publishable and free of any microlift coupling, so the two only ever meet
-# here.
-microlift = { path = "../../../microlift", features = ["disasm"] }
-# Host->guest thunks are compiled, not assembled: a trampoline is a handful of
-# Cranelift IR instructions, and letting the compiler emit the prologue and the
-# argument moves is what keeps this crate free of hand-written arm64. Same
-# version as `microlift`'s, deliberately - the `Function` built here is handed
-# to `microlift::backend::CraneliftBackend`, so the two must be one crate.
-# `timing` is left out of the default features on purpose: it is the only one
-# carrying a `thread_local!`, and macOS destroys the main thread's TLS inside
-# `exit`, so a pass timer read from a guest `atexit` handler panics. Features
-# unify across the graph, so `microlift` drops it too.
+microlift = { git = "https://github.com/microlift/microlift", branch = "dev/block_linking", features = ["disasm"] }
 cranelift-codegen = { git = "https://github.com/microlift/wasmtime", branch = "microlift_experimental", version = "0.136.0-dev", default-features = false, features = ["std", "unwind", "host-arch"] }
 cranelift-frontend = {git = "https://github.com/microlift/wasmtime", branch = "microlift_experimental", version = "0.136.0-dev" }
-# Only for the host's `TargetFrontendConfig` (see `jit::frontend_config`), which
-# the frontend needs to describe the machine a `Function` is being built for.
-# The same crate microlift builds its ISA from, so the two agree by
-# construction.
 cranelift-native = { git = "https://github.com/microlift/wasmtime", branch = "microlift_experimental", version = "0.136.0-dev" }
 
 static_init = "1.0.4"
 
 [dev-dependencies]
-# The ABI tests call real host libSystem functions through the marshaller, and
-# `dlsym` them to find the addresses in the first place.
 libc.workspace = true
