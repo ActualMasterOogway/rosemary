@@ -30,6 +30,7 @@ pub mod bundle;
 pub mod cache;
 pub mod compat;
 pub mod cxxlib;
+pub mod dispatch;
 pub mod dyld;
 pub mod exec;
 pub mod fault;

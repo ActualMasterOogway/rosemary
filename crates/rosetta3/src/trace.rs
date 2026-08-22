@@ -1,13 +1,13 @@
 //! `ROSETTA3_TRACE_CALL`: reporting an intercepted call by name.
 
 use microlift::arch::x86_64::context::RegisterContext;
+use static_init::dynamic;
 
 /// Whether `ROSETTA3_TRACE_CALL` asked for this symbol.
 pub fn watching(symbol: &str) -> bool {
-    static WANTED: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    let wanted =
-        WANTED.get_or_init(|| wanted(std::env::var("ROSETTA3_TRACE_CALL").ok().as_deref()));
-    matches(wanted, symbol)
+    #[dynamic]
+    static WANTED: Vec<String> = wanted(std::env::var("ROSETTA3_TRACE_CALL").ok().as_deref());
+    matches(&WANTED, symbol)
 }
 
 /// The symbol list `ROSETTA3_TRACE_CALL`'s value names, C names without the

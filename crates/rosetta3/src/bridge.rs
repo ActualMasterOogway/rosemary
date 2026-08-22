@@ -32,16 +32,25 @@ fn defer(_ctx: &mut RegisterContext) -> u32 {
 ///
 /// A host function this runtime forwards to may call *back* into the guest, and a
 /// failure there cannot be returned through the host frame in the middle.
-fn settle(vm: &crate::vm::Vm, ctx: &mut RegisterContext) -> u32 {
-    match vm.has_pending() {
+fn settle(state: Option<&crate::thread::ThreadState>, ctx: &mut RegisterContext) -> u32 {
+    match pending(state) {
         true => resume(true, ctx),
         false => HANDLED,
     }
 }
 
+/// Whether an error is parked on this thread, from the state already in hand.
+///
+/// The state is passed rather than looked up because every read of it is a
+/// `pthread_getspecific`, and an indirect call that is serviced inline asks this
+/// question twice - see [`indirect_call`].
+fn pending(state: Option<&crate::thread::ThreadState>) -> bool {
+    state.is_some_and(|s| s.pending.borrow().is_some())
+}
+
 /// Record the guest stack pointer the way a VM exit would have.
-fn publish_rsp(ctx: &RegisterContext) {
-    if let Some(state) = crate::thread::current() {
+fn publish_rsp(state: Option<&crate::thread::ThreadState>, ctx: &RegisterContext) {
+    if let Some(state) = state {
         state.rsp.set(ctx.rsp);
     }
 }
@@ -90,11 +99,12 @@ extern "C" fn import_call(ctx: *mut RegisterContext, import_va: u64) -> u32 {
         // the honest answer is the old path rather than a guess.
         return defer(ctx);
     };
-    publish_rsp(ctx);
+    let state = crate::thread::current();
+    publish_rsp(state, ctx);
     caught(vm, "<bridged import call>", || {
         match vm.service_bridged_import(import_va, ctx) {
-            Ok(false) => settle(vm, ctx),
-            Ok(true) => resume(vm.has_pending(), ctx),
+            Ok(false) => settle(state, ctx),
+            Ok(true) => resume(pending(state), ctx),
             Err(err) => {
                 vm.set_pending(err);
                 resume(true, ctx)
@@ -111,11 +121,15 @@ extern "C" fn indirect_call(ctx: *mut RegisterContext, target: u64) -> u32 {
     let Some(vm) = crate::thunk::current() else {
         return defer(ctx);
     };
-    publish_rsp(ctx);
+    // Read once, and handed to everything below that wants it: this is the hottest
+    // host function in the runtime, and each of the three readers it replaced was a
+    // `pthread_getspecific` of its own.
+    let state = crate::thread::current();
+    publish_rsp(state, ctx);
     caught(vm, "<bridged indirect call>", || {
-        match vm.dispatch_indirect_bridged(target, ctx) {
-            Ok(false) => settle(vm, ctx),
-            Ok(true) => resume(vm.has_pending(), ctx),
+        match vm.dispatch_indirect_bridged(target, ctx, state) {
+            Ok(false) => settle(state, ctx),
+            Ok(true) => resume(pending(state), ctx),
             Err(err) => {
                 vm.set_pending(err);
                 resume(true, ctx)

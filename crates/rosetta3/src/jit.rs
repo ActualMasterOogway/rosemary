@@ -6,6 +6,7 @@ use microlift::MicroliftError;
 use microlift::arch::x86_64::pin;
 use microlift::backend::CraneliftBackend;
 use microlift::core::callret::CallRetConfig;
+use microlift::core::hostframe::HostFrameConfig;
 use microlift::core::pin::PinnedAbi;
 use static_init::dynamic;
 
@@ -27,6 +28,10 @@ pub const NO_LINK_CELLS_ENV: &str = "ROSETTA3_NO_LINK_CELLS";
 pub const CALL_RETURN_ENV: &str = "ROSETTA3_CALL_RETURN";
 /// How many frames the per-thread call-return ring holds. A power of two.
 pub const CALLRET_FRAMES_ENV: &str = "ROSETTA3_CALLRET_FRAMES";
+/// Turns [`host_call_frames`] **on**. Off by default while it is being measured.
+pub const HOST_FRAMES_ENV: &str = "ROSETTA3_HOST_FRAMES";
+/// How deep guest calls may nest as host frames.
+pub const HOST_FRAME_DEPTH_ENV: &str = "ROSETTA3_HOST_FRAME_DEPTH";
 /// Replaces the pinned register set: a comma-separated list of x86-64 register
 /// names, e.g. `ROSETTA3_PINNED_REGS=rsp,rax,rdi,rsi,rbp`.
 pub const PINNED_REGS_ENV: &str = "ROSETTA3_PINNED_REGS";
@@ -392,6 +397,60 @@ fn opted_in(name: &str) -> bool {
                 false
             }
         },
+    }
+}
+
+/// Nest a guest `CALL`/`RET` pair as a real host call and return - microlift's
+/// `LifterConfig::host_call_frames`.
+///
+/// The other answer to the same question [`call_return_stack`] asks, and the one
+/// that can actually win it. The ring turned a `RET` into a cheaper lookup and was
+/// measured at +12% to +20% for the privilege; this makes the `RET` a `ret`, which
+/// is a matched pair the CPU's return-address stack predicts, and lands at the
+/// instruction after the call rather than back through the callee's entry dispatch.
+///
+/// **Off by default while it is being measured**, for the same reason the ring is.
+///
+/// The ceiling is a bound on *host stack* use rather than on how deep the guest is
+/// expected to go: every live guest call is a real frame of a compiled region.
+/// Past it a call takes the ordinary linked exit, which costs a host dispatch and
+/// never a wrong answer - see microlift's `core::hostframe`.
+pub fn host_call_frames() -> Option<HostFrameConfig> {
+    #[dynamic]
+    static CONFIG: Option<HostFrameConfig> = {
+        // Cells first: the callee's address comes from one.
+        if !link_cells() || !opted_in(HOST_FRAMES_ENV) {
+            return None;
+        }
+        Some(HostFrameConfig::new(host_frame_depth()))
+    };
+    *CONFIG
+}
+
+/// How deep guest calls may nest as host frames.
+///
+/// 256 against an 8 MiB main thread stack: a region's frame is small, but the
+/// guest's own recursion is unbounded and this is what stops it becoming the
+/// host's.
+pub const HOST_FRAME_DEPTH: u32 = 256;
+
+/// The ceiling this run uses.
+fn host_frame_depth() -> u32 {
+    let Ok(value) = std::env::var(HOST_FRAME_DEPTH_ENV) else {
+        return HOST_FRAME_DEPTH;
+    };
+    match value.trim().parse::<u32>() {
+        // Zero would make every call take the fallback, which is what leaving
+        // the feature off already does, so it is refused here where the variable
+        // that caused it can be named.
+        Ok(depth) if depth > 0 => depth,
+        _ => {
+            eprintln!(
+                "rosetta3: {HOST_FRAME_DEPTH_ENV}={value:?} is not a positive \
+                 integer; using {HOST_FRAME_DEPTH}"
+            );
+            HOST_FRAME_DEPTH
+        }
     }
 }
 

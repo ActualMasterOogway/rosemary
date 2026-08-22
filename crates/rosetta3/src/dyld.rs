@@ -543,6 +543,9 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
         let cell: &'static mut &'static [&'static Image] = Box::leak(Box::new(published));
         VIEW.store(cell as *mut _, Ordering::Release);
         IMAGE_COUNT.store(images.len(), Ordering::Release);
+        // A whole image's worth of addresses that meant nothing a moment ago,
+        // imports among them. See [`crate::dispatch::invalidate`].
+        crate::dispatch::invalidate();
     }
 
     // A loaded image's thread-locals are its own, and nothing else registers

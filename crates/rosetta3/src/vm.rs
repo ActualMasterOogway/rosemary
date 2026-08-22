@@ -389,6 +389,27 @@ fn page_is_mapped(at: u64, len: u64) -> bool {
     rc == 0
 }
 
+impl GuestView {
+    /// Write `data` at `va` without taking a `&mut` view.
+    ///
+    /// The same store [`GuestMemory::write`] makes - nothing in a write mutates the
+    /// view, and `PageCache` is atomics - reachable from a shared borrow. What that
+    /// buys is the two `Arc` clones [`Vm::view`] costs, on a path that runs once per
+    /// indirect call and on every guest thread at once.
+    pub fn store(&self, va: u64, data: &[u8]) -> Result<(), machish::Error> {
+        let dst = self
+            .resolve(va, data.len())
+            .ok_or(machish::Error::OutOfBounds {
+                addr: va,
+                len: data.len(),
+            })?;
+        // SAFETY: as for `GuestMemory::write`, which is this function with a `&mut`
+        // borrow in front of it.
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len()) };
+        Ok(())
+    }
+}
+
 impl GuestMemory for GuestView {
     fn read(&self, va: u64, out: &mut [u8]) -> Result<(), machish::Error> {
         let src = self
@@ -405,17 +426,10 @@ impl GuestMemory for GuestView {
         Ok(())
     }
 
+    // Writability is the guest's business: a store to a page it made read-only
+    // faults exactly as it would have on x86.
     fn write(&mut self, va: u64, data: &[u8]) -> Result<(), machish::Error> {
-        let dst = self
-            .resolve(va, data.len())
-            .ok_or(machish::Error::OutOfBounds {
-                addr: va,
-                len: data.len(),
-            })?;
-        // SAFETY: as for `read`. Writability is the guest's business: a store
-        // to a page it made read-only faults exactly as it would have on x86.
-        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len()) };
-        Ok(())
+        GuestView::store(self, va, data)
     }
 }
 
@@ -1015,7 +1029,7 @@ impl Vm {
             // The answer is discarded here and load-bearing in
             // [`Vm::dispatch_indirect_bridged`].
             ExitReason::IndirectCall => {
-                self.dispatch_indirect(ctx)?;
+                self.dispatch_indirect(ctx, crate::thread::current())?;
                 Ok(None)
             }
 
@@ -1090,11 +1104,12 @@ impl Vm {
         &self,
         target: u64,
         ctx: &mut RegisterContext,
+        state: Option<&crate::thread::ThreadState>,
     ) -> Result<bool, VmError> {
         // `dispatch_indirect` reads the callee from the context, and microlift
         // has already parked it there. Set explicitly rather than relied upon.
         ctx.imported_function_va = target;
-        self.dispatch_indirect(ctx)
+        self.dispatch_indirect(ctx, state)
     }
 
     /// Whether the call just serviced moved `rip` instead of returning a value,
@@ -1159,10 +1174,71 @@ impl Vm {
         Ok(())
     }
 
+    /// Stand in for the `CALL` microlift declined to perform: push `resume` and
+    /// continue at `target`.
+    ///
+    /// The push is onto this thread's own guest stack, which is one range it already
+    /// knows, so `state` is asked before [`GuestView`] is: the general answer is a
+    /// binary search over every mapped region, and after the lookups above it became
+    /// cheap this was the largest thing left on the path. A guest that has switched
+    /// stacks - a fibre, a `makecontext` - answers no and takes the search.
+    fn enter_guest_callee(
+        &self,
+        target: u64,
+        resume: u64,
+        ctx: &mut RegisterContext,
+        state: Option<&crate::thread::ThreadState>,
+    ) -> Result<(), VmError> {
+        let rsp = ctx.rsp.wrapping_sub(8);
+        // `[rsp, ctx.rsp)` inside the stack, stated so that an `rsp` below eight
+        // cannot wrap into a yes.
+        let on_own_stack = state.is_some_and(|s| {
+            let stack = s.stack_range();
+            ctx.rsp >= stack.start.wrapping_add(8) && ctx.rsp <= stack.end
+        });
+        if on_own_stack {
+            // SAFETY: `[rsp, rsp+8)` is inside the range this runtime mapped for
+            // this thread's guest stack, and guest addresses are host addresses.
+            // This is `GuestView::store`'s own store, with the check it makes
+            // answered by a range compare instead of a search.
+            unsafe { std::ptr::write_unaligned(rsp as usize as *mut u64, resume.to_le()) };
+        } else {
+            // `store`, not `view()`: a clone of the view is two atomic increments on
+            // a line every guest thread shares, for a borrow this needs for one
+            // store.
+            self.view
+                .store(rsp, &resume.to_le_bytes())
+                .map_err(|source| VmError::Stack { source })?;
+        }
+        ctx.rsp = rsp;
+        ctx.rip = target;
+        Ok(())
+    }
+
     /// Decide what an indirect call through a runtime-computed address means.
-    fn dispatch_indirect(&self, ctx: &mut RegisterContext) -> Result<bool, VmError> {
+    ///
+    /// `state` is this thread's, read once by the caller: the fast path needs it for
+    /// the cache and the slow one for the redirect flag, and reading it here as well
+    /// would be a second `pthread_getspecific` per call.
+    fn dispatch_indirect(
+        &self,
+        ctx: &mut RegisterContext,
+        state: Option<&crate::thread::ThreadState>,
+    ) -> Result<bool, VmError> {
         let callee = ctx.imported_function_va;
         let resume = ctx.rip;
+
+        // Where this address went last time, which is where it goes now. Ahead of
+        // every lookup below because it stands in for all four of them - see
+        // [`crate::dispatch`].
+        if let Some(known) = state
+            && let Some(target) = known.indirect().get(callee)
+        {
+            crate::stats::record_dispatch(true);
+            self.enter_guest_callee(target, resume, ctx, state)?;
+            return Ok(true);
+        }
+        crate::stats::record_dispatch(false);
 
         // A pointer read out of an import slot: the same host function the
         // import would have reached, so service it identically.
@@ -1176,13 +1252,12 @@ impl Vm {
         let target = self.guest_behind_thunk(callee).unwrap_or(callee);
 
         if self.program.is_guest_address(target) {
-            // Stand in for the `CALL` microlift declined to perform.
-            let rsp = ctx.rsp - 8;
-            self.view()
-                .write(rsp, &resume.to_le_bytes())
-                .map_err(|source| VmError::Stack { source })?;
-            ctx.rsp = rsp;
-            ctx.rip = target;
+            self.enter_guest_callee(target, resume, ctx, state)?;
+            // Only this verdict is remembered, and only once it has been reached the
+            // long way round.
+            if state.is_some_and(|s| s.indirect().put(callee, target)) {
+                crate::stats::record_dispatch_eviction();
+            }
             return Ok(true);
         }
 
@@ -1195,12 +1270,7 @@ impl Vm {
             // `dlsym`, but returned by some host function the guest then called
             // through.
             if let Some(stub) = crate::trampoline::for_site(site) {
-                let rsp = ctx.rsp - 8;
-                self.view()
-                    .write(rsp, &resume.to_le_bytes())
-                    .map_err(|source| VmError::Stack { source })?;
-                ctx.rsp = rsp;
-                ctx.rip = stub;
+                self.enter_guest_callee(stub, resume, ctx, state)?;
                 return Ok(true);
             }
             // `service_site_as`, not `call_site`.
@@ -1299,6 +1369,9 @@ impl Vm {
         // After the view, so a reader that sees this count has already had the
         // chance to see the view that produced it.
         self.thunk_count.store(count, Ordering::Release);
+        // An address that meant nothing a moment ago is now a thunk. See
+        // [`crate::dispatch::invalidate`].
+        crate::dispatch::invalidate();
         host
     }
 
@@ -1318,11 +1391,6 @@ impl Vm {
     /// Take whatever error a callback left behind on this thread.
     pub fn take_pending(&self) -> Option<VmError> {
         crate::thread::current().and_then(|s| s.pending.borrow_mut().take())
-    }
-
-    /// Whether a callback left an error behind, without taking it.
-    pub(crate) fn has_pending(&self) -> bool {
-        crate::thread::current().is_some_and(|s| s.pending.borrow().is_some())
     }
 }
 

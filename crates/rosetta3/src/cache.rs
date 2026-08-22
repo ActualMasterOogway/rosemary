@@ -227,6 +227,10 @@ pub struct CodeCache {
     published: RwLock<Published>,
     /// The lock-free half of [`published`](Self::published): what a hit reads.
     index: EntryIndex,
+    /// How many translations have been inserted, and what [`CodeCache::len`] last
+    /// answered after that many. See `len`.
+    inserts: AtomicU64,
+    counted: std::sync::Mutex<(u64, usize)>,
     /// Everything microlift needs to know before it lifts anything: the registered
     /// import addresses and the read-only segment hints. Immutable, so a lift reads it
     /// without taking anything.
@@ -271,6 +275,8 @@ impl CodeCache {
                 retained: Vec::new(),
             }),
             index: EntryIndex::new(),
+            inserts: AtomicU64::new(0),
+            counted: std::sync::Mutex::new((0, 0)),
             config,
         }
     }
@@ -281,8 +287,23 @@ impl CodeCache {
     /// threads that missed on the same address both compiled it - see
     /// [`Published::retained`]. A caller watching this number grow wants regions, not
     /// races.
+    ///
+    /// **Memoised, because microlift's count is not a field but a computation**: it
+    /// collects a pointer per resume point - on Roblox, hundreds of thousands - then
+    /// sorts and dedups them. The overlay asks twice a second on the thread that
+    /// draws, which put that sort at ~2% of the process's running time and held the
+    /// cache's lock across it, stalling any thread that wanted to lift. Inserts are
+    /// the only thing that can change the answer, so a run that has stopped
+    /// translating pays for it once.
     pub fn len(&self) -> usize {
-        self.read().cache.len()
+        let inserts = self.inserts.load(Ordering::Acquire);
+        let mut counted = self.counted.lock().unwrap_or_else(|e| e.into_inner());
+        if counted.0 == inserts && inserts != 0 {
+            return counted.1;
+        }
+        let n = self.read().cache.len();
+        *counted = (inserts, n);
+        n
     }
 
     pub fn is_empty(&self) -> bool {
@@ -437,6 +458,8 @@ impl CodeCache {
         // *elsewhere* that has been waiting for one of these resume points.
         let translation = published.cache.insert(translation);
         published.retained.push(Arc::clone(&translation));
+        // What makes `len`'s memo stale, bumped under the same lock the insert took.
+        self.inserts.fetch_add(1, Ordering::Release);
         self.index
             .publish(&translation.resume_points, Arc::as_ptr(&translation));
         Ok(translation)

@@ -166,6 +166,9 @@ pub struct ThreadState {
     /// Translations this thread has already entered, by the PC it entered them
     /// at, plus the two tables lifted code reads. See [`CodeWindow`].
     code: CodeWindow,
+    /// Where this thread's indirect calls went last time. See
+    /// [`crate::dispatch::IndirectCache`].
+    indirect: crate::dispatch::IndirectCache,
 }
 
 impl ThreadState {
@@ -188,6 +191,7 @@ impl ThreadState {
             unwinding: Cell::new(None),
             caught: RefCell::new(Vec::new()),
             code: CodeWindow::new(),
+            indirect: crate::dispatch::IndirectCache::new(),
         }
     }
 
@@ -207,6 +211,11 @@ impl ThreadState {
     /// This thread's view of the code cache.
     pub(crate) fn code(&self) -> &CodeWindow {
         &self.code
+    }
+
+    /// This thread's memory of where its indirect calls went.
+    pub(crate) fn indirect(&self) -> &crate::dispatch::IndirectCache {
+        &self.indirect
     }
 
     /// The entry into guest code currently live on this thread, or zero when
@@ -288,6 +297,10 @@ impl ThreadState {
     }
 
     /// The address range this thread's guest stack occupies.
+    ///
+    /// Two loads and no search, which is what makes it worth asking before
+    /// [`crate::vm::GuestView`] is asked the same question the general way - see
+    /// `Vm::enter_guest_callee`.
     pub fn stack_range(&self) -> Range<u64> {
         self.stack.range()
     }
@@ -328,6 +341,12 @@ pub(crate) struct CodeWindow {
     /// twice, and so that "which pointers a context owes a region" is stated in one
     /// place instead of here as well. See [`ThreadLinks`].
     links: UnsafeCell<ThreadLinks>,
+    /// The geometry `slot` uses, copied out of [`link_config`] once.
+    ///
+    /// The *same value* `links` was built with, so the two cannot drift; what it
+    /// avoids is the static read, which is not free and which `slot` performed twice
+    /// per run-loop entry and once per published row - 2% of Roblox's running time.
+    config: BlockLinkConfig,
 }
 
 /// How many PCs one thread remembers. A power of two, so the index is a mask.
@@ -354,23 +373,21 @@ pub fn link_config() -> BlockLinkConfig {
 
 impl CodeWindow {
     fn new() -> Self {
+        let config = link_config();
         CodeWindow {
             slots: RefCell::new(vec![None; WINDOW].into_boxed_slice()),
-            links: UnsafeCell::new(ThreadLinks::new(
-                link_config(),
-                crate::jit::call_return_stack(),
-            )),
+            links: UnsafeCell::new(ThreadLinks::new(config, crate::jit::call_return_stack())),
+            config,
         }
     }
 
     /// The slot a PC maps to.
     ///
-    /// Deferred to [`link_config`] so that this and the shift-and-mask microlift bakes
-    /// into every region cannot drift apart. Read from the static rather than rebuilt:
-    /// this runs twice per run-loop entry, and building a `BlockLinkConfig` runs a
-    /// power-of-two assert and reads the pinned-ABI decision to get to two constants.
-    fn slot(pc: u64) -> usize {
-        link_config().slot(pc)
+    /// Microlift's own `slot`, so this and the shift-and-mask baked into every region
+    /// cannot drift apart - called on the copy this window was built with rather than
+    /// on the static, which is the same arithmetic without the read.
+    fn slot(&self, pc: u64) -> usize {
+        self.config.slot(pc)
     }
 
     /// The address of the block-link table for this thread, as `ctx.link_table`
@@ -394,7 +411,7 @@ impl CodeWindow {
 
     /// The translation this thread last entered at `pc`, if it still holds one.
     pub(crate) fn get(&self, pc: u64) -> Option<std::sync::Arc<crate::cache::Translation>> {
-        match self.slots.borrow().get(Self::slot(pc)) {
+        match self.slots.borrow().get(self.slot(pc)) {
             Some(Some((at, translation))) if *at == pc => Some(std::sync::Arc::clone(translation)),
             _ => None,
         }
@@ -413,7 +430,7 @@ impl CodeWindow {
     /// costs a lookup and nothing else, which is what makes publishing the extra rows
     /// safe to do unconditionally.
     pub(crate) fn put(&self, pc: u64, translation: &std::sync::Arc<crate::cache::Translation>) {
-        let slot = Self::slot(pc);
+        let slot = self.slot(pc);
         // `try_borrow_mut` rather than `borrow_mut`.
         if let Ok(mut slots) = self.slots.try_borrow_mut() {
             slots[slot] = Some((pc, std::sync::Arc::clone(translation)));
@@ -505,6 +522,7 @@ pub fn install(state: ThreadState) -> &'static ThreadState {
 }
 
 /// Hand this thread the `errno` a thread that has just started really has.
+#[inline(always)]
 fn clear_errno() {
     // SAFETY: `__error()` returns this thread's own `errno` slot, which is
     // live for as long as the thread is.

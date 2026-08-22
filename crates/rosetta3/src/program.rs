@@ -12,6 +12,7 @@ use machish::spec::arch::X86_64;
 
 use microlift::arch::x86_64::context::RegisterContext;
 use microlift::core::exit::MemorySegment;
+use microlift::core::optimize::Optimizations;
 use microlift::core::specialize::Specialization;
 use microlift::core::{AddressMode, Atomic128Mode, LifterConfig, VmResumptionPoints};
 
@@ -340,6 +341,11 @@ pub fn lifter_config_base() -> LifterConfig {
         // And a ring of `<return address, cell>` frames for the exit that has no
         // constant to specialize on. See [`crate::jit::call_return_stack`].
         call_return_stack: crate::jit::call_return_stack(),
+        // Or the other answer to the same question: make the guest's call a host
+        // call, so its `RET` is a `ret` the return-address stack predicts. See
+        // [`crate::jit::host_call_frames`].
+        host_call_frames: crate::jit::host_call_frames(),
+        optimizations: Optimizations::all(),
         // `exit_trampoline_address` is left at its default `None`, and that
         // is a decision rather than an omission.
         ..LifterConfig::default()

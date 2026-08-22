@@ -55,6 +55,33 @@ counters! {
     SELECT_NS, LIFT_NS, COMPILE_NS,
     REFUSED, TAIL_EXITS,
     ENTRIES, WINDOW_MISSES, TAIL_IMPORTS, LINKED,
+    DISPATCHES, DISPATCH_HITS, DISPATCH_EVICTIONS,
+}
+
+/// One indirect call dispatched by the host, and whether this thread had already
+/// been told where that address goes.
+///
+/// The figure [`crate::dispatch`] is judged on: a miss is four lookups and a hit is
+/// a compare, so the rate is most of what the mechanism is worth.
+pub fn record_dispatch(hit: bool) {
+    if !enabled() {
+        return;
+    }
+    DISPATCHES.fetch_add(1, Relaxed);
+    if hit {
+        DISPATCH_HITS.fetch_add(1, Relaxed);
+    }
+}
+
+/// A verdict that displaced *another* address from its slot.
+///
+/// The one number that separates a table too small from a table that hashes badly:
+/// a working set larger than the table evicts on nearly every miss, and no amount of
+/// associativity fixes that. Measured before this table was left direct-mapped.
+pub fn record_dispatch_eviction() {
+    if enabled() {
+        DISPATCH_EVICTIONS.fetch_add(1, Relaxed);
+    }
 }
 
 
@@ -350,6 +377,19 @@ pub fn report() {
         share(compile),
         share(total),
     );
+    let dispatches = DISPATCHES.load(Relaxed);
+    if dispatches > 0 {
+        let hits = DISPATCH_HITS.load(Relaxed);
+        eprintln!(
+            "rosetta3: stats  {dispatches} indirect call(s) dispatched by the host, \
+             {hits} answered from this thread's table ({:.2}%), \
+             {} fill(s) evicted another address ({:.2}% of misses)",
+            100.0 * hits as f64 / dispatches as f64,
+            DISPATCH_EVICTIONS.load(Relaxed),
+            100.0 * DISPATCH_EVICTIONS.load(Relaxed) as f64
+                / (dispatches - hits).max(1) as f64,
+        );
+    }
     eprintln!(
         "rosetta3: stats  {} refused, {} tail exit(s)",
         REFUSED.load(Relaxed),

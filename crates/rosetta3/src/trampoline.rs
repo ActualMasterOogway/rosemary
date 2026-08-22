@@ -187,6 +187,9 @@ pub fn for_site(site: &ImportSite) -> Option<u64> {
     });
     state.by_target.insert(site.resolved, va);
     MADE.fetch_add(1, Ordering::Relaxed);
+    // Two addresses that meant nothing a moment ago - the stub and the import
+    // address behind it. See [`crate::dispatch::invalidate`].
+    crate::dispatch::invalidate();
     Some(va)
 }
 
