@@ -29,7 +29,8 @@
 //! shared table or out of a table the run loop never touches: a **link cell** for a
 //! destination the lift already knew (`ROSETTA3_NO_LINK_CELLS=1`), and the
 //! **call-return ring** for the one exit that has no constant to specialize on
-//! (`ROSETTA3_NO_CALL_RETURN=1`). The first claim is asserted for all of them and
+//! (`ROSETTA3_CALL_RETURN=1`, off by default - it was measured and it costs; see
+//! `rosetta3::jit::call_return_stack`). The first claim is asserted for all of them and
 //! *between* them, since each moves a different thing - where a guest register
 //! lives, which branch carries a successor, which table it comes out of - and each
 //! is a way to arrive somewhere the guest did not go. The second is asserted of the
@@ -56,9 +57,10 @@ const PER_SITE: (&str, &str) = ("ROSETTA3_INLINE_LINK_PROBES", "1");
 /// the region's own. See `rosetta3::jit::link_cells`.
 const NO_CELLS: (&str, &str) = ("ROSETTA3_NO_LINK_CELLS", "1");
 
-/// A `RET` hashed into the table like any other exit, rather than popped off the
-/// call-return ring. See `rosetta3::jit::call_return_stack`.
-const NO_CALLRET: (&str, &str) = ("ROSETTA3_NO_CALL_RETURN", "1");
+/// A `RET` popped off the call-return ring rather than hashed into the table like
+/// any other exit. **Not the default** - see `rosetta3::jit::call_return_stack` for
+/// the measurement that decided that - so this turns it on rather than off.
+const CALLRET: (&str, &str) = ("ROSETTA3_CALL_RETURN", "1");
 
 /// Every shape of the mechanism, named, as the environment that selects it.
 ///
@@ -75,7 +77,7 @@ const WAYS: [(&str, &[(&str, &str)]); 6] = [
     ("pinned links, a probe per exit site", &[PER_SITE]),
     ("host-resolved links", &[UNPINNED]),
     ("static edges through the shared table", &[NO_CELLS]),
-    ("returns through the shared table", &[NO_CALLRET]),
+    ("returns through the call-return ring", &[CALLRET]),
     ("no linking", &[OFF]),
 ];
 
@@ -399,13 +401,14 @@ fn a_static_edge_is_taken_through_a_cell_of_its_own() {
     assert!(live > 0, "no link cells were installed");
     assert_eq!(waiting, 0, "{waiting} cell(s) never found their target");
 
-    // Without the ring, the `CallReturn` cells are never allocated and the count
-    // drops to the static edges alone. That the two knobs move the same number in
-    // the same direction is what says the ring is really riding on cells.
-    let (without_ring, _) = cells(&[("ROSETTA3_STATS", "1"), NO_CALLRET]);
+    // With the ring on, each call site additionally gets a `CallReturn` cell for the
+    // address it comes back to, so the count rises above the static edges alone. That
+    // the two knobs move the same number in the same direction is what says the ring
+    // is really riding on cells.
+    let (with_ring, _) = cells(&[("ROSETTA3_STATS", "1"), CALLRET]);
     assert!(
-        without_ring < live,
-        "turning the call-return ring off left all {live} cell(s) in place; \
+        with_ring > live,
+        "turning the call-return ring on added no cells to the {live} static edge(s); \
          returns are not being predicted"
     );
 

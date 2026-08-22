@@ -22,8 +22,9 @@ pub const NO_PINNED_LINK_ENV: &str = "ROSETTA3_NO_PINNED_LINK";
 pub const INLINE_LINK_PROBES_ENV: &str = "ROSETTA3_INLINE_LINK_PROBES";
 /// Turns [`link_cells`] off, leaving every exit to the shared table probe.
 pub const NO_LINK_CELLS_ENV: &str = "ROSETTA3_NO_LINK_CELLS";
-/// Turns [`call_return_stack`] off, leaving `RET` to the table probe.
-pub const NO_CALL_RETURN_ENV: &str = "ROSETTA3_NO_CALL_RETURN";
+/// Turns [`call_return_stack`] **on**. Off by default; see that function for the
+/// measurement that decided it.
+pub const CALL_RETURN_ENV: &str = "ROSETTA3_CALL_RETURN";
 /// How many frames the per-thread call-return ring holds. A power of two.
 pub const CALLRET_FRAMES_ENV: &str = "ROSETTA3_CALLRET_FRAMES";
 /// Replaces the pinned register set: a comma-separated list of x86-64 register
@@ -330,28 +331,68 @@ pub fn link_cells() -> bool {
     *ON
 }
 
-/// The per-thread call-return ring, or `None` to hash every `RET` into the shared
-/// table like any other exit - microlift's `LifterConfig::call_return_stack`.
+/// The per-thread call-return ring - microlift's `LifterConfig::call_return_stack`.
 ///
-/// A `RET` is the most common linkable exit a real program has and the one the table
-/// probe serves worst, because the popped address is a runtime value with nothing to
-/// specialize. A frame pushed at each `call` names the cell to enter on the way back,
-/// which turns the return into one load and one compare.
+/// **Off by default, because it was measured and it costs.** On a call-heavy guest
+/// (two `noinline` calls per iteration, 40M iterations) it is **+15.8%** against the
+/// same run with link cells and no ring; on genuinely nested mutual recursion,
+/// +12% to +20% at every depth tried. The regression is the same for a given number
+/// of *calls* regardless of how deep they nest, which is the shape of a per-call cost
+/// rather than a per-frame one.
 ///
-/// [`CALLRET_FRAMES`] frames deep by default. Deeper than the guest recurses costs
-/// nothing but memory; shallower costs the oldest frames a probe on the way out, which
-/// is a hit rate and never a wrong answer - see microlift's `core::callret`.
+/// The reason is structural rather than a tuning failure. The ring pays a push at
+/// **every** out-of-region call - a null test, an offset load, a mask, two stores and
+/// a store back - to make the matching `RET` a load and a compare instead of the
+/// probe's shift, mask, scale, add, load and compare. Those two are close enough that
+/// the push is not repaid; and on a miss the return pays the pop *and* the whole
+/// probe behind it. What would repay it is the probe missing often, and it does not:
+/// instrumenting the same run shows **one** declined `ret` probe in 9.6M guest calls,
+/// because an 8192-row direct-mapped table over a normal working set essentially
+/// always hits.
+///
+/// FEX pays the same push and it is worth it there, because what FEX buys is a real
+/// `ret` instruction that the CPU's return-address-stack predicts. Microlift's ring
+/// cannot buy that - Cranelift has no `ret`-flavoured indirect branch and no way to
+/// name an address inside a function - so it stores a link cell instead, which keeps
+/// the bookkeeping and drops the payoff. Recovering the payoff is host call/return
+/// nesting, not a bigger ring.
+///
+/// So it stays, behind [`CALL_RETURN_ENV`], as the machinery that work builds on and
+/// as something to re-measure against it - not as a default.
+///
+/// [`CALLRET_FRAMES`] frames deep. Deeper than the guest recurses costs nothing but
+/// memory; shallower costs the oldest frames a probe on the way out, which is a hit
+/// rate and never a wrong answer - see microlift's `core::callret`.
 pub fn call_return_stack() -> Option<CallRetConfig> {
     #[dynamic]
     static CONFIG: Option<CallRetConfig> = {
         // Cells first: a frame names a cell, so there is nothing for one to hold
         // without them.
-        if !link_cells() || !boolean_env(NO_CALL_RETURN_ENV, false, "the ring stays on") {
+        if !link_cells() || !opted_in(CALL_RETURN_ENV) {
             return None;
         }
         Some(CallRetConfig::new(callret_frames()))
     };
     *CONFIG
+}
+
+/// Whether `name` is set to something truthy.
+///
+/// The inverse of [`boolean_env`], which reads a `NO_`-prefixed variable and is
+/// therefore false when set. A knob that is off by default needs the other sense, and
+/// spelling it as `!boolean_env(..)` reads as a double negative at every call site.
+fn opted_in(name: &str) -> bool {
+    match std::env::var(name) {
+        Err(_) => false,
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            _ => {
+                eprintln!("rosetta3: {name}={value:?} is not a boolean; leaving it off");
+                false
+            }
+        },
+    }
 }
 
 /// How deep the call-return ring is, unless [`CALLRET_FRAMES_ENV`] says otherwise.
