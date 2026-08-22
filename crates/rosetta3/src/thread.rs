@@ -409,6 +409,20 @@ impl CodeWindow {
         unsafe { (*self.links.get()).attach(ctx) };
     }
 
+    pub(crate) fn relink(&self, pc: u64, translation: &std::sync::Arc<crate::cache::Translation>) {
+        // SAFETY: as `put` - the only writer, on the thread that owns this window,
+        // in the run loop rather than inside a region.
+        unsafe {
+            let links = &mut *self.links.get();
+            if links.table().get(pc).is_some() {
+                return;
+            }
+            if links.publish_at(translation, pc) {
+                crate::stats::record_relink();
+            }
+        }
+    }
+
     /// The translation this thread last entered at `pc`, if it still holds one.
     pub(crate) fn get(&self, pc: u64) -> Option<std::sync::Arc<crate::cache::Translation>> {
         match self.slots.borrow().get(self.slot(pc)) {
@@ -418,7 +432,7 @@ impl CodeWindow {
     }
 
     /// Remember that `translation` may be entered at `pc`, and make it linkable from
-    /// this thread at **every** address it can be resumed at.
+    /// this thread at every address it can be resumed at.
     ///
     /// Not just at `pc`: publishing the whole set is what lets a link to an address
     /// this thread has never entered hit anyway, and it is the protocol microlift's
@@ -426,9 +440,10 @@ impl CodeWindow {
     /// points and nowhere else, since an address that is not one either runs the
     /// region from the top or exits having made no progress.
     ///
-    /// A row for an address whose slot is taken evicts the row that was there. That
-    /// costs a lookup and nothing else, which is what makes publishing the extra rows
-    /// safe to do unconditionally.
+    /// A row for an address whose slot is taken evicts the row that was there - which
+    /// costs a lookup, and which is why publishing the extra rows is not done
+    /// unconditionally any more. See [`crate::jit::link_publish`] for the measurement
+    /// that changed the default; `ROSETTA3_LINK_PUBLISH=all` restores it.
     pub(crate) fn put(&self, pc: u64, translation: &std::sync::Arc<crate::cache::Translation>) {
         let slot = self.slot(pc);
         // `try_borrow_mut` rather than `borrow_mut`.
@@ -442,7 +457,18 @@ impl CodeWindow {
             // SAFETY: the only writer, on the thread that owns this window, at a
             // point where this thread is in the run loop rather than inside a
             // region. See the field's own note.
-            unsafe { (*self.links.get()).publish(translation) };
+            let rows = unsafe {
+                match crate::jit::link_publish() {
+                    crate::jit::LinkPublish::Entry => {
+                        usize::from((*self.links.get()).publish_at(translation, pc))
+                    }
+                    crate::jit::LinkPublish::All => {
+                        (*self.links.get()).publish(translation);
+                        translation.resume_points.len()
+                    }
+                }
+            };
+            crate::stats::record_published(rows);
         }
     }
 }

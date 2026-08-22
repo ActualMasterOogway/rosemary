@@ -28,6 +28,9 @@ pub const NO_LINK_CELLS_ENV: &str = "ROSETTA3_NO_LINK_CELLS";
 pub const CALL_RETURN_ENV: &str = "ROSETTA3_CALL_RETURN";
 /// How many frames the per-thread call-return ring holds. A power of two.
 pub const CALLRET_FRAMES_ENV: &str = "ROSETTA3_CALLRET_FRAMES";
+/// Which addresses a translation is published as linkable at: `entry` (the one
+/// the thread entered) or `all` (every resume point). See [`link_publish`].
+pub const LINK_PUBLISH_ENV: &str = "ROSETTA3_LINK_PUBLISH";
 /// Turns [`host_call_frames`] **on**. Off by default while it is being measured.
 pub const HOST_FRAMES_ENV: &str = "ROSETTA3_HOST_FRAMES";
 /// How deep guest calls may nest as host frames.
@@ -400,21 +403,35 @@ fn opted_in(name: &str) -> bool {
     }
 }
 
-/// Nest a guest `CALL`/`RET` pair as a real host call and return - microlift's
-/// `LifterConfig::host_call_frames`.
-///
-/// The other answer to the same question [`call_return_stack`] asks, and the one
-/// that can actually win it. The ring turned a `RET` into a cheaper lookup and was
-/// measured at +12% to +20% for the privilege; this makes the `RET` a `ret`, which
-/// is a matched pair the CPU's return-address stack predicts, and lands at the
-/// instruction after the call rather than back through the callee's entry dispatch.
-///
-/// **Off by default while it is being measured**, for the same reason the ring is.
-///
-/// The ceiling is a bound on *host stack* use rather than on how deep the guest is
-/// expected to go: every live guest call is a real frame of a compiled region.
-/// Past it a call takes the ordinary linked exit, which costs a host dispatch and
-/// never a wrong answer - see microlift's `core::hostframe`.
+/// How much of a translation a thread declares linkable when it enters one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LinkPublish {
+    /// Only the address this thread entered at.
+    Entry,
+    /// Every address the region can be entered at.
+    All,
+}
+
+/// Which of the two this run uses. `All` unless [`LINK_PUBLISH_ENV`] says `entry`.
+pub fn link_publish() -> LinkPublish {
+    #[dynamic]
+    static CHOICE: LinkPublish = {
+        match std::env::var(LINK_PUBLISH_ENV) {
+            Ok(v) if v.trim().eq_ignore_ascii_case("entry") => LinkPublish::Entry,
+            Ok(v) if v.trim().eq_ignore_ascii_case("all") => LinkPublish::All,
+            Ok(v) => {
+                eprintln!(
+                    "rosetta3: {LINK_PUBLISH_ENV}={v:?} is not `entry` or `all`; using `all`"
+                );
+                LinkPublish::All
+            }
+            Err(_) => LinkPublish::All,
+        }
+    };
+    *CHOICE
+}
+
+/// Nest a guest `CALL`/`RET` pair as a real host call and return
 pub fn host_call_frames() -> Option<HostFrameConfig> {
     #[dynamic]
     static CONFIG: Option<HostFrameConfig> = {

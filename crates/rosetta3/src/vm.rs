@@ -866,19 +866,15 @@ impl Vm {
                 }
             }
 
-            // This thread's own answer first, which is the whole hot path. The
-            // import lookups sit behind it because a code-window hit proves the
-            // PC is not an import: nothing that answers "yes" can ever be in the
-            // window, so asking first makes every entry pay for a case that
-            // reaches the miss path anyway. Measured on A Hat in Time: 15.2
-            // million region entries a second, 1.4% of them missing the window,
-            // and `Program::import_at` alone was 15.6% of running time -
-            // answering "yes" 5,826 times out of 3.04 billion. A `dlopen` cannot
-            // break the induction, because it registers the new image's imports
-            // as part of loading it.
             let mut missed = false;
             let translation = match state.code().get(pc) {
-                Some(hit) => hit,
+                Some(hit) => {
+                    // The window answered, so nothing would otherwise notice that
+                    // this thread can no longer link here. See
+                    // [`CodeWindow::relink`].
+                    state.code().relink(pc, &hit);
+                    hit
+                }
                 None => {
                     missed = true;
 

@@ -56,6 +56,21 @@ counters! {
     REFUSED, TAIL_EXITS,
     ENTRIES, WINDOW_MISSES, TAIL_IMPORTS, LINKED,
     DISPATCHES, DISPATCH_HITS, DISPATCH_EVICTIONS,
+    PUBLISHES, PUBLISHED_ROWS, RELINKS,
+}
+
+pub fn record_relink() {
+    if enabled() {
+        RELINKS.fetch_add(1, Relaxed);
+    }
+}
+
+pub fn record_published(rows: usize) {
+    if !enabled() {
+        return;
+    }
+    PUBLISHES.fetch_add(1, Relaxed);
+    PUBLISHED_ROWS.fetch_add(rows as u64, Relaxed);
 }
 
 /// One indirect call dispatched by the host, and whether this thread had already
@@ -388,6 +403,24 @@ pub fn report() {
             DISPATCH_EVICTIONS.load(Relaxed),
             100.0 * DISPATCH_EVICTIONS.load(Relaxed) as f64
                 / (dispatches - hits).max(1) as f64,
+        );
+    }
+    let relinks = RELINKS.load(Relaxed);
+    if relinks > 0 {
+        eprintln!(
+            "rosetta3: stats  {relinks} link row(s) restored after eviction ({:.2}% of entries)",
+            100.0 * relinks as f64 / ENTRIES.load(Relaxed).max(1) as f64,
+        );
+    }
+    let publishes = PUBLISHES.load(Relaxed);
+    if publishes > 0 {
+        let rows = PUBLISHED_ROWS.load(Relaxed);
+        eprintln!(
+            "rosetta3: stats  {publishes} publish(es) of {rows} link row(s), \
+             {:.1} per publish into a {}-row table ({:?})",
+            rows as f64 / publishes as f64,
+            crate::thread::link_config().entries,
+            crate::jit::link_publish(),
         );
     }
     eprintln!(
