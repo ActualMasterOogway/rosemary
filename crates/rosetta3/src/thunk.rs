@@ -1,4 +1,5 @@
-//! Host->guest calls: a native arm64 trampoline per guest function pointer.
+//! Host->guest calls: a native trampoline per guest function pointer, built for
+//! whichever CPU this runtime is running on.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -6,7 +7,8 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use cranelift_codegen::ir::{
-    AbiParam, Function, InstBuilder, Signature, StackSlotData, StackSlotKind, UserFuncName, types,
+    AbiParam, ArgumentPurpose, Function, InstBuilder, MemFlagsData, Signature, StackSlotData,
+    StackSlotKind, UserFuncName, types,
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 
@@ -19,7 +21,8 @@ use crate::abi::aggregate::{Aggregate, Eightbyte, GuestClass, HostClass, Shape};
 use crate::vm::{Vm, VmError};
 
 /// The result slot a trampoline gives [`typed_entry`] to fill: four doubles, the
-/// widest thing AAPCS64 returns in registers.
+/// widest thing AAPCS64 returns in registers - and the largest aggregate this
+/// runtime will carry back through a SysV host's hidden buffer.
 const RESULT_BYTES: usize = 32;
 
 /// Integer argument registers the guest's convention uses.
@@ -208,10 +211,29 @@ impl ThunkSignature {
                     HostClass::Integer { words } => {
                         vec![T::UnsignedDoubleword; words]
                     }
+                    // One declared scalar per eightbyte, each the full width of
+                    // the register its class names - so a packed pair of floats
+                    // is one `f64` here and not two `f32`s.
+                    class @ HostClass::Eightbytes { .. } => class
+                        .slots()
+                        .into_iter()
+                        .map(|c| match c {
+                            Eightbyte::Sse => T::DoublePrecisionFp,
+                            Eightbyte::Integer => T::UnsignedDoubleword,
+                        })
+                        .collect(),
                     // AAPCS64 copies an argument this large to the *caller's*
                     // stack, and the trampoline would have to find it there.
+                    // SysV puts it in the callee's own incoming stack area,
+                    // which Cranelift declares as a `StructArgument` - so the
+                    // trampoline is handed its address and this shape is
+                    // carried. The leaves here are the spill slot's words and
+                    // not declared parameters; see [`build_typed`].
                     HostClass::Indirect => {
-                        return Err("takes an aggregate too large for AAPCS64's registers");
+                        if cfg!(target_arch = "aarch64") {
+                            return Err("takes an aggregate too large for AAPCS64's registers");
+                        }
+                        vec![T::UnsignedDoubleword; agg.size.div_ceil(8)]
                     }
                 },
             });
@@ -221,10 +243,19 @@ impl ThunkSignature {
         // trampoline declare scalars and still return a struct. Larger than that
         // the callee fills a buffer through `x8`, a register Cranelift's return
         // lowering gives no way to declare.
+        //
+        // SysV hands the buffer over as an ordinary first argument instead, which
+        // Cranelift *does* have a way to declare, so on that host the same shape
+        // is carried rather than refused. See [`ThunkSignature::indirect_return`].
         if let Some(Shape::Struct(agg)) = &returns
             && agg.host_class()? == HostClass::Indirect
         {
-            return Err("returns an aggregate too large for AAPCS64's registers");
+            if cfg!(target_arch = "aarch64") {
+                return Err("returns an aggregate too large for AAPCS64's registers");
+            }
+            if agg.size > RESULT_BYTES {
+                return Err("returns an aggregate larger than this runtime buffers");
+            }
         }
         Ok(ThunkSignature {
             params,
@@ -233,9 +264,27 @@ impl ThunkSignature {
         })
     }
 
+    /// Size of the aggregate the *host* returns through a caller-supplied buffer,
+    /// or `None` when the return travels in registers.
+    ///
+    /// `Some` only where the host's convention hands that buffer over as an argument;
+    /// [`ThunkSignature::new`] has already refused the shape otherwise.
+    fn indirect_return(&self) -> Option<usize> {
+        match self.returns.as_ref()? {
+            Shape::Struct(agg) if agg.host_class().ok()? == HostClass::Indirect => Some(agg.size),
+            _ => None,
+        }
+    }
+
     /// What the trampoline declares it returns, and the offset in [`RESULT_BYTES`]
     /// each value is read from.
+    ///
+    /// Empty for an indirect return: nothing comes back in a register, and the buffer
+    /// the caller passed is filled instead.
     fn return_leaves(&self) -> Result<Vec<(types::Type, i32)>, Unsupported> {
+        if self.indirect_return().is_some() {
+            return Ok(Vec::new());
+        }
         Ok(match self.returns.as_ref() {
             None | Some(Shape::Scalar(T::None)) => Vec::new(),
             Some(Shape::Scalar(t)) => vec![(Self::cl_type(*t), 0)],
@@ -249,6 +298,20 @@ impl ThunkSignature {
                 HostClass::Integer { words } => {
                     (0..words as i32).map(|i| (types::I64, i * 8)).collect()
                 }
+                // As above: one return value per eightbyte, read from that
+                // eightbyte's own offset in the result buffer.
+                class @ HostClass::Eightbytes { .. } => class
+                    .slots()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        let ty = match c {
+                            Eightbyte::Sse => types::F64,
+                            Eightbyte::Integer => types::I64,
+                        };
+                        (ty, i as i32 * 8)
+                    })
+                    .collect(),
                 HostClass::Indirect => {
                     return Err("returns an aggregate too large for AAPCS64's registers");
                 }
@@ -266,6 +329,72 @@ impl ThunkSignature {
     }
 }
 
+/// How one of a trampoline's declared parameters arrives, and where it is spilled.
+///
+/// Most parameters are one scalar in one register and one word in the spill slot.
+/// An aggregate the host passes in memory is the exception: one declared parameter
+/// carrying an address, and as many spill words as the aggregate has eightbytes.
+enum Incoming {
+    Leaf { word: usize, ty: T },
+    Aggregate { word: usize, size: usize },
+}
+
+impl ThunkSignature {
+    /// The parameters a trampoline for this signature declares, in order.
+    fn incoming(&self) -> Vec<Incoming> {
+        let mut out = Vec::new();
+        let mut word = 0usize;
+        for (shape, leaves) in self.params.iter().zip(&self.host_leaves) {
+            let indirect = match shape {
+                Shape::Struct(agg) => {
+                    matches!(agg.host_class(), Ok(HostClass::Indirect)).then_some(agg.size)
+                }
+                Shape::Scalar(_) => None,
+            };
+            match indirect {
+                Some(size) => {
+                    out.push(Incoming::Aggregate { word, size });
+                    word += leaves.len();
+                }
+                None => {
+                    for &ty in leaves {
+                        out.push(Incoming::Leaf { word, ty });
+                        word += 1;
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Copy `size` bytes from the trampoline's result slot to the caller's buffer.
+///
+/// Widest-first down to a single byte, so a struct whose size is not a multiple of
+/// eight - `{d f}` at twelve, say - is copied exactly and nothing past its end is
+/// written. The caller's buffer is only guaranteed to be `size` bytes long.
+fn copy_out(
+    b: &mut FunctionBuilder,
+    ptr: types::Type,
+    out: cranelift_codegen::ir::StackSlot,
+    dest: cranelift_codegen::ir::Value,
+    size: usize,
+) {
+    let mut at = 0usize;
+    for (width, ty) in [
+        (8, types::I64),
+        (4, types::I32),
+        (2, types::I16),
+        (1, types::I8),
+    ] {
+        while size - at >= width {
+            let v = b.ins().stack_load(ptr, ty, out, at as i32);
+            b.ins().store(MemFlagsData::trusted(), v, dest, at as i32);
+            at += width;
+        }
+    }
+}
+
 /// Compile a trampoline that re-enters the guest at `guest_va`, placing arguments by
 /// `signature` rather than by the generic shape.
 ///
@@ -278,20 +407,37 @@ pub(crate) fn build_typed(guest_va: u64, signature: ThunkSignature) -> Result<Th
         reason,
     };
 
-    let leaves: Vec<T> = signature.host_leaves.iter().flatten().copied().collect();
+    // The host machine this trampoline is being built for. Cranelift's frontend
+    // is told rather than asked; see [`crate::jit::frontend_config`].
+    let frontend = crate::jit::frontend_config().map_err(|e| fail(e.to_string()))?;
+    let ptr = frontend.pointer_type();
+
+    let incoming = signature.incoming();
+    let words: usize = signature.host_leaves.iter().map(Vec::len).sum();
+    // The buffer a caller passes for a return its convention sends to memory.
+    // First in the list, ahead of `self` - which is what makes it the hidden
+    // argument the callee expects rather than a declared one.
+    let indirect = signature.indirect_return();
     let mut sig = Signature::new(conv);
-    for &t in &leaves {
-        sig.params.push(AbiParam::new(ThunkSignature::cl_type(t)));
+    if indirect.is_some() {
+        sig.params
+            .push(AbiParam::special(ptr, ArgumentPurpose::StructReturn));
+    }
+    for arrival in &incoming {
+        sig.params.push(match arrival {
+            Incoming::Leaf { ty, .. } => AbiParam::new(ThunkSignature::cl_type(*ty)),
+            // Rounded up because the backend requires whole eightbytes, which is
+            // also what the caller reserved: SysV pads a stack argument out.
+            Incoming::Aggregate { size, .. } => AbiParam::special(
+                ptr,
+                ArgumentPurpose::StructArgument(size.next_multiple_of(8) as u32),
+            ),
+        });
     }
     let ret_leaves = signature.return_leaves().map_err(|e| fail(e.to_string()))?;
     for (ty, _) in &ret_leaves {
         sig.returns.push(AbiParam::new(*ty));
     }
-
-    // The host machine this trampoline is being built for. Cranelift's frontend
-    // is told rather than asked; see [`crate::jit::frontend_config`].
-    let frontend = crate::jit::frontend_config().map_err(|e| fail(e.to_string()))?;
-    let ptr = frontend.pointer_type();
 
     let mut func = Function::with_name_signature(UserFuncName::user(0, 0), sig);
     let mut fn_ctx = FunctionBuilderContext::new();
@@ -301,7 +447,7 @@ pub(crate) fn build_typed(guest_va: u64, signature: ThunkSignature) -> Result<Th
     // the type of each from the descriptor, so the slot carries no tags.
     let spill = b.create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
-        (leaves.len().max(1) * 8) as u32,
+        (words.max(1) * 8) as u32,
         3,
     ));
     // Where the entry writes the result, so a floating-point return does not
@@ -318,8 +464,28 @@ pub(crate) fn build_typed(guest_va: u64, signature: ThunkSignature) -> Result<Th
     b.seal_block(entry);
 
     let params: Vec<_> = b.block_params(entry).to_vec();
-    for (i, &v) in params.iter().enumerate() {
-        b.ins().stack_store(ptr, v, spill, (i * 8) as i32);
+    // The struct-return buffer is a parameter but not an argument, so it is
+    // taken off the front before the rest are spilled in declaration order.
+    let (sret, args) = match indirect {
+        Some(_) => (Some(params[0]), &params[1..]),
+        None => (None, &params[..]),
+    };
+    for (arrival, &v) in incoming.iter().zip(args) {
+        match arrival {
+            Incoming::Leaf { word, .. } => {
+                b.ins().stack_store(ptr, v, spill, (word * 8) as i32);
+            }
+            // `v` is the address of the caller's copy, so the bytes are read
+            // through it into the words the entry expects to find them in.
+            Incoming::Aggregate { word, size } => {
+                for i in 0..size.div_ceil(8) {
+                    let w = b
+                        .ins()
+                        .load(types::I64, MemFlagsData::trusted(), v, (i * 8) as i32);
+                    b.ins().stack_store(ptr, w, spill, ((word + i) * 8) as i32);
+                }
+            }
+        }
     }
 
     let desc = Box::leak(Box::new(signature)) as *const ThunkSignature;
@@ -339,11 +505,19 @@ pub(crate) fn build_typed(guest_va: u64, signature: ThunkSignature) -> Result<Th
     b.ins()
         .call_indirect(callee_sig, callee, &[guest, desc, spill_ptr, out_ptr]);
 
-    let rets: Vec<_> = ret_leaves
-        .iter()
-        .map(|(ty, offset)| b.ins().stack_load(ptr, *ty, out, *offset))
-        .collect();
-    b.ins().return_(&rets);
+    // The entry filled `out` either way; an indirect return is that buffer's
+    // bytes copied on to the caller's. Cranelift adds the return of the pointer
+    // itself, so this returns nothing.
+    if let (Some(sret), Some(size)) = (sret, indirect) {
+        copy_out(&mut b, ptr, out, sret, size);
+        b.ins().return_(&[]);
+    } else {
+        let rets: Vec<_> = ret_leaves
+            .iter()
+            .map(|(ty, offset)| b.ins().stack_load(ptr, *ty, out, *offset))
+            .collect();
+        b.ins().return_(&rets);
+    }
     b.finalize(frontend);
 
     let mut backend = crate::jit::backend().map_err(|e| fail(e.to_string()))?;
@@ -500,10 +674,10 @@ impl GuestArgs {
     }
 }
 
-/// Rebuild an aggregate's bytes from the scalars AAPCS64 delivered.
+/// Rebuild an aggregate's bytes from the scalars the host's convention delivered.
 ///
 /// An HFA arrives as its members, one per `v` register, so each goes back at its own
-/// offset.
+/// offset; a SysV aggregate arrives as eightbytes, which go back as they came.
 fn reassemble(agg: &Aggregate, host: HostClass, words: &[u64]) -> Vec<u8> {
     let mut raw = vec![0u8; agg.size];
     match host {
@@ -526,7 +700,29 @@ fn reassemble(agg: &Aggregate, host: HostClass, words: &[u64]) -> Vec<u8> {
                 }
             }
         }
-        HostClass::Indirect => {}
+        // One word per eightbyte, in order, whatever the members inside it are.
+        class @ HostClass::Eightbytes { .. } => {
+            for (i, _) in class.slots().into_iter().enumerate() {
+                let start = i * 8;
+                let end = (start + 8).min(raw.len());
+                if start < end {
+                    let word = words.get(i).copied().unwrap_or(0);
+                    raw[start..end].copy_from_slice(&word.to_le_bytes()[..end - start]);
+                }
+            }
+        }
+        // Copied out of the caller's stack area, so the words are already the
+        // aggregate's own eightbytes. Reached only where an indirect parameter
+        // was accepted in the first place.
+        HostClass::Indirect => {
+            for (i, word) in words.iter().enumerate() {
+                let start = i * 8;
+                let end = (start + 8).min(raw.len());
+                if start < end {
+                    raw[start..end].copy_from_slice(&word.to_le_bytes()[..end - start]);
+                }
+            }
+        }
     }
     raw
 }

@@ -86,19 +86,41 @@ int main() {
 }
 "#;
 
+/// Whether the guest architecture this runtime emulates is also the host's.
+///
+/// The whole of this file's engine-selection half turns on it. On arm64 the two
+/// backends take disjoint sets of binaries and forcing the wrong one is always a
+/// refusal; on x86-64 every x86-64 binary is eligible for both, so the same
+/// commands succeed and the refusals under test do not exist to be provoked.
+const HOST_RUNS_X86_64: bool = cfg!(target_arch = "x86_64");
+
 #[test]
-fn an_x86_64_binary_still_takes_the_emulated_path() {
+fn an_x86_64_binary_takes_the_backend_the_host_makes_available() {
     let Some(path) = common::hello() else {
         skip!("cannot build x86_64 fixtures")
     };
-    // The emulated backend is the only one that translates, so a non-zero
-    // region count is what distinguishes the two without a flag to ask with.
-    let (status, _, err) = common::run_guest_env(&[("ROSETTA3_TRACE_VM", "1")], &path, &[]);
-    assert_eq!(status, Some(0), "stderr: {err}");
-    assert!(
-        err.contains("image "),
-        "the emulated backend reports an image map: {err}"
-    );
+    // Spawned here rather than through a `common` helper because those state an
+    // engine, and what this test is about is the one the driver picks when it is
+    // not told. A region entry is the thing only the emulated backend can
+    // report, because only the emulated backend translates a region to enter -
+    // the image map is not that thing, since both backends print one.
+    let out = std::process::Command::new(driver())
+        .args(["run", &path])
+        .env("ROSETTA3_STATS", "1")
+        .output()
+        .expect("running the driver");
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(0), "stderr: {err}");
+    let translated = err.contains("region entr(");
+    match HOST_RUNS_X86_64 {
+        // Native is both faster and available, so selection must prefer it -
+        // translating an x86-64 binary on an x86-64 CPU is pure loss.
+        true => assert!(
+            !translated,
+            "the native backend should have been chosen: {err}"
+        ),
+        false => assert!(translated, "the emulated backend translates: {err}"),
+    }
 }
 
 #[test]
@@ -108,6 +130,10 @@ fn forcing_native_on_an_x86_64_binary_names_the_architecture() {
     };
     let (status, _, err) = run_guest_with(&["--native"], &path, &[]);
 
+    if HOST_RUNS_X86_64 {
+        assert_eq!(status, Some(0), "the host can run it directly: {err}");
+        return;
+    }
     assert_eq!(status, Some(1));
     assert!(err.contains("native backend"), "{err}");
     assert!(err.contains("x86-64"), "{err}");
@@ -120,6 +146,12 @@ fn forcing_emulated_on_a_native_binary_names_the_architecture() {
     };
     let (status, _, err) = run_guest_with(&["--emulated"], &path, &[]);
 
+    if HOST_RUNS_X86_64 {
+        // The "native" fixture is an x86-64 one here, so it is also a fixture
+        // the lifter accepts, and forcing emulation recompiles it.
+        assert_eq!(status, Some(0), "the lifter accepts it: {err}");
+        return;
+    }
     assert_eq!(status, Some(1));
     assert!(err.contains("emulated backend"), "{err}");
 }
@@ -131,6 +163,13 @@ fn forcing_emulated_on_a_native_binary_names_the_architecture() {
 fn an_arm64e_slice_does_not_claim_the_native_backend() {
     if !std::path::Path::new("/bin/ls").exists() {
         skip!("no /bin/ls")
+    }
+    if HOST_RUNS_X86_64 {
+        // There is no arm64e question to answer: the x86-64 slice is the one
+        // the native backend takes, and it takes it directly.
+        let (status, _, err) = run_guest_with(&["--native"], "/bin/ls", &["/bin"]);
+        assert_eq!(status, Some(0), "stderr: {err}");
+        return;
     }
     let (status, _, err) = run_guest_with(&["--native"], "/bin/ls", &[]);
     assert_eq!(status, Some(1));

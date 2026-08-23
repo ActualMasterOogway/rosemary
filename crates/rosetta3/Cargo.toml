@@ -1,6 +1,6 @@
 [package]
 name = "rosetta3"
-description = "Run Intel macOS applications on Apple Silicon atop the Microlift JIT recompiler"
+description = "Run Intel macOS applications on Apple Silicon or Intel Macs atop the Microlift JIT recompiler"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

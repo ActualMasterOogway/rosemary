@@ -34,6 +34,12 @@ pub fn run(exec: &dyn Execution) -> Result<i32, VmError> {
     say_image_map(exec);
     // Whatever this backend must do before any of the program's own code runs.
     exec.prepare()?;
+    // Everything above is this runtime's own start-up, and a host library that
+    // returns successfully is still entitled to leave `errno` wherever it likes:
+    // the loader leaves `EPERM` here and `NSUserDefaults` leaves `EINVAL`. A real
+    // process reaches its first initializer with a clean one, so the guest gets
+    // a clean one - after this line every write to it is the guest's own.
+    crate::thread::clear_errno();
     run_initializers(exec)?;
     let status = exec.enter_main()?;
     Ok((status & 0xff) as i32)
@@ -64,3 +70,4 @@ fn say_image_map(exec: &dyn Execution) {
         }
     }
 }
+

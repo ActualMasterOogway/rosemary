@@ -126,7 +126,7 @@ fn fast_and_slow_imports_produce_the_same_program() {
     };
 
     let (fast_status, fast_out, _) = run_guest(&path, &[]);
-    let (slow_status, slow_out, slow_err) = run_guest_with(&["--slow"], &path, &[]);
+    let (slow_status, slow_out, slow_err) = run_guest_with(&["--slow", "--emulated"], &path, &[]);
 
     assert_eq!(fast_status, slow_status, "slow stderr: {slow_err}");
     assert_eq!(fast_out, slow_out);
@@ -271,7 +271,7 @@ fn a_dynamically_loaded_image_runs_the_same_bridged_and_exited() {
     };
 
     let (fast_status, fast_out, fast_err) = run_guest(&path, &[]);
-    let (slow_status, slow_out, slow_err) = run_guest_with(&["--slow"], &path, &[]);
+    let (slow_status, slow_out, slow_err) = run_guest_with(&["--slow", "--emulated"], &path, &[]);
 
     assert_eq!(fast_status, Some(0), "stderr: {fast_err}");
     assert_eq!(slow_status, Some(0), "stderr: {slow_err}");
@@ -300,7 +300,7 @@ fn the_mode_a_guest_opens_with_is_the_mode_the_file_gets() {
         skip!("cannot build x86_64 fixtures")
     };
 
-    for extra in [&[][..], &["--slow"][..]] {
+    for extra in [&["--emulated"][..], &["--slow", "--emulated"][..]] {
         let dir = std::env::temp_dir().join(format!("rosetta3-open-mode{}", extra.len()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a directory the guest can write to");

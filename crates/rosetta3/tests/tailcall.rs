@@ -43,7 +43,7 @@ fn the_marshaller_places_it_as_well_as_the_lifter_does() {
     let Some(path) = tailcall_fixture() else {
         skip!("cannot build x86_64 fixtures")
     };
-    let (status, out, err) = run_guest_with(&["--slow"], &path, &[]);
+    let (status, out, err) = run_guest_with(&["--slow", "--emulated"], &path, &[]);
 
     assert_eq!(status, Some(0), "stderr: {err}");
     assert_eq!(out, EXPECTED, "stderr: {err}");

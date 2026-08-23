@@ -363,19 +363,28 @@ mod tests {
 
     #[test]
     fn a_legacy_x86_variant_suffix_falls_back_to_the_plain_name() {
-        // `/bin/ls` really does import this name, and arm64 really does not
-        // export it - the whole point of the fallback.
+        // `/bin/ls` really does import this name. Which arm of this test runs
+        // is the whole difference between the two hosts: arm64 does not export
+        // the variant, so the fallback is what makes the import resolvable,
+        // while an x86-64 host exports it for real and must be left alone -
+        // there the two flavours are different functions.
         let p = NativeDylibProvider::system();
         let plain = p
             .resolve(&sym("_fts_open"))
             .expect("_fts_open must resolve");
         let variant = p
             .resolve(&sym("_fts_open$INODE64"))
-            .expect("the $INODE64 variant must fall back");
-        assert_eq!(
-            variant, plain,
-            "the fallback must land on the same implementation"
-        );
+            .expect("the $INODE64 variant must resolve");
+        match p.dlsym("_fts_open$INODE64") {
+            Some(exact) => assert_eq!(
+                variant, exact,
+                "a host that has the variant must not be sent to the plain name"
+            ),
+            None => assert_eq!(
+                variant, plain,
+                "the fallback must land on the same implementation"
+            ),
+        }
     }
 
     #[test]

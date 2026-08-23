@@ -549,7 +549,7 @@ pub fn install(state: ThreadState) -> &'static ThreadState {
 
 /// Hand this thread the `errno` a thread that has just started really has.
 #[inline(always)]
-fn clear_errno() {
+pub(crate) fn clear_errno() {
     // SAFETY: `__error()` returns this thread's own `errno` slot, which is
     // live for as long as the thread is.
     unsafe { *libc::__error() = 0 };
@@ -594,8 +594,25 @@ pub fn tsd_base() -> u64 {
     tpidrro & !0b111
 }
 
-/// A host that is not arm64 has no `TPIDRRO_EL0`, and this runtime has no other host.
-#[cfg(not(target_arch = "aarch64"))]
+/// On x86-64 Darwin the array is what `%gs` already points at, and `tsd[0]` holds the
+/// base itself - which is how `pthread_self` is a single `mov` from `%gs:0`.
+///
+/// Read out of the segment rather than asked for by `pthread_self()`, because the two
+/// are the same value and this one cannot call into the guest's shims.
+#[cfg(target_arch = "x86_64")]
+pub fn tsd_base() -> u64 {
+    let base: u64;
+    // SAFETY: every Darwin thread has `%gs` pointing at its own TSD array, and
+    // slot zero of that array is live for as long as the thread is. One load,
+    // no writes.
+    unsafe {
+        std::arch::asm!("mov {}, gs:0", out(reg) base, options(nostack, preserves_flags))
+    };
+    base
+}
+
+/// A host with neither `TPIDRRO_EL0` nor a Darwin `%gs`, which this runtime has not got.
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub fn tsd_base() -> u64 {
     0
 }
@@ -624,11 +641,10 @@ impl StackRequest {
     fn build(self) -> Result<GuestStack, VmError> {
         match self {
             StackRequest::Default => GuestStack::bare(THREAD_STACK),
-            // A page more than asked for, because what the guest asked for is
-            // the part it may use.
-            StackRequest::Sized(bytes) => {
-                GuestStack::bare(bytes + machish::memory::host_page_size() as usize)
-            }
+            // The guard on top of what was asked for, because what the guest
+            // asked for is the part it may use. Paired with the subtraction in
+            // [`GuestStack::bare`], so the two have to name the same quantity.
+            StackRequest::Sized(bytes) => GuestStack::bare(bytes + crate::stack::guard()),
             StackRequest::Supplied { top, size } => Ok(GuestStack::supplied(top, size)),
         }
     }

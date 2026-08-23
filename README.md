@@ -2,6 +2,13 @@
 
 Rosetta 3 is a high level emulator for running x86-64 MacOS binaries on AArch64 Mac devices. It implements a compliant Mach-O loader using `machish` as its base, and shims the x86-64 Mac ABI to the AArch64 one.
 
+Rosetta 3 also builds and runs on x86-64 Macs, where the loader, the shim layer and the recompiler are the same code and only the host half of the ABI changes. Two backends are available on either host:
+
+* native, which links the program against the host's own dylibs and calls it directly. On an x86-64 host this is the backend selection picks for any x86-64 binary, because translating a program into the instruction set it is already written in buys nothing.
+* emulated, which recompiles the program through Microlift.
+
+Build either with `cargo build --release --target x86_64-apple-darwin --bin rosetta3`; leaving the target off builds for the machine you are on.
+
 Rosetta 3 builds its CPU emulation using the Microlift binary lifter as a base.
 
 ## Performance

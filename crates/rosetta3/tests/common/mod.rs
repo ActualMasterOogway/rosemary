@@ -2135,27 +2135,25 @@ pub fn objc_dlopen_fixture() -> Option<String> {
         .clone()
 }
 
-/// Run a guest program under the driver, returning `(status, stdout, stderr)`.
-///
-/// Through the built binary rather than the library, because that is what the
-/// milestone claims: a program *runs*, exits with its own status, and its
-/// `atexit` handlers fire from the host's exit - none of which is observable
-/// from inside a test that only calls `Vm::call`.
+/// Run an x86-64 guest program under the driver, returning `(status, stdout, stderr)`.
+/// through [`run_guest_with`] directly.
 pub fn run_guest(path: &str, args: &[&str]) -> (Option<i32>, String, String) {
-    run_guest_with(&[], path, args)
+    run_guest_with(&["--emulated"], path, args)
 }
 
 /// [`run_guest`], with environment variables set for the driver.
 ///
 /// Most of what this runtime can be asked to do differently is asked for that
 /// way, through a `ROSETTA3_*` variable.
+///
+/// `--emulated`, for the reason [`run_guest`] gives.
 pub fn run_guest_env(
     env: &[(&str, &str)],
     path: &str,
     args: &[&str],
 ) -> (Option<i32>, String, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_rosetta3"));
-    command.arg("run").arg(path).args(args);
+    command.arg("run").arg("--emulated").arg(path).args(args);
     for (key, value) in env {
         command.env(key, value);
     }
@@ -2173,6 +2171,10 @@ pub fn driver() -> &'static str {
 }
 
 /// [`run_guest`], with extra driver flags before the program path.
+///
+/// Unlike [`run_guest`] this states nothing of its own, so a caller handing it an
+/// x86-64 fixture must pass `--emulated` itself - see [`run_guest`] for why that
+/// matters on an x86-64 host.
 pub fn run_guest_with(flags: &[&str], path: &str, args: &[&str]) -> (Option<i32>, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_rosetta3"))
         .arg("run")

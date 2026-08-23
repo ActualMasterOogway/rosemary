@@ -254,7 +254,7 @@ fn the_slow_import_policy_sends_the_same_messages() {
         skip!("cannot build x86_64 Objective-C fixtures")
     };
     let (fast_status, fast, _) = common::run_guest(&path, &[]);
-    let (slow_status, slow, stderr) = common::run_guest_with(&["--slow"], &path, &[]);
+    let (slow_status, slow, stderr) = common::run_guest_with(&["--slow", "--emulated"], &path, &[]);
     assert_eq!(fast, slow, "stderr: {stderr}");
     assert_eq!(fast_status, slow_status);
 }

@@ -432,16 +432,23 @@ fn restore(signal: i32) {
 
 /// The faulting `pc`, out of the `ucontext_t` the kernel passed.
 ///
-/// The layout is Darwin's `_STRUCT_UCONTEXT` and `_STRUCT_ARM_THREAD_STATE64`, which
-/// the `libc` crate does not declare for Apple platforms.
+/// The layout is Darwin's `_STRUCT_UCONTEXT` and the host's thread state, which the
+/// `libc` crate does not declare for Apple platforms.
 ///
 /// `None` on any null, because a handler that dereferences its way to a second fault
 /// has destroyed the evidence it was called to preserve.
 fn host_pc(context: *mut libc::c_void) -> Option<u64> {
-    /// Byte offset of `uc_mcontext` within `ucontext_t`.
+    /// Byte offset of `uc_mcontext` within `ucontext_t`. The same on both hosts:
+    /// nothing ahead of it is architecture-dependent.
     const UC_MCONTEXT: usize = 48;
-    /// Byte offset of `__ss.__pc` within `__darwin_mcontext64`.
+    /// Byte offset of `__ss.__pc` within `__darwin_mcontext64` - sixteen bytes of
+    /// `__es`, then twenty-nine `__x` plus `__fp`, `__lr` and `__sp`.
+    #[cfg(target_arch = "aarch64")]
     const MC_PC: usize = 16 + 256;
+    /// Byte offset of `__ss.__rip` - sixteen bytes of `__es`, then the sixteen
+    /// general-purpose registers `_STRUCT_X86_THREAD_STATE64` lists before it.
+    #[cfg(target_arch = "x86_64")]
+    const MC_PC: usize = 16 + 128;
 
     if context.is_null() {
         return None;

@@ -1,4 +1,12 @@
 //! Reading arguments out of a guest register context and making the host call.
+//!
+//! The host call is made by transmuting the callee to a Rust prototype wide enough to
+//! cover the signature and letting the compiler place the arguments - so the host's
+//! convention is spelled by the compiler and not by this file. What this file decides
+//! is which prototype, and that is where the two hosts part company: the AAPCS64
+//! vocabulary of HFAs and `x` register pairs on one, eightbytes on the other. The
+//! guest's side is SysV AMD64 throughout, which on an x86-64 host makes the two halves
+//! the same convention.
 
 use iced_x86::Register;
 
@@ -10,7 +18,21 @@ use super::aggregate::{self, Eightbyte, GuestClass, HostClass, Shape};
 use super::{AbiError, ArgType, FunctionAbi, GuestMemory, Result, guest_call_abi_ref};
 
 /// Host argument registers of each class, per AAPCS64.
+///
+/// The count the prototypes below are shaped around; [`HOST_INT_REGS`] is the one that
+/// says where this host's registers actually run out.
 const MAX_INT_ARGS: usize = 8;
+
+/// Integer argument registers the *host* has, past which an argument is on the stack.
+///
+/// The prototypes below declare sixteen `u64`, and the compiler places the first
+/// [`HOST_INT_REGS`] of them in registers and the rest on the stack - so an index into
+/// `ints` at or above this is a stack slot, which is what lets an aggregate SysV sends
+/// to memory be written by pushing its eightbytes there.
+#[cfg(target_arch = "aarch64")]
+const HOST_INT_REGS: usize = 8;
+#[cfg(target_arch = "x86_64")]
+const HOST_INT_REGS: usize = 6;
 const MAX_FP_ARGS: usize = 8;
 
 /// Integer arguments the over-wide prototype declares, registers and stack together.
@@ -829,12 +851,23 @@ pub fn call_shapes(
     let (mut n_int, mut n_fp) = (0usize, 0usize);
 
     // The copies AAPCS64 B.4 says the *caller* makes for an aggregate too large
-    // for registers.
+    // for registers. SysV writes the bytes into the call's own stack slots, so
+    // on that host nothing outlives the call and this stays empty.
+    #[cfg_attr(target_arch = "x86_64", expect(unused_mut))]
     let mut copies: Vec<Vec<u64>> = Vec::new();
 
     // As in [`call_types`]: the integer arguments past the eighth decide which
     // prototype places them.
     let mut overflow: Vec<ArgType> = Vec::new();
+
+    // Whether an aggregate has already been written into the prototype's stack
+    // slots. Once one has, a *later* integer argument cannot be placed: SysV
+    // would give it one of the registers that aggregate skipped, and appending
+    // to `ints` would put it on the stack behind the aggregate instead. That
+    // shape is refused rather than mis-sent. Floating-point arguments are
+    // unaffected - the SSE registers are assigned independently of the stack.
+    #[cfg_attr(target_arch = "aarch64", expect(unused_mut, unused_variables))]
+    let mut on_stack = false;
     let mut push_int =
         |v: u64, ty: ArgType, n_int: &mut usize, overflow: &mut Vec<ArgType>| -> Result<()> {
             if *n_int == MAX_INT_ARGS_TOTAL {
@@ -855,6 +888,11 @@ pub fn call_shapes(
                     return Err(unmarshallable("a scalar placed as an aggregate"));
                 };
                 let raw = convert.argument(symbol, index, read_where(symbol, ctx, mem, *w)?)?;
+                if on_stack && !aggregate::is_fp(*ty) {
+                    return Err(unmarshallable(
+                        "an integer argument follows an aggregate this host passes in memory",
+                    ));
+                }
                 if aggregate::is_fp(*ty) {
                     if n_fp == MAX_FP_ARGS {
                         return Err(unmarshallable("more than eight floating-point arguments"));
@@ -884,7 +922,42 @@ pub fn call_shapes(
                             push_int(w, ArgType::UnsignedDoubleword, &mut n_int, &mut overflow)?;
                         }
                     }
-                    // AAPCS64 B.4.
+                    // SysV: one register per eightbyte, from the file its
+                    // class names. Unlike the AAPCS64 arm above the unit is the
+                    // eightbyte, so a pair of packed `float`s travels as one
+                    // register and not as two.
+                    HostClass::Eightbytes { .. } => {
+                        for (i, class) in agg
+                            .host_class()
+                            .map_err(unmarshallable)?
+                            .slots()
+                            .into_iter()
+                            .enumerate()
+                        {
+                            let w = leaf_bits(&bytes, i * 8, 8);
+                            match class {
+                                Eightbyte::Sse => {
+                                    if n_fp == MAX_FP_ARGS {
+                                        return Err(unmarshallable(
+                                            "more than eight floating-point arguments",
+                                        ));
+                                    }
+                                    fps[n_fp] = f64::from_bits(w);
+                                    n_fp += 1;
+                                }
+                                Eightbyte::Integer => push_int(
+                                    w,
+                                    ArgType::UnsignedDoubleword,
+                                    &mut n_int,
+                                    &mut overflow,
+                                )?,
+                            }
+                        }
+                    }
+                    // AAPCS64 B.4 passes a pointer to a copy the caller makes.
+                    // SysV passes the bytes themselves, on the stack - so the
+                    // two arms here are not two spellings of one thing.
+                    #[cfg(target_arch = "aarch64")]
                     HostClass::Indirect => {
                         let mut copy = vec![0u64; agg.size.div_ceil(8)];
                         for (i, w) in copy.iter_mut().enumerate() {
@@ -893,6 +966,21 @@ pub fn call_shapes(
                         let addr = copy.as_ptr() as usize as u64;
                         copies.push(copy);
                         push_int(addr, ArgType::Pointer, &mut n_int, &mut overflow)?;
+                    }
+                    // The prototype's stack slots begin at `HOST_INT_REGS`, so
+                    // the aggregate is written there and the integer registers
+                    // it skipped past are left holding whatever they held. The
+                    // callee does not read them: SysV assigned it none.
+                    #[cfg(target_arch = "x86_64")]
+                    HostClass::Indirect => {
+                        while n_int < HOST_INT_REGS {
+                            push_int(0, ArgType::UnsignedDoubleword, &mut n_int, &mut overflow)?;
+                        }
+                        for i in 0..agg.size.div_ceil(8) {
+                            let w = leaf_bits(&bytes, i * 8, 8);
+                            push_int(w, ArgType::UnsignedDoubleword, &mut n_int, &mut overflow)?;
+                        }
+                        on_stack = true;
                     }
                 }
             }
@@ -965,6 +1053,43 @@ fn call_returning(
                 let mut out = Vec::with_capacity(words * 8);
                 for w in v.0.iter().take(words) {
                     out.extend_from_slice(&w.to_le_bytes());
+                }
+                (out, 0)
+            }
+            // Each eightbyte comes back in one register, and the prototype is
+            // whichever pair of registers the classes name. A one-eightbyte
+            // aggregate borrows the two-eightbyte prototype and reads only the
+            // first: the callee wrote one register, and the second is simply
+            // not looked at.
+            Some(HostClass::Eightbytes { first, second }) => {
+                let mut out = Vec::with_capacity(16);
+                let mut take = |bytes: [u8; 8], keep: bool| {
+                    if keep {
+                        out.extend_from_slice(&bytes);
+                    }
+                };
+                let want_second = second.is_some();
+                match (first, second.unwrap_or(first)) {
+                    (Eightbyte::Integer, Eightbyte::Integer) => {
+                        let v = call_u64x2(host, ints, fps);
+                        take(v.0[0].to_le_bytes(), true);
+                        take(v.0[1].to_le_bytes(), want_second);
+                    }
+                    (Eightbyte::Sse, Eightbyte::Sse) => {
+                        let v = call_f64x2(host, ints, fps);
+                        take(v.0[0].to_le_bytes(), true);
+                        take(v.0[1].to_le_bytes(), want_second);
+                    }
+                    (Eightbyte::Integer, Eightbyte::Sse) => {
+                        let v = call_int_sse(host, ints, fps);
+                        take(v.0.to_le_bytes(), true);
+                        take(v.1.to_le_bytes(), want_second);
+                    }
+                    (Eightbyte::Sse, Eightbyte::Integer) => {
+                        let v = call_sse_int(host, ints, fps);
+                        take(v.0.to_le_bytes(), true);
+                        take(v.1.to_le_bytes(), want_second);
+                    }
                 }
                 (out, 0)
             }
@@ -1179,6 +1304,139 @@ unsafe fn call_u64x2(
     fps: &[f64; MAX_FP_ARGS],
 ) -> U64x2 {
     let f: U64x2Fn = unsafe { core::mem::transmute(host as usize as *const ()) };
+    unsafe { call_through!(f, ints, fps) }
+}
+
+/// Two SSE eightbytes, in `xmm0` and `xmm1`.
+///
+/// Sixteen bytes, so SysV returns it in registers - which is the whole reason this
+/// exists next to [`F64x4`]: that one is thirty-two and would come back through a
+/// hidden pointer the callee was never given.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct F64x2([f64; 2]);
+
+/// An integer eightbyte then an SSE one: `rax` and `xmm0`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IntSse(u64, f64);
+
+/// An SSE eightbyte then an integer one: `xmm0` and `rax`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SseInt(f64, u64);
+
+type F64x2Fn = unsafe extern "C" fn(
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+) -> F64x2;
+
+/// # Safety
+/// As [`call_int`], for a callee returning two SSE eightbytes.
+unsafe fn call_f64x2(
+    host: u64,
+    ints: &[u64; MAX_INT_ARGS_TOTAL],
+    fps: &[f64; MAX_FP_ARGS],
+) -> F64x2 {
+    let f: F64x2Fn = unsafe { core::mem::transmute(host as usize as *const ()) };
+    unsafe { call_through!(f, ints, fps) }
+}
+
+type IntSseFn = unsafe extern "C" fn(
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+) -> IntSse;
+
+/// # Safety
+/// As [`call_int`], for a callee returning an integer eightbyte then an SSE one.
+unsafe fn call_int_sse(
+    host: u64,
+    ints: &[u64; MAX_INT_ARGS_TOTAL],
+    fps: &[f64; MAX_FP_ARGS],
+) -> IntSse {
+    let f: IntSseFn = unsafe { core::mem::transmute(host as usize as *const ()) };
+    unsafe { call_through!(f, ints, fps) }
+}
+
+type SseIntFn = unsafe extern "C" fn(
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+) -> SseInt;
+
+/// # Safety
+/// As [`call_int`], for a callee returning an SSE eightbyte then an integer one.
+unsafe fn call_sse_int(
+    host: u64,
+    ints: &[u64; MAX_INT_ARGS_TOTAL],
+    fps: &[f64; MAX_FP_ARGS],
+) -> SseInt {
+    let f: SseIntFn = unsafe { core::mem::transmute(host as usize as *const ()) };
     unsafe { call_through!(f, ints, fps) }
 }
 

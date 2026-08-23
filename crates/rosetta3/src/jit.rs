@@ -112,6 +112,14 @@ impl OptLevel {
         builder
             .set("enable_table_access_spectre_mitigation", "false")
             .expect("failed to turn off table access pass");
+        // Not a choice: the x64 backend refuses to emit a `tail` call without
+        // one, and every block-linked jump this runtime lifts is a tail call.
+        // The aarch64 backend builds the frame record either way, so this is
+        // gated rather than set unconditionally only to leave that side alone.
+        #[cfg(target_arch = "x86_64")]
+        builder
+            .set("preserve_frame_pointers", "true")
+            .expect("cranelift accepts its own preserve_frame_pointers values");
         match self {
             OptLevel::Speed | OptLevel::All => {
                 builder

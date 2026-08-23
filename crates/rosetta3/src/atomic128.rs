@@ -97,21 +97,43 @@ unsafe fn compare_exchange(at: *mut u128, expected: u128, desired: u128) -> u128
     u128::from(found_lo) | (u128::from(found_hi) << 64)
 }
 
-/// The same operation where the host has one in its own instruction set.
+/// The same operation on the host that has the guest's own instruction.
 ///
-/// x86-64 *is* `CMPXCHG16B`, and any other host that gets here has no reason to need
-/// the exclusive-pair loop.
+/// The guest only reaches here when [`Atomic128Mode::Exit`] was chosen, which on an
+/// x86-64 host means the CPU lacks `CX16` - so this is the servicing path for a
+/// feature the lifted code could not use inline, not a translation.
+///
+/// [`Atomic128Mode::Exit`]: microlift::core::Atomic128Mode
 ///
 /// # Safety
 ///
 /// As the aarch64 arm.
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(target_arch = "x86_64")]
 unsafe fn compare_exchange(at: *mut u128, expected: u128, desired: u128) -> u128 {
-    // SAFETY: the caller's guarantee about `at`.
+    let (expect_lo, expect_hi) = (expected as u64, (expected >> 64) as u64);
+    let (desire_lo, desire_hi) = (desired as u64, (desired >> 64) as u64);
+    let (found_lo, found_hi): (u64, u64);
+    // SAFETY: the caller's guarantee about `at`. `rbx` is half the operand pair
+    // but LLVM will not hand it over as an operand, so it is saved and restored
+    // around the instruction; nothing between the two moves can observe it gone.
+    // The other operands are pinned to explicit registers precisely so that the
+    // allocator cannot put one of them in `rbx` behind our back.
     unsafe {
-        let cell = &*(at as *const std::sync::atomic::AtomicU64).cast::<CellU128>();
-        cell.compare_exchange(expected, desired)
+        std::arch::asm!(
+            "mov r8, rbx",
+            "mov rbx, rdi",
+            "lock cmpxchg16b [rsi]",
+            "mov rbx, r8",
+            in("rsi") at,
+            in("rdi") desire_lo,
+            out("r8") _,
+            inout("rax") expect_lo => found_lo,
+            inout("rdx") expect_hi => found_hi,
+            in("rcx") desire_hi,
+            options(nostack),
+        );
     }
+    u128::from(found_lo) | (u128::from(found_hi) << 64)
 }
 
 /// Find the instruction that ends at `end`.

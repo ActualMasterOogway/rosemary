@@ -128,6 +128,32 @@ unsafe fn msg_send<T: Copy>() -> T {
     unsafe { *(&p as *const *const () as *const T) }
 }
 
+/// [`msg_send`] for a message whose return this host sends to memory.
+///
+/// x86-64 has a second trampoline for exactly that case, and the ordinary one is
+/// wrong there: the caller's hidden buffer arrives in the register `objc_msgSend`
+/// reads the receiver from, so it looks the selector up on a stack address. arm64
+/// returns every struct this size in registers and has only the one trampoline.
+unsafe fn msg_send_stret<T: Copy>() -> T {
+    assert_eq!(
+        std::mem::size_of::<T>(),
+        std::mem::size_of::<*const ()>(),
+        "T must be a bare function pointer"
+    );
+    #[cfg(target_arch = "x86_64")]
+    let p = {
+        let name = std::ffi::CString::new("objc_msgSend_stret").unwrap();
+        // SAFETY: `RTLD_DEFAULT` is `(void *)-2` on macOS; `name` outlives the call.
+        let p = unsafe { libc::dlsym(-2isize as *mut std::ffi::c_void, name.as_ptr()) };
+        assert!(!p.is_null(), "an x86-64 host has objc_msgSend_stret");
+        p as *const ()
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let p = host::objc_msgSend as *const ();
+    // SAFETY: the caller promises `T` matches the selector being sent.
+    unsafe { *(&p as *const *const () as *const T) }
+}
+
 fn sel(name: &str) -> host::Sel {
     let c = std::ffi::CString::new(name).unwrap();
     // SAFETY: `c` is NUL-terminated and outlives the call.
@@ -690,7 +716,9 @@ fn a_guest_method_returns_a_struct_the_host_reads_from_registers() {
     unsafe {
         let size: extern "C" fn(host::Class, host::Sel) -> Size = msg_send();
         assert_eq!(size(obj, sel("shapeSize")), Size(640.0, 480.0));
-        let rect: extern "C" fn(host::Class, host::Sel) -> Rect = msg_send();
+        // Thirty-two bytes: registers on arm64, and the hidden-buffer
+        // trampoline on x86-64. Rust emits the buffer for us either way.
+        let rect: extern "C" fn(host::Class, host::Sel) -> Rect = msg_send_stret();
         assert_eq!(rect(obj, sel("shapeRect")), Rect(1.0, 2.0, 3.0, 4.0));
         let range: extern "C" fn(host::Class, host::Sel) -> Range = msg_send();
         assert_eq!(range(obj, sel("shapeRange")), Range(7, 9));

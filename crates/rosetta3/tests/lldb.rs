@@ -66,7 +66,7 @@ fn lldb_at_the_fault(settings: &[&str], commands: &[&str]) -> Option<String> {
         command.args(["-k", one]);
     }
     command
-        .args(["--", driver(), "run", &path])
+        .args(["--", driver(), "run", "--emulated", &path])
         .env("ROSETTA3_LLDB", "1");
 
     let out = command.output().ok()?;
@@ -293,7 +293,7 @@ fn a_debugger_that_arrives_late_still_sees_everything() {
     // version that only ever published the newest translation would pass every
     // other test in this file and fail this one.
     let mut guest = Command::new(driver())
-        .args(["run", &path])
+        .args(["run", "--emulated", &path])
         .env("ROSETTA3_LLDB", "1")
         .stdout(Stdio::piped())
         .spawn()

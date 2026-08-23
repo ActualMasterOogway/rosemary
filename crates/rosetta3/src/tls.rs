@@ -198,6 +198,60 @@ pub unsafe extern "C" fn bootstrap_thunk(_descriptor: *const u8) -> *mut u8 {
     )
 }
 
+/// [`bootstrap`] behind the same discipline on x86-64.
+///
+/// dyld's `_tlv_get_addr` saves every caller-saved register except `rax` around its
+/// slow path, and callers count on that here for the same reason they do on arm64.
+/// `rax` is the return value, so it is the one register the thunk is free to lose.
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+pub unsafe extern "C" fn bootstrap_thunk(_descriptor: *const u8) -> *mut u8 {
+    core::arch::naked_asm!(
+        "push rbp",
+        "mov rbp, rsp",
+        // Eight pushes keep the sixteen-byte alignment the frame arrived with,
+        // so the `sub` below lands the `call` on an aligned stack.
+        "push rdi",
+        "push rsi",
+        "push rdx",
+        "push rcx",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "sub rsp, 128",
+        "movaps [rsp + 0x00], xmm0",
+        "movaps [rsp + 0x10], xmm1",
+        "movaps [rsp + 0x20], xmm2",
+        "movaps [rsp + 0x30], xmm3",
+        "movaps [rsp + 0x40], xmm4",
+        "movaps [rsp + 0x50], xmm5",
+        "movaps [rsp + 0x60], xmm6",
+        "movaps [rsp + 0x70], xmm7",
+        "call {bootstrap}",
+        "movaps xmm0, [rsp + 0x00]",
+        "movaps xmm1, [rsp + 0x10]",
+        "movaps xmm2, [rsp + 0x20]",
+        "movaps xmm3, [rsp + 0x30]",
+        "movaps xmm4, [rsp + 0x40]",
+        "movaps xmm5, [rsp + 0x50]",
+        "movaps xmm6, [rsp + 0x60]",
+        "movaps xmm7, [rsp + 0x70]",
+        "add rsp, 128",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rcx",
+        "pop rdx",
+        "pop rsi",
+        "pop rdi",
+        "pop rbp",
+        "ret",
+        bootstrap = sym bootstrap,
+    )
+}
+
 /// The body of [`bootstrap`], with this thread's storage already in hand.
 fn resolve(tls: &mut ThreadTls, at: u64) -> *mut u8 {
     // Acquire pairs with the release in `register`: observing the new epoch

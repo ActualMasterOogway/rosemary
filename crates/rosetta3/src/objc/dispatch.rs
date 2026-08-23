@@ -1414,9 +1414,19 @@ mod tests {
                 crate::abi::aggregate::Eightbyte::Integer,
             ])
         );
+        // Two integer registers on either host, said in each one's own words.
+        #[cfg(target_arch = "aarch64")]
         assert_eq!(
             agg.host_class(),
             Ok(crate::abi::aggregate::HostClass::Integer { words: 2 })
+        );
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(
+            agg.host_class(),
+            Ok(crate::abi::aggregate::HostClass::Eightbytes {
+                first: crate::abi::aggregate::Eightbyte::Integer,
+                second: Some(crate::abi::aggregate::Eightbyte::Integer),
+            })
         );
     }
 

@@ -10,6 +10,21 @@ use crate::vm::VmError;
 /// Default guest stack, matching the 8 MiB macOS gives a main thread.
 pub const DEFAULT_STACK: usize = 8 * 1024 * 1024;
 
+/// Bytes reserved below a guest stack that the guest may not use.
+///
+/// A guest-visible number, not a host one: `pthread_get_stacksize_np` on a main thread
+/// returns `DEFAULT_STACK` less this, and a guest that reads sixteen kilobytes on real
+/// hardware has to read sixteen kilobytes here. Deriving it from the host page size
+/// gets the arm64 host right by coincidence - there a page *is* 16 KiB - and an x86-64
+/// host wrong by three pages.
+///
+/// Raised to a whole host page when a host ever has a larger one, because the guard is
+/// also a real `PROT_NONE` mapping.
+pub fn guard() -> usize {
+    const GUEST_GUARD: usize = 16 * 1024;
+    GUEST_GUARD.max(machish::memory::host_page_size() as usize)
+}
+
 /// A guest stack, with the process arguments written into its top.
 pub struct GuestStack {
     /// The reservation this stack owns, or `None` when the *guest* supplied the
@@ -41,27 +56,31 @@ impl GuestStack {
     /// Reserve `size` bytes with nothing laid out on them.
     pub fn bare(size: usize) -> Result<Self, VmError> {
         let page = machish::memory::host_page_size() as usize;
-        let size = size.next_multiple_of(page).max(page * 4);
+        let guard = guard();
+        // The floor leaves usable stack under either term: four host pages is
+        // what this has always reserved, and twice the guard is what keeps an
+        // x86-64 host - where four pages is the guard - from reserving none.
+        let size = size.next_multiple_of(page).max((page * 4).max(guard * 2));
 
         let mut space = MmapSpace::new();
         let reservation = space
             .reserve(size, page, Placement::Anywhere)
             .map_err(|source| VmError::Stack { source })?;
-        // Guard page: overflow faults instead of corrupting whatever the kernel
-        // happened to map below us.
+        // Guard region: overflow faults instead of corrupting whatever the
+        // kernel happened to map below us.
         space
-            .protect(reservation, page, Prot::NONE)
+            .protect(reservation, guard, Prot::NONE)
             .map_err(|source| VmError::Stack { source })?;
 
         let top = (reservation + size as u64) & !0xf;
         Ok(GuestStack {
             space: Some(space),
-            // The guard page is not stack, and saying so is what keeps
+            // The guard region is not stack, and saying so is what keeps
             // `pthread_get_stacksize_np` agreeing with the host's answer for a
             // thread of the same size - and what keeps the region list from
             // offering a shim a pointer into a `PROT_NONE` page.
-            base: reservation + page as u64,
-            size: size - page,
+            base: reservation + guard as u64,
+            size: size - guard,
             top,
             args_at: top,
             argc: 0,

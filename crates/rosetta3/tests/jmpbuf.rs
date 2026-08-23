@@ -121,7 +121,7 @@ fn setjmp_is_never_promoted_to_an_inlined_import() {
         skip!("cannot build x86_64 fixtures")
     };
     let (fast_status, fast_out, err) = run_guest(&path, &[]);
-    let (slow_status, slow_out, slow_err) = run_guest_with(&["--slow"], &path, &[]);
+    let (slow_status, slow_out, slow_err) = run_guest_with(&["--slow", "--emulated"], &path, &[]);
 
     assert_eq!(fast_status, Some(0), "stderr: {err}");
     assert_eq!(slow_status, Some(0), "stderr: {slow_err}");

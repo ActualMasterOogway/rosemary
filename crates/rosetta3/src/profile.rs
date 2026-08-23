@@ -55,15 +55,32 @@ fn number(key: &str, default: u64) -> u64 {
 const KERN_SUCCESS: i32 = 0;
 
 /// `ARM_THREAD_STATE64`, from `<mach/arm/thread_status.h>`.
-const ARM_THREAD_STATE64: i32 = 6;
+#[cfg(target_arch = "aarch64")]
+const HOST_THREAD_STATE: i32 = 6;
 
 /// `arm_thread_state64_t` in 32-bit words: `__x[29]`, `__fp`, `__lr`, `__sp`,
 /// `__pc` - thirty-three doublewords - then `__cpsr` and its padding.
-const ARM_THREAD_STATE64_COUNT: u32 = 68;
+#[cfg(target_arch = "aarch64")]
+const HOST_THREAD_STATE_COUNT: u32 = 68;
 
 /// Index of `__pc` within that state, in doublewords. Twenty-nine `__x` registers, then
 /// `__fp`, `__lr` and `__sp`.
+#[cfg(target_arch = "aarch64")]
 const PC_WORD: usize = 32;
+
+/// `x86_THREAD_STATE64`, from `<mach/i386/thread_status.h>`.
+#[cfg(target_arch = "x86_64")]
+const HOST_THREAD_STATE: i32 = 4;
+
+/// `x86_thread_state64_t` in 32-bit words: twenty-one doublewords, `__rip` among
+/// them, with `__rflags` and the segment registers stored just as wide.
+#[cfg(target_arch = "x86_64")]
+const HOST_THREAD_STATE_COUNT: u32 = 42;
+
+/// Index of `__rip` within that state, in doublewords - after the sixteen
+/// general-purpose registers `_STRUCT_X86_THREAD_STATE64` lists first.
+#[cfg(target_arch = "x86_64")]
+const PC_WORD: usize = 16;
 
 /// `THREAD_BASIC_INFO`, and its size in 32-bit words.
 const THREAD_BASIC_INFO: u32 = 3;
@@ -138,11 +155,11 @@ fn sample_thread(port: u32) -> Option<(u64, bool)> {
     if unsafe { thread_suspend(port) } != KERN_SUCCESS {
         return None;
     }
-    let mut state = [0u32; ARM_THREAD_STATE64_COUNT as usize];
-    let mut count = ARM_THREAD_STATE64_COUNT;
+    let mut state = [0u32; HOST_THREAD_STATE_COUNT as usize];
+    let mut count = HOST_THREAD_STATE_COUNT;
     // SAFETY: the buffer is exactly `count` words of the flavour asked for.
     let got_state =
-        unsafe { thread_get_state(port, ARM_THREAD_STATE64, state.as_mut_ptr(), &mut count) };
+        unsafe { thread_get_state(port, HOST_THREAD_STATE, state.as_mut_ptr(), &mut count) };
     // SAFETY: balances the suspend above, which succeeded.
     unsafe { thread_resume(port) };
 
@@ -845,11 +862,21 @@ mod tests {
 
     #[test]
     fn the_pc_word_index_agrees_with_the_offset_the_fault_handler_measured() {
-        // `crate::fault::host_pc` reads `__pc` at byte 256 into the thread
-        // state, measured with `offsetof` against this system's headers.
-        assert_eq!(PC_WORD * 8, 256);
-        // And the state is thirty-three doublewords plus `__cpsr` and its pad.
-        assert_eq!(ARM_THREAD_STATE64_COUNT as usize, 33 * 2 + 2);
+        // `crate::fault::host_pc` reads the same register out of the same
+        // structure, at an offset measured with `offsetof` against this
+        // system's headers - so the two must not drift apart.
+        #[cfg(target_arch = "aarch64")]
+        {
+            assert_eq!(PC_WORD * 8, 256);
+            // And the state is thirty-three doublewords plus `__cpsr` and its pad.
+            assert_eq!(HOST_THREAD_STATE_COUNT as usize, 33 * 2 + 2);
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            assert_eq!(PC_WORD * 8, 128);
+            // Twenty-one doublewords, every field of them eight bytes wide.
+            assert_eq!(HOST_THREAD_STATE_COUNT as usize, 21 * 2);
+        }
     }
 
     #[test]
