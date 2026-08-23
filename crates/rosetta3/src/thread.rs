@@ -349,11 +349,29 @@ pub(crate) struct CodeWindow {
     config: BlockLinkConfig,
 }
 
-/// How many PCs one thread remembers. A power of two, so the index is a mask.
-///
-/// 8192 slots is 128 KiB of pointers per guest thread, against a warm working
-/// set that Starbound measures in the low thousands of regions.
+/// How many PCs one thread remembers, unless [`WINDOW_ENV`] says otherwise. A power
+/// of two, so the index is a mask.
 const WINDOW: usize = 8192;
+
+pub const WINDOW_ENV: &str = "ROSETTA3_LINK_ROWS";
+
+/// How many rows this run uses.
+fn window() -> usize {
+    #[dynamic]
+    static ROWS: usize = {
+        match std::env::var(WINDOW_ENV) {
+            Ok(v) => match v.trim().parse::<usize>() {
+                Ok(n) if n >= 256 => n.next_power_of_two(),
+                _ => {
+                    eprintln!("rosetta3: {WINDOW_ENV}={v:?} is not an integer >= 256; using {WINDOW}");
+                    WINDOW
+                }
+            },
+            Err(_) => WINDOW,
+        }
+    };
+    *ROWS
+}
 
 /// The table geometry, shared with the lifter so that the slot lifted code
 /// computes and the slot [`CodeWindow::put`] writes are the same arithmetic
@@ -361,7 +379,7 @@ const WINDOW: usize = 8192;
 pub fn link_config() -> BlockLinkConfig {
     #[dynamic]
     static CONFIG: BlockLinkConfig = {
-        let config = BlockLinkConfig::new(WINDOW as u32);
+        let config = BlockLinkConfig::new(window() as u32);
         // Which of the two shapes of linking this process runs.
         match crate::jit::pinned_link_abi() {
             Some(abi) => config.pinned(abi),
@@ -374,8 +392,9 @@ pub fn link_config() -> BlockLinkConfig {
 impl CodeWindow {
     fn new() -> Self {
         let config = link_config();
+        let rows = config.entries as usize;
         CodeWindow {
-            slots: RefCell::new(vec![None; WINDOW].into_boxed_slice()),
+            slots: RefCell::new(vec![None; rows].into_boxed_slice()),
             links: UnsafeCell::new(ThreadLinks::new(config, crate::jit::call_return_stack())),
             config,
         }

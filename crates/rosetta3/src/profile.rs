@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use static_init::dynamic;
 
-use crate::fault::Attribution;
+use crate::fault::{Attribution, Unnamed};
 
 
 /// Samples per second per guest thread, when `ROSETTA3_PROFILE` names no rate.
@@ -198,12 +198,9 @@ struct Counts {
     /// First guest address of a region -> samples anywhere in its translation, including
     /// the parts no guest instruction was attributed to.
     region: HashMap<u64, u64>,
-    /// Samples inside a translation's own attributed extent that no guest instruction
-    /// covered.
-    translated_unnamed: u64,
-    /// Samples past everything a translation attributed but close enough to be its
-    /// epilogue.
-    translated_beyond: u64,
+    /// Samples inside a translation that no guest instruction covered, by the
+    /// reason they went unnamed. See [`Unnamed`].
+    unnamed: [u64; 4],
     /// Samples in executable memory belonging to neither a loaded image nor a
     /// translation.
     unknown: u64,
@@ -254,6 +251,17 @@ fn name(raw: *const libc::c_char) -> &'static str {
     unsafe { CStr::from_ptr(raw) }.to_str().unwrap_or("")
 }
 
+/// The slot in [`Counts::unnamed`] a reason is counted in. One function so the
+/// order the array is written in and the order it is reported in cannot drift.
+fn unnamed_index(why: Unnamed) -> usize {
+    match why {
+        Unnamed::Prologue => 0,
+        Unnamed::Budget => 1,
+        Unnamed::Gap => 2,
+        Unnamed::Beyond => 3,
+    }
+}
+
 /// Fold one `pc` into the counts.
 fn attribute(counts: &mut Counts, pc: u64) {
     let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
@@ -297,11 +305,8 @@ fn attribute(counts: &mut Counts, pc: u64) {
             *counts.guest.entry(guest_va).or_default() += 1;
             *counts.region.entry(region).or_default() += 1;
         }
-        Attribution::Translated { region, beyond } => {
-            match beyond {
-                true => counts.translated_beyond += 1,
-                false => counts.translated_unnamed += 1,
-            }
+        Attribution::Translated { region, why } => {
+            counts.unnamed[unnamed_index(why)] += 1;
             *counts.region.entry(region).or_default() += 1;
         }
         // Executable memory belonging to neither an image nor a translation.
@@ -522,7 +527,7 @@ pub fn report() {
     let share = |n: u64| 100.0 * n as f64 / counts.running.max(1) as f64;
 
     let translated =
-        counts.guest.values().sum::<u64>() + counts.translated_unnamed + counts.translated_beyond;
+        counts.guest.values().sum::<u64>() + counts.unnamed.iter().sum::<u64>();
     // The *achieved* rate, not the configured one.
     let sweeps = SWEEPS.load(Relaxed);
     let achieved = sweeps as f64 / wall.as_secs_f64().max(f64::EPSILON);
@@ -582,12 +587,22 @@ pub fn report() {
     }
     for (n, what) in [
         (
-            counts.translated_unnamed,
-            "[translated] inside a region, with no guest instruction \
-             (a prologue, the entry dispatch, or a region past the map budget)",
+            counts.unnamed[unnamed_index(Unnamed::Prologue)],
+            "[translated] the entry stub and `rip` dispatch - runtime cost per host \
+             entry, not guest work",
         ),
         (
-            counts.translated_beyond,
+            counts.unnamed[unnamed_index(Unnamed::Budget)],
+            "[translated] in a region whose source map the budget discarded - raise \
+             ROSETTA3_MAP_BUDGET (MiB) to name these",
+        ),
+        (
+            counts.unnamed[unnamed_index(Unnamed::Gap)],
+            "[translated] inside a mapped region, in a range no guest instruction \
+             claimed",
+        ),
+        (
+            counts.unnamed[unnamed_index(Unnamed::Beyond)],
             "[translated] past every range a region attributed, so the region \
              is an inference (probably its epilogue)",
         ),
@@ -685,7 +700,7 @@ pub fn snapshot(top: usize) -> Option<Snapshot> {
         .unwrap_or_default();
     let share = |n: u64| 100.0 * n as f64 / counts.running.max(1) as f64;
     let translated =
-        counts.guest.values().sum::<u64>() + counts.translated_unnamed + counts.translated_beyond;
+        counts.guest.values().sum::<u64>() + counts.unnamed.iter().sum::<u64>();
     let sweeps = SWEEPS.load(Relaxed);
     let in_sweep = Duration::from_nanos(SWEEP_NS.load(Relaxed));
 

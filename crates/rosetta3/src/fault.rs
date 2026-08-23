@@ -7,8 +7,15 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering}
 
 /// One compiled translation, as a fault needs to see it.
 struct Placed {
-    /// Host address the compiled code begins at.
+    /// Lowest host address of the compiled blob, and the key this vector is sorted
+    /// by.
     code: u64,
+    /// The address [`map`](Self::map)'s offsets are relative to, which is
+    /// `link_target` and not necessarily [`code`](Self::code).
+    map_base: u64,
+    /// The host-callable entry thunk: the prologue and the `rip` dispatch every
+    /// run-loop entry goes through.
+    stub: u64,
     /// Guest addresses the region covers.
     guest: (u64, u64),
     /// The guest `rip` the region was lifted to be entered at.
@@ -20,9 +27,15 @@ struct Placed {
 impl Placed {
     /// One past the last host byte any guest instruction was lifted into.
     fn attributed_end(&self) -> u64 {
-        self.map.last().map_or(0, |r| self.code + u64::from(r.end))
+        self.map
+            .last()
+            .map_or(self.code, |r| self.map_base + u64::from(r.end))
     }
 }
+
+/// How far past a blob's start a `pc` may be and still be believed to be in it, when
+/// nothing follows it to say otherwise.
+const MAX_BLOB: u64 = 1 << 20;
 
 /// Compiled translations by the host address of their entry point.
 ///
@@ -30,26 +43,45 @@ impl Placed {
 static PLACED: Mutex<Vec<Placed>> = Mutex::new(Vec::new());
 
 /// How many host-to-guest ranges to keep across the whole process.
-///
-/// Sixteen bytes each, so this is a 64 MiB ceiling on the one thing here that grows
-/// with the program.
-const MAP_BUDGET: usize = 4 * 1024 * 1024;
+const MAP_BUDGET_MIB: usize = 64;
 
-/// Ranges kept so far, against [`MAP_BUDGET`].
+/// Bytes per kept range, which is what turns the environment's MiB into a count.
+const RANGE_BYTES: usize = 16;
+
+/// The ceiling this run uses.
+fn map_budget() -> usize {
+    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        let mib = std::env::var("ROSETTA3_MAP_BUDGET")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(MAP_BUDGET_MIB);
+        mib.saturating_mul(1024 * 1024) / RANGE_BYTES
+    })
+}
+
+/// Ranges kept so far, against [`map_budget`].
 static MAPPED: AtomicUsize = AtomicUsize::new(0);
 
 /// Note where a translation's compiled code went, and what it came from.
 pub fn placed(
-    code: u64,
+    entry_point: u64,
+    link_target: u64,
     guest_start: u64,
     guest_end: u64,
     lifted_for: u64,
     map: &GuestCodeMap,
 ) -> usize {
+    let code = entry_point.min(link_target);
+    // Keyed low, but the thunk's own address is kept so a sample in it can be
+    // named as what it is rather than as whichever side of the body it fell on.
+    let stub = entry_point;
     let ranges = map.ranges();
-    let keep = MAPPED.fetch_add(ranges.len(), Ordering::Relaxed) + ranges.len() <= MAP_BUDGET;
+    let keep = MAPPED.fetch_add(ranges.len(), Ordering::Relaxed) + ranges.len() <= map_budget();
     let entry = Placed {
         code,
+        map_base: link_target,
+        stub,
         guest: (guest_start, guest_end),
         lifted_for,
         map: match keep {
@@ -83,46 +115,67 @@ pub enum Attribution {
     /// Inside a translation, in code no guest instruction was attributed to.
     Translated {
         region: u64,
-        /// Whether the `pc` was past everything the map attributed, which is the
-        /// [slack](EPILOGUE_SLACK) case rather than the covered one.
-        beyond: bool,
+        why: Unnamed,
     },
     /// In no translation this process placed.
     Elsewhere,
 }
 
-/// How far past a translation's last attributed byte still counts as that translation.
-///
-/// [`Placed::attributed_end`] deliberately under-counts - Cranelift attributes no
-/// source location to a prologue or an epilogue - so the true end of the compiled code
-/// is somewhere past it and nothing records where.
-const EPILOGUE_SLACK: u64 = 4096;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unnamed {
+    /// The host-callable entry thunk: the prologue and the `rip` dispatch that
+    /// begins every run-loop entry. Region entry overhead, not guest work.
+    Prologue,
+    /// This region kept no map, because [`map_budget`] was spent before it was
+    /// compiled. The `pc` could be any instruction in it.
+    Budget,
+    /// The region has a map and the `pc` is inside its span, in a range no guest
+    /// instruction claimed.
+    Gap,
+    /// Past everything the map attributed - most likely the epilogue.
+    Beyond,
+}
 
 /// Which guest code a host `pc` is, if it is any.
 pub fn attribute(pc: u64) -> Attribution {
     let placed = PLACED.lock().unwrap_or_else(|e| e.into_inner());
-    let found = match placed.binary_search_by_key(&pc, |p| p.code) {
-        Ok(i) => Some(&placed[i]),
-        Err(0) => None,
-        Err(i) => Some(&placed[i - 1]),
+    let at = match placed.binary_search_by_key(&pc, |p| p.code) {
+        Ok(i) => i,
+        Err(0) => return Attribution::Elsewhere,
+        Err(i) => i - 1,
     };
-    let Some(entry) = found else {
+    let entry = &placed[at];
+    let end = placed
+        .get(at + 1)
+        .map_or(u64::MAX, |next| next.code)
+        .min(entry.code.saturating_add(MAX_BLOB));
+    if pc >= end {
         return Attribution::Elsewhere;
-    };
-    let region = entry.guest.0;
-    if let Ok(offset) = u32::try_from(pc - entry.code) {
-        if let Some(guest_va) = lookup(&entry.map, offset) {
-            return Attribution::Instruction { guest_va, region };
-        }
     }
-    // Unattributed.
-    let end = entry.attributed_end();
-    match pc < end.saturating_add(EPILOGUE_SLACK) {
-        true => Attribution::Translated {
+    let region = entry.guest.0;
+    let in_stub = match entry.stub >= entry.map_base {
+        true => pc >= entry.stub && entry.stub != entry.map_base,
+        false => pc < entry.map_base,
+    };
+    if in_stub {
+        return Attribution::Translated {
             region,
-            beyond: pc >= end,
+            why: Unnamed::Prologue,
+        };
+    }
+    // Instruction-level, when the map for this one survived the budget.
+    if let Ok(offset) = u32::try_from(pc.wrapping_sub(entry.map_base))
+        && let Some(guest_va) = lookup(&entry.map, offset)
+    {
+        return Attribution::Instruction { guest_va, region };
+    }
+    Attribution::Translated {
+        region,
+        why: match () {
+            _ if entry.map.is_empty() => Unnamed::Budget,
+            _ if pc >= entry.attributed_end() => Unnamed::Beyond,
+            _ => Unnamed::Gap,
         },
-        false => Attribution::Elsewhere,
     }
 }
 
@@ -335,8 +388,10 @@ fn say_region(out: &mut Buffer, pc: u64) {
     out.hex(entry.lifted_for);
 
     // The exact instruction, when the map has it. This is the whole point of
-    // carrying microlift's source locations.
-    let offset = pc - entry.code;
+    // carrying microlift's source locations. Relative to `map_base`, which is what
+    // the offsets were recorded against - not to `code`, which may be the entry
+    // stub below it.
+    let offset = pc.wrapping_sub(entry.map_base);
     if let Ok(offset) = u32::try_from(offset) {
         if let Some(va) = lookup(&entry.map, offset) {
             out.str("\n  guest instruction ");
@@ -574,7 +629,7 @@ mod tests {
     #[test]
     fn a_host_pc_resolves_to_the_guest_instruction_it_came_from() {
         // The claim the whole module turns on.
-        placed(0x40_0000, 0x1_0000, 0x1_0010, 0x1_0000, &map(0x1_0000, 16));
+        placed(0x40_0000, 0x40_0000, 0x1_0000, 0x1_0010, 0x1_0000, &map(0x1_0000, 16));
         let placed = PLACED.lock().unwrap();
         let entry = placed.iter().find(|p| p.code == 0x40_0000).unwrap();
 
@@ -589,8 +644,8 @@ mod tests {
 
     #[test]
     fn the_nearest_translation_below_the_pc_is_the_one_reported() {
-        placed(0x4000, 0x1_0000, 0x1_0100, 0x1_0000, &map(0x1_0000, 4));
-        placed(0x8000, 0x2_0000, 0x2_0080, 0x2_0040, &map(0x2_0000, 4));
+        placed(0x4000, 0x4000, 0x1_0000, 0x1_0100, 0x1_0000, &map(0x1_0000, 4));
+        placed(0x8000, 0x8000, 0x2_0000, 0x2_0080, 0x2_0040, &map(0x2_0000, 4));
         let placed = PLACED.lock().unwrap();
         let find = |pc: u64| match placed.binary_search_by_key(&pc, |p| p.code) {
             Ok(i) => Some(placed[i].guest),
@@ -607,12 +662,113 @@ mod tests {
     fn a_pc_past_everything_a_translation_covers_is_not_claimed_for_it() {
         // The misattribution this replaced: `+0x57c` into a sixty-two-byte
         // region was reported as if it were inside it.
-        placed(0x10_0000, 0x3_0000, 0x3_0004, 0x3_0000, &map(0x3_0000, 4));
+        placed(0x10_0000, 0x10_0000, 0x3_0000, 0x3_0004, 0x3_0000, &map(0x3_0000, 4));
         let placed = PLACED.lock().unwrap();
         let entry = placed.iter().find(|p| p.code == 0x10_0000).unwrap();
         assert_eq!(entry.attributed_end(), 0x10_0040);
         assert_eq!(lookup(&entry.map, 0x3f), Some(0x3_0003));
         assert_eq!(lookup(&entry.map, 0x40), None);
+    }
+
+    /// The run loop enters through the thunk on every host dispatch, so a profile
+    /// that cannot name it cannot see the busiest code in the process. Cranelift
+    /// emits the thunk *above* the body, which is why it read as an epilogue.
+    #[test]
+    fn the_entry_stub_is_named_when_it_sits_above_the_body() {
+        let (link_target, entry_point) = (0x50_0000, 0x50_0100);
+        placed(
+            entry_point,
+            link_target,
+            0x5_0000,
+            0x5_0010,
+            0x5_0000,
+            &map(0x5_0000, 4),
+        );
+        assert_eq!(
+            attribute(entry_point + 8),
+            Attribution::Translated {
+                region: 0x5_0000,
+                why: Unnamed::Prologue,
+            }
+        );
+        assert_eq!(
+            attribute(link_target),
+            Attribution::Instruction {
+                guest_va: 0x5_0000,
+                region: 0x5_0000,
+            }
+        );
+    }
+
+    /// And the other layout, which is what a region with no separate thunk has.
+    #[test]
+    fn the_entry_stub_below_the_link_target_belongs_to_its_region() {
+        let (entry_point, link_target) = (0x50_0000, 0x50_0100);
+        placed(
+            entry_point,
+            link_target,
+            0x5_0000,
+            0x5_0010,
+            0x5_0000,
+            &map(0x5_0000, 4),
+        );
+        // In the stub, below the address a link row names.
+        assert_eq!(
+            attribute(entry_point + 8),
+            Attribution::Translated {
+                region: 0x5_0000,
+                why: Unnamed::Prologue,
+            }
+        );
+        // And the map still reads against the body, not against the stub.
+        assert_eq!(
+            attribute(link_target),
+            Attribution::Instruction {
+                guest_va: 0x5_0000,
+                region: 0x5_0000,
+            }
+        );
+    }
+
+    /// A translation whose map the budget discarded still owns its addresses.
+    /// Reporting it as `Elsewhere` is what put 70% of a real profile in the
+    /// unaccounted bucket.
+    #[test]
+    fn a_region_with_no_map_still_owns_its_code() {
+        let code = 0x60_0000;
+        placed(code, code, 0x6_0000, 0x6_0010, 0x6_0000, &map(0x6_0000, 0));
+        assert_eq!(
+            attribute(code + 0x40),
+            Attribution::Translated {
+                region: 0x6_0000,
+                // Nothing was attributed, so this is the budget and not an epilogue.
+                why: Unnamed::Budget,
+            }
+        );
+    }
+
+    /// The bound is the next blob, so an address between two translations belongs
+    /// to the lower one and an address past the last is still refused.
+    #[test]
+    fn a_blob_ends_where_the_next_one_starts() {
+        placed(0x70_0000, 0x70_0000, 0x7_0000, 0x7_0010, 0x7_0000, &map(0x7_0000, 1));
+        placed(0x70_1000, 0x70_1000, 0x7_1000, 0x7_1010, 0x7_1000, &map(0x7_1000, 1));
+
+        // Past its map but before its neighbour: still the first region's.
+        assert_eq!(
+            attribute(0x70_0800),
+            Attribution::Translated {
+                region: 0x7_0000,
+                why: Unnamed::Beyond,
+            }
+        );
+        // The neighbour's first byte is the neighbour's.
+        assert!(matches!(
+            attribute(0x70_1000),
+            Attribution::Instruction { region: 0x7_1000, .. }
+        ));
+        // And nothing is claimed a megabyte past the last one.
+        assert_eq!(attribute(0x70_1000 + MAX_BLOB), Attribution::Elsewhere);
     }
 
     #[test]

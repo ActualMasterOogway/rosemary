@@ -412,10 +412,8 @@ impl CodeCache {
             }
         }
 
-        // Where this region's compiled code went, so a fault inside it can be
-        // named as a *guest* range rather than as an address in an anonymous
-        // mapping. See [`crate::fault`]. The *body*, not the entry.
         crate::fault::placed(
+            compiled.region.entry as usize as u64,
             compiled.region.link_target as usize as u64,
             start,
             end,
