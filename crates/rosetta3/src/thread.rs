@@ -459,10 +459,10 @@ impl CodeWindow {
     /// points and nowhere else, since an address that is not one either runs the
     /// region from the top or exits having made no progress.
     ///
-    /// A row for an address whose slot is taken evicts the row that was there - which
-    /// costs a lookup, and which is why publishing the extra rows is not done
-    /// unconditionally any more. See [`crate::jit::link_publish`] for the measurement
-    /// that changed the default; `ROSETTA3_LINK_PUBLISH=all` restores it.
+    /// A row for an address whose slot is taken evicts the row that was there, which
+    /// costs a lookup - so how much of a translation goes in is a knob:
+    /// `ROSETTA3_LINK_PUBLISH=entry` publishes only the entry row. See
+    /// [`crate::jit::link_publish`].
     pub(crate) fn put(&self, pc: u64, translation: &std::sync::Arc<crate::cache::Translation>) {
         let slot = self.slot(pc);
         // `try_borrow_mut` rather than `borrow_mut`.

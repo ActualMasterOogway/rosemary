@@ -117,6 +117,9 @@ pub struct Program<M: Regions = BufferSpace> {
     imports_by_target: AddrMap<ImportSite>,
     /// One bit per hashed key of [`imports`](Self::imports)
     import_filter: Box<[u64]>,
+    /// The same, over [`imports_by_target`](Self::imports_by_target). Asked once per
+    /// run-loop miss, where the hash probe it replaces was a cache miss every time.
+    target_filter: Box<[u64]>,
 }
 
 /// A hasher for maps keyed by a guest or host **address**.
@@ -158,8 +161,14 @@ fn filter_bit(va: u64, words: usize) -> usize {
     (mixed as usize) & (words * 64 - 1)
 }
 
+/// Whether `filter` has heard of `va`. A yes may be a collision; a no is final.
+pub(crate) fn filter_has(filter: &[u64], va: u64) -> bool {
+    let bit = filter_bit(va, filter.len());
+    filter[bit / 64] >> (bit % 64) & 1 != 0
+}
+
 /// A filter over `keys`, sized to eight bits per key.
-fn build_import_filter(keys: impl Iterator<Item = u64>, count: usize) -> Box<[u64]> {
+pub(crate) fn build_import_filter(keys: impl Iterator<Item = u64>, count: usize) -> Box<[u64]> {
     let words = (count.max(1) / 8 + 1).next_power_of_two();
     let mut filter = vec![0u64; words];
     for va in keys {
@@ -456,6 +465,10 @@ impl<M: Regions> Program<M> {
         }
 
         let import_filter = build_import_filter(imports.keys().copied(), imports.len());
+        let target_filter = build_import_filter(
+            imports_by_target.keys().copied(),
+            imports_by_target.len(),
+        );
 
         Ok(Program {
             report,
@@ -466,6 +479,7 @@ impl<M: Regions> Program<M> {
             imports,
             imports_by_target,
             import_filter,
+            target_filter,
         })
     }
 
@@ -712,8 +726,7 @@ impl<M: Regions> Program<M> {
     /// Whether [`import_filter`](Self::import_filter) has heard of `va`. A yes may be
     /// a collision; a no is final.
     fn may_import(&self, va: u64) -> bool {
-        let bit = filter_bit(va, self.import_filter.len());
-        self.import_filter[bit / 64] >> (bit % 64) & 1 != 0
+        filter_has(&self.import_filter, va)
     }
 
     /// What an imported symbol resolved to, by name.
@@ -726,9 +739,13 @@ impl<M: Regions> Program<M> {
 
     /// The import that *resolved to* `host`, if any.
     pub fn import_by_target(&self, host: u64) -> Option<&ImportSite> {
-        self.imports_by_target
-            .get(&host)
-            .or_else(|| crate::dyld::import_by_target(host))
+        if let Some(site) = filter_has(&self.target_filter, host)
+            .then(|| self.imports_by_target.get(&host))
+            .flatten()
+        {
+            return Some(site);
+        }
+        crate::dyld::import_by_target(host)
     }
 
     /// Every import address, in ascending order.

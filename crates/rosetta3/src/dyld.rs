@@ -283,6 +283,48 @@ static IMAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static REGION_LO: AtomicU64 = AtomicU64::new(u64::MAX);
 static REGION_HI: AtomicU64 = AtomicU64::new(0);
 
+static IMPORT_FILTER: AtomicPtr<&'static [u64]> = AtomicPtr::new(core::ptr::null_mut());
+
+/// The same, over [`Image::imports_by_target`]'s keys.
+static TARGET_FILTER: AtomicPtr<&'static [u64]> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Whether `filter` has heard of `va`. A yes may be a collision; a no is final.
+/// Null - nothing published yet - answers yes, which costs a probe, not an answer.
+fn heard_of(filter: &AtomicPtr<&'static [u64]>, va: u64) -> bool {
+    let published = filter.load(Ordering::Acquire);
+    if published.is_null() {
+        return true;
+    }
+    // SAFETY: as `find` - leaked by `publish_filters`, never freed, never mutated.
+    crate::program::filter_has(unsafe { *published }, va)
+}
+
+/// Rebuild both filters from `images`. Called under the [`IMAGES`] lock.
+fn publish_filters(images: &[&'static Image]) {
+    let publish = |filter: &AtomicPtr<&'static [u64]>, built: Box<[u64]>| {
+        let leaked: &'static [u64] = Box::leak(built);
+        filter.store(Box::leak(Box::new(leaked)) as *mut _, Ordering::Release);
+    };
+    let imports = images.iter().map(|i| i.imports.len()).sum();
+    publish(
+        &IMPORT_FILTER,
+        crate::program::build_import_filter(
+            images.iter().flat_map(|i| i.imports.keys().copied()),
+            imports,
+        ),
+    );
+    let targets = images.iter().map(|i| i.imports_by_target.len()).sum();
+    publish(
+        &TARGET_FILTER,
+        crate::program::build_import_filter(
+            images
+                .iter()
+                .flat_map(|i| i.imports_by_target.keys().copied()),
+            targets,
+        ),
+    );
+}
+
 /// Search the loaded images without copying the list.
 ///
 /// Every `Image` is `&'static` - leaked at load, never freed - so a reference found
@@ -315,6 +357,9 @@ pub fn import_at(va: u64) -> Option<&'static ImportSite> {
     if va < REGION_LO.load(Ordering::Relaxed) || va >= REGION_HI.load(Ordering::Relaxed) {
         return None;
     }
+    if !heard_of(&IMPORT_FILTER, va) {
+        return None;
+    }
     find(|i| i.imports.get(&va))
 }
 
@@ -322,7 +367,7 @@ pub fn import_at(va: u64) -> Option<&'static ImportSite> {
 pub fn import_by_target(host: u64) -> Option<&'static ImportSite> {
     // The same two-compare rejection [`import_at`] makes, for a colder version
     // of the same problem.
-    if IMAGE_COUNT.load(Ordering::Relaxed) == 0 {
+    if IMAGE_COUNT.load(Ordering::Relaxed) == 0 || !heard_of(&TARGET_FILTER, host) {
         return native_symbol_at(host);
     }
     find(|i| i.imports_by_target.get(&host)).or_else(|| native_symbol_at(host))
@@ -537,8 +582,9 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
             REGION_LO.fetch_min(base, Ordering::Relaxed);
             REGION_HI.fetch_max(base + bytes.len() as u64, Ordering::Relaxed);
         }
-        // The extents go up before the view does, so a reader that sees the
-        // image also sees a range that contains it.
+        // The extents and the filters go up before the view does, so a reader
+        // that sees the image also sees a range and a filter that contain it.
+        publish_filters(&images);
         let published: &'static [&'static Image] = images.clone().leak();
         let cell: &'static mut &'static [&'static Image] = Box::leak(Box::new(published));
         VIEW.store(cell as *mut _, Ordering::Release);
@@ -885,6 +931,14 @@ pub fn native_symbol_at(host: u64) -> Option<&'static ImportSite> {
     // earlier anyway, and the guest cannot have the address yet - `dlsym` has
     // not returned it.
     let view = unsafe { &*published };
+    // Sorted, so the two ends bound it: the run loop asks this of a *guest* pc on
+    // every window miss, and a guest pc is nowhere near a host symbol.
+    let (Some(first), Some(last)) = (view.first(), view.last()) else {
+        return None;
+    };
+    if host < first.0 || host > last.0 {
+        return None;
+    }
     view.binary_search_by_key(&host, |(a, _)| *a)
         .ok()
         .map(|i| view[i].1)
