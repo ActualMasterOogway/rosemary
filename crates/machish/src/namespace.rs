@@ -42,6 +42,11 @@ pub struct FetchedDylib {
     /// The path actually opened, which becomes the image's `@loader_path`.
     pub path: String,
     pub bytes: Vec<u8>,
+    /// Install names to load as though this image had listed them as
+    /// dependencies. A substitute library's load commands describe the graph
+    /// its own build had; a source standing in for a system library can name
+    /// here what the real one would have pulled in.
+    pub implied: Vec<String>,
 }
 
 /// Something that can produce a dependency's bytes.
@@ -105,6 +110,7 @@ impl DylibSource for FsDylibSource {
                 return Ok(Some(FetchedDylib {
                     path: candidate.clone(),
                     bytes,
+                    implied: Vec::new(),
                 }));
             }
         }
@@ -117,7 +123,11 @@ impl DylibSource for FsDylibSource {
         for dir in &self.extra_search_paths {
             let path = join(dir, base);
             if let Ok(bytes) = std::fs::read(&path) {
-                return Ok(Some(FetchedDylib { path, bytes }));
+                return Ok(Some(FetchedDylib {
+                    path,
+                    bytes,
+                    implied: Vec::new(),
+                }));
             }
         }
         Ok(None)

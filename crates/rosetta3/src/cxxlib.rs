@@ -29,6 +29,9 @@ const UNWIND_NAMES: &[&str] = &[
     "/usr/lib/libunwind.dylib",
     "/usr/lib/libunwind.1.0.dylib",
     "@rpath/libunwind.1.dylib",
+    // The vendored image's own `LC_ID_DYLIB`, and where the unwinder actually
+    // lives on a real system.
+    "/usr/lib/system/libunwind.dylib",
 ];
 
 /// The GNU C++ runtime a pre-2011 Intel binary was linked against.
@@ -81,16 +84,25 @@ impl<S: DylibSource> DylibSource for VendoredCxx<S> {
             return Ok(Some(FetchedDylib {
                 path: AS_PATH.to_string(),
                 bytes: LIBCXX.to_vec(),
+                implied: Vec::new(),
             }));
         } else if is_libcxxabi(request.install_name) || is_libstdcxx(request.install_name) {
             return Ok(Some(FetchedDylib {
                 path: CXXABI_PATH.to_string(),
                 bytes: LIBCXXABI.to_vec(),
+                // The vendored `libc++abi` takes `_Unwind_*` from
+                // `libSystem`, which on a real system re-exports the
+                // unwinder. Nothing here loads `libSystem`, so the unwinder
+                // has to be named directly or it never enters the graph and
+                // [`bind_unwinder_to_the_vendored_one`] has nothing to bind
+                // to.
+                implied: vec![UNWIND_PATH.to_string()],
             }));
         } else if is_libunwind(request.install_name) {
             return Ok(Some(FetchedDylib {
                 path: UNWIND_PATH.to_string(),
                 bytes: LIBUNWIND.to_vec(),
+                implied: Vec::new(),
             }));
         }
         self.inner.fetch(request)
@@ -283,6 +295,59 @@ mod tests {
             .expect("libstdc++ is answered");
         assert_eq!(fetched.path, CXXABI_PATH);
         assert_eq!(fetched.bytes.len(), LIBCXXABI.len());
+    }
+
+    /// The unwinder has to enter the dependency graph even though nothing in it
+    /// names the unwinder.
+    ///
+    /// The vendored `libc++abi` takes `_Unwind_*` from `libSystem`, which is
+    /// never loaded as a guest image, so without the implied dependency the
+    /// unwinder is absent and [`bind_unwinder_to_the_vendored_one`] silently
+    /// rebinds nothing - which is how `__Unwind_RaiseException` ended up
+    /// reaching the host as an unsigned import.
+    #[test]
+    fn a_cxxabi_request_pulls_in_the_unwinder() {
+        let mut source = VendoredCxx::new(machish::namespace::NoDylibSource);
+        let fetched = source
+            .fetch(&DylibRequest {
+                install_name: "/usr/lib/libc++abi.dylib",
+                candidates: &[],
+                kind: machish::image::DependencyKind::Load,
+                loader_path: None,
+            })
+            .expect("the vendored source does not fail")
+            .expect("libc++abi is answered");
+        assert_eq!(fetched.implied, vec![UNWIND_PATH.to_string()]);
+        assert!(is_libunwind(UNWIND_PATH), "the implied name must resolve");
+
+        // And the implied name really does reach the unwinder's bytes.
+        let unwinder = source
+            .fetch(&DylibRequest {
+                install_name: UNWIND_PATH,
+                candidates: &[],
+                kind: machish::image::DependencyKind::Load,
+                loader_path: None,
+            })
+            .expect("the vendored source does not fail")
+            .expect("libunwind is answered");
+        assert_eq!(unwinder.bytes.len(), LIBUNWIND.len());
+    }
+
+    /// The unwinder the rebind points everything at actually defines the
+    /// entry points a throw goes through.
+    #[test]
+    fn the_vendored_unwinder_exports_the_unwind_interface() {
+        let object = MachObject::parse_any(LIBUNWIND, X86_64).expect("x86-64 Mach-O");
+        let exports = ExportTable::parse(&object).expect("exports");
+        for symbol in [
+            "__Unwind_RaiseException",
+            "__Unwind_Resume",
+            "__Unwind_DeleteException",
+            "__Unwind_GetLanguageSpecificData",
+            "__Unwind_SetIP",
+        ] {
+            assert!(exports.contains(symbol), "vendored libunwind lacks {symbol}");
+        }
     }
 
     /// The vendored `libc++abi` really does define every C++ ABI symbol a

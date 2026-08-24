@@ -65,6 +65,8 @@ struct Collected {
     requested_as: Option<String>,
     /// `LC_RPATH` entries in scope for this image: its own, then its loader's.
     rpaths: Vec<String>,
+    /// Dependencies the source added, which are not in the load commands.
+    implied: Vec<String>,
 }
 
 /// What phase 2 produced for one image.
@@ -171,6 +173,7 @@ impl<S: MachSpec + 'static> Loader<S> {
             bytes: root_obj.bytes().to_vec(),
             requested_as: None,
             rpaths: root_obj.rpaths().map(|r| r.to_string()).collect(),
+            implied: Vec::new(),
         }];
         if !self.policy.load_dependencies {
             return Ok(images);
@@ -189,11 +192,16 @@ impl<S: MachSpec + 'static> Loader<S> {
             let (deps, loader_path, rpaths) = {
                 let img = &images[next];
                 let obj = MachObject::parse(&img.bytes, self.spec)?;
-                let deps: Vec<(String, DependencyKind)> = obj
+                let mut deps: Vec<(String, DependencyKind)> = obj
                     .dependencies()
                     .iter()
                     .map(|d| (d.install_name.to_string(), d.kind))
                     .collect();
+                deps.extend(
+                    img.implied
+                        .iter()
+                        .map(|n| (n.clone(), DependencyKind::Load)),
+                );
                 (deps, img.path.clone(), img.rpaths.clone())
             };
             next += 1;
@@ -242,6 +250,7 @@ impl<S: MachSpec + 'static> Loader<S> {
                     bytes: obj.bytes().to_vec(),
                     requested_as: Some(install_name),
                     rpaths: inherited,
+                    implied: fetched.implied,
                 });
             }
         }
