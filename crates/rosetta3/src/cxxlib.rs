@@ -5,15 +5,9 @@ use machish::namespace::{DylibRequest, DylibSource, FetchedDylib};
 use machish::spec::arch::X86_64;
 
 /// A real x86-64 `libc++.1.dylib`, built for the ABI Apple's is built for.
-///
-/// libc++ selects `_LIBCPP_ABI_ALTERNATE_STRING_LAYOUT` on arm64 and not on x86-64, so
-/// the same twenty-four bytes of a `std::string` mean different things on the two
-/// sides: the data pointer is at `+16` for the guest and `+0` for the host. An import
-/// described *correctly* still hands the object to code that reads different fields out
-/// of it, which is why the guest runs a real Intel libc++ rather than the host's.
 const LIBCXX: &[u8] = include_bytes!("../vendor/libs/intel/libc++.1.dylib");
-const LIBCXXABI: &[u8] = include_bytes!("../vendor/libs/intel/libc++abi.1.dylib");
-const LIBUNWIND: &[u8] = include_bytes!("../vendor/libs/intel/libunwind.1.dylib");
+const LIBCXXABI: &[u8] = include_bytes!("../vendor/libs/intel/libc++abi.dylib");
+const LIBUNWIND: &[u8] = include_bytes!("../vendor/libs/intel/libunwind.dylib");
 
 /// The install names Apple's `libc++` answers to, and which this stands in for.
 const NAMES: &[&str] = &[

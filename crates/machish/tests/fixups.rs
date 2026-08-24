@@ -50,8 +50,6 @@ int main(int argc, char **argv) {
 }
 "#;
 
-// ------------------------------------------------------------- decoding ----
-
 #[test]
 fn dyld_info_decodes_lazy_bindings_into_la_symbol_ptr() {
     let Some(bytes) = common::system_binary(LS) else {
@@ -332,8 +330,6 @@ fn a_backwards_add_addr_uleb_wraps_instead_of_erroring() {
     );
 }
 
-// ------------------------------------------------------------ stub_va -------
-
 #[test]
 fn every_lazy_binding_carries_a_stub() {
     let Some(bytes) = common::system_binary(LS) else {
@@ -407,8 +403,6 @@ fn stub_addresses_actually_jump_through_their_slots() {
         "expected many stubs in {LS}, verified only {verified}"
     );
 }
-
-// ------------------------------------------------------------- binding ------
 
 /// A provider that answers everything with a distinct, recognisable address, so
 /// a slot's contents identify which symbol was written there.

@@ -138,6 +138,9 @@ pub struct NamespaceImage {
     /// This image's own dependency install names, in ordinal order, so a
     /// re-export's ordinal can be turned back into a name.
     pub dependencies: Vec<String>,
+    /// The subset of `dependencies` recorded with `LC_REEXPORT_DYLIB`, whose
+    /// exports this image republishes as its own.
+    pub reexports: Vec<String>,
 }
 
 impl NamespaceImage {
@@ -194,7 +197,17 @@ impl Namespace {
         if depth > MAX_REEXPORT_DEPTH {
             return None;
         }
-        let export = image.exports.get(name)?;
+        let Some(export) = image.exports.get(name) else {
+            // Not in this image's trie, but an `LC_REEXPORT_DYLIB` dependency
+            // may still define it: a re-export edge recorded as a load command
+            // publishes the whole of the other image's trie, with nothing
+            // written into this one.
+            return image
+                .reexports
+                .iter()
+                .filter_map(|target| self.find(target))
+                .find_map(|next| self.lookup(next, name, depth + 1));
+        };
 
         if let ExportValue::Reexport {
             ordinal,
@@ -288,6 +301,7 @@ mod tests {
             exports: ExportTable::from_entries(exports),
             slide,
             dependencies: deps.iter().map(|s| s.to_string()).collect(),
+            reexports: Vec::new(),
         }
     }
 
@@ -422,6 +436,7 @@ mod tests {
             exports: ExportTable::from_entries(vec![direct("_add", 0x10)]),
             slide: 0,
             dependencies: Vec::new(),
+            reexports: Vec::new(),
         });
         assert!(ns.provides("@rpath/libmath.dylib"));
         assert!(ns.provides("/tmp/build/libmath.dylib"));

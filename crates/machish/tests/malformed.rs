@@ -297,8 +297,6 @@ fn corrupted_load_commands_fail_cleanly() {
     }
 }
 
-// --------------------------------------------- decoders on hostile input ----
-//
 // The parser's totality is only half the requirement. The fixup decoders and
 // the export trie walker read `__LINKEDIT` - offsets and counts that the header
 // checks never look at - so they need their own sweep. Each case below asserts

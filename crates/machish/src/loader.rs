@@ -298,6 +298,13 @@ impl<S: MachSpec + 'static> Loader<S> {
                     .iter()
                     .map(|d| d.install_name.to_string())
                     .collect(),
+                reexports: m
+                    .obj
+                    .dependencies()
+                    .iter()
+                    .filter(|d| d.kind == DependencyKind::Reexport)
+                    .map(|d| d.install_name.to_string())
+                    .collect(),
             });
         }
 
