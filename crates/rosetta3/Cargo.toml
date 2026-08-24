@@ -10,7 +10,7 @@ machish.workspace = true
 gimli.workspace = true
 libc.workspace = true
 iced-x86 = "1"
-microlift = { git = "https://github.com/microlift/microlift", branch = "dev/block_linking", features = ["disasm", "runtime"] }
+microlift = { git = "https://github.com/microlift/microlift", features = ["disasm", "runtime"] }
 cranelift-codegen = { git = "https://github.com/microlift/wasmtime", branch = "microlift_experimental", version = "0.136.0-dev", default-features = false, features = ["std", "unwind", "host-arch"] }
 cranelift-frontend = {git = "https://github.com/microlift/wasmtime", branch = "microlift_experimental", version = "0.136.0-dev" }
 cranelift-native = { git = "https://github.com/microlift/wasmtime", branch = "microlift_experimental", version = "0.136.0-dev" }
