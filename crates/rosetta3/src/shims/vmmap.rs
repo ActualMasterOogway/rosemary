@@ -12,56 +12,146 @@ use super::set_int_return;
 const MAP_JIT: i32 = 0x0800;
 
 /// The ranges the guest asked to be executable.
-///
-/// ## Why this list is the right answer to "which bytes are code"
-///
-/// [The roadmap][r] states the problem in its smallest form - `__text` contains data,
-/// and no static rule separates the two - and this runtime's answer has always been to
-/// lift *from a PC*, demand-driven.
-///
-/// Append-only and never removed, matching [`crate::dyld`]'s images and for the same
-/// reason.
-static ARENAS: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());
+mod arenas {
+    use std::ptr::null_mut;
+    use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
-/// The lowest and highest arena address, for the question asked on the hot path.
-static ARENA_LO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
-static ARENA_HI: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    /// A published range, or a claimed-but-unfilled slot when `end` is zero.
+    struct Slot {
+        base: AtomicU64,
+        end: AtomicU64,
+    }
 
-/// Record `[base, base + len)` as memory the guest means to execute.
-fn remember_arena(base: u64, len: u64) {
-    use std::sync::atomic::Ordering;
-    if base == 0 || len == 0 {
-        return;
+    impl Slot {
+        fn empty() -> Self {
+            Self {
+                base: AtomicU64::new(0),
+                end: AtomicU64::new(0),
+            }
+        }
     }
-    let mut arenas = ARENAS.lock().unwrap_or_else(|e| e.into_inner());
-    if arenas
-        .iter()
-        .any(|&(b, l)| base >= b && base + len <= b + l)
-    {
-        return;
+
+    const CHUNK: usize = 512;
+    type Chunk = [Slot; CHUNK];
+
+    /// 512 chunks of 512, which a guest that emits one arena per JIT method would
+    /// still not reach.
+    static DIRECTORY: [AtomicPtr<Chunk>; 512] = [const { AtomicPtr::new(null_mut()) }; 512];
+
+    /// Slots claimed. Not slots *filled*: see [`Slot`].
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    /// One past the index that answered for a page, or zero: a direct-mapped cache
+    /// that turns the scan into two loads for an address the guest is executing.
+    ///
+    /// Keyed by page rather than kept as a single "last hit" so that two threads in
+    /// two arenas do not write the same line back and forth; a slot settles on one
+    /// value and is then only read.
+    static RECENT: [AtomicUsize; 64] = [const { AtomicUsize::new(0) }; 64];
+
+    fn recent(va: u64) -> &'static AtomicUsize {
+        &RECENT[(va >> 12) as usize & (RECENT.len() - 1)]
     }
-    arenas.push((base, len));
-    ARENA_LO.fetch_min(base, Ordering::Relaxed);
-    ARENA_HI.fetch_max(base + len, Ordering::Relaxed);
+
+    /// The lowest and highest arena address, for the question asked on the hot path.
+    static LO: AtomicU64 = AtomicU64::new(u64::MAX);
+    static HI: AtomicU64 = AtomicU64::new(0);
+
+    fn chunk(i: usize) -> Option<&'static Chunk> {
+        let p = DIRECTORY.get(i)?.load(Ordering::Acquire);
+        // SAFETY: a chunk is installed once, by `claim`, from a leaked `Box`.
+        (!p.is_null()).then(|| unsafe { &*p })
+    }
+
+    /// Slot `i`, if it has been filled.
+    fn get(i: usize) -> Option<(u64, u64)> {
+        let slot = &chunk(i / CHUNK)?[i % CHUNK];
+        // Pairs with the release in `push`: `base` is written first.
+        match slot.end.load(Ordering::Acquire) {
+            0 => None,
+            end => Some((slot.base.load(Ordering::Relaxed), end)),
+        }
+    }
+
+    /// Slot `i`, allocating its chunk if this is the first claim in it.
+    fn claim(i: usize) -> Option<&'static Slot> {
+        let cell = DIRECTORY.get(i / CHUNK)?;
+        let mut p = cell.load(Ordering::Acquire);
+        if p.is_null() {
+            let fresh = Box::into_raw(Box::new(std::array::from_fn(|_| Slot::empty())));
+            p = match cell.compare_exchange(
+                null_mut(),
+                fresh,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => fresh,
+                // SAFETY: the losing allocation was never published.
+                Err(won) => {
+                    drop(unsafe { Box::from_raw(fresh) });
+                    won
+                }
+            };
+        }
+        // SAFETY: as `chunk`.
+        Some(&unsafe { &*p }[i % CHUNK])
+    }
+
+    /// Record `[base, base + len)` as memory the guest means to execute.
+    pub fn push(base: u64, len: u64) {
+        let Some(end) = base.checked_add(len) else { return };
+        if base == 0 || len == 0 || find(base).is_some_and(|(_, e)| end <= e) {
+            return;
+        }
+        // Before the entry is published, so a reader that sees the entry has
+        // already seen a range wide enough to admit it.
+        LO.fetch_min(base, Ordering::Relaxed);
+        HI.fetch_max(end, Ordering::Relaxed);
+
+        let i = COUNT.fetch_add(1, Ordering::Relaxed);
+        let Some(slot) = claim(i) else {
+            eprintln!("rosetta3: out of arena slots, {base:#x}+{len:#x} not recorded");
+            return;
+        };
+        slot.base.store(base, Ordering::Relaxed);
+        slot.end.store(end, Ordering::Release);
+    }
+
+    /// The arena containing `va`, as `(base, end)`.
+    pub fn find(va: u64) -> Option<(u64, u64)> {
+        if va < LO.load(Ordering::Relaxed) || va >= HI.load(Ordering::Relaxed) {
+            return None;
+        }
+        let cached = recent(va);
+        let hint = cached.load(Ordering::Relaxed);
+        if hint != 0
+            && let Some((base, end)) = get(hint - 1)
+            && (base..end).contains(&va)
+        {
+            return Some((base, end));
+        }
+        for i in 0..COUNT.load(Ordering::Relaxed) {
+            if let Some((base, end)) = get(i)
+                && (base..end).contains(&va)
+            {
+                if hint != i + 1 {
+                    cached.store(i + 1, Ordering::Relaxed);
+                }
+                return Some((base, end));
+            }
+        }
+        None
+    }
 }
 
 /// The arena containing `va`, if any.
 pub fn arena_at(va: u64) -> Option<(u64, u64)> {
-    use std::sync::atomic::Ordering;
-    if va < ARENA_LO.load(Ordering::Relaxed) || va >= ARENA_HI.load(Ordering::Relaxed) {
-        return None;
-    }
-    ARENAS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .copied()
-        .find(|&(base, len)| va >= base && va < base + len)
+    arenas::find(va).map(|(base, end)| (base, end - base))
 }
 
 /// Whether `va` is in memory the guest declared executable.
 pub fn contains(va: u64) -> bool {
-    arena_at(va).is_some()
+    arenas::find(va).is_some()
 }
 
 /// The shim for `name`, if this module has one.
@@ -110,7 +200,7 @@ fn mmap(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) ->
 
     // The guest said it means to execute these bytes; see [`ARENAS`].
     if prot & libc::PROT_EXEC != 0 && p != libc::MAP_FAILED {
-        remember_arena(p as usize as u64, len as u64);
+        arenas::push(p as usize as u64, len as u64);
     }
 
     if tracing() {
@@ -136,7 +226,7 @@ fn mprotect(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory
     let rc = unsafe { libc::mprotect(addr as *mut libc::c_void, len, want_prot) };
 
     if prot & libc::PROT_EXEC != 0 && rc == 0 {
-        remember_arena(addr as u64, len as u64);
+        arenas::push(addr as u64, len as u64);
     }
 
     if tracing() {
@@ -209,6 +299,51 @@ fn flags_name(flags: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The property the lock-free table rests on: a slot, once published, is the
+    /// answer forever, and concurrent readers never see a half-written one.
+    #[test]
+    fn arenas_are_found_from_every_thread_while_they_are_being_appended() {
+        const N: u64 = 4096;
+        // Well above any address a real arena has, so this test's entries cannot
+        // be confused with another test's.
+        const BASE: u64 = 0x7000_0000_0000;
+
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                for i in 0..N {
+                    arenas::push(BASE + i * 0x2000, 0x1000);
+                }
+            });
+            for _ in 0..4 {
+                s.spawn(|| {
+                    for i in 0..N {
+                        // A published arena never stops being found, and the gap
+                        // between two of them is never claimed by either.
+                        let va = BASE + i * 0x2000;
+                        if let Some((base, len)) = arena_at(va) {
+                            assert_eq!((base, len), (va, 0x1000));
+                            assert!(arena_at(va + 0x1000).is_none());
+                        }
+                    }
+                });
+            }
+        });
+
+        for i in 0..N {
+            assert_eq!(arena_at(BASE + i * 0x2000), Some((BASE + i * 0x2000, 0x1000)));
+            assert!(!contains(BASE + i * 0x2000 + 0x1000));
+        }
+    }
+
+    /// A range already covered costs no slot.
+    #[test]
+    fn a_subrange_of_a_recorded_arena_is_not_recorded_again() {
+        const BASE: u64 = 0x7100_0000_0000;
+        arenas::push(BASE, 0x4000);
+        arenas::push(BASE + 0x1000, 0x1000);
+        assert_eq!(arena_at(BASE + 0x1000), Some((BASE, 0x4000)));
+    }
 
     #[test]
     fn executable_permission_becomes_readable_permission() {
