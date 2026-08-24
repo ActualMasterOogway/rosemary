@@ -522,9 +522,9 @@ impl<M: Regions> Program<M> {
                 // Everything a fast import cannot express - a variadic, a
                 // callback taker, a shim, a signature the marshaller refuses -
                 // becomes a bridged call. See [`crate::bridge`].
-                None if policy != ImportPolicy::AlwaysSlow => {
-                    config.register_bridge_import(va, crate::bridge::import_bridge())
-                }
+                // None if policy != ImportPolicy::AlwaysSlow => {
+                //     config.register_bridge_import(va, crate::bridge::import_bridge())
+                // }
                 None => config.register_slow_import(va),
             }
         }
@@ -538,7 +538,7 @@ impl<M: Regions> Program<M> {
             config.set_import_registry(crate::bridge::registry());
             // And the calls whose target no lift-time question can answer: a
             // `dlsym` result, a stored `objc_msgSend`, a `__tlv_bootstrap`.
-            config.set_indirect_call_bridge(crate::bridge::indirect_bridge());
+            // config.set_indirect_call_bridge(crate::bridge::indirect_bridge());
         }
         config
     }
