@@ -878,12 +878,29 @@ impl Vm {
                 None => {
                     missed = true;
 
+                    // Asked before the import lookups below, and not only to save
+                    // the second lookup on a hit: a translation existing at `pc`
+                    // settles that `pc` is guest code, and the two import questions
+                    // together cost more than this one does. They are a bloom
+                    // filter, a bounds check and a binary search each, on a path the
+                    // guest takes two million times a second - measured at 1.1% of a
+                    // Subnautica steady state against 0.5% for this lookup.
+                    //
+                    // An address can only stop being guest code by becoming an
+                    // import, and every way that happens gives an address that was
+                    // *nothing* beforehand - the same argument [`crate::dispatch`]
+                    // makes for caching a verdict at all.
+                    let known = self.cache.lookup(pc);
+
                     // Control *jumped* to an import rather than calling one.
-                    if let Some(site) = self
-                        .program
-                        .import_at(pc)
-                        .or_else(|| self.program.import_by_target(pc))
-                    {
+                    let site = match known {
+                        Some(_) => None,
+                        None => self
+                            .program
+                            .import_at(pc)
+                            .or_else(|| self.program.import_by_target(pc)),
+                    };
+                    if let Some(site) = site {
                         crate::stats::record_tail_import();
                         ctx.imported_function_va = pc;
                         self.service_site_as(site, ctx, true)?;
@@ -908,19 +925,21 @@ impl Vm {
                     // The lock is dropped before guest code runs, which is
                     // what keeps a callback re-entering the VM on this same
                     // thread from deadlocking against its own caller.
-                    let lifted = self
-                        .cache
-                        .get_or_lift(&self.program, pc)
-                        .map_err(|e| match e {
-                            VmError::NoCode { pc, from: None } => VmError::NoCode {
-                                pc,
-                                from: from.map(|mut t| {
-                                    t.at = self.program.locate(t.pc);
-                                    t
-                                }),
-                            },
-                            other => other,
-                        })?;
+                    let lifted = match known {
+                        Some(hit) => hit,
+                        None => self.cache.get_or_lift(&self.program, pc).map_err(|e| {
+                            match e {
+                                VmError::NoCode { pc, from: None } => VmError::NoCode {
+                                    pc,
+                                    from: from.map(|mut t| {
+                                        t.at = self.program.locate(t.pc);
+                                        t
+                                    }),
+                                },
+                                other => other,
+                            }
+                        })?,
+                    };
                     state.code().put(pc, &lifted);
                     lifted
                 }

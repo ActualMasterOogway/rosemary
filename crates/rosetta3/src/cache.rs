@@ -464,7 +464,12 @@ impl CodeCache {
     }
 
     /// An existing translation covering `pc`, if there is one.
-    fn lookup(&self, pc: u64) -> Option<Arc<Translation>> {
+    ///
+    /// Public because the run loop asks it before it asks whether `pc` is an
+    /// import: a translation existing at an address is proof the address is guest
+    /// code, and the import lookups are the more expensive question. See
+    /// `Vm::run_loop`.
+    pub(crate) fn lookup(&self, pc: u64) -> Option<Arc<Translation>> {
         if let Some(hit) = self.index.get(pc) {
             // SAFETY: the pointer was taken from an `Arc` this cache put in
             // `retained`, which never gives one up. So the strong count is at least

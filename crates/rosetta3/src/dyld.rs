@@ -395,14 +395,13 @@ pub fn contains(va: u64) -> bool {
 
 /// The recorded function starts inside `range`, for an image the *guest* loaded.
 pub fn function_starts_in(range: std::ops::Range<u64>) -> Vec<u64> {
+    // An address is in one image, so the first image with anything in `range` is
+    // the answer - and `starts_within` finds it by binary search rather than by
+    // scanning that image's function table. See
+    // [`crate::program::Program::function_starts_in`].
     find(|image| {
-        let mut starts: Vec<u64> = image
-            .functions
-            .iter()
-            .map(|f| f.start)
-            .filter(|s| range.contains(s))
-            .collect();
-        starts.sort_unstable();
+        let starts: Vec<u64> =
+            crate::program::starts_within(&image.functions, &range).collect();
         (!starts.is_empty()).then_some(starts)
     })
     .unwrap_or_default()

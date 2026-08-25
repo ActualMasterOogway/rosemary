@@ -42,11 +42,37 @@
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use static_init::dynamic;
+
 /// How many call sites one thread remembers. A power of two, so the index is a mask.
 ///
 /// 1024 entries is 16 KiB a thread against a virtual-call working set that a program
 /// which is not pathological measures in the hundreds.
 const SLOTS: usize = 1024;
+
+/// Overrides [`SLOTS`]. Rounded up to a power of two, floored at 64.
+///
+/// A knob because the argument above is a measurement on fixtures whose working set
+/// fits, and a program whose does not looks different: Subnautica answers 77% from
+/// 1024 slots and *evicts on 97% of its misses*, which is the shape the module note
+/// says a program that disagrees would show.
+pub const SLOTS_ENV: &str = "ROSETTA3_DISPATCH_SLOTS";
+
+/// How many slots this run uses.
+fn slots() -> usize {
+    #[dynamic]
+    static N: usize = match std::env::var(SLOTS_ENV) {
+        Err(_) => SLOTS,
+        Ok(v) => match v.trim().parse::<usize>() {
+            Ok(n) if n >= 64 => n.next_power_of_two(),
+            _ => {
+                eprintln!("rosetta3: {SLOTS_ENV}={v:?} is not an integer >= 64; using {SLOTS}");
+                SLOTS
+            }
+        },
+    };
+    *N
+}
 
 /// A slot nothing has been written to. No guest function lives at address zero.
 const EMPTY: u64 = 0;
@@ -73,14 +99,20 @@ pub(crate) struct IndirectCache {
     /// which differs from `callee` exactly when the callee was one of this runtime's
     /// own thunks.
     slots: Box<[Cell<(u64, u64)>]>,
+    /// `slots.len() - 1`, which is the index mask. Held rather than read from
+    /// [`slots`] so the mask is one load beside the table instead of a length
+    /// check the bounds check would repeat.
+    mask: usize,
     /// The generation these entries were decided under.
     generation: Cell<u64>,
 }
 
 impl IndirectCache {
     pub(crate) fn new() -> Self {
+        let n = slots();
         IndirectCache {
-            slots: (0..SLOTS).map(|_| Cell::new((EMPTY, 0))).collect(),
+            slots: (0..n).map(|_| Cell::new((EMPTY, 0))).collect(),
+            mask: n - 1,
             generation: Cell::new(GENERATION.load(Ordering::Relaxed)),
         }
     }
@@ -90,8 +122,8 @@ impl IndirectCache {
     /// Guest function addresses are aligned in the low bits and identical in the high
     /// ones, so the index comes from the middle of a multiply - as in
     /// [`crate::cache`], and for the same reason.
-    fn slot(callee: u64) -> usize {
-        (callee.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 24) as usize & (SLOTS - 1)
+    fn slot(&self, callee: u64) -> usize {
+        (callee.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 24) as usize & self.mask
     }
 
     /// Where `callee` went last time, if this thread has been told and the answer is
@@ -103,7 +135,7 @@ impl IndirectCache {
             return None;
         }
         self.refresh();
-        match self.slots[Self::slot(callee)].get() {
+        match self.slots[self.slot(callee)].get() {
             (at, target) if at == callee => Some(target),
             _ => None,
         }
@@ -116,7 +148,7 @@ impl IndirectCache {
             return false;
         }
         self.refresh();
-        let slot = &self.slots[Self::slot(callee)];
+        let slot = &self.slots[self.slot(callee)];
         let (was, _) = slot.get();
         slot.set((callee, target));
         was != EMPTY && was != callee
@@ -180,9 +212,12 @@ mod tests {
     fn a_collision_evicts_rather_than_answering_for_two() {
         let cache = IndirectCache::new();
         let a = 0x4000u64;
-        // The other address that maps to the same slot.
-        let b = a.wrapping_add((SLOTS as u64) << 24);
-        assert_eq!(IndirectCache::slot(a), IndirectCache::slot(b));
+        // Searched for rather than computed: the table's width is a knob now, and
+        // the point of the test is what a collision does, not which addresses
+        // happen to collide at one width.
+        let b = (a + 1..)
+            .find(|&c| cache.slot(c) == cache.slot(a))
+            .expect("some address shares a slot with `a`");
         assert!(!cache.put(a, a), "an empty slot evicts nothing");
         assert!(cache.put(b, b), "and the second address reports the eviction");
         assert_eq!(cache.get(b), Some(b));

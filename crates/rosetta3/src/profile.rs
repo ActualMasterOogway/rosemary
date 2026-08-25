@@ -350,6 +350,32 @@ pub fn set_sampling(on: bool) -> bool {
     true
 }
 
+/// Throw away everything sampled so far and restart the clock.
+///
+/// What `ROSETTA3_PROFILE_WINDOW` is for: the histogram is otherwise cumulative,
+/// so a program whose first two minutes are translation reports those two minutes
+/// forever and the steady state never rises out of them. Reset after each report
+/// and every report describes only the interval it covers.
+pub fn reset() {
+    let mut guard = COUNTS.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_some() {
+        *guard = Some(Counts::default());
+    }
+    *STARTED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+    SWEEPS.store(0, Relaxed);
+    SWEEP_NS.store(0, Relaxed);
+}
+
+/// Whether each periodic report covers only its own interval.
+fn windowed() -> bool {
+    #[dynamic]
+    static ON: bool = matches!(
+        std::env::var("ROSETTA3_PROFILE_WINDOW").ok().as_deref().map(str::trim),
+        Some("1" | "yes" | "on" | "true")
+    );
+    *ON
+}
+
 /// Start the sampler thread, once, whether or not the environment asked.
 ///
 /// Separate from [`start`] because a run that never set `ROSETTA3_PROFILE` can
@@ -445,8 +471,13 @@ fn sweep_forever(period: Duration, every: Option<Duration>) {
         SWEEP_NS.fetch_add(began.elapsed().as_nanos() as u64, Relaxed);
 
         if every.is_some_and(|d| last_report.elapsed() >= d) {
-            last_report = Instant::now();
             report();
+            // After the report, not before: the report is of the window that
+            // just closed.
+            if windowed() {
+                reset();
+            }
+            last_report = Instant::now();
         }
     }
 }

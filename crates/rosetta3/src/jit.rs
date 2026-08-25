@@ -38,6 +38,9 @@ pub const HOST_FRAME_DEPTH_ENV: &str = "ROSETTA3_HOST_FRAME_DEPTH";
 /// Replaces the pinned register set: a comma-separated list of x86-64 register
 /// names, e.g. `ROSETTA3_PINNED_REGS=rsp,rax,rdi,rsi,rbp`.
 pub const PINNED_REGS_ENV: &str = "ROSETTA3_PINNED_REGS";
+/// Which register allocator Cranelift runs: `backtracking` or `single_pass`.
+/// See [`regalloc_algorithm`].
+pub const REGALLOC_ENV: &str = "ROSETTA3_REGALLOC";
 
 /// What to ask of the JIT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -126,8 +129,8 @@ impl OptLevel {
                     .set("enable_alias_analysis", "true")
                     .expect("couldn't enable alias analysis");
                 builder
-                    .set("regalloc_algorithm", "backtracking")
-                    .expect("couldn't enable backtracking regalloc");
+                    .set("regalloc_algorithm", regalloc_algorithm())
+                    .expect("couldn't set the regalloc algorithm");
             }
             OptLevel::None => {}
         };
@@ -220,6 +223,37 @@ fn host_features() -> Vec<(&'static str, &'static str)> {
         let _ = value(false);
         Vec::new()
     }
+}
+
+/// Which register allocator Cranelift runs, at `speed` and above.
+///
+/// `backtracking` (the default) splits live ranges and produces better code;
+/// `single_pass` produces more spills and moves but is far cheaper to run. The
+/// difference is not academic here: on a Subnautica profile, regalloc2's
+/// backtracking allocator was around 18% of the whole runtime's time during the
+/// two minutes the title screen takes to appear, and this runtime compiles a
+/// great many regions it then enters only a handful of times.
+///
+/// A knob rather than a decision, because the two ends of that trade are the load
+/// time and the frame rate and only a measurement says which one a given program
+/// is short of.
+fn regalloc_algorithm() -> &'static str {
+    #[dynamic]
+    static ALGORITHM: &'static str = match std::env::var(REGALLOC_ENV) {
+        Err(_) => "backtracking",
+        Ok(value) => match value.trim() {
+            "backtracking" => "backtracking",
+            "single_pass" => "single_pass",
+            other => {
+                eprintln!(
+                    "rosetta3: {REGALLOC_ENV}={other:?} is not one of backtracking, \
+                     single_pass; using backtracking"
+                );
+                "backtracking"
+            }
+        },
+    };
+    *ALGORITHM
 }
 
 /// The level this run is using.

@@ -625,12 +625,15 @@ impl<M: Regions> Program<M> {
     }
 
     /// The recorded function starts inside `range`, ascending.
+    ///
+    /// Two binary searches and a slice, not a scan: `functions` comes out of
+    /// `LC_FUNCTION_STARTS`, which is a chain of *positive* ULEB128 deltas and so
+    /// is already ascending, and the slide added to every entry is the same one.
+    /// It matters because this is asked once per lifted region against an image
+    /// with a hundred thousand functions in it - a scan made region selection
+    /// quadratic in the program, and showed up on a Subnautica profile.
     pub fn function_starts_in(&self, range: std::ops::Range<u64>) -> Vec<u64> {
-        let mut starts: Vec<u64> = self
-            .functions
-            .iter()
-            .map(|f| f.start)
-            .filter(|s| range.contains(s))
+        let mut starts: Vec<u64> = starts_within(&self.functions, &range)
             .chain(crate::dyld::function_starts_in(range.clone()))
             .collect();
         starts.sort_unstable();
@@ -752,6 +755,23 @@ impl<M: Regions> Program<M> {
     pub fn import_addresses(&self) -> impl Iterator<Item = u64> + '_ {
         self.imports.keys().copied()
     }
+}
+
+/// The starts of `functions` that fall inside `range`, ascending.
+///
+/// `functions` must be sorted by `start`; every producer of one is a
+/// `LC_FUNCTION_STARTS` walk, which cannot produce anything else.
+pub(crate) fn starts_within<'a>(
+    functions: &'a [std::ops::Range<u64>],
+    range: &std::ops::Range<u64>,
+) -> impl Iterator<Item = u64> + 'a {
+    debug_assert!(
+        functions.windows(2).all(|w| w[0].start <= w[1].start),
+        "function starts must be ascending",
+    );
+    let lo = functions.partition_point(|f| f.start < range.start);
+    let hi = functions.partition_point(|f| f.start < range.end);
+    functions[lo..hi].iter().map(|f| f.start)
 }
 
 /// The bytes of a region, cut out of the mapping it was found in.
