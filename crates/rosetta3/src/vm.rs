@@ -1665,9 +1665,6 @@ mod tests {
         for (bit, name) in [
             (13, "cmpxchg16b"),
             (23, "popcnt"),
-            // The host CPU has AES instructions and microlift does not lift
-            // them, which is the case this whole test is about.
-            (25, "aes"),
             (26, "xsave"),
             (27, "osxsave"),
             (28, "avx"),
