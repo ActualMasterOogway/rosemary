@@ -11,6 +11,3 @@ license = "MIT OR Apache-2.0"
 machish = { path = "crates/machish" }
 libc = "0.2"
 gimli = "0.34"
-
-[profile.release]
-lto = "thin"
