@@ -1443,10 +1443,8 @@ fn cpuid(leaf: u32, subleaf: u32) -> [u32; 4] {
             // FPU | TSC | CX8 | CMOV | SSE | SSE2
             let edx = (1 << 0) | (1 << 4) | (1 << 8) | (1 << 15) | (1 << 25) | (1 << 26);
 
-            // SSE3 (bit 0) | SSSE3 (bit 9) | SSE4.1 (bit 19) | SSE4.2 (bit 20)
-            // | Hypervisor (bit 31) **AES-NI (bit 25) is deliberately absent,
-            // and this is the rule the whole word is written by.
-            let ecx = (1 << 0) | (1 << 9) | (1 << 19) | (1 << 20) | (1 << 31);
+            // SSE3 (bit 0) | SSSE3 (bit 9) | SSE4.1 (bit 19) | SSE4.2 (bit 20) | AES-NI (bit 25) | Hypervisor (bit 31)
+            let ecx = (1 << 0) | (1 << 9) | (1 << 19) | (1 << 20) | (1 << 25) | (1 << 31);
 
             [version, misc, ecx, edx]
         }
