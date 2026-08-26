@@ -7,7 +7,7 @@ use microlift::arch::x86_64::pin;
 use microlift::backend::CraneliftBackend;
 use microlift::core::callret::CallRetConfig;
 use microlift::core::hostframe::HostFrameConfig;
-use microlift::core::pin::PinnedAbi;
+use microlift::core::pin::{PinnedAbi, PinnedReg};
 use static_init::dynamic;
 
 /// The environment variables this module reads.
@@ -555,12 +555,7 @@ pub fn pinned_link_abi() -> Option<PinnedAbi> {
             return None;
         }
         let abi = match std::env::var(PINNED_REGS_ENV) {
-            Err(_) => PinnedAbi::new()
-                .with(pin::RSP)
-                .with(pin::RDI)
-                .with(pin::RAX)
-                .with(pin::RBP)
-                .with(pin::RSI),
+            Err(_) => default_pinned_abi(),
             Ok(list) => match parse_pinned_regs(&list) {
                 Some(abi) => abi,
                 None => return None,
@@ -576,6 +571,57 @@ pub fn pinned_link_abi() -> Option<PinnedAbi> {
         Some(abi)
     };
     *ABI
+}
+
+/// Guest registers to pin, most worth pinning first.
+///
+/// Order matters because the list is cut to fit the host: an x86-64 host passes
+/// eight integer values under the `tail` convention and an aarch64 one thirteen,
+/// both counting the context pointer, so the same default gives a different set
+/// on each and the ones at the front are the ones that survive.
+///
+/// The front five are the set this ran with when aarch64 could carry no more.
+/// The rest are in the order x86-64 code uses them: the SysV argument registers,
+/// then the scratch ones, then the callee-saved.
+const PIN_PRIORITY: &[PinnedReg] = &[
+    pin::RSP,
+    pin::RDI,
+    pin::RAX,
+    pin::RBP,
+    pin::RSI,
+    pin::RDX,
+    pin::RCX,
+    pin::RBX,
+    pin::R8,
+    pin::R9,
+    pin::R10,
+    pin::R11,
+    pin::R12,
+    pin::R13,
+    pin::R14,
+    pin::R15,
+];
+
+/// As much of [`PIN_PRIORITY`] as this host can carry in registers.
+///
+/// A slot past the host's budget is a *stack* slot in microlift - correct, and
+/// slower than leaving the register in the context - so the default takes what
+/// fits rather than asking for a fixed count and being quietly demoted. A host
+/// whose budget microlift does not record gets the five this ran with before the
+/// budget was widened, which is the conservative answer rather than a guess.
+fn default_pinned_abi() -> PinnedAbi {
+    const FALLBACK: usize = 5;
+    let slots = match microlift::core::pin::RegisterBudget::for_arch(
+        microlift::target_lexicon::Triple::host().architecture,
+    ) {
+        // The context pointer is a slot too, and it is the one nobody counts.
+        Some(budget) => (budget.gpr as usize).saturating_sub(1).min(PIN_PRIORITY.len()),
+        None => FALLBACK,
+    };
+    PIN_PRIORITY
+        .iter()
+        .take(slots)
+        .fold(PinnedAbi::new(), |abi, &reg| abi.with(reg))
 }
 
 /// Parse a `ROSETTA3_PINNED_REGS` list.
@@ -599,19 +645,39 @@ fn parse_pinned_regs(list: &str) -> Option<PinnedAbi> {
             "r13" => pin::R13,
             "r14" => pin::R14,
             "r15" => pin::R15,
-            other => {
-                eprintln!(
-                    "rosetta3: {PINNED_REGS_ENV} names {other:?}, which is not an x86-64 \
-                     general-purpose register; pinned links are off"
-                );
-                return None;
-            }
+            // `xmm0`..`xmm15`. Worth naming because the host's *vector* budget
+            // under the tail ABI is eight values and nothing has ever spent any
+            // of it, while the general-purpose budget is six counting the
+            // context pointer and the default already spends all of it.
+            other => match other.strip_prefix("xmm").and_then(|n| n.parse::<u16>().ok()) {
+                Some(n) if n < 16 => pin::xmm(n),
+                _ => {
+                    eprintln!(
+                        "rosetta3: {PINNED_REGS_ENV} names {other:?}, which is not an \
+                         x86-64 general-purpose or XMM register; pinned links are off"
+                    );
+                    return None;
+                }
+            },
         };
         if abi.contains(reg) {
             eprintln!("rosetta3: {PINNED_REGS_ENV} names {name} twice; pinned links are off");
             return None;
         }
         abi = abi.with(reg);
+    }
+    // An XMM slot is one value only under `use_vector_xmm`; in the scalar
+    // representation it is two variables and microlift turns pinning off for the
+    // whole lift rather than pin half a register. Refusing here says so, instead
+    // of silently producing a run with no pinned links at all.
+    if abi.count(microlift::core::pin::RegClass::Vector) > 0
+        && !crate::program::lifter_config_base().use_vector_xmm
+    {
+        eprintln!(
+            "rosetta3: {PINNED_REGS_ENV} names an XMM register, which needs the vector \
+             XMM representation this run is not using; pinned links are off"
+        );
+        return None;
     }
     (!abi.is_empty()).then_some(abi)
 }

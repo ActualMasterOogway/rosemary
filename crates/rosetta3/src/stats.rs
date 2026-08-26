@@ -57,6 +57,22 @@ counters! {
     ENTRIES, WINDOW_MISSES, TAIL_IMPORTS, LINKED,
     DISPATCHES, DISPATCH_HITS, DISPATCH_EVICTIONS,
     PUBLISHES, PUBLISHED_ROWS, RELINKS,
+    FRAMES,
+}
+
+/// One frame presented by the guest.
+///
+/// **Not gated on [`enabled`]**, unlike everything else here, and not gated on the
+/// overlay either: the frame rate is the number this whole runtime is judged on,
+/// and it must not cost a keystroke - or the overlay's own frame cost - to see. One
+/// relaxed add at thirty to a hundred hertz is not a measurable perturbation.
+pub fn record_frame() {
+    FRAMES.fetch_add(1, Relaxed);
+}
+
+/// Frames presented since the process started. Never rewinds.
+pub fn frames() -> u64 {
+    FRAMES.load(Relaxed)
 }
 
 pub fn record_relink() {

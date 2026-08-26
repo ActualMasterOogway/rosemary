@@ -83,10 +83,21 @@ fn observe(sel: u64) {
 
 /// Called for every message the guest sends, before it is dispatched.
 pub fn before_send(sel: u64, receiver: u64, argument: u64) {
+    let selectors = selectors();
+    // Counted before the `armed` gate below, and deliberately: the frame rate is
+    // what the runtime is judged on, so reading it must not require turning on the
+    // overlay - which costs frames of its own and so cannot be the only way to see
+    // how many there were. Seven pointer compares on a path that has already done
+    // a class lookup and is about to do a method search.
+    if sel == selectors.flush_buffer
+        || selectors.present_drawable.contains(&sel)
+        || selectors.present_self.contains(&sel)
+    {
+        crate::stats::record_frame();
+    }
     if !super::armed() {
         return;
     }
-    let selectors = selectors();
     if super::debugging() {
         observe(sel);
     }
@@ -145,6 +156,9 @@ fn flush_drawable(
     _mem: &mut dyn GuestMemory,
 ) -> Result<()> {
     let context = ctx.rdi;
+    // As in [`before_send`]: the frame is counted whether or not the overlay is
+    // drawing on it.
+    crate::stats::record_frame();
     if super::armed() {
         super::guarded(|| super::gl::present(context as usize));
     }
@@ -161,10 +175,11 @@ fn flush_drawable(
 
 /// Whether `name` (underscore already stripped) is one of this module's.
 pub fn shim_for(name: &str) -> Option<Shim> {
-    if !super::enabled() {
-        return None;
-    }
     match name {
+        // Installed even with the overlay off, because it is also where a frame
+        // is counted on the CGL path. The shim calls straight through to the
+        // host's own `CGLFlushDrawable` either way, so the only cost of taking it
+        // when nothing is drawing is one indirection per presented frame.
         "CGLFlushDrawable" => Some(flush_drawable),
         _ => None,
     }

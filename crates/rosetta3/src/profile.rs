@@ -213,6 +213,19 @@ struct Counts {
     threads: usize,
 }
 
+/// Frames presented as of the previous report, and when that report was, so a rate
+/// can be over the interval between two of them rather than over all time.
+static LAST_FRAMES: Mutex<Option<(u64, Instant)>> = Mutex::new(None);
+
+/// When sampling first started, which is what the *first* frame rate is measured
+/// from - there is no previous report to difference against.
+fn wall_origin() -> Instant {
+    STARTED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(Instant::now)
+}
+
 static COUNTS: Mutex<Option<Counts>> = Mutex::new(None);
 
 /// When sampling started, so a share can be a share of something.
@@ -576,6 +589,31 @@ pub fn report() {
             .unwrap_or_default(),
         100.0 * in_sweep.as_secs_f64() / wall.as_secs_f64().max(f64::EPSILON),
     );
+    // The frame rate, before anything else: it is the only number here that is
+    // the user's own experience rather than a share of it. Over the interval since
+    // the previous report, so under `ROSETTA3_PROFILE_WINDOW` it tracks the window
+    // and not the two minutes of loading that preceded it.
+    {
+        let now = Instant::now();
+        let frames = crate::stats::frames();
+        let mut last = LAST_FRAMES.lock().unwrap_or_else(|e| e.into_inner());
+        let (since, at) = last.unwrap_or((0, wall_origin()));
+        let elapsed = now.duration_since(at).as_secs_f64();
+        *last = Some((frames, now));
+        drop(last);
+        match frames.saturating_sub(since) {
+            0 => eprintln!(
+                "rosetta3: profile  0 frame(s) presented - the guest is not drawing, \
+                 or presents by a path this runtime does not hook"
+            ),
+            drawn => eprintln!(
+                "rosetta3: profile  {:.1} fps ({drawn} frame(s) in {:.1}s), {:.1?} per frame",
+                drawn as f64 / elapsed.max(f64::EPSILON),
+                elapsed,
+                Duration::from_secs_f64(elapsed / drawn as f64),
+            ),
+        }
+    }
     eprintln!(
         "rosetta3: profile  translated {:.1}%  runtime {:.1}%  host libraries {:.1}%  \
          unaccounted {:.1}%  (of {} running sample(s))",
