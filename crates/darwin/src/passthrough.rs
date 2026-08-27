@@ -1,0 +1,97 @@
+//! Names both sides implement identically, so the host's own symbol is the answer.
+//!
+//! Nothing is defined here and nothing is wrapped: a claimed name is resolved by the
+//! host resolver at the end of the chain, and the guest's import slot points straight
+//! at musl's `strlen`. What this list *is* is the claim - a reviewable statement that
+//! for this name the two platforms agree on the arguments, the return value, the
+//! errno values and the memory the call touches.
+//!
+//! The claim is worth writing down even though it changes no behaviour, because the
+//! alternative is that "which symbols are safe to pass through" exists only as the
+//! absence of an entry in [`crate::divergent`], where nobody can read it.
+//!
+//! Not exhaustive, and not meant to be: a name that is on neither list is still passed
+//! through. Adding one here is how a reviewer records that the question was asked.
+
+/// Symbols this crate asserts are ABI-identical on Darwin and on the host.
+///
+/// C names, without the Mach-O underscore.
+pub const CLAIMED: &[&str] = &[
+    // <string.h>. Pure functions over caller memory; no struct crosses the seam.
+    "memchr", "memcmp", "memcpy", "memmove", "memset", "strcasecmp", "strcat", "strchr",
+    "strcmp", "strcoll", "strcpy", "strcspn", "strdup", "strlen", "strncasecmp", "strncat",
+    "strncmp", "strncpy", "strndup", "strnlen", "strpbrk", "strrchr", "strspn", "strstr",
+    "strtok", "strtok_r", "bcmp", "bcopy", "bzero", "index", "rindex",
+    // <stdlib.h>. `malloc` and friends operate on an address space both sides share.
+    "abort", "abs", "atof", "atoi", "atol", "atoll", "bsearch", "calloc", "div", "free",
+    "labs", "llabs", "malloc", "qsort", "rand", "realloc", "srand", "strtod", "strtof",
+    "strtol", "strtoll", "strtoul", "strtoull",
+    // <ctype.h>, in the byte-at-a-time forms. The locale-aware `_l` variants take a
+    // `locale_t`, which is not the same object on both sides, and are deliberately
+    // absent.
+    "isalnum", "isalpha", "isascii", "isblank", "iscntrl", "isdigit", "isgraph",
+    "islower", "isprint", "ispunct", "isspace", "isupper", "isxdigit", "tolower",
+    "toupper",
+    // <unistd.h>. File descriptors are integers on both sides and the flags these
+    // take are POSIX. `open` and `fcntl` are not here: their flag values differ and
+    // `rosetta3::shims::openat` bridges them.
+    "_exit", "access", "alarm", "chdir", "chown", "close", "dup", "dup2", "execv",
+    "execve", "fsync", "ftruncate", "getcwd", "getegid", "geteuid", "getgid", "getpid",
+    "getppid", "getuid", "isatty", "link", "lseek", "pipe", "pread", "pwrite", "read",
+    "readlink", "rmdir", "sleep", "symlink", "sync", "truncate", "unlink", "usleep",
+    "write",
+    // <stdio.h>, minus the `FILE *` globals, which are named differently and live in
+    // [`crate::stdio`]. `FILE` itself never crosses: the guest receives a pointer and
+    // hands it back.
+    "clearerr", "fclose", "fdopen", "feof", "ferror", "fflush", "fgetc", "fgets",
+    "fileno", "fopen", "fputc", "fputs", "fread", "freopen", "fseek", "fseeko", "ftell",
+    "ftello", "fwrite", "getchar", "gets", "perror", "putchar", "puts", "remove",
+    "rename", "rewind", "setbuf", "setvbuf", "tmpfile", "ungetc",
+    // <math.h>. IEEE 754 on both, and `rosetta3::shims::math` already intercepts the
+    // handful where Darwin's rounding of a corner case differs.
+    "acos", "asin", "atan", "atan2", "cbrt", "ceil", "cos", "cosh", "exp", "exp2",
+    "expm1", "fabs", "floor", "fmax", "fmin", "fmod", "hypot", "log", "log10", "log1p",
+    "log2", "pow", "round", "sin", "sinh", "sqrt", "tan", "tanh", "trunc",
+    "clock", "difftime", "mktime", "time",
+    // Environment.
+    "getenv", "putenv", "setenv", "unsetenv", "exit", "atexit",
+];
+
+/// Whether this crate claims `name` is safe to pass through unchanged.
+pub fn claimed(name: &str) -> bool {
+    let name = crate::c_name(name);
+    CLAIMED.contains(&name) || crate::pthread::PASSED_THROUGH.contains(&name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_claim_is_made_about_c_names_and_mach_o_ones_alike() {
+        assert!(claimed("strlen"));
+        assert!(claimed("_strlen"));
+        assert!(!claimed("sysctl"), "a reimplemented name is not a passthrough");
+    }
+
+    /// A claimed name that the host does not export is a claim about nothing, and
+    /// almost always a typo.
+    #[test]
+    fn every_claimed_name_is_one_this_host_actually_exports() {
+        let missing: Vec<&str> = CLAIMED
+            .iter()
+            .copied()
+            .filter(|n| crate::host_symbol(n).is_none())
+            .collect();
+        assert!(missing.is_empty(), "claimed but not exported here: {missing:?}");
+    }
+
+    #[test]
+    fn the_list_has_no_duplicates() {
+        let mut sorted = CLAIMED.to_vec();
+        sorted.sort_unstable();
+        let before = sorted.len();
+        sorted.dedup();
+        assert_eq!(before, sorted.len(), "a name is claimed twice");
+    }
+}

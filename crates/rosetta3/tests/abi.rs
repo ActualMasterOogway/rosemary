@@ -510,7 +510,7 @@ fn process_and_environment_queries() {
     // depends on it being the *host's* thread-local - the same pointer the
     // host's own libc hands out.
     if let Some(ctx) = call("___error", &[]) {
-        assert_eq!(ctx.rax as usize as *mut i32, unsafe { libc::__error() });
+        assert_eq!(ctx.rax as usize as *mut i32, darwin::errno::location());
     }
     // Set a variable through the host and read it back through the marshaller,
     // so the two ends of the same table entry are checked against each other.

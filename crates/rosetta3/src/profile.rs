@@ -435,7 +435,7 @@ fn sweep_forever(period: Duration, every: Option<Duration>) {
     // SAFETY: `mach_absolute_time` reads the clock and takes nothing.
     let mut next = unsafe { mach_absolute_time() };
     let mut last_report = Instant::now();
-    let mine = crate::thread::mach_port();
+    let mine = crate::thread::key();
     loop {
         next += period;
         // SAFETY: as above.
@@ -462,7 +462,7 @@ fn sweep_forever(period: Duration, every: Option<Duration>) {
         let mut found = 0;
         // The registry is scanned with the counts held, which is safe in the
         // one direction that matters.
-        crate::thread::each_port(|port| {
+        crate::thread::each_key(|port| {
             if port == mine {
                 return;
             }

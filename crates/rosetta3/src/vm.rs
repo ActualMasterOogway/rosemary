@@ -3,7 +3,9 @@
 use std::fmt;
 use std::ops::Range;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+#[cfg(target_os = "macos")]
+use std::sync::Mutex;
+use std::sync::{Arc, RwLock};
 
 use machish::memory::{MmapSpace, Regions};
 
@@ -431,9 +433,11 @@ pub struct Vm {
     thunk_count: AtomicUsize,
     view: GuestView,
     /// The guest's Objective-C classes, once realized in the host runtime.
+    #[cfg(target_os = "macos")]
     objc: AtomicPtr<crate::objc::ObjcRuntime>,
     /// Held across a registration pass, so two `dlopen`s cannot each extend the
     /// same snapshot and publish one of the results.
+    #[cfg(target_os = "macos")]
     objc_registration: Mutex<()>,
 }
 
@@ -539,11 +543,14 @@ impl Vm {
             thunk_view: AtomicPtr::new(core::ptr::null_mut()),
             thunk_count: AtomicUsize::new(0),
             view: GuestView::new(ranges),
+            #[cfg(target_os = "macos")]
             objc: AtomicPtr::new(core::ptr::null_mut()),
+            #[cfg(target_os = "macos")]
             objc_registration: Mutex::new(()),
         })
     }
 
+    #[cfg(target_os = "macos")]
     /// Realize the guest's Objective-C classes in the host runtime.
     ///
     /// Idempotent, and deliberately *not* done in [`Vm::with_policy`].
@@ -558,6 +565,7 @@ impl Vm {
         Ok(self.publish_objc(crate::objc::register(self)?))
     }
 
+    #[cfg(target_os = "macos")]
     /// Realize the classes of an image the guest `dlopen`ed, into the same runtime.
     ///
     /// A `Vm` that has never registered at all is left alone.
@@ -578,6 +586,7 @@ impl Vm {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     /// Call the `+load` methods of an image [`Vm::register_loaded_objc`] just realized,
     /// returning how many ran.
     ///
@@ -592,6 +601,7 @@ impl Vm {
         }
     }
 
+    #[cfg(target_os = "macos")]
     /// Leak `rt` and make it the runtime every dispatching thread reads.
     fn publish_objc(&self, rt: crate::objc::ObjcRuntime) -> &'static crate::objc::ObjcRuntime {
         let leaked: &'static crate::objc::ObjcRuntime = Box::leak(Box::new(rt));
@@ -604,6 +614,7 @@ impl Vm {
         leaked
     }
 
+    #[cfg(target_os = "macos")]
     /// The registered Objective-C classes, if [`Vm::register_objc`] has run.
     pub fn objc(&self) -> Option<&'static crate::objc::ObjcRuntime> {
         let published = self.objc.load(Ordering::Acquire);
@@ -614,20 +625,44 @@ impl Vm {
     }
 
     /// A class pointer on its way *out* to the host runtime.
+    ///
+    /// Identity where there is no host runtime to go out to, which is the same answer
+    /// this gives on macOS before [`Vm::register_objc`] has run.
     pub fn objc_host_class(&self, va: u64) -> u64 {
-        self.objc().map_or(va, |rt| rt.host_or(va))
+        #[cfg(target_os = "macos")]
+        {
+            self.objc().map_or(va, |rt| rt.host_or(va))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            va
+        }
     }
 
     /// A class pointer on its way back *in*.
     pub fn objc_guest_class(&self, host: u64) -> u64 {
-        self.objc().map_or(host, |rt| rt.guest_or(host))
+        #[cfg(target_os = "macos")]
+        {
+            self.objc().map_or(host, |rt| rt.guest_or(host))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            host
+        }
     }
 
     /// A `Protocol *` on its way out to the host runtime.
     ///
     /// [`Vm::objc_host_class`] for protocols.
     pub fn objc_host_protocol(&self, va: u64) -> u64 {
-        self.objc().map_or(va, |rt| rt.host_protocol_or(va))
+        #[cfg(target_os = "macos")]
+        {
+            self.objc().map_or(va, |rt| rt.host_protocol_or(va))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            va
+        }
     }
 
     /// Guest memory, as a value a shim can hold.
@@ -1503,13 +1538,18 @@ impl crate::exec::Execution for Vm {
     }
 
     fn prepare(&self) -> Result<(), VmError> {
-        crate::profile::start();
-        crate::gui::install();
-        let objc = self.register_objc()?;
-        // `+load` before the C constructors of the same image, which is dyld's
-        // order and the one a program that uses both depends on.
-        crate::shims::machthread::warm();
-        crate::objc::call_load_methods(self, objc)?;
+        // The sampler, the overlay and the Objective-C runtime, none of which a host
+        // without Mach, Metal and libobjc has. See the module list in `lib.rs`.
+        #[cfg(target_os = "macos")]
+        {
+            crate::profile::start();
+            crate::gui::install();
+            let objc = self.register_objc()?;
+            // `+load` before the C constructors of the same image, which is dyld's
+            // order and the one a program that uses both depends on.
+            crate::shims::machthread::warm();
+            crate::objc::call_load_methods(self, objc)?;
+        }
         Ok(())
     }
 

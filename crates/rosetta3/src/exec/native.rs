@@ -98,9 +98,21 @@ impl Native {
         // a shim would only refuse symbols nothing else answers.
         let mut host = NativeDylibProvider::system();
         host.allow_everything();
+        // ...except the names whose Darwin and host ABIs differ, which
+        // `allow_everything` would otherwise re-admit. Empty on macOS, where this
+        // image really is calling the libraries it was linked against.
+        darwin::divergent::deny_in(&mut host);
         let eager = eager_binding_shims();
         let tlv = tlv_provider();
-        let providers: Vec<&dyn SymbolProvider> = vec![&eager, &tlv, &host];
+        let platform = darwin::provider();
+        let providers: Vec<&dyn SymbolProvider> = vec![&eager, &tlv, &platform, &host];
+
+        // A native image is of this host's architecture by definition, which is what
+        // makes it the native backend's. See [`darwin::sysctl`].
+        darwin::sysctl::set_guest_arch(match cfg!(target_arch = "aarch64") {
+            true => darwin::sysctl::GuestArch::Arm64,
+            false => darwin::sysctl::GuestArch::X86_64,
+        });
 
         let mut report = Loader::new(HOST_SPEC)
             .link_with(&bytes, path, &mut memory, &mut source, &providers)
@@ -160,6 +172,9 @@ impl Execution for Native {
     }
 
     fn prepare(&self) -> Result<(), VmError> {
+        // Registering the image's classes with the host's Objective-C runtime, which
+        // is a step only a host that has one can take.
+        #[cfg(target_os = "macos")]
         crate::objc::native::map_images(&self.report);
         Ok(())
     }
@@ -194,10 +209,6 @@ fn tlv_provider() -> SyntheticDylib {
     lib
 }
 
-unsafe extern "C" {
-    fn sys_icache_invalidate(start: *mut core::ffi::c_void, len: usize);
-}
-
 /// Flush the instruction cache over every executable segment.
 ///
 /// `MmapSpace` only does this for `MAP_JIT` writes, and these are ordinary ones.
@@ -209,9 +220,43 @@ fn flush_icache(report: &LinkReport) {
             continue;
         }
         // SAFETY: the range is a segment the loader just mapped and wrote, and
-        // `sys_icache_invalidate` only invalidates cache lines over it.
+        // invalidating cache lines over it changes nothing about its contents.
         unsafe {
-            sys_icache_invalidate(seg.vmaddr as usize as *mut _, seg.vmsize as usize);
+            invalidate_icache(seg.vmaddr as usize as *mut u8, seg.vmsize as usize);
         }
+    }
+}
+
+/// Invalidate the instruction cache over `len` bytes at `start`.
+///
+/// Darwin publishes `sys_icache_invalidate` for this; elsewhere it is the compiler
+/// builtin `__clear_cache`, which is in `libgcc`/`compiler-rt` rather than in libc and
+/// so is declared here rather than taken from the `libc` crate.
+///
+/// # Safety
+///
+/// `start..start+len` is mapped.
+unsafe fn invalidate_icache(start: *mut u8, len: usize) {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn sys_icache_invalidate(start: *mut core::ffi::c_void, len: usize);
+        }
+        // SAFETY: the caller's guarantee.
+        unsafe { sys_icache_invalidate(start as *mut core::ffi::c_void, len) };
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        unsafe extern "C" {
+            fn __clear_cache(start: *mut core::ffi::c_char, end: *mut core::ffi::c_char);
+        }
+        // SAFETY: as above. `__clear_cache` takes the half-open range rather than a
+        // base and a length, which is the only difference between the two.
+        unsafe {
+            __clear_cache(
+                start as *mut core::ffi::c_char,
+                start.add(len) as *mut core::ffi::c_char,
+            )
+        };
     }
 }

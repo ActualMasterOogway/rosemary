@@ -19,9 +19,31 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Read a system binary, or `None` if it is not present.
+/// Read a system binary, or `None` if this host has no Mach-O at that path.
+///
+/// Two ways to have none, and the second is the one that matters: the file may be
+/// missing, or - on a host that is not a Mac - it may be there and be an ELF. A test
+/// that reads `/bin/ls` is reading *this machine's own* Mach-O as a fixture, so on
+/// Linux the honest answer is that there is not one, and the test skips rather than
+/// failing over a magic number.
 pub fn system_binary(path: &str) -> Option<Vec<u8>> {
-    std::fs::read(path).ok()
+    let bytes = std::fs::read(path).ok()?;
+    is_mach_o(&bytes).then_some(bytes)
+}
+
+/// Whether `bytes` begins with a Mach-O or universal-binary magic.
+pub fn is_mach_o(bytes: &[u8]) -> bool {
+    let Some(magic) = bytes.get(..4) else {
+        return false;
+    };
+    let magic = u32::from_be_bytes([magic[0], magic[1], magic[2], magic[3]]);
+    matches!(
+        magic,
+        // Thin, 32- and 64-bit, either endianness...
+        0xfeed_face | 0xcefa_edfe | 0xfeed_facf | 0xcffa_edfe
+        // ...and fat, likewise.
+        | 0xcafe_babe | 0xbeba_feca | 0xcafe_babf | 0xbfba_feca
+    )
 }
 
 /// Where compiled fixtures are cached.

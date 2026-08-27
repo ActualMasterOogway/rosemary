@@ -42,30 +42,30 @@ impl GuestThread {
     }
 }
 
-/// One registry entry: a Mach thread port and the state behind it.
+/// One registry entry: a thread's key and the state behind it. See [`key`].
 struct Slot {
-    port: AtomicU32,
+    key: AtomicU32,
     thread: AtomicPtr<GuestThread>,
 }
 
-/// Guest threads by Mach thread port, looked up **without taking a lock**.
+/// Guest threads by [`key`], looked up **without taking a lock**.
 ///
 /// The one race left is a *miss*.
 static TABLE: [Slot; SLOTS] = [const {
     Slot {
-        port: AtomicU32::new(0),
+        key: AtomicU32::new(0),
         thread: AtomicPtr::new(core::ptr::null_mut()),
     }
 }; SLOTS];
 
 const SLOTS: usize = 512;
 
-/// Publish `thread` under `port`. The `Arc` is leaked into the table.
-fn register(port: u32, thread: Arc<GuestThread>) {
+/// Publish `thread` under `key`. The `Arc` is leaked into the table.
+fn register(key: u32, thread: Arc<GuestThread>) {
     let raw = Arc::into_raw(thread) as *mut GuestThread;
     for slot in &TABLE {
-        // The slot is claimed by its *pointer* and published by its port, in
-        // that order, so a lookup that matches a port always finds a pointer.
+        // The slot is claimed by its *pointer* and published by its key, in
+        // that order, so a lookup that matches a key always finds a pointer.
         if slot
             .thread
             .compare_exchange(
@@ -76,46 +76,49 @@ fn register(port: u32, thread: Arc<GuestThread>) {
             )
             .is_ok()
         {
-            slot.port.store(port, Ordering::Release);
+            slot.key.store(key, Ordering::Release);
             return;
         }
     }
     // Out of slots. Not fatal and not silent.
     eprintln!(
-        "rosetta3: more than {SLOTS} guest threads; thread {port} will not be          described to a collector"
+        "rosetta3: more than {SLOTS} guest threads; thread {key} will not be          described to a collector"
     );
     // SAFETY: `raw` came from `Arc::into_raw` immediately above and no slot
     // took it, so this is the only reference.
     drop(unsafe { Arc::from_raw(raw) });
 }
 
-/// Withdraw `port`, freeing its slot for a thread created later.
-fn unregister(port: u32) {
+/// Withdraw `key`, freeing its slot for a thread created later.
+fn unregister(key: u32) {
     for slot in &TABLE {
-        if slot.port.load(Ordering::Acquire) == port {
-            // Port first: a lookup racing this sees zero and misses, which is
+        if slot.key.load(Ordering::Acquire) == key {
+            // Key first: a lookup racing this sees zero and misses, which is
             // the right answer for a thread that is ending.
-            slot.port.store(0, Ordering::Release);
+            slot.key.store(0, Ordering::Release);
             slot.thread.store(core::ptr::null_mut(), Ordering::Release);
             return;
         }
     }
 }
 
-/// This host thread's Mach port name, which is what `thread_get_state` is given.
-pub fn mach_port() -> u32 {
-    // SAFETY: `pthread_self` is always valid on a running thread and
-    // `pthread_mach_thread_np` reads the port name out of it.
-    unsafe { libc::pthread_mach_thread_np(libc::pthread_self()) }
+/// What identifies this host thread to something looking at it from outside.
+///
+/// The Mach port name on Darwin, which is what `thread_get_state` is given; the kernel
+/// thread id elsewhere. Either way it is unique while the thread runs, readable from
+/// the thread without a lock, and the key the table above is built on. See
+/// [`darwin::pthread::id`].
+pub fn key() -> u32 {
+    darwin::pthread::id()
 }
 
-/// The guest thread registered under `port`, if it is one.
-pub fn by_port(port: u32) -> Option<&'static GuestThread> {
-    if port == 0 {
+/// The guest thread registered under `key`, if it is one.
+pub fn by_key(key: u32) -> Option<&'static GuestThread> {
+    if key == 0 {
         return None;
     }
     for slot in &TABLE {
-        if slot.port.load(Ordering::Acquire) == port {
+        if slot.key.load(Ordering::Acquire) == key {
             let raw = slot.thread.load(Ordering::Acquire);
             // SAFETY: a non-null pointer in the table came from
             // `Arc::into_raw` in `register` and is never freed - see the note
@@ -126,16 +129,16 @@ pub fn by_port(port: u32) -> Option<&'static GuestThread> {
     None
 }
 
-/// Call `f` with the Mach port of every registered guest thread.
+/// Call `f` with the [`key`] of every registered guest thread.
 ///
 /// A thread that ends mid-walk is reported and then fails to suspend, which is the
 /// ordinary race and is why the sampler treats a failed suspend as a miss rather than
 /// an error.
-pub fn each_port(mut f: impl FnMut(u32)) {
+pub fn each_key(mut f: impl FnMut(u32)) {
     for slot in &TABLE {
-        let port = slot.port.load(Ordering::Acquire);
-        if port != 0 {
-            f(port);
+        let key = slot.key.load(Ordering::Acquire);
+        if key != 0 {
+            f(key);
         }
     }
 }
@@ -513,8 +516,10 @@ static KEY: libc::pthread_key_t = {
     key
 };
 
+/// The pthread key `ThreadState` hangs off - not [`key`], which identifies the thread
+/// itself.
 #[inline(always)]
-fn key() -> libc::pthread_key_t {
+fn tsd_key() -> libc::pthread_key_t {
     *KEY
 }
 
@@ -525,7 +530,7 @@ unsafe extern "C" fn release(value: *mut c_void) {
     }
     // Unregistered first: after this the port may be reused by a thread created
     // later, and an entry naming a freed stack is worse than no entry.
-    unregister(mach_port());
+    unregister(key());
     // SAFETY: the only thing ever stored under this key is a `Box::into_raw` of
     // a `ThreadState`, and libpthread calls this once, with the key cleared, so
     // the box is not reachable from anywhere else.
@@ -537,7 +542,7 @@ pub fn current() -> Option<&'static ThreadState> {
     // SAFETY: reading a thread-specific value, which is null or the pointer
     // `install` stored. Dereferencing is sound because `release` is the only
     // thing that frees it and it runs after the last code on this thread.
-    let p = unsafe { libc::pthread_getspecific(key()) } as *const ThreadState;
+    let p = unsafe { libc::pthread_getspecific(tsd_key()) } as *const ThreadState;
     (!p.is_null()).then(|| unsafe { &*p })
 }
 
@@ -549,19 +554,19 @@ pub fn install(state: ThreadState) -> &'static ThreadState {
     // SAFETY: reads this thread's slot; anything non-null there is a box this
     // module leaked, and the slot is about to be overwritten so nothing can
     // reach it again.
-    let old = unsafe { libc::pthread_getspecific(key()) };
+    let old = unsafe { libc::pthread_getspecific(tsd_key()) };
     if !old.is_null() {
         drop(unsafe { Box::from_raw(old as *mut ThreadState) });
     }
     let raw = Box::into_raw(Box::new(state));
     // SAFETY: `raw` is a live leaked allocation; `release` takes ownership of it
     // when the thread ends.
-    unsafe { libc::pthread_setspecific(key(), raw as *mut c_void) };
+    unsafe { libc::pthread_setspecific(tsd_key(), raw as *mut c_void) };
     // SAFETY: just stored, and nothing has run since that could free it.
     let state = unsafe { &*raw };
     // Registered under this thread's Mach port, which is how a collector on
     // another thread finds it.
-    register(mach_port(), Arc::clone(&state.published));
+    register(key(), Arc::clone(&state.published));
     clear_errno();
     state
 }
@@ -569,9 +574,7 @@ pub fn install(state: ThreadState) -> &'static ThreadState {
 /// Hand this thread the `errno` a thread that has just started really has.
 #[inline(always)]
 pub(crate) fn clear_errno() {
-    // SAFETY: `__error()` returns this thread's own `errno` slot, which is
-    // live for as long as the thread is.
-    unsafe { *libc::__error() = 0 };
+    darwin::errno::set(0);
 }
 
 /// The guest's `errno`, put back exactly as it was.
@@ -579,61 +582,16 @@ pub(crate) fn clear_errno() {
 /// **Not defensive tidying - a measured bug, twice.** `dlopen` of a framework this
 /// system does not have sets `ENOENT`, and [`crate::gui`]'s `sys` does exactly that on
 /// the main thread between [`clear_errno`] and the guest's `main`.
-pub(crate) struct Errno(i32);
+pub(crate) type Errno = darwin::errno::Held;
 
-impl Errno {
-    pub(crate) fn held() -> Errno {
-        // SAFETY: `__error()` returns this thread's own `errno` slot, live for
-        // as long as the thread is.
-        Errno(unsafe { *libc::__error() })
-    }
-}
-
-impl Drop for Errno {
-    fn drop(&mut self) {
-        // SAFETY: as above.
-        unsafe { *libc::__error() = self.0 };
-    }
-}
-
-/// The base of this host thread's thread-specific data array - the value a guest's
+/// The base of this thread's Darwin thread-specific data array - the value a guest's
 /// `%gs` segment base must hold.
 ///
-/// On arm64 Darwin the array's address is `TPIDRRO_EL0` with its low three bits masked
-/// off; the register's spare bits carry the CPU number, which is not part of the
-/// address.
-#[cfg(target_arch = "aarch64")]
+/// The host's own array where the host is a Mac, and a synthesised one where it is
+/// not. See [`darwin::tls`], which owns both answers because which one is right is a
+/// question about the platform rather than about this runtime.
 pub fn tsd_base() -> u64 {
-    let tpidrro: u64;
-    // SAFETY: `mrs` from `TPIDRRO_EL0` is unprivileged and readable from EL0 on
-    // every arm64 Apple Silicon core; it reads a register and touches no memory.
-    unsafe {
-        std::arch::asm!("mrs {}, tpidrro_el0", out(reg) tpidrro, options(nomem, nostack, preserves_flags))
-    };
-    tpidrro & !0b111
-}
-
-/// On x86-64 Darwin the array is what `%gs` already points at, and `tsd[0]` holds the
-/// base itself - which is how `pthread_self` is a single `mov` from `%gs:0`.
-///
-/// Read out of the segment rather than asked for by `pthread_self()`, because the two
-/// are the same value and this one cannot call into the guest's shims.
-#[cfg(target_arch = "x86_64")]
-pub fn tsd_base() -> u64 {
-    let base: u64;
-    // SAFETY: every Darwin thread has `%gs` pointing at its own TSD array, and
-    // slot zero of that array is live for as long as the thread is. One load,
-    // no writes.
-    unsafe {
-        std::arch::asm!("mov {}, gs:0", out(reg) base, options(nostack, preserves_flags))
-    };
-    base
-}
-
-/// A host with neither `TPIDRRO_EL0` nor a Darwin `%gs`, which this runtime has not got.
-#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-pub fn tsd_base() -> u64 {
-    0
+    darwin::tls::tsd_base()
 }
 
 /// Stack for a guest thread that asked for no particular one.
@@ -688,7 +646,7 @@ pub struct GuestStart {
 
 /// Start a host thread that runs `start` as a guest thread.
 pub fn spawn(start: GuestStart, attr: &libc::pthread_attr_t) -> Result<libc::pthread_t, i32> {
-    let mut thread: libc::pthread_t = 0;
+    let mut thread: libc::pthread_t = darwin::pthread::null_thread();
     let boxed = Box::into_raw(Box::new(start)) as *mut c_void;
     // SAFETY: `entry` is this module's own function; `boxed` is a live leaked
     // allocation which the new thread takes ownership of, and which is
@@ -741,22 +699,29 @@ mod tests {
     use super::*;
 
     /// The guard restores, rather than clearing.
+    ///
+    /// The mechanism is `darwin::errno`'s and tested there; what this asserts is that
+    /// [`Errno`] still names it, because a shim holding the wrong guard restores the
+    /// wrong thread's `errno`.
     #[test]
     fn a_held_errno_comes_back_exactly_as_it_was() {
-        // SAFETY: this thread's own slot, in a test that owns the thread.
-        unsafe { *libc::__error() = libc::EPIPE };
-        {
-            let _held = Errno::held();
-            unsafe { *libc::__error() = libc::ENOENT };
+        for value in [libc::EPIPE, 0] {
+            darwin::errno::set(value);
+            {
+                let _held = Errno::now();
+                darwin::errno::set(libc::ENOENT);
+            }
+            assert_eq!(darwin::errno::get(), value);
         }
-        assert_eq!(unsafe { *libc::__error() }, libc::EPIPE);
+    }
 
-        // Including zero, which is the value the guest sees for most of a run.
-        unsafe { *libc::__error() = 0 };
-        {
-            let _held = Errno::held();
-            unsafe { *libc::__error() = libc::ENOENT };
-        }
-        assert_eq!(unsafe { *libc::__error() }, 0);
+    /// Every guest thread must read its own thread-specific data, because slot zero
+    /// of that array is what the guest's `pthread_self` returns.
+    #[test]
+    fn each_thread_has_its_own_tsd_base() {
+        let mine = tsd_base();
+        assert_ne!(mine, 0);
+        let theirs = std::thread::spawn(tsd_base).join().expect("a thread has one");
+        assert_ne!(mine, theirs);
     }
 }

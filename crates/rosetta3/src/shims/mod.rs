@@ -1,25 +1,25 @@
 //! Hand-written implementations for imports that cannot be passed through.
+//!
+//! A shim exists because the call cannot be *forwarded*: it needs the guest's
+//! registers or the guest's memory, which a host function reached through an import
+//! slot has neither of. A call that can be forwarded but means something different on
+//! this host is a different problem, and belongs in [`darwin`].
+//!
+//! The families gated to macOS below are gated because what they bridge is macOS: a
+//! guest that imports `objc_msgSend` or `AudioUnitRender` on Linux is refused at the
+//! import, by name, rather than half an hour into its run.
 
 use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{AbiError, GuestMemory, Result};
 
-pub mod appkit;
 pub mod atexit;
-pub mod audiounit;
 pub mod block;
-pub mod cfuuid;
-pub mod component;
-pub mod coregraphics;
-pub mod coremedia;
 pub mod curl;
 pub(crate) mod host;
 pub mod intdiv;
 pub mod ioctl;
-pub mod iokit;
-pub mod machthread;
 pub mod math;
-pub mod nslog;
 pub mod openat;
 pub mod printf;
 pub mod process;
@@ -30,6 +30,83 @@ pub mod stackprobe;
 pub mod sysvsem;
 pub mod vmmap;
 pub mod zlib;
+
+#[cfg(target_os = "macos")]
+pub mod appkit;
+#[cfg(target_os = "macos")]
+pub mod audiounit;
+#[cfg(target_os = "macos")]
+pub mod cfuuid;
+#[cfg(target_os = "macos")]
+pub mod component;
+#[cfg(target_os = "macos")]
+pub mod coregraphics;
+#[cfg(target_os = "macos")]
+pub mod coremedia;
+#[cfg(target_os = "macos")]
+pub mod iokit;
+#[cfg(target_os = "macos")]
+pub mod machthread;
+#[cfg(target_os = "macos")]
+pub mod nslog;
+
+/// A shim that reads and writes the guest's registers and memory.
+pub type Shim = fn(&str, &mut RegisterContext, &mut dyn GuestMemory) -> Result<()>;
+
+/// A shim that may also call *into* the guest.
+pub type CallbackShim =
+    fn(&str, &mut RegisterContext, &mut dyn GuestMemory, &dyn crate::abi::Callbacks) -> Result<()>;
+
+/// The macOS-only families, which do not exist on a host with no Objective-C runtime,
+/// no CoreFoundation and no Mach.
+#[cfg(target_os = "macos")]
+fn platform_shim_for(name: &str) -> Option<Shim> {
+    coregraphics::shim_for(name)
+        .or_else(|| coremedia::shim_for(name))
+        .or_else(|| cfuuid::shim_for(name))
+        .or_else(|| appkit::shim_for(name))
+        .or_else(|| component::shim_for(name))
+        .or_else(|| machthread::shim_for(name))
+        .or_else(|| crate::objc::dispatch::shim_for(name))
+        // The overlay's OpenGL seam. Only present when the overlay is on;
+        // see [`crate::gui::hook::shim_for`].
+        .or_else(|| crate::gui::hook::shim_for(name))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_shim_for(_name: &str) -> Option<Shim> {
+    None
+}
+
+/// The macOS-only families that may call into the guest.
+#[cfg(target_os = "macos")]
+fn platform_callback_shim_for(name: &str) -> Option<CallbackShim> {
+    iokit::shim_for(name)
+        .or_else(|| coremedia::callback_shim_for(name))
+        .or_else(|| audiounit::shim_for(name))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_callback_shim_for(_name: &str) -> Option<CallbackShim> {
+    None
+}
+
+/// The two variadics whose format string is an `NSString`, and so are Foundation's.
+#[cfg(target_os = "macos")]
+fn foundation_variadic(name: &str) -> Option<Shim> {
+    match name {
+        "NSLog" => Some(nslog::nslog),
+        // The other `NSString`-format variadic, and the one a Cocoa game reports a
+        // fatal error through. See [`nslog::run_alert_panel`].
+        "NSRunAlertPanel" => Some(nslog::run_alert_panel),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn foundation_variadic(_name: &str) -> Option<Shim> {
+    None
+}
 
 /// Run the shim for `symbol`, if there is one.
 ///
@@ -73,12 +150,6 @@ pub fn dispatch(
         "vsscanf" => sscanf::vsscanf,
         // libsystem_malloc's own printer, which the interposing mimalloc uses.
         "malloc_printf" => printf::malloc_printf,
-        // Variadic in its declaration and one argument wide in fact; see
-        // [`ioctl`] for why that makes it forwardable when `printf` is not.
-        "NSLog" => nslog::nslog,
-        // The other `NSString`-format variadic, and the one a Cocoa game
-        // reports a fatal error through. See [`nslog::run_alert_panel`].
-        "NSRunAlertPanel" => nslog::run_alert_panel,
         "ioctl" => ioctl::ioctl,
         // Variadic in its declaration and one argument wide in fact, decided by
         // a command number rather than a format string; see [`openat`].
@@ -86,39 +157,29 @@ pub fn dispatch(
         // Not variadic, and here for the same underlying reason: forwarding it
         // would operate on the *host's* registers and the host's stack.
         _ => {
-            if let Some(f) = math::shim_for(name)
+            if let Some(f) = foundation_variadic(name)
+                .or_else(|| math::shim_for(name))
                 .or_else(|| intdiv::shim_for(name))
-                .or_else(|| coregraphics::shim_for(name))
-                .or_else(|| coremedia::shim_for(name))
-                .or_else(|| cfuuid::shim_for(name))
-                .or_else(|| appkit::shim_for(name))
-                .or_else(|| component::shim_for(name))
                 .or_else(|| process::shim_for(name))
-                .or_else(|| machthread::shim_for(name))
                 .or_else(|| stackprobe::shim_for(name))
                 .or_else(|| sysvsem::shim_for(name))
                 .or_else(|| vmmap::shim_for(name))
                 .or_else(|| crate::jmpbuf::shim_for(name))
                 // .or_else(|| crate::unwind::shim_for(name))
-                .or_else(|| crate::objc::dispatch::shim_for(name))
                 .or_else(|| crate::dyld::shim_for(name))
-                // The overlay's OpenGL seam. Only present when the overlay is on;
-                // see [`crate::gui::hook::shim_for`].
-                .or_else(|| crate::gui::hook::shim_for(name))
+                .or_else(|| platform_shim_for(name))
             {
                 return Some(f(name, ctx, mem));
             }
-            // And the three families that need one thing more than the rest.
+            // And the families that need one thing more than the rest.
             return crate::signal::shim_for(name)
                 .or_else(|| pthread::shim_for(name))
-                .or_else(|| iokit::shim_for(name))
                 .or_else(|| block::shim_for(name))
-                .or_else(|| coremedia::callback_shim_for(name))
                 .or_else(|| crate::dyld::shim_for_callbacks(name))
                 .or_else(|| atexit::shim_for(name))
                 .or_else(|| zlib::shim_for(name))
-                .or_else(|| audiounit::shim_for(name))
                 .or_else(|| curl::shim_for(name))
+                .or_else(|| platform_callback_shim_for(name))
                 .map(|f| f(name, ctx, mem, callbacks));
         }
     };
@@ -130,21 +191,12 @@ pub fn is_shimmed(symbol: &str) -> bool {
     let name = symbol.strip_prefix('_').unwrap_or(symbol);
     if math::shim_for(name).is_some()
         || intdiv::shim_for(name).is_some()
-        || coregraphics::shim_for(name).is_some()
-        || coremedia::shim_for(name).is_some()
-        || coremedia::callback_shim_for(name).is_some()
-        || cfuuid::shim_for(name).is_some()
-        || appkit::shim_for(name).is_some()
-        || component::shim_for(name).is_some()
-        || iokit::shim_for(name).is_some()
         || process::shim_for(name).is_some()
-        || machthread::shim_for(name).is_some()
         || stackprobe::shim_for(name).is_some()
         || sysvsem::shim_for(name).is_some()
         || vmmap::shim_for(name).is_some()
         || crate::jmpbuf::shim_for(name).is_some()
         || crate::unwind::shim_for(name).is_some()
-        || crate::objc::dispatch::shim_for(name).is_some()
         || crate::dyld::shim_for(name).is_some()
         || crate::signal::shim_for(name).is_some()
         || pthread::shim_for(name).is_some()
@@ -152,17 +204,16 @@ pub fn is_shimmed(symbol: &str) -> bool {
         || crate::dyld::shim_for_callbacks(name).is_some()
         || atexit::shim_for(name).is_some()
         || zlib::shim_for(name).is_some()
-        || audiounit::shim_for(name).is_some()
         || curl::shim_for(name).is_some()
-        || crate::gui::hook::shim_for(name).is_some()
+        || foundation_variadic(name).is_some()
+        || platform_shim_for(name).is_some()
+        || platform_callback_shim_for(name).is_some()
     {
         return true;
     }
     matches!(
         name,
-        "NSLog"
-            | "NSRunAlertPanel"
-            | "printf"
+        "printf"
             | "fprintf"
             | "sprintf"
             | "snprintf"

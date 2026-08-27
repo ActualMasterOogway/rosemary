@@ -26,23 +26,18 @@ pub mod abi;
 pub mod atomic128;
 pub mod audit;
 pub mod bridge;
-pub mod bundle;
 pub mod cache;
-pub mod compat;
 pub mod cxxlib;
 pub mod dispatch;
 pub mod dyld;
 pub mod exec;
 pub mod fault;
-pub mod gui;
 pub mod host;
 pub mod interp;
 pub mod interpose;
 pub mod jit;
 pub mod jmpbuf;
 pub mod lldb;
-pub mod objc;
-pub mod profile;
 pub mod program;
 pub mod region;
 pub mod retstub;
@@ -58,6 +53,25 @@ pub mod trace;
 pub mod trampoline;
 pub mod unwind;
 pub mod vm;
+
+/// Subsystems that exist because macOS does.
+///
+/// [`objc`] is the Objective-C runtime, [`gui`] the debug overlay drawn through Metal
+/// and AppKit, [`profile`] a sampler built on Mach thread suspension, [`bundle`] the
+/// `.app` layout `NSBundle` expects, and [`compat`] a `NSUserDefaults` registration.
+/// None of them has a meaning on a host with none of those, and none is stubbed: a
+/// guest that imports into one is refused by name at the import. See
+/// [`darwin::divergent`].
+#[cfg(target_os = "macos")]
+pub mod bundle;
+#[cfg(target_os = "macos")]
+pub mod compat;
+#[cfg(target_os = "macos")]
+pub mod gui;
+#[cfg(target_os = "macos")]
+pub mod objc;
+#[cfg(target_os = "macos")]
+pub mod profile;
 
 pub use abi::{AbiError, Classification, call_import};
 pub use audit::{CallTargetAudit, UnresolvedCall, audit_call_targets};

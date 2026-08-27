@@ -34,7 +34,7 @@ pub enum ImportPolicy {
 impl ImportPolicy {
     /// The signature to inline this site's call with, and the address to inline a call
     /// to.
-    fn promotion_for(self, site: &ImportSite) -> Option<crate::objc::fast::Promotion> {
+    fn promotion_for(self, site: &ImportSite) -> Option<crate::abi::Promotion> {
         if self == ImportPolicy::AlwaysSlow || site.resolved == 0 {
             return None;
         }
@@ -45,7 +45,7 @@ impl ImportPolicy {
         // A shimmed symbol must never be promoted: the whole reason it has a
         // shim is that calling the host function directly would be wrong.
         if crate::shims::is_shimmed(&site.symbol) {
-            let promotion = crate::objc::fast::promotion(&site.symbol, site.resolved)?;
+            let promotion = crate::abi::promotion(&site.symbol, site.resolved)?;
             // Classified as well as described, so a promoted entry passes the
             // same marshallability test every other fast import passes rather
             // than being taken on the table's word.
@@ -56,7 +56,7 @@ impl ImportPolicy {
             return None;
         }
         match crate::abi::table::lookup(site.tag, &site.symbol) {
-            Lookup::Known(abi) => Some(crate::objc::fast::Promotion {
+            Lookup::Known(abi) => Some(crate::abi::Promotion {
                 abi,
                 address: site.resolved,
             }),
@@ -236,8 +236,14 @@ pub(crate) struct HostProviders {
     /// `___stack_chk_guard` and `__tlv_bootstrap`: symbols the host declines to export
     /// and every guest with an array on its stack dereferences in its own prologue.
     runtime: machish::resolve::SyntheticDylib,
+    /// The macOS API surface, with a host implementation of each entry. Ahead of
+    /// [`HostProviders::native`], so a Darwin-specific answer always wins over a
+    /// coincidentally-named host symbol - `___stdoutp` is the host's `stdout` on
+    /// Linux, and `hw.machine` is the guest's architecture on either host.
+    darwin: machish::resolve::SyntheticDylib,
     /// The Objective-C runtime. The native provider denies the `_objc_`, `_class_`,
     /// `_sel_` and `_protocol_` families precisely so a shim can claim them.
+    #[cfg(target_os = "macos")]
     objc: machish::resolve::SyntheticDylib,
     /// The `dl` family, which the host exports and cannot usefully answer for an
     /// x86-64 file. See [`crate::dyld`].
@@ -248,12 +254,18 @@ pub(crate) struct HostProviders {
 
 impl HostProviders {
     pub(crate) fn new() -> Self {
+        let mut native = NativeDylibProvider::system();
+        // Symbols whose Darwin and host ABIs differ must not become an address by
+        // accident. Empty on macOS; see `darwin::divergent`.
+        darwin::divergent::deny_in(&mut native);
         HostProviders {
             runtime: crate::shims::runtime::provider(),
+            darwin: darwin::provider(),
+            #[cfg(target_os = "macos")]
             objc: crate::objc::dispatch::provider(),
             dyld: crate::dyld::provider(),
             eager: eager_binding_shims(),
-            native: NativeDylibProvider::system(),
+            native,
         }
     }
 
@@ -264,6 +276,8 @@ impl HostProviders {
     ) -> Vec<&'a dyn SymbolProvider> {
         let mut providers: Vec<&dyn SymbolProvider> = extra.to_vec();
         providers.push(&self.runtime);
+        providers.push(&self.darwin);
+        #[cfg(target_os = "macos")]
         providers.push(&self.objc);
         providers.push(&self.dyld);
         providers.push(&self.eager);
@@ -373,6 +387,12 @@ impl<M: Regions> Program<M> {
         let mut source = crate::cxxlib::source();
         let hosts = HostProviders::new();
         let providers = hosts.chain(extra);
+
+        // What the guest believes it is running on, which is a property of the image
+        // and not of this host: `hw.machine` under Rosetta 2 is `x86_64` on an arm64
+        // Mac, and a guest reading `arm64` there goes looking for code paths it does
+        // not have. See [`darwin::sysctl`].
+        darwin::sysctl::set_guest_arch(darwin::sysctl::GuestArch::X86_64);
 
         let mut report =
             Loader::new(X86_64).link_with(bytes, path, &mut memory, &mut source, &providers)?;

@@ -1,0 +1,1281 @@
+//! The pthread interface, as the guest's Darwin declares it.
+//!
+//! Threading is the part of the C library where a wrong constant does not fail, it
+//! *deadlocks* - so this module reproduces Darwin's whole surface rather than passing
+//! any of it through and hoping. Four separate things differ, and each is handled
+//! somewhere below:
+//!
+//! * **Constants.** `PTHREAD_MUTEX_RECURSIVE` is 2 on Darwin and 1 on Linux, and
+//!   `PTHREAD_MUTEX_ERRORCHECK` is 1 and 2 - so the two are swapped, and a guest
+//!   asking for a recursive lock gets one that returns `EDEADLK` instead of recursing.
+//!   See [`consts`].
+//! * **Object layout.** A `pthread_mutex_t` is sixty-four bytes carrying a signature
+//!   on Darwin and forty bytes of zeroes under musl, and a `PTHREAD_MUTEX_INITIALIZER`
+//!   is a *static* initializer no call of ours ever sees written. See [`object`].
+//! * **Object lifetime.** The guest allocates the object; the host one has to live as
+//!   long and be found again from the guest's address. See [`sync`].
+//! * **Signatures.** `pthread_setname_np` takes one argument on Darwin and two on
+//!   Linux; `pthread_once_t` is sixteen bytes and four.
+//!
+//! On macOS none of this is bound to a guest import - the host's libpthread is the
+//! guest's - but all of it is *compiled and tested* there, against the very
+//! implementation a guest would otherwise have called.
+
+use machish::resolve::SyntheticDylib;
+
+pub mod attr;
+pub mod consts;
+pub mod object;
+pub mod raw;
+pub mod sync;
+
+pub use attr::{Attributes, HostAttr};
+pub use consts::*;
+pub use sync::{MutexAttr, once};
+
+use object::{Kind, Record};
+
+/// An opaque per-thread key, unique for as long as the thread lives.
+///
+/// Used only to find a thread's state from another thread. Darwin's answer is its Mach
+/// port, which is what `pthread_mach_thread_np` returns and what a Mach exception
+/// message carries; elsewhere it is the kernel thread id, which has the same two
+/// properties that matter here - unique while the thread runs, and readable from the
+/// thread itself without a lock.
+///
+/// A `u32` because both underlying values are one - a `mach_port_t` and a `pid_t` -
+/// and because the registry that keys on it compares it atomically.
+///
+/// Not comparable across hosts and not meaningful to a guest. A guest asking for its
+/// own Mach port is a different question, answered by `rosetta3::shims::machthread`.
+pub fn id() -> u32 {
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: takes this thread's own `pthread_t`, which is live by definition.
+        unsafe { libc::pthread_mach_thread_np(libc::pthread_self()) }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `gettid` takes no argument and cannot fail.
+        unsafe { libc::syscall(libc::SYS_gettid) as u32 }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        // SAFETY: `pthread_self` is infallible and takes no argument.
+        unsafe { libc::pthread_self() as u32 }
+    }
+}
+
+/// A `pthread_t` that names no thread.
+///
+/// `pthread_t` is an integer on Darwin and glibc and a pointer under musl, so the
+/// out-parameter `pthread_create` fills cannot be initialised with a literal `0`.
+pub fn null_thread() -> libc::pthread_t {
+    // SAFETY: `pthread_t` is a scalar - an integer or a pointer - on every platform
+    // this builds for, and all-zero is a valid bit pattern for either. The value is
+    // only ever written over by `pthread_create` before being read.
+    unsafe { core::mem::zeroed() }
+}
+
+/// A guest `pthread_t` as this host's.
+///
+/// Both are eight opaque bytes, and every value a guest can hold was produced by a
+/// `pthread_create` this runtime serviced - so the handle is the host's already and
+/// this is a cast rather than a lookup.
+fn thread_of(guest: u64) -> libc::pthread_t {
+    // SAFETY: `pthread_t` is pointer-sized on both platforms, and `guest` is a value
+    // the host's own `pthread_create` produced.
+    unsafe { core::mem::transmute_copy(&guest) }
+}
+
+// ---------------------------------------------------------------------------
+// Attribute objects that carry one setting or two
+// ---------------------------------------------------------------------------
+
+/// Build the `init`/`destroy`/`setter`/`getter` quartet for an attribute object whose
+/// whole state is one packed word.
+macro_rules! simple_attr {
+    ($kind:expr, $init:ident, $destroy:ident, $default:expr) => {
+        /// # Safety
+        ///
+        /// Called only through an import slot this crate defines; the argument is the
+        /// guest's own attribute object.
+        pub unsafe extern "C" fn $init(at: u64) -> i32 {
+            if at == 0 {
+                return err::EINVAL;
+            }
+            // SAFETY: the caller's guarantee.
+            let r = unsafe { Record::at(at, $kind) };
+            r.set_payload($default);
+            0
+        }
+
+        /// # Safety
+        ///
+        /// As above. Frees nothing: an attribute object owns no allocation.
+        pub unsafe extern "C" fn $destroy(at: u64) -> i32 {
+            if at == 0 {
+                return err::EINVAL;
+            }
+            // SAFETY: the caller's guarantee.
+            let r = unsafe { Record::at(at, $kind) };
+            match r.take() {
+                Some(_) => 0,
+                None => err::EINVAL,
+            }
+        }
+    };
+}
+
+simple_attr!(Kind::MutexAttr, mutexattr_init, mutexattr_destroy, 0);
+simple_attr!(
+    Kind::CondAttr,
+    condattr_init,
+    condattr_destroy,
+    PTHREAD_PROCESS_PRIVATE as u64
+);
+simple_attr!(
+    Kind::RwLockAttr,
+    rwlockattr_init,
+    rwlockattr_destroy,
+    PTHREAD_PROCESS_PRIVATE as u64
+);
+
+/// The packed word behind a `pthread_mutexattr_t`, read and written field by field.
+///
+/// # Safety
+///
+/// `at` is a guest `pthread_mutexattr_t *`.
+unsafe fn mutexattr_word(at: u64) -> Option<Record> {
+    if at == 0 {
+        return None;
+    }
+    // SAFETY: the caller's guarantee.
+    let r = unsafe { Record::at(at, Kind::MutexAttr) };
+    r.is_ours().then_some(r)
+}
+
+/// `int pthread_mutexattr_settype(pthread_mutexattr_t *, int)`.
+///
+/// The one setter whose value the guest and the host disagree about, and the reason
+/// this file is not a passthrough.
+///
+/// # Safety
+///
+/// As [`mutexattr_init`].
+pub unsafe extern "C" fn mutexattr_settype(at: u64, kind: u64) -> i32 {
+    // SAFETY: the caller's guarantee.
+    let Some(r) = (unsafe { mutexattr_word(at) }) else {
+        return err::EINVAL;
+    };
+    let kind = kind as i32;
+    if mutex_type_to_host(kind).is_none() {
+        return err::EINVAL;
+    }
+    let mut settings = MutexAttr::unpacked_public(r.cell().load(std::sync::atomic::Ordering::Relaxed));
+    settings.kind = kind;
+    r.cell()
+        .store(settings.packed_public(), std::sync::atomic::Ordering::Relaxed);
+    0
+}
+
+/// # Safety
+///
+/// As [`mutexattr_init`], with `out` a writable `int *`.
+pub unsafe extern "C" fn mutexattr_gettype(at: u64, out: u64) -> i32 {
+    // SAFETY: the caller's guarantee.
+    let Some(r) = (unsafe { mutexattr_word(at) }) else {
+        return err::EINVAL;
+    };
+    if out == 0 {
+        return err::EINVAL;
+    }
+    let settings = MutexAttr::unpacked_public(r.cell().load(std::sync::atomic::Ordering::Relaxed));
+    // SAFETY: the caller states `out` is a writable `int *`.
+    unsafe { *(out as usize as *mut i32) = settings.kind };
+    0
+}
+
+/// The `pshared` setter, shared by all three attribute kinds.
+macro_rules! pshared {
+    ($setter:ident, $getter:ident, $kind:expr, $field:ident) => {
+        /// # Safety
+        ///
+        /// As [`mutexattr_init`].
+        pub unsafe extern "C" fn $setter(at: u64, shared: u64) -> i32 {
+            let shared = shared as i32;
+            if shared != PTHREAD_PROCESS_SHARED && shared != PTHREAD_PROCESS_PRIVATE {
+                return err::EINVAL;
+            }
+            if at == 0 {
+                return err::EINVAL;
+            }
+            // SAFETY: the caller's guarantee.
+            let r = unsafe { Record::at(at, $kind) };
+            if !r.is_ours() {
+                return err::EINVAL;
+            }
+            $field(&r, shared);
+            0
+        }
+
+        /// # Safety
+        ///
+        /// As [`mutexattr_init`], with `out` a writable `int *`.
+        pub unsafe extern "C" fn $getter(at: u64, out: u64) -> i32 {
+            if at == 0 || out == 0 {
+                return err::EINVAL;
+            }
+            // SAFETY: the caller's guarantee.
+            let r = unsafe { Record::at(at, $kind) };
+            if !r.is_ours() {
+                return err::EINVAL;
+            }
+            // SAFETY: the caller states `out` is a writable `int *`.
+            unsafe { *(out as usize as *mut i32) = read_pshared(&r, $kind) };
+            0
+        }
+    };
+}
+
+fn store_mutex_pshared(r: &Record, shared: i32) {
+    let mut settings = MutexAttr::unpacked_public(r.cell().load(std::sync::atomic::Ordering::Relaxed));
+    settings.pshared = shared;
+    r.cell()
+        .store(settings.packed_public(), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn store_simple_pshared(r: &Record, shared: i32) {
+    r.cell()
+        .store(shared as u64, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn read_pshared(r: &Record, kind: Kind) -> i32 {
+    let word = r.cell().load(std::sync::atomic::Ordering::Relaxed);
+    match kind {
+        Kind::MutexAttr => MutexAttr::unpacked_public(word).pshared,
+        _ => word as i32,
+    }
+}
+
+pshared!(
+    mutexattr_setpshared,
+    mutexattr_getpshared,
+    Kind::MutexAttr,
+    store_mutex_pshared
+);
+pshared!(
+    condattr_setpshared,
+    condattr_getpshared,
+    Kind::CondAttr,
+    store_simple_pshared
+);
+pshared!(
+    rwlockattr_setpshared,
+    rwlockattr_getpshared,
+    Kind::RwLockAttr,
+    store_simple_pshared
+);
+
+// ---------------------------------------------------------------------------
+// Thread lifecycle
+// ---------------------------------------------------------------------------
+
+/// `int pthread_kill(pthread_t, int)`.
+///
+/// The signal number is Darwin's and has to be translated: `SIGUSR1` is 30 there and
+/// 10 here, so an untranslated call sends `SIGPWR` to a thread expecting a user
+/// signal. See [`crate::signal::signal_to_host`].
+///
+/// # Safety
+///
+/// Called only through an import slot this crate defines.
+pub unsafe extern "C" fn kill(thread: u64, signal: u64) -> i32 {
+    // Signal zero is the "does this thread exist" probe, and passes through as itself.
+    let host = match signal {
+        0 => 0,
+        s => match crate::signal::signal_to_host(s as i32) {
+            Some(host) => host,
+            None => return err::EINVAL,
+        },
+    };
+    // SAFETY: `thread` is a handle the host's own `pthread_create` produced.
+    unsafe { libc::pthread_kill(thread_of(thread), host) }
+}
+
+/// `int pthread_setname_np(const char *)` - **one** argument on Darwin, where Linux
+/// takes the thread as well.
+///
+/// A guest calling the host's directly would pass its name where the thread belongs.
+///
+/// # Safety
+///
+/// `name` is the guest's own NUL-terminated string.
+pub unsafe extern "C" fn setname_np(name: u64) -> i32 {
+    if name == 0 {
+        return err::EINVAL;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: the caller's guarantee; Darwin names the calling thread.
+        unsafe { libc::pthread_setname_np(name as usize as *const libc::c_char) }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Linux caps a thread name at sixteen bytes including the NUL and fails the
+        // whole call with `ERANGE` for a longer one, where Darwin truncates. Truncated
+        // here so a guest with a descriptive name gets a name rather than an error.
+        // SAFETY: the caller states `name` is NUL-terminated.
+        let full = unsafe { core::ffi::CStr::from_ptr(name as usize as *const libc::c_char) };
+        let mut buf = [0u8; 16];
+        let bytes = full.to_bytes();
+        let n = bytes.len().min(buf.len() - 1);
+        buf[..n].copy_from_slice(&bytes[..n]);
+        // SAFETY: `buf` is NUL-terminated by construction and outlives the call.
+        unsafe {
+            libc::pthread_setname_np(libc::pthread_self(), buf.as_ptr() as *const libc::c_char)
+        }
+    }
+}
+
+/// `int pthread_main_np(void)`, which is Darwin's own.
+///
+/// Non-zero on the thread that ran `main`. Answered by comparing thread ids rather
+/// than by asking libpthread, which has no such call here.
+pub unsafe extern "C" fn main_np() -> i32 {
+    use std::sync::OnceLock;
+    /// The id of whichever thread asked first, which during start-up is the main one.
+    static MAIN: OnceLock<u32> = OnceLock::new();
+    i32::from(*MAIN.get_or_init(id) == id())
+}
+
+/// `int pthread_threadid_np(pthread_t, uint64_t *)`, Darwin's own.
+///
+/// A null thread means the calling one. The id is this runtime's [`id`], which has the
+/// properties a caller wants - unique while the thread runs - without being Darwin's
+/// actual 64-bit thread id, which nothing here can produce.
+///
+/// # Safety
+///
+/// `out` is null or a writable `uint64_t *`.
+pub unsafe extern "C" fn threadid_np(thread: u64, out: u64) -> i32 {
+    if out == 0 {
+        return err::EINVAL;
+    }
+    if thread != 0 {
+        // Another thread's id is not readable from here without a registry, and the
+        // callers that matter ask about themselves.
+        // SAFETY: `thread` is a live handle; `pthread_equal` only compares.
+        if unsafe { libc::pthread_equal(thread_of(thread), libc::pthread_self()) } == 0 {
+            return err::ENOTSUP;
+        }
+    }
+    // SAFETY: the caller states `out` is a writable `uint64_t *`.
+    unsafe { *(out as usize as *mut u64) = u64::from(id()) };
+    0
+}
+
+/// `int pthread_yield_np(void)`, Darwin's spelling of `sched_yield`.
+pub unsafe extern "C" fn yield_np() -> i32 {
+    // SAFETY: takes no argument and touches no memory.
+    unsafe { libc::sched_yield() }
+}
+
+/// `int pthread_setcancelstate(int, int *)`, whose two states are inverted.
+///
+/// Darwin's `PTHREAD_CANCEL_ENABLE` is 1 and Linux's is 0, so an untranslated call
+/// disables cancellation where the guest asked to enable it.
+///
+/// # Safety
+///
+/// `old` is null or a writable `int *`.
+pub unsafe extern "C" fn setcancelstate(state: u64, old: u64) -> i32 {
+    let host = match state as i32 {
+        PTHREAD_CANCEL_ENABLE => host_cancel_enable(),
+        PTHREAD_CANCEL_DISABLE => host_cancel_disable(),
+        _ => return err::EINVAL,
+    };
+    let mut previous = 0;
+    // SAFETY: a live local.
+    let rc = unsafe { raw::pthread_setcancelstate(host, &mut previous) };
+    if rc == 0 && old != 0 {
+        let darwin = match previous == host_cancel_enable() {
+            true => PTHREAD_CANCEL_ENABLE,
+            false => PTHREAD_CANCEL_DISABLE,
+        };
+        // SAFETY: the caller states `old` is a writable `int *`.
+        unsafe { *(old as usize as *mut i32) = darwin };
+    }
+    rc
+}
+
+/// `int pthread_setcanceltype(int, int *)`, inverted for the same reason.
+///
+/// # Safety
+///
+/// As [`setcancelstate`].
+pub unsafe extern "C" fn setcanceltype(kind: u64, old: u64) -> i32 {
+    let host = match kind as i32 {
+        PTHREAD_CANCEL_DEFERRED => host_cancel_deferred(),
+        PTHREAD_CANCEL_ASYNCHRONOUS => host_cancel_asynchronous(),
+        _ => return err::EINVAL,
+    };
+    let mut previous = 0;
+    // SAFETY: a live local.
+    let rc = unsafe { raw::pthread_setcanceltype(host, &mut previous) };
+    if rc == 0 && old != 0 {
+        let darwin = match previous == host_cancel_deferred() {
+            true => PTHREAD_CANCEL_DEFERRED,
+            false => PTHREAD_CANCEL_ASYNCHRONOUS,
+        };
+        // SAFETY: the caller states `old` is a writable `int *`.
+        unsafe { *(old as usize as *mut i32) = darwin };
+    }
+    rc
+}
+
+fn host_cancel_enable() -> libc::c_int {
+    raw::cancel::ENABLE
+}
+fn host_cancel_disable() -> libc::c_int {
+    raw::cancel::DISABLE
+}
+fn host_cancel_deferred() -> libc::c_int {
+    raw::cancel::DEFERRED
+}
+fn host_cancel_asynchronous() -> libc::c_int {
+    raw::cancel::ASYNCHRONOUS
+}
+
+// ---------------------------------------------------------------------------
+// Thread-specific data
+// ---------------------------------------------------------------------------
+
+/// `pthread_key_t` is an `unsigned long` on Darwin and an `unsigned` under musl, so a
+/// key crosses as eight bytes and is used as four.
+///
+/// # Safety
+///
+/// Called only through an import slot this crate defines.
+pub unsafe extern "C" fn key_delete(key: u64) -> i32 {
+    // SAFETY: `key` is one this process's `pthread_key_create` produced.
+    unsafe { libc::pthread_key_delete(key as libc::pthread_key_t) }
+}
+
+/// # Safety
+///
+/// As [`key_delete`].
+pub unsafe extern "C" fn getspecific(key: u64) -> u64 {
+    // SAFETY: as above; a key nobody created reads null, which is what Darwin does.
+    unsafe { libc::pthread_getspecific(key as libc::pthread_key_t) as usize as u64 }
+}
+
+/// # Safety
+///
+/// As [`key_delete`]; `value` is the guest's own pointer, which only guest code
+/// dereferences.
+pub unsafe extern "C" fn setspecific(key: u64, value: u64) -> i32 {
+    // SAFETY: as above.
+    unsafe {
+        libc::pthread_setspecific(key as libc::pthread_key_t, value as usize as *const libc::c_void)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What this module answers for
+// ---------------------------------------------------------------------------
+
+/// The address of the implementation for `name`, or `None`.
+///
+/// Empty on macOS, where the host's libpthread *is* the guest's and passing a call
+/// through is both correct and free. Everything above is still compiled and tested
+/// there; what changes is only whether a guest import is bound to it.
+pub fn symbol(name: &str) -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        entries().iter().find(|(n, _)| *n == name).map(|(_, f)| *f)
+    }
+}
+
+/// Every entry, as `(C name, address)`.
+#[cfg(not(target_os = "macos"))]
+fn entries() -> &'static [(&'static str, u64)] {
+    use std::sync::OnceLock;
+    static TABLE: OnceLock<Vec<(&'static str, u64)>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        macro_rules! table {
+            ($($name:literal => $f:expr),* $(,)?) => {
+                vec![$(($name, $f as *const () as usize as u64)),*]
+            };
+        }
+        table! {
+            // Attributes.
+            "pthread_attr_init" => attr::imp::attr_init,
+            "pthread_attr_destroy" => attr::imp::attr_destroy,
+            "pthread_attr_setdetachstate" => attr::imp::attr_setdetachstate,
+            "pthread_attr_getdetachstate" => attr::imp::attr_getdetachstate,
+            "pthread_attr_setstacksize" => attr::imp::attr_setstacksize,
+            "pthread_attr_getstacksize" => attr::imp::attr_getstacksize,
+            "pthread_attr_setstackaddr" => attr::imp::attr_setstackaddr,
+            "pthread_attr_getstackaddr" => attr::imp::attr_getstackaddr,
+            "pthread_attr_setstack" => attr::imp::attr_setstack,
+            "pthread_attr_getstack" => attr::imp::attr_getstack,
+            "pthread_attr_setguardsize" => attr::imp::attr_setguardsize,
+            "pthread_attr_getguardsize" => attr::imp::attr_getguardsize,
+            "pthread_attr_setscope" => attr::imp::attr_setscope,
+            "pthread_attr_getscope" => attr::imp::attr_getscope,
+            "pthread_attr_setinheritsched" => attr::imp::attr_setinheritsched,
+            "pthread_attr_getinheritsched" => attr::imp::attr_getinheritsched,
+            "pthread_attr_setschedpolicy" => attr::imp::attr_setschedpolicy,
+            "pthread_attr_getschedpolicy" => attr::imp::attr_getschedpolicy,
+            "pthread_attr_setschedparam" => attr::imp::attr_setschedparam,
+            "pthread_attr_getschedparam" => attr::imp::attr_getschedparam,
+
+            // Mutexes.
+            "pthread_mutex_init" => sync::mutex_init,
+            "pthread_mutex_destroy" => sync::mutex_destroy,
+            "pthread_mutex_lock" => sync::mutex_lock,
+            "pthread_mutex_trylock" => sync::mutex_trylock,
+            "pthread_mutex_unlock" => sync::mutex_unlock,
+            "pthread_mutexattr_init" => mutexattr_init,
+            "pthread_mutexattr_destroy" => mutexattr_destroy,
+            "pthread_mutexattr_settype" => mutexattr_settype,
+            "pthread_mutexattr_gettype" => mutexattr_gettype,
+            "pthread_mutexattr_setpshared" => mutexattr_setpshared,
+            "pthread_mutexattr_getpshared" => mutexattr_getpshared,
+
+            // Condition variables.
+            "pthread_cond_init" => sync::cond_init,
+            "pthread_cond_destroy" => sync::cond_destroy,
+            "pthread_cond_wait" => sync::cond_wait,
+            "pthread_cond_timedwait" => sync::cond_timedwait,
+            "pthread_cond_timedwait_relative_np" => sync::cond_timedwait_relative,
+            "pthread_cond_signal" => sync::cond_signal,
+            "pthread_cond_broadcast" => sync::cond_broadcast,
+            "pthread_condattr_init" => condattr_init,
+            "pthread_condattr_destroy" => condattr_destroy,
+            "pthread_condattr_setpshared" => condattr_setpshared,
+            "pthread_condattr_getpshared" => condattr_getpshared,
+
+            // Read-write locks.
+            "pthread_rwlock_init" => sync::rwlock_init,
+            "pthread_rwlock_destroy" => sync::rwlock_destroy,
+            "pthread_rwlock_rdlock" => sync::rwlock_rdlock,
+            "pthread_rwlock_tryrdlock" => sync::rwlock_tryrdlock,
+            "pthread_rwlock_wrlock" => sync::rwlock_wrlock,
+            "pthread_rwlock_trywrlock" => sync::rwlock_trywrlock,
+            "pthread_rwlock_unlock" => sync::rwlock_unlock,
+            "pthread_rwlockattr_init" => rwlockattr_init,
+            "pthread_rwlockattr_destroy" => rwlockattr_destroy,
+            "pthread_rwlockattr_setpshared" => rwlockattr_setpshared,
+            "pthread_rwlockattr_getpshared" => rwlockattr_getpshared,
+
+            // Thread-specific data. `pthread_key_create` takes a destructor that is
+            // *guest code*, so it stays a shim in `rosetta3::shims::pthread`.
+            "pthread_key_delete" => key_delete,
+            "pthread_getspecific" => getspecific,
+            "pthread_setspecific" => setspecific,
+
+            // Lifecycle and the `_np` family.
+            "pthread_kill" => kill,
+            "pthread_setname_np" => setname_np,
+            "pthread_main_np" => main_np,
+            "pthread_threadid_np" => threadid_np,
+            "pthread_yield_np" => yield_np,
+            "pthread_setcancelstate" => setcancelstate,
+            "pthread_setcanceltype" => setcanceltype,
+        }
+    })
+}
+
+/// Names this module deliberately leaves to the host, and why.
+///
+/// Every one is a call whose arguments and result are plain scalars the two platforms
+/// agree about, and whose object - if it has one - never crosses the seam: a
+/// `pthread_t` is eight opaque bytes on both, and every value a guest holds came from
+/// a `pthread_create` this runtime serviced.
+pub const PASSED_THROUGH: &[&str] = &[
+    "pthread_self",
+    "pthread_equal",
+    "pthread_detach",
+    "pthread_join",
+    "pthread_exit",
+    // `pthread_cancel` is deliberately absent. Cancellation unwinds a stack the host's
+    // unwinder never saw, so `rosetta3::abi::table` refuses it outright - and this
+    // list vouching for it would quietly undo that.
+    "pthread_testcancel",
+    "pthread_getconcurrency",
+    "pthread_setconcurrency",
+    "sched_yield",
+];
+
+/// Names this crate leaves to the **runtime above it**, which services them with a
+/// thunk for the guest function pointer they take.
+///
+/// Reaching guest code needs emulation vocabulary this crate does not have, so
+/// `rosetta3::shims::pthread` owns the call and this crate owns whatever Darwin-shaped
+/// object it operates on - `pthread_once`'s sixteen-byte control word, say. Listed
+/// here so the blanket denial of the `pthread_` family in [`crate::divergent`] does
+/// not take their import slots with it: the slot still has to resolve to *something*
+/// for the runtime to intercept the call.
+pub const SHIMMED_ABOVE: &[&str] = &[
+    // Takes the thread's start routine.
+    "pthread_create",
+    // Takes the initialiser, and its control word is sixteen bytes here and four
+    // there.
+    "pthread_once",
+    // Takes the destructor, and its key is eight bytes here and four there.
+    "pthread_key_create",
+    // Takes three handlers, and is otherwise plain scalars.
+    "pthread_atfork",
+];
+
+/// Register every entry under the name a Mach-O imports it by.
+///
+/// [`PASSED_THROUGH`] is registered too, bound to the host's own function. That is not
+/// redundant: it is what lets the host resolver deny the whole `pthread_` family
+/// outright, so a name this crate has *not* thought about is refused rather than
+/// quietly answered. A passthrough registered here costs nothing at run time - the
+/// guest's slot holds the host address either way.
+pub fn provide(lib: &mut SyntheticDylib) {
+    #[cfg(not(target_os = "macos"))]
+    {
+        for (name, address) in entries() {
+            crate::define_fn(lib, &format!("_{name}"), *address as *const ());
+        }
+        // Both lists are bound to the host's own function: [`PASSED_THROUGH`] because
+        // that is the implementation, and [`SHIMMED_ABOVE`] because the slot has to
+        // hold *some* address for the runtime to intercept the call at. Neither costs
+        // anything at run time - the guest's slot holds the host address either way.
+        for name in PASSED_THROUGH.iter().chain(SHIMMED_ABOVE) {
+            if let Some(host) = crate::host_symbol(name) {
+                crate::define_fn(lib, &format!("_{name}"), host as *const ());
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    let _ = lib;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A guest object: the right size, and eight-byte aligned as a `long` first
+    /// member makes one.
+    #[repr(C, align(8))]
+    struct Obj<const N: usize>([u8; N]);
+
+    impl<const N: usize> Obj<N> {
+        /// Zeroed, as a guest's `.bss` object arrives.
+        fn new() -> Box<Obj<N>> {
+            Box::new(Obj([0u8; N]))
+        }
+
+        /// Carrying a Darwin static initializer, as a guest's `.data` object does.
+        fn statically_initialised(signature: u64) -> Box<Obj<N>> {
+            let mut o = Obj::<N>::new();
+            o.0[..8].copy_from_slice(&signature.to_le_bytes());
+            o
+        }
+
+        fn at(&self) -> u64 {
+            self as *const Obj<N> as usize as u64
+        }
+    }
+
+    type Mutex = Obj<{ object::size::MUTEX }>;
+    type Cond = Obj<{ object::size::COND }>;
+    type RwLock = Obj<{ object::size::RWLOCK }>;
+    type Once = Obj<{ object::size::ONCE }>;
+    type Attr = Obj<{ object::size::ATTR }>;
+    type MutexAttrObj = Obj<{ object::size::MUTEXATTR }>;
+
+    // -----------------------------------------------------------------------
+    // Attributes
+    // -----------------------------------------------------------------------
+
+    /// Everything a guest sets on a thread attribute set must read back as what it
+    /// set - which is the whole contract of an opaque type whose bytes are ours.
+    #[test]
+    fn every_thread_attribute_reads_back_as_what_was_set() {
+        let a = Attr::new();
+        // SAFETY: `a` is a live, correctly sized and aligned attribute object.
+        unsafe {
+            assert_eq!(attr::imp::attr_init(a.at()), 0);
+
+            assert_eq!(
+                attr::imp::attr_setdetachstate(a.at(), PTHREAD_CREATE_DETACHED as u64),
+                0
+            );
+            let mut detach = 0i32;
+            assert_eq!(attr::imp::attr_getdetachstate(a.at(), &mut detach as *mut _ as u64), 0);
+            assert_eq!(detach, PTHREAD_CREATE_DETACHED);
+
+            assert_eq!(attr::imp::attr_setstacksize(a.at(), 1 << 20), 0);
+            let mut size = 0usize;
+            assert_eq!(attr::imp::attr_getstacksize(a.at(), &mut size as *mut _ as u64), 0);
+            assert_eq!(size, 1 << 20);
+
+            assert_eq!(attr::imp::attr_setguardsize(a.at(), 0), 0);
+            let mut guard = 12345usize;
+            assert_eq!(attr::imp::attr_getguardsize(a.at(), &mut guard as *mut _ as u64), 0);
+            assert_eq!(guard, 0, "a guest may ask for no guard at all");
+
+            assert_eq!(attr::imp::attr_setscope(a.at(), PTHREAD_SCOPE_PROCESS as u64), 0);
+            let mut scope = 0i32;
+            assert_eq!(attr::imp::attr_getscope(a.at(), &mut scope as *mut _ as u64), 0);
+            assert_eq!(scope, PTHREAD_SCOPE_PROCESS);
+
+            assert_eq!(attr::imp::attr_setschedpolicy(a.at(), SCHED_RR as u64), 0);
+            let mut policy = 0i32;
+            assert_eq!(attr::imp::attr_getschedpolicy(a.at(), &mut policy as *mut _ as u64), 0);
+            assert_eq!(policy, SCHED_RR, "Darwin's SCHED_RR, not the host's");
+
+            assert_eq!(attr::imp::attr_destroy(a.at()), 0);
+        }
+    }
+
+    /// The two ends of a supplied stack. `pthread_attr_setstack` takes the low
+    /// address and `pthread_attr_getstackaddr` reports the high one, and getting the
+    /// direction wrong puts a thread's frames below its own guard page.
+    #[test]
+    fn a_supplied_stack_is_set_by_its_base_and_read_by_its_top() {
+        let a = Attr::new();
+        let (base, size) = (0x2_0000_0000u64, 1 << 20);
+        // SAFETY: a live attribute object; the stack address is never dereferenced.
+        unsafe {
+            assert_eq!(attr::imp::attr_init(a.at()), 0);
+            assert_eq!(attr::imp::attr_setstack(a.at(), base, size), 0);
+
+            let mut top = 0u64;
+            assert_eq!(attr::imp::attr_getstackaddr(a.at(), &mut top as *mut _ as u64), 0);
+            assert_eq!(top, base + size, "getstackaddr reports the top");
+
+            let (mut low, mut got) = (0u64, 0usize);
+            assert_eq!(
+                attr::imp::attr_getstack(a.at(), &mut low as *mut _ as u64, &mut got as *mut _ as u64),
+                0
+            );
+            assert_eq!((low, got as u64), (base, size), "getstack reports the base");
+        }
+    }
+
+    /// A size a guest never set must read back as the size a thread would really get,
+    /// because a guest that sizes a buffer off it is owed the truth.
+    #[test]
+    fn an_unset_stack_size_reads_back_as_darwins_default() {
+        let a = Attr::new();
+        // SAFETY: a live attribute object.
+        unsafe {
+            assert_eq!(attr::imp::attr_init(a.at()), 0);
+            let mut size = 0usize;
+            assert_eq!(attr::imp::attr_getstacksize(a.at(), &mut size as *mut _ as u64), 0);
+            assert_eq!(size, 512 * 1024, "Darwin's default thread stack");
+        }
+    }
+
+    #[test]
+    fn a_value_darwin_does_not_declare_is_refused() {
+        let a = Attr::new();
+        // SAFETY: a live attribute object.
+        unsafe {
+            assert_eq!(attr::imp::attr_init(a.at()), 0);
+            // Zero is Linux's `PTHREAD_CREATE_JOINABLE` and is not a Darwin value at
+            // all - which is exactly the mistake an untranslated call would make.
+            assert_eq!(attr::imp::attr_setdetachstate(a.at(), 0), err::EINVAL);
+            assert_eq!(attr::imp::attr_setscope(a.at(), 99), err::EINVAL);
+        }
+    }
+
+    #[test]
+    fn an_uninitialised_attribute_set_is_refused_rather_than_read() {
+        let a = Attr::new();
+        // SAFETY: a live, zeroed object that was never initialised.
+        unsafe {
+            let mut out = 0i32;
+            assert_eq!(
+                attr::imp::attr_getdetachstate(a.at(), &mut out as *mut _ as u64),
+                err::EINVAL
+            );
+            assert_eq!(attr::imp::attr_destroy(a.at()), err::EINVAL);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Mutexes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_mutex_locks_unlocks_and_is_destroyed() {
+        let m = Mutex::new();
+        // SAFETY: a live, correctly sized and aligned mutex object.
+        unsafe {
+            assert_eq!(sync::mutex_init(m.at(), 0), 0);
+            assert_eq!(sync::mutex_lock(m.at()), 0);
+            assert_eq!(sync::mutex_trylock(m.at()), libc::EBUSY, "already held");
+            assert_eq!(sync::mutex_unlock(m.at()), 0);
+            assert_eq!(sync::mutex_trylock(m.at()), 0, "and free again");
+            assert_eq!(sync::mutex_unlock(m.at()), 0);
+            assert_eq!(sync::mutex_destroy(m.at()), 0);
+            assert_eq!(sync::mutex_destroy(m.at()), err::EINVAL, "destroyed once");
+        }
+    }
+
+    /// The bug this whole file exists to prevent: `PTHREAD_MUTEX_RECURSIVE` is 2 on
+    /// Darwin and 1 on Linux, so an untranslated request for a recursive lock returns
+    /// an error-checking one - which does not recurse, it reports `EDEADLK`.
+    #[test]
+    fn a_recursive_mutex_recurses_and_an_errorcheck_one_does_not() {
+        let attr = MutexAttrObj::new();
+        let m = Mutex::new();
+        // SAFETY: two live, correctly sized objects.
+        unsafe {
+            assert_eq!(mutexattr_init(attr.at()), 0);
+            assert_eq!(
+                mutexattr_settype(attr.at(), PTHREAD_MUTEX_RECURSIVE as u64),
+                0
+            );
+            let mut kind = 0i32;
+            assert_eq!(mutexattr_gettype(attr.at(), &mut kind as *mut _ as u64), 0);
+            assert_eq!(kind, PTHREAD_MUTEX_RECURSIVE, "Darwin's number, read back");
+
+            assert_eq!(sync::mutex_init(m.at(), attr.at()), 0);
+            assert_eq!(sync::mutex_lock(m.at()), 0);
+            assert_eq!(sync::mutex_lock(m.at()), 0, "a recursive mutex recurses");
+            assert_eq!(sync::mutex_unlock(m.at()), 0);
+            assert_eq!(sync::mutex_unlock(m.at()), 0);
+            assert_eq!(sync::mutex_destroy(m.at()), 0);
+
+            // And the type Darwin numbers 1, which Linux numbers 2.
+            let e = Mutex::new();
+            assert_eq!(
+                mutexattr_settype(attr.at(), PTHREAD_MUTEX_ERRORCHECK as u64),
+                0
+            );
+            assert_eq!(sync::mutex_init(e.at(), attr.at()), 0);
+            assert_eq!(sync::mutex_lock(e.at()), 0);
+            assert_eq!(
+                sync::mutex_lock(e.at()),
+                libc::EDEADLK,
+                "an error-checking mutex reports rather than recursing"
+            );
+            assert_eq!(sync::mutex_unlock(e.at()), 0);
+            assert_eq!(sync::mutex_destroy(e.at()), 0);
+            assert_eq!(mutexattr_destroy(attr.at()), 0);
+        }
+    }
+
+    /// `PTHREAD_MUTEX_INITIALIZER` is written by the guest's compiler, so no call of
+    /// ours ever sees it happen. The first lock has to notice and build the object.
+    #[test]
+    fn a_statically_initialised_mutex_works_without_an_init_call() {
+        let m = Mutex::statically_initialised(object::sig::MUTEX_INIT);
+        // SAFETY: a live mutex object carrying a Darwin static initializer.
+        unsafe {
+            assert_eq!(sync::mutex_lock(m.at()), 0);
+            assert_eq!(sync::mutex_unlock(m.at()), 0);
+            assert_eq!(sync::mutex_destroy(m.at()), 0);
+        }
+    }
+
+    /// And `PTHREAD_RECURSIVE_MUTEX_INITIALIZER` has to build a *recursive* one:
+    /// which static initializer the guest wrote is the only record of what it wanted.
+    #[test]
+    fn a_statically_initialised_recursive_mutex_recurses() {
+        let m = Mutex::statically_initialised(object::sig::RECURSIVE_MUTEX_INIT);
+        // SAFETY: as above.
+        unsafe {
+            assert_eq!(sync::mutex_lock(m.at()), 0);
+            assert_eq!(sync::mutex_lock(m.at()), 0, "the initializer said recursive");
+            assert_eq!(sync::mutex_unlock(m.at()), 0);
+            assert_eq!(sync::mutex_unlock(m.at()), 0);
+        }
+    }
+
+    /// A statically initialised mutex first touched by several threads at once must
+    /// end up as *one* host mutex. Two would lock independently and exclude nobody.
+    #[test]
+    fn racing_threads_build_one_object_for_one_static_mutex() {
+        let m = Arc::new(Mutex::statically_initialised(object::sig::MUTEX_INIT));
+        let counter = Arc::new(AtomicU32::new(0));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let (m, counter) = (Arc::clone(&m), Arc::clone(&counter));
+                std::thread::spawn(move || {
+                    for _ in 0..2000 {
+                        // SAFETY: a live mutex object shared with the other threads,
+                        // which is what a guest's global mutex is.
+                        unsafe {
+                            assert_eq!(sync::mutex_lock(m.at()), 0);
+                            let seen = counter.load(Ordering::Relaxed);
+                            counter.store(seen + 1, Ordering::Relaxed);
+                            assert_eq!(sync::mutex_unlock(m.at()), 0);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("a locking thread");
+        }
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            8 * 2000,
+            "a lost update means two host mutexes behind one guest one"
+        );
+    }
+
+    /// An object of one kind handed to another kind's function is `EINVAL`, not a
+    /// host mutex built out of a condition variable.
+    #[test]
+    fn a_cond_is_not_a_mutex() {
+        let c = Cond::new();
+        // SAFETY: a live, correctly sized condition variable object.
+        unsafe {
+            assert_eq!(sync::cond_init(c.at(), 0), 0);
+            assert_eq!(sync::mutex_lock(c.at()), err::EINVAL);
+            assert_eq!(sync::cond_destroy(c.at()), 0);
+        }
+    }
+
+    /// Copying an initialised mutex is undefined in POSIX, and the copy sharing the
+    /// original's host lock is the quiet way to get it wrong: both would lock, and
+    /// neither would exclude the other.
+    #[test]
+    fn a_copied_mutex_is_refused_rather_than_aliased() {
+        let original = Mutex::new();
+        // SAFETY: a live mutex object.
+        unsafe { assert_eq!(sync::mutex_init(original.at(), 0), 0) };
+
+        let mut copy = Mutex::new();
+        copy.0.copy_from_slice(&original.0);
+        // SAFETY: a live, correctly sized object holding a byte copy of another's
+        // record - which is exactly what the owner word exists to catch.
+        unsafe {
+            assert_eq!(sync::mutex_lock(copy.at()), err::EINVAL);
+            assert_eq!(sync::mutex_lock(original.at()), 0, "the original still works");
+            assert_eq!(sync::mutex_unlock(original.at()), 0);
+            assert_eq!(sync::mutex_destroy(original.at()), 0);
+        }
+    }
+
+    #[test]
+    fn a_process_shared_mutex_is_refused_rather_than_made_private() {
+        let attr = MutexAttrObj::new();
+        let m = Mutex::new();
+        // SAFETY: two live, correctly sized objects.
+        unsafe {
+            assert_eq!(mutexattr_init(attr.at()), 0);
+            assert_eq!(
+                mutexattr_setpshared(attr.at(), PTHREAD_PROCESS_SHARED as u64),
+                0
+            );
+            let mut shared = 0i32;
+            assert_eq!(mutexattr_getpshared(attr.at(), &mut shared as *mut _ as u64), 0);
+            assert_eq!(shared, PTHREAD_PROCESS_SHARED);
+            assert_eq!(sync::mutex_init(m.at(), attr.at()), err::ENOTSUP);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Condition variables and read-write locks
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_condition_variable_wakes_a_waiter() {
+        struct Shared {
+            m: Box<Mutex>,
+            c: Box<Cond>,
+            ready: AtomicU32,
+        }
+        // SAFETY: the two objects are only ever reached through this module's
+        // functions, which is what a guest does with them.
+        unsafe impl Sync for Shared {}
+        unsafe impl Send for Shared {}
+
+        let s = Arc::new(Shared {
+            m: Mutex::new(),
+            c: Cond::new(),
+            ready: AtomicU32::new(0),
+        });
+        // SAFETY: two live, correctly sized objects.
+        unsafe {
+            assert_eq!(sync::mutex_init(s.m.at(), 0), 0);
+            assert_eq!(sync::cond_init(s.c.at(), 0), 0);
+        }
+
+        let waiter = {
+            let s = Arc::clone(&s);
+            std::thread::spawn(move || {
+                // SAFETY: live objects shared with the signalling thread.
+                unsafe {
+                    assert_eq!(sync::mutex_lock(s.m.at()), 0);
+                    while s.ready.load(Ordering::Relaxed) == 0 {
+                        assert_eq!(sync::cond_wait(s.c.at(), s.m.at()), 0);
+                    }
+                    assert_eq!(sync::mutex_unlock(s.m.at()), 0);
+                }
+            })
+        };
+
+        // SAFETY: as above.
+        unsafe {
+            loop {
+                assert_eq!(sync::mutex_lock(s.m.at()), 0);
+                s.ready.store(1, Ordering::Relaxed);
+                assert_eq!(sync::cond_broadcast(s.c.at()), 0);
+                assert_eq!(sync::mutex_unlock(s.m.at()), 0);
+                if waiter.is_finished() {
+                    break;
+                }
+                std::thread::yield_now();
+            }
+        }
+        waiter.join().expect("the waiter wakes");
+        // SAFETY: nothing is waiting any more.
+        unsafe {
+            assert_eq!(sync::cond_destroy(s.c.at()), 0);
+            assert_eq!(sync::mutex_destroy(s.m.at()), 0);
+        }
+    }
+
+    /// A relative timeout is Darwin's own call and has to become a deadline. The
+    /// assertion is that it *times out* rather than returning at once or hanging.
+    #[test]
+    fn a_relative_timed_wait_times_out() {
+        let m = Mutex::new();
+        let c = Cond::new();
+        let interval = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 20_000_000,
+        };
+        // SAFETY: two live objects and a live `timespec`.
+        unsafe {
+            assert_eq!(sync::mutex_init(m.at(), 0), 0);
+            assert_eq!(sync::cond_init(c.at(), 0), 0);
+            assert_eq!(sync::mutex_lock(m.at()), 0);
+            let start = std::time::Instant::now();
+            let rc = sync::cond_timedwait_relative(
+                c.at(),
+                m.at(),
+                &interval as *const libc::timespec as usize as u64,
+            );
+            assert_eq!(rc, libc::ETIMEDOUT);
+            assert!(start.elapsed() >= std::time::Duration::from_millis(15), "it waited");
+            assert_eq!(sync::mutex_unlock(m.at()), 0);
+            assert_eq!(sync::cond_destroy(c.at()), 0);
+            assert_eq!(sync::mutex_destroy(m.at()), 0);
+        }
+    }
+
+    /// Asked across threads rather than on one, which is both what the property is
+    /// about and the only way to ask it: whether a thread may take a second read lock
+    /// it already holds is left undefined by POSIX, and Darwin and Linux differ.
+    #[test]
+    fn a_read_write_lock_admits_readers_together_and_writers_alone() {
+        struct Shared(Box<RwLock>);
+        // SAFETY: the lock is only ever reached through this module's functions,
+        // which is what a guest does with it.
+        unsafe impl Sync for Shared {}
+        unsafe impl Send for Shared {}
+
+        let l = Arc::new(Shared(RwLock::new()));
+        // SAFETY: a live, correctly sized lock object.
+        unsafe {
+            assert_eq!(sync::rwlock_init(l.0.at(), 0), 0);
+            assert_eq!(sync::rwlock_rdlock(l.0.at()), 0);
+        }
+
+        // With a reader holding it, another thread may read and may not write.
+        {
+            let l = Arc::clone(&l);
+            std::thread::spawn(move || {
+                // SAFETY: a live lock shared with the holding thread.
+                unsafe {
+                    assert_eq!(sync::rwlock_trywrlock(l.0.at()), libc::EBUSY, "a reader holds it");
+                    assert_eq!(sync::rwlock_tryrdlock(l.0.at()), 0, "readers share");
+                    assert_eq!(sync::rwlock_unlock(l.0.at()), 0);
+                }
+            })
+            .join()
+            .expect("the second reader");
+        }
+
+        // SAFETY: as above; this thread still holds its read lock.
+        unsafe {
+            assert_eq!(sync::rwlock_unlock(l.0.at()), 0);
+            assert_eq!(sync::rwlock_wrlock(l.0.at()), 0, "and now it is free");
+        }
+
+        // With a writer holding it, another thread may do neither.
+        {
+            let l = Arc::clone(&l);
+            std::thread::spawn(move || {
+                // SAFETY: as above.
+                unsafe {
+                    assert_eq!(sync::rwlock_trywrlock(l.0.at()), libc::EBUSY);
+                    assert_eq!(sync::rwlock_tryrdlock(l.0.at()), libc::EBUSY);
+                }
+            })
+            .join()
+            .expect("the excluded thread");
+        }
+
+        // SAFETY: this thread holds the write lock and nothing else is waiting.
+        unsafe {
+            assert_eq!(sync::rwlock_unlock(l.0.at()), 0);
+            assert_eq!(sync::rwlock_destroy(l.0.at()), 0);
+        }
+    }
+
+    #[test]
+    fn a_statically_initialised_rwlock_works() {
+        let l = RwLock::statically_initialised(object::sig::RWLOCK_INIT);
+        // SAFETY: a live lock object carrying a Darwin static initializer.
+        unsafe {
+            assert_eq!(sync::rwlock_wrlock(l.at()), 0);
+            assert_eq!(sync::rwlock_unlock(l.at()), 0);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // `pthread_once`
+    // -----------------------------------------------------------------------
+
+    /// Exactly once, and every thread that asked waits for it - which is the whole
+    /// contract, and the one a spin that returned early would break.
+    #[test]
+    fn once_runs_once_and_everyone_waits_for_it() {
+        let o = Arc::new(Once::statically_initialised(object::sig::ONCE_INIT));
+        let ran = Arc::new(AtomicU32::new(0));
+        let finished = Arc::new(AtomicU32::new(0));
+
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let (o, ran, finished) = (Arc::clone(&o), Arc::clone(&ran), Arc::clone(&finished));
+                std::thread::spawn(move || {
+                    // SAFETY: a live `pthread_once_t` shared with the other threads.
+                    let rc = unsafe {
+                        once(o.at(), || {
+                            // Slow on purpose: a waiter that did not wait would see
+                            // the flag still unset.
+                            std::thread::sleep(std::time::Duration::from_millis(30));
+                            ran.fetch_add(1, Ordering::SeqCst);
+                        })
+                    };
+                    assert_eq!(rc, 0);
+                    assert_eq!(
+                        ran.load(Ordering::SeqCst),
+                        1,
+                        "returned before the routine finished"
+                    );
+                    finished.fetch_add(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("a once thread");
+        }
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "the routine ran once");
+        assert_eq!(finished.load(Ordering::SeqCst), 8, "and everyone got through");
+    }
+
+    #[test]
+    fn once_refuses_a_control_word_that_is_not_one() {
+        let o = Once::new();
+        // SAFETY: a live, zeroed object that carries no static initializer.
+        assert_eq!(unsafe { once(o.at(), || unreachable!()) }, err::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // Cancellation and signals
+    // -----------------------------------------------------------------------
+
+    /// Darwin's cancel state values are the opposite way round from the host's, so an
+    /// untranslated call disables cancellation where the guest asked to enable it.
+    #[test]
+    fn cancel_state_round_trips_in_darwins_numbering() {
+        // SAFETY: a live local out-parameter.
+        unsafe {
+            let mut old = -1i32;
+            assert_eq!(
+                setcancelstate(PTHREAD_CANCEL_DISABLE as u64, &mut old as *mut _ as u64),
+                0
+            );
+            let mut back = -1i32;
+            assert_eq!(
+                setcancelstate(PTHREAD_CANCEL_ENABLE as u64, &mut back as *mut _ as u64),
+                0
+            );
+            assert_eq!(back, PTHREAD_CANCEL_DISABLE, "what was just set");
+            assert_eq!(setcancelstate(99, core::ptr::null_mut::<i32>() as u64), err::EINVAL);
+        }
+    }
+
+    /// `pthread_kill` carries a Darwin signal number, which is not the host's for
+    /// most of the range.
+    ///
+    /// Asked through the "does this thread exist" probe and through a number the host
+    /// has not got, so nothing is ever actually delivered to the test process.
+    #[test]
+    fn pthread_kill_translates_the_signal_number() {
+        // SAFETY: signal zero delivers nothing; the thread is this one.
+        assert_eq!(unsafe { kill(this_thread(), 0) }, 0);
+
+        // `SIGINFO` is Darwin's own. On a Mac it is a real signal and translates to
+        // itself; anywhere else there is nothing to translate it to, and delivering
+        // whatever occupies 29 instead would run a handler installed for something
+        // else.
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            unsafe { kill(this_thread(), crate::signal::signum::SIGINFO as u64) },
+            err::EINVAL
+        );
+
+        // A number that is not a signal on either host.
+        // SAFETY: refused before anything is delivered.
+        assert_eq!(unsafe { kill(this_thread(), 200) }, err::EINVAL);
+    }
+
+    fn this_thread() -> u64 {
+        // SAFETY: `pthread_self` is infallible; the handle is pointer-sized.
+        unsafe { core::mem::transmute_copy(&libc::pthread_self()) }
+    }
+
+    // -----------------------------------------------------------------------
+    // The table
+    // -----------------------------------------------------------------------
+
+    /// Nothing may be both implemented here and claimed as a passthrough - the two
+    /// lists are the same question answered opposite ways.
+    #[test]
+    fn nothing_is_both_implemented_and_passed_through() {
+        for name in PASSED_THROUGH {
+            assert!(
+                symbol(name).is_none(),
+                "{name} is passed through and also implemented"
+            );
+        }
+    }
+
+    /// Every implemented name must be one Darwin actually exports, or it is answering
+    /// an import no guest can make.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn every_entry_names_a_real_darwin_symbol() {
+        // The list Darwin's libsystem_pthread exports, as of the SDK this was written
+        // against. Kept short: only the entries this module claims.
+        for (name, address) in entries() {
+            assert!(name.starts_with("pthread_"), "{name}");
+            assert_ne!(*address, 0, "{name} resolved to nothing");
+        }
+    }
+}

@@ -30,10 +30,36 @@ macro_rules! skip {
 }
 
 fn load(path: &str) -> Option<Program> {
-    if !std::path::Path::new(path).exists() {
+    if !host_macho(path) {
         return None;
     }
     Some(Program::load(path, &[]).unwrap_or_else(|e| panic!("linking {path} failed: {e}")))
+}
+
+/// Whether this host has a Mach-O at `path` to use as a fixture.
+///
+/// Two ways to have none, and the second is the one that matters: the file may be
+/// missing, or - on a host that is not a Mac - it may be there and be an ELF. These
+/// tests read *this machine's own* `/bin/ls`, so on Linux the honest answer is that
+/// there is not one, and the gate skips rather than failing over a magic number.
+///
+/// Spelled out here rather than taken from `tests/common`, which this file
+/// deliberately does not pull in.
+fn host_macho(path: &str) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let Some(magic) = bytes.get(..4) else {
+        return false;
+    };
+    let magic = u32::from_be_bytes([magic[0], magic[1], magic[2], magic[3]]);
+    matches!(
+        magic,
+        // Thin, 32- and 64-bit, either endianness...
+        0xfeed_face | 0xcefa_edfe | 0xfeed_facf | 0xcffa_edfe
+        // ...and fat, likewise.
+        | 0xcafe_babe | 0xbeba_feca | 0xcafe_babf | 0xbfba_feca
+    )
 }
 
 /// The audit with a chosen subset of addresses registered.
@@ -83,7 +109,7 @@ fn stub_addresses_are_load_bearing() {
     // collapse, because every `call rel32` targets a `__stubs` entry that is
     // now an unregistered address outside the lifted region.
     let Some(program) = load(LS) else {
-        skip!("{LS} not present")
+        skip!("no host Mach-O at {LS}")
     };
 
     let with_stubs: BTreeSet<u64> = program.import_addresses().collect();
@@ -124,7 +150,7 @@ fn every_uninterceptable_call_in_the_crippled_audit_is_a_stub() {
     // `machish::fixups::stubs` claims to have recovered, checked from the other
     // side - through the lifter's own view of the guest's control flow.
     let Some(program) = load(LS) else {
-        skip!("{LS} not present")
+        skip!("no host Mach-O at {LS}")
     };
 
     let slots_only: BTreeSet<u64> = program
@@ -154,7 +180,7 @@ fn every_uninterceptable_call_in_the_crippled_audit_is_a_stub() {
 #[test]
 fn linking_reports_a_stub_for_every_lazy_binding() {
     let Some(program) = load(LS) else {
-        skip!("{LS} not present")
+        skip!("no host Mach-O at {LS}")
     };
 
     let bindings = program.report.bindings().count();
@@ -181,7 +207,7 @@ fn linking_reports_a_stub_for_every_lazy_binding() {
 #[test]
 fn the_lifter_config_registers_both_addresses_per_binding() {
     let Some(program) = load(LS) else {
-        skip!("{LS} not present")
+        skip!("no host Mach-O at {LS}")
     };
     let config = program.lifter_config();
 

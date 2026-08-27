@@ -1,8 +1,5 @@
 //! `pthread_create`, and the two stacks a guest thread really has.
 
-use core::ffi::c_void;
-use core::mem::MaybeUninit;
-
 use microlift::arch::x86_64::context::RegisterContext;
 use static_init::dynamic;
 
@@ -33,26 +30,27 @@ pub fn pthread_create(
         return Ok(());
     }
 
-    // The guest's attributes, read before anything is created.
-    let Some(mut host_attr) = read_attr(symbol, attr, mem)? else {
+    // The guest's attributes, read before anything is created. Read rather than
+    // byte-copied: a Darwin `pthread_attr_t` and this host's are the same structure
+    // only on a Mac, so what crosses is what the set *says*. See
+    // [`darwin::pthread::Attributes`].
+    //
+    // SAFETY: `attr` is null or the guest's own `pthread_attr_t`, which is
+    // identity-mapped and so directly addressable.
+    let Some(attributes) = (unsafe { darwin::pthread::Attributes::of_guest(attr) }) else {
         set_int_return(ctx, EINVAL);
         return Ok(());
     };
-    let stack = stack_request(&host_attr);
-    // Whatever the guest asked for describes the *guest's* stack; the host
-    // thread gets this runtime's own. Both are set explicitly, because the copy
-    // above carries the guest's answers for them.
-    //
-    // SAFETY: `host_attr` is a live, initialised attribute set - a byte copy of
-    // one the host's own `pthread_attr_init` produced, which is what
-    // `read_attr` checked before returning it.
-    unsafe {
-        libc::pthread_attr_setstacksize(&mut host_attr, HOST_THREAD_STACK);
-        // Only when the guest supplied an address, and only then.
-        if matches!(stack, StackRequest::Supplied { .. }) {
-            libc::pthread_attr_setstackaddr(&mut host_attr, core::ptr::null_mut());
+    // Whatever the guest asked for describes the *guest's* stack; the host thread that
+    // runs its code gets this runtime's own, which is what `to_host_attr` is told.
+    let stack = stack_request(&attributes);
+    let mut host_attr = match attributes.to_host_attr(HOST_THREAD_STACK) {
+        Ok(attr) => attr,
+        Err(rc) => {
+            set_int_return(ctx, rc);
+            return Ok(());
         }
-    }
+    };
 
     // The start routine is guest code and crosses out as a thunk, exactly as
     // `qsort`'s comparator does.
@@ -62,10 +60,11 @@ pub fn pthread_create(
         return Ok(());
     }
 
-    let result = crate::thread::spawn(GuestStart { entry, arg, stack }, &host_attr);
-    // SAFETY: as above, and nothing holds a reference to it past this point -
-    // `pthread_create` copies what it needs out of an attribute set.
-    unsafe { libc::pthread_attr_destroy(&mut host_attr) };
+    // SAFETY: `host_attr` is initialised and outlives the call, which is all
+    // `pthread_create` needs - it copies what it wants out of an attribute set.
+    let result = crate::thread::spawn(GuestStart { entry, arg, stack }, unsafe {
+        &*host_attr.as_mut_ptr()
+    });
 
     match result {
         Ok(thread) => {
@@ -77,72 +76,106 @@ pub fn pthread_create(
     Ok(())
 }
 
-/// The guest's attribute set, copied into one the host may be handed.
-///
-/// A copy rather than the guest's pointer, though the layouts are identical and the
-/// memory is identity-mapped.
-fn read_attr(
-    symbol: &str,
-    attr: u64,
-    mem: &dyn GuestMemory,
-) -> Result<Option<libc::pthread_attr_t>> {
-    let mut copy = MaybeUninit::<libc::pthread_attr_t>::uninit();
-    if attr == 0 {
-        // No attributes: the host's own defaults, which is what libpthread
-        // would have used - including its default *size*, 512 KiB on Darwin.
-        // Reading it back out of a freshly initialised set rather than writing
-        // that number down here is what makes a guest thread's stack the size
-        // the same program gets natively, without this runtime having an
-        // opinion about what that size is.
-        // SAFETY: `pthread_attr_init` initialises the whole structure, which is
-        // what makes the `assume_init` below sound.
-        unsafe {
-            libc::pthread_attr_init(copy.as_mut_ptr());
-            return Ok(Some(copy.assume_init()));
-        }
+/// What the guest's attributes say about the stack its *own* frames go on.
+fn stack_request(attributes: &darwin::pthread::Attributes) -> StackRequest {
+    match (attributes.stack_top, attributes.stack_size) {
+        // A supplied stack of no size is not a stack; fall back rather than hand a
+        // thread a zero-byte range to run on.
+        (Some(top), Some(size)) if top != 0 && size != 0 => StackRequest::Supplied {
+            top,
+            size: size as u64,
+        },
+        (_, None) => StackRequest::Default,
+        (_, Some(size)) => StackRequest::Sized(size),
     }
-
-    let bytes = mem.read_bytes(attr, size_of::<libc::pthread_attr_t>(), symbol)?;
-    // SAFETY: `pthread_attr_t` is a `long` and an opaque byte array with no
-    // padding, no pointers this runtime dereferences and no niches, so any
-    // bytes are a valid value of it; whether they are a *meaningful* one is
-    // what the getter below asks. The lengths agree by construction.
-    unsafe {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), copy.as_mut_ptr() as *mut u8, bytes.len());
-    }
-    // SAFETY: every byte was just written.
-    let copy = unsafe { copy.assume_init() };
-
-    let mut detach = 0;
-    // SAFETY: a live attribute set and a live local; the getter checks the
-    // structure's signature and writes nothing when it refuses.
-    let ok = unsafe { libc::pthread_attr_getdetachstate(&copy, &mut detach) } == 0;
-    Ok(ok.then_some(copy))
 }
 
-/// What `attr` says about the stack the *guest's* frames go on.
-fn stack_request(attr: &libc::pthread_attr_t) -> StackRequest {
-    let mut top: *mut c_void = core::ptr::null_mut();
-    let mut size: usize = 0;
-    // SAFETY: a live attribute set and two live locals. Both getters are
-    // infallible for an initialised set, which `read_attr` established.
-    unsafe {
-        libc::pthread_attr_getstackaddr(attr, &mut top);
-        libc::pthread_attr_getstacksize(attr, &mut size);
+/// `int pthread_once(pthread_once_t *, void (*)(void))`.
+///
+/// A shim for two reasons at once. The routine is **guest code**, so reaching it needs
+/// a thunk; and a `pthread_once_t` is sixteen bytes on Darwin and four under musl, so
+/// the control word cannot be handed to the host at all. See [`darwin::pthread::once`],
+/// which owns the once-and-only-once and the waiting.
+///
+/// Only registered where this runtime implements the pthread family. On macOS the
+/// host's `pthread_once` reads the same sixteen bytes the guest wrote, and the generic
+/// marshaller already gives it a thunk - see the `cbsig!` entry in [`crate::abi::table`].
+#[cfg(not(target_os = "macos"))]
+fn pthread_once(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    _mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
+    let (control, routine) = (ctx.rdi, ctx.rsi);
+    if routine == 0 {
+        set_int_return(ctx, EINVAL);
+        return Ok(());
     }
-    match (top as u64, size as u64) {
-        // A supplied stack of no size is not a stack; fall back rather than
-        // hand a thread a zero-byte range to run on.
-        (top, size) if top != 0 && size != 0 => StackRequest::Supplied { top, size },
-        (_, 0) => StackRequest::Default,
-        (_, size) => StackRequest::Sized(size as usize),
+    let entry = callbacks.substitute(symbol, routine)?;
+    // SAFETY: `entry` is a thunk this runtime handed out for a guest function of no
+    // arguments and no result, which is what `pthread_once` promises its routine is.
+    let call: extern "C" fn() = unsafe { core::mem::transmute(entry as usize as *const ()) };
+    // SAFETY: `control` is the guest's own `pthread_once_t`, identity-mapped and so
+    // directly addressable, and eight-byte aligned as its leading `long` makes it.
+    let rc = unsafe { darwin::pthread::once(control, || call()) };
+    set_int_return(ctx, rc);
+    Ok(())
+}
+
+/// `int pthread_key_create(pthread_key_t *, void (*)(void *))`.
+///
+/// A `pthread_key_t` is an `unsigned long` on Darwin and an `unsigned` under musl, so
+/// letting the host write through the guest's pointer fills four of the eight bytes
+/// the guest will read and leaves the other four holding whatever was there. The key
+/// is written out as a full eight bytes here instead.
+#[cfg(not(target_os = "macos"))]
+fn pthread_key_create(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
+    let (out, destructor) = (ctx.rdi, ctx.rsi);
+    if out == 0 {
+        set_int_return(ctx, EINVAL);
+        return Ok(());
     }
+    // A null destructor is the common case and stays null; anything else is guest
+    // code and crosses out as a thunk.
+    let entry = match destructor {
+        0 => 0,
+        va => callbacks.substitute(symbol, va)?,
+    };
+    let mut key: libc::pthread_key_t = 0;
+    type Destructor = unsafe extern "C" fn(*mut libc::c_void);
+    // SAFETY: a live local, and `entry` is either null or a thunk this runtime handed
+    // out for a guest function taking one pointer - which is what a destructor is.
+    let rc = unsafe {
+        libc::pthread_key_create(
+            &mut key,
+            (entry != 0).then(|| core::mem::transmute::<usize, Destructor>(entry as usize)),
+        )
+    };
+    if rc == 0 {
+        mem.write_u64(out, key as u64, symbol)?;
+    }
+    set_int_return(ctx, rc);
+    Ok(())
 }
 
 pub type Shim = crate::signal::Shim;
 
 /// Whether `name` (underscore already stripped) is one of this module's.
 pub fn shim_for(name: &str) -> Option<Shim> {
+    // The two whose object this runtime owns rather than the host, and which are
+    // therefore shims only where that is true. See [`pthread_once`].
+    #[cfg(not(target_os = "macos"))]
+    match name {
+        "pthread_once" => return Some(pthread_once),
+        "pthread_key_create" => return Some(pthread_key_create),
+        _ => {}
+    }
     match name {
         "pthread_create" => Some(pthread_create),
         // Off unless asked for: this turns every lock in the program into a VM
@@ -195,138 +228,79 @@ fn mutex_lock(
 mod tests {
     use super::*;
 
-    unsafe extern "C" {
-        /// Not in the `libc` crate, and one of the two setters this module's
-        /// claim about "which end of the range" is about - so the test that
-        /// measures it has to declare it.
-        fn pthread_attr_setstack(
-            attr: *mut libc::pthread_attr_t,
-            stackaddr: *mut c_void,
-            stacksize: libc::size_t,
-        ) -> libc::c_int;
-    }
+    use darwin::pthread::Attributes;
 
-    /// An attribute set the host built, as the guest's would be.
-    fn attr() -> libc::pthread_attr_t {
-        let mut a = MaybeUninit::<libc::pthread_attr_t>::uninit();
-        unsafe {
-            libc::pthread_attr_init(a.as_mut_ptr());
-            a.assume_init()
+    /// Reading a guest's attribute set is [`darwin::pthread`]'s job and is tested
+    /// there, on both hosts. What is this module's is the last step: turning what the
+    /// guest asked for into where its frames actually go.
+    fn asked(stack_top: Option<u64>, stack_size: Option<usize>) -> Attributes {
+        Attributes {
+            stack_top,
+            stack_size,
+            ..Attributes::default()
         }
     }
 
     #[test]
-    fn a_default_attribute_set_asks_for_the_size_darwin_would_give() {
-        // Not `Default`.
-        let a = attr();
-        assert!(
-            matches!(stack_request(&a), StackRequest::Sized(n) if n >= 16 * 1024),
-            "{:?}",
-            stack_request(&a)
-        );
+    fn a_guest_that_asked_for_nothing_gets_the_default_stack() {
+        assert_eq!(stack_request(&asked(None, None)), StackRequest::Default);
     }
 
     #[test]
-    fn a_requested_size_is_read_back_as_the_guests_own_stack() {
-        let mut a = attr();
-        unsafe { libc::pthread_attr_setstacksize(&mut a, 1024 * 1024) };
-        assert_eq!(stack_request(&a), StackRequest::Sized(1024 * 1024));
-    }
-
-    /// The measurement the module note rests on, kept as a test:
-    ///
-    /// If a future libpthread ever disagreed, a guest's thread would run its frames
-    /// below the buffer it supplied - silently, on somebody else's memory - so this is
-    /// checked against the host rather than assumed.
-    #[test]
-    fn a_supplied_stack_is_read_as_its_high_address_whichever_setter_named_it() {
-        let page = machish::memory::host_page_size();
-        let base = 0x2_0000_0000u64;
-        let size = 256 * 1024;
-        assert_eq!(base % page, 0);
-
-        let mut by_stack = attr();
-        unsafe { pthread_attr_setstack(&mut by_stack, base as *mut c_void, size as usize) };
+    fn a_size_alone_is_a_size_and_not_an_address() {
         assert_eq!(
-            stack_request(&by_stack),
-            StackRequest::Supplied {
-                top: base + size,
-                size
-            },
-            "pthread_attr_setstack takes the low address"
-        );
-
-        let mut by_addr = attr();
-        unsafe {
-            libc::pthread_attr_setstackaddr(&mut by_addr, (base + size) as *mut c_void);
-            libc::pthread_attr_setstacksize(&mut by_addr, size as usize);
-        }
-        assert_eq!(
-            stack_request(&by_addr),
-            StackRequest::Supplied {
-                top: base + size,
-                size
-            },
-            "pthread_attr_setstackaddr takes the high address"
+            stack_request(&asked(None, Some(1024 * 1024))),
+            StackRequest::Sized(1024 * 1024)
         );
     }
 
+    /// A guest that supplied memory runs its frames on that memory, named by its
+    /// **top** - the end Darwin's `pthread_attr_getstackaddr` reports.
     #[test]
-    fn a_null_attribute_pointer_is_the_defaults_and_garbage_is_refused() {
-        struct Bytes(Vec<u8>);
-        impl GuestMemory for Bytes {
-            fn read(&self, va: u64, out: &mut [u8]) -> core::result::Result<(), machish::Error> {
-                let at = va as usize;
-                let end = at + out.len();
-                if end > self.0.len() {
-                    return Err(machish::Error::OutOfBounds {
-                        addr: va,
-                        len: out.len(),
-                    });
-                }
-                out.copy_from_slice(&self.0[at..end]);
-                Ok(())
+    fn a_supplied_stack_is_used_where_the_guest_put_it() {
+        let (top, size) = (0x2_0010_0000u64, 256 * 1024);
+        assert_eq!(
+            stack_request(&asked(Some(top), Some(size))),
+            StackRequest::Supplied {
+                top,
+                size: size as u64
             }
-            fn write(&mut self, va: u64, data: &[u8]) -> core::result::Result<(), machish::Error> {
-                Err(machish::Error::OutOfBounds {
-                    addr: va,
-                    len: data.len(),
-                })
-            }
-        }
-
-        // Address 8 rather than 0, because zero is the guest saying "no
-        // attributes" and never reaches memory at all.
-        const AT: u64 = 8;
-        let width = size_of::<libc::pthread_attr_t>();
-        let mut bytes = vec![0u8; AT as usize + width];
-
-        assert!(
-            read_attr("pthread_create", 0, &Bytes(bytes.clone()))
-                .expect("a null attr touches no memory")
-                .is_some(),
-            "a null attr is the defaults, which is what the host does"
         );
+    }
 
-        // Zeroed bytes are not an initialised attribute set - the signature
-        // word is wrong - and `EINVAL` is what the host answers for one.
-        assert!(
-            read_attr("pthread_create", AT, &Bytes(bytes.clone()))
-                .expect("the bytes are readable")
-                .is_none(),
-            "an uninitialised attribute set must be refused, not used"
+    /// A supplied stack of no size is not a stack. Falling back beats handing a
+    /// thread a zero-byte range to run on.
+    #[test]
+    fn a_supplied_stack_with_no_size_falls_back() {
+        assert_eq!(
+            stack_request(&asked(Some(0x2_0000_0000), Some(0))),
+            StackRequest::Sized(0)
         );
+        assert_eq!(stack_request(&asked(Some(0), None)), StackRequest::Default);
+    }
 
-        // The same bytes, initialised by the host: accepted, and carrying what
-        // the guest set - which is the whole claim that the layouts agree.
-        let mut initialised = attr();
-        unsafe { libc::pthread_attr_setstacksize(&mut initialised, 512 * 1024) };
-        let raw =
-            unsafe { core::slice::from_raw_parts((&raw const initialised) as *const u8, width) };
-        bytes[AT as usize..].copy_from_slice(raw);
-        let copied = read_attr("pthread_create", AT, &Bytes(bytes))
-            .expect("readable")
-            .expect("an initialised attribute set is accepted");
-        assert_eq!(stack_request(&copied), StackRequest::Sized(512 * 1024));
+    /// The host thread gets this runtime's own stack whatever the guest asked for:
+    /// the guest's answer describes the guest's frames, and the JIT's go elsewhere.
+    #[test]
+    fn the_host_thread_does_not_inherit_the_guests_stack_request() {
+        let mut attributes = asked(Some(0x2_0000_0000), Some(64 * 1024));
+        attributes.detached = true;
+        let mut host = attributes
+            .to_host_attr(HOST_THREAD_STACK)
+            .expect("a host attribute set");
+
+        let mut size = 0usize;
+        // SAFETY: `host` is an initialised attribute set and `size` a live local.
+        unsafe { libc::pthread_attr_getstacksize(host.as_mut_ptr(), &mut size) };
+        assert_eq!(size, HOST_THREAD_STACK, "the host thread gets the runtime's own");
+
+        let mut detach = 0;
+        // SAFETY: as above.
+        unsafe { darwin::pthread::raw::pthread_attr_getdetachstate(host.as_mut_ptr(), &mut detach) };
+        assert_ne!(
+            detach, 0,
+            "and a detached guest thread is a detached host thread, in the host's own \
+             numbering - which is not Darwin's"
+        );
     }
 }

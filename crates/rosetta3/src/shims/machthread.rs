@@ -43,7 +43,7 @@ fn thread_get_state(
 ) -> Result<()> {
     let (port, flavor, out, count_at) = (ctx.rdi as u32, ctx.rsi as u32, ctx.rdx, ctx.rcx);
 
-    let Some(thread) = crate::thread::by_port(port) else {
+    let Some(thread) = crate::thread::by_key(port) else {
         return passthrough(symbol, ctx);
     };
     if flavor != X86_THREAD_STATE64 && flavor != X86_FLOAT_STATE64 {
@@ -146,12 +146,12 @@ fn guest_thread_of(pthread: u64) -> Option<&'static crate::thread::GuestThread> 
     if pthread == 0 {
         return None;
     }
-    // SAFETY: `pthread` is a `pthread_t` the guest holds - from
-    // `pthread_self` or `pthread_create`, both of which are the host's own, so
-    // the value is one libpthread issued. `pthread_mach_thread_np` reads the
-    // port name out of it and sends nothing.
+    // SAFETY: `pthread` is a `pthread_t` the guest holds - from `pthread_self` or
+    // `pthread_create`, both of which are the host's own, so the value is one
+    // libpthread issued. `pthread_mach_thread_np` reads the port name out of it and
+    // sends nothing.
     let port = unsafe { libc::pthread_mach_thread_np(pthread as libc::pthread_t) };
-    crate::thread::by_port(port)
+    crate::thread::by_key(port)
 }
 
 /// The host's own implementation of each name this module claims, resolved **before**

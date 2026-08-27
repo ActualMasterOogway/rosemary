@@ -120,10 +120,11 @@ fn ls_links_against_the_host_and_every_address_is_real() {
 }
 
 #[test]
-fn resolved_addresses_are_the_hosts_own_arm64_implementations() {
+fn resolved_addresses_are_the_hosts_own_implementations() {
     // The point of high-level emulation, stated as an assertion: the address
     // written into the guest's slot for `_strlen` is the *same address* this
-    // process would call for `strlen`.
+    // process would call for `strlen`. True on either host, which is why the
+    // assertions below are about the host's own C library rather than about macOS.
     let native = NativeDylibProvider::system();
     let sym = SymbolRef {
         name: "_strlen",
@@ -142,9 +143,13 @@ fn resolved_addresses_are_the_hosts_own_arm64_implementations() {
         name.contains("strlen"),
         "resolved to {name} in {image}, which is not a strlen"
     );
-    // And it is genuinely a *system* image, not something we loaded.
+    // And it is genuinely the host's own C library, not something we loaded. Spelled
+    // for both: macOS splits libc across `libsystem_*` under `dyld`, and musl and
+    // glibc put it in one `libc`.
     assert!(
-        image.contains("libsystem") || image.contains("libSystem") || image.contains("dyld"),
+        ["libsystem", "libSystem", "dyld", "libc", "ld-musl", "ld-linux"]
+            .iter()
+            .any(|c| image.contains(c)),
         "unexpected host image for strlen: {image}"
     );
 }

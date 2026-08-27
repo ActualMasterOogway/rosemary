@@ -191,7 +191,11 @@ pub fn width_of(ty: T) -> usize {
     }
 }
 
-#[cfg(test)]
+/// Gated with its producer. The only thing that builds an [`Aggregate`] is the
+/// Objective-C type-encoding parser, and every test here starts from an encoding
+/// string - so on a host with no Objective-C runtime there is no aggregate to
+/// classify and nothing for these to say.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 

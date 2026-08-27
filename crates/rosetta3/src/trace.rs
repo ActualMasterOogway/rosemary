@@ -52,9 +52,7 @@ pub fn leaving<T>(symbol: &str, ctx: &RegisterContext, result: &Result<T, crate:
 
 /// This thread, as a number small enough to read across a log.
 fn thread_id() -> u32 {
-    // SAFETY: `pthread_self` is always valid on a running thread and
-    // `pthread_mach_thread_np` reads the port name out of it.
-    unsafe { libc::pthread_mach_thread_np(libc::pthread_self()) }
+    darwin::pthread::id()
 }
 
 #[cfg(test)]

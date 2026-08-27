@@ -330,7 +330,7 @@ pub fn classify(tag: u64, symbol: &str) -> Classification {
     // A shimmed symbol is slow whatever its signature says, because
     // [`crate::ImportPolicy`] refuses to promote one.
     if crate::shims::is_shimmed(symbol) {
-        let Some(abi) = crate::objc::fast::abi_of(symbol) else {
+        let Some(abi) = promotable_abi(symbol) else {
             return Classification::Slow;
         };
         return match guest_call_abi().can_fast_call(abi.types) && marshal::is_marshallable(abi) {
@@ -353,6 +353,45 @@ pub fn classify(tag: u64, symbol: &str) -> Classification {
         }
         Lookup::Refused(reason) => Classification::Refused(reason),
         Lookup::Unknown => Classification::Unknown,
+    }
+}
+
+/// An import as an inlined native call
+#[derive(Clone, Copy, Debug)]
+pub struct Promotion {
+    /// The signature microlift reproduces, built from the entry's own row.
+    pub abi: &'static FunctionAbi,
+    /// The address to call: the host's own, or a substituting function of this
+    /// runtime's.
+    pub address: u64,
+}
+
+/// `name` as an inlined native call, if this host has a table that says so.
+pub fn promotion(name: &str, resolved: u64) -> Option<Promotion> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::objc::fast::promotion(name, resolved)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (name, resolved);
+        None
+    }
+}
+
+/// The signature of a promotable entry, for a caller that only wants to classify it.
+///
+/// [`classify`] asks this so the audit reports how an import will really be reached;
+/// [`promotion`] is what actually decides, because only it knows the resolved address.
+pub fn promotable_abi(name: &str) -> Option<&'static FunctionAbi> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::objc::fast::abi_of(name)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = name;
+        None
     }
 }
 

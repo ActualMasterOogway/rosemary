@@ -720,7 +720,7 @@ pub fn isa_settings() -> &'static [(&'static str, &'static str)] {
 /// passthrough - so anything this does to `errno` is something the guest reads as its
 /// own.
 pub fn backend() -> microlift::Result<CraneliftBackend> {
-    let _errno = crate::thread::Errno::held();
+    let _errno = crate::thread::Errno::now();
     CraneliftBackend::with_flags(flags(), isa_settings())
 }
 
@@ -731,7 +731,7 @@ pub fn backend() -> microlift::Result<CraneliftBackend> {
 /// the machine.
 pub fn frontend_config() -> microlift::Result<TargetFrontendConfig> {
     // The same guard, for the same reason and the same call: see [`backend`].
-    let _errno = crate::thread::Errno::held();
+    let _errno = crate::thread::Errno::now();
     let isa = cranelift_native::builder()
         .map_err(|e| MicroliftError::CraneliftError(e.to_string()))?
         .finish(flags())

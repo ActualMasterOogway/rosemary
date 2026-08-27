@@ -161,8 +161,8 @@ fn forcing_emulated_on_a_native_binary_names_the_architecture() {
 /// a binary that used to run under emulation stops running at all.
 #[test]
 fn an_arm64e_slice_does_not_claim_the_native_backend() {
-    if !std::path::Path::new("/bin/ls").exists() {
-        skip!("no /bin/ls")
+    if !common::host_macho("/bin/ls") {
+        skip!("no host Mach-O at /bin/ls")
     }
     if HOST_RUNS_X86_64 {
         // There is no arm64e question to answer: the x86-64 slice is the one

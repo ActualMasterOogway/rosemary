@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 machish.workspace = true
+darwin.workspace = true
 gimli.workspace = true
 libc.workspace = true
 iced-x86 = "1"
@@ -19,3 +20,4 @@ static_init = "1.0.4"
 
 [dev-dependencies]
 libc.workspace = true
+darwin.workspace = true

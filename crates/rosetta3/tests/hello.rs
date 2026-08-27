@@ -82,8 +82,8 @@ fn the_fixture_exercises_all_three_outcomes() {
 
 #[test]
 fn every_import_of_bin_echo_is_classified() {
-    if !std::path::Path::new("/bin/echo").exists() {
-        skip!("/bin/echo not present");
+    if !common::host_macho("/bin/echo") {
+        skip!("no host Mach-O at /bin/echo");
     }
     let program = load("/bin/echo");
     let unknown: Vec<&str> = program

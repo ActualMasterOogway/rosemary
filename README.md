@@ -1,8 +1,8 @@
 # Rosetta 3
 
-Rosetta 3 is a high level emulator for running x86-64 MacOS binaries on AArch64 Mac devices. It implements a compliant Mach-O loader using `machish` as its base, and shims the x86-64 Mac ABI to the AArch64 one.
+Rosetta 3 is a high level emulator for running x86-64 and AArch64 macOS binaries on macOS and Linux. It implements a compliant Mach-O loader using `machish` as its base, and shims the x86-64 Mac ABI to the AArch64 one, additionally shimming Darwin APIs to cross platform libc ones where necessary.
 
-Rosetta 3 also builds and runs on x86-64 Macs, where the loader, the shim layer and the recompiler are the same code and only the host half of the ABI changes. Two backends are available on either host:
+Two backends are available on either host:
 
 * native, which links the program against the host's own dylibs and calls it directly. On an x86-64 host this is the backend selection picks for any x86-64 binary, because translating a program into the instruction set it is already written in buys nothing.
 * emulated, which recompiles the program through Microlift.
@@ -18,6 +18,14 @@ Rosetta 3 is relatively fast, though not up to speed with Rosetta 2 in all cases
 Rosetta 3, like many other high level emulators, implements Block Linking, a feature that makes jumping between different unknown blocks at lift time possible directly in the recompiled code via a jump table and a pinned register ABI. Microlift exposes the core of this functionality, and Rosetta 3 acts as the runtime that implements it.
 
 Rosetta 3 can optionally use Microlift's automatic flag analysis to optimize overflow and carry flag calculation via native hardware support. It is disabled by default out of accuracy concerns, following the same suit as Microlift (accuracy first, performance second). In most applications, leaving it off should not have a substantial performance impact.
+
+## Running on Linux
+
+Rosetta 3 builds and runs on Linux via the Darwin shim crate. It works by reimplementing Darwin APIs where they diverge on Linux, and passing the rest of them through to the host.
+
+Note: The Objective-C runtime, libdispatch, the Mach interfaces, the debug overlay and the `.app` bundle layout are macOS-only and are compiled out elsewhere. They are not implemented yet.
+
+`tools/linux-sync.sh` builds and runs the tree inside an Alpine container; its header documents the one-time setup.
 
 ## Differences from Rosetta 2
 

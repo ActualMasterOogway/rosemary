@@ -9,14 +9,7 @@ use crate::abi::table::FunctionAbi;
 use super::dispatch::{RUNTIME, Runtime, host_symbol};
 
 /// A runtime entry point as an inlined native call.
-#[derive(Clone, Copy, Debug)]
-pub struct Promotion {
-    /// The signature microlift reproduces, built from the entry's own row.
-    pub abi: &'static FunctionAbi,
-    /// The address to call: the host's own, or a substituting function of this
-    /// runtime's.
-    pub address: u64,
-}
+pub use crate::abi::Promotion;
 
 /// `name` as an inlined native call, if it is one.
 pub fn promotion(name: &str, resolved: u64) -> Option<Promotion> {

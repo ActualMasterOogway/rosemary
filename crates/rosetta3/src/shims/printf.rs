@@ -613,24 +613,19 @@ fn pad_bytes(out: &mut Vec<u8>, body: &[u8], spec: &Spec) {
 }
 
 /// The host stream a guest `printf` writes to.
+///
+/// Resolved rather than declared as an `extern`: the symbol is `__stdoutp` on Darwin
+/// and `stdout` elsewhere, so a link-time reference names one host or the other. See
+/// [`darwin::stdio`], which also answers the guest's own `___stdoutp` import - out of
+/// the same object, so a shim's output and the guest's interleave as they would
+/// natively.
 fn host_stdout() -> *mut libc::FILE {
-    // Declared here rather than taken from the `libc` crate, which does not
-    // export it.
-    unsafe extern "C" {
-        static __stdoutp: *mut libc::FILE;
-    }
-    // SAFETY: reading a pointer-sized global libSystem initializes before any
-    // user code runs, so it is valid by the time this process has a `main`.
-    unsafe { __stdoutp }
+    darwin::stdio::stdout()
 }
 
-/// `stderr`, for the same reason [`host_stdout`] is written out by hand.
+/// `stderr`, for the same reason.
 fn host_stderr() -> *mut libc::FILE {
-    unsafe extern "C" {
-        static __stderrp: *mut libc::FILE;
-    }
-    // SAFETY: as `host_stdout`.
-    unsafe { __stderrp }
+    darwin::stdio::stderr()
 }
 
 fn write_host(stream: *mut libc::FILE, bytes: &[u8]) {
@@ -720,15 +715,10 @@ pub fn sprintf_l(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMem
 
 /// Refuse unless `loc` formats numbers the way this renderer does.
 pub(crate) fn c_locale_or_refuse(symbol: &str, loc: u64) -> Result<()> {
-    let name = unsafe { libc::querylocale(libc::LC_NUMERIC_MASK, loc as _) };
-    // SAFETY: `querylocale` returns a NUL-terminated name owned by libc, or
-    // null for a handle it does not recognise.
-    let name = match name.is_null() {
-        true => None,
-        false => unsafe { core::ffi::CStr::from_ptr(name) }.to_str().ok(),
-    };
-    match name {
-        Some("C" | "POSIX") => Ok(()),
+    // SAFETY: `loc` is the `locale_t` the guest passed. A handle this process did
+    // not issue is the guest's own bug, and the answer to it is a refusal either way.
+    match unsafe { darwin::locale::is_c_numeric(loc as usize as *mut _) } {
+        Some(true) => Ok(()),
         _ => Err(AbiError::Refused {
             symbol: symbol.to_string(),
             reason: "a locale whose numbers this renderer does not reproduce",

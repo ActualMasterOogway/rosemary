@@ -1,3 +1,7 @@
+//! Gated to macOS: every test here realizes guest classes in the *host*
+//! Objective-C runtime, and a host without one has nothing to realize them into.
+#![cfg(target_os = "macos")]
+
 //! M6.3 acceptance: messages sent by the guest.
 //!
 //! The direction M6.2 left open. [`objc.rs`](objc.rs) messages a guest class

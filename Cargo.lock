@@ -303,6 +303,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "darwin"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "machish",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -628,6 +636,7 @@ dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-native",
+ "darwin",
  "gimli 0.34.0",
  "iced-x86",
  "libc",

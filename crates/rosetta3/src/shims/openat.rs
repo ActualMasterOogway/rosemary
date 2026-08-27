@@ -25,9 +25,13 @@ pub unsafe extern "C" fn open_with_mode(
     flags: libc::c_int,
     mode: libc::c_uint,
 ) -> libc::c_int {
+    let permissions = mode_for(flags, mode as u64);
+    let Some(flags) = host_flags(flags) else {
+        return -1;
+    };
     // SAFETY: the caller's guarantee, above. Whether the path exists is the
     // kernel's judgement, reported through the return value and `errno`.
-    unsafe { libc::open(path, flags, mode_for(flags, mode as u64)) }
+    unsafe { libc::open(path, flags, permissions) }
 }
 
 /// `int openat(int fd, const char *path, int flags, unsigned mode)`.
@@ -41,8 +45,38 @@ pub unsafe extern "C" fn openat_with_mode(
     flags: libc::c_int,
     mode: libc::c_uint,
 ) -> libc::c_int {
+    let permissions = mode_for(flags, mode as u64);
+    let Some(flags) = host_flags(flags) else {
+        return -1;
+    };
     // SAFETY: as `open_with_mode`.
-    unsafe { libc::openat(dirfd, path, flags, mode_for(flags, mode as u64)) }
+    unsafe { libc::openat(dirfd, path, flags, permissions) }
+}
+
+/// The guest's `open` flags as this host's, or `None` having set `errno`.
+fn host_flags(flags: libc::c_int) -> Option<libc::c_int> {
+    match darwin::fcntl::flags_to_host(flags) {
+        Ok(host) => Some(host),
+        Err(unknown) => {
+            say_unknown_open_flags(unknown);
+            darwin::errno::set(libc::EINVAL);
+            None
+        }
+    }
+}
+
+/// Name an `open` flag with no equivalent here, once for each distinct set.
+///
+/// `EINVAL` alone says the guest passed something wrong, which is not what happened.
+fn say_unknown_open_flags(unknown: libc::c_int) {
+    use std::sync::Mutex;
+    static SAID: Mutex<Vec<libc::c_int>> = Mutex::new(Vec::new());
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    if said.contains(&unknown) {
+        return;
+    }
+    said.push(unknown);
+    eprintln!("rosetta3: open: no equivalent on this host for Darwin O_ flags {unknown:#x}");
 }
 
 /// `sem_t *sem_open(const char *name, int oflag, unsigned mode, unsigned value)`, with
@@ -61,21 +95,25 @@ pub unsafe extern "C" fn sem_open_with_mode(
     mode: libc::c_uint,
     value: libc::c_uint,
 ) -> *mut libc::sem_t {
-    match oflag & libc::O_CREAT != 0 {
+    let Some(host_oflag) = host_flags(oflag) else {
+        return libc::SEM_FAILED;
+    };
+    // Decided by the guest's flags; made with the host's.
+    match darwin::fcntl::creates(oflag) {
         // SAFETY: the caller's guarantee, above. The mode is narrowed to the
         // `mode_t` the callee will read and re-promoted, exactly as `mode_for`
         // does - a guest register's spare bits are not permissions.
         true => unsafe {
             libc::sem_open(
                 name,
-                oflag,
+                host_oflag,
                 mode as libc::mode_t as libc::c_uint,
                 value as libc::c_uint,
             )
         },
         // SAFETY: as above, and the two arguments the guest did not pass are
         // not passed on. See the note on the value's range.
-        false => unsafe { libc::sem_open(name, oflag) },
+        false => unsafe { libc::sem_open(name, host_oflag) },
     }
 }
 
@@ -107,6 +145,14 @@ pub fn fcntl(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemor
         0
     };
 
+    // A command with no host equivalent is refused rather than forwarded under a
+    // number that means something else here. See [`darwin::fcntl::to_host`].
+    let Some(cmd) = darwin::fcntl::to_host(cmd) else {
+        set_int_return(ctx, -1);
+        darwin::errno::set(libc::EINVAL);
+        return Ok(());
+    };
+
     // SAFETY: the third parameter is a word-sized scalar or a pointer into the
     // guest, which is identity-mapped and so is a pointer here. Commands that
     // take no third argument are passed a zero rather than whatever the guest
@@ -121,7 +167,7 @@ pub fn fcntl(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemor
 /// Without `O_CREAT` the argument holds whatever the guest last left in the register
 /// the signature reads it from.
 fn mode_for(flags: i32, register: u64) -> libc::c_int {
-    if flags & libc::O_CREAT != 0 {
+    if darwin::fcntl::creates(flags) {
         register as libc::mode_t as libc::c_int
     } else {
         0
@@ -129,30 +175,28 @@ fn mode_for(flags: i32, register: u64) -> libc::c_int {
 }
 
 /// Whether `cmd` reads a third argument.
+///
+/// A question about the guest's call, so it is asked of the guest's own command
+/// numbers - which past `F_SETFL` are not this host's. See [`darwin::fcntl`].
 fn takes_third_argument(cmd: i32) -> bool {
-    !matches!(
-        cmd,
-        libc::F_GETFD
-            | libc::F_GETFL
-            | libc::F_GETOWN
-            | libc::F_FULLFSYNC
-            | libc::F_FREEZE_FS
-            | libc::F_THAW_FS
-            | libc::F_NOCACHE
-            | libc::F_GLOBAL_NOCACHE
-    )
+    darwin::fcntl::takes_third_argument(cmd)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // The wrappers take the *guest's* flags, which are Darwin's on either host - so
+    // the tests pass Darwin's, exactly as a guest would. Using `O_CREAT` here
+    // would test the wrapper against the wrong caller.
+    use darwin::fcntl::oflag::{O_CREAT, O_EXCL, O_RDONLY, O_WRONLY};
+
     #[test]
     fn a_mode_is_only_read_when_o_creat_asks_for_one() {
-        assert_eq!(mode_for(libc::O_RDONLY, 0o777), 0);
-        assert_eq!(mode_for(libc::O_WRONLY | libc::O_CREAT, 0o644), 0o644);
+        assert_eq!(mode_for(O_RDONLY, 0o777), 0);
+        assert_eq!(mode_for(O_WRONLY | O_CREAT, 0o644), 0o644);
         // The register may hold a whole pointer; only the mode bits are a mode.
-        assert_eq!(mode_for(libc::O_CREAT, 0xdead_beef_0000_01a4), 0o644);
+        assert_eq!(mode_for(O_CREAT, 0xdead_beef_0000_01a4), 0o644);
     }
 
     /// The wrapper is the callee a fast import calls, so it has to *be* `open`:
@@ -170,7 +214,7 @@ mod tests {
         let fd = unsafe {
             open_with_mode(
                 c.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+                O_WRONLY | O_CREAT | O_EXCL,
                 0o604,
             )
         };
@@ -203,7 +247,7 @@ mod tests {
 
         // SAFETY: as above; the third argument is the stale register this shim
         // exists to not believe.
-        let fd = unsafe { open_with_mode(c.as_ptr(), libc::O_RDONLY, 0o777) };
+        let fd = unsafe { open_with_mode(c.as_ptr(), O_RDONLY, 0o777) };
         assert!(fd >= 0, "open failed: {}", std::io::Error::last_os_error());
         // SAFETY: a descriptor this test just opened.
         unsafe { libc::close(fd) };
@@ -222,7 +266,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let c_dir = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
         // SAFETY: a NUL-terminated path this test owns.
-        let dirfd = unsafe { open_with_mode(c_dir.as_ptr(), libc::O_RDONLY, 0) };
+        let dirfd = unsafe { open_with_mode(c_dir.as_ptr(), O_RDONLY, 0) };
         assert!(dirfd >= 0, "opening the directory failed");
 
         let name = std::ffi::CString::new("relative").unwrap();
@@ -231,7 +275,7 @@ mod tests {
             openat_with_mode(
                 dirfd,
                 name.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+                O_WRONLY | O_CREAT | O_EXCL,
                 0o604,
             )
         };
@@ -264,7 +308,7 @@ mod tests {
         // SAFETY: as above. `O_EXCL` so a leftover from a previous run is a
         // failure rather than a semaphore with somebody else's count.
         let sem =
-            unsafe { sem_open_with_mode(name.as_ptr(), libc::O_CREAT | libc::O_EXCL, 0o600, 2) };
+            unsafe { sem_open_with_mode(name.as_ptr(), O_CREAT | O_EXCL, 0o600, 2) };
         assert_ne!(
             sem,
             libc::SEM_FAILED,

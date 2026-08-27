@@ -1,3 +1,7 @@
+//! Gated to macOS: every test here realizes guest classes in the *host*
+//! Objective-C runtime, and a host without one has nothing to realize them into.
+#![cfg(target_os = "macos")]
+
 //! M6.2 acceptance: the guest's classes, realized in the host's runtime.
 //!
 //! The direction under test is **host -> guest**, and that is the whole point.

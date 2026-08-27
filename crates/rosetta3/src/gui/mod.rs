@@ -52,7 +52,7 @@ pub fn install() {
     if !enabled() {
         return;
     }
-    let _errno = crate::thread::Errno::held();
+    let _errno = crate::thread::Errno::now();
     hotkey::install();
     ARMED.store(true, Relaxed);
     // The panel, open from the first frame, without a keystroke. This exists to
@@ -75,7 +75,7 @@ pub fn install() {
 /// a framework this system does not have sets `ENOENT`, and [`sys`] does exactly that
 /// on first use.
 pub(crate) fn guarded(body: impl FnOnce()) {
-    let _errno = crate::thread::Errno::held();
+    let _errno = crate::thread::Errno::now();
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err() {
         ARMED.store(false, Relaxed);
         say_once("the overlay panicked and has been switched off for this run");

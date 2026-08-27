@@ -258,8 +258,7 @@ fn outcome(rc: isize) -> String {
     if rc == 0 || (rc != -1 && rc as usize != usize::MAX) {
         return format!("{rc:#x}");
     }
-    // SAFETY: `__error` returns this thread's `errno` slot.
-    let e = unsafe { *libc::__error() };
+    let e = darwin::errno::get();
     format!("failed, errno {e}")
 }
 

@@ -411,6 +411,11 @@ mod tests {
     #[test]
     fn the_struct_is_sixteen_bytes_of_the_shape_both_architectures_use() {
         assert_eq!(std::mem::size_of::<SigAction>(), SigAction::SIZE);
+        // The guest's `struct sigaction` is Darwin's, so this is a cross-check against
+        // the host's declaration only where the host is a Mac. Under glibc and musl
+        // the host's is 152 bytes of a different shape, which is one of the reasons
+        // `darwin::divergent` refuses to pass `sigaction` through at all.
+        #[cfg(target_os = "macos")]
         assert_eq!(
             std::mem::size_of::<SigAction>(),
             std::mem::size_of::<libc::sigaction>()

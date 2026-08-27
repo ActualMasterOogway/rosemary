@@ -1879,7 +1879,14 @@ pub fn build_native_with(name: &str, source: &str, extra: &[&str]) -> Option<Str
         .arg(&src)
         .status()
         .ok()?;
-    status.success().then(|| out.to_string_lossy().into_owned())
+    if !status.success() {
+        return None;
+    }
+    // And it has to be a Mach-O, which is the whole point of a "native" fixture:
+    // it exists to be run by the native backend, and that backend loads Mach-O. On a
+    // host that is not a Mac, `cc` succeeds and produces an ELF, and a test handed one
+    // of those fails on a magic number rather than skipping.
+    host_macho(out.to_str()?).then(|| out.to_string_lossy().into_owned())
 }
 
 /// Run a program **natively**, as the host's own copy of it.
@@ -2223,6 +2230,29 @@ pub fn run_guest_with(flags: &[&str], path: &str, args: &[&str]) -> (Option<i32>
         out.status.code(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// Whether this host has a Mach-O at `path` to use as a fixture.
+///
+/// Two ways to have none, and the second is the one that matters: the file may be
+/// missing, or - on a host that is not a Mac - it may be there and be an ELF. A test
+/// that reads `/bin/ls` is reading *this machine's own* Mach-O, so on Linux the honest
+/// answer is that there is not one and the test skips.
+pub fn host_macho(path: &str) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let Some(magic) = bytes.get(..4) else {
+        return false;
+    };
+    let magic = u32::from_be_bytes([magic[0], magic[1], magic[2], magic[3]]);
+    matches!(
+        magic,
+        // Thin, 32- and 64-bit, either endianness...
+        0xfeed_face | 0xcefa_edfe | 0xfeed_facf | 0xcffa_edfe
+        // ...and fat, likewise.
+        | 0xcafe_babe | 0xbeba_feca | 0xcafe_babf | 0xbfba_feca
     )
 }
 

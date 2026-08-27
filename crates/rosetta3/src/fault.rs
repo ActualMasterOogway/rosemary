@@ -3,7 +3,7 @@
 use microlift::core::srcloc::{GuestCodeMap, GuestCodeRange};
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
 /// One compiled translation, as a fault needs to see it.
 struct Placed {
@@ -284,7 +284,10 @@ pub fn install() {
         };
         let saved = saved_for(signal);
         saved.handler.store(old.sa_sigaction, Ordering::SeqCst);
-        saved.mask.store(old.sa_mask, Ordering::SeqCst);
+        // SAFETY: `install` runs once during start-up. A fault arriving between the
+        // `sigaction` above and this line reads the empty mask, which is what the
+        // atomic it replaced would have held too.
+        unsafe { saved.mask.set(darwin::signal::Mask::of(&old)) };
         saved.flags.store(old.sa_flags, Ordering::SeqCst);
     }
 }
@@ -295,14 +298,18 @@ pub fn install() {
 /// A `sigaction` in a `static mut` would be the obvious shape and the wrong one.
 struct Saved {
     handler: AtomicUsize,
-    mask: AtomicU32,
+    /// Not an atomic: a `sigset_t` is a word on Darwin and a 128-byte structure under
+    /// glibc, and there is no atomic of that size. Written once by [`install`] and
+    /// read from the handler thereafter, which is the discipline
+    /// [`darwin::signal::StaticMask`] is for.
+    mask: darwin::signal::StaticMask,
     flags: AtomicI32,
 }
 
 const fn saved() -> Saved {
     Saved {
         handler: AtomicUsize::new(libc::SIG_DFL),
-        mask: AtomicU32::new(0),
+        mask: darwin::signal::StaticMask::empty(),
         flags: AtomicI32::new(0),
     }
 }
@@ -337,7 +344,7 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
 
     // SAFETY: the kernel passes a live `siginfo_t` for the duration of the
     // handler; `si_addr` is the faulting address for both signals handled here.
-    let addr = unsafe { info.as_ref() }.map_or(0, |i| i.si_addr as usize as u64);
+    let addr = unsafe { info.as_ref() }.map_or(0, |i| unsafe { darwin::signal::fault_address(i) });
     out.str(" at ");
     out.hex(addr);
     if let Some(text) = ascii_word(addr) {
@@ -450,7 +457,7 @@ fn say_image(out: &mut Buffer, addr: u64) {
 /// What this runtime knows about the faulting thread.
 fn say_thread(out: &mut Buffer) {
     out.str("\n  thread ");
-    out.hex(u64::from(crate::thread::mach_port()));
+    out.hex(u64::from(crate::thread::key()));
     let Some(state) = crate::thread::current() else {
         out.str(" - not a guest thread; the fault is in this runtime or in a host library");
         return;
@@ -479,7 +486,7 @@ fn restore(signal: i32) {
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = saved.handler.load(Ordering::SeqCst);
-        action.sa_mask = saved.mask.load(Ordering::SeqCst);
+        saved.mask.get().apply(&mut action);
         action.sa_flags = saved.flags.load(Ordering::SeqCst);
         libc::sigaction(signal, &action, std::ptr::null_mut());
     }

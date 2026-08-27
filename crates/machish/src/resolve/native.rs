@@ -253,11 +253,13 @@ impl NativeDylibProvider {
         }
         let c = std::ffi::CString::new(bare).ok()?;
 
-        // `RTLD_DEFAULT` is `(void *)-2` on macOS: search all loaded images.
-        let handle = self
-            .handle
-            .as_ref()
-            .map_or(-2isize as *mut core::ffi::c_void, |h| h.0);
+        // Search every loaded image when this provider is not scoped to one.
+        //
+        // Taken from the `libc` crate rather than written out: the sentinel is
+        // `(void *)-2` on macOS and the BSDs and a null pointer under glibc and musl,
+        // and a hardcoded `-2` on Linux is not a wrong answer but *no* answer - every
+        // lookup misses, and every import comes back unresolved.
+        let handle = self.handle.as_ref().map_or(libc::RTLD_DEFAULT, |h| h.0);
 
         // SAFETY: `handle` is either a live `dlopen` result owned by `self` or
         // the `RTLD_DEFAULT` sentinel, and `c` is a valid NUL-terminated string
@@ -362,6 +364,10 @@ mod tests {
     }
 
     #[test]
+    // The `$INODE64` mangling is Darwin's own compatibility scheme, and `fts_open`
+    // is a BSD interface musl does not have at all - so on Linux there is neither a
+    // variant to fall back from nor a plain name to fall back to.
+    #[cfg(target_vendor = "apple")]
     fn a_legacy_x86_variant_suffix_falls_back_to_the_plain_name() {
         // `/bin/ls` really does import this name. Which arm of this test runs
         // is the whole difference between the two hosts: arm64 does not export
@@ -402,6 +408,9 @@ mod tests {
     }
 
     #[test]
+    // Named by a macOS install path, which is the point: autoload opens the library
+    // an import *names*, and the name in a Mach-O is `/usr/lib/libncurses.5.4.dylib`.
+    #[cfg(target_vendor = "apple")]
     fn autoload_opens_a_library_the_host_has_not_loaded() {
         // Nothing in this test process links `libncurses`, so `RTLD_DEFAULT`
         // cannot see `_tputs` until the library named by the import is opened.

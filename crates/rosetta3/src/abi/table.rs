@@ -2388,6 +2388,22 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("pthread_mutexattr_init", I32, P),
     sig!("pthread_mutexattr_setprotocol", I32, P, I32),
     sig!("pthread_mutexattr_settype", I32, P, I32),
+    sig!("pthread_mutexattr_gettype", I32, P, P),
+    sig!("pthread_mutexattr_setpshared", I32, P, I32),
+    sig!("pthread_mutexattr_getpshared", I32, P, P),
+    sig!("pthread_condattr_setpshared", I32, P, I32),
+    sig!("pthread_condattr_getpshared", I32, P, P),
+    sig!("pthread_rwlockattr_init", I32, P),
+    sig!("pthread_rwlockattr_destroy", I32, P),
+    sig!("pthread_rwlockattr_setpshared", I32, P, I32),
+    sig!("pthread_rwlockattr_getpshared", I32, P, P),
+    // The two cancellation settings, which carry Darwin's own numbering - inverted
+    // relative to the host's. `pthread_cancel` itself stays refused below: setting the
+    // state is harmless, and acting on it is what unwinds a stack nothing here saw.
+    sig!("pthread_testcancel", V),
+    sig!("pthread_yield_np", I32),
+    sig!("pthread_getconcurrency", I32),
+    sig!("pthread_setconcurrency", I32, I32),
     // The initialiser is guest code, and `pthread_once` guarantees it runs
     // exactly once - a guarantee that survives thunking, since the thunk is
     // stable per guest address.

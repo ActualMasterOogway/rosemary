@@ -294,14 +294,14 @@ fn fast_import(site: &crate::program::ImportSite) -> Option<ImportKind> {
     }
     // An Objective-C runtime entry point is inlined against a *substituting*
     // address rather than the host's own; everything else against the host's.
-    let promotion = match crate::objc::fast::promotion(&site.symbol, site.resolved) {
+    let promotion = match crate::abi::promotion(&site.symbol, site.resolved) {
         Some(promotion) => promotion,
         None => {
             let crate::abi::Lookup::Known(abi) = crate::abi::table::lookup(site.tag, &site.symbol)
             else {
                 return None;
             };
-            crate::objc::fast::Promotion {
+            crate::abi::Promotion {
                 abi,
                 address: site.resolved,
             }

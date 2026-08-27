@@ -30,6 +30,7 @@ pub fn run(exec: &dyn Execution) -> Result<i32, VmError> {
     crate::fault::note_images(exec.report());
     // Before any framework can ask a question about the main executable and get
     // an answer about this binary rather than the program's. See [`crate::compat`].
+    #[cfg(target_os = "macos")]
     crate::compat::install();
     say_image_map(exec);
     // Whatever this backend must do before any of the program's own code runs.

@@ -1,0 +1,10 @@
+[package]
+name = "darwin"
+description = "A shim for the Darwin libc, libsystem, and other low level Darwin facilities that can be easily bridged to the host libc."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+machish.workspace = true
+libc.workspace = true

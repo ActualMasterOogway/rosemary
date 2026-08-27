@@ -134,8 +134,8 @@ fn fast_and_slow_imports_produce_the_same_program() {
 
 #[test]
 fn bin_ls_agrees_with_the_hosts_own_ls() {
-    if !Path::new("/bin/ls").exists() {
-        skip!("/bin/ls not present");
+    if !common::host_macho("/bin/ls") {
+        skip!("no host Mach-O at /bin/ls");
     }
     // A directory with entries of both kinds, and content that is stable while
     // the test runs - `ls` of anything shared would race with the rest of the

@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use rosetta3::{
     Classification, Engine, Execution, ImportPolicy, Native, Program, Vm, audit_call_targets,
-    bundle, startup,
+    startup,
 };
 
 use microlift::arch::x86_64::X86_64;
@@ -86,6 +86,7 @@ fn emulated(
 
     // Objective-C registration happens inside `startup::run`, in dyld's order.
     // It is driven from here first only so that its refusals reach the user.
+    #[cfg(target_os = "macos")]
     for r in vm.register_objc()?.refusals() {
         eprintln!("rosetta3: objc: {r:?}");
     }
@@ -124,9 +125,13 @@ fn main() -> ExitCode {
         // or `[NSBundle mainBundle]` is this binary's directory and the
         // application loads no nib, finds no resources, and sits in its run
         // loop having silently done nothing. See [`rosetta3::bundle`].
-        if let Some(mirror) = bundle::remirror(std::path::Path::new(&path)) {
+        //
+        // A `.app` is a macOS layout read by a macOS framework, so there is nothing to
+        // mirror on a host that has neither.
+        #[cfg(target_os = "macos")]
+        if let Some(mirror) = rosetta3::bundle::remirror(std::path::Path::new(&path)) {
             eprintln!("rosetta3: re-executing from {}", mirror.display());
-            let e = bundle::reexec(&mirror);
+            let e = rosetta3::bundle::reexec(&mirror);
             // Only reached if `execv` failed, in which case running anyway is
             // strictly better than not running.
             eprintln!("rosetta3: could not re-execute from the bundle mirror: {e}");

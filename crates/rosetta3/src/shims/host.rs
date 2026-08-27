@@ -1,4 +1,4 @@
-//! Shared lookup for host functions used by hand-written shims.
+//! Shared lookup for the host functions hand-written shims forward to.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -11,9 +11,9 @@ type HostSymbols = BTreeMap<&'static str, u64>;
 static HOST_SYMBOLS: AtomicPtr<HostSymbols> = AtomicPtr::new(std::ptr::null_mut());
 static HOST_SYMBOL_WRITER: Mutex<()> = Mutex::new(());
 
-/// Resolve a shim entry point, refusing by name when the host does not export it.
+/// Resolve a shim entry point, refusing by name when this host has no answer.
 pub(crate) fn host_or_refuse(symbol: &str) -> Result<u64> {
-    let name = symbol.strip_prefix('_').unwrap_or(symbol);
+    let name = darwin::c_name(symbol);
 
     let snapshot = HOST_SYMBOLS.load(Ordering::Acquire);
     if !snapshot.is_null() {
@@ -24,8 +24,14 @@ pub(crate) fn host_or_refuse(symbol: &str) -> Result<u64> {
         }
     }
 
-    let address = crate::host::symbol(name).ok_or_else(|| AbiError::NoShim {
-        symbol: symbol.to_string(),
+    let address = darwin::symbol(name).ok_or_else(|| match darwin::divergent::reason(name) {
+        Some(reason) => AbiError::Refused {
+            symbol: symbol.to_string(),
+            reason,
+        },
+        None => AbiError::NoShim {
+            symbol: symbol.to_string(),
+        },
     })?;
 
     // Publish a new immutable map. The lock is only on the uncommon successful

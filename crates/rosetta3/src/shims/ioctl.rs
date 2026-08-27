@@ -23,7 +23,7 @@ pub fn ioctl(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemor
     // architectures, and the guest is identity-mapped, so a pointer it passed
     // is a pointer here. Whether the request is meaningful for `fd` is the
     // kernel's judgement, reported through the return value as usual.
-    let rc = unsafe { libc::ioctl(fd, request as libc::c_ulong, arg as usize) };
+    let rc = unsafe { libc::ioctl(fd, darwin::ioctl::request(request), arg as usize) };
     set_int_return(ctx, rc);
     Ok(())
 }
@@ -69,7 +69,7 @@ mod tests {
 
         // SAFETY: a real `ioctl` on the process's own stdin with a correctly
         // sized `struct winsize` buffer.
-        let host = unsafe { libc::ioctl(0, TIOCGWINSZ as libc::c_ulong, ws.as_mut_ptr()) };
+        let host = unsafe { libc::ioctl(0, darwin::ioctl::request(TIOCGWINSZ), ws.as_mut_ptr()) };
         let shim = call(0, TIOCGWINSZ, ws.as_mut_ptr() as usize as u64);
         assert_eq!(shim, host as i64);
     }
