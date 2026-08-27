@@ -172,7 +172,7 @@ impl Exit {
     ///
     /// The exits that do not are the ones the host owes work before anything can
     /// continue at a guest address: an import call, an unregistered indirect call,
-    /// a `cpuid` or a syscall, the `int3` of a return stub, an error. Everything
+    /// a `cpuid`, the `int3` of a return stub, an error. Everything
     /// else is answered by *entering whatever covers `rip`*, which is what a link
     /// does. Kept in step with the `emit_exit` call sites in
     /// `microlift::core` and `microlift::arch::x86_64::semantics`.

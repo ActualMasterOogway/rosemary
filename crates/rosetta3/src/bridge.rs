@@ -1,8 +1,16 @@
-//! Runtime-supplied fast-call bridges: servicing an import without a VM exit.
+//! Servicing a guest event without a VM exit.
+//!
+//! Two shapes of host routine live here. A **bridge** is called for a `call` the
+//! recompiler intercepted - a registered import, or an indirect call through an
+//! address it could not resolve - and answers with a code saying whether the guest
+//! may carry on inline. A **callback** is called for the two events that used to be
+//! VM exits of their own, a `syscall` and an instruction the recompiler does not
+//! lift; it returns nothing, and steers the guest by the PC it leaves behind. See
+//! [`microlift::core::callback`].
 
 use std::sync::Arc;
 
-use microlift::arch::x86_64::context::RegisterContext;
+use microlift::arch::x86_64::context::{RegisterContext, X86_64Callbacks};
 use microlift::core::bridge::{BridgeImport, ImportKind, ImportRegistry, RESUME_LINKED};
 use microlift::core::exit::{ExitReason, TransferKind};
 
@@ -71,11 +79,7 @@ fn caught(vm: &crate::vm::Vm, what: &str, body: impl FnOnce() -> u32) -> u32 {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(code) => code,
         Err(payload) => {
-            let detail = payload
-                .downcast_ref::<&str>()
-                .map(|s| (*s).to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "a panic with no message".to_string());
+            let detail = panic_message(&*payload);
             vm.set_pending(
                 crate::abi::AbiError::Refused {
                     symbol: what.to_string(),
@@ -86,6 +90,15 @@ fn caught(vm: &crate::vm::Vm, what: &str, body: impl FnOnce() -> u32) -> u32 {
             HANDLED
         }
     }
+}
+
+/// What a caught panic said, for a diagnostic.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic with no message".to_string())
 }
 
 /// Service a call to a registered import.
@@ -136,6 +149,94 @@ extern "C" fn indirect_call(ctx: *mut RegisterContext, target: u64) -> u32 {
             }
         }
     })
+}
+
+/// The PC a callback leaves behind once it has parked an error: not guest code and
+/// in no link table, so the region it returns into dispatches it straight back to
+/// the run loop, which raises the parked error instead of ever looking it up.
+///
+/// **Not zero.** A link table's rows start zeroed, so a probe for `0` matches an
+/// empty row and jumps to the host code it names, which is also zero. `u64::MAX`
+/// is the address no row can hold and no guest can be at.
+const ABORT_PC: u64 = u64::MAX;
+
+/// Park `err` and stop the guest at the region's next dispatch.
+///
+/// A callback returns `()`, so it cannot hand a failure back the way a bridge
+/// does, and returning normally would resume a guest that has an unserviced
+/// event behind it.
+fn abort(vm: &crate::vm::Vm, ctx: &mut RegisterContext, err: crate::vm::VmError) {
+    vm.set_pending(err);
+    ctx.rip = ABORT_PC;
+}
+
+/// End the process, for a callback reached with no VM published on this thread.
+///
+/// Not reachable from the run loop, which publishes the VM around every entry into
+/// guest code; and there is nothing better to do about it than say so, since the
+/// alternative is a guest resumed past an event nothing serviced.
+fn no_vm(what: &str) -> ! {
+    eprintln!("rosetta3: {what} with no VM on this thread, which cannot be serviced");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    std::process::abort()
+}
+
+/// Service a guest `syscall`.
+///
+/// Under high-level emulation the host's libSystem issues the real syscalls
+/// natively, so a guest `syscall` means hand-written assembly and there is nothing
+/// to forward it to. The PC is the return address, as it was on the old exit.
+unsafe extern "C" fn syscall(ctx: *mut RegisterContext) {
+    // SAFETY: as in `import_call`.
+    let ctx = unsafe { &mut *ctx };
+    let Some(vm) = crate::thunk::current() else {
+        no_vm("a guest syscall")
+    };
+    abort(
+        vm,
+        ctx,
+        crate::vm::VmError::Syscall {
+            number: ctx.rax,
+            pc: ctx.rip,
+        },
+    );
+}
+
+/// Perform the instructions the recompiler declined to lift, at the PC it left.
+unsafe extern "C" fn interpret(ctx: *mut RegisterContext, instructions: u64) {
+    // SAFETY: as in `import_call`.
+    let ctx = unsafe { &mut *ctx };
+    let Some(vm) = crate::thunk::current() else {
+        no_vm("an instruction for the interpreter")
+    };
+    let state = crate::thread::current();
+    publish_rsp(state, ctx);
+    // `AssertUnwindSafe` for the reason `caught` gives: a panic here is a bug in
+    // this runtime, and one worth reporting rather than aborting on.
+    let at = ctx.rip;
+    let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::interp::run(ctx, &vm.view(), instructions)
+    }));
+    match done {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => abort(vm, ctx, err),
+        Err(payload) => abort(
+            vm,
+            ctx,
+            crate::vm::VmError::Interpret {
+                pc: at,
+                what: format!("the runtime panicked: {}", panic_message(&*payload)),
+            },
+        ),
+    }
+}
+
+/// The callbacks every guest context carries. See [`crate::vm::Vm::enter`].
+pub fn callbacks() -> X86_64Callbacks {
+    X86_64Callbacks {
+        handle_syscall: syscall,
+        interpreter_fallback: interpret,
+    }
 }
 
 /// The address of a bridge function, as microlift wants it.

@@ -39,8 +39,11 @@ pub enum VmError {
     UnknownIndirectCall { callee: u64, resume: u64 },
     /// The guest executed a `syscall` instruction. A stop rather than a passthrough.
     Syscall { number: u64, pc: u64 },
-    /// An exit the runtime has nothing to do about: an unimplemented or invalid
-    /// instruction, a trap, a divide error.
+    /// An instruction the recompiler handed to [`crate::interp`], which does not
+    /// perform it either. `what` names it, or says why it was refused.
+    Interpret { pc: u64, what: String },
+    /// An exit the runtime has nothing to do about: an invalid instruction, a
+    /// trap, a divide error.
     Trap {
         reason: ExitReason,
         code: u32,
@@ -168,16 +171,11 @@ impl fmt::Display for VmError {
             VmError::Syscall { number, pc } => {
                 write!(f, "guest syscall {number:#x} at {pc:#x}: not translated")
             }
+            VmError::Interpret { pc, what } => {
+                write!(f, "the interpreter refused {pc:#x}: {what}")
+            }
             VmError::Trap { reason, code, pc } => {
-                write!(f, "guest stopped at {pc:#x}: {reason} (code {code:#x}")?;
-                // For an unimplemented instruction the code *is* the decoder's
-                // identity for it, and a number alone leaves the reader with no
-                // way to find out which instruction the recompiler is missing -
-                // which is the only thing this diagnostic is for.
-                if let Some(name) = instruction_name(*reason, *code) {
-                    write!(f, ", {name}")?;
-                }
-                write!(f, ")")
+                write!(f, "guest stopped at {pc:#x}: {reason} (code {code:#x})")
             }
             VmError::Stack { source } => write!(f, "guest stack: {source}"),
             VmError::Thunk { guest, reason } => {
@@ -197,22 +195,6 @@ impl fmt::Display for VmError {
 
 impl std::error::Error for VmError {}
 
-/// The decoder's name for the instruction an `UnimplementedInstruction` exit
-/// carries, or `None` for any other exit.
-///
-/// The lifter stores `iced_x86::Instruction::code()` in `exit_code`, so this is
-/// a total function of that number and needs no access to guest memory - which
-/// matters, because it is called from `Display` long after the guest is gone.
-fn instruction_name(reason: ExitReason, code: u32) -> Option<String> {
-    if reason != ExitReason::UnimplementedInstruction {
-        return None;
-    }
-    let code = iced_x86::Code::try_from(code as usize).ok()?;
-    // `Debug` is the enum variant, which is the mnemonic *plus* its operand
-    // shape - `Vsqrtsd_xmm_xmm_xmmm64` rather than just `vsqrtsd`.
-    Some(format!("{code:?}"))
-}
-
 /// An exit, as [`crate::stats`] counts them.
 pub(crate) fn classify(exit: ExitReason, code: u32) -> crate::stats::Exit {
     use crate::stats::Exit;
@@ -224,9 +206,7 @@ pub(crate) fn classify(exit: ExitReason, code: u32) -> crate::stats::Exit {
         ExitReason::None => Exit::Fallthrough,
         ExitReason::ImportedFunctionCall => Exit::Import,
         ExitReason::IndirectCall => Exit::Indirect,
-        ExitReason::Cpuid | ExitReason::Syscall | ExitReason::UnimplementedInstruction => {
-            Exit::Instruction
-        }
+        ExitReason::Cpuid => Exit::Instruction,
         ExitReason::UnknownJump => match TransferKind::try_from(code) {
             Ok(TransferKind::DirectCall) => Exit::DirectCall,
             Ok(TransferKind::RegionTail | TransferKind::NoResumePoint) => Exit::RegionTail,
@@ -788,6 +768,12 @@ impl Vm {
         // one place every entry into guest code passes through, rather than
         // wherever a context happens to be built. See [`crate::thread`].
         ctx.gs_base = crate::thread::tsd_base();
+        // The two events lifted code services *inline*, by calling the host
+        // rather than exiting to it: a `syscall`, and an instruction the
+        // recompiler does not lift. Set here for the reason `gs_base` is - this
+        // is the one place every entry into guest code passes through - and
+        // because microlift's own defaults abort rather than return.
+        ctx.callbacks = crate::bridge::callbacks();
         // The two tables lifted code reads: the block-link rows a probe hashes into
         // and the ring a `call` pushes its return address onto. Facts about *this
         // thread*, for the same reason and in the same place as `gs_base`, and set
@@ -1056,25 +1042,6 @@ impl Vm {
                 ctx.rbx = ebx as u64;
                 ctx.rcx = ecx as u64;
                 ctx.rdx = edx as u64;
-                Ok(None)
-            }
-
-            // Under high-level emulation the host's libSystem issues the real
-            // syscalls natively, so a guest `syscall` means hand-written
-            // assembly.
-            ExitReason::Syscall => Err(VmError::Syscall {
-                number: ctx.rax,
-                pc: ctx.rip,
-            }),
-
-            // The one unimplemented instruction this runtime implements.
-            ExitReason::UnimplementedInstruction
-                if iced_x86::Code::try_from(ctx.exit_code as usize)
-                    .map(|c| c.mnemonic() == iced_x86::Mnemonic::Cmpxchg16b)
-                    .unwrap_or(false) =>
-            {
-                let mem = self.view();
-                crate::atomic128::service(ctx, &mem)?;
                 Ok(None)
             }
 

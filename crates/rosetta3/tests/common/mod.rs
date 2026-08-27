@@ -1749,6 +1749,42 @@ int main(void) {
 }
 "#;
 
+/// A guest that issues a raw `syscall`, which is the one thing high-level
+/// emulation cannot forward: the host's own libSystem makes the real calls, so
+/// a `syscall` in guest code is hand-written assembly with no shim behind it.
+///
+/// `write(2)` rather than something exotic, so that a runtime which ever does
+/// translate one has an obvious first case - and so a *failure* to refuse it is
+/// visible on stdout rather than silent.
+pub const SYSCALL_C: &str = r#"
+#include <stdio.h>
+
+int main(void) {
+    printf("before\n");
+    fflush(stdout);
+    __asm__ volatile(
+        "movq $0x2000004, %%rax\n\t"
+        "movq $1, %%rdi\n\t"
+        "leaq 1f(%%rip), %%rsi\n\t"
+        "movq $4, %%rdx\n\t"
+        "syscall\n\t"
+        "jmp 2f\n\t"
+        "1: .ascii \"raw\\n\"\n\t"
+        "2:"
+        ::: "rax", "rdi", "rsi", "rdx", "rcx", "r11", "memory");
+    printf("after\n");
+    return 0;
+}
+"#;
+
+/// Build [`SYSCALL_C`], or `None` if this host cannot.
+pub fn syscall_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("guest_syscall", SYSCALL_C, &[]))
+        .clone()
+}
+
 /// Build [`FAULT_C`], or `None` if this host cannot.
 pub fn fault_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();

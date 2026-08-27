@@ -1,34 +1,23 @@
 //! `CMPXCHG16B`, performed by the host because the guest shares it.
 
-use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, Register};
+use iced_x86::{Instruction, Register};
 
 use microlift::arch::x86_64::context::RegisterContext;
 
-use crate::abi::GuestMemory;
 use crate::vm::VmError;
 
-/// Longest x86-64 instruction, and so how far back the start can be.
-const MAX_LEN: u64 = 15;
-
-/// Perform the `CMPXCHG16B` the guest exited on.
-pub fn service(ctx: &mut RegisterContext, mem: &dyn GuestMemory) -> Result<(), VmError> {
+/// Perform the `CMPXCHG16B` the recompiler handed to [`crate::interp`].
+///
+/// The PC is left alone: the interpreter steps it over the instruction.
+pub fn service(ctx: &mut RegisterContext, instruction: &Instruction) -> Result<(), VmError> {
     let at = ctx.rip;
-    let instruction = decode_before(at, mem).ok_or(VmError::Trap {
-        reason: microlift::core::exit::ExitReason::UnimplementedInstruction,
-        code: ctx.exit_code,
-        pc: at,
-    })?;
-    let address = effective_address(&instruction, ctx).ok_or(VmError::Trap {
-        reason: microlift::core::exit::ExitReason::UnimplementedInstruction,
-        code: ctx.exit_code,
-        pc: at,
-    })?;
+    let refused = |what: String| VmError::Interpret { pc: at, what };
+    let address = effective_address(instruction, ctx)
+        .ok_or_else(|| refused("an operand this runtime cannot address".into()))?;
     if address % 16 != 0 {
-        return Err(VmError::Trap {
-            reason: microlift::core::exit::ExitReason::UnimplementedInstruction,
-            code: ctx.exit_code,
-            pc: at,
-        });
+        return Err(refused(format!(
+            "a misaligned operand at {address:#x}, which is a #GP on the guest's own CPU"
+        )));
     }
 
     let expected = u128::from(ctx.rax) | (u128::from(ctx.rdx) << 64);
@@ -99,11 +88,11 @@ unsafe fn compare_exchange(at: *mut u128, expected: u128, desired: u128) -> u128
 
 /// The same operation on the host that has the guest's own instruction.
 ///
-/// The guest only reaches here when [`Atomic128Mode::Exit`] was chosen, which on an
-/// x86-64 host means the CPU lacks `CX16` - so this is the servicing path for a
-/// feature the lifted code could not use inline, not a translation.
+/// The guest only reaches here when [`Atomic128Mode::Interpret`] was chosen, which
+/// on an x86-64 host means the CPU lacks `CX16` - so this is the servicing path for
+/// a feature the lifted code could not use inline, not a translation.
 ///
-/// [`Atomic128Mode::Exit`]: microlift::core::Atomic128Mode
+/// [`Atomic128Mode::Interpret`]: microlift::core::Atomic128Mode
 ///
 /// # Safety
 ///
@@ -136,25 +125,6 @@ unsafe fn compare_exchange(at: *mut u128, expected: u128, desired: u128) -> u128
     u128::from(found_lo) | (u128::from(found_hi) << 64)
 }
 
-/// Find the instruction that ends at `end`.
-fn decode_before(end: u64, mem: &dyn GuestMemory) -> Option<Instruction> {
-    let mut window = [0u8; MAX_LEN as usize];
-    let start = end.checked_sub(MAX_LEN)?;
-    mem.read(start, &mut window).ok()?;
-    for len in (1..=MAX_LEN).rev() {
-        let offset = (MAX_LEN - len) as usize;
-        let mut decoder = Decoder::with_ip(64, &window[offset..], end - len, DecoderOptions::NONE);
-        let instruction = decoder.decode();
-        if instruction.mnemonic() == Mnemonic::Cmpxchg16b
-            && instruction.next_ip() == end
-            && instruction.has_lock_prefix()
-        {
-            return Some(instruction);
-        }
-    }
-    None
-}
-
 /// The address the memory operand names, from the guest's own registers.
 fn effective_address(instruction: &Instruction, ctx: &RegisterContext) -> Option<u64> {
     if instruction.segment_prefix() != Register::None {
@@ -163,7 +133,8 @@ fn effective_address(instruction: &Instruction, ctx: &RegisterContext) -> Option
     let base = match instruction.memory_base() {
         Register::None => 0,
         // RIP-relative, where iced has already folded the displacement against
-        // the IP the decoder was given - which is why `decode_before` sets it.
+        // the IP the decoder was given - which is why [`crate::interp`] decodes
+        // at the instruction's own address.
         Register::RIP => return Some(instruction.memory_displacement64()),
         reg => read(reg, ctx)?,
     };

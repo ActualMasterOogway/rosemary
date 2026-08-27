@@ -36,6 +36,7 @@ pub mod exec;
 pub mod fault;
 pub mod gui;
 pub mod host;
+pub mod interp;
 pub mod interpose;
 pub mod jit;
 pub mod jmpbuf;
