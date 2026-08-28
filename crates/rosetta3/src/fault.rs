@@ -710,7 +710,9 @@ mod tests {
     /// And the other layout, which is what a region with no separate thunk has.
     #[test]
     fn the_entry_stub_below_the_link_target_belongs_to_its_region() {
-        let (entry_point, link_target) = (0x50_0000, 0x50_0100);
+        // Its own host address: `placed` keys on `min(entry_point, link_target)`, so
+        // a pair sharing that minimum with another test overwrites the other's row.
+        let (entry_point, link_target) = (0x51_0000, 0x51_0100);
         placed(
             entry_point,
             link_target,
