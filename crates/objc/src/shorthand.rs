@@ -206,14 +206,14 @@ fn copy_of(value: Id) -> Id {
 /// libclosure's. Retaining without copying would hand back a pointer into a
 /// frame that is about to go away, so this refuses instead.
 pub unsafe extern "C" fn objc_retainBlock(_block: Id) -> Id {
-    unimplemented!("objc_retainBlock needs libclosure, which this runtime does not have")
+    crate::fail!("objc_retainBlock needs libclosure, which this runtime does not have")
 }
 
 /// Mutating a collection while enumerating it. A named abort, as on Apple's.
 pub unsafe extern "C" fn objc_enumerationMutation(object: Id) {
     // SAFETY: a live object.
     let class = unsafe { crate::object::class_of(object) };
-    panic!(
+    crate::fail!(
         "collection was mutated while being enumerated: {}",
         class.map_or("nil", |c| c.name_str())
     );
@@ -221,5 +221,5 @@ pub unsafe extern "C" fn objc_enumerationMutation(object: Id) {
 
 /// The `std::terminate` an uncaught Objective-C exception reaches.
 pub unsafe extern "C" fn objc_terminate() -> ! {
-    panic!("objc_terminate");
+    crate::fail!("objc_terminate");
 }

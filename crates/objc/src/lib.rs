@@ -40,6 +40,15 @@ pub mod shorthand;
 
 use std::sync::Once;
 
+/// Stop, having said why, from a place a panic cannot leave.
+#[macro_export]
+macro_rules! fail {
+    ($($arg:tt)*) => {{
+        eprintln!("rosetta3: objc: {}", format_args!($($arg)*));
+        std::process::abort()
+    }};
+}
+
 /// Install the classes this runtime owns. Idempotent, and cheap after the first.
 ///
 /// `NSObject` is libobjc's on the system too, so a guest that subclasses it must

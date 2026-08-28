@@ -12,5 +12,6 @@ machish = { path = "crates/machish" }
 darwin = { path = "crates/darwin" }
 objc = { path = "crates/objc" }
 corefoundation = { path = "crates/corefoundation" }
+foundation = { path = "crates/foundation" }
 libc = "0.2"
 gimli = "0.34"

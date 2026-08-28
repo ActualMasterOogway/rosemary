@@ -32,8 +32,15 @@ struct Body<T> {
 
 /// Register a class whose instances are a [`Body<T>`], with a `-dealloc` that
 /// gives the contents back.
-fn register<T: 'static>(name: &'static std::ffi::CStr) -> &'static Class {
-    let class = crate::base::register(name, None, size_of::<Body<T>>(), true);
+///
+/// `superclass` is the abstract Foundation class the guest binds and asks
+/// `isKindOfClass:` about; it is what carries the CoreFoundation type.
+fn register<T: 'static>(
+    name: &'static std::ffi::CStr,
+    superclass: &'static Class,
+) -> &'static Class {
+    crate::base::note_type_class(superclass);
+    let class = crate::base::register(name, Some(superclass), size_of::<Body<T>>(), false);
     unsafe extern "C" fn dealloc<T>(receiver: Id, _sel: objc::sel::Sel) {
         // SAFETY: `-dealloc` is reached with the last reference gone, and the
         // receiver is a `Body<T>` whose `contents` came from `Box::into_raw`.
@@ -89,6 +96,13 @@ unsafe fn contents<'a, T>(object: CFTypeRef, class: &'static Class) -> Option<&'
 pub struct ArrayContents {
     pub values: Vec<CFTypeRef>,
     pub policy: Policy,
+    /// Whether the object was created mutable.
+    ///
+    /// Not a class distinction, because `__NSCFArray` has to descend from
+    /// `NSMutableArray` for a guest's `isKindOfClass:` to work either way. So it
+    /// is a field, and a mutation of an immutable array is refused *by name*
+    /// rather than quietly allowed - which is what Apple's raise amounts to.
+    pub mutable: bool,
 }
 
 impl Drop for ArrayContents {
@@ -102,16 +116,23 @@ impl Drop for ArrayContents {
 pub fn array_class() -> &'static Class {
     static CLASS: OnceLock<usize> = OnceLock::new();
     let p = *CLASS.get_or_init(|| {
-        objc::class::ptr(register::<ArrayContents>(c"__NSCFArray")) as usize
+        objc::class::ptr(register::<ArrayContents>(c"__NSCFArray", crate::base::mutable_pair(c"NSArray", c"NSMutableArray"))) as usize
     });
     // SAFETY: a leaked `Class` this crate registered.
     unsafe { &*(p as *const Class) }
 }
 
 /// Build an array from `values`, retaining each as `policy` says.
-pub fn new_array(values: &[CFTypeRef], policy: Policy) -> CFTypeRef {
+pub fn new_array(values: &[CFTypeRef], policy: Policy, mutable: bool) -> CFTypeRef {
     let values: Vec<CFTypeRef> = values.iter().map(|v| policy.retain(*v)).collect();
-    make(array_class(), ArrayContents { values, policy })
+    make(
+        array_class(),
+        ArrayContents {
+            values,
+            policy,
+            mutable,
+        },
+    )
 }
 
 /// # Safety
@@ -128,6 +149,8 @@ pub struct DictionaryContents {
     pub entries: Vec<(CFTypeRef, CFTypeRef)>,
     pub keys: Policy,
     pub values: Policy,
+    /// As [`ArrayContents::mutable`].
+    pub mutable: bool,
 }
 
 impl Drop for DictionaryContents {
@@ -160,7 +183,7 @@ impl DictionaryContents {
 pub fn dictionary_class() -> &'static Class {
     static CLASS: OnceLock<usize> = OnceLock::new();
     let p = *CLASS.get_or_init(|| {
-        objc::class::ptr(register::<DictionaryContents>(c"__NSCFDictionary")) as usize
+        objc::class::ptr(register::<DictionaryContents>(c"__NSCFDictionary", crate::base::mutable_pair(c"NSDictionary", c"NSMutableDictionary"))) as usize
     });
     // SAFETY: a leaked `Class` this crate registered.
     unsafe { &*(p as *const Class) }
@@ -170,11 +193,13 @@ pub fn new_dictionary(
     pairs: &[(CFTypeRef, CFTypeRef)],
     keys: Policy,
     values: Policy,
+    mutable: bool,
 ) -> CFTypeRef {
     let mut contents = DictionaryContents {
         entries: Vec::with_capacity(pairs.len()),
         keys,
         values,
+        mutable,
     };
     for (key, value) in pairs {
         contents.set(*key, *value);
@@ -262,7 +287,7 @@ pub fn number_shape(kind: i32) -> Option<(usize, bool)> {
 
 pub fn number_class() -> &'static Class {
     static CLASS: OnceLock<usize> = OnceLock::new();
-    let p = *CLASS.get_or_init(|| objc::class::ptr(register::<Number>(c"__NSCFNumber")) as usize);
+    let p = *CLASS.get_or_init(|| objc::class::ptr(register::<Number>(c"__NSCFNumber", crate::base::abstract_class(c"NSNumber", None))) as usize);
     // SAFETY: a leaked `Class` this crate registered.
     unsafe { &*(p as *const Class) }
 }
@@ -281,7 +306,7 @@ pub unsafe fn number<'a>(object: CFTypeRef) -> Option<&'a mut Number> {
 
 pub fn data_class() -> &'static Class {
     static CLASS: OnceLock<usize> = OnceLock::new();
-    let p = *CLASS.get_or_init(|| objc::class::ptr(register::<Vec<u8>>(c"__NSCFData")) as usize);
+    let p = *CLASS.get_or_init(|| objc::class::ptr(register::<Vec<u8>>(c"__NSCFData", crate::base::mutable_pair(c"NSData", c"NSMutableData"))) as usize);
     // SAFETY: a leaked `Class` this crate registered.
     unsafe { &*(p as *const Class) }
 }

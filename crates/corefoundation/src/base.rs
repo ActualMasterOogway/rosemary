@@ -87,6 +87,28 @@ pub unsafe fn is_kind_of(object: CFTypeRef, class: &'static Class) -> bool {
 /// list of ivars, because the layouts are not ours to choose - a `__cfstring`
 /// literal in the guest's `__DATA` is four words the compiler laid out, and
 /// nothing gets a chance to convert it.
+/// An abstract class with no storage of its own, created if it is not there.
+///
+/// `NSArray` and `NSMutableArray` are registered here rather than in a
+/// Foundation crate, for the same reason Apple's CoreFoundation registers them:
+/// `__NSCFArray` has to descend from them or a guest's `isKindOfClass:` and its
+/// `_OBJC_CLASS_$_NSArray` binding do not agree with the object it is holding.
+/// Foundation then adds the methods. The two crates meet in the runtime's class
+/// table rather than through a dependency, which is what lets the arrow point
+/// this way at all.
+pub fn abstract_class(name: &std::ffi::CStr, superclass: Option<&'static Class>) -> &'static Class {
+    register(name, superclass, size_of::<usize>(), false)
+}
+
+/// The chain `NSFoo` -> `NSMutableFoo`, for a concrete class to descend from.
+pub fn mutable_pair(
+    immutable: &std::ffi::CStr,
+    mutable: &std::ffi::CStr,
+) -> &'static Class {
+    let base = abstract_class(immutable, None);
+    abstract_class(mutable, Some(base))
+}
+
 pub fn register(
     name: &std::ffi::CStr,
     superclass: Option<&'static Class>,
@@ -110,6 +132,15 @@ pub fn register(
         note_type(class);
     }
     class
+}
+
+/// Mark `class` as the CoreFoundation type its subclasses report.
+///
+/// Used where the type is the *abstract* class - `CFGetTypeID` of any array
+/// answers `CFArrayGetTypeID()`, whether the object is a `__NSCFArray` or
+/// something a Foundation crate added underneath `NSArray` later.
+pub fn note_type_class(class: &'static Class) {
+    note_type(class);
 }
 
 /// Allocate an instance of `class` whose body is `T`, and hand back the body.

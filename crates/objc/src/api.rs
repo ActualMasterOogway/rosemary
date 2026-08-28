@@ -98,7 +98,7 @@ pub unsafe extern "C" fn objc_getRequiredClass(name: *const c_char) -> *mut c_vo
     if found.is_null() {
         // SAFETY: as above.
         let name = unsafe { cstr(name) }.map_or("<null>".into(), |n| n.to_string_lossy());
-        panic!("objc_getRequiredClass: no class named {name}");
+        crate::fail!("objc_getRequiredClass: no class named {name}");
     }
     found
 }

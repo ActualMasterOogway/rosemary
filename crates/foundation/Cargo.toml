@@ -1,0 +1,11 @@
+[package]
+name = "foundation"
+description = "Foundation, as methods on the classes CoreFoundation already registered."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+objc.workspace = true
+corefoundation.workspace = true
+libc.workspace = true

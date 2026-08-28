@@ -1,0 +1,441 @@
+//! `NSArray`, `NSDictionary`, `NSData` and `NSNumber`, on the storage
+//! [`corefoundation::collections`] already holds.
+//!
+//! The mutable spellings are here too. A `__NSCFArray` descends from
+//! `NSMutableArray` whether or not it was created mutable - it has to, or a
+//! guest's `isKindOfClass:` disagrees with the object it is holding - so
+//! mutability is a field, and mutating an immutable collection is refused *by
+//! name* rather than quietly allowed.
+
+use corefoundation::api;
+use corefoundation::base::CFTypeRef;
+use corefoundation::callbacks::Policy;
+use corefoundation::collections;
+use objc::object::Id;
+use objc::sel::Sel;
+
+use crate::define::{class_methods, methods};
+
+/// Report a mutation of a collection that was not created mutable.
+///
+/// A named abort rather than a wrong answer: an `NSArray` that silently accepted
+/// `-addObject:` would hand a different object back to the next reader with
+/// nothing anywhere to say why. Apple raises here.
+#[cold]
+fn immutable(what: &str, sel: &str) -> ! {
+    objc::fail!("-[{what} {sel}]: the collection was not created mutable");
+}
+
+// ------------------------------------------------------------------ NSArray
+
+unsafe extern "C" fn count(receiver: Id, _sel: Sel) -> usize {
+    // SAFETY: an array.
+    unsafe { api::CFArrayGetCount(receiver as CFTypeRef) as usize }
+}
+
+unsafe extern "C" fn object_at_index(receiver: Id, _sel: Sel, index: usize) -> Id {
+    // SAFETY: an array.
+    unsafe { api::CFArrayGetValueAtIndex(receiver as CFTypeRef, index as isize) as Id }
+}
+
+unsafe extern "C" fn add_object(receiver: Id, _sel: Sel, object: Id) {
+    // SAFETY: an array.
+    let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return;
+    };
+    if !a.mutable {
+        immutable("NSArray", "addObject:");
+    }
+    a.values.push(a.policy.retain(object as CFTypeRef));
+}
+
+unsafe extern "C" fn remove_object_at_index(receiver: Id, _sel: Sel, index: usize) {
+    // SAFETY: an array.
+    let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return;
+    };
+    if !a.mutable {
+        immutable("NSArray", "removeObjectAtIndex:");
+    }
+    if index < a.values.len() {
+        let gone = a.values.remove(index);
+        a.policy.release(gone);
+    }
+}
+
+unsafe extern "C" fn remove_all_objects(receiver: Id, _sel: Sel) {
+    // SAFETY: an array.
+    let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return;
+    };
+    if !a.mutable {
+        immutable("NSArray", "removeAllObjects");
+    }
+    for value in a.values.drain(..) {
+        a.policy.release(value);
+    }
+}
+
+unsafe extern "C" fn contains_object(receiver: Id, _sel: Sel, object: Id) -> bool {
+    // SAFETY: an array.
+    let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return false;
+    };
+    a.values.iter().any(|v| a.policy.equal(*v, object as CFTypeRef))
+}
+
+unsafe extern "C" fn new_array(_class: Id, _sel: Sel) -> Id {
+    collections::new_array(&[], Policy::from_type_callbacks(), true) as Id
+}
+
+unsafe extern "C" fn array_fn(_class: Id, _sel: Sel) -> Id {
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(collections::new_array(&[], Policy::from_type_callbacks(), true)) as Id }
+}
+
+unsafe extern "C" fn array_with_capacity(_class: Id, _sel: Sel, _capacity: usize) -> Id {
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(collections::new_array(&[], Policy::from_type_callbacks(), true)) as Id }
+}
+
+unsafe extern "C" fn array_with_object(_class: Id, _sel: Sel, object: Id) -> Id {
+    // SAFETY: a fresh object holding a live one.
+    unsafe {
+        api::CFAutorelease(collections::new_array(
+            &[object as CFTypeRef],
+            Policy::from_type_callbacks(),
+            false,
+        )) as Id
+    }
+}
+
+/// `+arrayWithObjects:count:`, which is the counted spelling
+/// `objc::dispatch` rewrites the nil-terminated variadic into.
+unsafe extern "C" fn array_with_objects_count(
+    _class: Id,
+    _sel: Sel,
+    objects: *const Id,
+    count: usize,
+) -> Id {
+    if objects.is_null() && count > 0 {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the caller says `objects` covers `count` entries.
+    let slice = match count {
+        0 => &[][..],
+        _ => unsafe { std::slice::from_raw_parts(objects as *const CFTypeRef, count) },
+    };
+    // SAFETY: a fresh object.
+    unsafe {
+        api::CFAutorelease(collections::new_array(
+            slice,
+            Policy::from_type_callbacks(),
+            false,
+        )) as Id
+    }
+}
+
+// ------------------------------------------------------------- NSDictionary
+
+unsafe extern "C" fn dictionary_count(receiver: Id, _sel: Sel) -> usize {
+    // SAFETY: a dictionary.
+    unsafe { api::CFDictionaryGetCount(receiver as CFTypeRef) as usize }
+}
+
+unsafe extern "C" fn object_for_key(receiver: Id, _sel: Sel, key: Id) -> Id {
+    // SAFETY: a dictionary and a key.
+    unsafe { api::CFDictionaryGetValue(receiver as CFTypeRef, key as CFTypeRef) as Id }
+}
+
+unsafe extern "C" fn set_object_for_key(receiver: Id, _sel: Sel, object: Id, key: Id) {
+    // SAFETY: a dictionary.
+    let Some(d) = (unsafe { collections::dictionary(receiver as CFTypeRef) }) else {
+        return;
+    };
+    if !d.mutable {
+        immutable("NSDictionary", "setObject:forKey:");
+    }
+    d.set(key as CFTypeRef, object as CFTypeRef);
+}
+
+unsafe extern "C" fn remove_object_for_key(receiver: Id, _sel: Sel, key: Id) {
+    // SAFETY: a dictionary.
+    let Some(d) = (unsafe { collections::dictionary(receiver as CFTypeRef) }) else {
+        return;
+    };
+    if !d.mutable {
+        immutable("NSDictionary", "removeObjectForKey:");
+    }
+    if let Some(at) = d.position(key as CFTypeRef) {
+        let (key, value) = d.entries.remove(at);
+        d.keys.release(key);
+        d.values.release(value);
+    }
+}
+
+/// `-allKeys`, which is an `NSArray` of the keys in insertion order.
+unsafe extern "C" fn all_keys(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a dictionary.
+    let Some(d) = (unsafe { collections::dictionary(receiver as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    let keys: Vec<CFTypeRef> = d.entries.iter().map(|(k, _)| *k).collect();
+    // SAFETY: a fresh object holding live ones.
+    unsafe {
+        api::CFAutorelease(collections::new_array(
+            &keys,
+            Policy::from_type_callbacks(),
+            false,
+        )) as Id
+    }
+}
+
+unsafe extern "C" fn all_values(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a dictionary.
+    let Some(d) = (unsafe { collections::dictionary(receiver as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    let values: Vec<CFTypeRef> = d.entries.iter().map(|(_, v)| *v).collect();
+    // SAFETY: a fresh object holding live ones.
+    unsafe {
+        api::CFAutorelease(collections::new_array(
+            &values,
+            Policy::from_type_callbacks(),
+            false,
+        )) as Id
+    }
+}
+
+unsafe extern "C" fn new_dictionary(_class: Id, _sel: Sel) -> Id {
+    collections::new_dictionary(
+        &[],
+        Policy::from_key_callbacks(),
+        Policy::from_type_callbacks(),
+        true,
+    ) as Id
+}
+
+unsafe extern "C" fn dictionary(_class: Id, _sel: Sel) -> Id {
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(new_dictionary(_class, _sel) as CFTypeRef) as Id }
+}
+
+unsafe extern "C" fn dictionary_with_capacity(_class: Id, _sel: Sel, _capacity: usize) -> Id {
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(new_dictionary(_class, _sel) as CFTypeRef) as Id }
+}
+
+/// `+dictionaryWithObjects:forKeys:count:`, the counted spelling.
+unsafe extern "C" fn dictionary_with_objects_for_keys_count(
+    _class: Id,
+    _sel: Sel,
+    objects: *const Id,
+    keys: *const Id,
+    count: usize,
+) -> Id {
+    if (objects.is_null() || keys.is_null()) && count > 0 {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the caller says both arrays cover `count` entries.
+    let pairs: Vec<(CFTypeRef, CFTypeRef)> = match count {
+        0 => Vec::new(),
+        _ => unsafe {
+            std::slice::from_raw_parts(keys as *const CFTypeRef, count)
+                .iter()
+                .copied()
+                .zip(
+                    std::slice::from_raw_parts(objects as *const CFTypeRef, count)
+                        .iter()
+                        .copied(),
+                )
+                .collect()
+        },
+    };
+    // SAFETY: a fresh object.
+    unsafe {
+        api::CFAutorelease(collections::new_dictionary(
+            &pairs,
+            Policy::from_key_callbacks(),
+            Policy::from_type_callbacks(),
+            false,
+        )) as Id
+    }
+}
+
+// ------------------------------------------------------------------- NSData
+
+unsafe extern "C" fn data_length(receiver: Id, _sel: Sel) -> usize {
+    // SAFETY: a data object.
+    unsafe { api::CFDataGetLength(receiver as CFTypeRef) as usize }
+}
+
+unsafe extern "C" fn data_bytes(receiver: Id, _sel: Sel) -> *const u8 {
+    // SAFETY: a data object.
+    unsafe { api::CFDataGetBytePtr(receiver as CFTypeRef) }
+}
+
+unsafe extern "C" fn data_with_bytes(
+    _class: Id,
+    _sel: Sel,
+    bytes: *const u8,
+    length: usize,
+) -> Id {
+    // SAFETY: the caller says `bytes` covers `length` bytes.
+    unsafe {
+        api::CFAutorelease(api::CFDataCreate(std::ptr::null(), bytes, length as isize)) as Id
+    }
+}
+
+unsafe extern "C" fn append_bytes(receiver: Id, _sel: Sel, bytes: *const u8, length: usize) {
+    // SAFETY: a data object.
+    let Some(d) = (unsafe { collections::data(receiver as CFTypeRef) }) else {
+        return;
+    };
+    if bytes.is_null() {
+        return;
+    }
+    // SAFETY: the caller says `bytes` covers `length` bytes.
+    d.extend_from_slice(unsafe { std::slice::from_raw_parts(bytes, length) });
+}
+
+// ----------------------------------------------------------------- NSNumber
+
+unsafe extern "C" fn int_value(receiver: Id, _sel: Sel) -> i32 {
+    // SAFETY: a number.
+    unsafe { collections::number(receiver as CFTypeRef) }.map_or(0, |n| n.as_i64() as i32)
+}
+
+unsafe extern "C" fn integer_value(receiver: Id, _sel: Sel) -> i64 {
+    // SAFETY: a number.
+    unsafe { collections::number(receiver as CFTypeRef) }.map_or(0, |n| n.as_i64())
+}
+
+unsafe extern "C" fn double_value(receiver: Id, _sel: Sel) -> f64 {
+    // SAFETY: a number.
+    unsafe { collections::number(receiver as CFTypeRef) }.map_or(0.0, |n| n.as_f64())
+}
+
+unsafe extern "C" fn float_value(receiver: Id, _sel: Sel) -> f32 {
+    // SAFETY: a number.
+    unsafe { collections::number(receiver as CFTypeRef) }.map_or(0.0, |n| n.as_f64() as f32)
+}
+
+unsafe extern "C" fn bool_value(receiver: Id, _sel: Sel) -> bool {
+    // SAFETY: a number.
+    unsafe { collections::number(receiver as CFTypeRef) }.is_some_and(|n| n.as_i64() != 0)
+}
+
+unsafe extern "C" fn number_with_int(_class: Id, _sel: Sel, value: i32) -> Id {
+    // SAFETY: a fresh object.
+    unsafe {
+        api::CFAutorelease(collections::new_number(collections::Number::Integer(
+            value as i64,
+        ))) as Id
+    }
+}
+
+unsafe extern "C" fn number_with_integer(_class: Id, _sel: Sel, value: i64) -> Id {
+    // SAFETY: a fresh object.
+    unsafe {
+        api::CFAutorelease(collections::new_number(collections::Number::Integer(value))) as Id
+    }
+}
+
+unsafe extern "C" fn number_with_double(_class: Id, _sel: Sel, value: f64) -> Id {
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(collections::new_number(collections::Number::Float(value))) as Id }
+}
+
+unsafe extern "C" fn number_with_bool(_class: Id, _sel: Sel, value: bool) -> Id {
+    // SAFETY: a fresh object.
+    unsafe {
+        api::CFAutorelease(collections::new_number(collections::Number::Integer(
+            value as i64,
+        ))) as Id
+    }
+}
+
+pub(crate) fn install() {
+    let array = objc::class::lookup(c"NSArray").expect("CoreFoundation registered NSArray");
+    let mutable_array = objc::class::lookup(c"NSMutableArray").expect("NSMutableArray");
+    methods!(array, {
+        "count" => count, c"Q16@0:8";
+        "objectAtIndex:" => object_at_index, c"@24@0:8Q16";
+        "objectAtIndexedSubscript:" => object_at_index, c"@24@0:8Q16";
+        "containsObject:" => contains_object, c"B24@0:8@16";
+    });
+    class_methods!(array, {
+        "array" => array_fn, c"@16@0:8";
+        "arrayWithObject:" => array_with_object, c"@24@0:8@16";
+        "arrayWithObjects:count:" => array_with_objects_count, c"@32@0:8^@16Q24";
+    });
+    methods!(mutable_array, {
+        "addObject:" => add_object, c"v24@0:8@16";
+        "removeObjectAtIndex:" => remove_object_at_index, c"v24@0:8Q16";
+        "removeAllObjects" => remove_all_objects, c"v16@0:8";
+    });
+    class_methods!(mutable_array, {
+        "new" => new_array, c"@16@0:8";
+        "array" => array_fn, c"@16@0:8";
+        "arrayWithCapacity:" => array_with_capacity, c"@24@0:8Q16";
+    });
+
+    let dictionary_class =
+        objc::class::lookup(c"NSDictionary").expect("CoreFoundation registered NSDictionary");
+    let mutable_dictionary = objc::class::lookup(c"NSMutableDictionary").expect("NSMutableDictionary");
+    methods!(dictionary_class, {
+        "count" => dictionary_count, c"Q16@0:8";
+        "objectForKey:" => object_for_key, c"@24@0:8@16";
+        "objectForKeyedSubscript:" => object_for_key, c"@24@0:8@16";
+        "allKeys" => all_keys, c"@16@0:8";
+        "allValues" => all_values, c"@16@0:8";
+    });
+    class_methods!(dictionary_class, {
+        "dictionaryWithObjects:forKeys:count:" => dictionary_with_objects_for_keys_count, c"@40@0:8^@16^@24Q32";
+    });
+    methods!(mutable_dictionary, {
+        "setObject:forKey:" => set_object_for_key, c"v32@0:8@16@24";
+        "setObject:forKeyedSubscript:" => set_object_for_key, c"v32@0:8@16@24";
+        "removeObjectForKey:" => remove_object_for_key, c"v24@0:8@16";
+    });
+    class_methods!(mutable_dictionary, {
+        "new" => new_dictionary, c"@16@0:8";
+        "dictionary" => dictionary, c"@16@0:8";
+        "dictionaryWithCapacity:" => dictionary_with_capacity, c"@24@0:8Q16";
+    });
+
+    let data = objc::class::lookup(c"NSData").expect("CoreFoundation registered NSData");
+    let mutable_data = objc::class::lookup(c"NSMutableData").expect("NSMutableData");
+    methods!(data, {
+        "length" => data_length, c"Q16@0:8";
+        "bytes" => data_bytes, c"^v16@0:8";
+    });
+    class_methods!(data, {
+        "dataWithBytes:length:" => data_with_bytes, c"@32@0:8^v16Q24";
+    });
+    methods!(mutable_data, {
+        "appendBytes:length:" => append_bytes, c"v32@0:8^v16Q24";
+        "mutableBytes" => data_bytes, c"^v16@0:8";
+    });
+
+    let number = objc::class::lookup(c"NSNumber").expect("CoreFoundation registered NSNumber");
+    methods!(number, {
+        "intValue" => int_value, c"i16@0:8";
+        "integerValue" => integer_value, c"q16@0:8";
+        "longValue" => integer_value, c"q16@0:8";
+        "longLongValue" => integer_value, c"q16@0:8";
+        "unsignedIntegerValue" => integer_value, c"Q16@0:8";
+        "doubleValue" => double_value, c"d16@0:8";
+        "floatValue" => float_value, c"f16@0:8";
+        "boolValue" => bool_value, c"B16@0:8";
+    });
+    class_methods!(number, {
+        "numberWithInt:" => number_with_int, c"@24@0:8i16";
+        "numberWithInteger:" => number_with_integer, c"@24@0:8q16";
+        "numberWithLong:" => number_with_integer, c"@24@0:8q16";
+        "numberWithLongLong:" => number_with_integer, c"@24@0:8q16";
+        "numberWithDouble:" => number_with_double, c"@24@0:8d16";
+        "numberWithBool:" => number_with_bool, c"@24@0:8B16";
+    });
+
+}

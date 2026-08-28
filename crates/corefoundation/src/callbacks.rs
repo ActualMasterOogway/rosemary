@@ -91,6 +91,25 @@ impl Policy {
         equal: None,
     };
 
+    /// The policy `kCFTypeArrayCallBacks` describes: retain, release, and
+    /// compare with `CFEqual`. What a collection built through Foundation gets.
+    pub fn from_type_callbacks() -> Policy {
+        Policy {
+            retain: TYPE_VALUE_CALLBACKS.retain,
+            release: TYPE_VALUE_CALLBACKS.release,
+            equal: TYPE_VALUE_CALLBACKS.equal,
+        }
+    }
+
+    /// The same for keys, which differ only in also carrying a hash.
+    pub fn from_key_callbacks() -> Policy {
+        Policy {
+            retain: TYPE_KEY_CALLBACKS.retain,
+            release: TYPE_KEY_CALLBACKS.release,
+            equal: TYPE_KEY_CALLBACKS.equal,
+        }
+    }
+
     /// # Safety
     ///
     /// `p` must be null or a live `CFArrayCallBacks`/`CFDictionaryValueCallBacks`.

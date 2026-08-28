@@ -292,7 +292,7 @@ use crate::callbacks::{KeyCallBacks, Policy, ValueCallBacks};
 use crate::collections;
 
 pub unsafe extern "C" fn CFArrayGetTypeID() -> CFTypeID {
-    crate::base::type_id(collections::array_class())
+    crate::base::type_id_of(collections::array_class())
 }
 
 pub unsafe extern "C" fn CFArrayCreate(
@@ -310,7 +310,7 @@ pub unsafe extern "C" fn CFArrayCreate(
         _ => unsafe { std::slice::from_raw_parts(values, count as usize) },
     };
     // SAFETY: the caller's obligation - null, or a live callbacks structure.
-    collections::new_array(slice, unsafe { Policy::from_value(callbacks) })
+    collections::new_array(slice, unsafe { Policy::from_value(callbacks) }, false)
 }
 
 pub unsafe extern "C" fn CFArrayGetCount(array: CFTypeRef) -> CFIndex {
@@ -335,7 +335,7 @@ pub unsafe extern "C" fn CFArrayGetValueAtIndex(array: CFTypeRef, index: CFIndex
 // 
 
 pub unsafe extern "C" fn CFDictionaryGetTypeID() -> CFTypeID {
-    crate::base::type_id(collections::dictionary_class())
+    crate::base::type_id_of(collections::dictionary_class())
 }
 
 pub unsafe extern "C" fn CFDictionaryCreate(
@@ -366,6 +366,7 @@ pub unsafe extern "C" fn CFDictionaryCreate(
             &pairs,
             Policy::from_key(key_callbacks),
             Policy::from_value(value_callbacks),
+            false,
         )
     }
 }
@@ -421,7 +422,7 @@ pub unsafe extern "C" fn CFDictionaryGetKeysAndValues(
 }
 
 pub unsafe extern "C" fn CFNumberGetTypeID() -> CFTypeID {
-    crate::base::type_id(collections::number_class())
+    crate::base::type_id_of(collections::number_class())
 }
 
 pub unsafe extern "C" fn CFNumberCreate(
@@ -506,7 +507,7 @@ pub unsafe extern "C" fn CFNumberGetByteSize(number: CFTypeRef) -> CFIndex {
 }
 
 pub unsafe extern "C" fn CFDataGetTypeID() -> CFTypeID {
-    crate::base::type_id(collections::data_class())
+    crate::base::type_id_of(collections::data_class())
 }
 
 pub unsafe extern "C" fn CFDataCreate(

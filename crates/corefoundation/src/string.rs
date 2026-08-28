@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 
 use objc::class::Class;
 
-use crate::base::{CFIndex, CFTypeRef, type_id};
+use crate::base::{CFIndex, CFTypeRef};
 
 /// `flags` bit: the bytes are UTF-16 rather than 8-bit.
 const WIDE: u64 = 0x10;
@@ -82,7 +82,9 @@ fn is_utf16(encoding: u32) -> bool {
 pub fn class() -> &'static Class {
     static CLASS: OnceLock<usize> = OnceLock::new();
     let p = *CLASS.get_or_init(|| {
-        let class = crate::base::register(c"__NSCFString", None, size_of::<CFString>(), true);
+        let base = crate::base::mutable_pair(c"NSString", c"NSMutableString");
+        crate::base::note_type_class(base);
+        let class = crate::base::register(c"__NSCFString", Some(base), size_of::<CFString>(), false);
         install_string_methods(class);
         objc::class::ptr(class) as usize
     });
@@ -227,8 +229,12 @@ fn install_constant_methods(class: &'static Class) {
 }
 
 /// `CFStringGetTypeID`.
+///
+/// The *abstract* class's id, not the concrete one's: `CFGetTypeID` of any
+/// string has to answer this, and a `__NSCFConstantString` is not a
+/// `__NSCFString`'s equal but is an `NSString`'s.
 pub fn type_id_of_strings() -> crate::base::CFTypeID {
-    type_id(class())
+    crate::base::type_id_of(class())
 }
 
 /// `string` as a `CFString`, or `None` if it is not one.

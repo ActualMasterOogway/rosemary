@@ -120,15 +120,11 @@ fn main() -> ExitCode {
             eprintln!("usage: rosetta3 run [--slow] [--native|--emulated] <mach-o path> [args...]");
             return ExitCode::FAILURE;
         };
-        // A guest inside a `.app` needs the *process* to be inside one too,
-        // or `[NSBundle mainBundle]` is this binary's directory and the
-        // application loads no nib, finds no resources, and sits in its run
-        // loop having silently done nothing. See [`rosetta3::bundle`].
-        //
-        // A `.app` is a macOS layout read by a macOS framework, so there is nothing to
-        // mirror on a host that has neither.
+        rosetta3::frameworks::set_main_bundle(std::path::Path::new(&path));
         #[cfg(target_os = "macos")]
-        if let Some(mirror) = rosetta3::bundle::remirror(std::path::Path::new(&path)) {
+        if !rosetta3::frameworks::builtin()
+            && let Some(mirror) = rosetta3::bundle::remirror(std::path::Path::new(&path))
+        {
             eprintln!("rosetta3: re-executing from {}", mirror.display());
             let e = rosetta3::bundle::reexec(&mirror);
             // Only reached if `execv` failed, in which case running anyway is

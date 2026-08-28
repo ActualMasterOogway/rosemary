@@ -66,8 +66,10 @@ fn add(class: &'static Class, sel: &str, imp: Imp, types: &CStr) {
 /// `receiver` must be a class pointer.
 unsafe fn as_class(receiver: Id) -> &'static Class {
     // SAFETY: the caller's obligation.
-    unsafe { crate::class::from_ptr(receiver as *const Class) }
-        .expect("a class method's receiver is a class")
+    match unsafe { crate::class::from_ptr(receiver as *const Class) } {
+        Some(class) => class,
+        None => crate::fail!("a class method was sent to nil"),
+    }
 }
 
 /// Send `receiver` a message taking one word and returning an object.
@@ -243,7 +245,7 @@ unsafe extern "C" fn does_not_recognize(receiver: Id, _sel: Sel, selector: Sel) 
         // SAFETY: a registered selector is its own NUL-terminated name.
         false => unsafe { CStr::from_ptr(selector) }.to_string_lossy(),
     };
-    panic!("unrecognized selector sent to instance of {name}: {selector}");
+    crate::fail!("unrecognized selector sent to instance of {name}: {selector}");
 }
 
 /// `+initialize` and `+load`, which `NSObject` answers by doing nothing.

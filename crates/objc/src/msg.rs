@@ -48,7 +48,7 @@ unsafe extern "C" fn unrecognised(receiver: Id, sel: Sel) -> ! {
         // SAFETY: a registered selector is a NUL-terminated interned name.
         false => unsafe { std::ffi::CStr::from_ptr(sel) }.to_string_lossy(),
     };
-    panic!("unrecognized selector sent to instance of {name}: {selector}");
+    crate::fail!("unrecognized selector sent to instance of {name}: {selector}");
 }
 
 /// `objc_msgSend`'s address.

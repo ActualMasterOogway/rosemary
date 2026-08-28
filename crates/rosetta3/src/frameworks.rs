@@ -27,7 +27,30 @@ pub fn builtin() -> bool {
 /// that lands after the first question is a registration that did not happen.
 fn install() {
     static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| darwin::register_provider(symbol));
+    ONCE.call_once(|| {
+        darwin::register_provider(symbol);
+        push_main_pool();
+    });
+}
+
+/// Push the outermost autorelease pool, the one a process is born with.
+///
+/// A real Darwin process reaches `main` inside a pool the runtime pushed, and
+/// `NSApplicationMain` pushes another per event. Without the outer one, the
+/// first `-autorelease` before the guest makes a pool of its own has nowhere to
+/// go, and this runtime says so and leaks it - which is Apple's behaviour and
+/// still the wrong thing to reproduce here, because it happens on the way in
+/// rather than in the guest's own code.
+///
+/// Here rather than in `startup::run`, because class realization autoreleases
+/// and that happens while the program is still being loaded. On the thread that
+/// first builds the provider chain, which is the one the program starts on.
+/// Never popped: it is the process's, and the process ending is what drains it.
+fn push_main_pool() {
+    if !builtin() {
+        return;
+    }
+    objc::arc::pool_push();
 }
 
 /// The frameworks, as a library the loader can bind against.
@@ -49,6 +72,11 @@ pub fn provider() -> SyntheticDylib {
     for (name, addr) in corefoundation::data_symbols() {
         lib.define_data(&name, addr);
     }
+    // The class objects, which are data: a guest's `[NSMutableArray array]`
+    // binds `_OBJC_CLASS_$_NSMutableArray` and sends to whatever it gets.
+    for (name, addr) in foundation::class_data() {
+        lib.define_data(&name, addr);
+    }
     lib
 }
 
@@ -59,7 +87,33 @@ pub fn provider() -> SyntheticDylib {
 /// loader bound - an inconsistency there is a guest whose import works and whose
 /// `dlsym` of the same name comes back null.
 pub fn symbol(name: &str) -> Option<u64> {
-    builtin().then(|| corefoundation::symbol(name)).flatten()
+    if !builtin() {
+        return None;
+    }
+    foundation::bootstrap();
+    corefoundation::symbol(name)
+}
+
+/// Tell this tree's `NSBundle` which `.app` the guest is.
+///
+/// Nothing here reads the *host* process's path, which is why the builtin path
+/// needs no re-exec: see `rosetta3::bundle` for the hack this replaces, and
+/// `foundation::bundle::set_main` for what is told.
+///
+/// A loose binary is not an error - most guests are one - so a `false` here is
+/// only reported under the trace.
+pub fn set_main_bundle(executable: &std::path::Path) {
+    install();
+    if !builtin() {
+        return;
+    }
+    let found = foundation::bundle::set_main(executable);
+    if !found && std::env::var_os("ROSETTA3_TRACE_VM").is_some() {
+        eprintln!(
+            "rosetta3: bundle: {} is not inside a .app",
+            executable.display()
+        );
+    }
 }
 
 /// Keep the host's own framework symbols away from a guest using these.

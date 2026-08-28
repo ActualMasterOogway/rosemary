@@ -10,6 +10,7 @@ machish.workspace = true
 darwin.workspace = true
 objc.workspace = true
 corefoundation.workspace = true
+foundation.workspace = true
 gimli.workspace = true
 libc.workspace = true
 iced-x86 = "1"
