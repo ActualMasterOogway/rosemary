@@ -138,11 +138,18 @@ fn resolved_addresses_are_the_hosts_own_implementations() {
     // `libsystem_platform`'s CPU-dispatched `_platform_strlen`, so the symbol
     // `dladdr` names is an implementation detail of the host's own libc. What
     // must hold is that we landed on *a* host strlen, in a system image.
-    let name = name.expect("resolved address has no symbol");
-    assert!(
-        name.contains("strlen"),
-        "resolved to {name} in {image}, which is not a strlen"
-    );
+    //
+    // And glibc may not name it at all: `strlen` there is an IFUNC, so the
+    // address resolves to a CPU-specific implementation that is a *local*
+    // symbol and appears in no dynamic symbol table for `dladdr` to read back.
+    // The image below still identifies it, which is the half of the claim that
+    // matters - the address is the host's own.
+    if let Some(name) = name {
+        assert!(
+            name.contains("strlen"),
+            "resolved to {name} in {image}, which is not a strlen"
+        );
+    }
     // And it is genuinely the host's own C library, not something we loaded. Spelled
     // for both: macOS splits libc across `libsystem_*` under `dyld`, and musl and
     // glibc put it in one `libc`.

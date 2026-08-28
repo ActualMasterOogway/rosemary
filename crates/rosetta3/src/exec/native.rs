@@ -54,8 +54,17 @@ pub const HOST_SPEC: HostSpec = HostRunnable(NativelyExecutable(machish::spec::a
 
 /// Whether the native backend can run this slice - the same question the
 /// loader will ask when it selects one.
+///
+/// Never off Apple's platforms, however well the instruction set matches. A
+/// universal Mach-O run on aarch64 Linux has a slice this CPU executes, and
+/// nothing else about it works: the Mach traps, the thread pointer that Darwin
+/// code reads with `mrs` (see `darwin::tls`'s unfinished third case), and the
+/// 16K page size are all still Darwin's. The emulated backend takes the x86-64
+/// slice instead, which is the only one this tree can actually run there.
 pub fn runnable(slice: &machish::fat::Slice) -> bool {
-    slice.cputype == HostSpec::CPU_TYPE && HOST_SPEC.accepts_subtype(slice.cpusubtype)
+    cfg!(target_vendor = "apple")
+        && slice.cputype == HostSpec::CPU_TYPE
+        && HOST_SPEC.accepts_subtype(slice.cpusubtype)
 }
 
 /// A program of the host's own architecture, mapped executable and called directly.

@@ -13,13 +13,38 @@ fn is_sentinel(value: u64) -> bool {
     value == 0 || value == 1 || value as i64 == -1
 }
 
-/// `struct sigaction` as both architectures lay it out.
-#[repr(C)]
+/// `struct sigaction` as both of *Darwin's* architectures lay it out.
+///
+/// Not the host's: under glibc a `struct sigaction` is 152 bytes with a 128-byte
+/// `sigset_t` in the middle, so these sixteen are a value to convert rather than
+/// a structure to hand along. [`darwin::signal::sigaction`] does the converting,
+/// on both hosts, so there is one path and it is tested on the one where the
+/// answers can be checked.
 #[derive(Clone, Copy, Default)]
 struct SigAction {
     handler: u64,
     mask: u32,
     flags: u32,
+}
+
+impl From<SigAction> for darwin::signal::Disposition {
+    fn from(a: SigAction) -> Self {
+        darwin::signal::Disposition {
+            handler: a.handler,
+            mask: a.mask,
+            flags: a.flags,
+        }
+    }
+}
+
+impl From<darwin::signal::Disposition> for SigAction {
+    fn from(d: darwin::signal::Disposition) -> Self {
+        SigAction {
+            handler: d.handler,
+            mask: d.mask,
+            flags: d.flags,
+        }
+    }
 }
 
 impl SigAction {
@@ -99,10 +124,11 @@ pub fn signal(
     let signum = ctx.rdi as u32 as i32;
     let handler = outbound(symbol, ctx.rsi, callbacks)?;
 
-    // SAFETY: `signal` takes an `int` and a function pointer the host will call
-    // as arm64 - which is what `outbound` just guaranteed it is, either a thunk
-    // this runtime compiled or one of the kernel's own sentinels.
-    let previous = unsafe { libc::signal(signum, handler as libc::sighandler_t) } as u64;
+    // SAFETY: `handler` is a function pointer the host will call as arm64 -
+    // which is what `outbound` just guaranteed it is, either a thunk this
+    // runtime compiled or one of the kernel's own sentinels. The signal
+    // *number* is Darwin's, which is why this does not go straight to `libc`.
+    let previous = unsafe { darwin::signal::signal(signum, handler) };
     ctx.rax = inbound(previous, callbacks);
     Ok(())
 }
@@ -164,35 +190,29 @@ pub fn sigaction(
             })?;
         let rc = match act {
             None => 0,
-            // SAFETY: as the call below - a live, correctly sized structure.
-            Some(a) => unsafe {
-                libc::sigaction(signum, (&raw const a).cast(), std::ptr::null_mut())
-            },
+            // SAFETY: as the call below - `a.handler` is a sentinel or a
+            // trampoline this runtime compiled.
+            Some(a) => unsafe { darwin::signal::sigaction(signum, Some(a.into()), None) },
         };
         crate::shims::set_int_return(ctx, rc);
         return Ok(());
     }
 
-    let mut old = SigAction::default();
-    // SAFETY: both pointers are to live, correctly sized local structures with
-    // the layout this platform's `sigaction` expects - the same sixteen bytes on
-    // either architecture, which `tests/signal.rs` checks by compilation rather
-    // than by assertion.
+    let mut old = darwin::signal::Disposition::default();
+    // SAFETY: `act`'s handler is a sentinel or a trampoline this runtime
+    // compiled and keeps mapped. Everything about the host's own structure -
+    // its size, its field order, its flag values, the width of its mask - is
+    // `darwin::signal`'s business and not this shim's.
     let rc = unsafe {
-        libc::sigaction(
+        darwin::signal::sigaction(
             signum,
-            act.as_ref()
-                .map_or(std::ptr::null(), |a| a as *const SigAction)
-                .cast(),
-            if old_va == 0 {
-                std::ptr::null_mut()
-            } else {
-                (&raw mut old).cast()
-            },
+            act.map(Into::into),
+            (old_va != 0).then_some(&mut old),
         )
     };
 
     if rc == 0 && old_va != 0 {
+        let mut old = SigAction::from(old);
         old.handler = inbound(old.handler, callbacks);
         mem.write(old_va, &old.to_bytes())
             .map_err(|_| AbiError::Memory {
@@ -413,8 +433,11 @@ mod tests {
         assert_eq!(std::mem::size_of::<SigAction>(), SigAction::SIZE);
         // The guest's `struct sigaction` is Darwin's, so this is a cross-check against
         // the host's declaration only where the host is a Mac. Under glibc and musl
-        // the host's is 152 bytes of a different shape, which is one of the reasons
-        // `darwin::divergent` refuses to pass `sigaction` through at all.
+        // the host's is 152 bytes of a different shape, which is why this shim
+        // converts through [`darwin::signal::sigaction`] rather than passing the
+        // guest's sixteen bytes along. `darwin::divergent` refuses the name too,
+        // but that is not the thing standing between the guest and the host: a
+        // shim runs before the divergence check, unconditionally.
         #[cfg(target_os = "macos")]
         assert_eq!(
             std::mem::size_of::<SigAction>(),
@@ -456,7 +479,7 @@ mod tests {
         mem.write(mem.base, &act.to_bytes()).unwrap();
 
         let mut ctx = RegisterContext::new();
-        ctx.rdi = libc::SIGUSR1 as u64;
+        ctx.rdi = darwin::signal::signum::SIGUSR1 as u64;
         ctx.rsi = mem.base;
         ctx.rdx = mem.base + 16;
         sigaction("_sigaction", &mut ctx, &mut mem, &Wrapping).expect("install");
@@ -465,7 +488,7 @@ mod tests {
         // Install again, asking for the previous disposition: what comes back
         // must be the guest's own address.
         let mut ctx = RegisterContext::new();
-        ctx.rdi = libc::SIGUSR1 as u64;
+        ctx.rdi = darwin::signal::signum::SIGUSR1 as u64;
         ctx.rsi = 0;
         ctx.rdx = mem.base + 16;
         sigaction("_sigaction", &mut ctx, &mut mem, &Wrapping).expect("query");
@@ -477,7 +500,7 @@ mod tests {
         // Leave the process as it was found.
         // SAFETY: restoring the default disposition for the signal this test
         // installed a handler for.
-        unsafe { libc::signal(libc::SIGUSR1, libc::SIG_DFL) };
+        unsafe { darwin::signal::signal(darwin::signal::signum::SIGUSR1, 0) };
     }
 
     #[test]
@@ -491,16 +514,19 @@ mod tests {
         mem.write(mem.base, &act.to_bytes()).unwrap();
 
         let mut ctx = RegisterContext::new();
-        ctx.rdi = libc::SIGUSR2 as u64;
+        ctx.rdi = darwin::signal::signum::SIGUSR2 as u64;
         ctx.rsi = mem.base;
         sigaction("_sigaction", &mut ctx, &mut mem, &Wrapping).expect("accepted");
         assert_eq!(ctx.rax as i32, 0, "the guest must be told it succeeded");
 
         // Accepted and *not installed*: the host's disposition for that signal
-        // is untouched, which is the whole claim.
-        let mut current = SigAction::default();
-        // SAFETY: querying the current disposition into a live local.
-        unsafe { libc::sigaction(libc::SIGUSR2, std::ptr::null(), (&raw mut current).cast()) };
+        // is untouched, which is the whole claim. Asked through `darwin`, whose
+        // job it is to know that the host's structure is not this one.
+        let mut current = darwin::signal::Disposition::default();
+        // SAFETY: a query, which installs nothing.
+        unsafe {
+            darwin::signal::sigaction(darwin::signal::signum::SIGUSR2, None, Some(&mut current))
+        };
         assert_eq!(current.handler, 0, "a disposition was installed anyway");
     }
 
@@ -518,7 +544,7 @@ mod tests {
         mem.write(mem.base, &first.to_bytes()).unwrap();
 
         let mut ctx = RegisterContext::new();
-        ctx.rdi = libc::SIGUSR2 as u64;
+        ctx.rdi = darwin::signal::signum::SIGUSR2 as u64;
         ctx.rsi = mem.base;
         sigaction("_sigaction", &mut ctx, &mut mem, &Wrapping).expect("first");
 
@@ -529,7 +555,7 @@ mod tests {
         };
         mem.write(mem.base, &second.to_bytes()).unwrap();
         let mut ctx = RegisterContext::new();
-        ctx.rdi = libc::SIGUSR2 as u64;
+        ctx.rdi = darwin::signal::signum::SIGUSR2 as u64;
         ctx.rsi = mem.base;
         ctx.rdx = mem.base + 16;
         sigaction("_sigaction", &mut ctx, &mut mem, &Wrapping).expect("second");
@@ -566,7 +592,7 @@ mod tests {
     fn a_handler_pointer_outside_guest_memory_fails_by_address() {
         let mut mem = guest_memory();
         let mut ctx = RegisterContext::new();
-        ctx.rdi = libc::SIGUSR1 as u64;
+        ctx.rdi = darwin::signal::signum::SIGUSR1 as u64;
         ctx.rsi = 0x9_0000_0000;
         let err = sigaction("_sigaction", &mut ctx, &mut mem, &Wrapping).expect_err("fail");
         assert_eq!(

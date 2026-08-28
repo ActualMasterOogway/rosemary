@@ -114,6 +114,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
+name = "corefoundation"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "objc",
+]
+
+[[package]]
 name = "cranelift"
 version = "0.136.0-dev"
 source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#4196efa492c6d18b5ef7c78c6f0fc7d969de5717"
@@ -640,6 +648,7 @@ dependencies = [
 name = "rosetta3"
 version = "0.1.0"
 dependencies = [
+ "corefoundation",
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-native",

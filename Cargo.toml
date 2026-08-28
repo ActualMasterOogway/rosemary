@@ -11,5 +11,6 @@ license = "MIT OR Apache-2.0"
 machish = { path = "crates/machish" }
 darwin = { path = "crates/darwin" }
 objc = { path = "crates/objc" }
+corefoundation = { path = "crates/corefoundation" }
 libc = "0.2"
 gimli = "0.34"

@@ -42,6 +42,35 @@ pub fn cxa_atexit(
     Ok(())
 }
 
+/// `int atexit(void (*func)(void))`, which is `__cxa_atexit` with no argument.
+///
+/// A shim rather than a passthrough for two reasons, and either would be enough:
+/// the handler is a *guest* address that has to become a trampoline, and glibc
+/// does not export `atexit` dynamically at all - it lives in `libc_nonshared.a`,
+/// so there is nothing for a `dlsym` to find. See `darwin::passthrough`.
+///
+/// The handler is registered through the three-argument form with a null
+/// argument. A function compiled to take none ignores the register it arrives
+/// in, under both ABIs in play here.
+pub fn atexit(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    _mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
+    let handler = callbacks.substitute(symbol, ctx.rdi)?;
+    // SAFETY: as `cxa_atexit`, whose obligations these are.
+    let rc = unsafe {
+        __cxa_atexit(
+            handler as *const (),
+            core::ptr::null_mut(),
+            &raw const DSO_HANDLE as *const (),
+        )
+    };
+    super::set_int_return(ctx, rc);
+    Ok(())
+}
+
 /// One of this module's implementations, in the shape [`crate::shims`] wants.
 pub type Shim = crate::signal::Shim;
 
@@ -49,6 +78,7 @@ pub type Shim = crate::signal::Shim;
 pub fn shim_for(name: &str) -> Option<Shim> {
     match name {
         "__cxa_atexit" => Some(cxa_atexit),
+        "atexit" => Some(atexit),
         // `__cxa_thread_atexit` is *not* here.
         _ => None,
     }

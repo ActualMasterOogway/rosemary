@@ -181,6 +181,177 @@ pub fn signal_to_host(darwin: i32) -> Option<libc::c_int> {
     }
 }
 
+/// The `SA_*` flags, whose *values* differ even where their meanings do not.
+///
+/// Darwin numbers them from one upward; Linux starts at the other end for the
+/// four that predate POSIX and uses the low bits for the `SIGCHLD` pair. A guest
+/// that asks for `SA_RESTART` and gets Linux's `SA_NOCLDSTOP` has installed a
+/// handler with the wrong semantics and no diagnostic.
+mod saflag {
+    pub const DARWIN: &[(u32, &str)] = &[
+        (0x0001, "ONSTACK"),
+        (0x0002, "RESTART"),
+        (0x0004, "RESETHAND"),
+        (0x0008, "NOCLDSTOP"),
+        (0x0010, "NODEFER"),
+        (0x0020, "NOCLDWAIT"),
+        (0x0040, "SIGINFO"),
+    ];
+
+    /// The host bit for each name above, in the same order.
+    pub fn host(name: &str) -> Option<libc::c_int> {
+        Some(match name {
+            "ONSTACK" => libc::SA_ONSTACK,
+            "RESTART" => libc::SA_RESTART,
+            "RESETHAND" => libc::SA_RESETHAND,
+            "NOCLDSTOP" => libc::SA_NOCLDSTOP,
+            "NODEFER" => libc::SA_NODEFER,
+            "NOCLDWAIT" => libc::SA_NOCLDWAIT,
+            "SIGINFO" => libc::SA_SIGINFO,
+            _ => return None,
+        })
+    }
+}
+
+/// Darwin's `sa_flags` as this host's. A bit with no counterpart is dropped.
+pub fn flags_to_host(darwin: u32) -> libc::c_int {
+    let mut out = 0;
+    for (bit, name) in saflag::DARWIN {
+        if darwin & bit != 0
+            && let Some(host) = saflag::host(name)
+        {
+            out |= host;
+        }
+    }
+    out
+}
+
+/// This host's `sa_flags` as Darwin's.
+pub fn flags_from_host(host: libc::c_int) -> u32 {
+    let mut out = 0;
+    for (bit, name) in saflag::DARWIN {
+        if saflag::host(name).is_some_and(|h| host & h != 0) {
+            out |= bit;
+        }
+    }
+    out
+}
+
+/// A signal disposition in Darwin's shape: a handler, a 32-bit mask, and flags.
+///
+/// Sixteen bytes on both of Darwin's architectures, which is what the guest
+/// reads and writes. The host's own `struct sigaction` is a different size and a
+/// different order under glibc - 152 bytes, with a 128-byte `sigset_t` - so this
+/// is a value to convert, never a structure to pass along.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Disposition {
+    pub handler: u64,
+    pub mask: u32,
+    pub flags: u32,
+}
+
+/// The dispositions that are values rather than addresses: `SIG_DFL`, `SIG_IGN`
+/// and `SIG_ERR`. Their numbers agree on both hosts.
+fn is_sentinel(handler: u64) -> bool {
+    handler == 0 || handler == 1 || handler as i64 == -1
+}
+
+/// `sigaction`, with Darwin's signal number, flags and mask on the outside and
+/// the host's `struct sigaction` on the inside.
+///
+/// Returns `-1` with `errno` set to `EINVAL` for a signal this host has not got,
+/// rather than acting on a neighbouring one.
+///
+/// # Safety
+///
+/// `act.handler`, when it is not a sentinel, must be a function this process can
+/// call as a signal handler - which for a guest's handler means a trampoline and
+/// not the guest's own address.
+pub unsafe fn sigaction(
+    darwin_signum: i32,
+    act: Option<Disposition>,
+    old: Option<&mut Disposition>,
+) -> libc::c_int {
+    let Some(signum) = signal_to_host(darwin_signum) else {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    };
+
+    // SAFETY: zeroed is a valid `struct sigaction` on both hosts - `SIG_DFL` with
+    // an empty mask and no flags - and every field is written below before use.
+    let mut host_act: libc::sigaction = unsafe { core::mem::zeroed() };
+    // SAFETY: as above.
+    let mut host_old: libc::sigaction = unsafe { core::mem::zeroed() };
+
+    if let Some(act) = act {
+        host_act.sa_sigaction = act.handler as usize as libc::sighandler_t;
+        host_act.sa_flags = flags_to_host(act.flags);
+        // SAFETY: `sa_mask` is a `sigset_t` being emptied before bits are added.
+        unsafe { libc::sigemptyset(&mut host_act.sa_mask) };
+        for darwin_bit in 1..=31 {
+            if act.mask & (1u32 << (darwin_bit - 1)) == 0 {
+                continue;
+            }
+            if let Some(host_bit) = signal_to_host(darwin_bit) {
+                // SAFETY: a `sigset_t` this function owns and a valid signal.
+                unsafe { libc::sigaddset(&mut host_act.sa_mask, host_bit) };
+            }
+        }
+    }
+
+    // SAFETY: two live, correctly shaped `struct sigaction`s of this host's own.
+    let rc = unsafe {
+        libc::sigaction(
+            signum,
+            act.map_or(core::ptr::null(), |_| &raw const host_act),
+            match old {
+                Some(_) => &raw mut host_old,
+                None => core::ptr::null_mut(),
+            },
+        )
+    };
+
+    if rc == 0 && let Some(old) = old {
+        let handler = host_old.sa_sigaction as u64;
+        let mut mask = 0u32;
+        for darwin_bit in 1..=31 {
+            let Some(host_bit) = signal_to_host(darwin_bit) else {
+                continue;
+            };
+            // SAFETY: a `sigset_t` the kernel filled in, and a valid signal.
+            if unsafe { libc::sigismember(&host_old.sa_mask, host_bit) } == 1 {
+                mask |= 1u32 << (darwin_bit - 1);
+            }
+        }
+        *old = Disposition {
+            handler,
+            mask,
+            flags: flags_from_host(host_old.sa_flags),
+        };
+        // A sentinel is a sentinel on both hosts, and must not be reported as an
+        // address the caller might try to translate back.
+        debug_assert!(is_sentinel(handler) || handler > 0xffff);
+    }
+    rc
+}
+
+/// `signal`, with Darwin's signal number on the outside.
+///
+/// `SIG_ERR` - which is `-1` on both hosts - for a signal this host has not got.
+///
+/// # Safety
+///
+/// As [`sigaction`]: `handler` must be a sentinel or a function this process can
+/// call as a signal handler.
+pub unsafe fn signal(darwin_signum: i32, handler: u64) -> u64 {
+    let Some(signum) = signal_to_host(darwin_signum) else {
+        crate::errno::set(libc::EINVAL);
+        return u64::MAX;
+    };
+    // SAFETY: the caller's obligation.
+    unsafe { libc::signal(signum, handler as usize as libc::sighandler_t) as u64 }
+}
+
 /// This host's signal number as Darwin's, for a report handed back to the guest.
 pub fn signal_from_host(host: libc::c_int) -> Option<i32> {
     (1..=31).find(|d| signal_to_host(*d) == Some(host))
@@ -360,5 +531,84 @@ mod tests {
     fn a_null_context_has_no_program_counter() {
         // SAFETY: null is the one argument this is documented to accept and refuse.
         assert_eq!(unsafe { interrupted_pc(core::ptr::null_mut()) }, None);
+    }
+}
+
+#[cfg(test)]
+mod disposition_tests {
+    use super::*;
+
+    /// The claim this module exists to make: the guest's sixteen bytes are not
+    /// the host's structure.
+    ///
+    /// A compile-time reminder rather than a runtime one. Handing a Darwin
+    /// `struct sigaction` to glibc reads a 128-byte `sigset_t` off the end of a
+    /// 16-byte value and writes 152 bytes into it, which is a smashed stack and
+    /// a jump to zero rather than anything that looks like a signal bug.
+    #[test]
+    fn the_hosts_structure_is_not_the_guests_sixteen_bytes() {
+        assert_eq!(core::mem::size_of::<Disposition>(), 16);
+        #[cfg(not(target_os = "macos"))]
+        assert!(
+            core::mem::size_of::<libc::sigaction>() > 16,
+            "this host's struct sigaction is Darwin-shaped after all; \
+             the conversion below is then merely redundant, not wrong"
+        );
+    }
+
+    /// A handler installed and read back is the same handler, and the mask and
+    /// flags survive the round trip in Darwin's spelling.
+    #[test]
+    fn a_disposition_round_trips_through_the_host() {
+        unsafe extern "C" fn handler(_signum: libc::c_int) {}
+
+        let wanted = Disposition {
+            handler: handler as *const () as usize as u64,
+            // `SIGUSR2` and `SIGINT`, in Darwin's numbering.
+            mask: (1 << (signum::SIGUSR2 - 1)) | (1 << (signum::SIGINT - 1)),
+            // Darwin's `SA_RESTART`, which is not Linux's value for it.
+            flags: 0x0002,
+        };
+
+        // SAFETY: a real function of the right prototype, on a signal this test
+        // restores below.
+        let rc = unsafe { sigaction(signum::SIGUSR1, Some(wanted), None) };
+        assert_eq!(rc, 0);
+
+        let mut back = Disposition::default();
+        // SAFETY: a query, which installs nothing.
+        assert_eq!(unsafe { sigaction(signum::SIGUSR1, None, Some(&mut back)) }, 0);
+        assert_eq!(back, wanted, "the disposition did not survive the host");
+
+        // SAFETY: restoring the default for the signal this test took.
+        unsafe { sigaction(signum::SIGUSR1, Some(Disposition::default()), None) };
+    }
+
+    /// A signal this host has not got is refused rather than aimed at a
+    /// neighbour: a handler installed for `SIGINFO` must not run for something
+    /// else.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn a_signal_this_host_lacks_is_refused() {
+        // SAFETY: `SIGINFO` maps to nothing here, so nothing is installed.
+        assert_eq!(unsafe { sigaction(signum::SIGINFO, None, None) }, -1);
+        // SAFETY: as above.
+        assert_eq!(unsafe { signal(signum::SIGEMT, 0) }, u64::MAX);
+    }
+
+    /// Darwin's `SA_*` bits are not this host's, and the translation is a
+    /// bijection over the ones both have.
+    #[test]
+    fn the_flag_bits_survive_a_round_trip() {
+        for (bit, name) in saflag::DARWIN {
+            if saflag::host(name).is_none() {
+                continue;
+            }
+            assert_eq!(
+                flags_from_host(flags_to_host(*bit)),
+                *bit,
+                "SA_{name} did not round trip"
+            );
+        }
     }
 }

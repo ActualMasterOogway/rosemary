@@ -54,6 +54,9 @@ pub mod trampoline;
 pub mod unwind;
 pub mod vm;
 
+/// The frameworks this tree implements, and whether they are the ones in use.
+pub mod frameworks;
+
 /// Realizing the guest's Objective-C classes, and servicing the messages it sends.
 ///
 /// Not gated, because the runtime it talks to need not be the host's: everything

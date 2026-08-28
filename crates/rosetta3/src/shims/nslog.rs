@@ -144,16 +144,21 @@ pub fn escaped_string(bytes: &[u8]) -> Option<u64> {
 }
 
 /// Hand `text` to the host's own `NSLog`, as the whole of a `%s` conversion.
+///
+/// With no Foundation to hand it to, it goes to stderr in the shape Apple's
+/// `NSLog` writes. Losing the guest's log entirely is the one outcome worth
+/// avoiding: it is how a Cocoa program says what went wrong.
 fn emit(text: &[u8]) {
-    let (Some(nslog), Some(fmt)) = (host_nslog(), percent_s()) else {
-        return;
-    };
     // An interior NUL would end the C string early; replacing it keeps the rest
     // of the line, which is what a reader wants from a log.
     let sanitised: Vec<u8> = text
         .iter()
         .map(|b| if *b == 0 { b'?' } else { *b })
         .collect();
+    let (Some(nslog), Some(fmt)) = (host_nslog(), percent_s()) else {
+        eprintln!("{}", String::from_utf8_lossy(&sanitised));
+        return;
+    };
     let Ok(c) = CString::new(sanitised) else {
         return;
     };

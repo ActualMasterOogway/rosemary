@@ -2,11 +2,13 @@
 
 use std::ffi::CString;
 
+pub mod dispatch;
 pub mod divergent;
 pub mod errno;
 pub mod fcntl;
 pub mod ioctl;
 pub mod locale;
+pub mod mach;
 pub mod passthrough;
 pub mod pthread;
 pub mod signal;
@@ -25,11 +27,33 @@ pub fn c_name(symbol: &str) -> &str {
 /// Not the answer a guest import gets: that goes through [`symbol`], which consults
 /// this crate's entries first and refuses a divergent name outright.
 pub fn host_symbol(name: &str) -> Option<u64> {
+    load_math();
     let c = CString::new(name).ok()?;
     // SAFETY: `RTLD_DEFAULT` is a valid pseudo-handle and `c` outlives the call.
     // `dlsym` returns null for a name it does not know, which is checked.
     let found = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c.as_ptr()) };
     (!found.is_null()).then(|| found as usize as u64)
+}
+
+/// Make sure the host's maths library is loaded before anything asks it for a
+/// symbol.
+///
+/// On Darwin `cos` is in libSystem, which every process has. On glibc it is in
+/// `libm.so.6`, which is loaded only if something linked against it - and this
+/// runtime does not, so `dlsym(RTLD_DEFAULT, "cos")` is null and a guest's whole
+/// maths library goes unresolved. One `dlopen` fixes every name at once.
+fn load_math() {
+    #[cfg(not(target_os = "macos"))]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            // SAFETY: a soname the dynamic loader resolves, opened globally so
+            // its exports join the default search and never closed.
+            unsafe {
+                libc::dlopen(c"libm.so.6".as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL);
+            }
+        });
+    }
 }
 
 /// The address a guest asking for `symbol` should be given, or `None`.
@@ -56,12 +80,44 @@ pub fn refusal(symbol: &str) -> String {
     }
 }
 
+/// A source of answers registered by the crate above this one.
+///
+/// `darwin` cannot depend on `corefoundation` - the dependency runs the other
+/// way - but the two have to agree: a name the loader binds to this tree's
+/// `CFStringGetLength` must also be the one a `dlsym` finds, or a guest gets an
+/// import that works and a `dlsym` of the same name that comes back null. The
+/// runtime registers itself here at startup and this crate asks.
+static REGISTERED: std::sync::RwLock<Vec<fn(&str) -> Option<u64>>> =
+    std::sync::RwLock::new(Vec::new());
+
+/// Add a source of answers, consulted by [`symbol`] alongside this crate's own.
+///
+/// Idempotent only by the caller's discipline: registering twice costs a second
+/// lookup and answers the same.
+pub fn register_provider(source: fn(&str) -> Option<u64>) {
+    REGISTERED
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(source);
+}
+
+fn registered(name: &str) -> Option<u64> {
+    REGISTERED
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find_map(|source| source(name))
+}
+
 fn implemented(name: &str) -> Option<u64> {
-    stdio::symbol(name)
+    registered(name)
+        .or_else(|| stdio::symbol(name))
         .or_else(|| errno::symbol(name))
         .or_else(|| sysctl::symbol(name))
         .or_else(|| sysinfo::symbol(name))
         .or_else(|| pthread::symbol(name))
+        .or_else(|| mach::symbol(name))
+        .or_else(|| dispatch::symbol(name))
 }
 
 pub fn is_implemented(symbol: &str) -> bool {
@@ -76,6 +132,8 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
     sysctl::provide(&mut lib);
     sysinfo::provide(&mut lib);
     pthread::provide(&mut lib);
+    mach::provide(&mut lib);
+    dispatch::provide(&mut lib);
     lib
 }
 

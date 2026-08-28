@@ -54,7 +54,11 @@ pub const CLAIMED: &[&str] = &[
     "log2", "pow", "round", "sin", "sinh", "sqrt", "tan", "tanh", "trunc",
     "clock", "difftime", "mktime", "time",
     // Environment.
-    "getenv", "putenv", "setenv", "unsetenv", "exit", "atexit",
+    // Not `atexit`: glibc keeps it in `libc_nonshared.a` and exports no dynamic
+    // symbol for it, so there is nothing to pass through to. `rosetta3`'s
+    // `shims::atexit` registers the handler through `__cxa_atexit` instead,
+    // which it would have to do anyway - the handler is a guest address.
+    "getenv", "putenv", "setenv", "unsetenv", "exit",
 ];
 
 /// Whether this crate claims `name` is safe to pass through unchanged.

@@ -86,7 +86,15 @@ mod tests {
         {
             libc::LC_ALL_MASK
         }
-        #[cfg(not(target_os = "macos"))]
+        // glibc's is *not* all ones: it has thirteen categories and `LC_ALL`
+        // itself is a category number with no mask bit, so the value has a hole
+        // at bit 6. `newlocale` rejects a mask with a bit it does not know, so
+        // the all-ones musl spelling returns null here rather than the C locale.
+        #[cfg(all(not(target_os = "macos"), target_env = "gnu"))]
+        {
+            0x1fbf
+        }
+        #[cfg(all(not(target_os = "macos"), not(target_env = "gnu")))]
         {
             0x7fff_ffff
         }

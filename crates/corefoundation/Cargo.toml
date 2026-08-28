@@ -1,0 +1,10 @@
+[package]
+name = "corefoundation"
+description = "CoreFoundation, implemented on this tree's own Objective-C runtime."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+objc.workspace = true
+libc.workspace = true

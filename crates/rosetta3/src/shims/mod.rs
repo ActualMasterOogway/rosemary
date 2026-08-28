@@ -47,7 +47,11 @@ pub mod coremedia;
 pub mod iokit;
 #[cfg(target_os = "macos")]
 pub mod machthread;
-#[cfg(target_os = "macos")]
+
+/// Not gated: `NSLog`'s two complications are a variadic tail and an `NSString`
+/// format, and both are this runtime's problem on either host. What it reaches
+/// for - CoreFoundation, and Foundation's own `NSLog` - it reaches by `dlsym`
+/// and does without when there is none. See [`nslog::emit`].
 pub mod nslog;
 
 /// A shim that reads and writes the guest's registers and memory.
@@ -99,7 +103,6 @@ fn platform_callback_shim_for(_name: &str) -> Option<CallbackShim> {
 }
 
 /// The two variadics whose format string is an `NSString`, and so are Foundation's.
-#[cfg(target_os = "macos")]
 fn foundation_variadic(name: &str) -> Option<Shim> {
     match name {
         "NSLog" => Some(nslog::nslog),
@@ -108,11 +111,6 @@ fn foundation_variadic(name: &str) -> Option<Shim> {
         "NSRunAlertPanel" => Some(nslog::run_alert_panel),
         _ => None,
     }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn foundation_variadic(_name: &str) -> Option<Shim> {
-    None
 }
 
 /// Run the shim for `symbol`, if there is one.

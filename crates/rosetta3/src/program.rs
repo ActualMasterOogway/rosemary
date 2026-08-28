@@ -244,6 +244,9 @@ pub(crate) struct HostProviders {
     /// The Objective-C runtime. The native provider denies the `_objc_`, `_class_`,
     /// `_sel_` and `_protocol_` families precisely so a shim can claim them.
     objc: machish::resolve::SyntheticDylib,
+    /// CoreFoundation and the frameworks above it, when this tree's own are the
+    /// ones in use. Empty otherwise. See [`crate::frameworks`].
+    frameworks: machish::resolve::SyntheticDylib,
     /// The `dl` family, which the host exports and cannot usefully answer for an
     /// x86-64 file. See [`crate::dyld`].
     dyld: machish::resolve::SyntheticDylib,
@@ -258,10 +261,12 @@ impl HostProviders {
         // accident. Empty on macOS; see `darwin::divergent`.
         darwin::divergent::deny_in(&mut native);
         crate::objc::host::deny_foreign_classes(&mut native);
+        crate::frameworks::deny_host_frameworks(&mut native);
         HostProviders {
             runtime: crate::shims::runtime::provider(),
             darwin: darwin::provider(),
             objc: crate::objc::dispatch::provider(),
+            frameworks: crate::frameworks::provider(),
             dyld: crate::dyld::provider(),
             eager: eager_binding_shims(),
             native,
@@ -277,6 +282,7 @@ impl HostProviders {
         providers.push(&self.runtime);
         providers.push(&self.darwin);
         providers.push(&self.objc);
+        providers.push(&self.frameworks);
         providers.push(&self.dyld);
         providers.push(&self.eager);
         providers.push(&self.native);

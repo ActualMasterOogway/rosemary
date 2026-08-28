@@ -137,13 +137,12 @@ pub const PREFIXES: &[(&str, &str)] = &[
 pub const PREFIXES: &[(&str, &str)] = &[];
 
 pub fn reason(name: &str) -> Option<&'static str> {
-    // The threading family is denied by prefix below, so the part of it this crate
-    // answers for has to be excused here: the entries it implements, the handful it
-    // has looked at and vouched for, and the few it leaves to the runtime above.
-    if crate::pthread::PASSED_THROUGH.contains(&name)
-        || crate::pthread::SHIMMED_ABOVE.contains(&name)
-        || crate::pthread::symbol(name).is_some()
-    {
+    // A name this crate implements is not divergent, whatever family it is in.
+    // Several of the prefixes below are denied wholesale precisely so that the
+    // handful within them this crate does answer for can be carved back out
+    // here: `mach_absolute_time` out of Mach, `dispatch_once_f` out of
+    // libdispatch, and most of `pthread_`.
+    if implemented_here(name) {
         return None;
     }
     if let Some((_, why)) = NAMES.iter().find(|(n, _)| *n == name) {
@@ -153,6 +152,17 @@ pub fn reason(name: &str) -> Option<&'static str> {
         .iter()
         .find(|(p, _)| name.starts_with(p))
         .map(|(_, why)| *why)
+}
+
+/// Whether `crate` answers for `name` itself.
+///
+/// The threading family needs two more lists than the others: `PASSED_THROUGH`
+/// is what this crate has looked at and vouched for, and `SHIMMED_ABOVE` what it
+/// leaves to the runtime above. Neither has a `symbol` entry.
+fn implemented_here(name: &str) -> bool {
+    crate::pthread::PASSED_THROUGH.contains(&name)
+        || crate::pthread::SHIMMED_ABOVE.contains(&name)
+        || crate::is_implemented(name)
 }
 
 pub fn contains(name: &str) -> bool {
@@ -187,7 +197,21 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     fn a_divergence_is_named_rather_than_passed_through() {
         assert_eq!(reason("readdir"), Some(DIRENT));
-        assert_eq!(reason("mach_absolute_time"), Some(MACH));
+        assert_eq!(reason("mach_port_deallocate"), Some(MACH));
         assert_eq!(reason("strlen"), None, "a genuine passthrough is not denied");
+    }
+
+    /// The families denied by prefix have holes in them, and the holes are the
+    /// point: a prefix is denied wholesale so that the few names this crate does
+    /// answer for can be excused one at a time.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn a_name_this_crate_implements_is_not_denied_by_its_family() {
+        for name in ["mach_absolute_time", "mach_timebase_info", "dispatch_once_f"] {
+            assert_eq!(reason(name), None, "{name} is implemented and still denied");
+        }
+        // And the families around them are still shut.
+        assert!(contains("dispatch_async"));
+        assert!(contains("mach_task_self"));
     }
 }
