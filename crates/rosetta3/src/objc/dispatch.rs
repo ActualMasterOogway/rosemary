@@ -713,7 +713,10 @@ impl Convert for Classes<'_> {
             return Ok(self.vm.objc_host_protocol(raw));
         }
         match self.classes.contains(&(index as u8)) || self.objects.contains(&(index as u8)) {
-            true => Ok(self.vm.objc_host_class(raw)),
+            // Not `objc_host_class`: an `@` in a method encoding is `id`,
+            // `Class` and `Protocol *` alike, so both maps are consulted. See
+            // [`Vm::objc_host_id`].
+            true => Ok(self.vm.objc_host_id(raw)),
             false => Ok(raw),
         }
     }

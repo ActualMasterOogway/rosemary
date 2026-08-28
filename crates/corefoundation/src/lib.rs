@@ -15,6 +15,7 @@ pub mod api;
 pub mod base;
 pub mod callbacks;
 pub mod collections;
+pub mod runloop;
 mod send;
 pub mod string;
 
@@ -62,6 +63,9 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFStringGetCStringPtr" => at!(api::CFStringGetCStringPtr),
         "CFStringGetBytes" => at!(api::CFStringGetBytes),
         "CFStringCompare" => at!(api::CFStringCompare),
+        "CFStringCreateMutable" => at!(api::CFStringCreateMutable),
+        "CFStringAppend" => at!(api::CFStringAppend),
+        "CFStringAppendCString" => at!(api::CFStringAppendCString),
 
         "CFArrayGetTypeID" => at!(api::CFArrayGetTypeID),
         "CFArrayCreate" => at!(api::CFArrayCreate),
@@ -85,6 +89,26 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFDataCreate" => at!(api::CFDataCreate),
         "CFDataGetLength" => at!(api::CFDataGetLength),
         "CFDataGetBytePtr" => at!(api::CFDataGetBytePtr),
+
+        "CFRunLoopGetCurrent" => at!(api::CFRunLoopGetCurrent),
+        "CFRunLoopGetMain" => at!(api::CFRunLoopGetMain),
+        "CFRunLoopRunInMode" => at!(api::CFRunLoopRunInMode),
+        "CFRunLoopRun" => at!(api::CFRunLoopRun),
+        "CFRunLoopStop" => at!(api::CFRunLoopStop),
+        "CFRunLoopWakeUp" => at!(api::CFRunLoopWakeUp),
+        "CFRunLoopSourceCreate" => at!(api::CFRunLoopSourceCreate),
+        "CFRunLoopSourceSignal" => at!(api::CFRunLoopSourceSignal),
+        "CFRunLoopSourceInvalidate" => at!(api::CFRunLoopSourceInvalidate),
+        "CFRunLoopSourceIsValid" => at!(api::CFRunLoopSourceIsValid),
+        "CFRunLoopAddSource" => at!(api::CFRunLoopAddSource),
+        "CFRunLoopRemoveSource" => at!(api::CFRunLoopRemoveSource),
+        "CFRunLoopContainsSource" => at!(api::CFRunLoopContainsSource),
+        "CFAbsoluteTimeGetCurrent" => at!(api::CFAbsoluteTimeGetCurrent),
+        "CFRunLoopTimerCreate" => at!(api::CFRunLoopTimerCreate),
+        "CFRunLoopAddTimer" => at!(api::CFRunLoopAddTimer),
+        "CFRunLoopRemoveTimer" => at!(api::CFRunLoopRemoveTimer),
+        "CFRunLoopTimerInvalidate" => at!(api::CFRunLoopTimerInvalidate),
+        "CFRunLoopTimerIsValid" => at!(api::CFRunLoopTimerIsValid),
 
         _ => return None,
     })
@@ -113,6 +137,9 @@ pub const NAMES: &[&str] = &[
     "CFStringGetCStringPtr",
     "CFStringGetBytes",
     "CFStringCompare",
+    "CFStringCreateMutable",
+    "CFStringAppend",
+    "CFStringAppendCString",
     "CFArrayGetTypeID",
     "CFArrayCreate",
     "CFArrayGetCount",
@@ -132,7 +159,45 @@ pub const NAMES: &[&str] = &[
     "CFDataCreate",
     "CFDataGetLength",
     "CFDataGetBytePtr",
+    "CFRunLoopGetCurrent",
+    "CFRunLoopGetMain",
+    "CFRunLoopRunInMode",
+    "CFRunLoopRun",
+    "CFRunLoopStop",
+    "CFRunLoopWakeUp",
+    "CFRunLoopSourceCreate",
+    "CFRunLoopSourceSignal",
+    "CFRunLoopSourceInvalidate",
+    "CFRunLoopSourceIsValid",
+    "CFRunLoopAddSource",
+    "CFRunLoopRemoveSource",
+    "CFRunLoopContainsSource",
+    "CFAbsoluteTimeGetCurrent",
+    "CFRunLoopTimerCreate",
+    "CFRunLoopAddTimer",
+    "CFRunLoopRemoveTimer",
+    "CFRunLoopTimerInvalidate",
+    "CFRunLoopTimerIsValid",
 ];
+/// A mode name, as a string that lives for the process.
+///
+/// `kCFRunLoopDefaultMode` is a `CFStringRef` a guest reads once and passes back
+/// into every `CFRunLoopAddSource`, so it has to be a real string object and it
+/// has to be the same one every time.
+fn mode_name_object(name: &'static str) -> u64 {
+    static NAMES: std::sync::Mutex<Vec<(&'static str, u64)>> = std::sync::Mutex::new(Vec::new());
+    let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, addr)) = names.iter().find(|(n, _)| *n == name) {
+        return *addr;
+    }
+    // Retained forever: a global a guest may release is one it can make dangle.
+    let object = string::from_bytes(name.as_bytes(), false);
+    objc::arc::retain(object as objc::object::Id);
+    let addr = object as usize as u64;
+    names.push((name, addr));
+    addr
+}
+
 
 /// The symbols that are **data**, as `(Mach-O name, address)`.
 ///
@@ -165,6 +230,16 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         (
             "_kCFTypeDictionaryKeyCallBacks".to_string(),
             &callbacks::TYPE_KEY_CALLBACKS as *const _ as usize as u64,
+        ),
+        // The run loop's mode names, which a guest passes straight back in and
+        // which `CFRunLoopAddSource` compares as strings.
+        (
+            "_kCFRunLoopDefaultMode".to_string(),
+            mode_name_object(runloop::DEFAULT_MODE),
+        ),
+        (
+            "_kCFRunLoopCommonModes".to_string(),
+            mode_name_object(runloop::COMMON_MODES),
         ),
     ]
 }

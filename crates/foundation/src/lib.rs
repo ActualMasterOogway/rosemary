@@ -1,5 +1,8 @@
 pub mod bundle;
+mod constant;
 mod define;
+pub mod geometry;
+pub mod kvc;
 pub mod plist;
 pub mod pool;
 pub mod string;
@@ -18,8 +21,71 @@ pub fn bootstrap() {
         collections::install();
         pool::install();
         value::install();
+        geometry::install();
+        kvc::install();
+        constant::install();
+        declare_abstract();
         bundle::class::install();
     });
+}
+
+/// An integer as an autoreleased `NSNumber`.
+pub(crate) fn number(value: i64) -> objc::object::Id {
+    let n = corefoundation::collections::new_number(corefoundation::collections::Number::Integer(
+        value,
+    ));
+    // SAFETY: a fresh object.
+    unsafe { corefoundation::api::CFAutorelease(n) as objc::object::Id }
+}
+
+/// A double as an autoreleased `NSNumber`.
+pub(crate) fn real(value: f64) -> objc::object::Id {
+    let n = corefoundation::collections::new_number(corefoundation::collections::Number::Float(
+        value,
+    ));
+    // SAFETY: a fresh object.
+    unsafe { corefoundation::api::CFAutorelease(n) as objc::object::Id }
+}
+
+/// The value an `NSNumber` holds, asked for rather than reached into.
+///
+/// A number is not always a `__NSCFNumber`: `@(9.25)` with a constant operand is
+/// an `NSConstantDoubleNumber` the compiler laid out in the image, and a guest
+/// may subclass `NSNumber` itself. So the accessor is *sent*, which every one of
+/// them answers, instead of the storage being read - which only one of them has.
+///
+/// # Safety
+///
+/// `value` must be null or an object this runtime allocated.
+pub(crate) unsafe fn number_of(value: objc::object::Id) -> Option<i64> {
+    // SAFETY: the caller's obligation; `-longLongValue` is `long long (id, SEL)`.
+    unsafe { send_scalar::<i64>(value, "longLongValue") }
+}
+
+/// # Safety
+///
+/// As [`number_of`].
+pub(crate) unsafe fn real_of(value: objc::object::Id) -> Option<f64> {
+    // SAFETY: the caller's obligation; `-doubleValue` is `double (id, SEL)`.
+    unsafe { send_scalar::<f64>(value, "doubleValue") }
+}
+
+/// Send a nullary message returning `T`, or `None` if the receiver has no such
+/// method.
+///
+/// # Safety
+///
+/// `receiver` must be null or a live object, and the method - if there is one -
+/// must return `T`.
+unsafe fn send_scalar<T>(receiver: objc::object::Id, name: &str) -> Option<T> {
+    let sel = objc::sel::get(name);
+    // SAFETY: the caller's obligation.
+    let method = unsafe { objc::object::class_of(receiver) }?.method(sel)?;
+    // SAFETY: the caller's obligation.
+    let f: unsafe extern "C" fn(objc::object::Id, objc::sel::Sel) -> T =
+        unsafe { std::mem::transmute(method.implementation()) };
+    // SAFETY: as above.
+    Some(unsafe { f(receiver, sel) })
 }
 
 /// The class objects this crate publishes as *data*, Mach-O spelling included.
@@ -29,8 +95,8 @@ pub fn bootstrap() {
 pub fn class_data() -> Vec<(String, u64)> {
     bootstrap();
     let mut out = Vec::new();
-    for name in CLASSES {
-        let Some(class) = std::ffi::CString::new(*name)
+    for name in CLASSES.iter().chain(constant::CLASSES).copied() {
+        let Some(class) = std::ffi::CString::new(name)
             .ok()
             .and_then(|n| objc::class::lookup(&n))
         else {
@@ -48,6 +114,22 @@ pub fn class_data() -> Vec<(String, u64)> {
     out
 }
 
+/// Classes declared so a guest can subclass them, with no methods of their own.
+///
+/// Declaring one is strictly better than leaving it out. A missing superclass
+/// refuses the guest's *whole subclass* - every method on it, and every message
+/// to it - whereas a declared one registers, and only the inherited messages the
+/// guest actually sends are refused, each by name. That difference is the whole
+/// diagnostic.
+///
+/// Only classes a guest in this tree has been seen to subclass. AppKit's -
+/// `NSView`, `NSWindow`, `NSApplication` - belong to AppKit and arrive with it.
+fn declare_abstract() {
+    for name in [c"NSFormatter", c"NSThread", c"NSLock", c"NSRecursiveLock"] {
+        corefoundation::base::abstract_class(name, None);
+    }
+}
+
 /// Every class this crate answers for.
 pub const CLASSES: &[&str] = &[
     "NSString",
@@ -63,7 +145,14 @@ pub const CLASSES: &[&str] = &[
     "NSNull",
     "NSAutoreleasePool",
     "NSBundle",
+    "NSFormatter",
+    "NSThread",
+    "NSLock",
+    "NSRecursiveLock",
 ];
+
+// The image-resident number classes are `constant::CLASSES`, published the same
+// way and listed there because their layouts are that module's business.
 
 #[cfg(test)]
 mod tests {
@@ -93,6 +182,7 @@ mod tests {
         bootstrap();
         let missing: Vec<&str> = CLASSES
             .iter()
+            .chain(constant::CLASSES)
             .copied()
             .filter(|n| {
                 std::ffi::CString::new(*n)

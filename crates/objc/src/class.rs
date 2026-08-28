@@ -59,7 +59,6 @@ pub struct Ivar {
     /// Bytes from the start of the object. Written once, before registration.
     offset: usize,
     size: usize,
-    #[allow(dead_code)]
     types: CString,
 }
 
@@ -74,6 +73,12 @@ impl Ivar {
 
     pub fn size(&self) -> usize {
         self.size
+    }
+
+    /// The ivar's type encoding, which is what a key-value coder reads to know
+    /// how wide the slot is and how to box what it finds there.
+    pub fn types(&self) -> &CStr {
+        &self.types
     }
 }
 

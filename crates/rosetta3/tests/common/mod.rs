@@ -1545,6 +1545,70 @@ int main(void) {
 }
 "#;
 
+/// A guest that schedules a run loop source and a timer, and is called back
+/// through both.
+///
+/// The claim is the one thing a run loop is for: *guest* code runs from inside
+/// `CFRunLoopRunInMode`. Both callbacks are guest functions, so both have to
+/// have become trampolines on the way in - the source's from inside a structure
+/// this runtime copied, the timer's from a register.
+pub const RUNLOOP_C: &str = r#"
+#include <CoreFoundation/CoreFoundation.h>
+#include <stdio.h>
+
+static int source_calls = 0;
+static int timer_calls = 0;
+static CFRunLoopSourceRef the_source;
+
+static void performed(void *info) {
+    source_calls++;
+    printf("source %d info %ld\n", source_calls, (long)(intptr_t)info);
+}
+
+static void fired(CFRunLoopTimerRef timer, void *info) {
+    timer_calls++;
+    printf("timer %d info %ld\n", timer_calls, (long)(intptr_t)info);
+    /* Signalled from inside a timer callback, so the next turn of the loop
+       services it: a source and a timer in the same loop, in order. */
+    CFRunLoopSourceSignal(the_source);
+    CFRunLoopWakeUp(CFRunLoopGetCurrent());
+}
+
+int main(void) {
+    CFRunLoopSourceContext sc;
+    memset(&sc, 0, sizeof sc);
+    sc.info = (void *)(intptr_t)42;
+    sc.perform = performed;
+    the_source = CFRunLoopSourceCreate(NULL, 0, &sc);
+    CFRunLoopAddSource(CFRunLoopGetCurrent(), the_source, kCFRunLoopDefaultMode);
+
+    CFRunLoopTimerContext tc;
+    memset(&tc, 0, sizeof tc);
+    tc.info = (void *)(intptr_t)7;
+    CFRunLoopTimerRef timer = CFRunLoopTimerCreate(
+        NULL, CFAbsoluteTimeGetCurrent() + 0.01, 0.01, 0, 0, fired, &tc);
+    CFRunLoopAddTimer(CFRunLoopGetCurrent(), timer, kCFRunLoopDefaultMode);
+
+    while (timer_calls < 2 || source_calls < 2) {
+        if (CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.0, true) == kCFRunLoopRunFinished) {
+            printf("the loop emptied\n");
+            break;
+        }
+    }
+    CFRunLoopTimerInvalidate(timer);
+    printf("done %d %d\n", source_calls >= 2, timer_calls >= 2);
+    return 0;
+}
+"#;
+
+/// Build [`RUNLOOP_C`], or `None` if this host cannot.
+pub fn runloop_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("runloop", RUNLOOP_C, &["-framework", "CoreFoundation"]))
+        .clone()
+}
+
 /// Build [`CFSTRING_C`], or `None` if this host cannot.
 pub fn cfstring_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();

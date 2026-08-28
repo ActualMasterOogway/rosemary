@@ -34,10 +34,4 @@ pub(crate) fn install() {
         "null" => null, c"@16@0:8";
     });
 
-    // `NSValue` is `NSNumber`'s superclass, and a guest's `isKindOfClass:`
-    // against it has to succeed. Nothing is implemented on it yet: a guest that
-    // sends `-getValue:` gets the runtime's unrecognised-selector report, with
-    // the name in it, which is the work queue.
-    let value = corefoundation::base::abstract_class(c"NSValue", None);
-    let _ = value;
 }

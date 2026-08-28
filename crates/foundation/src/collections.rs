@@ -26,7 +26,7 @@ fn immutable(what: &str, sel: &str) -> ! {
     objc::fail!("-[{what} {sel}]: the collection was not created mutable");
 }
 
-// ------------------------------------------------------------------ NSArray
+
 
 unsafe extern "C" fn count(receiver: Id, _sel: Sel) -> usize {
     // SAFETY: an array.
@@ -135,7 +135,7 @@ unsafe extern "C" fn array_with_objects_count(
     }
 }
 
-// ------------------------------------------------------------- NSDictionary
+
 
 unsafe extern "C" fn dictionary_count(receiver: Id, _sel: Sel) -> usize {
     // SAFETY: a dictionary.
@@ -262,7 +262,7 @@ unsafe extern "C" fn dictionary_with_objects_for_keys_count(
     }
 }
 
-// ------------------------------------------------------------------- NSData
+
 
 unsafe extern "C" fn data_length(receiver: Id, _sel: Sel) -> usize {
     // SAFETY: a data object.
@@ -298,7 +298,7 @@ unsafe extern "C" fn append_bytes(receiver: Id, _sel: Sel, bytes: *const u8, len
     d.extend_from_slice(unsafe { std::slice::from_raw_parts(bytes, length) });
 }
 
-// ----------------------------------------------------------------- NSNumber
+
 
 unsafe extern "C" fn int_value(receiver: Id, _sel: Sel) -> i32 {
     // SAFETY: a number.

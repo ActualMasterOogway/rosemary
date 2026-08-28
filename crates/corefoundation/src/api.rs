@@ -267,6 +267,46 @@ pub unsafe extern "C" fn CFStringGetBytes(
     (end - start) as CFIndex
 }
 
+pub unsafe extern "C" fn CFStringCreateMutable(
+    _allocator: CFAllocatorRef,
+    _max_length: CFIndex,
+) -> CFTypeRef {
+    // The capacity is a hint Apple's uses to preallocate and this one ignores;
+    // a `CFStringRef` with a maximum length is a thing a guest may then exceed,
+    // and truncating silently is worse than reallocating.
+    string::new_mutable()
+}
+
+pub unsafe extern "C" fn CFStringAppend(target: CFTypeRef, appended: CFTypeRef) {
+    // SAFETY: the caller's obligation.
+    let (Some(a), Some(b)) = (unsafe { string::as_string(target) }, unsafe {
+        string::as_string(appended)
+    }) else {
+        return;
+    };
+    let mut joined = a.utf8();
+    joined.extend_from_slice(&b.utf8());
+    // SAFETY: as above.
+    unsafe { string::set_bytes(target, &joined) };
+}
+
+pub unsafe extern "C" fn CFStringAppendCString(
+    target: CFTypeRef,
+    cstr: *const c_char,
+    _encoding: u32,
+) {
+    // SAFETY: the caller's obligation.
+    let (Some(a), Some(bytes)) = (unsafe { string::as_string(target) }, unsafe {
+        string::cstr_bytes(cstr)
+    }) else {
+        return;
+    };
+    let mut joined = a.utf8();
+    joined.extend_from_slice(bytes);
+    // SAFETY: as above.
+    unsafe { string::set_bytes(target, &joined) };
+}
+
 pub unsafe extern "C" fn CFStringCompare(a: CFTypeRef, b: CFTypeRef, options: u64) -> CFIndex {
     // SAFETY: the caller's obligation.
     let (Some(a), Some(b)) = (unsafe { string::as_string(a) }, unsafe { string::as_string(b) })
@@ -534,4 +574,284 @@ pub unsafe extern "C" fn CFDataGetLength(data: CFTypeRef) -> CFIndex {
 pub unsafe extern "C" fn CFDataGetBytePtr(data: CFTypeRef) -> *const u8 {
     // SAFETY: the caller's obligation.
     unsafe { collections::data(data) }.map_or(std::ptr::null(), |d| d.as_ptr())
+}
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::runloop::{self, RunLoop, Source, Timer};
+
+/// `CFRunLoopSourceContext`, as a guest lays it out.
+#[repr(C)]
+pub struct CFRunLoopSourceContext {
+    pub version: CFIndex,
+    pub info: *mut c_void,
+    pub retain: *const c_void,
+    pub release: *const c_void,
+    pub copy_description: *const c_void,
+    pub equal: *const c_void,
+    pub hash: *const c_void,
+    pub schedule: *const c_void,
+    pub cancel: *const c_void,
+    pub perform: Option<runloop::Perform>,
+}
+
+/// `CFRunLoopTimerContext`.
+#[repr(C)]
+pub struct CFRunLoopTimerContext {
+    pub version: CFIndex,
+    pub info: *mut c_void,
+    pub retain: *const c_void,
+    pub release: *const c_void,
+    pub copy_description: *const c_void,
+}
+
+/// A leaked `Arc`, as the C world holds one.
+///
+/// Never reclaimed. A `CFRunLoopSourceRef` is owned by the loop it was added to
+/// as much as by the guest that made it, and freeing one on the guest's last
+/// release would take the loop's out from under it - which is a use-after-free
+/// where the leak is a few dozen bytes.
+fn leak<T>(value: Arc<T>) -> CFTypeRef {
+    Arc::into_raw(value) as CFTypeRef
+}
+
+/// Borrow a leaked `Arc` without changing its count.
+///
+/// `ManuallyDrop`, because the `Arc` is reconstructed from a pointer that is
+/// still owned by the C world: letting it drop would release a reference nobody
+/// took.
+///
+/// # Safety
+///
+/// `p` must be a pointer [`leak`] produced for a `T`, or one of the stable
+/// pointers `CFRunLoopGetCurrent` hands out.
+unsafe fn borrow<T>(p: CFTypeRef) -> Option<std::mem::ManuallyDrop<Arc<T>>> {
+    // SAFETY: the caller's obligation.
+    (!p.is_null())
+        .then(|| std::mem::ManuallyDrop::new(unsafe { Arc::from_raw(p as *const T) }))
+}
+
+/// A run loop's address, which is stable for as long as its thread runs.
+///
+/// Not `leak`: `CFRunLoopGetCurrent` is called once a frame by anything with a
+/// frame, and handing out an owned reference each time would add one to the
+/// count forever. The thread-local holds the loop alive, so borrowing is both
+/// sound and stable.
+pub unsafe extern "C" fn CFRunLoopGetCurrent() -> CFTypeRef {
+    Arc::as_ptr(&runloop::current()) as CFTypeRef
+}
+
+pub unsafe extern "C" fn CFRunLoopGetMain() -> CFTypeRef {
+    Arc::as_ptr(&runloop::main()) as CFTypeRef
+}
+
+/// The mode name a guest passed, as a Rust string.
+///
+/// # Safety
+///
+/// `mode` must be null or a `CFStringRef`.
+unsafe fn mode_name(mode: CFTypeRef) -> String {
+    // SAFETY: the caller's obligation.
+    match unsafe { string::as_string(mode) } {
+        Some(s) => String::from_utf8_lossy(&s.utf8()).into_owned(),
+        // Null is `kCFRunLoopDefaultMode` in every call that takes one.
+        None => runloop::DEFAULT_MODE.to_string(),
+    }
+}
+
+pub unsafe extern "C" fn CFRunLoopRunInMode(
+    mode: CFTypeRef,
+    seconds: f64,
+    return_after_source_handled: Boolean,
+) -> i32 {
+    // SAFETY: the caller's obligation - a `CFStringRef` or null.
+    let (name, loop_) = unsafe { (mode_name(mode), runloop::current()) };
+    loop_.run_in_mode(&name, seconds, return_after_source_handled != 0)
+}
+
+pub unsafe extern "C" fn CFRunLoopRun() {
+    // `CFRunLoopRun` is the default mode with no timeout, until stopped.
+    runloop::current().run_in_mode(runloop::DEFAULT_MODE, f64::INFINITY, false);
+}
+
+pub unsafe extern "C" fn CFRunLoopStop(loop_: CFTypeRef) {
+    // SAFETY: the caller's obligation.
+    if let Some(l) = unsafe { borrow::<RunLoop>(loop_) } {
+        l.stop();
+    }
+}
+
+pub unsafe extern "C" fn CFRunLoopWakeUp(loop_: CFTypeRef) {
+    // SAFETY: the caller's obligation.
+    if let Some(l) = unsafe { borrow::<RunLoop>(loop_) } {
+        l.wake();
+    }
+}
+
+pub unsafe extern "C" fn CFRunLoopSourceCreate(
+    _allocator: CFAllocatorRef,
+    _order: CFIndex,
+    context: *const CFRunLoopSourceContext,
+) -> CFTypeRef {
+    if context.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: the caller's obligation - a live context structure.
+    let context = unsafe { &*context };
+    if context.version != 0 {
+        // A version-1 source is a mach port, and this runtime has no Mach.
+        // Accepting one would produce a source that is never fired, which is a
+        // program that hangs with nothing anywhere to say why.
+        objc::fail!(
+            "CFRunLoopSourceCreate: version {} is a mach-port source, which this runtime has no Mach for",
+            context.version
+        );
+    }
+    leak(runloop::new_source(context.perform, context.info as usize))
+}
+
+pub unsafe extern "C" fn CFRunLoopSourceSignal(source: CFTypeRef) {
+    // SAFETY: the caller's obligation.
+    if let Some(s) = unsafe { borrow::<Source>(source) } {
+        s.signal();
+    }
+}
+
+pub unsafe extern "C" fn CFRunLoopSourceInvalidate(source: CFTypeRef) {
+    // SAFETY: the caller's obligation.
+    if let Some(s) = unsafe { borrow::<Source>(source) } {
+        s.invalidate();
+    }
+}
+
+pub unsafe extern "C" fn CFRunLoopSourceIsValid(source: CFTypeRef) -> Boolean {
+    // SAFETY: the caller's obligation.
+    unsafe { borrow::<Source>(source) }.is_some_and(|s| s.is_valid()) as Boolean
+}
+
+pub unsafe extern "C" fn CFRunLoopAddSource(
+    loop_: CFTypeRef,
+    source: CFTypeRef,
+    mode: CFTypeRef,
+) {
+    // SAFETY: the caller's obligation.
+    let (Some(l), Some(s)) = (unsafe { borrow::<RunLoop>(loop_) }, unsafe {
+        borrow::<Source>(source)
+    }) else {
+        return;
+    };
+    // SAFETY: as above.
+    l.add_source(&s, &unsafe { mode_name(mode) });
+}
+
+pub unsafe extern "C" fn CFRunLoopRemoveSource(
+    loop_: CFTypeRef,
+    source: CFTypeRef,
+    mode: CFTypeRef,
+) {
+    // SAFETY: the caller's obligation.
+    let (Some(l), Some(s)) = (unsafe { borrow::<RunLoop>(loop_) }, unsafe {
+        borrow::<Source>(source)
+    }) else {
+        return;
+    };
+    // SAFETY: as above.
+    l.remove_source(&s, &unsafe { mode_name(mode) });
+}
+
+pub unsafe extern "C" fn CFRunLoopContainsSource(
+    loop_: CFTypeRef,
+    source: CFTypeRef,
+    mode: CFTypeRef,
+) -> Boolean {
+    // SAFETY: the caller's obligation.
+    let (Some(l), Some(s)) = (unsafe { borrow::<RunLoop>(loop_) }, unsafe {
+        borrow::<Source>(source)
+    }) else {
+        return 0;
+    };
+    // SAFETY: as above.
+    l.contains_source(&s, &unsafe { mode_name(mode) }) as Boolean
+}
+
+/// `CFAbsoluteTime` is seconds since 2001; a fire date is one of those.
+///
+/// Converted to a delay rather than kept as an absolute: the loop measures with
+/// a monotonic clock, which is the only one a timer should depend on.
+fn delay_until(fire_date: f64) -> Duration {
+    let now = absolute_time();
+    Duration::from_secs_f64((fire_date - now).max(0.0).min(1e9))
+}
+
+/// Seconds since 2001-01-01, which is `CFAbsoluteTimeGetCurrent`.
+fn absolute_time() -> f64 {
+    const APPLE_EPOCH: f64 = 978_307_200.0;
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() - APPLE_EPOCH)
+        .unwrap_or(0.0)
+}
+
+pub unsafe extern "C" fn CFAbsoluteTimeGetCurrent() -> f64 {
+    absolute_time()
+}
+
+pub unsafe extern "C" fn CFRunLoopTimerCreate(
+    _allocator: CFAllocatorRef,
+    fire_date: f64,
+    interval: f64,
+    _flags: u32,
+    _order: CFIndex,
+    callback: Option<runloop::TimerCallback>,
+    context: *mut CFRunLoopTimerContext,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation - null, or a live context structure.
+    let info = unsafe { context.as_ref() }.map_or(0, |c| c.info as usize);
+    // An interval of zero or less is a one-shot, which is what Apple's does.
+    let repeat = (interval > 0.0).then(|| Duration::from_secs_f64(interval.min(1e9)));
+    leak(runloop::new_timer(
+        delay_until(fire_date),
+        repeat,
+        callback,
+        info,
+    ))
+}
+
+pub unsafe extern "C" fn CFRunLoopAddTimer(loop_: CFTypeRef, timer: CFTypeRef, mode: CFTypeRef) {
+    // SAFETY: the caller's obligation.
+    let (Some(l), Some(t)) = (unsafe { borrow::<RunLoop>(loop_) }, unsafe {
+        borrow::<Timer>(timer)
+    }) else {
+        return;
+    };
+    // SAFETY: as above.
+    l.add_timer(&t, &unsafe { mode_name(mode) });
+}
+
+pub unsafe extern "C" fn CFRunLoopRemoveTimer(
+    loop_: CFTypeRef,
+    timer: CFTypeRef,
+    mode: CFTypeRef,
+) {
+    // SAFETY: the caller's obligation.
+    let (Some(l), Some(t)) = (unsafe { borrow::<RunLoop>(loop_) }, unsafe {
+        borrow::<Timer>(timer)
+    }) else {
+        return;
+    };
+    // SAFETY: as above.
+    l.remove_timer(&t, &unsafe { mode_name(mode) });
+}
+
+pub unsafe extern "C" fn CFRunLoopTimerInvalidate(timer: CFTypeRef) {
+    // SAFETY: the caller's obligation.
+    if let Some(t) = unsafe { borrow::<Timer>(timer) } {
+        t.invalidate();
+    }
+}
+
+pub unsafe extern "C" fn CFRunLoopTimerIsValid(timer: CFTypeRef) -> Boolean {
+    // SAFETY: the caller's obligation.
+    unsafe { borrow::<Timer>(timer) }.is_some_and(|t| t.is_valid()) as Boolean
 }

@@ -5,7 +5,18 @@ use std::sync::OnceLock;
 
 use microlift::arch::x86_64::context::RegisterContext;
 
-use crate::host::symbol_ptr as dlsym;
+/// CoreFoundation, from whichever one this process is using.
+///
+/// Not `dlsym`: under `ROSETTA3_OBJC=builtin` the strings this module reads are
+/// objects of *this tree's* runtime, and handing one to Apple's
+/// `CFStringGetCString` would be a foreign structure read as a native one. The
+/// frameworks register themselves with `darwin`, which is what makes one lookup
+/// answer for both. See [`crate::frameworks`].
+fn dlsym(name: &str) -> Option<*mut c_void> {
+    crate::frameworks::symbol(name)
+        .or_else(|| crate::host::symbol(name))
+        .map(|addr| addr as usize as *mut c_void)
+}
 use crate::objc::send::{Id, class, responds, sel, send0, send1};
 use crate::abi::{GuestMemory, Result};
 

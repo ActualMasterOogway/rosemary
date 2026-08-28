@@ -9,6 +9,8 @@ use std::ffi::{CStr, c_char};
 use corefoundation::api;
 use corefoundation::base::CFTypeRef;
 use corefoundation::string::encoding;
+
+use crate::geometry::NSRange;
 use objc::object::Id;
 use objc::sel::Sel;
 
@@ -108,6 +110,16 @@ unsafe extern "C" fn character_at_index(receiver: Id, _sel: Sel, index: usize) -
     bytes.get(index).map_or(0, |b| *b as u16)
 }
 
+unsafe extern "C" fn append_string(receiver: Id, _sel: Sel, other: Id) -> Id {
+    // SAFETY: two `NSString`s, or nil.
+    let mut joined = unsafe { bytes(receiver) };
+    // SAFETY: as above.
+    joined.extend_from_slice(&unsafe { bytes(other) });
+    let s = corefoundation::string::from_bytes(&joined, false);
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(s) as Id }
+}
+
 unsafe extern "C" fn description(receiver: Id, _sel: Sel) -> Id {
     receiver
 }
@@ -118,7 +130,7 @@ unsafe extern "C" fn copy(receiver: Id, _sel: Sel) -> Id {
     objc::arc::retain(receiver)
 }
 
-// ------------------------------------------------------------ class methods
+
 
 unsafe extern "C" fn string_with_utf8(_class: Id, _sel: Sel, cstr: *const c_char) -> Id {
     // SAFETY: a NUL-terminated string or null.
@@ -138,6 +150,68 @@ unsafe extern "C" fn string_with_cstring_encoding(
     unsafe {
         let s = api::CFStringCreateWithCString(std::ptr::null(), cstr, cf_encoding(ns));
         api::CFAutorelease(s) as Id
+    }
+}
+
+/// `+stringWithFormat:`, which arrives already rendered.
+///
+/// A guest's variadic message never reaches an `IMP`: `objc::dispatch` reads the
+/// format and the guest's variadic tail out of its registers, renders the two
+/// together, doubles every `%` in the result so it cannot be read as a format
+/// again, and re-sends the counted message with that string standing in for the
+/// original. So the only work left here is undoing that doubling.
+///
+/// A lone `%` is therefore something upstream did not render. It is passed
+/// through as itself - a visible oddity in the output - and said once, rather
+/// than dropped.
+fn unescape_rendered(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut rest = bytes.iter().copied().peekable();
+    while let Some(b) = rest.next() {
+        if b != b'%' {
+            out.push(b);
+            continue;
+        }
+        match rest.peek() {
+            Some(b'%') => {
+                rest.next();
+                out.push(b'%');
+            }
+            _ => {
+                unrendered_conversion();
+                out.push(b'%');
+            }
+        }
+    }
+    out
+}
+
+fn unrendered_conversion() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static SAID: AtomicBool = AtomicBool::new(false);
+    if !SAID.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "rosetta3: foundation: a format reached +[NSString stringWithFormat:] with a \
+             conversion still in it, which means it was not rendered on the way"
+        );
+    }
+}
+
+unsafe extern "C" fn string_with_format(_class: Id, _sel: Sel, format: Id) -> Id {
+    // SAFETY: the format is an `NSString` or nil.
+    let rendered = unescape_rendered(&unsafe { bytes(format) });
+    let s = corefoundation::string::from_bytes(&rendered, false);
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(s) as Id }
+}
+
+unsafe extern "C" fn init_with_format(receiver: Id, sel: Sel, format: Id) -> Id {
+    // SAFETY: the allocated shell is released and the built string returned,
+    // which is what every `-init...` in this crate does.
+    unsafe {
+        objc::arc::release(receiver);
+        let rendered = string_with_format(std::ptr::null_mut(), sel, format);
+        objc::arc::retain(rendered)
     }
 }
 
@@ -207,6 +281,242 @@ pub fn from_cstr(text: &CStr) -> Id {
     corefoundation::string::from_bytes(text.to_bytes(), false) as Id
 }
 
+/// Replace a mutable string's characters, or say by name that it is not one.
+///
+/// # Safety
+///
+/// `receiver` must be null or an object this runtime allocated.
+unsafe fn replace(receiver: Id, selector: &str, bytes: &[u8]) {
+    // SAFETY: the caller's obligation.
+    if unsafe { corefoundation::string::set_bytes(receiver as CFTypeRef, bytes) } {
+        return;
+    }
+    // SAFETY: as above.
+    let class = unsafe { objc::object::class_of(receiver) };
+    objc::fail!(
+        "-[{} {selector}]: the string was not created mutable",
+        class.map_or("nil", |c| c.name_str())
+    );
+}
+
+unsafe extern "C" fn append_string_in_place(receiver: Id, _sel: Sel, other: Id) {
+    // SAFETY: two `NSString`s, or nil.
+    let mut joined = unsafe { bytes(receiver) };
+    // SAFETY: as above.
+    joined.extend_from_slice(&unsafe { bytes(other) });
+    // SAFETY: as above.
+    unsafe { replace(receiver, "appendString:", &joined) };
+}
+
+/// `-appendFormat:`, which arrives already rendered - see [`string_with_format`].
+unsafe extern "C" fn append_format(receiver: Id, _sel: Sel, format: Id) {
+    // SAFETY: two `NSString`s, or nil.
+    let mut joined = unsafe { bytes(receiver) };
+    // SAFETY: as above.
+    joined.extend_from_slice(&unescape_rendered(&unsafe { bytes(format) }));
+    // SAFETY: as above.
+    unsafe { replace(receiver, "appendFormat:", &joined) };
+}
+
+unsafe extern "C" fn set_string(receiver: Id, _sel: Sel, other: Id) {
+    // SAFETY: two `NSString`s, or nil.
+    let bytes = unsafe { bytes(other) };
+    // SAFETY: as above.
+    unsafe { replace(receiver, "setString:", &bytes) };
+}
+
+unsafe extern "C" fn mutable_string(_class: Id, _sel: Sel) -> Id {
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(corefoundation::string::new_mutable()) as Id }
+}
+
+unsafe extern "C" fn mutable_string_with_capacity(_class: Id, _sel: Sel, _capacity: usize) -> Id {
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(corefoundation::string::new_mutable()) as Id }
+}
+
+unsafe extern "C" fn init_mutable(receiver: Id, _sel: Sel) -> Id {
+    // The allocated shell is released and a mutable string returned, which is
+    // what every `-init...` in this crate does.
+    objc::arc::release(receiver);
+    corefoundation::string::new_mutable() as Id
+}
+
+/// `-mutableCopy`, which is a mutable string with the same characters.
+unsafe extern "C" fn mutable_copy(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an `NSString`.
+    let bytes = unsafe { bytes(receiver) };
+    let copy = corefoundation::string::new_mutable();
+    // SAFETY: a mutable string this call just made.
+    unsafe { corefoundation::string::set_bytes(copy, &bytes) };
+    copy as Id
+}
+
+/// `NSNotFound`, which is `NSIntegerMax`.
+const NOT_FOUND: usize = usize::MAX >> 1;
+
+unsafe extern "C" fn range_of_string(receiver: Id, _sel: Sel, needle: Id) -> NSRange {
+    // SAFETY: two `NSString`s, or nil.
+    let (haystack, needle) = unsafe { (bytes(receiver), bytes(needle)) };
+    if needle.is_empty() {
+        return NSRange {
+            location: NOT_FOUND,
+            length: 0,
+        };
+    }
+    match haystack
+        .windows(needle.len())
+        .position(|w| w == needle.as_slice())
+    {
+        Some(at) => NSRange {
+            location: at,
+            length: needle.len(),
+        },
+        None => NSRange {
+            location: NOT_FOUND,
+            length: 0,
+        },
+    }
+}
+
+unsafe extern "C" fn has_prefix(receiver: Id, _sel: Sel, prefix: Id) -> bool {
+    // SAFETY: two `NSString`s, or nil.
+    let (whole, prefix) = unsafe { (bytes(receiver), bytes(prefix)) };
+    whole.starts_with(&prefix)
+}
+
+unsafe extern "C" fn has_suffix(receiver: Id, _sel: Sel, suffix: Id) -> bool {
+    // SAFETY: two `NSString`s, or nil.
+    let (whole, suffix) = unsafe { (bytes(receiver), bytes(suffix)) };
+    whole.ends_with(&suffix)
+}
+
+/// A new autoreleased string from a slice of this one, clamped to its length.
+fn slice(bytes: &[u8], from: usize, to: usize) -> Id {
+    let (from, to) = (from.min(bytes.len()), to.min(bytes.len()));
+    let s = corefoundation::string::from_bytes(&bytes[from.min(to)..to], false);
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(s) as Id }
+}
+
+unsafe extern "C" fn substring_from_index(receiver: Id, _sel: Sel, index: usize) -> Id {
+    // SAFETY: an `NSString`.
+    let whole = unsafe { bytes(receiver) };
+    slice(&whole, index, whole.len())
+}
+
+unsafe extern "C" fn substring_to_index(receiver: Id, _sel: Sel, index: usize) -> Id {
+    // SAFETY: an `NSString`.
+    let whole = unsafe { bytes(receiver) };
+    slice(&whole, 0, index)
+}
+
+unsafe extern "C" fn substring_with_range(receiver: Id, _sel: Sel, range: NSRange) -> Id {
+    // SAFETY: an `NSString`.
+    let whole = unsafe { bytes(receiver) };
+    slice(&whole, range.location, range.location.saturating_add(range.length))
+}
+
+unsafe extern "C" fn lowercase(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an `NSString`.
+    let mut whole = unsafe { bytes(receiver) };
+    whole.make_ascii_lowercase();
+    let s = corefoundation::string::from_bytes(&whole, false);
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(s) as Id }
+}
+
+unsafe extern "C" fn uppercase(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an `NSString`.
+    let mut whole = unsafe { bytes(receiver) };
+    whole.make_ascii_uppercase();
+    let s = corefoundation::string::from_bytes(&whole, false);
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(s) as Id }
+}
+
+unsafe extern "C" fn compare(receiver: Id, _sel: Sel, other: Id) -> isize {
+    // SAFETY: two `NSString`s, or nil.
+    let (a, b) = unsafe { (bytes(receiver), bytes(other)) };
+    match a.cmp(&b) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+unsafe extern "C" fn int_value(receiver: Id, _sel: Sel) -> i32 {
+    // SAFETY: an `NSString`.
+    parse_leading(&unsafe { bytes(receiver) }).map_or(0, |v| v as i32)
+}
+
+unsafe extern "C" fn integer_value(receiver: Id, _sel: Sel) -> i64 {
+    // SAFETY: an `NSString`.
+    parse_leading(&unsafe { bytes(receiver) }).unwrap_or(0)
+}
+
+unsafe extern "C" fn double_value(receiver: Id, _sel: Sel) -> f64 {
+    // SAFETY: an `NSString`.
+    let text = unsafe { bytes(receiver) };
+    let text = String::from_utf8_lossy(&text);
+    let end = text
+        .char_indices()
+        .position(|(_, c)| !(c.is_ascii_digit() || "+-.eE".contains(c)))
+        .unwrap_or(text.len());
+    text[..end].parse().unwrap_or(0.0)
+}
+
+/// The leading integer, as `-intValue` reads one: skip spaces, take a sign and
+/// digits, and answer zero for anything else. Never an error - Foundation's
+/// does not have one.
+fn parse_leading(bytes: &[u8]) -> Option<i64> {
+    let text = String::from_utf8_lossy(bytes);
+    let text = text.trim_start();
+    let end = text
+        .char_indices()
+        .position(|(i, c)| !(c.is_ascii_digit() || (i == 0 && (c == '-' || c == '+'))))
+        .unwrap_or(text.len());
+    text[..end].parse().ok()
+}
+
+
+
+unsafe extern "C" fn last_path_component(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an `NSString`.
+    let whole = unsafe { bytes(receiver) };
+    let at = whole.iter().rposition(|b| *b == b'/').map_or(0, |i| i + 1);
+    slice(&whole, at, whole.len())
+}
+
+unsafe extern "C" fn delete_last_path_component(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an `NSString`.
+    let whole = unsafe { bytes(receiver) };
+    let at = whole.iter().rposition(|b| *b == b'/').unwrap_or(0);
+    slice(&whole, 0, at)
+}
+
+unsafe extern "C" fn path_extension(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an `NSString`.
+    let whole = unsafe { bytes(receiver) };
+    let leaf = whole.iter().rposition(|b| *b == b'/').map_or(0, |i| i + 1);
+    match whole[leaf..].iter().rposition(|b| *b == b'.') {
+        Some(dot) if dot > 0 => slice(&whole, leaf + dot + 1, whole.len()),
+        _ => slice(&whole, 0, 0),
+    }
+}
+
+unsafe extern "C" fn append_path_component(receiver: Id, _sel: Sel, component: Id) -> Id {
+    // SAFETY: two `NSString`s, or nil.
+    let (mut whole, component) = unsafe { (bytes(receiver), bytes(component)) };
+    if !whole.is_empty() && whole.last() != Some(&b'/') {
+        whole.push(b'/');
+    }
+    whole.extend_from_slice(&component);
+    let s = corefoundation::string::from_bytes(&whole, false);
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(s) as Id }
+}
+
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSString").expect("CoreFoundation registered NSString");
     methods!(class, {
@@ -221,13 +531,51 @@ pub(crate) fn install() {
         "description" => description, c"@16@0:8";
         "copy" => copy, c"@16@0:8";
         "copyWithZone:" => copy, c"@24@0:8^v16";
+        "mutableCopy" => mutable_copy, c"@16@0:8";
+        "rangeOfString:" => range_of_string, c"{_NSRange=QQ}24@0:8@16";
+        "hasPrefix:" => has_prefix, c"B24@0:8@16";
+        "hasSuffix:" => has_suffix, c"B24@0:8@16";
+        "substringFromIndex:" => substring_from_index, c"@24@0:8Q16";
+        "substringToIndex:" => substring_to_index, c"@24@0:8Q16";
+        "substringWithRange:" => substring_with_range, c"@32@0:8{_NSRange=QQ}16";
+        "lowercaseString" => lowercase, c"@16@0:8";
+        "uppercaseString" => uppercase, c"@16@0:8";
+        "compare:" => compare, c"q24@0:8@16";
+        "caseInsensitiveCompare:" => compare, c"q24@0:8@16";
+        "intValue" => int_value, c"i16@0:8";
+        "integerValue" => integer_value, c"q16@0:8";
+        "longLongValue" => integer_value, c"q16@0:8";
+        "doubleValue" => double_value, c"d16@0:8";
+        "floatValue" => double_value, c"d16@0:8";
+        "lastPathComponent" => last_path_component, c"@16@0:8";
+        "stringByDeletingLastPathComponent" => delete_last_path_component, c"@16@0:8";
+        "pathExtension" => path_extension, c"@16@0:8";
+        "stringByAppendingPathComponent:" => append_path_component, c"@24@0:8@16";
+        "mutableCopyWithZone:" => mutable_copy, c"@24@0:8^v16";
         "initWithBytes:length:encoding:" => init_with_bytes, c"@40@0:8^v16Q24Q32";
         "initWithUTF8String:" => init_with_utf8, c"@24@0:8*16";
         "initWithCString:encoding:" => init_with_cstring_encoding, c"@32@0:8*16Q24";
+        "initWithFormat:" => init_with_format, c"@24@0:8@16";
+        "stringByAppendingString:" => append_string, c"@24@0:8@16";
     });
+    let mutable = objc::class::lookup(c"NSMutableString").expect("NSMutableString");
+    methods!(mutable, {
+        "appendString:" => append_string_in_place, c"v24@0:8@16";
+        "appendFormat:" => append_format, c"v24@0:8@16";
+        "setString:" => set_string, c"v24@0:8@16";
+        "init" => init_mutable, c"@16@0:8"
+    });
+    class_methods!(mutable, {
+        "string" => mutable_string, c"@16@0:8";
+        "stringWithCapacity:" => mutable_string_with_capacity, c"@24@0:8Q16";
+        "new" => mutable_string, c"@16@0:8"
+    });
+
     class_methods!(class, {
         "stringWithUTF8String:" => string_with_utf8, c"@24@0:8*16";
         "stringWithCString:encoding:" => string_with_cstring_encoding, c"@32@0:8*16Q24";
         "string" => empty_string, c"@16@0:8";
+        "stringWithFormat:" => string_with_format, c"@24@0:8@16";
+        "localizedStringWithFormat:" => string_with_format, c"@24@0:8@16";
     });
 }

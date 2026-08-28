@@ -419,8 +419,19 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // - exactly the shape the two independent register counters exist for.
     sig!("CFRunLoopRunInMode", I32, P, F64, U8),
     sig!("CFRunLoopSourceSignal", V, P),
+    sig!("CFRunLoopSourceInvalidate", V, P),
+    sig!("CFRunLoopSourceIsValid", U8, P),
+    sig!("CFRunLoopRemoveSource", V, P, P, P),
+    sig!("CFRunLoopContainsSource", U8, P, P, P),
+    sig!("CFRunLoopAddTimer", V, P, P, P),
+    sig!("CFRunLoopRemoveTimer", V, P, P, P),
+    sig!("CFRunLoopTimerInvalidate", V, P),
+    sig!("CFRunLoopTimerIsValid", U8, P),
     sig!("CFRunLoopStop", V, P),
     sig!("CFRunLoopWakeUp", V, P),
+    // `CFAbsoluteTime` is a `double`, and this is where a timer's fire date
+    // comes from.
+    sig!("CFAbsoluteTimeGetCurrent", F64),
     // `CFSetApplierFunction(const void *value, void *context)`, called once
     // per member before the call returns - so unlike most callbacks here it is
     // reached on the guest's own thread, and unlike most it must still go out
@@ -3135,10 +3146,16 @@ const LONG_DOUBLE: &str =
 /// Symbols that are described and deliberately not callable, in no particular
 /// order for the same reason as [`SIGNATURES`].
 pub static REFUSED: &[(&str, &str)] = &[
-    // The one CoreFoundation constructor whose *argument* is a table of
-    // callbacks rather than a callback.
+    // The CoreFoundation constructors whose *argument* is a table of callbacks
+    // rather than a callback. Refused only against the host's CoreFoundation:
+    // with this tree's own, `shims::corefoundation` copies the structure out and
+    // substitutes the pointers inside it, and a shim is consulted first.
     (
         "CFRunLoopSourceCreate",
+        "its context structure holds guest function pointers the host would call as arm64",
+    ),
+    (
+        "CFRunLoopTimerCreate",
         "its context structure holds guest function pointers the host would call as arm64",
     ),
     // `CFRange rangeToSearch` is passed **by value**.

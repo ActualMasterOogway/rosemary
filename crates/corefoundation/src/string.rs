@@ -29,6 +29,12 @@ const WIDE: u64 = 0x10;
 /// One of this crate's own. Apple keeps the same information in the same word,
 /// with different bits; nothing outside this file reads it either way.
 const OWNED: u64 = 0x1000_0000;
+/// `flags` bit: the string was created mutable.
+///
+/// A field rather than a class, for the reason `ArrayContents::mutable` is one:
+/// `__NSCFString` has to descend from `NSMutableString` or a guest's
+/// `isKindOfClass:` disagrees with the object it is holding.
+const MUTABLE: u64 = 0x2000_0000;
 
 /// The four words a `CFString` is.
 #[repr(C)]
@@ -323,6 +329,53 @@ pub fn from_bytes(bytes: &[u8], wide: bool) -> CFTypeRef {
         (*object).length = length;
     }
     object as CFTypeRef
+}
+
+/// Build an empty mutable string.
+pub fn new_mutable() -> CFTypeRef {
+    let object = from_bytes(&[], false);
+    if !object.is_null() {
+        // SAFETY: a `__NSCFString` this call just made.
+        unsafe { (*(object as *mut CFString)).flags |= MUTABLE };
+    }
+    object
+}
+
+/// Whether `string` may be changed.
+///
+/// # Safety
+///
+/// As [`as_string`].
+pub unsafe fn is_mutable(string: CFTypeRef) -> bool {
+    // SAFETY: the caller's obligation.
+    unsafe { as_string(string) }.is_some_and(|s| s.flags & MUTABLE != 0)
+}
+
+/// Replace a mutable string's characters, freeing what was there.
+///
+/// `false` for a string that was not created mutable, which is the caller's to
+/// report by name - the two spellings of that mistake, `-appendString:` on a
+/// literal and on an immutable copy, are both worth naming.
+///
+/// # Safety
+///
+/// As [`as_string`].
+pub unsafe fn set_bytes(string: CFTypeRef, bytes: &[u8]) -> bool {
+    // SAFETY: the caller's obligation.
+    if !unsafe { is_mutable(string) } {
+        return false;
+    }
+    let object = string as *mut CFString;
+    // SAFETY: a mutable `__NSCFString`, whose storage this crate allocated.
+    unsafe {
+        release_storage(object);
+        let mut owned = bytes.to_vec();
+        owned.push(0);
+        (*object).str = Box::into_raw(owned.into_boxed_slice()) as *const u8;
+        (*object).length = bytes.len() as i64;
+        (*object).flags |= OWNED;
+    }
+    true
 }
 
 /// Build a string from bytes in `encoding`, or null for an encoding this

@@ -15,6 +15,7 @@ use crate::abi::{AbiError, GuestMemory, Result};
 
 pub mod atexit;
 pub mod block;
+pub mod corefoundation;
 pub mod curl;
 pub(crate) mod host;
 pub mod intdiv;
@@ -89,16 +90,21 @@ fn macos_shim_for(_name: &str) -> Option<Shim> {
     None
 }
 
+/// The families that may call into the guest, on either host.
+fn callback_shim_for(name: &str) -> Option<CallbackShim> {
+    corefoundation::shim_for(name).or_else(|| macos_callback_shim_for(name))
+}
+
 /// The macOS-only families that may call into the guest.
 #[cfg(target_os = "macos")]
-fn platform_callback_shim_for(name: &str) -> Option<CallbackShim> {
+fn macos_callback_shim_for(name: &str) -> Option<CallbackShim> {
     iokit::shim_for(name)
         .or_else(|| coremedia::callback_shim_for(name))
         .or_else(|| audiounit::shim_for(name))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_callback_shim_for(_name: &str) -> Option<CallbackShim> {
+fn macos_callback_shim_for(_name: &str) -> Option<CallbackShim> {
     None
 }
 
@@ -184,7 +190,7 @@ pub fn dispatch(
                 .or_else(|| atexit::shim_for(name))
                 .or_else(|| zlib::shim_for(name))
                 .or_else(|| curl::shim_for(name))
-                .or_else(|| platform_callback_shim_for(name))
+                .or_else(|| callback_shim_for(name))
                 .map(|f| f(name, ctx, mem, callbacks));
         }
     };
@@ -212,7 +218,7 @@ pub fn is_shimmed(symbol: &str) -> bool {
         || curl::shim_for(name).is_some()
         || foundation_variadic(name).is_some()
         || platform_shim_for(name).is_some()
-        || platform_callback_shim_for(name).is_some()
+        || callback_shim_for(name).is_some()
     {
         return true;
     }

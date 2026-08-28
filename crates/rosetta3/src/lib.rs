@@ -54,6 +54,10 @@ pub mod trampoline;
 pub mod unwind;
 pub mod vm;
 
+pub fn darwin_name(symbol: &str) -> &str {
+    symbol.strip_prefix('_').unwrap_or(symbol)
+}
+
 /// The frameworks this tree implements, and whether they are the ones in use.
 pub mod frameworks;
 

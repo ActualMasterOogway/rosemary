@@ -633,6 +633,25 @@ impl Vm {
         self.objc().map_or(va, |rt| rt.host_protocol_or(va))
     }
 
+    /// A guest pointer on its way out where the encoding cannot say what it is.
+    ///
+    /// A method's type encoding spells `id`, `Class` and `Protocol *` all as
+    /// `@`, so `-conformsToProtocol:` is indistinguishable from any other
+    /// one-object message until the argument is looked up. Classes first, then
+    /// protocols
+    ///
+    /// Only messages need this. A runtime entry point is described by
+    /// [`crate::objc::dispatch::RUNTIME`], which names which parameter is which.
+    pub fn objc_host_id(&self, va: u64) -> u64 {
+        let Some(rt) = self.objc() else {
+            return va;
+        };
+        match rt.host_or(va) {
+            same if same == va => rt.host_protocol_or(va),
+            class => class,
+        }
+    }
+
     /// Guest memory, as a value a shim can hold.
     pub fn view(&self) -> GuestView {
         self.view.clone()
