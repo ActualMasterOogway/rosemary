@@ -29,8 +29,49 @@ fn install() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         darwin::register_provider(symbol);
+        register_dlopen_names();
         push_main_pool();
     });
+}
+
+/// Every library in this tree, and the paths a guest opens it by.
+///
+/// A guest that `dlopen`s a framework this runtime implements must get a live
+/// handle rather than null: the frameworks have no file on disk, so the
+/// filesystem search in `dyld::resolve_path` can never find one. It also stops
+/// the *host's* framework being loaded in its place, which under the builtin
+/// runtime would put Apple's classes in front of a guest that has ours.
+///
+/// Both spellings of each: the install name, and the versioned path an
+/// `LC_LOAD_DYLIB` records.
+fn register_dlopen_names() {
+    if !builtin() {
+        return;
+    }
+    crate::dyld::register_synthetic(
+        &[
+            "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+            "CoreFoundation",
+        ],
+        symbol,
+    );
+    crate::dyld::register_synthetic(
+        &[
+            "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation",
+            "/System/Library/Frameworks/Foundation.framework/Foundation",
+            "Foundation",
+        ],
+        symbol,
+    );
+    crate::dyld::register_synthetic(
+        &[
+            "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit",
+            "/System/Library/Frameworks/IOKit.framework/IOKit",
+            "IOKit",
+        ],
+        symbol,
+    );
 }
 
 /// Push the outermost autorelease pool, the one a process is born with.
@@ -77,6 +118,17 @@ pub fn provider() -> SyntheticDylib {
     for (name, addr) in foundation::class_data() {
         lib.define_data(&name, addr);
     }
+    // IOKit's HID half, on SDL3. Published even where there is no SDL3: a guest
+    // then gets a manager that declines to open, which is a diagnosis, where an
+    // unresolved import would only say the symbol was missing.
+    for name in iokit::NAMES {
+        if let Some(addr) = iokit::symbol(name) {
+            lib.define_fn(&format!("_{name}"), addr as usize as *const ());
+        }
+    }
+    for (name, addr) in iokit::data_symbols() {
+        lib.define_data(&name, addr);
+    }
     lib
 }
 
@@ -91,7 +143,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         return None;
     }
     foundation::bootstrap();
-    corefoundation::symbol(name)
+    corefoundation::symbol(name).or_else(|| iokit::symbol(name))
 }
 
 /// Tell this tree's `NSBundle` which `.app` the guest is.

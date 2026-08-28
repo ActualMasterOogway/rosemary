@@ -13,5 +13,7 @@ darwin = { path = "crates/darwin" }
 objc = { path = "crates/objc" }
 corefoundation = { path = "crates/corefoundation" }
 foundation = { path = "crates/foundation" }
+sdl3 = { path = "crates/sdl3" }
+iokit = { path = "crates/iokit" }
 libc = "0.2"
 gimli = "0.34"

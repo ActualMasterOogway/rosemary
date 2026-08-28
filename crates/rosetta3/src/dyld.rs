@@ -185,6 +185,82 @@ fn global_handle() -> u64 {
     &GLOBAL_TOKEN as *const u8 as usize as u64
 }
 
+/// Libraries this runtime *is*, which a guest may `dlopen` by name.
+///
+/// A framework reimplemented in this tree has no file on disk, so
+/// [`resolve_path`] - which ends in `fs::canonicalize` - can never find it, and
+/// `dlopen("/System/Library/Frameworks/AppKit.framework/AppKit")` would fall
+/// through to the host's loader and come back null. The *link* half of this
+/// already works: a flat `SyntheticDylib` ahead of the native provider in
+/// `HostProviders::chain` shadows every two-level binding. This is the other
+/// half.
+///
+/// Registered by install name and by the framework paths that name it, because a
+/// guest asks with whichever spelling it was given.
+mod synthetic {
+    use std::sync::Mutex;
+
+    /// One virtual library: what it answers to, and what it answers with.
+    pub struct Library {
+        pub names: Vec<String>,
+        pub symbol: fn(&str) -> Option<u64>,
+        /// The address a guest is handed, which is this entry's own.
+        pub handle: u64,
+    }
+
+    static LIBRARIES: Mutex<Vec<&'static Library>> = Mutex::new(Vec::new());
+
+    /// Publish a library under `names`, answering through `symbol`.
+    ///
+    /// The handle is the leaked entry's own address, which is distinct from
+    /// every image base and from [`super::global_handle`] by construction: it is
+    /// this process's heap, and a guest image is mapped elsewhere.
+    pub fn register(names: &[&str], symbol: fn(&str) -> Option<u64>) {
+        let mut libraries = LIBRARIES.lock().unwrap_or_else(|e| e.into_inner());
+        if libraries.iter().any(|l| l.names.iter().any(|n| n == names[0])) {
+            return;
+        }
+        let leaked: &'static Library = Box::leak(Box::new(Library {
+            names: names.iter().map(|n| n.to_string()).collect(),
+            symbol,
+            handle: 0,
+        }));
+        // The handle is the entry's address, filled in now that it has one.
+        let handle = leaked as *const Library as usize as u64;
+        // SAFETY: the entry was just leaked and nothing else has seen it, so
+        // this is the only write and it happens before publication.
+        unsafe { (*(leaked as *const Library as *mut Library)).handle = handle };
+        libraries.push(leaked);
+    }
+
+    /// The library `path` names, by install name or by any spelling of it.
+    ///
+    /// Matched on the *leaf* as well as the whole path, because a guest asks for
+    /// `AppKit.framework/Versions/C/AppKit` and for `AppKit` and means the same
+    /// library.
+    pub fn find(path: &str) -> Option<&'static Library> {
+        let leaf = path.rsplit('/').next().unwrap_or(path);
+        LIBRARIES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|l| l.names.iter().any(|n| n == path || n == leaf))
+            .copied()
+    }
+
+    /// The library a handle names, or `None` for a handle that is not one.
+    pub fn by_handle(handle: u64) -> Option<&'static Library> {
+        LIBRARIES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|l| l.handle == handle)
+            .copied()
+    }
+}
+
+pub use synthetic::register as register_synthetic;
+
 /// Return the guest image at a dyld image-list index.
 fn indexed_image(index: u32) -> Option<(u64, u64, String)> {
     if index == 0 {
@@ -453,6 +529,11 @@ pub fn loaded() -> usize {
 
 /// Load `path` as a guest image, or return the handle it already has.
 pub fn open(path: &str) -> std::result::Result<u64, String> {
+    // A library this runtime *is* has no file, so this has to come before
+    // anything that looks for one. See [`synthetic`].
+    if let Some(library) = synthetic::find(path) {
+        return Ok(library.handle);
+    }
     let resolved = resolve_path(path).ok_or_else(|| format!("no such file: {path}"))?;
 
     if let Some(handle) = find(|i| (i.path == resolved).then_some(i.handle)) {
@@ -792,6 +873,13 @@ fn rpaths_of(path: &str) -> Vec<String> {
 
 /// The address `name` has in `handle`, as `dlsym` reports it.
 fn lookup(handle: u64, name: &str) -> Option<u64> {
+    // A handle for a library this runtime is. Scoped: a guest that opened one
+    // framework and asks it for another's symbol should be told no, which is
+    // what the host's loader would say.
+    if let Some(library) = synthetic::by_handle(handle) {
+        return (library.symbol)(name);
+    }
+
     // A handle from the host's loader.
     if let Some(path) = native_handle(handle) {
         let c = CString::new(name).ok()?;
@@ -832,10 +920,19 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
         return Some(addr);
     }
 
-    // The global fallback, which is a *host* search.
+    // Then the libraries this runtime is, for a global search.
+    if let Some(addr) = crate::frameworks::symbol(name) {
+        return Some(addr);
+    }
+
+    // The global fallback, which is a *host* search - and one that has to go
+    // through `darwin`, not straight to `dlsym`. A guest asking `RTLD_DEFAULT`
+    // for `readdir` on Linux would otherwise get glibc's, whose `struct dirent`
+    // is not the one the guest was compiled against; `darwin::symbol` refuses a
+    // divergent name by the same list the loader binds against.
     let addr = match crate::shims::openat::host_substitute(name) {
         Some(wrapper) => wrapper,
-        None => crate::host::symbol(name)?,
+        None => darwin::symbol(name)?,
     };
     Some(remember_native_symbol(addr, name, None))
 }
@@ -1135,8 +1232,14 @@ fn dlsym(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> 
             ctx.rax = addr;
         }
         None => {
+            // Under the trace only. A `dlsym` that comes back null is how a
+            // program *asks* whether something is there, and a guest doing it
+            // once a frame would otherwise bury everything else on stderr. The
+            // message is still in `dlerror`, which is where a caller looks.
             let err = format!("dlsym({name}): symbol not found");
-            eprintln!("symbol lookup failed: {err}");
+            if crate::shims::vmmap::tracing() {
+                eprintln!("rosetta3: {err}");
+            }
             set_error(err);
             ctx.rax = 0;
         }

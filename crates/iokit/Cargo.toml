@@ -1,0 +1,12 @@
+[package]
+name = "iokit"
+description = "Reimplementation of IOKit on top of SDL3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+objc.workspace = true
+corefoundation.workspace = true
+sdl3.workspace = true
+libc.workspace = true

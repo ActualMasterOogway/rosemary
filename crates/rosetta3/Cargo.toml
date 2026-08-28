@@ -10,6 +10,7 @@ machish.workspace = true
 darwin.workspace = true
 objc.workspace = true
 corefoundation.workspace = true
+iokit.workspace = true
 foundation.workspace = true
 gimli.workspace = true
 libc.workspace = true

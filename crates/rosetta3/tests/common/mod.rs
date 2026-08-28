@@ -1,17 +1,3 @@
-//! Fixture plumbing for the driver's tests.
-//!
-//! Mirrors `machish/tests/common/mod.rs`, with one difference that matters:
-//! [`Program::load`] takes a *path*, because `@executable_path` expansion is
-//! part of linking, so these return where the fixture was written rather than
-//! its bytes.
-//!
-//! Milestone 1's acceptance test uses `/bin/ls`. Milestone 2 uses a fixture we
-//! compile, because the ABI question is about *which symbols a program calls*
-//! and a locally built program lets the test state exactly that - and because
-//! `/bin/ls` embeds a jump table in `__text` that two of its functions do not
-//! lift past, which would put an unrelated microlift gap in the middle of an
-//! ABI test.
-
 #![allow(dead_code)]
 
 use std::path::PathBuf;
@@ -1600,6 +1586,35 @@ int main(void) {
     return 0;
 }
 "#;
+
+/// A guest that `dlopen`s a framework by its install name and asks it for a
+/// symbol.
+///
+/// The frameworks this tree implements have no file on disk, so the filesystem
+/// search a `dlopen` ends in can never find one. Every line here is a claim
+/// about the handle a guest gets instead.
+pub const DLOPEN_FRAMEWORK_C: &str = r#"
+#include <dlfcn.h>
+#include <stdio.h>
+int main(void) {
+    const char *cf = "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation";
+    void *h = dlopen(cf, RTLD_LAZY);
+    printf("handle %d\n", h != NULL);
+    void *f = h ? dlsym(h, "CFStringGetLength") : NULL;
+    printf("scoped %d\n", f != NULL);
+    printf("absent %d\n", h ? dlsym(h, "NoSuchFunctionAnywhere") != NULL : 0);
+    printf("global %d\n", dlsym(RTLD_DEFAULT, "CFStringGetLength") != NULL);
+    return 0;
+}
+"#;
+
+/// Build [`DLOPEN_FRAMEWORK_C`], or `None` if this host cannot.
+pub fn dlopen_framework_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("dlopen_framework", DLOPEN_FRAMEWORK_C, &[]))
+        .clone()
+}
 
 /// Build [`RUNLOOP_C`], or `None` if this host cannot.
 pub fn runloop_fixture() -> Option<String> {

@@ -1,0 +1,9 @@
+[package]
+name = "sdl3"
+description = "The part of SDL3 this tree uses, loaded at run time rather than linked."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libc.workspace = true
