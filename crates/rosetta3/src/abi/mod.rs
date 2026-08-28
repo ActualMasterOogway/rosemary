@@ -368,15 +368,7 @@ pub struct Promotion {
 
 /// `name` as an inlined native call, if this host has a table that says so.
 pub fn promotion(name: &str, resolved: u64) -> Option<Promotion> {
-    #[cfg(target_os = "macos")]
-    {
-        crate::objc::fast::promotion(name, resolved)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (name, resolved);
-        None
-    }
+    crate::objc::fast::promotion(name, resolved)
 }
 
 /// The signature of a promotable entry, for a caller that only wants to classify it.
@@ -384,15 +376,7 @@ pub fn promotion(name: &str, resolved: u64) -> Option<Promotion> {
 /// [`classify`] asks this so the audit reports how an import will really be reached;
 /// [`promotion`] is what actually decides, because only it knows the resolved address.
 pub fn promotable_abi(name: &str) -> Option<&'static FunctionAbi> {
-    #[cfg(target_os = "macos")]
-    {
-        crate::objc::fast::abi_of(name)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = name;
-        None
-    }
+    crate::objc::fast::abi_of(name)
 }
 
 /// The `DynamicSymbol` microlift wants for a fast import.

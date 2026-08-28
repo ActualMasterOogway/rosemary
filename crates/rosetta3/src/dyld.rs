@@ -599,10 +599,6 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
 
     // Before any of this image's code runs, and after it is findable.
     let vm = crate::thunk::current();
-    // Realizing a loaded image's classes needs a host Objective-C runtime to realize
-    // them *into*, which is a thing only macOS has. An image that has classes and is
-    // loaded here has already been refused at its imports.
-    #[cfg(target_os = "macos")]
     if let Some(vm) = vm {
         match vm.objc() {
             // Registered classes: extend that runtime, selectors included.
@@ -625,13 +621,10 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     announce(leaked.handle, leaked.slide);
 
     // Now the image's own code, in dyld's order.
-    #[cfg(target_os = "macos")]
     if let Some(vm) = vm {
         vm.run_loaded_load_methods(&leaked.report)
             .map_err(|e| format!("{resolved}: objc +load: {e}"))?;
     }
-    #[cfg(not(target_os = "macos"))]
-    let _ = vm;
 
     run_initializers(leaked)?;
     Ok(leaked.handle)

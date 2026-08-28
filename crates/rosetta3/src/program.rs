@@ -243,7 +243,6 @@ pub(crate) struct HostProviders {
     darwin: machish::resolve::SyntheticDylib,
     /// The Objective-C runtime. The native provider denies the `_objc_`, `_class_`,
     /// `_sel_` and `_protocol_` families precisely so a shim can claim them.
-    #[cfg(target_os = "macos")]
     objc: machish::resolve::SyntheticDylib,
     /// The `dl` family, which the host exports and cannot usefully answer for an
     /// x86-64 file. See [`crate::dyld`].
@@ -258,10 +257,10 @@ impl HostProviders {
         // Symbols whose Darwin and host ABIs differ must not become an address by
         // accident. Empty on macOS; see `darwin::divergent`.
         darwin::divergent::deny_in(&mut native);
+        crate::objc::host::deny_foreign_classes(&mut native);
         HostProviders {
             runtime: crate::shims::runtime::provider(),
             darwin: darwin::provider(),
-            #[cfg(target_os = "macos")]
             objc: crate::objc::dispatch::provider(),
             dyld: crate::dyld::provider(),
             eager: eager_binding_shims(),
@@ -277,7 +276,6 @@ impl HostProviders {
         let mut providers: Vec<&dyn SymbolProvider> = extra.to_vec();
         providers.push(&self.runtime);
         providers.push(&self.darwin);
-        #[cfg(target_os = "macos")]
         providers.push(&self.objc);
         providers.push(&self.dyld);
         providers.push(&self.eager);

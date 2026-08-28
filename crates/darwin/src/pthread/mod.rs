@@ -88,10 +88,6 @@ fn thread_of(guest: u64) -> libc::pthread_t {
     unsafe { core::mem::transmute_copy(&guest) }
 }
 
-// ---------------------------------------------------------------------------
-// Attribute objects that carry one setting or two
-// ---------------------------------------------------------------------------
-
 /// Build the `init`/`destroy`/`setter`/`getter` quartet for an attribute object whose
 /// whole state is one packed word.
 macro_rules! simple_attr {
@@ -277,10 +273,6 @@ pshared!(
     store_simple_pshared
 );
 
-// ---------------------------------------------------------------------------
-// Thread lifecycle
-// ---------------------------------------------------------------------------
-
 /// `int pthread_kill(pthread_t, int)`.
 ///
 /// The signal number is Darwin's and has to be translated: `SIGUSR1` is 30 there and
@@ -447,10 +439,6 @@ fn host_cancel_asynchronous() -> libc::c_int {
     raw::cancel::ASYNCHRONOUS
 }
 
-// ---------------------------------------------------------------------------
-// Thread-specific data
-// ---------------------------------------------------------------------------
-
 /// `pthread_key_t` is an `unsigned long` on Darwin and an `unsigned` under musl, so a
 /// key crosses as eight bytes and is used as four.
 ///
@@ -480,10 +468,6 @@ pub unsafe extern "C" fn setspecific(key: u64, value: u64) -> i32 {
         libc::pthread_setspecific(key as libc::pthread_key_t, value as usize as *const libc::c_void)
     }
 }
-
-// ---------------------------------------------------------------------------
-// What this module answers for
-// ---------------------------------------------------------------------------
 
 /// The address of the implementation for `name`, or `None`.
 ///
@@ -698,10 +682,6 @@ mod tests {
     type Attr = Obj<{ object::size::ATTR }>;
     type MutexAttrObj = Obj<{ object::size::MUTEXATTR }>;
 
-    // -----------------------------------------------------------------------
-    // Attributes
-    // -----------------------------------------------------------------------
-
     /// Everything a guest sets on a thread attribute set must read back as what it
     /// set - which is the whole contract of an opaque type whose bytes are ours.
     #[test]
@@ -808,10 +788,6 @@ mod tests {
             assert_eq!(attr::imp::attr_destroy(a.at()), err::EINVAL);
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Mutexes
-    // -----------------------------------------------------------------------
 
     #[test]
     fn a_mutex_locks_unlocks_and_is_destroyed() {
@@ -985,10 +961,6 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Condition variables and read-write locks
-    // -----------------------------------------------------------------------
-
     #[test]
     fn a_condition_variable_wakes_a_waiter() {
         struct Shared {
@@ -1146,10 +1118,6 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // `pthread_once`
-    // -----------------------------------------------------------------------
-
     /// Exactly once, and every thread that asked waits for it - which is the whole
     /// contract, and the one a spin that returned early would break.
     #[test]
@@ -1194,10 +1162,6 @@ mod tests {
         // SAFETY: a live, zeroed object that carries no static initializer.
         assert_eq!(unsafe { once(o.at(), || unreachable!()) }, err::EINVAL);
     }
-
-    // -----------------------------------------------------------------------
-    // Cancellation and signals
-    // -----------------------------------------------------------------------
 
     /// Darwin's cancel state values are the opposite way round from the host's, so an
     /// untranslated call disables cancellation where the guest asked to enable it.
@@ -1249,10 +1213,6 @@ mod tests {
         // SAFETY: `pthread_self` is infallible; the handle is pointer-sized.
         unsafe { core::mem::transmute_copy(&libc::pthread_self()) }
     }
-
-    // -----------------------------------------------------------------------
-    // The table
-    // -----------------------------------------------------------------------
 
     /// Nothing may be both implemented here and claimed as a passthrough - the two
     /// lists are the same question answered opposite ways.

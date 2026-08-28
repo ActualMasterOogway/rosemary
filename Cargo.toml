@@ -10,5 +10,6 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 machish = { path = "crates/machish" }
 darwin = { path = "crates/darwin" }
+objc = { path = "crates/objc" }
 libc = "0.2"
 gimli = "0.34"

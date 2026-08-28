@@ -503,16 +503,38 @@ pub fn provider() -> SyntheticDylib {
         .chain(MESSAGES.iter().map(|(n, _)| *n))
         .chain(REFUSED.iter().map(|(n, _)| *n));
     for name in names {
-        if let Some(addr) = host_symbol(name).or_else(|| absent(name)) {
-            lib.define_fn(&format!("_{name}"), addr as usize as *const ());
-        }
+        // Never dropped. A name this provider does not define falls through to
+        // the native provider - or, on a host that denies the family, goes
+        // unresolved - and either way the guest gets an address or a silence
+        // instead of the refusal `serve` would have named it with.
+        let addr = host_symbol(name)
+            .or_else(|| absent(name))
+            .unwrap_or_else(unintercepted);
+        lib.define_fn(&format!("_{name}"), addr as usize as *const ());
     }
     for name in DATA {
         if let Some(addr) = host_symbol(name) {
             lib.define_data(&format!("_{name}"), addr);
         }
     }
+    // The class objects, which are data and which only the builtin runtime has
+    // to publish. See [`super::host::class_data`].
+    for (name, addr) in super::host::class_data() {
+        lib.define_data(&name, addr);
+    }
     lib
+}
+
+/// The address of a runtime entry point the selected runtime does not define.
+///
+/// Never called: every name in the three tables is intercepted by name before
+/// its address is read. It exists so that the *slot* resolves here rather than
+/// somewhere else, which is what keeps the refusal named.
+fn unintercepted() -> u64 {
+    unsafe extern "C" fn stub() -> u64 {
+        unreachable!("an Objective-C runtime entry point was called rather than intercepted")
+    }
+    stub as *const () as usize as u64
 }
 
 /// Symbols in the `_objc_` family that are **data**, not entry points.
@@ -540,14 +562,24 @@ fn absent(name: &str) -> Option<u64> {
     Some(f as *const () as usize as u64)
 }
 
-/// The host's own implementation of `name`, if this process has one.
+/// The debug overlay's seam into dispatch, and nothing where there is no overlay.
+#[cfg(target_os = "macos")]
+#[inline]
+fn overlay_before_send(sel: u64, receiver: u64, argument: u64) {
+    crate::gui::hook::before_send(sel, receiver, argument);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[inline]
+fn overlay_before_send(_sel: u64, _receiver: u64, _argument: u64) {}
+
+/// The selected runtime's own implementation of `name`, if it has one.
+///
+/// The one place this module asks where the runtime is. Both the addresses
+/// handed to the guest by [`provider`] and the ones [`crate::objc::fast`] proves
+/// equal before inlining come from here, so the backend is chosen once.
 pub(super) fn host_symbol(name: &str) -> Option<u64> {
-    let c = std::ffi::CString::new(name).ok()?;
-    // SAFETY: `RTLD_DEFAULT` is `(void *)-2` on macOS - search every loaded
-    // image - and `c` is a NUL-terminated string that outlives the call. A
-    // missing symbol is null, which is checked rather than dereferenced.
-    let ptr = unsafe { libc::dlsym(-2isize as *mut core::ffi::c_void, c.as_ptr()) };
-    (!ptr.is_null()).then_some(ptr as usize as u64)
+    super::host::symbol(name)
 }
 
 /// Service one call into the Objective-C runtime.
@@ -751,7 +783,7 @@ fn send(
     }
 
     // The overlay's seam.
-    crate::gui::hook::before_send(sel, host_receiver, arg_reg(ctx, base + 2));
+    overlay_before_send(sel, host_receiver, arg_reg(ctx, base + 2));
 
     // SAFETY: `host_receiver` is a pointer the host runtime owns - an object it
     // allocated, or a class it realized - which is what `object_getClass` takes.
@@ -1462,15 +1494,70 @@ mod tests {
         }
     }
 
+    /// Runtime entry points the builtin runtime does not implement yet.
+    ///
+    /// A named list rather than a silence: each of these is a guest that stops
+    /// with "unsatisfied import" under `ROSETTA3_OBJC=builtin`, and the name is
+    /// the whole of the work queue.
+    const BUILTIN_GAPS: &[&str] = &[
+        // Needs `@property` metadata, which this tree's runtime does not model.
+        // `libYoYoGamepad` reads it; see the Deltarune milestones.
+        "property_copyAttributeList",
+    ];
+
     #[test]
-    fn the_host_really_exports_what_this_module_forwards_to() {
+    fn the_selected_runtime_really_exports_what_this_module_forwards_to() {
         // Every entry in the table is a passthrough, so a name misspelled here
         // is a program that stops with "unsatisfied import" at run time.
         for entry in RUNTIME {
+            if BUILTIN_GAPS.contains(&entry.name) && super::super::host::backend() != super::super::host::Backend::Native {
+                continue;
+            }
             assert!(
                 host_symbol(entry.name).is_some(),
-                "libobjc has no {}",
+                "the {} runtime has no {}",
+                super::super::host::backend(),
                 entry.name
+            );
+        }
+    }
+
+    /// Nothing in the three tables goes unresolved, whichever runtime is chosen.
+    ///
+    /// A name this provider drops binds somewhere else - or nowhere - and either
+    /// way the guest gets an address or a silence instead of the refusal
+    /// [`serve`] would have named it with.
+    #[test]
+    fn the_provider_defines_every_name_the_shim_claims() {
+        let lib = provider();
+        let mut defined = std::collections::HashSet::new();
+        machish::resolve::SymbolProvider::enumerate(&lib, &mut |name, _| {
+            defined.insert(name.to_string());
+        });
+        let names = RUNTIME
+            .iter()
+            .map(|r| r.name)
+            .chain(MESSAGES.iter().map(|(n, _)| *n))
+            .chain(REFUSED.iter().map(|(n, _)| *n));
+        let missing: Vec<String> = names
+            .map(|n| format!("_{n}"))
+            .filter(|n| !defined.contains(n))
+            .collect();
+        assert!(missing.is_empty(), "the objc provider defines none of {missing:?}");
+    }
+
+    /// The gaps are gaps, and not names that quietly started working.
+    ///
+    /// A list that outlives what it describes is worse than no list.
+    #[test]
+    fn every_named_gap_is_still_a_gap() {
+        if super::super::host::backend() == super::super::host::Backend::Native {
+            return;
+        }
+        for name in BUILTIN_GAPS {
+            assert!(
+                host_symbol(name).is_none(),
+                "{name} is implemented now; take it out of BUILTIN_GAPS"
             );
         }
     }
@@ -1536,15 +1623,22 @@ mod tests {
         // runtime lock. The plan cache keeps the second's answer and re-checks
         // it with the first, which only works while the two agree.
         // SAFETY: NUL-terminated literals; every pointer is checked before use.
+        let mut checked = 0;
         unsafe {
             for (class, selector) in [
                 (c"NSString".as_ptr(), c"stringByAppendingString:".as_ptr()),
                 (c"NSString".as_ptr(), c"length".as_ptr()),
-                (c"NSObject".as_ptr(), c"description".as_ptr()),
+                (c"NSObject".as_ptr(), c"class".as_ptr()),
+                (c"NSObject".as_ptr(), c"isEqual:".as_ptr()),
                 (c"NSMutableArray".as_ptr(), c"addObject:".as_ptr()),
             ] {
+                // A Foundation class the selected runtime does not have is not
+                // a disagreement between the two lookups; it is a Foundation
+                // this tree has not written yet.
                 let cls = host::objc_getClass(class);
-                assert!(!cls.is_null());
+                if cls.is_null() {
+                    continue;
+                }
                 let sel = host::sel_registerName(selector);
                 let method = host::class_getInstanceMethod(cls, sel);
                 assert!(!method.is_null());
@@ -1553,8 +1647,10 @@ mod tests {
                     host::class_getMethodImplementation(cls, sel),
                     "the two lookups disagree, so no plan would ever be reused"
                 );
+                checked += 1;
             }
         }
+        assert!(checked > 0, "no class in the list was found at all");
     }
 
     #[test]

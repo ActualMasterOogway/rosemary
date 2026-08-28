@@ -54,13 +54,20 @@ pub mod trampoline;
 pub mod unwind;
 pub mod vm;
 
+/// Realizing the guest's Objective-C classes, and servicing the messages it sends.
+///
+/// Not gated, because the runtime it talks to need not be the host's: everything
+/// here goes through libobjc's public C API, and [`objc::host`] chooses between
+/// the host's implementation of that API and this tree's own.
+pub mod objc;
+
 /// Subsystems that exist because macOS does.
 ///
-/// [`objc`] is the Objective-C runtime, [`gui`] the debug overlay drawn through Metal
-/// and AppKit, [`profile`] a sampler built on Mach thread suspension, [`bundle`] the
-/// `.app` layout `NSBundle` expects, and [`compat`] a `NSUserDefaults` registration.
-/// None of them has a meaning on a host with none of those, and none is stubbed: a
-/// guest that imports into one is refused by name at the import. See
+/// [`gui`] is the debug overlay drawn through Metal and AppKit, [`profile`] a
+/// sampler built on Mach thread suspension, [`bundle`] the `.app` layout the
+/// host's `NSBundle` expects, and [`compat`] a `NSUserDefaults` registration.
+/// None of them has a meaning on a host with none of those, and none is stubbed:
+/// a guest that imports into one is refused by name at the import. See
 /// [`darwin::divergent`].
 #[cfg(target_os = "macos")]
 pub mod bundle;
@@ -68,8 +75,6 @@ pub mod bundle;
 pub mod compat;
 #[cfg(target_os = "macos")]
 pub mod gui;
-#[cfg(target_os = "macos")]
-pub mod objc;
 #[cfg(target_os = "macos")]
 pub mod profile;
 

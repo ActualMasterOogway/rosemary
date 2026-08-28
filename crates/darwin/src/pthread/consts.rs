@@ -88,17 +88,6 @@ pub mod err {
     pub const EAGAIN: i32 = libc::EAGAIN;
 }
 
-// ---------------------------------------------------------------------------
-// Translations. Each returns `None` for a value the guest had no business
-// passing, which becomes `EINVAL` - the same answer libpthread gives.
-//
-// Compiled on both hosts, though only Linux calls them through a guest import: on
-// macOS they are the identity, and having them there is what lets the implementations
-// above them be *exercised* on a Mac against the very libpthread a guest would
-// otherwise have called. A translation that is only ever run on the host that needs
-// it is a translation nobody has watched work.
-// ---------------------------------------------------------------------------
-
 /// Darwin's mutex type as the host's.
 pub fn mutex_type_to_host(darwin: i32) -> Option<libc::c_int> {
     Some(match darwin {

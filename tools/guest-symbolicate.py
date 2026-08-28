@@ -83,10 +83,6 @@ def run(args):
         sys.exit(f"{' '.join(args)}:\n{done.stderr.strip()}")
     return done.stdout
 
-
-# --------------------------------------------------------------- the map ----
-
-
 class Map:
     """Host address ranges and what each was lifted from.
 
@@ -147,9 +143,6 @@ class Map:
         return None
 
 
-# ------------------------------------------------------------- the trace ----
-
-
 def tables(trace):
     """Backtrace-bearing table schemas this trace actually has."""
     toc = run([xctrace(), "export", "--input", trace, "--toc"])
@@ -184,9 +177,6 @@ def frames(xml_path):
                 named = frame.find("binary") is not None
                 yield i == 0, int(addr, 16), named
         element.clear()
-
-
-# ------------------------------------------------------------ the report ----
 
 
 def main():

@@ -57,24 +57,31 @@ pub type Shim = fn(&str, &mut RegisterContext, &mut dyn GuestMemory) -> Result<(
 pub type CallbackShim =
     fn(&str, &mut RegisterContext, &mut dyn GuestMemory, &dyn crate::abi::Callbacks) -> Result<()>;
 
-/// The macOS-only families, which do not exist on a host with no Objective-C runtime,
-/// no CoreFoundation and no Mach.
-#[cfg(target_os = "macos")]
+/// The families this host has, whichever host it is.
+///
+/// The Objective-C runtime is here on both, because [`crate::objc::host`] chooses
+/// one rather than requiring the host to be one.
 fn platform_shim_for(name: &str) -> Option<Shim> {
+    crate::objc::dispatch::shim_for(name).or_else(|| macos_shim_for(name))
+}
+
+/// The macOS-only families, which do not exist on a host with no CoreFoundation
+/// and no Mach.
+#[cfg(target_os = "macos")]
+fn macos_shim_for(name: &str) -> Option<Shim> {
     coregraphics::shim_for(name)
         .or_else(|| coremedia::shim_for(name))
         .or_else(|| cfuuid::shim_for(name))
         .or_else(|| appkit::shim_for(name))
         .or_else(|| component::shim_for(name))
         .or_else(|| machthread::shim_for(name))
-        .or_else(|| crate::objc::dispatch::shim_for(name))
         // The overlay's OpenGL seam. Only present when the overlay is on;
         // see [`crate::gui::hook::shim_for`].
         .or_else(|| crate::gui::hook::shim_for(name))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_shim_for(_name: &str) -> Option<Shim> {
+fn macos_shim_for(_name: &str) -> Option<Shim> {
     None
 }
 

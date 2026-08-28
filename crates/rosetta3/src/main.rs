@@ -86,7 +86,6 @@ fn emulated(
 
     // Objective-C registration happens inside `startup::run`, in dyld's order.
     // It is driven from here first only so that its refusals reach the user.
-    #[cfg(target_os = "macos")]
     for r in vm.register_objc()?.refusals() {
         eprintln!("rosetta3: objc: {r:?}");
     }

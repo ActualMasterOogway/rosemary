@@ -281,12 +281,21 @@ fn responds_to(obj: u64, selector: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// Load Foundation, and say whether this host has one.
+    /// Load Foundation, and say whether these tests can run at all.
     ///
     /// The driver deliberately never links it - the roadmap records what a framework's
     /// initializers do to the `errno` a guest then reads - so a test binary has no
     /// `NSString` until it asks for one.
+    ///
+    /// Also false under `ROSETTA3_OBJC=builtin`. Everything below reaches the
+    /// host's CoreFoundation by `dlsym` and hands it an object found by name,
+    /// and under the builtin runtime that object is one of ours. The subject of
+    /// these tests is the host's CF, so with the host's runtime out of the
+    /// picture there is nothing here to test rather than something failing.
     fn foundation() -> bool {
+        if crate::objc::host::backend() != crate::objc::host::Backend::Native {
+            return false;
+        }
         // SAFETY: `dlopen` of an absolute path, answering null when absent.
         let handle = unsafe {
             libc::dlopen(

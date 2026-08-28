@@ -249,16 +249,6 @@ impl Drop for HostAttr {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The guest-facing `pthread_attr_*` family.
-//
-// Only Linux binds a guest import to any of it - on macOS the host's libpthread
-// owns the same bytes and passing the call through is both correct and free. It is
-// compiled and tested on both hosts all the same: the record these read and write is
-// the fiddliest thing in this crate, and a bug in it that only a Linux run can catch
-// is a bug that gets caught late.
-// ---------------------------------------------------------------------------
-
 pub mod imp {
     use super::*;
     use crate::pthread::object::ours;

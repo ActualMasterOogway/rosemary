@@ -1,0 +1,225 @@
+//! The entry points the compiler emits in place of a message.
+//!
+//! `[Foo alloc]` becomes `objc_alloc(Foo)`, `-isKindOfClass:` becomes
+//! `objc_opt_isKindOfClass`, and so on. Each is a message with the send folded
+//! away, so each is implemented by resolving and calling the method it stands
+//! for - never by shortcutting to the root implementation, which would skip an
+//! override and be wrong in exactly the cases the override exists for.
+
+// The C spellings are the interface; renaming them would only hide it.
+#![allow(non_snake_case)]
+
+use std::ffi::c_void;
+
+use crate::object::Id;
+use crate::sel::Sel;
+
+/// Send `receiver` a nullary message returning an object.
+///
+/// # Safety
+///
+/// `receiver` must be null or a live object.
+unsafe fn send0(receiver: Id, sel: Sel) -> Id {
+    // SAFETY: the caller's obligation.
+    let Some(imp) = unsafe { crate::object::class_of(receiver) }.and_then(|c| c.method(sel))
+    else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: a nullary message returning an object is `id (*)(id, SEL)`.
+    let f: unsafe extern "C" fn(Id, Sel) -> Id =
+        unsafe { std::mem::transmute(imp.implementation()) };
+    // SAFETY: as above.
+    unsafe { f(receiver, sel) }
+}
+
+/// Send `receiver` a one-argument message returning a `BOOL`.
+///
+/// # Safety
+///
+/// As [`send0`], and the method must take one word and return a `BOOL`.
+unsafe fn send1_bool(receiver: Id, sel: Sel, argument: usize) -> bool {
+    // SAFETY: the caller's obligation.
+    let Some(imp) = unsafe { crate::object::class_of(receiver) }.and_then(|c| c.method(sel))
+    else {
+        return false;
+    };
+    // SAFETY: the caller's obligation.
+    let f: unsafe extern "C" fn(Id, Sel, usize) -> bool =
+        unsafe { std::mem::transmute(imp.implementation()) };
+    // SAFETY: as above.
+    unsafe { f(receiver, sel, argument) }
+}
+
+pub unsafe extern "C" fn objc_alloc(cls: Id) -> Id {
+    // SAFETY: a class is an object.
+    unsafe { send0(cls, crate::sel::get("alloc")) }
+}
+
+pub unsafe extern "C" fn objc_allocWithZone(cls: Id) -> Id {
+    // SAFETY: as above.
+    unsafe { send0(cls, crate::sel::get("allocWithZone:")) }
+}
+
+pub unsafe extern "C" fn objc_alloc_init(cls: Id) -> Id {
+    // SAFETY: as above.
+    let object = unsafe { objc_alloc(cls) };
+    // SAFETY: a freshly allocated object.
+    unsafe { send0(object, crate::sel::get("init")) }
+}
+
+pub unsafe extern "C" fn objc_opt_new(cls: Id) -> Id {
+    // SAFETY: a class is an object.
+    unsafe { send0(cls, crate::sel::get("new")) }
+}
+
+pub unsafe extern "C" fn objc_opt_self(object: Id) -> Id {
+    object
+}
+
+pub unsafe extern "C" fn objc_opt_class(object: Id) -> *mut c_void {
+    if object.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: a live object.
+    let Some(class) = (unsafe { crate::object::class_of(object) }) else {
+        return std::ptr::null_mut();
+    };
+    // A class answers `-class` with itself, not with its metaclass, so the
+    // metaclass hop `object_getClass` would take has to be undone here.
+    match class.is_meta() {
+        true => object,
+        false => crate::class::ptr(class) as *mut c_void,
+    }
+}
+
+pub unsafe extern "C" fn objc_opt_isKindOfClass(object: Id, cls: *const c_void) -> bool {
+    // SAFETY: a live object, and a class pointer.
+    unsafe { send1_bool(object, crate::sel::get("isKindOfClass:"), cls as usize) }
+}
+
+pub unsafe extern "C" fn objc_opt_respondsToSelector(object: Id, sel: Sel) -> bool {
+    // SAFETY: a live object, and a selector.
+    unsafe { send1_bool(object, crate::sel::get("respondsToSelector:"), sel as usize) }
+}
+
+/// `@property` accessors the compiler folds, for a property whose ivar it names
+/// by byte offset.
+///
+/// The atomic spellings are not atomic here. Making them so needs a per-property
+/// lock, and nothing in this tree has yet produced a program that races a
+/// property; when one does, the fix belongs here and not at the call site.
+pub unsafe extern "C" fn objc_getProperty(
+    receiver: Id,
+    _sel: Sel,
+    offset: isize,
+    _atomic: bool,
+) -> Id {
+    if receiver.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the compiler computed `offset` against this object's own class.
+    let value = unsafe { *((receiver as *const u8).offset(offset) as *const Id) };
+    crate::arc::autorelease(crate::arc::retain(value))
+}
+
+pub unsafe extern "C" fn objc_setProperty(
+    receiver: Id,
+    _sel: Sel,
+    offset: isize,
+    value: Id,
+    _atomic: bool,
+    _copy: i8,
+) {
+    // SAFETY: as `objc_getProperty`.
+    unsafe { store_property(receiver, offset, value) }
+}
+
+/// The specialized spellings, whose arguments are in a different order from
+/// [`objc_setProperty`]'s: no `atomic` or `copy`, because the name says both.
+pub unsafe extern "C" fn objc_setProperty_atomic(
+    receiver: Id,
+    _sel: Sel,
+    value: Id,
+    offset: isize,
+) {
+    // SAFETY: as above.
+    unsafe { store_property(receiver, offset, value) }
+}
+
+pub unsafe extern "C" fn objc_setProperty_nonatomic(
+    receiver: Id,
+    _sel: Sel,
+    value: Id,
+    offset: isize,
+) {
+    // SAFETY: as above.
+    unsafe { store_property(receiver, offset, value) }
+}
+
+pub unsafe extern "C" fn objc_setProperty_atomic_copy(
+    receiver: Id,
+    _sel: Sel,
+    value: Id,
+    offset: isize,
+) {
+    // SAFETY: as above.
+    unsafe { store_property(receiver, offset, copy_of(value)) }
+}
+
+pub unsafe extern "C" fn objc_setProperty_nonatomic_copy(
+    receiver: Id,
+    _sel: Sel,
+    value: Id,
+    offset: isize,
+) {
+    // SAFETY: as above.
+    unsafe { store_property(receiver, offset, copy_of(value)) }
+}
+
+/// # Safety
+///
+/// `offset` must be an ivar offset of `receiver`'s own class.
+unsafe fn store_property(receiver: Id, offset: isize, value: Id) {
+    if receiver.is_null() {
+        return;
+    }
+    // SAFETY: the caller's obligation.
+    let slot = unsafe { (receiver as *mut u8).offset(offset) as *mut Id };
+    // SAFETY: as above.
+    unsafe { crate::api::objc_storeStrong(slot, value) };
+}
+
+/// `-copy`, or the object itself where the class does not implement it.
+fn copy_of(value: Id) -> Id {
+    // SAFETY: a live object or null.
+    let copied = unsafe { send0(value, crate::sel::get("copy")) };
+    match copied.is_null() {
+        true => value,
+        false => copied,
+    }
+}
+
+/// Blocks are Foundation's, not this runtime's.
+///
+/// `objc_retainBlock` on a stack block must copy it to the heap, and what a
+/// block *is* - the `__block_literal` layout and `_NSConcreteStackBlock` - is
+/// libclosure's. Retaining without copying would hand back a pointer into a
+/// frame that is about to go away, so this refuses instead.
+pub unsafe extern "C" fn objc_retainBlock(_block: Id) -> Id {
+    unimplemented!("objc_retainBlock needs libclosure, which this runtime does not have")
+}
+
+/// Mutating a collection while enumerating it. A named abort, as on Apple's.
+pub unsafe extern "C" fn objc_enumerationMutation(object: Id) {
+    // SAFETY: a live object.
+    let class = unsafe { crate::object::class_of(object) };
+    panic!(
+        "collection was mutated while being enumerated: {}",
+        class.map_or("nil", |c| c.name_str())
+    );
+}
+
+/// The `std::terminate` an uncaught Objective-C exception reaches.
+pub unsafe extern "C" fn objc_terminate() -> ! {
+    panic!("objc_terminate");
+}

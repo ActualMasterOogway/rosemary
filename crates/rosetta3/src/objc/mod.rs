@@ -5,6 +5,8 @@ pub mod dispatch;
 pub mod encoding;
 pub mod fast;
 pub mod host;
+/// Only where there is a host runtime for a host-architecture image to be given to.
+#[cfg(target_os = "macos")]
 pub mod native;
 pub mod send;
 

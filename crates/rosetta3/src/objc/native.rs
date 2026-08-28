@@ -4,6 +4,11 @@ use std::ffi::{CString, c_char, c_void};
 
 use machish::report::LinkReport;
 
+// Named, unlike the rest of this crate's libobjc calls: these two are *private*
+// exports with no `dlsym`-able counterpart in [`crate::objc::host`], and they
+// only ever mean the host's own runtime - a host-architecture image is dyld's
+// to map, not ours.
+#[link(name = "objc")]
 unsafe extern "C" {
     /// `void _objc_map_images(unsigned, const char *const [], const struct mach_header *const [])`
     ///

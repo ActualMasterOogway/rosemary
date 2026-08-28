@@ -59,10 +59,6 @@ unsafe fn reclaim<T>(at: u64) -> Box<T> {
     unsafe { Box::from_raw(at as usize as *mut T) }
 }
 
-// ---------------------------------------------------------------------------
-// Mutexes
-// ---------------------------------------------------------------------------
-
 /// A host mutex built for `kind`, or `None` if the host refused it.
 fn host_mutex(darwin_type: i32) -> Option<u64> {
     let mut attr: libc::pthread_mutexattr_t = unsafe { core::mem::zeroed() };
@@ -194,10 +190,6 @@ macro_rules! mutex_op {
 mutex_op!(mutex_lock, pthread_mutex_lock);
 mutex_op!(mutex_trylock, pthread_mutex_trylock);
 mutex_op!(mutex_unlock, pthread_mutex_unlock);
-
-// ---------------------------------------------------------------------------
-// Condition variables
-// ---------------------------------------------------------------------------
 
 fn host_cond() -> Option<u64> {
     let c = empty::<libc::pthread_cond_t>();
@@ -354,10 +346,6 @@ pub unsafe extern "C" fn cond_timedwait_relative(at: u64, mutex: u64, reltime: u
     unsafe { cond_timedwait(at, mutex, &deadline as *const libc::timespec as usize as u64) }
 }
 
-// ---------------------------------------------------------------------------
-// Read-write locks
-// ---------------------------------------------------------------------------
-
 fn host_rwlock() -> Option<u64> {
     let l = empty::<libc::pthread_rwlock_t>();
     // SAFETY: a live zeroed object of the right type, initialised where it will live -
@@ -449,10 +437,6 @@ rwlock_op!(rwlock_wrlock, pthread_rwlock_wrlock);
 rwlock_op!(rwlock_trywrlock, pthread_rwlock_trywrlock);
 rwlock_op!(rwlock_unlock, pthread_rwlock_unlock);
 
-// ---------------------------------------------------------------------------
-// Attribute objects that hold nothing but a setting or two
-// ---------------------------------------------------------------------------
-
 /// What a `pthread_mutexattr_t` says.
 #[derive(Clone, Copy, Debug)]
 pub struct MutexAttr {
@@ -533,10 +517,6 @@ unsafe fn simple_attr_pshared(attr: u64, kind: Kind) -> Option<i32> {
     let r = unsafe { Record::at(attr, kind) };
     r.is_ours().then(|| r.cell().load(Ordering::Relaxed) as i32)
 }
-
-// ---------------------------------------------------------------------------
-// `pthread_once`
-// ---------------------------------------------------------------------------
 
 /// The three states a `pthread_once_t` moves through, in its own second word.
 mod once_state {

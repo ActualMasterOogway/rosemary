@@ -64,10 +64,6 @@ const HOST_THREAD_POINTER: usize = SLOTS;
 /// zero byte, so a string overflow cannot copy it back.
 pub const STACK_CHK_GUARD: u64 = 0x00ff_dead_beef_c0de;
 
-// ---------------------------------------------------------------------------
-// The base a guest reads its thread-specific data from.
-// ---------------------------------------------------------------------------
-
 /// The base of this thread's Darwin TSD array - the value a guest's `%gs` must hold.
 ///
 /// On Darwin this is the thread's real array, which is the answer that costs nothing
@@ -175,10 +171,6 @@ fn allocate() -> u64 {
     Box::leak(words);
     base
 }
-
-// ---------------------------------------------------------------------------
-// The boundary: swapping the *real* thread pointer around Darwin machine code.
-// ---------------------------------------------------------------------------
 
 /// This thread's own thread pointer, as the host keeps it.
 ///

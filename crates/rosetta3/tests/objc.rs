@@ -127,7 +127,7 @@ unsafe fn msg_send<T: Copy>() -> T {
         std::mem::size_of::<*const ()>(),
         "T must be a bare function pointer"
     );
-    let p = host::objc_msgSend as *const ();
+    let p = host::msg_send() as *const ();
     // SAFETY: the caller promises `T` matches the selector being sent.
     unsafe { *(&p as *const *const () as *const T) }
 }
@@ -153,7 +153,7 @@ unsafe fn msg_send_stret<T: Copy>() -> T {
         p as *const ()
     };
     #[cfg(not(target_arch = "x86_64"))]
-    let p = host::objc_msgSend as *const ();
+    let p = host::msg_send() as *const ();
     // SAFETY: the caller promises `T` matches the selector being sent.
     unsafe { *(&p as *const *const () as *const T) }
 }

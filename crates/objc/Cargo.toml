@@ -1,0 +1,11 @@
+[package]
+name = "objc"
+description = "An Objective-C runtime, implemented here rather than borrowed from the host."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# No `machish`: this crate knows nothing about Mach-O. What it answers for is
+# published by `rosetta3`'s own objc provider, which already had that job.
+libc.workspace = true

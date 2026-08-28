@@ -65,11 +65,6 @@ pub unsafe fn responds(object: Id, selector: Sel) -> bool {
     }
 }
 
-/// `objc_msgSend` as an address, to be cast to the prototype the method has.
-fn entry() -> *const c_void {
-    host::objc_msgSend as *const c_void
-}
-
 macro_rules! sender {
     ($name:ident, $($arg:ident),* $(,)?) => {
         /// Send a message whose prototype the caller states.
@@ -80,16 +75,16 @@ macro_rules! sender {
         /// framework header declares it, and `receiver` must respond to `selector`.
         #[allow(clippy::missing_safety_doc, non_snake_case)]
         pub unsafe fn $name<R, $($arg),*>(receiver: Id, selector: Sel, $($arg: $arg),*) -> R {
-            // SAFETY: `entry` is `objc_msgSend`'s address, and the caller has
-            // stated the prototype. Transmuting the address rather than the
-            // declaration is the documented way to call it - see
-            // [`crate::objc::host::objc_msgSend`], which is declared with no
-            // parameters for exactly this reason.
+            // SAFETY: [`host::msg_send`] is the selected runtime's
+            // `objc_msgSend`, and the caller has stated the prototype.
+            // Transmuting the address rather than declaring it is the only way
+            // to call it: it takes its arguments in whatever registers the call
+            // site used.
             let f = unsafe {
                 std::mem::transmute::<
                     *const c_void,
                     extern "C" fn(Id, Sel, $($arg),*) -> R,
-                >(entry())
+                >(host::msg_send())
             };
             f(receiver, selector, $($arg),*)
         }
@@ -108,11 +103,8 @@ sender!(send4, A, B, C, D);
 ///
 /// The token must be popped, on the same thread, exactly once.
 pub unsafe fn pool_push() -> *mut c_void {
-    unsafe extern "C" {
-        fn objc_autoreleasePoolPush() -> *mut c_void;
-    }
     // SAFETY: public libobjc API, takes nothing.
-    unsafe { objc_autoreleasePoolPush() }
+    unsafe { host::objc_autoreleasePoolPush() }
 }
 
 /// Pop a pool pushed by [`pool_push`].
@@ -121,11 +113,8 @@ pub unsafe fn pool_push() -> *mut c_void {
 ///
 /// `token` must come from [`pool_push`] on this thread and be popped once.
 pub unsafe fn pool_pop(token: *mut c_void) {
-    unsafe extern "C" {
-        fn objc_autoreleasePoolPop(token: *mut c_void);
-    }
     // SAFETY: the caller's obligation, stated above.
-    unsafe { objc_autoreleasePoolPop(token) }
+    unsafe { host::objc_autoreleasePoolPop(token) }
 }
 
 /// An `NSString` for `s`, autoreleased into the caller's pool.

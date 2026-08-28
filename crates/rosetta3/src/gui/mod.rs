@@ -23,9 +23,19 @@ use draw::{DrawList, color};
 use panel::Model;
 
 /// Whether the overlay is switched on at all.
+///
+/// Never under `ROSETTA3_OBJC=builtin`. Every class this module reaches -
+/// `NSEvent`, `MTLRenderPassDescriptor`, `NSString` - is the *host's*, found by
+/// name through [`objc::class`], which now looks in whichever runtime is
+/// selected. With the builtin one selected it would find none of them, and any
+/// it did find would be a foreign object handed to a runtime that would read it
+/// as its own.
 pub fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
+        if crate::objc::host::backend() != crate::objc::host::Backend::Native {
+            return false;
+        }
         !matches!(
             std::env::var("ROSETTA3_GUI").as_deref().map(str::trim),
             Ok("0" | "no" | "off" | "false"),
