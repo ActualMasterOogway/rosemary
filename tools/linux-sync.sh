@@ -28,7 +28,8 @@
 #     container run -d --name r3debian --cpus 8 --memory 8g debian:trixie tail -f /dev/null
 #     container exec r3debian sh -c 'apt-get update -qq && \
 #         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-#         build-essential curl pkg-config libcurl4-openssl-dev zlib1g-dev libsdl3-dev'
+#         build-essential curl pkg-config libcurl4-openssl-dev zlib1g-dev libsdl3-dev \\
+#         libglu1-mesa'
 #     container exec r3debian sh -c 'curl --proto "=https" --tlsv1.2 -sSf \
 #         https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.98.0 --profile minimal'
 #     tools/linux-sync.sh --vendor
@@ -36,7 +37,10 @@
 # `libcurl4-openssl-dev` and `zlib1g-dev` are for `shims::curl` and `shims::zlib`,
 # which link against the real libraries on either host - they are on the macOS
 # SDK's include path and need the `-dev` packages here. `libsdl3-dev` is what the
-# reimplemented AppKit, IOKit and CoreAudio are built on.
+# reimplemented AppKit, IOKit and CoreAudio are built on, and it brings libGL with
+# it. `libglu1-mesa` does not come with it: `gluOrtho2D` is in Apple's OpenGL
+# framework and in a library of its own here, and a guest's `glu*` imports go
+# unresolved without it. See `darwin::load_host_libraries`.
 #
 # There is no display in the container. SDL runs headless by default; see the
 # `SDL_*` variables set below.

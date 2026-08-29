@@ -3230,16 +3230,20 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("_ZTVSt9exception", DATA),
     // A *variable* holding a function pointer, not a function.
     ("__explicit_bzero_hook", DATA),
-    // The personality routine a frame's LSDA names. Read as an address and
-    // never called.
+    // The personality routine a frame's LSDA names. Called by the *unwinder*,
+    // as guest code, rather than through this table - which is what these
+    // refusals mean: a personality routine reached through an import slot is a
+    // call nothing makes. `crate::cxxlib` binds the C++ one to the vendored
+    // `libc++abi`, and `crate::objcexc` points the Objective-C spelling at the
+    // same routine, because on 64-bit macOS it is the same routine.
     (
         "__gxx_personality_v0",
-        "a personality routine, named by an LSDA and never called",
+        "a personality routine, named by an LSDA and called by the unwinder",
     ),
     ("__mb_cur_max", DATA),
     (
         "__objc_personality_v0",
-        "a personality routine, named by an LSDA and never called",
+        "as __gxx_personality_v0, which it is",
     ),
     ("__stack_chk_guard", DATA),
     ("__stderrp", DATA),

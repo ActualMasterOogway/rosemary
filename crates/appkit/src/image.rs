@@ -223,24 +223,33 @@ pub(crate) fn install() {
     methods!(class, {
         "TIFFRepresentation" => tiff_representation, c"@16@0:8";
     });
-    for selector in [
-        "lockFocus",
-        "unlockFocus",
-        "CGImageForProposedRect:context:hints:",
-        "representations",
-        "bestRepresentationForRect:context:hints:",
+    // The pixel family, each reached by the same implementation so that the one
+    // that is wanted first names itself. The encodings are still each method's
+    // own: the runtime marshals a guest's send by decoding exactly this string,
+    // and the shared implementation does not make the arguments go away.
+    for (selector, types) in [
+        ("lockFocus", c"v16@0:8"),
+        ("unlockFocus", c"v16@0:8"),
+        ("representations", c"@16@0:8"),
+        (
+            "CGImageForProposedRect:context:hints:",
+            c"^v40@0:8^{CGRect={CGPoint=dd}{CGSize=dd}}16@24@32",
+        ),
+        (
+            "bestRepresentationForRect:context:hints:",
+            c"@64@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48@56",
+        ),
+        (
+            "drawInRect:fromRect:operation:fraction:",
+            c"v96@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16{CGRect={CGPoint=dd}{CGSize=dd}}48Q80d88",
+        ),
     ] {
         class.replace_method(
             objc::sel::get(selector),
             needs_pixels as *const c_void,
-            c"@16@0:8",
+            types,
         );
     }
-    class.replace_method(
-        objc::sel::get("drawInRect:fromRect:operation:fraction:"),
-        needs_pixels as *const c_void,
-        c"v88@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16{CGRect={CGPoint=dd}{CGSize=dd}}48Q80d88",
-    );
 }
 
 #[cfg(test)]

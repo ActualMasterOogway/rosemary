@@ -46,11 +46,12 @@ pub fn symbol(name: &str) -> Option<u64> {
     bootstrap();
     Some(match name {
         "NSApplicationMain" => at!(application::NSApplicationMain),
+        "CGMainDisplayID" => at!(screen::CGMainDisplayID),
         _ => return None,
     })
 }
 
-pub const NAMES: &[&str] = &["NSApplicationMain"];
+pub const NAMES: &[&str] = &["NSApplicationMain", "CGMainDisplayID"];
 
 pub fn ns_app_cell() -> u64 {
     corefoundation::base::global_cell("_NSApp", 0)

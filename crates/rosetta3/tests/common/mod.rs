@@ -857,6 +857,19 @@ pub fn build_cpp(name: &str, source: &str) -> Option<String> {
     build_x86_64(name, source, &["-x", "c++", "-lc++"])
 }
 
+/// Compile `source` as x86_64 Objective-C++ and return its path.
+///
+/// The `++` is what puts a real `libc++abi` in the image, which is where an
+/// Objective-C exception's `type_info` and unwinder come from - see
+/// `rosetta3::objcexc`. A plain Objective-C fixture links neither.
+pub fn build_objcpp(name: &str, source: &str) -> Option<String> {
+    build_x86_64(
+        name,
+        source,
+        &["-x", "objective-c++", "-lc++", "-framework", "Foundation"],
+    )
+}
+
 /// Compile `source` as x86_64 Objective-C and return its path.
 ///
 /// `-framework Foundation` is not optional even for a fixture that only
@@ -1179,6 +1192,65 @@ int main(int argc, char **argv) {
     return 0;
 }
 "#;
+
+/// An Objective-C exception thrown and caught, which is the whole of the path
+/// `rosetta3::objcexc` builds.
+///
+/// Each clause is its own claim:
+///
+/// - **the handler runs at all** - `_OBJC_EHTYPE_$_NSException` has to be a
+///   real `type_info`, and an unresolved one binds to zero.
+/// - **name and reason survive** - the object reaches the handler, which is
+///   `objc_begin_catch` returning the `id` rather than the buffer holding it.
+/// - **a subclass is caught by its base** - the record's base chain is the
+///   class chain, and nothing else makes this work.
+/// - **the wrong class is not caught** - a chain that matched everything would
+///   pass every clause above.
+/// - **`@finally` runs either way** - a cleanup landing pad, not a handler.
+pub const OBJC_EXCEPTIONS_MM: &str = r#"
+#import <Foundation/Foundation.h>
+#include <stdio.h>
+
+@interface Narrower : NSException @end
+@implementation Narrower @end
+
+int main(void) {
+    @try {
+        @throw [NSException exceptionWithName:@"E" reason:@"r" userInfo:nil];
+    } @catch (NSException *e) {
+        printf("caught %s %s\n", [[e name] UTF8String], [[e reason] UTF8String]);
+    } @finally {
+        printf("finally\n");
+    }
+
+    @try {
+        @throw [Narrower exceptionWithName:@"N" reason:@"n" userInfo:nil];
+    } @catch (NSException *e) {
+        printf("subclass %s\n", [[e name] UTF8String]);
+    }
+
+    @try {
+        @try {
+            @throw [NSException exceptionWithName:@"O" reason:@"o" userInfo:nil];
+        } @catch (Narrower *e) {
+            printf("wrong clause\n");
+        }
+    } @catch (NSException *e) {
+        printf("outer %s\n", [[e name] UTF8String]);
+    }
+
+    printf("done\n");
+    return 0;
+}
+"#;
+
+/// Build [`OBJC_EXCEPTIONS_MM`], or `None` if this host cannot.
+pub fn objc_exceptions_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_objcpp("objc_exceptions", OBJC_EXCEPTIONS_MM))
+        .clone()
+}
 
 /// Build [`OBJC_REFUSALS_M`], or `None` if this host cannot.
 pub fn objc_refusals_fixture() -> Option<String> {

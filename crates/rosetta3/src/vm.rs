@@ -1154,6 +1154,13 @@ impl Vm {
         Ok(())
     }
 
+    /// Continue the guest at `target` as if the import just serviced had tail-called
+    /// it, for a shim that must not leave a host frame behind - see
+    /// `objc::dispatch::exception_throw`.
+    pub(crate) fn tail_call(&self, target: u64, ctx: &mut RegisterContext) -> Result<(), VmError> {
+        self.transfer_to_guest(target, ctx)
+    }
+
     /// Continue the guest at `target`, as the intercepted transfer would have.
     fn transfer_to_guest(&self, target: u64, ctx: &mut RegisterContext) -> Result<(), VmError> {
         let Some(state) = crate::thread::current() else {

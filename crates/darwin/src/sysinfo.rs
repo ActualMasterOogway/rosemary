@@ -129,17 +129,75 @@ unsafe extern "C" fn compat_mode(
     libc::c_int::from(mode.eq_ignore_ascii_case(b"legacy") && legacy)
 }
 
+/// `OSErr Gestalt(OSType selector, SInt32 *response)`, the Carbon question a
+/// program still asks about the OS version.
+///
+/// Only the version selectors. Gestalt has hundreds, and every other one is
+/// about hardware this runtime is not - so an unknown selector is
+/// `gestaltUndefSelectorErr`, which is what Apple's answers for a selector the
+/// system does not implement, and a caller that checks gets told rather than
+/// handed a number about some other machine.
+///
+/// The version is [`crate::sysctl::macos_version`]'s, so this and
+/// `kern.osrelease` cannot disagree.
+///
+/// # Safety
+///
+/// `response` is null or a writable `SInt32 *`.
+#[cfg(not(target_os = "macos"))]
+unsafe extern "C" fn gestalt(selector: u32, response: *mut i32) -> i16 {
+    /// `paramErr`.
+    const PARAM_ERROR: i16 = -50;
+    /// `gestaltUndefSelectorErr`.
+    const UNDEFINED_SELECTOR: i16 = -5551;
+
+    if response.is_null() {
+        return PARAM_ERROR;
+    }
+    let (major, minor, patch) = crate::sysctl::macos_version();
+    let bcd = |n: i32| ((n / 10) << 4) | (n % 10);
+    let value = match &selector.to_be_bytes() {
+        b"sys1" => major,
+        b"sys2" => minor,
+        b"sys3" => patch,
+        // `gestaltSystemVersion`, a BCD word. Apple caps it at 0x1039 for every
+        // release after 10.3.9 precisely so that old code comparing it does not
+        // read 11.0 as older than 10.9, and a runtime that reported the true
+        // number would reintroduce the bug the cap exists for.
+        b"sysv" => 0x1039,
+        _ => return UNDEFINED_SELECTOR,
+    };
+    // SAFETY: the caller states `response` is writable.
+    unsafe { *response = if selector.to_be_bytes() == *b"sysv" { value } else { bcd(value) } };
+    0
+}
+
+/// The names this module answers, which is not the same list on both hosts:
+/// `Gestalt` is CoreServices' and is passed through where there is one.
+fn names() -> &'static [&'static str] {
+    #[cfg(target_os = "macos")]
+    {
+        &["uname", "compat_mode"]
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        &["uname", "compat_mode", "Gestalt"]
+    }
+}
+
 pub fn symbol(name: &str) -> Option<u64> {
     let f: *const () = match name {
         "uname" => uname as *const (),
         "compat_mode" => compat_mode as *const (),
+        #[cfg(not(target_os = "macos"))]
+        "Gestalt" => gestalt as *const (),
         _ => return None,
     };
     Some(f as usize as u64)
 }
 
 pub fn provide(lib: &mut SyntheticDylib) {
-    for name in ["uname", "compat_mode"] {
+    for name in names() {
         crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap() as *const ());
     }
 }

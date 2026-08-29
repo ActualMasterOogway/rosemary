@@ -8,14 +8,18 @@ pub mod errno;
 pub mod fcntl;
 pub mod ioctl;
 pub mod locale;
+pub mod malloc;
 pub mod mach;
 pub mod passthrough;
 pub mod pthread;
+pub mod path;
 pub mod signal;
+pub mod stat;
 pub mod stdio;
 pub mod sysctl;
 pub mod sysinfo;
 pub mod tls;
+pub mod xlocale;
 
 /// Strip the leading underscore a Mach-O symbol carries.
 pub fn c_name(symbol: &str) -> &str {
@@ -27,7 +31,7 @@ pub fn c_name(symbol: &str) -> &str {
 /// Not the answer a guest import gets: that goes through [`symbol`], which consults
 /// this crate's entries first and refuses a divergent name outright.
 pub fn host_symbol(name: &str) -> Option<u64> {
-    load_math();
+    load_host_libraries();
     let c = CString::new(name).ok()?;
     // SAFETY: `RTLD_DEFAULT` is a valid pseudo-handle and `c` outlives the call.
     // `dlsym` returns null for a name it does not know, which is checked.
@@ -35,22 +39,35 @@ pub fn host_symbol(name: &str) -> Option<u64> {
     (!found.is_null()).then(|| found as usize as u64)
 }
 
-/// Make sure the host's maths library is loaded before anything asks it for a
-/// symbol.
+/// Make sure the libraries a guest's imports come out of are loaded before
+/// anything asks for a symbol.
 ///
-/// On Darwin `cos` is in libSystem, which every process has. On glibc it is in
-/// `libm.so.6`, which is loaded only if something linked against it - and this
-/// runtime does not, so `dlsym(RTLD_DEFAULT, "cos")` is null and a guest's whole
-/// maths library goes unresolved. One `dlopen` fixes every name at once.
-fn load_math() {
+/// On Darwin `cos` is in libSystem and `glGenTextures` is in the OpenGL
+/// framework, both of which the loader has already. Off it, each lives in a
+/// library that is loaded only if something linked against it - and this runtime
+/// links neither - so `dlsym(RTLD_DEFAULT, "cos")` is null and a guest's whole
+/// maths library goes unresolved. One `dlopen` apiece fixes every name at once.
+///
+/// GLU is a separate library off Darwin - `gluOrtho2D` is in the OpenGL framework
+/// there and in `libGLU.so.1` here - so it is a third `dlopen` and not an
+/// oversight.
+///
+/// The GL library and not `SDL_GL_GetProcAddress`, which would be the more
+/// careful answer: an import slot is bound before any context exists, and
+/// `GetProcAddress` before a current context answers null on some drivers. The
+/// entry points a 2.1 program calls are the library's own exports, so the
+/// loader can be asked for them directly.
+fn load_host_libraries() {
     #[cfg(not(target_os = "macos"))]
     {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            // SAFETY: a soname the dynamic loader resolves, opened globally so
-            // its exports join the default search and never closed.
-            unsafe {
-                libc::dlopen(c"libm.so.6".as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL);
+            for soname in [c"libm.so.6", c"libGL.so.1", c"libGLU.so.1"] {
+                // SAFETY: a soname the dynamic loader resolves, opened globally
+                // so its exports join the default search, and never closed.
+                unsafe {
+                    libc::dlopen(soname.as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL);
+                }
             }
         });
     }
@@ -118,15 +135,88 @@ fn implemented(name: &str) -> Option<u64> {
         .or_else(|| pthread::symbol(name))
         .or_else(|| mach::symbol(name))
         .or_else(|| dispatch::symbol(name))
+        .or_else(|| xlocale_symbol(name))
+        .or_else(|| stat_symbol(name))
+        .or_else(|| malloc_symbol(name))
+}
+
+/// The zoned-allocator questions, which only a host with no zones answers.
+fn malloc_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return malloc::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
+}
+
+/// The `struct stat` family and the path calls beside it, which only a host
+/// whose layout is not Darwin's publishes.
+fn stat_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return stat::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
+}
+
+/// The `xlocale.h` family, which only a host without it publishes.
+fn xlocale_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return xlocale::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
 }
 
 pub fn is_implemented(symbol: &str) -> bool {
     implemented(c_name(symbol)).is_some()
 }
 
+/// Names the **runtime above** shims and no host exports.
+///
+/// A shim is only reached once its import resolves: `abi::call_import_inner`
+/// refuses a null address *before* it looks for one, so a name nothing defines
+/// fails as an unsatisfied import and never reaches the code that implements it.
+/// On Darwin these are libSystem's and resolve on their own; off it, nothing
+/// defines them and the address below is what makes the slot non-null.
+///
+/// Each is a Darwin ABI of its own rather than a missing function: `__sincos_stret`
+/// returns two doubles in the vector registers, which no glibc entry point does.
+pub const SHIMMED_ABOVE: &[&str] = &[
+    "__sincosf_stret",
+    "__sincos_stret",
+    "__divdc3",
+    "__mulsc3",
+];
+
+/// The address [`SHIMMED_ABOVE`] publishes, which exists to be non-null.
+unsafe extern "C" fn shimmed_above() -> u64 {
+    unreachable!("a shimmed Darwin entry point was called rather than intercepted")
+}
+
 pub fn provider() -> machish::resolve::SyntheticDylib {
     let mut lib = machish::resolve::SyntheticDylib::new("<darwin>");
     lib.flat(true);
+    for name in SHIMMED_ABOVE {
+        // Only where the host has none: on Darwin these are libSystem's own, and
+        // shadowing them would replace an implementation with a placeholder in
+        // the one case the shim ever stopped intercepting.
+        if host_symbol(name).is_none() {
+            define_fn(&mut lib, &format!("_{name}"), shimmed_above as *const ());
+        }
+    }
     stdio::provide(&mut lib);
     errno::provide(&mut lib);
     sysctl::provide(&mut lib);
@@ -134,6 +224,12 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
     pthread::provide(&mut lib);
     mach::provide(&mut lib);
     dispatch::provide(&mut lib);
+    #[cfg(not(target_os = "macos"))]
+    {
+        xlocale::provide(&mut lib);
+        stat::provide(&mut lib);
+        malloc::provide(&mut lib);
+    }
     lib
 }
 

@@ -197,6 +197,20 @@ impl Class {
             .copied()
     }
 
+    /// Every method this class declares itself, in no particular order.
+    ///
+    /// For a caller checking a whole class table at once - the encoding guard in
+    /// `rosetta3` - rather than for dispatch, which asks by selector.
+    pub fn own_methods(&'static self) -> Vec<&'static Method> {
+        self.contents
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .methods
+            .values()
+            .copied()
+            .collect()
+    }
+
     /// The method `sel` resolves to, searching superclasses.
     pub fn method(&'static self, sel: Sel) -> Option<&'static Method> {
         self.chain().find_map(|c| c.own_method(sel))

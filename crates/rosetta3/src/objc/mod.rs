@@ -201,6 +201,7 @@ impl ObjcRuntime {
 pub fn register(vm: &Vm) -> Result<ObjcRuntime, VmError> {
     let mut rt = ObjcRuntime::default();
     register_images(vm, &mut rt, &images_of(&vm.program.report))?;
+    crate::objcexc::repair_image_records(&mut vm.view(), &vm.program.report);
     Ok(rt)
 }
 
@@ -213,7 +214,9 @@ pub(crate) fn register_loaded(
     rt: &mut ObjcRuntime,
     report: &LinkReport,
 ) -> Result<(), VmError> {
-    register_images(vm, rt, &images_of(report))
+    register_images(vm, rt, &images_of(report))?;
+    crate::objcexc::repair_image_records(&mut vm.view(), report);
+    Ok(())
 }
 
 /// Every image in `report` carrying Objective-C metadata, dependencies first.

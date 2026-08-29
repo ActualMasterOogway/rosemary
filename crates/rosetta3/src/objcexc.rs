@@ -19,8 +19,10 @@
 
 use std::ffi::{CString, c_char};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use machish::error::Result;
+use machish::report::LinkReport;
 use machish::exports::ExportTable;
 use machish::image::MachObject;
 use machish::spec::arch::X86_64;
@@ -47,12 +49,21 @@ unsafe impl Send for TypeInfo {}
 /// libc++abi's pointer comparison of two `type_info`s correct.
 static RECORDS: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
 
+/// The two `type_info` vtables, from the vendored `libc++abi`, and the
+/// personality routine that goes with them.
+///
+/// Statics rather than arguments because a record is also made on the *throw*
+/// path, long after [`bind`] has run and with nothing there to pass them.
+static NO_BASES: AtomicU64 = AtomicU64::new(0);
+static ONE_BASE: AtomicU64 = AtomicU64::new(0);
+
 /// The `type_info` for `class`, making it and its superclasses' if needed.
 ///
-/// `None` for a class this runtime does not have: a record whose base chain
-/// stops short would answer "not a subclass" for a class that is one, which is a
-/// wrong catch rather than a missing one.
-fn record_for(class: &'static objc::class::Class) -> Option<u64> {
+/// `None` before [`bind`] has found the vtables, and for a class this runtime
+/// does not have: a record whose base chain stops short would answer "not a
+/// subclass" for a class that is one, which is a wrong catch rather than a
+/// missing one.
+pub fn record_for(class: &'static objc::class::Class) -> Option<u64> {
     let name = class.name_str().to_string();
     if let Some((_, addr)) = RECORDS
         .lock()
@@ -66,9 +77,16 @@ fn record_for(class: &'static objc::class::Class) -> Option<u64> {
         Some(parent) => record_for(parent)?,
         None => 0,
     };
+    let vptr = match base {
+        0 => NO_BASES.load(Ordering::Acquire),
+        _ => ONE_BASE.load(Ordering::Acquire),
+    };
+    if vptr == 0 {
+        return None;
+    }
     let text = CString::new(name.as_str()).ok()?;
     let record = Box::leak(Box::new(TypeInfo {
-        vptr: 0,
+        vptr,
         name: Box::leak(text.into_boxed_c_str()).as_ptr(),
         base,
     }));
@@ -78,6 +96,76 @@ fn record_for(class: &'static objc::class::Class) -> Option<u64> {
         .unwrap_or_else(|e| e.into_inner())
         .push((name, addr));
     Some(addr)
+}
+
+/// Rewrite the `type_info` records the *guest* laid out for its own classes.
+///
+/// clang emits `_OBJC_EHTYPE_$_Foo` into the image that implements `Foo`, as
+/// `{ objc_ehtype_vtable + 2, "Foo", OBJC_CLASS_$_Foo }` - a libobjc structure
+/// whose vtable this runtime has nothing to bind, so its first word is zero and
+/// the vendored `libc++abi` calls through it. Each is rewritten in place into
+/// the `__si_class_type_info` libc++abi can read: the vtable, and the third word
+/// from the class to the superclass's record. The name in the middle already
+/// says which class it is, which is what makes the rewrite possible without a
+/// symbol table.
+///
+/// Separate from [`bind`] because it needs the guest's classes to be
+/// *registered*, and that happens long after linking - see
+/// [`crate::objc::register`].
+pub fn repair_image_records(mem: &mut dyn crate::abi::GuestMemory, report: &LinkReport) {
+    let one_base = ONE_BASE.load(Ordering::Acquire);
+    if one_base == 0 {
+        return;
+    }
+    for image in &report.images {
+        let slots = image
+            .missing
+            .iter()
+            .filter(|m| m.symbol == EHTYPE_VTABLE)
+            .map(|m| m.slot_va)
+            .chain(
+                image
+                    .bindings
+                    .iter()
+                    .filter(|b| b.symbol == EHTYPE_VTABLE)
+                    .map(|b| b.slot_va),
+            );
+        for record in slots {
+            let Some(class) = class_named_in(mem, record) else {
+                continue;
+            };
+            let Some(base) = class.superclass().and_then(record_for) else {
+                continue;
+            };
+            let _ = mem.write(record, &one_base.to_le_bytes());
+            let _ = mem.write(record.wrapping_add(16), &base.to_le_bytes());
+        }
+    }
+}
+
+/// The symbol whose slot *is* an in-image record's vtable word.
+const EHTYPE_VTABLE: &str = "_objc_ehtype_vtable";
+
+/// The class an in-image `type_info` names, read out of its `name` word.
+fn class_named_in(
+    mem: &dyn crate::abi::GuestMemory,
+    record: u64,
+) -> Option<&'static objc::class::Class> {
+    /// A class name past this is not one, and the read has to stop somewhere.
+    const MAX_NAME: usize = 256;
+    let mut word = [0u8; 8];
+    mem.read(record.wrapping_add(8), &mut word).ok()?;
+    let at = u64::from_le_bytes(word);
+    let mut name = Vec::new();
+    let mut byte = [0u8; 1];
+    for i in 0..MAX_NAME {
+        mem.read(at.wrapping_add(i as u64), &mut byte).ok()?;
+        if byte[0] == 0 {
+            break;
+        }
+        name.push(byte[0]);
+    }
+    objc::class::lookup(&CString::new(name).ok()?)
 }
 
 /// Point every `_OBJC_EHTYPE_$_` binding at a record, and
@@ -91,6 +179,11 @@ pub fn bind<M: machish::memory::Regions>(
     libcxxabi: &[u8],
     is_libcxxabi: &dyn Fn(&str) -> bool,
 ) -> Result<usize> {
+    // Under the host's libobjc every one of these symbols is Apple's, and its
+    // `type_info` records describe Apple's classes.
+    if !crate::frameworks::builtin() {
+        return Ok(0);
+    }
     let Some(slide) = report
         .images
         .iter()
@@ -125,7 +218,46 @@ pub fn bind<M: machish::memory::Regions>(
         ("_objc_exception_rethrow", "___cxa_rethrow"),
     ];
 
+    NO_BASES.store(no_bases, Ordering::Release);
+    ONE_BASE.store(one_base, Ordering::Release);
+
     let mut bound = 0;
+    // The type records this runtime publishes, and out of `missing` rather than `bindings`: a
+    // symbol no provider answered leaves no binding record at all, only the slot
+    // it did not write. That slot is precisely the zero the LSDA reads as
+    // `catch (...)`.
+    for image in &mut report.images {
+        let mut satisfied = Vec::new();
+        for (i, missing) in image.missing.iter().enumerate() {
+            let Some(class) = missing.symbol.strip_prefix("_OBJC_EHTYPE_$_") else {
+                continue;
+            };
+            let Some(record) = std::ffi::CString::new(class)
+                .ok()
+                .and_then(|n| objc::class::lookup(&n))
+                .and_then(record_for)
+            else {
+                continue;
+            };
+            memory.write(missing.slot_va, &record.to_le_bytes())?;
+            satisfied.push((i, record));
+        }
+        for (i, record) in satisfied.iter().rev() {
+            let was = image.missing.remove(*i);
+            image.bindings.push(machish::report::BindingRecord {
+                slot_va: was.slot_va,
+                stub_va: was.stub_va,
+                library: was.library,
+                symbol: was.symbol,
+                resolved: *record,
+                kind: machish::fixups::BindKind::NonLazy,
+                weak_import: was.weak_import,
+                tag: 0,
+            });
+            bound += 1;
+        }
+    }
+
     for image in &mut report.images {
         for binding in &mut image.bindings {
             let addr = if binding.symbol == "___objc_personality_v0" {
@@ -141,29 +273,6 @@ pub fn bind<M: machish::memory::Regions>(
                     Some(addr) => addr,
                     None => continue,
                 }
-            } else if let Some(class) = binding.symbol.strip_prefix("_OBJC_EHTYPE_$_") {
-                // Already satisfied means the guest defines the class itself,
-                // and its own record is the one its `@catch` names.
-                if binding.resolved != 0 {
-                    continue;
-                }
-                let Some(record) = std::ffi::CString::new(class)
-                    .ok()
-                    .and_then(|n| objc::class::lookup(&n))
-                    .and_then(record_for)
-                else {
-                    continue;
-                };
-                // SAFETY: the address came out of the table above, so it is a
-                // record this module leaked.
-                unsafe {
-                    let r = record as *mut TypeInfo;
-                    (*r).vptr = match (*r).base {
-                        0 => no_bases,
-                        _ => one_base,
-                    };
-                }
-                record
             } else {
                 continue;
             };
@@ -173,6 +282,9 @@ pub fn bind<M: machish::memory::Regions>(
             bound += 1;
         }
     }
+    if crate::shims::vmmap::tracing() {
+        eprintln!("rosetta3: objc exceptions: {bound} binding(s) repaired");
+    }
     Ok(bound)
 }
 
@@ -180,33 +292,38 @@ pub fn bind<M: machish::memory::Regions>(
 mod tests {
     use super::*;
 
-    /// The record for a class is the record for that class every time, and its
-    /// base is its superclass's - which is the whole of what libc++abi walks.
+    /// The three properties libc++abi reads a record for, in one test because
+    /// they share the statics [`bind`] fills in and separate tests would race
+    /// over them.
     #[test]
-    fn a_chain_of_records_follows_the_class_chain() {
+    fn a_record_is_a_class_type_info_for_its_class() {
         foundation::bootstrap();
+        // Nothing is published before the vendored library has been found: a
+        // record with a null vtable is a crash inside libc++abi, which is worse
+        // than the binding it replaces.
+        let exception = objc::class::lookup(c"NSException").expect("NSException");
+        assert_eq!(record_for(exception), None, "a record without the vtables");
+
+        NO_BASES.store(0x1000, Ordering::Release);
+        ONE_BASE.store(0x2000, Ordering::Release);
+
         let string = objc::class::lookup(c"NSString").expect("NSString");
         let first = record_for(string).expect("a record");
         assert_eq!(record_for(string), Some(first), "not interned");
 
-        // SAFETY: an address this module leaked.
-        let base = unsafe { (*(first as *const TypeInfo)).base };
         let object = objc::class::lookup(c"NSObject").expect("NSObject");
-        assert_eq!(Some(base), record_for(object));
-        // SAFETY: as above. `NSObject` is the root, so it has no base.
-        assert_eq!(unsafe { (*(base as *const TypeInfo)).base }, 0);
-    }
-
-    /// The name is the plain class name, which is what clang puts in the record
-    /// it emits for a class the guest defines - so the two compare equal on the
-    /// path where libc++abi compares names rather than addresses.
-    #[test]
-    fn the_name_is_the_class_name() {
-        foundation::bootstrap();
-        let class = objc::class::lookup(c"NSString").expect("NSString");
-        let record = record_for(class).expect("a record");
-        // SAFETY: an address this module leaked, whose `name` is a leaked CStr.
-        let name = unsafe { std::ffi::CStr::from_ptr((*(record as *const TypeInfo)).name) };
-        assert_eq!(name.to_str(), Ok("NSString"));
+        // SAFETY: addresses this module leaked, whose `name` is a leaked CStr.
+        unsafe {
+            let record = &*(first as *const TypeInfo);
+            // The base chain is the class chain, which is what makes
+            // `@catch (NSObject *)` take an `NSString`.
+            assert_eq!(Some(record.base), record_for(object));
+            assert_eq!(std::ffi::CStr::from_ptr(record.name).to_str(), Ok("NSString"));
+            // The root uses the vtable with no base word, and everything else
+            // the one with it.
+            assert_eq!((*(record.base as *const TypeInfo)).base, 0);
+            assert_eq!((*(record.base as *const TypeInfo)).vptr, 0x1000);
+            assert_eq!(record.vptr, 0x2000);
+        }
     }
 }

@@ -389,17 +389,26 @@ static REFUSED: &[(&str, &str)] = &[
         "objc_msgSend_fpret",
         "a long double return lives in st0, which has no arm64 counterpart",
     ),
-    // The catch half is served: `objc_end_catch` and `objc_exception_rethrow`
-    // are bound straight to the vendored `libc++abi` by `crate::objcexc`, and
-    // `objc_begin_catch` is the shim below. Throwing is not, and the missing
-    // piece is control flow rather than bookkeeping: `objc_exception_throw`
-    // tail-calls `__cxa_throw` and never returns, so servicing it means moving
-    // the guest's `rip` into a function that unwinds - which no shim in this
-    // tree does, and which cannot be checked without a guest that throws.
+    // The Objective-C exception entry points, refused *here* and served
+    // elsewhere. Under the builtin runtime `crate::objcexc` rebinds
+    // `objc_end_catch` and `objc_exception_rethrow` to the vendored `libc++abi`
+    // after linking, and [`exception_shim`] answers the other two - so reaching
+    // one of these refusals means either no C++ runtime to bind to, or the host's
+    // libobjc, whose `objc_exception_throw` raises a *host* C++ exception with no
+    // guest frame to unwind to.
+    (
+        "objc_end_catch",
+        "an Objective-C exception is a C++ one, and there is no vendored \
+         libc++abi in this program to bind it to",
+    ),
+    ("objc_exception_rethrow", "as objc_end_catch"),
+    ("objc_begin_catch", "as objc_end_catch"),
     (
         "objc_exception_throw",
-        "throwing tail-calls __cxa_throw and never returns, which needs the \
-         redirect an unwinding shim would take (M6); catching is served",
+        "an Objective-C exception is a C++ one, and this program has no \
+         vendored libc++abi to throw it through - or is running on the host's \
+         libobjc, whose throw raises a host exception with no guest frame to \
+         unwind to",
     ),
     // Associated objects key host storage by the object's address, which would
     // work - but the *policy* argument decides whether the value is copied, and
@@ -512,7 +521,7 @@ fn set_arg_reg(ctx: &mut RegisterContext, i: usize, v: u64) {
 
 /// Whether `name` (underscore already stripped) is one of this module's.
 pub fn shim_for(name: &str) -> Option<crate::jmpbuf::Shim> {
-    if name == "objc_begin_catch"
+    if exception_shim(name).is_some()
         || MESSAGES.iter().any(|(n, _)| *n == name)
         || REFUSED.iter().any(|(n, _)| *n == name)
         || RUNTIME.binary_search_by_key(&name, |r| r.name).is_ok()
@@ -615,8 +624,10 @@ pub(super) fn host_symbol(name: &str) -> Option<u64> {
 
 /// Service one call into the Objective-C runtime.
 fn serve(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
-    if symbol == "objc_begin_catch" {
-        return begin_catch(symbol, ctx, mem);
+    // Before [`REFUSED`], which still lists these: the refusal is what a program
+    // the shim cannot serve gets, and the shim decides which that is.
+    if let Some(f) = exception_shim(symbol) {
+        return f(symbol, ctx, mem);
     }
     if let Some((_, message)) = MESSAGES.iter().find(|(n, _)| *n == symbol) {
         return send(symbol, *message, current_vm(symbol)?, ctx, mem);
@@ -634,6 +645,79 @@ fn serve(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> 
     Err(AbiError::NoSignature {
         symbol: symbol.to_string(),
     })
+}
+
+/// The two libobjc exception entry points that are more than an alias for their
+/// C++ counterpart, and so are served here rather than bound by
+/// [`crate::objcexc`].
+///
+/// Only under the builtin runtime. Under the host's libobjc the classes, the
+/// `_OBJC_EHTYPE_$_` records and `objc_exception_throw` are all Apple's, and
+/// half-replacing them would hand this runtime's `type_info` builder a class
+/// structure it did not make.
+fn exception_shim(symbol: &str) -> Option<crate::jmpbuf::Shim> {
+    if !crate::frameworks::builtin() {
+        return None;
+    }
+    Some(match symbol {
+        "objc_begin_catch" => begin_catch,
+        "objc_exception_throw" => exception_throw,
+        _ => return None,
+    })
+}
+
+/// `void objc_exception_throw(id object)`.
+///
+/// libobjc's allocates an exception holding the object, gives it the class's
+/// `type_info`, and tail-calls `__cxa_throw`. So does this: the tail call is
+/// what makes the frame that threw the frame the unwinder starts from, and a
+/// shim that *called* `__cxa_throw` would put a host frame between the two.
+fn exception_throw(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let vm = current_vm(symbol)?;
+    let refused = |reason: &'static str| AbiError::Refused {
+        symbol: symbol.to_string(),
+        reason,
+    };
+    let object = ctx.rdi;
+    let isa = (mem as &dyn GuestMemory).read_u64(object, symbol)?;
+    // SAFETY: `objc_host_class` maps a guest class object to the one this
+    // runtime registered for it, and leaves anything else alone - so the pointer
+    // is either a class of this runtime's or not a class at all, which
+    // `from_ptr` is the check for.
+    let class = unsafe {
+        objc::class::from_ptr(vm.objc_host_class(isa) as *const objc::class::Class)
+    }
+    .ok_or_else(|| refused("the thrown object's isa is not a class this runtime knows"))?;
+    let ehtype = crate::objcexc::record_for(class)
+        .ok_or_else(|| refused("no type_info for the thrown class; the program has no libc++abi"))?;
+    let allocate = vm
+        .program
+        .resolved_symbol("___cxa_allocate_exception")
+        .ok_or_else(|| refused("the program has no __cxa_allocate_exception"))?;
+    let throw = vm
+        .program
+        .resolved_symbol("___cxa_throw")
+        .ok_or_else(|| refused("the program has no __cxa_throw"))?;
+
+    let mut inner = RegisterContext::new();
+    inner.rdi = size_of::<u64>() as u64;
+    let buffer = vm
+        .call_with(allocate, inner)
+        .map_err(|_| refused("__cxa_allocate_exception did not return"))?;
+    mem.write_u64(buffer, object, symbol)?;
+
+    // `__cxa_throw(exception, tinfo, destructor)`. No destructor: the object is
+    // an `id` the guest still owns, and releasing it here would free something
+    // the handler is about to be given.
+    ctx.rdi = buffer;
+    ctx.rsi = ehtype;
+    ctx.rdx = 0;
+    vm.tail_call(throw, ctx)
+        .map_err(|_| refused("the guest could not be redirected into __cxa_throw"))
 }
 
 /// `id objc_begin_catch(void *exception)`.

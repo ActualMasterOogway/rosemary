@@ -131,7 +131,7 @@ pub fn provider() -> SyntheticDylib {
     // registered it would publish a null for that symbol, which is the very
     // failure the globals exist to avoid.
     foundation::bootstrap();
-    for name in corefoundation::NAMES {
+    for name in corefoundation::names() {
         if let Some(addr) = corefoundation::symbol(name) {
             lib.define_fn(&format!("_{name}"), addr as usize as *const ());
         }
@@ -172,6 +172,14 @@ pub fn provider() -> SyntheticDylib {
             lib.define_fn(&format!("_{name}"), addr as usize as *const ());
         }
     }
+    // CoreAudio's output half, on SDL3. Published even where there is no SDL3,
+    // for the reason IOKit's is: a unit that declines to open is a diagnosis,
+    // where an unresolved import only says the symbol was missing.
+    for name in coreaudio::NAMES {
+        if let Some(addr) = coreaudio::symbol(name) {
+            lib.define_fn(&format!("_{name}"), addr as usize as *const ());
+        }
+    }
     for (name, addr) in appkit::data_symbols() {
         lib.define_data(&name, addr);
     }
@@ -196,6 +204,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         .or_else(|| iokit::symbol(name))
         .or_else(|| appkit::symbol(name))
         .or_else(|| corevideo::symbol(name))
+        .or_else(|| coreaudio::symbol(name))
 }
 
 /// Tell this tree's `NSBundle` which `.app` the guest is.

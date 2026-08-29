@@ -16,6 +16,12 @@
 /// Symbols this crate asserts are ABI-identical on Darwin and on the host.
 ///
 /// C names, without the Mach-O underscore.
+///
+/// `access` and `fopen` were on this list and are not any more. The *call* is
+/// identical; what is not is the filesystem underneath it, which on a Mac is
+/// case-insensitive and here is not - so [`crate::stat`] wraps both with the
+/// fallback that difference needs, and a claim of "the host's own symbol is the
+/// answer" would be false off Darwin.
 pub const CLAIMED: &[&str] = &[
     // <string.h>. Pure functions over caller memory; no struct crosses the seam.
     "memchr", "memcmp", "memcpy", "memmove", "memset", "strcasecmp", "strcat", "strchr",
@@ -35,7 +41,7 @@ pub const CLAIMED: &[&str] = &[
     // <unistd.h>. File descriptors are integers on both sides and the flags these
     // take are POSIX. `open` and `fcntl` are not here: their flag values differ and
     // `rosetta3::shims::openat` bridges them.
-    "_exit", "access", "alarm", "chdir", "chown", "close", "dup", "dup2", "execv",
+    "_exit", "alarm", "chdir", "chown", "close", "dup", "dup2", "execv",
     "execve", "fsync", "ftruncate", "getcwd", "getegid", "geteuid", "getgid", "getpid",
     "getppid", "getuid", "isatty", "link", "lseek", "pipe", "pread", "pwrite", "read",
     "readlink", "rmdir", "sleep", "symlink", "sync", "truncate", "unlink", "usleep",
@@ -44,7 +50,7 @@ pub const CLAIMED: &[&str] = &[
     // [`crate::stdio`]. `FILE` itself never crosses: the guest receives a pointer and
     // hands it back.
     "clearerr", "fclose", "fdopen", "feof", "ferror", "fflush", "fgetc", "fgets",
-    "fileno", "fopen", "fputc", "fputs", "fread", "freopen", "fseek", "fseeko", "ftell",
+    "fileno", "fputc", "fputs", "fread", "freopen", "fseek", "fseeko", "ftell",
     "ftello", "fwrite", "getchar", "gets", "perror", "putchar", "puts", "remove",
     "rename", "rewind", "setbuf", "setvbuf", "tmpfile", "ungetc",
     // <math.h>. IEEE 754 on both, and `rosetta3::shims::math` already intercepts the

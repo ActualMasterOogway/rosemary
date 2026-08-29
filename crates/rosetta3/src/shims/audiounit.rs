@@ -1,4 +1,13 @@
 //! `AudioUnitSetProperty`: a guest function pointer installed as a *property*.
+//!
+//! Every other AudioUnit entry point is an ordinary forwarded call. This one is
+//! not, because `kAudioUnitProperty_SetRenderCallback`'s "value" is an
+//! `AURenderCallbackStruct` - a guest function pointer inside a structure, which
+//! has to become a thunk before whatever implements the unit is handed it.
+//!
+//! Which implementation that is depends on the runtime: `crates/coreaudio` under
+//! `ROSETTA3_OBJC=builtin`, the host's AudioToolbox otherwise. The substitution
+//! is the same either way, which is why it is here and not in either of them.
 
 use core::ffi::c_void;
 
@@ -63,30 +72,12 @@ pub fn set_property(
     let (unit, id, scope) = (ctx.rdi, ctx.rsi as u32, ctx.rdx as u32);
     let (element, data, size) = (ctx.rcx as u32, ctx.r8, ctx.r9 as u32);
 
-    // The guest cannot have reached this call without the framework being
-    // loaded, so a miss is a fact about the host rather than about the guest -
-    // reported by name, like any other unsatisfied import.
-    let Some(set) = host_set_property() else {
-        return Err(crate::abi::AbiError::Unsatisfied {
-            symbol: symbol.to_string(),
-        });
-    };
-
     // Every other property is bytes, and bytes are identity-mapped.
     if !carries_a_callback(id) || data == 0 {
         // SAFETY: `data` is either null or a guest address, which under identity
         // mapping is a readable host address for the `size` bytes the guest
         // says it is.
-        let rc = unsafe {
-            set(
-                unit as *mut c_void,
-                id,
-                scope,
-                element,
-                data as *const c_void,
-                size,
-            )
-        };
+        let rc = unsafe { apply(symbol, unit, id, scope, element, data as *const c_void, size)? };
         set_int_return(ctx, rc);
         return Ok(());
     }
@@ -106,21 +97,63 @@ pub fn set_property(
     // the *guest's* callback is what will dereference it.
     let substituted: [u64; 2] = [callbacks.substitute(symbol, proc_va)?, ref_con];
 
-    // SAFETY: `unit` is a host `AudioUnit` the guest received from
+    // SAFETY: `unit` is an `AudioUnit` the guest received from
     // `AudioComponentInstanceNew`, and `substituted` is a live local of exactly
-    // the size being declared. The framework copies it before returning.
+    // the size being declared. The implementation copies it before returning.
     let rc = unsafe {
-        set(
-            unit as *mut c_void,
+        apply(
+            symbol,
+            unit,
             id,
             scope,
             element,
             substituted.as_ptr().cast(),
             CALLBACK_STRUCT_SIZE,
-        )
+        )?
     };
     set_int_return(ctx, rc);
     Ok(())
+}
+
+/// Perform the call, on whichever implementation this run's frameworks are.
+///
+/// # Safety
+///
+/// `data` must be `size` readable bytes, and a callback property's must already
+/// hold a *host*-callable function pointer.
+unsafe fn apply(
+    symbol: &str,
+    unit: u64,
+    id: u32,
+    scope: u32,
+    element: u32,
+    data: *const c_void,
+    size: u32,
+) -> Result<i32> {
+    if crate::frameworks::builtin() {
+        // SAFETY: the caller's obligation, and `unit` is a handle
+        // `coreaudio::AudioComponentInstanceNew` handed out - which it checks.
+        return Ok(unsafe {
+            coreaudio::property::AudioUnitSetProperty(
+                unit as *mut c_void,
+                id,
+                scope,
+                element,
+                data,
+                size,
+            )
+        });
+    }
+    // The guest cannot have reached this call without the framework being
+    // loaded, so a miss is a fact about the host rather than about the guest -
+    // reported by name, like any other unsatisfied import.
+    let Some(set) = host_set_property() else {
+        return Err(crate::abi::AbiError::Unsatisfied {
+            symbol: symbol.to_string(),
+        });
+    };
+    // SAFETY: the caller's obligation.
+    Ok(unsafe { set(unit as *mut c_void, id, scope, element, data, size) })
 }
 
 /// One of this module's implementations, in the shape [`crate::shims`] wants -

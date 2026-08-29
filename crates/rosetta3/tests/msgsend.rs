@@ -171,9 +171,11 @@ fn a_runtime_entry_point_that_cannot_dispatch_is_a_fast_import() {
 ///
 /// This test used to assert all three were refused, and two of them moving is
 /// the whole of what [`rosetta3::abi::aggregate`] and the variadic re-send are
-/// for. What has not moved is `@throw`, which is M5's unwinder with a different
-/// personality routine - and what matters about it is unchanged: it says so,
-/// with the program's output up to that point intact, rather than crashing.
+/// for. `@throw` is served now too - `rosetta3::objcexc` binds it to the
+/// vendored `libc++abi` - but only for a program that *has* one, which this
+/// fixture, being C and Objective-C, does not. So what it still asserts is the
+/// property that has never changed: the refusal says so by name, with the
+/// program's output up to that point intact, rather than crashing.
 #[test]
 fn an_aggregate_return_and_a_variadic_method_both_work_and_throw_still_names_itself() {
     let Some(path) = common::objc_refusals_fixture() else {
@@ -203,8 +205,8 @@ fn an_aggregate_return_and_a_variadic_method_both_work_and_throw_still_names_its
     assert_ne!(status, Some(0), "throw was not refused");
     assert_eq!(stdout, "before\n", "throw ran past the refusal");
     assert!(
-        stderr.contains("personality"),
-        "throw: expected a personality-routine refusal, got {stderr:?}"
+        stderr.contains("libc++abi"),
+        "throw: expected a refusal naming the C++ runtime, got {stderr:?}"
     );
 }
 
@@ -391,4 +393,88 @@ fn a_linked_program_really_promotes_its_runtime_entry_points() {
             .map(|s| &s.symbol)
             .collect::<Vec<_>>()
     );
+}
+
+/// An Objective-C `@throw` is a C++ throw, and this is the proof end to end.
+///
+/// Run natively as well as emulated, and required to agree. A runtime that
+/// caught with the wrong clause, or lost the object on the way into the
+/// handler, produces *plausible* output - only the diff against Apple's says so.
+#[test]
+fn objective_c_exceptions_throw_and_catch_as_they_do_natively() {
+    let Some(path) = common::objc_exceptions_fixture() else {
+        skip!("cannot build x86_64 Objective-C++ fixtures")
+    };
+
+    let expected = "caught E r\nfinally\nsubclass N\nouter O\ndone\n";
+    if let Some((status, stdout)) = common::run_native(&path) {
+        assert_eq!(status, Some(0), "the fixture does not run on Apple's");
+        assert_eq!(stdout, expected, "the fixture does not do this on Apple's");
+    }
+
+    let (status, stdout, stderr) = common::run_guest_env(
+        &[("ROSETTA3_OBJC", "builtin")],
+        &path,
+        &[],
+    );
+    assert_eq!(status, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, expected);
+}
+
+/// Every method encoding this tree writes by hand is one this tree can read.
+///
+/// The encodings in `crates/foundation` and `crates/appkit` are string literals
+/// beside each implementation, and a wrong one is not a compile error: it is a
+/// guest send *refused* months later, because `objc::dispatch` marshals a
+/// message by decoding exactly this string. So the decoder is pointed at all of
+/// them at once.
+///
+/// The stronger claim, and the one that catches a transposed argument: the
+/// number of types the encoding declares is the return value plus `self`,
+/// `_cmd`, and the arguments the selector's colons count.
+#[test]
+fn every_method_encoding_this_tree_installs_can_be_decoded() {
+    foundation::bootstrap();
+    appkit::bootstrap();
+
+    let names: Vec<String> = foundation::CLASSES
+        .iter()
+        .map(|n| (*n).to_string())
+        .chain(appkit::classes::names().into_iter().map(|n| n.to_string()))
+        .collect();
+
+    let mut checked = 0;
+    for name in names {
+        let Some(class) = std::ffi::CString::new(name.clone())
+            .ok()
+            .and_then(|n| objc::class::lookup(&n))
+        else {
+            continue;
+        };
+        for class in [class, class.metaclass()] {
+            for method in class.own_methods() {
+                // SAFETY: a `Method`'s types outlive the class, which is leaked.
+                let types = unsafe { std::ffi::CStr::from_ptr(method.types()) }
+                    .to_str()
+                    .unwrap_or_else(|_| panic!("{name}: a type encoding that is not UTF-8"));
+                // SAFETY: a registered selector's name is interned for the
+                // life of the process.
+                let selector = unsafe { std::ffi::CStr::from_ptr(objc::sel::name(method.sel)) }
+                    .to_string_lossy()
+                    .into_owned();
+                let signature = rosetta3::objc::encoding::signature(types).unwrap_or_else(|e| {
+                    panic!("{name} {selector}: {types:?} does not decode: {e}")
+                });
+                let expected = 3 + selector.matches(':').count();
+                assert_eq!(
+                    signature.shapes.len(),
+                    expected,
+                    "{name} {selector}: {types:?} declares {} types, not {expected}",
+                    signature.shapes.len(),
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 200, "only {checked} encodings were checked");
 }

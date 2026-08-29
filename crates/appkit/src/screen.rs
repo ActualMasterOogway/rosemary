@@ -122,6 +122,18 @@ unsafe extern "C" fn device_description(receiver: Id, _sel: Sel) -> Id {
     unsafe { corefoundation::api::CFAutorelease(dictionary) as Id }
 }
 
+/// `CGDirectDisplayID CGMainDisplayID(void)`.
+///
+/// CoreGraphics is below AppKit and this is its only entry point here, which is
+/// the argument for it living in this file rather than a crate of its own: what
+/// a `CGDirectDisplayID` *is* in this tree is decided by [`device_description`],
+/// which publishes an SDL display id under `NSScreenNumber` for `CVDisplayLink`
+/// to open. Two definitions of that would be two display numbering schemes.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGMainDisplayID() -> u32 {
+    sdl3::video::primary_display()
+}
+
 /// The display id a screen stands for, for `CVDisplayLink` and its relatives.
 ///
 /// # Safety

@@ -176,6 +176,25 @@ fn release() -> String {
     env_or("ROSETTA3_DARWIN_RELEASE", "24.0.0")
 }
 
+/// The macOS version the [`release`] above implies, as `(major, minor, patch)`.
+///
+/// One derivation rather than a second constant, because a guest that reads
+/// `kern.osrelease` and a guest that calls `Gestalt` are asking the same
+/// question and must not get two answers. Darwin 20 is macOS 11 and each is one
+/// apart after that; before it, every Darwin was some 10.x.
+#[cfg(not(target_os = "macos"))]
+pub fn macos_version() -> (i32, i32, i32) {
+    let release = release();
+    let mut parts = release.split('.').map(|p| p.parse::<i32>().unwrap_or(0));
+    let darwin = parts.next().unwrap_or(24);
+    let minor = parts.next().unwrap_or(0);
+    let patch = parts.next().unwrap_or(0);
+    match darwin >= 20 {
+        true => (darwin - 9, minor, patch),
+        false => (10, darwin - 4, minor),
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 fn build() -> String {
     env_or("ROSETTA3_DARWIN_BUILD", "24A335")

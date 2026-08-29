@@ -8,6 +8,21 @@ pub mod init {
     pub const GAMEPAD: u32 = 0x0000_2000;
 }
 
+pub type AudioStream = *mut c_void;
+
+/// `SDL_AudioStreamCallback`: `(userdata, stream, additional, total)`.
+pub type AudioStreamCallback =
+    Option<unsafe extern "C" fn(*mut c_void, AudioStream, c_int, c_int)>;
+
+/// `SDL_AudioSpec`. Three fields and no padding on either host.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioSpec {
+    pub format: u32,
+    pub channels: c_int,
+    pub freq: c_int,
+}
+
 pub type Joystick = *mut c_void;
 pub type JoystickId = u32;
 pub type Window = *mut c_void;
@@ -102,6 +117,18 @@ struct Api {
     SDL_GetGlobalMouseState: Option<unsafe extern "C" fn(*mut f32, *mut f32) -> u32>,
     SDL_WarpMouseGlobal: Option<unsafe extern "C" fn(f32, f32) -> bool>,
     SDL_GetModState: Option<unsafe extern "C" fn() -> u16>,
+
+    SDL_OpenAudioDeviceStream: Option<
+        unsafe extern "C" fn(u32, *const AudioSpec, AudioStreamCallback, *mut c_void) -> AudioStream,
+    >,
+    SDL_DestroyAudioStream: Option<unsafe extern "C" fn(AudioStream)>,
+    SDL_PutAudioStreamData: Option<unsafe extern "C" fn(AudioStream, *const c_void, c_int) -> bool>,
+    SDL_GetAudioStreamQueued: Option<unsafe extern "C" fn(AudioStream) -> c_int>,
+    SDL_ClearAudioStream: Option<unsafe extern "C" fn(AudioStream) -> bool>,
+    SDL_ResumeAudioStreamDevice: Option<unsafe extern "C" fn(AudioStream) -> bool>,
+    SDL_PauseAudioStreamDevice: Option<unsafe extern "C" fn(AudioStream) -> bool>,
+    SDL_GetAudioDeviceFormat:
+        Option<unsafe extern "C" fn(u32, *mut AudioSpec, *mut c_int) -> bool>,
 }
 
 /// The library, opened once.
@@ -219,6 +246,14 @@ fn api() -> Option<&'static Api> {
             SDL_GetGlobalMouseState,
             SDL_WarpMouseGlobal,
             SDL_GetModState,
+            SDL_OpenAudioDeviceStream,
+            SDL_DestroyAudioStream,
+            SDL_PutAudioStreamData,
+            SDL_GetAudioStreamQueued,
+            SDL_ClearAudioStream,
+            SDL_ResumeAudioStreamDevice,
+            SDL_PauseAudioStreamDevice,
+            SDL_GetAudioDeviceFormat,
         ))
     })
     .as_ref()
@@ -1163,5 +1198,140 @@ use super::*;
         };
         // SAFETY: two coordinates.
         unsafe { f(x, y) }
+    }
+}
+
+/// Playback, as much of it as an `AudioUnit` needs.
+///
+/// The pull model is SDL's too: a stream opened with a callback asks for more
+/// bytes when the device is short of them, which is what an `AURenderCallback`
+/// is called for as well. So there is no buffering here beyond SDL's own.
+pub mod audio {
+    use super::*;
+
+    /// `SDL_AudioFormat`. Only the two an `AudioUnit` stream format can name.
+    pub mod format {
+        /// `SDL_AUDIO_S16LE`.
+        pub const S16: u32 = 0x8010;
+        /// `SDL_AUDIO_F32LE`.
+        pub const F32: u32 = 0x8120;
+    }
+
+    /// `SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK`.
+    const DEFAULT_PLAYBACK: u32 = 0xFFFF_FFFF;
+
+    /// Start the audio subsystem, once - see `video::init_video` for why this is
+    /// not done at load.
+    fn init_audio() -> bool {
+        static READY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *READY.get_or_init(|| super::init(super::init::AUDIO).is_ok())
+    }
+
+    /// Open the default playback device, converting from `spec` to whatever it
+    /// actually runs at.
+    ///
+    /// The stream starts *paused*: an `AudioUnit` is initialized before it is
+    /// started, and a device that ran between the two would call back before the
+    /// guest said to.
+    ///
+    /// # Safety
+    ///
+    /// `callback` is called on SDL's audio thread with `userdata`, which must
+    /// outlive the stream.
+    pub unsafe fn open_playback(
+        spec: AudioSpec,
+        callback: AudioStreamCallback,
+        userdata: *mut c_void,
+    ) -> Option<AudioStream> {
+        if !init_audio() {
+            return None;
+        }
+        let open = api()?.SDL_OpenAudioDeviceStream?;
+        // SAFETY: a live spec for the duration of the call, and the caller's
+        // obligation for the callback.
+        let stream = unsafe { open(DEFAULT_PLAYBACK, &spec, callback, userdata) };
+        (!stream.is_null()).then_some(stream)
+    }
+
+    /// What the default playback device is actually running at.
+    pub fn device_format() -> Option<AudioSpec> {
+        if !init_audio() {
+            return None;
+        }
+        let f = api()?.SDL_GetAudioDeviceFormat?;
+        let mut spec = AudioSpec {
+            format: format::F32,
+            channels: 2,
+            freq: 48000,
+        };
+        // SAFETY: a writable spec; the frame count is not wanted.
+        unsafe { f(DEFAULT_PLAYBACK, &mut spec, std::ptr::null_mut()) }.then_some(spec)
+    }
+
+    /// # Safety
+    ///
+    /// `stream` must be one [`open_playback`] returned and not yet destroyed.
+    pub unsafe fn put(stream: AudioStream, bytes: &[u8]) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_PutAudioStreamData) else {
+            return false;
+        };
+        // SAFETY: the caller's obligation, and a live slice.
+        unsafe { f(stream, bytes.as_ptr().cast(), bytes.len() as c_int) }
+    }
+
+    /// # Safety
+    ///
+    /// As [`put`].
+    pub unsafe fn resume(stream: AudioStream) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_ResumeAudioStreamDevice) else {
+            return false;
+        };
+        // SAFETY: the caller's obligation.
+        unsafe { f(stream) }
+    }
+
+    /// # Safety
+    ///
+    /// As [`put`].
+    pub unsafe fn pause(stream: AudioStream) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_PauseAudioStreamDevice) else {
+            return false;
+        };
+        // SAFETY: the caller's obligation.
+        unsafe { f(stream) }
+    }
+
+    /// # Safety
+    ///
+    /// As [`put`], and nothing may use `stream` afterwards.
+    pub unsafe fn destroy(stream: AudioStream) {
+        if let Some(f) = api().and_then(|a| a.SDL_DestroyAudioStream) {
+            // SAFETY: the caller's obligation.
+            unsafe { f(stream) };
+        }
+    }
+
+    /// # Safety
+    ///
+    /// As [`put`].
+    pub unsafe fn clear(stream: AudioStream) {
+        if let Some(f) = api().and_then(|a| a.SDL_ClearAudioStream) {
+            // SAFETY: the caller's obligation.
+            unsafe { f(stream) };
+        }
+    }
+
+    /// Bytes SDL still holds for this stream, which is what a feeder uses to
+    /// decide whether to pull another buffer.
+    ///
+    /// # Safety
+    ///
+    /// As [`put`].
+    pub unsafe fn queued(stream: AudioStream) -> i32 {
+        let Some(f) = api().and_then(|a| a.SDL_GetAudioStreamQueued) else {
+            return 0;
+        };
+        // SAFETY: the caller's obligation.
+        unsafe { f(stream) }
     }
 }

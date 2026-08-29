@@ -14,6 +14,7 @@ iokit.workspace = true
 foundation.workspace = true
 appkit.workspace = true
 corevideo.workspace = true
+coreaudio.workspace = true
 gimli.workspace = true
 libc.workspace = true
 iced-x86 = "1"

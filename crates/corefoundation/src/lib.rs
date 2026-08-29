@@ -18,6 +18,7 @@ pub mod collections;
 pub mod runloop;
 mod send;
 pub mod string;
+pub mod sysconfig;
 
 /// Install the classes this crate owns. Idempotent.
 pub fn bootstrap() {
@@ -111,7 +112,9 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFRunLoopTimerInvalidate" => at!(api::CFRunLoopTimerInvalidate),
         "CFRunLoopTimerIsValid" => at!(api::CFRunLoopTimerIsValid),
 
-        _ => return None,
+        // SystemConfiguration, which is a framework of its own and is here
+        // because its objects are CoreFoundation's - see [`sysconfig`].
+        other => return sysconfig::symbol(other),
     })
 }
 
@@ -180,6 +183,12 @@ pub const NAMES: &[&str] = &[
     "CFRunLoopTimerInvalidate",
     "CFRunLoopTimerIsValid",
 ];
+
+/// The names [`symbol`] answers, `sysconfig`'s included.
+pub fn names() -> Vec<&'static str> {
+    NAMES.iter().chain(sysconfig::NAMES).copied().collect()
+}
+
 /// A mode name, as a string that lives for the process.
 ///
 /// `kCFRunLoopDefaultMode` is a `CFStringRef` a guest reads once and passes back

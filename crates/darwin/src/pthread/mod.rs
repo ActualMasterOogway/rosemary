@@ -367,6 +367,28 @@ pub unsafe extern "C" fn threadid_np(thread: u64, out: u64) -> i32 {
     0
 }
 
+/// `mach_port_t pthread_mach_thread_np(pthread_t)`, Darwin's own.
+///
+/// The Mach thread port for a thread, and there is no Mach here. What asks for
+/// it uses it as a per-thread token and nothing else - the vendored `libc++abi`
+/// keys `__cxa_guard_acquire`'s recursion check on it, which is why a program
+/// with a static initializer in a C++ image needs this on Linux at all - so
+/// [`id`] is the answer, unique while the thread runs.
+///
+/// A thread other than the caller is `MACH_PORT_NULL`: another thread's id is
+/// not readable from here without a registry, and zero is what Apple's returns
+/// for a thread it cannot name. See [`threadid_np`], which has the same limit
+/// for the same reason.
+pub unsafe extern "C" fn mach_thread_np(thread: u64) -> u32 {
+    if thread != 0 {
+        // SAFETY: `thread` is a live handle; `pthread_equal` only compares.
+        if unsafe { libc::pthread_equal(thread_of(thread), libc::pthread_self()) } == 0 {
+            return 0;
+        }
+    }
+    id()
+}
+
 /// `int pthread_yield_np(void)`, Darwin's spelling of `sched_yield`.
 pub unsafe extern "C" fn yield_np() -> i32 {
     // SAFETY: takes no argument and touches no memory.
@@ -570,6 +592,7 @@ fn entries() -> &'static [(&'static str, u64)] {
             "pthread_setname_np" => setname_np,
             "pthread_main_np" => main_np,
             "pthread_threadid_np" => threadid_np,
+            "pthread_mach_thread_np" => mach_thread_np,
             "pthread_yield_np" => yield_np,
             "pthread_setcancelstate" => setcancelstate,
             "pthread_setcanceltype" => setcanceltype,

@@ -1,4 +1,10 @@
 //! The Carbon Component Manager, answered by the AudioComponent registry.
+//!
+//! The three legacy spellings are the modern three under old names, so each is
+//! forwarded to whichever registry this run's frameworks are: `crates/coreaudio`
+//! under `ROSETTA3_OBJC=builtin`, the host's AudioToolbox otherwise. A guest
+//! that opens its output unit the 1994 way then gets the same unit one that uses
+//! the modern names does, and not a second registry beside it.
 
 use microlift::arch::x86_64::context::RegisterContext;
 
@@ -53,6 +59,14 @@ fn find_next_component(
     ctx: &mut RegisterContext,
     _mem: &mut dyn GuestMemory,
 ) -> Result<()> {
+    if builtin() {
+        // SAFETY: null or a readable descriptor in guest memory, which is
+        // identity-mapped; `coreaudio` copies it and dereferences nothing else.
+        ctx.rax = unsafe {
+            coreaudio::AudioComponentFindNext(ctx.rdi as *mut core::ffi::c_void, ctx.rsi as *const _)
+        } as u64;
+        return Ok(());
+    }
     static FOUND: std::sync::OnceLock<Option<FindNextFn>> = std::sync::OnceLock::new();
     let Some(f) = host_fn(c"AudioComponentFindNext", &FOUND) else {
         return Err(no_audio_component(symbol));
@@ -65,12 +79,28 @@ fn find_next_component(
     Ok(())
 }
 
+/// Whether this run's AudioUnit registry is the one in `crates/coreaudio`.
+fn builtin() -> bool {
+    crate::frameworks::builtin()
+}
+
 /// `OSErr OpenAComponent(Component aComponent, ComponentInstance *ci)`
 fn open_a_component(
     symbol: &str,
     ctx: &mut RegisterContext,
     _mem: &mut dyn GuestMemory,
 ) -> Result<()> {
+    if builtin() {
+        // SAFETY: a component `find_next_component` handed out, and a
+        // pointer-sized writable slot in guest memory.
+        set_int_return(ctx, unsafe {
+            coreaudio::AudioComponentInstanceNew(
+                ctx.rdi as *mut core::ffi::c_void,
+                ctx.rsi as *mut *mut core::ffi::c_void,
+            )
+        });
+        return Ok(());
+    }
     static FOUND: std::sync::OnceLock<Option<InstanceNewFn>> = std::sync::OnceLock::new();
     let Some(f) = host_fn(c"AudioComponentInstanceNew", &FOUND) else {
         return Err(no_audio_component(symbol));
@@ -88,6 +118,13 @@ fn close_component(
     ctx: &mut RegisterContext,
     _mem: &mut dyn GuestMemory,
 ) -> Result<()> {
+    if builtin() {
+        // SAFETY: an instance `open_a_component` produced.
+        set_int_return(ctx, unsafe {
+            coreaudio::AudioComponentInstanceDispose(ctx.rdi as *mut core::ffi::c_void)
+        });
+        return Ok(());
+    }
     static FOUND: std::sync::OnceLock<Option<InstanceDisposeFn>> = std::sync::OnceLock::new();
     let Some(f) = host_fn(c"AudioComponentInstanceDispose", &FOUND) else {
         return Err(no_audio_component(symbol));

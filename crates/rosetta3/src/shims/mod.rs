@@ -14,8 +14,14 @@ use microlift::arch::x86_64::context::RegisterContext;
 use crate::abi::{AbiError, GuestMemory, Result};
 
 pub mod atexit;
+/// Not gated: the callback substitution is this runtime's business on either
+/// host, and which implementation the call lands on is decided inside.
+pub mod audiounit;
 pub mod block;
 pub mod corefoundation;
+/// Not gated: which registry the legacy spellings reach is decided inside, the
+/// same way [`audiounit`]'s is.
+pub mod component;
 pub mod curl;
 pub(crate) mod host;
 pub mod intdiv;
@@ -35,11 +41,7 @@ pub mod zlib;
 #[cfg(target_os = "macos")]
 pub mod appkit;
 #[cfg(target_os = "macos")]
-pub mod audiounit;
-#[cfg(target_os = "macos")]
 pub mod cfuuid;
-#[cfg(target_os = "macos")]
-pub mod component;
 #[cfg(target_os = "macos")]
 pub mod coregraphics;
 #[cfg(target_os = "macos")]
@@ -67,7 +69,9 @@ pub type CallbackShim =
 /// The Objective-C runtime is here on both, because [`crate::objc::host`] chooses
 /// one rather than requiring the host to be one.
 fn platform_shim_for(name: &str) -> Option<Shim> {
-    crate::objc::dispatch::shim_for(name).or_else(|| macos_shim_for(name))
+    crate::objc::dispatch::shim_for(name)
+        .or_else(|| component::shim_for(name))
+        .or_else(|| macos_shim_for(name))
 }
 
 /// The macOS-only families, which do not exist on a host with no CoreFoundation
@@ -78,7 +82,6 @@ fn macos_shim_for(name: &str) -> Option<Shim> {
         .or_else(|| coremedia::shim_for(name))
         .or_else(|| cfuuid::shim_for(name))
         .or_else(|| appkit::shim_for(name))
-        .or_else(|| component::shim_for(name))
         .or_else(|| machthread::shim_for(name))
         // The overlay's OpenGL seam. Only present when the overlay is on;
         // see [`crate::gui::hook::shim_for`].
@@ -92,15 +95,15 @@ fn macos_shim_for(_name: &str) -> Option<Shim> {
 
 /// The families that may call into the guest, on either host.
 fn callback_shim_for(name: &str) -> Option<CallbackShim> {
-    corefoundation::shim_for(name).or_else(|| macos_callback_shim_for(name))
+    corefoundation::shim_for(name)
+        .or_else(|| audiounit::shim_for(name))
+        .or_else(|| macos_callback_shim_for(name))
 }
 
 /// The macOS-only families that may call into the guest.
 #[cfg(target_os = "macos")]
 fn macos_callback_shim_for(name: &str) -> Option<CallbackShim> {
-    iokit::shim_for(name)
-        .or_else(|| coremedia::callback_shim_for(name))
-        .or_else(|| audiounit::shim_for(name))
+    iokit::shim_for(name).or_else(|| coremedia::callback_shim_for(name))
 }
 
 #[cfg(not(target_os = "macos"))]
