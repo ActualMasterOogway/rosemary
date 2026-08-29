@@ -17,20 +17,16 @@ use microlift::core::abi::{ArgLocation, GuestReg};
 use super::aggregate::{self, Eightbyte, GuestClass, HostClass, Shape};
 use super::{AbiError, ArgType, FunctionAbi, GuestMemory, Result, guest_call_abi_ref};
 
-/// Host argument registers of each class, per AAPCS64.
-///
-/// The count the prototypes below are shaped around; [`HOST_INT_REGS`] is the one that
-/// says where this host's registers actually run out.
+/// Host argument registers of each class, per AAPCS64. The count the prototypes below
+/// are shaped around.
 const MAX_INT_ARGS: usize = 8;
 
-/// Integer argument registers the *host* has, past which an argument is on the stack.
+/// Integer argument registers SysV has, past which an argument is on the stack.
 ///
-/// The prototypes below declare sixteen `u64`, and the compiler places the first
-/// [`HOST_INT_REGS`] of them in registers and the rest on the stack - so an index into
-/// `ints` at or above this is a stack slot, which is what lets an aggregate SysV sends
-/// to memory be written by pushing its eightbytes there.
-#[cfg(target_arch = "aarch64")]
-const HOST_INT_REGS: usize = 8;
+/// The prototypes below declare sixteen `u64`, and the compiler places the first six
+/// of them in registers and the rest on the stack - so an index into `ints` at or
+/// above this is a stack slot, which is what lets an aggregate SysV sends to memory be
+/// written there.
 #[cfg(target_arch = "x86_64")]
 const HOST_INT_REGS: usize = 6;
 const MAX_FP_ARGS: usize = 8;
@@ -39,6 +35,7 @@ const MAX_FP_ARGS: usize = 8;
 const MAX_INT_ARGS_TOTAL: usize = 16;
 
 /// Whether `ty` occupies a full eight bytes.
+#[cfg(target_arch = "aarch64")]
 fn is_doubleword(ty: ArgType) -> bool {
     matches!(
         ty,
@@ -47,6 +44,7 @@ fn is_doubleword(ty: ArgType) -> bool {
 }
 
 /// How many bytes `ty` occupies in a stack slot, which is also its alignment.
+#[cfg(target_arch = "aarch64")]
 fn stack_width(ty: ArgType) -> u64 {
     match ty {
         ArgType::SignedByte | ArgType::UnsignedByte => 1,
@@ -62,6 +60,7 @@ fn stack_width(ty: ArgType) -> u64 {
 /// Apple packs each stack argument at its own size *and its own alignment*, so a
 /// four-byte argument followed by a pointer still leaves the pointer at the next
 /// eight-byte boundary - exactly where a `u64` declaration would put it.
+#[cfg(target_arch = "aarch64")]
 fn widening_preserves_offsets(overflow: &[ArgType]) -> bool {
     let mut packed = 0u64;
     for (slot, ty) in overflow.iter().enumerate() {
@@ -100,7 +99,11 @@ pub fn is_marshallable(abi: &FunctionAbi) -> bool {
 }
 
 /// The prototype that places a run of overflowing arguments at their own widths.
+///
+/// SysV gives every stack argument a whole eightbyte, so on that host only the first
+/// variant is ever chosen.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 enum NarrowTail {
     /// Every overflowing argument is a full doubleword: the original prototype.
     None,
@@ -118,9 +121,18 @@ enum NarrowTail {
 }
 
 impl NarrowTail {
+    /// Every stack argument on this host occupies a whole eightbyte, so the
+    /// doubleword prototype already places them; the narrow tails spell AAPCS64's
+    /// packing rule, which SysV does not have.
+    #[cfg(target_arch = "x86_64")]
+    fn of(_overflow: &[ArgType], _fp_return: bool) -> Option<Self> {
+        Some(NarrowTail::None)
+    }
+
     /// Which prototype places `overflow`, or `None` if nothing here can.
     ///
     /// `fp_return` refuses the whole question rather than answering it wrong.
+    #[cfg(target_arch = "aarch64")]
     fn of(overflow: &[ArgType], fp_return: bool) -> Option<Self> {
         if widening_preserves_offsets(overflow) {
             return Some(NarrowTail::None);
@@ -846,28 +858,70 @@ pub fn call_shapes(
 
     let (places, sret) = place_shapes(shapes);
 
+    let Gathered {
+        ints,
+        fps,
+        overflow,
+        copies,
+    } = gather_args(symbol, shapes, &places, sret.is_some(), ctx, &*mem, convert)?;
+
+    // Only the integer-returning prototypes were given tails, so a narrow
+    // overflow is refused for anything else - an aggregate return included,
+    // since those go through their own prototypes and would silently take the
+    // doubleword one.
+    let plain_integer_return =
+        ret_host.is_none() && !matches!(ret.scalar(), Some(t) if aggregate::is_fp(t));
+    let tail = NarrowTail::of(&overflow, !plain_integer_return).ok_or_else(|| {
+        unmarshallable("no prototype places this signature's overflowing arguments")
+    })?;
+
+    // Everything that can fail has failed by here.
+    let (out, scalar_ret) = call_returning(host, &ints, &fps, ret_host, &ret, tail);
+    // Said rather than left to scope: `ints` holds addresses into these, and the
+    // callee has finished reading through them only now.
+    drop(copies);
+    write_return(ctx, mem, symbol, &ret, sret, &out, scalar_ret, convert)
+}
+
+/// The prototype's arguments, ready to be handed to whichever variant is called.
+struct Gathered {
+    ints: [u64; MAX_INT_ARGS_TOTAL],
+    fps: [f64; MAX_FP_ARGS],
+    /// The integer arguments the prototype places on its stack, in order.
+    overflow: Vec<ArgType>,
+    /// The copies AAPCS64 B.4 says the *caller* makes for an aggregate too
+    /// large for registers. `ints` holds their addresses, so they must outlive
+    /// the call and not merely the gather.
+    copies: Vec<Vec<u64>>,
+}
+
+/// Read each argument out of the guest and place it the way AAPCS64 would.
+///
+/// The classes are the host's, so an aggregate is re-decided here rather than taken
+/// from where the guest left it: an eightbyte pair on one side can be a float
+/// quadruple or a pointer to a copy on the other.
+#[cfg(target_arch = "aarch64")]
+fn gather_args(
+    symbol: &str,
+    shapes: &[Shape],
+    places: &[Place],
+    _sret: bool,
+    ctx: &RegisterContext,
+    mem: &dyn GuestMemory,
+    convert: &dyn Convert,
+) -> Result<Gathered> {
+    let unmarshallable = |reason: &'static str| AbiError::Unmarshallable {
+        symbol: symbol.to_string(),
+        reason,
+    };
     let mut ints = [0u64; MAX_INT_ARGS_TOTAL];
     let mut fps = [0f64; MAX_FP_ARGS];
     let (mut n_int, mut n_fp) = (0usize, 0usize);
-
-    // The copies AAPCS64 B.4 says the *caller* makes for an aggregate too large
-    // for registers. SysV writes the bytes into the call's own stack slots, so
-    // on that host nothing outlives the call and this stays empty.
-    #[cfg_attr(target_arch = "x86_64", expect(unused_mut))]
     let mut copies: Vec<Vec<u64>> = Vec::new();
 
     // As in [`call_types`]: the integer arguments past the eighth decide which
     // prototype places them.
     let mut overflow: Vec<ArgType> = Vec::new();
-
-    // Whether an aggregate has already been written into the prototype's stack
-    // slots. Once one has, a *later* integer argument cannot be placed: SysV
-    // would give it one of the registers that aggregate skipped, and appending
-    // to `ints` would put it on the stack behind the aggregate instead. That
-    // shape is refused rather than mis-sent. Floating-point arguments are
-    // unaffected - the SSE registers are assigned independently of the stack.
-    #[cfg_attr(target_arch = "aarch64", expect(unused_mut, unused_variables))]
-    let mut on_stack = false;
     let mut push_int =
         |v: u64, ty: ArgType, n_int: &mut usize, overflow: &mut Vec<ArgType>| -> Result<()> {
             if *n_int == MAX_INT_ARGS_TOTAL {
@@ -888,11 +942,6 @@ pub fn call_shapes(
                     return Err(unmarshallable("a scalar placed as an aggregate"));
                 };
                 let raw = convert.argument(symbol, index, read_where(symbol, ctx, mem, *w)?)?;
-                if on_stack && !aggregate::is_fp(*ty) {
-                    return Err(unmarshallable(
-                        "an integer argument follows an aggregate this host passes in memory",
-                    ));
-                }
                 if aggregate::is_fp(*ty) {
                     if n_fp == MAX_FP_ARGS {
                         return Err(unmarshallable("more than eight floating-point arguments"));
@@ -922,42 +971,7 @@ pub fn call_shapes(
                             push_int(w, ArgType::UnsignedDoubleword, &mut n_int, &mut overflow)?;
                         }
                     }
-                    // SysV: one register per eightbyte, from the file its
-                    // class names. Unlike the AAPCS64 arm above the unit is the
-                    // eightbyte, so a pair of packed `float`s travels as one
-                    // register and not as two.
-                    HostClass::Eightbytes { .. } => {
-                        for (i, class) in agg
-                            .host_class()
-                            .map_err(unmarshallable)?
-                            .slots()
-                            .into_iter()
-                            .enumerate()
-                        {
-                            let w = leaf_bits(&bytes, i * 8, 8);
-                            match class {
-                                Eightbyte::Sse => {
-                                    if n_fp == MAX_FP_ARGS {
-                                        return Err(unmarshallable(
-                                            "more than eight floating-point arguments",
-                                        ));
-                                    }
-                                    fps[n_fp] = f64::from_bits(w);
-                                    n_fp += 1;
-                                }
-                                Eightbyte::Integer => push_int(
-                                    w,
-                                    ArgType::UnsignedDoubleword,
-                                    &mut n_int,
-                                    &mut overflow,
-                                )?,
-                            }
-                        }
-                    }
                     // AAPCS64 B.4 passes a pointer to a copy the caller makes.
-                    // SysV passes the bytes themselves, on the stack - so the
-                    // two arms here are not two spellings of one thing.
-                    #[cfg(target_arch = "aarch64")]
                     HostClass::Indirect => {
                         let mut copy = vec![0u64; agg.size.div_ceil(8)];
                         for (i, w) in copy.iter_mut().enumerate() {
@@ -967,42 +981,116 @@ pub fn call_shapes(
                         copies.push(copy);
                         push_int(addr, ArgType::Pointer, &mut n_int, &mut overflow)?;
                     }
-                    // The prototype's stack slots begin at `HOST_INT_REGS`, so
-                    // the aggregate is written there and the integer registers
-                    // it skipped past are left holding whatever they held. The
-                    // callee does not read them: SysV assigned it none.
-                    #[cfg(target_arch = "x86_64")]
-                    HostClass::Indirect => {
-                        while n_int < HOST_INT_REGS {
-                            push_int(0, ArgType::UnsignedDoubleword, &mut n_int, &mut overflow)?;
-                        }
-                        for i in 0..agg.size.div_ceil(8) {
-                            let w = leaf_bits(&bytes, i * 8, 8);
-                            push_int(w, ArgType::UnsignedDoubleword, &mut n_int, &mut overflow)?;
-                        }
-                        on_stack = true;
+                    HostClass::Eightbytes { .. } => {
+                        return Err(unmarshallable("an aggregate classified for the wrong host"));
                     }
                 }
             }
         }
     }
 
-    // Only the integer-returning prototypes were given tails, so a narrow
-    // overflow is refused for anything else - an aggregate return included,
-    // since those go through their own prototypes and would silently take the
-    // doubleword one.
-    let plain_integer_return =
-        ret_host.is_none() && !matches!(ret.scalar(), Some(t) if aggregate::is_fp(t));
-    let tail = NarrowTail::of(&overflow, !plain_integer_return).ok_or_else(|| {
-        unmarshallable("no prototype places this signature's overflowing arguments")
-    })?;
+    Ok(Gathered {
+        ints,
+        fps,
+        overflow,
+        copies,
+    })
+}
 
-    // Everything that can fail has failed by here.
-    let (out, scalar_ret) = call_returning(host, &ints, &fps, ret_host, &ret, tail);
-    // Said rather than left to scope: `ints` holds addresses into these, and the
-    // callee has finished reading through them only now.
-    drop(copies);
-    write_return(ctx, mem, symbol, &ret, sret, &out, scalar_ret, convert)
+/// Read each argument out of the guest and place it where SysV puts it.
+///
+/// The host's convention is the guest's, so every argument's destination is the place
+/// [`place_shapes`] already computed for it. Re-deciding it from the argument's class
+/// would get SysV's all-or-nothing rule wrong once the registers run out, and would
+/// leave an argument *after* an aggregate SysV sent to memory with nowhere to go - it
+/// still takes the register that aggregate skipped.
+///
+/// A memory-class return shifts the registers down one on both sides: the prototype's
+/// hidden buffer pointer takes the first, as the guest's does.
+#[cfg(target_arch = "x86_64")]
+fn gather_args(
+    symbol: &str,
+    shapes: &[Shape],
+    places: &[Place],
+    sret: bool,
+    ctx: &RegisterContext,
+    mem: &dyn GuestMemory,
+    convert: &dyn Convert,
+) -> Result<Gathered> {
+    /// The prototype's stack slots, indexed by eightbyte of the outgoing area.
+    fn put(stack: &mut Vec<u64>, slot: usize, word: u64) {
+        if stack.len() <= slot {
+            stack.resize(slot + 1, 0);
+        }
+        stack[slot] = word;
+    }
+
+    let unmarshallable = |reason: &'static str| AbiError::Unmarshallable {
+        symbol: symbol.to_string(),
+        reason,
+    };
+    let mut ints = [0u64; MAX_INT_ARGS_TOTAL];
+    let mut fps = [0f64; MAX_FP_ARGS];
+    let mut stack: Vec<u64> = Vec::new();
+    let shift = usize::from(sret);
+
+    for (index, (shape, place)) in shapes.iter().skip(1).zip(places.iter()).enumerate() {
+        match shape {
+            Shape::Scalar(ty) => {
+                let Place::Scalar(w) = place else {
+                    return Err(unmarshallable("a scalar placed as an aggregate"));
+                };
+                let raw = convert.argument(symbol, index, read_where(symbol, ctx, mem, *w)?)?;
+                match w {
+                    Where::Int(i) => ints[i - shift] = int_arg(*ty, raw),
+                    Where::Sse(i) => fps[*i] = fp_arg(*ty, raw),
+                    // The guest wrote a whole slot and the callee reads only the
+                    // declared width back out of it, so the bits cross as they are.
+                    Where::Stack(off) => put(&mut stack, (off / 8) as usize, raw),
+                }
+            }
+            Shape::Struct(agg) => {
+                let bytes = read_aggregate(symbol, ctx, mem, place, agg.size)?;
+                match place {
+                    Place::Parts(parts) => {
+                        for (i, w) in parts.iter().enumerate() {
+                            let word = leaf_bits(&bytes, i * 8, 8);
+                            match w {
+                                Where::Int(r) => ints[r - shift] = word,
+                                Where::Sse(v) => fps[*v] = f64::from_bits(word),
+                                Where::Stack(off) => put(&mut stack, (off / 8) as usize, word),
+                            }
+                        }
+                    }
+                    Place::Memory { offset, size } => {
+                        let base = (offset / 8) as usize;
+                        for i in 0..size.div_ceil(8) {
+                            put(&mut stack, base + i, leaf_bits(&bytes, i * 8, 8));
+                        }
+                    }
+                    Place::Scalar(_) => {
+                        return Err(unmarshallable("an aggregate placed as a scalar"));
+                    }
+                }
+            }
+        }
+    }
+
+    // The prototype declares sixteen `u64`; the compiler puts the first of them
+    // in the registers the hidden pointer left free, and the rest on the stack
+    // in order - which is the area the offsets above index.
+    let regs = HOST_INT_REGS - shift;
+    if regs + stack.len() > MAX_INT_ARGS_TOTAL {
+        return Err(unmarshallable("more than sixteen integer arguments"));
+    }
+    ints[regs..regs + stack.len()].copy_from_slice(&stack);
+
+    Ok(Gathered {
+        ints,
+        fps,
+        overflow: Vec::new(),
+        copies: Vec::new(),
+    })
 }
 
 /// Make the call, choosing the prototype the *host's* return class needs.

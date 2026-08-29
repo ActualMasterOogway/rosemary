@@ -478,3 +478,21 @@ fn every_method_encoding_this_tree_installs_can_be_decoded() {
     }
     assert!(checked > 200, "only {checked} encodings were checked");
 }
+
+/// An integer argument behind an aggregate the guest passed in memory.
+///
+/// `-[NSTrackingArea initWithRect:options:owner:userInfo:]`: SysV sends the
+/// thirty-two-byte `NSRect` to the stack and gives `options`, `owner` and
+/// `userInfo` the integer registers it skipped. Placing each argument where the
+/// convention puts it rather than behind the one before it is the whole of what
+/// this asserts - a marshaller that appends finds nowhere to put `options`,
+/// which is how this was first seen.
+#[test]
+fn an_argument_after_a_memory_aggregate_reaches_the_method() {
+    let Some(path) = common::objc_after_memory_arg_fixture() else {
+        skip!("cannot build x86_64 Objective-C fixtures")
+    };
+    let (status, stdout, stderr) = common::run_guest(&path, &[]);
+    assert_eq!(status, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "rect 1.5 2.5 30.5 40.5\noptions 1 owner 1\n");
+}

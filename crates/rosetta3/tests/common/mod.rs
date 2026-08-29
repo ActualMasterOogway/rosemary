@@ -1094,6 +1094,49 @@ int main(void) {
 }
 "#;
 
+/// An argument *after* an aggregate the guest passed in memory.
+///
+/// `-[NSTrackingArea initWithRect:options:owner:userInfo:]`, which is the shape
+/// SysV places one way and AAPCS64 another: the `NSRect` is thirty-two bytes and
+/// goes to the guest's outgoing stack, and the three arguments behind it still
+/// take the integer registers it never touched. A marshaller that appends an
+/// argument to whatever it wrote last puts `options` behind the rect instead,
+/// and the tracking area comes back with none of the options it was given.
+///
+/// The rect is checked as well as the options: the two travel by different
+/// routes, and only the second one moved.
+pub const OBJC_AFTER_MEMORY_ARG_M: &str = r#"
+#import <Cocoa/Cocoa.h>
+
+int main(void) {
+    NSTrackingAreaOptions opts =
+        NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved | NSTrackingActiveAlways;
+    id owner = [[NSObject alloc] init];
+    NSTrackingArea *area = [[NSTrackingArea alloc] initWithRect:NSMakeRect(1.5, 2.5, 30.5, 40.5)
+                                                        options:opts
+                                                          owner:owner
+                                                       userInfo:nil];
+    NSRect r = [area rect];
+    printf("rect %.1f %.1f %.1f %.1f\n", r.origin.x, r.origin.y, r.size.width, r.size.height);
+    printf("options %d owner %d\n", [area options] == opts, [area owner] == owner);
+    return 0;
+}
+"#;
+
+/// Build [`OBJC_AFTER_MEMORY_ARG_M`], or `None` if this host cannot.
+pub fn objc_after_memory_arg_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            build_x86_64(
+                "objc_after_memory_arg",
+                OBJC_AFTER_MEMORY_ARG_M,
+                &["-x", "objective-c", "-framework", "Cocoa"],
+            )
+        })
+        .clone()
+}
+
 /// Build [`OBJC_HOST_AGGREGATE_M`], or `None` if this host cannot.
 pub fn objc_host_aggregate_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
