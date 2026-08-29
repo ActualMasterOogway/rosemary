@@ -389,14 +389,18 @@ static REFUSED: &[(&str, &str)] = &[
         "objc_msgSend_fpret",
         "a long double return lives in st0, which has no arm64 counterpart",
     ),
+    // The catch half is served: `objc_end_catch` and `objc_exception_rethrow`
+    // are bound straight to the vendored `libc++abi` by `crate::objcexc`, and
+    // `objc_begin_catch` is the shim below. Throwing is not, and the missing
+    // piece is control flow rather than bookkeeping: `objc_exception_throw`
+    // tail-calls `__cxa_throw` and never returns, so servicing it means moving
+    // the guest's `rip` into a function that unwinds - which no shim in this
+    // tree does, and which cannot be checked without a guest that throws.
     (
         "objc_exception_throw",
-        "an Objective-C exception needs a personality routine the guest \
-                              unwinder does not implement yet (M6)",
+        "throwing tail-calls __cxa_throw and never returns, which needs the \
+         redirect an unwinding shim would take (M6); catching is served",
     ),
-    ("objc_exception_rethrow", "as objc_exception_throw"),
-    ("objc_begin_catch", "as objc_exception_throw"),
-    ("objc_end_catch", "as objc_exception_throw"),
     // Associated objects key host storage by the object's address, which would
     // work - but the *policy* argument decides whether the value is copied, and
     // copying sends `copyWithZone:` from inside the runtime with none of this
@@ -508,7 +512,8 @@ fn set_arg_reg(ctx: &mut RegisterContext, i: usize, v: u64) {
 
 /// Whether `name` (underscore already stripped) is one of this module's.
 pub fn shim_for(name: &str) -> Option<crate::jmpbuf::Shim> {
-    if MESSAGES.iter().any(|(n, _)| *n == name)
+    if name == "objc_begin_catch"
+        || MESSAGES.iter().any(|(n, _)| *n == name)
         || REFUSED.iter().any(|(n, _)| *n == name)
         || RUNTIME.binary_search_by_key(&name, |r| r.name).is_ok()
     {
@@ -610,6 +615,9 @@ pub(super) fn host_symbol(name: &str) -> Option<u64> {
 
 /// Service one call into the Objective-C runtime.
 fn serve(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    if symbol == "objc_begin_catch" {
+        return begin_catch(symbol, ctx, mem);
+    }
     if let Some((_, message)) = MESSAGES.iter().find(|(n, _)| *n == symbol) {
         return send(symbol, *message, current_vm(symbol)?, ctx, mem);
     }
@@ -626,6 +634,31 @@ fn serve(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> 
     Err(AbiError::NoSignature {
         symbol: symbol.to_string(),
     })
+}
+
+/// `id objc_begin_catch(void *exception)`.
+///
+/// libobjc's is `__cxa_begin_catch` and one dereference: the exception an
+/// `@throw` allocates holds the `id` itself, and libc++abi hands back the
+/// buffer, so the object is the word inside it. That dereference is the whole
+/// reason this is a shim rather than an alias.
+fn begin_catch(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    let vm = current_vm(symbol)?;
+    let cxa = vm
+        .program
+        .resolved_symbol("___cxa_begin_catch")
+        .ok_or(AbiError::Refused {
+            symbol: symbol.to_string(),
+            reason: "the program has no __cxa_begin_catch to forward to",
+        })?;
+    let mut inner = RegisterContext::new();
+    inner.rdi = ctx.rdi;
+    let buffer = vm.call_with(cxa, inner).map_err(|_| AbiError::Refused {
+        symbol: symbol.to_string(),
+        reason: "__cxa_begin_catch did not return",
+    })?;
+    ctx.rax = (mem as &dyn GuestMemory).read_u64(buffer, symbol)?;
+    Ok(())
 }
 
 /// The host address of every entry in [`RUNTIME`], resolved once.

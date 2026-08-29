@@ -10,12 +10,12 @@
 //! Three situations, and it is worth being exact about which is which, because two of
 //! them need nothing at all:
 //!
-//! 1. **An emulated guest.** Lifted code does not execute `mrs`; it adds a base this
-//!    runtime supplies to an address. So the base is a *value*, [`tsd_base`], and the
+//! 1. An emulated guest. Lifted code does not execute `mrs`; it adds a base this
+//!    runtime supplies to an address. So the base is a value, [`tsd_base`], and the
 //!    host's own thread pointer is never disturbed. Host libc called from lifted code
 //!    - every shim, every fast import - works throughout.
-//! 2. **Darwin code on a Darwin host.** The host's array is the right one already.
-//! 3. **Darwin code on a host that is not Darwin.** Here the thread pointer really
+//! 2. Darwin code on a Darwin host. The host's array is the right one already.
+//! 3. Darwin code on a host that is not Darwin. Here the thread pointer really
 //!    does have to change across the call, which is what [`DarwinThread`] is for.
 //!
 //! Only (3) needs a trampoline, and only (3) is unfinished - see [`DarwinThread`].
@@ -38,22 +38,8 @@ pub mod slot {
     pub const PTR_MUNGE: usize = 7;
 }
 
-/// Slots in a synthetic array.
-///
-/// Darwin's direct-slot range is the first 256 keys, and `pthread_getspecific` of any
-/// of them is a load rather than a call - so all 256 have to exist or a guest key in
-/// the range reads off the end. The rest is headroom.
 const SLOTS: usize = 512;
 
-/// Index of the trailing word holding the host's own thread pointer.
-///
-/// Past every Darwin slot on purpose: a guest indexing its own array can never reach
-/// it, and [`HostThread`] needs somewhere to find the host's pointer that does not
-/// itself require host thread-local storage to read - which is the one thing it
-/// cannot use, being the thing it is about to restore.
-///
-/// Only meaningful for a *synthetic* array. On macOS the array is libpthread's, has
-/// its own length, and nothing here reads past it.
 const HOST_THREAD_POINTER: usize = SLOTS;
 
 /// The canary a synthetic array reports.

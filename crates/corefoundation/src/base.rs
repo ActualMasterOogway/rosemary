@@ -158,6 +158,19 @@ pub fn note_type_class(class: &'static Class) {
 /// `T` must begin with an `isa`-sized field and be the layout `class` was
 /// registered with.
 pub unsafe fn allocate<T>(class: &'static Class) -> *mut T {
+    // A class registered abstract has room for its `isa` and nothing else, so
+    // writing `T` into one walks off the end of the allocation and corrupts the
+    // heap - which surfaces as a trap in `malloc` somewhere else entirely. The
+    // size is what the registration decided, so this is a mismatch between two
+    // lines of this runtime and belongs here rather than in a caller.
+    assert!(
+        class.instance_size() >= size_of::<T>(),
+        "{} was registered with {} bytes but is allocated as {} of {}",
+        class.name_str(),
+        class.instance_size(),
+        std::any::type_name::<T>(),
+        size_of::<T>(),
+    );
     let object = objc::object::create_instance(class, 0);
     object as *mut T
 }

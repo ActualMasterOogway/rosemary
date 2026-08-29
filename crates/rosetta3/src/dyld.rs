@@ -574,6 +574,8 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
         .map_err(|e| format!("{resolved}: unwinder: {e}"))?;
     crate::cxxlib::bind_cxxabi_to_the_vendored_one(&mut report, &mut memory)
         .map_err(|e| format!("{resolved}: cxxabi: {e}"))?;
+    crate::cxxlib::bind_objc_exceptions_to_the_vendored_cxxabi(&mut report, &mut memory)
+        .map_err(|e| format!("{resolved}: objc exceptions: {e}"))?;
 
     // Say what did not resolve, here, rather than letting the guest find out by
     // calling it.

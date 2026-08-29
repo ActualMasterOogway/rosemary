@@ -205,6 +205,26 @@ unsafe extern "C" fn window(receiver: Id, _sel: Sel) -> Id {
     unsafe { window_of(receiver) }
 }
 
+/// `-isInFullScreenMode`: the window's answer, because a view is only ever in
+/// full screen by being in a window that is.
+///
+/// A view with no window is not, which is also what `-window` returning nil
+/// means everywhere else here.
+unsafe extern "C" fn is_in_full_screen_mode(receiver: Id, _sel: Sel) -> u8 {
+    // SAFETY: a view of this crate's.
+    let window = unsafe { window_of(receiver) };
+    if window.is_null() {
+        return 0;
+    }
+    let sel = objc::sel::get("isInFullScreenMode");
+    // SAFETY: `-isInFullScreenMode` is `BOOL (id, SEL)` on a window this crate
+    // made.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) -> u8 = std::mem::transmute(objc::msg::entry());
+        f(window, sel)
+    }
+}
+
 unsafe extern "C" fn superview(receiver: Id, _sel: Sel) -> Id {
     view_of(receiver).superview
 }
@@ -374,6 +394,7 @@ pub(crate) fn install() {
         "convertSizeToBacking:" => convert_size_to_backing, c"{CGSize=dd}32@0:8{CGSize=dd}16";
         "convertPoint:fromView:" => convert_point_from_view, c"{CGPoint=dd}40@0:8{CGPoint=dd}16@32";
         "window" => window, c"@16@0:8";
+        "isInFullScreenMode" => is_in_full_screen_mode, c"c16@0:8";
         "superview" => superview, c"@16@0:8";
         "subviews" => subviews, c"@16@0:8";
         "addSubview:" => add_subview, c"v24@0:8@16";

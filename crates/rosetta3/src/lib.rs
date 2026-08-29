@@ -67,6 +67,7 @@ pub mod frameworks;
 /// here goes through libobjc's public C API, and [`objc::host`] chooses between
 /// the host's implementation of that API and this tree's own.
 pub mod objc;
+pub mod objcexc;
 
 /// Subsystems that exist because macOS does.
 ///

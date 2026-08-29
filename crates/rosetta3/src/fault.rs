@@ -136,12 +136,15 @@ pub enum Unnamed {
     Beyond,
 }
 
-/// Which guest code a host `pc` is, if it is any.
-pub fn attribute(pc: u64) -> Attribution {
-    let placed = PLACED.lock().unwrap_or_else(|e| e.into_inner());
+/// The translation a host `pc` falls in.
+///
+/// The upper bound matters as much as the lower one: without it every host
+/// address above the last translation - a libc frame, most of them - is
+/// attributed to whichever translation happens to sit highest.
+fn covering(placed: &[Placed], pc: u64) -> Option<&Placed> {
     let at = match placed.binary_search_by_key(&pc, |p| p.code) {
         Ok(i) => i,
-        Err(0) => return Attribution::Elsewhere,
+        Err(0) => return None,
         Err(i) => i - 1,
     };
     let entry = &placed[at];
@@ -149,9 +152,15 @@ pub fn attribute(pc: u64) -> Attribution {
         .get(at + 1)
         .map_or(u64::MAX, |next| next.code)
         .min(entry.code.saturating_add(MAX_BLOB));
-    if pc >= end {
+    (pc < end).then_some(entry)
+}
+
+/// Which guest code a host `pc` is, if it is any.
+pub fn attribute(pc: u64) -> Attribution {
+    let placed = PLACED.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(entry) = covering(&placed, pc) else {
         return Attribution::Elsewhere;
-    }
+    };
     let region = entry.guest.0;
     let in_stub = match entry.stub >= entry.map_base {
         true => pc >= entry.stub && entry.stub != entry.map_base,
@@ -357,6 +366,9 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
         out.str("\n  host pc ");
         out.hex(pc);
         say_region(&mut out, pc);
+        if !in_translation(pc) {
+            say_caller(&mut out, context);
+        }
     }
 
     say_thread(&mut out);
@@ -366,6 +378,96 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
     restore(signal);
 }
 
+/// Byte offset of `uc_mcontext` within `ucontext_t`. The same on both hosts:
+/// nothing ahead of it is architecture-dependent.
+const UC_MCONTEXT: usize = 48;
+
+/// Whether a host `pc` is inside a translation at all.
+fn in_translation(pc: u64) -> bool {
+    PLACED
+        .try_lock()
+        .is_ok_and(|placed| covering(&placed, pc).is_some())
+}
+
+/// Name the guest instruction the fault was reached *from*, when the faulting
+/// `pc` is host code.
+///
+/// This is the common shape of a guest bug: a null pointer handed to a host
+/// library faults inside that library, where the report has nothing to say.
+/// Which guest instruction passed it is the whole answer, and it is one frame
+/// chain away.
+fn say_caller(out: &mut Buffer, context: *mut libc::c_void) {
+    /// How far to walk before giving up. A guest calling into a host library
+    /// is a handful of frames; a hundred means the chain is not one.
+    const FRAMES: usize = 128;
+
+    let Some((mut fp, sp, lr)) = host_frame(context) else {
+        return;
+    };
+    let candidates = lr.into_iter().chain(std::iter::from_fn(|| {
+        let (next, ret) = readable(fp, sp).and_then(|f| frame(f))?;
+        fp = next;
+        Some(ret)
+    }));
+    let found = candidates.take(FRAMES).find(|&ret| in_translation(ret));
+    let Some(ret) = found else {
+        out.str("\n  reached from: no host frame returns into a translation");
+        return;
+    };
+    out.str("\n  reached from host pc ");
+    out.hex(ret);
+    say_region(out, ret);
+}
+
+/// A frame pointer worth dereferencing: on this thread's stack, aligned, and
+/// above the one that named it.
+fn readable(fp: u64, sp: u64) -> Option<u64> {
+    /// Widest stack this walk will believe, which is the main thread's.
+    const SPAN: u64 = 8 << 20;
+    (fp >= sp && fp < sp.saturating_add(SPAN) && fp % 8 == 0).then_some(fp)
+}
+
+/// The saved frame pointer and return address a frame holds, in the layout both
+/// hosts use: the caller's `fp` at `[fp]` and its return address at `[fp + 8]`.
+fn frame(fp: u64) -> Option<(u64, u64)> {
+    // SAFETY: `readable` established that `fp` is an aligned address inside the
+    // faulting thread's stack, so the two words below are mapped.
+    let (next, ret) = unsafe {
+        (
+            std::ptr::read((fp as *const u64).offset(0)),
+            std::ptr::read((fp as *const u64).offset(1)),
+        )
+    };
+    (next > fp && ret != 0).then_some((next, ret))
+}
+
+/// The frame pointer, stack pointer and return address the fault interrupted.
+fn host_frame(context: *mut libc::c_void) -> Option<(u64, u64, Option<u64>)> {
+    /// `__ss.__fp`, `__ss.__lr` and `__ss.__sp`, after `__es` and the twenty-nine
+    /// `__x` registers - see [`host_pc`] for the same measurement.
+    #[cfg(target_arch = "aarch64")]
+    const MC: (usize, usize, usize) = (16 + 232, 16 + 240, 16 + 248);
+    /// `__ss.__rbp` and `__ss.__rsp`, the seventh and eighth of the sixteen
+    /// general-purpose registers. x86-64 has no link register.
+    #[cfg(target_arch = "x86_64")]
+    const MC: (usize, usize, usize) = (16 + 48, 16 + 48, 16 + 56);
+
+    if context.is_null() {
+        return None;
+    }
+    // SAFETY: the same live `ucontext_t` [`host_pc`] reads, at measured offsets
+    // of pointer-sized fields the kernel filled in.
+    unsafe {
+        let mcontext = std::ptr::read((context as *const u8).add(UC_MCONTEXT) as *const *const u8);
+        if mcontext.is_null() {
+            return None;
+        }
+        let at = |offset: usize| std::ptr::read(mcontext.add(offset) as *const u64);
+        let lr = cfg!(target_arch = "aarch64").then(|| at(MC.1));
+        Some((at(MC.0), at(MC.2), lr))
+    }
+}
+
 /// Name the translation the faulting `pc` fell in, and the guest instruction
 /// inside it when microlift's source locations reach that far.
 fn say_region(out: &mut Buffer, pc: u64) {
@@ -373,16 +475,8 @@ fn say_region(out: &mut Buffer, pc: u64) {
         out.str("\n  guest region: unavailable (a thread holds the map)");
         return;
     };
-    let found = match placed.binary_search_by_key(&pc, |p| p.code) {
-        Ok(i) => Some(&placed[i]),
-        Err(0) => None,
-        Err(i) => Some(&placed[i - 1]),
-    };
-    let Some(entry) = found else {
-        out.str(
-            "\n  guest region: none - the pc is below every translation, \
-             so this fault is in host code",
-        );
+    let Some(entry) = covering(&placed, pc) else {
+        out.str("\n  guest region: none - the pc is in no translation, so this fault is in host code");
         return;
     };
 
@@ -500,9 +594,6 @@ fn restore(signal: i32) {
 /// `None` on any null, because a handler that dereferences its way to a second fault
 /// has destroyed the evidence it was called to preserve.
 fn host_pc(context: *mut libc::c_void) -> Option<u64> {
-    /// Byte offset of `uc_mcontext` within `ucontext_t`. The same on both hosts:
-    /// nothing ahead of it is architecture-dependent.
-    const UC_MCONTEXT: usize = 48;
     /// Byte offset of `__ss.__pc` within `__darwin_mcontext64` - sixteen bytes of
     /// `__es`, then twenty-nine `__x` plus `__fp`, `__lr` and `__sp`.
     #[cfg(target_arch = "aarch64")]

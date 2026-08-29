@@ -101,6 +101,7 @@ struct Api {
     SDL_ShowCursor: Option<unsafe extern "C" fn() -> bool>,
     SDL_GetGlobalMouseState: Option<unsafe extern "C" fn(*mut f32, *mut f32) -> u32>,
     SDL_WarpMouseGlobal: Option<unsafe extern "C" fn(f32, f32) -> bool>,
+    SDL_GetModState: Option<unsafe extern "C" fn() -> u16>,
 }
 
 /// The library, opened once.
@@ -217,6 +218,7 @@ fn api() -> Option<&'static Api> {
             SDL_ShowCursor,
             SDL_GetGlobalMouseState,
             SDL_WarpMouseGlobal,
+            SDL_GetModState,
         ))
     })
     .as_ref()
@@ -611,7 +613,9 @@ mod tests {
 /// thin is [`Event`](video::Event), which is decoded here: `SDL_Event` is a
 /// union whose members are this crate's business to know and nobody else's.
 pub mod video {
-    use super::*;
+    use std::ffi::CString;
+
+use super::*;
 
     /// `SDL_WindowFlags`.
     pub mod flags {
@@ -938,8 +942,10 @@ pub mod video {
         let Some(f) = api().and_then(|a| a.SDL_SetWindowTitle) else {
             return false;
         };
+        let mut title_with_brand = title.to_owned().into_bytes();
+        title_with_brand.extend_from_slice(" (SDL3 via Rosetta 3)".as_bytes());
         // SAFETY: a window and a NUL-terminated title.
-        unsafe { f(window, title.as_ptr()) }
+        unsafe { f(window, CString::new(title_with_brand).unwrap().as_ptr()) }
     }
 
     /// The small integer SDL puts in an event to name a window.
@@ -1132,6 +1138,14 @@ pub mod video {
         };
         // SAFETY: no arguments.
         f.is_some_and(|f| unsafe { f() })
+    }
+
+    /// Which modifier keys are held right now, as `SDL_Keymod` bits.
+    pub fn keyboard_modifiers() -> u16 {
+        api().and_then(|a| a.SDL_GetModState).map_or(0, |f| {
+            // SAFETY: no arguments.
+            unsafe { f() }
+        })
     }
 
     /// The pointer in desktop coordinates, and which buttons are down.

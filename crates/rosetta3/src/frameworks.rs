@@ -141,7 +141,7 @@ pub fn provider() -> SyntheticDylib {
     }
     // The class objects, which are data: a guest's `[NSMutableArray array]`
     // binds `_OBJC_CLASS_$_NSMutableArray` and sends to whatever it gets.
-    for (name, addr) in foundation::class_data() {
+    for (name, addr) in foundation::data_symbols() {
         lib.define_data(&name, addr);
     }
     // IOKit's HID half, on SDL3. Published even where there is no SDL3: a guest

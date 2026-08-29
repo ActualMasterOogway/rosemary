@@ -1,9 +1,11 @@
 pub mod bundle;
 mod constant;
 mod define;
+pub mod exception;
 pub mod filemanager;
 pub mod geometry;
 pub mod kvc;
+pub mod locale;
 pub mod notification;
 pub mod objectify;
 pub mod plist;
@@ -33,6 +35,8 @@ pub fn bootstrap() {
         declare_abstract();
         bundle::class::install();
         filemanager::install();
+        exception::install();
+        locale::install();
         timer::install();
     });
 }
@@ -188,6 +192,8 @@ pub const CLASSES: &[&str] = &[
     "NSBundle",
     "NSDate",
     "NSFileManager",
+    "NSLocale",
+    "NSException",
     "NSRunLoop",
     "NSTimer",
     "NSFormatter",
@@ -200,6 +206,22 @@ pub const CLASSES: &[&str] = &[
 
 // The image-resident number classes are `constant::CLASSES`, published the same
 // way and listed there because their layouts are that module's business.
+
+/// Everything this crate publishes as data: the class objects, and the string
+/// globals a program reads through their own symbol.
+///
+/// A key global is a **variable** holding an `NSString *`, not the string, so
+/// each goes through a cell - see `corefoundation::base::global_cell`.
+pub fn data_symbols() -> Vec<(String, u64)> {
+    let mut out = class_data();
+    for (symbol, text) in locale::KEYS {
+        out.push((
+            symbol.to_string(),
+            corefoundation::base::global_cell(symbol, notification::name_object(text)),
+        ));
+    }
+    out
+}
 
 #[cfg(test)]
 mod tests {

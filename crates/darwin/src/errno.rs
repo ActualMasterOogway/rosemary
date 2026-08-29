@@ -18,13 +18,11 @@ pub fn location() -> *mut libc::c_int {
     }
 }
 
-/// Read this thread's `errno`.
 pub fn get() -> i32 {
     // SAFETY: `location` returns a live slot for this thread.
     unsafe { *location() }
 }
 
-/// Write this thread's `errno`.
 pub fn set(value: i32) {
     // SAFETY: as above.
     unsafe { *location() = value };

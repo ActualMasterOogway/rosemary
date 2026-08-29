@@ -225,6 +225,16 @@ fn rebind_to_vendored<M: machish::memory::Regions>(
     Ok(rebound)
 }
 
+/// Bind the Objective-C exception machinery to the vendored `libc++abi`.
+///
+/// Last of the three, because every address it writes is one of that image's.
+pub fn bind_objc_exceptions_to_the_vendored_cxxabi<M: machish::memory::Regions>(
+    report: &mut machish::report::LinkReport,
+    memory: &mut M,
+) -> Result<usize> {
+    crate::objcexc::bind(report, memory, LIBCXXABI, &is_libcxxabi)
+}
+
 /// The source every link in this crate uses: vendored libc++ in front of the
 /// filesystem.
 pub fn source() -> VendoredCxx<machish::namespace::FsDylibSource> {

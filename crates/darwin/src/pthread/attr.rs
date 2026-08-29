@@ -1,45 +1,22 @@
 //! `pthread_attr_t` and the three attribute types.
-//!
-//! An attribute set is a bag of settings, read once when the thing it describes is
-//! created and never again. So none of these owns a host object: the settings live in
-//! the guest's own bytes, and a host `pthread_attr_t` is built from them at
-//! `pthread_create` time and thrown away.
-//!
-//! That matters for lifetime as much as for layout. An attribute set the guest
-//! destroys, or simply drops on the floor - which is common, since POSIX lets a
-//! program create ten threads from one attribute set and never call
-//! `pthread_attr_destroy` - leaks nothing here, because there was never anything to
-//! free.
 
 use super::consts::*;
 use super::object::{Kind, Record, size};
 
-
-/// What a guest's `pthread_attr_t` says, in terms neither platform owns.
-///
-/// The shape `rosetta3::shims::pthread` reads, because `pthread_create` is a shim
-/// there: it needs a thunk for the guest's start routine, which is emulation
-/// vocabulary this crate does not have.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Attributes {
     pub detached: bool,
-    /// Bytes the guest asked for, or `None` for "whatever the platform gives".
     pub stack_size: Option<usize>,
-    /// The **highest** address of the stack the guest supplied, exclusive - the end
-    /// Darwin's `pthread_attr_getstackaddr` reports. `None` when it supplied none.
     pub stack_top: Option<u64>,
     pub guard_size: Option<usize>,
-    /// Darwin's `PTHREAD_SCOPE_*`.
     pub scope: i32,
-    /// Darwin's `PTHREAD_INHERIT_SCHED` or `PTHREAD_EXPLICIT_SCHED`.
     pub inherit_sched: i32,
-    /// Darwin's `SCHED_*`.
     pub sched_policy: i32,
     pub sched_priority: i32,
 }
 
 impl Default for Attributes {
-    /// What `pthread_attr_init` leaves behind, in Darwin's terms.
+    /// `pthread_attr_init`
     fn default() -> Self {
         Attributes {
             detached: false,

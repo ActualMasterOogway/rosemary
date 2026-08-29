@@ -271,7 +271,7 @@ unsafe extern "C" fn init_with_cstring_encoding(
     }
 }
 
-/// A Rust string as an autoreleased `NSString`, for this crate's own use.
+/// A Rust string as an `NSString` the caller owns, for this crate's own use.
 pub fn from_str(text: &str) -> Id {
     corefoundation::string::from_bytes(text.as_bytes(), false) as Id
 }

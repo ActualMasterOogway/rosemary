@@ -5,6 +5,8 @@ pub mod cursor;
 pub(crate) mod decode;
 pub mod event;
 mod define;
+pub mod keymap;
+pub mod nsevent;
 pub mod geometry;
 pub mod image;
 pub mod menu;
@@ -30,6 +32,7 @@ pub fn bootstrap() {
         window::install();
         view::install();
         opengl::install();
+        nsevent::install();
     });
 }
 

@@ -1,27 +1,28 @@
-//! `CVDisplayLink`, over the run loop.
+//! `CVDisplayLink`, on a thread of its own.
 //!
 //! A display link is a callback at the refresh rate, and it is how a Mac game
 //! that does not use `NSTimer` gets a frame loop. Deltarune is one: after
 //! `applicationDidFinishLaunching:` returns, *nothing else* would ever run its
 //! code again.
 //!
-//! **The callback runs on the run loop's thread, not a thread of its own.**
-//! Apple's runs it on a dedicated high-priority thread and documents that you
-//! must not draw on the main one without care. Here it is a run loop timer,
-//! which is a deliberate difference and the safer of the two: the guest's
-//! callback makes its `NSOpenGLContext` current and draws, and a GL context is
-//! current *per thread* - so a callback on a second thread would draw into a
-//! context the main thread had made current on itself, which is undefined and
-//! silently blank rather than an error.
+//! The thread is not an implementation detail. This was a run loop timer first,
+//! on the argument that a callback drawing into an `NSOpenGLContext` needs the
+//! thread that context is current on - and Deltarune deadlocked on it. Its frame
+//! function spins on a counter that the *callback* increments, so a callback
+//! that waits for the main thread to come back round waits for a main thread
+//! waiting for it. Apple's runs on a dedicated thread, guests are written
+//! against that, and matching it is the only thing that terminates.
 //!
-//! The cost of that choice is real and worth stating: a guest that blocks in its
-//! callback blocks the run loop, where Apple's would only stall its own thread.
+//! What a guest may do in the callback follows from where it runs: a GL context
+//! is current per thread, so a callback that draws has to make one current on
+//! this thread first, exactly as it would on Apple's.
 
 // The C spellings are the interface, as they are in `objc::api`; renaming them
 // would only hide it.
 #![allow(non_snake_case)]
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// `CVReturn`. Zero is success, and the one failure this reports is
@@ -73,8 +74,9 @@ type OutputCallback = unsafe extern "C" fn(
 struct Link {
     callback: Option<OutputCallback>,
     context: *mut c_void,
-    /// The run loop timer, once started.
-    timer: Option<Arc<corefoundation::runloop::Timer>>,
+    /// Set while the link's thread should keep calling back. Cleared by
+    /// [`CVDisplayLinkStop`], which is the thread's only stop signal.
+    running: Option<Arc<AtomicBool>>,
     /// Seconds between frames, from the display SDL reports.
     period: f64,
     /// How many times the callback has run, which is the `videoTime` a guest
@@ -128,7 +130,7 @@ pub unsafe extern "C" fn CVDisplayLinkCreateWithCGDisplay(
     let link = Arc::new(Mutex::new(Link {
         callback: None,
         context: std::ptr::null_mut(),
-        timer: None,
+        running: None,
         period: DEFAULT_PERIOD,
         frame: 0,
         started: std::time::Instant::now(),
@@ -208,39 +210,58 @@ pub unsafe extern "C" fn CVDisplayLinkGetActualOutputVideoRefreshPeriod(
     })
 }
 
-/// `CVDisplayLinkStart`: schedule the timer that calls the guest back.
+/// `CVDisplayLinkStart`: start the thread that calls the guest back.
 pub unsafe extern "C" fn CVDisplayLinkStart(handle: *mut c_void) -> i32 {
     let Some(link) = link_for(handle) else {
         return INVALID_ARGUMENT;
     };
-    let period = {
+    let (period, running) = {
         let mut guard = link.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.timer.is_some() {
+        if guard.running.is_some() {
             return SUCCESS;
         }
         guard.started = std::time::Instant::now();
-        guard.period
+        let running = Arc::new(AtomicBool::new(true));
+        guard.running = Some(Arc::clone(&running));
+        (guard.period, running)
     };
 
-    // The timer's `info` is the handle, so the one `perform` below serves every
-    // link rather than needing a closure per link.
-    let interval = std::time::Duration::from_secs_f64(period);
-    let timer =
-        corefoundation::runloop::new_timer(interval, Some(interval), Some(fire), handle as usize);
-    corefoundation::runloop::main().add_timer(&timer, corefoundation::runloop::DEFAULT_MODE);
-    link.lock().unwrap_or_else(|e| e.into_inner()).timer = Some(timer);
-    SUCCESS
+    let period = std::time::Duration::from_secs_f64(period);
+    let at = handle as usize;
+    // Detached. A guest may stop its link from inside the callback, and a
+    // `Stop` that joined would then be the thread waiting for itself.
+    std::thread::Builder::new()
+        .name("CVDisplayLink".to_string())
+        .spawn(move || {
+            let mut next = std::time::Instant::now() + period;
+            while running.load(Ordering::Acquire) {
+                let now = std::time::Instant::now();
+                if next > now {
+                    std::thread::sleep(next - now);
+                } else {
+                    // Behind: give up the frames that were missed rather than
+                    // calling back in a burst to catch up.
+                    next = now;
+                }
+                next += period;
+                if !running.load(Ordering::Acquire) {
+                    break;
+                }
+                // SAFETY: `at` is a handle this module made, and the table keeps
+                // it alive.
+                unsafe { fire(std::ptr::null(), at as *mut c_void) };
+            }
+        })
+        .map_or(INVALID_ARGUMENT, |_| SUCCESS)
 }
 
 pub unsafe extern "C" fn CVDisplayLinkStop(handle: *mut c_void) -> i32 {
     let Some(link) = link_for(handle) else {
         return INVALID_ARGUMENT;
     };
-    let timer = link.lock().unwrap_or_else(|e| e.into_inner()).timer.take();
-    if let Some(timer) = timer {
-        corefoundation::runloop::main()
-            .remove_timer(&timer, corefoundation::runloop::DEFAULT_MODE);
-        timer.invalidate();
+    let running = link.lock().unwrap_or_else(|e| e.into_inner()).running.take();
+    if let Some(running) = running {
+        running.store(false, Ordering::Release);
     }
     SUCCESS
 }
@@ -253,13 +274,13 @@ pub unsafe extern "C" fn CVDisplayLinkRelease(_handle: *mut c_void) {}
 
 pub unsafe extern "C" fn CVDisplayLinkIsRunning(handle: *mut c_void) -> u8 {
     link_for(handle).is_some_and(|link| {
-        link.lock().unwrap_or_else(|e| e.into_inner()).timer.is_some()
+        link.lock().unwrap_or_else(|e| e.into_inner()).running.is_some()
     }) as u8
 }
 
-/// One turn of the timer: build the two timestamps and call the guest.
+/// One turn of the link: build the two timestamps and call the guest.
 ///
-/// `info` is the link's handle, which is how a single `perform` serves them all.
+/// `info` is the link's handle, which is how one function serves them all.
 unsafe extern "C" fn fire(_timer: *const c_void, info: *mut c_void) {
     let Some(link) = link_for(info) else {
         return;
@@ -367,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn a_started_link_calls_back_from_the_run_loop() {
+    fn a_started_link_calls_back_on_its_own_thread() {
         FIRED.store(0, Ordering::SeqCst);
         let mut handle = std::ptr::null_mut();
         // SAFETY: a writable slot.
@@ -389,13 +410,13 @@ mod tests {
         // SAFETY: as above.
         assert_eq!(unsafe { CVDisplayLinkIsRunning(handle) }, 1);
 
-        // Turning the loop is what fires it, which is the whole design.
-        for _ in 0..50 {
+        // Nothing is turned here, which is the whole point: this thread does
+        // not serve the link, so a guest may block on it.
+        for _ in 0..100 {
             if FIRED.load(Ordering::SeqCst) >= 2 {
                 break;
             }
-            corefoundation::runloop::main()
-                .run_in_mode(corefoundation::runloop::DEFAULT_MODE, 0.02, false);
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(
             FIRED.load(Ordering::SeqCst) >= 2,
@@ -407,6 +428,12 @@ mod tests {
         assert_eq!(unsafe { CVDisplayLinkStop(handle) }, SUCCESS);
         // SAFETY: as above.
         assert_eq!(unsafe { CVDisplayLinkIsRunning(handle) }, 0);
+
+        // And a stopped link stops: the thread notices the flag within a frame.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let settled = FIRED.load(Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(FIRED.load(Ordering::SeqCst), settled, "the thread kept firing");
     }
 
     /// A handle nothing made is refused rather than dereferenced.
