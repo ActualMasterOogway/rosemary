@@ -364,6 +364,187 @@ pub unsafe extern "C" fn objc_destructInstance(object: Id) -> Id {
     object
 }
 
+/// `objc_property_attribute_t`: a name and a value, both C strings.
+#[repr(C)]
+pub struct PropertyAttribute {
+    pub name: *const c_char,
+    pub value: *const c_char,
+}
+
+/// A property handle.
+///
+/// # Safety
+///
+/// `p` must be null or a handle this runtime produced.
+unsafe fn property<'a>(p: *const c_void) -> Option<&'static crate::property::Property> {
+    // SAFETY: the caller's obligation.
+    (!p.is_null()).then(|| unsafe { &*(p as *const crate::property::Property) })
+}
+
+/// A block the caller frees with `free`, holding `values`.
+///
+/// The whole family of `class_copy...List` works this way, and a Rust
+/// allocation handed across it would be freed by an allocator that never made
+/// it.
+unsafe fn copied_list<T>(values: Vec<T>, out_count: *mut u32) -> *mut T {
+    // SAFETY: a nullable out-parameter, as every `copy...List` has.
+    if !out_count.is_null() {
+        unsafe { *out_count = values.len() as u32 };
+    }
+    if values.is_empty() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: a positive size, and the result is checked before it is written.
+    let block = unsafe { libc::malloc(size_of::<T>() * values.len()) } as *mut T;
+    if block.is_null() {
+        return block;
+    }
+    for (i, value) in values.into_iter().enumerate() {
+        // SAFETY: `i` is inside the allocation, which is uninitialized.
+        unsafe { block.add(i).write(value) };
+    }
+    block
+}
+
+pub unsafe extern "C" fn class_copyPropertyList(
+    cls: *const c_void,
+    out_count: *mut u32,
+) -> *mut *const c_void {
+    // SAFETY: the caller's obligation.
+    let properties = unsafe { class(cls) }.map(|c| c.properties()).unwrap_or_default();
+    let values: Vec<*const c_void> = properties
+        .into_iter()
+        .map(|p| p as *const crate::property::Property as *const c_void)
+        .collect();
+    // SAFETY: `out_count` is null or writable, as the C prototype requires.
+    unsafe { copied_list(values, out_count) }
+}
+
+pub unsafe extern "C" fn class_getProperty(
+    cls: *const c_void,
+    name: *const c_char,
+) -> *const c_void {
+    // SAFETY: the caller's obligation.
+    let (Some(cls), Some(name)) = (unsafe { class(cls) }, unsafe { cstr(name) }) else {
+        return std::ptr::null();
+    };
+    cls.property(name)
+        .map_or(std::ptr::null(), |p| p as *const _ as *const c_void)
+}
+
+/// `class_addProperty`, which takes the attributes apart rather than as the
+/// string the compiler emits - so they are put back together here.
+pub unsafe extern "C" fn class_addProperty(
+    cls: *const c_void,
+    name: *const c_char,
+    attributes: *const PropertyAttribute,
+    count: u32,
+) -> bool {
+    // SAFETY: the caller's obligation.
+    let (Some(cls), Some(name)) = (unsafe { class(cls) }, unsafe { cstr(name) }) else {
+        return false;
+    };
+    if cls.property(name).is_some() {
+        return false;
+    }
+    // SAFETY: as above; `attributes` is null or `count` entries long.
+    unsafe { cls.set_property(name, &attribute_string(attributes, count)) };
+    true
+}
+
+pub unsafe extern "C" fn class_replaceProperty(
+    cls: *const c_void,
+    name: *const c_char,
+    attributes: *const PropertyAttribute,
+    count: u32,
+) {
+    // SAFETY: the caller's obligation.
+    let (Some(cls), Some(name)) = (unsafe { class(cls) }, unsafe { cstr(name) }) else {
+        return;
+    };
+    // SAFETY: as above.
+    unsafe { cls.set_property(name, &attribute_string(attributes, count)) };
+}
+
+/// The attribute string an `objc_property_attribute_t` array spells.
+///
+/// # Safety
+///
+/// `attributes` must be null or `count` entries of NUL-terminated strings.
+unsafe fn attribute_string(attributes: *const PropertyAttribute, count: u32) -> std::ffi::CString {
+    let mut fields: Vec<Vec<u8>> = Vec::new();
+    for i in 0..count as usize {
+        if attributes.is_null() {
+            break;
+        }
+        // SAFETY: the caller's obligation.
+        let entry = unsafe { &*attributes.add(i) };
+        // SAFETY: as above.
+        let (Some(name), value) = (unsafe { cstr(entry.name) }, unsafe { cstr(entry.value) }) else {
+            continue;
+        };
+        let mut field = name.to_bytes().to_vec();
+        field.extend_from_slice(value.map_or(b"", |v| v.to_bytes()));
+        fields.push(field);
+    }
+    std::ffi::CString::new(fields.join(&b',')).unwrap_or_default()
+}
+
+pub unsafe extern "C" fn property_getName(p: *const c_void) -> *const c_char {
+    // SAFETY: the caller's obligation.
+    unsafe { property(p) }.map_or(c"".as_ptr(), |p| p.name())
+}
+
+pub unsafe extern "C" fn property_getAttributes(p: *const c_void) -> *const c_char {
+    // SAFETY: the caller's obligation.
+    unsafe { property(p) }.map_or(std::ptr::null(), |p| p.attributes())
+}
+
+/// `property_copyAttributeList`.
+///
+/// The strings the entries point at are the property's own and outlive the call;
+/// only the array is the caller's to free, which is what Apple documents and
+/// what a caller that frees the whole thing with one `free` depends on.
+pub unsafe extern "C" fn property_copyAttributeList(
+    p: *const c_void,
+    out_count: *mut u32,
+) -> *mut PropertyAttribute {
+    // SAFETY: the caller's obligation.
+    let Some(p) = (unsafe { property(p) }) else {
+        // SAFETY: null or writable.
+        if !out_count.is_null() {
+            unsafe { *out_count = 0 };
+        }
+        return std::ptr::null_mut();
+    };
+    // Leaked with the property, because the caller frees the array and not what
+    // it points at.
+    let values: Vec<PropertyAttribute> = p
+        .attribute_list()
+        .into_iter()
+        .map(|(name, value)| PropertyAttribute {
+            name: Box::leak(Box::new(name)).as_ptr(),
+            value: Box::leak(Box::new(value)).as_ptr(),
+        })
+        .collect();
+    // SAFETY: `out_count` is null or writable.
+    unsafe { copied_list(values, out_count) }
+}
+
+/// `objc_loadClassref`, which resolves a class reference slot.
+///
+/// Apple's low bit marks a *stub* class, whose initializer has to be called
+/// before the slot means anything. This runtime has no stub classes - a class is
+/// a class from the moment it is allocated - so the slot already holds the
+/// answer and the bit is never set.
+pub unsafe extern "C" fn objc_loadClassref(slot: *mut *mut c_void) -> *mut c_void {
+    match slot.is_null() {
+        true => std::ptr::null_mut(),
+        // SAFETY: the caller's obligation: a writable class reference slot.
+        false => unsafe { *slot },
+    }
+}
+
 pub unsafe extern "C" fn objc_getProtocol(name: *const c_char) -> *mut c_void {
     // SAFETY: the caller's obligation.
     as_ptr(unsafe { cstr(name) }.and_then(crate::protocol::lookup))

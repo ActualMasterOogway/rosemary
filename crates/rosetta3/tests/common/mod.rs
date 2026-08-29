@@ -2335,6 +2335,230 @@ pub fn host_macho(path: &str) -> bool {
     )
 }
 
+
+/// The AppKit fixture: a program whose `main` is `NSApplicationMain`.
+///
+/// Written so each step of the launch fails on its own line rather than as one
+/// blob:
+///
+/// - **the nib is read** - the delegate is wired in `MainMenu.nib` and nowhere
+///   else, so a `delegate is self 1` means the archive was decoded, the custom
+///   object was instantiated by name, and the outlet reached `-setDelegate:`;
+/// - **the notifications arrive in order**, each carrying its own name, which is
+///   what makes the argument a real `NSNotification` rather than a register;
+/// - **the property metadata survived the replay**, which nothing else in this
+///   suite asks: a `@property` compiles to a name and an attribute string beside
+///   the accessors, and a runtime that drops them answers the same as a class
+///   that never declared any.
+///
+/// `[NSApp stop:]` rather than `terminate:`, so that `-run` returns and `main`
+/// returns a status the test can read.
+pub const APPKIT_M: &str = r####"
+#import <Cocoa/Cocoa.h>
+#import <objc/runtime.h>
+#include <stdio.h>
+
+@interface R3Delegate : NSObject
+@property (nonatomic, assign) int launches;
+@end
+
+@implementation R3Delegate
+- (void)applicationWillFinishLaunching:(NSNotification *)note {
+    printf("will %s\n", [[note name] UTF8String]);
+}
+- (void)applicationDidFinishLaunching:(NSNotification *)note {
+    printf("did %s\n", [[note name] UTF8String]);
+    printf("delegate is self %d\n", [NSApp delegate] == self);
+
+    unsigned int count = 0;
+    objc_property_t *properties = class_copyPropertyList([self class], &count);
+    printf("properties %u\n", count);
+    for (unsigned int i = 0; i < count; i++) {
+        printf("property %s %s\n",
+               property_getName(properties[i]),
+               property_getAttributes(properties[i]));
+        unsigned int fields = 0;
+        objc_property_attribute_t *list =
+            property_copyAttributeList(properties[i], &fields);
+        printf("attributes %u first %s=%s\n", fields, list[0].name, list[0].value);
+        free(list);
+    }
+    free(properties);
+
+    fflush(stdout);
+    [NSApp stop:nil];
+}
+@end
+
+int main(int argc, const char *argv[]) {
+    return NSApplicationMain(argc, argv);
+}
+"####;
+
+/// `MainMenu.nib`: File's Owner is the application, its `delegate` outlet is an
+/// `R3Delegate`.
+///
+/// The XML spelling of a keyed archive, which is what `plutil -convert xml1`
+/// makes of the binary one Interface Builder writes, and which the same reader
+/// decodes. A checked-in binary nib would say no more and could not be read.
+pub const MAIN_NIB: &str = r####"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>$archiver</key>
+	<string>NSKeyedArchiver</string>
+	<key>$objects</key>
+	<array>
+		<string>$null</string>
+		<dict>
+			<key>$class</key><dict><key>CF$UID</key><integer>8</integer></dict>
+			<key>NSConnections</key><dict><key>CF$UID</key><integer>4</integer></dict>
+			<key>NSRoot</key><dict><key>CF$UID</key><integer>2</integer></dict>
+		</dict>
+		<dict>
+			<key>$class</key><dict><key>CF$UID</key><integer>9</integer></dict>
+			<key>NSClassName</key><dict><key>CF$UID</key><integer>3</integer></dict>
+		</dict>
+		<string>NSApplication</string>
+		<dict>
+			<key>$class</key><dict><key>CF$UID</key><integer>10</integer></dict>
+			<key>NS.objects</key>
+			<array><dict><key>CF$UID</key><integer>5</integer></dict></array>
+		</dict>
+		<dict>
+			<key>$class</key><dict><key>CF$UID</key><integer>11</integer></dict>
+			<key>NSSource</key><dict><key>CF$UID</key><integer>2</integer></dict>
+			<key>NSDestination</key><dict><key>CF$UID</key><integer>6</integer></dict>
+			<key>NSLabel</key><dict><key>CF$UID</key><integer>7</integer></dict>
+		</dict>
+		<dict>
+			<key>$class</key><dict><key>CF$UID</key><integer>9</integer></dict>
+			<key>NSClassName</key><dict><key>CF$UID</key><integer>12</integer></dict>
+		</dict>
+		<string>delegate</string>
+		<dict>
+			<key>$classes</key><array><string>NSIBObjectData</string></array>
+			<key>$classname</key><string>NSIBObjectData</string>
+		</dict>
+		<dict>
+			<key>$classes</key><array><string>NSCustomObject</string></array>
+			<key>$classname</key><string>NSCustomObject</string>
+		</dict>
+		<dict>
+			<key>$classes</key><array><string>NSMutableArray</string><string>NSArray</string></array>
+			<key>$classname</key><string>NSMutableArray</string>
+		</dict>
+		<dict>
+			<key>$classes</key><array><string>NSNibOutletConnector</string></array>
+			<key>$classname</key><string>NSNibOutletConnector</string>
+		</dict>
+		<string>R3Delegate</string>
+	</array>
+	<key>$top</key>
+	<dict>
+		<key>IB.objectdata</key><dict><key>CF$UID</key><integer>1</integer></dict>
+	</dict>
+	<key>$version</key>
+	<integer>100000</integer>
+</dict>
+</plist>
+"####;
+
+/// Build `source` as an Objective-C `.app`, and return the path of the
+/// executable *inside* it.
+///
+/// The layout is what `NSBundle` recognises by shape - `Contents/MacOS/<exe>`,
+/// `Contents/Info.plist`, `Contents/Resources` - because that is what
+/// `foundation::bundle` looks for, and a fixture laid out any other way would
+/// test the fallback rather than the bundle.
+pub fn build_app(name: &str, source: &str, info: &str, nib: Option<&str>) -> Option<String> {
+    if !can_build_x86_64() {
+        return None;
+    }
+    let app = fixture_dir().join(format!("{name}.app"));
+    let contents = app.join("Contents");
+    let resources = contents.join("Resources");
+    std::fs::create_dir_all(contents.join("MacOS")).ok()?;
+    std::fs::create_dir_all(&resources).ok()?;
+    std::fs::write(contents.join("Info.plist"), info).ok()?;
+    if let Some(nib) = nib {
+        std::fs::write(resources.join("MainMenu.nib"), nib).ok()?;
+    }
+
+    let src = fixture_dir().join(format!("{name}.m"));
+    std::fs::write(&src, source).ok()?;
+    let out = contents.join("MacOS").join(name);
+    let status = Command::new("cc")
+        .args(["-arch", "x86_64", "-x", "objective-c", "-framework", "Cocoa"])
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .status()
+        .ok()?;
+    status.success().then(|| out.to_string_lossy().into_owned())
+}
+
+/// Build [`APPKIT_M`] into a `.app` whose `Info.plist` names the nib, or `None`
+/// if this host cannot.
+pub fn appkit_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            build_app(
+                "appkitmain",
+                APPKIT_M,
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key><string>appkitmain</string>
+	<key>CFBundleIdentifier</key><string>org.rosetta3.appkitmain</string>
+	<key>NSPrincipalClass</key><string>NSApplication</string>
+	<key>NSMainNibFile</key><string>MainMenu</string>
+</dict>
+</plist>
+"#,
+                Some(MAIN_NIB),
+            )
+        })
+        .clone()
+}
+
+/// The framework-globals fixture: read three `CFStringRef` and `CFAllocatorRef`
+/// globals and use them.
+///
+/// Each is a *variable* the guest loads through, not the object itself, so a
+/// provider that defines the symbol as the object hands the guest the object's
+/// `isa` - and `kCFAllocatorDefault`, whose value is null, hands it address
+/// zero. The failure is a segfault at zero, or a length read out of a class
+/// structure, and neither says which symbol did it.
+pub const GLOBALS_C: &str = r#"
+#include <CoreFoundation/CoreFoundation.h>
+#include <stdio.h>
+
+int main(void) {
+    printf("mode %ld\n", (long)CFStringGetLength(kCFRunLoopDefaultMode));
+    printf("common %ld\n", (long)CFStringGetLength(kCFRunLoopCommonModes));
+    printf("null allocator %d\n", kCFAllocatorDefault == NULL);
+    CFStringRef made =
+        CFStringCreateWithCString(kCFAllocatorDefault, "abc", kCFStringEncodingUTF8);
+    printf("made %ld\n", (long)CFStringGetLength(made));
+    CFRelease(made);
+    return 0;
+}
+"#;
+
+pub fn globals_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            build_x86_64(
+                "cfglobals",
+                GLOBALS_C,
+                &["-framework", "CoreFoundation"],
+            )
+        })
+        .clone()
+}
+
 /// Skip the calling test with an explanatory note.
 #[macro_export]
 macro_rules! skip {

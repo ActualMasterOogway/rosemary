@@ -72,6 +72,19 @@ fn register_dlopen_names() {
         ],
         symbol,
     );
+    crate::dyld::register_synthetic(
+        &[
+            "/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit",
+            "/System/Library/Frameworks/AppKit.framework/AppKit",
+            "AppKit",
+            // Cocoa is the umbrella, and a program that links it imports
+            // AppKit's symbols through that name.
+            "/System/Library/Frameworks/Cocoa.framework/Versions/A/Cocoa",
+            "/System/Library/Frameworks/Cocoa.framework/Cocoa",
+            "Cocoa",
+        ],
+        symbol,
+    );
 }
 
 /// Push the outermost autorelease pool, the one a process is born with.
@@ -129,6 +142,18 @@ pub fn provider() -> SyntheticDylib {
     for (name, addr) in iokit::data_symbols() {
         lib.define_data(&name, addr);
     }
+    // AppKit up to the point a window would be needed. Its classes are here
+    // even though none of them draws: a guest's `YYGLView : NSView` binds
+    // `_OBJC_CLASS_$_NSView` and is refused whole without it, where a declared
+    // superclass turns that into one refusal per selector actually sent.
+    for name in appkit::NAMES {
+        if let Some(addr) = appkit::symbol(name) {
+            lib.define_fn(&format!("_{name}"), addr as usize as *const ());
+        }
+    }
+    for (name, addr) in appkit::data_symbols() {
+        lib.define_data(&name, addr);
+    }
     lib
 }
 
@@ -143,7 +168,9 @@ pub fn symbol(name: &str) -> Option<u64> {
         return None;
     }
     foundation::bootstrap();
-    corefoundation::symbol(name).or_else(|| iokit::symbol(name))
+    corefoundation::symbol(name)
+        .or_else(|| iokit::symbol(name))
+        .or_else(|| appkit::symbol(name))
 }
 
 /// Tell this tree's `NSBundle` which `.app` the guest is.

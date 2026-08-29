@@ -3,9 +3,11 @@ mod constant;
 mod define;
 pub mod geometry;
 pub mod kvc;
+pub mod notification;
 pub mod plist;
 pub mod pool;
 pub mod string;
+pub mod unarchiver;
 pub mod value;
 
 mod collections;
@@ -23,6 +25,7 @@ pub fn bootstrap() {
         value::install();
         geometry::install();
         kvc::install();
+        notification::install();
         constant::install();
         declare_abstract();
         bundle::class::install();
@@ -125,7 +128,14 @@ pub fn class_data() -> Vec<(String, u64)> {
 /// Only classes a guest in this tree has been seen to subclass. AppKit's -
 /// `NSView`, `NSWindow`, `NSApplication` - belong to AppKit and arrive with it.
 fn declare_abstract() {
-    for name in [c"NSFormatter", c"NSThread", c"NSLock", c"NSRecursiveLock"] {
+    for name in [
+        c"NSFormatter",
+        c"NSThread",
+        c"NSLock",
+        c"NSRecursiveLock",
+        c"NSOperation",
+        c"NSOperationQueue",
+    ] {
         corefoundation::base::abstract_class(name, None);
     }
 }
@@ -143,12 +153,16 @@ pub const CLASSES: &[&str] = &[
     "NSNumber",
     "NSValue",
     "NSNull",
+    "NSNotification",
+    "NSNotificationCenter",
     "NSAutoreleasePool",
     "NSBundle",
     "NSFormatter",
     "NSThread",
     "NSLock",
     "NSRecursiveLock",
+    "NSOperation",
+    "NSOperationQueue",
 ];
 
 // The image-resident number classes are `constant::CLASSES`, published the same

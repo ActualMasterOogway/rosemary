@@ -34,6 +34,7 @@ pub mod class;
 pub mod msg;
 mod nsobject;
 pub mod object;
+pub mod property;
 pub mod protocol;
 pub mod sel;
 pub mod shorthand;
@@ -111,6 +112,15 @@ pub fn symbol(name: &str) -> Option<u64> {
         "ivar_getOffset" => at!(api::ivar_getOffset),
         "ivar_getName" => at!(api::ivar_getName),
 
+        // properties
+        "class_copyPropertyList" => at!(api::class_copyPropertyList),
+        "class_getProperty" => at!(api::class_getProperty),
+        "class_addProperty" => at!(api::class_addProperty),
+        "class_replaceProperty" => at!(api::class_replaceProperty),
+        "property_getName" => at!(api::property_getName),
+        "property_getAttributes" => at!(api::property_getAttributes),
+        "property_copyAttributeList" => at!(api::property_copyAttributeList),
+
         // objects
         "object_getClass" => at!(api::object_getClass),
         "object_setClass" => at!(api::object_setClass),
@@ -120,6 +130,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         "object_setIvar" => at!(api::object_setIvar),
         "objc_constructInstance" => at!(api::objc_constructInstance),
         "objc_destructInstance" => at!(api::objc_destructInstance),
+        "objc_loadClassref" => at!(api::objc_loadClassref),
 
         // protocols
         "objc_getProtocol" => at!(api::objc_getProtocol),
@@ -228,8 +239,12 @@ pub const NAMES: &[&str] = &[
     "class_createInstance",
     "method_getImplementation", "method_getTypeEncoding", "method_getName",
     "method_setImplementation", "ivar_getOffset", "ivar_getName",
+    "class_copyPropertyList", "class_getProperty", "class_addProperty",
+    "class_replaceProperty", "property_getName", "property_getAttributes",
+    "property_copyAttributeList",
     "object_getClass", "object_setClass", "object_getClassName", "object_getIndexedIvars",
     "object_getIvar", "object_setIvar", "objc_constructInstance", "objc_destructInstance",
+    "objc_loadClassref",
     "objc_getProtocol", "objc_allocateProtocol", "objc_registerProtocol", "protocol_getName",
     "protocol_addProtocol", "protocol_addMethodDescription", "protocol_getMethodDescription",
     "objc_retain", "objc_release", "objc_autorelease", "objc_autoreleasePoolPush",

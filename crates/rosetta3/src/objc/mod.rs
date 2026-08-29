@@ -74,6 +74,7 @@ pub struct Stats {
     pub classes: usize,
     pub methods: usize,
     pub ivars: usize,
+    pub properties: usize,
     pub protocols: usize,
     pub categories: usize,
     pub selectors: usize,
@@ -570,6 +571,12 @@ fn register_class(
     rt.stats.classes += 1;
     rt.stats.methods += methods;
     rt.stats.ivars += ivars;
+    rt.stats.properties += add_properties(cls, &class.ro.properties)
+        + class.meta.as_ref().map_or(0, |m| {
+            // SAFETY: `cls` is a `Class`, so `object_getClass` of it is the
+            // metaclass, which is where a class property lives.
+            add_properties(unsafe { host::object_getClass(cls) }, &m.ro.properties)
+        });
     chain.remove(&class.va);
     Some(host_va)
 }
@@ -727,7 +734,44 @@ fn register_category(vm: &Vm, rt: &mut ObjcRuntime, cat: &ObjcCategory) {
         }
     }
     rt.stats.methods += added;
+    rt.stats.properties += add_properties(target, &cat.instance_properties)
+        + add_properties(meta, &cat.class_properties);
     rt.stats.categories += 1;
+}
+
+/// Replay a `property_list_t` onto a class.
+///
+/// Nothing reads a property to run the program: an accessor is an ordinary
+/// method and was added with the rest. What reads one is code introspecting a
+/// class it did not write, and to that a class with no properties and a class
+/// this pass dropped the properties of look exactly alike.
+///
+/// The guest carries one attribute *string* per property and `class_addProperty`
+/// takes the fields apart, so the split is here. Returns how many were added.
+fn add_properties(cls: host::Class, properties: &[machish::extensions::objc::ObjcProperty]) -> usize {
+    let mut added = 0;
+    for property in properties {
+        let (Some(name), Some(attributes)) = (
+            host::c_string(&property.name),
+            host::c_string(&property.attributes),
+        ) else {
+            continue;
+        };
+        let fields = objc::property::attributes_of(&attributes);
+        let entries: Vec<host::PropertyAttribute> = fields
+            .iter()
+            .map(|(n, v)| host::PropertyAttribute {
+                name: n.as_ptr(),
+                value: v.as_ptr(),
+            })
+            .collect();
+        // SAFETY: `cls` is a `Class`, and the strings outlive the call - which
+        // is all the runtime needs, because it copies them.
+        added += unsafe {
+            host::class_addProperty(cls, name.as_ptr(), entries.as_ptr(), entries.len() as u32)
+        } as usize;
+    }
+    added
 }
 
 /// Write the runtime's ivar offsets back into the guest's own `__objc_ivar`.

@@ -15,5 +15,6 @@ corefoundation = { path = "crates/corefoundation" }
 foundation = { path = "crates/foundation" }
 sdl3 = { path = "crates/sdl3" }
 iokit = { path = "crates/iokit" }
+appkit = { path = "crates/appkit" }
 libc = "0.2"
 gimli = "0.34"

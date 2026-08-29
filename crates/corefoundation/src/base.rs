@@ -125,8 +125,13 @@ pub fn register(
     // for. `class_addIvar` is not used: the fields are this crate's, and naming
     // them to the runtime would only invite something to move them.
     let extra = instance_size.saturating_sub(superclass.instance_size());
-    let class = objc::class::allocate_pair(Some(superclass), name, extra)
-        .expect("a CoreFoundation class name is this crate's own");
+    let class = match objc::class::allocate_pair(Some(superclass), name, extra) {
+        Some(class) => class,
+        // Another thread registered this name between the lookup above and
+        // here. Its class is as good as this one would have been, and two
+        // classes of one name is the outcome that must not happen.
+        None => return objc::class::lookup(name).expect("taken by another thread"),
+    };
     objc::class::register_pair(class);
     if is_type {
         note_type(class);
@@ -155,4 +160,25 @@ pub fn note_type_class(class: &'static Class) {
 pub unsafe fn allocate<T>(class: &'static Class) -> *mut T {
     let object = objc::object::create_instance(class, 0);
     object as *mut T
+}
+
+/// The address of the **variable** a pointer-typed global names.
+///
+/// `kCFRunLoopDefaultMode` is a `CFStringRef` variable, not an object. A guest
+/// loads the symbol's address out of its GOT and then loads the object out of
+/// *that*, so a symbol defined as the object itself hands the guest the object's
+/// `isa` - and `kCFAllocatorDefault`, whose value is null, hands it address
+/// zero. Interned by name, because the cell has to be the same one every time a
+/// provider is built.
+pub fn global_cell(name: &str, value: u64) -> u64 {
+    static CELLS: std::sync::Mutex<Vec<(String, u64)>> = std::sync::Mutex::new(Vec::new());
+    let mut cells = CELLS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, addr)) = cells.iter().find(|(n, _)| n == name) {
+        return *addr;
+    }
+    // Leaked: the guest holds the address for the life of the process, which is
+    // exactly as long as a real framework's `__DATA` word lives.
+    let addr = Box::leak(Box::new(value)) as *mut u64 as usize as u64;
+    cells.push((name.to_string(), addr));
+    addr
 }

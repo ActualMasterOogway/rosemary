@@ -88,6 +88,7 @@ struct Contents {
     methods: HashMap<usize, &'static Method>,
     ivars: Vec<&'static Ivar>,
     protocols: Vec<&'static crate::protocol::Protocol>,
+    properties: Vec<&'static crate::property::Property>,
 }
 
 /// A class.
@@ -264,6 +265,45 @@ impl Class {
                 .ivars
                 .iter()
                 .find(|i| i.name.as_c_str() == name)
+                .copied()
+        })
+    }
+
+    /// Add or replace a `@property`.
+    ///
+    /// Unlike an ivar this is allowed after registration, because a category
+    /// carries properties and a category is applied to a class that is already
+    /// there. Replacing rather than appending a second of the same name: two
+    /// entries would make `class_copyPropertyList` report a property twice and
+    /// `class_getProperty` answer with whichever came first.
+    pub fn set_property(&self, name: &CStr, attributes: &CStr) {
+        let mut contents = self.contents.write().unwrap_or_else(|e| e.into_inner());
+        let property = crate::property::make(name, attributes);
+        match contents.properties.iter().position(|p| p.name_c() == name) {
+            Some(at) => contents.properties[at] = property,
+            None => contents.properties.push(property),
+        }
+    }
+
+    /// The properties this class declares, not counting a superclass's - which
+    /// is what `class_copyPropertyList` answers.
+    pub fn properties(&self) -> Vec<&'static crate::property::Property> {
+        self.contents
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .properties
+            .clone()
+    }
+
+    /// The property this class or a superclass declares under `name`.
+    pub fn property(&'static self, name: &CStr) -> Option<&'static crate::property::Property> {
+        self.chain().find_map(|c| {
+            c.contents
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .properties
+                .iter()
+                .find(|p| p.name_c() == name)
                 .copied()
         })
     }

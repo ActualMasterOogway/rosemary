@@ -29,6 +29,14 @@ pub type Method = *const std::ffi::c_void;
 /// are the ones installing it.
 pub type Imp = *const std::ffi::c_void;
 
+/// `objc_property_attribute_t`. Both runtimes lay it out this way, because both
+/// are answering the same C header.
+#[repr(C)]
+pub struct PropertyAttribute {
+    pub name: *const c_char,
+    pub value: *const c_char,
+}
+
 /// Which Objective-C runtime answers.
 ///
 /// `Native` is the host's own libobjc, and exists only where there is one.
@@ -208,6 +216,12 @@ entries! {
         types: *const c_char,
     ) -> bool;
     fn class_addProtocol(cls: Class, protocol: Protocol) -> bool;
+    fn class_addProperty(
+        cls: Class,
+        name: *const c_char,
+        attributes: *const PropertyAttribute,
+        count: u32,
+    ) -> bool;
     fn class_getInstanceVariable(cls: Class, name: *const c_char) -> Ivar;
     fn class_getInstanceMethod(cls: Class, name: Sel) -> Method;
     /// Allocate and **zero** an instance of `cls`.

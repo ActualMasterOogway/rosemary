@@ -205,20 +205,23 @@ fn mode_name_object(name: &'static str) -> u64 {
 /// works: the four words the compiler laid out in `__DATA` become a live object
 /// of this runtime the moment that one symbol is bound, with nothing copied.
 ///
-/// `kCFAllocatorDefault` and its relatives are null here. Null *is* the default
-/// allocator in Apple's CoreFoundation, and this runtime has only the one - so a
-/// guest comparing against it, or passing it along, gets the right answer.
+/// Two shapes, and mixing them up is a segfault at address zero. A class
+/// reference and a callbacks table are the *thing itself*, and the guest uses
+/// the symbol's address as the value. Every `kCF...` pointer global is a
+/// **variable**: the guest loads the symbol's address and then loads the object
+/// out of it, so those go through [`base::global_cell`].
+///
+/// `kCFAllocatorDefault` and its relatives are cells holding null. Null *is* the
+/// default allocator in Apple's CoreFoundation, and this runtime has only the
+/// one - so a guest comparing against it, or passing it along, gets the right
+/// answer.
 pub fn data_symbols() -> Vec<(String, u64)> {
     bootstrap();
-    vec![
+    let mut out = vec![
         (
             "___CFConstantStringClassReference".to_string(),
             objc::class::ptr(string::constant_class()) as usize as u64,
         ),
-        ("_kCFAllocatorDefault".to_string(), 0),
-        ("_kCFAllocatorSystemDefault".to_string(), 0),
-        ("_kCFAllocatorMalloc".to_string(), 0),
-        ("_kCFAllocatorNull".to_string(), 0),
         (
             "_kCFTypeArrayCallBacks".to_string(),
             &callbacks::TYPE_VALUE_CALLBACKS as *const _ as usize as u64,
@@ -231,17 +234,24 @@ pub fn data_symbols() -> Vec<(String, u64)> {
             "_kCFTypeDictionaryKeyCallBacks".to_string(),
             &callbacks::TYPE_KEY_CALLBACKS as *const _ as usize as u64,
         ),
-        // The run loop's mode names, which a guest passes straight back in and
-        // which `CFRunLoopAddSource` compares as strings.
-        (
-            "_kCFRunLoopDefaultMode".to_string(),
-            mode_name_object(runloop::DEFAULT_MODE),
-        ),
-        (
-            "_kCFRunLoopCommonModes".to_string(),
-            mode_name_object(runloop::COMMON_MODES),
-        ),
-    ]
+    ];
+    for name in [
+        "_kCFAllocatorDefault",
+        "_kCFAllocatorSystemDefault",
+        "_kCFAllocatorMalloc",
+        "_kCFAllocatorNull",
+    ] {
+        out.push((name.to_string(), base::global_cell(name, 0)));
+    }
+    // The run loop's mode names, which a guest passes straight back in and
+    // which `CFRunLoopAddSource` compares as strings.
+    for (name, mode) in [
+        ("_kCFRunLoopDefaultMode", runloop::DEFAULT_MODE),
+        ("_kCFRunLoopCommonModes", runloop::COMMON_MODES),
+    ] {
+        out.push((name.to_string(), base::global_cell(name, mode_name_object(mode))));
+    }
+    out
 }
 
 #[cfg(test)]

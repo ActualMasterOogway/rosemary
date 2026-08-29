@@ -125,6 +125,15 @@ pub(super) static RUNTIME: &[Runtime] = &[
     // Terraria reaches all three: Mono's Objective-C bridge builds an
     // `NSApplication` delegate class at start-up rather than declaring one.
     rtcb!([0], [2], "class_addMethod", U8, P, P, P, P),
+    // ## `@property` metadata
+    //
+    // Not methods and not ivars: a name and an attribute string beside them,
+    // read only by code introspecting a class it did not write - which is
+    // exactly what `libYoYoGamepad` does. The list a `class_copyPropertyList`
+    // returns is `malloc`ed and the caller frees it, so nothing is translated on
+    // the way back: a property handle is opaque, and the guest only ever hands
+    // it to `property_getName` and its neighbours.
+    rtc!([0], "class_addProperty", U8, P, P, P, I32),
     // Spelled out rather than built by a macro, as every entry taking a
     // protocol is.
     Runtime {
@@ -137,13 +146,19 @@ pub(super) static RUNTIME: &[Runtime] = &[
         protocols: &[1],
         struct_return: None,
     },
+    rtc!([0], "class_copyPropertyList", P, P, P),
     rtc!([0] -> true, "class_createInstance", P, P, U64),
     rtc!([0], "class_getInstanceMethod", P, P, P),
     rtc!([0], "class_getInstanceSize", U64, P),
     rtc!([0], "class_getInstanceVariable", P, P, P),
+    // The compiler-emitted ARC layout bitmap for a class's strong ivars. This
+    // runtime does not model one; see `BUILTIN_GAPS`.
+    rtc!([0], "class_getIvarLayout", P, P),
     rtc!([0], "class_getName", P, P),
+    rtc!([0], "class_getProperty", P, P, P),
     rtc!([0] -> true, "class_getSuperclass", P, P),
     rtc!([0], "class_isMetaClass", U8, P),
+    rtc!([0], "class_replaceProperty", V, P, P, P, I32),
     rtc!([0], "class_respondsToSelector", U8, P, P),
     // ## Ivars, reflectively
     //
@@ -179,6 +194,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
     // `objc_storeWeak`'s *value* is the exception, and it is the ordinary one:
     // a guest may legally weakly reference a class, and a class is the one
     // pointer that means something different on each side.
+    rt!("objc_copyClassNamesForImage", P, P, P),
     rt!("objc_copyWeak", V, P, P),
     rt!("objc_destroyWeak", V, P),
     // The hook the compiler emits inside every `for (x in collection)` loop, to
@@ -214,6 +230,9 @@ pub(super) static RUNTIME: &[Runtime] = &[
     // Whatever `objc_storeWeak` put in the table comes back out, so the return
     // is translated for the same reason that call's argument is.
     rtc!([1], "objc_initWeak", P, P, P),
+    // `Class objc_loadClassref(Class *)` resolves a class reference slot, which
+    // on Apple's runtime may hold a *stub* class marked by its low bit.
+    rtc!([] -> true, "objc_loadClassref", P, P),
     rtc!([] -> true, "objc_loadWeakRetained", P, P),
     rtc!([] -> true, "objc_lookUpClass", P, P),
     // `void objc_moveWeak(id *dst, id *src)` - the third of the four weak
@@ -224,6 +243,11 @@ pub(super) static RUNTIME: &[Runtime] = &[
     rtc!([0], "objc_opt_new", P, P),
     rtc!([0], "objc_opt_respondsToSelector", U8, P, P),
     rtc!([0], "objc_opt_self", P, P),
+    // `Class objc_readClassPair(Class, const struct objc_image_info *)` and
+    // `const char **objc_copyClassNamesForImage(const char *, unsigned *)` are
+    // both about *images*, which this runtime's classes do not belong to. See
+    // `BUILTIN_GAPS`.
+    rtc!([0] -> true, "objc_readClassPair", P, P, P),
     rtc!([0], "objc_registerClassPair", V, P),
     rtc!([0], "objc_release", V, P),
     rtc!([0], "objc_retain", P, P),
@@ -266,6 +290,8 @@ pub(super) static RUNTIME: &[Runtime] = &[
     rtc!([0] -> true, "object_getIvar", P, P, P),
     rtc!([0, 2], "object_setIvar", V, P, P, P),
     rt!("property_copyAttributeList", P, P, P),
+    rt!("property_getAttributes", P, P),
+    rt!("property_getName", P, P),
     // ## The one entry that returns a struct
     //
     // `struct objc_method_description protocol_getMethodDescription(Protocol *,
@@ -1503,9 +1529,18 @@ mod tests {
     /// with "unsatisfied import" under `ROSETTA3_OBJC=builtin`, and the name is
     /// the whole of the work queue.
     const BUILTIN_GAPS: &[&str] = &[
-        // Needs `@property` metadata, which this tree's runtime does not model.
-        // `libYoYoGamepad` reads it; see the Deltarune milestones.
-        "property_copyAttributeList",
+        // The ARC layout bitmap for a class's strong ivars, which the compiler
+        // emits into a `class_ro_t` and this runtime does not carry across.
+        // Null would be a legal answer meaning "no strong ivars", and a wrong
+        // one for every class that has some.
+        "class_getIvarLayout",
+        // Both are about images. A class here belongs to the runtime rather than
+        // to the file it was declared in, so there is nothing to enumerate and
+        // nothing to read a compiler-laid-out `objc_class` out of - that pass is
+        // `crate::objc::register`, and it runs at load time from the link
+        // transcript rather than on a guest's say-so.
+        "objc_copyClassNamesForImage",
+        "objc_readClassPair",
     ];
 
     #[test]

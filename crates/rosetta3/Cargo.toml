@@ -12,6 +12,7 @@ objc.workspace = true
 corefoundation.workspace = true
 iokit.workspace = true
 foundation.workspace = true
+appkit.workspace = true
 gimli.workspace = true
 libc.workspace = true
 iced-x86 = "1"

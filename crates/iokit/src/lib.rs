@@ -86,13 +86,20 @@ pub const NAMES: &[&str] = &[
 
 /// The `kIOHID*Key` globals, as `(Mach-O name, address)`.
 ///
-/// Each is a `CFStringRef` a guest reads once and uses as a dictionary key, so
-/// it has to be a real string object and the same one every time.
+/// Each is a `CFStringRef` **variable**: the guest loads the symbol's address
+/// and then loads the string out of it, so the symbol is a cell holding the
+/// object rather than the object. The string itself still has to be the same one
+/// every time, because a matching dictionary compares its keys by identity.
 pub fn data_symbols() -> Vec<(String, u64)> {
     corefoundation::bootstrap();
     api::key_strings()
         .into_iter()
-        .map(|(symbol, text)| (symbol.to_string(), key_object(text)))
+        .map(|(symbol, text)| {
+            (
+                symbol.to_string(),
+                corefoundation::base::global_cell(symbol, key_object(text)),
+            )
+        })
         .collect()
 }
 

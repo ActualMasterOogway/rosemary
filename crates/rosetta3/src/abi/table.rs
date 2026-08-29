@@ -1488,6 +1488,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("getwc", I32, P),
     sig!("getxattr", I64, P, P, P, U64, U32, I32),
     sig!("getentropy", I32, P, U64),
+
     sig!("getattrlist", I32, P, P, P, U64, U64),
     // ## OpenGL
     //
@@ -2085,6 +2086,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // guest code, called when a key is already present.
     sig!("hash_create", P, I32),
     cbsig!([3], "hash_search", P, P, P, P, P),
+    // The rest of the same header, whose callbacks are guest code for the same
+    // reason. `libYoYoGamepad` imports the pair above; a table that stops there
+    // refuses the teardown of a table it was happy to build.
+    cbsig!([2], "hash_destroy", V, P, P, P),
+    cbsig!([1], "hash_purge", V, P, P),
+    cbsig!([1], "hash_traverse", V, P, P, P),
     sig!("herror", V, P),
     // Two `host_*` calls Valve's tier0 makes to size physical memory.
     sig!("host_get_clock_service", I32, U32, U32, P),
