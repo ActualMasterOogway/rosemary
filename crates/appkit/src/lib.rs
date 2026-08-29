@@ -1,7 +1,15 @@
 pub mod application;
 pub mod classes;
+pub mod color;
+pub mod cursor;
+pub(crate) mod decode;
 mod define;
+pub mod geometry;
 pub mod nib;
+pub mod opengl;
+pub mod screen;
+pub mod view;
+pub mod window;
 
 pub fn bootstrap() {
     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -9,6 +17,12 @@ pub fn bootstrap() {
         foundation::bootstrap();
         classes::install();
         application::install();
+        color::install();
+        cursor::install();
+        screen::install();
+        window::install();
+        view::install();
+        opengl::install();
     });
 }
 

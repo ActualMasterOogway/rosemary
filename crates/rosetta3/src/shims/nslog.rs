@@ -184,8 +184,18 @@ fn emit(text: &[u8]) {
 
 type NsLogFn = unsafe extern "C" fn(*const c_void, ...);
 
-/// Foundation's `NSLog`, if this process has Foundation.
+/// Foundation's `NSLog`, if this process has a Foundation it may hand a string.
+///
+/// **Not under the builtin frameworks.** [`dlsym`] answers `NSLog` from the host
+/// - this tree has no `NSLog` of its own - and answers
+/// `CFStringCreateWithCString` from *here*, so the two together would hand
+/// Apple's Foundation an object of this runtime and crash inside libobjc. The
+/// stderr fallback in [`emit`] is what a process with no Foundation already
+/// took, and it is the right path for a process whose Foundation is this one.
 fn host_nslog() -> Option<NsLogFn> {
+    if crate::frameworks::builtin() {
+        return None;
+    }
     static FOUND: OnceLock<Option<usize>> = OnceLock::new();
     let addr = *FOUND.get_or_init(|| dlsym("NSLog").map(|p| p as usize));
     // SAFETY: `dlsym` returned Foundation's `NSLog`, whose C declaration is

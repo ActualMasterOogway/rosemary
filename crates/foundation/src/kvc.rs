@@ -1,17 +1,4 @@
 //! Key-value coding: `-setValue:forKey:` and `-valueForKey:`.
-//!
-//! The path by which a *host* caller reaches a guest's accessors, which is what
-//! makes it worth having before anything else in Foundation that is not a
-//! collection: a nib's outlet connections are applied through it, and so is
-//! every `[object setValue:x forKey:@"name"]` a Cocoa program writes instead of
-//! a setter call.
-//!
-//! Calling an accessor means knowing its prototype, and the only thing that
-//! says what that is is the method's own type encoding. So the shapes are read
-//! from it and dispatched to one of a fixed set of transmutes - and a shape
-//! outside that set is refused *by name* rather than called at a guessed ABI,
-//! which on the two conventions in play here would put a struct in the wrong
-//! registers and corrupt whatever it landed on.
 
 use std::ffi::{CStr, CString};
 
@@ -394,6 +381,19 @@ unsafe extern "C" fn value_for_key(receiver: Id, _sel: Sel, key: Id) -> Id {
             ),
         )
     }
+}
+
+/// Whether `-setValue:forKey:` on an object of `class` would reach anything.
+pub fn accepts(class: &'static Class, key: &str) -> bool {
+    if let Some(method) = class.method(objc::sel::get(&setter_name(key))) {
+        // A setter whose argument this runtime cannot pass is a setter that
+        // would abort, so it does not count as accepting the key.
+        // SAFETY: a method's type encoding is a NUL-terminated string the
+        // runtime owns.
+        let parts = parts(unsafe { CStr::from_ptr(method.types()) });
+        return parts.get(3).and_then(|p| Shape::of(p)).is_some();
+    }
+    ivar_for(class, key).is_some_and(|i| Shape::of(i.types().to_bytes()).is_some())
 }
 
 pub(crate) fn install() {

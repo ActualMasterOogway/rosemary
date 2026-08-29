@@ -27,6 +27,7 @@ dependencies = [
  "corefoundation",
  "foundation",
  "objc",
+ "sdl3",
 ]
 
 [[package]]

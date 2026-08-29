@@ -154,15 +154,18 @@ pub fn provider() -> SyntheticDylib {
     for (name, addr) in appkit::data_symbols() {
         lib.define_data(&name, addr);
     }
+    for name in SHIMMED {
+        lib.define_fn(&format!("_{name}"), unintercepted as *const ());
+    }
     lib
 }
 
-/// The address `name` has in one of them, or `None`.
-///
-/// `name` is the C identifier, without the leading underscore. Registered with
-/// [`darwin::register_provider`] so that a `dlsym` finds the same answer the
-/// loader bound - an inconsistency there is a guest whose import works and whose
-/// `dlsym` of the same name comes back null.
+const SHIMMED: &[&str] = &["NSLog", "NSRunAlertPanel"];
+
+unsafe extern "C" fn unintercepted() -> u64 {
+    unreachable!("a shimmed Foundation entry point was called rather than intercepted")
+}
+
 pub fn symbol(name: &str) -> Option<u64> {
     if !builtin() {
         return None;

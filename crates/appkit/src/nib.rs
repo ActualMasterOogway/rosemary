@@ -1,26 +1,4 @@
 //! Instantiating a nib.
-//!
-//! A `MainMenu.nib` is where a Cocoa program's application delegate is wired,
-//! and usually the only place: `NSApplicationMain` cannot reach
-//! `applicationDidFinishLaunching:` without reading one. What it holds is an
-//! `NSIBObjectData` - a list of objects, and a list of connections between them.
-//!
-//! Three kinds of entry matter here, and the rest is M2's:
-//!
-//! * `NSCustomObject` names a class by string, which is how a program's own
-//!   delegate gets built;
-//! * `NSNibOutletConnector` is `[source setValue:destination forKey:label]`,
-//!   which is why key-value coding had to exist before this did;
-//! * `NSNibControlConnector` is a target and an action, which needs a control to
-//!   set them on.
-//!
-//! Everything else - `NSWindowTemplate`, `NSTextView`, the thirty-odd view
-//! classes an Interface Builder document carries - is instantiated as an object
-//! of a class with no methods, and **named in the report**. That is not the same
-//! as skipping it: the object exists, the graph is whole, and the first message
-//! a program sends one is refused by the runtime with the class and the
-//! selector. A nib that a program only reads its delegate out of therefore
-//! loads, and a nib whose window it goes on to use says which class it needs.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -94,6 +72,7 @@ pub fn load(path: &Path, owner: Id) -> Result<Loaded, String> {
         archive: &archive,
         owner,
         file_owner: archive.field_object(root, "NSRoot"),
+        decoding: None,
         loaded: Loaded {
             objects: BTreeMap::new(),
             placeholders: Vec::new(),
@@ -121,6 +100,13 @@ fn implemented(name: &str) -> bool {
 struct Builder<'a> {
     archive: &'a Archive,
     owner: Id,
+    /// The entry [`Builder::build`] is building, so a decoder can read the rest
+    /// of its fields.
+    ///
+    /// A field rather than an argument because `build` is reached from
+    /// `instantiate` by class name alone, and threading the entry through every
+    /// caller would put it in the two paths that do not need it.
+    decoding: Option<Uid>,
     /// The entry the archive calls `NSRoot`, which is File's Owner: the one
     /// object a nib does not build, because the caller supplies it.
     file_owner: Option<Uid>,
@@ -181,11 +167,22 @@ impl Builder<'_> {
 
     /// `[source setValue:destination forKey:label]`.
     ///
-    /// Skipped, with a sentence, when the source is one of the classes this
-    /// crate invented: key-value coding on an object with neither a setter nor
-    /// an ivar of that name is an abort, and aborting inside the loader would
-    /// replace the diagnostic with a stop.
+    /// Asked first, through `foundation::kvc::accepts`, and *reported* rather
+    /// than sent when the answer is no. Key-value coding on an object with
+    /// neither a setter nor an ivar of that name is an abort - correctly, for a
+    /// program that meant to set it - and aborting inside the loader would
+    /// replace this milestone's diagnostic with a stop on the first nib that
+    /// connects a menu to its delegate.
+    ///
+    /// The check is not "did this crate invent the class". A declared `NSMenu`
+    /// with no methods accepts an outlet exactly as badly as an invented one
+    /// does, and Deltarune's own nib is where that showed.
     fn outlet(&mut self, source: Uid, destination: Uid, label: &str) {
+        let source_class = self
+            .archive
+            .class_name(source)
+            .unwrap_or("<untyped entry>")
+            .to_string();
         if let Some(class) = self.unimplemented(source) {
             self.loaded.unwired.push(format!(
                 "the outlet \"{label}\" of a {class} is not set, because this runtime has no \
@@ -193,7 +190,6 @@ impl Builder<'_> {
             ));
             return;
         }
-        let source_class = self.archive.class_name(source).unwrap_or("<untyped entry>");
         let (Some(from), Some(to)) = (self.instantiate(source), self.instantiate(destination))
         else {
             self.loaded
@@ -201,6 +197,21 @@ impl Builder<'_> {
                 .push(format!("the outlet \"{label}\" of a {source_class} has no object to set"));
             return;
         };
+        // SAFETY: an object this loader just built or was handed as the owner.
+        let accepts = unsafe { objc::object::class_of(from) }
+            .is_some_and(|c| foundation::kvc::accepts(c, label));
+        if !accepts {
+            // Not noted as a class with no implementation: this one exists, and
+            // the guest's own delegate reaches here for an outlet Interface
+            // Builder kept after the class stopped declaring it. Conflating the
+            // two would put a guest class in the list of what M2 owes.
+            let class = self.class_of(from, &source_class);
+            self.loaded.unwired.push(format!(
+                "the outlet \"{label}\" of a {class} is not set: it has no setValue:forKey: \
+                 target of that name"
+            ));
+            return;
+        }
         let key = foundation::string::from_str(label);
         // SAFETY: `-setValue:forKey:` is `void (id, SEL, id, id)`, installed on
         // `NSObject` by `foundation::kvc`, so every object here answers it.
@@ -227,11 +238,22 @@ impl Builder<'_> {
             Some(other) => other.to_string(),
             None => return None,
         };
-        if implemented(&name) {
+        // A class `crate::decode` builds is implemented whatever the runtime's
+        // class table says: `NSWindowTemplate` has no class of its own and
+        // never will, because what it describes is an `NSWindow`.
+        if implemented(&name) || crate::decode::DECODED.contains(&name.as_str()) {
             return None;
         }
         self.note(&name);
         Some(name)
+    }
+
+    /// The runtime's name for an object, falling back to what the archive
+    /// called it - which is what a null or foreign pointer would leave.
+    fn class_of(&self, object: Id, fallback: &str) -> String {
+        // SAFETY: an object this loader built.
+        unsafe { objc::object::class_of(object) }
+            .map_or_else(|| fallback.to_string(), |c| c.name_str().to_string())
     }
 
     /// Record a class name the nib held that nothing implements, once.
@@ -266,7 +288,10 @@ impl Builder<'_> {
             }
             Some(name) => {
                 let name = name.to_string();
-                self.build(&name)
+                self.decoding = Some(uid);
+                let object = self.build(&name);
+                self.decoding = None;
+                object
             }
         };
         objc::arc::retain(object);
@@ -280,6 +305,14 @@ impl Builder<'_> {
     /// a guest's delegate is entitled to have one and a nib is how it is created.
     /// An invented class has no `-init` at all, so nothing is sent to one.
     fn build(&mut self, name: &str) -> Id {
+        // An archived AppKit object is not built by allocating a class of its
+        // name: `NSWindowTemplate` is a *description* of an `NSWindow`, and the
+        // name is the description's. `crate::decode` is where that is undone.
+        if crate::decode::DECODED.contains(&name) {
+            return self.decoding.take().and_then(|uid| {
+                crate::decode::build(self, uid, name)
+            }).unwrap_or(std::ptr::null_mut());
+        }
         let known = implemented(name)
             .then(|| std::ffi::CString::new(name).ok().and_then(|n| objc::class::lookup(&n)))
             .flatten();
@@ -303,12 +336,32 @@ impl Builder<'_> {
     }
 }
 
+impl crate::decode::Builder for Builder<'_> {
+    fn archive(&self) -> &Archive {
+        self.archive
+    }
+
+    fn object_at(&mut self, uid: Uid) -> Option<Id> {
+        self.instantiate(uid)
+    }
+
+    fn note_missing(&mut self, name: &str) {
+        self.note(name);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A nib with the one connection that matters: File's Owner's `delegate`
-    /// outlet, wired to a custom object the archive names by class.
+    /// A nib with the one connection that matters - File's Owner's `delegate`
+    /// outlet, wired to a custom object the archive names by class - and one
+    /// that cannot be made, from a class nothing implements.
+    ///
+    /// The second source is a made-up class rather than `NSWindowTemplate`:
+    /// that one *is* built now, by `crate::decode`, and building it needs a
+    /// display. What this fixture is about is the reporting path, which wants a
+    /// class that will never be implemented rather than one that just was.
     ///
     /// Written as the XML spelling of a keyed archive, which is what `plutil
     /// -convert xml1` makes of the binary one an Interface Builder document is,
@@ -377,8 +430,8 @@ mod tests {
 		</dict>
 		<string>R3TestNibDelegate</string>
 		<dict>
-			<key>$classes</key><array><string>NSWindowTemplate</string></array>
-			<key>$classname</key><string>NSWindowTemplate</string>
+			<key>$classes</key><array><string>R3TestUnbuiltClass</string></array>
+			<key>$classname</key><string>R3TestUnbuiltClass</string>
 		</dict>
 	</array>
 	<key>$top</key>
@@ -428,8 +481,8 @@ mod tests {
         let class = unsafe { objc::object::class_of(delegate) }.expect("a class");
         assert_eq!(class.name_str(), "R3TestNibDelegate");
         assert!(
-            loaded.placeholders.contains(&"NSWindowTemplate".to_string()),
-            "the window template was not reported: {:?}",
+            loaded.placeholders.contains(&"R3TestUnbuiltClass".to_string()),
+            "the class nothing implements was not reported: {:?}",
             loaded.placeholders
         );
     }
@@ -450,7 +503,7 @@ mod tests {
             loaded
                 .unwired
                 .iter()
-                .any(|u| u.contains("NSWindowTemplate") && u.contains("delegate")),
+                .any(|u| u.contains("R3TestUnbuiltClass") && u.contains("delegate")),
             "{:?}",
             loaded.unwired
         );
