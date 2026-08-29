@@ -10,15 +10,26 @@
 //!   claim for a callback that *is* in a register and a context that is not;
 //! - **the same program prints the same thing natively**, which is the only
 //!   specification of a run loop worth having.
+//!
+//! Under `ROSETTA3_OBJC=builtin`, which is not a detail. A
+//! `CFRunLoopSourceContext` holds guest function pointers, and the *host's*
+//! CoreFoundation would call them as arm64 - so the native path refuses
+//! `CFRunLoopSourceCreate` by name, correctly. Serving that call is precisely
+//! what `crates/corefoundation` exists for, and it is the thing under test.
 
 mod common;
+
+/// The fixture under this tree's own CoreFoundation, for the reason above.
+fn run_builtin(path: &str) -> (Option<i32>, String, String) {
+    common::run_guest_env(&[("ROSETTA3_OBJC", "builtin")], path, &[])
+}
 
 #[test]
 fn a_guest_is_called_back_from_inside_the_run_loop() {
     let Some(path) = common::runloop_fixture() else {
         skip!("cannot build x86_64 fixtures")
     };
-    let (status, out, err) = common::run_guest(&path, &[]);
+    let (status, out, err) = run_builtin(&path);
     assert_eq!(status, Some(0), "stderr: {err}");
     assert!(
         out.contains("source 1 info 42\n"),
@@ -56,7 +67,7 @@ fn the_guest_agrees_with_the_same_program_built_for_the_host() {
     ) else {
         skip!("cannot build native fixtures")
     };
-    let (_, guest_out, err) = common::run_guest(&guest, &[]);
+    let (_, guest_out, err) = run_builtin(&guest);
     let Some((_, native_out)) = common::run_native(&native) else {
         skip!("the native fixture would not run")
     };

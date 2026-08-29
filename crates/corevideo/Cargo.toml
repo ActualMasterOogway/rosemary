@@ -1,0 +1,11 @@
+[package]
+name = "corevideo"
+description = "CVDisplayLink, as a run loop timer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+corefoundation.workspace = true
+objc.workspace = true
+sdl3.workspace = true

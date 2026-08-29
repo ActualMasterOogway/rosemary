@@ -126,12 +126,14 @@ fn a_known_signature_is_inlined_and_a_variadic_is_not() {
                 assert_eq!(import.symbol.value as usize as u64, site.resolved);
                 fast += 1;
             }
-            // Not inlinable, and no longer an exit either: a symbol microlift
-            // cannot reproduce the call for is reached through the runtime's
-            // own bridge. See `rosetta3::bridge`.
+            // Not inlinable, so it stays a VM exit. `rosetta3::bridge` could
+            // take these instead - the machinery is all there - and
+            // `Program::lifter_config_with` deliberately does not use it:
+            // bridging every unpromotable call cost more than the exits did.
+            // See the commit that turned it off.
             _ => assert!(
-                matches!(entry, ImportKind::Bridge(_)),
-                "{} has no usable signature but was not registered as a bridge",
+                matches!(entry, ImportKind::Slow),
+                "{} has no usable signature but was not left on the exit path",
                 site.symbol
             ),
         }
@@ -161,25 +163,28 @@ fn the_slow_policy_registers_the_same_addresses_and_no_metadata() {
         v
     };
     assert_eq!(addrs(&fast), addrs(&slow));
-    // The baseline is exits and nothing else - no inlined calls, no bridges,
-    // and none of the lift-time machinery either, or it would not be a baseline.
+    // The baseline is exits and nothing else - no inlined calls, and none of
+    // the lift-time machinery either, or it would not be a baseline.
     assert!(slow.imports.values().all(|k| matches!(k, ImportKind::Slow)));
     assert!(slow.import_registry.is_none());
-    assert!(slow.indirect_call_bridge.is_none());
 
-    // Under the fast policy every site is reached without an exit: inlined
-    // where the signature allows, bridged where it does not.
+    // Under the fast policy the sites microlift can reproduce are inlined, and
+    // the rest keep the exit the baseline gives them. What separates the two
+    // configurations is therefore *only* the promotions and the registry - and
+    // the registry is what lets a site that did not exist at lift time, a
+    // `dlsym` result or a lazily opened dylib, still be intercepted.
     assert!(
         fast.imports
             .values()
             .any(|k| matches!(k, ImportKind::Fast(_)))
     );
-    assert!(
-        !fast.imports.values().any(|k| matches!(k, ImportKind::Slow)),
-        "an import was left on the slow exit path"
-    );
     assert!(fast.import_registry.is_some());
-    assert!(fast.indirect_call_bridge.is_some());
+
+    // Neither sets an indirect-call bridge. It is off for the same reason the
+    // import bridge is: an indirect call that has to go through it costs more
+    // than the exit it replaces.
+    assert!(slow.indirect_call_bridge.is_none());
+    assert!(fast.indirect_call_bridge.is_none());
 }
 
 #[test]

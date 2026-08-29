@@ -1059,7 +1059,12 @@ fn traced(sel: u64) -> Option<String> {
         return None;
     }
     let name = selector_name(sel)?;
-    wanted.contains(&name).then_some(name)
+    // `*` traces everything. A program that has stopped somewhere unexpected
+    // does not tell you which selector to ask for, and the whole sequence is
+    // what says where it went - so the list a reader can name is not always the
+    // list a reader needs.
+    let all = wanted.iter().any(|w| w == "*");
+    (all || wanted.contains(&name)).then_some(name)
 }
 
 /// The receiver's class name, for a diagnostic - never by messaging it.

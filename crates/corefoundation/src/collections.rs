@@ -296,6 +296,43 @@ pub fn new_number(value: Number) -> CFTypeRef {
     make(number_class(), value)
 }
 
+/// `__NSCFBoolean`, which is a subclass of `NSNumber` here as it is on Darwin.
+///
+/// A separate class rather than a number holding zero or one, because
+/// `kCFBooleanTrue` is an *object a guest compares against by identity* - and
+/// because `CFGetTypeID` of one has to answer `CFBooleanGetTypeID()` rather than
+/// the number type, which a guest switching on the type of a dictionary value
+/// depends on.
+pub fn boolean_class() -> &'static Class {
+    static CLASS: OnceLock<usize> = OnceLock::new();
+    let p = *CLASS.get_or_init(|| {
+        objc::class::ptr(register::<Number>(
+            c"__NSCFBoolean",
+            crate::base::abstract_class(c"NSNumber", None),
+        )) as usize
+    });
+    // SAFETY: a leaked `Class` this crate registered.
+    unsafe { &*(p as *const Class) }
+}
+
+/// `kCFBooleanTrue` and `kCFBooleanFalse`, one object each for the process.
+///
+/// Retained forever: a guest that released one could make every later read of
+/// the global dangle.
+pub fn boolean(value: bool) -> CFTypeRef {
+    static TRUE: OnceLock<usize> = OnceLock::new();
+    static FALSE: OnceLock<usize> = OnceLock::new();
+    let cell = match value {
+        true => &TRUE,
+        false => &FALSE,
+    };
+    *cell.get_or_init(|| {
+        let object = make(boolean_class(), Number::Integer(value as i64));
+        objc::arc::retain(object as objc::object::Id);
+        object as usize
+    }) as CFTypeRef
+}
+
 /// # Safety
 ///
 /// As [`contents`].

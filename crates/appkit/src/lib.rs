@@ -3,10 +3,14 @@ pub mod classes;
 pub mod color;
 pub mod cursor;
 pub(crate) mod decode;
+pub mod event;
 mod define;
 pub mod geometry;
+pub mod image;
+pub mod menu;
 pub mod nib;
 pub mod opengl;
+pub mod raster;
 pub mod screen;
 pub mod view;
 pub mod window;
@@ -19,6 +23,9 @@ pub fn bootstrap() {
         application::install();
         color::install();
         cursor::install();
+        image::install();
+        image::bitmap::install();
+        menu::install();
         screen::install();
         window::install();
         view::install();
@@ -58,15 +65,50 @@ pub fn data_symbols() -> Vec<(String, u64)> {
             corefoundation::base::global_cell(&symbol, object),
         ));
     }
+    for (symbol, text) in STRING_GLOBALS {
+        let object = foundation::notification::name_object(text);
+        out.push((
+            symbol.to_string(),
+            corefoundation::base::global_cell(symbol, object),
+        ));
+    }
     out
 }
 
+/// The `NSNotificationName` globals a program compares against.
+///
+/// The window's are here as well as the application's, and some of them are not
+/// posted yet - `NSWindowDidResizeNotification` waits on the event pump. They
+/// are published anyway, and the reason is the difference between the two ways a
+/// symbol can be missing: an unresolved *function* import is refused by name at
+/// the call, while an unresolved **data** import binds to zero and the guest's
+/// next instruction dereferences it. A name nothing posts is a gap; a name
+/// nothing defines is a segfault at address zero.
 pub const NOTIFICATION_NAMES: &[&str] = &[
     application::WILL_FINISH_LAUNCHING,
     application::DID_FINISH_LAUNCHING,
     application::WILL_TERMINATE,
     application::DID_BECOME_ACTIVE,
     application::WILL_RESIGN_ACTIVE,
+    window::DID_RESIZE,
+    window::DID_MOVE,
+    window::WILL_CLOSE,
+    window::DID_BECOME_KEY,
+    window::DID_RESIGN_KEY,
+    window::DID_MINIATURIZE,
+    window::DID_DEMINIATURIZE,
+];
+
+/// The other AppKit string globals a program reads.
+///
+/// Each is a fixed name rather than something this runtime chooses: a colour
+/// space and an attribute key are compared against by string, so publishing the
+/// documented value is exact.
+pub const STRING_GLOBALS: &[(&str, &str)] = &[
+    ("_NSCalibratedRGBColorSpace", "NSCalibratedRGBColorSpace"),
+    ("_NSDeviceRGBColorSpace", "NSDeviceRGBColorSpace"),
+    ("_NSDeviceResolution", "NSDeviceResolution"),
+    ("_NSForegroundColorAttributeName", "NSColor"),
 ];
 
 #[cfg(test)]

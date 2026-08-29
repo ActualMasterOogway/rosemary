@@ -85,6 +85,14 @@ fn register_dlopen_names() {
         ],
         symbol,
     );
+    crate::dyld::register_synthetic(
+        &[
+            "/System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo",
+            "/System/Library/Frameworks/CoreVideo.framework/CoreVideo",
+            "CoreVideo",
+        ],
+        symbol,
+    );
 }
 
 /// Push the outermost autorelease pool, the one a process is born with.
@@ -118,6 +126,11 @@ pub fn provider() -> SyntheticDylib {
     if !builtin() {
         return lib;
     }
+    // Before anything is published: `kCFNull` is the `NSNull` singleton, and
+    // `NSNull` is Foundation's class. A provider built before Foundation had
+    // registered it would publish a null for that symbol, which is the very
+    // failure the globals exist to avoid.
+    foundation::bootstrap();
     for name in corefoundation::NAMES {
         if let Some(addr) = corefoundation::symbol(name) {
             lib.define_fn(&format!("_{name}"), addr as usize as *const ());
@@ -151,6 +164,14 @@ pub fn provider() -> SyntheticDylib {
             lib.define_fn(&format!("_{name}"), addr as usize as *const ());
         }
     }
+    // CoreVideo, which is one thing: the display link a Mac game's frame loop
+    // hangs on. Its callback is guest code, and reaches this runtime as a thunk
+    // because `abi::table` names that parameter a callback.
+    for name in corevideo::NAMES {
+        if let Some(addr) = corevideo::symbol(name) {
+            lib.define_fn(&format!("_{name}"), addr as usize as *const ());
+        }
+    }
     for (name, addr) in appkit::data_symbols() {
         lib.define_data(&name, addr);
     }
@@ -174,6 +195,7 @@ pub fn symbol(name: &str) -> Option<u64> {
     corefoundation::symbol(name)
         .or_else(|| iokit::symbol(name))
         .or_else(|| appkit::symbol(name))
+        .or_else(|| corevideo::symbol(name))
 }
 
 /// Tell this tree's `NSBundle` which `.app` the guest is.

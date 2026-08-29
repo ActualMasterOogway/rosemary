@@ -35,38 +35,111 @@ pub const CONTEXT_INSTANCE_SIZE: usize = size_of::<Context>();
 /// SDL counterpart has not been checked, and guessing at it would ask SDL for a
 /// visual the program did not request.
 mod attribute {
+    // Every `NSOpenGLPixelFormatAttribute` in `NSOpenGL.h`, whether or not it
+    // maps to anything. The list has to be complete rather than convenient:
+    // `takes_value` is what tells the walk how far to step, so an attribute
+    // missing from it stops the walk - and one classified wrongly reads the
+    // next attribute as this one's value and silently turns the list into a
+    // different list.
+    pub const ALL_RENDERERS: u32 = 1;
+    pub const TRIPLE_BUFFER: u32 = 3;
     pub const DOUBLE_BUFFER: u32 = 5;
     pub const STEREO: u32 = 6;
+    pub const AUX_BUFFERS: u32 = 7;
     pub const COLOR_SIZE: u32 = 8;
     pub const ALPHA_SIZE: u32 = 11;
     pub const DEPTH_SIZE: u32 = 12;
     pub const STENCIL_SIZE: u32 = 13;
     pub const ACCUM_SIZE: u32 = 14;
+    pub const MINIMUM_POLICY: u32 = 51;
+    pub const MAXIMUM_POLICY: u32 = 52;
+    pub const OFF_SCREEN: u32 = 53;
+    pub const FULL_SCREEN: u32 = 54;
     pub const SAMPLE_BUFFERS: u32 = 55;
     pub const SAMPLES: u32 = 56;
-    pub const ACCELERATED: u32 = 73;
+    pub const AUX_DEPTH_STENCIL: u32 = 57;
+    pub const COLOR_FLOAT: u32 = 58;
+    pub const MULTISAMPLE: u32 = 59;
+    pub const SUPERSAMPLE: u32 = 60;
+    pub const SAMPLE_ALPHA: u32 = 61;
+    pub const RENDERER_ID: u32 = 70;
+    pub const SINGLE_RENDERER: u32 = 71;
     pub const NO_RECOVERY: u32 = 72;
-    pub const OPENGL_PROFILE: u32 = 99;
+    pub const ACCELERATED: u32 = 73;
+    pub const CLOSEST_POLICY: u32 = 74;
+    pub const ROBUST: u32 = 75;
+    pub const BACKING_STORE: u32 = 76;
+    pub const MP_SAFE: u32 = 78;
+    pub const WINDOW: u32 = 80;
+    pub const MULTI_SCREEN: u32 = 81;
+    pub const COMPLIANT: u32 = 83;
     pub const SCREEN_MASK: u32 = 84;
+    pub const PIXEL_BUFFER: u32 = 90;
+    pub const REMOTE_PIXEL_BUFFER: u32 = 91;
+    pub const ALLOW_OFFLINE_RENDERERS: u32 = 96;
+    pub const ACCELERATED_COMPUTE: u32 = 97;
+    pub const OPENGL_PROFILE: u32 = 99;
+    pub const VIRTUAL_SCREEN_COUNT: u32 = 128;
 
     /// The `NSOpenGLProfileVersion*` values `OPENGL_PROFILE` takes.
     pub const PROFILE_LEGACY: u32 = 0x1000;
     pub const PROFILE_3_2_CORE: u32 = 0x3200;
     pub const PROFILE_4_1_CORE: u32 = 0x4100;
 
+    /// The attributes that are followed by a value, per the header's own
+    /// comments - "number of", "bit mask of", "request ... by ID".
+    pub const VALUED: &[u32] = &[
+        AUX_BUFFERS,
+        COLOR_SIZE,
+        ALPHA_SIZE,
+        DEPTH_SIZE,
+        STENCIL_SIZE,
+        ACCUM_SIZE,
+        SAMPLE_BUFFERS,
+        SAMPLES,
+        RENDERER_ID,
+        SCREEN_MASK,
+        OPENGL_PROFILE,
+        VIRTUAL_SCREEN_COUNT,
+    ];
+
+    /// The attributes that stand alone, each meaning "yes" by being present.
+    pub const STANDALONE: &[u32] = &[
+        ALL_RENDERERS,
+        TRIPLE_BUFFER,
+        DOUBLE_BUFFER,
+        STEREO,
+        MINIMUM_POLICY,
+        MAXIMUM_POLICY,
+        OFF_SCREEN,
+        FULL_SCREEN,
+        AUX_DEPTH_STENCIL,
+        COLOR_FLOAT,
+        MULTISAMPLE,
+        SUPERSAMPLE,
+        SAMPLE_ALPHA,
+        SINGLE_RENDERER,
+        NO_RECOVERY,
+        ACCELERATED,
+        CLOSEST_POLICY,
+        ROBUST,
+        BACKING_STORE,
+        MP_SAFE,
+        WINDOW,
+        MULTI_SCREEN,
+        COMPLIANT,
+        PIXEL_BUFFER,
+        REMOTE_PIXEL_BUFFER,
+        ALLOW_OFFLINE_RENDERERS,
+        ACCELERATED_COMPUTE,
+    ];
+
     /// Whether the attribute is followed by a value rather than standing alone.
-    ///
-    /// Getting this wrong reads the *next attribute* as this one's value and
-    /// then skips a real attribute, so the list silently becomes a different
-    /// list. Every entry above is classified here, and one that is not is
-    /// refused by number.
     pub fn takes_value(attribute: u32) -> Option<bool> {
-        Some(match attribute {
-            DOUBLE_BUFFER | STEREO | ACCELERATED | NO_RECOVERY => false,
-            COLOR_SIZE | ALPHA_SIZE | DEPTH_SIZE | STENCIL_SIZE | ACCUM_SIZE | SAMPLE_BUFFERS
-            | SAMPLES | OPENGL_PROFILE | SCREEN_MASK => true,
-            _ => return None,
-        })
+        if VALUED.contains(&attribute) {
+            return Some(true);
+        }
+        STANDALONE.contains(&attribute).then_some(false)
     }
 }
 
@@ -133,38 +206,40 @@ fn apply(format: Id) {
         i += 1 + takes_value as usize;
 
         match name {
+            // The ones SDL asks the driver for directly.
             attribute::DOUBLE_BUFFER => sdl3::video::gl_set_attribute(attr::DOUBLEBUFFER, 1),
+            attribute::TRIPLE_BUFFER => sdl3::video::gl_set_attribute(attr::DOUBLEBUFFER, 1),
             attribute::STEREO => sdl3::video::gl_set_attribute(attr::STEREO, 1),
-            attribute::ACCELERATED => sdl3::video::gl_set_attribute(attr::ACCELERATED_VISUAL, 1),
-            // "Do not fall back to software" is SDL's accelerated-visual
-            // request said the other way round.
-            attribute::NO_RECOVERY => sdl3::video::gl_set_attribute(attr::ACCELERATED_VISUAL, 1),
             attribute::COLOR_SIZE => sdl3::video::gl_set_attribute(attr::BUFFER_SIZE, value),
             attribute::ALPHA_SIZE => sdl3::video::gl_set_attribute(attr::ALPHA_SIZE, value),
             attribute::DEPTH_SIZE => sdl3::video::gl_set_attribute(attr::DEPTH_SIZE, value),
             attribute::STENCIL_SIZE => sdl3::video::gl_set_attribute(attr::STENCIL_SIZE, value),
-            attribute::SAMPLE_BUFFERS => {
-                sdl3::video::gl_set_attribute(attr::MULTISAMPLEBUFFERS, value)
+            attribute::SAMPLE_BUFFERS | attribute::MULTISAMPLE => {
+                sdl3::video::gl_set_attribute(attr::MULTISAMPLEBUFFERS, value.max(1))
             }
             attribute::SAMPLES => sdl3::video::gl_set_attribute(attr::MULTISAMPLESAMPLES, value),
-            // An accumulation buffer is not a thing SDL asks the driver for by
-            // total size, and no GL 2.1 program in this tree has used one.
-            attribute::ACCUM_SIZE => true,
-            // The screen mask names a `CGDirectDisplayID` to prefer, which SDL
-            // decides from where the window is instead.
-            attribute::SCREEN_MASK => true,
+            // "Accelerated", "no recovery" and "no software renderer" are three
+            // spellings of the same request.
+            attribute::ACCELERATED | attribute::NO_RECOVERY | attribute::ACCELERATED_COMPUTE => {
+                sdl3::video::gl_set_attribute(attr::ACCELERATED_VISUAL, 1)
+            }
             attribute::OPENGL_PROFILE => match value as u32 {
-                attribute::PROFILE_LEGACY => {
-                    sdl3::video::gl_set_attribute(attr::CONTEXT_PROFILE_MASK, sdl3::video::profile::COMPATIBILITY)
-                }
+                attribute::PROFILE_LEGACY => sdl3::video::gl_set_attribute(
+                    attr::CONTEXT_PROFILE_MASK,
+                    sdl3::video::profile::COMPATIBILITY,
+                ),
                 attribute::PROFILE_3_2_CORE => {
-                    sdl3::video::gl_set_attribute(attr::CONTEXT_PROFILE_MASK, sdl3::video::profile::CORE)
-                        && sdl3::video::gl_set_attribute(attr::CONTEXT_MAJOR_VERSION, 3)
+                    sdl3::video::gl_set_attribute(
+                        attr::CONTEXT_PROFILE_MASK,
+                        sdl3::video::profile::CORE,
+                    ) && sdl3::video::gl_set_attribute(attr::CONTEXT_MAJOR_VERSION, 3)
                         && sdl3::video::gl_set_attribute(attr::CONTEXT_MINOR_VERSION, 2)
                 }
                 attribute::PROFILE_4_1_CORE => {
-                    sdl3::video::gl_set_attribute(attr::CONTEXT_PROFILE_MASK, sdl3::video::profile::CORE)
-                        && sdl3::video::gl_set_attribute(attr::CONTEXT_MAJOR_VERSION, 4)
+                    sdl3::video::gl_set_attribute(
+                        attr::CONTEXT_PROFILE_MASK,
+                        sdl3::video::profile::CORE,
+                    ) && sdl3::video::gl_set_attribute(attr::CONTEXT_MAJOR_VERSION, 4)
                         && sdl3::video::gl_set_attribute(attr::CONTEXT_MINOR_VERSION, 1)
                 }
                 other => objc::fail!(
@@ -172,6 +247,47 @@ fn apply(format: Id) {
                      not a profile this runtime maps"
                 ),
             },
+
+            // ## Carried, and deliberately not asked for
+            //
+            // Each of these describes a choice SDL has already made, or a
+            // renderer selection that means nothing when there is one driver.
+            // They are listed rather than caught by a wildcard so that the set
+            // is a decision a reader can check against the header, which is the
+            // whole point of refusing an attribute that is in neither list.
+            //
+            // The policies say how to pick among visuals SDL picks for us; the
+            // renderer selectors name a specific GPU; a window, an offscreen or
+            // a pixel buffer is a *drawable kind*, and the drawable here is
+            // always the window SDL made; an accumulation buffer is not
+            // something SDL requests by total size, and no GL 2.1 program in
+            // this tree has used one.
+            attribute::ALL_RENDERERS
+            | attribute::AUX_BUFFERS
+            | attribute::ACCUM_SIZE
+            | attribute::MINIMUM_POLICY
+            | attribute::MAXIMUM_POLICY
+            | attribute::CLOSEST_POLICY
+            | attribute::AUX_DEPTH_STENCIL
+            | attribute::COLOR_FLOAT
+            | attribute::SUPERSAMPLE
+            | attribute::SAMPLE_ALPHA
+            | attribute::RENDERER_ID
+            | attribute::SINGLE_RENDERER
+            | attribute::ROBUST
+            | attribute::BACKING_STORE
+            | attribute::MP_SAFE
+            | attribute::COMPLIANT
+            | attribute::MULTI_SCREEN
+            | attribute::ALLOW_OFFLINE_RENDERERS
+            | attribute::SCREEN_MASK
+            | attribute::VIRTUAL_SCREEN_COUNT
+            | attribute::WINDOW
+            | attribute::OFF_SCREEN
+            | attribute::FULL_SCREEN
+            | attribute::PIXEL_BUFFER
+            | attribute::REMOTE_PIXEL_BUFFER => true,
+
             _ => unreachable!("every attribute above is one `takes_value` classified"),
         };
     }
@@ -183,34 +299,62 @@ unsafe extern "C" fn init_with_format(receiver: Id, _sel: Sel, format: Id, _shar
     receiver
 }
 
-/// `-setView:`, which is where the SDL context is actually made.
+/// `-setView:`, which records the drawable and nothing more.
 ///
-/// SDL needs a window to create a GL context against and AppKit does not, so
-/// this is the first moment both halves are known.
+/// Creating the SDL context here would be the obvious place and is the wrong
+/// one: AppKit lets a program make a context and send it `-makeCurrentContext`
+/// *before* it has a view - the runner does exactly that - and a context created
+/// only on `-setView:` is nil at the moment it is first used.
 unsafe extern "C" fn set_view(receiver: Id, _sel: Sel, view: Id) {
     let context = context_of(receiver);
     objc::arc::release(context.view);
     context.view = objc::arc::retain(view);
+}
+
+/// The window a context should draw into: its view's, or - before it has one -
+/// whichever window the program has made.
+///
+/// SDL needs a window to *create* a context against, and AppKit does not. The
+/// window is not part of the context on either side, though: `SDL_GL_MakeCurrent`
+/// takes it again on every call, so binding a context made against one window to
+/// another later is what the API is for rather than a workaround.
+fn drawable(context: &Context) -> sdl3::Window {
+    // SAFETY: the view is null or an object this runtime allocated.
+    let window = unsafe { crate::view::window_of(context.view) };
+    // SAFETY: null or a window this crate made.
+    let sdl = unsafe { crate::window::sdl_window(window) };
+    if !sdl.is_null() {
+        return sdl;
+    }
+    let fallback = match crate::window::key_window().is_null() {
+        false => crate::window::key_window(),
+        true => crate::window::all().last().copied().unwrap_or(std::ptr::null_mut()),
+    };
+    // SAFETY: null or a window this crate made.
+    unsafe { crate::window::sdl_window(fallback) }
+}
+
+/// Make the SDL context, if it is not there yet.
+fn ensure(receiver: Id, sent: &str) -> sdl3::Window {
+    let context = context_of(receiver);
+    let window = drawable(context);
+    if window.is_null() {
+        objc::fail!(
+            "-[NSOpenGLContext {sent}]: there is no window to create a GL context against - the \
+             program has not made one yet"
+        );
+    }
     if context.sdl.is_null() {
-        // SAFETY: `view` is null or an object this runtime allocated.
-        let window = unsafe { crate::view::window_of(view) };
-        // SAFETY: null or a window this crate made.
-        let sdl_window = unsafe { crate::window::sdl_window(window) };
-        if sdl_window.is_null() {
-            objc::fail!(
-                "-[NSOpenGLContext setView:]: the view is not in a window this runtime made, so \
-                 there is nothing to create a GL context against"
-            );
-        }
         apply(context.format);
-        let Some(sdl) = sdl3::video::gl_create_context(sdl_window) else {
+        let Some(sdl) = sdl3::video::gl_create_context(window) else {
             objc::fail!(
-                "-[NSOpenGLContext setView:]: SDL could not create a GL context: {}",
+                "-[NSOpenGLContext {sent}]: SDL could not create a GL context: {}",
                 sdl3::error()
             );
         };
         context.sdl = sdl;
     }
+    window
 }
 
 unsafe extern "C" fn view(receiver: Id, _sel: Sel) -> Id {
@@ -220,23 +364,9 @@ unsafe extern "C" fn view(receiver: Id, _sel: Sel) -> Id {
 /// The context that was made current last, which `+currentContext` answers.
 static CURRENT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// The SDL window a context draws into, or null.
-fn window_of(context: &Context) -> sdl3::Window {
-    // SAFETY: the view is null or an object this runtime allocated.
-    let window = unsafe { crate::view::window_of(context.view) };
-    // SAFETY: null or a window this crate made.
-    unsafe { crate::window::sdl_window(window) }
-}
-
 unsafe extern "C" fn make_current_context(receiver: Id, _sel: Sel) {
+    let window = ensure(receiver, "makeCurrentContext");
     let context = context_of(receiver);
-    if context.sdl.is_null() {
-        objc::fail!(
-            "-[NSOpenGLContext makeCurrentContext]: this context has no view, so it was never \
-             created"
-        );
-    }
-    let window = window_of(context);
     if !sdl3::video::gl_make_current(window, context.sdl) {
         objc::fail!(
             "-[NSOpenGLContext makeCurrentContext]: SDL could not make the context current: {}",
@@ -257,8 +387,7 @@ unsafe extern "C" fn clear_current_context(_class: Id, _sel: Sel) {
 
 /// `-flushBuffer`: the swap that puts a frame on the screen.
 unsafe extern "C" fn flush_buffer(receiver: Id, _sel: Sel) {
-    let context = context_of(receiver);
-    let window = window_of(context);
+    let window = drawable(context_of(receiver));
     if !window.is_null() {
         sdl3::video::swap_window(window);
     }
@@ -326,31 +455,34 @@ pub(crate) fn install() {
 mod tests {
     use super::*;
 
-    /// Every attribute the mapping handles is one `takes_value` classifies, and
-    /// the two lists cannot drift: an attribute in one and not the other is
-    /// either a refusal for something that works or a silent skip.
+    /// No attribute is in both lists, and every one is in a list.
+    ///
+    /// The two are what the walk steps by, so an attribute in neither stops a
+    /// program that was going to work and one in both is a step of the wrong
+    /// length - after which every later attribute is read as something else.
     #[test]
-    fn every_mapped_attribute_is_classified() {
-        for name in [
-            attribute::DOUBLE_BUFFER,
-            attribute::STEREO,
-            attribute::COLOR_SIZE,
-            attribute::ALPHA_SIZE,
-            attribute::DEPTH_SIZE,
-            attribute::STENCIL_SIZE,
-            attribute::ACCUM_SIZE,
-            attribute::SAMPLE_BUFFERS,
-            attribute::SAMPLES,
-            attribute::ACCELERATED,
-            attribute::NO_RECOVERY,
-            attribute::OPENGL_PROFILE,
-            attribute::SCREEN_MASK,
-        ] {
-            assert!(
-                attribute::takes_value(name).is_some(),
-                "{name} is mapped but not classified"
-            );
+    fn the_two_classifications_are_a_partition() {
+        for name in attribute::VALUED {
+            assert!(!attribute::STANDALONE.contains(name), "{name} is in both lists");
+            assert_eq!(attribute::takes_value(*name), Some(true), "{name}");
         }
+        for name in attribute::STANDALONE {
+            assert_eq!(attribute::takes_value(*name), Some(false), "{name}");
+        }
+    }
+
+    /// And the union is the whole of `NSOpenGL.h`, which is what stops a program
+    /// being refused for an attribute Apple has had since 10.0.
+    ///
+    /// The count rather than the values: the values are the two lists above, and
+    /// asserting them against themselves would say nothing.
+    #[test]
+    fn every_attribute_the_header_declares_is_classified() {
+        assert_eq!(
+            attribute::VALUED.len() + attribute::STANDALONE.len(),
+            39,
+            "NSOpenGL.h declares thirty-nine pixel format attributes"
+        );
     }
 
     /// An attribute nobody has described is refused rather than guessed at,

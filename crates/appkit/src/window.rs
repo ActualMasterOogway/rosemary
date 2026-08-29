@@ -22,9 +22,30 @@ pub struct Window {
     level: isize,
     accepts_mouse_moved: usize,
     shown: usize,
+    /// `NSWindowCollectionBehavior`, which a program reads back to decide
+    /// whether it may go full screen.
+    collection_behavior: usize,
+    first_responder: Id,
+    minimum: NSSize,
+    maximum: NSSize,
+    fullscreen: usize,
+    miniaturized: usize,
 }
 
 pub const INSTANCE_SIZE: usize = size_of::<Window>();
+
+/// The notification names a window posts.
+///
+/// Named here rather than where they are posted, because publishing the symbol
+/// and posting the notification are two different jobs and the first has to
+/// happen whether or not the second does yet.
+pub const DID_RESIZE: &str = "NSWindowDidResizeNotification";
+pub const DID_MOVE: &str = "NSWindowDidMoveNotification";
+pub const WILL_CLOSE: &str = "NSWindowWillCloseNotification";
+pub const DID_BECOME_KEY: &str = "NSWindowDidBecomeKeyNotification";
+pub const DID_RESIGN_KEY: &str = "NSWindowDidResignKeyNotification";
+pub const DID_MINIATURIZE: &str = "NSWindowDidMiniaturizeNotification";
+pub const DID_DEMINIATURIZE: &str = "NSWindowDidDeminiaturizeNotification";
 
 /// `NSWindowStyleMask`.
 mod style {
@@ -84,6 +105,14 @@ pub unsafe fn sdl_window(object: Id) -> sdl3::Window {
     match is_window {
         true => window_of(object).sdl,
         false => std::ptr::null_mut(),
+    }
+}
+
+/// A window's content view, for the event pump.
+pub fn content_view_of(object: Id) -> Id {
+    match object.is_null() {
+        true => std::ptr::null_mut(),
+        false => window_of(object).content_view,
     }
 }
 
@@ -200,12 +229,37 @@ unsafe extern "C" fn content_view(receiver: Id, _sel: Sel) -> Id {
     window_of(receiver).content_view
 }
 
+/// `-setContentView:`, which **resizes the view to the window**.
+///
+/// AppKit does that, and it is not a detail: a nib's view carries the size it
+/// had in Interface Builder, and a window carries the size the document asked
+/// for. Deltarune's are 640x480 and 966x620, so a view left at its own size
+/// draws into a fraction of the window and reports a backing store that does not
+/// match it.
 unsafe extern "C" fn set_content_view(receiver: Id, _sel: Sel, view: Id) {
     let window = window_of(receiver);
     objc::arc::release(window.content_view);
     window.content_view = objc::arc::retain(view);
     // SAFETY: `view` is null or an object this runtime allocated.
     unsafe { crate::view::set_window(view, receiver) };
+    if view.is_null() || window.sdl.is_null() {
+        return;
+    }
+    let (width, height) = sdl3::video::window_size(window.sdl).unwrap_or((0, 0));
+    let frame = NSRect {
+        origin: foundation::geometry::NSPoint::default(),
+        size: NSSize {
+            width: width as f64,
+            height: height as f64,
+        },
+    };
+    // Sent rather than written, so a view that tracks its own size - which a
+    // guest's `-setFrame:` override is for - hears about it.
+    // SAFETY: `-setFrame:` is `void (id, SEL, NSRect)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, NSRect) = std::mem::transmute(objc::msg::entry());
+        f(view, objc::sel::get("setFrame:"), frame);
+    }
 }
 
 unsafe extern "C" fn delegate(receiver: Id, _sel: Sel) -> Id {
@@ -345,6 +399,122 @@ unsafe extern "C" fn set_style_mask(receiver: Id, _sel: Sel, mask: usize) {
     }
 }
 
+unsafe extern "C" fn collection_behavior(receiver: Id, _sel: Sel) -> usize {
+    window_of(receiver).collection_behavior
+}
+
+unsafe extern "C" fn set_collection_behavior(receiver: Id, _sel: Sel, behavior: usize) {
+    window_of(receiver).collection_behavior = behavior;
+}
+
+unsafe extern "C" fn first_responder(receiver: Id, _sel: Sel) -> Id {
+    let window = window_of(receiver);
+    match window.first_responder.is_null() {
+        // A window with no first responder of its own answers with itself, as
+        // AppKit's does - it is the end of its own responder chain.
+        true => receiver,
+        false => window.first_responder,
+    }
+}
+
+unsafe extern "C" fn make_first_responder(receiver: Id, _sel: Sel, responder: Id) -> u8 {
+    window_of(receiver).first_responder = responder;
+    1
+}
+
+/// `-toggleFullScreen:`, which SDL does have.
+///
+/// The one window operation in this file that is not bookkeeping: a game asks
+/// for it from a menu item or a keystroke, and a window that stayed the same
+/// size would look like the request was lost.
+unsafe extern "C" fn toggle_full_screen(receiver: Id, _sel: Sel, _sender: Id) {
+    let window = window_of(receiver);
+    if window.sdl.is_null() {
+        return;
+    }
+    let wanted = window.fullscreen == 0;
+    if sdl3::video::set_window_fullscreen(window.sdl, wanted) {
+        window.fullscreen = wanted as usize;
+    }
+}
+
+unsafe extern "C" fn is_full_screen(receiver: Id, _sel: Sel) -> u8 {
+    (window_of(receiver).fullscreen != 0) as u8
+}
+
+unsafe extern "C" fn is_miniaturized(receiver: Id, _sel: Sel) -> u8 {
+    (window_of(receiver).miniaturized != 0) as u8
+}
+
+unsafe extern "C" fn miniaturize(receiver: Id, sel: Sel, sender: Id) {
+    window_of(receiver).miniaturized = 1;
+    // SAFETY: `-orderOut:` is `void (id, SEL, id)`.
+    unsafe { order_out(receiver, sel, sender) };
+}
+
+unsafe extern "C" fn deminiaturize(receiver: Id, sel: Sel, sender: Id) {
+    window_of(receiver).miniaturized = 0;
+    // SAFETY: `-makeKeyAndOrderFront:` is `void (id, SEL, id)`.
+    unsafe { make_key_and_order_front(receiver, sel, sender) };
+}
+
+/// `-isZoomed`: whether the window fills its screen.
+///
+/// Asked of the window's actual size rather than remembered, because a user can
+/// zoom one by dragging it and a remembered flag would then be a claim about
+/// what the program last did.
+unsafe extern "C" fn is_zoomed(receiver: Id, sel: Sel) -> u8 {
+    // SAFETY: `-frame` is `NSRect (id, SEL)`.
+    let frame = unsafe { frame(receiver, sel) };
+    let screen = crate::geometry::primary_height();
+    (frame.size.height >= screen) as u8
+}
+
+/// The size limits, kept and reported.
+///
+/// SDL can be told a minimum and a maximum, and is not: this runtime does not
+/// resize the window itself, so the limits only matter when the *user* drags an
+/// edge - and a limit enforced here but not there would let the drag through and
+/// then report a size the window does not have.
+unsafe extern "C" fn min_size(receiver: Id, _sel: Sel) -> NSSize {
+    window_of(receiver).minimum
+}
+
+unsafe extern "C" fn set_min_size(receiver: Id, _sel: Sel, size: NSSize) {
+    window_of(receiver).minimum = size;
+}
+
+unsafe extern "C" fn max_size(receiver: Id, _sel: Sel) -> NSSize {
+    window_of(receiver).maximum
+}
+
+unsafe extern "C" fn set_max_size(receiver: Id, _sel: Sel, size: NSSize) {
+    window_of(receiver).maximum = size;
+}
+
+/// `-standardWindowButton:`: the close, minimise and zoom buttons.
+///
+/// Nil, which is what AppKit answers for a button the window's style mask does
+/// not include - and an SDL window's decorations are the platform's, not
+/// objects this runtime has. A program asking for one is usually about to hide
+/// it, which is already the case.
+unsafe extern "C" fn standard_window_button(_receiver: Id, _sel: Sel, _which: usize) -> Id {
+    std::ptr::null_mut()
+}
+
+/// `-windowNumber`, which is SDL's own window id.
+///
+/// A number a program compares and passes around rather than one it interprets,
+/// so any stable per-window integer will do - and SDL's is the one this runtime
+/// already uses to route events.
+unsafe extern "C" fn window_number(receiver: Id, _sel: Sel) -> isize {
+    let sdl = window_of(receiver).sdl;
+    match sdl.is_null() {
+        true => 0,
+        false => sdl3::video::window_id(sdl) as isize,
+    }
+}
+
 /// Accepted and ignored, one line each.
 ///
 /// Every one is a request about how a window *looks* that SDL either does by
@@ -356,6 +526,10 @@ unsafe extern "C" fn ignored_flag(_receiver: Id, _sel: Sel, _flag: u8) {}
 unsafe extern "C" fn ignored(_receiver: Id, _sel: Sel) {}
 
 unsafe extern "C" fn ignored_object(_receiver: Id, _sel: Sel, _object: Id) {}
+
+unsafe extern "C" fn ignored_size(_receiver: Id, _sel: Sel, _size: NSSize) {}
+
+unsafe extern "C" fn ignored_integer(_receiver: Id, _sel: Sel, _value: isize) {}
 
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSWindow").expect("declared before its methods");
@@ -401,7 +575,36 @@ pub(crate) fn install() {
         "setHidesOnDeactivate:" => ignored_flag, c"v20@0:8c16";
         "setRestorable:" => ignored_flag, c"v20@0:8c16";
         "setShowsResizeIndicator:" => ignored_flag, c"v20@0:8c16";
-        "setCollectionBehavior:" => ignored_flag, c"v24@0:8Q16";
+        "standardWindowButton:" => standard_window_button, c"@24@0:8Q16";
+        "windowNumber" => window_number, c"q16@0:8";
+        "setTitlebarAppearsTransparent:" => ignored_flag, c"v20@0:8c16";
+        "setTitleVisibility:" => ignored_integer, c"v24@0:8q16";
+        "setMovableByWindowBackground:" => ignored_flag, c"v20@0:8c16";
+        "setIgnoresMouseEvents:" => ignored_flag, c"v20@0:8c16";
+        "collectionBehavior" => collection_behavior, c"Q16@0:8";
+        "setCollectionBehavior:" => set_collection_behavior, c"v24@0:8Q16";
+        "firstResponder" => first_responder, c"@16@0:8";
+        "makeFirstResponder:" => make_first_responder, c"c24@0:8@16";
+        "toggleFullScreen:" => toggle_full_screen, c"v24@0:8@16";
+        "isInFullScreenMode" => is_full_screen, c"c16@0:8";
+        "minSize" => min_size, c"{CGSize=dd}16@0:8";
+        "setMinSize:" => set_min_size, c"v32@0:8{CGSize=dd}16";
+        "maxSize" => max_size, c"{CGSize=dd}16@0:8";
+        "setMaxSize:" => set_max_size, c"v32@0:8{CGSize=dd}16";
+        "contentMinSize" => min_size, c"{CGSize=dd}16@0:8";
+        "setContentMinSize:" => set_min_size, c"v32@0:8{CGSize=dd}16";
+        "contentMaxSize" => max_size, c"{CGSize=dd}16@0:8";
+        "setContentMaxSize:" => set_max_size, c"v32@0:8{CGSize=dd}16";
+        "setContentAspectRatio:" => ignored_size, c"v32@0:8{CGSize=dd}16";
+        "setAspectRatio:" => ignored_size, c"v32@0:8{CGSize=dd}16";
+        "setContentResizeIncrements:" => ignored_size, c"v32@0:8{CGSize=dd}16";
+        "zoom:" => ignored_object, c"v24@0:8@16";
+        "performZoom:" => ignored_object, c"v24@0:8@16";
+        "miniaturize:" => miniaturize, c"v24@0:8@16";
+        "performMiniaturize:" => miniaturize, c"v24@0:8@16";
+        "deminiaturize:" => deminiaturize, c"v24@0:8@16";
+        "isMiniaturized" => is_miniaturized, c"c16@0:8";
+        "isZoomed" => is_zoomed, c"c16@0:8";
         "center" => ignored, c"v16@0:8";
         "display" => ignored, c"v16@0:8";
         "update" => ignored, c"v16@0:8";

@@ -316,6 +316,34 @@ unsafe extern "C" fn no(_receiver: Id, _sel: Sel) -> u8 {
     0
 }
 
+/// `-display`: draw the view now.
+///
+/// **This is what calls `-drawRect:`,** and a no-op here is a program that
+/// renders nothing while looking like it is running. Deltarune's frame is
+/// exactly this path: its display link sends `-[YYGLView display]`, AppKit turns
+/// that into `-drawRect:`, and the guest's override makes its GL context current
+/// and swaps. With `-display` empty the game ticks, the display link fires, and
+/// the window stays black.
+///
+/// Sent rather than called, so the *guest's* override is what runs. A view with
+/// no `-drawRect:` of its own draws nothing, which is what an empty view does.
+unsafe extern "C" fn display(receiver: Id, sel: Sel) {
+    let sel_draw = objc::sel::get("drawRect:");
+    // SAFETY: a live view; `-bounds` is `NSRect (id, SEL)`.
+    let rect = unsafe { bounds(receiver, sel) };
+    // SAFETY: a live object this runtime allocated.
+    let responds =
+        unsafe { objc::object::class_of(receiver) }.is_some_and(|c| c.method(sel_draw).is_some());
+    if !responds {
+        return;
+    }
+    // SAFETY: `-drawRect:` is `void (id, SEL, NSRect)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, NSRect) = std::mem::transmute(objc::msg::entry());
+        f(receiver, sel_draw, rect);
+    }
+}
+
 unsafe extern "C" fn ignored(_receiver: Id, _sel: Sel) {}
 
 unsafe extern "C" fn ignored_flag(_receiver: Id, _sel: Sel, _flag: u8) {}
@@ -358,7 +386,10 @@ pub(crate) fn install() {
         "isOpaque" => yes, c"c16@0:8";
         "isFlipped" => no, c"c16@0:8";
         "isHidden" => no, c"c16@0:8";
-        "display" => ignored, c"v16@0:8";
+        "display" => display, c"v16@0:8";
+        "displayIfNeeded" => display, c"v16@0:8";
+        "lockFocus" => ignored, c"v16@0:8";
+        "unlockFocus" => ignored, c"v16@0:8";
         "setNeedsDisplay:" => ignored_flag, c"v20@0:8c16";
         "setHidden:" => ignored_flag, c"v20@0:8c16";
         "setAutoresizingMask:" => ignored_flag, c"v24@0:8Q16";

@@ -32,6 +32,13 @@ pub struct Layout {
 impl Layout {
     /// The bundle `executable` is inside, or `None` for a loose binary.
     pub fn enclosing(executable: &Path) -> Option<Layout> {
+        // Absolute, always. Apple's `-bundlePath` is, and a program that joins
+        // it onto another directory - which is exactly what a game does to find
+        // its data beside its save files - turns a relative one into a path
+        // that does not exist. `canonicalize` also resolves the symlinks a
+        // `.app` in a library folder is often reached through.
+        let absolute = executable.canonicalize().ok();
+        let executable = absolute.as_deref().unwrap_or(executable);
         let macos = executable.parent()?;
         if macos.file_name()? != "MacOS" {
             return None;
@@ -316,16 +323,18 @@ pub(crate) mod class {
         unsafe { path_for_resource(receiver, sel, name, kind) }
     }
 
+    /// `-infoDictionary`: the whole `Info.plist` as objects.
+    ///
+    /// This was refused until `crate::objectify` existed, and the reason is
+    /// worth keeping: a dictionary missing a key is indistinguishable from a
+    /// plist that never had one, so a *partial* conversion is worse than none.
+    /// What makes it answerable now is that the conversion is total - every
+    /// plist type is either built or refused by name.
     unsafe extern "C" fn info_dictionary(_receiver: Id, _sel: Sel) -> Id {
-        // Refused rather than half-built: an `NSDictionary` of the whole
-        // `Info.plist` means converting every plist type into a Foundation
-        // object, and a guest that gets a dictionary missing the key it wanted
-        // has no way to tell that from a key the plist really lacks.
-        objc::fail!(
-            "-[NSBundle infoDictionary]: this runtime answers individual keys \
-             through -objectForInfoDictionaryKey: but does not build the whole \
-             dictionary yet"
-        );
+        match super::main() {
+            Some(layout) => crate::objectify::object(&layout.info, "-[NSBundle infoDictionary]"),
+            None => std::ptr::null_mut(),
+        }
     }
 
     unsafe extern "C" fn executable_name(_receiver: Id, _sel: Sel) -> *const c_char {

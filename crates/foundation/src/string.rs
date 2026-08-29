@@ -517,6 +517,157 @@ unsafe extern "C" fn append_path_component(receiver: Id, _sel: Sel, component: I
     unsafe { api::CFAutorelease(s) as Id }
 }
 
+/// `-componentsSeparatedByString:`.
+///
+/// An empty separator would split into as many empty pieces as there are bytes,
+/// which is not what Apple does - it raises - so the whole string comes back as
+/// one component instead, which is the answer a caller can use.
+unsafe extern "C" fn components_separated_by_string(receiver: Id, _sel: Sel, separator: Id) -> Id {
+    // SAFETY: two `NSString`s, or nil.
+    let (whole, separator) = unsafe { (bytes(receiver), bytes(separator)) };
+    let mut pieces: Vec<corefoundation::base::CFTypeRef> = Vec::new();
+    let mut push = |piece: &[u8]| pieces.push(corefoundation::string::from_bytes(piece, false));
+    if separator.is_empty() {
+        push(&whole);
+    } else {
+        let mut at = 0;
+        while let Some(found) = whole[at..]
+            .windows(separator.len())
+            .position(|w| w == separator.as_slice())
+        {
+            push(&whole[at..at + found]);
+            at += found + separator.len();
+        }
+        push(&whole[at..]);
+    }
+    let array = corefoundation::collections::new_array(
+        &pieces,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    // Each piece was retained by the array, so this call's own reference goes.
+    for piece in pieces {
+        // SAFETY: a string this function made.
+        unsafe { api::CFRelease(piece) };
+    }
+    // SAFETY: a fresh array.
+    unsafe { api::CFAutorelease(array) as Id }
+}
+
+/// `-stringByDeletingPathExtension`: everything up to the last dot in the last
+/// component.
+///
+/// The dot has to be *in the last component* and not at its start: `a.b/c` keeps
+/// its dot, and `/etc/.profile` is a name rather than an extension. Both are the
+/// cases a naive search for the last dot gets wrong.
+unsafe extern "C" fn delete_path_extension(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an `NSString`, or nil.
+    let whole = unsafe { bytes(receiver) };
+    let leaf = whole.iter().rposition(|b| *b == b'/').map_or(0, |i| i + 1);
+    match whole[leaf..].iter().rposition(|b| *b == b'.') {
+        Some(dot) if dot > 0 => slice(&whole, 0, leaf + dot),
+        _ => slice(&whole, 0, whole.len()),
+    }
+}
+
+unsafe extern "C" fn append_path_extension(receiver: Id, _sel: Sel, extension: Id) -> Id {
+    // SAFETY: two `NSString`s, or nil.
+    let (mut whole, extension) = unsafe { (bytes(receiver), bytes(extension)) };
+    if !extension.is_empty() {
+        whole.push(b'.');
+        whole.extend_from_slice(&extension);
+    }
+    let s = corefoundation::string::from_bytes(&whole, false);
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(s) as Id }
+}
+
+/// `-stringByExpandingTildeInPath`.
+///
+/// `~` alone and `~/...` are the home directory; `~user` is *someone else's*,
+/// which needs the password database and is left alone rather than expanded to
+/// this user's - a path that silently became a different account's is worse than
+/// one that stayed as it was written.
+unsafe extern "C" fn expand_tilde(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an `NSString`, or nil.
+    let whole = unsafe { bytes(receiver) };
+    let expanded = match whole.first() {
+        Some(b'~') if matches!(whole.get(1), None | Some(b'/')) => {
+            let mut home = crate::home_directory().into_bytes();
+            home.extend_from_slice(&whole[1..]);
+            home
+        }
+        _ => whole,
+    };
+    let s = corefoundation::string::from_bytes(&expanded, false);
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(s) as Id }
+}
+
+/// `-stringByStandardizingPath`: the tilde expanded, `//` collapsed, `.` and
+/// `..` resolved lexically.
+///
+/// Lexically and not through the filesystem, which is what Apple documents for a
+/// path that is not absolute or that has symlinks in it. Resolving `..` by
+/// asking the filesystem would follow a symlink and give a different answer than
+/// the guest's own string arithmetic.
+unsafe extern "C" fn standardize_path(receiver: Id, sel: Sel) -> Id {
+    // SAFETY: `-stringByExpandingTildeInPath` is `id (id, SEL)`.
+    let expanded = unsafe { expand_tilde(receiver, sel) };
+    // SAFETY: a string this call just made.
+    let whole = unsafe { bytes(expanded) };
+    let absolute = whole.first() == Some(&b'/');
+
+    let mut parts: Vec<&[u8]> = Vec::new();
+    for part in whole.split(|b| *b == b'/') {
+        match part {
+            b"" | b"." => {}
+            b".." if parts.last().is_some_and(|p| *p != b"..") => {
+                parts.pop();
+            }
+            // A leading `..` on an absolute path is the root's parent, which is
+            // the root.
+            b".." if absolute => {}
+            other => parts.push(other),
+        }
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(whole.len());
+    if absolute {
+        out.push(b'/');
+    }
+    out.extend_from_slice(&parts.join(&b'/'));
+    if out.is_empty() {
+        out.push(b'.');
+    }
+    let s = corefoundation::string::from_bytes(&out, false);
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(s) as Id }
+}
+
+/// `-fileSystemRepresentation`, which is `-UTF8String` on a filesystem whose
+/// paths are bytes.
+unsafe extern "C" fn file_system_representation(receiver: Id, sel: Sel) -> *const c_char {
+    // SAFETY: `-UTF8String` is `const char * (id, SEL)`.
+    unsafe { utf8_string(receiver, sel) }
+}
+
+unsafe extern "C" fn is_absolute_path(receiver: Id, _sel: Sel) -> u8 {
+    // SAFETY: an `NSString`, or nil.
+    (unsafe { bytes(receiver) }.first() == Some(&b'/')) as u8
+}
+
+/// `+stringWithString:` and `-initWithString:`: a copy of another string.
+///
+/// A copy rather than the same object, because the argument may be mutable and
+/// a caller taking a snapshot of one expects the snapshot to stay put.
+unsafe extern "C" fn string_with_string(_class: Id, _sel: Sel, other: Id) -> Id {
+    // SAFETY: an `NSString`, or nil.
+    let text = unsafe { bytes(other) };
+    let s = corefoundation::string::from_bytes(&text, false);
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(s) as Id }
+}
+
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSString").expect("CoreFoundation registered NSString");
     methods!(class, {
@@ -538,6 +689,7 @@ pub(crate) fn install() {
         "substringFromIndex:" => substring_from_index, c"@24@0:8Q16";
         "substringToIndex:" => substring_to_index, c"@24@0:8Q16";
         "substringWithRange:" => substring_with_range, c"@32@0:8{_NSRange=QQ}16";
+        "componentsSeparatedByString:" => components_separated_by_string, c"@24@0:8@16";
         "lowercaseString" => lowercase, c"@16@0:8";
         "uppercaseString" => uppercase, c"@16@0:8";
         "compare:" => compare, c"q24@0:8@16";
@@ -551,6 +703,13 @@ pub(crate) fn install() {
         "stringByDeletingLastPathComponent" => delete_last_path_component, c"@16@0:8";
         "pathExtension" => path_extension, c"@16@0:8";
         "stringByAppendingPathComponent:" => append_path_component, c"@24@0:8@16";
+        "stringByDeletingPathExtension" => delete_path_extension, c"@16@0:8";
+        "stringByAppendingPathExtension:" => append_path_extension, c"@24@0:8@16";
+        "isAbsolutePath" => is_absolute_path, c"B16@0:8";
+        "stringByExpandingTildeInPath" => expand_tilde, c"@16@0:8";
+        "stringByStandardizingPath" => standardize_path, c"@16@0:8";
+        "stringByResolvingSymlinksInPath" => standardize_path, c"@16@0:8";
+        "fileSystemRepresentation" => file_system_representation, c"*16@0:8";
         "mutableCopyWithZone:" => mutable_copy, c"@24@0:8^v16";
         "initWithBytes:length:encoding:" => init_with_bytes, c"@40@0:8^v16Q24Q32";
         "initWithUTF8String:" => init_with_utf8, c"@24@0:8*16";
@@ -577,5 +736,94 @@ pub(crate) fn install() {
         "string" => empty_string, c"@16@0:8";
         "stringWithFormat:" => string_with_format, c"@24@0:8@16";
         "localizedStringWithFormat:" => string_with_format, c"@24@0:8@16";
+        "stringWithString:" => string_with_string, c"@24@0:8@16";
     });
+    methods!(class, {
+        "initWithString:" => string_with_string, c"@24@0:8@16";
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Splitting and joining are each other's inverse, which is the property a
+    /// path or an argument list is taken apart and put back together on.
+    #[test]
+    fn separating_and_joining_round_trip() {
+        crate::bootstrap();
+        let text = from_str("alpha::beta::gamma");
+        let separator = from_str("::");
+        // SAFETY: `-componentsSeparatedByString:` is `id (id, SEL, id)`.
+        let parts = unsafe {
+            components_separated_by_string(
+                text,
+                objc::sel::get("componentsSeparatedByString:"),
+                separator,
+            )
+        };
+        // SAFETY: an array this call made.
+        let array = unsafe {
+            corefoundation::collections::array(parts as corefoundation::base::CFTypeRef)
+        }
+        .expect("an array");
+        assert_eq!(array.values.len(), 3);
+
+        // Sent rather than called: `-componentsJoinedByString:` is installed by
+        // `crate::collections`, and going through dispatch is what says the two
+        // halves meet on the same class.
+        // SAFETY: it is `id (id, SEL, id)`.
+        let joined = unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, Id) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            f(parts, objc::sel::get("componentsJoinedByString:"), separator)
+        };
+        // SAFETY: a string.
+        assert_eq!(unsafe { bytes(joined) }, b"alpha::beta::gamma");
+    }
+
+    /// The path methods on the two cases a search for the last dot gets wrong.
+    #[test]
+    fn a_path_extension_is_in_the_last_component_and_is_not_the_whole_name() {
+        crate::bootstrap();
+        let deleted = |path: &str| {
+            let s = from_str(path);
+            // SAFETY: `-stringByDeletingPathExtension` is `id (id, SEL)`.
+            let out = unsafe {
+                delete_path_extension(s, objc::sel::get("stringByDeletingPathExtension"))
+            };
+            // SAFETY: a string this call made.
+            String::from_utf8(unsafe { bytes(out) }).expect("utf8")
+        };
+        assert_eq!(deleted("/a/b/game.ios"), "/a/b/game");
+        // A dot in a *directory* is not this path's extension.
+        assert_eq!(deleted("/a.b/c"), "/a.b/c");
+        // And a leading dot is a name, not an extension.
+        assert_eq!(deleted("/etc/.profile"), "/etc/.profile");
+        assert_eq!(deleted("plain"), "plain");
+    }
+
+    /// A separator that is not there gives one component, and an empty one gives
+    /// the whole string rather than a component per byte.
+    #[test]
+    fn a_separator_that_is_absent_or_empty_gives_one_component() {
+        crate::bootstrap();
+        let text = from_str("nothing to split");
+        for separator in ["|", ""] {
+            // SAFETY: `-componentsSeparatedByString:` is `id (id, SEL, id)`.
+            let parts = unsafe {
+                components_separated_by_string(
+                    text,
+                    objc::sel::get("componentsSeparatedByString:"),
+                    from_str(separator),
+                )
+            };
+            // SAFETY: an array this call made.
+            let array = unsafe {
+                corefoundation::collections::array(parts as corefoundation::base::CFTypeRef)
+            }
+            .expect("an array");
+            assert_eq!(array.values.len(), 1, "separator {separator:?}");
+        }
+    }
 }

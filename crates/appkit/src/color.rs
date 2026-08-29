@@ -59,10 +59,24 @@ fn make(red: f64, green: f64, blue: f64, alpha: f64) -> Id {
 
 /// The named colours, as `(selector, r, g, b, a)`.
 ///
-/// Only the ones with an unambiguous value. `+controlColor` and its relatives
-/// are the *appearance's*, and answering one with a guess would put a made-up
-/// grey where a program expected the system's.
+/// The first group is the device colours, whose values are their names. The
+/// second is the semantic ones - `+textColor` and its relatives - whose value
+/// depends on the appearance, and which are answered with the light appearance's
+/// because this runtime has one appearance and it is that one. A program that
+/// draws with `+textColor` on a dark background gets black text, which is what
+/// it would get from AppKit in light mode; a program that switched appearance
+/// would not be followed, and there is no appearance here to switch.
 static NAMED: &[(&str, f64, f64, f64, f64)] = &[
+    ("textColor", 0.0, 0.0, 0.0, 1.0),
+    ("labelColor", 0.0, 0.0, 0.0, 1.0),
+    ("windowBackgroundColor", 0.93, 0.93, 0.93, 1.0),
+    ("controlColor", 0.93, 0.93, 0.93, 1.0),
+    ("controlTextColor", 0.0, 0.0, 0.0, 1.0),
+    ("controlBackgroundColor", 1.0, 1.0, 1.0, 1.0),
+    ("textBackgroundColor", 1.0, 1.0, 1.0, 1.0),
+    ("selectedTextColor", 0.0, 0.0, 0.0, 1.0),
+    ("windowFrameTextColor", 0.0, 0.0, 0.0, 1.0),
+    ("disabledControlTextColor", 0.53, 0.53, 0.53, 1.0),
     ("blackColor", 0.0, 0.0, 0.0, 1.0),
     ("whiteColor", 1.0, 1.0, 1.0, 1.0),
     ("clearColor", 0.0, 0.0, 0.0, 0.0),

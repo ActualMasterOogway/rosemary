@@ -124,8 +124,19 @@ unsafe extern "C" fn run(receiver: Id, sel: Sel) {
         if unsafe { (*(receiver as *const Application)).running } == 0 {
             break;
         }
-        let result = loop_.run_in_mode(corefoundation::runloop::DEFAULT_MODE, 0.05, false);
+        // The window system first, and every turn. A window that is never
+        // pumped is one the platform has not been told to show: on macOS SDL's
+        // Cocoa backend needs its events drained for the window to appear at
+        // all, so this is not only about delivering input.
+        crate::event::pump(receiver);
+        // A short slice rather than a long one: the run loop's timers are what
+        // drive a frame - see `corevideo` - and a turn that blocked for a tenth
+        // of a second would cap the frame rate at ten.
+        let result = loop_.run_in_mode(corefoundation::runloop::DEFAULT_MODE, 0.002, false);
         if result == corefoundation::runloop::result::FINISHED {
+            // Nothing scheduled: a program with no display link and no source is
+            // waiting to be told to stop, and spinning on that would be a core
+            // at a hundred per cent for a window that is only being looked at.
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
@@ -167,6 +178,41 @@ unsafe extern "C" fn activate(_receiver: Id, _sel: Sel, _flag: u8) {}
 /// `-setActivationPolicy:`, which answers that it succeeded.
 unsafe extern "C" fn set_activation_policy(_receiver: Id, _sel: Sel, _policy: isize) -> u8 {
     1
+}
+
+/// `NSApplicationPresentationOptions`: whether the menu bar and Dock are hidden.
+///
+/// Kept and reported rather than acted on. There is no menu bar and no Dock in
+/// an SDL window, so the *effect* of hiding them is already the case; what a
+/// program needs is for the value it set to be the value it reads back, because
+/// a game toggling full screen compares the two.
+static PRESENTATION: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+unsafe extern "C" fn presentation_options(_receiver: Id, _sel: Sel) -> usize {
+    PRESENTATION.load(std::sync::atomic::Ordering::Acquire)
+}
+
+unsafe extern "C" fn set_presentation_options(_receiver: Id, _sel: Sel, options: usize) {
+    PRESENTATION.store(options, std::sync::atomic::Ordering::Release);
+}
+
+/// The windows this runtime has made, in the order they were made.
+unsafe extern "C" fn windows(_receiver: Id, _sel: Sel) -> Id {
+    let objects: Vec<corefoundation::base::CFTypeRef> = crate::window::all()
+        .into_iter()
+        .map(|w| w as corefoundation::base::CFTypeRef)
+        .collect();
+    let array = corefoundation::collections::new_array(
+        &objects,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    // SAFETY: a fresh array.
+    unsafe { corefoundation::api::CFAutorelease(array) as Id }
+}
+
+unsafe extern "C" fn key_window(_receiver: Id, _sel: Sel) -> Id {
+    crate::window::key_window()
 }
 
 /// Send `selector` to `target` if it has one, and do nothing if it does not.
@@ -276,6 +322,12 @@ pub(crate) fn install() {
         "terminate:" => terminate, c"v24@0:8@16";
         "activateIgnoringOtherApps:" => activate, c"v20@0:8c16";
         "setActivationPolicy:" => set_activation_policy, c"c24@0:8q16";
+        "currentSystemPresentationOptions" => presentation_options, c"Q16@0:8";
+        "presentationOptions" => presentation_options, c"Q16@0:8";
+        "setPresentationOptions:" => set_presentation_options, c"v24@0:8Q16";
+        "windows" => windows, c"@16@0:8";
+        "keyWindow" => key_window, c"@16@0:8";
+        "mainWindow" => key_window, c"@16@0:8";
     });
 }
 

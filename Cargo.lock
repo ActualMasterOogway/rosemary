@@ -132,6 +132,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "corevideo"
+version = "0.1.0"
+dependencies = [
+ "corefoundation",
+ "objc",
+ "sdl3",
+]
+
+[[package]]
 name = "cranelift"
 version = "0.136.0-dev"
 source = "git+https://github.com/microlift/wasmtime?branch=microlift_experimental#4196efa492c6d18b5ef7c78c6f0fc7d969de5717"
@@ -679,6 +688,7 @@ version = "0.1.0"
 dependencies = [
  "appkit",
  "corefoundation",
+ "corevideo",
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-native",

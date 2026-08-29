@@ -27,6 +27,7 @@ pub fn bootstrap() {
     collections::array_class();
     collections::dictionary_class();
     collections::number_class();
+    collections::boolean_class();
     collections::data_class();
 }
 
@@ -248,10 +249,87 @@ pub fn data_symbols() -> Vec<(String, u64)> {
     for (name, mode) in [
         ("_kCFRunLoopDefaultMode", runloop::DEFAULT_MODE),
         ("_kCFRunLoopCommonModes", runloop::COMMON_MODES),
+        // Foundation spells the default mode this way, and it is the same mode:
+        // a guest that schedules with one and runs with the other has to be
+        // talking about the same thing or nothing ever fires.
+        ("_NSDefaultRunLoopMode", runloop::DEFAULT_MODE),
     ] {
         out.push((name.to_string(), base::global_cell(name, mode_name_object(mode))));
     }
+    // The string-valued globals, each of which is exactly its own name without
+    // the `k` and the `Key`. Interned so that a guest comparing one against a
+    // key it read back gets identity as well as equality.
+    for (symbol, text) in KEY_STRINGS {
+        out.push((
+            symbol.to_string(),
+            base::global_cell(symbol, mode_name_object(text)),
+        ));
+    }
+    for (symbol, value) in [
+        ("_kCFBooleanTrue", collections::boolean(true)),
+        ("_kCFBooleanFalse", collections::boolean(false)),
+    ] {
+        out.push((
+            symbol.to_string(),
+            base::global_cell(symbol, value as usize as u64),
+        ));
+    }
+    out.push((
+        "_kCFNull".to_string(),
+        base::global_cell("_kCFNull", null_object()),
+    ));
+    // A `double` variable, not a pointer: the guest loads the symbol's address
+    // and reads a floating-point number out of it. 1600 is the Big Sur value,
+    // which is the floor every version test in a program of this vintage asks
+    // about.
+    out.push((
+        "_kCFCoreFoundationVersionNumber".to_string(),
+        base::global_cell(
+            "_kCFCoreFoundationVersionNumber",
+            (1600.0f64).to_bits(),
+        ),
+    ));
     out
+}
+
+/// The `CFStringRef` globals whose value is a fixed name.
+///
+/// Each is a documented constant string rather than something this runtime
+/// chooses, which is what makes publishing them safe: a guest using one as a
+/// dictionary key gets the key Apple's CoreFoundation would have given it.
+///
+/// They matter more than they look. An unresolved *function* import is refused
+/// by name at the call; an unresolved **data** import binds to zero, and the
+/// guest's very next instruction dereferences it - which is a segfault at
+/// address zero with nothing anywhere to say which symbol it was.
+static KEY_STRINGS: &[(&str, &str)] = &[
+    ("_kCFBundleIdentifierKey", "CFBundleIdentifier"),
+    ("_kCFBundleNameKey", "CFBundleName"),
+    ("_kCFBundleVersionKey", "CFBundleVersion"),
+    ("_kCFBundleExecutableKey", "CFBundleExecutable"),
+    ("_kCFBundleLocalizationsKey", "CFBundleLocalizations"),
+    ("_kCFBundleDevelopmentRegionKey", "CFBundleDevelopmentRegion"),
+    ("_kCFBundleInfoDictionaryVersionKey", "CFBundleInfoDictionaryVersion"),
+];
+
+/// `kCFNull`, the singleton `NSNull` also answers for.
+fn null_object() -> u64 {
+    let class = objc::class::lookup(c"NSNull");
+    let Some(class) = class else {
+        // Foundation registers `NSNull`, and a process using CoreFoundation
+        // without it has no null to publish. Zero here is the same as not
+        // publishing the symbol, which is what it was before.
+        return 0;
+    };
+    let sel = objc::sel::get("null");
+    // SAFETY: `+null` is `id (Class, SEL)` and hands back a singleton kept for
+    // the process.
+    let null = unsafe {
+        let f: unsafe extern "C" fn(objc::object::Id, objc::sel::Sel) -> objc::object::Id =
+            std::mem::transmute(objc::msg::entry());
+        f(objc::class::ptr(class) as objc::object::Id, sel)
+    };
+    null as usize as u64
 }
 
 #[cfg(test)]

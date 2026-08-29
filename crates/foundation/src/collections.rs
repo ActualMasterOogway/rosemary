@@ -63,6 +63,227 @@ unsafe extern "C" fn remove_object_at_index(receiver: Id, _sel: Sel, index: usiz
     }
 }
 
+/// `-componentsJoinedByString:`, the other half of
+/// `-[NSString componentsSeparatedByString:]`.
+///
+/// Every element is *sent* `-UTF8String` rather than read as a string, because
+/// an array is entitled to hold anything and a guest joining an array of its own
+/// objects expects each one's own answer. An element that answers nothing joins
+/// as nothing, which is what a nil description would give.
+unsafe extern "C" fn components_joined_by_string(receiver: Id, _sel: Sel, separator: Id) -> Id {
+    // SAFETY: an array.
+    let Some(array) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: null or a string.
+    let separator = unsafe { crate::string::bytes(separator) };
+    let mut out: Vec<u8> = Vec::new();
+    for (i, value) in array.values.iter().enumerate() {
+        if i > 0 {
+            out.extend_from_slice(&separator);
+        }
+        // SAFETY: an element of a live array.
+        out.extend_from_slice(&unsafe { crate::string::bytes(*value as Id) });
+    }
+    let joined = corefoundation::string::from_bytes(&out, false);
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(joined) as Id }
+}
+
+/// `+[NSData dataWithContentsOfFile:]`.
+///
+/// Nil for a file that cannot be read, which is Apple's answer and the one a
+/// caller checks for - a program asking for a file it may not have is asking a
+/// question, not making a mistake.
+unsafe extern "C" fn data_with_contents_of_file(_class: Id, _sel: Sel, path: Id) -> Id {
+    // SAFETY: an `NSString`, or nil.
+    let path = unsafe { crate::string::bytes(path) };
+    let Ok(path) = String::from_utf8(path) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return std::ptr::null_mut();
+    };
+    let data = collections::new_data(bytes);
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(data) as Id }
+}
+
+/// `-writeToFile:atomically:`.
+///
+/// The atomic flag is honoured by writing beside the target and renaming, which
+/// is what makes it atomic - a program that asked for it and got a plain write
+/// would have a half-written save file after a crash and nothing to say so.
+unsafe extern "C" fn write_to_file(receiver: Id, _sel: Sel, path: Id, atomically: u8) -> u8 {
+    // SAFETY: an `NSString`, or nil.
+    let path = unsafe { crate::string::bytes(path) };
+    let Ok(path) = String::from_utf8(path) else {
+        return 0;
+    };
+    // SAFETY: a data object.
+    let Some(bytes) = (unsafe { collections::data(receiver as CFTypeRef) }) else {
+        return 0;
+    };
+    if atomically == 0 {
+        return std::fs::write(&path, &**bytes).is_ok() as u8;
+    }
+    let temporary = format!("{path}.rosetta3-{}", std::process::id());
+    if std::fs::write(&temporary, &**bytes).is_err() {
+        return 0;
+    }
+    match std::fs::rename(&temporary, &path) {
+        Ok(()) => 1,
+        Err(_) => {
+            let _ = std::fs::remove_file(&temporary);
+            0
+        }
+    }
+}
+
+/// `-[NSDictionary valueForKey:]`, which is *not* the `NSObject` one.
+///
+/// A dictionary overrides key-value coding to mean its own contents: Apple's
+/// answers `-objectForKey:` for any key not beginning with `@`. Without the
+/// override the inherited implementation looks for a getter or an ivar of that
+/// name, finds neither, and reports a class that in fact has the key.
+unsafe extern "C" fn dictionary_value_for_key(receiver: Id, sel: Sel, key: Id) -> Id {
+    // SAFETY: an `NSString`, or nil.
+    let name = unsafe { crate::string::bytes(key) };
+    if name.first() == Some(&b'@') {
+        // `@count` and its relatives are the operators, which address the
+        // dictionary itself rather than its contents. Refused by name: an
+        // operator answered as a missing key would be nil where a number was
+        // expected.
+        objc::fail!(
+            "-[NSDictionary valueForKey:]: {} is a key-value coding operator, which this runtime \
+             does not implement",
+            String::from_utf8_lossy(&name)
+        );
+    }
+    // SAFETY: `-objectForKey:` is `id (id, SEL, id)`.
+    unsafe { object_for_key(receiver, sel, key) }
+}
+
+/// `-[NSMutableDictionary setValue:forKey:]`, whose nil means *remove*.
+unsafe extern "C" fn dictionary_set_value_for_key(receiver: Id, sel: Sel, value: Id, key: Id) {
+    match value.is_null() {
+        // SAFETY: `-removeObjectForKey:` is `void (id, SEL, id)`.
+        true => unsafe { remove_object_for_key(receiver, sel, key) },
+        // SAFETY: `-setObject:forKey:` is `void (id, SEL, id, id)`.
+        false => unsafe { set_object_for_key(receiver, sel, value, key) },
+    }
+}
+
+/// `NSFastEnumerationState`, which the guest allocates on its own stack.
+///
+/// The layout is ABI: `for (id x in collection)` is compiled by clang into a
+/// call to `-countByEnumeratingWithState:objects:count:` and then a walk of
+/// `items_ptr`, so a field at the wrong offset is a loop over the wrong memory.
+#[repr(C)]
+struct FastEnumerationState {
+    state: usize,
+    items: *mut Id,
+    mutations: *mut usize,
+    extra: [usize; 5],
+}
+
+/// A word every collection points `mutations` at.
+///
+/// The compiler reads it before and after the loop body and raises if it
+/// changed, which is how a program is told it mutated a collection while
+/// enumerating it. One shared word means this runtime never reports that - it
+/// has no per-collection version counter - so the check always passes. The
+/// alternative is pointing at the collection's own storage, whose value changes
+/// for reasons that are not mutations and would raise on a correct program.
+static NEVER_MUTATED: usize = 0;
+
+/// `-countByEnumeratingWithState:objects:count:`, for anything whose elements
+/// are a contiguous vector.
+///
+/// One pass: everything is already in one buffer, so the first call hands the
+/// guest a pointer straight into it and the second says there is no more. That
+/// is what Apple's array does too, and it is why `buffer` is untouched - it is
+/// there for a collection that has to *materialise* its elements, which none of
+/// these do.
+///
+/// # Safety
+///
+/// `state` must be a writable `NSFastEnumerationState`, and `values` must
+/// outlive the loop - which it does, because a mutation during enumeration is
+/// the program's error and the one this cannot detect.
+unsafe fn enumerate(state: *mut FastEnumerationState, values: &mut [CFTypeRef]) -> usize {
+    if state.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's obligation.
+    let state = unsafe { &mut *state };
+    if state.state != 0 {
+        return 0;
+    }
+    state.state = 1;
+    state.items = values.as_mut_ptr() as *mut Id;
+    state.mutations = &NEVER_MUTATED as *const usize as *mut usize;
+    values.len()
+}
+
+unsafe extern "C" fn array_enumerate(
+    receiver: Id,
+    _sel: Sel,
+    state: *mut FastEnumerationState,
+    _buffer: *mut Id,
+    _len: usize,
+) -> usize {
+    // SAFETY: an array.
+    let Some(array) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return 0;
+    };
+    // SAFETY: the guest's own state structure, and storage that outlives the
+    // loop.
+    unsafe { enumerate(state, &mut array.values) }
+}
+
+/// The dictionary's, which enumerates **keys** - as `for (id key in dict)` does.
+///
+/// A dictionary's keys are not contiguous here: it is a vector of *pairs*. So
+/// this fills the caller's buffer a batch at a time, which is what that argument
+/// is for and the reason the protocol has one. Copying them into a buffer of
+/// this object's own would either leak it - a `break` means the second call
+/// never comes - or need a lifetime nothing here can give it.
+///
+/// `state` is the cursor: zero on entry, and the index of the next key after
+/// that.
+unsafe extern "C" fn dictionary_enumerate(
+    receiver: Id,
+    _sel: Sel,
+    state: *mut FastEnumerationState,
+    buffer: *mut Id,
+    len: usize,
+) -> usize {
+    // SAFETY: a dictionary.
+    let Some(dictionary) = (unsafe { collections::dictionary(receiver as CFTypeRef) }) else {
+        return 0;
+    };
+    if state.is_null() || buffer.is_null() || len == 0 {
+        return 0;
+    }
+    // SAFETY: the guest's own state structure.
+    let state = unsafe { &mut *state };
+    let from = state.state;
+    let batch = dictionary.entries.len().saturating_sub(from).min(len);
+    if batch == 0 {
+        return 0;
+    }
+    for i in 0..batch {
+        // SAFETY: the caller said `buffer` holds `len` items, and `batch` is at
+        // most that.
+        unsafe { *buffer.add(i) = dictionary.entries[from + i].0 as Id };
+    }
+    state.state = from + batch;
+    state.items = buffer;
+    state.mutations = &NEVER_MUTATED as *const usize as *mut usize;
+    batch
+}
+
 unsafe extern "C" fn remove_all_objects(receiver: Id, _sel: Sel) {
     // SAFETY: an array.
     let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
@@ -363,6 +584,8 @@ pub(crate) fn install() {
         "objectAtIndex:" => object_at_index, c"@24@0:8Q16";
         "objectAtIndexedSubscript:" => object_at_index, c"@24@0:8Q16";
         "containsObject:" => contains_object, c"B24@0:8@16";
+        "componentsJoinedByString:" => components_joined_by_string, c"@24@0:8@16";
+        "countByEnumeratingWithState:objects:count:" => array_enumerate, c"Q40@0:8^{?=Q^@^QQ5}16^@24Q32";
     });
     class_methods!(array, {
         "array" => array_fn, c"@16@0:8";
@@ -389,6 +612,8 @@ pub(crate) fn install() {
         "objectForKeyedSubscript:" => object_for_key, c"@24@0:8@16";
         "allKeys" => all_keys, c"@16@0:8";
         "allValues" => all_values, c"@16@0:8";
+        "valueForKey:" => dictionary_value_for_key, c"@24@0:8@16";
+        "countByEnumeratingWithState:objects:count:" => dictionary_enumerate, c"Q40@0:8^{?=Q^@^QQ5}16^@24Q32";
     });
     class_methods!(dictionary_class, {
         "dictionaryWithObjects:forKeys:count:" => dictionary_with_objects_for_keys_count, c"@40@0:8^@16^@24Q32";
@@ -397,6 +622,7 @@ pub(crate) fn install() {
         "setObject:forKey:" => set_object_for_key, c"v32@0:8@16@24";
         "setObject:forKeyedSubscript:" => set_object_for_key, c"v32@0:8@16@24";
         "removeObjectForKey:" => remove_object_for_key, c"v24@0:8@16";
+        "setValue:forKey:" => dictionary_set_value_for_key, c"v32@0:8@16@24";
     });
     class_methods!(mutable_dictionary, {
         "new" => new_dictionary, c"@16@0:8";
@@ -412,6 +638,10 @@ pub(crate) fn install() {
     });
     class_methods!(data, {
         "dataWithBytes:length:" => data_with_bytes, c"@32@0:8^v16Q24";
+        "dataWithContentsOfFile:" => data_with_contents_of_file, c"@24@0:8@16";
+    });
+    methods!(data, {
+        "writeToFile:atomically:" => write_to_file, c"B28@0:8@16c24";
     });
     methods!(mutable_data, {
         "appendBytes:length:" => append_bytes, c"v32@0:8^v16Q24";

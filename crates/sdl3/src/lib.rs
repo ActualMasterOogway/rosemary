@@ -80,6 +80,7 @@ struct Api {
     SDL_SetWindowFullscreen: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_SetWindowResizable: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_GetWindowPixelDensity: Option<unsafe extern "C" fn(Window) -> f32>,
+    SDL_GetWindowID: Option<unsafe extern "C" fn(Window) -> u32>,
 
     SDL_GL_CreateContext: Option<unsafe extern "C" fn(Window) -> GlContext>,
     SDL_GL_DestroyContext: Option<unsafe extern "C" fn(GlContext) -> bool>,
@@ -99,7 +100,6 @@ struct Api {
     SDL_HideCursor: Option<unsafe extern "C" fn() -> bool>,
     SDL_ShowCursor: Option<unsafe extern "C" fn() -> bool>,
     SDL_GetGlobalMouseState: Option<unsafe extern "C" fn(*mut f32, *mut f32) -> u32>,
-    SDL_GetMouseState: Option<unsafe extern "C" fn(*mut f32, *mut f32) -> u32>,
     SDL_WarpMouseGlobal: Option<unsafe extern "C" fn(f32, f32) -> bool>,
 }
 
@@ -199,6 +199,7 @@ fn api() -> Option<&'static Api> {
             SDL_SetWindowFullscreen,
             SDL_SetWindowResizable,
             SDL_GetWindowPixelDensity,
+            SDL_GetWindowID,
             SDL_GL_CreateContext,
             SDL_GL_DestroyContext,
             SDL_GL_MakeCurrent,
@@ -215,7 +216,6 @@ fn api() -> Option<&'static Api> {
             SDL_HideCursor,
             SDL_ShowCursor,
             SDL_GetGlobalMouseState,
-            SDL_GetMouseState,
             SDL_WarpMouseGlobal,
         ))
     })
@@ -940,6 +940,15 @@ pub mod video {
         };
         // SAFETY: a window and a NUL-terminated title.
         unsafe { f(window, title.as_ptr()) }
+    }
+
+    /// The small integer SDL puts in an event to name a window.
+    pub fn window_id(window: Window) -> u32 {
+        let Some(f) = api().and_then(|a| a.SDL_GetWindowID) else {
+            return 0;
+        };
+        // SAFETY: a window this crate created.
+        unsafe { f(window) }
     }
 
     pub fn window_size(window: Window) -> Option<(i32, i32)> {

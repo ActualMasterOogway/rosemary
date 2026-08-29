@@ -596,14 +596,22 @@ pub fn tsd_base() -> u64 {
 
 /// Stack for a guest thread that asked for no particular one.
 ///
-/// The main thread's size, which is the choice that cannot surprise a guest that never
-/// said.
-pub const THREAD_STACK: usize = crate::stack::DEFAULT_STACK;
+/// **libpthread's default for a created thread, not the main thread's.** The two
+/// differ by a factor of sixteen: a main thread gets 8 MiB from the kernel and
+/// `pthread_create` with a null attribute set gets 512 KiB. A guest that never
+/// said is not asking for "as much as possible" - it is asking for the default,
+/// and `pthread_get_stacksize_np` is how it finds out which it got.
+///
+/// Getting this wrong is not a crash. It is a guest thread with sixteen times
+/// the stack it would have had, which only shows up as a program that does not
+/// overflow where it would natively - or, on a program that sizes something from
+/// it, as a number that disagrees with the same binary run for the host.
+pub const THREAD_STACK: usize = 512 * 1024;
 
 /// Where a guest thread's frames are to live.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StackRequest {
-    /// Reserve [`THREAD_STACK`] bytes, the main thread's size.
+    /// Reserve [`THREAD_STACK`] bytes, libpthread's default.
     Default,
     /// Reserve `bytes`, rounded up to a page. What the guest asked for through
     /// `pthread_attr_setstacksize`.
@@ -617,10 +625,12 @@ impl StackRequest {
     /// Build the stack this asks for.
     fn build(self) -> Result<GuestStack, VmError> {
         match self {
-            StackRequest::Default => GuestStack::bare(THREAD_STACK),
             // The guard on top of what was asked for, because what the guest
             // asked for is the part it may use. Paired with the subtraction in
-            // [`GuestStack::bare`], so the two have to name the same quantity.
+            // [`GuestStack::bare`], so the two have to name the same quantity -
+            // and the default is a size the guest asked for by not asking, so it
+            // is reserved the same way rather than one guard page short.
+            StackRequest::Default => GuestStack::bare(THREAD_STACK + crate::stack::guard()),
             StackRequest::Sized(bytes) => GuestStack::bare(bytes + crate::stack::guard()),
             StackRequest::Supplied { top, size } => Ok(GuestStack::supplied(top, size)),
         }

@@ -80,6 +80,8 @@ pub fn load(path: &Path, owner: Id) -> Result<Loaded, String> {
         },
     };
     builder.connect(root);
+    builder.show_visible_windows(root);
+    builder.awake();
     Ok(builder.loaded)
 }
 
@@ -161,6 +163,73 @@ impl Builder<'_> {
                     .loaded
                     .unwired
                     .push(format!("a connector of an unknown kind, {other}")),
+            }
+        }
+    }
+
+    /// Order front the windows the document had open when it was saved.
+    ///
+    /// `NSVisibleWindows` is that set, and AppKit shows them as part of loading
+    /// the nib - which is why a Cocoa program's main window appears without the
+    /// program ever asking for it. Deltarune never sends
+    /// `-makeKeyAndOrderFront:` to its game window: it was visible in Interface
+    /// Builder, so the nib is what shows it, and a loader that skips this runs
+    /// the whole game into a window nobody can see.
+    fn show_visible_windows(&mut self, root: Uid) {
+        let Some(windows) = self.archive.field_object(root, "NSVisibleWindows") else {
+            return;
+        };
+        for entry in self.archive.array(windows) {
+            let Some(window) = self.instantiate(entry) else {
+                continue;
+            };
+            // SAFETY: `-makeKeyAndOrderFront:` is `void (id, SEL, id)`, which
+            // every window this loader built answers.
+            unsafe {
+                let f: unsafe extern "C" fn(Id, objc::sel::Sel, Id) =
+                    std::mem::transmute(objc::msg::entry());
+                f(
+                    window,
+                    objc::sel::get("makeKeyAndOrderFront:"),
+                    std::ptr::null_mut(),
+                );
+            }
+        }
+    }
+
+    /// Send `-awakeFromNib` to everything the nib built, and to the owner.
+    ///
+    /// After every connection, and to every object. That order is AppKit's
+    /// and is the whole point of the message: it is where an object does the
+    /// setting-up that needs its outlets, and an object woken before its outlets
+    /// were wired would find them nil.
+    ///
+    /// Skipping this is not a missing nicety. Deltarune's `YYGLView` creates its
+    /// `NSOpenGLContext` in `-awakeFromNib`, so without it the view exists, the
+    /// window exists, and the runner prints `Nil context detected` and never
+    /// draws.
+    ///
+    /// Only objects that implement it, and the owner only if it does: Apple
+    /// sends it to whatever responds, and `-[NSObject awakeFromNib]` does not
+    /// exist to inherit.
+    fn awake(&mut self) {
+        let sel = objc::sel::get("awakeFromNib");
+        let mut targets: Vec<Id> = self.loaded.objects.values().copied().collect();
+        if !self.owner.is_null() && !targets.contains(&self.owner) {
+            targets.push(self.owner);
+        }
+        for object in targets {
+            // SAFETY: an object this loader built or was handed.
+            let responds = unsafe { objc::object::class_of(object) }
+                .is_some_and(|c| c.method(sel).is_some());
+            if !responds {
+                continue;
+            }
+            // SAFETY: `-awakeFromNib` is `void (id, SEL)`.
+            unsafe {
+                let f: unsafe extern "C" fn(Id, objc::sel::Sel) =
+                    std::mem::transmute(objc::msg::entry());
+                f(object, sel);
             }
         }
     }

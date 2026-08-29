@@ -1,12 +1,15 @@
 pub mod bundle;
 mod constant;
 mod define;
+pub mod filemanager;
 pub mod geometry;
 pub mod kvc;
 pub mod notification;
+pub mod objectify;
 pub mod plist;
 pub mod pool;
 pub mod string;
+pub mod timer;
 pub mod unarchiver;
 pub mod value;
 
@@ -29,7 +32,33 @@ pub fn bootstrap() {
         constant::install();
         declare_abstract();
         bundle::class::install();
+        filemanager::install();
+        timer::install();
     });
+}
+
+/// This user's home directory.
+///
+/// `HOME` first, as every Unix does, and the password database only if it is
+/// unset - which is the order a guest's own `getenv("HOME")` would see, so the
+/// two agree about where a save file goes.
+pub fn home_directory() -> String {
+    if let Some(home) = std::env::var_os("HOME")
+        && !home.is_empty()
+    {
+        return home.to_string_lossy().into_owned();
+    }
+    // SAFETY: `getpwuid` returns a pointer into the library's own storage, valid
+    // until the next call to it - which this makes before returning.
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() || (*pw).pw_dir.is_null() {
+            return "/".to_string();
+        }
+        std::ffi::CStr::from_ptr((*pw).pw_dir)
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 /// An integer as an autoreleased `NSNumber`.
@@ -157,6 +186,10 @@ pub const CLASSES: &[&str] = &[
     "NSNotificationCenter",
     "NSAutoreleasePool",
     "NSBundle",
+    "NSDate",
+    "NSFileManager",
+    "NSRunLoop",
+    "NSTimer",
     "NSFormatter",
     "NSThread",
     "NSLock",
