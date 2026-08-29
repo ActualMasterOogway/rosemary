@@ -51,9 +51,56 @@ unsafe extern "C" fn unrecognised(receiver: Id, sel: Sel) -> ! {
     crate::fail!("unrecognized selector sent to instance of {name}: {selector}");
 }
 
+/// [`unrecognised`] for the `_stret` ABI, where the argument registers are one
+/// place along and the first of them is the caller's return buffer.
+unsafe extern "C" fn unrecognised_stret(_buffer: *mut c_void, receiver: Id, sel: Sel) -> ! {
+    // SAFETY: reached only from `lookup_stret`, which was given a live receiver.
+    unsafe { unrecognised(receiver, sel) }
+}
+
+/// [`lookup`] for the `_stret` ABI.
+///
+/// # Safety
+///
+/// As [`lookup`].
+unsafe extern "C" fn lookup_stret(receiver: Id, sel: Sel) -> *const c_void {
+    // SAFETY: the caller's obligation.
+    let Some(class) = (unsafe { crate::object::class_of(receiver) }) else {
+        return unrecognised_stret as *const c_void;
+    };
+    match class.method(sel) {
+        Some(method) => method.implementation(),
+        None => unrecognised_stret as *const c_void,
+    }
+}
+
 /// `objc_msgSend`'s address.
 pub fn entry() -> *const c_void {
     msg_send as *const c_void
+}
+
+/// `objc_msgSend_stret`'s address: the entry point for a message whose return
+/// value the ABI hands back through a caller-provided buffer rather than in
+/// registers.
+///
+/// Separate from [`entry`] on x86-64 because the buffer occupies the first
+/// argument register, so the receiver is in the second and the selector in the
+/// third - a message sent through [`entry`] would look up a method on whatever
+/// the caller's return slot happened to contain. On AArch64 the buffer travels
+/// in `x8`, which displaces nothing, so there is one entry point and this is it.
+///
+/// Which of the two a message needs is the return type's, not the selector's:
+/// anything the System V ABI classifies as MEMORY - `NSRect`, at four doubles -
+/// comes here, and `NSPoint` and `NSSize` at two do not.
+pub fn entry_stret() -> *const c_void {
+    #[cfg(target_arch = "x86_64")]
+    {
+        msg_send_stret as *const c_void
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        msg_send as *const c_void
+    }
 }
 
 /// The trampoline itself.
@@ -162,5 +209,72 @@ unsafe extern "C" fn msg_send() {
         "xorps   xmm1, xmm1",
         "ret",
         lookup = sym lookup,
+    )
+}
+
+/// [`msg_send`] for a message returning through a buffer, which on x86-64 puts
+/// the buffer in `rdi` and pushes the receiver and selector to `rsi` and `rdx`.
+///
+/// The lookup call is the only thing that differs: it has to be handed `rsi` and
+/// `rdx` rather than `rdi` and `rsi`. Everything else - the spill, the restore,
+/// the tail jump - is the same, because the implementation is entered with the
+/// registers the call site set, buffer included.
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+unsafe extern "C" fn msg_send_stret() {
+    core::arch::naked_asm!(
+        "test    rsi, rsi",
+        "je      9f",
+        "push    rbp",
+        "mov     rbp, rsp",
+        "sub     rsp, 192",
+        "movaps  [rsp + 0], xmm0",
+        "movaps  [rsp + 16], xmm1",
+        "movaps  [rsp + 32], xmm2",
+        "movaps  [rsp + 48], xmm3",
+        "movaps  [rsp + 64], xmm4",
+        "movaps  [rsp + 80], xmm5",
+        "movaps  [rsp + 96], xmm6",
+        "movaps  [rsp + 112], xmm7",
+        "mov     [rsp + 128], rdi",
+        "mov     [rsp + 136], rsi",
+        "mov     [rsp + 144], rdx",
+        "mov     [rsp + 152], rcx",
+        "mov     [rsp + 160], r8",
+        "mov     [rsp + 168], r9",
+        "mov     [rsp + 176], rax",
+        // The receiver and selector, one register along from where the lookup
+        // takes them.
+        "mov     rdi, rsi",
+        "mov     rsi, rdx",
+        "call    {lookup}",
+        "mov     r11, rax",
+        "movaps  xmm0, [rsp + 0]",
+        "movaps  xmm1, [rsp + 16]",
+        "movaps  xmm2, [rsp + 32]",
+        "movaps  xmm3, [rsp + 48]",
+        "movaps  xmm4, [rsp + 64]",
+        "movaps  xmm5, [rsp + 80]",
+        "movaps  xmm6, [rsp + 96]",
+        "movaps  xmm7, [rsp + 112]",
+        "mov     rdi, [rsp + 128]",
+        "mov     rsi, [rsp + 136]",
+        "mov     rdx, [rsp + 144]",
+        "mov     rcx, [rsp + 152]",
+        "mov     r8,  [rsp + 160]",
+        "mov     r9,  [rsp + 168]",
+        "mov     rax, [rsp + 176]",
+        "add     rsp, 192",
+        "pop     rbp",
+        "jmp     r11",
+        // Messaging nil, where the only thing to hand back is the buffer address
+        // a struct return owes its caller in `rax`. The buffer itself is left
+        // alone, as Apple's own `_stret` leaves it: its size is not something
+        // this entry point is told, so there is nothing here that could zero it.
+        // A caller that might be holding nil has to check, and this tree's do.
+        "9:",
+        "mov     rax, rdi",
+        "ret",
+        lookup = sym lookup_stret,
     )
 }

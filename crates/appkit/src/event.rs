@@ -199,9 +199,11 @@ fn location(window: Id, x: f32, y: f32) -> NSPoint {
     let height = match content.is_null() {
         true => 0.0,
         // SAFETY: `-bounds` is `NSRect (id, SEL)` on a view this crate made.
+        // `NSRect` returns through a buffer, so this is the `_stret` entry:
+        // through the other one the receiver would be the return slot.
         false => unsafe {
             let f: unsafe extern "C" fn(Id, objc::sel::Sel) -> foundation::geometry::NSRect =
-                std::mem::transmute(objc::msg::entry());
+                std::mem::transmute(objc::msg::entry_stret());
             f(content, objc::sel::get("bounds")).size.height
         },
     };
