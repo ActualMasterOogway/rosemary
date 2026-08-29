@@ -52,6 +52,7 @@
         {
           default = pkgs.mkShell {
             packages = [
+              pkgs.lldb
               toolchain
               pkgs.pkg-config
               # Cargo fetches microlift and the Cranelift fork over git.
