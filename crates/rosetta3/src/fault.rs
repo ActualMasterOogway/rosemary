@@ -378,8 +378,11 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
     restore(signal);
 }
 
-/// Byte offset of `uc_mcontext` within `ucontext_t`. The same on both hosts:
-/// nothing ahead of it is architecture-dependent.
+/// Byte offset of `uc_mcontext` within Darwin's `ucontext_t`, where it is a
+/// pointer to the thread state. The same on both architectures: nothing ahead of
+/// it is architecture-dependent. Linux inlines its `mcontext_t` instead, so this
+/// is only ever applied under `target_os = "macos"`.
+#[cfg(target_os = "macos")]
 const UC_MCONTEXT: usize = 48;
 
 /// Whether a host `pc` is inside a translation at all.
@@ -442,6 +445,7 @@ fn frame(fp: u64) -> Option<(u64, u64)> {
 }
 
 /// The frame pointer, stack pointer and return address the fault interrupted.
+#[cfg(target_os = "macos")]
 fn host_frame(context: *mut libc::c_void) -> Option<(u64, u64, Option<u64>)> {
     /// `__ss.__fp`, `__ss.__lr` and `__ss.__sp`, after `__es` and the twenty-nine
     /// `__x` registers - see [`host_pc`] for the same measurement.
@@ -466,6 +470,35 @@ fn host_frame(context: *mut libc::c_void) -> Option<(u64, u64, Option<u64>)> {
         let lr = cfg!(target_arch = "aarch64").then(|| at(MC.1));
         Some((at(MC.0), at(MC.2), lr))
     }
+}
+
+/// The frame pointer, stack pointer and return address the fault interrupted.
+///
+/// Linux embeds its `mcontext_t` in the `ucontext_t` rather than pointing at one,
+/// and the `libc` crate declares both - so this reads fields rather than offsets.
+#[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
+fn host_frame(context: *mut libc::c_void) -> Option<(u64, u64, Option<u64>)> {
+    if context.is_null() {
+        return None;
+    }
+    // SAFETY: the kernel passes a live `ucontext_t` for the duration of the
+    // handler, and `gregs` is the general-purpose register array it filled in.
+    let gregs = unsafe { &(*(context as *const libc::ucontext_t)).uc_mcontext.gregs };
+    let at = |reg: libc::c_int| gregs[reg as usize] as u64;
+    // x86-64 has no link register.
+    Some((at(libc::REG_RBP), at(libc::REG_RSP), None))
+}
+
+/// The frame pointer, stack pointer and return address the fault interrupted.
+#[cfg(all(not(target_os = "macos"), target_arch = "aarch64"))]
+fn host_frame(context: *mut libc::c_void) -> Option<(u64, u64, Option<u64>)> {
+    if context.is_null() {
+        return None;
+    }
+    // SAFETY: as above; `regs[29]` is the frame pointer and `regs[30]` the link
+    // register, in the layout AAPCS64 and the kernel agree on.
+    let mc = unsafe { &(*(context as *const libc::ucontext_t)).uc_mcontext };
+    Some((mc.regs[29], mc.sp, Some(mc.regs[30])))
 }
 
 /// Name the translation the faulting `pc` fell in, and the guest instruction
@@ -588,35 +621,13 @@ fn restore(signal: i32) {
 
 /// The faulting `pc`, out of the `ucontext_t` the kernel passed.
 ///
-/// The layout is Darwin's `_STRUCT_UCONTEXT` and the host's thread state, which the
-/// `libc` crate does not declare for Apple platforms.
-///
 /// `None` on any null, because a handler that dereferences its way to a second fault
 /// has destroyed the evidence it was called to preserve.
 fn host_pc(context: *mut libc::c_void) -> Option<u64> {
-    /// Byte offset of `__ss.__pc` within `__darwin_mcontext64` - sixteen bytes of
-    /// `__es`, then twenty-nine `__x` plus `__fp`, `__lr` and `__sp`.
-    #[cfg(target_arch = "aarch64")]
-    const MC_PC: usize = 16 + 256;
-    /// Byte offset of `__ss.__rip` - sixteen bytes of `__es`, then the sixteen
-    /// general-purpose registers `_STRUCT_X86_THREAD_STATE64` lists before it.
-    #[cfg(target_arch = "x86_64")]
-    const MC_PC: usize = 16 + 128;
-
-    if context.is_null() {
-        return None;
-    }
-    // SAFETY: the kernel passes a live `ucontext_t` for the duration of the
-    // handler, and the two offsets are the measured ones above. Both loads are
-    // eight-aligned reads of pointer-sized fields inside structures the kernel
-    // filled in.
-    unsafe {
-        let mcontext = std::ptr::read((context as *const u8).add(UC_MCONTEXT) as *const *const u8);
-        if mcontext.is_null() {
-            return None;
-        }
-        Some(std::ptr::read(mcontext.add(MC_PC) as *const u64))
-    }
+    // SAFETY: `context` is the third argument of this `SA_SIGINFO` handler, which
+    // is exactly what `interrupted_pc` asks for. It knows both hosts' layouts -
+    // Darwin's out-of-line thread state and Linux's inline `mcontext_t`.
+    unsafe { darwin::signal::interrupted_pc(context) }
 }
 
 /// The address's own bytes, when every one of them is printable.

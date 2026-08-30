@@ -205,10 +205,11 @@ mod ctype {
 /// The rune type word for `c`, assembled from the host's `<ctype.h>`.
 ///
 /// Assembled rather than read out of a table, because the table is Darwin's
-/// `_DefaultRuneLocale` and this host has no such object. Every bit below is a
-/// question the host answers directly; the ones it cannot - `_CTYPE_I`,
-/// `_CTYPE_T`, `_CTYPE_Q`, and the character-width field - are left clear, which
-/// is what they are for every character in a C or UTF-8 locale anyway.
+/// `_DefaultRuneLocale` and this host has no such object - [`default_rune_locale`]
+/// builds one from this. Every bit below is a question the host answers directly;
+/// the ones it cannot - `_CTYPE_I`, `_CTYPE_T`, `_CTYPE_Q`, and the
+/// character-width field - are left clear, which is what they are for every
+/// character in a C or UTF-8 locale anyway.
 fn runetype(c: c_int) -> u32 {
     let mut kinds = 0;
     // SAFETY: every one of these takes an `int` and touches no memory.
@@ -232,6 +233,98 @@ fn runetype(c: c_int) -> u32 {
         }
     }
     kinds
+}
+
+/// How many characters Darwin's `_RuneLocale` caches, from `<runetype.h>`'s
+/// `_CACHED_RUNES`. The inline `__maskrune` indexes the table directly for a `c`
+/// in `0.._CACHED_RUNES` and calls [`maskrune`] for anything outside it.
+const CACHED_RUNES: usize = 256;
+
+/// Darwin's `_RuneRange`, left empty here: a character above the cached range
+/// reaches [`maskrune`] instead of a range table, so there is nothing to fill in.
+#[repr(C)]
+struct RuneRange {
+    nranges: c_int,
+    ranges: *const c_void,
+}
+
+/// Darwin's `_RuneLocale`, laid out as `<runetype.h>` declares it.
+///
+/// The layout is ABI rather than an implementation detail. A guest compiled
+/// against Darwin's `<ctype.h>` does not *call* `isspace` - the header inlines it
+/// to a load from `__runetype[c]` at a byte offset baked into the guest's own
+/// code - so a field out of place here is a wrong answer, not a link error.
+#[repr(C)]
+struct RuneLocale {
+    magic: [c_char; 8],
+    encoding: [c_char; 32],
+    sgetrune: *const c_void,
+    sputrune: *const c_void,
+    invalid_rune: i32,
+    runetype: [u32; CACHED_RUNES],
+    maplower: [i32; CACHED_RUNES],
+    mapupper: [i32; CACHED_RUNES],
+    runetype_ext: RuneRange,
+    maplower_ext: RuneRange,
+    mapupper_ext: RuneRange,
+    variable: *const c_void,
+    variable_len: c_int,
+    ncharclasses: c_int,
+    charclasses: *const c_void,
+}
+
+/// The address of this process's stand-in for `_DefaultRuneLocale`.
+///
+/// Built once and leaked, because the guest holds the address for the life of the
+/// process: its `__runetype` loads are compiled against this object, not against
+/// a call that could be re-dispatched.
+///
+/// The classifications come from [`runetype`] and the case maps from the host's
+/// own `tolower`/`toupper`, so the inlined path and the [`maskrune`] call-out
+/// answer the same question the same way. Both are read in the C locale, which is
+/// the one `_DefaultRuneLocale` describes on Darwin too - `setlocale` there
+/// replaces `_CurrentRuneLocale` and leaves this table alone.
+fn default_rune_locale() -> u64 {
+    /// `_RUNE_MAGIC_1`, and the encoding name Darwin's own default table carries.
+    const MAGIC: &[u8; 8] = b"RuneMagi";
+
+    static AT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *AT.get_or_init(|| {
+        let mut locale = Box::new(RuneLocale {
+            magic: [0; 8],
+            encoding: [0; 32],
+            sgetrune: core::ptr::null(),
+            sputrune: core::ptr::null(),
+            // What Darwin's default table reports for a byte that decodes to no
+            // character.
+            invalid_rune: 0xfffd,
+            runetype: [0; CACHED_RUNES],
+            maplower: [0; CACHED_RUNES],
+            mapupper: [0; CACHED_RUNES],
+            runetype_ext: RuneRange { nranges: 0, ranges: core::ptr::null() },
+            maplower_ext: RuneRange { nranges: 0, ranges: core::ptr::null() },
+            mapupper_ext: RuneRange { nranges: 0, ranges: core::ptr::null() },
+            variable: core::ptr::null(),
+            variable_len: 0,
+            ncharclasses: 0,
+            charclasses: core::ptr::null(),
+        });
+        for (slot, byte) in locale.magic.iter_mut().zip(MAGIC) {
+            *slot = *byte as c_char;
+        }
+        for (slot, byte) in locale.encoding.iter_mut().zip(b"NONE") {
+            *slot = *byte as c_char;
+        }
+        for c in 0..CACHED_RUNES {
+            locale.runetype[c] = runetype(c as c_int);
+            // SAFETY: both take an `int` in the cached range and touch no memory.
+            unsafe {
+                locale.maplower[c] = plain::tolower(c as c_int);
+                locale.mapupper[c] = plain::toupper(c as c_int);
+            }
+        }
+        Box::leak(locale) as *const RuneLocale as usize as u64
+    })
 }
 
 /// `int __maskrune(__darwin_ct_rune_t, unsigned long)`
@@ -353,6 +446,10 @@ pub fn provide(lib: &mut SyntheticDylib) {
     for name in NAMES {
         crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap_or(0) as *const ());
     }
+    // Data rather than a function: the guest reads this object's fields directly,
+    // and every `isspace`/`tolower` the header inlined faults on a null slot.
+    // The Mach-O underscore, put back: the guest imports `__DefaultRuneLocale`.
+    crate::define_data(lib, "__DefaultRuneLocale", default_rune_locale());
 }
 
 #[cfg(test)]
@@ -410,6 +507,55 @@ mod tests {
             assert_ne!(maskrune('7' as c_int, ctype::DIGIT as u64), 0);
             assert_eq!(maskrune('7' as c_int, ctype::ALPHA as u64), 0);
         }
+    }
+
+    /// The offsets a guest's inlined `<ctype.h>` has baked into its own code.
+    /// Measured from Darwin's `<runetype.h>` on a 64-bit target, and checked here
+    /// because nothing else in this process ever reads these fields by name: if
+    /// `__runetype` moved, every classification would come back from the wrong
+    /// bytes and still look like a plausible answer.
+    #[test]
+    fn the_rune_locale_is_laid_out_the_way_the_header_declares_it() {
+        let at = default_rune_locale();
+        let offset = |field: *const u8| field as usize as u64 - at;
+        // SAFETY: `at` is the leaked object, live for the process.
+        let locale = unsafe { &*(at as usize as *const RuneLocale) };
+        assert_eq!(offset(locale.magic.as_ptr().cast()), 0);
+        assert_eq!(offset(locale.encoding.as_ptr().cast()), 8);
+        // 0x3c, which is the displacement in the guest's own `movl
+        // 0x3c(%r13,%rax,4), %eax`.
+        assert_eq!(offset(locale.runetype.as_ptr().cast()), 60);
+        assert_eq!(offset(locale.maplower.as_ptr().cast()), 60 + 1024);
+        assert_eq!(offset(locale.mapupper.as_ptr().cast()), 60 + 2048);
+        assert_eq!(size_of::<RuneLocale>(), 3208);
+    }
+
+    /// The table a guest indexes and the function it calls out to have to agree:
+    /// the header picks between them on the character's value alone, so a
+    /// disagreement is a program that classifies the same byte two ways.
+    #[test]
+    fn the_cached_table_answers_as_maskrune_does() {
+        // SAFETY: the leaked object, live for the process.
+        let locale = unsafe { &*(default_rune_locale() as usize as *const RuneLocale) };
+        for c in 0..CACHED_RUNES {
+            // SAFETY: touches no memory.
+            let called = unsafe { maskrune(c as c_int, u32::MAX as u64) };
+            assert_eq!(locale.runetype[c], called as u32, "runetype[{c}]");
+        }
+        assert_ne!(locale.runetype[' ' as usize] & ctype::SPACE, 0);
+        assert_ne!(locale.runetype['\t' as usize] & ctype::SPACE, 0);
+        assert_eq!(locale.runetype['x' as usize] & ctype::SPACE, 0);
+        assert_eq!(locale.maplower['A' as usize], 'a' as i32);
+        assert_eq!(locale.mapupper['a' as usize], 'A' as i32);
+        assert_eq!(locale.maplower['5' as usize], '5' as i32);
+    }
+
+    /// One object, at one address: the guest binds the symbol once and keeps the
+    /// pointer, so a second call that built a second table would leave half the
+    /// program reading a table nothing else updates.
+    #[test]
+    fn the_rune_locale_is_built_once() {
+        assert_eq!(default_rune_locale(), default_rune_locale());
     }
 
     #[test]
