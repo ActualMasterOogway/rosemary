@@ -71,6 +71,33 @@ impl Layout {
         self.info_string("CFBundleIdentifier")
     }
 
+    /// The name to show a person, which is not the executable's.
+    ///
+    /// `CFBundleDisplayName` first, because `CFBundleName` is so often the
+    /// executable instead: DELTARUNE's is `Mac_Runner` and its display name is
+    /// the game's.
+    pub fn display_name(&self) -> Option<&str> {
+        self.info_string("CFBundleDisplayName")
+            .or_else(|| self.info_string("CFBundleName"))
+    }
+
+    /// The version to show a person, which is the marketing one where a bundle
+    /// distinguishes it from the build number.
+    pub fn version(&self) -> Option<&str> {
+        self.info_string("CFBundleShortVersionString")
+            .or_else(|| self.info_string("CFBundleVersion"))
+    }
+
+    pub fn copyright(&self) -> Option<&str> {
+        self.info_string("NSHumanReadableCopyright")
+    }
+
+    /// `LSApplicationCategoryType`, as the uniform type identifier the plist
+    /// spells it - `public.app-category.action-games` and the rest.
+    pub fn category(&self) -> Option<&str> {
+        self.info_string("LSApplicationCategoryType")
+    }
+
     /// The development region's `.lproj`, which is where a nib lives.
     fn localizations(&self) -> Vec<PathBuf> {
         let mut out = Vec::new();

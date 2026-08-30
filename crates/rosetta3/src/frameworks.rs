@@ -239,6 +239,9 @@ pub fn set_main_bundle(executable: &std::path::Path) {
         return;
     }
     let found = foundation::bundle::set_main(executable);
+    // Before anything brings SDL up, which is what makes it reach the audio
+    // server and the compositor: see `appkit::metadata`.
+    appkit::metadata::publish(executable);
     if !found && std::env::var_os("ROSETTA3_TRACE_VM").is_some() {
         eprintln!(
             "rosetta3: bundle: {} is not inside a .app",

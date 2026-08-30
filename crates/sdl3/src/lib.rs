@@ -1,4 +1,4 @@
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::sync::OnceLock;
 
 pub mod init {
@@ -64,6 +64,7 @@ impl Default for Event {
 #[allow(non_snake_case)]
 struct Api {
     SDL_InitSubSystem: Option<unsafe extern "C" fn(u32) -> bool>,
+    SDL_SetAppMetadataProperty: Option<unsafe extern "C" fn(*const c_char, *const c_char) -> bool>,
     SDL_GetError: Option<unsafe extern "C" fn() -> *const c_char>,
     SDL_PumpEvents: Option<unsafe extern "C" fn()>,
 
@@ -202,6 +203,7 @@ fn api() -> Option<&'static Api> {
         }
         Some(resolve!(
             SDL_InitSubSystem,
+            SDL_SetAppMetadataProperty,
             SDL_GetError,
             SDL_PumpEvents,
             SDL_GetJoysticks,
@@ -288,6 +290,51 @@ pub fn error() -> String {
         true => String::new(),
         // SAFETY: as above.
         false => unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned(),
+    }
+}
+
+/// What the desktop is told this program is.
+///
+/// Every field is optional, and one left out stays unset in SDL rather than
+/// being set to an empty string: the identifier in particular is matched
+/// against by a compositor, and an empty one matches the wrong thing.
+#[derive(Default, Debug)]
+pub struct AppMetadata {
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub identifier: Option<String>,
+    pub creator: Option<String>,
+    pub copyright: Option<String>,
+    pub url: Option<String>,
+    /// `"game"`, `"mediaplayer"` or `"application"` - SDL's own three.
+    pub kind: Option<String>,
+}
+
+/// Publish `metadata`, which SDL passes on to the desktop: the name an audio
+/// mixer shows for a stream, the Wayland `app_id` a compositor matches a
+/// desktop entry and its icon against, and the X11 `WM_CLASS`.
+///
+/// Has to happen before SDL comes up. SDL reads these when its drivers start,
+/// and a later call changes the properties without changing what the audio
+/// server and the compositor were already told.
+pub fn set_app_metadata(metadata: &AppMetadata) {
+    let Some(set) = api().and_then(|a| a.SDL_SetAppMetadataProperty) else {
+        return;
+    };
+    for (property, value) in [
+        (c"SDL.app.metadata.name", &metadata.name),
+        (c"SDL.app.metadata.version", &metadata.version),
+        (c"SDL.app.metadata.identifier", &metadata.identifier),
+        (c"SDL.app.metadata.creator", &metadata.creator),
+        (c"SDL.app.metadata.copyright", &metadata.copyright),
+        (c"SDL.app.metadata.url", &metadata.url),
+        (c"SDL.app.metadata.type", &metadata.kind),
+    ] {
+        let Some(value) = value.as_deref().and_then(|v| CString::new(v).ok()) else {
+            continue;
+        };
+        // SAFETY: two NUL-terminated strings, both of which SDL copies.
+        unsafe { set(property.as_ptr(), value.as_ptr()) };
     }
 }
 

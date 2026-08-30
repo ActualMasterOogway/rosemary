@@ -11,6 +11,7 @@ pub mod geometry;
 pub mod icon;
 pub mod image;
 pub mod menu;
+pub mod metadata;
 pub mod nib;
 pub mod opengl;
 pub mod raster;
