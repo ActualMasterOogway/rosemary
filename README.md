@@ -21,9 +21,7 @@ Rosetta 3 can optionally use Microlift's automatic flag analysis to optimize ove
 
 ## Running on Linux
 
-Rosetta 3 builds and runs on Linux via the Darwin shim crate. It works by reimplementing Darwin APIs where they diverge on Linux, and passing the rest of them through to the host.
-
-Note: The Objective-C runtime, libdispatch, the Mach interfaces, the debug overlay and the `.app` bundle layout are macOS-only and are compiled out elsewhere. They are not implemented yet.
+Rosetta 3 builds and runs on Linux via the Darwin shim crate. It works by reimplementing Darwin APIs where they diverge on Linux, and passing the rest of them through to the host. It also has reimplementations of various macOS APIs, and a custom Objective-C runtime that can even be differentially tested against an actual macOS installation by forcing `ROSETTA3_OBJC=builtin` and `ROSETTA3_BUNDLED=1`. This enables reimplementations of macOS frameworks and the Objective C runtime on top of cross platform Rust and SDL libraries.
 
 `tools/linux-sync.sh` builds and runs the tree inside an Alpine container; its header documents the one-time setup.
 
