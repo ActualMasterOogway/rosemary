@@ -2,7 +2,7 @@
 
 use std::ffi::c_void;
 
-use foundation::geometry::{CGFloat, NSRect, NSSize};
+use foundation::geometry::{CGFloat, NSPoint, NSRect, NSSize};
 use objc::object::Id;
 use objc::sel::Sel;
 
@@ -182,6 +182,31 @@ unsafe extern "C" fn frame(receiver: Id, _sel: Sel) -> NSRect {
     let (x, y) = sdl3::video::window_position(sdl).unwrap_or((0, 0));
     let (w, h) = sdl3::video::window_size(sdl).unwrap_or((0, 0));
     crate::geometry::rect_from_sdl(x, y, w, h)
+}
+
+/// `-convertBaseToScreen:`, and its inverse below.
+///
+/// A window's base coordinates have their origin at its own bottom-left, so the
+/// conversion is the frame origin - which is already in screen coordinates,
+/// flipped the way AppKit wants by `geometry::rect_from_sdl`. The two are the
+/// deprecated spellings of `-convertRectToScreen:`; a program that positions a
+/// popover or reads the mouse in screen space still uses them.
+unsafe extern "C" fn convert_base_to_screen(receiver: Id, sel: Sel, point: NSPoint) -> NSPoint {
+    // SAFETY: the receiver is a window of this crate's.
+    let origin = unsafe { frame(receiver, sel) }.origin;
+    NSPoint {
+        x: point.x + origin.x,
+        y: point.y + origin.y,
+    }
+}
+
+unsafe extern "C" fn convert_screen_to_base(receiver: Id, sel: Sel, point: NSPoint) -> NSPoint {
+    // SAFETY: the receiver is a window of this crate's.
+    let origin = unsafe { frame(receiver, sel) }.origin;
+    NSPoint {
+        x: point.x - origin.x,
+        y: point.y - origin.y,
+    }
 }
 
 /// `-contentRectForFrameRect:` and its inverse are the identity here.
@@ -551,6 +576,8 @@ pub(crate) fn install() {
         "setFrame:" => set_frame, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "setFrame:display:" => set_frame_display, c"v52@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16c48";
         "setFrameOrigin:" => set_frame_origin, c"v32@0:8{CGPoint=dd}16";
+        "convertBaseToScreen:" => convert_base_to_screen, c"{CGPoint=dd}32@0:8{CGPoint=dd}16";
+        "convertScreenToBase:" => convert_screen_to_base, c"{CGPoint=dd}32@0:8{CGPoint=dd}16";
         "setContentSize:" => set_content_size, c"v32@0:8{CGSize=dd}16";
         "contentView" => content_view, c"@16@0:8";
         "setContentView:" => set_content_view, c"v24@0:8@16";

@@ -12,6 +12,7 @@
 //! value is always the truth, and a caller that dereferences the error on
 //! failure is refused by name at the send rather than handed something invented.
 
+use corefoundation::base::CFTypeRef;
 use objc::object::Id;
 use objc::sel::Sel;
 
@@ -199,9 +200,9 @@ unsafe extern "C" fn contents_of_directory(
     unsafe { corefoundation::api::CFAutorelease(array) as Id }
 }
 
-/// `-attributesOfItemAtPath:error:`, with the two keys a program actually reads.
+/// `-attributesOfItemAtPath:error:`, with the keys a program actually reads.
 ///
-/// `NSFileSize` and `NSFileType`. A dictionary with only some of an item's
+/// Size, type and the two timestamps. A dictionary with only some of an item's
 /// attributes is the shape this tree refused `-[NSBundle infoDictionary]` over,
 /// and the reason it is allowed here is that these are *this runtime's* answers
 /// to a fixed question rather than a file's own contents: a key that is absent
@@ -226,33 +227,126 @@ unsafe extern "C" fn attributes_of_item(
         true => "NSFileTypeDirectory",
         false => "NSFileTypeRegular",
     };
-    let pairs = [
+    // The bool is whether this function owns the value: a date is autoreleased,
+    // so releasing it here would be releasing what this function never held.
+    let mut values: Vec<(&str, CFTypeRef, bool)> = vec![
         (
-            corefoundation::string::from_bytes(b"NSFileSize", false),
+            "NSFileSize",
             corefoundation::collections::new_number(corefoundation::collections::Number::Integer(
                 metadata.len() as i64,
             )),
+            true,
         ),
         (
-            corefoundation::string::from_bytes(b"NSFileType", false),
+            "NSFileType",
             corefoundation::string::from_bytes(kind.as_bytes(), false),
+            true,
         ),
     ];
+    let timestamps = [
+        ("NSFileModificationDate", metadata.modified()),
+        ("NSFileCreationDate", metadata.created()),
+    ];
+    for (key, time) in timestamps {
+        if let Some(seconds) = time.ok().map(since_1970) {
+            values.push((key, crate::timer::date_since_1970(seconds) as CFTypeRef, false));
+        }
+    }
+
+    let pairs: Vec<(CFTypeRef, CFTypeRef)> = values
+        .iter()
+        .map(|(key, value, _)| {
+            (
+                corefoundation::string::from_bytes(key.as_bytes(), false),
+                *value,
+            )
+        })
+        .collect();
     let dictionary = corefoundation::collections::new_dictionary(
         &pairs,
         corefoundation::callbacks::Policy::from_key_callbacks(),
         corefoundation::callbacks::Policy::from_type_callbacks(),
         false,
     );
-    for (key, value) in pairs {
-        // SAFETY: objects this function made and the dictionary has retained.
-        unsafe {
-            corefoundation::api::CFRelease(key);
-            corefoundation::api::CFRelease(value);
+    for (key, _) in &pairs {
+        // SAFETY: a string this function made and the dictionary has retained.
+        unsafe { corefoundation::api::CFRelease(*key) };
+    }
+    for (_, value, owned) in &values {
+        if *owned {
+            // SAFETY: an object this function made and the dictionary has retained.
+            unsafe { corefoundation::api::CFRelease(*value) };
         }
     }
     // SAFETY: a fresh dictionary.
     unsafe { corefoundation::api::CFAutorelease(dictionary) as Id }
+}
+
+/// Seconds since the Unix epoch, negative for a file dated before it.
+fn since_1970(time: std::time::SystemTime) -> f64 {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(forward) => forward.as_secs_f64(),
+        Err(back) => -back.duration().as_secs_f64(),
+    }
+}
+
+/// One key of an attributes dictionary, or nil.
+///
+/// # Safety
+///
+/// `receiver` must be an `NSDictionary`.
+unsafe fn attribute(receiver: Id, key: &str) -> Id {
+    let key = corefoundation::string::from_bytes(key.as_bytes(), false);
+    // SAFETY: a dictionary and a string key.
+    let value = unsafe { corefoundation::api::CFDictionaryGetValue(receiver as CFTypeRef, key) };
+    // SAFETY: a string this function made and holds the only reference to.
+    unsafe { corefoundation::api::CFRelease(key) };
+    value as Id
+}
+
+unsafe extern "C" fn file_size(receiver: Id, _sel: Sel) -> u64 {
+    // SAFETY: a dictionary.
+    let value = unsafe { attribute(receiver, "NSFileSize") };
+    // SAFETY: a number, or nil.
+    unsafe { corefoundation::collections::number(value as CFTypeRef) }.map_or(0, |n| n.as_i64() as u64)
+}
+
+unsafe extern "C" fn file_type(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a dictionary.
+    unsafe { attribute(receiver, "NSFileType") }
+}
+
+unsafe extern "C" fn file_modification_date(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a dictionary.
+    unsafe { attribute(receiver, "NSFileModificationDate") }
+}
+
+unsafe extern "C" fn file_creation_date(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a dictionary.
+    unsafe { attribute(receiver, "NSFileCreationDate") }
+}
+
+/// `-stringWithFileSystemRepresentation:length:`, the path a `readdir` or a
+/// `getcwd` gave read back as an `NSString`.
+///
+/// The bytes are a path, so they are taken as UTF-8 and kept lossily rather than
+/// refused: a name this host will hand back verbatim is one the guest can still
+/// open, and dropping the whole path over one byte would lose the directory too.
+unsafe extern "C" fn string_with_file_system_representation(
+    _receiver: Id,
+    _sel: Sel,
+    bytes: *const u8,
+    length: usize,
+) -> Id {
+    if bytes.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the caller's `length` bytes, which is the contract of the method.
+    let bytes = unsafe { std::slice::from_raw_parts(bytes, length) };
+    // SAFETY: a fresh string.
+    unsafe {
+        corefoundation::api::CFAutorelease(corefoundation::string::from_bytes(bytes, false)) as Id
+    }
 }
 
 unsafe extern "C" fn is_writable(_receiver: Id, _sel: Sel, path: Id) -> u8 {
@@ -291,6 +385,19 @@ pub(crate) fn install() {
         "isWritableFileAtPath:" => is_writable, c"B24@0:8@16";
         "isReadableFileAtPath:" => file_exists, c"B24@0:8@16";
         "currentDirectoryPath" => current_directory, c"@16@0:8";
+        "stringWithFileSystemRepresentation:length:"
+            => string_with_file_system_representation, c"@32@0:8*16Q24";
+    });
+
+    // Foundation's `NSFileAttributes` category: how a program reads the result
+    // of `-attributesOfItemAtPath:error:` when it does not subscript it by key.
+    let dictionary =
+        objc::class::lookup(c"NSDictionary").expect("CoreFoundation registered NSDictionary");
+    methods!(dictionary, {
+        "fileSize" => file_size, c"Q16@0:8";
+        "fileType" => file_type, c"@16@0:8";
+        "fileModificationDate" => file_modification_date, c"@16@0:8";
+        "fileCreationDate" => file_creation_date, c"@16@0:8";
     });
 }
 

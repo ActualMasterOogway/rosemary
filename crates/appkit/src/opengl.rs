@@ -23,6 +23,9 @@ pub struct Context {
     /// swap a window that had gone.
     view: Id,
     format: Id,
+    /// The `CGLContextObj` behind the SDL context, recorded the first time it is
+    /// made current - see [`cgl_context`].
+    cgl: *mut c_void,
 }
 
 pub const PIXEL_FORMAT_INSTANCE_SIZE: usize = size_of::<PixelFormat>();
@@ -311,6 +314,17 @@ unsafe extern "C" fn set_view(receiver: Id, _sel: Sel, view: Id) {
     context.view = objc::arc::retain(view);
 }
 
+/// `-clearDrawable`, which only lets go of the view.
+///
+/// The SDL context stays. It is not bound to a window until it is made current,
+/// so a later `-setView:` replaces the drawable on its own and there is nothing
+/// here that tearing the context down would fix.
+unsafe extern "C" fn clear_drawable(receiver: Id, _sel: Sel) {
+    let context = context_of(receiver);
+    objc::arc::release(context.view);
+    context.view = std::ptr::null_mut();
+}
+
 /// The window a context should draw into: its view's, or - before it has one -
 /// whichever window the program has made.
 ///
@@ -374,6 +388,40 @@ unsafe extern "C" fn make_current_context(receiver: Id, _sel: Sel) {
         );
     }
     CURRENT.store(receiver as usize, std::sync::atomic::Ordering::Release);
+    if context.cgl.is_null() {
+        context.cgl = current_cgl_context();
+    }
+}
+
+/// The CGL context current on this thread, or null where there is no CGL.
+///
+/// Through SDL's loader rather than a link: `CGLGetCurrentContext` lives in the
+/// OpenGL framework, which is what SDL opened to make the context, and asking
+/// SDL for it keeps this file building where that framework does not exist.
+fn current_cgl_context() -> *mut c_void {
+    let Some(f) = sdl3::video::gl_proc_address(c"CGLGetCurrentContext") else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: `CGLContextObj CGLGetCurrentContext(void)`.
+    unsafe {
+        let f: unsafe extern "C" fn() -> *mut c_void = std::mem::transmute(f);
+        f()
+    }
+}
+
+/// `-CGLContextObj`, the context SDL made underneath this one.
+///
+/// Recorded when the context is made current, because the only way to name
+/// SDL's is to ask the thread it is current on. A receiver that has never been
+/// current is made current here: the alternative is answering null, and the CGL
+/// calls a program makes with it - `CGLEnable`, `CGLSetParameter` - would then
+/// silently do nothing to the context it meant.
+unsafe extern "C" fn cgl_context(receiver: Id, sel: Sel) -> *mut c_void {
+    if context_of(receiver).cgl.is_null() {
+        // SAFETY: the receiver is a context of this crate's.
+        unsafe { make_current_context(receiver, sel) };
+    }
+    context_of(receiver).cgl
 }
 
 unsafe extern "C" fn current_context(_class: Id, _sel: Sel) -> Id {
@@ -443,6 +491,8 @@ pub(crate) fn install() {
         "initWithFormat:shareContext:" => init_with_format, c"@32@0:8@16@24";
         "setView:" => set_view, c"v24@0:8@16";
         "view" => view, c"@16@0:8";
+        "clearDrawable" => clear_drawable, c"v16@0:8";
+        "CGLContextObj" => cgl_context, c"^v16@0:8";
         "pixelFormat" => pixel_format, c"@16@0:8";
         "makeCurrentContext" => make_current_context, c"v16@0:8";
         "flushBuffer" => flush_buffer, c"v16@0:8";

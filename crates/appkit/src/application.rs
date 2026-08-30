@@ -142,6 +142,45 @@ unsafe extern "C" fn run(receiver: Id, sel: Sel) {
     }
 }
 
+/// Seconds until a deadline, or zero for a date this runtime cannot read.
+fn wait_interval(until: Id) -> f64 {
+    if until.is_null() {
+        return 0.0;
+    }
+    // SAFETY: `-timeIntervalSinceNow` is `double (id, SEL)` on an `NSDate`.
+    let seconds = unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) -> f64 = std::mem::transmute(objc::msg::entry());
+        f(until, objc::sel::get("timeIntervalSinceNow"))
+    };
+    seconds.max(0.0)
+}
+
+/// `-nextEventMatchingMask:untilDate:inMode:dequeue:`, which is always nil.
+///
+/// A program that drives its own loop - UE3 does - calls this instead of
+/// `-run`, so the pump has to happen here too or its window is never serviced.
+/// What it does not get is an event *object*: this tree turns a window-system
+/// event straight into the message to the responder it names (`event::deliver`)
+/// rather than keeping a queue of `NSEvent`s, so there is nothing to hand back.
+/// Input still arrives; forwarding it by hand is what is missing.
+unsafe extern "C" fn next_event(
+    receiver: Id,
+    _sel: Sel,
+    _mask: u64,
+    until: Id,
+    _mode: Id,
+    _dequeue: u8,
+) -> Id {
+    crate::event::pump(receiver);
+    // Apple blocks until the deadline when there is no event. Nothing here can
+    // wake, so the wait is a short sleep: a loop asking for the next event with
+    // a distant deadline and answered nil at once would spin a core.
+    if wait_interval(until) > 0.0 {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    std::ptr::null_mut()
+}
+
 /// `-stop:`, which ends the loop above after the current turn.
 unsafe extern "C" fn stop(receiver: Id, _sel: Sel, _sender: Id) {
     // SAFETY: an application.
@@ -325,6 +364,7 @@ pub(crate) fn install() {
         "currentSystemPresentationOptions" => presentation_options, c"Q16@0:8";
         "presentationOptions" => presentation_options, c"Q16@0:8";
         "setPresentationOptions:" => set_presentation_options, c"v24@0:8Q16";
+        "nextEventMatchingMask:untilDate:inMode:dequeue:" => next_event, c"@48@0:8Q16@24@32B40";
         "windows" => windows, c"@16@0:8";
         "keyWindow" => key_window, c"@16@0:8";
         "mainWindow" => key_window, c"@16@0:8";

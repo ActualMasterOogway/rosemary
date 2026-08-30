@@ -144,6 +144,11 @@ pub fn provider() -> SyntheticDylib {
     for (name, addr) in foundation::data_symbols() {
         lib.define_data(&name, addr);
     }
+    for name in foundation::names() {
+        if let Some(addr) = foundation::symbol(name) {
+            lib.define_fn(&format!("_{name}"), addr as usize as *const ());
+        }
+    }
     // IOKit's HID half, on SDL3. Published even where there is no SDL3: a guest
     // then gets a manager that declines to open, which is a diagnosis, where an
     // unresolved import would only say the symbol was missing.
@@ -213,6 +218,7 @@ pub fn symbol(name: &str) -> Option<u64> {
     }
     foundation::bootstrap();
     corefoundation::symbol(name)
+        .or_else(|| foundation::symbol(name))
         .or_else(|| iokit::symbol(name))
         .or_else(|| appkit::symbol(name))
         .or_else(|| corevideo::symbol(name))

@@ -120,6 +120,78 @@ impl Layout {
     }
 }
 
+/// `CFBundleRef` is `NSBundle *`, so the CoreFoundation spellings live beside
+/// the class rather than in `corefoundation` - which is underneath this crate
+/// and has no bundle to answer with.
+///
+/// Only the two a program in this tree reaches. `CFBundleCopyResourceURL` is
+/// here for what it does when the resource is *absent*, which is the answer a
+/// bundle usually has to give: A Hat in Time asks for a `RadioEffectUnit` its
+/// own `Resources` does not contain, and a null lets it skip the whole Carbon
+/// component path instead of being refused at the import.
+pub mod cf {
+    // The C spellings are the interface; renaming them would only hide it.
+    #![allow(non_snake_case)]
+
+    use objc::object::Id;
+
+    /// `CFBundleRef CFBundleGetMainBundle(void)`
+    ///
+    /// A `Get`, so the caller does not own it - which is what the singleton
+    /// already is: retained forever, and never handed out with a reference.
+    unsafe extern "C" fn CFBundleGetMainBundle() -> Id {
+        super::class::main_object()
+    }
+
+    /// `CFURLRef CFBundleCopyResourceURL(CFBundleRef, CFStringRef name,
+    /// CFStringRef type, CFStringRef subDirName)`
+    ///
+    /// The subdirectory is ignored for the reason
+    /// `-pathForResource:ofType:inDirectory:` ignores it.
+    unsafe extern "C" fn CFBundleCopyResourceURL(
+        _bundle: Id,
+        name: Id,
+        kind: Id,
+        _subdirectory: Id,
+    ) -> Id {
+        // SAFETY: the caller's obligation - each is an `NSString` or nil.
+        let (name, kind) = unsafe { (crate::string::bytes(name), crate::string::bytes(kind)) };
+        let (Ok(name), Ok(kind)) = (std::str::from_utf8(&name), std::str::from_utf8(&kind)) else {
+            return std::ptr::null_mut();
+        };
+        let Some(path) = super::main().and_then(|b| b.resource(name, kind)) else {
+            return std::ptr::null_mut();
+        };
+        // There is no `CFURL` in this tree. Refused by name rather than answered
+        // with the path as a string: a caller passes what it gets here to
+        // `CFURLGetFSRef` or `CFURLGetFileSystemRepresentation`, and a string in
+        // that slot is a wrong type read as the right one.
+        objc::fail!(
+            "CFBundleCopyResourceURL: {} is in the bundle, and this runtime has no CFURL to \
+             return it as",
+            path.display()
+        );
+    }
+
+    /// One entry point, as an address.
+    macro_rules! at {
+        ($f:expr) => {
+            $f as *const () as usize as u64
+        };
+    }
+
+    pub fn symbol(name: &str) -> Option<u64> {
+        Some(match name {
+            "CFBundleGetMainBundle" => at!(CFBundleGetMainBundle),
+            "CFBundleCopyResourceURL" => at!(CFBundleCopyResourceURL),
+            _ => return None,
+        })
+    }
+
+    /// Every name [`symbol`] answers.
+    pub const NAMES: &[&str] = &["CFBundleGetMainBundle", "CFBundleCopyResourceURL"];
+}
+
 /// The bundle the program is, once something has said which.
 static MAIN: RwLock<Option<&'static Layout>> = RwLock::new(None);
 
@@ -226,22 +298,33 @@ pub(crate) mod class {
     static MAIN_BUNDLE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
     unsafe extern "C" fn main_bundle(class: Id, _sel: Sel) -> Id {
-        // A bundle object with no state: everything it answers comes from
-        // `super::main()`, so there is nothing to carry.
+        // SAFETY: `class` is `NSBundle`, which this crate registered.
+        let class = match unsafe { objc::class::from_ptr(class as *const objc::class::Class) } {
+            Some(class) => class,
+            None => objc::fail!("+[NSBundle mainBundle] was sent to nil"),
+        };
+        of(class)
+    }
+
+    /// The one main-bundle object, which `+mainBundle` and
+    /// `CFBundleGetMainBundle` both have to answer with.
+    ///
+    /// A bundle object with no state: everything it answers comes from
+    /// `super::main()`, so there is nothing to carry.
+    fn of(class: &'static objc::class::Class) -> Id {
         *MAIN_BUNDLE.get_or_init(|| {
-            // SAFETY: `class` is `NSBundle`, which this crate registered.
-            let object = unsafe {
-                objc::object::create_instance(
-                    match objc::class::from_ptr(class as *const objc::class::Class) {
-                        Some(class) => class,
-                        None => objc::fail!("+[NSBundle mainBundle] was sent to nil"),
-                    },
-                    0,
-                )
-            };
+            let object = objc::object::create_instance(class, 0);
             objc::arc::retain(object);
             object as usize
         }) as Id
+    }
+
+    /// The main bundle, for a caller that has no class object in hand.
+    pub(crate) fn main_object() -> Id {
+        match objc::class::lookup(c"NSBundle") {
+            Some(class) => of(class),
+            None => std::ptr::null_mut(),
+        }
     }
 
     /// An `Info.plist` string as an autoreleased `NSString`, or nil.

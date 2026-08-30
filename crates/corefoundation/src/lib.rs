@@ -15,6 +15,9 @@ pub mod api;
 pub mod base;
 pub mod callbacks;
 pub mod collections;
+/// Only on Darwin: nowhere else is there another CoreFoundation to meet.
+#[cfg(target_os = "macos")]
+pub mod foreign;
 pub mod runloop;
 mod send;
 pub mod string;
@@ -73,6 +76,8 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFArrayCreate" => at!(api::CFArrayCreate),
         "CFArrayGetCount" => at!(api::CFArrayGetCount),
         "CFArrayGetValueAtIndex" => at!(api::CFArrayGetValueAtIndex),
+        "CFArrayCreateMutable" => at!(api::CFArrayCreateMutable),
+        "CFArrayAppendValue" => at!(api::CFArrayAppendValue),
 
         "CFDictionaryGetTypeID" => at!(api::CFDictionaryGetTypeID),
         "CFDictionaryCreate" => at!(api::CFDictionaryCreate),
@@ -80,6 +85,8 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFDictionaryGetValue" => at!(api::CFDictionaryGetValue),
         "CFDictionaryContainsKey" => at!(api::CFDictionaryContainsKey),
         "CFDictionaryGetKeysAndValues" => at!(api::CFDictionaryGetKeysAndValues),
+        "CFDictionaryCreateMutable" => at!(api::CFDictionaryCreateMutable),
+        "CFDictionarySetValue" => at!(api::CFDictionarySetValue),
 
         "CFNumberGetTypeID" => at!(api::CFNumberGetTypeID),
         "CFNumberCreate" => at!(api::CFNumberCreate),
@@ -148,12 +155,16 @@ pub const NAMES: &[&str] = &[
     "CFArrayCreate",
     "CFArrayGetCount",
     "CFArrayGetValueAtIndex",
+    "CFArrayCreateMutable",
+    "CFArrayAppendValue",
     "CFDictionaryGetTypeID",
     "CFDictionaryCreate",
     "CFDictionaryGetCount",
     "CFDictionaryGetValue",
     "CFDictionaryContainsKey",
     "CFDictionaryGetKeysAndValues",
+    "CFDictionaryCreateMutable",
+    "CFDictionarySetValue",
     "CFNumberGetTypeID",
     "CFNumberCreate",
     "CFNumberGetValue",

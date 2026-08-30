@@ -130,9 +130,24 @@ pub fn generation() -> usize {
     GENERATION.load(Ordering::Acquire)
 }
 
+/// Every class this runtime has built, so a pointer can be told from a foreign
+/// one.
+///
+/// The isa of an object from Apple's runtime is a class this crate never made,
+/// and reading it as one walks a structure that is not there. Off the send path:
+/// a send already knows its receiver is the guest's, and [`is_known`] is for the
+/// entry points a *host* object can reach - `CFRelease` on a `CGEventRef`, say.
+static KNOWN: LazyLock<RwLock<std::collections::HashSet<usize>>> =
+    LazyLock::new(|| RwLock::new(std::collections::HashSet::new()));
+
+/// Whether `p` is a class this runtime built.
+pub fn is_known(p: *const Class) -> bool {
+    !p.is_null() && KNOWN.read().unwrap_or_else(|e| e.into_inner()).contains(&(p as usize))
+}
+
 impl Class {
     fn new(name: CString, superclass: *mut Class, is_meta: bool, instance_size: usize) -> &'static Class {
-        Box::leak(Box::new(Class {
+        let class = Box::leak(Box::new(Class {
             isa: AtomicPtr::new(std::ptr::null_mut()),
             superclass: AtomicPtr::new(superclass),
             name,
@@ -140,7 +155,12 @@ impl Class {
             is_meta,
             registered: AtomicUsize::new(0),
             contents: RwLock::new(Contents::default()),
-        }))
+        }));
+        KNOWN
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(std::ptr::from_ref(class) as usize);
+        class
     }
 
     pub fn name(&self) -> *const c_char {

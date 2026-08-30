@@ -67,11 +67,16 @@ pub fn run_alert_panel(
         String::from_utf8_lossy(&out)
     );
 
-    let (Some(host), Some(message)) = (dlsym(symbol), escaped_string(&out)) else {
-        // Nothing to show it with, but the text is already out; the guest's
-        // caller sees the default button, which is what dismissing the panel
-        // would have returned.
-        ctx.rax = NS_ALERT_DEFAULT_RETURN;
+    // The host's panel is Apple's AppKit, and under `ROSETTA3_OBJC=builtin` the
+    // title and buttons are objects of *this* tree's runtime - a foreign
+    // structure read as a native one, which faults inside AppKit rather than
+    // showing anything.
+    let host = (!crate::frameworks::builtin()).then(|| dlsym(symbol)).flatten();
+    let (Some(host), Some(message)) = (host, escaped_string(&out)) else {
+        // Nothing to show it with, so nobody answered: the guest's caller sees
+        // the alternate button rather than the default, because a panel this
+        // runtime never displayed cannot be reported as one the user agreed to.
+        ctx.rax = NS_ALERT_ALTERNATE_RETURN;
         return Ok(());
     };
     // SAFETY: `symbol` resolved in an AppKit this process has loaded - the
@@ -93,10 +98,9 @@ pub fn run_alert_panel(
     Ok(())
 }
 
-/// `NSAlertDefaultReturn`, which is what dismissing a panel with its default
-/// button gives - the answer a guest handles by definition, since that button
-/// is the one it always supplies.
-const NS_ALERT_DEFAULT_RETURN: u64 = 1;
+/// `NSAlertAlternateReturn`, the panel's second button - conventionally the one
+/// that declines whatever the default would have agreed to.
+const NS_ALERT_ALTERNATE_RETURN: u64 = 0;
 
 /// Render the `NSString` format at `fmt_obj` against the guest's variadic tail.
 ///

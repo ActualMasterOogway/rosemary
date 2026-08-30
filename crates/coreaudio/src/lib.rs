@@ -25,6 +25,7 @@
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
+mod foreign;
 mod render;
 mod status;
 mod stream;
@@ -177,7 +178,7 @@ pub unsafe extern "C" fn AudioComponentInstanceNew(
 /// `OSStatus AudioComponentInstanceDispose(AudioComponentInstance)`
 pub unsafe extern "C" fn AudioComponentInstanceDispose(handle: *mut c_void) -> i32 {
     let Some(unit) = unit_for(handle) else {
-        return INVALID_COMPONENT;
+        return foreign::status(c"AudioComponentInstanceDispose", handle).unwrap_or(INVALID_COMPONENT);
     };
     // SAFETY: `close` owns the stream and leaves none behind.
     unsafe { stream::close(&mut unit.lock().unwrap_or_else(|e| e.into_inner())) };
@@ -195,7 +196,7 @@ pub unsafe extern "C" fn AudioComponentInstanceDispose(handle: *mut c_void) -> i
 /// already started is past the point where it checks.
 pub unsafe extern "C" fn AudioUnitInitialize(handle: *mut c_void) -> i32 {
     let Some(unit) = unit_for(handle) else {
-        return INVALID_COMPONENT;
+        return foreign::status(c"AudioUnitInitialize", handle).unwrap_or(INVALID_COMPONENT);
     };
     let mut unit = unit.lock().unwrap_or_else(|e| e.into_inner());
     if !unit.stream.is_null() {
@@ -213,7 +214,7 @@ pub unsafe extern "C" fn AudioUnitInitialize(handle: *mut c_void) -> i32 {
 /// `OSStatus AudioUnitUninitialize(AudioUnit)`
 pub unsafe extern "C" fn AudioUnitUninitialize(handle: *mut c_void) -> i32 {
     let Some(unit) = unit_for(handle) else {
-        return INVALID_COMPONENT;
+        return foreign::status(c"AudioUnitUninitialize", handle).unwrap_or(INVALID_COMPONENT);
     };
     // SAFETY: as `AudioComponentInstanceDispose`.
     unsafe { stream::close(&mut unit.lock().unwrap_or_else(|e| e.into_inner())) };
@@ -223,7 +224,7 @@ pub unsafe extern "C" fn AudioUnitUninitialize(handle: *mut c_void) -> i32 {
 /// `OSStatus AudioOutputUnitStart(AudioOutputUnit)`
 pub unsafe extern "C" fn AudioOutputUnitStart(handle: *mut c_void) -> i32 {
     let Some(unit) = unit_for(handle) else {
-        return INVALID_COMPONENT;
+        return foreign::status(c"AudioOutputUnitStart", handle).unwrap_or(INVALID_COMPONENT);
     };
     let mut unit = unit.lock().unwrap_or_else(|e| e.into_inner());
     if unit.stream.is_null() {
@@ -238,7 +239,7 @@ pub unsafe extern "C" fn AudioOutputUnitStart(handle: *mut c_void) -> i32 {
 /// `OSStatus AudioOutputUnitStop(AudioOutputUnit)`
 pub unsafe extern "C" fn AudioOutputUnitStop(handle: *mut c_void) -> i32 {
     let Some(unit) = unit_for(handle) else {
-        return INVALID_COMPONENT;
+        return foreign::status(c"AudioOutputUnitStop", handle).unwrap_or(INVALID_COMPONENT);
     };
     let mut unit = unit.lock().unwrap_or_else(|e| e.into_inner());
     if !unit.stream.is_null() {

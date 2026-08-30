@@ -19,11 +19,61 @@ pub type Boolean = u8;
 /// is the only one here.
 pub type CFAllocatorRef = *const c_void;
 
+/// Hand a foreign object back to the CoreFoundation that made it.
+///
+/// Returns whether it did. See [`crate::foreign`]: the alternative is reading
+/// Apple's object as one of this runtime's, which walks a class structure that
+/// is not there.
+#[cfg(target_os = "macos")]
+unsafe fn forwarded(name: &std::ffi::CStr, object: CFTypeRef) -> bool {
+    // SAFETY: the caller's obligation - null or an object.
+    if !unsafe { crate::foreign::is(object) } {
+        return false;
+    }
+    if !crate::foreign::forwarding() {
+        objc::fail!(
+            "{}: the object is not this runtime's, and ROSETTA3_NO_FOREIGN forbids passing it to \
+             the CoreFoundation that made it",
+            name.to_string_lossy()
+        );
+    }
+    let Some(f) = crate::foreign::entry(name) else {
+        objc::fail!(
+            "{}: the object is not this runtime's and there is no host CoreFoundation to pass it \
+             to",
+            name.to_string_lossy()
+        );
+    };
+    // SAFETY: every entry point forwarded here is `void (*)(CFTypeRef)` in the
+    // one respect that matters - one pointer argument - and a return value the
+    // caller does not read.
+    unsafe {
+        let f: unsafe extern "C" fn(CFTypeRef) -> CFTypeRef = std::mem::transmute(f);
+        f(object);
+    }
+    true
+}
+
+/// Off Darwin every object the guest holds is this runtime's, so there is
+/// nothing to forward and nothing to check for.
+#[cfg(not(target_os = "macos"))]
+unsafe fn forwarded(_name: &std::ffi::CStr, _object: CFTypeRef) -> bool {
+    false
+}
+
 pub unsafe extern "C" fn CFRetain(object: CFTypeRef) -> CFTypeRef {
+    // SAFETY: the caller's obligation.
+    if unsafe { forwarded(c"CFRetain", object) } {
+        return object;
+    }
     objc::arc::retain(object as Id) as CFTypeRef
 }
 
 pub unsafe extern "C" fn CFRelease(object: CFTypeRef) {
+    // SAFETY: the caller's obligation.
+    if unsafe { forwarded(c"CFRelease", object) } {
+        return;
+    }
     objc::arc::release(object as Id);
 }
 
@@ -353,6 +403,28 @@ pub unsafe extern "C" fn CFArrayCreate(
     collections::new_array(slice, unsafe { Policy::from_value(callbacks) }, false)
 }
 
+/// `CFArrayCreateMutable`. The capacity is a hint, and zero means unbounded;
+/// this array grows either way, so it is only reserved for.
+pub unsafe extern "C" fn CFArrayCreateMutable(
+    _allocator: CFAllocatorRef,
+    _capacity: CFIndex,
+    callbacks: *const ValueCallBacks,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation - null, or a live callbacks structure.
+    collections::new_array(&[], unsafe { Policy::from_value(callbacks) }, true)
+}
+
+pub unsafe extern "C" fn CFArrayAppendValue(array: CFTypeRef, value: CFTypeRef) {
+    // SAFETY: the caller's obligation.
+    let Some(a) = (unsafe { collections::array(array) }) else {
+        return;
+    };
+    if !a.mutable {
+        return;
+    }
+    a.values.push(a.policy.retain(value));
+}
+
 pub unsafe extern "C" fn CFArrayGetCount(array: CFTypeRef) -> CFIndex {
     // SAFETY: the caller's obligation.
     unsafe { collections::array(array) }.map_or(0, |a| a.values.len() as CFIndex)
@@ -409,6 +481,40 @@ pub unsafe extern "C" fn CFDictionaryCreate(
             false,
         )
     }
+}
+
+/// `CFDictionaryCreateMutable`, whose capacity is a hint the same way
+/// [`CFArrayCreateMutable`]'s is.
+pub unsafe extern "C" fn CFDictionaryCreateMutable(
+    _allocator: CFAllocatorRef,
+    _capacity: CFIndex,
+    key_callbacks: *const KeyCallBacks,
+    value_callbacks: *const ValueCallBacks,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation - null, or live callbacks structures.
+    unsafe {
+        collections::new_dictionary(
+            &[],
+            Policy::from_key(key_callbacks),
+            Policy::from_value(value_callbacks),
+            true,
+        )
+    }
+}
+
+pub unsafe extern "C" fn CFDictionarySetValue(
+    dictionary: CFTypeRef,
+    key: CFTypeRef,
+    value: CFTypeRef,
+) {
+    // SAFETY: the caller's obligation.
+    let Some(d) = (unsafe { collections::dictionary(dictionary) }) else {
+        return;
+    };
+    if !d.mutable {
+        return;
+    }
+    d.set(key, value);
 }
 
 pub unsafe extern "C" fn CFDictionaryGetCount(dictionary: CFTypeRef) -> CFIndex {

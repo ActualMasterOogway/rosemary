@@ -71,6 +71,11 @@ pub fn date(interval: f64) -> Id {
     objc::arc::autorelease(object as Id)
 }
 
+/// A date object for a Unix timestamp, autoreleased.
+pub fn date_since_1970(seconds: f64) -> Id {
+    date(seconds - UNIX_TO_REFERENCE)
+}
+
 fn date_of(receiver: Id) -> f64 {
     // SAFETY: a date of this module's.
     unsafe { (*(receiver as *const Date)).interval }

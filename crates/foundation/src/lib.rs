@@ -8,9 +8,11 @@ pub mod kvc;
 pub mod locale;
 pub mod notification;
 pub mod objectify;
+pub mod paths;
 pub mod plist;
 pub mod pool;
 pub mod string;
+pub mod thread;
 pub mod timer;
 pub mod unarchiver;
 pub mod value;
@@ -38,7 +40,22 @@ pub fn bootstrap() {
         exception::install();
         locale::install();
         timer::install();
+        thread::install();
     });
+}
+
+/// The C entry points this crate answers, from whichever module owns them.
+///
+/// Bundle and search-path calls are CoreFoundation and Foundation spellings of
+/// questions only this crate can answer - `corefoundation` is underneath it and
+/// has neither an `NSBundle` nor a `$HOME`.
+pub fn symbol(name: &str) -> Option<u64> {
+    paths::symbol(name).or_else(|| bundle::cf::symbol(name))
+}
+
+/// Every name [`symbol`] answers.
+pub fn names() -> impl Iterator<Item = &'static str> {
+    paths::NAMES.iter().chain(bundle::cf::NAMES).copied()
 }
 
 /// This user's home directory.
