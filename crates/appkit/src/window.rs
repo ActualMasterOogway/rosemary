@@ -79,6 +79,16 @@ pub fn window_for(sdl: sdl3::Window) -> Id {
         .map_or(std::ptr::null_mut(), |(_, object)| *object as Id)
 }
 
+/// Every live SDL window, for a change that applies to all of them.
+pub fn sdl_windows() -> Vec<sdl3::Window> {
+    WINDOWS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|(sdl, _)| *sdl as sdl3::Window)
+        .collect()
+}
+
 /// Every window this crate has made, most recent last.
 pub fn all() -> Vec<Id> {
     WINDOWS
@@ -162,6 +172,7 @@ unsafe extern "C" fn init_with_content_rect(
         );
     };
     sdl3::video::set_window_position(sdl, x, y);
+    crate::icon::apply(sdl);
     window.sdl = sdl;
     WINDOWS
         .lock()

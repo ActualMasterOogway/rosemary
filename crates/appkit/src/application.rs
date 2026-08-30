@@ -11,6 +11,7 @@ pub struct Application {
     isa: *const c_void,
     delegate: Id,
     main_menu: Id,
+    icon: Id,
     running: usize,
 }
 
@@ -74,6 +75,25 @@ unsafe extern "C" fn main_menu(receiver: Id, _sel: Sel) -> Id {
 unsafe extern "C" fn set_main_menu(receiver: Id, _sel: Sel, value: Id) {
     // SAFETY: an application.
     unsafe { (*(receiver as *mut Application)).main_menu = objc::arc::retain(value) };
+}
+
+/// `-applicationIconImage`.
+///
+/// What the program itself set, and nil otherwise. Apple would answer with the
+/// bundle's icon here; this does not, because the icon is decoded straight into
+/// a window rather than into an `NSImage`, and an image made only to answer this
+/// would be one nothing else in the runtime can draw.
+unsafe extern "C" fn application_icon_image(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an application.
+    unsafe { (*(receiver as *const Application)).icon }
+}
+
+/// `-setApplicationIconImage:`, which is the Dock tile on macOS and the window
+/// icon elsewhere - see [`crate::icon`].
+unsafe extern "C" fn set_application_icon_image(receiver: Id, _sel: Sel, image: Id) {
+    // SAFETY: an application.
+    unsafe { (*(receiver as *mut Application)).icon = objc::arc::retain(image) };
+    crate::icon::replace(crate::image::bitmap(image));
 }
 
 unsafe extern "C" fn is_running(receiver: Id, _sel: Sel) -> u8 {
@@ -354,6 +374,8 @@ pub(crate) fn install() {
         "setDelegate:" => set_delegate, c"v24@0:8@16";
         "mainMenu" => main_menu, c"@16@0:8";
         "setMainMenu:" => set_main_menu, c"v24@0:8@16";
+        "applicationIconImage" => application_icon_image, c"@16@0:8";
+        "setApplicationIconImage:" => set_application_icon_image, c"v24@0:8@16";
         "isRunning" => is_running, c"c16@0:8";
         "finishLaunching" => finish_launching, c"v16@0:8";
         "run" => run, c"v16@0:8";

@@ -96,6 +96,10 @@ struct Api {
     SDL_SetWindowResizable: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_GetWindowPixelDensity: Option<unsafe extern "C" fn(Window) -> f32>,
     SDL_GetWindowID: Option<unsafe extern "C" fn(Window) -> u32>,
+    SDL_SetWindowIcon: Option<unsafe extern "C" fn(Window, *mut c_void) -> bool>,
+    SDL_CreateSurfaceFrom:
+        Option<unsafe extern "C" fn(c_int, c_int, u32, *mut c_void, c_int) -> *mut c_void>,
+    SDL_DestroySurface: Option<unsafe extern "C" fn(*mut c_void)>,
 
     SDL_GL_CreateContext: Option<unsafe extern "C" fn(Window) -> GlContext>,
     SDL_GL_DestroyContext: Option<unsafe extern "C" fn(GlContext) -> bool>,
@@ -228,6 +232,9 @@ fn api() -> Option<&'static Api> {
             SDL_SetWindowResizable,
             SDL_GetWindowPixelDensity,
             SDL_GetWindowID,
+            SDL_SetWindowIcon,
+            SDL_CreateSurfaceFrom,
+            SDL_DestroySurface,
             SDL_GL_CreateContext,
             SDL_GL_DestroyContext,
             SDL_GL_MakeCurrent,
@@ -981,6 +988,59 @@ use super::*;
         title_with_brand.extend_from_slice(" (SDL3 via Rosetta 3)".as_bytes());
         // SAFETY: a window and a NUL-terminated title.
         unsafe { f(window, CString::new(title_with_brand).unwrap().as_ptr()) }
+    }
+
+    /// `SDL_PIXELFORMAT_RGBA32`: four bytes per pixel, red first in memory.
+    ///
+    /// The number rather than the name, because SDL builds this one out of
+    /// field widths in a macro and there is no symbol to bind to.
+    const PIXELFORMAT_RGBA: u32 = 0x1676_2004;
+
+    /// Give a window an icon, from `width * height` RGBA pixels.
+    ///
+    /// On a desktop that shows a per-window icon this is that icon; on macOS
+    /// SDL routes it to the application icon, which is the Dock tile - and that
+    /// is the only way to set it here, because the *process* is `rosetta3` and
+    /// its own bundle is not the guest's.
+    ///
+    /// SDL converts the surface into its own representation, so nothing here
+    /// has to outlive the call.
+    pub fn set_window_icon(window: Window, width: i32, height: i32, pixels: &[u8]) -> bool {
+        if pixels.len() != (width as usize) * (height as usize) * 4 {
+            return false;
+        }
+        let Some(api) = api() else {
+            return false;
+        };
+        let (Some(create), Some(set), Some(destroy)) = (
+            api.SDL_CreateSurfaceFrom,
+            api.SDL_SetWindowIcon,
+            api.SDL_DestroySurface,
+        ) else {
+            return false;
+        };
+        // `SDL_CreateSurfaceFrom` borrows the pixels rather than copying them,
+        // so they are a local this call outlives.
+        let mut pixels = pixels.to_vec();
+        // SAFETY: the buffer is `width * height * 4` bytes, which is what the
+        // format and pitch below describe, and it outlives the surface.
+        let surface = unsafe {
+            create(
+                width,
+                height,
+                PIXELFORMAT_RGBA,
+                pixels.as_mut_ptr().cast(),
+                width * 4,
+            )
+        };
+        if surface.is_null() {
+            return false;
+        }
+        // SAFETY: a window this crate created and a surface just made.
+        let ok = unsafe { set(window, surface) };
+        // SAFETY: as above; SDL has taken its own copy by now.
+        unsafe { destroy(surface) };
+        ok
     }
 
     /// The small integer SDL puts in an event to name a window.

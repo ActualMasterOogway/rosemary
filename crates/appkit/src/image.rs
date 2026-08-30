@@ -127,6 +127,25 @@ fn bytes_of<'a>(receiver: Id) -> &'a [u8] {
     }
 }
 
+/// An image's pixels, for a caller outside AppKit that needs them - the
+/// application icon is the one that does.
+///
+/// The class is checked rather than assumed: the selector that reaches here
+/// takes an `id`, and a program that passes something else would otherwise have
+/// an arbitrary object read as an `NSImage`.
+pub fn bitmap(object: Id) -> Option<crate::raster::Bitmap> {
+    if object.is_null() {
+        return None;
+    }
+    // SAFETY: null or an object this runtime allocated.
+    let is_image = unsafe { objc::object::class_of(object) }.is_some_and(|c| {
+        objc::class::lookup(c"NSImage").is_some_and(|k| c.chain().any(|x| std::ptr::eq(x, k)))
+    });
+    is_image
+        .then(|| crate::raster::decode(bytes_of(object)))
+        .flatten()
+}
+
 /// `-initWithData:`.
 ///
 /// **Nil for data this runtime does not recognise**, which is `NSImage`'s own

@@ -8,6 +8,7 @@ mod define;
 pub mod keymap;
 pub mod nsevent;
 pub mod geometry;
+pub mod icon;
 pub mod image;
 pub mod menu;
 pub mod nib;

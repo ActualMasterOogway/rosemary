@@ -42,6 +42,12 @@ pub fn decode(bytes: &[u8]) -> Option<Bitmap> {
     if bytes.starts_with(b"II") || bytes.starts_with(b"MM") {
         return tiff(bytes);
     }
+    if bytes.starts_with(PNG_SIGNATURE) {
+        return png(bytes);
+    }
+    if bytes.starts_with(b"icns") {
+        return icns(bytes);
+    }
     None
 }
 
@@ -260,6 +266,360 @@ fn tiff(bytes: &[u8]) -> Option<Bitmap> {
     Some(out)
 }
 
+// zlib's one-shot inflate: the same copy of the library the guest's own zlib
+// imports are forwarded to, reached here by name rather than through a slot.
+#[link(name = "z")]
+unsafe extern "C" {
+    fn uncompress(
+        dest: *mut u8,
+        dest_len: *mut std::ffi::c_ulong,
+        source: *const u8,
+        source_len: std::ffi::c_ulong,
+    ) -> std::ffi::c_int;
+}
+
+const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+fn be32(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+}
+
+/// `IHDR`, which is everything the rest of the decoder branches on.
+struct PngHeader {
+    width: u32,
+    height: u32,
+    depth: u8,
+    colour: u8,
+    interlace: u8,
+}
+
+impl PngHeader {
+    /// Samples per pixel for this colour type, or `None` for one that is not a
+    /// colour type at all.
+    fn channels(&self) -> Option<usize> {
+        match self.colour {
+            0 => Some(1),
+            2 => Some(3),
+            3 => Some(1),
+            4 => Some(2),
+            6 => Some(4),
+            _ => None,
+        }
+    }
+}
+
+/// An eight-bit non-interlaced PNG.
+///
+/// Sixteen-bit samples and Adam7 are declined rather than approximated: half of
+/// a sixteen-bit sample is a visibly different image, and an interlaced file
+/// read as if it were not is seven overlapping thumbnails.
+fn png(bytes: &[u8]) -> Option<Bitmap> {
+    let mut header = None;
+    let mut palette: &[u8] = &[];
+    let mut transparency: &[u8] = &[];
+    let mut deflated: Vec<u8> = Vec::new();
+
+    let mut at = PNG_SIGNATURE.len();
+    while at + 8 <= bytes.len() {
+        let length = be32(bytes, at)? as usize;
+        let kind = bytes.get(at + 4..at + 8)?;
+        let data = bytes.get(at + 8..at + 8 + length)?;
+        match kind {
+            b"IHDR" => {
+                header = Some(PngHeader {
+                    width: be32(data, 0)?,
+                    height: be32(data, 4)?,
+                    depth: *data.get(8)?,
+                    colour: *data.get(9)?,
+                    interlace: *data.get(12)?,
+                })
+            }
+            b"PLTE" => palette = data,
+            b"tRNS" => transparency = data,
+            b"IDAT" => deflated.extend_from_slice(data),
+            b"IEND" => break,
+            _ => {}
+        }
+        // Length, type, data, then a four-byte CRC this decoder does not check:
+        // a corrupt icon is not a threat model, and a file that fails to
+        // inflate is refused below anyway.
+        at += 12 + length;
+    }
+
+    let header = header?;
+    if header.depth != 8 || header.interlace != 0 || header.width == 0 || header.height == 0 {
+        return None;
+    }
+    let channels = header.channels()?;
+    let width = header.width as usize;
+    let height = header.height as usize;
+    let stride = width.checked_mul(channels)?;
+
+    // Every row is one filter byte followed by its samples, so the inflated
+    // size is known exactly - which is what lets this use the one-shot
+    // `uncompress` instead of driving a stream.
+    let mut raw = vec![0u8; (stride + 1).checked_mul(height)?];
+    let mut produced = raw.len() as std::ffi::c_ulong;
+    // SAFETY: `raw` has room for `produced` bytes and `deflated` is that many
+    // valid bytes of input.
+    let status = unsafe {
+        uncompress(
+            raw.as_mut_ptr(),
+            &mut produced,
+            deflated.as_ptr(),
+            deflated.len() as std::ffi::c_ulong,
+        )
+    };
+    if status != 0 || produced as usize != raw.len() {
+        return None;
+    }
+
+    let mut out = Bitmap::new(header.width, header.height);
+    let mut previous = vec![0u8; stride];
+    let mut row = vec![0u8; stride];
+    for y in 0..height {
+        let start = y * (stride + 1);
+        let filter = raw[start];
+        row.copy_from_slice(&raw[start + 1..start + 1 + stride]);
+        unfilter(filter, &mut row, &previous, channels)?;
+        let destination = y * out.bytes_per_row();
+        for x in 0..width {
+            let sample = &row[x * channels..];
+            let rgba = match header.colour {
+                0 => [sample[0], sample[0], sample[0], 0xff],
+                2 => [sample[0], sample[1], sample[2], 0xff],
+                3 => {
+                    let index = sample[0] as usize;
+                    let entry = palette.get(index * 3..index * 3 + 3)?;
+                    let alpha = transparency.get(index).copied().unwrap_or(0xff);
+                    [entry[0], entry[1], entry[2], alpha]
+                }
+                4 => [sample[0], sample[0], sample[0], sample[1]],
+                _ => [sample[0], sample[1], sample[2], sample[3]],
+            };
+            out.pixels[destination + x * 4..destination + x * 4 + 4].copy_from_slice(&rgba);
+        }
+        std::mem::swap(&mut previous, &mut row);
+    }
+    Some(out)
+}
+
+/// Undo one row's filter, given the row above it already undone.
+///
+/// The filters predict from the byte to the left, the byte above and the byte
+/// diagonally above-left; outside the image each of those reads as zero, which
+/// is what the first row and the first pixel of every row rely on.
+fn unfilter(filter: u8, row: &mut [u8], previous: &[u8], channels: usize) -> Option<()> {
+    for i in 0..row.len() {
+        let left = match i >= channels {
+            true => row[i - channels] as i32,
+            false => 0,
+        };
+        let above = previous.get(i).copied().unwrap_or(0) as i32;
+        let diagonal = match i >= channels {
+            true => previous.get(i - channels).copied().unwrap_or(0) as i32,
+            false => 0,
+        };
+        let predicted = match filter {
+            0 => 0,
+            1 => left,
+            2 => above,
+            3 => (left + above) / 2,
+            4 => paeth(left, above, diagonal),
+            _ => return None,
+        };
+        row[i] = (row[i] as i32).wrapping_add(predicted) as u8;
+    }
+    Some(())
+}
+
+fn paeth(left: i32, above: i32, diagonal: i32) -> i32 {
+    let estimate = left + above - diagonal;
+    let (dl, da, dd) = (
+        (estimate - left).abs(),
+        (estimate - above).abs(),
+        (estimate - diagonal).abs(),
+    );
+    if dl <= da && dl <= dd {
+        left
+    } else if da <= dd {
+        above
+    } else {
+        diagonal
+    }
+}
+
+/// The classic entries: a 24-bit image, the 8-bit mask that goes with it, and
+/// the side both are.
+///
+/// An `.icns` with none of the PNG entries is not old enough to be rare -
+/// Subnautica's is exactly this and nothing else - so these are read rather
+/// than skipped past.
+const CLASSIC: &[(&[u8; 4], &[u8; 4], u32)] = &[
+    (b"is32", b"s8mk", 16),
+    (b"il32", b"l8mk", 32),
+    (b"ih32", b"h8mk", 48),
+    (b"it32", b"t8mk", 128),
+];
+
+/// The straight ARGB entries, which carry their own alpha.
+const ARGB: &[(&[u8; 4], u32)] = &[(b"ic04", 16), (b"ic05", 32)];
+
+/// The largest representation worth taking out of an `.icns`.
+///
+/// A window icon is scaled by the window server from whatever it is given, and
+/// the 1024-pixel entry a modern bundle carries is four megabytes to hand over
+/// for something drawn at 128.
+const ICON_SIDE_LIMIT: u32 = 512;
+
+/// One representation inside an `.icns`, before it is decoded.
+///
+/// Chosen by side and decoded afterwards rather than the other way round: a
+/// bundle may carry ten of these, and decoding all of them to compare sizes
+/// would inflate a megabyte of PNG to throw nine tenths of it away.
+enum Rep<'a> {
+    Png(&'a [u8]),
+    Classic {
+        data: &'a [u8],
+        mask: Option<&'a [u8]>,
+        side: u32,
+        leading_header: bool,
+    },
+    Argb(&'a [u8], u32),
+}
+
+/// The `.icns` representation nearest [`ICON_SIDE_LIMIT`] from below, or the
+/// smallest one when every entry is larger.
+fn icns(bytes: &[u8]) -> Option<Bitmap> {
+    let mut entries: Vec<([u8; 4], &[u8])> = Vec::new();
+    let mut at = 8;
+    while at + 8 <= bytes.len() {
+        let kind: [u8; 4] = bytes.get(at..at + 4)?.try_into().ok()?;
+        let length = be32(bytes, at + 4)? as usize;
+        if length < 8 {
+            break;
+        }
+        if let Some(data) = bytes.get(at + 8..at + length) {
+            entries.push((kind, data));
+        }
+        at += length;
+    }
+    let entry = |wanted: &[u8; 4]| {
+        entries
+            .iter()
+            .find(|(kind, _)| kind == wanted)
+            .map(|(_, data)| *data)
+    };
+
+    let mut reps: Vec<(u32, Rep)> = Vec::new();
+    for (kind, data) in &entries {
+        if data.starts_with(PNG_SIGNATURE)
+            && let Some(side) = be32(data, 16)
+        {
+            reps.push((side, Rep::Png(data)));
+            continue;
+        }
+        if let Some((_, mask, side)) = CLASSIC.iter().find(|(t, ..)| *t == kind) {
+            reps.push((
+                *side,
+                Rep::Classic {
+                    data,
+                    mask: entry(mask),
+                    side: *side,
+                    leading_header: kind == b"it32",
+                },
+            ));
+            continue;
+        }
+        if let Some((_, side)) = ARGB.iter().find(|(t, _)| *t == kind)
+            && let Some(planes) = data.strip_prefix(b"ARGB")
+        {
+            reps.push((*side, Rep::Argb(planes, *side)));
+        }
+    }
+
+    let best = reps
+        .iter()
+        .filter(|(side, _)| *side <= ICON_SIDE_LIMIT)
+        .max_by_key(|(side, _)| *side)
+        .or_else(|| reps.iter().min_by_key(|(side, _)| *side))?;
+    match &best.1 {
+        Rep::Png(data) => png(data),
+        Rep::Classic {
+            data,
+            mask,
+            side,
+            leading_header,
+        } => classic(data, *mask, *side, *leading_header),
+        Rep::Argb(data, side) => argb(data, *side),
+    }
+}
+
+/// A 24-bit `.icns` entry and its separate mask.
+///
+/// The three colour planes are stored one after another in a single run-length
+/// stream, so one unpack of `3 * pixels` bytes covers all of them. A missing
+/// mask is opaque rather than an error: the mask is a separate entry and an
+/// encoder is free to leave it out.
+fn classic(data: &[u8], mask: Option<&[u8]>, side: u32, leading_header: bool) -> Option<Bitmap> {
+    let pixels = (side as usize).checked_mul(side as usize)?;
+    // The 128-pixel entry begins with four zero bytes that are not part of the
+    // stream.
+    let data = match leading_header && data.starts_with(&[0, 0, 0, 0]) {
+        true => &data[4..],
+        false => data,
+    };
+    let planes = match data.len() == pixels * 3 {
+        true => data.to_vec(),
+        false => unpack(data, pixels * 3)?,
+    };
+
+    let mut out = Bitmap::new(side, side);
+    for i in 0..pixels {
+        out.pixels[i * 4] = planes[i];
+        out.pixels[i * 4 + 1] = planes[pixels + i];
+        out.pixels[i * 4 + 2] = planes[pixels * 2 + i];
+        out.pixels[i * 4 + 3] = mask.and_then(|m| m.get(i).copied()).unwrap_or(0xff);
+    }
+    Some(out)
+}
+
+/// An `ARGB` entry: four run-length planes, alpha first.
+fn argb(data: &[u8], side: u32) -> Option<Bitmap> {
+    let pixels = (side as usize).checked_mul(side as usize)?;
+    let planes = unpack(data, pixels * 4)?;
+    let mut out = Bitmap::new(side, side);
+    for i in 0..pixels {
+        out.pixels[i * 4] = planes[pixels + i];
+        out.pixels[i * 4 + 1] = planes[pixels * 2 + i];
+        out.pixels[i * 4 + 2] = planes[pixels * 3 + i];
+        out.pixels[i * 4 + 3] = planes[i];
+    }
+    Some(out)
+}
+
+/// The `.icns` run-length encoding: a control byte with the high bit set is a
+/// run of `control - 125` copies of the byte after it, and one without is
+/// `control + 1` literal bytes.
+fn unpack(mut data: &[u8], length: usize) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(length);
+    while out.len() < length {
+        let (&control, rest) = data.split_first()?;
+        data = rest;
+        if control & 0x80 != 0 {
+            let (&value, rest) = data.split_first()?;
+            data = rest;
+            out.extend(std::iter::repeat_n(value, control as usize - 125));
+        } else {
+            let count = control as usize + 1;
+            out.extend_from_slice(data.get(..count)?);
+            data = &data[count..];
+        }
+    }
+    out.truncate(length);
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +688,128 @@ mod tests {
 
         let decoded = decode(&file).expect("a top-down BMP");
         assert_eq!(&decoded.pixels[0..4], &[0xff, 0x00, 0x00, 0xff]);
+    }
+
+    /// A zlib stream of one stored block, so a test can write a PNG without a
+    /// compressor.
+    fn stored(data: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x78, 0x01, 0x01];
+        out.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(!(data.len() as u16)).to_le_bytes());
+        out.extend_from_slice(data);
+        let (mut a, mut b) = (1u32, 0u32);
+        for byte in data {
+            a = (a + *byte as u32) % 65521;
+            b = (b + a) % 65521;
+        }
+        out.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        out
+    }
+
+    fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = (data.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        // The CRC, which the decoder does not check.
+        out.extend_from_slice(&[0; 4]);
+        out
+    }
+
+    /// A PNG of `width * height` RGBA rows, each with the filter byte in front.
+    fn png_file(width: u32, height: u32, colour: u8, rows: &[u8]) -> Vec<u8> {
+        let mut header = width.to_be_bytes().to_vec();
+        header.extend_from_slice(&height.to_be_bytes());
+        header.extend_from_slice(&[8, colour, 0, 0, 0]);
+
+        let mut file = PNG_SIGNATURE.to_vec();
+        file.extend_from_slice(&chunk(b"IHDR", &header));
+        file.extend_from_slice(&chunk(b"IDAT", &stored(rows)));
+        file.extend_from_slice(&chunk(b"IEND", &[]));
+        file
+    }
+
+    /// The unfiltering is the whole of a PNG decoder that can be wrong without
+    /// failing, so the two rows here are filtered differently: `Sub` predicts
+    /// from the pixel to the left and `Up` from the row above.
+    #[test]
+    fn a_filtered_png_comes_back_unfiltered() {
+        let rows = [
+            // Sub: red, then a delta of one per channel.
+            1, 10, 20, 30, 40, 1, 1, 1, 1, //
+            // Up: a delta of two per channel against the row above.
+            2, 2, 2, 2, 2, 2, 2, 2, 2,
+        ];
+        let decoded = decode(&png_file(2, 2, 6, &rows)).expect("an RGBA PNG");
+        assert_eq!(decoded.width, 2);
+        assert_eq!(decoded.height, 2);
+        assert_eq!(&decoded.pixels[0..8], &[10, 20, 30, 40, 11, 21, 31, 41]);
+        assert_eq!(&decoded.pixels[8..16], &[12, 22, 32, 42, 13, 23, 33, 43]);
+    }
+
+    /// A colour type with no alpha channel is opaque rather than transparent,
+    /// which is the difference between an icon and an empty rectangle.
+    #[test]
+    fn a_png_without_alpha_is_opaque() {
+        let decoded = decode(&png_file(1, 1, 2, &[0, 1, 2, 3])).expect("an RGB PNG");
+        assert_eq!(&decoded.pixels[..], &[1, 2, 3, 0xff]);
+    }
+
+    /// Sixteen-bit samples would have to be halved and Adam7 reassembled, so
+    /// both are declined - a decoder that ignored either would answer with a
+    /// plausible wrong image.
+    #[test]
+    fn a_png_this_decoder_cannot_read_is_declined() {
+        let mut deep = png_file(1, 1, 6, &[0; 9]);
+        deep[24] = 16;
+        assert_eq!(decode(&deep), None);
+
+        let mut interlaced = png_file(1, 1, 6, &[0; 5]);
+        interlaced[28] = 1;
+        assert_eq!(decode(&interlaced), None);
+    }
+
+    fn icns_file(entries: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (kind, data) in entries {
+            body.extend_from_slice(*kind);
+            body.extend_from_slice(&(data.len() as u32 + 8).to_be_bytes());
+            body.extend_from_slice(data);
+        }
+        let mut file = b"icns".to_vec();
+        file.extend_from_slice(&(body.len() as u32 + 8).to_be_bytes());
+        file.extend_from_slice(&body);
+        file
+    }
+
+    /// The classic entries, which are all a bundle predating retina icons has:
+    /// three colour planes in one run-length stream, and the alpha in a
+    /// separate entry.
+    #[test]
+    fn a_classic_icns_entry_is_read_with_its_mask() {
+        // Two runs of a hundred and twenty-eight per plane - the encoding's
+        // longest run is a hundred and thirty - red, then green, then blue.
+        let mut runs = Vec::new();
+        for value in [0x10, 0x20, 0x30] {
+            runs.extend_from_slice(&[128 + 125, value, 128 + 125, value]);
+        }
+        let icns = icns_file(&[(b"is32", runs), (b"s8mk", vec![0x40; 16 * 16])]);
+        let decoded = decode(&icns).expect("a classic icns");
+        assert_eq!((decoded.width, decoded.height), (16, 16));
+        assert!(decoded.pixels.chunks(4).all(|p| p == [0x10, 0x20, 0x30, 0x40]));
+    }
+
+    /// The entry a window wants is the largest one that is not extravagant: a
+    /// bundle carrying a 1024-pixel icon is asking for four megabytes to draw
+    /// something the window server will scale down anyway.
+    #[test]
+    fn the_largest_icns_entry_under_the_limit_wins() {
+        let small = png_file(32, 32, 6, &vec![0; (32 * 4 + 1) * 32]);
+        // Its pixels are never inflated, because its header is enough to rule
+        // it out - which is the point of choosing before decoding.
+        let large = png_file(1024, 1024, 6, &[]);
+        let decoded = decode(&icns_file(&[(b"ic11", small), (b"ic10", large)]))
+            .expect("an icns of two PNGs");
+        assert_eq!(decoded.width, 32);
     }
 
     /// A compression this module cannot read is declined rather than read as if

@@ -113,6 +113,17 @@ impl Layout {
             .or_else(|| self.resource(name, ""))
     }
 
+    /// The `.icns` the `Info.plist` names, if it is there.
+    ///
+    /// `CFBundleIconFile` is written both ways - with the extension and without
+    /// it - and Apple accepts either, so both spellings are tried. A bundle
+    /// whose icon is an asset catalog names it with `CFBundleIconName` and has
+    /// no file to find, which is a `None` here rather than a diagnostic.
+    pub fn icon(&self) -> Option<PathBuf> {
+        let name = self.info_string("CFBundleIconFile")?;
+        self.resource(name, "icns").or_else(|| self.resource(name, ""))
+    }
+
     /// `NSPrincipalClass`, which `NSApplicationMain` instantiates instead of
     /// `NSApplication`.
     pub fn principal_class(&self) -> Option<&str> {
@@ -243,6 +254,7 @@ mod tests {
         <key>CFBundleExecutable</key><string>Thing</string>
         <key>CFBundleIdentifier</key><string>com.example.thing</string>
         <key>CFBundleDevelopmentRegion</key><string>English</string>
+        <key>CFBundleIconFile</key><string>icon.icns</string>
         <key>NSMainNibFile</key><string>MainMenu</string>
         <key>NSPrincipalClass</key><string>ThingApplication</string>
         </dict></plist>"#;
@@ -258,6 +270,23 @@ mod tests {
         assert!(layout.resource("icon", "icns").is_some());
         assert!(layout.main_nib().is_some(), "the nib is in English.lproj");
         assert!(layout.resource("nothing", "txt").is_none());
+    }
+
+    /// `CFBundleIconFile` is written with the extension as often as without,
+    /// and a bundle whose icon is named the other way still has to be found.
+    #[test]
+    fn the_icon_is_found_whichever_way_the_plist_spells_it() {
+        let with_extension = scratch("icon-spelt-out", INFO);
+        let layout = Layout::enclosing(&with_extension).expect("a bundle");
+        assert_eq!(layout.icon(), Some(layout.resources.join("icon.icns")));
+
+        let bare = INFO.replace("<string>icon.icns</string>", "<string>icon</string>");
+        let layout = Layout::enclosing(&scratch("icon-bare", &bare)).expect("a bundle");
+        assert_eq!(layout.icon(), Some(layout.resources.join("icon.icns")));
+
+        let none = INFO.replace("<key>CFBundleIconFile</key><string>icon.icns</string>", "");
+        let layout = Layout::enclosing(&scratch("icon-absent", &none)).expect("a bundle");
+        assert_eq!(layout.icon(), None);
     }
 
     /// The shape is the whole of the test: the same files with the wrong
