@@ -391,21 +391,35 @@ mod tests {
         );
     }
 
-    /// A host that cannot give Darwin code its array must not move the thread pointer
-    /// at all. Swapping `TPIDR_EL0` on aarch64 Linux leaves Darwin code reading the
-    /// register it always read and the *host* reading an array that is not its own,
-    /// which is a segfault in the allocator rather than a partial success.
+    /// The host's own thread pointer is never what moves, on any of the three hosts.
+    ///
+    /// On x86-64 Linux that is the whole design and not an incidental property:
+    /// Darwin's array goes in `%gs` and Linux keeps its own in `%fs`, so host
+    /// thread-locals - the allocator, the panic machinery, this guard's own `Drop` -
+    /// stay live for the duration of the call. A host that cannot separate the two
+    /// swaps nothing at all rather than half-doing it; see [`can_enter_darwin`].
     #[test]
-    fn a_host_that_cannot_enter_darwin_code_does_not_pretend_to() {
+    fn entering_darwin_code_leaves_the_host_s_own_thread_pointer_alone() {
         let before = host_thread_pointer();
         let guard = DarwinThread::enter();
-        let during = host_thread_pointer();
-        if can_enter_darwin() && !cfg!(target_os = "macos") {
-            assert_ne!(during, before, "a host that can swap, did");
-        } else {
-            assert_eq!(during, before, "a host that cannot swap, did not");
-        }
+        assert_eq!(host_thread_pointer(), before);
         drop(guard);
         assert_eq!(host_thread_pointer(), before);
+    }
+
+    /// And the other half: a host that says it can enter Darwin code must actually
+    /// put this thread's array where Darwin code looks for it. Reading `%gs:0` is
+    /// how the guest's own `pthread_self` is compiled, so this is the guest's view.
+    #[test]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn darwin_code_finds_its_array_in_gs() {
+        let _darwin = DarwinThread::enter();
+        let base: u64;
+        // SAFETY: `DarwinThread::enter` set this thread's `%gs` base to its array,
+        // whose slot zero is live for as long as the thread is.
+        unsafe {
+            std::arch::asm!("mov {}, gs:0", out(reg) base, options(nostack, preserves_flags))
+        };
+        assert_eq!(base, tsd_base(), "slot zero of the array in `%gs` is the array");
     }
 }

@@ -55,14 +55,23 @@ pub const HOST_SPEC: HostSpec = HostRunnable(NativelyExecutable(machish::spec::a
 /// Whether the native backend can run this slice - the same question the
 /// loader will ask when it selects one.
 ///
-/// Never off Apple's platforms, however well the instruction set matches. A
-/// universal Mach-O run on aarch64 Linux has a slice this CPU executes, and
-/// nothing else about it works: the Mach traps, the thread pointer that Darwin
-/// code reads with `mrs` (see `darwin::tls`'s unfinished third case), and the
-/// 16K page size are all still Darwin's. The emulated backend takes the x86-64
-/// slice instead, which is the only one this tree can actually run there.
+/// A matching instruction set is not on its own enough, because the code is
+/// still Darwin's: it reads its thread-specific data straight out of the
+/// thread pointer register. [`darwin::tls::can_enter_darwin`] is what says the
+/// host can give it that array, and it is the narrower of the two conditions.
+/// On aarch64 Linux it is false - Darwin arm64 code reads `TPIDRRO_EL0`, which
+/// Linux does not let userspace write - so a universal Mach-O there takes the
+/// emulated backend's x86-64 slice instead.
+/// Whether this host needs [`crate::cxxlib`]'s vendored C++ runtime rather than
+/// the one on its own filesystem.
+///
+/// The vendored images are x86-64 Mach-O, so they can only stand in where that is
+/// also the host's architecture - which off Darwin is the only architecture the
+/// native backend runs on anyway, for [`runnable`]'s reason.
+const VENDORED_CXX: bool = cfg!(all(not(target_os = "macos"), target_arch = "x86_64"));
+
 pub fn runnable(slice: &machish::fat::Slice) -> bool {
-    cfg!(target_vendor = "apple")
+    darwin::tls::can_enter_darwin()
         && slice.cputype == HostSpec::CPU_TYPE
         && HOST_SPEC.accepts_subtype(slice.cpusubtype)
 }
@@ -101,7 +110,6 @@ impl Native {
         // `__TEXT` RX and `__DATA` RW, which is what the image asked for -
         // measured on this host: an anonymous RW mapping does become RX.
         let mut memory = MmapSpace::new();
-        let mut source = FsDylibSource::new();
         // Nothing here needs virtualizing: the image is host code calling host
         // libraries, so the denylist that exists to force an emulated guest onto
         // a shim would only refuse symbols nothing else answers.
@@ -119,6 +127,13 @@ impl Native {
 
         let eager = eager_binding_shims();
         let tlv = tlv_provider();
+        // The symbols libSystem exports and no other host libc does:
+        // `___stack_chk_guard`, `__NSGetExecutablePath`, `_environ`, the Mach
+        // task port. On macOS the host provider answers every one of them, which
+        // is why this chain went without it; off Darwin nothing does, and an
+        // unbound `___stack_chk_guard` faults in the first prologue the program
+        // enters. Same provider the emulated chain uses, in the same position.
+        let runtime = crate::shims::runtime::provider();
         let platform = darwin::provider();
         let objc = crate::objc::dispatch::provider();
         let frameworks = crate::frameworks::provider();
@@ -129,8 +144,8 @@ impl Native {
         // instead - including `dlopen`, or the first `dlopen("CoreFoundation")`
         // puts Apple's classes in front of a program that has ours.
         let providers: Vec<&dyn SymbolProvider> = match crate::frameworks::builtin() {
-            true => vec![&eager, &tlv, &platform, &objc, &frameworks, &dyld, &host],
-            false => vec![&eager, &tlv, &platform, &host],
+            true => vec![&eager, &tlv, &runtime, &platform, &objc, &frameworks, &dyld, &host],
+            false => vec![&eager, &tlv, &runtime, &platform, &host],
         };
 
         // A native image is of this host's architecture by definition, which is what
@@ -140,12 +155,50 @@ impl Native {
             false => darwin::sysctl::GuestArch::X86_64,
         });
 
-        let mut report = Loader::new(HOST_SPEC)
-            .link_with(&bytes, path, &mut memory, &mut source, &providers)
-            .map_err(|e| VmError::Load {
+        // Where the image's C++ runtime comes from. On macOS the real
+        // `/usr/lib/libc++.1.dylib` is on disk and is the one the image was linked
+        // against, so the filesystem is the honest answer. Off Darwin there is no
+        // such file - and a host `libstdc++` is not a substitute, because the
+        // `std::__1` names an Apple binary imports are libc++'s and nobody else's -
+        // so the vendored Intel image the emulated backend already carries stands in.
+        // It is Mach-O of this host's architecture, which is what makes it loadable
+        // here at all; see [`crate::cxxlib`].
+        let mut report = match VENDORED_CXX {
+            true => Loader::new(HOST_SPEC).link_with(
+                &bytes,
+                path,
+                &mut memory,
+                &mut crate::cxxlib::source(),
+                &providers,
+            ),
+            false => Loader::new(HOST_SPEC).link_with(
+                &bytes,
+                path,
+                &mut memory,
+                &mut FsDylibSource::new(),
+                &providers,
+            ),
+        }
+        .map_err(|e| VmError::Load {
+            path: path.to_string(),
+            reason: e.to_string(),
+        })?;
+
+        // The unwinder and the C++ ABI, whose names the host provider would
+        // otherwise claim with its own incompatible implementations. Before
+        // anything reads the report, and in the emulated backend's order.
+        if VENDORED_CXX {
+            let load = |e: machish::Error| VmError::Load {
                 path: path.to_string(),
                 reason: e.to_string(),
-            })?;
+            };
+            crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory)
+                .map_err(load)?;
+            crate::cxxlib::bind_cxxabi_to_the_vendored_one(&mut report, &mut memory)
+                .map_err(load)?;
+            crate::cxxlib::bind_objc_exceptions_to_the_vendored_cxxabi(&mut report, &mut memory)
+                .map_err(load)?;
+        }
 
         // `libmimalloc.3.dylib` replaces `free` for every image that binds it,
         // and a `malloc` from one allocator freed by the other aborts inside
@@ -194,6 +247,11 @@ impl Execution for Native {
         // above permit.
         let f: extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64 =
             unsafe { std::mem::transmute(entry as usize as *const ()) };
+        // The image is Darwin code, so for the duration of the call this thread's
+        // thread pointer must be the Darwin TSD array rather than the host's:
+        // `pthread_self`, `errno` and the stack canary are all direct loads off it
+        // and never reach a shim. Compiles away on macOS, where it is already.
+        let _darwin = darwin::tls::DarwinThread::enter();
         Ok(f(a[0], a[1], a[2], a[3], a[4], a[5]))
     }
 
@@ -324,6 +382,10 @@ impl crate::objc::Realizer for Native {
 /// here, so their thunks still hold the bootstrap pointer and dyld's own
 /// implementation aborts the process through `_tlv_bootstrap_error` on the first
 /// thread-local read. Flat, so it answers a two-level import naming libSystem.
+///
+/// Ahead of [`crate::shims::runtime::provider`] in the chain, which defines the
+/// same names for an emulated guest: that one is the plain function, and a native
+/// image reaches its thread-locals through the thunk.
 fn tlv_provider() -> SyntheticDylib {
     let mut lib = SyntheticDylib::new("<rosetta3 tlv>");
     lib.flat(true);

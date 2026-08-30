@@ -1,4 +1,8 @@
 //! Math helpers whose arguments or return values the signature table cannot name.
+//!
+//! Only the register marshaling: the arithmetic is [`darwin::math`]'s, because the
+//! native backend needs the same four functions and reaches them by calling the
+//! address in the import slot rather than by being intercepted here.
 
 use microlift::arch::x86_64::context::RegisterContext;
 
@@ -15,7 +19,7 @@ pub fn sincosf_stret(
     _mem: &mut dyn GuestMemory,
 ) -> Result<()> {
     let x = f32::from_bits(ctx.xmm[0][0] as u32);
-    let (sin, cos) = (x.sin(), x.cos());
+    let (sin, cos) = darwin::math::sincosf(x);
     ctx.xmm[0] = [
         u64::from(sin.to_bits()) | (u64::from(cos.to_bits()) << 32),
         0,
@@ -34,7 +38,7 @@ pub fn sincos_stret(
     _mem: &mut dyn GuestMemory,
 ) -> Result<()> {
     let x = f64::from_bits(ctx.xmm[0][0]);
-    let (sin, cos) = (x.sin(), x.cos());
+    let (sin, cos) = darwin::math::sincos(x);
     ctx.xmm[0] = [sin.to_bits(), 0];
     ctx.xmm[1] = [cos.to_bits(), 0];
     Ok(())
@@ -49,38 +53,7 @@ pub fn divdc3(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemo
         f64::from_bits(ctx.xmm[3][0]),
     );
 
-    let scale = c.abs().max(d.abs());
-    let (cr, dr) = if scale.is_infinite() {
-        // inf / inf is NaN, but an infinite divisor is represented by its
-        // direction in the limiting quotient.
-        (c.signum(), d.signum())
-    } else if scale == 0.0 {
-        // Preserve the signed zero information for the correction below.
-        (c, d)
-    } else {
-        (c / scale, d / scale)
-    };
-
-    let (real, imag) = if scale == 0.0 {
-        // A non-zero numerator divided by zero has an infinite magnitude.
-        let real = if a == 0.0 && b == 0.0 {
-            f64::NAN
-        } else {
-            (a * c.signum() + b * d.signum()) * f64::INFINITY
-        };
-        let imag = if a == 0.0 && b == 0.0 {
-            f64::NAN
-        } else {
-            (b * c.signum() - a * d.signum()) * f64::INFINITY
-        };
-        (real, imag)
-    } else {
-        let denom = cr * cr + dr * dr;
-        (
-            (a * cr + b * dr) / denom / scale,
-            (b * cr - a * dr) / denom / scale,
-        )
-    };
+    let (real, imag) = darwin::math::divdc3(a, b, c, d);
 
     ctx.xmm[0] = [real.to_bits(), 0];
     ctx.xmm[1] = [imag.to_bits(), 0];
@@ -103,59 +76,7 @@ pub fn mulsc3(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemo
     let (a, b) = (half(0, false), half(0, true));
     let (c, d) = (half(1, false), half(1, true));
 
-    let (ac, bd, ad, bc) = (a * c, b * d, a * d, b * c);
-    let mut real = ac - bd;
-    let mut imag = ad + bc;
-
-    if real.is_nan() && imag.is_nan() {
-        // One operand was infinite and the other had a zero component, so the
-        // naive product manufactured `inf * 0`. Annex G's recovery.
-        let mut recovered = false;
-        let (mut a, mut b, mut c, mut d) = (a, b, c, d);
-        /// An infinite component becomes a signed one and a finite one a signed
-        /// zero: the infinity's *direction*, which is what the limit depends on.
-        fn direction(x: f32) -> f32 {
-            let magnitude: f32 = if x.is_infinite() { 1.0 } else { 0.0 };
-            magnitude.copysign(x)
-        }
-        /// A NaN in the other operand carried no information, so it becomes a
-        /// signed zero and stops poisoning the product.
-        fn tame(x: f32) -> f32 {
-            match x.is_nan() {
-                true => 0.0f32.copysign(x),
-                false => x,
-            }
-        }
-        if a.is_infinite() || b.is_infinite() {
-            a = direction(a);
-            b = direction(b);
-            c = tame(c);
-            d = tame(d);
-            recovered = true;
-        }
-        if c.is_infinite() || d.is_infinite() {
-            c = direction(c);
-            d = direction(d);
-            a = tame(a);
-            b = tame(b);
-            recovered = true;
-        }
-        if !recovered
-            && (ac.is_infinite() || bd.is_infinite() || ad.is_infinite() || bc.is_infinite())
-        {
-            // The operands are finite but their products overflowed, which is
-            // an infinite result rather than an indeterminate one.
-            a = tame(a);
-            b = tame(b);
-            c = tame(c);
-            d = tame(d);
-            recovered = true;
-        }
-        if recovered {
-            real = f32::INFINITY * (a * c - b * d);
-            imag = f32::INFINITY * (a * d + b * c);
-        }
-    }
+    let (real, imag) = darwin::math::mulsc3(a, b, c, d);
 
     ctx.xmm[0] = [
         u64::from(real.to_bits()) | (u64::from(imag.to_bits()) << 32),

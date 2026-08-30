@@ -10,6 +10,7 @@ pub mod ioctl;
 pub mod locale;
 pub mod malloc;
 pub mod mach;
+pub mod math;
 pub mod passthrough;
 pub mod pthread;
 pub mod path;
@@ -190,21 +191,19 @@ pub fn is_implemented(symbol: &str) -> bool {
 /// refuses a null address *before* it looks for one, so a name nothing defines
 /// fails as an unsatisfied import and never reaches the code that implements it.
 /// On Darwin these are libSystem's and resolve on their own; off it, nothing
-/// defines them and the address below is what makes the slot non-null.
+/// defines them and [`crate::math`] is what makes the slot non-null.
 ///
 /// Each is a Darwin ABI of its own rather than a missing function: `__sincos_stret`
 /// returns two doubles in the vector registers, which no glibc entry point does.
+/// The runtime above intercepts all four for an emulated guest and never reaches
+/// the published address; a native guest calls it, so it is a real implementation
+/// rather than a placeholder.
 pub const SHIMMED_ABOVE: &[&str] = &[
     "__sincosf_stret",
     "__sincos_stret",
     "__divdc3",
     "__mulsc3",
 ];
-
-/// The address [`SHIMMED_ABOVE`] publishes, which exists to be non-null.
-unsafe extern "C" fn shimmed_above() -> u64 {
-    unreachable!("a shimmed Darwin entry point was called rather than intercepted")
-}
 
 pub fn provider() -> machish::resolve::SyntheticDylib {
     let mut lib = machish::resolve::SyntheticDylib::new("<darwin>");
@@ -213,8 +212,10 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
         // Only where the host has none: on Darwin these are libSystem's own, and
         // shadowing them would replace an implementation with a placeholder in
         // the one case the shim ever stopped intercepting.
-        if host_symbol(name).is_none() {
-            define_fn(&mut lib, &format!("_{name}"), shimmed_above as *const ());
+        if host_symbol(name).is_none()
+            && let Some(f) = math::symbol(name)
+        {
+            define_fn(&mut lib, &format!("_{name}"), f);
         }
     }
     stdio::provide(&mut lib);
