@@ -183,16 +183,28 @@ pub fn provider() -> SyntheticDylib {
     for (name, addr) in appkit::data_symbols() {
         lib.define_data(&name, addr);
     }
-    for name in SHIMMED {
-        lib.define_fn(&format!("_{name}"), unintercepted as *const ());
+    for (name, addr) in shimmed() {
+        lib.define_fn(&format!("_{name}"), addr);
     }
     lib
 }
 
-const SHIMMED: &[&str] = &["NSLog", "NSRunAlertPanel"];
+/// Names this tree answers only as a shim, and the address the loader binds.
+///
+/// A shim is reached by *name* on the way through an intercepted call, so under
+/// the emulated backend the address only has to resolve here rather than
+/// somewhere else - see the roadmap's "a shim needs its import to resolve
+/// first". The native backend intercepts nothing, so the address is the whole
+/// implementation there, and a stub is what says which one is still missing.
+fn shimmed() -> Vec<(&'static str, *const ())> {
+    vec![
+        ("NSLog", crate::shims::nslog::native::nslog() as *const ()),
+        ("NSRunAlertPanel", unintercepted_alert as *const ()),
+    ]
+}
 
-unsafe extern "C" fn unintercepted() -> u64 {
-    unreachable!("a shimmed Foundation entry point was called rather than intercepted")
+unsafe extern "C" fn unintercepted_alert() -> u64 {
+    objc::fail!("NSRunAlertPanel was called rather than intercepted")
 }
 
 pub fn symbol(name: &str) -> Option<u64> {

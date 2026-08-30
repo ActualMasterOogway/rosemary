@@ -17,7 +17,35 @@ use machish::extensions::objc::{ObjcCategory, ObjcClass, ObjcImage, ObjcMethod, 
 use machish::report::LinkReport;
 
 use crate::abi::GuestMemory;
-use crate::vm::{Vm, VmError};
+use crate::vm::VmError;
+
+/// What realizing a guest's Objective-C metadata needs from the backend running it.
+///
+/// The two backends differ in one thing, and it runs through every pass below:
+/// whether anything stands between the guest and the runtime. An emulated
+/// guest's sends are intercepted, so its methods are reached through thunks and
+/// a class is named by the guest's own `objc_class`. A native image calls
+/// `objc_msgSend` for real, so its `IMP`s are host functions already and every
+/// class it is handed has to be the registered one.
+pub trait Realizer {
+    fn report(&self) -> &LinkReport;
+
+    /// The program's memory, for the two passes that write back into the
+    /// guest's own metadata.
+    fn memory(&self) -> Box<dyn GuestMemory + '_>;
+
+    fn is_guest_address(&self, va: u64) -> bool;
+
+    /// Call guest code - a `+load`, and nothing else here.
+    fn call(&self, f: u64, args: &[u64]) -> Result<u64, VmError>;
+
+    /// The `IMP` to install for `m`, and what about the method could not be
+    /// carried faithfully to a host caller.
+    fn imp_for(&self, m: &ObjcMethod) -> Result<(u64, Option<&'static str>), &'static str>;
+
+    /// What guest code is handed for a class this pass registered.
+    fn class_value(&self, rt: &ObjcRuntime, guest_va: u64) -> u64;
+}
 
 /// Something the guest declared that could not be reproduced faithfully.
 ///
@@ -198,10 +226,10 @@ impl ObjcRuntime {
 }
 
 /// Register every image's Objective-C metadata with the host runtime.
-pub fn register(vm: &Vm) -> Result<ObjcRuntime, VmError> {
+pub fn register(r: &dyn Realizer) -> Result<ObjcRuntime, VmError> {
     let mut rt = ObjcRuntime::default();
-    register_images(vm, &mut rt, &images_of(&vm.program.report))?;
-    crate::objcexc::repair_image_records(&mut vm.view(), &vm.program.report);
+    register_images(r, &mut rt, &images_of(r.report()))?;
+    crate::objcexc::repair_image_records(&mut *r.memory(), r.report());
     Ok(rt)
 }
 
@@ -210,12 +238,12 @@ pub fn register(vm: &Vm) -> Result<ObjcRuntime, VmError> {
 /// The same five passes [`register`] runs, over a `dlopen`ed image's report instead of
 /// the program's.
 pub(crate) fn register_loaded(
-    vm: &Vm,
+    r: &dyn Realizer,
     rt: &mut ObjcRuntime,
     report: &LinkReport,
 ) -> Result<(), VmError> {
-    register_images(vm, rt, &images_of(report))?;
-    crate::objcexc::repair_image_records(&mut vm.view(), report);
+    register_images(r, rt, &images_of(report))?;
+    crate::objcexc::repair_image_records(&mut *r.memory(), report);
     Ok(())
 }
 
@@ -230,7 +258,7 @@ fn images_of(report: &LinkReport) -> Vec<&ObjcImage> {
 }
 
 /// The five passes, in the order the runtime needs them.
-fn register_images(vm: &Vm, rt: &mut ObjcRuntime, images: &[&ObjcImage]) -> Result<(), VmError> {
+fn register_images(r: &dyn Realizer, rt: &mut ObjcRuntime, images: &[&ObjcImage]) -> Result<(), VmError> {
     // Protocols first - a class adopts them as it is registered.
     for image in images {
         for p in &image.protocols {
@@ -248,7 +276,7 @@ fn register_images(vm: &Vm, rt: &mut ObjcRuntime, images: &[&ObjcImage]) -> Resu
     for image in images {
         for c in &image.classes {
             let mut chain = HashSet::new();
-            register_class(vm, rt, &by_va, c, &mut chain);
+            register_class(r, rt, &by_va, c, &mut chain);
         }
     }
 
@@ -256,41 +284,41 @@ fn register_images(vm: &Vm, rt: &mut ObjcRuntime, images: &[&ObjcImage]) -> Resu
     // out.
     for image in images {
         for c in &image.classes {
-            patch_ivar_offsets(vm, rt, c)?;
+            patch_ivar_offsets(r, rt, c)?;
         }
     }
 
     // Categories last: one may extend a class registered above.
     for image in images {
         for c in &image.categories {
-            register_category(vm, rt, c);
+            register_category(r, rt, c);
         }
     }
 
     // Selector uniquing, which is independent of all of the above: it rewrites
     // the guest's own `__objc_selrefs` slots from string pointers to `SEL`s.
     for image in images {
-        rt.stats.selectors += unique_selectors(vm, image)?;
+        rt.stats.selectors += unique_selectors(r, image)?;
     }
 
     Ok(())
 }
 
 /// Call every `+load` the guest declares, superclass first.
-pub fn call_load_methods(vm: &Vm, rt: &ObjcRuntime) -> Result<usize, VmError> {
-    load_images(vm, rt, &images_of(&vm.program.report))
+pub fn call_load_methods(r: &dyn Realizer, rt: &ObjcRuntime) -> Result<usize, VmError> {
+    load_images(r, rt, &images_of(r.report()))
 }
 
 /// Every `+load` in an image the guest loaded.
 pub(crate) fn call_loaded_load_methods(
-    vm: &Vm,
+    r: &dyn Realizer,
     rt: &ObjcRuntime,
     report: &LinkReport,
 ) -> Result<usize, VmError> {
-    load_images(vm, rt, &images_of(report))
+    load_images(r, rt, &images_of(report))
 }
 
-fn load_images(vm: &Vm, rt: &ObjcRuntime, images: &[&ObjcImage]) -> Result<usize, VmError> {
+fn load_images(r: &dyn Realizer, rt: &ObjcRuntime, images: &[&ObjcImage]) -> Result<usize, VmError> {
     let by_va: HashMap<u64, &ObjcClass> = images
         .iter()
         .flat_map(|i| i.classes.iter())
@@ -301,7 +329,7 @@ fn load_images(vm: &Vm, rt: &ObjcRuntime, images: &[&ObjcImage]) -> Result<usize
     let mut called = 0;
     for image in images {
         for class in &image.classes {
-            called += load_class(vm, rt, &by_va, class, &mut done)?;
+            called += load_class(r, rt, &by_va, class, &mut done)?;
         }
     }
     // A category's `+load` is a method on the target class's metaclass and is
@@ -310,9 +338,9 @@ fn load_images(vm: &Vm, rt: &ObjcRuntime, images: &[&ObjcImage]) -> Result<usize
     for image in images {
         for cat in &image.categories {
             for m in &cat.class_methods {
-                if m.name == "load" && vm.program.is_guest_address(m.imp) {
+                if m.name == "load" && r.is_guest_address(m.imp) {
                     let target = rt.host_or(cat.class);
-                    vm.call(m.imp, &[target, load_selector()])?;
+                    r.call(m.imp, &[target, load_selector()])?;
                     called += 1;
                 }
             }
@@ -323,7 +351,7 @@ fn load_images(vm: &Vm, rt: &ObjcRuntime, images: &[&ObjcImage]) -> Result<usize
 
 /// One class's `+load`, its superclass's first.
 fn load_class(
-    vm: &Vm,
+    r: &dyn Realizer,
     rt: &ObjcRuntime,
     by_va: &HashMap<u64, &ObjcClass>,
     class: &ObjcClass,
@@ -334,7 +362,7 @@ fn load_class(
     }
     let mut called = 0;
     if let Some(parent) = by_va.get(&class.superclass).copied() {
-        called += load_class(vm, rt, by_va, parent, done)?;
+        called += load_class(r, rt, by_va, parent, done)?;
     }
     // Only a class this pass registered.
     if rt.host_class(class.va).is_none() {
@@ -344,10 +372,8 @@ fn load_class(
         return Ok(called);
     };
     for m in &meta.ro.methods {
-        if m.name == "load" && vm.program.is_guest_address(m.imp) {
-            // `self` is the class as the *guest* names it, which is the rule
-            // everywhere.
-            vm.call(m.imp, &[class.va, load_selector()])?;
+        if m.name == "load" && r.is_guest_address(m.imp) {
+            r.call(m.imp, &[r.class_value(rt, class.va), load_selector()])?;
             called += 1;
         }
     }
@@ -373,7 +399,7 @@ fn memory_error(addr: u64) -> VmError {
 
 /// Create one class, registering its superclass first if that is also a guest's.
 fn register_class(
-    vm: &Vm,
+    r: &dyn Realizer,
     rt: &mut ObjcRuntime,
     by_va: &HashMap<u64, &ObjcClass>,
     class: &ObjcClass,
@@ -410,7 +436,7 @@ fn register_class(
     } else if let Some(&host_super) = rt.to_host.get(&class.superclass) {
         host_super as host::Class
     } else if let Some(guest_super) = by_va.get(&class.superclass).copied() {
-        match register_class(vm, rt, by_va, guest_super, chain) {
+        match register_class(r, rt, by_va, guest_super, chain) {
             Some(c) => c as host::Class,
             None => {
                 rt.refusals.push(Refusal::SuperclassMissing {
@@ -420,7 +446,7 @@ fn register_class(
                 return None;
             }
         }
-    } else if class.superclass != 0 && !vm.program.is_guest_address(class.superclass) {
+    } else if class.superclass != 0 && !r.is_guest_address(class.superclass) {
         // A host class, resolved by the ordinary native passthrough. This is
         // the common case: `Greeter : NSObject` binds `_OBJC_CLASS_$_NSObject`
         // to the host's own, which is exactly the class we want to derive from.
@@ -511,7 +537,7 @@ fn register_class(
     let mut cxx_construct: Option<host::Imp> = None;
     for (target, list) in [(cls, &class.ro.methods), (meta, class_methods)] {
         for m in list {
-            match add_method(vm, target, m) {
+            match add_method(r, target, m) {
                 Ok(carried) => {
                     methods += 1;
                     if target == cls && m.name == cxxivars::CONSTRUCT {
@@ -584,28 +610,19 @@ fn register_class(
     Some(host_va)
 }
 
-/// Install one guest method on `target`, with a thunk in place of its `IMP`.
+/// Install one guest method on `target`.
 fn add_method(
-    vm: &Vm,
+    r: &dyn Realizer,
     target: host::Class,
     m: &ObjcMethod,
 ) -> Result<Option<&'static str>, &'static str> {
     let (Some(name), Some(types)) = (host::c_string(&m.name), host::c_string(&m.types)) else {
         return Err("the selector or type encoding has an interior NUL");
     };
-    if !vm.program.is_guest_address(m.imp) {
+    if !r.is_guest_address(m.imp) {
         return Err("the implementation is not a guest address");
     }
-    // The encoding is right here, and it is what makes this callback different
-    // from every other one.
-    let (imp, carried) = match typed_thunk(vm, m) {
-        Ok(imp) => (imp, Ok(())),
-        Err(reason) => (
-            vm.thunk_for(m.imp)
-                .map_err(|_| "a host->guest thunk could not be built")?,
-            Err(reason),
-        ),
-    };
+    let (imp, carried) = r.imp_for(m)?;
 
     // SAFETY: both strings outlive the call; `imp` is an executable arm64
     // trampoline this runtime built and never frees.
@@ -615,21 +632,21 @@ fn add_method(
     // `false` means the class already has the selector, which for a freshly
     // allocated class means the guest declared it twice.
     if ok {
-        Ok(carried.err())
+        Ok(carried)
     } else {
         Err("the class already responds to that selector")
     }
 }
 
-/// Build a trampoline from the method's own type encoding.
+/// A method's own type encoding, as the signature a thunk into it needs.
 ///
-/// `Err` is a `&'static str` in the register the rest of this project uses for refusals
-/// - it names what about *this* method could not be carried, so the listing says
-/// "returns an aggregate by value" rather than "unsupported".
+/// `Err` is a `&'static str` in the register the rest of this project uses for
+/// refusals - it names what about *this* method could not be carried, so the
+/// listing says "returns an aggregate by value" rather than "unsupported".
 ///
 /// - **An aggregate return too large for AAPCS64's registers.** The callee fills a
 /// buffer through `x8`, and a trampoline has no way to declare that register.
-fn typed_thunk(vm: &Vm, m: &ObjcMethod) -> Result<u64, &'static str> {
+pub(crate) fn thunk_signature(m: &ObjcMethod) -> Result<crate::thunk::ThunkSignature, &'static str> {
     let signature = encoding::signature(&m.types)?;
     let (returns, params) = signature
         .shapes
@@ -641,9 +658,7 @@ fn typed_thunk(vm: &Vm, m: &ObjcMethod) -> Result<u64, &'static str> {
         crate::abi::aggregate::Shape::Scalar(crate::abi::ArgType::None) => None,
         other => Some(other.clone()),
     };
-    let signature = crate::thunk::ThunkSignature::new(params.to_vec(), returns)?;
-    vm.typed_thunk_for(m.imp, signature)
-        .map_err(|_| "a host->guest thunk could not be built")
+    crate::thunk::ThunkSignature::new(params.to_vec(), returns)
 }
 
 /// Recreate a protocol the guest declares.
@@ -698,10 +713,10 @@ fn register_protocol(rt: &mut ObjcRuntime, p: &ObjcProtocol) {
 }
 
 /// Attach a category's methods to its target class.
-fn register_category(vm: &Vm, rt: &mut ObjcRuntime, cat: &ObjcCategory) {
+fn register_category(r: &dyn Realizer, rt: &mut ObjcRuntime, cat: &ObjcCategory) {
     let target = if let Some(&registered) = rt.to_host.get(&cat.class) {
         registered as host::Class
-    } else if cat.class != 0 && !vm.program.is_guest_address(cat.class) {
+    } else if cat.class != 0 && !r.is_guest_address(cat.class) {
         cat.class as host::Class
     } else {
         rt.refusals.push(Refusal::CategoryTargetMissing {
@@ -717,7 +732,7 @@ fn register_category(vm: &Vm, rt: &mut ObjcRuntime, cat: &ObjcCategory) {
     let mut added = 0;
     for (on, list) in [(target, &cat.instance_methods), (meta, &cat.class_methods)] {
         for m in list {
-            match add_method(vm, on, m) {
+            match add_method(r, on, m) {
                 Ok(carried) => {
                     added += 1;
                     if let Some(reason) = carried {
@@ -778,11 +793,11 @@ fn add_properties(cls: host::Class, properties: &[machish::extensions::objc::Obj
 }
 
 /// Write the runtime's ivar offsets back into the guest's own `__objc_ivar`.
-fn patch_ivar_offsets(vm: &Vm, rt: &mut ObjcRuntime, class: &ObjcClass) -> Result<(), VmError> {
+fn patch_ivar_offsets(r: &dyn Realizer, rt: &mut ObjcRuntime, class: &ObjcClass) -> Result<(), VmError> {
     let Some(&cls) = rt.to_host.get(&class.va) else {
         return Ok(());
     };
-    let mut view = vm.view();
+    let mut view = r.memory();
     for ivar in &class.ro.ivars {
         if ivar.offset_va == 0 {
             continue;
@@ -811,10 +826,51 @@ fn patch_ivar_offsets(vm: &Vm, rt: &mut ObjcRuntime, class: &ObjcClass) -> Resul
     Ok(())
 }
 
+/// Point the guest's own class and protocol references at the registered objects.
+///
+/// libobjc does this when dyld maps an image. The emulated backend does not need
+/// it - a send is intercepted, and `dispatch` translates the receiver on the way
+/// through - but a native image reaches `objc_msgSend` directly, so a classref
+/// still holding the guest's own `objc_class` is a message to a structure this
+/// runtime never made.
+pub(crate) fn rewrite_refs(r: &dyn Realizer, rt: &ObjcRuntime) -> Result<usize, VmError> {
+    let mut view = r.memory();
+    let mut rewritten = 0;
+    for image in r.report().images.iter().filter_map(|i| i.objc.as_ref()) {
+        // A superref names the class a `[super ...]` send starts its search
+        // from, and is a class reference in every other respect.
+        let classes = image.class_refs.iter().chain(image.super_refs.iter());
+        for (slot, translate) in classes
+            .map(|s| (s, false))
+            .chain(image.protocol_refs.iter().map(|s| (s, true)))
+        {
+            let mut buf = [0u8; 8];
+            if view.read(*slot, &mut buf).is_err() {
+                continue;
+            }
+            let va = u64::from_le_bytes(buf);
+            if va == 0 {
+                continue;
+            }
+            let host = match translate {
+                true => rt.host_protocol_or(va),
+                false => rt.host_or(va),
+            };
+            if host == va {
+                continue;
+            }
+            view.write(*slot, &host.to_le_bytes())
+                .map_err(|_| memory_error(*slot))?;
+            rewritten += 1;
+        }
+    }
+    Ok(rewritten)
+}
+
 /// Turn every `__objc_selrefs` slot from a string pointer into a `SEL`.
-fn unique_selectors(vm: &Vm, image: &ObjcImage) -> Result<usize, VmError> {
+fn unique_selectors(r: &dyn Realizer, image: &ObjcImage) -> Result<usize, VmError> {
     let mut uniqued = 0;
-    let mut view = vm.view();
+    let mut view = r.memory();
     for &slot in &image.selector_refs {
         let mut buf = [0u8; 8];
         if view.read(slot, &mut buf).is_err() {
@@ -824,7 +880,7 @@ fn unique_selectors(vm: &Vm, image: &ObjcImage) -> Result<usize, VmError> {
         if name_va == 0 {
             continue;
         }
-        let Ok(bytes) = (&view as &dyn GuestMemory).read_cstr(name_va, "objc selector") else {
+        let Ok(bytes) = (&*view).read_cstr(name_va, "objc selector") else {
             continue;
         };
         let Ok(name) = std::ffi::CString::new(bytes) else {
@@ -846,10 +902,10 @@ fn unique_selectors(vm: &Vm, image: &ObjcImage) -> Result<usize, VmError> {
 /// The one pass of [`register_loaded`]'s five that has to happen even when the rest
 /// cannot - when no `Vm` has registered anything yet, or when the image declares no
 /// classes at all.
-pub(crate) fn unique_loaded_selectors(vm: &Vm, report: &LinkReport) -> Result<usize, VmError> {
+pub(crate) fn unique_loaded_selectors(r: &dyn Realizer, report: &LinkReport) -> Result<usize, VmError> {
     let mut uniqued = 0;
     for image in report.images.iter().filter_map(|i| i.objc.as_ref()) {
-        uniqued += unique_selectors(vm, image)?;
+        uniqued += unique_selectors(r, image)?;
     }
     Ok(uniqued)
 }

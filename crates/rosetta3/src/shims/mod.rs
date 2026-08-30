@@ -56,6 +56,7 @@ pub mod machthread;
 /// for - CoreFoundation, and Foundation's own `NSLog` - it reaches by `dlsym`
 /// and does without when there is none. See [`nslog::emit`].
 pub mod nslog;
+pub mod variadic;
 
 /// A shim that reads and writes the guest's registers and memory.
 pub type Shim = fn(&str, &mut RegisterContext, &mut dyn GuestMemory) -> Result<()>;

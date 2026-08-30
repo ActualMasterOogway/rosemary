@@ -17,19 +17,32 @@ const FP_REGS: usize = 8;
 /// One stack argument slot.
 const SLOT: u64 = 8;
 
-/// A walk over the variadic tail of a guest call.
+/// A walk over the variadic tail of a call.
 pub struct VarArgs<'a> {
     symbol: &'a str,
-    ctx: &'a RegisterContext,
     mem: &'a dyn GuestMemory,
-    int: usize,
-    fp: usize,
-    stack: u64,
-    /// The `va_list` to read from, when the caller was handed one rather than leaving
-    /// its arguments in registers.
-    list: Option<VaList>,
+    source: Source<'a>,
     /// How to render `%@`, for a format string that is an `NSString`.
     object: Option<&'a dyn Fn(u64) -> Vec<u8>>,
+}
+
+/// Where the arguments are.
+enum Source<'a> {
+    /// The guest's own registers and stack, as SysV lays them out: how many of
+    /// each register file the walk has consumed, and how far down the stack.
+    Registers {
+        ctx: &'a RegisterContext,
+        int: usize,
+        fp: usize,
+        stack: u64,
+    },
+    /// A SysV `va_list` - the guest's, or this process's own under the native
+    /// backend, where the two have the same layout because they are the same ABI.
+    List(VaList),
+    /// AArch64's variadic tail, which Darwin puts entirely on the stack: a
+    /// pointer, and every argument one eight-byte slot. Only the native backend
+    /// produces one.
+    Stack(u64),
 }
 
 impl<'a> VarArgs<'a> {
@@ -44,32 +57,64 @@ impl<'a> VarArgs<'a> {
     ) -> Self {
         VarArgs {
             symbol,
-            ctx,
             mem,
-            int: fixed_int,
-            fp: 0,
-            stack: 0,
-            list: None,
+            source: Source::Registers {
+                ctx,
+                int: fixed_int,
+                fp: 0,
+                stack: 0,
+            },
             object: None,
         }
     }
 
-    /// Read arguments from the guest `va_list` at `addr` rather than from the
+    /// Read arguments from the SysV `va_list` at `addr` rather than from the
     /// register context.
     pub fn from_list(
         symbol: &'a str,
-        ctx: &'a RegisterContext,
+        _ctx: &'a RegisterContext,
         mem: &'a dyn GuestMemory,
         addr: u64,
     ) -> Result<Self> {
-        let mut args = VarArgs::new(symbol, ctx, mem, 0);
-        args.list = Some(VaList::read(symbol, mem, addr)?);
-        Ok(args)
+        VarArgs::from_va_list(symbol, mem, addr)
+    }
+
+    /// [`VarArgs::from_list`] without a register context, for the native
+    /// backend: the `va_list` a host trampoline built is the same structure,
+    /// and there are no guest registers behind it.
+    pub fn from_va_list(symbol: &'a str, mem: &'a dyn GuestMemory, addr: u64) -> Result<Self> {
+        Ok(VarArgs {
+            symbol,
+            mem,
+            source: Source::List(VaList::read(symbol, mem, addr)?),
+            object: None,
+        })
+    }
+
+    /// Read arguments from an AAPCS64 variadic tail: a pointer to the first of
+    /// them, which is all Darwin's `va_list` is.
+    pub fn from_stack(symbol: &'a str, mem: &'a dyn GuestMemory, ap: u64) -> Self {
+        VarArgs {
+            symbol,
+            mem,
+            source: Source::Stack(ap),
+            object: None,
+        }
     }
 
     /// The `va_list` as it now stands, for a caller that must write it back.
     pub fn list(&self) -> Option<VaList> {
-        self.list
+        match self.source {
+            Source::List(list) => Some(list),
+            _ => None,
+        }
+    }
+
+    /// Render `%@` as an object's description, which is what an `NSString`
+    /// format adds to the C ones.
+    pub fn describing(mut self, object: &'a dyn Fn(u64) -> Vec<u8>) -> Self {
+        self.object = Some(object);
+        self
     }
 
     /// As [`VarArgs::new`], for an `NSString` format, where `%@` prints an
@@ -81,61 +126,80 @@ impl<'a> VarArgs<'a> {
         fixed_int: usize,
         object: &'a dyn Fn(u64) -> Vec<u8>,
     ) -> Self {
-        let mut args = VarArgs::new(symbol, ctx, mem, fixed_int);
-        args.object = Some(object);
-        args
-    }
-
-    fn next_stack(&mut self) -> Result<u64> {
-        let addr = self.ctx.rsp.wrapping_add(self.stack);
-        self.stack += SLOT;
-        self.mem.read_u64(addr, self.symbol)
+        VarArgs::new(symbol, ctx, mem, fixed_int).describing(object)
     }
 
     /// The next integer or pointer argument.
     pub fn next_int(&mut self) -> Result<u64> {
-        if let Some(list) = self.list.as_mut() {
-            let (at, gp) = match list.gp_offset < GP_SAVE_END {
-                true => (list.reg_save.wrapping_add(u64::from(list.gp_offset)), true),
-                false => (list.overflow, false),
-            };
-            match gp {
-                true => list.gp_offset += 8,
-                false => list.overflow = list.overflow.wrapping_add(8),
+        let at = match &mut self.source {
+            Source::Registers {
+                ctx, int, stack, ..
+            } => {
+                if *int < INT_REGS {
+                    let v = [ctx.rdi, ctx.rsi, ctx.rdx, ctx.rcx, ctx.r8, ctx.r9][*int];
+                    *int += 1;
+                    return Ok(v);
+                }
+                let at = ctx.rsp.wrapping_add(*stack);
+                *stack += SLOT;
+                at
             }
-            return self.mem.read_u64(at, self.symbol);
-        }
-        if self.int >= INT_REGS {
-            return self.next_stack();
-        }
-        let ctx = self.ctx;
-        let v = [ctx.rdi, ctx.rsi, ctx.rdx, ctx.rcx, ctx.r8, ctx.r9][self.int];
-        self.int += 1;
-        Ok(v)
+            Source::List(list) => {
+                let in_regs = list.gp_offset < GP_SAVE_END;
+                let at = match in_regs {
+                    true => list.reg_save.wrapping_add(u64::from(list.gp_offset)),
+                    false => list.overflow,
+                };
+                match in_regs {
+                    true => list.gp_offset += 8,
+                    false => list.overflow = list.overflow.wrapping_add(SLOT),
+                }
+                at
+            }
+            Source::Stack(ap) => {
+                let at = *ap;
+                *ap = ap.wrapping_add(SLOT);
+                at
+            }
+        };
+        self.mem.read_u64(at, self.symbol)
     }
 
     /// The next floating-point argument. C promotes a variadic `float` to
-    /// `double`, so the register always holds a `double`.
+    /// `double`, so the slot always holds a `double`.
     pub fn next_fp(&mut self) -> Result<f64> {
-        if let Some(list) = self.list.as_mut() {
-            // A vector slot in the save area is sixteen bytes wide and holds a
-            // `double` in its low half; a spilled one is eight.
-            let (at, in_regs) = match list.fp_offset < FP_SAVE_END {
-                true => (list.reg_save.wrapping_add(u64::from(list.fp_offset)), true),
-                false => (list.overflow, false),
-            };
-            match in_regs {
-                true => list.fp_offset += 16,
-                false => list.overflow = list.overflow.wrapping_add(8),
+        let at = match &mut self.source {
+            Source::Registers { ctx, fp, stack, .. } => {
+                if *fp < FP_REGS {
+                    let v = ctx.xmm[*fp][0];
+                    *fp += 1;
+                    return Ok(f64::from_bits(v));
+                }
+                let at = ctx.rsp.wrapping_add(*stack);
+                *stack += SLOT;
+                at
             }
-            return Ok(f64::from_bits(self.mem.read_u64(at, self.symbol)?));
-        }
-        if self.fp >= FP_REGS {
-            return Ok(f64::from_bits(self.next_stack()?));
-        }
-        let v = self.ctx.xmm[self.fp][0];
-        self.fp += 1;
-        Ok(f64::from_bits(v))
+            Source::List(list) => {
+                // A vector slot in the save area is sixteen bytes wide and
+                // holds a `double` in its low half; a spilled one is eight.
+                let in_regs = list.fp_offset < FP_SAVE_END;
+                let at = match in_regs {
+                    true => list.reg_save.wrapping_add(u64::from(list.fp_offset)),
+                    false => list.overflow,
+                };
+                match in_regs {
+                    true => list.fp_offset += 16,
+                    false => list.overflow = list.overflow.wrapping_add(SLOT),
+                }
+                at
+            }
+            Source::Stack(ap) => {
+                let at = *ap;
+                *ap = ap.wrapping_add(SLOT);
+                at
+            }
+        };
+        Ok(f64::from_bits(self.mem.read_u64(at, self.symbol)?))
     }
 }
 

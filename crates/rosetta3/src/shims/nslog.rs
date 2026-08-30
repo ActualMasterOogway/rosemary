@@ -382,3 +382,138 @@ mod tests {
         );
     }
 }
+
+/// `NSLog` for the native backend, which calls it rather than intercepting it.
+///
+/// The rendering is the same; only the argument source differs. There is no
+/// `RegisterContext` here, so a trampoline captures the variadic tail the way a
+/// callee's own `va_start` would and hands [`render_native`] its address.
+pub mod native {
+    use std::ffi::c_void;
+
+    use crate::abi::GuestMemory;
+
+    use super::super::printf::{VarArgs, render};
+    use super::{cf_string_bytes, description_bytes, emit};
+
+    /// The address `_NSLog` is bound to.
+    pub fn nslog() -> *const c_void {
+        trampoline as *const c_void
+    }
+
+    /// This process's own memory.
+    ///
+    /// A native image's pointers are host pointers, and what a `%s` names is as
+    /// likely to be in a host library as in the program - so there is nothing
+    /// to bound the read against but the process itself. A pointer that is not
+    /// mapped faults here exactly as it would inside the real `NSLog`.
+    struct ProcessMemory;
+
+    impl GuestMemory for ProcessMemory {
+        fn read(&self, va: u64, out: &mut [u8]) -> Result<(), machish::Error> {
+            if va == 0 {
+                return Err(machish::Error::Memory("a null pointer"));
+            }
+            // SAFETY: the caller of `NSLog` promised these pointers are its own.
+            unsafe {
+                core::ptr::copy_nonoverlapping(va as usize as *const u8, out.as_mut_ptr(), out.len())
+            };
+            Ok(())
+        }
+
+        fn write(&mut self, _va: u64, _data: &[u8]) -> Result<(), machish::Error> {
+            // `%n` is the only conversion that writes, and this tree's renderer
+            // does not implement it.
+            Err(machish::Error::Memory("NSLog does not write through arguments"))
+        }
+    }
+
+    /// Render `format` against the tail a trampoline captured.
+    ///
+    /// `tail` is a `va_list` on x86-64 and the address of the first stack
+    /// argument on AArch64, which is what Darwin's `va_list` is there.
+    ///
+    /// `None` is a format that was not a readable string, which is the caller's
+    /// error and not this runtime's - a logging or formatting call must not be
+    /// the thing that stops a program.
+    pub fn render_tail(symbol: &str, format: u64, tail: u64) -> Option<Vec<u8>> {
+        let mem = ProcessMemory;
+        let bytes = cf_string_bytes(format)?;
+        let describe = |obj: u64| description_bytes(obj).unwrap_or_default();
+        #[cfg(target_arch = "aarch64")]
+        let args: crate::abi::Result<VarArgs> = Ok(VarArgs::from_stack(symbol, &mem, tail));
+        #[cfg(not(target_arch = "aarch64"))]
+        let args: crate::abi::Result<VarArgs> = VarArgs::from_va_list(symbol, &mem, tail);
+        let mut args = args.ok()?.describing(&describe);
+        render(&bytes, &mut args).ok()
+    }
+
+    /// [`render_tail`] as an autoreleased `NSString` with every `%` doubled,
+    /// which is the form the frameworks' own format methods expect.
+    pub fn render_escaped(symbol: &str, format: u64, tail: u64) -> Option<u64> {
+        super::escaped_string(&render_tail(symbol, format, tail)?)
+    }
+
+    unsafe extern "C" fn render_native(fmt: u64, tail: u64) {
+        if let Some(out) = render_tail("NSLog", fmt, tail) {
+            emit(&out);
+        }
+    }
+
+    /// Darwin's AArch64 ABI passes every variadic argument on the stack, so
+    /// `va_start` is the stack pointer on entry and nothing has to be spilled.
+    #[cfg(target_arch = "aarch64")]
+    #[unsafe(naked)]
+    unsafe extern "C" fn trampoline() {
+        core::arch::naked_asm!(
+            "mov x1, sp",
+            "b   {render}",
+            render = sym render_native,
+        )
+    }
+
+    /// SysV puts the first arguments in registers, so the save area a callee's
+    /// prologue would build has to be built here: five integer registers (`rdi`
+    /// is the format and is not part of the tail) and, when `al` says the call
+    /// site passed any, the eight vector ones.
+    #[cfg(not(target_arch = "aarch64"))]
+    #[unsafe(naked)]
+    unsafe extern "C" fn trampoline() {
+        core::arch::naked_asm!(
+            "push rbp",
+            "mov  rbp, rsp",
+            // 176 bytes of save area, then the four-field `va_list`.
+            "sub  rsp, 208",
+            "mov  [rsp + 8],  rsi",
+            "mov  [rsp + 16], rdx",
+            "mov  [rsp + 24], rcx",
+            "mov  [rsp + 32], r8",
+            "mov  [rsp + 40], r9",
+            "test al, al",
+            "je   2f",
+            "movaps [rsp + 48],  xmm0",
+            "movaps [rsp + 64],  xmm1",
+            "movaps [rsp + 80],  xmm2",
+            "movaps [rsp + 96],  xmm3",
+            "movaps [rsp + 112], xmm4",
+            "movaps [rsp + 128], xmm5",
+            "movaps [rsp + 144], xmm6",
+            "movaps [rsp + 160], xmm7",
+            "2:",
+            // gp_offset skips `rdi`; fp_offset is the start of the vector half.
+            "mov  dword ptr [rsp + 176], 8",
+            "mov  dword ptr [rsp + 180], 48",
+            // The overflow area is whatever the call site pushed, which begins
+            // above the return address and the saved frame pointer.
+            "lea  rax, [rbp + 16]",
+            "mov  [rsp + 184], rax",
+            "mov  [rsp + 192], rsp",
+            "lea  rsi, [rsp + 176]",
+            "call {render}",
+            "mov  rsp, rbp",
+            "pop  rbp",
+            "ret",
+            render = sym render_native,
+        )
+    }
+}

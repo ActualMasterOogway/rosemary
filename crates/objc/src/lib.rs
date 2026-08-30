@@ -188,6 +188,14 @@ pub fn symbol(name: &str) -> Option<u64> {
 
         // the send itself
         "objc_msgSend" => msg::entry() as usize as u64,
+        "objc_msgSendSuper" => msg::entry_super() as usize as u64,
+        "objc_msgSendSuper2" => msg::entry_super2() as usize as u64,
+        // The `_stret` spellings are x86-64's, and are the same entry points
+        // again on AArch64, where an indirect return travels in `x8` and
+        // displaces no argument.
+        "objc_msgSend_stret" => msg::entry_stret() as usize as u64,
+        "objc_msgSendSuper_stret" => msg::entry_super_stret() as usize as u64,
+        "objc_msgSendSuper2_stret" => msg::entry_super2_stret() as usize as u64,
 
         _ => return None,
     })
@@ -260,7 +268,8 @@ pub const NAMES: &[&str] = &[
     "objc_setProperty_nonatomic", "objc_setProperty_atomic_copy",
     "objc_setProperty_nonatomic_copy", "objc_retainBlock", "objc_enumerationMutation",
     "objc_terminate",
-    "objc_msgSend",
+    "objc_msgSend", "objc_msgSendSuper", "objc_msgSendSuper2",
+    "objc_msgSend_stret", "objc_msgSendSuper_stret", "objc_msgSendSuper2_stret",
 ];
 
 #[cfg(test)]

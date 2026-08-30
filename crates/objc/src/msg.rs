@@ -53,6 +53,7 @@ unsafe extern "C" fn unrecognised(receiver: Id, sel: Sel) -> ! {
 
 /// [`unrecognised`] for the `_stret` ABI, where the argument registers are one
 /// place along and the first of them is the caller's return buffer.
+#[cfg(target_arch = "x86_64")]
 unsafe extern "C" fn unrecognised_stret(_buffer: *mut c_void, receiver: Id, sel: Sel) -> ! {
     // SAFETY: reached only from `lookup_stret`, which was given a live receiver.
     unsafe { unrecognised(receiver, sel) }
@@ -63,6 +64,7 @@ unsafe extern "C" fn unrecognised_stret(_buffer: *mut c_void, receiver: Id, sel:
 /// # Safety
 ///
 /// As [`lookup`].
+#[cfg(target_arch = "x86_64")]
 unsafe extern "C" fn lookup_stret(receiver: Id, sel: Sel) -> *const c_void {
     // SAFETY: the caller's obligation.
     let Some(class) = (unsafe { crate::object::class_of(receiver) }) else {
@@ -278,3 +280,277 @@ unsafe extern "C" fn msg_send_stret() {
         lookup = sym lookup_stret,
     )
 }
+
+/// `struct objc_super`, the first argument of every `Super` spelling.
+///
+/// `class` is what the search starts *at* for `objc_msgSendSuper` and the class
+/// whose superclass it starts at for `objc_msgSendSuper2`. Both slots are filled
+/// from a `__objc_superrefs` entry, which is why those have to name a class this
+/// runtime knows: see `rosetta3::objc::rewrite_refs`.
+#[repr(C)]
+struct Super {
+    receiver: Id,
+    class: *const crate::class::Class,
+}
+
+/// The `IMP` for a `[super ...]` send, searching from `super.class` itself.
+///
+/// # Safety
+///
+/// `sup` must point at a live `objc_super` whose receiver is non-null.
+unsafe extern "C" fn lookup_super(sup: *const Super, sel: Sel) -> *const c_void {
+    // SAFETY: the caller's obligation.
+    let sup = unsafe { &*sup };
+    // SAFETY: `class` is a class pointer this runtime handed out, or null.
+    match unsafe { crate::class::from_ptr(sup.class) } {
+        Some(class) => imp_or_unrecognised(class, sel),
+        None => unrecognised as *const c_void,
+    }
+}
+
+/// [`lookup_super`] for `objc_msgSendSuper2`, where the search starts one class
+/// higher: clang names the class the method is *in*, so that a category or a
+/// subclass compiled separately still resolves against the right superclass.
+///
+/// # Safety
+///
+/// As [`lookup_super`].
+unsafe extern "C" fn lookup_super2(sup: *const Super, sel: Sel) -> *const c_void {
+    // SAFETY: the caller's obligation.
+    let sup = unsafe { &*sup };
+    // SAFETY: as above.
+    match unsafe { crate::class::from_ptr(sup.class) }.and_then(|c| c.superclass()) {
+        Some(class) => imp_or_unrecognised(class, sel),
+        None => unrecognised as *const c_void,
+    }
+}
+
+fn imp_or_unrecognised(class: &'static crate::class::Class, sel: Sel) -> *const c_void {
+    match class.method(sel) {
+        Some(method) => method.implementation(),
+        None => unrecognised as *const c_void,
+    }
+}
+
+/// `objc_msgSendSuper`'s address.
+pub fn entry_super() -> *const c_void {
+    msg_send_super as *const c_void
+}
+
+/// `objc_msgSendSuper2`'s address.
+pub fn entry_super2() -> *const c_void {
+    msg_send_super2 as *const c_void
+}
+
+/// `objc_msgSendSuper_stret`'s address. As [`entry_stret`], one entry point on
+/// AArch64 and a second one on x86-64.
+pub fn entry_super_stret() -> *const c_void {
+    #[cfg(target_arch = "x86_64")]
+    {
+        msg_send_super_stret as *const c_void
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        msg_send_super as *const c_void
+    }
+}
+
+/// `objc_msgSendSuper2_stret`'s address.
+pub fn entry_super2_stret() -> *const c_void {
+    #[cfg(target_arch = "x86_64")]
+    {
+        msg_send_super2_stret as *const c_void
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        msg_send_super2 as *const c_void
+    }
+}
+
+/// The two `Super` trampolines, which differ only in which lookup they call.
+///
+/// Each is [`msg_send`] with two changes: the receiver is `[x0]`/`[rdi]` rather
+/// than the first argument itself, and it is put back into the argument register
+/// after the lookup - the implementation is entered as if it had been sent
+/// directly.
+macro_rules! super_trampoline {
+    ($name:ident, $lookup:ident) => {
+        #[cfg(target_arch = "aarch64")]
+        #[unsafe(naked)]
+        unsafe extern "C" fn $name() {
+            core::arch::naked_asm!(
+                "cbz     x0, 9f",
+                "ldr     x9, [x0]",
+                "cbz     x9, 9f",
+                "stp     x29, x30, [sp, #-16]!",
+                "mov     x29, sp",
+                "sub     sp, sp, #208",
+                "stp     q0, q1, [sp, #0]",
+                "stp     q2, q3, [sp, #32]",
+                "stp     q4, q5, [sp, #64]",
+                "stp     q6, q7, [sp, #96]",
+                "stp     x0, x1, [sp, #128]",
+                "stp     x2, x3, [sp, #144]",
+                "stp     x4, x5, [sp, #160]",
+                "stp     x6, x7, [sp, #176]",
+                "str     x8,      [sp, #192]",
+                "bl      {lookup}",
+                "mov     x9, x0",
+                "ldp     q0, q1, [sp, #0]",
+                "ldp     q2, q3, [sp, #32]",
+                "ldp     q4, q5, [sp, #64]",
+                "ldp     q6, q7, [sp, #96]",
+                "ldp     x0, x1, [sp, #128]",
+                "ldp     x2, x3, [sp, #144]",
+                "ldp     x4, x5, [sp, #160]",
+                "ldp     x6, x7, [sp, #176]",
+                "ldr     x8,      [sp, #192]",
+                "add     sp, sp, #208",
+                "ldp     x29, x30, [sp], #16",
+                // x0 still holds the `objc_super`; the callee wants its receiver.
+                "ldr     x0, [x0]",
+                "br      x9",
+                "9:",
+                "mov     x0, #0",
+                "mov     x1, #0",
+                "movi    d0, #0",
+                "movi    d1, #0",
+                "movi    d2, #0",
+                "movi    d3, #0",
+                "ret",
+                lookup = sym $lookup,
+            )
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[unsafe(naked)]
+        unsafe extern "C" fn $name() {
+            core::arch::naked_asm!(
+                "test    rdi, rdi",
+                "je      9f",
+                "cmp     qword ptr [rdi], 0",
+                "je      9f",
+                "push    rbp",
+                "mov     rbp, rsp",
+                "sub     rsp, 192",
+                "movaps  [rsp + 0], xmm0",
+                "movaps  [rsp + 16], xmm1",
+                "movaps  [rsp + 32], xmm2",
+                "movaps  [rsp + 48], xmm3",
+                "movaps  [rsp + 64], xmm4",
+                "movaps  [rsp + 80], xmm5",
+                "movaps  [rsp + 96], xmm6",
+                "movaps  [rsp + 112], xmm7",
+                "mov     [rsp + 128], rdi",
+                "mov     [rsp + 136], rsi",
+                "mov     [rsp + 144], rdx",
+                "mov     [rsp + 152], rcx",
+                "mov     [rsp + 160], r8",
+                "mov     [rsp + 168], r9",
+                "mov     [rsp + 176], rax",
+                "call    {lookup}",
+                "mov     r11, rax",
+                "movaps  xmm0, [rsp + 0]",
+                "movaps  xmm1, [rsp + 16]",
+                "movaps  xmm2, [rsp + 32]",
+                "movaps  xmm3, [rsp + 48]",
+                "movaps  xmm4, [rsp + 64]",
+                "movaps  xmm5, [rsp + 80]",
+                "movaps  xmm6, [rsp + 96]",
+                "movaps  xmm7, [rsp + 112]",
+                "mov     rdi, [rsp + 128]",
+                "mov     rsi, [rsp + 136]",
+                "mov     rdx, [rsp + 144]",
+                "mov     rcx, [rsp + 152]",
+                "mov     r8,  [rsp + 160]",
+                "mov     r9,  [rsp + 168]",
+                "mov     rax, [rsp + 176]",
+                "add     rsp, 192",
+                "pop     rbp",
+                // As above: the callee is entered on the receiver.
+                "mov     rdi, [rdi]",
+                "jmp     r11",
+                "9:",
+                "xor     eax, eax",
+                "xor     edx, edx",
+                "xorps   xmm0, xmm0",
+                "xorps   xmm1, xmm1",
+                "ret",
+                lookup = sym $lookup,
+            )
+        }
+    };
+}
+
+super_trampoline!(msg_send_super, lookup_super);
+super_trampoline!(msg_send_super2, lookup_super2);
+
+/// The `_stret` spellings of the two above, which exist only on x86-64: the
+/// return buffer takes `rdi`, so the `objc_super` is in `rsi` and the selector
+/// in `rdx`.
+#[cfg(target_arch = "x86_64")]
+macro_rules! super_stret_trampoline {
+    ($name:ident, $lookup:ident) => {
+        #[unsafe(naked)]
+        unsafe extern "C" fn $name() {
+            core::arch::naked_asm!(
+                "test    rsi, rsi",
+                "je      9f",
+                "cmp     qword ptr [rsi], 0",
+                "je      9f",
+                "push    rbp",
+                "mov     rbp, rsp",
+                "sub     rsp, 192",
+                "movaps  [rsp + 0], xmm0",
+                "movaps  [rsp + 16], xmm1",
+                "movaps  [rsp + 32], xmm2",
+                "movaps  [rsp + 48], xmm3",
+                "movaps  [rsp + 64], xmm4",
+                "movaps  [rsp + 80], xmm5",
+                "movaps  [rsp + 96], xmm6",
+                "movaps  [rsp + 112], xmm7",
+                "mov     [rsp + 128], rdi",
+                "mov     [rsp + 136], rsi",
+                "mov     [rsp + 144], rdx",
+                "mov     [rsp + 152], rcx",
+                "mov     [rsp + 160], r8",
+                "mov     [rsp + 168], r9",
+                "mov     [rsp + 176], rax",
+                "mov     rdi, rsi",
+                "mov     rsi, rdx",
+                "call    {lookup}",
+                "mov     r11, rax",
+                "movaps  xmm0, [rsp + 0]",
+                "movaps  xmm1, [rsp + 16]",
+                "movaps  xmm2, [rsp + 32]",
+                "movaps  xmm3, [rsp + 48]",
+                "movaps  xmm4, [rsp + 64]",
+                "movaps  xmm5, [rsp + 80]",
+                "movaps  xmm6, [rsp + 96]",
+                "movaps  xmm7, [rsp + 112]",
+                "mov     rdi, [rsp + 128]",
+                "mov     rsi, [rsp + 136]",
+                "mov     rdx, [rsp + 144]",
+                "mov     rcx, [rsp + 152]",
+                "mov     r8,  [rsp + 160]",
+                "mov     r9,  [rsp + 168]",
+                "mov     rax, [rsp + 176]",
+                "add     rsp, 192",
+                "pop     rbp",
+                "mov     rsi, [rsi]",
+                "jmp     r11",
+                // Messaging nil, as in `msg_send_stret`: the buffer is left
+                // alone and its address is what the caller is owed.
+                "9:",
+                "mov     rax, rdi",
+                "ret",
+                lookup = sym $lookup,
+            )
+        }
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+super_stret_trampoline!(msg_send_super_stret, lookup_super);
+#[cfg(target_arch = "x86_64")]
+super_stret_trampoline!(msg_send_super2_stret, lookup_super2);

@@ -1565,6 +1565,52 @@ impl crate::exec::Execution for Vm {
     }
 }
 
+impl crate::objc::Realizer for Vm {
+    fn report(&self) -> &machish::report::LinkReport {
+        &self.program.report
+    }
+
+    fn memory(&self) -> Box<dyn crate::abi::GuestMemory + '_> {
+        Box::new(self.view())
+    }
+
+    fn is_guest_address(&self, va: u64) -> bool {
+        self.program.is_guest_address(va)
+    }
+
+    fn call(&self, f: u64, args: &[u64]) -> Result<u64, VmError> {
+        Vm::call(self, f, args)
+    }
+
+    /// A trampoline built from the method's own type encoding, which is what
+    /// makes this callback different from every other one: a host caller enters
+    /// guest code through it. The untyped thunk is the fallback, and what it
+    /// cannot carry is reported rather than silently dropped.
+    fn imp_for(
+        &self,
+        m: &machish::extensions::objc::ObjcMethod,
+    ) -> Result<(u64, Option<&'static str>), &'static str> {
+        let typed = crate::objc::thunk_signature(m).and_then(|signature| {
+            self.typed_thunk_for(m.imp, signature)
+                .map_err(|_| "a host->guest thunk could not be built")
+        });
+        match typed {
+            Ok(imp) => Ok((imp, None)),
+            Err(reason) => Ok((
+                self.thunk_for(m.imp)
+                    .map_err(|_| "a host->guest thunk could not be built")?,
+                Some(reason),
+            )),
+        }
+    }
+
+    /// The guest's own `objc_class`: a send to it is intercepted, and
+    /// `crate::objc::dispatch` is what turns it into the registered one.
+    fn class_value(&self, _rt: &crate::objc::ObjcRuntime, guest_va: u64) -> u64 {
+        guest_va
+    }
+}
+
 impl crate::abi::Callbacks for Vm {
     fn substitute(&self, symbol: &str, va: u64) -> Result<u64, AbiError> {
         if va == 0 {

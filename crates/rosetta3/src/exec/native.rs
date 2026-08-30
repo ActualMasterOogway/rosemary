@@ -70,9 +70,9 @@ pub fn runnable(slice: &machish::fat::Slice) -> bool {
 /// A program of the host's own architecture, mapped executable and called directly.
 pub struct Native {
     report: LinkReport,
-    /// The mappings the report's addresses point into. Never read through
-    /// again; dropping it would unmap the program.
-    _memory: MmapSpace,
+    /// The mappings the report's addresses point into, and what says an address
+    /// is the program's. Dropping it would unmap the program.
+    memory: MmapSpace,
     /// Only the `argc`/`argv`/`envp`/`apple` block. Nothing runs on it: an
     /// `LC_MAIN` image is entered by a call, on the host's own stack.
     stack: GuestStack,
@@ -111,10 +111,27 @@ impl Native {
         // `allow_everything` would otherwise re-admit. Empty on macOS, where this
         // image really is calling the libraries it was linked against.
         darwin::divergent::deny_in(&mut host);
+        // And, under the builtin runtime, the two families whose objects would
+        // otherwise be Apple's. Both are no-ops under `native`, and both must
+        // come after `allow_everything`, which clears the prefix list.
+        crate::objc::host::deny_foreign_classes(&mut host);
+        crate::frameworks::deny_host_frameworks(&mut host);
+
         let eager = eager_binding_shims();
         let tlv = tlv_provider();
         let platform = darwin::provider();
-        let providers: Vec<&dyn SymbolProvider> = vec![&eager, &tlv, &platform, &host];
+        let objc = crate::objc::dispatch::provider();
+        let frameworks = crate::frameworks::provider();
+        let dyld = crate::dyld::provider();
+        // Under `native` the image is host code calling the libraries it was
+        // linked against, and the shortest chain that works is the honest one.
+        // Under `builtin` it must reach this tree's runtime and frameworks
+        // instead - including `dlopen`, or the first `dlopen("CoreFoundation")`
+        // puts Apple's classes in front of a program that has ours.
+        let providers: Vec<&dyn SymbolProvider> = match crate::frameworks::builtin() {
+            true => vec![&eager, &tlv, &platform, &objc, &frameworks, &dyld, &host],
+            false => vec![&eager, &tlv, &platform, &host],
+        };
 
         // A native image is of this host's architecture by definition, which is what
         // makes it the native backend's. See [`darwin::sysctl`].
@@ -144,7 +161,7 @@ impl Native {
         let stack = GuestStack::new(crate::stack::DEFAULT_STACK, path, args)?;
         Ok(Native {
             report,
-            _memory: memory,
+            memory,
             stack,
         })
     }
@@ -181,6 +198,9 @@ impl Execution for Native {
     }
 
     fn prepare(&self) -> Result<(), VmError> {
+        if crate::frameworks::builtin() {
+            return self.realize_objc();
+        }
         // Registering the image's classes with the host's Objective-C runtime, which
         // is a step only a host that has one can take.
         #[cfg(target_os = "macos")]
@@ -200,6 +220,101 @@ impl Execution for Native {
         let entry = root.entry.ok_or(VmError::NoCode { pc: 0, from: None })?;
         let (argc, argv, envp, apple) = self.main_args();
         self.call(entry, &[argc, argv, envp, apple])
+    }
+}
+
+impl Native {
+    /// Realize the image's Objective-C metadata in this tree's own runtime.
+    ///
+    /// What `_objc_map_images` does for the host's libobjc, minus the part dyld
+    /// would have done: the classes are rebuilt through the public C API, and
+    /// the guest's own references to them are pointed at the result.
+    fn realize_objc(&self) -> Result<(), VmError> {
+        // Before the program can send one: a format method reached as an `IMP`
+        // has no variadic tail without this.
+        crate::shims::variadic::install();
+        let rt = Box::leak(Box::new(crate::objc::register(self)?));
+        crate::objc::publish(rt);
+        crate::objc::rewrite_refs(self, rt)?;
+        // `+load` before the C constructors of the same image, which is dyld's
+        // order and the one a program that uses both depends on.
+        crate::objc::call_load_methods(self, rt)?;
+        Ok(())
+    }
+}
+
+/// The program's memory, for the passes that write back into its own metadata.
+///
+/// A native image is mapped at the addresses it was linked for, so a guest
+/// address is a host one and the copy is a `memcpy`. The loader's regions are
+/// still what says an address is *in* the program: a metadata pointer that is
+/// not belongs in a diagnostic rather than in a fault.
+struct HostView<'a>(&'a MmapSpace);
+
+impl HostView<'_> {
+    fn span(&self, va: u64, len: usize) -> Result<*mut u8, machish::Error> {
+        use machish::memory::Regions;
+        let outside = || machish::Error::Memory("the address is in no mapped region");
+        let (base, bytes) = self.0.region_at(va).ok_or_else(outside)?;
+        let offset = usize::try_from(va - base).map_err(|_| outside())?;
+        if bytes.len() - offset < len {
+            return Err(outside());
+        }
+        Ok(va as usize as *mut u8)
+    }
+}
+
+impl crate::abi::GuestMemory for HostView<'_> {
+    fn read(&self, va: u64, out: &mut [u8]) -> Result<(), machish::Error> {
+        let src = self.span(va, out.len())?;
+        // SAFETY: `span` checked the whole range lies in a region the loader
+        // mapped, and the mapping outlives this view.
+        unsafe { core::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), out.len()) };
+        Ok(())
+    }
+
+    fn write(&mut self, va: u64, data: &[u8]) -> Result<(), machish::Error> {
+        let dst = self.span(va, data.len())?;
+        // SAFETY: as above. Every caller writes into `__DATA`, which the loader
+        // left writable.
+        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len()) };
+        Ok(())
+    }
+}
+
+impl crate::objc::Realizer for Native {
+    fn report(&self) -> &LinkReport {
+        &self.report
+    }
+
+    fn memory(&self) -> Box<dyn crate::abi::GuestMemory + '_> {
+        Box::new(HostView(&self.memory))
+    }
+
+    fn is_guest_address(&self, va: u64) -> bool {
+        use machish::memory::Regions;
+        self.memory.region_at(va).is_some()
+    }
+
+    fn call(&self, f: u64, args: &[u64]) -> Result<u64, VmError> {
+        Execution::call(self, f, args)
+    }
+
+    /// The address itself. A native image's methods are host functions with the
+    /// host's ABI, so there is nothing for a trampoline to convert.
+    fn imp_for(
+        &self,
+        m: &machish::extensions::objc::ObjcMethod,
+    ) -> Result<(u64, Option<&'static str>), &'static str> {
+        Ok((m.imp, None))
+    }
+
+    /// The registered class. Nothing intercepts the sends a native image makes,
+    /// so the guest's own `objc_class` would be a receiver this runtime never
+    /// made - see [`crate::objc::rewrite_refs`], which is the same argument for
+    /// the references the compiler emitted.
+    fn class_value(&self, rt: &crate::objc::ObjcRuntime, guest_va: u64) -> u64 {
+        rt.host_or(guest_va)
     }
 }
 
