@@ -1562,20 +1562,156 @@ fn symbol_cstr(name: &str) -> u64 {
     interned(name.strip_prefix('_').unwrap_or(name))
 }
 
-/// The `dl` family, claimed ahead of the host's.
+/// The `dl` family as ordinary functions, for a guest nothing intercepts.
 ///
-/// The host exports all four and passing any of them through would be wrong for the
-/// reason in the module note, so they are claimed here and the addresses are never
-/// called.
+/// Under the emulated backend every one of these is answered by [`shim_for`]
+/// before the address in an import slot is ever used, which is why this module
+/// could publish the host's own and say they are never called. A native guest
+/// calls the slot directly, and there the host's are wrong twice over.
+mod entry {
+    use std::ffi::{CStr, c_char, c_void};
+
+    /// `void *dlopen(const char *path, int mode)`
+    ///
+    /// The mode is ignored, as the emulated shim ignores it: nothing here is
+    /// ever unloaded and every image is global, so `RTLD_LAZY`/`RTLD_NOW` and
+    /// `RTLD_LOCAL`/`RTLD_GLOBAL` describe a choice this runtime does not have.
+    /// That also sidesteps the flag values, which are not the host's either -
+    /// Darwin's `RTLD_GLOBAL` is `8`, and `8` under glibc is `RTLD_DEEPBIND`.
+    ///
+    /// # Safety
+    ///
+    /// `path` is null or NUL-terminated, as `dlopen`'s contract requires.
+    pub unsafe extern "C" fn dlopen(path: *const c_char, _mode: i32) -> *mut c_void {
+        if path.is_null() {
+            super::clear_error();
+            return super::global_handle() as usize as *mut c_void;
+        }
+        // SAFETY: the caller states `path` is NUL-terminated.
+        let path = unsafe { CStr::from_ptr(path) }
+            .to_string_lossy()
+            .into_owned();
+        if crate::shims::vmmap::tracing() {
+            eprintln!("rosetta3: dlopen({path:?})");
+        }
+        let handle = match super::open(&path) {
+            Ok(handle) => Some(handle),
+            // No x86-64 Mach-O on disk under that name.
+            Err(reason) => super::open_native(&path).or_else(|| {
+                super::set_error(format!("dlopen({path}): {reason}"));
+                None
+            }),
+        };
+        match handle {
+            Some(handle) => {
+                super::clear_error();
+                handle as usize as *mut c_void
+            }
+            None => std::ptr::null_mut(),
+        }
+    }
+
+    /// `void *dlsym(void *handle, const char *name)`
+    ///
+    /// # Safety
+    ///
+    /// `name` is NUL-terminated. `handle` is not dereferenced: it is either one
+    /// [`super::open`] handed out or a pseudo-handle, and [`super::lookup`]
+    /// treats everything it does not recognise as a global search.
+    pub unsafe extern "C" fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void {
+        if name.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: the caller states `name` is NUL-terminated.
+        let name = unsafe { CStr::from_ptr(name) }
+            .to_string_lossy()
+            .into_owned();
+        match super::lookup(handle as usize as u64, &name) {
+            Some(addr) => {
+                super::clear_error();
+                addr as usize as *mut c_void
+            }
+            None => {
+                // Under the trace only; see the emulated shim for why.
+                let err = format!("dlsym({name}): symbol not found");
+                if crate::shims::vmmap::tracing() {
+                    eprintln!("rosetta3: {err}");
+                }
+                super::set_error(err);
+                std::ptr::null_mut()
+            }
+        }
+    }
+
+    /// `int dlclose(void *handle)`. Nothing is unloaded; see the module note.
+    pub extern "C" fn dlclose(_handle: *mut c_void) -> i32 {
+        super::clear_error();
+        0
+    }
+
+    /// `char *dlerror(void)`, which clears the error it reports.
+    pub extern "C" fn dlerror() -> *const c_char {
+        let taken = super::ERROR
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let mut reported = super::REPORTED.lock().unwrap_or_else(|e| e.into_inner());
+        *reported = taken;
+        reported
+            .as_ref()
+            .map_or(std::ptr::null(), |s| s.as_ptr().cast())
+    }
+
+    /// `int dladdr(const void *addr, Dl_info *info)`
+    ///
+    /// # Safety
+    ///
+    /// `info` is null or a writable Darwin `Dl_info`: four pointers.
+    pub unsafe extern "C" fn dladdr(addr: *const c_void, info: *mut u64) -> i32 {
+        let addr = addr as usize as u64;
+        let Some(found) = super::describe(addr) else {
+            // Not ours. The host knows its own images, and this is exactly the
+            // question it can answer.
+            let Some(host) = crate::host::symbol("dladdr") else {
+                return 0;
+            };
+            // SAFETY: `dladdr` is `int (const void *, Dl_info *)`, and the
+            // guest's `Dl_info` is four pointers in the order glibc's is.
+            let f: unsafe extern "C" fn(u64, *mut u64) -> i32 =
+                unsafe { core::mem::transmute(host as usize as *const ()) };
+            // SAFETY: the caller's own arguments.
+            return unsafe { f(addr, info) };
+        };
+        if info.is_null() {
+            return 0;
+        }
+        // SAFETY: the caller states `info` is four writable words.
+        unsafe {
+            info.write(found.fname);
+            info.add(1).write(found.fbase);
+            info.add(2).write(found.sname);
+            info.add(3).write(found.saddr);
+        }
+        // Non-zero on success, unlike almost everything else in `<dlfcn.h>`.
+        1
+    }
+}
+
+/// The `dl` family, claimed ahead of the host's.
 pub fn provider() -> SyntheticDylib {
     let mut lib = SyntheticDylib::new("<rosetta3 dyld>");
     lib.flat(true);
+    // Implemented here, because the native backend really does call these.
+    for (name, f) in [
+        ("_dlopen", entry::dlopen as *const ()),
+        ("_dlsym", entry::dlsym as *const ()),
+        ("_dlclose", entry::dlclose as *const ()),
+        ("_dlerror", entry::dlerror as *const ()),
+        ("_dladdr", entry::dladdr as *const ()),
+    ] {
+        lib.define_fn(name, f);
+    }
     for name in [
-        "dlopen",
-        "dlsym",
-        "dlclose",
-        "dlerror",
-        "dladdr",
         "_dyld_image_count",
         "_dyld_get_image_header",
         "_dyld_get_image_vmaddr_slide",

@@ -508,6 +508,10 @@ impl Vm {
         let program = program;
 
         let stack = GuestStack::new(crate::stack::DEFAULT_STACK, exe_path, args)?;
+        // What `_NSGetArgc`/`_NSGetArgv` answer with, now that there is a layout
+        // for them to point into.
+        let (argc, argv, _, _) = stack.main_args();
+        crate::shims::runtime::set_process_args(argc, argv);
 
         let mut ranges: Vec<Range<u64>> = program
             .memory

@@ -200,12 +200,36 @@ impl Native {
             reason: e.to_string(),
         })?;
 
+        // Say what did not bind, now that every repair above has had its say and
+        // `missing` means missing. The emulated backend has always done this;
+        // this one had not, and the difference is the whole diagnostic: a native
+        // image calls straight through its stub, so an unbound import is a jump
+        // to zero with no runtime in the way to name the symbol. Every failure
+        // this backend reported was "SIGSEGV at 0x0" with the answer sitting in
+        // the link report the whole time.
+        let unbound = crate::program::announce_unbound_imports(&report, path);
+        if !unbound.is_empty() && crate::program::strict_imports() {
+            return Err(VmError::Load {
+                path: path.to_string(),
+                reason: format!(
+                    "{} unbound import(s), the first being {} ({} is set)",
+                    unbound.len(),
+                    unbound[0].1.symbol,
+                    crate::program::STRICT_IMPORTS_ENV,
+                ),
+            });
+        }
+
         flush_icache(&report);
         crate::tls::register(&report);
         // Before the program runs, because the first thing it may do is throw.
         crate::dyld::register_mapped_images(&report);
 
         let stack = GuestStack::new(crate::stack::DEFAULT_STACK, path, args)?;
+        // What `_NSGetArgc`/`_NSGetArgv` answer with, now that there is a layout
+        // for them to point into.
+        let (argc, argv, _, _) = stack.main_args();
+        crate::shims::runtime::set_process_args(argc, argv);
         Ok(Native {
             report,
             memory,

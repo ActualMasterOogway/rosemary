@@ -233,6 +233,41 @@ struct Image {
 /// Where the guest's images landed. Filled once, before any guest code runs.
 static IMAGES: Mutex<Vec<Image>> = Mutex::new(Vec::new());
 
+/// One import nothing satisfied, flattened so a handler can search it.
+struct Unbound {
+    /// The `__stubs` entry a call to this symbol goes through.
+    stub: u64,
+    name: [u8; NAME],
+    used: usize,
+}
+
+/// Every unbound import that has a stub, by stub address.
+static UNBOUND: Mutex<Vec<Unbound>> = Mutex::new(Vec::new());
+
+/// Record which imports went unbound, so a fault at zero can name the one the
+/// guest called.
+///
+/// An unbound import leaves a zero in its slot and its stub jumps through that
+/// slot, so calling one lands at address zero with the symbol nowhere in the
+/// register state: `rip` is zero and the stub - the only thing that identifies
+/// the symbol - was jumped through rather than called, so it is not on the
+/// stack either. All that survives is the return address the *call* pushed, and
+/// the call is five bytes of `call rel32` immediately before it. That is enough
+/// to recover the stub, and this table turns the stub back into a name.
+pub fn note_unbound(entries: &[(&str, &machish::report::MissingSymbol)]) {
+    let mut unbound = UNBOUND.lock().unwrap_or_else(|e| e.into_inner());
+    unbound.clear();
+    for (_, m) in entries {
+        let Some(stub) = m.stub_va else { continue };
+        let bytes = m.symbol.as_bytes();
+        let used = bytes.len().min(NAME);
+        let mut name = [0u8; NAME];
+        name[..used].copy_from_slice(&bytes[..used]);
+        unbound.push(Unbound { stub, name, used });
+    }
+    unbound.sort_by_key(|u| u.stub);
+}
+
 /// Record the guest's image map, so a fault can name a guest address rather
 /// than only state it.
 ///
@@ -363,6 +398,11 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
         out.str("\n  host pc ");
         out.hex(pc);
         say_region(&mut out, pc);
+        // Before the frame walk, because when it applies it is the answer and
+        // the walk is not: a jump to zero has no frame of its own.
+        if pc == 0 {
+            say_unbound_call(&mut out, context);
+        }
         if !in_translation(pc) {
             say_caller(&mut out, context);
         }
@@ -417,6 +457,56 @@ fn say_caller(out: &mut Buffer, context: *mut libc::c_void) {
     out.str("\n  reached from host pc ");
     out.hex(ret);
     say_region(out, ret);
+}
+
+/// Name the unbound import a jump to zero went through.
+///
+/// See [`note_unbound`] for why this has to be reconstructed rather than read.
+/// The call is `call rel32` - five bytes, the last four a signed displacement
+/// from the instruction's end, which is the return address itself. Anything
+/// else (an indirect call, a tail jump) simply does not match a stub and says
+/// nothing, which is the same as the report said before.
+fn say_unbound_call(out: &mut Buffer, context: *mut libc::c_void) {
+    let Some((_, sp, _)) = host_frame(context) else {
+        return;
+    };
+    if sp == 0 || sp % 8 != 0 {
+        return;
+    }
+    // SAFETY: `rip` is zero, so the faulting instruction was the call's target
+    // and the word at `sp` is the return address that call pushed. `sp` is the
+    // kernel's own value for this thread's stack pointer.
+    let ret = unsafe { std::ptr::read(sp as *const u64) };
+    // Only inside a guest image, which is both what makes the read below safe -
+    // the loader mapped it - and what makes a `call rel32` a plausible reading.
+    if !in_image(ret) || ret < 4 {
+        return;
+    }
+    // SAFETY: `ret - 4 .. ret` is inside a mapped, readable guest image, just
+    // checked.
+    let displacement = unsafe { std::ptr::read_unaligned((ret - 4) as *const i32) };
+    let stub = ret.wrapping_add(displacement as i64 as u64);
+
+    let Ok(unbound) = UNBOUND.try_lock() else {
+        return;
+    };
+    let Ok(index) = unbound.binary_search_by_key(&stub, |u| u.stub) else {
+        return;
+    };
+    out.str("\n  called ");
+    out.bytes(&unbound[index].name[..unbound[index].used]);
+    out.str(", an import nothing satisfied - its stub ");
+    out.hex(stub);
+    out.str(" jumps through a slot left zero");
+}
+
+/// Whether `addr` is inside an image the loader mapped.
+fn in_image(addr: u64) -> bool {
+    IMAGES.try_lock().is_ok_and(|images| {
+        images
+            .iter()
+            .any(|i| (i.range.0..i.range.1).contains(&addr))
+    })
 }
 
 /// A frame pointer worth dereferencing: on this thread's stack, aligned, and

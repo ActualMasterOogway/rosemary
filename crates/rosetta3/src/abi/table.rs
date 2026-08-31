@@ -2369,8 +2369,6 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("pthread_cond_wait", I32, P, P),
     sig!("pthread_condattr_destroy", I32, P),
     sig!("pthread_condattr_init", I32, P),
-    // `int pthread_cpu_number_np(size_t *)` - how mimalloc, which Roblox links
-    // as its allocator, picks a per-CPU heap.
     sig!("pthread_cpu_number_np", I32, P),
     cbsig!([2], "pthread_create", I32, P, P, P, P),
     sig!("pthread_detach", I32, U64),
@@ -2747,9 +2745,6 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // Metal symbols
     sig!("MTLCopyAllDevices", P),
     // ## CoreAudio's hardware layer, and the clock underneath it
-    //
-    // Roblox does not use an output `AudioUnit` the way a GameMaker runner
-    // does.
     sig!("AudioConvertHostTimeToNanos", U64, U64),
     sig!("AudioGetCurrentHostTime", U64),
     // `AudioDeviceIOProcID` looks like a function pointer in the header - it is
@@ -2770,10 +2765,6 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("AudioConverterGetPropertyInfo", I32, P, U32, P, P),
     sig!("AudioConverterSetProperty", I32, P, U32, U32, P),
     // ## CoreMedia, CoreVideo and VideoToolbox
-    //
-    // Roblox decodes and encodes video - its own capture path and the H.264
-    // stream a game may play - and the three frameworks travel together.
-    // Almost all of it is handles and out-parameters.
     sig!(
         "CMBlockBufferCreateContiguous",
         I32,
@@ -2940,9 +2931,6 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("VTSessionCopyProperty", I32, P, P, P, P),
     sig!("VTSessionSetProperty", I32, P, P, P),
     // ## FSEvents
-    //
-    // A directory watcher, which Roblox uses to notice when its own content
-    // changes underneath it.
     cbsig!([1], "FSEventStreamCreate", P, P, P, P, P, U64, F64, U32),
     sig!("FSEventStreamSetDispatchQueue", V, P, P),
     sig!("FSEventStreamStart", BOOL, P),
@@ -3068,9 +3056,6 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("_malloc_fork_parent", V),
     sig!("_malloc_fork_child", V),
     // ## The remaining C library
-    //
-    // Ordinary scalars and pointers, each reached by Roblox and none of them
-    // interesting on its own.
     sig!("_Exit", V, I32),
     sig!("__exp10", F64, F64),
     // `int __srget(FILE *)` and `int __swbuf(int, FILE *)` - the out-of-line

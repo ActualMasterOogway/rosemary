@@ -62,12 +62,6 @@ pub fn enter(translation: &Translation, ctx: &mut RegisterContext) -> ExitReason
 
 /// Every address a published translation can be entered at, as an open-addressed
 /// table read without taking the cache's lock.
-///
-/// It stands in for a walk. Regions overlap, so a map keyed by start address can only
-/// answer "who can execute `pc`" by scanning back as far as the widest region reaches
-/// and asking each candidate, and one wide region makes that scan thousands of entries
-/// long: on Roblox the scan and the `BTreeMap` navigation under it were 27% of running
-/// time. A probe here is one dependent load.
 struct EntryIndex {
     table: AtomicPtr<Table>,
     /// Addresses in the live table. Written only by a lift, which holds the cache's
@@ -287,14 +281,6 @@ impl CodeCache {
     /// threads that missed on the same address both compiled it - see
     /// [`Published::retained`]. A caller watching this number grow wants regions, not
     /// races.
-    ///
-    /// **Memoised, because microlift's count is not a field but a computation**: it
-    /// collects a pointer per resume point - on Roblox, hundreds of thousands - then
-    /// sorts and dedups them. The overlay asks twice a second on the thread that
-    /// draws, which put that sort at ~2% of the process's running time and held the
-    /// cache's lock across it, stalling any thread that wanted to lift. Inserts are
-    /// the only thing that can change the answer, so a run that has stopped
-    /// translating pays for it once.
     pub fn len(&self) -> usize {
         let inserts = self.inserts.load(Ordering::Acquire);
         let mut counted = self.counted.lock().unwrap_or_else(|e| e.into_inner());

@@ -281,12 +281,16 @@ pub fn announce_unbound_imports<'r>(
     {
         eprintln!("rosetta3:   (and {rest} more)");
     }
+    // So a later fault at zero can say which of these the guest called, rather
+    // than leaving the reader to match a return address against this list by
+    // hand.
+    crate::fault::note_unbound(&unbound);
     unbound
 }
 
 /// Whether an unbound import is a refusal to load rather than a warning. Read
 /// per load rather than cached: loads are counted in ones.
-fn strict_imports() -> bool {
+pub fn strict_imports() -> bool {
     match std::env::var(STRICT_IMPORTS_ENV) {
         Err(_) => false,
         Ok(value) => !matches!(

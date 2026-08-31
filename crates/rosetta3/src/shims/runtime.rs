@@ -1,9 +1,118 @@
 //! Symbols the runtime supplies itself, because the host will not hand them out.
 
+use std::ffi::{c_char, c_void};
+use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
+
 use machish::resolve::SyntheticDylib;
 
 /// The guest's stack canary.
 static STACK_CHK_GUARD: u64 = 0x00ff_dead_beef_c0de;
+
+/// The guest's `argc`, as `_NSGetArgc` hands out the address of.
+static GUEST_ARGC: AtomicI32 = AtomicI32::new(0);
+
+/// The guest's `argv`, as `_NSGetArgv` hands out the address of.
+static GUEST_ARGV: AtomicPtr<*mut c_char> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Record the arguments the guest was entered with.
+///
+/// Called once the stack is laid out, which is after the chain that answers these
+/// imports was built - so the two accessors below hand out the addresses of these
+/// statics and read them when the guest calls, rather than at bind time.
+///
+/// The guest's arguments, not this process's: `argv[0]` has to be the program the
+/// guest thinks it is, not `rosetta3`.
+pub fn set_process_args(argc: u64, argv: u64) {
+    GUEST_ARGC.store(argc as i32, Ordering::Relaxed);
+    GUEST_ARGV.store(argv as usize as *mut *mut c_char, Ordering::Relaxed);
+}
+
+/// `int *_NSGetArgc(void)`.
+extern "C" fn ns_get_argc() -> *mut i32 {
+    GUEST_ARGC.as_ptr()
+}
+
+/// `char ***_NSGetArgv(void)`.
+extern "C" fn ns_get_argv() -> *mut *mut *mut c_char {
+    GUEST_ARGV.as_ptr()
+}
+
+/// The address of the host's `environ` variable, or `None` if it has none.
+///
+/// `getenv`/`setenv`/`putenv` are passed through to the host, so a guest reading
+/// `environ` - or calling `_NSGetEnviron` to get at it, which is how Darwin spells
+/// taking its address - must be looking at the same block those calls edit.
+///
+/// Darwin does not export `environ` from a dylib at all, only the accessor; every
+/// other host exports the variable and has no accessor. Try both.
+fn host_environ() -> Option<u64> {
+    if let Some(f) = crate::host::symbol("_NSGetEnviron") {
+        // SAFETY: `_NSGetEnviron` is `char ***(void)`, a pure accessor for a
+        // libSystem global, so its result is valid for the life of the process.
+        let get: unsafe extern "C" fn() -> *mut *mut *mut c_char =
+            unsafe { core::mem::transmute(f as usize as *const ()) };
+        let addr = unsafe { get() };
+        if !addr.is_null() {
+            return Some(addr as usize as u64);
+        }
+    }
+    crate::host::symbol("environ")
+}
+
+/// Whatever [`host_environ`] found, resolved once at provider time.
+static ENVIRON: AtomicPtr<*mut *mut c_char> = AtomicPtr::new(std::ptr::null_mut());
+
+/// A stable address inside *this* binary, for glibc's `dso_symbol` argument.
+///
+/// It is not read: `__cxa_thread_atexit_impl` looks the address up to find the
+/// object that owns the destructor and holds it in memory until the destructor
+/// has run. The guest's images are never unloaded, so this runtime's own handle
+/// says the true thing - the code will still be there.
+static DSO_ANCHOR: u8 = 0;
+
+/// `void _tlv_atexit(void (*dtor)(void *), void *obj)`, for a host without one.
+///
+/// Darwin registers a thread-local's destructor with dyld, which runs it when
+/// the thread ends. glibc's equivalent is `__cxa_thread_atexit_impl`, whose only
+/// difference is the third argument - see [`DSO_ANCHOR`].
+///
+/// A host with neither drops the destructor rather than faulting. That leaks
+/// whatever the thread-local owned, which is a worse program than one whose
+/// destructors run and a much better one than a null call in a constructor.
+///
+/// # Safety
+///
+/// Called through an import slot this module defines, with the two arguments the
+/// Darwin declaration gives it. `dtor` is guest code and `obj` is the guest's
+/// object; neither is touched here.
+unsafe extern "C" fn tlv_atexit(dtor: Option<unsafe extern "C" fn(*mut c_void)>, obj: *mut c_void) {
+    /// `__cxa_thread_atexit_impl`, looked up once.
+    static HOST: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+
+    let Some(dtor) = dtor else { return };
+    let Some(f) =
+        *HOST.get_or_init(|| crate::host::symbol("__cxa_thread_atexit_impl").map(|f| f as usize))
+    else {
+        return;
+    };
+    // SAFETY: glibc's `int __cxa_thread_atexit_impl(void (*)(void *), void *,
+    // void *)`, the prototype named here.
+    let register: unsafe extern "C" fn(
+        unsafe extern "C" fn(*mut c_void),
+        *mut c_void,
+        *mut c_void,
+    ) -> i32 = unsafe { core::mem::transmute(f as *const ()) };
+    // SAFETY: `dtor` and `obj` are the caller's own, and the handle is this
+    // binary's.
+    unsafe {
+        register(dtor, obj, &DSO_ANCHOR as *const u8 as *mut c_void);
+    }
+}
+
+/// `char ***_NSGetEnviron(void)`.
+extern "C" fn ns_get_environ() -> *mut *mut *mut c_char {
+    ENVIRON.load(Ordering::Relaxed)
+}
 
 /// `int _NSGetExecutablePath(char *buf, uint32_t *bufsize)`.
 ///
@@ -46,13 +155,15 @@ pub fn provider() -> SyntheticDylib {
     for name in machish::extensions::tlv::BOOTSTRAP_SYMBOLS {
         lib.define_fn(name, crate::tls::bootstrap as *const ());
     }
-    // The host's own `_tlv_atexit` is the right implementation - it appends a
-    // destructor to the list dyld runs when this thread ends, and a guest thread
-    // is a host thread. It is denied only because the whole `__tlv_` prefix is.
-    if let Some(f) = crate::host::symbol("_tlv_atexit") {
-        lib.define_fn("__tlv_atexit", f as *const ());
-        lib.define_fn("_tlv_atexit", f as *const ());
-    }
+    // The host's own `_tlv_atexit` is the right implementation where there is
+    // one - it appends a destructor to the list dyld runs when this thread ends,
+    // and a guest thread is a host thread. It is denied only because the whole
+    // `__tlv_` prefix is. Off Darwin nothing exports it and [`tlv_atexit`] is
+    // the stand-in.
+    let atexit = crate::host::symbol("_tlv_atexit")
+        .map_or(tlv_atexit as *const (), |f| f as usize as *const ());
+    lib.define_fn("__tlv_atexit", atexit);
+    lib.define_fn("_tlv_atexit", atexit);
     // The host's `open`/`openat` are variadic, and Apple's arm64 ABI puts a
     // variadic argument on the stack - so a fixed signature would leave the mode
     // in a register no `va_arg` reads. These bind to fixed-arity wrappers instead.
@@ -78,28 +189,19 @@ pub fn provider() -> SyntheticDylib {
     if let Some(f) = crate::host::symbol("mach_host_self") {
         lib.define_fn("_mach_host_self", f as *const ());
     }
-    // `getenv`/`setenv`/`putenv` are passed through, so a guest walking
-    // `environ` directly must see the host's block.
-    for (mach_o, host) in [
-        ("__NSGetEnviron", "_NSGetEnviron"),
-        ("__NSGetArgc", "_NSGetArgc"),
-        ("__NSGetArgv", "_NSGetArgv"),
-    ] {
-        if let Some(f) = crate::host::symbol(host) {
-            lib.define_fn(mach_o, f as *const ());
-        }
-    }
-    // `environ` is a variable, so the slot takes its address, which on Darwin is
-    // what `_NSGetEnviron()` is for.
-    if let Some(f) = crate::host::symbol("_NSGetEnviron") {
-        // SAFETY: `_NSGetEnviron` is `char ***(void)`, a pure accessor for a
-        // libSystem global, so its result is valid for the life of the process.
-        let get: unsafe extern "C" fn() -> *mut *mut *mut u8 =
-            unsafe { core::mem::transmute(f as usize as *const ()) };
-        let addr = unsafe { get() };
-        if !addr.is_null() {
-            lib.define_data("_environ", addr as usize as u64);
-        }
+    // The process arguments. Answered here on every host, not just off Darwin:
+    // the host's own `_NSGetArgc`/`_NSGetArgv` describe *this* process, so a
+    // guest asking for its arguments would be told it is `rosetta3`.
+    lib.define_fn("__NSGetArgc", ns_get_argc as *const ());
+    lib.define_fn("__NSGetArgv", ns_get_argv as *const ());
+    // `environ` and the accessor for its address. Off Darwin nothing exports
+    // `_NSGetEnviron`, and leaving the slot unbound is not a diagnosable
+    // failure: `libmimalloc.3.dylib` reads its options out of `environ` from a
+    // static initializer, so the program calls null before it has run a line.
+    if let Some(addr) = host_environ() {
+        ENVIRON.store(addr as usize as *mut *mut *mut c_char, Ordering::Relaxed);
+        lib.define_data("_environ", addr);
+        lib.define_fn("__NSGetEnviron", ns_get_environ as *const ());
     }
     lib
 }

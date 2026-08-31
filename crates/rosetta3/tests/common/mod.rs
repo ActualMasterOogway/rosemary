@@ -1152,9 +1152,6 @@ pub fn objc_host_aggregate_fixture() -> Option<String> {
 /// anyway, recording `MethodNotHostCallable` and moving on. That is only sound while
 /// the send path leaves the encoding alone when the `IMP` is the guest's own, which is
 /// what this fixture is: a union returned by value, from one guest method to another.
-///
-/// Roblox's `AppDelegate` is where the encoding was decoded eagerly and the send
-/// refused.
 pub const OBJC_GUEST_UNION_M: &str = r#"
 #import <Foundation/Foundation.h>
 

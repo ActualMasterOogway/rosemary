@@ -212,6 +212,19 @@ pub const CLAIMED: &[&str] = &[
     "setenv",
     "unsetenv",
     "exit",
+    // <sys/mman.h>, the half of it that takes no flag word. `PROT_READ`,
+    // `PROT_WRITE` and `PROT_EXEC` are the same three bits on both sides, an
+    // address and a length mean the same thing, and each of these returns `0` or
+    // `-1` with the same errno values.
+    //
+    // The other half - `mmap`, `madvise`, `posix_madvise`, `msync` - is *not*
+    // here and must not be: their `MAP_`, `MADV_` and `MS_` constants have
+    // different values on the two platforms, so `crate::vmmap` rewrites them.
+    "munmap",
+    "mprotect",
+    "mlock",
+    "munlock",
+    "mincore",
 ];
 
 /// Whether this crate claims `name` is safe to pass through unchanged.

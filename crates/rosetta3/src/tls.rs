@@ -158,9 +158,7 @@ pub extern "C" fn bootstrap(descriptor: *const u8) -> *mut u8 {
 /// caller.
 ///
 /// dyld's `_tlv_get_addr` saves x1-x16 and q0-q7 around its slow path and the
-/// compiler counts on it - Roblox's allocator holds a live pointer in x8 across
-/// the `blr` through the descriptor. An ordinary C function clobbers all of
-/// them, so a native image's descriptors point here instead.
+/// compiler counts on it
 #[cfg(target_arch = "aarch64")]
 #[unsafe(naked)]
 pub unsafe extern "C" fn bootstrap_thunk(_descriptor: *const u8) -> *mut u8 {

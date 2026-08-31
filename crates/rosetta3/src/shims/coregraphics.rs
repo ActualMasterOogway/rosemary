@@ -281,8 +281,6 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         "CGContextClearRect" => Some(context_clear_rect),
         "CGContextDrawImage" => Some(context_draw_image),
         "CGEventGetLocation" => Some(event_location),
-        // A `CGRect` in *and* out. Roblox insets its content view's frame while
-        // laying out the window's title bar.
         "NSInsetRect" => Some(inset_rect),
         // A `CGPoint` **argument** in the middle of three scalars; see
         // [`event_create_mouse`] for why that moves `mouseButton` a register.

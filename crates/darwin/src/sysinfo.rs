@@ -1,4 +1,5 @@
-//! `uname` and `compat_mode`: what the system says it is, and which century it is in.
+//! `uname`, `sysconf` and `compat_mode`: what the system says it is, and which
+//! century it is in.
 
 use machish::resolve::SyntheticDylib;
 
@@ -98,6 +99,181 @@ fn ask(mib: &[i32]) -> String {
     String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
+/// Darwin's `_SC_*` names, which are numbered nothing like glibc's.
+///
+/// Both platforms hand `sysconf` a small integer and neither publishes the same
+/// integer for the same question. The one that matters most is `_SC_PAGESIZE`:
+/// Darwin calls it 29, glibc calls 29 `_SC_VERSION`, and a guest asking for the
+/// page size is answered `200809`. mimalloc rounds its page-map reservation up
+/// to that "page size", asks for a mapping of the result, gets nothing, and the
+/// program dies in a static initializer with an uncaught `std::bad_alloc` - with
+/// no mention of `sysconf` anywhere in the wreckage.
+///
+/// From macOS's `<sys/unistd.h>`. Only the block this list covers contiguously,
+/// 1 through 52, plus the handful above it that programs actually ask for; a
+/// name outside it is `EINVAL` rather than a guess, because a guess here is the
+/// bug being fixed.
+#[cfg(not(target_os = "macos"))]
+mod sc {
+    pub const ARG_MAX: i32 = 1;
+    pub const CHILD_MAX: i32 = 2;
+    pub const CLK_TCK: i32 = 3;
+    pub const NGROUPS_MAX: i32 = 4;
+    pub const OPEN_MAX: i32 = 5;
+    pub const JOB_CONTROL: i32 = 6;
+    pub const SAVED_IDS: i32 = 7;
+    pub const VERSION: i32 = 8;
+    pub const BC_BASE_MAX: i32 = 9;
+    pub const BC_DIM_MAX: i32 = 10;
+    pub const BC_SCALE_MAX: i32 = 11;
+    pub const BC_STRING_MAX: i32 = 12;
+    pub const COLL_WEIGHTS_MAX: i32 = 13;
+    pub const EXPR_NEST_MAX: i32 = 14;
+    pub const LINE_MAX: i32 = 15;
+    pub const RE_DUP_MAX: i32 = 16;
+    pub const TWO_VERSION: i32 = 17;
+    pub const TWO_C_BIND: i32 = 18;
+    pub const TWO_C_DEV: i32 = 19;
+    pub const TWO_CHAR_TERM: i32 = 20;
+    pub const TWO_FORT_DEV: i32 = 21;
+    pub const TWO_FORT_RUN: i32 = 22;
+    pub const TWO_LOCALEDEF: i32 = 23;
+    pub const TWO_SW_DEV: i32 = 24;
+    pub const TWO_UPE: i32 = 25;
+    pub const STREAM_MAX: i32 = 26;
+    pub const TZNAME_MAX: i32 = 27;
+    pub const ASYNCHRONOUS_IO: i32 = 28;
+    pub const PAGESIZE: i32 = 29;
+    pub const MEMLOCK: i32 = 30;
+    pub const MEMLOCK_RANGE: i32 = 31;
+    pub const MEMORY_PROTECTION: i32 = 32;
+    pub const MESSAGE_PASSING: i32 = 33;
+    pub const PRIORITIZED_IO: i32 = 34;
+    pub const PRIORITY_SCHEDULING: i32 = 35;
+    pub const REALTIME_SIGNALS: i32 = 36;
+    pub const SEMAPHORES: i32 = 37;
+    pub const FSYNC: i32 = 38;
+    pub const SHARED_MEMORY_OBJECTS: i32 = 39;
+    pub const SYNCHRONIZED_IO: i32 = 40;
+    pub const AIO_LISTIO_MAX: i32 = 42;
+    pub const AIO_MAX: i32 = 43;
+    pub const AIO_PRIO_DELTA_MAX: i32 = 44;
+    pub const DELAYTIMER_MAX: i32 = 45;
+    pub const MQ_OPEN_MAX: i32 = 46;
+    pub const MAPPED_FILES: i32 = 47;
+    pub const RTSIG_MAX: i32 = 48;
+    pub const SEM_NSEMS_MAX: i32 = 49;
+    pub const SEM_VALUE_MAX: i32 = 50;
+    pub const SIGQUEUE_MAX: i32 = 51;
+    pub const TIMER_MAX: i32 = 52;
+    pub const IOV_MAX: i32 = 56;
+    pub const NPROCESSORS_CONF: i32 = 57;
+    pub const NPROCESSORS_ONLN: i32 = 58;
+    pub const GETGR_R_SIZE_MAX: i32 = 70;
+    pub const GETPW_R_SIZE_MAX: i32 = 71;
+    pub const HOST_NAME_MAX: i32 = 72;
+    pub const LOGIN_NAME_MAX: i32 = 73;
+    pub const THREAD_DESTRUCTOR_ITERATIONS: i32 = 85;
+    pub const THREAD_KEYS_MAX: i32 = 86;
+    pub const THREAD_STACK_MIN: i32 = 93;
+    pub const THREAD_THREADS_MAX: i32 = 94;
+    pub const TTY_NAME_MAX: i32 = 101;
+    pub const ATEXIT_MAX: i32 = 107;
+    pub const PHYS_PAGES: i32 = 200;
+}
+
+/// The host's `_SC_*` for a guest's Darwin one, or `None` for a name this
+/// mapping does not carry.
+#[cfg(not(target_os = "macos"))]
+fn host_confname(name: i32) -> Option<i32> {
+    Some(match name {
+        sc::ARG_MAX => libc::_SC_ARG_MAX,
+        sc::CHILD_MAX => libc::_SC_CHILD_MAX,
+        sc::CLK_TCK => libc::_SC_CLK_TCK,
+        sc::NGROUPS_MAX => libc::_SC_NGROUPS_MAX,
+        sc::OPEN_MAX => libc::_SC_OPEN_MAX,
+        sc::JOB_CONTROL => libc::_SC_JOB_CONTROL,
+        sc::SAVED_IDS => libc::_SC_SAVED_IDS,
+        sc::VERSION => libc::_SC_VERSION,
+        sc::BC_BASE_MAX => libc::_SC_BC_BASE_MAX,
+        sc::BC_DIM_MAX => libc::_SC_BC_DIM_MAX,
+        sc::BC_SCALE_MAX => libc::_SC_BC_SCALE_MAX,
+        sc::BC_STRING_MAX => libc::_SC_BC_STRING_MAX,
+        sc::COLL_WEIGHTS_MAX => libc::_SC_COLL_WEIGHTS_MAX,
+        sc::EXPR_NEST_MAX => libc::_SC_EXPR_NEST_MAX,
+        sc::LINE_MAX => libc::_SC_LINE_MAX,
+        sc::RE_DUP_MAX => libc::_SC_RE_DUP_MAX,
+        sc::TWO_VERSION => libc::_SC_2_VERSION,
+        sc::TWO_C_BIND => libc::_SC_2_C_BIND,
+        sc::TWO_C_DEV => libc::_SC_2_C_DEV,
+        sc::TWO_CHAR_TERM => libc::_SC_2_CHAR_TERM,
+        sc::TWO_FORT_DEV => libc::_SC_2_FORT_DEV,
+        sc::TWO_FORT_RUN => libc::_SC_2_FORT_RUN,
+        sc::TWO_LOCALEDEF => libc::_SC_2_LOCALEDEF,
+        sc::TWO_SW_DEV => libc::_SC_2_SW_DEV,
+        sc::TWO_UPE => libc::_SC_2_UPE,
+        sc::STREAM_MAX => libc::_SC_STREAM_MAX,
+        sc::TZNAME_MAX => libc::_SC_TZNAME_MAX,
+        sc::ASYNCHRONOUS_IO => libc::_SC_ASYNCHRONOUS_IO,
+        sc::PAGESIZE => libc::_SC_PAGESIZE,
+        sc::MEMLOCK => libc::_SC_MEMLOCK,
+        sc::MEMLOCK_RANGE => libc::_SC_MEMLOCK_RANGE,
+        sc::MEMORY_PROTECTION => libc::_SC_MEMORY_PROTECTION,
+        sc::MESSAGE_PASSING => libc::_SC_MESSAGE_PASSING,
+        sc::PRIORITIZED_IO => libc::_SC_PRIORITIZED_IO,
+        sc::PRIORITY_SCHEDULING => libc::_SC_PRIORITY_SCHEDULING,
+        sc::REALTIME_SIGNALS => libc::_SC_REALTIME_SIGNALS,
+        sc::SEMAPHORES => libc::_SC_SEMAPHORES,
+        sc::FSYNC => libc::_SC_FSYNC,
+        sc::SHARED_MEMORY_OBJECTS => libc::_SC_SHARED_MEMORY_OBJECTS,
+        sc::SYNCHRONIZED_IO => libc::_SC_SYNCHRONIZED_IO,
+        sc::AIO_LISTIO_MAX => libc::_SC_AIO_LISTIO_MAX,
+        sc::AIO_MAX => libc::_SC_AIO_MAX,
+        sc::AIO_PRIO_DELTA_MAX => libc::_SC_AIO_PRIO_DELTA_MAX,
+        sc::DELAYTIMER_MAX => libc::_SC_DELAYTIMER_MAX,
+        sc::MQ_OPEN_MAX => libc::_SC_MQ_OPEN_MAX,
+        sc::MAPPED_FILES => libc::_SC_MAPPED_FILES,
+        sc::RTSIG_MAX => libc::_SC_RTSIG_MAX,
+        sc::SEM_NSEMS_MAX => libc::_SC_SEM_NSEMS_MAX,
+        sc::SEM_VALUE_MAX => libc::_SC_SEM_VALUE_MAX,
+        sc::SIGQUEUE_MAX => libc::_SC_SIGQUEUE_MAX,
+        sc::TIMER_MAX => libc::_SC_TIMER_MAX,
+        sc::IOV_MAX => libc::_SC_IOV_MAX,
+        sc::NPROCESSORS_CONF => libc::_SC_NPROCESSORS_CONF,
+        sc::NPROCESSORS_ONLN => libc::_SC_NPROCESSORS_ONLN,
+        sc::GETGR_R_SIZE_MAX => libc::_SC_GETGR_R_SIZE_MAX,
+        sc::GETPW_R_SIZE_MAX => libc::_SC_GETPW_R_SIZE_MAX,
+        sc::HOST_NAME_MAX => libc::_SC_HOST_NAME_MAX,
+        sc::LOGIN_NAME_MAX => libc::_SC_LOGIN_NAME_MAX,
+        sc::THREAD_DESTRUCTOR_ITERATIONS => libc::_SC_THREAD_DESTRUCTOR_ITERATIONS,
+        sc::THREAD_KEYS_MAX => libc::_SC_THREAD_KEYS_MAX,
+        sc::THREAD_STACK_MIN => libc::_SC_THREAD_STACK_MIN,
+        sc::THREAD_THREADS_MAX => libc::_SC_THREAD_THREADS_MAX,
+        sc::TTY_NAME_MAX => libc::_SC_TTY_NAME_MAX,
+        sc::ATEXIT_MAX => libc::_SC_ATEXIT_MAX,
+        sc::PHYS_PAGES => libc::_SC_PHYS_PAGES,
+        _ => return None,
+    })
+}
+
+/// `long sysconf(int name)`, with `name` translated out of Darwin's numbering.
+///
+/// Only the name is rewritten. The *value* is the host's own answer, because
+/// every entry above is a question about the machine this is actually running
+/// on: the page size has to be the real one or a mapping is the wrong size, and
+/// the processor count has to be the real one or a thread pool is the wrong
+/// shape.
+#[cfg(not(target_os = "macos"))]
+unsafe extern "C" fn sysconf(name: i32) -> libc::c_long {
+    let Some(host) = host_confname(name) else {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    };
+    // SAFETY: a name this host publishes; `sysconf` takes no pointer and reads a
+    // static system parameter.
+    unsafe { libc::sysconf(host) }
+}
+
 /// `int compat_mode(const char *command, const char *mode)`.
 ///
 /// Darwin-only, and there is nothing on Linux to pass it through to. A command asks
@@ -179,7 +355,8 @@ unsafe extern "C" fn gestalt(selector: u32, response: *mut i32) -> i16 {
 }
 
 /// The names this module answers, which is not the same list on both hosts:
-/// `Gestalt` is CoreServices' and is passed through where there is one.
+/// `Gestalt` is CoreServices' and is passed through where there is one, and
+/// `sysconf`'s names are Darwin's already on a Mac.
 fn names() -> &'static [&'static str] {
     #[cfg(target_os = "macos")]
     {
@@ -187,7 +364,7 @@ fn names() -> &'static [&'static str] {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        &["uname", "compat_mode", "Gestalt"]
+        &["uname", "compat_mode", "Gestalt", "sysconf"]
     }
 }
 
@@ -197,6 +374,8 @@ pub fn symbol(name: &str) -> Option<u64> {
         "compat_mode" => compat_mode as *const (),
         #[cfg(not(target_os = "macos"))]
         "Gestalt" => gestalt as *const (),
+        #[cfg(not(target_os = "macos"))]
+        "sysconf" => sysconf as *const (),
         _ => return None,
     };
     Some(f as usize as u64)
@@ -292,5 +471,44 @@ mod tests {
             assert_eq!(compat_mode(cmd.as_ptr(), legacy.as_ptr()), 0);
             assert_eq!(compat_mode(cmd.as_ptr(), std::ptr::null()), 0);
         }
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn the_page_size_is_a_page_size() {
+        // SAFETY: `sysconf` takes an integer and reads a system parameter.
+        let page = unsafe { sysconf(sc::PAGESIZE) };
+        assert_eq!(page, machish::memory::host_page_size() as libc::c_long);
+        assert!(
+            page > 0 && (page as u64).is_power_of_two(),
+            "{page} is not a page size"
+        );
+    }
+
+    /// Darwin's numbering is not glibc's anywhere in the block, so a name that
+    /// happens to collide must still come back with its own answer.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn each_name_is_translated_rather_than_passed_through() {
+        // SAFETY: each is an integer argument to a parameter query.
+        unsafe {
+            assert_eq!(sysconf(sc::VERSION), libc::sysconf(libc::_SC_VERSION));
+            assert_eq!(
+                sysconf(sc::NPROCESSORS_ONLN),
+                libc::sysconf(libc::_SC_NPROCESSORS_ONLN)
+            );
+            assert!(sysconf(sc::NPROCESSORS_ONLN) >= 1);
+            assert_eq!(sysconf(sc::OPEN_MAX), libc::sysconf(libc::_SC_OPEN_MAX));
+        }
+    }
+
+    /// A name this mapping does not carry is refused rather than guessed at,
+    /// because guessing is what turned a page size into `200809`.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn an_unmapped_name_is_einval() {
+        // SAFETY: an integer argument; 9999 names nothing on either side.
+        assert_eq!(unsafe { sysconf(9999) }, -1);
+        assert_eq!(crate::errno::get(), libc::EINVAL);
     }
 }

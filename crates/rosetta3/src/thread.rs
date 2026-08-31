@@ -345,10 +345,6 @@ pub(crate) struct CodeWindow {
     /// place instead of here as well. See [`ThreadLinks`].
     links: UnsafeCell<ThreadLinks>,
     /// The geometry `slot` uses, copied out of [`link_config`] once.
-    ///
-    /// The *same value* `links` was built with, so the two cannot drift; what it
-    /// avoids is the static read, which is not free and which `slot` performed twice
-    /// per run-loop entry and once per published row - 2% of Roblox's running time.
     config: BlockLinkConfig,
 }
 

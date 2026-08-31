@@ -9,7 +9,7 @@ use super::set_int_return;
 
 /// `MAP_JIT`. Not in the `libc` crate's Darwin bindings, and it is the flag this
 /// module exists to remove, so it is spelled out with the value from `mman.h`.
-const MAP_JIT: i32 = 0x0800;
+const MAP_JIT: i32 = darwin::vmmap::darwin::MAP_JIT;
 
 /// The ranges the guest asked to be executable.
 mod arenas {
@@ -172,8 +172,14 @@ pub(crate) fn host_prot(prot: i32) -> i32 {
 }
 
 /// The flags to actually request for a guest's `flags`.
+///
+/// `MAP_JIT` is dropped here rather than in [`darwin::vmmap::map_flags`] because
+/// it is this module's business and not the platform's: the guest is saying it
+/// means to write code into the mapping, which is what [`arenas`] records. The
+/// rest of the translation is the platform's, and off Darwin it is not a no-op -
+/// `MAP_ANON` alone is a different bit on either side.
 pub(crate) fn host_flags(flags: i32) -> i32 {
-    flags & !MAP_JIT
+    darwin::vmmap::map_flags(flags & !MAP_JIT)
 }
 
 /// `void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off)`
@@ -191,7 +197,9 @@ fn mmap(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) ->
             len,
             want_prot,
             want_flags,
-            fd,
+            // An anonymous mapping's `fd` on Darwin is a VM tag rather than a
+            // descriptor; see [`darwin::vmmap::map_fd`].
+            darwin::vmmap::map_fd(flags, fd),
             off,
         )
     };
@@ -371,12 +379,19 @@ mod tests {
         }
     }
 
+    /// The guest's flags are Darwin's, whatever host this is compiled for; see
+    /// [`darwin::vmmap`], which is what `host_flags` defers the rest to.
+    use darwin::vmmap::darwin as guest;
+
     #[test]
     fn map_jit_is_removed_and_nothing_else_is() {
-        let flags = libc::MAP_PRIVATE | libc::MAP_ANON | MAP_JIT;
-        assert_eq!(host_flags(flags), libc::MAP_PRIVATE | libc::MAP_ANON);
-        let flags = libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_FIXED;
-        assert_eq!(host_flags(flags), flags);
+        let flags = guest::MAP_PRIVATE | guest::MAP_ANON | MAP_JIT;
+        assert_eq!(
+            host_flags(flags),
+            darwin::vmmap::map_flags(guest::MAP_PRIVATE | guest::MAP_ANON),
+        );
+        let flags = guest::MAP_PRIVATE | guest::MAP_ANON | guest::MAP_FIXED;
+        assert_eq!(host_flags(flags), darwin::vmmap::map_flags(flags));
     }
 
     /// The fault this module exists for, reproduced and then not reproduced.
@@ -384,7 +399,7 @@ mod tests {
     fn the_rewritten_request_yields_memory_the_guest_can_write() {
         let (prot, flags) = (
             libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-            libc::MAP_PRIVATE | libc::MAP_ANON | MAP_JIT,
+            guest::MAP_PRIVATE | guest::MAP_ANON | MAP_JIT,
         );
         // SAFETY: an anonymous mapping of one host page, unmapped below.
         let p = unsafe {
@@ -393,7 +408,7 @@ mod tests {
                 0x4000,
                 host_prot(prot),
                 host_flags(flags),
-                -1,
+                darwin::vmmap::map_fd(flags, -1),
                 0,
             )
         };

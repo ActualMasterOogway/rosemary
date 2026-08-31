@@ -17,9 +17,11 @@ pub mod pthread;
 pub mod signal;
 pub mod stat;
 pub mod stdio;
+pub mod string;
 pub mod sysctl;
 pub mod sysinfo;
 pub mod tls;
+pub mod vmmap;
 pub mod xlocale;
 
 /// Strip the leading underscore a Mach-O symbol carries.
@@ -139,6 +141,35 @@ fn implemented(name: &str) -> Option<u64> {
         .or_else(|| xlocale_symbol(name))
         .or_else(|| stat_symbol(name))
         .or_else(|| malloc_symbol(name))
+        .or_else(|| vmmap_symbol(name))
+        .or_else(|| string_symbol(name))
+}
+
+/// Apple's `<string.h>` extensions, which only a host without them publishes.
+fn string_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return string::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
+}
+
+/// The memory-mapping family, which only a host whose `MAP_`/`MADV_`/`MS_`
+/// values are not Darwin's needs rewritten.
+fn vmmap_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return vmmap::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
 }
 
 /// The zoned-allocator questions, which only a host with no zones answers.
@@ -225,6 +256,8 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
         xlocale::provide(&mut lib);
         stat::provide(&mut lib);
         malloc::provide(&mut lib);
+        vmmap::provide(&mut lib);
+        string::provide(&mut lib);
     }
     lib
 }
