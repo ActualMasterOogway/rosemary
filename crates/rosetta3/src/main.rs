@@ -11,6 +11,11 @@ use rosetta3::{
 use microlift::arch::x86_64::X86_64;
 use microlift::core::lift_to_function;
 
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 /// Load and execute, with `argv[0]` the path as the guest will see it.
 fn run(path: &str, args: Vec<String>, policy: ImportPolicy, forced: Option<Engine>) -> ExitCode {
     let mut argv = vec![path.to_string()];
