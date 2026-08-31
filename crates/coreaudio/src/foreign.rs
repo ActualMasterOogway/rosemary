@@ -21,8 +21,10 @@ use std::ffi::{CStr, c_void};
 /// reason and with the same default.
 #[cfg(target_os = "macos")]
 fn forwarding() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("ROSETTA3_NO_FOREIGN").is_none())
+    use static_init::dynamic;
+    #[dynamic]
+    static ON: bool = std::env::var_os("ROSETTA3_NO_FOREIGN").is_none();
+    *ON
 }
 
 /// The framework's own entry point, by `dlsym` rather than a link.

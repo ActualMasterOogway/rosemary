@@ -167,6 +167,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "sdl3",
+ "static_init",
 ]
 
 [[package]]
@@ -176,6 +177,7 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
  "objc",
+ "static_init",
 ]
 
 [[package]]
@@ -382,6 +384,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "machish",
+ "static_init",
 ]
 
 [[package]]

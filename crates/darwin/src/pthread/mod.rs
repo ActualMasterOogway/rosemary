@@ -336,15 +336,16 @@ pub unsafe extern "C" fn setname_np(name: u64) -> i32 {
     }
 }
 
-/// `int pthread_main_np(void)`, which is Darwin's own.
-///
 /// Non-zero on the thread that ran `main`. Answered by comparing thread ids rather
 /// than by asking libpthread, which has no such call here.
 pub unsafe extern "C" fn main_np() -> i32 {
-    use std::sync::OnceLock;
-    /// The id of whichever thread asked first, which during start-up is the main one.
-    static MAIN: OnceLock<u32> = OnceLock::new();
-    i32::from(*MAIN.get_or_init(id) == id())
+    use static_init::dynamic;
+
+    // static_init::dynamic is a necessity here because it runs on the main thread always as a constructor
+    #[dynamic]
+    static MAIN: u32 = id();
+
+    i32::from(*MAIN == id())
 }
 
 /// `int pthread_threadid_np(pthread_t, uint64_t *)`, Darwin's own.

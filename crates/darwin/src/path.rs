@@ -3,7 +3,7 @@
 //! A Mac filesystem is case-*insensitive* by default, and Mac software relies on
 //! it without meaning to: Deltarune's runner lowercases the path it derives from
 //! its bundle and opens
-//! `/…/deltarune.app/contents/resources/game.ios`, which is the same file on
+//! `/.../deltarune.app/contents/resources/game.ios`, which is the same file on
 //! HFS+ or APFS and nothing at all on ext4.
 //!
 //! So a path that does not exist is retried component by component against what

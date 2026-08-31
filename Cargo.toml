@@ -22,6 +22,7 @@ libc = "0.2"
 gimli = "0.34"
 getrandom = "0.3"
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip", "cookies"] }
+static_init = "1.0.4"
 
 [profile.fullnative]
 inherits = "release"

@@ -1,6 +1,7 @@
 //! What a crashing guest says on its way out.
 
 use microlift::core::srcloc::{GuestCodeMap, GuestCodeRange};
+use static_init::dynamic;
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
@@ -50,14 +51,15 @@ const RANGE_BYTES: usize = 16;
 
 /// The ceiling this run uses.
 fn map_budget() -> usize {
-    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *BUDGET.get_or_init(|| {
+    #[dynamic]
+    static BUDGET: usize = {
         let mib = std::env::var("ROSETTA3_MAP_BUDGET")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
             .unwrap_or(MAP_BUDGET_MIB);
         mib.saturating_mul(1024 * 1024) / RANGE_BYTES
-    })
+    };
+    *BUDGET
 }
 
 /// Ranges kept so far, against [`map_budget`].

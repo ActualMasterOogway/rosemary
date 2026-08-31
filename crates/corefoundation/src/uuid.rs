@@ -1,10 +1,3 @@
-//! `CFUUID`.
-//!
-//! A UUID here is sixteen bytes and the two things a caller does with them:
-//! generate a fresh one, and format it. Version 4 - random with the variant bits
-//! set - because that is what Apple's `CFUUIDCreate` produces and what a program
-//! storing one as an install identifier expects to look at.
-
 use objc::class::Class;
 use objc::object::Id;
 
@@ -57,15 +50,6 @@ pub unsafe fn bytes_of(uuid: CFTypeRef) -> Option<Bytes> {
 }
 
 /// Sixteen random bytes with version 4 and the RFC 4122 variant set.
-///
-/// Through `getrandom` rather than `arc4random_buf`: the latter is Darwin's and
-/// the `libc` crate does not export it on Linux, where musl and glibc disagree
-/// about whether it is there at all. `getrandom` asks each host for the one
-/// source it actually has.
-///
-/// A failure is refused rather than filled in. There is no weaker UUID to fall
-/// back to: a caller stores this as a device or install identifier, and bytes
-/// that only look random would collide silently and for the life of the install.
 pub fn generate() -> Bytes {
     let mut bytes = [0u8; 16];
     if let Err(e) = getrandom::fill(&mut bytes) {
@@ -76,7 +60,7 @@ pub fn generate() -> Bytes {
     bytes
 }
 
-/// The canonical spelling: uppercase hexadecimal in 8-4-4-4-12 groups.
+/// Uppercase hexadecimal in 8-4-4-4-12 groups.
 pub fn format(bytes: &Bytes) -> String {
     let hex = |range: std::ops::Range<usize>| {
         bytes[range]
@@ -94,9 +78,6 @@ pub fn format(bytes: &Bytes) -> String {
     )
 }
 
-/// The one object for a given set of bytes, which is what
-/// `CFUUIDGetConstantUUIDWithBytes` promises: a `Get`, so the caller never
-/// releases it, and the same pointer for the same bytes every time.
 pub fn constant(bytes: Bytes) -> CFTypeRef {
     static CONSTANTS: std::sync::Mutex<Vec<(Bytes, usize)>> = std::sync::Mutex::new(Vec::new());
     let mut constants = CONSTANTS.lock().unwrap_or_else(|e| e.into_inner());

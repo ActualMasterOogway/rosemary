@@ -11,9 +11,9 @@
 //! nothing here is consulted.
 
 use std::ffi::{CStr, c_void};
-use std::sync::OnceLock;
 
 use objc::class::Class;
+use static_init::dynamic;
 
 use crate::base::CFTypeRef;
 
@@ -29,8 +29,9 @@ use crate::base::CFTypeRef;
 /// the same default. Its refusal *is* an error return, because
 /// `kAudioUnitErr_InvalidElement` is an answer its callers already check for.
 pub fn forwarding() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("ROSETTA3_NO_FOREIGN").is_none())
+    #[dynamic]
+    static ON: bool = std::env::var_os("ROSETTA3_NO_FOREIGN").is_none();
+    *ON
 }
 
 /// Whether `object` came from a CoreFoundation that is not this one.
