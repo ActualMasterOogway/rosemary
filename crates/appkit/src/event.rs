@@ -348,6 +348,11 @@ fn delegate_selector(name: &str) -> &'static str {
         window::DID_RESIGN_KEY => "windowDidResignKey:",
         window::DID_MINIATURIZE => "windowDidMiniaturize:",
         window::DID_DEMINIATURIZE => "windowDidDeminiaturize:",
+        window::WILL_ENTER_FULL_SCREEN => "windowWillEnterFullScreen:",
+        window::WILL_EXIT_FULL_SCREEN => "windowWillExitFullScreen:",
+        window::DID_ENTER_FULL_SCREEN => "windowDidEnterFullScreen:",
+        window::DID_EXIT_FULL_SCREEN => "windowDidExitFullScreen:",
+        window::DID_CHANGE_BACKING_PROPERTIES => "windowDidChangeBackingProperties:",
         other => objc::fail!("appkit::event: {other} has no delegate method in this table"),
     }
 }

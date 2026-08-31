@@ -50,12 +50,18 @@ pub fn bootstrap() {
 /// questions only this crate can answer - `corefoundation` is underneath it and
 /// has neither an `NSBundle` nor a `$HOME`.
 pub fn symbol(name: &str) -> Option<u64> {
-    paths::symbol(name).or_else(|| bundle::cf::symbol(name))
+    paths::symbol(name)
+        .or_else(|| bundle::cf::symbol(name))
+        .or_else(|| notification::cf::symbol(name))
 }
 
 /// Every name [`symbol`] answers.
 pub fn names() -> impl Iterator<Item = &'static str> {
-    paths::NAMES.iter().chain(bundle::cf::NAMES).copied()
+    paths::NAMES
+        .iter()
+        .chain(bundle::cf::NAMES)
+        .chain(notification::cf::NAMES)
+        .copied()
 }
 
 /// This user's home directory.
@@ -206,6 +212,7 @@ pub const CLASSES: &[&str] = &[
     "NSNotificationCenter",
     "NSAutoreleasePool",
     "NSBundle",
+    "NSURL",
     "NSDate",
     "NSFileManager",
     "NSLocale",
@@ -230,14 +237,70 @@ pub const CLASSES: &[&str] = &[
 /// each goes through a cell - see `corefoundation::base::global_cell`.
 pub fn data_symbols() -> Vec<(String, u64)> {
     let mut out = class_data();
-    for (symbol, text) in locale::KEYS {
+    for (symbol, text) in locale::KEYS
+        .iter()
+        .copied()
+        .chain(STRING_GLOBALS.iter().copied())
+    {
         out.push((
             symbol.to_string(),
             corefoundation::base::global_cell(symbol, notification::name_object(text)),
         ));
     }
+    for name in NOTIFICATION_NAMES {
+        let symbol = format!("_{name}");
+        let object = notification::name_object(name);
+        out.push((
+            symbol.clone(),
+            corefoundation::base::global_cell(&symbol, object),
+        ));
+    }
+    // `NSZeroPoint` and `NSZeroRect` are **structs** in Foundation's `__DATA`,
+    // not pointers to them: the guest loads the symbol's address and reads two
+    // or four doubles out of it. A one-word cell would leave the rest of the
+    // read off the end of the allocation.
+    out.push(("_NSZeroPoint".to_string(), zeroed::<geometry::NSPoint>()));
+    out.push(("_NSZeroRect".to_string(), zeroed::<geometry::NSRect>()));
     out
 }
+
+/// The address of a zeroed `T` that lives for the process.
+///
+/// Not interned: each of these names a distinct global, and a guest that writes
+/// through one - which nothing should, but the memory is writable either way -
+/// must not disturb the other.
+fn zeroed<T>() -> u64 {
+    Box::leak(vec![0u8; size_of::<T>()].into_boxed_slice()).as_ptr() as usize as u64
+}
+
+/// The `NSString *` globals whose value is a fixed name.
+///
+/// Each is a documented constant rather than something this runtime chooses, so
+/// a guest using one as a dictionary key gets the key Apple's Foundation would.
+pub const STRING_GLOBALS: &[(&str, &str)] = &[
+    ("_NSLocalizedDescriptionKey", "NSLocalizedDescription"),
+    ("_NSArgumentDomain", "NSArgumentDomain"),
+    // The cookie property keys, whose values are the bare words a `Set-Cookie`
+    // attribute is spelled with.
+    ("_NSHTTPCookieDomain", "Domain"),
+    ("_NSHTTPCookieExpires", "Expires"),
+    ("_NSHTTPCookieName", "Name"),
+    ("_NSHTTPCookiePath", "Path"),
+    ("_NSHTTPCookieSecure", "Secure"),
+    ("_NSHTTPCookieValue", "Value"),
+    ("_NSHTTPCookieVersion", "Version"),
+    (
+        "_NSURLVolumeAvailableCapacityForImportantUsageKey",
+        "NSURLVolumeAvailableCapacityForImportantUsageKey",
+    ),
+];
+
+/// The Foundation notification names a program compares against.
+///
+/// Published whether or not anything posts them, for the reason AppKit's are: an
+/// unresolved data import binds to zero and the guest's next instruction
+/// dereferences it.
+pub const NOTIFICATION_NAMES: &[&str] = &["NSProcessInfoThermalStateDidChangeNotification"];
 
 #[cfg(test)]
 mod tests {

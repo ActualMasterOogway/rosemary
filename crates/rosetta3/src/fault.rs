@@ -251,9 +251,10 @@ static UNBOUND: Mutex<Vec<Unbound>> = Mutex::new(Vec::new());
 /// slot, so calling one lands at address zero with the symbol nowhere in the
 /// register state: `rip` is zero and the stub - the only thing that identifies
 /// the symbol - was jumped through rather than called, so it is not on the
-/// stack either. All that survives is the return address the *call* pushed, and
-/// the call is five bytes of `call rel32` immediately before it. That is enough
-/// to recover the stub, and this table turns the stub back into a name.
+/// stack either. All that survives is where the call came from - the link
+/// register on AAPCS64, the word the call pushed on x86-64 - and the call
+/// instruction immediately before it names its own target. That is enough to
+/// recover the stub, and this table turns the stub back into a name.
 pub fn note_unbound(entries: &[(&str, &machish::report::MissingSymbol)]) {
     let mut unbound = UNBOUND.lock().unwrap_or_else(|e| e.into_inner());
     unbound.clear();
@@ -467,25 +468,38 @@ fn say_caller(out: &mut Buffer, context: *mut libc::c_void) {
 /// else (an indirect call, a tail jump) simply does not match a stub and says
 /// nothing, which is the same as the report said before.
 fn say_unbound_call(out: &mut Buffer, context: *mut libc::c_void) {
-    let Some((_, sp, _)) = host_frame(context) else {
+    let Some((_, sp, lr)) = host_frame(context) else {
         return;
     };
-    if sp == 0 || sp % 8 != 0 {
-        return;
-    }
-    // SAFETY: `rip` is zero, so the faulting instruction was the call's target
-    // and the word at `sp` is the return address that call pushed. `sp` is the
-    // kernel's own value for this thread's stack pointer.
-    let ret = unsafe { std::ptr::read(sp as *const u64) };
+    // Where the call came from. AAPCS64 leaves it in the link register; x86-64
+    // pushed it, and a `pc` of zero means the push is the last thing that
+    // happened, so the word at `sp` is it.
+    let ret = match lr {
+        Some(lr) => lr,
+        None => {
+            if sp == 0 || sp % 8 != 0 {
+                return;
+            }
+            // SAFETY: `sp` is the kernel's own value for this thread's stack
+            // pointer, and the word at it is the return address the call pushed.
+            unsafe { std::ptr::read(sp as *const u64) }
+        }
+    };
+    // The address itself, always. A jump to zero from a host library or from
+    // this runtime names no import, and the return address is then the only
+    // thing that says where to look.
+    out.str("\n  called from ");
+    out.hex(ret);
+    say_image(out, ret);
+
     // Only inside a guest image, which is both what makes the read below safe -
-    // the loader mapped it - and what makes a `call rel32` a plausible reading.
+    // the loader mapped it - and what makes the call a plausible reading.
     if !in_image(ret) || ret < 4 {
         return;
     }
-    // SAFETY: `ret - 4 .. ret` is inside a mapped, readable guest image, just
-    // checked.
-    let displacement = unsafe { std::ptr::read_unaligned((ret - 4) as *const i32) };
-    let stub = ret.wrapping_add(displacement as i64 as u64);
+    let Some(stub) = call_target(ret) else {
+        return;
+    };
 
     let Ok(unbound) = UNBOUND.try_lock() else {
         return;
@@ -498,6 +512,33 @@ fn say_unbound_call(out: &mut Buffer, context: *mut libc::c_void) {
     out.str(", an import nothing satisfied - its stub ");
     out.hex(stub);
     out.str(" jumps through a slot left zero");
+}
+
+/// The address the call just before `ret` was made to.
+///
+/// `ret` is inside a mapped guest image, so the instruction ahead of it is
+/// readable. The encoding is the host's own, because a native image is host code
+/// and an emulated one reaches its imports through a translation rather than
+/// through this path.
+#[cfg(target_arch = "aarch64")]
+fn call_target(ret: u64) -> Option<u64> {
+    // SAFETY: `ret - 4 .. ret` is inside a mapped, readable guest image, and an
+    // instruction is four aligned bytes.
+    let instruction = unsafe { std::ptr::read_unaligned((ret - 4) as *const u32) };
+    // `bl imm26`, whose displacement is in words and signed.
+    if instruction & 0xfc00_0000 != 0x9400_0000 {
+        return None;
+    }
+    let words = ((instruction << 6) as i32 >> 6) as i64;
+    Some((ret - 4).wrapping_add((words * 4) as u64))
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn call_target(ret: u64) -> Option<u64> {
+    // SAFETY: `ret - 4 .. ret` is inside a mapped, readable guest image, just
+    // checked by the caller.
+    let displacement = unsafe { std::ptr::read_unaligned((ret - 4) as *const i32) };
+    Some(ret.wrapping_add(displacement as i64 as u64))
 }
 
 /// Whether `addr` is inside an image the loader mapped.

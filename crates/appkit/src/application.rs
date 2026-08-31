@@ -22,6 +22,9 @@ pub const DID_FINISH_LAUNCHING: &str = "NSApplicationDidFinishLaunchingNotificat
 pub const WILL_TERMINATE: &str = "NSApplicationWillTerminateNotification";
 pub const DID_BECOME_ACTIVE: &str = "NSApplicationDidBecomeActiveNotification";
 pub const WILL_RESIGN_ACTIVE: &str = "NSApplicationWillResignActiveNotification";
+/// Posted when a display is added, removed or resized.
+pub const DID_CHANGE_SCREEN_PARAMETERS: &str =
+    "NSApplicationDidChangeScreenParametersNotification";
 
 static SHARED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 

@@ -24,7 +24,7 @@ cranelift-frontend = {git = "https://github.com/microlift/wasmtime", branch = "m
 cranelift-native = { git = "https://github.com/microlift/wasmtime", branch = "microlift_experimental", version = "0.136.0-dev" }
 
 static_init = "1.0.4"
-mimalloc = { version = "0.1.52", features = ["override"] }
+mimalloc = "0.1.52"
 
 [dev-dependencies]
 libc.workspace = true

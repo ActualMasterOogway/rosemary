@@ -55,7 +55,7 @@ static HIERARCHY: &[(&str, Option<&str>, usize)] = &[
     ),
     ("NSPasteboard", None, 0),
     ("NSWorkspace", None, 0),
-    ("NSAlert", None, 0),
+    ("NSAlert", None, crate::alert::INSTANCE_SIZE),
     ("NSNib", None, 0),
     (
         "NSTrackingArea",

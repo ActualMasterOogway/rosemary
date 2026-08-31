@@ -1,3 +1,4 @@
+pub mod alert;
 pub mod application;
 pub mod classes;
 pub mod color;
@@ -24,6 +25,7 @@ pub fn bootstrap() {
     ONCE.call_once(|| {
         foundation::bootstrap();
         classes::install();
+        alert::install();
         application::install();
         color::install();
         cursor::install();
@@ -71,6 +73,10 @@ pub fn data_symbols() -> Vec<(String, u64)> {
             corefoundation::base::global_cell(&symbol, object),
         ));
     }
+    out.push((
+        "_NSAppKitVersionNumber".to_string(),
+        corefoundation::base::global_cell("_NSAppKitVersionNumber", APPKIT_VERSION.to_bits()),
+    ));
     for (symbol, text) in STRING_GLOBALS {
         let object = foundation::notification::name_object(text);
         out.push((
@@ -103,6 +109,14 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
     window::DID_RESIGN_KEY,
     window::DID_MINIATURIZE,
     window::DID_DEMINIATURIZE,
+    window::WILL_ENTER_FULL_SCREEN,
+    window::WILL_EXIT_FULL_SCREEN,
+    window::DID_ENTER_FULL_SCREEN,
+    window::DID_EXIT_FULL_SCREEN,
+    window::DID_CHANGE_BACKING_PROPERTIES,
+    application::DID_CHANGE_SCREEN_PARAMETERS,
+    view::FRAME_DID_CHANGE,
+    view::BOUNDS_DID_CHANGE,
 ];
 
 /// The other AppKit string globals a program reads.
@@ -115,7 +129,23 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_NSDeviceRGBColorSpace", "NSDeviceRGBColorSpace"),
     ("_NSDeviceResolution", "NSDeviceResolution"),
     ("_NSForegroundColorAttributeName", "NSColor"),
+    ("_NSAppearanceNameAqua", "NSAppearanceNameAqua"),
+    ("_NSDeviceSize", "NSDeviceSize"),
+    ("_NSModalPanelRunLoopMode", "NSModalPanelRunLoopMode"),
+    // The pasteboard's plain-text type, under both its spellings: the modern one
+    // is a uniform type identifier and the deprecated one is not, and a program
+    // that writes with one and reads with the other has to name the same type.
+    ("_NSPasteboardTypeString", "public.utf8-plain-text"),
+    ("_NSStringPboardType", "public.utf8-plain-text"),
 ];
+
+/// `NSAppKitVersionNumber`, which is a `double` variable rather than a pointer.
+///
+/// 2022 is Big Sur's, chosen for the reason `kCFCoreFoundationVersionNumber` is
+/// 1600: it is the floor every version test in a program of this vintage asks
+/// about, and claiming a later one would have a guest take a path against an
+/// AppKit this tree does not implement.
+const APPKIT_VERSION: f64 = 2022.0;
 
 #[cfg(test)]
 mod tests {

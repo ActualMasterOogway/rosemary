@@ -682,6 +682,119 @@ pub unsafe extern "C" fn CFDataGetBytePtr(data: CFTypeRef) -> *const u8 {
     unsafe { collections::data(data) }.map_or(std::ptr::null(), |d| d.as_ptr())
 }
 
+//
+
+pub unsafe extern "C" fn CFURLGetTypeID() -> CFTypeID {
+    crate::base::type_id_of(crate::url::class())
+}
+
+/// `kCFURLPOSIXPathStyle`, the only one a path in this tree is written in.
+const POSIX_PATH_STYLE: CFIndex = 0;
+
+pub unsafe extern "C" fn CFURLCreateWithFileSystemPath(
+    _allocator: CFAllocatorRef,
+    path: CFTypeRef,
+    style: CFIndex,
+    directory: Boolean,
+) -> CFTypeRef {
+    if style != POSIX_PATH_STYLE {
+        // HFS and Windows path styles describe a separator and a volume this
+        // runtime has no notion of, so a path in one read as POSIX would name a
+        // different file rather than fail.
+        objc::fail!("CFURLCreateWithFileSystemPath: path style {style} is not POSIX");
+    }
+    // SAFETY: the caller's obligation - a `CFString` or null.
+    let Some(path) = (unsafe { string::as_string(path) }) else {
+        return std::ptr::null();
+    };
+    let bytes = path.utf8();
+    let Ok(path) = std::str::from_utf8(&bytes) else {
+        return std::ptr::null();
+    };
+    crate::url::new_file_url(path, directory != 0)
+}
+
+/// `CFURLGetFileSystemRepresentation`, which fills `buffer` with a
+/// NUL-terminated path and says whether it fit.
+///
+/// `resolve` is ignored: every URL here is absolute already, so there is no base
+/// to resolve against and the two answers are the same one.
+pub unsafe extern "C" fn CFURLGetFileSystemRepresentation(
+    url: CFTypeRef,
+    _resolve: Boolean,
+    buffer: *mut u8,
+    length: CFIndex,
+) -> Boolean {
+    // SAFETY: the caller's obligation - a `CFURL` or null.
+    let Some(url) = (unsafe { crate::url::as_url(url) }) else {
+        return 0;
+    };
+    if buffer.is_null() || length <= 0 {
+        return 0;
+    }
+    let path = url.path.as_bytes();
+    // The NUL is part of what has to fit: a caller passes `PATH_MAX` and then
+    // reads the buffer as a C string.
+    if path.len() >= length as usize {
+        return 0;
+    }
+    // SAFETY: `buffer` holds `length` bytes by the caller's contract, and the
+    // check above leaves room for the path and its terminator.
+    unsafe {
+        std::ptr::copy_nonoverlapping(path.as_ptr(), buffer, path.len());
+        *buffer.add(path.len()) = 0;
+    }
+    1
+}
+
+//
+
+pub unsafe extern "C" fn CFUUIDGetTypeID() -> CFTypeID {
+    crate::base::type_id_of(crate::uuid::class())
+}
+
+pub unsafe extern "C" fn CFUUIDCreate(_allocator: CFAllocatorRef) -> CFTypeRef {
+    crate::uuid::new(crate::uuid::generate())
+}
+
+/// `CFStringRef CFUUIDCreateString(CFAllocatorRef, CFUUIDRef)`
+pub unsafe extern "C" fn CFUUIDCreateString(
+    _allocator: CFAllocatorRef,
+    uuid: CFTypeRef,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation - a `CFUUID` or null.
+    let Some(bytes) = (unsafe { crate::uuid::bytes_of(uuid) }) else {
+        return std::ptr::null();
+    };
+    string::from_bytes(crate::uuid::format(&bytes).as_bytes(), false)
+}
+
+/// `CFUUIDGetConstantUUIDWithBytes`, whose sixteen bytes are sixteen arguments.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn CFUUIDGetConstantUUIDWithBytes(
+    _allocator: CFAllocatorRef,
+    b0: u8,
+    b1: u8,
+    b2: u8,
+    b3: u8,
+    b4: u8,
+    b5: u8,
+    b6: u8,
+    b7: u8,
+    b8: u8,
+    b9: u8,
+    b10: u8,
+    b11: u8,
+    b12: u8,
+    b13: u8,
+    b14: u8,
+    b15: u8,
+) -> CFTypeRef {
+    crate::uuid::constant([
+        b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15,
+    ])
+}
+
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -47,6 +47,33 @@ unsafe impl Send for Observer {}
 
 static OBSERVERS: std::sync::Mutex<Vec<Observer>> = std::sync::Mutex::new(Vec::new());
 
+/// A `CFNotificationCallback`.
+pub type Callback =
+    unsafe extern "C" fn(Id, *const c_void, Id, *const c_void, Id);
+
+/// One `CFNotificationCenterAddObserver`.
+///
+/// The CoreFoundation spelling of an observer is a C callback and an opaque
+/// pointer rather than a receiver and a selector, so it cannot go in
+/// [`OBSERVERS`]. It is still the same event: [`post`] walks both tables, which
+/// is what lets a guest observe an AppKit notification through either vocabulary.
+struct CallbackObserver {
+    center: Id,
+    observer: *const c_void,
+    callback: Callback,
+    /// `None` matches any name.
+    name: Option<String>,
+    /// Null matches any sender.
+    object: *const c_void,
+}
+
+// SAFETY: as `Observer`'s - the pointers are only used on the posting thread,
+// and the mutex serializes the table.
+unsafe impl Send for CallbackObserver {}
+
+static CALLBACK_OBSERVERS: std::sync::Mutex<Vec<CallbackObserver>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// The one center, which `+defaultCenter` must return every time.
 static DEFAULT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
@@ -94,6 +121,29 @@ pub fn post(name: &str, object: Id, user_info: Id) {
         // the contract of `-addObserver:selector:name:object:`.
         unsafe { send_notification(observer, selector, notification) };
     }
+    post_to_callbacks(cf::local_center(), name, object as *const c_void, user_info);
+}
+
+/// Call every CoreFoundation observer of `name` on `center`.
+///
+/// Copied out under the lock for the reason the selector observers are: a
+/// callback may add or remove one.
+fn post_to_callbacks(center: Id, name: &str, object: *const c_void, user_info: Id) {
+    let name_object = crate::string::from_str(name);
+    let targets: Vec<(Callback, *const c_void)> = CALLBACK_OBSERVERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|o| o.center == center)
+        .filter(|o| o.name.as_deref().is_none_or(|n| n == name))
+        .filter(|o| o.object.is_null() || o.object == object)
+        .map(|o| (o.callback, o.observer))
+        .collect();
+    for (callback, observer) in targets {
+        // SAFETY: the signature `CFNotificationCenterAddObserver` declares.
+        unsafe { callback(center, observer, name_object, object, user_info) };
+    }
+    objc::arc::release(name_object);
 }
 
 /// # Safety
@@ -145,14 +195,18 @@ unsafe extern "C" fn notification_with_name(class: Id, _sel: Sel, name: Id, send
 }
 
 unsafe extern "C" fn default_center(class: Id, _sel: Sel) -> Id {
+    // SAFETY: `class` is `NSNotificationCenter`, which this crate registered.
+    match unsafe { objc::class::from_ptr(class as *const Class) } {
+        Some(class) => center_of(class),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// The one center, which `+defaultCenter` and `CFNotificationCenterGetLocalCenter`
+/// both have to answer with.
+fn center_of(class: &'static Class) -> Id {
     *DEFAULT.get_or_init(|| {
-        // SAFETY: `class` is `NSNotificationCenter`, which this crate registered.
-        let center = unsafe {
-            objc::object::create_instance(
-                objc::class::from_ptr(class as *const Class).expect("a class"),
-                0,
-            )
-        };
+        let center = objc::object::create_instance(class, 0);
         // Retained forever: a singleton a guest can release is one it can make
         // dangle by releasing what it never owned.
         objc::arc::retain(center);
@@ -267,6 +321,129 @@ pub fn name_object(text: &'static str) -> u64 {
     let addr = object as usize as u64;
     names.push((text, addr));
     addr
+}
+
+/// The CoreFoundation spellings, which name the same centers and the same
+/// observers as the class above.
+///
+/// A center is an object rather than an opaque handle so that the local one can
+/// simply *be* `+[NSNotificationCenter defaultCenter]` - which is what Apple's
+/// `CFNotificationCenterGetLocalCenter` is, and what makes a notification posted
+/// through one arrive at an observer registered through the other.
+pub mod cf {
+    // The C spellings are the interface; renaming them would only hide it.
+    #![allow(non_snake_case)]
+
+    use std::ffi::c_void;
+
+    use objc::object::Id;
+
+    use super::{CALLBACK_OBSERVERS, Callback, CallbackObserver};
+
+    /// `CFNotificationCenterGetLocalCenter`, which is this process's own.
+    pub fn local_center() -> Id {
+        super::default_center_object()
+    }
+
+    unsafe extern "C" fn CFNotificationCenterGetLocalCenter() -> Id {
+        local_center()
+    }
+
+    /// The center for notifications from *other* processes.
+    ///
+    /// A center of its own, and one nothing ever posts to: there is no
+    /// distributed notification daemon behind this runtime, so no other process
+    /// is talking to the guest. Distinct from the local center rather than
+    /// aliased onto it, because a guest's own local posts must not arrive at an
+    /// observer that asked to hear only what another process said.
+    unsafe extern "C" fn CFNotificationCenterGetDistributedCenter() -> Id {
+        static CENTER: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *CENTER.get_or_init(|| {
+            let class = corefoundation::base::abstract_class(c"CFNotificationCenter", None);
+            let center = objc::object::create_instance(class, 0);
+            // Retained forever, as every singleton here is.
+            objc::arc::retain(center);
+            center as usize
+        }) as Id
+    }
+
+    /// `CFNotificationCenterAddObserver(center, observer, callback, name,
+    /// object, suspensionBehavior)`
+    ///
+    /// The suspension behaviour is ignored: it says what a *distributed* center
+    /// should do with notifications that arrive while the process is suspended,
+    /// and nothing posts to the distributed center here.
+    unsafe extern "C" fn CFNotificationCenterAddObserver(
+        center: Id,
+        observer: *const c_void,
+        callback: Option<Callback>,
+        name: Id,
+        object: *const c_void,
+        _suspension: isize,
+    ) {
+        let Some(callback) = callback else {
+            return;
+        };
+        // SAFETY: null or a string.
+        let name = (!name.is_null()).then(|| unsafe { super::text_of(name) });
+        CALLBACK_OBSERVERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(CallbackObserver {
+                center,
+                observer,
+                callback,
+                name,
+                object,
+            });
+    }
+
+    unsafe extern "C" fn CFNotificationCenterRemoveEveryObserver(
+        center: Id,
+        observer: *const c_void,
+    ) {
+        CALLBACK_OBSERVERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|o| o.center != center || o.observer != observer);
+    }
+
+    /// One entry point, as an address.
+    macro_rules! at {
+        ($f:expr) => {
+            $f as *const () as usize as u64
+        };
+    }
+
+    pub fn symbol(name: &str) -> Option<u64> {
+        Some(match name {
+            "CFNotificationCenterGetLocalCenter" => at!(CFNotificationCenterGetLocalCenter),
+            "CFNotificationCenterGetDistributedCenter" => {
+                at!(CFNotificationCenterGetDistributedCenter)
+            }
+            "CFNotificationCenterAddObserver" => at!(CFNotificationCenterAddObserver),
+            "CFNotificationCenterRemoveEveryObserver" => {
+                at!(CFNotificationCenterRemoveEveryObserver)
+            }
+            _ => return None,
+        })
+    }
+
+    /// Every name [`symbol`] answers.
+    pub const NAMES: &[&str] = &[
+        "CFNotificationCenterGetLocalCenter",
+        "CFNotificationCenterGetDistributedCenter",
+        "CFNotificationCenterAddObserver",
+        "CFNotificationCenterRemoveEveryObserver",
+    ];
+}
+
+/// The default center, for a caller with no class object in hand.
+fn default_center_object() -> Id {
+    match objc::class::lookup(c"NSNotificationCenter") {
+        Some(class) => center_of(class),
+        None => std::ptr::null_mut(),
+    }
 }
 
 pub(crate) fn install() {

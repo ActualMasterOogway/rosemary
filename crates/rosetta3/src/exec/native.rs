@@ -88,6 +88,14 @@ unsafe impl Sync for Native {}
 impl Native {
     /// Load and link `path`, with `args` laid out for its entry point.
     pub fn load(path: &str, args: &[String]) -> Result<Self, VmError> {
+        // Before anything can hand the program a symbol. A trampoline is five
+        // bytes of x86-64 that turn a call back into an import for the lifter to
+        // intercept, and the native backend intercepts nothing: a `dlsym` result
+        // here has to be the host function itself. The program is this host's
+        // own architecture, so on aarch64 it would `blr` into x86-64 bytes and
+        // on x86-64 it would call a bridge with no run loop behind it.
+        crate::trampoline::disarm();
+
         let bytes = std::fs::read(path).map_err(|e| VmError::Load {
             path: path.to_string(),
             reason: e.to_string(),

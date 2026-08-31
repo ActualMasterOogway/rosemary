@@ -26,8 +26,100 @@ pub struct View {
     superview: Id,
     subviews: Id,
     tracking_areas: Id,
+    /// Retained, as AppKit's is: a layer outlives the call that set it.
+    layer: Id,
+    /// `-setAllowedTouchTypes:`, stored so `-allowedTouchTypes` reads back what
+    /// was set. Nothing in this tree delivers a touch event, so the mask only
+    /// ever says which ones the view *would* accept.
+    allowed_touch_types: usize,
     frame: NSRect,
     wants_best_resolution: usize,
+    /// `-setPostsFrameChangedNotifications:` and its bounds twin, as the two
+    /// low bits. A view posts nothing until it is asked to, which is AppKit's
+    /// default for a view built with `-initWithFrame:`.
+    posts: usize,
+}
+
+/// The bits of [`View::posts`].
+const POSTS_FRAME: usize = 1;
+const POSTS_BOUNDS: usize = 2;
+
+/// The notification a view posts when its frame changes.
+pub const FRAME_DID_CHANGE: &str = "NSViewFrameDidChangeNotification";
+/// ...and when its bounds do.
+pub const BOUNDS_DID_CHANGE: &str = "NSViewBoundsDidChangeNotification";
+
+/// Post the frame and bounds notifications a resized view owes its observers.
+///
+/// Both, because this tree's `-bounds` is the frame's size at the origin: a
+/// change to one *is* a change to the other, and a guest watching only the
+/// bounds - which is what `-setPostsBoundsChangedNotifications:` asks for -
+/// would otherwise never hear that the view resized.
+fn note_geometry_change(receiver: Id, before: NSRect) {
+    let view = view_of(receiver);
+    if view.frame == before {
+        return;
+    }
+    let posts = view.posts;
+    if posts & POSTS_FRAME != 0 {
+        foundation::notification::post(FRAME_DID_CHANGE, receiver, std::ptr::null_mut());
+    }
+    if posts & POSTS_BOUNDS != 0 && view.frame.size != before.size {
+        foundation::notification::post(BOUNDS_DID_CHANGE, receiver, std::ptr::null_mut());
+    }
+}
+
+unsafe extern "C" fn set_posts_frame_changed(receiver: Id, _sel: Sel, flag: u8) {
+    set_posts(receiver, POSTS_FRAME, flag);
+}
+
+unsafe extern "C" fn set_posts_bounds_changed(receiver: Id, _sel: Sel, flag: u8) {
+    set_posts(receiver, POSTS_BOUNDS, flag);
+}
+
+fn set_posts(receiver: Id, bit: usize, flag: u8) {
+    let view = view_of(receiver);
+    view.posts = match flag != 0 {
+        true => view.posts | bit,
+        false => view.posts & !bit,
+    };
+}
+
+unsafe extern "C" fn posts_frame_changed(receiver: Id, _sel: Sel) -> u8 {
+    u8::from(view_of(receiver).posts & POSTS_FRAME != 0)
+}
+
+unsafe extern "C" fn posts_bounds_changed(receiver: Id, _sel: Sel) -> u8 {
+    u8::from(view_of(receiver).posts & POSTS_BOUNDS != 0)
+}
+
+/// `-setLayer:`, which stores the layer and nothing more.
+///
+/// Nothing in this tree composites one: a guest that hands its view a
+/// `CAMetalLayer` draws through the layer's own drawables, which are Metal's
+/// business rather than the view's. What the view owes it is to give the same
+/// object back from `-layer`, because that is where the guest reaches for it on
+/// every frame.
+unsafe extern "C" fn set_layer(receiver: Id, _sel: Sel, layer: Id) {
+    let view = view_of(receiver);
+    if view.layer == layer {
+        return;
+    }
+    let previous = view.layer;
+    view.layer = objc::arc::retain(layer);
+    objc::arc::release(previous);
+}
+
+unsafe extern "C" fn layer(receiver: Id, _sel: Sel) -> Id {
+    view_of(receiver).layer
+}
+
+unsafe extern "C" fn set_allowed_touch_types(receiver: Id, _sel: Sel, mask: usize) {
+    view_of(receiver).allowed_touch_types = mask;
+}
+
+unsafe extern "C" fn allowed_touch_types(receiver: Id, _sel: Sel) -> usize {
+    view_of(receiver).allowed_touch_types
 }
 
 pub const INSTANCE_SIZE: usize = size_of::<View>();
@@ -104,15 +196,21 @@ unsafe extern "C" fn frame(receiver: Id, _sel: Sel) -> NSRect {
 }
 
 unsafe extern "C" fn set_frame(receiver: Id, _sel: Sel, frame: NSRect) {
+    let before = view_of(receiver).frame;
     view_of(receiver).frame = frame;
+    note_geometry_change(receiver, before);
 }
 
 unsafe extern "C" fn set_frame_size(receiver: Id, _sel: Sel, size: NSSize) {
+    let before = view_of(receiver).frame;
     view_of(receiver).frame.size = size;
+    note_geometry_change(receiver, before);
 }
 
 unsafe extern "C" fn set_frame_origin(receiver: Id, _sel: Sel, origin: NSPoint) {
+    let before = view_of(receiver).frame;
     view_of(receiver).frame.origin = origin;
+    note_geometry_change(receiver, before);
 }
 
 /// `-bounds`: the frame's size at the origin, which is what a view with no
@@ -125,7 +223,9 @@ unsafe extern "C" fn bounds(receiver: Id, _sel: Sel) -> NSRect {
 }
 
 unsafe extern "C" fn set_bounds(receiver: Id, _sel: Sel, bounds: NSRect) {
+    let before = view_of(receiver).frame;
     view_of(receiver).frame.size = bounds.size;
+    note_geometry_change(receiver, before);
 }
 
 /// `-visibleRect`: the part of the view not clipped away by an ancestor.
@@ -425,6 +525,16 @@ pub(crate) fn install() {
         "addTrackingArea:" => add_tracking_area, c"v24@0:8@16";
         "removeTrackingArea:" => remove_tracking_area, c"v24@0:8@16";
         "trackingAreas" => tracking_areas, c"@16@0:8";
+        "setPostsFrameChangedNotifications:" => set_posts_frame_changed, c"v20@0:8c16";
+        "setPostsBoundsChangedNotifications:" => set_posts_bounds_changed, c"v20@0:8c16";
+        "postsFrameChangedNotifications" => posts_frame_changed, c"c16@0:8";
+        "postsBoundsChangedNotifications" => posts_bounds_changed, c"c16@0:8";
+        "setLayer:" => set_layer, c"v24@0:8@16";
+        "layer" => layer, c"@16@0:8";
+        "setWantsLayer:" => ignored_flag, c"v20@0:8c16";
+        "wantsLayer" => yes, c"c16@0:8";
+        "setAllowedTouchTypes:" => set_allowed_touch_types, c"v24@0:8Q16";
+        "allowedTouchTypes" => allowed_touch_types, c"Q16@0:8";
     });
 }
 

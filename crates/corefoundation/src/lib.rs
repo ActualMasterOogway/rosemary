@@ -21,6 +21,8 @@ pub mod foreign;
 pub mod runloop;
 mod send;
 pub mod string;
+pub mod url;
+pub mod uuid;
 pub mod sysconfig;
 
 /// Install the classes this crate owns. Idempotent.
@@ -33,6 +35,8 @@ pub fn bootstrap() {
     collections::number_class();
     collections::boolean_class();
     collections::data_class();
+    url::class();
+    uuid::class();
 }
 
 /// One entry point, as an address.
@@ -98,6 +102,15 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFDataCreate" => at!(api::CFDataCreate),
         "CFDataGetLength" => at!(api::CFDataGetLength),
         "CFDataGetBytePtr" => at!(api::CFDataGetBytePtr),
+
+        "CFUUIDGetTypeID" => at!(api::CFUUIDGetTypeID),
+        "CFUUIDCreate" => at!(api::CFUUIDCreate),
+        "CFUUIDCreateString" => at!(api::CFUUIDCreateString),
+        "CFUUIDGetConstantUUIDWithBytes" => at!(api::CFUUIDGetConstantUUIDWithBytes),
+
+        "CFURLGetTypeID" => at!(api::CFURLGetTypeID),
+        "CFURLCreateWithFileSystemPath" => at!(api::CFURLCreateWithFileSystemPath),
+        "CFURLGetFileSystemRepresentation" => at!(api::CFURLGetFileSystemRepresentation),
 
         "CFRunLoopGetCurrent" => at!(api::CFRunLoopGetCurrent),
         "CFRunLoopGetMain" => at!(api::CFRunLoopGetMain),
@@ -174,6 +187,13 @@ pub const NAMES: &[&str] = &[
     "CFDataCreate",
     "CFDataGetLength",
     "CFDataGetBytePtr",
+    "CFUUIDGetTypeID",
+    "CFUUIDCreate",
+    "CFUUIDCreateString",
+    "CFUUIDGetConstantUUIDWithBytes",
+    "CFURLGetTypeID",
+    "CFURLCreateWithFileSystemPath",
+    "CFURLGetFileSystemRepresentation",
     "CFRunLoopGetCurrent",
     "CFRunLoopGetMain",
     "CFRunLoopRunInMode",
@@ -272,6 +292,9 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         // a guest that schedules with one and runs with the other has to be
         // talking about the same thing or nothing ever fires.
         ("_NSDefaultRunLoopMode", runloop::DEFAULT_MODE),
+        // ...and Foundation's spelling of the common-modes set, which is the
+        // same set for the same reason.
+        ("_NSRunLoopCommonModes", runloop::COMMON_MODES),
     ] {
         out.push((
             name.to_string(),

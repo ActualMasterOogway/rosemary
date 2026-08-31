@@ -46,6 +46,13 @@ pub const DID_BECOME_KEY: &str = "NSWindowDidBecomeKeyNotification";
 pub const DID_RESIGN_KEY: &str = "NSWindowDidResignKeyNotification";
 pub const DID_MINIATURIZE: &str = "NSWindowDidMiniaturizeNotification";
 pub const DID_DEMINIATURIZE: &str = "NSWindowDidDeminiaturizeNotification";
+pub const WILL_ENTER_FULL_SCREEN: &str = "NSWindowWillEnterFullScreenNotification";
+pub const WILL_EXIT_FULL_SCREEN: &str = "NSWindowWillExitFullScreenNotification";
+pub const DID_ENTER_FULL_SCREEN: &str = "NSWindowDidEnterFullScreenNotification";
+pub const DID_EXIT_FULL_SCREEN: &str = "NSWindowDidExitFullScreenNotification";
+/// Posted when the window moves to a screen of a different backing scale, which
+/// is what a guest recomputes its drawable size from.
+pub const DID_CHANGE_BACKING_PROPERTIES: &str = "NSWindowDidChangeBackingPropertiesNotification";
 
 /// `NSWindowStyleMask`.
 mod style {

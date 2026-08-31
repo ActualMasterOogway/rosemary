@@ -62,6 +62,37 @@ impl Layout {
         })
     }
 
+    /// The bundle *at* `root`, which is how `+bundleWithPath:` asks.
+    ///
+    /// The same shape [`Layout::enclosing`] recognises, entered from the other
+    /// end: a directory whose `Contents/Info.plist` is a file. The executable is
+    /// named by `CFBundleExecutable` rather than found by looking, because a
+    /// `.bundle` with a resource beside its binary in `MacOS` has no other way
+    /// to say which one it is.
+    pub fn at(root: &Path) -> Option<Layout> {
+        let absolute = root.canonicalize().ok();
+        let root = absolute.as_deref().unwrap_or(root);
+        let contents = root.join("Contents");
+        let info_path = contents.join("Info.plist");
+        if !info_path.is_file() {
+            return None;
+        }
+        let info = plist::parse(&std::fs::read(&info_path).ok()?).ok()?;
+        let executable = info
+            .get("CFBundleExecutable")
+            .and_then(|name| name.as_str())
+            .map(|name| contents.join("MacOS").join(name))
+            .unwrap_or_default();
+        Some(Layout {
+            root: root.to_path_buf(),
+            resources: contents.join("Resources"),
+            frameworks: contents.join("Frameworks"),
+            executable,
+            contents,
+            info,
+        })
+    }
+
     /// An `Info.plist` string, which is how every question below is asked.
     pub fn info_string(&self, key: &str) -> Option<&str> {
         self.info.get(key)?.as_str()
@@ -163,15 +194,16 @@ impl Layout {
 /// the class rather than in `corefoundation` - which is underneath this crate
 /// and has no bundle to answer with.
 ///
-/// Only the two a program in this tree reaches. `CFBundleCopyResourceURL` is
-/// here for what it does when the resource is *absent*, which is the answer a
-/// bundle usually has to give: A Hat in Time asks for a `RadioEffectUnit` its
-/// own `Resources` does not contain, and a null lets it skip the whole Carbon
-/// component path instead of being refused at the import.
+/// `CFBundleCopyResourceURL` is here for what it does when the resource is
+/// *absent*, which is the answer a bundle usually has to give: A Hat in Time
+/// asks for a `RadioEffectUnit` its own `Resources` does not contain, and a null
+/// lets it skip the whole Carbon component path instead of being refused at the
+/// import.
 pub mod cf {
     // The C spellings are the interface; renaming them would only hide it.
     #![allow(non_snake_case)]
 
+    use corefoundation::base::CFTypeRef;
     use objc::object::Id;
 
     /// `CFBundleRef CFBundleGetMainBundle(void)`
@@ -201,15 +233,106 @@ pub mod cf {
         let Some(path) = super::main().and_then(|b| b.resource(name, kind)) else {
             return std::ptr::null_mut();
         };
-        // There is no `CFURL` in this tree. Refused by name rather than answered
-        // with the path as a string: a caller passes what it gets here to
-        // `CFURLGetFSRef` or `CFURLGetFileSystemRepresentation`, and a string in
-        // that slot is a wrong type read as the right one.
-        objc::fail!(
-            "CFBundleCopyResourceURL: {} is in the bundle, and this runtime has no CFURL to \
-             return it as",
-            path.display()
-        );
+        file_url(&path, false)
+    }
+
+    /// `CFURLRef CFBundleCopyExecutableURL(CFBundleRef)`
+    unsafe extern "C" fn CFBundleCopyExecutableURL(_bundle: Id) -> Id {
+        match super::main() {
+            Some(bundle) => file_url(&bundle.executable, false),
+            None => std::ptr::null_mut(),
+        }
+    }
+
+    /// `CFURLRef CFBundleCopyResourcesDirectoryURL(CFBundleRef)`
+    ///
+    /// The directory rather than a file in it, so the trailing slash a caller
+    /// appends a name onto is there.
+    unsafe extern "C" fn CFBundleCopyResourcesDirectoryURL(_bundle: Id) -> Id {
+        match super::main() {
+            Some(bundle) => file_url(&bundle.resources, true),
+            None => std::ptr::null_mut(),
+        }
+    }
+
+    /// `CFURLRef CFBundleCopyPrivateFrameworksURL(CFBundleRef)`
+    ///
+    /// Answered whether or not the directory exists, which is Apple's behaviour:
+    /// the URL is where a private framework *would* be, and a caller that finds
+    /// nothing there is entitled to that answer rather than to a null.
+    unsafe extern "C" fn CFBundleCopyPrivateFrameworksURL(_bundle: Id) -> Id {
+        match super::main() {
+            Some(bundle) => file_url(&bundle.frameworks, true),
+            None => std::ptr::null_mut(),
+        }
+    }
+
+    /// `CFStringRef CFBundleGetIdentifier(CFBundleRef)`
+    ///
+    /// A `Get`, so the string is not the caller's to release - which is why it is
+    /// interned rather than made fresh each time.
+    unsafe extern "C" fn CFBundleGetIdentifier(_bundle: Id) -> Id {
+        let Some(identifier) = super::main().and_then(|b| b.identifier()) else {
+            return std::ptr::null_mut();
+        };
+        crate::notification::name_object(identifier) as Id
+    }
+
+    /// `UInt32 CFBundleGetVersionNumber(CFBundleRef)`
+    ///
+    /// Apple's is a packed BCD `vvvv.rr.ss` word. Only the major version is
+    /// filled in: a caller compares the whole word against a constant of its
+    /// own, and a fabricated revision would make that comparison say something
+    /// the `Info.plist` never did.
+    unsafe extern "C" fn CFBundleGetVersionNumber(_bundle: Id) -> u32 {
+        let Some(version) = super::main().and_then(|b| b.version()) else {
+            return 0;
+        };
+        let Some(major) = version
+            .split('.')
+            .next()
+            .and_then(|major| major.parse::<u32>().ok())
+        else {
+            return 0;
+        };
+        // The major version occupies the top four BCD digits.
+        let mut packed = 0u32;
+        for (shift, digit) in format!("{major:0>4}").bytes().rev().enumerate().take(4) {
+            packed |= u32::from(digit - b'0') << (16 + 4 * shift);
+        }
+        packed
+    }
+
+    /// `CFBundleRef CFBundleCreate(CFAllocatorRef, CFURLRef bundleURL)`
+    ///
+    /// Only the main bundle, and only when the URL names it. A guest asking about
+    /// its own `.app` by URL - which is what a program that already called
+    /// `CFBundleCopyExecutableURL` does - gets the bundle it means; anything else
+    /// is a bundle this runtime has not loaded, and a null says so where an
+    /// invented one would answer questions about the wrong directory.
+    unsafe extern "C" fn CFBundleCreate(_allocator: *const std::ffi::c_void, url: Id) -> Id {
+        // SAFETY: the caller's obligation - a `CFURL` or null.
+        let Some(url) = (unsafe { corefoundation::url::as_url(url as CFTypeRef) }) else {
+            return std::ptr::null_mut();
+        };
+        let Some(bundle) = super::main() else {
+            return std::ptr::null_mut();
+        };
+        if std::path::Path::new(&url.path) != bundle.root {
+            return std::ptr::null_mut();
+        }
+        // A `Create`, so the caller owns a reference to the singleton.
+        let object = super::class::main_object();
+        objc::arc::retain(object);
+        object
+    }
+
+    /// A path as a `CFURL` the caller owns.
+    fn file_url(path: &std::path::Path, directory: bool) -> Id {
+        match path.to_str() {
+            Some(path) => corefoundation::url::new_file_url(path, directory) as Id,
+            None => std::ptr::null_mut(),
+        }
     }
 
     /// One entry point, as an address.
@@ -223,12 +346,27 @@ pub mod cf {
         Some(match name {
             "CFBundleGetMainBundle" => at!(CFBundleGetMainBundle),
             "CFBundleCopyResourceURL" => at!(CFBundleCopyResourceURL),
+            "CFBundleCopyExecutableURL" => at!(CFBundleCopyExecutableURL),
+            "CFBundleCopyResourcesDirectoryURL" => at!(CFBundleCopyResourcesDirectoryURL),
+            "CFBundleCopyPrivateFrameworksURL" => at!(CFBundleCopyPrivateFrameworksURL),
+            "CFBundleGetIdentifier" => at!(CFBundleGetIdentifier),
+            "CFBundleGetVersionNumber" => at!(CFBundleGetVersionNumber),
+            "CFBundleCreate" => at!(CFBundleCreate),
             _ => return None,
         })
     }
 
     /// Every name [`symbol`] answers.
-    pub const NAMES: &[&str] = &["CFBundleGetMainBundle", "CFBundleCopyResourceURL"];
+    pub const NAMES: &[&str] = &[
+        "CFBundleGetMainBundle",
+        "CFBundleCopyResourceURL",
+        "CFBundleCopyExecutableURL",
+        "CFBundleCopyResourcesDirectoryURL",
+        "CFBundleCopyPrivateFrameworksURL",
+        "CFBundleGetIdentifier",
+        "CFBundleGetVersionNumber",
+        "CFBundleCreate",
+    ];
 }
 
 /// The bundle the program is, once something has said which.
@@ -351,6 +489,16 @@ pub(crate) mod class {
 
     use crate::define::{class_methods, methods};
 
+    /// An `NSBundle`: the `isa`, and the layout it answers for.
+    ///
+    /// The main bundle's is null rather than a copy of `super::main()`, so that
+    /// a bundle set up after the object was made still answers through it.
+    #[repr(C)]
+    struct Body {
+        isa: *const objc::class::Class,
+        layout: *const super::Layout,
+    }
+
     /// The `NSBundle` singleton, created on the first `+mainBundle`.
     static MAIN_BUNDLE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
@@ -365,15 +513,58 @@ pub(crate) mod class {
 
     /// The one main-bundle object, which `+mainBundle` and
     /// `CFBundleGetMainBundle` both have to answer with.
-    ///
-    /// A bundle object with no state: everything it answers comes from
-    /// `super::main()`, so there is nothing to carry.
     fn of(class: &'static objc::class::Class) -> Id {
         *MAIN_BUNDLE.get_or_init(|| {
             let object = objc::object::create_instance(class, 0);
             objc::arc::retain(object);
             object as usize
         }) as Id
+    }
+
+    /// `+bundleWithPath:`, autoreleased.
+    unsafe extern "C" fn bundle_with_path(class: Id, _sel: Sel, path: Id) -> Id {
+        // SAFETY: an `NSString`, or nil.
+        let path = unsafe { crate::string::bytes(path) };
+        let Ok(path) = std::str::from_utf8(&path) else {
+            return std::ptr::null_mut();
+        };
+        let path = std::path::Path::new(path);
+        if super::main().is_some_and(|main| main.root == path) {
+            return main_object();
+        }
+        let Some(layout) = super::Layout::at(path) else {
+            return std::ptr::null_mut();
+        };
+        // SAFETY: `class` is `NSBundle`, which this crate registered.
+        let Some(class) = (unsafe { objc::class::from_ptr(class as *const objc::class::Class) })
+        else {
+            return std::ptr::null_mut();
+        };
+        let object = objc::object::create_instance(class, 0);
+        // Leaked rather than owned by the object: a bundle is interned by Apple's
+        // Foundation too, and a `-dealloc` freeing it would leave every string
+        // this runtime handed out from it pointing at nothing.
+        // SAFETY: a live instance whose second word is ours to fill in.
+        unsafe { (*(object as *mut Body)).layout = Box::leak(Box::new(layout)) };
+        objc::arc::autorelease(object)
+    }
+
+    /// The layout a bundle object answers for: its own, or the main one.
+    ///
+    /// # Safety
+    ///
+    /// `receiver` must be an `NSBundle` this module made.
+    unsafe fn layout_of(receiver: Id) -> Option<&'static super::Layout> {
+        if receiver.is_null() {
+            return None;
+        }
+        // SAFETY: the caller's obligation - every `NSBundle` is a `Body`.
+        let layout = unsafe { (*(receiver as *const Body)).layout };
+        match layout.is_null() {
+            // SAFETY: the pointer was leaked by `bundle_with_path`.
+            false => Some(unsafe { &*layout }),
+            true => super::main(),
+        }
     }
 
     /// The main bundle, for a caller that has no class object in hand.
@@ -385,8 +576,13 @@ pub(crate) mod class {
     }
 
     /// An `Info.plist` string as an autoreleased `NSString`, or nil.
-    fn info(key: &str) -> Id {
-        match super::main().and_then(|b| b.info_string(key)) {
+    ///
+    /// # Safety
+    ///
+    /// As [`layout_of`].
+    unsafe fn info(receiver: Id, key: &str) -> Id {
+        // SAFETY: the caller's obligation.
+        match unsafe { layout_of(receiver) }.and_then(|b| b.info_string(key)) {
             Some(text) => autoreleased(text),
             None => std::ptr::null_mut(),
         }
@@ -407,42 +603,45 @@ pub(crate) mod class {
         }
     }
 
-    unsafe extern "C" fn bundle_path(_receiver: Id, _sel: Sel) -> Id {
-        path(super::main().map(|b| b.root.clone()))
+    unsafe extern "C" fn bundle_path(receiver: Id, _sel: Sel) -> Id {
+        // SAFETY: the receiver is an `NSBundle`; so for each accessor below.
+        path(unsafe { layout_of(receiver) }.map(|b| b.root.clone()))
     }
 
-    unsafe extern "C" fn resource_path(_receiver: Id, _sel: Sel) -> Id {
-        path(super::main().map(|b| b.resources.clone()))
+    unsafe extern "C" fn resource_path(receiver: Id, _sel: Sel) -> Id {
+        path(unsafe { layout_of(receiver) }.map(|b| b.resources.clone()))
     }
 
-    unsafe extern "C" fn executable_path(_receiver: Id, _sel: Sel) -> Id {
-        path(super::main().map(|b| b.executable.clone()))
+    unsafe extern "C" fn executable_path(receiver: Id, _sel: Sel) -> Id {
+        path(unsafe { layout_of(receiver) }.map(|b| b.executable.clone()))
     }
 
-    unsafe extern "C" fn private_frameworks_path(_receiver: Id, _sel: Sel) -> Id {
-        path(super::main().map(|b| b.frameworks.clone()))
+    unsafe extern "C" fn private_frameworks_path(receiver: Id, _sel: Sel) -> Id {
+        path(unsafe { layout_of(receiver) }.map(|b| b.frameworks.clone()))
     }
 
-    unsafe extern "C" fn bundle_identifier(_receiver: Id, _sel: Sel) -> Id {
-        info("CFBundleIdentifier")
+    unsafe extern "C" fn bundle_identifier(receiver: Id, _sel: Sel) -> Id {
+        unsafe { info(receiver, "CFBundleIdentifier") }
     }
 
-    unsafe extern "C" fn object_for_info_key(_receiver: Id, _sel: Sel, key: Id) -> Id {
+    unsafe extern "C" fn object_for_info_key(receiver: Id, _sel: Sel, key: Id) -> Id {
         // SAFETY: the key is an `NSString`.
         let key = unsafe { crate::string::bytes(key) };
         match std::str::from_utf8(&key) {
-            Ok(key) => info(key),
+            // SAFETY: the receiver is an `NSBundle`.
+            Ok(key) => unsafe { info(receiver, key) },
             Err(_) => std::ptr::null_mut(),
         }
     }
 
-    unsafe extern "C" fn path_for_resource(_receiver: Id, _sel: Sel, name: Id, kind: Id) -> Id {
+    unsafe extern "C" fn path_for_resource(receiver: Id, _sel: Sel, name: Id, kind: Id) -> Id {
         // SAFETY: both are `NSString`s or nil.
         let (name, kind) = unsafe { (crate::string::bytes(name), crate::string::bytes(kind)) };
         let (Ok(name), Ok(kind)) = (std::str::from_utf8(&name), std::str::from_utf8(&kind)) else {
             return std::ptr::null_mut();
         };
-        path(super::main().and_then(|b| b.resource(name, kind)))
+        // SAFETY: the receiver is an `NSBundle`.
+        path(unsafe { layout_of(receiver) }.and_then(|b| b.resource(name, kind)))
     }
 
     unsafe extern "C" fn path_for_resource_in_directory(
@@ -467,8 +666,9 @@ pub(crate) mod class {
     /// plist that never had one, so a *partial* conversion is worse than none.
     /// What makes it answerable now is that the conversion is total - every
     /// plist type is either built or refused by name.
-    unsafe extern "C" fn info_dictionary(_receiver: Id, _sel: Sel) -> Id {
-        match super::main() {
+    unsafe extern "C" fn info_dictionary(receiver: Id, _sel: Sel) -> Id {
+        // SAFETY: the receiver is an `NSBundle`.
+        match unsafe { layout_of(receiver) } {
             Some(layout) => crate::objectify::object(&layout.info, "-[NSBundle infoDictionary]"),
             None => std::ptr::null_mut(),
         }
@@ -480,7 +680,7 @@ pub(crate) mod class {
 
     pub(crate) fn install() {
         let class =
-            corefoundation::base::register(c"NSBundle", None, std::mem::size_of::<usize>(), false);
+            corefoundation::base::register(c"NSBundle", None, std::mem::size_of::<Body>(), false);
         methods!(class, {
             "bundlePath" => bundle_path, c"@16@0:8";
             "resourcePath" => resource_path, c"@16@0:8";
@@ -495,7 +695,8 @@ pub(crate) mod class {
             "executableName" => executable_name, c"*16@0:8"
         });
         class_methods!(class, {
-            "mainBundle" => main_bundle, c"@16@0:8"
+            "mainBundle" => main_bundle, c"@16@0:8";
+            "bundleWithPath:" => bundle_with_path, c"@24@0:8@16"
         });
     }
 }
