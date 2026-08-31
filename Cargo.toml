@@ -20,3 +20,10 @@ corevideo = { path = "crates/corevideo" }
 coreaudio = { path = "crates/coreaudio" }
 libc = "0.2"
 gimli = "0.34"
+
+[profile.fullnative]
+inherits = "release"
+lto = true
+codegen-units = 1
+panic = "abort"
+target-cpu = "native"
