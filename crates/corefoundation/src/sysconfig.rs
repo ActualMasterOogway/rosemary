@@ -113,9 +113,15 @@ pub unsafe extern "C" fn SCNetworkReachabilityGetFlags(target: CFTypeRef, flags:
     // than assumed: reading one of this runtime's objects as Apple's structure
     // is the failure `crate::foreign` exists to stop.
     // SAFETY: the caller's obligation - null or an object.
-    if target.is_null() || !unsafe { crate::foreign::is(target) } {
+    if target.is_null() {
         return 0;
     }
+
+    #[cfg(target_os = "macos")]
+    if !unsafe { crate::foreign::is(target) } {
+        return 0;
+    }
+
     let Some(f) = host(c"SCNetworkReachabilityGetFlags") else {
         return 0;
     };
