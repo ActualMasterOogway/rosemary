@@ -73,6 +73,13 @@ pub enum ProgramError {
     Link(machish::Error),
     /// The image has no `__TEXT,__text`, so there is nothing to lift.
     NoText,
+    /// Non-weak imports nothing satisfied, with [`STRICT_IMPORTS_ENV`] set.
+    /// Never raised otherwise: the default is to announce and run, because a
+    /// program that never calls the symbol runs correctly without it.
+    UnboundImports {
+        count: usize,
+        first: String,
+    },
 }
 
 impl fmt::Display for ProgramError {
@@ -81,6 +88,10 @@ impl fmt::Display for ProgramError {
             ProgramError::Io(e) => write!(f, "{e}"),
             ProgramError::Link(e) => write!(f, "{e}"),
             ProgramError::NoText => write!(f, "image has no __TEXT,__text section"),
+            ProgramError::UnboundImports { count, first } => write!(
+                f,
+                "{count} unbound import(s), the first being {first} ({STRICT_IMPORTS_ENV} is set)"
+            ),
         }
     }
 }
@@ -191,6 +202,98 @@ pub struct ImportSite {
     pub tag: u64,
     /// Whether this address is the `__stubs` entry rather than the pointer slot.
     pub is_stub: bool,
+}
+
+/// Turns [`announce_unbound_imports`] from a warning into a refusal to load.
+pub const STRICT_IMPORTS_ENV: &str = "ROSETTA3_STRICT_IMPORTS";
+
+/// How many unbound imports are named one by one before the rest are counted.
+const UNBOUND_DETAIL_LIMIT: usize = 40;
+
+/// Symbols whose slot is left unwritten at link time *on purpose*, because
+/// something later fills it in: `_objc_ehtype_vtable` is written by
+/// [`crate::objcexc::repair_image_records`] once the guest's classes are
+/// registered, which is long after this runs. Announcing one would be a false
+/// alarm.
+const REPAIRED_AFTER_LINKING: [&str; 1] = ["_objc_ehtype_vtable"];
+
+/// Every non-weak import in `report` that nothing answered, as
+/// `(image name, symbol)`.
+///
+/// A weak import is excluded because a null slot is what the image asked for and
+/// its own code tests for; everything here is a slot the guest will use as if it
+/// held an address.
+pub fn unbound_imports(report: &LinkReport) -> Vec<(&str, &machish::report::MissingSymbol)> {
+    report
+        .images
+        .iter()
+        .flat_map(|image| image.hard_missing().map(move |m| (image.name.as_str(), m)))
+        .filter(|(_, m)| !REPAIRED_AFTER_LINKING.contains(&m.symbol.as_str()))
+        .collect()
+}
+
+/// Say on stderr which imports went unbound, and return them.
+///
+/// The alternative is what this replaces. An import nobody satisfied leaves a
+/// zero in its slot, and the shape of the failure depends on what the guest does
+/// with it: a *call* through one reaches [`crate::abi::AbiError::Unsatisfied`]
+/// and names the symbol, but a *data* import is dereferenced with no runtime
+/// involved at all, and the whole diagnostic the user gets is a fault at a small
+/// address, hours into a run, in code that has nothing to do with the symbol
+/// that is actually missing. Both cases are decided here, at link time, where
+/// the name is still in hand - so this says it then, whether or not the guest
+/// ever goes near the slot.
+///
+/// `what` names the thing being loaded, for the message: a path, or
+/// `dlopen(...)`.
+pub fn announce_unbound_imports<'r>(
+    report: &'r LinkReport,
+    what: &str,
+) -> Vec<(&'r str, &'r machish::report::MissingSymbol)> {
+    let unbound = unbound_imports(report);
+    if unbound.is_empty() {
+        return unbound;
+    }
+    eprintln!(
+        "rosetta3: {what}: {} import(s) unbound - using one faults instead of working",
+        unbound.len()
+    );
+    for (image, m) in unbound.iter().take(UNBOUND_DETAIL_LIMIT) {
+        // The slot and the stub, because they are the addresses a later fault
+        // reports: a call through an unbound import arrives at the stub, and a
+        // load of one reads the slot. Printing them is what connects "faulted
+        // at 0x0 from 0x1000ab2c4" to a symbol name.
+        let stub = match m.stub_va {
+            Some(stub) => format!(", stub {stub:#x}"),
+            None => String::new(),
+        };
+        eprintln!(
+            "rosetta3:   {} from {} in {image}, slot {:#x}{stub}",
+            m.symbol,
+            m.library.as_deref().unwrap_or("<no library>"),
+            m.slot_va,
+        );
+    }
+    if let Some(rest) = unbound
+        .len()
+        .checked_sub(UNBOUND_DETAIL_LIMIT)
+        .filter(|n| *n > 0)
+    {
+        eprintln!("rosetta3:   (and {rest} more)");
+    }
+    unbound
+}
+
+/// Whether an unbound import is a refusal to load rather than a warning. Read
+/// per load rather than cached: loads are counted in ones.
+fn strict_imports() -> bool {
+    match std::env::var(STRICT_IMPORTS_ENV) {
+        Err(_) => false,
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off" | ""
+        ),
+    }
 }
 
 impl Program<BufferSpace> {
@@ -419,6 +522,17 @@ impl<M: Regions> Program<M> {
         // And last, because it is stated in terms of what everything above
         // settled on.
         crate::interpose::apply(&mut report, &mut memory)?;
+
+        // Say what did not bind, now that the repairs above have had their say
+        // and `missing` means missing. See [`announce_unbound_imports`] for why
+        // this is not left to the guest to discover.
+        let unbound = announce_unbound_imports(&report, path);
+        if !unbound.is_empty() && strict_imports() {
+            return Err(ProgramError::UnboundImports {
+                count: unbound.len(),
+                first: unbound[0].1.symbol.clone(),
+            });
+        }
 
         // The root image's `__text` is what the driver lifts.
         let obj = machish::image::MachObject::parse_any(bytes, X86_64)?;
@@ -864,7 +978,40 @@ fn lift_generated(va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_import_filter, filter_bit};
+    use super::{build_import_filter, filter_bit, unbound_imports};
+    use machish::report::{ImageReport, LinkReport, MissingSymbol};
+
+    fn missing(symbol: &str, weak: bool) -> MissingSymbol {
+        MissingSymbol {
+            symbol: symbol.to_string(),
+            library: None,
+            slot_va: 0x1_0000_0000,
+            stub_va: None,
+            weak_import: weak,
+        }
+    }
+
+    #[test]
+    fn only_the_imports_a_guest_would_fault_on_are_announced() {
+        let report = LinkReport {
+            images: vec![ImageReport {
+                name: "a.out".to_string(),
+                missing: vec![
+                    missing("_hard", false),
+                    // Legal, and the image tests for it itself.
+                    missing("_weak", true),
+                    // Written after registration; see `objcexc`.
+                    missing("_objc_ehtype_vtable", false),
+                ],
+                ..ImageReport::default()
+            }],
+        };
+        let named: Vec<&str> = unbound_imports(&report)
+            .iter()
+            .map(|(_, m)| m.symbol.as_str())
+            .collect();
+        assert_eq!(named, ["_hard"]);
+    }
 
     #[test]
     fn the_filter_never_says_no_to_a_key() {

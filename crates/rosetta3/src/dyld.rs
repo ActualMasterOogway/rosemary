@@ -622,26 +622,9 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     .map_err(|e| format!("{resolved}: objc exceptions: {e}"))?;
 
     // Say what did not resolve, here, rather than letting the guest find out by
-    // calling it.
-    let unresolved: Vec<&str> = report
-        .images
-        .iter()
-        .flat_map(|i| i.missing.iter())
-        .filter(|m| !m.weak_import)
-        .map(|m| m.symbol.as_str())
-        .collect();
-    if !unresolved.is_empty() {
-        eprintln!(
-            "rosetta3: dlopen({resolved}): {} unresolved: {}",
-            unresolved.len(),
-            unresolved
-                .iter()
-                .take(20)
-                .copied()
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-    }
+    // calling it. The program's own link says it the same way, and this is the
+    // same announcement - see [`crate::program::announce_unbound_imports`].
+    crate::program::announce_unbound_imports(&report, &format!("dlopen({resolved})"));
 
     let root = report
         .root()
