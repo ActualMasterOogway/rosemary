@@ -215,7 +215,10 @@ fn runetype(c: c_int) -> u32 {
     // SAFETY: every one of these takes an `int` and touches no memory.
     unsafe {
         for (test, bit) in [
-            (plain::isalpha as unsafe extern "C" fn(c_int) -> c_int, ctype::ALPHA),
+            (
+                plain::isalpha as unsafe extern "C" fn(c_int) -> c_int,
+                ctype::ALPHA,
+            ),
             (plain::iscntrl, ctype::CONTROL),
             (plain::isdigit, ctype::DIGIT),
             (plain::isgraph, ctype::GRAPH),
@@ -301,9 +304,18 @@ fn default_rune_locale() -> u64 {
             runetype: [0; CACHED_RUNES],
             maplower: [0; CACHED_RUNES],
             mapupper: [0; CACHED_RUNES],
-            runetype_ext: RuneRange { nranges: 0, ranges: core::ptr::null() },
-            maplower_ext: RuneRange { nranges: 0, ranges: core::ptr::null() },
-            mapupper_ext: RuneRange { nranges: 0, ranges: core::ptr::null() },
+            runetype_ext: RuneRange {
+                nranges: 0,
+                ranges: core::ptr::null(),
+            },
+            maplower_ext: RuneRange {
+                nranges: 0,
+                ranges: core::ptr::null(),
+            },
+            mapupper_ext: RuneRange {
+                nranges: 0,
+                ranges: core::ptr::null(),
+            },
             variable: core::ptr::null(),
             variable_len: 0,
             ncharclasses: 0,
@@ -444,7 +456,11 @@ pub fn symbol(name: &str) -> Option<u64> {
 
 pub fn provide(lib: &mut SyntheticDylib) {
     for name in NAMES {
-        crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap_or(0) as *const ());
+        crate::define_fn(
+            lib,
+            &format!("_{name}"),
+            symbol(name).unwrap_or(0) as *const (),
+        );
     }
     // Data rather than a function: the guest reads this object's fields directly,
     // and every `isspace`/`tolower` the header inlined faults on a null slot.

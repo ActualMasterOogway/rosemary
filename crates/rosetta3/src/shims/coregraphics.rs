@@ -355,8 +355,7 @@ mod tests {
     #[test]
     fn a_cvtime_second_eightbyte_is_the_two_int32s_low_then_high() {
         assert_eq!(core::mem::size_of::<CvTime>(), 16);
-        let Some(_) = crate::host::symbol("CVDisplayLinkGetNominalOutputVideoRefreshPeriod")
-        else {
+        let Some(_) = crate::host::symbol("CVDisplayLinkGetNominalOutputVideoRefreshPeriod") else {
             return;
         };
         // A null display link is the case CoreVideo answers without a display.

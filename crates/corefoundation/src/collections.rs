@@ -91,7 +91,7 @@ unsafe fn contents<'a, T>(object: CFTypeRef, class: &'static Class) -> Option<&'
     }
 }
 
-// 
+//
 
 pub struct ArrayContents {
     pub values: Vec<CFTypeRef>,
@@ -116,7 +116,10 @@ impl Drop for ArrayContents {
 pub fn array_class() -> &'static Class {
     static CLASS: OnceLock<usize> = OnceLock::new();
     let p = *CLASS.get_or_init(|| {
-        objc::class::ptr(register::<ArrayContents>(c"__NSCFArray", crate::base::mutable_pair(c"NSArray", c"NSMutableArray"))) as usize
+        objc::class::ptr(register::<ArrayContents>(
+            c"__NSCFArray",
+            crate::base::mutable_pair(c"NSArray", c"NSMutableArray"),
+        )) as usize
     });
     // SAFETY: a leaked `Class` this crate registered.
     unsafe { &*(p as *const Class) }
@@ -143,7 +146,7 @@ pub unsafe fn array<'a>(object: CFTypeRef) -> Option<&'a mut ArrayContents> {
     unsafe { contents(object, array_class()) }
 }
 
-// 
+//
 
 pub struct DictionaryContents {
     pub entries: Vec<(CFTypeRef, CFTypeRef)>,
@@ -164,7 +167,9 @@ impl Drop for DictionaryContents {
 
 impl DictionaryContents {
     pub fn position(&self, key: CFTypeRef) -> Option<usize> {
-        self.entries.iter().position(|(k, _)| self.keys.equal(*k, key))
+        self.entries
+            .iter()
+            .position(|(k, _)| self.keys.equal(*k, key))
     }
 
     /// Insert or replace, retaining both as the policies say.
@@ -183,7 +188,10 @@ impl DictionaryContents {
 pub fn dictionary_class() -> &'static Class {
     static CLASS: OnceLock<usize> = OnceLock::new();
     let p = *CLASS.get_or_init(|| {
-        objc::class::ptr(register::<DictionaryContents>(c"__NSCFDictionary", crate::base::mutable_pair(c"NSDictionary", c"NSMutableDictionary"))) as usize
+        objc::class::ptr(register::<DictionaryContents>(
+            c"__NSCFDictionary",
+            crate::base::mutable_pair(c"NSDictionary", c"NSMutableDictionary"),
+        )) as usize
     });
     // SAFETY: a leaked `Class` this crate registered.
     unsafe { &*(p as *const Class) }
@@ -215,7 +223,7 @@ pub unsafe fn dictionary<'a>(object: CFTypeRef) -> Option<&'a mut DictionaryCont
     unsafe { contents(object, dictionary_class()) }
 }
 
-// 
+//
 
 /// `CFNumberType`, which says how to read the sixteen bytes a number carries.
 ///
@@ -287,7 +295,12 @@ pub fn number_shape(kind: i32) -> Option<(usize, bool)> {
 
 pub fn number_class() -> &'static Class {
     static CLASS: OnceLock<usize> = OnceLock::new();
-    let p = *CLASS.get_or_init(|| objc::class::ptr(register::<Number>(c"__NSCFNumber", crate::base::abstract_class(c"NSNumber", None))) as usize);
+    let p = *CLASS.get_or_init(|| {
+        objc::class::ptr(register::<Number>(
+            c"__NSCFNumber",
+            crate::base::abstract_class(c"NSNumber", None),
+        )) as usize
+    });
     // SAFETY: a leaked `Class` this crate registered.
     unsafe { &*(p as *const Class) }
 }
@@ -343,7 +356,12 @@ pub unsafe fn number<'a>(object: CFTypeRef) -> Option<&'a mut Number> {
 
 pub fn data_class() -> &'static Class {
     static CLASS: OnceLock<usize> = OnceLock::new();
-    let p = *CLASS.get_or_init(|| objc::class::ptr(register::<Vec<u8>>(c"__NSCFData", crate::base::mutable_pair(c"NSData", c"NSMutableData"))) as usize);
+    let p = *CLASS.get_or_init(|| {
+        objc::class::ptr(register::<Vec<u8>>(
+            c"__NSCFData",
+            crate::base::mutable_pair(c"NSData", c"NSMutableData"),
+        )) as usize
+    });
     // SAFETY: a leaked `Class` this crate registered.
     unsafe { &*(p as *const Class) }
 }

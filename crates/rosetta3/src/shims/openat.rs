@@ -211,13 +211,7 @@ mod tests {
 
         // SAFETY: a NUL-terminated path this test owns, and two scalars - the
         // arguments the import slot supplies.
-        let fd = unsafe {
-            open_with_mode(
-                c.as_ptr(),
-                O_WRONLY | O_CREAT | O_EXCL,
-                0o604,
-            )
-        };
+        let fd = unsafe { open_with_mode(c.as_ptr(), O_WRONLY | O_CREAT | O_EXCL, 0o604) };
         assert!(fd >= 0, "open failed: {}", std::io::Error::last_os_error());
         // SAFETY: a descriptor this test just opened.
         unsafe { libc::close(fd) };
@@ -271,14 +265,8 @@ mod tests {
 
         let name = std::ffi::CString::new("relative").unwrap();
         // SAFETY: a descriptor and a NUL-terminated relative path.
-        let fd = unsafe {
-            openat_with_mode(
-                dirfd,
-                name.as_ptr(),
-                O_WRONLY | O_CREAT | O_EXCL,
-                0o604,
-            )
-        };
+        let fd =
+            unsafe { openat_with_mode(dirfd, name.as_ptr(), O_WRONLY | O_CREAT | O_EXCL, 0o604) };
         assert!(
             fd >= 0,
             "openat failed: {}",
@@ -307,8 +295,7 @@ mod tests {
 
         // SAFETY: as above. `O_EXCL` so a leftover from a previous run is a
         // failure rather than a semaphore with somebody else's count.
-        let sem =
-            unsafe { sem_open_with_mode(name.as_ptr(), O_CREAT | O_EXCL, 0o600, 2) };
+        let sem = unsafe { sem_open_with_mode(name.as_ptr(), O_CREAT | O_EXCL, 0o600, 2) };
         assert_ne!(
             sem,
             libc::SEM_FAILED,

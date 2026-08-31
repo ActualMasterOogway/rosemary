@@ -165,7 +165,13 @@ unsafe fn unbox_value(shape: Shape, value: Id) -> Option<Vec<u8>> {
 ///
 /// `imp` must be the implementation of a method whose one argument is `shape`,
 /// and `bytes` must be a value of it.
-unsafe fn call_setter(imp: *const std::ffi::c_void, receiver: Id, sel: Sel, shape: Shape, bytes: &[u8]) {
+unsafe fn call_setter(
+    imp: *const std::ffi::c_void,
+    receiver: Id,
+    sel: Sel,
+    shape: Shape,
+    bytes: &[u8],
+) {
     // Each arm states the prototype the encoding said the method has, which is
     // the only way the argument lands where the callee looks for it.
     macro_rules! call {
@@ -270,7 +276,9 @@ unsafe extern "C" fn set_value_for_key(receiver: Id, _sel: Sel, value: Id, key: 
             objc::fail!(
                 "-[{} setValue:forKey:@\"{key}\"]: this runtime does not know how to pass a {}",
                 class.name_str(),
-                parts.get(3).map_or(String::new(), |p| String::from_utf8_lossy(p).into_owned())
+                parts
+                    .get(3)
+                    .map_or(String::new(), |p| String::from_utf8_lossy(p).into_owned())
             );
         };
         // SAFETY: the value is an object this runtime allocated, or nil.
@@ -351,7 +359,9 @@ unsafe extern "C" fn value_for_key(receiver: Id, _sel: Sel, key: Id) -> Id {
             objc::fail!(
                 "-[{} valueForKey:@\"{key}\"]: this runtime does not know how to return a {}",
                 class.name_str(),
-                parts.first().map_or(String::new(), |p| String::from_utf8_lossy(p).into_owned())
+                parts
+                    .first()
+                    .map_or(String::new(), |p| String::from_utf8_lossy(p).into_owned())
             );
         };
         // SAFETY: the encoding said the method returns a `shape`.
@@ -375,10 +385,7 @@ unsafe extern "C" fn value_for_key(receiver: Id, _sel: Sel, key: Id) -> Id {
     unsafe {
         box_value(
             shape,
-            std::slice::from_raw_parts(
-                (receiver as *const u8).offset(ivar.offset()),
-                ivar.size(),
-            ),
+            std::slice::from_raw_parts((receiver as *const u8).offset(ivar.offset()), ivar.size()),
         )
     }
 }

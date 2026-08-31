@@ -37,10 +37,7 @@ fn split(name: &str) -> (String, String) {
     let mut parts = base.split(['_', '-']);
     let language = parts.next().filter(|p| !p.is_empty()).unwrap_or("en");
     let country = parts.next().filter(|p| !p.is_empty()).unwrap_or("US");
-    (
-        language.to_ascii_lowercase(),
-        country.to_ascii_uppercase(),
-    )
+    (language.to_ascii_lowercase(), country.to_ascii_uppercase())
 }
 
 fn language() -> String {
@@ -138,12 +135,8 @@ pub const KEYS: &[(&str, &str)] = &[
 ];
 
 pub(crate) fn install() {
-    let class = corefoundation::base::register(
-        c"NSLocale",
-        None,
-        std::mem::size_of::<usize>(),
-        false,
-    );
+    let class =
+        corefoundation::base::register(c"NSLocale", None, std::mem::size_of::<usize>(), false);
     class_methods!(class, {
         "currentLocale" => current_locale, c"@16@0:8";
         "autoupdatingCurrentLocale" => current_locale, c"@16@0:8";

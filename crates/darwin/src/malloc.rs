@@ -100,7 +100,11 @@ pub fn symbol(name: &str) -> Option<u64> {
 
 pub fn provide(lib: &mut SyntheticDylib) {
     for name in NAMES {
-        crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap_or(0) as *const ());
+        crate::define_fn(
+            lib,
+            &format!("_{name}"),
+            symbol(name).unwrap_or(0) as *const (),
+        );
     }
 }
 

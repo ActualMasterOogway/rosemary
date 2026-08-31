@@ -160,7 +160,14 @@ unsafe extern "C" fn fire(_timer: *const c_void, info: *mut c_void) {
 }
 
 /// Build a timer object, scheduling it on the main loop if asked.
-fn make(interval: f64, target: Id, selector: Sel, user_info: Id, repeats: bool, schedule: bool) -> Id {
+fn make(
+    interval: f64,
+    target: Id,
+    selector: Sel,
+    user_info: Id,
+    repeats: bool,
+    schedule: bool,
+) -> Id {
     let class = objc::class::lookup(c"NSTimer").expect("registered by this module");
     // SAFETY: `Timer` is the layout the class was registered with.
     let object = unsafe { corefoundation::base::allocate::<Timer>(class) };
@@ -318,8 +325,7 @@ unsafe extern "C" fn run_until_date(receiver: Id, sel: Sel, limit: Id) {
 }
 
 pub(crate) fn install() {
-    let date_class =
-        corefoundation::base::register(c"NSDate", None, DATE_INSTANCE_SIZE, false);
+    let date_class = corefoundation::base::register(c"NSDate", None, DATE_INSTANCE_SIZE, false);
     class_methods!(date_class, {
         "date" => date_now, c"@16@0:8";
         "distantFuture" => distant_future, c"@16@0:8";
@@ -333,8 +339,7 @@ pub(crate) fn install() {
         "timeIntervalSinceDate:" => time_interval_since_date, c"d24@0:8@16";
     });
 
-    let timer_class =
-        corefoundation::base::register(c"NSTimer", None, TIMER_INSTANCE_SIZE, false);
+    let timer_class = corefoundation::base::register(c"NSTimer", None, TIMER_INSTANCE_SIZE, false);
     class_methods!(timer_class, {
         "scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"
             => scheduled_timer, c"@48@0:8d16@24:32@40c48";
@@ -350,12 +355,8 @@ pub(crate) fn install() {
         "fireDate" => fire_date, c"@16@0:8";
     });
 
-    let run_loop = corefoundation::base::register(
-        c"NSRunLoop",
-        None,
-        std::mem::size_of::<usize>(),
-        false,
-    );
+    let run_loop =
+        corefoundation::base::register(c"NSRunLoop", None, std::mem::size_of::<usize>(), false);
     class_methods!(run_loop, {
         "currentRunLoop" => current_run_loop, c"@16@0:8";
         "mainRunLoop" => current_run_loop, c"@16@0:8";
@@ -390,8 +391,7 @@ mod tests {
     /// loop, and a shared counter would count both.
     fn target(name: &std::ffi::CStr, imp: unsafe extern "C" fn(Id, Sel, Id)) -> Id {
         crate::bootstrap();
-        let class =
-            corefoundation::base::register(name, None, std::mem::size_of::<usize>(), false);
+        let class = corefoundation::base::register(name, None, std::mem::size_of::<usize>(), false);
         methods!(class, {
             "tick:" => imp, c"v24@0:8@16";
         });
@@ -423,10 +423,16 @@ mod tests {
             if REPEATED.load(Ordering::SeqCst) >= 2 {
                 break;
             }
-            corefoundation::runloop::main()
-                .run_in_mode(corefoundation::runloop::DEFAULT_MODE, 0.01, false);
+            corefoundation::runloop::main().run_in_mode(
+                corefoundation::runloop::DEFAULT_MODE,
+                0.01,
+                false,
+            );
         }
-        assert!(REPEATED.load(Ordering::SeqCst) >= 2, "the timer did not repeat");
+        assert!(
+            REPEATED.load(Ordering::SeqCst) >= 2,
+            "the timer did not repeat"
+        );
 
         // SAFETY: `-invalidate` is `void (id, SEL)`.
         unsafe { invalidate(timer, objc::sel::get("invalidate")) };
@@ -434,10 +440,17 @@ mod tests {
         assert_eq!(unsafe { is_valid(timer, objc::sel::get("isValid")) }, 0);
         let after = REPEATED.load(Ordering::SeqCst);
         for _ in 0..5 {
-            corefoundation::runloop::main()
-                .run_in_mode(corefoundation::runloop::DEFAULT_MODE, 0.01, false);
+            corefoundation::runloop::main().run_in_mode(
+                corefoundation::runloop::DEFAULT_MODE,
+                0.01,
+                false,
+            );
         }
-        assert_eq!(REPEATED.load(Ordering::SeqCst), after, "it fired after invalidation");
+        assert_eq!(
+            REPEATED.load(Ordering::SeqCst),
+            after,
+            "it fired after invalidation"
+        );
     }
 
     /// A non-repeating timer invalidates itself, which is what stops a
@@ -462,10 +475,17 @@ mod tests {
             if ONCE.load(Ordering::SeqCst) >= 1 {
                 break;
             }
-            corefoundation::runloop::main()
-                .run_in_mode(corefoundation::runloop::DEFAULT_MODE, 0.01, false);
+            corefoundation::runloop::main().run_in_mode(
+                corefoundation::runloop::DEFAULT_MODE,
+                0.01,
+                false,
+            );
         }
-        assert_eq!(ONCE.load(Ordering::SeqCst), 1, "a one-shot fired more than once");
+        assert_eq!(
+            ONCE.load(Ordering::SeqCst),
+            1,
+            "a one-shot fired more than once"
+        );
         // SAFETY: `-isValid` is `BOOL (id, SEL)`.
         assert_eq!(unsafe { is_valid(timer, objc::sel::get("isValid")) }, 0);
     }

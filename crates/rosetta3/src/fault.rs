@@ -113,10 +113,7 @@ pub enum Attribution {
         region: u64,
     },
     /// Inside a translation, in code no guest instruction was attributed to.
-    Translated {
-        region: u64,
-        why: Unnamed,
-    },
+    Translated { region: u64, why: Unnamed },
     /// In no translation this process placed.
     Elsewhere,
 }
@@ -509,7 +506,9 @@ fn say_region(out: &mut Buffer, pc: u64) {
         return;
     };
     let Some(entry) = covering(&placed, pc) else {
-        out.str("\n  guest region: none - the pc is in no translation, so this fault is in host code");
+        out.str(
+            "\n  guest region: none - the pc is in no translation, so this fault is in host code",
+        );
         return;
     };
 
@@ -738,7 +737,14 @@ mod tests {
     #[test]
     fn a_host_pc_resolves_to_the_guest_instruction_it_came_from() {
         // The claim the whole module turns on.
-        placed(0x40_0000, 0x40_0000, 0x1_0000, 0x1_0010, 0x1_0000, &map(0x1_0000, 16));
+        placed(
+            0x40_0000,
+            0x40_0000,
+            0x1_0000,
+            0x1_0010,
+            0x1_0000,
+            &map(0x1_0000, 16),
+        );
         let placed = PLACED.lock().unwrap();
         let entry = placed.iter().find(|p| p.code == 0x40_0000).unwrap();
 
@@ -753,8 +759,22 @@ mod tests {
 
     #[test]
     fn the_nearest_translation_below_the_pc_is_the_one_reported() {
-        placed(0x4000, 0x4000, 0x1_0000, 0x1_0100, 0x1_0000, &map(0x1_0000, 4));
-        placed(0x8000, 0x8000, 0x2_0000, 0x2_0080, 0x2_0040, &map(0x2_0000, 4));
+        placed(
+            0x4000,
+            0x4000,
+            0x1_0000,
+            0x1_0100,
+            0x1_0000,
+            &map(0x1_0000, 4),
+        );
+        placed(
+            0x8000,
+            0x8000,
+            0x2_0000,
+            0x2_0080,
+            0x2_0040,
+            &map(0x2_0000, 4),
+        );
         let placed = PLACED.lock().unwrap();
         let find = |pc: u64| match placed.binary_search_by_key(&pc, |p| p.code) {
             Ok(i) => Some(placed[i].guest),
@@ -771,7 +791,14 @@ mod tests {
     fn a_pc_past_everything_a_translation_covers_is_not_claimed_for_it() {
         // The misattribution this replaced: `+0x57c` into a sixty-two-byte
         // region was reported as if it were inside it.
-        placed(0x10_0000, 0x10_0000, 0x3_0000, 0x3_0004, 0x3_0000, &map(0x3_0000, 4));
+        placed(
+            0x10_0000,
+            0x10_0000,
+            0x3_0000,
+            0x3_0004,
+            0x3_0000,
+            &map(0x3_0000, 4),
+        );
         let placed = PLACED.lock().unwrap();
         let entry = placed.iter().find(|p| p.code == 0x10_0000).unwrap();
         assert_eq!(entry.attributed_end(), 0x10_0040);
@@ -862,8 +889,22 @@ mod tests {
     /// to the lower one and an address past the last is still refused.
     #[test]
     fn a_blob_ends_where_the_next_one_starts() {
-        placed(0x70_0000, 0x70_0000, 0x7_0000, 0x7_0010, 0x7_0000, &map(0x7_0000, 1));
-        placed(0x70_1000, 0x70_1000, 0x7_1000, 0x7_1010, 0x7_1000, &map(0x7_1000, 1));
+        placed(
+            0x70_0000,
+            0x70_0000,
+            0x7_0000,
+            0x7_0010,
+            0x7_0000,
+            &map(0x7_0000, 1),
+        );
+        placed(
+            0x70_1000,
+            0x70_1000,
+            0x7_1000,
+            0x7_1010,
+            0x7_1000,
+            &map(0x7_1000, 1),
+        );
 
         // Past its map but before its neighbour: still the first region's.
         assert_eq!(
@@ -876,7 +917,10 @@ mod tests {
         // The neighbour's first byte is the neighbour's.
         assert!(matches!(
             attribute(0x70_1000),
-            Attribution::Instruction { region: 0x7_1000, .. }
+            Attribution::Instruction {
+                region: 0x7_1000,
+                ..
+            }
         ));
         // And nothing is claimed a megabyte past the last one.
         assert_eq!(attribute(0x70_1000 + MAX_BLOB), Attribution::Elsewhere);

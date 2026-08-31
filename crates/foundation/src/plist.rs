@@ -229,8 +229,7 @@ mod binary {
                     let mut out = BTreeMap::new();
                     for i in 0..len {
                         let k = be(self.slice(body + i * self.ref_size, self.ref_size)?) as usize;
-                        let v = be(self
-                            .slice(body + (len + i) * self.ref_size, self.ref_size)?)
+                        let v = be(self.slice(body + (len + i) * self.ref_size, self.ref_size)?)
                             as usize;
                         let key = match self.object(k, depth + 1)? {
                             Value::String(s) => s,
@@ -298,8 +297,10 @@ mod xml {
             let body_end = rest[body_start..].find('<').map(|at| body_start + at);
             let body = body_end.map(|end| &rest[body_start..end]).unwrap_or("");
 
-            let mut push = |value: Value, stack: &mut Vec<Value>, keys: &mut Vec<Option<String>>| {
-                match stack.last_mut() {
+            let mut push =
+                |value: Value, stack: &mut Vec<Value>, keys: &mut Vec<Option<String>>| match stack
+                    .last_mut()
+                {
                     Some(Value::Array(a)) => a.push(value),
                     Some(Value::Dictionary(d)) => {
                         if let Some(Some(key)) = keys.last_mut().map(std::mem::take) {
@@ -307,8 +308,7 @@ mod xml {
                         }
                     }
                     _ => root = Some(value),
-                }
-            };
+                };
 
             match tag {
                 "dict" => {
@@ -320,7 +320,9 @@ mod xml {
                     keys.push(None);
                 }
                 "/dict" | "/array" => {
-                    let done = stack.pop().ok_or_else(|| bad("a closing tag with nothing open"))?;
+                    let done = stack
+                        .pop()
+                        .ok_or_else(|| bad("a closing tag with nothing open"))?;
                     keys.pop();
                     push(done, &mut stack, &mut keys);
                 }
@@ -377,11 +379,22 @@ mod tests {
         </dict>
         </plist>"#;
         let value = parse(text).expect("an XML plist");
-        assert_eq!(value.get("CFBundleExecutable").and_then(Value::as_str), Some("Mac_Runner"));
-        assert_eq!(value.get("NSPrincipalClass").and_then(Value::as_str), Some("YYApplication"));
-        assert_eq!(value.get("NSHighResolutionCapable"), Some(&Value::Bool(true)));
         assert_eq!(
-            value.get("CFBundleSupportedPlatforms").and_then(Value::as_array),
+            value.get("CFBundleExecutable").and_then(Value::as_str),
+            Some("Mac_Runner")
+        );
+        assert_eq!(
+            value.get("NSPrincipalClass").and_then(Value::as_str),
+            Some("YYApplication")
+        );
+        assert_eq!(
+            value.get("NSHighResolutionCapable"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            value
+                .get("CFBundleSupportedPlatforms")
+                .and_then(Value::as_array),
             Some(&[Value::String("MacOSX".into())][..])
         );
     }

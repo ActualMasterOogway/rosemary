@@ -154,9 +154,16 @@ fn resolved_addresses_are_the_hosts_own_implementations() {
     // for both: macOS splits libc across `libsystem_*` under `dyld`, and musl and
     // glibc put it in one `libc`.
     assert!(
-        ["libsystem", "libSystem", "dyld", "libc", "ld-musl", "ld-linux"]
-            .iter()
-            .any(|c| image.contains(c)),
+        [
+            "libsystem",
+            "libSystem",
+            "dyld",
+            "libc",
+            "ld-musl",
+            "ld-linux"
+        ]
+        .iter()
+        .any(|c| image.contains(c)),
         "unexpected host image for strlen: {image}"
     );
 }

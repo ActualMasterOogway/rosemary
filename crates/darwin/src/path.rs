@@ -133,7 +133,12 @@ mod tests {
         let found = insensitive(&lowered).expect("a case-insensitive match");
         assert_eq!(
             found.to_str().expect("utf-8"),
-            scratch.0.join("Contents").join("Game.ios").to_str().unwrap()
+            scratch
+                .0
+                .join("Contents")
+                .join("Game.ios")
+                .to_str()
+                .unwrap()
         );
     }
 
@@ -142,16 +147,23 @@ mod tests {
     #[test]
     fn an_exact_path_is_not_a_match() {
         let scratch = scratch("exact");
-        let exact =
-            CString::new(scratch.0.join("Contents").join("Game.ios").to_str().unwrap()).unwrap();
+        let exact = CString::new(
+            scratch
+                .0
+                .join("Contents")
+                .join("Game.ios")
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(insensitive(&exact), None);
     }
 
     #[test]
     fn a_path_that_is_not_there_in_any_case_is_none() {
         let scratch = scratch("absent");
-        let absent = CString::new(scratch.0.join("contents").join("nothing").to_str().unwrap())
-            .unwrap();
+        let absent =
+            CString::new(scratch.0.join("contents").join("nothing").to_str().unwrap()).unwrap();
         assert_eq!(insensitive(&absent), None);
     }
 }

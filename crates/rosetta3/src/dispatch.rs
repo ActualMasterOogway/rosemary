@@ -219,7 +219,10 @@ mod tests {
             .find(|&c| cache.slot(c) == cache.slot(a))
             .expect("some address shares a slot with `a`");
         assert!(!cache.put(a, a), "an empty slot evicts nothing");
-        assert!(cache.put(b, b), "and the second address reports the eviction");
+        assert!(
+            cache.put(b, b),
+            "and the second address reports the eviction"
+        );
         assert_eq!(cache.get(b), Some(b));
         assert_eq!(cache.get(a), None);
     }

@@ -41,12 +41,7 @@ pub fn apply(window: sdl3::Window) {
     let Some(icon) = replacement.as_ref().or_else(|| bundled()) else {
         return;
     };
-    sdl3::video::set_window_icon(
-        window,
-        icon.width as i32,
-        icon.height as i32,
-        &icon.pixels,
-    );
+    sdl3::video::set_window_icon(window, icon.width as i32, icon.height as i32, &icon.pixels);
 }
 
 /// Replace the icon, and tell the windows that already have the old one.

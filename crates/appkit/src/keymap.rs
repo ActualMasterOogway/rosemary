@@ -105,9 +105,9 @@ static VIRTUAL_KEYS: &[(u32, u16)] = &[
     (94, 0x58),
     (95, 0x59),
     (96, 0x5B),
-    (97, 0x5C), // keypad 9
-    (98, 0x52), // keypad 0
-    (99, 0x41), // keypad period
+    (97, 0x5C),  // keypad 9
+    (98, 0x52),  // keypad 0
+    (99, 0x41),  // keypad period
     (103, 0x51), // keypad equals
     (224, 0x3B), // left control
     (225, 0x38), // left shift
@@ -182,16 +182,16 @@ pub fn characters(scancode: u32, keycode: u32) -> String {
         return c.to_string();
     }
     let private = match scancode {
-        82 => 0xF700,  // up
-        81 => 0xF701,  // down
-        80 => 0xF702,  // left
-        79 => 0xF703,  // right
-        74 => 0xF729,  // home
-        77 => 0xF72B,  // end
-        75 => 0xF72C,  // page up
-        78 => 0xF72D,  // page down
-        76 => 0xF728,  // forward delete
-        73 => 0xF727,  // insert
+        82 => 0xF700,                        // up
+        81 => 0xF701,                        // down
+        80 => 0xF702,                        // left
+        79 => 0xF703,                        // right
+        74 => 0xF729,                        // home
+        77 => 0xF72B,                        // end
+        75 => 0xF72C,                        // page up
+        78 => 0xF72D,                        // page down
+        76 => 0xF728,                        // forward delete
+        73 => 0xF727,                        // insert
         58..=69 => 0xF704 + (scancode - 58), // F1 through F12
         40 | 88 => 0x000D,                   // return and keypad enter
         42 => 0x0008,                        // backspace
@@ -199,7 +199,9 @@ pub fn characters(scancode: u32, keycode: u32) -> String {
         43 => 0x0009,                        // tab
         _ => return String::new(),
     };
-    char::from_u32(private).map(String::from).unwrap_or_default()
+    char::from_u32(private)
+        .map(String::from)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

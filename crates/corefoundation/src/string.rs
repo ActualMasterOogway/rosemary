@@ -90,7 +90,8 @@ pub fn class() -> &'static Class {
     let p = *CLASS.get_or_init(|| {
         let base = crate::base::mutable_pair(c"NSString", c"NSMutableString");
         crate::base::note_type_class(base);
-        let class = crate::base::register(c"__NSCFString", Some(base), size_of::<CFString>(), false);
+        let class =
+            crate::base::register(c"__NSCFString", Some(base), size_of::<CFString>(), false);
         install_string_methods(class);
         objc::class::ptr(class) as usize
     });
@@ -139,7 +140,10 @@ fn install_string_methods(class: &'static Class) {
         }
         // SAFETY: the receiver is a string; `other` is checked before it is read.
         unsafe {
-            match (as_string(receiver as CFTypeRef), as_string(other as CFTypeRef)) {
+            match (
+                as_string(receiver as CFTypeRef),
+                as_string(other as CFTypeRef),
+            ) {
                 (Some(a), Some(b)) => a.utf8() == b.utf8(),
                 _ => false,
             }
@@ -176,9 +180,17 @@ fn install_string_methods(class: &'static Class) {
             .map_or(std::ptr::null(), |s| s.c_string(encoding::UTF8))
     }
 
-    class.add_method(objc::sel::get("isEqual:"), is_equal as *const c_void, c"B24@0:8@16");
+    class.add_method(
+        objc::sel::get("isEqual:"),
+        is_equal as *const c_void,
+        c"B24@0:8@16",
+    );
     class.add_method(objc::sel::get("hash"), hash as *const c_void, c"Q16@0:8");
-    class.add_method(objc::sel::get("length"), length as *const c_void, c"Q16@0:8");
+    class.add_method(
+        objc::sel::get("length"),
+        length as *const c_void,
+        c"Q16@0:8",
+    );
     class.add_method(
         objc::sel::get("UTF8String"),
         utf8_string as *const c_void,
@@ -211,7 +223,10 @@ fn install_dealloc(class: &'static Class) {
 /// `-retain`, `-release` and `-dealloc` that do nothing, for a string that lives
 /// in an image rather than on the heap.
 fn install_constant_methods(class: &'static Class) {
-    unsafe extern "C" fn retain(receiver: objc::object::Id, _sel: objc::sel::Sel) -> objc::object::Id {
+    unsafe extern "C" fn retain(
+        receiver: objc::object::Id,
+        _sel: objc::sel::Sel,
+    ) -> objc::object::Id {
         receiver
     }
     unsafe extern "C" fn release(_receiver: objc::object::Id, _sel: objc::sel::Sel) {}
@@ -219,8 +234,16 @@ fn install_constant_methods(class: &'static Class) {
         // What Apple reports for an object that cannot be deallocated.
         usize::MAX
     }
-    class.replace_method(objc::sel::get("retain"), retain as *const c_void, c"@16@0:8");
-    class.replace_method(objc::sel::get("release"), release as *const c_void, c"v16@0:8");
+    class.replace_method(
+        objc::sel::get("retain"),
+        retain as *const c_void,
+        c"@16@0:8",
+    );
+    class.replace_method(
+        objc::sel::get("release"),
+        release as *const c_void,
+        c"v16@0:8",
+    );
     class.replace_method(
         objc::sel::get("autorelease"),
         retain as *const c_void,
@@ -231,7 +254,11 @@ fn install_constant_methods(class: &'static Class) {
         retain_count as *const c_void,
         c"Q16@0:8",
     );
-    class.replace_method(objc::sel::get("dealloc"), release as *const c_void, c"v16@0:8");
+    class.replace_method(
+        objc::sel::get("dealloc"),
+        release as *const c_void,
+        c"v16@0:8",
+    );
 }
 
 /// `CFStringGetTypeID`.
@@ -251,7 +278,8 @@ pub fn type_id_of_strings() -> crate::base::CFTypeID {
 pub unsafe fn as_string<'a>(string: CFTypeRef) -> Option<&'a CFString> {
     // SAFETY: the caller's obligation.
     let is_string = unsafe {
-        crate::base::is_kind_of(string, class()) || crate::base::is_kind_of(string, constant_class())
+        crate::base::is_kind_of(string, class())
+            || crate::base::is_kind_of(string, constant_class())
     };
     // SAFETY: a `__NSCFString` or `__NSCFConstantString` is a `CFString`.
     is_string.then(|| unsafe { &*(string as *const CFString) })

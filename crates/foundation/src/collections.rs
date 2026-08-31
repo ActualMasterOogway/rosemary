@@ -26,8 +26,6 @@ fn immutable(what: &str, sel: &str) -> ! {
     objc::fail!("-[{what} {sel}]: the collection was not created mutable");
 }
 
-
-
 unsafe extern "C" fn count(receiver: Id, _sel: Sel) -> usize {
     // SAFETY: an array.
     unsafe { api::CFArrayGetCount(receiver as CFTypeRef) as usize }
@@ -302,7 +300,9 @@ unsafe extern "C" fn contains_object(receiver: Id, _sel: Sel, object: Id) -> boo
     let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
         return false;
     };
-    a.values.iter().any(|v| a.policy.equal(*v, object as CFTypeRef))
+    a.values
+        .iter()
+        .any(|v| a.policy.equal(*v, object as CFTypeRef))
 }
 
 unsafe extern "C" fn new_array(_class: Id, _sel: Sel) -> Id {
@@ -311,12 +311,24 @@ unsafe extern "C" fn new_array(_class: Id, _sel: Sel) -> Id {
 
 unsafe extern "C" fn array_fn(_class: Id, _sel: Sel) -> Id {
     // SAFETY: a fresh object.
-    unsafe { api::CFAutorelease(collections::new_array(&[], Policy::from_type_callbacks(), true)) as Id }
+    unsafe {
+        api::CFAutorelease(collections::new_array(
+            &[],
+            Policy::from_type_callbacks(),
+            true,
+        )) as Id
+    }
 }
 
 unsafe extern "C" fn array_with_capacity(_class: Id, _sel: Sel, _capacity: usize) -> Id {
     // SAFETY: a fresh object.
-    unsafe { api::CFAutorelease(collections::new_array(&[], Policy::from_type_callbacks(), true)) as Id }
+    unsafe {
+        api::CFAutorelease(collections::new_array(
+            &[],
+            Policy::from_type_callbacks(),
+            true,
+        )) as Id
+    }
 }
 
 unsafe extern "C" fn array_with_object(_class: Id, _sel: Sel, object: Id) -> Id {
@@ -355,8 +367,6 @@ unsafe extern "C" fn array_with_objects_count(
         )) as Id
     }
 }
-
-
 
 unsafe extern "C" fn dictionary_count(receiver: Id, _sel: Sel) -> usize {
     // SAFETY: a dictionary.
@@ -483,8 +493,6 @@ unsafe extern "C" fn dictionary_with_objects_for_keys_count(
     }
 }
 
-
-
 unsafe extern "C" fn data_length(receiver: Id, _sel: Sel) -> usize {
     // SAFETY: a data object.
     unsafe { api::CFDataGetLength(receiver as CFTypeRef) as usize }
@@ -495,16 +503,9 @@ unsafe extern "C" fn data_bytes(receiver: Id, _sel: Sel) -> *const u8 {
     unsafe { api::CFDataGetBytePtr(receiver as CFTypeRef) }
 }
 
-unsafe extern "C" fn data_with_bytes(
-    _class: Id,
-    _sel: Sel,
-    bytes: *const u8,
-    length: usize,
-) -> Id {
+unsafe extern "C" fn data_with_bytes(_class: Id, _sel: Sel, bytes: *const u8, length: usize) -> Id {
     // SAFETY: the caller says `bytes` covers `length` bytes.
-    unsafe {
-        api::CFAutorelease(api::CFDataCreate(std::ptr::null(), bytes, length as isize)) as Id
-    }
+    unsafe { api::CFAutorelease(api::CFDataCreate(std::ptr::null(), bytes, length as isize)) as Id }
 }
 
 unsafe extern "C" fn append_bytes(receiver: Id, _sel: Sel, bytes: *const u8, length: usize) {
@@ -518,8 +519,6 @@ unsafe extern "C" fn append_bytes(receiver: Id, _sel: Sel, bytes: *const u8, len
     // SAFETY: the caller says `bytes` covers `length` bytes.
     d.extend_from_slice(unsafe { std::slice::from_raw_parts(bytes, length) });
 }
-
-
 
 unsafe extern "C" fn int_value(receiver: Id, _sel: Sel) -> i32 {
     // SAFETY: a number.
@@ -605,7 +604,8 @@ pub(crate) fn install() {
 
     let dictionary_class =
         objc::class::lookup(c"NSDictionary").expect("CoreFoundation registered NSDictionary");
-    let mutable_dictionary = objc::class::lookup(c"NSMutableDictionary").expect("NSMutableDictionary");
+    let mutable_dictionary =
+        objc::class::lookup(c"NSMutableDictionary").expect("NSMutableDictionary");
     methods!(dictionary_class, {
         "count" => dictionary_count, c"Q16@0:8";
         "objectForKey:" => object_for_key, c"@24@0:8@16";
@@ -667,5 +667,4 @@ pub(crate) fn install() {
         "numberWithDouble:" => number_with_double, c"@24@0:8d16";
         "numberWithBool:" => number_with_bool, c"@24@0:8B16";
     });
-
 }

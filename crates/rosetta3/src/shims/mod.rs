@@ -18,10 +18,10 @@ pub mod atexit;
 /// host, and which implementation the call lands on is decided inside.
 pub mod audiounit;
 pub mod block;
-pub mod corefoundation;
 /// Not gated: which registry the legacy spellings reach is decided inside, the
 /// same way [`audiounit`]'s is.
 pub mod component;
+pub mod corefoundation;
 pub mod curl;
 pub(crate) mod host;
 pub mod intdiv;

@@ -148,7 +148,6 @@ pub fn before_send(sel: u64, receiver: u64, argument: u64) {
     }
 }
 
-
 /// `CGLError CGLFlushDrawable(CGLContextObj ctx)`
 fn flush_drawable(
     symbol: &str,

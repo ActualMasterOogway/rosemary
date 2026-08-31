@@ -517,8 +517,7 @@ pub mod bitmap {
     }
 
     pub(crate) fn install() {
-        let class =
-            objc::class::lookup(c"NSBitmapImageRep").expect("declared before its methods");
+        let class = objc::class::lookup(c"NSBitmapImageRep").expect("declared before its methods");
         class_methods!(class, {
             "imageRepWithData:" => init_with_data, c"@24@0:8@16";
         });
@@ -563,15 +562,16 @@ pub mod bitmap {
             bmp.extend_from_slice(&[0x10, 0x20, 0x30, 0]);
 
             let data = corefoundation::collections::new_data(bmp);
-            let image = objc::object::create_instance(
-                objc::class::lookup(c"NSImage").expect("NSImage"),
-                0,
-            );
+            let image =
+                objc::object::create_instance(objc::class::lookup(c"NSImage").expect("NSImage"), 0);
             // SAFETY: `-initWithData:` is `id (id, SEL, id)`.
             let image = unsafe {
                 super::super::init_with_data(image, objc::sel::get("initWithData:"), data as Id)
             };
-            assert!(!image.is_null(), "a BMP is an image this runtime recognises");
+            assert!(
+                !image.is_null(),
+                "a BMP is an image this runtime recognises"
+            );
 
             // SAFETY: `-TIFFRepresentation` is `id (id, SEL)`.
             let tiff = unsafe {

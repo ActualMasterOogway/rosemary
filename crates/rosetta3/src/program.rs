@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::ops::Range;
 
+use crate::cxxlib::Flavor;
 use machish::loader::Loader;
 use machish::memory::{BufferSpace, Regions};
 use machish::report::LinkReport;
@@ -388,7 +389,7 @@ impl<M: Regions> Program<M> {
         mut memory: M,
     ) -> Result<Self, ProgramError> {
         // Vendored libc++ ahead of the filesystem; see [`crate::cxxlib`].
-        let mut source = crate::cxxlib::source();
+        let mut source = crate::cxxlib::source(Flavor::Intel);
         let hosts = HostProviders::new();
         let providers = hosts.chain(extra);
 
@@ -402,14 +403,18 @@ impl<M: Regions> Program<M> {
             Loader::new(X86_64).link_with(bytes, path, &mut memory, &mut source, &providers)?;
 
         // Before anything reads the report.
-        crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory)?;
+        crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory, Flavor::Intel)?;
 
         // And the same for the C++ ABI.
-        crate::cxxlib::bind_cxxabi_to_the_vendored_one(&mut report, &mut memory)?;
+        crate::cxxlib::bind_cxxabi_to_the_vendored_one(&mut report, &mut memory, Flavor::Intel)?;
 
         // And the Objective-C half of the same ABI, which is stated in terms of
         // the addresses the line above settled on.
-        crate::cxxlib::bind_objc_exceptions_to_the_vendored_cxxabi(&mut report, &mut memory)?;
+        crate::cxxlib::bind_objc_exceptions_to_the_vendored_cxxabi(
+            &mut report,
+            &mut memory,
+            Flavor::Intel,
+        )?;
 
         // And last, because it is stated in terms of what everything above
         // settled on.
@@ -493,10 +498,8 @@ impl<M: Regions> Program<M> {
         }
 
         let import_filter = build_import_filter(imports.keys().copied(), imports.len());
-        let target_filter = build_import_filter(
-            imports_by_target.keys().copied(),
-            imports_by_target.len(),
-        );
+        let target_filter =
+            build_import_filter(imports_by_target.keys().copied(), imports_by_target.len());
 
         Ok(Program {
             report,

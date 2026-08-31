@@ -105,7 +105,11 @@ pub unsafe extern "C" fn objc_getRequiredClass(name: *const c_char) -> *mut c_vo
 
 pub unsafe extern "C" fn objc_getMetaClass(name: *const c_char) -> *mut c_void {
     // SAFETY: the caller's obligation.
-    as_ptr(unsafe { cstr(name) }.and_then(crate::class::lookup).map(|c| c.metaclass()))
+    as_ptr(
+        unsafe { cstr(name) }
+            .and_then(crate::class::lookup)
+            .map(|c| c.metaclass()),
+    )
 }
 
 pub unsafe extern "C" fn objc_allocateClassPair(
@@ -190,11 +194,11 @@ pub unsafe extern "C" fn class_addIvar(
     types: *const c_char,
 ) -> bool {
     // SAFETY: the caller's obligation.
-    let (Some(cls), Some(name), Some(types)) = (
-        unsafe { class(cls) },
-        unsafe { cstr(name) },
-        unsafe { cstr(types) },
-    ) else {
+    let (Some(cls), Some(name), Some(types)) =
+        (unsafe { class(cls) }, unsafe { cstr(name) }, unsafe {
+            cstr(types)
+        })
+    else {
         return false;
     };
     cls.add_ivar(name, size, alignment, types)
@@ -250,7 +254,10 @@ pub unsafe extern "C" fn class_addProtocol(cls: *const c_void, proto: *const c_v
     cls.add_protocol(proto)
 }
 
-pub unsafe extern "C" fn class_conformsToProtocol(cls: *const c_void, proto: *const c_void) -> bool {
+pub unsafe extern "C" fn class_conformsToProtocol(
+    cls: *const c_void,
+    proto: *const c_void,
+) -> bool {
     // SAFETY: the caller's obligation.
     let (Some(cls), Some(proto)) = (unsafe { class(cls) }, unsafe { protocol(proto) }) else {
         return false;
@@ -411,7 +418,9 @@ pub unsafe extern "C" fn class_copyPropertyList(
     out_count: *mut u32,
 ) -> *mut *const c_void {
     // SAFETY: the caller's obligation.
-    let properties = unsafe { class(cls) }.map(|c| c.properties()).unwrap_or_default();
+    let properties = unsafe { class(cls) }
+        .map(|c| c.properties())
+        .unwrap_or_default();
     let values: Vec<*const c_void> = properties
         .into_iter()
         .map(|p| p as *const crate::property::Property as *const c_void)
@@ -480,7 +489,8 @@ unsafe fn attribute_string(attributes: *const PropertyAttribute, count: u32) -> 
         // SAFETY: the caller's obligation.
         let entry = unsafe { &*attributes.add(i) };
         // SAFETY: as above.
-        let (Some(name), value) = (unsafe { cstr(entry.name) }, unsafe { cstr(entry.value) }) else {
+        let (Some(name), value) = (unsafe { cstr(entry.name) }, unsafe { cstr(entry.value) })
+        else {
             continue;
         };
         let mut field = name.to_bytes().to_vec();

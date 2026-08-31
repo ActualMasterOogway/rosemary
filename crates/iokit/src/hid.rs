@@ -135,7 +135,9 @@ impl Device {
         self.handles
             .get()
             .and_then(|h| h.get(cookie as usize))
-            .map_or(std::ptr::null(), |r| r as *const _ as *const std::ffi::c_void)
+            .map_or(std::ptr::null(), |r| {
+                r as *const _ as *const std::ffi::c_void
+            })
     }
 
     pub fn element(&self, cookie: u32) -> Option<&Element> {
@@ -273,9 +275,20 @@ mod tests {
         let axes: Vec<u32> = elements[1..7].iter().map(|e| e.usage).collect();
         assert_eq!(
             axes,
-            vec![usage::X, usage::Y, usage::Z, usage::RX, usage::RY, usage::RZ]
+            vec![
+                usage::X,
+                usage::Y,
+                usage::Z,
+                usage::RX,
+                usage::RY,
+                usage::RZ
+            ]
         );
-        assert!(elements[1..7].iter().all(|e| e.kind == element_type::INPUT_AXIS));
+        assert!(
+            elements[1..7]
+                .iter()
+                .all(|e| e.kind == element_type::INPUT_AXIS)
+        );
         assert_eq!(elements[1].logical_min, -32768);
         assert_eq!(elements[1].logical_max, 32767);
 
@@ -288,7 +301,12 @@ mod tests {
         // the same element later.
         assert_eq!(elements[8].page, page::BUTTON);
         assert_eq!(elements[8].usage, 1);
-        assert!(elements.iter().enumerate().all(|(i, e)| e.cookie == i as u32));
+        assert!(
+            elements
+                .iter()
+                .enumerate()
+                .all(|(i, e)| e.cookie == i as u32)
+        );
     }
 
     /// A hat's bitfield becomes HID's clockwise-from-north direction, and

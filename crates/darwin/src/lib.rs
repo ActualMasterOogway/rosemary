@@ -8,12 +8,12 @@ pub mod errno;
 pub mod fcntl;
 pub mod ioctl;
 pub mod locale;
-pub mod malloc;
 pub mod mach;
+pub mod malloc;
 pub mod math;
 pub mod passthrough;
-pub mod pthread;
 pub mod path;
+pub mod pthread;
 pub mod signal;
 pub mod stat;
 pub mod stdio;
@@ -198,12 +198,7 @@ pub fn is_implemented(symbol: &str) -> bool {
 /// The runtime above intercepts all four for an emulated guest and never reaches
 /// the published address; a native guest calls it, so it is a real implementation
 /// rather than a placeholder.
-pub const SHIMMED_ABOVE: &[&str] = &[
-    "__sincosf_stret",
-    "__sincos_stret",
-    "__divdc3",
-    "__mulsc3",
-];
+pub const SHIMMED_ABOVE: &[&str] = &["__sincosf_stret", "__sincos_stret", "__divdc3", "__mulsc3"];
 
 pub fn provider() -> machish::resolve::SyntheticDylib {
     let mut lib = machish::resolve::SyntheticDylib::new("<darwin>");
@@ -262,7 +257,10 @@ mod tests {
             .copied()
             .filter(|n| divergent::contains(n))
             .collect();
-        assert!(overlap.is_empty(), "claimed safe and also denied: {overlap:?}");
+        assert!(
+            overlap.is_empty(),
+            "claimed safe and also denied: {overlap:?}"
+        );
     }
 
     /// Nor can a name this crate implements be claimed as a passthrough: the whole

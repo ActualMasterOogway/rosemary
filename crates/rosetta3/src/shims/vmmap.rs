@@ -79,12 +79,8 @@ mod arenas {
         let mut p = cell.load(Ordering::Acquire);
         if p.is_null() {
             let fresh = Box::into_raw(Box::new(std::array::from_fn(|_| Slot::empty())));
-            p = match cell.compare_exchange(
-                null_mut(),
-                fresh,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
+            p = match cell.compare_exchange(null_mut(), fresh, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => fresh,
                 // SAFETY: the losing allocation was never published.
                 Err(won) => {
@@ -99,7 +95,9 @@ mod arenas {
 
     /// Record `[base, base + len)` as memory the guest means to execute.
     pub fn push(base: u64, len: u64) {
-        let Some(end) = base.checked_add(len) else { return };
+        let Some(end) = base.checked_add(len) else {
+            return;
+        };
         if base == 0 || len == 0 || find(base).is_some_and(|(_, e)| end <= e) {
             return;
         }
@@ -330,7 +328,10 @@ mod tests {
         });
 
         for i in 0..N {
-            assert_eq!(arena_at(BASE + i * 0x2000), Some((BASE + i * 0x2000, 0x1000)));
+            assert_eq!(
+                arena_at(BASE + i * 0x2000),
+                Some((BASE + i * 0x2000, 0x1000))
+            );
             assert!(!contains(BASE + i * 0x2000 + 0x1000));
         }
     }

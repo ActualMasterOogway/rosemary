@@ -120,12 +120,7 @@ unsafe extern "C" fn color_with_rgba(
     make(red, green, blue, alpha)
 }
 
-unsafe extern "C" fn color_with_white(
-    _class: Id,
-    _sel: Sel,
-    white: CGFloat,
-    alpha: CGFloat,
-) -> Id {
+unsafe extern "C" fn color_with_white(_class: Id, _sel: Sel, white: CGFloat, alpha: CGFloat) -> Id {
     make(white, white, white, alpha)
 }
 
@@ -154,7 +149,12 @@ unsafe extern "C" fn get_components(
     // SAFETY: four out-parameters, each null or writable, as the method's
     // contract says.
     unsafe {
-        for (slot, value) in [(red, c.red), (green, c.green), (blue, c.blue), (alpha, c.alpha)] {
+        for (slot, value) in [
+            (red, c.red),
+            (green, c.green),
+            (blue, c.blue),
+            (alpha, c.alpha),
+        ] {
             if !slot.is_null() {
                 *slot = value;
             }
@@ -166,11 +166,7 @@ pub(crate) fn install() {
     let class = objc::class::lookup(c"NSColor").expect("declared before its methods");
     let meta = class.metaclass();
     for (name, ..) in NAMED {
-        meta.replace_method(
-            objc::sel::get(name),
-            named as *const c_void,
-            c"@16@0:8",
-        );
+        meta.replace_method(objc::sel::get(name), named as *const c_void, c"@16@0:8");
     }
     class_methods!(class, {
         "colorWithCalibratedRed:green:blue:alpha:" => color_with_rgba, c"@48@0:8d16d24d32d40";
@@ -218,6 +214,9 @@ mod tests {
         // SAFETY: a live object.
         assert_eq!(unsafe { components(string) }, (0.0, 0.0, 0.0, 1.0));
         // SAFETY: null is allowed.
-        assert_eq!(unsafe { components(std::ptr::null_mut()) }, (0.0, 0.0, 0.0, 1.0));
+        assert_eq!(
+            unsafe { components(std::ptr::null_mut()) },
+            (0.0, 0.0, 0.0, 1.0)
+        );
     }
 }

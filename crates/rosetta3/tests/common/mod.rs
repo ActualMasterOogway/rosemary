@@ -2450,7 +2450,6 @@ pub fn host_macho(path: &str) -> bool {
     )
 }
 
-
 /// The AppKit fixture: a program whose `main` is `NSApplicationMain`.
 ///
 /// Written so each step of the launch fails on its own line rather than as one
@@ -2603,7 +2602,14 @@ pub fn build_app(name: &str, source: &str, info: &str, nib: Option<&str>) -> Opt
     std::fs::write(&src, source).ok()?;
     let out = contents.join("MacOS").join(name);
     let status = Command::new("cc")
-        .args(["-arch", "x86_64", "-x", "objective-c", "-framework", "Cocoa"])
+        .args([
+            "-arch",
+            "x86_64",
+            "-x",
+            "objective-c",
+            "-framework",
+            "Cocoa",
+        ])
         .arg("-o")
         .arg(&out)
         .arg(&src)
@@ -2664,13 +2670,7 @@ int main(void) {
 pub fn globals_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     BUILT
-        .get_or_init(|| {
-            build_x86_64(
-                "cfglobals",
-                GLOBALS_C,
-                &["-framework", "CoreFoundation"],
-            )
-        })
+        .get_or_init(|| build_x86_64("cfglobals", GLOBALS_C, &["-framework", "CoreFoundation"]))
         .clone()
 }
 

@@ -68,11 +68,7 @@ unsafe extern "C" fn utf8_string(receiver: Id, _sel: Sel) -> *const c_char {
     unsafe { api::CFStringGetCStringPtr(receiver as CFTypeRef, encoding::UTF8) }
 }
 
-unsafe extern "C" fn c_string_using_encoding(
-    receiver: Id,
-    _sel: Sel,
-    ns: usize,
-) -> *const c_char {
+unsafe extern "C" fn c_string_using_encoding(receiver: Id, _sel: Sel, ns: usize) -> *const c_char {
     // SAFETY: an `NSString`.
     unsafe { api::CFStringGetCStringPtr(receiver as CFTypeRef, cf_encoding(ns)) }
 }
@@ -129,8 +125,6 @@ unsafe extern "C" fn copy(receiver: Id, _sel: Sel) -> Id {
     // and why `-copy` on one is free.
     objc::arc::retain(receiver)
 }
-
-
 
 unsafe extern "C" fn string_with_utf8(_class: Id, _sel: Sel, cstr: *const c_char) -> Id {
     // SAFETY: a NUL-terminated string or null.
@@ -240,13 +234,8 @@ unsafe extern "C" fn init_with_bytes(
     // SAFETY: the caller says `bytes` covers `length` bytes.
     unsafe {
         objc::arc::release(receiver);
-        api::CFStringCreateWithBytes(
-            std::ptr::null(),
-            bytes,
-            length as isize,
-            cf_encoding(ns),
-            0,
-        ) as Id
+        api::CFStringCreateWithBytes(std::ptr::null(), bytes, length as isize, cf_encoding(ns), 0)
+            as Id
     }
 }
 
@@ -414,7 +403,11 @@ unsafe extern "C" fn substring_to_index(receiver: Id, _sel: Sel, index: usize) -
 unsafe extern "C" fn substring_with_range(receiver: Id, _sel: Sel, range: NSRange) -> Id {
     // SAFETY: an `NSString`.
     let whole = unsafe { bytes(receiver) };
-    slice(&whole, range.location, range.location.saturating_add(range.length))
+    slice(
+        &whole,
+        range.location,
+        range.location.saturating_add(range.length),
+    )
 }
 
 unsafe extern "C" fn lowercase(receiver: Id, _sel: Sel) -> Id {
@@ -478,8 +471,6 @@ fn parse_leading(bytes: &[u8]) -> Option<i64> {
         .unwrap_or(text.len());
     text[..end].parse().ok()
 }
-
-
 
 unsafe extern "C" fn last_path_component(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: an `NSString`.
@@ -763,10 +754,9 @@ mod tests {
             )
         };
         // SAFETY: an array this call made.
-        let array = unsafe {
-            corefoundation::collections::array(parts as corefoundation::base::CFTypeRef)
-        }
-        .expect("an array");
+        let array =
+            unsafe { corefoundation::collections::array(parts as corefoundation::base::CFTypeRef) }
+                .expect("an array");
         assert_eq!(array.values.len(), 3);
 
         // Sent rather than called: `-componentsJoinedByString:` is installed by
@@ -776,7 +766,11 @@ mod tests {
         let joined = unsafe {
             let f: unsafe extern "C" fn(Id, Sel, Id) -> Id =
                 std::mem::transmute(objc::msg::entry());
-            f(parts, objc::sel::get("componentsJoinedByString:"), separator)
+            f(
+                parts,
+                objc::sel::get("componentsJoinedByString:"),
+                separator,
+            )
         };
         // SAFETY: a string.
         assert_eq!(unsafe { bytes(joined) }, b"alpha::beta::gamma");

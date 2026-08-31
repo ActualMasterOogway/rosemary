@@ -193,7 +193,10 @@ macro_rules! entries {
 #[cold]
 #[inline(never)]
 fn missing(name: &str) -> ! {
-    panic!("the {} Objective-C runtime does not define {name}", backend())
+    panic!(
+        "the {} Objective-C runtime does not define {name}",
+        backend()
+    )
 }
 
 entries! {

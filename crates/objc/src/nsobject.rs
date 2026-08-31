@@ -26,11 +26,21 @@ pub(crate) fn install() {
     // root metaclass's superclass is the root class: `[NSObject class]` has to
     // resolve from either side.
     add(meta, "alloc", alloc as Imp, c"@16@0:8");
-    add(meta, "allocWithZone:", alloc_with_zone as Imp, c"@24@0:8^v16");
+    add(
+        meta,
+        "allocWithZone:",
+        alloc_with_zone as Imp,
+        c"@24@0:8^v16",
+    );
     add(meta, "new", new as Imp, c"@16@0:8");
     add(meta, "class", class_of_class as Imp, c"#16@0:8");
     add(meta, "superclass", superclass as Imp, c"#16@0:8");
-    add(meta, "instancesRespondToSelector:", instances_respond as Imp, c"B24@0:8:16");
+    add(
+        meta,
+        "instancesRespondToSelector:",
+        instances_respond as Imp,
+        c"B24@0:8:16",
+    );
     add(meta, "conformsToProtocol:", conforms as Imp, c"B24@0:8@16");
     add(meta, "initialize", initialize as Imp, c"v16@0:8");
     add(meta, "load", initialize as Imp, c"v16@0:8");
@@ -47,10 +57,25 @@ pub(crate) fn install() {
     add(class, "isEqual:", is_equal as Imp, c"B24@0:8@16");
     add(class, "hash", hash as Imp, c"Q16@0:8");
     add(class, "isKindOfClass:", is_kind_of as Imp, c"B24@0:8#16");
-    add(class, "isMemberOfClass:", is_member_of as Imp, c"B24@0:8#16");
+    add(
+        class,
+        "isMemberOfClass:",
+        is_member_of as Imp,
+        c"B24@0:8#16",
+    );
     add(class, "respondsToSelector:", responds as Imp, c"B24@0:8:16");
-    add(class, "conformsToProtocol:", instance_conforms as Imp, c"B24@0:8@16");
-    add(class, "doesNotRecognizeSelector:", does_not_recognize as Imp, c"v24@0:8:16");
+    add(
+        class,
+        "conformsToProtocol:",
+        instance_conforms as Imp,
+        c"B24@0:8@16",
+    );
+    add(
+        class,
+        "doesNotRecognizeSelector:",
+        does_not_recognize as Imp,
+        c"v24@0:8:16",
+    );
 
     crate::class::register_pair(class);
 }

@@ -115,7 +115,10 @@ const OWNER: u64 = 16;
 impl Kind {
     /// Whether an object of this kind has room for the [`OWNER`] word.
     const fn tracks_owner(self) -> bool {
-        matches!(self, Kind::Mutex | Kind::Cond | Kind::RwLock | Kind::RwLockAttr)
+        matches!(
+            self,
+            Kind::Mutex | Kind::Cond | Kind::RwLock | Kind::RwLockAttr
+        )
     }
 
     /// The signature a static initializer for this kind writes, if it has one.
@@ -206,7 +209,9 @@ impl Record {
         loop {
             let sig = self.word(0).load(Ordering::Acquire);
             if sig == ours(self.kind) {
-                return self.owner_matches().then(|| self.word(PAYLOAD).load(Ordering::Relaxed));
+                return self
+                    .owner_matches()
+                    .then(|| self.word(PAYLOAD).load(Ordering::Relaxed));
             }
             if sig == BUSY {
                 // Another thread is building this object. Short by construction: it
@@ -286,7 +291,10 @@ impl Record {
     /// anything the guest can cause: the sizes are compile-time constants and the
     /// callers are all in this module.
     pub fn slot(&self, index: usize, of_size: usize) -> &AtomicU64 {
-        assert!((index + 1) * 8 <= of_size, "slot {index} is past a {of_size}-byte object");
+        assert!(
+            (index + 1) * 8 <= of_size,
+            "slot {index} is past a {of_size}-byte object"
+        );
         self.word(index as u64 * 8)
     }
 
@@ -371,7 +379,10 @@ mod tests {
 
         let c = libc::PTHREAD_COND_INITIALIZER;
         // SAFETY: as above.
-        assert_eq!(unsafe { *(&c as *const libc::pthread_cond_t as *const u64) }, sig::COND_INIT);
+        assert_eq!(
+            unsafe { *(&c as *const libc::pthread_cond_t as *const u64) },
+            sig::COND_INIT
+        );
     }
 
     /// A record must fit inside the smallest object of its kind, or it writes past
@@ -392,7 +403,10 @@ mod tests {
                 true => OWNER as usize + 8,
                 false => PAYLOAD as usize + 8,
             };
-            assert!(bytes >= needed, "{kind:?} needs {needed} bytes and has {bytes}");
+            assert!(
+                bytes >= needed,
+                "{kind:?} needs {needed} bytes and has {bytes}"
+            );
         }
     }
 

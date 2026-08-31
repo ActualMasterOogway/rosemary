@@ -168,10 +168,13 @@ pub unsafe extern "C" fn mutexattr_settype(at: u64, kind: u64) -> i32 {
     if mutex_type_to_host(kind).is_none() {
         return err::EINVAL;
     }
-    let mut settings = MutexAttr::unpacked_public(r.cell().load(std::sync::atomic::Ordering::Relaxed));
+    let mut settings =
+        MutexAttr::unpacked_public(r.cell().load(std::sync::atomic::Ordering::Relaxed));
     settings.kind = kind;
-    r.cell()
-        .store(settings.packed_public(), std::sync::atomic::Ordering::Relaxed);
+    r.cell().store(
+        settings.packed_public(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     0
 }
 
@@ -235,10 +238,13 @@ macro_rules! pshared {
 }
 
 fn store_mutex_pshared(r: &Record, shared: i32) {
-    let mut settings = MutexAttr::unpacked_public(r.cell().load(std::sync::atomic::Ordering::Relaxed));
+    let mut settings =
+        MutexAttr::unpacked_public(r.cell().load(std::sync::atomic::Ordering::Relaxed));
     settings.pshared = shared;
-    r.cell()
-        .store(settings.packed_public(), std::sync::atomic::Ordering::Relaxed);
+    r.cell().store(
+        settings.packed_public(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 fn store_simple_pshared(r: &Record, shared: i32) {
@@ -487,7 +493,10 @@ pub unsafe extern "C" fn getspecific(key: u64) -> u64 {
 pub unsafe extern "C" fn setspecific(key: u64, value: u64) -> i32 {
     // SAFETY: as above.
     unsafe {
-        libc::pthread_setspecific(key as libc::pthread_key_t, value as usize as *const libc::c_void)
+        libc::pthread_setspecific(
+            key as libc::pthread_key_t,
+            value as usize as *const libc::c_void,
+        )
     }
 }
 
@@ -719,27 +728,45 @@ mod tests {
                 0
             );
             let mut detach = 0i32;
-            assert_eq!(attr::imp::attr_getdetachstate(a.at(), &mut detach as *mut _ as u64), 0);
+            assert_eq!(
+                attr::imp::attr_getdetachstate(a.at(), &mut detach as *mut _ as u64),
+                0
+            );
             assert_eq!(detach, PTHREAD_CREATE_DETACHED);
 
             assert_eq!(attr::imp::attr_setstacksize(a.at(), 1 << 20), 0);
             let mut size = 0usize;
-            assert_eq!(attr::imp::attr_getstacksize(a.at(), &mut size as *mut _ as u64), 0);
+            assert_eq!(
+                attr::imp::attr_getstacksize(a.at(), &mut size as *mut _ as u64),
+                0
+            );
             assert_eq!(size, 1 << 20);
 
             assert_eq!(attr::imp::attr_setguardsize(a.at(), 0), 0);
             let mut guard = 12345usize;
-            assert_eq!(attr::imp::attr_getguardsize(a.at(), &mut guard as *mut _ as u64), 0);
+            assert_eq!(
+                attr::imp::attr_getguardsize(a.at(), &mut guard as *mut _ as u64),
+                0
+            );
             assert_eq!(guard, 0, "a guest may ask for no guard at all");
 
-            assert_eq!(attr::imp::attr_setscope(a.at(), PTHREAD_SCOPE_PROCESS as u64), 0);
+            assert_eq!(
+                attr::imp::attr_setscope(a.at(), PTHREAD_SCOPE_PROCESS as u64),
+                0
+            );
             let mut scope = 0i32;
-            assert_eq!(attr::imp::attr_getscope(a.at(), &mut scope as *mut _ as u64), 0);
+            assert_eq!(
+                attr::imp::attr_getscope(a.at(), &mut scope as *mut _ as u64),
+                0
+            );
             assert_eq!(scope, PTHREAD_SCOPE_PROCESS);
 
             assert_eq!(attr::imp::attr_setschedpolicy(a.at(), SCHED_RR as u64), 0);
             let mut policy = 0i32;
-            assert_eq!(attr::imp::attr_getschedpolicy(a.at(), &mut policy as *mut _ as u64), 0);
+            assert_eq!(
+                attr::imp::attr_getschedpolicy(a.at(), &mut policy as *mut _ as u64),
+                0
+            );
             assert_eq!(policy, SCHED_RR, "Darwin's SCHED_RR, not the host's");
 
             assert_eq!(attr::imp::attr_destroy(a.at()), 0);
@@ -759,12 +786,19 @@ mod tests {
             assert_eq!(attr::imp::attr_setstack(a.at(), base, size), 0);
 
             let mut top = 0u64;
-            assert_eq!(attr::imp::attr_getstackaddr(a.at(), &mut top as *mut _ as u64), 0);
+            assert_eq!(
+                attr::imp::attr_getstackaddr(a.at(), &mut top as *mut _ as u64),
+                0
+            );
             assert_eq!(top, base + size, "getstackaddr reports the top");
 
             let (mut low, mut got) = (0u64, 0usize);
             assert_eq!(
-                attr::imp::attr_getstack(a.at(), &mut low as *mut _ as u64, &mut got as *mut _ as u64),
+                attr::imp::attr_getstack(
+                    a.at(),
+                    &mut low as *mut _ as u64,
+                    &mut got as *mut _ as u64
+                ),
                 0
             );
             assert_eq!((low, got as u64), (base, size), "getstack reports the base");
@@ -780,7 +814,10 @@ mod tests {
         unsafe {
             assert_eq!(attr::imp::attr_init(a.at()), 0);
             let mut size = 0usize;
-            assert_eq!(attr::imp::attr_getstacksize(a.at(), &mut size as *mut _ as u64), 0);
+            assert_eq!(
+                attr::imp::attr_getstacksize(a.at(), &mut size as *mut _ as u64),
+                0
+            );
             assert_eq!(size, 512 * 1024, "Darwin's default thread stack");
         }
     }
@@ -893,7 +930,11 @@ mod tests {
         // SAFETY: as above.
         unsafe {
             assert_eq!(sync::mutex_lock(m.at()), 0);
-            assert_eq!(sync::mutex_lock(m.at()), 0, "the initializer said recursive");
+            assert_eq!(
+                sync::mutex_lock(m.at()),
+                0,
+                "the initializer said recursive"
+            );
             assert_eq!(sync::mutex_unlock(m.at()), 0);
             assert_eq!(sync::mutex_unlock(m.at()), 0);
         }
@@ -960,7 +1001,11 @@ mod tests {
         // record - which is exactly what the owner word exists to catch.
         unsafe {
             assert_eq!(sync::mutex_lock(copy.at()), err::EINVAL);
-            assert_eq!(sync::mutex_lock(original.at()), 0, "the original still works");
+            assert_eq!(
+                sync::mutex_lock(original.at()),
+                0,
+                "the original still works"
+            );
             assert_eq!(sync::mutex_unlock(original.at()), 0);
             assert_eq!(sync::mutex_destroy(original.at()), 0);
         }
@@ -978,7 +1023,10 @@ mod tests {
                 0
             );
             let mut shared = 0i32;
-            assert_eq!(mutexattr_getpshared(attr.at(), &mut shared as *mut _ as u64), 0);
+            assert_eq!(
+                mutexattr_getpshared(attr.at(), &mut shared as *mut _ as u64),
+                0
+            );
             assert_eq!(shared, PTHREAD_PROCESS_SHARED);
             assert_eq!(sync::mutex_init(m.at(), attr.at()), err::ENOTSUP);
         }
@@ -1064,7 +1112,10 @@ mod tests {
                 &interval as *const libc::timespec as usize as u64,
             );
             assert_eq!(rc, libc::ETIMEDOUT);
-            assert!(start.elapsed() >= std::time::Duration::from_millis(15), "it waited");
+            assert!(
+                start.elapsed() >= std::time::Duration::from_millis(15),
+                "it waited"
+            );
             assert_eq!(sync::mutex_unlock(m.at()), 0);
             assert_eq!(sync::cond_destroy(c.at()), 0);
             assert_eq!(sync::mutex_destroy(m.at()), 0);
@@ -1095,7 +1146,11 @@ mod tests {
             std::thread::spawn(move || {
                 // SAFETY: a live lock shared with the holding thread.
                 unsafe {
-                    assert_eq!(sync::rwlock_trywrlock(l.0.at()), libc::EBUSY, "a reader holds it");
+                    assert_eq!(
+                        sync::rwlock_trywrlock(l.0.at()),
+                        libc::EBUSY,
+                        "a reader holds it"
+                    );
                     assert_eq!(sync::rwlock_tryrdlock(l.0.at()), 0, "readers share");
                     assert_eq!(sync::rwlock_unlock(l.0.at()), 0);
                 }
@@ -1176,7 +1231,11 @@ mod tests {
             t.join().expect("a once thread");
         }
         assert_eq!(ran.load(Ordering::SeqCst), 1, "the routine ran once");
-        assert_eq!(finished.load(Ordering::SeqCst), 8, "and everyone got through");
+        assert_eq!(
+            finished.load(Ordering::SeqCst),
+            8,
+            "and everyone got through"
+        );
     }
 
     #[test]
@@ -1203,7 +1262,10 @@ mod tests {
                 0
             );
             assert_eq!(back, PTHREAD_CANCEL_DISABLE, "what was just set");
-            assert_eq!(setcancelstate(99, core::ptr::null_mut::<i32>() as u64), err::EINVAL);
+            assert_eq!(
+                setcancelstate(99, core::ptr::null_mut::<i32>() as u64),
+                err::EINVAL
+            );
         }
     }
 

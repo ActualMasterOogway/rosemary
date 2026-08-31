@@ -71,4 +71,3 @@ fn say_image_map(exec: &dyn Execution) {
         }
     }
 }
-

@@ -12,8 +12,7 @@ mod why {
     pub const MACH: &str = "Mach is a Darwin kernel interface";
     pub const SYSCTL: &str = "reimplemented; see darwin::sysctl";
     pub const OBJC: &str = "the Objective-C runtime is macOS-only";
-    pub const PTHREAD: &str =
-        "no Darwin-compatible implementation; see darwin::pthread for the family this \
+    pub const PTHREAD: &str = "no Darwin-compatible implementation; see darwin::pthread for the family this \
          crate does implement";
 }
 
@@ -198,7 +197,11 @@ mod tests {
     fn a_divergence_is_named_rather_than_passed_through() {
         assert_eq!(reason("readdir"), Some(DIRENT));
         assert_eq!(reason("mach_port_deallocate"), Some(MACH));
-        assert_eq!(reason("strlen"), None, "a genuine passthrough is not denied");
+        assert_eq!(
+            reason("strlen"),
+            None,
+            "a genuine passthrough is not denied"
+        );
     }
 
     /// The families denied by prefix have holes in them, and the holes are the
@@ -207,7 +210,11 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "macos"))]
     fn a_name_this_crate_implements_is_not_denied_by_its_family() {
-        for name in ["mach_absolute_time", "mach_timebase_info", "dispatch_once_f"] {
+        for name in [
+            "mach_absolute_time",
+            "mach_timebase_info",
+            "dispatch_once_f",
+        ] {
             assert_eq!(reason(name), None, "{name} is implemented and still denied");
         }
         // And the families around them are still shut.

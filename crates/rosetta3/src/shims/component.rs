@@ -63,7 +63,10 @@ fn find_next_component(
         // SAFETY: null or a readable descriptor in guest memory, which is
         // identity-mapped; `coreaudio` copies it and dereferences nothing else.
         ctx.rax = unsafe {
-            coreaudio::AudioComponentFindNext(ctx.rdi as *mut core::ffi::c_void, ctx.rsi as *const _)
+            coreaudio::AudioComponentFindNext(
+                ctx.rdi as *mut core::ffi::c_void,
+                ctx.rsi as *const _,
+            )
         } as u64;
         return Ok(());
     }

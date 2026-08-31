@@ -7,6 +7,7 @@ use std::ops::Range;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
+use crate::cxxlib::Flavor;
 use machish::exports::ExportTable;
 use machish::image::MachObject;
 use machish::install_name::PathContext;
@@ -217,7 +218,10 @@ mod synthetic {
     /// this process's heap, and a guest image is mapped elsewhere.
     pub fn register(names: &[&str], symbol: fn(&str) -> Option<u64>) {
         let mut libraries = LIBRARIES.lock().unwrap_or_else(|e| e.into_inner());
-        if libraries.iter().any(|l| l.names.iter().any(|n| n == names[0])) {
+        if libraries
+            .iter()
+            .any(|l| l.names.iter().any(|n| n == names[0]))
+        {
             return;
         }
         let leaked: &'static Library = Box::leak(Box::new(Library {
@@ -476,8 +480,7 @@ pub fn function_starts_in(range: std::ops::Range<u64>) -> Vec<u64> {
     // scanning that image's function table. See
     // [`crate::program::Program::function_starts_in`].
     find(|image| {
-        let starts: Vec<u64> =
-            crate::program::starts_within(&image.functions, &range).collect();
+        let starts: Vec<u64> = crate::program::starts_within(&image.functions, &range).collect();
         (!starts.is_empty()).then_some(starts)
     })
     .unwrap_or_default()
@@ -526,7 +529,6 @@ pub fn loaded() -> usize {
     IMAGE_COUNT.load(Ordering::Acquire)
 }
 
-
 /// Load `path` as a guest image, or return the handle it already has.
 pub fn open(path: &str) -> std::result::Result<u64, String> {
     // A library this runtime *is* has no file, so this has to come before
@@ -548,7 +550,7 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
 
     let mut memory = MmapSpace::new();
     // Vendored libc++ ahead of the filesystem; see [`crate::cxxlib`].
-    let mut source = crate::cxxlib::source();
+    let mut source = crate::cxxlib::source(Flavor::Intel);
     let hosts = HostProviders::new();
     // Everything already loaded, which is what dyld resolves a new image
     // against.
@@ -570,12 +572,16 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
         .map_err(|e| format!("{resolved}: {e}"))?;
 
     // The same repair the program's own link needs, for the same reason.
-    crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory)
+    crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory, Flavor::Intel)
         .map_err(|e| format!("{resolved}: unwinder: {e}"))?;
-    crate::cxxlib::bind_cxxabi_to_the_vendored_one(&mut report, &mut memory)
+    crate::cxxlib::bind_cxxabi_to_the_vendored_one(&mut report, &mut memory, Flavor::Intel)
         .map_err(|e| format!("{resolved}: cxxabi: {e}"))?;
-    crate::cxxlib::bind_objc_exceptions_to_the_vendored_cxxabi(&mut report, &mut memory)
-        .map_err(|e| format!("{resolved}: objc exceptions: {e}"))?;
+    crate::cxxlib::bind_objc_exceptions_to_the_vendored_cxxabi(
+        &mut report,
+        &mut memory,
+        Flavor::Intel,
+    )
+    .map_err(|e| format!("{resolved}: objc exceptions: {e}"))?;
 
     // Say what did not resolve, here, rather than letting the guest find out by
     // calling it.
@@ -872,7 +878,6 @@ fn rpaths_of(path: &str) -> Vec<String> {
     object.rpaths().map(|r| r.to_string()).collect()
 }
 
-
 /// The address `name` has in `handle`, as `dlsym` reports it.
 fn lookup(handle: u64, name: &str) -> Option<u64> {
     // A handle for a library this runtime is. Scoped: a guest that opened one
@@ -1042,7 +1047,6 @@ pub fn native_symbol_at(host: u64) -> Option<&'static ImportSite> {
         .map(|i| view[i].1)
 }
 
-
 /// The `add image` callbacks the guest has registered, as **thunks**.
 static ADD_IMAGE: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
@@ -1129,7 +1133,6 @@ pub fn shim_for_callbacks(name: &str) -> Option<crate::signal::Shim> {
         _ => return None,
     })
 }
-
 
 fn set_error(message: String) {
     *ERROR.lock().unwrap_or_else(|e| e.into_inner()) = CString::new(message).ok();

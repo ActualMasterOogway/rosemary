@@ -3,12 +3,12 @@
 use machish::image::EntryPoint;
 use machish::loader::Loader;
 use machish::memory::MmapSpace;
-use machish::namespace::FsDylibSource;
 use machish::report::LinkReport;
 use machish::resolve::{NativeDylibProvider, SymbolProvider, SyntheticDylib, eager_binding_shims};
 use machish::spec::constants::{CPU_SUBTYPE_ARM64E, subtype_of};
 use machish::spec::{MachSpec, NativelyExecutable};
 
+use crate::cxxlib;
 use crate::exec::Execution;
 use crate::stack::GuestStack;
 use crate::vm::VmError;
@@ -62,14 +62,6 @@ pub const HOST_SPEC: HostSpec = HostRunnable(NativelyExecutable(machish::spec::a
 /// On aarch64 Linux it is false - Darwin arm64 code reads `TPIDRRO_EL0`, which
 /// Linux does not let userspace write - so a universal Mach-O there takes the
 /// emulated backend's x86-64 slice instead.
-/// Whether this host needs [`crate::cxxlib`]'s vendored C++ runtime rather than
-/// the one on its own filesystem.
-///
-/// The vendored images are x86-64 Mach-O, so they can only stand in where that is
-/// also the host's architecture - which off Darwin is the only architecture the
-/// native backend runs on anyway, for [`runnable`]'s reason.
-const VENDORED_CXX: bool = cfg!(all(not(target_os = "macos"), target_arch = "x86_64"));
-
 pub fn runnable(slice: &machish::fat::Slice) -> bool {
     darwin::tls::can_enter_darwin()
         && slice.cputype == HostSpec::CPU_TYPE
@@ -144,7 +136,16 @@ impl Native {
         // instead - including `dlopen`, or the first `dlopen("CoreFoundation")`
         // puts Apple's classes in front of a program that has ours.
         let providers: Vec<&dyn SymbolProvider> = match crate::frameworks::builtin() {
-            true => vec![&eager, &tlv, &runtime, &platform, &objc, &frameworks, &dyld, &host],
+            true => vec![
+                &eager,
+                &tlv,
+                &runtime,
+                &platform,
+                &objc,
+                &frameworks,
+                &dyld,
+                &host,
+            ],
             false => vec![&eager, &tlv, &runtime, &platform, &host],
         };
 
@@ -155,50 +156,41 @@ impl Native {
             false => darwin::sysctl::GuestArch::X86_64,
         });
 
-        // Where the image's C++ runtime comes from. On macOS the real
-        // `/usr/lib/libc++.1.dylib` is on disk and is the one the image was linked
-        // against, so the filesystem is the honest answer. Off Darwin there is no
-        // such file - and a host `libstdc++` is not a substitute, because the
-        // `std::__1` names an Apple binary imports are libc++'s and nobody else's -
-        // so the vendored Intel image the emulated backend already carries stands in.
-        // It is Mach-O of this host's architecture, which is what makes it loadable
-        // here at all; see [`crate::cxxlib`].
-        let mut report = match VENDORED_CXX {
-            true => Loader::new(HOST_SPEC).link_with(
+        // The image's C++ runtime is the vendored one of this host's
+        // architecture, on macOS as well as off it. Off Darwin there is no
+        // `/usr/lib/libc++.1.dylib` to link against at all; on macOS there is,
+        // but binding to it would put the guest's C++ allocations outside
+        // [`crate::interpose`]'s reach. See [`crate::cxxlib`].
+        let mut report = Loader::new(HOST_SPEC)
+            .link_with(
                 &bytes,
                 path,
                 &mut memory,
-                &mut crate::cxxlib::source(),
+                &mut crate::cxxlib::source(cxxlib::HOST),
                 &providers,
-            ),
-            false => Loader::new(HOST_SPEC).link_with(
-                &bytes,
-                path,
-                &mut memory,
-                &mut FsDylibSource::new(),
-                &providers,
-            ),
-        }
-        .map_err(|e| VmError::Load {
-            path: path.to_string(),
-            reason: e.to_string(),
-        })?;
-
-        // The unwinder and the C++ ABI, whose names the host provider would
-        // otherwise claim with its own incompatible implementations. Before
-        // anything reads the report, and in the emulated backend's order.
-        if VENDORED_CXX {
-            let load = |e: machish::Error| VmError::Load {
+            )
+            .map_err(|e| VmError::Load {
                 path: path.to_string(),
                 reason: e.to_string(),
-            };
-            crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory)
-                .map_err(load)?;
-            crate::cxxlib::bind_cxxabi_to_the_vendored_one(&mut report, &mut memory)
-                .map_err(load)?;
-            crate::cxxlib::bind_objc_exceptions_to_the_vendored_cxxabi(&mut report, &mut memory)
-                .map_err(load)?;
-        }
+            })?;
+
+        // The unwinder and the C++ ABI, whose names the host provider would
+        // otherwise claim with its own implementations. Before anything reads
+        // the report, and in the emulated backend's order.
+        let load = |e: machish::Error| VmError::Load {
+            path: path.to_string(),
+            reason: e.to_string(),
+        };
+        crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory, cxxlib::HOST)
+            .map_err(load)?;
+        crate::cxxlib::bind_cxxabi_to_the_vendored_one(&mut report, &mut memory, cxxlib::HOST)
+            .map_err(load)?;
+        crate::cxxlib::bind_objc_exceptions_to_the_vendored_cxxabi(
+            &mut report,
+            &mut memory,
+            cxxlib::HOST,
+        )
+        .map_err(load)?;
 
         // `libmimalloc.3.dylib` replaces `free` for every image that binds it,
         // and a `malloc` from one allocator freed by the other aborts inside
@@ -267,7 +259,10 @@ impl Execution for Native {
     }
 
     fn enter_main(&self) -> Result<u64, VmError> {
-        let root = self.report.root().ok_or(VmError::NoCode { pc: 0, from: None })?;
+        let root = self
+            .report
+            .root()
+            .ok_or(VmError::NoCode { pc: 0, from: None })?;
         if let Some(EntryPoint::UnixThread { .. }) = root.entry_command {
             return Err(VmError::Unsupported {
                 what: "an LC_UNIXTHREAD entry point, which is entered on a stack of its own \

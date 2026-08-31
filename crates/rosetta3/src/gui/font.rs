@@ -74,7 +74,6 @@ impl Atlas {
     }
 }
 
-
 /// `kCGImageAlphaOnly`. One byte per texel and no colour at all, which is exactly what
 /// a coverage mask is and saves converting one out of an RGBA bitmap afterwards.
 const ALPHA_ONLY: u32 = 7;
@@ -258,7 +257,6 @@ fn rasterize(size: f32) -> Option<Atlas> {
         line_h: (up + down) as f32,
     })
 }
-
 
 /// Atlases already built, keyed by the pixel size that produced them.
 static ATLASES: Mutex<Option<HashMap<u32, &'static Atlas>>> = Mutex::new(None);

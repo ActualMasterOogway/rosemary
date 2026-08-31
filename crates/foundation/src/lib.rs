@@ -93,9 +93,8 @@ pub(crate) fn number(value: i64) -> objc::object::Id {
 
 /// A double as an autoreleased `NSNumber`.
 pub(crate) fn real(value: f64) -> objc::object::Id {
-    let n = corefoundation::collections::new_number(corefoundation::collections::Number::Float(
-        value,
-    ));
+    let n =
+        corefoundation::collections::new_number(corefoundation::collections::Number::Float(value));
     // SAFETY: a fresh object.
     unsafe { corefoundation::api::CFAutorelease(n) as objc::object::Id }
 }
@@ -277,7 +276,10 @@ mod tests {
                     .is_none()
             })
             .collect();
-        assert!(missing.is_empty(), "claimed but not registered: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "claimed but not registered: {missing:?}"
+        );
     }
 
     /// The whole of toll-free bridging, in one assertion each way: a string

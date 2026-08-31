@@ -16,7 +16,6 @@ use microlift::arch::x86_64::decode::decode_region;
 use microlift::core::srcloc::GuestCodeMap;
 use static_init::dynamic;
 
-
 /// The layout LLDB expects, from `JITLoaderGDB.cpp`:
 ///
 /// ```c
@@ -72,7 +71,6 @@ pub extern "C" fn __jit_debug_register_code() {
     std::hint::black_box(());
 }
 
-
 /// Whether this module does anything, and the one place that says so out loud.
 #[inline(always)]
 pub fn enabled() -> bool {
@@ -95,7 +93,6 @@ pub fn enabled() -> bool {
     };
     *ENABLED
 }
-
 
 static REGISTER: Mutex<()> = Mutex::new(());
 
@@ -162,7 +159,6 @@ pub fn register(
         (*descriptor).relevant_entry = std::ptr::null_mut();
     }
 }
-
 
 /// Build the Mach-O LLDB will read out of this process's memory.
 fn symfile(
@@ -363,7 +359,6 @@ fn dwarf(
     dwarf.write(&mut sections).ok()?;
     Some(sections)
 }
-
 
 /// Where a region's guest instructions ended up in its image's listing.
 #[derive(Clone)]

@@ -450,8 +450,7 @@ mod tests {
     #[test]
     fn run_services_the_run_loop_until_it_is_stopped() {
         crate::bootstrap();
-        static FIRED: std::sync::atomic::AtomicUsize =
-            std::sync::atomic::AtomicUsize::new(0);
+        static FIRED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         static APP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
         unsafe extern "C" fn perform(_info: *mut std::ffi::c_void) {

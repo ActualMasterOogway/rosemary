@@ -105,17 +105,31 @@ fn deliver(event: sdl3::video::Event) {
             // key-up for one, and a guest that treated it as a key would see
             // shift as a character.
             match is_modifier(scancode) {
-                true => send(id, "flagsChanged:", |w| Fields { kind: kind::FLAGS_CHANGED, ..fields(w) }),
-                false => send(id, match down {
-                    true => "keyDown:",
-                    false => "keyUp:",
-                }, fields),
+                true => send(id, "flagsChanged:", |w| Fields {
+                    kind: kind::FLAGS_CHANGED,
+                    ..fields(w)
+                }),
+                false => send(
+                    id,
+                    match down {
+                        true => "keyDown:",
+                        false => "keyUp:",
+                    },
+                    fields,
+                ),
             }
         }
         // Text is what `-characters` already carries. A second delivery would
         // be the same keystroke twice.
         Event::Text { .. } => {}
-        Event::MouseMotion { window: id, x, y, dx, dy, buttons } => {
+        Event::MouseMotion {
+            window: id,
+            x,
+            y,
+            dx,
+            dy,
+            buttons,
+        } => {
             let held = held_button(buttons);
             let selector = match held {
                 Some(0) => "mouseDragged:",
@@ -135,13 +149,23 @@ fn deliver(event: sdl3::video::Event) {
                 },
                 modifiers: current_modifiers(),
                 location: location(window, x, y),
-                delta: NSPoint { x: dx as f64, y: dy as f64 },
+                delta: NSPoint {
+                    x: dx as f64,
+                    y: dy as f64,
+                },
                 button: held.unwrap_or(0),
                 window,
                 ..Fields::default()
             });
         }
-        Event::MouseButton { window: id, button, down, clicks, x, y } => {
+        Event::MouseButton {
+            window: id,
+            button,
+            down,
+            clicks,
+            x,
+            y,
+        } => {
             let (selector, kind) = match (button, down) {
                 (1, true) => ("mouseDown:", kind::LEFT_MOUSE_DOWN),
                 (1, false) => ("mouseUp:", kind::LEFT_MOUSE_UP),
@@ -165,7 +189,10 @@ fn deliver(event: sdl3::video::Event) {
             send(id, "scrollWheel:", |window| Fields {
                 kind: kind::SCROLL_WHEEL,
                 modifiers: current_modifiers(),
-                delta: NSPoint { x: x as f64, y: y as f64 },
+                delta: NSPoint {
+                    x: x as f64,
+                    y: y as f64,
+                },
                 window,
                 ..Fields::default()
             });
@@ -292,7 +319,8 @@ fn post(id: u32, name: &str) {
         // `void (id, SEL, NSNotification *)`.
         let sel = objc::sel::get(selector);
         // SAFETY: null or a live object this runtime allocated.
-        if let Some(method) = unsafe { objc::object::class_of(delegate) }.and_then(|c| c.method(sel))
+        if let Some(method) =
+            unsafe { objc::object::class_of(delegate) }.and_then(|c| c.method(sel))
         {
             // SAFETY: the prototype above.
             unsafe {

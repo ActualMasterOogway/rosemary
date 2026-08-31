@@ -2,8 +2,16 @@ use objc::class::Class;
 
 static HIERARCHY: &[(&str, Option<&str>, usize)] = &[
     ("NSResponder", None, 0),
-    ("NSApplication", Some("NSResponder"), crate::application::INSTANCE_SIZE),
-    ("NSWindow", Some("NSResponder"), crate::window::INSTANCE_SIZE),
+    (
+        "NSApplication",
+        Some("NSResponder"),
+        crate::application::INSTANCE_SIZE,
+    ),
+    (
+        "NSWindow",
+        Some("NSResponder"),
+        crate::window::INSTANCE_SIZE,
+    ),
     ("NSPanel", Some("NSWindow"), 0),
     ("NSSavePanel", Some("NSPanel"), 0),
     ("NSOpenPanel", Some("NSSavePanel"), 0),
@@ -28,16 +36,32 @@ static HIERARCHY: &[(&str, Option<&str>, usize)] = &[
     ("NSColor", None, crate::color::INSTANCE_SIZE),
     ("NSImage", None, crate::image::INSTANCE_SIZE),
     ("NSImageRep", None, 0),
-    ("NSBitmapImageRep", Some("NSImageRep"), crate::image::bitmap::INSTANCE_SIZE),
+    (
+        "NSBitmapImageRep",
+        Some("NSImageRep"),
+        crate::image::bitmap::INSTANCE_SIZE,
+    ),
     ("NSFont", None, 0),
     ("NSFontManager", None, 0),
-    ("NSOpenGLContext", None, crate::opengl::CONTEXT_INSTANCE_SIZE),
-    ("NSOpenGLPixelFormat", None, crate::opengl::PIXEL_FORMAT_INSTANCE_SIZE),
+    (
+        "NSOpenGLContext",
+        None,
+        crate::opengl::CONTEXT_INSTANCE_SIZE,
+    ),
+    (
+        "NSOpenGLPixelFormat",
+        None,
+        crate::opengl::PIXEL_FORMAT_INSTANCE_SIZE,
+    ),
     ("NSPasteboard", None, 0),
     ("NSWorkspace", None, 0),
     ("NSAlert", None, 0),
     ("NSNib", None, 0),
-    ("NSTrackingArea", None, crate::cursor::TRACKING_AREA_INSTANCE_SIZE),
+    (
+        "NSTrackingArea",
+        None,
+        crate::cursor::TRACKING_AREA_INSTANCE_SIZE,
+    ),
 ];
 
 pub fn install() {

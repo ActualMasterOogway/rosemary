@@ -232,8 +232,7 @@ impl RunLoop {
         let modes = self.modes.lock().unwrap_or_else(|e| e.into_inner());
         self.names(mode).iter().all(|name| {
             modes.get(name).is_none_or(|m| {
-                m.sources.iter().all(|s| !s.is_valid())
-                    && m.timers.iter().all(|t| !t.is_valid())
+                m.sources.iter().all(|s| !s.is_valid()) && m.timers.iter().all(|t| !t.is_valid())
             })
         })
     }
@@ -435,7 +434,10 @@ mod tests {
     fn an_empty_mode_finishes_immediately() {
         let loop_ = Arc::new(RunLoop::new());
         let started = Instant::now();
-        assert_eq!(loop_.run_in_mode(DEFAULT_MODE, 30.0, false), result::FINISHED);
+        assert_eq!(
+            loop_.run_in_mode(DEFAULT_MODE, 30.0, false),
+            result::FINISHED
+        );
         assert!(started.elapsed() < Duration::from_secs(1), "it waited");
     }
 
@@ -456,7 +458,10 @@ mod tests {
 
         timer.invalidate();
         // With nothing valid left, the mode is empty.
-        assert_eq!(loop_.run_in_mode(DEFAULT_MODE, 1.0, false), result::FINISHED);
+        assert_eq!(
+            loop_.run_in_mode(DEFAULT_MODE, 1.0, false),
+            result::FINISHED
+        );
         assert_eq!(calls(), fired, "it fired after invalidation");
     }
 
@@ -489,9 +494,15 @@ mod tests {
             signal.signal();
             waker.wake();
         });
-        assert_eq!(loop_.run_in_mode(DEFAULT_MODE, 30.0, true), result::HANDLED_SOURCE);
+        assert_eq!(
+            loop_.run_in_mode(DEFAULT_MODE, 30.0, true),
+            result::HANDLED_SOURCE
+        );
         assert_eq!(calls(), 1);
-        assert!(started.elapsed() < Duration::from_secs(5), "it slept the timeout out");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "it slept the timeout out"
+        );
     }
 
     /// `CFRunLoopStop` from inside a callback ends the loop.

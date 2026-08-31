@@ -73,8 +73,7 @@ fn deallocate(object: Id) {
         let imp = method.implementation();
         // SAFETY: `-dealloc` is `void (*)(id, SEL)` in every Objective-C there
         // has ever been.
-        let f: unsafe extern "C" fn(Id, crate::sel::Sel) =
-            unsafe { std::mem::transmute(imp) };
+        let f: unsafe extern "C" fn(Id, crate::sel::Sel) = unsafe { std::mem::transmute(imp) };
         // SAFETY: as above. An override is expected to end by calling super's,
         // and `NSObject`'s is what frees.
         unsafe { f(object, dealloc) };
@@ -225,14 +224,12 @@ struct Monitor {
 
 fn monitor(object: Id) -> &'static Monitor {
     let mut guard = MONITORS.lock().unwrap_or_else(|e| e.into_inner());
-    guard
-        .entry(object as usize)
-        .or_insert_with(|| {
-            Box::leak(Box::new(Monitor {
-                owner: Mutex::new(None),
-                condition: std::sync::Condvar::new(),
-            }))
-        })
+    guard.entry(object as usize).or_insert_with(|| {
+        Box::leak(Box::new(Monitor {
+            owner: Mutex::new(None),
+            condition: std::sync::Condvar::new(),
+        }))
+    })
 }
 
 fn thread_id() -> u64 {

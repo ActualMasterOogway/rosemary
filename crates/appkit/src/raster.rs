@@ -229,8 +229,9 @@ fn tiff(bytes: &[u8]) -> Option<Bitmap> {
     // two samples, and inline for one or two.
     let (_, _, bits_count, bits_value) = field(tag::BITS_PER_SAMPLE)?;
     let bits_ok = match bits_count > 2 {
-        true => (0..bits_count as usize)
-            .all(|i| le16(bytes, bits_value as usize + i * 2) == Some(8)),
+        true => {
+            (0..bits_count as usize).all(|i| le16(bytes, bits_value as usize + i * 2) == Some(8))
+        }
         false => bits_value & 0xffff == 8,
     };
     if !bits_ok {
@@ -795,7 +796,12 @@ mod tests {
         let icns = icns_file(&[(b"is32", runs), (b"s8mk", vec![0x40; 16 * 16])]);
         let decoded = decode(&icns).expect("a classic icns");
         assert_eq!((decoded.width, decoded.height), (16, 16));
-        assert!(decoded.pixels.chunks(4).all(|p| p == [0x10, 0x20, 0x30, 0x40]));
+        assert!(
+            decoded
+                .pixels
+                .chunks(4)
+                .all(|p| p == [0x10, 0x20, 0x30, 0x40])
+        );
     }
 
     /// The entry a window wants is the largest one that is not extravagant: a
@@ -807,8 +813,8 @@ mod tests {
         // Its pixels are never inflated, because its header is enough to rule
         // it out - which is the point of choosing before decoding.
         let large = png_file(1024, 1024, 6, &[]);
-        let decoded = decode(&icns_file(&[(b"ic11", small), (b"ic10", large)]))
-            .expect("an icns of two PNGs");
+        let decoded =
+            decode(&icns_file(&[(b"ic11", small), (b"ic10", large)])).expect("an icns of two PNGs");
         assert_eq!(decoded.width, 32);
     }
 

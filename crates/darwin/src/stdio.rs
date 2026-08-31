@@ -117,6 +117,9 @@ mod tests {
     fn a_guest_s_stream_and_this_runtime_s_are_the_same_stream() {
         let at = symbol("__stdoutp").expect("stdout resolves");
         // SAFETY: `at` is the address of the host's `FILE *`.
-        assert_eq!(unsafe { *(at as usize as *const *mut libc::FILE) }, stdout());
+        assert_eq!(
+            unsafe { *(at as usize as *const *mut libc::FILE) },
+            stdout()
+        );
     }
 }

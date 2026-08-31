@@ -115,7 +115,6 @@ pub fn record_dispatch_eviction() {
     }
 }
 
-
 /// How a region entry ended.
 #[derive(Clone, Copy)]
 pub enum Exit {
@@ -417,8 +416,7 @@ pub fn report() {
              {} fill(s) evicted another address ({:.2}% of misses)",
             100.0 * hits as f64 / dispatches as f64,
             DISPATCH_EVICTIONS.load(Relaxed),
-            100.0 * DISPATCH_EVICTIONS.load(Relaxed) as f64
-                / (dispatches - hits).max(1) as f64,
+            100.0 * DISPATCH_EVICTIONS.load(Relaxed) as f64 / (dispatches - hits).max(1) as f64,
         );
     }
     let relinks = RELINKS.load(Relaxed);
@@ -543,7 +541,6 @@ pub fn report() {
         );
     }
 }
-
 
 /// Every counter above, read at one moment, for a consumer that is not stderr.
 #[derive(Clone, Default)]

@@ -414,7 +414,10 @@ mod tests {
             add_item(root, objc::sel::get("addItem:"), holder);
             add_item(file, objc::sel::get("addItem:"), wanted);
 
-            assert_eq!(item_with_tag(root, objc::sel::get("itemWithTag:"), 42), wanted);
+            assert_eq!(
+                item_with_tag(root, objc::sel::get("itemWithTag:"), 42),
+                wanted
+            );
             assert!(item_with_tag(root, objc::sel::get("itemWithTag:"), 7).is_null());
             // And the submenu knows what it hangs from.
             assert_eq!(supermenu(file, objc::sel::get("supermenu")), holder);
@@ -432,12 +435,21 @@ mod tests {
             add_item(menu, objc::sel::get("addItem:"), first);
             insert_item(menu, objc::sel::get("insertItem:atIndex:"), second, 0);
             assert_eq!(number_of_items(menu, objc::sel::get("numberOfItems")), 2);
-            assert_eq!(item_at_index(menu, objc::sel::get("itemAtIndex:"), 0), second);
-            assert_eq!(index_of_item(menu, objc::sel::get("indexOfItem:"), first), 1);
+            assert_eq!(
+                item_at_index(menu, objc::sel::get("itemAtIndex:"), 0),
+                second
+            );
+            assert_eq!(
+                index_of_item(menu, objc::sel::get("indexOfItem:"), first),
+                1
+            );
 
             remove_item(menu, objc::sel::get("removeItem:"), second);
             assert_eq!(number_of_items(menu, objc::sel::get("numberOfItems")), 1);
-            assert_eq!(item_at_index(menu, objc::sel::get("itemAtIndex:"), 0), first);
+            assert_eq!(
+                item_at_index(menu, objc::sel::get("itemAtIndex:"), 0),
+                first
+            );
             // An index outside the list is nil rather than a panic.
             assert!(item_at_index(menu, objc::sel::get("itemAtIndex:"), 9).is_null());
         }

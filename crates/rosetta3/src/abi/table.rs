@@ -1488,7 +1488,6 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("getwc", I32, P),
     sig!("getxattr", I64, P, P, P, U64, U32, I32),
     sig!("getentropy", I32, P, U64),
-
     sig!("getattrlist", I32, P, P, P, U64, U64),
     // ## OpenGL
     //

@@ -65,7 +65,6 @@ pub unsafe fn function<F: Copy>(name: &str) -> Option<F> {
     Some(unsafe { std::mem::transmute_copy::<*mut c_void, F>(&raw) })
 }
 
-
 /// An opaque `CFTypeRef`. Never dereferenced here.
 pub type CfRef = *mut c_void;
 

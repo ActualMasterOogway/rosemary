@@ -8,7 +8,6 @@ use super::draw::{DrawList, Vertex};
 use super::objc::{Id, class, send0, send1};
 use super::sys;
 
-
 // `<OpenGL/gl.h>`, `<OpenGL/gl3.h>`. Spelled out rather than pulled from a
 // binding crate.
 const NO_ERROR: u32 = 0;
@@ -76,7 +75,6 @@ const TEXTURE_ENV_MODE: u32 = 0x2200;
 const MODULATE: i32 = 0x2100;
 const ALL_ATTRIB_BITS: u32 = 0x000f_ffff;
 const CLIENT_ALL_ATTRIB_BITS: u32 = 0xffff_ffff;
-
 
 /// Every OpenGL function the overlay calls, resolved once.
 #[allow(non_snake_case)]
@@ -218,7 +216,6 @@ fn gl() -> Option<&'static Gl> {
     })
     .as_ref()
 }
-
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Profile {
@@ -391,7 +388,6 @@ const FRAGMENT_SHADER_SOURCE: &str = "#version 150\n\
         float coverage = texture(Atlas, vTexCoord).r;\n\
         Fragment = vec4(vColor.rgb, vColor.a * coverage);\n\
     }\n";
-
 
 /// How far one context has got.
 ///
@@ -621,7 +617,6 @@ fn surface(gl: &Gl) -> Option<(f32, f32)> {
     }
 }
 
-
 /// The guest's state, as it was before the overlay touched anything.
 #[derive(Default)]
 struct Saved {
@@ -793,7 +788,6 @@ impl Saved {
     }
 }
 
-
 /// Every piece of *pixel unpack* state a texture upload reads, saved.
 ///
 /// So the upload sets all of it and puts it back. This is the shape of every bug this
@@ -915,7 +909,6 @@ unsafe fn upload_atlas(gl: &Gl, resources: &mut Resources, list: &DrawList, prof
     }
     resources.atlas_key = key;
 }
-
 
 /// # Safety
 ///
@@ -1071,7 +1064,6 @@ unsafe fn draw_legacy(gl: &Gl, resources: &mut Resources, list: &DrawList) {
         step!(gl, "glPopMatrix(projection)", pop_matrix());
     }
 }
-
 
 /// # Safety
 ///

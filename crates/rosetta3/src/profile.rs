@@ -11,7 +11,6 @@ use static_init::dynamic;
 
 use crate::fault::{Attribution, Unnamed};
 
-
 /// Samples per second per guest thread, when `ROSETTA3_PROFILE` names no rate.
 const DEFAULT_HZ: u32 = 1000;
 
@@ -49,7 +48,6 @@ fn number(key: &str, default: u64) -> u64 {
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(default)
 }
-
 
 /// `KERN_SUCCESS`.
 const KERN_SUCCESS: i32 = 0;
@@ -170,7 +168,6 @@ fn sample_thread(port: u32) -> Option<(u64, bool)> {
     Some((pc, running))
 }
 
-
 /// One host symbol the guest's threads were found inside.
 struct HostSite {
     count: u64,
@@ -236,7 +233,6 @@ static SWEEPS: AtomicU64 = AtomicU64::new(0);
 
 /// Nanoseconds spent inside a sweep rather than waiting for the next one.
 static SWEEP_NS: AtomicU64 = AtomicU64::new(0);
-
 
 /// This binary's own load address, so a host sample can be told from a library one.
 fn self_base() -> u64 {
@@ -327,7 +323,6 @@ fn attribute(counts: &mut Counts, pc: u64) {
     }
 }
 
-
 /// Start sampling, if `ROSETTA3_PROFILE` asked for it. Idempotent.
 ///
 /// Called from [`crate::startup::run`] beside [`crate::fault::install`] and for the
@@ -383,7 +378,10 @@ pub fn reset() {
 fn windowed() -> bool {
     #[dynamic]
     static ON: bool = matches!(
-        std::env::var("ROSETTA3_PROFILE_WINDOW").ok().as_deref().map(str::trim),
+        std::env::var("ROSETTA3_PROFILE_WINDOW")
+            .ok()
+            .as_deref()
+            .map(str::trim),
         Some("1" | "yes" | "on" | "true")
     );
     *ON
@@ -527,7 +525,6 @@ fn install_exit_report() {
     unsafe { libc::atexit(report_at_exit) };
 }
 
-
 /// One row of a ranked list, already resolved.
 struct Row {
     count: u64,
@@ -570,8 +567,7 @@ pub fn report() {
         .unwrap_or_default();
     let share = |n: u64| 100.0 * n as f64 / counts.running.max(1) as f64;
 
-    let translated =
-        counts.guest.values().sum::<u64>() + counts.unnamed.iter().sum::<u64>();
+    let translated = counts.guest.values().sum::<u64>() + counts.unnamed.iter().sum::<u64>();
     // The *achieved* rate, not the configured one.
     let sweeps = SWEEPS.load(Relaxed);
     let achieved = sweeps as f64 / wall.as_secs_f64().max(f64::EPSILON);
@@ -701,7 +697,6 @@ pub fn report() {
     crate::stats::report();
 }
 
-
 /// One row of a ranked list, resolved and with its share already worked out.
 #[derive(Clone)]
 pub struct Entry {
@@ -768,8 +763,7 @@ pub fn snapshot(top: usize) -> Option<Snapshot> {
         .map(|t| t.elapsed())
         .unwrap_or_default();
     let share = |n: u64| 100.0 * n as f64 / counts.running.max(1) as f64;
-    let translated =
-        counts.guest.values().sum::<u64>() + counts.unnamed.iter().sum::<u64>();
+    let translated = counts.guest.values().sum::<u64>() + counts.unnamed.iter().sum::<u64>();
     let sweeps = SWEEPS.load(Relaxed);
     let in_sweep = Duration::from_nanos(SWEEP_NS.load(Relaxed));
 

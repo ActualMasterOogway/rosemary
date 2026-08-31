@@ -101,10 +101,7 @@ pub fn abstract_class(name: &std::ffi::CStr, superclass: Option<&'static Class>)
 }
 
 /// The chain `NSFoo` -> `NSMutableFoo`, for a concrete class to descend from.
-pub fn mutable_pair(
-    immutable: &std::ffi::CStr,
-    mutable: &std::ffi::CStr,
-) -> &'static Class {
+pub fn mutable_pair(immutable: &std::ffi::CStr, mutable: &std::ffi::CStr) -> &'static Class {
     let base = abstract_class(immutable, None);
     abstract_class(mutable, Some(base))
 }
@@ -119,8 +116,9 @@ pub fn register(
     if let Some(existing) = objc::class::lookup(name) {
         return existing;
     }
-    let superclass = superclass
-        .unwrap_or_else(|| objc::class::lookup(c"NSObject").expect("NSObject is the runtime's own"));
+    let superclass = superclass.unwrap_or_else(|| {
+        objc::class::lookup(c"NSObject").expect("NSObject is the runtime's own")
+    });
     // The extra bytes are everything past what the superclass already accounts
     // for. `class_addIvar` is not used: the fields are this crate's, and naming
     // them to the runtime would only invite something to move them.

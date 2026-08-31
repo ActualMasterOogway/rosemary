@@ -3,16 +3,16 @@ pub mod classes;
 pub mod color;
 pub mod cursor;
 pub(crate) mod decode;
-pub mod event;
 mod define;
-pub mod keymap;
-pub mod nsevent;
+pub mod event;
 pub mod geometry;
 pub mod icon;
 pub mod image;
+pub mod keymap;
 pub mod menu;
 pub mod metadata;
 pub mod nib;
+pub mod nsevent;
 pub mod opengl;
 pub mod raster;
 pub mod screen;
@@ -123,7 +123,11 @@ mod tests {
 
     #[test]
     fn every_listed_name_resolves() {
-        let missing: Vec<&str> = NAMES.iter().copied().filter(|n| symbol(n).is_none()).collect();
+        let missing: Vec<&str> = NAMES
+            .iter()
+            .copied()
+            .filter(|n| symbol(n).is_none())
+            .collect();
         assert!(missing.is_empty(), "listed but unresolved: {missing:?}");
     }
 
@@ -142,6 +146,10 @@ mod tests {
         assert!(!object.is_null());
         // SAFETY: an object this runtime allocated.
         let class = unsafe { objc::object::class_of(object) }.expect("a class");
-        assert!(class.chain().any(|c| c.name_str().contains("String")), "{}", class.name_str());
+        assert!(
+            class.chain().any(|c| c.name_str().contains("String")),
+            "{}",
+            class.name_str()
+        );
     }
 }

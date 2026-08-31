@@ -366,7 +366,9 @@ fn window() -> usize {
             Ok(v) => match v.trim().parse::<usize>() {
                 Ok(n) if n >= 256 => n.next_power_of_two(),
                 _ => {
-                    eprintln!("rosetta3: {WINDOW_ENV}={v:?} is not an integer >= 256; using {WINDOW}");
+                    eprintln!(
+                        "rosetta3: {WINDOW_ENV}={v:?} is not an integer >= 256; using {WINDOW}"
+                    );
                     WINDOW
                 }
             },
@@ -731,7 +733,9 @@ mod tests {
     fn each_thread_has_its_own_tsd_base() {
         let mine = tsd_base();
         assert_ne!(mine, 0);
-        let theirs = std::thread::spawn(tsd_base).join().expect("a thread has one");
+        let theirs = std::thread::spawn(tsd_base)
+            .join()
+            .expect("a thread has one");
         assert_ne!(mine, theirs);
     }
 }

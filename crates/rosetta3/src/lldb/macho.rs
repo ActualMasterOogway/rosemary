@@ -78,7 +78,6 @@ pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
 
     let mut out = Vec::with_capacity(stroff + strtab.len());
 
-
     out.extend_from_slice(&MH_MAGIC_64.to_le_bytes());
     out.extend_from_slice(&CPU_TYPE_ARM64.to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes()); // CPU_SUBTYPE_ARM64_ALL
@@ -87,7 +86,6 @@ pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
     out.extend_from_slice(&sizeofcmds.to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes()); // flags
     out.extend_from_slice(&0u32.to_le_bytes()); // reserved
-
 
     // An `MH_OBJECT` has exactly one, unnamed, segment; the section records
     // carry the segment names, and they carry the addresses too.
@@ -120,7 +118,6 @@ pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
         out.extend_from_slice(&[0u8; 12]); // reserved1..3
     }
 
-
     out.extend_from_slice(&LC_SYMTAB.to_le_bytes());
     out.extend_from_slice(&SYMTAB_COMMAND_SIZE.to_le_bytes());
     out.extend_from_slice(&(symoff as u32).to_le_bytes());
@@ -129,7 +126,6 @@ pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
     out.extend_from_slice(&(strtab.len() as u32).to_le_bytes());
 
     debug_assert_eq!(out.len(), commands_end, "load commands are mis-sized");
-
 
     for (section, &offset) in sections.iter().zip(&offsets) {
         out.resize(offset as usize, 0);

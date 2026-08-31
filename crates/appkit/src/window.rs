@@ -244,7 +244,11 @@ unsafe extern "C" fn set_frame_display(receiver: Id, sel: Sel, rect: NSRect, _di
     unsafe { set_frame(receiver, sel, rect) };
 }
 
-unsafe extern "C" fn set_frame_origin(receiver: Id, _sel: Sel, origin: foundation::geometry::NSPoint) {
+unsafe extern "C" fn set_frame_origin(
+    receiver: Id,
+    _sel: Sel,
+    origin: foundation::geometry::NSPoint,
+) {
     let sdl = window_of(receiver).sdl;
     if sdl.is_null() {
         return;

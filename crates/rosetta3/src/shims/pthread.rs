@@ -292,11 +292,16 @@ mod tests {
         let mut size = 0usize;
         // SAFETY: `host` is an initialised attribute set and `size` a live local.
         unsafe { libc::pthread_attr_getstacksize(host.as_mut_ptr(), &mut size) };
-        assert_eq!(size, HOST_THREAD_STACK, "the host thread gets the runtime's own");
+        assert_eq!(
+            size, HOST_THREAD_STACK,
+            "the host thread gets the runtime's own"
+        );
 
         let mut detach = 0;
         // SAFETY: as above.
-        unsafe { darwin::pthread::raw::pthread_attr_getdetachstate(host.as_mut_ptr(), &mut detach) };
+        unsafe {
+            darwin::pthread::raw::pthread_attr_getdetachstate(host.as_mut_ptr(), &mut detach)
+        };
         assert_ne!(
             detach, 0,
             "and a detached guest thread is a detached host thread, in the host's own \

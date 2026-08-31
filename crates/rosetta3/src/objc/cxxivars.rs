@@ -254,8 +254,7 @@ mod tests {
             host::objc_registerClassPair(cls);
 
             // Through `objc_msgSend`, which is how everyone else reaches it.
-            let send: extern "C" fn(Class, Sel) -> Class =
-                std::mem::transmute(host::msg_send());
+            let send: extern "C" fn(Class, Sel) -> Class = std::mem::transmute(host::msg_send());
             let alloc_name = host::c_string("alloc").expect("no NUL");
             let obj = send(cls, host::sel_registerName(alloc_name.as_ptr()));
             assert!(!obj.is_null());

@@ -7,8 +7,8 @@
 
 use std::ffi::c_void;
 
-use crate::stream::Format;
 use crate::status::SUCCESS;
+use crate::stream::Format;
 
 /// `AURenderCallback`.
 pub type Proc = unsafe extern "C" fn(

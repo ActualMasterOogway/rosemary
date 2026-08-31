@@ -311,7 +311,9 @@ pub unsafe fn sigaction(
         )
     };
 
-    if rc == 0 && let Some(old) = old {
+    if rc == 0
+        && let Some(old) = old
+    {
         let handler = host_old.sa_sigaction as u64;
         let mut mask = 0u32;
         for darwin_bit in 1..=31 {
@@ -427,7 +429,10 @@ pub unsafe fn interrupted_pc(context: *mut libc::c_void) -> Option<u64> {
     #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
     // SAFETY: as above. `REG_RIP` indexes the general-purpose register array.
     unsafe {
-        Some((*(context as *const libc::ucontext_t)).uc_mcontext.gregs[libc::REG_RIP as usize] as u64)
+        Some(
+            (*(context as *const libc::ucontext_t)).uc_mcontext.gregs[libc::REG_RIP as usize]
+                as u64,
+        )
     }
     #[cfg(all(
         not(target_os = "macos"),
@@ -460,8 +465,14 @@ mod tests {
         let mut other: libc::sigaction = unsafe { core::mem::zeroed() };
         saved.apply(&mut other);
         // SAFETY: `other.sa_mask` is a live, initialised set.
-        assert_eq!(unsafe { libc::sigismember(&other.sa_mask, libc::SIGUSR1) }, 1);
-        assert_eq!(unsafe { libc::sigismember(&other.sa_mask, libc::SIGUSR2) }, 0);
+        assert_eq!(
+            unsafe { libc::sigismember(&other.sa_mask, libc::SIGUSR1) },
+            1
+        );
+        assert_eq!(
+            unsafe { libc::sigismember(&other.sa_mask, libc::SIGUSR2) },
+            0
+        );
     }
 
     /// A mask parked in a `static` and taken back out is the mask that went in -
@@ -482,7 +493,10 @@ mod tests {
         let mut other: libc::sigaction = unsafe { core::mem::zeroed() };
         SAVED.get().apply(&mut other);
         // SAFETY: a live, initialised set.
-        assert_eq!(unsafe { libc::sigismember(&other.sa_mask, libc::SIGUSR2) }, 1);
+        assert_eq!(
+            unsafe { libc::sigismember(&other.sa_mask, libc::SIGUSR2) },
+            1
+        );
     }
 
     /// The numbers are Darwin's, cross-checked against the host's own declarations
@@ -577,7 +591,10 @@ mod disposition_tests {
 
         let mut back = Disposition::default();
         // SAFETY: a query, which installs nothing.
-        assert_eq!(unsafe { sigaction(signum::SIGUSR1, None, Some(&mut back)) }, 0);
+        assert_eq!(
+            unsafe { sigaction(signum::SIGUSR1, None, Some(&mut back)) },
+            0
+        );
         assert_eq!(back, wanted, "the disposition did not survive the host");
 
         // SAFETY: restoring the default for the signal this test took.

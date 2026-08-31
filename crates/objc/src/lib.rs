@@ -212,7 +212,10 @@ pub fn class_data() -> Vec<(String, u64)> {
     bootstrap();
     let mut data = Vec::new();
     for name in ROOT_CLASSES {
-        let Some(class) = std::ffi::CString::new(*name).ok().and_then(|n| class::lookup(&n)) else {
+        let Some(class) = std::ffi::CString::new(*name)
+            .ok()
+            .and_then(|n| class::lookup(&n))
+        else {
             continue;
         };
         data.push((
@@ -237,39 +240,106 @@ pub const ROOT_CLASSES: &[&str] = &["NSObject"];
 /// A second list rather than a generated one, because the match in [`symbol`] is
 /// what a reader checks against the headers and a macro would hide it.
 pub const NAMES: &[&str] = &[
-    "sel_registerName", "sel_getUid", "sel_getName", "sel_isEqual",
-    "objc_getClass", "objc_lookUpClass", "objc_getRequiredClass", "objc_getMetaClass",
-    "objc_allocateClassPair", "objc_registerClassPair", "objc_disposeClassPair",
-    "class_getName", "class_getSuperclass", "class_isMetaClass", "class_getInstanceSize",
-    "class_addMethod", "class_replaceMethod", "class_addIvar", "class_getInstanceVariable",
-    "class_getInstanceMethod", "class_getClassMethod", "class_getMethodImplementation",
-    "class_respondsToSelector", "class_addProtocol", "class_conformsToProtocol",
+    "sel_registerName",
+    "sel_getUid",
+    "sel_getName",
+    "sel_isEqual",
+    "objc_getClass",
+    "objc_lookUpClass",
+    "objc_getRequiredClass",
+    "objc_getMetaClass",
+    "objc_allocateClassPair",
+    "objc_registerClassPair",
+    "objc_disposeClassPair",
+    "class_getName",
+    "class_getSuperclass",
+    "class_isMetaClass",
+    "class_getInstanceSize",
+    "class_addMethod",
+    "class_replaceMethod",
+    "class_addIvar",
+    "class_getInstanceVariable",
+    "class_getInstanceMethod",
+    "class_getClassMethod",
+    "class_getMethodImplementation",
+    "class_respondsToSelector",
+    "class_addProtocol",
+    "class_conformsToProtocol",
     "class_createInstance",
-    "method_getImplementation", "method_getTypeEncoding", "method_getName",
-    "method_setImplementation", "ivar_getOffset", "ivar_getName",
-    "class_copyPropertyList", "class_getProperty", "class_addProperty",
-    "class_replaceProperty", "property_getName", "property_getAttributes",
+    "method_getImplementation",
+    "method_getTypeEncoding",
+    "method_getName",
+    "method_setImplementation",
+    "ivar_getOffset",
+    "ivar_getName",
+    "class_copyPropertyList",
+    "class_getProperty",
+    "class_addProperty",
+    "class_replaceProperty",
+    "property_getName",
+    "property_getAttributes",
     "property_copyAttributeList",
-    "object_getClass", "object_setClass", "object_getClassName", "object_getIndexedIvars",
-    "object_getIvar", "object_setIvar", "objc_constructInstance", "objc_destructInstance",
+    "object_getClass",
+    "object_setClass",
+    "object_getClassName",
+    "object_getIndexedIvars",
+    "object_getIvar",
+    "object_setIvar",
+    "objc_constructInstance",
+    "objc_destructInstance",
     "objc_loadClassref",
-    "objc_getProtocol", "objc_allocateProtocol", "objc_registerProtocol", "protocol_getName",
-    "protocol_addProtocol", "protocol_addMethodDescription", "protocol_getMethodDescription",
-    "objc_retain", "objc_release", "objc_autorelease", "objc_autoreleasePoolPush",
-    "objc_autoreleasePoolPop", "objc_autoreleaseReturnValue", "objc_retainAutorelease",
-    "objc_retainAutoreleaseReturnValue", "objc_retainAutoreleasedReturnValue",
-    "objc_unsafeClaimAutoreleasedReturnValue", "objc_storeStrong", "objc_initWeak",
-    "objc_storeWeak", "objc_loadWeak", "objc_loadWeakRetained", "objc_destroyWeak",
-    "objc_copyWeak", "objc_moveWeak", "objc_sync_enter", "objc_sync_exit",
-    "objc_setAssociatedObject", "objc_getAssociatedObject",
-    "objc_alloc", "objc_allocWithZone", "objc_alloc_init", "objc_opt_new", "objc_opt_self",
-    "objc_opt_class", "objc_opt_isKindOfClass", "objc_opt_respondsToSelector",
-    "objc_getProperty", "objc_setProperty", "objc_setProperty_atomic",
-    "objc_setProperty_nonatomic", "objc_setProperty_atomic_copy",
-    "objc_setProperty_nonatomic_copy", "objc_retainBlock", "objc_enumerationMutation",
+    "objc_getProtocol",
+    "objc_allocateProtocol",
+    "objc_registerProtocol",
+    "protocol_getName",
+    "protocol_addProtocol",
+    "protocol_addMethodDescription",
+    "protocol_getMethodDescription",
+    "objc_retain",
+    "objc_release",
+    "objc_autorelease",
+    "objc_autoreleasePoolPush",
+    "objc_autoreleasePoolPop",
+    "objc_autoreleaseReturnValue",
+    "objc_retainAutorelease",
+    "objc_retainAutoreleaseReturnValue",
+    "objc_retainAutoreleasedReturnValue",
+    "objc_unsafeClaimAutoreleasedReturnValue",
+    "objc_storeStrong",
+    "objc_initWeak",
+    "objc_storeWeak",
+    "objc_loadWeak",
+    "objc_loadWeakRetained",
+    "objc_destroyWeak",
+    "objc_copyWeak",
+    "objc_moveWeak",
+    "objc_sync_enter",
+    "objc_sync_exit",
+    "objc_setAssociatedObject",
+    "objc_getAssociatedObject",
+    "objc_alloc",
+    "objc_allocWithZone",
+    "objc_alloc_init",
+    "objc_opt_new",
+    "objc_opt_self",
+    "objc_opt_class",
+    "objc_opt_isKindOfClass",
+    "objc_opt_respondsToSelector",
+    "objc_getProperty",
+    "objc_setProperty",
+    "objc_setProperty_atomic",
+    "objc_setProperty_nonatomic",
+    "objc_setProperty_atomic_copy",
+    "objc_setProperty_nonatomic_copy",
+    "objc_retainBlock",
+    "objc_enumerationMutation",
     "objc_terminate",
-    "objc_msgSend", "objc_msgSendSuper", "objc_msgSendSuper2",
-    "objc_msgSend_stret", "objc_msgSendSuper_stret", "objc_msgSendSuper2_stret",
+    "objc_msgSend",
+    "objc_msgSendSuper",
+    "objc_msgSendSuper2",
+    "objc_msgSend_stret",
+    "objc_msgSendSuper_stret",
+    "objc_msgSendSuper2_stret",
 ];
 
 #[cfg(test)]
@@ -278,7 +348,11 @@ mod tests {
 
     #[test]
     fn every_listed_name_resolves() {
-        let missing: Vec<&str> = NAMES.iter().copied().filter(|n| symbol(n).is_none()).collect();
+        let missing: Vec<&str> = NAMES
+            .iter()
+            .copied()
+            .filter(|n| symbol(n).is_none())
+            .collect();
         assert!(missing.is_empty(), "listed but unresolved: {missing:?}");
     }
 
@@ -407,7 +481,11 @@ mod invariants {
             let object = send(object, sel::get("init"));
 
             let is_kind: extern "C" fn(Id, Sel, Id) -> bool = std::mem::transmute(msg::entry());
-            assert!(is_kind(object, sel::get("isKindOfClass:"), class::ptr(class) as Id));
+            assert!(is_kind(
+                object,
+                sel::get("isKindOfClass:"),
+                class::ptr(class) as Id
+            ));
             let nsobject = class::lookup(c"NSObject").unwrap();
             assert!(is_kind(
                 object,

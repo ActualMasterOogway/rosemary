@@ -147,14 +147,17 @@ mod tests {
             )
         };
         // SAFETY: the value is a string.
-        assert_eq!(unsafe { crate::string::bytes(value_for("name")) }, b"DELTARUNE");
+        assert_eq!(
+            unsafe { crate::string::bytes(value_for("name")) },
+            b"DELTARUNE"
+        );
         // SAFETY: the value is a number.
         assert_eq!(unsafe { crate::number_of(value_for("count")) }, Some(3));
 
         let list = value_for("list");
         // SAFETY: an array this conversion made.
-        let array = unsafe { corefoundation::collections::array(list as CFTypeRef) }
-            .expect("an array");
+        let array =
+            unsafe { corefoundation::collections::array(list as CFTypeRef) }.expect("an array");
         assert_eq!(array.values.len(), 2);
     }
 
@@ -169,7 +172,11 @@ mod tests {
         let contents =
             unsafe { corefoundation::collections::array(array as CFTypeRef) }.expect("an array");
         let element = contents.values[0] as Id;
-        assert_eq!(objc::arc::retain_count(element), 1, "the array holds one reference");
+        assert_eq!(
+            objc::arc::retain_count(element),
+            1,
+            "the array holds one reference"
+        );
         // SAFETY: the element is a live string the array still holds.
         assert_eq!(unsafe { crate::string::bytes(element) }, b"kept");
     }

@@ -343,7 +343,13 @@ pub unsafe extern "C" fn cond_timedwait_relative(at: u64, mutex: u64, reltime: u
     }
     // SAFETY: `deadline` is a live local for the duration of the call, and the rest is
     // the caller's.
-    unsafe { cond_timedwait(at, mutex, &deadline as *const libc::timespec as usize as u64) }
+    unsafe {
+        cond_timedwait(
+            at,
+            mutex,
+            &deadline as *const libc::timespec as usize as u64,
+        )
+    }
 }
 
 fn host_rwlock() -> Option<u64> {
@@ -467,7 +473,9 @@ impl MutexAttr {
     }
 
     fn packed(self) -> u64 {
-        (self.kind as u32 as u64) | ((self.pshared as u32 as u64) << 16) | ((self.protocol as u32 as u64) << 32)
+        (self.kind as u32 as u64)
+            | ((self.pshared as u32 as u64) << 16)
+            | ((self.protocol as u32 as u64) << 32)
     }
 
     fn unpacked(word: u64) -> MutexAttr {

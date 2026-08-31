@@ -55,13 +55,7 @@ unsafe extern "C" fn user_info(receiver: Id, _sel: Sel) -> Id {
 }
 
 /// `+exceptionWithName:reason:userInfo:`, and the `-initWith...` it wraps.
-unsafe extern "C" fn init(
-    receiver: Id,
-    _sel: Sel,
-    name: Id,
-    reason: Id,
-    user_info: Id,
-) -> Id {
+unsafe extern "C" fn init(receiver: Id, _sel: Sel, name: Id, reason: Id, user_info: Id) -> Id {
     for object in [name, reason, user_info] {
         objc::arc::retain(object);
     }
@@ -90,7 +84,15 @@ unsafe extern "C" fn exception_with(
         )
     } as Id;
     // SAFETY: a fresh instance, and the prototype above.
-    unsafe { init(exception, objc::sel::get("initWithName:reason:userInfo:"), name, reason, user_info) };
+    unsafe {
+        init(
+            exception,
+            objc::sel::get("initWithName:reason:userInfo:"),
+            name,
+            reason,
+            user_info,
+        )
+    };
     objc::arc::autorelease(exception)
 }
 

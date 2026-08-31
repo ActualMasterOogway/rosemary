@@ -136,7 +136,9 @@ fn window_template(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
     // implements falls back to `NSWindow` and is reported, because a window of
     // the wrong class still shows the right pixels where a placeholder shows
     // none.
-    let wanted = text(builder, uid, "NSWindowClass").unwrap_or("NSWindow").to_string();
+    let wanted = text(builder, uid, "NSWindowClass")
+        .unwrap_or("NSWindow")
+        .to_string();
     let object = match allocate(&wanted) {
         Some(object) => object,
         None => {

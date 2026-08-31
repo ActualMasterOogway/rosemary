@@ -33,5 +33,4 @@ pub(crate) fn install() {
     class_methods!(null_class, {
         "null" => null, c"@16@0:8";
     });
-
 }

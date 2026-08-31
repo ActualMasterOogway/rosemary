@@ -20,7 +20,6 @@
 //!
 //! Only (3) needs a trampoline, and only (3) is unfinished - see [`DarwinThread`].
 
-
 /// Direct TSD slots, by index. Darwin's `<pthread/tsd_private.h>` names.
 ///
 /// `pthread_getspecific(k)` for a small `k` is a single load of slot `k`, so these are
@@ -114,7 +113,10 @@ fn synthetic_key() -> libc::pthread_key_t {
         let mut key: libc::pthread_key_t = 0;
         // SAFETY: a live local; `release` is an `extern "C"` function of this module.
         let rc = unsafe { libc::pthread_key_create(&mut key, Some(release)) };
-        assert_eq!(rc, 0, "a guest thread cannot run without thread-specific data");
+        assert_eq!(
+            rc, 0,
+            "a guest thread cannot run without thread-specific data"
+        );
         key
     })
 }
@@ -323,7 +325,9 @@ mod tests {
         assert_ne!(mine, 0);
         assert_eq!(tsd_base(), mine, "a second ask is the same array");
 
-        let theirs = std::thread::spawn(tsd_base).join().expect("a thread has one too");
+        let theirs = std::thread::spawn(tsd_base)
+            .join()
+            .expect("a thread has one too");
         assert_ne!(theirs, mine, "two threads must not share an array");
     }
 
@@ -366,7 +370,10 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     fn the_array_covers_every_direct_key() {
         assert!(SLOTS >= 256);
-        assert!(HOST_THREAD_POINTER >= SLOTS, "the host's word is past every slot");
+        assert!(
+            HOST_THREAD_POINTER >= SLOTS,
+            "the host's word is past every slot"
+        );
     }
 
     /// The boundary must leave the thread pointer exactly as it found it, including
@@ -420,6 +427,10 @@ mod tests {
         unsafe {
             std::arch::asm!("mov {}, gs:0", out(reg) base, options(nostack, preserves_flags))
         };
-        assert_eq!(base, tsd_base(), "slot zero of the array in `%gs` is the array");
+        assert_eq!(
+            base,
+            tsd_base(),
+            "slot zero of the array in `%gs` is the array"
+        );
     }
 }

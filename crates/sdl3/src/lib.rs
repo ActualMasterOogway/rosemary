@@ -11,8 +11,7 @@ pub mod init {
 pub type AudioStream = *mut c_void;
 
 /// `SDL_AudioStreamCallback`: `(userdata, stream, additional, total)`.
-pub type AudioStreamCallback =
-    Option<unsafe extern "C" fn(*mut c_void, AudioStream, c_int, c_int)>;
+pub type AudioStreamCallback = Option<unsafe extern "C" fn(*mut c_void, AudioStream, c_int, c_int)>;
 
 /// `SDL_AudioSpec`. Three fields and no padding on either host.
 #[repr(C)]
@@ -124,7 +123,12 @@ struct Api {
     SDL_GetModState: Option<unsafe extern "C" fn() -> u16>,
 
     SDL_OpenAudioDeviceStream: Option<
-        unsafe extern "C" fn(u32, *const AudioSpec, AudioStreamCallback, *mut c_void) -> AudioStream,
+        unsafe extern "C" fn(
+            u32,
+            *const AudioSpec,
+            AudioStreamCallback,
+            *mut c_void,
+        ) -> AudioStream,
     >,
     SDL_DestroyAudioStream: Option<unsafe extern "C" fn(AudioStream)>,
     SDL_PutAudioStreamData: Option<unsafe extern "C" fn(AudioStream, *const c_void, c_int) -> bool>,
@@ -132,8 +136,7 @@ struct Api {
     SDL_ClearAudioStream: Option<unsafe extern "C" fn(AudioStream) -> bool>,
     SDL_ResumeAudioStreamDevice: Option<unsafe extern "C" fn(AudioStream) -> bool>,
     SDL_PauseAudioStreamDevice: Option<unsafe extern "C" fn(AudioStream) -> bool>,
-    SDL_GetAudioDeviceFormat:
-        Option<unsafe extern "C" fn(u32, *mut AudioSpec, *mut c_int) -> bool>,
+    SDL_GetAudioDeviceFormat: Option<unsafe extern "C" fn(u32, *mut AudioSpec, *mut c_int) -> bool>,
 }
 
 /// The library, opened once.
@@ -289,7 +292,9 @@ pub fn error() -> String {
     match text.is_null() {
         true => String::new(),
         // SAFETY: as above.
-        false => unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned(),
+        false => unsafe { CStr::from_ptr(text) }
+            .to_string_lossy()
+            .into_owned(),
     }
 }
 
@@ -427,7 +432,9 @@ pub unsafe fn name(joystick: Joystick) -> String {
     match text.is_null() {
         true => String::new(),
         // SAFETY: as above.
-        false => unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned(),
+        false => unsafe { CStr::from_ptr(text) }
+            .to_string_lossy()
+            .into_owned(),
     }
 }
 
@@ -669,7 +676,10 @@ mod tests {
             panic!("SDL declined to attach a virtual joystick: {}", error());
         };
         pump();
-        assert!(joysticks().contains(&id), "the attached joystick is not listed");
+        assert!(
+            joysticks().contains(&id),
+            "the attached joystick is not listed"
+        );
 
         let joystick = open(id).expect("the joystick opens");
         // SAFETY: a joystick just opened, closed at the end of this test.
@@ -704,7 +714,7 @@ mod tests {
 pub mod video {
     use std::ffi::CString;
 
-use super::*;
+    use super::*;
 
     /// `SDL_WindowFlags`.
     pub mod flags {
@@ -868,14 +878,51 @@ use super::*;
     #[derive(Clone, Debug, PartialEq)]
     pub enum Event {
         Quit,
-        WindowResized { window: u32, width: i32, height: i32 },
-        WindowClosed { window: u32 },
-        WindowFocus { window: u32, gained: bool },
-        Key { window: u32, scancode: u32, key: u32, modifiers: u16, down: bool, repeat: bool },
-        Text { window: u32, text: String },
-        MouseMotion { window: u32, x: f32, y: f32, dx: f32, dy: f32, buttons: u32 },
-        MouseButton { window: u32, button: u8, down: bool, clicks: u8, x: f32, y: f32 },
-        MouseWheel { window: u32, x: f32, y: f32 },
+        WindowResized {
+            window: u32,
+            width: i32,
+            height: i32,
+        },
+        WindowClosed {
+            window: u32,
+        },
+        WindowFocus {
+            window: u32,
+            gained: bool,
+        },
+        Key {
+            window: u32,
+            scancode: u32,
+            key: u32,
+            modifiers: u16,
+            down: bool,
+            repeat: bool,
+        },
+        Text {
+            window: u32,
+            text: String,
+        },
+        MouseMotion {
+            window: u32,
+            x: f32,
+            y: f32,
+            dx: f32,
+            dy: f32,
+            buttons: u32,
+        },
+        MouseButton {
+            window: u32,
+            button: u8,
+            down: bool,
+            clicks: u8,
+            x: f32,
+            y: f32,
+        },
+        MouseWheel {
+            window: u32,
+            x: f32,
+            y: f32,
+        },
         /// One SDL delivers that nothing here acts on, kept so a caller can see
         /// that the queue moved.
         Other(u32),
@@ -912,7 +959,11 @@ use super::*;
                 event_type::QUIT => Event::Quit,
                 event_type::WINDOW_RESIZED => {
                     let e: WindowEvent = decode(&raw);
-                    Event::WindowResized { window: e.window, width: e.data1, height: e.data2 }
+                    Event::WindowResized {
+                        window: e.window,
+                        width: e.data1,
+                        height: e.data2,
+                    }
                 }
                 event_type::WINDOW_CLOSE_REQUESTED => {
                     let e: WindowEvent = decode(&raw);
@@ -944,7 +995,10 @@ use super::*;
                         // is after this copy.
                         false => CStr::from_ptr(e.text).to_string_lossy().into_owned(),
                     };
-                    Event::Text { window: e.window, text }
+                    Event::Text {
+                        window: e.window,
+                        text,
+                    }
                 }
                 event_type::MOUSE_MOTION => {
                     let e: MouseMotionEvent = decode(&raw);
@@ -970,7 +1024,11 @@ use super::*;
                 }
                 event_type::MOUSE_WHEEL => {
                     let e: MouseWheelEvent = decode(&raw);
-                    Event::MouseWheel { window: e.window, x: e.x, y: e.y }
+                    Event::MouseWheel {
+                        window: e.window,
+                        x: e.x,
+                        y: e.y,
+                    }
                 }
                 other => Event::Other(other),
             }
@@ -1209,7 +1267,9 @@ use super::*;
     }
 
     pub fn primary_display() -> u32 {
-        let Some(f) = init_video().then(|| api().and_then(|a| a.SDL_GetPrimaryDisplay)).flatten()
+        let Some(f) = init_video()
+            .then(|| api().and_then(|a| a.SDL_GetPrimaryDisplay))
+            .flatten()
         else {
             return 0;
         };

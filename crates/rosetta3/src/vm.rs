@@ -756,12 +756,7 @@ impl Vm {
 
     /// Enter guest code at `entry` with `rsp` exactly as given, and **no return
     /// address**.
-    pub fn jump_to(
-        &self,
-        entry: u64,
-        ctx: RegisterContext,
-        rsp: u64,
-    ) -> Result<Returned, VmError> {
+    pub fn jump_to(&self, entry: u64, ctx: RegisterContext, rsp: u64) -> Result<Returned, VmError> {
         let state = crate::thread::ensure()?;
         self.enter(state, entry, ctx, rsp)
     }
@@ -935,8 +930,10 @@ impl Vm {
                     // thread from deadlocking against its own caller.
                     let lifted = match known {
                         Some(hit) => hit,
-                        None => self.cache.get_or_lift(&self.program, pc).map_err(|e| {
-                            match e {
+                        None => self
+                            .cache
+                            .get_or_lift(&self.program, pc)
+                            .map_err(|e| match e {
                                 VmError::NoCode { pc, from: None } => VmError::NoCode {
                                     pc,
                                     from: from.map(|mut t| {
@@ -945,8 +942,7 @@ impl Vm {
                                     }),
                                 },
                                 other => other,
-                            }
-                        })?,
+                            })?,
                     };
                     state.code().put(pc, &lifted);
                     lifted
@@ -1555,9 +1551,9 @@ impl crate::exec::Execution for Vm {
         // Which of the two entry-point encodings the root image used decides how it
         // is reached, and the difference is not cosmetic.
         if self.program.entry_reads_stack() {
-            let sp = self
-                .kernel_sp()
-                .expect("an LC_UNIXTHREAD program starts on the stack its arguments were laid out on");
+            let sp = self.kernel_sp().expect(
+                "an LC_UNIXTHREAD program starts on the stack its arguments were laid out on",
+            );
             return Ok(self.jump_to(entry, RegisterContext::new(), sp)?.rax);
         }
         let (argc, argv, envp, apple) = Vm::main_args(self);

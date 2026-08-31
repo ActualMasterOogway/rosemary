@@ -33,10 +33,7 @@ unsafe fn device<'a>(device: CFTypeRef) -> Option<&'a Device> {
     (!device.is_null()).then(|| unsafe { &*(device as *const Device) })
 }
 
-pub unsafe extern "C" fn IOHIDManagerCreate(
-    _allocator: CFTypeRef,
-    _options: u32,
-) -> CFTypeRef {
+pub unsafe extern "C" fn IOHIDManagerCreate(_allocator: CFTypeRef, _options: u32) -> CFTypeRef {
     let manager = Arc::new(Manager::new());
     let handle = Arc::as_ptr(&manager) as CFTypeRef;
     MANAGERS
@@ -87,10 +84,7 @@ unsafe fn criterion_of(dictionary: CFTypeRef) -> Criterion {
     }
 }
 
-pub unsafe extern "C" fn IOHIDManagerSetDeviceMatching(
-    manager: CFTypeRef,
-    matching: CFTypeRef,
-) {
+pub unsafe extern "C" fn IOHIDManagerSetDeviceMatching(manager: CFTypeRef, matching: CFTypeRef) {
     // SAFETY: the caller's obligation.
     let Some(m) = (unsafe { self::manager(manager) }) else {
         return;
@@ -304,8 +298,6 @@ pub unsafe extern "C" fn IOHIDDeviceClose(_device: CFTypeRef, _options: u32) -> 
     SUCCESS
 }
 
-
-
 /// Read one field of an element.
 macro_rules! element_field {
     ($(#[$meta:meta])* $name:ident, $ty:ty, $read:expr, $default:expr) => {
@@ -358,7 +350,6 @@ pub unsafe extern "C" fn IOHIDElementGetChildren(element: *const c_void) -> CFTy
     collections::new_array(&handles, corefoundation::callbacks::Policy::NONE, false)
 }
 
-
 pub unsafe extern "C" fn IOHIDValueGetElement(v: CFTypeRef) -> *const c_void {
     // SAFETY: the caller's obligation - a value handed to a callback, read
     // during that callback.
@@ -409,4 +400,3 @@ pub fn key_strings() -> Vec<(&'static str, &'static str)> {
         ("_kIOHIDManufacturerKey", "Manufacturer"),
     ]
 }
-

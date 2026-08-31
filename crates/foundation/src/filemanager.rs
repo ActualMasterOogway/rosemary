@@ -125,13 +125,7 @@ unsafe extern "C" fn remove_item(_receiver: Id, _sel: Sel, path: Id, error: *mut
     removed.is_ok() as u8
 }
 
-unsafe extern "C" fn copy_item(
-    _receiver: Id,
-    _sel: Sel,
-    from: Id,
-    to: Id,
-    error: *mut Id,
-) -> u8 {
+unsafe extern "C" fn copy_item(_receiver: Id, _sel: Sel, from: Id, to: Id, error: *mut Id) -> u8 {
     // SAFETY: null or writable.
     unsafe { no_error(error) };
     // SAFETY: two `NSString`s, or nil.
@@ -208,12 +202,7 @@ unsafe extern "C" fn contents_of_directory(
 /// to a fixed question rather than a file's own contents: a key that is absent
 /// is one nothing in this tree can answer, and adding one later cannot change
 /// what the present ones mean.
-unsafe extern "C" fn attributes_of_item(
-    _receiver: Id,
-    _sel: Sel,
-    path: Id,
-    error: *mut Id,
-) -> Id {
+unsafe extern "C" fn attributes_of_item(_receiver: Id, _sel: Sel, path: Id, error: *mut Id) -> Id {
     // SAFETY: null or writable.
     unsafe { no_error(error) };
     // SAFETY: an `NSString`, or nil.
@@ -249,7 +238,11 @@ unsafe extern "C" fn attributes_of_item(
     ];
     for (key, time) in timestamps {
         if let Some(seconds) = time.ok().map(since_1970) {
-            values.push((key, crate::timer::date_since_1970(seconds) as CFTypeRef, false));
+            values.push((
+                key,
+                crate::timer::date_since_1970(seconds) as CFTypeRef,
+                false,
+            ));
         }
     }
 
@@ -308,7 +301,8 @@ unsafe extern "C" fn file_size(receiver: Id, _sel: Sel) -> u64 {
     // SAFETY: a dictionary.
     let value = unsafe { attribute(receiver, "NSFileSize") };
     // SAFETY: a number, or nil.
-    unsafe { corefoundation::collections::number(value as CFTypeRef) }.map_or(0, |n| n.as_i64() as u64)
+    unsafe { corefoundation::collections::number(value as CFTypeRef) }
+        .map_or(0, |n| n.as_i64() as u64)
 }
 
 unsafe extern "C" fn file_type(receiver: Id, _sel: Sel) -> Id {
@@ -363,12 +357,8 @@ unsafe extern "C" fn current_directory(_receiver: Id, _sel: Sel) -> Id {
 }
 
 pub(crate) fn install() {
-    let class = corefoundation::base::register(
-        c"NSFileManager",
-        None,
-        std::mem::size_of::<usize>(),
-        false,
-    );
+    let class =
+        corefoundation::base::register(c"NSFileManager", None, std::mem::size_of::<usize>(), false);
     class_methods!(class, {
         "defaultManager" => default_manager, c"@16@0:8";
     });
@@ -409,7 +399,12 @@ mod tests {
         crate::bootstrap();
         let class = objc::class::lookup(c"NSFileManager").expect("NSFileManager");
         // SAFETY: `+defaultManager` is `id (Class, SEL)`.
-        unsafe { default_manager(objc::class::ptr(class) as Id, objc::sel::get("defaultManager")) }
+        unsafe {
+            default_manager(
+                objc::class::ptr(class) as Id,
+                objc::sel::get("defaultManager"),
+            )
+        }
     }
 
     /// The three the runner uses, on a directory this test makes and removes.
@@ -434,7 +429,10 @@ mod tests {
                 1,
                 "intermediates were asked for"
             );
-            assert_eq!(file_exists(manager, objc::sel::get("fileExistsAtPath:"), path), 1);
+            assert_eq!(
+                file_exists(manager, objc::sel::get("fileExistsAtPath:"), path),
+                1
+            );
 
             let mut is_directory = 0u8;
             assert_eq!(
@@ -458,7 +456,10 @@ mod tests {
                 ),
                 1
             );
-            assert_eq!(file_exists(manager, objc::sel::get("fileExistsAtPath:"), path), 0);
+            assert_eq!(
+                file_exists(manager, objc::sel::get("fileExistsAtPath:"), path),
+                0
+            );
         }
     }
 

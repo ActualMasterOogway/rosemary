@@ -77,7 +77,17 @@ pub fn set_property(
         // SAFETY: `data` is either null or a guest address, which under identity
         // mapping is a readable host address for the `size` bytes the guest
         // says it is.
-        let rc = unsafe { apply(symbol, unit, id, scope, element, data as *const c_void, size)? };
+        let rc = unsafe {
+            apply(
+                symbol,
+                unit,
+                id,
+                scope,
+                element,
+                data as *const c_void,
+                size,
+            )?
+        };
         set_int_return(ctx, rc);
         return Ok(());
     }

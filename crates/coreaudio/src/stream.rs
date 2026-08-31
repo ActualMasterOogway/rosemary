@@ -155,15 +155,34 @@ mod tests {
             bytes_per_packet: 4,
             ..canonical
         };
-        assert_eq!(sdl_spec(&s16).map(|s| s.format), Some(sdl3::audio::format::S16));
+        assert_eq!(
+            sdl_spec(&s16).map(|s| s.format),
+            Some(sdl3::audio::format::S16)
+        );
 
         // Each of these plays as noise if it is converted rather than refused.
         for bad in [
-            Format { format_flags: flags::IS_FLOAT | flags::IS_BIG_ENDIAN, ..canonical },
-            Format { bits_per_channel: 24, format_flags: flags::IS_SIGNED_INTEGER, ..canonical },
-            Format { format_id: u32::from_be_bytes(*b"aac "), ..canonical },
-            Format { sample_rate: 0.0, ..canonical },
-            Format { channels_per_frame: 0, ..canonical },
+            Format {
+                format_flags: flags::IS_FLOAT | flags::IS_BIG_ENDIAN,
+                ..canonical
+            },
+            Format {
+                bits_per_channel: 24,
+                format_flags: flags::IS_SIGNED_INTEGER,
+                ..canonical
+            },
+            Format {
+                format_id: u32::from_be_bytes(*b"aac "),
+                ..canonical
+            },
+            Format {
+                sample_rate: 0.0,
+                ..canonical
+            },
+            Format {
+                channels_per_frame: 0,
+                ..canonical
+            },
         ] {
             assert_eq!(sdl_spec(&bad), None, "{bad:?}");
         }

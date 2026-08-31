@@ -22,10 +22,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use machish::error::Result;
-use machish::report::LinkReport;
 use machish::exports::ExportTable;
-use machish::image::MachObject;
-use machish::spec::arch::X86_64;
+use machish::report::LinkReport;
 
 /// `__cxxabiv1::__si_class_type_info`, which is `{ vtable, name, base }`.
 ///
@@ -176,7 +174,7 @@ fn class_named_in(
 pub fn bind<M: machish::memory::Regions>(
     report: &mut machish::report::LinkReport,
     memory: &mut M,
-    libcxxabi: &[u8],
+    exports: &ExportTable,
     is_libcxxabi: &dyn Fn(&str) -> bool,
 ) -> Result<usize> {
     // Under the host's libobjc every one of these symbols is Apple's, and its
@@ -194,8 +192,6 @@ pub fn bind<M: machish::memory::Regions>(
         // to be compared against.
         return Ok(0);
     };
-    let object = MachObject::parse_any(libcxxabi, X86_64)?;
-    let exports = ExportTable::parse(&object)?;
     let at = |symbol: &str| exports.get(symbol).and_then(|e| e.address(slide));
 
     // Two words in, which is where a C++ vtable *pointer* points: past the
@@ -262,8 +258,7 @@ pub fn bind<M: machish::memory::Regions>(
         for binding in &mut image.bindings {
             let addr = if binding.symbol == "___objc_personality_v0" {
                 personality
-            } else if let Some((_, cxx)) =
-                aliases.iter().find(|(objc, _)| *objc == binding.symbol)
+            } else if let Some((_, cxx)) = aliases.iter().find(|(objc, _)| *objc == binding.symbol)
             {
                 // Unconditionally, over whatever provider answered: this
                 // runtime publishes these names so that a call to one is
@@ -318,7 +313,10 @@ mod tests {
             // The base chain is the class chain, which is what makes
             // `@catch (NSObject *)` take an `NSString`.
             assert_eq!(Some(record.base), record_for(object));
-            assert_eq!(std::ffi::CStr::from_ptr(record.name).to_str(), Ok("NSString"));
+            assert_eq!(
+                std::ffi::CStr::from_ptr(record.name).to_str(),
+                Ok("NSString")
+            );
             // The root uses the vtable with no base word, and everything else
             // the one with it.
             assert_eq!((*(record.base as *const TypeInfo)).base, 0);

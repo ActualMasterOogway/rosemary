@@ -250,7 +250,9 @@ unsafe extern "C" fn add_subview(receiver: Id, sel: Sel, subview: Id) {
     // SAFETY: `-subviews` is `id (id, SEL)` and answers a mutable array.
     let list = unsafe { subviews(receiver, sel) };
     if let Some(array) = unsafe { corefoundation::collections::array(list as *const c_void) } {
-        array.values.push(array.policy.retain(subview as *const c_void));
+        array
+            .values
+            .push(array.policy.retain(subview as *const c_void));
     }
 }
 
@@ -292,7 +294,9 @@ unsafe extern "C" fn add_tracking_area(receiver: Id, _sel: Sel, area: Id) {
     if let Some(array) =
         unsafe { corefoundation::collections::array(view.tracking_areas as *const c_void) }
     {
-        array.values.push(array.policy.retain(area as *const c_void));
+        array
+            .values
+            .push(array.policy.retain(area as *const c_void));
     }
 }
 
@@ -462,19 +466,22 @@ mod tests {
         // SAFETY: `-addSubview:` is `void (id, SEL, id)`.
         unsafe { add_subview(parent, objc::sel::get("addSubview:"), child) };
         // SAFETY: `-superview` is `id (id, SEL)`.
-        assert_eq!(unsafe { superview(child, objc::sel::get("superview")) }, parent);
+        assert_eq!(
+            unsafe { superview(child, objc::sel::get("superview")) },
+            parent
+        );
         // SAFETY: `-subviews` is `id (id, SEL)`.
         let list = unsafe { subviews(parent, objc::sel::get("subviews")) };
         // SAFETY: an array this module made.
-        let array = unsafe { corefoundation::collections::array(list as *const c_void) }
-            .expect("an array");
+        let array =
+            unsafe { corefoundation::collections::array(list as *const c_void) }.expect("an array");
         assert_eq!(array.values.len(), 1);
 
         // SAFETY: `-removeFromSuperview` is `void (id, SEL)`.
         unsafe { remove_from_superview(child, objc::sel::get("removeFromSuperview")) };
         // SAFETY: as above.
-        let array = unsafe { corefoundation::collections::array(list as *const c_void) }
-            .expect("an array");
+        let array =
+            unsafe { corefoundation::collections::array(list as *const c_void) }.expect("an array");
         assert!(array.values.is_empty());
     }
 
@@ -486,10 +493,8 @@ mod tests {
         let child = view(NSRect::default());
         // SAFETY: `-addSubview:` is `void (id, SEL, id)`.
         unsafe { add_subview(parent, objc::sel::get("addSubview:"), child) };
-        let window = objc::object::create_instance(
-            objc::class::lookup(c"NSWindow").expect("NSWindow"),
-            0,
-        );
+        let window =
+            objc::object::create_instance(objc::class::lookup(c"NSWindow").expect("NSWindow"), 0);
         // SAFETY: both are objects this runtime allocated.
         unsafe { set_window(parent, window) };
         // SAFETY: as above.

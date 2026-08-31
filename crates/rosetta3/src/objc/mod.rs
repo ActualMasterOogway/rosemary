@@ -258,7 +258,11 @@ fn images_of(report: &LinkReport) -> Vec<&ObjcImage> {
 }
 
 /// The five passes, in the order the runtime needs them.
-fn register_images(r: &dyn Realizer, rt: &mut ObjcRuntime, images: &[&ObjcImage]) -> Result<(), VmError> {
+fn register_images(
+    r: &dyn Realizer,
+    rt: &mut ObjcRuntime,
+    images: &[&ObjcImage],
+) -> Result<(), VmError> {
     // Protocols first - a class adopts them as it is registered.
     for image in images {
         for p in &image.protocols {
@@ -318,7 +322,11 @@ pub(crate) fn call_loaded_load_methods(
     load_images(r, rt, &images_of(report))
 }
 
-fn load_images(r: &dyn Realizer, rt: &ObjcRuntime, images: &[&ObjcImage]) -> Result<usize, VmError> {
+fn load_images(
+    r: &dyn Realizer,
+    rt: &ObjcRuntime,
+    images: &[&ObjcImage],
+) -> Result<usize, VmError> {
     let by_va: HashMap<u64, &ObjcClass> = images
         .iter()
         .flat_map(|i| i.classes.iter())
@@ -646,7 +654,9 @@ fn add_method(
 ///
 /// - **An aggregate return too large for AAPCS64's registers.** The callee fills a
 /// buffer through `x8`, and a trampoline has no way to declare that register.
-pub(crate) fn thunk_signature(m: &ObjcMethod) -> Result<crate::thunk::ThunkSignature, &'static str> {
+pub(crate) fn thunk_signature(
+    m: &ObjcMethod,
+) -> Result<crate::thunk::ThunkSignature, &'static str> {
     let signature = encoding::signature(&m.types)?;
     let (returns, params) = signature
         .shapes
@@ -766,7 +776,10 @@ fn register_category(r: &dyn Realizer, rt: &mut ObjcRuntime, cat: &ObjcCategory)
 ///
 /// The guest carries one attribute *string* per property and `class_addProperty`
 /// takes the fields apart, so the split is here. Returns how many were added.
-fn add_properties(cls: host::Class, properties: &[machish::extensions::objc::ObjcProperty]) -> usize {
+fn add_properties(
+    cls: host::Class,
+    properties: &[machish::extensions::objc::ObjcProperty],
+) -> usize {
     let mut added = 0;
     for property in properties {
         let (Some(name), Some(attributes)) = (
@@ -793,7 +806,11 @@ fn add_properties(cls: host::Class, properties: &[machish::extensions::objc::Obj
 }
 
 /// Write the runtime's ivar offsets back into the guest's own `__objc_ivar`.
-fn patch_ivar_offsets(r: &dyn Realizer, rt: &mut ObjcRuntime, class: &ObjcClass) -> Result<(), VmError> {
+fn patch_ivar_offsets(
+    r: &dyn Realizer,
+    rt: &mut ObjcRuntime,
+    class: &ObjcClass,
+) -> Result<(), VmError> {
     let Some(&cls) = rt.to_host.get(&class.va) else {
         return Ok(());
     };
@@ -902,7 +919,10 @@ fn unique_selectors(r: &dyn Realizer, image: &ObjcImage) -> Result<usize, VmErro
 /// The one pass of [`register_loaded`]'s five that has to happen even when the rest
 /// cannot - when no `Vm` has registered anything yet, or when the image declares no
 /// classes at all.
-pub(crate) fn unique_loaded_selectors(r: &dyn Realizer, report: &LinkReport) -> Result<usize, VmError> {
+pub(crate) fn unique_loaded_selectors(
+    r: &dyn Realizer,
+    report: &LinkReport,
+) -> Result<usize, VmError> {
     let mut uniqued = 0;
     for image in report.images.iter().filter_map(|i| i.objc.as_ref()) {
         uniqued += unique_selectors(r, image)?;

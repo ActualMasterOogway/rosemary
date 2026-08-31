@@ -168,7 +168,13 @@ unsafe extern "C" fn gestalt(selector: u32, response: *mut i32) -> i16 {
         _ => return UNDEFINED_SELECTOR,
     };
     // SAFETY: the caller states `response` is writable.
-    unsafe { *response = if selector.to_be_bytes() == *b"sysv" { value } else { bcd(value) } };
+    unsafe {
+        *response = if selector.to_be_bytes() == *b"sysv" {
+            value
+        } else {
+            bcd(value)
+        }
+    };
     0
 }
 
@@ -274,7 +280,11 @@ mod tests {
         for spelling in ["unix2003", "Unix2003", "UNIX2003"] {
             let mode = std::ffi::CString::new(spelling).unwrap();
             // SAFETY: both arguments are NUL-terminated and outlive the call.
-            assert_eq!(unsafe { compat_mode(cmd.as_ptr(), mode.as_ptr()) }, 1, "{spelling}");
+            assert_eq!(
+                unsafe { compat_mode(cmd.as_ptr(), mode.as_ptr()) },
+                1,
+                "{spelling}"
+            );
         }
         let legacy = std::ffi::CString::new("legacy").unwrap();
         // SAFETY: as above.

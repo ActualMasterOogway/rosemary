@@ -17,8 +17,8 @@ fn dlsym(name: &str) -> Option<*mut c_void> {
         .or_else(|| crate::host::symbol(name))
         .map(|addr| addr as usize as *mut c_void)
 }
-use crate::objc::send::{Id, class, responds, sel, send0, send1};
 use crate::abi::{GuestMemory, Result};
+use crate::objc::send::{Id, class, responds, sel, send0, send1};
 
 use super::printf::{VarArgs, render};
 use super::set_int_return;
@@ -71,7 +71,9 @@ pub fn run_alert_panel(
     // title and buttons are objects of *this* tree's runtime - a foreign
     // structure read as a native one, which faults inside AppKit rather than
     // showing anything.
-    let host = (!crate::frameworks::builtin()).then(|| dlsym(symbol)).flatten();
+    let host = (!crate::frameworks::builtin())
+        .then(|| dlsym(symbol))
+        .flatten();
     let (Some(host), Some(message)) = (host, escaped_string(&out)) else {
         // Nothing to show it with, so nobody answered: the guest's caller sees
         // the alternate button rather than the default, because a panel this
@@ -420,7 +422,11 @@ pub mod native {
             }
             // SAFETY: the caller of `NSLog` promised these pointers are its own.
             unsafe {
-                core::ptr::copy_nonoverlapping(va as usize as *const u8, out.as_mut_ptr(), out.len())
+                core::ptr::copy_nonoverlapping(
+                    va as usize as *const u8,
+                    out.as_mut_ptr(),
+                    out.len(),
+                )
             };
             Ok(())
         }
@@ -428,7 +434,9 @@ pub mod native {
         fn write(&mut self, _va: u64, _data: &[u8]) -> Result<(), machish::Error> {
             // `%n` is the only conversion that writes, and this tree's renderer
             // does not implement it.
-            Err(machish::Error::Memory("NSLog does not write through arguments"))
+            Err(machish::Error::Memory(
+                "NSLog does not write through arguments",
+            ))
         }
     }
 

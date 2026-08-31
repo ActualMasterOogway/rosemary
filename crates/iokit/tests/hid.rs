@@ -173,9 +173,15 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
 
         // The first axis is X on the generic-desktop page, over SDL's own range.
         let first_axis = cf::CFArrayGetValueAtIndex(elements, 1) as *const c_void;
-        assert_eq!(api::IOHIDElementGetUsagePage(first_axis), page::GENERIC_DESKTOP);
+        assert_eq!(
+            api::IOHIDElementGetUsagePage(first_axis),
+            page::GENERIC_DESKTOP
+        );
         assert_eq!(api::IOHIDElementGetUsage(first_axis), usage::X);
-        assert_eq!(api::IOHIDElementGetType(first_axis), element_type::INPUT_AXIS);
+        assert_eq!(
+            api::IOHIDElementGetType(first_axis),
+            element_type::INPUT_AXIS
+        );
         assert_eq!(api::IOHIDElementGetLogicalMin(first_axis), -32768);
         assert_eq!(api::IOHIDElementGetLogicalMax(first_axis), 32767);
 

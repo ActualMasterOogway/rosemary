@@ -615,7 +615,9 @@ fn default_pinned_abi() -> PinnedAbi {
         microlift::target_lexicon::Triple::host().architecture,
     ) {
         // The context pointer is a slot too, and it is the one nobody counts.
-        Some(budget) => (budget.gpr as usize).saturating_sub(1).min(PIN_PRIORITY.len()),
+        Some(budget) => (budget.gpr as usize)
+            .saturating_sub(1)
+            .min(PIN_PRIORITY.len()),
         None => FALLBACK,
     };
     PIN_PRIORITY
@@ -649,7 +651,10 @@ fn parse_pinned_regs(list: &str) -> Option<PinnedAbi> {
             // under the tail ABI is eight values and nothing has ever spent any
             // of it, while the general-purpose budget is six counting the
             // context pointer and the default already spends all of it.
-            other => match other.strip_prefix("xmm").and_then(|n| n.parse::<u16>().ok()) {
+            other => match other
+                .strip_prefix("xmm")
+                .and_then(|n| n.parse::<u16>().ok())
+            {
                 Some(n) if n < 16 => pin::xmm(n),
                 _ => {
                     eprintln!(

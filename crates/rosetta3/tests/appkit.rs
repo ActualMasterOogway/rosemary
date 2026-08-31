@@ -26,11 +26,7 @@ use common::{appkit_fixture, run_guest_env};
 
 fn launch() -> Option<(Option<i32>, String, String)> {
     let path = appkit_fixture()?;
-    Some(run_guest_env(
-        &[("ROSETTA3_OBJC", "builtin")],
-        &path,
-        &[],
-    ))
+    Some(run_guest_env(&[("ROSETTA3_OBJC", "builtin")], &path, &[]))
 }
 
 #[test]

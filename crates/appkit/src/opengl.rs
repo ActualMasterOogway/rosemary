@@ -342,7 +342,10 @@ fn drawable(context: &Context) -> sdl3::Window {
     }
     let fallback = match crate::window::key_window().is_null() {
         false => crate::window::key_window(),
-        true => crate::window::all().last().copied().unwrap_or(std::ptr::null_mut()),
+        true => crate::window::all()
+            .last()
+            .copied()
+            .unwrap_or(std::ptr::null_mut()),
     };
     // SAFETY: null or a window this crate made.
     unsafe { crate::window::sdl_window(fallback) }
@@ -513,7 +516,10 @@ mod tests {
     #[test]
     fn the_two_classifications_are_a_partition() {
         for name in attribute::VALUED {
-            assert!(!attribute::STANDALONE.contains(name), "{name} is in both lists");
+            assert!(
+                !attribute::STANDALONE.contains(name),
+                "{name} is in both lists"
+            );
             assert_eq!(attribute::takes_value(*name), Some(true), "{name}");
         }
         for name in attribute::STANDALONE {

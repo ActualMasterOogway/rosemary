@@ -123,7 +123,11 @@ mod tests {
 
     #[test]
     fn every_listed_name_resolves() {
-        let missing: Vec<&str> = NAMES.iter().copied().filter(|n| symbol(n).is_none()).collect();
+        let missing: Vec<&str> = NAMES
+            .iter()
+            .copied()
+            .filter(|n| symbol(n).is_none())
+            .collect();
         assert!(missing.is_empty(), "listed but unresolved: {missing:?}");
     }
 

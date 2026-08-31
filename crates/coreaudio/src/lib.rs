@@ -178,7 +178,8 @@ pub unsafe extern "C" fn AudioComponentInstanceNew(
 /// `OSStatus AudioComponentInstanceDispose(AudioComponentInstance)`
 pub unsafe extern "C" fn AudioComponentInstanceDispose(handle: *mut c_void) -> i32 {
     let Some(unit) = unit_for(handle) else {
-        return foreign::status(c"AudioComponentInstanceDispose", handle).unwrap_or(INVALID_COMPONENT);
+        return foreign::status(c"AudioComponentInstanceDispose", handle)
+            .unwrap_or(INVALID_COMPONENT);
     };
     // SAFETY: `close` owns the stream and leaves none behind.
     unsafe { stream::close(&mut unit.lock().unwrap_or_else(|e| e.into_inner())) };

@@ -144,9 +144,8 @@ pub unsafe fn display_id(screen: Id) -> Option<u32> {
         return None;
     }
     // SAFETY: the caller's obligation.
-    let is_screen = unsafe { objc::object::class_of(screen) }.is_some_and(|c| {
-        objc::class::lookup(c"NSScreen").is_some_and(|k| std::ptr::eq(c, k))
-    });
+    let is_screen = unsafe { objc::object::class_of(screen) }
+        .is_some_and(|c| objc::class::lookup(c"NSScreen").is_some_and(|k| std::ptr::eq(c, k)));
     is_screen.then(|| display_of(screen))
 }
 

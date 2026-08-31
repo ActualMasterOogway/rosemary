@@ -688,12 +688,12 @@ fn exception_throw(
     // runtime registered for it, and leaves anything else alone - so the pointer
     // is either a class of this runtime's or not a class at all, which
     // `from_ptr` is the check for.
-    let class = unsafe {
-        objc::class::from_ptr(vm.objc_host_class(isa) as *const objc::class::Class)
-    }
-    .ok_or_else(|| refused("the thrown object's isa is not a class this runtime knows"))?;
-    let ehtype = crate::objcexc::record_for(class)
-        .ok_or_else(|| refused("no type_info for the thrown class; the program has no libc++abi"))?;
+    let class =
+        unsafe { objc::class::from_ptr(vm.objc_host_class(isa) as *const objc::class::Class) }
+            .ok_or_else(|| refused("the thrown object's isa is not a class this runtime knows"))?;
+    let ehtype = crate::objcexc::record_for(class).ok_or_else(|| {
+        refused("no type_info for the thrown class; the program has no libc++abi")
+    })?;
     let allocate = vm
         .program
         .resolved_symbol("___cxa_allocate_exception")
@@ -1670,7 +1670,9 @@ mod tests {
         // Every entry in the table is a passthrough, so a name misspelled here
         // is a program that stops with "unsatisfied import" at run time.
         for entry in RUNTIME {
-            if BUILTIN_GAPS.contains(&entry.name) && super::super::host::backend() != super::super::host::Backend::Native {
+            if BUILTIN_GAPS.contains(&entry.name)
+                && super::super::host::backend() != super::super::host::Backend::Native
+            {
                 continue;
             }
             assert!(
@@ -1703,7 +1705,10 @@ mod tests {
             .map(|n| format!("_{n}"))
             .filter(|n| !defined.contains(n))
             .collect();
-        assert!(missing.is_empty(), "the objc provider defines none of {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "the objc provider defines none of {missing:?}"
+        );
     }
 
     /// The gaps are gaps, and not names that quietly started working.

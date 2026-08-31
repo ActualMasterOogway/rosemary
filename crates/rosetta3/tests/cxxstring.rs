@@ -216,7 +216,8 @@ fn the_slow_path_agrees_too() {
         skip!("no x86_64 C++ toolchain");
     };
     let (status, fast, fast_err) = run_guest(&path, &[]);
-    let (slow_status, slow, slow_err) = common::run_guest_with(&["--slow", "--emulated"], &path, &[]);
+    let (slow_status, slow, slow_err) =
+        common::run_guest_with(&["--slow", "--emulated"], &path, &[]);
     assert_eq!(
         status, slow_status,
         "exit status differs\n{fast_err}{slow_err}"

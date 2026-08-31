@@ -51,10 +51,8 @@ pub unsafe extern "C" fn AudioUnitSetProperty(
 ) -> i32 {
     let Some(unit) = crate::unit_for(handle) else {
         // SAFETY: the caller's obligation, unchanged by the forward.
-        return unsafe {
-            crate::foreign::set_property(handle, id, _scope, _element, data, size)
-        }
-        .unwrap_or(INVALID_COMPONENT);
+        return unsafe { crate::foreign::set_property(handle, id, _scope, _element, data, size) }
+            .unwrap_or(INVALID_COMPONENT);
     };
     if data.is_null() {
         return PARAM_ERROR;
@@ -123,10 +121,8 @@ pub unsafe extern "C" fn AudioUnitGetProperty(
 ) -> i32 {
     let Some(unit) = crate::unit_for(handle) else {
         // SAFETY: the caller's obligation, unchanged by the forward.
-        return unsafe {
-            crate::foreign::get_property(handle, id, _scope, _element, out, size)
-        }
-        .unwrap_or(INVALID_COMPONENT);
+        return unsafe { crate::foreign::get_property(handle, id, _scope, _element, out, size) }
+            .unwrap_or(INVALID_COMPONENT);
     };
     if size.is_null() {
         return PARAM_ERROR;

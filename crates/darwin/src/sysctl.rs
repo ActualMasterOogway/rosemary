@@ -445,7 +445,9 @@ unsafe extern "C" fn sysctlbyname(
         return -1;
     }
     // SAFETY: the caller states `name` is NUL-terminated.
-    let key = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned();
+    let key = unsafe { std::ffi::CStr::from_ptr(name) }
+        .to_string_lossy()
+        .into_owned();
 
     if let Some((_, mib)) = BY_NAME.iter().find(|(n, _)| *n == key) {
         // SAFETY: `mib` is a static slice of the right length; the rest is the
@@ -522,7 +524,9 @@ unsafe extern "C" fn sysctlnametomib(
         return -1;
     }
     // SAFETY: the caller states `name` is NUL-terminated.
-    let key = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned();
+    let key = unsafe { std::ffi::CStr::from_ptr(name) }
+        .to_string_lossy()
+        .into_owned();
     let Some((_, mib)) = BY_NAME.iter().find(|(n, _)| *n == key) else {
         say_unanswered(&format_args!("name {key:?} as a mib"));
         crate::errno::set(libc::ENOENT);

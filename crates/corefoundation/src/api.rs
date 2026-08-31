@@ -114,7 +114,7 @@ pub unsafe extern "C" fn CFHash(object: CFTypeRef) -> usize {
     unsafe { crate::send::send0_usize(object as Id, objc::sel::get("hash")) }
 }
 
-// 
+//
 
 pub unsafe extern "C" fn CFStringGetTypeID() -> CFTypeID {
     string::type_id_of_strings()
@@ -359,8 +359,9 @@ pub unsafe extern "C" fn CFStringAppendCString(
 
 pub unsafe extern "C" fn CFStringCompare(a: CFTypeRef, b: CFTypeRef, options: u64) -> CFIndex {
     // SAFETY: the caller's obligation.
-    let (Some(a), Some(b)) = (unsafe { string::as_string(a) }, unsafe { string::as_string(b) })
-    else {
+    let (Some(a), Some(b)) = (unsafe { string::as_string(a) }, unsafe {
+        string::as_string(b)
+    }) else {
         return 0;
     };
     let (mut x, mut y) = (a.utf8(), b.utf8());
@@ -376,7 +377,7 @@ pub unsafe extern "C" fn CFStringCompare(a: CFTypeRef, b: CFTypeRef, options: u6
     }
 }
 
-// 
+//
 
 use crate::callbacks::{KeyCallBacks, Policy, ValueCallBacks};
 use crate::collections;
@@ -444,7 +445,7 @@ pub unsafe extern "C" fn CFArrayGetValueAtIndex(array: CFTypeRef, index: CFIndex
     }
 }
 
-// 
+//
 
 pub unsafe extern "C" fn CFDictionaryGetTypeID() -> CFTypeID {
     crate::base::type_id_of(collections::dictionary_class())
@@ -468,7 +469,11 @@ pub unsafe extern "C" fn CFDictionaryCreate(
             std::slice::from_raw_parts(keys, count as usize)
                 .iter()
                 .copied()
-                .zip(std::slice::from_raw_parts(values, count as usize).iter().copied())
+                .zip(
+                    std::slice::from_raw_parts(values, count as usize)
+                        .iter()
+                        .copied(),
+                )
                 .collect()
         },
     };
@@ -522,24 +527,19 @@ pub unsafe extern "C" fn CFDictionaryGetCount(dictionary: CFTypeRef) -> CFIndex 
     unsafe { collections::dictionary(dictionary) }.map_or(0, |d| d.entries.len() as CFIndex)
 }
 
-pub unsafe extern "C" fn CFDictionaryGetValue(
-    dictionary: CFTypeRef,
-    key: CFTypeRef,
-) -> CFTypeRef {
+pub unsafe extern "C" fn CFDictionaryGetValue(dictionary: CFTypeRef, key: CFTypeRef) -> CFTypeRef {
     // SAFETY: the caller's obligation.
     let Some(d) = (unsafe { collections::dictionary(dictionary) }) else {
         return std::ptr::null();
     };
-    d.position(key).map_or(std::ptr::null(), |at| d.entries[at].1)
+    d.position(key)
+        .map_or(std::ptr::null(), |at| d.entries[at].1)
 }
 
-pub unsafe extern "C" fn CFDictionaryContainsKey(
-    dictionary: CFTypeRef,
-    key: CFTypeRef,
-) -> Boolean {
+pub unsafe extern "C" fn CFDictionaryContainsKey(dictionary: CFTypeRef, key: CFTypeRef) -> Boolean {
     // SAFETY: the caller's obligation.
-    unsafe { collections::dictionary(dictionary) }
-        .is_some_and(|d| d.position(key).is_some()) as Boolean
+    unsafe { collections::dictionary(dictionary) }.is_some_and(|d| d.position(key).is_some())
+        as Boolean
 }
 
 /// `CFDictionaryGetKeysAndValues`: both sides, in one pass, into the caller's
@@ -734,8 +734,7 @@ fn leak<T>(value: Arc<T>) -> CFTypeRef {
 /// pointers `CFRunLoopGetCurrent` hands out.
 unsafe fn borrow<T>(p: CFTypeRef) -> Option<std::mem::ManuallyDrop<Arc<T>>> {
     // SAFETY: the caller's obligation.
-    (!p.is_null())
-        .then(|| std::mem::ManuallyDrop::new(unsafe { Arc::from_raw(p as *const T) }))
+    (!p.is_null()).then(|| std::mem::ManuallyDrop::new(unsafe { Arc::from_raw(p as *const T) }))
 }
 
 /// A run loop's address, which is stable for as long as its thread runs.
@@ -836,11 +835,7 @@ pub unsafe extern "C" fn CFRunLoopSourceIsValid(source: CFTypeRef) -> Boolean {
     unsafe { borrow::<Source>(source) }.is_some_and(|s| s.is_valid()) as Boolean
 }
 
-pub unsafe extern "C" fn CFRunLoopAddSource(
-    loop_: CFTypeRef,
-    source: CFTypeRef,
-    mode: CFTypeRef,
-) {
+pub unsafe extern "C" fn CFRunLoopAddSource(loop_: CFTypeRef, source: CFTypeRef, mode: CFTypeRef) {
     // SAFETY: the caller's obligation.
     let (Some(l), Some(s)) = (unsafe { borrow::<RunLoop>(loop_) }, unsafe {
         borrow::<Source>(source)
@@ -935,11 +930,7 @@ pub unsafe extern "C" fn CFRunLoopAddTimer(loop_: CFTypeRef, timer: CFTypeRef, m
     l.add_timer(&t, &unsafe { mode_name(mode) });
 }
 
-pub unsafe extern "C" fn CFRunLoopRemoveTimer(
-    loop_: CFTypeRef,
-    timer: CFTypeRef,
-    mode: CFTypeRef,
-) {
+pub unsafe extern "C" fn CFRunLoopRemoveTimer(loop_: CFTypeRef, timer: CFTypeRef, mode: CFTypeRef) {
     // SAFETY: the caller's obligation.
     let (Some(l), Some(t)) = (unsafe { borrow::<RunLoop>(loop_) }, unsafe {
         borrow::<Timer>(timer)

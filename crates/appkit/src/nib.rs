@@ -220,8 +220,8 @@ impl Builder<'_> {
         }
         for object in targets {
             // SAFETY: an object this loader built or was handed.
-            let responds = unsafe { objc::object::class_of(object) }
-                .is_some_and(|c| c.method(sel).is_some());
+            let responds =
+                unsafe { objc::object::class_of(object) }.is_some_and(|c| c.method(sel).is_some());
             if !responds {
                 continue;
             }
@@ -261,9 +261,9 @@ impl Builder<'_> {
         }
         let (Some(from), Some(to)) = (self.instantiate(source), self.instantiate(destination))
         else {
-            self.loaded
-                .unwired
-                .push(format!("the outlet \"{label}\" of a {source_class} has no object to set"));
+            self.loaded.unwired.push(format!(
+                "the outlet \"{label}\" of a {source_class} has no object to set"
+            ));
             return;
         };
         // SAFETY: an object this loader just built or was handed as the owner.
@@ -378,12 +378,18 @@ impl Builder<'_> {
         // name: `NSWindowTemplate` is a *description* of an `NSWindow`, and the
         // name is the description's. `crate::decode` is where that is undone.
         if crate::decode::DECODED.contains(&name) {
-            return self.decoding.take().and_then(|uid| {
-                crate::decode::build(self, uid, name)
-            }).unwrap_or(std::ptr::null_mut());
+            return self
+                .decoding
+                .take()
+                .and_then(|uid| crate::decode::build(self, uid, name))
+                .unwrap_or(std::ptr::null_mut());
         }
         let known = implemented(name)
-            .then(|| std::ffi::CString::new(name).ok().and_then(|n| objc::class::lookup(&n)))
+            .then(|| {
+                std::ffi::CString::new(name)
+                    .ok()
+                    .and_then(|n| objc::class::lookup(&n))
+            })
             .flatten();
         let Some(class) = known else {
             self.note(name);
@@ -550,7 +556,9 @@ mod tests {
         let class = unsafe { objc::object::class_of(delegate) }.expect("a class");
         assert_eq!(class.name_str(), "R3TestNibDelegate");
         assert!(
-            loaded.placeholders.contains(&"R3TestUnbuiltClass".to_string()),
+            loaded
+                .placeholders
+                .contains(&"R3TestUnbuiltClass".to_string()),
             "the class nothing implements was not reported: {:?}",
             loaded.placeholders
         );

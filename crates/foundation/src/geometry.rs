@@ -267,12 +267,8 @@ pub(crate) fn install() {
     // `NSNumber` under it; this is where it gains storage. The instance size is
     // set here because a class's size is fixed at registration and `NSNumber`
     // has its own body of the same shape.
-    let class = corefoundation::base::register(
-        c"NSValue",
-        None,
-        std::mem::size_of::<Body>(),
-        false,
-    );
+    let class =
+        corefoundation::base::register(c"NSValue", None, std::mem::size_of::<Body>(), false);
     methods!(class, {
         "objCType" => obj_c_type, c"*16@0:8";
         "getValue:" => get_value, c"v24@0:8^v16";

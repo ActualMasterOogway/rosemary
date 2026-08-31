@@ -256,7 +256,11 @@ pub fn symbol(name: &str) -> Option<u64> {
 
 pub fn provide(lib: &mut SyntheticDylib) {
     for name in NAMES {
-        crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap_or(0) as *const ());
+        crate::define_fn(
+            lib,
+            &format!("_{name}"),
+            symbol(name).unwrap_or(0) as *const (),
+        );
     }
 }
 
@@ -305,7 +309,10 @@ mod tests {
         std::fs::create_dir_all(dir.join("Contents")).expect("a directory");
         std::fs::write(dir.join("Contents").join("Game.ios"), b"xyz").expect("a file");
         let lowered = CString::new(
-            dir.join("contents").join("game.ios").to_str().expect("utf-8"),
+            dir.join("contents")
+                .join("game.ios")
+                .to_str()
+                .expect("utf-8"),
         )
         .expect("no NUL");
         let mut out = Stat::default();

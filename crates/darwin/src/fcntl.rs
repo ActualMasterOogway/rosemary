@@ -182,7 +182,11 @@ mod tests {
         assert_eq!(to_host(cmd::F_SETFL), Some(libc::F_SETFL));
         #[cfg(not(target_os = "macos"))]
         {
-            assert_eq!(to_host(cmd::F_GETLK), None, "struct flock is laid out differently");
+            assert_eq!(
+                to_host(cmd::F_GETLK),
+                None,
+                "struct flock is laid out differently"
+            );
             assert_eq!(to_host(cmd::F_FULLFSYNC), None, "Linux spells this fsync");
             assert_eq!(to_host(cmd::F_NOCACHE), None);
         }

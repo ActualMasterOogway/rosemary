@@ -153,9 +153,7 @@ pub unsafe extern "C" fn CVDisplayLinkCreateWithCGDisplay(
 /// # Safety
 ///
 /// As [`CVDisplayLinkCreateWithCGDisplay`].
-pub unsafe extern "C" fn CVDisplayLinkCreateWithActiveCGDisplays(
-    out: *mut *mut c_void,
-) -> i32 {
+pub unsafe extern "C" fn CVDisplayLinkCreateWithActiveCGDisplays(out: *mut *mut c_void) -> i32 {
     // SAFETY: the caller's obligation.
     unsafe { CVDisplayLinkCreateWithCGDisplay(0, out) }
 }
@@ -259,7 +257,11 @@ pub unsafe extern "C" fn CVDisplayLinkStop(handle: *mut c_void) -> i32 {
     let Some(link) = link_for(handle) else {
         return INVALID_ARGUMENT;
     };
-    let running = link.lock().unwrap_or_else(|e| e.into_inner()).running.take();
+    let running = link
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .running
+        .take();
     if let Some(running) = running {
         running.store(false, Ordering::Release);
     }
@@ -274,7 +276,10 @@ pub unsafe extern "C" fn CVDisplayLinkRelease(_handle: *mut c_void) {}
 
 pub unsafe extern "C" fn CVDisplayLinkIsRunning(handle: *mut c_void) -> u8 {
     link_for(handle).is_some_and(|link| {
-        link.lock().unwrap_or_else(|e| e.into_inner()).running.is_some()
+        link.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .running
+            .is_some()
     }) as u8
 }
 
@@ -422,7 +427,11 @@ mod tests {
             FIRED.load(Ordering::SeqCst) >= 2,
             "the link did not call back twice"
         );
-        assert_eq!(SEEN_CONTEXT.load(Ordering::SeqCst), 0x1234, "the context arrives");
+        assert_eq!(
+            SEEN_CONTEXT.load(Ordering::SeqCst),
+            0x1234,
+            "the context arrives"
+        );
 
         // SAFETY: a link this test made.
         assert_eq!(unsafe { CVDisplayLinkStop(handle) }, SUCCESS);
@@ -433,7 +442,11 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
         let settled = FIRED.load(Ordering::SeqCst);
         std::thread::sleep(std::time::Duration::from_millis(100));
-        assert_eq!(FIRED.load(Ordering::SeqCst), settled, "the thread kept firing");
+        assert_eq!(
+            FIRED.load(Ordering::SeqCst),
+            settled,
+            "the thread kept firing"
+        );
     }
 
     /// A handle nothing made is refused rather than dereferenced.
@@ -455,7 +468,11 @@ mod tests {
 
     #[test]
     fn every_listed_name_resolves() {
-        let missing: Vec<&str> = NAMES.iter().copied().filter(|n| symbol(n).is_none()).collect();
+        let missing: Vec<&str> = NAMES
+            .iter()
+            .copied()
+            .filter(|n| symbol(n).is_none())
+            .collect();
         assert!(missing.is_empty(), "listed but unresolved: {missing:?}");
     }
 }

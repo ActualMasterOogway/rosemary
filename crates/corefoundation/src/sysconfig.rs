@@ -44,10 +44,7 @@ pub unsafe extern "C" fn SCNetworkReachabilityCreateWithName(
 ///
 /// False, and the flags are left alone: a caller that reads them after a false
 /// return is reading its own uninitialised memory on Apple's too.
-pub unsafe extern "C" fn SCNetworkReachabilityGetFlags(
-    _target: CFTypeRef,
-    _flags: *mut u32,
-) -> u8 {
+pub unsafe extern "C" fn SCNetworkReachabilityGetFlags(_target: CFTypeRef, _flags: *mut u32) -> u8 {
     0
 }
 
@@ -137,11 +134,8 @@ mod tests {
         // "no target" means to them.
         unsafe {
             assert!(
-                SCNetworkReachabilityCreateWithAddress(
-                    std::ptr::null(),
-                    std::ptr::null()
-                )
-                .is_null()
+                SCNetworkReachabilityCreateWithAddress(std::ptr::null(), std::ptr::null())
+                    .is_null()
             );
             assert!(
                 SCNetworkReachabilityCreateWithName(std::ptr::null(), std::ptr::null()).is_null()

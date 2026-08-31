@@ -101,7 +101,8 @@ pub fn post(name: &str, object: Id, user_info: Id) {
 /// `observer` must be live and `selector` must name a method taking one object.
 unsafe fn send_notification(observer: Id, selector: Sel, notification: Id) {
     // SAFETY: the caller's obligation.
-    let Some(method) = (unsafe { objc::object::class_of(observer) }).and_then(|c| c.method(selector))
+    let Some(method) =
+        (unsafe { objc::object::class_of(observer) }).and_then(|c| c.method(selector))
     else {
         // Apple raises here. A named abort instead, because a handler that is
         // not there is a program whose notification never arrives, and silence

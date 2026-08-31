@@ -96,7 +96,8 @@ fn a_framework_this_tree_implements_can_be_opened_by_name() {
     let Some(guest) = common::dlopen_framework_fixture() else {
         skip!("cannot build x86_64 fixtures")
     };
-    let Some(native) = common::build_native_with("dlopen_framework_native", common::DLOPEN_FRAMEWORK_C, &[])
+    let Some(native) =
+        common::build_native_with("dlopen_framework_native", common::DLOPEN_FRAMEWORK_C, &[])
     else {
         skip!("cannot build native fixtures")
     };

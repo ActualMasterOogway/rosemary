@@ -219,7 +219,6 @@ fn mode_name_object(name: &'static str) -> u64 {
     addr
 }
 
-
 /// The symbols that are **data**, as `(Mach-O name, address)`.
 ///
 /// `___CFConstantStringClassReference` is the whole reason a guest's `@"literal"`
@@ -274,7 +273,10 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         // talking about the same thing or nothing ever fires.
         ("_NSDefaultRunLoopMode", runloop::DEFAULT_MODE),
     ] {
-        out.push((name.to_string(), base::global_cell(name, mode_name_object(mode))));
+        out.push((
+            name.to_string(),
+            base::global_cell(name, mode_name_object(mode)),
+        ));
     }
     // The string-valued globals, each of which is exactly its own name without
     // the `k` and the `Key`. Interned so that a guest comparing one against a
@@ -304,10 +306,7 @@ pub fn data_symbols() -> Vec<(String, u64)> {
     // about.
     out.push((
         "_kCFCoreFoundationVersionNumber".to_string(),
-        base::global_cell(
-            "_kCFCoreFoundationVersionNumber",
-            (1600.0f64).to_bits(),
-        ),
+        base::global_cell("_kCFCoreFoundationVersionNumber", (1600.0f64).to_bits()),
     ));
     out
 }
@@ -328,8 +327,14 @@ static KEY_STRINGS: &[(&str, &str)] = &[
     ("_kCFBundleVersionKey", "CFBundleVersion"),
     ("_kCFBundleExecutableKey", "CFBundleExecutable"),
     ("_kCFBundleLocalizationsKey", "CFBundleLocalizations"),
-    ("_kCFBundleDevelopmentRegionKey", "CFBundleDevelopmentRegion"),
-    ("_kCFBundleInfoDictionaryVersionKey", "CFBundleInfoDictionaryVersion"),
+    (
+        "_kCFBundleDevelopmentRegionKey",
+        "CFBundleDevelopmentRegion",
+    ),
+    (
+        "_kCFBundleInfoDictionaryVersionKey",
+        "CFBundleInfoDictionaryVersion",
+    ),
 ];
 
 /// `kCFNull`, the singleton `NSNull` also answers for.
@@ -362,7 +367,11 @@ mod tests {
 
     #[test]
     fn every_listed_name_resolves() {
-        let missing: Vec<&str> = NAMES.iter().copied().filter(|n| symbol(n).is_none()).collect();
+        let missing: Vec<&str> = NAMES
+            .iter()
+            .copied()
+            .filter(|n| symbol(n).is_none())
+            .collect();
         assert!(missing.is_empty(), "listed but unresolved: {missing:?}");
     }
 
@@ -386,12 +395,7 @@ mod tests {
             assert_eq!(max, 30, "three bytes a UTF-16 unit, as Apple's answers");
 
             let mut buf = [0 as c_char; 256];
-            let ok = api::CFStringGetCString(
-                s,
-                buf.as_mut_ptr(),
-                max + 1,
-                string::encoding::UTF8,
-            );
+            let ok = api::CFStringGetCString(s, buf.as_mut_ptr(), max + 1, string::encoding::UTF8);
             assert_eq!(ok, 1, "the conversion must succeed");
             assert_eq!(
                 std::ffi::CStr::from_ptr(buf.as_ptr()).to_bytes(),
@@ -454,7 +458,11 @@ mod tests {
             assert_eq!(api::CFStringGetLength(object), 14);
             assert_eq!(api::CFGetTypeID(object), api::CFStringGetTypeID());
             let ptr = api::CFStringGetCStringPtr(object, string::encoding::UTF8);
-            assert_eq!(ptr as *const u8, bytes.as_ptr() as *const u8, "not in place");
+            assert_eq!(
+                ptr as *const u8,
+                bytes.as_ptr() as *const u8,
+                "not in place"
+            );
 
             // Released as many times as anyone likes, and still there.
             api::CFRelease(object);
@@ -531,7 +539,10 @@ mod collection_tests {
         bootstrap();
         let page = string(c"DeviceUsagePage");
         let usage = string(c"DeviceUsage");
-        let (one, four) = (number(number_type::SINT32, 1), number(number_type::SINT32, 4));
+        let (one, four) = (
+            number(number_type::SINT32, 1),
+            number(number_type::SINT32, 4),
+        );
 
         // SAFETY: real objects and the type callbacks this crate exports.
         unsafe {
@@ -576,7 +587,10 @@ mod collection_tests {
             );
             assert_eq!(api::CFArrayGetCount(array), 1);
             assert_eq!(api::CFArrayGetValueAtIndex(array, 0), dict);
-            assert!(api::CFArrayGetValueAtIndex(array, 1).is_null(), "past the end");
+            assert!(
+                api::CFArrayGetValueAtIndex(array, 1).is_null(),
+                "past the end"
+            );
 
             api::CFRelease(same);
             api::CFRelease(array);
@@ -605,7 +619,10 @@ mod collection_tests {
             assert_eq!(api::CFGetRetainCount(element), 2);
             api::CFRelease(element);
             // Still readable: the array's reference is the one left.
-            assert_eq!(api::CFStringGetLength(api::CFArrayGetValueAtIndex(array, 0)), 4);
+            assert_eq!(
+                api::CFStringGetLength(api::CFArrayGetValueAtIndex(array, 0)),
+                4
+            );
             api::CFRelease(array);
         }
     }

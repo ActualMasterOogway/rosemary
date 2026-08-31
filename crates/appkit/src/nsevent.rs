@@ -107,7 +107,10 @@ reader! {
 /// method means on Apple's - the value is only ever differenced.
 unsafe extern "C" fn timestamp(_receiver: Id, _sel: Sel) -> CGFloat {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs_f64()
 }
 
 /// `+[NSEvent modifierFlags]`, which asks about the keyboard *now* rather than

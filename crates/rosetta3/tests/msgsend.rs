@@ -412,11 +412,8 @@ fn objective_c_exceptions_throw_and_catch_as_they_do_natively() {
         assert_eq!(stdout, expected, "the fixture does not do this on Apple's");
     }
 
-    let (status, stdout, stderr) = common::run_guest_env(
-        &[("ROSETTA3_OBJC", "builtin")],
-        &path,
-        &[],
-    );
+    let (status, stdout, stderr) =
+        common::run_guest_env(&[("ROSETTA3_OBJC", "builtin")], &path, &[]);
     assert_eq!(status, Some(0), "stderr: {stderr}");
     assert_eq!(stdout, expected);
 }

@@ -148,7 +148,8 @@ impl Layout {
     /// no file to find, which is a `None` here rather than a diagnostic.
     pub fn icon(&self) -> Option<PathBuf> {
         let name = self.info_string("CFBundleIconFile")?;
-        self.resource(name, "icns").or_else(|| self.resource(name, ""))
+        self.resource(name, "icns")
+            .or_else(|| self.resource(name, ""))
     }
 
     /// `NSPrincipalClass`, which `NSApplicationMain` instantiates instead of
@@ -394,7 +395,9 @@ pub(crate) mod class {
     fn autoreleased(text: &str) -> Id {
         let string = crate::string::from_str(text);
         // SAFETY: a string this call just created.
-        unsafe { corefoundation::api::CFAutorelease(string as corefoundation::base::CFTypeRef) as Id }
+        unsafe {
+            corefoundation::api::CFAutorelease(string as corefoundation::base::CFTypeRef) as Id
+        }
     }
 
     fn path(p: Option<std::path::PathBuf>) -> Id {
@@ -433,12 +436,7 @@ pub(crate) mod class {
         }
     }
 
-    unsafe extern "C" fn path_for_resource(
-        _receiver: Id,
-        _sel: Sel,
-        name: Id,
-        kind: Id,
-    ) -> Id {
+    unsafe extern "C" fn path_for_resource(_receiver: Id, _sel: Sel, name: Id, kind: Id) -> Id {
         // SAFETY: both are `NSString`s or nil.
         let (name, kind) = unsafe { (crate::string::bytes(name), crate::string::bytes(kind)) };
         let (Ok(name), Ok(kind)) = (std::str::from_utf8(&name), std::str::from_utf8(&kind)) else {
@@ -481,12 +479,8 @@ pub(crate) mod class {
     }
 
     pub(crate) fn install() {
-        let class = corefoundation::base::register(
-            c"NSBundle",
-            None,
-            std::mem::size_of::<usize>(),
-            false,
-        );
+        let class =
+            corefoundation::base::register(c"NSBundle", None, std::mem::size_of::<usize>(), false);
         methods!(class, {
             "bundlePath" => bundle_path, c"@16@0:8";
             "resourcePath" => resource_path, c"@16@0:8";

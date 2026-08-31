@@ -52,11 +52,13 @@ mod slot {
 const UNSET: u64 = u64::MAX;
 
 fn get(r: &Record, index: usize) -> u64 {
-    r.slot(index, size::ATTR).load(std::sync::atomic::Ordering::Relaxed)
+    r.slot(index, size::ATTR)
+        .load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn set(r: &Record, index: usize, value: u64) {
-    r.slot(index, size::ATTR).store(value, std::sync::atomic::Ordering::Relaxed)
+    r.slot(index, size::ATTR)
+        .store(value, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Attributes {
@@ -445,7 +447,8 @@ pub mod imp {
         0
     }
 
-    getter!(attr_getschedpolicy, slot::SCHED, i32, |v| (v & 0xffff_ffff) as i32);
+    getter!(attr_getschedpolicy, slot::SCHED, i32, |v| (v & 0xffff_ffff)
+        as i32);
 
     /// `struct sched_param` is one `int` on Darwin, which is what
     /// `__SCHED_PARAM_SIZE__` says.
@@ -515,7 +518,10 @@ mod tests {
     #[test]
     fn a_null_attribute_pointer_is_the_defaults() {
         // SAFETY: null is the one address this is documented to accept.
-        assert_eq!(unsafe { Attributes::of_guest(0) }, Some(Attributes::default()));
+        assert_eq!(
+            unsafe { Attributes::of_guest(0) },
+            Some(Attributes::default())
+        );
     }
 
     #[test]

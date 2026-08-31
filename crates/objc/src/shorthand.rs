@@ -21,8 +21,7 @@ use crate::sel::Sel;
 /// `receiver` must be null or a live object.
 unsafe fn send0(receiver: Id, sel: Sel) -> Id {
     // SAFETY: the caller's obligation.
-    let Some(imp) = unsafe { crate::object::class_of(receiver) }.and_then(|c| c.method(sel))
-    else {
+    let Some(imp) = unsafe { crate::object::class_of(receiver) }.and_then(|c| c.method(sel)) else {
         return std::ptr::null_mut();
     };
     // SAFETY: a nullary message returning an object is `id (*)(id, SEL)`.
@@ -39,8 +38,7 @@ unsafe fn send0(receiver: Id, sel: Sel) -> Id {
 /// As [`send0`], and the method must take one word and return a `BOOL`.
 unsafe fn send1_bool(receiver: Id, sel: Sel, argument: usize) -> bool {
     // SAFETY: the caller's obligation.
-    let Some(imp) = unsafe { crate::object::class_of(receiver) }.and_then(|c| c.method(sel))
-    else {
+    let Some(imp) = unsafe { crate::object::class_of(receiver) }.and_then(|c| c.method(sel)) else {
         return false;
     };
     // SAFETY: the caller's obligation.

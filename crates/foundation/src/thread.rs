@@ -23,13 +23,7 @@ struct Detached {
 // runtime they belong to is shared across threads already.
 unsafe impl Send for Detached {}
 
-unsafe extern "C" fn detach(
-    _class: Id,
-    _sel: Sel,
-    selector: Sel,
-    target: Id,
-    object: Id,
-) {
+unsafe extern "C" fn detach(_class: Id, _sel: Sel, selector: Sel, target: Id, object: Id) {
     if target.is_null() || selector.is_null() {
         return;
     }

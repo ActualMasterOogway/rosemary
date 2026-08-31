@@ -142,11 +142,20 @@ static KNOWN: LazyLock<RwLock<std::collections::HashSet<usize>>> =
 
 /// Whether `p` is a class this runtime built.
 pub fn is_known(p: *const Class) -> bool {
-    !p.is_null() && KNOWN.read().unwrap_or_else(|e| e.into_inner()).contains(&(p as usize))
+    !p.is_null()
+        && KNOWN
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&(p as usize))
 }
 
 impl Class {
-    fn new(name: CString, superclass: *mut Class, is_meta: bool, instance_size: usize) -> &'static Class {
+    fn new(
+        name: CString,
+        superclass: *mut Class,
+        is_meta: bool,
+        instance_size: usize,
+    ) -> &'static Class {
         let class = Box::leak(Box::new(Class {
             isa: AtomicPtr::new(std::ptr::null_mut()),
             superclass: AtomicPtr::new(superclass),
@@ -344,7 +353,11 @@ impl Class {
 
     pub fn add_protocol(&self, protocol: &'static crate::protocol::Protocol) -> bool {
         let mut contents = self.contents.write().unwrap_or_else(|e| e.into_inner());
-        if contents.protocols.iter().any(|p| std::ptr::eq(*p, protocol)) {
+        if contents
+            .protocols
+            .iter()
+            .any(|p| std::ptr::eq(*p, protocol))
+        {
             return false;
         }
         contents.protocols.push(protocol);

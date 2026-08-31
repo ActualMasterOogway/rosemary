@@ -66,7 +66,9 @@ pub fn install() {
             continue;
         }
         let key = sel as u64;
-        if let Some(clash) = originals.iter().find(|(s, imp)| *s == key && *imp != previous as u64)
+        if let Some(clash) = originals
+            .iter()
+            .find(|(s, imp)| *s == key && *imp != previous as u64)
         {
             objc::fail!(
                 "{selector} has two implementations ({:#x} and {:#x}), which the \
