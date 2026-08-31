@@ -37,6 +37,28 @@ extern "C" fn ns_get_argv() -> *mut *mut *mut c_char {
     GUEST_ARGV.as_ptr()
 }
 
+/// The guest's own executable, as `_NSGetExecutablePath` must report it.
+///
+/// Empty until [`set_executable_path`] runs, which is before any guest code.
+static GUEST_EXECUTABLE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Record the program the guest is, for the reason [`set_process_args`] records
+/// its arguments: the path has to be the one the guest thinks it is running
+/// from, not this runtime's.
+///
+/// A program locates its own resources by walking up from here - Roblox's
+/// `Contents/Resources/ssl/cacert.pem` is found this way, and answering with
+/// `rosetta3`'s path sent it looking beside the emulator instead, where the
+/// missing CA bundle failed every TLS handshake it made.
+///
+/// Canonical, because a caller joins onto it: `Layout::enclosing` resolves the
+/// same symlinks for the same reason.
+pub fn set_executable_path(path: &std::path::Path) {
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    *GUEST_EXECUTABLE.lock().unwrap_or_else(|e| e.into_inner()) =
+        resolved.to_string_lossy().into_owned();
+}
+
 /// The address of the host's `environ` variable, or `None` if it has none.
 ///
 /// `getenv`/`setenv`/`putenv` are passed through to the host, so a guest reading
@@ -124,8 +146,19 @@ unsafe extern "C" fn ns_get_executable_path(buf: *mut u8, bufsize: *mut u32) -> 
     if bufsize.is_null() {
         return -1;
     }
-    let path = std::env::current_exe().unwrap_or_default();
-    let path = path.to_string_lossy();
+    // The guest's, not this process's. Only a runtime that was handed no path -
+    // which is no run that reaches a guest - falls back to its own.
+    let path = GUEST_EXECUTABLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let path = match path.is_empty() {
+        false => path,
+        true => std::env::current_exe()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+    };
     let needed = path.len() + 1;
     // SAFETY: a guest `uint32_t *`, directly addressable under the identity mapping.
     let available = unsafe { *bufsize } as usize;

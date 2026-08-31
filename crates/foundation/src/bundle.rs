@@ -318,7 +318,12 @@ pub mod cf {
         let Some(bundle) = super::main() else {
             return std::ptr::null_mut();
         };
-        if std::path::Path::new(&url.path) != bundle.root {
+        // A bundle is named by a file URL and by nothing else: a `https:` URL
+        // has no directory for this to be about.
+        let Some(path) = url.file_path() else {
+            return std::ptr::null_mut();
+        };
+        if std::path::Path::new(&path) != bundle.root {
             return std::ptr::null_mut();
         }
         // A `Create`, so the caller owns a reference to the singleton.

@@ -125,6 +125,10 @@ fn main() -> ExitCode {
             eprintln!("usage: rosetta3 run [--slow] [--native|--emulated] <mach-o path> [args...]");
             return ExitCode::FAILURE;
         };
+        // Before anything can ask: both say which program the guest is, and a
+        // guest that finds its own resources through either must get the same
+        // answer.
+        rosetta3::shims::runtime::set_executable_path(std::path::Path::new(&path));
         rosetta3::frameworks::set_main_bundle(std::path::Path::new(&path));
         #[cfg(target_os = "macos")]
         if !rosetta3::frameworks::builtin()

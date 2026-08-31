@@ -1,14 +1,15 @@
 //! `CFURL`, which is `NSURL *`.
 //!
-//! Only file URLs are built here, because that is what a bundle answers with and
-//! what a guest turns straight back into a path. A URL is stored as the *path*
-//! rather than as text: every caller in this tree either asks for the file
-//! system representation or hands it to another call that does, and round
-//! tripping through percent-encoded text would only add a place to lose a
-//! character.
+//! A URL is stored as its absolute text and nothing else. The pieces a caller
+//! asks for - the scheme, the file system path - are cut out of that text on
+//! demand rather than kept beside it, so there is no second representation to
+//! disagree with the first. What performs an HTTP request parses the text
+//! properly; see `foundation::urlsession`.
 //!
-//! The `file://` spelling is still what `-absoluteString` reports, so a guest
-//! that logs one sees what Apple's would print.
+//! A file URL is the case that has to round-trip exactly, because a bundle
+//! answers with one and the guest turns it straight back into a path. The path
+//! is percent-encoded on the way in and decoded on the way out, which is what
+//! keeps a directory with a space in its name from re-parsing as two.
 
 use std::ffi::c_void;
 
@@ -17,7 +18,7 @@ use objc::object::Id;
 
 use crate::base::CFTypeRef;
 
-/// A URL object: the `isa`, and the path hanging off it.
+/// A URL object: the `isa`, and the text hanging off it.
 #[repr(C)]
 struct Body {
     isa: *const Class,
@@ -25,32 +26,87 @@ struct Body {
 }
 
 pub struct Contents {
-    /// An absolute file system path, with no trailing slash except at the root.
-    pub path: String,
-    /// Whether the URL names a directory, which is the one bit
-    /// `CFURLCreateWithFileSystemPath` takes and `-absoluteString` shows.
-    pub directory: bool,
+    /// The absolute URL, `https://host/path` or `file:///Applications/Foo.app/`.
+    pub text: String,
 }
 
 impl Contents {
-    /// `file:///Applications/Foo.app/Contents/Resources/`, which is what
-    /// `-absoluteString` answers.
-    pub fn text(&self) -> String {
-        let mut out = String::from("file://");
-        out.push_str(&percent_encode(&self.path));
-        if self.directory && !out.ends_with('/') {
-            out.push('/');
+    /// The scheme, lowercased, or empty for text that has none.
+    ///
+    /// Cut at the first `:`, and only when everything before it could be a
+    /// scheme: `/tmp/a:b` is a path someone passed by mistake, not a URL whose
+    /// scheme is `/tmp/a`.
+    pub fn scheme(&self) -> String {
+        let Some(end) = self.text.find(':') else {
+            return String::new();
+        };
+        let scheme = &self.text[..end];
+        let valid = !scheme.is_empty()
+            && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+        match valid {
+            true => scheme.to_ascii_lowercase(),
+            false => String::new(),
         }
-        out
+    }
+
+    pub fn is_file_url(&self) -> bool {
+        self.scheme() == "file"
+    }
+
+    /// The file system path, for a `file:` URL.
+    ///
+    /// `None` for anything else: a caller asking a `https:` URL for its path
+    /// wants the path *component*, which is [`Contents::path`], and answering
+    /// with one here would let a file operation open it.
+    pub fn file_path(&self) -> Option<String> {
+        if !self.is_file_url() {
+            return None;
+        }
+        // `file://<authority>/<path>`; the authority is empty or `localhost`,
+        // and either way the path begins at the slash that ends it.
+        let rest = self.text.strip_prefix("file://")?;
+        let path = match rest.find('/') {
+            Some(slash) => &rest[slash..],
+            None => "/",
+        };
+        Some(percent_decode(trim_trailing_slash(path)))
+    }
+
+    /// The path component, decoded: everything after the authority and before
+    /// the query or fragment.
+    pub fn path(&self) -> String {
+        if let Some(path) = self.file_path() {
+            return path;
+        }
+        let after_scheme = match self.text.split_once("://") {
+            Some((_, rest)) => rest,
+            None => return String::new(),
+        };
+        let path = match after_scheme.find('/') {
+            Some(slash) => &after_scheme[slash..],
+            None => return String::new(),
+        };
+        let end = path.find(['?', '#']).unwrap_or(path.len());
+        percent_decode(&path[..end])
+    }
+}
+
+/// Drop a trailing slash, except from the root - which is the one path whose
+/// trailing slash is the whole path.
+fn trim_trailing_slash(path: &str) -> &str {
+    match path.len() > 1 {
+        true => path.trim_end_matches('/'),
+        false => path,
     }
 }
 
 /// The characters a path may carry into a URL unescaped.
 ///
 /// RFC 3986's unreserved set plus the sub-delimiters a file path routinely
-/// contains, and `/` itself. Anything else is escaped, which is what stops a
-/// bundle under a directory with a space in its name from producing a URL that
-/// re-parses as two.
+/// contains, and `/` itself.
 fn unreserved(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || b"-._~/!$&'()*+,;=:@".contains(&byte)
 }
@@ -66,6 +122,33 @@ fn percent_encode(path: &str) -> String {
     out
 }
 
+/// The reverse. A `%` that is not followed by two hexadecimal digits is a
+/// literal `%`, which is what a path containing one and never encoded produces.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let decoded = (bytes[index] == b'%' && index + 2 < bytes.len())
+            .then(|| {
+                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok()?;
+                u8::from_str_radix(hex, 16).ok()
+            })
+            .flatten();
+        match decoded {
+            Some(byte) => {
+                out.push(byte);
+                index += 3;
+            }
+            None => {
+                out.push(bytes[index]);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// The concrete class, under `NSURL` so that a guest's `isKindOfClass:` and its
 /// `_OBJC_CLASS_$_NSURL` binding agree about the object.
 pub fn class() -> &'static Class {
@@ -74,7 +157,11 @@ pub fn class() -> &'static Class {
         let base = crate::base::abstract_class(c"NSURL", None);
         crate::base::note_type_class(base);
         let class = crate::base::register(c"__NSCFURL", Some(base), size_of::<Body>(), false);
-        class.replace_method(objc::sel::get("dealloc"), dealloc as *const c_void, c"v16@0:8");
+        class.replace_method(
+            objc::sel::get("dealloc"),
+            dealloc as *const c_void,
+            c"v16@0:8",
+        );
         objc::class::ptr(class) as usize
     });
     // SAFETY: the cell holds a pointer to a class this function registered.
@@ -94,8 +181,8 @@ unsafe extern "C" fn dealloc(receiver: Id, _sel: objc::sel::Sel) {
     }
 }
 
-/// A file URL naming `path`, owned by the caller.
-pub fn new_file_url(path: &str, directory: bool) -> CFTypeRef {
+/// A URL holding `text`, owned by the caller.
+pub fn new(text: &str) -> CFTypeRef {
     // SAFETY: `Body` begins with `isa` and is the layout `class` was registered
     // with.
     let body: *mut Body = unsafe { crate::base::allocate(class()) };
@@ -103,21 +190,25 @@ pub fn new_file_url(path: &str, directory: bool) -> CFTypeRef {
         return std::ptr::null();
     }
     let contents = Contents {
-        path: path.trim_end_matches('/').to_string(),
-        directory,
-    };
-    // A path that trimmed to nothing was the root, which is the one path whose
-    // trailing slash is the whole path.
-    let contents = match contents.path.is_empty() {
-        true => Contents {
-            path: "/".to_string(),
-            ..contents
-        },
-        false => contents,
+        text: text.to_string(),
     };
     // SAFETY: a live instance whose second word is ours to fill in.
     unsafe { (*body).contents = Box::into_raw(Box::new(contents)) };
     body as CFTypeRef
+}
+
+/// A file URL naming `path`, owned by the caller.
+///
+/// `directory` decides the trailing slash, which is what a caller appending a
+/// name onto the result depends on.
+pub fn new_file_url(path: &str, directory: bool) -> CFTypeRef {
+    let trimmed = trim_trailing_slash(path);
+    let mut text = String::from("file://");
+    text.push_str(&percent_encode(trimmed));
+    if directory && !text.ends_with('/') {
+        text.push('/');
+    }
+    new(&text)
 }
 
 /// The contents of `url`, if it is one.
@@ -134,5 +225,69 @@ pub unsafe fn as_url<'a>(url: CFTypeRef) -> Option<&'a Contents> {
     unsafe {
         let body = url as *const Body;
         (!(*body).contents.is_null()).then(|| &*(*body).contents)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The property a bundle depends on: a path with characters a URL reserves
+    /// comes back as the path that went in.
+    #[test]
+    fn a_file_path_round_trips_through_its_url() {
+        for path in [
+            "/Applications/A Game.app/Contents/Resources",
+            "/tmp/100% sure",
+            "/tmp/a#b?c",
+            "/",
+        ] {
+            crate::bootstrap();
+            let url = new_file_url(path, false);
+            // SAFETY: a URL this call just made.
+            let contents = unsafe { as_url(url) }.expect("a URL");
+            assert_eq!(contents.file_path().as_deref(), Some(path), "{path}");
+            // SAFETY: nothing else holds a reference.
+            unsafe { crate::api::CFRelease(url) };
+        }
+    }
+
+    #[test]
+    fn a_directory_url_keeps_its_trailing_slash() {
+        crate::bootstrap();
+        let url = new_file_url("/tmp/dir", true);
+        // SAFETY: a URL this call just made.
+        let contents = unsafe { as_url(url) }.expect("a URL");
+        assert_eq!(contents.text, "file:///tmp/dir/");
+        // The path is still the directory, without the slash the text carries.
+        assert_eq!(contents.file_path().as_deref(), Some("/tmp/dir"));
+        // SAFETY: nothing else holds a reference.
+        unsafe { crate::api::CFRelease(url) };
+    }
+
+    #[test]
+    fn a_http_url_reports_its_scheme_and_path_but_no_file_path() {
+        crate::bootstrap();
+        let url = new("https://example.com/a/b?c=d");
+        // SAFETY: a URL this call just made.
+        let contents = unsafe { as_url(url) }.expect("a URL");
+        assert_eq!(contents.scheme(), "https");
+        assert_eq!(contents.path(), "/a/b");
+        assert!(!contents.is_file_url());
+        assert_eq!(contents.file_path(), None, "not a file to be opened");
+        // SAFETY: nothing else holds a reference.
+        unsafe { crate::api::CFRelease(url) };
+    }
+
+    /// Text with a colon in it is not a scheme just because it has one.
+    #[test]
+    fn a_bare_path_has_no_scheme() {
+        crate::bootstrap();
+        let url = new("/tmp/a:b");
+        // SAFETY: a URL this call just made.
+        let contents = unsafe { as_url(url) }.expect("a URL");
+        assert_eq!(contents.scheme(), "");
+        // SAFETY: nothing else holds a reference.
+        unsafe { crate::api::CFRelease(url) };
     }
 }

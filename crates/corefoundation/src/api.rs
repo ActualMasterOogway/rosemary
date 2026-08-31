@@ -732,7 +732,13 @@ pub unsafe extern "C" fn CFURLGetFileSystemRepresentation(
     if buffer.is_null() || length <= 0 {
         return 0;
     }
-    let path = url.path.as_bytes();
+    // Only a file URL has a file system representation. Apple's answers false
+    // for anything else rather than handing back the path component, which a
+    // caller would then try to open.
+    let Some(path) = url.file_path() else {
+        return 0;
+    };
+    let path = path.as_bytes();
     // The NUL is part of what has to fit: a caller passes `PATH_MAX` and then
     // reads the buffer as a C string.
     if path.len() >= length as usize {

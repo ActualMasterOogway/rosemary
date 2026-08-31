@@ -5,8 +5,6 @@
 //! set - because that is what Apple's `CFUUIDCreate` produces and what a program
 //! storing one as an install identifier expects to look at.
 
-use std::ffi::c_void;
-
 use objc::class::Class;
 use objc::object::Id;
 
@@ -59,11 +57,20 @@ pub unsafe fn bytes_of(uuid: CFTypeRef) -> Option<Bytes> {
 }
 
 /// Sixteen random bytes with version 4 and the RFC 4122 variant set.
+///
+/// Through `getrandom` rather than `arc4random_buf`: the latter is Darwin's and
+/// the `libc` crate does not export it on Linux, where musl and glibc disagree
+/// about whether it is there at all. `getrandom` asks each host for the one
+/// source it actually has.
+///
+/// A failure is refused rather than filled in. There is no weaker UUID to fall
+/// back to: a caller stores this as a device or install identifier, and bytes
+/// that only look random would collide silently and for the life of the install.
 pub fn generate() -> Bytes {
     let mut bytes = [0u8; 16];
-    // SAFETY: `arc4random_buf` fills exactly the buffer it is given the length
-    // of. It is the one source of randomness both hosts have without a crate.
-    unsafe { libc::arc4random_buf(bytes.as_mut_ptr() as *mut c_void, bytes.len()) };
+    if let Err(e) = getrandom::fill(&mut bytes) {
+        objc::fail!("CFUUIDCreate: this host has no source of randomness: {e}");
+    }
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     bytes

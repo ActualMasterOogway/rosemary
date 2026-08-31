@@ -20,6 +20,8 @@ corevideo = { path = "crates/corevideo" }
 coreaudio = { path = "crates/coreaudio" }
 libc = "0.2"
 gimli = "0.34"
+getrandom = "0.3"
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip", "cookies"] }
 
 [profile.fullnative]
 inherits = "release"

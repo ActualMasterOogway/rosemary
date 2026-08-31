@@ -1,4 +1,5 @@
 pub mod bundle;
+pub mod error;
 mod constant;
 mod define;
 pub mod exception;
@@ -15,6 +16,8 @@ pub mod string;
 pub mod thread;
 pub mod timer;
 pub mod unarchiver;
+pub mod url;
+pub mod urlsession;
 pub mod value;
 
 mod collections;
@@ -41,6 +44,8 @@ pub fn bootstrap() {
         locale::install();
         timer::install();
         thread::install();
+        url::install();
+        urlsession::install();
     });
 }
 
@@ -153,7 +158,12 @@ unsafe fn send_scalar<T>(receiver: objc::object::Id, name: &str) -> Option<T> {
 pub fn class_data() -> Vec<(String, u64)> {
     bootstrap();
     let mut out = Vec::new();
-    for name in CLASSES.iter().chain(constant::CLASSES).copied() {
+    for name in CLASSES
+        .iter()
+        .chain(constant::CLASSES)
+        .chain(urlsession::CLASSES)
+        .copied()
+    {
         let Some(class) = std::ffi::CString::new(name)
             .ok()
             .and_then(|n| objc::class::lookup(&n))
@@ -212,7 +222,6 @@ pub const CLASSES: &[&str] = &[
     "NSNotificationCenter",
     "NSAutoreleasePool",
     "NSBundle",
-    "NSURL",
     "NSDate",
     "NSFileManager",
     "NSLocale",
@@ -225,6 +234,7 @@ pub const CLASSES: &[&str] = &[
     "NSRecursiveLock",
     "NSOperation",
     "NSOperationQueue",
+    "NSURL",
 ];
 
 // The image-resident number classes are `constant::CLASSES`, published the same
