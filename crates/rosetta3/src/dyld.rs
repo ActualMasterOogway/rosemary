@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::ops::Range;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use crate::cxxlib::Flavor;
 use machish::exports::ExportTable;
@@ -63,6 +63,44 @@ static VIEW: AtomicPtr<&'static [&'static Image]> = AtomicPtr::new(core::ptr::nu
 
 /// The guest executable's path and slide.
 static EXECUTABLE: Mutex<Option<(String, u64)>> = Mutex::new(None);
+
+/// One image this runtime mapped, as much of it as [`guest_image_at`] needs.
+struct MappedImage {
+    /// The mapped `mach_header`, which is what dyld calls an image's base.
+    header: u64,
+    slide: u64,
+    /// Slid `[lo, hi)` of each segment.
+    segments: Vec<(u64, u64)>,
+}
+
+/// The images the native backend mapped.
+///
+/// The emulated backend's are reachable through [`crate::thunk::current`], which
+/// is a `Vm` and so is absent under `native`. Nothing else answers for them:
+/// dyld never saw these mappings, so its `_dyld_find_unwind_sections` reports no
+/// unwind info for a guest frame and a throw terminates instead of unwinding.
+/// Written once, before the program runs, and read once per frame of every
+/// unwind - so a lock rather than a `OnceLock` would put the unwinder's frame
+/// walk behind a mutex.
+static MAPPED: OnceLock<Vec<MappedImage>> = OnceLock::new();
+
+/// Publish `report`'s images for the questions dyld cannot answer about them.
+pub fn register_mapped_images(report: &LinkReport) {
+    let images: Vec<MappedImage> = report
+        .images
+        .iter()
+        .map(|i| MappedImage {
+            header: i.base,
+            slide: i.slide,
+            segments: i
+                .segments
+                .iter()
+                .map(|s| (s.vmaddr, s.vmaddr.wrapping_add(s.vmsize)))
+                .collect(),
+        })
+        .collect();
+    let _ = MAPPED.set(images);
+}
 
 /// The main executable's export table, parsed once, on first use.
 static MAIN_EXPORTS: Mutex<Option<&'static MainExports>> = Mutex::new(None);
@@ -1317,7 +1355,7 @@ fn find_unwind_sections(
     mem: &mut dyn GuestMemory,
 ) -> Result<()> {
     let (addr, out) = (ctx.rdi, ctx.rsi);
-    let Some((header, slide)) = guest_image_at(addr) else {
+    let Some(words) = unwind_sections_of(addr) else {
         // Not ours.
         let Some(host) = crate::host::symbol("_dyld_find_unwind_sections") else {
             crate::shims::set_int_return(ctx, 0);
@@ -1335,7 +1373,19 @@ fn find_unwind_sections(
         crate::shims::set_int_return(ctx, 0);
         return Ok(());
     }
+    mem.write_bytes(out, &words, symbol)?;
+    // True even when both sections are absent, which is a real answer rather
+    // than a failure.
+    crate::shims::set_int_return(ctx, 1);
+    Ok(())
+}
 
+/// The `dyld_unwind_sections` this runtime fills in for one of its own images.
+///
+/// Returns false when `addr` is in no image this runtime mapped, which is the
+/// caller's cue to ask the host.
+fn unwind_sections_of(addr: u64) -> Option<[u8; 40]> {
+    let (header, slide) = guest_image_at(addr)?;
     let mut words = [0u8; 40];
     words[0..8].copy_from_slice(&header.to_le_bytes());
     for (i, section) in ["__eh_frame", "__unwind_info"].into_iter().enumerate() {
@@ -1345,11 +1395,45 @@ fn find_unwind_sections(
         words[base..base + 8].copy_from_slice(&at.to_le_bytes());
         words[base + 8..base + 16].copy_from_slice(&len.to_le_bytes());
     }
-    mem.write_bytes(out, &words, symbol)?;
+    Some(words)
+}
+
+/// `_dyld_find_unwind_sections`, as the native backend's guest calls it: a plain
+/// host call, with no register context to read the arguments out of.
+///
+/// The vendored `libunwind` asks this for every frame it walks, and Apple's
+/// answers only for images dyld itself mapped - so under `native` every guest
+/// frame looked like it had no unwind info, and a `throw` reached `terminate`
+/// with no handler found. See [`MAPPED`].
+///
+/// # Safety
+///
+/// Called only through an import slot [`crate::shims::runtime::provider`]
+/// defines, with the two arguments the declaration gives it.
+pub unsafe extern "C" fn find_unwind_sections_natively(
+    addr: *const core::ffi::c_void,
+    out: *mut u8,
+) -> bool {
+    let addr = addr as usize as u64;
+    let Some(words) = unwind_sections_of(addr) else {
+        let Some(host) = crate::host::symbol("_dyld_find_unwind_sections") else {
+            return false;
+        };
+        // SAFETY: `bool (*)(void *, struct dyld_unwind_sections *)`. The host
+        // writes forty bytes at `out`, which is what the caller reserved.
+        let f: extern "C" fn(u64, *mut u8) -> bool =
+            unsafe { core::mem::transmute::<u64, extern "C" fn(u64, *mut u8) -> bool>(host) };
+        return f(addr, out);
+    };
+    if out.is_null() {
+        return false;
+    }
+    // SAFETY: the caller reserved a `struct dyld_unwind_sections`, whose forty
+    // bytes are the five words written here.
+    unsafe { core::ptr::copy_nonoverlapping(words.as_ptr(), out, words.len()) };
     // True even when both sections are absent, which is a real answer rather
     // than a failure.
-    crate::shims::set_int_return(ctx, 1);
-    Ok(())
+    true
 }
 
 /// `(mach_header VA, slide)` for the guest image containing `va`.
@@ -1367,6 +1451,13 @@ fn guest_image_at(va: u64) -> Option<(u64, u64)> {
     }
     if let Some(found) = find(|i| containing(&i.report, va)) {
         return Some(found);
+    }
+    if let Some(found) = MAPPED.get().and_then(|images| {
+        images
+            .iter()
+            .find(|i| i.segments.iter().any(|(lo, hi)| va >= *lo && va < *hi))
+    }) {
+        return Some((found.header, found.slide));
     }
     containing(&crate::thunk::current()?.program.report, va)
 }

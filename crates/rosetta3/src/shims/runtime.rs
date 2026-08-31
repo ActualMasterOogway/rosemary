@@ -60,6 +60,16 @@ pub fn provider() -> SyntheticDylib {
     // Two underscores as the Mach-O spells it: one from C mangling, one from the
     // identifier `_NSGetExecutablePath`.
     lib.define_fn("__NSGetExecutablePath", ns_get_executable_path as *const ());
+    // Answered here rather than left to the host because the host answers it
+    // wrongly: dyld knows nothing of the images this runtime mapped, so its
+    // reply to the vendored `libunwind` is "no unwind info" for every guest
+    // frame. Defined in this provider rather than `dyld`'s because that one is
+    // absent from the native backend's chain unless the builtin runtime is
+    // selected, and the native backend is where a real host unwind happens.
+    lib.define_fn(
+        "__dyld_find_unwind_sections",
+        crate::dyld::find_unwind_sections_natively as *const (),
+    );
     // Under high-level emulation the guest's Mach task *is* this process's. The
     // address, not the value.
     if let Some(port) = crate::host::symbol("mach_task_self_") {

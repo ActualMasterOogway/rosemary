@@ -58,10 +58,11 @@ fn native_constructors_run_in_order_before_main() {
     assert_eq!(out, native_out, "stderr: {err}");
 }
 
-/// The vendored libc++ is x86-64 and is not in the native provider chain, so a
-/// C++ fixture that prints the right thing proves the *host's* copy was linked.
+/// The native backend links the vendored libc++ of this host's architecture
+/// rather than the system's, so a C++ fixture printing what the host's own build
+/// prints is what says the substitution is ABI-faithful.
 #[test]
-fn a_native_cxx_program_reaches_the_hosts_own_libcxx() {
+fn a_native_cxx_program_matches_the_hosts_own_libcxx() {
     let Some(path) = build_native_with("native_cxx", CXX, &["-x", "c++", "-lc++"]) else {
         skip!("cannot build native C++ fixtures")
     };
@@ -82,6 +83,57 @@ const CXX: &str = r#"
 int main() {
     std::vector<std::string> v{"a", "bb", "ccc"};
     for (const auto &s : v) std::cout << s << " " << s.size() << "\n";
+    return 0;
+}
+"#;
+
+/// A throw under the native backend has to find the guest's `__unwind_info`.
+///
+/// The vendored `libunwind` asks `_dyld_find_unwind_sections` for every frame it
+/// walks, and dyld knows nothing of the images this runtime mapped - so its
+/// answer is "no unwind info" and the throw reaches `terminate` with no handler
+/// found. The destructor count is in the output because it is what separates a
+/// caught exception from a two-phase walk that found the handler but skipped
+/// cleanup.
+#[test]
+fn a_native_cxx_program_unwinds_through_its_own_frames() {
+    let Some(path) = build_native_with("native_throw", THROW_CXX, &["-x", "c++", "-lc++"]) else {
+        skip!("cannot build native C++ fixtures")
+    };
+    let Some((_, native_out)) = run_native(&path) else {
+        skip!("cannot run the native fixture")
+    };
+    let (status, out, err) = run(&path, &[]);
+
+    assert_eq!(status, Some(0), "stderr: {err}");
+    assert_eq!(out, native_out, "stderr: {err}");
+    assert!(out.contains("caught deep"), "no handler ran: {out}");
+}
+
+const THROW_CXX: &str = r#"
+#include <cstdio>
+#include <stdexcept>
+#include <string>
+
+static int destroyed = 0;
+struct Trace { ~Trace() { destroyed++; } };
+
+static void level(int n) {
+    Trace t;
+    std::string hold(64, 'z');
+    if (n == 0) throw std::logic_error("deep");
+    level(n - 1);
+}
+
+int main() {
+    try { level(20); }
+    catch (const std::logic_error &e) {
+        printf("caught %s destroyed=%d\n", e.what(), destroyed);
+    }
+    try {
+        try { throw std::out_of_range("inner"); }
+        catch (...) { throw; }
+    } catch (const std::exception &e) { printf("rethrown %s\n", e.what()); }
     return 0;
 }
 "#;

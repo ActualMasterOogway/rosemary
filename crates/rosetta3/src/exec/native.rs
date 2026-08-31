@@ -202,6 +202,8 @@ impl Native {
 
         flush_icache(&report);
         crate::tls::register(&report);
+        // Before the program runs, because the first thing it may do is throw.
+        crate::dyld::register_mapped_images(&report);
 
         let stack = GuestStack::new(crate::stack::DEFAULT_STACK, path, args)?;
         Ok(Native {
