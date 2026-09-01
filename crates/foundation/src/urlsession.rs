@@ -28,10 +28,6 @@ use crate::define::{class_methods, methods};
 /// How long a request waits when nothing said otherwise. Apple's default.
 const DEFAULT_TIMEOUT_SECONDS: f64 = 60.0;
 
-/// The selector a refusal out of `crate::block` names: the handler this class
-/// keeps is the only block it holds.
-const WHO: &str = "-[NSURLSession dataTaskWithRequest:completionHandler:]";
-
 //
 
 /// What a request carries, independent of any object holding it.
@@ -533,7 +529,7 @@ unsafe extern "C" fn resume(receiver: Id, _sel: Sel) {
         // until the release below.
         unsafe { call_completion(completion as Id, data, response, error) };
         objc::arc::pool_pop(pool);
-        block::release(completion as Id, WHO);
+        objc::block::release(completion as Id);
     });
 }
 
@@ -604,7 +600,7 @@ fn autoreleased_task(request: Request, completion: Id) -> Id {
         // Copied here and released once the handler has run, because the block
         // a guest passes inline is stack-allocated and its scope ends the moment
         // this method returns.
-        completion: block::copy(completion, WHO) as usize,
+        completion: objc::block::copy(completion) as usize,
         started: false,
     };
     objc::arc::autorelease(make(task_class(), task))

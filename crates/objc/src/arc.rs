@@ -28,6 +28,13 @@ pub fn retain(object: Id) -> Id {
     if object.is_null() {
         return object;
     }
+    // A block counts its own references, in its `flags` word: see
+    // `crate::block`. Retaining one here would leave the count in the block
+    // untouched and a stack block on the stack.
+    // SAFETY: a live object, whose first word is the `isa`.
+    if unsafe { crate::block::is_block(object) } {
+        return crate::block::copy(object);
+    }
     *counts().entry(object as usize).or_insert(0) += 1;
     object
 }
@@ -40,6 +47,10 @@ pub fn retain(object: Id) -> Id {
 pub fn release(object: Id) {
     if object.is_null() {
         return;
+    }
+    // SAFETY: a live object; see [`retain`].
+    if unsafe { crate::block::is_block(object) } {
+        return crate::block::release(object);
     }
     {
         let mut map = counts();

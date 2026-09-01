@@ -100,6 +100,20 @@ pub fn class_data() -> Vec<(String, u64)> {
     }
 }
 
+/// The `_NSConcrete*Block` values, which are data and which a block literal in
+/// the guest's image names directly.
+///
+/// Empty under `native`, where libSystem exports them and an ordinary bind finds
+/// them. Under `builtin` they are [`objc::block`]'s own classes, and they have
+/// to be: that module compares a block's `isa` against them to tell a block from
+/// an object.
+pub fn block_data() -> Vec<(String, u64)> {
+    match backend() {
+        Backend::Native => Vec::new(),
+        Backend::Builtin => builtin::block::data_symbols(),
+    }
+}
+
 /// Stop the *host's* class objects reaching a runtime that is not the host's.
 ///
 /// A guest's `Cat : NSString` binds `_OBJC_CLASS_$_NSString` as data and hands

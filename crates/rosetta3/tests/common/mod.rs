@@ -1728,6 +1728,56 @@ pub fn dlopen_framework_fixture() -> Option<String> {
         .clone()
 }
 
+/// Blocks, in the three shapes libclosure has to tell apart: a stack block with
+/// a capture, a `__block` variable two blocks share, and a global block.
+///
+/// Plain C, deliberately - nothing here needs an Objective-C object, so what it
+/// exercises is the block runtime alone.
+pub const BLOCK_C: &str = r#"
+#include <Block.h>
+#include <stdio.h>
+
+typedef void (^Adder)(int);
+
+/// The captured `base` outlives this frame only if the copy took it along.
+static Adder made(int base, int *sink) {
+    return Block_copy(^(int x) { *sink = base + x; });
+}
+
+int main(void) {
+    int sink = 0;
+    Adder add = made(40, &sink);
+    add(2);
+    printf("captured %d\n", sink);
+
+    __block int counter = 0;
+    void (^bump)(void) = ^{ counter++; };
+    void (^kept)(void) = Block_copy(bump);
+    bump();
+    kept();
+    kept();
+    printf("byref %d\n", counter);
+
+    Block_release(kept);
+    Block_release(add);
+
+    void (^global)(void) = ^{ printf("global ran\n"); };
+    void (^copied)(void) = Block_copy(global);
+    printf("global same %d\n", copied == global);
+    copied();
+    Block_release(copied);
+    return 0;
+}
+"#;
+
+/// Build [`BLOCK_C`], or `None` if this host cannot.
+pub fn block_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("block", BLOCK_C, &[]))
+        .clone()
+}
+
 /// Build [`RUNLOOP_C`], or `None` if this host cannot.
 pub fn runloop_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();

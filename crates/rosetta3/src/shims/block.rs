@@ -5,7 +5,7 @@ use core::ffi::c_void;
 
 use microlift::arch::x86_64::context::RegisterContext;
 
-use crate::abi::{Callbacks, GuestMemory, Result};
+use crate::abi::{AbiError, Callbacks, GuestMemory, Result};
 
 use super::bad_pointer;
 use super::host::host_or_refuse;
@@ -180,10 +180,17 @@ fn block_copy(
         return Ok(());
     }
     substitute_block(symbol, block, mem, callbacks)?;
-    let host = host_or_refuse(symbol)?;
-    // SAFETY: `host` is libsystem_blocks' own `_Block_copy`, whose prototype is
-    // one pointer in and one pointer out. The block's code pointers are thunks
-    // by the line above, so the copy helper this call runs is native.
+    // The selected Objective-C runtime's, not `host_or_refuse`'s: a block
+    // copied by one runtime carries that runtime's `_NSConcreteMallocBlock` in
+    // its `isa`, and whichever runtime will be asked to retain it later has to
+    // be the one that wrote it. `objc::block` is the answer where there is no
+    // host libclosure at all.
+    let host = crate::objc::host::symbol(symbol).ok_or_else(|| AbiError::NoShim {
+        symbol: symbol.to_string(),
+    })?;
+    // SAFETY: `host` is a `_Block_copy`, whose prototype is one pointer in and
+    // one pointer out. The block's code pointers are thunks by the line above,
+    // so the copy helper this call runs is native.
     let f: extern "C" fn(u64) -> u64 =
         unsafe { core::mem::transmute::<u64, extern "C" fn(u64) -> u64>(host) };
     ctx.rax = f(block);

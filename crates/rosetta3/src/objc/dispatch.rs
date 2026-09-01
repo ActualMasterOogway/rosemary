@@ -541,7 +541,12 @@ pub fn provider() -> SyntheticDylib {
         .iter()
         .map(|r| r.name)
         .chain(MESSAGES.iter().map(|(n, _)| *n))
-        .chain(REFUSED.iter().map(|(n, _)| *n));
+        .chain(REFUSED.iter().map(|(n, _)| *n))
+        // libclosure. Published here rather than beside the frameworks because
+        // it is the runtime that answers for it: `objc_retainBlock` and
+        // `_Block_copy` are one function, and whichever runtime has one has the
+        // other.
+        .chain(objc::block::NAMES.iter().copied());
     for name in names {
         // Never dropped. A name this provider does not define falls through to
         // the native provider - or, on a host that denies the family, goes
@@ -560,6 +565,9 @@ pub fn provider() -> SyntheticDylib {
     // The class objects, which are data and which only the builtin runtime has
     // to publish. See [`super::host::class_data`].
     for (name, addr) in super::host::class_data() {
+        lib.define_data(&name, addr);
+    }
+    for (name, addr) in super::host::block_data() {
         lib.define_data(&name, addr);
     }
     lib

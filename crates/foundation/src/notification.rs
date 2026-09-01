@@ -101,9 +101,6 @@ unsafe impl Send for BlockObserver {}
 
 static BLOCK_OBSERVERS: std::sync::Mutex<Vec<BlockObserver>> = std::sync::Mutex::new(Vec::new());
 
-/// What a refusal out of `crate::block` names.
-const WHO: &str = "-[NSNotificationCenter addObserverForName:object:queue:usingBlock:]";
-
 /// The one center, which `+defaultCenter` must return every time.
 static DEFAULT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
@@ -167,7 +164,7 @@ fn post_to_blocks(name: &str, object: Id, notification: Id) {
         .iter()
         .filter(|o| o.name.as_deref().is_none_or(|n| n == name))
         .filter(|o| o.object.is_null() || o.object == object)
-        .map(|o| (block::copy(o.block as Id, WHO) as usize, o.queue))
+        .map(|o| (objc::block::copy(o.block as Id) as usize, o.queue))
         .collect();
     for (block, queue) in targets {
         deliver(block, queue, notification);
@@ -194,7 +191,7 @@ fn deliver(block: usize, queue: Id, notification: Id) {
     if queue.is_null() {
         // SAFETY: a handler is `void (^)(NSNotification *)`.
         unsafe { block::call_with(block as Id, notification) };
-        block::release(block as Id, WHO);
+        objc::block::release(block as Id);
         return;
     }
     let delivery = Delivery {
@@ -205,7 +202,7 @@ fn deliver(block: usize, queue: Id, notification: Id) {
         let delivery = delivery;
         // SAFETY: as above; both were kept alive for this call.
         unsafe { block::call_with(delivery.block as Id, delivery.notification as Id) };
-        block::release(delivery.block as Id, WHO);
+        objc::block::release(delivery.block as Id);
         objc::arc::release(delivery.notification as Id);
     });
     crate::operation::add_to_queue(queue, operation);
@@ -336,7 +333,7 @@ unsafe extern "C" fn add_observer_for_name(
     queue: Id,
     handler: Id,
 ) -> Id {
-    let copied = block::copy(handler, WHO) as usize;
+    let copied = objc::block::copy(handler) as usize;
     if copied == 0 {
         // Apple's returns a token for a nil block, and posting to it does
         // nothing. Nothing to remove later either, so nothing is recorded.
@@ -382,7 +379,7 @@ fn drop_block_observers(keep: impl Fn(&BlockObserver) -> bool) {
     // Freed outside the lock: releasing the queue may run its `-dealloc`, and a
     // handler is entitled to register another observer from inside one.
     for (held, queue, token) in dropped {
-        block::release(held as Id, WHO);
+        objc::block::release(held as Id);
         objc::arc::release(queue);
         objc::arc::release(token);
     }

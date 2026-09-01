@@ -35,8 +35,6 @@ const DEFAULT_MAX_CONCURRENT: i64 = -1;
 /// How many threads a queue that was left to decide will run at once.
 const DEFAULT_WIDTH: usize = 4;
 
-const WHO: &str = "-[NSOperationQueue addOperationWithBlock:]";
-
 //
 
 /// An operation's state, shared between the thread that queued it and the one
@@ -72,7 +70,7 @@ impl Drop for Operation {
     fn drop(&mut self) {
         let state = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
         for held in state.blocks.drain(..).chain([state.completion]) {
-            block::release(held as Id, WHO);
+            objc::block::release(held as Id);
         }
     }
 }
@@ -239,9 +237,9 @@ unsafe extern "C" fn set_completion_block(receiver: Id, _sel: Sel, completion: I
     let Some(operation) = (unsafe { operation(receiver) }) else {
         return;
     };
-    let copied = block::copy(completion, "-[NSOperation setCompletionBlock:]") as usize;
+    let copied = objc::block::copy(completion) as usize;
     let mut state = operation.state.lock().unwrap_or_else(|e| e.into_inner());
-    block::release(std::mem::replace(&mut state.completion, copied) as Id, WHO);
+    objc::block::release(std::mem::replace(&mut state.completion, copied) as Id);
 }
 
 unsafe extern "C" fn completion_block(receiver: Id, _sel: Sel) -> Id {
@@ -262,7 +260,7 @@ fn add_block(receiver: Id, execution: Id) {
     let Some(operation) = (unsafe { operation(receiver) }) else {
         return;
     };
-    let copied = block::copy(execution, WHO) as usize;
+    let copied = objc::block::copy(execution) as usize;
     if copied == 0 {
         return;
     }

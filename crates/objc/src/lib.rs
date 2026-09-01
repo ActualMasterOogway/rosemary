@@ -30,6 +30,7 @@
 
 pub mod api;
 pub mod arc;
+pub mod block;
 pub mod class;
 pub mod msg;
 mod nsobject;
@@ -56,7 +57,10 @@ macro_rules! fail {
 /// find it before any framework has loaded.
 pub fn bootstrap() {
     static ONCE: Once = Once::new();
-    ONCE.call_once(nsobject::install);
+    ONCE.call_once(|| {
+        nsobject::install();
+        block::install();
+    });
 }
 
 /// One entry point, as an address.
@@ -183,6 +187,9 @@ pub fn symbol(name: &str) -> Option<u64> {
         "objc_setProperty_atomic_copy" => at!(shorthand::objc_setProperty_atomic_copy),
         "objc_setProperty_nonatomic_copy" => at!(shorthand::objc_setProperty_nonatomic_copy),
         "objc_retainBlock" => at!(shorthand::objc_retainBlock),
+
+        // libclosure, which is this runtime's for the reason `block` gives.
+        name if block::symbol(name).is_some() => block::symbol(name)?,
         "objc_enumerationMutation" => at!(shorthand::objc_enumerationMutation),
         "objc_terminate" => at!(shorthand::objc_terminate),
 
@@ -332,6 +339,10 @@ pub const NAMES: &[&str] = &[
     "objc_setProperty_atomic_copy",
     "objc_setProperty_nonatomic_copy",
     "objc_retainBlock",
+    "_Block_copy",
+    "_Block_release",
+    "_Block_object_assign",
+    "_Block_object_dispose",
     "objc_enumerationMutation",
     "objc_terminate",
     "objc_msgSend",

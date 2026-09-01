@@ -1038,6 +1038,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // The signature stays for [`longjmp`]'s reason: it is what stops the site
     // being promoted to an inlined fast import and what names it at an exit.
     sig!("_Block_copy", P, P),
+    sig!("_Block_release", V, P),
     sig!("_Block_object_assign", V, P, P, I32),
     sig!("_Block_object_dispose", V, P, I32),
     // Answered by `crate::shims::runtime` rather than by the host, whose
@@ -3183,6 +3184,7 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("NSWindowWillCloseNotification", DATA),
     ("_DefaultRuneLocale", DATA),
     ("_NSConcreteGlobalBlock", DATA),
+    ("_NSConcreteMallocBlock", DATA),
     ("_NSConcreteStackBlock", DATA),
     (
         "_ZNKSt3__120__vector_base_commonILb1EE20__throw_length_errorEv",

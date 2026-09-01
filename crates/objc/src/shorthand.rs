@@ -197,14 +197,13 @@ fn copy_of(value: Id) -> Id {
     }
 }
 
-/// Blocks are Foundation's, not this runtime's.
+/// `objc_retainBlock` is `_Block_copy` under another name.
 ///
-/// `objc_retainBlock` on a stack block must copy it to the heap, and what a
-/// block *is* - the `__block_literal` layout and `_NSConcreteStackBlock` - is
-/// libclosure's. Retaining without copying would hand back a pointer into a
-/// frame that is about to go away, so this refuses instead.
-pub unsafe extern "C" fn objc_retainBlock(_block: Id) -> Id {
-    crate::fail!("objc_retainBlock needs libclosure, which this runtime does not have")
+/// A stack block has to be *copied*, not retained: retaining without copying
+/// would hand back a pointer into a frame that is about to go away. See
+/// [`crate::block`], which is this tree's libclosure.
+pub unsafe extern "C" fn objc_retainBlock(block: Id) -> Id {
+    crate::block::copy(block)
 }
 
 /// Mutating a collection while enumerating it. A named abort, as on Apple's.

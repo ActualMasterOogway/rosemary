@@ -2,8 +2,8 @@
 //!
 //! A block a guest writes inline lives on the caller's stack, so anything that
 //! runs one later - a queued operation, a completion handler - has to copy it to
-//! the heap first. The copy is libclosure's, not this crate's: reimplementing it
-//! would mean running the block's own copy helper over its captures.
+//! the heap first. The copy itself is `objc::block`, this tree's libclosure;
+//! what is here is calling one, which nothing else has needed to spell out.
 
 use objc::object::Id;
 
@@ -13,45 +13,6 @@ use objc::object::Id;
 /// reason: that module rewrites the pointer so a host call reaches the guest,
 /// and this one calls what it finds there.
 pub(crate) const INVOKE_OFFSET: usize = 16;
-
-/// libclosure's `_Block_copy` and `_Block_release`, by name.
-///
-/// Refused by name rather than skipped when the host has no libclosure: carrying
-/// on would call a block whose captures are a dead stack frame, which is a wrong
-/// value read as a live one rather than a failure anyone could see. `who` names
-/// the selector that wanted the block, since that is what has to be looked at.
-fn runtime(name: &std::ffi::CStr, who: &str) -> unsafe extern "C" fn(Id) -> Id {
-    // SAFETY: a NUL-terminated name, and the default search order.
-    let found = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
-    if found.is_null() {
-        objc::fail!(
-            "{who}: this host has no {}, so the block cannot be kept past the call that passed it",
-            name.to_string_lossy()
-        );
-    }
-    // SAFETY: both are `void *(*)(const void *)` in the one respect that
-    // matters - one pointer in, one pointer out for the copy, and a return the
-    // release's caller does not read.
-    unsafe { std::mem::transmute(found) }
-}
-
-/// A heap copy of `block`, owned by the caller.
-pub(crate) fn copy(block: Id, who: &str) -> Id {
-    if block.is_null() {
-        return std::ptr::null_mut();
-    }
-    // SAFETY: a block literal, which is what `_Block_copy` takes.
-    unsafe { runtime(c"_Block_copy", who)(block) }
-}
-
-/// Release a copy [`copy`] made.
-pub(crate) fn release(block: Id, who: &str) {
-    if block.is_null() {
-        return;
-    }
-    // SAFETY: a block `copy` returned.
-    unsafe { runtime(c"_Block_release", who)(block) };
-}
 
 /// The `invoke` a block literal carries, or `None` for a block with none.
 ///
@@ -147,9 +108,12 @@ pub(crate) mod fake {
     /// A block whose `invoke` is `imp`, which must take the block itself as its
     /// first argument and whatever the caller will pass after it.
     pub(crate) fn block(imp: *const c_void) -> Box<GlobalBlock> {
-        // SAFETY: a NUL-terminated name, and the default search order.
-        let isa = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"_NSConcreteGlobalBlock".as_ptr()) };
-        assert!(!isa.is_null(), "this host has no libclosure");
+        objc::bootstrap();
+        // `_NSConcreteGlobalBlock` under the name the class carries: this
+        // runtime's own, so a block built here is one `objc::block` recognises.
+        let isa = objc::class::lookup(c"__NSGlobalBlock__")
+            .map(|class| objc::class::ptr(class) as *const c_void)
+            .expect("registered by `objc::block`");
         Box::new(GlobalBlock {
             isa,
             // `BLOCK_IS_GLOBAL`, which is what makes the copy a no-op.

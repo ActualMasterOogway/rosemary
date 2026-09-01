@@ -218,6 +218,9 @@ pub fn symbol(name: &str) -> Option<u64> {
     }
     foundation::bootstrap();
     corefoundation::symbol(name)
+        // libclosure, which a shim forwards to by name - see
+        // `crate::shims::block`. Nothing on a host off Darwin defines it.
+        .or_else(|| objc::block::symbol(name))
         .or_else(|| foundation::symbol(name))
         .or_else(|| iokit::symbol(name))
         .or_else(|| appkit::symbol(name))
