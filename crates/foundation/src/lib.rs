@@ -1,7 +1,9 @@
+mod block;
+mod boxed;
 pub mod bundle;
-pub mod error;
 mod constant;
 mod define;
+pub mod error;
 pub mod exception;
 pub mod filemanager;
 pub mod geometry;
@@ -9,6 +11,7 @@ pub mod kvc;
 pub mod locale;
 pub mod notification;
 pub mod objectify;
+pub mod operation;
 pub mod paths;
 pub mod plist;
 pub mod pool;
@@ -44,6 +47,7 @@ pub fn bootstrap() {
         locale::install();
         timer::install();
         thread::install();
+        operation::install();
         url::install();
         urlsession::install();
     });
@@ -193,14 +197,7 @@ pub fn class_data() -> Vec<(String, u64)> {
 /// Only classes a guest in this tree has been seen to subclass. AppKit's -
 /// `NSView`, `NSWindow`, `NSApplication` - belong to AppKit and arrive with it.
 fn declare_abstract() {
-    for name in [
-        c"NSFormatter",
-        c"NSThread",
-        c"NSLock",
-        c"NSRecursiveLock",
-        c"NSOperation",
-        c"NSOperationQueue",
-    ] {
+    for name in [c"NSFormatter", c"NSThread", c"NSLock", c"NSRecursiveLock"] {
         corefoundation::base::abstract_class(name, None);
     }
 }
@@ -233,6 +230,7 @@ pub const CLASSES: &[&str] = &[
     "NSLock",
     "NSRecursiveLock",
     "NSOperation",
+    "NSBlockOperation",
     "NSOperationQueue",
     "NSURL",
 ];

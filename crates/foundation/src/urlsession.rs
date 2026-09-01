@@ -21,17 +21,16 @@ use objc::sel::Sel;
 
 use corefoundation::base::CFTypeRef;
 
+use crate::block;
+use crate::boxed::{Body, contents, make, register};
 use crate::define::{class_methods, methods};
-
-/// Byte offset of `invoke` in a `Block_layout`: `isa`, `flags`, `reserved`.
-///
-/// The same constant `rosetta3::shims::block` reads, and for the mirror-image
-/// reason: that module rewrites the pointer so a host call reaches the guest,
-/// and this one calls what it finds there.
-const BLOCK_INVOKE_OFFSET: usize = 16;
 
 /// How long a request waits when nothing said otherwise. Apple's default.
 const DEFAULT_TIMEOUT_SECONDS: f64 = 60.0;
+
+/// The selector a refusal out of `crate::block` names: the handler this class
+/// keeps is the only block it holds.
+const WHO: &str = "-[NSURLSession dataTaskWithRequest:completionHandler:]";
 
 //
 
@@ -63,65 +62,6 @@ struct Response {
     url: String,
     status: u16,
     headers: Vec<(String, String)>,
-}
-
-/// The shape every class here shares: the object, and a boxed Rust value.
-#[repr(C)]
-struct Body<T> {
-    isa: *const Class,
-    contents: *mut T,
-}
-
-fn register<T: 'static>(
-    name: &'static std::ffi::CStr,
-    superclass: Option<&'static Class>,
-) -> &'static Class {
-    let class = corefoundation::base::register(name, superclass, size_of::<Body<T>>(), false);
-    unsafe extern "C" fn dealloc<T>(receiver: Id, _sel: Sel) {
-        // SAFETY: `-dealloc` is reached with the last reference gone, and the
-        // receiver is a `Body<T>` whose `contents` came from `Box::into_raw`.
-        unsafe {
-            let body = receiver as *mut Body<T>;
-            if !(*body).contents.is_null() {
-                drop(Box::from_raw((*body).contents));
-                (*body).contents = std::ptr::null_mut();
-            }
-        }
-        objc::arc::finalize(receiver);
-    }
-    class.replace_method(
-        objc::sel::get("dealloc"),
-        dealloc::<T> as *const std::ffi::c_void,
-        c"v16@0:8",
-    );
-    class
-}
-
-fn make<T>(class: &'static Class, contents: T) -> Id {
-    // SAFETY: `Body<T>` begins with `isa` and is the layout `class` was
-    // registered with.
-    let body: *mut Body<T> = unsafe { corefoundation::base::allocate(class) };
-    if body.is_null() {
-        return std::ptr::null_mut();
-    }
-    // SAFETY: a live instance whose second word is ours to fill in.
-    unsafe { (*body).contents = Box::into_raw(Box::new(contents)) };
-    body as Id
-}
-
-/// # Safety
-///
-/// `object` must be null or an instance of `class`.
-unsafe fn contents<'a, T>(object: Id, class: &'static Class) -> Option<&'a mut T> {
-    // SAFETY: the caller's obligation.
-    if !unsafe { corefoundation::base::is_kind_of(object as CFTypeRef, class) } {
-        return None;
-    }
-    // SAFETY: an instance of `class` is a `Body<T>` with a live `contents`.
-    unsafe {
-        let body = object as *mut Body<T>;
-        (!(*body).contents.is_null()).then(|| &mut *(*body).contents)
-    }
 }
 
 //
@@ -515,50 +455,6 @@ fn objects(result: Result<(Response, Vec<u8>), String>) -> (Id, Id, Id) {
     }
 }
 
-/// libclosure's `_Block_copy` and `_Block_release`, by name.
-///
-/// A block a guest passes inline lives on the caller's stack, and `-resume`
-/// outlives that frame - so the handler has to be copied to the heap, which is
-/// what Apple's does too. Reimplementing the copy would mean running the block's
-/// own copy helper over its captures, so the runtime that wrote the literal is
-/// asked to do it. `rosetta3::shims::block` reaches the same function for the
-/// same reason.
-///
-/// Refused by name rather than skipped when the host has no libclosure: carrying
-/// on would call a handler whose captures are a dead stack frame, which is a
-/// wrong value read as a live one rather than a failure anyone could see.
-fn block_runtime(name: &std::ffi::CStr) -> unsafe extern "C" fn(Id) -> Id {
-    // SAFETY: a NUL-terminated name, and the default search order.
-    let found = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
-    if found.is_null() {
-        objc::fail!(
-            "-[NSURLSession dataTaskWithRequest:completionHandler:]: this host has no {}, so the \
-             handler cannot be kept past the call that passed it",
-            name.to_string_lossy()
-        );
-    }
-    // SAFETY: both are `void *(*)(const void *)` in the one respect that
-    // matters - one pointer in, one pointer out for the copy, and a return the
-    // release's caller does not read.
-    unsafe { std::mem::transmute(found) }
-}
-
-fn copy_block(block: Id) -> Id {
-    if block.is_null() {
-        return std::ptr::null_mut();
-    }
-    // SAFETY: a block literal, which is what `_Block_copy` takes.
-    unsafe { block_runtime(c"_Block_copy")(block) }
-}
-
-fn release_block(block: Id) {
-    if block.is_null() {
-        return;
-    }
-    // SAFETY: a block `copy_block` returned.
-    unsafe { block_runtime(c"_Block_release")(block) };
-}
-
 /// Call a `void (^)(NSData *, NSURLResponse *, NSError *)` block.
 ///
 /// # Safety
@@ -573,7 +469,7 @@ unsafe fn call_completion(block: Id, data: Id, response: Id, error: Id) {
     // a thunk, because the method's `@?` encoding had `rosetta3::shims::block`
     // rewrite it on the way in.
     unsafe {
-        let invoke = *((block as *const u8).add(BLOCK_INVOKE_OFFSET) as *const usize);
+        let invoke = *((block as *const u8).add(block::INVOKE_OFFSET) as *const usize);
         if invoke == 0 {
             return;
         }
@@ -637,7 +533,7 @@ unsafe extern "C" fn resume(receiver: Id, _sel: Sel) {
         // until the release below.
         unsafe { call_completion(completion as Id, data, response, error) };
         objc::arc::pool_pop(pool);
-        release_block(completion as Id);
+        block::release(completion as Id, WHO);
     });
 }
 
@@ -708,7 +604,7 @@ fn autoreleased_task(request: Request, completion: Id) -> Id {
         // Copied here and released once the handler has run, because the block
         // a guest passes inline is stack-allocated and its scope ends the moment
         // this method returns.
-        completion: copy_block(completion) as usize,
+        completion: block::copy(completion, WHO) as usize,
         started: false,
     };
     objc::arc::autorelease(make(task_class(), task))
@@ -883,7 +779,9 @@ mod tests {
         crate::bootstrap();
         let mut request = Request::new("https://postman-echo.com/post".to_string(), 30.0);
         request.method = "POST".to_string();
-        request.headers.push(("x-rosetta3".to_string(), "1".to_string()));
+        request
+            .headers
+            .push(("x-rosetta3".to_string(), "1".to_string()));
         request.body = b"a body".to_vec();
         let (response, body) = match perform(&request) {
             Ok(pair) => pair,
