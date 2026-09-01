@@ -54,6 +54,10 @@ struct Progress {
     /// Heap copies of `void (^)(void)`, run in order by `-main`. Empty for an
     /// operation whose work is an overridden `-main`.
     blocks: Vec<usize>,
+    /// Work this crate queued itself, run after the blocks. A notification
+    /// delivered to a queue is one: there is no block to copy, because the
+    /// argument the handler wants is not one the caller passed.
+    work: Option<Box<dyn FnOnce() + Send>>,
     completion: usize,
     executing: bool,
     finished: bool,
@@ -111,15 +115,16 @@ unsafe extern "C" fn run_main(receiver: Id, _sel: Sel) {
     let Some(operation) = (unsafe { operation(receiver) }) else {
         return;
     };
-    let blocks: Vec<usize> = operation
-        .state
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .blocks
-        .clone();
+    let (blocks, work) = {
+        let mut state = operation.state.lock().unwrap_or_else(|e| e.into_inner());
+        (state.blocks.clone(), state.work.take())
+    };
     for held in blocks {
         // SAFETY: an execution block is `void (^)(void)`.
         unsafe { block::call(held as Id) };
+    }
+    if let Some(work) = work {
+        work();
     }
 }
 
@@ -284,6 +289,30 @@ fn block_operation(execution: Id) -> Id {
 
 unsafe extern "C" fn block_operation_with_block(_class: Id, _sel: Sel, execution: Id) -> Id {
     block_operation(execution)
+}
+
+/// An operation that runs `work` when it is started, owned by the caller.
+///
+/// For this crate's own use: a queue's interface is a block, and work that
+/// starts on this side of the boundary has no block literal to hand it.
+pub(crate) fn with_work(work: impl FnOnce() + Send + 'static) -> Id {
+    operation_class();
+    let class = objc::class::lookup(c"NSBlockOperation").expect("registered by `operation_class`");
+    let object = boxed::make(class, Operation::default());
+    // SAFETY: freshly made by this module.
+    if let Some(operation) = unsafe { operation(object) } {
+        operation
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .work = Some(Box::new(work));
+    }
+    object
+}
+
+/// Queue an operation, as `-addOperation:` does. For this crate's own use.
+pub(crate) fn add_to_queue(queue: Id, operation: Id) {
+    enqueue(queue, operation);
 }
 
 //
@@ -781,49 +810,9 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::c_void;
     use std::sync::atomic::AtomicUsize;
 
-    /// A global block literal, which is what lets a test build one without a
-    /// compiler that has blocks: `_Block_copy` of a global block is the block
-    /// itself, so the copy path this module relies on is still the one taken.
-    #[repr(C)]
-    struct GlobalBlock {
-        isa: *const c_void,
-        flags: i32,
-        reserved: i32,
-        invoke: unsafe extern "C" fn(Id),
-        descriptor: *const Descriptor,
-    }
-
-    #[repr(C)]
-    struct Descriptor {
-        reserved: u64,
-        size: u64,
-    }
-
-    // SAFETY: a global block is immutable and outlives every thread that runs
-    // it, which is what `BLOCK_IS_GLOBAL` tells libclosure.
-    unsafe impl Sync for GlobalBlock {}
-
-    static DESCRIPTOR: Descriptor = Descriptor {
-        reserved: 0,
-        size: size_of::<GlobalBlock>() as u64,
-    };
-
-    fn global_block(invoke: unsafe extern "C" fn(Id)) -> Box<GlobalBlock> {
-        // SAFETY: a NUL-terminated name, and the default search order.
-        let isa = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"_NSConcreteGlobalBlock".as_ptr()) };
-        assert!(!isa.is_null(), "this host has no libclosure");
-        Box::new(GlobalBlock {
-            isa,
-            // `BLOCK_IS_GLOBAL`, which is what makes the copy a no-op.
-            flags: 1 << 28,
-            reserved: 0,
-            invoke,
-            descriptor: &DESCRIPTOR,
-        })
-    }
+    use crate::block::fake;
 
     fn send0(receiver: Id, name: &str) -> Id {
         let sel = objc::sel::get(name);
@@ -867,13 +856,13 @@ mod tests {
     fn a_queued_block_runs_and_the_queue_can_be_waited_on() {
         let queue = new_object(c"NSOperationQueue");
         BACKGROUND.store(0, Ordering::SeqCst);
-        let block = global_block(count_background);
+        let block = fake::block(count_background as *const std::ffi::c_void);
         let sel = objc::sel::get("addOperationWithBlock:");
         // SAFETY: the prototype is the method's, and the block is a valid
         // literal whose `invoke` takes only itself.
         unsafe {
             for _ in 0..3 {
-                add_operation_with_block(queue, sel, &*block as *const GlobalBlock as Id);
+                add_operation_with_block(queue, sel, block.id());
             }
             wait_until_all_finished(queue, objc::sel::get("waitUntilAllOperationsAreFinished"));
         }
@@ -904,7 +893,7 @@ mod tests {
         let queue = new_object(c"NSOperationQueue");
         SERIAL.store(0, Ordering::SeqCst);
         OVERLAPPED.store(0, Ordering::SeqCst);
-        let block = global_block(one_at_a_time);
+        let block = fake::block(one_at_a_time as *const std::ffi::c_void);
         // SAFETY: each prototype is its method's.
         unsafe {
             set_max_concurrent(queue, objc::sel::get("setMaxConcurrentOperationCount:"), 1);
@@ -912,7 +901,7 @@ mod tests {
                 add_operation_with_block(
                     queue,
                     objc::sel::get("addOperationWithBlock:"),
-                    &*block as *const GlobalBlock as Id,
+                    block.id(),
                 );
             }
             wait_until_all_finished(queue, objc::sel::get("waitUntilAllOperationsAreFinished"));
@@ -937,14 +926,10 @@ mod tests {
         let queue = unsafe { main_queue(std::ptr::null_mut(), objc::sel::get("mainQueue")) };
         assert!(!queue.is_null());
         MAIN.store(0, Ordering::SeqCst);
-        let block = global_block(count_main);
+        let block = fake::block(count_main as *const std::ffi::c_void);
         // SAFETY: the prototype is the method's.
         unsafe {
-            add_operation_with_block(
-                queue,
-                objc::sel::get("addOperationWithBlock:"),
-                &*block as *const GlobalBlock as Id,
-            );
+            add_operation_with_block(queue, objc::sel::get("addOperationWithBlock:"), block.id());
         }
         for _ in 0..200 {
             if MAIN.load(Ordering::SeqCst) == 1 {
@@ -975,13 +960,13 @@ mod tests {
     fn a_cancelled_operation_finishes_without_running() {
         crate::bootstrap();
         CANCELLED.store(0, Ordering::SeqCst);
-        let block = global_block(count_cancelled);
+        let block = fake::block(count_cancelled as *const std::ffi::c_void);
         // SAFETY: each prototype is its method's.
         unsafe {
             let operation = block_operation_with_block(
                 std::ptr::null_mut(),
                 objc::sel::get("blockOperationWithBlock:"),
-                &*block as *const GlobalBlock as Id,
+                block.id(),
             );
             cancel(operation, objc::sel::get("cancel"));
             start(operation, objc::sel::get("start"));
@@ -1012,14 +997,10 @@ mod tests {
 
         let queue = new_object(c"NSOperationQueue");
         SEEN.store(0, Ordering::SeqCst);
-        let block = global_block(record);
+        let block = fake::block(record as *const std::ffi::c_void);
         // SAFETY: the prototype is the method's.
         unsafe {
-            add_operation_with_block(
-                queue,
-                objc::sel::get("addOperationWithBlock:"),
-                &*block as *const GlobalBlock as Id,
-            );
+            add_operation_with_block(queue, objc::sel::get("addOperationWithBlock:"), block.id());
         }
         assert!(until(&SEEN, 1), "the operation never ran");
         assert_eq!(SEEN.load(Ordering::SeqCst), queue as usize);

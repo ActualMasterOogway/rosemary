@@ -16,6 +16,7 @@ use objc::class::Class;
 use objc::object::Id;
 use objc::sel::Sel;
 
+use crate::block;
 use crate::define::{class_methods, methods};
 
 /// An `NSNotification`, laid out by this crate.
@@ -48,8 +49,7 @@ unsafe impl Send for Observer {}
 static OBSERVERS: std::sync::Mutex<Vec<Observer>> = std::sync::Mutex::new(Vec::new());
 
 /// A `CFNotificationCallback`.
-pub type Callback =
-    unsafe extern "C" fn(Id, *const c_void, Id, *const c_void, Id);
+pub type Callback = unsafe extern "C" fn(Id, *const c_void, Id, *const c_void, Id);
 
 /// One `CFNotificationCenterAddObserver`.
 ///
@@ -73,6 +73,36 @@ unsafe impl Send for CallbackObserver {}
 
 static CALLBACK_OBSERVERS: std::sync::Mutex<Vec<CallbackObserver>> =
     std::sync::Mutex::new(Vec::new());
+
+/// One `-addObserverForName:object:queue:usingBlock:`.
+///
+/// The center *owns* what is in here, unlike the two tables above: the token it
+/// handed back is this crate's object, the block is a heap copy, and both are
+/// freed by `-removeObserver:`. That is Apple's rule - a block observer has no
+/// observer object of the guest's to outlive, so the only thing that can end one
+/// is the token being removed.
+struct BlockObserver {
+    /// What `-addObserverForName:...` returned, and what `-removeObserver:`
+    /// will be given back.
+    token: Id,
+    /// A heap copy of the `void (^)(NSNotification *)`.
+    block: usize,
+    /// The queue to deliver on, retained; null means the posting thread.
+    queue: Id,
+    /// `None` matches any name.
+    name: Option<String>,
+    /// Null matches any sender.
+    object: Id,
+}
+
+// SAFETY: the block is a heap copy this table owns, and the objects belong to
+// runtimes that are shared across threads already.
+unsafe impl Send for BlockObserver {}
+
+static BLOCK_OBSERVERS: std::sync::Mutex<Vec<BlockObserver>> = std::sync::Mutex::new(Vec::new());
+
+/// What a refusal out of `crate::block` names.
+const WHO: &str = "-[NSNotificationCenter addObserverForName:object:queue:usingBlock:]";
 
 /// The one center, which `+defaultCenter` must return every time.
 static DEFAULT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -121,7 +151,65 @@ pub fn post(name: &str, object: Id, user_info: Id) {
         // the contract of `-addObserver:selector:name:object:`.
         unsafe { send_notification(observer, selector, notification) };
     }
+    post_to_blocks(name, object, notification);
     post_to_callbacks(cf::local_center(), name, object as *const c_void, user_info);
+}
+
+/// Hand the notification to every block observer of `name`.
+///
+/// Each block is copied *under the lock*: a `-removeObserver:` between the scan
+/// and the call would otherwise free a block this is about to invoke, and a
+/// queued delivery outlives the scan by definition.
+fn post_to_blocks(name: &str, object: Id, notification: Id) {
+    let targets: Vec<(usize, Id)> = BLOCK_OBSERVERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|o| o.name.as_deref().is_none_or(|n| n == name))
+        .filter(|o| o.object.is_null() || o.object == object)
+        .map(|o| (block::copy(o.block as Id, WHO) as usize, o.queue))
+        .collect();
+    for (block, queue) in targets {
+        deliver(block, queue, notification);
+    }
+}
+
+/// A notification and the block that wants it, on their way to another thread.
+struct Delivery {
+    block: usize,
+    notification: usize,
+}
+
+// SAFETY: the block is a copy this delivery owns and the notification is
+// retained for it, so neither can go while the operation is queued.
+unsafe impl Send for Delivery {}
+
+/// Run one block observer's handler, on its queue if it asked for one.
+///
+/// A queue rather than the posting thread is the whole point of the `queue:`
+/// argument: a program observes on the main queue so that its handler can touch
+/// the UI, and running it wherever the post happened to come from would be the
+/// race it registered that way to avoid.
+fn deliver(block: usize, queue: Id, notification: Id) {
+    if queue.is_null() {
+        // SAFETY: a handler is `void (^)(NSNotification *)`.
+        unsafe { block::call_with(block as Id, notification) };
+        block::release(block as Id, WHO);
+        return;
+    }
+    let delivery = Delivery {
+        block,
+        notification: objc::arc::retain(notification) as usize,
+    };
+    let operation = crate::operation::with_work(move || {
+        let delivery = delivery;
+        // SAFETY: as above; both were kept alive for this call.
+        unsafe { block::call_with(delivery.block as Id, delivery.notification as Id) };
+        block::release(delivery.block as Id, WHO);
+        objc::arc::release(delivery.notification as Id);
+    });
+    crate::operation::add_to_queue(queue, operation);
+    objc::arc::release(operation);
 }
 
 /// Call every CoreFoundation observer of `name` on `center`.
@@ -235,11 +323,77 @@ unsafe extern "C" fn add_observer(
         });
 }
 
+/// `-addObserverForName:object:queue:usingBlock:`.
+///
+/// The token handed back is an object of this crate's rather than the observer
+/// the caller never supplied: `-removeObserver:` takes one argument, so the
+/// registration has to be identifiable by a single value.
+unsafe extern "C" fn add_observer_for_name(
+    _receiver: Id,
+    _sel: Sel,
+    name: Id,
+    object: Id,
+    queue: Id,
+    handler: Id,
+) -> Id {
+    let copied = block::copy(handler, WHO) as usize;
+    if copied == 0 {
+        // Apple's returns a token for a nil block, and posting to it does
+        // nothing. Nothing to remove later either, so nothing is recorded.
+        return std::ptr::null_mut();
+    }
+    let token = objc::object::create_instance(token_class(), 0);
+    // SAFETY: null or a string.
+    let name = (!name.is_null()).then(|| unsafe { text_of(name) });
+    BLOCK_OBSERVERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(BlockObserver {
+            token,
+            block: copied,
+            queue: objc::arc::retain(queue),
+            name,
+            object,
+        });
+    token
+}
+
+/// The class of the token `-addObserverForName:...` returns.
+///
+/// Apple's is `__NSObserver`, and a guest has no business doing anything with it
+/// but handing it back, so the name is the only thing about it that matters.
+fn token_class() -> &'static Class {
+    corefoundation::base::abstract_class(c"__NSObserver", None)
+}
+
+/// Forget every block observer `keep` rejects, freeing what the center owns.
+fn drop_block_observers(keep: impl Fn(&BlockObserver) -> bool) {
+    let mut dropped = Vec::new();
+    BLOCK_OBSERVERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|o| {
+            if keep(o) {
+                return true;
+            }
+            dropped.push((o.block, o.queue, o.token));
+            false
+        });
+    // Freed outside the lock: releasing the queue may run its `-dealloc`, and a
+    // handler is entitled to register another observer from inside one.
+    for (held, queue, token) in dropped {
+        block::release(held as Id, WHO);
+        objc::arc::release(queue);
+        objc::arc::release(token);
+    }
+}
+
 unsafe extern "C" fn remove_observer(_receiver: Id, _sel: Sel, observer: Id) {
     OBSERVERS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .retain(|o| o.observer != observer);
+    drop_block_observers(|o| o.token != observer);
 }
 
 unsafe extern "C" fn remove_observer_name(
@@ -259,6 +413,11 @@ unsafe extern "C" fn remove_observer_name(
                 || (name.is_some() && o.name != name)
                 || (!object.is_null() && o.object != object)
         });
+    drop_block_observers(|o| {
+        o.token != observer
+            || (name.is_some() && o.name != name)
+            || (!object.is_null() && o.object != object)
+    });
 }
 
 unsafe extern "C" fn post_notification(_receiver: Id, _sel: Sel, notification: Id) {
@@ -464,6 +623,8 @@ pub(crate) fn install() {
     });
     methods!(center, {
         "addObserver:selector:name:object:" => add_observer, c"v48@0:8@16:24@32@40";
+        "addObserverForName:object:queue:usingBlock:"
+            => add_observer_for_name, c"@48@0:8@16@24@32@?40";
         "removeObserver:" => remove_observer, c"v24@0:8@16";
         "removeObserver:name:object:" => remove_observer_name, c"v40@0:8@16@24@32";
         "postNotification:" => post_notification, c"v24@0:8@16";
@@ -475,6 +636,9 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::block::fake;
 
     static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
@@ -538,5 +702,129 @@ mod tests {
             name_object("NSApplicationDidFinishLaunchingNotification"),
             name_object("NSApplicationDidFinishLaunchingNotification")
         );
+    }
+
+    static HEARD: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    unsafe extern "C" fn record_block(_block: Id, notification: Id) {
+        // SAFETY: a notification this crate posted.
+        let n = unsafe { &*(notification as *const Notification) };
+        // SAFETY: its name is a string.
+        let text = unsafe { text_of(n.name) };
+        HEARD.lock().unwrap_or_else(|e| e.into_inner()).push(text);
+    }
+
+    fn add_block_observer(
+        name: &str,
+        queue: Id,
+        imp: *const c_void,
+    ) -> (Id, Box<fake::GlobalBlock>) {
+        crate::bootstrap();
+        let block = fake::block(imp);
+        let name = crate::string::from_str(name);
+        // SAFETY: the prototype is the method's, and the block is a valid
+        // literal whose `invoke` takes itself and one object.
+        let token = unsafe {
+            add_observer_for_name(
+                std::ptr::null_mut(),
+                objc::sel::get("addObserverForName:object:queue:usingBlock:"),
+                name,
+                std::ptr::null_mut(),
+                queue,
+                block.id(),
+            )
+        };
+        objc::arc::release(name);
+        assert!(!token.is_null());
+        (token, block)
+    }
+
+    /// A block observer with no queue hears its name on the posting thread, and
+    /// stops hearing anything once its token is removed.
+    #[test]
+    fn a_block_observer_hears_its_name_until_it_is_removed() {
+        let (token, _block) = add_block_observer(
+            "R3BlockWanted",
+            std::ptr::null_mut(),
+            record_block as *const c_void,
+        );
+        HEARD.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        post(
+            "R3BlockUnwanted",
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        post("R3BlockWanted", std::ptr::null_mut(), std::ptr::null_mut());
+        assert_eq!(
+            HEARD.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            ["R3BlockWanted"]
+        );
+
+        // SAFETY: `-removeObserver:` is `void (id, SEL, id)`.
+        unsafe {
+            remove_observer(
+                std::ptr::null_mut(),
+                objc::sel::get("removeObserver:"),
+                token,
+            )
+        };
+        post("R3BlockWanted", std::ptr::null_mut(), std::ptr::null_mut());
+        assert_eq!(
+            HEARD.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            1,
+            "a removed block observer still heard a post"
+        );
+    }
+
+    /// The thread the queued handler ran on, which is what the `queue:`
+    /// argument decides.
+    static ON_QUEUE: std::sync::Mutex<Option<std::thread::ThreadId>> = std::sync::Mutex::new(None);
+    static DELIVERED: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn record_thread(_block: Id, _notification: Id) {
+        *ON_QUEUE.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current().id());
+        DELIVERED.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A block observer given a queue is delivered *through* it, on the queue's
+    /// thread rather than the poster's.
+    #[test]
+    fn a_block_observer_with_a_queue_is_delivered_on_it() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSOperationQueue").expect("registered by `operation`");
+        // SAFETY: `+new` is `id (Class, SEL)`.
+        let queue = unsafe {
+            let f: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+            f(objc::class::ptr(class) as Id, objc::sel::get("new"))
+        };
+        assert!(!queue.is_null());
+
+        let (token, _block) =
+            add_block_observer("R3BlockQueued", queue, record_thread as *const c_void);
+        DELIVERED.store(0, Ordering::SeqCst);
+        post("R3BlockQueued", std::ptr::null_mut(), std::ptr::null_mut());
+
+        for _ in 0..500 {
+            if DELIVERED.load(Ordering::SeqCst) != 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(DELIVERED.load(Ordering::SeqCst), 1, "the handler never ran");
+        assert_ne!(
+            *ON_QUEUE.lock().unwrap_or_else(|e| e.into_inner()),
+            Some(std::thread::current().id()),
+            "the handler ran on the posting thread"
+        );
+
+        // SAFETY: `-removeObserver:` is `void (id, SEL, id)`.
+        unsafe {
+            remove_observer(
+                std::ptr::null_mut(),
+                objc::sel::get("removeObserver:"),
+                token,
+            )
+        };
+        objc::arc::release(queue);
     }
 }
