@@ -1,0 +1,364 @@
+//! `__ulock_wait` and `__ulock_wake`, Darwin's futex, onto the host's.
+//!
+//! These are what every Darwin blocking primitive bottoms out in - `os_unfair_lock`,
+//! libc++'s `atomic::wait`, and libdispatch's own semaphores - so a guest reaches
+//! them without ever naming them. They are a kernel interface with no libc wrapper
+//! and no host spelling, which is why they are reimplemented here rather than
+//! refused: refusing them would refuse blocking itself.
+//!
+//! The shapes line up better than most of this crate's subjects. Both are
+//! compare-and-block on a word of user memory, both take a relative timeout, and both
+//! wake by address. Three things do not:
+//!
+//! * **Width.** Darwin has 64-bit compare operations; a Linux futex compares 32 bits
+//!   and only 32. See [`wait`], which checks the full width itself first.
+//! * **Waking one named thread.** `ULF_WAKE_THREAD` names its target by port, which a
+//!   futex cannot do. Woken threads re-check their word and block again, so waking
+//!   *everyone* is a correct answer where waking an arbitrary one is not.
+//! * **Reporting.** `ULF_NO_ERRNO` asks for `-errno` as the return value instead of
+//!   `errno` being set, because the callers inside libplatform run where touching
+//!   `errno` is not allowed.
+
+// Compiled and tested on macOS, bound to nothing there: the host's own kernel answers
+// these. See [`symbol`].
+#![cfg_attr(target_os = "macos", allow(dead_code))]
+
+use std::ffi::c_void;
+
+/// The operation, in the low byte of the first argument. From `<sys/ulock.h>`.
+///
+/// The whole range is written out even though the plain 32-bit private lock needs no
+/// special handling: the validity check below is a range over these, so a name missing
+/// here would be a valid opcode this module refused.
+#[allow(dead_code)]
+mod op {
+    pub const MASK: u32 = 0x0000_00ff;
+
+    pub const COMPARE_AND_WAIT: u32 = 1;
+    pub const UNFAIR_LOCK: u32 = 2;
+    pub const COMPARE_AND_WAIT_SHARED: u32 = 3;
+    pub const UNFAIR_LOCK64_SHARED: u32 = 4;
+    pub const COMPARE_AND_WAIT64: u32 = 5;
+    pub const COMPARE_AND_WAIT64_SHARED: u32 = 6;
+}
+
+/// The flags, in the upper three bytes. Only the three that change behaviour here are
+/// named; the rest are scheduler hints a host cannot act on and are ignored.
+mod flag {
+    pub const WAKE_ALL: u32 = 0x0000_0100;
+    pub const WAKE_THREAD: u32 = 0x0000_0200;
+    pub const NO_ERRNO: u32 = 0x0100_0000;
+}
+
+/// Whether an opcode compares eight bytes rather than four.
+fn is_64_bit(opcode: u32) -> bool {
+    matches!(
+        opcode,
+        op::COMPARE_AND_WAIT64 | op::COMPARE_AND_WAIT64_SHARED | op::UNFAIR_LOCK64_SHARED
+    )
+}
+
+/// Whether an opcode names memory another process may also be waiting on.
+///
+/// A private futex is the cheaper one, and is wrong if the word really is shared - so
+/// this errs toward the shared form for the operations that say so.
+fn is_shared(opcode: u32) -> bool {
+    matches!(
+        opcode,
+        op::COMPARE_AND_WAIT_SHARED | op::COMPARE_AND_WAIT64_SHARED | op::UNFAIR_LOCK64_SHARED
+    )
+}
+
+/// Report `error` the way `operation` asked for it.
+///
+/// With `ULF_NO_ERRNO` the negated error *is* the return value; without it, the libc
+/// convention. A caller that asked for the first is one that cannot touch `errno`.
+fn fail(operation: u32, error: i32) -> i32 {
+    if operation & flag::NO_ERRNO != 0 {
+        return -error;
+    }
+    crate::errno::set(error);
+    -1
+}
+
+/// `int __ulock_wait(uint32_t operation, void *addr, uint64_t value, uint32_t timeout_us)`.
+///
+/// Blocks while the word at `addr` still equals `value`. The timeout is microseconds,
+/// and zero means forever.
+///
+/// A value that no longer matches returns 0 rather than an error. Every caller of a
+/// compare-and-wait re-reads the word and loops, so 0 - "you may have been woken, look
+/// again" - is the answer that is correct for all of them, and the one that cannot
+/// turn a race into a caller's error path.
+///
+/// # Safety
+///
+/// `addr` is a readable word of at least the operation's width.
+pub unsafe extern "C" fn wait(operation: u32, addr: *mut c_void, value: u64, timeout_us: u32) -> i32 {
+    // SAFETY: the caller's guarantee.
+    unsafe { wait_ns(operation, addr, value, (timeout_us as u64).saturating_mul(1_000)) }
+}
+
+/// `int __ulock_wait2(uint32_t, void *, uint64_t, uint64_t timeout_ns, uint64_t)`.
+///
+/// The same call with a nanosecond timeout. The fifth argument names a thread to
+/// attribute the wait to, for the scheduler's benefit; it changes no outcome here.
+///
+/// # Safety
+///
+/// As [`wait`].
+pub unsafe extern "C" fn wait2(
+    operation: u32,
+    addr: *mut c_void,
+    value: u64,
+    timeout_ns: u64,
+    _owner: u64,
+) -> i32 {
+    // SAFETY: the caller's guarantee.
+    unsafe { wait_ns(operation, addr, value, timeout_ns) }
+}
+
+/// # Safety
+///
+/// As [`wait`].
+unsafe fn wait_ns(operation: u32, addr: *mut c_void, value: u64, timeout_ns: u64) -> i32 {
+    let opcode = operation & op::MASK;
+    if addr.is_null() || !(op::COMPARE_AND_WAIT..=op::COMPARE_AND_WAIT64_SHARED).contains(&opcode) {
+        return fail(operation, libc::EINVAL);
+    }
+    // A futex compares 32 bits, so the upper half of a 64-bit operation is checked
+    // here instead. This narrows the race rather than closing it: the word can still
+    // change between this load and the blocking call. That is survivable because the
+    // thread that changes it goes on to call `__ulock_wake`, and because the caller
+    // re-checks after every return.
+    if is_64_bit(opcode) {
+        // SAFETY: the caller states `addr` is a readable eight-byte word.
+        if unsafe { (addr as *const u64).read_volatile() } != value {
+            return 0;
+        }
+    }
+    // SAFETY: the caller states `addr` is a readable word; a 64-bit operation was
+    // just confirmed to have eight readable bytes, and the low four are the futex's
+    // on a little-endian host.
+    match unsafe { block(addr as *mut u32, value as u32, timeout_ns, is_shared(opcode)) } {
+        Ok(()) => 0,
+        Err(libc::EAGAIN) => 0,
+        Err(e) => fail(operation, e),
+    }
+}
+
+/// `int __ulock_wake(uint32_t operation, void *addr, uint64_t wake_value)`.
+///
+/// Darwin reports "nobody was waiting" as `ENOENT`, and callers use it to skip work -
+/// so a wake that reached no one must not be reported as success.
+///
+/// # Safety
+///
+/// `addr` is a readable word.
+pub unsafe extern "C" fn wake(operation: u32, addr: *mut c_void, _wake_value: u64) -> i32 {
+    let opcode = operation & op::MASK;
+    if addr.is_null() || !(op::COMPARE_AND_WAIT..=op::COMPARE_AND_WAIT64_SHARED).contains(&opcode) {
+        return fail(operation, libc::EINVAL);
+    }
+    // `ULF_WAKE_THREAD` names one thread by port, which a futex cannot single out.
+    // Waking all of them is what makes the named thread certainly among the woken;
+    // the others re-check their word and block again, which they must tolerate
+    // anyway.
+    let all = operation & (flag::WAKE_ALL | flag::WAKE_THREAD) != 0;
+    // SAFETY: the caller states `addr` is a readable word.
+    match unsafe { unblock(addr as *mut u32, all, is_shared(opcode)) } {
+        0 => fail(operation, libc::ENOENT),
+        _ => 0,
+    }
+}
+
+/// Block on `addr` while it holds `value`, for at most `timeout_ns` (0 being forever).
+///
+/// # Safety
+///
+/// `addr` is a readable, four-byte-aligned word.
+#[cfg(target_os = "linux")]
+unsafe fn block(addr: *mut u32, value: u32, timeout_ns: u64, shared: bool) -> Result<(), i32> {
+    const FUTEX_WAIT: i32 = 0;
+    const FUTEX_PRIVATE_FLAG: i32 = 128;
+
+    let futex_op = FUTEX_WAIT | if shared { 0 } else { FUTEX_PRIVATE_FLAG };
+    let timeout = libc::timespec {
+        tv_sec: (timeout_ns / 1_000_000_000) as libc::time_t,
+        tv_nsec: (timeout_ns % 1_000_000_000) as _,
+    };
+    // A null timeout is what a futex takes for "forever"; Darwin spells it zero.
+    let timeout = match timeout_ns {
+        0 => std::ptr::null(),
+        _ => &timeout,
+    };
+    // SAFETY: the caller's guarantee for `addr`, and `timeout` is null or a live
+    // local. `futex` reads both and writes neither.
+    let rc = unsafe { libc::syscall(libc::SYS_futex, addr, futex_op, value, timeout, 0, 0) };
+    match rc {
+        0 => Ok(()),
+        _ => Err(crate::errno::get()),
+    }
+}
+
+/// As above, for a host with no futex: poll rather than block.
+///
+/// Correct - every caller re-checks its word and loops - and never reached on macOS,
+/// where the guest's `__ulock_wait` is the host's own.
+#[cfg(not(target_os = "linux"))]
+unsafe fn block(addr: *mut u32, value: u32, _timeout_ns: u64, _shared: bool) -> Result<(), i32> {
+    // SAFETY: the caller states `addr` is a readable word.
+    if unsafe { addr.read_volatile() } == value {
+        std::thread::yield_now();
+    }
+    Ok(())
+}
+
+/// Wake one waiter on `addr`, or all of them, and report how many were woken.
+///
+/// # Safety
+///
+/// `addr` is a readable, four-byte-aligned word.
+#[cfg(target_os = "linux")]
+unsafe fn unblock(addr: *mut u32, all: bool, shared: bool) -> i64 {
+    const FUTEX_WAKE: i32 = 1;
+    const FUTEX_PRIVATE_FLAG: i32 = 128;
+
+    let futex_op = FUTEX_WAKE | if shared { 0 } else { FUTEX_PRIVATE_FLAG };
+    let count = if all { i32::MAX } else { 1 };
+    // SAFETY: the caller's guarantee. `FUTEX_WAKE` reads the address as a key and
+    // does not dereference the remaining arguments.
+    let woken = unsafe { libc::syscall(libc::SYS_futex, addr, futex_op, count, 0, 0, 0) };
+    woken.max(0)
+}
+
+/// As above, for a host with no futex. The polling [`block`] needs no wake.
+#[cfg(not(target_os = "linux"))]
+unsafe fn unblock(_addr: *mut u32, _all: bool, _shared: bool) -> i64 {
+    1
+}
+
+/// Empty on macOS, where the host's own kernel answers these.
+#[cfg(target_os = "macos")]
+pub fn symbol(_name: &str) -> Option<u64> {
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn symbol(name: &str) -> Option<u64> {
+    let f: *const () = match name {
+        "__ulock_wait" => wait as *const (),
+        "__ulock_wait2" => wait2 as *const (),
+        "__ulock_wake" => wake as *const (),
+        _ => return None,
+    };
+    Some(f as usize as u64)
+}
+
+#[cfg(target_os = "macos")]
+pub fn provide(_lib: &mut machish::resolve::SyntheticDylib) {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn provide(lib: &mut machish::resolve::SyntheticDylib) {
+    for name in NAMES {
+        // One underscore from C mangling on top of the two in the identifier.
+        crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap() as *const ());
+    }
+}
+
+/// Everything [`symbol`] answers.
+pub const NAMES: &[&str] = &["__ulock_wait", "__ulock_wait2", "__ulock_wake"];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// The whole point: a thread blocked on a word wakes when the word changes and
+    /// its owner wakes it. A test that hangs is a test that failed.
+    #[test]
+    fn a_waiter_wakes_when_the_word_changes() {
+        let word = Arc::new(AtomicU32::new(7));
+        let theirs = Arc::clone(&word);
+        let waiter = std::thread::spawn(move || {
+            let at = theirs.as_ptr() as *mut c_void;
+            // Loop as every real caller does: a return is permission to re-check,
+            // not proof the value changed.
+            while theirs.load(Ordering::Acquire) == 7 {
+                // SAFETY: `at` points at a live `AtomicU32`.
+                unsafe { wait(op::COMPARE_AND_WAIT, at, 7, 0) };
+            }
+            theirs.load(Ordering::Acquire)
+        });
+        // Give the waiter time to reach the blocking call, so the wake below is the
+        // thing that releases it rather than the initial compare.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        word.store(9, Ordering::Release);
+        // SAFETY: the word is live for as long as this scope.
+        unsafe { wake(op::COMPARE_AND_WAIT | flag::WAKE_ALL, word.as_ptr() as *mut c_void, 0) };
+        assert_eq!(waiter.join().expect("the waiter wakes"), 9);
+    }
+
+    /// A word that already disagrees must not block at all.
+    #[test]
+    fn a_stale_value_returns_immediately() {
+        let word = AtomicU32::new(1);
+        let at = &word as *const _ as *mut c_void;
+        // SAFETY: a live local. Would hang if this blocked, which is the assertion.
+        assert_eq!(unsafe { wait(op::COMPARE_AND_WAIT, at, 2, 0) }, 0);
+    }
+
+    /// The 64-bit compare must see the half a futex cannot.
+    #[test]
+    fn a_64_bit_compare_checks_the_upper_half() {
+        let word: u64 = 0xdead_0000_0000_0001;
+        let at = &word as *const _ as *mut c_void;
+        // The low 32 bits match and the high ones do not, so this must return
+        // rather than block on the futex's narrower view.
+        // SAFETY: a live eight-byte local.
+        assert_eq!(unsafe { wait(op::COMPARE_AND_WAIT64, at, 1, 0) }, 0);
+    }
+
+    #[test]
+    fn a_timeout_is_reported_and_bounded() {
+        let word = AtomicU32::new(4);
+        let at = &word as *const _ as *mut c_void;
+        let started = std::time::Instant::now();
+        // SAFETY: a live local.
+        let rc = unsafe { wait(op::COMPARE_AND_WAIT, at, 4, 30_000) };
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "must not block forever");
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(rc, -1);
+            assert_eq!(crate::errno::get(), libc::ETIMEDOUT);
+            crate::errno::set(0);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = rc;
+    }
+
+    /// `ULF_NO_ERRNO` callers run where `errno` may not be touched, so the error has
+    /// to come back in the return value.
+    #[test]
+    fn no_errno_returns_the_error_instead_of_setting_it() {
+        crate::errno::set(0);
+        // An unknown opcode, which fails without blocking.
+        // SAFETY: the address is never dereferenced on the refusing path.
+        let rc = unsafe { wait(0xfe | flag::NO_ERRNO, 8 as *mut c_void, 0, 0) };
+        assert_eq!(rc, -libc::EINVAL);
+        assert_eq!(crate::errno::get(), 0, "errno must be untouched");
+    }
+
+    /// Darwin's callers read `ENOENT` as "nobody was waiting" and skip work on it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn waking_nobody_says_so() {
+        let word = AtomicU32::new(0);
+        // SAFETY: a live local.
+        let rc = unsafe { wake(op::COMPARE_AND_WAIT, word.as_ptr() as *mut c_void, 0) };
+        assert_eq!(rc, -1);
+        assert_eq!(crate::errno::get(), libc::ENOENT);
+        crate::errno::set(0);
+    }
+}

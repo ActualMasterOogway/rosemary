@@ -70,6 +70,19 @@ pub const SCHED_OTHER: i32 = 1;
 pub const SCHED_FIFO: i32 = 4;
 pub const SCHED_RR: i32 = 2;
 
+/// `qos_class_t`, from `<sys/qos.h>`. The numbers are the kernel's thread-QoS
+/// indices, not an ordering the host shares, so a class is only ever compared against
+/// these names.
+pub const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+pub const QOS_CLASS_USER_INITIATED: u32 = 0x19;
+pub const QOS_CLASS_DEFAULT: u32 = 0x15;
+pub const QOS_CLASS_UTILITY: u32 = 0x11;
+pub const QOS_CLASS_BACKGROUND: u32 = 0x09;
+pub const QOS_CLASS_UNSPECIFIED: u32 = 0x00;
+
+/// The most negative `relative_priority` a QoS class accepts; 0 is the least.
+pub const QOS_MIN_RELATIVE_PRIORITY: i32 = -15;
+
 /// Darwin's `errno` values this module returns.
 ///
 /// The first thirty-four are POSIX and identical on both, and every one used here is

@@ -505,10 +505,7 @@ fn task_class() -> &'static Class {
 /// `-resume`: run the request on a thread of its own and call the handler there.
 ///
 /// A thread rather than the caller's, because that is what a caller of an
-/// asynchronous API is entitled to: Roblox sends `-resume` from a thread that
-/// then waits on something the handler signals, and running the request inline
-/// would work only as long as no caller ever did the reverse. The same shape
-/// `+[NSThread detachNewThreadSelector:...]` uses, pool included.
+/// asynchronous API is entitled to.
 unsafe extern "C" fn resume(receiver: Id, _sel: Sel) {
     // SAFETY: the receiver is a task this module made.
     let Some(task) = (unsafe { contents::<Task>(receiver, task_class()) }) else {

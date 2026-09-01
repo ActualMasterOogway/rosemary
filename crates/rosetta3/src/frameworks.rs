@@ -30,8 +30,29 @@ fn install() {
     ONCE.call_once(|| {
         darwin::register_provider(symbol);
         register_dlopen_names();
+        install_block_runtime();
         push_main_pool();
     });
+}
+
+/// Tell `darwin`'s libdispatch which block runtime this process is using.
+///
+/// `dispatch_async` has to copy the block it is given, because the block outlives its
+/// caller's frame - but a block carries its runtime's `_NSConcreteMallocBlock` in its
+/// `isa`, so whichever runtime copies it has to be the one that later releases it.
+/// `darwin` therefore implements neither and asks here, where the selection that
+/// [`crate::objc::host`] already made is known.
+fn install_block_runtime() {
+    let (Some(copy), Some(release)) = (
+        crate::objc::host::symbol("_Block_copy"),
+        crate::objc::host::symbol("_Block_release"),
+    ) else {
+        // Not an error to leave unset: on macOS nothing binds `darwin`'s libdispatch
+        // at all. Where something does, a block-taking entry point refuses rather
+        // than queueing a block it cannot keep alive.
+        return;
+    };
+    darwin::dispatch::block::set_runtime(copy, release);
 }
 
 /// Every library in this tree, and the paths a guest opens it by.

@@ -82,6 +82,10 @@ pub const NAMES: &[(&str, &str)] = &[
     ("getaddrinfo", "struct addrinfo is laid out differently"),
     ("getnameinfo", "the NI_ flags differ"),
     ("dladdr", "Dl_info is laid out differently"),
+    // The reading half of the clock family is reimplemented; see darwin::clock for
+    // why the `clockid_t` cannot be passed through. Setting the clock is refused
+    // rather than translated: it would be the *host's* clock a guest moved.
+    ("clock_settime", "the clockid_t values differ; see darwin::clock"),
     ("sysctl", SYSCTL),
     ("sysctlbyname", SYSCTL),
     ("sysctlnametomib", SYSCTL),
@@ -214,11 +218,17 @@ mod tests {
             "mach_absolute_time",
             "mach_timebase_info",
             "dispatch_once_f",
+            // The libdispatch this crate implements, which the `dispatch_` prefix
+            // would otherwise deny along with the rest of the family.
+            "dispatch_async",
+            "dispatch_semaphore_wait",
+            "dispatch_queue_create",
         ] {
             assert_eq!(reason(name), None, "{name} is implemented and still denied");
         }
-        // And the families around them are still shut.
-        assert!(contains("dispatch_async"));
+        // And the families around them are still shut: a member of one that this
+        // crate has *not* implemented is refused rather than passed through.
+        assert!(contains("dispatch_source_create"));
         assert!(contains("mach_task_self"));
     }
 }

@@ -105,7 +105,22 @@ impl SymbolProvider for SyntheticDylib {
     }
 
     fn resolve(&self, sym: &SymbolRef<'_>) -> Option<Resolved> {
-        self.symbols.get(sym.name).copied()
+        if let Some(exact) = self.symbols.get(sym.name) {
+            return Some(*exact);
+        }
+        // A `$` suffix marks a platform variant of the same function:
+        // `_close$NOCANCEL`, `_fopen$DARWIN_EXTSN`, `_fts_open$INODE64`,
+        // `_dispatch_queue_create_with_target$V2`. The variant is a promise about
+        // the *base* symbol's behaviour - not a cancellation point, the extended
+        // return convention, 64-bit inodes - and a definition of the base name is
+        // the implementation of all of them. Without this a guest importing the
+        // suffixed spelling binds nothing at all, which faults at the call rather
+        // than diverging in behaviour.
+        let (base, variant) = sym.name.split_once('$')?;
+        if base.is_empty() || variant.is_empty() {
+            return None;
+        }
+        self.symbols.get(base).copied()
     }
 
     fn enumerate(&self, out: &mut dyn FnMut(&str, Resolved)) {

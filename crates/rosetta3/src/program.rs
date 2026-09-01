@@ -208,7 +208,20 @@ pub struct ImportSite {
 pub const STRICT_IMPORTS_ENV: &str = "ROSETTA3_STRICT_IMPORTS";
 
 /// How many unbound imports are named one by one before the rest are counted.
+///
+/// Capped because a large application has hundreds and the interesting output is
+/// usually what comes *after* this list. `ROSETTA3_UNBOUND_DETAIL` raises it, which
+/// is what turns a fault with no symbol into a search of the real work queue - set it
+/// to `all` for the whole list.
 const UNBOUND_DETAIL_LIMIT: usize = 40;
+
+fn unbound_detail_limit() -> usize {
+    match std::env::var("ROSETTA3_UNBOUND_DETAIL") {
+        Err(_) => UNBOUND_DETAIL_LIMIT,
+        Ok(value) if value.eq_ignore_ascii_case("all") => usize::MAX,
+        Ok(value) => value.trim().parse().unwrap_or(UNBOUND_DETAIL_LIMIT),
+    }
+}
 
 /// Symbols whose slot is left unwritten at link time *on purpose*, because
 /// something later fills it in: `_objc_ehtype_vtable` is written by
@@ -258,7 +271,8 @@ pub fn announce_unbound_imports<'r>(
         "rosetta3: {what}: {} import(s) unbound - using one faults instead of working",
         unbound.len()
     );
-    for (image, m) in unbound.iter().take(UNBOUND_DETAIL_LIMIT) {
+    let limit = unbound_detail_limit();
+    for (image, m) in unbound.iter().take(limit) {
         // The slot and the stub, because they are the addresses a later fault
         // reports: a call through an unbound import arrives at the stub, and a
         // load of one reads the slot. Printing them is what connects "faulted
@@ -274,10 +288,7 @@ pub fn announce_unbound_imports<'r>(
             m.slot_va,
         );
     }
-    if let Some(rest) = unbound
-        .len()
-        .checked_sub(UNBOUND_DETAIL_LIMIT)
-        .filter(|n| *n > 0)
+    if let Some(rest) = unbound.len().checked_sub(limit).filter(|n| *n > 0)
     {
         eprintln!("rosetta3:   (and {rest} more)");
     }

@@ -402,6 +402,53 @@ pub unsafe extern "C" fn yield_np() -> i32 {
     unsafe { libc::sched_yield() }
 }
 
+/// `int pthread_set_qos_class_self_np(qos_class_t, int)`.
+///
+/// A QoS class is one name for what Linux splits across a nice value, an I/O class and
+/// a timer slack, so only the part a host can honour without privilege is applied: the
+/// classes at or below the default become a nice value, and the two above it are
+/// accepted and left alone, since raising a thread's priority needs `CAP_SYS_NICE` and
+/// a guest that asks to run *faster* must not be failed for it.
+///
+/// Darwin's validation is kept, so a guest computing a class or a relative priority
+/// wrongly still hears about it - and unlike the rest of the `pthread_` family this
+/// call reports that the libc way, returning -1 with `errno` set rather than the error
+/// itself. That is what libpthread does, and a caller reading `errno` after a `-1`
+/// would otherwise see whatever was there before.
+pub unsafe extern "C" fn set_qos_class_self_np(class: u32, relative: i32) -> i32 {
+    // `None` for the two classes above the default: recognised, so not an error, but
+    // nothing a host can apply.
+    let nice = match class {
+        QOS_CLASS_BACKGROUND => Some(10),
+        QOS_CLASS_UTILITY => Some(5),
+        QOS_CLASS_DEFAULT | QOS_CLASS_UNSPECIFIED => Some(0),
+        QOS_CLASS_USER_INITIATED | QOS_CLASS_USER_INTERACTIVE => None,
+        _ => return qos_einval(),
+    };
+    if !(QOS_MIN_RELATIVE_PRIORITY..=0).contains(&relative) {
+        return qos_einval();
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(nice) = nice {
+        // A relative priority runs 0 down to -15 within a class, so it lowers this
+        // thread a little further inside the band the class already chose.
+        //
+        // SAFETY: `PRIO_PROCESS` with a `who` of zero names the calling thread on
+        // Linux, so this touches no other thread and no memory. A failure here is a
+        // scheduling hint not taken, which is not the guest's error to see.
+        unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice - relative / 4) };
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = nice;
+    0
+}
+
+/// `pthread_set_qos_class_self_np`'s failure: the libc convention, not the pthread one.
+fn qos_einval() -> i32 {
+    crate::errno::set(err::EINVAL);
+    -1
+}
+
 /// `int pthread_setcancelstate(int, int *)`, whose two states are inverted.
 ///
 /// Darwin's `PTHREAD_CANCEL_ENABLE` is 1 and Linux's is 0, so an untranslated call
@@ -604,6 +651,7 @@ fn entries() -> &'static [(&'static str, u64)] {
             "pthread_threadid_np" => threadid_np,
             "pthread_mach_thread_np" => mach_thread_np,
             "pthread_yield_np" => yield_np,
+            "pthread_set_qos_class_self_np" => set_qos_class_self_np,
             "pthread_setcancelstate" => setcancelstate,
             "pthread_setcanceltype" => setcanceltype,
         }

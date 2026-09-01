@@ -2,6 +2,7 @@
 
 use std::ffi::CString;
 
+pub mod clock;
 pub mod dispatch;
 pub mod divergent;
 pub mod errno;
@@ -15,12 +16,14 @@ pub mod passthrough;
 pub mod path;
 pub mod pthread;
 pub mod signal;
+pub mod spawn;
 pub mod stat;
 pub mod stdio;
 pub mod string;
 pub mod sysctl;
 pub mod sysinfo;
 pub mod tls;
+pub mod ulock;
 pub mod vmmap;
 pub mod xlocale;
 
@@ -137,6 +140,9 @@ fn implemented(name: &str) -> Option<u64> {
         .or_else(|| sysinfo::symbol(name))
         .or_else(|| pthread::symbol(name))
         .or_else(|| mach::symbol(name))
+        .or_else(|| clock::symbol(name))
+        .or_else(|| ulock::symbol(name))
+        .or_else(|| spawn::symbol(name))
         .or_else(|| dispatch::symbol(name))
         .or_else(|| xlocale_symbol(name))
         .or_else(|| stat_symbol(name))
@@ -250,6 +256,9 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
     sysinfo::provide(&mut lib);
     pthread::provide(&mut lib);
     mach::provide(&mut lib);
+    clock::provide(&mut lib);
+    ulock::provide(&mut lib);
+    spawn::provide(&mut lib);
     dispatch::provide(&mut lib);
     #[cfg(not(target_os = "macos"))]
     {

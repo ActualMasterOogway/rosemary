@@ -152,6 +152,10 @@ unsafe extern "C" fn run(receiver: Id, sel: Sel) {
         // Cocoa backend needs its events drained for the window to appear at
         // all, so this is not only about delivering input.
         crate::event::pump(receiver);
+        // The main queue is drained here because this is the main thread: a block
+        // sent to it with `dispatch_async` runs nowhere else, so a run loop that
+        // never drained would leave every such block queued forever.
+        darwin::dispatch::queue::drain_main();
         // A short slice rather than a long one: the run loop's timers are what
         // drive a frame - see `corevideo` - and a turn that blocked for a tenth
         // of a second would cap the frame rate at ten.

@@ -1214,6 +1214,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // guest passes it by address, so the host fills it in place.
     sig!("clock_get_time", I32, U32, P),
     sig!("clock_gettime", I32, U32, P),
+    sig!("clock_getres", I32, U32, P),
     sig!("clock_gettime_nsec_np", U64, I32),
     // `kern_return_t clock_sleep(mach_port_t, sleep_type_t, mach_timespec_t,
     // mach_timespec_t *)`.

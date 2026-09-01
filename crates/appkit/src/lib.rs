@@ -17,6 +17,7 @@ pub mod nsevent;
 pub mod opengl;
 pub mod raster;
 pub mod screen;
+pub mod textinput;
 pub mod view;
 pub mod window;
 
@@ -51,11 +52,26 @@ pub fn symbol(name: &str) -> Option<u64> {
     Some(match name {
         "NSApplicationMain" => at!(application::NSApplicationMain),
         "CGMainDisplayID" => at!(screen::CGMainDisplayID),
+        "TISCopyCurrentKeyboardInputSource" => at!(textinput::TISCopyCurrentKeyboardInputSource),
+        "TISCopyCurrentKeyboardLayoutInputSource" => {
+            at!(textinput::TISCopyCurrentKeyboardLayoutInputSource)
+        }
+        "TISGetInputSourceProperty" => at!(textinput::TISGetInputSourceProperty),
+        "LMGetKbdType" => at!(textinput::LMGetKbdType),
+        "UCKeyTranslate" => at!(textinput::UCKeyTranslate),
         _ => return None,
     })
 }
 
-pub const NAMES: &[&str] = &["NSApplicationMain", "CGMainDisplayID"];
+pub const NAMES: &[&str] = &[
+    "NSApplicationMain",
+    "CGMainDisplayID",
+    "TISCopyCurrentKeyboardInputSource",
+    "TISCopyCurrentKeyboardLayoutInputSource",
+    "TISGetInputSourceProperty",
+    "LMGetKbdType",
+    "UCKeyTranslate",
+];
 
 pub fn ns_app_cell() -> u64 {
     corefoundation::base::global_cell("_NSApp", 0)
@@ -77,6 +93,13 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         "_NSAppKitVersionNumber".to_string(),
         corefoundation::base::global_cell("_NSAppKitVersionNumber", APPKIT_VERSION.to_bits()),
     ));
+    for (symbol, text) in textinput::STRING_GLOBALS {
+        let object = foundation::notification::name_object(text);
+        out.push((
+            symbol.to_string(),
+            corefoundation::base::global_cell(symbol, object),
+        ));
+    }
     for (symbol, text) in STRING_GLOBALS {
         let object = foundation::notification::name_object(text);
         out.push((

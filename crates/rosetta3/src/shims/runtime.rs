@@ -46,11 +46,6 @@ static GUEST_EXECUTABLE: std::sync::Mutex<String> = std::sync::Mutex::new(String
 /// its arguments: the path has to be the one the guest thinks it is running
 /// from, not this runtime's.
 ///
-/// A program locates its own resources by walking up from here - Roblox's
-/// `Contents/Resources/ssl/cacert.pem` is found this way, and answering with
-/// `rosetta3`'s path sent it looking beside the emulator instead, where the
-/// missing CA bundle failed every TLS handshake it made.
-///
 /// Canonical, because a caller joins onto it: `Layout::enclosing` resolves the
 /// same symlinks for the same reason.
 pub fn set_executable_path(path: &std::path::Path) {
