@@ -157,7 +157,6 @@ pub const CLAIMED: &[&str] = &[
     "fwrite",
     "getchar",
     "gets",
-    "perror",
     "putchar",
     "puts",
     "remove",

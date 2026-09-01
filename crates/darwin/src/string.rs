@@ -1,18 +1,22 @@
-//! The `<string.h>` functions Darwin has and this host does not.
+//! The `<string.h>` functions Darwin has and this host does not, or has under
+//! different terms.
 //!
-//! Everything in `<string.h>` that both sides define is a genuine passthrough
-//! and is claimed as one in [`crate::passthrough`]. What is left is Apple's own
-//! `memset_pattern4`/`8`/`16`, which fill a buffer by repeating a fixed-width
-//! pattern - `memset` with a wider unit. glibc has no equivalent under any name,
-//! so an image that calls one binds to nothing and jumps to zero.
+//! Everything in `<string.h>` that both sides define compatibly is a genuine
+//! passthrough and is claimed as one in [`crate::passthrough`]. What is left is
+//! two things:
 //!
-//! Not niche, either: it is what a C++ compiler on Darwin emits for
-//! `std::fill` over a 4-, 8- or 16-byte type, so any program that initialises an
-//! array of doubles or of pointers has one.
+//! - Apple's own `memset_pattern4`/`8`/`16`, which fill a buffer by repeating a
+//!   fixed-width pattern - `memset` with a wider unit. glibc has no equivalent
+//!   under any name, so an image that calls one binds to nothing and jumps to
+//!   zero. Not niche, either: it is what a C++ compiler on Darwin emits for
+//!   `std::fill` over a 4-, 8- or 16-byte type, so any program that initialises
+//!   an array of doubles or of pointers has one.
+//! - `strerror`, `strerror_r` and `perror`, where the name is shared and the
+//!   contract is not. See [`strerror_r`].
 
 #![cfg(not(target_os = "macos"))]
 
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void};
 
 use machish::resolve::SyntheticDylib;
 
@@ -72,13 +76,95 @@ pub unsafe extern "C" fn memset_pattern16(b: *mut c_void, pattern: *const c_void
     unsafe { fill(b, pattern, 16, len) };
 }
 
-pub const NAMES: &[&str] = &["memset_pattern4", "memset_pattern8", "memset_pattern16"];
+/// `char *strerror(int errnum)`
+///
+/// Wrapped only for the number: `errnum` is the guest's, and the guest's are not
+/// this host's above 34. Handing this host's `strerror` a Darwin `ENOTSUP` (45)
+/// gets "Level 2 not synchronized", which is a real message about a real error
+/// and the wrong one. See [`crate::errno`].
+pub unsafe extern "C" fn strerror(errnum: i32) -> *mut c_char {
+    // SAFETY: no caller memory is touched; the string is the host library's own,
+    // valid until this thread calls `strerror` again, which is Darwin's contract
+    // for it too.
+    unsafe { libc::strerror(crate::errno::to_host(errnum)) }
+}
+
+/// `int strerror_r(int errnum, char *buf, size_t buflen)`
+///
+/// Two divergences at once. Darwin's is POSIX's: it writes the message into the
+/// caller's buffer and returns 0, `EINVAL` for a number it does not know or
+/// `ERANGE` for a buffer too small. glibc's `strerror_r` is the GNU one - it
+/// *returns* the message and is entitled to leave the buffer untouched - so a
+/// guest that prints its buffer after the call prints whatever was there before,
+/// which is uninitialised stack rather than an error. glibc does publish the
+/// POSIX form, under `__xpg_strerror_r`, which is what `libc::strerror_r` binds
+/// to here.
+///
+/// And `errnum` is a guest's error number, translated as in [`strerror`].
+///
+/// # Safety
+///
+/// `buf` is `buflen` writable bytes, or `buflen` is zero.
+pub unsafe extern "C" fn strerror_r(errnum: i32, buf: *mut c_char, buflen: usize) -> i32 {
+    if buf.is_null() || buflen == 0 {
+        return libc::ERANGE;
+    }
+    // SAFETY: the caller's buffer, with the length they gave for it.
+    unsafe { libc::strerror_r(crate::errno::to_host(errnum), buf, buflen) }
+}
+
+/// `void perror(const char *s)`
+///
+/// Reads the *guest's* `errno`, which is a different slot holding a different
+/// numbering from the one this host's `perror` would read. Written out here
+/// rather than forwarded, because forwarding it would print this host's last
+/// error rather than the guest's.
+///
+/// # Safety
+///
+/// `s` is NUL-terminated or null.
+pub unsafe extern "C" fn perror(s: *const c_char) {
+    let errnum = crate::errno::to_host(crate::errno::guest_errno());
+    // SAFETY: the host's own static message for a number it knows.
+    let message = unsafe { std::ffi::CStr::from_ptr(libc::strerror(errnum)) };
+    let prefix = match s.is_null() {
+        true => None,
+        // SAFETY: the caller's guarantee.
+        false => Some(unsafe { std::ffi::CStr::from_ptr(s) }),
+    };
+    let line = match prefix.map(|p| p.to_bytes()).filter(|p| !p.is_empty()) {
+        Some(p) => format!(
+            "{}: {}\n",
+            String::from_utf8_lossy(p),
+            String::from_utf8_lossy(message.to_bytes())
+        ),
+        None => format!("{}\n", String::from_utf8_lossy(message.to_bytes())),
+    };
+    // SAFETY: a buffer this function owns, written to the descriptor Darwin's
+    // `perror` writes to. `write` rather than `fputs(stderr)` because the guest's
+    // `stderr` is `crate::stdio`'s and this is below it.
+    unsafe {
+        libc::write(2, line.as_ptr().cast(), line.len());
+    }
+}
+
+pub const NAMES: &[&str] = &[
+    "memset_pattern4",
+    "memset_pattern8",
+    "memset_pattern16",
+    "strerror",
+    "strerror_r",
+    "perror",
+];
 
 pub fn symbol(name: &str) -> Option<u64> {
     let f: *const () = match name {
         "memset_pattern4" => memset_pattern4 as *const (),
         "memset_pattern8" => memset_pattern8 as *const (),
         "memset_pattern16" => memset_pattern16 as *const (),
+        "strerror" => strerror as *const (),
+        "perror" => perror as *const (),
+        "strerror_r" => strerror_r as *const (),
         _ => return None,
     };
     Some(f as usize as u64)
@@ -126,6 +212,30 @@ mod tests {
     fn a_zero_length_writes_nothing() {
         let out = filled(8, b"01234567", 0);
         assert!(out.iter().all(|b| *b == 0xAA));
+    }
+
+    /// The property glibc's own `strerror_r` does not have: the message ends up
+    /// in the caller's buffer, and the return is the status rather than a
+    /// pointer.
+    #[test]
+    fn strerror_r_fills_the_callers_buffer() {
+        let mut buf = [0u8; 128];
+        // SAFETY: 128 writable bytes, and the length matches.
+        let rc = unsafe { strerror_r(libc::ENOENT, buf.as_mut_ptr().cast(), buf.len()) };
+        assert_eq!(rc, 0);
+        let text = std::ffi::CStr::from_bytes_until_nul(&buf).expect("a C string");
+        assert!(
+            !text.to_bytes().is_empty(),
+            "the buffer was left untouched, which is the GNU behaviour"
+        );
+    }
+
+    #[test]
+    fn a_buffer_too_small_is_reported_rather_than_overrun() {
+        let mut buf = [0u8; 2];
+        // SAFETY: two writable bytes, and the length matches.
+        let rc = unsafe { strerror_r(libc::ENOENT, buf.as_mut_ptr().cast(), buf.len()) };
+        assert_eq!(rc, libc::ERANGE);
     }
 
     /// The published entry points, through the addresses a guest is handed.

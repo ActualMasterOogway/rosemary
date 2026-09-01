@@ -1446,29 +1446,76 @@ fn guest_image_at(va: u64) -> Option<(u64, u64)> {
 }
 
 /// `(unslid addr, size)` of a section in the guest image at `header`.
+///
+/// The image's own load commands, walked here rather than through libmacho's
+/// `getsectbynamefromheader_64`. That entry point is Darwin's alone, so off it
+/// the lookup failed for every image and [`unwind_sections_of`] answered with
+/// both section bounds zero - a `_dyld_find_unwind_sections` that *succeeds*
+/// and reports the frame has no unwind info. A throw then reaches
+/// `_Unwind_RaiseException`, cannot unwind even its own frame, and the process
+/// dies with a stack overflow rather than with a missing symbol.
 fn section_in(header: u64, section: &str) -> Option<(u64, u64)> {
-    let host = crate::host::symbol("getsectbynamefromheader_64")?;
-    let (seg, sect) = (CString::new("__TEXT").ok()?, CString::new(section).ok()?);
-    // SAFETY: `const struct section_64 *(*)(const struct mach_header_64 *,
-    // const char *, const char *)`. `header` is a guest image's mapped header,
-    // which is identity-mapped and therefore a real address here, and both
-    // strings outlive the call.
-    let f: extern "C" fn(u64, *const libc::c_char, *const libc::c_char) -> *const u8 =
-        unsafe { core::mem::transmute::<u64, _>(host) };
-    let found = f(header, seg.as_ptr(), sect.as_ptr());
-    if found.is_null() {
+    /// `MH_MAGIC_64`.
+    const MAGIC: u32 = 0xfeed_facf;
+    /// `LC_SEGMENT_64`.
+    const SEGMENT_64: u32 = 0x19;
+    /// `sizeof(struct mach_header_64)`.
+    const HEADER: usize = 32;
+    /// `sizeof(struct segment_command_64)`, which the sections follow.
+    const SEGMENT: usize = 72;
+    /// `sizeof(struct section_64)`.
+    const SECTION: usize = 80;
+
+    let base = header as *const u8;
+    if base.is_null() {
         return None;
     }
-    // `struct section_64`: two 16-byte names, then `addr` and `size`.
-    // SAFETY: libmacho returned a `section_64` inside the guest's own mapped
-    // load commands, so the thirty-two bytes at +32 are the image's.
-    let (addr, size) = unsafe {
-        (
-            found.add(32).cast::<u64>().read_unaligned(),
-            found.add(40).cast::<u64>().read_unaligned(),
-        )
-    };
-    Some((addr, size))
+    // SAFETY: `header` is an image this runtime mapped, so its `mach_header_64`
+    // and the `sizeofcmds` bytes of load commands after it are mapped and stay
+    // mapped for the life of the process. Every read below is inside that run,
+    // bounded by the header's own `ncmds` and each command's `cmdsize`.
+    unsafe {
+        if base.cast::<u32>().read_unaligned() != MAGIC {
+            return None;
+        }
+        let ncmds = base.add(16).cast::<u32>().read_unaligned();
+        let mut cmd = base.add(HEADER);
+        for _ in 0..ncmds {
+            let kind = cmd.cast::<u32>().read_unaligned();
+            let cmdsize = cmd.add(4).cast::<u32>().read_unaligned() as usize;
+            if cmdsize < SEGMENT {
+                // Shorter than a segment command, so it is not one; a zero size
+                // would also loop forever.
+                if cmdsize < 8 {
+                    return None;
+                }
+                cmd = cmd.add(cmdsize);
+                continue;
+            }
+            if kind == SEGMENT_64 {
+                let nsects = cmd.add(64).cast::<u32>().read_unaligned() as usize;
+                for i in 0..nsects {
+                    let at = SEGMENT + i * SECTION;
+                    if at + SECTION > cmdsize {
+                        break;
+                    }
+                    let sect = cmd.add(at);
+                    // `sectname` is sixteen bytes, NUL-padded rather than
+                    // NUL-terminated when the name fills the field.
+                    let name = core::slice::from_raw_parts(sect, 16);
+                    let name = name.split(|b| *b == 0).next().unwrap_or_default();
+                    if name == section.as_bytes() {
+                        return Some((
+                            sect.add(32).cast::<u64>().read_unaligned(),
+                            sect.add(40).cast::<u64>().read_unaligned(),
+                        ));
+                    }
+                }
+            }
+            cmd = cmd.add(cmdsize);
+        }
+    }
+    None
 }
 
 /// What [`dladdr`] found: the four `Dl_info` fields, as host addresses.

@@ -12,8 +12,10 @@ pub mod locale;
 pub mod mach;
 pub mod malloc;
 pub mod math;
+pub mod net;
 pub mod passthrough;
 pub mod path;
+pub mod poll;
 pub mod pthread;
 pub mod signal;
 pub mod spawn;
@@ -24,12 +26,33 @@ pub mod sysctl;
 pub mod sysinfo;
 pub mod tls;
 pub mod ulock;
+pub mod uuid;
 pub mod vmmap;
+pub mod xattr;
 pub mod xlocale;
 
 /// Strip the leading underscore a Mach-O symbol carries.
 pub fn c_name(symbol: &str) -> &str {
     symbol.strip_prefix('_').unwrap_or(symbol)
+}
+
+/// [`c_name`], with a `$` variant suffix folded away as well.
+///
+/// `_close$NOCANCEL`, `_fopen$DARWIN_EXTSN`, `_fts_open$INODE64`: the suffix is a
+/// promise about the *base* symbol's behaviour, not a different function, so the
+/// base name is the one to ask every list about.
+///
+/// `machish::resolve::SyntheticDylib` folds the same suffix for the definitions
+/// this crate publishes. This is the other half: a suffixed name that would
+/// otherwise be handed to `dlsym` verbatim, which no host library exports, and
+/// which no entry of [`divergent`] would match either - so a divergent function
+/// spelled with a suffix would be passed straight through.
+pub fn base_name(symbol: &str) -> &str {
+    let name = c_name(symbol);
+    match name.split_once('$') {
+        Some((base, variant)) if !base.is_empty() && !variant.is_empty() => base,
+        _ => name,
+    }
 }
 
 /// `dlsym(RTLD_DEFAULT, name)` - this crate's own lookup against the host.
@@ -84,7 +107,7 @@ fn load_host_libraries() {
 /// `None` has two causes that a caller may want to tell apart - the name is
 /// [`divergent`], or nothing anywhere defines it - and [`refusal`] says which.
 pub fn symbol(symbol: &str) -> Option<u64> {
-    let name = c_name(symbol);
+    let name = base_name(symbol);
     if let Some(addr) = implemented(name) {
         return Some(addr);
     }
@@ -96,7 +119,7 @@ pub fn symbol(symbol: &str) -> Option<u64> {
 
 /// Why [`symbol`] declined `symbol`, as a sentence.
 pub fn refusal(symbol: &str) -> String {
-    let name = c_name(symbol);
+    let name = base_name(symbol);
     match divergent::reason(name) {
         Some(why) => format!("{symbol}: no Darwin-compatible implementation on this host: {why}"),
         None => format!("{symbol}: nothing on this host defines it"),
@@ -148,7 +171,63 @@ fn implemented(name: &str) -> Option<u64> {
         .or_else(|| stat_symbol(name))
         .or_else(|| malloc_symbol(name))
         .or_else(|| vmmap_symbol(name))
+        .or_else(|| poll_symbol(name))
+        .or_else(|| net_symbol(name))
+        .or_else(|| xattr_symbol(name))
+        .or_else(|| uuid_symbol(name))
         .or_else(|| string_symbol(name))
+}
+
+/// The socket API, which only a host whose `sockaddr` is not Darwin's rewrites.
+fn net_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return net::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
+}
+
+/// `<uuid/uuid.h>`, which only a host that keeps it out of its libc publishes.
+fn uuid_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return uuid::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
+}
+
+/// Extended attributes, which only a host that namespaces them rewrites.
+fn xattr_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return xattr::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
+}
+
+/// `poll`, which only a host whose `POLL*` bits are not Darwin's rewrites.
+fn poll_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return poll::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
 }
 
 /// Apple's `<string.h>` extensions, which only a host without them publishes.
@@ -219,7 +298,7 @@ fn xlocale_symbol(name: &str) -> Option<u64> {
 }
 
 pub fn is_implemented(symbol: &str) -> bool {
-    implemented(c_name(symbol)).is_some()
+    implemented(base_name(symbol)).is_some()
 }
 
 /// Names the **runtime above** shims and no host exports.
@@ -267,6 +346,10 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
         malloc::provide(&mut lib);
         vmmap::provide(&mut lib);
         string::provide(&mut lib);
+        poll::provide(&mut lib);
+        net::provide(&mut lib);
+        xattr::provide(&mut lib);
+        uuid::provide(&mut lib);
     }
     lib
 }
@@ -325,5 +408,19 @@ mod tests {
         assert_eq!(c_name("_sysctl"), "sysctl");
         assert_eq!(c_name("__error"), "_error");
         assert_eq!(c_name("sysctl"), "sysctl");
+    }
+
+    /// A `$` suffix names the same function, so every list is asked about the
+    /// base - including [`divergent`], which would otherwise pass a suffixed
+    /// spelling of a denied name straight through to the host.
+    #[test]
+    fn a_variant_suffix_is_not_part_of_the_name() {
+        assert_eq!(base_name("_close$NOCANCEL"), "close");
+        assert_eq!(base_name("_fopen$DARWIN_EXTSN"), "fopen");
+        assert_eq!(base_name("_select$DARWIN_EXTSN"), "select");
+        assert!(divergent::contains(base_name("_select$DARWIN_EXTSN")));
+        // Neither half may be empty, or `$` alone would name everything.
+        assert_eq!(base_name("_$NOCANCEL"), "$NOCANCEL");
+        assert_eq!(base_name("_close$"), "close$");
     }
 }

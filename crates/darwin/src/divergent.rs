@@ -11,6 +11,10 @@ mod why {
     pub const TERMIOS: &str = "struct termios is laid out differently";
     pub const MACH: &str = "Mach is a Darwin kernel interface";
     pub const SYSCTL: &str = "reimplemented; see darwin::sysctl";
+    pub const XATTR: &str =
+        "the calls take two more arguments and the names live in a namespace here";
+    pub const ERRNO: &str = "the errno numbers diverge above 34; see darwin::errno";
+    pub const SOCKET: &str = "struct sockaddr and the AF_/MSG_ constants differ; see darwin::net";
     pub const OBJC: &str = "the Objective-C runtime is macOS-only";
     pub const PTHREAD: &str = "no Darwin-compatible implementation; see darwin::pthread for the family this \
          crate does implement";
@@ -45,7 +49,9 @@ pub const NAMES: &[(&str, &str)] = &[
         "the comparator takes its context argument in a different position",
     ),
     // Darwin's is the POSIX `int` form; glibc's returns `char *` and may not touch
-    // the caller's buffer at all.
+    // the caller's buffer at all. Kept listed although `crate::string` now answers
+    // it: the entry is what stops the host's own from being bound instead, and
+    // `reason` carves an implemented name back out.
     (
         "strerror_r",
         "glibc returns a pointer rather than filling the caller's buffer",
@@ -73,25 +79,74 @@ pub const NAMES: &[(&str, &str)] = &[
     // `POLL*` are not the host's bits.
     ("select", "fd_set is laid out differently"),
     ("pselect", "fd_set is laid out differently"),
+    // Listed although `crate::poll` now answers it, for the reason `strerror_r`
+    // is: the entry is what stops the host's own from being bound instead.
     ("poll", "the POLL* event bits differ"),
     // `struct termios` field order, and the `c_cc` indices.
     ("tcgetattr", TERMIOS),
     ("tcsetattr", TERMIOS),
+    // The socket API, every layer of which disagrees; `crate::net` answers all of
+    // these, and the entries are what stop the host's own being bound instead.
+    // `listen`, `shutdown` and the `inet_addr` family are absent on purpose: they
+    // carry no platform constant.
+    ("socket", SOCKET),
+    ("socketpair", SOCKET),
+    ("bind", SOCKET),
+    ("connect", SOCKET),
+    ("accept", SOCKET),
+    ("getsockname", SOCKET),
+    ("getpeername", SOCKET),
+    ("send", SOCKET),
+    ("recv", SOCKET),
+    ("sendto", SOCKET),
+    ("recvfrom", SOCKET),
+    ("sendmsg", SOCKET),
+    ("recvmsg", SOCKET),
+    ("inet_pton", SOCKET),
+    ("inet_ntop", SOCKET),
+    (
+        "setsockopt",
+        "SOL_SOCKET and every SO_ name are different numbers",
+    ),
+    (
+        "getsockopt",
+        "SOL_SOCKET and every SO_ name are different numbers",
+    ),
+    ("getifaddrs", SOCKET),
+    ("freeifaddrs", SOCKET),
     // Darwin's `struct addrinfo` orders `ai_addr` and `ai_canonname` the other way,
     // and its `AI_*`/`NI_*` are different bits.
     ("getaddrinfo", "struct addrinfo is laid out differently"),
+    ("freeaddrinfo", "struct addrinfo is laid out differently"),
+    (
+        "gai_strerror",
+        "the EAI_ codes differ, in value and in sign",
+    ),
     ("getnameinfo", "the NI_ flags differ"),
     ("dladdr", "Dl_info is laid out differently"),
     // The reading half of the clock family is reimplemented; see darwin::clock for
     // why the `clockid_t` cannot be passed through. Setting the clock is refused
     // rather than translated: it would be the *host's* clock a guest moved.
-    ("clock_settime", "the clockid_t values differ; see darwin::clock"),
+    (
+        "clock_settime",
+        "the clockid_t values differ; see darwin::clock",
+    ),
     ("sysctl", SYSCTL),
     ("sysctlbyname", SYSCTL),
     ("sysctlnametomib", SYSCTL),
     // `struct utsname`'s fields are 256 bytes on Darwin and 65 under glibc, so the
     // buffer the guest passes is not the size the host would fill.
     ("uname", "struct utsname has different field widths"),
+    // Two extra arguments on Darwin, and a flat namespace where this host has a
+    // partitioned one. `crate::xattr` answers all four.
+    ("getxattr", XATTR),
+    ("setxattr", XATTR),
+    ("removexattr", XATTR),
+    ("listxattr", XATTR),
+    // The message a number names is not the same message: the `errno` tables
+    // diverge above 34. `crate::string` answers both.
+    ("strerror", ERRNO),
+    ("perror", ERRNO),
 ];
 
 #[cfg(target_os = "macos")]

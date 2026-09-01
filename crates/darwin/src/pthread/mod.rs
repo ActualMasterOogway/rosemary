@@ -298,7 +298,7 @@ pub unsafe extern "C" fn kill(thread: u64, signal: u64) -> i32 {
         },
     };
     // SAFETY: `thread` is a handle the host's own `pthread_create` produced.
-    unsafe { libc::pthread_kill(thread_of(thread), host) }
+    err::from_host(unsafe { libc::pthread_kill(thread_of(thread), host) })
 }
 
 /// `int pthread_setname_np(const char *)` - **one** argument on Darwin, where Linux
@@ -316,7 +316,7 @@ pub unsafe extern "C" fn setname_np(name: u64) -> i32 {
     #[cfg(target_os = "macos")]
     {
         // SAFETY: the caller's guarantee; Darwin names the calling thread.
-        unsafe { libc::pthread_setname_np(name as usize as *const libc::c_char) }
+        err::from_host(unsafe { libc::pthread_setname_np(name as usize as *const libc::c_char) })
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -330,9 +330,9 @@ pub unsafe extern "C" fn setname_np(name: u64) -> i32 {
         let n = bytes.len().min(buf.len() - 1);
         buf[..n].copy_from_slice(&bytes[..n]);
         // SAFETY: `buf` is NUL-terminated by construction and outlives the call.
-        unsafe {
+        err::from_host(unsafe {
             libc::pthread_setname_np(libc::pthread_self(), buf.as_ptr() as *const libc::c_char)
-        }
+        })
     }
 }
 
@@ -523,7 +523,32 @@ fn host_cancel_asynchronous() -> libc::c_int {
 /// Called only through an import slot this crate defines.
 pub unsafe extern "C" fn key_delete(key: u64) -> i32 {
     // SAFETY: `key` is one this process's `pthread_key_create` produced.
-    unsafe { libc::pthread_key_delete(key as libc::pthread_key_t) }
+    err::from_host(unsafe { libc::pthread_key_delete(key as libc::pthread_key_t) })
+}
+
+/// `int pthread_join(pthread_t, void **)`
+///
+/// Wrapped for its *result*: the arguments and the handle agree on both
+/// platforms, but a failing join returns `ESRCH`, `EDEADLK` or `EINVAL` as a
+/// number, and `EDEADLK` is 11 on Darwin and 35 here.
+///
+/// # Safety
+///
+/// `thread` is a handle this process's `pthread_create` produced and `value` is
+/// a writable pointer slot or null.
+pub unsafe extern "C" fn join(thread: u64, value: u64) -> i32 {
+    // SAFETY: the caller's guarantee.
+    err::from_host(unsafe { libc::pthread_join(thread_of(thread), value as usize as *mut _) })
+}
+
+/// `int pthread_detach(pthread_t)`
+///
+/// # Safety
+///
+/// As [`join`].
+pub unsafe extern "C" fn detach(thread: u64) -> i32 {
+    // SAFETY: the caller's guarantee.
+    err::from_host(unsafe { libc::pthread_detach(thread_of(thread)) })
 }
 
 /// # Safety
@@ -540,12 +565,12 @@ pub unsafe extern "C" fn getspecific(key: u64) -> u64 {
 /// dereferences.
 pub unsafe extern "C" fn setspecific(key: u64, value: u64) -> i32 {
     // SAFETY: as above.
-    unsafe {
+    err::from_host(unsafe {
         libc::pthread_setspecific(
             key as libc::pthread_key_t,
             value as usize as *const libc::c_void,
         )
-    }
+    })
 }
 
 /// The address of the implementation for `name`, or `None`.
@@ -645,6 +670,8 @@ fn entries() -> &'static [(&'static str, u64)] {
             "pthread_setspecific" => setspecific,
 
             // Lifecycle and the `_np` family.
+            "pthread_join" => join,
+            "pthread_detach" => detach,
             "pthread_kill" => kill,
             "pthread_setname_np" => setname_np,
             "pthread_main_np" => main_np,
@@ -667,8 +694,10 @@ fn entries() -> &'static [(&'static str, u64)] {
 pub const PASSED_THROUGH: &[&str] = &[
     "pthread_self",
     "pthread_equal",
-    "pthread_detach",
-    "pthread_join",
+    // `pthread_join` and `pthread_detach` were on this list and are not any
+    // more. The arguments do agree; the *result* does not, because a `pthread_*`
+    // call returns its error as a number and `EDEADLK` is 11 on Darwin and 35
+    // here. Both are wrapped above for that one reason.
     "pthread_exit",
     // `pthread_cancel` is deliberately absent. Cancellation unwinds a stack the host's
     // unwinder never saw, so `rosetta3::abi::table` refuses it outright - and this
@@ -947,9 +976,11 @@ mod tests {
             );
             assert_eq!(sync::mutex_init(e.at(), attr.at()), 0);
             assert_eq!(sync::mutex_lock(e.at()), 0);
+            // Darwin's number, which is not this host's: a guest compares the
+            // result against its own header.
             assert_eq!(
                 sync::mutex_lock(e.at()),
-                libc::EDEADLK,
+                err::EDEADLK,
                 "an error-checking mutex reports rather than recursing"
             );
             assert_eq!(sync::mutex_unlock(e.at()), 0);
@@ -1160,7 +1191,9 @@ mod tests {
                 m.at(),
                 &interval as *const libc::timespec as usize as u64,
             );
-            assert_eq!(rc, libc::ETIMEDOUT);
+            // Darwin's 60, not this host's 110 - which is the number `libc++`
+            // compares against before deciding a timed wait failed.
+            assert_eq!(rc, err::ETIMEDOUT);
             assert!(
                 start.elapsed() >= std::time::Duration::from_millis(15),
                 "it waited"

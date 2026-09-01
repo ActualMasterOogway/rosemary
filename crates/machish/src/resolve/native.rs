@@ -50,25 +50,28 @@ const DENY_PREFIXES: &[&str] = &[
     "__tlv_",
 ];
 
-/// Suffixes an x86-64 macOS symbol may carry that the arm64 ABI does not.
+/// `name` with any `$` variant suffix removed, or `None` if it carries none.
 ///
-/// These are the platform's own compatibility mangling, and they are exactly
-/// the sort of thing high-level emulation has to notice. `/bin/ls` imports
-/// `_fts_open$INODE64` because on x86-64 macOS `fts_open` came in two flavours,
-/// one with a 32-bit `ino_t` and one with 64. arm64 has only ever had the
-/// 64-bit one, so it exports the plain name and `dlsym("fts_open$INODE64")`
-/// returns null - five of `/bin/ls`'s imports, unresolvable, over a suffix.
+/// A `$` suffix is the platform's own compatibility mangling and names the same
+/// function: `_fts_open$INODE64` because on x86-64 macOS `fts_open` came in a
+/// 32-bit and a 64-bit `ino_t` flavour, `_close$NOCANCEL` because the
+/// cancellation point can be opted out of, `_fopen$DARWIN_EXTSN` and
+/// `$UNIX2003` for conformance eras since replaced. arm64 macOS exports the
+/// plain name for most of them and a host that is not a Mac exports the plain
+/// name for all of them, so `dlsym` of the suffixed spelling returns null -
+/// five of `/bin/ls`'s imports, unresolvable, over a suffix.
 ///
-/// Stripping is a *fallback*, tried only after the exact name misses, because
+/// Every suffix rather than a list of known ones: what they have in common is
+/// that the base symbol is the implementation, and a suffix nobody enumerated
+/// is exactly the one that would otherwise fail with no diagnosis.
+///
+/// The base is a *fallback*, consulted only after the exact name misses, because
 /// `$NOCANCEL` variants genuinely do exist on arm64 and the exact match is
 /// always the better answer when it is available.
-const LEGACY_VARIANT_SUFFIXES: &[&str] = &[
-    // 64-bit `ino_t` variants of the `fts`/`readdir`/`stat` family.
-    "$INODE64",
-    // SUSv3 conformance variants from the 10.4/10.5 era.
-    "$UNIX2003",
-    "$1050",
-];
+fn variant_base(name: &str) -> Option<&str> {
+    let (base, variant) = name.split_once('$')?;
+    (!base.is_empty() && !variant.is_empty() && base != "_").then_some(base)
+}
 
 /// Resolution against the images already loaded in this process.
 pub struct NativeDylibProvider {
@@ -207,20 +210,12 @@ impl NativeDylibProvider {
                 .any(|p| name.starts_with(p.as_str()))
     }
 
-    /// Try `dlsym` for `name`, then again with a legacy x86-only variant
-    /// suffix stripped. See [`LEGACY_VARIANT_SUFFIXES`].
+    /// Try `dlsym` for `name`, then again for its base. See [`variant_base`].
     fn lookup(&self, name: &str) -> Option<Resolved> {
         if let Some(found) = self.dlsym(name) {
             return Some(found);
         }
-        for suffix in LEGACY_VARIANT_SUFFIXES {
-            if let Some(base) = name.strip_suffix(suffix)
-                && let Some(found) = self.dlsym(base)
-            {
-                return Some(found);
-            }
-        }
-        None
+        self.dlsym(variant_base(name)?)
     }
 
     /// `dlopen` `install_name` into the global namespace, once.
@@ -287,7 +282,11 @@ impl SymbolProvider for NativeDylibProvider {
     }
 
     fn resolve(&self, sym: &SymbolRef<'_>) -> Option<Resolved> {
-        if self.is_denied(sym.name) {
+        // Both spellings: a denylist entry names the function, and the
+        // suffixed import is the same function. Checking only the spelling the
+        // guest used would let `_select$DARWIN_EXTSN` through a list that
+        // denies `_select`, which is the whole failure the list exists to stop.
+        if self.is_denied(sym.name) || variant_base(sym.name).is_some_and(|b| self.is_denied(b)) {
             return None;
         }
         if let Some(hit) = self.cache.borrow().get(sym.name) {

@@ -96,6 +96,26 @@ unsafe extern "C" fn home_directory() -> Id {
     crate::string::from_str(&crate::home_directory())
 }
 
+/// The `~/Library` subdirectories every Mac ships, created if this host has not
+/// got them.
+///
+/// The list is what a guest may assume rather than everything Apple ships: an
+/// unused directory created here costs an empty directory, and a missing one
+/// costs a failure the guest reports as something else.
+#[cfg(not(target_os = "macos"))]
+pub fn ensure_standard_directories() {
+    let home = crate::home_directory();
+    for relative in [
+        "Library/Application Support",
+        "Library/Caches",
+        "Library/Logs",
+        "Library/Preferences",
+        "Library/Saved Application State",
+    ] {
+        let _ = std::fs::create_dir_all(format!("{home}/{relative}"));
+    }
+}
+
 unsafe extern "C" fn temporary_directory() -> Id {
     // Apple's ends in a separator, and a caller that concatenates rather than
     // using `-stringByAppendingPathComponent:` depends on it.

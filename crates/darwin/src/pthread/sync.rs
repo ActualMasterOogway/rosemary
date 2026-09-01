@@ -167,7 +167,7 @@ pub unsafe extern "C" fn mutex_destroy(at: u64) -> i32 {
     // guest - `take` replaced the signature before this ran.
     let mut boxed = unsafe { reclaim::<libc::pthread_mutex_t>(host) };
     // SAFETY: a live, initialised mutex this owns.
-    unsafe { libc::pthread_mutex_destroy(&mut *boxed) }
+    err::from_host(unsafe { libc::pthread_mutex_destroy(&mut *boxed) })
 }
 
 macro_rules! mutex_op {
@@ -182,7 +182,7 @@ macro_rules! mutex_op {
             };
             // SAFETY: a live host mutex this module owns for as long as the guest's
             // object says it does.
-            unsafe { libc::$host(m) }
+            err::from_host(unsafe { libc::$host(m) })
         }
     };
 }
@@ -257,7 +257,7 @@ pub unsafe extern "C" fn cond_destroy(at: u64) -> i32 {
     // SAFETY: published by this module, and now unreachable from the guest.
     let mut boxed = unsafe { reclaim::<libc::pthread_cond_t>(host) };
     // SAFETY: a live condition variable this owns.
-    unsafe { libc::pthread_cond_destroy(&mut *boxed) }
+    err::from_host(unsafe { libc::pthread_cond_destroy(&mut *boxed) })
 }
 
 macro_rules! cond_signal_op {
@@ -271,7 +271,7 @@ macro_rules! cond_signal_op {
                 return err::EINVAL;
             };
             // SAFETY: a live condition variable this module owns.
-            unsafe { libc::$host(c) }
+            err::from_host(unsafe { libc::$host(c) })
         }
     };
 }
@@ -289,7 +289,7 @@ pub unsafe extern "C" fn cond_wait(at: u64, mutex: u64) -> i32 {
     };
     // SAFETY: both objects are live and this module owns them; the guest holds the
     // lock, which is its side of the contract.
-    unsafe { libc::pthread_cond_wait(c, m) }
+    err::from_host(unsafe { libc::pthread_cond_wait(c, m) })
 }
 
 /// `struct timespec` is a `time_t` and a `long` on both platforms, so the guest's
@@ -308,7 +308,9 @@ pub unsafe extern "C" fn cond_timedwait(at: u64, mutex: u64, abstime: u64) -> i3
     }
     // SAFETY: as above; `abstime` is the guest's own `timespec`, whose two fields are
     // the same width and order here.
-    unsafe { libc::pthread_cond_timedwait(c, m, abstime as usize as *const libc::timespec) }
+    err::from_host(unsafe {
+        libc::pthread_cond_timedwait(c, m, abstime as usize as *const libc::timespec)
+    })
 }
 
 /// `pthread_cond_timedwait_relative_np`, which is Darwin's and takes an *interval*.
@@ -418,7 +420,7 @@ pub unsafe extern "C" fn rwlock_destroy(at: u64) -> i32 {
     // SAFETY: published by this module, and now unreachable from the guest.
     let mut boxed = unsafe { reclaim::<libc::pthread_rwlock_t>(host) };
     // SAFETY: a live lock this owns.
-    unsafe { libc::pthread_rwlock_destroy(&mut *boxed) }
+    err::from_host(unsafe { libc::pthread_rwlock_destroy(&mut *boxed) })
 }
 
 macro_rules! rwlock_op {
@@ -432,7 +434,7 @@ macro_rules! rwlock_op {
                 return err::EINVAL;
             };
             // SAFETY: a live lock this module owns.
-            unsafe { libc::$host(l) }
+            err::from_host(unsafe { libc::$host(l) })
         }
     };
 }

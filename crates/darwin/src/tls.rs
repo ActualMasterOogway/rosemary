@@ -150,7 +150,9 @@ fn allocate() -> u64 {
     // Slot 0 is the array's own address: `pthread_self` is a load of it, and a guest
     // comparing two threads' identities compares these.
     words[slot::SELF] = base;
-    words[slot::ERRNO] = crate::errno::location() as usize as u64;
+    // The guest's slot, not the host's: a guest reading `%gs:8` reads a number
+    // and must read Darwin's numbering of it. See `crate::errno::error`.
+    words[slot::ERRNO] = crate::errno::guest_location() as usize as u64;
     words[slot::STACK_GUARD] = STACK_CHK_GUARD;
     // Non-zero, so a pointer mangled through it is not the pointer itself, and stable
     // per thread, which is all `_pthread_ptr_mangle` requires.
@@ -353,15 +355,21 @@ mod tests {
     }
 
     /// `errno` reached through the array and `errno` reached through `__error()` are
-    /// the same slot - the property that lets a guest read `%gs:8` and a shim call
-    /// `darwin::errno::set` and see each other.
+    /// the same slot - the property that lets a guest read `%gs:8` and a guest
+    /// calling `__error` see each other. Both are the *guest's* slot, which holds
+    /// Darwin's numbering; the host's is a separate one this crate reconciles with.
     #[test]
     #[cfg(not(target_os = "macos"))]
     fn the_errno_slot_is_this_thread_s_errno() {
         let base = tsd_base() as usize as *const u64;
         // SAFETY: slot 1 is within the array.
         let at = unsafe { *base.add(slot::ERRNO) } as usize as *mut libc::c_int;
-        assert_eq!(at, crate::errno::location());
+        assert_eq!(at, crate::errno::guest_location());
+        assert_ne!(
+            at,
+            crate::errno::location(),
+            "the host's numbering is not the guest's"
+        );
     }
 
     /// Every direct key must be inside the array, because `pthread_getspecific` of

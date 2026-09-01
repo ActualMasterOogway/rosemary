@@ -130,6 +130,10 @@ fn main() -> ExitCode {
         // answer.
         rosetta3::shims::runtime::set_executable_path(std::path::Path::new(&path));
         rosetta3::frameworks::set_main_bundle(std::path::Path::new(&path));
+        // A Mac's `~/Library` subtree, which this host has not got and a guest
+        // does not create for itself.
+        #[cfg(not(target_os = "macos"))]
+        foundation::paths::ensure_standard_directories();
         #[cfg(target_os = "macos")]
         if !rosetta3::frameworks::builtin()
             && let Some(mirror) = rosetta3::bundle::remirror(std::path::Path::new(&path))

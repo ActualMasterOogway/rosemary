@@ -85,20 +85,34 @@ pub const QOS_MIN_RELATIVE_PRIORITY: i32 = -15;
 
 /// Darwin's `errno` values this module returns.
 ///
-/// The first thirty-four are POSIX and identical on both, and every one used here is
-/// in that range - so these are taken from the `libc` crate rather than written out.
-/// Named only so the call sites read as pthread code rather than as libc code:
-/// `pthread_*` returns its error, it does not set `errno`.
+/// **Darwin's** numbers, written out, not the `libc` crate's. `pthread_*`
+/// returns its error rather than setting `errno`, so these cross the seam as
+/// return values and the guest compares them against its own header's numbers.
+/// Five of the nine below disagree between the platforms - `EDEADLK` is 11 on
+/// Darwin and 35 here, `EAGAIN` 35 and 11, `ETIMEDOUT` 60 and 110 - and each
+/// disagreement is with a number that names a real error on the other side. See
+/// [`crate::errno`] for the whole table.
 pub mod err {
-    pub const EINVAL: i32 = libc::EINVAL;
-    pub const EBUSY: i32 = libc::EBUSY;
-    pub const EDEADLK: i32 = libc::EDEADLK;
-    pub const ENOMEM: i32 = libc::ENOMEM;
-    pub const EPERM: i32 = libc::EPERM;
-    pub const ESRCH: i32 = libc::ESRCH;
-    pub const ETIMEDOUT: i32 = libc::ETIMEDOUT;
-    pub const ENOTSUP: i32 = libc::ENOTSUP;
-    pub const EAGAIN: i32 = libc::EAGAIN;
+    pub const EINVAL: i32 = 22;
+    pub const EBUSY: i32 = 16;
+    pub const EDEADLK: i32 = 11;
+    pub const ENOMEM: i32 = 12;
+    pub const EPERM: i32 = 1;
+    pub const ESRCH: i32 = 3;
+    pub const ETIMEDOUT: i32 = 60;
+    pub const ENOTSUP: i32 = 45;
+    pub const EAGAIN: i32 = 35;
+
+    /// A host `pthread_*` return value in Darwin's numbering.
+    ///
+    /// Every host call whose result this module hands back has to go through
+    /// this: `libc++`'s `condition_variable::wait_for` compares the result of
+    /// `pthread_cond_timedwait` against `ETIMEDOUT` and throws for anything
+    /// else, so an untranslated 110 turns a timeout into a `system_error` with
+    /// no message - Darwin has no error 110 to name.
+    pub fn from_host(rc: i32) -> i32 {
+        crate::errno::from_host(rc)
+    }
 }
 
 /// Darwin's mutex type as the host's.
