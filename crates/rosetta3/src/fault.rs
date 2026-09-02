@@ -311,6 +311,7 @@ pub fn install() {
     if INSTALLED.swap(true, Ordering::SeqCst) {
         return;
     }
+    keep_the_fault_signals();
     // `SIGABRT` beside the two faults, because the allocator is the third way a
     // program of this size dies and the only one that used to leave no report at
     // all: glibc's `free(): invalid size` goes to stderr and then straight to
@@ -325,7 +326,14 @@ pub fn install() {
         let old = unsafe {
             let mut action: libc::sigaction = std::mem::zeroed();
             action.sa_sigaction = report as *const () as usize;
-            action.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
+            // `SA_NODEFER` because the handler reads memory a fault has just
+            // said nothing can be trusted about, and so can fault itself. The
+            // signal is blocked inside its own handler by default, and a
+            // synchronous fault raised while it is blocked is forced to
+            // `SIG_DFL` and kills the process on the spot - so without this the
+            // second fault is not a second report, it is silence. `REPORTING`
+            // is what keeps the re-entry to one level; see [`salvage`].
+            action.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK | libc::SA_NODEFER;
             let mut old: libc::sigaction = std::mem::zeroed();
             if libc::sigaction(signal, &action, &mut old) != 0 {
                 continue;
@@ -339,6 +347,60 @@ pub fn install() {
         // atomic it replaced would have held too.
         unsafe { saved.mask.set(darwin::signal::Mask::of(&old)) };
         saved.flags.store(old.sa_flags, Ordering::SeqCst);
+    }
+}
+
+/// Set to stop the guest from replacing the handlers [`install`] just put in.
+///
+/// A guest with its own crash reporter installs a `SIGSEGV` handler within the
+/// first second, and from then on a fault produces whatever that reporter says -
+/// which for a program whose reporter has been stubbed out is nothing at all,
+/// and the process exits 139 with no pc, no image and no symbol. Set this and
+/// the report below is what runs instead.
+///
+/// Off by default: the guest's handler is part of the guest, and a program that
+/// recovers from a fault by design does not survive having its handler ignored.
+pub const KEEP_FAULT_HANDLER_ENV: &str = "ROSETTA3_KEEP_FAULT_HANDLER";
+
+fn keep_the_fault_signals() {
+    if !std::env::var_os(KEEP_FAULT_HANDLER_ENV).is_some_and(|v| v != "0") {
+        return;
+    }
+    for signal in [libc::SIGSEGV, libc::SIGBUS, libc::SIGABRT, libc::SIGILL] {
+        // The registry is keyed by Darwin's numbering, which is what the guest's
+        // `sigaction` is given. `SIGBUS` is 10 there and 7 here.
+        if let Some(darwin) = darwin::signal::signal_from_host(signal) {
+            darwin::signal::retain(darwin);
+        }
+    }
+    install_alternate_stack();
+    darwin::signal::retain_altstack();
+    eprintln!(
+        "rosetta3: the guest's own handlers for SIGSEGV, SIGBUS, SIGABRT and SIGILL will be \
+         accepted and ignored ({KEEP_FAULT_HANDLER_ENV} is set)"
+    );
+}
+
+/// An alternate signal stack of the runtime's own, big enough for the report.
+///
+/// `SA_ONSTACK` means "run on whatever alternate stack this thread has", and the
+/// thread has exactly one. Crashpad installs `MINSIGSTKSZ` - two kilobytes - and
+/// from then on the report below was being composed in it, faulting on its own
+/// frame. Installed here, and [`darwin::signal::retain_altstack`] keeps it.
+fn install_alternate_stack() {
+    /// Room for the report's frames with a wide margin. Leaked deliberately:
+    /// this stack has to outlive everything, including a fault during exit.
+    const BYTES: usize = 512 * 1024;
+
+    let stack = Box::leak(vec![0u8; BYTES].into_boxed_slice());
+    // SAFETY: `stack` is a live, leaked, writable allocation of `BYTES` bytes,
+    // which is what `sigaltstack` is being told.
+    unsafe {
+        let mut wanted: libc::stack_t = std::mem::zeroed();
+        wanted.ss_sp = stack.as_mut_ptr().cast();
+        wanted.ss_size = BYTES;
+        wanted.ss_flags = 0;
+        libc::sigaltstack(&wanted, std::ptr::null_mut());
     }
 }
 
@@ -376,17 +438,54 @@ fn saved_for(signal: i32) -> &'static Saved {
     }
 }
 
+/// The report being composed, in a `static` rather than on the handler's stack.
+///
+/// The report is one `write` so that two threads faulting together cannot
+/// interleave, and that is the reason it is built up before any of it is
+/// printed. The cost is that a fault *inside* the handler used to take the whole
+/// report with it - the header, the pc, the registers - and the process then
+/// exited with no output at all, which is the hardest of the three endings to
+/// work with. Here the buffer outlives the frame that filled it, so the nested
+/// entry can print what was known before it faulted; see [`salvage`].
+struct Shared(std::cell::UnsafeCell<Buffer>);
+
+/// SAFETY: `REPORTING` admits one writer, and the only other access is
+/// [`salvage`] on the way out of the process.
+unsafe impl Sync for Shared {}
+
+static REPORT: Shared = Shared(std::cell::UnsafeCell::new(Buffer::empty()));
+
+/// Whether [`REPORT`] holds a report that has not been printed.
+static BUILDING: AtomicBool = AtomicBool::new(false);
+
+/// Print a report the handler faulted part-way through building.
+fn salvage() {
+    if !BUILDING.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    // SAFETY: the swap above hands this over exactly once, and the buffer is a
+    // `static` - the frame that was filling it may be gone, its storage is not.
+    let out = unsafe { &mut *REPORT.0.get() };
+    out.str("\n  (the handler faulted here; the rest of the report is missing)\n");
+    out.flush();
+}
+
 /// The handler. Prints, restores the previous disposition, and returns.
 extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc::c_void) {
     // A fault *inside* this handler would recurse until the alternate stack ran
     // out, which would replace one unexplained crash with another.
     static REPORTING: AtomicBool = AtomicBool::new(false);
     if REPORTING.swap(true, Ordering::SeqCst) {
+        salvage();
         restore(signal);
         return;
     }
 
-    let mut out = Buffer::new();
+    // SAFETY: the swap above is what makes this the only writer - every other
+    // entry to the handler takes the branch that only reads it, and does so on
+    // its way out of the process.
+    let out = unsafe { &mut *REPORT.0.get() };
+    BUILDING.store(true, Ordering::SeqCst);
     out.str("rosetta3: fault: ");
     out.str(match signal {
         libc::SIGBUS => "SIGBUS",
@@ -400,35 +499,48 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
     let addr = unsafe { info.as_ref() }.map_or(0, |i| unsafe { darwin::signal::fault_address(i) });
     out.str(" at ");
     out.hex(addr);
-    say_access(&mut out, info);
+    say_access(out, info);
     if let Some(text) = ascii_word(addr) {
         out.str(" (ascii \"");
         out.bytes(&text);
         out.str("\")");
     }
 
+    // The registers and the thread before the two walks below, because those two
+    // read memory the fault has just said nothing can be trusted about, and a
+    // handler that faults leaves only what [`salvage`] finds in the buffer.
     if let Some(pc) = host_pc(context) {
         out.str("\n  host pc ");
         out.hex(pc);
-        say_region(&mut out, pc);
+        say_region(out, pc);
+    }
+    say_registers(out, context);
+    say_thread(out);
+    // Everything above is read from the kernel's own `siginfo_t` and
+    // `ucontext_t` and cannot fault. Everything below walks the guest's stack
+    // and its images, and can. Printed here so the two arrive separately rather
+    // than not at all - [`salvage`] covers the case where the handler dies
+    // before it can add the rest.
+    out.flush();
+
+    if let Some(pc) = host_pc(context) {
         // Before the frame walk, because when it applies it is the answer and
         // the walk is not: a jump to zero has no frame of its own.
         if pc == 0 {
-            say_unbound_call(&mut out, context);
+            say_unbound_call(out, context);
         }
         if !in_translation(pc) {
-            say_caller(&mut out, context);
+            say_caller(out, context);
         }
     }
     // An abort has no interesting pc of its own - it is always inside the C
     // library - so the frame walk is the whole report.
     else if signal == libc::SIGABRT {
-        say_caller(&mut out, context);
+        say_caller(out, context);
     }
 
-    say_registers(&mut out, context);
-    say_thread(&mut out);
     out.str("\n");
+    BUILDING.store(false, Ordering::SeqCst);
     out.flush();
 
     restore(signal);
@@ -1025,7 +1137,7 @@ struct Buffer {
 }
 
 impl Buffer {
-    fn new() -> Self {
+    const fn empty() -> Self {
         Buffer {
             bytes: [0; 2048],
             used: 0,
@@ -1082,7 +1194,7 @@ mod tests {
 
     #[test]
     fn hex_has_no_leading_zeros_and_a_zero_is_a_zero() {
-        let mut b = Buffer::new();
+        let mut b = Buffer::empty();
         b.hex(0);
         b.str(" ");
         b.hex(0x70536573556e6143);
@@ -1305,7 +1417,7 @@ mod tests {
 
     #[test]
     fn a_buffer_truncates_rather_than_panicking() {
-        let mut b = Buffer::new();
+        let mut b = Buffer::empty();
         for _ in 0..500 {
             b.str("0123456789");
         }

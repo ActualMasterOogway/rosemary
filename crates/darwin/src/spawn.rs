@@ -347,11 +347,11 @@ impl FileActions {
                     Action::Close(fd) => {
                         libc::posix_spawn_file_actions_addclose(&mut host.0, *fd)
                     }
-                    #[cfg(target_os = "linux")]
+                    #[cfg(not(target_os = "macos"))]
                     Action::Chdir(path) => {
                         libc::posix_spawn_file_actions_addchdir_np(&mut host.0, path.as_ptr())
                     }
-                    #[cfg(target_os = "linux")]
+                    #[cfg(not(target_os = "macos"))]
                     Action::Fchdir(fd) => {
                         libc::posix_spawn_file_actions_addfchdir_np(&mut host.0, *fd)
                     }
@@ -360,6 +360,7 @@ impl FileActions {
                     Action::Inherit(fd) => {
                         libc::posix_spawn_file_actions_adddup2(&mut host.0, *fd, *fd)
                     }
+                    #[cfg(target_os = "macos")]
                     _ => unimplemented!()
                 }
             };

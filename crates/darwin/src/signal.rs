@@ -237,6 +237,130 @@ pub fn flags_from_host(host: libc::c_int) -> u32 {
     out
 }
 
+/// Signals whose host disposition belongs to the runtime, not to the guest.
+///
+/// A bit per Darwin signal number. Empty unless something calls [`retain`].
+static RETAINED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// What the guest asked for on a retained signal.
+///
+/// A caller that installs a handler and reads its own installation back has to
+/// see what it installed: finding `SIG_DFL` there is how a crash reporter
+/// concludes it failed to start. Same reasoning as
+/// `mach::task_get_exception_ports`.
+static PRETENDED: [Pretended; 32] = [const { Pretended::new() }; 32];
+
+struct Pretended {
+    handler: core::sync::atomic::AtomicU64,
+    mask: core::sync::atomic::AtomicU32,
+    flags: core::sync::atomic::AtomicU32,
+}
+
+impl Pretended {
+    const fn new() -> Pretended {
+        use core::sync::atomic::{AtomicU32, AtomicU64};
+        Pretended {
+            handler: AtomicU64::new(0),
+            mask: AtomicU32::new(0),
+            flags: AtomicU32::new(0),
+        }
+    }
+
+    fn get(&self) -> Disposition {
+        use core::sync::atomic::Ordering::Relaxed;
+        Disposition {
+            handler: self.handler.load(Relaxed),
+            mask: self.mask.load(Relaxed),
+            flags: self.flags.load(Relaxed),
+        }
+    }
+
+    fn set(&self, value: Disposition) {
+        use core::sync::atomic::Ordering::Relaxed;
+        self.handler.store(value.handler, Relaxed);
+        self.mask.store(value.mask, Relaxed);
+        self.flags.store(value.flags, Relaxed);
+    }
+}
+
+/// Keep the host's disposition for `darwin_signum`, whatever the guest asks for.
+///
+/// The guest's `sigaction` and `signal` then succeed, change nothing, and report
+/// back the disposition the guest last asked for. Meant for the fault signals
+/// while the runtime's own reporter is what is being read: a guest that installs
+/// a `SIGSEGV` handler takes every diagnostic with it, and an intermittent
+/// corruption then dies with no output at all.
+///
+/// Not the default. A program is entitled to handle its own faults, and one that
+/// recovers from `SIGBUS` by design would hang or loop instead.
+pub fn retain(darwin_signum: i32) {
+    if !(1..=31).contains(&darwin_signum) {
+        return;
+    }
+    RETAINED.fetch_or(
+        1u32 << (darwin_signum - 1),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// Whether [`retain`] named this signal.
+pub fn retained(darwin_signum: i32) -> bool {
+    (1..=31).contains(&darwin_signum)
+        && RETAINED.load(core::sync::atomic::Ordering::Relaxed) & (1u32 << (darwin_signum - 1)) != 0
+}
+
+/// Whether the alternate signal stack belongs to the runtime too.
+///
+/// A thread has one alternate stack and every `SA_ONSTACK` handler runs on it,
+/// so a guest that installs a small one - Crashpad installs `MINSIGSTKSZ`, two
+/// kilobytes - is what the runtime's fault reporter then gets, and a report
+/// longer than that overflows it and dies half-written. Retained beside the
+/// handlers themselves, by the same lever and for the same reason.
+static RETAIN_ALTSTACK: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// What the guest asked for on the retained alternate stack: `ss_sp`, `ss_size`
+/// and `ss_flags`, so it reads its own installation back.
+static PRETENDED_ALTSTACK: (
+    core::sync::atomic::AtomicU64,
+    core::sync::atomic::AtomicU64,
+    core::sync::atomic::AtomicI32,
+) = {
+    use core::sync::atomic::{AtomicI32, AtomicU64};
+    (AtomicU64::new(0), AtomicU64::new(0), AtomicI32::new(0))
+};
+
+/// Keep this thread's alternate signal stack, whatever the guest asks for.
+pub fn retain_altstack() {
+    RETAIN_ALTSTACK.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether [`retain_altstack`] was called.
+pub fn altstack_retained() -> bool {
+    RETAIN_ALTSTACK.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// The alternate stack the guest last asked for, for a caller reading it back.
+pub fn pretended_altstack() -> libc::stack_t {
+    use core::sync::atomic::Ordering::Relaxed;
+    // SAFETY: zeroed is a disabled stack, and every field is written below.
+    let mut stack: libc::stack_t = unsafe { core::mem::zeroed() };
+    stack.ss_sp = PRETENDED_ALTSTACK.0.load(Relaxed) as usize as *mut libc::c_void;
+    stack.ss_size = PRETENDED_ALTSTACK.1.load(Relaxed) as usize;
+    stack.ss_flags = PRETENDED_ALTSTACK.2.load(Relaxed);
+    stack
+}
+
+/// Record what the guest asked for without acting on it.
+pub fn set_pretended_altstack(stack: &libc::stack_t) {
+    use core::sync::atomic::Ordering::Relaxed;
+    PRETENDED_ALTSTACK
+        .0
+        .store(stack.ss_sp as usize as u64, Relaxed);
+    PRETENDED_ALTSTACK.1.store(stack.ss_size as u64, Relaxed);
+    PRETENDED_ALTSTACK.2.store(stack.ss_flags, Relaxed);
+}
+
 /// A signal disposition in Darwin's shape: a handler, a 32-bit mask, and flags.
 ///
 /// Sixteen bytes on both of Darwin's architectures, which is what the guest
@@ -276,6 +400,17 @@ pub unsafe fn sigaction(
         crate::errno::set(libc::EINVAL);
         return -1;
     };
+
+    if retained(darwin_signum) {
+        let previous = PRETENDED[darwin_signum as usize].get();
+        if let Some(act) = act {
+            PRETENDED[darwin_signum as usize].set(act);
+        }
+        if let Some(old) = old {
+            *old = previous;
+        }
+        return 0;
+    }
 
     // SAFETY: zeroed is a valid `struct sigaction` on both hosts - `SIG_DFL` with
     // an empty mask and no flags - and every field is written below before use.
@@ -350,6 +485,14 @@ pub unsafe fn signal(darwin_signum: i32, handler: u64) -> u64 {
         crate::errno::set(libc::EINVAL);
         return u64::MAX;
     };
+    if retained(darwin_signum) {
+        let previous = PRETENDED[darwin_signum as usize].get();
+        PRETENDED[darwin_signum as usize].set(Disposition {
+            handler,
+            ..previous
+        });
+        return previous.handler;
+    }
     // SAFETY: the caller's obligation.
     unsafe { libc::signal(signum, handler as usize as libc::sighandler_t) as u64 }
 }
@@ -729,6 +872,17 @@ pub mod entry {
             true => None,
             false => Some(unsafe { read_stack(ss.cast()) }),
         };
+        if altstack_retained() {
+            let previous = pretended_altstack();
+            if let Some(wanted) = wanted.as_ref() {
+                set_pretended_altstack(wanted);
+            }
+            if !oss.is_null() {
+                // SAFETY: the caller's structure.
+                unsafe { write_stack(oss.cast(), &previous) };
+            }
+            return 0;
+        }
         // SAFETY: zeroed is a disabled stack, and it is written before it is read.
         let mut previous: libc::stack_t = unsafe { core::mem::zeroed() };
         // SAFETY: two live `stack_t` of this host's own shape.
@@ -1109,6 +1263,55 @@ pub mod entry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A retained signal's disposition is the runtime's: the guest's install
+    /// succeeds, the host's handler is untouched, and the guest reads its own
+    /// installation back - a crash reporter that reads `SIG_DFL` there
+    /// concludes it failed to start.
+    #[test]
+    fn a_retained_signal_is_accepted_recorded_and_not_applied() {
+        // `SIGUSR2`, so nothing else in this process depends on the outcome.
+        const SIGUSR2: i32 = signum::SIGUSR2;
+        let host = signal_to_host(SIGUSR2).expect("this host has SIGUSR2");
+
+        // SAFETY: a live `struct sigaction`, read only.
+        let before = unsafe {
+            let mut current: libc::sigaction = core::mem::zeroed();
+            libc::sigaction(host, core::ptr::null(), &mut current);
+            current.sa_sigaction
+        };
+
+        retain(SIGUSR2);
+        assert!(retained(SIGUSR2));
+
+        let wanted = Disposition {
+            handler: 0xdead_beef,
+            mask: 0,
+            flags: 0,
+        };
+        let mut old = Disposition::default();
+        // SAFETY: the handler is never entered - that is what being retained
+        // means, and is what this test asserts.
+        assert_eq!(unsafe { sigaction(SIGUSR2, Some(wanted), Some(&mut old)) }, 0);
+
+        // SAFETY: as above.
+        let after = unsafe {
+            let mut current: libc::sigaction = core::mem::zeroed();
+            libc::sigaction(host, core::ptr::null(), &mut current);
+            current.sa_sigaction
+        };
+        assert_eq!(after, before, "the host's disposition was changed");
+
+        let mut read_back = Disposition::default();
+        // SAFETY: a query, with no disposition to install.
+        assert_eq!(unsafe { sigaction(SIGUSR2, None, Some(&mut read_back)) }, 0);
+        assert_eq!(read_back.handler, wanted.handler);
+
+        RETAINED.fetch_and(
+            !(1u32 << (SIGUSR2 - 1)),
+            core::sync::atomic::Ordering::Relaxed,
+        );
+    }
 
     /// A mask taken out of a disposition and put back must be the same mask - which
     /// is the whole of what [`Mask`] promises, and the one thing a `u32` copy of a

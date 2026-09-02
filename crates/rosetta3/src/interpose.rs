@@ -28,6 +28,20 @@ pub const NO_INTERPOSE_ENV: &str = "ROSETTA3_NO_INTERPOSE";
 /// host under a symbol something else moved.
 pub const TRACE_ENV: &str = "ROSETTA3_TRACE_INTERPOSE";
 
+/// Set to leave this tree's frameworks on the host's allocator, rather than the
+/// guest's.
+///
+/// Narrower than [`NO_INTERPOSE_ENV`] and useful for the opposite reason: the
+/// guest keeps its own allocator throughout, and the only thing that changes is
+/// whether `objc::allocator` and `darwin::heap` call into it. So a heap
+/// corruption that survives this is not one of *these* crossings, and one that
+/// does not is.
+///
+/// Not a fix either way: with it set, the handful of blocks this tree hands the
+/// guest to `free` come from the wrong allocator instead. It is an A/B, not a
+/// mode to run in.
+pub const NO_ADOPT_ENV: &str = "ROSETTA3_NO_ADOPT_ALLOCATOR";
+
 fn tracing() -> bool {
     std::env::var_os(TRACE_ENV).is_some()
 }
@@ -135,6 +149,13 @@ pub fn guest_allocator(report: &LinkReport) -> Option<(u64, u64)> {
 /// and the host's own is used, which is what every other host call in that
 /// backend already does.
 pub fn adopt_guest_allocator(report: &LinkReport) {
+    if std::env::var_os(NO_ADOPT_ENV).is_some_and(|v| v != "0") {
+        eprintln!(
+            "rosetta3: interpose: this tree's frameworks will keep the host's allocator \
+             ({NO_ADOPT_ENV} is set)"
+        );
+        return;
+    }
     let Some((malloc, free)) = guest_allocator(report) else {
         return;
     };
