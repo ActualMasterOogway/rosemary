@@ -2,11 +2,14 @@ mod block;
 mod boxed;
 pub mod bundle;
 mod constant;
+pub mod cookies;
 mod define;
+pub mod defaults;
 pub mod error;
 pub mod exception;
 pub mod filemanager;
 pub mod geometry;
+pub mod keychain;
 pub mod kvc;
 pub mod locale;
 pub mod notification;
@@ -50,6 +53,8 @@ pub fn bootstrap() {
         operation::install();
         url::install();
         urlsession::install();
+        cookies::install();
+        defaults::install();
     });
 }
 
@@ -62,6 +67,7 @@ pub fn symbol(name: &str) -> Option<u64> {
     paths::symbol(name)
         .or_else(|| bundle::cf::symbol(name))
         .or_else(|| notification::cf::symbol(name))
+        .or_else(|| keychain::symbol(name))
 }
 
 /// Every name [`symbol`] answers.
@@ -70,6 +76,7 @@ pub fn names() -> impl Iterator<Item = &'static str> {
         .iter()
         .chain(bundle::cf::NAMES)
         .chain(notification::cf::NAMES)
+        .chain(keychain::NAMES)
         .copied()
 }
 
@@ -205,6 +212,9 @@ fn declare_abstract() {
 /// Every class this crate answers for.
 pub const CLASSES: &[&str] = &[
     "NSString",
+    "NSHTTPCookie",
+    "NSHTTPCookieStorage",
+    "NSUserDefaults",
     "NSMutableString",
     "NSArray",
     "NSMutableArray",
@@ -247,6 +257,7 @@ pub fn data_symbols() -> Vec<(String, u64)> {
     let mut out = class_data();
     for (symbol, text) in locale::KEYS
         .iter()
+        .chain(keychain::KEYS)
         .copied()
         .chain(STRING_GLOBALS.iter().copied())
     {
