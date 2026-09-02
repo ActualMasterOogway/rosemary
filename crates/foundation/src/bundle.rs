@@ -613,6 +613,45 @@ pub(crate) mod class {
         path(unsafe { layout_of(receiver) }.map(|b| b.root.clone()))
     }
 
+    /// The `file:` URL forms of the two paths above, which is what a program
+    /// that hands the bundle to `NSWorkspace` or `NSTask` asks for.
+    fn url(p: Option<std::path::PathBuf>) -> Id {
+        let Some(p) = p else {
+            return std::ptr::null_mut();
+        };
+        // SAFETY: a URL this call just made.
+        unsafe {
+            corefoundation::api::CFAutorelease(corefoundation::url::new_file_url(
+                &p.to_string_lossy(),
+                true,
+            )) as Id
+        }
+    }
+
+    unsafe extern "C" fn bundle_url(receiver: Id, _sel: Sel) -> Id {
+        // SAFETY: the receiver is an `NSBundle`.
+        url(unsafe { layout_of(receiver) }.map(|b| b.root.clone()))
+    }
+
+    unsafe extern "C" fn resource_url(receiver: Id, _sel: Sel) -> Id {
+        // SAFETY: as above.
+        url(unsafe { layout_of(receiver) }.map(|b| b.resources.clone()))
+    }
+
+    unsafe extern "C" fn executable_url(receiver: Id, _sel: Sel) -> Id {
+        // SAFETY: as above. Not a directory: this one names the binary.
+        let Some(path) = (unsafe { layout_of(receiver) }.map(|b| b.executable.clone())) else {
+            return std::ptr::null_mut();
+        };
+        // SAFETY: a URL this call just made.
+        unsafe {
+            corefoundation::api::CFAutorelease(corefoundation::url::new_file_url(
+                &path.to_string_lossy(),
+                false,
+            )) as Id
+        }
+    }
+
     unsafe extern "C" fn resource_path(receiver: Id, _sel: Sel) -> Id {
         path(unsafe { layout_of(receiver) }.map(|b| b.resources.clone()))
     }
@@ -688,6 +727,9 @@ pub(crate) mod class {
             corefoundation::base::register(c"NSBundle", None, std::mem::size_of::<Body>(), false);
         methods!(class, {
             "bundlePath" => bundle_path, c"@16@0:8";
+            "bundleURL" => bundle_url, c"@16@0:8";
+            "resourceURL" => resource_url, c"@16@0:8";
+            "executableURL" => executable_url, c"@16@0:8";
             "resourcePath" => resource_path, c"@16@0:8";
             "executablePath" => executable_path, c"@16@0:8";
             "privateFrameworksPath" => private_frameworks_path, c"@16@0:8";

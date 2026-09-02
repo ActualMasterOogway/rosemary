@@ -30,6 +30,11 @@ unsafe fn forwarded(name: &std::ffi::CStr, object: CFTypeRef) -> bool {
     if !unsafe { crate::foreign::is(object) } {
         return false;
     }
+    // A handle of this tree's that has no isa to read. Nothing to forward and
+    // nothing to count: see [`crate::base::is_opaque`].
+    if crate::base::is_opaque(object) {
+        return true;
+    }
     if !crate::foreign::forwarding() {
         objc::fail!(
             "{}: the object is not this runtime's, and ROSETTA3_NO_FOREIGN forbids passing it to \
@@ -57,8 +62,10 @@ unsafe fn forwarded(name: &std::ffi::CStr, object: CFTypeRef) -> bool {
 /// Off Darwin every object the guest holds is this runtime's, so there is
 /// nothing to forward and nothing to check for.
 #[cfg(not(target_os = "macos"))]
-unsafe fn forwarded(_name: &std::ffi::CStr, _object: CFTypeRef) -> bool {
-    false
+unsafe fn forwarded(_name: &std::ffi::CStr, object: CFTypeRef) -> bool {
+    // The opaque handles are here too - `IOHIDDeviceRef` is one on every host -
+    // even though a foreign object is not.
+    crate::base::is_opaque(object)
 }
 
 pub unsafe extern "C" fn CFRetain(object: CFTypeRef) -> CFTypeRef {
@@ -78,6 +85,10 @@ pub unsafe extern "C" fn CFRelease(object: CFTypeRef) {
 }
 
 pub unsafe extern "C" fn CFAutorelease(object: CFTypeRef) -> CFTypeRef {
+    // SAFETY: the caller's obligation.
+    if unsafe { forwarded(c"CFAutorelease", object) } {
+        return object;
+    }
     objc::arc::autorelease(object as Id) as CFTypeRef
 }
 
@@ -672,6 +683,42 @@ pub unsafe extern "C" fn CFDataCreate(
     collections::new_data(slice.to_vec())
 }
 
+/// `CFDataCreateCopy`, which forwards a foreign original rather than reading it.
+///
+/// The keyboard layout `TISGetInputSourceProperty` hands back is Apple's
+/// `CFData`, and the copy of it goes straight back into `UCKeyTranslate` - so
+/// the copy has to be Apple's too. See [`crate::foreign`].
+pub unsafe extern "C" fn CFDataCreateCopy(
+    allocator: CFAllocatorRef,
+    data: CFTypeRef,
+) -> CFTypeRef {
+    #[cfg(target_os = "macos")]
+    // SAFETY: the caller's obligation - null or an object.
+    if unsafe { crate::foreign::is(data) } {
+        if !crate::foreign::forwarding() {
+            objc::fail!(
+                "CFDataCreateCopy: the data is not this runtime's, and ROSETTA3_NO_FOREIGN                  forbids passing it to the CoreFoundation that made it"
+            );
+        }
+        let Some(f) = crate::foreign::entry(c"CFDataCreateCopy") else {
+            objc::fail!(
+                "CFDataCreateCopy: the data is not this runtime's and there is no host                  CoreFoundation to pass it to"
+            );
+        };
+        // SAFETY: the framework's own declaration, and an object it made.
+        return unsafe {
+            let f: unsafe extern "C" fn(CFAllocatorRef, CFTypeRef) -> CFTypeRef =
+                std::mem::transmute(f);
+            f(allocator, data)
+        };
+    }
+    // SAFETY: the caller's obligation.
+    let Some(bytes) = (unsafe { collections::data(data) }) else {
+        return std::ptr::null();
+    };
+    collections::new_data(bytes.clone())
+}
+
 pub unsafe extern "C" fn CFDataGetLength(data: CFTypeRef) -> CFIndex {
     // SAFETY: the caller's obligation.
     unsafe { collections::data(data) }.map_or(0, |d| d.len() as CFIndex)
@@ -847,13 +894,22 @@ fn leak<T>(value: Arc<T>) -> CFTypeRef {
 /// still owned by the C world: letting it drop would release a reference nobody
 /// took.
 ///
+/// Anything this crate did not make is `None` rather than a `T`, which is what
+/// keeps a source from some other CoreFoundation - IOKit's notification port
+/// makes one - from being read as this crate's. See [`runloop::note`].
+///
 /// # Safety
 ///
 /// `p` must be a pointer [`leak`] produced for a `T`, or one of the stable
 /// pointers `CFRunLoopGetCurrent` hands out.
-unsafe fn borrow<T>(p: CFTypeRef) -> Option<std::mem::ManuallyDrop<Arc<T>>> {
+unsafe fn borrow<T: 'static>(p: CFTypeRef) -> Option<std::mem::ManuallyDrop<Arc<T>>> {
+    if !runloop::is_noted::<T>(p as usize) {
+        return None;
+    }
     // SAFETY: the caller's obligation.
-    (!p.is_null()).then(|| std::mem::ManuallyDrop::new(unsafe { Arc::from_raw(p as *const T) }))
+    Some(std::mem::ManuallyDrop::new(unsafe {
+        Arc::from_raw(p as *const T)
+    }))
 }
 
 /// A run loop's address, which is stable for as long as its thread runs.

@@ -100,6 +100,16 @@ unsafe extern "C" fn visible_frame(receiver: Id, sel: Sel) -> NSRect {
     }
 }
 
+/// `-maximumFramesPerSecond`: how often the display can present, which a game
+/// uses to pick a frame cap. Sixty where SDL has no mode to report, because the
+/// answer is a divisor a caller will use either way.
+unsafe extern "C" fn maximum_frames_per_second(receiver: Id, _sel: Sel) -> isize {
+    match sdl3::video::display_refresh_rate(display_of(receiver)) {
+        Some(rate) => rate.round() as isize,
+        None => 60,
+    }
+}
+
 unsafe extern "C" fn backing_scale_factor(receiver: Id, _sel: Sel) -> CGFloat {
     sdl3::video::display_content_scale(display_of(receiver)) as f64
 }
@@ -278,6 +288,7 @@ pub(crate) fn install() {
         "frame" => frame, c"{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8";
         "visibleFrame" => visible_frame, c"{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8";
         "backingScaleFactor" => backing_scale_factor, c"d16@0:8";
+        "maximumFramesPerSecond" => maximum_frames_per_second, c"q16@0:8";
         "deviceDescription" => device_description, c"@16@0:8";
     });
 }

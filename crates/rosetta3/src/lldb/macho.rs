@@ -25,15 +25,41 @@ const NLIST_SIZE: usize = 16;
 const N_SECT_EXT: u8 = 0x0f;
 
 pub struct Section {
-    pub segname: &'static str,
-    pub sectname: &'static str,
+    pub segname: String,
+    pub sectname: String,
     /// The section's Mach-O `addr`. For `__text` this is the live address of
     /// the compiled code; for the DWARF sections it is zero.
     pub addr: u64,
     /// Alignment as a power of two, the field's own encoding.
     pub align: u32,
     pub flags: u32,
+    /// The section's extent. Larger than `data` for a section whose contents
+    /// LLDB is expected to read out of the live process instead - which is
+    /// every section of a mapped image, none of which is worth copying.
+    pub size: u64,
     pub data: Vec<u8>,
+}
+
+impl Section {
+    /// A section whose bytes travel with the object.
+    pub fn resident(
+        segname: &str,
+        sectname: &str,
+        addr: u64,
+        align: u32,
+        flags: u32,
+        data: Vec<u8>,
+    ) -> Self {
+        Section {
+            segname: segname.to_string(),
+            sectname: sectname.to_string(),
+            addr,
+            align,
+            flags,
+            size: data.len() as u64,
+            data,
+        }
+    }
 }
 
 pub struct Sym {
@@ -56,6 +82,12 @@ pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
     let mut offset = commands_end;
     let mut offsets = Vec::with_capacity(sections.len());
     for section in sections {
+        // A section with no bytes here gets file offset zero, Mach-O's "not in
+        // the file" encoding.
+        if section.data.is_empty() {
+            offsets.push(0);
+            continue;
+        }
         let align = 1usize << section.align;
         offset = offset.next_multiple_of(align);
         offsets.push(offset as u32);
@@ -106,10 +138,10 @@ pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
     out.extend_from_slice(&0u32.to_le_bytes()); // flags
 
     for (section, &offset) in sections.iter().zip(&offsets) {
-        out.extend_from_slice(&name16(section.sectname));
-        out.extend_from_slice(&name16(section.segname));
+        out.extend_from_slice(&name16(&section.sectname));
+        out.extend_from_slice(&name16(&section.segname));
         out.extend_from_slice(&section.addr.to_le_bytes());
-        out.extend_from_slice(&(section.data.len() as u64).to_le_bytes());
+        out.extend_from_slice(&section.size.to_le_bytes());
         out.extend_from_slice(&offset.to_le_bytes());
         out.extend_from_slice(&section.align.to_le_bytes());
         out.extend_from_slice(&0u32.to_le_bytes()); // reloff
@@ -128,6 +160,9 @@ pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
     debug_assert_eq!(out.len(), commands_end, "load commands are mis-sized");
 
     for (section, &offset) in sections.iter().zip(&offsets) {
+        if section.data.is_empty() {
+            continue;
+        }
         out.resize(offset as usize, 0);
         out.extend_from_slice(&section.data);
     }
@@ -162,22 +197,15 @@ mod tests {
     fn object() -> Vec<u8> {
         write(
             &[
-                Section {
-                    segname: "__TEXT",
-                    sectname: "__text",
-                    addr: 0x1_0234_5000,
-                    align: 2,
-                    flags: S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS,
-                    data: vec![0xc0, 0x03, 0x5f, 0xd6],
-                },
-                Section {
-                    segname: "__DWARF",
-                    sectname: "__debug_info",
-                    addr: 0,
-                    align: 0,
-                    flags: S_ATTR_DEBUG,
-                    data: vec![1, 2, 3],
-                },
+                Section::resident(
+                    "__TEXT",
+                    "__text",
+                    0x1_0234_5000,
+                    2,
+                    S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS,
+                    vec![0xc0, 0x03, 0x5f, 0xd6],
+                ),
+                Section::resident("__DWARF", "__debug_info", 0, 0, S_ATTR_DEBUG, vec![1, 2, 3]),
             ],
             &[Sym {
                 name: "_guest+0x40".into(),

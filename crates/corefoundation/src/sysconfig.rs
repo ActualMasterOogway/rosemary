@@ -31,7 +31,10 @@
 
 use std::ffi::c_void;
 
+use objc::class::Class;
+
 use crate::base::CFTypeRef;
+use crate::callbacks::Policy;
 
 /// The host's SystemConfiguration entry point of that name, or `None`.
 ///
@@ -172,6 +175,266 @@ pub unsafe extern "C" fn SCDynamicStoreCopyProxies(_store: CFTypeRef) -> CFTypeR
     std::ptr::null()
 }
 
+
+/// An `SCDynamicStoreRef`.
+///
+/// A handle and nothing else: the store below answers from the host's own
+/// interfaces rather than from a session, and the name and callback a guest
+/// passes name a notification channel this tree does not deliver on. It is a
+/// real object of this runtime's because the caller releases it with
+/// `CFRelease`, which walks the isa.
+#[repr(C)]
+struct Store {
+    isa: *const Class,
+}
+
+fn store_class() -> &'static Class {
+    static CLASS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let ptr = *CLASS.get_or_init(|| {
+        let class = crate::base::register(c"SCDynamicStore", None, size_of::<Store>(), true);
+        objc::class::ptr(class) as usize
+    });
+    // SAFETY: the cell holds a pointer to a class this function registered.
+    unsafe { objc::class::from_ptr(ptr as *const Class).expect("a class") }
+}
+
+/// `SCDynamicStoreRef SCDynamicStoreCreate(CFAllocatorRef, CFStringRef, SCDynamicStoreCallBack, SCDynamicStoreContext *)`
+///
+/// The store is created rather than declined, because a caller that gets NULL
+/// here asks nothing further - and the keys below can be answered.
+pub unsafe extern "C" fn SCDynamicStoreCreate(
+    _allocator: CFTypeRef,
+    _name: CFTypeRef,
+    _callout: *const c_void,
+    _context: *mut c_void,
+) -> CFTypeRef {
+    // SAFETY: `Store` begins with `isa` and is the layout `store_class` was
+    // registered with.
+    let store: *mut Store = unsafe { crate::base::allocate(store_class()) };
+    store as CFTypeRef
+}
+
+/// `CFStringRef SCDynamicStoreKeyCreateNetworkGlobalEntity(CFAllocatorRef, CFStringRef domain, CFStringRef entity)`
+///
+/// The key is a path, and its spelling is the interface: `State:` and `IPv4`
+/// make `State:/Network/Global/IPv4`, which is what [`SCDynamicStoreCopyValue`]
+/// matches on.
+pub unsafe extern "C" fn SCDynamicStoreKeyCreateNetworkGlobalEntity(
+    _allocator: CFTypeRef,
+    domain: CFTypeRef,
+    entity: CFTypeRef,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation - null or an object of this runtime's.
+    let (Some(domain), Some(entity)) = (unsafe { text_of(domain) }, unsafe { text_of(entity) })
+    else {
+        return std::ptr::null();
+    };
+    let mut key = domain;
+    key.extend_from_slice(b"/Network/Global/");
+    key.extend_from_slice(&entity);
+    crate::string::from_bytes(&key, false)
+}
+
+/// `CFPropertyListRef SCDynamicStoreCopyValue(SCDynamicStoreRef, CFStringRef key)`
+///
+/// One key is answered: the global IPv4 entity, whose `PrimaryInterface` is what
+/// a program reads to find out how it is on the network. Every other key is NULL,
+/// which is what Apple's returns for a key the store does not hold.
+pub unsafe extern "C" fn SCDynamicStoreCopyValue(_store: CFTypeRef, key: CFTypeRef) -> CFTypeRef {
+    // SAFETY: the caller's obligation.
+    let Some(key) = (unsafe { text_of(key) }) else {
+        return std::ptr::null();
+    };
+    if key != b"State:/Network/Global/IPv4" {
+        return std::ptr::null();
+    }
+    let Some(interface) = primary_interface() else {
+        return std::ptr::null();
+    };
+    let name = crate::string::from_bytes(interface.as_bytes(), false);
+    let value = crate::collections::new_dictionary(
+        &[(interned(PRIMARY_INTERFACE), name)],
+        Policy::from_key_callbacks(),
+        Policy::from_type_callbacks(),
+        false,
+    );
+    // The dictionary retained it; this call's own reference is spent.
+    // SAFETY: a string this call just made.
+    unsafe { crate::api::CFRelease(name) };
+    value
+}
+
+/// `SCPreferencesRef SCPreferencesCreate(CFAllocatorRef, CFStringRef, CFStringRef)`
+///
+/// NULL: the preferences file is the *system's* network configuration, and
+/// nothing here has one to read. Apple's returns NULL for a caller that may not
+/// open it, so a program already handles the answer.
+pub unsafe extern "C" fn SCPreferencesCreate(
+    _allocator: CFTypeRef,
+    _name: CFTypeRef,
+    _prefs_id: CFTypeRef,
+) -> CFTypeRef {
+    std::ptr::null()
+}
+
+/// `CFPropertyListRef SCPreferencesGetValue(SCPreferencesRef, CFStringRef)`
+pub unsafe extern "C" fn SCPreferencesGetValue(_prefs: CFTypeRef, _key: CFTypeRef) -> CFTypeRef {
+    std::ptr::null()
+}
+
+/// `SCNetworkServiceRef SCNetworkServiceCopy(SCPreferencesRef, CFStringRef)`
+///
+/// NULL, and it cannot be otherwise: the only way to a service is through the
+/// preferences [`SCPreferencesCreate`] declines to open.
+pub unsafe extern "C" fn SCNetworkServiceCopy(
+    _prefs: CFTypeRef,
+    _service_id: CFTypeRef,
+) -> CFTypeRef {
+    std::ptr::null()
+}
+
+/// `SCNetworkInterfaceRef SCNetworkServiceGetInterface(SCNetworkServiceRef)`
+pub unsafe extern "C" fn SCNetworkServiceGetInterface(_service: CFTypeRef) -> CFTypeRef {
+    std::ptr::null()
+}
+
+/// `CFStringRef SCNetworkInterfaceGetInterfaceType(SCNetworkInterfaceRef)`
+pub unsafe extern "C" fn SCNetworkInterfaceGetInterfaceType(_interface: CFTypeRef) -> CFTypeRef {
+    std::ptr::null()
+}
+
+/// The characters of a string of this runtime's, or `None` for anything else.
+///
+/// # Safety
+///
+/// `string` must be null or an object this runtime allocated.
+unsafe fn text_of(string: CFTypeRef) -> Option<Vec<u8>> {
+    // SAFETY: the caller's obligation.
+    unsafe { crate::string::as_string(string) }.map(|s| s.utf8())
+}
+
+/// The interface packets to the outside world leave by.
+///
+/// Asked of the routing table rather than guessed at, and asked without sending
+/// anything: `connect` on a datagram socket picks the route and binds a local
+/// address, which `getifaddrs` then names. `None` when nothing is routable,
+/// which is the honest answer for a machine that is offline.
+fn primary_interface() -> Option<String> {
+    let local = routed_source_address()?;
+    // SAFETY: `getifaddrs` fills in the pointer or returns non-zero.
+    unsafe {
+        let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut list) != 0 {
+            return None;
+        }
+        let mut found = None;
+        let mut entry = list;
+        while !entry.is_null() {
+            let address = (*entry).ifa_addr;
+            if !address.is_null() && (*address).sa_family as i32 == libc::AF_INET {
+                let address = &*(address as *const libc::sockaddr_in);
+                if address.sin_addr.s_addr == local {
+                    found = std::ffi::CStr::from_ptr((*entry).ifa_name)
+                        .to_str()
+                        .ok()
+                        .map(str::to_string);
+                    break;
+                }
+            }
+            entry = (*entry).ifa_next;
+        }
+        libc::freeifaddrs(list);
+        found
+    }
+}
+
+/// The local IPv4 address a packet to the public internet would go out from, in
+/// network order.
+fn routed_source_address() -> Option<u32> {
+    // SAFETY: every call below is checked, and the socket is closed on every
+    // path out.
+    unsafe {
+        let socket = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
+        if socket < 0 {
+            return None;
+        }
+        // A public address that is not contacted: `connect` on a datagram
+        // socket only consults the routing table.
+        let mut to: libc::sockaddr_in = std::mem::zeroed();
+        to.sin_family = libc::AF_INET as libc::sa_family_t;
+        to.sin_port = 53u16.to_be();
+        to.sin_addr.s_addr = u32::from_be_bytes([1, 1, 1, 1]).to_be();
+        let mut local: libc::sockaddr_in = std::mem::zeroed();
+        let mut len = size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        let routed = libc::connect(
+            socket,
+            std::ptr::from_ref(&to).cast(),
+            size_of::<libc::sockaddr_in>() as libc::socklen_t,
+        ) == 0
+            && libc::getsockname(socket, std::ptr::from_mut(&mut local).cast(), &mut len) == 0;
+        libc::close(socket);
+        routed.then_some(local.sin_addr.s_addr)
+    }
+}
+
+/// `kSCDynamicStorePropNetPrimaryInterface`, which is also the dictionary key
+/// the answer above is read out of.
+const PRIMARY_INTERFACE: &str = "PrimaryInterface";
+
+/// The `kSC*` globals, each of which is a `CFStringRef` **variable** holding the
+/// path component it names.
+///
+/// Published even where nothing here answers a call that uses one - see
+/// `corefoundation::data_symbols`: an unresolved data import binds to zero and
+/// the guest dereferences it.
+const KEY_STRINGS: &[(&str, &str)] = &[
+    ("_kSCDynamicStoreDomainState", "State:"),
+    ("_kSCDynamicStoreDomainSetup", "Setup:"),
+    (
+        "_kSCDynamicStorePropNetPrimaryInterface",
+        PRIMARY_INTERFACE,
+    ),
+    ("_kSCDynamicStorePropNetPrimaryService", "PrimaryService"),
+    ("_kSCEntNetIPv4", "IPv4"),
+    ("_kSCEntNetIPv6", "IPv6"),
+    ("_kSCEntNetInterface", "Interface"),
+    ("_kSCEntNetLink", "Link"),
+    ("_kSCPrefNetworkServices", "NetworkServices"),
+    ("_kSCPropNetInterfaceDeviceName", "DeviceName"),
+    ("_kSCPropNetInterfaceType", "Type"),
+    ("_kSCNetworkInterfaceTypeEthernet", "Ethernet"),
+    ("_kSCNetworkInterfaceTypeIEEE80211", "IEEE80211"),
+];
+
+/// One interned string per distinct text, so that a guest comparing a key it
+/// read back against the global gets identity as well as equality.
+fn interned(text: &str) -> CFTypeRef {
+    static STRINGS: std::sync::Mutex<Vec<(String, usize)>> = std::sync::Mutex::new(Vec::new());
+    let mut strings = STRINGS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, object)) = strings.iter().find(|(t, _)| t == text) {
+        return *object as CFTypeRef;
+    }
+    let object = crate::string::from_bytes(text.as_bytes(), false);
+    // Retained forever: a global a guest may release is one it can make dangle.
+    objc::arc::retain(object as objc::object::Id);
+    strings.push((text.to_string(), object as usize));
+    object
+}
+
+/// The `kSC*` globals, as `(Mach-O name, address)`.
+pub fn data_symbols() -> Vec<(String, u64)> {
+    crate::bootstrap();
+    KEY_STRINGS
+        .iter()
+        .map(|(symbol, text)| {
+            (
+                (*symbol).to_string(),
+                crate::base::global_cell(symbol, interned(text) as usize as u64),
+            )
+        })
+        .collect()
+}
+
 macro_rules! at {
     ($f:expr) => {
         $f as *const () as usize as u64
@@ -191,6 +454,16 @@ pub fn symbol(name: &str) -> Option<u64> {
             at!(SCNetworkReachabilityUnscheduleFromRunLoop)
         }
         "SCDynamicStoreCopyProxies" => at!(SCDynamicStoreCopyProxies),
+        "SCDynamicStoreCreate" => at!(SCDynamicStoreCreate),
+        "SCDynamicStoreKeyCreateNetworkGlobalEntity" => {
+            at!(SCDynamicStoreKeyCreateNetworkGlobalEntity)
+        }
+        "SCDynamicStoreCopyValue" => at!(SCDynamicStoreCopyValue),
+        "SCPreferencesCreate" => at!(SCPreferencesCreate),
+        "SCPreferencesGetValue" => at!(SCPreferencesGetValue),
+        "SCNetworkServiceCopy" => at!(SCNetworkServiceCopy),
+        "SCNetworkServiceGetInterface" => at!(SCNetworkServiceGetInterface),
+        "SCNetworkInterfaceGetInterfaceType" => at!(SCNetworkInterfaceGetInterfaceType),
         _ => return None,
     })
 }
@@ -203,6 +476,14 @@ pub const NAMES: &[&str] = &[
     "SCNetworkReachabilityScheduleWithRunLoop",
     "SCNetworkReachabilityUnscheduleFromRunLoop",
     "SCDynamicStoreCopyProxies",
+    "SCDynamicStoreCreate",
+    "SCDynamicStoreKeyCreateNetworkGlobalEntity",
+    "SCDynamicStoreCopyValue",
+    "SCPreferencesCreate",
+    "SCPreferencesGetValue",
+    "SCNetworkServiceCopy",
+    "SCNetworkServiceGetInterface",
+    "SCNetworkInterfaceGetInterfaceType",
 ];
 
 #[cfg(test)]

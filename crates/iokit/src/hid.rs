@@ -119,7 +119,7 @@ impl Device {
     /// Give every element a stable handle, now that the device has an address.
     fn publish(self: &std::sync::Arc<Device>) {
         let base = std::sync::Arc::as_ptr(self);
-        let handles = self
+        let handles: Vec<crate::value::ElementRef> = self
             .elements
             .iter()
             .map(|e| crate::value::ElementRef {
@@ -127,7 +127,16 @@ impl Device {
                 cookie: e.cookie,
             })
             .collect();
+        // The device and every element handle are things a guest may `CFRetain`
+        // - see `corefoundation::base::note_opaque` - and both live as long as
+        // the device does, which is as long as the process.
+        corefoundation::base::note_opaque(base as *const std::ffi::c_void);
         let _ = self.handles.set(handles);
+        for handle in self.handles.get().into_iter().flatten() {
+            corefoundation::base::note_opaque(
+                std::ptr::from_ref(handle) as *const std::ffi::c_void
+            );
+        }
     }
 
     /// The `IOHIDElementRef` for one element.

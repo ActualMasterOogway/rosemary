@@ -358,7 +358,13 @@ pub fn deny_host_frameworks(provider: &mut NativeDylibProvider) {
     if !builtin() {
         return;
     }
-    for prefix in ["_CF", "_NS", "_kCF", "_kNS"] {
+    // `_SC` with them, and for the same reason one step removed:
+    // SystemConfiguration is Apple's own and takes CoreFoundation objects, so
+    // `SCDynamicStoreCreate` handed one of this tree's strings is Apple's
+    // CoreFoundation reading a structure this runtime laid out. Denied whole
+    // rather than per name, so that an entry point `corefoundation::sysconfig`
+    // does not implement is refused by name instead of corrupting memory.
+    for prefix in ["_CF", "_NS", "_kCF", "_kNS", "_SC", "_kSC"] {
         provider.deny_prefix(prefix);
     }
 }

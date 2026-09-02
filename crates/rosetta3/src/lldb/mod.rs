@@ -1,6 +1,9 @@
 //! Opt-in LLDB support for translated guest code.
 
+mod image;
 mod macho;
+
+pub use image::register_all as register_images;
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -118,7 +121,11 @@ pub fn register(
     let Some(object) = symfile(code, guest_start, guest_end, image, bytes, map) else {
         return;
     };
+    publish(object);
+}
 
+/// Hand one finished symbol file to LLDB.
+fn publish(object: Vec<u8>) {
     // LLDB needs the object to stay readable for as long as the entry is
     // registered, and entries are never withdrawn - a translation lives as long
     // as the process. So both are leaked, deliberately.
@@ -179,22 +186,22 @@ fn symfile(
     let dwarf = dwarf(code, native_size, image, &listing, map)?;
 
     // `__text` first, and this is not cosmetic.
-    let mut sections = vec![macho::Section {
-        segname: "__TEXT",
-        sectname: "__text",
-        addr: code,
-        align: 2,
-        flags: macho::S_ATTR_PURE_INSTRUCTIONS | macho::S_ATTR_SOME_INSTRUCTIONS,
-        // A copy of the live code. LLDB reads the running process for a loaded
-        // section, so this is only ever the fallback - but a `__text` with no
-        // contents is a section a reader is entitled to refuse.
-        //
-        // SAFETY: `code..code + native_size` is inside the buffer Cranelift
-        // finalized for this region, which is mapped and immutable for the rest
-        // of the process's life.
-        data: unsafe { std::slice::from_raw_parts(code as *const u8, native_size as usize) }
-            .to_vec(),
-    }];
+    // A copy of the live code. LLDB reads the running process for a loaded
+    // section, so this is only ever the fallback - but a `__text` with no
+    // contents is a section a reader is entitled to refuse.
+    //
+    // SAFETY: `code..code + native_size` is inside the buffer Cranelift
+    // finalized for this region, which is mapped and immutable for the rest of
+    // the process's life.
+    let text = unsafe { std::slice::from_raw_parts(code as *const u8, native_size as usize) };
+    let mut sections = vec![macho::Section::resident(
+        "__TEXT",
+        "__text",
+        code,
+        2,
+        macho::S_ATTR_PURE_INSTRUCTIONS | macho::S_ATTR_SOME_INSTRUCTIONS,
+        text.to_vec(),
+    )];
 
     for (sectname, data) in [
         ("__debug_abbrev", dwarf.debug_abbrev.slice()),
@@ -205,14 +212,14 @@ fn symfile(
         if data.is_empty() {
             continue;
         }
-        sections.push(macho::Section {
-            segname: "__DWARF",
+        sections.push(macho::Section::resident(
+            "__DWARF",
             sectname,
-            addr: 0,
-            align: 0,
-            flags: macho::S_ATTR_DEBUG,
-            data: data.to_vec(),
-        });
+            0,
+            0,
+            macho::S_ATTR_DEBUG,
+            data.to_vec(),
+        ));
     }
 
     // Mach-O's C-linkage underscore. LLDB strips it back off for display, so

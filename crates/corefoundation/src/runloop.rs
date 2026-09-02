@@ -1,3 +1,4 @@
+use std::any::TypeId;
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -320,12 +321,44 @@ impl RunLoop {
 
 /// Build a version-0 source.
 pub fn new_source(perform: Option<Perform>, info: usize) -> Arc<Source> {
-    Arc::new(Source {
+    let source = Arc::new(Source {
         signalled: AtomicBool::new(false),
         perform,
         info,
         valid: AtomicBool::new(true),
-    })
+    });
+    note(Arc::as_ptr(&source));
+    source
+}
+
+/// Every run loop, source and timer this module made, and which of the three it
+/// is.
+///
+/// These are the one family of CoreFoundation handles that is *not* an object
+/// with an isa - a `CFRunLoopSourceRef` here is a leaked `Arc` - so nothing
+/// about the pointer says what it points at, and the isa check
+/// [`crate::foreign`] uses cannot be asked. It has to be asked of something: a
+/// program under the builtin frameworks still gets sources from Apple's own
+/// libraries, IOKit's notification port among them, and one of those read as a
+/// [`Source`] turns a field of a structure this crate did not lay out into the
+/// callback the loop then calls.
+static HANDLES: Mutex<BTreeMap<usize, TypeId>> = Mutex::new(BTreeMap::new());
+
+/// Record a handle before it is handed to the C world.
+pub fn note<T: 'static>(handle: *const T) {
+    HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(handle as usize, TypeId::of::<T>());
+}
+
+/// Whether `handle` is a `T` this module handed out.
+pub fn is_noted<T: 'static>(handle: usize) -> bool {
+    HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&handle)
+        == Some(&TypeId::of::<T>())
 }
 
 /// Build a timer, first due `after` from now and repeating every `interval`.
@@ -335,13 +368,15 @@ pub fn new_timer(
     callback: Option<TimerCallback>,
     info: usize,
 ) -> Arc<Timer> {
-    Arc::new(Timer {
+    let timer = Arc::new(Timer {
         next: Mutex::new(Instant::now() + after),
         interval,
         callback,
         info,
         valid: AtomicBool::new(true),
-    })
+    });
+    note(Arc::as_ptr(&timer));
+    timer
 }
 
 thread_local! {
@@ -358,7 +393,11 @@ static MAIN: Mutex<Option<Arc<RunLoop>>> = Mutex::new(None);
 /// caller is the thread the program started on.
 pub fn current() -> Arc<RunLoop> {
     CURRENT.with(|cell| {
-        let loop_ = cell.get_or_init(|| Arc::new(RunLoop::new()));
+        let loop_ = cell.get_or_init(|| {
+            let loop_ = Arc::new(RunLoop::new());
+            note(Arc::as_ptr(&loop_));
+            loop_
+        });
         let mut main = MAIN.lock().unwrap_or_else(|e| e.into_inner());
         if main.is_none() {
             *main = Some(Arc::clone(loop_));

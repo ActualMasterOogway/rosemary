@@ -16,11 +16,16 @@ pub struct Value {
 
 /// A value for one element's reading, which the caller releases.
 pub fn new(device: &Arc<Device>, cookie: u32, integer: i64) -> CFTypeRef {
-    Box::into_raw(Box::new(Value {
+    let value = Box::into_raw(Box::new(Value {
         device: Arc::as_ptr(device) as usize,
         cookie,
         integer,
-    })) as CFTypeRef
+    })) as CFTypeRef;
+    // A value is the one handle here that is freed, so it is forgotten again in
+    // [`release`] rather than left in the table for an unrelated allocation to
+    // land on. See `corefoundation::base::note_opaque`.
+    corefoundation::base::note_opaque(value);
+    value
 }
 
 /// Give one back.
@@ -28,6 +33,7 @@ pub fn release(value: CFTypeRef) {
     if value.is_null() {
         return;
     }
+    corefoundation::base::forget_opaque(value);
     // SAFETY: a pointer [`new`] produced, released once - which is what the one
     // caller, the manager's poll, does immediately after the callback returns.
     drop(unsafe { Box::from_raw(value as *mut Value) });

@@ -12,7 +12,7 @@
 
 use std::ffi::c_void;
 
-use foundation::geometry::NSRect;
+use foundation::geometry::{NSPoint, NSRect};
 use objc::object::Id;
 use objc::sel::Sel;
 
@@ -35,6 +35,10 @@ pub struct Cursor {
     /// Which of the named cursors this is, for `-set` to act on. SDL has no
     /// shape to switch to, so the value is kept and not used.
     shape: usize,
+    /// The image a custom cursor was made from, retained, and where its point
+    /// is. Kept for the same reason the shape is: a program reads them back.
+    image: Id,
+    hot_spot: foundation::geometry::NSPoint,
 }
 
 pub const CURSOR_INSTANCE_SIZE: usize = size_of::<Cursor>();
@@ -76,6 +80,29 @@ unsafe extern "C" fn tracking_owner(receiver: Id, _sel: Sel) -> Id {
 unsafe extern "C" fn tracking_user_info(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: a tracking area of this crate's.
     unsafe { (*(receiver as *const TrackingArea)).user_info }
+}
+
+/// `-initWithImage:hotSpot:`.
+///
+/// The image is kept and the pointer keeps whatever shape it had: this tree
+/// changes only whether the pointer is *visible*, which is the module note
+/// above and applies to a custom cursor exactly as it does to `+IBeamCursor`.
+unsafe extern "C" fn init_with_image(receiver: Id, _sel: Sel, image: Id, hot_spot: NSPoint) -> Id {
+    // SAFETY: a cursor of this crate's.
+    let cursor = unsafe { &mut *(receiver as *mut Cursor) };
+    cursor.image = objc::arc::retain(image);
+    cursor.hot_spot = hot_spot;
+    receiver
+}
+
+unsafe extern "C" fn image(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: as above.
+    unsafe { (*(receiver as *const Cursor)).image }
+}
+
+unsafe extern "C" fn hot_spot(receiver: Id, _sel: Sel) -> NSPoint {
+    // SAFETY: as above.
+    unsafe { (*(receiver as *const Cursor)).hot_spot }
 }
 
 /// The named cursors, made once each.
@@ -200,6 +227,9 @@ pub(crate) fn install() {
         "setHiddenUntilMouseMoves:" => set_hidden_until_mouse_moves, c"v20@0:8c16";
     });
     methods!(cursor, {
+        "initWithImage:hotSpot:" => init_with_image, c"@40@0:8@16{CGPoint=dd}24";
+        "image" => image, c"@16@0:8";
+        "hotSpot" => hot_spot, c"{CGPoint=dd}16@0:8";
         "set" => set, c"v16@0:8";
         "push" => set, c"v16@0:8";
         "pop" => set, c"v16@0:8";

@@ -6,7 +6,7 @@ use foundation::geometry::{CGFloat, NSPoint, NSRect, NSSize};
 use objc::object::Id;
 use objc::sel::Sel;
 
-use crate::define::methods;
+use crate::define::{class_methods, methods};
 
 #[repr(C)]
 pub struct Window {
@@ -202,6 +202,50 @@ unsafe extern "C" fn frame(receiver: Id, _sel: Sel) -> NSRect {
     crate::geometry::rect_from_sdl(x, y, w, h)
 }
 
+/// `+windowNumberAtPoint:belowWindowWithWindowNumber:`, over this runtime's own
+/// windows.
+///
+/// Apple's answers about every window on the screen, this process's or not.
+/// Nothing here can: the windows of other applications belong to the window
+/// server and SDL does not report them. A program that asks whether the pointer
+/// is over one of *its* windows - which is what this is for - gets the right
+/// answer; one asking whether some other application is in front is told no.
+unsafe extern "C" fn window_number_at_point(
+    _class: Id,
+    _sel: Sel,
+    point: NSPoint,
+    below: isize,
+) -> isize {
+    // Front to back, which is the order the answer is defined in and the
+    // reverse of the order windows were made in.
+    let windows: Vec<Id> = all().into_iter().rev().collect();
+    let start = match below {
+        0 => 0,
+        // SAFETY: `-windowNumber` is `NSInteger (id, SEL)`.
+        _ => match windows.iter().position(|w| unsafe {
+            window_number(*w, objc::sel::get("windowNumber")) == below
+        }) {
+            Some(at) => at + 1,
+            // A number naming no window of this process's orders nothing.
+            None => return 0,
+        },
+    };
+    for window in &windows[start.min(windows.len())..] {
+        // SAFETY: `-isVisible` and `-frame` are this module's own, called with
+        // the receivers they were installed for.
+        unsafe {
+            if is_visible(*window, objc::sel::get("isVisible")) == 0 {
+                continue;
+            }
+            let rect = frame(*window, objc::sel::get("frame"));
+            if crate::geometry::contains(rect, point) {
+                return window_number(*window, objc::sel::get("windowNumber"));
+            }
+        }
+    }
+    0
+}
+
 /// `-convertBaseToScreen:`, and its inverse below.
 ///
 /// A window's base coordinates have their origin at its own bottom-left, so the
@@ -224,6 +268,24 @@ unsafe extern "C" fn convert_screen_to_base(receiver: Id, sel: Sel, point: NSPoi
     NSPoint {
         x: point.x - origin.x,
         y: point.y - origin.y,
+    }
+}
+
+/// The rectangle forms of the two above: only the origin moves, because the two
+/// coordinate systems differ by a translation and nothing else.
+unsafe extern "C" fn convert_rect_from_screen(receiver: Id, sel: Sel, rect: NSRect) -> NSRect {
+    NSRect {
+        // SAFETY: the receiver is a window of this crate's.
+        origin: unsafe { convert_screen_to_base(receiver, sel, rect.origin) },
+        size: rect.size,
+    }
+}
+
+unsafe extern "C" fn convert_rect_to_screen(receiver: Id, sel: Sel, rect: NSRect) -> NSRect {
+    NSRect {
+        // SAFETY: as above.
+        origin: unsafe { convert_base_to_screen(receiver, sel, rect.origin) },
+        size: rect.size,
     }
 }
 
@@ -587,6 +649,10 @@ unsafe extern "C" fn ignored_integer(_receiver: Id, _sel: Sel, _value: isize) {}
 
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSWindow").expect("declared before its methods");
+    class_methods!(class, {
+        "windowNumberAtPoint:belowWindowWithWindowNumber:" => window_number_at_point,
+            c"q40@0:8{CGPoint=dd}16q32";
+    });
     methods!(class, {
         "initWithContentRect:styleMask:backing:defer:" => init_with_content_rect,
             c"@56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16Q48Q56c64";
@@ -600,6 +666,12 @@ pub(crate) fn install() {
         "setFrameOrigin:" => set_frame_origin, c"v32@0:8{CGPoint=dd}16";
         "convertBaseToScreen:" => convert_base_to_screen, c"{CGPoint=dd}32@0:8{CGPoint=dd}16";
         "convertScreenToBase:" => convert_screen_to_base, c"{CGPoint=dd}32@0:8{CGPoint=dd}16";
+        "convertPointFromScreen:" => convert_screen_to_base, c"{CGPoint=dd}32@0:8{CGPoint=dd}16";
+        "convertPointToScreen:" => convert_base_to_screen, c"{CGPoint=dd}32@0:8{CGPoint=dd}16";
+        "convertRectFromScreen:" => convert_rect_from_screen,
+            c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
+        "convertRectToScreen:" => convert_rect_to_screen,
+            c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "setContentSize:" => set_content_size, c"v32@0:8{CGSize=dd}16";
         "contentView" => content_view, c"@16@0:8";
         "setContentView:" => set_content_view, c"v24@0:8@16";

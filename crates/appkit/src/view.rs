@@ -472,6 +472,8 @@ unsafe extern "C" fn ignored(_receiver: Id, _sel: Sel) {}
 
 unsafe extern "C" fn ignored_flag(_receiver: Id, _sel: Sel, _flag: u8) {}
 
+unsafe extern "C" fn ignored_integer(_receiver: Id, _sel: Sel, _value: isize) {}
+
 unsafe extern "C" fn ignored_rect(_receiver: Id, _sel: Sel, _rect: NSRect) {}
 
 unsafe extern "C" fn ignored_object_object(_receiver: Id, _sel: Sel, _a: Id, _b: Id) {}
@@ -532,6 +534,10 @@ pub(crate) fn install() {
         "setLayer:" => set_layer, c"v24@0:8@16";
         "layer" => layer, c"@16@0:8";
         "setWantsLayer:" => ignored_flag, c"v20@0:8c16";
+        // A hint about when the backing store may be reused across a resize.
+        // Nothing here keeps one, so every policy draws the same.
+        "setLayerContentsRedrawPolicy:" => ignored_integer, c"v24@0:8q16";
+        "setLayerContentsPlacement:" => ignored_integer, c"v24@0:8q16";
         "wantsLayer" => yes, c"c16@0:8";
         "setAllowedTouchTypes:" => set_allowed_touch_types, c"v24@0:8Q16";
         "allowedTouchTypes" => allowed_touch_types, c"Q16@0:8";

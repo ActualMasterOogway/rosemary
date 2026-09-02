@@ -36,6 +36,8 @@ unsafe fn device<'a>(device: CFTypeRef) -> Option<&'a Device> {
 pub unsafe extern "C" fn IOHIDManagerCreate(_allocator: CFTypeRef, _options: u32) -> CFTypeRef {
     let manager = Arc::new(Manager::new());
     let handle = Arc::as_ptr(&manager) as CFTypeRef;
+    // A guest may `CFRetain` it, and this handle has no isa to retain through.
+    corefoundation::base::note_opaque(handle);
     MANAGERS
         .lock()
         .unwrap_or_else(|e| e.into_inner())

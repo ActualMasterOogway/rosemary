@@ -241,6 +241,9 @@ impl Native {
         crate::tls::register(&report);
         // Before the program runs, because the first thing it may do is throw.
         crate::dyld::register_mapped_images(&report);
+        // And to LLDB, which otherwise has nothing to name a frame in the
+        // program with: these images were mapped here rather than by dyld.
+        crate::lldb::register_images(&report, path);
 
         let stack = GuestStack::new(crate::stack::DEFAULT_STACK, path, args)?;
         // What `_NSGetArgc`/`_NSGetArgv` answer with, now that there is a layout

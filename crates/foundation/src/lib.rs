@@ -313,7 +313,12 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
 /// Published whether or not anything posts them, for the reason AppKit's are: an
 /// unresolved data import binds to zero and the guest's next instruction
 /// dereferences it.
-pub const NOTIFICATION_NAMES: &[&str] = &["NSProcessInfoThermalStateDidChangeNotification"];
+pub const NOTIFICATION_NAMES: &[&str] = &[
+    "NSProcessInfoThermalStateDidChangeNotification",
+    // Weakly imported by programs that predate it, and still dereferenced
+    // without a null check by at least one of them.
+    "NSProcessInfoPowerStateDidChangeNotification",
+];
 
 #[cfg(test)]
 mod tests {

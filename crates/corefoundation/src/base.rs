@@ -173,6 +173,49 @@ pub unsafe fn allocate<T>(class: &'static Class) -> *mut T {
     object as *mut T
 }
 
+/// Handles this tree hands out that are *not* objects.
+///
+/// An `IOHIDDeviceRef` is an `Arc` and an `IOHIDValueRef` is a `Box`: neither
+/// begins with an isa, and a guest is entitled to pass either to `CFRetain`,
+/// because both are CoreFoundation types as far as its headers are concerned.
+/// Without this they look exactly like an object some other CoreFoundation made
+/// - the isa check in [`crate::foreign`] cannot tell them apart - and retaining
+/// one calls Apple's `objc_retain` on a structure this tree laid out.
+///
+/// Retaining and releasing one is a no-op: a manager, a device and its element
+/// handles live for as long as the subsystem, and a value is freed by the code
+/// that made it.
+static OPAQUE: std::sync::Mutex<std::collections::BTreeSet<usize>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Record a handle before it is handed to a guest.
+pub fn note_opaque(handle: *const c_void) {
+    if handle.is_null() {
+        return;
+    }
+    OPAQUE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(handle as usize);
+}
+
+/// Forget one, for the handles that are freed rather than immortal.
+pub fn forget_opaque(handle: *const c_void) {
+    OPAQUE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&(handle as usize));
+}
+
+/// Whether `handle` is one of them.
+pub fn is_opaque(handle: CFTypeRef) -> bool {
+    !handle.is_null()
+        && OPAQUE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&(handle as usize))
+}
+
 /// The address of the **variable** a pointer-typed global names.
 ///
 /// `kCFRunLoopDefaultMode` is a `CFStringRef` variable, not an object. A guest

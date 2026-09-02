@@ -80,6 +80,13 @@ fn standardized(rect: NSRect) -> (f64, f64, f64, f64) {
     (x, y, width, height)
 }
 
+/// Whether `point` is inside `rect`, half-open on the far edges as
+/// `CGRectContainsPoint` is.
+pub fn contains(rect: NSRect, point: NSPoint) -> bool {
+    let (x, y, width, height) = standardized(rect);
+    point.x >= x && point.x < x + width && point.y >= y && point.y < y + height
+}
+
 /// The eight `CGFloat CGRectGet…(CGRect)` accessors.
 ///
 /// Inline functions in the header on a Mac *and* exported symbols, and a guest

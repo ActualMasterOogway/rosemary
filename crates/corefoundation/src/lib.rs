@@ -101,6 +101,7 @@ pub fn symbol(name: &str) -> Option<u64> {
 
         "CFDataGetTypeID" => at!(api::CFDataGetTypeID),
         "CFDataCreate" => at!(api::CFDataCreate),
+        "CFDataCreateCopy" => at!(api::CFDataCreateCopy),
         "CFDataGetLength" => at!(api::CFDataGetLength),
         "CFDataGetBytePtr" => at!(api::CFDataGetBytePtr),
 
@@ -186,6 +187,7 @@ pub const NAMES: &[&str] = &[
     "CFNumberGetByteSize",
     "CFDataGetTypeID",
     "CFDataCreate",
+    "CFDataCreateCopy",
     "CFDataGetLength",
     "CFDataGetBytePtr",
     "CFUUIDGetTypeID",
@@ -337,6 +339,7 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         "_kCFCoreFoundationVersionNumber".to_string(),
         base::global_cell("_kCFCoreFoundationVersionNumber", (1600.0f64).to_bits()),
     ));
+    out.extend(sysconfig::data_symbols());
     out
 }
 

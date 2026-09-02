@@ -27,6 +27,9 @@ pub struct Image {
     isa: *const c_void,
     /// The bytes, retained as the `NSData` the guest handed over.
     data: Id,
+    /// The representations added to it, as a retained `NSMutableArray`, or nil
+    /// for the usual image that was made from data and has none.
+    reps: Id,
     size: NSSize,
 }
 
@@ -141,9 +144,24 @@ pub fn bitmap(object: Id) -> Option<crate::raster::Bitmap> {
     let is_image = unsafe { objc::object::class_of(object) }.is_some_and(|c| {
         objc::class::lookup(c"NSImage").is_some_and(|k| c.chain().any(|x| std::ptr::eq(x, k)))
     });
-    is_image
-        .then(|| crate::raster::decode(bytes_of(object)))
-        .flatten()
+    if !is_image {
+        return None;
+    }
+    crate::raster::decode(bytes_of(object)).or_else(|| {
+        // Built by `-initWithSize:` plus `-addRepresentation:`, which is how a
+        // program that generated its pixels rather than loading a file makes
+        // one. The first representation is the image, as it is in Apple's for
+        // an image with only one.
+        let reps = image_of(object).reps;
+        if reps.is_null() {
+            return None;
+        }
+        // SAFETY: an array of representations this object made.
+        let first = unsafe {
+            corefoundation::api::CFArrayGetValueAtIndex(reps as *const c_void, 0) as Id
+        };
+        bitmap::pixels_of(first)
+    })
 }
 
 /// `-initWithData:`.
@@ -185,6 +203,51 @@ unsafe extern "C" fn init_with_contents_of_file(receiver: Id, sel: Sel, path: Id
     // SAFETY: as above; the image retained it if it kept it.
     unsafe { corefoundation::api::CFRelease(data) };
     image
+}
+
+/// `-addRepresentation:`, and the list it appends to.
+///
+/// An image built this way carries its pixels in the representation rather than
+/// in encoded bytes, which is why [`bitmap`] asks the representation when there
+/// is no data.
+unsafe extern "C" fn add_representation(receiver: Id, _sel: Sel, rep: Id) {
+    if rep.is_null() {
+        return;
+    }
+    let image = image_of(receiver);
+    if image.reps.is_null() {
+        image.reps = objc::arc::retain(corefoundation::collections::new_array(
+            &[],
+            corefoundation::callbacks::Policy::from_type_callbacks(),
+            true,
+        ) as Id);
+    }
+    // SAFETY: an array this function made, and an object to put in it.
+    unsafe {
+        corefoundation::api::CFArrayAppendValue(image.reps as *const c_void, rep as *const c_void)
+    };
+}
+
+unsafe extern "C" fn representations(receiver: Id, _sel: Sel) -> Id {
+    let image = image_of(receiver);
+    if !image.reps.is_null() {
+        return image.reps;
+    }
+    corefoundation::collections::new_array(
+        &[],
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    ) as Id
+}
+
+/// `-initWithSize:`: an image with a size and no pixels yet.
+///
+/// What a program builds before drawing into it or adding a representation, so
+/// the empty result is the correct one - and the family below is what says so
+/// if it is asked for pixels that were never put there.
+unsafe extern "C" fn init_with_size(receiver: Id, _sel: Sel, size: NSSize) -> Id {
+    image_of(receiver).size = size;
+    receiver
 }
 
 unsafe extern "C" fn size(receiver: Id, _sel: Sel) -> NSSize {
@@ -233,6 +296,9 @@ pub(crate) fn install() {
     let class = objc::class::lookup(c"NSImage").expect("declared before its methods");
     methods!(class, {
         "initWithData:" => init_with_data, c"@24@0:8@16";
+        "initWithSize:" => init_with_size, c"@32@0:8{CGSize=dd}16";
+        "addRepresentation:" => add_representation, c"v24@0:8@16";
+        "representations" => representations, c"@16@0:8";
         "initWithContentsOfFile:" => init_with_contents_of_file, c"@24@0:8@16";
         "size" => size, c"{CGSize=dd}16@0:8";
         "setSize:" => set_size, c"v32@0:8{CGSize=dd}16";
@@ -249,7 +315,6 @@ pub(crate) fn install() {
     for (selector, types) in [
         ("lockFocus", c"v16@0:8"),
         ("unlockFocus", c"v16@0:8"),
-        ("representations", c"@16@0:8"),
         (
             "CGImageForProposedRect:context:hints:",
             c"^v40@0:8^{CGRect={CGPoint=dd}{CGSize=dd}}16@24@32",
@@ -441,6 +506,47 @@ pub mod bitmap {
             false => rep.supplied = supplied,
         }
         receiver
+    }
+
+    /// The rep's pixels as a bitmap, for the image that holds it.
+    ///
+    /// Only the layout this module produces and accepts: eight bits a sample,
+    /// four samples, no padding between rows. A rep of any other shape is
+    /// `None` rather than reinterpreted, because the bytes would be read as a
+    /// format they are not.
+    pub fn pixels_of(object: Id) -> Option<crate::raster::Bitmap> {
+        if object.is_null() {
+            return None;
+        }
+        // SAFETY: null or an object this runtime allocated.
+        let is_rep = unsafe { objc::object::class_of(object) }.is_some_and(|c| {
+            objc::class::lookup(c"NSBitmapImageRep")
+                .is_some_and(|k| c.chain().any(|x| std::ptr::eq(x, k)))
+        });
+        if !is_rep {
+            return None;
+        }
+        let rep = rep_of(object);
+        let stride = rep.width.checked_mul(4)?;
+        if rep.bits_per_sample != 8 || rep.bits_per_pixel != 32 || rep.bytes_per_row != stride {
+            return None;
+        }
+        let wanted = stride.checked_mul(rep.height)?;
+        let pixels = match rep.supplied.is_null() {
+            // SAFETY: the buffer the guest supplied, which it declared covers
+            // `bytes_per_row * height`.
+            false => unsafe { std::slice::from_raw_parts(rep.supplied, wanted) }.to_vec(),
+            // SAFETY: a buffer this object leaked.
+            true => unsafe { rep.pixels.as_ref() }?.clone(),
+        };
+        if pixels.len() < wanted {
+            return None;
+        }
+        Some(crate::raster::Bitmap {
+            width: rep.width as u32,
+            height: rep.height as u32,
+            pixels,
+        })
     }
 
     unsafe extern "C" fn bitmap_data(receiver: Id, _sel: Sel) -> *mut u8 {

@@ -161,10 +161,21 @@ pub fn make(fields: Fields) -> Id {
     objc::arc::autorelease(event as Id)
 }
 
+/// `+[NSEvent mouseLocation]`: the pointer in screen coordinates, asked of the
+/// window system rather than of the last event - which is the difference
+/// between this and `-locationInWindow`, and the reason a program uses it.
+unsafe extern "C" fn mouse_location(_class: Id, _sel: Sel) -> NSPoint {
+    match sdl3::video::global_mouse_state() {
+        Some((x, y, _)) => crate::geometry::point_from_sdl(x as f64, y as f64),
+        None => NSPoint::default(),
+    }
+}
+
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSEvent").expect("declared before its methods");
     crate::define::class_methods!(class, {
         "modifierFlags" => current_modifier_flags, c"Q16@0:8";
+        "mouseLocation" => mouse_location, c"{CGPoint=dd}16@0:8";
     });
     methods!(class, {
         "type" => kind, c"Q16@0:8";

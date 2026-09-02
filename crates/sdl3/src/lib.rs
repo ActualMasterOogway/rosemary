@@ -37,6 +37,23 @@ pub struct Rect {
     pub h: c_int,
 }
 
+/// `SDL_DisplayMode`, of which only the refresh rate is read here. Declared
+/// whole because SDL hands back a pointer into its own array and the fields
+/// after the one wanted are what put it at the right offset.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct DisplayMode {
+    pub display: u32,
+    pub format: u32,
+    pub w: c_int,
+    pub h: c_int,
+    pub pixel_density: f32,
+    pub refresh_rate: f32,
+    pub refresh_rate_numerator: c_int,
+    pub refresh_rate_denominator: c_int,
+    pub internal: *mut c_void,
+}
+
 /// `SDL_Event`, as bytes.
 ///
 /// The union is a hundred and twenty-eight bytes of variants this tree does not
@@ -114,6 +131,7 @@ struct Api {
     SDL_GetDisplayBounds: Option<unsafe extern "C" fn(u32, *mut Rect) -> bool>,
     SDL_GetDisplayUsableBounds: Option<unsafe extern "C" fn(u32, *mut Rect) -> bool>,
     SDL_GetDisplayContentScale: Option<unsafe extern "C" fn(u32) -> f32>,
+    SDL_GetDesktopDisplayMode: Option<unsafe extern "C" fn(u32) -> *const DisplayMode>,
 
     SDL_PollEvent: Option<unsafe extern "C" fn(*mut Event) -> bool>,
     SDL_HideCursor: Option<unsafe extern "C" fn() -> bool>,
@@ -252,6 +270,7 @@ fn api() -> Option<&'static Api> {
             SDL_GetDisplayBounds,
             SDL_GetDisplayUsableBounds,
             SDL_GetDisplayContentScale,
+            SDL_GetDesktopDisplayMode,
             SDL_PollEvent,
             SDL_HideCursor,
             SDL_ShowCursor,
@@ -366,11 +385,48 @@ pub fn init(flags: u32) -> Result<(), String> {
     }
 }
 
+/// The thread SDL's *video* subsystem was brought up on, as a `pthread_t`, or
+/// zero while there is no video at all.
+static VIDEO_THREAD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn this_thread() -> usize {
+    // SAFETY: `pthread_self` takes nothing and always answers.
+    unsafe { libc::pthread_self() as usize }
+}
+
+/// Whether servicing the event queue from this thread is allowed: either there
+/// is no video subsystem, or this is the thread it belongs to.
+pub fn may_pump() -> bool {
+    let owner = VIDEO_THREAD.load(std::sync::atomic::Ordering::Acquire);
+    owner == 0 || owner == this_thread()
+}
+
+/// Record the thread the video subsystem came up on. Called once, from
+/// [`video::init_video`].
+fn claim_video_thread() {
+    let _ = VIDEO_THREAD.compare_exchange(
+        0,
+        this_thread(),
+        std::sync::atomic::Ordering::AcqRel,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
 /// Service SDL's own event queue, which is what makes the state below change.
+///
+/// A no-op on any thread but the video subsystem's. The Cocoa backend pumps by calling
+/// `-[NSApplication nextEventMatchingMask:...]`, which **throws** off the main
+/// thread - and that exception unwinds out through whatever C callback this was
+/// reached from, which aborts the process with no diagnostic. The
+/// [`crate::video`] state a caller wanted refreshed is refreshed by the main
+/// thread's own pump instead.
 pub fn pump() {
+    if !may_pump() {
+        return;
+    }
     if let Some(pump) = api().and_then(|a| a.SDL_PumpEvents) {
-        // SAFETY: takes nothing, and must be called on the thread that
-        // initialised the subsystem - which is this tree's main thread.
+        // SAFETY: takes nothing, and this is a thread allowed to service the
+        // queue.
         unsafe { pump() };
     }
 }
@@ -1042,7 +1098,14 @@ pub mod video {
     /// for a display connection.
     fn init_video() -> bool {
         static READY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *READY.get_or_init(|| super::init(super::init::VIDEO).is_ok())
+        *READY.get_or_init(|| {
+            let up = super::init(super::init::VIDEO).is_ok();
+            if up {
+                // This thread now owns the event queue: see [`super::pump`].
+                super::claim_video_thread();
+            }
+            up
+        })
     }
 
     pub fn create_window(title: &CStr, width: i32, height: i32, flags: u64) -> Option<Window> {
@@ -1328,6 +1391,20 @@ pub mod video {
             true => scale,
             false => 1.0,
         }
+    }
+
+    /// The desktop mode's refresh rate in hertz, or `None` when SDL has no
+    /// mode for the display - which is every host with no video subsystem.
+    pub fn display_refresh_rate(display: u32) -> Option<f32> {
+        let f = api()?.SDL_GetDesktopDisplayMode?;
+        // SAFETY: a display id; the mode belongs to SDL and outlives the read.
+        let mode = unsafe { f(display) };
+        if mode.is_null() {
+            return None;
+        }
+        // SAFETY: SDL's own mode record, valid until the display changes.
+        let rate = unsafe { (*mode).refresh_rate };
+        (rate > 0.0).then_some(rate)
     }
 
     pub fn set_cursor_visible(visible: bool) -> bool {
