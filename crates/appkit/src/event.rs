@@ -10,9 +10,54 @@ use crate::window;
 /// about when the event names no window this crate made.
 pub fn pump(app: Id) {
     let _ = app;
+    debug_resize();
     while let Some(event) = sdl3::video::poll() {
         deliver(event);
     }
+}
+
+/// `ROSETTA3_DEBUG_RESIZE=WxH@SECONDS`: resize the program's window once, that
+/// many seconds in.
+///
+/// A resize is the one window event that cannot be produced without a person
+/// dragging a corner, which makes "does the program follow its window" the one
+/// thing about a window that is untestable from a script. `SDL_SetWindowSize`
+/// on a resizable window raises the same `SDL_EVENT_WINDOW_RESIZED` the
+/// compositor would, so everything downstream of the pump - the content view's
+/// frame, the subviews, the delegate's `-windowDidResize:` - is exercised for
+/// real.
+fn debug_resize() {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+
+    static REQUEST: OnceLock<Option<(i32, i32, f64)>> = OnceLock::new();
+    static START: OnceLock<Instant> = OnceLock::new();
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    let request = *REQUEST.get_or_init(|| {
+        let value = std::env::var("ROSETTA3_DEBUG_RESIZE").ok()?;
+        let (size, after) = value.split_once('@').unwrap_or((value.as_str(), "5"));
+        let (width, height) = size.split_once('x')?;
+        Some((
+            width.trim().parse().ok()?,
+            height.trim().parse().ok()?,
+            after.trim().parse().unwrap_or(5.0),
+        ))
+    });
+    let Some((width, height, after)) = request else {
+        return;
+    };
+    if DONE.load(std::sync::atomic::Ordering::Relaxed)
+        || START.get_or_init(Instant::now).elapsed().as_secs_f64() < after
+    {
+        return;
+    }
+    DONE.store(true, std::sync::atomic::Ordering::Relaxed);
+    let Some(sdl) = window::sdl_windows().into_iter().next() else {
+        return;
+    };
+    eprintln!("rosetta3: appkit: ROSETTA3_DEBUG_RESIZE: resizing to {width}x{height}");
+    sdl3::video::set_window_size(sdl, width, height);
 }
 
 fn deliver(event: sdl3::video::Event) {
@@ -306,12 +351,31 @@ fn object_for(id: u32) -> Id {
 /// method directly as well: AppKit registers a window's delegate for the
 /// notifications it declares the moment it is set, so a program that only
 /// implements `-windowDidResize:` never registers as an observer of anything.
+/// Set to print every window notification, and whether anything took it.
+///
+/// A window event that reaches nobody is invisible from both ends - the program
+/// simply does not react - and a release build inlines every function on this
+/// path, so a breakpoint cannot answer it either. This is the answer: the name,
+/// the window, its delegate, and whether that delegate implements the method.
+pub const TRACE_ENV: &str = "ROSETTA3_TRACE_EVENT";
+
+fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os(TRACE_ENV).is_some())
+}
+
 fn post(id: u32, name: &str) {
     let object = object_for(id);
     if object.is_null() {
+        if tracing() {
+            eprintln!("rosetta3: appkit: {name}: SDL window {id} is no window this crate made");
+        }
         return;
     }
     let delegate = window::delegate_of(object);
+    if tracing() {
+        eprintln!("rosetta3: appkit: {name}: window {object:p}, delegate {delegate:p}");
+    }
     if !delegate.is_null() {
         let selector = delegate_selector(name);
         let notification = foundation::notification::make(name, object, std::ptr::null_mut());
@@ -319,9 +383,17 @@ fn post(id: u32, name: &str) {
         // `void (id, SEL, NSNotification *)`.
         let sel = objc::sel::get(selector);
         // SAFETY: null or a live object this runtime allocated.
-        if let Some(method) =
-            unsafe { objc::object::class_of(delegate) }.and_then(|c| c.method(sel))
-        {
+        let method = unsafe { objc::object::class_of(delegate) }.and_then(|c| c.method(sel));
+        if tracing() {
+            eprintln!(
+                "rosetta3: appkit:   -{selector} is {}",
+                match method.is_some() {
+                    true => "implemented by the delegate",
+                    false => "NOT implemented by the delegate",
+                }
+            );
+        }
+        if let Some(method) = method {
             // SAFETY: the prototype above.
             unsafe {
                 let f: unsafe extern "C" fn(Id, objc::sel::Sel, Id) =

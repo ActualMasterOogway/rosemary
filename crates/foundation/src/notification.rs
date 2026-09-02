@@ -130,7 +130,31 @@ pub fn make(name: &str, object: Id, user_info: Id) -> Id {
 ///
 /// Callable from this tree as well as from a guest, which is what AppKit's
 /// launch notifications use.
+/// Set to print every notification posted, how many observers took it, and
+/// every registration as it is made.
+///
+/// The question it answers is the one a program that ignores an event raises
+/// and neither end can answer: a notification nobody observes and an observer
+/// nobody posts to look identical from outside, and a release build inlines
+/// this whole path so a breakpoint cannot tell them apart either.
+pub const TRACE_ENV: &str = "ROSETTA3_TRACE_EVENT";
+
+fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os(TRACE_ENV).is_some())
+}
+
 pub fn post(name: &str, object: Id, user_info: Id) {
+    if tracing() {
+        let takers = OBSERVERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|o| o.name.as_deref().is_none_or(|n| n == name))
+            .filter(|o| o.object.is_null() || o.object == object)
+            .count();
+        eprintln!("rosetta3: foundation: post {name} object {object:p} to {takers} observer(s)");
+    }
     let notification = make(name, object, user_info);
     // Copied out before sending: an observer is entitled to add or remove one
     // from inside its own handler, and holding the lock across the send would
@@ -309,6 +333,15 @@ unsafe extern "C" fn add_observer(
 ) {
     // SAFETY: null or a string.
     let name = (!name.is_null()).then(|| unsafe { text_of(name) });
+    if tracing() {
+        eprintln!(
+            "rosetta3: foundation: addObserver {observer:p} -{} for {} object {object:p}",
+            // SAFETY: a selector this runtime uniqued, whose name is a live
+            // NUL-terminated string for the life of the process.
+            unsafe { std::ffi::CStr::from_ptr(objc::sel::name(selector)) }.to_string_lossy(),
+            name.as_deref().unwrap_or("<any name>")
+        );
+    }
     OBSERVERS
         .lock()
         .unwrap_or_else(|e| e.into_inner())

@@ -38,11 +38,28 @@ pub struct View {
     /// low bits. A view posts nothing until it is asked to, which is AppKit's
     /// default for a view built with `-initWithFrame:`.
     posts: usize,
+    /// `NSAutoresizingMaskOptions`, which says which of the six lengths around
+    /// and inside this view give when its superview resizes. See
+    /// [`resize_subviews`].
+    autoresizing_mask: usize,
+    /// `-setAutoresizesSubviews:`, which is `YES` on a fresh view - so the
+    /// field is stored inverted, and zero means the AppKit default.
+    does_not_autoresize_subviews: usize,
 }
 
 /// The bits of [`View::posts`].
 const POSTS_FRAME: usize = 1;
 const POSTS_BOUNDS: usize = 2;
+
+/// `NSAutoresizingMaskOptions`.
+mod autoresizing {
+    pub const MIN_X_MARGIN: usize = 1;
+    pub const WIDTH_SIZABLE: usize = 2;
+    pub const MAX_X_MARGIN: usize = 4;
+    pub const MIN_Y_MARGIN: usize = 8;
+    pub const HEIGHT_SIZABLE: usize = 16;
+    pub const MAX_Y_MARGIN: usize = 32;
+}
 
 /// The notification a view posts when its frame changes.
 pub const FRAME_DID_CHANGE: &str = "NSViewFrameDidChangeNotification";
@@ -60,6 +77,10 @@ fn note_geometry_change(receiver: Id, before: NSRect) {
     if view.frame == before {
         return;
     }
+    if view.frame.size != before.size {
+        resize_subviews(receiver, before.size);
+    }
+    let view = view_of(receiver);
     let posts = view.posts;
     if posts & POSTS_FRAME != 0 {
         foundation::notification::post(FRAME_DID_CHANGE, receiver, std::ptr::null_mut());
@@ -67,6 +88,146 @@ fn note_geometry_change(receiver: Id, before: NSRect) {
     if posts & POSTS_BOUNDS != 0 && view.frame.size != before.size {
         foundation::notification::post(BOUNDS_DID_CHANGE, receiver, std::ptr::null_mut());
     }
+}
+
+/// Resize `receiver`'s subviews for a superview that went from `old` to its
+/// current size, as `-resizeSubviewsWithOldSize:` does.
+///
+/// This is what makes a window resize reach the view a program actually draws
+/// into. AppKit resizes subviews on *every* frame change of their superview,
+/// and a program's GL view is a subview of the window's content view - so
+/// without this the content view follows the window and the view underneath it
+/// keeps its original frame forever. The program then asks its own view how big
+/// it is, gets the size the window had when it opened, and renders that size
+/// for the rest of the run: a window that resizes and a picture that does not.
+fn resize_subviews(receiver: Id, old: NSSize) {
+    let view = view_of(receiver);
+    if view.does_not_autoresize_subviews != 0 || view.subviews.is_null() {
+        return;
+    }
+    let new = view.frame.size;
+    let list = view.subviews;
+    // SAFETY: an array this module made and only ever fills with views.
+    let Some(array) = (unsafe { corefoundation::collections::array(list as *const c_void) }) else {
+        return;
+    };
+    let subviews: Vec<Id> = array.values.iter().map(|v| *v as Id).collect();
+    for subview in subviews {
+        if !is_view(subview) {
+            continue;
+        }
+        let before = view_of(subview).frame;
+        let mask = view_of(subview).autoresizing_mask;
+        let (x, width) = distribute(
+            mask & autoresizing::MIN_X_MARGIN != 0,
+            mask & autoresizing::WIDTH_SIZABLE != 0,
+            mask & autoresizing::MAX_X_MARGIN != 0,
+            before.origin.x,
+            before.size.width,
+            old.width,
+            new.width,
+        );
+        let (y, height) = distribute(
+            mask & autoresizing::MIN_Y_MARGIN != 0,
+            mask & autoresizing::HEIGHT_SIZABLE != 0,
+            mask & autoresizing::MAX_Y_MARGIN != 0,
+            before.origin.y,
+            before.size.height,
+            old.height,
+            new.height,
+        );
+        let frame = NSRect {
+            origin: NSPoint { x, y },
+            size: NSSize { width, height },
+        };
+        if frame == before {
+            continue;
+        }
+        view_of(subview).frame = frame;
+        // Recursive, through the same path a `-setFrame:` would take: a
+        // subview that resized has subviews of its own to tell, and observers
+        // of its frame to post to.
+        note_geometry_change(subview, before);
+    }
+}
+
+/// Spread a superview's change along one axis over the three lengths that make
+/// it up: the leading margin, the subview itself, and the trailing margin.
+///
+/// Only the flexible ones give, and they give in proportion to their current
+/// sizes - which is AppKit's rule and the one that matters, because a view that
+/// is `WidthSizable` with two fixed margins must absorb the whole change. When
+/// every flexible length is currently zero the change is split evenly between
+/// them instead, since proportional shares of nothing are all nothing and the
+/// view would not move at all.
+///
+/// Nothing flexible means nothing moves: `NSViewNotSizable` is a real answer
+/// and a view that asked for it keeps its frame.
+#[allow(clippy::too_many_arguments)]
+fn distribute(
+    leading: bool,
+    sizable: bool,
+    trailing: bool,
+    origin: CGFloat,
+    size: CGFloat,
+    old: CGFloat,
+    new: CGFloat,
+) -> (CGFloat, CGFloat) {
+    let delta = new - old;
+    if delta == 0.0 {
+        return (origin, size);
+    }
+    let trailing_margin = old - origin - size;
+    let parts = [
+        (leading, origin),
+        (sizable, size),
+        (trailing, trailing_margin),
+    ];
+    let flexible: Vec<CGFloat> = parts
+        .iter()
+        .filter(|(is, _)| *is)
+        .map(|(_, length)| *length)
+        .collect();
+    if flexible.is_empty() {
+        return (origin, size);
+    }
+    let total: CGFloat = flexible.iter().sum();
+    let share = |length: CGFloat| match total > 0.0 {
+        true => delta * (length / total),
+        false => delta / flexible.len() as CGFloat,
+    };
+    let origin = match leading {
+        true => origin + share(origin),
+        false => origin,
+    };
+    let size = match sizable {
+        true => (size + share(size)).max(0.0),
+        false => size,
+    };
+    (origin, size)
+}
+
+unsafe extern "C" fn set_autoresizing_mask(receiver: Id, _sel: Sel, mask: usize) {
+    view_of(receiver).autoresizing_mask = mask;
+}
+
+unsafe extern "C" fn autoresizing_mask(receiver: Id, _sel: Sel) -> usize {
+    view_of(receiver).autoresizing_mask
+}
+
+unsafe extern "C" fn set_autoresizes_subviews(receiver: Id, _sel: Sel, flag: u8) {
+    view_of(receiver).does_not_autoresize_subviews = usize::from(flag == 0);
+}
+
+unsafe extern "C" fn autoresizes_subviews(receiver: Id, _sel: Sel) -> u8 {
+    u8::from(view_of(receiver).does_not_autoresize_subviews == 0)
+}
+
+/// `-resizeSubviewsWithOldSize:`, which a program may call itself and which an
+/// `NSView` subclass overriding `-resizeWithOldSuperviewSize:` expects to be
+/// the thing that drives it.
+unsafe extern "C" fn resize_subviews_with_old_size(receiver: Id, _sel: Sel, old: NSSize) {
+    resize_subviews(receiver, old);
 }
 
 unsafe extern "C" fn set_posts_frame_changed(receiver: Id, _sel: Sel, flag: u8) {
@@ -519,7 +680,12 @@ pub(crate) fn install() {
         "unlockFocus" => ignored, c"v16@0:8";
         "setNeedsDisplay:" => ignored_flag, c"v20@0:8c16";
         "setHidden:" => ignored_flag, c"v20@0:8c16";
-        "setAutoresizingMask:" => ignored_flag, c"v24@0:8Q16";
+        "setAutoresizingMask:" => set_autoresizing_mask, c"v24@0:8Q16";
+        "autoresizingMask" => autoresizing_mask, c"Q16@0:8";
+        "setAutoresizesSubviews:" => set_autoresizes_subviews, c"v20@0:8c16";
+        "autoresizesSubviews" => autoresizes_subviews, c"c16@0:8";
+        "resizeSubviewsWithOldSize:" => resize_subviews_with_old_size,
+            c"v32@0:8{CGSize=dd}16";
         "setNeedsDisplayInRect:" => ignored_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "addCursorRect:cursor:" => ignored_object_object, c"v56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
         "discardCursorRects" => ignored, c"v16@0:8";
