@@ -1,6 +1,8 @@
 pub mod api;
 pub mod hid;
 pub mod manager;
+pub mod power;
+pub mod registry;
 pub mod value;
 
 /// This crate answers nothing without SDL3 to answer from.
@@ -51,7 +53,16 @@ pub fn symbol(name: &str) -> Option<u64> {
         "IOHIDValueGetLength" => at!(api::IOHIDValueGetLength),
         "IOHIDValueGetScaledValue" => at!(api::IOHIDValueGetScaledValue),
 
-        _ => return None,
+        "IOHIDManagerCopyDevices" => at!(api::IOHIDManagerCopyDevices),
+        "IOHIDDeviceGetService" => at!(api::IOHIDDeviceGetService),
+        "IOHIDDeviceScheduleWithRunLoop" => at!(api::IOHIDDeviceScheduleWithRunLoop),
+        "IOHIDDeviceUnscheduleFromRunLoop" => at!(api::IOHIDDeviceUnscheduleFromRunLoop),
+        "IOHIDDeviceRegisterRemovalCallback" => at!(api::IOHIDDeviceRegisterRemovalCallback),
+        "IOHIDDeviceGetReport" => at!(api::IOHIDDeviceGetReport),
+        "IOHIDDeviceSetReport" => at!(api::IOHIDDeviceSetReport),
+        "IOHIDDeviceRegisterInputReportCallback" => at!(api::IOHIDDeviceRegisterInputReportCallback),
+
+        _ => return power::symbol(name).or_else(|| registry::symbol(name)),
     })
 }
 
@@ -82,25 +93,45 @@ pub const NAMES: &[&str] = &[
     "IOHIDValueGetIntegerValue",
     "IOHIDValueGetLength",
     "IOHIDValueGetScaledValue",
+    "IOHIDManagerCopyDevices",
+    "IOHIDDeviceGetService",
+    "IOHIDDeviceScheduleWithRunLoop",
+    "IOHIDDeviceUnscheduleFromRunLoop",
+    "IOHIDDeviceRegisterRemovalCallback",
+    "IOHIDDeviceGetReport",
+    "IOHIDDeviceSetReport",
+    "IOHIDDeviceRegisterInputReportCallback",
 ];
 
-/// The `kIOHID*Key` globals, as `(Mach-O name, address)`.
+/// Every name this crate answers: the HID family above, the power sources in
+/// [`power`], and the registry in [`registry`].
+pub fn names() -> Vec<&'static str> {
+    NAMES
+        .iter()
+        .copied()
+        .chain(power::NAMES.iter().copied())
+        .chain(registry::NAMES.iter().copied())
+        .collect()
+}
+
+/// The `kIOHID*Key` globals and [`registry`]'s master port, as
+/// `(Mach-O name, address)`.
 ///
-/// Each is a `CFStringRef` **variable**: the guest loads the symbol's address
-/// and then loads the string out of it, so the symbol is a cell holding the
-/// object rather than the object. The string itself still has to be the same one
-/// every time, because a matching dictionary compares its keys by identity.
+/// Each key is a `CFStringRef` **variable**: the guest loads the symbol's
+/// address and then loads the string out of it, so the symbol is a cell holding
+/// the object rather than the object. The string itself still has to be the
+/// same one every time, because a matching dictionary compares its keys by
+/// identity.
 pub fn data_symbols() -> Vec<(String, u64)> {
     corefoundation::bootstrap();
-    api::key_strings()
-        .into_iter()
-        .map(|(symbol, text)| {
-            (
-                symbol.to_string(),
-                corefoundation::base::global_cell(symbol, key_object(text)),
-            )
-        })
-        .collect()
+    let mut out = registry::data_symbols();
+    out.extend(api::key_strings().into_iter().map(|(symbol, text)| {
+        (
+            symbol.to_string(),
+            corefoundation::base::global_cell(symbol, key_object(text)),
+        )
+    }));
+    out
 }
 
 fn key_object(text: &'static str) -> u64 {

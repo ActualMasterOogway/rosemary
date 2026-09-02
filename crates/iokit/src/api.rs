@@ -402,3 +402,94 @@ pub fn key_strings() -> Vec<(&'static str, &'static str)> {
         ("_kIOHIDManufacturerKey", "Manufacturer"),
     ]
 }
+
+/// `CFSetRef IOHIDManagerCopyDevices(IOHIDManagerRef)`.
+///
+/// Null, which is what Apple's returns when the manager has matched nothing -
+/// so a caller already has this case. The alternative would be an empty
+/// `CFSetRef`, and there is no `CFSet` in this tree to hand back: a `CFArray`
+/// in its place is a different type whose `CFSetGetCount` reads the wrong
+/// field.
+///
+/// The devices this crate does know about arrive through
+/// `IOHIDManagerRegisterDeviceMatchingCallback` instead, which is the path
+/// `manager::Manager` drives.
+pub unsafe extern "C" fn IOHIDManagerCopyDevices(_manager: CFTypeRef) -> CFTypeRef {
+    std::ptr::null_mut()
+}
+
+/// `io_service_t IOHIDDeviceGetService(IOHIDDeviceRef)`.
+///
+/// Zero. A device here is an SDL joystick, which has no IORegistry entry
+/// behind it, and every `io_service_t` in this tree is zero - see
+/// [`crate::registry`].
+pub unsafe extern "C" fn IOHIDDeviceGetService(_device: CFTypeRef) -> u32 {
+    0
+}
+
+/// `IOHIDDeviceScheduleWithRunLoop` / `IOHIDDeviceUnscheduleFromRunLoop`.
+///
+/// Accepted and ignored. Scheduling is what makes callbacks arrive on a run
+/// loop, and this crate's arrive from SDL's own polling instead - so there is
+/// nothing to attach, and refusing would stop a program that only wanted its
+/// callbacks to work.
+pub unsafe extern "C" fn IOHIDDeviceScheduleWithRunLoop(
+    _device: CFTypeRef,
+    _run_loop: CFTypeRef,
+    _mode: CFTypeRef,
+) {
+}
+
+pub unsafe extern "C" fn IOHIDDeviceUnscheduleFromRunLoop(
+    _device: CFTypeRef,
+    _run_loop: CFTypeRef,
+    _mode: CFTypeRef,
+) {
+}
+
+/// `IOHIDDeviceRegisterRemovalCallback(device, callback, context)`.
+///
+/// Accepted and never called: SDL reports removal through the *manager*, which
+/// is where `IOHIDManagerRegisterDeviceRemovalCallback` already listens.
+pub unsafe extern "C" fn IOHIDDeviceRegisterRemovalCallback(
+    _device: CFTypeRef,
+    _callback: *const c_void,
+    _context: *mut c_void,
+) {
+}
+
+/// The raw-report family: `IOHIDDeviceGetReport`, `IOHIDDeviceSetReport`,
+/// `IOHIDDeviceRegisterInputReportCallback`.
+///
+/// Refused. A report is the device's own HID protocol bytes, and SDL exposes a
+/// decoded joystick rather than the descriptor it was decoded from - so there
+/// is nothing to read out and nothing meaningful to write in. Fabricating an
+/// empty report would tell the caller the exchange succeeded.
+pub unsafe extern "C" fn IOHIDDeviceGetReport(
+    _device: CFTypeRef,
+    _report_type: u32,
+    _report_id: CFIndex,
+    _report: *mut u8,
+    _length: *mut CFIndex,
+) -> IOReturn {
+    ERROR
+}
+
+pub unsafe extern "C" fn IOHIDDeviceSetReport(
+    _device: CFTypeRef,
+    _report_type: u32,
+    _report_id: CFIndex,
+    _report: *const u8,
+    _length: CFIndex,
+) -> IOReturn {
+    ERROR
+}
+
+pub unsafe extern "C" fn IOHIDDeviceRegisterInputReportCallback(
+    _device: CFTypeRef,
+    _report: *mut u8,
+    _length: CFIndex,
+    _callback: *const c_void,
+    _context: *mut c_void,
+) {
+}

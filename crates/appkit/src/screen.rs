@@ -326,3 +326,61 @@ mod tests {
         assert_eq!(rect.size.height, bounds.h as f64);
     }
 }
+
+/// `CGError CGWarpMouseCursorPosition(CGPoint)` - move the pointer, in global
+/// screen coordinates.
+///
+/// SDL's own warp takes the same frame, so this is the one CoreGraphics mouse
+/// call that carries across exactly. `kCGErrorSuccess` is `0`.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGWarpMouseCursorPosition(point: foundation::geometry::NSPoint) -> i32 {
+    sdl3::video::warp_mouse_global(point.x as f32, point.y as f32);
+    0
+}
+
+/// `CGError CGAssociateMouseAndMouseCursorPosition(boolean_t connected)`.
+///
+/// Accepted, recorded and **not honoured**, which is stated here rather than
+/// refused because of what refusing costs: this is the second half of mouse
+/// look - a game hides the cursor and then disassociates it so the pointer
+/// stops moving while deltas keep arriving - and a program that gets an error
+/// from it treats mouse look as unavailable rather than working without
+/// capture.
+///
+/// What is missing is SDL's relative mouse mode, which this tree's `sdl3` does
+/// not bind yet. Until it does the cursor stays attached to the pointer: mouse
+/// look will drag the pointer to the screen edge and stop, and everything else
+/// works.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGAssociateMouseAndMouseCursorPosition(connected: u32) -> i32 {
+    ASSOCIATED.store(connected != 0, std::sync::atomic::Ordering::Release);
+    0
+}
+
+/// Whether the pointer and the cursor are meant to be moving together.
+///
+/// Read back rather than merely written: a caller that disassociates and then
+/// asks is entitled to be told what it set.
+static ASSOCIATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Whether the last [`CGAssociateMouseAndMouseCursorPosition`] asked for the
+/// cursor to follow the pointer.
+pub fn mouse_is_associated() -> bool {
+    ASSOCIATED.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// `bool CGEventSourceKeyState(CGEventSourceStateID, CGKeyCode)`.
+///
+/// False for every key. This asks the *window server* whether a key is down
+/// right now, independently of the event queue, and there is no window server
+/// here to ask - SDL's keyboard state is this process's own view and answers a
+/// different question, one that is wrong in exactly the case the call exists
+/// for (a key pressed while the program was not focused).
+///
+/// False rather than refused because the return type has no error value: a
+/// caller gets "not pressed", which is the answer for all but one key at any
+/// moment anyway.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGEventSourceKeyState(_source: i32, _key: u16) -> u8 {
+    0
+}

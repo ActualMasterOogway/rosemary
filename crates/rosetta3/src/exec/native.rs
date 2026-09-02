@@ -215,6 +215,14 @@ impl Native {
         // After the interpositions, because the answer wanted is the allocator
         // the guest's code *ends up* calling. This backend only: see
         // [`crate::interpose::adopt_guest_allocator`].
+        crate::hostheap::apply(&mut report, &mut memory).map_err(|e| VmError::Load {
+            path: path.to_string(),
+            reason: e.to_string(),
+        })?;
+        crate::heapcheck::install(&mut report, &mut memory).map_err(|e| VmError::Load {
+            path: path.to_string(),
+            reason: e.to_string(),
+        })?;
         crate::interpose::adopt_guest_allocator(&report);
 
         // Say what did not bind, now that every repair above has had its say and
@@ -225,6 +233,7 @@ impl Native {
         // this backend reported was "SIGSEGV at 0x0" with the answer sitting in
         // the link report the whole time.
         let unbound = crate::program::announce_unbound_imports(&report, path);
+        crate::program::announce_passthrough_imports(&report, path);
         if !unbound.is_empty() && crate::program::strict_imports() {
             return Err(VmError::Load {
                 path: path.to_string(),

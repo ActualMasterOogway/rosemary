@@ -114,6 +114,47 @@ fn register_dlopen_names() {
         ],
         symbol,
     );
+    register_opengl_framework();
+}
+
+/// `OpenGL.framework`, as a handle over this host's libGL.
+///
+/// A GL program does not call `glDrawArrays` through an import - it `dlopen`s
+/// the framework and `dlsym`s every entry point it wants, because that is the
+/// only way to reach the 3.x and extension functions the framework does not
+/// export as a link-time symbol. Roblox does exactly this, with
+/// `/System/Library/Frameworks/OpenGL.framework/Versions/Current/OpenGL`.
+///
+/// Without a handle for that path the loader returns null, every `dlsym` after
+/// it answers null, and the program reports **"Missing GL version"** and then
+/// "OpenGL 3.2 support or higher required" - a version check that failed
+/// because there was no library to ask, not because the driver is old.
+///
+/// Off macOS only. A Mac has the real framework and the host loader finds it.
+#[cfg(not(target_os = "macos"))]
+fn register_opengl_framework() {
+    crate::dyld::register_synthetic(
+        &[
+            "/System/Library/Frameworks/OpenGL.framework/Versions/Current/OpenGL",
+            "/System/Library/Frameworks/OpenGL.framework/Versions/A/OpenGL",
+            "/System/Library/Frameworks/OpenGL.framework/OpenGL",
+            "OpenGL",
+        ],
+        gl_symbol,
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn register_opengl_framework() {}
+
+/// One GL entry point, from whichever library the host keeps it in.
+///
+/// `darwin::symbol` rather than a bare `dlsym`, because it is what has already
+/// opened `libGL.so.1` into the global namespace - a `dlsym` here before that
+/// happened would answer null for every name and look like a missing driver.
+#[cfg(not(target_os = "macos"))]
+fn gl_symbol(name: &str) -> Option<u64> {
+    name.starts_with("gl").then(|| darwin::symbol(name))?
 }
 
 /// Push the outermost autorelease pool, the one a process is born with.
@@ -173,7 +214,7 @@ pub fn provider() -> SyntheticDylib {
     // IOKit's HID half, on SDL3. Published even where there is no SDL3: a guest
     // then gets a manager that declines to open, which is a diagnosis, where an
     // unresolved import would only say the symbol was missing.
-    for name in iokit::NAMES {
+    for name in iokit::names() {
         if let Some(addr) = iokit::symbol(name) {
             lib.define_fn(&format!("_{name}"), addr as usize as *const ());
         }
@@ -212,7 +253,7 @@ pub fn provider() -> SyntheticDylib {
     for (name, addr) in media_constants() {
         lib.define_data(&name, addr);
     }
-    for (name, addr) in shimmed() {
+    for (name, addr) in shimmed().into_iter().chain(metal()) {
         lib.define_fn(&format!("_{name}"), addr);
     }
     lib
@@ -305,6 +346,49 @@ unsafe extern "C" fn unintercepted_alert() -> u64 {
     objc::fail!("NSRunAlertPanel was called rather than intercepted")
 }
 
+/// Metal, answered as a machine that has none.
+///
+/// `nil` is what `MTLCreateSystemDefaultDevice` returns on a Mac whose GPU
+/// Metal does not support, so it is an answer the callers were written for
+/// rather than one invented here - a game that gets it takes its own
+/// no-Metal path, which is OpenGL.
+///
+/// The alternative is leaving the three unbound, and that is not "no Metal", it
+/// is a call through a slot left zero: the renderer never learns the device is
+/// missing because it faults asking for it. Nothing else about Metal is
+/// answered, deliberately - a program that gets a device and then sends it a
+/// message is one that decided Metal *was* available, and every selector after
+/// that would have to be invented.
+///
+/// Absent on macOS, where the host's own framework is the answer.
+#[cfg(not(target_os = "macos"))]
+fn metal() -> Vec<(&'static str, *const ())> {
+    vec![
+        ("MTLCreateSystemDefaultDevice", no_metal_device as *const ()),
+        ("MTLCopyAllDevices", no_metal_device as *const ()),
+        (
+            "CGDirectDisplayCopyCurrentMetalDevice",
+            no_metal_device as *const (),
+        ),
+    ]
+}
+
+#[cfg(target_os = "macos")]
+fn metal() -> Vec<(&'static str, *const ())> {
+    Vec::new()
+}
+
+/// `nil`, for every Metal entry point that hands one back.
+///
+/// One function for all three: `MTLCopyAllDevices` is a `copy`, so a caller
+/// releases what it gets, and `nil` is the one value it can be handed without
+/// deciding who owns an array. `-count` on it is zero, which is the same
+/// "no devices" the empty array would have said.
+#[cfg(not(target_os = "macos"))]
+unsafe extern "C" fn no_metal_device() -> u64 {
+    0
+}
+
 pub fn symbol(name: &str) -> Option<u64> {
     if !builtin() {
         return None;
@@ -319,6 +403,14 @@ pub fn symbol(name: &str) -> Option<u64> {
         .or_else(|| appkit::symbol(name))
         .or_else(|| corevideo::symbol(name))
         .or_else(|| coreaudio::symbol(name))
+        // So a `dlsym` of one of these answers what the loader bound, which is
+        // the agreement `darwin::symbol`'s doc comment states.
+        .or_else(|| {
+            metal()
+                .into_iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, addr)| addr as usize as u64)
+        })
 }
 
 /// Tell this tree's `NSBundle` which `.app` the guest is.

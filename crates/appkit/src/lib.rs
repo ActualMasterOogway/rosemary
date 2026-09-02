@@ -63,6 +63,11 @@ pub fn symbol(name: &str) -> Option<u64> {
         }
         "CGDisplayIDToOpenGLDisplayMask" => at!(screen::CGDisplayIDToOpenGLDisplayMask),
         "CGDisplayIOServicePort" => at!(screen::CGDisplayIOServicePort),
+        "CGWarpMouseCursorPosition" => at!(screen::CGWarpMouseCursorPosition),
+        "CGAssociateMouseAndMouseCursorPosition" => {
+            at!(screen::CGAssociateMouseAndMouseCursorPosition)
+        }
+        "CGEventSourceKeyState" => at!(screen::CGEventSourceKeyState),
         "CGRectGetWidth" => at!(geometry::CGRectGetWidth),
         "CGRectGetHeight" => at!(geometry::CGRectGetHeight),
         "CGRectGetMinX" => at!(geometry::CGRectGetMinX),
@@ -91,6 +96,9 @@ pub const NAMES: &[&str] = &[
     "CGGetActiveDisplayList",
     "CGDisplayIDToOpenGLDisplayMask",
     "CGDisplayIOServicePort",
+    "CGWarpMouseCursorPosition",
+    "CGAssociateMouseAndMouseCursorPosition",
+    "CGEventSourceKeyState",
     "CGRectGetWidth",
     "CGRectGetHeight",
     "CGRectGetMinX",

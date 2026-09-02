@@ -299,6 +299,54 @@ pub fn announce_unbound_imports<'r>(
     unbound
 }
 
+/// List every import that resolved to this host's own libc rather than to
+/// anything in this tree, under `ROSETTA3_TRACE_PASSTHROUGH`.
+///
+/// The audit that answers "which names is the guest calling that nobody here
+/// looked at". A passthrough is safe only when the two platforms agree on the
+/// arguments, the structures and the errno values - `darwin::passthrough` is
+/// where that claim is recorded - and a name on neither that list nor
+/// `darwin::divergent` is passed through because nobody decided to, not because
+/// somebody decided it was safe.
+///
+/// The test is the address, not a table: this tree's entries are Rust functions
+/// with no dynamic symbol, so a binding whose resolved address is what `dlsym`
+/// answers for the same name came from the host and from nowhere else.
+pub fn announce_passthrough_imports(report: &LinkReport, what: &str) {
+    if std::env::var_os("ROSETTA3_TRACE_PASSTHROUGH").is_none() {
+        return;
+    }
+    let mut named: Vec<(&str, &str, u64)> = Vec::new();
+    for image in &report.images {
+        let short = image.name.rsplit('/').next().unwrap_or(&image.name);
+        for binding in &image.bindings {
+            if !binding.is_satisfied() {
+                continue;
+            }
+            let name = binding.symbol.as_str();
+            if crate::host::symbol(name.strip_prefix('_').unwrap_or(name)) != Some(binding.resolved)
+            {
+                continue;
+            }
+            named.push((name, short, binding.resolved));
+        }
+    }
+    named.sort_unstable();
+    named.dedup();
+    eprintln!(
+        "rosetta3: {what}: {} import(s) reach this host's libc unaltered",
+        named.len()
+    );
+    for (name, image, addr) in named {
+        let claimed = if darwin::passthrough::claimed(name) {
+            "claimed"
+        } else {
+            "UNREVIEWED"
+        };
+        eprintln!("rosetta3:   {name} in {image} -> {addr:#x} ({claimed})");
+    }
+}
+
 /// Whether an unbound import is a refusal to load rather than a warning. Read
 /// per load rather than cached: loads are counted in ones.
 pub fn strict_imports() -> bool {

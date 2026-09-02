@@ -228,6 +228,118 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: u32) -> c
 
 /// Every name this module answers, in both spellings a Mach-O may import them
 /// by - see the module note on why `$INODE64` is not the same name.
+/// Darwin's `struct statfs`, which is 2168 bytes to this host's 120.
+///
+/// The two do not merely differ in layout, they differ in *kind*: Darwin
+/// carries the mount point and the device inside the structure, as two
+/// 1024-byte paths, where Linux answers only numbers and expects a caller who
+/// wants the path to have asked `/proc/mounts`. So the size difference is the
+/// dangerous part - the host's `statfs` writes 120 bytes into a buffer the
+/// guest sized at 2168 and leaves the rest as whatever was on its stack, and a
+/// caller reading `f_mntonname` gets that.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Statfs {
+    pub bsize: u32,
+    pub iosize: i32,
+    pub blocks: u64,
+    pub bfree: u64,
+    pub bavail: u64,
+    pub files: u64,
+    pub ffree: u64,
+    pub fsid: [i32; 2],
+    pub owner: u32,
+    pub fstype: u32,
+    pub flags: u32,
+    pub fssubtype: u32,
+    pub fstypename: [u8; 16],
+    pub mntonname: [u8; 1024],
+    pub mntfromname: [u8; 1024],
+    pub flags_ext: u32,
+    pub reserved: [u32; 7],
+}
+
+/// Fill a Darwin `struct statfs` from this host's.
+///
+/// The counts are the whole answer and they carry across exactly: both
+/// platforms report blocks of `f_bsize` bytes. What does **not** carry across
+/// is everything textual - `f_fstypename`, `f_mntonname` and `f_mntfromname`
+/// are left empty rather than filled with a plausible `"apfs"` and `"/"`,
+/// because a caller that reads them is one deciding something about the volume
+/// and an invented mount point is a wrong answer where an empty one is a
+/// visible gap. Every caller seen so far wants `f_bsize * f_bavail`.
+///
+/// # Safety
+///
+/// `out` is null or a writable Darwin `struct statfs`.
+unsafe fn fill_statfs(host: &libc::statfs, out: *mut Statfs) {
+    if out.is_null() {
+        return;
+    }
+    let value = Statfs {
+        bsize: host.f_bsize as u32,
+        iosize: host.f_bsize as i32,
+        blocks: host.f_blocks,
+        bfree: host.f_bfree,
+        bavail: host.f_bavail,
+        files: host.f_files,
+        ffree: host.f_ffree,
+        // Two 32-bit halves on both sides, and opaque on both: it is only ever
+        // compared against another `f_fsid`.
+        fsid: unsafe { std::mem::transmute::<libc::fsid_t, [i32; 2]>(host.f_fsid) },
+        owner: 0,
+        fstype: 0,
+        // This host's `struct statfs` carries no mount-flag word at all - the
+        // read-only bit is `statvfs`'s `f_flag`, a different call - so nothing
+        // is claimed rather than `MNT_RDONLY` being guessed at.
+        flags: 0,
+        fssubtype: 0,
+        fstypename: [0; 16],
+        mntonname: [0; 1024],
+        mntfromname: [0; 1024],
+        flags_ext: 0,
+        reserved: [0; 7],
+    };
+    // SAFETY: the caller's obligation; `out` is non-null and sized by the guest
+    // at exactly this structure.
+    unsafe { out.write(value) };
+}
+
+/// `int statfs(const char *, struct statfs *)`
+///
+/// # Safety
+///
+/// `path` is NUL-terminated and `out` is null or a writable Darwin
+/// `struct statfs`.
+pub unsafe extern "C" fn statfs(path: *const c_char, out: *mut Statfs) -> c_int {
+    with_fallback(path, |path| {
+        let mut host: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: the caller's obligation, and `host` is this host's own layout.
+        let result = unsafe { libc::statfs(path, &mut host) };
+        if result == 0 {
+            // SAFETY: as above.
+            unsafe { fill_statfs(&host, out) };
+        }
+        (result, result == 0)
+    })
+}
+
+/// `int fstatfs(int, struct statfs *)`
+///
+/// # Safety
+///
+/// As [`statfs`].
+pub unsafe extern "C" fn fstatfs(fd: c_int, out: *mut Statfs) -> c_int {
+    let mut host: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `host` is this host's own layout and `fd` is the caller's.
+    let result = unsafe { libc::fstatfs(fd, &mut host) };
+    if result == 0 {
+        // SAFETY: the caller's obligation.
+        unsafe { fill_statfs(&host, out) };
+    }
+    result
+}
+
 pub const NAMES: &[&str] = &[
     "stat",
     "lstat",
@@ -235,6 +347,10 @@ pub const NAMES: &[&str] = &[
     "stat$INODE64",
     "lstat$INODE64",
     "fstat$INODE64",
+    "statfs",
+    "fstatfs",
+    "statfs$INODE64",
+    "fstatfs$INODE64",
     "access",
     "fopen",
     "fopen$UNIX2003",
@@ -246,6 +362,8 @@ pub fn symbol(name: &str) -> Option<u64> {
         "stat" | "stat$INODE64" => stat as *const (),
         "lstat" | "lstat$INODE64" => lstat as *const (),
         "fstat" | "fstat$INODE64" => fstat as *const (),
+        "statfs" | "statfs$INODE64" => statfs as *const (),
+        "fstatfs" | "fstatfs$INODE64" => fstatfs as *const (),
         "access" => access as *const (),
         "fopen" | "fopen$UNIX2003" => fopen as *const (),
         "open" => open as *const (),
