@@ -424,8 +424,134 @@ fn named(name: &str) -> Option<Value> {
             guest_arch() == GuestArch::X86_64 && cfg!(target_arch = "aarch64"),
         ))),
         "hw.optional.arm64" => Some(Value::U32(u32::from(guest_arch() == GuestArch::Arm64))),
-        _ => None,
+        "machdep.cpu.brand_string" => Some(Value::Str(brand_string())),
+        // `cpu_type_t`/`cpu_subtype_t` as `<mach/machine.h>` numbers them:
+        // `CPU_ARCH_ABI64` (`0x0100_0000`) over the 32-bit type.
+        "hw.cputype" => Some(Value::U32(match guest_arch() {
+            GuestArch::X86_64 => 0x0100_0007,
+            GuestArch::Arm64 => 0x0100_000c,
+        })),
+        "hw.cpusubtype" => Some(Value::U32(match guest_arch() {
+            // `CPU_SUBTYPE_X86_64_ALL` and `CPU_SUBTYPE_ARM64_ALL`.
+            GuestArch::X86_64 => 3,
+            GuestArch::Arm64 => 0,
+        })),
+        // `CPUFAMILY_UNKNOWN`. The real values are opaque hashes of a specific
+        // Apple or Intel part, and a caller that recognises one acts on what it
+        // knows about that part - so naming a family this is not is worse than
+        // the answer Darwin itself gives for a CPU it does not recognise.
+        "hw.cpufamily" | "hw.cpusubfamily" => Some(Value::U32(0)),
+        _ => optional_feature(name),
     }
+}
+
+/// `hw.optional.*`: which instructions the guest may actually execute.
+///
+/// The question is not "what can this CPU do". Under emulation the guest's
+/// instructions are recompiled, and a guest told the machine has AVX-512 emits
+/// AVX-512 that the lifter has to be able to translate - so the honest answer
+/// there is the *baseline* of the guest's architecture and nothing more.
+///
+/// The native backend is the case where the two coincide: the program's
+/// instructions are this CPU's, so it may ask this CPU. [`set_runs_host_
+/// instructions`] is how that is said, and it is the only thing that turns the
+/// wider answers on.
+///
+/// A name this does not know is left to the caller's `None`, which is
+/// `ENOENT` - what a Mac without the feature answers, because Darwin publishes
+/// an `hw.optional` key only when the feature is present.
+#[cfg(not(target_os = "macos"))]
+fn optional_feature(name: &str) -> Option<Value> {
+    let x86 = guest_arch() == GuestArch::X86_64;
+    let arm = !x86;
+    let present = match name {
+        // SSE and SSE2 are the x86-64 baseline; no such CPU lacks them.
+        "hw.optional.sse" | "hw.optional.sse2" | "hw.optional.floatingpoint" => x86,
+        // NEON is the arm64 baseline, likewise.
+        "hw.optional.AdvSIMD" | "hw.optional.neon" => arm,
+        "hw.optional.sse3" => x86 && host_has("sse3"),
+        "hw.optional.supplementalsse3" => x86 && host_has("ssse3"),
+        "hw.optional.sse4_1" => x86 && host_has("sse4.1"),
+        "hw.optional.sse4_2" => x86 && host_has("sse4.2"),
+        "hw.optional.avx1_0" => x86 && host_has("avx"),
+        "hw.optional.avx2_0" => x86 && host_has("avx2"),
+        "hw.optional.avx512f" => x86 && host_has("avx512f"),
+        "hw.optional.f16c" => x86 && host_has("f16c"),
+        "hw.optional.fma" => x86 && host_has("fma"),
+        // The arm64 feature names, none of which is a baseline. Answered only
+        // on a host whose own instructions the guest runs, which for an arm64
+        // guest means an arm64 host - and this crate cannot ask an aarch64 CPU
+        // for them portably, so they are absent rather than claimed.
+        _ if name.starts_with("hw.optional.arm.") => false,
+        _ => return None,
+    };
+    // Absent, not zero: Darwin removes the key rather than answering `0`, and a
+    // caller that checks for the key's *existence* - which is the documented way
+    // to read these - would read a zero as "present".
+    present.then_some(Value::U32(1))
+}
+
+/// Whether the guest's instructions are this CPU's own, and so whether
+/// `hw.optional` may report what this CPU has. See [`optional_feature`].
+#[cfg(not(target_os = "macos"))]
+static RUNS_HOST_INSTRUCTIONS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Say that the program executes this CPU's instructions directly, which is what
+/// the native backend does and the emulated one does not.
+#[cfg(not(target_os = "macos"))]
+pub fn set_runs_host_instructions(native: bool) {
+    RUNS_HOST_INSTRUCTIONS.store(native, Ordering::Release);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn host_has(feature: &str) -> bool {
+    if !RUNS_HOST_INSTRUCTIONS.load(Ordering::Acquire) {
+        return false;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        return match feature {
+            "sse3" => std::arch::is_x86_feature_detected!("sse3"),
+            "ssse3" => std::arch::is_x86_feature_detected!("ssse3"),
+            "sse4.1" => std::arch::is_x86_feature_detected!("sse4.1"),
+            "sse4.2" => std::arch::is_x86_feature_detected!("sse4.2"),
+            "avx" => std::arch::is_x86_feature_detected!("avx"),
+            "avx2" => std::arch::is_x86_feature_detected!("avx2"),
+            "avx512f" => std::arch::is_x86_feature_detected!("avx512f"),
+            "f16c" => std::arch::is_x86_feature_detected!("f16c"),
+            "fma" => std::arch::is_x86_feature_detected!("fma"),
+            _ => false,
+        };
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = feature;
+        false
+    }
+}
+
+/// `machdep.cpu.brand_string` - the CPU's marketing name.
+#[cfg(not(target_os = "macos"))]
+fn brand_string() -> String {
+    fn from_cpuinfo() -> Option<String> {
+        let text = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+        for line in text.lines() {
+            let (key, value) = line.split_once(':')?;
+            if matches!(key.trim(), "model name" | "Model name" | "Processor") {
+                return Some(value.trim().to_string());
+            }
+        }
+        None
+    }
+    env_or_else("ROSETTA3_CPU_BRAND", || {
+        from_cpuinfo().unwrap_or_else(|| "Unknown CPU".to_string())
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn env_or_else(key: &str, fallback: impl FnOnce() -> String) -> String {
+    std::env::var(key).unwrap_or_else(|_| fallback())
 }
 
 /// `int sysctlbyname(const char *, void *, size_t *, void *, size_t)`.

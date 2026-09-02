@@ -28,6 +28,7 @@
 //! above: a selector is a pointer to its interned name, and there are no tagged
 //! pointers, so `object_getClass` is always a load of the first word.
 
+pub mod allocator;
 pub mod api;
 pub mod arc;
 pub mod block;

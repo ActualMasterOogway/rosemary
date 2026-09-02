@@ -301,6 +301,60 @@ pub unsafe extern "C" fn kill(thread: u64, signal: u64) -> i32 {
     err::from_host(unsafe { libc::pthread_kill(thread_of(thread), host) })
 }
 
+/// `void *pthread_get_stackaddr_np(pthread_t)` - the **highest** address of the
+/// thread's stack, which is where a stack that grows down begins.
+///
+/// Darwin's answer is the top; glibc's `pthread_getattr_np` reports the *low*
+/// address and the size, so the two have to be added. A guest handed the low
+/// address instead gets a stack it believes lies above its real one, which is
+/// how a crash reporter comes to walk unmapped memory.
+///
+/// Zero when the host will not say, which is what Darwin answers for a thread
+/// it does not know.
+///
+/// # Safety
+///
+/// `thread` is a `pthread_t` this process issued.
+pub unsafe extern "C" fn get_stackaddr_np(thread: u64) -> u64 {
+    // SAFETY: the caller's obligation.
+    match unsafe { stack_of(thread) } {
+        Some((low, size)) => low.wrapping_add(size as u64),
+        None => 0,
+    }
+}
+
+/// `size_t pthread_get_stacksize_np(pthread_t)`
+///
+/// # Safety
+///
+/// As [`get_stackaddr_np`].
+pub unsafe extern "C" fn get_stacksize_np(thread: u64) -> u64 {
+    // SAFETY: the caller's obligation.
+    unsafe { stack_of(thread) }.map_or(0, |(_, size)| size as u64)
+}
+
+/// The `(lowest address, size)` of `thread`'s stack, out of glibc's attributes.
+///
+/// # Safety
+///
+/// As [`get_stackaddr_np`].
+unsafe fn stack_of(thread: u64) -> Option<(u64, usize)> {
+    // SAFETY: zeroed is not a valid `pthread_attr_t` to *read*, but it is what
+    // `pthread_getattr_np` is given to fill in, and it is only read on success.
+    let mut attr: libc::pthread_attr_t = unsafe { core::mem::zeroed() };
+    // SAFETY: a handle this process issued and a live attribute object.
+    if unsafe { libc::pthread_getattr_np(thread_of(thread), &mut attr) } != 0 {
+        return None;
+    }
+    let mut low: *mut core::ffi::c_void = core::ptr::null_mut();
+    let mut size: usize = 0;
+    // SAFETY: an attribute object just filled in, and two live locals.
+    let rc = unsafe { libc::pthread_attr_getstack(&attr, &mut low, &mut size) };
+    // SAFETY: the same object, which is this function's to destroy.
+    unsafe { libc::pthread_attr_destroy(&mut attr) };
+    (rc == 0).then_some((low as usize as u64, size))
+}
+
 /// `int pthread_setname_np(const char *)` - **one** argument on Darwin, where Linux
 /// takes the thread as well.
 ///
@@ -673,6 +727,8 @@ fn entries() -> &'static [(&'static str, u64)] {
             "pthread_join" => join,
             "pthread_detach" => detach,
             "pthread_kill" => kill,
+            "pthread_get_stackaddr_np" => get_stackaddr_np,
+            "pthread_get_stacksize_np" => get_stacksize_np,
             "pthread_setname_np" => setname_np,
             "pthread_main_np" => main_np,
             "pthread_threadid_np" => threadid_np,

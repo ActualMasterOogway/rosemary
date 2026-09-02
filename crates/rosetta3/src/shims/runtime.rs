@@ -211,6 +211,11 @@ pub fn provider() -> SyntheticDylib {
     );
     // Under high-level emulation the guest's Mach task *is* this process's. The
     // address, not the value.
+    //
+    // Only where the host has a Mach to share: off Darwin these two resolve to
+    // nothing here and `darwin::mach` publishes its own, out of the synthetic
+    // port namespace. This provider is ahead of that one in the chain, so the
+    // host's real task port still wins wherever there is one.
     if let Some(port) = crate::host::symbol("mach_task_self_") {
         lib.define_data("_mach_task_self_", port);
     }

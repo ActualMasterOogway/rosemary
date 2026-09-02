@@ -93,9 +93,10 @@ impl Drop for Data {
         }
         let _ = self.queue;
         if self.destructor == destructor_free() {
-            // SAFETY: `DISPATCH_DATA_DESTRUCTOR_FREE` promises the buffer came from
-            // `malloc`, which is what makes this the right way to free it.
-            unsafe { libc::free(self.borrowed as *mut c_void) };
+            // SAFETY: `DISPATCH_DATA_DESTRUCTOR_FREE` promises the buffer came
+            // from `malloc` - the *guest's*, which is not this crate's whenever
+            // the program ships an allocator of its own. See [`crate::heap`].
+            unsafe { crate::heap::free(self.borrowed as *mut c_void) };
             return;
         }
         // Any other destructor is a block, which the runtime that copied it owns.

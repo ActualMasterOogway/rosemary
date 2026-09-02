@@ -3012,6 +3012,54 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("pid_for_task", I32, U32, P),
     sig!("bootstrap_check_in", I32, U32, P, P),
     sig!("bootstrap_strerror", P, I32),
+    // ## The rest of the port namespace
+    //
+    // `darwin::mach` answers all of these off Darwin; on it they are the
+    // kernel's own. Either way the arguments are `mach_port_t`, `integer_t` and
+    // pointers to arrays of those, so none of them needs translating - see the
+    // note on the MIG routines above.
+    sig!("mach_task_self", U32),
+    sig!("mach_continuous_time", U64),
+    sig!("mach_error", V, P, I32),
+    // `mach_msg` with a separate reply buffer: the same seven arguments, then
+    // the buffer and its limit.
+    sig!(
+        "mach_msg_overwrite",
+        I32,
+        P,
+        I32,
+        U32,
+        U32,
+        U32,
+        U32,
+        U32,
+        P,
+        U32
+    ),
+    sig!("mach_port_destroy", I32, U32, U32),
+    sig!("mach_port_get_refs", I32, U32, U32, U32, P),
+    sig!("mach_port_move_member", I32, U32, U32, U32),
+    sig!("mach_port_set_attributes", I32, U32, U32, I32, P, U32),
+    sig!("task_get_special_port", I32, U32, I32, P),
+    sig!("task_set_special_port", I32, U32, I32, U32),
+    sig!("semaphore_signal_thread", I32, U32, U32),
+    sig!("bootstrap_register", I32, U32, P, U32),
+    sig!("bootstrap_look_up2", I32, U32, P, P, I32, U64),
+    sig!("bootstrap_parent", I32, U32, P),
+    // ## The signal family
+    //
+    // `signal`, `sigaction` and `sigaltstack` are shimmed above - see
+    // [`crate::signal`] - and the rest are `darwin::signal::entry`'s. The
+    // `sigset_t` these five take is Darwin's **one word**, not glibc's
+    // hundred-and-twenty-eight-byte structure, which is why they cannot be
+    // forwarded.
+    sig!("killpg", I32, I32, I32),
+    sig!("sigsuspend", I32, P),
+    sig!("sigemptyset", I32, P),
+    sig!("sigfillset", I32, P),
+    sig!("sigaddset", I32, P, I32),
+    sig!("sigdelset", I32, P, I32),
+    sig!("sigismember", I32, P, I32),
     sig!("sys_icache_invalidate", V, P, U64),
     // `int proc_get_wakemon_params(pid_t, int32_t *rate_hz, int32_t *flags)` -
     // libproc SPI with no header on this system, read out of the kernel's own

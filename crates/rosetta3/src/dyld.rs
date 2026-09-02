@@ -1618,6 +1618,41 @@ fn symbol_cstr(name: &str) -> u64 {
 mod entry {
     use std::ffi::{CStr, c_char, c_void};
 
+    // ## The image-list calls, for the native backend
+    //
+    // The emulated backend reaches these through a shim; the native one calls
+    // whatever the slot holds. On a Mac the slot holds dyld's own - which is
+    // wrong, because dyld never saw the images this runtime mapped, but at
+    // least answers - and off it the host exports nothing at all, so the slot
+    // is zero and a program that asks how many images it has calls address
+    // zero. Rust's own standard library asks, which is how the crash handler
+    // stub found this.
+
+    /// `uint32_t _dyld_image_count(void)`
+    pub extern "C" fn dyld_image_count() -> u32 {
+        super::image_count()
+    }
+
+    /// `const struct mach_header *_dyld_get_image_header(uint32_t)`
+    pub extern "C" fn dyld_get_image_header(index: u32) -> u64 {
+        super::indexed_image(index).map_or(0, |(header, _, _)| header)
+    }
+
+    /// `intptr_t _dyld_get_image_vmaddr_slide(uint32_t)`
+    pub extern "C" fn dyld_get_image_vmaddr_slide(index: u32) -> u64 {
+        super::indexed_image(index).map_or(0, |(_, slide, _)| slide)
+    }
+
+    /// `const char *_dyld_get_image_name(uint32_t)`
+    pub extern "C" fn dyld_get_image_name(index: u32) -> u64 {
+        super::indexed_image(index).map_or(0, |(_, _, path)| super::path_cstr(&path))
+    }
+
+    /// `const struct mach_header *_dyld_image_containing_address(const void *)`
+    pub extern "C" fn dyld_image_containing_address(va: u64) -> u64 {
+        super::guest_image_at(va).map_or(0, |(header, _)| header)
+    }
+
     /// `void *dlopen(const char *path, int mode)`
     ///
     /// The mode is ignored, as the emulated shim ignores it: nothing here is
@@ -1758,12 +1793,32 @@ pub fn provider() -> SyntheticDylib {
     ] {
         lib.define_fn(name, f);
     }
+    // The image list. This module's own implementations, not the host's: dyld
+    // never saw the images this runtime mapped, so its answers describe the
+    // wrong process - and off a Mac there is no dyld to ask at all, which
+    // leaves the slot zero and the guest calling it.
+    for (name, f) in [
+        ("_dyld_image_count", entry::dyld_image_count as *const ()),
+        (
+            "_dyld_get_image_header",
+            entry::dyld_get_image_header as *const (),
+        ),
+        (
+            "_dyld_get_image_vmaddr_slide",
+            entry::dyld_get_image_vmaddr_slide as *const (),
+        ),
+        (
+            "_dyld_get_image_name",
+            entry::dyld_get_image_name as *const (),
+        ),
+        (
+            "_dyld_image_containing_address",
+            entry::dyld_image_containing_address as *const (),
+        ),
+    ] {
+        lib.define_fn(&format!("_{name}"), f);
+    }
     for name in [
-        "_dyld_image_count",
-        "_dyld_get_image_header",
-        "_dyld_get_image_vmaddr_slide",
-        "_dyld_get_image_name",
-        "_dyld_image_containing_address",
         // Spelled with the underscore the C identifier already carries.
         "_dyld_register_func_for_add_image",
         "_dyld_register_func_for_remove_image",

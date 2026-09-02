@@ -472,7 +472,7 @@ const _: () = {
 
 impl Vm {
     /// Load `path`, identity-mapped, with a guest stack and `argv`.
-    pub fn load(path: &str, args: &[String]) -> Result<Self, VmError> {
+    pub fn load(path: &str, args: &[std::ffi::OsString]) -> Result<Self, VmError> {
         let program = Program::load_executable(path, &[]).map_err(|e| VmError::Load {
             path: path.to_string(),
             reason: e.to_string(),
@@ -484,7 +484,7 @@ impl Vm {
     pub fn new(
         program: Program<MmapSpace>,
         exe_path: &str,
-        args: &[String],
+        args: &[std::ffi::OsString],
     ) -> Result<Self, VmError> {
         Self::with_policy(program, exe_path, args, crate::ImportPolicy::default())
     }
@@ -493,7 +493,7 @@ impl Vm {
     pub fn with_policy(
         program: Program<MmapSpace>,
         exe_path: &str,
-        args: &[String],
+        args: &[std::ffi::OsString],
         policy: crate::ImportPolicy,
     ) -> Result<Self, VmError> {
         let mut program = program;

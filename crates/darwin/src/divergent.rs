@@ -72,6 +72,12 @@ pub const NAMES: &[(&str, &str)] = &[
     ("sigaddset", SIGNAL),
     ("sigdelset", SIGNAL),
     ("sigismember", SIGNAL),
+    ("sigpending", SIGNAL),
+    ("killpg", SIGNAL),
+    // The number names a different signal on each host, so the *name* it prints
+    // is wrong rather than missing - `strerror`'s trap, one table over.
+    ("strsignal", SIGNAL),
+    ("psignal", SIGNAL),
     // `RLIMIT_*` are not the same numbers, and `rlim_t` differs in width.
     ("getrlimit", "the RLIMIT_ resource numbers differ"),
     ("setrlimit", "the RLIMIT_ resource numbers differ"),
@@ -255,7 +261,9 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     fn a_divergence_is_named_rather_than_passed_through() {
         assert_eq!(reason("readdir"), Some(DIRENT));
-        assert_eq!(reason("mach_port_deallocate"), Some(MACH));
+        // A Mach call that reaches the kernel about *memory*, which is the half
+        // of the family `crate::mach` does not answer.
+        assert_eq!(reason("mach_vm_allocate"), Some(MACH));
         assert_eq!(
             reason("strlen"),
             None,
@@ -272,6 +280,16 @@ mod tests {
         for name in [
             "mach_absolute_time",
             "mach_timebase_info",
+            // The synthetic port namespace; see [`crate::mach`]. The `mach_`,
+            // `task_`, `host_`, `semaphore_` and `bootstrap_` prefixes are all
+            // denied wholesale so that exactly this list can be carved back out.
+            "mach_task_self",
+            "mach_port_allocate",
+            "mach_msg",
+            "task_set_exception_ports",
+            "host_get_exception_ports",
+            "semaphore_wait",
+            "bootstrap_check_in",
             "dispatch_once_f",
             // The libdispatch this crate implements, which the `dispatch_` prefix
             // would otherwise deny along with the rest of the family.
@@ -284,6 +302,10 @@ mod tests {
         // And the families around them are still shut: a member of one that this
         // crate has *not* implemented is refused rather than passed through.
         assert!(contains("dispatch_source_create"));
-        assert!(contains("mach_task_self"));
+        // The half of Mach that is still refused: anything asking the kernel
+        // about a task's memory, or about another process at all.
+        assert!(contains("mach_vm_read"));
+        assert!(contains("task_for_pid"));
+        assert!(contains("task_threads"));
     }
 }

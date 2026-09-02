@@ -311,7 +311,13 @@ pub fn install() {
     if INSTALLED.swap(true, Ordering::SeqCst) {
         return;
     }
-    for signal in [libc::SIGSEGV, libc::SIGBUS] {
+    // `SIGABRT` beside the two faults, because the allocator is the third way a
+    // program of this size dies and the only one that used to leave no report at
+    // all: glibc's `free(): invalid size` goes to stderr and then straight to
+    // `abort`, with no pc, no image and no registers. The handler restores the
+    // previous disposition and returns, so the abort still happens - this only
+    // adds the sentence in front of it.
+    for signal in [libc::SIGSEGV, libc::SIGBUS, libc::SIGABRT] {
         // SAFETY: `action` and `old` are live locals of the right type;
         // `sa_sigaction` holds a handler with the `SA_SIGINFO` signature, which
         // is what `SA_SIGINFO` in the flags declares it to be. Installing a
@@ -360,10 +366,12 @@ const fn saved() -> Saved {
 
 static SEGV: Saved = saved();
 static BUS: Saved = saved();
+static ABRT: Saved = saved();
 
 fn saved_for(signal: i32) -> &'static Saved {
     match signal {
         libc::SIGBUS => &BUS,
+        libc::SIGABRT => &ABRT,
         _ => &SEGV,
     }
 }
@@ -383,6 +391,7 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
     out.str(match signal {
         libc::SIGBUS => "SIGBUS",
         libc::SIGSEGV => "SIGSEGV",
+        libc::SIGABRT => "SIGABRT",
         _ => "signal",
     });
 
@@ -391,6 +400,7 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
     let addr = unsafe { info.as_ref() }.map_or(0, |i| unsafe { darwin::signal::fault_address(i) });
     out.str(" at ");
     out.hex(addr);
+    say_access(&mut out, info);
     if let Some(text) = ascii_word(addr) {
         out.str(" (ascii \"");
         out.bytes(&text);
@@ -410,7 +420,13 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
             say_caller(&mut out, context);
         }
     }
+    // An abort has no interesting pc of its own - it is always inside the C
+    // library - so the frame walk is the whole report.
+    else if signal == libc::SIGABRT {
+        say_caller(&mut out, context);
+    }
 
+    say_registers(&mut out, context);
     say_thread(&mut out);
     out.str("\n");
     out.flush();
@@ -452,14 +468,24 @@ fn say_caller(out: &mut Buffer, context: *mut libc::c_void) {
         fp = next;
         Some(ret)
     }));
-    let found = candidates.take(FRAMES).find(|&ret| in_translation(ret));
+    // A translation under the emulated backend, and an image the loader mapped
+    // under the native one - where there are no translations at all, so looking
+    // only for those answers "nothing" for every fault the program has.
+    let found = candidates
+        .take(FRAMES)
+        .find(|&ret| in_translation(ret) || in_image(ret));
     let Some(ret) = found else {
-        out.str("\n  reached from: no host frame returns into a translation");
+        out.str("\n  reached from: no host frame returns into guest code");
         return;
     };
     out.str("\n  reached from host pc ");
     out.hex(ret);
-    say_region(out, ret);
+    if in_translation(ret) {
+        say_region(out, ret);
+    } else {
+        out.str(" in");
+        let _ = say_image(out, ret);
+    }
 }
 
 /// Name the unbound import a jump to zero went through.
@@ -492,7 +518,7 @@ fn say_unbound_call(out: &mut Buffer, context: *mut libc::c_void) {
     // thing that says where to look.
     out.str("\n  called from ");
     out.hex(ret);
-    say_image(out, ret);
+    let _ = say_image(out, ret);
 
     // Only inside a guest image, which is both what makes the read below safe -
     // the loader mapped it - and what makes the call a plausible reading.
@@ -639,9 +665,18 @@ fn say_region(out: &mut Buffer, pc: u64) {
         return;
     };
     let Some(entry) = covering(&placed, pc) else {
-        out.str(
-            "\n  guest region: none - the pc is in no translation, so this fault is in host code",
-        );
+        // The native backend has no translations at all, so "no translation" is
+        // not the same statement there that it is under emulation: the image is
+        // host code the loader mapped, and the guest's own frames are exactly
+        // the ones worth naming.
+        out.str("\n  in");
+        if !say_image(out, pc) {
+            out.str(
+                " no guest image - the pc is in no translation either, so this fault is in this \
+                 runtime or in a host library",
+            );
+            say_host_mapping(out, pc);
+        }
         return;
     };
 
@@ -649,7 +684,7 @@ fn say_region(out: &mut Buffer, pc: u64) {
     out.hex(entry.guest.0);
     out.str("..");
     out.hex(entry.guest.1);
-    say_image(out, entry.guest.0);
+    let _ = say_image(out, entry.guest.0);
     out.str(", entered at ");
     out.hex(entry.lifted_for);
 
@@ -662,7 +697,7 @@ fn say_region(out: &mut Buffer, pc: u64) {
         if let Some(va) = lookup(&entry.map, offset) {
             out.str("\n  guest instruction ");
             out.hex(va);
-            say_image(out, va);
+            let _ = say_image(out, va);
             return;
         }
     }
@@ -695,22 +730,23 @@ fn lookup(map: &[GuestCodeRange], offset: u32) -> Option<u64> {
     range.contains(offset).then_some(range.guest_va)
 }
 
-/// Name the image a guest address is in, as `name+offset`.
-fn say_image(out: &mut Buffer, addr: u64) {
+/// Name the image a guest address is in, as `name+offset`. Whether it named one.
+fn say_image(out: &mut Buffer, addr: u64) -> bool {
     let Ok(images) = IMAGES.try_lock() else {
-        return;
+        return false;
     };
     let Some(image) = images
         .iter()
         .find(|i| (i.range.0..i.range.1).contains(&addr))
     else {
-        return;
+        return false;
     };
     out.str(" (");
     out.bytes(&image.name[..image.used]);
     out.str("+");
     out.hex(addr - image.range.0);
     out.str(")");
+    true
 }
 
 /// What this runtime knows about the faulting thread.
@@ -774,16 +810,224 @@ fn ascii_word(addr: u64) -> Option<[u8; 8]> {
         .then_some(bytes)
 }
 
+
+/// Whether the address was unmapped or merely not writable.
+///
+/// The difference is the whole diagnosis. `SEGV_MAPERR` on a plausible-looking
+/// address is a corrupted pointer; `SEGV_ACCERR` is a *write* to memory that is
+/// mapped and read-only, which is a different bug entirely - a guest writing
+/// through a pointer into its own `__TEXT`, or a segment this loader mapped
+/// with the wrong protection.
+#[cfg(target_os = "linux")]
+fn say_access(out: &mut Buffer, info: *mut libc::siginfo_t) {
+    // SAFETY: the kernel passes a live `siginfo_t` for the duration of the
+    // handler.
+    // `SEGV_MAPERR` and `SEGV_ACCERR`, which the `libc` crate does not declare.
+    // Both are `si_code` values for `SIGSEGV` alone, and they are 1 and 2 on
+    // every Linux architecture.
+    const MAPERR: i32 = 1;
+    const ACCERR: i32 = 2;
+
+    let Some(code) = unsafe { info.as_ref() }.map(|i| i.si_code) else {
+        return;
+    };
+    out.str(match code {
+        MAPERR => " (nothing is mapped there)",
+        ACCERR => " (mapped, but the access is not permitted - a write to read-only memory)",
+        // What a non-canonical address gives on x86-64: the CPU raises a general
+        // protection fault rather than a page fault, and the kernel has no
+        // faulting address to report - so `si_addr` reads zero however wild the
+        // pointer was. Worth naming, because "SIGSEGV at 0x0" otherwise sends a
+        // reader looking for a null dereference that never happened.
+        libc::SI_KERNEL => " (a non-canonical address; the reported address is not the pointer)",
+        _ => return,
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+fn say_access(_out: &mut Buffer, _info: *mut libc::siginfo_t) {}
+
+/// The integer registers the fault stopped on.
+///
+/// Printed because the two questions a fault in guest code always raises -
+/// *which* pointer was null, and which of the values around it is the corrupt
+/// one - are answered by the registers and by nothing else in this report. A
+/// disassembly of the faulting instruction names a register; without this there
+/// is nothing to look its value up in, and gdb cannot be used to find out (it
+/// is far too slow to reach the fault in a program of this size).
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn say_registers(out: &mut Buffer, context: *mut libc::c_void) {
+    if context.is_null() {
+        return;
+    }
+    // The order `libc::REG_*` indexes them in, with the names a disassembly uses.
+    const NAMED: &[(&str, usize)] = &[
+        ("rax", libc::REG_RAX as usize),
+        ("rbx", libc::REG_RBX as usize),
+        ("rcx", libc::REG_RCX as usize),
+        ("rdx", libc::REG_RDX as usize),
+        ("rsi", libc::REG_RSI as usize),
+        ("rdi", libc::REG_RDI as usize),
+        ("rbp", libc::REG_RBP as usize),
+        ("rsp", libc::REG_RSP as usize),
+        ("r8", libc::REG_R8 as usize),
+        ("r9", libc::REG_R9 as usize),
+        ("r10", libc::REG_R10 as usize),
+        ("r11", libc::REG_R11 as usize),
+        ("r12", libc::REG_R12 as usize),
+        ("r13", libc::REG_R13 as usize),
+        ("r14", libc::REG_R14 as usize),
+        ("r15", libc::REG_R15 as usize),
+    ];
+    // SAFETY: the kernel passes a live `ucontext_t` for the duration of an
+    // `SA_SIGINFO` handler, and `gregs` is the register array inside it.
+    let gregs = unsafe { &(*(context as *const libc::ucontext_t)).uc_mcontext.gregs };
+    for (i, (name, index)) in NAMED.iter().enumerate() {
+        out.str(match i % 4 {
+            0 => "\n  ",
+            _ => "  ",
+        });
+        out.str(name);
+        out.str("=");
+        out.hex(gregs[*index] as u64);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+fn say_registers(_out: &mut Buffer, _context: *mut libc::c_void) {}
+
+/// Name the host mapping a `pc` outside any translation fell in.
+///
+/// Without this the report says "this fault is in host code" and stops, which
+/// leaves an address and nothing to do with it. The native backend has no
+/// translations at all, so that is *every* fault it reports.
+///
+/// `/proc/self/maps` rather than `dladdr`: `dladdr` takes the loader's lock,
+/// and a handler that blocks on a lock the faulting thread already holds hangs
+/// instead of printing. Reading a file with `open`/`read`/`close` is
+/// async-signal-safe, which is the same rule [`Buffer`] exists for.
+///
+/// Silent on a host without `/proc`. macOS has `dyld_image_count` and a
+/// different answer; nothing here needs it yet.
+#[cfg(target_os = "linux")]
+fn say_host_mapping(out: &mut Buffer, pc: u64) {
+    // SAFETY: a constant path and constant flags.
+    let fd = unsafe { libc::open(c"/proc/self/maps".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return;
+    }
+    let mut buf = [0u8; 8192];
+    let mut held = 0usize;
+    'reading: loop {
+        // SAFETY: writing into the unused tail of a live local array.
+        let read = unsafe {
+            libc::read(
+                fd,
+                buf[held..].as_mut_ptr().cast(),
+                buf.len() - held,
+            )
+        };
+        if read <= 0 {
+            break;
+        }
+        let filled = held + read as usize;
+        let mut start = 0;
+        while let Some(end) = buf[start..filled].iter().position(|b| *b == b'\n') {
+            if say_if_containing(out, &buf[start..start + end], pc) {
+                break 'reading;
+            }
+            start += end + 1;
+        }
+        held = filled - start;
+        // A line longer than the whole buffer is not one this can parse, and
+        // stalling on it would leave the report without a thread line.
+        if held == buf.len() {
+            held = 0;
+        } else {
+            buf.copy_within(start..filled, 0);
+        }
+    }
+    // SAFETY: the descriptor opened above, which nothing else holds.
+    unsafe { libc::close(fd) };
+}
+
+#[cfg(not(target_os = "linux"))]
+fn say_host_mapping(_out: &mut Buffer, _pc: u64) {}
+
+/// One `/proc/self/maps` line: `lo-hi perms offset dev inode  path`.
+///
+/// Answers whether it was the one, so the caller can stop reading.
+#[cfg(target_os = "linux")]
+fn say_if_containing(out: &mut Buffer, line: &[u8], pc: u64) -> bool {
+    let (low, rest) = hex_prefix(line);
+    let Some(rest) = rest.strip_prefix(b"-") else {
+        return false;
+    };
+    let (high, rest) = hex_prefix(rest);
+    if !(low..high).contains(&pc) {
+        return false;
+    }
+    // One field - the permissions - then the file offset, which is what turns
+    // this into something `objdump --start-address` can be pointed at. Exactly
+    // one: `hex_prefix` above stopped on the space before `perms`, so skipping
+    // twice reads the device major number instead and reports every mapping as
+    // starting at offset zero.
+    let (file_offset, _) = hex_prefix(skip_field(rest));
+
+    out.str("\n  in ");
+    match line.iter().position(|b| *b == b'/') {
+        Some(at) => out.bytes(&line[at..]),
+        // An anonymous mapping - a JIT page, a stack, a heap - which is worth
+        // saying rather than leaving blank.
+        None => out.str("an anonymous mapping"),
+    }
+    out.str(" + ");
+    out.hex(pc - low);
+    out.str(" (file offset ");
+    out.hex(file_offset + (pc - low));
+    out.str(")");
+    true
+}
+
+/// The leading hexadecimal number and whatever follows it.
+#[cfg(target_os = "linux")]
+fn hex_prefix(bytes: &[u8]) -> (u64, &[u8]) {
+    let mut value = 0u64;
+    let mut n = 0;
+    for byte in bytes {
+        let digit = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => break,
+        };
+        value = (value << 4) | u64::from(digit);
+        n += 1;
+    }
+    (value, &bytes[n..])
+}
+
+/// Past one space-separated field and the spaces around it.
+#[cfg(target_os = "linux")]
+fn skip_field(bytes: &[u8]) -> &[u8] {
+    let start = bytes.iter().position(|b| *b != b' ').unwrap_or(bytes.len());
+    let rest = &bytes[start..];
+    let end = rest.iter().position(|b| *b == b' ').unwrap_or(rest.len());
+    let rest = &rest[end..];
+    let start = rest.iter().position(|b| *b != b' ').unwrap_or(rest.len());
+    &rest[start..]
+}
+
 /// A fixed message buffer, written out in one `write(2)`.
 struct Buffer {
-    bytes: [u8; 1024],
+    bytes: [u8; 2048],
     used: usize,
 }
 
 impl Buffer {
     fn new() -> Self {
         Buffer {
-            bytes: [0; 1024],
+            bytes: [0; 2048],
             used: 0,
         }
     }

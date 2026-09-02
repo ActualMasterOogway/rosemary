@@ -90,16 +90,90 @@ const TCP_OPTIONS: &[(i32, i32)] = &[
 
 /// Darwin's `SO_NOSIGPIPE`, which this host has no option for.
 ///
-/// Not translated and not silently accepted. Linux asks for the same thing per
-/// call, with `MSG_NOSIGNAL`, and a socket-wide switch cannot be built out of
-/// that without also covering `write`, which is not a socket call. So the guest
-/// is told `ENOPROTOOPT`, which is what it would be told by a Mac kernel that
-/// did not have the option either - a documented failure rather than a promise
-/// this crate cannot keep.
+/// Linux asks for the same thing per *call*, with `MSG_NOSIGNAL`. So the switch
+/// is kept here and [`crate::net::socket`] reads it: a `send` on a socket the
+/// guest set the option on is sent with `MSG_NOSIGNAL`, and the guest gets
+/// `EPIPE` instead of a signal, which is what it asked for.
+///
+/// The gap, and it is a real one: `write` is not a socket call and takes no
+/// flags, so writing to a closed socket still raises `SIGPIPE` however this
+/// option was set. Nothing can be done about that short of changing the
+/// process-wide disposition, which is not one socket's to change.
+///
+/// Refusing instead - which this module used to do, `ENOPROTOOPT` being what a
+/// kernel without the option would say - turned out not to be survivable:
+/// Crashpad `CHECK`s the return value and aborts the process, so the honest
+/// failure was a crash before the program had started.
 const NOSIGPIPE: i32 = 0x1022;
 
 fn nosigpipe(level: i32, name: i32) -> bool {
     level == SOL_SOCKET && name == NOSIGPIPE
+}
+
+/// The descriptors `SO_NOSIGPIPE` is set on.
+///
+/// Entries are cleared when a descriptor number is *issued* rather than when
+/// one is closed, because `close` is not this crate's call to see - and a stale
+/// entry would otherwise suppress `SIGPIPE` on whatever socket inherited the
+/// number.
+static SUPPRESSED: std::sync::Mutex<Option<std::collections::HashSet<i32>>> =
+    std::sync::Mutex::new(None);
+
+fn with_suppressed<R>(f: impl FnOnce(&mut std::collections::HashSet<i32>) -> R) -> R {
+    let mut guard = SUPPRESSED.lock().unwrap_or_else(|e| e.into_inner());
+    f(guard.get_or_insert_with(Default::default))
+}
+
+/// Whether `fd` was given `SO_NOSIGPIPE`, and so wants `MSG_NOSIGNAL`.
+pub fn suppresses_sigpipe(fd: i32) -> bool {
+    with_suppressed(|held| held.contains(&fd))
+}
+
+/// Forget any option set on `fd`, because it names a new socket now.
+pub fn forget(fd: i32) {
+    if fd >= 0 {
+        with_suppressed(|held| held.remove(&fd));
+    }
+}
+
+/// # Safety
+///
+/// `value` is `len` readable bytes, or is null with `len` zero.
+unsafe fn set_nosigpipe(fd: i32, value: *const c_void, len: u32) -> i32 {
+    if value.is_null() || (len as usize) < core::mem::size_of::<i32>() {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    // SAFETY: at least an `int` of the caller's, just checked.
+    let wanted = unsafe { value.cast::<i32>().read_unaligned() } != 0;
+    with_suppressed(|held| match wanted {
+        true => held.insert(fd),
+        false => held.remove(&fd),
+    });
+    0
+}
+
+/// # Safety
+///
+/// `value` is `*len` writable bytes and `len` is a writable `socklen_t`.
+unsafe fn get_nosigpipe(fd: i32, value: *mut c_void, len: *mut u32) -> i32 {
+    if value.is_null() || len.is_null() {
+        crate::errno::set(libc::EFAULT);
+        return -1;
+    }
+    // SAFETY: the caller's length slot.
+    if (unsafe { len.read() } as usize) < core::mem::size_of::<i32>() {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    // SAFETY: at least an `int` of the caller's, just checked.
+    unsafe {
+        value
+            .cast::<i32>()
+            .write_unaligned(suppresses_sigpipe(fd) as i32);
+        len.write(core::mem::size_of::<i32>() as u32);
+    }
+    0
 }
 
 /// `(level, name)` in the host's numbering, or `None` for a pair this module has
@@ -155,8 +229,8 @@ unsafe extern "C" fn setsockopt(
     len: u32,
 ) -> i32 {
     if nosigpipe(level, name) {
-        crate::errno::set(libc::ENOPROTOOPT);
-        return -1;
+        // SAFETY: the caller's buffer, with the length they gave for it.
+        return unsafe { set_nosigpipe(fd, value, len) };
     }
     let Some((level, name)) = option_to_host(level, name) else {
         crate::errno::set(libc::ENOPROTOOPT);
@@ -198,8 +272,8 @@ unsafe extern "C" fn getsockopt(
     len: *mut u32,
 ) -> i32 {
     if nosigpipe(level, name) {
-        crate::errno::set(libc::ENOPROTOOPT);
-        return -1;
+        // SAFETY: the caller's buffer and length slot.
+        return unsafe { get_nosigpipe(fd, value, len) };
     }
     let Some((host_level, host_name)) = option_to_host(level, name) else {
         crate::errno::set(libc::ENOPROTOOPT);
@@ -339,6 +413,36 @@ mod tests {
         assert_eq!(i64::from_le_bytes(back[0..8].try_into().unwrap()), 2);
         assert_eq!(i32::from_le_bytes(back[8..12].try_into().unwrap()), 500_000);
 
+        // SAFETY: a descriptor this test opened and no longer uses.
+        unsafe { libc::close(fd) };
+    }
+
+    /// `SO_NOSIGPIPE` is honoured per send rather than refused, and a
+    /// descriptor number reused by a new socket does not inherit it.
+    #[test]
+    fn nosigpipe_is_recorded_read_back_and_forgotten_when_the_number_is_reused() {
+        // SAFETY: a plain socket call with constant arguments.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        assert!(fd >= 0);
+
+        let on = 1i32;
+        // SAFETY: one readable `int`, and the length says four.
+        let rc = unsafe {
+            setsockopt(fd, SOL_SOCKET, NOSIGPIPE, (&raw const on).cast(), 4)
+        };
+        assert_eq!(rc, 0, "refusing this aborts Crashpad before it starts");
+        assert!(suppresses_sigpipe(fd));
+
+        let mut back = 0i32;
+        let mut len = 4u32;
+        // SAFETY: one writable `int` and a live length.
+        let rc = unsafe {
+            getsockopt(fd, SOL_SOCKET, NOSIGPIPE, (&raw mut back).cast(), &mut len)
+        };
+        assert_eq!((rc, back, len), (0, 1, 4));
+
+        forget(fd);
+        assert!(!suppresses_sigpipe(fd));
         // SAFETY: a descriptor this test opened and no longer uses.
         unsafe { libc::close(fd) };
     }

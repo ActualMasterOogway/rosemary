@@ -1,7 +1,8 @@
 //! The guest's stack, and the process arguments laid out on it.
 
-use std::ffi::CString;
+use std::ffi::{CString, OsString};
 use std::ops::Range;
+use std::os::unix::ffi::OsStrExt;
 
 use machish::memory::{AddressSpace, MmapSpace, Placement, Prot, Regions};
 
@@ -47,7 +48,7 @@ pub struct GuestStack {
 
 impl GuestStack {
     /// Reserve `size` bytes and lay out `args` and the host's environment.
-    pub fn new(size: usize, exe_path: &str, args: &[String]) -> Result<Self, VmError> {
+    pub fn new(size: usize, exe_path: &str, args: &[OsString]) -> Result<Self, VmError> {
         let mut stack = Self::bare(size)?;
         stack.place_args(exe_path, args)?;
         Ok(stack)
@@ -110,19 +111,26 @@ impl GuestStack {
     }
 
     /// Write the strings and the three pointer arrays into the top of the stack.
-    fn place_args(&mut self, exe_path: &str, args: &[String]) -> Result<(), VmError> {
+    fn place_args(&mut self, exe_path: &str, args: &[OsString]) -> Result<(), VmError> {
         let space = self
             .space
             .as_mut()
             .expect("argument material is only laid out on a stack this runtime reserved");
+        // Bytes, not text. A process argument or environment value is an
+        // arbitrary byte string on both platforms - Crashpad passes its crash
+        // handler annotations read straight out of `sysctl` - and converting
+        // one through `String` either loses bytes or refuses to run.
         let env: Vec<CString> = std::env::vars_os()
             .filter_map(|(k, v)| {
-                CString::new(format!("{}={}", k.to_string_lossy(), v.to_string_lossy())).ok()
+                let mut entry = k.as_bytes().to_vec();
+                entry.push(b'=');
+                entry.extend_from_slice(v.as_bytes());
+                CString::new(entry).ok()
             })
             .collect();
         let argv: Vec<CString> = args
             .iter()
-            .filter_map(|a| CString::new(a.as_str()).ok())
+            .filter_map(|a| CString::new(a.as_bytes()).ok())
             .collect();
         let apple: Vec<CString> =
             std::iter::once(CString::new(exe_path).unwrap_or_default()).collect();
@@ -254,7 +262,7 @@ mod tests {
     /// The frame an `LC_UNIXTHREAD` entry point walks, walked the same way it walks it.
     #[test]
     fn the_kernel_frame_is_what_start_walks() {
-        let args = ["prog".to_string(), "one".to_string(), "two".to_string()];
+        let args = ["prog".into(), "one".into(), "two".into()] as [OsString; 3];
         let stack = GuestStack::new(DEFAULT_STACK, "/tmp/prog", &args).expect("reserved");
 
         let sp = stack.kernel_sp().expect("arguments were laid out");
@@ -294,7 +302,7 @@ mod tests {
     #[test]
     fn the_entry_rsp_is_aligned_for_either_parity() {
         for n in 1..=4 {
-            let args: Vec<String> = (0..n).map(|i| format!("arg{i}")).collect();
+            let args: Vec<OsString> = (0..n).map(|i| OsString::from(format!("arg{i}"))).collect();
             let stack = GuestStack::new(DEFAULT_STACK, "/tmp/prog", &args).expect("reserved");
             let sp = stack.kernel_sp().expect("arguments were laid out");
             assert_eq!(sp % 16, 0, "argc-at-rsp is aligned with {n} arguments");

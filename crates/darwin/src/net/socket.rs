@@ -73,7 +73,9 @@ unsafe extern "C" fn socket(domain: i32, kind: i32, protocol: i32) -> i32 {
         return -1;
     };
     // SAFETY: three integers; the call touches no caller memory.
-    unsafe { libc::socket(domain, kind, protocol) }
+    let fd = unsafe { libc::socket(domain, kind, protocol) };
+    super::sockopt::forget(fd);
+    fd
 }
 
 /// `int socketpair(int domain, int type, int protocol, int sv[2])`
@@ -87,7 +89,15 @@ unsafe extern "C" fn socketpair(domain: i32, kind: i32, protocol: i32, sv: *mut 
         return -1;
     };
     // SAFETY: the caller's two-element array.
-    unsafe { libc::socketpair(domain, kind, protocol, sv) }
+    let rc = unsafe { libc::socketpair(domain, kind, protocol, sv) };
+    if rc == 0 && !sv.is_null() {
+        // SAFETY: two `int`s the call just filled in.
+        unsafe {
+            super::sockopt::forget(sv.read());
+            super::sockopt::forget(sv.add(1).read());
+        }
+    }
+    rc
 }
 
 /// The shape `bind` and `connect` share: an address in, nothing out.
@@ -165,7 +175,9 @@ unsafe fn returning_address(
 /// As [`returning_address`].
 unsafe extern "C" fn accept(fd: i32, address: *mut c_void, len: *mut u32) -> i32 {
     // SAFETY: the caller's guarantee, passed along.
-    unsafe { returning_address(fd, address, len, libc::accept) }
+    let accepted = unsafe { returning_address(fd, address, len, libc::accept) };
+    super::sockopt::forget(accepted);
+    accepted
 }
 
 /// `int getsockname(int, struct sockaddr *, socklen_t *)`
@@ -195,7 +207,17 @@ unsafe extern "C" fn getpeername(fd: i32, address: *mut c_void, len: *mut u32) -
 /// `buf` is `len` readable bytes.
 unsafe extern "C" fn send(fd: i32, buf: *const c_void, len: usize, flags: i32) -> isize {
     // SAFETY: the caller's buffer, with the flags translated.
-    unsafe { libc::send(fd, buf, len, flags_to_host(flags)) }
+    unsafe { libc::send(fd, buf, len, sending_flags(fd, flags)) }
+}
+
+/// `flags` for a send on `fd`, with `MSG_NOSIGNAL` added when the guest asked
+/// for `SO_NOSIGPIPE` on it. See [`super::sockopt::suppresses_sigpipe`].
+fn sending_flags(fd: i32, darwin: i32) -> i32 {
+    let mut host = flags_to_host(darwin);
+    if super::sockopt::suppresses_sigpipe(fd) {
+        host |= libc::MSG_NOSIGNAL;
+    }
+    host
 }
 
 /// `ssize_t recv(int, void *, size_t, int)`
@@ -222,7 +244,7 @@ unsafe extern "C" fn sendto(
     address: *const c_void,
     addrlen: u32,
 ) -> isize {
-    let flags = flags_to_host(flags);
+    let flags = sending_flags(fd, flags);
     if address.is_null() {
         // SAFETY: a connected socket, which is what a null address means.
         return unsafe { libc::sendto(fd, buf, len, flags, core::ptr::null(), 0) };
@@ -364,7 +386,7 @@ unsafe extern "C" fn sendmsg(fd: i32, message: *const c_void, flags: i32) -> isi
     };
     // SAFETY: a `msghdr` this function built, pointing at the caller's own
     // iovecs, which `struct iovec` has the same layout for on both platforms.
-    unsafe { libc::sendmsg(fd, &host, flags_to_host(flags)) }
+    unsafe { libc::sendmsg(fd, &host, sending_flags(fd, flags)) }
 }
 
 /// `ssize_t recvmsg(int, struct msghdr *, int)`

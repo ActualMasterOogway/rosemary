@@ -87,7 +87,7 @@ unsafe impl Sync for Native {}
 
 impl Native {
     /// Load and link `path`, with `args` laid out for its entry point.
-    pub fn load(path: &str, args: &[String]) -> Result<Self, VmError> {
+    pub fn load(path: &str, args: &[std::ffi::OsString]) -> Result<Self, VmError> {
         // Before anything can hand the program a symbol. A trampoline is five
         // bytes of x86-64 that turn a call back into an import for the lifter to
         // intercept, and the native backend intercepts nothing: a `dlsym` result
@@ -163,6 +163,11 @@ impl Native {
             true => darwin::sysctl::GuestArch::Arm64,
             false => darwin::sysctl::GuestArch::X86_64,
         });
+        // And that its instructions are this CPU's, which is what lets
+        // `hw.optional.*` report what this CPU has rather than the guest
+        // architecture's baseline. See `darwin::sysctl::optional_feature`.
+        #[cfg(not(target_os = "macos"))]
+        darwin::sysctl::set_runs_host_instructions(true);
 
         // The image's C++ runtime is the vendored one of this host's
         // architecture, on macOS as well as off it. Off Darwin there is no
@@ -207,6 +212,10 @@ impl Native {
             path: path.to_string(),
             reason: e.to_string(),
         })?;
+        // After the interpositions, because the answer wanted is the allocator
+        // the guest's code *ends up* calling. This backend only: see
+        // [`crate::interpose::adopt_guest_allocator`].
+        crate::interpose::adopt_guest_allocator(&report);
 
         // Say what did not bind, now that every repair above has had its say and
         // `missing` means missing. The emulated backend has always done this;

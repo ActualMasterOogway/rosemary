@@ -1,6 +1,7 @@
 //! `rosetta3 run [--slow] [--native|--emulated] <path> [args...]`.
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::process::ExitCode;
 
 use rosetta3::{
@@ -17,8 +18,13 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 /// Load and execute, with `argv[0]` the path as the guest will see it.
-fn run(path: &str, args: Vec<String>, policy: ImportPolicy, forced: Option<Engine>) -> ExitCode {
-    let mut argv = vec![path.to_string()];
+fn run(
+    path: &str,
+    args: Vec<OsString>,
+    policy: ImportPolicy,
+    forced: Option<Engine>,
+) -> ExitCode {
+    let mut argv = vec![OsString::from(path)];
     argv.extend(args);
     rosetta3::stats::start();
 
@@ -80,7 +86,7 @@ fn choose(path: &str, forced: Option<Engine>) -> Result<Engine, String> {
 /// The emulated backend, published for the rest of the process.
 fn emulated(
     path: &str,
-    argv: &[String],
+    argv: &[OsString],
     policy: ImportPolicy,
 ) -> Result<&'static Vm, Box<dyn std::error::Error>> {
     let program = Program::load_executable(path, &[])?;
@@ -98,7 +104,12 @@ fn emulated(
 }
 
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
+    // `args_os`, not `args`: a process argument is a byte string, and
+    // `std::env::args` *panics* on one that is not UTF-8. Some apps spawn
+    // with annotations copied out of `sysctl`, so the argument
+    // that aborted this runtime before it had loaded anything was the guest's
+    // own and perfectly legal.
+    let mut args = std::env::args_os().skip(1);
     let Some(first) = args.next() else {
         eprintln!("usage: rosetta3 run [--native|--emulated] <mach-o path> [args...]");
         eprintln!("       rosetta3 <mach-o path> [--audit] [--ir]");
@@ -111,7 +122,7 @@ fn main() -> ExitCode {
         let mut engine = None;
         let mut path = None;
         for arg in args.by_ref() {
-            match arg.as_str() {
+            match arg.to_str().unwrap_or_default() {
                 "--slow" if path.is_none() => policy = ImportPolicy::AlwaysSlow,
                 "--native" if path.is_none() => engine = Some(Engine::Native),
                 "--emulated" if path.is_none() => engine = Some(Engine::Emulated),
@@ -123,6 +134,13 @@ fn main() -> ExitCode {
         }
         let Some(path) = path else {
             eprintln!("usage: rosetta3 run [--slow] [--native|--emulated] <mach-o path> [args...]");
+            return ExitCode::FAILURE;
+        };
+        // The guest's *arguments* are bytes; its own path is not. Refused by
+        // name rather than converted, because every later use of it - the
+        // bundle layout, `_NSGetExecutablePath`, the fault reports - is text.
+        let Some(path) = path.to_str().map(str::to_owned) else {
+            eprintln!("rosetta3: the program's path is not valid UTF-8");
             return ExitCode::FAILURE;
         };
         // Before anything can ask: both say which program the guest is, and a
@@ -146,8 +164,11 @@ fn main() -> ExitCode {
         }
         return run(&path, args.collect(), policy, engine);
     }
-    let path = first;
-    let rest: Vec<String> = args.collect();
+    let Some(path) = first.to_str().map(str::to_owned) else {
+        eprintln!("rosetta3: the program's path is not valid UTF-8");
+        return ExitCode::FAILURE;
+    };
+    let rest: Vec<String> = args.map(|a| a.to_string_lossy().into_owned()).collect();
     let show_ir = rest.iter().any(|a| a == "--ir");
     let run_audit = rest.iter().any(|a| a == "--audit");
 

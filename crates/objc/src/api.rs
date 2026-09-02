@@ -392,7 +392,9 @@ unsafe fn property<'a>(p: *const c_void) -> Option<&'static crate::property::Pro
 ///
 /// The whole family of `class_copy...List` works this way, and a Rust
 /// allocation handed across it would be freed by an allocator that never made
-/// it.
+/// it. Neither would this process's own `malloc`: see [`crate::allocator`],
+/// which is why the block comes from the *guest's* allocator and not from
+/// `libc`.
 unsafe fn copied_list<T>(values: Vec<T>, out_count: *mut u32) -> *mut T {
     // SAFETY: a nullable out-parameter, as every `copy...List` has.
     if !out_count.is_null() {
@@ -402,7 +404,7 @@ unsafe fn copied_list<T>(values: Vec<T>, out_count: *mut u32) -> *mut T {
         return std::ptr::null_mut();
     }
     // SAFETY: a positive size, and the result is checked before it is written.
-    let block = unsafe { libc::malloc(size_of::<T>() * values.len()) } as *mut T;
+    let block = unsafe { crate::allocator::guest_malloc(size_of::<T>() * values.len()) } as *mut T;
     if block.is_null() {
         return block;
     }

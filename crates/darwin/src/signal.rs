@@ -443,6 +443,645 @@ pub unsafe fn interrupted_pc(context: *mut libc::c_void) -> Option<u64> {
     }
 }
 
+// The entry points a guest binds to. Everything above is the translation the
+// runtime shares with them; everything below is the Darwin ABI itself.
+//
+// Published only where the host's own would be wrong. On macOS these are
+// libSystem's and `symbol` answers nothing, which is what leaves the guest
+// bound to the real ones.
+#[cfg(not(target_os = "macos"))]
+pub mod entry {
+    use std::ffi::{CStr, c_char, c_int, c_void};
+
+    use super::*;
+
+    /// Darwin's `struct sigaction`: a handler, a **32-bit** `sigset_t`, and
+    /// flags. Sixteen bytes, against glibc's 152.
+    const SIGACTION_SIZE: usize = 16;
+
+    /// Darwin's `stack_t`, whose fields are in a different *order* from Linux's:
+    /// `{ void *ss_sp; size_t ss_size; int ss_flags; }` against glibc's
+    /// `{ void *ss_sp; int ss_flags; size_t ss_size; }`. Passing one through
+    /// reads the size out of the flags.
+    const STACK_SIZE: usize = 24;
+
+    /// `SS_ONSTACK` agrees; `SS_DISABLE` is 4 on Darwin and 2 here, and 4 here
+    /// is not a defined bit - so the collision is one-way and still a collision.
+    const SS_ONSTACK: i32 = 0x0001;
+    const SS_DISABLE: i32 = 0x0004;
+
+    /// `SIG_BLOCK`/`SIG_UNBLOCK`/`SIG_SETMASK` - and the worst kind of
+    /// divergence, the kind that collides: Darwin's `SIG_BLOCK` is 1, which is
+    /// this host's `SIG_UNBLOCK`. A `sigprocmask` passed through does the
+    /// opposite of what the caller asked and succeeds.
+    fn how_to_host(darwin: c_int) -> Option<c_int> {
+        Some(match darwin {
+            1 => libc::SIG_BLOCK,
+            2 => libc::SIG_UNBLOCK,
+            3 => libc::SIG_SETMASK,
+            _ => return None,
+        })
+    }
+
+    /// A Darwin `sigset_t` - a bit per signal, numbered Darwin's way - as this
+    /// host's.
+    fn mask_to_host(darwin: u32) -> libc::sigset_t {
+        // SAFETY: emptied before any bit is added, which is what makes a zeroed
+        // `sigset_t` valid to hand to `sigaddset`.
+        let mut host: libc::sigset_t = unsafe { core::mem::zeroed() };
+        // SAFETY: a live local.
+        unsafe { libc::sigemptyset(&mut host) };
+        for signum in 1..=31 {
+            if darwin & (1u32 << (signum - 1)) == 0 {
+                continue;
+            }
+            if let Some(host_signum) = signal_to_host(signum) {
+                // SAFETY: a live local and a signal this host has.
+                unsafe { libc::sigaddset(&mut host, host_signum) };
+            }
+        }
+        host
+    }
+
+    fn mask_from_host(host: &libc::sigset_t) -> u32 {
+        let mut darwin = 0u32;
+        for signum in 1..=31 {
+            let Some(host_signum) = signal_to_host(signum) else {
+                continue;
+            };
+            // SAFETY: a `sigset_t` the caller owns and a signal this host has.
+            if unsafe { libc::sigismember(host, host_signum) } == 1 {
+                darwin |= 1u32 << (signum - 1);
+            }
+        }
+        darwin
+    }
+
+    /// A signal this host has not got: `EINVAL` rather than a neighbour.
+    fn no_such_signal() -> c_int {
+        crate::errno::set(libc::EINVAL);
+        -1
+    }
+
+    /// `void (*signal(int, void (*)(int)))(int)`
+    ///
+    /// # Safety
+    ///
+    /// `handler` is a sentinel or a function this process can call as a signal
+    /// handler.
+    pub unsafe extern "C" fn signal_(signum: c_int, handler: u64) -> u64 {
+        // SAFETY: the caller's obligation, passed straight on.
+        unsafe { super::signal(signum, handler) }
+    }
+
+    /// Read Darwin's sixteen-byte `struct sigaction`.
+    ///
+    /// # Safety
+    ///
+    /// `at` is [`SIGACTION_SIZE`] readable bytes.
+    unsafe fn read_disposition(at: *const u8) -> Disposition {
+        let mut bytes = [0u8; SIGACTION_SIZE];
+        // SAFETY: the caller's structure, whose size is Darwin's and not this
+        // host's - which is the whole reason it is copied rather than cast.
+        unsafe { core::ptr::copy_nonoverlapping(at, bytes.as_mut_ptr(), SIGACTION_SIZE) };
+        Disposition {
+            handler: u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+            mask: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            flags: u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `at` is [`SIGACTION_SIZE`] writable bytes.
+    unsafe fn write_disposition(at: *mut u8, held: Disposition) {
+        let mut bytes = [0u8; SIGACTION_SIZE];
+        bytes[0..8].copy_from_slice(&held.handler.to_le_bytes());
+        bytes[8..12].copy_from_slice(&held.mask.to_le_bytes());
+        bytes[12..16].copy_from_slice(&held.flags.to_le_bytes());
+        // SAFETY: the caller's structure, of Darwin's size.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), at, SIGACTION_SIZE) };
+    }
+
+    /// `int sigaction(int, const struct sigaction *, struct sigaction *)`
+    ///
+    /// The one thing this cannot bridge, and says so once on stderr: an
+    /// `SA_SIGINFO` handler is entered with **this host's** `siginfo_t` and
+    /// `ucontext_t`, not Darwin's. The fields a handler usually reads - the
+    /// signal number and `si_addr` - are in different places in the two, so a
+    /// guest handler that inspects them reads the wrong words.
+    ///
+    /// Installed anyway rather than refused, because the alternative is not a
+    /// diagnostic: an unbound `sigaction` is a call to address zero from inside
+    /// whatever library was setting up its crash handler.
+    ///
+    /// # Safety
+    ///
+    /// `act` and `old` are [`SIGACTION_SIZE`] bytes, or null.
+    pub unsafe extern "C" fn sigaction_(
+        signum: c_int,
+        act: *const c_void,
+        old: *mut c_void,
+    ) -> c_int {
+        if signal_to_host(signum).is_none() {
+            return no_such_signal();
+        }
+        // SAFETY: the caller's structure, if it passed one.
+        let wanted = match act.is_null() {
+            true => None,
+            false => Some(unsafe { read_disposition(act.cast()) }),
+        };
+        if wanted.is_some_and(|w| w.flags & 0x0040 != 0) {
+            announce_siginfo();
+        }
+
+        let mut previous = Disposition::default();
+        // SAFETY: the handler is the guest's own, and under the native backend
+        // the guest is host code - so it is a function this process can call.
+        // The shape of the host's own `struct sigaction` is [`sigaction`]'s
+        // business and not this entry point's.
+        let rc = unsafe { super::sigaction(signum, wanted, Some(&mut previous)) };
+        if rc == 0 && !old.is_null() {
+            // SAFETY: the caller's structure.
+            unsafe { write_disposition(old.cast(), previous) };
+        }
+        rc
+    }
+
+    fn announce_siginfo() {
+        static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "rosetta3: an SA_SIGINFO handler was installed - it will be entered with this \
+                 host's siginfo_t and ucontext_t rather than Darwin's, so a handler that reads \
+                 si_addr or the interrupted registers reads the wrong words"
+            );
+        }
+    }
+
+    /// `int sigprocmask(int how, const sigset_t *set, sigset_t *oset)`
+    ///
+    /// # Safety
+    ///
+    /// `set` and `oset` are Darwin `sigset_t` - four bytes each - or null.
+    pub unsafe extern "C" fn sigprocmask_(
+        how: c_int,
+        set: *const u32,
+        oset: *mut u32,
+    ) -> c_int {
+        let host_how = match set.is_null() {
+            // With no set, `how` is not read at all and any value is legal.
+            true => libc::SIG_SETMASK,
+            false => match how_to_host(how) {
+                Some(how) => how,
+                None => {
+                    crate::errno::set(libc::EINVAL);
+                    return -1;
+                }
+            },
+        };
+        // SAFETY: the caller's four bytes, if it passed any.
+        let wanted = match set.is_null() {
+            true => None,
+            false => Some(mask_to_host(unsafe { set.read_unaligned() })),
+        };
+        // SAFETY: zeroed is the empty set, and it is written before it is read.
+        let mut previous: libc::sigset_t = unsafe { core::mem::zeroed() };
+        // SAFETY: two live `sigset_t` of this host's own shape.
+        let rc = unsafe {
+            libc::sigprocmask(
+                host_how,
+                wanted.as_ref().map_or(core::ptr::null(), |set| set as *const _),
+                &mut previous,
+            )
+        };
+        if rc == 0 && !oset.is_null() {
+            // SAFETY: the caller's four bytes.
+            unsafe { oset.write_unaligned(mask_from_host(&previous)) };
+        }
+        rc
+    }
+
+    /// # Safety
+    ///
+    /// `at` is [`STACK_SIZE`] readable bytes.
+    unsafe fn read_stack(at: *const u8) -> libc::stack_t {
+        let mut bytes = [0u8; STACK_SIZE];
+        // SAFETY: the caller's structure, of Darwin's size.
+        unsafe { core::ptr::copy_nonoverlapping(at, bytes.as_mut_ptr(), STACK_SIZE) };
+        let flags = i32::from_le_bytes(bytes[16..20].try_into().unwrap());
+        libc::stack_t {
+            ss_sp: usize::from_le_bytes(bytes[0..8].try_into().unwrap()) as *mut c_void,
+            ss_size: usize::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            ss_flags: match flags & SS_DISABLE != 0 {
+                true => libc::SS_DISABLE,
+                false => flags & SS_ONSTACK,
+            },
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `at` is [`STACK_SIZE`] writable bytes.
+    unsafe fn write_stack(at: *mut u8, stack: &libc::stack_t) {
+        let mut flags = stack.ss_flags & SS_ONSTACK;
+        if stack.ss_flags & libc::SS_DISABLE != 0 {
+            flags |= SS_DISABLE;
+        }
+        let mut bytes = [0u8; STACK_SIZE];
+        bytes[0..8].copy_from_slice(&(stack.ss_sp as usize).to_le_bytes());
+        bytes[8..16].copy_from_slice(&stack.ss_size.to_le_bytes());
+        bytes[16..20].copy_from_slice(&flags.to_le_bytes());
+        // SAFETY: the caller's structure, of Darwin's size.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), at, STACK_SIZE) };
+    }
+
+    /// `int sigaltstack(const stack_t *ss, stack_t *oss)`
+    ///
+    /// # Safety
+    ///
+    /// `ss` and `oss` are [`STACK_SIZE`] bytes, or null.
+    pub unsafe extern "C" fn sigaltstack_(ss: *const c_void, oss: *mut c_void) -> c_int {
+        // SAFETY: the caller's structure, if it passed one.
+        let wanted = match ss.is_null() {
+            true => None,
+            false => Some(unsafe { read_stack(ss.cast()) }),
+        };
+        // SAFETY: zeroed is a disabled stack, and it is written before it is read.
+        let mut previous: libc::stack_t = unsafe { core::mem::zeroed() };
+        // SAFETY: two live `stack_t` of this host's own shape.
+        let rc = unsafe {
+            libc::sigaltstack(
+                wanted.as_ref().map_or(core::ptr::null(), |s| s as *const _),
+                &mut previous,
+            )
+        };
+        if rc == 0 && !oss.is_null() {
+            // SAFETY: the caller's structure.
+            unsafe { write_stack(oss.cast(), &previous) };
+        }
+        rc
+    }
+
+    /// `int raise(int)`
+    pub extern "C" fn raise_(signum: c_int) -> c_int {
+        match signal_to_host(signum) {
+            // SAFETY: a signal number this host has.
+            Some(host) => unsafe { libc::raise(host) },
+            None => no_such_signal(),
+        }
+    }
+
+    /// `int kill(pid_t, int)`
+    ///
+    /// Signal zero is the existence probe - "is this process alive" - and is
+    /// not a signal number, so it goes through untranslated. A crash handler
+    /// watching its client is the caller that depends on this.
+    pub extern "C" fn kill_(pid: c_int, signum: c_int) -> c_int {
+        if signum == 0 {
+            // SAFETY: a plain system call.
+            return unsafe { libc::kill(pid, 0) };
+        }
+        match signal_to_host(signum) {
+            // SAFETY: a signal number this host has.
+            Some(host) => unsafe { libc::kill(pid, host) },
+            None => no_such_signal(),
+        }
+    }
+
+    /// `int killpg(pid_t, int)`
+    pub extern "C" fn killpg_(pgrp: c_int, signum: c_int) -> c_int {
+        match signum == 0 {
+            true => kill_(-pgrp, 0),
+            false => match signal_to_host(signum) {
+                // SAFETY: a signal number this host has.
+                Some(host) => unsafe { libc::killpg(pgrp, host) },
+                None => no_such_signal(),
+            },
+        }
+    }
+
+    // The `sigset_t` operations. A Darwin `sigset_t` is a `uint32_t` whose bits
+    // are numbered by *Darwin's* signal numbers, and the guest's numbers are
+    // Darwin's - so these translate nothing and are pure bit arithmetic. They
+    // are here because glibc's take a 128-byte structure and would write 124
+    // bytes past the guest's word.
+
+    /// # Safety
+    ///
+    /// `set` is a writable Darwin `sigset_t`, or null.
+    pub unsafe extern "C" fn sigemptyset_(set: *mut u32) -> c_int {
+        match set.is_null() {
+            true => -1,
+            // SAFETY: the caller's four bytes.
+            false => unsafe {
+                set.write_unaligned(0);
+                0
+            },
+        }
+    }
+
+    /// # Safety
+    ///
+    /// As [`sigemptyset_`].
+    pub unsafe extern "C" fn sigfillset_(set: *mut u32) -> c_int {
+        match set.is_null() {
+            true => -1,
+            // SAFETY: the caller's four bytes.
+            false => unsafe {
+                set.write_unaligned(!0);
+                0
+            },
+        }
+    }
+
+    /// The bit `signum` occupies, or `None` for a number that is not a signal.
+    fn bit(signum: c_int) -> Option<u32> {
+        (1..=32).contains(&signum).then(|| 1u32 << (signum - 1))
+    }
+
+    /// # Safety
+    ///
+    /// As [`sigemptyset_`].
+    pub unsafe extern "C" fn sigaddset_(set: *mut u32, signum: c_int) -> c_int {
+        let Some(bit) = bit(signum) else {
+            return no_such_signal();
+        };
+        match set.is_null() {
+            true => -1,
+            // SAFETY: the caller's four bytes.
+            false => unsafe {
+                set.write_unaligned(set.read_unaligned() | bit);
+                0
+            },
+        }
+    }
+
+    /// # Safety
+    ///
+    /// As [`sigemptyset_`].
+    pub unsafe extern "C" fn sigdelset_(set: *mut u32, signum: c_int) -> c_int {
+        let Some(bit) = bit(signum) else {
+            return no_such_signal();
+        };
+        match set.is_null() {
+            true => -1,
+            // SAFETY: the caller's four bytes.
+            false => unsafe {
+                set.write_unaligned(set.read_unaligned() & !bit);
+                0
+            },
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `set` is a readable Darwin `sigset_t`, or null.
+    pub unsafe extern "C" fn sigismember_(set: *const u32, signum: c_int) -> c_int {
+        let Some(bit) = bit(signum) else {
+            return no_such_signal();
+        };
+        match set.is_null() {
+            true => -1,
+            // SAFETY: the caller's four bytes.
+            false => unsafe { (set.read_unaligned() & bit != 0) as c_int },
+        }
+    }
+
+    /// `int sigpending(sigset_t *)`
+    ///
+    /// # Safety
+    ///
+    /// As [`sigemptyset_`].
+    pub unsafe extern "C" fn sigpending_(set: *mut u32) -> c_int {
+        if set.is_null() {
+            crate::errno::set(libc::EFAULT);
+            return -1;
+        }
+        // SAFETY: zeroed is the empty set, written before it is read.
+        let mut host: libc::sigset_t = unsafe { core::mem::zeroed() };
+        // SAFETY: a live `sigset_t` of this host's shape.
+        let rc = unsafe { libc::sigpending(&mut host) };
+        if rc == 0 {
+            // SAFETY: the caller's four bytes.
+            unsafe { set.write_unaligned(mask_from_host(&host)) };
+        }
+        rc
+    }
+
+    /// `int sigsuspend(const sigset_t *)`
+    ///
+    /// # Safety
+    ///
+    /// `mask` is a readable Darwin `sigset_t`.
+    pub unsafe extern "C" fn sigsuspend_(mask: *const u32) -> c_int {
+        if mask.is_null() {
+            crate::errno::set(libc::EFAULT);
+            return -1;
+        }
+        // SAFETY: the caller's four bytes.
+        let host = mask_to_host(unsafe { mask.read_unaligned() });
+        // SAFETY: a live `sigset_t` of this host's shape. Returns only when a
+        // handler has run, always with `EINTR`.
+        unsafe { libc::sigsuspend(&host) }
+    }
+
+    /// `char *strsignal(int)`, whose argument is a *Darwin* signal number.
+    ///
+    /// The same trap `strerror` has, and the same answer: the number names a
+    /// different signal on each host, so it is translated before the host's
+    /// table is asked. `SIGEMT` and `SIGINFO` have no host name at all and are
+    /// spelled here rather than reported as some neighbour's.
+    pub extern "C" fn strsignal_(signum: c_int) -> *const c_char {
+        match signum {
+            signum::SIGEMT => return c"EMT trap".as_ptr(),
+            signum::SIGINFO => return c"Information request".as_ptr(),
+            _ => {}
+        }
+        let Some(host) = signal_to_host(signum) else {
+            return c"Unknown signal".as_ptr();
+        };
+        // SAFETY: a signal number this host has; `strsignal` returns storage the
+        // caller does not own and does not free.
+        unsafe { libc::strsignal(host) }
+    }
+
+    /// `void psignal(int, const char *)`
+    ///
+    /// # Safety
+    ///
+    /// `prefix` is a NUL-terminated string, or null.
+    pub unsafe extern "C" fn psignal_(signum: c_int, prefix: *const c_char) {
+        // SAFETY: this module's own storage or the host's, both NUL-terminated.
+        let described = unsafe { CStr::from_ptr(strsignal_(signum)) }.to_string_lossy();
+        match prefix.is_null() {
+            true => eprintln!("{described}"),
+            // SAFETY: the caller's NUL-terminated string.
+            false => {
+                let prefix = unsafe { CStr::from_ptr(prefix) }.to_string_lossy();
+                eprintln!("{prefix}: {described}");
+            }
+        }
+    }
+
+    pub const NAMES: &[&str] = &[
+        "signal",
+        "sigaction",
+        "sigprocmask",
+        "sigaltstack",
+        "sigsuspend",
+        "sigpending",
+        "raise",
+        "kill",
+        "killpg",
+        "sigemptyset",
+        "sigfillset",
+        "sigaddset",
+        "sigdelset",
+        "sigismember",
+        "strsignal",
+        "psignal",
+    ];
+
+    pub fn symbol(name: &str) -> Option<u64> {
+        let f: *const () = match name {
+            "signal" => signal_ as *const (),
+            "sigaction" => sigaction_ as *const (),
+            "sigprocmask" => sigprocmask_ as *const (),
+            "sigaltstack" => sigaltstack_ as *const (),
+            "sigsuspend" => sigsuspend_ as *const (),
+            "sigpending" => sigpending_ as *const (),
+            "raise" => raise_ as *const (),
+            "kill" => kill_ as *const (),
+            "killpg" => killpg_ as *const (),
+            "sigemptyset" => sigemptyset_ as *const (),
+            "sigfillset" => sigfillset_ as *const (),
+            "sigaddset" => sigaddset_ as *const (),
+            "sigdelset" => sigdelset_ as *const (),
+            "sigismember" => sigismember_ as *const (),
+            "strsignal" => strsignal_ as *const (),
+            "psignal" => psignal_ as *const (),
+            _ => return None,
+        };
+        Some(f as usize as u64)
+    }
+
+    pub fn provide(lib: &mut machish::resolve::SyntheticDylib) {
+        for name in NAMES {
+            crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap() as *const ());
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The collision worth the whole module: Darwin's `SIG_BLOCK` is this
+        /// host's `SIG_UNBLOCK`, so a passed-through `sigprocmask` unblocks what
+        /// the caller asked to block and reports success.
+        #[test]
+        fn the_sigprocmask_how_values_are_translated_rather_than_forwarded() {
+            assert_eq!(how_to_host(1), Some(libc::SIG_BLOCK));
+            assert_ne!(1, libc::SIG_BLOCK, "the collision being avoided");
+            assert_eq!(1, libc::SIG_UNBLOCK, "and what forwarding would have meant");
+            assert_eq!(how_to_host(3), Some(libc::SIG_SETMASK));
+            assert_eq!(how_to_host(0), None);
+        }
+
+        /// `SIGUSR1` is 30 on Darwin and 10 here, so a mask with Darwin's bit 30
+        /// set must come back as Darwin's bit 30 and not as bit 10.
+        #[test]
+        fn a_signal_mask_round_trips_through_the_hosts_shape() {
+            let darwin = (1u32 << (signum::SIGUSR1 - 1)) | (1u32 << (signum::SIGCHLD - 1));
+            let host = mask_to_host(darwin);
+            // SAFETY: a live `sigset_t` this test owns.
+            assert_eq!(unsafe { libc::sigismember(&host, libc::SIGUSR1) }, 1);
+            assert_eq!(mask_from_host(&host), darwin);
+        }
+
+        /// Darwin puts `ss_size` where Linux puts `ss_flags`, so a structure
+        /// passed through reads the size out of the flags word.
+        #[test]
+        fn an_alternate_stack_is_reordered_rather_than_passed_through() {
+            let mut darwin = [0u8; STACK_SIZE];
+            darwin[0..8].copy_from_slice(&0x1234_5000u64.to_le_bytes());
+            darwin[8..16].copy_from_slice(&(64u64 * 1024).to_le_bytes());
+            darwin[16..20].copy_from_slice(&SS_DISABLE.to_le_bytes());
+
+            // SAFETY: `darwin` is `STACK_SIZE` bytes.
+            let host = unsafe { read_stack(darwin.as_ptr()) };
+            assert_eq!(host.ss_sp as usize, 0x1234_5000);
+            assert_eq!(host.ss_size, 64 * 1024);
+            assert_eq!(host.ss_flags, libc::SS_DISABLE);
+            assert_ne!(SS_DISABLE, libc::SS_DISABLE, "the collision being avoided");
+
+            let mut back = [0u8; STACK_SIZE];
+            // SAFETY: `back` is `STACK_SIZE` bytes.
+            unsafe { write_stack(back.as_mut_ptr(), &host) };
+            assert_eq!(back, darwin);
+        }
+
+        /// A Darwin `sigset_t` is one word, and the guest reserved exactly four
+        /// bytes for it. glibc's own would write 128.
+        #[test]
+        fn the_set_operations_touch_four_bytes_and_number_the_bits_darwins_way() {
+            let mut set = [0u32, 0xdead_beef];
+            // SAFETY: a live word, and the second element is the guard.
+            unsafe {
+                assert_eq!(sigfillset_(set.as_mut_ptr()), 0);
+                assert_eq!(sigismember_(set.as_ptr(), signum::SIGUSR1), 1);
+                assert_eq!(sigdelset_(set.as_mut_ptr(), signum::SIGUSR1), 0);
+                assert_eq!(sigismember_(set.as_ptr(), signum::SIGUSR1), 0);
+                assert_eq!(sigismember_(set.as_ptr(), signum::SIGCHLD), 1);
+                assert_eq!(sigemptyset_(set.as_mut_ptr()), 0);
+                assert_eq!(sigaddset_(set.as_mut_ptr(), signum::SIGUSR1), 0);
+            }
+            assert_eq!(set[0], 1 << (signum::SIGUSR1 - 1));
+            assert_eq!(set[1], 0xdead_beef, "nothing past the caller's word");
+        }
+
+        /// `kill(pid, 0)` is the existence probe a crash handler watches its
+        /// client with, and zero is not a signal number to translate.
+        #[test]
+        fn signal_zero_probes_existence_rather_than_being_translated() {
+            // SAFETY: `getpid` takes no argument.
+            let self_pid = unsafe { libc::getpid() };
+            assert_eq!(kill_(self_pid, 0), 0);
+            assert_eq!(kill_(self_pid, 99), -1, "not a signal");
+        }
+
+        /// Darwin's structure is sixteen bytes against glibc's hundred and
+        /// fifty-two, and the guest reserved sixteen.
+        #[test]
+        fn a_disposition_occupies_darwins_sixteen_bytes_and_no_more() {
+            let mut bytes = [0xAAu8; SIGACTION_SIZE + 8];
+            let held = Disposition {
+                handler: 0x1234_5678_9abc,
+                mask: 0x0f0f_0f0f,
+                flags: 0x0040,
+            };
+            // SAFETY: `bytes` is longer than `SIGACTION_SIZE`.
+            unsafe {
+                write_disposition(bytes.as_mut_ptr(), held);
+                assert_eq!(read_disposition(bytes.as_ptr()), held);
+            }
+            assert!(
+                bytes[SIGACTION_SIZE..].iter().all(|b| *b == 0xAA),
+                "nothing past the guest's structure"
+            );
+        }
+
+        #[test]
+        fn a_signal_this_host_has_not_got_is_refused_rather_than_aimed_at_a_neighbour() {
+            assert_eq!(raise_(signum::SIGEMT), -1);
+            assert_eq!(raise_(signum::SIGINFO), -1);
+            // SAFETY: this module's own NUL-terminated storage.
+            let named = unsafe { CStr::from_ptr(strsignal_(signum::SIGINFO)) };
+            assert_eq!(named.to_str().unwrap(), "Information request");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
