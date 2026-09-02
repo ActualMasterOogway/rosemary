@@ -32,7 +32,15 @@ const MAX_COMPONENTS: usize = 64;
 /// `None` for a path that already exists, because the caller is expected to have
 /// tried it: this is the answer to "the exact name failed", not a replacement
 /// for it.
+///
+/// `errno` is put back before returning. The caller has already failed a call
+/// and is about to report that failure, so the walk's own syscalls must not be
+/// what the guest reads: Rust's `read_dir` clears `errno` before each `readdir`
+/// to tell the end of a directory from an error, so a walk that finds nothing
+/// turns the caller's `ENOENT` into a failure with `errno == 0`. Boost reads
+/// that as "not a not-found error" and throws `status: Success`.
 pub fn insensitive(path: &CStr) -> Option<CString> {
+    let _errno = crate::errno::Held::now();
     let text = path.to_str().ok()?;
     if text.is_empty() {
         return None;
@@ -165,5 +173,18 @@ mod tests {
         let absent =
             CString::new(scratch.0.join("contents").join("nothing").to_str().unwrap()).unwrap();
         assert_eq!(insensitive(&absent), None);
+    }
+
+    /// The walk reads directories, and `read_dir` clears `errno` on the way. The
+    /// caller is reporting the failure that sent it here, so that must not show.
+    #[test]
+    fn the_walk_leaves_errno_where_it_found_it() {
+        let scratch = scratch("errno");
+        let absent =
+            CString::new(scratch.0.join("Contents").join("nothing").to_str().unwrap()).unwrap();
+        crate::errno::set(libc::ENOENT);
+        assert_eq!(insensitive(&absent), None);
+        assert_eq!(crate::errno::get(), libc::ENOENT);
+        crate::errno::set(0);
     }
 }

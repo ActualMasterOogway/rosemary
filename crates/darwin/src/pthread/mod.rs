@@ -595,6 +595,123 @@ pub unsafe extern "C" fn join(thread: u64, value: u64) -> i32 {
     err::from_host(unsafe { libc::pthread_join(thread_of(thread), value as usize as *mut _) })
 }
 
+/// The stack a guest thread's frames go on when its attributes ask for nothing.
+///
+/// This host's own default, which is deliberately not the 512 KiB
+/// `rosetta3::thread::THREAD_STACK` gives an *emulated* guest thread. There the
+/// guest's frames have a stack to themselves; here they share one with every shim
+/// this crate runs on their behalf, and those are deeper than the Darwin libc the
+/// guest was compiled against. A guest reading `pthread_get_stacksize_np` back
+/// therefore sees a larger number than it would on a Mac.
+#[cfg(not(target_os = "macos"))]
+const DEFAULT_STACK: usize = 8 * 1024 * 1024;
+
+/// The floor under a guest's own request.
+///
+/// A natively executed guest runs this runtime's shims on the same stack it runs its
+/// own frames on, and those are deeper than the Darwin libc the guest sized itself
+/// against. Only ever raises a request, so the thread has at least the room the guest
+/// asked for.
+#[cfg(not(target_os = "macos"))]
+const MIN_STACK: usize = 1024 * 1024;
+
+#[cfg(not(target_os = "macos"))]
+fn stack_size(attributes: &Attributes) -> usize {
+    attributes
+        .stack_size
+        .unwrap_or(DEFAULT_STACK)
+        .max(MIN_STACK)
+}
+
+/// What [`create`] hands the host thread: the guest's start routine and its argument.
+#[cfg(not(target_os = "macos"))]
+struct Start {
+    entry: u64,
+    arg: u64,
+}
+
+/// The host thread's start routine, which enters Darwin code and stays there.
+///
+/// The guard is held for the whole of the thread's life rather than around a call,
+/// because there is no call to wrap: the thread *is* guest code from here to its
+/// return, and every host function it invokes is reached from inside it.
+///
+/// `context` is the [`Start`] [`create`] leaked, handed back unchanged - which is the
+/// only value the host can pass, and why this is not an `unsafe fn`: `pthread_create`
+/// takes a safe pointer.
+#[cfg(not(target_os = "macos"))]
+extern "C" fn run(context: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
+    // Reclaimed and copied out before the guest runs, because a start routine may
+    // call `pthread_exit` - which ends the thread from under these frames without
+    // unwinding them, leaking anything still boxed. `rosetta3::thread::entry` does
+    // the same for the same reason.
+    // SAFETY: the caller's guarantee - the same allocation, reclaimed once.
+    let start = *unsafe { Box::from_raw(context as *mut Start) };
+    let _darwin = crate::tls::DarwinThread::enter();
+    // SAFETY: `create` refused a null, and a start routine is `void *(void *)` -
+    // one pointer in, one out, which is what this signature is in the guest's
+    // integer registers.
+    let f: unsafe extern "C" fn(u64) -> u64 =
+        unsafe { core::mem::transmute(start.entry as usize as *const ()) };
+    // SAFETY: as above; `arg` is the guest's own and only guest code reads it.
+    unsafe { f(start.arg) as usize as *mut core::ffi::c_void }
+}
+
+/// `int pthread_create(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *)`
+///
+/// Not passed through, for two reasons that are independent of each other:
+///
+/// * A Darwin `pthread_attr_t` is [`attr`]'s own record and this host's is a different
+///   structure of a different size, so handing the guest's set to the host's
+///   `pthread_create` asks it to read a stack size out of bytes that mean something
+///   else. This is the [`crate::spawn`] problem again.
+/// * A Darwin thread reads `pthread_self`, `errno` and its stack canary as **direct
+///   loads off `%gs`** - see [`crate::tls`]. A thread the host started has no Darwin
+///   array there, so the guest's start routine runs against whatever `%gs` happens to
+///   address. Only [`crate::tls::DarwinThread`] can give it one, and only from inside
+///   the new thread.
+///
+/// # Safety
+///
+/// `out` is a writable `pthread_t`, `attr` is null or a guest `pthread_attr_t`, and
+/// `start` is guest code of this host's architecture.
+#[cfg(not(target_os = "macos"))]
+pub unsafe extern "C" fn create(out: u64, attr: u64, start: u64, arg: u64) -> i32 {
+    if out == 0 || start == 0 {
+        return err::EINVAL;
+    }
+    // SAFETY: the caller's guarantee.
+    let Some(attributes) = (unsafe { Attributes::of_guest(attr) }) else {
+        return err::EINVAL;
+    };
+    let mut host = match attributes.to_host_attr(stack_size(&attributes)) {
+        Ok(host) => host,
+        Err(rc) => return rc,
+    };
+    let context = Box::into_raw(Box::new(Start { entry: start, arg }));
+    let mut thread = null_thread();
+    // SAFETY: `host` is an initialised attribute set that outlives the call, which is
+    // all `pthread_create` needs - it copies what it wants out of one. `run` is this
+    // module's own, and owns `context` from here.
+    let rc = unsafe {
+        libc::pthread_create(
+            &mut thread,
+            host.as_mut_ptr(),
+            run,
+            context as *mut core::ffi::c_void,
+        )
+    };
+    if rc != 0 {
+        // SAFETY: the thread did not start, so nothing else holds the allocation.
+        drop(unsafe { Box::from_raw(context) });
+        return err::from_host(rc);
+    }
+    // SAFETY: the caller states `out` is a writable `pthread_t`, which is eight
+    // opaque bytes on both platforms - see [`thread_of`], which reads it back.
+    unsafe { (out as usize as *mut u64).write(thread as u64) };
+    0
+}
+
 /// `int pthread_detach(pthread_t)`
 ///
 /// # Safety
@@ -724,6 +841,7 @@ fn entries() -> &'static [(&'static str, u64)] {
             "pthread_setspecific" => setspecific,
 
             // Lifecycle and the `_np` family.
+            "pthread_create" => create,
             "pthread_join" => join,
             "pthread_detach" => detach,
             "pthread_kill" => kill,
@@ -773,9 +891,12 @@ pub const PASSED_THROUGH: &[&str] = &[
 /// here so the blanket denial of the `pthread_` family in [`crate::divergent`] does
 /// not take their import slots with it: the slot still has to resolve to *something*
 /// for the runtime to intercept the call.
+/// `pthread_create` is deliberately absent, and was here. Under emulation the runtime
+/// still intercepts it by name - interception reads the link report, not the slot - but
+/// the *slot* must hold this crate's [`create`] rather than the host's, because the
+/// native backend intercepts nothing and would otherwise hand a Darwin
+/// `pthread_attr_t` to glibc and start a guest thread with no Darwin `%gs`.
 pub const SHIMMED_ABOVE: &[&str] = &[
-    // Takes the thread's start routine.
-    "pthread_create",
     // Takes the initialiser, and its control word is sixteen bytes here and four
     // there.
     "pthread_once",
@@ -1460,5 +1581,52 @@ mod tests {
             assert!(name.starts_with("pthread_"), "{name}");
             assert_ne!(*address, 0, "{name} resolved to nothing");
         }
+    }
+
+    /// A thread this module starts runs with the *Darwin* thread pointer, which is
+    /// the whole reason `pthread_create` is not passed through: a guest reads
+    /// `pthread_self` and its stack canary as direct loads off it and never calls
+    /// anything this could be done inside.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn a_created_thread_runs_with_the_darwin_thread_pointer() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        /// `ARCH_GET_GS`, from `<asm/prctl.h>`. Not in the `libc` crate.
+        const ARCH_GET_GS: libc::c_int = 0x1004;
+
+        /// The `%gs` *base*, asked for rather than dereferenced: a thread that
+        /// never got one would fault on the load a guest actually compiles to,
+        /// and a failing test beats a crashing one.
+        extern "C" fn body(out: u64) -> u64 {
+            let mut base: u64 = 0;
+            // SAFETY: `arch_prctl` with `ARCH_GET_GS` writes this thread's `%gs`
+            // base through the pointer, which is a live local.
+            unsafe { libc::syscall(libc::SYS_arch_prctl, ARCH_GET_GS, &mut base) };
+            // SAFETY: the `AtomicU64` the caller passed, live until the join below.
+            unsafe { &*(out as usize as *const AtomicU64) }.store(base, Ordering::SeqCst);
+            0
+        }
+
+        let seen = AtomicU64::new(0);
+        let mut thread = null_thread();
+        // SAFETY: a writable `pthread_t`, no attributes, and a start routine of
+        // this module's own taking the address of a live local.
+        let rc = unsafe {
+            create(
+                &mut thread as *mut _ as u64,
+                0,
+                body as *const () as u64,
+                &seen as *const _ as u64,
+            )
+        };
+        assert_eq!(rc, 0, "the thread did not start");
+        // SAFETY: the handle `create` just wrote, joined exactly once.
+        assert_eq!(unsafe { join(thread as u64, 0) }, 0);
+        assert_ne!(
+            seen.load(Ordering::SeqCst),
+            0,
+            "the new thread ran with no Darwin thread pointer at all"
+        );
     }
 }

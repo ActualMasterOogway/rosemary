@@ -1,8 +1,12 @@
 //! Instances: allocation, `isa`, and ivar access.
 //!
 //! An object is its class pointer followed by its ivars, and nothing else. It is
-//! allocated with `calloc` and freed with `free` so that guest code which does
-//! either by hand - and GameMaker's Objective-C bridge does - is not surprised.
+//! allocated and freed so that guest code which does either by hand - and
+//! GameMaker's Objective-C bridge does - is not surprised, which means it has
+//! to come from the allocator the *guest* calls `free` on and not from this
+//! process's own. See [`crate::allocator`]: when the guest ships a replacement
+//! allocator those are two different heaps, and this module's whole contract is
+//! that the guest may `free` what it allocated here.
 
 use std::ffi::{CStr, c_void};
 
@@ -20,12 +24,16 @@ pub fn create_instance(class: &'static Class, extra: usize) -> Id {
         return std::ptr::null_mut();
     }
     let size = class.instance_size() + extra;
-    // SAFETY: a non-zero size; `calloc` zeroes, which is what `class_createInstance`
-    // promises and what every `-init` that skips a field relies on.
-    let memory = unsafe { libc::calloc(1, size) };
+    // SAFETY: a non-zero size. Zeroed by hand because the registry holds
+    // `malloc` and `free` and not `calloc` - and zeroed it must be, which is
+    // what `class_createInstance` promises and what every `-init` that skips a
+    // field relies on.
+    let memory = unsafe { crate::allocator::guest_malloc(size) };
     if memory.is_null() {
         return std::ptr::null_mut();
     }
+    // SAFETY: `size` bytes, freshly ours.
+    unsafe { std::ptr::write_bytes(memory as *mut u8, 0, size) };
     // SAFETY: `memory` is at least one word and freshly ours.
     unsafe { *(memory as *mut *mut Class) = ptr(class) };
     memory
@@ -40,8 +48,9 @@ pub unsafe fn dispose_instance(object: Id) {
     if object.is_null() {
         return;
     }
-    // SAFETY: the caller's obligation, and `calloc` memory is `free`'s to take.
-    unsafe { libc::free(object) }
+    // SAFETY: the caller's obligation, and the block came from
+    // [`create_instance`], which takes it from the same allocator.
+    unsafe { crate::allocator::guest_free(object) }
 }
 
 /// The class of `object`.

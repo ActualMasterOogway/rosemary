@@ -205,7 +205,10 @@ pub fn copy(block: Id) -> Id {
         crate::fail!("_Block_copy: the descriptor's size is smaller than a block header");
     }
     // SAFETY: `size` bytes, which is what the descriptor says the literal is.
-    let copied = unsafe { libc::malloc(size) } as *mut Block;
+    // From the guest's allocator, not this process's: libclosure calls the one
+    // `malloc` its process has, and when the guest ships a replacement that is
+    // the guest's. See [`crate::allocator`].
+    let copied = unsafe { crate::allocator::guest_malloc(size) } as *mut Block;
     if copied.is_null() {
         crate::fail!("_Block_copy: out of memory copying a block to the heap");
     }
@@ -254,7 +257,7 @@ pub fn release(block: Id) {
         {
             helper(block as *mut c_void);
         }
-        libc::free(block as *mut c_void);
+        crate::allocator::guest_free(block as *mut c_void);
     }
 }
 
@@ -339,8 +342,9 @@ unsafe fn byref_copy(source: *mut Byref) -> *mut Byref {
     if size < size_of::<Byref>() {
         crate::fail!("_Block_object_assign: a __block variable smaller than its own header");
     }
-    // SAFETY: `size` is what the compiler recorded for the whole variable.
-    let copied = unsafe { libc::malloc(size) } as *mut Byref;
+    // SAFETY: `size` is what the compiler recorded for the whole variable, and
+    // the allocator is the guest's for [`copy`]'s reason.
+    let copied = unsafe { crate::allocator::guest_malloc(size) } as *mut Byref;
     if copied.is_null() {
         crate::fail!("_Block_object_assign: out of memory copying a __block variable");
     }
@@ -415,7 +419,7 @@ unsafe fn byref_release(byref: *mut Byref) {
         {
             destroy(byref as *mut c_void);
         }
-        libc::free(byref as *mut c_void);
+        crate::allocator::guest_free(byref as *mut c_void);
     }
 }
 
