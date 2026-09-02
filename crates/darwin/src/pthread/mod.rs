@@ -580,6 +580,38 @@ pub unsafe extern "C" fn key_delete(key: u64) -> i32 {
     err::from_host(unsafe { libc::pthread_key_delete(key as libc::pthread_key_t) })
 }
 
+/// `int pthread_key_create(pthread_key_t *, void (*destructor)(void *))`
+///
+/// The entry point the *native* backend binds. Under emulation the destructor is
+/// guest code that needs a thunk, so `rosetta3::shims::pthread` intercepts the
+/// call by name; here the guest's code is host code already.
+///
+/// The key is written out as **eight** bytes, because that is what the guest
+/// reserved: `pthread_key_t` is an `unsigned long` on Darwin and an `unsigned`
+/// here. Letting the host write through the guest's pointer fills half of the
+/// slot and leaves the other half holding whatever was there before.
+///
+/// # Safety
+///
+/// `out` is eight writable bytes and `destructor` is null or a function this
+/// process can call.
+pub unsafe extern "C" fn key_create(
+    out: *mut u64,
+    destructor: Option<unsafe extern "C" fn(*mut core::ffi::c_void)>,
+) -> i32 {
+    if out.is_null() {
+        return err::EINVAL;
+    }
+    let mut key: libc::pthread_key_t = 0;
+    // SAFETY: a live local, and the caller's destructor.
+    let rc = unsafe { libc::pthread_key_create(&mut key, destructor) };
+    if rc == 0 {
+        // SAFETY: the caller's eight bytes.
+        unsafe { out.write_unaligned(u64::from(key)) };
+    }
+    err::from_host(rc)
+}
+
 /// `int pthread_join(pthread_t, void **)`
 ///
 /// Wrapped for its *result*: the arguments and the handle agree on both
@@ -834,8 +866,12 @@ fn entries() -> &'static [(&'static str, u64)] {
             "pthread_rwlockattr_setpshared" => rwlockattr_setpshared,
             "pthread_rwlockattr_getpshared" => rwlockattr_getpshared,
 
-            // Thread-specific data. `pthread_key_create` takes a destructor that is
-            // *guest code*, so it stays a shim in `rosetta3::shims::pthread`.
+            // Thread-specific data. `pthread_key_create` is *also* a shim under
+            // emulation, where the destructor is guest code that needs a thunk -
+            // the entry here is what the native backend binds, and what stops
+            // glibc writing four bytes into the guest's eight.
+            "pthread_key_create" => key_create,
+            "pthread_once" => sync::once_entry,
             "pthread_key_delete" => key_delete,
             "pthread_getspecific" => getspecific,
             "pthread_setspecific" => setspecific,
@@ -886,22 +922,19 @@ pub const PASSED_THROUGH: &[&str] = &[
 /// thunk for the guest function pointer they take.
 ///
 /// Reaching guest code needs emulation vocabulary this crate does not have, so
-/// `rosetta3::shims::pthread` owns the call and this crate owns whatever Darwin-shaped
-/// object it operates on - `pthread_once`'s sixteen-byte control word, say. Listed
-/// here so the blanket denial of the `pthread_` family in [`crate::divergent`] does
-/// not take their import slots with it: the slot still has to resolve to *something*
-/// for the runtime to intercept the call.
-/// `pthread_create` is deliberately absent, and was here. Under emulation the runtime
-/// still intercepts it by name - interception reads the link report, not the slot - but
-/// the *slot* must hold this crate's [`create`] rather than the host's, because the
-/// native backend intercepts nothing and would otherwise hand a Darwin
-/// `pthread_attr_t` to glibc and start a guest thread with no Darwin `%gs`.
+/// `rosetta3::shims::pthread` owns the call. Listed here so the blanket denial of the
+/// `pthread_` family in [`crate::divergent`] does not take their import slots with it:
+/// the slot still has to resolve to *something* for the runtime to intercept the call.
+///
+/// **Being on this list is not enough for anything that takes a Darwin-shaped
+/// object.** Interception is an emulated-backend thing; the native backend
+/// intercepts nothing and calls whatever the slot holds. So `pthread_create`,
+/// `pthread_once` and `pthread_key_create` have all been taken off this list and
+/// given entries of their own - each was handing glibc a structure of the wrong
+/// shape, and each failed silently rather than loudly. `pthread_once` is the one
+/// worth remembering: Darwin's `PTHREAD_ONCE_INIT` signature has the bit set that
+/// glibc reads as "already run".
 pub const SHIMMED_ABOVE: &[&str] = &[
-    // Takes the initialiser, and its control word is sixteen bytes here and four
-    // there.
-    "pthread_once",
-    // Takes the destructor, and its key is eight bytes here and four there.
-    "pthread_key_create",
     // Takes three handlers, and is otherwise plain scalars. The slot it binds to
     // is `crate::bsd`'s and not the host's: glibc keeps `pthread_atfork` in
     // `libc_nonshared.a`, so the passthrough below finds nothing for it.
@@ -970,6 +1003,47 @@ mod tests {
     type Once = Obj<{ object::size::ONCE }>;
     type Attr = Obj<{ object::size::ATTR }>;
     type MutexAttrObj = Obj<{ object::size::MUTEXATTR }>;
+
+    /// The three names whose Darwin-shaped object glibc would misread must bind to
+    /// *this crate's* entry, not to the host's.
+    ///
+    /// Being intercepted above is not enough: interception is an emulated-backend
+    /// thing, and the native backend calls whatever the slot holds. `pthread_once`
+    /// is the reason this test exists - see [`sync::once_entry`].
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn the_calls_whose_object_is_darwin_shaped_do_not_bind_to_the_host_s() {
+        for name in ["pthread_create", "pthread_once", "pthread_key_create"] {
+            let ours = symbol(name).unwrap_or_else(|| panic!("{name} has no entry"));
+            assert_ne!(
+                Some(ours),
+                crate::host_symbol(name),
+                "{name} binds to the host's, which reads the guest's object wrong"
+            );
+        }
+    }
+
+    /// A `pthread_once_t` carrying Darwin's static initializer runs its routine,
+    /// and runs it once.
+    ///
+    /// glibc's `pthread_once` reads that same word as its own state, and Darwin's
+    /// signature `0x30B1BCBA` has the bit set that glibc takes to mean "already
+    /// run" - so passing one through succeeds and never calls the routine. That
+    /// silence is the whole failure: it looks like the routine ran.
+    #[test]
+    fn a_darwin_initialised_once_runs_its_routine_exactly_once() {
+        static RUNS: AtomicU32 = AtomicU32::new(0);
+        extern "C" fn body() {
+            RUNS.fetch_add(1, Ordering::Relaxed);
+        }
+        let control = Once::statically_initialised(object::sig::ONCE_INIT);
+        // SAFETY: a live, correctly sized and aligned `pthread_once_t`.
+        unsafe {
+            assert_eq!(sync::once_entry(control.at(), Some(body)), 0);
+            assert_eq!(sync::once_entry(control.at(), Some(body)), 0);
+        }
+        assert_eq!(RUNS.load(Ordering::Relaxed), 1);
+    }
 
     /// Everything a guest sets on a thread attribute set must read back as what it
     /// set - which is the whole contract of an opaque type whose bytes are ours.

@@ -106,6 +106,20 @@ mod plain {
         pub fn isblank(c: c_int) -> c_int;
         pub fn isprint(c: c_int) -> c_int;
         pub fn __ctype_get_mb_cur_max() -> usize;
+        pub fn strtol(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> i64;
+        pub fn strtoll(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> i64;
+        pub fn strtoul(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> u64;
+        pub fn strtoull(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> u64;
+        pub fn strtod(nptr: *const c_char, endptr: *mut *mut c_char) -> f64;
+        pub fn strtof(nptr: *const c_char, endptr: *mut *mut c_char) -> f32;
+        pub fn strcoll(a: *const c_char, b: *const c_char) -> c_int;
+        pub fn strxfrm(dst: *mut c_char, src: *const c_char, n: usize) -> usize;
+        pub fn strftime(
+            buf: *mut c_char,
+            n: usize,
+            fmt: *const c_char,
+            tm: *const c_void,
+        ) -> usize;
     }
 
     use super::c_void;
@@ -181,6 +195,40 @@ localised! {
     tolower_l(c: c_int) -> c_int = tolower;
     /// `int toupper_l(int, locale_t)`, likewise.
     toupper_l(c: c_int) -> c_int = toupper;
+
+    // The number and string family. This host *has* all of these under their own
+    // names, and that is the trap: forwarding them looks free and is not, because
+    // the `locale_t` goes with them. `libc++` on Darwin spells the C locale as a
+    // **null** `locale_t`, which Darwin's manual pages document as "the current
+    // locale" and glibc's implementations dereference - so a guest parsing a
+    // number through `std::num_get` faulted inside `____strtoull_l_internal`, with
+    // nothing about it to say the locale was the problem.
+
+    /// `long strtol_l(const char *, char **, int, locale_t)`
+    strtol_l(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> i64 = strtol;
+    /// `long long strtoll_l(const char *, char **, int, locale_t)`
+    strtoll_l(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> i64 = strtoll;
+    /// `unsigned long strtoul_l(const char *, char **, int, locale_t)`
+    strtoul_l(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> u64 = strtoul;
+    /// `unsigned long long strtoull_l(const char *, char **, int, locale_t)`
+    strtoull_l(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> u64 = strtoull;
+    /// `double strtod_l(const char *, char **, locale_t)`
+    strtod_l(nptr: *const c_char, endptr: *mut *mut c_char) -> f64 = strtod;
+    /// `float strtof_l(const char *, char **, locale_t)`
+    strtof_l(nptr: *const c_char, endptr: *mut *mut c_char) -> f32 = strtof;
+    /// `int strcoll_l(const char *, const char *, locale_t)`
+    strcoll_l(a: *const c_char, b: *const c_char) -> c_int = strcoll;
+    /// `size_t strxfrm_l(char *, const char *, size_t, locale_t)`
+    strxfrm_l(dst: *mut c_char, src: *const c_char, n: usize) -> usize = strxfrm;
+    /// `size_t strftime_l(char *, size_t, const char *, const struct tm *, locale_t)`
+    ///
+    /// `struct tm` agrees on both platforms, so only the locale needs bridging.
+    strftime_l(
+        buf: *mut c_char,
+        n: usize,
+        fmt: *const c_char,
+        tm: *const c_void
+    ) -> usize = strftime;
 }
 
 /// The `_CTYPE_*` bits Darwin's `<ctype.h>` masks a rune type with.
@@ -419,14 +467,35 @@ pub const NAMES: &[&str] = &[
     "wcwidth_l",
     "localeconv_l",
     "__mb_cur_max_l",
+    // Three underscores, and not a typo. Darwin's `<xlocale/_ctype.h>` defines
+    // `__mb_cur_max_l` and friends as *inline* functions that call these, so a
+    // guest compiled against that header imports the inner spelling and never the
+    // outer one. `libc++.1.dylib` imports all three of these and none of the two-
+    // underscore forms above.
+    "___mb_cur_max_l",
     "tolower_l",
     "toupper_l",
     "__tolower_l",
     "__toupper_l",
+    "___tolower_l",
+    "___toupper_l",
     "__maskrune",
     "__maskrune_l",
+    "___maskrune",
+    "___maskrune_l",
     "__tolower",
     "__toupper",
+    "___tolower",
+    "___toupper",
+    "strtol_l",
+    "strtoll_l",
+    "strtoul_l",
+    "strtoull_l",
+    "strtod_l",
+    "strtof_l",
+    "strcoll_l",
+    "strxfrm_l",
+    "strftime_l",
 ];
 
 pub fn symbol(name: &str) -> Option<u64> {
@@ -442,13 +511,22 @@ pub fn symbol(name: &str) -> Option<u64> {
         "wcsnrtombs_l" => wcsnrtombs_l as *const (),
         "wcwidth_l" => wcwidth_l as *const (),
         "localeconv_l" => localeconv_l as *const (),
-        "__mb_cur_max_l" => mb_cur_max_l as *const (),
-        "tolower_l" | "__tolower_l" => tolower_l as *const (),
-        "toupper_l" | "__toupper_l" => toupper_l as *const (),
-        "__maskrune" => maskrune as *const (),
-        "__maskrune_l" => maskrune_l as *const (),
-        "__tolower" => tolower_ as *const (),
-        "__toupper" => toupper_ as *const (),
+        "__mb_cur_max_l" | "___mb_cur_max_l" => mb_cur_max_l as *const (),
+        "tolower_l" | "__tolower_l" | "___tolower_l" => tolower_l as *const (),
+        "toupper_l" | "__toupper_l" | "___toupper_l" => toupper_l as *const (),
+        "__maskrune" | "___maskrune" => maskrune as *const (),
+        "__maskrune_l" | "___maskrune_l" => maskrune_l as *const (),
+        "strtol_l" => strtol_l as *const (),
+        "strtoll_l" => strtoll_l as *const (),
+        "strtoul_l" => strtoul_l as *const (),
+        "strtoull_l" => strtoull_l as *const (),
+        "strtod_l" => strtod_l as *const (),
+        "strtof_l" => strtof_l as *const (),
+        "strcoll_l" => strcoll_l as *const (),
+        "strxfrm_l" => strxfrm_l as *const (),
+        "strftime_l" => strftime_l as *const (),
+        "__tolower" | "___tolower" => tolower_ as *const (),
+        "__toupper" | "___toupper" => toupper_ as *const (),
         _ => return None,
     };
     Some(f as usize as u64)
@@ -506,6 +584,22 @@ mod tests {
     #[test]
     fn a_null_locale_switches_nothing() {
         assert!(switch(std::ptr::null_mut()).is_none());
+    }
+
+    /// And a null locale reaches the number parsers, which is the case that
+    /// mattered: `libc++` spells the C locale as a null `locale_t`, and this
+    /// host's own `strtoull_l` dereferences one.
+    #[test]
+    fn a_null_locale_parses_a_number_instead_of_faulting() {
+        let text = c"0x2a tail";
+        let mut end: *mut c_char = std::ptr::null_mut();
+        // SAFETY: a NUL-terminated string, a live `char *` slot, and the null
+        // locale a `libc++` caller passes.
+        let value =
+            unsafe { strtoull_l(text.as_ptr(), &mut end, 16, std::ptr::null_mut()) };
+        assert_eq!(value, 42);
+        // SAFETY: `end` points inside `text`, which outlives this.
+        assert_eq!(unsafe { std::ffi::CStr::from_ptr(end) }.to_bytes(), b" tail");
     }
 
     /// The bits are the header's, and a character has the ones it has.

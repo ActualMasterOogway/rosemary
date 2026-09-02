@@ -585,6 +585,25 @@ pub unsafe fn once(at: u64, body: impl FnOnce()) -> i32 {
     }
 }
 
+/// `int pthread_once(pthread_once_t *, void (*routine)(void))`
+///
+/// The entry point the *native* backend binds, where the guest's code is already
+/// host code and the routine can simply be called. Under emulation the routine
+/// is x86-64 that needs a thunk, so `rosetta3::shims::pthread` intercepts the
+/// call by name and reaches [`once`] itself.
+///
+/// # Safety
+///
+/// `at` is a guest `pthread_once_t *` and `routine` is a function this process
+/// can call.
+pub unsafe extern "C" fn once_entry(at: u64, routine: Option<extern "C" fn()>) -> i32 {
+    let Some(routine) = routine else {
+        return err::EINVAL;
+    };
+    // SAFETY: the caller's guarantee.
+    unsafe { once(at, || routine()) }
+}
+
 /// Report a pthread feature this crate declines to fake, once per description.
 fn say_unsupported(what: &str) {
     use std::sync::Mutex;

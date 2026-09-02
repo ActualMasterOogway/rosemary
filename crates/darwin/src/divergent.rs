@@ -6,6 +6,7 @@
 #[cfg(not(target_os = "macos"))]
 mod why {
     pub const STAT: &str = "struct stat is laid out differently";
+    pub const PASSWD: &str = "struct passwd is laid out differently";
     pub const DIRENT: &str = "struct dirent is laid out differently";
     pub const SIGNAL: &str = "the signal numbers and sigaction layout differ";
     pub const TERMIOS: &str = "struct termios is laid out differently";
@@ -92,6 +93,13 @@ pub const NAMES: &[(&str, &str)] = &[
     // the flag word that command takes is an `open` flag word, which agrees on
     // nothing past the access mode.
     ("fcntl", "the fcntl commands and the O_ status flags differ"),
+    // Darwin's `struct passwd` has BSD's `pw_change` and `pw_class` in the middle,
+    // so `pw_dir` is at offset 48 - past the end of this host's whole structure.
+    // `crate::passwd` answers the two lookups; the reentrant pair stay denied.
+    ("getpwuid", PASSWD),
+    ("getpwnam", PASSWD),
+    ("getpwuid_r", PASSWD),
+    ("getpwnam_r", PASSWD),
     // `struct termios` field order, and the `c_cc` indices.
     ("tcgetattr", TERMIOS),
     ("tcsetattr", TERMIOS),

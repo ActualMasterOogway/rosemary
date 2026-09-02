@@ -16,6 +16,7 @@ pub mod malloc;
 pub mod math;
 pub mod net;
 pub mod passthrough;
+pub mod passwd;
 pub mod path;
 pub mod poll;
 pub mod pthread;
@@ -181,6 +182,20 @@ fn implemented(name: &str) -> Option<u64> {
         .or_else(|| signal_symbol(name))
         .or_else(|| fcntl_symbol(name))
         .or_else(|| bsd_symbol(name))
+        .or_else(|| passwd_symbol(name))
+}
+
+/// `<pwd.h>`, which only a host whose `struct passwd` is not Darwin's rewrites.
+fn passwd_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return passwd::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
 }
 
 /// The names a Mac's libc exports and this host's does not, which only a host
@@ -400,6 +415,7 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
         signal::entry::provide(&mut lib);
         fcntl::entry::provide(&mut lib);
         bsd::provide(&mut lib);
+        passwd::provide(&mut lib);
     }
     lib
 }
