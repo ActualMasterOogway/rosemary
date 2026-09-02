@@ -88,6 +88,10 @@ pub const NAMES: &[(&str, &str)] = &[
     // Listed although `crate::poll` now answers it, for the reason `strerror_r`
     // is: the entry is what stops the host's own from being bound instead.
     ("poll", "the POLL* event bits differ"),
+    // `crate::fcntl` answers it. The commands agree only as far as `F_SETFL`, and
+    // the flag word that command takes is an `open` flag word, which agrees on
+    // nothing past the access mode.
+    ("fcntl", "the fcntl commands and the O_ status flags differ"),
     // `struct termios` field order, and the `c_cc` indices.
     ("tcgetattr", TERMIOS),
     ("tcsetattr", TERMIOS),

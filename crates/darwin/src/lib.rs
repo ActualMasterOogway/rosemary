@@ -178,6 +178,21 @@ fn implemented(name: &str) -> Option<u64> {
         .or_else(|| uuid_symbol(name))
         .or_else(|| string_symbol(name))
         .or_else(|| signal_symbol(name))
+        .or_else(|| fcntl_symbol(name))
+}
+
+/// `fcntl`, which only a host whose commands and `O_` flags are not Darwin's
+/// rewrites.
+fn fcntl_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return fcntl::entry::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
 }
 
 /// The signal family, which only a host whose signal numbers, `sigset_t`,
@@ -367,6 +382,7 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
         xattr::provide(&mut lib);
         uuid::provide(&mut lib);
         signal::entry::provide(&mut lib);
+        fcntl::entry::provide(&mut lib);
     }
     lib
 }

@@ -96,10 +96,10 @@ pub unsafe extern "C" fn sem_open_with_mode(
     value: libc::c_uint,
 ) -> *mut libc::sem_t {
     let Some(host_oflag) = host_flags(oflag) else {
-        return libc::SEM_FAILED;
+        return DARWIN_SEM_FAILED;
     };
     // Decided by the guest's flags; made with the host's.
-    match darwin::fcntl::creates(oflag) {
+    let sem = match darwin::fcntl::creates(oflag) {
         // SAFETY: the caller's guarantee, above. The mode is narrowed to the
         // `mode_t` the callee will read and re-promoted, exactly as `mode_for`
         // does - a guest register's spare bits are not permissions.
@@ -114,8 +114,20 @@ pub unsafe extern "C" fn sem_open_with_mode(
         // SAFETY: as above, and the two arguments the guest did not pass are
         // not passed on. See the note on the value's range.
         false => unsafe { libc::sem_open(name, host_oflag) },
+    };
+    match sem == libc::SEM_FAILED {
+        true => DARWIN_SEM_FAILED,
+        false => sem,
     }
 }
+
+/// Darwin's `SEM_FAILED`, which is `(sem_t *)-1` where glibc's is null.
+///
+/// The dangerous kind of disagreement: a guest that checks its `sem_open` against
+/// `-1` reads a null as a live semaphore and hands it to `sem_post`, which faults
+/// with nothing to say. Roblox opens `robloxPlayerStartedEvent` without `O_CREAT`,
+/// so the failure is the *ordinary* path here, not an edge case.
+const DARWIN_SEM_FAILED: *mut libc::sem_t = usize::MAX as *mut libc::sem_t;
 
 /// Claim `_open`, `_openat` and `_sem_open` for this module's wrappers.
 pub(crate) fn provide(lib: &mut SyntheticDylib) {
@@ -145,21 +157,41 @@ pub fn fcntl(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemor
         0
     };
 
-    // A command with no host equivalent is refused rather than forwarded under a
-    // number that means something else here. See [`darwin::fcntl::to_host`].
-    let Some(cmd) = darwin::fcntl::to_host(cmd) else {
-        set_int_return(ctx, -1);
-        darwin::errno::set(libc::EINVAL);
-        return Ok(());
-    };
-
     // SAFETY: the third parameter is a word-sized scalar or a pointer into the
     // guest, which is identity-mapped and so is a pointer here. Commands that
     // take no third argument are passed a zero rather than whatever the guest
     // last left in `rdx`, which is the same care `ioctl` takes for `IOC_VOID`.
-    let rc = unsafe { libc::fcntl(fd, cmd, arg as usize) };
+    let rc = unsafe { host_fcntl(fd, cmd, arg as usize) };
     set_int_return(ctx, rc);
     Ok(())
+}
+
+/// The one implementation of `fcntl`, shared with the native backend.
+///
+/// Under emulation the guest cannot be handed an address, so this shim reads the
+/// registers - but what it then does has to be what an image linked against
+/// `darwin::fcntl::entry` gets, or a command or a flag word means one thing on one
+/// backend and another on the other.
+///
+/// # Safety
+///
+/// As the caller of [`fcntl`].
+#[cfg(not(target_os = "macos"))]
+unsafe fn host_fcntl(fd: i32, cmd: i32, arg: usize) -> i32 {
+    // SAFETY: the caller's obligation.
+    unsafe { darwin::fcntl::entry::fcntl(fd, cmd, arg) }
+}
+
+/// On Darwin the guest's command and flags are the host's, so there is nothing to
+/// translate and no entry point in `darwin` to share.
+///
+/// # Safety
+///
+/// As the caller of [`fcntl`].
+#[cfg(target_os = "macos")]
+unsafe fn host_fcntl(fd: i32, cmd: i32, arg: usize) -> i32 {
+    // SAFETY: the caller's obligation.
+    unsafe { libc::fcntl(fd, cmd, arg) }
 }
 
 /// The `mode` argument, or zero when the guest passed none.
