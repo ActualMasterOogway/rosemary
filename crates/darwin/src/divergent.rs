@@ -36,9 +36,16 @@ pub const NAMES: &[(&str, &str)] = &[
     ("fstatat", STAT),
     ("statfs", STAT),
     ("fstatfs", STAT),
-    // `struct dirent`: `d_ino` width and the position of `d_type`.
+    // `struct dirent`: Darwin has a `d_namlen` glibc has not, so `d_type` and
+    // the name are two bytes later. `crate::dirent` answers all but the last;
+    // the entries are what stop the host's own being bound instead. `opendir`
+    // and `closedir` are listed although the handle passes through untouched -
+    // one takes a path this crate case-folds, the other drops the entry
+    // `readdir` published for the handle.
+    ("opendir", DIRENT),
     ("readdir", DIRENT),
     ("readdir_r", DIRENT),
+    ("closedir", DIRENT),
     ("scandir", DIRENT),
     ("alphasort", DIRENT),
     ("getdirentries", DIRENT),
@@ -79,7 +86,9 @@ pub const NAMES: &[(&str, &str)] = &[
     // is wrong rather than missing - `strerror`'s trap, one table over.
     ("strsignal", SIGNAL),
     ("psignal", SIGNAL),
-    // `RLIMIT_*` are not the same numbers, and `rlim_t` differs in width.
+    // `RLIMIT_*` are not the same numbers, and `RLIM_INFINITY` is a different
+    // sentinel. `crate::rlimit` answers both; the entries are what stop the
+    // host's own being bound instead.
     ("getrlimit", "the RLIMIT_ resource numbers differ"),
     ("setrlimit", "the RLIMIT_ resource numbers differ"),
     // `FD_SETSIZE` is 1024 on both, but `fd_set`'s word width is not, and Darwin's
@@ -272,7 +281,10 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "macos"))]
     fn a_divergence_is_named_rather_than_passed_through() {
-        assert_eq!(reason("readdir"), Some(DIRENT));
+        // The half of the directory family nothing has implemented. `readdir`
+        // itself was here until `crate::dirent` answered it, and is asserted
+        // the other way round below.
+        assert_eq!(reason("getdirentries"), Some(DIRENT));
         // A Mach call that reaches the kernel about *memory*, which is the half
         // of the family `crate::mach` does not answer.
         assert_eq!(reason("mach_vm_allocate"), Some(MACH));
@@ -308,6 +320,11 @@ mod tests {
             "dispatch_async",
             "dispatch_semaphore_wait",
             "dispatch_queue_create",
+            // The directory family, denied by name so the host's `struct
+            // dirent` never becomes the guest's.
+            "readdir",
+            "readdir_r",
+            "scandir",
         ] {
             assert_eq!(reason(name), None, "{name} is implemented and still denied");
         }

@@ -525,6 +525,36 @@ unsafe extern "C" fn int_value(receiver: Id, _sel: Sel) -> i32 {
     unsafe { collections::number(receiver as CFTypeRef) }.map_or(0, |n| n.as_i64() as i32)
 }
 
+/// The narrower integer accessors.
+///
+/// Each truncates the stored value the way a C cast does, which is what Apple's
+/// do: an `NSNumber` holds one value and every accessor is a *conversion* of
+/// it, not a claim about how it was made.
+unsafe extern "C" fn unsigned_int_value(receiver: Id, _sel: Sel) -> u32 {
+    // SAFETY: a number.
+    unsafe { collections::number(receiver as CFTypeRef) }.map_or(0, |n| n.as_i64() as u32)
+}
+
+unsafe extern "C" fn short_value(receiver: Id, _sel: Sel) -> i16 {
+    // SAFETY: a number.
+    unsafe { collections::number(receiver as CFTypeRef) }.map_or(0, |n| n.as_i64() as i16)
+}
+
+unsafe extern "C" fn unsigned_short_value(receiver: Id, _sel: Sel) -> u16 {
+    // SAFETY: a number.
+    unsafe { collections::number(receiver as CFTypeRef) }.map_or(0, |n| n.as_i64() as u16)
+}
+
+unsafe extern "C" fn char_value(receiver: Id, _sel: Sel) -> i8 {
+    // SAFETY: a number.
+    unsafe { collections::number(receiver as CFTypeRef) }.map_or(0, |n| n.as_i64() as i8)
+}
+
+unsafe extern "C" fn unsigned_char_value(receiver: Id, _sel: Sel) -> u8 {
+    // SAFETY: a number.
+    unsafe { collections::number(receiver as CFTypeRef) }.map_or(0, |n| n.as_i64() as u8)
+}
+
 unsafe extern "C" fn integer_value(receiver: Id, _sel: Sel) -> i64 {
     // SAFETY: a number.
     unsafe { collections::number(receiver as CFTypeRef) }.map_or(0, |n| n.as_i64())
@@ -543,6 +573,25 @@ unsafe extern "C" fn float_value(receiver: Id, _sel: Sel) -> f32 {
 unsafe extern "C" fn bool_value(receiver: Id, _sel: Sel) -> bool {
     // SAFETY: a number.
     unsafe { collections::number(receiver as CFTypeRef) }.is_some_and(|n| n.as_i64() != 0)
+}
+
+/// `-stringValue`, which is also `-description` for a number.
+///
+/// An integer prints as itself; a float prints the way Rust's `{}` does, which
+/// is the shortest text that reads back as the same double - the same rule
+/// Apple's uses, so `@(9.25)` is `9.25` and `@(9.0)` is `9` on both.
+unsafe extern "C" fn string_value(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a number.
+    let text = match unsafe { collections::number(receiver as CFTypeRef) } {
+        Some(collections::Number::Integer(value)) => value.to_string(),
+        Some(collections::Number::Float(value)) => value.to_string(),
+        // Not a number this runtime made. Apple would raise; an empty string is
+        // the answer that lets the caller print something and carry on.
+        None => String::new(),
+    };
+    let string = crate::string::from_str(&text);
+    // SAFETY: a string this call just created.
+    unsafe { api::CFAutorelease(string as CFTypeRef) as Id }
 }
 
 unsafe extern "C" fn number_with_int(_class: Id, _sel: Sel, value: i32) -> Id {
@@ -655,9 +704,18 @@ pub(crate) fn install() {
         "longValue" => integer_value, c"q16@0:8";
         "longLongValue" => integer_value, c"q16@0:8";
         "unsignedIntegerValue" => integer_value, c"Q16@0:8";
+        "unsignedLongValue" => integer_value, c"Q16@0:8";
+        "unsignedLongLongValue" => integer_value, c"Q16@0:8";
+        "unsignedIntValue" => unsigned_int_value, c"I16@0:8";
+        "shortValue" => short_value, c"s16@0:8";
+        "unsignedShortValue" => unsigned_short_value, c"S16@0:8";
+        "charValue" => char_value, c"c16@0:8";
+        "unsignedCharValue" => unsigned_char_value, c"C16@0:8";
         "doubleValue" => double_value, c"d16@0:8";
         "floatValue" => float_value, c"f16@0:8";
         "boolValue" => bool_value, c"B16@0:8";
+        "stringValue" => string_value, c"@16@0:8";
+        "description" => string_value, c"@16@0:8";
     });
     class_methods!(number, {
         "numberWithInt:" => number_with_int, c"@24@0:8i16";

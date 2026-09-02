@@ -1235,6 +1235,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // importing the underscore forms is one that used the ordinary API.
     sig!("adler32", U64, U64, P, U32),
     sig!("alarm", U32, U32),
+    // The comparator `scandir` is usually called with. Both arguments are
+    // `const struct dirent **`, which is a pointer to an array slot rather
+    // than to an entry.
+    sig!("alphasort", I32, P, P),
     // `double cabs(double complex)`. A `double complex` is two doubles, and it
     // is one of the aggregates the two ABIs agree about.
     sig!("cabs", F64, F64, F64),
@@ -2482,6 +2486,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("scalbn", F64, F64, I32),
     sig!("scalbnf", F32, F32, I32),
     vsig!("scanf", I32, P),
+    // `int scandir(const char *, struct dirent ***, int (*)(const struct
+    // dirent *), int (*)(const struct dirent **, const struct dirent **))`
+    sig!("scandir", I32, P, P, P, P),
     sig!("sched_get_priority_max", I32, I32),
     sig!("sched_get_priority_min", I32, I32),
     sig!("sched_yield", I32),

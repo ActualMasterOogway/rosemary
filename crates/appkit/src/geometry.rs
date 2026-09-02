@@ -63,9 +63,78 @@ pub fn point_in_window(x: f64, y: f64, height: f64) -> NSPoint {
     NSPoint { x, y: height - y }
 }
 
+/// A rectangle with a non-negative width and height, which is what every
+/// `CGRectGet…` accessor answers about.
+///
+/// CoreGraphics allows a negative extent and standardizes before measuring, so
+/// `CGRectGetMinX` of a rectangle that runs leftwards is its *right* edge.
+fn standardized(rect: NSRect) -> (f64, f64, f64, f64) {
+    let (x, width) = match rect.size.width < 0.0 {
+        true => (rect.origin.x + rect.size.width, -rect.size.width),
+        false => (rect.origin.x, rect.size.width),
+    };
+    let (y, height) = match rect.size.height < 0.0 {
+        true => (rect.origin.y + rect.size.height, -rect.size.height),
+        false => (rect.origin.y, rect.size.height),
+    };
+    (x, y, width, height)
+}
+
+/// The eight `CGFloat CGRectGet…(CGRect)` accessors.
+///
+/// Inline functions in the header on a Mac *and* exported symbols, and a guest
+/// compiled against one SDK imports what another inlined - so these are real
+/// imports for some programs and absent from others. A `CGRect` is four
+/// doubles, which is four vector registers on this ABI rather than a pointer.
+macro_rules! accessors {
+    ($($name:ident => $measure:expr;)*) => {
+        $(
+            #[allow(non_snake_case)]
+            pub unsafe extern "C" fn $name(rect: NSRect) -> f64 {
+                let measure: fn(f64, f64, f64, f64) -> f64 = $measure;
+                let (x, y, width, height) = standardized(rect);
+                measure(x, y, width, height)
+            }
+        )*
+    };
+}
+
+accessors! {
+    CGRectGetWidth => |_x, _y, width, _height| width;
+    CGRectGetHeight => |_x, _y, _width, height| height;
+    CGRectGetMinX => |x, _y, _width, _height| x;
+    CGRectGetMidX => |x, _y, width, _height| x + width / 2.0;
+    CGRectGetMaxX => |x, _y, width, _height| x + width;
+    CGRectGetMinY => |_x, y, _width, _height| y;
+    CGRectGetMidY => |_x, y, _width, height| y + height / 2.0;
+    CGRectGetMaxY => |_x, y, _width, height| y + height;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The accessors standardize first, which is what makes a rectangle with a
+    /// negative extent measure the same as the one it describes.
+    #[test]
+    fn a_rectangle_that_runs_backwards_measures_as_the_one_it_describes() {
+        let backwards = NSRect {
+            origin: NSPoint { x: 30.0, y: 40.0 },
+            size: NSSize {
+                width: -10.0,
+                height: -20.0,
+            },
+        };
+        // SAFETY: each takes a `CGRect` by value and returns a `CGFloat`.
+        unsafe {
+            assert_eq!(CGRectGetWidth(backwards), 10.0);
+            assert_eq!(CGRectGetHeight(backwards), 20.0);
+            assert_eq!(CGRectGetMinX(backwards), 20.0);
+            assert_eq!(CGRectGetMaxX(backwards), 30.0);
+            assert_eq!(CGRectGetMidY(backwards), 30.0);
+            assert_eq!(CGRectGetMaxY(backwards), 40.0);
+        }
+    }
 
     /// The conversion is its own inverse, whatever the display height is -
     /// which is the property that makes a round trip through SDL and back leave

@@ -189,6 +189,39 @@ unsafe extern "C" fn item_with_tag(receiver: Id, sel: Sel, tag: isize) -> Id {
     std::ptr::null_mut()
 }
 
+/// `-itemWithTitle:`, which is **not** recursive - unlike `-itemWithTag:` above.
+///
+/// Apple's searches this menu's own items only, and the difference is not an
+/// oversight in either place: a tag is unique across a hierarchy by convention
+/// and a title is not, so a recursive search by title would answer with an item
+/// from a submenu the caller was not asking about.
+unsafe extern "C" fn item_with_title(receiver: Id, _sel: Sel, title: Id) -> Id {
+    // SAFETY: null or an `NSString`.
+    let wanted = unsafe { foundation::string::bytes(title) };
+    for value in items_of(receiver).values.clone() {
+        let item = value as Id;
+        // SAFETY: an item of this menu, whose title is null or an `NSString`.
+        if unsafe { foundation::string::bytes(item_of(item).title) } == wanted {
+            return item;
+        }
+    }
+    std::ptr::null_mut()
+}
+
+/// `-indexOfItemWithTitle:`, the same search reported as a position.
+unsafe extern "C" fn index_of_item_with_title(receiver: Id, sel: Sel, title: Id) -> isize {
+    // SAFETY: `-itemWithTitle:` is `id (id, SEL, id)`.
+    let found = unsafe { item_with_title(receiver, sel, title) };
+    match found.is_null() {
+        // `NSNotFound` is `NSIntegerMax` and not -1, which is the value a
+        // caller compares against.
+        true => isize::MAX,
+        // SAFETY: `-indexOfItem:` is `NSInteger (id, SEL, id)`, and `found` is
+        // an item of this menu.
+        false => unsafe { index_of_item(receiver, sel, found) },
+    }
+}
+
 unsafe extern "C" fn menu_delegate(receiver: Id, _sel: Sel) -> Id {
     menu_of(receiver).delegate
 }
@@ -332,6 +365,8 @@ pub(crate) fn install() {
         "removeAllItems" => remove_all_items, c"v16@0:8";
         "indexOfItem:" => index_of_item, c"q24@0:8@16";
         "itemWithTag:" => item_with_tag, c"@24@0:8q16";
+        "itemWithTitle:" => item_with_title, c"@24@0:8@16";
+        "indexOfItemWithTitle:" => index_of_item_with_title, c"q24@0:8@16";
         "delegate" => menu_delegate, c"@16@0:8";
         "setDelegate:" => set_menu_delegate, c"v24@0:8@16";
         "supermenu" => supermenu, c"@16@0:8";

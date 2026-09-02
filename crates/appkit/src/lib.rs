@@ -17,6 +17,7 @@ pub mod nsevent;
 pub mod opengl;
 pub mod raster;
 pub mod screen;
+pub mod text;
 pub mod textinput;
 pub mod view;
 pub mod window;
@@ -36,6 +37,7 @@ pub fn bootstrap() {
         screen::install();
         window::install();
         view::install();
+        text::install();
         opengl::install();
         nsevent::install();
     });
@@ -52,6 +54,23 @@ pub fn symbol(name: &str) -> Option<u64> {
     Some(match name {
         "NSApplicationMain" => at!(application::NSApplicationMain),
         "CGMainDisplayID" => at!(screen::CGMainDisplayID),
+        "CGDisplayBounds" => at!(screen::CGDisplayBounds),
+        "CGDisplayScreenSize" => at!(screen::CGDisplayScreenSize),
+        // The two lists differ only in whether a mirrored display is named,
+        // and nothing here mirrors.
+        "CGGetOnlineDisplayList" | "CGGetActiveDisplayList" => {
+            at!(screen::CGGetOnlineDisplayList)
+        }
+        "CGDisplayIDToOpenGLDisplayMask" => at!(screen::CGDisplayIDToOpenGLDisplayMask),
+        "CGDisplayIOServicePort" => at!(screen::CGDisplayIOServicePort),
+        "CGRectGetWidth" => at!(geometry::CGRectGetWidth),
+        "CGRectGetHeight" => at!(geometry::CGRectGetHeight),
+        "CGRectGetMinX" => at!(geometry::CGRectGetMinX),
+        "CGRectGetMidX" => at!(geometry::CGRectGetMidX),
+        "CGRectGetMaxX" => at!(geometry::CGRectGetMaxX),
+        "CGRectGetMinY" => at!(geometry::CGRectGetMinY),
+        "CGRectGetMidY" => at!(geometry::CGRectGetMidY),
+        "CGRectGetMaxY" => at!(geometry::CGRectGetMaxY),
         "TISCopyCurrentKeyboardInputSource" => at!(textinput::TISCopyCurrentKeyboardInputSource),
         "TISCopyCurrentKeyboardLayoutInputSource" => {
             at!(textinput::TISCopyCurrentKeyboardLayoutInputSource)
@@ -66,6 +85,20 @@ pub fn symbol(name: &str) -> Option<u64> {
 pub const NAMES: &[&str] = &[
     "NSApplicationMain",
     "CGMainDisplayID",
+    "CGDisplayBounds",
+    "CGDisplayScreenSize",
+    "CGGetOnlineDisplayList",
+    "CGGetActiveDisplayList",
+    "CGDisplayIDToOpenGLDisplayMask",
+    "CGDisplayIOServicePort",
+    "CGRectGetWidth",
+    "CGRectGetHeight",
+    "CGRectGetMinX",
+    "CGRectGetMidX",
+    "CGRectGetMaxX",
+    "CGRectGetMinY",
+    "CGRectGetMidY",
+    "CGRectGetMaxY",
     "TISCopyCurrentKeyboardInputSource",
     "TISCopyCurrentKeyboardLayoutInputSource",
     "TISGetInputSourceProperty",

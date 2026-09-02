@@ -30,7 +30,7 @@ use machish::resolve::SyntheticDylib;
 /// A guard rather than a pair of calls, because every wrapper below has an early
 /// return in it and a restore that is skipped leaves the *thread* in the guest's
 /// locale for good.
-struct Switched(libc::locale_t);
+pub(crate) struct Switched(libc::locale_t);
 
 impl Drop for Switched {
     fn drop(&mut self) {
@@ -43,7 +43,7 @@ impl Drop for Switched {
 /// Make `loc` the thread's locale for as long as the guard lives.
 ///
 /// `None` for a null `loc`, which asks for the locale already in effect.
-fn switch(loc: libc::locale_t) -> Option<Switched> {
+pub(crate) fn switch(loc: libc::locale_t) -> Option<Switched> {
     if loc.is_null() {
         return None;
     }

@@ -60,6 +60,21 @@ fn roots(mask: u64, expand: bool) -> Vec<String> {
     out
 }
 
+/// The absolute paths a search-path constant names in each domain of `mask`.
+///
+/// The same answer [`search_path`] gives with `expand` true, as strings rather
+/// than as objects - which is what the `NSURL` forms on `NSFileManager` need,
+/// and the reason this is one function rather than two tables that could drift.
+pub(crate) fn directory_paths(directory: u64, mask: u64) -> Vec<String> {
+    let Some(relative) = relative(directory) else {
+        return Vec::new();
+    };
+    roots(mask, true)
+        .into_iter()
+        .map(|root| format!("{root}/{relative}"))
+        .collect()
+}
+
 /// `NSArray *NSSearchPathForDirectoriesInDomains(NSSearchPathDirectory,
 /// NSSearchPathDomainMask, BOOL)`.
 ///

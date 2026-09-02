@@ -155,6 +155,148 @@ unsafe extern "C" fn move_item(_receiver: Id, _sel: Sel, from: Id, to: Id, error
     std::fs::rename(&from, &to).is_ok() as u8
 }
 
+/// Run `with` on the path a file URL names, spelled as the `NSString` the
+/// path-taking methods above already take.
+///
+/// The URL forms are the same operations - Apple's documentation for each pair
+/// says so - and a second implementation of "create this directory" would be a
+/// second set of failure cases. `absent` is the answer for a receiver that is
+/// not a file URL, which is what Apple's returns for one.
+///
+/// # Safety
+///
+/// `url` is null or an `NSURL`.
+unsafe fn at_url<T>(url: Id, absent: T, with: impl FnOnce(Id) -> T) -> T {
+    // SAFETY: the caller's obligation.
+    let Some(path) = (unsafe { corefoundation::url::as_url(url as CFTypeRef) })
+        .and_then(|u| u.file_path())
+    else {
+        return absent;
+    };
+    let string = crate::string::from_str(&path) as Id;
+    let answer = with(string);
+    // SAFETY: a string this function made and nothing else holds.
+    unsafe { corefoundation::api::CFRelease(string as CFTypeRef) };
+    answer
+}
+
+unsafe extern "C" fn create_directory_at_url(
+    receiver: Id,
+    sel: Sel,
+    url: Id,
+    intermediates: u8,
+    attributes: Id,
+    error: *mut Id,
+) -> u8 {
+    // SAFETY: an `NSURL`; the inner call is the path form of this method.
+    unsafe {
+        at_url(url, 0, |path| {
+            create_directory(receiver, sel, path, intermediates, attributes, error)
+        })
+    }
+}
+
+unsafe extern "C" fn remove_item_at_url(receiver: Id, sel: Sel, url: Id, error: *mut Id) -> u8 {
+    // SAFETY: as above.
+    unsafe { at_url(url, 0, |path| remove_item(receiver, sel, path, error)) }
+}
+
+unsafe extern "C" fn move_item_at_url(
+    receiver: Id,
+    sel: Sel,
+    from: Id,
+    to: Id,
+    error: *mut Id,
+) -> u8 {
+    // SAFETY: as above, for both ends.
+    unsafe {
+        at_url(from, 0, |from| {
+            at_url(to, 0, |to| move_item(receiver, sel, from, to, error))
+        })
+    }
+}
+
+unsafe extern "C" fn copy_item_at_url(
+    receiver: Id,
+    sel: Sel,
+    from: Id,
+    to: Id,
+    error: *mut Id,
+) -> u8 {
+    // SAFETY: as above.
+    unsafe {
+        at_url(from, 0, |from| {
+            at_url(to, 0, |to| copy_item(receiver, sel, from, to, error))
+        })
+    }
+}
+
+/// A file URL for a directory, autoreleased.
+fn directory_url(path: &str) -> Id {
+    // SAFETY: a URL this call just made.
+    let url = corefoundation::url::new_file_url(path, true);
+    // SAFETY: a URL this call just made.
+    unsafe { corefoundation::api::CFAutorelease(url) as Id }
+}
+
+/// `-URLsForDirectory:inDomains:`, the `NSURL` form of
+/// `NSSearchPathForDirectoriesInDomains`.
+///
+/// The paths come from [`crate::paths`] rather than from a second table here:
+/// two lists of where `NSApplicationSupportDirectory` is would be two answers
+/// for a program that asks both ways, which programs do.
+unsafe extern "C" fn urls_for_directory(_receiver: Id, _sel: Sel, directory: u64, mask: u64) -> Id {
+    let objects: Vec<CFTypeRef> = crate::paths::directory_paths(directory, mask)
+        .iter()
+        .map(|path| corefoundation::url::new_file_url(path, true))
+        .collect();
+    let array = corefoundation::collections::new_array(
+        &objects,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    for object in objects {
+        // SAFETY: a URL this function made and the array has retained.
+        unsafe { corefoundation::api::CFRelease(object) };
+    }
+    // SAFETY: a fresh array.
+    unsafe { corefoundation::api::CFAutorelease(array) as Id }
+}
+
+/// `-URLForDirectory:inDomain:appropriateForURL:create:error:`
+///
+/// The first URL of the domain, made on disk when `create` asks for it - which
+/// is the difference between this and the plural form above, and the reason a
+/// program calls it: it wants a directory it can write to *now*.
+///
+/// `appropriateForURL:` is ignored. It only means anything for
+/// `NSItemReplacementDirectory`, which asks for a scratch directory on the same
+/// volume as the URL - and this tree does not place that constant at all, so
+/// the answer for it is nil rather than a directory on the wrong volume.
+///
+/// # Safety
+///
+/// `error` is null or a writable `NSError *`.
+unsafe extern "C" fn url_for_directory(
+    _receiver: Id,
+    _sel: Sel,
+    directory: u64,
+    domain: u64,
+    _appropriate_for: Id,
+    create: u8,
+    error: *mut Id,
+) -> Id {
+    // SAFETY: the caller's obligation.
+    unsafe { no_error(error) };
+    let Some(path) = crate::paths::directory_paths(directory, domain).into_iter().next() else {
+        return std::ptr::null_mut();
+    };
+    if create != 0 && std::fs::create_dir_all(&path).is_err() {
+        return std::ptr::null_mut();
+    }
+    directory_url(&path)
+}
+
 unsafe extern "C" fn contents_of_directory(
     _receiver: Id,
     _sel: Sel,
@@ -377,6 +519,14 @@ pub(crate) fn install() {
         "currentDirectoryPath" => current_directory, c"@16@0:8";
         "stringWithFileSystemRepresentation:length:"
             => string_with_file_system_representation, c"@32@0:8*16Q24";
+        "createDirectoryAtURL:withIntermediateDirectories:attributes:error:"
+            => create_directory_at_url, c"B44@0:8@16c24@32^@40";
+        "removeItemAtURL:error:" => remove_item_at_url, c"B32@0:8@16^@24";
+        "moveItemAtURL:toURL:error:" => move_item_at_url, c"B40@0:8@16@24^@32";
+        "copyItemAtURL:toURL:error:" => copy_item_at_url, c"B40@0:8@16@24^@32";
+        "URLsForDirectory:inDomains:" => urls_for_directory, c"@32@0:8Q16Q24";
+        "URLForDirectory:inDomain:appropriateForURL:create:error:"
+            => url_for_directory, c"@52@0:8Q16Q24@32c40^@44";
     });
 
     // Foundation's `NSFileAttributes` category: how a program reads the result

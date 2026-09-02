@@ -4,11 +4,14 @@ use std::ffi::CString;
 
 pub mod bsd;
 pub mod clock;
+pub mod dirent;
 pub mod dispatch;
 pub mod divergent;
 pub mod errno;
 pub mod fcntl;
 pub mod heap;
+pub mod kqueue;
+pub mod libproc;
 pub mod ioctl;
 pub mod locale;
 pub mod mach;
@@ -19,7 +22,9 @@ pub mod passthrough;
 pub mod passwd;
 pub mod path;
 pub mod poll;
+pub mod printf_l;
 pub mod pthread;
+pub mod rlimit;
 pub mod signal;
 pub mod spawn;
 pub mod stat;
@@ -183,6 +188,80 @@ fn implemented(name: &str) -> Option<u64> {
         .or_else(|| fcntl_symbol(name))
         .or_else(|| bsd_symbol(name))
         .or_else(|| passwd_symbol(name))
+        .or_else(|| dirent_symbol(name))
+        .or_else(|| rlimit_symbol(name))
+        .or_else(|| libproc_symbol(name))
+        .or_else(|| printf_l_symbol(name))
+        .or_else(|| kqueue_symbol(name))
+}
+
+/// The variadic `_l` printers, which only an x86-64 host off Darwin publishes -
+/// the trampolines behind them are that ABI's. See [`printf_l`].
+fn printf_l_symbol(name: &str) -> Option<u64> {
+    #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
+    {
+        return printf_l::symbol(name);
+    }
+    #[cfg(not(all(not(target_os = "macos"), target_arch = "x86_64")))]
+    {
+        let _ = name;
+        None
+    }
+}
+
+/// `kqueue`, which only a host that has no event queue of its own rebuilds out
+/// of `poll`.
+fn kqueue_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return kqueue::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
+}
+
+/// `<libproc.h>`, which only a host that has not got one publishes.
+fn libproc_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return libproc::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
+}
+
+/// The resource limits, which only a host whose `RLIMIT_` numbers and
+/// `RLIM_INFINITY` are not Darwin's rewrites.
+fn rlimit_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return rlimit::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
+}
+
+/// `<dirent.h>`, which only a host whose `struct dirent` is not Darwin's
+/// rewrites.
+fn dirent_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return dirent::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
 }
 
 /// `<pwd.h>`, which only a host whose `struct passwd` is not Darwin's rewrites.
@@ -416,6 +495,12 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
         fcntl::entry::provide(&mut lib);
         bsd::provide(&mut lib);
         passwd::provide(&mut lib);
+        dirent::provide(&mut lib);
+        rlimit::provide(&mut lib);
+        libproc::provide(&mut lib);
+        kqueue::provide(&mut lib);
+        #[cfg(target_arch = "x86_64")]
+        printf_l::provide(&mut lib);
     }
     lib
 }

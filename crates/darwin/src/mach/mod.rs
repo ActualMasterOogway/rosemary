@@ -24,6 +24,7 @@
 //! | [`msg`] | `mach_msg`, and translating names at the process boundary |
 //! | [`bootstrap`] | the name server two unrelated processes rendezvous through |
 //! | [`task`] | `mach_task_self_`, the thread and host ports, exception ports |
+//! | [`info`] | `task_info` and the host statistics, which are not port questions at all |
 //! | [`sync`] | Mach semaphores, which are named out of the same space |
 //! | [`kern`] | `kern_return_t` and the three numberings it is not |
 //!
@@ -45,6 +46,7 @@
 use std::ffi::c_void;
 
 pub mod bootstrap;
+pub mod info;
 pub mod kern;
 pub mod msg;
 pub mod space;
@@ -133,6 +135,10 @@ pub fn symbol(name: &str) -> Option<u64> {
         "mach_task_self" => task::mach_task_self as *const (),
         "mach_host_self" => task::mach_host_self as *const (),
         "mach_thread_self" => task::mach_thread_self as *const (),
+        "task_info" => info::task_info as *const (),
+        "host_page_size" => info::host_page_size as *const (),
+        "host_statistics" => info::host_statistics as *const (),
+        "host_statistics64" => info::host_statistics64 as *const (),
         "task_get_special_port" => task::task_get_special_port as *const (),
         "task_set_special_port" => task::task_set_special_port as *const (),
 
@@ -223,6 +229,10 @@ pub const NAMES: &[&str] = &[
     "mach_task_self",
     "mach_host_self",
     "mach_thread_self",
+    "task_info",
+    "host_page_size",
+    "host_statistics",
+    "host_statistics64",
     "task_get_special_port",
     "task_set_special_port",
     "task_set_exception_ports",

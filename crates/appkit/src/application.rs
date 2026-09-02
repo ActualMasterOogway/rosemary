@@ -104,6 +104,17 @@ unsafe extern "C" fn is_running(receiver: Id, _sel: Sel) -> u8 {
     unsafe { ((*(receiver as *const Application)).running != 0) as u8 }
 }
 
+/// `-isActive`: whether this is the frontmost application.
+///
+/// The same state as [`is_running`], and deliberately: nothing here ever
+/// resigns active, because there is no other application for this one to be
+/// behind. A game asks this to decide whether to keep rendering, so answering
+/// NO is not the cautious choice - it pauses the program for good.
+unsafe extern "C" fn is_active(receiver: Id, _sel: Sel) -> u8 {
+    // SAFETY: an application.
+    unsafe { ((*(receiver as *const Application)).running != 0) as u8 }
+}
+
 /// `-finishLaunching`: the two notifications, in the order Apple sends them.
 ///
 /// The delegate is sent each directly as well as through the notification
@@ -384,6 +395,7 @@ pub(crate) fn install() {
         "applicationIconImage" => application_icon_image, c"@16@0:8";
         "setApplicationIconImage:" => set_application_icon_image, c"v24@0:8@16";
         "isRunning" => is_running, c"c16@0:8";
+        "isActive" => is_active, c"c16@0:8";
         "finishLaunching" => finish_launching, c"v16@0:8";
         "run" => run, c"v16@0:8";
         "stop:" => stop, c"v24@0:8@16";

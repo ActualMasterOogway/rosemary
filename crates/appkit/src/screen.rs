@@ -134,6 +134,124 @@ pub unsafe extern "C" fn CGMainDisplayID() -> u32 {
     sdl3::video::primary_display()
 }
 
+/// `CGRect CGDisplayBounds(CGDirectDisplayID)`.
+///
+/// CoreGraphics measures the global display space from the **top left** with y
+/// increasing downwards, which is SDL's convention and not `-[NSScreen frame]`'s
+/// - so this is not [`frame`] with a different receiver, and converting it as
+/// though it were puts a second display on the wrong side of the first.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayBounds(display: u32) -> NSRect {
+    match sdl3::video::display_bounds(display) {
+        Some(b) => NSRect {
+            origin: foundation::geometry::NSPoint {
+                x: b.x as f64,
+                y: b.y as f64,
+            },
+            size: foundation::geometry::NSSize {
+                width: b.w as f64,
+                height: b.h as f64,
+            },
+        },
+        // What CoreGraphics answers for a display id it does not know.
+        None => NSRect::default(),
+    }
+}
+
+/// `kCGErrorSuccess`.
+const CG_SUCCESS: i32 = 0;
+/// `kCGErrorIllegalArgument`.
+const CG_ILLEGAL_ARGUMENT: i32 = 1001;
+
+/// `CGError CGGetOnlineDisplayList(uint32_t, CGDirectDisplayID *, uint32_t *)`
+///
+/// Also `CGGetActiveDisplayList`. The two differ on a Mac only in whether a
+/// display mirroring another is listed, and nothing here mirrors.
+///
+/// A null list with a count is the enquiry form, which is how a caller sizes
+/// the array it is about to pass - so it succeeds rather than failing.
+///
+/// # Safety
+///
+/// `list` is null or writable for `max` display ids, and `count` is null or a
+/// writable `uint32_t`.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGGetOnlineDisplayList(
+    max: u32,
+    list: *mut u32,
+    count: *mut u32,
+) -> i32 {
+    let displays = sdl3::video::displays();
+    if list.is_null() {
+        if count.is_null() {
+            return CG_ILLEGAL_ARGUMENT;
+        }
+        // SAFETY: the caller states it is writable.
+        unsafe { count.write(displays.len() as u32) };
+        return CG_SUCCESS;
+    }
+    let room = (max as usize).min(displays.len());
+    // SAFETY: the caller states `list` holds `max` ids.
+    unsafe { std::ptr::copy_nonoverlapping(displays.as_ptr(), list, room) };
+    if !count.is_null() {
+        // The number *written*, which is what a caller iterates over. The total
+        // would walk past the end of its own array.
+        // SAFETY: the caller states it is writable.
+        unsafe { count.write(room as u32) };
+    }
+    CG_SUCCESS
+}
+
+/// Points per inch assumed for a display whose physical size nothing here can
+/// measure.
+///
+/// SDL reports a display's size in points and its scale factor, and neither
+/// says how large the panel is. Zero is what CoreGraphics answers for a display
+/// id it does not know, and it cannot be the answer here: a caller works its
+/// display density out as pixels over inches, and a zero denominator is an
+/// infinite density rather than a missing one. So a conventional desktop
+/// density is assumed and said so.
+const ASSUMED_DPI: f64 = 96.0;
+
+/// `CGSize CGDisplayScreenSize(CGDirectDisplayID)` - the panel's size in
+/// millimetres.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayScreenSize(display: u32) -> foundation::geometry::NSSize {
+    const MM_PER_INCH: f64 = 25.4;
+    match sdl3::video::display_bounds(display) {
+        Some(b) => foundation::geometry::NSSize {
+            width: b.w as f64 / ASSUMED_DPI * MM_PER_INCH,
+            height: b.h as f64 / ASSUMED_DPI * MM_PER_INCH,
+        },
+        None => foundation::geometry::NSSize::default(),
+    }
+}
+
+/// `CGOpenGLDisplayMask CGDisplayIDToOpenGLDisplayMask(CGDirectDisplayID)`.
+///
+/// One bit per display, which is what a pixel-format attribute list carries.
+/// The mask is only ever handed back to a CGL call this tree answers, so the
+/// numbering is this tree's own; a display past the thirty-second gets no bit,
+/// as it does on a Mac.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayIDToOpenGLDisplayMask(display: u32) -> u32 {
+    sdl3::video::displays()
+        .iter()
+        .position(|d| *d == display)
+        .filter(|index| *index < 32)
+        .map_or(0, |index| 1u32 << index)
+}
+
+/// `io_service_t CGDisplayIOServicePort(CGDirectDisplayID)`.
+///
+/// `MACH_PORT_NULL`, which is what a Mac answers for a display with no IOKit
+/// service behind it. There is no IORegistry here, and a fabricated port number
+/// would be one a caller went on to send a message to.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayIOServicePort(_display: u32) -> u32 {
+    0
+}
+
 /// The display id a screen stands for, for `CVDisplayLink` and its relatives.
 ///
 /// # Safety

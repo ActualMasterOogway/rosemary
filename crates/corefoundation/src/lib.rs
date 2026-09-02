@@ -23,6 +23,7 @@ mod send;
 pub mod string;
 pub mod url;
 pub mod uuid;
+pub mod preferences;
 pub mod sysconfig;
 
 /// Install the classes this crate owns. Idempotent.
@@ -134,7 +135,7 @@ pub fn symbol(name: &str) -> Option<u64> {
 
         // SystemConfiguration, which is a framework of its own and is here
         // because its objects are CoreFoundation's - see [`sysconfig`].
-        other => return sysconfig::symbol(other),
+        other => return preferences::symbol(other).or_else(|| sysconfig::symbol(other)),
     })
 }
 
@@ -217,7 +218,12 @@ pub const NAMES: &[&str] = &[
 
 /// The names [`symbol`] answers, `sysconfig`'s included.
 pub fn names() -> Vec<&'static str> {
-    NAMES.iter().chain(sysconfig::NAMES).copied().collect()
+    NAMES
+        .iter()
+        .chain(preferences::NAMES)
+        .chain(sysconfig::NAMES)
+        .copied()
+        .collect()
 }
 
 /// A mode name, as a string that lives for the process.

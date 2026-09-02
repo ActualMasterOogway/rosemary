@@ -209,10 +209,82 @@ pub fn provider() -> SyntheticDylib {
     for (name, addr) in appkit::data_symbols() {
         lib.define_data(&name, addr);
     }
+    for (name, addr) in media_constants() {
+        lib.define_data(&name, addr);
+    }
     for (name, addr) in shimmed() {
         lib.define_fn(&format!("_{name}"), addr);
     }
     lib
+}
+
+/// String globals belonging to frameworks this tree does not implement at all.
+///
+/// Published anyway, and only because of the difference AppKit's
+/// `NOTIFICATION_NAMES` states: an unresolved *function* import is refused by
+/// name at the call, while an unresolved **data** import binds to zero and the
+/// guest dereferences it. A program that registers for
+/// `AVCaptureDeviceWasConnectedNotification` before it ever touches a camera
+/// therefore segfaults on the `objc_msgSend` that passes the name, with nothing
+/// to say which symbol it was.
+///
+/// Nothing posts any of these, which is the honest state: there is no capture
+/// session and no game controller here. A name nothing posts is a gap the
+/// program survives.
+///
+/// The values are Apple's own, not the symbol names. Three of them differ, and
+/// they are the ones a program compares rather than merely passes on:
+/// `AVMediaTypeVideo` is the four-character code `vide`.
+const MEDIA_CONSTANTS: &[(&str, &str)] = &[
+    (
+        "_AVCaptureDeviceWasConnectedNotification",
+        "AVCaptureDeviceWasConnectedNotification",
+    ),
+    (
+        "_AVCaptureDeviceWasDisconnectedNotification",
+        "AVCaptureDeviceWasDisconnectedNotification",
+    ),
+    (
+        "_AVCaptureSessionDidStartRunningNotification",
+        "AVCaptureSessionDidStartRunningNotification",
+    ),
+    (
+        "_AVCaptureSessionDidStopRunningNotification",
+        "AVCaptureSessionDidStopRunningNotification",
+    ),
+    (
+        "_AVCaptureSessionRuntimeErrorNotification",
+        "AVCaptureSessionRuntimeErrorNotification",
+    ),
+    ("_AVCaptureSessionErrorKey", "AVCaptureSessionErrorKey"),
+    ("_AVMediaTypeVideo", "vide"),
+    ("_AVMediaTypeAudio", "soun"),
+    ("_AVMediaTypeText", "text"),
+    (
+        "_GCControllerDidConnectNotification",
+        "GCControllerDidConnectNotification",
+    ),
+    (
+        "_GCControllerDidDisconnectNotification",
+        "GCControllerDidDisconnectNotification",
+    ),
+];
+
+/// Each of [`MEDIA_CONSTANTS`] as a cell holding an `NSString *`.
+///
+/// A cell rather than the string itself, for the reason `foundation`'s own
+/// globals go through one: the symbol names a *variable* holding the pointer,
+/// and a guest loads it before dereferencing.
+fn media_constants() -> Vec<(String, u64)> {
+    MEDIA_CONSTANTS
+        .iter()
+        .map(|(symbol, text)| {
+            (
+                (*symbol).to_string(),
+                corefoundation::base::global_cell(symbol, foundation::notification::name_object(text)),
+            )
+        })
+        .collect()
 }
 
 /// Names this tree answers only as a shim, and the address the loader binds.

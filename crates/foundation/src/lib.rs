@@ -269,6 +269,11 @@ pub fn data_symbols() -> Vec<(String, u64)> {
     // read off the end of the allocation.
     out.push(("_NSZeroPoint".to_string(), zeroed::<geometry::NSPoint>()));
     out.push(("_NSZeroRect".to_string(), zeroed::<geometry::NSRect>()));
+    // The CoreGraphics spellings of the same three, which are separate symbols
+    // in a separate framework's `__DATA` even though the types are identical.
+    out.push(("_CGPointZero".to_string(), zeroed::<geometry::NSPoint>()));
+    out.push(("_CGSizeZero".to_string(), zeroed::<geometry::NSSize>()));
+    out.push(("_CGRectZero".to_string(), zeroed::<geometry::NSRect>()));
     out
 }
 
