@@ -347,9 +347,11 @@ impl FileActions {
                     Action::Close(fd) => {
                         libc::posix_spawn_file_actions_addclose(&mut host.0, *fd)
                     }
+                    #[cfg(target_os = "linux")]
                     Action::Chdir(path) => {
                         libc::posix_spawn_file_actions_addchdir_np(&mut host.0, path.as_ptr())
                     }
+                    #[cfg(target_os = "linux")]
                     Action::Fchdir(fd) => {
                         libc::posix_spawn_file_actions_addfchdir_np(&mut host.0, *fd)
                     }
@@ -358,6 +360,7 @@ impl FileActions {
                     Action::Inherit(fd) => {
                         libc::posix_spawn_file_actions_adddup2(&mut host.0, *fd, *fd)
                     }
+                    _ => unimplemented!()
                 }
             };
             if rc != 0 {
@@ -967,6 +970,7 @@ mod tests {
 
     /// The flags that collide are the reason this translation exists: Darwin's
     /// `SETEXEC` is Linux's `USEVFORK`, so the word must never be passed through.
+    #[cfg(target_os = "linux")]
     #[test]
     fn only_the_agreeing_flags_are_forwarded() {
         let attributes = Attributes {

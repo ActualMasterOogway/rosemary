@@ -315,6 +315,7 @@ pub unsafe extern "C" fn kill(thread: u64, signal: u64) -> i32 {
 /// # Safety
 ///
 /// `thread` is a `pthread_t` this process issued.
+#[cfg(not(target_os = "macos"))]
 pub unsafe extern "C" fn get_stackaddr_np(thread: u64) -> u64 {
     // SAFETY: the caller's obligation.
     match unsafe { stack_of(thread) } {
@@ -328,6 +329,7 @@ pub unsafe extern "C" fn get_stackaddr_np(thread: u64) -> u64 {
 /// # Safety
 ///
 /// As [`get_stackaddr_np`].
+#[cfg(not(target_os = "macos"))]
 pub unsafe extern "C" fn get_stacksize_np(thread: u64) -> u64 {
     // SAFETY: the caller's obligation.
     unsafe { stack_of(thread) }.map_or(0, |(_, size)| size as u64)
@@ -338,6 +340,7 @@ pub unsafe extern "C" fn get_stacksize_np(thread: u64) -> u64 {
 /// # Safety
 ///
 /// As [`get_stackaddr_np`].
+#[cfg(not(target_os = "macos"))]
 unsafe fn stack_of(thread: u64) -> Option<(u64, usize)> {
     // SAFETY: zeroed is not a valid `pthread_attr_t` to *read*, but it is what
     // `pthread_getattr_np` is given to fill in, and it is only read on success.

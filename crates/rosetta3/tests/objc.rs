@@ -25,7 +25,8 @@
 
 mod common;
 
-use std::ffi::CStr;
+use std::ffi::{CStr, OsString};
+use std::str::FromStr;
 
 use rosetta3::objc::{Refusal, host};
 use rosetta3::{Program, Vm, startup};
@@ -58,7 +59,7 @@ static PUBLISHED: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn vm_for(path: &str) -> &'static Vm {
     let program = Program::load_executable(path, &[])
         .unwrap_or_else(|e| panic!("linking {path} failed: {e}"));
-    let args = [path.to_string()];
+    let args = [OsString::from_str(path).unwrap()];
     let vm: &'static Vm = Box::leak(Box::new(
         Vm::new(program, path, &args).expect("a VM with a stack"),
     ));
