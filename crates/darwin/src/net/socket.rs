@@ -62,18 +62,38 @@ fn flags_from_host(host: i32) -> i32 {
     out
 }
 
-/// `int socket(int domain, int type, int protocol)`
+/// Darwin's `SOCK_CLOEXEC`, which this host spells with a different bit.
+const SOCK_CLOEXEC: i32 = 0x1000_0000;
+/// Darwin's `SOCK_NONBLOCK`, likewise.
+const SOCK_NONBLOCK: i32 = 0x2000_0000;
+
+/// The guest's `type` argument as this host's.
 ///
-/// The `SOCK_*` types and the `IPPROTO_*` numbers agree; only the domain does
-/// not. Darwin has no `SOCK_NONBLOCK`/`SOCK_CLOEXEC` bits, so `type` carries
-/// nothing this host would misread.
+/// The `SOCK_*` type numbers and the `IPPROTO_*` protocol numbers agree. The two
+/// flag bits Darwin ORs into `type` do not, and they are the top of the word
+/// where this host's are `0x80000`/`0x800` - so a guest asking for a
+/// non-blocking socket in one call gets `EINVAL` from a host that has never seen
+/// that bit. Anything else above the type is left alone, so a value neither
+/// platform defines is refused by the kernel rather than quietly dropped here.
+fn kind_to_host(darwin: i32) -> i32 {
+    let mut host = darwin & !(SOCK_CLOEXEC | SOCK_NONBLOCK);
+    if darwin & SOCK_CLOEXEC != 0 {
+        host |= libc::SOCK_CLOEXEC;
+    }
+    if darwin & SOCK_NONBLOCK != 0 {
+        host |= libc::SOCK_NONBLOCK;
+    }
+    host
+}
+
+/// `int socket(int domain, int type, int protocol)`
 unsafe extern "C" fn socket(domain: i32, kind: i32, protocol: i32) -> i32 {
     let Some(domain) = addr::family_to_host(domain) else {
         crate::errno::set(libc::EAFNOSUPPORT);
         return -1;
     };
     // SAFETY: three integers; the call touches no caller memory.
-    let fd = unsafe { libc::socket(domain, kind, protocol) };
+    let fd = unsafe { libc::socket(domain, kind_to_host(kind), protocol) };
     super::sockopt::forget(fd);
     fd
 }
@@ -89,7 +109,7 @@ unsafe extern "C" fn socketpair(domain: i32, kind: i32, protocol: i32, sv: *mut 
         return -1;
     };
     // SAFETY: the caller's two-element array.
-    let rc = unsafe { libc::socketpair(domain, kind, protocol, sv) };
+    let rc = unsafe { libc::socketpair(domain, kind_to_host(kind), protocol, sv) };
     if rc == 0 && !sv.is_null() {
         // SAFETY: two `int`s the call just filled in.
         unsafe {

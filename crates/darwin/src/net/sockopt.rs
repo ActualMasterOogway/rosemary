@@ -88,6 +88,9 @@ const TCP_OPTIONS: &[(i32, i32)] = &[
     (0x102, libc::TCP_KEEPCNT),
 ];
 
+/// Darwin's `SO_ERROR`, whose value needs translating; see [`is_pending_error`].
+const SO_ERROR: i32 = 0x1007;
+
 /// Darwin's `SO_NOSIGPIPE`, which this host has no option for.
 ///
 /// Linux asks for the same thing per *call*, with `MSG_NOSIGNAL`. So the switch
@@ -178,16 +181,43 @@ unsafe fn get_nosigpipe(fd: i32, value: *mut c_void, len: *mut u32) -> i32 {
 
 /// `(level, name)` in the host's numbering, or `None` for a pair this module has
 /// not been taught.
+///
+/// A `None` is named on stderr, once per pair. `ENOPROTOOPT` on its own is a
+/// refusal the caller reports as a network failure three layers away - it looks
+/// like the peer, not like a gap in this table - and the pair is the only thing
+/// that says which entry to add.
 fn option_to_host(level: i32, name: i32) -> Option<(i32, i32)> {
-    let (host_level, table) = match level {
-        SOL_SOCKET => (libc::SOL_SOCKET, SOCKET_OPTIONS),
-        IPPROTO_IP => (IPPROTO_IP, IP_OPTIONS),
-        IPPROTO_IPV6 => (IPPROTO_IPV6, IPV6_OPTIONS),
-        IPPROTO_TCP => (IPPROTO_TCP, TCP_OPTIONS),
-        _ => return None,
+    let translated = || {
+        let (host_level, table) = match level {
+            SOL_SOCKET => (libc::SOL_SOCKET, SOCKET_OPTIONS),
+            IPPROTO_IP => (IPPROTO_IP, IP_OPTIONS),
+            IPPROTO_IPV6 => (IPPROTO_IPV6, IPV6_OPTIONS),
+            IPPROTO_TCP => (IPPROTO_TCP, TCP_OPTIONS),
+            _ => return None,
+        };
+        let host_name = table.iter().find(|(theirs, _)| *theirs == name)?.1;
+        Some((host_level, host_name))
     };
-    let host_name = table.iter().find(|(theirs, _)| *theirs == name)?.1;
-    Some((host_level, host_name))
+    let found = translated();
+    if found.is_none() {
+        say_unknown_option(level, name);
+    }
+    found
+}
+
+/// Name a refused `(level, name)` pair, once for each distinct one.
+fn say_unknown_option(level: i32, name: i32) {
+    use std::sync::Mutex;
+    static SAID: Mutex<Vec<(i32, i32)>> = Mutex::new(Vec::new());
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    if said.contains(&(level, name)) {
+        return;
+    }
+    said.push((level, name));
+    eprintln!(
+        "rosetta3: socket option level {level:#x} name {name:#x} is not in \
+         darwin::net::sockopt's tables - refused with ENOPROTOOPT"
+    );
 }
 
 /// Whether an option's *value* is a `struct timeval`, whose two platforms differ
@@ -319,7 +349,33 @@ unsafe extern "C" fn getsockopt(
         return rc;
     }
     // SAFETY: the caller's buffer and length slot.
-    unsafe { libc::getsockopt(fd, host_level, host_name, value, len) }
+    let rc = unsafe { libc::getsockopt(fd, host_level, host_name, value, len) };
+    if rc == 0 && is_pending_error(level, name, len) {
+        // SAFETY: `len` said the buffer holds at least an `int`, checked above.
+        unsafe {
+            let host = value.cast::<i32>().read_unaligned();
+            value
+                .cast::<i32>()
+                .write_unaligned(crate::errno::from_host(host));
+        }
+    }
+    rc
+}
+
+/// Whether this is `SO_ERROR`, whose *value* is an `errno` in the host's
+/// numbering and has to be translated like any other.
+///
+/// The one option whose payload is not a flag, a size or a structure. Left
+/// untranslated it is the `errno` collision in its most misleading form: a guest
+/// asking a non-blocking `connect` how it went reads `EINPROGRESS` (115 here) as
+/// Darwin's 115, which is nothing, or `ECONNREFUSED` (111) as Darwin's 111,
+/// which is nothing either - so a failed connection reports an error the guest
+/// has no name for rather than the one that happened.
+fn is_pending_error(level: i32, name: i32, len: *const u32) -> bool {
+    // SAFETY: `len` is the caller's length slot, already known non-null here.
+    level == SOL_SOCKET
+        && name == SO_ERROR
+        && unsafe { *len as usize >= core::mem::size_of::<i32>() }
 }
 
 pub const NAMES: &[&str] = &["setsockopt", "getsockopt"];

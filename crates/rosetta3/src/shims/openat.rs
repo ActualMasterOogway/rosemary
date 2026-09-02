@@ -122,11 +122,6 @@ pub unsafe extern "C" fn sem_open_with_mode(
 }
 
 /// Darwin's `SEM_FAILED`, which is `(sem_t *)-1` where glibc's is null.
-///
-/// The dangerous kind of disagreement: a guest that checks its `sem_open` against
-/// `-1` reads a null as a live semaphore and hands it to `sem_post`, which faults
-/// with nothing to say. Roblox opens `robloxPlayerStartedEvent` without `O_CREAT`,
-/// so the failure is the *ordinary* path here, not an edge case.
 const DARWIN_SEM_FAILED: *mut libc::sem_t = usize::MAX as *mut libc::sem_t;
 
 /// Claim `_open`, `_openat` and `_sem_open` for this module's wrappers.

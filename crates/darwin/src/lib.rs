@@ -2,6 +2,7 @@
 
 use std::ffi::CString;
 
+pub mod bsd;
 pub mod clock;
 pub mod dispatch;
 pub mod divergent;
@@ -179,6 +180,21 @@ fn implemented(name: &str) -> Option<u64> {
         .or_else(|| string_symbol(name))
         .or_else(|| signal_symbol(name))
         .or_else(|| fcntl_symbol(name))
+        .or_else(|| bsd_symbol(name))
+}
+
+/// The names a Mac's libc exports and this host's does not, which only a host
+/// that is missing them publishes.
+fn bsd_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return bsd::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
 }
 
 /// `fcntl`, which only a host whose commands and `O_` flags are not Darwin's
@@ -383,6 +399,7 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
         uuid::provide(&mut lib);
         signal::entry::provide(&mut lib);
         fcntl::entry::provide(&mut lib);
+        bsd::provide(&mut lib);
     }
     lib
 }

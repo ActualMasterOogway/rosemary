@@ -902,7 +902,9 @@ pub const SHIMMED_ABOVE: &[&str] = &[
     "pthread_once",
     // Takes the destructor, and its key is eight bytes here and four there.
     "pthread_key_create",
-    // Takes three handlers, and is otherwise plain scalars.
+    // Takes three handlers, and is otherwise plain scalars. The slot it binds to
+    // is `crate::bsd`'s and not the host's: glibc keeps `pthread_atfork` in
+    // `libc_nonshared.a`, so the passthrough below finds nothing for it.
     "pthread_atfork",
 ];
 

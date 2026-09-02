@@ -662,6 +662,28 @@ pub mod entry {
         rc
     }
 
+    /// `int pthread_sigmask(int how, const sigset_t *set, sigset_t *oset)`
+    ///
+    /// Every collision [`sigprocmask_`] bridges, and one more: this call returns
+    /// its error *as its return value* rather than through `errno`, so the
+    /// number has to be Darwin's. `divergent` denies the whole `pthread_` family
+    /// and this is one of the entries carved back out of it.
+    ///
+    /// # Safety
+    ///
+    /// As [`sigprocmask_`].
+    pub unsafe extern "C" fn pthread_sigmask_(
+        how: c_int,
+        set: *const u32,
+        oset: *mut u32,
+    ) -> c_int {
+        // SAFETY: the caller's obligation, which is the same one.
+        match unsafe { sigprocmask_(how, set, oset) } {
+            0 => 0,
+            _ => crate::errno::from_host(crate::errno::get()),
+        }
+    }
+
     /// # Safety
     ///
     /// `at` is [`STACK_SIZE`] readable bytes.
@@ -928,6 +950,7 @@ pub mod entry {
         "signal",
         "sigaction",
         "sigprocmask",
+        "pthread_sigmask",
         "sigaltstack",
         "sigsuspend",
         "sigpending",
@@ -948,6 +971,7 @@ pub mod entry {
             "signal" => signal_ as *const (),
             "sigaction" => sigaction_ as *const (),
             "sigprocmask" => sigprocmask_ as *const (),
+            "pthread_sigmask" => pthread_sigmask_ as *const (),
             "sigaltstack" => sigaltstack_ as *const (),
             "sigsuspend" => sigsuspend_ as *const (),
             "sigpending" => sigpending_ as *const (),
