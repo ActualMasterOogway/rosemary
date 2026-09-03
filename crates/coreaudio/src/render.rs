@@ -38,7 +38,7 @@ pub struct TimeStamp {
     pub rate_scalar: f64,
     pub word_clock_time: u64,
     /// `SMPTETime`, which nothing here fills in.
-    smpte: [u8; 24],
+    pub smpte: [u8; 24],
     pub flags: u32,
     pub reserved: u32,
 }

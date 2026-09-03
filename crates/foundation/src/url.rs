@@ -70,6 +70,40 @@ unsafe extern "C" fn file_url_with_path_is_directory(
     }
 }
 
+/// `+fileURLWithPath:relativeToURL:`.
+///
+/// The base is where a *relative* path is measured from and is ignored for an
+/// absolute one, which is the rule for every one of Apple's relative-URL
+/// constructors. Roblox builds its cache paths this way after a login, so a
+/// runtime without it aborts the moment an account has somewhere to store
+/// anything.
+unsafe extern "C" fn file_url_with_path_relative_to_url(
+    class: Id,
+    sel: Sel,
+    path: Id,
+    base: Id,
+) -> Id {
+    // SAFETY: an `NSString`, or nil.
+    let bytes = unsafe { crate::string::bytes(path) };
+    let Ok(path) = std::str::from_utf8(&bytes) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: null or an `NSURL`.
+    let base = unsafe { corefoundation::url::as_url(base as corefoundation::base::CFTypeRef) }
+        .map(|u| u.path())
+        .filter(|p| !p.is_empty());
+    let resolved = match base {
+        Some(base) if !path.starts_with('/') => format!("{}/{path}", base.trim_end_matches('/')),
+        _ => path.to_string(),
+    };
+    let resolved = crate::string::from_str(&resolved);
+    // SAFETY: `+fileURLWithPath:` is this module's own, called with the class it
+    // was installed on and a string this call just made.
+    let url = unsafe { file_url_with_path(class, sel, resolved) };
+    objc::arc::release(resolved);
+    url
+}
+
 /// One accessor, given what it reads off the contents.
 macro_rules! accessor {
     ($name:ident, $read:expr) => {
@@ -391,6 +425,8 @@ pub(crate) fn install() {
         "URLWithString:" => url_with_string, c"@24@0:8@16";
         "fileURLWithPath:" => file_url_with_path, c"@24@0:8@16";
         "fileURLWithPath:isDirectory:" => file_url_with_path_is_directory, c"@28@0:8@16c24";
+        "fileURLWithPath:relativeToURL:" => file_url_with_path_relative_to_url,
+            c"@32@0:8@16@24";
     });
     methods!(class, {
         "absoluteString" => absolute_string, c"@16@0:8";

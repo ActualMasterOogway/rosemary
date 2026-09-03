@@ -476,7 +476,7 @@ pub const SHIMMED_ABOVE: &[&str] = &["__sincosf_stret", "__sincos_stret", "__div
 pub fn provider() -> machish::resolve::SyntheticDylib {
     let mut lib = machish::resolve::SyntheticDylib::new("<darwin>");
     lib.flat(true);
-    for name in SHIMMED_ABOVE {
+    for name in SHIMMED_ABOVE.iter().chain(math::PLAIN) {
         // Only where the host has none: on Darwin these are libSystem's own, and
         // shadowing them would replace an implementation with a placeholder in
         // the one case the shim ever stopped intercepting.

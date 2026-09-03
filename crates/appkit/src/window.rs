@@ -246,6 +246,35 @@ unsafe extern "C" fn window_number_at_point(
     0
 }
 
+/// `-sendEvent:`, the default routing.
+///
+/// A program that overrides this - Roblox does - sees every event first and
+/// calls up to here for the ones it does not take. See [`crate::event::route`].
+unsafe extern "C" fn send_event(receiver: Id, _sel: Sel, event: Id) {
+    crate::event::route(receiver, event);
+}
+
+/// `-mouseLocationOutsideOfEventStream`: where the pointer is now, in this
+/// window's coordinates.
+///
+/// "Outside of the event stream" is the point: a game asks this instead of
+/// remembering the last event, because between two frames the pointer has moved
+/// and the events for it have not been dequeued yet. Roblox asks it on every
+/// `-mouseEntered:`, so a runtime without it aborts the moment the pointer
+/// crosses into the window.
+unsafe extern "C" fn mouse_location_outside_of_event_stream(receiver: Id, sel: Sel) -> NSPoint {
+    let point = match crate::script::pointer() {
+        Some((x, y)) => crate::geometry::point_from_sdl(x as f64, y as f64),
+        None => match sdl3::video::global_mouse_state() {
+            Some((x, y, _)) => crate::geometry::point_from_sdl(x as f64, y as f64),
+            None => return NSPoint::default(),
+        },
+    };
+    // SAFETY: the receiver is a window of this crate's, and both are its own
+    // methods called with the receiver they were installed for.
+    unsafe { convert_screen_to_base(receiver, sel, point) }
+}
+
 /// `-convertBaseToScreen:`, and its inverse below.
 ///
 /// A window's base coordinates have their origin at its own bottom-left, so the
@@ -376,6 +405,8 @@ unsafe extern "C" fn set_content_view(receiver: Id, _sel: Sel, view: Id) {
         let f: unsafe extern "C" fn(Id, Sel, NSRect) = std::mem::transmute(objc::msg::entry());
         f(view, objc::sel::get("setFrame:"), frame);
     }
+    // SAFETY: a view this crate made, now this window's.
+    unsafe { crate::view::update_tracking_areas(view) };
 }
 
 unsafe extern "C" fn delegate(receiver: Id, _sel: Sel) -> Id {
@@ -534,6 +565,14 @@ unsafe extern "C" fn first_responder(receiver: Id, _sel: Sel) -> Id {
 }
 
 unsafe extern "C" fn make_first_responder(receiver: Id, _sel: Sel, responder: Id) -> u8 {
+    if crate::event::tracing() {
+        // SAFETY: null or a live object this runtime allocated.
+        let class = unsafe { objc::object::class_of(responder) };
+        eprintln!(
+            "rosetta3: appkit: -makeFirstResponder: {responder:p} ({})",
+            class.map_or("nil", |c| c.name_str())
+        );
+    }
     window_of(receiver).first_responder = responder;
     1
 }
@@ -668,6 +707,9 @@ pub(crate) fn install() {
         "convertScreenToBase:" => convert_screen_to_base, c"{CGPoint=dd}32@0:8{CGPoint=dd}16";
         "convertPointFromScreen:" => convert_screen_to_base, c"{CGPoint=dd}32@0:8{CGPoint=dd}16";
         "convertPointToScreen:" => convert_base_to_screen, c"{CGPoint=dd}32@0:8{CGPoint=dd}16";
+        "sendEvent:" => send_event, c"v24@0:8@16";
+        "mouseLocationOutsideOfEventStream" => mouse_location_outside_of_event_stream,
+            c"{CGPoint=dd}16@0:8";
         "convertRectFromScreen:" => convert_rect_from_screen,
             c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "convertRectToScreen:" => convert_rect_to_screen,

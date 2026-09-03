@@ -403,6 +403,156 @@ pub unsafe fn describe(view: Id, depth: usize, out: &mut String) {
     }
 }
 
+/// The deepest view under a point, as `-[NSView hitTest:]` finds it.
+///
+/// `point` is in the *superview's* coordinates, which is the argument AppKit's
+/// takes. Subviews are tried last-first, because the last one added is the one
+/// drawn on top.
+///
+/// This is what routes a mouse event, and routing one any other way is not a
+/// detail: AppKit sends a click to the view it landed on and a key to the first
+/// responder, so a runtime that sent both to the responder delivers every click
+/// to whatever was focused last. Roblox focuses a zero-sized
+/// `InputMethodHandler` that implements no mouse method at all, so every click
+/// in the program was being dropped.
+///
+/// # Safety
+///
+/// `view` must be null or an object this runtime allocated.
+pub unsafe fn hit_test(view: Id, point: NSPoint) -> Id {
+    // SAFETY: the caller's obligation.
+    unsafe { hit(view, point, 0) }
+}
+
+unsafe fn hit(view: Id, point: NSPoint, depth: usize) -> Id {
+    if !is_view(view) || depth > 32 {
+        return std::ptr::null_mut();
+    }
+    // A guest's own `-hitTest:` is the answer where it has one: a view that
+    // reshapes its hit region - a round button, a transparent overlay - is
+    // saying so in code this crate cannot see from the frame.
+    let sel = objc::sel::get("hitTest:");
+    // SAFETY: a live object this runtime allocated.
+    if let Some(method) = unsafe { objc::object::class_of(view) }.and_then(|c| c.method(sel)) {
+        // SAFETY: `-hitTest:` is `id (id, SEL, NSPoint)`.
+        return unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, NSPoint) -> Id =
+                std::mem::transmute(method.implementation());
+            f(view, sel, point)
+        };
+    }
+    let frame = view_of(view).frame;
+    if !contains(frame, point) {
+        return std::ptr::null_mut();
+    }
+    let local = NSPoint {
+        x: point.x - frame.origin.x,
+        y: point.y - frame.origin.y,
+    };
+    // SAFETY: the subview list is an array of this runtime's, holding views.
+    let children = unsafe { corefoundation::collections::array(view_of(view).subviews as *const c_void) };
+    for child in children
+        .map(|a| a.values.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .rev()
+    {
+        // SAFETY: an object this runtime allocated.
+        let hit = unsafe { hit(child as Id, local, depth + 1) };
+        if !hit.is_null() {
+            return hit;
+        }
+    }
+    view
+}
+
+/// Whether a rectangle holds a point, on AppKit's half-open rule: the minimum
+/// edges are inside and the maximum ones are not, so two views that share an
+/// edge do not both claim the click.
+fn contains(rect: NSRect, point: NSPoint) -> bool {
+    point.x >= rect.origin.x
+        && point.y >= rect.origin.y
+        && point.x < rect.origin.x + rect.size.width
+        && point.y < rect.origin.y + rect.size.height
+}
+
+/// Send `-updateTrackingAreas` down a view tree.
+///
+/// AppKit sends it when a view is added to a window and whenever the geometry
+/// changes, and it is the *only* time a program is asked to install its
+/// tracking areas: a view's `-updateTrackingAreas` is where an application
+/// removes the old area and adds one for its new bounds. A runtime that never
+/// sends it has a program that never adds one - so `-mouseMoved:`,
+/// `-mouseEntered:` and `-mouseExited:` are all events nothing ever asked for,
+/// and the pointer appears to a game to be standing still.
+///
+/// # Safety
+///
+/// `view` must be null or an object this runtime allocated.
+pub unsafe fn update_tracking_areas(view: Id) {
+    if !is_view(view) {
+        return;
+    }
+    let sel = objc::sel::get("updateTrackingAreas");
+    // SAFETY: a live object this runtime allocated.
+    if let Some(method) = unsafe { objc::object::class_of(view) }.and_then(|c| c.method(sel)) {
+        // SAFETY: `-updateTrackingAreas` is `void (id, SEL)`.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel) = std::mem::transmute(method.implementation());
+            f(view, sel);
+        }
+    }
+    // SAFETY: the subview list is an array of this runtime's, holding views.
+    let children = unsafe { corefoundation::collections::array(view_of(view).subviews as *const c_void) };
+    for child in children.map(|a| a.values.clone()).unwrap_or_default() {
+        // SAFETY: an object this runtime allocated.
+        unsafe { update_tracking_areas(child as Id) };
+    }
+}
+
+/// Whether any view in this tree has a tracking area.
+///
+/// Not *which* area and not its rectangle: the question a caller has is whether
+/// the program asked to be told about the pointer at all, and a view that added
+/// one covering part of itself still wants `-mouseMoved:` while the pointer is
+/// in it. Reporting per-rectangle would need enter and exit events, which this
+/// crate does not deliver.
+///
+/// # Safety
+///
+/// `view` must be null or an object this runtime allocated.
+pub unsafe fn any_tracking_area(view: Id) -> bool {
+    if !is_view(view) {
+        return false;
+    }
+    let v = view_of(view);
+    // SAFETY: the list is an array of this runtime's.
+    let areas = unsafe { corefoundation::collections::array(v.tracking_areas as *const c_void) };
+    if areas.is_some_and(|a| !a.values.is_empty()) {
+        return true;
+    }
+    // SAFETY: the subview list is an array of this runtime's, holding views.
+    let children = unsafe { corefoundation::collections::array(v.subviews as *const c_void) };
+    children
+        .map(|a| a.values.clone())
+        .unwrap_or_default()
+        .into_iter()
+        // SAFETY: an object this runtime allocated.
+        .any(|child| unsafe { any_tracking_area(child as Id) })
+}
+
+/// The view above this one, for walking the responder chain.
+///
+/// # Safety
+///
+/// As [`hit_test`].
+pub unsafe fn superview_of(view: Id) -> Id {
+    match is_view(view) {
+        true => view_of(view).superview,
+        false => std::ptr::null_mut(),
+    }
+}
+
 /// The backing scale a view draws at: its window's, or one.
 fn scale(receiver: Id) -> f64 {
     // SAFETY: a view of this crate's.
@@ -583,6 +733,8 @@ unsafe extern "C" fn add_subview(receiver: Id, sel: Sel, subview: Id) {
             .values
             .push(array.policy.retain(subview as *const c_void));
     }
+    // SAFETY: a view this crate made, now in a window.
+    unsafe { update_tracking_areas(subview) };
 }
 
 unsafe extern "C" fn remove_from_superview(receiver: Id, _sel: Sel) {

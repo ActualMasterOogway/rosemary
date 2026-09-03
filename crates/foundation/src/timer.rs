@@ -99,6 +99,69 @@ unsafe extern "C" fn date_with_interval_since_now(_class: Id, _sel: Sel, seconds
     date(now() + seconds)
 }
 
+/// `+dateWithTimeIntervalSince1970:`, which is the one a program building a
+/// date out of a server timestamp uses - every Roblox response carries Unix
+/// seconds.
+unsafe extern "C" fn date_with_interval_since_1970(_class: Id, _sel: Sel, seconds: f64) -> Id {
+    date_since_1970(seconds)
+}
+
+/// `+dateWithTimeIntervalSinceReferenceDate:`, the same constructor in Apple's
+/// own epoch.
+unsafe extern "C" fn date_with_interval_since_reference(
+    _class: Id,
+    _sel: Sel,
+    seconds: f64,
+) -> Id {
+    date(seconds)
+}
+
+/// `-dateByAddingTimeInterval:`, the one arithmetic method on a date.
+///
+/// A new object rather than a mutation: `NSDate` is immutable, and a caller
+/// that got its own receiver back with a moved interval would find every date
+/// it had kept a reference to had moved with it.
+unsafe extern "C" fn date_by_adding_interval(receiver: Id, _sel: Sel, seconds: f64) -> Id {
+    date(date_of(receiver) + seconds)
+}
+
+/// `-compare:`, which answers `NSComparisonResult`: -1, 0 or 1, in that
+/// numbering and no other. A caller sorts with it and branches on the sign.
+///
+/// Two dates that are equal to the microsecond are equal here, because a date
+/// *is* its interval - there is nothing else to break a tie with.
+unsafe extern "C" fn compare(receiver: Id, _sel: Sel, other: Id) -> isize {
+    let (mine, theirs) = (date_of(receiver), date_of(other));
+    match mine.partial_cmp(&theirs) {
+        Some(std::cmp::Ordering::Less) => -1,
+        Some(std::cmp::Ordering::Greater) => 1,
+        // Equal, and also the answer for a NaN interval: `NSOrderedSame` is the
+        // only one of the three that does not claim an order that is not there.
+        _ => 0,
+    }
+}
+
+unsafe extern "C" fn is_equal_to_date(receiver: Id, _sel: Sel, other: Id) -> u8 {
+    u8::from(date_of(receiver) == date_of(other))
+}
+
+/// `-earlierDate:` and `-laterDate:`, which answer with *one of the two
+/// receivers* rather than a new date - a caller compares the answer against its
+/// own pointer.
+unsafe extern "C" fn earlier_date(receiver: Id, _sel: Sel, other: Id) -> Id {
+    match date_of(receiver) <= date_of(other) {
+        true => receiver,
+        false => other,
+    }
+}
+
+unsafe extern "C" fn later_date(receiver: Id, _sel: Sel, other: Id) -> Id {
+    match date_of(receiver) >= date_of(other) {
+        true => receiver,
+        false => other,
+    }
+}
+
 unsafe extern "C" fn time_interval_since_reference(receiver: Id, _sel: Sel) -> f64 {
     date_of(receiver)
 }
@@ -331,12 +394,20 @@ pub(crate) fn install() {
         "distantFuture" => distant_future, c"@16@0:8";
         "distantPast" => distant_past, c"@16@0:8";
         "dateWithTimeIntervalSinceNow:" => date_with_interval_since_now, c"@24@0:8d16";
+        "dateWithTimeIntervalSince1970:" => date_with_interval_since_1970, c"@24@0:8d16";
+        "dateWithTimeIntervalSinceReferenceDate:" => date_with_interval_since_reference,
+            c"@24@0:8d16";
     });
     methods!(date_class, {
         "timeIntervalSinceReferenceDate" => time_interval_since_reference, c"d16@0:8";
         "timeIntervalSinceNow" => time_interval_since_now, c"d16@0:8";
         "timeIntervalSince1970" => time_interval_since_1970, c"d16@0:8";
         "timeIntervalSinceDate:" => time_interval_since_date, c"d24@0:8@16";
+        "dateByAddingTimeInterval:" => date_by_adding_interval, c"@24@0:8d16";
+        "compare:" => compare, c"q24@0:8@16";
+        "isEqualToDate:" => is_equal_to_date, c"c24@0:8@16";
+        "earlierDate:" => earlier_date, c"@24@0:8@16";
+        "laterDate:" => later_date, c"@24@0:8@16";
     });
 
     let timer_class = corefoundation::base::register(c"NSTimer", None, TIMER_INSTANCE_SIZE, false);

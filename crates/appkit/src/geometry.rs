@@ -7,7 +7,7 @@
 //! mouse coordinate read without converting is wrong by twice its distance from
 //! the centre - both of which look like a program bug rather than a runtime one.
 
-use foundation::geometry::{NSPoint, NSRect, NSSize};
+use foundation::geometry::{CGFloat, NSPoint, NSRect, NSSize};
 
 /// The height of the primary display, which is the origin AppKit measures from.
 ///
@@ -85,6 +85,33 @@ fn standardized(rect: NSRect) -> (f64, f64, f64, f64) {
 pub fn contains(rect: NSRect, point: NSPoint) -> bool {
     let (x, y, width, height) = standardized(rect);
     point.x >= x && point.x < x + width && point.y >= y && point.y < y + height
+}
+
+/// `BOOL NSPointInRect(NSPoint, NSRect)`.
+///
+/// Foundation's spelling of [`contains`], and the first thing Roblox's
+/// `-mouseDown:` calls - so an unbound one is a click that faults rather than a
+/// click that misses.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn NSPointInRect(point: NSPoint, rect: NSRect) -> u8 {
+    contains(rect, point) as u8
+}
+
+/// `NSRect NSInsetRect(NSRect, CGFloat, CGFloat)`: the rectangle shrunk by `dx`
+/// on each side and `dy` on each end. A negative amount grows it, which is how
+/// callers use it to make a margin.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn NSInsetRect(rect: NSRect, dx: CGFloat, dy: CGFloat) -> NSRect {
+    NSRect {
+        origin: NSPoint {
+            x: rect.origin.x + dx,
+            y: rect.origin.y + dy,
+        },
+        size: NSSize {
+            width: rect.size.width - 2.0 * dx,
+            height: rect.size.height - 2.0 * dy,
+        },
+    }
 }
 
 /// The eight `CGFloat CGRectGet…(CGRect)` accessors.

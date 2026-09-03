@@ -103,6 +103,73 @@ reader! {
     is_a_repeat -> u8 { |e| e.repeat as u8 },
 }
 
+/// The scroll accessors, which a program reads on every wheel event.
+///
+/// All four describe a *trackpad*, and this runtime has none: SDL reports a
+/// wheel, which is a discrete notch from a device with no fingers on it. So the
+/// answers are the ones AppKit gives for a mouse wheel, and each of them
+/// matters to a caller - `-hasPreciseScrollingDeltas` says the deltas are lines
+/// rather than points, and the two phases say the gesture is not one AppKit is
+/// tracking, so nothing waits for an end that never comes.
+unsafe extern "C" fn no_phase(_receiver: Id, _sel: Sel) -> u64 {
+    // `NSEventPhaseNone`.
+    0
+}
+
+unsafe extern "C" fn no(_receiver: Id, _sel: Sel) -> u8 {
+    0
+}
+
+unsafe extern "C" fn zero(_receiver: Id, _sel: Sel) -> isize {
+    0
+}
+
+unsafe extern "C" fn zero_short(_receiver: Id, _sel: Sel) -> i16 {
+    0
+}
+
+unsafe extern "C" fn zero_double(_receiver: Id, _sel: Sel) -> CGFloat {
+    0.0
+}
+
+/// `-pressure`: full for a button that is down, none for one that is not.
+///
+/// A wheel or a moved-mouse event has no button, and a program that scaled
+/// something by the pressure of a click would get zero for every click if this
+/// answered zero throughout.
+unsafe extern "C" fn pressure(receiver: Id, _sel: Sel) -> f32 {
+    // SAFETY: the caller sends to a live object.
+    let down = unsafe { event_of(receiver) }.is_some_and(|e| {
+        matches!(
+            e.kind,
+            kind::LEFT_MOUSE_DOWN
+                | kind::RIGHT_MOUSE_DOWN
+                | kind::OTHER_MOUSE_DOWN
+                | kind::LEFT_MOUSE_DRAGGED
+                | kind::RIGHT_MOUSE_DRAGGED
+                | kind::OTHER_MOUSE_DRAGGED
+        )
+    });
+    f32::from(u8::from(down))
+}
+
+/// `-windowNumber`, from the window the event was built for, so an event and
+/// `+windowNumberAtPoint:` agree about which window is meant.
+unsafe extern "C" fn window_number(receiver: Id, _sel: Sel) -> isize {
+    // SAFETY: the caller sends to a live object.
+    let window = unsafe { event_of(receiver) }.map_or(std::ptr::null_mut(), |e| e.window);
+    if window.is_null() {
+        return 0;
+    }
+    let sel = objc::sel::get("windowNumber");
+    // SAFETY: `-windowNumber` is `NSInteger (id, SEL)` on a window this crate
+    // made.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) -> isize = std::mem::transmute(objc::msg::entry());
+        f(window, sel)
+    }
+}
+
 /// `-timestamp`: seconds since this process started, which is what the same
 /// method means on Apple's - the value is only ever differenced.
 unsafe extern "C" fn timestamp(_receiver: Id, _sel: Sel) -> CGFloat {
@@ -161,10 +228,31 @@ pub fn make(fields: Fields) -> Id {
     objc::arc::autorelease(event as Id)
 }
 
+/// An event's type, for the window's own routing.
+///
+/// Zero for anything that is not an event, which no selector matches - so a
+/// stray object routes nowhere rather than to whatever `mouseDown:` would do.
+pub fn kind_of(event: Id) -> u64 {
+    // SAFETY: null or a live object this runtime allocated.
+    unsafe { event_of(event) }.map_or(0, |e| e.kind)
+}
+
+/// Where the event happened, in its window's coordinates.
+pub fn location_of(event: Id) -> NSPoint {
+    // SAFETY: as above.
+    unsafe { event_of(event) }.map_or(NSPoint::default(), |e| e.location)
+}
+
 /// `+[NSEvent mouseLocation]`: the pointer in screen coordinates, asked of the
 /// window system rather than of the last event - which is the difference
 /// between this and `-locationInWindow`, and the reason a program uses it.
 unsafe extern "C" fn mouse_location(_class: Id, _sel: Sel) -> NSPoint {
+    // A scripted pointer is the exception: nothing moved the compositor's
+    // cursor, so the window system would answer where a person left it and
+    // disagree with the events the guest has just been given.
+    if let Some((x, y)) = crate::script::pointer() {
+        return crate::geometry::point_from_sdl(x as f64, y as f64);
+    }
     match sdl3::video::global_mouse_state() {
         Some((x, y, _)) => crate::geometry::point_from_sdl(x as f64, y as f64),
         None => NSPoint::default(),
@@ -192,6 +280,20 @@ pub(crate) fn install() {
         "charactersIgnoringModifiers" => characters, c"@16@0:8";
         "window" => window, c"@16@0:8";
         "isARepeat" => is_a_repeat, c"c16@0:8";
+        "phase" => no_phase, c"Q16@0:8";
+        "momentumPhase" => no_phase, c"Q16@0:8";
+        "hasPreciseScrollingDeltas" => no, c"c16@0:8";
+        "isDirectionInvertedFromDevice" => no, c"c16@0:8";
+        "pressure" => pressure, c"f16@0:8";
+        "windowNumber" => window_number, c"q16@0:8";
+        // An event number counts *tracking* sequences on a Mac, and nothing
+        // here tracks one; zero is what an event outside any sequence carries.
+        "eventNumber" => zero, c"q16@0:8";
+        // `NSEventSubtype`, which for a mouse or key event is zero.
+        "subtype" => zero_short, c"s16@0:8";
+        // `-magnification` is the pinch gesture's, and SDL delivers no pinch.
+        "magnification" => zero_double, c"d16@0:8";
+        "deltaZ" => zero_double, c"d16@0:8";
         "timestamp" => timestamp, c"d16@0:8";
     });
 }

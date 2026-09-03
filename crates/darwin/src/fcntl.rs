@@ -50,18 +50,82 @@ pub fn takes_third_argument(cmd: i32) -> bool {
     )
 }
 
+/// Darwin's `struct flock`, which is not this host's.
+///
+/// The two platforms hold the same five fields in a different **order**:
+///
+/// | | Darwin | Linux |
+/// |---|---|---|
+/// | 0 | `l_start` | `l_type`, `l_whence` |
+/// | 8 | `l_len` | `l_start` |
+/// | 16 | `l_pid` | `l_len` |
+/// | 20 | `l_type`, `l_whence` | `l_pid` at 24 |
+///
+/// So forwarding the structure reads a whole-file lock's `l_start` of 0 as
+/// `l_type` 0, which is Linux's `F_RDLCK` where Darwin's 0 is not a lock type at
+/// all. The values are renumbered too - see [`lock_type_to_host`].
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Flock {
+    pub start: i64,
+    pub len: i64,
+    pub pid: i32,
+    pub kind: i16,
+    pub whence: i16,
+}
+
+const _: () = assert!(size_of::<Flock>() == 24);
+
+/// Darwin's `l_type` values, from `<sys/fcntl.h>`.
+pub mod lock {
+    pub const F_RDLCK: i16 = 1;
+    pub const F_UNLCK: i16 = 2;
+    pub const F_WRLCK: i16 = 3;
+}
+
+/// Darwin's lock type as this host's, which renumbers all three.
+///
+/// `None` for a value that is none of them: a lock type nothing recognises is a
+/// caller's bug, and passing it on would ask for whichever lock this host gives
+/// that number - `F_UNLCK` for Darwin's `F_WRLCK`, which is an unlock where an
+/// exclusive lock was asked for.
+#[cfg(not(target_os = "macos"))]
+pub fn lock_type_to_host(kind: i16) -> Option<i16> {
+    Some(match kind {
+        lock::F_RDLCK => libc::F_RDLCK as i16,
+        lock::F_WRLCK => libc::F_WRLCK as i16,
+        lock::F_UNLCK => libc::F_UNLCK as i16,
+        _ => return None,
+    })
+}
+
+/// And back, for what `F_GETLK` reports about the lock that is in the way.
+#[cfg(not(target_os = "macos"))]
+pub fn lock_type_to_guest(kind: i16) -> i16 {
+    match kind as libc::c_int {
+        libc::F_RDLCK => lock::F_RDLCK,
+        libc::F_WRLCK => lock::F_WRLCK,
+        _ => lock::F_UNLCK,
+    }
+}
+
+/// Whether a command takes a `struct flock` rather than a scalar.
+pub fn takes_a_lock(cmd: i32) -> bool {
+    matches!(cmd, cmd::F_GETLK | cmd::F_SETLK | cmd::F_SETLKW)
+}
+
 /// The host command that means what Darwin's `cmd` means, or `None`.
 ///
-/// `None` is the answer for three separate reasons, and none of them is worth
-/// guessing past:
+/// `None` is the answer for two separate reasons, and neither is worth guessing
+/// past:
 ///
-/// * The lock family. `F_GETLK` and its neighbours take a `struct flock`, whose fields
-///   are in a different order on the two platforms, so forwarding the command would
-///   read the guest's `l_type` as its `l_start`.
 /// * `F_FULLFSYNC`, which asks the drive to flush its own write cache. Linux spells
 ///   that `fsync` - a different call, not a different command number - so a caller
 ///   that wants it has to make it, and this cannot.
 /// * The rest of the Darwin-only tail, which has no host equivalent at all.
+///
+/// The lock family is *not* refused: it is translated, structure and all, by
+/// [`entry::fcntl`].
 #[cfg(not(target_os = "macos"))]
 pub fn to_host(cmd: i32) -> Option<libc::c_int> {
     Some(match cmd {
@@ -73,6 +137,9 @@ pub fn to_host(cmd: i32) -> Option<libc::c_int> {
         cmd::F_GETOWN => libc::F_GETOWN,
         cmd::F_SETOWN => libc::F_SETOWN,
         cmd::F_DUPFD_CLOEXEC => libc::F_DUPFD_CLOEXEC,
+        cmd::F_GETLK => libc::F_GETLK,
+        cmd::F_SETLK => libc::F_SETLK,
+        cmd::F_SETLKW => libc::F_SETLKW,
         _ => return None,
     })
 }
@@ -200,7 +267,10 @@ pub fn flags_to_host(flags: i32) -> Result<libc::c_int, i32> {
 pub mod entry {
     use machish::resolve::SyntheticDylib;
 
-    use super::{cmd, flags_to_guest, split_flags_to_host, takes_third_argument, to_host};
+    use super::{
+        Flock, cmd, flags_to_guest, lock_type_to_guest, lock_type_to_host, split_flags_to_host,
+        takes_a_lock, takes_third_argument, to_host,
+    };
 
     /// `int fcntl(int fd, int cmd, ...)`, with the ellipsis spelled out.
     ///
@@ -229,6 +299,11 @@ pub mod entry {
             crate::errno::set(libc::EINVAL);
             return -1;
         };
+        if takes_a_lock(command) {
+            // SAFETY: the caller's obligation - a lock command's third argument
+            // is a `struct flock *`.
+            return unsafe { lock(fd, host_command, arg as *mut Flock) };
+        }
         let arg = match command {
             _ if !takes_third_argument(command) => 0,
             cmd::F_SETFL => {
@@ -246,6 +321,59 @@ pub mod entry {
             true => flags_to_guest(rc),
             false => rc,
         }
+    }
+
+    /// The lock family, through a `struct flock` of this host's.
+    ///
+    /// This is what a single-instance lock is made of, and it is why it needs
+    /// translating rather than forwarding: Roblox's `NamedMutex` opens
+    /// `InstallerInfo.log` and takes a whole-file `F_WRLCK` on it with
+    /// `F_SETLK`, so a runtime that refused the command reported
+    /// `NamedMutex::lock failed: Invalid argument` and would not load a place.
+    ///
+    /// `F_GETLK` is copied back as well as in: it answers by *overwriting* the
+    /// caller's structure with the lock that is in the way, and a caller reads
+    /// `l_pid` out of it to name the process holding it.
+    ///
+    /// # Safety
+    ///
+    /// `flock` must be a readable and writable Darwin `struct flock`.
+    unsafe fn lock(
+        fd: libc::c_int,
+        host_command: libc::c_int,
+        flock: *mut Flock,
+    ) -> libc::c_int {
+        if flock.is_null() {
+            crate::errno::set(libc::EINVAL);
+            return -1;
+        }
+        // SAFETY: the caller's obligation.
+        let wanted = unsafe { *flock };
+        let Some(kind) = lock_type_to_host(wanted.kind) else {
+            crate::errno::set(libc::EINVAL);
+            return -1;
+        };
+        let mut host: libc::flock = unsafe { std::mem::zeroed() };
+        host.l_type = kind as libc::c_short;
+        host.l_whence = wanted.whence as libc::c_short;
+        host.l_start = wanted.start;
+        host.l_len = wanted.len;
+        // SAFETY: a live `struct flock` of this host's, which is what the host
+        // command reads.
+        let rc = unsafe { libc::fcntl(fd, host_command, &mut host) };
+        if rc >= 0 && host_command == libc::F_GETLK {
+            // SAFETY: the caller's obligation.
+            unsafe {
+                *flock = Flock {
+                    start: host.l_start,
+                    len: host.l_len,
+                    pid: host.l_pid,
+                    kind: lock_type_to_guest(host.l_type as i16),
+                    whence: host.l_whence as i16,
+                };
+            }
+        }
+        rc
     }
 
     /// Name a `F_SETFL` bit with no equivalent here, once for each distinct set.
@@ -317,14 +445,88 @@ mod tests {
         assert_eq!(to_host(cmd::F_SETFL), Some(libc::F_SETFL));
         #[cfg(not(target_os = "macos"))]
         {
-            assert_eq!(
-                to_host(cmd::F_GETLK),
-                None,
-                "struct flock is laid out differently"
-            );
             assert_eq!(to_host(cmd::F_FULLFSYNC), None, "Linux spells this fsync");
             assert_eq!(to_host(cmd::F_NOCACHE), None);
         }
+    }
+
+    /// The lock family is translated rather than forwarded, and the structure is
+    /// the reason: the two platforms hold the same fields in a different order.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn a_darwin_lock_is_not_this_host_s_lock() {
+        assert_eq!(std::mem::offset_of!(Flock, start), 0);
+        assert_eq!(std::mem::offset_of!(Flock, kind), 20);
+        assert_ne!(
+            std::mem::offset_of!(Flock, kind),
+            std::mem::offset_of!(libc::flock, l_type),
+            "the whole reason this needs translating"
+        );
+        assert!(takes_a_lock(cmd::F_SETLK) && takes_a_lock(cmd::F_SETLKW));
+        assert!(!takes_a_lock(cmd::F_SETFL));
+    }
+
+    /// And the values are renumbered too. Darwin's `F_WRLCK` is 3, this host's is
+    /// 1, and this host's 3 is nothing at all - so an untranslated exclusive lock
+    /// asks for a lock type that does not exist.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn the_lock_types_are_renumbered_both_ways() {
+        assert_eq!(lock_type_to_host(lock::F_WRLCK), Some(libc::F_WRLCK as i16));
+        assert_eq!(lock_type_to_host(lock::F_RDLCK), Some(libc::F_RDLCK as i16));
+        assert_eq!(lock_type_to_host(lock::F_UNLCK), Some(libc::F_UNLCK as i16));
+        assert_eq!(lock_type_to_host(0), None, "0 is no Darwin lock type");
+        for kind in [lock::F_RDLCK, lock::F_WRLCK, lock::F_UNLCK] {
+            assert_eq!(lock_type_to_guest(lock_type_to_host(kind).unwrap()), kind);
+        }
+    }
+
+    /// The whole-file exclusive lock a single-instance guard takes, end to end
+    /// through the published entry point: it is granted, and a second attempt on
+    /// the same file from another descriptor is refused rather than granted
+    /// twice.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn a_whole_file_write_lock_is_taken_and_then_contended() {
+        use std::os::fd::IntoRawFd;
+
+        let path = std::env::temp_dir().join(format!("rosetta3-flock-{}", std::process::id()));
+        let one = std::fs::File::create(&path).expect("a temporary file");
+        let two = std::fs::File::open(&path).expect("a second descriptor");
+        let (one, two) = (one.into_raw_fd(), two.into_raw_fd());
+
+        let mut wanted = Flock {
+            kind: lock::F_WRLCK,
+            whence: 0,
+            start: 0,
+            len: 0,
+            pid: 0,
+        };
+        // SAFETY: two live descriptors and a live Darwin `struct flock`, which is
+        // what a lock command's third argument is.
+        unsafe {
+            assert_eq!(
+                entry::fcntl(one, cmd::F_SETLK, (&mut wanted as *mut Flock) as usize),
+                0,
+                "an uncontended whole-file lock is granted"
+            );
+            // Held by this process already, so `F_GETLK` on the other descriptor
+            // reports it as free - POSIX locks are per process. What must not
+            // happen is the `EINVAL` this used to answer with.
+            let mut query = wanted;
+            assert_eq!(
+                entry::fcntl(two, cmd::F_GETLK, (&mut query as *mut Flock) as usize),
+                0
+            );
+            wanted.kind = lock::F_UNLCK;
+            assert_eq!(
+                entry::fcntl(one, cmd::F_SETLK, (&mut wanted as *mut Flock) as usize),
+                0
+            );
+            libc::close(one);
+            libc::close(two);
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The round trip a caller actually performs: read the flags, add one, write

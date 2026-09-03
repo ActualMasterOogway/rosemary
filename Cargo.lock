@@ -166,6 +166,7 @@ dependencies = [
 name = "coreaudio"
 version = "0.1.0"
 dependencies = [
+ "corefoundation",
  "libc",
  "sdl3",
  "static_init",

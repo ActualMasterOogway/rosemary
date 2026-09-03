@@ -155,6 +155,14 @@ struct Api {
     SDL_ResumeAudioStreamDevice: Option<unsafe extern "C" fn(AudioStream) -> bool>,
     SDL_PauseAudioStreamDevice: Option<unsafe extern "C" fn(AudioStream) -> bool>,
     SDL_GetAudioDeviceFormat: Option<unsafe extern "C" fn(u32, *mut AudioSpec, *mut c_int) -> bool>,
+    SDL_GetAudioDeviceName: Option<unsafe extern "C" fn(u32) -> *const c_char>,
+    SDL_CreateAudioStream:
+        Option<unsafe extern "C" fn(*const AudioSpec, *const AudioSpec) -> AudioStream>,
+    SDL_SetAudioStreamFormat:
+        Option<unsafe extern "C" fn(AudioStream, *const AudioSpec, *const AudioSpec) -> bool>,
+    SDL_GetAudioStreamData: Option<unsafe extern "C" fn(AudioStream, *mut c_void, c_int) -> c_int>,
+    SDL_GetAudioStreamAvailable: Option<unsafe extern "C" fn(AudioStream) -> c_int>,
+    SDL_FlushAudioStream: Option<unsafe extern "C" fn(AudioStream) -> bool>,
 }
 
 /// The library, opened once.
@@ -285,6 +293,12 @@ fn api() -> Option<&'static Api> {
             SDL_ResumeAudioStreamDevice,
             SDL_PauseAudioStreamDevice,
             SDL_GetAudioDeviceFormat,
+            SDL_GetAudioDeviceName,
+            SDL_CreateAudioStream,
+            SDL_SetAudioStreamFormat,
+            SDL_GetAudioStreamData,
+            SDL_GetAudioStreamAvailable,
+            SDL_FlushAudioStream,
         ))
     })
     .as_ref()
@@ -1563,6 +1577,90 @@ pub mod audio {
             // SAFETY: the caller's obligation.
             unsafe { f(stream) };
         }
+    }
+
+    /// The default playback device's name, for a caller that shows the user
+    /// which device it is using.
+    pub fn device_name() -> Option<String> {
+        if !init_audio() {
+            return None;
+        }
+        let f = api()?.SDL_GetAudioDeviceName?;
+        // SAFETY: SDL owns the string and it outlives this call.
+        let name = unsafe { f(DEFAULT_PLAYBACK) };
+        match name.is_null() {
+            true => None,
+            // SAFETY: a NUL-terminated string of SDL's.
+            false => Some(unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned()),
+        }
+    }
+
+    /// A stream that converts between two formats and is attached to no device.
+    ///
+    /// This is what an `AudioConverter` is: bytes in one format in, the same
+    /// audio in another out, including a sample-rate change. SDL resamples,
+    /// which is the part that cannot be written in a few lines.
+    pub fn create_converter(from: AudioSpec, to: AudioSpec) -> Option<AudioStream> {
+        if !init_audio() {
+            return None;
+        }
+        let f = api()?.SDL_CreateAudioStream?;
+        // SAFETY: two live specs for the duration of the call.
+        let stream = unsafe { f(&from, &to) };
+        (!stream.is_null()).then_some(stream)
+    }
+
+    /// # Safety
+    ///
+    /// As [`put`].
+    pub unsafe fn set_format(stream: AudioStream, from: AudioSpec, to: AudioSpec) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_SetAudioStreamFormat) else {
+            return false;
+        };
+        // SAFETY: the caller's obligation, and two live specs.
+        unsafe { f(stream, &from, &to) }
+    }
+
+    /// Take converted bytes out, up to `out.len()`. The count is what was
+    /// written, and a negative return from SDL is reported as none.
+    ///
+    /// # Safety
+    ///
+    /// As [`put`].
+    pub unsafe fn get(stream: AudioStream, out: &mut [u8]) -> usize {
+        let Some(f) = api().and_then(|a| a.SDL_GetAudioStreamData) else {
+            return 0;
+        };
+        // SAFETY: the caller's obligation, and a live buffer of that length.
+        let taken = unsafe { f(stream, out.as_mut_ptr().cast(), out.len() as c_int) };
+        taken.max(0) as usize
+    }
+
+    /// Converted bytes ready to be taken.
+    ///
+    /// # Safety
+    ///
+    /// As [`put`].
+    pub unsafe fn available(stream: AudioStream) -> usize {
+        let Some(f) = api().and_then(|a| a.SDL_GetAudioStreamAvailable) else {
+            return 0;
+        };
+        // SAFETY: the caller's obligation.
+        unsafe { f(stream) }.max(0) as usize
+    }
+
+    /// Tell SDL no more input is coming, so it hands back the tail rather than
+    /// holding it for a resampler that will never be fed again.
+    ///
+    /// # Safety
+    ///
+    /// As [`put`].
+    pub unsafe fn flush(stream: AudioStream) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_FlushAudioStream) else {
+            return false;
+        };
+        // SAFETY: the caller's obligation.
+        unsafe { f(stream) }
     }
 
     /// Bytes SDL still holds for this stream, which is what a feeder uses to

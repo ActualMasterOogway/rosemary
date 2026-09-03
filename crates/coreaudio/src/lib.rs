@@ -25,7 +25,10 @@
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
+mod converter;
 mod foreign;
+mod format;
+mod hal;
 mod render;
 mod status;
 mod stream;
@@ -251,6 +254,111 @@ pub unsafe extern "C" fn AudioOutputUnitStop(handle: *mut c_void) -> i32 {
     SUCCESS
 }
 
+/// The clock `AudioGetCurrentHostTime` reports, in nanoseconds.
+///
+/// It must be the *same* clock `mach_absolute_time` is, because a program
+/// compares an `AudioTimeStamp`'s `mHostTime` against one it read from Mach -
+/// scheduling a sound "half a second from now" is exactly that subtraction.
+/// `darwin::mach` answers `CLOCK_MONOTONIC` nanoseconds off Darwin and reports
+/// a 1/1 timebase, so this reads the same clock and
+/// [`AudioConvertHostTimeToNanos`] is the identity.
+pub(crate) fn host_time() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `clock_gettime` writes the `timespec` it is given and nothing
+    // else.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 {
+        return 0;
+    }
+    (now.tv_sec as u64)
+        .wrapping_mul(1_000_000_000)
+        .wrapping_add(now.tv_nsec as u64)
+}
+
+/// `UInt64 AudioGetCurrentHostTime(void)`
+pub unsafe extern "C" fn AudioGetCurrentHostTime() -> u64 {
+    host_time()
+}
+
+/// `UInt64 AudioConvertHostTimeToNanos(UInt64)`, and its inverse: both the
+/// identity here, for the reason [`host_time`] gives.
+pub unsafe extern "C" fn AudioConvertHostTimeToNanos(host_time: u64) -> u64 {
+    host_time
+}
+
+pub unsafe extern "C" fn AudioConvertNanosToHostTime(nanos: u64) -> u64 {
+    nanos
+}
+
+/// `OSStatus AudioUnitRender(AudioUnit, AudioUnitRenderActionFlags *, const
+/// AudioTimeStamp *, UInt32, UInt32, AudioBufferList *)`
+///
+/// Pull this unit's render callback into the caller's buffer list. A program
+/// calls it when it drives the graph itself rather than letting the output unit
+/// pull - a mixer that wants a block of its input, or a tap recording what is
+/// about to be played.
+///
+/// # Safety
+///
+/// `list` must be a writable `AudioBufferList` whose buffers are writable for
+/// their own `mDataByteSize`, and `timestamp` null or readable.
+pub unsafe extern "C" fn AudioUnitRender(
+    handle: *mut c_void,
+    flags: *mut u32,
+    timestamp: *const render::TimeStamp,
+    bus: u32,
+    frames: u32,
+    list: *mut render::AudioBufferList,
+) -> i32 {
+    if list.is_null() {
+        return PARAM_ERROR;
+    }
+    let Some(unit) = unit_for(handle) else {
+        return foreign::status(c"AudioUnitRender", handle).unwrap_or(INVALID_COMPONENT);
+    };
+    let mut unit = unit.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(callback) = unit.callback else {
+        // A unit with no callback has nothing to render, and the buffers are
+        // left as they are: an `AudioUnitRender` that failed has not promised
+        // anything about them.
+        return UNINITIALIZED;
+    };
+    let now = match timestamp.is_null() {
+        true => render::TimeStamp {
+            sample_time: unit.rendered as f64,
+            host_time: host_time(),
+            rate_scalar: 1.0,
+            flags: 1 | 2,
+            ..render::TimeStamp::default()
+        },
+        // SAFETY: the caller's obligation.
+        false => unsafe { *timestamp },
+    };
+    let mut action = 0u32;
+    // SAFETY: `callback.proc` is a host-callable pointer this runtime was
+    // handed for the guest's function, and every structure it is given outlives
+    // the call.
+    let status = unsafe {
+        (callback.proc)(
+            callback.ref_con,
+            match flags.is_null() {
+                true => &mut action,
+                false => flags,
+            },
+            &now,
+            bus,
+            frames,
+            list,
+        )
+    };
+    if status == SUCCESS {
+        unit.rendered += u64::from(frames);
+    }
+    status
+}
+
 /// One entry point, as an address.
 macro_rules! at {
     ($f:expr) => {
@@ -269,6 +377,31 @@ pub fn symbol(name: &str) -> Option<u64> {
         "AudioOutputUnitStop" => at!(AudioOutputUnitStop),
         "AudioUnitGetProperty" => at!(property::AudioUnitGetProperty),
         "AudioUnitSetProperty" => at!(property::AudioUnitSetProperty),
+        "AudioUnitRender" => at!(AudioUnitRender),
+        "AudioGetCurrentHostTime" => at!(AudioGetCurrentHostTime),
+        "AudioConvertHostTimeToNanos" => at!(AudioConvertHostTimeToNanos),
+        "AudioConvertNanosToHostTime" => at!(AudioConvertNanosToHostTime),
+        "AudioObjectGetPropertyData" => at!(hal::AudioObjectGetPropertyData),
+        "AudioObjectGetPropertyDataSize" => at!(hal::AudioObjectGetPropertyDataSize),
+        "AudioObjectHasProperty" => at!(hal::AudioObjectHasProperty),
+        "AudioObjectIsPropertySettable" => at!(hal::AudioObjectIsPropertySettable),
+        "AudioObjectSetPropertyData" => at!(hal::AudioObjectSetPropertyData),
+        "AudioObjectAddPropertyListener" => at!(hal::AudioObjectAddPropertyListener),
+        "AudioObjectRemovePropertyListener" => at!(hal::AudioObjectRemovePropertyListener),
+        "AudioHardwareUnload" => at!(hal::AudioHardwareUnload),
+        "AudioDeviceCreateIOProcID" => at!(hal::AudioDeviceCreateIOProcID),
+        "AudioDeviceDestroyIOProcID" => at!(hal::AudioDeviceDestroyIOProcID),
+        "AudioDeviceStart" => at!(hal::AudioDeviceStart),
+        "AudioDeviceStop" => at!(hal::AudioDeviceStop),
+        "AudioConverterNew" => at!(converter::AudioConverterNew),
+        "AudioConverterNewSpecific" => at!(converter::AudioConverterNewSpecific),
+        "AudioConverterDispose" => at!(converter::AudioConverterDispose),
+        "AudioConverterReset" => at!(converter::AudioConverterReset),
+        "AudioConverterGetProperty" => at!(converter::AudioConverterGetProperty),
+        "AudioConverterGetPropertyInfo" => at!(converter::AudioConverterGetPropertyInfo),
+        "AudioConverterSetProperty" => at!(converter::AudioConverterSetProperty),
+        "AudioConverterFillComplexBuffer" => at!(converter::AudioConverterFillComplexBuffer),
+        "AudioFormatGetProperty" => at!(format::AudioFormatGetProperty),
         _ => return None,
     })
 }
@@ -284,6 +417,31 @@ pub const NAMES: &[&str] = &[
     "AudioOutputUnitStop",
     "AudioUnitGetProperty",
     "AudioUnitSetProperty",
+    "AudioUnitRender",
+    "AudioGetCurrentHostTime",
+    "AudioConvertHostTimeToNanos",
+    "AudioConvertNanosToHostTime",
+    "AudioObjectGetPropertyData",
+    "AudioObjectGetPropertyDataSize",
+    "AudioObjectHasProperty",
+    "AudioObjectIsPropertySettable",
+    "AudioObjectSetPropertyData",
+    "AudioObjectAddPropertyListener",
+    "AudioObjectRemovePropertyListener",
+    "AudioHardwareUnload",
+    "AudioDeviceCreateIOProcID",
+    "AudioDeviceDestroyIOProcID",
+    "AudioDeviceStart",
+    "AudioDeviceStop",
+    "AudioConverterNew",
+    "AudioConverterNewSpecific",
+    "AudioConverterDispose",
+    "AudioConverterReset",
+    "AudioConverterGetProperty",
+    "AudioConverterGetPropertyInfo",
+    "AudioConverterSetProperty",
+    "AudioConverterFillComplexBuffer",
+    "AudioFormatGetProperty",
 ];
 
 pub mod property;

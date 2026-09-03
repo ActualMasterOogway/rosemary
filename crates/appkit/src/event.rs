@@ -12,6 +12,7 @@ pub fn pump(app: Id) {
     let _ = app;
     debug_resize();
     debug_key();
+    crate::script::run();
     trace_views();
     while let Some(event) = sdl3::video::poll() {
         deliver(event);
@@ -121,7 +122,7 @@ fn debug_key() {
 }
 
 /// The USB HID usage id `ROSETTA3_DEBUG_KEY`'s value names, or a raw number.
-fn scancode(name: &str) -> Option<u32> {
+pub(crate) fn scancode(name: &str) -> Option<u32> {
     Some(match name.to_ascii_lowercase().as_str() {
         "return" | "enter" => 40,
         "escape" => 41,
@@ -180,7 +181,7 @@ fn trace_views() {
     eprint!("{out}");
 }
 
-fn deliver(event: sdl3::video::Event) {
+pub(crate) fn deliver(event: sdl3::video::Event) {
     use sdl3::video::Event;
     match event {
         // A quit is the whole application, and is the one event that is not
@@ -228,6 +229,10 @@ fn deliver(event: sdl3::video::Event) {
                     f(content, objc::sel::get("setFrame:"), frame);
                 }
             }
+            // A resized view's tracking rectangle is the wrong shape, and
+            // AppKit asks for a new one here rather than resizing the old.
+            // SAFETY: null or a view this crate made.
+            unsafe { crate::view::update_tracking_areas(content) };
             post(window, window::DID_RESIZE);
         }
         Event::WindowFocus { window, gained } => {
@@ -270,18 +275,11 @@ fn deliver(event: sdl3::video::Event) {
             // key-up for one, and a guest that treated it as a key would see
             // shift as a character.
             match is_modifier(scancode) {
-                true => send(id, "flagsChanged:", |w| Fields {
+                true => send(id, None, |w, _| Fields {
                     kind: kind::FLAGS_CHANGED,
                     ..fields(w)
                 }),
-                false => send(
-                    id,
-                    match down {
-                        true => "keyDown:",
-                        false => "keyUp:",
-                    },
-                    fields,
-                ),
+                false => send(id, None, |w, _| fields(w)),
             }
         }
         // Text is what `-characters` already carries. A second delivery would
@@ -296,16 +294,17 @@ fn deliver(event: sdl3::video::Event) {
             buttons,
         } => {
             let held = held_button(buttons);
-            let selector = match held {
-                Some(0) => "mouseDragged:",
-                Some(1) => "otherMouseDragged:",
-                Some(_) => "rightMouseDragged:",
-                None => "mouseMoved:",
-            };
-            if held.is_none() && !window::accepts_mouse_moved_events(object_for(id)) {
+            *POINTER.lock().unwrap_or_else(|e| e.into_inner()) = (x, y);
+            if held.is_none() && !wants_mouse_moved(object_for(id)) {
+                if tracing() {
+                    eprintln!(
+                        "rosetta3: appkit: -mouseMoved: dropped: the window did not ask for it \
+                         and no view is tracking"
+                    );
+                }
                 return;
             }
-            send(id, selector, |window| Fields {
+            send(id, Some((x, y)), |window, location| Fields {
                 kind: match held {
                     Some(0) => kind::LEFT_MOUSE_DRAGGED,
                     Some(1) => kind::OTHER_MOUSE_DRAGGED,
@@ -313,7 +312,7 @@ fn deliver(event: sdl3::video::Event) {
                     None => kind::MOUSE_MOVED,
                 },
                 modifiers: current_modifiers(),
-                location: location(window, x, y),
+                location,
                 delta: NSPoint {
                     x: dx as f64,
                     y: dy as f64,
@@ -331,18 +330,19 @@ fn deliver(event: sdl3::video::Event) {
             x,
             y,
         } => {
-            let (selector, kind) = match (button, down) {
-                (1, true) => ("mouseDown:", kind::LEFT_MOUSE_DOWN),
-                (1, false) => ("mouseUp:", kind::LEFT_MOUSE_UP),
-                (3, true) => ("rightMouseDown:", kind::RIGHT_MOUSE_DOWN),
-                (3, false) => ("rightMouseUp:", kind::RIGHT_MOUSE_UP),
-                (_, true) => ("otherMouseDown:", kind::OTHER_MOUSE_DOWN),
-                (_, false) => ("otherMouseUp:", kind::OTHER_MOUSE_UP),
+            let kind = match (button, down) {
+                (1, true) => kind::LEFT_MOUSE_DOWN,
+                (1, false) => kind::LEFT_MOUSE_UP,
+                (3, true) => kind::RIGHT_MOUSE_DOWN,
+                (3, false) => kind::RIGHT_MOUSE_UP,
+                (_, true) => kind::OTHER_MOUSE_DOWN,
+                (_, false) => kind::OTHER_MOUSE_UP,
             };
-            send(id, selector, |window| Fields {
+            *POINTER.lock().unwrap_or_else(|e| e.into_inner()) = (x, y);
+            send(id, Some((x, y)), |window, location| Fields {
                 kind,
                 modifiers: current_modifiers(),
-                location: location(window, x, y),
+                location,
                 // AppKit numbers from zero, SDL from one.
                 button: i64::from(button).saturating_sub(1),
                 clicks: i64::from(clicks),
@@ -350,10 +350,14 @@ fn deliver(event: sdl3::video::Event) {
                 ..Fields::default()
             });
         }
+        // A wheel event carries no position, so it goes to the view the pointer
+        // was last over - which is where the wheel turned.
         Event::MouseWheel { window: id, x, y } => {
-            send(id, "scrollWheel:", |window| Fields {
+            let at = *POINTER.lock().unwrap_or_else(|e| e.into_inner());
+            send(id, Some(at), |window, location| Fields {
                 kind: kind::SCROLL_WHEEL,
                 modifiers: current_modifiers(),
+                location,
                 delta: NSPoint {
                     x: x as f64,
                     y: y as f64,
@@ -402,31 +406,162 @@ fn location(window: Id, x: f32, y: f32) -> NSPoint {
     crate::geometry::point_in_window(x as f64, y as f64, height)
 }
 
-/// Deliver one input event to the window's responder.
+/// Hand one input event to its window, as `-[NSApplication sendEvent:]` does.
 ///
-/// The responder, not the window: AppKit walks the chain from the first
-/// responder, and every method here is one a view implements. A window whose
-/// responder does not implement the selector drops the event, which is what
-/// AppKit does once the chain runs out.
-fn send(id: u32, selector: &str, fields: impl FnOnce(Id) -> Fields) {
+/// Through the window and not straight to a responder, because `-sendEvent:` is
+/// where a program gets to see every event before anything else does - and
+/// Roblox overrides it on its own `RBXWindow`. That override is how the engine
+/// receives the keyboard at all: the first responder while a text field is
+/// focused is Roblox's `InputMethodHandler`, so a runtime that dispatched
+/// straight to the responder handed every keystroke to a text buffer and gave
+/// the engine nothing.
+///
+/// `at` is where the pointer was, in SDL's window coordinates, for the events
+/// that have a position.
+fn send(id: u32, at: Option<(f32, f32)>, fields: impl FnOnce(Id, NSPoint) -> Fields) {
     let window = object_for(id);
     if window.is_null() {
         return;
     }
-    let responder = responder_of(window);
-    let sel = objc::sel::get(selector);
-    // SAFETY: null or a live object this runtime allocated.
-    let Some(method) = (unsafe { objc::object::class_of(responder) }).and_then(|c| c.method(sel))
-    else {
+    let point = at.map(|(x, y)| location(window, x, y)).unwrap_or_default();
+    let event = nsevent::make(fields(window, point));
+    let sel = objc::sel::get("sendEvent:");
+    // SAFETY: `-sendEvent:` is `void (id, SEL, NSEvent *)`, and every window
+    // has one - this crate installs the default on `NSWindow`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, objc::sel::Sel, Id) =
+            std::mem::transmute(objc::msg::entry());
+        f(window, sel, event);
+    }
+}
+
+/// `-[NSWindow sendEvent:]`: route one event to the responder it belongs to.
+///
+/// The default AppKit routing, and the two halves of it are not the same rule:
+/// an event with a position goes to the view under it, and a key event goes to
+/// the first responder. Either way the search walks up the responder chain from
+/// there, and an event nothing implements is dropped.
+pub fn route(window: Id, event: Id) {
+    let kind = nsevent::kind_of(event);
+    let Some(selector) = responder_selector(kind) else {
         return;
     };
-    let event = nsevent::make(fields(window));
+    let sel = objc::sel::get(selector);
+    let start = match positional(kind) {
+        // SAFETY: null or the content view, which this crate made.
+        true => unsafe {
+            crate::view::hit_test(
+                window::content_view_of(window),
+                nsevent::location_of(event),
+            )
+        },
+        false => responder_of(window),
+    };
+    let Some((responder, method)) = chain(start, sel) else {
+        if tracing() {
+            eprintln!("rosetta3: appkit: -{selector}: nothing from {start:p} up implements it");
+        }
+        return;
+    };
+    if tracing() {
+        // SAFETY: a live object this runtime allocated.
+        let class = unsafe { objc::object::class_of(responder) };
+        eprintln!(
+            "rosetta3: appkit: -{selector} to {responder:p} ({})",
+            class.map_or("no class", |c| c.name_str()),
+        );
+    }
     // SAFETY: every responder method here is `void (id, SEL, NSEvent *)`.
     unsafe {
         let f: unsafe extern "C" fn(Id, objc::sel::Sel, Id) =
             std::mem::transmute(method.implementation());
         f(responder, sel, event);
     }
+}
+
+/// The responder method an event type is delivered through.
+fn responder_selector(kind: u64) -> Option<&'static str> {
+    Some(match kind {
+        kind::LEFT_MOUSE_DOWN => "mouseDown:",
+        kind::LEFT_MOUSE_UP => "mouseUp:",
+        kind::RIGHT_MOUSE_DOWN => "rightMouseDown:",
+        kind::RIGHT_MOUSE_UP => "rightMouseUp:",
+        kind::OTHER_MOUSE_DOWN => "otherMouseDown:",
+        kind::OTHER_MOUSE_UP => "otherMouseUp:",
+        kind::MOUSE_MOVED => "mouseMoved:",
+        kind::LEFT_MOUSE_DRAGGED => "mouseDragged:",
+        kind::RIGHT_MOUSE_DRAGGED => "rightMouseDragged:",
+        kind::OTHER_MOUSE_DRAGGED => "otherMouseDragged:",
+        kind::MOUSE_ENTERED => "mouseEntered:",
+        kind::MOUSE_EXITED => "mouseExited:",
+        kind::SCROLL_WHEEL => "scrollWheel:",
+        kind::KEY_DOWN => "keyDown:",
+        kind::KEY_UP => "keyUp:",
+        kind::FLAGS_CHANGED => "flagsChanged:",
+        _ => return None,
+    })
+}
+
+/// Whether an event is about a place rather than about the keyboard.
+fn positional(kind: u64) -> bool {
+    !matches!(kind, kind::KEY_DOWN | kind::KEY_UP | kind::FLAGS_CHANGED)
+}
+
+/// Walk the responder chain from `start` for something that implements `sel`.
+///
+/// The chain is the superview chain and then the window, which is AppKit's for
+/// a view in a window. Bounded, because a subview list a guest built with a
+/// cycle in it would otherwise hang inside event delivery.
+fn chain(start: Id, sel: objc::sel::Sel) -> Option<(Id, &'static objc::class::Method)> {
+    let mut responder = start;
+    let mut fallback = None;
+    for _ in 0..64 {
+        if responder.is_null() {
+            return fallback;
+        }
+        // SAFETY: null or a live object this runtime allocated.
+        if let Some(method) = unsafe { objc::object::class_of(responder) }.and_then(|c| c.method(sel))
+        {
+            // A text view's own key handling is the *last* resort, not the
+            // first. Roblox makes its `NSTextView` the first responder while a
+            // field is focused and still expects its engine view to see the
+            // keystroke - it reads the text view back afterwards for what an
+            // input method composed. Taking the text view's implementation here
+            // would end the search at a buffer nothing else is told about.
+            let ours = crate::text::is_default_key_handling(method.implementation() as *const ());
+            match ours {
+                false => return Some((responder, method)),
+                true => fallback = fallback.or(Some((responder, method))),
+            }
+        }
+        // SAFETY: as above.
+        let next = unsafe { crate::view::superview_of(responder) };
+        responder = match next.is_null() {
+            // SAFETY: as above.
+            true => unsafe { crate::view::window_of(responder) },
+            false => next,
+        };
+    }
+    fallback
+}
+
+/// Where the pointer was last seen, in SDL's window coordinates.
+///
+/// A wheel event carries no position and a click carries one only where SDL
+/// filled it in, so the last motion is what says which view the event is about.
+static POINTER: std::sync::Mutex<(f32, f32)> = std::sync::Mutex::new((0.0, 0.0));
+
+/// Whether `-mouseMoved:` should be delivered at all.
+///
+/// AppKit drops it unless the window asked for it *or* a view is tracking, and
+/// the second half is not optional here: Roblox never sends
+/// `-setAcceptsMouseMovedEvents:YES` and installs an `NSTrackingArea` instead,
+/// so a runtime that only honoured the window flag has a program whose pointer
+/// never moves.
+fn wants_mouse_moved(window: Id) -> bool {
+    // SAFETY: null or the content view, which this crate made.
+    window::accepts_mouse_moved_events(window)
+        || unsafe { crate::view::any_tracking_area(window::content_view_of(window)) }
 }
 
 /// The object an input event goes to: the window's first responder, or its
@@ -479,7 +614,7 @@ fn object_for(id: u32) -> Id {
 /// the window, its delegate, and whether that delegate implements the method.
 pub const TRACE_ENV: &str = "ROSETTA3_TRACE_EVENT";
 
-fn tracing() -> bool {
+pub(crate) fn tracing() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os(TRACE_ENV).is_some())
 }

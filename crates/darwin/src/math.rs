@@ -154,6 +154,31 @@ extern "C" fn mulsc3_abi(a: f32, b: f32, c: f32, d: f32) -> Float2 {
     Float2 { a, b }
 }
 
+/// `double __exp10(double)` and its float twin, which are Darwin's spelling of
+/// ten to the power of x.
+///
+/// glibc has `exp10` and `exp10f` and *not* these names, so the import goes
+/// unresolved on this host - and it is a plain function with an ordinary ABI,
+/// which is the only reason it belongs beside the four above. Roblox's renderer
+/// calls the float one, so an unbound slot is a fault the first time anything is
+/// drawn.
+///
+/// `powf(10, x)` rather than `exp(x * ln 10)`: the second is a rounding error
+/// wide of the first at every integral exponent, and an integral exponent is
+/// what a caller converting decibels or building a decimal scale passes.
+extern "C" fn exp10_abi(x: f64) -> f64 {
+    10f64.powf(x)
+}
+
+extern "C" fn exp10f_abi(x: f32) -> f32 {
+    10f32.powf(x)
+}
+
+/// The names this module publishes that are plain functions rather than a
+/// Darwin return ABI: nothing above intercepts them, so a guest calls exactly
+/// these.
+pub const PLAIN: &[&str] = &["__exp10", "__exp10f"];
+
 /// The address to publish for each name in [`crate::SHIMMED_ABOVE`].
 ///
 /// An emulated guest never arrives here - its import is intercepted before the
@@ -165,6 +190,8 @@ pub fn symbol(name: &str) -> Option<*const ()> {
         "__sincos_stret" => sincos_stret_abi as *const (),
         "__divdc3" => divdc3_abi as *const (),
         "__mulsc3" => mulsc3_abi as *const (),
+        "__exp10" => exp10_abi as *const (),
+        "__exp10f" => exp10f_abi as *const (),
         _ => return None,
     };
     Some(f)
@@ -173,6 +200,18 @@ pub fn symbol(name: &str) -> Option<*const ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ten to an integral power is exact, which is what a caller building a
+    /// decimal scale relies on and what `exp(x * ln 10)` would not give.
+    #[test]
+    fn ten_to_a_whole_power_is_exact() {
+        let f = symbol("__exp10").expect("a published name");
+        // SAFETY: `symbol` returned `exp10_abi`, whose signature this is.
+        let f: extern "C" fn(f64) -> f64 = unsafe { core::mem::transmute(f) };
+        assert_eq!(f(0.0), 1.0);
+        assert_eq!(f(3.0), 1000.0);
+        assert_eq!(f(-2.0), 0.01);
+    }
 
     #[test]
     fn sincos_agrees_with_the_two_calls_it_stands_for() {

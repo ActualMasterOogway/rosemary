@@ -493,6 +493,27 @@ unsafe extern "C" fn is_writable(_receiver: Id, _sel: Sel, path: Id) -> u8 {
     std::fs::metadata(&path).is_ok_and(|m| !m.permissions().readonly()) as u8
 }
 
+/// `-isExecutableFileAtPath:`, which is the question "may I spawn this".
+///
+/// The execute bit for *this* process, not merely "some execute bit is set":
+/// the bundle's own helpers are what a program asks about, and one that shipped
+/// non-executable is exactly the case this has to report honestly - the crash
+/// handler stub in this bundle did, and the spawn failed with `EACCES`.
+unsafe extern "C" fn is_executable(_receiver: Id, _sel: Sel, path: Id) -> u8 {
+    // SAFETY: an `NSString`, or nil.
+    let Some(path) = (unsafe { path_of(path) }) else {
+        return 0;
+    };
+    let Ok(path) = std::ffi::CString::new(path) else {
+        return 0;
+    };
+    // `access(X_OK)` rather than a mode-bit test, because the answer depends on
+    // which of owner, group and other this process is - and on a mount that was
+    // made `noexec`, where every mode bit says yes and an `execve` says no.
+    // SAFETY: a NUL-terminated path that outlives the call.
+    u8::from(unsafe { libc::access(path.as_ptr(), libc::X_OK) } == 0)
+}
+
 unsafe extern "C" fn current_directory(_receiver: Id, _sel: Sel) -> Id {
     let path = std::env::current_dir().unwrap_or_default();
     crate::string::from_str(&path.to_string_lossy())
@@ -516,6 +537,7 @@ pub(crate) fn install() {
         "attributesOfItemAtPath:error:" => attributes_of_item, c"@32@0:8@16^@24";
         "isWritableFileAtPath:" => is_writable, c"B24@0:8@16";
         "isReadableFileAtPath:" => file_exists, c"B24@0:8@16";
+        "isExecutableFileAtPath:" => is_executable, c"B24@0:8@16";
         "currentDirectoryPath" => current_directory, c"@16@0:8";
         "stringWithFileSystemRepresentation:length:"
             => string_with_file_system_representation, c"@32@0:8*16Q24";

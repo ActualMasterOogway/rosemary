@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use foundation::geometry::NSRange;
 use objc::object::Id;
 use objc::sel::Sel;
 
@@ -100,6 +101,283 @@ unsafe extern "C" fn delegate(receiver: Id, _sel: Sel) -> Id {
 /// nothing for a caller to read back that this crate could be wrong about.
 unsafe extern "C" fn ignored_flag(_receiver: Id, _sel: Sel, _on: u8) {}
 
+/// What a text view holds, which is the half of it that is not configuration.
+///
+/// A Cocoa game does not use an `NSTextView` to draw anything - it keeps an
+/// invisible one as the thing the keyboard talks to, forwards `-keyDown:` to
+/// it, and reads `-string` back. Roblox's `InputMethodHandler` is exactly that,
+/// so this buffer is where a typed password actually lands: without it the view
+/// answers nothing to `-string` however many keys arrive, and every text field
+/// in the program stays empty.
+#[derive(Clone, Default)]
+struct Contents {
+    text: String,
+    /// The insertion point or selection, in characters.
+    selected: NSRange,
+    /// The composition an input method has in progress, if any. Marked text is
+    /// *provisional*: it is in `text` and replaced wholesale by the next
+    /// `-setMarkedText:...`, which is what makes a dead key or a CJK candidate
+    /// list behave.
+    marked: Option<NSRange>,
+}
+
+fn contents() -> &'static Mutex<HashMap<usize, Contents>> {
+    static CONTENTS: std::sync::OnceLock<Mutex<HashMap<usize, Contents>>> =
+        std::sync::OnceLock::new();
+    CONTENTS.get_or_init(Default::default)
+}
+
+fn read(receiver: Id) -> Contents {
+    contents()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&(receiver as usize))
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Edit a view's contents and tell its delegate, as AppKit does.
+///
+/// The notification is not decoration: a program that keeps its own copy of the
+/// field learns about a keystroke this way and no other, and one that polls
+/// `-string` is unaffected by it either way.
+fn edit(receiver: Id, with: impl FnOnce(&mut Contents)) {
+    {
+        let mut table = contents().lock().unwrap_or_else(|e| e.into_inner());
+        with(table.entry(receiver as usize).or_default());
+    }
+    foundation::notification::post("NSTextDidChangeNotification", receiver, std::ptr::null_mut());
+    let delegate = get(receiver).delegate as Id;
+    let sel = objc::sel::get("textDidChange:");
+    // SAFETY: null or a live object this runtime allocated.
+    let Some(method) = (unsafe { objc::object::class_of(delegate) }).and_then(|c| c.method(sel))
+    else {
+        return;
+    };
+    let notification =
+        foundation::notification::make("NSTextDidChangeNotification", receiver, std::ptr::null_mut());
+    // SAFETY: `-textDidChange:` is `void (id, SEL, NSNotification *)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(method.implementation());
+        f(delegate, sel, notification);
+    }
+}
+
+/// Character indices are what `NSRange` counts, and a `String` is bytes: this
+/// is the join, clamped so a range a caller invented cannot slice mid-character
+/// or past the end.
+fn byte_range(text: &str, range: NSRange) -> std::ops::Range<usize> {
+    let index = |characters: usize| {
+        text.char_indices()
+            .nth(characters)
+            .map_or(text.len(), |(at, _)| at)
+    };
+    let start = index(range.location);
+    let end = index(range.location.saturating_add(range.length));
+    start..end.max(start)
+}
+
+/// Replace `range` with `insertion`, leaving the insertion point after it.
+fn replace(state: &mut Contents, range: NSRange, insertion: &str) {
+    let bytes = byte_range(&state.text, range);
+    state.text.replace_range(bytes, insertion);
+    state.selected = NSRange {
+        location: range.location + insertion.chars().count(),
+        length: 0,
+    };
+}
+
+/// `NSNotFound`, which is what a range with nothing in it reports.
+const NOT_FOUND: usize = usize::MAX;
+
+unsafe extern "C" fn string(receiver: Id, _sel: Sel) -> Id {
+    objc::arc::autorelease(foundation::string::from_str(&read(receiver).text))
+}
+
+unsafe extern "C" fn set_string(receiver: Id, _sel: Sel, value: Id) {
+    // SAFETY: null or an `NSString`.
+    let text = String::from_utf8_lossy(&unsafe { foundation::string::bytes(value) }).into_owned();
+    edit(receiver, |state| {
+        state.selected = NSRange {
+            location: text.chars().count(),
+            length: 0,
+        };
+        state.marked = None;
+        state.text = text;
+    });
+}
+
+unsafe extern "C" fn selected_range(receiver: Id, _sel: Sel) -> NSRange {
+    read(receiver).selected
+}
+
+unsafe extern "C" fn set_selected_range(receiver: Id, _sel: Sel, range: NSRange) {
+    edit(receiver, |state| state.selected = range);
+}
+
+unsafe extern "C" fn marked_range(receiver: Id, _sel: Sel) -> NSRange {
+    read(receiver).marked.unwrap_or(NSRange {
+        location: NOT_FOUND,
+        length: 0,
+    })
+}
+
+unsafe extern "C" fn has_marked_text(receiver: Id, _sel: Sel) -> u8 {
+    read(receiver).marked.is_some() as u8
+}
+
+unsafe extern "C" fn unmark_text(receiver: Id, _sel: Sel) {
+    edit(receiver, |state| state.marked = None);
+}
+
+/// `-insertText:replacementRange:`, and `-insertText:` through the same body:
+/// the older selector is the same operation with the replacement range left to
+/// the current selection, which is what a null range means anyway.
+unsafe extern "C" fn insert_text(receiver: Id, _sel: Sel, value: Id, replacement: NSRange) {
+    // SAFETY: null or an `NSString`, which is what both selectors pass.
+    let insertion = String::from_utf8_lossy(&unsafe { foundation::string::bytes(value) }).into_owned();
+    edit(receiver, |state| {
+        let range = match replacement.location {
+            NOT_FOUND => state.marked.unwrap_or(state.selected),
+            _ => replacement,
+        };
+        replace(state, range, &insertion);
+        state.marked = None;
+    });
+}
+
+unsafe extern "C" fn set_marked_text(
+    receiver: Id,
+    _sel: Sel,
+    value: Id,
+    selected: NSRange,
+    replacement: NSRange,
+) {
+    // SAFETY: null or an `NSString`.
+    let insertion = String::from_utf8_lossy(&unsafe { foundation::string::bytes(value) }).into_owned();
+    edit(receiver, |state| {
+        let range = match replacement.location {
+            NOT_FOUND => state.marked.unwrap_or(state.selected),
+            _ => replacement,
+        };
+        replace(state, range, &insertion);
+        let length = insertion.chars().count();
+        state.marked = (length > 0).then_some(NSRange {
+            location: range.location,
+            length,
+        });
+        state.selected = NSRange {
+            location: range.location + selected.location.min(length),
+            length: selected.length.min(length),
+        };
+    });
+}
+
+/// `-keyDown:`, which is the whole reason the rest of this exists.
+///
+/// AppKit's `NSTextView` runs the event through the input manager, which ends
+/// in `-insertText:` for a character and a command selector for everything
+/// else. There is no input manager here, so the two commands a text field
+/// cannot do without are handled directly and the rest of the key codes are
+/// left alone - a program reading `-string` sees exactly what was typed.
+unsafe extern "C" fn key_down(receiver: Id, _sel: Sel, event: Id) {
+    let sel = objc::sel::get("characters");
+    // SAFETY: `-characters` is `id (id, SEL)` on an event this crate made.
+    let characters = unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+        f(event, sel)
+    };
+    // SAFETY: null or an `NSString`.
+    let text = String::from_utf8_lossy(&unsafe { foundation::string::bytes(characters) }).into_owned();
+    let Some(character) = text.chars().next() else {
+        return;
+    };
+    match character {
+        // Backspace, which is `-deleteBackward:` on a Mac.
+        '\u{8}' | '\u{7f}' => edit(receiver, |state| {
+            let range = match state.selected.length {
+                0 => NSRange {
+                    location: state.selected.location.saturating_sub(1),
+                    length: state.selected.location.min(1),
+                },
+                _ => state.selected,
+            };
+            replace(state, range, "");
+            state.marked = None;
+        }),
+        // A control character is a command - return, tab, an arrow - and none
+        // of them types anything. Inserting one would put a control code in a
+        // password.
+        c if c.is_control() || ('\u{f700}'..='\u{f8ff}').contains(&c) => {}
+        _ => edit(receiver, |state| {
+            let range = state.marked.unwrap_or(state.selected);
+            replace(state, range, &text);
+            state.marked = None;
+        }),
+    }
+}
+
+/// The three `NSTextInputClient` answers that are not about the buffer.
+///
+/// An input method asks where the text is on screen so it can put its candidate
+/// window beside it, and which character a point is over. Nothing here draws
+/// text, so there is no honest answer to either: the rectangle is empty and the
+/// index is `NSNotFound`, which is what a client with no visible text reports.
+unsafe extern "C" fn first_rect_for_character_range(
+    _receiver: Id,
+    _sel: Sel,
+    _range: NSRange,
+    _actual: *mut NSRange,
+) -> foundation::geometry::NSRect {
+    foundation::geometry::NSRect::default()
+}
+
+unsafe extern "C" fn character_index_for_point(
+    _receiver: Id,
+    _sel: Sel,
+    _point: foundation::geometry::NSPoint,
+) -> usize {
+    NOT_FOUND
+}
+
+unsafe extern "C" fn attributed_substring(
+    _receiver: Id,
+    _sel: Sel,
+    _range: NSRange,
+    _actual: *mut NSRange,
+) -> Id {
+    std::ptr::null_mut()
+}
+
+unsafe extern "C" fn valid_attributes(_receiver: Id, _sel: Sel) -> Id {
+    let array = corefoundation::collections::new_array(
+        &[],
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    // SAFETY: a fresh array.
+    unsafe { corefoundation::api::CFAutorelease(array) as Id }
+}
+
+unsafe extern "C" fn do_command_by_selector(_receiver: Id, _sel: Sel, _command: Sel) {}
+
+/// Whether an implementation is this crate's own text-view key handling.
+///
+/// The event router asks, because a text view is where a keystroke goes only
+/// when nothing else wants it: see [`crate::event::chain`].
+pub(crate) fn is_default_key_handling(implementation: *const ()) -> bool {
+    [key_down as *const (), key_up as *const ()].contains(&implementation)
+}
+
+/// A release types nothing, and a text view that did not answer it would abort
+/// the program the first time a key came back up.
+unsafe extern "C" fn key_up(_receiver: Id, _sel: Sel, _event: Id) {}
+
+/// A text view is what the keyboard talks to, so it takes first responder.
+unsafe extern "C" fn accepts_first_responder(_receiver: Id, _sel: Sel) -> u8 {
+    1
+}
+
 pub(crate) fn install() {
     let text = objc::class::lookup(c"NSText").expect("declared before its methods");
     methods!(text, {
@@ -117,6 +395,26 @@ pub(crate) fn install() {
         "setDrawsBackground:" => ignored_flag, c"v20@0:8c16";
         "setHorizontallyResizable:" => ignored_flag, c"v20@0:8c16";
         "setVerticallyResizable:" => ignored_flag, c"v20@0:8c16";
+        "string" => string, c"@16@0:8";
+        "setString:" => set_string, c"v24@0:8@16";
+        "selectedRange" => selected_range, c"{_NSRange=QQ}16@0:8";
+        "setSelectedRange:" => set_selected_range, c"v32@0:8{_NSRange=QQ}16";
+        "markedRange" => marked_range, c"{_NSRange=QQ}16@0:8";
+        "hasMarkedText" => has_marked_text, c"c16@0:8";
+        "unmarkText" => unmark_text, c"v16@0:8";
+        "insertText:replacementRange:" => insert_text, c"v40@0:8@16{_NSRange=QQ}24";
+        "setMarkedText:selectedRange:replacementRange:" => set_marked_text,
+            c"v56@0:8@16{_NSRange=QQ}24{_NSRange=QQ}40";
+        "keyDown:" => key_down, c"v24@0:8@16";
+        "keyUp:" => key_up, c"v24@0:8@16";
+        "firstRectForCharacterRange:actualRange:" => first_rect_for_character_range,
+            c"{CGRect={CGPoint=dd}{CGSize=dd}}40@0:8{_NSRange=QQ}16^{_NSRange=QQ}32";
+        "characterIndexForPoint:" => character_index_for_point, c"Q32@0:8{CGPoint=dd}16";
+        "attributedSubstringForProposedRange:actualRange:" => attributed_substring,
+            c"@40@0:8{_NSRange=QQ}16^{_NSRange=QQ}32";
+        "validAttributesForMarkedText" => valid_attributes, c"@16@0:8";
+        "doCommandBySelector:" => do_command_by_selector, c"v24@0:8:16";
+        "acceptsFirstResponder" => accepts_first_responder, c"c16@0:8";
     });
 }
 

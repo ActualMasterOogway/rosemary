@@ -1,0 +1,314 @@
+//! `ROSETTA3_DEBUG_INPUT`: a scripted pointer and keyboard, timed from launch.
+//!
+//! `ROSETTA3_DEBUG_KEY` exists because this compositor implements no
+//! virtual-keyboard protocol, and the pointer is worse off: `wtype` and
+//! `ydotool` cover neither, `SDL_WarpMouseInWindow` moves the real cursor only
+//! when the window has pointer focus, and nothing at all can press a button.
+//! So a click on a login field - the one thing between a run and an account -
+//! is an event no script outside this process can produce.
+//!
+//! A step goes through [`crate::event::deliver`], so hit testing, the responder
+//! chain and every accessor a guest reads off the event run exactly as they
+//! would for a person's hand. The one thing it cannot reproduce is the
+//! compositor's own cursor moving, so [`pointer`] records where the script put
+//! it and `+[NSEvent mouseLocation]` answers from there once a script is
+//! running - a guest that reads the pointer position instead of the event's
+//! would otherwise see the two disagree.
+
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
+
+use sdl3::video::Event;
+
+pub const ENV: &str = "ROSETTA3_DEBUG_INPUT";
+
+/// Where the script last put the pointer, in SDL window coordinates, and
+/// whether it has put it anywhere at all.
+static POINTER: Mutex<(f32, f32)> = Mutex::new((0.0, 0.0));
+static MOVED: AtomicBool = AtomicBool::new(false);
+
+/// The pointer position the script last set, on the desktop, for callers that
+/// ask the window system where the cursor is rather than reading it off an
+/// event. `None` while no script has moved it, so a person's cursor is still
+/// the answer in every ordinary run.
+pub fn pointer() -> Option<(f32, f32)> {
+    if !MOVED.load(Ordering::Relaxed) {
+        return None;
+    }
+    let (x, y) = *POINTER.lock().unwrap_or_else(|e| e.into_inner());
+    let origin = crate::window::sdl_windows()
+        .into_iter()
+        .next()
+        .and_then(sdl3::video::window_position)
+        .unwrap_or((0, 0));
+    Some((x + origin.0 as f32, y + origin.1 as f32))
+}
+
+#[derive(Debug, PartialEq)]
+enum Action {
+    Move(f32, f32),
+    /// Press and release, `clicks` times, at the current position.
+    Click { button: u8, clicks: i64 },
+    Down(u8),
+    Up(u8),
+    Scroll(f32, f32),
+    /// One key, by the name [`crate::event::scancode`] knows.
+    Key(u32),
+    /// Each character in turn, as the key that types it.
+    Type(String),
+}
+
+struct Step {
+    at: f64,
+    action: Action,
+}
+
+/// Parse `SECONDS:ACTION[;SECONDS:ACTION...]`.
+///
+/// A step nothing understands is named on stderr rather than dropped: a typo in
+/// a script that silently does nothing looks exactly like a program that ignored
+/// the event, which is the question the script was written to answer.
+fn parse(value: &str) -> Vec<Step> {
+    let mut steps = Vec::new();
+    for piece in value.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+        let Some((at, rest)) = piece.split_once(':') else {
+            eprintln!("rosetta3: appkit: {ENV}: {piece:?} has no SECONDS: prefix");
+            continue;
+        };
+        let Ok(at) = at.trim().parse::<f64>() else {
+            eprintln!("rosetta3: appkit: {ENV}: {at:?} is not a number of seconds");
+            continue;
+        };
+        let rest = rest.trim();
+        let (verb, argument) = rest.split_once(' ').unwrap_or((rest, ""));
+        let argument = argument.trim();
+        let action = match verb {
+            "move" => point(argument).map(|(x, y)| Action::Move(x, y)),
+            "click" => Some(Action::Click {
+                button: argument.parse().unwrap_or(1),
+                clicks: 1,
+            }),
+            "doubleclick" => Some(Action::Click {
+                button: argument.parse().unwrap_or(1),
+                clicks: 2,
+            }),
+            "down" => Some(Action::Down(argument.parse().unwrap_or(1))),
+            "up" => Some(Action::Up(argument.parse().unwrap_or(1))),
+            "scroll" => point(argument).map(|(x, y)| Action::Scroll(x, y)),
+            "key" => crate::event::scancode(argument).map(Action::Key),
+            "type" => Some(Action::Type(argument.to_owned())),
+            _ => None,
+        };
+        match action {
+            Some(action) => steps.push(Step { at, action }),
+            None => eprintln!("rosetta3: appkit: {ENV}: {rest:?} is not an action"),
+        }
+    }
+    steps.sort_by(|a, b| a.at.total_cmp(&b.at));
+    steps
+}
+
+fn point(argument: &str) -> Option<(f32, f32)> {
+    let (x, y) = argument.split_once(',')?;
+    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+}
+
+/// Run whatever the script has due, once per pump.
+pub fn run() {
+    static SCRIPT: std::sync::OnceLock<Vec<Step>> = std::sync::OnceLock::new();
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    let script = SCRIPT.get_or_init(|| match std::env::var(ENV) {
+        Ok(value) => parse(&value),
+        Err(_) => Vec::new(),
+    });
+    let mut next = NEXT.load(Ordering::Relaxed);
+    if next >= script.len() {
+        return;
+    }
+    let elapsed = START.get_or_init(Instant::now).elapsed().as_secs_f64();
+    let Some(window) = crate::window::sdl_windows()
+        .into_iter()
+        .map(sdl3::video::window_id)
+        .next()
+    else {
+        return;
+    };
+    while next < script.len() && script[next].at <= elapsed {
+        perform(window, &script[next].action);
+        next += 1;
+        NEXT.store(next, Ordering::Relaxed);
+    }
+}
+
+fn perform(window: u32, action: &Action) {
+    eprintln!("rosetta3: appkit: {ENV}: {action:?}");
+    let (x, y) = *POINTER.lock().unwrap_or_else(|e| e.into_inner());
+    match action {
+        Action::Move(to_x, to_y) => {
+            let (dx, dy) = (to_x - x, to_y - y);
+            *POINTER.lock().unwrap_or_else(|e| e.into_inner()) = (*to_x, *to_y);
+            MOVED.store(true, Ordering::Relaxed);
+            crate::event::deliver(Event::MouseMotion {
+                window,
+                x: *to_x,
+                y: *to_y,
+                dx,
+                dy,
+                buttons: 0,
+            });
+        }
+        Action::Click { button, clicks } => {
+            for click in 1..=*clicks {
+                button_event(window, *button, true, click, x, y);
+                button_event(window, *button, false, click, x, y);
+            }
+        }
+        Action::Down(button) => button_event(window, *button, true, 1, x, y),
+        Action::Up(button) => button_event(window, *button, false, 1, x, y),
+        Action::Scroll(dx, dy) => crate::event::deliver(Event::MouseWheel {
+            window,
+            x: *dx,
+            y: *dy,
+        }),
+        Action::Key(scancode) => key(window, *scancode, 0, 0),
+        Action::Type(text) => {
+            for character in text.chars() {
+                match typed(character) {
+                    Some((scancode, shifted)) => key(
+                        window,
+                        scancode,
+                        character as u32,
+                        match shifted {
+                            // `SDL_KMOD_LSHIFT`, so `-modifierFlags` reports the
+                            // shift a capital letter was typed with.
+                            true => 0x0001,
+                            false => 0,
+                        },
+                    ),
+                    None => eprintln!(
+                        "rosetta3: appkit: {ENV}: no US key types {character:?} - skipped"
+                    ),
+                }
+            }
+        }
+    }
+}
+
+fn button_event(window: u32, button: u8, down: bool, clicks: i64, x: f32, y: f32) {
+    crate::event::deliver(Event::MouseButton {
+        window,
+        button: button.into(),
+        down,
+        clicks: clicks as u8,
+        x,
+        y,
+    });
+}
+
+fn key(window: u32, scancode: u32, character: u32, modifiers: u16) {
+    for down in [true, false] {
+        crate::event::deliver(Event::Key {
+            window,
+            scancode,
+            key: character,
+            modifiers,
+            down,
+            repeat: false,
+        });
+    }
+}
+
+/// The US-layout key that types a character, and whether it needs shift.
+///
+/// A US layout because that is what [`crate::keymap`] already is: a script that
+/// typed through a different one would report a key code the guest's own table
+/// would read as another key.
+fn typed(character: char) -> Option<(u32, bool)> {
+    let unshifted = |scancode: u32| Some((scancode, false));
+    let shifted = |scancode: u32| Some((scancode, true));
+    match character {
+        'a'..='z' => unshifted(4 + (character as u32 - 'a' as u32)),
+        'A'..='Z' => shifted(4 + (character as u32 - 'A' as u32)),
+        '1'..='9' => unshifted(30 + (character as u32 - '1' as u32)),
+        '0' => unshifted(39),
+        ' ' => unshifted(44),
+        '\n' => unshifted(40),
+        '\t' => unshifted(43),
+        '-' => unshifted(45),
+        '=' => unshifted(46),
+        '[' => unshifted(47),
+        ']' => unshifted(48),
+        '\\' => unshifted(49),
+        ';' => unshifted(51),
+        '\'' => unshifted(52),
+        '`' => unshifted(53),
+        ',' => unshifted(54),
+        '.' => unshifted(55),
+        '/' => unshifted(56),
+        '!' => shifted(30),
+        '@' => shifted(31),
+        '#' => shifted(32),
+        '$' => shifted(33),
+        '%' => shifted(34),
+        '^' => shifted(35),
+        '&' => shifted(36),
+        '*' => shifted(37),
+        '(' => shifted(38),
+        ')' => shifted(39),
+        '_' => shifted(45),
+        '+' => shifted(46),
+        '{' => shifted(47),
+        '}' => shifted(48),
+        '|' => shifted(49),
+        ':' => shifted(51),
+        '"' => shifted(52),
+        '~' => shifted(53),
+        '<' => shifted(54),
+        '>' => shifted(55),
+        '?' => shifted(56),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_script_is_read_in_time_order_whatever_order_it_is_written_in() {
+        let steps = parse("9: click; 8: move 10,20; 10: type hi");
+        let times: Vec<f64> = steps.iter().map(|s| s.at).collect();
+        assert_eq!(times, [8.0, 9.0, 10.0]);
+        assert_eq!(steps[0].action, Action::Move(10.0, 20.0));
+        assert_eq!(steps[2].action, Action::Type("hi".to_owned()));
+    }
+
+    /// A step that parses to nothing is dropped rather than shifting the ones
+    /// after it, so a typo costs one action and not the whole script.
+    #[test]
+    fn an_unknown_action_is_dropped_and_the_rest_still_run() {
+        let steps = parse("1: teleport 5,5; 2: click");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            steps[0].action,
+            Action::Click {
+                button: 1,
+                clicks: 1
+            }
+        );
+    }
+
+    /// The shift is part of the key, not of the character: a guest reads
+    /// `-modifierFlags` and `-characters` off the same event and a capital typed
+    /// without the flag is a key nothing was holding shift for.
+    #[test]
+    fn a_capital_is_the_same_key_with_shift() {
+        assert_eq!(typed('a'), Some((4, false)));
+        assert_eq!(typed('A'), Some((4, true)));
+        assert_eq!(typed('@'), Some((31, true)), "shift-2");
+        assert_eq!(typed('\u{2603}'), None, "no US key types a snowman");
+    }
+}

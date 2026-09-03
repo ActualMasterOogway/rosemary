@@ -18,6 +18,7 @@ pub mod nsevent;
 pub mod opengl;
 pub mod raster;
 pub mod screen;
+pub mod script;
 pub mod text;
 pub mod textinput;
 pub mod view;
@@ -78,6 +79,8 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CGRectGetMinY" => at!(geometry::CGRectGetMinY),
         "CGRectGetMidY" => at!(geometry::CGRectGetMidY),
         "CGRectGetMaxY" => at!(geometry::CGRectGetMaxY),
+        "NSPointInRect" => at!(geometry::NSPointInRect),
+        "NSInsetRect" => at!(geometry::NSInsetRect),
         "TISCopyCurrentKeyboardInputSource" => at!(textinput::TISCopyCurrentKeyboardInputSource),
         "TISCopyCurrentKeyboardLayoutInputSource" => {
             at!(textinput::TISCopyCurrentKeyboardLayoutInputSource)
@@ -109,6 +112,8 @@ pub const NAMES: &[&str] = &[
     "CGRectGetMinY",
     "CGRectGetMidY",
     "CGRectGetMaxY",
+    "NSPointInRect",
+    "NSInsetRect",
     "TISCopyCurrentKeyboardInputSource",
     "TISCopyCurrentKeyboardLayoutInputSource",
     "TISGetInputSourceProperty",

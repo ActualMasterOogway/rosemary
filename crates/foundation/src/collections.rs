@@ -36,6 +36,29 @@ unsafe extern "C" fn object_at_index(receiver: Id, _sel: Sel, index: usize) -> I
     unsafe { api::CFArrayGetValueAtIndex(receiver as CFTypeRef, index as isize) as Id }
 }
 
+/// `-firstObject` and `-lastObject`, which answer nil for an empty array where
+/// `-objectAtIndex:` on one is out of range. That difference is the reason a
+/// caller uses them.
+unsafe extern "C" fn first_object(receiver: Id, sel: Sel) -> Id {
+    // SAFETY: an array; `-objectAtIndex:` is this module's own.
+    unsafe {
+        match count(receiver, sel) {
+            0 => std::ptr::null_mut(),
+            _ => object_at_index(receiver, sel, 0),
+        }
+    }
+}
+
+unsafe extern "C" fn last_object(receiver: Id, sel: Sel) -> Id {
+    // SAFETY: as above.
+    unsafe {
+        match count(receiver, sel) {
+            0 => std::ptr::null_mut(),
+            n => object_at_index(receiver, sel, n - 1),
+        }
+    }
+}
+
 unsafe extern "C" fn add_object(receiver: Id, _sel: Sel, object: Id) {
     // SAFETY: an array.
     let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
@@ -632,6 +655,8 @@ pub(crate) fn install() {
         "objectAtIndex:" => object_at_index, c"@24@0:8Q16";
         "objectAtIndexedSubscript:" => object_at_index, c"@24@0:8Q16";
         "containsObject:" => contains_object, c"B24@0:8@16";
+        "firstObject" => first_object, c"@16@0:8";
+        "lastObject" => last_object, c"@16@0:8";
         "componentsJoinedByString:" => components_joined_by_string, c"@24@0:8@16";
         "countByEnumeratingWithState:objects:count:" => array_enumerate, c"Q40@0:8^{?=Q^@^QQ5}16^@24Q32";
     });
