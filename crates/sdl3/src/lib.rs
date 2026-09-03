@@ -26,6 +26,7 @@ pub type Joystick = *mut c_void;
 pub type JoystickId = u32;
 pub type Window = *mut c_void;
 pub type GlContext = *mut c_void;
+pub type Cursor = *mut c_void;
 
 /// `SDL_Rect`: a display's bounds, in the desktop's own coordinates.
 #[repr(C)]
@@ -136,6 +137,10 @@ struct Api {
     SDL_PollEvent: Option<unsafe extern "C" fn(*mut Event) -> bool>,
     SDL_HideCursor: Option<unsafe extern "C" fn() -> bool>,
     SDL_ShowCursor: Option<unsafe extern "C" fn() -> bool>,
+    SDL_CreateColorCursor: Option<unsafe extern "C" fn(*mut c_void, c_int, c_int) -> Cursor>,
+    SDL_SetCursor: Option<unsafe extern "C" fn(Cursor) -> bool>,
+    SDL_GetDefaultCursor: Option<unsafe extern "C" fn() -> Cursor>,
+    SDL_DestroyCursor: Option<unsafe extern "C" fn(Cursor)>,
     SDL_GetGlobalMouseState: Option<unsafe extern "C" fn(*mut f32, *mut f32) -> u32>,
     SDL_WarpMouseGlobal: Option<unsafe extern "C" fn(f32, f32) -> bool>,
     SDL_GetModState: Option<unsafe extern "C" fn() -> u16>,
@@ -282,6 +287,10 @@ fn api() -> Option<&'static Api> {
             SDL_PollEvent,
             SDL_HideCursor,
             SDL_ShowCursor,
+            SDL_CreateColorCursor,
+            SDL_SetCursor,
+            SDL_GetDefaultCursor,
+            SDL_DestroyCursor,
             SDL_GetGlobalMouseState,
             SDL_WarpMouseGlobal,
             SDL_GetModState,
@@ -1431,6 +1440,83 @@ pub mod video {
         };
         // SAFETY: no arguments.
         f.is_some_and(|f| unsafe { f() })
+    }
+
+    /// Make a cursor out of `width * height` RGBA pixels, with its point at
+    /// `(hot_x, hot_y)` in those pixels.
+    ///
+    /// SDL converts the surface into its own representation, so the pixels do
+    /// not have to outlive the call - the cursor does, and belongs to the
+    /// caller until [`destroy_cursor`].
+    pub fn create_color_cursor(
+        width: i32,
+        height: i32,
+        pixels: &[u8],
+        hot_x: i32,
+        hot_y: i32,
+    ) -> Option<Cursor> {
+        if pixels.len() != (width as usize) * (height as usize) * 4 {
+            return None;
+        }
+        let api = api()?;
+        let (create, destroy) = (api.SDL_CreateColorCursor?, api.SDL_DestroySurface?);
+        let from = api.SDL_CreateSurfaceFrom?;
+        // Borrowed rather than copied, as in `set_window_icon`.
+        let mut pixels = pixels.to_vec();
+        // SAFETY: the buffer is `width * height * 4` bytes, which is what the
+        // format and pitch describe, and it outlives the surface.
+        let surface = unsafe {
+            from(
+                width,
+                height,
+                PIXELFORMAT_RGBA,
+                pixels.as_mut_ptr().cast(),
+                width * 4,
+            )
+        };
+        if surface.is_null() {
+            return None;
+        }
+        // SAFETY: a surface just made, and a point SDL clamps itself.
+        let cursor = unsafe { create(surface, hot_x, hot_y) };
+        // SAFETY: as above; SDL has taken its own copy by now.
+        unsafe { destroy(surface) };
+        (!cursor.is_null()).then_some(cursor)
+    }
+
+    /// Show `cursor`, or the desktop's own when it is null.
+    pub fn set_cursor(cursor: Cursor) -> bool {
+        let Some(api) = api() else {
+            return false;
+        };
+        let Some(set) = api.SDL_SetCursor else {
+            return false;
+        };
+        // Handing SDL the null through would redraw the cursor it already has
+        // rather than restoring the desktop's, which is the opposite of what a
+        // program setting `+arrowCursor` back asked for.
+        let cursor = match cursor.is_null() {
+            // SAFETY: no arguments.
+            true => match api.SDL_GetDefaultCursor.map(|f| unsafe { f() }) {
+                Some(default) if !default.is_null() => default,
+                _ => return false,
+            },
+            false => cursor,
+        };
+        // SAFETY: a cursor from SDL, either made here or its own default.
+        unsafe { set(cursor) }
+    }
+
+    /// # Safety
+    ///
+    /// `cursor` must come from [`create_color_cursor`] and not be destroyed
+    /// twice.
+    pub unsafe fn destroy_cursor(cursor: Cursor) {
+        let Some(f) = api().and_then(|a| a.SDL_DestroyCursor) else {
+            return;
+        };
+        // SAFETY: the caller's obligation.
+        unsafe { f(cursor) };
     }
 
     /// Which modifier keys are held right now, as `SDL_Keymod` bits.

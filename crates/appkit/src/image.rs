@@ -130,21 +130,33 @@ fn bytes_of<'a>(receiver: Id) -> &'a [u8] {
     }
 }
 
+/// Whether `object` is an image, checked rather than assumed: the selectors
+/// that reach the two below take an `id`, and a program that passes something
+/// else would otherwise have an arbitrary object read as an `NSImage`.
+fn is_image(object: Id) -> bool {
+    if object.is_null() {
+        return false;
+    }
+    // SAFETY: an object this runtime allocated.
+    unsafe { objc::object::class_of(object) }.is_some_and(|c| {
+        objc::class::lookup(c"NSImage").is_some_and(|k| c.chain().any(|x| std::ptr::eq(x, k)))
+    })
+}
+
+/// The size an image reports, in points, which a caller relating it to the
+/// pixels [`bitmap`] hands back needs: a 2x representation makes the two
+/// differ, and a cursor's point is in points.
+pub fn declared_size(object: Id) -> NSSize {
+    match is_image(object) {
+        true => image_of(object).size,
+        false => NSSize::default(),
+    }
+}
+
 /// An image's pixels, for a caller outside AppKit that needs them - the
 /// application icon is the one that does.
-///
-/// The class is checked rather than assumed: the selector that reaches here
-/// takes an `id`, and a program that passes something else would otherwise have
-/// an arbitrary object read as an `NSImage`.
 pub fn bitmap(object: Id) -> Option<crate::raster::Bitmap> {
-    if object.is_null() {
-        return None;
-    }
-    // SAFETY: null or an object this runtime allocated.
-    let is_image = unsafe { objc::object::class_of(object) }.is_some_and(|c| {
-        objc::class::lookup(c"NSImage").is_some_and(|k| c.chain().any(|x| std::ptr::eq(x, k)))
-    });
-    if !is_image {
+    if !is_image(object) {
         return None;
     }
     crate::raster::decode(bytes_of(object)).or_else(|| {

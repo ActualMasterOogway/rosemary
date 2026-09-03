@@ -3,7 +3,9 @@
 //! Both are here because both are about the pointer, and both are almost all
 //! bookkeeping. SDL has one cursor for the process and no notion of a tracking
 //! region, so what a program can actually change is whether the pointer is
-//! visible - and that is the one thing a full-screen game does change.
+//! visible and, for a cursor it made from an image of its own, what it looks
+//! like. A named cursor has no shape for SDL to switch to and shows the
+//! desktop's own.
 //!
 //! A tracking area therefore remembers what it was made with and does nothing
 //! else. It has to exist as an object, because a view holds one and compares it
@@ -12,7 +14,7 @@
 
 use std::ffi::c_void;
 
-use foundation::geometry::{NSPoint, NSRect};
+use foundation::geometry::{NSPoint, NSRect, NSSize};
 use objc::object::Id;
 use objc::sel::Sel;
 
@@ -32,13 +34,17 @@ pub const TRACKING_AREA_INSTANCE_SIZE: usize = size_of::<TrackingArea>();
 #[repr(C)]
 pub struct Cursor {
     isa: *const c_void,
-    /// Which of the named cursors this is, for `-set` to act on. SDL has no
-    /// shape to switch to, so the value is kept and not used.
+    /// Which of the named cursors this is. SDL has no shape to switch to, so
+    /// the value is kept for a program that reads it back and not used.
     shape: usize,
     /// The image a custom cursor was made from, retained, and where its point
-    /// is. Kept for the same reason the shape is: a program reads them back.
+    /// is. Both are read back by a program, and both are what `sdl` was built
+    /// from.
     image: Id,
     hot_spot: foundation::geometry::NSPoint,
+    /// The SDL cursor `-set` shows, or null for a named cursor and for an
+    /// image this tree could not decode - both of which show the desktop's.
+    sdl: sdl3::Cursor,
 }
 
 pub const CURSOR_INSTANCE_SIZE: usize = size_of::<Cursor>();
@@ -82,17 +88,83 @@ unsafe extern "C" fn tracking_user_info(receiver: Id, _sel: Sel) -> Id {
     unsafe { (*(receiver as *const TrackingArea)).user_info }
 }
 
-/// `-initWithImage:hotSpot:`.
+/// Where the point lands in the pixels SDL is given.
 ///
-/// The image is kept and the pointer keeps whatever shape it had: this tree
-/// changes only whether the pointer is *visible*, which is the module note
-/// above and applies to a custom cursor exactly as it does to `+IBeamCursor`.
+/// The hot spot is in the image's points and the bitmap is in pixels, which
+/// differ for an image whose representation is 2x. An image reporting no size
+/// is taken as one point per pixel, since that is the only ratio available.
+fn hot_spot_pixels(hot_spot: NSPoint, size: NSSize, width: u32, height: u32) -> (i32, i32) {
+    let scale = |point: f64, extent: f64, pixels: u32| match extent > 0.0 {
+        true => point * f64::from(pixels) / extent,
+        false => point,
+    };
+    (
+        scale(hot_spot.x, size.width, width) as i32,
+        scale(hot_spot.y, size.height, height) as i32,
+    )
+}
+
+/// Build the SDL cursor for an image, or null when there are no pixels to
+/// build it from.
+///
+/// A cursor with no pixels is a diagnostic rather than a refusal: the program
+/// gets the desktop's pointer instead of its own, which is worse than the
+/// image it asked for and far better than an invisible pointer.
+fn cursor_from_image(image: Id, hot_spot: NSPoint) -> sdl3::Cursor {
+    let Some(bitmap) = crate::image::bitmap(image) else {
+        eprintln!(
+            "rosetta3: appkit: -[NSCursor initWithImage:hotSpot:]: no pixels for this image - \
+             the pointer keeps the desktop's cursor"
+        );
+        return std::ptr::null_mut();
+    };
+    let size = crate::image::declared_size(image);
+    let (x, y) = hot_spot_pixels(hot_spot, size, bitmap.width, bitmap.height);
+    sdl3::video::create_color_cursor(
+        bitmap.width as i32,
+        bitmap.height as i32,
+        &bitmap.pixels,
+        x,
+        y,
+    )
+    .unwrap_or(std::ptr::null_mut())
+}
+
+/// `-initWithImage:hotSpot:`.
 unsafe extern "C" fn init_with_image(receiver: Id, _sel: Sel, image: Id, hot_spot: NSPoint) -> Id {
     // SAFETY: a cursor of this crate's.
     let cursor = unsafe { &mut *(receiver as *mut Cursor) };
     cursor.image = objc::arc::retain(image);
     cursor.hot_spot = hot_spot;
+    cursor.sdl = cursor_from_image(image, hot_spot);
     receiver
+}
+
+/// `-dealloc`, which has to put the desktop's cursor back if this was the one
+/// on screen: SDL keeps showing a destroyed cursor's pixels otherwise.
+unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a cursor of this crate's.
+    let cursor = unsafe { &mut *(receiver as *mut Cursor) };
+    objc::arc::release(cursor.image);
+    cursor.image = std::ptr::null_mut();
+    if CURRENT
+        .compare_exchange(
+            receiver as usize,
+            0,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_ok()
+    {
+        sdl3::video::set_cursor(std::ptr::null_mut());
+    }
+    if !cursor.sdl.is_null() {
+        // SAFETY: made by `create_color_cursor`, and destroyed once - the last
+        // reference to the object holding it is gone.
+        unsafe { sdl3::video::destroy_cursor(cursor.sdl) };
+        cursor.sdl = std::ptr::null_mut();
+    }
+    objc::arc::finalize(receiver);
 }
 
 unsafe extern "C" fn image(receiver: Id, _sel: Sel) -> Id {
@@ -154,6 +226,11 @@ static CURRENT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize:
 
 unsafe extern "C" fn set(receiver: Id, _sel: Sel) {
     CURRENT.store(receiver as usize, std::sync::atomic::Ordering::Release);
+    // SAFETY: a cursor of this crate's.
+    let sdl = unsafe { (*(receiver as *const Cursor)).sdl };
+    // Null for a named cursor, which restores the desktop's own: a program
+    // that sets `+arrowCursor` back is taking its custom cursor off.
+    sdl3::video::set_cursor(sdl);
 }
 
 unsafe extern "C" fn current_cursor(_class: Id, _sel: Sel) -> Id {
@@ -233,6 +310,7 @@ pub(crate) fn install() {
         "set" => set, c"v16@0:8";
         "push" => set, c"v16@0:8";
         "pop" => set, c"v16@0:8";
+        "dealloc" => dealloc, c"v16@0:8";
     });
 }
 
@@ -260,6 +338,20 @@ mod tests {
         // SAFETY: as above.
         unsafe { unhide(class, objc::sel::get("unhide")) };
         assert_eq!(HIDDEN.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
+    /// A 2x image's point is in points and its pixels are not, so the two
+    /// differ by the scale - and an image with no size is one to one.
+    #[test]
+    fn the_point_is_scaled_to_the_pixels() {
+        let hot_spot = NSPoint { x: 4.0, y: 6.0 };
+        let two_x = NSSize {
+            width: 16.0,
+            height: 16.0,
+        };
+        assert_eq!(hot_spot_pixels(hot_spot, two_x, 32, 32), (8, 12));
+        assert_eq!(hot_spot_pixels(hot_spot, two_x, 16, 16), (4, 6));
+        assert_eq!(hot_spot_pixels(hot_spot, NSSize::default(), 16, 16), (4, 6));
     }
 
     /// Each named cursor is its own object, which is what a program comparing
