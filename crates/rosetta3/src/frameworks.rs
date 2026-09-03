@@ -177,6 +177,47 @@ fn push_main_pool() {
     objc::arc::pool_push();
 }
 
+/// Whether `ROSETTA3_WITHHOLD` names this symbol, so the loader leaves it unbound.
+///
+/// The A/B this tree could not otherwise run. A framework answer that is subtly
+/// wrong is invisible - the guest takes a different branch and something stops
+/// working three layers away - and the way to find one is to compare against a
+/// runtime that does not answer at all. Withholding a name here reproduces that
+/// side of the comparison without a rebuild.
+///
+/// What it costs is the difference `appkit::NOTIFICATION_NAMES` states: a
+/// withheld **data** symbol binds to zero and a message to it answers nil, which
+/// is survivable and is the interesting case; a withheld **function** faults at
+/// the call. So this is a diagnostic and not a mode, and it says what it did.
+fn withheld(name: &str) -> bool {
+    #[static_init::dynamic]
+    static NAMES: Vec<String> = std::env::var("ROSETTA3_WITHHOLD")
+        .unwrap_or_default()
+        .split(',')
+        .map(|n| n.trim().trim_start_matches('_').to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
+
+    let bare = name.trim_start_matches('_');
+    let out = NAMES.iter().any(|n| n == bare);
+    if out {
+        eprintln!("rosetta3: {name}: withheld (ROSETTA3_WITHHOLD names it)");
+    }
+    out
+}
+
+fn define_fn(lib: &mut SyntheticDylib, name: &str, address: *const ()) {
+    if !withheld(name) {
+        lib.define_fn(name, address);
+    }
+}
+
+fn define_data(lib: &mut SyntheticDylib, name: &str, address: u64) {
+    if !withheld(name) {
+        lib.define_data(name, address);
+    }
+}
+
 /// The frameworks, as a library the loader can bind against.
 ///
 /// Flat, like the rest of this runtime's providers: which framework an image
@@ -195,20 +236,20 @@ pub fn provider() -> SyntheticDylib {
     foundation::bootstrap();
     for name in corefoundation::names() {
         if let Some(addr) = corefoundation::symbol(name) {
-            lib.define_fn(&format!("_{name}"), addr as usize as *const ());
+            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
         }
     }
     for (name, addr) in corefoundation::data_symbols() {
-        lib.define_data(&name, addr);
+        define_data(&mut lib, &name, addr);
     }
     // The class objects, which are data: a guest's `[NSMutableArray array]`
     // binds `_OBJC_CLASS_$_NSMutableArray` and sends to whatever it gets.
     for (name, addr) in foundation::data_symbols() {
-        lib.define_data(&name, addr);
+        define_data(&mut lib, &name, addr);
     }
     for name in foundation::names() {
         if let Some(addr) = foundation::symbol(name) {
-            lib.define_fn(&format!("_{name}"), addr as usize as *const ());
+            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
         }
     }
     // IOKit's HID half, on SDL3. Published even where there is no SDL3: a guest
@@ -216,11 +257,11 @@ pub fn provider() -> SyntheticDylib {
     // unresolved import would only say the symbol was missing.
     for name in iokit::names() {
         if let Some(addr) = iokit::symbol(name) {
-            lib.define_fn(&format!("_{name}"), addr as usize as *const ());
+            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
         }
     }
     for (name, addr) in iokit::data_symbols() {
-        lib.define_data(&name, addr);
+        define_data(&mut lib, &name, addr);
     }
     // AppKit up to the point a window would be needed. Its classes are here
     // even though none of them draws: a guest's `YYGLView : NSView` binds
@@ -228,7 +269,7 @@ pub fn provider() -> SyntheticDylib {
     // superclass turns that into one refusal per selector actually sent.
     for name in appkit::NAMES {
         if let Some(addr) = appkit::symbol(name) {
-            lib.define_fn(&format!("_{name}"), addr as usize as *const ());
+            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
         }
     }
     // CoreVideo, which is one thing: the display link a Mac game's frame loop
@@ -236,7 +277,7 @@ pub fn provider() -> SyntheticDylib {
     // because `abi::table` names that parameter a callback.
     for name in corevideo::NAMES {
         if let Some(addr) = corevideo::symbol(name) {
-            lib.define_fn(&format!("_{name}"), addr as usize as *const ());
+            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
         }
     }
     // CoreAudio's output half, on SDL3. Published even where there is no SDL3,
@@ -244,17 +285,17 @@ pub fn provider() -> SyntheticDylib {
     // where an unresolved import only says the symbol was missing.
     for name in coreaudio::NAMES {
         if let Some(addr) = coreaudio::symbol(name) {
-            lib.define_fn(&format!("_{name}"), addr as usize as *const ());
+            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
         }
     }
     for (name, addr) in appkit::data_symbols() {
-        lib.define_data(&name, addr);
+        define_data(&mut lib, &name, addr);
     }
     for (name, addr) in media_constants() {
-        lib.define_data(&name, addr);
+        define_data(&mut lib, &name, addr);
     }
     for (name, addr) in shimmed().into_iter().chain(metal()) {
-        lib.define_fn(&format!("_{name}"), addr);
+        define_fn(&mut lib, &format!("_{name}"), addr);
     }
     lib
 }

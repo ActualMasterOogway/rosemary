@@ -462,6 +462,7 @@ name = "foundation"
 version = "0.1.0"
 dependencies = [
  "corefoundation",
+ "darwin",
  "libc",
  "objc",
  "ureq",

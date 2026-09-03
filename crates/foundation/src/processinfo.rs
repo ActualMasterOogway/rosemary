@@ -1,0 +1,351 @@
+//! `NSProcessInfo`, which is what a program asks about the machine it is on.
+//!
+//! An unbound `_OBJC_CLASS_$_NSProcessInfo` is the expensive kind of gap rather
+//! than a fault: `+processInfo` on a nil class is nil, every message after it is
+//! nil, and a *struct*-returning one is zeroed. So a program that gates on
+//! `-operatingSystemVersion` is told it is on **macOS 0.0.0** and takes whatever
+//! branch that implies, with nothing anywhere saying a class was missing.
+//!
+//! The version comes from `darwin::sysctl`, not from a constant here: a guest
+//! that reads `kern.osrelease` and one that sends `-operatingSystemVersion` are
+//! asking the same question, and two derivations would let them disagree.
+
+use objc::object::Id;
+use objc::sel::Sel;
+
+use crate::define::{class_methods, methods};
+
+/// `NSOperatingSystemVersion`, three `NSInteger`s.
+#[repr(C)]
+pub struct OperatingSystemVersion {
+    major: i64,
+    minor: i64,
+    patch: i64,
+}
+
+/// `NSProcessInfoThermalState`, of which only `Nominal` is reported.
+///
+/// Nothing here watches the machine's thermal state, and the three states above
+/// nominal all mean "the program should do less work". Claiming one would make a
+/// program throttle itself for a condition this runtime cannot observe.
+const THERMAL_STATE_NOMINAL: i64 = 0;
+
+/// The one process, which `+processInfo` returns every time.
+static SHARED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+unsafe extern "C" fn process_info(class: Id, _sel: Sel) -> Id {
+    *SHARED.get_or_init(|| {
+        // SAFETY: `class` is `NSProcessInfo`, which this module registered.
+        let object = unsafe {
+            objc::object::create_instance(
+                objc::class::from_ptr(class as *const objc::class::Class).expect("a class"),
+                0,
+            )
+        };
+        // Retained forever, as every singleton in this tree is: one a guest can
+        // release is one it can make dangle by releasing what it never owned.
+        objc::arc::retain(object);
+        object as usize
+    }) as Id
+}
+
+/// The macOS version, as the rest of this runtime states it.
+#[cfg(not(target_os = "macos"))]
+fn version() -> (i64, i64, i64) {
+    let (major, minor, patch) = darwin::sysctl::macos_version();
+    (major as i64, minor as i64, patch as i64)
+}
+
+/// On a Mac this class is Apple's unless the built-in runtime is in use, and
+/// when it is, the honest answer is the host's own.
+#[cfg(target_os = "macos")]
+fn version() -> (i64, i64, i64) {
+    let mut buffer = [0u8; 32];
+    let mut length = buffer.len();
+    // SAFETY: a name this process owns and a buffer described by its length.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"kern.osproductversion".as_ptr(),
+            buffer.as_mut_ptr().cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || length == 0 {
+        return (0, 0, 0);
+    }
+    let text = String::from_utf8_lossy(&buffer[..length.saturating_sub(1)]).into_owned();
+    let mut parts = text.split('.').map(|p| p.parse().unwrap_or(0));
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
+}
+
+unsafe extern "C" fn operating_system_version(_receiver: Id, _sel: Sel) -> OperatingSystemVersion {
+    let (major, minor, patch) = version();
+    OperatingSystemVersion {
+        major,
+        minor,
+        patch,
+    }
+}
+
+/// `-operatingSystemVersionString`, which is prose and not a version.
+///
+/// Apple's reads `Version 15.0 (Build 24A335)`, and a program that parses it is
+/// doing so because it wants the build - so the build is in it.
+unsafe extern "C" fn operating_system_version_string(_receiver: Id, _sel: Sel) -> Id {
+    let (major, minor, patch) = version();
+    let text = match patch {
+        0 => format!("Version {major}.{minor}"),
+        _ => format!("Version {major}.{minor}.{patch}"),
+    };
+    autoreleased(&text)
+}
+
+/// `-operatingSystem`, `NSMACHOperatingSystem`, which is what every macOS is.
+unsafe extern "C" fn operating_system(_receiver: Id, _sel: Sel) -> i64 {
+    5
+}
+
+unsafe extern "C" fn operating_system_name(_receiver: Id, _sel: Sel) -> Id {
+    autoreleased("NSMACHOperatingSystem")
+}
+
+/// `-isOperatingSystemAtLeastVersion:`, compared field by field.
+unsafe extern "C" fn at_least_version(
+    _receiver: Id,
+    _sel: Sel,
+    wanted: OperatingSystemVersion,
+) -> u8 {
+    let (major, minor, patch) = version();
+    u8::from((major, minor, patch) >= (wanted.major, wanted.minor, wanted.patch))
+}
+
+unsafe extern "C" fn processor_count(_receiver: Id, _sel: Sel) -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+}
+
+/// `-physicalMemory`, in bytes.
+///
+/// Zero is refused rather than reported: a caller sizes a cache as a fraction of
+/// it, and a fraction of zero is a cache that holds nothing. Where the machine
+/// cannot be asked, the answer is the smallest one a Mac has ever shipped with.
+unsafe extern "C" fn physical_memory(_receiver: Id, _sel: Sel) -> u64 {
+    const FALLBACK: u64 = 4 << 30;
+    // SAFETY: two `sysconf` names, and the multiplication is checked below.
+    let bytes = unsafe {
+        (libc::sysconf(libc::_SC_PHYS_PAGES) as u64)
+            .saturating_mul(libc::sysconf(libc::_SC_PAGESIZE) as u64)
+    };
+    match bytes == 0 {
+        true => FALLBACK,
+        false => bytes,
+    }
+}
+
+unsafe extern "C" fn process_identifier(_receiver: Id, _sel: Sel) -> i32 {
+    std::process::id() as i32
+}
+
+unsafe extern "C" fn process_name(_receiver: Id, _sel: Sel) -> Id {
+    let name = std::env::args_os()
+        .next()
+        .and_then(|arg| {
+            std::path::Path::new(&arg)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "rosetta3".to_string());
+    autoreleased(&name)
+}
+
+/// `-arguments`, the guest's own `argv` as this process received it.
+unsafe extern "C" fn arguments(_receiver: Id, _sel: Sel) -> Id {
+    let strings: Vec<corefoundation::base::CFTypeRef> = std::env::args_os()
+        .map(|arg| crate::string::from_str(&arg.to_string_lossy()) as corefoundation::base::CFTypeRef)
+        .collect();
+    let array = corefoundation::collections::new_array(
+        &strings,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    // SAFETY: the array retained each; these are this call's own references.
+    for string in strings {
+        unsafe { corefoundation::api::CFRelease(string) };
+    }
+    // SAFETY: a fresh array this call owns.
+    unsafe { corefoundation::api::CFAutorelease(array) as Id }
+}
+
+unsafe extern "C" fn environment(_receiver: Id, _sel: Sel) -> Id {
+    let entries: Vec<(corefoundation::base::CFTypeRef, corefoundation::base::CFTypeRef)> =
+        std::env::vars_os()
+            .map(|(name, value)| {
+                (
+                    crate::string::from_str(&name.to_string_lossy())
+                        as corefoundation::base::CFTypeRef,
+                    crate::string::from_str(&value.to_string_lossy())
+                        as corefoundation::base::CFTypeRef,
+                )
+            })
+            .collect();
+    let dictionary = corefoundation::collections::new_dictionary(
+        &entries,
+        corefoundation::callbacks::Policy::from_key_callbacks(),
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    // SAFETY: the dictionary retained both halves of every entry.
+    for (name, value) in entries {
+        unsafe {
+            corefoundation::api::CFRelease(name);
+            corefoundation::api::CFRelease(value);
+        }
+    }
+    // SAFETY: a fresh dictionary this call owns.
+    unsafe { corefoundation::api::CFAutorelease(dictionary) as Id }
+}
+
+/// `-systemUptime`, seconds since boot as a `double`.
+unsafe extern "C" fn system_uptime(_receiver: Id, _sel: Sel) -> f64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: a writable `timespec` and a clock every platform here has.
+    #[cfg(not(target_os = "macos"))]
+    let clock = libc::CLOCK_BOOTTIME;
+    #[cfg(target_os = "macos")]
+    let clock = libc::CLOCK_MONOTONIC;
+    // SAFETY: as above.
+    if unsafe { libc::clock_gettime(clock, &mut now) } != 0 {
+        return 0.0;
+    }
+    now.tv_sec as f64 + now.tv_nsec as f64 / 1e9
+}
+
+unsafe extern "C" fn thermal_state(_receiver: Id, _sel: Sel) -> i64 {
+    THERMAL_STATE_NOMINAL
+}
+
+unsafe extern "C" fn low_power_mode(_receiver: Id, _sel: Sel) -> u8 {
+    0
+}
+
+/// `-globallyUniqueString`, which is a UUID and a process identity.
+unsafe extern "C" fn globally_unique_string(_receiver: Id, _sel: Sel) -> Id {
+    let uuid = corefoundation::uuid::format(&corefoundation::uuid::generate());
+    autoreleased(&format!("{uuid}-{}", std::process::id()))
+}
+
+/// `-hostName`, which is the machine's name and not the process's.
+unsafe extern "C" fn host_name(_receiver: Id, _sel: Sel) -> Id {
+    let mut buffer = [0u8; 256];
+    // SAFETY: a buffer described by its own length; the result is NUL-terminated
+    // by `gethostname` on success.
+    let name = match unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len() - 1) } {
+        0 => String::from_utf8_lossy(&buffer[..buffer.iter().position(|b| *b == 0).unwrap_or(0)])
+            .into_owned(),
+        _ => String::new(),
+    };
+    autoreleased(&name)
+}
+
+fn autoreleased(text: &str) -> Id {
+    let string = crate::string::from_str(text);
+    // SAFETY: a fresh object this call owns.
+    unsafe { corefoundation::api::CFAutorelease(string as corefoundation::base::CFTypeRef) as Id }
+}
+
+pub(crate) fn install() {
+    let class = corefoundation::base::register(
+        c"NSProcessInfo",
+        None,
+        std::mem::size_of::<usize>(),
+        false,
+    );
+    class_methods!(class, {
+        "processInfo" => process_info, c"@16@0:8";
+    });
+    methods!(class, {
+        "operatingSystemVersion" => operating_system_version, c"{?=qqq}16@0:8";
+        "operatingSystemVersionString" => operating_system_version_string, c"@16@0:8";
+        "operatingSystem" => operating_system, c"q16@0:8";
+        "operatingSystemName" => operating_system_name, c"@16@0:8";
+        "isOperatingSystemAtLeastVersion:" => at_least_version, c"c40@0:8{?=qqq}16";
+        "processorCount" => processor_count, c"Q16@0:8";
+        "activeProcessorCount" => processor_count, c"Q16@0:8";
+        "physicalMemory" => physical_memory, c"Q16@0:8";
+        "processIdentifier" => process_identifier, c"i16@0:8";
+        "processName" => process_name, c"@16@0:8";
+        "arguments" => arguments, c"@16@0:8";
+        "environment" => environment, c"@16@0:8";
+        "systemUptime" => system_uptime, c"d16@0:8";
+        "thermalState" => thermal_state, c"q16@0:8";
+        "isLowPowerModeEnabled" => low_power_mode, c"c16@0:8";
+        "globallyUniqueString" => globally_unique_string, c"@16@0:8";
+        "hostName" => host_name, c"@16@0:8";
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole point of the class: a version that is not zero, because
+    /// `[[nil processInfo] operatingSystemVersion]` is macOS 0.0.0 and every
+    /// minimum-version check passes or fails on it.
+    #[test]
+    fn the_operating_system_is_not_version_zero() {
+        crate::bootstrap();
+        // SAFETY: neither argument is read.
+        let version =
+            unsafe { operating_system_version(std::ptr::null_mut(), objc::sel::get("x")) };
+        assert!(version.major >= 10, "macOS {}", version.major);
+    }
+
+    /// A version comparison has to answer both ways round, or a caller that
+    /// gates on it is gated by a constant.
+    #[test]
+    fn a_version_is_compared_against_and_not_ignored() {
+        crate::bootstrap();
+        let ask = |major| {
+            let wanted = OperatingSystemVersion {
+                major,
+                minor: 0,
+                patch: 0,
+            };
+            // SAFETY: neither of the first two arguments is read.
+            unsafe { at_least_version(std::ptr::null_mut(), objc::sel::get("x"), wanted) }
+        };
+        assert_eq!(ask(10), 1);
+        assert_eq!(ask(99), 0);
+    }
+
+    /// `+processInfo` is a singleton, which is what makes a guest's cached
+    /// pointer to it stay valid.
+    #[test]
+    fn the_process_is_one_object() {
+        crate::bootstrap();
+        let class = corefoundation::base::register(
+            c"NSProcessInfo",
+            None,
+            std::mem::size_of::<usize>(),
+            false,
+        );
+        let class = objc::class::ptr(class) as Id;
+        // SAFETY: the class this module registered.
+        let (a, b) = unsafe {
+            (
+                process_info(class, objc::sel::get("processInfo")),
+                process_info(class, objc::sel::get("processInfo")),
+            )
+        };
+        assert!(!a.is_null());
+        assert_eq!(a, b);
+    }
+}

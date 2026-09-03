@@ -724,9 +724,20 @@ pub unsafe extern "C" fn CFDataGetLength(data: CFTypeRef) -> CFIndex {
     unsafe { collections::data(data) }.map_or(0, |d| d.len() as CFIndex)
 }
 
+/// The bytes, and for an empty `CFData` a readable byte rather than Rust's.
+///
+/// `Vec::as_ptr` on a `Vec` that never allocated is the *alignment* - address
+/// `1` for a `u8` - which is not null and not readable. A guest that checks the
+/// pointer against null sees a valid one and dereferences it, and Apple's
+/// `CFDataGetBytePtr` never hands out an address that cannot be read. So an
+/// empty `CFData` answers with a byte of this runtime's own instead.
 pub unsafe extern "C" fn CFDataGetBytePtr(data: CFTypeRef) -> *const u8 {
+    static EMPTY: u8 = 0;
     // SAFETY: the caller's obligation.
-    unsafe { collections::data(data) }.map_or(std::ptr::null(), |d| d.as_ptr())
+    unsafe { collections::data(data) }.map_or(std::ptr::null(), |d| match d.is_empty() {
+        true => &raw const EMPTY,
+        false => d.as_ptr(),
+    })
 }
 
 //
@@ -1126,4 +1137,31 @@ pub unsafe extern "C" fn CFRunLoopTimerInvalidate(timer: CFTypeRef) {
 pub unsafe extern "C" fn CFRunLoopTimerIsValid(timer: CFTypeRef) -> Boolean {
     // SAFETY: the caller's obligation.
     unsafe { borrow::<Timer>(timer) }.is_some_and(|t| t.is_valid()) as Boolean
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An empty `CFData` must still answer a byte pointer that can be read.
+    /// Rust's own answer is the alignment, which is not null and faults.
+    #[test]
+    fn an_empty_data_answers_a_readable_pointer() {
+        let data = collections::new_data(Vec::new());
+        // SAFETY: a `CFData` this test made.
+        let (bytes, length) = unsafe { (CFDataGetBytePtr(data), CFDataGetLength(data)) };
+        assert_eq!(length, 0);
+        assert!(!bytes.is_null());
+        assert!(bytes as usize > 0xffff, "{bytes:p} is not a mapped address");
+        // SAFETY: the pointer this call just promised is readable.
+        assert_eq!(unsafe { bytes.read() }, 0);
+    }
+
+    /// Null is still null: an object that is not a `CFData` has no bytes, and a
+    /// readable pointer there would be a wrong answer rather than a safe one.
+    #[test]
+    fn a_non_data_has_no_bytes() {
+        // SAFETY: null is the documented "not an object" case.
+        assert!(unsafe { CFDataGetBytePtr(std::ptr::null()) }.is_null());
+    }
 }

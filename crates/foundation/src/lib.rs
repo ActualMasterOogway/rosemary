@@ -18,6 +18,7 @@ pub mod objectify;
 pub mod operation;
 pub mod paths;
 pub mod plist;
+pub mod processinfo;
 pub mod pool;
 pub mod string;
 pub mod thread;
@@ -57,6 +58,7 @@ pub fn bootstrap() {
         urlsession::install();
         cookies::install();
         defaults::install();
+        processinfo::install();
     });
 }
 
@@ -246,6 +248,7 @@ pub const CLASSES: &[&str] = &[
     "NSOperationQueue",
     "NSURL",
     "NSJSONSerialization",
+    "NSProcessInfo",
 ];
 
 // The image-resident number classes are `constant::CLASSES`, published the same
