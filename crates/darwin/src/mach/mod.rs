@@ -200,15 +200,19 @@ pub fn provide(lib: &mut machish::resolve::SyntheticDylib) {
     for name in NAMES {
         crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap() as *const ());
     }
-    // The three data imports. Unlike a function, an unbound one of these is not
+    // The data imports. Unlike a function, an unbound one of these is not
     // refused at the call - it binds to zero and the guest's next instruction
     // dereferences it, which is a segfault at address zero with no symbol
     // anywhere near it. They are the reason this module has to exist at all
     // rather than leaving the family denied.
+    info::publish_page_size();
     for (mach_o, addr) in [
         ("_mach_task_self_", &raw const task::TASK_SELF_PORT as usize),
         ("_bootstrap_port", &raw const bootstrap::BOOTSTRAP_PORT as usize),
         ("_NDR_record", (&raw const task::NDR_RECORD).cast::<u8>() as usize),
+        ("_vm_page_size", &raw const info::VM_PAGE_SIZE as usize),
+        ("_vm_page_mask", &raw const info::VM_PAGE_MASK as usize),
+        ("_vm_page_shift", &raw const info::VM_PAGE_SHIFT as usize),
     ] {
         crate::define_data(lib, mach_o, addr as u64);
     }

@@ -28,6 +28,7 @@
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use super::kern::{KERN_INVALID_ARGUMENT, KERN_SUCCESS};
 use super::space::{HOST_SELF, Name, TASK_SELF};
@@ -121,6 +122,28 @@ const _: () = {
 fn page_size() -> u64 {
     // SAFETY: `sysconf` reads a static system parameter and takes no pointer.
     (unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).max(4096) as u64
+}
+
+/// `vm_size_t vm_page_size`, `vm_size_t vm_page_mask` and `int vm_page_shift` -
+/// the three data symbols `<mach/vm_param.h>` publishes beside
+/// [`host_page_size`].
+///
+/// Data, so an unbound one is not refused at the call: it binds to zero, and a
+/// guest that rounds an allocation up to a page then rounds it to *nothing*.
+/// Roblox imports `_vm_page_size` directly and so does mimalloc's Darwin
+/// backend, which is why they are published rather than left to the function.
+///
+/// Written once, before the loader binds anything, by [`publish_page_size`].
+pub static VM_PAGE_SIZE: AtomicU64 = AtomicU64::new(0);
+pub static VM_PAGE_MASK: AtomicU64 = AtomicU64::new(0);
+pub static VM_PAGE_SHIFT: AtomicU32 = AtomicU32::new(0);
+
+/// Fill the three globals above. Idempotent.
+pub fn publish_page_size() {
+    let size = page_size();
+    VM_PAGE_SIZE.store(size, Ordering::Relaxed);
+    VM_PAGE_MASK.store(size - 1, Ordering::Relaxed);
+    VM_PAGE_SHIFT.store(size.trailing_zeros(), Ordering::Relaxed);
 }
 
 /// The page counts `/proc/self/statm` reports: total, resident, shared.

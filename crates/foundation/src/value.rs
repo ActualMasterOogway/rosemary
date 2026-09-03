@@ -27,6 +27,19 @@ unsafe extern "C" fn null(class: Id, _sel: Sel) -> Id {
     }) as Id
 }
 
+/// The `NSNull` singleton, for this crate's own converters.
+///
+/// Sent rather than called, so a guest that replaced `+null` is the one
+/// answering - `NSNull` is a class a guest may categorise.
+pub(crate) fn null_object() -> Id {
+    let class = objc::class::lookup(c"NSNull").expect("Foundation registered NSNull");
+    // SAFETY: `+null` is `id (Class, SEL)`, installed below.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+        f(objc::class::ptr(class) as Id, objc::sel::get("null"))
+    }
+}
+
 pub(crate) fn install() {
     let null_class =
         corefoundation::base::register(c"NSNull", None, std::mem::size_of::<usize>(), false);

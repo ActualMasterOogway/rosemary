@@ -260,6 +260,90 @@ unsafe extern "C" fn init_with_cstring_encoding(
     }
 }
 
+/// `-dataUsingEncoding:`, which is how a string reaches anything that takes
+/// bytes - `NSJSONSerialization` and `-[NSData writeToFile:]` both.
+///
+/// Answers nil for a string this encoding cannot spell, which is Apple's
+/// contract and matters: a lossy conversion here is a message body with a
+/// character silently replaced, where nil is a caller's own error path.
+unsafe extern "C" fn data_using_encoding(receiver: Id, _sel: Sel, ns: usize) -> Id {
+    // SAFETY: an `NSString`.
+    let utf8 = unsafe { bytes(receiver) };
+    let encoded = match ns {
+        ns_encoding::UTF8 => Some(utf8),
+        ns_encoding::ASCII => utf8.iter().all(|b| *b < 0x80).then_some(utf8),
+        ns_encoding::ISO_LATIN1 | ns_encoding::WINDOWS_CP1252 => String::from_utf8(utf8)
+            .ok()
+            .and_then(|text| text.chars().map(|c| u8::try_from(c as u32).ok()).collect()),
+        ns_encoding::UNICODE | ns_encoding::UTF16_LE | ns_encoding::UTF16_BE => {
+            String::from_utf8(utf8).ok().map(|text| {
+                let big_endian = ns == ns_encoding::UTF16_BE;
+                text.encode_utf16()
+                    .flat_map(|unit| match big_endian {
+                        true => unit.to_be_bytes(),
+                        false => unit.to_le_bytes(),
+                    })
+                    .collect()
+            })
+        }
+        // Refused by number rather than folded into UTF-8 the way `cf_encoding`
+        // folds it: the answer here is bytes the caller writes out or sends, so
+        // an encoding nobody translated would leave the wrong ones on the wire
+        // under the right name.
+        _ => {
+            eprintln!(
+                "rosetta3: foundation: -[NSString dataUsingEncoding:]: encoding {ns} is not one \
+                 this runtime encodes"
+            );
+            None
+        }
+    };
+    match encoded {
+        Some(bytes) => {
+            let data = corefoundation::collections::new_data(bytes);
+            // SAFETY: a fresh object this function owns a reference to.
+            unsafe { api::CFAutorelease(data) as Id }
+        }
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// `-dataUsingEncoding:allowLossyConversion:`.
+///
+/// The flag is ignored, and that is the honest reading of it: nothing above
+/// converts lossily, so a caller passing `YES` gets the same nil a caller
+/// passing `NO` gets rather than a string with characters dropped.
+unsafe extern "C" fn data_using_encoding_lossy(
+    receiver: Id,
+    sel: Sel,
+    ns: usize,
+    _lossy: bool,
+) -> Id {
+    // SAFETY: as above.
+    unsafe { data_using_encoding(receiver, sel, ns) }
+}
+
+/// `-initWithData:encoding:`, the other direction.
+unsafe extern "C" fn init_with_data(receiver: Id, _sel: Sel, data: Id, ns: usize) -> Id {
+    objc::arc::release(receiver);
+    // Type-checked: a length read out of another class's field is the first
+    // thing this would allocate.
+    // SAFETY: a live object.
+    let Some(bytes) = (unsafe { corefoundation::collections::data(data as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: `bytes` is a live buffer of its own length.
+    unsafe {
+        api::CFStringCreateWithBytes(
+            std::ptr::null(),
+            bytes.as_ptr(),
+            bytes.len() as isize,
+            cf_encoding(ns),
+            0,
+        ) as Id
+    }
+}
+
 /// A Rust string as an `NSString` the caller owns, for this crate's own use.
 pub fn from_str(text: &str) -> Id {
     corefoundation::string::from_bytes(text.as_bytes(), false) as Id
@@ -667,6 +751,8 @@ pub(crate) fn install() {
         "cStringUsingEncoding:" => c_string_using_encoding, c"*24@0:8Q16";
         "getCString:maxLength:encoding:" => get_c_string, c"B40@0:8*16Q24Q32";
         "lengthOfBytesUsingEncoding:" => length_of_bytes, c"Q24@0:8Q16";
+        "dataUsingEncoding:" => data_using_encoding, c"@24@0:8Q16";
+        "dataUsingEncoding:allowLossyConversion:" => data_using_encoding_lossy, c"@32@0:8Q16B24";
         "maximumLengthOfBytesUsingEncoding:" => length_of_bytes, c"Q24@0:8Q16";
         "isEqualToString:" => is_equal_to_string, c"B24@0:8@16";
         "characterAtIndex:" => character_at_index, c"S24@0:8Q16";
@@ -703,6 +789,7 @@ pub(crate) fn install() {
         "fileSystemRepresentation" => file_system_representation, c"*16@0:8";
         "mutableCopyWithZone:" => mutable_copy, c"@24@0:8^v16";
         "initWithBytes:length:encoding:" => init_with_bytes, c"@40@0:8^v16Q24Q32";
+        "initWithData:encoding:" => init_with_data, c"@32@0:8@16Q24";
         "initWithUTF8String:" => init_with_utf8, c"@24@0:8*16";
         "initWithCString:encoding:" => init_with_cstring_encoding, c"@32@0:8*16Q24";
         "initWithFormat:" => init_with_format, c"@24@0:8@16";

@@ -9,6 +9,7 @@ pub mod error;
 pub mod exception;
 pub mod filemanager;
 pub mod geometry;
+pub mod json;
 pub mod keychain;
 pub mod kvc;
 pub mod locale;
@@ -52,6 +53,7 @@ pub fn bootstrap() {
         thread::install();
         operation::install();
         url::install();
+        json::install();
         urlsession::install();
         cookies::install();
         defaults::install();
@@ -243,6 +245,7 @@ pub const CLASSES: &[&str] = &[
     "NSBlockOperation",
     "NSOperationQueue",
     "NSURL",
+    "NSJSONSerialization",
 ];
 
 // The image-resident number classes are `constant::CLASSES`, published the same
