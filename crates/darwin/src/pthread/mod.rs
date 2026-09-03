@@ -195,6 +195,27 @@ pub unsafe extern "C" fn mutexattr_gettype(at: u64, out: u64) -> i32 {
     0
 }
 
+/// `int pthread_mutexattr_setpolicy_np(pthread_mutexattr_t *, int)`.
+///
+/// The policy picks which waiter Darwin hands the lock to; the host has no equivalent,
+/// and neither policy changes what a correct program observes, so the value is checked
+/// and discarded. It cannot be dropped instead: the symbol does not exist on this host,
+/// so an unbound import is refused by name and the guest never starts.
+///
+/// # Safety
+///
+/// As [`mutexattr_init`].
+pub unsafe extern "C" fn mutexattr_setpolicy_np(at: u64, policy: u64) -> i32 {
+    // SAFETY: the caller's guarantee.
+    if unsafe { mutexattr_word(at) }.is_none() {
+        return err::EINVAL;
+    }
+    match policy as i32 {
+        PTHREAD_MUTEX_POLICY_FAIRSHARE_NP | PTHREAD_MUTEX_POLICY_FIRSTFIT_NP => 0,
+        _ => err::EINVAL,
+    }
+}
+
 /// The `pshared` setter, shared by all three attribute kinds.
 macro_rules! pshared {
     ($setter:ident, $getter:ident, $kind:expr, $field:ident) => {
@@ -842,6 +863,7 @@ fn entries() -> &'static [(&'static str, u64)] {
             "pthread_mutexattr_gettype" => mutexattr_gettype,
             "pthread_mutexattr_setpshared" => mutexattr_setpshared,
             "pthread_mutexattr_getpshared" => mutexattr_getpshared,
+            "pthread_mutexattr_setpolicy_np" => mutexattr_setpolicy_np,
 
             // Condition variables.
             "pthread_cond_init" => sync::cond_init,
@@ -1242,6 +1264,33 @@ mod tests {
             assert_eq!(sync::mutex_unlock(e.at()), 0);
             assert_eq!(sync::mutex_destroy(e.at()), 0);
             assert_eq!(mutexattr_destroy(attr.at()), 0);
+        }
+    }
+
+    /// A policy the host cannot honour is still accepted, and one Darwin does not
+    /// declare is still refused: the guest checks the return value, not the effect.
+    #[test]
+    fn a_mutex_policy_is_accepted_and_a_number_darwin_does_not_declare_is_not() {
+        let attr = MutexAttrObj::new();
+        // SAFETY: a live, correctly sized attribute object.
+        unsafe {
+            assert_eq!(mutexattr_init(attr.at()), 0);
+            assert_eq!(
+                mutexattr_setpolicy_np(attr.at(), PTHREAD_MUTEX_POLICY_FIRSTFIT_NP as u64),
+                0
+            );
+            assert_eq!(
+                mutexattr_setpolicy_np(attr.at(), PTHREAD_MUTEX_POLICY_FAIRSHARE_NP as u64),
+                0
+            );
+            assert_eq!(mutexattr_setpolicy_np(attr.at(), 2), err::EINVAL);
+            assert_eq!(mutexattr_setpolicy_np(0, 1), err::EINVAL);
+            assert_eq!(mutexattr_destroy(attr.at()), 0);
+            assert_eq!(
+                mutexattr_setpolicy_np(attr.at(), 1),
+                err::EINVAL,
+                "not an attribute set any more"
+            );
         }
     }
 
