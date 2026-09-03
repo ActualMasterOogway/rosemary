@@ -31,6 +31,7 @@ mod format;
 mod hal;
 mod render;
 mod status;
+pub(crate) mod trace;
 mod stream;
 
 pub use status::*;
@@ -207,12 +208,18 @@ pub unsafe extern "C" fn AudioUnitInitialize(handle: *mut c_void) -> i32 {
         return SUCCESS;
     }
     let Some(spec) = sdl_spec(&unit.format) else {
+        trace::say(format_args!("initialize {:?}", unit.format), FORMAT_NOT_SUPPORTED);
         return FORMAT_NOT_SUPPORTED;
     };
-    match stream::open(&mut unit, spec, handle) {
+    let status = match stream::open(&mut unit, spec, handle) {
         true => SUCCESS,
         false => CANNOT_DO_IN_CURRENT_CONTEXT,
-    }
+    };
+    trace::say(
+        format_args!("initialize {} Hz, {} channels", spec.freq, spec.channels),
+        status,
+    );
+    status
 }
 
 /// `OSStatus AudioUnitUninitialize(AudioUnit)`
@@ -237,6 +244,7 @@ pub unsafe extern "C" fn AudioOutputUnitStart(handle: *mut c_void) -> i32 {
     // SAFETY: a stream this crate opened.
     unsafe { sdl3::audio::resume(unit.stream) };
     unit.running = true;
+    trace::say(format_args!("start"), SUCCESS);
     SUCCESS
 }
 

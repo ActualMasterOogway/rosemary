@@ -35,7 +35,7 @@ pub type ObjectId = u32;
 const SYSTEM_OBJECT: ObjectId = 1;
 /// The one device this crate has. Not 0: `kAudioObjectUnknown` is 0, and a
 /// caller checks for it.
-const OUTPUT_DEVICE: ObjectId = 2;
+pub(crate) const OUTPUT_DEVICE: ObjectId = 2;
 
 /// `kAudioHardwareUnknownPropertyError`, `'who?'`.
 const UNKNOWN_PROPERTY: i32 = i32::from_be_bytes(*b"who?");
@@ -291,6 +291,18 @@ fn stream_configuration(scope: u32) -> Vec<u8> {
 /// The bytes one property answers with, or `None` for one this HAL does not
 /// have.
 fn property(object: ObjectId, address: &Address) -> Option<Vec<u8>> {
+    let answer = described(object, address);
+    if answer.is_none() && crate::trace::on() {
+        eprintln!(
+            "audio: object {object} has no property {} scope {}",
+            crate::trace::code(address.selector),
+            crate::trace::code(address.scope),
+        );
+    }
+    answer
+}
+
+fn described(object: ObjectId, address: &Address) -> Option<Vec<u8>> {
     let device = device();
     Some(match (object, address.selector) {
         (SYSTEM_OBJECT, selector::DEVICES) => as_bytes(&OUTPUT_DEVICE).to_vec(),
