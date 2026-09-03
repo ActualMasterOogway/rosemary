@@ -149,6 +149,7 @@ struct Api {
     SDL_SetWindowRelativeMouseMode: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_GetWindowRelativeMouseMode: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_GetModState: Option<unsafe extern "C" fn() -> u16>,
+    SDL_SetHint: Option<unsafe extern "C" fn(*const c_char, *const c_char) -> bool>,
 
     SDL_OpenAudioDeviceStream: Option<
         unsafe extern "C" fn(
@@ -301,6 +302,7 @@ fn api() -> Option<&'static Api> {
             SDL_SetWindowRelativeMouseMode,
             SDL_GetWindowRelativeMouseMode,
             SDL_GetModState,
+            SDL_SetHint,
             SDL_OpenAudioDeviceStream,
             SDL_DestroyAudioStream,
             SDL_PutAudioStreamData,
@@ -1550,6 +1552,20 @@ pub mod video {
         // SAFETY: two coordinates.
         unsafe { f(x, y) }
     }
+
+    /// `SDL_SetHint`, for the hints this tree has to override rather than
+    /// leave at SDL's default. False on a host whose SDL does not have it.
+    pub fn set_hint(name: &CStr, value: &CStr) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_SetHint) else {
+            return false;
+        };
+        // SAFETY: two NUL-terminated strings.
+        unsafe { f(name.as_ptr(), value.as_ptr()) }
+    }
+
+    /// `SDL_HINT_MOUSE_RELATIVE_CURSOR_VISIBLE`: whether the pointer stays
+    /// visible while relative mouse mode is on. SDL hides it by default.
+    pub const HINT_RELATIVE_CURSOR_VISIBLE: &CStr = c"SDL_MOUSE_RELATIVE_CURSOR_VISIBLE";
 
     /// Hold the pointer in place over `window` and report motion only as
     /// deltas, or stop doing so.

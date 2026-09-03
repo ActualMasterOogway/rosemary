@@ -274,7 +274,7 @@ pub fn pointer_location(window: Id) -> NSPoint {
     if window.is_null() {
         return NSPoint::default();
     }
-    let point = match crate::script::pointer() {
+    let point = match crate::script::pointer().or_else(crate::event::frozen_pointer) {
         Some((x, y)) => crate::geometry::point_from_sdl(x as f64, y as f64),
         None => match sdl3::video::global_mouse_state() {
             Some((x, y, _)) => crate::geometry::point_from_sdl(x as f64, y as f64),

@@ -445,6 +445,11 @@ pub fn mouse_is_associated() -> bool {
 /// focus goes and a window made after the guest disassociated never had it.
 pub fn apply_mouse_association() {
     let relative = !mouse_is_associated();
+    // Disassociating is not hiding: on macOS the cursor stays on screen where
+    // it was, and only `+[NSCursor hide]` takes it away - which this tree
+    // already counts in `crate::cursor`. SDL's relative mode hides the pointer
+    // itself, so the hint is what stops it from making that decision twice.
+    sdl3::video::set_hint(sdl3::video::HINT_RELATIVE_CURSOR_VISIBLE, c"1");
     for window in crate::window::sdl_windows() {
         if sdl3::video::relative_mouse_mode(window) != relative {
             sdl3::video::set_relative_mouse_mode(window, relative);

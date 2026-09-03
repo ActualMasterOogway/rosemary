@@ -302,13 +302,7 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             // movement: the location a guest reads back is where the cursor was
             // when it broke the link, which is what CoreGraphics does and what
             // SDL, still tracking a position inside the window, does not.
-            let (x, y) = match crate::screen::mouse_is_associated() {
-                true => {
-                    *POINTER.lock().unwrap_or_else(|e| e.into_inner()) = (x, y);
-                    (x, y)
-                }
-                false => *POINTER.lock().unwrap_or_else(|e| e.into_inner()),
-            };
+            let (x, y) = track_pointer(x, y);
             // Before the drop below: a cursor rectangle applies whether or not
             // anything asked for `-mouseMoved:`, and AppKit re-decides the
             // pointer on every move rather than only when a rectangle changes.
@@ -344,7 +338,7 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             y,
         } => {
             let kind = crate::button::event_kind(button, down);
-            *POINTER.lock().unwrap_or_else(|e| e.into_inner()) = (x, y);
+            let (x, y) = track_pointer(x, y);
             send(id, Some((x, y)), |window, location| Fields {
                 kind,
                 modifiers: current_modifiers(),
@@ -541,6 +535,47 @@ fn chain(start: Id, sel: objc::sel::Sel) -> Option<(Id, &'static objc::class::Me
 /// A wheel event carries no position and a click carries one only where SDL
 /// filled it in, so the last motion is what says which view the event is about.
 static POINTER: std::sync::Mutex<(f32, f32)> = std::sync::Mutex::new((0.0, 0.0));
+
+/// Record where an event says the pointer is, and answer where a guest is to be
+/// told it is.
+///
+/// The two differ only while the pointer is disassociated, and then they differ
+/// for every event and not only for motion: CoreGraphics leaves the cursor
+/// exactly where it was, so a click and a wheel turn arrive at that point too.
+/// SDL keeps tracking a position inside the window through relative mode, and a
+/// click that took SDL's answer would move the frozen point to somewhere the
+/// cursor never was - which is a hit test, and so a first responder, against the
+/// wrong view.
+fn track_pointer(x: f32, y: f32) -> (f32, f32) {
+    let mut pointer = POINTER.lock().unwrap_or_else(|e| e.into_inner());
+    if crate::screen::mouse_is_associated() {
+        *pointer = (x, y);
+    }
+    *pointer
+}
+
+/// Where the guest is to be told the pointer is on the desktop, for the calls
+/// that ask the window system rather than reading an event.
+///
+/// `None` while the pointer and cursor move together, when the window system is
+/// the better answer. While they do not, this is the whole point of the call:
+/// `+[NSEvent mouseLocation]` answering a pointer that is still moving, against
+/// events that all carry the frozen one, is a program being told two different
+/// things about the same cursor - and a program that decides whether its own
+/// window is focused from the pointer (Roblox does) then hands the keyboard
+/// away in the middle of mouse look.
+pub(crate) fn frozen_pointer() -> Option<(f32, f32)> {
+    if crate::screen::mouse_is_associated() {
+        return None;
+    }
+    let (x, y) = *POINTER.lock().unwrap_or_else(|e| e.into_inner());
+    let origin = crate::window::sdl_windows()
+        .into_iter()
+        .next()
+        .and_then(sdl3::video::window_position)
+        .unwrap_or((0, 0));
+    Some((x + origin.0 as f32, y + origin.1 as f32))
+}
 
 /// Whether `-mouseMoved:` should be delivered at all.
 ///
