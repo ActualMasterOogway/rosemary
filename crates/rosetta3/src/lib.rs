@@ -71,6 +71,9 @@ pub mod frameworks;
 pub mod objc;
 pub mod objcexc;
 
+/// `OpenGL.framework`, bound to the GL library SDL is using.
+pub mod opengl;
+
 /// Subsystems that exist because macOS does.
 ///
 /// [`gui`] is the debug overlay drawn through Metal and AppKit, [`profile`] a

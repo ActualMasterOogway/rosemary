@@ -411,8 +411,7 @@ pub fn announce_unbound_imports<'r>(
             m.slot_va,
         );
     }
-    if let Some(rest) = unbound.len().checked_sub(limit).filter(|n| *n > 0)
-    {
+    if let Some(rest) = unbound.len().checked_sub(limit).filter(|n| *n > 0) {
         eprintln!("rosetta3:   (and {rest} more)");
     }
     // So a later fault at zero can say which of these the guest called, rather
@@ -542,6 +541,9 @@ pub(crate) struct HostProviders {
     /// The `dl` family, which the host exports and cannot usefully answer for an
     /// x86-64 file. See [`crate::dyld`].
     dyld: machish::resolve::SyntheticDylib,
+    /// OpenGL, on the GL library SDL made the context against rather than on
+    /// whichever one the host loader has. See [`crate::opengl`].
+    opengl: machish::resolve::LazyDylib,
     eager: machish::resolve::SyntheticDylib,
     native: NativeDylibProvider,
 }
@@ -554,12 +556,14 @@ impl HostProviders {
         darwin::divergent::deny_in(&mut native);
         crate::objc::host::deny_foreign_classes(&mut native);
         crate::frameworks::deny_host_frameworks(&mut native);
+        crate::opengl::deny_host_gl(&mut native);
         HostProviders {
             runtime: crate::shims::runtime::provider(),
             darwin: darwin::provider(),
             objc: crate::objc::dispatch::provider(),
             frameworks: crate::frameworks::provider(),
             dyld: crate::dyld::provider(),
+            opengl: crate::opengl::provider(),
             eager: eager_binding_shims(),
             native,
         }
@@ -576,6 +580,7 @@ impl HostProviders {
         providers.push(&self.objc);
         providers.push(&self.frameworks);
         providers.push(&self.dyld);
+        providers.push(&self.opengl);
         providers.push(&self.eager);
         providers.push(&self.native);
         providers

@@ -1,8 +1,10 @@
+mod lazy;
 mod synthetic;
 
 #[cfg(feature = "std")]
 mod native;
 
+pub use lazy::LazyDylib;
 pub use synthetic::SyntheticDylib;
 
 #[cfg(feature = "std")]

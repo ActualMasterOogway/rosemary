@@ -80,27 +80,26 @@ pub fn host_symbol(name: &str) -> Option<u64> {
 /// Make sure the libraries a guest's imports come out of are loaded before
 /// anything asks for a symbol.
 ///
-/// On Darwin `cos` is in libSystem and `glGenTextures` is in the OpenGL
-/// framework, both of which the loader has already. Off it, each lives in a
-/// library that is loaded only if something linked against it - and this runtime
-/// links neither - so `dlsym(RTLD_DEFAULT, "cos")` is null and a guest's whole
-/// maths library goes unresolved. One `dlopen` apiece fixes every name at once.
+/// On Darwin `cos` is in libSystem, which the loader has already. Off it, it
+/// lives in a library that is loaded only if something linked against it - and
+/// this runtime links neither - so `dlsym(RTLD_DEFAULT, "cos")` is null and a
+/// guest's whole maths library goes unresolved. One `dlopen` fixes every name
+/// at once.
 ///
-/// GLU is a separate library off Darwin - `gluOrtho2D` is in the OpenGL framework
-/// there and in `libGLU.so.1` here - so it is a third `dlopen` and not an
-/// oversight.
+/// GLU is a separate library off Darwin - `gluOrtho2D` is in the OpenGL
+/// framework there and in `libGLU.so.1` here - so it is a second `dlopen` and
+/// not an oversight.
 ///
-/// The GL library and not `SDL_GL_GetProcAddress`, which would be the more
-/// careful answer: an import slot is bound before any context exists, and
-/// `GetProcAddress` before a current context answers null on some drivers. The
-/// entry points a 2.1 program calls are the library's own exports, so the
-/// loader can be asked for them directly.
+/// GL itself is deliberately **not** opened here. Its entry points have to come
+/// out of the library SDL made the context against, which is not necessarily
+/// this loader's `libGL.so.1`, and a global one would answer every `gl` name
+/// first. See `rosetta3::opengl`.
 fn load_host_libraries() {
     #[cfg(not(target_os = "macos"))]
     {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            for soname in [c"libm.so.6", c"libGL.so.1", c"libGLU.so.1"] {
+            for soname in [c"libm.so.6", c"libGLU.so.1"] {
                 // SAFETY: a soname the dynamic loader resolves, opened globally
                 // so its exports join the default search, and never closed.
                 unsafe {

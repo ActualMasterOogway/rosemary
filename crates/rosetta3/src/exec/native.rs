@@ -124,6 +124,7 @@ impl Native {
         // come after `allow_everything`, which clears the prefix list.
         crate::objc::host::deny_foreign_classes(&mut host);
         crate::frameworks::deny_host_frameworks(&mut host);
+        crate::opengl::deny_host_gl(&mut host);
 
         let eager = eager_binding_shims();
         let tlv = tlv_provider();
@@ -138,6 +139,7 @@ impl Native {
         let objc = crate::objc::dispatch::provider();
         let frameworks = crate::frameworks::provider();
         let dyld = crate::dyld::provider();
+        let opengl = crate::opengl::provider();
         // Under `native` the image is host code calling the libraries it was
         // linked against, and the shortest chain that works is the honest one.
         // Under `builtin` it must reach this tree's runtime and frameworks
@@ -152,6 +154,7 @@ impl Native {
                 &objc,
                 &frameworks,
                 &dyld,
+                &opengl,
                 &host,
             ],
             false => vec![&eager, &tlv, &runtime, &platform, &host],

@@ -13,6 +13,7 @@ corefoundation.workspace = true
 iokit.workspace = true
 foundation.workspace = true
 appkit.workspace = true
+sdl3.workspace = true
 corevideo.workspace = true
 coreaudio.workspace = true
 gimli.workspace = true

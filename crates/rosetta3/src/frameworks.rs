@@ -117,7 +117,7 @@ fn register_dlopen_names() {
     register_opengl_framework();
 }
 
-/// `OpenGL.framework`, as a handle over this host's libGL.
+/// `OpenGL.framework`, as a handle over the GL library SDL is using.
 ///
 /// A GL program does not call `glDrawArrays` through an import - it `dlopen`s
 /// the framework and `dlsym`s every entry point it wants, because that is the
@@ -130,31 +130,14 @@ fn register_dlopen_names() {
 /// "OpenGL 3.2 support or higher required" - a version check that failed
 /// because there was no library to ask, not because the driver is old.
 ///
-/// Off macOS only. A Mac has the real framework and the host loader finds it.
-#[cfg(not(target_os = "macos"))]
+/// The other half of [`crate::opengl`]: the same answers a link gets, so that a
+/// program which resolves half its GL by import and half by `dlsym` draws
+/// through one library either way.
 fn register_opengl_framework() {
-    crate::dyld::register_synthetic(
-        &[
-            "/System/Library/Frameworks/OpenGL.framework/Versions/Current/OpenGL",
-            "/System/Library/Frameworks/OpenGL.framework/Versions/A/OpenGL",
-            "/System/Library/Frameworks/OpenGL.framework/OpenGL",
-            "OpenGL",
-        ],
-        gl_symbol,
-    );
-}
-
-#[cfg(target_os = "macos")]
-fn register_opengl_framework() {}
-
-/// One GL entry point, from whichever library the host keeps it in.
-///
-/// `darwin::symbol` rather than a bare `dlsym`, because it is what has already
-/// opened `libGL.so.1` into the global namespace - a `dlsym` here before that
-/// happened would answer null for every name and look like a missing driver.
-#[cfg(not(target_os = "macos"))]
-fn gl_symbol(name: &str) -> Option<u64> {
-    name.starts_with("gl").then(|| darwin::symbol(name))?
+    if !crate::opengl::interposed() {
+        return;
+    }
+    crate::dyld::register_synthetic(crate::opengl::NAMES, crate::opengl::symbol);
 }
 
 /// Push the outermost autorelease pool, the one a process is born with.
@@ -363,7 +346,10 @@ fn media_constants() -> Vec<(String, u64)> {
         .map(|(symbol, text)| {
             (
                 (*symbol).to_string(),
-                corefoundation::base::global_cell(symbol, foundation::notification::name_object(text)),
+                corefoundation::base::global_cell(
+                    symbol,
+                    foundation::notification::name_object(text),
+                ),
             )
         })
         .collect()
@@ -443,6 +429,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         .or_else(|| iokit::symbol(name))
         .or_else(|| appkit::symbol(name))
         .or_else(|| corevideo::symbol(name))
+        .or_else(|| crate::opengl::symbol(name))
         .or_else(|| coreaudio::symbol(name))
         // So a `dlsym` of one of these answers what the loader bound, which is
         // the agreement `darwin::symbol`'s doc comment states.

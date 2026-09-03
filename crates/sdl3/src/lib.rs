@@ -122,6 +122,7 @@ struct Api {
         Option<unsafe extern "C" fn(c_int, c_int, u32, *mut c_void, c_int) -> *mut c_void>,
     SDL_DestroySurface: Option<unsafe extern "C" fn(*mut c_void)>,
 
+    SDL_GL_LoadLibrary: Option<unsafe extern "C" fn(*const c_char) -> bool>,
     SDL_GL_CreateContext: Option<unsafe extern "C" fn(Window) -> GlContext>,
     SDL_GL_DestroyContext: Option<unsafe extern "C" fn(GlContext) -> bool>,
     SDL_GL_MakeCurrent: Option<unsafe extern "C" fn(Window, GlContext) -> bool>,
@@ -277,6 +278,7 @@ fn api() -> Option<&'static Api> {
             SDL_SetWindowIcon,
             SDL_CreateSurfaceFrom,
             SDL_DestroySurface,
+            SDL_GL_LoadLibrary,
             SDL_GL_CreateContext,
             SDL_GL_DestroyContext,
             SDL_GL_MakeCurrent,
@@ -1312,6 +1314,32 @@ pub mod video {
             true => density,
             false => 1.0,
         }
+    }
+
+    /// Open the GL library SDL will make its contexts against, once.
+    ///
+    /// Every `gl` entry point a guest binds has to come out of this one: a
+    /// second GL library, found through the host loader, is a different driver
+    /// object with its own dispatch state, and a context created here but drawn
+    /// through there renders nothing or corrupts both.
+    ///
+    /// Implied by creating a window with `flags::OPENGL`, and called ahead of
+    /// that here because a guest binds its imports long before it opens a
+    /// window - `SDL_GL_GetProcAddress` answers null until this has run.
+    pub fn gl_load_library() -> bool {
+        static LOADED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *LOADED.get_or_init(|| {
+            let Some(f) = init_video()
+                .then(api)
+                .flatten()
+                .and_then(|a| a.SDL_GL_LoadLibrary)
+            else {
+                return false;
+            };
+            // SAFETY: a null path asks SDL for the platform default, which is
+            // the library it would load for a GL window anyway.
+            unsafe { f(std::ptr::null()) }
+        })
     }
 
     pub fn gl_create_context(window: Window) -> Option<GlContext> {

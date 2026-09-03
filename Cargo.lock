@@ -1024,6 +1024,7 @@ dependencies = [
  "microlift",
  "mimalloc",
  "objc",
+ "sdl3",
  "static_init",
 ]
 
