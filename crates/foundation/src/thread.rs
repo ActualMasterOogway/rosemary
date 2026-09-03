@@ -6,10 +6,17 @@
 //! module does not own - the main one, and every one a guest made itself - and
 //! there is nothing here that could.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use objc::object::Id;
 use objc::sel::Sel;
 
 use crate::define::class_methods;
+
+/// Set once a thread has been detached, which is the whole of what
+/// `+isMultiThreaded` reports: a guest that made its own threads with
+/// `pthread_create` gets NO here on Apple too.
+static MULTITHREADED: AtomicBool = AtomicBool::new(false);
 
 /// A retained object, so the sending thread cannot release what the new thread
 /// is about to be handed.
@@ -27,6 +34,7 @@ unsafe extern "C" fn detach(_class: Id, _sel: Sel, selector: Sel, target: Id, ob
     if target.is_null() || selector.is_null() {
         return;
     }
+    MULTITHREADED.store(true, Ordering::Relaxed);
     let detached = Detached {
         target: objc::arc::retain(target) as usize,
         object: objc::arc::retain(object) as usize,
@@ -64,10 +72,15 @@ unsafe extern "C" fn sleep_for_interval(_class: Id, _sel: Sel, seconds: f64) {
     }
 }
 
+unsafe extern "C" fn is_multi_threaded(_class: Id, _sel: Sel) -> bool {
+    MULTITHREADED.load(Ordering::Relaxed)
+}
+
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSThread").expect("declared abstract by this crate");
     class_methods!(class, {
         "detachNewThreadSelector:toTarget:withObject:" => detach, c"v40@0:8:16@24@32";
         "sleepForTimeInterval:" => sleep_for_interval, c"v24@0:8d16";
+        "isMultiThreaded" => is_multi_threaded, c"B16@0:8";
     });
 }

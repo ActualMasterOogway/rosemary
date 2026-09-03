@@ -365,6 +365,26 @@ unsafe extern "C" fn array_with_object(_class: Id, _sel: Sel, object: Id) -> Id 
     }
 }
 
+unsafe extern "C" fn array_with_array(_class: Id, _sel: Sel, other: Id) -> Id {
+    let values: Vec<CFTypeRef> = if other.is_null() {
+        Vec::new()
+    } else {
+        // SAFETY: the argument is an array if it is one of ours.
+        match unsafe { collections::array(other as CFTypeRef) } {
+            Some(a) => a.values.clone(),
+            None => objc::fail!("+[NSMutableArray arrayWithArray:]: the argument is not an array"),
+        }
+    };
+    // SAFETY: a fresh object holding live ones.
+    unsafe {
+        api::CFAutorelease(collections::new_array(
+            &values,
+            Policy::from_type_callbacks(),
+            true,
+        )) as Id
+    }
+}
+
 /// `+arrayWithObjects:count:`, which is the counted spelling
 /// `objc::dispatch` rewrites the nil-terminated variadic into.
 unsafe extern "C" fn array_with_objects_count(
@@ -674,6 +694,7 @@ pub(crate) fn install() {
         "new" => new_array, c"@16@0:8";
         "array" => array_fn, c"@16@0:8";
         "arrayWithCapacity:" => array_with_capacity, c"@24@0:8Q16";
+        "arrayWithArray:" => array_with_array, c"@24@0:8@16";
     });
 
     let dictionary_class =
