@@ -42,6 +42,12 @@ pub(crate) fn install() {
         c"B24@0:8:16",
     );
     add(meta, "conformsToProtocol:", conforms as Imp, c"B24@0:8@16");
+    add(
+        meta,
+        "instanceMethodForSelector:",
+        instance_method_for as Imp,
+        c"^?24@0:8:16",
+    );
     add(meta, "initialize", initialize as Imp, c"v16@0:8");
     add(meta, "load", initialize as Imp, c"v16@0:8");
 
@@ -64,6 +70,25 @@ pub(crate) fn install() {
         c"B24@0:8#16",
     );
     add(class, "respondsToSelector:", responds as Imp, c"B24@0:8:16");
+    add(
+        class,
+        "methodForSelector:",
+        method_for as Imp,
+        c"^?24@0:8:16",
+    );
+    add(class, "performSelector:", perform as Imp, c"@24@0:8:16");
+    add(
+        class,
+        "performSelector:withObject:",
+        perform_with as Imp,
+        c"@32@0:8:16@24",
+    );
+    add(
+        class,
+        "performSelector:withObject:withObject:",
+        perform_with_with as Imp,
+        c"@40@0:8:16@24@32",
+    );
     add(
         class,
         "conformsToProtocol:",
@@ -242,6 +267,74 @@ unsafe extern "C" fn instances_respond(receiver: Id, _sel: Sel, selector: Sel) -
     unsafe { as_class(receiver) }.method(selector).is_some()
 }
 
+/// The `IMP` for `selector` on `receiver`'s class, or the stub that reports the
+/// message rather than the nil a caller would jump to. See [`crate::msg::forward`].
+///
+/// # Safety
+///
+/// `receiver` must be a live object.
+unsafe fn imp_for(receiver: Id, selector: Sel) -> Imp {
+    // SAFETY: the caller's obligation.
+    let imp = unsafe { crate::object::class_of(receiver) }
+        .map_or(std::ptr::null(), |c| {
+            crate::class::method_implementation(c, selector)
+        });
+    match imp.is_null() {
+        true => crate::msg::forward(),
+        false => imp,
+    }
+}
+
+/// `-methodForSelector:`, which a class receiver answers about its *class*
+/// methods: `class_of` a class is its metaclass, which is where those live.
+unsafe extern "C" fn method_for(receiver: Id, _sel: Sel, selector: Sel) -> Imp {
+    // SAFETY: an instance.
+    unsafe { imp_for(receiver, selector) }
+}
+
+unsafe extern "C" fn instance_method_for(receiver: Id, _sel: Sel, selector: Sel) -> Imp {
+    // SAFETY: a class.
+    let imp = crate::class::method_implementation(unsafe { as_class(receiver) }, selector);
+    match imp.is_null() {
+        true => crate::msg::forward(),
+        false => imp,
+    }
+}
+
+/// The `-performSelector:` family, resolved and called rather than routed
+/// through `objc_msgSend`: the guest's sends are intercepted before they reach
+/// it, so a send made from here has to find the implementation itself.
+unsafe extern "C" fn perform(receiver: Id, _sel: Sel, selector: Sel) -> Id {
+    // SAFETY: an instance, and `imp_for` answers an implementation of
+    // `selector`, whose prototype begins with the receiver and the selector.
+    let f: unsafe extern "C" fn(Id, Sel) -> Id =
+        unsafe { std::mem::transmute(imp_for(receiver, selector)) };
+    // SAFETY: as above.
+    unsafe { f(receiver, selector) }
+}
+
+unsafe extern "C" fn perform_with(receiver: Id, _sel: Sel, selector: Sel, object: Id) -> Id {
+    // SAFETY: as `perform`, for a method taking one object.
+    let f: unsafe extern "C" fn(Id, Sel, Id) -> Id =
+        unsafe { std::mem::transmute(imp_for(receiver, selector)) };
+    // SAFETY: as above.
+    unsafe { f(receiver, selector, object) }
+}
+
+unsafe extern "C" fn perform_with_with(
+    receiver: Id,
+    _sel: Sel,
+    selector: Sel,
+    first: Id,
+    second: Id,
+) -> Id {
+    // SAFETY: as `perform`, for a method taking two objects.
+    let f: unsafe extern "C" fn(Id, Sel, Id, Id) -> Id =
+        unsafe { std::mem::transmute(imp_for(receiver, selector)) };
+    // SAFETY: as above.
+    unsafe { f(receiver, selector, first, second) }
+}
+
 unsafe extern "C" fn conforms(receiver: Id, _sel: Sel, protocol: Id) -> bool {
     // SAFETY: a class and a protocol.
     let class = unsafe { as_class(receiver) };
@@ -275,3 +368,65 @@ unsafe extern "C" fn does_not_recognize(receiver: Id, _sel: Sel, selector: Sel) 
 
 /// `+initialize` and `+load`, which `NSObject` answers by doing nothing.
 unsafe extern "C" fn initialize(_receiver: Id, _sel: Sel) {}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::c_void;
+
+    use super::*;
+    use crate::sel;
+
+    unsafe extern "C" fn answer(_receiver: Id, _sel: Sel) -> Id {
+        42 as Id
+    }
+
+    /// An instance of a fresh subclass of `NSObject` implementing `-answer`.
+    ///
+    /// The name is the caller's because class names are global and the tests
+    /// share a process.
+    fn instance(name: &CStr) -> Id {
+        crate::bootstrap();
+        let nsobject = crate::class::lookup(c"NSObject").expect("NSObject");
+        let class = crate::class::allocate_pair(Some(nsobject), name, 0).expect("a fresh name");
+        assert!(class.add_method(sel::get("answer"), answer as Imp, c"@16@0:8"));
+        crate::class::register_pair(class);
+        crate::object::create_instance(class, 0)
+    }
+
+    /// Send a message taking one word and returning one, as a call site does.
+    fn send(receiver: Id, name: &str, argument: *const c_void) -> *const c_void {
+        // SAFETY: an instance made above.
+        let class = unsafe { crate::object::class_of(receiver) }.expect("an instance");
+        let sel = sel::get(name);
+        let imp = crate::class::method_implementation(class, sel);
+        assert!(!imp.is_null(), "NSObject answers -{name}");
+        // SAFETY: every method reached here takes one word and returns one.
+        let f: unsafe extern "C" fn(Id, Sel, *const c_void) -> *const c_void =
+            unsafe { std::mem::transmute(imp) };
+        // SAFETY: as above.
+        unsafe { f(receiver, sel, argument) }
+    }
+
+    #[test]
+    fn method_for_selector_answers_the_installed_imp() {
+        let object = instance(c"Rosetta3MethodForA");
+        let found = send(object, "methodForSelector:", sel::get("answer") as *const c_void);
+        assert_eq!(found, answer as *const c_void);
+    }
+
+    /// The nil this used to answer is a jump to zero at the call site, which
+    /// reports neither the class nor the selector.
+    #[test]
+    fn method_for_selector_never_answers_nil() {
+        let object = instance(c"Rosetta3MethodForB");
+        let found = send(object, "methodForSelector:", sel::get("absent") as *const c_void);
+        assert_eq!(found, crate::msg::forward());
+    }
+
+    #[test]
+    fn perform_selector_reaches_the_method() {
+        let object = instance(c"Rosetta3MethodForC");
+        let result = send(object, "performSelector:", sel::get("answer") as *const c_void);
+        assert_eq!(result as usize, 42);
+    }
+}

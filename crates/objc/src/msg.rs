@@ -50,6 +50,21 @@ unsafe extern "C" fn unrecognised(receiver: Id, sel: Sel) -> ! {
     crate::fail!("{line}");
 }
 
+/// The `IMP` a message nothing answers resolves to, for a caller that asked for
+/// one rather than sent the message - `-methodForSelector:` and the
+/// `-performSelector:` family.
+///
+/// Never null, and that is the point: a call site handed nil jumps to zero, and
+/// a null jump reports neither the class nor the selector. This is Apple's
+/// `_objc_msgForward` position, minus the forwarding machinery - the only thing
+/// left to do with the message is name it.
+pub fn forward() -> *const c_void {
+    match logging_unrecognised() {
+        true => unrecognised_logged as *const c_void,
+        false => unrecognised as *const c_void,
+    }
+}
+
 /// The class and selector of a message nothing answers, as one line.
 ///
 /// # Safety
