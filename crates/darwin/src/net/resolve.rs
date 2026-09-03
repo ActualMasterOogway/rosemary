@@ -345,7 +345,114 @@ unsafe extern "C" fn getnameinfo(
     }
 }
 
-pub const NAMES: &[&str] = &["getaddrinfo", "freeaddrinfo", "gai_strerror", "getnameinfo"];
+// The `hostent` family, none of which the `libc` crate declares. All three are
+// obsolescent - `getaddrinfo` replaced them - and all three are still exported
+// by both platforms and still imported by programs older than the replacement.
+unsafe extern "C" {
+    #[link_name = "gethostbyname"]
+    fn host_gethostbyname(name: *const c_char) -> *mut libc::hostent;
+    #[link_name = "gethostbyname2"]
+    fn host_gethostbyname2(name: *const c_char, af: i32) -> *mut libc::hostent;
+    #[link_name = "gethostbyaddr"]
+    fn host_gethostbyaddr(addr: *const c_void, len: u32, af: i32) -> *mut libc::hostent;
+}
+
+/// The lookup that predates `getaddrinfo`, and the one field of its answer that
+/// is a platform constant.
+///
+/// `struct hostent` is the same five fields at the same offsets on both
+/// platforms, so nothing here is rebuilt - except `h_addrtype`, which is an
+/// `AF_*`: an IPv6 answer says 10 here and has to say 30 to the guest, and 10
+/// on Darwin is `AF_ROUTE`. A caller that switches on it - which is all of them,
+/// because the field is what says how many bytes `h_addr_list` entries hold -
+/// reads an address family it has a name for and did not ask about.
+///
+/// The answer is copied into a slot of this thread's rather than rewritten in
+/// place, because the structure belongs to the resolver: writing Darwin's family
+/// number into it would leave the host's own `gethostbyaddr` reading `AF_ROUTE`
+/// out of its cache. The pointers inside still point at the resolver's storage,
+/// which is the same lifetime a caller of this function already has - valid
+/// until the next lookup on this thread.
+///
+/// # Safety
+///
+/// `answer` is a `hostent` a resolver returned, or null.
+unsafe fn in_darwins_shape(answer: *mut libc::hostent) -> *mut c_void {
+    if answer.is_null() {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: the caller's guarantee.
+    let mut copy = unsafe { answer.read() };
+    let Some(family) = addr::family_from_host(copy.h_addrtype) else {
+        // A family the guest cannot name is no answer at all: it would read the
+        // address length out of a field it has no case for.
+        return core::ptr::null_mut();
+    };
+    copy.h_addrtype = family;
+
+    thread_local! {
+        static HELD: core::cell::UnsafeCell<libc::hostent> =
+            // SAFETY: zeroed is the empty answer, and it is overwritten below
+            // before any pointer to it is handed out.
+            core::cell::UnsafeCell::new(unsafe { core::mem::zeroed() });
+    }
+    HELD.with(|slot| {
+        // SAFETY: a slot of this thread's, which nothing else holds a reference
+        // to - the pointer handed out is read, not aliased, before the next
+        // lookup on this thread replaces it.
+        unsafe { slot.get().write(copy) };
+        slot.get().cast()
+    })
+}
+
+/// `struct hostent *gethostbyname(const char *)`
+///
+/// # Safety
+///
+/// `name` is a NUL-terminated string.
+unsafe extern "C" fn gethostbyname(name: *const c_char) -> *mut c_void {
+    // SAFETY: the caller's string.
+    unsafe { in_darwins_shape(host_gethostbyname(name)) }
+}
+
+/// `struct hostent *gethostbyname2(const char *, int af)`
+///
+/// # Safety
+///
+/// As [`gethostbyname`].
+unsafe extern "C" fn gethostbyname2(name: *const c_char, af: i32) -> *mut c_void {
+    let Some(af) = addr::family_to_host(af) else {
+        crate::errno::set(libc::EAFNOSUPPORT);
+        return core::ptr::null_mut();
+    };
+    // SAFETY: the caller's string.
+    unsafe { in_darwins_shape(host_gethostbyname2(name, af)) }
+}
+
+/// `struct hostent *gethostbyaddr(const void *, socklen_t, int)`
+///
+/// # Safety
+///
+/// `addr` is `len` readable bytes - an address of the family `af` names, which
+/// is the same bytes on both platforms.
+unsafe extern "C" fn gethostbyaddr(addr: *const c_void, len: u32, af: i32) -> *mut c_void {
+    let Some(af) = addr::family_to_host(af) else {
+        crate::errno::set(libc::EAFNOSUPPORT);
+        return core::ptr::null_mut();
+    };
+    // SAFETY: the caller's address, at the length they gave for it.
+    unsafe { in_darwins_shape(host_gethostbyaddr(addr, len, af)) }
+}
+
+pub const NAMES: &[&str] = &[
+    "getaddrinfo",
+    "freeaddrinfo",
+    "gai_strerror",
+    "getnameinfo",
+    "gethostbyname",
+    "gethostbyname2",
+    "gethostbyaddr",
+];
 
 pub fn symbol(name: &str) -> Option<u64> {
     let f: *const () = match name {
@@ -353,6 +460,9 @@ pub fn symbol(name: &str) -> Option<u64> {
         "freeaddrinfo" => freeaddrinfo as *const (),
         "gai_strerror" => gai_strerror as *const (),
         "getnameinfo" => getnameinfo as *const (),
+        "gethostbyname" => gethostbyname as *const (),
+        "gethostbyname2" => gethostbyname2 as *const (),
+        "gethostbyaddr" => gethostbyaddr as *const (),
         _ => return None,
     };
     Some(f as usize as u64)

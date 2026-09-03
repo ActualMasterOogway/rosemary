@@ -23,13 +23,17 @@ mod msg {
     pub const CTRUNC: i32 = 0x20;
     pub const WAITALL: i32 = 0x40;
     pub const DONTWAIT: i32 = 0x80;
+    /// Half-close after the send; see [`super::half_close_if_asked`].
+    pub const EOF: i32 = 0x100;
     pub const NOSIGNAL: i32 = 0x80000;
 }
 
 /// Each flag that means the same thing on both, as `(darwin, host)`.
 ///
-/// Darwin's `MSG_EOF` (`0x100`) has no host counterpart and is dropped: it asks
-/// for a half-close after the send, which here is a separate `shutdown`.
+/// `MSG_EOF` is not here and must not be: `0x100` here is `MSG_WAITALL`. It is
+/// the one Darwin flag this host answers with a *second call* rather than with
+/// a bit - see [`half_close_if_asked`] - so it is stripped on the way through
+/// and acted on afterwards.
 const FLAGS: &[(i32, i32)] = &[
     (msg::OOB, libc::MSG_OOB),
     (msg::PEEK, libc::MSG_PEEK),
@@ -227,7 +231,8 @@ unsafe extern "C" fn getpeername(fd: i32, address: *mut c_void, len: *mut u32) -
 /// `buf` is `len` readable bytes.
 unsafe extern "C" fn send(fd: i32, buf: *const c_void, len: usize, flags: i32) -> isize {
     // SAFETY: the caller's buffer, with the flags translated.
-    unsafe { libc::send(fd, buf, len, sending_flags(fd, flags)) }
+    let sent = unsafe { libc::send(fd, buf, len, sending_flags(fd, flags)) };
+    half_close_if_asked(fd, flags, sent)
 }
 
 /// `flags` for a send on `fd`, with `MSG_NOSIGNAL` added when the guest asked
@@ -264,10 +269,11 @@ unsafe extern "C" fn sendto(
     address: *const c_void,
     addrlen: u32,
 ) -> isize {
-    let flags = sending_flags(fd, flags);
+    let host_flags = sending_flags(fd, flags);
     if address.is_null() {
         // SAFETY: a connected socket, which is what a null address means.
-        return unsafe { libc::sendto(fd, buf, len, flags, core::ptr::null(), 0) };
+        let sent = unsafe { libc::sendto(fd, buf, len, host_flags, core::ptr::null(), 0) };
+        return half_close_if_asked(fd, flags, sent);
     }
     // SAFETY: the caller's guarantee.
     let Some(host) = (unsafe { addr::to_host(address, addrlen) }) else {
@@ -275,7 +281,8 @@ unsafe extern "C" fn sendto(
         return -1;
     };
     // SAFETY: the caller's buffer and an address this function owns.
-    unsafe { libc::sendto(fd, buf, len, flags, host.as_ptr(), host.len()) }
+    let sent = unsafe { libc::sendto(fd, buf, len, host_flags, host.as_ptr(), host.len()) };
+    half_close_if_asked(fd, flags, sent)
 }
 
 /// `ssize_t recvfrom(int, void *, size_t, int, struct sockaddr *, socklen_t *)`
@@ -335,25 +342,30 @@ struct MsgHdr {
     flags: i32,
 }
 
-/// Say once that a control message was refused, and why.
-fn say_control_refused() {
-    static SAID: std::sync::Once = std::sync::Once::new();
-    SAID.call_once(|| {
-        eprintln!(
-            "rosetta3: sendmsg/recvmsg with ancillary data: refused - a struct cmsghdr is \
-             twelve bytes on Darwin and sixteen here, and the SCM_ types are different \
-             numbers, so the payload cannot be handed across unread"
-        );
-    });
+/// Say once that a control message was refused, and which one.
+fn say_control_refused(refused: super::control::Untranslatable) {
+    use std::sync::Mutex;
+    static SAID: Mutex<Vec<super::control::Untranslatable>> = Mutex::new(Vec::new());
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    if said.contains(&refused) {
+        return;
+    }
+    said.push(refused);
+    let (level, kind) = (refused.level, refused.kind);
+    eprintln!(
+        "rosetta3: sendmsg with ancillary data of level {level:#x} type {kind:#x}: refused - \
+         darwin::net::control converts SCM_RIGHTS and nothing else, and the SCM_ types are \
+         different numbers on the two platforms, so a payload it does not know the shape of \
+         cannot be handed across unread"
+    );
 }
 
 /// The two halves `sendmsg` and `recvmsg` share: a guest `msghdr` as the host's.
 ///
-/// `None` when the message carries ancillary data, which is refused rather than
-/// forwarded: `struct cmsghdr` differs in width and the `SCM_*` types differ in
-/// value, so the control buffer would have to be parsed and rebuilt rather than
-/// passed. A guest passing a descriptor over a socket gets `EOPNOTSUPP` and a
-/// line on stderr instead of a descriptor number read out of a length field.
+/// `None` when the message carries ancillary data this host cannot be given -
+/// anything but `SCM_RIGHTS`; see [`super::control`], which owns that decision
+/// and the conversion behind it. `control` is the host buffer the returned
+/// `msghdr` points into, so the caller has to keep it alive across the call.
 ///
 /// # Safety
 ///
@@ -361,12 +373,19 @@ fn say_control_refused() {
 unsafe fn msghdr_to_host(
     guest: *const MsgHdr,
     name: &mut Option<HostAddr>,
+    control: &mut Vec<u8>,
 ) -> Option<libc::msghdr> {
     // SAFETY: the caller's guarantee.
     let g = unsafe { guest.read() };
     if !g.control.is_null() && g.controllen != 0 {
-        say_control_refused();
-        return None;
+        // SAFETY: the guest's control buffer, with the length it gave for it.
+        match unsafe { super::control::to_host(g.control, g.controllen) } {
+            Ok(host) => *control = host,
+            Err(refused) => {
+                say_control_refused(refused);
+                return None;
+            }
+        }
     }
     // SAFETY: as above; a null name is a message with no address.
     *name = match g.name.is_null() {
@@ -384,6 +403,10 @@ unsafe fn msghdr_to_host(
     host.msg_iov = g.iov;
     host.msg_iovlen = g.iovlen.max(0) as _;
     host.msg_flags = flags_to_host(g.flags);
+    if !control.is_empty() {
+        host.msg_control = control.as_mut_ptr().cast();
+        host.msg_controllen = control.len() as _;
+    }
     Some(host)
 }
 
@@ -399,14 +422,17 @@ unsafe extern "C" fn sendmsg(fd: i32, message: *const c_void, flags: i32) -> isi
         return -1;
     }
     let mut name = None;
+    let mut control = Vec::new();
     // SAFETY: the caller's guarantee.
-    let Some(host) = (unsafe { msghdr_to_host(message.cast(), &mut name) }) else {
+    let Some(host) = (unsafe { msghdr_to_host(message.cast(), &mut name, &mut control) }) else {
         crate::errno::set(libc::EOPNOTSUPP);
         return -1;
     };
     // SAFETY: a `msghdr` this function built, pointing at the caller's own
-    // iovecs, which `struct iovec` has the same layout for on both platforms.
-    unsafe { libc::sendmsg(fd, &host, sending_flags(fd, flags)) }
+    // iovecs - which `struct iovec` has the same layout for on both platforms -
+    // and at a control buffer that outlives the call.
+    let sent = unsafe { libc::sendmsg(fd, &host, sending_flags(fd, flags)) };
+    half_close_if_asked(fd, flags, sent)
 }
 
 /// `ssize_t recvmsg(int, struct msghdr *, int)`
@@ -421,19 +447,37 @@ unsafe extern "C" fn recvmsg(fd: i32, message: *mut c_void, flags: i32) -> isize
     }
     let guest: *mut MsgHdr = message.cast();
     let mut name = None;
+    let mut sent_control = Vec::new();
     // SAFETY: the caller's guarantee.
-    let Some(mut host) = (unsafe { msghdr_to_host(guest, &mut name) }) else {
+    let Some(mut host) = (unsafe { msghdr_to_host(guest, &mut name, &mut sent_control) }) else {
         crate::errno::set(libc::EOPNOTSUPP);
         return -1;
     };
     // The name is written by the kernel, so it needs room rather than a copy of
     // what the guest had there.
     let mut received = HostAddr::empty();
-    // SAFETY: the caller's own `msghdr`, read for its name buffer.
-    let (guest_name, guest_namelen) = unsafe { ((*guest).name, (*guest).namelen) };
+    // SAFETY: the caller's own `msghdr`, read for its name and control buffers.
+    let (guest_name, guest_namelen, guest_control, guest_controllen) = unsafe {
+        (
+            (*guest).name,
+            (*guest).namelen,
+            (*guest).control,
+            (*guest).controllen,
+        )
+    };
     if !guest_name.is_null() {
         host.msg_name = received.as_mut_ptr().cast();
         host.msg_namelen = received.len();
+    }
+    // As with the name: the kernel fills the control buffer in, and what it
+    // writes there is wider than what the guest reserved room for.
+    let mut control = vec![0u8; super::control::host_capacity(guest_controllen)];
+    if guest_control.is_null() || guest_controllen == 0 {
+        host.msg_control = core::ptr::null_mut();
+        host.msg_controllen = 0;
+    } else {
+        host.msg_control = control.as_mut_ptr().cast();
+        host.msg_controllen = control.len() as _;
     }
 
     // SAFETY: a `msghdr` this function built over the caller's iovecs.
@@ -459,9 +503,179 @@ unsafe extern "C" fn recvmsg(fd: i32, message: *mut c_void, flags: i32) -> isize
         // SAFETY: the caller's own `msghdr`.
         unsafe { (*guest).namelen = len };
     }
-    // SAFETY: as above.
-    unsafe { (*guest).flags = flags_from_host(host.msg_flags) };
+    let mut received_flags = flags_from_host(host.msg_flags);
+    if !guest_control.is_null() && guest_controllen != 0 {
+        // SAFETY: a `msghdr` the kernel has just filled in, and the caller's
+        // control buffer with the length they reserved.
+        let (written, dropped) =
+            unsafe { super::control::from_host(&host, guest_control, guest_controllen) };
+        // SAFETY: the caller's own `msghdr`.
+        unsafe { (*guest).controllen = written };
+        if dropped {
+            received_flags |= msg::CTRUNC;
+        }
+    }
+    // SAFETY: the caller's own `msghdr`.
+    unsafe { (*guest).flags = received_flags };
     rc
+}
+
+/// Darwin's `MSG_EOF`: send, then half-close.
+///
+/// The bit asks for the send and a `shutdown(SHUT_WR)` after it, which is how
+/// Darwin's `send` ends a request without a second call. There is no host flag
+/// for it and there was no host meaning either - `0x100` here is `MSG_WAITALL`,
+/// so passing it through made a send wait - so it is stripped by
+/// [`flags_to_host`] and answered here instead.
+///
+/// A failed send is not half-closed: the caller will retry it.
+fn half_close_if_asked(fd: i32, darwin_flags: i32, sent: isize) -> isize {
+    if sent >= 0 && darwin_flags & msg::EOF != 0 {
+        // SAFETY: a descriptor and a constant; the call touches no memory.
+        unsafe { libc::shutdown(fd, libc::SHUT_WR) };
+    }
+    sent
+}
+
+/// `ssize_t write(int, const void *, size_t)`
+///
+/// Here, and not passed through, for one reason: `SO_NOSIGPIPE`. Darwin's is a
+/// property of the socket and this host's `MSG_NOSIGNAL` is a property of the
+/// call, so a guest that set the option and then wrote to a closed socket with
+/// `write` - which takes no flags - still took a `SIGPIPE` and died. A write to
+/// a descriptor the guest set the option on is sent instead, which is the same
+/// call for a socket and is where the flag can be given.
+///
+/// The cost of being in this path at all is one relaxed load per write; see
+/// [`super::sockopt::any_suppress_sigpipe`].
+///
+/// # Safety
+///
+/// `buf` is `len` readable bytes.
+unsafe extern "C" fn write(fd: i32, buf: *const c_void, len: usize) -> isize {
+    if super::sockopt::suppresses_sigpipe(fd) {
+        // SAFETY: the caller's buffer. A `send` with no flags is a `write` on
+        // anything this branch can be reached for - the descriptor is one the
+        // guest set a socket option on.
+        return unsafe { libc::send(fd, buf, len, libc::MSG_NOSIGNAL) };
+    }
+    // SAFETY: the caller's buffer.
+    unsafe { libc::write(fd, buf, len) }
+}
+
+/// `ssize_t writev(int, const struct iovec *, int)`
+///
+/// As [`write`]: the gathered form needs the same flag and has the same
+/// nowhere to put it, so it becomes a `sendmsg` when the option is set.
+///
+/// # Safety
+///
+/// `iov` is `iovcnt` readable `struct iovec`.
+unsafe extern "C" fn writev(fd: i32, iov: *const libc::iovec, iovcnt: i32) -> isize {
+    if super::sockopt::suppresses_sigpipe(fd) {
+        // SAFETY: zeroed is a valid `msghdr` - no name, no control - and the
+        // two fields that matter are the caller's own iovecs.
+        let mut host: libc::msghdr = unsafe { core::mem::zeroed() };
+        host.msg_iov = iov.cast_mut();
+        host.msg_iovlen = iovcnt.max(0) as _;
+        // SAFETY: a `msghdr` this function built over the caller's iovecs.
+        return unsafe { libc::sendmsg(fd, &host, libc::MSG_NOSIGNAL) };
+    }
+    // SAFETY: the caller's iovecs, whose layout is the same on both platforms.
+    unsafe { libc::writev(fd, iov, iovcnt) }
+}
+
+/// Darwin's `sa_endpoints_t`, the argument that makes `connectx` more than a
+/// `connect`: a source and a destination in one call.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Endpoints {
+    srcif: u32,
+    srcaddr: *const c_void,
+    srcaddrlen: u32,
+    dstaddr: *const c_void,
+    dstaddrlen: u32,
+}
+
+/// `int connectx(int, const sa_endpoints_t *, sae_associd_t, unsigned int,
+/// const struct iovec *, unsigned int, size_t *, sae_connid_t *)`
+///
+/// Darwin's own multipath-aware connect. This host has no such call, and does
+/// not need one for what a guest uses it for: the three things `connectx` adds
+/// over `connect` are a source endpoint, which is a `bind` before the connect;
+/// data sent with the handshake, which is a `writev` after it; and an
+/// association, which only Multipath TCP has and which a guest asks for by
+/// socket type rather than here.
+///
+/// So this is `bind`, `connect`, `writev` - the same sequence with the same
+/// outcome, minus the round trip that fast-open would have saved. The `flags`
+/// are `CONNECT_DATA_IDEMPOTENT` and its relatives, which say the payload may
+/// be replayed; sending it after the handshake instead satisfies all of them.
+///
+/// `sae_srcif` is refused rather than dropped: binding to an interface by index
+/// is a different call here - `SO_BINDTODEVICE`, which takes a name - and a
+/// connection that silently ignored the interface it was pinned to would go out
+/// of the wrong one and work.
+///
+/// # Safety
+///
+/// `endpoints` is a readable `sa_endpoints_t` whose addresses are readable at
+/// their stated lengths; `iov` is `iovcnt` readable `struct iovec`; `len` and
+/// `connid` are writable or null.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn connectx(
+    fd: i32,
+    endpoints: *const Endpoints,
+    _associd: u32,
+    _flags: u32,
+    iov: *const libc::iovec,
+    iovcnt: u32,
+    len: *mut usize,
+    connid: *mut u32,
+) -> i32 {
+    if endpoints.is_null() {
+        crate::errno::set(libc::EFAULT);
+        return -1;
+    }
+    // SAFETY: the caller's guarantee.
+    let ends = unsafe { endpoints.read() };
+    if ends.srcif != 0 {
+        crate::errno::set(libc::ENOPROTOOPT);
+        return -1;
+    }
+    if !ends.srcaddr.is_null() {
+        // SAFETY: the caller's source address, at the length they gave.
+        let rc = unsafe { with_address(fd, ends.srcaddr, ends.srcaddrlen, libc::bind) };
+        if rc < 0 {
+            return rc;
+        }
+    }
+    // SAFETY: the caller's destination address, at the length they gave.
+    let rc = unsafe { with_address(fd, ends.dstaddr, ends.dstaddrlen, libc::connect) };
+    if rc < 0 {
+        return rc;
+    }
+    if !connid.is_null() {
+        // SAFETY: the caller's slot. `SAE_CONNID_ANY` is the only connection
+        // this socket has, there being no association to number it within.
+        unsafe { connid.write(0) };
+    }
+    if iov.is_null() || iovcnt == 0 {
+        return 0;
+    }
+    // SAFETY: the caller's iovecs, whose layout is the same on both platforms.
+    let written = unsafe { libc::writev(fd, iov, iovcnt as i32) };
+    if written < 0 {
+        // The connection stands; only the data did not go. Darwin reports this
+        // the same way - the descriptor is connected and `errno` says why the
+        // payload did not follow.
+        return -1;
+    }
+    if !len.is_null() {
+        // SAFETY: the caller's slot.
+        unsafe { len.write(written as usize) };
+    }
+    0
 }
 
 // Not in the `libc` crate on any platform, so declared here. Both take an
@@ -513,6 +727,9 @@ unsafe extern "C" fn inet_ntop(
 }
 
 pub const NAMES: &[&str] = &[
+    "write",
+    "writev",
+    "connectx",
     "socket",
     "socketpair",
     "bind",
@@ -532,6 +749,9 @@ pub const NAMES: &[&str] = &[
 
 pub fn symbol(name: &str) -> Option<u64> {
     let f: *const () = match name {
+        "write" => write as *const (),
+        "writev" => writev as *const (),
+        "connectx" => connectx as *const (),
         "socket" => socket as *const (),
         "socketpair" => socketpair as *const (),
         "bind" => bind as *const (),
@@ -573,13 +793,156 @@ mod tests {
         }
     }
 
-    /// Darwin's `MSG_EOF` has no host meaning and must not become one: `0x100`
-    /// here is `MSG_WAITALL`, so passing it through would make a send wait.
+    /// Darwin's `MSG_EOF` must not reach this host as a flag: `0x100` here is
+    /// `MSG_WAITALL`, so passing it through would make a send wait. It is
+    /// answered with a `shutdown` after the send instead, which the round trip
+    /// below checks end to end.
     #[test]
-    fn msg_eof_is_dropped_rather_than_mapped_onto_a_neighbour() {
-        const EOF: i32 = 0x100;
-        assert_eq!(EOF, libc::MSG_WAITALL, "the collision being avoided");
-        assert_eq!(flags_to_host(EOF), 0);
+    fn msg_eof_is_not_handed_to_this_host_as_a_flag() {
+        assert_eq!(msg::EOF, libc::MSG_WAITALL, "the collision being avoided");
+        assert_eq!(flags_to_host(msg::EOF), 0);
+    }
+
+    /// A pair of connected sockets, which is what the send-side tests need.
+    fn pair() -> (i32, i32) {
+        let mut ends = [0i32; 2];
+        // SAFETY: a live array of two `int`.
+        let rc =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, ends.as_mut_ptr()) };
+        assert_eq!(rc, 0);
+        (ends[0], ends[1])
+    }
+
+    /// `MSG_EOF` asks for a half-close after the send, which is the peer seeing
+    /// the bytes and then seeing end-of-file without anything being closed.
+    #[test]
+    fn msg_eof_half_closes_the_socket_after_the_send() {
+        let (ours, theirs) = pair();
+        // SAFETY: five readable bytes, and the length says five.
+        let sent = unsafe { send(ours, c"hello".as_ptr().cast(), 5, msg::EOF) };
+        assert_eq!(sent, 5);
+
+        let mut buf = [0u8; 8];
+        // SAFETY: eight writable bytes of this test's own.
+        let read = unsafe { libc::read(theirs, buf.as_mut_ptr().cast(), 8) };
+        assert_eq!(read, 5, "the bytes went before the half-close");
+        // SAFETY: as above; the write half is shut, so this is end of file.
+        assert_eq!(unsafe { libc::read(theirs, buf.as_mut_ptr().cast(), 8) }, 0);
+
+        // SAFETY: two descriptors this test opened and no longer uses.
+        unsafe {
+            libc::close(ours);
+            libc::close(theirs);
+        }
+    }
+
+    /// The refusal this module used to make: a descriptor passed over a socket
+    /// now arrives as a descriptor, in Darwin's twelve-byte control message on
+    /// both sides.
+    #[test]
+    fn a_descriptor_crosses_a_socket_in_darwins_control_message() {
+        let (ours, theirs) = pair();
+        let mut ends = [0i32; 2];
+        // SAFETY: a live array of two `int`.
+        assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
+
+        // Darwin's `CMSG_SPACE(sizeof(int))`: a twelve-byte header and four
+        // bytes of payload, which needs no padding.
+        let mut control = [0u8; 16];
+        control[0..4].copy_from_slice(&16u32.to_ne_bytes());
+        control[4..8].copy_from_slice(&0xffffu32.to_ne_bytes());
+        control[8..12].copy_from_slice(&1i32.to_ne_bytes());
+        control[12..16].copy_from_slice(&ends[0].to_ne_bytes());
+
+        let mut byte = *b"x";
+        let mut iov = libc::iovec {
+            iov_base: byte.as_mut_ptr().cast(),
+            iov_len: 1,
+        };
+        let out = MsgHdr {
+            name: core::ptr::null_mut(),
+            namelen: 0,
+            iov: &mut iov,
+            iovlen: 1,
+            control: control.as_mut_ptr().cast(),
+            controllen: 16,
+            flags: 0,
+        };
+        // SAFETY: a Darwin `msghdr` this test built, with one live iovec and a
+        // control buffer of the length it states.
+        assert_eq!(unsafe { sendmsg(ours, (&raw const out).cast(), 0) }, 1);
+
+        let mut got = [0u8; 1];
+        let mut got_iov = libc::iovec {
+            iov_base: got.as_mut_ptr().cast(),
+            iov_len: 1,
+        };
+        let mut back = [0u8; 32];
+        let mut incoming = MsgHdr {
+            name: core::ptr::null_mut(),
+            namelen: 0,
+            iov: &mut got_iov,
+            iovlen: 1,
+            control: back.as_mut_ptr().cast(),
+            controllen: 32,
+            flags: 0,
+        };
+        // SAFETY: as above, with the buffers writable.
+        assert_eq!(unsafe { recvmsg(theirs, (&raw mut incoming).cast(), 0) }, 1);
+        assert_eq!(got, *b"x");
+        assert_eq!(incoming.controllen, 16, "one twelve-byte header and an int");
+        assert_eq!(u32::from_ne_bytes(back[4..8].try_into().unwrap()), 0xffff);
+        assert_eq!(i32::from_ne_bytes(back[8..12].try_into().unwrap()), 1);
+
+        // The descriptor that arrived is a descriptor, and it is the read end
+        // of the pipe rather than the number that was sent.
+        let received = i32::from_ne_bytes(back[12..16].try_into().unwrap());
+        // SAFETY: the write end of a pipe this test owns.
+        assert_eq!(
+            unsafe { libc::write(ends[1], c"pipe".as_ptr().cast(), 4) },
+            4
+        );
+        let mut through = [0u8; 4];
+        // SAFETY: a descriptor the kernel just installed, and four writable bytes.
+        assert_eq!(
+            unsafe { libc::read(received, through.as_mut_ptr().cast(), 4) },
+            4
+        );
+        assert_eq!(&through, b"pipe");
+
+        // SAFETY: descriptors this test opened and no longer uses.
+        unsafe {
+            for fd in [ours, theirs, ends[0], ends[1], received] {
+                libc::close(fd);
+            }
+        }
+    }
+
+    /// The part of `SO_NOSIGPIPE` that a per-call flag did not reach: `write`
+    /// takes no flags, so a guest that set the option and wrote to a socket
+    /// whose peer had gone still died of a signal.
+    #[test]
+    fn a_write_to_a_closed_peer_reports_epipe_when_the_guest_asked_it_to() {
+        let (ours, theirs) = pair();
+        // SAFETY: the other end, which this test is finished with.
+        unsafe { libc::close(theirs) };
+
+        let on = 1i32;
+        // SAFETY: one readable `int`, and the length says four. `0xffff` is
+        // Darwin's `SOL_SOCKET` and `0x1022` its `SO_NOSIGPIPE`.
+        let rc = unsafe {
+            crate::net::sockopt::setsockopt(ours, 0xffff, 0x1022, (&raw const on).cast(), 4)
+        };
+        assert_eq!(rc, 0);
+
+        // SAFETY: five readable bytes, and the length says five.
+        let wrote = unsafe { write(ours, c"hello".as_ptr().cast(), 5) };
+        assert_eq!((wrote, crate::errno::get()), (-1, libc::EPIPE));
+        crate::errno::set(0);
+
+        crate::net::sockopt::forget(ours);
+        // SAFETY: a descriptor this test opened and no longer uses.
+        unsafe { libc::close(ours) };
     }
 
     #[test]

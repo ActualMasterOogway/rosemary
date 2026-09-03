@@ -55,8 +55,49 @@ const SHARED: &[(i16, i16)] = &[
     (bit::WRBAND, libc::POLLWRBAND),
 ];
 
+/// The four Darwin-only vnode bits, as `(bit, name)`.
+///
+/// `POLLEXTEND` (a file grew), `POLLATTRIB` (its attributes changed),
+/// `POLLNLINK` (it was linked or unlinked) and `POLLWRITE` (it was written).
+/// This host has no way to ask any of them of a descriptor - the nearest thing
+/// is `inotify`, which watches a *path* and is a different interface with a
+/// different lifetime - so each is dropped rather than aimed at the real Linux
+/// bit that shares its number.
+const VNODE: &[(i16, &str)] = &[
+    (0x0200, "POLLEXTEND"),
+    (0x0400, "POLLATTRIB"),
+    (0x0800, "POLLNLINK"),
+    (0x1000, "POLLWRITE"),
+];
+
+/// Name a dropped vnode bit, once for each.
+///
+/// Silence here is what the module note warns about one paragraph up: the guest
+/// is told nothing happened, which is honest and indistinguishable from a file
+/// that nothing happened to. A guest waiting on a file it will never be told
+/// about should say so once rather than only look slow.
+fn say_vnode_dropped(darwin: i16) {
+    use std::sync::Mutex;
+    static SAID: Mutex<i16> = Mutex::new(0);
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    for (bit, name) in VNODE {
+        if darwin & bit == 0 || *said & bit != 0 {
+            continue;
+        }
+        *said |= bit;
+        eprintln!(
+            "rosetta3: poll for Darwin's {name} ({bit:#06x}): dropped - this host has no vnode \
+             event a descriptor can be polled for, and {bit:#06x} here is a real bit meaning \
+             something else. The poll will report that nothing happened."
+        );
+    }
+}
+
 /// A guest's `events` as this host's.
 fn events_to_host(darwin: i16) -> i16 {
+    if darwin & VNODE.iter().fold(0, |all, (bit, _)| all | bit) != 0 {
+        say_vnode_dropped(darwin);
+    }
     let mut out = 0;
     for (theirs, ours) in SHARED {
         if darwin & theirs != 0 {

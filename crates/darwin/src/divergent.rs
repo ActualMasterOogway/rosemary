@@ -91,10 +91,10 @@ pub const NAMES: &[(&str, &str)] = &[
     // host's own being bound instead.
     ("getrlimit", "the RLIMIT_ resource numbers differ"),
     ("setrlimit", "the RLIMIT_ resource numbers differ"),
-    // `FD_SETSIZE` is 1024 on both, but `fd_set`'s word width is not, and Darwin's
-    // `POLL*` are not the host's bits.
-    ("select", "fd_set is laid out differently"),
-    ("pselect", "fd_set is laid out differently"),
+    // `fd_set` is the same 128 bytes on both and the *timeout* is not; `crate::select`
+    // answers both calls, and these entries are what stop the host's own being bound.
+    ("select", "struct timeval is laid out differently"),
+    ("pselect", "the sigset_t is Darwin's, and 32 bits wide"),
     // Listed although `crate::poll` now answers it, for the reason `strerror_r`
     // is: the entry is what stops the host's own from being bound instead.
     ("poll", "the POLL* event bits differ"),
@@ -131,6 +131,23 @@ pub const NAMES: &[(&str, &str)] = &[
     ("recvmsg", SOCKET),
     ("inet_pton", SOCKET),
     ("inet_ntop", SOCKET),
+    ("connectx", SOCKET),
+    // Not socket calls, and here for what they do to a socket: `SO_NOSIGPIPE` is a
+    // property of the descriptor on Darwin and of the call here, and neither takes
+    // flags. See `crate::net::socket`.
+    (
+        "write",
+        "SO_NOSIGPIPE is per-descriptor there and per-call here",
+    ),
+    (
+        "writev",
+        "SO_NOSIGPIPE is per-descriptor there and per-call here",
+    ),
+    // `struct hostent` matches; `h_addrtype` inside it is an `AF_*`, and Darwin's
+    // `AF_INET6` is this host's `AF_ROUTE`.
+    ("gethostbyname", SOCKET),
+    ("gethostbyname2", SOCKET),
+    ("gethostbyaddr", SOCKET),
     (
         "setsockopt",
         "SOL_SOCKET and every SO_ name are different numbers",

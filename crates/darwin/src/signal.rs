@@ -628,7 +628,7 @@ pub mod entry {
 
     /// A Darwin `sigset_t` - a bit per signal, numbered Darwin's way - as this
     /// host's.
-    fn mask_to_host(darwin: u32) -> libc::sigset_t {
+    pub(crate) fn mask_to_host(darwin: u32) -> libc::sigset_t {
         // SAFETY: emptied before any bit is added, which is what makes a zeroed
         // `sigset_t` valid to hand to `sigaddset`.
         let mut host: libc::sigset_t = unsafe { core::mem::zeroed() };

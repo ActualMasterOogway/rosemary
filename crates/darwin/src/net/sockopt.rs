@@ -26,7 +26,9 @@ const IPPROTO_IPV6: i32 = 41;
 /// Darwin's `SO_*` names, paired with the host's.
 ///
 /// `SO_NOSIGPIPE` (`0x1022`) is absent: it has no host counterpart at all. See
-/// [`nosigpipe`].
+/// [`nosigpipe`]. `SO_NREAD` and `SO_NWRITE` are absent for the opposite reason
+/// - this host answers both, with an ioctl rather than an option; see
+/// [`queued_bytes`].
 const SOCKET_OPTIONS: &[(i32, i32)] = &[
     (0x0001, libc::SO_DEBUG),
     (0x0002, libc::SO_ACCEPTCONN),
@@ -46,9 +48,16 @@ const SOCKET_OPTIONS: &[(i32, i32)] = &[
     (0x1006, libc::SO_RCVTIMEO),
     (0x1007, libc::SO_ERROR),
     (0x1008, libc::SO_TYPE),
+    // `SO_LINGER_SEC` is `SO_LINGER` with `l_linger` in seconds, which is the
+    // only unit this host's `SO_LINGER` has.
+    (0x1080, libc::SO_LINGER),
 ];
 
 /// Darwin's `IP_*`, paired with the host's.
+///
+/// The numbering agrees with this host's up to `IP_RECVOPTS` and then stops:
+/// Darwin's 26 is `IP_PKTINFO` (spelled `IP_RECVPKTINFO` when it is asked for
+/// on receive) where this host's is 8, and Darwin's 27 is `IP_RECVTOS`.
 const IP_OPTIONS: &[(i32, i32)] = &[
     (1, libc::IP_OPTIONS),
     (2, libc::IP_HDRINCL),
@@ -60,32 +69,48 @@ const IP_OPTIONS: &[(i32, i32)] = &[
     (11, libc::IP_MULTICAST_LOOP),
     (12, libc::IP_ADD_MEMBERSHIP),
     (13, libc::IP_DROP_MEMBERSHIP),
-    (27, libc::IP_PKTINFO),
+    (24, libc::IP_RECVTTL),
+    (26, libc::IP_PKTINFO),
+    (27, libc::IP_RECVTOS),
 ];
 
 /// Darwin's `IPV6_*`, paired with the host's.
+///
+/// Darwin keeps the RFC 3493 numbers - `IPV6_UNICAST_HOPS` is 4, as it is on
+/// every other BSD - and this host does not: 4 here is `IPV6_ADDRFORM`, and 16
+/// here is the hop limit. Darwin's 36 is `IPV6_TCLASS`, which is what this table
+/// once aimed at the hop limit.
 const IPV6_OPTIONS: &[(i32, i32)] = &[
+    (4, libc::IPV6_UNICAST_HOPS),
     (9, libc::IPV6_MULTICAST_IF),
     (10, libc::IPV6_MULTICAST_HOPS),
     (11, libc::IPV6_MULTICAST_LOOP),
     (12, libc::IPV6_ADD_MEMBERSHIP),
     (13, libc::IPV6_DROP_MEMBERSHIP),
-    (36, libc::IPV6_UNICAST_HOPS),
     (27, libc::IPV6_V6ONLY),
+    (35, libc::IPV6_RECVTCLASS),
+    (36, libc::IPV6_TCLASS),
     (61, libc::IPV6_RECVPKTINFO),
 ];
 
 /// Darwin's `TCP_*`, paired with the host's.
 ///
-/// `TCP_NOPUSH` (4) is `TCP_CORK` here in effect but not in contract - Darwin's
-/// is advisory and Linux's holds the data until it is cleared - so it is not
-/// listed and a guest asking for it is refused.
+/// `TCP_NOPUSH` (4) is this host's `TCP_CORK`, and the two are not the same
+/// promise: Darwin's is advisory - the stack sends when it suits it - and this
+/// host's holds a partial segment until the option is cleared or 200ms pass.
+/// Mapped anyway, because the failure modes are not comparable. A caller sets
+/// `TCP_NOPUSH` around a header-then-body write and clears it after; corking is
+/// what it meant, and the worst it costs is the delay it asked to avoid. The
+/// refusal it replaces cost the write itself, three layers under a caller that
+/// reported the network was broken.
 const TCP_OPTIONS: &[(i32, i32)] = &[
     (0x01, libc::TCP_NODELAY),
     (0x02, libc::TCP_MAXSEG),
+    (0x04, libc::TCP_CORK),
     (0x10, libc::TCP_KEEPIDLE),
     (0x101, libc::TCP_KEEPINTVL),
     (0x102, libc::TCP_KEEPCNT),
+    (0x201, libc::TCP_NOTSENT_LOWAT),
 ];
 
 /// Darwin's `SO_ERROR`, whose value needs translating; see [`is_pending_error`].
@@ -98,10 +123,10 @@ const SO_ERROR: i32 = 0x1007;
 /// guest set the option on is sent with `MSG_NOSIGNAL`, and the guest gets
 /// `EPIPE` instead of a signal, which is what it asked for.
 ///
-/// The gap, and it is a real one: `write` is not a socket call and takes no
-/// flags, so writing to a closed socket still raises `SIGPIPE` however this
-/// option was set. Nothing can be done about that short of changing the
-/// process-wide disposition, which is not one socket's to change.
+/// `write` and `writev` take no flags and so had nowhere to put it, which used
+/// to be the gap: a guest that set the option and then wrote to a closed socket
+/// still died of a signal. Both are now this crate's, and a write to a
+/// descriptor in this set goes out as a `send`; see [`crate::net::socket`].
 ///
 /// Refusing instead - which this module used to do, `ENOPROTOOPT` being what a
 /// kernel without the option would say - turned out not to be survivable:
@@ -113,6 +138,45 @@ fn nosigpipe(level: i32, name: i32) -> bool {
     level == SOL_SOCKET && name == NOSIGPIPE
 }
 
+/// Darwin's `SO_NREAD` and `SO_NWRITE`: how much is waiting to be read, and how
+/// much this side has written that the peer has not acknowledged.
+///
+/// Both are read-only options on Darwin and neither is an option at all here -
+/// this host asks the same two questions with `FIONREAD` and `TIOCOUTQ`. A
+/// `setsockopt` on either is `ENOPROTOOPT`, which is what Darwin answers too.
+const SO_NREAD: i32 = 0x1020;
+const SO_NWRITE: i32 = 0x1024;
+
+/// # Safety
+///
+/// `value` is `*len` writable bytes and `len` is a writable `socklen_t`.
+unsafe fn queued_bytes(fd: i32, name: i32, value: *mut c_void, len: *mut u32) -> i32 {
+    if value.is_null() || len.is_null() {
+        crate::errno::set(libc::EFAULT);
+        return -1;
+    }
+    // SAFETY: the caller's length slot.
+    if (unsafe { len.read() } as usize) < core::mem::size_of::<i32>() {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    let request = match name {
+        SO_NREAD => libc::FIONREAD,
+        _ => libc::TIOCOUTQ,
+    };
+    let mut bytes: i32 = 0;
+    // SAFETY: both requests write one `int` through the pointer they are given.
+    if unsafe { libc::ioctl(fd, request, &raw mut bytes) } < 0 {
+        return -1;
+    }
+    // SAFETY: at least an `int` of the caller's, just checked.
+    unsafe {
+        value.cast::<i32>().write_unaligned(bytes);
+        len.write(core::mem::size_of::<i32>() as u32);
+    }
+    0
+}
+
 /// The descriptors `SO_NOSIGPIPE` is set on.
 ///
 /// Entries are cleared when a descriptor number is *issued* rather than when
@@ -122,19 +186,34 @@ fn nosigpipe(level: i32, name: i32) -> bool {
 static SUPPRESSED: std::sync::Mutex<Option<std::collections::HashSet<i32>>> =
     std::sync::Mutex::new(None);
 
+/// How many descriptors [`SUPPRESSED`] holds.
+///
+/// Kept beside the set because [`crate::net::socket::write`] asks on every
+/// write a guest makes, and a process that never set the option - which is
+/// most of them - should pay a relaxed load for that rather than a lock.
+static SUPPRESSED_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn with_suppressed<R>(f: impl FnOnce(&mut std::collections::HashSet<i32>) -> R) -> R {
     let mut guard = SUPPRESSED.lock().unwrap_or_else(|e| e.into_inner());
-    f(guard.get_or_insert_with(Default::default))
+    let held = guard.get_or_insert_with(Default::default);
+    let answer = f(held);
+    SUPPRESSED_COUNT.store(held.len(), std::sync::atomic::Ordering::Relaxed);
+    answer
+}
+
+/// Whether any descriptor at all was given `SO_NOSIGPIPE`.
+pub fn any_suppress_sigpipe() -> bool {
+    SUPPRESSED_COUNT.load(std::sync::atomic::Ordering::Relaxed) != 0
 }
 
 /// Whether `fd` was given `SO_NOSIGPIPE`, and so wants `MSG_NOSIGNAL`.
 pub fn suppresses_sigpipe(fd: i32) -> bool {
-    with_suppressed(|held| held.contains(&fd))
+    any_suppress_sigpipe() && with_suppressed(|held| held.contains(&fd))
 }
 
 /// Forget any option set on `fd`, because it names a new socket now.
 pub fn forget(fd: i32) {
-    if fd >= 0 {
+    if fd >= 0 && any_suppress_sigpipe() {
         with_suppressed(|held| held.remove(&fd));
     }
 }
@@ -236,7 +315,7 @@ fn is_timeval(level: i32, name: i32) -> bool {
 /// # Safety
 ///
 /// `value` is at least sixteen readable bytes.
-unsafe fn timeval_to_host(value: *const c_void) -> libc::timeval {
+pub(crate) unsafe fn timeval_to_host(value: *const c_void) -> libc::timeval {
     // SAFETY: the caller's guarantee; both fields are read at Darwin's offsets.
     unsafe {
         libc::timeval {
@@ -251,7 +330,7 @@ unsafe fn timeval_to_host(value: *const c_void) -> libc::timeval {
 /// # Safety
 ///
 /// `value` is `len` readable bytes, or is null with `len` zero.
-unsafe extern "C" fn setsockopt(
+pub(crate) unsafe extern "C" fn setsockopt(
     fd: i32,
     level: i32,
     name: i32,
@@ -261,6 +340,10 @@ unsafe extern "C" fn setsockopt(
     if nosigpipe(level, name) {
         // SAFETY: the caller's buffer, with the length they gave for it.
         return unsafe { set_nosigpipe(fd, value, len) };
+    }
+    if level == SOL_SOCKET && matches!(name, SO_NREAD | SO_NWRITE) {
+        crate::errno::set(libc::ENOPROTOOPT);
+        return -1;
     }
     let Some((level, name)) = option_to_host(level, name) else {
         crate::errno::set(libc::ENOPROTOOPT);
@@ -304,6 +387,10 @@ unsafe extern "C" fn getsockopt(
     if nosigpipe(level, name) {
         // SAFETY: the caller's buffer and length slot.
         return unsafe { get_nosigpipe(fd, value, len) };
+    }
+    if level == SOL_SOCKET && matches!(name, SO_NREAD | SO_NWRITE) {
+        // SAFETY: the caller's buffer and length slot.
+        return unsafe { queued_bytes(fd, name, value, len) };
     }
     let Some((host_level, host_name)) = option_to_host(level, name) else {
         crate::errno::set(libc::ENOPROTOOPT);
@@ -418,6 +505,82 @@ mod tests {
         assert_eq!(option_to_host(1234, 1), None);
     }
 
+    /// The IPv6 numbering is the one place a table entry aimed at the wrong
+    /// real option rather than at nothing: Darwin's 36 is the traffic class and
+    /// this host's 36 is not, so a guest setting it once set the hop limit.
+    #[test]
+    fn the_ipv6_options_are_the_rfc_numbers_and_not_this_hosts() {
+        assert_eq!(
+            option_to_host(IPPROTO_IPV6, 36),
+            Some((IPPROTO_IPV6, libc::IPV6_TCLASS))
+        );
+        assert_eq!(
+            option_to_host(IPPROTO_IPV6, 4),
+            Some((IPPROTO_IPV6, libc::IPV6_UNICAST_HOPS))
+        );
+        assert_ne!(4, libc::IPV6_UNICAST_HOPS, "the collision being avoided");
+        // Darwin's `IP_PKTINFO` is 26; 27 there is `IP_RECVTOS`.
+        assert_eq!(
+            option_to_host(IPPROTO_IP, 26),
+            Some((IPPROTO_IP, libc::IP_PKTINFO))
+        );
+    }
+
+    /// `TCP_NOPUSH` is corking, which is the closest thing this host has, and
+    /// is mapped rather than refused - a refused write is worse than a delayed
+    /// one. See [`TCP_OPTIONS`].
+    #[test]
+    fn tcp_nopush_corks_rather_than_being_refused() {
+        assert_eq!(
+            option_to_host(IPPROTO_TCP, 0x04),
+            Some((IPPROTO_TCP, libc::TCP_CORK))
+        );
+    }
+
+    /// `SO_NREAD` is not a `getsockopt` name on this host, and the question it
+    /// asks still has an answer: five bytes written into a socket pair are five
+    /// bytes waiting at the other end.
+    #[test]
+    fn the_bytes_waiting_are_reported_through_an_option_this_host_has_not_got() {
+        let mut ends = [0 as std::ffi::c_int; 2];
+        // SAFETY: a live array of two `int`.
+        let rc =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, ends.as_mut_ptr()) };
+        assert_eq!(rc, 0);
+        // SAFETY: one end of a socket pair this test owns.
+        assert_eq!(
+            unsafe { libc::write(ends[1], c"hello".as_ptr().cast(), 5) },
+            5
+        );
+
+        let mut waiting: i32 = 0;
+        let mut len = 4u32;
+        // SAFETY: four writable bytes and a live length.
+        let rc = unsafe {
+            getsockopt(
+                ends[0],
+                SOL_SOCKET,
+                SO_NREAD,
+                (&raw mut waiting).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!((rc, waiting, len), (0, 5, 4));
+
+        // And it is read-only, as it is on Darwin.
+        let value = 1i32;
+        // SAFETY: four readable bytes, and the length says four.
+        let rc = unsafe { setsockopt(ends[0], SOL_SOCKET, SO_NREAD, (&raw const value).cast(), 4) };
+        assert_eq!((rc, crate::errno::get()), (-1, libc::ENOPROTOOPT));
+        crate::errno::set(0);
+
+        // SAFETY: two descriptors this test opened and no longer uses.
+        unsafe {
+            libc::close(ends[0]);
+            libc::close(ends[1]);
+        }
+    }
+
     /// Through the real stack: `SO_REUSEADDR` set in Darwin's spelling comes
     /// back set, in Darwin's spelling.
     #[test]
@@ -483,18 +646,14 @@ mod tests {
 
         let on = 1i32;
         // SAFETY: one readable `int`, and the length says four.
-        let rc = unsafe {
-            setsockopt(fd, SOL_SOCKET, NOSIGPIPE, (&raw const on).cast(), 4)
-        };
+        let rc = unsafe { setsockopt(fd, SOL_SOCKET, NOSIGPIPE, (&raw const on).cast(), 4) };
         assert_eq!(rc, 0, "refusing this aborts Crashpad before it starts");
         assert!(suppresses_sigpipe(fd));
 
         let mut back = 0i32;
         let mut len = 4u32;
         // SAFETY: one writable `int` and a live length.
-        let rc = unsafe {
-            getsockopt(fd, SOL_SOCKET, NOSIGPIPE, (&raw mut back).cast(), &mut len)
-        };
+        let rc = unsafe { getsockopt(fd, SOL_SOCKET, NOSIGPIPE, (&raw mut back).cast(), &mut len) };
         assert_eq!((rc, back, len), (0, 1, 4));
 
         forget(fd);

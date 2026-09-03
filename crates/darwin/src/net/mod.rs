@@ -24,6 +24,7 @@
 use machish::resolve::SyntheticDylib;
 
 pub mod addr;
+pub mod control;
 pub mod ifaddrs;
 pub mod resolve;
 pub mod socket;

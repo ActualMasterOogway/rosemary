@@ -22,6 +22,12 @@
 /// case-insensitive and here is not - so [`crate::stat`] wraps both with the
 /// fallback that difference needs, and a claim of "the host's own symbol is the
 /// answer" would be false off Darwin.
+///
+/// `write` came off for a subtler reason: the call is identical and what it does
+/// to a *socket* is not. `SO_NOSIGPIPE` is a property of the descriptor on
+/// Darwin and of the call here, so a write to a socket the guest asked not to be
+/// signalled about had nowhere to say so and killed the process. See
+/// [`crate::net::socket`], which answers it and `writev` both.
 pub const CLAIMED: &[&str] = &[
     // <string.h>. Pure functions over caller memory; no struct crosses the seam.
     "memchr",
@@ -133,7 +139,6 @@ pub const CLAIMED: &[&str] = &[
     "truncate",
     "unlink",
     "usleep",
-    "write",
     // <stdio.h>, minus the `FILE *` globals, which are named differently and live in
     // [`crate::stdio`]. `FILE` itself never crosses: the guest receives a pointer and
     // hands it back.

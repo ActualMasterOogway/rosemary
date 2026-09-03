@@ -1453,6 +1453,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("getgrnam", P, P),
     sig!("getgrnam_r", I32, P, P, P, U64, P),
     sig!("gethostbyname", P, P),
+    sig!("gethostbyname2", P, P, I32),
+    sig!("gethostbyaddr", P, P, U32, I32),
     sig!("gethostid", I64),
     sig!("gethostname", I32, P, U64),
     sig!("getifaddrs", I32, P),
@@ -2495,6 +2497,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // The import is `_select$1050`, the variant with the 10.5 `fd_set`
     // semantics; arm64 has only the one, and the `$`-suffix fallback finds it.
     sig!("select", I32, I32, P, P, P, P),
+    // `pselect`'s last two arguments are a `timespec` and Darwin's 32-bit
+    // `sigset_t`, neither of which `select` takes.
+    sig!("pselect", I32, I32, P, P, P, P, P),
     // The named-semaphore surface. `sem_open` is `open`'s shape exactly.
     sig!("sem_close", I32, P),
     sig!("sem_open", P, P, I32, U32, U32),

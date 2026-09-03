@@ -25,6 +25,7 @@ pub mod poll;
 pub mod printf_l;
 pub mod pthread;
 pub mod rlimit;
+pub mod select;
 pub mod signal;
 pub mod spawn;
 pub mod stat;
@@ -180,6 +181,7 @@ fn implemented(name: &str) -> Option<u64> {
         .or_else(|| malloc_symbol(name))
         .or_else(|| vmmap_symbol(name))
         .or_else(|| poll_symbol(name))
+        .or_else(|| select_symbol(name))
         .or_else(|| net_symbol(name))
         .or_else(|| xattr_symbol(name))
         .or_else(|| uuid_symbol(name))
@@ -358,6 +360,20 @@ fn xattr_symbol(name: &str) -> Option<u64> {
     }
 }
 
+/// `select`, which only a host that once refused it on the strength of a
+/// declaration publishes; see [`select`].
+fn select_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return select::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
+}
+
 /// `poll`, which only a host whose `POLL*` bits are not Darwin's rewrites.
 fn poll_symbol(name: &str) -> Option<u64> {
     #[cfg(not(target_os = "macos"))]
@@ -488,6 +504,7 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
         vmmap::provide(&mut lib);
         string::provide(&mut lib);
         poll::provide(&mut lib);
+        select::provide(&mut lib);
         net::provide(&mut lib);
         xattr::provide(&mut lib);
         uuid::provide(&mut lib);
@@ -568,8 +585,8 @@ mod tests {
     fn a_variant_suffix_is_not_part_of_the_name() {
         assert_eq!(base_name("_close$NOCANCEL"), "close");
         assert_eq!(base_name("_fopen$DARWIN_EXTSN"), "fopen");
-        assert_eq!(base_name("_select$DARWIN_EXTSN"), "select");
-        assert!(divergent::contains(base_name("_select$DARWIN_EXTSN")));
+        assert_eq!(base_name("_getdirentries$INODE64"), "getdirentries");
+        assert!(divergent::contains(base_name("_getdirentries$INODE64")));
         // Neither half may be empty, or `$` alone would name everything.
         assert_eq!(base_name("_$NOCANCEL"), "$NOCANCEL");
         assert_eq!(base_name("_close$"), "close$");
