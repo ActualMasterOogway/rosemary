@@ -115,6 +115,15 @@ unsafe extern "C" fn is_active(receiver: Id, _sel: Sel) -> u8 {
     unsafe { ((*(receiver as *const Application)).running != 0) as u8 }
 }
 
+/// `-effectiveAppearance`, the light appearance this runtime renders with.
+///
+/// Semantic AppKit colours are Aqua throughout this runtime, so reporting the
+/// same appearance keeps an application choosing assets by appearance in step
+/// with the colours it receives.
+unsafe extern "C" fn effective_appearance(_receiver: Id, _sel: Sel) -> Id {
+    crate::appearance::aqua()
+}
+
 /// `-finishLaunching`: the two notifications, in the order Apple sends them,
 /// with the launch Apple Event between them.
 ///
@@ -409,6 +418,7 @@ pub(crate) fn install() {
         "setApplicationIconImage:" => set_application_icon_image, c"v24@0:8@16";
         "isRunning" => is_running, c"c16@0:8";
         "isActive" => is_active, c"c16@0:8";
+        "effectiveAppearance" => effective_appearance, c"@16@0:8";
         "finishLaunching" => finish_launching, c"v16@0:8";
         "run" => run, c"v16@0:8";
         "stop:" => stop, c"v24@0:8@16";
@@ -470,6 +480,20 @@ mod tests {
         // SAFETY: the cell is a word this crate leaked.
         let held = unsafe { *(crate::ns_app_cell() as *const u64) };
         assert_eq!(held, app as usize as u64);
+    }
+
+    #[test]
+    fn effective_appearance_is_the_named_aqua_appearance() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSApplication").expect("NSApplication");
+        let app = objc::object::create_instance(class, 0);
+        let appearance =
+            unsafe { effective_appearance(app, objc::sel::get("effectiveAppearance")) };
+        let name = unsafe { crate::appearance::name(appearance, objc::sel::get("name")) };
+        assert_eq!(
+            unsafe { foundation::string::bytes(name) },
+            b"NSAppearanceNameAqua"
+        );
     }
 
     /// `-run` turns the run loop, and `-stop:` ends it.

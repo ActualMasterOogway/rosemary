@@ -1,6 +1,7 @@
 pub mod alert;
-pub mod button;
 pub mod application;
+pub mod appearance;
+pub mod button;
 pub mod classes;
 pub mod color;
 pub mod cursor;
@@ -32,6 +33,7 @@ pub fn bootstrap() {
         foundation::bootstrap();
         classes::install();
         alert::install();
+        appearance::install();
         application::install();
         color::install();
         cursor::install();

@@ -246,6 +246,46 @@ unsafe extern "C" fn insert_text(receiver: Id, _sel: Sel, value: Id, replacement
     });
 }
 
+/// The pre-`NSTextInputClient` spelling of `-insertText:replacementRange:`.
+///
+/// `InputMethodHandler` still uses this form when the active input source does
+/// not need to replace a range explicitly. It replaces the current selection
+/// (or outstanding marked text), exactly as the modern spelling does when its
+/// range is `NSNotFound`.
+unsafe extern "C" fn insert_text_legacy(receiver: Id, sel: Sel, value: Id) {
+    // SAFETY: `insert_text` has the same receiver and string requirements, and
+    // `NSNotFound` names the current replacement range.
+    unsafe {
+        insert_text(
+            receiver,
+            sel,
+            value,
+            NSRange {
+                location: NOT_FOUND,
+                length: 0,
+            },
+        )
+    };
+}
+
+/// `-replaceCharactersInRange:withString:`, used by a text input handler to
+/// commit an edit it has already measured against its buffer.
+unsafe extern "C" fn replace_characters(
+    receiver: Id,
+    _sel: Sel,
+    range: NSRange,
+    value: Id,
+) {
+    // SAFETY: null or an `NSString`.
+    let insertion = String::from_utf8_lossy(&unsafe { foundation::string::bytes(value) }).into_owned();
+    edit(receiver, |state| {
+        replace(state, range, &insertion);
+        // Replacing a range is a committed edit, never a continuation of a
+        // composition that happened to occupy the same bytes.
+        state.marked = None;
+    });
+}
+
 unsafe extern "C" fn set_marked_text(
     receiver: Id,
     _sel: Sel,
@@ -271,6 +311,56 @@ unsafe extern "C" fn set_marked_text(
             length: selected.length.min(length),
         };
     });
+}
+
+/// The older `NSTextInput` spelling, whose omitted replacement range means the
+/// current selection or marked text.
+unsafe extern "C" fn set_marked_text_legacy(
+    receiver: Id,
+    sel: Sel,
+    value: Id,
+    selected: NSRange,
+) {
+    // SAFETY: `set_marked_text` has the same receiver and string requirements.
+    unsafe {
+        set_marked_text(
+            receiver,
+            sel,
+            value,
+            selected,
+            NSRange {
+                location: NOT_FOUND,
+                length: 0,
+            },
+        )
+    };
+}
+
+/// `-deleteBackward:`, the command an input method sends instead of inserting
+/// a backspace character.
+unsafe extern "C" fn delete_backward(receiver: Id, _sel: Sel, _sender: Id) {
+    edit(receiver, |state| {
+        let range = match state.selected.length {
+            0 => NSRange {
+                location: state.selected.location.saturating_sub(1),
+                length: state.selected.location.min(1),
+            },
+            _ => state.selected,
+        };
+        replace(state, range, "");
+        state.marked = None;
+    });
+}
+
+/// `-shouldChangeTextInRange:replacementString:`. The in-memory text buffer
+/// has no separate validation delegate, so every edit is permitted.
+unsafe extern "C" fn should_change_text(
+    _receiver: Id,
+    _sel: Sel,
+    _range: NSRange,
+    _replacement: Id,
+) -> u8 {
+    1
 }
 
 /// `-keyDown:`, which is the whole reason the rest of this exists.
@@ -402,9 +492,16 @@ pub(crate) fn install() {
         "markedRange" => marked_range, c"{_NSRange=QQ}16@0:8";
         "hasMarkedText" => has_marked_text, c"c16@0:8";
         "unmarkText" => unmark_text, c"v16@0:8";
+        "insertText:" => insert_text_legacy, c"v24@0:8@16";
         "insertText:replacementRange:" => insert_text, c"v40@0:8@16{_NSRange=QQ}24";
+        "replaceCharactersInRange:withString:" => replace_characters,
+            c"v40@0:8{_NSRange=QQ}16@32";
+        "setMarkedText:selectedRange:" => set_marked_text_legacy, c"v40@0:8@16{_NSRange=QQ}24";
         "setMarkedText:selectedRange:replacementRange:" => set_marked_text,
             c"v56@0:8@16{_NSRange=QQ}24{_NSRange=QQ}40";
+        "deleteBackward:" => delete_backward, c"v24@0:8@16";
+        "shouldChangeTextInRange:replacementString:" => should_change_text,
+            c"c40@0:8{_NSRange=QQ}16@32";
         "keyDown:" => key_down, c"v24@0:8@16";
         "keyUp:" => key_up, c"v24@0:8@16";
         "firstRectForCharacterRange:actualRange:" => first_rect_for_character_range,
@@ -455,6 +552,30 @@ mod tests {
             assert_eq!(is_selectable(view, sel), 1);
             set_selectable(view, sel, 0);
             assert_eq!(is_editable(view, sel), 0);
+        }
+    }
+
+    #[test]
+    fn a_text_input_handler_can_replace_commit_and_delete_text() {
+        let view = text_view();
+        let initial = foundation::string::from_str("café");
+        let replacement = foundation::string::from_str("ee");
+        // SAFETY: the strings are this runtime's and the view is a live
+        // `NSTextView`, which inherits these `NSText` implementations.
+        unsafe {
+            set_string(view, objc::sel::get("setString:"), initial);
+            replace_characters(
+                view,
+                objc::sel::get("replaceCharactersInRange:withString:"),
+                NSRange {
+                    location: 1,
+                    length: 2,
+                },
+                replacement,
+            );
+            assert_eq!(foundation::string::bytes(string(view, objc::sel::get("string"))), b"cee\xc3\xa9");
+            delete_backward(view, objc::sel::get("deleteBackward:"), std::ptr::null_mut());
+            assert_eq!(foundation::string::bytes(string(view, objc::sel::get("string"))), b"ce\xc3\xa9");
         }
     }
 }

@@ -58,7 +58,10 @@ unsafe extern "C" fn realloc_aligned(
     }
     // SAFETY: `p` came from this allocator, so asking it for the block's size
     // is defined.
+    #[cfg(not(target_os = "macos"))]
     let old = unsafe { libc::malloc_usable_size(p) };
+    #[cfg(target_os = "macos")]
+    let old = unsafe { libc::malloc_size(p) };
     // SAFETY: as above.
     let fresh = unsafe { malloc_aligned(newsize, alignment) };
     if fresh.is_null() {
