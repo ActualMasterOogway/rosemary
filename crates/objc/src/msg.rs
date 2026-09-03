@@ -26,12 +26,17 @@ use crate::sel::Sel;
 /// `receiver` must be a non-null object pointer.
 unsafe extern "C" fn lookup(receiver: Id, sel: Sel) -> *const c_void {
     // SAFETY: the caller's obligation.
+    let refused = match logging_unrecognised() {
+        true => unrecognised_logged as *const c_void,
+        false => unrecognised as *const c_void,
+    };
+    // SAFETY: the caller's obligation.
     let Some(class) = (unsafe { crate::object::class_of(receiver) }) else {
-        return unrecognised as *const c_void;
+        return refused;
     };
     match class.method(sel) {
         Some(method) => method.implementation(),
-        None => unrecognised as *const c_void,
+        None => refused,
     }
 }
 
@@ -41,6 +46,17 @@ unsafe extern "C" fn lookup(receiver: Id, sel: Sel) -> *const c_void {
 /// whole of the diagnostic, and a null call would print neither.
 unsafe extern "C" fn unrecognised(receiver: Id, sel: Sel) -> ! {
     // SAFETY: reached only from `lookup`, which was given a live receiver.
+    let line = unsafe { describe_unrecognised(receiver, sel) };
+    crate::fail!("{line}");
+}
+
+/// The class and selector of a message nothing answers, as one line.
+///
+/// # Safety
+///
+/// `receiver` is null or a live object.
+unsafe fn describe_unrecognised(receiver: Id, sel: Sel) -> String {
+    // SAFETY: the caller's obligation.
     let class = unsafe { crate::object::class_of(receiver) };
     let name = class.map_or("nil", |c| c.name_str());
     let selector = match sel.is_null() {
@@ -48,7 +64,36 @@ unsafe extern "C" fn unrecognised(receiver: Id, sel: Sel) -> ! {
         // SAFETY: a registered selector is a NUL-terminated interned name.
         false => unsafe { std::ffi::CStr::from_ptr(sel) }.to_string_lossy(),
     };
-    crate::fail!("unrecognized selector sent to instance of {name}: {selector}");
+    format!("unrecognized selector sent to instance of {name}: {selector}")
+}
+
+/// `ROSETTA3_LOG_UNRECOGNIZED=1`: report each unanswered message once and answer
+/// nil, instead of aborting on the first one.
+///
+/// A diagnostic and not a mode, and the difference matters: answering nil to a
+/// message the class does not implement is exactly the silent-wrong-answer this
+/// runtime exists to avoid, and a program run this way is a program whose later
+/// behaviour cannot be trusted. What it buys is the *whole* list in one run
+/// rather than one name per rebuild - which is the only affordable way to find
+/// out which of forty-odd missing classes a large program actually uses.
+pub fn logging_unrecognised() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("ROSETTA3_LOG_UNRECOGNIZED").is_some())
+}
+
+/// [`unrecognised`] under [`logging_unrecognised`]: one line per distinct
+/// message, then nil.
+unsafe extern "C" fn unrecognised_logged(receiver: Id, sel: Sel) -> usize {
+    use std::sync::Mutex;
+    static SEEN: Mutex<Option<std::collections::BTreeSet<String>>> = Mutex::new(None);
+
+    // SAFETY: the caller's obligation.
+    let line = unsafe { describe_unrecognised(receiver, sel) };
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if seen.get_or_insert_default().insert(line.clone()) {
+        eprintln!("rosetta3: objc: {line} - answering nil (ROSETTA3_LOG_UNRECOGNIZED is set)");
+    }
+    0
 }
 
 /// [`unrecognised`] for the `_stret` ABI, where the argument registers are one
@@ -59,6 +104,14 @@ unsafe extern "C" fn unrecognised_stret(_buffer: *mut c_void, receiver: Id, sel:
     unsafe { unrecognised(receiver, sel) }
 }
 
+/// [`unrecognised_logged`] for the `_stret` ABI: the buffer is left as the
+/// caller set it, which is what messaging nil does to it too.
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" fn unrecognised_stret_logged(_buffer: *mut c_void, receiver: Id, sel: Sel) {
+    // SAFETY: reached only from `lookup_stret`, which was given a live receiver.
+    unsafe { unrecognised_logged(receiver, sel) };
+}
+
 /// [`lookup`] for the `_stret` ABI.
 ///
 /// # Safety
@@ -67,12 +120,17 @@ unsafe extern "C" fn unrecognised_stret(_buffer: *mut c_void, receiver: Id, sel:
 #[cfg(target_arch = "x86_64")]
 unsafe extern "C" fn lookup_stret(receiver: Id, sel: Sel) -> *const c_void {
     // SAFETY: the caller's obligation.
+    let refused = match logging_unrecognised() {
+        true => unrecognised_stret_logged as *const c_void,
+        false => unrecognised_stret as *const c_void,
+    };
+    // SAFETY: the caller's obligation.
     let Some(class) = (unsafe { crate::object::class_of(receiver) }) else {
-        return unrecognised_stret as *const c_void;
+        return refused;
     };
     match class.method(sel) {
         Some(method) => method.implementation(),
-        None => unrecognised_stret as *const c_void,
+        None => refused,
     }
 }
 

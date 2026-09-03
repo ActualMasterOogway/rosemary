@@ -18,6 +18,8 @@ static HIERARCHY: &[(&str, Option<&str>, usize)] = &[
     ("NSWindowController", Some("NSResponder"), 0),
     ("NSViewController", Some("NSResponder"), 0),
     ("NSView", Some("NSResponder"), crate::view::INSTANCE_SIZE),
+    // Core Animation, and here for `-contentsScale`; see `crate::layer`.
+    ("CALayer", None, crate::layer::INSTANCE_SIZE),
     ("NSControl", Some("NSView"), 0),
     ("NSButton", Some("NSControl"), 0),
     ("NSTextField", Some("NSControl"), 0),

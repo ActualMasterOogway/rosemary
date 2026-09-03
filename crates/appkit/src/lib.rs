@@ -10,6 +10,7 @@ pub mod geometry;
 pub mod icon;
 pub mod image;
 pub mod keymap;
+pub mod layer;
 pub mod menu;
 pub mod metadata;
 pub mod nib;
@@ -37,6 +38,7 @@ pub fn bootstrap() {
         screen::install();
         window::install();
         view::install();
+        layer::install();
         text::install();
         opengl::install();
         nsevent::install();

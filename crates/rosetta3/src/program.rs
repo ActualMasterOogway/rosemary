@@ -245,6 +245,129 @@ pub fn unbound_imports(report: &LinkReport) -> Vec<(&str, &machish::report::Miss
         .collect()
 }
 
+/// `ROSETTA3_FILL_UNBOUND_DATA=1`: put a readable address in every unbound
+/// *data* slot instead of leaving it zero.
+///
+/// An A/B and not a mode, and it exists because the minimal runtime - which runs
+/// this same client and draws UI this one does not - binds every unresolved
+/// import to a per-symbol trap stub, which is **readable, non-null memory**. So
+/// a guest testing a framework constant against nil branches one way there and
+/// the other way here, for four hundred symbols at once, and that difference is
+/// invisible from both sides. This is how to ask whether it matters.
+///
+/// Only data slots: a *function* slot left at zero is what makes a call through
+/// it reach [`crate::fault`] and be named, and filling one would trade the best
+/// diagnostic in this runtime for a jump into a page of zeroes.
+///
+/// What the guest gets is a page of zeroes, so a pointer that is dereferenced
+/// reads zero rather than faulting, and one that is *messaged* still fails - an
+/// `isa` of zero is not a class. That is the point: it moves the failure from
+/// "crashes on the load" to "behaves as if the constant existed and was empty",
+/// which is the minimal runtime's behaviour and can be compared against.
+fn fill_unbound_data(unbound: &[(&str, &machish::report::MissingSymbol)]) {
+    let Ok(which) = std::env::var("ROSETTA3_FILL_UNBOUND_DATA") else {
+        return;
+    };
+    let everything = which.trim() == "all";
+    let page = {
+        static PAGE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *PAGE.get_or_init(|| {
+            // SAFETY: an anonymous private mapping of one page, never unmapped:
+            // the addresses handed out live as long as the guest does.
+            let p = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    4096,
+                    libc::PROT_READ,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            match p == libc::MAP_FAILED {
+                true => 0,
+                false => p as usize,
+            }
+        })
+    };
+    if page == 0 {
+        eprintln!("rosetta3: ROSETTA3_FILL_UNBOUND_DATA: no page to point at");
+        return;
+    }
+    let mut filled = 0;
+    for (_, m) in unbound
+        .iter()
+        .filter(|(_, m)| m.stub_va.is_none())
+        .filter(|(_, m)| everything || is_framework_constant(&m.symbol))
+    {
+        // SAFETY: the slot is in an image this runtime mapped writable for
+        // exactly this - the linker has just finished writing the others.
+        unsafe { (m.slot_va as *mut usize).write(page) };
+        filled += 1;
+    }
+    eprintln!(
+        "rosetta3: ROSETTA3_FILL_UNBOUND_DATA: {filled} data slot(s) point at a readable page \
+         instead of zero - this is an A/B against the minimal runtime, not a mode"
+    );
+}
+
+/// `ROSETTA3_NAME_MISSING_CLASSES=1`: bind every unbound `_OBJC_CLASS_$_X` to an
+/// empty class called `X`, so the first message to it names the class and the
+/// selector.
+///
+/// The gap this closes in the *diagnostics*, not in the runtime. A class symbol
+/// nothing defines binds to zero, `[nil alloc]` is nil, and every message after
+/// it is nil - so a feature the guest built on that class does nothing at all
+/// and says nothing at all. There are forty-odd of those here, and no way to
+/// tell which the program actually uses.
+///
+/// An empty class turns each into `objc`'s own refusal-by-name:
+/// `unrecognized selector sent to instance of NSTask: launchedTaskWithLaunchPath:`.
+/// That aborts, which is why this is off by default - but it aborts *naming the
+/// thing to implement next*, where the default silently does not. It is the
+/// `abi::table` rule ("refused by name rather than guessed at") applied to the
+/// half of the surface that is data rather than functions.
+fn name_missing_classes(unbound: &[(&str, &machish::report::MissingSymbol)]) {
+    if std::env::var_os("ROSETTA3_NAME_MISSING_CLASSES").is_none() {
+        return;
+    }
+    const PREFIX: &str = "_OBJC_CLASS_$_";
+    let mut named = 0;
+    for (_, m) in unbound.iter().filter(|(_, m)| m.stub_va.is_none()) {
+        let Some(name) = m.symbol.strip_prefix(PREFIX) else {
+            continue;
+        };
+        let Ok(name) = std::ffi::CString::new(name) else {
+            continue;
+        };
+        let class = corefoundation::base::register(&name, None, size_of::<usize>(), false);
+        // SAFETY: the slot is in an image this runtime mapped writable, and the
+        // linker has just finished writing every other binding in it.
+        unsafe { (m.slot_va as *mut usize).write(objc::class::ptr(class) as usize) };
+        named += 1;
+    }
+    eprintln!(
+        "rosetta3: ROSETTA3_NAME_MISSING_CLASSES: {named} missing class(es) will now abort by \
+         name on the first message instead of answering nil"
+    );
+}
+
+/// Whether a symbol is a framework *constant* - a key, a notification name, a
+/// media type - rather than something the runtimes underneath depend on.
+///
+/// The distinction is what makes [`fill_unbound_data`] usable. Filling every
+/// data slot aborts before the first log line, and correctly so: `__objc_empty_cache`
+/// is a class's cache and objc writes through it, a `__ZTV` slot is a vtable the
+/// C++ runtime walks, and `_environ` is a pointer libc dereferences. None of
+/// those is a constant a guest tests against nil, which is the only thing the
+/// A/B is about.
+fn is_framework_constant(symbol: &str) -> bool {
+    const PREFIXES: [&str; 5] = ["_NS", "_AV", "_GC", "_UN", "_k"];
+    !symbol.starts_with("_OBJC_")
+        && !symbol.starts_with("__")
+        && PREFIXES.iter().any(|p| symbol.starts_with(p))
+}
+
 /// Say on stderr which imports went unbound, and return them.
 ///
 /// The alternative is what this replaces. An import nobody satisfied leaves a
@@ -296,6 +419,8 @@ pub fn announce_unbound_imports<'r>(
     // than leaving the reader to match a return address against this list by
     // hand.
     crate::fault::note_unbound(&unbound);
+    fill_unbound_data(&unbound);
+    name_missing_classes(&unbound);
     unbound
 }
 
