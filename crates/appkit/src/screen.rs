@@ -409,20 +409,20 @@ pub unsafe extern "C" fn CGWarpMouseCursorPosition(point: foundation::geometry::
 
 /// `CGError CGAssociateMouseAndMouseCursorPosition(boolean_t connected)`.
 ///
-/// Accepted, recorded and **not honoured**, which is stated here rather than
-/// refused because of what refusing costs: this is the second half of mouse
-/// look - a game hides the cursor and then disassociates it so the pointer
-/// stops moving while deltas keep arriving - and a program that gets an error
-/// from it treats mouse look as unavailable rather than working without
-/// capture.
+/// Disassociating is the second half of mouse look: a game hides the cursor and
+/// then breaks the link between pointer and cursor so the cursor stops moving
+/// while deltas keep arriving. SDL's relative mouse mode is the same thing, so
+/// that is what this turns on.
 ///
-/// What is missing is SDL's relative mouse mode, which this tree's `sdl3` does
-/// not bind yet. Until it does the cursor stays attached to the pointer: mouse
-/// look will drag the pointer to the screen edge and stop, and everything else
-/// works.
+/// The mode is per-window in SDL and process-wide in CoreGraphics, hence
+/// [`apply_mouse_association`] over every window rather than the key one.
+/// `kCGErrorSuccess` is `0`, and stays the answer on a host whose SDL is too
+/// old for the mode: a program told this failed treats mouse look as
+/// unavailable rather than running without capture.
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn CGAssociateMouseAndMouseCursorPosition(connected: u32) -> i32 {
     ASSOCIATED.store(connected != 0, std::sync::atomic::Ordering::Release);
+    apply_mouse_association();
     0
 }
 
@@ -436,6 +436,20 @@ static ASSOCIATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 /// cursor to follow the pointer.
 pub fn mouse_is_associated() -> bool {
     ASSOCIATED.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Put every window into relative mouse mode, or take it out, to match the last
+/// [`CGAssociateMouseAndMouseCursorPosition`].
+///
+/// Called again when a window takes focus, because SDL leaves the mode when
+/// focus goes and a window made after the guest disassociated never had it.
+pub fn apply_mouse_association() {
+    let relative = !mouse_is_associated();
+    for window in crate::window::sdl_windows() {
+        if sdl3::video::relative_mouse_mode(window) != relative {
+            sdl3::video::set_relative_mouse_mode(window, relative);
+        }
+    }
 }
 
 /// `bool CGEventSourceKeyState(CGEventSourceStateID, CGKeyCode)`.

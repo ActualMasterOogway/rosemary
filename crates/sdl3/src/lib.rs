@@ -143,6 +143,8 @@ struct Api {
     SDL_DestroyCursor: Option<unsafe extern "C" fn(Cursor)>,
     SDL_GetGlobalMouseState: Option<unsafe extern "C" fn(*mut f32, *mut f32) -> u32>,
     SDL_WarpMouseGlobal: Option<unsafe extern "C" fn(f32, f32) -> bool>,
+    SDL_SetWindowRelativeMouseMode: Option<unsafe extern "C" fn(Window, bool) -> bool>,
+    SDL_GetWindowRelativeMouseMode: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_GetModState: Option<unsafe extern "C" fn() -> u16>,
 
     SDL_OpenAudioDeviceStream: Option<
@@ -293,6 +295,8 @@ fn api() -> Option<&'static Api> {
             SDL_DestroyCursor,
             SDL_GetGlobalMouseState,
             SDL_WarpMouseGlobal,
+            SDL_SetWindowRelativeMouseMode,
+            SDL_GetWindowRelativeMouseMode,
             SDL_GetModState,
             SDL_OpenAudioDeviceStream,
             SDL_DestroyAudioStream,
@@ -1542,6 +1546,30 @@ pub mod video {
         };
         // SAFETY: two coordinates.
         unsafe { f(x, y) }
+    }
+
+    /// Hold the pointer in place over `window` and report motion only as
+    /// deltas, or stop doing so.
+    ///
+    /// False when this build of SDL is older than the per-window spelling of
+    /// the call, which is a host too old for the mode rather than a failure to
+    /// enter it.
+    pub fn set_relative_mouse_mode(window: Window, enabled: bool) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_SetWindowRelativeMouseMode) else {
+            return false;
+        };
+        // SAFETY: a window from SDL.
+        unsafe { f(window, enabled) }
+    }
+
+    /// Whether `window` is holding the pointer, asked of SDL rather than
+    /// remembered: SDL drops the mode itself when a window loses focus.
+    pub fn relative_mouse_mode(window: Window) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_GetWindowRelativeMouseMode) else {
+            return false;
+        };
+        // SAFETY: a window from SDL.
+        unsafe { f(window) }
     }
 }
 

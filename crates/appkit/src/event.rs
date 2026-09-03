@@ -239,6 +239,9 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             let object = object_for(window);
             if !object.is_null() && gained {
                 window::set_key_window(object);
+                // SDL drops relative mouse mode when focus goes, and a window
+                // made while the guest was disassociated never entered it.
+                crate::screen::apply_mouse_association();
             }
             post(
                 window,
@@ -294,7 +297,17 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             buttons,
         } => {
             let held = held_button(buttons);
-            *POINTER.lock().unwrap_or_else(|e| e.into_inner()) = (x, y);
+            // A disassociated pointer reports the deltas and none of the
+            // movement: the location a guest reads back is where the cursor was
+            // when it broke the link, which is what CoreGraphics does and what
+            // SDL, still tracking a position inside the window, does not.
+            let (x, y) = match crate::screen::mouse_is_associated() {
+                true => {
+                    *POINTER.lock().unwrap_or_else(|e| e.into_inner()) = (x, y);
+                    (x, y)
+                }
+                false => *POINTER.lock().unwrap_or_else(|e| e.into_inner()),
+            };
             if held.is_none() && !wants_mouse_moved(object_for(id)) {
                 if tracing() {
                     eprintln!(
