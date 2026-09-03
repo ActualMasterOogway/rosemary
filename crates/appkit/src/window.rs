@@ -576,6 +576,22 @@ unsafe extern "C" fn first_responder(receiver: Id, _sel: Sel) -> Id {
     }
 }
 
+/// `-makeFirstResponder:`, which is a *handshake* and not an assignment.
+///
+/// AppKit asks the outgoing responder to resign, records the new one, and then
+/// tells it that it has become first responder - and a program is entitled to
+/// answer that message by moving the first responder somewhere else again.
+/// Roblox does exactly that: its `-rightMouseDown:` makes the engine view first
+/// responder, and the view's `-becomeFirstResponder` hands the keyboard
+/// straight on to its `InputMethodHandler`, which is what the engine actually
+/// reads keystrokes from. A runtime that only stored the pointer left the
+/// engine view as first responder, and its `-keyDown:` drops the key on the
+/// floor - so a right-click, and nothing else, killed the keyboard until a
+/// window activation put the handler back.
+///
+/// The new responder is recorded before it is told, because that message is
+/// where the re-entrant call comes from and it has to see the state AppKit
+/// would have left.
 unsafe extern "C" fn make_first_responder(receiver: Id, _sel: Sel, responder: Id) -> u8 {
     if crate::event::tracing() {
         // SAFETY: null or a live object this runtime allocated.
@@ -585,7 +601,59 @@ unsafe extern "C" fn make_first_responder(receiver: Id, _sel: Sel, responder: Id
             class.map_or("nil", |c| c.name_str())
         );
     }
+    let current = window_of(receiver).first_responder;
+    if current == responder {
+        return 1;
+    }
+    // SAFETY: null or a live object this runtime allocated.
+    if !unsafe { responder_agrees(current, "resignFirstResponder") } {
+        return 0;
+    }
     window_of(receiver).first_responder = responder;
+    // SAFETY: as above.
+    if unsafe { responder_agrees(responder, "becomeFirstResponder") } {
+        return 1;
+    }
+    // A refusal leaves the window itself as the responder, which is the null
+    // this file spells it with - unless the refusal already moved it on.
+    if window_of(receiver).first_responder == responder {
+        window_of(receiver).first_responder = std::ptr::null_mut();
+    }
+    0
+}
+
+/// Send one of the two first-responder messages, or take silence for consent.
+///
+/// `NSResponder`'s own answer to both is yes, so a responder that implements
+/// neither is not refusing - and neither is the window at the end of the chain,
+/// which this file spells as a null responder.
+///
+/// # Safety
+///
+/// `responder` must be null or an object this runtime allocated.
+unsafe fn responder_agrees(responder: Id, selector: &str) -> bool {
+    if responder.is_null() {
+        return true;
+    }
+    let sel = objc::sel::get(selector);
+    // SAFETY: the caller's guarantee.
+    let Some(method) = unsafe { objc::object::class_of(responder) }.and_then(|c| c.method(sel))
+    else {
+        return true;
+    };
+    // SAFETY: both messages are `BOOL (id, SEL)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) -> u8 = std::mem::transmute(method.implementation());
+        f(responder, sel) != 0
+    }
+}
+
+/// `NSResponder`'s own `-becomeFirstResponder` and `-resignFirstResponder`,
+/// which answer yes.
+///
+/// Installed because a program overriding either calls `super` - Roblox's
+/// engine view does - and because [`make_first_responder`] now sends them.
+unsafe extern "C" fn accepts_responder_change(_receiver: Id, _sel: Sel) -> u8 {
     1
 }
 
@@ -736,6 +804,11 @@ unsafe extern "C" fn are_cursor_rects_enabled(_receiver: Id, _sel: Sel) -> u8 {
 }
 
 pub(crate) fn install() {
+    let responder = objc::class::lookup(c"NSResponder").expect("declared before its methods");
+    methods!(responder, {
+        "becomeFirstResponder" => accepts_responder_change, c"c16@0:8";
+        "resignFirstResponder" => accepts_responder_change, c"c16@0:8";
+    });
     let class = objc::class::lookup(c"NSWindow").expect("declared before its methods");
     class_methods!(class, {
         "windowNumberAtPoint:belowWindowWithWindowNumber:" => window_number_at_point,
@@ -834,4 +907,53 @@ pub(crate) fn install() {
         "areCursorRectsEnabled" => are_cursor_rects_enabled, c"c16@0:8";
         "discardCursorRects" => discard_cursor_rects, c"v16@0:8";
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The redirect target of the view below, so its `-becomeFirstResponder`
+    /// can hand the responder on the way Roblox's engine view does.
+    static REDIRECT: std::sync::Mutex<(usize, usize)> = std::sync::Mutex::new((0, 0));
+
+    unsafe extern "C" fn redirecting_become(_receiver: Id, _sel: Sel) -> u8 {
+        let (window, to) = *REDIRECT.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: the window and view the test made.
+        unsafe { make_first_responder(window as Id, objc::sel::get("x"), to as Id) };
+        1
+    }
+
+    /// `-makeFirstResponder:` is a handshake, and the whole reason it is one is
+    /// that the new responder may hand the keyboard on. Roblox's
+    /// `-rightMouseDown:` makes its engine view first responder and that view's
+    /// `-becomeFirstResponder` passes it to the text view the engine actually
+    /// reads keystrokes from, so a runtime that only stored the pointer left
+    /// the keyboard at a view that drops it.
+    #[test]
+    fn a_new_first_responder_may_hand_it_on() {
+        crate::bootstrap();
+        let window = objc::object::create_instance(
+            objc::class::lookup(c"NSWindow").expect("NSWindow"),
+            0,
+        );
+        let view = objc::class::lookup(c"NSView").expect("NSView");
+        let handler = objc::object::create_instance(view, 0);
+        let redirecting = objc::class::allocate_pair(Some(view), c"RedirectingView", 0)
+            .expect("a class of this name is not declared elsewhere");
+        redirecting.add_method(
+            objc::sel::get("becomeFirstResponder"),
+            redirecting_become as objc::class::Imp,
+            c"c16@0:8",
+        );
+        objc::class::register_pair(redirecting);
+        let engine = objc::object::create_instance(redirecting, 0);
+        *REDIRECT.lock().unwrap() = (window as usize, handler as usize);
+
+        // SAFETY: the window and view above, and `-makeFirstResponder:` is
+        // `BOOL (id, SEL, id)`.
+        let answered = unsafe { make_first_responder(window, objc::sel::get("x"), engine) };
+        assert_eq!(answered, 1);
+        assert_eq!(window_of(window).first_responder, handler);
+    }
 }

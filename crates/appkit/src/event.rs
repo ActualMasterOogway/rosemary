@@ -410,6 +410,15 @@ fn send(id: u32, at: Option<(f32, f32)>, fields: impl FnOnce(Id, NSPoint) -> Fie
     }
     let point = at.map(|(x, y)| location(window, x, y)).unwrap_or_default();
     let event = nsevent::make(fields(window, point));
+    // Before the window sees it, which is where AppKit runs a local monitor: a
+    // monitor exists to swallow an event, and one that ran afterwards could
+    // only take it back.
+    if !crate::monitor::allows(event) {
+        if tracing() {
+            eprintln!("rosetta3: appkit: a local event monitor swallowed the event");
+        }
+        return;
+    }
     let sel = objc::sel::get("sendEvent:");
     // SAFETY: `-sendEvent:` is `void (id, SEL, NSEvent *)`, and every window
     // has one - this crate installs the default on `NSWindow`.

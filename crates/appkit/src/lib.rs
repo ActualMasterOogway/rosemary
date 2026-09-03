@@ -14,6 +14,7 @@ pub mod keymap;
 pub mod layer;
 pub mod menu;
 pub mod metadata;
+pub mod monitor;
 pub mod nib;
 pub mod nsevent;
 pub mod opengl;
@@ -44,6 +45,7 @@ pub fn bootstrap() {
         text::install();
         opengl::install();
         nsevent::install();
+        monitor::install();
     });
 }
 
