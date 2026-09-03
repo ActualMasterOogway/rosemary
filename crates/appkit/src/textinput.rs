@@ -14,6 +14,17 @@
 //!
 //! What a program gets instead is [`crate::keymap`], which is where this tree turns a
 //! key code into a character.
+//!
+//! **What refusing costs, measured.** Roblox falls back to naming the key, so its
+//! keyboard hints read `LeftBracket` where the key is `[`. That is a visible wrong
+//! answer and it looks like this refusal is the thing to undo - but handing out a
+//! layout is worse, and was tried: with `kTISPropertyUnicodeKeyLayoutData` answered
+//! by an opaque `CFData` and `UCKeyTranslate` translating from [`crate::keymap`],
+//! Roblox's whole keyboard-hint bar **stops appearing at all**. Empty data, a
+//! sixteen-byte `UCKeyboardLayout` header, control characters left in the table or
+//! left out - all four the same. So the guest reads the resource itself, and the only
+//! answer better than null is a real `'uchr'`. Anything between is a subtree that
+//! silently stops rendering, which is the expensive kind of wrong.
 
 #![expect(non_snake_case, reason = "the C spelling is the interface")]
 

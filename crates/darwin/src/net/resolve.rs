@@ -188,6 +188,13 @@ unsafe extern "C" fn getaddrinfo(
         crate::errno::set(libc::EFAULT);
         return 11;
     }
+    // SAFETY: the caller's guarantee - NUL-terminated or null.
+    if unsafe { blocked(node) } {
+        // SAFETY: a writable slot, per the caller's guarantee.
+        unsafe { *out = core::ptr::null_mut() };
+        // Darwin's `EAI_NONAME`.
+        return 8;
+    }
     // SAFETY: zeroed is a valid `struct addrinfo` - no hints at all.
     let mut host_hints: libc::addrinfo = unsafe { core::mem::zeroed() };
     let mut hints_ptr = core::ptr::null();
@@ -244,6 +251,41 @@ unsafe extern "C" fn getaddrinfo(
     // SAFETY: a writable slot, per the caller's guarantee.
     unsafe { *out = head };
     0
+}
+
+/// Whether `ROSETTA3_BLOCK_HOST` names this host, as a comma-separated list.
+///
+/// A diagnostic, not a policy: a client that reads its configuration from a
+/// server cannot be told to use the local file instead, and answering
+/// `EAI_NONAME` for the server is the only way to find out what it would do
+/// without it. `getaddrinfo` is the choke point because every connection this
+/// program makes goes through it, name by name.
+///
+/// # Safety
+///
+/// `node` is NUL-terminated or null.
+unsafe fn blocked(node: *const c_char) -> bool {
+    #[static_init::dynamic]
+    static NAMES: Vec<String> = std::env::var("ROSETTA3_BLOCK_HOST")
+        .unwrap_or_default()
+        .split(',')
+        .map(|name| name.trim().to_ascii_lowercase())
+        .filter(|name| !name.is_empty())
+        .collect();
+
+    if NAMES.is_empty() || node.is_null() {
+        return false;
+    }
+    // SAFETY: the caller's guarantee.
+    let Ok(name) = (unsafe { CStr::from_ptr(node) }).to_str() else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    let refused = NAMES.iter().any(|blocked| name == *blocked);
+    if refused {
+        eprintln!("rosetta3: {name}: refused (ROSETTA3_BLOCK_HOST names it)");
+    }
+    refused
 }
 
 /// Free a list [`getaddrinfo`] built.

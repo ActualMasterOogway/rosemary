@@ -444,6 +444,20 @@ unsafe extern "C" fn cookie_properties(receiver: Id, _sel: Sel) -> Id {
     unsafe { corefoundation::api::CFAutorelease(dictionary) as Id }
 }
 
+/// `ROSETTA3_TRACE_COOKIES=1`: report each call and what it answered.
+///
+/// A cookie jar is invisible from both ends: a client that asks for a cookie it
+/// has never been given and one that is never asked look the same from outside,
+/// and the session state that depends on the answer is three HTTP round trips
+/// away. This is what tells them apart.
+fn trace(what: std::fmt::Arguments) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+    if *ON.get_or_init(|| std::env::var_os("ROSETTA3_TRACE_COOKIES").is_some()) {
+        eprintln!("rosetta3: cookies: {what}");
+    }
+}
+
 fn autoreleased(text: &str) -> Id {
     let string = crate::string::from_str(text);
     // SAFETY: a fresh object.
@@ -483,7 +497,22 @@ fn cookie_array(cookies: Vec<Cookie>) -> Id {
 }
 
 unsafe extern "C" fn storage_cookies(_receiver: Id, _sel: Sel) -> Id {
-    cookie_array(jar().clone())
+    let all = jar().clone();
+    trace(format_args!(
+        "-cookies -> {} ({})",
+        all.len(),
+        names(&all)
+    ));
+    cookie_array(all)
+}
+
+/// The names in a cookie list, for [`trace`].
+fn names(cookies: &[Cookie]) -> String {
+    cookies
+        .iter()
+        .map(|c| format!("{}@{}", c.name, c.domain))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 unsafe extern "C" fn cookies_for_url(_receiver: Id, _sel: Sel, url: Id) -> Id {
@@ -495,6 +524,11 @@ unsafe extern "C" fn cookies_for_url(_receiver: Id, _sel: Sel, url: Id) -> Id {
         .filter(|c| c.matches(&host, &path) && c.expires.is_none_or(|e| e > now))
         .cloned()
         .collect();
+    trace(format_args!(
+        "-cookiesForURL: {host}{path} -> {} ({})",
+        matching.len(),
+        names(&matching)
+    ));
     cookie_array(matching)
 }
 
@@ -503,6 +537,13 @@ unsafe extern "C" fn set_cookie(_receiver: Id, _sel: Sel, cookie: Id) {
     let Some(cookie) = (unsafe { cookie_of(cookie) }) else {
         return;
     };
+    trace(format_args!(
+        "-setCookie: {}@{}{} = {} bytes",
+        cookie.name,
+        cookie.domain,
+        cookie.path,
+        cookie.value.len()
+    ));
     let mut jar = jar();
     jar.retain(|existing| !existing.same_as(cookie));
     jar.push(cookie.clone());

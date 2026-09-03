@@ -11,6 +11,7 @@ use crate::window;
 pub fn pump(app: Id) {
     let _ = app;
     debug_resize();
+    debug_key();
     trace_views();
     while let Some(event) = sdl3::video::poll() {
         deliver(event);
@@ -59,6 +60,79 @@ fn debug_resize() {
     };
     eprintln!("rosetta3: appkit: ROSETTA3_DEBUG_RESIZE: resizing to {width}x{height}");
     sdl3::video::set_window_size(sdl, width, height);
+}
+
+/// `ROSETTA3_DEBUG_KEY=NAME[,NAME...]@SECONDS`: press and release each key in
+/// turn, that many seconds in.
+///
+/// The companion to `ROSETTA3_DEBUG_RESIZE`, and there for the same reason: a
+/// keystroke cannot be produced from a script under a compositor that does not
+/// implement the virtual-keyboard protocol, so "does the program answer the
+/// keyboard" is otherwise only testable by hand. The event goes through
+/// [`deliver`], so the keymap, `-keyDown:` and the responder chain are exercised
+/// exactly as a real press would exercise them.
+fn debug_key() {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+
+    static REQUEST: OnceLock<Option<(Vec<u32>, f64)>> = OnceLock::new();
+    static START: OnceLock<Instant> = OnceLock::new();
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    let request = REQUEST.get_or_init(|| {
+        let value = std::env::var("ROSETTA3_DEBUG_KEY").ok()?;
+        let (names, after) = value.split_once('@').unwrap_or((value.as_str(), "5"));
+        let keys: Vec<u32> = names.split(',').filter_map(|n| scancode(n.trim())).collect();
+        match keys.is_empty() {
+            true => None,
+            false => Some((keys, after.trim().parse().unwrap_or(5.0))),
+        }
+    });
+    let Some((keys, after)) = request else {
+        return;
+    };
+    let after = *after;
+    if DONE.load(std::sync::atomic::Ordering::Relaxed)
+        || START.get_or_init(Instant::now).elapsed().as_secs_f64() < after
+    {
+        return;
+    }
+    DONE.store(true, std::sync::atomic::Ordering::Relaxed);
+    let Some(window) = window::sdl_windows()
+        .into_iter()
+        .map(sdl3::video::window_id)
+        .next()
+    else {
+        return;
+    };
+    eprintln!("rosetta3: appkit: ROSETTA3_DEBUG_KEY: pressing scancodes {keys:?}");
+    for scancode in keys {
+        for down in [true, false] {
+            deliver(sdl3::video::Event::Key {
+                window,
+                scancode: *scancode,
+                key: 0,
+                modifiers: 0,
+                down,
+                repeat: false,
+            });
+        }
+    }
+}
+
+/// The USB HID usage id `ROSETTA3_DEBUG_KEY`'s value names, or a raw number.
+fn scancode(name: &str) -> Option<u32> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "return" | "enter" => 40,
+        "escape" => 41,
+        "tab" => 43,
+        "space" => 44,
+        "right" => 79,
+        "left" => 80,
+        "down" => 81,
+        "up" => 82,
+        other => other.parse().ok()?,
+    })
 }
 
 /// `ROSETTA3_TRACE_VIEWS=SECONDS`: print each window and the tree of views under
