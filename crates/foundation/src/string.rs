@@ -452,6 +452,15 @@ unsafe extern "C" fn range_of_string(receiver: Id, _sel: Sel, needle: Id) -> NSR
     }
 }
 
+/// `-containsString:`, which is `-rangeOfString:` reaching a match.
+///
+/// An empty needle is not contained: `-rangeOfString:` answers `NSNotFound` for
+/// one, and Apple's `-containsString:` is documented as that comparison.
+unsafe extern "C" fn contains_string(receiver: Id, sel: Sel, needle: Id) -> bool {
+    // SAFETY: `-rangeOfString:` is `NSRange (id, SEL, id)`.
+    unsafe { range_of_string(receiver, sel, needle) }.location != NOT_FOUND
+}
+
 unsafe extern "C" fn has_prefix(receiver: Id, _sel: Sel, prefix: Id) -> bool {
     // SAFETY: two `NSString`s, or nil.
     let (whole, prefix) = unsafe { (bytes(receiver), bytes(prefix)) };
@@ -761,6 +770,7 @@ pub(crate) fn install() {
         "copyWithZone:" => copy, c"@24@0:8^v16";
         "mutableCopy" => mutable_copy, c"@16@0:8";
         "rangeOfString:" => range_of_string, c"{_NSRange=QQ}24@0:8@16";
+        "containsString:" => contains_string, c"B24@0:8@16";
         "hasPrefix:" => has_prefix, c"B24@0:8@16";
         "hasSuffix:" => has_suffix, c"B24@0:8@16";
         "substringFromIndex:" => substring_from_index, c"@24@0:8Q16";
