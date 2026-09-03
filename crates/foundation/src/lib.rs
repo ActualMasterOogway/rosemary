@@ -1,4 +1,5 @@
 mod block;
+pub mod appleevent;
 mod boxed;
 pub mod bundle;
 mod constant;
@@ -59,6 +60,7 @@ pub fn bootstrap() {
         cookies::install();
         defaults::install();
         processinfo::install();
+        appleevent::install();
     });
 }
 
@@ -249,6 +251,8 @@ pub const CLASSES: &[&str] = &[
     "NSURL",
     "NSJSONSerialization",
     "NSProcessInfo",
+    "NSAppleEventManager",
+    "NSAppleEventDescriptor",
 ];
 
 // The image-resident number classes are `constant::CLASSES`, published the same

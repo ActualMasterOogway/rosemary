@@ -115,12 +115,19 @@ unsafe extern "C" fn is_active(receiver: Id, _sel: Sel) -> u8 {
     unsafe { ((*(receiver as *const Application)).running != 0) as u8 }
 }
 
-/// `-finishLaunching`: the two notifications, in the order Apple sends them.
+/// `-finishLaunching`: the two notifications, in the order Apple sends them,
+/// with the launch Apple Event between them.
 ///
 /// The delegate is sent each directly as well as through the notification
 /// center, because AppKit registers a delegate for the notifications it declares
 /// the moment it is set, and a program that only implements the delegate method
 /// never registers as an observer of anything.
+///
+/// `aevt`/`oapp` is raised where Apple raises it - after the program has had
+/// `applicationWillFinishLaunching:` to install its handlers, and before it is
+/// told launching finished. It is the one Apple Event every application on a
+/// real Mac receives, and a program that opens its untitled document from the
+/// handler opens nothing without it.
 unsafe extern "C" fn finish_launching(receiver: Id, _sel: Sel) {
     // SAFETY: an application.
     let delegate = unsafe { (*(receiver as *const Application)).delegate };
@@ -128,6 +135,12 @@ unsafe extern "C" fn finish_launching(receiver: Id, _sel: Sel) {
         (WILL_FINISH_LAUNCHING, "applicationWillFinishLaunching:"),
         (DID_FINISH_LAUNCHING, "applicationDidFinishLaunching:"),
     ] {
+        if name == DID_FINISH_LAUNCHING {
+            foundation::appleevent::raise(
+                foundation::appleevent::CORE_EVENT_CLASS,
+                foundation::appleevent::OPEN_APPLICATION,
+            );
+        }
         let notification = foundation::notification::make(name, receiver, std::ptr::null_mut());
         // SAFETY: a delegate method is `void (id, SEL, NSNotification *)`.
         unsafe { send_if_implemented(delegate, selector, notification) };
