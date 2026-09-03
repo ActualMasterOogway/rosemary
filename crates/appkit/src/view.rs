@@ -100,77 +100,82 @@ fn note_geometry_change(receiver: Id, before: NSRect) {
 /// keeps its original frame forever. The program then asks its own view how big
 /// it is, gets the size the window had when it opened, and renders that size
 /// for the rest of the run: a window that resizes and a picture that does not.
-/// `ROSETTA3_RESIZE_SUBVIEWS_ANYWAY`: treat every subview as fully sizable,
-/// whatever mask it actually has.
 ///
-/// **An A/B, not a mode to run in.** It is wrong on its face - a view with
-/// `NSViewNotSizable` is one AppKit leaves alone, and a program that positions
-/// a fixed-size control inside a resizing window gets it stretched here.
-///
-/// It exists because it isolates one question that is otherwise unanswerable
-/// from outside: *does this program depend on its view following its
-/// superview?* For Roblox the answer is yes and the A/B is one line of the
-/// engine's own log - `SceneManager: resizing main targets to 1200x760` with it
-/// set against nothing at all without - even though Roblox sets no mask, so
-/// AppKit would leave its view alone on a Mac too. Something on that host sizes
-/// that view and this tree has not found it; until it does, this says what the
-/// missing thing has to accomplish.
-fn resize_anyway() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("ROSETTA3_RESIZE_SUBVIEWS_ANYWAY").is_some())
-}
-
+/// Each subview is *sent* `-resizeWithOldSuperviewSize:` rather than having its
+/// frame written here, because that is the method AppKit documents as the one a
+/// view overrides to lay itself out - so a guest's override has to be what runs.
 fn resize_subviews(receiver: Id, old: NSSize) {
     let view = view_of(receiver);
     if view.does_not_autoresize_subviews != 0 || view.subviews.is_null() {
         return;
     }
-    let new = view.frame.size;
     let list = view.subviews;
     // SAFETY: an array this module made and only ever fills with views.
     let Some(array) = (unsafe { corefoundation::collections::array(list as *const c_void) }) else {
         return;
     };
     let subviews: Vec<Id> = array.values.iter().map(|v| *v as Id).collect();
+    let sel = objc::sel::get("resizeWithOldSuperviewSize:");
     for subview in subviews {
         if !is_view(subview) {
             continue;
         }
-        let before = view_of(subview).frame;
-        let mask = match resize_anyway() {
-            true => autoresizing::WIDTH_SIZABLE | autoresizing::HEIGHT_SIZABLE,
-            false => view_of(subview).autoresizing_mask,
-        };
-        let (x, width) = distribute(
-            mask & autoresizing::MIN_X_MARGIN != 0,
-            mask & autoresizing::WIDTH_SIZABLE != 0,
-            mask & autoresizing::MAX_X_MARGIN != 0,
-            before.origin.x,
-            before.size.width,
-            old.width,
-            new.width,
-        );
-        let (y, height) = distribute(
-            mask & autoresizing::MIN_Y_MARGIN != 0,
-            mask & autoresizing::HEIGHT_SIZABLE != 0,
-            mask & autoresizing::MAX_Y_MARGIN != 0,
-            before.origin.y,
-            before.size.height,
-            old.height,
-            new.height,
-        );
-        let frame = NSRect {
-            origin: NSPoint { x, y },
-            size: NSSize { width, height },
-        };
-        if frame == before {
-            continue;
+        // SAFETY: `-resizeWithOldSuperviewSize:` is `void (id, SEL, NSSize)`.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, NSSize) = std::mem::transmute(objc::msg::entry());
+            f(subview, sel, old);
         }
-        view_of(subview).frame = frame;
-        // Recursive, through the same path a `-setFrame:` would take: a
-        // subview that resized has subviews of its own to tell, and observers
-        // of its frame to post to.
-        note_geometry_change(subview, before);
+    }
+}
+
+/// `-resizeWithOldSuperviewSize:`: put this view where its autoresizing mask
+/// says it belongs, now that its superview has gone from `old` to its current
+/// size.
+///
+/// A view whose mask is `NSViewNotSizable` keeps its frame, which is a real
+/// answer and not a gap: a program that positions a fixed-size control in a
+/// resizing window means it.
+unsafe extern "C" fn resize_with_old_superview_size(receiver: Id, _sel: Sel, old: NSSize) {
+    let view = view_of(receiver);
+    let superview = view.superview;
+    if !is_view(superview) {
+        return;
+    }
+    let new = view_of(superview).frame.size;
+    let mask = view.autoresizing_mask;
+    let before = view.frame;
+    let (x, width) = distribute(
+        mask & autoresizing::MIN_X_MARGIN != 0,
+        mask & autoresizing::WIDTH_SIZABLE != 0,
+        mask & autoresizing::MAX_X_MARGIN != 0,
+        before.origin.x,
+        before.size.width,
+        old.width,
+        new.width,
+    );
+    let (y, height) = distribute(
+        mask & autoresizing::MIN_Y_MARGIN != 0,
+        mask & autoresizing::HEIGHT_SIZABLE != 0,
+        mask & autoresizing::MAX_Y_MARGIN != 0,
+        before.origin.y,
+        before.size.height,
+        old.height,
+        new.height,
+    );
+    let frame = NSRect {
+        origin: NSPoint { x, y },
+        size: NSSize { width, height },
+    };
+    if frame == before {
+        return;
+    }
+    // Sent rather than written, for the reason `-[NSWindow setContentView:]`
+    // sends it: a view that tracks its own size overrides `-setFrame:`, and
+    // this path also has to reach the subviews and observers of *this* view.
+    // SAFETY: `-setFrame:` is `void (id, SEL, NSRect)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, NSRect) = std::mem::transmute(objc::msg::entry());
+        f(receiver, objc::sel::get("setFrame:"), frame);
     }
 }
 
@@ -450,7 +455,8 @@ unsafe fn hit(view: Id, point: NSPoint, depth: usize) -> Id {
         y: point.y - frame.origin.y,
     };
     // SAFETY: the subview list is an array of this runtime's, holding views.
-    let children = unsafe { corefoundation::collections::array(view_of(view).subviews as *const c_void) };
+    let children =
+        unsafe { corefoundation::collections::array(view_of(view).subviews as *const c_void) };
     for child in children
         .map(|a| a.values.clone())
         .unwrap_or_default()
@@ -503,7 +509,8 @@ pub unsafe fn update_tracking_areas(view: Id) {
         }
     }
     // SAFETY: the subview list is an array of this runtime's, holding views.
-    let children = unsafe { corefoundation::collections::array(view_of(view).subviews as *const c_void) };
+    let children =
+        unsafe { corefoundation::collections::array(view_of(view).subviews as *const c_void) };
     for child in children.map(|a| a.values.clone()).unwrap_or_default() {
         // SAFETY: an object this runtime allocated.
         unsafe { update_tracking_areas(child as Id) };
@@ -906,6 +913,8 @@ pub(crate) fn install() {
         "autoresizesSubviews" => autoresizes_subviews, c"c16@0:8";
         "resizeSubviewsWithOldSize:" => resize_subviews_with_old_size,
             c"v32@0:8{CGSize=dd}16";
+        "resizeWithOldSuperviewSize:" => resize_with_old_superview_size,
+            c"v32@0:8{CGSize=dd}16";
         "setNeedsDisplayInRect:" => ignored_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "addCursorRect:cursor:" => ignored_object_object, c"v56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
         "discardCursorRects" => ignored, c"v16@0:8";
@@ -940,6 +949,146 @@ mod tests {
         let object = objc::object::create_instance(class, 0);
         // SAFETY: `-initWithFrame:` is `id (id, SEL, NSRect)`.
         unsafe { init_with_frame(object, objc::sel::get("initWithFrame:"), frame) }
+    }
+
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
+        NSRect {
+            origin: NSPoint { x, y },
+            size: NSSize { width, height },
+        }
+    }
+
+    /// A superview and one subview of the given mask, wired as `-addSubview:`
+    /// wires them.
+    fn tree(parent: NSRect, child: NSRect, mask: usize) -> (Id, Id) {
+        let superview = view(parent);
+        let subview = view(child);
+        // SAFETY: `-addSubview:` is `void (id, SEL, id)`.
+        unsafe { add_subview(superview, objc::sel::get("addSubview:"), subview) };
+        view_of(subview).autoresizing_mask = mask;
+        (superview, subview)
+    }
+
+    fn set_frame_of(view: Id, frame: NSRect) {
+        // SAFETY: `-setFrame:` is `void (id, SEL, NSRect)`.
+        unsafe { set_frame(view, objc::sel::get("setFrame:"), frame) };
+    }
+
+    /// The case every windowed program is in: a render view that fills the
+    /// content view, and a window the person resizes. Without this the program
+    /// asks its own view how big it is and gets the size the window opened at.
+    #[test]
+    fn a_sizable_subview_follows_its_superview() {
+        let (superview, subview) = tree(
+            rect(0.0, 0.0, 1000.0, 665.0),
+            rect(0.0, 0.0, 1000.0, 665.0),
+            autoresizing::WIDTH_SIZABLE | autoresizing::HEIGHT_SIZABLE,
+        );
+        set_frame_of(superview, rect(0.0, 0.0, 1200.0, 760.0));
+        assert_eq!(view_of(subview).frame, rect(0.0, 0.0, 1200.0, 760.0));
+    }
+
+    /// `NSViewNotSizable` is a real answer: a fixed-size control in a resizing
+    /// window keeps both its size and its place.
+    #[test]
+    fn a_not_sizable_subview_keeps_its_frame() {
+        let (superview, subview) = tree(
+            rect(0.0, 0.0, 400.0, 400.0),
+            rect(10.0, 10.0, 80.0, 20.0),
+            0,
+        );
+        set_frame_of(superview, rect(0.0, 0.0, 800.0, 400.0));
+        assert_eq!(view_of(subview).frame, rect(10.0, 10.0, 80.0, 20.0));
+    }
+
+    /// A view that is sizable with a fixed leading margin absorbs the whole
+    /// change and stays where it started.
+    #[test]
+    fn a_fixed_margin_holds_a_sizable_subview_in_place() {
+        let (superview, subview) = tree(
+            rect(0.0, 0.0, 200.0, 100.0),
+            rect(20.0, 0.0, 180.0, 100.0),
+            autoresizing::WIDTH_SIZABLE,
+        );
+        set_frame_of(superview, rect(0.0, 0.0, 300.0, 100.0));
+        assert_eq!(view_of(subview).frame, rect(20.0, 0.0, 280.0, 100.0));
+    }
+
+    /// A resize reaches all the way down, because a subview that resized has
+    /// subviews of its own to tell.
+    #[test]
+    fn a_resize_reaches_a_grandchild() {
+        let both = autoresizing::WIDTH_SIZABLE | autoresizing::HEIGHT_SIZABLE;
+        let (superview, subview) = tree(
+            rect(0.0, 0.0, 100.0, 100.0),
+            rect(0.0, 0.0, 100.0, 100.0),
+            both,
+        );
+        let grandchild = view(rect(0.0, 0.0, 100.0, 100.0));
+        // SAFETY: `-addSubview:` is `void (id, SEL, id)`.
+        unsafe { add_subview(subview, objc::sel::get("addSubview:"), grandchild) };
+        view_of(grandchild).autoresizing_mask = both;
+        set_frame_of(superview, rect(0.0, 0.0, 200.0, 50.0));
+        assert_eq!(view_of(grandchild).frame, rect(0.0, 0.0, 200.0, 50.0));
+    }
+
+    /// A superview told not to autoresize its subviews does not.
+    #[test]
+    fn autoresizes_subviews_no_leaves_the_subviews_alone() {
+        let (superview, subview) = tree(
+            rect(0.0, 0.0, 100.0, 100.0),
+            rect(0.0, 0.0, 100.0, 100.0),
+            autoresizing::WIDTH_SIZABLE | autoresizing::HEIGHT_SIZABLE,
+        );
+        // SAFETY: `-setAutoresizesSubviews:` is `void (id, SEL, BOOL)`.
+        unsafe {
+            set_autoresizes_subviews(superview, objc::sel::get("setAutoresizesSubviews:"), 0)
+        };
+        set_frame_of(superview, rect(0.0, 0.0, 200.0, 200.0));
+        assert_eq!(view_of(subview).frame, rect(0.0, 0.0, 100.0, 100.0));
+    }
+
+    static OVERRIDE_RAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    unsafe extern "C" fn overridden_resize(_receiver: Id, _sel: Sel, _old: NSSize) {
+        OVERRIDE_RAN.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The subview is *sent* `-resizeWithOldSuperviewSize:`, so a program that
+    /// overrides it lays itself out and the mask is not consulted behind its
+    /// back. AppKit's contract, and the reason a view can size itself against
+    /// something the mask cannot express.
+    #[test]
+    fn a_subclasss_own_resize_method_is_what_runs() {
+        crate::bootstrap();
+        let class = corefoundation::base::register(
+            c"R3TestResizeView",
+            objc::class::lookup(c"NSView"),
+            INSTANCE_SIZE,
+            false,
+        );
+        methods!(class, {
+            "resizeWithOldSuperviewSize:" => overridden_resize, c"v32@0:8{CGSize=dd}16";
+        });
+        let superview = view(rect(0.0, 0.0, 100.0, 100.0));
+        let subview = objc::object::create_instance(class, 0);
+        // SAFETY: `-initWithFrame:` is `id (id, SEL, NSRect)`.
+        unsafe {
+            init_with_frame(
+                subview,
+                objc::sel::get("initWithFrame:"),
+                rect(0.0, 0.0, 100.0, 100.0),
+            )
+        };
+        // SAFETY: `-addSubview:` is `void (id, SEL, id)`.
+        unsafe { add_subview(superview, objc::sel::get("addSubview:"), subview) };
+        view_of(subview).autoresizing_mask =
+            autoresizing::WIDTH_SIZABLE | autoresizing::HEIGHT_SIZABLE;
+
+        set_frame_of(superview, rect(0.0, 0.0, 200.0, 200.0));
+        assert!(OVERRIDE_RAN.load(std::sync::atomic::Ordering::Relaxed));
+        // The override did not call through, so nothing moved the frame.
+        assert_eq!(view_of(subview).frame, rect(0.0, 0.0, 100.0, 100.0));
     }
 
     /// A view with no window scales by one, whatever it was asked - which is

@@ -102,6 +102,29 @@ unsafe fn send_object(receiver: Id, selector: &str, argument: Id) {
     }
 }
 
+/// # Safety
+///
+/// The selector must name a method taking one `NSUInteger` and returning
+/// nothing.
+unsafe fn send_integer(receiver: Id, selector: &str, value: usize) {
+    // SAFETY: the caller's obligation.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, usize) = std::mem::transmute(objc::msg::entry());
+        f(receiver, objc::sel::get(selector), value);
+    }
+}
+
+/// # Safety
+///
+/// The selector must name a method taking one `BOOL` and returning nothing.
+unsafe fn send_flag(receiver: Id, selector: &str, value: bool) {
+    // SAFETY: the caller's obligation.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, u8) = std::mem::transmute(objc::msg::entry());
+        f(receiver, objc::sel::get(selector), u8::from(value));
+    }
+}
+
 /// What a decoder needs from its caller: the archive, and a way to build the
 /// objects an entry refers to.
 pub(crate) trait Builder {
@@ -188,6 +211,22 @@ fn custom_view(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
     view(builder, uid, &wanted)
 }
 
+/// The bits of `NSvFlags`, which is where a view built in Interface Builder
+/// keeps what it would otherwise be sent.
+///
+/// This is the whole reason a nib's view resizes with its window: nothing sends
+/// `-setAutoresizingMask:` to a view the document positioned, so a decoder that
+/// drops these leaves every one of them `NSViewNotSizable` - and a program whose
+/// render view is a subview of the content view then draws at the size the
+/// window had when it opened, for the rest of the run.
+///
+/// Bit 31 is `hidden`, which is not decoded: `-setHidden:` is ignored in this
+/// tree, so applying it would record a state nothing acts on.
+mod vflags {
+    pub const MASK: i64 = 0x3f;
+    pub const AUTORESIZES_SUBVIEWS: i64 = 0x100;
+}
+
 fn view(builder: &mut dyn Builder, uid: Uid, class_name: &str) -> Option<Id> {
     let object = match allocate(class_name) {
         Some(object) => object,
@@ -196,16 +235,21 @@ fn view(builder: &mut dyn Builder, uid: Uid, class_name: &str) -> Option<Id> {
             return None;
         }
     };
-    // A view's own frame is its size at the origin: the archive records where a
-    // view sits through its superview's subview list, which nothing here reads.
-    let size = text(builder, uid, "NSFrameSize")
-        .and_then(size)
-        .or_else(|| text(builder, uid, "NSFrame").and_then(rect).map(|r| r.size))
+    // `NSFrame` carries the origin the view sits at inside its superview, and
+    // `NSFrameSize` is what Interface Builder writes instead when that origin is
+    // zero. The origin is not cosmetic: it is the leading margin the
+    // autoresizing mask distributes a resize over.
+    let frame = text(builder, uid, "NSFrame")
+        .and_then(rect)
+        .or_else(|| {
+            text(builder, uid, "NSFrameSize")
+                .and_then(size)
+                .map(|size| NSRect {
+                    origin: NSPoint::default(),
+                    size,
+                })
+        })
         .unwrap_or_default();
-    let frame = NSRect {
-        origin: NSPoint::default(),
-        size,
-    };
     // SAFETY: the selector's prototype is the one stated at `send_init_frame`.
     let view = unsafe { send_init_frame(object, frame) };
     if view.is_null() {
@@ -230,6 +274,29 @@ fn view(builder: &mut dyn Builder, uid: Uid, class_name: &str) -> Option<Id> {
         }
     }
 
+    if let Some(flags) = builder
+        .archive()
+        .field(uid, "NSvFlags")
+        .and_then(foundation::plist::Value::as_i64)
+    {
+        // SAFETY: `-setAutoresizingMask:` takes one `NSUInteger`.
+        unsafe {
+            send_integer(
+                view,
+                "setAutoresizingMask:",
+                (flags & vflags::MASK) as usize,
+            )
+        };
+        // SAFETY: `-setAutoresizesSubviews:` takes one `BOOL`.
+        unsafe {
+            send_flag(
+                view,
+                "setAutoresizesSubviews:",
+                flags & vflags::AUTORESIZES_SUBVIEWS != 0,
+            )
+        };
+    }
+
     if let Some(subviews) = builder.archive().field_object(uid, "NSSubviews") {
         for entry in builder.archive().array(subviews) {
             if let Some(subview) = builder.object_at(entry) {
@@ -244,6 +311,155 @@ fn view(builder: &mut dyn Builder, uid: Uid, class_name: &str) -> Option<Id> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One archived view of each kind a nib holds: a plain `NSView` that is the
+    /// window's, and the custom view a program's own class fills it with.
+    ///
+    /// The flags are the ones Roblox's document actually carries: `319` is
+    /// `0x13f`, a content view flexible on all six lengths, and `274` is
+    /// `0x112`, a render view that is width- and height-sizable and nothing
+    /// else. Both have bit 8, which is `autoresizesSubviews`.
+    const VIEWS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>$archiver</key>
+	<string>NSKeyedArchiver</string>
+	<key>$objects</key>
+	<array>
+		<string>$null</string>
+		<dict>
+			<key>$class</key><dict><key>CF$UID</key><integer>6</integer></dict>
+			<key>NSvFlags</key><integer>319</integer>
+			<key>NSFrameSize</key><dict><key>CF$UID</key><integer>2</integer></dict>
+			<key>NSSubviews</key><dict><key>CF$UID</key><integer>3</integer></dict>
+		</dict>
+		<string>{1000, 665}</string>
+		<dict>
+			<key>$class</key><dict><key>CF$UID</key><integer>8</integer></dict>
+			<key>NS.objects</key>
+			<array><dict><key>CF$UID</key><integer>4</integer></dict></array>
+		</dict>
+		<dict>
+			<key>$class</key><dict><key>CF$UID</key><integer>7</integer></dict>
+			<key>NSvFlags</key><integer>274</integer>
+			<key>NSClassName</key><dict><key>CF$UID</key><integer>9</integer></dict>
+			<key>NSFrame</key><dict><key>CF$UID</key><integer>5</integer></dict>
+		</dict>
+		<string>{{10, 20}, {900, 600}}</string>
+		<dict>
+			<key>$classes</key><array><string>NSView</string></array>
+			<key>$classname</key><string>NSView</string>
+		</dict>
+		<dict>
+			<key>$classes</key><array><string>NSCustomView</string></array>
+			<key>$classname</key><string>NSCustomView</string>
+		</dict>
+		<dict>
+			<key>$classes</key><array><string>NSMutableArray</string></array>
+			<key>$classname</key><string>NSMutableArray</string>
+		</dict>
+		<string>NSView</string>
+	</array>
+	<key>$top</key>
+	<dict>
+		<key>root</key><dict><key>CF$UID</key><integer>1</integer></dict>
+	</dict>
+	<key>$version</key>
+	<integer>100000</integer>
+</dict>
+</plist>"#;
+
+    struct Test<'a> {
+        archive: &'a Archive,
+    }
+
+    impl Builder for Test<'_> {
+        fn archive(&self) -> &Archive {
+            self.archive
+        }
+        fn object_at(&mut self, uid: Uid) -> Option<Id> {
+            let name = self.archive.class_name(uid)?.to_string();
+            build(self, uid, &name)
+        }
+        fn note_missing(&mut self, name: &str) {
+            panic!("nothing implements {name}");
+        }
+    }
+
+    fn decode(archive: &str) -> Id {
+        crate::bootstrap();
+        let archive = Archive::parse(archive.as_bytes()).expect("an archive");
+        let root = archive.root().expect("a root");
+        let mut builder = Test { archive: &archive };
+        builder.object_at(root).expect("a view")
+    }
+
+    fn send<R>(receiver: Id, selector: &str) -> R {
+        // SAFETY: every selector this reads is a nullary accessor of `NSView`'s.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel) -> R = std::mem::transmute(objc::msg::entry());
+            f(receiver, objc::sel::get(selector))
+        }
+    }
+
+    /// `-frame` returns a rectangle, which x86-64 returns through a hidden
+    /// pointer - so it is read through the method rather than through
+    /// `objc_msgSend`, whose non-`_stret` entry would shift every argument.
+    fn frame_of(view: Id) -> NSRect {
+        let sel = objc::sel::get("frame");
+        // SAFETY: a view this module decoded.
+        let class = unsafe { objc::object::class_of(view) }.expect("a class");
+        let method = class.method(sel).expect("-frame");
+        // SAFETY: `-frame` is `NSRect (id, SEL)`.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel) -> NSRect =
+                std::mem::transmute(method.implementation());
+            f(view, sel)
+        }
+    }
+
+    /// A view resizes with its superview because the *nib* said so. Nothing
+    /// sends `-setAutoresizingMask:` to a view a document positioned, so a
+    /// decoder that drops `NSvFlags` is a program that renders at its opening
+    /// size for the rest of the run.
+    #[test]
+    fn a_nibs_view_gets_the_autoresizing_mask_the_document_recorded() {
+        let content = decode(VIEWS);
+        assert_eq!(send::<usize>(content, "autoresizingMask"), 0x3f);
+        assert_eq!(send::<u8>(content, "autoresizesSubviews"), 1);
+
+        let subviews = send::<Id>(content, "subviews");
+        // SAFETY: an array this runtime made.
+        let array =
+            unsafe { corefoundation::collections::array(subviews as *const std::ffi::c_void) }
+                .expect("an array");
+        let view = *array.values.first().expect("one subview") as Id;
+        // `NSViewWidthSizable | NSViewHeightSizable`.
+        assert_eq!(send::<usize>(view, "autoresizingMask"), 0x12);
+    }
+
+    /// And it is where the document put it: the origin is the margin the mask
+    /// distributes a resize over, so a view decoded at `(0, 0)` grows from the
+    /// wrong place even once the mask is right.
+    #[test]
+    fn a_subview_keeps_the_origin_the_document_gave_it() {
+        let content = decode(VIEWS);
+        let subviews = send::<Id>(content, "subviews");
+        // SAFETY: an array this runtime made.
+        let array =
+            unsafe { corefoundation::collections::array(subviews as *const std::ffi::c_void) }
+                .expect("an array");
+        let view = *array.values.first().expect("one subview") as Id;
+        let frame = frame_of(view);
+        assert_eq!(frame.origin, NSPoint { x: 10.0, y: 20.0 });
+        assert_eq!(
+            frame.size,
+            NSSize {
+                width: 900.0,
+                height: 600.0
+            }
+        );
+    }
 
     #[test]
     fn interface_builders_geometry_strings_parse() {
