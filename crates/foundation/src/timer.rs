@@ -76,6 +76,18 @@ pub fn date_since_1970(seconds: f64) -> Id {
     date(seconds - UNIX_TO_REFERENCE)
 }
 
+/// The Unix timestamp of an `NSDate`, or `None` for anything else.
+///
+/// Type-checked, because the caller is reading a value a guest put in a
+/// dictionary: reading another class's second word as an interval is a date
+/// with no relation to the one that was stored.
+pub fn interval_since_1970(object: Id) -> Option<f64> {
+    let class = objc::class::lookup(c"NSDate")?;
+    // SAFETY: null or an object this runtime allocated.
+    unsafe { corefoundation::base::is_kind_of(object as corefoundation::base::CFTypeRef, class) }
+        .then(|| date_of(object) + UNIX_TO_REFERENCE)
+}
+
 fn date_of(receiver: Id) -> f64 {
     // SAFETY: a date of this module's.
     unsafe { (*(receiver as *const Date)).interval }

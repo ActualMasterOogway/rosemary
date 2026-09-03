@@ -100,6 +100,15 @@ fn save(cookies: &[Cookie]) {
     let mut text = String::new();
     for cookie in cookies {
         let Some(expires) = cookie.expires.filter(|e| *e > now) else {
+            trace(format_args!(
+                "not written: {}@{} is {}",
+                cookie.name,
+                cookie.domain,
+                match cookie.expires {
+                    Some(expires) => format!("expired ({expires} <= {now})"),
+                    None => "a session cookie".to_string(),
+                }
+            ));
             continue;
         };
         text.push_str(&format!(
@@ -224,8 +233,7 @@ fn split_url(absolute: &str) -> (String, String) {
 /// dictionary with no name or no value is not a cookie and answers nil, which
 /// is what Apple's does.
 unsafe extern "C" fn cookie_with_properties(_class: Id, _sel: Sel, properties: Id) -> Id {
-    // SAFETY: null or an `NSDictionary`.
-    let get = |keys: &[&str]| -> String {
+    let object = |keys: &[&str]| -> Id {
         for key in keys {
             let name = crate::string::from_str(key);
             // SAFETY: `properties` is null or a dictionary, `name` a live string.
@@ -235,20 +243,28 @@ unsafe extern "C" fn cookie_with_properties(_class: Id, _sel: Sel, properties: I
             // SAFETY: a fresh string this call owns.
             unsafe { corefoundation::api::CFRelease(name as CFTypeRef) };
             if !value.is_null() {
-                // SAFETY: whatever the caller put there; read as a string.
-                return unsafe { text(value as Id) };
+                return value as Id;
             }
         }
-        String::new()
+        std::ptr::null_mut()
     };
+    // SAFETY: whatever the caller put there; read as a string, which answers
+    // empty for an object that is not one.
+    let get = |keys: &[&str]| -> String { unsafe { text(object(keys)) } };
     let name = get(&["NSHTTPCookieName", "Name", "name"]);
     let value = get(&["NSHTTPCookieValue", "Value", "value"]);
     if name.is_empty() {
         return std::ptr::null_mut();
     }
-    let domain = get(&["NSHTTPCookieDomain", "Domain", "domain"]);
+    // Normalised as a header's is, so a cookie set for `.roblox.com` and the
+    // same one set for `roblox.com` are one entry rather than two.
+    let domain = get(&["NSHTTPCookieDomain", "Domain", "domain"])
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
     let path = get(&["NSHTTPCookiePath", "Path", "path"]);
     let secure = !get(&["NSHTTPCookieSecure", "Secure", "secure"]).is_empty();
+    // SAFETY: null or an object this runtime allocated.
+    let expires = unsafe { expiry(object(&["NSHTTPCookieExpires", "Expires", "expires"])) };
     make_cookie(Cookie {
         name,
         value,
@@ -258,8 +274,31 @@ unsafe extern "C" fn cookie_with_properties(_class: Id, _sel: Sel, properties: I
             false => path,
         },
         secure,
-        expires: None,
+        expires,
     })
+}
+
+/// The expiry in an `NSHTTPCookieExpires`.
+///
+/// An `NSDate` from a caller that built the dictionary with Apple's constants -
+/// which is the one Roblox uses when it hands its own session cookie to the
+/// storage - and a string from one that carried the header's spelling through.
+/// Dropping this is what turned the session cookie into a session-*only* cookie
+/// and cleared it from the jar on the next launch.
+///
+/// # Safety
+///
+/// `value` must be null or an object this runtime allocated.
+unsafe fn expiry(value: Id) -> Option<i64> {
+    if value.is_null() {
+        return None;
+    }
+    if let Some(seconds) = crate::timer::interval_since_1970(value) {
+        return Some(seconds as i64);
+    }
+    // SAFETY: the caller's obligation; empty for anything but a string.
+    let text = unsafe { text(value) };
+    parse_expires(text.trim()).or_else(|| text.trim().parse().ok())
 }
 
 /// `+[NSHTTPCookie cookiesWithResponseHeaderFields:forURL:]`.
@@ -290,7 +329,17 @@ unsafe extern "C" fn cookies_with_response_header_fields(
             continue;
         }
         // SAFETY: an `NSString`.
-        if let Some(cookie) = parse_set_cookie(&unsafe { text(value as Id) }, &host) {
+        let header = unsafe { text(value as Id) };
+        let parsed = parse_set_cookie(&header, &host);
+        trace(format_args!(
+            "+cookiesWithResponseHeaderFields: {host}: {} -> {}",
+            attributes(&header),
+            match &parsed {
+                Some(cookie) => format!("{}@{} {}", cookie.name, cookie.domain, life(cookie)),
+                None => "nothing".to_string(),
+            }
+        ));
+        if let Some(cookie) = parsed {
             made.push(make_cookie(cookie) as CFTypeRef);
         }
     }
@@ -336,34 +385,76 @@ fn parse_set_cookie(header: &str, host: &str) -> Option<Cookie> {
 
 /// `Expires=Wed, 21 Oct 2015 07:28:00 GMT` as seconds since the epoch.
 ///
-/// This is the attribute the session cookie actually carries - `.ROBLOSECURITY`
-/// arrives with an `Expires` and no `Max-Age` - so parsing only `Max-Age` meant
-/// treating it as a session cookie and dropping it on exit, which is the exact
-/// bug this module exists to fix.
+/// RFC 6265's own parser rather than one spelling of the date. The delimiters
+/// are not part of it, so `Sat, 26-Aug-2056 16:47:16 GMT` - which is how
+/// `auth.roblox.com` sends `.ROBLOSECURITY` - reads the same as the RFC 1123
+/// form Cloudflare sends, and `Sat Aug 26 16:47:16 2056` reads the same again.
+/// Reading only the spaced spelling made the session cookie a session-*only*
+/// cookie, and `save` drops those: the login worked and nothing was written.
 ///
-/// One format, the RFC 1123 one every server sends. The other two RFC 6265
-/// names are a two-digit year and an `asctime` shape, and a cookie in either is
-/// kept for the session rather than given a date guessed from an ambiguous
-/// year - `None` costs a re-login and a wrong century costs a cookie that never
-/// expires or one that never works.
+/// The order the fields are tried in is the RFC's and is load-bearing. The time
+/// is looked for first, so `16:47:16` is not taken as a day of month; the day
+/// before the year, so the two-digit `26` is not taken as a year.
 fn parse_expires(value: &str) -> Option<i64> {
-    // "Wed, 21 Oct 2015 07:28:00 GMT"
-    let rest = value.split_once(", ").map_or(value, |(_, rest)| rest);
-    let mut parts = rest.split_whitespace();
-    let day: i64 = parts.next()?.parse().ok()?;
-    let month = 1 + [
+    let (mut time, mut day, mut month, mut year) = (None, None, None, None);
+    for token in value.split(|c: char| !c.is_ascii_alphanumeric() && c != ':') {
+        if time.is_none() {
+            if let Some(clock) = parse_time(token) {
+                time = Some(clock);
+                continue;
+            }
+        }
+        if day.is_none() {
+            if let Some(number) = parse_number(token, 1..=2) {
+                day = Some(number);
+                continue;
+            }
+        }
+        if month.is_none() {
+            if let Some(number) = parse_month(token) {
+                month = Some(number);
+                continue;
+            }
+        }
+        if year.is_none() {
+            if let Some(number) = parse_number(token, 2..=4) {
+                year = Some(number);
+            }
+        }
+    }
+    let ((hour, minute, second), day, month, year) = (time?, day?, month?, year?);
+    // A two-digit year, in the century the RFC names rather than one guessed at.
+    let year = match year {
+        70..=99 => year + 1900,
+        0..=69 => year + 2000,
+        _ => year,
+    };
+    let sane = (1..=31).contains(&day) && hour < 24 && minute < 60 && second < 60 && year >= 1601;
+    sane.then(|| {
+        days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second
+    })
+}
+
+fn parse_number(token: &str, digits: std::ops::RangeInclusive<usize>) -> Option<i64> {
+    digits
+        .contains(&token.len())
+        .then(|| token.parse().ok())
+        .flatten()
+}
+
+fn parse_time(token: &str) -> Option<(i64, i64, i64)> {
+    let mut fields = token.split(':');
+    let mut next = || parse_number(fields.next()?, 1..=2);
+    let clock = (next()?, next()?, next()?);
+    fields.next().is_none().then_some(clock)
+}
+
+fn parse_month(token: &str) -> Option<i64> {
+    let name = token.get(..3)?.to_ascii_lowercase();
+    let months = [
         "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
-    ]
-    .iter()
-    .position(|m| parts.clone().next().is_some_and(|p| p.to_ascii_lowercase().starts_with(m)))?
-        as i64;
-    parts.next()?;
-    let year: i64 = parts.next()?.parse().ok()?;
-    let mut clock = parts.next()?.split(':');
-    let hour: i64 = clock.next()?.parse().ok()?;
-    let minute: i64 = clock.next()?.parse().ok()?;
-    let second: i64 = clock.next()?.parse().ok()?;
-    Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second)
+    ];
+    months.iter().position(|m| *m == name).map(|i| i as i64 + 1)
 }
 
 /// Howard Hinnant's `days_from_civil`: days since 1970-01-01 for a proleptic
@@ -406,19 +497,42 @@ unsafe extern "C" fn cookie_is_secure(receiver: Id, _sel: Sel) -> u8 {
     u8::from(unsafe { cookie_of(receiver) }.is_some_and(|c| c.secure))
 }
 
+/// `-expiresDate`, nil for a session cookie, as Apple's is.
+unsafe extern "C" fn cookie_expires_date(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an `NSHTTPCookie` this module made.
+    match unsafe { cookie_of(receiver) }.and_then(|c| c.expires) {
+        Some(expires) => crate::timer::date_since_1970(expires as f64),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// `-isSessionOnly`, which is what "has no expiry" means to a caller deciding
+/// whether the cookie is worth keeping.
+unsafe extern "C" fn cookie_is_session_only(receiver: Id, _sel: Sel) -> u8 {
+    // SAFETY: as above.
+    u8::from(unsafe { cookie_of(receiver) }.is_none_or(|c| c.expires.is_none()))
+}
+
 /// `-properties`, as the dictionary `+cookieWithProperties:` would take back.
+///
+/// The expiry is part of that round trip and not decoration: a client that
+/// reads its stored cookies out and puts them back - which is what Roblox does
+/// at startup - would otherwise hand back a cookie with no expiry, and this
+/// storage would drop it from the jar as a session cookie.
 unsafe extern "C" fn cookie_properties(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: an `NSHTTPCookie` this module made.
     let Some(cookie) = (unsafe { cookie_of(receiver) }) else {
         return std::ptr::null_mut();
     };
-    let pairs: Vec<(CFTypeRef, CFTypeRef)> = [
+    let mut pairs: Vec<(CFTypeRef, CFTypeRef)> = [
         ("NSHTTPCookieName", cookie.name.as_str()),
         ("NSHTTPCookieValue", cookie.value.as_str()),
         ("NSHTTPCookieDomain", cookie.domain.as_str()),
         ("NSHTTPCookiePath", cookie.path.as_str()),
+        ("NSHTTPCookieVersion", "0"),
     ]
     .into_iter()
+    .chain(cookie.secure.then_some(("NSHTTPCookieSecure", "TRUE")))
     .map(|(key, value)| {
         (
             crate::string::from_str(key) as CFTypeRef,
@@ -426,6 +540,16 @@ unsafe extern "C" fn cookie_properties(receiver: Id, _sel: Sel) -> Id {
         )
     })
     .collect();
+    if let Some(expires) = cookie.expires {
+        let date = crate::timer::date_since_1970(expires as f64);
+        // Retained, because the loop below releases every value and this one is
+        // autoreleased rather than owned by this call.
+        objc::arc::retain(date);
+        pairs.push((
+            crate::string::from_str("NSHTTPCookieExpires") as CFTypeRef,
+            date as CFTypeRef,
+        ));
+    }
     let dictionary = corefoundation::collections::new_dictionary(
         &pairs,
         corefoundation::callbacks::Policy::from_key_callbacks(),
@@ -456,6 +580,28 @@ fn trace(what: std::fmt::Arguments) {
     if *ON.get_or_init(|| std::env::var_os("ROSETTA3_TRACE_COOKIES").is_some()) {
         eprintln!("rosetta3: cookies: {what}");
     }
+}
+
+/// A cookie's lifetime, which is what decides whether it reaches the jar file.
+fn life(cookie: &Cookie) -> String {
+    match cookie.expires {
+        Some(expires) => format!("expires {expires}"),
+        None => "session only".to_string(),
+    }
+}
+
+/// A `Set-Cookie` header with its value elided, for [`trace`].
+///
+/// The name and the attributes are the whole of what decides where the cookie
+/// goes and how long it lives; the value is the secret and is not printed.
+fn attributes(header: &str) -> String {
+    let mut parts = header.split(';');
+    let first = parts.next().unwrap_or_default();
+    let name = first.split_once('=').map_or(first, |(name, _)| name);
+    std::iter::once(format!("{}=<{} bytes>", name.trim(), first.len()))
+        .chain(parts.map(|a| a.trim().to_string()))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn autoreleased(text: &str) -> Id {
@@ -497,7 +643,12 @@ fn cookie_array(cookies: Vec<Cookie>) -> Id {
 }
 
 unsafe extern "C" fn storage_cookies(_receiver: Id, _sel: Sel) -> Id {
-    let all = jar().clone();
+    let now = now();
+    let all: Vec<Cookie> = jar()
+        .iter()
+        .filter(|c| c.expires.is_none_or(|e| e > now))
+        .cloned()
+        .collect();
     trace(format_args!(
         "-cookies -> {} ({})",
         all.len(),
@@ -538,11 +689,12 @@ unsafe extern "C" fn set_cookie(_receiver: Id, _sel: Sel, cookie: Id) {
         return;
     };
     trace(format_args!(
-        "-setCookie: {}@{}{} = {} bytes",
+        "-setCookie: {}@{}{} = {} bytes, {}",
         cookie.name,
         cookie.domain,
         cookie.path,
-        cookie.value.len()
+        cookie.value.len(),
+        life(cookie)
     ));
     let mut jar = jar();
     jar.retain(|existing| !existing.same_as(cookie));
@@ -646,6 +798,8 @@ pub(crate) fn install() {
         "domain" => cookie_domain, c"@16@0:8";
         "path" => cookie_path, c"@16@0:8";
         "isSecure" => cookie_is_secure, c"c16@0:8";
+        "expiresDate" => cookie_expires_date, c"@16@0:8";
+        "isSessionOnly" => cookie_is_session_only, c"c16@0:8";
         "properties" => cookie_properties, c"@16@0:8";
     });
 
@@ -744,12 +898,64 @@ mod tests {
         assert_eq!(cookie.expires, Some(4_102_444_800));
     }
 
-    /// A format this parser does not read is a *session* cookie, not a cookie
-    /// with an invented date.
+    /// The trace elides the value, which is the secret, and keeps the
+    /// attributes, which are what decides whether the cookie is written.
+    #[test]
+    fn a_traced_header_shows_its_attributes_and_not_its_value() {
+        assert_eq!(
+            attributes(".ROBLOSECURITY=SECRET; domain=.roblox.com; expires=Fri, 01 Jan 2100 00:00:00 GMT"),
+            ".ROBLOSECURITY=<21 bytes>; domain=.roblox.com; expires=Fri, 01 Jan 2100 00:00:00 GMT"
+        );
+    }
+
+    /// The round trip through `-properties` and `+cookieWithProperties:` is
+    /// what a client does at startup, and an expiry lost across it is the
+    /// session cookie cleared from the jar on every relaunch.
+    #[test]
+    fn a_property_expiry_survives_both_spellings() {
+        assert_eq!(
+            parse_expires("Fri, 01 Jan 2100 00:00:00 GMT"),
+            Some(4_102_444_800)
+        );
+        // What `-properties` hands back for a cookie with no expiry, and what
+        // `+cookieWithProperties:` must not invent one from.
+        assert_eq!(parse_expires(""), None);
+    }
+
+    /// The three spellings RFC 6265 admits, all of the same instant. The dashed
+    /// one is what `auth.roblox.com` sends and the reason the session cookie was
+    /// never written.
+    #[test]
+    fn every_spelling_of_a_cookie_date_reads_the_same() {
+        let expected = Some(2_734_534_036);
+        assert_eq!(parse_expires("Sat, 26-Aug-2056 16:47:16 GMT"), expected);
+        assert_eq!(parse_expires("Sat, 26 Aug 2056 16:47:16 GMT"), expected);
+        assert_eq!(parse_expires("Sat Aug 26 16:47:16 2056"), expected);
+    }
+
+    /// A two-digit year takes the century RFC 6265 names, not one guessed at.
+    #[test]
+    fn a_two_digit_year_takes_the_rfcs_century() {
+        assert_eq!(
+            parse_expires("Wed, 21-Oct-15 07:28:00 GMT"),
+            parse_expires("Wed, 21 Oct 2015 07:28:00 GMT")
+        );
+        assert_eq!(
+            parse_expires("Thu, 01-Jan-70 00:00:00 GMT"),
+            parse_expires("Thu, 01 Jan 1970 00:00:00 GMT")
+        );
+    }
+
+    /// A date with a field missing is a *session* cookie, not a cookie with an
+    /// invented date.
     #[test]
     fn an_unreadable_date_is_refused_rather_than_guessed_at() {
-        assert_eq!(parse_expires("Thu Jan  1 00:00:00 1970"), None);
         assert_eq!(parse_expires("nonsense"), None);
+        assert_eq!(parse_expires("Sat, 26 Aug 2056 GMT"), None);
+        assert_eq!(parse_expires("16:47:16"), None);
+        // Out of range rather than wrapped into the next month.
+        assert_eq!(parse_expires("Sat, 32 Aug 2056 16:47:16 GMT"), None);
+        assert_eq!(parse_expires("Sat, 26 Aug 2056 25:47:16 GMT"), None);
     }
 
     /// A header with no `Domain` belongs to the host that sent it.
