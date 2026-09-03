@@ -437,6 +437,45 @@ pub unsafe extern "C" fn CFArrayAppendValue(array: CFTypeRef, value: CFTypeRef) 
     a.values.push(a.policy.retain(value));
 }
 
+/// The function called by [`CFArrayApplyFunction`] for each value in its range.
+pub type ArrayApplierFunction = unsafe extern "C" fn(CFTypeRef, *mut c_void);
+
+/// Apply `callback` to every value in the requested array range.
+///
+/// `CFRange` is passed as its two `CFIndex` fields so that this Rust entry point
+/// has the same System V ABI as the C function taking the aggregate by value.
+/// The values are copied before invoking guest code: callbacks must not mutate
+/// the array, but this keeps an accidental mutation from invalidating the walk.
+pub unsafe extern "C" fn CFArrayApplyFunction(
+    array: CFTypeRef,
+    range_location: CFIndex,
+    range_length: CFIndex,
+    callback: Option<ArrayApplierFunction>,
+    context: *mut c_void,
+) {
+    let Some(callback) = callback else {
+        return;
+    };
+    let (Ok(start), Some(end)) = (
+        usize::try_from(range_location),
+        range_location
+            .checked_add(range_length)
+            .and_then(|end| usize::try_from(end).ok()),
+    ) else {
+        return;
+    };
+    // SAFETY: the caller's obligation.
+    let Some(values) = (unsafe { collections::array(array) })
+        .and_then(|a| a.values.get(start..end).map(ToOwned::to_owned))
+    else {
+        return;
+    };
+    for value in values {
+        // SAFETY: `callback` is supplied by the caller with this signature.
+        unsafe { callback(value, context) };
+    }
+}
+
 pub unsafe extern "C" fn CFArrayGetCount(array: CFTypeRef) -> CFIndex {
     // SAFETY: the caller's obligation.
     unsafe { collections::array(array) }.map_or(0, |a| a.values.len() as CFIndex)

@@ -79,6 +79,7 @@ pub fn symbol(name: &str) -> Option<u64> {
 
         "CFArrayGetTypeID" => at!(api::CFArrayGetTypeID),
         "CFArrayCreate" => at!(api::CFArrayCreate),
+        "CFArrayApplyFunction" => at!(api::CFArrayApplyFunction),
         "CFArrayGetCount" => at!(api::CFArrayGetCount),
         "CFArrayGetValueAtIndex" => at!(api::CFArrayGetValueAtIndex),
         "CFArrayCreateMutable" => at!(api::CFArrayCreateMutable),
@@ -168,6 +169,7 @@ pub const NAMES: &[&str] = &[
     "CFStringAppendCString",
     "CFArrayGetTypeID",
     "CFArrayCreate",
+    "CFArrayApplyFunction",
     "CFArrayGetCount",
     "CFArrayGetValueAtIndex",
     "CFArrayCreateMutable",
@@ -671,6 +673,45 @@ mod collection_tests {
             let array = api::CFArrayCreate(std::ptr::null(), raw.as_ptr(), 2, std::ptr::null());
             assert_eq!(api::CFArrayGetCount(array), 2);
             assert_eq!(api::CFArrayGetValueAtIndex(array, 1), 9 as CFTypeRef);
+            api::CFRelease(array);
+        }
+    }
+
+    #[test]
+    fn array_apply_function_visits_only_the_requested_range() {
+        bootstrap();
+        unsafe extern "C" fn collect(value: CFTypeRef, context: *mut c_void) {
+            // SAFETY: the test passes a pointer to this exact vector.
+            unsafe { (&mut *(context as *mut Vec<CFTypeRef>)).push(value) };
+        }
+
+        // SAFETY: the raw values are not objects and the callback context is
+        // valid for the synchronous invocation.
+        unsafe {
+            let values = [
+                3usize as CFTypeRef,
+                5usize as CFTypeRef,
+                7usize as CFTypeRef,
+            ];
+            let array = api::CFArrayCreate(std::ptr::null(), values.as_ptr(), 3, std::ptr::null());
+            let mut seen = Vec::new();
+            api::CFArrayApplyFunction(
+                array,
+                1,
+                2,
+                Some(collect),
+                &mut seen as *mut Vec<CFTypeRef> as *mut c_void,
+            );
+            assert_eq!(seen, values[1..]);
+
+            api::CFArrayApplyFunction(
+                array,
+                2,
+                2,
+                Some(collect),
+                &mut seen as *mut Vec<CFTypeRef> as *mut c_void,
+            );
+            assert_eq!(seen, values[1..], "an out-of-bounds range is ignored");
             api::CFRelease(array);
         }
     }
