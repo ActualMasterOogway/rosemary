@@ -41,6 +41,20 @@ const SLOTS: usize = 512;
 
 const HOST_THREAD_POINTER: usize = SLOTS;
 
+/// How many teardown passes have reached this thread's array - see [`release`].
+#[cfg(not(target_os = "macos"))]
+const PASSES: usize = SLOTS + 1;
+
+/// The whole array, direct slots and this module's two words past them.
+#[cfg(not(target_os = "macos"))]
+const WORDS: usize = SLOTS + 2;
+
+/// How many times libpthread calls a key's destructor before giving up.
+///
+/// `PTHREAD_DESTRUCTOR_ITERATIONS`, four on Darwin and on glibc alike.
+#[cfg(not(target_os = "macos"))]
+const DESTRUCTOR_PASSES: u64 = 4;
+
 /// The canary a synthetic array reports.
 ///
 /// The same value `rosetta3::shims::runtime` binds `___stack_chk_guard` to, and it has
@@ -123,6 +137,11 @@ fn synthetic_key() -> libc::pthread_key_t {
 
 /// Free a thread's array when the thread ends.
 ///
+/// Puts it back for every pass but the last, because a destructor that has not run yet
+/// is Darwin code like any other: it reads `pthread_self` and its stack canary off this
+/// array, and mangles pointers through slot 7. A fresh array would answer all three
+/// differently halfway through the thread's teardown.
+///
 /// # Safety
 ///
 /// Called by libpthread with the value this thread stored, which is an [`allocate`]
@@ -132,20 +151,28 @@ unsafe extern "C" fn release(block: *mut core::ffi::c_void) {
     if block.is_null() {
         return;
     }
-    // SAFETY: the caller's guarantee. Reconstituting the same `Box<[u64]>` `allocate`
-    // leaked, with the same length.
-    drop(unsafe {
-        Box::from_raw(core::ptr::slice_from_raw_parts_mut(
-            block as *mut u64,
-            SLOTS + 1,
-        ))
-    });
+    let words = block as *mut u64;
+    // SAFETY: the caller's guarantee, on the thread that owns the array.
+    let passes = unsafe {
+        let at = words.add(PASSES);
+        *at += 1;
+        *at
+    };
+    // SAFETY: the key is this module's own, taking back the array it just handed over.
+    if passes < DESTRUCTOR_PASSES
+        && unsafe { libc::pthread_setspecific(synthetic_key(), block as *const _) } == 0
+    {
+        return;
+    }
+    // SAFETY: as above. Reconstituting the same `Box<[u64]>` `allocate` leaked, with
+    // the same length.
+    drop(unsafe { Box::from_raw(core::ptr::slice_from_raw_parts_mut(words, WORDS)) });
 }
 
 /// A fresh array for this thread, filled in and leaked into the key.
 #[cfg(not(target_os = "macos"))]
 fn allocate() -> u64 {
-    let mut words = vec![0u64; SLOTS + 1].into_boxed_slice();
+    let mut words = vec![0u64; WORDS].into_boxed_slice();
     let base = words.as_ptr() as usize as u64;
     // Slot 0 is the array's own address: `pthread_self` is a load of it, and a guest
     // comparing two threads' identities compares these.
@@ -280,7 +307,7 @@ impl HostThread {
         }
         let saved = host_thread_pointer();
         let base = tsd_base() as usize as *const u64;
-        // SAFETY: `base` is this thread's own array, which has `SLOTS + 1` words.
+        // SAFETY: `base` is this thread's own array, which has `WORDS` words.
         let host = unsafe { *base.add(HOST_THREAD_POINTER) };
         if host == 0 {
             return HostThread { saved: None };
@@ -382,6 +409,7 @@ mod tests {
             HOST_THREAD_POINTER >= SLOTS,
             "the host's word is past every slot"
         );
+        assert!(PASSES > HOST_THREAD_POINTER && WORDS > PASSES);
     }
 
     /// The boundary must leave the thread pointer exactly as it found it, including

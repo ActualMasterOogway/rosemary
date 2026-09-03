@@ -1,7 +1,6 @@
 //! Thread-local storage: `__tlv_bootstrap`, and the per-thread block behind it.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
@@ -60,19 +59,101 @@ struct ThreadTls {
     /// This thread's blocks, one per image that has thread-locals, allocated on
     /// first touch and freed when the thread ends.
     blocks: BTreeMap<usize, Block>,
+    /// How many teardown passes have reached this thread's storage - see [`discard`].
+    passes: u32,
 }
 
-thread_local! {
-    /// Everything about thread-locals that belongs to *this* thread.
-    ///
-    /// The cache and the blocks are one object on purpose.
-    static TLS: RefCell<ThreadTls> = const {
-        RefCell::new(ThreadTls {
+impl ThreadTls {
+    const fn new() -> ThreadTls {
+        ThreadTls {
             epoch: 0,
             cache: [(0, std::ptr::null_mut()); CACHE],
             blocks: BTreeMap::new(),
-        })
+            passes: 0,
+        }
+    }
+}
+
+/// How many times libpthread calls a key's destructor before giving up.
+///
+/// `PTHREAD_DESTRUCTOR_ITERATIONS`, which is four on Darwin and on glibc alike. The
+/// last of those calls is this runtime's last chance to free the blocks, so it takes
+/// it rather than leaking one set per thread.
+const DESTRUCTOR_PASSES: u32 = 4;
+
+/// The key this thread's storage hangs off.
+///
+/// A raw pthread key rather than a `thread_local!`, and the difference is what a read
+/// **after** teardown does. A destructed `thread_local!` refuses every later access for
+/// the rest of the thread's life, and there is no answer to give the guest but null -
+/// which its very next instruction dereferences. Such reads are ordinary rather than
+/// exotic: a destructor is code like any other, and a guest `pthread_key_create`
+/// destructor runs after every thread-local destructor this runtime registered has.
+///
+/// dyld does not have that failure mode, so this must not either. [`discard`] hands the
+/// storage back to the key for as many passes as libpthread makes, which keeps the
+/// blocks addressable for the whole of teardown instead of up to the first pass that
+/// happens to reach them.
+fn key() -> libc::pthread_key_t {
+    static KEY: std::sync::OnceLock<libc::pthread_key_t> = std::sync::OnceLock::new();
+    *KEY.get_or_init(|| {
+        let mut key: libc::pthread_key_t = 0;
+        // SAFETY: a live local; `discard` is an `extern "C"` function of this module.
+        let rc = unsafe { libc::pthread_key_create(&mut key, Some(discard)) };
+        assert_eq!(rc, 0, "a guest cannot run without thread-local storage");
+        key
+    })
+}
+
+/// This thread's storage, created on first touch. Null only if the key would not take
+/// it, which leaves the caller with no storage to answer from.
+fn storage() -> *mut ThreadTls {
+    let key = key();
+    // SAFETY: `key` came from `pthread_key_create` above and is never deleted; its
+    // value on this thread is a `Box::into_raw` result of this function and nothing
+    // else.
+    let existing = unsafe { libc::pthread_getspecific(key) } as *mut ThreadTls;
+    if !existing.is_null() {
+        return existing;
+    }
+    let fresh = Box::into_raw(Box::new(ThreadTls::new()));
+    // SAFETY: as above; the key takes ownership of `fresh` from here.
+    if unsafe { libc::pthread_setspecific(key, fresh as *const core::ffi::c_void) } != 0 {
+        // SAFETY: the key did not take it, so nothing else holds the allocation.
+        drop(unsafe { Box::from_raw(fresh) });
+        return std::ptr::null_mut();
+    }
+    fresh
+}
+
+/// Called by libpthread with this thread's storage when the thread ends.
+///
+/// Puts it straight back for every pass but the last, so a destructor that has not run
+/// yet - the guest's own, or another of this runtime's - still reads the block it wrote
+/// rather than a fresh zeroed one.
+///
+/// # Safety
+///
+/// Called with the value this thread stored, which is a [`storage`] allocation and
+/// nothing else.
+unsafe extern "C" fn discard(block: *mut core::ffi::c_void) {
+    if block.is_null() {
+        return;
+    }
+    let tls = block as *mut ThreadTls;
+    // SAFETY: the caller's guarantee, on the thread that owns the allocation.
+    let passes = unsafe {
+        (*tls).passes += 1;
+        (*tls).passes
     };
+    // SAFETY: as `storage`; handing the same allocation back to the same key.
+    if passes < DESTRUCTOR_PASSES
+        && unsafe { libc::pthread_setspecific(key(), block as *const core::ffi::c_void) } == 0
+    {
+        return;
+    }
+    // SAFETY: libpthread will not call this again, and nothing else holds it.
+    drop(unsafe { Box::from_raw(tls) });
 }
 
 /// One thread's block for one image.
@@ -144,14 +225,14 @@ pub fn register(report: &LinkReport) -> usize {
 /// rather than corrupting anything.
 pub extern "C" fn bootstrap(descriptor: *const u8) -> *mut u8 {
     let at = descriptor as usize as u64;
-    // `try_with` rather than `with`.
-    match TLS.try_with(|tls| resolve(&mut tls.borrow_mut(), at)) {
-        Ok(address) => address,
-        Err(_) => {
-            say_after_teardown(at);
-            std::ptr::null_mut()
-        }
+    let tls = storage();
+    if tls.is_null() {
+        say_without_storage(at);
+        return std::ptr::null_mut();
     }
+    // SAFETY: `storage` returns this thread's own allocation, and `resolve` reaches
+    // nothing that could call back in and borrow it a second time.
+    unsafe { resolve(&mut *tls, at) }
 }
 
 /// [`bootstrap`] behind the register discipline a `tlv_descriptor` thunk owes its
@@ -310,14 +391,16 @@ fn say_unregistered(at: u64) {
     );
 }
 
-/// Report a thread-local read that arrived after this thread's storage was destroyed,
-/// once for the process.
-fn say_after_teardown(at: u64) {
+/// Report a thread that could not be given storage at all, once for the process.
+///
+/// Only [`key`] refusing a value produces this - a thread past its last teardown pass,
+/// or one libpthread has no room for. There is no block to answer from either way.
+fn say_without_storage(at: u64) {
     static SAID: std::sync::Once = std::sync::Once::new();
     SAID.call_once(|| {
         eprintln!(
-            "rosetta3: __tlv_bootstrap({at:#x}): this thread's thread-local storage is already \
-             torn down - the guest will read address zero"
+            "rosetta3: __tlv_bootstrap({at:#x}): this thread will not hold thread-local \
+             storage - the guest will read address zero"
         );
     });
 }
@@ -379,8 +462,7 @@ mod tests {
 
         let mut tls = ThreadTls {
             epoch: EPOCH.load(Ordering::Relaxed),
-            cache: [(0, std::ptr::null_mut()); CACHE],
-            blocks: BTreeMap::new(),
+            ..ThreadTls::new()
         };
         let sentinel = 0x5eed_usize as *mut u8;
         tls.cache[line(a)] = (a, sentinel);
@@ -447,8 +529,7 @@ mod tests {
         let at = 0x2_0000u64;
         let mut tls = ThreadTls {
             epoch: EPOCH.load(Ordering::Relaxed),
-            cache: [(0, std::ptr::null_mut()); CACHE],
-            blocks: BTreeMap::new(),
+            ..ThreadTls::new()
         };
         tls.cache[line(at)] = (at, 0x5eed_usize as *mut u8);
 
@@ -456,6 +537,70 @@ mod tests {
         assert!(
             resolve(&mut tls, at).is_null(),
             "the stale entry must not survive the epoch it was filled in"
+        );
+    }
+
+    /// A thread-local read from a `pthread_key_create` destructor must still answer.
+    ///
+    /// This is the case a `thread_local!` cannot serve and the whole reason [`key`] is
+    /// a raw one: libpthread runs key destructors after every thread-local's own, so a
+    /// guest destructor touching a thread-local arrives once this runtime's storage
+    /// would already be gone, and null is what the guest dereferences.
+    #[test]
+    fn a_read_from_a_thread_s_own_destructor_still_finds_its_block() {
+        static AT: AtomicU64 = AtomicU64::new(0);
+        static ANSWERED: AtomicU64 = AtomicU64::new(0);
+
+        let at = 0x4_0000u64;
+        {
+            let mut images = IMAGES.write().unwrap();
+            images.push(Template {
+                initial_va: 0,
+                initial_size: 0,
+                total_size: 64,
+                align: 16,
+            });
+            let image = images.len() - 1;
+            drop(images);
+            SLOTS.write().unwrap().insert(at, Slot { image, offset: 0 });
+        }
+        EPOCH.fetch_add(1, Ordering::Release);
+        AT.store(at, Ordering::SeqCst);
+        // Here rather than on the spawned thread, so this module's key is the older of
+        // the two and libpthread reaches it first in each pass - the order that broke.
+        assert!(!bootstrap(at as *const u8).is_null());
+
+        /// # Safety
+        ///
+        /// Called by libpthread with the value the thread below stored.
+        unsafe extern "C" fn destructor(_: *mut core::ffi::c_void) {
+            let address = bootstrap(AT.load(Ordering::SeqCst) as *const u8);
+            ANSWERED.store(address as usize as u64, Ordering::SeqCst);
+        }
+
+        std::thread::spawn(move || {
+            let mut key: libc::pthread_key_t = 0;
+            // SAFETY: a live local, and a destructor of this module.
+            assert_eq!(
+                unsafe { libc::pthread_key_create(&mut key, Some(destructor)) },
+                0
+            );
+            // Any non-null value: libpthread calls the destructor for a key that holds
+            // one, and what it holds is never read here.
+            // SAFETY: `key` is the one just created.
+            assert_eq!(
+                unsafe { libc::pthread_setspecific(key, &raw const AT as _) },
+                0
+            );
+            assert!(!bootstrap(AT.load(Ordering::SeqCst) as *const u8).is_null());
+        })
+        .join()
+        .expect("the thread reads its thread-local and then ends");
+
+        assert_ne!(
+            ANSWERED.load(Ordering::SeqCst),
+            0,
+            "a destructor's read must be served, not refused"
         );
     }
 }
