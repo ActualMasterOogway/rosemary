@@ -114,23 +114,92 @@ unsafe extern "C" fn backing_scale_factor(receiver: Id, _sel: Sel) -> CGFloat {
     sdl3::video::display_content_scale(display_of(receiver)) as f64
 }
 
-/// `-deviceDescription`, which a program reads `NSScreenNumber` out of to get a
-/// `CGDirectDisplayID` for `CVDisplayLink`.
+/// `-deviceDescription`: `NSScreenNumber` for a `CGDirectDisplayID`, and
+/// `NSDeviceSize`/`NSDeviceResolution` for anything measuring the display.
+///
+/// The two size keys are not decoration. A program that wants its window in
+/// *physical* units has to divide pixels by dots-per-inch, and this dictionary
+/// is where both numbers come from - Roblox reads `NSDeviceSize` by name, in
+/// `-updateWindowSizeMM:`. A missing key is `nil`, `-[nil sizeValue]` is
+/// `{0, 0}`, and a caller dividing by that keeps whatever size it already had:
+/// the failure is a window measurement that never updates, with nothing
+/// anywhere reporting a missing key.
+///
+/// `NSDeviceResolution` is dots per *inch* and is 72 for a display at unit
+/// scale, because AppKit's user-space unit is 1/72 inch by definition. It is
+/// scaled by the backing factor, which is what makes a Retina screen report 144
+/// and is the only place the scale enters the arithmetic.
 unsafe extern "C" fn device_description(receiver: Id, _sel: Sel) -> Id {
+    use foundation::geometry::NSSize;
+
     let display = display_of(receiver);
-    let key = foundation::string::from_str("NSScreenNumber") as corefoundation::base::CFTypeRef;
-    let number = corefoundation::collections::new_number(
-        corefoundation::collections::Number::Integer(display as i64),
-    );
+    // SAFETY: a screen of this crate's, which is what this method is sent to.
+    let frame = unsafe { frame(receiver, objc::sel::get("frame")) };
+    let scale = sdl3::video::display_content_scale(display) as f64;
+    // A scale of zero would make the resolution zero, which is the value this
+    // whole entry exists to keep a caller from dividing by.
+    let scale = match scale > 0.0 {
+        true => scale,
+        false => 1.0,
+    };
+    // Every value is autoreleased, so this function owns none of them and the
+    // dictionary's retain is the only one that matters. Mixing an owned value
+    // in with autoreleased ones is how a leak or a double release gets written.
+    let number = |value: i64| {
+        // SAFETY: a fresh number this closure owns a reference to.
+        unsafe {
+            corefoundation::api::CFAutorelease(corefoundation::collections::new_number(
+                corefoundation::collections::Number::Integer(value),
+            ))
+        }
+    };
+    let entries: [(&str, corefoundation::base::CFTypeRef); 4] = [
+        ("NSScreenNumber", number(display as i64)),
+        (
+            // Pixels, which on a scaled display is the frame times the scale.
+            "NSDeviceSize",
+            foundation::geometry::boxed_size(NSSize {
+                width: frame.size.width * scale,
+                height: frame.size.height * scale,
+            }) as corefoundation::base::CFTypeRef,
+        ),
+        (
+            "NSDeviceResolution",
+            foundation::geometry::boxed_size(NSSize {
+                width: POINTS_PER_INCH * scale,
+                height: POINTS_PER_INCH * scale,
+            }) as corefoundation::base::CFTypeRef,
+        ),
+        ("NSDeviceBitsPerSample", number(8)),
+    ];
+    let pairs: Vec<(corefoundation::base::CFTypeRef, corefoundation::base::CFTypeRef)> = entries
+        .iter()
+        .map(|(key, value)| {
+            (
+                foundation::string::from_str(key) as corefoundation::base::CFTypeRef,
+                *value,
+            )
+        })
+        .collect();
     let dictionary = corefoundation::collections::new_dictionary(
-        &[(key, number)],
+        &pairs,
         corefoundation::callbacks::Policy::from_key_callbacks(),
         corefoundation::callbacks::Policy::from_type_callbacks(),
         false,
     );
+    // The dictionary retained each key; the boxed values are autoreleased
+    // already, so only this function's own references to the keys are spent.
+    for (key, _) in &pairs {
+        // SAFETY: a string this function made.
+        unsafe { corefoundation::api::CFRelease(*key) };
+    }
     // SAFETY: a fresh dictionary.
     unsafe { corefoundation::api::CFAutorelease(dictionary) as Id }
 }
+
+/// AppKit's user-space unit is 1/72 inch, so an unscaled display is 72 dpi by
+/// definition rather than by measurement.
+const POINTS_PER_INCH: f64 = 72.0;
 
 /// `CGDirectDisplayID CGMainDisplayID(void)`.
 ///

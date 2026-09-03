@@ -100,6 +100,26 @@ fn note_geometry_change(receiver: Id, before: NSRect) {
 /// keeps its original frame forever. The program then asks its own view how big
 /// it is, gets the size the window had when it opened, and renders that size
 /// for the rest of the run: a window that resizes and a picture that does not.
+/// `ROSETTA3_RESIZE_SUBVIEWS_ANYWAY`: treat every subview as fully sizable,
+/// whatever mask it actually has.
+///
+/// **An A/B, not a mode to run in.** It is wrong on its face - a view with
+/// `NSViewNotSizable` is one AppKit leaves alone, and a program that positions
+/// a fixed-size control inside a resizing window gets it stretched here.
+///
+/// It exists because it isolates one question that is otherwise unanswerable
+/// from outside: *does this program depend on its view following its
+/// superview?* For Roblox the answer is yes and the A/B is one line of the
+/// engine's own log - `SceneManager: resizing main targets to 1200x760` with it
+/// set against nothing at all without - even though Roblox sets no mask, so
+/// AppKit would leave its view alone on a Mac too. Something on that host sizes
+/// that view and this tree has not found it; until it does, this says what the
+/// missing thing has to accomplish.
+fn resize_anyway() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("ROSETTA3_RESIZE_SUBVIEWS_ANYWAY").is_some())
+}
+
 fn resize_subviews(receiver: Id, old: NSSize) {
     let view = view_of(receiver);
     if view.does_not_autoresize_subviews != 0 || view.subviews.is_null() {
@@ -117,7 +137,10 @@ fn resize_subviews(receiver: Id, old: NSSize) {
             continue;
         }
         let before = view_of(subview).frame;
-        let mask = view_of(subview).autoresizing_mask;
+        let mask = match resize_anyway() {
+            true => autoresizing::WIDTH_SIZABLE | autoresizing::HEIGHT_SIZABLE,
+            false => view_of(subview).autoresizing_mask,
+        };
         let (x, width) = distribute(
             mask & autoresizing::MIN_X_MARGIN != 0,
             mask & autoresizing::WIDTH_SIZABLE != 0,
@@ -333,6 +356,51 @@ pub unsafe fn window_of(view: Id) -> Id {
         current = v.superview;
     }
     std::ptr::null_mut()
+}
+
+/// One line per view, describing the tree under `view`.
+///
+/// The question this exists for is "what size does the *guest's* view think it
+/// is", and it cannot be answered any other way: a release build inlines the
+/// whole geometry path out of gdb's reach - `appkit::event::post` and
+/// `foundation::notification::post` both resolve to "Function not defined" -
+/// and the view that matters is one the guest made, so it has no symbol either.
+///
+/// # Safety
+///
+/// `view` must be null or an object this runtime allocated.
+pub unsafe fn describe(view: Id, depth: usize, out: &mut String) {
+    use std::fmt::Write;
+
+    if !is_view(view) || depth > 16 {
+        return;
+    }
+    let v = view_of(view);
+    // The class is what names it: `NSView` is this crate's, and anything else is
+    // the guest's own subclass, which is the one the question is about.
+    // SAFETY: a live object.
+    let class = unsafe { objc::object::class_of(view) }.map_or("?", objc::class::Class::name_str);
+    let _ = writeln!(
+        out,
+        "rosetta3: appkit: {:indent$}{class} {view:p} frame {}x{} at ({},{}) mask {:#x}{}",
+        "",
+        v.frame.size.width,
+        v.frame.size.height,
+        v.frame.origin.x,
+        v.frame.origin.y,
+        v.autoresizing_mask,
+        match v.does_not_autoresize_subviews {
+            0 => "",
+            _ => " autoresizesSubviews=NO",
+        },
+        indent = depth * 2,
+    );
+    // SAFETY: the subview list is an array of this runtime's, holding views.
+    let children = unsafe { corefoundation::collections::array(v.subviews as *const c_void) };
+    for child in children.map(|a| a.values.clone()).unwrap_or_default() {
+        // SAFETY: an object this runtime allocated.
+        unsafe { describe(child as Id, depth + 1, out) };
+    }
 }
 
 /// The backing scale a view draws at: its window's, or one.

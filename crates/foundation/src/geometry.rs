@@ -204,6 +204,14 @@ unsafe extern "C" fn value_with_point(_class: Id, _sel: Sel, point: NSPoint) -> 
 }
 
 unsafe extern "C" fn value_with_size(_class: Id, _sel: Sel, size: NSSize) -> Id {
+    boxed_size(size)
+}
+
+/// An autoreleased `NSValue` holding `size`, for this tree's own dictionaries.
+///
+/// `-[NSScreen deviceDescription]` is the caller: its values are boxed sizes,
+/// and a guest reads one back with `-sizeValue`.
+pub fn boxed_size(size: NSSize) -> Id {
     make(bytes_of(&size), encoding::SIZE)
 }
 

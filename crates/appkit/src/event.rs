@@ -11,6 +11,7 @@ use crate::window;
 pub fn pump(app: Id) {
     let _ = app;
     debug_resize();
+    trace_views();
     while let Some(event) = sdl3::video::poll() {
         deliver(event);
     }
@@ -58,6 +59,51 @@ fn debug_resize() {
     };
     eprintln!("rosetta3: appkit: ROSETTA3_DEBUG_RESIZE: resizing to {width}x{height}");
     sdl3::video::set_window_size(sdl, width, height);
+}
+
+/// `ROSETTA3_TRACE_VIEWS=SECONDS`: print each window and the tree of views under
+/// it, once, that many seconds in.
+///
+/// Companion to `ROSETTA3_DEBUG_RESIZE`, and needed for the same reason: the
+/// question a resize raises is which view ended up the wrong size, and the view
+/// that matters is one the *guest* made - so it is in no debugger's symbol
+/// table, and a release build has inlined every accessor that would name it.
+/// Printed after the window's own size so the two can be compared on sight.
+fn trace_views() {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+
+    static AFTER: OnceLock<Option<f64>> = OnceLock::new();
+    static START: OnceLock<Instant> = OnceLock::new();
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    let Some(after) = *AFTER.get_or_init(|| {
+        std::env::var("ROSETTA3_TRACE_VIEWS")
+            .ok()
+            .map(|value| value.trim().parse().unwrap_or(5.0))
+    }) else {
+        return;
+    };
+    if DONE.load(std::sync::atomic::Ordering::Relaxed)
+        || START.get_or_init(Instant::now).elapsed().as_secs_f64() < after
+    {
+        return;
+    }
+    DONE.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let mut out = String::new();
+    for object in window::all() {
+        // SAFETY: a window this crate made.
+        let sdl = unsafe { window::sdl_window(object) };
+        let size = sdl3::video::window_size(sdl).unwrap_or((0, 0));
+        out.push_str(&format!(
+            "rosetta3: appkit: window {object:p} sdl {}x{}\n",
+            size.0, size.1
+        ));
+        // SAFETY: null or a view this runtime allocated.
+        unsafe { crate::view::describe(window::content_view_of(object), 1, &mut out) };
+    }
+    eprint!("{out}");
 }
 
 fn deliver(event: sdl3::video::Event) {

@@ -9,18 +9,29 @@
 //! so the synchronous half is forwarded - see [`crate::foreign`], which is what
 //! lets the target Apple's framework hands back be released again.
 //!
-//! Off Darwin there is no such daemon, and no answer to invent:
-//! `SCNetworkReachabilityCreateWithAddress` returns NULL, which is the
-//! documented answer for "a reachability reference could not be created" and one
-//! every caller already has to handle - Apple's returns it for a bad address.
-//! Everything downstream then answers false, which is what those functions do
-//! for a null target on Apple's too.
+//! Off Darwin there is no such daemon, and the answer used to be NULL for every
+//! target - which is the documented "could not be created" and looked safe.
+//! **It is not an answer a program survives.** A client asks reachability before
+//! it decides it is online, and NULL is not "offline", it is "I could not find
+//! out": Roblox imports `CreateWithAddress`, `SetCallback`,
+//! `ScheduleWithRunLoop`, `GetFlags` and `Unschedule` - the whole *asynchronous*
+//! pattern - so it registers a callback, waits for the network state, and is
+//! still waiting. A refusal three layers under a caller that is waiting for an
+//! event is indistinguishable from a network that never comes up.
 //!
-//! The *asynchronous* half is declined on both hosts. Scheduling a target hands
-//! the framework a `CFRunLoopRef`, and this tree's run loop is not Apple's: a
-//! foreign target scheduled on a native loop would be read as a structure it is
-//! not. A caller that polls `GetFlags` gets the right answer; one that waits for
-//! a callback is told, by the false return, that it will not arrive.
+//! So the target is real here, and the flags are **measured rather than
+//! invented**, which is the part that keeps this honest: [`routed_source_address`]
+//! asks the routing table whether a packet to the public internet has anywhere
+//! to go, by `connect`ing a datagram socket, which sends nothing. A machine with
+//! a route is reachable and one without is not, and that is the same question
+//! the configuration daemon answers on a Mac.
+//!
+//! Scheduling delivers **one callback with the current flags**, as Apple's does
+//! when a target is first scheduled, and delivers it on the calling thread
+//! rather than on the run loop's - this tree's run loop is not Apple's and a
+//! foreign target cannot be handed to it. What that costs is written down at
+//! [`SCNetworkReachabilityScheduleWithRunLoop`]: a *change* in reachability is
+//! never reported, because nothing here watches for one.
 //!
 //! Published rather than left out for the reason the run loop's mode names are:
 //! an unresolved *function* import is refused at the call, which stops a program
@@ -65,107 +76,434 @@ fn host(name: &std::ffi::CStr) -> Option<*mut c_void> {
     crate::foreign::entry(name)
 }
 
+/// `SCNetworkReachabilityFlags`, of which only the two below are answered.
+///
+/// `kSCNetworkReachabilityFlagsReachable` is the bit every caller tests;
+/// `IsLocalAddress` distinguishes a target on this machine, which is reachable
+/// whatever the routing table says.
+mod flag {
+    pub const REACHABLE: u32 = 1 << 1;
+    pub const IS_LOCAL_ADDRESS: u32 = 1 << 16;
+}
+
+/// `SCNetworkReachabilityContext`, as `<SCNetworkReachability.h>` lays it out.
+///
+/// The `info` a caller registers is *its* object, and the retain and release it
+/// passes alongside are how it stays alive for as long as this holds it. A
+/// runtime that kept the pointer and skipped the retain hands the callback a
+/// freed object, which is the crossing this tree spends its time chasing.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Context {
+    version: i64,
+    info: *mut c_void,
+    retain: Option<unsafe extern "C" fn(*const c_void) -> *const c_void>,
+    release: Option<unsafe extern "C" fn(*const c_void)>,
+    copy_description: *const c_void,
+}
+
+type Callback = unsafe extern "C" fn(CFTypeRef, u32, *mut c_void);
+
+/// An `SCNetworkReachabilityRef` of this runtime's.
+///
+/// A real object rather than a handle, because the caller `CFRelease`s it and
+/// that walks the isa.
 #[cfg(not(target_os = "macos"))]
-fn host(_name: &std::ffi::CStr) -> Option<*mut c_void> {
-    None
+#[repr(C)]
+struct Reachability {
+    isa: *const Class,
+    /// Boxed and leaked with the object: `crate::base::allocate` gives fixed
+    /// storage, and the state has a lock and a callback in it.
+    state: *mut std::sync::Mutex<TargetState>,
 }
 
-/// `SCNetworkReachabilityRef SCNetworkReachabilityCreateWithAddress(CFAllocatorRef, const struct sockaddr *)`
-pub unsafe extern "C" fn SCNetworkReachabilityCreateWithAddress(
-    allocator: CFTypeRef,
-    address: *const c_void,
-) -> CFTypeRef {
-    let Some(f) = host(c"SCNetworkReachabilityCreateWithAddress") else {
-        return std::ptr::null();
-    };
-    // SAFETY: the declaration above is the framework's own, and `address` is the
-    // caller's `struct sockaddr` - a host layout on the one host this reaches.
-    // The allocator is passed along; every caller in practice passes the default,
-    // which is null in Apple's CoreFoundation as well as in this one.
-    unsafe {
-        let f: unsafe extern "C" fn(CFTypeRef, *const c_void) -> CFTypeRef =
-            std::mem::transmute(f);
-        f(allocator, address)
-    }
+#[cfg(not(target_os = "macos"))]
+#[derive(Default)]
+struct TargetState {
+    callback: Option<Callback>,
+    info: *mut c_void,
+    release: Option<unsafe extern "C" fn(*const c_void)>,
+    /// Whether the target names something on this machine, which is reachable
+    /// with or without a route to the outside world.
+    local: bool,
 }
 
-/// `SCNetworkReachabilityRef SCNetworkReachabilityCreateWithName(CFAllocatorRef, const char *)`
-pub unsafe extern "C" fn SCNetworkReachabilityCreateWithName(
-    allocator: CFTypeRef,
-    name: *const c_void,
-) -> CFTypeRef {
-    let Some(f) = host(c"SCNetworkReachabilityCreateWithName") else {
-        return std::ptr::null();
-    };
-    // SAFETY: as above; `name` is the caller's NUL-terminated host name.
-    unsafe {
-        let f: unsafe extern "C" fn(CFTypeRef, *const c_void) -> CFTypeRef =
-            std::mem::transmute(f);
-        f(allocator, name)
-    }
+#[cfg(not(target_os = "macos"))]
+fn target_class() -> &'static Class {
+    static CLASS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let ptr = *CLASS.get_or_init(|| {
+        let class = crate::base::register(
+            c"SCNetworkReachability",
+            None,
+            size_of::<Reachability>(),
+            true,
+        );
+        objc::class::ptr(class) as usize
+    });
+    // SAFETY: the cell holds a pointer to a class this function registered.
+    unsafe { objc::class::from_ptr(ptr as *const Class).expect("a class") }
 }
 
-/// `Boolean SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef, SCNetworkReachabilityFlags *)`
+/// The state of a target of *this runtime's*, or `None` for anything else.
 ///
-/// False for a target this tree did not get from the host, and the flags are
-/// left alone: a caller that reads them after a false return is reading its own
-/// uninitialised memory on Apple's too.
-pub unsafe extern "C" fn SCNetworkReachabilityGetFlags(target: CFTypeRef, flags: *mut u32) -> u8 {
-    // Every target that exists came from the host, because that is the only
-    // place [`SCNetworkReachabilityCreateWithName`] gets one. Checked rather
-    // than assumed: reading one of this runtime's objects as Apple's structure
-    // is the failure `crate::foreign` exists to stop.
-    // SAFETY: the caller's obligation - null or an object.
-    if target.is_null() {
-        return 0;
-    }
-
-    #[cfg(target_os = "macos")]
-    if !unsafe { crate::foreign::is(target) } {
-        return 0;
-    }
-
-    let Some(f) = host(c"SCNetworkReachabilityGetFlags") else {
-        return 0;
-    };
-    // SAFETY: a target Apple's framework made, handed back to it, and a `u32`
-    // out-parameter the caller owns.
-    unsafe {
-        let f: unsafe extern "C" fn(CFTypeRef, *mut u32) -> u8 = std::mem::transmute(f);
-        f(target, flags)
-    }
-}
-
-/// `Boolean SCNetworkReachabilitySetCallback(SCNetworkReachabilityRef, SCNetworkReachabilityCallBack, SCNetworkReachabilityContext *)`
+/// Type-checked rather than assumed, for the reason `foreign::is` exists on the
+/// other host: reading another class's second word as a `Mutex` pointer is a
+/// dereference of whatever that field happens to hold.
 ///
-/// Declined even where the target is the host's: a callback only ever arrives
-/// through the run loop the target is scheduled on, and scheduling is what
-/// cannot be forwarded. See the module note.
-pub unsafe extern "C" fn SCNetworkReachabilitySetCallback(
-    _target: CFTypeRef,
-    _callback: *const c_void,
-    _context: *mut c_void,
-) -> u8 {
-    0
+/// # Safety
+///
+/// `target` must be null or an object this runtime allocated.
+#[cfg(not(target_os = "macos"))]
+unsafe fn target_state(target: CFTypeRef) -> Option<&'static std::sync::Mutex<TargetState>> {
+    // SAFETY: the caller's obligation.
+    if !unsafe { crate::base::is_kind_of(target, target_class()) } {
+        return None;
+    }
+    // SAFETY: an instance of the class above, whose `state` this module set.
+    unsafe { (*(target as *const Reachability)).state.as_ref() }
 }
 
-/// `Boolean SCNetworkReachabilityScheduleWithRunLoop(SCNetworkReachabilityRef, CFRunLoopRef, CFStringRef)`
-pub unsafe extern "C" fn SCNetworkReachabilityScheduleWithRunLoop(
-    _target: CFTypeRef,
-    _loop: CFTypeRef,
-    _mode: CFTypeRef,
-) -> u8 {
-    0
+/// A target for something at `local`, as a new object the caller owns.
+#[cfg(not(target_os = "macos"))]
+fn new_target(local: bool) -> CFTypeRef {
+    // SAFETY: `Reachability` begins with `isa` and is the layout `target_class`
+    // was registered with.
+    let object: *mut Reachability = unsafe { crate::base::allocate(target_class()) };
+    if object.is_null() {
+        return std::ptr::null();
+    }
+    let state = Box::into_raw(Box::new(std::sync::Mutex::new(TargetState {
+        local,
+        ..TargetState::default()
+    })));
+    // SAFETY: a fresh allocation of this module's own layout.
+    unsafe { (*object).state = state };
+    object as CFTypeRef
 }
 
-/// `Boolean SCNetworkReachabilityUnscheduleFromRunLoop(SCNetworkReachabilityRef, CFRunLoopRef, CFStringRef)`
-pub unsafe extern "C" fn SCNetworkReachabilityUnscheduleFromRunLoop(
-    _target: CFTypeRef,
-    _loop: CFTypeRef,
-    _mode: CFTypeRef,
-) -> u8 {
-    0
+/// Whether a packet leaving this machine has anywhere to go.
+#[cfg(not(target_os = "macos"))]
+fn reachable_flags(local: bool) -> u32 {
+    match local {
+        true => flag::REACHABLE | flag::IS_LOCAL_ADDRESS,
+        false => match routed_source_address().is_some() {
+            true => flag::REACHABLE,
+            // Zero is what Apple's reports for a host with no route, and it is
+            // the answer a client turns into "offline" rather than into a wait.
+            false => 0,
+        },
+    }
 }
+
+/// Whether a Darwin `struct sockaddr` names *this machine*, which is reachable
+/// with or without a route to anywhere else.
+///
+/// Loopback only. The **unspecified** address is deliberately not local, and
+/// getting that wrong is what this comment is for: `0.0.0.0` is what a client
+/// passes to ask "is the internet reachable at all" - it is the one address
+/// Roblox passes - and answering `kSCNetworkReachabilityFlagsIsLocalAddress`
+/// for it tells the client the thing it asked about is on this machine, which
+/// is the opposite of what it wanted to know. It is answered from the routing
+/// table like any other address.
+///
+/// **Darwin's layout, not this host's**, and that is the whole of why this is
+/// read by hand: Darwin is `{ uint8_t sa_len; uint8_t sa_family; ... }` where
+/// Linux is a `uint16_t sa_family` at offset zero, so a `sockaddr` the guest
+/// filled in has its family read out of the *length* byte by anything that
+/// takes it for the host's. `AF_INET` is 2 on both; `AF_INET6` is 30 there and
+/// 10 here.
+///
+/// # Safety
+///
+/// `address` must be null or a readable Darwin `struct sockaddr`.
+#[cfg(not(target_os = "macos"))]
+unsafe fn names_this_machine(address: *const c_void) -> bool {
+    const DARWIN_AF_INET: u8 = 2;
+    const DARWIN_AF_INET6: u8 = 30;
+    if address.is_null() {
+        return false;
+    }
+    // SAFETY: the caller's obligation; both reads are within the two-byte
+    // header every `sockaddr` has whatever its family.
+    let family = unsafe { address.cast::<u8>().add(1).read() };
+    match family {
+        DARWIN_AF_INET => {
+            // `sockaddr_in`: two bytes of header, two of port, then the address
+            // in network order - the same offsets on both platforms.
+            // SAFETY: an `AF_INET` address is sixteen bytes.
+            unsafe { address.cast::<u8>().add(4).read() == 127 }
+        }
+        DARWIN_AF_INET6 => {
+            // `sockaddr_in6`: header, port, flow label, then sixteen bytes.
+            // SAFETY: an `AF_INET6` address is twenty-eight bytes.
+            let octets = unsafe { address.cast::<u8>().add(8).cast::<[u8; 16]>().read() };
+            let mut loopback = [0u8; 16];
+            loopback[15] = 1;
+            octets == loopback
+        }
+        // A family this does not know is not claimed to be local, so it is
+        // answered from the routing table like anything else.
+        _ => false,
+    }
+}
+
+/// The five reachability entry points, forwarded to Apple's framework.
+///
+/// A Mac has the configuration daemon and its opinion is the true one, so
+/// nothing here is answered locally. The asynchronous half stays declined: a
+/// foreign target scheduled on this tree's run loop would be read as a
+/// structure it is not.
+#[cfg(target_os = "macos")]
+mod darwin {
+    use super::*;
+
+    /// `SCNetworkReachabilityRef SCNetworkReachabilityCreateWithAddress(CFAllocatorRef, const struct sockaddr *)`
+    pub unsafe extern "C" fn SCNetworkReachabilityCreateWithAddress(
+        allocator: CFTypeRef,
+        address: *const c_void,
+    ) -> CFTypeRef {
+        let Some(f) = host(c"SCNetworkReachabilityCreateWithAddress") else {
+            return std::ptr::null();
+        };
+        // SAFETY: the declaration above is the framework's own, and `address` is
+        // the caller's `struct sockaddr` - a host layout on the one host this
+        // reaches. The allocator is passed along; every caller in practice
+        // passes the default, which is null in Apple's CoreFoundation as well as
+        // in this one.
+        unsafe {
+            let f: unsafe extern "C" fn(CFTypeRef, *const c_void) -> CFTypeRef =
+                std::mem::transmute(f);
+            f(allocator, address)
+        }
+    }
+
+    /// `SCNetworkReachabilityRef SCNetworkReachabilityCreateWithName(CFAllocatorRef, const char *)`
+    pub unsafe extern "C" fn SCNetworkReachabilityCreateWithName(
+        allocator: CFTypeRef,
+        name: *const c_void,
+    ) -> CFTypeRef {
+        let Some(f) = host(c"SCNetworkReachabilityCreateWithName") else {
+            return std::ptr::null();
+        };
+        // SAFETY: as above; `name` is the caller's NUL-terminated host name.
+        unsafe {
+            let f: unsafe extern "C" fn(CFTypeRef, *const c_void) -> CFTypeRef =
+                std::mem::transmute(f);
+            f(allocator, name)
+        }
+    }
+
+    /// `Boolean SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef, SCNetworkReachabilityFlags *)`
+    ///
+    /// False for a target this tree did not get from the host, and the flags are
+    /// left alone: a caller that reads them after a false return is reading its
+    /// own uninitialised memory on Apple's too.
+    pub unsafe extern "C" fn SCNetworkReachabilityGetFlags(
+        target: CFTypeRef,
+        flags: *mut u32,
+    ) -> u8 {
+        if target.is_null() {
+            return 0;
+        }
+        // Checked rather than assumed: reading one of this runtime's objects as
+        // Apple's structure is the failure `crate::foreign` exists to stop.
+        // SAFETY: the caller's obligation - null or an object.
+        if !unsafe { crate::foreign::is(target) } {
+            return 0;
+        }
+        let Some(f) = host(c"SCNetworkReachabilityGetFlags") else {
+            return 0;
+        };
+        // SAFETY: a target Apple's framework made, handed back to it, and a
+        // `u32` out-parameter the caller owns.
+        unsafe {
+            let f: unsafe extern "C" fn(CFTypeRef, *mut u32) -> u8 = std::mem::transmute(f);
+            f(target, flags)
+        }
+    }
+
+    /// `Boolean SCNetworkReachabilitySetCallback(SCNetworkReachabilityRef, SCNetworkReachabilityCallBack, SCNetworkReachabilityContext *)`
+    ///
+    /// Declined even where the target is the host's: a callback only ever
+    /// arrives through the run loop the target is scheduled on, and scheduling
+    /// is what cannot be forwarded.
+    pub unsafe extern "C" fn SCNetworkReachabilitySetCallback(
+        _target: CFTypeRef,
+        _callback: *const c_void,
+        _context: *mut c_void,
+    ) -> u8 {
+        0
+    }
+
+    /// `Boolean SCNetworkReachabilityScheduleWithRunLoop(SCNetworkReachabilityRef, CFRunLoopRef, CFStringRef)`
+    pub unsafe extern "C" fn SCNetworkReachabilityScheduleWithRunLoop(
+        _target: CFTypeRef,
+        _loop: CFTypeRef,
+        _mode: CFTypeRef,
+    ) -> u8 {
+        0
+    }
+
+    /// `Boolean SCNetworkReachabilityUnscheduleFromRunLoop(SCNetworkReachabilityRef, CFRunLoopRef, CFStringRef)`
+    pub unsafe extern "C" fn SCNetworkReachabilityUnscheduleFromRunLoop(
+        _target: CFTypeRef,
+        _loop: CFTypeRef,
+        _mode: CFTypeRef,
+    ) -> u8 {
+        0
+    }
+}
+
+/// The same five, answered here, because there is no daemon to ask. See the
+/// module note for why NULL was the wrong answer.
+#[cfg(not(target_os = "macos"))]
+mod local {
+    use super::*;
+
+    /// `SCNetworkReachabilityRef SCNetworkReachabilityCreateWithAddress(CFAllocatorRef, const struct sockaddr *)`
+    pub unsafe extern "C" fn SCNetworkReachabilityCreateWithAddress(
+        _allocator: CFTypeRef,
+        address: *const c_void,
+    ) -> CFTypeRef {
+        // Apple's answers NULL for a null address, and callers check for it.
+        if address.is_null() {
+            return std::ptr::null();
+        }
+        // SAFETY: the caller's `struct sockaddr`, in *Darwin's* layout.
+        new_target(unsafe { names_this_machine(address) })
+    }
+
+    /// `SCNetworkReachabilityRef SCNetworkReachabilityCreateWithName(CFAllocatorRef, const char *)`
+    ///
+    /// The name is not resolved. Reachability is a question about the *network*,
+    /// not about DNS - Apple's answers for a name that does not resolve - and
+    /// resolving here would block the caller inside what it expects to be a
+    /// cheap constructor.
+    pub unsafe extern "C" fn SCNetworkReachabilityCreateWithName(
+        _allocator: CFTypeRef,
+        name: *const c_void,
+    ) -> CFTypeRef {
+        if name.is_null() {
+            return std::ptr::null();
+        }
+        // SAFETY: the caller's NUL-terminated host name.
+        let local = unsafe { std::ffi::CStr::from_ptr(name.cast()) }.to_bytes() == b"localhost";
+        new_target(local)
+    }
+
+    /// `Boolean SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef, SCNetworkReachabilityFlags *)`
+    pub unsafe extern "C" fn SCNetworkReachabilityGetFlags(
+        target: CFTypeRef,
+        flags: *mut u32,
+    ) -> u8 {
+        // SAFETY: the caller's obligation - null or an object.
+        let Some(state) = (unsafe { target_state(target) }) else {
+            return 0;
+        };
+        if flags.is_null() {
+            return 0;
+        }
+        let local = state.lock().unwrap_or_else(|e| e.into_inner()).local;
+        // SAFETY: the caller's out-parameter.
+        unsafe { flags.write(reachable_flags(local)) };
+        1
+    }
+
+    /// `Boolean SCNetworkReachabilitySetCallback(SCNetworkReachabilityRef, SCNetworkReachabilityCallBack, SCNetworkReachabilityContext *)`
+    ///
+    /// The context's `retain` is called on the way in and the previous `info`'s
+    /// `release` on the way out, because the caller's object has to outlive the
+    /// registration and nothing else here keeps it alive.
+    ///
+    /// A null callback clears the registration, which is how a caller detaches.
+    pub unsafe extern "C" fn SCNetworkReachabilitySetCallback(
+        target: CFTypeRef,
+        callback: *const c_void,
+        context: *mut c_void,
+    ) -> u8 {
+        // SAFETY: the caller's obligation.
+        let Some(state) = (unsafe { target_state(target) }) else {
+            return 0;
+        };
+        // SAFETY: null, or the caller's `SCNetworkReachabilityContext`.
+        let context = match context.is_null() {
+            true => None,
+            false => Some(unsafe { context.cast::<Context>().read() }),
+        };
+        // Apple refuses a context whose version it does not know rather than
+        // reading fields that may not be there.
+        if context.is_some_and(|c| c.version != 0) {
+            return 0;
+        }
+        let info = context.map_or(std::ptr::null_mut(), |c| match c.retain {
+            // SAFETY: the caller's own retain, on the caller's own object.
+            Some(retain) if !c.info.is_null() => unsafe { retain(c.info) }.cast_mut(),
+            _ => c.info,
+        });
+
+        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+        if let (Some(release), false) = (state.release, state.info.is_null()) {
+            // SAFETY: the release registered with the info it was given.
+            unsafe { release(state.info) };
+        }
+        // SAFETY: the caller's function pointer, of the declared shape.
+        state.callback = (!callback.is_null())
+            .then(|| unsafe { std::mem::transmute::<*const c_void, Callback>(callback) });
+        state.info = info;
+        state.release = context.and_then(|c| c.release);
+        1
+    }
+
+    /// `Boolean SCNetworkReachabilityScheduleWithRunLoop(SCNetworkReachabilityRef, CFRunLoopRef, CFStringRef)`
+    ///
+    /// Delivers one callback with the current flags, which is what Apple's does
+    /// when a target is first scheduled and is the whole reason a client
+    /// schedules rather than polls.
+    ///
+    /// Two departures, both written down because a caller cannot see them: the
+    /// callback runs on **this** thread rather than on the run loop's, since a
+    /// foreign target cannot be handed to that loop; and it is the *only* one
+    /// that ever arrives, because nothing here watches the routing table for a
+    /// change. A client that comes up online stays told it is online.
+    pub unsafe extern "C" fn SCNetworkReachabilityScheduleWithRunLoop(
+        target: CFTypeRef,
+        _loop: CFTypeRef,
+        _mode: CFTypeRef,
+    ) -> u8 {
+        // SAFETY: the caller's obligation.
+        let Some(state) = (unsafe { target_state(target) }) else {
+            return 0;
+        };
+        // The lock is dropped before the callback: it runs the caller's code,
+        // which may ask this target its flags and would deadlock on a lock this
+        // thread still held.
+        let delivery = {
+            let state = state.lock().unwrap_or_else(|e| e.into_inner());
+            state.callback.map(|f| (f, state.info, state.local))
+        };
+        if let Some((callback, info, local)) = delivery {
+            // SAFETY: the callback and info the caller registered, with the
+            // target it registered them against.
+            unsafe { callback(target, reachable_flags(local), info) };
+        }
+        1
+    }
+
+    /// `Boolean SCNetworkReachabilityUnscheduleFromRunLoop(SCNetworkReachabilityRef, CFRunLoopRef, CFStringRef)`
+    pub unsafe extern "C" fn SCNetworkReachabilityUnscheduleFromRunLoop(
+        target: CFTypeRef,
+        _loop: CFTypeRef,
+        _mode: CFTypeRef,
+    ) -> u8 {
+        // SAFETY: the caller's obligation.
+        u8::from(unsafe { target_state(target) }.is_some())
+    }
+}
+
+#[cfg(target_os = "macos")]
+use darwin::*;
+#[cfg(not(target_os = "macos"))]
+use local::*;
 
 /// `CFDictionaryRef SCDynamicStoreCopyProxies(SCDynamicStoreRef)`
 ///
@@ -496,11 +834,10 @@ mod tests {
         assert!(missing.is_empty(), "listed but unresolved: {missing:?}");
     }
 
-    /// Off Darwin no target is ever created, so nothing downstream is handed one
-    /// this module cannot describe.
+    /// A null argument is the one case that still answers NULL, on both hosts.
     #[test]
-    #[cfg(not(target_os = "macos"))]
-    fn no_reachability_target_is_ever_made() {
+    fn a_null_argument_makes_no_target() {
+        crate::bootstrap();
         // SAFETY: both take a null allocator and a null argument, which is what
         // "no target" means to them.
         unsafe {
@@ -511,6 +848,159 @@ mod tests {
             assert!(
                 SCNetworkReachabilityCreateWithName(std::ptr::null(), std::ptr::null()).is_null()
             );
+        }
+    }
+
+    /// A Darwin `sockaddr_in` for `address`, laid out as the *guest* writes one:
+    /// `sa_len` then `sa_family`, which is the divergence this reads by hand.
+    #[cfg(not(target_os = "macos"))]
+    fn darwin_sockaddr_in(address: [u8; 4]) -> [u8; 16] {
+        let mut bytes = [0u8; 16];
+        bytes[0] = 16;
+        bytes[1] = 2;
+        bytes[4..8].copy_from_slice(&address);
+        bytes
+    }
+
+    /// The whole point of the module off Darwin: a target is made, its flags are
+    /// answered, and a scheduled callback *arrives*. A client that registers one
+    /// and waits is the case NULL never served.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn a_scheduled_callback_arrives_for_a_local_target() {
+        crate::bootstrap();
+        static SEEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        unsafe extern "C" fn record(_target: CFTypeRef, flags: u32, info: *mut c_void) {
+            SEEN.store(flags, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(info as usize, 0x1234, "the registered info is handed back");
+        }
+
+        let address = darwin_sockaddr_in([127, 0, 0, 1]);
+        let mut context = Context {
+            version: 0,
+            info: 0x1234 as *mut c_void,
+            retain: None,
+            release: None,
+            copy_description: std::ptr::null(),
+        };
+        // SAFETY: a live `sockaddr`, a live context, and a callback of the
+        // declared shape.
+        unsafe {
+            let target = SCNetworkReachabilityCreateWithAddress(
+                std::ptr::null(),
+                std::ptr::from_ref(&address).cast(),
+            );
+            assert!(!target.is_null());
+
+            let mut flags = 0u32;
+            assert_ne!(SCNetworkReachabilityGetFlags(target, &mut flags), 0);
+            assert_ne!(
+                flags & flag::REACHABLE,
+                0,
+                "the loopback address is reachable whatever the routing table says"
+            );
+
+            assert_ne!(
+                SCNetworkReachabilitySetCallback(
+                    target,
+                    record as *const c_void,
+                    std::ptr::from_mut(&mut context).cast(),
+                ),
+                0
+            );
+            assert_ne!(
+                SCNetworkReachabilityScheduleWithRunLoop(
+                    target,
+                    std::ptr::null(),
+                    std::ptr::null()
+                ),
+                0
+            );
+            assert_eq!(
+                SEEN.load(std::sync::atomic::Ordering::Relaxed) & flag::REACHABLE,
+                flag::REACHABLE,
+                "scheduling delivers the current flags"
+            );
+            assert_ne!(
+                SCNetworkReachabilityUnscheduleFromRunLoop(
+                    target,
+                    std::ptr::null(),
+                    std::ptr::null()
+                ),
+                0
+            );
+            crate::api::CFRelease(target);
+        }
+    }
+
+    /// A context whose version this does not know is refused rather than read,
+    /// and a target of another class is refused rather than cast.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn a_target_that_is_not_one_and_a_context_that_is_not_v0_are_both_refused() {
+        crate::bootstrap();
+        let not_a_target = crate::string::from_bytes(b"not a target", false);
+        let mut flags = 0u32;
+        // SAFETY: a live object of this runtime's, of the wrong class.
+        unsafe {
+            assert_eq!(SCNetworkReachabilityGetFlags(not_a_target, &mut flags), 0);
+            assert_eq!(flags, 0, "the flags of a refused target are left alone");
+            assert_eq!(
+                SCNetworkReachabilityScheduleWithRunLoop(
+                    not_a_target,
+                    std::ptr::null(),
+                    std::ptr::null()
+                ),
+                0
+            );
+            crate::api::CFRelease(not_a_target);
+        }
+
+        let address = darwin_sockaddr_in([1, 1, 1, 1]);
+        let mut context = Context {
+            version: 1,
+            info: std::ptr::null_mut(),
+            retain: None,
+            release: None,
+            copy_description: std::ptr::null(),
+        };
+        // SAFETY: a live `sockaddr` and a live context.
+        unsafe {
+            let target = SCNetworkReachabilityCreateWithAddress(
+                std::ptr::null(),
+                std::ptr::from_ref(&address).cast(),
+            );
+            assert_eq!(
+                SCNetworkReachabilitySetCallback(
+                    target,
+                    std::ptr::null(),
+                    std::ptr::from_mut(&mut context).cast(),
+                ),
+                0,
+                "a context this does not understand is not read"
+            );
+            crate::api::CFRelease(target);
+        }
+    }
+
+    /// The family is read from Darwin's offset, not this host's. A Linux reader
+    /// takes the *length* byte for the low half of `sa_family` and sees 16, not
+    /// `AF_INET` - so a loopback address would come back as not local.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn the_family_is_read_out_of_darwins_second_byte() {
+        // SAFETY: both are sixteen readable bytes in Darwin's layout.
+        unsafe {
+            assert!(names_this_machine(
+                std::ptr::from_ref(&darwin_sockaddr_in([127, 0, 0, 1])).cast()
+            ));
+            assert!(!names_this_machine(
+                std::ptr::from_ref(&darwin_sockaddr_in([1, 1, 1, 1])).cast()
+            ));
+            // The address Roblox actually passes. Not local: see the note there.
+            assert!(!names_this_machine(
+                std::ptr::from_ref(&darwin_sockaddr_in([0, 0, 0, 0])).cast()
+            ));
         }
     }
 
