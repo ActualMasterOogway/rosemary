@@ -429,6 +429,62 @@ pub unsafe fn hit_test(view: Id, point: NSPoint) -> Id {
     unsafe { hit(view, point, 0) }
 }
 
+/// Where the pointer is in this view's own coordinates, or `None` for a view
+/// in no window - which is every view before it is installed, and the point
+/// where a cursor rectangle cannot be about the pointer at all.
+///
+/// The walk up the superviews does both halves: it finds the window, since only
+/// a content view carries one directly and Roblox installs its view with
+/// `-addSubview:` rather than `-setContentView:`, and it converts, since a
+/// view's frame is stated in its superview's coordinates.
+///
+/// # Safety
+///
+/// `view` must be null or an object this runtime allocated.
+pub unsafe fn pointer_in(view: Id) -> Option<NSPoint> {
+    if !is_view(view) {
+        return None;
+    }
+    // SAFETY: the caller's obligation.
+    let window = unsafe { window_of(view) };
+    if window.is_null() {
+        return None;
+    }
+    let mut point = crate::window::pointer_location(window);
+    let mut node = view;
+    for _ in 0..32 {
+        if !is_view(node) {
+            break;
+        }
+        let origin = view_of(node).frame.origin;
+        point.x -= origin.x;
+        point.y -= origin.y;
+        node = view_of(node).superview;
+    }
+    Some(point)
+}
+
+/// Whether a rectangle of a view's holds a point, for [`crate::cursor`].
+pub fn holds(view: Id, rect: NSRect, point: NSPoint) -> bool {
+    is_view(view) && contains(rect, point)
+}
+
+/// The subviews of a view, for a caller walking the tree outside this module.
+///
+/// # Safety
+///
+/// `view` must be null or an object this runtime allocated.
+pub unsafe fn children(view: Id) -> Vec<Id> {
+    if !is_view(view) {
+        return Vec::new();
+    }
+    // SAFETY: the subview list is an array of this runtime's, holding views.
+    let list =
+        unsafe { corefoundation::collections::array(view_of(view).subviews as *const c_void) };
+    list.map(|a| a.values.iter().map(|v| *v as Id).collect())
+        .unwrap_or_default()
+}
+
 unsafe fn hit(view: Id, point: NSPoint, depth: usize) -> Id {
     if !is_view(view) || depth > 32 {
         return std::ptr::null_mut();
@@ -864,7 +920,17 @@ unsafe extern "C" fn ignored_integer(_receiver: Id, _sel: Sel, _value: isize) {}
 
 unsafe extern "C" fn ignored_rect(_receiver: Id, _sel: Sel, _rect: NSRect) {}
 
-unsafe extern "C" fn ignored_object_object(_receiver: Id, _sel: Sel, _a: Id, _b: Id) {}
+/// `-addCursorRect:cursor:`, which is only ever called from inside a view's own
+/// `-resetCursorRects`: the rectangle it records lasts until the next
+/// `-discardCursorRects`, and [`crate::cursor`] decides from the whole set
+/// which cursor the pointer is over.
+unsafe extern "C" fn add_cursor_rect(receiver: Id, _sel: Sel, rect: NSRect, cursor: Id) {
+    crate::cursor::add_rect(receiver, rect, cursor);
+}
+
+unsafe extern "C" fn discard_cursor_rects(receiver: Id, _sel: Sel) {
+    crate::cursor::discard_rects(receiver);
+}
 
 unsafe extern "C" fn backing_scale_factor(receiver: Id, _sel: Sel) -> CGFloat {
     scale(receiver)
@@ -916,8 +982,9 @@ pub(crate) fn install() {
         "resizeWithOldSuperviewSize:" => resize_with_old_superview_size,
             c"v32@0:8{CGSize=dd}16";
         "setNeedsDisplayInRect:" => ignored_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
-        "addCursorRect:cursor:" => ignored_object_object, c"v56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
-        "discardCursorRects" => ignored, c"v16@0:8";
+        "addCursorRect:cursor:" => add_cursor_rect,
+            c"v56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
+        "discardCursorRects" => discard_cursor_rects, c"v16@0:8";
         "updateTrackingAreas" => ignored, c"v16@0:8";
         "addTrackingArea:" => add_tracking_area, c"v24@0:8@16";
         "removeTrackingArea:" => remove_tracking_area, c"v24@0:8@16";

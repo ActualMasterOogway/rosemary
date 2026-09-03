@@ -8,115 +8,232 @@
 //!
 //! SDL's scancodes are the USB HID keyboard usage IDs, which do have a pattern
 //! and are not these. The table below is the join, and it is the whole module.
+//! Both sides are named rather than spelled as numbers: the SDL side comes from
+//! `sdl3::keycodes`, which `tools/sdl-constants.py` writes out of SDL's own
+//! headers, and the macOS side from [`vk`] below.
+
+use sdl3::keycodes::{keymod, scancode};
+
+/// `kVK_*` from `<Carbon/HIToolbox/Events.h>`, for the keys this tree names.
+///
+/// Apple's header is the only place these numbers exist; a Linux host has no
+/// copy of it to generate them from, so they are transcribed - which is why the
+/// tests below check the ones a person is most likely to have got wrong.
+#[rustfmt::skip]
+mod vk {
+    pub const ANSI_A: u16 = 0x00; pub const ANSI_S: u16 = 0x01;
+    pub const ANSI_D: u16 = 0x02; pub const ANSI_F: u16 = 0x03;
+    pub const ANSI_H: u16 = 0x04; pub const ANSI_G: u16 = 0x05;
+    pub const ANSI_Z: u16 = 0x06; pub const ANSI_X: u16 = 0x07;
+    pub const ANSI_C: u16 = 0x08; pub const ANSI_V: u16 = 0x09;
+    pub const ISO_SECTION: u16 = 0x0A;
+    pub const ANSI_B: u16 = 0x0B; pub const ANSI_Q: u16 = 0x0C;
+    pub const ANSI_W: u16 = 0x0D; pub const ANSI_E: u16 = 0x0E;
+    pub const ANSI_R: u16 = 0x0F; pub const ANSI_Y: u16 = 0x10;
+    pub const ANSI_T: u16 = 0x11;
+    pub const ANSI_1: u16 = 0x12; pub const ANSI_2: u16 = 0x13;
+    pub const ANSI_3: u16 = 0x14; pub const ANSI_4: u16 = 0x15;
+    pub const ANSI_6: u16 = 0x16; pub const ANSI_5: u16 = 0x17;
+    pub const ANSI_EQUAL: u16 = 0x18;
+    pub const ANSI_9: u16 = 0x19; pub const ANSI_7: u16 = 0x1A;
+    pub const ANSI_MINUS: u16 = 0x1B;
+    pub const ANSI_8: u16 = 0x1C; pub const ANSI_0: u16 = 0x1D;
+    pub const ANSI_RIGHT_BRACKET: u16 = 0x1E;
+    pub const ANSI_O: u16 = 0x1F; pub const ANSI_U: u16 = 0x20;
+    pub const ANSI_LEFT_BRACKET: u16 = 0x21;
+    pub const ANSI_I: u16 = 0x22; pub const ANSI_P: u16 = 0x23;
+    pub const RETURN: u16 = 0x24;
+    pub const ANSI_L: u16 = 0x25; pub const ANSI_J: u16 = 0x26;
+    pub const ANSI_QUOTE: u16 = 0x27;
+    pub const ANSI_K: u16 = 0x28;
+    pub const ANSI_SEMICOLON: u16 = 0x29;
+    pub const ANSI_BACKSLASH: u16 = 0x2A;
+    pub const ANSI_COMMA: u16 = 0x2B;
+    pub const ANSI_SLASH: u16 = 0x2C;
+    pub const ANSI_N: u16 = 0x2D; pub const ANSI_M: u16 = 0x2E;
+    pub const ANSI_PERIOD: u16 = 0x2F;
+    pub const TAB: u16 = 0x30;
+    pub const SPACE: u16 = 0x31;
+    pub const ANSI_GRAVE: u16 = 0x32;
+    pub const DELETE: u16 = 0x33;
+    pub const ESCAPE: u16 = 0x35;
+    pub const RIGHT_COMMAND: u16 = 0x36;
+    pub const COMMAND: u16 = 0x37;
+    pub const SHIFT: u16 = 0x38;
+    pub const CAPS_LOCK: u16 = 0x39;
+    pub const OPTION: u16 = 0x3A;
+    pub const CONTROL: u16 = 0x3B;
+    pub const RIGHT_SHIFT: u16 = 0x3C;
+    pub const RIGHT_OPTION: u16 = 0x3D;
+    pub const RIGHT_CONTROL: u16 = 0x3E;
+    pub const F17: u16 = 0x40;
+    pub const ANSI_KEYPAD_DECIMAL: u16 = 0x41;
+    pub const ANSI_KEYPAD_MULTIPLY: u16 = 0x43;
+    pub const ANSI_KEYPAD_PLUS: u16 = 0x45;
+    pub const ANSI_KEYPAD_CLEAR: u16 = 0x47;
+    pub const VOLUME_UP: u16 = 0x48;
+    pub const VOLUME_DOWN: u16 = 0x49;
+    pub const MUTE: u16 = 0x4A;
+    pub const ANSI_KEYPAD_DIVIDE: u16 = 0x4B;
+    pub const KEYPAD_ENTER: u16 = 0x4C;
+    pub const ANSI_KEYPAD_MINUS: u16 = 0x4E;
+    pub const F18: u16 = 0x4F; pub const F19: u16 = 0x50;
+    pub const ANSI_KEYPAD_EQUALS: u16 = 0x51;
+    pub const ANSI_KEYPAD_0: u16 = 0x52; pub const ANSI_KEYPAD_1: u16 = 0x53;
+    pub const ANSI_KEYPAD_2: u16 = 0x54; pub const ANSI_KEYPAD_3: u16 = 0x55;
+    pub const ANSI_KEYPAD_4: u16 = 0x56; pub const ANSI_KEYPAD_5: u16 = 0x57;
+    pub const ANSI_KEYPAD_6: u16 = 0x58; pub const ANSI_KEYPAD_7: u16 = 0x59;
+    pub const F20: u16 = 0x5A;
+    pub const ANSI_KEYPAD_8: u16 = 0x5B; pub const ANSI_KEYPAD_9: u16 = 0x5C;
+    pub const JIS_YEN: u16 = 0x5D;
+    pub const JIS_UNDERSCORE: u16 = 0x5E;
+    pub const F5: u16 = 0x60; pub const F6: u16 = 0x61;
+    pub const F7: u16 = 0x62; pub const F3: u16 = 0x63;
+    pub const F8: u16 = 0x64; pub const F9: u16 = 0x65;
+    pub const JIS_EISU: u16 = 0x66;
+    pub const F11: u16 = 0x67;
+    pub const JIS_KANA: u16 = 0x68;
+    pub const F13: u16 = 0x69; pub const F16: u16 = 0x6A;
+    pub const F14: u16 = 0x6B;
+    pub const F10: u16 = 0x6D; pub const F12: u16 = 0x6F;
+    pub const F15: u16 = 0x71;
+    pub const HELP: u16 = 0x72;
+    pub const HOME: u16 = 0x73;
+    pub const PAGE_UP: u16 = 0x74;
+    pub const FORWARD_DELETE: u16 = 0x75;
+    pub const F4: u16 = 0x76;
+    pub const END: u16 = 0x77;
+    pub const F2: u16 = 0x78;
+    pub const PAGE_DOWN: u16 = 0x79;
+    pub const F1: u16 = 0x7A;
+    pub const LEFT_ARROW: u16 = 0x7B; pub const RIGHT_ARROW: u16 = 0x7C;
+    pub const DOWN_ARROW: u16 = 0x7D; pub const UP_ARROW: u16 = 0x7E;
+}
 
 /// `SDL_Scancode` -> `kVK_*`, for every key a keyboard has that this tree can
 /// name. A scancode absent from it has no macOS code, and the event carries
 /// [`UNKNOWN`] rather than a neighbour's.
 static VIRTUAL_KEYS: &[(u32, u16)] = &[
-    // Letters, in USB order, which is alphabetical.
-    (4, 0x00),  // a
-    (5, 0x0B),  // b
-    (6, 0x08),  // c
-    (7, 0x02),  // d
-    (8, 0x0E),  // e
-    (9, 0x03),  // f
-    (10, 0x05), // g
-    (11, 0x04), // h
-    (12, 0x22), // i
-    (13, 0x26), // j
-    (14, 0x28), // k
-    (15, 0x25), // l
-    (16, 0x2E), // m
-    (17, 0x2D), // n
-    (18, 0x1F), // o
-    (19, 0x23), // p
-    (20, 0x0C), // q
-    (21, 0x0F), // r
-    (22, 0x01), // s
-    (23, 0x11), // t
-    (24, 0x20), // u
-    (25, 0x09), // v
-    (26, 0x0D), // w
-    (27, 0x07), // x
-    (28, 0x10), // y
-    (29, 0x06), // z
-    // The number row, `1` through `0`.
-    (30, 0x12),
-    (31, 0x13),
-    (32, 0x14),
-    (33, 0x15),
-    (34, 0x17),
-    (35, 0x16),
-    (36, 0x1A),
-    (37, 0x1C),
-    (38, 0x19),
-    (39, 0x1D),
-    (40, 0x24), // return
-    (41, 0x35), // escape
-    (42, 0x33), // backspace
-    (43, 0x30), // tab
-    (44, 0x31), // space
-    (45, 0x1B), // minus
-    (46, 0x18), // equals
-    (47, 0x21), // left bracket
-    (48, 0x1E), // right bracket
-    (49, 0x2A), // backslash
-    (51, 0x29), // semicolon
-    (52, 0x27), // apostrophe
-    (53, 0x32), // grave
-    (54, 0x2B), // comma
-    (55, 0x2F), // period
-    (56, 0x2C), // slash
-    (57, 0x39), // caps lock
-    // The function keys, which are not consecutive in ADB order.
-    (58, 0x7A), // F1
-    (59, 0x78),
-    (60, 0x63),
-    (61, 0x76),
-    (62, 0x60),
-    (63, 0x61),
-    (64, 0x62),
-    (65, 0x64),
-    (66, 0x65),
-    (67, 0x6D),
-    (68, 0x67),
-    (69, 0x6F), // F12
-    (73, 0x72), // insert, which macOS spells help
-    (74, 0x73), // home
-    (75, 0x74), // page up
-    (76, 0x75), // forward delete
-    (77, 0x77), // end
-    (78, 0x79), // page down
-    (79, 0x7C), // right
-    (80, 0x7B), // left
-    (81, 0x7D), // down
-    (82, 0x7E), // up
-    (83, 0x47), // num lock, which macOS spells clear
-    (84, 0x4B), // keypad divide
-    (85, 0x43), // keypad multiply
-    (86, 0x4E), // keypad minus
-    (87, 0x45), // keypad plus
-    (88, 0x4C), // keypad enter
-    (89, 0x53), // keypad 1
-    (90, 0x54),
-    (91, 0x55),
-    (92, 0x56),
-    (93, 0x57),
-    (94, 0x58),
-    (95, 0x59),
-    (96, 0x5B),
-    (97, 0x5C),  // keypad 9
-    (98, 0x52),  // keypad 0
-    (99, 0x41),  // keypad period
-    (103, 0x51), // keypad equals
-    (224, 0x3B), // left control
-    (225, 0x38), // left shift
-    (226, 0x3A), // left option
-    (227, 0x37), // left command
-    (228, 0x3E), // right control
-    (229, 0x3C), // right shift
-    (230, 0x3D), // right option
-    (231, 0x36), // right command
+    (scancode::A, vk::ANSI_A),
+    (scancode::B, vk::ANSI_B),
+    (scancode::C, vk::ANSI_C),
+    (scancode::D, vk::ANSI_D),
+    (scancode::E, vk::ANSI_E),
+    (scancode::F, vk::ANSI_F),
+    (scancode::G, vk::ANSI_G),
+    (scancode::H, vk::ANSI_H),
+    (scancode::I, vk::ANSI_I),
+    (scancode::J, vk::ANSI_J),
+    (scancode::K, vk::ANSI_K),
+    (scancode::L, vk::ANSI_L),
+    (scancode::M, vk::ANSI_M),
+    (scancode::N, vk::ANSI_N),
+    (scancode::O, vk::ANSI_O),
+    (scancode::P, vk::ANSI_P),
+    (scancode::Q, vk::ANSI_Q),
+    (scancode::R, vk::ANSI_R),
+    (scancode::S, vk::ANSI_S),
+    (scancode::T, vk::ANSI_T),
+    (scancode::U, vk::ANSI_U),
+    (scancode::V, vk::ANSI_V),
+    (scancode::W, vk::ANSI_W),
+    (scancode::X, vk::ANSI_X),
+    (scancode::Y, vk::ANSI_Y),
+    (scancode::Z, vk::ANSI_Z),
+    (scancode::KEY_1, vk::ANSI_1),
+    (scancode::KEY_2, vk::ANSI_2),
+    (scancode::KEY_3, vk::ANSI_3),
+    (scancode::KEY_4, vk::ANSI_4),
+    (scancode::KEY_5, vk::ANSI_5),
+    (scancode::KEY_6, vk::ANSI_6),
+    (scancode::KEY_7, vk::ANSI_7),
+    (scancode::KEY_8, vk::ANSI_8),
+    (scancode::KEY_9, vk::ANSI_9),
+    (scancode::KEY_0, vk::ANSI_0),
+    (scancode::RETURN, vk::RETURN),
+    (scancode::ESCAPE, vk::ESCAPE),
+    (scancode::BACKSPACE, vk::DELETE),
+    (scancode::TAB, vk::TAB),
+    (scancode::SPACE, vk::SPACE),
+    (scancode::MINUS, vk::ANSI_MINUS),
+    (scancode::EQUALS, vk::ANSI_EQUAL),
+    (scancode::LEFTBRACKET, vk::ANSI_LEFT_BRACKET),
+    (scancode::RIGHTBRACKET, vk::ANSI_RIGHT_BRACKET),
+    (scancode::BACKSLASH, vk::ANSI_BACKSLASH),
+    (scancode::SEMICOLON, vk::ANSI_SEMICOLON),
+    (scancode::APOSTROPHE, vk::ANSI_QUOTE),
+    (scancode::GRAVE, vk::ANSI_GRAVE),
+    (scancode::COMMA, vk::ANSI_COMMA),
+    (scancode::PERIOD, vk::ANSI_PERIOD),
+    (scancode::SLASH, vk::ANSI_SLASH),
+    (scancode::CAPSLOCK, vk::CAPS_LOCK),
+    // The key left of `Z` on an ISO keyboard, which is a separate key there and
+    // not the backslash it shares a legend with.
+    (scancode::NONUSBACKSLASH, vk::ISO_SECTION),
+    (scancode::F1, vk::F1),
+    (scancode::F2, vk::F2),
+    (scancode::F3, vk::F3),
+    (scancode::F4, vk::F4),
+    (scancode::F5, vk::F5),
+    (scancode::F6, vk::F6),
+    (scancode::F7, vk::F7),
+    (scancode::F8, vk::F8),
+    (scancode::F9, vk::F9),
+    (scancode::F10, vk::F10),
+    (scancode::F11, vk::F11),
+    (scancode::F12, vk::F12),
+    (scancode::F13, vk::F13),
+    (scancode::F14, vk::F14),
+    (scancode::F15, vk::F15),
+    (scancode::F16, vk::F16),
+    (scancode::F17, vk::F17),
+    (scancode::F18, vk::F18),
+    (scancode::F19, vk::F19),
+    (scancode::F20, vk::F20),
+    (scancode::INSERT, vk::HELP), // macOS spells insert help
+    (scancode::HOME, vk::HOME),
+    (scancode::PAGEUP, vk::PAGE_UP),
+    (scancode::DELETE, vk::FORWARD_DELETE),
+    (scancode::END, vk::END),
+    (scancode::PAGEDOWN, vk::PAGE_DOWN),
+    (scancode::RIGHT, vk::RIGHT_ARROW),
+    (scancode::LEFT, vk::LEFT_ARROW),
+    (scancode::DOWN, vk::DOWN_ARROW),
+    (scancode::UP, vk::UP_ARROW),
+    (scancode::NUMLOCKCLEAR, vk::ANSI_KEYPAD_CLEAR),
+    (scancode::KP_DIVIDE, vk::ANSI_KEYPAD_DIVIDE),
+    (scancode::KP_MULTIPLY, vk::ANSI_KEYPAD_MULTIPLY),
+    (scancode::KP_MINUS, vk::ANSI_KEYPAD_MINUS),
+    (scancode::KP_PLUS, vk::ANSI_KEYPAD_PLUS),
+    (scancode::KP_ENTER, vk::KEYPAD_ENTER),
+    (scancode::KP_1, vk::ANSI_KEYPAD_1),
+    (scancode::KP_2, vk::ANSI_KEYPAD_2),
+    (scancode::KP_3, vk::ANSI_KEYPAD_3),
+    (scancode::KP_4, vk::ANSI_KEYPAD_4),
+    (scancode::KP_5, vk::ANSI_KEYPAD_5),
+    (scancode::KP_6, vk::ANSI_KEYPAD_6),
+    (scancode::KP_7, vk::ANSI_KEYPAD_7),
+    (scancode::KP_8, vk::ANSI_KEYPAD_8),
+    (scancode::KP_9, vk::ANSI_KEYPAD_9),
+    (scancode::KP_0, vk::ANSI_KEYPAD_0),
+    (scancode::KP_PERIOD, vk::ANSI_KEYPAD_DECIMAL),
+    (scancode::KP_EQUALS, vk::ANSI_KEYPAD_EQUALS),
+    (scancode::MUTE, vk::MUTE),
+    (scancode::VOLUMEUP, vk::VOLUME_UP),
+    (scancode::VOLUMEDOWN, vk::VOLUME_DOWN),
+    // The JIS keys, whose scancodes SDL names by their USB numbers.
+    (scancode::INTERNATIONAL1, vk::JIS_UNDERSCORE),
+    (scancode::INTERNATIONAL3, vk::JIS_YEN),
+    (scancode::LANG1, vk::JIS_KANA),
+    (scancode::LANG2, vk::JIS_EISU),
+    (scancode::LCTRL, vk::CONTROL),
+    (scancode::LSHIFT, vk::SHIFT),
+    (scancode::LALT, vk::OPTION),
+    (scancode::LGUI, vk::COMMAND),
+    (scancode::RCTRL, vk::RIGHT_CONTROL),
+    (scancode::RSHIFT, vk::RIGHT_SHIFT),
+    (scancode::RALT, vk::RIGHT_OPTION),
+    (scancode::RGUI, vk::RIGHT_COMMAND),
 ];
 
 /// The key code an event carries for a scancode nothing here names.
@@ -130,16 +247,6 @@ pub fn virtual_key(scancode: u32) -> u16 {
         .iter()
         .find(|(sdl, _)| *sdl == scancode)
         .map_or(UNKNOWN, |(_, vk)| *vk)
-}
-
-/// `SDL_Keymod` bits, which are not `NSEventModifierFlags` bits.
-mod sdl {
-    pub const SHIFT: u16 = 0x0001 | 0x0002;
-    pub const CTRL: u16 = 0x0040 | 0x0080;
-    pub const ALT: u16 = 0x0100 | 0x0200;
-    pub const GUI: u16 = 0x0400 | 0x0800;
-    pub const CAPS: u16 = 0x2000;
-    pub const NUM: u16 = 0x1000;
 }
 
 /// `NSEventModifierFlags`.
@@ -156,18 +263,24 @@ pub mod flags {
 pub fn modifiers(sdl_modifiers: u16) -> u64 {
     let mut out = 0;
     for (from, to) in [
-        (sdl::SHIFT, flags::SHIFT),
-        (sdl::CTRL, flags::CONTROL),
-        (sdl::ALT, flags::OPTION),
-        (sdl::GUI, flags::COMMAND),
-        (sdl::CAPS, flags::CAPS_LOCK),
-        (sdl::NUM, flags::NUMERIC_PAD),
+        (keymod::SHIFT, flags::SHIFT),
+        (keymod::CTRL, flags::CONTROL),
+        (keymod::ALT, flags::OPTION),
+        (keymod::GUI, flags::COMMAND),
+        (keymod::CAPS, flags::CAPS_LOCK),
+        (keymod::NUM, flags::NUMERIC_PAD),
     ] {
         if sdl_modifiers & from != 0 {
             out |= to;
         }
     }
     out
+}
+
+/// Whether a scancode is a modifier, which AppKit reports as `-flagsChanged:`
+/// and never as a key.
+pub fn is_modifier(scancode: u32) -> bool {
+    (scancode::LCTRL..=scancode::RGUI).contains(&scancode) || scancode == scancode::CAPSLOCK
 }
 
 /// The text `-characters` reports, from SDL's keycode.
@@ -177,26 +290,26 @@ pub fn modifiers(sdl_modifiers: u16) -> u64 {
 /// a function key, because a guest walking the string sees the same length and
 /// the same values it would on Apple's - and a key with neither is the empty
 /// string, which is what AppKit gives for a modifier.
-pub fn characters(scancode: u32, keycode: u32) -> String {
+pub fn characters(code: u32, keycode: u32) -> String {
     if let Some(c) = char::from_u32(keycode).filter(|c| !c.is_control()) {
         return c.to_string();
     }
-    let private = match scancode {
-        82 => 0xF700,                        // up
-        81 => 0xF701,                        // down
-        80 => 0xF702,                        // left
-        79 => 0xF703,                        // right
-        74 => 0xF729,                        // home
-        77 => 0xF72B,                        // end
-        75 => 0xF72C,                        // page up
-        78 => 0xF72D,                        // page down
-        76 => 0xF728,                        // forward delete
-        73 => 0xF727,                        // insert
-        58..=69 => 0xF704 + (scancode - 58), // F1 through F12
-        40 | 88 => 0x000D,                   // return and keypad enter
-        42 => 0x0008,                        // backspace
-        41 => 0x001B,                        // escape
-        43 => 0x0009,                        // tab
+    let private = match code {
+        scancode::UP => 0xF700,
+        scancode::DOWN => 0xF701,
+        scancode::LEFT => 0xF702,
+        scancode::RIGHT => 0xF703,
+        scancode::HOME => 0xF729,
+        scancode::END => 0xF72B,
+        scancode::PAGEUP => 0xF72C,
+        scancode::PAGEDOWN => 0xF72D,
+        scancode::DELETE => 0xF728,
+        scancode::INSERT => 0xF727,
+        scancode::F1..=scancode::F12 => 0xF704 + (code - scancode::F1),
+        scancode::RETURN | scancode::KP_ENTER => 0x000D,
+        scancode::BACKSPACE => 0x0008,
+        scancode::ESCAPE => 0x001B,
+        scancode::TAB => 0x0009,
         _ => return String::new(),
     };
     char::from_u32(private)
@@ -219,32 +332,57 @@ mod tests {
         assert_eq!(before, seen.len(), "a virtual key code appears twice");
     }
 
-    /// The four Apple documents by name, as the anchor for the rest.
+    /// Apple's own numbers, by name, as the anchor for the rest.
     #[test]
     fn the_documented_codes_are_the_documented_codes() {
-        assert_eq!(virtual_key(4), 0x00, "kVK_ANSI_A");
-        assert_eq!(virtual_key(29), 0x06, "kVK_ANSI_Z");
-        assert_eq!(virtual_key(44), 0x31, "kVK_Space");
-        assert_eq!(virtual_key(82), 0x7E, "kVK_UpArrow");
+        assert_eq!(virtual_key(scancode::A), 0x00, "kVK_ANSI_A");
+        assert_eq!(virtual_key(scancode::Z), 0x06, "kVK_ANSI_Z");
+        assert_eq!(virtual_key(scancode::SPACE), 0x31, "kVK_Space");
+        assert_eq!(virtual_key(scancode::UP), 0x7E, "kVK_UpArrow");
+        // The keypad's, whose ADB order skips 0x5A - and 0x5A is F20, which is
+        // the pair a transcription slip puts on top of each other.
+        assert_eq!(virtual_key(scancode::KP_7), 0x59, "kVK_ANSI_Keypad7");
+        assert_eq!(virtual_key(scancode::KP_8), 0x5B, "kVK_ANSI_Keypad8");
+        assert_eq!(virtual_key(scancode::F20), 0x5A, "kVK_F20");
+        // The function keys are not consecutive in ADB order either.
+        assert_eq!(virtual_key(scancode::F1), 0x7A, "kVK_F1");
+        assert_eq!(virtual_key(scancode::F3), 0x63, "kVK_F3");
+        assert_eq!(virtual_key(scancode::F13), 0x69, "kVK_F13");
     }
 
     #[test]
     fn a_scancode_with_no_macos_code_is_not_the_a_key() {
-        assert_eq!(virtual_key(0), UNKNOWN);
+        assert_eq!(virtual_key(scancode::UNKNOWN), UNKNOWN);
         assert_eq!(virtual_key(400), UNKNOWN);
     }
 
     #[test]
     fn characters_are_the_scalar_for_text_and_apples_private_use_for_the_rest() {
-        assert_eq!(characters(4, 'a' as u32), "a");
-        assert_eq!(characters(82, 0x40000052), "\u{F700}", "up arrow");
-        assert_eq!(characters(225, 0x400000E1), "", "a modifier types nothing");
+        assert_eq!(characters(scancode::A, 'a' as u32), "a");
+        assert_eq!(characters(scancode::UP, 0x40000052), "\u{F700}", "up arrow");
+        assert_eq!(
+            characters(scancode::LSHIFT, 0x400000E1),
+            "",
+            "a modifier types nothing"
+        );
     }
 
     #[test]
     fn sdl_modifiers_become_appkit_flags() {
-        assert_eq!(modifiers(0x0002), flags::SHIFT, "right shift is shift");
-        assert_eq!(modifiers(0x0040 | 0x0100), flags::CONTROL | flags::OPTION);
-        assert_eq!(modifiers(0), 0);
+        assert_eq!(modifiers(keymod::RSHIFT), flags::SHIFT);
+        assert_eq!(
+            modifiers(keymod::LCTRL | keymod::LALT),
+            flags::CONTROL | flags::OPTION
+        );
+        assert_eq!(modifiers(keymod::NONE), 0);
+    }
+
+    #[test]
+    fn the_modifier_keys_are_the_modifiers() {
+        assert!(is_modifier(scancode::LSHIFT));
+        assert!(is_modifier(scancode::RGUI));
+        assert!(is_modifier(scancode::CAPSLOCK));
+        assert!(!is_modifier(scancode::A));
+        assert!(!is_modifier(scancode::MODE));
     }
 }

@@ -262,7 +262,18 @@ unsafe extern "C" fn send_event(receiver: Id, _sel: Sel, event: Id) {
 /// and the events for it have not been dequeued yet. Roblox asks it on every
 /// `-mouseEntered:`, so a runtime without it aborts the moment the pointer
 /// crosses into the window.
-unsafe extern "C" fn mouse_location_outside_of_event_stream(receiver: Id, sel: Sel) -> NSPoint {
+unsafe extern "C" fn mouse_location_outside_of_event_stream(receiver: Id, _sel: Sel) -> NSPoint {
+    pointer_location(receiver)
+}
+
+/// Where the pointer is in a window's base coordinates, for the cursor
+/// rectangles as well as for the method above: [`crate::cursor`] has to decide
+/// which rectangle holds the pointer, and asking through `objc_msgSend` would
+/// reach a program's own override of a method it never called.
+pub fn pointer_location(window: Id) -> NSPoint {
+    if window.is_null() {
+        return NSPoint::default();
+    }
     let point = match crate::script::pointer() {
         Some((x, y)) => crate::geometry::point_from_sdl(x as f64, y as f64),
         None => match sdl3::video::global_mouse_state() {
@@ -270,9 +281,10 @@ unsafe extern "C" fn mouse_location_outside_of_event_stream(receiver: Id, sel: S
             None => return NSPoint::default(),
         },
     };
+    let sel = objc::sel::get("frame");
     // SAFETY: the receiver is a window of this crate's, and both are its own
     // methods called with the receiver they were installed for.
-    unsafe { convert_screen_to_base(receiver, sel, point) }
+    unsafe { convert_screen_to_base(window, sel, point) }
 }
 
 /// `-convertBaseToScreen:`, and its inverse below.
@@ -686,6 +698,43 @@ unsafe extern "C" fn ignored_size(_receiver: Id, _sel: Sel, _size: NSSize) {}
 
 unsafe extern "C" fn ignored_integer(_receiver: Id, _sel: Sel, _value: isize) {}
 
+/// `-invalidateCursorRectsForView:`, which is the whole of a program's custom
+/// cursor: AppKit answers it by discarding that view's rectangles and asking
+/// the view to install them again through `-resetCursorRects`, and the cursor
+/// a view hands to `-addCursorRect:cursor:` there is the one the pointer shows
+/// over it. A runtime that ignored this left `-resetCursorRects` uncalled, so
+/// the program's cursor was built and never reached the screen.
+unsafe extern "C" fn invalidate_cursor_rects_for_view(_receiver: Id, _sel: Sel, view: Id) {
+    // SAFETY: null or an object this runtime allocated.
+    unsafe { crate::cursor::reset_rects(view) };
+}
+
+/// `-resetCursorRects` on the *window*, which rebuilds every view's.
+unsafe extern "C" fn reset_cursor_rects(receiver: Id, _sel: Sel) {
+    // SAFETY: null or the content view, which this crate made.
+    unsafe { crate::cursor::reset_rects_in_tree(content_view_of(receiver)) };
+}
+
+unsafe extern "C" fn discard_cursor_rects(receiver: Id, _sel: Sel) {
+    // SAFETY: as above.
+    unsafe { crate::cursor::discard_rects_in_tree(content_view_of(receiver)) };
+}
+
+unsafe extern "C" fn enable_cursor_rects(_receiver: Id, _sel: Sel) {
+    crate::cursor::set_rects_enabled(true);
+}
+
+/// `-disableCursorRects`, which a program uses while it is drawing its own
+/// pointer: the rectangles stay, and none of them applies until it enables them
+/// again.
+unsafe extern "C" fn disable_cursor_rects(_receiver: Id, _sel: Sel) {
+    crate::cursor::set_rects_enabled(false);
+}
+
+unsafe extern "C" fn are_cursor_rects_enabled(_receiver: Id, _sel: Sel) -> u8 {
+    crate::cursor::rects_enabled() as u8
+}
+
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSWindow").expect("declared before its methods");
     class_methods!(class, {
@@ -778,6 +827,11 @@ pub(crate) fn install() {
         "center" => ignored, c"v16@0:8";
         "display" => ignored, c"v16@0:8";
         "update" => ignored, c"v16@0:8";
-        "invalidateCursorRectsForView:" => ignored_object, c"v24@0:8@16";
+        "invalidateCursorRectsForView:" => invalidate_cursor_rects_for_view, c"v24@0:8@16";
+        "resetCursorRects" => reset_cursor_rects, c"v16@0:8";
+        "enableCursorRects" => enable_cursor_rects, c"v16@0:8";
+        "disableCursorRects" => disable_cursor_rects, c"v16@0:8";
+        "areCursorRectsEnabled" => are_cursor_rects_enabled, c"c16@0:8";
+        "discardCursorRects" => discard_cursor_rects, c"v16@0:8";
     });
 }

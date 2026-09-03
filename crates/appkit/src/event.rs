@@ -123,15 +123,16 @@ fn debug_key() {
 
 /// The USB HID usage id `ROSETTA3_DEBUG_KEY`'s value names, or a raw number.
 pub(crate) fn scancode(name: &str) -> Option<u32> {
+    use sdl3::keycodes::scancode;
     Some(match name.to_ascii_lowercase().as_str() {
-        "return" | "enter" => 40,
-        "escape" => 41,
-        "tab" => 43,
-        "space" => 44,
-        "right" => 79,
-        "left" => 80,
-        "down" => 81,
-        "up" => 82,
+        "return" | "enter" => scancode::RETURN,
+        "escape" => scancode::ESCAPE,
+        "tab" => scancode::TAB,
+        "space" => scancode::SPACE,
+        "right" => scancode::RIGHT,
+        "left" => scancode::LEFT,
+        "down" => scancode::DOWN,
+        "up" => scancode::UP,
         other => other.parse().ok()?,
     })
 }
@@ -277,7 +278,7 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             // A modifier is `-flagsChanged:`, not a key down: AppKit has no
             // key-up for one, and a guest that treated it as a key would see
             // shift as a character.
-            match is_modifier(scancode) {
+            match crate::keymap::is_modifier(scancode) {
                 true => send(id, None, |w, _| Fields {
                     kind: kind::FLAGS_CHANGED,
                     ..fields(w)
@@ -296,7 +297,7 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             dy,
             buttons,
         } => {
-            let held = held_button(buttons);
+            let held = crate::button::held(buttons);
             // A disassociated pointer reports the deltas and none of the
             // movement: the location a guest reads back is where the cursor was
             // when it broke the link, which is what CoreGraphics does and what
@@ -308,6 +309,10 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
                 }
                 false => *POINTER.lock().unwrap_or_else(|e| e.into_inner()),
             };
+            // Before the drop below: a cursor rectangle applies whether or not
+            // anything asked for `-mouseMoved:`, and AppKit re-decides the
+            // pointer on every move rather than only when a rectangle changes.
+            crate::cursor::apply();
             if held.is_none() && !wants_mouse_moved(object_for(id)) {
                 if tracing() {
                     eprintln!(
@@ -318,19 +323,14 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
                 return;
             }
             send(id, Some((x, y)), |window, location| Fields {
-                kind: match held {
-                    Some(0) => kind::LEFT_MOUSE_DRAGGED,
-                    Some(1) => kind::OTHER_MOUSE_DRAGGED,
-                    Some(_) => kind::RIGHT_MOUSE_DRAGGED,
-                    None => kind::MOUSE_MOVED,
-                },
+                kind: crate::button::dragged_kind(held),
                 modifiers: current_modifiers(),
                 location,
                 delta: NSPoint {
                     x: dx as f64,
                     y: dy as f64,
                 },
-                button: held.unwrap_or(0),
+                button: held.map_or(0, crate::button::number),
                 window,
                 ..Fields::default()
             });
@@ -343,21 +343,13 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             x,
             y,
         } => {
-            let kind = match (button, down) {
-                (1, true) => kind::LEFT_MOUSE_DOWN,
-                (1, false) => kind::LEFT_MOUSE_UP,
-                (3, true) => kind::RIGHT_MOUSE_DOWN,
-                (3, false) => kind::RIGHT_MOUSE_UP,
-                (_, true) => kind::OTHER_MOUSE_DOWN,
-                (_, false) => kind::OTHER_MOUSE_UP,
-            };
+            let kind = crate::button::event_kind(button, down);
             *POINTER.lock().unwrap_or_else(|e| e.into_inner()) = (x, y);
             send(id, Some((x, y)), |window, location| Fields {
                 kind,
                 modifiers: current_modifiers(),
                 location,
-                // AppKit numbers from zero, SDL from one.
-                button: i64::from(button).saturating_sub(1),
+                button: crate::button::number(button),
                 clicks: i64::from(clicks),
                 window,
                 ..Fields::default()
@@ -381,20 +373,6 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
         }
         Event::Other(_) => {}
     }
-}
-
-/// Whether a scancode is a modifier, which AppKit reports as `-flagsChanged:`
-/// and never as a key.
-fn is_modifier(scancode: u32) -> bool {
-    (224..=231).contains(&scancode) || scancode == 57
-}
-
-/// The lowest button held, as AppKit numbers them, or `None` for none.
-///
-/// SDL's mask has bit 0 for the left button and bit 2 for the right, which is
-/// AppKit's numbering already - the middle button is 1 in both.
-fn held_button(buttons: u32) -> Option<i64> {
-    (0..5).find(|b| buttons & (1 << b) != 0)
 }
 
 fn current_modifiers() -> u64 {

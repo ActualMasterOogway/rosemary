@@ -1,6 +1,9 @@
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::sync::OnceLock;
 
+pub mod keycodes;
+pub mod mouse;
+
 pub mod init {
     pub const VIDEO: u32 = 0x0000_0020;
     pub const AUDIO: u32 = 0x0000_0010;

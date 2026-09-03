@@ -7,6 +7,13 @@
 //! like. A named cursor has no shape for SDL to switch to and shows the
 //! desktop's own.
 //!
+//! A program's *custom* cursor arrives through the cursor rectangles rather
+//! than through `-set`: it builds an `NSCursor`, asks its window to
+//! `-invalidateCursorRectsForView:`, and hands the cursor over from inside the
+//! view's `-resetCursorRects`. Roblox does exactly that and nothing else, so
+//! the rectangles below are not bookkeeping - they are the only path its
+//! pointer has to the screen.
+//!
 //! A tracking area therefore remembers what it was made with and does nothing
 //! else. It has to exist as an object, because a view holds one and compares it
 //! against the one it removes; making it a placeholder instead would refuse
@@ -45,6 +52,9 @@ pub struct Cursor {
     /// The SDL cursor `-set` shows, or null for a named cursor and for an
     /// image this tree could not decode - both of which show the desktop's.
     sdl: sdl3::Cursor,
+    /// `-setOnMouseEntered:` and `-setOnMouseExited:`, stored to be read back.
+    on_mouse_entered: usize,
+    on_mouse_exited: usize,
 }
 
 pub const CURSOR_INSTANCE_SIZE: usize = size_of::<Cursor>();
@@ -104,6 +114,54 @@ fn hot_spot_pixels(hot_spot: NSPoint, size: NSSize, width: u32, height: u32) -> 
     )
 }
 
+/// `ROSETTA3_TRACE_CURSOR`: name every cursor a program builds, every rectangle
+/// it installs one in, and which one the pointer ends up showing.
+///
+/// It exists because none of that is visible from the outside: a custom cursor
+/// that never appears looks the same whether the image had no pixels, the
+/// program's `-resetCursorRects` was never called, the rectangle it gave is on
+/// a view in no window, or the pointer is outside that rectangle - and the four
+/// have nothing in common to fix.
+pub fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("ROSETTA3_TRACE_CURSOR").is_some())
+}
+
+/// Show a cursor object's pixels, without recording it as the one a program
+/// `-set`: the cursor rectangles put a cursor on screen while leaving
+/// `+currentCursor` saying what the program last chose, which is Apple's
+/// split and what a program comparing the two depends on.
+fn show(cursor: Id) {
+    let sdl = match is_cursor(cursor) {
+        // SAFETY: a cursor of this crate's.
+        true => unsafe { (*(cursor as *const Cursor)).sdl },
+        false => std::ptr::null_mut(),
+    };
+    // Only on a change: this runs on every mouse move, and SDL redraws the
+    // pointer for each call whether or not it is the cursor already shown.
+    if SHOWN.swap(sdl as usize, std::sync::atomic::Ordering::AcqRel) == sdl as usize {
+        return;
+    }
+    sdl3::video::set_cursor(sdl);
+}
+
+/// The SDL cursor on screen, so [`show`] can skip the calls that change
+/// nothing. Reset when a cursor is destroyed: SDL is free to hand the same
+/// address out again, and a stale match would leave the new cursor unshown.
+static SHOWN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// Whether `object` is one of this crate's cursors, checked rather than
+/// assumed: `-addCursorRect:cursor:` takes an `id` from the guest.
+fn is_cursor(object: Id) -> bool {
+    if object.is_null() {
+        return false;
+    }
+    // SAFETY: an object this runtime allocated.
+    unsafe { objc::object::class_of(object) }.is_some_and(|c| {
+        objc::class::lookup(c"NSCursor").is_some_and(|k| c.chain().any(|x| std::ptr::eq(x, k)))
+    })
+}
+
 /// Build the SDL cursor for an image, or null when there are no pixels to
 /// build it from.
 ///
@@ -137,6 +195,21 @@ unsafe extern "C" fn init_with_image(receiver: Id, _sel: Sel, image: Id, hot_spo
     cursor.image = objc::arc::retain(image);
     cursor.hot_spot = hot_spot;
     cursor.sdl = cursor_from_image(image, hot_spot);
+    if tracing() {
+        let size = crate::image::declared_size(image);
+        eprintln!(
+            "rosetta3: appkit: -[NSCursor initWithImage:hotSpot:] {receiver:p}: \
+             {}x{} points, point ({}, {}), {}",
+            size.width,
+            size.height,
+            hot_spot.x,
+            hot_spot.y,
+            match cursor.sdl.is_null() {
+                true => "no SDL cursor - the pointer keeps the desktop's",
+                false => "SDL cursor made",
+            }
+        );
+    }
     receiver
 }
 
@@ -159,6 +232,7 @@ unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
         sdl3::video::set_cursor(std::ptr::null_mut());
     }
     if !cursor.sdl.is_null() {
+        SHOWN.store(usize::MAX, std::sync::atomic::Ordering::Release);
         // SAFETY: made by `create_color_cursor`, and destroyed once - the last
         // reference to the object holding it is gone.
         unsafe { sdl3::video::destroy_cursor(cursor.sdl) };
@@ -177,6 +251,194 @@ unsafe extern "C" fn hot_spot(receiver: Id, _sel: Sel) -> NSPoint {
     unsafe { (*(receiver as *const Cursor)).hot_spot }
 }
 
+/// One `-addCursorRect:cursor:`, kept until the view discards its rectangles.
+///
+/// The view is retained. AppKit's rectangles are dropped by the view's own
+/// `-dealloc`; nothing here reaches that, so an unretained view would leave
+/// [`apply`] reading a freed object on the next mouse move.
+struct CursorRect {
+    view: usize,
+    rect: NSRect,
+    /// Retained: the program's own reference usually goes away as soon as
+    /// `-resetCursorRects` returns, and the cursor has to outlive it.
+    cursor: usize,
+}
+
+static RECTS: std::sync::Mutex<Vec<CursorRect>> = std::sync::Mutex::new(Vec::new());
+
+/// `-disableCursorRects`, which a program uses while it draws its own pointer.
+static RECTS_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_rects_enabled(enabled: bool) {
+    RECTS_ENABLED.store(enabled, std::sync::atomic::Ordering::Release);
+    apply();
+}
+
+pub fn rects_enabled() -> bool {
+    RECTS_ENABLED.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// `-[NSView addCursorRect:cursor:]`.
+pub fn add_rect(view: Id, rect: NSRect, cursor: Id) {
+    if !is_cursor(cursor) {
+        if tracing() {
+            eprintln!(
+                "rosetta3: appkit: -[NSView addCursorRect:cursor:] {view:p}: {cursor:p} is \
+                 not an NSCursor - the rectangle is dropped"
+            );
+        }
+        return;
+    }
+    if tracing() {
+        eprintln!(
+            "rosetta3: appkit: -[NSView addCursorRect:cursor:] {view:p}: ({}, {}) {}x{} -> \
+             {cursor:p}",
+            rect.origin.x, rect.origin.y, rect.size.width, rect.size.height
+        );
+    }
+    RECTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(CursorRect {
+            view: objc::arc::retain(view) as usize,
+            rect,
+            cursor: objc::arc::retain(cursor) as usize,
+        });
+    apply();
+}
+
+/// `-[NSView discardCursorRects]`, and the first half of every reset.
+pub fn discard_rects(view: Id) {
+    let taken: Vec<CursorRect> = {
+        let mut rects = RECTS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut kept = Vec::with_capacity(rects.len());
+        let mut taken = Vec::new();
+        for entry in rects.drain(..) {
+            match entry.view == view as usize {
+                true => taken.push(entry),
+                false => kept.push(entry),
+            }
+        }
+        *rects = kept;
+        taken
+    };
+    for entry in taken {
+        objc::arc::release(entry.cursor as Id);
+        objc::arc::release(entry.view as Id);
+    }
+}
+
+/// Rebuild one view's cursor rectangles, which is what
+/// `-invalidateCursorRectsForView:` means: throw the old ones away and ask the
+/// view for its new ones through `-resetCursorRects`.
+///
+/// A view with no `-resetCursorRects` of its own is not an error - AppKit's is
+/// an empty method - but it is the whole of a program's custom cursor, so the
+/// trace names it.
+///
+/// # Safety
+///
+/// `view` must be null or an object this runtime allocated.
+pub unsafe fn reset_rects(view: Id) {
+    discard_rects(view);
+    let sel = objc::sel::get("resetCursorRects");
+    // SAFETY: the caller's obligation.
+    let method = unsafe { objc::object::class_of(view) }.and_then(|c| c.method(sel));
+    if tracing() {
+        // The window as well as the method: a rectangle on a view that is in no
+        // window can never hold the pointer, and the two failures look the same
+        // from the outside.
+        // SAFETY: the caller's obligation.
+        let window = unsafe { crate::view::window_of(view) };
+        eprintln!(
+            "rosetta3: appkit: -resetCursorRects to {view:p} (in window {window:p}): {}",
+            match method.is_some() {
+                true => "implemented",
+                false => "NOT implemented - this view has no cursor of its own",
+            }
+        );
+    }
+    if let Some(method) = method {
+        // SAFETY: `-resetCursorRects` is `void (id, SEL)`.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel) = std::mem::transmute(method.implementation());
+            f(view, sel);
+        }
+    }
+    apply();
+}
+
+/// The same, down a view tree, for `-[NSWindow resetCursorRects]`.
+///
+/// # Safety
+///
+/// `view` must be null or an object this runtime allocated.
+pub unsafe fn reset_rects_in_tree(view: Id) {
+    // SAFETY: the caller's obligation.
+    for child in unsafe { crate::view::children(view) } {
+        // SAFETY: an object this runtime allocated.
+        unsafe { reset_rects_in_tree(child) };
+    }
+    // SAFETY: as above.
+    unsafe { reset_rects(view) };
+}
+
+/// # Safety
+///
+/// `view` must be null or an object this runtime allocated.
+pub unsafe fn discard_rects_in_tree(view: Id) {
+    // SAFETY: the caller's obligation.
+    for child in unsafe { crate::view::children(view) } {
+        // SAFETY: an object this runtime allocated.
+        unsafe { discard_rects_in_tree(child) };
+    }
+    discard_rects(view);
+    apply();
+}
+
+/// Decide what the pointer shows, from the cursor rectangles and where the
+/// pointer is.
+///
+/// The last rectangle installed that holds the pointer wins, which is AppKit's
+/// order for overlapping rectangles, and a pointer in none of them falls back
+/// to whatever the program last `-set`. Called wherever either half can have
+/// changed: a rectangle added or discarded, and every mouse move.
+pub fn apply() {
+    let current = CURRENT.load(std::sync::atomic::Ordering::Acquire) as Id;
+    let chosen = match rects_enabled() {
+        true => holding_rect().unwrap_or(current),
+        false => current,
+    };
+    if tracing() {
+        // Only on a change: this runs on every mouse move.
+        static LAST: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(usize::MAX);
+        if LAST.swap(chosen as usize, std::sync::atomic::Ordering::AcqRel) != chosen as usize {
+            eprintln!(
+                "rosetta3: appkit: the pointer shows {chosen:p}, from {} cursor rectangle(s){}",
+                RECTS.lock().unwrap_or_else(|e| e.into_inner()).len(),
+                match std::ptr::eq(chosen, current) {
+                    true => " - none of them holds the pointer",
+                    false => "",
+                }
+            );
+        }
+    }
+    show(chosen);
+}
+
+/// The cursor of the last rectangle installed that holds the pointer, which is
+/// AppKit's order for overlapping rectangles.
+fn holding_rect() -> Option<Id> {
+    let rects = RECTS.lock().unwrap_or_else(|e| e.into_inner());
+    rects.iter().rev().find_map(|entry| {
+        let view = entry.view as Id;
+        // SAFETY: an object this runtime allocated, retained by the entry.
+        let point = unsafe { crate::view::pointer_in(view) }?;
+        crate::view::holds(view, entry.rect, point).then_some(entry.cursor as Id)
+    })
+}
+
 /// The named cursors, made once each.
 ///
 /// The shape is the index in this list. Every one is the same pointer as far as
@@ -185,12 +447,22 @@ unsafe extern "C" fn hot_spot(receiver: Id, _sel: Sel) -> NSPoint {
 static SHAPES: &[&str] = &[
     "arrowCursor",
     "IBeamCursor",
+    "IBeamCursorForVerticalLayout",
     "pointingHandCursor",
     "crosshairCursor",
     "closedHandCursor",
     "openHandCursor",
+    "resizeLeftCursor",
+    "resizeRightCursor",
     "resizeLeftRightCursor",
+    "resizeUpCursor",
+    "resizeDownCursor",
     "resizeUpDownCursor",
+    "disappearingItemCursor",
+    "operationNotAllowedCursor",
+    "dragLinkCursor",
+    "dragCopyCursor",
+    "contextualMenuCursor",
 ];
 
 fn cursor_for(shape: usize) -> Id {
@@ -226,11 +498,12 @@ static CURRENT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize:
 
 unsafe extern "C" fn set(receiver: Id, _sel: Sel) {
     CURRENT.store(receiver as usize, std::sync::atomic::Ordering::Release);
-    // SAFETY: a cursor of this crate's.
-    let sdl = unsafe { (*(receiver as *const Cursor)).sdl };
-    // Null for a named cursor, which restores the desktop's own: a program
-    // that sets `+arrowCursor` back is taking its custom cursor off.
-    sdl3::video::set_cursor(sdl);
+    if tracing() {
+        eprintln!("rosetta3: appkit: -[NSCursor set] {receiver:p}");
+    }
+    // A named cursor has no SDL cursor, which restores the desktop's own: a
+    // program that sets `+arrowCursor` back is taking its custom cursor off.
+    show(receiver);
 }
 
 unsafe extern "C" fn current_cursor(_class: Id, _sel: Sel) -> Id {
@@ -249,13 +522,20 @@ unsafe extern "C" fn current_cursor(_class: Id, _sel: Sel) -> Id {
 static HIDDEN: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 unsafe extern "C" fn hide(_class: Id, _sel: Sel) {
-    if HIDDEN.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 0 {
+    let count = HIDDEN.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+    if tracing() {
+        eprintln!("rosetta3: appkit: +[NSCursor hide]: hidden {count} deep");
+    }
+    if count == 1 {
         sdl3::video::set_cursor_visible(false);
     }
 }
 
 unsafe extern "C" fn unhide(_class: Id, _sel: Sel) {
     let previous = HIDDEN.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    if tracing() {
+        eprintln!("rosetta3: appkit: +[NSCursor unhide]: was hidden {previous} deep");
+    }
     if previous <= 0 {
         // AppKit clamps at zero rather than letting the count go negative, or a
         // stray unhide would take an extra hide to undo.
@@ -265,6 +545,41 @@ unsafe extern "C" fn unhide(_class: Id, _sel: Sel) {
     if previous == 1 {
         sdl3::video::set_cursor_visible(true);
     }
+}
+
+/// `-setOnMouseEntered:` and `-setOnMouseExited:`, which say that a *tracking
+/// area* should set this cursor rather than a cursor rectangle.
+///
+/// Stored and read back, not acted on: nothing here delivers the enter and exit
+/// events a tracking area's cursor would be set from, and answering the getter
+/// with a guess would tell a program its cursor is installed when it is not.
+unsafe extern "C" fn set_on_mouse_entered(receiver: Id, _sel: Sel, on: u8) {
+    // SAFETY: a cursor of this crate's.
+    unsafe { &mut *(receiver as *mut Cursor) }.on_mouse_entered = (on != 0) as usize;
+}
+
+unsafe extern "C" fn is_set_on_mouse_entered(receiver: Id, _sel: Sel) -> u8 {
+    // SAFETY: as above.
+    (unsafe { (*(receiver as *const Cursor)).on_mouse_entered } != 0) as u8
+}
+
+unsafe extern "C" fn set_on_mouse_exited(receiver: Id, _sel: Sel, on: u8) {
+    // SAFETY: as above.
+    unsafe { &mut *(receiver as *mut Cursor) }.on_mouse_exited = (on != 0) as usize;
+}
+
+unsafe extern "C" fn is_set_on_mouse_exited(receiver: Id, _sel: Sel) -> u8 {
+    // SAFETY: as above.
+    (unsafe { (*(receiver as *const Cursor)).on_mouse_exited } != 0) as u8
+}
+
+/// `+pop`, which is the class spelling of the instance `-pop` below.
+///
+/// Neither pops: this runtime keeps no cursor stack, because the cursor
+/// rectangles decide what is on screen on every mouse move and would put back
+/// whatever a stack restored.
+unsafe extern "C" fn class_pop(_class: Id, _sel: Sel) {
+    apply();
 }
 
 unsafe extern "C" fn set_hidden_until_mouse_moves(class: Id, sel: Sel, hidden: u8) {
@@ -299,6 +614,7 @@ pub(crate) fn install() {
     }
     class_methods!(cursor, {
         "currentCursor" => current_cursor, c"@16@0:8";
+        "pop" => class_pop, c"v16@0:8";
         "hide" => hide, c"v16@0:8";
         "unhide" => unhide, c"v16@0:8";
         "setHiddenUntilMouseMoves:" => set_hidden_until_mouse_moves, c"v20@0:8c16";
@@ -310,6 +626,10 @@ pub(crate) fn install() {
         "set" => set, c"v16@0:8";
         "push" => set, c"v16@0:8";
         "pop" => set, c"v16@0:8";
+        "setOnMouseEntered:" => set_on_mouse_entered, c"v20@0:8c16";
+        "isSetOnMouseEntered" => is_set_on_mouse_entered, c"c16@0:8";
+        "setOnMouseExited:" => set_on_mouse_exited, c"v20@0:8c16";
+        "isSetOnMouseExited" => is_set_on_mouse_exited, c"c16@0:8";
         "dealloc" => dealloc, c"v16@0:8";
     });
 }
@@ -352,6 +672,38 @@ mod tests {
         assert_eq!(hot_spot_pixels(hot_spot, two_x, 32, 32), (8, 12));
         assert_eq!(hot_spot_pixels(hot_spot, two_x, 16, 16), (4, 6));
         assert_eq!(hot_spot_pixels(hot_spot, NSSize::default(), 16, 16), (4, 6));
+    }
+
+    /// The rectangles a view installs belong to that view, and the cursor in
+    /// one outlives the `-resetCursorRects` that handed it over: a program
+    /// releases its own reference as soon as that method returns.
+    #[test]
+    fn a_view_owns_its_cursor_rectangles() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSCursor").expect("NSCursor");
+        let cursor = objc::object::create_instance(class, 0);
+        let view = objc::class::lookup(c"NSView").expect("NSView");
+        let one = objc::object::create_instance(view, 0);
+        let two = objc::object::create_instance(view, 0);
+
+        let before = objc::arc::retain_count(cursor);
+        add_rect(one, NSRect::default(), cursor);
+        add_rect(two, NSRect::default(), cursor);
+        assert_eq!(objc::arc::retain_count(cursor), before + 2);
+
+        discard_rects(one);
+        assert_eq!(objc::arc::retain_count(cursor), before + 1);
+        assert!(
+            RECTS
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|entry| entry.view == two as usize),
+            "only the discarded view's rectangles go"
+        );
+
+        discard_rects(two);
+        assert_eq!(objc::arc::retain_count(cursor), before);
     }
 
     /// Each named cursor is its own object, which is what a program comparing
