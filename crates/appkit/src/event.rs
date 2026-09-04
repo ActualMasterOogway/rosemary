@@ -234,6 +234,15 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             // AppKit asks for a new one here rather than resizing the old.
             // SAFETY: null or a view this crate made.
             unsafe { crate::view::update_tracking_areas(content) };
+            // Cursor rectangles are in their view's coordinates too. A
+            // reset lets a view rebuild rectangles derived from its old bounds
+            // before the next cursor hit test chooses the wrong cursor.
+            // SAFETY: null or the content view of a window this crate made.
+            unsafe { crate::cursor::reset_rects_in_tree(content) };
+            // SDL can leave per-window relative mouse mode while it rebuilds
+            // the native window for a resize.  CoreGraphics association is
+            // process-wide, so restore the mode the guest last requested.
+            crate::screen::apply_mouse_association();
             post(window, window::DID_RESIZE);
         }
         Event::WindowFocus { window, gained } => {
