@@ -548,6 +548,27 @@ pub(crate) struct HostProviders {
     native: NativeDylibProvider,
 }
 
+/// Say once that the host's libraries answer nothing, because the alternative is a
+/// page of unbound imports with no cause given.
+///
+/// Both backends link, so both have to say it: `darwin::strict` withdraws the
+/// native provider from [`HostProviders::chain`] and from `exec::native`'s chain
+/// alike.
+pub(crate) fn announce_strict() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    if !darwin::strict::enabled() {
+        return;
+    }
+    ONCE.call_once(|| {
+        eprintln!(
+            "rosetta3: {}: the host's own libraries answer no import; every symbol this \
+             tree does not implement is unbound. Set ROSETTA3_UNBOUND_DETAIL=all for the \
+             whole list.",
+            darwin::strict::VAR
+        );
+    });
+}
+
 impl HostProviders {
     pub(crate) fn new() -> Self {
         let mut native = NativeDylibProvider::system();
@@ -569,29 +590,12 @@ impl HostProviders {
         }
     }
 
-    /// Say once that the host's libraries answer nothing, because the alternative
-    /// is a page of unbound imports with no cause given.
-    fn announce_strict(&self) {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        if !darwin::strict::enabled() {
-            return;
-        }
-        ONCE.call_once(|| {
-            eprintln!(
-                "rosetta3: {}: the host's own libraries answer no import; every symbol this \
-                 tree does not implement is unbound. Set ROSETTA3_UNBOUND_DETAIL=all for the \
-                 whole list.",
-                darwin::strict::VAR
-            );
-        });
-    }
-
     /// The chain, with `extra` consulted ahead of everything.
     pub(crate) fn chain<'a>(
         &'a self,
         extra: &[&'a dyn SymbolProvider],
     ) -> Vec<&'a dyn SymbolProvider> {
-        self.announce_strict();
+        announce_strict();
         let mut providers: Vec<&dyn SymbolProvider> = extra.to_vec();
         providers.push(&self.runtime);
         providers.push(&self.darwin);
@@ -743,6 +747,7 @@ impl<M: Regions> Program<M> {
         // and `missing` means missing. See [`announce_unbound_imports`] for why
         // this is not left to the guest to discover.
         let unbound = announce_unbound_imports(&report, path);
+        announce_passthrough_imports(&report, path);
         if !unbound.is_empty() && strict_imports() {
             return Err(ProgramError::UnboundImports {
                 count: unbound.len(),

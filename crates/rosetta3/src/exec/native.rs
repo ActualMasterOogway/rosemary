@@ -145,7 +145,7 @@ impl Native {
         // Under `builtin` it must reach this tree's runtime and frameworks
         // instead - including `dlopen`, or the first `dlopen("CoreFoundation")`
         // puts Apple's classes in front of a program that has ours.
-        let providers: Vec<&dyn SymbolProvider> = match crate::frameworks::builtin() {
+        let mut providers: Vec<&dyn SymbolProvider> = match crate::frameworks::builtin() {
             true => vec![
                 &eager,
                 &tlv,
@@ -155,10 +155,19 @@ impl Native {
                 &frameworks,
                 &dyld,
                 &opengl,
-                &host,
             ],
-            false => vec![&eager, &tlv, &runtime, &platform, &host],
+            false => vec![&eager, &tlv, &runtime, &platform],
         };
+        // Last, and only when the host's own libraries are allowed to answer at
+        // all. This backend is the one an x86-64 guest gets on an x86-64 host, so
+        // leaving it out of `darwin::strict` left the mode answering nothing on
+        // the configuration it exists for: every name reached the host's libc and
+        // the program ran to completion. Same rule and same order as the emulated
+        // chain - see [`crate::program::HostProviders::chain`].
+        match darwin::strict::enabled() {
+            true => crate::program::announce_strict(),
+            false => providers.push(&host),
+        }
 
         // A native image is of this host's architecture by definition, which is what
         // makes it the native backend's. See [`darwin::sysctl`].
