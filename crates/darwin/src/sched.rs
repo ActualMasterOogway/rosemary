@@ -4,7 +4,7 @@
 
 use machish::resolve::SyntheticDylib;
 
-fn policy(policy: i32) -> Option<i32> {
+fn to_host_policy(policy: i32) -> Option<i32> {
     Some(match policy {
         1 => libc::SCHED_OTHER,
         2 => libc::SCHED_RR,
@@ -14,7 +14,7 @@ fn policy(policy: i32) -> Option<i32> {
 }
 
 unsafe extern "C" fn max(policy: i32) -> i32 {
-    policy(policy).map_or_else(
+    to_host_policy(policy).map_or_else(
         || {
             crate::errno::set(libc::EINVAL);
             -1
@@ -24,7 +24,7 @@ unsafe extern "C" fn max(policy: i32) -> i32 {
 }
 
 unsafe extern "C" fn min(policy: i32) -> i32 {
-    policy(policy).map_or_else(
+    to_host_policy(policy).map_or_else(
         || {
             crate::errno::set(libc::EINVAL);
             -1
