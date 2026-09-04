@@ -603,6 +603,7 @@ unsafe extern "C" fn make_first_responder(receiver: Id, _sel: Sel, responder: Id
     }
     let current = window_of(receiver).first_responder;
     if current == responder {
+        update_text_input(receiver);
         return 1;
     }
     // SAFETY: null or a live object this runtime allocated.
@@ -612,6 +613,7 @@ unsafe extern "C" fn make_first_responder(receiver: Id, _sel: Sel, responder: Id
     window_of(receiver).first_responder = responder;
     // SAFETY: as above.
     if unsafe { responder_agrees(responder, "becomeFirstResponder") } {
+        update_text_input(receiver);
         return 1;
     }
     // A refusal leaves the window itself as the responder, which is the null
@@ -619,7 +621,28 @@ unsafe extern "C" fn make_first_responder(receiver: Id, _sel: Sel, responder: Id
     if window_of(receiver).first_responder == responder {
         window_of(receiver).first_responder = std::ptr::null_mut();
     }
+    update_text_input(receiver);
     0
+}
+
+/// Keep SDL's text-input stream paired with AppKit's first responder.
+///
+/// SDL leaves it disabled by default. Key events still arrive in that state,
+/// which made text appear to work at the engine layer while every committed
+/// character and IME composition was silently absent from the text client.
+fn update_text_input(receiver: Id) {
+    let window = window_of(receiver);
+    if window.sdl.is_null() {
+        return;
+    }
+    match crate::text::is_input_client(window.first_responder) {
+        true => {
+            sdl3::video::start_text_input(window.sdl);
+        }
+        false => {
+            sdl3::video::stop_text_input(window.sdl);
+        }
+    }
 }
 
 /// Send one of the two first-responder messages, or take silence for consent.

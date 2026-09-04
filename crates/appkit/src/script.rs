@@ -209,16 +209,24 @@ fn button_event(window: u32, button: u8, down: bool, clicks: i64, x: f32, y: f32
 }
 
 fn key(window: u32, scancode: u32, character: u32, modifiers: u16) {
-    for down in [true, false] {
-        crate::event::deliver(Event::Key {
+    let event = |down| Event::Key {
+        window,
+        scancode,
+        key: character,
+        modifiers,
+        down,
+        repeat: false,
+    };
+    crate::event::deliver(event(true));
+    // SDL places a committed text event between the physical press and
+    // release. Keep scripted typing on the same path as a real keyboard.
+    if let Some(text) = char::from_u32(character).filter(|c| !c.is_control()) {
+        crate::event::deliver(Event::Text {
             window,
-            scancode,
-            key: character,
-            modifiers,
-            down,
-            repeat: false,
+            text: text.to_string(),
         });
     }
+    crate::event::deliver(event(false));
 }
 
 /// The US-layout key that types a character, and whether it needs shift.

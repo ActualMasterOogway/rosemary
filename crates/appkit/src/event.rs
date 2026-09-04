@@ -316,9 +316,22 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
                 false => send(id, None, |w, _| fields(w)),
             }
         }
-        // Text is what `-characters` already carries. A second delivery would
-        // be the same keystroke twice.
-        Event::Text { .. } => {}
+        // A key event describes a physical key. Text input is the separate,
+        // layout- and IME-resolved commit, and must go to the focused
+        // `NSTextInputClient`; `-characters` is not a substitute for it.
+        Event::Text { window, text } => {
+            let window = object_for(window);
+            crate::text::commit(responder_of(window), &text);
+        }
+        Event::TextEditing {
+            window,
+            text,
+            start,
+            length,
+        } => {
+            let window = object_for(window);
+            crate::text::compose(responder_of(window), &text, start, length);
+        }
         Event::MouseMotion {
             window: id,
             x,

@@ -139,6 +139,8 @@ struct Api {
     SDL_GetDesktopDisplayMode: Option<unsafe extern "C" fn(u32) -> *const DisplayMode>,
 
     SDL_PollEvent: Option<unsafe extern "C" fn(*mut Event) -> bool>,
+    SDL_StartTextInput: Option<unsafe extern "C" fn(Window) -> bool>,
+    SDL_StopTextInput: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_HideCursor: Option<unsafe extern "C" fn() -> bool>,
     SDL_ShowCursor: Option<unsafe extern "C" fn() -> bool>,
     SDL_CreateColorCursor: Option<unsafe extern "C" fn(*mut c_void, c_int, c_int) -> Cursor>,
@@ -294,6 +296,8 @@ fn api() -> Option<&'static Api> {
             SDL_GetDisplayContentScale,
             SDL_GetDesktopDisplayMode,
             SDL_PollEvent,
+            SDL_StartTextInput,
+            SDL_StopTextInput,
             SDL_HideCursor,
             SDL_ShowCursor,
             SDL_CreateColorCursor,
@@ -855,6 +859,7 @@ pub mod video {
         pub const WINDOW_CLOSE_REQUESTED: u32 = 0x210;
         pub const KEY_DOWN: u32 = 0x300;
         pub const KEY_UP: u32 = 0x301;
+        pub const TEXT_EDITING: u32 = 0x302;
         pub const TEXT_INPUT: u32 = 0x303;
         pub const MOUSE_MOTION: u32 = 0x400;
         pub const MOUSE_BUTTON_DOWN: u32 = 0x401;
@@ -946,6 +951,18 @@ pub mod video {
         text: *const c_char,
     }
 
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct TextEditingEvent {
+        kind: u32,
+        reserved: u32,
+        timestamp: u64,
+        window: u32,
+        text: *const c_char,
+        start: i32,
+        length: i32,
+    }
+
     // The offsets these structures put their fields at, checked against the
     // ones SDL's own headers compute. A member read at the wrong offset is a
     // coordinate or a keycode that is merely *wrong*, which is the failure this
@@ -959,6 +976,7 @@ pub mod video {
         assert!(std::mem::offset_of!(MouseButtonEvent, x) == 0x1c);
         assert!(std::mem::offset_of!(MouseMotionEvent, xrel) == 0x24);
         assert!(std::mem::offset_of!(TextInputEvent, text) == 0x18);
+        assert!(std::mem::offset_of!(TextEditingEvent, start) == 0x20);
         // `SDL_MouseWheelEvent` grew `integer_x`/`integer_y` in 3.2.12, which is
         // why this one is shorter than SDL's: the head is what is read.
         assert!(std::mem::offset_of!(MouseWheelEvent, y) == 0x1c);
@@ -999,6 +1017,12 @@ pub mod video {
         Text {
             window: u32,
             text: String,
+        },
+        TextEditing {
+            window: u32,
+            text: String,
+            start: i32,
+            length: i32,
         },
         MouseMotion {
             window: u32,
@@ -1105,6 +1129,21 @@ pub mod video {
                         text,
                     }
                 }
+                event_type::TEXT_EDITING => {
+                    let e: TextEditingEvent = decode(&raw);
+                    let text = match e.text.is_null() {
+                        true => String::new(),
+                        // SAFETY: SDL owns the string until the next poll, which
+                        // is after this copy.
+                        false => CStr::from_ptr(e.text).to_string_lossy().into_owned(),
+                    };
+                    Event::TextEditing {
+                        window: e.window,
+                        text,
+                        start: e.start,
+                        length: e.length,
+                    }
+                }
                 event_type::MOUSE_MOTION => {
                     let e: MouseMotionEvent = decode(&raw);
                     Event::MouseMotion {
@@ -1187,6 +1226,8 @@ pub mod video {
         hide_window => SDL_HideWindow,
         raise_window => SDL_RaiseWindow,
         swap_window => SDL_GL_SwapWindow,
+        start_text_input => SDL_StartTextInput,
+        stop_text_input => SDL_StopTextInput,
     }
 
     pub fn destroy_window(window: Window) {

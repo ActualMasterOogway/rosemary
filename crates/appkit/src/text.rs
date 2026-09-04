@@ -112,7 +112,8 @@ unsafe extern "C" fn ignored_flag(_receiver: Id, _sel: Sel, _on: u8) {}
 #[derive(Clone, Default)]
 struct Contents {
     text: String,
-    /// The insertion point or selection, in characters.
+    /// The insertion point or selection, in UTF-16 code units, as `NSRange`
+    /// and `NSString` define it.
     selected: NSRange,
     /// The composition an input method has in progress, if any. Marked text is
     /// *provisional*: it is in `text` and replaced wholesale by the next
@@ -163,26 +164,47 @@ fn edit(receiver: Id, with: impl FnOnce(&mut Contents)) {
     }
 }
 
-/// Character indices are what `NSRange` counts, and a `String` is bytes: this
-/// is the join, clamped so a range a caller invented cannot slice mid-character
-/// or past the end.
+fn utf16_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+/// `NSString` ranges count UTF-16 code units and Rust strings count bytes.
+/// Clamp an offset inside a surrogate pair to the scalar's leading boundary.
+fn byte_index(text: &str, offset: usize) -> usize {
+    let mut units = 0;
+    for (byte, character) in text.char_indices() {
+        let next = units + character.len_utf16();
+        if offset < next {
+            return byte;
+        }
+        units = next;
+    }
+    text.len()
+}
+
+/// Join an `NSRange` to Rust's byte ranges without slicing a scalar or running
+/// beyond the string.
 fn byte_range(text: &str, range: NSRange) -> std::ops::Range<usize> {
-    let index = |characters: usize| {
-        text.char_indices()
-            .nth(characters)
-            .map_or(text.len(), |(at, _)| at)
-    };
-    let start = index(range.location);
-    let end = index(range.location.saturating_add(range.length));
+    let start = byte_index(text, range.location);
+    let end = byte_index(text, range.location.saturating_add(range.length));
     start..end.max(start)
+}
+
+fn clamp_range(text: &str, range: NSRange) -> NSRange {
+    let bytes = byte_range(text, range);
+    NSRange {
+        location: utf16_len(&text[..bytes.start]),
+        length: utf16_len(&text[bytes]),
+    }
 }
 
 /// Replace `range` with `insertion`, leaving the insertion point after it.
 fn replace(state: &mut Contents, range: NSRange, insertion: &str) {
     let bytes = byte_range(&state.text, range);
+    let location = utf16_len(&state.text[..bytes.start]);
     state.text.replace_range(bytes, insertion);
     state.selected = NSRange {
-        location: range.location + insertion.chars().count(),
+        location: location + utf16_len(insertion),
         length: 0,
     };
 }
@@ -199,7 +221,7 @@ unsafe extern "C" fn set_string(receiver: Id, _sel: Sel, value: Id) {
     let text = String::from_utf8_lossy(&unsafe { foundation::string::bytes(value) }).into_owned();
     edit(receiver, |state| {
         state.selected = NSRange {
-            location: text.chars().count(),
+            location: utf16_len(&text),
             length: 0,
         };
         state.marked = None;
@@ -212,7 +234,9 @@ unsafe extern "C" fn selected_range(receiver: Id, _sel: Sel) -> NSRange {
 }
 
 unsafe extern "C" fn set_selected_range(receiver: Id, _sel: Sel, range: NSRange) {
-    edit(receiver, |state| state.selected = range);
+    let mut table = contents().lock().unwrap_or_else(|e| e.into_inner());
+    let state = table.entry(receiver as usize).or_default();
+    state.selected = clamp_range(&state.text, range);
 }
 
 unsafe extern "C" fn marked_range(receiver: Id, _sel: Sel) -> NSRange {
@@ -227,7 +251,8 @@ unsafe extern "C" fn has_marked_text(receiver: Id, _sel: Sel) -> u8 {
 }
 
 unsafe extern "C" fn unmark_text(receiver: Id, _sel: Sel) {
-    edit(receiver, |state| state.marked = None);
+    let mut table = contents().lock().unwrap_or_else(|e| e.into_inner());
+    table.entry(receiver as usize).or_default().marked = None;
 }
 
 /// `-insertText:replacementRange:`, and `-insertText:` through the same body:
@@ -301,14 +326,16 @@ unsafe extern "C" fn set_marked_text(
             _ => replacement,
         };
         replace(state, range, &insertion);
-        let length = insertion.chars().count();
+        let location = state.selected.location.saturating_sub(utf16_len(&insertion));
+        let length = utf16_len(&insertion);
         state.marked = (length > 0).then_some(NSRange {
-            location: range.location,
+            location,
             length,
         });
+        let selected_location = selected.location.min(length);
         state.selected = NSRange {
-            location: range.location + selected.location.min(length),
-            length: selected.length.min(length),
+            location: location + selected_location,
+            length: selected.length.min(length - selected_location),
         };
     });
 }
@@ -340,11 +367,37 @@ unsafe extern "C" fn set_marked_text_legacy(
 /// a backspace character.
 unsafe extern "C" fn delete_backward(receiver: Id, _sel: Sel, _sender: Id) {
     edit(receiver, |state| {
+        let range = backward_range(state);
+        replace(state, range, "");
+        state.marked = None;
+    });
+}
+
+fn backward_range(state: &Contents) -> NSRange {
+    if state.selected.length != 0 {
+        return state.selected;
+    }
+    let caret = byte_index(&state.text, state.selected.location);
+    let previous = state.text[..caret]
+        .chars()
+        .next_back()
+        .map_or(0, char::len_utf16);
+    NSRange {
+        location: state.selected.location.saturating_sub(previous),
+        length: previous,
+    }
+}
+
+unsafe extern "C" fn delete_forward(receiver: Id, _sel: Sel, _sender: Id) {
+    edit(receiver, |state| {
         let range = match state.selected.length {
-            0 => NSRange {
-                location: state.selected.location.saturating_sub(1),
-                length: state.selected.location.min(1),
-            },
+            0 => {
+                let caret = byte_index(&state.text, state.selected.location);
+                NSRange {
+                    location: state.selected.location,
+                    length: state.text[caret..].chars().next().map_or(0, char::len_utf16),
+                }
+            }
             _ => state.selected,
         };
         replace(state, range, "");
@@ -365,11 +418,10 @@ unsafe extern "C" fn should_change_text(
 
 /// `-keyDown:`, which is the whole reason the rest of this exists.
 ///
-/// AppKit's `NSTextView` runs the event through the input manager, which ends
-/// in `-insertText:` for a character and a command selector for everything
-/// else. There is no input manager here, so the two commands a text field
-/// cannot do without are handled directly and the rest of the key codes are
-/// left alone - a program reading `-string` sees exactly what was typed.
+/// AppKit's `NSTextView` runs printable input through the input manager, which
+/// is represented by SDL's separate text-input event. The key event handles
+/// editing commands only; inserting its `-characters` here as well would type
+/// every printable key twice.
 unsafe extern "C" fn key_down(receiver: Id, _sel: Sel, event: Id) {
     let sel = objc::sel::get("characters");
     // SAFETY: `-characters` is `id (id, SEL)` on an event this crate made.
@@ -384,26 +436,14 @@ unsafe extern "C" fn key_down(receiver: Id, _sel: Sel, event: Id) {
     };
     match character {
         // Backspace, which is `-deleteBackward:` on a Mac.
-        '\u{8}' | '\u{7f}' => edit(receiver, |state| {
-            let range = match state.selected.length {
-                0 => NSRange {
-                    location: state.selected.location.saturating_sub(1),
-                    length: state.selected.location.min(1),
-                },
-                _ => state.selected,
-            };
-            replace(state, range, "");
-            state.marked = None;
-        }),
+        '\u{8}' | '\u{7f}' => unsafe {
+            delete_backward(receiver, objc::sel::get("deleteBackward:"), receiver)
+        },
         // A control character is a command - return, tab, an arrow - and none
         // of them types anything. Inserting one would put a control code in a
         // password.
         c if c.is_control() || ('\u{f700}'..='\u{f8ff}').contains(&c) => {}
-        _ => edit(receiver, |state| {
-            let range = state.marked.unwrap_or(state.selected);
-            replace(state, range, &text);
-            state.marked = None;
-        }),
+        _ => {}
     }
 }
 
@@ -414,11 +454,15 @@ unsafe extern "C" fn key_down(receiver: Id, _sel: Sel, event: Id) {
 /// text, so there is no honest answer to either: the rectangle is empty and the
 /// index is `NSNotFound`, which is what a client with no visible text reports.
 unsafe extern "C" fn first_rect_for_character_range(
-    _receiver: Id,
+    receiver: Id,
     _sel: Sel,
-    _range: NSRange,
-    _actual: *mut NSRange,
+    range: NSRange,
+    actual: *mut NSRange,
 ) -> foundation::geometry::NSRect {
+    if !actual.is_null() {
+        // SAFETY: the caller supplied the optional out-parameter.
+        unsafe { *actual = clamp_range(&read(receiver).text, range) };
+    }
     foundation::geometry::NSRect::default()
 }
 
@@ -449,7 +493,166 @@ unsafe extern "C" fn valid_attributes(_receiver: Id, _sel: Sel) -> Id {
     unsafe { corefoundation::api::CFAutorelease(array) as Id }
 }
 
-unsafe extern "C" fn do_command_by_selector(_receiver: Id, _sel: Sel, _command: Sel) {}
+unsafe extern "C" fn select_all(receiver: Id, _sel: Sel, _sender: Id) {
+    let mut table = contents().lock().unwrap_or_else(|e| e.into_inner());
+    let state = table.entry(receiver as usize).or_default();
+    state.selected = NSRange {
+        location: 0,
+        length: utf16_len(&state.text),
+    };
+}
+
+unsafe extern "C" fn move_left(receiver: Id, _sel: Sel, _sender: Id) {
+    let mut table = contents().lock().unwrap_or_else(|e| e.into_inner());
+    let state = table.entry(receiver as usize).or_default();
+    state.selected = match state.selected.length {
+        0 => {
+            let caret = byte_index(&state.text, state.selected.location);
+            let units = state.text[..caret]
+                .chars()
+                .next_back()
+                .map_or(0, char::len_utf16);
+            NSRange {
+                location: state.selected.location.saturating_sub(units),
+                length: 0,
+            }
+        }
+        _ => NSRange {
+            location: state.selected.location,
+            length: 0,
+        },
+    };
+}
+
+unsafe extern "C" fn move_right(receiver: Id, _sel: Sel, _sender: Id) {
+    let mut table = contents().lock().unwrap_or_else(|e| e.into_inner());
+    let state = table.entry(receiver as usize).or_default();
+    let location = match state.selected.length {
+        0 => {
+            let caret = byte_index(&state.text, state.selected.location);
+            state.selected.location
+                + state.text[caret..].chars().next().map_or(0, char::len_utf16)
+        }
+        _ => state.selected.location.saturating_add(state.selected.length),
+    };
+    state.selected = NSRange {
+        location: location.min(utf16_len(&state.text)),
+        length: 0,
+    };
+}
+
+unsafe extern "C" fn do_command_by_selector(receiver: Id, _sel: Sel, command: Sel) {
+    // The selectors an input manager produces for the commands that alter an
+    // otherwise invisible field. Unknown commands are intentionally ignored.
+    // SAFETY: each target has the uniform text-command shape `(id, SEL, id)`.
+    unsafe {
+        if command == objc::sel::get("deleteBackward:") {
+            delete_backward(receiver, command, receiver);
+        } else if command == objc::sel::get("deleteForward:") {
+            delete_forward(receiver, command, receiver);
+        } else if command == objc::sel::get("selectAll:") {
+            select_all(receiver, command, receiver);
+        } else if command == objc::sel::get("moveLeft:") {
+            move_left(receiver, command, receiver);
+        } else if command == objc::sel::get("moveRight:") {
+            move_right(receiver, command, receiver);
+        }
+    }
+}
+
+/// Whether an object is an `NSTextInputClient` this bridge can feed.
+pub(crate) fn is_input_client(receiver: Id) -> bool {
+    if receiver.is_null() {
+        return false;
+    }
+    let insert = objc::sel::get("insertText:replacementRange:");
+    let legacy = objc::sel::get("insertText:");
+    // SAFETY: a non-null live responder from a window this crate owns.
+    unsafe { objc::object::class_of(receiver) }
+        .is_some_and(|class| class.method(insert).is_some() || class.method(legacy).is_some())
+}
+
+/// Deliver one text-input commit to the focused input client.
+pub(crate) fn commit(receiver: Id, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let value = objc::arc::autorelease(foundation::string::from_str(text));
+    let modern = objc::sel::get("insertText:replacementRange:");
+    // SAFETY: a live first responder, when present.
+    let method = unsafe { objc::object::class_of(receiver) }.and_then(|class| class.method(modern));
+    unsafe {
+        if let Some(method) = method {
+            let f: unsafe extern "C" fn(Id, Sel, Id, NSRange) =
+                std::mem::transmute(method.implementation());
+            f(
+                receiver,
+                modern,
+                value,
+                NSRange {
+                    location: NOT_FOUND,
+                    length: 0,
+                },
+            );
+        } else if let Some(method) = objc::object::class_of(receiver)
+            .and_then(|class| class.method(objc::sel::get("insertText:")))
+        {
+            let sel = objc::sel::get("insertText:");
+            let f: unsafe extern "C" fn(Id, Sel, Id) =
+                std::mem::transmute(method.implementation());
+            f(receiver, sel, value);
+        }
+    }
+}
+
+/// Deliver an in-progress host IME composition to the focused input client.
+pub(crate) fn compose(receiver: Id, text: &str, start: i32, length: i32) {
+    let value = objc::arc::autorelease(foundation::string::from_str(text));
+    let character_range = NSRange {
+        location: usize::try_from(start).unwrap_or(0),
+        length: usize::try_from(length).unwrap_or(0),
+    };
+    let bytes = |characters: usize| {
+        text.char_indices()
+            .nth(characters)
+            .map_or(text.len(), |(at, _)| at)
+    };
+    let from = bytes(character_range.location);
+    let to = bytes(
+        character_range
+            .location
+            .saturating_add(character_range.length),
+    );
+    let selected = NSRange {
+        location: utf16_len(&text[..from]),
+        length: utf16_len(&text[from..to.max(from)]),
+    };
+    let modern = objc::sel::get("setMarkedText:selectedRange:replacementRange:");
+    let legacy = objc::sel::get("setMarkedText:selectedRange:");
+    // SAFETY: the selector is either the modern five-argument shape or its
+    // older spelling without a replacement range.
+    unsafe {
+        let class = objc::object::class_of(receiver);
+        if let Some(method) = class.and_then(|class| class.method(modern)) {
+            let f: unsafe extern "C" fn(Id, Sel, Id, NSRange, NSRange) =
+                std::mem::transmute(method.implementation());
+            f(
+                receiver,
+                modern,
+                value,
+                selected,
+                NSRange {
+                    location: NOT_FOUND,
+                    length: 0,
+                },
+            );
+        } else if let Some(method) = class.and_then(|class| class.method(legacy)) {
+            let f: unsafe extern "C" fn(Id, Sel, Id, NSRange) =
+                std::mem::transmute(method.implementation());
+            f(receiver, legacy, value, selected);
+        }
+    }
+}
 
 /// Whether an implementation is this crate's own text-view key handling.
 ///
@@ -500,6 +703,10 @@ pub(crate) fn install() {
         "setMarkedText:selectedRange:replacementRange:" => set_marked_text,
             c"v56@0:8@16{_NSRange=QQ}24{_NSRange=QQ}40";
         "deleteBackward:" => delete_backward, c"v24@0:8@16";
+        "deleteForward:" => delete_forward, c"v24@0:8@16";
+        "selectAll:" => select_all, c"v24@0:8@16";
+        "moveLeft:" => move_left, c"v24@0:8@16";
+        "moveRight:" => move_right, c"v24@0:8@16";
         "shouldChangeTextInRange:replacementString:" => should_change_text,
             c"c40@0:8{_NSRange=QQ}16@32";
         "keyDown:" => key_down, c"v24@0:8@16";
@@ -577,5 +784,52 @@ mod tests {
             delete_backward(view, objc::sel::get("deleteBackward:"), std::ptr::null_mut());
             assert_eq!(foundation::string::bytes(string(view, objc::sel::get("string"))), b"ce\xc3\xa9");
         }
+    }
+
+    #[test]
+    fn committed_host_text_reaches_the_focused_client_immediately() {
+        let view = text_view();
+        commit(view, "typed");
+        // SAFETY: a live text view and the string it owns.
+        assert_eq!(
+            unsafe { foundation::string::bytes(string(view, objc::sel::get("string"))) },
+            b"typed"
+        );
+        assert_eq!(read(view).selected.location, 5);
+    }
+
+    #[test]
+    fn composition_is_replaced_by_the_commit() {
+        let view = text_view();
+        compose(view, "caf\u{e9}", 3, 1);
+        assert_eq!(
+            read(view).marked,
+            Some(NSRange {
+                location: 0,
+                length: 4,
+            })
+        );
+        assert_eq!(read(view).selected, NSRange { location: 3, length: 1 });
+        commit(view, "coffee");
+        assert_eq!(read(view).text, "coffee");
+        assert_eq!(read(view).marked, None);
+    }
+
+    #[test]
+    fn ranges_and_deletion_count_utf16_code_units() {
+        let view = text_view();
+        // SAFETY: a live view and string.
+        unsafe {
+            set_string(
+                view,
+                objc::sel::get("setString:"),
+                foundation::string::from_str("a\u{1f600}b"),
+            );
+            assert_eq!(read(view).selected.location, 4);
+            delete_backward(view, objc::sel::get("deleteBackward:"), view);
+            delete_backward(view, objc::sel::get("deleteBackward:"), view);
+        }
+        assert_eq!(read(view).text, "a");
+        assert_eq!(read(view).selected.location, 1);
     }
 }
