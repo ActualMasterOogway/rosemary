@@ -30,6 +30,7 @@ pub mod signal;
 pub mod spawn;
 pub mod stat;
 pub mod stdio;
+pub mod strict;
 pub mod string;
 pub mod sysctl;
 pub mod sysinfo;
@@ -119,6 +120,21 @@ pub fn symbol(symbol: &str) -> Option<u64> {
     if let Some(addr) = implemented(name) {
         return Some(addr);
     }
+    if divergent::contains(name) || strict::enabled() {
+        return None;
+    }
+    host_symbol(name)
+}
+
+/// [`symbol`] without the [`strict`] refusal, for a shim naming what it forwards to.
+///
+/// A shim that calls the host's `printf` is the explicit implementation the strict
+/// mode asks for, not the fallback it withdraws - so it keeps its answer.
+pub fn shim_symbol(symbol: &str) -> Option<u64> {
+    let name = base_name(symbol);
+    if let Some(addr) = implemented(name) {
+        return Some(addr);
+    }
     if divergent::contains(name) {
         return None;
     }
@@ -130,6 +146,10 @@ pub fn refusal(symbol: &str) -> String {
     let name = base_name(symbol);
     match divergent::reason(name) {
         Some(why) => format!("{symbol}: no Darwin-compatible implementation on this host: {why}"),
+        None if strict::enabled() && host_symbol(name).is_some() => format!(
+            "{symbol}: nothing in this tree implements it, and {} withdraws the host's own",
+            strict::VAR
+        ),
         None => format!("{symbol}: nothing on this host defines it"),
     }
 }
@@ -478,8 +498,9 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
     for name in SHIMMED_ABOVE.iter().chain(math::PLAIN) {
         // Only where the host has none: on Darwin these are libSystem's own, and
         // shadowing them would replace an implementation with a placeholder in
-        // the one case the shim ever stopped intercepting.
-        if host_symbol(name).is_none()
+        // the one case the shim ever stopped intercepting. Under [`strict`] the
+        // host answers nothing, so this tree's own entry is the only answer left.
+        if (strict::enabled() || host_symbol(name).is_none())
             && let Some(f) = math::symbol(name)
         {
             define_fn(&mut lib, &format!("_{name}"), f);

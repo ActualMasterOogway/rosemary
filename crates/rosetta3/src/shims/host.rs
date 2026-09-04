@@ -24,7 +24,7 @@ pub(crate) fn host_or_refuse(symbol: &str) -> Result<u64> {
         }
     }
 
-    let address = darwin::symbol(name).ok_or_else(|| match darwin::divergent::reason(name) {
+    let address = darwin::shim_symbol(name).ok_or_else(|| match darwin::divergent::reason(name) {
         Some(reason) => AbiError::Refused {
             symbol: symbol.to_string(),
             reason,
