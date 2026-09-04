@@ -1426,6 +1426,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("free", V, P),
     sig!("freeaddrinfo", V, P),
     sig!("freeifaddrs", V, P),
+    sig!("freeifmaddrs", V, P),
     sig!("freelocale", V, P),
     sig!("freopen", P, P, P, P),
     // `double frexp(double, int *)` - the exponent goes to a pointer the
@@ -1480,6 +1481,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("gethostid", I64),
     sig!("gethostname", I32, P, U64),
     sig!("getifaddrs", I32, P),
+    sig!("getifmaddrs", I32, P),
     sig!("getloadavg", I32, P, I32),
     sig!("getlogin_r", I32, P, U64),
     sig!("getnameinfo", I32, P, U32, P, U32, P, U32, I32),
