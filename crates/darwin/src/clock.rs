@@ -31,14 +31,18 @@ use std::ffi::c_void;
 
 /// `clockid_t`, from Darwin's `<time.h>`.
 pub mod id {
-    pub const REALTIME: u32 = 0;
-    pub const MONOTONIC: u32 = 6;
-    pub const MONOTONIC_RAW: u32 = 4;
-    pub const MONOTONIC_RAW_APPROX: u32 = 5;
-    pub const UPTIME_RAW: u32 = 8;
-    pub const UPTIME_RAW_APPROX: u32 = 9;
-    pub const PROCESS_CPUTIME_ID: u32 = 12;
-    pub const THREAD_CPUTIME_ID: u32 = 16;
+    #[allow(non_camel_case_types)]
+
+    pub type clockid_t = i32;
+
+    pub const REALTIME: clockid_t = 0;
+    pub const MONOTONIC: clockid_t = 6;
+    pub const MONOTONIC_RAW: clockid_t = 4;
+    pub const MONOTONIC_RAW_APPROX: clockid_t = 5;
+    pub const UPTIME_RAW: clockid_t = 8;
+    pub const UPTIME_RAW_APPROX: clockid_t = 9;
+    pub const PROCESS_CPUTIME_ID: clockid_t = 12;
+    pub const THREAD_CPUTIME_ID: clockid_t = 16;
 }
 
 /// The host clocks the mapping picks from, named by the property being preserved
@@ -54,6 +58,10 @@ mod host {
     pub const WITHOUT_SLEEP_COARSE: clockid_t = libc::CLOCK_MONOTONIC_COARSE;
     pub const PROCESS_CPU: clockid_t = libc::CLOCK_PROCESS_CPUTIME_ID;
     pub const THREAD_CPU: clockid_t = libc::CLOCK_THREAD_CPUTIME_ID;
+
+    unsafe extern "C" {
+        pub fn clock() -> clockid_t;
+    }
 }
 
 /// As above, for a host with no clock that counts a sleep and none that is coarse.
@@ -70,11 +78,24 @@ mod host {
     pub const THREAD_CPU: clockid_t = libc::CLOCK_THREAD_CPUTIME_ID;
 }
 
+const CLOCK_MAPPING: [(id::clockid_t, libc::clockid_t); 8] = [
+    (id::REALTIME, host::REALTIME),
+    (id::MONOTONIC, host::WITH_SLEEP),
+    (id::MONOTONIC_RAW, host::WITH_SLEEP),
+    // No host clock is both coarse and sleep-counting; sleep-counting wins, and
+    // the cost is only that the read is not the cheap one.
+    (id::MONOTONIC_RAW_APPROX, host::WITH_SLEEP),
+    (id::UPTIME_RAW, host::WITHOUT_SLEEP),
+    (id::UPTIME_RAW_APPROX, host::WITHOUT_SLEEP_COARSE),
+    (id::PROCESS_CPUTIME_ID, host::PROCESS_CPU),
+    (id::THREAD_CPUTIME_ID, host::THREAD_CPU),
+];
+
 /// The host clock a guest's `clockid_t` names, or `None` if it names none.
 ///
 /// An unrecognised id is refused rather than passed through: the host's own numbering
 /// starts at zero too, so a wrong id is a *working* clock rather than an error.
-fn translate(guest: u32) -> Option<libc::clockid_t> {
+fn translate(guest: id::clockid_t) -> Option<libc::clockid_t> {
     Some(match guest {
         id::REALTIME => host::REALTIME,
         id::MONOTONIC | id::MONOTONIC_RAW => host::WITH_SLEEP,
@@ -89,13 +110,21 @@ fn translate(guest: u32) -> Option<libc::clockid_t> {
     })
 }
 
+fn to_darwin(host: libc::clockid_t) -> Option<id::clockid_t> {
+    let clock = CLOCK_MAPPING
+        .iter()
+        .find(|clock| clock.1 == host)
+        .and_then(|clock| Some(clock.0));
+    clock
+}
+
 /// `int clock_gettime(clockid_t, struct timespec *)`.
 ///
 /// # Safety
 ///
 /// `ts` is null or a writable `struct timespec *`, which is two eight-byte words on
 /// Darwin and on this host alike.
-unsafe extern "C" fn gettime(clock: u32, ts: *mut c_void) -> i32 {
+unsafe extern "C" fn gettime(clock: id::clockid_t, ts: *mut c_void) -> i32 {
     let Some(host) = translate(clock) else {
         crate::errno::set(libc::EINVAL);
         return -1;
@@ -109,7 +138,7 @@ unsafe extern "C" fn gettime(clock: u32, ts: *mut c_void) -> i32 {
 /// # Safety
 ///
 /// As [`gettime`].
-unsafe extern "C" fn getres(clock: u32, ts: *mut c_void) -> i32 {
+unsafe extern "C" fn getres(clock: id::clockid_t, ts: *mut c_void) -> i32 {
     let Some(host) = translate(clock) else {
         crate::errno::set(libc::EINVAL);
         return -1;
@@ -122,7 +151,7 @@ unsafe extern "C" fn getres(clock: u32, ts: *mut c_void) -> i32 {
 ///
 /// Zero is the failure Darwin reports, with `errno` set; there is no other value a
 /// `uint64_t` return can reserve.
-unsafe extern "C" fn gettime_nsec_np(clock: u32) -> u64 {
+unsafe extern "C" fn gettime_nsec_np(clock: id::clockid_t) -> u64 {
     let Some(host) = translate(clock) else {
         crate::errno::set(libc::EINVAL);
         return 0;
@@ -140,6 +169,14 @@ unsafe extern "C" fn gettime_nsec_np(clock: u32) -> u64 {
         .wrapping_add(ts.tv_nsec as u64)
 }
 
+unsafe extern "C" fn clock() -> id::clockid_t {
+    let host_clock = unsafe { host::clock() };
+    let Some(darwin_clock) = to_darwin(host_clock) else {
+        panic!("unsupported host clock {}", host_clock);
+    };
+    darwin_clock
+}
+
 /// Empty on macOS, where the guest's clock ids are the host's.
 #[cfg(target_os = "macos")]
 pub fn symbol(_name: &str) -> Option<u64> {
@@ -152,6 +189,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         "clock_gettime" => gettime as *const (),
         "clock_getres" => getres as *const (),
         "clock_gettime_nsec_np" => gettime_nsec_np as *const (),
+        "clock" => clock as *const (),
         _ => return None,
     };
     Some(f as usize as u64)
@@ -179,7 +217,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn darwin_monotonic_is_not_the_host_s_number() {
-        assert_eq!(id::MONOTONIC, libc::CLOCK_MONOTONIC_COARSE as u32);
+        assert_eq!(id::MONOTONIC, libc::CLOCK_MONOTONIC_COARSE as id::clockid_t);
         assert_eq!(translate(id::MONOTONIC), Some(libc::CLOCK_BOOTTIME));
     }
 
@@ -220,7 +258,15 @@ mod tests {
     #[test]
     fn realtime_and_uptime_are_different_timelines() {
         // SAFETY: neither touches caller memory.
-        let (real, up) = unsafe { (gettime_nsec_np(id::REALTIME), gettime_nsec_np(id::UPTIME_RAW)) };
-        assert!(real > up, "the wall clock counts from 1970 and uptime from boot");
+        let (real, up) = unsafe {
+            (
+                gettime_nsec_np(id::REALTIME),
+                gettime_nsec_np(id::UPTIME_RAW),
+            )
+        };
+        assert!(
+            real > up,
+            "the wall clock counts from 1970 and uptime from boot"
+        );
     }
 }
