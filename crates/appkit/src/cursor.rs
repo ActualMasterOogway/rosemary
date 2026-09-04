@@ -150,6 +150,17 @@ fn show(cursor: Id) {
 /// address out again, and a stale match would leave the new cursor unshown.
 static SHOWN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
 
+/// Reinstall the cursor after the native window changed underneath SDL.
+///
+/// Both this module and SDL avoid setting the same cursor twice. A Wayland
+/// resize can invalidate the compositor-side cursor without changing either
+/// cached value, so pass through the default cursor to force a backend update.
+pub fn refresh() {
+    SHOWN.store(usize::MAX, std::sync::atomic::Ordering::Release);
+    sdl3::video::set_cursor(std::ptr::null_mut());
+    apply();
+}
+
 /// Whether `object` is one of this crate's cursors, checked rather than
 /// assumed: `-addCursorRect:cursor:` takes an `id` from the guest.
 fn is_cursor(object: Id) -> bool {

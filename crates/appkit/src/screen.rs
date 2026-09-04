@@ -457,6 +457,25 @@ pub fn apply_mouse_association() {
     }
 }
 
+/// Recreate relative mouse mode after the native window changed underneath
+/// SDL.
+///
+/// On Wayland a resize can destroy the compositor's pointer constraint while
+/// SDL continues to report relative mode as enabled from its local state. An
+/// ordinary [`apply_mouse_association`] then sees no change to make. Toggling
+/// the mode makes SDL discard that stale state and request a new constraint.
+pub fn refresh_mouse_association() {
+    if mouse_is_associated() {
+        apply_mouse_association();
+        return;
+    }
+    sdl3::video::set_hint(sdl3::video::HINT_RELATIVE_CURSOR_VISIBLE, c"1");
+    for window in crate::window::sdl_windows() {
+        sdl3::video::set_relative_mouse_mode(window, false);
+        sdl3::video::set_relative_mouse_mode(window, true);
+    }
+}
+
 /// `bool CGEventSourceKeyState(CGEventSourceStateID, CGKeyCode)`.
 ///
 /// False for every key. This asks the *window server* whether a key is down

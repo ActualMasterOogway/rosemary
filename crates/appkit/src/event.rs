@@ -239,10 +239,11 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             // before the next cursor hit test chooses the wrong cursor.
             // SAFETY: null or the content view of a window this crate made.
             unsafe { crate::cursor::reset_rects_in_tree(content) };
-            // SDL can leave per-window relative mouse mode while it rebuilds
-            // the native window for a resize.  CoreGraphics association is
-            // process-wide, so restore the mode the guest last requested.
-            crate::screen::apply_mouse_association();
+            // Wayland can discard its pointer constraint and cursor surface
+            // while SDL's local state still says both are installed. Force
+            // real backend transitions instead of trusting those caches.
+            crate::screen::refresh_mouse_association();
+            crate::cursor::refresh();
             post(window, window::DID_RESIZE);
         }
         Event::WindowFocus { window, gained } => {
