@@ -271,8 +271,13 @@ const fn swaps() -> bool {
 
 impl DarwinThread {
     /// Enter Darwin code on this thread.
+    ///
+    /// Nothing to do when this thread is inside Darwin code already, and saying
+    /// so is not only an optimisation: a nested guard that saved and restored
+    /// would put the *host's* pointer back while the outer frame was still
+    /// running Darwin code.
     pub fn enter() -> DarwinThread {
-        if !swaps() {
+        if entered() {
             return DarwinThread { saved: None };
         }
         let saved = host_thread_pointer();
@@ -337,6 +342,37 @@ fn set_thread_pointer(base: u64) {
     // value passed. Linux keeps its own thread pointer in `%fs`, so this disturbs
     // nothing the host relies on.
     unsafe { libc::syscall(libc::SYS_arch_prctl, ARCH_SET_GS, base) };
+    INSTALLED.with(|at| at.set(base));
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+thread_local! {
+    /// What this runtime last installed as this thread's Darwin thread pointer.
+    ///
+    /// The register itself can only be read back with another system call, and
+    /// [`entered`] is asked once per call into Darwin code - the guest's
+    /// allocator among them, which is every object this tree makes.
+    ///
+    /// Const-initialised and destructor-free deliberately: a `thread_local!`
+    /// that registers one cannot be touched from a guest thread at all, which
+    /// is the reason [`synthetic_key`] is a raw pthread key.
+    static INSTALLED: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// Whether this thread's thread pointer is the Darwin array already, so a
+/// boundary around a call into Darwin code has nothing to do.
+///
+/// True wherever nothing is swapped: on Darwin the host's array *is* the guest's,
+/// and where [`can_enter_darwin`] is false no boundary can be raised anyway.
+pub fn entered() -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        INSTALLED.with(|at| at.get()) == tsd_base()
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    {
+        !swaps()
+    }
 }
 
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
@@ -410,6 +446,20 @@ mod tests {
             "the host's word is past every slot"
         );
         assert!(PASSES > HOST_THREAD_POINTER && WORDS > PASSES);
+    }
+
+    /// A boundary raised inside Darwin code must leave the array installed when it
+    /// ends: the frame around it is still Darwin's, and putting the host's pointer
+    /// back there is what a saving-and-restoring nested guard used to do.
+    #[test]
+    fn a_nested_boundary_leaves_the_array_installed() {
+        let outer = DarwinThread::enter();
+        assert!(entered());
+        {
+            let _inner = DarwinThread::enter();
+        }
+        assert!(entered(), "the inner boundary took the array away");
+        drop(outer);
     }
 
     /// The boundary must leave the thread pointer exactly as it found it, including

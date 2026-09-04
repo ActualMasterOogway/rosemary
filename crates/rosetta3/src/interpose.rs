@@ -2,6 +2,7 @@
 //! image calls.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use machish::memory::Regions;
 use machish::report::LinkReport;
@@ -159,11 +160,49 @@ pub fn adopt_guest_allocator(report: &LinkReport) {
     let Some((malloc, free)) = guest_allocator(report) else {
         return;
     };
-    objc::allocator::register(malloc as usize, free as usize);
-    darwin::heap::register(malloc as usize, free as usize);
+    GUEST_MALLOC.store(malloc as usize, Ordering::Release);
+    GUEST_FREE.store(free as usize, Ordering::Release);
+    let malloc_entry = malloc_as_darwin as *const () as usize;
+    let free_entry = free_as_darwin as *const () as usize;
+    objc::allocator::register(malloc_entry, free_entry);
+    darwin::heap::register(malloc_entry, free_entry);
     if tracing() {
         eprintln!("rosetta3: interpose: guest allocator malloc {malloc:#x}, free {free:#x}");
     }
+}
+
+/// The guest's own `malloc` and `free`, behind [`malloc_as_darwin`].
+static GUEST_MALLOC: AtomicUsize = AtomicUsize::new(0);
+static GUEST_FREE: AtomicUsize = AtomicUsize::new(0);
+
+/// The guest's allocator, entered with this thread's Darwin thread pointer.
+///
+/// Registered in place of the allocator itself because the allocator is Darwin
+/// machine code and reads the thread pointer directly: mimalloc's `free` decides
+/// between its unsynchronised local free list and the atomic cross-thread one by
+/// comparing the owning thread's identity against `%gs:0`. A pool worker or any
+/// other thread this runtime started has the host's pointer there, so the
+/// comparison is between a real thread and whatever that address holds - and the
+/// allocator either faults on a low address or takes the local path on a page it
+/// does not own. The guard costs nothing on a thread that is inside Darwin code
+/// already, which every guest thread is.
+unsafe extern "C" fn malloc_as_darwin(size: usize) -> *mut std::ffi::c_void {
+    let _darwin = darwin::tls::DarwinThread::enter();
+    // SAFETY: `GUEST_MALLOC` holds the address of the guest's own `malloc`.
+    let malloc: unsafe extern "C" fn(usize) -> *mut std::ffi::c_void =
+        unsafe { std::mem::transmute(GUEST_MALLOC.load(Ordering::Acquire)) };
+    // SAFETY: the caller's size, answered by the allocator the guest also frees with.
+    unsafe { malloc(size) }
+}
+
+/// As [`malloc_as_darwin`], for `free`.
+unsafe extern "C" fn free_as_darwin(block: *mut std::ffi::c_void) {
+    let _darwin = darwin::tls::DarwinThread::enter();
+    // SAFETY: `GUEST_FREE` holds the address of the guest's own `free`.
+    let free: unsafe extern "C" fn(*mut std::ffi::c_void) =
+        unsafe { std::mem::transmute(GUEST_FREE.load(Ordering::Acquire)) };
+    // SAFETY: the caller states the block came from the guest's allocator.
+    unsafe { free(block) };
 }
 
 /// Bindings that name a symbol some *other* binding had interposed, and were left

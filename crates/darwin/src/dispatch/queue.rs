@@ -42,6 +42,12 @@ impl Work {
     /// The block or function is callable from this thread - for guest code, its
     /// pointers have already been replaced by thunks.
     unsafe fn run(self) {
+        // A pool worker is a thread this runtime started, so its thread pointer
+        // is the host's and the block about to run is Darwin code: it reads
+        // `pthread_self`, `errno` and its stack canary straight off the thread
+        // pointer, and its allocator reads a thread identity the same way. Free
+        // on a thread that is inside Darwin code already - the main queue's.
+        let _darwin = crate::tls::DarwinThread::enter();
         match self {
             // SAFETY: the caller's guarantee. The release pairs with the copy that
             // put it on the queue.
