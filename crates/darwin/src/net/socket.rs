@@ -487,17 +487,12 @@ unsafe extern "C" fn recvmsg(fd: i32, message: *mut c_void, flags: i32) -> isize
     }
     if !guest_name.is_null() {
         let mut len = guest_namelen;
-        // The kernel reports the address's length in `msg_namelen`, not in the
-        // buffer, so it has to be moved across before the conversion reads it.
-        received = HostAddr::empty();
-        // SAFETY: both are `STORAGE`-byte buffers this function owns.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                host.msg_name.cast::<u8>(),
-                received.as_mut_ptr().cast::<u8>(),
-                (host.msg_namelen as usize).min(addr::STORAGE),
-            )
-        };
+        // The kernel reports the address's length in `msg_namelen` rather than
+        // beside the bytes, so it is moved into the buffer's own length before
+        // the conversion reads it. The bytes are already there - `msg_name` is
+        // this buffer - so nothing is copied.
+        // SAFETY: the length slot of a buffer this function owns.
+        unsafe { *received.len_mut() = host.msg_namelen.min(addr::STORAGE as u32) };
         // SAFETY: the caller's name buffer, with the length they reserved.
         unsafe { addr::from_host(&received, guest_name, &mut len) };
         // SAFETY: the caller's own `msghdr`.
@@ -984,6 +979,87 @@ mod tests {
 
         // SAFETY: a descriptor this test opened and no longer uses.
         unsafe { libc::close(fd) };
+    }
+
+    /// The sender's address a `recvmsg` reports, which this module used to
+    /// overwrite with zeroes between the call and the conversion.
+    #[test]
+    fn recvmsg_reports_the_senders_address_in_darwins_shape() {
+        /// A Darwin `sockaddr_in` for `127.0.0.1:port`.
+        fn loopback(port: u16) -> [u8; 16] {
+            let mut a = [0u8; 16];
+            a[0] = 16;
+            a[1] = addr::family::INET as u8;
+            a[2..4].copy_from_slice(&port.to_be_bytes());
+            a[4..8].copy_from_slice(&[127, 0, 0, 1]);
+            a
+        }
+
+        // SAFETY: Darwin's `AF_INET`; no caller memory is touched.
+        let (rx, tx) = unsafe {
+            (
+                socket(addr::family::INET, libc::SOCK_DGRAM, 0),
+                socket(addr::family::INET, libc::SOCK_DGRAM, 0),
+            )
+        };
+        assert!(rx >= 0 && tx >= 0, "two datagram sockets");
+
+        let any = loopback(0);
+        // SAFETY: sixteen readable bytes, and the length matches.
+        unsafe {
+            assert_eq!(bind(rx, any.as_ptr().cast(), 16), 0);
+            assert_eq!(bind(tx, any.as_ptr().cast(), 16), 0);
+        }
+
+        let mut bound = [0u8; 16];
+        let mut len = 16u32;
+        // SAFETY: sixteen writable bytes and a live length.
+        assert_eq!(
+            unsafe { getsockname(rx, bound.as_mut_ptr().cast(), &mut len) },
+            0
+        );
+        let mut sender = [0u8; 16];
+        let mut sender_len = 16u32;
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { getsockname(tx, sender.as_mut_ptr().cast(), &mut sender_len) },
+            0
+        );
+
+        // SAFETY: one readable byte and a sixteen-byte address of that length.
+        assert_eq!(
+            unsafe { sendto(tx, c"x".as_ptr().cast(), 1, 0, bound.as_ptr().cast(), 16) },
+            1
+        );
+
+        let mut got = [0u8; 1];
+        let mut iov = libc::iovec {
+            iov_base: got.as_mut_ptr().cast(),
+            iov_len: 1,
+        };
+        let mut name = [0u8; 128];
+        let mut incoming = MsgHdr {
+            name: name.as_mut_ptr().cast(),
+            namelen: 128,
+            iov: &mut iov,
+            iovlen: 1,
+            control: core::ptr::null_mut(),
+            controllen: 0,
+            flags: 0,
+        };
+        // SAFETY: a Darwin `msghdr` this test built, with one writable iovec
+        // and a name buffer of the length it states.
+        assert_eq!(unsafe { recvmsg(rx, (&raw mut incoming).cast(), 0) }, 1);
+        assert_eq!(got, *b"x");
+        assert_eq!(incoming.namelen, 16, "a `sockaddr_in`");
+        assert_eq!(name[1], addr::family::INET as u8, "Darwin's family number");
+        assert_eq!(&name[2..8], &sender[2..8], "the port and address that sent");
+
+        // SAFETY: descriptors this test opened and no longer uses.
+        unsafe {
+            libc::close(rx);
+            libc::close(tx);
+        }
     }
 
     /// The layout claim this module rests on: a guest's `struct msghdr` is
