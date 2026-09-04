@@ -9,3 +9,4 @@ license.workspace = true
 machish.workspace = true
 libc.workspace = true
 static_init.workspace = true
+getrandom.workspace = true

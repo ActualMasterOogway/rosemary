@@ -11,9 +11,9 @@ pub mod divergent;
 pub mod errno;
 pub mod fcntl;
 pub mod heap;
+pub mod ioctl;
 pub mod kqueue;
 pub mod libproc;
-pub mod ioctl;
 pub mod locale;
 pub mod mach;
 pub mod malloc;
@@ -25,7 +25,9 @@ pub mod path;
 pub mod poll;
 pub mod printf_l;
 pub mod pthread;
+pub mod random;
 pub mod rlimit;
+pub mod sched;
 pub mod select;
 pub mod signal;
 pub mod spawn;
@@ -193,6 +195,9 @@ fn implemented(name: &str) -> Option<u64> {
         .or_else(|| pthread::symbol(name))
         .or_else(|| mach::symbol(name))
         .or_else(|| clock::symbol(name))
+        .or_else(|| ioctl_symbol(name))
+        .or_else(|| sched_symbol(name))
+        .or_else(|| random_symbol(name))
         .or_else(|| ulock::symbol(name))
         .or_else(|| spawn::symbol(name))
         .or_else(|| dispatch::symbol(name))
@@ -238,6 +243,42 @@ fn kqueue_symbol(name: &str) -> Option<u64> {
     #[cfg(not(target_os = "macos"))]
     {
         return kqueue::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
+}
+
+fn sched_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return sched::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
+}
+
+fn random_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return random::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
+}
+
+fn ioctl_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return ioctl::symbol(name);
     }
     #[cfg(target_os = "macos")]
     {
@@ -529,6 +570,12 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
     pthread::provide(&mut lib);
     mach::provide(&mut lib);
     clock::provide(&mut lib);
+    #[cfg(not(target_os = "macos"))]
+    sched::provide(&mut lib);
+    #[cfg(not(target_os = "macos"))]
+    random::provide(&mut lib);
+    #[cfg(not(target_os = "macos"))]
+    ioctl::provide(&mut lib);
     ulock::provide(&mut lib);
     spawn::provide(&mut lib);
     dispatch::provide(&mut lib);

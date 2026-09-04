@@ -34,10 +34,7 @@ const LEN: usize = 16;
 /// that can act on the failure, and there is no other channel to report it on.
 fn random() -> [u8; LEN] {
     let mut bytes = [0u8; LEN];
-    // SAFETY: a live local of `LEN` bytes, and the length matches. A short or
-    // failed read leaves the tail zero, which is checked for below.
-    let read = unsafe { libc::getrandom(bytes.as_mut_ptr().cast(), LEN, 0) };
-    if read == LEN as isize {
+    if getrandom::fill(&mut bytes).is_ok() {
         return bytes;
     }
     bytes.fill(0);

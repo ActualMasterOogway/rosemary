@@ -1,33 +1,149 @@
-//! `clock_gettime` and the clock ids it takes, which the two platforms number
-//! differently.
-//!
-//! Only the `clockid_t` diverges - a `struct timespec` is two eight-byte words on
-//! both - but it diverges in the worst possible way, by colliding rather than by
-//! going out of range:
-//!
-//! | | Darwin | Linux |
-//! |---|---|---|
-//! | `CLOCK_MONOTONIC` | 6 | 1 |
-//! | `CLOCK_MONOTONIC_COARSE` | - | 6 |
-//! | `CLOCK_THREAD_CPUTIME_ID` | 16 | 3 |
-//!
-//! So a guest reading Darwin's `CLOCK_MONOTONIC` through the host's `clock_gettime`
-//! is answered from `CLOCK_MONOTONIC_COARSE`: a clock that succeeds, advances, and is
-//! quantised to the timer tick. Frame pacing built on it stutters and nothing reports
-//! an error. Darwin's `CLOCK_THREAD_CPUTIME_ID` is out of range and merely fails.
-//!
-//! The other half of the mapping is that Darwin splits monotonic time by whether it
-//! counts a sleep, where Linux splits it by whether it is NTP-adjusted. Darwin's
-//! `CLOCK_MONOTONIC` runs while the machine sleeps and `CLOCK_UPTIME_RAW` does not,
-//! which is `CLOCK_BOOTTIME` and `CLOCK_MONOTONIC` here. Counting the sleep is the
-//! property a guest actually depends on, so it is what the mapping preserves; the
-//! `_RAW` promise of no frequency adjustment has no host equivalent and is dropped.
-
-// Compiled and tested on macOS, bound to nothing there: Darwin's clock ids are the
-// host's. See [`symbol`].
 #![cfg_attr(target_os = "macos", allow(dead_code))]
 
+#[cfg(not(target_os = "macos"))]
+use std::ffi::c_char;
 use std::ffi::c_void;
+
+/// Darwin's 64-bit `struct timeval` from `<sys/_types/_timeval.h>`.
+///
+/// `tv_usec` is `__darwin_suseconds_t` (`int32_t`); `_pad` is the four bytes
+/// of tail padding required to align an array element to eight bytes.  It is
+/// guest representation only: no host libc call receives this structure.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct Timeval {
+    sec: i64,
+    usec: i32,
+    _pad: i32,
+}
+
+/// Darwin's obsolete `struct timezone`, whose two `int` fields remain part of
+/// the `settimeofday` ABI.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Timezone {
+    minutes_west: i32,
+    dst_time: i32,
+}
+
+impl Timezone {
+    /// # Safety
+    ///
+    /// `value` is readable for one Darwin `timezone`.
+    unsafe fn read(value: *const Self) -> Self {
+        unsafe { value.read_unaligned() }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl Timeval {
+    /// Read a potentially unaligned guest value without imposing Rust's
+    /// alignment requirements on guest memory.
+    ///
+    /// # Safety
+    ///
+    /// `value` is readable for one Darwin `timeval`.
+    pub(crate) unsafe fn read(value: *const Self) -> Self {
+        unsafe { value.read_unaligned() }
+    }
+
+    /// A host-owned timeval suitable for passing to libc.
+    pub(crate) fn host(self) -> libc::timeval {
+        libc::timeval {
+            tv_sec: self.sec,
+            tv_usec: i64::from(self.usec),
+        }
+    }
+}
+
+/// `int gettimeofday(struct timeval *, void *)`.
+unsafe extern "C" fn gettimeofday(out: *mut Timeval, tz: *mut c_void) -> i32 {
+    let mut host = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+    let rc = unsafe { libc::gettimeofday(&mut host, tz.cast()) };
+    if rc == 0 && !out.is_null() {
+        unsafe {
+            out.write(Timeval {
+                sec: host.tv_sec,
+                usec: host.tv_usec as i32,
+                _pad: 0,
+            })
+        };
+    }
+    rc
+}
+
+#[cfg(not(target_os = "macos"))]
+unsafe extern "C" {
+    #[link_name = "utimes"]
+    fn host_utimes(path: *const c_char, times: *const libc::timeval) -> i32;
+    #[link_name = "futimes"]
+    fn host_futimes(fd: i32, times: *const libc::timeval) -> i32;
+    #[link_name = "lutimes"]
+    fn host_lutimes(path: *const c_char, times: *const libc::timeval) -> i32;
+    #[link_name = "settimeofday"]
+    fn host_settimeofday(time: *const libc::timeval, timezone: *const Timezone) -> i32;
+}
+
+/// Convert the two guest values into host-owned storage. A null pointer keeps
+/// the documented "use the current time" meaning and reaches libc as null.
+#[cfg(not(target_os = "macos"))]
+unsafe fn timevals(times: *const Timeval) -> Option<[libc::timeval; 2]> {
+    (!times.is_null()).then(|| unsafe {
+        [
+            Timeval::read(times).host(),
+            Timeval::read(times.add(1)).host(),
+        ]
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+unsafe extern "C" fn utimes(path: *const c_char, times: *const Timeval) -> i32 {
+    let host = unsafe { timevals(times) };
+    unsafe {
+        host_utimes(
+            path,
+            host.as_ref().map_or(core::ptr::null(), |v| v.as_ptr()),
+        )
+    }
+}
+#[cfg(not(target_os = "macos"))]
+unsafe extern "C" fn futimes(fd: i32, times: *const Timeval) -> i32 {
+    let host = unsafe { timevals(times) };
+    unsafe { host_futimes(fd, host.as_ref().map_or(core::ptr::null(), |v| v.as_ptr())) }
+}
+#[cfg(not(target_os = "macos"))]
+unsafe extern "C" fn lutimes(path: *const c_char, times: *const Timeval) -> i32 {
+    let host = unsafe { timevals(times) };
+    unsafe {
+        host_lutimes(
+            path,
+            host.as_ref().map_or(core::ptr::null(), |v| v.as_ptr()),
+        )
+    }
+}
+
+/// `int settimeofday(const struct timeval *, const struct timezone *)`.
+///
+/// This is bridged rather than denied: changing host time is the host analogue
+/// of the Darwin operation, still subject to the host's privilege policy.
+#[cfg(not(target_os = "macos"))]
+unsafe extern "C" fn settimeofday(time: *const Timeval, timezone: *const Timezone) -> i32 {
+    let host_time = (!time.is_null()).then(|| unsafe { Timeval::read(time).host() });
+    let host_timezone = (!timezone.is_null()).then(|| unsafe { Timezone::read(timezone) });
+    unsafe {
+        host_settimeofday(
+            host_time
+                .as_ref()
+                .map_or(core::ptr::null(), core::ptr::from_ref),
+            host_timezone
+                .as_ref()
+                .map_or(core::ptr::null(), core::ptr::from_ref),
+        )
+    }
+}
 
 /// `clockid_t`, from Darwin's `<time.h>`.
 pub mod id {
@@ -194,6 +310,15 @@ pub fn symbol(name: &str) -> Option<u64> {
         "clock_getres" => getres as *const (),
         "clock_gettime_nsec_np" => gettime_nsec_np as *const (),
         "clock" => clock as *const (),
+        "gettimeofday" => gettimeofday as *const (),
+        #[cfg(not(target_os = "macos"))]
+        "utimes" => utimes as *const (),
+        #[cfg(not(target_os = "macos"))]
+        "futimes" => futimes as *const (),
+        #[cfg(not(target_os = "macos"))]
+        "lutimes" => lutimes as *const (),
+        #[cfg(not(target_os = "macos"))]
+        "settimeofday" => settimeofday as *const (),
         _ => return None,
     };
     Some(f as usize as u64)
@@ -210,11 +335,28 @@ pub fn provide(lib: &mut machish::resolve::SyntheticDylib) {
 }
 
 /// Everything [`symbol`] answers.
-pub const NAMES: &[&str] = &["clock_gettime", "clock_getres", "clock_gettime_nsec_np"];
+pub const NAMES: &[&str] = &[
+    "clock_gettime",
+    "clock_getres",
+    "clock_gettime_nsec_np",
+    "gettimeofday",
+    "utimes",
+    "futimes",
+    "lutimes",
+    "settimeofday",
+];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// macOS SDK `<sys/_types/_timeval.h>` declares `long` then `int32_t`.
+    #[test]
+    fn timeval_matches_the_64_bit_darwin_sdk_abi() {
+        assert_eq!(core::mem::size_of::<Timeval>(), 16);
+        assert_eq!(core::mem::offset_of!(Timeval, sec), 0);
+        assert_eq!(core::mem::offset_of!(Timeval, usec), 8);
+    }
 
     /// The collision this module exists for: Darwin's monotonic id is the host's
     /// coarse monotonic, so the mapping must not be the identity.

@@ -26,6 +26,7 @@ use machish::resolve::SyntheticDylib;
 pub mod addr;
 pub mod control;
 pub mod ifaddrs;
+pub mod interface;
 pub mod resolve;
 pub mod socket;
 pub mod sockopt;
@@ -37,6 +38,7 @@ pub fn names() -> impl Iterator<Item = &'static str> {
         .chain(sockopt::NAMES)
         .chain(resolve::NAMES)
         .chain(ifaddrs::NAMES)
+        .chain(interface::NAMES)
         .copied()
 }
 
@@ -45,6 +47,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         .or_else(|| sockopt::symbol(name))
         .or_else(|| resolve::symbol(name))
         .or_else(|| ifaddrs::symbol(name))
+        .or_else(|| interface::symbol(name))
 }
 
 pub fn provide(lib: &mut SyntheticDylib) {
@@ -55,6 +58,12 @@ pub fn provide(lib: &mut SyntheticDylib) {
             symbol(name).unwrap_or(0) as *const (),
         );
     }
+    crate::define_data(lib, "_in6addr_any", interface::ANY.as_ptr() as u64);
+    crate::define_data(
+        lib,
+        "_in6addr_loopback",
+        interface::LOOPBACK.as_ptr() as u64,
+    );
 }
 
 #[cfg(test)]

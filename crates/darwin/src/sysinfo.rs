@@ -7,6 +7,107 @@ use crate::sysctl::{
     CTL_HW, CTL_KERN, HW_MACHINE, KERN_HOSTNAME, KERN_OSRELEASE, KERN_OSTYPE, KERN_VERSION,
 };
 
+#[cfg(not(target_os = "macos"))]
+#[repr(C)]
+struct Rusage {
+    utime: [i64; 2],
+    stime: [i64; 2],
+    counters: [i64; 14],
+}
+
+/// `getrusage` converts Darwin's 32-bit `tv_usec` fields and byte-valued
+/// `ru_maxrss` instead of exposing Linux's layout and KiB count.
+#[cfg(not(target_os = "macos"))]
+unsafe extern "C" fn getrusage(who: i32, out: *mut Rusage) -> i32 {
+    if out.is_null() {
+        crate::errno::set(libc::EFAULT);
+        return -1;
+    }
+    let mut host = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    if unsafe { libc::getrusage(who, host.as_mut_ptr()) } != 0 {
+        return -1;
+    }
+    let host = unsafe { host.assume_init() };
+    let mut counters = [
+        host.ru_maxrss.saturating_mul(1024),
+        host.ru_ixrss,
+        host.ru_idrss,
+        host.ru_isrss,
+        host.ru_minflt,
+        host.ru_majflt,
+        host.ru_nswap,
+        host.ru_inblock,
+        host.ru_oublock,
+        host.ru_msgsnd,
+        host.ru_msgrcv,
+        host.ru_nsignals,
+        host.ru_nvcsw,
+        host.ru_nivcsw,
+    ];
+    // The array is explicitly Darwin's fourteen `long` counters.
+    unsafe {
+        out.write(Rusage {
+            utime: [
+                host.ru_utime.tv_sec,
+                i64::from(host.ru_utime.tv_usec as i32),
+            ],
+            stime: [
+                host.ru_stime.tv_sec,
+                i64::from(host.ru_stime.tv_usec as i32),
+            ],
+            counters,
+        })
+    };
+    0
+}
+
+#[cfg(not(target_os = "macos"))]
+const PATHCONF: &[(i32, i32)] = &[
+    (1, libc::_PC_LINK_MAX),
+    (2, libc::_PC_MAX_CANON),
+    (3, libc::_PC_MAX_INPUT),
+    (4, libc::_PC_NAME_MAX),
+    (5, libc::_PC_PATH_MAX),
+    (6, libc::_PC_PIPE_BUF),
+    (7, libc::_PC_CHOWN_RESTRICTED),
+    (8, libc::_PC_NO_TRUNC),
+    (9, libc::_PC_VDISABLE),
+    (10, libc::_PC_SYMLINK_MAX),
+];
+#[cfg(not(target_os = "macos"))]
+fn pathconf_name(name: i32) -> Option<i32> {
+    PATHCONF.iter().find(|(d, _)| *d == name).map(|(_, h)| *h)
+}
+#[cfg(not(target_os = "macos"))]
+unsafe extern "C" fn pathconf(path: *const libc::c_char, name: i32) -> i64 {
+    match pathconf_name(name) {
+        Some(name) => unsafe { libc::pathconf(path, name) as i64 },
+        None => {
+            crate::errno::set(libc::EINVAL);
+            -1
+        }
+    }
+}
+#[cfg(not(target_os = "macos"))]
+unsafe extern "C" fn fpathconf(fd: i32, name: i32) -> i64 {
+    match pathconf_name(name) {
+        Some(name) => unsafe { libc::fpathconf(fd, name) as i64 },
+        None => {
+            crate::errno::set(libc::EINVAL);
+            -1
+        }
+    }
+}
+#[cfg(not(target_os = "macos"))]
+unsafe extern "C" fn confstr(name: i32, out: *mut libc::c_char, len: usize) -> usize {
+    if name == 1 {
+        unsafe { libc::confstr(libc::_CS_PATH, out, len) }
+    } else {
+        crate::errno::set(libc::EINVAL);
+        0
+    }
+}
+
 /// `_SYS_NAMELEN`, the width of every field in Darwin's `struct utsname`.
 ///
 /// The reason `uname` cannot be passed through on Linux: glibc's fields are 65 bytes
@@ -364,7 +465,16 @@ fn names() -> &'static [&'static str] {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        &["uname", "compat_mode", "Gestalt", "sysconf"]
+        &[
+            "uname",
+            "compat_mode",
+            "Gestalt",
+            "sysconf",
+            "getrusage",
+            "pathconf",
+            "fpathconf",
+            "confstr",
+        ]
     }
 }
 
@@ -376,6 +486,14 @@ pub fn symbol(name: &str) -> Option<u64> {
         "Gestalt" => gestalt as *const (),
         #[cfg(not(target_os = "macos"))]
         "sysconf" => sysconf as *const (),
+        #[cfg(not(target_os = "macos"))]
+        "getrusage" => getrusage as *const (),
+        #[cfg(not(target_os = "macos"))]
+        "pathconf" => pathconf as *const (),
+        #[cfg(not(target_os = "macos"))]
+        "fpathconf" => fpathconf as *const (),
+        #[cfg(not(target_os = "macos"))]
+        "confstr" => confstr as *const (),
         _ => return None,
     };
     Some(f as usize as u64)

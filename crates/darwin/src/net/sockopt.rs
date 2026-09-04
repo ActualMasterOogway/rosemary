@@ -316,13 +316,9 @@ fn is_timeval(level: i32, name: i32) -> bool {
 ///
 /// `value` is at least sixteen readable bytes.
 pub(crate) unsafe fn timeval_to_host(value: *const c_void) -> libc::timeval {
-    // SAFETY: the caller's guarantee; both fields are read at Darwin's offsets.
-    unsafe {
-        libc::timeval {
-            tv_sec: value.cast::<i64>().read_unaligned(),
-            tv_usec: i64::from(value.cast::<u8>().add(8).cast::<i32>().read_unaligned()),
-        }
-    }
+    // SAFETY: the caller's guarantee; `Timeval::read` performs an unaligned
+    // read of the shared Darwin guest representation.
+    unsafe { crate::clock::Timeval::read(value.cast()).host() }
 }
 
 /// `int setsockopt(int, int, int, const void *, socklen_t)`
