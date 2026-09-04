@@ -640,7 +640,7 @@ pub(crate) mod class {
 
     unsafe extern "C" fn executable_url(receiver: Id, _sel: Sel) -> Id {
         // SAFETY: as above. Not a directory: this one names the binary.
-        let Some(path) = (unsafe { layout_of(receiver) }.map(|b| b.executable.clone())) else {
+        let Some(path) = unsafe { layout_of(receiver) }.map(|b| b.executable.clone()) else {
             return std::ptr::null_mut();
         };
         // SAFETY: a URL this call just made.

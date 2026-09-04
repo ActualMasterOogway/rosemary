@@ -28,7 +28,7 @@ unsafe extern "C" fn getrusage(who: i32, out: *mut Rusage) -> i32 {
         return -1;
     }
     let host = unsafe { host.assume_init() };
-    let mut counters = [
+    let counters = [
         host.ru_maxrss.saturating_mul(1024),
         host.ru_ixrss,
         host.ru_idrss,

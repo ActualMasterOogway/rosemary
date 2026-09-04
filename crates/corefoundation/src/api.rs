@@ -978,7 +978,7 @@ pub unsafe extern "C" fn CFDataCreate(
 /// `CFData`, and the copy of it goes straight back into `UCKeyTranslate` - so
 /// the copy has to be Apple's too. See [`crate::foreign`].
 pub unsafe extern "C" fn CFDataCreateCopy(
-    allocator: CFAllocatorRef,
+    _allocator: CFAllocatorRef,
     data: CFTypeRef,
 ) -> CFTypeRef {
     #[cfg(target_os = "macos")]
