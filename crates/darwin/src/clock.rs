@@ -76,6 +76,10 @@ mod host {
     pub const WITHOUT_SLEEP_COARSE: clockid_t = libc::CLOCK_MONOTONIC;
     pub const PROCESS_CPU: clockid_t = libc::CLOCK_PROCESS_CPUTIME_ID;
     pub const THREAD_CPU: clockid_t = libc::CLOCK_THREAD_CPUTIME_ID;
+
+    unsafe extern "C" {
+        pub fn clock() -> clockid_t;
+    }
 }
 
 const CLOCK_MAPPING: [(id::clockid_t, libc::clockid_t); 8] = [
