@@ -145,6 +145,7 @@ struct Api {
     SDL_SetCursor: Option<unsafe extern "C" fn(Cursor) -> bool>,
     SDL_GetDefaultCursor: Option<unsafe extern "C" fn() -> Cursor>,
     SDL_DestroyCursor: Option<unsafe extern "C" fn(Cursor)>,
+    SDL_GetMouseState: Option<unsafe extern "C" fn(*mut f32, *mut f32) -> u32>,
     SDL_GetGlobalMouseState: Option<unsafe extern "C" fn(*mut f32, *mut f32) -> u32>,
     SDL_WarpMouseGlobal: Option<unsafe extern "C" fn(f32, f32) -> bool>,
     SDL_SetWindowRelativeMouseMode: Option<unsafe extern "C" fn(Window, bool) -> bool>,
@@ -299,6 +300,7 @@ fn api() -> Option<&'static Api> {
             SDL_SetCursor,
             SDL_GetDefaultCursor,
             SDL_DestroyCursor,
+            SDL_GetMouseState,
             SDL_GetGlobalMouseState,
             SDL_WarpMouseGlobal,
             SDL_SetWindowRelativeMouseMode,
@@ -846,6 +848,8 @@ pub mod video {
     pub mod event_type {
         pub const QUIT: u32 = 0x100;
         pub const WINDOW_RESIZED: u32 = 0x206;
+        pub const WINDOW_MOUSE_ENTER: u32 = 0x20c;
+        pub const WINDOW_MOUSE_LEAVE: u32 = 0x20d;
         pub const WINDOW_FOCUS_GAINED: u32 = 0x20e;
         pub const WINDOW_FOCUS_LOST: u32 = 0x20f;
         pub const WINDOW_CLOSE_REQUESTED: u32 = 0x210;
@@ -980,6 +984,10 @@ pub mod video {
             window: u32,
             gained: bool,
         },
+        WindowMouse {
+            window: u32,
+            entered: bool,
+        },
         Key {
             window: u32,
             scancode: u32,
@@ -1064,6 +1072,13 @@ pub mod video {
                     Event::WindowFocus {
                         window: e.window,
                         gained: tag == event_type::WINDOW_FOCUS_GAINED,
+                    }
+                }
+                event_type::WINDOW_MOUSE_ENTER | event_type::WINDOW_MOUSE_LEAVE => {
+                    let e: WindowEvent = decode(&raw);
+                    Event::WindowMouse {
+                        window: e.window,
+                        entered: tag == event_type::WINDOW_MOUSE_ENTER,
                     }
                 }
                 event_type::KEY_DOWN | event_type::KEY_UP => {
@@ -1567,6 +1582,15 @@ pub mod video {
     /// The pointer in desktop coordinates, and which buttons are down.
     pub fn global_mouse_state() -> Option<(f32, f32, u32)> {
         let f = api()?.SDL_GetGlobalMouseState?;
+        let (mut x, mut y) = (0.0, 0.0);
+        // SAFETY: two writable floats.
+        let buttons = unsafe { f(&mut x, &mut y) };
+        Some((x, y, buttons))
+    }
+
+    /// The pointer in the focused window's coordinates, and held buttons.
+    pub fn mouse_state() -> Option<(f32, f32, u32)> {
+        let f = api()?.SDL_GetMouseState?;
         let (mut x, mut y) = (0.0, 0.0);
         // SAFETY: two writable floats.
         let buttons = unsafe { f(&mut x, &mut y) };

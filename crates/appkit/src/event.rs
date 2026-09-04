@@ -239,12 +239,32 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             // before the next cursor hit test chooses the wrong cursor.
             // SAFETY: null or the content view of a window this crate made.
             unsafe { crate::cursor::reset_rects_in_tree(content) };
-            // Wayland can discard its pointer constraint and cursor surface
-            // while SDL's local state still says both are installed. Force
-            // real backend transitions instead of trusting those caches.
-            crate::screen::refresh_mouse_association();
-            crate::cursor::refresh();
             post(window, window::DID_RESIZE);
+        }
+        Event::WindowMouse { window, entered } => {
+            // A resize is performed from outside the client area. SDL reports
+            // the resulting leave and re-entry as window events rather than
+            // mouse-motion events; dropping them leaves an NSTrackingArea
+            // owner believing the pointer is outside forever.
+            let at = match entered {
+                true => sdl3::video::mouse_state()
+                    .map(|(x, y, _)| track_pointer(x, y))
+                    .unwrap_or_else(|| *POINTER.lock().unwrap_or_else(|e| e.into_inner())),
+                // SDL may already report an outside coordinate on leave. The
+                // last motion is the view the pointer is leaving.
+                false => *POINTER.lock().unwrap_or_else(|e| e.into_inner()),
+            };
+            send(window, Some(at), |window, location| Fields {
+                kind: match entered {
+                    true => kind::MOUSE_ENTERED,
+                    false => kind::MOUSE_EXITED,
+                },
+                modifiers: current_modifiers(),
+                location,
+                window,
+                ..Fields::default()
+            });
+            crate::cursor::apply();
         }
         Event::WindowFocus { window, gained } => {
             let object = object_for(window);
