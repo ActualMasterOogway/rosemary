@@ -74,6 +74,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         .or_else(|| bundle::cf::symbol(name))
         .or_else(|| notification::cf::symbol(name))
         .or_else(|| keychain::symbol(name))
+        .or_else(|| locale::cf::symbol(name))
 }
 
 /// Every name [`symbol`] answers.
@@ -83,6 +84,7 @@ pub fn names() -> impl Iterator<Item = &'static str> {
         .chain(bundle::cf::NAMES)
         .chain(notification::cf::NAMES)
         .chain(keychain::NAMES)
+        .chain(locale::cf::NAMES)
         .copied()
 }
 

@@ -20,7 +20,7 @@ use sdl3::keycodes::{keymod, scancode};
 /// copy of it to generate them from, so they are transcribed - which is why the
 /// tests below check the ones a person is most likely to have got wrong.
 #[rustfmt::skip]
-mod vk {
+pub mod vk {
     pub const ANSI_A: u16 = 0x00; pub const ANSI_S: u16 = 0x01;
     pub const ANSI_D: u16 = 0x02; pub const ANSI_F: u16 = 0x03;
     pub const ANSI_H: u16 = 0x04; pub const ANSI_G: u16 = 0x05;

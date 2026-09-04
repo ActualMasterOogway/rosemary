@@ -66,6 +66,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFStringCreateWithCString" => at!(api::CFStringCreateWithCString),
         "CFStringCreateWithCStringNoCopy" => at!(api::CFStringCreateWithCStringNoCopy),
         "CFStringCreateWithBytes" => at!(api::CFStringCreateWithBytes),
+        "CFStringCreateWithCharacters" => at!(api::CFStringCreateWithCharacters),
         "CFStringCreateCopy" => at!(api::CFStringCreateCopy),
         "CFStringGetLength" => at!(api::CFStringGetLength),
         "CFStringGetMaximumSizeForEncoding" => at!(api::CFStringGetMaximumSizeForEncoding),
@@ -74,6 +75,13 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFStringGetBytes" => at!(api::CFStringGetBytes),
         "CFStringCompare" => at!(api::CFStringCompare),
         "CFStringCreateMutable" => at!(api::CFStringCreateMutable),
+        "CFStringCreateMutableCopy" => at!(api::CFStringCreateMutableCopy),
+        "CFStringUppercase" => at!(api::CFStringUppercase),
+        "CFStringLowercase" => at!(api::CFStringLowercase),
+        "CFStringGetCharacterAtIndex" => at!(api::CFStringGetCharacterAtIndex),
+        "CFStringGetCharacters" => at!(api::CFStringGetCharacters),
+        "CFStringGetCharactersPtr" => at!(api::CFStringGetCharactersPtr),
+        "CFStringAppendCharacters" => at!(api::CFStringAppendCharacters),
         "CFStringAppend" => at!(api::CFStringAppend),
         "CFStringAppendCString" => at!(api::CFStringAppendCString),
 
@@ -157,6 +165,7 @@ pub const NAMES: &[&str] = &[
     "CFStringCreateWithCString",
     "CFStringCreateWithCStringNoCopy",
     "CFStringCreateWithBytes",
+    "CFStringCreateWithCharacters",
     "CFStringCreateCopy",
     "CFStringGetLength",
     "CFStringGetMaximumSizeForEncoding",
@@ -165,6 +174,13 @@ pub const NAMES: &[&str] = &[
     "CFStringGetBytes",
     "CFStringCompare",
     "CFStringCreateMutable",
+    "CFStringCreateMutableCopy",
+    "CFStringUppercase",
+    "CFStringLowercase",
+    "CFStringGetCharacterAtIndex",
+    "CFStringGetCharacters",
+    "CFStringGetCharactersPtr",
+    "CFStringAppendCharacters",
     "CFStringAppend",
     "CFStringAppendCString",
     "CFArrayGetTypeID",
@@ -434,6 +450,324 @@ mod tests {
             assert_eq!(
                 std::ffi::CStr::from_ptr(buf.as_ptr()).to_bytes(),
                 b"fmodstudio"
+            );
+            api::CFRelease(s);
+        }
+    }
+
+    /// The characters a caller passes are the characters it gets back, counted
+    /// in code units rather than in the bytes they encode to.
+    #[test]
+    fn a_string_is_built_from_code_units_and_keeps_them() {
+        bootstrap();
+        // "hi" then U+00E9 and U+4E2D - one byte, two and three in UTF-8, so a
+        // length in bytes and one in characters cannot agree.
+        let text = "hi\u{00E9}\u{4E2D}";
+        let units: Vec<u16> = text.encode_utf16().collect();
+        // SAFETY: a live buffer described by the count that follows it.
+        unsafe {
+            let s = api::CFStringCreateWithCharacters(
+                std::ptr::null(),
+                units.as_ptr(),
+                units.len() as base::CFIndex,
+            );
+            assert!(!s.is_null());
+            assert_eq!(api::CFStringGetLength(s), 4, "characters, not bytes");
+            let read = string::as_string(s).expect("a string");
+            assert!(read.is_wide());
+            assert_eq!(read.utf16(), units);
+            assert_eq!(read.utf8(), text.as_bytes());
+
+            // A copy is the same string, still measured in characters.
+            let copy = api::CFStringCreateCopy(std::ptr::null(), s);
+            assert_eq!(api::CFStringGetLength(copy), 4);
+            assert_eq!(api::CFEqual(s, copy), 1);
+            api::CFRelease(copy);
+            api::CFRelease(s);
+        }
+    }
+
+    /// No characters is the empty string; a negative count and a null pointer
+    /// with characters to read are refused.
+    #[test]
+    fn a_string_of_no_characters_is_empty_rather_than_null() {
+        bootstrap();
+        // SAFETY: null with a zero count reads nothing.
+        unsafe {
+            let empty = api::CFStringCreateWithCharacters(std::ptr::null(), std::ptr::null(), 0);
+            assert!(!empty.is_null());
+            assert_eq!(api::CFStringGetLength(empty), 0);
+            api::CFRelease(empty);
+            assert!(
+                api::CFStringCreateWithCharacters(std::ptr::null(), std::ptr::null(), 4).is_null(),
+                "there is nothing to read at null"
+            );
+            let units = [b'a' as u16];
+            assert!(
+                api::CFStringCreateWithCharacters(std::ptr::null(), units.as_ptr(), -1).is_null(),
+                "a negative count is not a length"
+            );
+        }
+    }
+
+    /// A mutable copy is a separate, writable string that starts out equal -
+    /// and stays measured the way the original was.
+    #[test]
+    fn a_mutable_copy_is_independent_and_keeps_its_characters() {
+        bootstrap();
+        let text = "caf\u{00E9}";
+        let units: Vec<u16> = text.encode_utf16().collect();
+        // SAFETY: a live buffer, and strings this test made.
+        unsafe {
+            let original = api::CFStringCreateWithCharacters(
+                std::ptr::null(),
+                units.as_ptr(),
+                units.len() as base::CFIndex,
+            );
+            let copy = api::CFStringCreateMutableCopy(std::ptr::null(), 0, original);
+            assert!(!copy.is_null());
+            assert_eq!(api::CFEqual(original, copy), 1);
+            assert_eq!(api::CFStringGetLength(copy), 4, "characters, not bytes");
+
+            api::CFStringAppendCString(copy, c" au lait".as_ptr(), string::encoding::UTF8);
+            assert_eq!(
+                api::CFStringGetLength(copy),
+                12,
+                "the append is counted in characters too"
+            );
+            assert_eq!(
+                string::as_string(copy).unwrap().utf8(),
+                "caf\u{00E9} au lait".as_bytes()
+            );
+            // The original is untouched: a copy shares no storage with it.
+            assert_eq!(api::CFStringGetLength(original), 4);
+            assert_eq!(api::CFEqual(original, copy), 0);
+            api::CFRelease(copy);
+            api::CFRelease(original);
+        }
+    }
+
+    /// The 8-bit path, which is what almost every guest copies, and the two
+    /// arguments that are not a string.
+    #[test]
+    fn a_mutable_copy_of_an_ordinary_string_appends() {
+        bootstrap();
+        // SAFETY: a literal, and null in place of a string.
+        unsafe {
+            let original = api::CFStringCreateWithCString(
+                std::ptr::null(),
+                c"abc".as_ptr(),
+                string::encoding::UTF8,
+            );
+            // A maximum length is ignored, as `CFStringCreateMutable`'s is.
+            let copy = api::CFStringCreateMutableCopy(std::ptr::null(), 4, original);
+            api::CFStringAppendCString(copy, c"defgh".as_ptr(), string::encoding::UTF8);
+            assert_eq!(string::as_string(copy).unwrap().utf8(), b"abcdefgh");
+            api::CFRelease(copy);
+            api::CFRelease(original);
+            assert!(
+                api::CFStringCreateMutableCopy(std::ptr::null(), 0, std::ptr::null()).is_null(),
+                "there is nothing to copy"
+            );
+        }
+    }
+
+    /// Case mapping is Unicode's, in whichever representation the string has,
+    /// and only a mutable string is rewritten.
+    #[test]
+    fn a_mutable_string_is_recased_in_place() {
+        bootstrap();
+        // SAFETY: strings this test made, and a null locale.
+        unsafe {
+            let s = api::CFStringCreateWithCString(
+                std::ptr::null(),
+                c"Stra\xc3\x9fe".as_ptr(),
+                string::encoding::UTF8,
+            );
+            let copy = api::CFStringCreateMutableCopy(std::ptr::null(), 0, s);
+            api::CFStringUppercase(copy, std::ptr::null());
+            assert_eq!(
+                string::as_string(copy).unwrap().utf8(),
+                "STRASSE".as_bytes(),
+                "the full mapping, so the sharp s becomes two letters"
+            );
+            api::CFStringLowercase(copy, std::ptr::null());
+            assert_eq!(string::as_string(copy).unwrap().utf8(), b"strasse");
+
+            // An immutable string is left alone rather than written through.
+            api::CFStringUppercase(s, std::ptr::null());
+            assert_eq!(string::as_string(s).unwrap().utf8(), "Stra\u{00DF}e".as_bytes());
+            api::CFRelease(copy);
+            api::CFRelease(s);
+
+            // The wide path, which stays wide and stays counted in characters.
+            let units: Vec<u16> = "caf\u{00E9}".encode_utf16().collect();
+            let wide = api::CFStringCreateWithCharacters(
+                std::ptr::null(),
+                units.as_ptr(),
+                units.len() as base::CFIndex,
+            );
+            let wide = api::CFStringCreateMutableCopy(std::ptr::null(), 0, wide);
+            api::CFStringUppercase(wide, std::ptr::null());
+            let read = string::as_string(wide).unwrap();
+            assert!(read.is_wide());
+            assert_eq!(api::CFStringGetLength(wide), 4);
+            assert_eq!(read.utf8(), "CAF\u{00C9}".as_bytes());
+            api::CFRelease(wide);
+        }
+    }
+
+    /// The characters come back the way they went in, and a range outside the
+    /// string writes nothing rather than a short answer.
+    #[test]
+    fn the_characters_are_read_back_by_index_and_by_range() {
+        bootstrap();
+        let units: Vec<u16> = "caf\u{00E9}s".encode_utf16().collect();
+        // SAFETY: a live buffer, and out-parameters sized below.
+        unsafe {
+            let s = api::CFStringCreateWithCharacters(
+                std::ptr::null(),
+                units.as_ptr(),
+                units.len() as base::CFIndex,
+            );
+            assert_eq!(api::CFStringGetCharacterAtIndex(s, 3), 0x00E9);
+            assert_eq!(api::CFStringGetCharacterAtIndex(s, 5), 0, "past the end");
+            assert_eq!(api::CFStringGetCharacterAtIndex(s, -1), 0);
+
+            let mut buffer = [0u16; 8];
+            api::CFStringGetCharacters(s, 1, 3, buffer.as_mut_ptr());
+            assert_eq!(&buffer[..3], &units[1..4]);
+            buffer = [0u16; 8];
+            api::CFStringGetCharacters(s, 3, 4, buffer.as_mut_ptr());
+            assert_eq!(buffer, [0u16; 8], "a range past the end writes nothing");
+
+            // The pointer is only handed out when it costs nothing.
+            assert!(!api::CFStringGetCharactersPtr(s).is_null());
+            let eight_bit = api::CFStringCreateWithCString(
+                std::ptr::null(),
+                c"abc".as_ptr(),
+                string::encoding::UTF8,
+            );
+            assert!(api::CFStringGetCharactersPtr(eight_bit).is_null());
+
+            // Appending characters keeps the target wide.
+            let mutable = api::CFStringCreateMutableCopy(std::ptr::null(), 0, s);
+            let tail: Vec<u16> = "!".encode_utf16().collect();
+            api::CFStringAppendCharacters(mutable, tail.as_ptr(), 1);
+            assert_eq!(api::CFStringGetLength(mutable), 6);
+            assert!(string::as_string(mutable).unwrap().is_wide());
+
+            api::CFRelease(mutable);
+            api::CFRelease(eight_bit);
+            api::CFRelease(s);
+        }
+    }
+
+    /// `CFStringGetBytes` in UTF-16: the byte order the encoding names, a mark
+    /// only where Apple writes one, and a character count that is not the byte
+    /// count.
+    #[test]
+    fn the_bytes_can_be_asked_for_as_utf16() {
+        bootstrap();
+        let units: Vec<u16> = "hi\u{00E9}".encode_utf16().collect();
+        // SAFETY: a live buffer and out-parameters sized here.
+        unsafe {
+            let s = api::CFStringCreateWithCharacters(
+                std::ptr::null(),
+                units.as_ptr(),
+                units.len() as base::CFIndex,
+            );
+            let mut buffer = [0u8; 16];
+            let mut used = 0;
+            let converted = api::CFStringGetBytes(
+                s,
+                0,
+                3,
+                string::encoding::UTF16_BE,
+                0,
+                0,
+                buffer.as_mut_ptr(),
+                buffer.len() as base::CFIndex,
+                &mut used,
+            );
+            assert_eq!(converted, 3, "characters, not bytes");
+            assert_eq!(used, 6);
+            assert_eq!(&buffer[..6], &[0, b'h', 0, b'i', 0x00, 0xE9]);
+
+            // The external representation of the order-less encoding carries a
+            // byte-order mark, and the mark is not a character.
+            let mut used = 0;
+            let converted = api::CFStringGetBytes(
+                s,
+                0,
+                3,
+                string::encoding::UTF16,
+                0,
+                1,
+                buffer.as_mut_ptr(),
+                buffer.len() as base::CFIndex,
+                &mut used,
+            );
+            assert_eq!(converted, 3);
+            assert_eq!(used, 8);
+            assert_eq!(&buffer[..4], &[0xFF, 0xFE, b'h', 0]);
+
+            // A buffer that holds one and a half characters holds one.
+            let mut used = 0;
+            let converted = api::CFStringGetBytes(
+                s,
+                0,
+                3,
+                string::encoding::UTF16_LE,
+                0,
+                0,
+                buffer.as_mut_ptr(),
+                3,
+                &mut used,
+            );
+            assert_eq!(converted, 1, "half a character is not a character");
+            assert_eq!(used, 2);
+
+            // A null buffer is the question of how much room is needed.
+            let mut used = 0;
+            api::CFStringGetBytes(
+                s,
+                0,
+                3,
+                string::encoding::UTF16,
+                0,
+                0,
+                std::ptr::null_mut(),
+                0,
+                &mut used,
+            );
+            assert_eq!(used, 6);
+            api::CFRelease(s);
+        }
+    }
+
+    /// `-UTF8String` has to answer for a wide string too, where
+    /// `CFStringGetCStringPtr` correctly does not.
+    #[test]
+    fn a_wide_string_still_answers_utf8_string() {
+        bootstrap();
+        let units: Vec<u16> = "caf\u{00E9}".encode_utf16().collect();
+        // SAFETY: a live buffer, and a message to a string.
+        unsafe {
+            let s = api::CFStringCreateWithCharacters(
+                std::ptr::null(),
+                units.as_ptr(),
+                units.len() as base::CFIndex,
+            );
+            assert!(
+                api::CFStringGetCStringPtr(s, string::encoding::UTF8).is_null(),
+                "the answer is not free, so there is none"
+            );
+            let text = send::send0_usize(s as objc::object::Id, objc::sel::get("UTF8String"));
+            assert_ne!(text, 0, "but -UTF8String always has one");
+            assert_eq!(
+                std::ffi::CStr::from_ptr(text as *const c_char).to_bytes(),
+                "caf\u{00E9}".as_bytes()
             );
             api::CFRelease(s);
         }

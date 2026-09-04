@@ -174,6 +174,36 @@ pub unsafe extern "C" fn CFStringCreateWithBytes(
     string::from_encoded(slice, encoding)
 }
 
+/// `CFStringRef CFStringCreateWithCharacters(CFAllocatorRef, const UniChar *,
+/// CFIndex numChars)`.
+///
+/// The characters are UTF-16 in this machine's order, and are kept that way: a
+/// string built from code units is asked for its code units back, and going
+/// through UTF-8 would lose an unpaired surrogate that a caller put there.
+///
+/// No characters is the empty string rather than null - `numChars` of zero is
+/// how a caller spells one, and there is nothing to read at the pointer.
+pub unsafe extern "C" fn CFStringCreateWithCharacters(
+    _allocator: CFAllocatorRef,
+    chars: *const u16,
+    count: CFIndex,
+) -> CFTypeRef {
+    if count < 0 || (chars.is_null() && count > 0) {
+        return std::ptr::null();
+    }
+    // SAFETY: the caller says `chars` covers `count` code units.
+    let units = match count {
+        0 => &[][..],
+        _ => unsafe { std::slice::from_raw_parts(chars, count as usize) },
+    };
+    string::from_utf16(units)
+}
+
+/// `CFStringCreateCopy`, which keeps the original's representation.
+///
+/// A wide string copied to 8-bit would have its `length` become a count of
+/// UTF-8 bytes rather than of characters, so a caller that copies a string and
+/// asks its length would be told something different about the same characters.
 pub unsafe extern "C" fn CFStringCreateCopy(
     _allocator: CFAllocatorRef,
     original: CFTypeRef,
@@ -182,7 +212,10 @@ pub unsafe extern "C" fn CFStringCreateCopy(
     let Some(s) = (unsafe { string::as_string(original) }) else {
         return std::ptr::null();
     };
-    string::from_bytes(&s.utf8(), false)
+    match s.is_wide() {
+        true => string::from_utf16(&s.utf16()),
+        false => string::from_bytes(&s.utf8(), false),
+    }
 }
 
 pub unsafe extern "C" fn CFStringGetLength(s: CFTypeRef) -> CFIndex {
@@ -274,13 +307,19 @@ pub unsafe extern "C" fn CFStringGetCStringPtr(s: CFTypeRef, encoding: u32) -> *
 }
 
 /// `CFStringGetBytes`: the general form, which reports how much it moved.
+/// `CFStringGetBytes`: the range's characters in an encoding, and how many of
+/// them fit.
+///
+/// The return is *characters converted*, which is not the byte count a caller
+/// gets in `usedBufLen` and is not the whole range either when the buffer runs
+/// out - a caller that trusts one for the other reads past what it was given.
 pub unsafe extern "C" fn CFStringGetBytes(
     s: CFTypeRef,
     range_location: CFIndex,
     range_length: CFIndex,
     encoding: u32,
     _loss_byte: u8,
-    _external_representation: Boolean,
+    external_representation: Boolean,
     buffer: *mut u8,
     max_buffer_length: CFIndex,
     used_buffer_length: *mut CFIndex,
@@ -289,32 +328,65 @@ pub unsafe extern "C" fn CFStringGetBytes(
     let Some(s) = (unsafe { string::as_string(s) }) else {
         return 0;
     };
-    let utf8 = s.utf8();
-    // The range is in characters, which for the strings this runtime builds is
-    // bytes; a wide string is converted first, so the two agree there too.
     let start = range_location.max(0) as usize;
-    if start > utf8.len() {
-        return 0;
-    }
-    let end = (start + range_length.max(0) as usize).min(utf8.len());
-    let wanted = &utf8[start..end];
-    if !matches!(
-        encoding,
+    let length = range_length.max(0) as usize;
+
+    // Bytes to write, and how many bytes one character of them takes: the two
+    // together are what turns a truncated buffer back into a character count.
+    let (wanted, per_character, prefix) = match encoding {
         string::encoding::UTF8
-            | string::encoding::ASCII
-            | string::encoding::ISO_LATIN_1
-            | string::encoding::MAC_ROMAN
-            | string::encoding::WINDOWS_LATIN1
-    ) {
-        return 0;
-    }
+        | string::encoding::ASCII
+        | string::encoding::ISO_LATIN_1
+        | string::encoding::MAC_ROMAN
+        | string::encoding::WINDOWS_LATIN1 => {
+            let utf8 = s.utf8();
+            if start > utf8.len() {
+                return 0;
+            }
+            let end = (start + length).min(utf8.len());
+            (utf8[start..end].to_vec(), 1, 0)
+        }
+        string::encoding::UTF16 | string::encoding::UTF16_BE | string::encoding::UTF16_LE => {
+            let units = s.units();
+            if start > units.len() {
+                return 0;
+            }
+            let end = (start + length).min(units.len());
+            // A byte-order mark, and only where Apple writes one: the plain
+            // UTF-16 encoding asked for as an external representation. The two
+            // explicit orders say their order in their name.
+            let mark = external_representation != 0 && encoding == string::encoding::UTF16;
+            let big_endian = encoding == string::encoding::UTF16_BE;
+            let mut bytes = Vec::with_capacity((end - start) * 2 + 2 * mark as usize);
+            for unit in mark
+                .then_some(0xFEFF_u16)
+                .iter()
+                .chain(&units[start..end])
+            {
+                match big_endian {
+                    true => bytes.extend_from_slice(&unit.to_be_bytes()),
+                    false => bytes.extend_from_slice(&unit.to_le_bytes()),
+                }
+            }
+            (bytes, 2, 2 * mark as usize)
+        }
+        // An encoding with no table here converts nothing, which is what a
+        // caller checking the return against zero already handles.
+        _ => return 0,
+    };
 
     // A null buffer is the caller asking how much room it needs.
     let moved = match buffer.is_null() {
         true => wanted.len(),
         false => {
             let room = max_buffer_length.max(0) as usize;
+            // Whole characters only: half of one is not a character, and the
+            // count returned below has to name what the caller can read.
             let moved = wanted.len().min(room);
+            let moved = match moved >= prefix {
+                true => prefix + (moved - prefix) / per_character * per_character,
+                false => 0,
+            };
             // SAFETY: the caller says `buffer` covers `max_buffer_length`
             // bytes, and `moved` is no more than that.
             unsafe { std::ptr::copy_nonoverlapping(wanted.as_ptr(), buffer, moved) };
@@ -325,7 +397,7 @@ pub unsafe extern "C" fn CFStringGetBytes(
         // SAFETY: the caller's out-parameter.
         unsafe { *used_buffer_length = moved as CFIndex };
     }
-    (end - start) as CFIndex
+    (moved.saturating_sub(prefix) / per_character) as CFIndex
 }
 
 pub unsafe extern "C" fn CFStringCreateMutable(
@@ -338,6 +410,49 @@ pub unsafe extern "C" fn CFStringCreateMutable(
     string::new_mutable()
 }
 
+/// `CFStringCreateMutableCopy(CFAllocatorRef, CFIndex maxLength, CFStringRef)`.
+///
+/// The maximum length is ignored for the reason [`CFStringCreateMutable`]
+/// ignores it. The characters keep the representation the original had, so that
+/// the length of the copy is the length of what it was copied from.
+pub unsafe extern "C" fn CFStringCreateMutableCopy(
+    _allocator: CFAllocatorRef,
+    _max_length: CFIndex,
+    original: CFTypeRef,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation.
+    let Some(s) = (unsafe { string::as_string(original) }) else {
+        return std::ptr::null();
+    };
+    string::new_mutable_copy(s)
+}
+
+/// Add to a mutable string in the representation it already has.
+///
+/// An 8-bit string appended to in code units - or the reverse - would have its
+/// `length` start counting something different from what it counted before.
+///
+/// # Safety
+///
+/// `target` is null or an object this runtime allocated.
+unsafe fn append(target: CFTypeRef, tail_utf8: &[u8]) {
+    // SAFETY: the caller's obligation.
+    let Some(a) = (unsafe { string::as_string(target) }) else {
+        return;
+    };
+    if a.is_wide() {
+        let mut units = a.utf16();
+        units.extend(String::from_utf8_lossy(tail_utf8).encode_utf16());
+        // SAFETY: as above.
+        unsafe { string::set_utf16(target, &units) };
+        return;
+    }
+    let mut joined = a.utf8();
+    joined.extend_from_slice(tail_utf8);
+    // SAFETY: as above.
+    unsafe { string::set_bytes(target, &joined) };
+}
+
 pub unsafe extern "C" fn CFStringAppend(target: CFTypeRef, appended: CFTypeRef) {
     // SAFETY: the caller's obligation.
     let (Some(a), Some(b)) = (unsafe { string::as_string(target) }, unsafe {
@@ -345,10 +460,17 @@ pub unsafe extern "C" fn CFStringAppend(target: CFTypeRef, appended: CFTypeRef) 
     }) else {
         return;
     };
-    let mut joined = a.utf8();
-    joined.extend_from_slice(&b.utf8());
+    // Both wide: the code units go across untouched, so an unpaired surrogate
+    // survives the append rather than becoming a replacement character.
+    if a.is_wide() && b.is_wide() {
+        let mut units = a.utf16();
+        units.extend_from_slice(&b.utf16());
+        // SAFETY: as above.
+        unsafe { string::set_utf16(target, &units) };
+        return;
+    }
     // SAFETY: as above.
-    unsafe { string::set_bytes(target, &joined) };
+    unsafe { append(target, &b.utf8()) };
 }
 
 pub unsafe extern "C" fn CFStringAppendCString(
@@ -357,15 +479,143 @@ pub unsafe extern "C" fn CFStringAppendCString(
     _encoding: u32,
 ) {
     // SAFETY: the caller's obligation.
-    let (Some(a), Some(bytes)) = (unsafe { string::as_string(target) }, unsafe {
-        string::cstr_bytes(cstr)
-    }) else {
+    // SAFETY: the caller's obligation - a NUL-terminated string or null.
+    let Some(bytes) = (unsafe { string::cstr_bytes(cstr) }) else {
         return;
     };
-    let mut joined = a.utf8();
-    joined.extend_from_slice(bytes);
     // SAFETY: as above.
-    unsafe { string::set_bytes(target, &joined) };
+    unsafe { append(target, bytes) };
+}
+
+/// `void CFStringUppercase(CFMutableStringRef, CFLocaleRef locale)`.
+///
+/// The locale is not consulted: this runtime has no case-mapping tables of its
+/// own, so the mapping is Unicode's default one. What that costs is the
+/// language-specific pairs - a Turkish locale uppercases `i` to `I` here where
+/// Apple's gives `U+0130`. Everything else, including the multi-character
+/// mappings such as `ss` to `SS`, is the same answer.
+pub unsafe extern "C" fn CFStringUppercase(target: CFTypeRef, _locale: CFTypeRef) {
+    // SAFETY: the caller's obligation.
+    unsafe { recase(target, str::to_uppercase) }
+}
+
+/// `void CFStringLowercase(CFMutableStringRef, CFLocaleRef locale)`, with the
+/// same treatment of the locale as [`CFStringUppercase`].
+pub unsafe extern "C" fn CFStringLowercase(target: CFTypeRef, _locale: CFTypeRef) {
+    // SAFETY: the caller's obligation.
+    unsafe { recase(target, str::to_lowercase) }
+}
+
+/// Rewrite a mutable string through a case mapping, keeping the representation.
+///
+/// An immutable string is left alone rather than written through: Apple's would
+/// be a crash, and there is nothing this can return to say so.
+///
+/// # Safety
+///
+/// `target` is null or an object this runtime allocated.
+unsafe fn recase(target: CFTypeRef, map: fn(&str) -> String) {
+    // SAFETY: the caller's obligation.
+    let Some(s) = (unsafe { string::as_string(target) }) else {
+        return;
+    };
+    if s.is_wide() {
+        let mapped = map(&String::from_utf16_lossy(&s.utf16()));
+        let units: Vec<u16> = mapped.encode_utf16().collect();
+        // SAFETY: as above.
+        unsafe { string::set_utf16(target, &units) };
+        return;
+    }
+    let mapped = map(&String::from_utf8_lossy(&s.utf8()));
+    // SAFETY: as above.
+    unsafe { string::set_bytes(target, mapped.as_bytes()) };
+}
+
+/// `UniChar CFStringGetCharacterAtIndex(CFStringRef, CFIndex)`.
+///
+/// Zero for an index outside the string, which Apple's would fault on: there is
+/// no character to answer with, and a caller reading past the length it was
+/// given has already lost track of the string.
+pub unsafe extern "C" fn CFStringGetCharacterAtIndex(s: CFTypeRef, index: CFIndex) -> u16 {
+    // SAFETY: the caller's obligation.
+    let Some(s) = (unsafe { string::as_string(s) }) else {
+        return 0;
+    };
+    match usize::try_from(index) {
+        Ok(index) => s.units().get(index).copied().unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+/// `void CFStringGetCharacters(CFStringRef, CFRange, UniChar *buffer)`, with the
+/// range flattened into the two words it is passed in.
+///
+/// A range that is not inside the string writes nothing: the caller sized the
+/// buffer from the range, so writing a shorter answer would leave it reading
+/// characters it never received, and writing a longer one is the overflow.
+pub unsafe extern "C" fn CFStringGetCharacters(
+    s: CFTypeRef,
+    range_location: CFIndex,
+    range_length: CFIndex,
+    buffer: *mut u16,
+) {
+    // SAFETY: the caller's obligation.
+    let Some(s) = (unsafe { string::as_string(s) }) else {
+        return;
+    };
+    let (Ok(start), Ok(count)) = (usize::try_from(range_location), usize::try_from(range_length))
+    else {
+        return;
+    };
+    let units = s.units();
+    if buffer.is_null() || start + count > units.len() {
+        return;
+    }
+    // SAFETY: the caller states `buffer` holds the range's characters, and the
+    // range has just been checked against the string.
+    unsafe { std::ptr::copy_nonoverlapping(units[start..].as_ptr(), buffer, count) };
+}
+
+/// `const UniChar *CFStringGetCharactersPtr(CFStringRef)`.
+///
+/// The same contract as `CFStringGetCStringPtr`: the characters if they are
+/// already there, and null rather than a conversion. An 8-bit string's bytes
+/// are not `UniChar`s, so it has none to point at.
+pub unsafe extern "C" fn CFStringGetCharactersPtr(s: CFTypeRef) -> *const u16 {
+    // SAFETY: the caller's obligation.
+    unsafe { string::as_string(s) }.map_or(std::ptr::null(), |s| s.characters_ptr())
+}
+
+/// `void CFStringAppendCharacters(CFMutableStringRef, const UniChar *, CFIndex)`.
+pub unsafe extern "C" fn CFStringAppendCharacters(
+    target: CFTypeRef,
+    chars: *const u16,
+    count: CFIndex,
+) {
+    let Ok(count) = usize::try_from(count) else {
+        return;
+    };
+    if chars.is_null() && count > 0 {
+        return;
+    }
+    // SAFETY: the caller says `chars` covers `count` code units.
+    let tail = match count {
+        0 => &[][..],
+        _ => unsafe { std::slice::from_raw_parts(chars, count) },
+    };
+    // SAFETY: the caller's obligation.
+    let Some(a) = (unsafe { string::as_string(target) }) else {
+        return;
+    };
+    if a.is_wide() {
+        let mut units = a.utf16();
+        units.extend_from_slice(tail);
+        // SAFETY: as above.
+        unsafe { string::set_utf16(target, &units) };
+        return;
+    }
+    // SAFETY: as above.
+    unsafe { append(target, String::from_utf16_lossy(tail).as_bytes()) };
 }
 
 pub unsafe extern "C" fn CFStringCompare(a: CFTypeRef, b: CFTypeRef, options: u64) -> CFIndex {

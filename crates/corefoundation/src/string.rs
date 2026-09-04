@@ -41,7 +41,8 @@ const MUTABLE: u64 = 0x2000_0000;
 pub struct CFString {
     isa: *const Class,
     flags: u64,
-    /// The bytes: 8-bit and NUL-terminated, or UTF-16 and not.
+    /// The characters, NUL-terminated: 8-bit bytes, or UTF-16 code units when
+    /// `flags` carries `WIDE`.
     str: *const u8,
     /// Characters, not bytes. For an 8-bit string the two are the same.
     length: i64,
@@ -171,13 +172,32 @@ fn install_string_methods(class: &'static Class) {
         unsafe { as_string(receiver as CFTypeRef) }.map_or(0, |s| s.length() as usize)
     }
 
+    /// `-UTF8String`, which never answers null for a string that has
+    /// characters - unlike `CFStringGetCStringPtr`, whose contract is that the
+    /// answer is free or there is none.
+    ///
+    /// A wide string has no NUL-terminated UTF-8 to point at, so one is made and
+    /// autoreleased: the caller is entitled to use it until the pool drains,
+    /// which is exactly what Apple's promises.
     unsafe extern "C" fn utf8_string(
         receiver: objc::object::Id,
         _sel: objc::sel::Sel,
     ) -> *const c_char {
         // SAFETY: the receiver is a string.
-        unsafe { as_string(receiver as CFTypeRef) }
-            .map_or(std::ptr::null(), |s| s.c_string(encoding::UTF8))
+        let Some(s) = (unsafe { as_string(receiver as CFTypeRef) }) else {
+            return std::ptr::null();
+        };
+        let free = s.c_string(encoding::UTF8);
+        if !free.is_null() {
+            return free;
+        }
+        let mut bytes = s.utf8();
+        bytes.push(0);
+        let data = crate::collections::new_data(bytes);
+        // SAFETY: a fresh object, handed to the pool that will free it.
+        let data = unsafe { crate::api::CFAutorelease(data) };
+        // SAFETY: a `CFData` this call just made.
+        unsafe { crate::api::CFDataGetBytePtr(data) as *const c_char }
     }
 
     class.add_method(
@@ -304,6 +324,54 @@ impl CFString {
         String::from_utf16_lossy(units).into_bytes()
     }
 
+    /// The characters, as UTF-16 code units.
+    ///
+    /// The counterpart of [`CFString::utf8`], and the representation a wide
+    /// string keeps: a copy of one has to be wide too, or its length stops
+    /// being its character count.
+    pub fn utf16(&self) -> Vec<u16> {
+        if self.str.is_null() || self.length <= 0 {
+            return Vec::new();
+        }
+        let count = self.length as usize;
+        if self.is_wide() {
+            // SAFETY: `str` points at `length` UTF-16 code units.
+            return unsafe { std::slice::from_raw_parts(self.str as *const u16, count) }.to_vec();
+        }
+        String::from_utf8_lossy(&self.utf8()).encode_utf16().collect()
+    }
+
+    /// The code units `CFStringGetLength` counts.
+    ///
+    /// For a wide string these are the characters. For an 8-bit one they are
+    /// its *bytes*, widened one for one, because that is what its `length`
+    /// counts - see [`from_encoded`], where a UTF-8 string keeps its bytes and
+    /// a length in bytes with them. Indexing has to agree with the length a
+    /// caller sized its buffer from, whatever the two together say about a
+    /// non-ASCII character.
+    pub fn units(&self) -> Vec<u16> {
+        match self.is_wide() {
+            true => self.utf16(),
+            false => self.utf8().into_iter().map(u16::from).collect(),
+        }
+    }
+
+    /// The characters as `UniChar`s, if they already are some.
+    ///
+    /// `CFStringGetCharactersPtr`'s contract, which is `c_string`'s in the other
+    /// direction: null unless the answer costs nothing.
+    pub fn characters_ptr(&self) -> *const u16 {
+        match self.is_wide() && !self.str.is_null() {
+            true => self.str as *const u16,
+            false => std::ptr::null(),
+        }
+    }
+
+    /// Whether the characters are code units rather than bytes.
+    pub fn is_wide(&self) -> bool {
+        self.flags & WIDE != 0
+    }
+
     /// Characters, which is what `CFStringGetLength` reports.
     pub fn length(&self) -> CFIndex {
         self.length.max(0) as CFIndex
@@ -322,41 +390,107 @@ impl CFString {
     }
 }
 
-/// Build a string from 8-bit bytes this runtime will own.
+/// Replace a mutable string's characters with code units, as [`set_bytes`] does
+/// with bytes.
+///
+/// # Safety
+///
+/// As [`set_bytes`].
+pub unsafe fn set_utf16(string: CFTypeRef, units: &[u16]) -> bool {
+    // SAFETY: the caller's obligation.
+    if !unsafe { is_mutable(string) } {
+        return false;
+    }
+    let object = string as *mut CFString;
+    // SAFETY: a mutable `__NSCFString`, whose storage this crate allocated.
+    unsafe {
+        release_storage(object);
+        let mut owned = units.to_vec();
+        owned.push(0);
+        (*object).str = Box::into_raw(owned.into_boxed_slice()) as *const u8;
+        (*object).length = units.len() as i64;
+        (*object).flags |= OWNED | WIDE;
+    }
+    true
+}
+
+/// Build a string from 8-bit bytes this runtime will own, or from UTF-16 bytes
+/// in this machine's order.
 ///
 /// The storage is NUL-terminated even though the length is carried separately,
 /// so that `CFStringGetCStringPtr` can answer without copying - which is the one
 /// thing a caller of it is entitled to expect.
 pub fn from_bytes(bytes: &[u8], wide: bool) -> CFTypeRef {
+    if wide {
+        // An odd trailing byte is not a code unit and there is nothing to pair
+        // it with, so it is dropped rather than paired with whatever follows.
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        return from_utf16(&units);
+    }
     // SAFETY: `CFString` begins with `isa` and is the layout `class` was
     // registered with.
     let object: *mut CFString = unsafe { crate::base::allocate(class()) };
     if object.is_null() {
         return std::ptr::null();
     }
-    let (storage, length) = match wide {
-        false => {
-            let mut owned = bytes.to_vec();
-            owned.push(0);
-            let length = bytes.len() as i64;
-            (owned.into_boxed_slice(), length)
-        }
-        true => {
-            let length = (bytes.len() / 2) as i64;
-            let mut owned = bytes.to_vec();
-            owned.extend_from_slice(&[0, 0]);
-            (owned.into_boxed_slice(), length)
-        }
-    };
-    let str = Box::into_raw(storage) as *const u8;
+    let mut owned = bytes.to_vec();
+    owned.push(0);
+    let str = Box::into_raw(owned.into_boxed_slice()) as *const u8;
     // SAFETY: `object` is a live instance of `class()`, so its four words are
     // ours to fill in. The `isa` is already set.
     unsafe {
-        (*object).flags = OWNED | if wide { WIDE } else { 0 };
+        (*object).flags = OWNED;
         (*object).str = str;
-        (*object).length = length;
+        (*object).length = bytes.len() as i64;
     }
     object as CFTypeRef
+}
+
+/// Build a wide string from code units this runtime will own.
+///
+/// The storage is allocated as `u16` rather than as bytes because every reader
+/// of a wide string takes `str` as a `*const u16` - a byte allocation is only
+/// aligned for one of those by luck, and [`release_storage`] has to hand back
+/// what was allocated. Terminated with a NUL unit for the same reason the 8-bit
+/// case is: a guest that walks the characters expects the end to be there.
+pub fn from_utf16(units: &[u16]) -> CFTypeRef {
+    // SAFETY: `CFString` begins with `isa` and is the layout `class` was
+    // registered with.
+    let object: *mut CFString = unsafe { crate::base::allocate(class()) };
+    if object.is_null() {
+        return std::ptr::null();
+    }
+    let mut owned = units.to_vec();
+    owned.push(0);
+    let str = Box::into_raw(owned.into_boxed_slice()) as *const u8;
+    // SAFETY: as above.
+    unsafe {
+        (*object).flags = OWNED | WIDE;
+        (*object).str = str;
+        (*object).length = units.len() as i64;
+    }
+    object as CFTypeRef
+}
+
+/// Copy a string's characters into a new mutable one, keeping the
+/// representation.
+///
+/// A mutable copy exists to be appended to, and an append that changed how the
+/// characters are stored would change what `CFStringGetLength` counts: an 8-bit
+/// string's length is its bytes, a wide one's is its characters.
+pub fn new_mutable_copy(s: &CFString) -> CFTypeRef {
+    let object = match s.is_wide() {
+        true => from_utf16(&s.utf16()),
+        false => from_bytes(&s.utf8(), false),
+    };
+    if !object.is_null() {
+        // SAFETY: a `__NSCFString` this call just made.
+        unsafe { (*(object as *mut CFString)).flags |= MUTABLE };
+    }
+    object
 }
 
 /// Build an empty mutable string.
@@ -401,7 +535,9 @@ pub unsafe fn set_bytes(string: CFTypeRef, bytes: &[u8]) -> bool {
         owned.push(0);
         (*object).str = Box::into_raw(owned.into_boxed_slice()) as *const u8;
         (*object).length = bytes.len() as i64;
-        (*object).flags |= OWNED;
+        // The new storage is 8-bit whatever the old was, and a stale `WIDE`
+        // would have `release_storage` free it as code units.
+        (*object).flags = (*object).flags & !WIDE | OWNED;
     }
     true
 }
@@ -438,17 +574,21 @@ pub unsafe fn release_storage(object: *mut CFString) {
     if flags & OWNED == 0 {
         return;
     }
-    // SAFETY: `str` came from `Box::into_raw` in `from_bytes`, and the length
-    // recorded there covers the NUL this frees along with it.
+    // SAFETY: `str` came from `Box::into_raw` in `from_bytes` or `from_utf16`,
+    // and is freed as what was allocated there - bytes or code units, one more
+    // than the length records, for the terminator.
     unsafe {
-        let count = match flags & WIDE == 0 {
-            true => (*object).length as usize + 1,
-            false => (*object).length as usize * 2 + 2,
-        };
-        drop(Box::from_raw(std::slice::from_raw_parts_mut(
-            (*object).str as *mut u8,
-            count,
-        )));
+        let count = (*object).length as usize + 1;
+        match flags & WIDE == 0 {
+            true => drop(Box::from_raw(std::slice::from_raw_parts_mut(
+                (*object).str as *mut u8,
+                count,
+            ))),
+            false => drop(Box::from_raw(std::slice::from_raw_parts_mut(
+                (*object).str as *mut u16,
+                count,
+            ))),
+        }
         (*object).str = std::ptr::null();
         (*object).flags &= !OWNED;
     }

@@ -58,23 +58,29 @@ fn identifier() -> String {
     format!("{}_{}", language(), country())
 }
 
-/// The one locale, which the three class methods all return.
+/// The one locale, which every spelling of "the locale" returns.
+///
+/// The current locale, the system locale and the autoupdating one are the same
+/// object here: Apple's differ by whether the user's preferences are applied on
+/// top of the raw ones, and this host has no preferences database - the
+/// environment is the only answer it has, so there is nothing for them to
+/// disagree about.
 static CURRENT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
-unsafe extern "C" fn current_locale(class: Id, _sel: Sel) -> Id {
+fn shared() -> Id {
     *CURRENT.get_or_init(|| {
-        // SAFETY: `class` is `NSLocale`, which this module registered.
-        let locale = unsafe {
-            objc::object::create_instance(
-                objc::class::from_ptr(class as *const objc::class::Class).expect("a class"),
-                0,
-            )
-        };
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSLocale").expect("NSLocale is registered");
+        let locale = objc::object::create_instance(class, 0);
         // Retained forever: a singleton a guest can release is one it can make
         // dangle by releasing what it never owned.
         objc::arc::retain(locale);
         locale as usize
     }) as Id
+}
+
+unsafe extern "C" fn current_locale(_class: Id, _sel: Sel) -> Id {
+    shared()
 }
 
 /// `+preferredLanguages`, which is the one language this process has.
@@ -96,6 +102,37 @@ unsafe extern "C" fn preferred_languages(_class: Id, _sel: Sel) -> Id {
     }
 }
 
+/// Whether this locale measures in metres.
+///
+/// Every country but three uses the metric system, and the United States is the
+/// one of those a `LANG` is likely to name. Derived rather than guessed: it is a
+/// fact about the country the locale already reports, not a preference this host
+/// has no store for.
+fn uses_metric() -> bool {
+    !matches!(country().as_str(), "US" | "LR" | "MM")
+}
+
+/// The value of one locale component, or `None` for a key this host cannot
+/// answer from the environment.
+///
+/// The separators, the currency and the calendar are deliberately absent: they
+/// are locale *data*, which lives in CLDR, and this tree carries none of it. A
+/// decimal separator invented as `.` would be wrong for every locale that uses
+/// `,` and a caller could not tell - where a nil is the documented answer for a
+/// component a locale has no value for, and the branch a caller already has.
+fn component(key: &[u8]) -> Option<String> {
+    Some(match key {
+        b"kCFLocaleIdentifier" => identifier(),
+        b"kCFLocaleLanguageCode" => language(),
+        b"kCFLocaleCountryCode" => country(),
+        b"kCFLocaleMeasurementSystem" => match uses_metric() {
+            true => "Metric".to_string(),
+            false => "U.S.".to_string(),
+        },
+        _ => return None,
+    })
+}
+
 /// The locale components, by the key the constants below name.
 ///
 /// A key this does not know answers nil, which is what Apple's locale does for
@@ -103,13 +140,15 @@ unsafe extern "C" fn preferred_languages(_class: Id, _sel: Sel) -> Id {
 unsafe extern "C" fn object_for_key(_receiver: Id, _sel: Sel, key: Id) -> Id {
     // SAFETY: an `NSString`, or nil.
     let key = unsafe { crate::string::bytes(key) };
-    let value = match key.as_slice() {
-        b"kCFLocaleIdentifier" => identifier(),
-        b"kCFLocaleLanguageCode" => language(),
-        b"kCFLocaleCountryCode" => country(),
-        _ => return std::ptr::null_mut(),
-    };
-    autoreleased(&value)
+    // `kCFLocaleUsesMetricSystem` is a `CFBoolean`, not a string, so it is
+    // answered before the ones that are.
+    if key.as_slice() == b"kCFLocaleUsesMetricSystem" {
+        return corefoundation::collections::boolean(uses_metric()) as Id;
+    }
+    match component(key.as_slice()) {
+        Some(value) => autoreleased(&value),
+        None => std::ptr::null_mut(),
+    }
 }
 
 unsafe extern "C" fn locale_identifier(_receiver: Id, _sel: Sel) -> Id {
@@ -125,14 +164,133 @@ fn autoreleased(text: &str) -> Id {
 /// The `NSString *` globals naming a locale component, and their documented
 /// values - which are the CoreFoundation spellings, because Foundation's
 /// constants *are* CoreFoundation's.
+///
+/// Published whether or not [`component`] answers for them, and that is the
+/// point: an unresolved *data* import binds to zero, so a guest asking for the
+/// currency code with a key nothing defines passes address zero rather than
+/// getting the nil this answers.
 pub const KEYS: &[(&str, &str)] = &[
     ("_NSLocaleIdentifier", "kCFLocaleIdentifier"),
     ("_NSLocaleLanguageCode", "kCFLocaleLanguageCode"),
     ("_NSLocaleCountryCode", "kCFLocaleCountryCode"),
+    ("_NSLocaleScriptCode", "kCFLocaleScriptCode"),
+    ("_NSLocaleVariantCode", "kCFLocaleVariantCode"),
+    ("_NSLocaleUsesMetricSystem", "kCFLocaleUsesMetricSystem"),
+    ("_NSLocaleMeasurementSystem", "kCFLocaleMeasurementSystem"),
+    ("_NSLocaleDecimalSeparator", "kCFLocaleDecimalSeparator"),
+    ("_NSLocaleGroupingSeparator", "kCFLocaleGroupingSeparator"),
+    ("_NSLocaleCurrencySymbol", "kCFLocaleCurrencySymbol"),
+    ("_NSLocaleCurrencyCode", "kCFLocaleCurrencyCode"),
+    ("_NSLocaleCalendarIdentifier", "kCFLocaleCalendarIdentifier"),
+    ("_NSLocaleCollationIdentifier", "kCFLocaleCollationIdentifier"),
     ("_kCFLocaleIdentifier", "kCFLocaleIdentifier"),
     ("_kCFLocaleLanguageCode", "kCFLocaleLanguageCode"),
     ("_kCFLocaleCountryCode", "kCFLocaleCountryCode"),
+    ("_kCFLocaleScriptCode", "kCFLocaleScriptCode"),
+    ("_kCFLocaleVariantCode", "kCFLocaleVariantCode"),
+    ("_kCFLocaleUsesMetricSystem", "kCFLocaleUsesMetricSystem"),
+    ("_kCFLocaleMeasurementSystem", "kCFLocaleMeasurementSystem"),
+    ("_kCFLocaleDecimalSeparator", "kCFLocaleDecimalSeparator"),
+    ("_kCFLocaleGroupingSeparator", "kCFLocaleGroupingSeparator"),
+    ("_kCFLocaleCurrencySymbol", "kCFLocaleCurrencySymbol"),
+    ("_kCFLocaleCurrencyCode", "kCFLocaleCurrencyCode"),
+    ("_kCFLocaleCalendarIdentifier", "kCFLocaleCalendarIdentifier"),
+    ("_kCFLocaleCollationIdentifier", "kCFLocaleCollationIdentifier"),
 ];
+
+/// The CoreFoundation spellings, which name the same locale as the class above.
+pub mod cf {
+    // The C spellings are the interface; renaming them would only hide it.
+    #![allow(non_snake_case)]
+
+    use objc::object::Id;
+
+    /// `CFLocaleRef CFLocaleCopyCurrent(void)`.
+    ///
+    /// A `Copy`, so the caller owns a reference and will release it - which is
+    /// the only difference between this and [`CFLocaleGetSystem`] here.
+    unsafe extern "C" fn CFLocaleCopyCurrent() -> Id {
+        let locale = super::shared();
+        objc::arc::retain(locale);
+        locale
+    }
+
+    /// `CFStringRef CFLocaleGetIdentifier(CFLocaleRef)`.
+    ///
+    /// A `Get`, so the string has to outlive the call without the caller holding
+    /// a reference: it is interned rather than made fresh.
+    unsafe extern "C" fn CFLocaleGetIdentifier(_locale: Id) -> Id {
+        interned(&super::identifier())
+    }
+
+    /// `CFTypeRef CFLocaleGetValue(CFLocaleRef, CFLocaleKey key)`.
+    ///
+    /// The same components `-objectForKey:` answers, by the same key text - a
+    /// guest that reads `kCFLocaleLanguageCode` and one that reads
+    /// `NSLocaleLanguageCode` are naming one string, so they cannot disagree.
+    /// A `Get` again, so the value is interned.
+    unsafe extern "C" fn CFLocaleGetValue(_locale: Id, key: Id) -> Id {
+        // SAFETY: the caller's obligation - an `NSString`, or nil.
+        let key = unsafe { crate::string::bytes(key) };
+        if key.as_slice() == b"kCFLocaleUsesMetricSystem" {
+            return corefoundation::collections::boolean(super::uses_metric()) as Id;
+        }
+        match super::component(key.as_slice()) {
+            Some(value) => interned(&value),
+            None => std::ptr::null_mut(),
+        }
+    }
+
+    /// A string that outlives the call, one object per distinct text.
+    ///
+    /// Retained forever, which is what a `Get` requires and what makes handing
+    /// the same object out twice safe: a guest that released one would make
+    /// every later read of it dangle.
+    fn interned(text: &str) -> Id {
+        static POOL: std::sync::Mutex<Vec<(String, usize)>> = std::sync::Mutex::new(Vec::new());
+        let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, object)) = pool.iter().find(|(t, _)| t == text) {
+            return *object as Id;
+        }
+        let object = crate::string::from_str(text);
+        objc::arc::retain(object);
+        pool.push((text.to_string(), object as usize));
+        object
+    }
+
+    /// `CFLocaleRef CFLocaleGetSystem(void)`.
+    ///
+    /// A `Get`, so the caller does not own it and will not release it - which
+    /// the singleton already is: retained forever, and handed out without a
+    /// reference. It is the same object `+[NSLocale systemLocale]` answers, for
+    /// the reason [`super::CURRENT`] records.
+    unsafe extern "C" fn CFLocaleGetSystem() -> Id {
+        super::shared()
+    }
+
+    pub fn symbol(name: &str) -> Option<u64> {
+        macro_rules! at {
+            ($f:expr) => {
+                $f as *const () as usize as u64
+            };
+        }
+        Some(match name {
+            "CFLocaleGetSystem" => at!(CFLocaleGetSystem),
+            "CFLocaleCopyCurrent" => at!(CFLocaleCopyCurrent),
+            "CFLocaleGetIdentifier" => at!(CFLocaleGetIdentifier),
+            "CFLocaleGetValue" => at!(CFLocaleGetValue),
+            _ => return None,
+        })
+    }
+
+    /// Every name [`symbol`] answers.
+    pub const NAMES: &[&str] = &[
+        "CFLocaleGetSystem",
+        "CFLocaleCopyCurrent",
+        "CFLocaleGetIdentifier",
+        "CFLocaleGetValue",
+    ];
+}
 
 pub(crate) fn install() {
     let class =
@@ -152,6 +310,68 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `Get` hands back the same object every time and does not hand over a
+    /// reference with it - so the one thing that must be true is that it is the
+    /// singleton, and not a fresh locale the caller would be expected to free.
+    #[test]
+    fn the_system_locale_is_the_one_locale() {
+        crate::bootstrap();
+        let address = cf::symbol("CFLocaleGetSystem").expect("the name has to resolve");
+        // SAFETY: the address of `CFLocaleGetSystem`, which takes no argument
+        // and returns an object.
+        let system: unsafe extern "C" fn() -> Id = unsafe { std::mem::transmute(address as usize) };
+        // SAFETY: as above.
+        let (first, second) = unsafe { (system(), system()) };
+        assert!(!first.is_null());
+        assert_eq!(first, second, "a Get answers with one object");
+        assert_eq!(first, shared(), "and it is the locale every other call gets");
+    }
+
+    /// The components a caller reads through the CoreFoundation spelling are
+    /// the ones the class answers, and a component this host has no data for is
+    /// nil rather than an invented one.
+    #[test]
+    fn the_locale_answers_the_components_it_can_derive() {
+        crate::bootstrap();
+        let address = cf::symbol("CFLocaleGetValue").expect("the name has to resolve");
+        // SAFETY: the address of `CFLocaleGetValue`, which takes a locale and a
+        // key and returns an object.
+        let value: unsafe extern "C" fn(Id, Id) -> Id = unsafe { std::mem::transmute(address as usize) };
+        let ask = |key: &str| {
+            let key = crate::string::from_str(key);
+            // SAFETY: a live locale and a string this test made.
+            unsafe { value(shared(), key) }
+        };
+        let text = |object: Id| {
+            // SAFETY: an `NSString` this runtime made, or nil.
+            String::from_utf8(unsafe { crate::string::bytes(object) }).expect("utf-8")
+        };
+        assert_eq!(text(ask("kCFLocaleIdentifier")), identifier());
+        assert_eq!(text(ask("kCFLocaleLanguageCode")), language());
+        assert_eq!(text(ask("kCFLocaleCountryCode")), country());
+        assert!(
+            ask("kCFLocaleCurrencyCode").is_null(),
+            "a currency is locale data this tree does not carry"
+        );
+        // A `Get`, so the same object each time rather than one per call.
+        assert_eq!(ask("kCFLocaleIdentifier"), ask("kCFLocaleIdentifier"));
+    }
+
+    /// Whether the country measures in metres is a fact about the country, and
+    /// the answer is a boolean object rather than a string.
+    /// Whether the country measures in metres is a fact about the country, and
+    /// the two answers derived from it cannot disagree.
+    #[test]
+    fn the_measurement_system_follows_the_country() {
+        let system = component(b"kCFLocaleMeasurementSystem").expect("every country has one");
+        assert_eq!(system == "Metric", uses_metric());
+        assert_eq!(system == "U.S.", country() == "US");
+        assert!(
+            component(b"kCFLocaleDecimalSeparator").is_none(),
+            "a separator is locale data this tree does not carry"
+        );
+    }
 
     #[test]
     fn a_posix_name_splits_into_a_language_and_a_country() {

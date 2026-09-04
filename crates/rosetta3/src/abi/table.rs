@@ -463,7 +463,13 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `Boolean CFStringGetCString(CFStringRef, char *buffer, CFIndex
     // bufferSize, CFStringEncoding encoding)` - **four** parameters.
     sig!("CFStringCreateMutableCopy", P, P, I64, P),
+    // `void CFStringUppercase(CFMutableStringRef, CFLocaleRef)`, and its
+    // mirror. The locale is the second argument and is conventionally null.
+    sig!("CFStringLowercase", V, P, P),
     sig!("CFStringUppercase", V, P, P),
+    // `void CFStringGetCharacters(CFStringRef, CFRange, UniChar *)` - the range
+    // flattened into two words, as `CFStringGetBytes` above has it.
+    sig!("CFStringGetCharacters", V, P, I64, I64, P),
     sig!("CFTimeZoneCopyDefault", P),
     sig!("CFTimeZoneGetName", P, P),
     sig!("CFStringGetCString", BOOL, P, P, I64, U32),
@@ -904,8 +910,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // a static table.
     sig!("GetMacOSStatusCommentString", P, I32),
     sig!("GetMacOSStatusErrorString", P, I32),
-    // `UInt8 LMGetKbdType(void)` - the low-memory global that still backs
-    // `UCKeyTranslate`'s keyboard-type argument.
+    // The two keyboard low-memory globals, both `UInt8 (*)(void)` and both an
+    // ordinary function on a 64-bit system: `LMGetKbdType` is what still backs
+    // `UCKeyTranslate`'s keyboard-type argument, and `LMGetKbdLast` is the ADB
+    // address of the keyboard last used.
+    sig!("LMGetKbdLast", U8),
     sig!("LMGetKbdType", U8),
     // ## AppKit and Foundation's C surface
     //
@@ -1008,10 +1017,23 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     //
     // SDL3 asks the current layout for its Unicode key-layout data so it can
     // translate a virtual key code into characters.
+    sig!("TISCopyCurrentASCIICapableKeyboardInputSource", P),
     sig!("TISCopyCurrentASCIICapableKeyboardLayoutInputSource", P),
     sig!("TISCopyCurrentKeyboardInputSource", P),
     sig!("TISCopyCurrentKeyboardLayoutInputSource", P),
+    // `TISInputSourceRef TISCopyInputSourceForLanguage(CFStringRef)`, and the
+    // two list calls beside it - the second argument of the general one is a
+    // `Boolean`, which is a byte rather than the four this ABI would guess.
+    sig!("TISCopyInputSourceForLanguage", P, P),
+    sig!("TISCreateASCIICapableInputSourceList", P),
+    sig!("TISCreateInputSourceList", P, P, U8),
+    // The four that turn a source on and off, each an `OSStatus` over one
+    // `TISInputSourceRef`.
+    sig!("TISDeselectInputSource", I32, P),
+    sig!("TISDisableInputSource", I32, P),
+    sig!("TISEnableInputSource", I32, P),
     sig!("TISGetInputSourceProperty", P, P, P),
+    sig!("TISSelectInputSource", I32, P),
     // `OSStatus UCKeyTranslate(const UCKeyboardLayout *, UInt16, UInt16,
     // UInt32, UInt32, OptionBits, UInt32 *, UniCharCount, UniCharCount *,
     // UniChar[])` - the call that turns a virtual key code into characters,
@@ -2967,9 +2989,6 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CTRunGetTypeID", U64),
     sig!("CGEventSourceKeyState", BOOL, I32, U16),
     sig!("UTTypeConformsTo", BOOL, P, P),
-    // `UInt8 LMGetKbdLast(void)` - a Carbon low-memory accessor, which on a
-    // 64-bit system is an ordinary function reading a global the OS maintains.
-    sig!("LMGetKbdLast", U8),
     // `CFDictionaryRef _CFCopySystemVersionDictionary(void)` - private CF, and
     // the same question [`crate::compat`] answers for the SDK gates.
     sig!("_CFCopySystemVersionDictionary", P),

@@ -1,30 +1,21 @@
 //! Text Input Services: what a program asks about the keyboard layout.
 //!
 //! Carbon rather than AppKit, but it is the keyboard, so it lives beside
-//! [`crate::keymap`]. A program reaches it for one of two reasons: to be told when the
-//! user switches input source, or to get the `'uchr'` layout resource and translate
-//! key codes itself through `UCKeyTranslate`.
+//! [`crate::keymap`]. A program reaches it to be told when the user switches
+//! input source, to describe the source it has, or to get the `'uchr'` layout
+//! resource and translate key codes itself through [`UCKeyTranslate`].
 //!
-//! The second is not answered, and deliberately: this host has no `'uchr'` resource to
-//! hand over, and a *fabricated* one would be a table of wrong characters that no
-//! caller could tell from a right one. `TISGetInputSourceProperty` is documented to
-//! return null for a property a source does not carry, so null is both honest and a
-//! path every caller already has to handle - and [`UCKeyTranslate`] refuses rather
-//! than reading whatever was passed instead.
+//! The resource is [`crate::uchr`]'s, and it is a real one: a guest reads the
+//! tables as readily as it calls back in, so an opaque stand-in is a "there is a
+//! layout" branch with nothing in it - which is measurably worse than the null
+//! this module used to return. What is handed out describes US ANSI, the layout
+//! [`crate::keymap`] already assumes, so the two cannot disagree about what a
+//! key types.
 //!
-//! What a program gets instead is [`crate::keymap`], which is where this tree turns a
-//! key code into a character.
-//!
-//! **What refusing costs, measured.** Roblox falls back to naming the key, so its
-//! keyboard hints read `LeftBracket` where the key is `[`. That is a visible wrong
-//! answer and it looks like this refusal is the thing to undo - but handing out a
-//! layout is worse, and was tried: with `kTISPropertyUnicodeKeyLayoutData` answered
-//! by an opaque `CFData` and `UCKeyTranslate` translating from [`crate::keymap`],
-//! Roblox's whole keyboard-hint bar **stops appearing at all**. Empty data, a
-//! sixteen-byte `UCKeyboardLayout` header, control characters left in the table or
-//! left out - all four the same. So the guest reads the resource itself, and the only
-//! answer better than null is a real `'uchr'`. Anything between is a subtree that
-//! silently stops rendering, which is the expensive kind of wrong.
+//! One source is reported, and it is a keyboard layout rather than an input
+//! method: this host does no composition of its own, so an input mode, an
+//! override layout and a marked-text session all have no answer here and are
+//! not implemented rather than answered emptily.
 
 #![expect(non_snake_case, reason = "the C spelling is the interface")]
 
@@ -37,87 +28,311 @@ use corefoundation::base::CFTypeRef;
 pub const NOTIFY_SELECTED_INPUT_SOURCE_CHANGED: &str =
     "AppleSelectedInputSourcesChangedNotification";
 
-/// `kTISPropertyInputSourceLanguages`, and the value of the symbol of that name.
-pub const PROPERTY_INPUT_SOURCE_LANGUAGES: &str = "TISPropertyInputSourceLanguages";
+/// `kTISNotifyEnabledKeyboardInputSourcesChanged`, whose value is its own name
+/// on Darwin as well.
+pub const NOTIFY_ENABLED_INPUT_SOURCES_CHANGED: &str =
+    "AppleEnabledInputSourcesChangedNotification";
 
-/// `kTISPropertyUnicodeKeyLayoutData`.
+/// The property keys, whose values on Darwin are the constant names without the
+/// `k` - a guest may pass its own `CFString` rather than the global, so they are
+/// compared by text.
+pub const PROPERTY_INPUT_SOURCE_CATEGORY: &str = "TISPropertyInputSourceCategory";
+pub const PROPERTY_INPUT_SOURCE_TYPE: &str = "TISPropertyInputSourceType";
+pub const PROPERTY_INPUT_SOURCE_IS_ASCII_CAPABLE: &str = "TISPropertyInputSourceIsASCIICapable";
+pub const PROPERTY_INPUT_SOURCE_IS_ENABLE_CAPABLE: &str = "TISPropertyInputSourceIsEnableCapable";
+pub const PROPERTY_INPUT_SOURCE_IS_SELECT_CAPABLE: &str = "TISPropertyInputSourceIsSelectCapable";
+pub const PROPERTY_INPUT_SOURCE_IS_ENABLED: &str = "TISPropertyInputSourceIsEnabled";
+pub const PROPERTY_INPUT_SOURCE_IS_SELECTED: &str = "TISPropertyInputSourceIsSelected";
+pub const PROPERTY_INPUT_SOURCE_ID: &str = "TISPropertyInputSourceID";
+pub const PROPERTY_BUNDLE_ID: &str = "TISPropertyBundleID";
+pub const PROPERTY_LOCALIZED_NAME: &str = "TISPropertyLocalizedName";
+pub const PROPERTY_INPUT_SOURCE_LANGUAGES: &str = "TISPropertyInputSourceLanguages";
 pub const PROPERTY_UNICODE_KEY_LAYOUT_DATA: &str = "TISPropertyUnicodeKeyLayoutData";
+
+/// The two `kTIS*` values a category and a type are compared against.
+pub const CATEGORY_KEYBOARD_INPUT_SOURCE: &str = "TISCategoryKeyboardInputSource";
+pub const TYPE_KEYBOARD_LAYOUT: &str = "TISTypeKeyboardLayout";
+
+/// The identifier and name of the one source, which a guest displays and files
+/// preferences under.
+const SOURCE_ID: &str = "com.apple.keylayout.US";
+const SOURCE_NAME: &str = "U.S.";
+const SOURCE_BUNDLE_ID: &str = "com.apple.CarbonComponents";
 
 /// The one input source this host reports.
 ///
 /// A `TISInputSourceRef` is opaque: a caller receives one and passes it back to
 /// [`TISGetInputSourceProperty`], never reading it. A string standing in for the
-/// object is therefore indistinguishable from a real one to any correct caller, and
-/// is a real CoreFoundation object, so retaining and releasing it behave.
+/// object is therefore indistinguishable from a real one to any correct caller,
+/// and is a real CoreFoundation object, so retaining and releasing it behave.
 fn current_source() -> CFTypeRef {
-    foundation::notification::name_object("com.apple.keylayout.US") as CFTypeRef
+    foundation::notification::name_object(SOURCE_ID) as CFTypeRef
+}
+
+/// A shared object handed out by `Get` rather than `Copy`, built once.
+///
+/// Everything a property answers with outlives the call, because the caller does
+/// not own it and this runtime is not told when it is done.
+fn shared(
+    slot: &'static std::sync::OnceLock<usize>,
+    make: impl FnOnce() -> CFTypeRef,
+) -> CFTypeRef {
+    *slot.get_or_init(|| {
+        let object = make();
+        objc::arc::retain(object as objc::object::Id);
+        object as usize
+    }) as CFTypeRef
+}
+
+fn retained(source: CFTypeRef) -> CFTypeRef {
+    objc::arc::retain(source as objc::object::Id);
+    source
 }
 
 /// `TISInputSourceRef TISCopyCurrentKeyboardInputSource(void)`.
 ///
 /// `Copy` in the name, so the caller owns a reference and will release it.
 pub unsafe extern "C" fn TISCopyCurrentKeyboardInputSource() -> CFTypeRef {
-    let source = current_source();
-    objc::arc::retain(source as objc::object::Id);
-    source
+    retained(current_source())
 }
 
-/// `TISInputSourceRef TISCopyCurrentKeyboardLayoutInputSource(void)`.
+/// `TISCopyCurrentKeyboardLayoutInputSource`, and the two ASCII-capable
+/// spellings beside it.
 ///
-/// The same source: this host has one keyboard layout, so the "current layout" and
-/// the "current input source" cannot disagree.
+/// One source, and it is a US keyboard layout: the current input source, the
+/// current layout and the ASCII-capable fallback cannot disagree here.
 pub unsafe extern "C" fn TISCopyCurrentKeyboardLayoutInputSource() -> CFTypeRef {
-    // SAFETY: takes no argument and returns a retained object.
-    unsafe { TISCopyCurrentKeyboardInputSource() }
+    retained(current_source())
+}
+
+pub unsafe extern "C" fn TISCopyCurrentASCIICapableKeyboardInputSource() -> CFTypeRef {
+    retained(current_source())
+}
+
+pub unsafe extern "C" fn TISCopyCurrentASCIICapableKeyboardLayoutInputSource() -> CFTypeRef {
+    retained(current_source())
+}
+
+/// `TISInputSourceRef TISCopyInputSourceForLanguage(CFStringRef)`.
+///
+/// Null for a language this layout does not type, which is the documented answer
+/// for one no installed source handles - and the honest one, since a guest that
+/// asked for Japanese and got a US layout would type mojibake rather than
+/// falling back.
+pub unsafe extern "C" fn TISCopyInputSourceForLanguage(language: CFTypeRef) -> CFTypeRef {
+    // SAFETY: the caller's obligation - null or a `CFStringRef`.
+    let Some(language) = (unsafe { text_of(language) }) else {
+        return std::ptr::null();
+    };
+    match language.split(['-', '_']).next() == Some("en") {
+        true => retained(current_source()),
+        false => std::ptr::null(),
+    }
+}
+
+/// `CFArrayRef TISCreateInputSourceList(CFDictionaryRef properties, Boolean)`.
+///
+/// `Create`, so the caller owns the array. The filter is a dictionary of the
+/// same property keys [`TISGetInputSourceProperty`] answers, and a source that
+/// fails any of them is not in the list - an empty array rather than null, which
+/// is what a caller enumerating one expects.
+pub unsafe extern "C" fn TISCreateInputSourceList(
+    properties: CFTypeRef,
+    _include_all_installed: u8,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation - null or a `CFDictionaryRef`.
+    let matches = unsafe { matches_filter(properties) };
+    source_list(matches)
+}
+
+/// `CFArrayRef TISCreateASCIICapableInputSourceList(void)`.
+pub unsafe extern "C" fn TISCreateASCIICapableInputSourceList() -> CFTypeRef {
+    source_list(true)
+}
+
+fn source_list(include: bool) -> CFTypeRef {
+    let values = [current_source()];
+    let count = include as isize;
+    // SAFETY: a live array of one object pointer, described by the count that
+    // follows it, with this tree's own type callbacks.
+    unsafe {
+        corefoundation::api::CFArrayCreate(
+            std::ptr::null(),
+            values.as_ptr(),
+            count,
+            &corefoundation::callbacks::TYPE_VALUE_CALLBACKS,
+        )
+    }
+}
+
+/// Whether the one source satisfies every property in a filter dictionary.
+///
+/// # Safety
+///
+/// `properties` is null or a `CFDictionaryRef`.
+unsafe fn matches_filter(properties: CFTypeRef) -> bool {
+    if properties.is_null() {
+        return true;
+    }
+    let keys = [
+        PROPERTY_INPUT_SOURCE_CATEGORY,
+        PROPERTY_INPUT_SOURCE_TYPE,
+        PROPERTY_INPUT_SOURCE_IS_ASCII_CAPABLE,
+        PROPERTY_INPUT_SOURCE_IS_ENABLED,
+        PROPERTY_INPUT_SOURCE_IS_SELECTED,
+        PROPERTY_INPUT_SOURCE_ID,
+        PROPERTY_BUNDLE_ID,
+        PROPERTY_LOCALIZED_NAME,
+    ];
+    keys.iter().all(|key| {
+        let name = foundation::notification::name_object(key) as CFTypeRef;
+        // SAFETY: the caller's obligation, and a key this module made.
+        let wanted = unsafe { corefoundation::api::CFDictionaryGetValue(properties, name.cast()) };
+        if wanted.is_null() {
+            return true;
+        }
+        let ours = property(key);
+        // SAFETY: two objects this runtime made, or null.
+        !ours.is_null() && unsafe { corefoundation::api::CFEqual(ours, wanted) != 0 }
+    })
 }
 
 /// `void *TISGetInputSourceProperty(TISInputSourceRef, CFStringRef key)`.
 ///
 /// Not retained - `Get` rather than `Copy` - so everything returned here has to
 /// outlive the call on its own.
-pub unsafe extern "C" fn TISGetInputSourceProperty(_source: CFTypeRef, key: CFTypeRef) -> CFTypeRef {
-    if key.is_null() {
-        return std::ptr::null();
+pub unsafe extern "C" fn TISGetInputSourceProperty(
+    _source: CFTypeRef,
+    key: CFTypeRef,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation - null or a `CFStringRef`.
+    match unsafe { text_of(key) } {
+        Some(key) => property(&key),
+        None => std::ptr::null(),
     }
-    let languages = foundation::notification::name_object(PROPERTY_INPUT_SOURCE_LANGUAGES);
-    if key as u64 == languages {
-        return language_list();
+}
+
+/// The text of a `CFStringRef` argument.
+///
+/// # Safety
+///
+/// `value` is null or an object this runtime allocated.
+unsafe fn text_of(value: CFTypeRef) -> Option<String> {
+    // SAFETY: the caller's obligation.
+    unsafe { corefoundation::string::as_string(value) }
+        .map(|s| String::from_utf8_lossy(&s.utf8()).into_owned())
+}
+
+/// The value of one property, by the key's text.
+///
+/// A property this host has no answer for is null, which is what Darwin returns
+/// for one a source does not carry and the branch every caller already has.
+fn property(key: &str) -> CFTypeRef {
+    let string = |slot: &'static std::sync::OnceLock<usize>, text: &'static str| {
+        shared(slot, || {
+            foundation::notification::name_object(text) as CFTypeRef
+        })
+    };
+    static CATEGORY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    static KIND: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    static ID: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    static BUNDLE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    static NAME: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    match key {
+        PROPERTY_INPUT_SOURCE_CATEGORY => string(&CATEGORY, CATEGORY_KEYBOARD_INPUT_SOURCE),
+        PROPERTY_INPUT_SOURCE_TYPE => string(&KIND, TYPE_KEYBOARD_LAYOUT),
+        PROPERTY_INPUT_SOURCE_ID => string(&ID, SOURCE_ID),
+        PROPERTY_BUNDLE_ID => string(&BUNDLE, SOURCE_BUNDLE_ID),
+        PROPERTY_LOCALIZED_NAME => string(&NAME, SOURCE_NAME),
+        PROPERTY_INPUT_SOURCE_IS_ASCII_CAPABLE
+        | PROPERTY_INPUT_SOURCE_IS_ENABLE_CAPABLE
+        | PROPERTY_INPUT_SOURCE_IS_SELECT_CAPABLE
+        | PROPERTY_INPUT_SOURCE_IS_ENABLED
+        | PROPERTY_INPUT_SOURCE_IS_SELECTED => corefoundation::collections::boolean(true),
+        PROPERTY_INPUT_SOURCE_LANGUAGES => language_list(),
+        PROPERTY_UNICODE_KEY_LAYOUT_DATA => layout_data(),
+        _ => std::ptr::null(),
     }
-    // Every other property, `kTISPropertyUnicodeKeyLayoutData` above all: null,
-    // because there is no answer this host can give that a caller could trust. See
-    // the module note.
-    std::ptr::null()
 }
 
 /// `["en"]`, as `kTISPropertyInputSourceLanguages` is an array of language codes.
-///
-/// Built once and kept, because the caller does not own what it is handed.
 fn language_list() -> CFTypeRef {
-    static LIST: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
-    let mut list = LIST.lock().unwrap_or_else(|e| e.into_inner());
-    if *list == 0 {
-        let english = foundation::notification::name_object("en");
-        let values = [english];
-        // SAFETY: a live array of one object pointer, described by the count that
-        // follows it, with this tree's own type callbacks.
-        let array = unsafe {
+    static LIST: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    shared(&LIST, || {
+        let values = [foundation::notification::name_object("en") as CFTypeRef];
+        // SAFETY: a live array of one object pointer, described by the count
+        // that follows it, with this tree's own type callbacks.
+        unsafe {
             corefoundation::api::CFArrayCreate(
                 std::ptr::null(),
-                values.as_ptr() as *const corefoundation::base::CFTypeRef,
+                values.as_ptr(),
                 1,
                 &corefoundation::callbacks::TYPE_VALUE_CALLBACKS,
             )
-        };
-        objc::arc::retain(array as objc::object::Id);
-        *list = array as u64;
+        }
+    })
+}
+
+/// `kTISPropertyUnicodeKeyLayoutData`: the `'uchr'` resource as a `CFData`.
+///
+/// One object for the process, because the caller is handed it rather than a
+/// copy and may hold the byte pointer for as long as it runs.
+fn layout_data() -> CFTypeRef {
+    static DATA: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    shared(&DATA, || {
+        corefoundation::collections::new_data(crate::uchr::layout().to_vec())
+    })
+}
+
+/// The four calls that turn a source on and off.
+///
+/// This host has one source and it is always enabled and selected, so each is
+/// `noErr` for that source and `paramErr` for anything else - the difference
+/// being that a guest asking to select a source that does not exist has made an
+/// error, and one asking for the source it is already using has not.
+pub unsafe extern "C" fn TISSelectInputSource(source: CFTypeRef) -> i32 {
+    match source == current_source() {
+        true => 0,
+        false => crate::uchr::PARAM_ERR,
     }
-    *list as CFTypeRef
+}
+
+/// Deselecting the only source would leave the keyboard typing nothing, which
+/// this host cannot represent - and Darwin refuses it too for a source that is
+/// not deselectable.
+pub unsafe extern "C" fn TISDeselectInputSource(_source: CFTypeRef) -> i32 {
+    crate::uchr::PARAM_ERR
+}
+
+pub unsafe extern "C" fn TISEnableInputSource(source: CFTypeRef) -> i32 {
+    // SAFETY: takes the same argument and reads nothing through it.
+    unsafe { TISSelectInputSource(source) }
+}
+
+pub unsafe extern "C" fn TISDisableInputSource(_source: CFTypeRef) -> i32 {
+    crate::uchr::PARAM_ERR
+}
+
+/// `UInt8 LMGetKbdLast(void)`.
+///
+/// `KbdLast` is the ADB address of the keyboard last used, and 2 is the address
+/// an encoded device answers on - the one a keyboard has had since ADB. This
+/// host reports one keyboard, so the last one used is that one, and the value
+/// cannot change.
+///
+/// It is not [`LMGetKbdType`]: a caller that confuses the two is asking
+/// [`UCKeyTranslate`] to translate for keyboard type 2, and the layout
+/// [`crate::uchr`] builds answers for every type rather than one.
+pub unsafe extern "C" fn LMGetKbdLast() -> u8 {
+    2
 }
 
 /// `UInt8 LMGetKbdType(void)`.
 ///
-/// `kKeyboardANSI`. The value only selects between the physical layouts that differ
-/// in where a handful of keys sit, and ANSI is the one [`crate::keymap`] describes.
+/// `kKeyboardANSI`. The value only selects between the physical layouts that
+/// differ in where a handful of keys sit, and ANSI is the one [`crate::keymap`]
+/// describes. The layout [`crate::uchr`] builds answers for every keyboard type,
+/// so a guest that passes a different one still translates.
 pub unsafe extern "C" fn LMGetKbdType() -> u8 {
     40
 }
@@ -126,35 +341,66 @@ pub unsafe extern "C" fn LMGetKbdType() -> u8 {
 /// UInt32 modifiers, UInt32 kbdType, OptionBits options, UInt32 *deadKeyState,
 /// UniCharCount maxLength, UniCharCount *actualLength, UniChar *string)`.
 ///
-/// Refused with `paramErr`, which is what it returns for a layout it cannot read.
-///
-/// Reachable only through a layout that [`TISGetInputSourceProperty`] declined to
-/// hand out, so a caller arriving here is one that ignored a null - and translating
-/// from whatever it passed instead would produce characters out of unrelated memory.
-/// The out-parameters are still written, because a caller that ignores the status
-/// reads them.
+/// The layout argument is parsed rather than assumed to be this host's: a caller
+/// may pass a copy, or a resource of its own, and the characters have to be the
+/// ones its bytes describe.
 pub unsafe extern "C" fn UCKeyTranslate(
-    _layout: *const std::ffi::c_void,
-    _code: u16,
-    _action: u16,
-    _modifiers: u32,
-    _kbd_type: u32,
-    _options: u32,
+    layout: *const std::ffi::c_void,
+    code: u16,
+    action: u16,
+    modifiers: u32,
+    kbd_type: u32,
+    options: u32,
     dead_key_state: *mut u32,
-    _max_length: usize,
+    max_length: usize,
     actual_length: *mut usize,
-    _string: *mut u16,
+    string: *mut u16,
 ) -> i32 {
-    if !actual_length.is_null() {
-        // SAFETY: the caller states this is a writable `UniCharCount *`.
-        unsafe { *actual_length = 0 };
-    }
+    let mut state = match dead_key_state.is_null() {
+        // SAFETY: the caller states this is a writable `UInt32 *`.
+        false => unsafe { *dead_key_state },
+        true => 0,
+    };
+    // SAFETY: the caller's obligation - the layout it was handed.
+    let chars = unsafe {
+        crate::uchr::translate(
+            layout.cast(),
+            code,
+            action,
+            modifiers,
+            kbd_type,
+            options,
+            &mut state,
+        )
+    };
+    let chars = match chars {
+        Ok(chars) => chars,
+        Err(status) => {
+            if !actual_length.is_null() {
+                // SAFETY: the caller states this is a writable `UniCharCount *`.
+                unsafe { *actual_length = 0 };
+            }
+            return status;
+        }
+    };
     if !dead_key_state.is_null() {
-        // SAFETY: as above. Cleared so a caller that loops on it terminates.
-        unsafe { *dead_key_state = 0 };
+        // SAFETY: as above.
+        unsafe { *dead_key_state = state };
     }
-    // `paramErr`.
-    -50
+    if !actual_length.is_null() {
+        // SAFETY: as above. Written before the buffer check, because a caller
+        // that sized its buffer from a first call reads it after the failure.
+        unsafe { *actual_length = chars.len() };
+    }
+    if chars.len() > max_length || (string.is_null() && !chars.is_empty()) {
+        return crate::uchr::BUFFER_TOO_SMALL;
+    }
+    if !string.is_null() {
+        // SAFETY: the caller states `string` holds `max_length` characters, and
+        // no more than that are written.
+        unsafe { std::ptr::copy_nonoverlapping(chars.as_ptr(), string, chars.len()) };
+    }
+    0
 }
 
 /// The `kTIS*` string globals, as `(symbol, the string it holds)`.
@@ -164,6 +410,38 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
         NOTIFY_SELECTED_INPUT_SOURCE_CHANGED,
     ),
     (
+        "_kTISNotifyEnabledKeyboardInputSourcesChanged",
+        NOTIFY_ENABLED_INPUT_SOURCES_CHANGED,
+    ),
+    (
+        "_kTISPropertyInputSourceCategory",
+        PROPERTY_INPUT_SOURCE_CATEGORY,
+    ),
+    ("_kTISPropertyInputSourceType", PROPERTY_INPUT_SOURCE_TYPE),
+    (
+        "_kTISPropertyInputSourceIsASCIICapable",
+        PROPERTY_INPUT_SOURCE_IS_ASCII_CAPABLE,
+    ),
+    (
+        "_kTISPropertyInputSourceIsEnableCapable",
+        PROPERTY_INPUT_SOURCE_IS_ENABLE_CAPABLE,
+    ),
+    (
+        "_kTISPropertyInputSourceIsSelectCapable",
+        PROPERTY_INPUT_SOURCE_IS_SELECT_CAPABLE,
+    ),
+    (
+        "_kTISPropertyInputSourceIsEnabled",
+        PROPERTY_INPUT_SOURCE_IS_ENABLED,
+    ),
+    (
+        "_kTISPropertyInputSourceIsSelected",
+        PROPERTY_INPUT_SOURCE_IS_SELECTED,
+    ),
+    ("_kTISPropertyInputSourceID", PROPERTY_INPUT_SOURCE_ID),
+    ("_kTISPropertyBundleID", PROPERTY_BUNDLE_ID),
+    ("_kTISPropertyLocalizedName", PROPERTY_LOCALIZED_NAME),
+    (
         "_kTISPropertyInputSourceLanguages",
         PROPERTY_INPUT_SOURCE_LANGUAGES,
     ),
@@ -171,40 +449,132 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
         "_kTISPropertyUnicodeKeyLayoutData",
         PROPERTY_UNICODE_KEY_LAYOUT_DATA,
     ),
+    (
+        "_kTISCategoryKeyboardInputSource",
+        CATEGORY_KEYBOARD_INPUT_SOURCE,
+    ),
+    ("_kTISTypeKeyboardLayout", TYPE_KEYBOARD_LAYOUT),
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The property key a caller passes has to be the same object this module
-    /// compares against, or every lookup falls through to null.
-    #[test]
-    fn the_languages_property_answers_its_own_key() {
-        crate::bootstrap();
-        let key = foundation::notification::name_object(PROPERTY_INPUT_SOURCE_LANGUAGES);
-        // SAFETY: a live source and key.
-        let value = unsafe { TISGetInputSourceProperty(current_source(), key as CFTypeRef) };
-        assert!(!value.is_null(), "the languages property must be answered");
+    fn key(text: &str) -> CFTypeRef {
+        foundation::string::from_str(text) as CFTypeRef
     }
 
-    /// The layout resource is declined rather than fabricated - see the module note.
-    #[test]
-    fn the_key_layout_is_declined() {
-        crate::bootstrap();
-        let key = foundation::notification::name_object(PROPERTY_UNICODE_KEY_LAYOUT_DATA);
-        // SAFETY: a live source and key.
-        let value = unsafe { TISGetInputSourceProperty(current_source(), key as CFTypeRef) };
-        assert!(value.is_null(), "no uchr resource may be invented");
+    fn ask(property: &str) -> CFTypeRef {
+        // SAFETY: a live source and a string this test made.
+        unsafe { TISGetInputSourceProperty(current_source(), key(property)) }
     }
 
-    /// A caller that ignored the null layout must get an error and cleared
-    /// out-parameters, not characters from whatever it passed.
+    /// The key is matched by text, so a caller that built its own `CFString`
+    /// rather than reading the global gets the same answer.
+    #[test]
+    fn a_property_is_found_by_its_text_and_not_its_address() {
+        crate::bootstrap();
+        assert!(!ask(PROPERTY_INPUT_SOURCE_LANGUAGES).is_null());
+        assert!(!ask(PROPERTY_INPUT_SOURCE_ID).is_null());
+        assert!(
+            ask("TISPropertyInputSourceIsNothing").is_null(),
+            "a property this host does not carry is null"
+        );
+        // SAFETY: null is documented, and a non-string key cannot be read.
+        assert!(unsafe { TISGetInputSourceProperty(current_source(), std::ptr::null()) }.is_null());
+    }
+
+    /// The layout is handed out, and what comes back translates - the round trip
+    /// a guest makes, through the byte pointer rather than this tree's slice.
+    #[test]
+    fn the_layout_data_is_the_resource_and_it_translates() {
+        crate::bootstrap();
+        let data = ask(PROPERTY_UNICODE_KEY_LAYOUT_DATA);
+        assert!(!data.is_null(), "the layout has to be answered");
+        // SAFETY: a `CFData` this module made.
+        let (bytes, length) = unsafe {
+            (
+                corefoundation::api::CFDataGetBytePtr(data),
+                corefoundation::api::CFDataGetLength(data) as usize,
+            )
+        };
+        assert_eq!(length, crate::uchr::layout().len());
+        assert!(!bytes.is_null());
+
+        let mut state = 0;
+        let mut chars = [0u16; 4];
+        let mut written = 0;
+        // SAFETY: the layout just handed out, and live out-parameters.
+        let status = unsafe {
+            UCKeyTranslate(
+                bytes.cast(),
+                crate::keymap::vk::ANSI_LEFT_BRACKET,
+                0,
+                0,
+                LMGetKbdType() as u32,
+                0,
+                &mut state,
+                chars.len(),
+                &mut written,
+                chars.as_mut_ptr(),
+            )
+        };
+        assert_eq!(status, 0);
+        assert_eq!(String::from_utf16_lossy(&chars[..written]), "[");
+    }
+
+    /// The same object every time: the caller is handed the data rather than a
+    /// copy, and may hold its byte pointer for as long as it runs.
+    #[test]
+    fn the_layout_data_is_one_object() {
+        crate::bootstrap();
+        assert_eq!(ask(PROPERTY_UNICODE_KEY_LAYOUT_DATA), layout_data());
+    }
+
+    /// The two keyboard globals are different globals: one is an ADB address
+    /// and the other a keyboard type, and a guest reading both has to see two
+    /// values rather than one repeated.
+    #[test]
+    fn the_keyboard_globals_are_not_the_same_global() {
+        // SAFETY: neither takes an argument.
+        unsafe {
+            assert_eq!(LMGetKbdType(), 40, "kKeyboardANSI");
+            assert_eq!(LMGetKbdLast(), 2, "the ADB address of a keyboard");
+        }
+    }
+
+    /// A buffer that cannot hold the translation is an error and a length, not
+    /// a write past the end of it.
+    #[test]
+    fn a_short_buffer_is_refused_with_the_length_it_needed() {
+        let mut state = 0;
+        let mut written = 99;
+        // SAFETY: live out-parameters and no output buffer.
+        let status = unsafe {
+            UCKeyTranslate(
+                crate::uchr::layout().as_ptr().cast(),
+                crate::keymap::vk::ANSI_A,
+                0,
+                0,
+                40,
+                0,
+                &mut state,
+                0,
+                &mut written,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, crate::uchr::BUFFER_TOO_SMALL);
+        assert_eq!(written, 1, "the length it would have written");
+    }
+
+    /// A caller that ignored the layout it was handed must get an error rather
+    /// than characters from whatever it passed instead.
     #[test]
     fn translating_without_a_layout_is_refused() {
         let mut length = 99usize;
         let mut dead = 7u32;
-        // SAFETY: live out-parameters; the layout is never read.
+        // SAFETY: live out-parameters; a null layout is never read.
         let status = unsafe {
             UCKeyTranslate(
                 std::ptr::null(),
@@ -219,8 +589,94 @@ mod tests {
                 std::ptr::null_mut(),
             )
         };
-        assert_eq!(status, -50);
+        assert_eq!(status, crate::uchr::PARAM_ERR);
         assert_eq!(length, 0);
-        assert_eq!(dead, 0);
+    }
+
+    #[test]
+    fn a_source_is_asked_for_by_language_this_layout_types() {
+        crate::bootstrap();
+        // SAFETY: strings this test made.
+        unsafe {
+            assert_eq!(TISCopyInputSourceForLanguage(key("en")), current_source());
+            assert_eq!(
+                TISCopyInputSourceForLanguage(key("en-US")),
+                current_source()
+            );
+            assert!(TISCopyInputSourceForLanguage(key("ja")).is_null());
+            assert!(TISCopyInputSourceForLanguage(std::ptr::null()).is_null());
+        }
+    }
+
+    fn count(array: CFTypeRef) -> isize {
+        // SAFETY: an array this module made.
+        unsafe { corefoundation::api::CFArrayGetCount(array) }
+    }
+
+    #[test]
+    fn the_source_list_holds_the_one_source_unless_the_filter_excludes_it() {
+        crate::bootstrap();
+        // SAFETY: no filter, so every source is listed.
+        assert_eq!(
+            count(unsafe { TISCreateInputSourceList(std::ptr::null(), 0) }),
+            1
+        );
+        // SAFETY: takes no argument.
+        assert_eq!(count(unsafe { TISCreateASCIICapableInputSourceList() }), 1);
+
+        let matching = dictionary(
+            PROPERTY_INPUT_SOURCE_CATEGORY,
+            CATEGORY_KEYBOARD_INPUT_SOURCE,
+        );
+        let other = dictionary(PROPERTY_INPUT_SOURCE_ID, "com.apple.inputmethod.Kotoeri");
+        // SAFETY: dictionaries this test made.
+        unsafe {
+            assert_eq!(count(TISCreateInputSourceList(matching, 0)), 1);
+            assert_eq!(
+                count(TISCreateInputSourceList(other, 0)),
+                0,
+                "a filter naming another source lists none"
+            );
+        }
+    }
+
+    fn dictionary(property: &'static str, value: &str) -> CFTypeRef {
+        let keys = [foundation::notification::name_object(property) as CFTypeRef];
+        let values = [key(value)];
+        // SAFETY: one key and one value, described by the count that follows.
+        unsafe {
+            corefoundation::api::CFDictionaryCreate(
+                std::ptr::null(),
+                keys.as_ptr().cast(),
+                values.as_ptr().cast(),
+                1,
+                &corefoundation::callbacks::TYPE_KEY_CALLBACKS,
+                &corefoundation::callbacks::TYPE_VALUE_CALLBACKS,
+            )
+        }
+    }
+
+    /// Selecting the source in use is not an error; naming one that does not
+    /// exist is.
+    #[test]
+    fn selecting_the_only_source_succeeds_and_deselecting_it_does_not() {
+        crate::bootstrap();
+        // SAFETY: a live source, and a string that is not one.
+        unsafe {
+            assert_eq!(TISSelectInputSource(current_source()), 0);
+            assert_eq!(TISEnableInputSource(current_source()), 0);
+            assert_eq!(
+                TISSelectInputSource(key("com.apple.keylayout.German")),
+                crate::uchr::PARAM_ERR
+            );
+            assert_eq!(
+                TISDeselectInputSource(current_source()),
+                crate::uchr::PARAM_ERR
+            );
+            assert_eq!(
+                TISDisableInputSource(current_source()),
+                crate::uchr::PARAM_ERR
+            );
+        }
     }
 }

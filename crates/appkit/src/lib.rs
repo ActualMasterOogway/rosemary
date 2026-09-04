@@ -24,6 +24,7 @@ pub mod screen;
 pub mod script;
 pub mod text;
 pub mod textinput;
+pub mod uchr;
 pub mod view;
 pub mod window;
 
@@ -90,8 +91,24 @@ pub fn symbol(name: &str) -> Option<u64> {
         "TISCopyCurrentKeyboardLayoutInputSource" => {
             at!(textinput::TISCopyCurrentKeyboardLayoutInputSource)
         }
+        "TISCopyCurrentASCIICapableKeyboardInputSource" => {
+            at!(textinput::TISCopyCurrentASCIICapableKeyboardInputSource)
+        }
+        "TISCopyCurrentASCIICapableKeyboardLayoutInputSource" => {
+            at!(textinput::TISCopyCurrentASCIICapableKeyboardLayoutInputSource)
+        }
+        "TISCopyInputSourceForLanguage" => at!(textinput::TISCopyInputSourceForLanguage),
+        "TISCreateInputSourceList" => at!(textinput::TISCreateInputSourceList),
+        "TISCreateASCIICapableInputSourceList" => {
+            at!(textinput::TISCreateASCIICapableInputSourceList)
+        }
+        "TISSelectInputSource" => at!(textinput::TISSelectInputSource),
+        "TISDeselectInputSource" => at!(textinput::TISDeselectInputSource),
+        "TISEnableInputSource" => at!(textinput::TISEnableInputSource),
+        "TISDisableInputSource" => at!(textinput::TISDisableInputSource),
         "TISGetInputSourceProperty" => at!(textinput::TISGetInputSourceProperty),
         "LMGetKbdType" => at!(textinput::LMGetKbdType),
+        "LMGetKbdLast" => at!(textinput::LMGetKbdLast),
         "UCKeyTranslate" => at!(textinput::UCKeyTranslate),
         _ => return None,
     })
@@ -121,8 +138,18 @@ pub const NAMES: &[&str] = &[
     "NSInsetRect",
     "TISCopyCurrentKeyboardInputSource",
     "TISCopyCurrentKeyboardLayoutInputSource",
+    "TISCopyCurrentASCIICapableKeyboardInputSource",
+    "TISCopyCurrentASCIICapableKeyboardLayoutInputSource",
+    "TISCopyInputSourceForLanguage",
+    "TISCreateInputSourceList",
+    "TISCreateASCIICapableInputSourceList",
+    "TISSelectInputSource",
+    "TISDeselectInputSource",
+    "TISEnableInputSource",
+    "TISDisableInputSource",
     "TISGetInputSourceProperty",
     "LMGetKbdType",
+    "LMGetKbdLast",
     "UCKeyTranslate",
 ];
 
