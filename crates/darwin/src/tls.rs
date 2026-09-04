@@ -222,6 +222,34 @@ pub fn host_thread_pointer() -> u64 {
     }
 }
 
+/// Make one call into Darwin code with this thread's Darwin thread pointer installed.
+///
+/// `call_as_darwin!(libc::qsort(base, nel, width, compare))` is that call and
+/// nothing else: the arguments are evaluated and passed as written, the value of
+/// the call is the value of the macro, and the boundary lasts exactly as long as
+/// the call. It costs nothing on a thread that is inside Darwin code already -
+/// see [`entered`] - so it is cheap enough to write wherever the question comes
+/// up rather than only where the answer is known to be no.
+///
+/// This is the form to reach for wherever *host* code is about to call back into
+/// the guest: a comparator handed to the host's `qsort`, a block a queue worker
+/// of this runtime's runs. Guest code reads `pthread_self`, `errno` and its stack
+/// canary straight off the thread pointer and never calls anything to do it, so
+/// on a thread this runtime started - which has the host's pointer, or none - it
+/// reads whatever those offsets happen to address.
+///
+/// # Safety
+///
+/// The macro adds nothing to the call's own contract: an `unsafe` call still
+/// needs an `unsafe` block around the macro.
+#[macro_export]
+macro_rules! call_as_darwin {
+    ($($call:tt)*) => {{
+        let _darwin = $crate::tls::DarwinThread::enter();
+        $($call)*
+    }};
+}
+
 /// Held for the duration of a call into **Darwin machine code** on a host that is not
 /// Darwin, with the thread pointer swapped to this thread's synthetic array.
 ///

@@ -3,6 +3,7 @@
 use std::ffi::CString;
 
 pub mod bsd;
+pub mod callback;
 pub mod clock;
 pub mod dirent;
 pub mod dispatch;
@@ -208,6 +209,7 @@ fn implemented(name: &str) -> Option<u64> {
         .or_else(|| signal_symbol(name))
         .or_else(|| fcntl_symbol(name))
         .or_else(|| bsd_symbol(name))
+        .or_else(|| callback_symbol(name))
         .or_else(|| passwd_symbol(name))
         .or_else(|| dirent_symbol(name))
         .or_else(|| rlimit_symbol(name))
@@ -300,6 +302,20 @@ fn passwd_symbol(name: &str) -> Option<u64> {
 
 /// The names a Mac's libc exports and this host's does not, which only a host
 /// that is missing them publishes.
+/// The host functions whose *callback* is guest code, which on a host that is not
+/// Darwin has to be entered with the guest's thread pointer. See [`callback`].
+fn callback_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return callback::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
+}
+
 fn bsd_symbol(name: &str) -> Option<u64> {
     #[cfg(not(target_os = "macos"))]
     {
@@ -531,6 +547,7 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
         signal::entry::provide(&mut lib);
         fcntl::entry::provide(&mut lib);
         bsd::provide(&mut lib);
+        callback::provide(&mut lib);
         passwd::provide(&mut lib);
         dirent::provide(&mut lib);
         rlimit::provide(&mut lib);

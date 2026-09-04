@@ -187,22 +187,20 @@ static GUEST_FREE: AtomicUsize = AtomicUsize::new(0);
 /// does not own. The guard costs nothing on a thread that is inside Darwin code
 /// already, which every guest thread is.
 unsafe extern "C" fn malloc_as_darwin(size: usize) -> *mut std::ffi::c_void {
-    let _darwin = darwin::tls::DarwinThread::enter();
     // SAFETY: `GUEST_MALLOC` holds the address of the guest's own `malloc`.
     let malloc: unsafe extern "C" fn(usize) -> *mut std::ffi::c_void =
         unsafe { std::mem::transmute(GUEST_MALLOC.load(Ordering::Acquire)) };
     // SAFETY: the caller's size, answered by the allocator the guest also frees with.
-    unsafe { malloc(size) }
+    unsafe { darwin::call_as_darwin!(malloc(size)) }
 }
 
 /// As [`malloc_as_darwin`], for `free`.
 unsafe extern "C" fn free_as_darwin(block: *mut std::ffi::c_void) {
-    let _darwin = darwin::tls::DarwinThread::enter();
     // SAFETY: `GUEST_FREE` holds the address of the guest's own `free`.
     let free: unsafe extern "C" fn(*mut std::ffi::c_void) =
         unsafe { std::mem::transmute(GUEST_FREE.load(Ordering::Acquire)) };
     // SAFETY: the caller states the block came from the guest's allocator.
-    unsafe { free(block) };
+    unsafe { darwin::call_as_darwin!(free(block)) };
 }
 
 /// Bindings that name a symbol some *other* binding had interposed, and were left

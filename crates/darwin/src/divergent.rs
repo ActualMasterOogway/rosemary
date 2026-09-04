@@ -56,6 +56,18 @@ pub const NAMES: &[(&str, &str)] = &[
         "qsort_r",
         "the comparator takes its context argument in a different position",
     ),
+    // The other two callback-taking searchers of the C library, and neither is a
+    // comparator problem: what diverges is the structure the call fills in.
+    // Darwin's `glob_t` is `{ gl_pathc, gl_matchc, gl_offs, gl_flags, gl_pathv }`
+    // and glibc's is `{ gl_pathc, gl_pathv, gl_offs, gl_flags }`, so a guest
+    // reading the results at Darwin's offset 32 reads glibc's `gl_closedir`.
+    (
+        "glob",
+        "glob_t is laid out differently - gl_pathv is the second field here and the fifth there",
+    ),
+    // `FTSENT::fts_statp` is a `struct stat *`, which is the [`STAT`] divergence
+    // one pointer removed - the walk would hand the guest this host's.
+    ("fts_open", STAT),
     // Darwin's is the POSIX `int` form; glibc's returns `char *` and may not touch
     // the caller's buffer at all. Kept listed although `crate::string` now answers
     // it: the entry is what stops the host's own from being bound instead, and

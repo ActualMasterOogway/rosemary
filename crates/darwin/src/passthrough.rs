@@ -23,6 +23,10 @@
 /// fallback that difference needs, and a claim of "the host's own symbol is the
 /// answer" would be false off Darwin.
 ///
+/// `qsort` and `bsearch` came off because of what they *call*: the comparator is
+/// guest code, and entering it needs the guest's thread pointer on a host that is
+/// not Darwin. See [`crate::callback`], which is where they are now.
+///
 /// `write` came off for a subtler reason: the call is identical and what it does
 /// to a *socket* is not. `SO_NOSIGPIPE` is a property of the descriptor on
 /// Darwin and of the call here, so a write to a socket the guest asked not to be
@@ -68,14 +72,12 @@ pub const CLAIMED: &[&str] = &[
     "atoi",
     "atol",
     "atoll",
-    "bsearch",
     "calloc",
     "div",
     "free",
     "labs",
     "llabs",
     "malloc",
-    "qsort",
     "rand",
     "realloc",
     "srand",
