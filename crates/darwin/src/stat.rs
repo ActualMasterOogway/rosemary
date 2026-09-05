@@ -212,18 +212,98 @@ pub unsafe extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> *mut
 
 /// `int open(const char *, int, ...)`, with the same fallback.
 ///
-/// The third argument is read unconditionally, which is what the guest's own
-/// variadic call put in the register whether or not `O_CREAT` was asked for.
+/// This entry has a fixed third argument so it can also be called by an ABI
+/// bridge. Only `O_CREAT` makes that argument meaningful; without it the guest
+/// may have left the corresponding register untouched.
 ///
 /// # Safety
 ///
 /// `path` is a NUL-terminated string.
 pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: u32) -> c_int {
+    let Some(host_flags) = open_flags(flags) else {
+        return -1;
+    };
+    let mode = open_mode(flags, mode);
     with_fallback(path, |path| {
         // SAFETY: the caller's obligation.
-        let fd = unsafe { libc::open(path, flags, mode) };
+        let fd = unsafe { libc::open(path, host_flags, mode) };
         (fd, fd >= 0)
     })
+}
+
+/// `int openat(int, const char *, int, ...)`, with Darwin's flag word.
+///
+/// The case-insensitive fallback remains relative to `dirfd`, including when it
+/// is a real directory descriptor rather than `AT_FDCWD`.
+///
+/// # Safety
+///
+/// `path` is a NUL-terminated string and `dirfd` is either a directory
+/// descriptor or Darwin's `AT_FDCWD`.
+pub unsafe extern "C" fn openat(
+    dirfd: c_int,
+    path: *const c_char,
+    flags: c_int,
+    mode: u32,
+) -> c_int {
+    let Some(host_flags) = open_flags(flags) else {
+        return -1;
+    };
+    let dirfd = match dirfd {
+        DARWIN_AT_FDCWD => libc::AT_FDCWD,
+        fd => fd,
+    };
+    let mode = open_mode(flags, mode);
+    let ask = |path| {
+        // SAFETY: the caller's obligation.
+        let fd = unsafe { libc::openat(dirfd, path, host_flags, mode) };
+        (fd, fd >= 0)
+    };
+    let (result, ok) = ask(path);
+    if ok || path.is_null() || crate::errno::get() != libc::ENOENT {
+        return result;
+    }
+    // SAFETY: non-null, and a `const char *` is NUL-terminated by contract.
+    let Some(found) = crate::path::insensitive_at(dirfd, unsafe { CStr::from_ptr(path) }) else {
+        return result;
+    };
+    ask(found.as_ptr()).0
+}
+
+/// Darwin spells `AT_FDCWD` as `-2`; Linux spells it as `-100`.
+const DARWIN_AT_FDCWD: c_int = -2;
+
+/// Translate a Darwin `O_` word, refusing bits whose semantics cannot be kept.
+fn open_flags(flags: c_int) -> Option<c_int> {
+    match crate::fcntl::flags_to_host(flags) {
+        Ok(host) => Some(host),
+        Err(unknown) => {
+            say_unknown_open_flags(unknown);
+            crate::errno::set(libc::EINVAL);
+            None
+        }
+    }
+}
+
+/// Narrow a real mode and discard the stale register when there is no mode.
+fn open_mode(flags: c_int, mode: u32) -> c_int {
+    match crate::fcntl::creates(flags) {
+        true => mode as libc::mode_t as c_int,
+        false => 0,
+    }
+}
+
+/// Name an unsupported flag set once; `EINVAL` alone blames the guest.
+fn say_unknown_open_flags(unknown: c_int) {
+    use std::sync::Mutex;
+
+    static SAID: Mutex<Vec<c_int>> = Mutex::new(Vec::new());
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    if said.contains(&unknown) {
+        return;
+    }
+    said.push(unknown);
+    eprintln!("rosetta3: open: no equivalent on this host for Darwin O_ flags {unknown:#x}");
 }
 
 /// Every name this module answers, in both spellings a Mach-O may import them
@@ -355,6 +435,7 @@ pub const NAMES: &[&str] = &[
     "fopen",
     "fopen$UNIX2003",
     "open",
+    "openat",
 ];
 
 pub fn symbol(name: &str) -> Option<u64> {
@@ -367,6 +448,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         "access" => access as *const (),
         "fopen" | "fopen$UNIX2003" => fopen as *const (),
         "open" => open as *const (),
+        "openat" => openat as *const (),
         _ => return None,
     };
     Some(f as usize as u64)
@@ -395,6 +477,7 @@ fn base(name: &str) -> &str {
 mod tests {
     use super::*;
     use std::ffi::CString;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn every_listed_name_resolves_and_a_variant_is_its_base() {
@@ -439,5 +522,143 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(rc, 0, "the lowercased path was not found");
         assert_eq!(out.size, 3);
+    }
+
+    #[test]
+    fn open_translates_darwin_status_flags() {
+        let at = std::env::temp_dir().join(format!("r3-open-flags-{}", std::process::id()));
+        std::fs::write(&at, b"x").expect("a file");
+        let path = CString::new(at.to_str().expect("utf-8")).expect("no NUL");
+
+        // SAFETY: a NUL-terminated path and Darwin scalar arguments.
+        let fd = unsafe {
+            open(
+                path.as_ptr(),
+                crate::fcntl::oflag::O_RDONLY | crate::fcntl::oflag::O_NONBLOCK,
+                0,
+            )
+        };
+        assert!(fd >= 0, "open failed: {}", std::io::Error::last_os_error());
+        // SAFETY: a descriptor this test just opened; F_GETFL has no third argument.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        // SAFETY: a descriptor this test just opened.
+        unsafe { libc::close(fd) };
+        let _ = std::fs::remove_file(&at);
+
+        assert_ne!(flags & libc::O_NONBLOCK, 0);
+    }
+
+    #[test]
+    fn open_refuses_a_flag_the_host_cannot_honor() {
+        // Darwin's O_SHLOCK has no Linux equivalent. Silently dropping it
+        // would claim a lock that was never acquired.
+        const O_SHLOCK: c_int = 0x0010;
+        let path = c"/dev/null";
+        crate::errno::set(0);
+        // SAFETY: a static NUL-terminated path and Darwin scalar arguments.
+        let fd = unsafe { open(path.as_ptr(), crate::fcntl::oflag::O_RDONLY | O_SHLOCK, 0) };
+        assert_eq!(fd, -1);
+        assert_eq!(crate::errno::get(), libc::EINVAL);
+        crate::errno::set(0);
+    }
+
+    #[test]
+    fn openat_translates_at_fdcwd_flags_and_mode() {
+        let at = std::env::temp_dir().join(format!("r3-openat-cwd-{}", std::process::id()));
+        let _ = std::fs::remove_file(&at);
+        let path = CString::new(at.to_str().expect("utf-8")).expect("no NUL");
+        let guest_flags = crate::fcntl::oflag::O_WRONLY
+            | crate::fcntl::oflag::O_CREAT
+            | crate::fcntl::oflag::O_EXCL;
+
+        // SAFETY: a NUL-terminated path, Darwin's AT_FDCWD and scalar arguments.
+        let fd = unsafe { openat(DARWIN_AT_FDCWD, path.as_ptr(), guest_flags, 0o604) };
+        assert!(
+            fd >= 0,
+            "openat(AT_FDCWD) failed: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: a descriptor this test just opened.
+        unsafe { libc::close(fd) };
+
+        let permissions = std::fs::metadata(&at)
+            .expect("the created file")
+            .permissions()
+            .mode()
+            & 0o777;
+        let _ = std::fs::remove_file(&at);
+        assert_eq!(permissions & 0o604, 0o604 & !umask());
+    }
+
+    #[test]
+    fn openat_resolves_a_relative_path_against_its_descriptor() {
+        let dir = std::env::temp_dir().join(format!("r3-openat-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let directory = CString::new(dir.to_str().expect("utf-8")).expect("no NUL");
+        // SAFETY: a NUL-terminated directory path and Darwin scalar arguments.
+        let dirfd = unsafe { open(directory.as_ptr(), crate::fcntl::oflag::O_RDONLY, 0) };
+        assert!(dirfd >= 0);
+
+        let name = c"relative";
+        let guest_flags = crate::fcntl::oflag::O_WRONLY
+            | crate::fcntl::oflag::O_CREAT
+            | crate::fcntl::oflag::O_EXCL;
+        // SAFETY: a live directory descriptor, a NUL-terminated relative path
+        // and Darwin scalar arguments.
+        let fd = unsafe { openat(dirfd, name.as_ptr(), guest_flags, 0o600) };
+        assert!(
+            fd >= 0,
+            "openat failed: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: two descriptors this test just opened.
+        unsafe {
+            libc::close(fd);
+            libc::close(dirfd);
+        }
+
+        assert!(dir.join("relative").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn openat_case_folds_relative_to_its_descriptor() {
+        let dir = std::env::temp_dir().join(format!("r3-openat-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Contents")).expect("a directory");
+        std::fs::write(dir.join("Contents").join("Game.ios"), b"x").expect("a file");
+        let directory = CString::new(dir.to_str().expect("utf-8")).expect("no NUL");
+        // SAFETY: a NUL-terminated directory path and Darwin scalar arguments.
+        let dirfd = unsafe { open(directory.as_ptr(), crate::fcntl::oflag::O_RDONLY, 0) };
+        assert!(dirfd >= 0);
+
+        // SAFETY: a live directory descriptor, a NUL-terminated relative path
+        // and Darwin scalar arguments.
+        let fd = unsafe {
+            openat(
+                dirfd,
+                c"contents/game.ios".as_ptr(),
+                crate::fcntl::oflag::O_RDONLY,
+                0,
+            )
+        };
+        assert!(fd >= 0, "openat failed: {}", std::io::Error::last_os_error());
+        // SAFETY: two descriptors this test just opened.
+        unsafe {
+            libc::close(fd);
+            libc::close(dirfd);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The process umask, restored immediately after reading it.
+    fn umask() -> u32 {
+        // SAFETY: `umask` cannot fail and the second call restores the first.
+        unsafe {
+            let previous = libc::umask(0o777);
+            libc::umask(previous);
+            previous as u32
+        }
     }
 }

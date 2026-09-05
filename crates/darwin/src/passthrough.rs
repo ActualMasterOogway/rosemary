@@ -106,8 +106,8 @@ pub const CLAIMED: &[&str] = &[
     "tolower",
     "toupper",
     // <unistd.h>. File descriptors are integers on both sides and the flags these
-    // take are POSIX. `open` and `fcntl` are not here: their flag values differ and
-    // `rosetta3::shims::openat` bridges them.
+    // take are POSIX. `open`, `openat` and `fcntl` are not here: their flag values
+    // differ and `rosetta3::shims::openat` bridges them.
     "_exit",
     "alarm",
     "chdir",

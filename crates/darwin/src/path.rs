@@ -83,6 +83,20 @@ pub fn insensitive(path: &CStr) -> Option<CString> {
     (found != text).then(|| CString::new(found).ok())?
 }
 
+/// [`insensitive`] for a path interpreted relative to an open directory.
+///
+/// `/proc/self/fd` preserves `openat`'s starting point without changing the
+/// process working directory. If procfs is unavailable, the ordinary exact
+/// `openat` attempt has already happened and this fallback simply finds none.
+pub fn insensitive_at(dirfd: libc::c_int, path: &CStr) -> Option<CString> {
+    if path.to_bytes().starts_with(b"/") || dirfd == libc::AT_FDCWD {
+        return insensitive(path);
+    }
+    let mut anchored = format!("/proc/self/fd/{dirfd}/").into_bytes();
+    anchored.extend_from_slice(path.to_bytes());
+    insensitive(&CString::new(anchored).ok()?)
+}
+
 /// The one entry of `directory` whose name equals `name` ignoring case.
 ///
 /// `None` for none and for more than one. Two entries differing only in case is
@@ -186,5 +200,20 @@ mod tests {
         assert_eq!(insensitive(&absent), None);
         assert_eq!(crate::errno::get(), libc::ENOENT);
         crate::errno::set(0);
+    }
+
+    #[test]
+    fn a_relative_path_can_start_at_a_directory_descriptor() {
+        let scratch = scratch("at");
+        let directory = CString::new(scratch.0.to_str().expect("utf-8")).expect("no NUL");
+        // SAFETY: a NUL-terminated path and native flags.
+        let dirfd = unsafe { libc::open(directory.as_ptr(), libc::O_RDONLY) };
+        assert!(dirfd >= 0);
+        let found = insensitive_at(dirfd, c"contents/game.ios")
+            .expect("a case-insensitive relative match");
+        // SAFETY: a descriptor this test just opened.
+        unsafe { libc::close(dirfd) };
+
+        assert!(found.to_bytes().ends_with(b"/Contents/Game.ios"));
     }
 }

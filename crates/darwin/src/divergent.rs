@@ -114,6 +114,8 @@ pub const NAMES: &[(&str, &str)] = &[
     // the flag word that command takes is an `open` flag word, which agrees on
     // nothing past the access mode.
     ("fcntl", "the fcntl commands and the O_ status flags differ"),
+    ("open", "the O_ flags differ"),
+    ("openat", "the O_ flags differ"),
     // Darwin's `struct passwd` has BSD's `pw_change` and `pw_class` in the middle,
     // so `pw_dir` is at offset 48 - past the end of this host's whole structure.
     // `crate::passwd` answers the two lookups; the reentrant pair stay denied.

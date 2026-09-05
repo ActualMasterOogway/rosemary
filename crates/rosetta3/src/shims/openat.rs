@@ -25,13 +25,9 @@ pub unsafe extern "C" fn open_with_mode(
     flags: libc::c_int,
     mode: libc::c_uint,
 ) -> libc::c_int {
-    let permissions = mode_for(flags, mode as u64);
-    let Some(flags) = host_flags(flags) else {
-        return -1;
-    };
-    // SAFETY: the caller's guarantee, above. Whether the path exists is the
-    // kernel's judgement, reported through the return value and `errno`.
-    unsafe { libc::open(path, flags, permissions) }
+    // SAFETY: the caller's guarantee, above. The Darwin implementation owns
+    // flag translation, mode arity and case-insensitive path fallback.
+    unsafe { host_open(path, flags, mode) }
 }
 
 /// `int openat(int fd, const char *path, int flags, unsigned mode)`.
@@ -45,12 +41,50 @@ pub unsafe extern "C" fn openat_with_mode(
     flags: libc::c_int,
     mode: libc::c_uint,
 ) -> libc::c_int {
-    let permissions = mode_for(flags, mode as u64);
-    let Some(flags) = host_flags(flags) else {
-        return -1;
-    };
     // SAFETY: as `open_with_mode`.
-    unsafe { libc::openat(dirfd, path, flags, permissions) }
+    unsafe { host_openat(dirfd, path, flags, mode) }
+}
+
+#[cfg(not(target_os = "macos"))]
+unsafe fn host_open(
+    path: *const libc::c_char,
+    flags: libc::c_int,
+    mode: libc::c_uint,
+) -> libc::c_int {
+    // SAFETY: the caller's obligation.
+    unsafe { darwin::stat::open(path, flags, mode) }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn host_open(
+    path: *const libc::c_char,
+    flags: libc::c_int,
+    mode: libc::c_uint,
+) -> libc::c_int {
+    // SAFETY: the caller's obligation. Darwin flags are native on macOS.
+    unsafe { libc::open(path, flags, mode_for(flags, mode as u64)) }
+}
+
+#[cfg(not(target_os = "macos"))]
+unsafe fn host_openat(
+    dirfd: libc::c_int,
+    path: *const libc::c_char,
+    flags: libc::c_int,
+    mode: libc::c_uint,
+) -> libc::c_int {
+    // SAFETY: the caller's obligation.
+    unsafe { darwin::stat::openat(dirfd, path, flags, mode) }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn host_openat(
+    dirfd: libc::c_int,
+    path: *const libc::c_char,
+    flags: libc::c_int,
+    mode: libc::c_uint,
+) -> libc::c_int {
+    // SAFETY: the caller's obligation. Darwin flags are native on macOS.
+    unsafe { libc::openat(dirfd, path, flags, mode_for(flags, mode as u64)) }
 }
 
 /// The guest's `open` flags as this host's, or `None` having set `errno`.
@@ -193,6 +227,7 @@ unsafe fn host_fcntl(fd: i32, cmd: i32, arg: usize) -> i32 {
 ///
 /// Without `O_CREAT` the argument holds whatever the guest last left in the register
 /// the signature reads it from.
+#[cfg(any(target_os = "macos", test))]
 fn mode_for(flags: i32, register: u64) -> libc::c_int {
     if darwin::fcntl::creates(flags) {
         register as libc::mode_t as libc::c_int
