@@ -207,6 +207,9 @@ mod tests {
         assert_eq!(unsafe { getrlimit(64, &raw mut guest) }, -1);
         assert_eq!(crate::errno::get(), libc::EINVAL);
         // SAFETY: a null buffer is what this checks.
-        assert_eq!(unsafe { getrlimit(DARWIN_NOFILE, std::ptr::null_mut()) }, -1);
+        assert_eq!(
+            unsafe { getrlimit(DARWIN_NOFILE, std::ptr::null_mut()) },
+            -1
+        );
     }
 }

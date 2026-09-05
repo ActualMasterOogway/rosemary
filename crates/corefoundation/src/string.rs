@@ -338,7 +338,9 @@ impl CFString {
             // SAFETY: `str` points at `length` UTF-16 code units.
             return unsafe { std::slice::from_raw_parts(self.str as *const u16, count) }.to_vec();
         }
-        String::from_utf8_lossy(&self.utf8()).encode_utf16().collect()
+        String::from_utf8_lossy(&self.utf8())
+            .encode_utf16()
+            .collect()
     }
 
     /// The code units `CFStringGetLength` counts.

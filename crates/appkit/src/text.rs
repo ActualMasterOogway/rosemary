@@ -358,7 +358,8 @@ unsafe extern "C" fn unmark_text(receiver: Id, _sel: Sel) {
 /// the current selection, which is what a null range means anyway.
 unsafe extern "C" fn insert_text(receiver: Id, _sel: Sel, value: Id, replacement: NSRange) {
     // SAFETY: null or an `NSString`, which is what both selectors pass.
-    let insertion = String::from_utf8_lossy(&unsafe { foundation::string::bytes(value) }).into_owned();
+    let insertion =
+        String::from_utf8_lossy(&unsafe { foundation::string::bytes(value) }).into_owned();
     edit(receiver, |state| {
         let range = match replacement.location {
             NOT_FOUND => state.marked.unwrap_or(state.selected),
@@ -393,14 +394,10 @@ unsafe extern "C" fn insert_text_legacy(receiver: Id, sel: Sel, value: Id) {
 
 /// `-replaceCharactersInRange:withString:`, used by a text input handler to
 /// commit an edit it has already measured against its buffer.
-unsafe extern "C" fn replace_characters(
-    receiver: Id,
-    _sel: Sel,
-    range: NSRange,
-    value: Id,
-) {
+unsafe extern "C" fn replace_characters(receiver: Id, _sel: Sel, range: NSRange, value: Id) {
     // SAFETY: null or an `NSString`.
-    let insertion = String::from_utf8_lossy(&unsafe { foundation::string::bytes(value) }).into_owned();
+    let insertion =
+        String::from_utf8_lossy(&unsafe { foundation::string::bytes(value) }).into_owned();
     edit(receiver, |state| {
         replace(state, range, &insertion);
         // Replacing a range is a committed edit, never a continuation of a
@@ -417,19 +414,20 @@ unsafe extern "C" fn set_marked_text(
     replacement: NSRange,
 ) {
     // SAFETY: null or an `NSString`.
-    let insertion = String::from_utf8_lossy(&unsafe { foundation::string::bytes(value) }).into_owned();
+    let insertion =
+        String::from_utf8_lossy(&unsafe { foundation::string::bytes(value) }).into_owned();
     edit(receiver, |state| {
         let range = match replacement.location {
             NOT_FOUND => state.marked.unwrap_or(state.selected),
             _ => replacement,
         };
         replace(state, range, &insertion);
-        let location = state.selected.location.saturating_sub(utf16_len(&insertion));
+        let location = state
+            .selected
+            .location
+            .saturating_sub(utf16_len(&insertion));
         let length = utf16_len(&insertion);
-        state.marked = (length > 0).then_some(NSRange {
-            location,
-            length,
-        });
+        state.marked = (length > 0).then_some(NSRange { location, length });
         let selected_location = selected.location.min(length);
         state.selected = NSRange {
             location: location + selected_location,
@@ -440,12 +438,7 @@ unsafe extern "C" fn set_marked_text(
 
 /// The older `NSTextInput` spelling, whose omitted replacement range means the
 /// current selection or marked text.
-unsafe extern "C" fn set_marked_text_legacy(
-    receiver: Id,
-    sel: Sel,
-    value: Id,
-    selected: NSRange,
-) {
+unsafe extern "C" fn set_marked_text_legacy(receiver: Id, sel: Sel, value: Id, selected: NSRange) {
     // SAFETY: `set_marked_text` has the same receiver and string requirements.
     unsafe {
         set_marked_text(
@@ -493,7 +486,10 @@ unsafe extern "C" fn delete_forward(receiver: Id, _sel: Sel, _sender: Id) {
                 let caret = byte_index(&state.text, state.selected.location);
                 NSRange {
                     location: state.selected.location,
-                    length: state.text[caret..].chars().next().map_or(0, char::len_utf16),
+                    length: state.text[caret..]
+                        .chars()
+                        .next()
+                        .map_or(0, char::len_utf16),
                 }
             }
             _ => state.selected,
@@ -529,7 +525,8 @@ unsafe extern "C" fn key_down(receiver: Id, _sel: Sel, event: Id) {
         f(event, sel)
     };
     // SAFETY: null or an `NSString`.
-    let text = String::from_utf8_lossy(&unsafe { foundation::string::bytes(characters) }).into_owned();
+    let text =
+        String::from_utf8_lossy(&unsafe { foundation::string::bytes(characters) }).into_owned();
     let Some(character) = text.chars().next() else {
         return;
     };
@@ -638,9 +635,15 @@ unsafe extern "C" fn move_right(receiver: Id, _sel: Sel, _sender: Id) {
         0 => {
             let caret = byte_index(&state.text, state.selected.location);
             state.selected.location
-                + state.text[caret..].chars().next().map_or(0, char::len_utf16)
+                + state.text[caret..]
+                    .chars()
+                    .next()
+                    .map_or(0, char::len_utf16)
         }
-        _ => state.selected.location.saturating_add(state.selected.length),
+        _ => state
+            .selected
+            .location
+            .saturating_add(state.selected.length),
     };
     change_selection(
         receiver,
@@ -708,8 +711,7 @@ pub(crate) fn commit(receiver: Id, text: &str) {
             .and_then(|class| class.method(objc::sel::get("insertText:")))
         {
             let sel = objc::sel::get("insertText:");
-            let f: unsafe extern "C" fn(Id, Sel, Id) =
-                std::mem::transmute(method.implementation());
+            let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(method.implementation());
             f(receiver, sel, value);
         }
     }
@@ -940,9 +942,19 @@ mod tests {
                 },
                 replacement,
             );
-            assert_eq!(foundation::string::bytes(string(view, objc::sel::get("string"))), b"cee\xc3\xa9");
-            delete_backward(view, objc::sel::get("deleteBackward:"), std::ptr::null_mut());
-            assert_eq!(foundation::string::bytes(string(view, objc::sel::get("string"))), b"ce\xc3\xa9");
+            assert_eq!(
+                foundation::string::bytes(string(view, objc::sel::get("string"))),
+                b"cee\xc3\xa9"
+            );
+            delete_backward(
+                view,
+                objc::sel::get("deleteBackward:"),
+                std::ptr::null_mut(),
+            );
+            assert_eq!(
+                foundation::string::bytes(string(view, objc::sel::get("string"))),
+                b"ce\xc3\xa9"
+            );
         }
     }
 
@@ -1053,7 +1065,13 @@ mod tests {
                 length: 4,
             })
         );
-        assert_eq!(read(view).selected, NSRange { location: 3, length: 1 });
+        assert_eq!(
+            read(view).selected,
+            NSRange {
+                location: 3,
+                length: 1
+            }
+        );
         commit(view, "coffee");
         assert_eq!(read(view).text, "coffee");
         assert_eq!(read(view).marked, None);

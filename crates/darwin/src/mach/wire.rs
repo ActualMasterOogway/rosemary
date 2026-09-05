@@ -224,7 +224,11 @@ impl Receiver {
 
     /// Whether a message is waiting, without taking it.
     pub fn ready(&self) -> bool {
-        self.held.lock().unwrap_or_else(|e| e.into_inner()).is_some() || poll_one(self.fd, 0)
+        self.held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+            || poll_one(self.fd, 0)
     }
 
     /// Take the next message, or `None` if none arrived within `timeout_ms`.
@@ -295,7 +299,13 @@ pub fn poll_any(fds: &[c_int], timeout_ms: i32) -> Option<usize> {
     loop {
         // SAFETY: `entries` is exactly the number of live `struct pollfd` the
         // count names.
-        let rc = unsafe { libc::poll(entries.as_mut_ptr(), entries.len() as libc::nfds_t, timeout_ms) };
+        let rc = unsafe {
+            libc::poll(
+                entries.as_mut_ptr(),
+                entries.len() as libc::nfds_t,
+                timeout_ms,
+            )
+        };
         if rc < 0 {
             if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
                 continue;

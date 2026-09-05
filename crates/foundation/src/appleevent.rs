@@ -147,7 +147,10 @@ fn autoreleased(desc: Desc) -> Id {
 unsafe fn desc_of<'a>(object: Id) -> Option<&'a mut Desc> {
     // SAFETY: the caller's obligation.
     if !unsafe {
-        corefoundation::base::is_kind_of(object as corefoundation::base::CFTypeRef, descriptor_class())
+        corefoundation::base::is_kind_of(
+            object as corefoundation::base::CFTypeRef,
+            descriptor_class(),
+        )
     } {
         return None;
     }
@@ -207,8 +210,10 @@ pub fn event(event_class: u32, event_id: u32) -> Id {
         // `wrap` rather than `autoreleased`: the attribute table owns these,
         // and a pool release of the extra reference would be the only thing
         // between them and the event they describe.
-        desc.attributes
-            .push((keyword, wrap(Desc::leaf(TYPE_TYPE, code.to_ne_bytes().to_vec()))));
+        desc.attributes.push((
+            keyword,
+            wrap(Desc::leaf(TYPE_TYPE, code.to_ne_bytes().to_vec())),
+        ));
     }
     autoreleased(desc)
 }
@@ -525,7 +530,12 @@ unsafe extern "C" fn double_value(receiver: Id, _sel: Sel) -> f64 {
 
 unsafe extern "C" fn boolean_value(receiver: Id, _sel: Sel) -> u8 {
     // SAFETY: a descriptor.
-    u8::from(unsafe { desc_of(receiver) }.and_then(|d| integer_of(d)).unwrap_or(0) != 0)
+    u8::from(
+        unsafe { desc_of(receiver) }
+            .and_then(|d| integer_of(d))
+            .unwrap_or(0)
+            != 0,
+    )
 }
 
 unsafe extern "C" fn type_code_value(receiver: Id, _sel: Sel) -> u32 {
@@ -556,7 +566,10 @@ unsafe extern "C" fn descriptor_at_index(receiver: Id, _sel: Sel, index: i64) ->
         return std::ptr::null_mut();
     };
     match desc.keyed() {
-        true => desc.record.get(at).map_or(std::ptr::null_mut(), |(_, v)| *v),
+        true => desc
+            .record
+            .get(at)
+            .map_or(std::ptr::null_mut(), |(_, v)| *v),
         false => desc.list.get(at).copied().unwrap_or(std::ptr::null_mut()),
     }
 }
@@ -575,12 +588,7 @@ unsafe extern "C" fn keyword_for_descriptor_at_index(receiver: Id, _sel: Sel, in
 /// `-insertDescriptor:atIndex:`. Index 0 means "append", which is what Apple's
 /// documents and what `-[NSAppleEventDescriptor listDescriptor]` callers use to
 /// build a list in order.
-unsafe extern "C" fn insert_descriptor_at_index(
-    receiver: Id,
-    _sel: Sel,
-    value: Id,
-    index: i64,
-) {
+unsafe extern "C" fn insert_descriptor_at_index(receiver: Id, _sel: Sel, value: Id, index: i64) {
     // SAFETY: a descriptor.
     let Some(desc) = (unsafe { desc_of(receiver) }) else {
         return;
@@ -812,8 +820,7 @@ unsafe extern "C" fn current_reply_apple_event(_receiver: Id, _sel: Sel) -> Id {
 /// The suspension ID a guest is handed is the index into this table plus one,
 /// so that zero is never a valid one - a caller that stores the ID in a zeroed
 /// struct would otherwise resume an event it never suspended.
-static SUSPENDED: std::sync::Mutex<Vec<Option<(usize, usize)>>> =
-    std::sync::Mutex::new(Vec::new());
+static SUSPENDED: std::sync::Mutex<Vec<Option<(usize, usize)>>> = std::sync::Mutex::new(Vec::new());
 
 unsafe extern "C" fn suspend_current_apple_event(_receiver: Id, _sel: Sel) -> *const c_void {
     let (event, reply) = CURRENT.with(|c| c.get());
@@ -1093,12 +1100,8 @@ mod tests {
 
     fn install_handler(class: u32, id: u32) -> Id {
         crate::bootstrap();
-        let handler = corefoundation::base::register(
-            c"R3AppleEventHandler",
-            None,
-            size_of::<usize>(),
-            false,
-        );
+        let handler =
+            corefoundation::base::register(c"R3AppleEventHandler", None, size_of::<usize>(), false);
         handler.replace_method(
             objc::sel::get("handle:withReply:"),
             record as *const c_void,

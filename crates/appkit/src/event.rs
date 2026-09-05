@@ -83,7 +83,10 @@ fn debug_key() {
     let request = REQUEST.get_or_init(|| {
         let value = std::env::var("ROSETTA3_DEBUG_KEY").ok()?;
         let (names, after) = value.split_once('@').unwrap_or((value.as_str(), "5"));
-        let keys: Vec<u32> = names.split(',').filter_map(|n| scancode(n.trim())).collect();
+        let keys: Vec<u32> = names
+            .split(',')
+            .filter_map(|n| scancode(n.trim()))
+            .collect();
         match keys.is_empty() {
             true => None,
             false => Some((keys, after.trim().parse().unwrap_or(5.0))),
@@ -486,10 +489,7 @@ pub fn route(window: Id, event: Id) {
     let start = match positional(kind) {
         // SAFETY: null or the content view, which this crate made.
         true => unsafe {
-            crate::view::hit_test(
-                window::content_view_of(window),
-                nsevent::location_of(event),
-            )
+            crate::view::hit_test(window::content_view_of(window), nsevent::location_of(event))
         },
         false => responder_of(window),
     };
@@ -556,7 +556,8 @@ fn chain(start: Id, sel: objc::sel::Sel) -> Option<(Id, &'static objc::class::Me
             return fallback;
         }
         // SAFETY: null or a live object this runtime allocated.
-        if let Some(method) = unsafe { objc::object::class_of(responder) }.and_then(|c| c.method(sel))
+        if let Some(method) =
+            unsafe { objc::object::class_of(responder) }.and_then(|c| c.method(sel))
         {
             let ours = crate::text::is_default_key_handling(method.implementation() as *const ());
             match ours {

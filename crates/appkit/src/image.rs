@@ -169,9 +169,8 @@ pub fn bitmap(object: Id) -> Option<crate::raster::Bitmap> {
             return None;
         }
         // SAFETY: an array of representations this object made.
-        let first = unsafe {
-            corefoundation::api::CFArrayGetValueAtIndex(reps as *const c_void, 0) as Id
-        };
+        let first =
+            unsafe { corefoundation::api::CFArrayGetValueAtIndex(reps as *const c_void, 0) as Id };
         bitmap::pixels_of(first)
     })
 }

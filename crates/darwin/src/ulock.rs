@@ -94,9 +94,21 @@ fn fail(operation: u32, error: i32) -> i32 {
 /// # Safety
 ///
 /// `addr` is a readable word of at least the operation's width.
-pub unsafe extern "C" fn wait(operation: u32, addr: *mut c_void, value: u64, timeout_us: u32) -> i32 {
+pub unsafe extern "C" fn wait(
+    operation: u32,
+    addr: *mut c_void,
+    value: u64,
+    timeout_us: u32,
+) -> i32 {
     // SAFETY: the caller's guarantee.
-    unsafe { wait_ns(operation, addr, value, (timeout_us as u64).saturating_mul(1_000)) }
+    unsafe {
+        wait_ns(
+            operation,
+            addr,
+            value,
+            (timeout_us as u64).saturating_mul(1_000),
+        )
+    }
 }
 
 /// `int __ulock_wait2(uint32_t, void *, uint64_t, uint64_t timeout_ns, uint64_t)`.
@@ -140,7 +152,14 @@ unsafe fn wait_ns(operation: u32, addr: *mut c_void, value: u64, timeout_ns: u64
     // SAFETY: the caller states `addr` is a readable word; a 64-bit operation was
     // just confirmed to have eight readable bytes, and the low four are the futex's
     // on a little-endian host.
-    match unsafe { block(addr as *mut u32, value as u32, timeout_ns, is_shared(opcode)) } {
+    match unsafe {
+        block(
+            addr as *mut u32,
+            value as u32,
+            timeout_ns,
+            is_shared(opcode),
+        )
+    } {
         Ok(()) => 0,
         Err(libc::EAGAIN) => 0,
         Err(e) => fail(operation, e),
@@ -296,7 +315,13 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         word.store(9, Ordering::Release);
         // SAFETY: the word is live for as long as this scope.
-        unsafe { wake(op::COMPARE_AND_WAIT | flag::WAKE_ALL, word.as_ptr() as *mut c_void, 0) };
+        unsafe {
+            wake(
+                op::COMPARE_AND_WAIT | flag::WAKE_ALL,
+                word.as_ptr() as *mut c_void,
+                0,
+            )
+        };
         assert_eq!(waiter.join().expect("the waiter wakes"), 9);
     }
 
@@ -327,7 +352,10 @@ mod tests {
         let started = std::time::Instant::now();
         // SAFETY: a live local.
         let rc = unsafe { wait(op::COMPARE_AND_WAIT, at, 4, 30_000) };
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "must not block forever");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "must not block forever"
+        );
         #[cfg(target_os = "linux")]
         {
             assert_eq!(rc, -1);

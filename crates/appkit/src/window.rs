@@ -222,9 +222,10 @@ unsafe extern "C" fn window_number_at_point(
     let start = match below {
         0 => 0,
         // SAFETY: `-windowNumber` is `NSInteger (id, SEL)`.
-        _ => match windows.iter().position(|w| unsafe {
-            window_number(*w, objc::sel::get("windowNumber")) == below
-        }) {
+        _ => match windows
+            .iter()
+            .position(|w| unsafe { window_number(*w, objc::sel::get("windowNumber")) == below })
+        {
             Some(at) => at + 1,
             // A number naming no window of this process's orders nothing.
             None => return 0,
@@ -918,10 +919,8 @@ mod tests {
     #[test]
     fn a_new_first_responder_may_hand_it_on() {
         crate::bootstrap();
-        let window = objc::object::create_instance(
-            objc::class::lookup(c"NSWindow").expect("NSWindow"),
-            0,
-        );
+        let window =
+            objc::object::create_instance(objc::class::lookup(c"NSWindow").expect("NSWindow"), 0);
         let view = objc::class::lookup(c"NSView").expect("NSView");
         let handler = objc::object::create_instance(view, 0);
         let redirecting = objc::class::allocate_pair(Some(view), c"RedirectingView", 0)

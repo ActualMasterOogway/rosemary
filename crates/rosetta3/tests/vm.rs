@@ -27,7 +27,10 @@ fn vm_for(path: &str) -> &'static Vm {
     // `argv` cannot back reads past the array's NULL and dereferences it - its
     // own behaviour, correctly reproduced, and not a failure worth
     // manufacturing in a test.
-    let args = [std::ffi::OsString::from(path), std::ffi::OsString::from("one")];
+    let args = [
+        std::ffi::OsString::from(path),
+        std::ffi::OsString::from("one"),
+    ];
     Box::leak(Box::new(
         Vm::new(program, path, &args).expect("a VM with a stack"),
     ))

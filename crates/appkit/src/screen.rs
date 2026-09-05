@@ -164,7 +164,10 @@ unsafe extern "C" fn device_description(receiver: Id, _sel: Sel) -> Id {
         ),
         ("NSDeviceBitsPerSample", number(8)),
     ];
-    let pairs: Vec<(corefoundation::base::CFTypeRef, corefoundation::base::CFTypeRef)> = entries
+    let pairs: Vec<(
+        corefoundation::base::CFTypeRef,
+        corefoundation::base::CFTypeRef,
+    )> = entries
         .iter()
         .map(|(key, value)| {
             (
@@ -247,11 +250,7 @@ const CG_ILLEGAL_ARGUMENT: i32 = 1001;
 /// `list` is null or writable for `max` display ids, and `count` is null or a
 /// writable `uint32_t`.
 #[allow(non_snake_case)]
-pub unsafe extern "C" fn CGGetOnlineDisplayList(
-    max: u32,
-    list: *mut u32,
-    count: *mut u32,
-) -> i32 {
+pub unsafe extern "C" fn CGGetOnlineDisplayList(max: u32, list: *mut u32, count: *mut u32) -> i32 {
     let displays = sdl3::video::displays();
     if list.is_null() {
         if count.is_null() {

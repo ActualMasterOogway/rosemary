@@ -127,11 +127,11 @@ mod tests {
             unsafe { libc::free(block) };
         }
 
-        let (was_malloc, was_free) = (
-            MALLOC.load(Ordering::Acquire),
-            FREE.load(Ordering::Acquire),
+        let (was_malloc, was_free) = (MALLOC.load(Ordering::Acquire), FREE.load(Ordering::Acquire));
+        register(
+            counting_malloc as *const () as usize,
+            counting_free as *const () as usize,
         );
-        register(counting_malloc as *const () as usize, counting_free as *const () as usize);
         assert!(is_registered());
         // SAFETY: a size this test asks for and immediately frees.
         unsafe { guest_free(guest_malloc(32)) };

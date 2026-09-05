@@ -31,8 +31,8 @@ mod format;
 mod hal;
 mod render;
 mod status;
-pub(crate) mod trace;
 mod stream;
+pub(crate) mod trace;
 
 pub use status::*;
 use stream::{Format, sdl_spec};
@@ -208,7 +208,10 @@ pub unsafe extern "C" fn AudioUnitInitialize(handle: *mut c_void) -> i32 {
         return SUCCESS;
     }
     let Some(spec) = sdl_spec(&unit.format) else {
-        trace::say(format_args!("initialize {:?}", unit.format), FORMAT_NOT_SUPPORTED);
+        trace::say(
+            format_args!("initialize {:?}", unit.format),
+            FORMAT_NOT_SUPPORTED,
+        );
         return FORMAT_NOT_SUPPORTED;
     };
     let status = match stream::open(&mut unit, spec, handle) {

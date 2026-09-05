@@ -49,7 +49,10 @@ pub fn pointer() -> Option<(f32, f32)> {
 enum Action {
     Move(f32, f32),
     /// Press and release, `clicks` times, at the current position.
-    Click { button: u8, clicks: i64 },
+    Click {
+        button: u8,
+        clicks: i64,
+    },
     Down(u8),
     Up(u8),
     Scroll(f32, f32),

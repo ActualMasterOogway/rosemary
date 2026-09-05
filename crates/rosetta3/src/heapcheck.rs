@@ -171,7 +171,10 @@ pub fn foreign_count() -> u64 {
 /// Call after [`crate::interpose::apply`], so the address recovered is the
 /// allocator the guest's code actually ends up calling.
 #[cfg(target_arch = "x86_64")]
-pub fn install<M: Regions>(report: &mut LinkReport, memory: &mut M) -> Result<usize, machish::Error> {
+pub fn install<M: Regions>(
+    report: &mut LinkReport,
+    memory: &mut M,
+) -> Result<usize, machish::Error> {
     if !requested() {
         return Ok(0);
     }
@@ -229,7 +232,9 @@ pub fn install<M: Regions>(report: &mut LinkReport, memory: &mut M) -> Result<us
             rebound += 1;
         }
     }
-    eprintln!("rosetta3: {ENV}: {rebound} free binding(s) now checked against the guest's allocator");
+    eprintln!(
+        "rosetta3: {ENV}: {rebound} free binding(s) now checked against the guest's allocator"
+    );
     Ok(rebound)
 }
 

@@ -219,8 +219,7 @@ mod tests {
         let mut fds = [ProcFdInfo::default(); 256];
         let size = std::mem::size_of_val(&fds) as c_int;
         // SAFETY: a buffer this test sized.
-        let bytes =
-            unsafe { proc_pidinfo(0, PROC_PIDLISTFDS, 0, fds.as_mut_ptr().cast(), size) };
+        let bytes = unsafe { proc_pidinfo(0, PROC_PIDLISTFDS, 0, fds.as_mut_ptr().cast(), size) };
         assert!(bytes > 0 && bytes % 8 == 0);
         let open = bytes as usize / size_of::<ProcFdInfo>();
         assert!(open >= 3, "at least the three standard descriptors");

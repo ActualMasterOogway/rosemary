@@ -81,14 +81,7 @@ pub unsafe extern "C" fn pthread_atfork(
     child: *const (),
 ) -> c_int {
     // SAFETY: the caller's guarantee, and a DSO handle of this crate's own.
-    unsafe {
-        __register_atfork(
-            prepare,
-            parent,
-            child,
-            &raw const DSO_HANDLE as *const (),
-        )
-    }
+    unsafe { __register_atfork(prepare, parent, child, &raw const DSO_HANDLE as *const ()) }
 }
 
 /// `void __assert_rtn(const char *func, const char *file, int line, const char *expr)`
@@ -263,7 +256,10 @@ mod tests {
     #[test]
     fn memset_s_refuses_a_null_destination_rather_than_writing_to_it() {
         // SAFETY: null with a zero size, which is what the check is for.
-        assert_eq!(unsafe { memset_s(core::ptr::null_mut(), 0, 0, 0) }, libc::EINVAL);
+        assert_eq!(
+            unsafe { memset_s(core::ptr::null_mut(), 0, 0, 0) },
+            libc::EINVAL
+        );
     }
 
     /// Seeding twice from the kernel gives two different sequences, which is the

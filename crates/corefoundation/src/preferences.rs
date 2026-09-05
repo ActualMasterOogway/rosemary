@@ -52,7 +52,8 @@ fn store() -> &'static Mutex<HashMap<String, Domain>> {
 /// `value` is null or an object this runtime allocated.
 unsafe fn text(value: CFTypeRef) -> Option<String> {
     // SAFETY: the caller's obligation.
-    unsafe { crate::string::as_string(value) }.map(|s| String::from_utf8_lossy(&s.utf8()).into_owned())
+    unsafe { crate::string::as_string(value) }
+        .map(|s| String::from_utf8_lossy(&s.utf8()).into_owned())
 }
 
 /// The domain name to file a key under.
@@ -283,8 +284,14 @@ mod tests {
         // SAFETY: two strings this test made, and a live `Boolean`.
         unsafe {
             assert!(CFPreferencesCopyAppValue(key, app).is_null());
-            assert_eq!(CFPreferencesGetAppBooleanValue(key, app, &raw mut exists), 0);
-            assert_eq!(exists, 0, "false because it is unset, not because it is off");
+            assert_eq!(
+                CFPreferencesGetAppBooleanValue(key, app, &raw mut exists),
+                0
+            );
+            assert_eq!(
+                exists, 0,
+                "false because it is unset, not because it is off"
+            );
         }
     }
 
@@ -299,10 +306,16 @@ mod tests {
         // SAFETY: strings and a number this test made.
         unsafe {
             CFPreferencesSetAppValue(key, value, mine);
-            assert_eq!(CFPreferencesGetAppBooleanValue(key, mine, &raw mut exists), 1);
+            assert_eq!(
+                CFPreferencesGetAppBooleanValue(key, mine, &raw mut exists),
+                1
+            );
             assert_eq!(exists, 1);
             assert!(CFPreferencesCopyAppValue(key, theirs).is_null());
-            assert_eq!(CFPreferencesGetAppIntegerValue(key, mine, std::ptr::null_mut()), 1);
+            assert_eq!(
+                CFPreferencesGetAppIntegerValue(key, mine, std::ptr::null_mut()),
+                1
+            );
 
             // And a null value removes it again.
             CFPreferencesSetAppValue(key, std::ptr::null(), mine);

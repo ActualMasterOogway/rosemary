@@ -193,8 +193,8 @@ fn apply(queue: c_int, state: &mut Queue, change: &Kevent) -> Result<(), c_int> 
         // `EBADF` at registration rather than at the first `poll` - which is
         // where BSD reports it, and the only place a caller looks.
         if change.filter != EVFILT_USER {
-            let fd = c_int::try_from(change.ident)
-                .map_err(|_| crate::errno::from_host(libc::EBADF))?;
+            let fd =
+                c_int::try_from(change.ident).map_err(|_| crate::errno::from_host(libc::EBADF))?;
             // SAFETY: `F_GETFD` reads a flag word and takes no pointer.
             if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
                 return Err(crate::errno::from_host(crate::errno::get()));
@@ -526,7 +526,14 @@ mod tests {
         // SAFETY: one change and room for four events.
         unsafe {
             assert_eq!(
-                kevent(queue, &raw const add, 1, got.as_mut_ptr(), 4, &raw const NO_WAIT),
+                kevent(
+                    queue,
+                    &raw const add,
+                    1,
+                    got.as_mut_ptr(),
+                    4,
+                    &raw const NO_WAIT
+                ),
                 0,
                 "nothing is ready yet"
             );
@@ -569,7 +576,14 @@ mod tests {
         // SAFETY: one change and room for one event.
         unsafe {
             assert_eq!(
-                kevent(queue, &raw const add, 1, got.as_mut_ptr(), 1, &raw const NO_WAIT),
+                kevent(
+                    queue,
+                    &raw const add,
+                    1,
+                    got.as_mut_ptr(),
+                    1,
+                    &raw const NO_WAIT
+                ),
                 0
             );
         }
@@ -583,7 +597,16 @@ mod tests {
             };
             // SAFETY: one change and no room for events, which applies it and
             // returns.
-            unsafe { kevent(queue, &raw const fire, 1, std::ptr::null_mut(), 0, std::ptr::null()) }
+            unsafe {
+                kevent(
+                    queue,
+                    &raw const fire,
+                    1,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null(),
+                )
+            }
         });
         // SAFETY: no changes, room for one event, and a null timeout - which is
         // the wait the trigger has to break.
@@ -625,7 +648,14 @@ mod tests {
         let mut got = [Kevent::default(); 1];
         // SAFETY: one change and room for one event.
         let n = unsafe {
-            kevent(queue, &raw const add, 1, got.as_mut_ptr(), 1, &raw const NO_WAIT)
+            kevent(
+                queue,
+                &raw const add,
+                1,
+                got.as_mut_ptr(),
+                1,
+                &raw const NO_WAIT,
+            )
         };
         assert_eq!(n, 1);
         assert_eq!(got[0].flags & EV_ERROR, EV_ERROR);
@@ -638,7 +668,14 @@ mod tests {
         // SAFETY: as above.
         assert_eq!(
             unsafe {
-                kevent(queue, &raw const add, 1, got.as_mut_ptr(), 1, &raw const NO_WAIT)
+                kevent(
+                    queue,
+                    &raw const add,
+                    1,
+                    got.as_mut_ptr(),
+                    1,
+                    &raw const NO_WAIT,
+                )
             },
             -1
         );

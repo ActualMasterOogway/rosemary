@@ -244,9 +244,7 @@ pub unsafe extern "C" fn execve(
     let raw = as_argv(&rewritten);
     // SAFETY: `runtime` and every string in `rewritten` outlive the call, and `raw` is
     // null-terminated. On success this does not return.
-    unsafe {
-        libc::execve(runtime.as_ptr(), raw.as_ptr(), envp)
-    }
+    unsafe { libc::execve(runtime.as_ptr(), raw.as_ptr(), envp) }
 }
 
 /// `int execv(const char *path, char *const argv[])`.
@@ -344,9 +342,7 @@ impl FileActions {
                     Action::Dup2 { from, to } => {
                         libc::posix_spawn_file_actions_adddup2(&mut host.0, *from, *to)
                     }
-                    Action::Close(fd) => {
-                        libc::posix_spawn_file_actions_addclose(&mut host.0, *fd)
-                    }
+                    Action::Close(fd) => libc::posix_spawn_file_actions_addclose(&mut host.0, *fd),
                     #[cfg(not(target_os = "macos"))]
                     Action::Chdir(path) => {
                         libc::posix_spawn_file_actions_addchdir_np(&mut host.0, path.as_ptr())
@@ -361,7 +357,7 @@ impl FileActions {
                         libc::posix_spawn_file_actions_adddup2(&mut host.0, *fd, *fd)
                     }
                     #[cfg(target_os = "macos")]
-                    _ => unimplemented!()
+                    _ => unimplemented!(),
                 }
             };
             if rc != 0 {
@@ -508,7 +504,10 @@ pub unsafe extern "C" fn posix_spawn(
 
     // `POSIX_SPAWN_SETEXEC` asks for this process to be replaced rather than a child
     // made, which is an `execve` however the guest spelled it.
-    if attributes.as_ref().is_some_and(|a| a.flags & flag::SETEXEC != 0) {
+    if attributes
+        .as_ref()
+        .is_some_and(|a| a.flags & flag::SETEXEC != 0)
+    {
         // SAFETY: the caller's guarantee.
         unsafe { execve(path, argv, envp) };
         return crate::errno::get();

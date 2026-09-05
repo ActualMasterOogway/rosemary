@@ -141,12 +141,7 @@ struct CookieObject {
 }
 
 fn cookie_class() -> &'static objc::class::Class {
-    corefoundation::base::register(
-        c"NSHTTPCookie",
-        None,
-        size_of::<CookieObject>(),
-        false,
-    )
+    corefoundation::base::register(c"NSHTTPCookie", None, size_of::<CookieObject>(), false)
 }
 
 /// # Safety
@@ -236,7 +231,10 @@ unsafe extern "C" fn cookie_with_properties(_class: Id, _sel: Sel, properties: I
             let name = crate::string::from_str(key);
             // SAFETY: `properties` is null or a dictionary, `name` a live string.
             let value = unsafe {
-                corefoundation::api::CFDictionaryGetValue(properties as CFTypeRef, name as CFTypeRef)
+                corefoundation::api::CFDictionaryGetValue(
+                    properties as CFTypeRef,
+                    name as CFTypeRef,
+                )
             };
             // SAFETY: a fresh string this call owns.
             unsafe { corefoundation::api::CFRelease(name as CFTypeRef) };
@@ -410,9 +408,7 @@ fn parse_expires(value: &str) -> Option<i64> {
         _ => year,
     };
     let sane = (1..=31).contains(&day) && hour < 24 && minute < 60 && second < 60 && year >= 1601;
-    sane.then(|| {
-        days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second
-    })
+    sane.then(|| days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second)
 }
 
 fn parse_number(token: &str, digits: std::ops::RangeInclusive<usize>) -> Option<i64> {
@@ -624,11 +620,7 @@ unsafe extern "C" fn storage_cookies(_receiver: Id, _sel: Sel) -> Id {
         .filter(|c| c.expires.is_none_or(|e| e > now))
         .cloned()
         .collect();
-    trace(format_args!(
-        "-cookies -> {} ({})",
-        all.len(),
-        names(&all)
-    ));
+    trace(format_args!("-cookies -> {} ({})", all.len(), names(&all)));
     cookie_array(all)
 }
 
@@ -698,9 +690,8 @@ unsafe extern "C" fn set_cookies_for_url(
     let count = unsafe { corefoundation::api::CFArrayGetCount(cookies as CFTypeRef) };
     for i in 0..count {
         // SAFETY: an index the count admits.
-        let cookie = unsafe {
-            corefoundation::api::CFArrayGetValueAtIndex(cookies as CFTypeRef, i) as Id
-        };
+        let cookie =
+            unsafe { corefoundation::api::CFArrayGetValueAtIndex(cookies as CFTypeRef, i) as Id };
         // SAFETY: `-setCookie:` takes exactly this.
         unsafe { set_cookie(receiver, sel, cookie) };
     }
@@ -714,9 +705,8 @@ unsafe extern "C" fn request_header_fields(_class: Id, _sel: Sel, cookies: Id) -
     let mut header = String::new();
     for i in 0..count {
         // SAFETY: an index the count admits.
-        let object = unsafe {
-            corefoundation::api::CFArrayGetValueAtIndex(cookies as CFTypeRef, i) as Id
-        };
+        let object =
+            unsafe { corefoundation::api::CFArrayGetValueAtIndex(cookies as CFTypeRef, i) as Id };
         // SAFETY: an `NSHTTPCookie` this module made.
         let Some(cookie) = (unsafe { cookie_of(object) }) else {
             continue;
@@ -778,12 +768,8 @@ pub(crate) fn install() {
         "properties" => cookie_properties, c"@16@0:8";
     });
 
-    let storage = corefoundation::base::register(
-        c"NSHTTPCookieStorage",
-        None,
-        size_of::<usize>(),
-        false,
-    );
+    let storage =
+        corefoundation::base::register(c"NSHTTPCookieStorage", None, size_of::<usize>(), false);
     class_methods!(storage, {
         "sharedHTTPCookieStorage" => shared_storage, c"@16@0:8";
     });
@@ -878,7 +864,9 @@ mod tests {
     #[test]
     fn a_traced_header_shows_its_attributes_and_not_its_value() {
         assert_eq!(
-            attributes(".ROBLOSECURITY=SECRET; domain=.roblox.com; expires=Fri, 01 Jan 2100 00:00:00 GMT"),
+            attributes(
+                ".ROBLOSECURITY=SECRET; domain=.roblox.com; expires=Fri, 01 Jan 2100 00:00:00 GMT"
+            ),
             ".ROBLOSECURITY=<21 bytes>; domain=.roblox.com; expires=Fri, 01 Jan 2100 00:00:00 GMT"
         );
     }

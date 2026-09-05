@@ -125,8 +125,8 @@ pub unsafe extern "C" fn get_size(handle: u64) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::object;
+    use super::*;
 
     /// A null destructor means the buffer belongs to the caller, so the object must
     /// still read correctly once that buffer is gone.
@@ -141,7 +141,10 @@ mod tests {
         assert_eq!(unsafe { get_size(handle) }, 4);
         let (at, len) = bytes(handle).expect("a data object");
         // SAFETY: the copy this object owns.
-        assert_eq!(unsafe { std::slice::from_raw_parts(at, len) }, &[1, 2, 3, 4]);
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(at, len) },
+            &[1, 2, 3, 4]
+        );
         // SAFETY: giving up the create reference.
         unsafe { object::release(handle) };
     }

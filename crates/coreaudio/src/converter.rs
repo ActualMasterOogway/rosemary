@@ -346,14 +346,14 @@ pub unsafe extern "C" fn AudioConverterFillComplexBuffer(
     }
     let frame_bytes = converter.destination.bytes_per_packet.max(1) as usize;
     // SAFETY: the caller's obligation: the buffer is writable for its own size.
-    let room = (out.buffers[0].byte_size as usize)
-        .min(unsafe { *packets } as usize * frame_bytes);
+    let room = (out.buffers[0].byte_size as usize).min(unsafe { *packets } as usize * frame_bytes);
     let destination = out.buffers[0].data.cast::<u8>();
 
     let mut produced = 0usize;
     while produced < room {
         // SAFETY: a stream this crate made.
-        if unsafe { sdl3::audio::available(converter.stream) } == 0 && !feed(&mut converter, input, input_data)
+        if unsafe { sdl3::audio::available(converter.stream) } == 0
+            && !feed(&mut converter, input, input_data)
         {
             break;
         }
@@ -422,7 +422,8 @@ fn feed(converter: &mut Converter, input: InputProc, input_data: *mut c_void) ->
     }
     // SAFETY: the guest's procedure says this buffer holds `mDataByteSize`
     // readable bytes.
-    converter.held = unsafe { std::slice::from_raw_parts(supplied.data.cast::<u8>(), bytes) }.to_vec();
+    converter.held =
+        unsafe { std::slice::from_raw_parts(supplied.data.cast::<u8>(), bytes) }.to_vec();
     // SAFETY: a stream this crate made, and a live slice.
     unsafe { sdl3::audio::put(converter.stream, &converter.held) }
 }

@@ -190,8 +190,16 @@ pub fn provide(lib: &mut machish::resolve::SyntheticDylib) {
         crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap() as *const ());
     }
     crate::define_data(lib, "__dispatch_main_q", queue::main_queue());
-    crate::define_data(lib, "__dispatch_queue_attr_concurrent", queue::concurrent_attr());
-    crate::define_data(lib, "__dispatch_data_destructor_free", data::destructor_free());
+    crate::define_data(
+        lib,
+        "__dispatch_queue_attr_concurrent",
+        queue::concurrent_attr(),
+    );
+    crate::define_data(
+        lib,
+        "__dispatch_data_destructor_free",
+        data::destructor_free(),
+    );
 }
 
 /// Everything [`symbol`] answers.
@@ -227,7 +235,6 @@ pub const NAMES: &[&str] = &[
     "dispatch_get_context",
     "dispatch_set_finalizer_f",
 ];
-
 
 #[cfg(test)]
 mod tests {

@@ -168,8 +168,8 @@ unsafe extern "C" fn move_item(_receiver: Id, _sel: Sel, from: Id, to: Id, error
 /// `url` is null or an `NSURL`.
 unsafe fn at_url<T>(url: Id, absent: T, with: impl FnOnce(Id) -> T) -> T {
     // SAFETY: the caller's obligation.
-    let Some(path) = (unsafe { corefoundation::url::as_url(url as CFTypeRef) })
-        .and_then(|u| u.file_path())
+    let Some(path) =
+        (unsafe { corefoundation::url::as_url(url as CFTypeRef) }).and_then(|u| u.file_path())
     else {
         return absent;
     };
@@ -288,7 +288,10 @@ unsafe extern "C" fn url_for_directory(
 ) -> Id {
     // SAFETY: the caller's obligation.
     unsafe { no_error(error) };
-    let Some(path) = crate::paths::directory_paths(directory, domain).into_iter().next() else {
+    let Some(path) = crate::paths::directory_paths(directory, domain)
+        .into_iter()
+        .next()
+    else {
         return std::ptr::null_mut();
     };
     if create != 0 && std::fs::create_dir_all(&path).is_err() {

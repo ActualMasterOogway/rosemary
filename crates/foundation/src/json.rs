@@ -75,7 +75,9 @@ fn write(object: CFTypeRef, out: &mut Vec<u8>, options: usize, depth: usize) -> 
     let class = unsafe { corefoundation::base::class_of(object) }
         .map(|c| c.name_str().to_string())
         .unwrap_or_else(|| "an object with no class".into());
-    Err(format!("the graph holds a {class}, which JSON cannot carry"))
+    Err(format!(
+        "the graph holds a {class}, which JSON cannot carry"
+    ))
 }
 
 fn write_array(
@@ -210,10 +212,7 @@ impl Reader<'_> {
                 self.at += 1;
                 Ok(())
             }
-            _ => Err(format!(
-                "expected '{}' at byte {}",
-                byte as char, self.at
-            )),
+            _ => Err(format!("expected '{}' at byte {}", byte as char, self.at)),
         }
     }
 
@@ -241,11 +240,17 @@ impl Reader<'_> {
             }
             Some(b't') => {
                 self.literal(b"true")?;
-                Ok(objc::arc::retain(corefoundation::collections::boolean(true) as Id) as CFTypeRef)
+                Ok(
+                    objc::arc::retain(corefoundation::collections::boolean(true) as Id)
+                        as CFTypeRef,
+                )
             }
             Some(b'f') => {
                 self.literal(b"false")?;
-                Ok(objc::arc::retain(corefoundation::collections::boolean(false) as Id) as CFTypeRef)
+                Ok(
+                    objc::arc::retain(corefoundation::collections::boolean(false) as Id)
+                        as CFTypeRef,
+                )
             }
             Some(b'n') => {
                 self.literal(b"null")?;
@@ -395,8 +400,8 @@ impl Reader<'_> {
                     }
                     _ => u32::from(first),
                 };
-                let character =
-                    char::from_u32(scalar).ok_or_else(|| format!("{scalar:#x} is not a character"))?;
+                let character = char::from_u32(scalar)
+                    .ok_or_else(|| format!("{scalar:#x} is not a character"))?;
                 let mut buffer = [0u8; 4];
                 out.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
             }
@@ -412,7 +417,8 @@ impl Reader<'_> {
         }
         let digits = &self.bytes[self.at..end];
         self.at = end;
-        let text = std::str::from_utf8(digits).map_err(|_| "a \\u escape is not hex".to_string())?;
+        let text =
+            std::str::from_utf8(digits).map_err(|_| "a \\u escape is not hex".to_string())?;
         u16::from_str_radix(text, 16).map_err(|_| format!("'{text}' is not four hex digits"))
     }
 
@@ -445,7 +451,9 @@ impl Reader<'_> {
         let value = text
             .parse::<f64>()
             .map_err(|_| format!("'{text}' is not a number, at byte {start}"))?;
-        Ok(corefoundation::collections::new_number(Number::Float(value)))
+        Ok(corefoundation::collections::new_number(Number::Float(
+            value,
+        )))
     }
 }
 
@@ -608,7 +616,11 @@ mod tests {
                 &mut error,
             )
         };
-        assert_eq!(value.is_null(), !error.is_null(), "one of the two, never both");
+        assert_eq!(
+            value.is_null(),
+            !error.is_null(),
+            "one of the two, never both"
+        );
         value
     }
 
@@ -653,7 +665,8 @@ mod tests {
         // strings and not something that merely prints like one.
         // SAFETY: `-objectForKey:` is `id (id, SEL, id)`.
         let value = unsafe {
-            let f: unsafe extern "C" fn(Id, Sel, Id) -> Id = std::mem::transmute(objc::msg::entry());
+            let f: unsafe extern "C" fn(Id, Sel, Id) -> Id =
+                std::mem::transmute(objc::msg::entry());
             f(
                 object,
                 objc::sel::get("objectForKey:"),
@@ -661,7 +674,10 @@ mod tests {
             )
         };
         // SAFETY: a string.
-        assert_eq!(unsafe { crate::string::bytes(value) }, b"Credentials.isAvailable");
+        assert_eq!(
+            unsafe { crate::string::bytes(value) },
+            b"Credentials.isAvailable"
+        );
     }
 
     /// A boolean must not come back as the number one: the far side of the bus
@@ -671,7 +687,10 @@ mod tests {
     fn a_boolean_stays_a_boolean() {
         crate::bootstrap();
         let object = decode(br#"{"ok":true,"n":1}"#, 0);
-        assert_eq!(encode(object, writing::SORTED_KEYS), br#"{"n":1,"ok":true}"#);
+        assert_eq!(
+            encode(object, writing::SORTED_KEYS),
+            br#"{"n":1,"ok":true}"#
+        );
     }
 
     /// An id past 2^53 is the case a JSON reader that keeps every number as a

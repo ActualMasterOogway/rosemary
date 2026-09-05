@@ -182,7 +182,10 @@ pub const KEYS: &[(&str, &str)] = &[
     ("_NSLocaleCurrencySymbol", "kCFLocaleCurrencySymbol"),
     ("_NSLocaleCurrencyCode", "kCFLocaleCurrencyCode"),
     ("_NSLocaleCalendarIdentifier", "kCFLocaleCalendarIdentifier"),
-    ("_NSLocaleCollationIdentifier", "kCFLocaleCollationIdentifier"),
+    (
+        "_NSLocaleCollationIdentifier",
+        "kCFLocaleCollationIdentifier",
+    ),
     ("_kCFLocaleIdentifier", "kCFLocaleIdentifier"),
     ("_kCFLocaleLanguageCode", "kCFLocaleLanguageCode"),
     ("_kCFLocaleCountryCode", "kCFLocaleCountryCode"),
@@ -194,8 +197,14 @@ pub const KEYS: &[(&str, &str)] = &[
     ("_kCFLocaleGroupingSeparator", "kCFLocaleGroupingSeparator"),
     ("_kCFLocaleCurrencySymbol", "kCFLocaleCurrencySymbol"),
     ("_kCFLocaleCurrencyCode", "kCFLocaleCurrencyCode"),
-    ("_kCFLocaleCalendarIdentifier", "kCFLocaleCalendarIdentifier"),
-    ("_kCFLocaleCollationIdentifier", "kCFLocaleCollationIdentifier"),
+    (
+        "_kCFLocaleCalendarIdentifier",
+        "kCFLocaleCalendarIdentifier",
+    ),
+    (
+        "_kCFLocaleCollationIdentifier",
+        "kCFLocaleCollationIdentifier",
+    ),
 ];
 
 /// The CoreFoundation spellings, which name the same locale as the class above.
@@ -325,7 +334,11 @@ mod tests {
         let (first, second) = unsafe { (system(), system()) };
         assert!(!first.is_null());
         assert_eq!(first, second, "a Get answers with one object");
-        assert_eq!(first, shared(), "and it is the locale every other call gets");
+        assert_eq!(
+            first,
+            shared(),
+            "and it is the locale every other call gets"
+        );
     }
 
     /// The components a caller reads through the CoreFoundation spelling are
@@ -337,7 +350,8 @@ mod tests {
         let address = cf::symbol("CFLocaleGetValue").expect("the name has to resolve");
         // SAFETY: the address of `CFLocaleGetValue`, which takes a locale and a
         // key and returns an object.
-        let value: unsafe extern "C" fn(Id, Id) -> Id = unsafe { std::mem::transmute(address as usize) };
+        let value: unsafe extern "C" fn(Id, Id) -> Id =
+            unsafe { std::mem::transmute(address as usize) };
         let ask = |key: &str| {
             let key = crate::string::from_str(key);
             // SAFETY: a live locale and a string this test made.

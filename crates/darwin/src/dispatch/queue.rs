@@ -100,10 +100,7 @@ impl Done {
     fn wait(&self) {
         let mut finished = self.finished.lock().unwrap_or_else(|e| e.into_inner());
         while !*finished {
-            finished = self
-                .woken
-                .wait(finished)
-                .unwrap_or_else(|e| e.into_inner());
+            finished = self.woken.wait(finished).unwrap_or_else(|e| e.into_inner());
         }
     }
 }
@@ -834,7 +831,11 @@ mod tests {
         let q = create_serial("sync test");
         // SAFETY: a live queue, a host function, and a live counter.
         unsafe {
-            sync_f(q, &counter as *const _ as u64, bump as *const () as usize as u64);
+            sync_f(
+                q,
+                &counter as *const _ as u64,
+                bump as *const () as usize as u64,
+            );
             assert_eq!(counter.load(Ordering::Acquire), 1);
             object::release(q);
         }
@@ -900,7 +901,8 @@ mod tests {
     fn a_timer_runs_after_its_deadline_and_not_before() {
         let counter = AtomicU32::new(0);
         let q = create_serial("timer test");
-        let deadline = unsafe { crate::dispatch::time::time(crate::dispatch::time::NOW, 60_000_000) };
+        let deadline =
+            unsafe { crate::dispatch::time::time(crate::dispatch::time::NOW, 60_000_000) };
         // SAFETY: a live queue, a host function, and a counter that outlives the wait.
         unsafe {
             after_f(

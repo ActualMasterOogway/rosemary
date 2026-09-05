@@ -18,12 +18,7 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 /// Load and execute, with `argv[0]` the path as the guest will see it.
-fn run(
-    path: &str,
-    args: Vec<OsString>,
-    policy: ImportPolicy,
-    forced: Option<Engine>,
-) -> ExitCode {
+fn run(path: &str, args: Vec<OsString>, policy: ImportPolicy, forced: Option<Engine>) -> ExitCode {
     let mut argv = vec![OsString::from(path)];
     argv.extend(args);
     rosetta3::stats::start();

@@ -68,7 +68,9 @@ pub fn symbol(name: &str) -> Option<u64> {
         "IOHIDDeviceRegisterRemovalCallback" => at!(api::IOHIDDeviceRegisterRemovalCallback),
         "IOHIDDeviceGetReport" => at!(api::IOHIDDeviceGetReport),
         "IOHIDDeviceSetReport" => at!(api::IOHIDDeviceSetReport),
-        "IOHIDDeviceRegisterInputReportCallback" => at!(api::IOHIDDeviceRegisterInputReportCallback),
+        "IOHIDDeviceRegisterInputReportCallback" => {
+            at!(api::IOHIDDeviceRegisterInputReportCallback)
+        }
 
         _ => return power::symbol(name).or_else(|| registry::symbol(name)),
     })

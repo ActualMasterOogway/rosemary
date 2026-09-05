@@ -530,9 +530,7 @@ mod tests {
             let n = scandir(path.as_ptr(), &raw mut list, Some(visible), Some(alphasort));
             assert_eq!(n, 3);
             assert!(!list.is_null());
-            let names: Vec<String> = (0..n as usize)
-                .map(|i| read(*list.add(i)).0)
-                .collect();
+            let names: Vec<String> = (0..n as usize).map(|i| read(*list.add(i)).0).collect();
             assert_eq!(names, ["alpha", "beta", "gamma"]);
             assert!((*list.add(n as usize)).is_null(), "NULL-terminated too");
             for i in 0..n as usize {

@@ -331,12 +331,15 @@ unsafe extern "C" fn resource_values_for_keys(
         return std::ptr::null_mut();
     };
 
-    let mut pairs: Vec<(corefoundation::base::CFTypeRef, corefoundation::base::CFTypeRef)> =
-        Vec::new();
+    let mut pairs: Vec<(
+        corefoundation::base::CFTypeRef,
+        corefoundation::base::CFTypeRef,
+    )> = Vec::new();
     for key in keys.values.clone() {
         // SAFETY: an element of a live array, which a caller of this method
         // fills with `NSString`s.
-        let name = String::from_utf8(unsafe { crate::string::bytes(key as Id) }).unwrap_or_default();
+        let name =
+            String::from_utf8(unsafe { crate::string::bytes(key as Id) }).unwrap_or_default();
         if let Some(value) = resource_value(&path, &name) {
             pairs.push((key, value));
         }

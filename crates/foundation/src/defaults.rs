@@ -253,10 +253,14 @@ unsafe extern "C" fn double_for_key(receiver: Id, _sel: Sel, key: Id) -> f64 {
 }
 
 unsafe extern "C" fn set_bool_for_key(receiver: Id, _sel: Sel, value: u8, key: Id) {
-    store(receiver, key, match value != 0 {
-        true => "YES",
-        false => "NO",
-    });
+    store(
+        receiver,
+        key,
+        match value != 0 {
+            true => "YES",
+            false => "NO",
+        },
+    );
 }
 
 unsafe extern "C" fn set_integer_for_key(receiver: Id, _sel: Sel, value: i64, key: Id) {
@@ -384,12 +388,8 @@ unsafe extern "C" fn set_domain(_receiver: Id, _sel: Sel, _domain: Id, _name: Id
 unsafe extern "C" fn remove_domain(_receiver: Id, _sel: Sel, _name: Id) {}
 
 pub(crate) fn install() {
-    let class = corefoundation::base::register(
-        c"NSUserDefaults",
-        None,
-        size_of::<Defaults>(),
-        false,
-    );
+    let class =
+        corefoundation::base::register(c"NSUserDefaults", None, size_of::<Defaults>(), false);
     class_methods!(class, {
         "standardUserDefaults" => standard_defaults, c"@16@0:8";
     });

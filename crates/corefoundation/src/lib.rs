@@ -18,13 +18,13 @@ pub mod collections;
 /// Only on Darwin: nowhere else is there another CoreFoundation to meet.
 #[cfg(target_os = "macos")]
 pub mod foreign;
+pub mod preferences;
 pub mod runloop;
 mod send;
 pub mod string;
+pub mod sysconfig;
 pub mod url;
 pub mod uuid;
-pub mod preferences;
-pub mod sysconfig;
 
 /// Install the classes this crate owns. Idempotent.
 pub fn bootstrap() {
@@ -606,7 +606,10 @@ mod tests {
 
             // An immutable string is left alone rather than written through.
             api::CFStringUppercase(s, std::ptr::null());
-            assert_eq!(string::as_string(s).unwrap().utf8(), "Stra\u{00DF}e".as_bytes());
+            assert_eq!(
+                string::as_string(s).unwrap().utf8(),
+                "Stra\u{00DF}e".as_bytes()
+            );
             api::CFRelease(copy);
             api::CFRelease(s);
 

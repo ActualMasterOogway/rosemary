@@ -166,7 +166,9 @@ unsafe extern "C" fn process_name(_receiver: Id, _sel: Sel) -> Id {
 /// `-arguments`, the guest's own `argv` as this process received it.
 unsafe extern "C" fn arguments(_receiver: Id, _sel: Sel) -> Id {
     let strings: Vec<corefoundation::base::CFTypeRef> = std::env::args_os()
-        .map(|arg| crate::string::from_str(&arg.to_string_lossy()) as corefoundation::base::CFTypeRef)
+        .map(|arg| {
+            crate::string::from_str(&arg.to_string_lossy()) as corefoundation::base::CFTypeRef
+        })
         .collect();
     let array = corefoundation::collections::new_array(
         &strings,
@@ -182,17 +184,18 @@ unsafe extern "C" fn arguments(_receiver: Id, _sel: Sel) -> Id {
 }
 
 unsafe extern "C" fn environment(_receiver: Id, _sel: Sel) -> Id {
-    let entries: Vec<(corefoundation::base::CFTypeRef, corefoundation::base::CFTypeRef)> =
-        std::env::vars_os()
-            .map(|(name, value)| {
-                (
-                    crate::string::from_str(&name.to_string_lossy())
-                        as corefoundation::base::CFTypeRef,
-                    crate::string::from_str(&value.to_string_lossy())
-                        as corefoundation::base::CFTypeRef,
-                )
-            })
-            .collect();
+    let entries: Vec<(
+        corefoundation::base::CFTypeRef,
+        corefoundation::base::CFTypeRef,
+    )> = std::env::vars_os()
+        .map(|(name, value)| {
+            (
+                crate::string::from_str(&name.to_string_lossy()) as corefoundation::base::CFTypeRef,
+                crate::string::from_str(&value.to_string_lossy())
+                    as corefoundation::base::CFTypeRef,
+            )
+        })
+        .collect();
     let dictionary = corefoundation::collections::new_dictionary(
         &entries,
         corefoundation::callbacks::Policy::from_key_callbacks(),
@@ -262,12 +265,8 @@ fn autoreleased(text: &str) -> Id {
 }
 
 pub(crate) fn install() {
-    let class = corefoundation::base::register(
-        c"NSProcessInfo",
-        None,
-        std::mem::size_of::<usize>(),
-        false,
-    );
+    let class =
+        corefoundation::base::register(c"NSProcessInfo", None, std::mem::size_of::<usize>(), false);
     class_methods!(class, {
         "processInfo" => process_info, c"@16@0:8";
     });

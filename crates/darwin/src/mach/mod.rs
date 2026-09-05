@@ -148,9 +148,11 @@ pub fn symbol(name: &str) -> Option<u64> {
         "task_set_exception_ports" => task::task_set_exception_ports as *const (),
         "thread_set_exception_ports" => task::thread_set_exception_ports as *const (),
         "host_set_exception_ports" => task::host_set_exception_ports as *const (),
-        "task_get_exception_ports" | "host_get_exception_ports"
-        | "thread_get_exception_ports" => task::task_get_exception_ports as *const (),
-        "task_swap_exception_ports" | "host_swap_exception_ports"
+        "task_get_exception_ports" | "host_get_exception_ports" | "thread_get_exception_ports" => {
+            task::task_get_exception_ports as *const ()
+        }
+        "task_swap_exception_ports"
+        | "host_swap_exception_ports"
         | "thread_swap_exception_ports" => task::task_swap_exception_ports as *const (),
 
         "mach_port_allocate" => space::mach_port_allocate as *const (),
@@ -208,8 +210,14 @@ pub fn provide(lib: &mut machish::resolve::SyntheticDylib) {
     info::publish_page_size();
     for (mach_o, addr) in [
         ("_mach_task_self_", &raw const task::TASK_SELF_PORT as usize),
-        ("_bootstrap_port", &raw const bootstrap::BOOTSTRAP_PORT as usize),
-        ("_NDR_record", (&raw const task::NDR_RECORD).cast::<u8>() as usize),
+        (
+            "_bootstrap_port",
+            &raw const bootstrap::BOOTSTRAP_PORT as usize,
+        ),
+        (
+            "_NDR_record",
+            (&raw const task::NDR_RECORD).cast::<u8>() as usize,
+        ),
         ("_vm_page_size", &raw const info::VM_PAGE_SIZE as usize),
         ("_vm_page_mask", &raw const info::VM_PAGE_MASK as usize),
         ("_vm_page_shift", &raw const info::VM_PAGE_SHIFT as usize),

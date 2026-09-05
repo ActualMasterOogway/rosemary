@@ -115,7 +115,6 @@ pub fn apply<M: Regions>(report: &mut LinkReport, memory: &mut M) -> Result<usiz
     Ok(rebound)
 }
 
-
 /// The `malloc`/`free` the guest's own images call, once every interposition
 /// has been applied.
 ///

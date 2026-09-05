@@ -119,11 +119,7 @@ unsafe extern "C" fn date_with_interval_since_1970(_class: Id, _sel: Sel, second
 
 /// `+dateWithTimeIntervalSinceReferenceDate:`, the same constructor in Apple's
 /// own epoch.
-unsafe extern "C" fn date_with_interval_since_reference(
-    _class: Id,
-    _sel: Sel,
-    seconds: f64,
-) -> Id {
+unsafe extern "C" fn date_with_interval_since_reference(_class: Id, _sel: Sel, seconds: f64) -> Id {
     date(seconds)
 }
 

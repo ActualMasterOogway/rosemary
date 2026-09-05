@@ -251,9 +251,8 @@ fn stream_configuration(scope: u32) -> Vec<u8> {
     if scope != scope::INPUT {
         list.count = 1;
         list.buffers[0].channels = device.channels;
-        list.buffers[0].byte_size = BUFFER_FRAMES.load(std::sync::atomic::Ordering::Relaxed)
-            * 4
-            * device.channels;
+        list.buffers[0].byte_size =
+            BUFFER_FRAMES.load(std::sync::atomic::Ordering::Relaxed) * 4 * device.channels;
     }
     // Only the buffers that are declared: the header's trailing array is one
     // element long and a caller reads `mNumberBuffers` of them.
@@ -815,8 +814,12 @@ mod tests {
     /// answers about - a caller follows exactly this chain.
     #[test]
     fn the_default_output_device_is_the_one_that_answers() {
-        let id = ask(SYSTEM_OBJECT, selector::DEFAULT_OUTPUT_DEVICE, scope::GLOBAL)
-            .expect("a default output device");
+        let id = ask(
+            SYSTEM_OBJECT,
+            selector::DEFAULT_OUTPUT_DEVICE,
+            scope::GLOBAL,
+        )
+        .expect("a default output device");
         assert_eq!(id, as_bytes(&OUTPUT_DEVICE));
         assert!(ask(OUTPUT_DEVICE, selector::NOMINAL_SAMPLE_RATE, scope::GLOBAL).is_some());
     }

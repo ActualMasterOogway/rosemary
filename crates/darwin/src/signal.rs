@@ -316,8 +316,7 @@ pub fn retained(darwin_signum: i32) -> bool {
 /// kilobytes - is what the runtime's fault reporter then gets, and a report
 /// longer than that overflows it and dies half-written. Retained beside the
 /// handlers themselves, by the same lever and for the same reason.
-static RETAIN_ALTSTACK: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+static RETAIN_ALTSTACK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// What the guest asked for on the retained alternate stack: `ss_sp`, `ss_size`
 /// and `ss_flags`, so it reads its own installation back.
@@ -767,11 +766,7 @@ pub mod entry {
     /// # Safety
     ///
     /// `set` and `oset` are Darwin `sigset_t` - four bytes each - or null.
-    pub unsafe extern "C" fn sigprocmask_(
-        how: c_int,
-        set: *const u32,
-        oset: *mut u32,
-    ) -> c_int {
+    pub unsafe extern "C" fn sigprocmask_(how: c_int, set: *const u32, oset: *mut u32) -> c_int {
         let host_how = match set.is_null() {
             // With no set, `how` is not read at all and any value is legal.
             true => libc::SIG_SETMASK,
@@ -794,7 +789,9 @@ pub mod entry {
         let rc = unsafe {
             libc::sigprocmask(
                 host_how,
-                wanted.as_ref().map_or(core::ptr::null(), |set| set as *const _),
+                wanted
+                    .as_ref()
+                    .map_or(core::ptr::null(), |set| set as *const _),
                 &mut previous,
             )
         };
@@ -1292,7 +1289,10 @@ mod tests {
         let mut old = Disposition::default();
         // SAFETY: the handler is never entered - that is what being retained
         // means, and is what this test asserts.
-        assert_eq!(unsafe { sigaction(SIGUSR2, Some(wanted), Some(&mut old)) }, 0);
+        assert_eq!(
+            unsafe { sigaction(SIGUSR2, Some(wanted), Some(&mut old)) },
+            0
+        );
 
         // SAFETY: as above.
         let after = unsafe {

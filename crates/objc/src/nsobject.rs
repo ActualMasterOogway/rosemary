@@ -275,10 +275,9 @@ unsafe extern "C" fn instances_respond(receiver: Id, _sel: Sel, selector: Sel) -
 /// `receiver` must be a live object.
 unsafe fn imp_for(receiver: Id, selector: Sel) -> Imp {
     // SAFETY: the caller's obligation.
-    let imp = unsafe { crate::object::class_of(receiver) }
-        .map_or(std::ptr::null(), |c| {
-            crate::class::method_implementation(c, selector)
-        });
+    let imp = unsafe { crate::object::class_of(receiver) }.map_or(std::ptr::null(), |c| {
+        crate::class::method_implementation(c, selector)
+    });
     match imp.is_null() {
         true => crate::msg::forward(),
         false => imp,
@@ -410,7 +409,11 @@ mod tests {
     #[test]
     fn method_for_selector_answers_the_installed_imp() {
         let object = instance(c"Rosetta3MethodForA");
-        let found = send(object, "methodForSelector:", sel::get("answer") as *const c_void);
+        let found = send(
+            object,
+            "methodForSelector:",
+            sel::get("answer") as *const c_void,
+        );
         assert_eq!(found, answer as *const c_void);
     }
 
@@ -419,14 +422,22 @@ mod tests {
     #[test]
     fn method_for_selector_never_answers_nil() {
         let object = instance(c"Rosetta3MethodForB");
-        let found = send(object, "methodForSelector:", sel::get("absent") as *const c_void);
+        let found = send(
+            object,
+            "methodForSelector:",
+            sel::get("absent") as *const c_void,
+        );
         assert_eq!(found, crate::msg::forward());
     }
 
     #[test]
     fn perform_selector_reaches_the_method() {
         let object = instance(c"Rosetta3MethodForC");
-        let result = send(object, "performSelector:", sel::get("answer") as *const c_void);
+        let result = send(
+            object,
+            "performSelector:",
+            sel::get("answer") as *const c_void,
+        );
         assert_eq!(result as usize, 42);
     }
 }

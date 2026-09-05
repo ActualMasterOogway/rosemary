@@ -92,8 +92,7 @@ mod tests {
     /// proves nothing - on a thread that is inside Darwin code already.
     #[test]
     fn a_comparator_runs_with_the_guests_thread_pointer() {
-        static SAW_DARWIN: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(true);
+        static SAW_DARWIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
         unsafe extern "C" fn compare(a: *const c_void, b: *const c_void) -> c_int {
             if !crate::tls::entered() {

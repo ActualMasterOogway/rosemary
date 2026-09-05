@@ -15,8 +15,15 @@ use super::time;
 
 /// What a group runs when it empties: a queue and the work to put on it.
 enum Notify {
-    Block { queue: u64, block: u64 },
-    Function { queue: u64, context: u64, function: Function },
+    Block {
+        queue: u64,
+        block: u64,
+    },
+    Function {
+        queue: u64,
+        context: u64,
+        function: Function,
+    },
 }
 
 /// `#[repr(C)]` is load-bearing, not decoration: [`super::object`] recovers this
@@ -379,7 +386,11 @@ mod tests {
             group_notify_f(g, q, at, bump as *const () as usize as u64);
             group_leave(g);
             std::thread::sleep(std::time::Duration::from_millis(20));
-            assert_eq!(counter.load(Ordering::Acquire), 0, "one participant remains");
+            assert_eq!(
+                counter.load(Ordering::Acquire),
+                0,
+                "one participant remains"
+            );
             group_leave(g);
             wait_for(&counter, "never notified");
             object::release(g);

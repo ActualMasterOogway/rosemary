@@ -456,7 +456,9 @@ pub unsafe extern "C" fn mach_port_extract_right(
         return KERN_INVALID_NAME;
     };
     let (extracted, kind) = match disposition {
-        super::msg::MAKE_SEND | super::msg::COPY_SEND => (insert_send(address), super::msg::MOVE_SEND),
+        super::msg::MAKE_SEND | super::msg::COPY_SEND => {
+            (insert_send(address), super::msg::MOVE_SEND)
+        }
         super::msg::MAKE_SEND_ONCE => (insert_send_once(address), super::msg::MOVE_SEND_ONCE),
         super::msg::MOVE_SEND => (name, super::msg::MOVE_SEND),
         _ => return KERN_INVALID_VALUE,
@@ -655,7 +657,10 @@ mod tests {
 
         let mut bits = 0;
         // SAFETY: as above.
-        assert_eq!(unsafe { mach_port_type(TASK_SELF, name, &mut bits) }, KERN_SUCCESS);
+        assert_eq!(
+            unsafe { mach_port_type(TASK_SELF, name, &mut bits) },
+            KERN_SUCCESS
+        );
         assert_eq!(bits, type_of(RIGHT_RECEIVE));
 
         // A receive right cannot be deallocated, only destroyed - the check
@@ -721,12 +726,21 @@ mod tests {
             mach_port_allocate(TASK_SELF, RIGHT_PORT_SET, &mut set);
             mach_port_allocate(TASK_SELF, RIGHT_RECEIVE, &mut member);
         }
-        assert_eq!(mach_port_insert_member(TASK_SELF, member, set), KERN_SUCCESS);
+        assert_eq!(
+            mach_port_insert_member(TASK_SELF, member, set),
+            KERN_SUCCESS
+        );
         assert_eq!(members(set).unwrap(), vec![member]);
         // A set is not a receive right, and inserting one into itself is not a
         // question with an answer.
-        assert_eq!(mach_port_insert_member(TASK_SELF, set, set), KERN_INVALID_RIGHT);
-        assert_eq!(mach_port_move_member(TASK_SELF, member, MACH_PORT_NULL), KERN_SUCCESS);
+        assert_eq!(
+            mach_port_insert_member(TASK_SELF, set, set),
+            KERN_INVALID_RIGHT
+        );
+        assert_eq!(
+            mach_port_move_member(TASK_SELF, member, MACH_PORT_NULL),
+            KERN_SUCCESS
+        );
         assert!(members(set).unwrap().is_empty());
 
         mach_port_destroy(TASK_SELF, set);

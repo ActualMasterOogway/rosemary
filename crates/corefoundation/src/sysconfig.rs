@@ -466,7 +466,6 @@ pub unsafe extern "C" fn SCDynamicStoreCopyProxies(_store: CFTypeRef) -> CFTypeR
     std::ptr::null()
 }
 
-
 /// An `SCDynamicStoreRef`.
 ///
 /// A handle and nothing else: the store below answers from the host's own
@@ -681,10 +680,7 @@ const PRIMARY_INTERFACE: &str = "PrimaryInterface";
 const KEY_STRINGS: &[(&str, &str)] = &[
     ("_kSCDynamicStoreDomainState", "State:"),
     ("_kSCDynamicStoreDomainSetup", "Setup:"),
-    (
-        "_kSCDynamicStorePropNetPrimaryInterface",
-        PRIMARY_INTERFACE,
-    ),
+    ("_kSCDynamicStorePropNetPrimaryInterface", PRIMARY_INTERFACE),
     ("_kSCDynamicStorePropNetPrimaryService", "PrimaryService"),
     ("_kSCEntNetIPv4", "IPv4"),
     ("_kSCEntNetIPv6", "IPv6"),

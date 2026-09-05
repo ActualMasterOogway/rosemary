@@ -47,7 +47,8 @@ fn namespace() -> Option<&'static Path> {
         // The namespace is this user's, and a service name is a rendezvous
         // token: another user able to write one could answer a lookup with a
         // port of their own.
-        let _ = std::fs::set_permissions(&base, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+        let _ =
+            std::fs::set_permissions(&base, std::os::unix::fs::PermissionsExt::from_mode(0o700));
         let _ = std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
         Some(dir)
     })
@@ -132,7 +133,8 @@ pub unsafe extern "C" fn bootstrap_check_in(
 
     let mut name = MACH_PORT_NULL;
     // SAFETY: a live local for the out-parameter.
-    let rc = unsafe { space::mach_port_allocate(space::TASK_SELF, space::RIGHT_RECEIVE, &mut name) };
+    let rc =
+        unsafe { space::mach_port_allocate(space::TASK_SELF, space::RIGHT_RECEIVE, &mut name) };
     if rc != KERN_SUCCESS {
         return rc;
     }
@@ -269,7 +271,10 @@ mod tests {
         // SAFETY: a NUL-terminated name and a live local for the out-parameter.
         let rc = unsafe { bootstrap_check_in(BOOTSTRAP, service.as_ptr(), &mut server) };
         assert_eq!(rc, BOOTSTRAP_SUCCESS);
-        assert!(space::receiver(server).is_some(), "the server gets a receive right");
+        assert!(
+            space::receiver(server).is_some(),
+            "the server gets a receive right"
+        );
 
         let mut client = MACH_PORT_NULL;
         // SAFETY: as above.

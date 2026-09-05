@@ -1817,7 +1817,11 @@ pub mod audio {
         match name.is_null() {
             true => None,
             // SAFETY: a NUL-terminated string of SDL's.
-            false => Some(unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned()),
+            false => Some(
+                unsafe { CStr::from_ptr(name) }
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
         }
     }
 

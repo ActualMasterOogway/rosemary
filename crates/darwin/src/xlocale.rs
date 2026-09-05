@@ -114,12 +114,8 @@ mod plain {
         pub fn strtof(nptr: *const c_char, endptr: *mut *mut c_char) -> f32;
         pub fn strcoll(a: *const c_char, b: *const c_char) -> c_int;
         pub fn strxfrm(dst: *mut c_char, src: *const c_char, n: usize) -> usize;
-        pub fn strftime(
-            buf: *mut c_char,
-            n: usize,
-            fmt: *const c_char,
-            tm: *const c_void,
-        ) -> usize;
+        pub fn strftime(buf: *mut c_char, n: usize, fmt: *const c_char, tm: *const c_void)
+        -> usize;
     }
 
     use super::c_void;
@@ -595,11 +591,13 @@ mod tests {
         let mut end: *mut c_char = std::ptr::null_mut();
         // SAFETY: a NUL-terminated string, a live `char *` slot, and the null
         // locale a `libc++` caller passes.
-        let value =
-            unsafe { strtoull_l(text.as_ptr(), &mut end, 16, std::ptr::null_mut()) };
+        let value = unsafe { strtoull_l(text.as_ptr(), &mut end, 16, std::ptr::null_mut()) };
         assert_eq!(value, 42);
         // SAFETY: `end` points inside `text`, which outlives this.
-        assert_eq!(unsafe { std::ffi::CStr::from_ptr(end) }.to_bytes(), b" tail");
+        assert_eq!(
+            unsafe { std::ffi::CStr::from_ptr(end) }.to_bytes(),
+            b" tail"
+        );
     }
 
     /// The bits are the header's, and a character has the ones it has.

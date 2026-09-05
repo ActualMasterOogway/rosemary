@@ -276,9 +276,8 @@ mod tests {
         assert_eq!(mach_task_self(), TASK_SELF_PORT);
         let mut port = MACH_PORT_NULL;
         // SAFETY: a live local for the out-parameter.
-        let rc = unsafe {
-            space::mach_port_allocate(TASK_SELF_PORT, space::RIGHT_RECEIVE, &mut port)
-        };
+        let rc =
+            unsafe { space::mach_port_allocate(TASK_SELF_PORT, space::RIGHT_RECEIVE, &mut port) };
         assert_eq!(rc, KERN_SUCCESS);
         space::destroy(port);
     }

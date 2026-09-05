@@ -604,7 +604,10 @@ mod tests {
         assert_eq!(rc, KERN_SUCCESS);
         let footprint = word(&info, 144);
         assert!(footprint > 0, "some memory is this process's own");
-        assert!(footprint <= word(&info, 16), "and no more than the resident");
+        assert!(
+            footprint <= word(&info, 16),
+            "and no more than the resident"
+        );
         assert_eq!(
             u32::from_le_bytes(info[12..16].try_into().expect("four bytes")) as u64,
             page_size()

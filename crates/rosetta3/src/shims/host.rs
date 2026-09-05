@@ -24,15 +24,16 @@ pub(crate) fn host_or_refuse(symbol: &str) -> Result<u64> {
         }
     }
 
-    let address = darwin::shim_symbol(name).ok_or_else(|| match darwin::divergent::reason(name) {
-        Some(reason) => AbiError::Refused {
-            symbol: symbol.to_string(),
-            reason,
-        },
-        None => AbiError::NoShim {
-            symbol: symbol.to_string(),
-        },
-    })?;
+    let address =
+        darwin::shim_symbol(name).ok_or_else(|| match darwin::divergent::reason(name) {
+            Some(reason) => AbiError::Refused {
+                symbol: symbol.to_string(),
+                reason,
+            },
+            None => AbiError::NoShim {
+                symbol: symbol.to_string(),
+            },
+        })?;
 
     // Publish a new immutable map. The lock is only on the uncommon successful
     // miss path; all later lookups use the atomic snapshot above.

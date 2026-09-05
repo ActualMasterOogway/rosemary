@@ -251,13 +251,8 @@ mod tests {
     /// The trampolines are variadic C functions, which is exactly what Rust
     /// cannot declare - so each is called through a transmuted pointer with the
     /// signature the caller would have used.
-    fn snprintf_l() -> unsafe extern "C" fn(
-        *mut c_char,
-        usize,
-        libc::locale_t,
-        *const c_char,
-        ...
-    ) -> c_int {
+    fn snprintf_l()
+    -> unsafe extern "C" fn(*mut c_char, usize, libc::locale_t, *const c_char, ...) -> c_int {
         // SAFETY: the trampoline is a variadic function of this shape.
         unsafe { std::mem::transmute(symbol("snprintf_l").expect("published")) }
     }

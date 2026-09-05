@@ -231,10 +231,7 @@ pub unsafe extern "C" fn SecItemAdd(attributes: CFTypeRef, result: *mut CFTypeRe
 /// # Safety
 ///
 /// As [`SecItemAdd`].
-pub unsafe extern "C" fn SecItemCopyMatching(
-    query: CFTypeRef,
-    result: *mut CFTypeRef,
-) -> OSStatus {
+pub unsafe extern "C" fn SecItemCopyMatching(query: CFTypeRef, result: *mut CFTypeRef) -> OSStatus {
     if !result.is_null() {
         // SAFETY: the caller's obligation.
         unsafe { result.write(std::ptr::null_mut()) };

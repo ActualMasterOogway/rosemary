@@ -415,9 +415,7 @@ mod tests {
         let handle = unit();
         let word = |value: u32, id: u32, scope: u32| {
             // SAFETY: a live word of the size declared.
-            unsafe {
-                AudioUnitSetProperty(handle, id, scope, 0, (&value as *const u32).cast(), 4)
-            }
+            unsafe { AudioUnitSetProperty(handle, id, scope, 0, (&value as *const u32).cast(), 4) }
         };
         assert_eq!(word(1, ENABLE_IO, scope::OUTPUT), SUCCESS);
         assert_eq!(word(0, ENABLE_IO, scope::INPUT), SUCCESS);

@@ -356,7 +356,8 @@ unsafe fn send(msg: *const u8, send_size: u32) -> i32 {
     }
 
     let payload = &bytes[payload_at..];
-    let mut wire_bytes = Vec::with_capacity(envelope::FIXED + descriptors.len() * REFERENCE + payload.len());
+    let mut wire_bytes =
+        Vec::with_capacity(envelope::FIXED + descriptors.len() * REFERENCE + payload.len());
     wire_bytes.extend_from_slice(&envelope::MAGIC.to_le_bytes());
     wire_bytes.extend_from_slice(&envelope::VERSION.to_le_bytes());
     wire_bytes.extend_from_slice(&bits.to_le_bytes());
@@ -446,7 +447,13 @@ fn next_message(rcv_name: Name, timeout_ms: i32) -> Result<(Datagram, Name), i32
 /// # Safety
 ///
 /// `msg` addresses `rcv_size` writable bytes.
-unsafe fn receive(msg: *mut u8, rcv_size: u32, rcv_name: Name, timeout_ms: i32, large: bool) -> i32 {
+unsafe fn receive(
+    msg: *mut u8,
+    rcv_size: u32,
+    rcv_name: Name,
+    timeout_ms: i32,
+    large: bool,
+) -> i32 {
     let (mut message, arrived_on) = match next_message(rcv_name, timeout_ms) {
         Ok(taken) => taken,
         Err(code) => return code,
@@ -499,14 +506,13 @@ unsafe fn receive(msg: *mut u8, rcv_size: u32, rcv_name: Name, timeout_ms: i32, 
     let adopted: Vec<(Name, u8)> = (0..count)
         .map(|i| {
             let at = envelope::FIXED + i * REFERENCE;
-            let reference =
-                Reference::decode(&message.bytes[at..]).unwrap_or(Reference::NONE);
+            let reference = Reference::decode(&message.bytes[at..]).unwrap_or(Reference::NONE);
             (reference.adopt(&mut message), reference.disposition)
         })
         .collect();
 
-    let mut bits = (reply.disposition as u32 & BITS_PORTS_MASK)
-        | (MOVE_RECEIVE << BITS_LOCAL_SHIFT);
+    let mut bits =
+        (reply.disposition as u32 & BITS_PORTS_MASK) | (MOVE_RECEIVE << BITS_LOCAL_SHIFT);
     if complex {
         bits |= BITS_COMPLEX;
     }
@@ -785,7 +791,11 @@ mod tests {
         let mut name = MACH_PORT_NULL;
         // SAFETY: a live local for the out-parameter.
         unsafe {
-            super::super::space::mach_port_allocate(space::TASK_SELF, space::RIGHT_RECEIVE, &mut name)
+            super::super::space::mach_port_allocate(
+                space::TASK_SELF,
+                space::RIGHT_RECEIVE,
+                &mut name,
+            )
         };
         name
     }
@@ -823,8 +833,16 @@ mod tests {
         };
         assert_eq!(rc, MACH_MSG_SUCCESS);
         assert_eq!(word(&buf, 20) as i32, 0x1234, "msgh_id");
-        assert_eq!(word(&buf, 4) as usize, HEADER + 8, "msgh_size excludes the trailer");
-        assert_eq!(word(&buf, 12), port, "msgh_local_port is the port it arrived on");
+        assert_eq!(
+            word(&buf, 4) as usize,
+            HEADER + 8,
+            "msgh_size excludes the trailer"
+        );
+        assert_eq!(
+            word(&buf, 12),
+            port,
+            "msgh_local_port is the port it arrived on"
+        );
         assert_eq!(&buf[HEADER..HEADER + 8], b"eight!!\0");
         // The trailer the kernel appends, which `msgh_size` does not count.
         assert_eq!(word(&buf, HEADER + 8 + 4) as usize, TRAILER);
@@ -977,9 +995,15 @@ mod tests {
         assert_ne!(word(&buf, 0) & BITS_COMPLEX, 0, "still complex");
         assert_eq!(word(&buf, HEADER), 1, "one descriptor");
         let arrived = word(&buf, HEADER + BODY);
-        assert_eq!(buf[HEADER + BODY + DESCRIPTOR_DISPOSITION_AT] as u32, MOVE_RECEIVE);
+        assert_eq!(
+            buf[HEADER + BODY + DESCRIPTOR_DISPOSITION_AT] as u32,
+            MOVE_RECEIVE
+        );
         assert_eq!(space::address_of(arrived), Some(address));
-        assert!(space::receiver(arrived).is_some(), "and it is a receive right");
+        assert!(
+            space::receiver(arrived).is_some(),
+            "and it is a receive right"
+        );
         assert_eq!(
             word(&buf, HEADER + BODY + DESCRIPTOR),
             0xdead_beef,

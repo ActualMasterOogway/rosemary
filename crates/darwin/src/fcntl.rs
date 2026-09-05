@@ -294,7 +294,11 @@ pub mod entry {
     /// is a word-sized scalar or a pointer into the guest, which is identity-mapped;
     /// for a command that takes none it is whatever the caller left in the register,
     /// and is not passed on.
-    pub unsafe extern "C" fn fcntl(fd: libc::c_int, command: libc::c_int, arg: usize) -> libc::c_int {
+    pub unsafe extern "C" fn fcntl(
+        fd: libc::c_int,
+        command: libc::c_int,
+        arg: usize,
+    ) -> libc::c_int {
         let Some(host_command) = to_host(command) else {
             crate::errno::set(libc::EINVAL);
             return -1;
@@ -332,11 +336,7 @@ pub mod entry {
     /// # Safety
     ///
     /// `flock` must be a readable and writable Darwin `struct flock`.
-    unsafe fn lock(
-        fd: libc::c_int,
-        host_command: libc::c_int,
-        flock: *mut Flock,
-    ) -> libc::c_int {
+    unsafe fn lock(fd: libc::c_int, host_command: libc::c_int, flock: *mut Flock) -> libc::c_int {
         if flock.is_null() {
             crate::errno::set(libc::EINVAL);
             return -1;
@@ -379,7 +379,9 @@ pub mod entry {
             return;
         }
         said.push(dropped);
-        eprintln!("rosetta3: fcntl F_SETFL: no equivalent on this host for Darwin O_ flags {dropped:#x} - dropped");
+        eprintln!(
+            "rosetta3: fcntl F_SETFL: no equivalent on this host for Darwin O_ flags {dropped:#x} - dropped"
+        );
     }
 
     pub const NAMES: &[&str] = &["fcntl"];
@@ -559,13 +561,8 @@ mod tests {
         assert!(flags >= 0);
         assert_eq!(flags & oflag::O_NONBLOCK, 0, "a fresh pipe blocks");
         // SAFETY: as above.
-        let rc = unsafe {
-            entry::fcntl(
-                read_end,
-                cmd::F_SETFL,
-                (flags | oflag::O_NONBLOCK) as usize,
-            )
-        };
+        let rc =
+            unsafe { entry::fcntl(read_end, cmd::F_SETFL, (flags | oflag::O_NONBLOCK) as usize) };
         assert_eq!(rc, 0);
 
         let mut byte = 0u8;

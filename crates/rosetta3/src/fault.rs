@@ -922,7 +922,6 @@ fn ascii_word(addr: u64) -> Option<[u8; 8]> {
         .then_some(bytes)
 }
 
-
 /// Whether the address was unmapped or merely not writable.
 ///
 /// The difference is the whole diagnosis. `SEGV_MAPERR` on a plausible-looking
@@ -1024,7 +1023,12 @@ fn say_registers(_out: &mut Buffer, _context: *mut libc::c_void) {}
 #[cfg(target_os = "linux")]
 fn say_host_mapping(out: &mut Buffer, pc: u64) {
     // SAFETY: a constant path and constant flags.
-    let fd = unsafe { libc::open(c"/proc/self/maps".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    let fd = unsafe {
+        libc::open(
+            c"/proc/self/maps".as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC,
+        )
+    };
     if fd < 0 {
         return;
     }
@@ -1032,13 +1036,7 @@ fn say_host_mapping(out: &mut Buffer, pc: u64) {
     let mut held = 0usize;
     'reading: loop {
         // SAFETY: writing into the unused tail of a live local array.
-        let read = unsafe {
-            libc::read(
-                fd,
-                buf[held..].as_mut_ptr().cast(),
-                buf.len() - held,
-            )
-        };
+        let read = unsafe { libc::read(fd, buf[held..].as_mut_ptr().cast(), buf.len() - held) };
         if read <= 0 {
             break;
         }

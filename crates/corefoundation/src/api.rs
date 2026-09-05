@@ -370,11 +370,7 @@ pub unsafe extern "C" fn CFStringGetBytes(
             let mark = external_representation != 0 && encoding == string::encoding::UTF16;
             let big_endian = encoding == string::encoding::UTF16_BE;
             let mut bytes = Vec::with_capacity((end - start) * 2 + 2 * mark as usize);
-            for unit in mark
-                .then_some(0xFEFF_u16)
-                .iter()
-                .chain(&units[start..end])
-            {
+            for unit in mark.then_some(0xFEFF_u16).iter().chain(&units[start..end]) {
                 match big_endian {
                     true => bytes.extend_from_slice(&unit.to_be_bytes()),
                     false => bytes.extend_from_slice(&unit.to_le_bytes()),
@@ -575,8 +571,10 @@ pub unsafe extern "C" fn CFStringGetCharacters(
     let Some(s) = (unsafe { string::as_string(s) }) else {
         return;
     };
-    let (Ok(start), Ok(count)) = (usize::try_from(range_location), usize::try_from(range_length))
-    else {
+    let (Ok(start), Ok(count)) = (
+        usize::try_from(range_location),
+        usize::try_from(range_length),
+    ) else {
         return;
     };
     let units = s.units();
@@ -1030,10 +1028,7 @@ pub unsafe extern "C" fn CFDataCreate(
 /// The keyboard layout `TISGetInputSourceProperty` hands back is Apple's
 /// `CFData`, and the copy of it goes straight back into `UCKeyTranslate` - so
 /// the copy has to be Apple's too. See [`crate::foreign`].
-pub unsafe extern "C" fn CFDataCreateCopy(
-    allocator: CFAllocatorRef,
-    data: CFTypeRef,
-) -> CFTypeRef {
+pub unsafe extern "C" fn CFDataCreateCopy(allocator: CFAllocatorRef, data: CFTypeRef) -> CFTypeRef {
     #[cfg(target_os = "macos")]
     // SAFETY: the caller's obligation - null or an object.
     if unsafe { crate::foreign::is(data) } {

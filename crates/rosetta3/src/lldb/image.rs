@@ -105,13 +105,13 @@ fn symbols(image: &ImageReport, path: &str, stem: &str) -> Vec<macho::Sym> {
     // the same address.
     if let Some(objc) = &image.objc {
         for class in &objc.classes {
-            for (method, kind) in class
-                .ro
-                .methods
-                .iter()
-                .map(|m| (m, '-'))
-                .chain(class.meta.iter().flat_map(|m| &m.ro.methods).map(|m| (m, '+')))
-            {
+            for (method, kind) in class.ro.methods.iter().map(|m| (m, '-')).chain(
+                class
+                    .meta
+                    .iter()
+                    .flat_map(|m| &m.ro.methods)
+                    .map(|m| (m, '+')),
+            ) {
                 syms.push(macho::Sym {
                     name: format!("_{kind}[{} {}]", class.ro.name, method.name),
                     sect: 1,
