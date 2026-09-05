@@ -899,9 +899,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("IORegistryEntryGetParentEntry", I32, U32, P, P),
     sig!("IOServiceGetMatchingServices", I32, U32, P, P),
     sig!("IOServiceMatching", P, P),
-    // `KBGetLayoutType(SInt16) -> SInt32`, and the only Apple entry point in
-    // this table with **no header anywhere on the system** - it is private
-    // HIToolbox, present in `Carbon.tbd`'s export list and declared nowhere.
+    // `PhysicalKeyboardLayoutType KBGetLayoutType(SInt16)`. Its OSType result
+    // and narrow argument travel through the integer registers as 32-bit
+    // values, which is the shape SDL's call site also uses.
     sig!("KBGetLayoutType", I32, I32),
     // `EventTime GetCurrentEventTime(void)` is a `double` of seconds since
     // boot, and `OSErr UpdateSystemActivity(UInt8)` is how a program that is

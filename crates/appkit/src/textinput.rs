@@ -313,6 +313,16 @@ pub unsafe extern "C" fn TISDisableInputSource(_source: CFTypeRef) -> i32 {
     crate::uchr::PARAM_ERR
 }
 
+/// `PhysicalKeyboardLayoutType KBGetLayoutType(SInt16 keyboardType)`.
+///
+/// `kKeyboardANSI`. The keyboard type names a hardware model, while this
+/// function reduces it to the physical ANSI, ISO, or JIS arrangement. This
+/// host exposes one ANSI keyboard through [`LMGetKbdType`], matching the key
+/// positions in [`crate::keymap`] and the layout in [`crate::uchr`].
+pub unsafe extern "C" fn KBGetLayoutType(_keyboard_type: i16) -> u32 {
+    u32::from_be_bytes(*b"ANSI")
+}
+
 /// `UInt8 LMGetKbdLast(void)`.
 ///
 /// `KbdLast` is the ADB address of the keyboard last used, and 2 is the address
@@ -532,14 +542,19 @@ mod tests {
     }
 
     /// The two keyboard globals are different globals: one is an ADB address
-    /// and the other a keyboard type, and a guest reading both has to see two
-    /// values rather than one repeated.
+    /// and the other a keyboard type, and that type describes the ANSI layout
+    /// implemented by this module.
     #[test]
-    fn the_keyboard_globals_are_not_the_same_global() {
-        // SAFETY: neither takes an argument.
+    fn the_keyboard_globals_and_layout_agree() {
+        // SAFETY: these functions take no pointers and touch no caller memory.
         unsafe {
             assert_eq!(LMGetKbdType(), 40, "kKeyboardANSI");
             assert_eq!(LMGetKbdLast(), 2, "the ADB address of a keyboard");
+            assert_eq!(
+                KBGetLayoutType(LMGetKbdType().into()),
+                u32::from_be_bytes(*b"ANSI"),
+                "the physical layout described by the exported keyboard type"
+            );
         }
     }
 
