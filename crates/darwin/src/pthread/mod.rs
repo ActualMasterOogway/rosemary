@@ -1716,7 +1716,7 @@ mod tests {
     /// `pthread_self` and its stack canary as direct loads off it and never calls
     /// anything this could be done inside.
     #[test]
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn a_created_thread_runs_with_the_darwin_thread_pointer() {
         use std::sync::atomic::{AtomicU64, Ordering};
 

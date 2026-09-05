@@ -13,7 +13,7 @@
 //! and Darwin's `SCM_CREDS` is 3, which is `SCM_SECURITY` here. A descriptor
 //! array handed over unread would be read as a credentials structure.
 //!
-//! Two types are translated and the rest are refused by number, because a
+//! Known types are translated and the rest are refused by number, because a
 //! payload is only convertible if this module knows what is in it:
 //!
 //! - `SCM_RIGHTS`, whose payload is an array of `int` and is the same array on
@@ -23,6 +23,9 @@
 //! - `SCM_TIMESTAMP` on the way back, whose payload is a `struct timeval` and so
 //!   diverges again in the width of `tv_usec`; see [`crate::net::sockopt`] for
 //!   the same conversion one call over.
+
+//! - IP TOS / IPv6 traffic class for ECN, and IPv4/IPv6 packet information.
+//!   Packet information has the same field layout on both platforms.
 
 use std::ffi::c_void;
 
@@ -39,8 +42,14 @@ fn host_align(len: usize) -> usize {
     len.next_multiple_of(core::mem::size_of::<usize>())
 }
 
-/// Darwin's `SOL_SOCKET`, the only level either platform sends these at.
+/// Darwin's `SOL_SOCKET`.
 const DARWIN_SOL_SOCKET: i32 = 0xffff;
+
+const DARWIN_IP_TOS: i32 = 3;
+const DARWIN_IP_PKTINFO: i32 = 26;
+const DARWIN_IP_RECVTOS: i32 = 27;
+const DARWIN_IPV6_TCLASS: i32 = 36;
+const DARWIN_IPV6_PKTINFO: i32 = 46;
 
 const SCM_RIGHTS: i32 = 0x01;
 /// Darwin's `SCM_TIMESTAMP`, which is this host's `SCM_CREDENTIALS`.
@@ -87,15 +96,26 @@ pub unsafe fn to_host(control: *const c_void, len: u32) -> Result<Vec<u8>, Untra
             // what the kernel's own `CMSG_NXTHDR` does with one.
             break;
         }
-        if level != DARWIN_SOL_SOCKET || kind != SCM_RIGHTS {
-            return Err(Untranslatable { level, kind });
-        }
-        let payload = message_len - DARWIN_HDR;
-        // SAFETY: `payload` bytes after the header, both within `len`.
-        let data = unsafe { control.cast::<u8>().add(at + DARWIN_HDR) };
-        push_host(&mut out, libc::SOL_SOCKET, SCM_RIGHTS, |into| {
-            // SAFETY: as above; the descriptor array is the same array here.
-            into.extend_from_slice(unsafe { core::slice::from_raw_parts(data, payload) });
+        let payload_len = message_len - DARWIN_HDR;
+        // SAFETY: the header and its payload are within the caller's buffer.
+        let payload = unsafe {
+            core::slice::from_raw_parts(control.cast::<u8>().add(at + DARWIN_HDR), payload_len)
+        };
+        let host_kind = match (level, kind, payload.len()) {
+            (DARWIN_SOL_SOCKET, SCM_RIGHTS, _) => SCM_RIGHTS,
+            (libc::IPPROTO_IP, DARWIN_IP_TOS, 1 | 4) => libc::IP_TOS,
+            (libc::IPPROTO_IP, DARWIN_IP_PKTINFO, 12) => libc::IP_PKTINFO,
+            (libc::IPPROTO_IPV6, DARWIN_IPV6_TCLASS, 4) => libc::IPV6_TCLASS,
+            (libc::IPPROTO_IPV6, DARWIN_IPV6_PKTINFO, 20) => libc::IPV6_PKTINFO,
+            _ => return Err(Untranslatable { level, kind }),
+        };
+        let host_level = if level == DARWIN_SOL_SOCKET {
+            libc::SOL_SOCKET
+        } else {
+            level
+        };
+        push_host(&mut out, host_level, host_kind, |into| {
+            into.extend_from_slice(payload);
         });
         at += darwin_align(message_len);
     }
@@ -141,6 +161,27 @@ fn message_from_host(level: i32, kind: i32, payload: &[u8]) -> Option<Message> {
                 payload: darwin,
             })
         }
+        (libc::IPPROTO_IP, libc::IP_TOS) if payload.len() == 1 => Some(Message {
+            level,
+            // Darwin receives IP_RECVTOS, not the IP_TOS used on send.
+            kind: DARWIN_IP_RECVTOS,
+            payload: payload.to_vec(),
+        }),
+        (libc::IPPROTO_IP, libc::IP_PKTINFO) if payload.len() == 12 => Some(Message {
+            level,
+            kind: DARWIN_IP_PKTINFO,
+            payload: payload.to_vec(),
+        }),
+        (libc::IPPROTO_IPV6, libc::IPV6_TCLASS) if payload.len() == 4 => Some(Message {
+            level,
+            kind: DARWIN_IPV6_TCLASS,
+            payload: payload.to_vec(),
+        }),
+        (libc::IPPROTO_IPV6, libc::IPV6_PKTINFO) if payload.len() == 20 => Some(Message {
+            level,
+            kind: DARWIN_IPV6_PKTINFO,
+            payload: payload.to_vec(),
+        }),
         _ => None,
     }
 }
@@ -235,6 +276,156 @@ pub fn host_capacity(capacity: u32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn guest_message(level: i32, kind: i32, payload: &[u8]) -> Vec<u8> {
+        let len = DARWIN_HDR + payload.len();
+        let mut out = (len as u32).to_ne_bytes().to_vec();
+        out.extend_from_slice(&level.to_ne_bytes());
+        out.extend_from_slice(&kind.to_ne_bytes());
+        out.extend_from_slice(payload);
+        out.resize(darwin_align(len), 0);
+        out
+    }
+
+    #[test]
+    fn quic_control_messages_preserve_payloads_and_translate_types() {
+        for (level, send_kind, recv_kind, host_kind, payload) in [
+            (
+                libc::IPPROTO_IP,
+                DARWIN_IP_TOS,
+                DARWIN_IP_RECVTOS,
+                libc::IP_TOS,
+                vec![3],
+            ),
+            (
+                libc::IPPROTO_IP,
+                DARWIN_IP_PKTINFO,
+                DARWIN_IP_PKTINFO,
+                libc::IP_PKTINFO,
+                vec![1, 0, 0, 0, 127, 0, 0, 1, 127, 0, 0, 2],
+            ),
+            (
+                libc::IPPROTO_IPV6,
+                DARWIN_IPV6_TCLASS,
+                DARWIN_IPV6_TCLASS,
+                libc::IPV6_TCLASS,
+                3i32.to_ne_bytes().to_vec(),
+            ),
+            (
+                libc::IPPROTO_IPV6,
+                DARWIN_IPV6_PKTINFO,
+                DARWIN_IPV6_PKTINFO,
+                libc::IPV6_PKTINFO,
+                (0..20).collect(),
+            ),
+        ] {
+            let guest = guest_message(level, send_kind, &payload);
+            // SAFETY: guest is a complete control buffer.
+            let host = unsafe { to_host(guest.as_ptr().cast(), guest.len() as u32) }.unwrap();
+            assert_eq!(i32::from_ne_bytes(host[8..12].try_into().unwrap()), level);
+            assert_eq!(
+                i32::from_ne_bytes(host[12..16].try_into().unwrap()),
+                host_kind
+            );
+            assert_eq!(&host[16..16 + payload.len()], payload);
+            let received = message_from_host(level, host_kind, &payload).unwrap();
+            assert_eq!((received.level, received.kind), (level, recv_kind));
+            assert_eq!(received.payload, payload);
+
+            let short = guest_message(level, send_kind, &[]);
+            // SAFETY: short is a complete header with an empty payload.
+            assert!(unsafe { to_host(short.as_ptr().cast(), short.len() as u32) }.is_err());
+            assert!(message_from_host(level, host_kind, &[]).is_none());
+        }
+    }
+
+    #[test]
+    fn udp_ecn_and_packet_info_reach_the_guest() {
+        use std::os::fd::AsRawFd;
+        for ipv6 in [false, true] {
+            let address = if ipv6 { "[::1]:0" } else { "127.0.0.1:0" };
+            let receiver = std::net::UdpSocket::bind(address).unwrap();
+            receiver
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let sender = std::net::UdpSocket::bind(address).unwrap();
+            sender.connect(receiver.local_addr().unwrap()).unwrap();
+            let (level, recv_ecn, recv_info, send_kind, ecn_kind, info_kind) = if ipv6 {
+                (
+                    libc::IPPROTO_IPV6,
+                    libc::IPV6_RECVTCLASS,
+                    libc::IPV6_RECVPKTINFO,
+                    DARWIN_IPV6_TCLASS,
+                    DARWIN_IPV6_TCLASS,
+                    DARWIN_IPV6_PKTINFO,
+                )
+            } else {
+                (
+                    libc::IPPROTO_IP,
+                    libc::IP_RECVTOS,
+                    libc::IP_PKTINFO,
+                    DARWIN_IP_TOS,
+                    DARWIN_IP_RECVTOS,
+                    DARWIN_IP_PKTINFO,
+                )
+            };
+            let enabled = 1i32;
+            for option in [recv_ecn, recv_info] {
+                // SAFETY: a live socket and a readable integer option.
+                assert_eq!(
+                    unsafe {
+                        libc::setsockopt(
+                            receiver.as_raw_fd(),
+                            level,
+                            option,
+                            (&enabled as *const i32).cast(),
+                            4,
+                        )
+                    },
+                    0
+                );
+            }
+            let guest = guest_message(level, send_kind, &3i32.to_ne_bytes());
+            // SAFETY: all message buffers below are live for their respective calls.
+            unsafe {
+                let mut control = to_host(guest.as_ptr().cast(), guest.len() as u32).unwrap();
+                let mut byte = 42u8;
+                let mut iov = libc::iovec {
+                    iov_base: (&mut byte as *mut u8).cast(),
+                    iov_len: 1,
+                };
+                let mut msg: libc::msghdr = core::mem::zeroed();
+                msg.msg_iov = &mut iov;
+                msg.msg_iovlen = 1;
+                msg.msg_control = control.as_mut_ptr().cast();
+                msg.msg_controllen = control.len();
+                assert_eq!(libc::sendmsg(sender.as_raw_fd(), &msg, 0), 1);
+                let mut incoming = vec![0u8; 256];
+                msg.msg_control = incoming.as_mut_ptr().cast();
+                msg.msg_controllen = incoming.len();
+                assert_eq!(libc::recvmsg(receiver.as_raw_fd(), &mut msg, 0), 1);
+                let mut output = [0u8; 128];
+                let (len, dropped) =
+                    from_host(&msg, output.as_mut_ptr().cast(), output.len() as u32);
+                assert!(!dropped);
+                let mut at = 0;
+                let mut kinds = Vec::new();
+                while at < len as usize {
+                    let size = u32::from_ne_bytes(output[at..at + 4].try_into().unwrap()) as usize;
+                    let kind = i32::from_ne_bytes(output[at + 8..at + 12].try_into().unwrap());
+                    kinds.push(kind);
+                    if kind == ecn_kind {
+                        assert_eq!(output[at + 12], 3);
+                    }
+                    at += darwin_align(size);
+                }
+                assert!(kinds.contains(&ecn_kind));
+                assert!(kinds.contains(&info_kind));
+                let (_, dropped) = from_host(&msg, output.as_mut_ptr().cast(), 12);
+                assert!(dropped);
+            }
+        }
+    }
 
     /// The claim the whole module rests on, as an assertion.
     #[test]

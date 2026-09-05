@@ -354,7 +354,7 @@ fn say_control_refused(refused: super::control::Untranslatable) {
     let (level, kind) = (refused.level, refused.kind);
     eprintln!(
         "rosetta3: sendmsg with ancillary data of level {level:#x} type {kind:#x}: refused - \
-         darwin::net::control converts SCM_RIGHTS and nothing else, and the SCM_ types are \
+         the control message type or payload shape is unsupported; types can have \
          different numbers on the two platforms, so a payload it does not know the shape of \
          cannot be handed across unread"
     );
@@ -363,8 +363,7 @@ fn say_control_refused(refused: super::control::Untranslatable) {
 /// The two halves `sendmsg` and `recvmsg` share: a guest `msghdr` as the host's.
 ///
 /// `None` when the message carries ancillary data this host cannot be given -
-/// anything but `SCM_RIGHTS`; see [`super::control`], which owns that decision
-/// and the conversion behind it. `control` is the host buffer the returned
+/// see [`super::control`], which owns that decision and the conversion behind it. `control` is the host buffer the returned
 /// `msghdr` points into, so the caller has to keep it alive across the call.
 ///
 /// # Safety
@@ -374,10 +373,11 @@ unsafe fn msghdr_to_host(
     guest: *const MsgHdr,
     name: &mut Option<HostAddr>,
     control: &mut Vec<u8>,
+    sending: bool,
 ) -> Option<libc::msghdr> {
     // SAFETY: the caller's guarantee.
     let g = unsafe { guest.read() };
-    if !g.control.is_null() && g.controllen != 0 {
+    if sending && !g.control.is_null() && g.controllen != 0 {
         // SAFETY: the guest's control buffer, with the length it gave for it.
         match unsafe { super::control::to_host(g.control, g.controllen) } {
             Ok(host) => *control = host,
@@ -388,7 +388,7 @@ unsafe fn msghdr_to_host(
         }
     }
     // SAFETY: as above; a null name is a message with no address.
-    *name = match g.name.is_null() {
+    *name = match !sending || g.name.is_null() {
         true => None,
         false => Some(unsafe { addr::to_host(g.name, g.namelen) }?),
     };
@@ -424,7 +424,8 @@ unsafe extern "C" fn sendmsg(fd: i32, message: *const c_void, flags: i32) -> isi
     let mut name = None;
     let mut control = Vec::new();
     // SAFETY: the caller's guarantee.
-    let Some(host) = (unsafe { msghdr_to_host(message.cast(), &mut name, &mut control) }) else {
+    let Some(host) = (unsafe { msghdr_to_host(message.cast(), &mut name, &mut control, true) })
+    else {
         crate::errno::set(libc::EOPNOTSUPP);
         return -1;
     };
@@ -449,7 +450,8 @@ unsafe extern "C" fn recvmsg(fd: i32, message: *mut c_void, flags: i32) -> isize
     let mut name = None;
     let mut sent_control = Vec::new();
     // SAFETY: the caller's guarantee.
-    let Some(mut host) = (unsafe { msghdr_to_host(guest, &mut name, &mut sent_control) }) else {
+    let Some(mut host) = (unsafe { msghdr_to_host(guest, &mut name, &mut sent_control, false) })
+    else {
         crate::errno::set(libc::EOPNOTSUPP);
         return -1;
     };
@@ -769,6 +771,27 @@ pub fn symbol(name: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn receiving_does_not_parse_output_buffers() {
+        let mut bytes = [0xffu8; 32];
+        let guest = super::MsgHdr {
+            name: bytes.as_mut_ptr().cast(),
+            namelen: bytes.len() as u32,
+            iov: core::ptr::null_mut(),
+            iovlen: 0,
+            control: bytes.as_mut_ptr().cast(),
+            controllen: bytes.len() as u32,
+            flags: 0,
+        };
+        let mut name = None;
+        let mut control = Vec::new();
+        // SAFETY: guest is initialized and its output buffers are writable.
+        let host = unsafe { super::msghdr_to_host(&guest, &mut name, &mut control, false) };
+        assert!(host.is_some());
+        assert!(name.is_none());
+        assert!(control.is_empty());
+    }
+
     use super::*;
 
     /// The two that collide, named: `MSG_WAITALL` passed through asks this host
