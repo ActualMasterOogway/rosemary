@@ -143,6 +143,32 @@ impl Layout {
         out
     }
 
+    /// Localization identifiers declared by the bundle and present as
+    /// `Resources/*.lproj` directories.
+    pub fn localization_names(&self) -> Vec<String> {
+        let mut names = self
+            .info
+            .get("CFBundleLocalizations")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if let Ok(entries) = std::fs::read_dir(&self.resources) {
+            names.extend(entries.filter_map(|entry| {
+                let entry = entry.ok()?;
+                entry.file_type().ok()?.is_dir().then_some(())?;
+                let name = entry.file_name();
+                let name = name.to_str()?;
+                name.strip_suffix(".lproj").map(str::to_owned)
+            }));
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// `-pathForResource:ofType:`, searching `Resources` and then each
     /// localization.
     ///
@@ -275,6 +301,60 @@ pub mod cf {
         }
     }
 
+    /// `CFArrayRef CFBundleCopyBundleLocalizations(CFBundleRef)`.
+    unsafe extern "C" fn CFBundleCopyBundleLocalizations(_bundle: Id) -> Id {
+        let Some(bundle) = super::main() else {
+            return std::ptr::null_mut();
+        };
+        let strings = bundle
+            .localization_names()
+            .iter()
+            .map(|name| crate::string::from_str(name) as CFTypeRef)
+            .collect::<Vec<_>>();
+        let array = corefoundation::collections::new_array(
+            &strings,
+            corefoundation::callbacks::Policy::from_type_callbacks(),
+            false,
+        );
+        for string in strings {
+            // The array retained each newly-created string and now owns it.
+            // SAFETY: each is the live object made immediately above.
+            unsafe { corefoundation::api::CFRelease(string) };
+        }
+        array as Id
+    }
+
+    /// `CFArrayRef CFBundleCopyPreferredLocalizationsFromArray(CFArrayRef)`.
+    unsafe extern "C" fn CFBundleCopyPreferredLocalizationsFromArray(localizations: Id) -> Id {
+        // SAFETY: the caller's obligation - a CFArray or null.
+        let Some(array) =
+            (unsafe { corefoundation::collections::array(localizations as CFTypeRef) })
+        else {
+            return std::ptr::null_mut();
+        };
+        let language = crate::locale::language();
+        let preferred = array.values.iter().copied().find(|value| {
+            // SAFETY: localization arrays contain CFStrings.
+            let bytes = unsafe { crate::string::bytes(*value as Id) };
+            std::str::from_utf8(&bytes).is_ok_and(|name| {
+                name.eq_ignore_ascii_case(&language)
+                    || name
+                        .split(['-', '_'])
+                        .next()
+                        .is_some_and(|base| base.eq_ignore_ascii_case(&language))
+            })
+        });
+        let values = preferred
+            .or_else(|| array.values.first().copied())
+            .into_iter()
+            .collect::<Vec<_>>();
+        corefoundation::collections::new_array(
+            &values,
+            corefoundation::callbacks::Policy::from_type_callbacks(),
+            false,
+        ) as Id
+    }
+
     /// `CFStringRef CFBundleGetIdentifier(CFBundleRef)`
     ///
     /// A `Get`, so the string is not the caller's to release - which is why it is
@@ -394,6 +474,10 @@ pub mod cf {
             "CFBundleCopyBundleURL" => at!(CFBundleCopyBundleURL),
             "CFBundleCopyResourcesDirectoryURL" => at!(CFBundleCopyResourcesDirectoryURL),
             "CFBundleCopyPrivateFrameworksURL" => at!(CFBundleCopyPrivateFrameworksURL),
+            "CFBundleCopyBundleLocalizations" => at!(CFBundleCopyBundleLocalizations),
+            "CFBundleCopyPreferredLocalizationsFromArray" => {
+                at!(CFBundleCopyPreferredLocalizationsFromArray)
+            }
             "CFBundleGetIdentifier" => at!(CFBundleGetIdentifier),
             "CFBundleGetInfoDictionary" => at!(CFBundleGetInfoDictionary),
             "CFBundleGetValueForInfoDictionaryKey" => {
@@ -413,6 +497,8 @@ pub mod cf {
         "CFBundleCopyBundleURL",
         "CFBundleCopyResourcesDirectoryURL",
         "CFBundleCopyPrivateFrameworksURL",
+        "CFBundleCopyBundleLocalizations",
+        "CFBundleCopyPreferredLocalizationsFromArray",
         "CFBundleGetIdentifier",
         "CFBundleGetInfoDictionary",
         "CFBundleGetValueForInfoDictionaryKey",
@@ -488,6 +574,7 @@ mod tests {
         assert!(layout.resource("icon", "icns").is_some());
         assert!(layout.main_nib().is_some(), "the nib is in English.lproj");
         assert!(layout.resource("nothing", "txt").is_none());
+        assert_eq!(layout.localization_names(), ["English"]);
     }
 
     /// `CFBundleIconFile` is written with the extension as often as without,

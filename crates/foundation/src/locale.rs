@@ -40,7 +40,7 @@ fn split(name: &str) -> (String, String) {
     (language.to_ascii_lowercase(), country.to_ascii_uppercase())
 }
 
-fn language() -> String {
+pub(crate) fn language() -> String {
     split(&posix()).0
 }
 

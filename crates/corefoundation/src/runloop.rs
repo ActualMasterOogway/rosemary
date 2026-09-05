@@ -350,6 +350,12 @@ pub fn note<T: 'static>(handle: *const T) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(handle as usize, TypeId::of::<T>());
+    // Run loops, sources and timers are CoreFoundation references even though
+    // this implementation represents them as Rust allocations without an
+    // Objective-C isa. Make the shared retain/release path recognize them too;
+    // otherwise Darwin mistakes them for host CF objects and forwards them to
+    // Apple's CoreFoundation.
+    crate::base::note_opaque(handle.cast());
 }
 
 /// Whether `handle` is a `T` this module handed out.

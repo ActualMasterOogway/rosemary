@@ -58,6 +58,12 @@ unsafe fn forwarded(name: &std::ffi::CStr, object: CFTypeRef) -> bool {
     if !unsafe { crate::foreign::is(object) } {
         return false;
     }
+    if std::env::var_os("ROSETTA3_TRACE_FOREIGN_CF").is_some() {
+        eprintln!(
+            "rosetta3: foreign CoreFoundation {}({object:p})",
+            name.to_string_lossy()
+        );
+    }
     // A handle of this tree's that has no isa to read. Nothing to forward and
     // nothing to count: see [`crate::base::is_opaque`].
     if crate::base::is_opaque(object) {
@@ -183,6 +189,17 @@ pub unsafe extern "C" fn CFStringCreateWithCString(
     string::from_encoded(bytes, encoding)
 }
 
+pub unsafe extern "C" fn CFStringCreateWithFileSystemRepresentation(
+    _allocator: CFAllocatorRef,
+    path: *const c_char,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation - a NUL-terminated filesystem path.
+    let Some(bytes) = (unsafe { string::cstr_bytes(path) }) else {
+        return std::ptr::null();
+    };
+    string::from_bytes(bytes, false)
+}
+
 /// `CFStringCreateWithCStringNoCopy`, which copies here.
 ///
 /// The "no copy" contract is about the *allocator* being told who frees the
@@ -256,6 +273,30 @@ pub unsafe extern "C" fn CFStringCreateCopy(
         true => string::from_utf16(&s.utf16()),
         false => string::from_bytes(&s.utf8(), false),
     }
+}
+
+/// `CFStringCreateWithSubstring`, whose range is measured in UTF-16 units.
+pub unsafe extern "C" fn CFStringCreateWithSubstring(
+    _allocator: CFAllocatorRef,
+    source: CFTypeRef,
+    location: CFIndex,
+    length: CFIndex,
+) -> CFTypeRef {
+    let (Ok(location), Ok(length)) = (usize::try_from(location), usize::try_from(length)) else {
+        return std::ptr::null();
+    };
+    // SAFETY: the caller's obligation - a live string or null.
+    let Some(source) = (unsafe { string::as_string(source) }) else {
+        return std::ptr::null();
+    };
+    let units = source.utf16();
+    let Some(end) = location
+        .checked_add(length)
+        .filter(|end| *end <= units.len())
+    else {
+        return std::ptr::null();
+    };
+    string::from_utf16(&units[location..end])
 }
 
 pub unsafe extern "C" fn CFStringGetLength(s: CFTypeRef) -> CFIndex {
@@ -632,6 +673,39 @@ pub unsafe extern "C" fn CFStringInsert(target: CFTypeRef, index: CFIndex, inser
     unsafe { string::set_bytes(target, &bytes) };
 }
 
+pub unsafe extern "C" fn CFStringDelete(target: CFTypeRef, location: CFIndex, length: CFIndex) {
+    let (Ok(location), Ok(length)) = (usize::try_from(location), usize::try_from(length)) else {
+        return;
+    };
+    // SAFETY: the caller's obligation - a live mutable string or null.
+    let Some(value) = (unsafe { string::as_string(target) }) else {
+        return;
+    };
+    if value.is_wide() {
+        let mut units = value.utf16();
+        let Some(end) = location
+            .checked_add(length)
+            .filter(|end| *end <= units.len())
+        else {
+            return;
+        };
+        units.drain(location..end);
+        // SAFETY: the caller's target is a mutable string.
+        unsafe { string::set_utf16(target, &units) };
+        return;
+    }
+    let mut bytes = value.utf8();
+    let Some(end) = location
+        .checked_add(length)
+        .filter(|end| *end <= bytes.len())
+    else {
+        return;
+    };
+    bytes.drain(location..end);
+    // SAFETY: the caller's target is a mutable string.
+    unsafe { string::set_bytes(target, &bytes) };
+}
+
 pub unsafe extern "C" fn CFStringAppendCString(
     target: CFTypeRef,
     cstr: *const c_char,
@@ -797,6 +871,86 @@ pub unsafe extern "C" fn CFStringCompare(a: CFTypeRef, b: CFTypeRef, options: u6
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,
     }
+}
+
+#[repr(C)]
+pub struct CFRange {
+    location: CFIndex,
+    length: CFIndex,
+}
+
+/// Find a string inside a caller-selected UTF-16 range.
+pub unsafe extern "C" fn CFStringFindWithOptions(
+    searched: CFTypeRef,
+    needle: CFTypeRef,
+    range_location: CFIndex,
+    range_length: CFIndex,
+    options: u64,
+    result: *mut CFRange,
+) -> Boolean {
+    let (Ok(start), Ok(length)) = (
+        usize::try_from(range_location),
+        usize::try_from(range_length),
+    ) else {
+        return 0;
+    };
+    // SAFETY: the caller's obligation - live strings or null.
+    let (Some(searched), Some(needle)) = (unsafe { string::as_string(searched) }, unsafe {
+        string::as_string(needle)
+    }) else {
+        return 0;
+    };
+    let mut haystack = searched.utf16();
+    let mut needle = needle.utf16();
+    let Some(end) = start
+        .checked_add(length)
+        .filter(|end| *end <= haystack.len())
+    else {
+        return 0;
+    };
+    const CASE_INSENSITIVE: u64 = 1;
+    const BACKWARDS: u64 = 4;
+    const ANCHORED: u64 = 8;
+    if options & CASE_INSENSITIVE != 0 {
+        // ASCII case folding preserves UTF-16 indices, unlike a full Unicode
+        // case mapping whose expansions would make the returned range wrong.
+        for unit in haystack.iter_mut().chain(needle.iter_mut()) {
+            if let Ok(byte) = u8::try_from(*unit) {
+                *unit = u16::from(byte.to_ascii_lowercase());
+            }
+        }
+    }
+    if needle.len() > length {
+        return 0;
+    }
+    let mut candidates = start..=end - needle.len();
+    let found = if options & ANCHORED != 0 {
+        let index = if options & BACKWARDS != 0 {
+            end - needle.len()
+        } else {
+            start
+        };
+        (haystack[index..index + needle.len()] == needle).then_some(index)
+    } else if options & BACKWARDS != 0 {
+        candidates
+            .rev()
+            .find(|index| haystack[*index..*index + needle.len()] == needle)
+    } else {
+        candidates.find(|index| haystack[*index..*index + needle.len()] == needle)
+    };
+    let Some(location) = found else {
+        return 0;
+    };
+    if !result.is_null() {
+        // SAFETY: the caller supplied writable storage for one `CFRange`.
+        unsafe {
+            *result = CFRange {
+                location: location as CFIndex,
+                length: needle.len() as CFIndex,
+            }
+        };
+    }
+    1
 }
 
 /// `CFRange` is flattened to its two `CFIndex` fields by both 64-bit ABIs.
@@ -1058,6 +1212,24 @@ pub unsafe extern "C" fn CFDictionarySetValue(
         return;
     };
     if !d.mutable {
+        return;
+    }
+    d.set(key, value);
+}
+
+pub unsafe extern "C" fn CFDictionaryAddValue(
+    dictionary: CFTypeRef,
+    key: CFTypeRef,
+    value: CFTypeRef,
+) {
+    // Core Foundation documents an existing key as a programming error. This
+    // runtime leaves its value alone, which preserves Add rather than turning
+    // it into Set in release guests.
+    // SAFETY: the caller's obligation.
+    let Some(d) = (unsafe { collections::dictionary(dictionary) }) else {
+        return;
+    };
+    if !d.mutable || d.position(key).is_some() {
         return;
     }
     d.set(key, value);
@@ -1340,6 +1512,35 @@ pub unsafe extern "C" fn CFURLCreateFromFSRef(
     std::ptr::null()
 }
 
+pub unsafe extern "C" fn CFURLGetFSRef(url: CFTypeRef, fs_ref: *mut c_void) -> Boolean {
+    if fs_ref.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's obligation - a URL or null.
+    let Some(path) = (unsafe { crate::url::as_url(url) }).and_then(|url| url.file_path()) else {
+        return 0;
+    };
+    let Ok(path) = std::ffi::CString::new(path) else {
+        return 0;
+    };
+    #[cfg(target_os = "macos")]
+    {
+        let Some(entry) = crate::foreign::entry(c"FSPathMakeRef") else {
+            return 0;
+        };
+        // SAFETY: the host entry has the documented Carbon signature; the
+        // guest supplied storage for an `FSRef`, whose layout is architecture
+        // independent opaque bytes.
+        let make_ref: unsafe extern "C" fn(*const u8, *mut c_void, *mut u8) -> i32 =
+            unsafe { std::mem::transmute(entry) };
+        return u8::from(
+            unsafe { make_ref(path.as_ptr().cast(), fs_ref, std::ptr::null_mut()) } == 0,
+        );
+    }
+    #[cfg(not(target_os = "macos"))]
+    0
+}
+
 /// `kCFURLPOSIXPathStyle`, the only one a path in this tree is written in.
 const POSIX_PATH_STYLE: CFIndex = 0;
 
@@ -1364,6 +1565,37 @@ pub unsafe extern "C" fn CFURLCreateWithFileSystemPath(
         return std::ptr::null();
     };
     crate::url::new_file_url(path, directory != 0)
+}
+
+pub unsafe extern "C" fn CFURLCreateWithFileSystemPathRelativeToBase(
+    _allocator: CFAllocatorRef,
+    path: CFTypeRef,
+    style: CFIndex,
+    directory: Boolean,
+    base: CFTypeRef,
+) -> CFTypeRef {
+    if style != POSIX_PATH_STYLE {
+        objc::fail!("CFURLCreateWithFileSystemPathRelativeToBase: path style {style} is not POSIX");
+    }
+    // SAFETY: the caller's obligation - a string and optional URL.
+    let Some(path) = (unsafe { string::as_string(path) }) else {
+        return std::ptr::null();
+    };
+    let path_bytes = path.utf8();
+    let Ok(path) = std::str::from_utf8(&path_bytes) else {
+        return std::ptr::null();
+    };
+    if std::path::Path::new(path).is_absolute() {
+        return crate::url::new_file_url(path, directory != 0);
+    }
+    let Some(base_path) = (unsafe { crate::url::as_url(base) }).and_then(|base| base.file_path())
+    else {
+        return crate::url::new_file_url(path, directory != 0);
+    };
+    let joined = std::path::Path::new(&base_path).join(path);
+    joined.to_str().map_or(std::ptr::null(), |path| {
+        crate::url::new_file_url(path, directory != 0)
+    })
 }
 
 pub unsafe extern "C" fn CFURLCreateWithString(
@@ -1416,6 +1648,85 @@ pub unsafe extern "C" fn CFURLCopyAbsoluteURL(url: CFTypeRef) -> CFTypeRef {
     unsafe { crate::url::as_url(url) }.map_or(std::ptr::null(), |url| crate::url::new(&url.text))
 }
 
+fn copied_url_piece(
+    url: CFTypeRef,
+    piece: impl FnOnce(&crate::url::Contents) -> String,
+) -> CFTypeRef {
+    // SAFETY: callers pass through the guest's live URL argument.
+    unsafe { crate::url::as_url(url) }.map_or(std::ptr::null(), |url| {
+        let piece = piece(url);
+        string::from_bytes(piece.as_bytes(), false)
+    })
+}
+
+pub unsafe extern "C" fn CFURLCopyPath(url: CFTypeRef) -> CFTypeRef {
+    copied_url_piece(url, crate::url::Contents::path)
+}
+
+pub unsafe extern "C" fn CFURLCopyLastPathComponent(url: CFTypeRef) -> CFTypeRef {
+    copied_url_piece(url, |url| {
+        url.path()
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    })
+}
+
+pub unsafe extern "C" fn CFURLCopyScheme(url: CFTypeRef) -> CFTypeRef {
+    copied_url_piece(url, crate::url::Contents::scheme)
+}
+
+pub unsafe extern "C" fn CFURLCopyHostName(url: CFTypeRef) -> CFTypeRef {
+    copied_url_piece(url, |url| {
+        let Some((_, rest)) = url.text.split_once("://") else {
+            return String::new();
+        };
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let host_port = authority.rsplit('@').next().unwrap_or_default();
+        if host_port.starts_with('[') {
+            return host_port
+                .find(']')
+                .map_or(host_port, |end| &host_port[..=end])
+                .to_string();
+        }
+        host_port.split(':').next().unwrap_or_default().to_string()
+    })
+}
+
+pub unsafe extern "C" fn CFURLGetPortNumber(url: CFTypeRef) -> i32 {
+    // SAFETY: the caller's obligation - a URL or null.
+    let Some(url) = (unsafe { crate::url::as_url(url) }) else {
+        return -1;
+    };
+    let Some((_, rest)) = url.text.split_once("://") else {
+        return -1;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority.rsplit('@').next().unwrap_or_default();
+    if host_port.starts_with('[') {
+        return host_port
+            .split_once("]:")
+            .and_then(|(_, port)| port.parse().ok())
+            .unwrap_or(-1);
+    }
+    host_port
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse().ok())
+        .unwrap_or(-1)
+}
+
+pub unsafe extern "C" fn CFURLHasDirectoryPath(url: CFTypeRef) -> Boolean {
+    // SAFETY: the caller's obligation - a URL or null.
+    u8::from(unsafe { crate::url::as_url(url) }.is_some_and(|url| {
+        url.text
+            .split(['?', '#'])
+            .next()
+            .is_some_and(|path| path.ends_with('/'))
+    }))
+}
+
 pub unsafe extern "C" fn CFURLCreateCopyAppendingPathComponent(
     _allocator: CFAllocatorRef,
     url: CFTypeRef,
@@ -1440,6 +1751,54 @@ pub unsafe extern "C" fn CFURLCreateCopyAppendingPathComponent(
     }
     path.push_str(component.trim_matches('/'));
     crate::url::new_file_url(&path, directory != 0)
+}
+
+pub unsafe extern "C" fn CFURLCreateCopyDeletingLastPathComponent(
+    _allocator: CFAllocatorRef,
+    url: CFTypeRef,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation - a URL or null.
+    let Some(url) = (unsafe { crate::url::as_url(url) }) else {
+        return std::ptr::null();
+    };
+    if let Some(path) = url.file_path() {
+        return std::path::Path::new(&path)
+            .parent()
+            .and_then(std::path::Path::to_str)
+            .map_or(std::ptr::null(), |parent| {
+                crate::url::new_file_url(parent, true)
+            });
+    }
+    let suffix = url.text.find(['?', '#']).unwrap_or(url.text.len());
+    let path = &url.text[..suffix];
+    let Some(slash) = path.trim_end_matches('/').rfind('/') else {
+        return crate::url::new(&url.text);
+    };
+    crate::url::new(&format!("{}/", &path[..slash]))
+}
+
+pub unsafe extern "C" fn CFURLCreateCopyDeletingPathExtension(
+    _allocator: CFAllocatorRef,
+    url: CFTypeRef,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation - a URL or null.
+    let Some(url) = (unsafe { crate::url::as_url(url) }) else {
+        return std::ptr::null();
+    };
+    if let Some(path) = url.file_path() {
+        let mut path = std::path::PathBuf::from(path);
+        path.set_extension("");
+        return path.to_str().map_or(std::ptr::null(), |path| {
+            crate::url::new_file_url(path, false)
+        });
+    }
+    let suffix = url.text.find(['?', '#']).unwrap_or(url.text.len());
+    let (path, tail) = url.text.split_at(suffix);
+    let slash = path.rfind('/').map_or(0, |slash| slash + 1);
+    let Some(dot) = path[slash..].rfind('.').map(|dot| slash + dot) else {
+        return crate::url::new(&url.text);
+    };
+    crate::url::new(&format!("{}{tail}", &path[..dot]))
 }
 
 /// Add URL percent escapes while preserving the caller-selected exceptions.
@@ -1479,6 +1838,69 @@ pub unsafe extern "C" fn CFURLCreateStringByAddingPercentEscapes(
         }
     }
     string::from_bytes(escaped.as_bytes(), false)
+}
+
+unsafe fn replacing_percent_escapes(
+    original: CFTypeRef,
+    leave_escaped: CFTypeRef,
+    encoding: u32,
+) -> CFTypeRef {
+    if encoding != string::encoding::UTF8 {
+        return std::ptr::null();
+    }
+    // SAFETY: the caller's obligation - strings or null.
+    let Some(original) = (unsafe { string::as_string(original) }) else {
+        return std::ptr::null();
+    };
+    let leave = unsafe { string::as_string(leave_escaped) }
+        .map(|value| String::from_utf8_lossy(&value.utf8()).into_owned())
+        .unwrap_or_default();
+    let bytes = original.utf8();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let value = if bytes[index] == b'%' && index + 2 < bytes.len() {
+            std::str::from_utf8(&bytes[index + 1..index + 3])
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+        } else {
+            None
+        };
+        match value {
+            Some(value) if value.is_ascii() && leave.contains(value as char) => {
+                decoded.extend_from_slice(&bytes[index..index + 3]);
+                index += 3;
+            }
+            Some(value) => {
+                decoded.push(value);
+                index += 3;
+            }
+            None => {
+                decoded.push(bytes[index]);
+                index += 1;
+            }
+        }
+    }
+    string::from_bytes(&decoded, false)
+}
+
+pub unsafe extern "C" fn CFURLCreateStringByReplacingPercentEscapes(
+    _allocator: CFAllocatorRef,
+    original: CFTypeRef,
+    leave_escaped: CFTypeRef,
+) -> CFTypeRef {
+    // SAFETY: the arguments retain their documented meaning.
+    unsafe { replacing_percent_escapes(original, leave_escaped, string::encoding::UTF8) }
+}
+
+pub unsafe extern "C" fn CFURLCreateStringByReplacingPercentEscapesUsingEncoding(
+    _allocator: CFAllocatorRef,
+    original: CFTypeRef,
+    leave_escaped: CFTypeRef,
+    encoding: u32,
+) -> CFTypeRef {
+    // SAFETY: the arguments retain their documented meaning.
+    unsafe { replacing_percent_escapes(original, leave_escaped, encoding) }
 }
 
 pub unsafe extern "C" fn CFURLCopyFileSystemPath(url: CFTypeRef, style: CFIndex) -> CFTypeRef {

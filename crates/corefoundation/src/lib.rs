@@ -23,6 +23,7 @@ pub mod runloop;
 mod send;
 pub mod string;
 pub mod sysconfig;
+mod timezone;
 pub mod url;
 pub mod uuid;
 
@@ -69,10 +70,14 @@ pub fn symbol(name: &str) -> Option<u64> {
 
         "CFStringGetTypeID" => at!(api::CFStringGetTypeID),
         "CFStringCreateWithCString" => at!(api::CFStringCreateWithCString),
+        "CFStringCreateWithFileSystemRepresentation" => {
+            at!(api::CFStringCreateWithFileSystemRepresentation)
+        }
         "CFStringCreateWithCStringNoCopy" => at!(api::CFStringCreateWithCStringNoCopy),
         "CFStringCreateWithBytes" => at!(api::CFStringCreateWithBytes),
         "CFStringCreateWithCharacters" => at!(api::CFStringCreateWithCharacters),
         "CFStringCreateCopy" => at!(api::CFStringCreateCopy),
+        "CFStringCreateWithSubstring" => at!(api::CFStringCreateWithSubstring),
         "CFStringGetLength" => at!(api::CFStringGetLength),
         "CFStringGetIntValue" => at!(api::CFStringGetIntValue),
         "CFStringGetDoubleValue" => at!(api::CFStringGetDoubleValue),
@@ -85,6 +90,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         }
         "CFStringCompare" => at!(api::CFStringCompare),
         "CFStringCompareWithOptions" => at!(api::CFStringCompareWithOptions),
+        "CFStringFindWithOptions" => at!(api::CFStringFindWithOptions),
         "CFStringCreateMutable" => at!(api::CFStringCreateMutable),
         "CFStringCreateMutableCopy" => at!(api::CFStringCreateMutableCopy),
         "CFStringUppercase" => at!(api::CFStringUppercase),
@@ -95,6 +101,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFStringAppendCharacters" => at!(api::CFStringAppendCharacters),
         "CFStringAppend" => at!(api::CFStringAppend),
         "CFStringInsert" => at!(api::CFStringInsert),
+        "CFStringDelete" => at!(api::CFStringDelete),
         "CFStringAppendCString" => at!(api::CFStringAppendCString),
 
         "CFArrayGetTypeID" => at!(api::CFArrayGetTypeID),
@@ -119,6 +126,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFDictionaryGetKeysAndValues" => at!(api::CFDictionaryGetKeysAndValues),
         "CFDictionaryCreateMutable" => at!(api::CFDictionaryCreateMutable),
         "CFDictionarySetValue" => at!(api::CFDictionarySetValue),
+        "CFDictionaryAddValue" => at!(api::CFDictionaryAddValue),
 
         "CFNumberGetTypeID" => at!(api::CFNumberGetTypeID),
         "CFBooleanGetTypeID" => at!(api::CFBooleanGetTypeID),
@@ -140,16 +148,42 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFUUIDGetConstantUUIDWithBytes" => at!(api::CFUUIDGetConstantUUIDWithBytes),
 
         "CFURLGetTypeID" => at!(api::CFURLGetTypeID),
+        "CFTimeZoneCopyDefault" => at!(timezone::copy_default),
+        "CFTimeZoneCopySystem" => at!(timezone::copy_system),
+        "CFTimeZoneCreateWithName" => at!(timezone::create_with_name),
+        "CFTimeZoneGetName" => at!(timezone::get_name),
         "CFURLCreateFromFSRef" => at!(api::CFURLCreateFromFSRef),
+        "CFURLGetFSRef" => at!(api::CFURLGetFSRef),
         "CFURLCreateWithFileSystemPath" => at!(api::CFURLCreateWithFileSystemPath),
+        "CFURLCreateWithFileSystemPathRelativeToBase" => {
+            at!(api::CFURLCreateWithFileSystemPathRelativeToBase)
+        }
         "CFURLCreateWithString" => at!(api::CFURLCreateWithString),
         "CFURLGetString" => at!(api::CFURLGetString),
         "CFURLCopyAbsoluteURL" => at!(api::CFURLCopyAbsoluteURL),
+        "CFURLCopyPath" => at!(api::CFURLCopyPath),
+        "CFURLCopyLastPathComponent" => at!(api::CFURLCopyLastPathComponent),
+        "CFURLCopyScheme" => at!(api::CFURLCopyScheme),
+        "CFURLCopyHostName" => at!(api::CFURLCopyHostName),
+        "CFURLGetPortNumber" => at!(api::CFURLGetPortNumber),
+        "CFURLHasDirectoryPath" => at!(api::CFURLHasDirectoryPath),
         "CFURLCreateCopyAppendingPathComponent" => {
             at!(api::CFURLCreateCopyAppendingPathComponent)
         }
+        "CFURLCreateCopyDeletingLastPathComponent" => {
+            at!(api::CFURLCreateCopyDeletingLastPathComponent)
+        }
+        "CFURLCreateCopyDeletingPathExtension" => {
+            at!(api::CFURLCreateCopyDeletingPathExtension)
+        }
         "CFURLCreateStringByAddingPercentEscapes" => {
             at!(api::CFURLCreateStringByAddingPercentEscapes)
+        }
+        "CFURLCreateStringByReplacingPercentEscapes" => {
+            at!(api::CFURLCreateStringByReplacingPercentEscapes)
+        }
+        "CFURLCreateStringByReplacingPercentEscapesUsingEncoding" => {
+            at!(api::CFURLCreateStringByReplacingPercentEscapesUsingEncoding)
         }
         "CFURLCopyFileSystemPath" => at!(api::CFURLCopyFileSystemPath),
         "CFURLGetFileSystemRepresentation" => at!(api::CFURLGetFileSystemRepresentation),
@@ -197,10 +231,12 @@ pub const NAMES: &[&str] = &[
     "CFAllocatorCreate",
     "CFStringGetTypeID",
     "CFStringCreateWithCString",
+    "CFStringCreateWithFileSystemRepresentation",
     "CFStringCreateWithCStringNoCopy",
     "CFStringCreateWithBytes",
     "CFStringCreateWithCharacters",
     "CFStringCreateCopy",
+    "CFStringCreateWithSubstring",
     "CFStringGetLength",
     "CFStringGetIntValue",
     "CFStringGetDoubleValue",
@@ -211,6 +247,7 @@ pub const NAMES: &[&str] = &[
     "CFStringCreateExternalRepresentation",
     "CFStringCompare",
     "CFStringCompareWithOptions",
+    "CFStringFindWithOptions",
     "CFStringCreateMutable",
     "CFStringCreateMutableCopy",
     "CFStringUppercase",
@@ -221,6 +258,7 @@ pub const NAMES: &[&str] = &[
     "CFStringAppendCharacters",
     "CFStringAppend",
     "CFStringInsert",
+    "CFStringDelete",
     "CFStringAppendCString",
     "CFArrayGetTypeID",
     "CFArrayCreate",
@@ -242,6 +280,7 @@ pub const NAMES: &[&str] = &[
     "CFDictionaryGetKeysAndValues",
     "CFDictionaryCreateMutable",
     "CFDictionarySetValue",
+    "CFDictionaryAddValue",
     "CFNumberGetTypeID",
     "CFBooleanGetTypeID",
     "CFBooleanGetValue",
@@ -259,13 +298,29 @@ pub const NAMES: &[&str] = &[
     "CFUUIDCreateString",
     "CFUUIDGetConstantUUIDWithBytes",
     "CFURLGetTypeID",
+    "CFTimeZoneCopyDefault",
+    "CFTimeZoneCopySystem",
+    "CFTimeZoneCreateWithName",
+    "CFTimeZoneGetName",
     "CFURLCreateFromFSRef",
+    "CFURLGetFSRef",
     "CFURLCreateWithFileSystemPath",
+    "CFURLCreateWithFileSystemPathRelativeToBase",
     "CFURLCreateWithString",
     "CFURLGetString",
     "CFURLCopyAbsoluteURL",
+    "CFURLCopyPath",
+    "CFURLCopyLastPathComponent",
+    "CFURLCopyScheme",
+    "CFURLCopyHostName",
+    "CFURLGetPortNumber",
+    "CFURLHasDirectoryPath",
     "CFURLCreateCopyAppendingPathComponent",
+    "CFURLCreateCopyDeletingLastPathComponent",
+    "CFURLCreateCopyDeletingPathExtension",
     "CFURLCreateStringByAddingPercentEscapes",
+    "CFURLCreateStringByReplacingPercentEscapes",
+    "CFURLCreateStringByReplacingPercentEscapesUsingEncoding",
     "CFURLCopyFileSystemPath",
     "CFURLGetFileSystemRepresentation",
     "CFRunLoopGetCurrent",

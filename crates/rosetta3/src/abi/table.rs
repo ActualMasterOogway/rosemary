@@ -323,6 +323,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // inside the mirror rather than `rosetta3`'s.
     sig!("CFBundleCopyExecutableURL", P, P),
     sig!("CFBundleCopyPrivateFrameworksURL", P, P),
+    sig!("CFBundleCopyBundleLocalizations", P, P),
+    sig!("CFBundleCopyPreferredLocalizationsFromArray", P, P),
     sig!("CFBundleCopyResourcesDirectoryURL", P, P),
     // `CFURLRef CFBundleCopyResourceURL(CFBundleRef, CFStringRef name,
     // CFStringRef type, CFStringRef subDirName)` - three `CFStringRef`s, any of
@@ -348,6 +350,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFSetGetTypeID", U64),
     sig!("CFURLGetTypeID", U64),
     sig!("CFURLCreateFromFSRef", P, P, P),
+    sig!("CFURLGetFSRef", BOOL, P, P),
     sig!("CFUUIDGetTypeID", U64),
     sig!("CFBooleanGetValue", BOOL, P),
     sig!("CFDateCreate", P, P, F64),
@@ -483,6 +486,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `CFStringCompareFlags` is a `CFOptionFlags` - both 64-bit on LP64.
     sig!("CFStringCompare", I64, P, P, U64),
     sig!("CFStringCompareWithOptions", I64, P, P, I64, I64, U64),
+    // `Boolean CFStringFindWithOptions(CFStringRef, CFStringRef, CFRange,
+    // CFStringCompareFlags, CFRange *)`, with the range flattened.
+    sig!("CFStringFindWithOptions", BOOL, P, P, I64, I64, U64, P),
     sig!("CFStringConvertEncodingToIANACharSetName", P, U32),
     sig!("CFStringConvertEncodingToNSStringEncoding", U64, U32),
     sig!("CFStringConvertIANACharSetNameToEncoding", U32, P),
@@ -504,6 +510,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `Boolean CFStringGetCString(CFStringRef, char *buffer, CFIndex
     // bufferSize, CFStringEncoding encoding)` - **four** parameters.
     sig!("CFStringCreateMutableCopy", P, P, I64, P),
+    sig!("CFStringCreateWithFileSystemRepresentation", P, P, P),
+    sig!("CFStringCreateWithSubstring", P, P, P, I64, I64),
     // `void CFStringUppercase(CFMutableStringRef, CFLocaleRef)`, and its
     // mirror. The locale is the second argument and is conventionally null.
     sig!("CFStringLowercase", V, P, P),
@@ -512,6 +520,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // flattened into two words, as `CFStringGetBytes` above has it.
     sig!("CFStringGetCharacters", V, P, I64, I64, P),
     sig!("CFTimeZoneCopyDefault", P),
+    sig!("CFTimeZoneCopySystem", P),
+    sig!("CFTimeZoneCreateWithName", P, P, P, U8),
     sig!("CFTimeZoneGetName", P, P),
     sig!("CFStringGetCString", BOOL, P, P, I64, U32),
     sig!("CFStringGetCStringPtr", P, P, U32),
@@ -520,6 +530,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFStringGetDoubleValue", F64, P),
     sig!("CFStringAppend", V, P, P),
     sig!("CFStringInsert", V, P, I64, P),
+    sig!("CFStringDelete", V, P, I64, I64),
     sig!("CFStringGetMaximumSizeForEncoding", I64, I64, U32),
     sig!("CFStringGetSystemEncoding", U32),
     sig!("CFStringGetTypeID", U64),
@@ -533,19 +544,45 @@ pub static SIGNATURES: &[FunctionAbi] = &[
         P,
         U32
     ),
+    sig!("CFURLCreateStringByReplacingPercentEscapes", P, P, P, P),
+    sig!(
+        "CFURLCreateStringByReplacingPercentEscapesUsingEncoding",
+        P,
+        P,
+        P,
+        P,
+        U32
+    ),
     // `CFURLPathStyle` is a `CF_ENUM(CFIndex, ...)`, so the style is a
     // doubleword and not the `uint32_t` the neighbouring encoding arguments
     // are - the two look interchangeable in a header and are not.
     sig!("CFURLCopyFileSystemPath", P, P, I64),
     sig!("CFURLCreateWithBytes", P, P, P, I64, U32, P),
+    sig!(
+        "CFURLCreateWithFileSystemPathRelativeToBase",
+        P,
+        P,
+        P,
+        I64,
+        BOOL,
+        P
+    ),
     sig!("CFURLCreateWithString", P, P, P, P),
     sig!("CFURLGetString", P, P),
     sig!("CFURLCopyAbsoluteURL", P, P),
+    sig!("CFURLCopyPath", P, P),
+    sig!("CFURLCopyLastPathComponent", P, P),
+    sig!("CFURLCopyScheme", P, P),
+    sig!("CFURLCopyHostName", P, P),
+    sig!("CFURLGetPortNumber", I32, P),
+    sig!("CFURLHasDirectoryPath", BOOL, P),
     // A `CFURLPathStyle` is a `CFIndex`, not an `int`, and `isDirectory` is a
     // `Boolean` - the two narrow types this family keeps getting wrong in the
     // direction that does not fault.
     sig!("CFURLCreateWithFileSystemPath", P, P, P, I64, BOOL),
     sig!("CFURLCreateCopyAppendingPathComponent", P, P, P, P, BOOL),
+    sig!("CFURLCreateCopyDeletingLastPathComponent", P, P, P),
+    sig!("CFURLCreateCopyDeletingPathExtension", P, P, P),
     sig!("CFURLGetFileSystemRepresentation", U8, P, U8, P, I64),
     sig!("CFUUIDCreate", P, P),
     sig!("CFUUIDCreateString", P, P, P),
@@ -960,6 +997,28 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("UpdateSystemActivity", I32, U8),
     // `OSErr FSFindFolder(FSVolumeRefNum, OSType, Boolean, FSRef *)`.
     sig!("FSFindFolder", I16, I16, U32, U8, P),
+    // `OSStatus FSPathMakeRef(const UInt8 *, FSRef *, Boolean *)`.
+    sig!("FSPathMakeRef", I32, P, P, P),
+    // `OSStatus FSResolveAliasFile(FSRef *, Boolean, Boolean *, Boolean *)`.
+    sig!("FSResolveAliasFile", I32, P, U8, P, P),
+    // `OSStatus FSGetCatalogInfo(const FSRef *, FSCatalogInfoBitmap,
+    // FSCatalogInfo *, HFSUniStr255 *, FSSpec *, FSRef *)`.
+    sig!("FSGetCatalogInfo", I32, P, U32, P, P, P, P),
+    sig!("FSCompareFSRefs", I32, P, P),
+    sig!("FSExchangeObjects", I32, P, P),
+    sig!("FSIsAliasFile", I32, P, P, P),
+    sig!("FSNewAlias", I32, P, P, P),
+    sig!("FSSetCatalogInfo", I32, P, U32, P),
+    sig!("FSGetVolumeInfo", I32, I16, U32, P, U32, P, P, P),
+    sig!("FSGetVolumeParms", I32, I16, P, U32),
+    sig!("FSPathMoveObjectToTrashSync", I32, P, P, U32),
+    sig!("FSFileOperationCreate", P, P),
+    sig!("FSFileOperationScheduleWithRunLoop", V, P, P, P),
+    sig!("GetCurrentProcess", I32, P),
+    sig!("GetProcessBundleLocation", I32, P, P),
+    sig!("SameProcess", I32, P, P, P),
+    sig!("SetFrontProcess", I32, P),
+    sig!("TransformProcessType", I32, P, U32),
     // The two error-string lookups beside them, which hand back a pointer into
     // a static table.
     sig!("GetMacOSStatusCommentString", P, I32),
@@ -1435,6 +1494,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("fchmod", I32, I32, U32),
     sig!("fclose", I32, P),
     vsig!("fcntl", I32, I32, I32),
+    // `copyfile(const char *, const char *, copyfile_state_t,
+    // copyfile_flags_t)`: the state is an opaque pointer and Darwin's flag
+    // word is unsigned 32-bit on both architectures.
+    sig!("copyfile", I32, P, P, P, U32),
     sig!("fcopyfile", I32, I32, P, U32),
     sig!("fdopen", P, I32, P),
     sig!("feof", I32, P),
@@ -2552,6 +2615,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("readv", I64, I32, P, I32),
     sig!("realloc", P, P, U64),
     sig!("reallocf", P, P, U64),
+    // Darwin's `regex_t` and `regmatch_t` have the same pointer/size_t/off_t
+    // layout on x86_64 and arm64, so libc can use the guest's buffers directly.
+    sig!("regcomp", I32, P, P, I32),
+    sig!("regerror", U64, I32, P, P, U64),
+    sig!("regexec", I32, P, P, U64, P, I32),
+    sig!("regfree", V, P),
     sig!("recv", I64, I32, P, U64, I32),
     sig!("recvfrom", I64, I32, P, U64, I32, P, P),
     sig!("recvmsg", I64, I32, P, I32),

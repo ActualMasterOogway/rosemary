@@ -29,8 +29,9 @@ fn matches(wanted: &[String], symbol: &str) -> bool {
 /// Report the call about to be serviced.
 pub fn entering(symbol: &str, ctx: &RegisterContext) {
     eprintln!(
-        "rosetta3: call [{:#x}] {symbol}({:#x}, {:#x}, {:#x}, {:#x})",
+        "rosetta3: call [{:#x}] at {:#x} {symbol}({:#x}, {:#x}, {:#x}, {:#x})",
         thread_id(),
+        ctx.rip,
         ctx.rdi,
         ctx.rsi,
         ctx.rdx,
