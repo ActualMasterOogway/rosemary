@@ -1,15 +1,113 @@
 # Rosetta 3
 
-Rosetta 3 is a high level emulator for running x86-64 and AArch64 macOS binaries on macOS and Linux. It implements a compliant Mach-O loader using `machish` as its base, and shims the x86-64 Mac ABI to the AArch64 one, additionally shimming Darwin APIs to cross platform libc ones where necessary.
+Rosetta 3 runs macOS applications across architectures and operating systems. It
+combines two closely related projects:
 
-Two backends are available on either host:
+* a high-level x86-64 emulator built on the Microlift binary lifter and JIT; and
+* a macOS compatibility layer that reimplements Darwin APIs and Apple frameworks
+  on non-macOS hosts.
 
-* native, which links the program against the host's own dylibs and calls it directly. On an x86-64 host this is the backend selection picks for any x86-64 binary, because translating a program into the instruction set it is already written in buys nothing.
-* emulated, which recompiles the program through Microlift.
+Rosetta 3 aims to make macOS software portable across macOS and non-macOS systems while
+sharing one Mach-O loader, runtime, ABI bridge, and framework implementation. It
+is an experimental compatibility project rather than a drop-in replacement for
+Apple's Rosetta 2, and application coverage is still incomplete.
 
-Build either with `cargo build --release --target x86_64-apple-darwin --bin rosetta3`; leaving the target off builds for the machine you are on.
+The runtime uses [`machish`](crates/machish) to load and link Mach-O images. Its
+framework crates provide cross-platform implementations of APIs such as
+Objective-C, Foundation, AppKit, CoreAudio, and IOKit. Together these pieces let
+the same runtime execute a host-architecture Mach-O directly or recompile an
+x86-64 image through Microlift.
 
-Rosetta 3 builds its CPU emulation using the Microlift binary lifter as a base.
+## Project goals
+
+* Run x86-64 macOS applications through Microlift on supported host
+  architectures.
+* Run macOS applications on non-macOS hosts by translating Darwin behavior to
+  portable Rust, libc, and SDL3 implementations.
+* Share the loader, ABI definitions, shims, and framework implementations between
+  native and emulated execution instead of maintaining separate runtimes.
+* Prefer behavioral compatibility and correctness first, then improve application
+  coverage and performance incrementally.
+
+Rosetta 3 currently has two execution backends:
+
+* `native` loads a slice matching the host CPU, links it to the available native
+  or reimplemented libraries, and calls it directly.
+* `emulated` recompiles an x86-64 slice through Microlift. On an x86-64 host,
+  native execution is normally selected because recompiling the same instruction
+  set provides no benefit.
+
+## Building
+
+Rosetta 3 uses the Rust 2024 edition and currently requires Rust 1.88 or newer.
+The Microlift and Microlift Wasmtime repositories are Git dependencies, so the
+build environment must be able to fetch them.
+
+For a release build on the current host:
+
+```sh
+cargo build --release --bin rosetta3
+```
+
+The resulting executable is `target/release/rosetta3`. Release builds are
+strongly recommended for emulation; debug builds are substantially slower.
+
+### Nix development environment
+
+The repository includes a development flake for AArch64 and x86-64 hosts on both
+macOS and Linux. With Nix and flakes enabled, enter the complete development
+environment with:
+
+```sh
+nix develop
+```
+
+The shell provides the Rust toolchain and the build, runtime, and development
+dependencies needed to build Rosetta 3 and its workspace components. From inside
+the shell, the normal Cargo commands work without any additional setup:
+
+```sh
+cargo build --release --bin rosetta3
+cargo test --release
+```
+
+### Platform setup
+
+On macOS, install the Xcode command-line tools before building.
+
+On Debian-based Linux systems, install the native build and runtime dependencies
+first:
+
+```sh
+sudo apt-get install build-essential pkg-config libcurl4-openssl-dev \
+    zlib1g-dev libsdl3-dev libglu1-mesa
+cargo build --release --bin rosetta3
+```
+
+Development from a macOS host can also use the configured Debian container:
+
+```sh
+tools/linux-sync.sh --vendor  # first run, or after dependencies change
+tools/linux-sync.sh
+```
+
+Read the header of [`tools/linux-sync.sh`](tools/linux-sync.sh) for the one-time
+container setup and dependency details.
+
+## Running
+
+Rosetta 3 automatically uses a native Mach-O slice when one matches the host and
+falls back to an available emulated slice. A backend can also be selected
+explicitly:
+
+```sh
+target/release/rosetta3 run /path/to/application [args...]
+target/release/rosetta3 run --emulated /path/to/application [args...]
+target/release/rosetta3 run --native /path/to/application [args...]
+```
+
+See [`docs/usage.md`](docs/usage.md) for runtime options and environment
+variables.
 
 ## Performance
 
@@ -22,8 +120,6 @@ Rosetta 3 can optionally use Microlift's automatic flag analysis to optimize ove
 ## Running on Linux
 
 Rosetta 3 builds and runs on Linux via the Darwin shim crate. It works by reimplementing Darwin APIs where they diverge on Linux, and passing the rest of them through to the host. It also has reimplementations of various macOS APIs, and a custom Objective-C runtime that can even be differentially tested against an actual macOS installation by forcing `ROSETTA3_OBJC=builtin` and `ROSETTA3_BUNDLED=1`. This enables reimplementations of macOS frameworks and the Objective C runtime on top of cross platform Rust and SDL libraries.
-
-`tools/linux-sync.sh` builds and runs the tree inside a Debian container; its header documents the one-time setup.
 
 ## Differences from Rosetta 2
 
