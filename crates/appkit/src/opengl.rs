@@ -4,6 +4,7 @@ use std::ffi::c_void;
 
 use objc::object::Id;
 use objc::sel::Sel;
+use static_init::dynamic;
 
 use crate::define::{class_methods, methods};
 
@@ -444,6 +445,19 @@ unsafe extern "C" fn flush_buffer(receiver: Id, _sel: Sel) {
     }
 }
 
+#[inline(always)]
+fn swap_interval() -> Option<i32> {
+    #[dynamic]
+    static SWAP_INTERVAL: Option<i32> = {
+        if let Ok(no_vsync) = std::env::var("ROSETTA3_SWAP_INTERVAL") {
+            no_vsync.parse().ok()
+        } else {
+            None
+        }
+    };
+    *SWAP_INTERVAL
+}
+
 /// `-setValues:forParameter:`, of which only the swap interval is honoured.
 ///
 /// `NSOpenGLContextParameterSwapInterval` is 222 and is the one a program sets;
@@ -462,7 +476,8 @@ unsafe extern "C" fn set_values(receiver: Id, _sel: Sel, values: *const i32, par
     };
     match parameter {
         SWAP_INTERVAL => {
-            sdl3::video::gl_set_swap_interval(value);
+            let actual_value = swap_interval().unwrap_or(value);
+            sdl3::video::gl_set_swap_interval(actual_value);
         }
         // Opacity is the compositor's, and SDL's window is opaque.
         SURFACE_OPACITY => {}

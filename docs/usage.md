@@ -12,6 +12,7 @@
 | `ROSETTA3_STRICT_IMPORTS` | `0` | Refuse to run a program that has unbound imports, rather than announcing them on stderr and running anyway. Unbound imports are always announced; this only decides whether they are fatal. |
 | `ROSETTA3_UNBOUND_DETAIL` | `40` | How many unbound imports are named one by one before the rest are only counted. Set to `all` for the whole list. A large application has hundreds, so the default keeps the interesting output - what comes *after* the list - on screen; raise it when a fault at address zero has to be matched against a symbol. |
 | `ROSETTA3_NO_FOREIGN` | `0` | (macOS only - unsafe) Assume that we have reimplemented every framework this app asks of us, disabling foreign Objective-C support in the reimplementations for a slight performance boost. Assumed to be always on with non-macOS systems, since there are no native Objective C frameworks to conflict with. |
+| `ROSETTA3_SWAP_INTERVAL` | `none` | Force a specific swap interval on OpenGL applications. Allows enabling immediate (0), VSync (1), and -1 (Adaptive VSync), along with other V-blank values, allowing unlocked framerate on apps that use VSync. |
 
 ## GUI
 

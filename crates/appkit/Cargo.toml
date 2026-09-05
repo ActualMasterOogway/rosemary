@@ -12,3 +12,4 @@ corefoundation.workspace = true
 foundation.workspace = true
 sdl3.workspace = true
 gamecontroller.workspace = true
+static_init.workspace = true

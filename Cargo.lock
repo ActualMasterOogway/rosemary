@@ -30,6 +30,7 @@ dependencies = [
  "gamecontroller",
  "objc",
  "sdl3",
+ "static_init",
 ]
 
 [[package]]
