@@ -244,6 +244,14 @@ pub mod cf {
         }
     }
 
+    /// `CFURLRef CFBundleCopyBundleURL(CFBundleRef)`
+    unsafe extern "C" fn CFBundleCopyBundleURL(_bundle: Id) -> Id {
+        match super::main() {
+            Some(bundle) => file_url(&bundle.root, true),
+            None => std::ptr::null_mut(),
+        }
+    }
+
     /// `CFURLRef CFBundleCopyResourcesDirectoryURL(CFBundleRef)`
     ///
     /// The directory rather than a file in it, so the trailing slash a caller
@@ -276,6 +284,37 @@ pub mod cf {
             return std::ptr::null_mut();
         };
         crate::notification::name_object(identifier) as Id
+    }
+
+    fn info_dictionary() -> Id {
+        static INFO: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *INFO.get_or_init(|| {
+            let Some(bundle) = super::main() else {
+                return 0;
+            };
+            let object = crate::objectify::object(&bundle.info, "CFBundleGetInfoDictionary");
+            // A Get result lives with the bundle rather than with an autorelease
+            // pool, so keep the objectified plist for the process.
+            objc::arc::retain(object);
+            object as usize
+        }) as Id
+    }
+
+    unsafe extern "C" fn CFBundleGetInfoDictionary(_bundle: Id) -> Id {
+        info_dictionary()
+    }
+
+    unsafe extern "C" fn CFBundleGetValueForInfoDictionaryKey(_bundle: Id, key: Id) -> Id {
+        let dictionary = info_dictionary();
+        if dictionary.is_null() || key.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: the cached object is a dictionary and `key` is the caller's
+        // live CFString.
+        unsafe {
+            corefoundation::api::CFDictionaryGetValue(dictionary as CFTypeRef, key as CFTypeRef)
+                as Id
+        }
     }
 
     /// `UInt32 CFBundleGetVersionNumber(CFBundleRef)`
@@ -352,9 +391,14 @@ pub mod cf {
             "CFBundleGetMainBundle" => at!(CFBundleGetMainBundle),
             "CFBundleCopyResourceURL" => at!(CFBundleCopyResourceURL),
             "CFBundleCopyExecutableURL" => at!(CFBundleCopyExecutableURL),
+            "CFBundleCopyBundleURL" => at!(CFBundleCopyBundleURL),
             "CFBundleCopyResourcesDirectoryURL" => at!(CFBundleCopyResourcesDirectoryURL),
             "CFBundleCopyPrivateFrameworksURL" => at!(CFBundleCopyPrivateFrameworksURL),
             "CFBundleGetIdentifier" => at!(CFBundleGetIdentifier),
+            "CFBundleGetInfoDictionary" => at!(CFBundleGetInfoDictionary),
+            "CFBundleGetValueForInfoDictionaryKey" => {
+                at!(CFBundleGetValueForInfoDictionaryKey)
+            }
             "CFBundleGetVersionNumber" => at!(CFBundleGetVersionNumber),
             "CFBundleCreate" => at!(CFBundleCreate),
             _ => return None,
@@ -366,9 +410,12 @@ pub mod cf {
         "CFBundleGetMainBundle",
         "CFBundleCopyResourceURL",
         "CFBundleCopyExecutableURL",
+        "CFBundleCopyBundleURL",
         "CFBundleCopyResourcesDirectoryURL",
         "CFBundleCopyPrivateFrameworksURL",
         "CFBundleGetIdentifier",
+        "CFBundleGetInfoDictionary",
+        "CFBundleGetValueForInfoDictionaryKey",
         "CFBundleGetVersionNumber",
         "CFBundleCreate",
     ];

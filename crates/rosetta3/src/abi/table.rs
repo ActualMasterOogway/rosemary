@@ -171,12 +171,42 @@ const F32: T = T::SinglePrecisionFp;
 const F64: T = T::DoublePrecisionFp;
 const P: T = T::Pointer;
 const U8: T = T::UnsignedByte;
+const I16: T = T::SignedHalfword;
 const U16: T = T::UnsignedHalfword;
 const BOOL: T = U8;
 
 /// Known signatures, in no particular order - [`index`] builds the lookup. Names must
 /// be unique; `signatures_are_unique` says so.
 pub static SIGNATURES: &[FunctionAbi] = &[
+    sig!("getsegbyname", P, P),
+    sig!("getsectbyname", P, P, P),
+    // OpenAL 1.1. Its scalar typedefs are fixed-width even on Darwin.
+    sig!("alBufferData", V, U32, I32, P, I32, I32),
+    sig!("alDeleteBuffers", V, I32, P),
+    sig!("alDeleteSources", V, I32, P),
+    sig!("alDistanceModel", V, I32),
+    sig!("alGenBuffers", V, I32, P),
+    sig!("alGenSources", V, I32, P),
+    sig!("alGetError", I32),
+    sig!("alGetFloat", F32, I32),
+    sig!("alGetSourcei", V, U32, I32, P),
+    sig!("alIsExtensionPresent", U8, P),
+    sig!("alListenerfv", V, I32, P),
+    sig!("alSourcePlay", V, U32),
+    sig!("alSourceQueueBuffers", V, U32, I32, P),
+    sig!("alSourceStop", V, U32),
+    sig!("alSourcef", V, U32, I32, F32),
+    sig!("alSourcefv", V, U32, I32, P),
+    sig!("alSourcei", V, U32, I32, I32),
+    sig!("alcCloseDevice", U8, P),
+    sig!("alcCreateContext", P, P, P),
+    sig!("alcDestroyContext", V, P),
+    sig!("alcGetCurrentContext", P),
+    sig!("alcGetEnumValue", I32, P, P),
+    sig!("alcGetProcAddress", P, P, P),
+    sig!("alcIsExtensionPresent", U8, P, P),
+    sig!("alcMakeContextCurrent", U8, P),
+    sig!("alcOpenDevice", P, P),
     sig!("AudioComponentFindNext", P, P, P),
     sig!("AudioComponentInstanceDispose", I32, P),
     sig!("AudioComponentInstanceNew", I32, P, P),
@@ -298,8 +328,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // CFStringRef type, CFStringRef subDirName)` - three `CFStringRef`s, any of
     // which may be null.
     sig!("CFBundleCopyResourceURL", P, P, P, P, P),
+    sig!("CFBundleCopyBundleURL", P, P),
     sig!("CFBundleCreate", P, P, P),
     sig!("CFBundleGetIdentifier", P, P),
+    sig!("CFBundleGetInfoDictionary", P, P),
     sig!("CFBundleGetMainBundle", P),
     sig!("CFBundleGetVersionNumber", U32, P),
     sig!("CFBundleGetValueForInfoDictionaryKey", P, P, P),
@@ -315,8 +347,14 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFNullGetTypeID", U64),
     sig!("CFSetGetTypeID", U64),
     sig!("CFURLGetTypeID", U64),
+    sig!("CFURLCreateFromFSRef", P, P, P),
     sig!("CFUUIDGetTypeID", U64),
     sig!("CFBooleanGetValue", BOOL, P),
+    sig!("CFDateCreate", P, P, F64),
+    sig!("CFDateGetAbsoluteTime", F64, P),
+    sig!("CFAllocatorCreate", P, P, P),
+    sig!("CFAllocatorGetDefault", P),
+    sig!("CFAllocatorGetTypeID", U64),
     // `CFDataRef CFDataCreate(CFAllocatorRef, const UInt8 *, CFIndex)` - the
     // bytes are read out of guest memory and copied into the host's object,
     // which is what makes the copy the right one.
@@ -326,6 +364,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFDataGetLength", I64, P),
     sig!("CFDataGetTypeID", U64),
     sig!("CFDictionaryAddValue", V, P, P, P),
+    cbsig!([1], "CFDictionaryApplyFunction", V, P, P, P),
     sig!("CFDictionaryContainsKey", BOOL, P, P),
     sig!("CFDictionaryGetCount", I64, P),
     sig!("CFDictionaryCreate", P, P, P, P, I64, P, P),
@@ -443,6 +482,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `CFComparisonResult` is a `CFIndex`, so a signed doubleword, and
     // `CFStringCompareFlags` is a `CFOptionFlags` - both 64-bit on LP64.
     sig!("CFStringCompare", I64, P, P, U64),
+    sig!("CFStringCompareWithOptions", I64, P, P, I64, I64, U64),
     sig!("CFStringConvertEncodingToIANACharSetName", P, U32),
     sig!("CFStringConvertEncodingToNSStringEncoding", U64, U32),
     sig!("CFStringConvertIANACharSetNameToEncoding", U32, P),
@@ -458,6 +498,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // AMD64 and AAPCS64 agree on passing one in two consecutive integer
     // registers.
     sig!("CFStringGetBytes", I64, P, I64, I64, U32, U8, U8, P, I64, P),
+    sig!("CFStringCreateExternalRepresentation", P, P, P, U32, U8),
     // A `UniChar` is a `UInt16`.
     sig!("CFStringGetCharacterAtIndex", U16, P, I64),
     // `Boolean CFStringGetCString(CFStringRef, char *buffer, CFIndex
@@ -475,6 +516,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFStringGetCString", BOOL, P, P, I64, U32),
     sig!("CFStringGetCStringPtr", P, P, U32),
     sig!("CFStringGetLength", I64, P),
+    sig!("CFStringGetIntValue", I32, P),
+    sig!("CFStringGetDoubleValue", F64, P),
+    sig!("CFStringAppend", V, P, P),
+    sig!("CFStringInsert", V, P, I64, P),
     sig!("CFStringGetMaximumSizeForEncoding", I64, I64, U32),
     sig!("CFStringGetSystemEncoding", U32),
     sig!("CFStringGetTypeID", U64),
@@ -493,10 +538,14 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // are - the two look interchangeable in a header and are not.
     sig!("CFURLCopyFileSystemPath", P, P, I64),
     sig!("CFURLCreateWithBytes", P, P, P, I64, U32, P),
+    sig!("CFURLCreateWithString", P, P, P, P),
+    sig!("CFURLGetString", P, P),
+    sig!("CFURLCopyAbsoluteURL", P, P),
     // A `CFURLPathStyle` is a `CFIndex`, not an `int`, and `isDirectory` is a
     // `Boolean` - the two narrow types this family keeps getting wrong in the
     // direction that does not fault.
     sig!("CFURLCreateWithFileSystemPath", P, P, P, I64, BOOL),
+    sig!("CFURLCreateCopyAppendingPathComponent", P, P, P, P, BOOL),
     sig!("CFURLGetFileSystemRepresentation", U8, P, U8, P, I64),
     sig!("CFUUIDCreate", P, P),
     sig!("CFUUIDCreateString", P, P, P),
@@ -909,6 +958,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // a game does every frame.
     sig!("GetCurrentEventTime", F64),
     sig!("UpdateSystemActivity", I32, U8),
+    // `OSErr FSFindFolder(FSVolumeRefNum, OSType, Boolean, FSRef *)`.
+    sig!("FSFindFolder", I16, I16, U32, U8, P),
     // The two error-string lookups beside them, which hand back a pointer into
     // a static table.
     sig!("GetMacOSStatusCommentString", P, I32),
@@ -2246,6 +2297,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("mach_vm_read_overwrite", I32, U32, U64, U64, U64, P),
     sig!("vm_allocate", I32, U32, P, U64, I32),
     sig!("vm_deallocate", I32, U32, U64, U64),
+    sig!("vm_read_overwrite", I32, U32, U64, U64, U64, P),
+    sig!("vm_region_64", I32, U32, P, P, I32, P, P, P),
+    sig!("vm_region_recurse_64", I32, U32, P, P, P, P, P),
     sig!("mach_thread_self", U32),
     sig!("mach_timebase_info", I32, P),
     sig!("madvise", U64, P, U64, I32),
@@ -3266,6 +3320,8 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("NSUnderlyingErrorKey", DATA),
     ("NSWindowDidMoveNotification", DATA),
     ("NSWindowDidResizeNotification", DATA),
+    ("NSWindowDidBecomeMainNotification", DATA),
+    ("NSWindowDidResignMainNotification", DATA),
     ("NSWindowWillCloseNotification", DATA),
     ("_DefaultRuneLocale", DATA),
     ("_NSConcreteGlobalBlock", DATA),

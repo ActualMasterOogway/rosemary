@@ -212,6 +212,8 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
     window::WILL_CLOSE,
     window::DID_BECOME_KEY,
     window::DID_RESIGN_KEY,
+    window::DID_BECOME_MAIN,
+    window::DID_RESIGN_MAIN,
     window::DID_MINIATURIZE,
     window::DID_DEMINIATURIZE,
     window::WILL_ENTER_FULL_SCREEN,

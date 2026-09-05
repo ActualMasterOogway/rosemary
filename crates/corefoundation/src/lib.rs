@@ -63,6 +63,10 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFEqual" => at!(api::CFEqual),
         "CFHash" => at!(api::CFHash),
 
+        "CFAllocatorGetTypeID" => at!(api::CFAllocatorGetTypeID),
+        "CFAllocatorGetDefault" => at!(api::CFAllocatorGetDefault),
+        "CFAllocatorCreate" => at!(api::CFAllocatorCreate),
+
         "CFStringGetTypeID" => at!(api::CFStringGetTypeID),
         "CFStringCreateWithCString" => at!(api::CFStringCreateWithCString),
         "CFStringCreateWithCStringNoCopy" => at!(api::CFStringCreateWithCStringNoCopy),
@@ -70,11 +74,17 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFStringCreateWithCharacters" => at!(api::CFStringCreateWithCharacters),
         "CFStringCreateCopy" => at!(api::CFStringCreateCopy),
         "CFStringGetLength" => at!(api::CFStringGetLength),
+        "CFStringGetIntValue" => at!(api::CFStringGetIntValue),
+        "CFStringGetDoubleValue" => at!(api::CFStringGetDoubleValue),
         "CFStringGetMaximumSizeForEncoding" => at!(api::CFStringGetMaximumSizeForEncoding),
         "CFStringGetCString" => at!(api::CFStringGetCString),
         "CFStringGetCStringPtr" => at!(api::CFStringGetCStringPtr),
         "CFStringGetBytes" => at!(api::CFStringGetBytes),
+        "CFStringCreateExternalRepresentation" => {
+            at!(api::CFStringCreateExternalRepresentation)
+        }
         "CFStringCompare" => at!(api::CFStringCompare),
+        "CFStringCompareWithOptions" => at!(api::CFStringCompareWithOptions),
         "CFStringCreateMutable" => at!(api::CFStringCreateMutable),
         "CFStringCreateMutableCopy" => at!(api::CFStringCreateMutableCopy),
         "CFStringUppercase" => at!(api::CFStringUppercase),
@@ -84,6 +94,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFStringGetCharactersPtr" => at!(api::CFStringGetCharactersPtr),
         "CFStringAppendCharacters" => at!(api::CFStringAppendCharacters),
         "CFStringAppend" => at!(api::CFStringAppend),
+        "CFStringInsert" => at!(api::CFStringInsert),
         "CFStringAppendCString" => at!(api::CFStringAppendCString),
 
         "CFArrayGetTypeID" => at!(api::CFArrayGetTypeID),
@@ -102,6 +113,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFDictionaryGetTypeID" => at!(api::CFDictionaryGetTypeID),
         "CFDictionaryCreate" => at!(api::CFDictionaryCreate),
         "CFDictionaryGetCount" => at!(api::CFDictionaryGetCount),
+        "CFDictionaryApplyFunction" => at!(api::CFDictionaryApplyFunction),
         "CFDictionaryGetValue" => at!(api::CFDictionaryGetValue),
         "CFDictionaryContainsKey" => at!(api::CFDictionaryContainsKey),
         "CFDictionaryGetKeysAndValues" => at!(api::CFDictionaryGetKeysAndValues),
@@ -109,6 +121,8 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFDictionarySetValue" => at!(api::CFDictionarySetValue),
 
         "CFNumberGetTypeID" => at!(api::CFNumberGetTypeID),
+        "CFBooleanGetTypeID" => at!(api::CFBooleanGetTypeID),
+        "CFBooleanGetValue" => at!(api::CFBooleanGetValue),
         "CFNumberCreate" => at!(api::CFNumberCreate),
         "CFNumberGetValue" => at!(api::CFNumberGetValue),
         "CFNumberIsFloatType" => at!(api::CFNumberIsFloatType),
@@ -126,7 +140,18 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFUUIDGetConstantUUIDWithBytes" => at!(api::CFUUIDGetConstantUUIDWithBytes),
 
         "CFURLGetTypeID" => at!(api::CFURLGetTypeID),
+        "CFURLCreateFromFSRef" => at!(api::CFURLCreateFromFSRef),
         "CFURLCreateWithFileSystemPath" => at!(api::CFURLCreateWithFileSystemPath),
+        "CFURLCreateWithString" => at!(api::CFURLCreateWithString),
+        "CFURLGetString" => at!(api::CFURLGetString),
+        "CFURLCopyAbsoluteURL" => at!(api::CFURLCopyAbsoluteURL),
+        "CFURLCreateCopyAppendingPathComponent" => {
+            at!(api::CFURLCreateCopyAppendingPathComponent)
+        }
+        "CFURLCreateStringByAddingPercentEscapes" => {
+            at!(api::CFURLCreateStringByAddingPercentEscapes)
+        }
+        "CFURLCopyFileSystemPath" => at!(api::CFURLCopyFileSystemPath),
         "CFURLGetFileSystemRepresentation" => at!(api::CFURLGetFileSystemRepresentation),
 
         "CFRunLoopGetCurrent" => at!(api::CFRunLoopGetCurrent),
@@ -167,6 +192,9 @@ pub const NAMES: &[&str] = &[
     "CFGetTypeID",
     "CFEqual",
     "CFHash",
+    "CFAllocatorGetTypeID",
+    "CFAllocatorGetDefault",
+    "CFAllocatorCreate",
     "CFStringGetTypeID",
     "CFStringCreateWithCString",
     "CFStringCreateWithCStringNoCopy",
@@ -174,11 +202,15 @@ pub const NAMES: &[&str] = &[
     "CFStringCreateWithCharacters",
     "CFStringCreateCopy",
     "CFStringGetLength",
+    "CFStringGetIntValue",
+    "CFStringGetDoubleValue",
     "CFStringGetMaximumSizeForEncoding",
     "CFStringGetCString",
     "CFStringGetCStringPtr",
     "CFStringGetBytes",
+    "CFStringCreateExternalRepresentation",
     "CFStringCompare",
+    "CFStringCompareWithOptions",
     "CFStringCreateMutable",
     "CFStringCreateMutableCopy",
     "CFStringUppercase",
@@ -188,6 +220,7 @@ pub const NAMES: &[&str] = &[
     "CFStringGetCharactersPtr",
     "CFStringAppendCharacters",
     "CFStringAppend",
+    "CFStringInsert",
     "CFStringAppendCString",
     "CFArrayGetTypeID",
     "CFArrayCreate",
@@ -203,12 +236,15 @@ pub const NAMES: &[&str] = &[
     "CFDictionaryGetTypeID",
     "CFDictionaryCreate",
     "CFDictionaryGetCount",
+    "CFDictionaryApplyFunction",
     "CFDictionaryGetValue",
     "CFDictionaryContainsKey",
     "CFDictionaryGetKeysAndValues",
     "CFDictionaryCreateMutable",
     "CFDictionarySetValue",
     "CFNumberGetTypeID",
+    "CFBooleanGetTypeID",
+    "CFBooleanGetValue",
     "CFNumberCreate",
     "CFNumberGetValue",
     "CFNumberIsFloatType",
@@ -223,7 +259,14 @@ pub const NAMES: &[&str] = &[
     "CFUUIDCreateString",
     "CFUUIDGetConstantUUIDWithBytes",
     "CFURLGetTypeID",
+    "CFURLCreateFromFSRef",
     "CFURLCreateWithFileSystemPath",
+    "CFURLCreateWithString",
+    "CFURLGetString",
+    "CFURLCopyAbsoluteURL",
+    "CFURLCreateCopyAppendingPathComponent",
+    "CFURLCreateStringByAddingPercentEscapes",
+    "CFURLCopyFileSystemPath",
     "CFURLGetFileSystemRepresentation",
     "CFRunLoopGetCurrent",
     "CFRunLoopGetMain",
@@ -433,6 +476,19 @@ mod tests {
             .filter(|n| symbol(n).is_none())
             .collect();
         assert!(missing.is_empty(), "listed but unresolved: {missing:?}");
+    }
+
+    #[test]
+    fn custom_allocator_has_identity_but_default_is_null() {
+        bootstrap();
+        // SAFETY: this implementation does not inspect the callback context.
+        unsafe {
+            assert!(api::CFAllocatorGetDefault().is_null());
+            let allocator = api::CFAllocatorCreate(std::ptr::null(), std::ptr::null());
+            assert!(!allocator.is_null());
+            assert_eq!(api::CFGetTypeID(allocator), api::CFAllocatorGetTypeID());
+            api::CFRelease(allocator);
+        }
     }
 
     /// The fixture in `rosetta3/tests/cfstring.rs`, run against this crate

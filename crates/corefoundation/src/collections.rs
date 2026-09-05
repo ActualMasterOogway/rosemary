@@ -370,10 +370,12 @@ pub fn new_number(value: Number) -> CFTypeRef {
 pub fn boolean_class() -> &'static Class {
     static CLASS: OnceLock<usize> = OnceLock::new();
     let p = *CLASS.get_or_init(|| {
-        objc::class::ptr(register::<Number>(
+        let class = register::<Number>(
             c"__NSCFBoolean",
             crate::base::abstract_class(c"NSNumber", None),
-        )) as usize
+        );
+        crate::base::note_type_class(class);
+        objc::class::ptr(class) as usize
     });
     // SAFETY: a leaked `Class` this crate registered.
     unsafe { &*(p as *const Class) }

@@ -1178,6 +1178,8 @@ pub fn shim_for(name: &str) -> Option<crate::jmpbuf::Shim> {
             | "_dyld_get_image_name"
             | "_dyld_image_containing_address"
             | "_dyld_find_unwind_sections"
+            | "getsegbyname"
+            | "getsectbyname"
     )
     .then_some(
         |symbol, ctx, mem| match symbol.strip_prefix('_').unwrap_or(symbol) {
@@ -1203,6 +1205,21 @@ fn serve(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> 
             Ok(())
         }
         "dladdr" => dladdr(symbol, ctx, mem),
+        "getsegbyname" => {
+            let name = mem.read_cstr(ctx.rdi, symbol)?;
+            ctx.rax = load_command_in(MAIN_HEADER.load(Ordering::Acquire), &name, None);
+            Ok(())
+        }
+        "getsectbyname" => {
+            let segment = mem.read_cstr(ctx.rdi, symbol)?;
+            let section = mem.read_cstr(ctx.rsi, symbol)?;
+            ctx.rax = load_command_in(
+                MAIN_HEADER.load(Ordering::Acquire),
+                &segment,
+                Some(&section),
+            );
+            Ok(())
+        }
         // Spelled with one fewer underscore than [`shim_for`] matches on.
         "dyld_find_unwind_sections" => find_unwind_sections(symbol, ctx, mem),
         "dlerror" => {
@@ -1516,6 +1533,63 @@ fn section_in(header: u64, section: &str) -> Option<(u64, u64)> {
         }
     }
     None
+}
+
+/// A `segment_command_64`, or one of its `section_64` records, in the main
+/// guest image. The pointer is returned exactly as libmacho's process-global
+/// `getsegbyname` and `getsectbyname` return it.
+fn load_command_in(header: u64, segment: &[u8], section: Option<&[u8]>) -> u64 {
+    const MAGIC: u32 = 0xfeed_facf;
+    const SEGMENT_64: u32 = 0x19;
+    const HEADER: usize = 32;
+    const SEGMENT: usize = 72;
+    const SECTION: usize = 80;
+
+    let base = header as *const u8;
+    if base.is_null() {
+        return 0;
+    }
+    // SAFETY: `header` names the mapped main image and every load-command read
+    // is bounded by `ncmds`, `cmdsize`, and the segment's section count.
+    unsafe {
+        if base.cast::<u32>().read_unaligned() != MAGIC {
+            return 0;
+        }
+        let ncmds = base.add(16).cast::<u32>().read_unaligned();
+        let mut cmd = base.add(HEADER);
+        for _ in 0..ncmds {
+            let kind = cmd.cast::<u32>().read_unaligned();
+            let cmdsize = cmd.add(4).cast::<u32>().read_unaligned() as usize;
+            if cmdsize < 8 {
+                return 0;
+            }
+            if kind == SEGMENT_64 && cmdsize >= SEGMENT {
+                let name = core::slice::from_raw_parts(cmd.add(8), 16);
+                let name = name.split(|byte| *byte == 0).next().unwrap_or_default();
+                if name == segment {
+                    let Some(section) = section else {
+                        return cmd as usize as u64;
+                    };
+                    let nsects = cmd.add(64).cast::<u32>().read_unaligned() as usize;
+                    for index in 0..nsects {
+                        let offset = SEGMENT + index * SECTION;
+                        if offset + SECTION > cmdsize {
+                            break;
+                        }
+                        let record = cmd.add(offset);
+                        let name = core::slice::from_raw_parts(record, 16);
+                        let name = name.split(|byte| *byte == 0).next().unwrap_or_default();
+                        if name == section {
+                            return record as usize as u64;
+                        }
+                    }
+                    return 0;
+                }
+            }
+            cmd = cmd.add(cmdsize);
+        }
+    }
+    0
 }
 
 /// What [`dladdr`] found: the four `Dl_info` fields, as host addresses.

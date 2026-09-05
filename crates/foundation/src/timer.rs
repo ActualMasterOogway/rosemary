@@ -49,6 +49,7 @@ pub struct Timer {
     selector: Sel,
     interval: f64,
     repeats: usize,
+    passes_timer: usize,
 }
 
 pub const DATE_INSTANCE_SIZE: usize = size_of::<Date>();
@@ -63,12 +64,17 @@ fn now() -> f64 {
 
 /// A date object for `interval` seconds since the reference date, autoreleased.
 pub fn date(interval: f64) -> Id {
+    objc::arc::autorelease(make_date(interval))
+}
+
+/// A date object for `interval` seconds since the reference date, retained.
+fn make_date(interval: f64) -> Id {
     let class = objc::class::lookup(c"NSDate").expect("registered by this module");
     // SAFETY: `Date` is the layout the class was registered with.
     let object = unsafe { corefoundation::base::allocate::<Date>(class) };
     // SAFETY: freshly allocated.
     unsafe { (*object).interval = interval };
-    objc::arc::autorelease(object as Id)
+    object as Id
 }
 
 /// A date object for a Unix timestamp, autoreleased.
@@ -200,9 +206,15 @@ static SCHEDULED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new(
 /// One turn of a timer: send the selector to the target.
 unsafe extern "C" fn fire(_timer: *const c_void, info: *mut c_void) {
     let object = info as Id;
-    let (target, selector, repeats) = {
+    let (target, selector, repeats, user_info, passes_timer) = {
         let timer = timer_of(object);
-        (timer.target, timer.selector, timer.repeats)
+        (
+            timer.target,
+            timer.selector,
+            timer.repeats,
+            timer.user_info,
+            timer.passes_timer,
+        )
     };
     if target.is_null() || selector.is_null() {
         return;
@@ -218,10 +230,15 @@ unsafe extern "C" fn fire(_timer: *const c_void, info: *mut c_void) {
             "-[NSTimer fire]: the target does not respond to the selector it was scheduled with"
         );
     };
-    // SAFETY: a timer action is `void (id, SEL, NSTimer *)`.
+    // SAFETY: a timer action takes the timer, while delayed performing takes
+    // the object supplied by its caller. Both are `void (id, SEL, id)`.
     unsafe {
         let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(method.implementation());
-        f(target, selector, object);
+        f(
+            target,
+            selector,
+            if passes_timer != 0 { object } else { user_info },
+        );
     }
     if repeats == 0 {
         // SAFETY: `-invalidate` is `void (id, SEL)`.
@@ -237,6 +254,7 @@ fn make(
     user_info: Id,
     repeats: bool,
     schedule: bool,
+    passes_timer: bool,
 ) -> Id {
     let class = objc::class::lookup(c"NSTimer").expect("registered by this module");
     // SAFETY: `Timer` is the layout the class was registered with.
@@ -252,6 +270,7 @@ fn make(
         (*object).selector = selector;
         (*object).interval = interval;
         (*object).repeats = repeats as usize;
+        (*object).passes_timer = passes_timer as usize;
         (*object).timer = std::ptr::null();
     }
     let object = object as Id;
@@ -292,7 +311,15 @@ unsafe extern "C" fn scheduled_timer(
     user_info: Id,
     repeats: u8,
 ) -> Id {
-    make(interval, target, selector, user_info, repeats != 0, true)
+    make(
+        interval,
+        target,
+        selector,
+        user_info,
+        repeats != 0,
+        true,
+        true,
+    )
 }
 
 unsafe extern "C" fn unscheduled_timer(
@@ -304,7 +331,25 @@ unsafe extern "C" fn unscheduled_timer(
     user_info: Id,
     repeats: u8,
 ) -> Id {
-    make(interval, target, selector, user_info, repeats != 0, false)
+    make(
+        interval,
+        target,
+        selector,
+        user_info,
+        repeats != 0,
+        false,
+        true,
+    )
+}
+
+unsafe extern "C" fn perform_after_delay(
+    receiver: Id,
+    _sel: Sel,
+    selector: Sel,
+    object: Id,
+    delay: f64,
+) {
+    let _ = make(delay, receiver, selector, object, false, true, false);
 }
 
 unsafe extern "C" fn invalidate(receiver: Id, _sel: Sel) {
@@ -395,7 +440,14 @@ unsafe extern "C" fn run_until_date(receiver: Id, sel: Sel, limit: Id) {
 }
 
 pub(crate) fn install() {
+    let nsobject = objc::class::lookup(c"NSObject").expect("the runtime's own NSObject");
+    methods!(nsobject, {
+        "performSelector:withObject:afterDelay:" => perform_after_delay,
+            c"v40@0:8:16@24d32";
+    });
+
     let date_class = corefoundation::base::register(c"NSDate", None, DATE_INSTANCE_SIZE, false);
+    corefoundation::base::note_type_class(date_class);
     class_methods!(date_class, {
         "date" => date_now, c"@16@0:8";
         "distantFuture" => distant_future, c"@16@0:8";
@@ -444,6 +496,44 @@ pub(crate) fn install() {
         "runMode:beforeDate:" => run_mode_before_date, c"B32@0:8@16@24";
         "runUntilDate:" => run_until_date, c"v24@0:8@16";
     });
+}
+
+/// Core Foundation's toll-free bridge to `NSDate`.
+pub mod cf {
+    #![allow(non_snake_case)]
+
+    use corefoundation::base::{CFTypeID, CFTypeRef};
+    use objc::object::Id;
+
+    unsafe extern "C" fn CFDateGetTypeID() -> CFTypeID {
+        let class = objc::class::lookup(c"NSDate").expect("registered by timer::install");
+        corefoundation::base::type_id(class)
+    }
+
+    unsafe extern "C" fn CFDateCreate(_allocator: CFTypeRef, interval: f64) -> Id {
+        super::make_date(interval)
+    }
+
+    unsafe extern "C" fn CFDateGetAbsoluteTime(date: Id) -> f64 {
+        super::date_of(date)
+    }
+
+    macro_rules! at {
+        ($f:expr) => {
+            $f as *const () as usize as u64
+        };
+    }
+
+    pub fn symbol(name: &str) -> Option<u64> {
+        Some(match name {
+            "CFDateGetTypeID" => at!(CFDateGetTypeID),
+            "CFDateCreate" => at!(CFDateCreate),
+            "CFDateGetAbsoluteTime" => at!(CFDateGetAbsoluteTime),
+            _ => return None,
+        })
+    }
+
+    pub const NAMES: &[&str] = &["CFDateGetTypeID", "CFDateCreate", "CFDateGetAbsoluteTime"];
 }
 
 #[cfg(test)]

@@ -19,6 +19,34 @@ pub type Boolean = u8;
 /// is the only one here.
 pub type CFAllocatorRef = *const c_void;
 
+/// The default allocator is represented by null, as it is by the allocator
+/// globals this crate publishes. A custom allocator still needs an object of
+/// its own: callers retain and release it, even though this CoreFoundation does
+/// not route its allocations through the callback table.
+fn allocator_class() -> &'static objc::class::Class {
+    crate::base::register(c"__NSCFAllocator", None, std::mem::size_of::<usize>(), true)
+}
+
+pub unsafe extern "C" fn CFAllocatorGetTypeID() -> CFTypeID {
+    crate::base::type_id(allocator_class())
+}
+
+pub unsafe extern "C" fn CFAllocatorGetDefault() -> CFAllocatorRef {
+    std::ptr::null()
+}
+
+pub unsafe extern "C" fn CFAllocatorCreate(
+    _allocator: CFAllocatorRef,
+    _context: *const c_void,
+) -> CFAllocatorRef {
+    // The context's callbacks are deliberately not copied: every constructor
+    // in this implementation owns its storage and therefore treats an
+    // allocator argument as advisory. The returned object preserves the part
+    // of the contract guests can observe here: distinct identity and CF/ObjC
+    // retain/release behavior.
+    objc::object::create_instance(allocator_class(), 0) as CFAllocatorRef
+}
+
 /// Hand a foreign object back to the CoreFoundation that made it.
 ///
 /// Returns whether it did. See [`crate::foreign`]: the alternative is reading
@@ -235,6 +263,36 @@ pub unsafe extern "C" fn CFStringGetLength(s: CFTypeRef) -> CFIndex {
     unsafe { string::as_string(s) }.map_or(0, |s| s.length())
 }
 
+pub unsafe extern "C" fn CFStringGetIntValue(value: CFTypeRef) -> i32 {
+    // SAFETY: the caller's obligation - a string or null.
+    let Some(value) = (unsafe { string::as_string(value) }) else {
+        return 0;
+    };
+    let bytes = value.utf8();
+    let text = String::from_utf8_lossy(&bytes);
+    let text = text.trim_start();
+    let end = text
+        .char_indices()
+        .position(|(index, ch)| !(ch.is_ascii_digit() || (index == 0 && matches!(ch, '+' | '-'))))
+        .unwrap_or(text.len());
+    text[..end].parse::<i64>().map_or(0, |number| number as i32)
+}
+
+pub unsafe extern "C" fn CFStringGetDoubleValue(value: CFTypeRef) -> f64 {
+    // SAFETY: the caller's obligation - a string or null.
+    let Some(value) = (unsafe { string::as_string(value) }) else {
+        return 0.0;
+    };
+    let bytes = value.utf8();
+    let text = String::from_utf8_lossy(&bytes);
+    let text = text.trim_start();
+    let end = text
+        .char_indices()
+        .position(|(_, ch)| !(ch.is_ascii_digit() || matches!(ch, '+' | '-' | '.' | 'e' | 'E')))
+        .unwrap_or(text.len());
+    text[..end].parse().unwrap_or(0.0)
+}
+
 /// `CFStringGetMaximumSizeForEncoding`.
 ///
 /// A bound, not an answer: the caller adds one for the NUL and allocates that
@@ -408,6 +466,56 @@ pub unsafe extern "C" fn CFStringGetBytes(
     (moved.saturating_sub(prefix) / per_character) as CFIndex
 }
 
+pub unsafe extern "C" fn CFStringCreateExternalRepresentation(
+    _allocator: CFAllocatorRef,
+    string: CFTypeRef,
+    encoding: u32,
+    loss_byte: u8,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation - a string or null.
+    let Some(value) = (unsafe { crate::string::as_string(string) }) else {
+        return std::ptr::null();
+    };
+    let length = value.length();
+    let mut used = 0;
+    // SAFETY: a sizing call writes only the local `used` value.
+    let converted = unsafe {
+        CFStringGetBytes(
+            string,
+            0,
+            length,
+            encoding,
+            loss_byte,
+            1,
+            std::ptr::null_mut(),
+            0,
+            &mut used,
+        )
+    };
+    if converted != length || used < 0 {
+        return std::ptr::null();
+    }
+    let mut bytes = vec![0; used as usize];
+    // SAFETY: the buffer has the exact size the sizing call returned.
+    let converted = unsafe {
+        CFStringGetBytes(
+            string,
+            0,
+            length,
+            encoding,
+            loss_byte,
+            1,
+            bytes.as_mut_ptr(),
+            used,
+            &mut used,
+        )
+    };
+    if converted != length {
+        return std::ptr::null();
+    }
+    collections::new_data(bytes)
+}
+
 pub unsafe extern "C" fn CFStringCreateMutable(
     _allocator: CFAllocatorRef,
     _max_length: CFIndex,
@@ -479,6 +587,49 @@ pub unsafe extern "C" fn CFStringAppend(target: CFTypeRef, appended: CFTypeRef) 
     }
     // SAFETY: as above.
     unsafe { append(target, &b.utf8()) };
+}
+
+/// Insert a string at a character boundary in a mutable string.
+pub unsafe extern "C" fn CFStringInsert(target: CFTypeRef, index: CFIndex, inserted: CFTypeRef) {
+    let Ok(index) = usize::try_from(index) else {
+        return;
+    };
+    // Read the inserted value first because it is allowed to alias `target`.
+    // SAFETY: the caller's obligation.
+    let Some(inserted) = (unsafe { string::as_string(inserted) }) else {
+        return;
+    };
+    let inserted_wide = inserted.is_wide();
+    let inserted_units = inserted_wide.then(|| inserted.utf16());
+    let inserted_bytes = (!inserted_wide).then(|| inserted.utf8());
+    let Some(target_value) = (unsafe { string::as_string(target) }) else {
+        return;
+    };
+    if target_value.is_wide() {
+        let mut units = target_value.utf16();
+        if index > units.len() {
+            return;
+        }
+        let addition = inserted_units.unwrap_or_else(|| {
+            String::from_utf8_lossy(inserted_bytes.as_deref().unwrap_or_default())
+                .encode_utf16()
+                .collect()
+        });
+        units.splice(index..index, addition);
+        // SAFETY: the caller's target is a mutable string.
+        unsafe { string::set_utf16(target, &units) };
+        return;
+    }
+    let mut bytes = target_value.utf8();
+    if index > bytes.len() {
+        return;
+    }
+    let addition = inserted_bytes.unwrap_or_else(|| {
+        String::from_utf16_lossy(inserted_units.as_deref().unwrap_or_default()).into_bytes()
+    });
+    bytes.splice(index..index, addition);
+    // SAFETY: the caller's target is a mutable string.
+    unsafe { string::set_bytes(target, &bytes) };
 }
 
 pub unsafe extern "C" fn CFStringAppendCString(
@@ -637,6 +788,45 @@ pub unsafe extern "C" fn CFStringCompare(a: CFTypeRef, b: CFTypeRef, options: u6
     };
     let (mut x, mut y) = (a.utf8(), b.utf8());
     // `kCFCompareCaseInsensitive`.
+    if options & 1 != 0 {
+        x.make_ascii_lowercase();
+        y.make_ascii_lowercase();
+    }
+    match x.cmp(&y) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+/// `CFRange` is flattened to its two `CFIndex` fields by both 64-bit ABIs.
+pub unsafe extern "C" fn CFStringCompareWithOptions(
+    a: CFTypeRef,
+    b: CFTypeRef,
+    location: CFIndex,
+    length: CFIndex,
+    options: u64,
+) -> CFIndex {
+    // SAFETY: the caller's obligation.
+    let (Some(a), Some(b)) = (unsafe { string::as_string(a) }, unsafe {
+        string::as_string(b)
+    }) else {
+        return 0;
+    };
+    let (Ok(start), Some(end)) = (
+        usize::try_from(location),
+        location
+            .checked_add(length)
+            .and_then(|end| usize::try_from(end).ok()),
+    ) else {
+        return 0;
+    };
+    let units = a.utf16();
+    let Some(range) = units.get(start..end) else {
+        return 0;
+    };
+    let mut x = String::from_utf16_lossy(range).into_bytes();
+    let mut y = b.utf8();
     if options & 1 != 0 {
         x.make_ascii_lowercase();
         y.make_ascii_lowercase();
@@ -878,6 +1068,29 @@ pub unsafe extern "C" fn CFDictionaryGetCount(dictionary: CFTypeRef) -> CFIndex 
     unsafe { collections::dictionary(dictionary) }.map_or(0, |d| d.entries.len() as CFIndex)
 }
 
+pub type DictionaryApplierFunction = unsafe extern "C" fn(CFTypeRef, CFTypeRef, *mut c_void);
+
+pub unsafe extern "C" fn CFDictionaryApplyFunction(
+    dictionary: CFTypeRef,
+    callback: Option<DictionaryApplierFunction>,
+    context: *mut c_void,
+) {
+    let Some(callback) = callback else {
+        return;
+    };
+    // Snapshot before invoking guest code, which may mutate the dictionary.
+    // SAFETY: the caller's obligation - a dictionary or null.
+    let Some(entries) = (unsafe { collections::dictionary(dictionary) })
+        .map(|dictionary| dictionary.entries.clone())
+    else {
+        return;
+    };
+    for (key, value) in entries {
+        // SAFETY: the callback is supplied by the caller with this signature.
+        unsafe { callback(key, value, context) };
+    }
+}
+
 pub unsafe extern "C" fn CFDictionaryGetValue(dictionary: CFTypeRef, key: CFTypeRef) -> CFTypeRef {
     // SAFETY: the caller's obligation.
     let Some(d) = (unsafe { collections::dictionary(dictionary) }) else {
@@ -920,6 +1133,14 @@ pub unsafe extern "C" fn CFDictionaryGetKeysAndValues(
 
 pub unsafe extern "C" fn CFNumberGetTypeID() -> CFTypeID {
     crate::base::type_id_of(collections::number_class())
+}
+
+pub unsafe extern "C" fn CFBooleanGetTypeID() -> CFTypeID {
+    crate::base::type_id_of(collections::boolean_class())
+}
+
+pub unsafe extern "C" fn CFBooleanGetValue(value: CFTypeRef) -> Boolean {
+    (value == collections::boolean(true)) as Boolean
 }
 
 pub unsafe extern "C" fn CFNumberCreate(
@@ -1083,6 +1304,42 @@ pub unsafe extern "C" fn CFURLGetTypeID() -> CFTypeID {
     crate::base::type_id_of(crate::url::class())
 }
 
+/// Turn Carbon's opaque `FSRef` into a URL owned by this CoreFoundation.
+/// Only the host knows the reference's layout, so it is asked only to decode
+/// the path; the URL object itself remains in this runtime's object model.
+pub unsafe extern "C" fn CFURLCreateFromFSRef(
+    _allocator: CFAllocatorRef,
+    fs_ref: *const c_void,
+) -> CFTypeRef {
+    if fs_ref.is_null() {
+        return std::ptr::null();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let Some(entry) = crate::foreign::entry(c"FSRefMakePath") else {
+            return std::ptr::null();
+        };
+        // SAFETY: the Carbon entry point has the documented
+        // `OSStatus(const FSRef *, UInt8 *, UInt32)` signature.
+        let make_path: unsafe extern "C" fn(*const c_void, *mut u8, u32) -> i32 =
+            unsafe { std::mem::transmute(entry) };
+        let mut bytes = [0_u8; libc::PATH_MAX as usize];
+        // SAFETY: `fs_ref` is the caller's live reference and `bytes` is a
+        // writable buffer whose exact capacity accompanies it.
+        if unsafe { make_path(fs_ref, bytes.as_mut_ptr(), bytes.len() as u32) } != 0 {
+            return std::ptr::null();
+        }
+        let Some(end) = bytes.iter().position(|byte| *byte == 0) else {
+            return std::ptr::null();
+        };
+        let path = String::from_utf8_lossy(&bytes[..end]);
+        let directory = std::fs::metadata(path.as_ref()).is_ok_and(|metadata| metadata.is_dir());
+        return crate::url::new_file_url(&path, directory);
+    }
+    #[cfg(not(target_os = "macos"))]
+    std::ptr::null()
+}
+
 /// `kCFURLPOSIXPathStyle`, the only one a path in this tree is written in.
 const POSIX_PATH_STYLE: CFIndex = 0;
 
@@ -1107,6 +1364,132 @@ pub unsafe extern "C" fn CFURLCreateWithFileSystemPath(
         return std::ptr::null();
     };
     crate::url::new_file_url(path, directory != 0)
+}
+
+pub unsafe extern "C" fn CFURLCreateWithString(
+    _allocator: CFAllocatorRef,
+    text: CFTypeRef,
+    base: CFTypeRef,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation - a string and an optional URL.
+    let Some(text) = (unsafe { string::as_string(text) }) else {
+        return std::ptr::null();
+    };
+    let text_bytes = text.utf8();
+    let Ok(text) = std::str::from_utf8(&text_bytes) else {
+        return std::ptr::null();
+    };
+    let Some(base) = (unsafe { crate::url::as_url(base) }) else {
+        return crate::url::new(text);
+    };
+    if text.contains(':') {
+        return crate::url::new(text);
+    }
+    let absolute = if text.starts_with('/') {
+        match base.text.find("://") {
+            Some(scheme_end) => {
+                let authority_end = base.text[scheme_end + 3..]
+                    .find('/')
+                    .map_or(base.text.len(), |slash| scheme_end + 3 + slash);
+                format!("{}{text}", &base.text[..authority_end])
+            }
+            None => text.to_string(),
+        }
+    } else {
+        let directory_end = base
+            .text
+            .rfind('/')
+            .map_or(base.text.len(), |slash| slash + 1);
+        format!("{}{text}", &base.text[..directory_end])
+    };
+    crate::url::new(&absolute)
+}
+
+pub unsafe extern "C" fn CFURLGetString(url: CFTypeRef) -> CFTypeRef {
+    // SAFETY: the caller's obligation - a URL or null.
+    unsafe { crate::url::as_url(url) }.map_or(std::ptr::null(), crate::url::Contents::string)
+}
+
+pub unsafe extern "C" fn CFURLCopyAbsoluteURL(url: CFTypeRef) -> CFTypeRef {
+    // URLs are stored absolute after construction, so a copy preserves text.
+    // SAFETY: the caller's obligation - a URL or null.
+    unsafe { crate::url::as_url(url) }.map_or(std::ptr::null(), |url| crate::url::new(&url.text))
+}
+
+pub unsafe extern "C" fn CFURLCreateCopyAppendingPathComponent(
+    _allocator: CFAllocatorRef,
+    url: CFTypeRef,
+    component: CFTypeRef,
+    directory: Boolean,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation - a URL and a string from this runtime.
+    let (Some(base), Some(component)) = (unsafe { crate::url::as_url(url) }, unsafe {
+        string::as_string(component)
+    }) else {
+        return std::ptr::null();
+    };
+    let Some(mut path) = base.file_path() else {
+        return std::ptr::null();
+    };
+    let component = component.utf8();
+    let Ok(component) = std::str::from_utf8(&component) else {
+        return std::ptr::null();
+    };
+    if !path.ends_with('/') {
+        path.push('/');
+    }
+    path.push_str(component.trim_matches('/'));
+    crate::url::new_file_url(&path, directory != 0)
+}
+
+/// Add URL percent escapes while preserving the caller-selected exceptions.
+pub unsafe extern "C" fn CFURLCreateStringByAddingPercentEscapes(
+    _allocator: CFAllocatorRef,
+    original: CFTypeRef,
+    leave_unescaped: CFTypeRef,
+    force_escaped: CFTypeRef,
+    encoding: u32,
+) -> CFTypeRef {
+    if encoding != string::encoding::UTF8 {
+        objc::fail!("CFURLCreateStringByAddingPercentEscapes: unsupported encoding {encoding:#x}");
+    }
+    // SAFETY: the caller's obligation - strings or null for the two sets.
+    let Some(original) = (unsafe { string::as_string(original) }) else {
+        return std::ptr::null();
+    };
+    let leave = unsafe { string::as_string(leave_unescaped) }
+        .map(|value| String::from_utf8_lossy(&value.utf8()).into_owned())
+        .unwrap_or_default();
+    let force = unsafe { string::as_string(force_escaped) }
+        .map(|value| String::from_utf8_lossy(&value.utf8()).into_owned())
+        .unwrap_or_default();
+    let original_utf8 = original.utf8();
+    let source = String::from_utf8_lossy(&original_utf8);
+    let mut escaped = String::with_capacity(source.len());
+    for character in source.chars() {
+        let ordinarily_legal =
+            character.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(character);
+        if (ordinarily_legal || leave.contains(character)) && !force.contains(character) {
+            escaped.push(character);
+        } else {
+            let mut utf8 = [0_u8; 4];
+            for byte in character.encode_utf8(&mut utf8).bytes() {
+                escaped.push_str(&format!("%{byte:02X}"));
+            }
+        }
+    }
+    string::from_bytes(escaped.as_bytes(), false)
+}
+
+pub unsafe extern "C" fn CFURLCopyFileSystemPath(url: CFTypeRef, style: CFIndex) -> CFTypeRef {
+    if style != POSIX_PATH_STYLE {
+        objc::fail!("CFURLCopyFileSystemPath: path style {style} is not POSIX");
+    }
+    // SAFETY: the caller's obligation - a URL or null.
+    let Some(path) = (unsafe { crate::url::as_url(url) }).and_then(|url| url.file_path()) else {
+        return std::ptr::null();
+    };
+    string::from_bytes(path.as_bytes(), false)
 }
 
 /// `CFURLGetFileSystemRepresentation`, which fills `buffer` with a

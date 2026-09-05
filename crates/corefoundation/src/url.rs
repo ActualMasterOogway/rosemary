@@ -28,6 +28,8 @@ struct Body {
 pub struct Contents {
     /// The absolute URL, `https://host/path` or `file:///Applications/Foo.app/`.
     pub text: String,
+    /// The same text as a stable, borrowed `CFStringRef` for `CFURLGetString`.
+    string: CFTypeRef,
 }
 
 impl Contents {
@@ -174,7 +176,9 @@ unsafe extern "C" fn dealloc(receiver: Id, _sel: objc::sel::Sel) {
     unsafe {
         let body = receiver as *mut Body;
         if !(*body).contents.is_null() {
-            drop(Box::from_raw((*body).contents));
+            let contents = Box::from_raw((*body).contents);
+            objc::arc::release(contents.string as Id);
+            drop(contents);
             (*body).contents = std::ptr::null_mut();
         }
         objc::arc::finalize(receiver);
@@ -191,10 +195,18 @@ pub fn new(text: &str) -> CFTypeRef {
     }
     let contents = Contents {
         text: text.to_string(),
+        string: crate::string::from_bytes(text.as_bytes(), false),
     };
     // SAFETY: a live instance whose second word is ours to fill in.
     unsafe { (*body).contents = Box::into_raw(Box::new(contents)) };
     body as CFTypeRef
+}
+
+impl Contents {
+    /// The stable string object owned by this URL.
+    pub fn string(&self) -> CFTypeRef {
+        self.string
+    }
 }
 
 /// A file URL naming `path`, owned by the caller.
