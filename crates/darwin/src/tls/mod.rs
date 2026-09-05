@@ -1,39 +1,10 @@
-//! The Darwin thread-specific data array, and the boundary around code that reads it.
-//!
-//! A Darwin thread keeps a flat array of `void *` at its thread pointer. Code reaches
-//! it without calling anything: `pthread_self` is one load of slot 0, `errno` is a
-//! load of slot 1, and a function compiled with `-fstack-protector` reads its canary
-//! straight out of slot 6. On x86-64 the array is at `%gs`; on arm64 it is
-//! `TPIDRRO_EL0` with the low three bits - which carry the CPU number, not address -
-//! masked off.
-//!
-//! Three situations, and it is worth being exact about which is which, because two of
-//! them need nothing at all:
-//!
-//! 1. An emulated guest. Lifted code does not execute `mrs`; it adds a base this
-//!    runtime supplies to an address. So the base is a value, [`tsd_base`], and the
-//!    host's own thread pointer is never disturbed. Host libc called from lifted code
-//!    - every shim, every fast import - works throughout.
-//! 2. Darwin code on a Darwin host. The host's array is the right one already.
-//! 3. Darwin code on a host that is not Darwin. Here the thread pointer really
-//!    does have to change across the call, which is what [`DarwinThread`] is for.
-//!
-//! Only (3) needs a trampoline, and only (3) is unfinished - see [`DarwinThread`].
+mod helpers;
 
-/// Direct TSD slots, by index. Darwin's `<pthread/tsd_private.h>` names.
-///
-/// `pthread_getspecific(k)` for a small `k` is a single load of slot `k`, so these are
-/// part of the guest's ABI in the same way a struct offset is.
 pub mod slot {
-    /// The array's own base, which is what makes `pthread_self` one load.
     pub const SELF: usize = 0;
-    /// `int *`, this thread's `errno`. `__error()` returns it.
     pub const ERRNO: usize = 1;
-    /// This thread's Mach port. Meaningless off Darwin; left zero.
     pub const MACH_THREAD_SELF: usize = 3;
-    /// The `-fstack-protector` canary, read directly as `%gs:0x30` on x86-64.
     pub const STACK_GUARD: usize = 6;
-    /// The cookie `_pthread_ptr_mangle` xors function pointers with.
     pub const PTR_MUNGE: usize = 7;
 }
 
@@ -363,13 +334,35 @@ impl Drop for HostThread {
 /// Only ever called where [`swaps`] is true, which is the one configuration where
 /// changing it does not take the host's own thread-locals with it.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[inline(always)]
 fn set_thread_pointer(base: u64) {
-    /// `ARCH_SET_GS`, from `<asm/prctl.h>`. Not in the `libc` crate.
-    const ARCH_SET_GS: libc::c_int = 0x1001;
-    // SAFETY: `arch_prctl` with `ARCH_SET_GS` sets this thread's `%gs` base to the
-    // value passed. Linux keeps its own thread pointer in `%fs`, so this disturbs
-    // nothing the host relies on.
-    unsafe { libc::syscall(libc::SYS_arch_prctl, ARCH_SET_GS, base) };
+    use crate::tls::helpers::HAS_FSGSBASE;
+
+    if *HAS_FSGSBASE {
+        // SAFETY:
+        // - CPUID reports FSGSBASE support.
+        // - `wrgsbase` changes only this thread's %gs base.
+        // - Linux keeps its own thread pointer in %fs, so this does not disturb
+        //   the host's TLS.
+        unsafe {
+            std::arch::asm!(
+                "wrgsbase {}",
+                in(reg) base,
+                options(nostack, preserves_flags),
+            );
+        }
+    } else {
+        /// `ARCH_SET_GS`, from `<asm/prctl.h>`. Not in the `libc` crate.
+        const ARCH_SET_GS: libc::c_int = 0x1001;
+
+        // SAFETY: `arch_prctl` with `ARCH_SET_GS` sets this thread's `%gs` base
+        // to the value passed. Linux keeps its own thread pointer in `%fs`, so
+        // this disturbs nothing the host relies on.
+        unsafe {
+            libc::syscall(libc::SYS_arch_prctl, ARCH_SET_GS, base);
+        }
+    }
+
     INSTALLED.with(|at| at.set(base));
 }
 
