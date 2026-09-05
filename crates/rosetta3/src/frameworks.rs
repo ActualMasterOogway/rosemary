@@ -114,6 +114,14 @@ fn register_dlopen_names() {
         ],
         symbol,
     );
+    crate::dyld::register_synthetic(
+        &[
+            "/System/Library/Frameworks/Contacts.framework/Versions/A/Contacts",
+            "/System/Library/Frameworks/Contacts.framework/Contacts",
+            "Contacts",
+        ],
+        symbol,
+    );
     register_opengl_framework();
 }
 
@@ -264,6 +272,11 @@ pub fn provider() -> SyntheticDylib {
         if let Some(addr) = coreaudio::symbol(name) {
             define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
         }
+    }
+    // Contacts has no backing store. Its one class reports that access is
+    // restricted, which lets applications disable contact-dependent features.
+    for (name, addr) in contacts::data_symbols() {
+        define_data(&mut lib, &name, addr);
     }
     for (name, addr) in appkit::data_symbols() {
         define_data(&mut lib, &name, addr);
@@ -472,13 +485,15 @@ pub fn deny_host_frameworks(provider: &mut NativeDylibProvider) {
     if !builtin() {
         return;
     }
-    // `_SC` with them, and for the same reason one step removed:
+    // `_SC` and Contacts with them, and for the same reason one step removed:
     // SystemConfiguration is Apple's own and takes CoreFoundation objects, so
     // `SCDynamicStoreCreate` handed one of this tree's strings is Apple's
     // CoreFoundation reading a structure this runtime laid out. Denied whole
     // rather than per name, so that an entry point `corefoundation::sysconfig`
-    // does not implement is refused by name instead of corrupting memory.
-    for prefix in ["_CF", "_NS", "_kCF", "_kNS", "_SC", "_kSC"] {
+    // does not implement is refused by name instead of corrupting memory. An
+    // unimplemented Contacts call likewise must not hand this tree's
+    // `CNContactStore` to Apple's Contacts framework.
+    for prefix in ["_CF", "_NS", "_kCF", "_kNS", "_SC", "_kSC", "_CN", "_kCN"] {
         provider.deny_prefix(prefix);
     }
 }

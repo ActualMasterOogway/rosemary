@@ -18,6 +18,7 @@ iokit = { path = "crates/iokit" }
 appkit = { path = "crates/appkit" }
 corevideo = { path = "crates/corevideo" }
 coreaudio = { path = "crates/coreaudio" }
+contacts = { path = "crates/contacts" }
 libc = "0.2"
 gimli = "0.34"
 getrandom = "0.3"
