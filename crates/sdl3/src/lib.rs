@@ -26,6 +26,7 @@ pub struct AudioSpec {
 }
 
 pub type Joystick = *mut c_void;
+pub type Gamepad = *mut c_void;
 pub type JoystickId = u32;
 pub type Window = *mut c_void;
 pub type GlContext = *mut c_void;
@@ -101,6 +102,12 @@ struct Api {
     SDL_GetJoystickAxis: Option<unsafe extern "C" fn(Joystick, c_int) -> i16>,
     SDL_GetJoystickButton: Option<unsafe extern "C" fn(Joystick, c_int) -> bool>,
     SDL_GetJoystickHat: Option<unsafe extern "C" fn(Joystick, c_int) -> u8>,
+    SDL_GetGamepads: Option<unsafe extern "C" fn(*mut c_int) -> *mut JoystickId>,
+    SDL_OpenGamepad: Option<unsafe extern "C" fn(JoystickId) -> Gamepad>,
+    SDL_CloseGamepad: Option<unsafe extern "C" fn(Gamepad)>,
+    SDL_GetGamepadName: Option<unsafe extern "C" fn(Gamepad) -> *const c_char>,
+    SDL_GetGamepadAxis: Option<unsafe extern "C" fn(Gamepad, c_int) -> i16>,
+    SDL_GetGamepadButton: Option<unsafe extern "C" fn(Gamepad, c_int) -> bool>,
     SDL_free: Option<unsafe extern "C" fn(*mut c_void)>,
 
     SDL_CreateWindow: Option<unsafe extern "C" fn(*const c_char, c_int, c_int, u64) -> Window>,
@@ -263,6 +270,12 @@ fn api() -> Option<&'static Api> {
             SDL_GetJoystickAxis,
             SDL_GetJoystickButton,
             SDL_GetJoystickHat,
+            SDL_GetGamepads,
+            SDL_OpenGamepad,
+            SDL_CloseGamepad,
+            SDL_GetGamepadName,
+            SDL_GetGamepadAxis,
+            SDL_GetGamepadButton,
             SDL_free,
             SDL_CreateWindow,
             SDL_DestroyWindow,
@@ -601,6 +614,124 @@ pub unsafe fn hat(joystick: Joystick, index: c_int) -> u8 {
         // SAFETY: the caller's obligation.
         Some(f) => unsafe { f(joystick, index) },
         None => 0,
+    }
+}
+
+/// SDL's standard gamepad axes.
+pub mod gamepad_axis {
+    pub const LEFT_X: i32 = 0;
+    pub const LEFT_Y: i32 = 1;
+    pub const RIGHT_X: i32 = 2;
+    pub const RIGHT_Y: i32 = 3;
+    pub const LEFT_TRIGGER: i32 = 4;
+    pub const RIGHT_TRIGGER: i32 = 5;
+}
+
+/// SDL's standard gamepad buttons.
+pub mod gamepad_button {
+    pub const SOUTH: i32 = 0;
+    pub const EAST: i32 = 1;
+    pub const WEST: i32 = 2;
+    pub const NORTH: i32 = 3;
+    pub const BACK: i32 = 4;
+    pub const GUIDE: i32 = 5;
+    pub const START: i32 = 6;
+    pub const LEFT_STICK: i32 = 7;
+    pub const RIGHT_STICK: i32 = 8;
+    pub const LEFT_SHOULDER: i32 = 9;
+    pub const RIGHT_SHOULDER: i32 = 10;
+    pub const DPAD_UP: i32 = 11;
+    pub const DPAD_DOWN: i32 = 12;
+    pub const DPAD_LEFT: i32 = 13;
+    pub const DPAD_RIGHT: i32 = 14;
+}
+
+/// The gamepad instance ids attached right now.
+pub fn gamepads() -> Vec<JoystickId> {
+    let Some(api) = api() else {
+        return Vec::new();
+    };
+    let (Some(get), Some(free)) = (api.SDL_GetGamepads, api.SDL_free) else {
+        return Vec::new();
+    };
+    let mut count = 0;
+    // SAFETY: SDL writes `count` and returns an SDL-allocated array of ids.
+    unsafe {
+        let ids = get(&mut count);
+        if ids.is_null() || count <= 0 {
+            if !ids.is_null() {
+                free(ids.cast());
+            }
+            return Vec::new();
+        }
+        let out = std::slice::from_raw_parts(ids, count as usize).to_vec();
+        free(ids.cast());
+        out
+    }
+}
+
+/// Open an SDL standard-mapped gamepad.
+pub fn open_gamepad(id: JoystickId) -> Option<Gamepad> {
+    let open = api()?.SDL_OpenGamepad?;
+    // SAFETY: `id` came from `SDL_GetGamepads`.
+    let gamepad = unsafe { open(id) };
+    (!gamepad.is_null()).then_some(gamepad)
+}
+
+/// # Safety
+///
+/// `gamepad` must be one [`open_gamepad`] returned and not yet closed.
+pub unsafe fn close_gamepad(gamepad: Gamepad) {
+    if let Some(close) = api().and_then(|a| a.SDL_CloseGamepad) {
+        // SAFETY: the caller's obligation.
+        unsafe { close(gamepad) };
+    }
+}
+
+/// A gamepad's display name, or empty.
+///
+/// # Safety
+///
+/// As [`close_gamepad`].
+pub unsafe fn gamepad_name(gamepad: Gamepad) -> String {
+    let Some(get) = api().and_then(|a| a.SDL_GetGamepadName) else {
+        return String::new();
+    };
+    // SAFETY: the caller's obligation; SDL owns the NUL-terminated string.
+    let text = unsafe { get(gamepad) };
+    if text.is_null() {
+        String::new()
+    } else {
+        // SAFETY: as above.
+        unsafe { CStr::from_ptr(text) }
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// Read one standard gamepad axis in SDL's `-32768..32767` range.
+///
+/// # Safety
+///
+/// As [`close_gamepad`].
+pub unsafe fn gamepad_axis(gamepad: Gamepad, axis: c_int) -> i16 {
+    match api().and_then(|a| a.SDL_GetGamepadAxis) {
+        // SAFETY: the caller's obligation.
+        Some(get) => unsafe { get(gamepad, axis) },
+        None => 0,
+    }
+}
+
+/// Read one standard gamepad button.
+///
+/// # Safety
+///
+/// As [`close_gamepad`].
+pub unsafe fn gamepad_button(gamepad: Gamepad, button: c_int) -> bool {
+    match api().and_then(|a| a.SDL_GetGamepadButton) {
+        // SAFETY: the caller's obligation.
+        Some(get) => unsafe { get(gamepad, button) },
+        None => false,
     }
 }
 

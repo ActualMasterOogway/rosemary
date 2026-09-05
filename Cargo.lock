@@ -27,6 +27,7 @@ dependencies = [
  "corefoundation",
  "darwin",
  "foundation",
+ "gamecontroller",
  "objc",
  "sdl3",
 ]
@@ -489,6 +490,16 @@ name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
+
+[[package]]
+name = "gamecontroller"
+version = "0.1.0"
+dependencies = [
+ "corefoundation",
+ "foundation",
+ "objc",
+ "sdl3",
+]
 
 [[package]]
 name = "getrandom"
@@ -1027,6 +1038,7 @@ dependencies = [
  "cranelift-native",
  "darwin",
  "foundation",
+ "gamecontroller",
  "gimli 0.34.0",
  "iced-x86",
  "iokit",

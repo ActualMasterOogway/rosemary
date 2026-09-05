@@ -11,3 +11,4 @@ objc.workspace = true
 corefoundation.workspace = true
 foundation.workspace = true
 sdl3.workspace = true
+gamecontroller.workspace = true

@@ -122,6 +122,14 @@ fn register_dlopen_names() {
         ],
         symbol,
     );
+    crate::dyld::register_synthetic(
+        &[
+            "/System/Library/Frameworks/GameController.framework/Versions/A/GameController",
+            "/System/Library/Frameworks/GameController.framework/GameController",
+            "GameController",
+        ],
+        symbol,
+    );
     register_opengl_framework();
 }
 
@@ -278,6 +286,9 @@ pub fn provider() -> SyntheticDylib {
     for (name, addr) in contacts::data_symbols() {
         define_data(&mut lib, &name, addr);
     }
+    for (name, addr) in gamecontroller::data_symbols() {
+        define_data(&mut lib, &name, addr);
+    }
     for (name, addr) in appkit::data_symbols() {
         define_data(&mut lib, &name, addr);
     }
@@ -301,8 +312,7 @@ pub fn provider() -> SyntheticDylib {
 /// to say which symbol it was.
 ///
 /// Nothing posts any of these, which is the honest state: there is no capture
-/// session and no game controller here. A name nothing posts is a gap the
-/// program survives.
+/// session here. A name nothing posts is a gap the program survives.
 ///
 /// The values are Apple's own, not the symbol names. Three of them differ, and
 /// they are the ones a program compares rather than merely passes on:
@@ -332,14 +342,6 @@ const MEDIA_CONSTANTS: &[(&str, &str)] = &[
     ("_AVMediaTypeVideo", "vide"),
     ("_AVMediaTypeAudio", "soun"),
     ("_AVMediaTypeText", "text"),
-    (
-        "_GCControllerDidConnectNotification",
-        "GCControllerDidConnectNotification",
-    ),
-    (
-        "_GCControllerDidDisconnectNotification",
-        "GCControllerDidDisconnectNotification",
-    ),
 ];
 
 /// Each of [`MEDIA_CONSTANTS`] as a cell holding an `NSString *`.
@@ -438,6 +440,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         .or_else(|| corevideo::symbol(name))
         .or_else(|| crate::opengl::symbol(name))
         .or_else(|| coreaudio::symbol(name))
+        .or_else(|| gamecontroller::symbol(name))
         // So a `dlsym` of one of these answers what the loader bound, which is
         // the agreement `darwin::symbol`'s doc comment states.
         .or_else(|| {
@@ -491,9 +494,11 @@ pub fn deny_host_frameworks(provider: &mut NativeDylibProvider) {
     // CoreFoundation reading a structure this runtime laid out. Denied whole
     // rather than per name, so that an entry point `corefoundation::sysconfig`
     // does not implement is refused by name instead of corrupting memory. An
-    // unimplemented Contacts call likewise must not hand this tree's
-    // `CNContactStore` to Apple's Contacts framework.
-    for prefix in ["_CF", "_NS", "_kCF", "_kNS", "_SC", "_kSC", "_CN", "_kCN"] {
+    // unimplemented Contacts or GameController call likewise must not hand an
+    // object from this tree to Apple's corresponding framework.
+    for prefix in [
+        "_CF", "_NS", "_kCF", "_kNS", "_SC", "_kSC", "_CN", "_kCN", "_GC", "_kGC",
+    ] {
         provider.deny_prefix(prefix);
     }
 }

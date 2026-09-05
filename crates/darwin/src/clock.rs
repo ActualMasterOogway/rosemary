@@ -17,6 +17,18 @@ pub(crate) struct Timeval {
     _pad: i32,
 }
 
+#[cfg(target_os = "macos")]
+impl Timeval {
+    /// A host value converted to the guest's padded Darwin representation.
+    fn from_host(value: libc::timeval) -> Timeval {
+        Timeval {
+            sec: value.tv_sec,
+            usec: value.tv_usec,
+            _pad: 0,
+        }
+    }
+}
+
 /// Darwin's obsolete `struct timezone`, whose two `int` fields remain part of
 /// the `settimeofday` ABI.
 #[repr(C)]

@@ -17,6 +17,7 @@ sdl3.workspace = true
 corevideo.workspace = true
 coreaudio.workspace = true
 contacts.workspace = true
+gamecontroller.workspace = true
 gimli.workspace = true
 libc.workspace = true
 static_init.workspace = true

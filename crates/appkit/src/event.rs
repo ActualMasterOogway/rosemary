@@ -10,6 +10,7 @@ use crate::window;
 /// about when the event names no window this crate made.
 pub fn pump(app: Id) {
     let _ = app;
+    gamecontroller::pump();
     debug_resize();
     debug_key();
     crate::script::run();

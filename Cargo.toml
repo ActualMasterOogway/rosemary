@@ -19,6 +19,7 @@ appkit = { path = "crates/appkit" }
 corevideo = { path = "crates/corevideo" }
 coreaudio = { path = "crates/coreaudio" }
 contacts = { path = "crates/contacts" }
+gamecontroller = { path = "crates/gamecontroller" }
 libc = "0.2"
 gimli = "0.34"
 getrandom = "0.3"
