@@ -297,12 +297,12 @@ mod tests {
         host.ifa_ifu = host.ifa_addr;
         unsafe {
             let node = node_from_host(&host).unwrap();
-            let bytes = core::slice::from_raw_parts((*node).addr.cast::<u8>(), 28);
-            assert_eq!(&bytes[..2], &[28, 18]);
+            let bytes = core::slice::from_raw_parts((*node).addr.cast::<u8>(), 29);
+            assert_eq!(&bytes[..2], &[29, 18]);
             assert_eq!(u16::from_ne_bytes([bytes[2], bytes[3]]), 42);
-            assert_eq!(&bytes[4..8], &[6, 14, 6, 0]);
-            assert_eq!(&bytes[8..22], b"longdevice12345");
-            assert_eq!(&bytes[22..28], &[2, 3, 4, 5, 6, 7]);
+            assert_eq!(&bytes[4..8], &[6, 15, 6, 0]);
+            assert_eq!(&bytes[8..23], b"longdevice12345");
+            assert_eq!(&bytes[23..29], &[2, 3, 4, 5, 6, 7]);
             assert_eq!((*node).addr as usize % 8, 0);
             assert!((*node).dstaddr.is_null());
             free_list(node);
