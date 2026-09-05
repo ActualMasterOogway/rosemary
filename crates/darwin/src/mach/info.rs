@@ -128,11 +128,6 @@ fn page_size() -> u64 {
 /// the three data symbols `<mach/vm_param.h>` publishes beside
 /// [`host_page_size`].
 ///
-/// Data, so an unbound one is not refused at the call: it binds to zero, and a
-/// guest that rounds an allocation up to a page then rounds it to *nothing*.
-/// Roblox imports `_vm_page_size` directly and so does mimalloc's Darwin
-/// backend, which is why they are published rather than left to the function.
-///
 /// Written once, before the loader binds anything, by [`publish_page_size`].
 pub static VM_PAGE_SIZE: AtomicU64 = AtomicU64::new(0);
 pub static VM_PAGE_MASK: AtomicU64 = AtomicU64::new(0);

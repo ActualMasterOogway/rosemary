@@ -74,9 +74,7 @@ unsafe extern "C" fn file_url_with_path_is_directory(
 ///
 /// The base is where a *relative* path is measured from and is ignored for an
 /// absolute one, which is the rule for every one of Apple's relative-URL
-/// constructors. Roblox builds its cache paths this way after a login, so a
-/// runtime without it aborts the moment an account has somewhere to store
-/// anything.
+/// constructors.
 unsafe extern "C" fn file_url_with_path_relative_to_url(
     class: Id,
     sel: Sel,

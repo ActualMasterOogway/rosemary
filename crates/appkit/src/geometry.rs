@@ -88,10 +88,6 @@ pub fn contains(rect: NSRect, point: NSPoint) -> bool {
 }
 
 /// `BOOL NSPointInRect(NSPoint, NSRect)`.
-///
-/// Foundation's spelling of [`contains`], and the first thing Roblox's
-/// `-mouseDown:` calls - so an unbound one is a click that faults rather than a
-/// click that misses.
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn NSPointInRect(point: NSPoint, rect: NSRect) -> u8 {
     contains(rect, point) as u8

@@ -158,9 +158,6 @@ fn where_is(addr: u64) -> String {
 }
 
 /// Every name that hands a block back to the allocator.
-///
-/// Both spellings of each, because Roblox calls its allocator by its own names
-/// as well as through the interposed libc ones.
 const FREES: &[&str] = &["free", "mi_free"];
 const REALLOCS: &[&str] = &["realloc", "mi_realloc"];
 

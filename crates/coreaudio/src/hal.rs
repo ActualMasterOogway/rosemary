@@ -1,26 +1,3 @@
-//! The CoreAudio HAL: the system object, and one output device that is SDL's.
-//!
-//! This is the layer *below* an `AudioUnit`. A program asks the system object
-//! which device is the default output, asks that device its sample rate and
-//! channel count, and - if it drives the hardware itself rather than through an
-//! output unit - registers an `AudioDeviceIOProc` and starts it. Roblox does
-//! both: it queries the device before opening its unit, and it listens for the
-//! default device changing.
-//!
-//! The device is real. Its sample rate, channel count and name come from the
-//! playback device SDL actually opened, and an `IOProc` is driven by that
-//! device's own callback - so a program that plays this way is heard, and one
-//! that only asks the device its format configures itself for the hardware in
-//! this machine rather than for a number invented here.
-//!
-//! What is *not* answered is refused with the framework's own
-//! `kAudioHardwareUnknownPropertyError`, which is what Apple's HAL answers for
-//! a property a device does not have. The rule this crate is built on applies
-//! with more force here than anywhere: every property is a number a program
-//! will configure itself from, and a plausible wrong one - a sample rate the
-//! device does not run at, a channel count that does not match the buffer list
-//! - is silence or noise with nothing in any log.
-
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 

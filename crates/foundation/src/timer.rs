@@ -112,8 +112,7 @@ unsafe extern "C" fn date_with_interval_since_now(_class: Id, _sel: Sel, seconds
 }
 
 /// `+dateWithTimeIntervalSince1970:`, which is the one a program building a
-/// date out of a server timestamp uses - every Roblox response carries Unix
-/// seconds.
+/// date out of a server timestamp uses.
 unsafe extern "C" fn date_with_interval_since_1970(_class: Id, _sel: Sel, seconds: f64) -> Id {
     date_since_1970(seconds)
 }

@@ -1,24 +1,3 @@
-//! `CALayer`, which is here for one number.
-//!
-//! Core Animation, not AppKit, but a layer only ever reaches this tree through
-//! `-[NSView setLayer:]`, so it lives beside [`crate::view`].
-//!
-//! Nothing here composites a layer and nothing is going to: a guest that hands
-//! its view a layer draws through the layer's own drawables - Metal's, or the
-//! GL context's - and the view's whole obligation is to give the same object
-//! back. What the *layer* owes is `-contentsScale`, and that one accessor is
-//! why this file exists.
-//!
-//! An unbound `_OBJC_CLASS_$_CALayer` binds to zero, so `+layer` is nil,
-//! `-[NSView setLayer:nil]` stores nothing, and `[[view layer] contentsScale]`
-//! is **0.0** - a `double` return from a message to nil. Roblox multiplies its
-//! view bounds by that number. Nothing faults, nothing is logged, and the
-//! program carries on with a size of zero: the silent-wrong-answer this runtime
-//! exists to avoid, in one accessor.
-//!
-//! The default is `1.0` because that is Apple's, and a layer attached to a view
-//! takes the window's backing scale - see [`crate::view`]'s `-layer`.
-
 use std::ffi::c_void;
 
 use objc::object::Id;

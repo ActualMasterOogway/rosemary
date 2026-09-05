@@ -435,17 +435,6 @@ fn location(window: Id, x: f32, y: f32) -> NSPoint {
 }
 
 /// Hand one input event to its window, as `-[NSApplication sendEvent:]` does.
-///
-/// Through the window and not straight to a responder, because `-sendEvent:` is
-/// where a program gets to see every event before anything else does - and
-/// Roblox overrides it on its own `RBXWindow`. That override is how the engine
-/// receives the keyboard at all: the first responder while a text field is
-/// focused is Roblox's `InputMethodHandler`, so a runtime that dispatched
-/// straight to the responder handed every keystroke to a text buffer and gave
-/// the engine nothing.
-///
-/// `at` is where the pointer was, in SDL's window coordinates, for the events
-/// that have a position.
 fn send(id: u32, at: Option<(f32, f32)>, fields: impl FnOnce(Id, NSPoint) -> Fields) {
     let window = object_for(id);
     if window.is_null() {
@@ -559,12 +548,6 @@ fn chain(start: Id, sel: objc::sel::Sel) -> Option<(Id, &'static objc::class::Me
         // SAFETY: null or a live object this runtime allocated.
         if let Some(method) = unsafe { objc::object::class_of(responder) }.and_then(|c| c.method(sel))
         {
-            // A text view's own key handling is the *last* resort, not the
-            // first. Roblox makes its `NSTextView` the first responder while a
-            // field is focused and still expects its engine view to see the
-            // keystroke - it reads the text view back afterwards for what an
-            // input method composed. Taking the text view's implementation here
-            // would end the search at a buffer nothing else is told about.
             let ours = crate::text::is_default_key_handling(method.implementation() as *const ());
             match ours {
                 false => return Some((responder, method)),
@@ -608,14 +591,6 @@ fn track_pointer(x: f32, y: f32) -> (f32, f32) {
 
 /// Where the guest is to be told the pointer is on the desktop, for the calls
 /// that ask the window system rather than reading an event.
-///
-/// `None` while the pointer and cursor move together, when the window system is
-/// the better answer. While they do not, this is the whole point of the call:
-/// `+[NSEvent mouseLocation]` answering a pointer that is still moving, against
-/// events that all carry the frozen one, is a program being told two different
-/// things about the same cursor - and a program that decides whether its own
-/// window is focused from the pointer (Roblox does) then hands the keyboard
-/// away in the middle of mouse look.
 pub(crate) fn frozen_pointer() -> Option<(f32, f32)> {
     if crate::screen::mouse_is_associated() {
         return None;
@@ -630,12 +605,6 @@ pub(crate) fn frozen_pointer() -> Option<(f32, f32)> {
 }
 
 /// Whether `-mouseMoved:` should be delivered at all.
-///
-/// AppKit drops it unless the window asked for it *or* a view is tracking, and
-/// the second half is not optional here: Roblox never sends
-/// `-setAcceptsMouseMovedEvents:YES` and installs an `NSTrackingArea` instead,
-/// so a runtime that only honoured the window flag has a program whose pointer
-/// never moves.
 fn wants_mouse_moved(window: Id) -> bool {
     // SAFETY: null or the content view, which this crate made.
     window::accepts_mouse_moved_events(window)

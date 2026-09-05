@@ -1,42 +1,3 @@
-//! `SCNetworkReachability`: asked of the host where there is one, declined where
-//! there is not.
-//!
-//! A program asks this whether a host is reachable *before* trying, so that it
-//! can skip the attempt or tell the user why. What the framework reports is the
-//! network configuration daemon's opinion rather than a probe, and a runtime
-//! that invented one would have programs skipping requests that would have
-//! worked. On macOS the daemon is right there and its opinion is the true one,
-//! so the synchronous half is forwarded - see [`crate::foreign`], which is what
-//! lets the target Apple's framework hands back be released again.
-//!
-//! Off Darwin there is no such daemon, and the answer used to be NULL for every
-//! target - which is the documented "could not be created" and looked safe.
-//! **It is not an answer a program survives.** A client asks reachability before
-//! it decides it is online, and NULL is not "offline", it is "I could not find
-//! out": Roblox imports `CreateWithAddress`, `SetCallback`,
-//! `ScheduleWithRunLoop`, `GetFlags` and `Unschedule` - the whole *asynchronous*
-//! pattern - so it registers a callback, waits for the network state, and is
-//! still waiting. A refusal three layers under a caller that is waiting for an
-//! event is indistinguishable from a network that never comes up.
-//!
-//! So the target is real here, and the flags are **measured rather than
-//! invented**, which is the part that keeps this honest: [`routed_source_address`]
-//! asks the routing table whether a packet to the public internet has anywhere
-//! to go, by `connect`ing a datagram socket, which sends nothing. A machine with
-//! a route is reachable and one without is not, and that is the same question
-//! the configuration daemon answers on a Mac.
-//!
-//! Scheduling delivers **one callback with the current flags**, as Apple's does
-//! when a target is first scheduled, and delivers it on the calling thread
-//! rather than on the run loop's - this tree's run loop is not Apple's and a
-//! foreign target cannot be handed to it. What that costs is written down at
-//! [`SCNetworkReachabilityScheduleWithRunLoop`]: a *change* in reachability is
-//! never reported, because nothing here watches for one.
-//!
-//! Published rather than left out for the reason the run loop's mode names are:
-//! an unresolved *function* import is refused at the call, which stops a program
-//! that only wanted to print "offline".
-
 // The C spellings are the interface, as they are in `api`.
 #![allow(non_snake_case)]
 
@@ -197,14 +158,6 @@ fn reachable_flags(local: bool) -> u32 {
 
 /// Whether a Darwin `struct sockaddr` names *this machine*, which is reachable
 /// with or without a route to anywhere else.
-///
-/// Loopback only. The **unspecified** address is deliberately not local, and
-/// getting that wrong is what this comment is for: `0.0.0.0` is what a client
-/// passes to ask "is the internet reachable at all" - it is the one address
-/// Roblox passes - and answering `kSCNetworkReachabilityFlagsIsLocalAddress`
-/// for it tells the client the thing it asked about is on this machine, which
-/// is the opposite of what it wanted to know. It is answered from the routing
-/// table like any other address.
 ///
 /// **Darwin's layout, not this host's**, and that is the whole of why this is
 /// read by hand: Darwin is `{ uint8_t sa_len; uint8_t sa_family; ... }` where
@@ -997,7 +950,6 @@ mod tests {
             assert!(!names_this_machine(
                 std::ptr::from_ref(&darwin_sockaddr_in([1, 1, 1, 1])).cast()
             ));
-            // The address Roblox actually passes. Not local: see the note there.
             assert!(!names_this_machine(
                 std::ptr::from_ref(&darwin_sockaddr_in([0, 0, 0, 0])).cast()
             ));

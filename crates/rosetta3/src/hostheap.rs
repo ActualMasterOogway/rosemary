@@ -1,12 +1,6 @@
 //! Putting the whole guest on this host's `malloc`, so the host's own
 //! corruption checks apply.
 //!
-//! [`crate::interpose::NO_INTERPOSE_ENV`] is half of this and on its own it is
-//! misleading: it stops `malloc`/`free` being redirected to the allocator the
-//! guest ships, but Roblox's `operator new` calls **`mi_malloc` by name**, so
-//! turning the interposition off leaves a program that allocates with mimalloc
-//! and frees with glibc - a mismatch that did not exist before the flag was set.
-//!
 //! This is the other half. Every entry point the guest imports from its own
 //! allocator is rebound to a host equivalent as well, so one allocator owns
 //! every block, and a double free stops being a live block quietly pushed onto

@@ -186,7 +186,7 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
         let count = cf::CFArrayGetCount(elements);
         assert_eq!(count, 1 + 6 + 1 + 15, "the element tree is the wrong shape");
 
-        // Roblox rejects every array member whose general CF type does not
+        // Apps can reject every array member whose general CF type does not
         // equal IOKit's element type before it reads any HID fields.
         for i in 0..count {
             let element = cf::CFArrayGetValueAtIndex(elements, i);
@@ -207,7 +207,7 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
         assert_eq!(api::IOHIDElementGetLogicalMin(first_axis), -32768);
         assert_eq!(api::IOHIDElementGetLogicalMax(first_axis), 32767);
 
-        // Roblox polls mapped controls with IOHIDDeviceGetValue rather than
+        // Apps may poll mapped controls with IOHIDDeviceGetValue rather than
         // registering the manager-level value callback.
         let mut value = std::ptr::null();
         assert_eq!(api::IOHIDDeviceGetValue(device, first_axis, &mut value), 0);

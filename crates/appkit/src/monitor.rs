@@ -1,11 +1,3 @@
-//! `+[NSEvent addLocalMonitorForEventsMatchingMask:handler:]`.
-//!
-//! A local monitor sees an event on its way to the application's own windows and
-//! can swallow it by answering nil. Roblox installs one from
-//! `-[InputMethodHandler becomeFirstResponder]`, which is on the path a
-//! right-click takes, so a runtime without it stops the program the first time
-//! the keyboard changes hands.
-
 use std::sync::Mutex;
 
 use objc::class::Class;

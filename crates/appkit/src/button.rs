@@ -1,11 +1,4 @@
 //! SDL mouse buttons as AppKit's.
-//!
-//! The two disagree twice over, which is why this is a table and not an
-//! arithmetic adjustment: SDL numbers from one and AppKit from zero, and their
-//! middle and right buttons are the other way round - AppKit's right button is
-//! 1 and its middle is 2, SDL's middle is 2 and its right is 3. Subtracting one
-//! from SDL's number gets the left button right and swaps the other two, which
-//! is what Roblox saw.
 
 use crate::nsevent::kind;
 use sdl3::mouse;

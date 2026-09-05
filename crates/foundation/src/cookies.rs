@@ -24,8 +24,6 @@ struct Cookie {
 }
 
 impl Cookie {
-    /// RFC 6265's rule, which is what a caller depends on to find
-    /// `.ROBLOSECURITY` for `www.roblox.com` when it was set for `.roblox.com`.
     fn matches(&self, host: &str, path: &str) -> bool {
         let domain = self.domain.trim_start_matches('.');
         if domain.is_empty() {
@@ -256,8 +254,7 @@ unsafe extern "C" fn cookie_with_properties(_class: Id, _sel: Sel, properties: I
     if name.is_empty() {
         return std::ptr::null_mut();
     }
-    // Normalised as a header's is, so a cookie set for `.roblox.com` and the
-    // same one set for `roblox.com` are one entry rather than two.
+    // Normalised as a header's is.
     let domain = get(&["NSHTTPCookieDomain", "Domain", "domain"])
         .trim_start_matches('.')
         .to_ascii_lowercase();
@@ -279,12 +276,6 @@ unsafe extern "C" fn cookie_with_properties(_class: Id, _sel: Sel, properties: I
 }
 
 /// The expiry in an `NSHTTPCookieExpires`.
-///
-/// An `NSDate` from a caller that built the dictionary with Apple's constants -
-/// which is the one Roblox uses when it hands its own session cookie to the
-/// storage - and a string from one that carried the header's spelling through.
-/// Dropping this is what turned the session cookie into a session-*only* cookie
-/// and cleared it from the jar on the next launch.
 ///
 /// # Safety
 ///
@@ -384,17 +375,6 @@ fn parse_set_cookie(header: &str, host: &str) -> Option<Cookie> {
 }
 
 /// `Expires=Wed, 21 Oct 2015 07:28:00 GMT` as seconds since the epoch.
-///
-/// RFC 6265's own parser rather than one spelling of the date. The delimiters
-/// are not part of it, so `Sat, 26-Aug-2056 16:47:16 GMT` - which is how
-/// `auth.roblox.com` sends `.ROBLOSECURITY` - reads the same as the RFC 1123
-/// form Cloudflare sends, and `Sat Aug 26 16:47:16 2056` reads the same again.
-/// Reading only the spaced spelling made the session cookie a session-*only*
-/// cookie, and `save` drops those: the login worked and nothing was written.
-///
-/// The order the fields are tried in is the RFC's and is load-bearing. The time
-/// is looked for first, so `16:47:16` is not taken as a day of month; the day
-/// before the year, so the two-digit `26` is not taken as a year.
 fn parse_expires(value: &str) -> Option<i64> {
     let (mut time, mut day, mut month, mut year) = (None, None, None, None);
     for token in value.split(|c: char| !c.is_ascii_alphanumeric() && c != ':') {
@@ -514,11 +494,6 @@ unsafe extern "C" fn cookie_is_session_only(receiver: Id, _sel: Sel) -> u8 {
 }
 
 /// `-properties`, as the dictionary `+cookieWithProperties:` would take back.
-///
-/// The expiry is part of that round trip and not decoration: a client that
-/// reads its stored cookies out and puts them back - which is what Roblox does
-/// at startup - would otherwise hand back a cookie with no expiry, and this
-/// storage would drop it from the jar as a session cookie.
 unsafe extern "C" fn cookie_properties(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: an `NSHTTPCookie` this module made.
     let Some(cookie) = (unsafe { cookie_of(receiver) }) else {

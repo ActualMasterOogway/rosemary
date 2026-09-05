@@ -247,21 +247,12 @@ unsafe extern "C" fn window_number_at_point(
 }
 
 /// `-sendEvent:`, the default routing.
-///
-/// A program that overrides this - Roblox does - sees every event first and
-/// calls up to here for the ones it does not take. See [`crate::event::route`].
 unsafe extern "C" fn send_event(receiver: Id, _sel: Sel, event: Id) {
     crate::event::route(receiver, event);
 }
 
 /// `-mouseLocationOutsideOfEventStream`: where the pointer is now, in this
 /// window's coordinates.
-///
-/// "Outside of the event stream" is the point: a game asks this instead of
-/// remembering the last event, because between two frames the pointer has moved
-/// and the events for it have not been dequeued yet. Roblox asks it on every
-/// `-mouseEntered:`, so a runtime without it aborts the moment the pointer
-/// crosses into the window.
 unsafe extern "C" fn mouse_location_outside_of_event_stream(receiver: Id, _sel: Sel) -> NSPoint {
     pointer_location(receiver)
 }
@@ -576,22 +567,6 @@ unsafe extern "C" fn first_responder(receiver: Id, _sel: Sel) -> Id {
     }
 }
 
-/// `-makeFirstResponder:`, which is a *handshake* and not an assignment.
-///
-/// AppKit asks the outgoing responder to resign, records the new one, and then
-/// tells it that it has become first responder - and a program is entitled to
-/// answer that message by moving the first responder somewhere else again.
-/// Roblox does exactly that: its `-rightMouseDown:` makes the engine view first
-/// responder, and the view's `-becomeFirstResponder` hands the keyboard
-/// straight on to its `InputMethodHandler`, which is what the engine actually
-/// reads keystrokes from. A runtime that only stored the pointer left the
-/// engine view as first responder, and its `-keyDown:` drops the key on the
-/// floor - so a right-click, and nothing else, killed the keyboard until a
-/// window activation put the handler back.
-///
-/// The new responder is recorded before it is told, because that message is
-/// where the re-entrant call comes from and it has to see the state AppKit
-/// would have left.
 unsafe extern "C" fn make_first_responder(receiver: Id, _sel: Sel, responder: Id) -> u8 {
     if crate::event::tracing() {
         // SAFETY: null or a live object this runtime allocated.
@@ -671,11 +646,6 @@ unsafe fn responder_agrees(responder: Id, selector: &str) -> bool {
     }
 }
 
-/// `NSResponder`'s own `-becomeFirstResponder` and `-resignFirstResponder`,
-/// which answer yes.
-///
-/// Installed because a program overriding either calls `super` - Roblox's
-/// engine view does - and because [`make_first_responder`] now sends them.
 unsafe extern "C" fn accepts_responder_change(_receiver: Id, _sel: Sel) -> u8 {
     1
 }
@@ -936,8 +906,6 @@ pub(crate) fn install() {
 mod tests {
     use super::*;
 
-    /// The redirect target of the view below, so its `-becomeFirstResponder`
-    /// can hand the responder on the way Roblox's engine view does.
     static REDIRECT: std::sync::Mutex<(usize, usize)> = std::sync::Mutex::new((0, 0));
 
     unsafe extern "C" fn redirecting_become(_receiver: Id, _sel: Sel) -> u8 {
@@ -947,12 +915,6 @@ mod tests {
         1
     }
 
-    /// `-makeFirstResponder:` is a handshake, and the whole reason it is one is
-    /// that the new responder may hand the keyboard on. Roblox's
-    /// `-rightMouseDown:` makes its engine view first responder and that view's
-    /// `-becomeFirstResponder` passes it to the text view the engine actually
-    /// reads keystrokes from, so a runtime that only stored the pointer left
-    /// the keyboard at a view that drops it.
     #[test]
     fn a_new_first_responder_may_hand_it_on() {
         crate::bootstrap();

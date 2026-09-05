@@ -314,11 +314,6 @@ mod tests {
 
     /// One archived view of each kind a nib holds: a plain `NSView` that is the
     /// window's, and the custom view a program's own class fills it with.
-    ///
-    /// The flags are the ones Roblox's document actually carries: `319` is
-    /// `0x13f`, a content view flexible on all six lengths, and `274` is
-    /// `0x112`, a render view that is width- and height-sizable and nothing
-    /// else. Both have bit 8, which is `autoresizesSubviews`.
     const VIEWS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
 <dict>

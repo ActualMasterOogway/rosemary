@@ -7,13 +7,6 @@
 //! like. A named cursor has no shape for SDL to switch to and shows the
 //! desktop's own.
 //!
-//! A program's *custom* cursor arrives through the cursor rectangles rather
-//! than through `-set`: it builds an `NSCursor`, asks its window to
-//! `-invalidateCursorRectsForView:`, and hands the cursor over from inside the
-//! view's `-resetCursorRects`. Roblox does exactly that and nothing else, so
-//! the rectangles below are not bookkeeping - they are the only path its
-//! pointer has to the screen.
-//!
 //! A tracking area therefore remembers what it was made with and does nothing
 //! else. It has to exist as an object, because a view holds one and compares it
 //! against the one it removes; making it a placeholder instead would refuse

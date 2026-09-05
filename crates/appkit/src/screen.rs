@@ -117,14 +117,6 @@ unsafe extern "C" fn backing_scale_factor(receiver: Id, _sel: Sel) -> CGFloat {
 /// `-deviceDescription`: `NSScreenNumber` for a `CGDirectDisplayID`, and
 /// `NSDeviceSize`/`NSDeviceResolution` for anything measuring the display.
 ///
-/// The two size keys are not decoration. A program that wants its window in
-/// *physical* units has to divide pixels by dots-per-inch, and this dictionary
-/// is where both numbers come from - Roblox reads `NSDeviceSize` by name, in
-/// `-updateWindowSizeMM:`. A missing key is `nil`, `-[nil sizeValue]` is
-/// `{0, 0}`, and a caller dividing by that keeps whatever size it already had:
-/// the failure is a window measurement that never updates, with nothing
-/// anywhere reporting a missing key.
-///
 /// `NSDeviceResolution` is dots per *inch* and is 72 for a display at unit
 /// scale, because AppKit's user-space unit is 1/72 inch by definition. It is
 /// scaled by the backing factor, which is what makes a Retina screen report 144

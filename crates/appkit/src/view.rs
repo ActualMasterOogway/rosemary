@@ -414,13 +414,6 @@ pub unsafe fn describe(view: Id, depth: usize, out: &mut String) {
 /// takes. Subviews are tried last-first, because the last one added is the one
 /// drawn on top.
 ///
-/// This is what routes a mouse event, and routing one any other way is not a
-/// detail: AppKit sends a click to the view it landed on and a key to the first
-/// responder, so a runtime that sent both to the responder delivers every click
-/// to whatever was focused last. Roblox focuses a zero-sized
-/// `InputMethodHandler` that implements no mouse method at all, so every click
-/// in the program was being dropped.
-///
 /// # Safety
 ///
 /// `view` must be null or an object this runtime allocated.
@@ -432,11 +425,6 @@ pub unsafe fn hit_test(view: Id, point: NSPoint) -> Id {
 /// Where the pointer is in this view's own coordinates, or `None` for a view
 /// in no window - which is every view before it is installed, and the point
 /// where a cursor rectangle cannot be about the pointer at all.
-///
-/// The walk up the superviews does both halves: it finds the window, since only
-/// a content view carries one directly and Roblox installs its view with
-/// `-addSubview:` rather than `-setContentView:`, and it converts, since a
-/// view's frame is stated in its superview's coordinates.
 ///
 /// # Safety
 ///

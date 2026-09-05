@@ -119,12 +119,6 @@ fn register_dlopen_names() {
 
 /// `OpenGL.framework`, as a handle over the GL library SDL is using.
 ///
-/// A GL program does not call `glDrawArrays` through an import - it `dlopen`s
-/// the framework and `dlsym`s every entry point it wants, because that is the
-/// only way to reach the 3.x and extension functions the framework does not
-/// export as a link-time symbol. Roblox does exactly this, with
-/// `/System/Library/Frameworks/OpenGL.framework/Versions/Current/OpenGL`.
-///
 /// Without a handle for that path the loader returns null, every `dlsym` after
 /// it answers null, and the program reports **"Missing GL version"** and then
 /// "OpenGL 3.2 support or higher required" - a version check that failed

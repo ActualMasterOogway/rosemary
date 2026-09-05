@@ -1,21 +1,3 @@
-//! `NSJSONSerialization`.
-//!
-//! Roblox's message bus round-trips every message's parameters through it -
-//! `-serializeMessageParams:` turns a dictionary into text and
-//! `-deserializeMessageParams:` turns it back - so with the class unbound the
-//! parameters serialise to nil and the Lua side of a request never sees a reply.
-//! That is a *data* import binding to zero, so nothing faults and nothing is
-//! logged; the only symptom is a promise that never resolves.
-//!
-//! The two directions are not symmetric and neither is Apple's:
-//!
-//! - **Writing** refuses what JSON cannot carry, by name. An `NSData` or an
-//!   `NSDate` in the graph is a caller's mistake, and an encoder that skipped
-//!   the key would hand the far side a message missing a parameter, which reads
-//!   as the sender never having set it.
-//! - **Reading** answers `nil` and an `NSError`, because the bytes came off a
-//!   socket and malformed input is an ordinary event rather than a bug here.
-
 use std::ffi::c_void;
 
 use corefoundation::base::CFTypeRef;
@@ -693,7 +675,7 @@ mod tests {
     }
 
     /// An id past 2^53 is the case a JSON reader that keeps every number as a
-    /// double gets wrong, and Roblox's ids are in that range.
+    /// double gets wrong.
     #[test]
     fn a_large_integer_survives() {
         crate::bootstrap();

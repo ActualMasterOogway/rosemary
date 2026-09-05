@@ -102,13 +102,6 @@ unsafe extern "C" fn delegate(receiver: Id, _sel: Sel) -> Id {
 unsafe extern "C" fn ignored_flag(_receiver: Id, _sel: Sel, _on: u8) {}
 
 /// What a text view holds, which is the half of it that is not configuration.
-///
-/// A Cocoa game does not use an `NSTextView` to draw anything - it keeps an
-/// invisible one as the thing the keyboard talks to, forwards `-keyDown:` to
-/// it, and reads `-string` back. Roblox's `InputMethodHandler` is exactly that,
-/// so this buffer is where a typed password actually lands: without it the view
-/// answers nothing to `-string` however many keys arrive, and every text field
-/// in the program stays empty.
 #[derive(Clone, Default)]
 struct Contents {
     text: String,

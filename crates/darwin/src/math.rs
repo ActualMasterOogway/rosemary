@@ -159,9 +159,7 @@ extern "C" fn mulsc3_abi(a: f32, b: f32, c: f32, d: f32) -> Float2 {
 ///
 /// glibc has `exp10` and `exp10f` and *not* these names, so the import goes
 /// unresolved on this host - and it is a plain function with an ordinary ABI,
-/// which is the only reason it belongs beside the four above. Roblox's renderer
-/// calls the float one, so an unbound slot is a fault the first time anything is
-/// drawn.
+/// which is the only reason it belongs beside the four above.
 ///
 /// `powf(10, x)` rather than `exp(x * ln 10)`: the second is a rounding error
 /// wide of the first at every integral exponent, and an integral exponent is

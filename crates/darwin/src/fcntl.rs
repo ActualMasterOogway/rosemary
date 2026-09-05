@@ -325,12 +325,6 @@ pub mod entry {
 
     /// The lock family, through a `struct flock` of this host's.
     ///
-    /// This is what a single-instance lock is made of, and it is why it needs
-    /// translating rather than forwarding: Roblox's `NamedMutex` opens
-    /// `InstallerInfo.log` and takes a whole-file `F_WRLCK` on it with
-    /// `F_SETLK`, so a runtime that refused the command reported
-    /// `NamedMutex::lock failed: Invalid argument` and would not load a place.
-    ///
     /// `F_GETLK` is copied back as well as in: it answers by *overwriting* the
     /// caller's structure with the lock that is in the way, and a caller reads
     /// `l_pid` out of it to name the process holding it.
