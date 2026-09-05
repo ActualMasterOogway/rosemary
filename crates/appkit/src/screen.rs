@@ -390,12 +390,58 @@ mod tests {
 /// `CGError CGWarpMouseCursorPosition(CGPoint)` - move the pointer, in global
 /// screen coordinates.
 ///
-/// SDL's own warp takes the same frame, so this is the one CoreGraphics mouse
-/// call that carries across exactly. `kCGErrorSuccess` is `0`.
+/// SDL's own warp takes the same frame, but treats a warp during relative mouse
+/// mode as virtual. Temporarily releasing each relative-mode window makes the
+/// warp reach the desktop cursor. Games commonly warp to the centre every
+/// frame, so a position reached by the last real warp is remembered: releasing
+/// capture again would only give a person's movement during the transition a
+/// chance to become visible as lag. `kCGErrorSuccess` is `0`.
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn CGWarpMouseCursorPosition(point: foundation::geometry::NSPoint) -> i32 {
-    sdl3::video::warp_mouse_global(point.x as f32, point.y as f32);
+    let point = (point.x as f32, point.y as f32);
+    let relative: Vec<_> = crate::window::sdl_windows()
+        .into_iter()
+        .filter(|window| sdl3::video::relative_mouse_mode(*window))
+        .collect();
+
+    if relative.is_empty() {
+        forget_relative_warp();
+        sdl3::video::warp_mouse_global(point.0, point.1);
+        return 0;
+    }
+    if known_relative_warp() == Some(point) {
+        return 0;
+    }
+
+    let mut released = true;
+    for window in &relative {
+        released &= sdl3::video::set_relative_mouse_mode(*window, false);
+    }
+    let warped = sdl3::video::warp_mouse_global(point.0, point.1);
+    for window in relative {
+        sdl3::video::set_relative_mouse_mode(window, true);
+    }
+    match released && warped {
+        true => remember_relative_warp(point),
+        false => forget_relative_warp(),
+    }
     0
+}
+
+/// The desktop position reached by the last warp performed outside relative
+/// mode. It is valid only while the current relative-mode session continues.
+static RELATIVE_WARP: std::sync::Mutex<Option<(f32, f32)>> = std::sync::Mutex::new(None);
+
+fn known_relative_warp() -> Option<(f32, f32)> {
+    *RELATIVE_WARP.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn remember_relative_warp(point: (f32, f32)) {
+    *RELATIVE_WARP.lock().unwrap_or_else(|e| e.into_inner()) = Some(point);
+}
+
+fn forget_relative_warp() {
+    *RELATIVE_WARP.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// `CGError CGAssociateMouseAndMouseCursorPosition(boolean_t connected)`.
@@ -441,10 +487,18 @@ pub fn apply_mouse_association() {
     // already counts in `crate::cursor`. SDL's relative mode hides the pointer
     // itself, so the hint is what stops it from making that decision twice.
     sdl3::video::set_hint(sdl3::video::HINT_RELATIVE_CURSOR_VISIBLE, c"1");
+    let mut changed = false;
     for window in crate::window::sdl_windows() {
         if sdl3::video::relative_mouse_mode(window) != relative {
             sdl3::video::set_relative_mouse_mode(window, relative);
+            changed = true;
         }
+    }
+    // A focus transition can leave capture without the guest changing its
+    // association setting. The user may move the real cursor in that gap, so
+    // a position remembered by the previous capture session is no longer safe.
+    if changed {
+        forget_relative_warp();
     }
 }
 
