@@ -100,6 +100,7 @@ pub fn map_flags(flags: i32) -> i32 {
             // function exists.
             (darwin::MAP_ANON, libc::MAP_ANONYMOUS),
             (darwin::MAP_NORESERVE, libc::MAP_NORESERVE),
+            #[cfg(target_arch = "x86_64")]
             (darwin::MAP_32BIT, libc::MAP_32BIT),
         ] {
             if flags & theirs != 0 {
@@ -349,6 +350,7 @@ mod tests {
     fn noreserve_does_not_become_a_32_bit_mapping() {
         let host = map_flags(darwin::MAP_PRIVATE | darwin::MAP_ANON | darwin::MAP_NORESERVE);
         assert_eq!(host & libc::MAP_NORESERVE, libc::MAP_NORESERVE);
+        #[cfg(target_arch = "x86_64")]
         assert_eq!(host & libc::MAP_32BIT, 0);
     }
 
