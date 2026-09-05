@@ -245,6 +245,12 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             unsafe { crate::cursor::reset_rects_in_tree(content) };
             post(window, window::DID_RESIZE);
         }
+        // The frame remains in points when a window crosses onto a display at
+        // another scale, but its backing store does not. AppKit tells guests to
+        // recompute pixel-sized viewports with this notification.
+        Event::WindowBackingChanged { window } => {
+            post(window, window::DID_CHANGE_BACKING_PROPERTIES);
+        }
         Event::WindowMouse { window, entered } => {
             // A resize is performed from outside the client area. SDL reports
             // the resulting leave and re-entry as window events rather than

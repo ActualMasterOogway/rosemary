@@ -115,6 +115,7 @@ struct Api {
     SDL_SetWindowTitle: Option<unsafe extern "C" fn(Window, *const c_char) -> bool>,
     SDL_GetWindowSize: Option<unsafe extern "C" fn(Window, *mut c_int, *mut c_int) -> bool>,
     SDL_SetWindowSize: Option<unsafe extern "C" fn(Window, c_int, c_int) -> bool>,
+    SDL_GetWindowSizeInPixels: Option<unsafe extern "C" fn(Window, *mut c_int, *mut c_int) -> bool>,
     SDL_GetWindowPosition: Option<unsafe extern "C" fn(Window, *mut c_int, *mut c_int) -> bool>,
     SDL_SetWindowPosition: Option<unsafe extern "C" fn(Window, c_int, c_int) -> bool>,
     SDL_ShowWindow: Option<unsafe extern "C" fn(Window) -> bool>,
@@ -282,6 +283,7 @@ fn api() -> Option<&'static Api> {
             SDL_SetWindowTitle,
             SDL_GetWindowSize,
             SDL_SetWindowSize,
+            SDL_GetWindowSizeInPixels,
             SDL_GetWindowPosition,
             SDL_SetWindowPosition,
             SDL_ShowWindow,
@@ -983,11 +985,13 @@ pub mod video {
     pub mod event_type {
         pub const QUIT: u32 = 0x100;
         pub const WINDOW_RESIZED: u32 = 0x206;
+        pub const WINDOW_PIXEL_SIZE_CHANGED: u32 = 0x207;
         pub const WINDOW_MOUSE_ENTER: u32 = 0x20c;
         pub const WINDOW_MOUSE_LEAVE: u32 = 0x20d;
         pub const WINDOW_FOCUS_GAINED: u32 = 0x20e;
         pub const WINDOW_FOCUS_LOST: u32 = 0x20f;
         pub const WINDOW_CLOSE_REQUESTED: u32 = 0x210;
+        pub const WINDOW_DISPLAY_SCALE_CHANGED: u32 = 0x214;
         pub const KEY_DOWN: u32 = 0x300;
         pub const KEY_UP: u32 = 0x301;
         pub const TEXT_EDITING: u32 = 0x302;
@@ -1126,6 +1130,11 @@ pub mod video {
             width: i32,
             height: i32,
         },
+        /// The drawable's pixel dimensions or scale changed without changing
+        /// the window's size in desktop coordinates.
+        WindowBackingChanged {
+            window: u32,
+        },
         WindowClosed {
             window: u32,
         },
@@ -1217,6 +1226,11 @@ pub mod video {
                         width: e.data1,
                         height: e.data2,
                     }
+                }
+                event_type::WINDOW_PIXEL_SIZE_CHANGED
+                | event_type::WINDOW_DISPLAY_SCALE_CHANGED => {
+                    let e: WindowEvent = decode(&raw);
+                    Event::WindowBackingChanged { window: e.window }
                 }
                 event_type::WINDOW_CLOSE_REQUESTED => {
                     let e: WindowEvent = decode(&raw);
@@ -1454,6 +1468,13 @@ pub mod video {
         };
         // SAFETY: a window this crate created.
         unsafe { f(window, width, height) }
+    }
+
+    pub fn window_size_in_pixels(window: Window) -> Option<(i32, i32)> {
+        let f = api()?.SDL_GetWindowSizeInPixels?;
+        let (mut w, mut h) = (0, 0);
+        // SAFETY: a window and two writable ints.
+        unsafe { f(window, &mut w, &mut h) }.then_some((w, h))
     }
 
     pub fn window_position(window: Window) -> Option<(i32, i32)> {

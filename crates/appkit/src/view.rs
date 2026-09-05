@@ -604,13 +604,20 @@ pub unsafe fn superview_of(view: Id) -> Id {
     }
 }
 
-/// The backing scale a view draws at: its window's, or one.
+/// The backing scale of a view's window, or one.
+///
+/// `wantsBestResolutionOpenGLSurface` controls the resolution AppKit gives an
+/// OpenGL surface; it does not change the window's backing coordinate system.
+/// SDL's OpenGL surface is always the high-density one because the window was
+/// created with `HIGH_PIXEL_DENSITY`, so reporting one here for a view that did
+/// not set that flag leaves the guest drawing a point-sized viewport into a
+/// pixel-sized surface.
 fn scale(receiver: Id) -> f64 {
     // SAFETY: a view of this crate's.
     let window = unsafe { window_of(receiver) };
     // SAFETY: null or a window this crate made.
     let sdl = unsafe { crate::window::sdl_window(window) };
-    match sdl.is_null() || view_of(receiver).wants_best_resolution == 0 {
+    match sdl.is_null() {
         true => 1.0,
         false => sdl3::video::window_pixel_density(sdl) as f64,
     }
