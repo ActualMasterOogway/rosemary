@@ -1,31 +1,49 @@
 use std::ffi::c_void;
-use std::sync::Arc;
+use std::sync::OnceLock;
 
-use corefoundation::base::CFTypeRef;
+use corefoundation::base::{CFTypeID, CFTypeRef};
+use objc::class::Class;
 
 use crate::hid::Device;
+
+pub fn type_id() -> CFTypeID {
+    corefoundation::base::type_id(class())
+}
+
+fn class() -> &'static Class {
+    static CLASS: OnceLock<usize> = OnceLock::new();
+    let pointer = *CLASS.get_or_init(|| {
+        let class = corefoundation::base::register(c"__IOHIDValue", None, size_of::<Value>(), true);
+        objc::class::ptr(class) as usize
+    });
+    // SAFETY: a leaked class registered above.
+    unsafe { &*(pointer as *const Class) }
+}
 
 /// What an `IOHIDValueRef` points at.
 #[repr(C)]
 pub struct Value {
+    isa: *const Class,
     /// The device the element belongs to, so `IOHIDValueGetElement` can answer.
     pub device: usize,
     pub cookie: u32,
     pub integer: i64,
 }
 
-/// A value for one element's reading, which the caller releases.
-pub fn new(device: &Arc<Device>, cookie: u32, integer: i64) -> CFTypeRef {
-    let value = Box::into_raw(Box::new(Value {
-        device: Arc::as_ptr(device) as usize,
-        cookie,
-        integer,
-    })) as CFTypeRef;
-    // A value is the one handle here that is freed, so it is forgotten again in
-    // [`release`] rather than left in the table for an unrelated allocation to
-    // land on. See `corefoundation::base::note_opaque`.
-    corefoundation::base::note_opaque(value);
-    value
+/// A value for one element's reading. Its owner decides whether to release or
+/// autorelease it according to the API that produced it.
+pub fn new(device: &Device, cookie: u32, integer: i64) -> CFTypeRef {
+    // SAFETY: `Value` starts with an isa and is the layout registered by
+    // `class`.
+    let value = unsafe { corefoundation::base::allocate::<Value>(class()) };
+    // SAFETY: a new instance; allocation initialized the isa word and the
+    // remaining fields belong to this type.
+    unsafe {
+        (*value).device = std::ptr::from_ref(device) as usize;
+        (*value).cookie = cookie;
+        (*value).integer = integer;
+    }
+    value as CFTypeRef
 }
 
 /// Give one back.
@@ -33,10 +51,7 @@ pub fn release(value: CFTypeRef) {
     if value.is_null() {
         return;
     }
-    corefoundation::base::forget_opaque(value);
-    // SAFETY: a pointer [`new`] produced, released once - which is what the one
-    // caller, the manager's poll, does immediately after the callback returns.
-    drop(unsafe { Box::from_raw(value as *mut Value) });
+    objc::arc::release(value as objc::object::Id);
 }
 
 /// # Safety

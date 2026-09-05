@@ -748,6 +748,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `IOReturn IOHIDDeviceOpen(IOHIDDeviceRef, IOOptionBits)`, and its close.
     sig!("IOHIDDeviceOpen", I32, P, U32),
     sig!("IOHIDDeviceClose", I32, P, U32),
+    sig!("IOHIDDeviceGetTypeID", U64),
     sig!("IOHIDDeviceGetProperty", P, P, P),
     // `IOHIDDeviceGetService` hands back the `io_service_t` behind a device,
     // which is the 32-bit port name the registry calls are asked in terms of -
@@ -806,6 +807,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("IOHIDElementGetUsage", U32, P),
     sig!("IOHIDElementGetUsagePage", U32, P),
     sig!("IOHIDManagerClose", I32, P, U32),
+    sig!("IOHIDManagerGetTypeID", U64),
     // `IOHIDManagerRef IOHIDManagerCreate(CFAllocatorRef, IOOptionBits)` -
     // a null allocator is the default one, which is what a game passes.
     sig!("IOHIDManagerCopyDevices", P, P),
@@ -841,6 +843,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("IOHIDValueGetElement", P, P),
     sig!("IOHIDValueGetIntegerValue", I64, P),
     sig!("IOHIDValueGetLength", I64, P),
+    sig!("IOHIDValueGetTypeID", U64),
     sig!("IOIteratorIsValid", I32, U32),
     sig!("IOIteratorNext", U32, U32),
     sig!("IOMasterPort", I32, U32, P),

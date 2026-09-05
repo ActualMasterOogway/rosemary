@@ -4,10 +4,10 @@ use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
 use corefoundation::api as cf;
-use corefoundation::base::{CFIndex, CFTypeRef};
+use corefoundation::base::{CFIndex, CFTypeID, CFTypeRef};
 use corefoundation::collections::{self, Number};
 
-use crate::hid::Device;
+use crate::hid::{Device, RemovalCallback};
 use crate::manager::{Criterion, DeviceCallback, Manager, ValueCallback};
 use crate::value;
 
@@ -37,7 +37,7 @@ pub unsafe extern "C" fn IOHIDManagerCreate(_allocator: CFTypeRef, _options: u32
     let manager = Arc::new(Manager::new());
     let handle = Arc::as_ptr(&manager) as CFTypeRef;
     // A guest may `CFRetain` it, and this handle has no isa to retain through.
-    corefoundation::base::note_opaque(handle);
+    corefoundation::base::note_typed_opaque(handle, crate::manager::type_id());
     MANAGERS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -61,6 +61,22 @@ pub unsafe extern "C" fn IOHIDManagerClose(manager: CFTypeRef, _options: u32) ->
     SUCCESS
 }
 
+pub unsafe extern "C" fn IOHIDManagerGetTypeID() -> CFTypeID {
+    crate::manager::type_id()
+}
+
+pub unsafe extern "C" fn IOHIDDeviceGetTypeID() -> CFTypeID {
+    crate::hid::device_type_id()
+}
+
+pub unsafe extern "C" fn IOHIDElementGetTypeID() -> CFTypeID {
+    crate::hid::element_type_id()
+}
+
+pub unsafe extern "C" fn IOHIDValueGetTypeID() -> CFTypeID {
+    value::type_id()
+}
+
 /// Read one matching dictionary into a [`Criterion`].
 ///
 /// # Safety
@@ -82,6 +98,8 @@ unsafe fn criterion_of(dictionary: CFTypeRef) -> Criterion {
         Criterion {
             page: number_for(dictionary, c"DeviceUsagePage"),
             usage: number_for(dictionary, c"DeviceUsage"),
+            vendor: number_for(dictionary, c"VendorID"),
+            product: number_for(dictionary, c"ProductID"),
         }
     }
 }
@@ -139,6 +157,17 @@ pub unsafe extern "C" fn IOHIDManagerRegisterDeviceRemovalCallback(
     // SAFETY: the caller's obligation.
     if let Some(m) = unsafe { self::manager(manager) } {
         m.set_removed(callback, context as usize);
+    }
+}
+
+pub unsafe extern "C" fn IOHIDManagerRegisterInputValueCallback(
+    manager: CFTypeRef,
+    callback: Option<ValueCallback>,
+    context: *mut c_void,
+) {
+    // SAFETY: the caller's obligation.
+    if let Some(manager) = unsafe { self::manager(manager) } {
+        manager.set_values(callback, context as usize);
     }
 }
 
@@ -300,6 +329,38 @@ pub unsafe extern "C" fn IOHIDDeviceClose(_device: CFTypeRef, _options: u32) -> 
     SUCCESS
 }
 
+/// Poll one element from a device.
+pub unsafe extern "C" fn IOHIDDeviceGetValue(
+    device: CFTypeRef,
+    element: *const c_void,
+    out: *mut CFTypeRef,
+) -> IOReturn {
+    if out.is_null() {
+        return ERROR;
+    }
+    // SAFETY: the caller's two handles must be a device and one of its
+    // elements.
+    let Some(device) = (unsafe { self::device(device) }) else {
+        return ERROR;
+    };
+    let Some((owner, cookie)) = (unsafe { value::element(element) }) else {
+        return ERROR;
+    };
+    if !std::ptr::eq(device, owner) {
+        return ERROR;
+    }
+    let Some(element) = device.element(cookie) else {
+        return ERROR;
+    };
+    let value = value::new(device, cookie, device.value(element));
+    // `GetValue` has no Create/Copy ownership; keep the value valid through the
+    // caller's autorelease pool.
+    let value = unsafe { cf::CFAutorelease(value) };
+    // SAFETY: checked non-null above.
+    unsafe { out.write(value) };
+    SUCCESS
+}
+
 /// Read one field of an element.
 macro_rules! element_field {
     ($(#[$meta:meta])* $name:ident, $ty:ty, $read:expr, $default:expr) => {
@@ -405,17 +466,25 @@ pub fn key_strings() -> Vec<(&'static str, &'static str)> {
 
 /// `CFSetRef IOHIDManagerCopyDevices(IOHIDManagerRef)`.
 ///
-/// Null, which is what Apple's returns when the manager has matched nothing -
-/// so a caller already has this case. The alternative would be an empty
-/// `CFSetRef`, and there is no `CFSet` in this tree to hand back: a `CFArray`
-/// in its place is a different type whose `CFSetGetCount` reads the wrong
-/// field.
-///
-/// The devices this crate does know about arrive through
-/// `IOHIDManagerRegisterDeviceMatchingCallback` instead, which is the path
-/// `manager::Manager` drives.
-pub unsafe extern "C" fn IOHIDManagerCopyDevices(_manager: CFTypeRef) -> CFTypeRef {
-    std::ptr::null_mut()
+/// Null when no devices have matched, otherwise a retained set of the devices
+/// the manager currently owns.
+pub unsafe extern "C" fn IOHIDManagerCopyDevices(manager: CFTypeRef) -> CFTypeRef {
+    // SAFETY: the caller's obligation.
+    let Some(manager) = (unsafe { self::manager(manager) }) else {
+        return std::ptr::null();
+    };
+    let devices = manager.devices();
+    if devices.is_empty() {
+        return std::ptr::null();
+    }
+    let handles: Vec<CFTypeRef> = devices
+        .iter()
+        .map(|device| Arc::as_ptr(device) as CFTypeRef)
+        .collect();
+    collections::new_set(
+        &handles,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+    )
 }
 
 /// `io_service_t IOHIDDeviceGetService(IOHIDDeviceRef)`.
@@ -449,13 +518,17 @@ pub unsafe extern "C" fn IOHIDDeviceUnscheduleFromRunLoop(
 
 /// `IOHIDDeviceRegisterRemovalCallback(device, callback, context)`.
 ///
-/// Accepted and never called: SDL reports removal through the *manager*, which
-/// is where `IOHIDManagerRegisterDeviceRemovalCallback` already listens.
+/// SDL reports removal while polling the manager, which delivers both the
+/// device callback registered here and the manager-level callback.
 pub unsafe extern "C" fn IOHIDDeviceRegisterRemovalCallback(
-    _device: CFTypeRef,
-    _callback: *const c_void,
-    _context: *mut c_void,
+    device: CFTypeRef,
+    callback: Option<RemovalCallback>,
+    context: *mut c_void,
 ) {
+    // SAFETY: the caller's obligation.
+    if let Some(device) = unsafe { self::device(device) } {
+        device.set_removal_callback(callback, context as usize);
+    }
 }
 
 /// The raw-report family: `IOHIDDeviceGetReport`, `IOHIDDeviceSetReport`,

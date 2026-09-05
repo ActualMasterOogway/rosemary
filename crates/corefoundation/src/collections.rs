@@ -1,4 +1,4 @@
-//! `CFArray`, `CFDictionary`, `CFNumber` and `CFData`.
+//! `CFArray`, `CFSet`, `CFDictionary`, `CFNumber` and `CFData`.
 //!
 //! Each is an object of this tree's Objective-C runtime whose body is a
 //! `#[repr(C)]` struct beginning with the `isa`, and whose contents live in a
@@ -144,6 +144,57 @@ pub fn new_array(values: &[CFTypeRef], policy: Policy, mutable: bool) -> CFTypeR
 pub unsafe fn array<'a>(object: CFTypeRef) -> Option<&'a mut ArrayContents> {
     // SAFETY: the caller's obligation.
     unsafe { contents(object, array_class()) }
+}
+
+//
+
+pub struct SetContents {
+    pub values: Vec<CFTypeRef>,
+    pub policy: Policy,
+}
+
+impl Drop for SetContents {
+    fn drop(&mut self) {
+        for value in self.values.drain(..) {
+            self.policy.release(value);
+        }
+    }
+}
+
+pub fn set_class() -> &'static Class {
+    static CLASS: OnceLock<usize> = OnceLock::new();
+    let p = *CLASS.get_or_init(|| {
+        objc::class::ptr(register::<SetContents>(
+            c"__NSCFSet",
+            crate::base::mutable_pair(c"NSSet", c"NSMutableSet"),
+        )) as usize
+    });
+    // SAFETY: a leaked `Class` this crate registered.
+    unsafe { &*(p as *const Class) }
+}
+
+pub fn new_set(values: &[CFTypeRef], policy: Policy) -> CFTypeRef {
+    let mut unique = Vec::with_capacity(values.len());
+    for value in values {
+        if !unique.iter().any(|v| policy.equal(*v, *value)) {
+            unique.push(policy.retain(*value));
+        }
+    }
+    make(
+        set_class(),
+        SetContents {
+            values: unique,
+            policy,
+        },
+    )
+}
+
+/// # Safety
+///
+/// As [`contents`].
+pub unsafe fn set<'a>(object: CFTypeRef) -> Option<&'a mut SetContents> {
+    // SAFETY: the caller's obligation.
+    unsafe { contents(object, set_class()) }
 }
 
 //

@@ -23,6 +23,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         "IOHIDManagerCreate" => at!(api::IOHIDManagerCreate),
         "IOHIDManagerOpen" => at!(api::IOHIDManagerOpen),
         "IOHIDManagerClose" => at!(api::IOHIDManagerClose),
+        "IOHIDManagerGetTypeID" => at!(api::IOHIDManagerGetTypeID),
         "IOHIDManagerSetDeviceMatching" => at!(api::IOHIDManagerSetDeviceMatching),
         "IOHIDManagerSetDeviceMatchingMultiple" => at!(api::IOHIDManagerSetDeviceMatchingMultiple),
         "IOHIDManagerRegisterDeviceMatchingCallback" => {
@@ -30,6 +31,9 @@ pub fn symbol(name: &str) -> Option<u64> {
         }
         "IOHIDManagerRegisterDeviceRemovalCallback" => {
             at!(api::IOHIDManagerRegisterDeviceRemovalCallback)
+        }
+        "IOHIDManagerRegisterInputValueCallback" => {
+            at!(api::IOHIDManagerRegisterInputValueCallback)
         }
         "IOHIDManagerScheduleWithRunLoop" => at!(api::IOHIDManagerScheduleWithRunLoop),
         "IOHIDManagerUnscheduleFromRunLoop" => at!(api::IOHIDManagerUnscheduleFromRunLoop),
@@ -39,6 +43,8 @@ pub fn symbol(name: &str) -> Option<u64> {
         "IOHIDDeviceCopyMatchingElements" => at!(api::IOHIDDeviceCopyMatchingElements),
         "IOHIDDeviceOpen" => at!(api::IOHIDDeviceOpen),
         "IOHIDDeviceClose" => at!(api::IOHIDDeviceClose),
+        "IOHIDDeviceGetTypeID" => at!(api::IOHIDDeviceGetTypeID),
+        "IOHIDDeviceGetValue" => at!(api::IOHIDDeviceGetValue),
 
         "IOHIDElementGetCookie" => at!(api::IOHIDElementGetCookie),
         "IOHIDElementGetUsagePage" => at!(api::IOHIDElementGetUsagePage),
@@ -47,11 +53,13 @@ pub fn symbol(name: &str) -> Option<u64> {
         "IOHIDElementGetLogicalMin" => at!(api::IOHIDElementGetLogicalMin),
         "IOHIDElementGetLogicalMax" => at!(api::IOHIDElementGetLogicalMax),
         "IOHIDElementGetChildren" => at!(api::IOHIDElementGetChildren),
+        "IOHIDElementGetTypeID" => at!(api::IOHIDElementGetTypeID),
 
         "IOHIDValueGetElement" => at!(api::IOHIDValueGetElement),
         "IOHIDValueGetIntegerValue" => at!(api::IOHIDValueGetIntegerValue),
         "IOHIDValueGetLength" => at!(api::IOHIDValueGetLength),
         "IOHIDValueGetScaledValue" => at!(api::IOHIDValueGetScaledValue),
+        "IOHIDValueGetTypeID" => at!(api::IOHIDValueGetTypeID),
 
         "IOHIDManagerCopyDevices" => at!(api::IOHIDManagerCopyDevices),
         "IOHIDDeviceGetService" => at!(api::IOHIDDeviceGetService),
@@ -71,10 +79,12 @@ pub const NAMES: &[&str] = &[
     "IOHIDManagerCreate",
     "IOHIDManagerOpen",
     "IOHIDManagerClose",
+    "IOHIDManagerGetTypeID",
     "IOHIDManagerSetDeviceMatching",
     "IOHIDManagerSetDeviceMatchingMultiple",
     "IOHIDManagerRegisterDeviceMatchingCallback",
     "IOHIDManagerRegisterDeviceRemovalCallback",
+    "IOHIDManagerRegisterInputValueCallback",
     "IOHIDManagerScheduleWithRunLoop",
     "IOHIDManagerUnscheduleFromRunLoop",
     "IOHIDDeviceRegisterInputValueCallback",
@@ -82,6 +92,8 @@ pub const NAMES: &[&str] = &[
     "IOHIDDeviceCopyMatchingElements",
     "IOHIDDeviceOpen",
     "IOHIDDeviceClose",
+    "IOHIDDeviceGetTypeID",
+    "IOHIDDeviceGetValue",
     "IOHIDElementGetCookie",
     "IOHIDElementGetUsagePage",
     "IOHIDElementGetUsage",
@@ -89,10 +101,12 @@ pub const NAMES: &[&str] = &[
     "IOHIDElementGetLogicalMin",
     "IOHIDElementGetLogicalMax",
     "IOHIDElementGetChildren",
+    "IOHIDElementGetTypeID",
     "IOHIDValueGetElement",
     "IOHIDValueGetIntegerValue",
     "IOHIDValueGetLength",
     "IOHIDValueGetScaledValue",
+    "IOHIDValueGetTypeID",
     "IOHIDManagerCopyDevices",
     "IOHIDDeviceGetService",
     "IOHIDDeviceScheduleWithRunLoop",

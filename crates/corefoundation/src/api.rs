@@ -93,10 +93,16 @@ pub unsafe extern "C" fn CFAutorelease(object: CFTypeRef) -> CFTypeRef {
 }
 
 pub unsafe extern "C" fn CFGetRetainCount(object: CFTypeRef) -> CFIndex {
+    if crate::base::is_opaque(object) {
+        return 1;
+    }
     objc::arc::retain_count(object as Id) as CFIndex
 }
 
 pub unsafe extern "C" fn CFGetTypeID(object: CFTypeRef) -> CFTypeID {
+    if let Some(type_id) = crate::base::opaque_type_id(object) {
+        return type_id;
+    }
     // SAFETY: the caller's obligation - an object this runtime allocated.
     unsafe { crate::base::class_of(object) }.map_or(0, crate::base::type_id_of)
 }
@@ -113,6 +119,9 @@ pub unsafe extern "C" fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> Boolean {
     if a.is_null() || b.is_null() {
         return 0;
     }
+    if crate::base::is_opaque(a) || crate::base::is_opaque(b) {
+        return 0;
+    }
     // SAFETY: two live objects; `-isEqual:` is `BOOL (*)(id, SEL, id)`.
     unsafe { crate::send::send1_bool(a as Id, objc::sel::get("isEqual:"), b as usize) as Boolean }
 }
@@ -120,6 +129,9 @@ pub unsafe extern "C" fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> Boolean {
 pub unsafe extern "C" fn CFHash(object: CFTypeRef) -> usize {
     if object.is_null() {
         return 0;
+    }
+    if crate::base::is_opaque(object) {
+        return object as usize;
     }
     // SAFETY: a live object; `-hash` is `NSUInteger (*)(id, SEL)`.
     unsafe { crate::send::send0_usize(object as Id, objc::sel::get("hash")) }
@@ -742,6 +754,47 @@ pub unsafe extern "C" fn CFArrayGetValueAtIndex(array: CFTypeRef, index: CFIndex
         // that walks past the end gets a nil it can see rather than a crash in a
         // frame that says nothing about its own loop.
         None => std::ptr::null(),
+    }
+}
+
+//
+
+pub unsafe extern "C" fn CFSetGetTypeID() -> CFTypeID {
+    crate::base::type_id_of(collections::set_class())
+}
+
+pub unsafe extern "C" fn CFSetGetCount(set: CFTypeRef) -> CFIndex {
+    // SAFETY: the caller's obligation.
+    unsafe { collections::set(set) }.map_or(0, |set| set.values.len() as CFIndex)
+}
+
+pub unsafe extern "C" fn CFSetGetValues(set: CFTypeRef, values: *mut CFTypeRef) {
+    if values.is_null() {
+        return;
+    }
+    // SAFETY: the caller's obligation.
+    let Some(set) = (unsafe { collections::set(set) }) else {
+        return;
+    };
+    // SAFETY: the caller provides room for CFSetGetCount entries.
+    unsafe { std::ptr::copy_nonoverlapping(set.values.as_ptr(), values, set.values.len()) };
+}
+
+pub unsafe extern "C" fn CFSetApplyFunction(
+    set: CFTypeRef,
+    callback: Option<ArrayApplierFunction>,
+    context: *mut c_void,
+) {
+    let Some(callback) = callback else {
+        return;
+    };
+    // SAFETY: the caller's obligation. Copy before entering guest code.
+    let Some(values) = (unsafe { collections::set(set) }).map(|set| set.values.clone()) else {
+        return;
+    };
+    for value in values {
+        // SAFETY: the caller supplies this CFSetApplierFunction.
+        unsafe { callback(value, context) };
     }
 }
 
@@ -1431,6 +1484,22 @@ pub unsafe extern "C" fn CFRunLoopTimerIsValid(timer: CFTypeRef) -> Boolean {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_opaque_cf_handle_uses_its_registered_type_without_an_isa() {
+        static HANDLE: u8 = 0;
+        let handle = std::ptr::addr_of!(HANDLE).cast::<c_void>();
+        crate::base::note_typed_opaque(handle, 0x1234);
+        // SAFETY: a registered opaque CF handle.
+        unsafe {
+            assert_eq!(CFGetTypeID(handle), 0x1234);
+            assert_eq!(CFGetRetainCount(handle), 1);
+            assert_eq!(CFHash(handle), handle as usize);
+            assert_eq!(CFEqual(handle, handle), 1);
+            assert_eq!(CFRetain(handle), handle);
+            CFRelease(handle);
+        }
+    }
 
     /// An empty `CFData` must still answer a byte pointer that can be read.
     /// Rust's own answer is the alignment, which is not null and faults.

@@ -18,6 +18,7 @@ use iokit::api;
 use iokit::hid::{element_type, page, usage};
 
 static MATCHED: AtomicUsize = AtomicUsize::new(0);
+static REMOVED: AtomicUsize = AtomicUsize::new(0);
 static DEVICE: Mutex<usize> = Mutex::new(0);
 static VALUES: Mutex<Vec<(u32, i64)>> = Mutex::new(Vec::new());
 
@@ -47,6 +48,10 @@ unsafe extern "C" fn changed(
             .unwrap_or_else(|e| e.into_inner())
             .push((cookie, integer));
     }
+}
+
+unsafe extern "C" fn removed(_context: *mut c_void, _result: i32, _sender: *mut c_void) {
+    REMOVED.fetch_add(1, Ordering::SeqCst);
 }
 
 fn string(text: &[u8]) -> CFTypeRef {
@@ -100,6 +105,7 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
         return;
     }
     corefoundation::bootstrap();
+    let pool = unsafe { objc::api::objc_autoreleasePoolPush() };
 
     let label = c"rosetta3 test pad";
     let desc = sdl3::virtual_joystick::Desc {
@@ -121,19 +127,16 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
     // The guest's sequence, in the guest's order.
     // SAFETY: every argument is an object built just above, and the callbacks
     // are this file's own.
+    let manager;
     unsafe {
-        let manager = api::IOHIDManagerCreate(std::ptr::null(), 0);
+        manager = api::IOHIDManagerCreate(std::ptr::null(), 0);
         api::IOHIDManagerSetDeviceMatchingMultiple(manager, gamepad_criteria());
         api::IOHIDManagerRegisterDeviceMatchingCallback(
             manager,
             Some(matched),
             std::ptr::null_mut(),
         );
-        api::IOHIDDeviceRegisterInputValueCallback(
-            std::ptr::null(),
-            Some(changed),
-            std::ptr::null_mut(),
-        );
+        api::IOHIDManagerRegisterInputValueCallback(manager, Some(changed), std::ptr::null_mut());
         assert_eq!(api::IOHIDManagerOpen(manager, 0), 0, "the manager opens");
         api::IOHIDManagerScheduleWithRunLoop(
             manager,
@@ -150,6 +153,18 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
     );
     let device = *DEVICE.lock().unwrap_or_else(|e| e.into_inner()) as CFTypeRef;
     assert!(!device.is_null());
+    unsafe {
+        let devices = api::IOHIDManagerCopyDevices(manager);
+        assert_eq!(cf::CFGetTypeID(devices), cf::CFSetGetTypeID());
+        assert_eq!(cf::CFSetGetCount(devices), 1);
+        let mut copied = std::ptr::null();
+        cf::CFSetGetValues(devices, &mut copied);
+        assert_eq!(copied, device);
+        cf::CFRelease(devices);
+    }
+    unsafe {
+        api::IOHIDDeviceRegisterRemovalCallback(device, Some(removed), std::ptr::null_mut());
+    }
 
     // The properties the runner builds its GUID from, which is what
     // `SGamepadMapping::FindFromGUID` matches on.
@@ -171,6 +186,13 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
         let count = cf::CFArrayGetCount(elements);
         assert_eq!(count, 1 + 6 + 1 + 15, "the element tree is the wrong shape");
 
+        // Roblox rejects every array member whose general CF type does not
+        // equal IOKit's element type before it reads any HID fields.
+        for i in 0..count {
+            let element = cf::CFArrayGetValueAtIndex(elements, i);
+            assert_eq!(cf::CFGetTypeID(element), api::IOHIDElementGetTypeID());
+        }
+
         // The first axis is X on the generic-desktop page, over SDL's own range.
         let first_axis = cf::CFArrayGetValueAtIndex(elements, 1) as *const c_void;
         assert_eq!(
@@ -184,6 +206,14 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
         );
         assert_eq!(api::IOHIDElementGetLogicalMin(first_axis), -32768);
         assert_eq!(api::IOHIDElementGetLogicalMax(first_axis), 32767);
+
+        // Roblox polls mapped controls with IOHIDDeviceGetValue rather than
+        // registering the manager-level value callback.
+        let mut value = std::ptr::null();
+        assert_eq!(api::IOHIDDeviceGetValue(device, first_axis, &mut value), 0);
+        assert!(!value.is_null());
+        assert_eq!(cf::CFGetTypeID(value), api::IOHIDValueGetTypeID());
+        assert_eq!(api::IOHIDValueGetElement(value), first_axis);
 
         // And the root collection's children are everything else.
         let root = cf::CFArrayGetValueAtIndex(elements, 0) as *const c_void;
@@ -218,4 +248,7 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
     // SAFETY: a joystick this test opened.
     unsafe { sdl3::close(joystick) };
     sdl3::virtual_joystick::detach(id);
+    pump_until(|| REMOVED.load(Ordering::SeqCst) > 0);
+    assert_eq!(REMOVED.load(Ordering::SeqCst), 1);
+    unsafe { objc::api::objc_autoreleasePoolPop(pool) };
 }

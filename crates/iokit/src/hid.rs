@@ -1,4 +1,21 @@
+use std::ffi::c_void;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU8;
+
+use corefoundation::base::CFTypeID;
+
+static DEVICE_TYPE: AtomicU8 = AtomicU8::new(0);
+static ELEMENT_TYPE: AtomicU8 = AtomicU8::new(0);
+
+pub fn device_type_id() -> CFTypeID {
+    std::ptr::addr_of!(DEVICE_TYPE) as CFTypeID
+}
+
+pub fn element_type_id() -> CFTypeID {
+    std::ptr::addr_of!(ELEMENT_TYPE) as CFTypeID
+}
+
+pub type RemovalCallback = unsafe extern "C" fn(*mut c_void, i32, *mut c_void);
 
 pub mod page {
     pub const GENERIC_DESKTOP: u32 = 0x01;
@@ -70,6 +87,7 @@ pub struct Device {
     /// device's address and that is not known before then. See
     /// [`Device::publish`].
     handles: std::sync::OnceLock<Vec<crate::value::ElementRef>>,
+    removal: Mutex<(Option<RemovalCallback>, usize)>,
 }
 
 // SAFETY: `joystick` is an SDL handle used only from the thread that opened it -
@@ -111,6 +129,7 @@ impl Device {
             elements,
             last,
             handles: std::sync::OnceLock::new(),
+            removal: Mutex::new((None, 0)),
         });
         device.publish();
         Some(device)
@@ -130,11 +149,12 @@ impl Device {
         // The device and every element handle are things a guest may `CFRetain`
         // - see `corefoundation::base::note_opaque` - and both live as long as
         // the device does, which is as long as the process.
-        corefoundation::base::note_opaque(base as *const std::ffi::c_void);
+        corefoundation::base::note_typed_opaque(base as *const std::ffi::c_void, device_type_id());
         let _ = self.handles.set(handles);
         for handle in self.handles.get().into_iter().flatten() {
-            corefoundation::base::note_opaque(
-                std::ptr::from_ref(handle) as *const std::ffi::c_void
+            corefoundation::base::note_typed_opaque(
+                std::ptr::from_ref(handle) as *const std::ffi::c_void,
+                element_type_id(),
             );
         }
     }
@@ -151,6 +171,25 @@ impl Device {
 
     pub fn element(&self, cookie: u32) -> Option<&Element> {
         self.elements.get(cookie as usize)
+    }
+
+    pub fn set_removal_callback(&self, callback: Option<RemovalCallback>, context: usize) {
+        *self.removal.lock().unwrap_or_else(|e| e.into_inner()) = (callback, context);
+    }
+
+    pub fn notify_removed(&self) {
+        let (callback, context) = *self.removal.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(callback) = callback {
+            // SAFETY: the registration supplies an IOHIDCallback and its
+            // untouched context. The device remains alive for this call.
+            unsafe {
+                callback(
+                    context as *mut c_void,
+                    0,
+                    std::ptr::from_ref(self).cast_mut().cast(),
+                )
+            };
+        }
     }
 
     /// What an element reads right now.

@@ -32,6 +32,7 @@ pub fn bootstrap() {
     string::class();
     string::constant_class();
     collections::array_class();
+    collections::set_class();
     collections::dictionary_class();
     collections::number_class();
     collections::boolean_class();
@@ -92,6 +93,11 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFArrayGetValueAtIndex" => at!(api::CFArrayGetValueAtIndex),
         "CFArrayCreateMutable" => at!(api::CFArrayCreateMutable),
         "CFArrayAppendValue" => at!(api::CFArrayAppendValue),
+
+        "CFSetGetTypeID" => at!(api::CFSetGetTypeID),
+        "CFSetApplyFunction" => at!(api::CFSetApplyFunction),
+        "CFSetGetCount" => at!(api::CFSetGetCount),
+        "CFSetGetValues" => at!(api::CFSetGetValues),
 
         "CFDictionaryGetTypeID" => at!(api::CFDictionaryGetTypeID),
         "CFDictionaryCreate" => at!(api::CFDictionaryCreate),
@@ -190,6 +196,10 @@ pub const NAMES: &[&str] = &[
     "CFArrayGetValueAtIndex",
     "CFArrayCreateMutable",
     "CFArrayAppendValue",
+    "CFSetGetTypeID",
+    "CFSetApplyFunction",
+    "CFSetGetCount",
+    "CFSetGetValues",
     "CFDictionaryGetTypeID",
     "CFDictionaryCreate",
     "CFDictionaryGetCount",

@@ -1,10 +1,17 @@
 use std::collections::BTreeMap;
 use std::ffi::c_void;
+use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, Mutex};
 
-use corefoundation::base::CFTypeRef;
+use corefoundation::base::{CFTypeID, CFTypeRef};
 
 use crate::hid::Device;
+
+static MANAGER_TYPE: AtomicU8 = AtomicU8::new(0);
+
+pub fn type_id() -> CFTypeID {
+    std::ptr::addr_of!(MANAGER_TYPE) as CFTypeID
+}
 
 /// `IOHIDDeviceCallback`: `(context, result, sender, device)`.
 pub type DeviceCallback = unsafe extern "C" fn(*mut c_void, i32, *mut c_void, CFTypeRef);
@@ -13,20 +20,23 @@ pub type ValueCallback = unsafe extern "C" fn(*mut c_void, i32, *mut c_void, CFT
 
 /// One matching criterion, as a dictionary a guest built.
 ///
-/// Only the two keys anything uses: a page and a usage. A criterion naming
-/// something else matches nothing rather than everything - a manager that
-/// reported every device to a guest asking for gamepads would have it treat a
-/// keyboard as one.
+/// The usage pair selects a device class; vendor and product support the
+/// narrower enumeration filter used by HIDAPI.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Criterion {
     pub page: Option<u32>,
     pub usage: Option<u32>,
+    pub vendor: Option<u32>,
+    pub product: Option<u32>,
 }
 
 impl Criterion {
     /// Whether a device whose root collection is `(page, usage)` matches.
-    pub fn matches(&self, page: u32, usage: u32) -> bool {
-        self.page.is_none_or(|p| p == page) && self.usage.is_none_or(|u| u == usage)
+    pub fn matches(&self, page: u32, usage: u32, vendor: u32, product: u32) -> bool {
+        self.page.is_none_or(|p| p == page)
+            && self.usage.is_none_or(|u| u == usage)
+            && self.vendor.is_none_or(|v| v == vendor)
+            && self.product.is_none_or(|p| p == product)
     }
 }
 
@@ -50,6 +60,9 @@ impl<T> Default for Registered<T> {
 pub struct Manager {
     criteria: Mutex<Vec<Criterion>>,
     devices: Mutex<BTreeMap<sdl3::JoystickId, Arc<Device>>>,
+    /// Removed devices remain alive because opaque CFRetain/CFRelease is a
+    /// no-op and guest code may release its device after the removal callback.
+    retired: Mutex<Vec<Arc<Device>>>,
     matched: Mutex<Registered<DeviceCallback>>,
     removed: Mutex<Registered<DeviceCallback>>,
     values: Mutex<Registered<ValueCallback>>,
@@ -66,6 +79,7 @@ impl Manager {
         Manager {
             criteria: Mutex::new(Vec::new()),
             devices: Mutex::new(BTreeMap::new()),
+            retired: Mutex::new(Vec::new()),
             matched: Mutex::new(Registered::default()),
             removed: Mutex::new(Registered::default()),
             values: Mutex::new(Registered::default()),
@@ -108,7 +122,14 @@ impl Manager {
             return true;
         }
         let root = &device.elements[0];
-        criteria.iter().any(|c| c.matches(root.page, root.usage))
+        criteria.iter().any(|c| {
+            c.matches(
+                root.page,
+                root.usage,
+                device.vendor as u32,
+                device.product as u32,
+            )
+        })
     }
 
     pub fn device(&self, id: sdl3::JoystickId) -> Option<Arc<Device>> {
@@ -117,6 +138,16 @@ impl Manager {
             .unwrap_or_else(|e| e.into_inner())
             .get(&id)
             .cloned()
+    }
+
+    pub fn devices(&self) -> Vec<Arc<Device>> {
+        self.devices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|device| self.accepts(device))
+            .cloned()
+            .collect()
     }
 
     /// One turn: notice what appeared and went, and report what moved.
@@ -179,6 +210,7 @@ impl Manager {
             }
         }
         for device in vanished {
+            device.notify_removed();
             let registered = *self.removed.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(callback) = registered.callback {
                 // SAFETY: as above.
@@ -191,6 +223,10 @@ impl Manager {
                     )
                 };
             }
+            self.retired
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(device);
         }
 
         // And what moved, one callback per element per change
@@ -240,18 +276,22 @@ mod tests {
         let gamepad = Criterion {
             page: Some(page::GENERIC_DESKTOP),
             usage: Some(usage::GAMEPAD),
+            vendor: None,
+            product: None,
         };
-        assert!(gamepad.matches(page::GENERIC_DESKTOP, usage::GAMEPAD));
-        assert!(!gamepad.matches(page::GENERIC_DESKTOP, usage::JOYSTICK));
-        assert!(!gamepad.matches(page::BUTTON, usage::GAMEPAD));
+        assert!(gamepad.matches(page::GENERIC_DESKTOP, usage::GAMEPAD, 1, 2));
+        assert!(!gamepad.matches(page::GENERIC_DESKTOP, usage::JOYSTICK, 1, 2));
+        assert!(!gamepad.matches(page::BUTTON, usage::GAMEPAD, 1, 2));
 
         // A criterion that names only a page matches every usage on it, which
         // is what a guest asking for "anything on the desktop page" means.
         let any_desktop = Criterion {
             page: Some(page::GENERIC_DESKTOP),
             usage: None,
+            vendor: None,
+            product: None,
         };
-        assert!(any_desktop.matches(page::GENERIC_DESKTOP, usage::JOYSTICK));
-        assert!(!any_desktop.matches(page::BUTTON, 1));
+        assert!(any_desktop.matches(page::GENERIC_DESKTOP, usage::JOYSTICK, 1, 2));
+        assert!(!any_desktop.matches(page::BUTTON, 1, 1, 2));
     }
 }
