@@ -23,6 +23,74 @@ const IPPROTO_IP: i32 = 0;
 const IPPROTO_TCP: i32 = 6;
 const IPPROTO_IPV6: i32 = 41;
 
+/// Darwin socket option names from `<sys/socket.h>`.
+mod so {
+    pub const DEBUG: i32 = 0x0001;
+    pub const ACCEPTCONN: i32 = 0x0002;
+    pub const REUSEADDR: i32 = 0x0004;
+    pub const KEEPALIVE: i32 = 0x0008;
+    pub const DONTROUTE: i32 = 0x0010;
+    pub const BROADCAST: i32 = 0x0020;
+    pub const LINGER: i32 = 0x0080;
+    pub const OOBINLINE: i32 = 0x0100;
+    pub const REUSEPORT: i32 = 0x0200;
+    pub const TIMESTAMP: i32 = 0x0400;
+    pub const SNDBUF: i32 = 0x1001;
+    pub const RCVBUF: i32 = 0x1002;
+    pub const SNDLOWAT: i32 = 0x1003;
+    pub const RCVLOWAT: i32 = 0x1004;
+    pub const SNDTIMEO: i32 = 0x1005;
+    pub const RCVTIMEO: i32 = 0x1006;
+    pub const ERROR: i32 = 0x1007;
+    pub const TYPE: i32 = 0x1008;
+    pub const NREAD: i32 = 0x1020;
+    pub const NOSIGPIPE: i32 = 0x1022;
+    pub const NWRITE: i32 = 0x1024;
+    pub const LINGER_SEC: i32 = 0x1080;
+}
+
+/// Darwin IPv4 option names from `<netinet/in.h>`.
+mod ip {
+    pub const OPTIONS: i32 = 1;
+    pub const HDRINCL: i32 = 2;
+    pub const TOS: i32 = 3;
+    pub const TTL: i32 = 4;
+    pub const RECVOPTS: i32 = 5;
+    pub const MULTICAST_IF: i32 = 9;
+    pub const MULTICAST_TTL: i32 = 10;
+    pub const MULTICAST_LOOP: i32 = 11;
+    pub const ADD_MEMBERSHIP: i32 = 12;
+    pub const DROP_MEMBERSHIP: i32 = 13;
+    pub const RECVTTL: i32 = 24;
+    pub const PKTINFO: i32 = 26;
+    pub const RECVTOS: i32 = 27;
+}
+
+/// Darwin IPv6 option names from `<netinet6/in6.h>`.
+mod ipv6 {
+    pub const UNICAST_HOPS: i32 = 4;
+    pub const MULTICAST_IF: i32 = 9;
+    pub const MULTICAST_HOPS: i32 = 10;
+    pub const MULTICAST_LOOP: i32 = 11;
+    pub const ADD_MEMBERSHIP: i32 = 12;
+    pub const DROP_MEMBERSHIP: i32 = 13;
+    pub const V6ONLY: i32 = 27;
+    pub const RECVTCLASS: i32 = 35;
+    pub const TCLASS: i32 = 36;
+    pub const RECVPKTINFO: i32 = 61;
+}
+
+/// Darwin TCP option names from `<netinet/tcp.h>`.
+mod tcp {
+    pub const NODELAY: i32 = 0x01;
+    pub const MAXSEG: i32 = 0x02;
+    pub const NOPUSH: i32 = 0x04;
+    pub const KEEPALIVE: i32 = 0x10;
+    pub const KEEPINTVL: i32 = 0x101;
+    pub const KEEPCNT: i32 = 0x102;
+    pub const NOTSENT_LOWAT: i32 = 0x201;
+}
+
 /// Darwin's `SO_*` names, paired with the host's.
 ///
 /// `SO_NOSIGPIPE` (`0x1022`) is absent: it has no host counterpart at all. See
@@ -30,27 +98,27 @@ const IPPROTO_IPV6: i32 = 41;
 /// - this host answers both, with an ioctl rather than an option; see
 /// [`queued_bytes`].
 const SOCKET_OPTIONS: &[(i32, i32)] = &[
-    (0x0001, libc::SO_DEBUG),
-    (0x0002, libc::SO_ACCEPTCONN),
-    (0x0004, libc::SO_REUSEADDR),
-    (0x0008, libc::SO_KEEPALIVE),
-    (0x0010, libc::SO_DONTROUTE),
-    (0x0020, libc::SO_BROADCAST),
-    (0x0080, libc::SO_LINGER),
-    (0x0100, libc::SO_OOBINLINE),
-    (0x0200, libc::SO_REUSEPORT),
-    (0x0400, libc::SO_TIMESTAMP),
-    (0x1001, libc::SO_SNDBUF),
-    (0x1002, libc::SO_RCVBUF),
-    (0x1003, libc::SO_SNDLOWAT),
-    (0x1004, libc::SO_RCVLOWAT),
-    (0x1005, libc::SO_SNDTIMEO),
-    (0x1006, libc::SO_RCVTIMEO),
-    (0x1007, libc::SO_ERROR),
-    (0x1008, libc::SO_TYPE),
+    (so::DEBUG, libc::SO_DEBUG),
+    (so::ACCEPTCONN, libc::SO_ACCEPTCONN),
+    (so::REUSEADDR, libc::SO_REUSEADDR),
+    (so::KEEPALIVE, libc::SO_KEEPALIVE),
+    (so::DONTROUTE, libc::SO_DONTROUTE),
+    (so::BROADCAST, libc::SO_BROADCAST),
+    (so::LINGER, libc::SO_LINGER),
+    (so::OOBINLINE, libc::SO_OOBINLINE),
+    (so::REUSEPORT, libc::SO_REUSEPORT),
+    (so::TIMESTAMP, libc::SO_TIMESTAMP),
+    (so::SNDBUF, libc::SO_SNDBUF),
+    (so::RCVBUF, libc::SO_RCVBUF),
+    (so::SNDLOWAT, libc::SO_SNDLOWAT),
+    (so::RCVLOWAT, libc::SO_RCVLOWAT),
+    (so::SNDTIMEO, libc::SO_SNDTIMEO),
+    (so::RCVTIMEO, libc::SO_RCVTIMEO),
+    (so::ERROR, libc::SO_ERROR),
+    (so::TYPE, libc::SO_TYPE),
     // `SO_LINGER_SEC` is `SO_LINGER` with `l_linger` in seconds, which is the
     // only unit this host's `SO_LINGER` has.
-    (0x1080, libc::SO_LINGER),
+    (so::LINGER_SEC, libc::SO_LINGER),
 ];
 
 /// Darwin's `IP_*`, paired with the host's.
@@ -59,19 +127,19 @@ const SOCKET_OPTIONS: &[(i32, i32)] = &[
 /// Darwin's 26 is `IP_PKTINFO` (spelled `IP_RECVPKTINFO` when it is asked for
 /// on receive) where this host's is 8, and Darwin's 27 is `IP_RECVTOS`.
 const IP_OPTIONS: &[(i32, i32)] = &[
-    (1, libc::IP_OPTIONS),
-    (2, libc::IP_HDRINCL),
-    (3, libc::IP_TOS),
-    (4, libc::IP_TTL),
-    (5, libc::IP_RECVOPTS),
-    (9, libc::IP_MULTICAST_IF),
-    (10, libc::IP_MULTICAST_TTL),
-    (11, libc::IP_MULTICAST_LOOP),
-    (12, libc::IP_ADD_MEMBERSHIP),
-    (13, libc::IP_DROP_MEMBERSHIP),
-    (24, libc::IP_RECVTTL),
-    (26, libc::IP_PKTINFO),
-    (27, libc::IP_RECVTOS),
+    (ip::OPTIONS, libc::IP_OPTIONS),
+    (ip::HDRINCL, libc::IP_HDRINCL),
+    (ip::TOS, libc::IP_TOS),
+    (ip::TTL, libc::IP_TTL),
+    (ip::RECVOPTS, libc::IP_RECVOPTS),
+    (ip::MULTICAST_IF, libc::IP_MULTICAST_IF),
+    (ip::MULTICAST_TTL, libc::IP_MULTICAST_TTL),
+    (ip::MULTICAST_LOOP, libc::IP_MULTICAST_LOOP),
+    (ip::ADD_MEMBERSHIP, libc::IP_ADD_MEMBERSHIP),
+    (ip::DROP_MEMBERSHIP, libc::IP_DROP_MEMBERSHIP),
+    (ip::RECVTTL, libc::IP_RECVTTL),
+    (ip::PKTINFO, libc::IP_PKTINFO),
+    (ip::RECVTOS, libc::IP_RECVTOS),
 ];
 
 /// Darwin's `IPV6_*`, paired with the host's.
@@ -81,16 +149,16 @@ const IP_OPTIONS: &[(i32, i32)] = &[
 /// here is the hop limit. Darwin's 36 is `IPV6_TCLASS`, which is what this table
 /// once aimed at the hop limit.
 const IPV6_OPTIONS: &[(i32, i32)] = &[
-    (4, libc::IPV6_UNICAST_HOPS),
-    (9, libc::IPV6_MULTICAST_IF),
-    (10, libc::IPV6_MULTICAST_HOPS),
-    (11, libc::IPV6_MULTICAST_LOOP),
-    (12, libc::IPV6_ADD_MEMBERSHIP),
-    (13, libc::IPV6_DROP_MEMBERSHIP),
-    (27, libc::IPV6_V6ONLY),
-    (35, libc::IPV6_RECVTCLASS),
-    (36, libc::IPV6_TCLASS),
-    (61, libc::IPV6_RECVPKTINFO),
+    (ipv6::UNICAST_HOPS, libc::IPV6_UNICAST_HOPS),
+    (ipv6::MULTICAST_IF, libc::IPV6_MULTICAST_IF),
+    (ipv6::MULTICAST_HOPS, libc::IPV6_MULTICAST_HOPS),
+    (ipv6::MULTICAST_LOOP, libc::IPV6_MULTICAST_LOOP),
+    (ipv6::ADD_MEMBERSHIP, libc::IPV6_ADD_MEMBERSHIP),
+    (ipv6::DROP_MEMBERSHIP, libc::IPV6_DROP_MEMBERSHIP),
+    (ipv6::V6ONLY, libc::IPV6_V6ONLY),
+    (ipv6::RECVTCLASS, libc::IPV6_RECVTCLASS),
+    (ipv6::TCLASS, libc::IPV6_TCLASS),
+    (ipv6::RECVPKTINFO, libc::IPV6_RECVPKTINFO),
 ];
 
 /// Darwin's `TCP_*`, paired with the host's.
@@ -104,17 +172,14 @@ const IPV6_OPTIONS: &[(i32, i32)] = &[
 /// refusal it replaces cost the write itself, three layers under a caller that
 /// reported the network was broken.
 const TCP_OPTIONS: &[(i32, i32)] = &[
-    (0x01, libc::TCP_NODELAY),
-    (0x02, libc::TCP_MAXSEG),
-    (0x04, libc::TCP_CORK),
-    (0x10, libc::TCP_KEEPIDLE),
-    (0x101, libc::TCP_KEEPINTVL),
-    (0x102, libc::TCP_KEEPCNT),
-    (0x201, libc::TCP_NOTSENT_LOWAT),
+    (tcp::NODELAY, libc::TCP_NODELAY),
+    (tcp::MAXSEG, libc::TCP_MAXSEG),
+    (tcp::NOPUSH, libc::TCP_CORK),
+    (tcp::KEEPALIVE, libc::TCP_KEEPIDLE),
+    (tcp::KEEPINTVL, libc::TCP_KEEPINTVL),
+    (tcp::KEEPCNT, libc::TCP_KEEPCNT),
+    (tcp::NOTSENT_LOWAT, libc::TCP_NOTSENT_LOWAT),
 ];
-
-/// Darwin's `SO_ERROR`, whose value needs translating; see [`is_pending_error`].
-const SO_ERROR: i32 = 0x1007;
 
 /// Darwin's `SO_NOSIGPIPE`, which this host has no option for.
 ///
@@ -132,10 +197,8 @@ const SO_ERROR: i32 = 0x1007;
 /// kernel without the option would say - turned out not to be survivable:
 /// Crashpad `CHECK`s the return value and aborts the process, so the honest
 /// failure was a crash before the program had started.
-const NOSIGPIPE: i32 = 0x1022;
-
 fn nosigpipe(level: i32, name: i32) -> bool {
-    level == SOL_SOCKET && name == NOSIGPIPE
+    level == SOL_SOCKET && name == so::NOSIGPIPE
 }
 
 /// Darwin's `SO_NREAD` and `SO_NWRITE`: how much is waiting to be read, and how
@@ -144,9 +207,6 @@ fn nosigpipe(level: i32, name: i32) -> bool {
 /// Both are read-only options on Darwin and neither is an option at all here -
 /// this host asks the same two questions with `FIONREAD` and `TIOCOUTQ`. A
 /// `setsockopt` on either is `ENOPROTOOPT`, which is what Darwin answers too.
-const SO_NREAD: i32 = 0x1020;
-const SO_NWRITE: i32 = 0x1024;
-
 /// # Safety
 ///
 /// `value` is `*len` writable bytes and `len` is a writable `socklen_t`.
@@ -161,7 +221,7 @@ unsafe fn queued_bytes(fd: i32, name: i32, value: *mut c_void, len: *mut u32) ->
         return -1;
     }
     let request = match name {
-        SO_NREAD => libc::FIONREAD,
+        so::NREAD => libc::FIONREAD,
         _ => libc::TIOCOUTQ,
     };
     let mut bytes: i32 = 0;
@@ -307,7 +367,7 @@ fn say_unknown_option(level: i32, name: i32) {
 /// same value: a guest asking for a 500 ms timeout is asking here for one of
 /// 500000 seconds plus whatever the padding held.
 fn is_timeval(level: i32, name: i32) -> bool {
-    level == SOL_SOCKET && (name == 0x1005 || name == 0x1006)
+    level == SOL_SOCKET && matches!(name, so::SNDTIMEO | so::RCVTIMEO)
 }
 
 /// A guest's `struct timeval` as this host's.
@@ -337,7 +397,7 @@ pub(crate) unsafe extern "C" fn setsockopt(
         // SAFETY: the caller's buffer, with the length they gave for it.
         return unsafe { set_nosigpipe(fd, value, len) };
     }
-    if level == SOL_SOCKET && matches!(name, SO_NREAD | SO_NWRITE) {
+    if level == SOL_SOCKET && matches!(name, so::NREAD | so::NWRITE) {
         crate::errno::set(libc::ENOPROTOOPT);
         return -1;
     }
@@ -384,7 +444,7 @@ unsafe extern "C" fn getsockopt(
         // SAFETY: the caller's buffer and length slot.
         return unsafe { get_nosigpipe(fd, value, len) };
     }
-    if level == SOL_SOCKET && matches!(name, SO_NREAD | SO_NWRITE) {
+    if level == SOL_SOCKET && matches!(name, so::NREAD | so::NWRITE) {
         // SAFETY: the caller's buffer and length slot.
         return unsafe { queued_bytes(fd, name, value, len) };
     }
@@ -419,13 +479,7 @@ unsafe extern "C" fn getsockopt(
                     crate::errno::set(libc::EINVAL);
                     return -1;
                 }
-                value.cast::<i64>().write_unaligned(host.tv_sec);
-                value
-                    .cast::<u8>()
-                    .add(8)
-                    .cast::<i32>()
-                    .write_unaligned(host.tv_usec as i32);
-                value.cast::<u8>().add(12).cast::<i32>().write_unaligned(0);
+                crate::clock::Timeval::from_host(host).write(value.cast());
                 *len = 16;
             }
         }
@@ -457,7 +511,7 @@ unsafe extern "C" fn getsockopt(
 fn is_pending_error(level: i32, name: i32, len: *const u32) -> bool {
     // SAFETY: `len` is the caller's length slot, already known non-null here.
     level == SOL_SOCKET
-        && name == SO_ERROR
+        && name == so::ERROR
         && unsafe { *len as usize >= core::mem::size_of::<i32>() }
 }
 
@@ -482,7 +536,7 @@ mod tests {
     fn the_level_is_translated_rather_than_passed_through() {
         assert_ne!(SOL_SOCKET, libc::SOL_SOCKET);
         assert_eq!(
-            option_to_host(SOL_SOCKET, 0x0004),
+            option_to_host(SOL_SOCKET, so::REUSEADDR),
             Some((libc::SOL_SOCKET, libc::SO_REUSEADDR))
         );
     }
@@ -491,8 +545,8 @@ mod tests {
     /// passing it through succeeds and reads or writes something else.
     #[test]
     fn a_boolean_option_is_not_the_option_the_guest_named() {
-        assert_eq!(0x0004, libc::SO_ERROR);
-        assert_eq!(0x0008, libc::SO_RCVBUF, "Darwin's SO_KEEPALIVE");
+        assert_eq!(so::REUSEADDR, libc::SO_ERROR);
+        assert_eq!(so::KEEPALIVE, libc::SO_RCVBUF, "Darwin's SO_KEEPALIVE");
     }
 
     #[test]
@@ -507,17 +561,21 @@ mod tests {
     #[test]
     fn the_ipv6_options_are_the_rfc_numbers_and_not_this_hosts() {
         assert_eq!(
-            option_to_host(IPPROTO_IPV6, 36),
+            option_to_host(IPPROTO_IPV6, ipv6::TCLASS),
             Some((IPPROTO_IPV6, libc::IPV6_TCLASS))
         );
         assert_eq!(
-            option_to_host(IPPROTO_IPV6, 4),
+            option_to_host(IPPROTO_IPV6, ipv6::UNICAST_HOPS),
             Some((IPPROTO_IPV6, libc::IPV6_UNICAST_HOPS))
         );
-        assert_ne!(4, libc::IPV6_UNICAST_HOPS, "the collision being avoided");
+        assert_ne!(
+            ipv6::UNICAST_HOPS,
+            libc::IPV6_UNICAST_HOPS,
+            "the collision being avoided"
+        );
         // Darwin's `IP_PKTINFO` is 26; 27 there is `IP_RECVTOS`.
         assert_eq!(
-            option_to_host(IPPROTO_IP, 26),
+            option_to_host(IPPROTO_IP, ip::PKTINFO),
             Some((IPPROTO_IP, libc::IP_PKTINFO))
         );
     }
@@ -528,7 +586,7 @@ mod tests {
     #[test]
     fn tcp_nopush_corks_rather_than_being_refused() {
         assert_eq!(
-            option_to_host(IPPROTO_TCP, 0x04),
+            option_to_host(IPPROTO_TCP, tcp::NOPUSH),
             Some((IPPROTO_TCP, libc::TCP_CORK))
         );
     }
@@ -556,7 +614,7 @@ mod tests {
             getsockopt(
                 ends[0],
                 SOL_SOCKET,
-                SO_NREAD,
+                so::NREAD,
                 (&raw mut waiting).cast(),
                 &mut len,
             )
@@ -566,7 +624,8 @@ mod tests {
         // And it is read-only, as it is on Darwin.
         let value = 1i32;
         // SAFETY: four readable bytes, and the length says four.
-        let rc = unsafe { setsockopt(ends[0], SOL_SOCKET, SO_NREAD, (&raw const value).cast(), 4) };
+        let rc =
+            unsafe { setsockopt(ends[0], SOL_SOCKET, so::NREAD, (&raw const value).cast(), 4) };
         assert_eq!((rc, crate::errno::get()), (-1, libc::ENOPROTOOPT));
         crate::errno::set(0);
 
@@ -587,13 +646,21 @@ mod tests {
 
         let on: i32 = 1;
         // SAFETY: four readable bytes, and the length says four.
-        let rc = unsafe { setsockopt(fd, SOL_SOCKET, 0x0004, (&raw const on).cast(), 4) };
+        let rc = unsafe { setsockopt(fd, SOL_SOCKET, so::REUSEADDR, (&raw const on).cast(), 4) };
         assert_eq!(rc, 0, "SO_REUSEADDR in Darwin's numbering");
 
         let mut back: i32 = 0;
         let mut len = 4u32;
         // SAFETY: four writable bytes and a live length.
-        let rc = unsafe { getsockopt(fd, SOL_SOCKET, 0x0004, (&raw mut back).cast(), &mut len) };
+        let rc = unsafe {
+            getsockopt(
+                fd,
+                SOL_SOCKET,
+                so::REUSEADDR,
+                (&raw mut back).cast(),
+                &mut len,
+            )
+        };
         assert_eq!(rc, 0);
         assert_ne!(back, 0, "the option the guest set is the one that is on");
 
@@ -617,13 +684,21 @@ mod tests {
         guest[12..16].copy_from_slice(&(-1i32).to_le_bytes());
 
         // SAFETY: sixteen readable bytes, and the length says sixteen.
-        let rc = unsafe { setsockopt(fd, SOL_SOCKET, 0x1006, guest.as_ptr().cast(), 16) };
+        let rc = unsafe { setsockopt(fd, SOL_SOCKET, so::RCVTIMEO, guest.as_ptr().cast(), 16) };
         assert_eq!(rc, 0, "SO_RCVTIMEO in Darwin's numbering and shape");
 
         let mut back = [0u8; 16];
         let mut len = 16u32;
         // SAFETY: sixteen writable bytes and a live length.
-        let rc = unsafe { getsockopt(fd, SOL_SOCKET, 0x1006, back.as_mut_ptr().cast(), &mut len) };
+        let rc = unsafe {
+            getsockopt(
+                fd,
+                SOL_SOCKET,
+                so::RCVTIMEO,
+                back.as_mut_ptr().cast(),
+                &mut len,
+            )
+        };
         assert_eq!(rc, 0);
         assert_eq!(i64::from_le_bytes(back[0..8].try_into().unwrap()), 2);
         assert_eq!(i32::from_le_bytes(back[8..12].try_into().unwrap()), 500_000);
@@ -642,14 +717,22 @@ mod tests {
 
         let on = 1i32;
         // SAFETY: one readable `int`, and the length says four.
-        let rc = unsafe { setsockopt(fd, SOL_SOCKET, NOSIGPIPE, (&raw const on).cast(), 4) };
+        let rc = unsafe { setsockopt(fd, SOL_SOCKET, so::NOSIGPIPE, (&raw const on).cast(), 4) };
         assert_eq!(rc, 0, "refusing this aborts Crashpad before it starts");
         assert!(suppresses_sigpipe(fd));
 
         let mut back = 0i32;
         let mut len = 4u32;
         // SAFETY: one writable `int` and a live length.
-        let rc = unsafe { getsockopt(fd, SOL_SOCKET, NOSIGPIPE, (&raw mut back).cast(), &mut len) };
+        let rc = unsafe {
+            getsockopt(
+                fd,
+                SOL_SOCKET,
+                so::NOSIGPIPE,
+                (&raw mut back).cast(),
+                &mut len,
+            )
+        };
         assert_eq!((rc, back, len), (0, 1, 4));
 
         forget(fd);

@@ -37,6 +37,15 @@ impl Timezone {
 
 #[cfg(not(target_os = "macos"))]
 impl Timeval {
+    /// A host value converted to the Darwin representation.
+    pub(crate) fn from_host(value: libc::timeval) -> Timeval {
+        Timeval {
+            sec: value.tv_sec,
+            usec: value.tv_usec as i32,
+            _pad: 0,
+        }
+    }
+
     /// Read a potentially unaligned guest value without imposing Rust's
     /// alignment requirements on guest memory.
     ///
@@ -54,6 +63,15 @@ impl Timeval {
             tv_usec: i64::from(self.usec),
         }
     }
+
+    /// Write to a potentially unaligned guest buffer.
+    ///
+    /// # Safety
+    ///
+    /// `out` is writable for one Darwin `timeval`.
+    pub(crate) unsafe fn write(self, out: *mut Self) {
+        unsafe { out.write_unaligned(self) }
+    }
 }
 
 /// `int gettimeofday(struct timeval *, void *)`.
@@ -64,13 +82,7 @@ unsafe extern "C" fn gettimeofday(out: *mut Timeval, tz: *mut c_void) -> i32 {
     };
     let rc = unsafe { libc::gettimeofday(&mut host, tz.cast()) };
     if rc == 0 && !out.is_null() {
-        unsafe {
-            out.write(Timeval {
-                sec: host.tv_sec,
-                usec: host.tv_usec as i32,
-                _pad: 0,
-            })
-        };
+        unsafe { out.write(Timeval::from_host(host)) };
     }
     rc
 }
@@ -176,7 +188,7 @@ mod host {
     pub const THREAD_CPU: clockid_t = libc::CLOCK_THREAD_CPUTIME_ID;
 
     unsafe extern "C" {
-        pub fn clock() -> clockid_t;
+        pub fn clock() -> libc::clock_t;
     }
 }
 
@@ -194,22 +206,9 @@ mod host {
     pub const THREAD_CPU: clockid_t = libc::CLOCK_THREAD_CPUTIME_ID;
 
     unsafe extern "C" {
-        pub fn clock() -> clockid_t;
+        pub fn clock() -> libc::clock_t;
     }
 }
-
-const CLOCK_MAPPING: [(id::clockid_t, libc::clockid_t); 8] = [
-    (id::REALTIME, host::REALTIME),
-    (id::MONOTONIC, host::WITH_SLEEP),
-    (id::MONOTONIC_RAW, host::WITH_SLEEP),
-    // No host clock is both coarse and sleep-counting; sleep-counting wins, and
-    // the cost is only that the read is not the cheap one.
-    (id::MONOTONIC_RAW_APPROX, host::WITH_SLEEP),
-    (id::UPTIME_RAW, host::WITHOUT_SLEEP),
-    (id::UPTIME_RAW_APPROX, host::WITHOUT_SLEEP_COARSE),
-    (id::PROCESS_CPUTIME_ID, host::PROCESS_CPU),
-    (id::THREAD_CPUTIME_ID, host::THREAD_CPU),
-];
 
 /// The host clock a guest's `clockid_t` names, or `None` if it names none.
 ///
@@ -228,14 +227,6 @@ fn translate(guest: id::clockid_t) -> Option<libc::clockid_t> {
         id::THREAD_CPUTIME_ID => host::THREAD_CPU,
         _ => return None,
     })
-}
-
-fn to_darwin(host: libc::clockid_t) -> Option<id::clockid_t> {
-    let clock = CLOCK_MAPPING
-        .iter()
-        .find(|clock| clock.1 == host)
-        .and_then(|clock| Some(clock.0));
-    clock
 }
 
 /// `int clock_gettime(clockid_t, struct timespec *)`.
@@ -289,12 +280,13 @@ unsafe extern "C" fn gettime_nsec_np(clock: id::clockid_t) -> u64 {
         .wrapping_add(ts.tv_nsec as u64)
 }
 
-unsafe extern "C" fn clock() -> id::clockid_t {
-    let host_clock = unsafe { host::clock() };
-    let Some(darwin_clock) = to_darwin(host_clock) else {
-        panic!("unsupported host clock {}", host_clock);
-    };
-    darwin_clock
+/// `clock_t clock(void)`.
+///
+/// Darwin's `clock_t` is an unsigned 64-bit value. POSIX hosts report the same
+/// microsecond CPU-time ticks, so only the signedness of the host representation
+/// needs adapting. Casting also preserves the `(clock_t)-1` failure sentinel.
+unsafe extern "C" fn clock() -> u64 {
+    unsafe { host::clock() as u64 }
 }
 
 /// Empty on macOS, where the guest's clock ids are the host's.
@@ -336,6 +328,7 @@ pub fn provide(lib: &mut machish::resolve::SyntheticDylib) {
 
 /// Everything [`symbol`] answers.
 pub const NAMES: &[&str] = &[
+    "clock",
     "clock_gettime",
     "clock_getres",
     "clock_gettime_nsec_np",
@@ -397,6 +390,15 @@ mod tests {
             let rc = unsafe { gettime(clock, &mut ts as *mut _ as *mut c_void) };
             assert_eq!(rc, 0, "clock {clock} must read");
         }
+    }
+
+    #[test]
+    fn clock_returns_cpu_time_instead_of_treating_it_as_a_clock_id() {
+        // SAFETY: `clock` has no arguments and touches no caller memory.
+        let first = unsafe { clock() };
+        let second = unsafe { clock() };
+        assert_ne!(first, u64::MAX, "clock must not fail");
+        assert!(second >= first, "process CPU time must not run backwards");
     }
 
     /// The wall clock and a monotonic clock must not be confused for one another:

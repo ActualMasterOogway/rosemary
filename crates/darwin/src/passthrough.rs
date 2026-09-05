@@ -204,7 +204,6 @@ pub const CLAIMED: &[&str] = &[
     "tan",
     "tanh",
     "trunc",
-    "clock",
     "difftime",
     "mktime",
     "time",

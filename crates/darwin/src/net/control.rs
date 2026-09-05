@@ -29,8 +29,33 @@
 
 use std::ffi::c_void;
 
-/// `sizeof(struct cmsghdr)` on Darwin.
-const DARWIN_HDR: usize = 12;
+/// Darwin's `struct cmsghdr`.
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct DarwinControlHeader {
+    len: u32,
+    level: i32,
+    kind: i32,
+}
+
+impl DarwinControlHeader {
+    /// # Safety
+    ///
+    /// `at` is readable for one potentially unaligned header.
+    unsafe fn read(at: *const u8) -> Self {
+        unsafe { at.cast::<Self>().read_unaligned() }
+    }
+
+    /// # Safety
+    ///
+    /// `at` is writable for one potentially unaligned header.
+    unsafe fn write(self, at: *mut u8) {
+        unsafe { at.cast::<Self>().write_unaligned(self) }
+    }
+}
+
+const DARWIN_HDR: usize = core::mem::size_of::<DarwinControlHeader>();
+const _: () = assert!(DARWIN_HDR == 12);
 
 /// Darwin's `CMSG_ALIGN`, which rounds to `sizeof(uint32_t)`.
 fn darwin_align(len: usize) -> usize {
@@ -83,14 +108,10 @@ pub unsafe fn to_host(control: *const c_void, len: u32) -> Result<Vec<u8>, Untra
         // SAFETY: the caller's bytes, read a header at a time and never past
         // the length they gave. Unaligned because a guest's control buffer is
         // only ever four-byte aligned.
-        let (message_len, level, kind) = unsafe {
-            let at = control.cast::<u8>().add(at);
-            (
-                at.cast::<u32>().read_unaligned() as usize,
-                at.add(4).cast::<i32>().read_unaligned(),
-                at.add(8).cast::<i32>().read_unaligned(),
-            )
-        };
+        let header = unsafe { DarwinControlHeader::read(control.cast::<u8>().add(at)) };
+        let message_len = header.len as usize;
+        let level = header.level;
+        let kind = header.kind;
         if message_len < DARWIN_HDR || message_len > len - at {
             // A length that does not describe a message ends the walk, which is
             // what the kernel's own `CMSG_NXTHDR` does with one.
@@ -128,10 +149,19 @@ fn push_host(out: &mut Vec<u8>, level: i32, kind: i32, fill: impl FnOnce(&mut Ve
     out.extend_from_slice(&[0; core::mem::size_of::<libc::cmsghdr>()]);
     fill(out);
     let len = out.len() - header;
-    out[header..header + core::mem::size_of::<usize>()].copy_from_slice(&len.to_ne_bytes());
-    let fields = header + core::mem::size_of::<usize>();
-    out[fields..fields + 4].copy_from_slice(&level.to_ne_bytes());
-    out[fields + 4..fields + 8].copy_from_slice(&kind.to_ne_bytes());
+    let value = libc::cmsghdr {
+        cmsg_len: len as _,
+        cmsg_level: level,
+        cmsg_type: kind,
+    };
+    // SAFETY: the placeholder above reserved a complete host header. A byte
+    // buffer provides no alignment guarantee, so write the structure unaligned.
+    unsafe {
+        out.as_mut_ptr()
+            .add(header)
+            .cast::<libc::cmsghdr>()
+            .write_unaligned(value)
+    };
     out.resize(header + host_align(len), 0);
 }
 
@@ -240,9 +270,12 @@ pub unsafe fn from_host(host: &libc::msghdr, control: *mut c_void, capacity: u32
                 // the guest's buffer need only be four-byte aligned.
                 unsafe {
                     let at = control.cast::<u8>().add(written);
-                    at.cast::<u32>().write_unaligned(len as u32);
-                    at.add(4).cast::<i32>().write_unaligned(message.level);
-                    at.add(8).cast::<i32>().write_unaligned(message.kind);
+                    DarwinControlHeader {
+                        len: len as u32,
+                        level: message.level,
+                        kind: message.kind,
+                    }
+                    .write(at);
                     core::ptr::copy_nonoverlapping(
                         message.payload.as_ptr(),
                         at.add(DARWIN_HDR),

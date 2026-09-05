@@ -522,6 +522,82 @@ pub unsafe fn fault_address(info: &libc::siginfo_t) -> u64 {
     }
 }
 
+/// Darwin's `stack_t`, embedded in `ucontext_t`.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct DarwinStack {
+    _sp: *mut libc::c_void,
+    _size: usize,
+    _flags: i32,
+}
+
+/// Darwin's `ucontext_t` through the machine-context pointer.
+///
+/// The SDK does not expose this structure through the `libc` crate, so keep the
+/// small ABI declaration we need here instead of finding its fields by byte offset.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct DarwinUcontext {
+    _onstack: i32,
+    _sigmask: u32,
+    _stack: DarwinStack,
+    _link: *mut DarwinUcontext,
+    _mcsize: usize,
+    mcontext: *const DarwinMcontext,
+}
+
+/// Darwin's machine context through the saved thread state.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct DarwinMcontext {
+    _exception_state: DarwinExceptionState,
+    thread_state: DarwinThreadState,
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[repr(C)]
+struct DarwinExceptionState {
+    _fault_address: u64,
+    _syndrome: u32,
+    _exception: u32,
+}
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[repr(C)]
+struct DarwinExceptionState {
+    _trap: u16,
+    _cpu: u16,
+    _error: u32,
+    _fault_address: u64,
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[repr(C)]
+struct DarwinThreadState {
+    _x: [u64; 29],
+    _fp: u64,
+    _lr: u64,
+    _sp: u64,
+    pc: u64,
+}
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[repr(C)]
+struct DarwinThreadState {
+    _registers_before_rip: [u64; 16],
+    pc: u64,
+}
+
+#[cfg(target_os = "macos")]
+const _: () = {
+    assert!(core::mem::offset_of!(DarwinUcontext, mcontext) == 48);
+    assert!(core::mem::offset_of!(DarwinMcontext, thread_state) == 16);
+    #[cfg(target_arch = "aarch64")]
+    assert!(core::mem::offset_of!(DarwinThreadState, pc) == 256);
+    #[cfg(target_arch = "x86_64")]
+    assert!(core::mem::offset_of!(DarwinThreadState, pc) == 128);
+};
+
 /// The program counter the kernel interrupted, out of the `ucontext_t` it passed.
 ///
 /// `None` on any null, because a handler that dereferences its way to a second fault
@@ -536,30 +612,15 @@ pub unsafe fn interrupted_pc(context: *mut libc::c_void) -> Option<u64> {
     }
     #[cfg(target_os = "macos")]
     {
-        // Darwin's `_STRUCT_UCONTEXT` and thread state, which the `libc` crate does
-        // not declare for Apple platforms - hence the offsets.
-        //
-        // Byte offset of `uc_mcontext` within `ucontext_t`: the same on both
-        // architectures.
-        const UC_MCONTEXT: usize = 48;
-        // Byte offset of `__ss.__pc` within `__darwin_mcontext64`: sixteen bytes of
-        // `__es`, then the twenty-nine general-purpose registers, `fp` and `lr`.
-        #[cfg(target_arch = "aarch64")]
-        const MC_PC: usize = 16 + 32 * 8;
-        // Byte offset of `__ss.__rip`: sixteen bytes of `__es`, then the sixteen
-        // general-purpose registers `_STRUCT_X86_THREAD_STATE64` lists before it.
-        #[cfg(target_arch = "x86_64")]
-        const MC_PC: usize = 16 + 16 * 8;
-
         // SAFETY: the kernel passes a live `ucontext_t` for the duration of the
         // handler, whose `uc_mcontext` is a pointer to a live thread state.
         unsafe {
-            let mcontext =
-                core::ptr::read((context as *const u8).add(UC_MCONTEXT) as *const *const u8);
+            let context = context.cast::<DarwinUcontext>();
+            let mcontext = core::ptr::read(&raw const (*context).mcontext);
             if mcontext.is_null() {
                 return None;
             }
-            Some(core::ptr::read(mcontext.add(MC_PC) as *const u64))
+            Some(core::ptr::read(&raw const (*mcontext).thread_state.pc))
         }
     }
     #[cfg(all(not(target_os = "macos"), target_arch = "aarch64"))]
