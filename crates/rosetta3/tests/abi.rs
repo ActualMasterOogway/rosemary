@@ -891,6 +891,7 @@ fn thirteen_integer_arguments_with_a_byte_among_them_are_placed() {
     assert_eq!(ctx.rax as i64, want);
 }
 
+#[cfg(target_arch = "aarch64")]
 #[test]
 fn an_overflow_too_wide_to_place_is_still_refused_by_name() {
     // Four overflowing arguments beginning with two *adjacent* narrow ones.
