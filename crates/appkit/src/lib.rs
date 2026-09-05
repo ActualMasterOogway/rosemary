@@ -217,6 +217,8 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
     window::DID_ENTER_FULL_SCREEN,
     window::DID_EXIT_FULL_SCREEN,
     window::DID_CHANGE_BACKING_PROPERTIES,
+    text::DID_CHANGE,
+    text::DID_CHANGE_SELECTION,
     application::DID_CHANGE_SCREEN_PARAMETERS,
     view::FRAME_DID_CHANGE,
     view::BOUNDS_DID_CHANGE,

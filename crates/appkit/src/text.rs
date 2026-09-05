@@ -121,6 +121,44 @@ fn contents() -> &'static Mutex<HashMap<usize, Contents>> {
     CONTENTS.get_or_init(Default::default)
 }
 
+/// Responders whose most recent key-down entered the inherited text system.
+///
+/// SDL reports resolved text separately from the physical key. A guest may
+/// remain first responder while choosing not to call `[super keyDown:]`; that
+/// choice must suppress the later text event or game keys leak into its hidden
+/// editor.
+fn interpreting() -> &'static Mutex<HashMap<usize, bool>> {
+    static INTERPRETING: std::sync::OnceLock<Mutex<HashMap<usize, bool>>> =
+        std::sync::OnceLock::new();
+    INTERPRETING.get_or_init(Default::default)
+}
+
+pub(crate) fn begin_key_interpretation(receiver: Id) {
+    if !receiver.is_null() {
+        interpreting()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(receiver as usize, false);
+    }
+}
+
+fn accept_key_interpretation(receiver: Id) {
+    interpreting()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(receiver as usize, true);
+}
+
+pub(crate) fn accepts_host_text(receiver: Id) -> bool {
+    !receiver.is_null()
+        && interpreting()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(receiver as usize))
+            .copied()
+            .unwrap_or(false)
+}
+
 fn read(receiver: Id) -> Contents {
     contents()
         .lock()
@@ -130,31 +168,84 @@ fn read(receiver: Id) -> Contents {
         .unwrap_or_default()
 }
 
+pub(crate) const DID_CHANGE: &str = "NSTextDidChangeNotification";
+pub(crate) const DID_CHANGE_SELECTION: &str = "NSTextViewDidChangeSelectionNotification";
+
+fn delegate_method(receiver: Id, name: &str) -> Option<(Id, Sel, &'static objc::class::Method)> {
+    let delegate = get(receiver).delegate as Id;
+    let sel = objc::sel::get(name);
+    // SAFETY: null or a live object this runtime allocated.
+    let method = unsafe { objc::object::class_of(delegate) }?.method(sel)?;
+    Some((delegate, sel, method))
+}
+
+fn will_change_selection(receiver: Id, old: NSRange, proposed: NSRange) -> NSRange {
+    let Some((delegate, sel, method)) = delegate_method(
+        receiver,
+        "textView:willChangeSelectionFromCharacterRange:toCharacterRange:",
+    ) else {
+        return proposed;
+    };
+    // SAFETY: the delegate method returns NSRange and takes the view and two ranges.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id, NSRange, NSRange) -> NSRange =
+            std::mem::transmute(method.implementation());
+        f(delegate, sel, receiver, old, proposed)
+    }
+}
+
+fn did_change_selection(receiver: Id) {
+    foundation::notification::post(DID_CHANGE_SELECTION, receiver, std::ptr::null_mut());
+    let Some((delegate, sel, method)) = delegate_method(receiver, "textViewDidChangeSelection:")
+    else {
+        return;
+    };
+    let notification =
+        foundation::notification::make(DID_CHANGE_SELECTION, receiver, std::ptr::null_mut());
+    // SAFETY: `-textViewDidChangeSelection:` is `void (id, SEL, NSNotification *)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(method.implementation());
+        f(delegate, sel, notification);
+    }
+}
+
+fn notify_text_changed(receiver: Id) {
+    foundation::notification::post(DID_CHANGE, receiver, std::ptr::null_mut());
+    let Some((delegate, sel, method)) = delegate_method(receiver, "textDidChange:") else {
+        return;
+    };
+    let notification = foundation::notification::make(DID_CHANGE, receiver, std::ptr::null_mut());
+    // SAFETY: `-textDidChange:` is `void (id, SEL, NSNotification *)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(method.implementation());
+        f(delegate, sel, notification);
+    }
+}
+
 /// Edit a view's contents and tell its delegate, as AppKit does.
 ///
 /// The notification is not decoration: a program that keeps its own copy of the
 /// field learns about a keystroke this way and no other, and one that polls
 /// `-string` is unaffected by it either way.
 fn edit(receiver: Id, with: impl FnOnce(&mut Contents)) {
-    {
+    let (old, proposed) = {
         let mut table = contents().lock().unwrap_or_else(|e| e.into_inner());
-        with(table.entry(receiver as usize).or_default());
-    }
-    foundation::notification::post("NSTextDidChangeNotification", receiver, std::ptr::null_mut());
-    let delegate = get(receiver).delegate as Id;
-    let sel = objc::sel::get("textDidChange:");
-    // SAFETY: null or a live object this runtime allocated.
-    let Some(method) = (unsafe { objc::object::class_of(delegate) }).and_then(|c| c.method(sel))
-    else {
-        return;
+        let state = table.entry(receiver as usize).or_default();
+        let old = state.selected;
+        with(state);
+        (old, state.selected)
     };
-    let notification =
-        foundation::notification::make("NSTextDidChangeNotification", receiver, std::ptr::null_mut());
-    // SAFETY: `-textDidChange:` is `void (id, SEL, NSNotification *)`.
-    unsafe {
-        let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(method.implementation());
-        f(delegate, sel, notification);
+    if old != proposed {
+        let accepted = will_change_selection(receiver, old, proposed);
+        let mut table = contents().lock().unwrap_or_else(|e| e.into_inner());
+        let state = table.entry(receiver as usize).or_default();
+        if state.selected == proposed {
+            state.selected = clamp_range(&state.text, accepted);
+        }
+        drop(table);
+        did_change_selection(receiver);
     }
+    notify_text_changed(receiver);
 }
 
 fn utf16_len(text: &str) -> usize {
@@ -203,7 +294,7 @@ fn replace(state: &mut Contents, range: NSRange, insertion: &str) {
 }
 
 /// `NSNotFound`, which is what a range with nothing in it reports.
-const NOT_FOUND: usize = usize::MAX;
+const NOT_FOUND: usize = isize::MAX as usize;
 
 unsafe extern "C" fn string(receiver: Id, _sel: Sel) -> Id {
     objc::arc::autorelease(foundation::string::from_str(&read(receiver).text))
@@ -227,9 +318,23 @@ unsafe extern "C" fn selected_range(receiver: Id, _sel: Sel) -> NSRange {
 }
 
 unsafe extern "C" fn set_selected_range(receiver: Id, _sel: Sel, range: NSRange) {
+    change_selection(receiver, range);
+}
+
+fn change_selection(receiver: Id, range: NSRange) {
+    let state = read(receiver);
+    let proposed = clamp_range(&state.text, range);
+    if state.selected == proposed {
+        return;
+    }
+    let accepted = clamp_range(
+        &state.text,
+        will_change_selection(receiver, state.selected, proposed),
+    );
     let mut table = contents().lock().unwrap_or_else(|e| e.into_inner());
-    let state = table.entry(receiver as usize).or_default();
-    state.selected = clamp_range(&state.text, range);
+    table.entry(receiver as usize).or_default().selected = accepted;
+    drop(table);
+    did_change_selection(receiver);
 }
 
 unsafe extern "C" fn marked_range(receiver: Id, _sel: Sel) -> NSRange {
@@ -416,6 +521,7 @@ unsafe extern "C" fn should_change_text(
 /// editing commands only; inserting its `-characters` here as well would type
 /// every printable key twice.
 unsafe extern "C" fn key_down(receiver: Id, _sel: Sel, event: Id) {
+    accept_key_interpretation(receiver);
     let sel = objc::sel::get("characters");
     // SAFETY: `-characters` is `id (id, SEL)` on an event this crate made.
     let characters = unsafe {
@@ -468,12 +574,19 @@ unsafe extern "C" fn character_index_for_point(
 }
 
 unsafe extern "C" fn attributed_substring(
-    _receiver: Id,
+    receiver: Id,
     _sel: Sel,
-    _range: NSRange,
-    _actual: *mut NSRange,
+    range: NSRange,
+    actual: *mut NSRange,
 ) -> Id {
-    std::ptr::null_mut()
+    let state = read(receiver);
+    let range = clamp_range(&state.text, range);
+    if !actual.is_null() {
+        // SAFETY: the caller supplied the optional out-parameter.
+        unsafe { *actual = range };
+    }
+    let bytes = byte_range(&state.text, range);
+    foundation::attributed_string(&state.text[bytes])
 }
 
 unsafe extern "C" fn valid_attributes(_receiver: Id, _sel: Sel) -> Id {
@@ -487,18 +600,19 @@ unsafe extern "C" fn valid_attributes(_receiver: Id, _sel: Sel) -> Id {
 }
 
 unsafe extern "C" fn select_all(receiver: Id, _sel: Sel, _sender: Id) {
-    let mut table = contents().lock().unwrap_or_else(|e| e.into_inner());
-    let state = table.entry(receiver as usize).or_default();
-    state.selected = NSRange {
-        location: 0,
-        length: utf16_len(&state.text),
-    };
+    let length = utf16_len(&read(receiver).text);
+    change_selection(
+        receiver,
+        NSRange {
+            location: 0,
+            length,
+        },
+    );
 }
 
 unsafe extern "C" fn move_left(receiver: Id, _sel: Sel, _sender: Id) {
-    let mut table = contents().lock().unwrap_or_else(|e| e.into_inner());
-    let state = table.entry(receiver as usize).or_default();
-    state.selected = match state.selected.length {
+    let state = read(receiver);
+    let selected = match state.selected.length {
         0 => {
             let caret = byte_index(&state.text, state.selected.location);
             let units = state.text[..caret]
@@ -515,11 +629,11 @@ unsafe extern "C" fn move_left(receiver: Id, _sel: Sel, _sender: Id) {
             length: 0,
         },
     };
+    change_selection(receiver, selected);
 }
 
 unsafe extern "C" fn move_right(receiver: Id, _sel: Sel, _sender: Id) {
-    let mut table = contents().lock().unwrap_or_else(|e| e.into_inner());
-    let state = table.entry(receiver as usize).or_default();
+    let state = read(receiver);
     let location = match state.selected.length {
         0 => {
             let caret = byte_index(&state.text, state.selected.location);
@@ -528,10 +642,13 @@ unsafe extern "C" fn move_right(receiver: Id, _sel: Sel, _sender: Id) {
         }
         _ => state.selected.location.saturating_add(state.selected.length),
     };
-    state.selected = NSRange {
-        location: location.min(utf16_len(&state.text)),
-        length: 0,
-    };
+    change_selection(
+        receiver,
+        NSRange {
+            location: location.min(utf16_len(&state.text)),
+            length: 0,
+        },
+    );
 }
 
 unsafe extern "C" fn do_command_by_selector(receiver: Id, _sel: Sel, command: Sel) {
@@ -719,6 +836,56 @@ pub(crate) fn install() {
 mod tests {
     use super::*;
 
+    static SELECTION_EVENTS: Mutex<Vec<(&'static str, String, NSRange)>> = Mutex::new(Vec::new());
+
+    unsafe extern "C" fn record_will_change(
+        receiver: Id,
+        _sel: Sel,
+        _view: Id,
+        _old: NSRange,
+        proposed: NSRange,
+    ) -> NSRange {
+        let state = read(receiver);
+        SELECTION_EVENTS
+            .lock()
+            .unwrap()
+            .push(("will", state.text, state.selected));
+        proposed
+    }
+
+    unsafe extern "C" fn record_did_change(receiver: Id, _sel: Sel, _notification: Id) {
+        let state = read(receiver);
+        SELECTION_EVENTS
+            .lock()
+            .unwrap()
+            .push(("did", state.text, state.selected));
+    }
+
+    fn delegate_text_view() -> Id {
+        crate::bootstrap();
+        let text = objc::class::lookup(c"NSTextView").expect("NSTextView");
+        let class = objc::class::lookup(c"Rosetta3TextSelectionDelegate").unwrap_or_else(|| {
+            let class = objc::class::allocate_pair(Some(text), c"Rosetta3TextSelectionDelegate", 0)
+                .expect("a fresh test class");
+            assert!(class.add_method(
+                objc::sel::get("textView:willChangeSelectionFromCharacterRange:toCharacterRange:"),
+                record_will_change as objc::class::Imp,
+                c"{_NSRange=QQ}56@0:8@16{_NSRange=QQ}24{_NSRange=QQ}40",
+            ));
+            assert!(class.add_method(
+                objc::sel::get("textViewDidChangeSelection:"),
+                record_did_change as objc::class::Imp,
+                c"v24@0:8@16",
+            ));
+            objc::class::register_pair(class);
+            class
+        });
+        let view = objc::object::create_instance(class, 0);
+        // SAFETY: the live view is its own delegate.
+        unsafe { set_delegate(view, objc::sel::get("setDelegate:"), view) };
+        view
+    }
+
     fn text_view() -> Id {
         crate::bootstrap();
         let class = objc::class::lookup(c"NSTextView").expect("NSTextView");
@@ -789,6 +956,90 @@ mod tests {
             b"typed"
         );
         assert_eq!(read(view).selected.location, 5);
+    }
+
+    #[test]
+    fn an_edit_publishes_text_and_selection_before_delegate_callbacks() {
+        SELECTION_EVENTS.lock().unwrap().clear();
+        let view = delegate_text_view();
+        commit(view, "\u{1f600}");
+        assert_eq!(
+            *SELECTION_EVENTS.lock().unwrap(),
+            vec![
+                (
+                    "will",
+                    "\u{1f600}".to_owned(),
+                    NSRange {
+                        location: 2,
+                        length: 0
+                    }
+                ),
+                (
+                    "did",
+                    "\u{1f600}".to_owned(),
+                    NSRange {
+                        location: 2,
+                        length: 0
+                    }
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn attributed_substring_returns_the_utf16_intersection() {
+        let view = text_view();
+        // SAFETY: live text objects and correctly typed method calls.
+        unsafe {
+            set_string(
+                view,
+                objc::sel::get("setString:"),
+                foundation::string::from_str("a\u{1f600}\u{e9}b"),
+            );
+            let mut actual = NSRange::default();
+            let attributed = attributed_substring(
+                view,
+                objc::sel::get("attributedSubstringForProposedRange:actualRange:"),
+                NSRange {
+                    location: 1,
+                    length: 3,
+                },
+                &mut actual,
+            );
+            assert!(!attributed.is_null());
+            assert_eq!(
+                actual,
+                NSRange {
+                    location: 1,
+                    length: 3
+                }
+            );
+            let method = objc::object::class_of(attributed)
+                .and_then(|class| class.method(objc::sel::get("string")))
+                .expect("NSAttributedString answers -string");
+            let get_string: unsafe extern "C" fn(Id, Sel) -> Id =
+                std::mem::transmute(method.implementation());
+            assert_eq!(
+                foundation::string::bytes(get_string(attributed, objc::sel::get("string"))),
+                "\u{1f600}\u{e9}".as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn ns_not_found_is_ns_integer_max() {
+        assert_eq!(NOT_FOUND, 0x7fff_ffff_ffff_ffff);
+    }
+
+    #[test]
+    fn host_text_requires_the_responder_to_enter_super_key_down() {
+        let view = text_view();
+        begin_key_interpretation(view);
+        assert!(!accepts_host_text(view));
+        accept_key_interpretation(view);
+        assert!(accepts_host_text(view));
+        begin_key_interpretation(view);
+        assert!(!accepts_host_text(view));
     }
 
     #[test]

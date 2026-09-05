@@ -1,3 +1,4 @@
+mod attributed_string;
 mod block;
 pub mod appleevent;
 mod boxed;
@@ -39,6 +40,7 @@ pub fn bootstrap() {
     ONCE.call_once(|| {
         corefoundation::bootstrap();
         string::install();
+        attributed_string::install();
         collections::install();
         pool::install();
         value::install();
@@ -127,6 +129,11 @@ pub(crate) fn real(value: f64) -> objc::object::Id {
         corefoundation::collections::new_number(corefoundation::collections::Number::Float(value));
     // SAFETY: a fresh object.
     unsafe { corefoundation::api::CFAutorelease(n) as objc::object::Id }
+}
+
+/// An autoreleased, attribute-free `NSAttributedString`.
+pub fn attributed_string(text: &str) -> objc::object::Id {
+    attributed_string::make(text)
 }
 
 /// The value an `NSNumber` holds, asked for rather than reached into.
@@ -220,6 +227,7 @@ fn declare_abstract() {
 /// Every class this crate answers for.
 pub const CLASSES: &[&str] = &[
     "NSString",
+    "NSAttributedString",
     "NSHTTPCookie",
     "NSHTTPCookieStorage",
     "NSUserDefaults",

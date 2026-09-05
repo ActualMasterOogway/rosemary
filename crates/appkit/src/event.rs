@@ -293,6 +293,10 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             let modifiers = crate::keymap::modifiers(modifiers);
             let code = crate::keymap::virtual_key(scancode);
             let text = crate::keymap::characters(scancode, key);
+            if down && !crate::keymap::is_modifier(scancode) {
+                let window = object_for(id);
+                crate::text::begin_key_interpretation(responder_of(window));
+            }
             let fields = |window| Fields {
                 kind: match down {
                     true => kind::KEY_DOWN,
@@ -321,7 +325,10 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
         // `NSTextInputClient`; `-characters` is not a substitute for it.
         Event::Text { window, text } => {
             let window = object_for(window);
-            crate::text::commit(responder_of(window), &text);
+            let responder = responder_of(window);
+            if crate::text::accepts_host_text(responder) {
+                crate::text::commit(responder, &text);
+            }
         }
         Event::TextEditing {
             window,
@@ -330,7 +337,10 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             length,
         } => {
             let window = object_for(window);
-            crate::text::compose(responder_of(window), &text, start, length);
+            let responder = responder_of(window);
+            if crate::text::accepts_host_text(responder) {
+                crate::text::compose(responder, &text, start, length);
+            }
         }
         Event::MouseMotion {
             window: id,
