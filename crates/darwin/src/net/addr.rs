@@ -63,6 +63,7 @@ pub fn family_from_host(host: i32) -> Option<i32> {
 /// Owned by value so a caller can hand `libc` a pointer to it without a second
 /// allocation; `STORAGE` bytes is what `struct sockaddr_storage` reserves and is
 /// the most any address either side defines needs.
+#[repr(C, align(8))]
 pub struct HostAddr {
     bytes: [u8; STORAGE],
     len: libc::socklen_t,
