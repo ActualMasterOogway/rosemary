@@ -643,7 +643,11 @@ mod tests {
                 0,
             )
         };
-        assert!(fd >= 0, "openat failed: {}", std::io::Error::last_os_error());
+        assert!(
+            fd >= 0,
+            "openat failed: {}",
+            std::io::Error::last_os_error()
+        );
         // SAFETY: two descriptors this test just opened.
         unsafe {
             libc::close(fd);

@@ -209,8 +209,8 @@ mod tests {
         // SAFETY: a NUL-terminated path and native flags.
         let dirfd = unsafe { libc::open(directory.as_ptr(), libc::O_RDONLY) };
         assert!(dirfd >= 0);
-        let found = insensitive_at(dirfd, c"contents/game.ios")
-            .expect("a case-insensitive relative match");
+        let found =
+            insensitive_at(dirfd, c"contents/game.ios").expect("a case-insensitive relative match");
         // SAFETY: a descriptor this test just opened.
         unsafe { libc::close(dirfd) };
 
