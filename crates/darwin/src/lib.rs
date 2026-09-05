@@ -5,6 +5,7 @@ use std::ffi::CString;
 pub mod bsd;
 pub mod callback;
 pub mod clock;
+pub mod data;
 pub mod dirent;
 pub mod dispatch;
 pub mod divergent;
@@ -579,6 +580,7 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
     ulock::provide(&mut lib);
     spawn::provide(&mut lib);
     dispatch::provide(&mut lib);
+    data::provide(&mut lib);
     #[cfg(not(target_os = "macos"))]
     {
         xlocale::provide(&mut lib);
