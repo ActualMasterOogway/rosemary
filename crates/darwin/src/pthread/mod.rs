@@ -27,6 +27,7 @@ pub mod attr;
 pub mod consts;
 pub mod object;
 pub mod raw;
+mod sched;
 pub mod sync;
 
 pub use attr::{Attributes, HostAttr};
@@ -916,6 +917,10 @@ fn entries() -> &'static [(&'static str, u64)] {
             "pthread_set_qos_class_self_np" => set_qos_class_self_np,
             "pthread_setcancelstate" => setcancelstate,
             "pthread_setcanceltype" => setcanceltype,
+
+            // Scheduler
+            "pthread_getschedparam" => sched::pthread_getschedparam,
+            "pthread_setschedparam" => sched::pthread_setschedparam,
         }
     })
 }
