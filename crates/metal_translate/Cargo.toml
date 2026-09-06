@@ -1,0 +1,10 @@
+[package]
+name = "metal_translate"
+description = "Translate Apple AIR into a Metal-shaped IR and SPIR-V"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+llvm-bitcode.workspace = true
+rspirv.workspace = true

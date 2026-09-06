@@ -1,0 +1,171 @@
+use metal_translate::ir::{Access, InstructionKind, Stage};
+use metal_translate::{AirInput, Phase, TargetProfile, parse_air, translate};
+use rspirv::spirv::Op;
+
+const STORE: &str = include_str!("fixtures/kernel_store_const.ll");
+const COPY: &str = include_str!("fixtures/kernel_copy_word.ll");
+const INVERT: &str = include_str!("fixtures/kernel_invert_word.ll");
+const LOOP: &str = include_str!("fixtures/kernel_bounded_loop_word.ll");
+
+fn store_bitcode() -> Vec<u8> {
+    let encoded = include_str!("fixtures/kernel_store_const.bc.hex")
+        .trim()
+        .as_bytes();
+    let (pairs, remainder) = encoded.as_chunks::<2>();
+    assert!(remainder.is_empty());
+    pairs
+        .iter()
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).unwrap();
+            u8::from_str_radix(text, 16).unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn imports_the_four_core_compute_fixtures() {
+    for (source, name) in [
+        (STORE, "store_const"),
+        (COPY, "copy_word"),
+        (INVERT, "invert_word"),
+        (LOOP, "bounded_loop_word"),
+    ] {
+        let module = parse_air(AirInput::Text(source)).unwrap();
+        assert_eq!(module.functions[0].name, name);
+        assert_eq!(module.entries[0].stage, Stage::Kernel);
+    }
+}
+
+#[test]
+fn preserves_metal_resource_access_and_indices() {
+    let module = parse_air(AirInput::Text(COPY)).unwrap();
+    let resources = &module.entries[0].resources;
+    assert_eq!(resources.len(), 2);
+    assert_eq!((resources[0].index, resources[0].access), (0, Access::Read));
+    assert_eq!(
+        (resources[1].index, resources[1].access),
+        (1, Access::Write)
+    );
+}
+
+#[test]
+fn preserves_loop_ssa_before_spirv_lowering() {
+    let module = parse_air(AirInput::Text(LOOP)).unwrap();
+    assert_eq!(module.functions[0].blocks.len(), 4);
+    assert!(matches!(
+        module.functions[0].blocks[1].instructions[0].kind,
+        InstructionKind::Phi { .. }
+    ));
+}
+
+#[test]
+fn emits_parseable_spirv_for_each_core_kernel() {
+    for source in [STORE, COPY, INVERT, LOOP] {
+        let library = translate(AirInput::Text(source), &TargetProfile::vulkan_1_3()).unwrap();
+        assert_eq!(library.entries.len(), 1);
+        let entry = &library.entries[0];
+        assert_eq!(entry.words[0], rspirv::spirv::MAGIC_NUMBER);
+        assert_eq!(entry.required.capabilities, ["Shader"]);
+        let module = rspirv::dr::load_words(&entry.words).unwrap();
+        assert_eq!(module.entry_points.len(), 1);
+    }
+}
+
+#[test]
+fn maps_buffer_indices_into_the_buffer_descriptor_set() {
+    let library = translate(AirInput::Text(COPY), &TargetProfile::vulkan_1_3()).unwrap();
+    let resources = &library.entries[0].resources;
+    assert_eq!((resources[0].descriptor_set, resources[0].binding), (0, 0));
+    assert_eq!((resources[1].descriptor_set, resources[1].binding), (0, 1));
+}
+
+#[test]
+fn emits_loop_merge_and_phi_for_the_bounded_loop() {
+    let library = translate(AirInput::Text(LOOP), &TargetProfile::vulkan_1_3()).unwrap();
+    let module = rspirv::dr::load_words(&library.entries[0].words).unwrap();
+    let opcodes: Vec<_> = module
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.instructions)
+        .map(|instruction| instruction.class.opcode)
+        .collect();
+    assert!(opcodes.contains(&Op::Phi));
+    assert!(opcodes.contains(&Op::LoopMerge));
+}
+
+#[test]
+fn rejects_non_kernel_air_without_a_spirv_fallback() {
+    let error = parse_air(AirInput::Text(
+        "define void @f() { ret void }\n!air.fragment = !{!0}\n",
+    ))
+    .unwrap_err();
+    assert_eq!(error.diagnostics[0].phase, Phase::AirSemantics);
+}
+
+#[test]
+fn rejects_truncated_bitcode_as_a_container_error() {
+    let error = parse_air(AirInput::Bitcode(b"not bitcode")).unwrap_err();
+    assert_eq!(error.diagnostics[0].phase, Phase::AirContainer);
+}
+
+#[test]
+fn textual_and_bitcode_store_modules_are_equivalent() {
+    let text = parse_air(AirInput::Text(STORE)).unwrap();
+    let bitcode = parse_air(AirInput::Bitcode(&store_bitcode())).unwrap();
+    assert_eq!(bitcode, text);
+    translate(
+        AirInput::Bitcode(&store_bitcode()),
+        &TargetProfile::vulkan_1_3(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn emission_is_deterministic() {
+    let first = translate(AirInput::Text(LOOP), &TargetProfile::vulkan_1_3()).unwrap();
+    let second = translate(AirInput::Text(LOOP), &TargetProfile::vulkan_1_3()).unwrap();
+    assert_eq!(first, second);
+}
+
+#[test]
+fn rejects_malformed_resource_metadata() {
+    let source = STORE.replace("air.location_index", "air.unknown_location");
+    let error = parse_air(AirInput::Text(&source)).unwrap_err();
+    assert_eq!(error.diagnostics[0].phase, Phase::AirSemantics);
+}
+
+#[test]
+fn rejects_unsupported_air_instructions() {
+    let source = INVERT.replace("xor i32", "mul i32");
+    let error = parse_air(AirInput::Text(&source)).unwrap_err();
+    assert_eq!(error.diagnostics[0].phase, Phase::AirSyntax);
+}
+
+#[test]
+fn verifier_rejects_an_undefined_ssa_use() {
+    let mut module = parse_air(AirInput::Text(STORE)).unwrap();
+    let metal_translate::ir::InstructionKind::Store { value, .. } =
+        &mut module.functions[0].blocks[0].instructions[0].kind
+    else {
+        unreachable!()
+    };
+    *value = metal_translate::ir::Operand::Value(metal_translate::ir::ValueId(99));
+    let error = module.verify().unwrap_err();
+    assert_eq!(error.diagnostics[0].phase, Phase::IrVerification);
+}
+
+#[test]
+fn verifier_rejects_duplicate_metal_bindings() {
+    let mut module = parse_air(AirInput::Text(COPY)).unwrap();
+    module.entries[0].resources[1].index = 0;
+    assert!(module.verify().is_err());
+}
+
+#[test]
+fn rejects_a_target_without_required_capabilities() {
+    let mut target = TargetProfile::vulkan_1_3();
+    target.shader = false;
+    let error = translate(AirInput::Text(STORE), &target).unwrap_err();
+    assert_eq!(error.diagnostics[0].phase, Phase::SpirvEmission);
+}

@@ -58,6 +58,7 @@
               # Cargo fetches microlift and the Cranelift fork over git.
               pkgs.git
               pkgs.python3 # tools/guest-symbolicate.py
+              pkgs.llvm # metal_translate
             ];
 
             buildInputs = runtimeLibs;

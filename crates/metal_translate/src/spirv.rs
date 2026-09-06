@@ -1,0 +1,618 @@
+//! SPIR-V emission from Metal IR.
+
+use std::collections::HashMap;
+
+use rspirv::binary::Assemble;
+use rspirv::dr::{Builder, Operand as SpirvOperand};
+use rspirv::spirv::{
+    AddressingModel, Capability, Decoration, ExecutionMode, ExecutionModel, FunctionControl,
+    LoopControl, MemoryModel, StorageClass,
+};
+
+use crate::ir::{
+    Access, BlockId, EntryPoint, Function, InstructionKind, IntegerPredicate, Module, Operand,
+    ResourceKind, Stage, Terminator, Type, ValueId,
+};
+use crate::{Diagnostic, Phase, TranslateError};
+
+/// Vulkan and SPIR-V capabilities available to an emitter invocation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TargetProfile {
+    pub vulkan_version: (u8, u8),
+    pub spirv_version: (u8, u8),
+    pub max_bound_descriptor_sets: u32,
+    pub shader: bool,
+}
+
+impl TargetProfile {
+    pub fn vulkan_1_3() -> Self {
+        Self {
+            vulkan_version: (1, 3),
+            spirv_version: (1, 6),
+            max_bound_descriptor_sets: 4,
+            shader: true,
+        }
+    }
+}
+
+impl Default for TargetProfile {
+    fn default() -> Self {
+        Self::vulkan_1_3()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequiredFeatures {
+    pub capabilities: Vec<String>,
+    pub extensions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceBinding {
+    pub stage: Stage,
+    pub kind: ResourceKind,
+    pub metal_index: u32,
+    pub descriptor_set: u32,
+    pub binding: u32,
+    pub count: u32,
+    pub access: Access,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EntryArtifact {
+    pub name: String,
+    pub stage: Stage,
+    pub words: Vec<u32>,
+    pub resources: Vec<ResourceBinding>,
+    pub required: RequiredFeatures,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TranslatedLibrary {
+    pub entries: Vec<EntryArtifact>,
+}
+
+pub fn emit_spirv(
+    module: &Module,
+    target: &TargetProfile,
+) -> Result<TranslatedLibrary, TranslateError> {
+    module.verify()?;
+    validate_target(target)?;
+    let entries = module
+        .entries
+        .iter()
+        .map(|entry| emit_entry(module, entry, target))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(TranslatedLibrary { entries })
+}
+
+fn validate_target(target: &TargetProfile) -> Result<(), TranslateError> {
+    if !target.shader {
+        return Err(emission(
+            "target profile does not support the Shader capability",
+        ));
+    }
+    if target.max_bound_descriptor_sets < 4 {
+        return Err(emission(
+            "Metal descriptor ABI requires four bound descriptor sets",
+        ));
+    }
+    if target.vulkan_version < (1, 1) {
+        return Err(emission(
+            "the initial descriptor ABI requires at least Vulkan 1.1",
+        ));
+    }
+    if target.spirv_version.0 != 1 || target.spirv_version.1 > 6 {
+        return Err(emission("unsupported SPIR-V target version"));
+    }
+    if target.spirv_version < (1, 3) {
+        return Err(emission(
+            "the initial emitter requires SPIR-V 1.3 for StorageBuffer resources",
+        ));
+    }
+    Ok(())
+}
+
+fn emit_entry(
+    module: &Module,
+    entry: &EntryPoint,
+    target: &TargetProfile,
+) -> Result<EntryArtifact, TranslateError> {
+    if entry.stage != Stage::Kernel {
+        return Err(emission(
+            "the first emitter slice only supports kernel entry points",
+        ));
+    }
+    let function = module
+        .functions
+        .get(entry.function)
+        .ok_or_else(|| emission("entry point refers to a missing function"))?;
+    let mut emitter = Emitter::new(target);
+    let resources = emitter.declare_resources(entry, function)?;
+    let function_id = emitter.emit_function(entry, function)?;
+    emitter.builder.entry_point(
+        ExecutionModel::GLCompute,
+        function_id,
+        &function.name,
+        emitter.interface.clone(),
+    );
+    emitter
+        .builder
+        .execution_mode(function_id, ExecutionMode::LocalSize, [1, 1, 1]);
+    let words = emitter.builder.module().assemble();
+    rspirv::dr::load_words(&words)
+        .map_err(|error| emission(format!("emitted SPIR-V could not be parsed: {error}")))?;
+    Ok(EntryArtifact {
+        name: function.name.clone(),
+        stage: entry.stage,
+        words,
+        resources,
+        required: RequiredFeatures {
+            capabilities: vec!["Shader".to_string()],
+            extensions: Vec::new(),
+        },
+    })
+}
+
+struct Emitter {
+    builder: Builder,
+    types: HashMap<Type, u32>,
+    constants: HashMap<(Type, u64), u32>,
+    buffer_types: HashMap<Type, (u32, u32)>,
+    interface: Vec<u32>,
+    parameter_pointers: HashMap<ValueId, u32>,
+}
+
+impl Emitter {
+    fn new(target: &TargetProfile) -> Self {
+        let mut builder = Builder::new();
+        builder.set_version(target.spirv_version.0, target.spirv_version.1);
+        builder.capability(Capability::Shader);
+        builder.memory_model(AddressingModel::Logical, MemoryModel::GLSL450);
+        Self {
+            builder,
+            types: HashMap::new(),
+            constants: HashMap::new(),
+            buffer_types: HashMap::new(),
+            interface: Vec::new(),
+            parameter_pointers: HashMap::new(),
+        }
+    }
+
+    fn declare_resources(
+        &mut self,
+        entry: &EntryPoint,
+        function: &Function,
+    ) -> Result<Vec<ResourceBinding>, TranslateError> {
+        let mut reflected = Vec::new();
+        for resource in &entry.resources {
+            let parameter = function
+                .parameters
+                .get(resource.argument as usize)
+                .ok_or_else(|| emission("resource refers to a missing function parameter"))?;
+            let Type::Pointer { pointee, .. } = &parameter.ty else {
+                return Err(emission("buffer resource parameter is not a pointer"));
+            };
+            let (_block_type, pointer_type) = self.buffer_type(pointee)?;
+            let variable =
+                self.builder
+                    .variable(pointer_type, None, StorageClass::StorageBuffer, None);
+            let descriptor_set = descriptor_set(resource.kind);
+            let binding = entry.stage.ordinal() * 256 + resource.index;
+            self.builder.decorate(
+                variable,
+                Decoration::DescriptorSet,
+                [SpirvOperand::LiteralBit32(descriptor_set)],
+            );
+            self.builder.decorate(
+                variable,
+                Decoration::Binding,
+                [SpirvOperand::LiteralBit32(binding)],
+            );
+            match resource.access {
+                Access::Read => self.builder.decorate(
+                    variable,
+                    Decoration::NonWritable,
+                    std::iter::empty::<SpirvOperand>(),
+                ),
+                Access::Write => self.builder.decorate(
+                    variable,
+                    Decoration::NonReadable,
+                    std::iter::empty::<SpirvOperand>(),
+                ),
+                Access::ReadWrite => {}
+            }
+            self.interface.push(variable);
+            // The parameter pointer is materialized in the entry block after the
+            // function has begun. Temporarily retain the descriptor variable.
+            self.parameter_pointers.insert(parameter.value, variable);
+            reflected.push(ResourceBinding {
+                stage: entry.stage,
+                kind: resource.kind,
+                metal_index: resource.index,
+                descriptor_set,
+                binding,
+                count: resource.count,
+                access: resource.access,
+            });
+        }
+        Ok(reflected)
+    }
+
+    fn buffer_type(&mut self, pointee: &Type) -> Result<(u32, u32), TranslateError> {
+        if let Some(ids) = self.buffer_types.get(pointee) {
+            return Ok(*ids);
+        }
+        let element_type = self.type_id(pointee)?;
+        let block_type = self.builder.type_struct([element_type]);
+        self.builder.decorate(
+            block_type,
+            Decoration::Block,
+            std::iter::empty::<SpirvOperand>(),
+        );
+        self.builder.member_decorate(
+            block_type,
+            0,
+            Decoration::Offset,
+            [SpirvOperand::LiteralBit32(0)],
+        );
+        let pointer_type = self
+            .builder
+            .type_pointer(None, StorageClass::StorageBuffer, block_type);
+        self.buffer_types
+            .insert(pointee.clone(), (block_type, pointer_type));
+        Ok((block_type, pointer_type))
+    }
+
+    fn emit_function(
+        &mut self,
+        _entry: &EntryPoint,
+        function: &Function,
+    ) -> Result<u32, TranslateError> {
+        self.collect_constants(function)?;
+        let void = self.type_id(&Type::Void)?;
+        let function_type = self.builder.type_function(void, []);
+        let function_id = self.builder.id();
+        let block_ids: HashMap<_, _> = function
+            .blocks
+            .iter()
+            .map(|block| (block.id, self.builder.id()))
+            .collect();
+        let value_ids: HashMap<_, _> = function
+            .values
+            .iter()
+            .enumerate()
+            .map(|(index, _)| (ValueId(index as u32), self.builder.id()))
+            .collect();
+        self.builder
+            .begin_function(
+                void,
+                Some(function_id),
+                FunctionControl::NONE,
+                function_type,
+            )
+            .map_err(build_error)?;
+
+        for (block_index, block) in function.blocks.iter().enumerate() {
+            self.builder
+                .begin_block(Some(block_ids[&block.id]))
+                .map_err(build_error)?;
+            if block_index == 0 {
+                self.materialize_parameter_pointers(function, &value_ids)?;
+            }
+            for instruction in &block.instructions {
+                self.emit_instruction(function, instruction, &block_ids, &value_ids)?;
+            }
+            if let Some((merge, continue_target)) = loop_shape(function, block.id) {
+                self.builder
+                    .loop_merge(
+                        block_ids[&merge],
+                        block_ids[&continue_target],
+                        LoopControl::NONE,
+                        std::iter::empty::<SpirvOperand>(),
+                    )
+                    .map_err(build_error)?;
+            }
+            self.emit_terminator(&block.terminator, &block_ids, &value_ids)?;
+        }
+        self.builder.end_function().map_err(build_error)?;
+        Ok(function_id)
+    }
+
+    fn materialize_parameter_pointers(
+        &mut self,
+        function: &Function,
+        values: &HashMap<ValueId, u32>,
+    ) -> Result<(), TranslateError> {
+        let zero = self.constant(&Type::u32(), 0)?;
+        for parameter in &function.parameters {
+            let Some(variable) = self.parameter_pointers.get(&parameter.value).copied() else {
+                return Err(emission(format!(
+                    "non-resource parameter {} is not supported",
+                    parameter.name
+                )));
+            };
+            let Type::Pointer { pointee, .. } = &parameter.ty else {
+                return Err(emission("resource parameter is not a pointer"));
+            };
+            let pointee_id = self.type_id(pointee)?;
+            let pointer_type =
+                self.builder
+                    .type_pointer(None, StorageClass::StorageBuffer, pointee_id);
+            self.builder
+                .access_chain(
+                    pointer_type,
+                    Some(values[&parameter.value]),
+                    variable,
+                    [zero],
+                )
+                .map_err(build_error)?;
+        }
+        Ok(())
+    }
+
+    fn collect_constants(&mut self, function: &Function) -> Result<(), TranslateError> {
+        for block in &function.blocks {
+            for instruction in &block.instructions {
+                for operand in instruction_operands(&instruction.kind) {
+                    if let Operand::Integer { ty, value } = operand {
+                        self.constant(ty, *value)?;
+                    }
+                }
+            }
+            for operand in terminator_operands(&block.terminator) {
+                if let Operand::Integer { ty, value } = operand {
+                    self.constant(ty, *value)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_instruction(
+        &mut self,
+        function: &Function,
+        instruction: &crate::ir::Instruction,
+        blocks: &HashMap<BlockId, u32>,
+        values: &HashMap<ValueId, u32>,
+    ) -> Result<(), TranslateError> {
+        let result_id = instruction.result.map(|result| values[&result]);
+        match &instruction.kind {
+            InstructionKind::Load { pointer } => {
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("load has no result"))?;
+                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let pointer = self.operand(pointer, values)?;
+                self.builder
+                    .load(ty, result_id, pointer, None, [])
+                    .map_err(build_error)?;
+            }
+            InstructionKind::Store { pointer, value } => {
+                let pointer = self.operand(pointer, values)?;
+                let value = self.operand(value, values)?;
+                self.builder
+                    .store(pointer, value, None, [])
+                    .map_err(build_error)?;
+            }
+            InstructionKind::IntegerAdd { lhs, rhs } => {
+                self.emit_binary(
+                    function,
+                    instruction,
+                    lhs,
+                    rhs,
+                    values,
+                    |builder, ty, id, a, b| builder.i_add(ty, id, a, b),
+                )?;
+            }
+            InstructionKind::IntegerXor { lhs, rhs } => {
+                self.emit_binary(
+                    function,
+                    instruction,
+                    lhs,
+                    rhs,
+                    values,
+                    |builder, ty, id, a, b| builder.bitwise_xor(ty, id, a, b),
+                )?;
+            }
+            InstructionKind::IntegerCompare {
+                predicate: IntegerPredicate::UnsignedLessThan,
+                lhs,
+                rhs,
+            } => {
+                let ty = self.type_id(&Type::Bool)?;
+                let lhs = self.operand(lhs, values)?;
+                let rhs = self.operand(rhs, values)?;
+                self.builder
+                    .u_less_than(ty, result_id, lhs, rhs)
+                    .map_err(build_error)?;
+            }
+            InstructionKind::Phi { incomings } => {
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("phi has no result"))?;
+                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let incoming = incomings
+                    .iter()
+                    .map(|(block, operand)| Ok((self.operand(operand, values)?, blocks[block])))
+                    .collect::<Result<Vec<_>, TranslateError>>()?;
+                self.builder
+                    .phi(ty, result_id, incoming)
+                    .map_err(build_error)?;
+            }
+            InstructionKind::ElementAddress { .. } => {
+                return Err(emission("element-address lowering is not implemented"));
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_binary<F>(
+        &mut self,
+        function: &Function,
+        instruction: &crate::ir::Instruction,
+        lhs: &Operand,
+        rhs: &Operand,
+        values: &HashMap<ValueId, u32>,
+        emit: F,
+    ) -> Result<(), TranslateError>
+    where
+        F: FnOnce(&mut Builder, u32, Option<u32>, u32, u32) -> Result<u32, rspirv::dr::Error>,
+    {
+        let result = instruction
+            .result
+            .ok_or_else(|| emission("binary instruction has no result"))?;
+        let ty = self.type_id(&function.values[result.0 as usize])?;
+        let lhs = self.operand(lhs, values)?;
+        let rhs = self.operand(rhs, values)?;
+        emit(&mut self.builder, ty, Some(values[&result]), lhs, rhs).map_err(build_error)?;
+        Ok(())
+    }
+
+    fn emit_terminator(
+        &mut self,
+        terminator: &Terminator,
+        blocks: &HashMap<BlockId, u32>,
+        values: &HashMap<ValueId, u32>,
+    ) -> Result<(), TranslateError> {
+        match terminator {
+            Terminator::Branch(target) => self.builder.branch(blocks[target]).map_err(build_error),
+            Terminator::CondBranch {
+                condition,
+                true_block,
+                false_block,
+            } => {
+                let condition = self.operand(condition, values)?;
+                self.builder
+                    .branch_conditional(
+                        condition,
+                        blocks[true_block],
+                        blocks[false_block],
+                        std::iter::empty(),
+                    )
+                    .map_err(build_error)
+            }
+            Terminator::Return(None) => self.builder.ret().map_err(build_error),
+            Terminator::Return(Some(value)) => {
+                let value = self.operand(value, values)?;
+                self.builder.ret_value(value).map_err(build_error)
+            }
+            Terminator::Unreachable => self.builder.unreachable().map_err(build_error),
+        }
+    }
+
+    fn operand(
+        &mut self,
+        operand: &Operand,
+        values: &HashMap<ValueId, u32>,
+    ) -> Result<u32, TranslateError> {
+        match operand {
+            Operand::Value(value) => values
+                .get(value)
+                .copied()
+                .ok_or_else(|| emission("operand refers to a missing value")),
+            Operand::Integer { ty, value } => self.constant(ty, *value),
+        }
+    }
+
+    fn constant(&mut self, ty: &Type, value: u64) -> Result<u32, TranslateError> {
+        let key = (ty.clone(), value);
+        if let Some(id) = self.constants.get(&key) {
+            return Ok(*id);
+        }
+        let ty_id = self.type_id(ty)?;
+        let id = match ty {
+            Type::Int { bits: 1..=32, .. } => self.builder.constant_bit32(ty_id, value as u32),
+            Type::Int { bits: 33..=64, .. } => self.builder.constant_bit64(ty_id, value),
+            _ => return Err(emission("unsupported SPIR-V constant type")),
+        };
+        self.constants.insert(key, id);
+        Ok(id)
+    }
+
+    fn type_id(&mut self, ty: &Type) -> Result<u32, TranslateError> {
+        if let Some(id) = self.types.get(ty) {
+            return Ok(*id);
+        }
+        let id = match ty {
+            Type::Void => self.builder.type_void(),
+            Type::Bool => self.builder.type_bool(),
+            Type::Int { bits, signed } => {
+                self.builder.type_int(u32::from(*bits), u32::from(*signed))
+            }
+            _ => return Err(emission(format!("unsupported SPIR-V value type {ty:?}"))),
+        };
+        self.types.insert(ty.clone(), id);
+        Ok(id)
+    }
+}
+
+fn descriptor_set(kind: ResourceKind) -> u32 {
+    match kind {
+        ResourceKind::Texture => 1,
+        ResourceKind::Sampler => 2,
+        ResourceKind::Imageblock => 3,
+        ResourceKind::Buffer
+        | ResourceKind::AccelerationStructure
+        | ResourceKind::VisibleFunctionTable
+        | ResourceKind::IntersectionFunctionTable
+        | ResourceKind::ArgumentBuffer => 0,
+    }
+}
+
+fn loop_shape(function: &Function, header: BlockId) -> Option<(BlockId, BlockId)> {
+    let block = function.blocks.iter().find(|block| block.id == header)?;
+    let Terminator::CondBranch {
+        true_block,
+        false_block,
+        ..
+    } = block.terminator
+    else {
+        return None;
+    };
+    let true_back = branches_to(function, true_block, header);
+    let false_back = branches_to(function, false_block, header);
+    match (true_back, false_back) {
+        (true, false) => Some((false_block, true_block)),
+        (false, true) => Some((true_block, false_block)),
+        _ => None,
+    }
+}
+
+fn branches_to(function: &Function, from: BlockId, target: BlockId) -> bool {
+    function
+        .blocks
+        .iter()
+        .find(|block| block.id == from)
+        .is_some_and(
+            |block| matches!(block.terminator, Terminator::Branch(value) if value == target),
+        )
+}
+
+fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
+    match kind {
+        InstructionKind::Load { pointer } => vec![pointer],
+        InstructionKind::Store { pointer, value } => vec![pointer, value],
+        InstructionKind::IntegerAdd { lhs, rhs }
+        | InstructionKind::IntegerXor { lhs, rhs }
+        | InstructionKind::IntegerCompare { lhs, rhs, .. } => vec![lhs, rhs],
+        InstructionKind::ElementAddress { pointer, index } => vec![pointer, index],
+        InstructionKind::Phi { incomings } => incomings.iter().map(|(_, value)| value).collect(),
+    }
+}
+
+fn terminator_operands(terminator: &Terminator) -> Vec<&Operand> {
+    match terminator {
+        Terminator::CondBranch { condition, .. } => vec![condition],
+        Terminator::Return(Some(value)) => vec![value],
+        _ => Vec::new(),
+    }
+}
+
+fn build_error(error: rspirv::dr::Error) -> TranslateError {
+    emission(format!("SPIR-V builder rejected the module: {error}"))
+}
+
+fn emission(message: impl Into<String>) -> TranslateError {
+    TranslateError::one(Diagnostic::new(Phase::SpirvEmission, message))
+}
