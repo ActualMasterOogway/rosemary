@@ -157,6 +157,10 @@ pub const NAMES: &[(&str, &str)] = &[
         "writev",
         "SO_NOSIGPIPE is per-descriptor there and per-call here",
     ),
+    (
+        "sendfile",
+        "Darwin takes six arguments and reports the byte count through an off_t pointer",
+    ),
     // `struct hostent` matches; `h_addrtype` inside it is an `AF_*`, and Darwin's
     // `AF_INET6` is this host's `AF_ROUTE`.
     ("gethostbyname", SOCKET),

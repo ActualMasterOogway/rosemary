@@ -582,6 +582,178 @@ unsafe extern "C" fn writev(fd: i32, iov: *const libc::iovec, iovcnt: i32) -> is
     unsafe { libc::writev(fd, iov, iovcnt) }
 }
 
+/// Darwin's optional header and trailer around a `sendfile` transfer.
+///
+/// `struct iovec` itself has the same layout on both platforms; only the
+/// structure collecting the two arrays is Darwin-specific.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SendfileHdtr {
+    headers: *const libc::iovec,
+    header_count: i32,
+    trailers: *const libc::iovec,
+    trailer_count: i32,
+}
+
+/// Send an iovec array in order, adding its bytes to Darwin's value-result
+/// count. An error after a partial write remains an error; Darwin reports the
+/// partial byte count through `len` alongside it.
+unsafe fn sendfile_iovecs(
+    socket: i32,
+    iov: *const libc::iovec,
+    count: i32,
+    limit: Option<u64>,
+    sent: &mut i64,
+) -> Result<(), ()> {
+    if count < 0 || (count != 0 && iov.is_null()) {
+        crate::errno::set(libc::EINVAL);
+        return Err(());
+    }
+
+    let mut left = limit.unwrap_or(u64::MAX);
+    for index in 0..count as usize {
+        // SAFETY: the caller promises an array containing `count` readable
+        // iovecs.
+        let part = unsafe { iov.add(index).read_unaligned() };
+        let mut at = part.iov_base.cast::<u8>();
+        let mut remaining = part.iov_len.min(left as usize);
+        while remaining != 0 {
+            let flags = if super::sockopt::suppresses_sigpipe(socket) {
+                libc::MSG_NOSIGNAL
+            } else {
+                0
+            };
+            // SAFETY: `at` names `remaining` readable bytes from this iovec.
+            let wrote = unsafe { libc::send(socket, at.cast(), remaining, flags) };
+            if wrote < 0 {
+                return Err(());
+            }
+            if wrote == 0 {
+                crate::errno::set(libc::EAGAIN);
+                return Err(());
+            }
+            let wrote = wrote as usize;
+            *sent = sent.saturating_add(wrote as i64);
+            left -= wrote as u64;
+            remaining -= wrote;
+            // SAFETY: `wrote` did not exceed `remaining` before subtraction.
+            at = unsafe { at.add(wrote) };
+        }
+        if left == 0 {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// `int sendfile(int fd, int socket, off_t offset, off_t *len,
+/// struct sf_hdtr *hdtr, int flags)`
+///
+/// Linux's function has four arguments in a different order and returns the
+/// byte count directly. Darwin returns zero or minus one and makes `len` a
+/// value-result parameter. Its count includes headers and trailers, and a
+/// zero input count means through end-of-file.
+///
+/// # Safety
+///
+/// `len` is a readable and writable Darwin `off_t`; `hdtr`, when non-null,
+/// describes readable arrays of readable iovecs.
+unsafe extern "C" fn sendfile(
+    file: i32,
+    socket: i32,
+    offset: i64,
+    len: *mut i64,
+    hdtr: *const SendfileHdtr,
+    flags: i32,
+) -> i32 {
+    if len.is_null() {
+        crate::errno::set(libc::EFAULT);
+        return -1;
+    }
+    // SAFETY: the caller's value-result slot.
+    let requested = unsafe { len.read_unaligned() };
+    // From here on every failure reports that no bytes have yet been sent.
+    unsafe { len.write_unaligned(0) };
+    if requested < 0 || offset < 0 || flags != 0 {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+
+    // Darwin requires the output descriptor to be a socket. Modern Linux also
+    // accepts a regular file, so letting the host call decide would turn a
+    // Darwin ENOTSOCK failure into a successful copy.
+    let mut socket_type = 0i32;
+    let mut socket_type_len = core::mem::size_of_val(&socket_type) as libc::socklen_t;
+    // SAFETY: two live output slots and a descriptor supplied by the caller.
+    if unsafe {
+        libc::getsockopt(
+            socket,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            (&raw mut socket_type).cast(),
+            &raw mut socket_type_len,
+        )
+    } < 0
+    {
+        return -1;
+    }
+
+    // SAFETY: the caller's optional structure.
+    let hdtr = match hdtr.is_null() {
+        true => None,
+        false => Some(unsafe { hdtr.read_unaligned() }),
+    };
+    let mut sent = 0i64;
+    let finite = (requested != 0).then_some(requested as u64);
+    if let Some(parts) = hdtr {
+        // Headers count against a nonzero input limit.
+        if unsafe { sendfile_iovecs(socket, parts.headers, parts.header_count, finite, &mut sent) }
+            .is_err()
+        {
+            unsafe { len.write_unaligned(sent) };
+            return -1;
+        }
+    }
+
+    let header_bytes = sent as u64;
+    let mut file_left = finite.map(|total| total.saturating_sub(header_bytes));
+    let mut host_offset = offset as libc::off_t;
+    loop {
+        let count = match file_left {
+            Some(0) => break,
+            Some(left) => left.min(0x7fff_f000) as usize,
+            None => 0x7fff_f000,
+        };
+        // SAFETY: a local offset slot; the kernel validates both descriptors.
+        let wrote = unsafe { libc::sendfile(socket, file, &raw mut host_offset, count) };
+        if wrote < 0 {
+            unsafe { len.write_unaligned(sent) };
+            return -1;
+        }
+        if wrote == 0 {
+            break;
+        }
+        sent = sent.saturating_add(wrote as i64);
+        if let Some(left) = &mut file_left {
+            *left -= wrote as u64;
+        }
+    }
+
+    if let Some(parts) = hdtr {
+        // Trailers do not count against Darwin's input limit and are sent after
+        // the selected file region even when the headers exhausted that limit.
+        if unsafe { sendfile_iovecs(socket, parts.trailers, parts.trailer_count, None, &mut sent) }
+            .is_err()
+        {
+            unsafe { len.write_unaligned(sent) };
+            return -1;
+        }
+    }
+
+    unsafe { len.write_unaligned(sent) };
+    0
+}
+
 /// Darwin's `sa_endpoints_t`, the argument that makes `connectx` more than a
 /// `connect`: a source and a destination in one call.
 #[repr(C)]
@@ -726,6 +898,7 @@ unsafe extern "C" fn inet_ntop(
 pub const NAMES: &[&str] = &[
     "write",
     "writev",
+    "sendfile",
     "connectx",
     "socket",
     "socketpair",
@@ -748,6 +921,7 @@ pub fn symbol(name: &str) -> Option<u64> {
     let f: *const () = match name {
         "write" => write as *const (),
         "writev" => writev as *const (),
+        "sendfile" => sendfile as *const (),
         "connectx" => connectx as *const (),
         "socket" => socket as *const (),
         "socketpair" => socketpair as *const (),
@@ -829,6 +1003,98 @@ mod tests {
             unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, ends.as_mut_ptr()) };
         assert_eq!(rc, 0);
         (ends[0], ends[1])
+    }
+
+    fn memory_file(bytes: &[u8]) -> i32 {
+        // SAFETY: a static C string and flags accepted by `memfd_create`.
+        let fd = unsafe { libc::memfd_create(c"darwin-sendfile-test".as_ptr(), 0) };
+        assert!(fd >= 0);
+        // SAFETY: `bytes` is readable for its length and `fd` is the new file.
+        assert_eq!(
+            unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) },
+            bytes.len() as isize
+        );
+        fd
+    }
+
+    #[test]
+    fn sendfile_uses_darwins_argument_order_and_value_result_count() {
+        let file = memory_file(b"abcdefghij");
+        let (ours, theirs) = pair();
+        let mut header = libc::iovec {
+            iov_base: c"H".as_ptr().cast_mut().cast(),
+            iov_len: 1,
+        };
+        let mut trailer = libc::iovec {
+            iov_base: c"T".as_ptr().cast_mut().cast(),
+            iov_len: 1,
+        };
+        let hdtr = SendfileHdtr {
+            headers: &raw mut header,
+            header_count: 1,
+            trailers: &raw mut trailer,
+            trailer_count: 1,
+        };
+        // Darwin counts the header against this limit and always sends the
+        // trailer, so this asks for one header byte, seven file bytes and one
+        // trailer byte.
+        let mut len = 8i64;
+        // SAFETY: live descriptors and initialized value-result/header slots.
+        assert_eq!(
+            unsafe { sendfile(file, ours, 0, &raw mut len, &raw const hdtr, 0) },
+            0
+        );
+        assert_eq!(len, 9, "the returned count includes the trailer");
+
+        let mut got = [0u8; 9];
+        // SAFETY: a connected descriptor and nine writable bytes.
+        assert_eq!(
+            unsafe {
+                libc::recv(
+                    theirs,
+                    got.as_mut_ptr().cast(),
+                    got.len(),
+                    libc::MSG_WAITALL,
+                )
+            },
+            got.len() as isize
+        );
+        assert_eq!(&got, b"HabcdefgT");
+
+        // SAFETY: descriptors this test opened and no longer uses.
+        unsafe {
+            libc::close(file);
+            libc::close(ours);
+            libc::close(theirs);
+        }
+    }
+
+    /// Linux accepts a regular output file, while Darwin requires a socket.
+    /// Besides preserving that failure, the guest must receive Darwin's 38
+    /// rather than Linux's 88 for `ENOTSOCK`.
+    #[test]
+    fn sendfile_translates_the_hosts_enotsock_for_the_guest() {
+        let input = memory_file(b"x");
+        let output = memory_file(b"");
+        crate::errno::set(0);
+        assert_eq!(crate::errno::guest_errno(), 0);
+
+        let mut len = 1i64;
+        // SAFETY: live descriptors and a writable value-result slot.
+        assert_eq!(
+            unsafe { sendfile(input, output, 0, &raw mut len, core::ptr::null(), 0,) },
+            -1
+        );
+        assert_eq!(len, 0);
+        assert_eq!(crate::errno::get(), libc::ENOTSOCK);
+        assert_eq!(crate::errno::guest_errno(), 38, "Darwin's ENOTSOCK");
+        crate::errno::set(0);
+
+        // SAFETY: descriptors this test opened and no longer uses.
+        unsafe {
+            libc::close(input);
+            libc::close(output);
+        }
     }
 
     /// `MSG_EOF` asks for a half-close after the send, which is the peer seeing
