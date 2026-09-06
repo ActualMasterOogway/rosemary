@@ -55,6 +55,8 @@ pub mod element_type {
 pub enum Source {
     Axis(i32),
     Button(i32),
+    GamepadAxis(i32, bool),
+    GamepadButton(i32),
     Hat(i32),
     /// The device's root collection, which has a usage but no value.
     Collection,
@@ -84,6 +86,7 @@ const AXIS_USAGES: &[u32] = &[
 pub struct Device {
     pub id: sdl3::JoystickId,
     pub joystick: sdl3::Joystick,
+    gamepad: usize,
     raw: Mutex<usize>,
     pub name: String,
     pub vendor: u16,
@@ -130,7 +133,18 @@ impl Device {
                 sdl3::hats(joystick),
             )
         };
-        let elements = describe(axes, buttons, hats);
+        let gamepad = (vendor == 0x045e)
+            .then(|| sdl3::open_gamepad(id))
+            .flatten()
+            .map_or(0, |gamepad| gamepad as usize);
+        let (vendor, product, version, elements) = if vendor == 0x045e && gamepad != 0 {
+            // macOS publishes Microsoft pads to legacy IOKit clients as an
+            // Xbox 360-shaped synthetic HID device. Its stable semantic
+            // layout is what old games have in their mapping databases.
+            (0x045e, 0x028e, 0, describe_gamepad(buttons))
+        } else {
+            (vendor, product, version, describe(axes, buttons, hats))
+        };
         // SAFETY: the joystick is open. Not every SDL joystick has a raw HID
         // path; those devices use the synthetic report representation below.
         let raw = unsafe { sdl3::open_hid(joystick) }.map_or(0, |device| device as usize);
@@ -138,6 +152,7 @@ impl Device {
         let device = std::sync::Arc::new(Device {
             id,
             joystick,
+            gamepad,
             raw: Mutex::new(raw),
             name,
             vendor,
@@ -237,7 +252,7 @@ impl Device {
         for element in self
             .elements
             .iter()
-            .filter(|e| matches!(e.source, Source::Axis(_)))
+            .filter(|e| matches!(e.source, Source::Axis(_) | Source::GamepadAxis(_, _)))
         {
             report.extend_from_slice(&(self.value(element) as i16).to_le_bytes());
         }
@@ -251,7 +266,7 @@ impl Device {
         let buttons: Vec<&Element> = self
             .elements
             .iter()
-            .filter(|e| matches!(e.source, Source::Button(_)))
+            .filter(|e| matches!(e.source, Source::Button(_) | Source::GamepadButton(_)))
             .collect();
         for chunk in buttons.chunks(8) {
             let mut byte = 0;
@@ -273,7 +288,7 @@ impl Device {
         let axes = self
             .elements
             .iter()
-            .filter(|e| matches!(e.source, Source::Axis(_)))
+            .filter(|e| matches!(e.source, Source::Axis(_) | Source::GamepadAxis(_, _)))
             .count();
         let hats = self
             .elements
@@ -283,7 +298,7 @@ impl Device {
         let buttons = self
             .elements
             .iter()
-            .filter(|e| matches!(e.source, Source::Button(_)))
+            .filter(|e| matches!(e.source, Source::Button(_) | Source::GamepadButton(_)))
             .count();
         axes * 2 + hats + buttons.div_ceil(8)
     }
@@ -300,7 +315,7 @@ impl Device {
         descriptor(
             self.elements
                 .iter()
-                .filter(|e| matches!(e.source, Source::Axis(_)))
+                .filter(|e| matches!(e.source, Source::Axis(_) | Source::GamepadAxis(_, _)))
                 .count(),
             self.elements
                 .iter()
@@ -308,7 +323,7 @@ impl Device {
                 .count(),
             self.elements
                 .iter()
-                .filter(|e| matches!(e.source, Source::Button(_)))
+                .filter(|e| matches!(e.source, Source::Button(_) | Source::GamepadButton(_)))
                 .count(),
         )
     }
@@ -414,6 +429,13 @@ impl Device {
             Source::Axis(i) => unsafe { sdl3::axis(self.joystick, i) as i64 },
             // SAFETY: as above.
             Source::Button(i) => unsafe { sdl3::button(self.joystick, i) as i64 },
+            Source::GamepadAxis(i, invert) => unsafe {
+                let value = sdl3::gamepad_axis(self.gamepad as sdl3::Gamepad, i) as i64;
+                if invert { -value } else { value }
+            },
+            Source::GamepadButton(i) => unsafe {
+                sdl3::gamepad_button(self.gamepad as sdl3::Gamepad, i) as i64
+            },
             // SAFETY: as above.
             Source::Hat(i) => hat_to_direction(unsafe { sdl3::hat(self.joystick, i) }),
             Source::Collection => 0,
@@ -563,6 +585,61 @@ pub fn describe(axes: i32, buttons: i32, hats: i32) -> Vec<Element> {
     out
 }
 
+/// Apple's synthetic Xbox HID layout, backed by SDL's semantic gamepad API.
+fn describe_gamepad(reported_buttons: i32) -> Vec<Element> {
+    let mut out = describe(sdl3::gamepad_axis::COUNT, reported_buttons.max(15), 0);
+    let axes = [
+        (sdl3::gamepad_axis::LEFT_X, false),
+        (sdl3::gamepad_axis::LEFT_Y, false),
+        (sdl3::gamepad_axis::LEFT_TRIGGER, false),
+        (sdl3::gamepad_axis::RIGHT_X, false),
+        (sdl3::gamepad_axis::RIGHT_Y, true),
+        (sdl3::gamepad_axis::RIGHT_TRIGGER, false),
+    ];
+    for (element, (axis, invert)) in out.iter_mut().skip(1).zip(axes) {
+        element.source = Source::GamepadAxis(axis, invert);
+        if axis == sdl3::gamepad_axis::LEFT_TRIGGER || axis == sdl3::gamepad_axis::RIGHT_TRIGGER {
+            element.logical_min = 0;
+        }
+    }
+    let buttons = [
+        sdl3::gamepad_button::SOUTH,
+        sdl3::gamepad_button::EAST,
+        sdl3::gamepad_button::WEST,
+        sdl3::gamepad_button::NORTH,
+        sdl3::gamepad_button::LEFT_SHOULDER,
+        sdl3::gamepad_button::RIGHT_SHOULDER,
+        sdl3::gamepad_button::LEFT_STICK,
+        sdl3::gamepad_button::RIGHT_STICK,
+        sdl3::gamepad_button::BACK,
+        sdl3::gamepad_button::START,
+        sdl3::gamepad_button::GUIDE,
+        sdl3::gamepad_button::DPAD_UP,
+        sdl3::gamepad_button::DPAD_DOWN,
+        sdl3::gamepad_button::DPAD_LEFT,
+        sdl3::gamepad_button::DPAD_RIGHT,
+        sdl3::gamepad_button::MISC1,
+        sdl3::gamepad_button::RIGHT_PADDLE1,
+        sdl3::gamepad_button::LEFT_PADDLE1,
+        sdl3::gamepad_button::RIGHT_PADDLE2,
+        sdl3::gamepad_button::LEFT_PADDLE2,
+        sdl3::gamepad_button::TOUCHPAD,
+        sdl3::gamepad_button::MISC2,
+        sdl3::gamepad_button::MISC3,
+        sdl3::gamepad_button::MISC4,
+        sdl3::gamepad_button::MISC5,
+        sdl3::gamepad_button::MISC6,
+    ];
+    for (element, button) in out
+        .iter_mut()
+        .skip(1 + sdl3::gamepad_axis::COUNT as usize)
+        .zip(buttons)
+    {
+        element.source = Source::GamepadButton(button);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,5 +714,39 @@ mod tests {
         let elements = describe(8, 0, 0);
         assert_eq!(elements[7].usage, 0);
         assert_eq!(elements[8].usage, 0);
+    }
+
+    #[test]
+    fn an_xbox_gamepad_uses_apples_synthetic_hid_order() {
+        let elements = describe_gamepad(18);
+        assert_eq!(
+            elements[1..7].iter().map(|e| e.source).collect::<Vec<_>>(),
+            vec![
+                Source::GamepadAxis(sdl3::gamepad_axis::LEFT_X, false),
+                Source::GamepadAxis(sdl3::gamepad_axis::LEFT_Y, false),
+                Source::GamepadAxis(sdl3::gamepad_axis::LEFT_TRIGGER, false),
+                Source::GamepadAxis(sdl3::gamepad_axis::RIGHT_X, false),
+                Source::GamepadAxis(sdl3::gamepad_axis::RIGHT_Y, true),
+                Source::GamepadAxis(sdl3::gamepad_axis::RIGHT_TRIGGER, false),
+            ]
+        );
+        assert_eq!(elements[3].logical_min, 0, "left trigger is unsigned");
+        assert_eq!(elements[6].logical_min, 0, "right trigger is unsigned");
+        assert_eq!(
+            elements[7].source,
+            Source::GamepadButton(sdl3::gamepad_button::SOUTH)
+        );
+        assert_eq!(
+            elements[11].source,
+            Source::GamepadButton(sdl3::gamepad_button::LEFT_SHOULDER)
+        );
+        assert_eq!(
+            elements[13].source,
+            Source::GamepadButton(sdl3::gamepad_button::LEFT_STICK)
+        );
+        assert_eq!(
+            elements[18].source,
+            Source::GamepadButton(sdl3::gamepad_button::DPAD_UP)
+        );
     }
 }

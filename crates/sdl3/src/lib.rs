@@ -721,16 +721,19 @@ pub unsafe fn send_effect(joystick: Joystick, bytes: &[u8]) -> bool {
 
 /// SDL's standard gamepad axes.
 pub mod gamepad_axis {
+    pub const INVALID: i32 = -1;
     pub const LEFT_X: i32 = 0;
     pub const LEFT_Y: i32 = 1;
     pub const RIGHT_X: i32 = 2;
     pub const RIGHT_Y: i32 = 3;
     pub const LEFT_TRIGGER: i32 = 4;
     pub const RIGHT_TRIGGER: i32 = 5;
+    pub const COUNT: i32 = 6;
 }
 
 /// SDL's standard gamepad buttons.
 pub mod gamepad_button {
+    pub const INVALID: i32 = -1;
     pub const SOUTH: i32 = 0;
     pub const EAST: i32 = 1;
     pub const WEST: i32 = 2;
@@ -746,6 +749,18 @@ pub mod gamepad_button {
     pub const DPAD_DOWN: i32 = 12;
     pub const DPAD_LEFT: i32 = 13;
     pub const DPAD_RIGHT: i32 = 14;
+    pub const MISC1: i32 = 15;
+    pub const RIGHT_PADDLE1: i32 = 16;
+    pub const LEFT_PADDLE1: i32 = 17;
+    pub const RIGHT_PADDLE2: i32 = 18;
+    pub const LEFT_PADDLE2: i32 = 19;
+    pub const TOUCHPAD: i32 = 20;
+    pub const MISC2: i32 = 21;
+    pub const MISC3: i32 = 22;
+    pub const MISC4: i32 = 23;
+    pub const MISC5: i32 = 24;
+    pub const MISC6: i32 = 25;
+    pub const COUNT: i32 = 26;
 }
 
 /// The gamepad instance ids attached right now.

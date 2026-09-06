@@ -213,7 +213,7 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
         };
         assert_eq!(read(b"VendorID"), 0x045e, "the vendor id is SDL's own");
         assert_eq!(read(b"ProductID"), 0x028e);
-        assert_eq!(read(b"MaxInputReportSize"), 15);
+        assert_eq!(read(b"MaxInputReportSize"), 14);
 
         let descriptor = api::IOHIDDeviceGetProperty(device, string(b"ReportDescriptor"));
         assert_eq!(cf::CFGetTypeID(descriptor), cf::CFDataGetTypeID());
@@ -232,7 +232,7 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
     unsafe {
         let elements = api::IOHIDDeviceCopyMatchingElements(device, std::ptr::null(), 0);
         let count = cf::CFArrayGetCount(elements);
-        assert_eq!(count, 1 + 6 + 1 + 15, "the element tree is the wrong shape");
+        assert_eq!(count, 1 + 6 + 15, "the element tree is the wrong shape");
 
         // Apps can reject every array member whose general CF type does not
         // equal IOKit's element type before it reads any HID fields.
@@ -262,6 +262,14 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
         assert!(!value.is_null());
         assert_eq!(cf::CFGetTypeID(value), api::IOHIDValueGetTypeID());
         assert_eq!(api::IOHIDValueGetElement(value), first_axis);
+        assert_eq!(api::IOHIDValueGetLength(value), 2);
+
+        let first_button = cf::CFArrayGetValueAtIndex(elements, 7);
+        assert_eq!(
+            api::IOHIDDeviceGetValue(device, first_button, &mut value),
+            0
+        );
+        assert_eq!(api::IOHIDValueGetLength(value), 1);
 
         // And the root collection's children are everything else.
         let root = cf::CFArrayGetValueAtIndex(elements, 0);
@@ -275,7 +283,7 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
     let joystick = sdl3::open(id).expect("the joystick opens");
     VALUES.lock().unwrap_or_else(|e| e.into_inner()).clear();
     REPORTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    let mut report_buffer = [0u8; 15];
+    let mut report_buffer = [0u8; 14];
     // SAFETY: the device remains alive and the buffer remains in scope through
     // the callback registration below.
     unsafe {
@@ -302,21 +310,21 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
         values.contains(&(1, 20_000)),
         "the axis did not arrive as element 1: {values:?}"
     );
-    // Element 0 is the collection, 1..=6 the axes, 7 the hat, 8.. the buttons -
-    // so SDL's button 2 is element 10.
+    // Element 0 is the collection, 1..=6 the axes and 7.. the buttons, so
+    // SDL's semantic X button is element 9.
     assert!(
-        values.contains(&(10, 1)),
-        "the button did not arrive as element 10: {values:?}"
+        values.contains(&(9, 1)),
+        "the button did not arrive as element 9: {values:?}"
     );
     let reports = REPORTS.lock().unwrap_or_else(|e| e.into_inner());
     let report = reports
         .last()
         .expect("the input report callback did not run");
     assert_eq!(i16::from_le_bytes([report[0], report[1]]), 20_000);
-    assert_eq!(report[13] & 0x04, 0x04, "button 2 was not packed");
+    assert_eq!(report[12] & 0x04, 0x04, "button 2 was not packed");
     drop(reports);
 
-    let mut polled = [0u8; 15];
+    let mut polled = [0u8; 14];
     let mut polled_length = polled.len() as isize;
     // SAFETY: the device and output buffer remain valid for the call.
     unsafe {
@@ -325,7 +333,7 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
             0
         );
     }
-    assert_eq!(polled_length, 15);
+    assert_eq!(polled_length, 14);
     assert_eq!(polled, report_buffer);
 
     let output = [0x05, 0xaa, 0x55];

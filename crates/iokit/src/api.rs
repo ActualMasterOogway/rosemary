@@ -487,12 +487,25 @@ pub unsafe extern "C" fn IOHIDValueGetIntegerValue(v: CFTypeRef) -> CFIndex {
     unsafe { value::borrow(v) }.map_or(0, |v| v.integer as CFIndex)
 }
 
-/// The width of the value in bytes, which for everything here is one word.
+/// The width of the element's value in its HID report.
 pub unsafe extern "C" fn IOHIDValueGetLength(v: CFTypeRef) -> CFIndex {
     // SAFETY: as above.
-    match unsafe { value::borrow(v) } {
-        Some(_) => size_of::<CFIndex>() as CFIndex,
-        None => 0,
+    let Some(value) = (unsafe { value::borrow(v) }) else {
+        return 0;
+    };
+    // SAFETY: as above; the value keeps the originating device and cookie.
+    let Some(element) = (unsafe { value::device(value) }).and_then(|d| d.element(value.cookie))
+    else {
+        return 0;
+    };
+    match element.source {
+        crate::hid::Source::Axis(_) | crate::hid::Source::GamepadAxis(_, _) => {
+            size_of::<i16>() as CFIndex
+        }
+        crate::hid::Source::Button(_)
+        | crate::hid::Source::GamepadButton(_)
+        | crate::hid::Source::Hat(_) => size_of::<u8>() as CFIndex,
+        crate::hid::Source::Collection => 0,
     }
 }
 
