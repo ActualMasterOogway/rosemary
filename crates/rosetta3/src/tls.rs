@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use machish::report::LinkReport;
+use static_init::dynamic;
 
 /// Largest thread block this will allocate.
 const MAX_BLOCK: u64 = 64 * 1024 * 1024;
@@ -94,15 +95,17 @@ const DESTRUCTOR_PASSES: u32 = 4;
 /// storage back to the key for as many passes as libpthread makes, which keeps the
 /// blocks addressable for the whole of teardown instead of up to the first pass that
 /// happens to reach them.
+#[inline(always)]
 fn key() -> libc::pthread_key_t {
-    static KEY: std::sync::OnceLock<libc::pthread_key_t> = std::sync::OnceLock::new();
-    *KEY.get_or_init(|| {
+    #[dynamic]
+    static KEY: libc::pthread_key_t = {
         let mut key: libc::pthread_key_t = 0;
         // SAFETY: a live local; `discard` is an `extern "C"` function of this module.
         let rc = unsafe { libc::pthread_key_create(&mut key, Some(discard)) };
         assert_eq!(rc, 0, "a guest cannot run without thread-local storage");
         key
-    })
+    };
+    *KEY
 }
 
 /// This thread's storage, created on first touch. Null only if the key would not take
