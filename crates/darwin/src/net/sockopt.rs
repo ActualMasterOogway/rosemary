@@ -244,8 +244,8 @@ unsafe fn queued_bytes(fd: i32, name: i32, value: *mut c_void, len: *mut u32) ->
 /// `close` clears entries eagerly and descriptor duplication copies or replaces
 /// them. `write` and `writev` still discard an entry when a file-type probe, or
 /// a raced `send`, proves its descriptor is no longer a socket.
-static SUPPRESSED: std::sync::Mutex<Option<std::collections::HashSet<i32>>> =
-    std::sync::Mutex::new(None);
+static SUPPRESSED: std::sync::RwLock<Option<std::collections::HashSet<i32>>> =
+    std::sync::RwLock::new(None);
 
 /// How many descriptors [`SUPPRESSED`] holds.
 ///
@@ -254,12 +254,17 @@ static SUPPRESSED: std::sync::Mutex<Option<std::collections::HashSet<i32>>> =
 /// most of them - should pay a relaxed load for that rather than a lock.
 static SUPPRESSED_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-fn with_suppressed<R>(f: impl FnOnce(&mut std::collections::HashSet<i32>) -> R) -> R {
-    let mut guard = SUPPRESSED.lock().unwrap_or_else(|e| e.into_inner());
+fn with_suppressed_mut<R>(f: impl FnOnce(&mut std::collections::HashSet<i32>) -> R) -> R {
+    let mut guard = SUPPRESSED.write().unwrap_or_else(|e| e.into_inner());
     let held = guard.get_or_insert_with(Default::default);
     let answer = f(held);
     SUPPRESSED_COUNT.store(held.len(), std::sync::atomic::Ordering::Relaxed);
     answer
+}
+
+fn suppressed_contains(fd: i32) -> bool {
+    let guard = SUPPRESSED.read().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref().is_some_and(|held| held.contains(&fd))
 }
 
 /// Whether any descriptor at all was given `SO_NOSIGPIPE`.
@@ -274,7 +279,7 @@ pub fn any_suppress_sigpipe() -> bool {
 /// write. The file type reported by `fstat` distinguishes a live socket from a
 /// reused non-socket. This check is only made for a number present in the set.
 pub fn suppresses_sigpipe(fd: i32) -> bool {
-    if !any_suppress_sigpipe() || !with_suppressed(|held| held.contains(&fd)) {
+    if !any_suppress_sigpipe() || !suppressed_contains(fd) {
         return false;
     }
 
@@ -302,7 +307,7 @@ pub fn inherit_sigpipe_suppression(from: i32, to: i32) {
     }
     let suppressed = suppresses_sigpipe(from);
     if suppressed || any_suppress_sigpipe() {
-        with_suppressed(|held| match suppressed {
+        with_suppressed_mut(|held| match suppressed {
             true => held.insert(to),
             false => held.remove(&to),
         });
@@ -312,7 +317,7 @@ pub fn inherit_sigpipe_suppression(from: i32, to: i32) {
 /// Forget any option set on `fd`, because it no longer names that socket.
 pub fn forget(fd: i32) {
     if fd >= 0 && any_suppress_sigpipe() {
-        with_suppressed(|held| held.remove(&fd));
+        with_suppressed_mut(|held| held.remove(&fd));
     }
 }
 
@@ -326,7 +331,7 @@ unsafe fn set_nosigpipe(fd: i32, value: *const c_void, len: u32) -> i32 {
     }
     // SAFETY: at least an `int` of the caller's, just checked.
     let wanted = unsafe { value.cast::<i32>().read_unaligned() } != 0;
-    with_suppressed(|held| match wanted {
+    with_suppressed_mut(|held| match wanted {
         true => held.insert(fd),
         false => held.remove(&fd),
     });
