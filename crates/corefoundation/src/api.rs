@@ -1422,7 +1422,7 @@ pub unsafe extern "C" fn CFDataCreate(
 /// `CFData`, and the copy of it goes straight back into `UCKeyTranslate` - so
 /// the copy has to be Apple's too. See [`crate::foreign`].
 pub unsafe extern "C" fn CFDataCreateCopy(
-    _allocator: CFAllocatorRef,
+    allocator: CFAllocatorRef,
     data: CFTypeRef,
 ) -> CFTypeRef {
     #[cfg(target_os = "macos")]
@@ -1445,6 +1445,8 @@ pub unsafe extern "C" fn CFDataCreateCopy(
             f(allocator, data)
         };
     }
+    // silence clippy warning on non-macos
+    let _ = allocator;
     // SAFETY: the caller's obligation.
     let Some(bytes) = (unsafe { collections::data(data) }) else {
         return std::ptr::null();
