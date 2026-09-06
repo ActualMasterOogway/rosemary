@@ -133,18 +133,24 @@ impl Device {
                 sdl3::hats(joystick),
             )
         };
-        let gamepad = (vendor == 0x045e)
+        let gamepad = (vendor == sdl3::usb_vendor::MICROSOFT)
             .then(|| sdl3::open_gamepad(id))
             .flatten()
             .map_or(0, |gamepad| gamepad as usize);
-        let (vendor, product, version, elements) = if vendor == 0x045e && gamepad != 0 {
-            // macOS publishes Microsoft pads to legacy IOKit clients as an
-            // Xbox 360-shaped synthetic HID device. Its stable semantic
-            // layout is what old games have in their mapping databases.
-            (0x045e, 0x028e, 0, describe_gamepad(buttons))
-        } else {
-            (vendor, product, version, describe(axes, buttons, hats))
-        };
+        let (vendor, product, version, elements) =
+            if vendor == sdl3::usb_vendor::MICROSOFT && gamepad != 0 {
+                // macOS publishes Microsoft pads to legacy IOKit clients as an
+                // Xbox 360-shaped synthetic HID device. Its stable semantic
+                // layout is what old games have in their mapping databases.
+                (
+                    sdl3::usb_vendor::MICROSOFT,
+                    sdl3::usb_product::XBOX_360_CONTROLLER,
+                    0,
+                    describe_gamepad(buttons),
+                )
+            } else {
+                (vendor, product, version, describe(axes, buttons, hats))
+            };
         // SAFETY: the joystick is open. Not every SDL joystick has a raw HID
         // path; those devices use the synthetic report representation below.
         let raw = unsafe { sdl3::open_hid(joystick) }.map_or(0, |device| device as usize);

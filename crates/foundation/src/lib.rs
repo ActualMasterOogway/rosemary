@@ -249,6 +249,7 @@ pub const CLASSES: &[&str] = &[
     "NSData",
     "NSMutableData",
     "NSNumber",
+    "NSPredicate",
     "NSValue",
     "NSNull",
     "NSNotification",

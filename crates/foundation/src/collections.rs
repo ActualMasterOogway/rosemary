@@ -16,6 +16,21 @@ use objc::sel::Sel;
 
 use crate::define::{class_methods, methods};
 
+#[repr(C)]
+struct Predicate {
+    isa: *const objc::class::Class,
+    block: usize,
+}
+
+unsafe fn block_invoke(block: Id) -> Option<usize> {
+    if block.is_null() {
+        return None;
+    }
+    // SAFETY: `invoke` is the third word of every Objective-C block literal.
+    let invoke = unsafe { *((block as *const u8).add(16) as *const usize) };
+    (invoke != 0).then_some(invoke)
+}
+
 /// Report a mutation of a collection that was not created mutable.
 ///
 /// A named abort rather than a wrong answer: an `NSArray` that silently accepted
@@ -57,6 +72,77 @@ unsafe extern "C" fn last_object(receiver: Id, sel: Sel) -> Id {
             n => object_at_index(receiver, sel, n - 1),
         }
     }
+}
+
+unsafe extern "C" fn sorted_array_using_selector(receiver: Id, _sel: Sel, _compare: Sel) -> Id {
+    // Apps use this with NSString keys and `caseInsensitiveCompare:`. Keep
+    // the ordering deterministic while avoiding guest callbacks during sort.
+    let Some(array) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    let mut values = array.values.clone();
+    values.sort_by_cached_key(|value| {
+        // SAFETY: this Foundation entry point is used with NSString arrays.
+        unsafe { crate::string::bytes(*value as Id) }.to_ascii_lowercase()
+    });
+    // SAFETY: a fresh array follows the convenience-constructor rule.
+    unsafe {
+        api::CFAutorelease(collections::new_array(
+            &values,
+            Policy::from_type_callbacks(),
+            false,
+        )) as Id
+    }
+}
+
+unsafe extern "C" fn filtered_array_using_predicate(receiver: Id, _sel: Sel, predicate: Id) -> Id {
+    let Some(array) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    if predicate.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: `predicateWithBlock:` creates this layout.
+    let block = unsafe { (*(predicate as *const Predicate)).block as Id };
+    let mut values = Vec::new();
+    if let Some(invoke) = unsafe { block_invoke(block) } {
+        // `NSPredicate` block predicates receive the object and a bindings
+        // dictionary. There are no substitution variables in this operation.
+        let call: unsafe extern "C" fn(Id, Id, Id) -> bool = unsafe { std::mem::transmute(invoke) };
+        for value in &array.values {
+            if unsafe { call(block, *value as Id, std::ptr::null_mut()) } {
+                values.push(*value);
+            }
+        }
+    }
+    // SAFETY: a fresh array follows the convenience-constructor rule.
+    unsafe {
+        api::CFAutorelease(collections::new_array(
+            &values,
+            Policy::from_type_callbacks(),
+            false,
+        )) as Id
+    }
+}
+
+unsafe extern "C" fn predicate_with_block(_class: Id, _sel: Sel, block: Id) -> Id {
+    let class = objc::class::lookup(c"NSPredicate").expect("NSPredicate is installed");
+    // SAFETY: `Predicate` is the registered layout for this class.
+    let predicate = unsafe { corefoundation::base::allocate::<Predicate>(class) };
+    if predicate.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: a fresh instance.
+    unsafe { (*predicate).block = objc::block::copy(block) as usize };
+    // SAFETY: a fresh object follows the convenience-constructor rule.
+    unsafe { api::CFAutorelease(predicate as CFTypeRef) as Id }
+}
+
+unsafe extern "C" fn predicate_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a Predicate instance at the end of its lifetime.
+    let block = unsafe { (*(receiver as *mut Predicate)).block as Id };
+    objc::block::release(block);
+    objc::arc::finalize(receiver);
 }
 
 unsafe extern "C" fn add_object(receiver: Id, _sel: Sel, object: Id) {
@@ -678,6 +764,8 @@ pub(crate) fn install() {
         "firstObject" => first_object, c"@16@0:8";
         "lastObject" => last_object, c"@16@0:8";
         "componentsJoinedByString:" => components_joined_by_string, c"@24@0:8@16";
+        "sortedArrayUsingSelector:" => sorted_array_using_selector, c"@24@0:8:16";
+        "filteredArrayUsingPredicate:" => filtered_array_using_predicate, c"@24@0:8@16";
         "countByEnumeratingWithState:objects:count:" => array_enumerate, c"Q40@0:8^{?=Q^@^QQ5}16^@24Q32";
     });
     class_methods!(array, {
@@ -723,6 +811,19 @@ pub(crate) fn install() {
         "new" => new_dictionary, c"@16@0:8";
         "dictionary" => dictionary, c"@16@0:8";
         "dictionaryWithCapacity:" => dictionary_with_capacity, c"@24@0:8Q16";
+    });
+
+    let predicate = corefoundation::base::register(
+        c"NSPredicate",
+        None,
+        std::mem::size_of::<Predicate>(),
+        false,
+    );
+    methods!(predicate, {
+        "dealloc" => predicate_dealloc, c"v16@0:8";
+    });
+    class_methods!(predicate, {
+        "predicateWithBlock:" => predicate_with_block, c"@24@0:8@?16";
     });
 
     let data = objc::class::lookup(c"NSData").expect("CoreFoundation registered NSData");

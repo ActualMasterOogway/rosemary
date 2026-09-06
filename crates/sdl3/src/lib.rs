@@ -119,6 +119,7 @@ struct Api {
     SDL_OpenGamepad: Option<unsafe extern "C" fn(JoystickId) -> Gamepad>,
     SDL_CloseGamepad: Option<unsafe extern "C" fn(Gamepad)>,
     SDL_GetGamepadName: Option<unsafe extern "C" fn(Gamepad) -> *const c_char>,
+    SDL_GetGamepadVendor: Option<unsafe extern "C" fn(Gamepad) -> u16>,
     SDL_GetGamepadProperties: Option<unsafe extern "C" fn(Gamepad) -> PropertiesId>,
     SDL_GetBooleanProperty: Option<unsafe extern "C" fn(PropertiesId, *const c_char, bool) -> bool>,
     SDL_GetGamepadAxis: Option<unsafe extern "C" fn(Gamepad, c_int) -> i16>,
@@ -299,6 +300,7 @@ fn api() -> Option<&'static Api> {
             SDL_OpenGamepad,
             SDL_CloseGamepad,
             SDL_GetGamepadName,
+            SDL_GetGamepadVendor,
             SDL_GetGamepadProperties,
             SDL_GetBooleanProperty,
             SDL_GetGamepadAxis,
@@ -763,6 +765,16 @@ pub mod gamepad_button {
     pub const COUNT: i32 = 26;
 }
 
+/// USB vendor identifiers used when SDL's gamepad metadata is interpreted.
+pub mod usb_vendor {
+    pub const MICROSOFT: u16 = 0x045e;
+}
+
+pub mod usb_product {
+    pub const XBOX_360_CONTROLLER: u16 = 0x028e;
+    pub const XBOX_SERIES_CONTROLLER: u16 = 0x0b13;
+}
+
 /// The gamepad instance ids attached right now.
 pub fn gamepads() -> Vec<JoystickId> {
     let Some(api) = api() else {
@@ -823,6 +835,19 @@ pub unsafe fn gamepad_name(gamepad: Gamepad) -> String {
         unsafe { CStr::from_ptr(text) }
             .to_string_lossy()
             .into_owned()
+    }
+}
+
+/// A gamepad's USB vendor id, or zero when SDL does not know it.
+///
+/// # Safety
+///
+/// As [`close_gamepad`].
+pub unsafe fn gamepad_vendor(gamepad: Gamepad) -> u16 {
+    match api().and_then(|a| a.SDL_GetGamepadVendor) {
+        // SAFETY: the caller's obligation.
+        Some(get) => unsafe { get(gamepad) },
+        None => 0,
     }
 }
 

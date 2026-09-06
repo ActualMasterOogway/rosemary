@@ -17,6 +17,7 @@ struct Controller {
     player_index: isize,
     extended: Id,
     vendor_name: Id,
+    product_category: Id,
     motion: Id,
     light: Id,
     haptics: Id,
@@ -84,6 +85,8 @@ struct ExtendedGamepad {
     right_thumbstick_button: Id,
     button_menu: Id,
     button_options: Id,
+    elements: Id,
+    buttons: Id,
 }
 
 #[repr(C)]
@@ -236,9 +239,9 @@ fn make_direction(controller: *mut Controller, kind: DirectionKind) -> Id {
     direction as Id
 }
 
-fn make_extended(controller: *mut Controller) -> Id {
+fn make_extended(controller: *mut Controller, class: &'static Class) -> Id {
     // SAFETY: `ExtendedGamepad` is the registered layout.
-    let profile = unsafe { allocate::<ExtendedGamepad>(extended_class()) };
+    let profile = unsafe { allocate::<ExtendedGamepad>(class) };
     if profile.is_null() {
         return std::ptr::null_mut();
     }
@@ -268,6 +271,76 @@ fn make_extended(controller: *mut Controller) -> Id {
         (*profile).right_thumbstick_button = button(sdl3::gamepad_button::RIGHT_STICK);
         (*profile).button_menu = button(sdl3::gamepad_button::START);
         (*profile).button_options = button(sdl3::gamepad_button::BACK);
+        let p = &*profile;
+        let named = [
+            ("Button A", p.button_a),
+            ("Button B", p.button_b),
+            ("Button X", p.button_x),
+            ("Button Y", p.button_y),
+            ("Left Shoulder", p.left_shoulder),
+            ("Right Shoulder", p.right_shoulder),
+            ("Left Trigger", p.left_trigger),
+            ("Right Trigger", p.right_trigger),
+            ("Left Thumbstick Button", p.left_thumbstick_button),
+            ("Right Thumbstick Button", p.right_thumbstick_button),
+            ("Button Menu", p.button_menu),
+            ("Button Options", p.button_options),
+            ("Direction Pad Up", (*(p.dpad as *const Direction)).up),
+            ("Direction Pad Down", (*(p.dpad as *const Direction)).down),
+            ("Direction Pad Left", (*(p.dpad as *const Direction)).left),
+            ("Direction Pad Right", (*(p.dpad as *const Direction)).right),
+        ];
+        let axes = [
+            (
+                "Left Thumbstick X Axis",
+                (*(p.left_thumbstick as *const Direction)).x_axis,
+            ),
+            (
+                "Left Thumbstick Y Axis",
+                (*(p.left_thumbstick as *const Direction)).y_axis,
+            ),
+            (
+                "Right Thumbstick X Axis",
+                (*(p.right_thumbstick as *const Direction)).x_axis,
+            ),
+            (
+                "Right Thumbstick Y Axis",
+                (*(p.right_thumbstick as *const Direction)).y_axis,
+            ),
+            (
+                "Direction Pad X Axis",
+                (*(p.dpad as *const Direction)).x_axis,
+            ),
+            (
+                "Direction Pad Y Axis",
+                (*(p.dpad as *const Direction)).y_axis,
+            ),
+        ];
+        let make_dictionary = |entries: &[(&str, Id)]| {
+            let keys: Vec<Id> = entries
+                .iter()
+                .map(|(name, _)| foundation::string::from_str(name))
+                .collect();
+            let pairs: Vec<_> = keys
+                .iter()
+                .zip(entries)
+                .map(|(key, (_, value))| (*key as _, *value as _))
+                .collect();
+            let dictionary = corefoundation::collections::new_dictionary(
+                &pairs,
+                Policy::from_key_callbacks(),
+                Policy::from_type_callbacks(),
+                false,
+            );
+            for key in keys {
+                corefoundation::api::CFRelease(key as _);
+            }
+            dictionary as Id
+        };
+        let mut elements = named.to_vec();
+        elements.extend_from_slice(&axes);
+        (*profile).buttons = make_dictionary(&named);
+        (*profile).elements = make_dictionary(&elements);
     }
     profile as Id
 }
@@ -283,13 +356,24 @@ fn make_controller(id: sdl3::JoystickId, gamepad: sdl3::Gamepad) -> Id {
     // SAFETY: as above.
     let properties = unsafe { sdl3::gamepad_properties(gamepad) };
     let vendor_name = foundation::string::from_str(&name);
+    // SAFETY: the same live gamepad handle used for its name and properties.
+    let vendor = unsafe { sdl3::gamepad_vendor(gamepad) };
+    let is_xbox =
+        vendor == sdl3::usb_vendor::MICROSOFT || name.to_ascii_lowercase().contains("xbox");
+    let profile_class = if is_xbox {
+        objc::class::lookup(c"GCXboxGamepad").expect("GameController is bootstrapped")
+    } else {
+        extended_class()
+    };
     // SAFETY: a fresh instance.
     unsafe {
         (*controller).id = id;
         (*controller).gamepad = gamepad as usize;
         (*controller).player_index = -1;
-        (*controller).extended = make_extended(controller);
+        (*controller).extended = make_extended(controller, profile_class);
         (*controller).vendor_name = vendor_name;
+        (*controller).product_category =
+            foundation::string::from_str(if is_xbox { "Xbox One" } else { &name });
         (*controller).motion = std::ptr::null_mut();
         (*controller).light = (properties.mono_led || properties.rgb_led || properties.player_led)
             .then(|| capability(c"GCDeviceLight"))
@@ -440,6 +524,42 @@ unsafe extern "C" fn vendor_name(receiver: Id, _sel: Sel) -> Id {
     unsafe { (*(receiver as *mut Controller)).vendor_name }
 }
 
+unsafe extern "C" fn product_category(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a controller.
+    unsafe { (*(receiver as *mut Controller)).product_category }
+}
+
+unsafe extern "C" fn physical_input_profile(receiver: Id, _sel: Sel) -> Id {
+    // GCExtendedGamepad is a GCPhysicalInputProfile subclass on macOS.
+    unsafe { (*(receiver as *mut Controller)).extended }
+}
+
+unsafe extern "C" fn profile_dictionary(receiver: Id, sel: Sel) -> Id {
+    let profile = unsafe { &*(receiver as *const ExtendedGamepad) };
+    let name = unsafe { std::ffi::CStr::from_ptr(objc::sel::name(sel)) }.to_bytes();
+    match name {
+        b"elements" => profile.elements,
+        b"buttons" => profile.buttons,
+        _ => std::ptr::null_mut(),
+    }
+}
+
+static MONITOR_BACKGROUND_EVENTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+unsafe extern "C" fn should_monitor_background_events(_class: Id, _sel: Sel) -> bool {
+    MONITOR_BACKGROUND_EVENTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+unsafe extern "C" fn set_should_monitor_background_events(_class: Id, _sel: Sel, value: bool) {
+    MONITOR_BACKGROUND_EVENTS.store(value, std::sync::atomic::Ordering::Relaxed);
+}
+
+unsafe extern "C" fn supported_localities(_receiver: Id, _sel: Sel) -> Id {
+    let set = corefoundation::collections::new_set(&[], Policy::from_type_callbacks());
+    unsafe { corefoundation::api::CFAutorelease(set) as Id }
+}
+
 unsafe extern "C" fn set_paused_handler(receiver: Id, _sel: Sel, block: Id) {
     // SAFETY: a controller.
     replace_block(
@@ -457,6 +577,15 @@ unsafe extern "C" fn input_value(receiver: Id, _sel: Sel) -> f32 {
 unsafe extern "C" fn input_pressed(receiver: Id, sel: Sel) -> u8 {
     // SAFETY: this receiver is also an input.
     (unsafe { input_value(receiver, sel) } > 0.0) as u8
+}
+
+unsafe extern "C" fn input_is_analog(receiver: Id, _sel: Sel) -> bool {
+    // Axes and triggers have a continuous value. SDL's standardized digital
+    // buttons do not, even though GCControllerButtonInput inherits the axis API.
+    matches!(
+        unsafe { (*(receiver as *const Input)).source },
+        Source::Axis(..) | Source::Trigger(_) | Source::DpadX | Source::DpadY
+    )
 }
 
 unsafe extern "C" fn set_input_handler(receiver: Id, _sel: Sel, block: Id) {
@@ -719,6 +848,16 @@ pub fn bootstrap() {
             c"@16@0:8",
         );
         controller.metaclass().replace_method(
+            objc::sel::get("shouldMonitorBackgroundEvents"),
+            should_monitor_background_events as *const c_void,
+            c"B16@0:8",
+        );
+        controller.metaclass().replace_method(
+            objc::sel::get("setShouldMonitorBackgroundEvents:"),
+            set_should_monitor_background_events as *const c_void,
+            c"v20@0:8B16",
+        );
+        controller.metaclass().replace_method(
             objc::sel::get("supportsHIDDevice:"),
             supports_hid_device as *const c_void,
             c"B24@0:8^{__IOHIDDevice=}16",
@@ -736,6 +875,16 @@ pub fn bootstrap() {
                 c"v24@0:8q16",
             ),
             ("vendorName", vendor_name as *const c_void, c"@16@0:8"),
+            (
+                "productCategory",
+                product_category as *const c_void,
+                c"@16@0:8",
+            ),
+            (
+                "physicalInputProfile",
+                physical_input_profile as *const c_void,
+                c"@16@0:8",
+            ),
             (
                 "setControllerPausedHandler:",
                 set_paused_handler as *const c_void,
@@ -761,6 +910,11 @@ pub fn bootstrap() {
                 objc::sel::get("setValueChangedHandler:"),
                 set_input_handler as *const c_void,
                 c"v24@0:8@?16",
+            );
+            class.replace_method(
+                objc::sel::get("isAnalog"),
+                input_is_analog as *const c_void,
+                c"B16@0:8",
             );
         }
         button.replace_method(
@@ -803,6 +957,19 @@ pub fn bootstrap() {
                 c"@16@0:8",
             );
         }
+        for name in ["elements", "buttons"] {
+            profile.replace_method(
+                objc::sel::get(name),
+                profile_dictionary as *const c_void,
+                c"@16@0:8",
+            );
+        }
+        let haptics = objc::class::lookup(c"GCDeviceHaptics").expect("GCDeviceHaptics");
+        haptics.replace_method(
+            objc::sel::get("supportedLocalities"),
+            supported_localities as *const c_void,
+            c"@16@0:8",
+        );
     });
 }
 
@@ -948,8 +1115,8 @@ mod tests {
         }
         let desc = sdl3::virtual_joystick::Desc {
             kind: 1,
-            vendor_id: 0x1234,
-            product_id: 0x5678,
+            vendor_id: sdl3::usb_vendor::MICROSOFT,
+            product_id: sdl3::usb_product::XBOX_SERIES_CONTROLLER,
             naxes: 6,
             nbuttons: 15,
             rumble: Some(rumble),
@@ -1001,6 +1168,13 @@ mod tests {
             unsafe { &*((*(object as *mut Controller)).extended as *const ExtendedGamepad) };
         // SAFETY: `object` is the controller allocated above.
         let controller = unsafe { &*(object as *const Controller) };
+        // SAFETY: the extended profile is a live Objective-C object.
+        assert_eq!(
+            unsafe { objc::object::class_of(controller.extended) }
+                .expect("the profile has a class")
+                .name_str(),
+            "GCXboxGamepad"
+        );
         assert!(!controller.light.is_null());
         assert!(!controller.haptics.is_null());
         assert!(controller.motion.is_null());

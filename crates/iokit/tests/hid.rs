@@ -142,8 +142,8 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
     let desc = sdl3::virtual_joystick::Desc {
         // `SDL_JOYSTICK_TYPE_GAMEPAD`, so SDL reports it as one.
         kind: 1,
-        vendor_id: 0x045e,
-        product_id: 0x028e,
+        vendor_id: sdl3::usb_vendor::MICROSOFT,
+        product_id: sdl3::usb_product::XBOX_360_CONTROLLER,
         naxes: 6,
         nbuttons: 15,
         nhats: 1,
@@ -211,8 +211,15 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
                 .map(|v| v.as_i64())
                 .unwrap_or(-1)
         };
-        assert_eq!(read(b"VendorID"), 0x045e, "the vendor id is SDL's own");
-        assert_eq!(read(b"ProductID"), 0x028e);
+        assert_eq!(
+            read(b"VendorID"),
+            i64::from(sdl3::usb_vendor::MICROSOFT),
+            "the vendor id is SDL's own"
+        );
+        assert_eq!(
+            read(b"ProductID"),
+            i64::from(sdl3::usb_product::XBOX_360_CONTROLLER)
+        );
         assert_eq!(read(b"MaxInputReportSize"), 14);
 
         let descriptor = api::IOHIDDeviceGetProperty(device, string(b"ReportDescriptor"));
