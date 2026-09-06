@@ -39,6 +39,12 @@ unsafe extern "C" fn pointer_value(receiver: Id, _sel: Sel) -> *const c_void {
     unsafe { (*(receiver as *const PointerValue)).pointer }
 }
 
+unsafe extern "C" fn pointer_dealloc(receiver: Id, _sel: Sel) {
+    // `pointer` is borrowed. In particular, do not inherit `NSValue`'s
+    // destructor, which interprets its second word as an owned `Boxed`.
+    objc::arc::finalize(receiver);
+}
+
 /// The one `NSNull`, which `+null` must return every time.
 static NULL: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
@@ -72,13 +78,13 @@ pub(crate) fn null_object() -> Id {
 }
 
 pub(crate) fn install() {
-    let value_class =
-        corefoundation::base::register(c"NSValue", None, std::mem::size_of::<usize>(), false);
+    let value_class = objc::class::lookup(c"NSValue").expect("geometry registered NSValue");
     class_methods!(value_class, {
         "valueWithPointer:" => value_with_pointer, c"@24@0:8^v16";
     });
     methods!(pointer_value_class(), {
         "pointerValue" => pointer_value, c"^v16@0:8";
+        "dealloc" => pointer_dealloc, c"v16@0:8";
     });
 
     let null_class =
@@ -86,4 +92,33 @@ pub(crate) fn install() {
     class_methods!(null_class, {
         "null" => null, c"@16@0:8";
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pointer_value_does_not_free_the_borrowed_pointer() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let pointer = 0x10usize as *const c_void;
+        // SAFETY: the class method accepts an opaque pointer and returns a live
+        // autoreleased value.
+        let value = unsafe {
+            value_with_pointer(
+                std::ptr::null_mut(),
+                objc::sel::get("valueWithPointer:"),
+                pointer,
+            )
+        };
+        // SAFETY: `value` is the pointer value made immediately above.
+        assert_eq!(
+            unsafe { pointer_value(value, objc::sel::get("pointerValue")) },
+            pointer
+        );
+        // This reaches `-dealloc`; treating `pointer` as an owned box would
+        // attempt to free address 0x10.
+        objc::arc::pool_pop(pool);
+    }
 }

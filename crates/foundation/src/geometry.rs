@@ -271,10 +271,9 @@ pub(crate) unsafe fn unbox_bytes(value: Id) -> Option<Vec<u8>> {
 }
 
 pub(crate) fn install() {
-    // `NSValue` was registered as an abstract class by `value::install`, with
-    // `NSNumber` under it; this is where it gains storage. The instance size is
-    // set here because a class's size is fixed at registration and `NSNumber`
-    // has its own body of the same shape.
+    // Register the storage-bearing class before `value::install` adds the
+    // pointer-value constructor. A class's size is fixed at registration, so a
+    // prior abstract registration would leave no room for `boxed`.
     let class =
         corefoundation::base::register(c"NSValue", None, std::mem::size_of::<Body>(), false);
     methods!(class, {
@@ -300,6 +299,13 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nsvalue_has_room_for_its_boxed_payload() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSValue").expect("registered");
+        assert!(class.instance_size() >= size_of::<Body>());
+    }
 
     /// Each of the three shapes survives being boxed and read back.
     ///

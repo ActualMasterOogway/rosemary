@@ -43,8 +43,8 @@ pub fn bootstrap() {
         attributed_string::install();
         collections::install();
         pool::install();
-        value::install();
         geometry::install();
+        value::install();
         kvc::install();
         notification::install();
         constant::install();
