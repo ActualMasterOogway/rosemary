@@ -1,3 +1,15 @@
+#![allow(
+    clippy::doc_lazy_continuation,
+    clippy::items_after_test_module,
+    clippy::manual_is_multiple_of,
+    clippy::missing_safety_doc,
+    clippy::not_unsafe_ptr_arg_deref,
+    clippy::only_used_in_recursion,
+    clippy::ptr_eq,
+    clippy::single_match,
+    clippy::useless_conversion
+)]
+
 pub mod alert;
 pub mod appearance;
 pub mod application;

@@ -1,3 +1,12 @@
+#![allow(
+    clippy::cast_slice_from_raw_parts,
+    clippy::chunks_exact_to_as_chunks,
+    clippy::doc_lazy_continuation,
+    clippy::manual_clamp,
+    clippy::missing_safety_doc,
+    clippy::not_unsafe_ptr_arg_deref
+)]
+
 //! CoreFoundation, on this tree's own Objective-C runtime.
 //!
 //! Every CF type here is a class in [`objc`] and every `CFTypeRef` is an object,

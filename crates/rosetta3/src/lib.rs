@@ -1,3 +1,20 @@
+#![allow(
+    clippy::chunks_exact_to_as_chunks,
+    clippy::collapsible_if,
+    clippy::doc_lazy_continuation,
+    clippy::drop_non_drop,
+    clippy::if_same_then_else,
+    clippy::identity_op,
+    clippy::manual_is_multiple_of,
+    clippy::missing_safety_doc,
+    clippy::needless_borrow,
+    clippy::obfuscated_if_else,
+    clippy::question_mark,
+    clippy::redundant_closure,
+    clippy::type_complexity,
+    clippy::unnecessary_cast
+)]
+
 //! Rosetta 3: the driver that joins [`machish`] to [`microlift`].
 //!
 //! [`Vm`] is the loop: lift the region control is about to reach, enter it, service

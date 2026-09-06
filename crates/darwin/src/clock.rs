@@ -172,7 +172,6 @@ unsafe extern "C" fn settimeofday(time: *const Timeval, timezone: *const Timezon
 /// `clockid_t`, from Darwin's `<time.h>`.
 pub mod id {
     #[allow(non_camel_case_types)]
-
     pub type clockid_t = i32;
 
     pub const REALTIME: clockid_t = 0;

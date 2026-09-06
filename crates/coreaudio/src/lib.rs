@@ -1,3 +1,5 @@
+#![allow(clippy::missing_safety_doc)]
+
 //! `AudioUnit` output, over SDL3.
 //!
 //! One thing, done the way a Mac game does it: find the default output

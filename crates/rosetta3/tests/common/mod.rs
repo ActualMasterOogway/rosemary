@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code, clippy::doc_lazy_continuation)]
 
 use std::path::PathBuf;
 use std::process::Command;

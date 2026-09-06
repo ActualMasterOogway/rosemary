@@ -738,6 +738,8 @@ fn delegate_selector(name: &str) -> &'static str {
         window::WILL_CLOSE => "windowWillClose:",
         window::DID_BECOME_KEY => "windowDidBecomeKey:",
         window::DID_RESIGN_KEY => "windowDidResignKey:",
+        window::DID_BECOME_MAIN => "windowDidBecomeMain:",
+        window::DID_RESIGN_MAIN => "windowDidResignMain:",
         window::DID_MINIATURIZE => "windowDidMiniaturize:",
         window::DID_DEMINIATURIZE => "windowDidDeminiaturize:",
         window::WILL_ENTER_FULL_SCREEN => "windowWillEnterFullScreen:",

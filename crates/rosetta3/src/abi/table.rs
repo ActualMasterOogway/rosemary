@@ -3358,8 +3358,6 @@ pub static REFUSED: &[(&str, &str)] = &[
         "CFRunLoopTimerCreate",
         "its context structure holds guest function pointers the host would call as arm64",
     ),
-    // `CFRange rangeToSearch` is passed **by value**.
-    ("CFStringFindWithOptions", AGGREGATE),
     // Seventeen parameters: an allocator and the sixteen bytes of a UUID.
     (
         "CFUUIDGetConstantUUIDWithBytes",

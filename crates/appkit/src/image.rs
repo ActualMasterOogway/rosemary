@@ -462,7 +462,6 @@ pub mod bitmap {
     /// the two cases are kept apart here rather than always copying: a guest that
     /// passed its own buffer goes on writing through it, and a copy would leave
     /// it drawing into memory nothing reads.
-    #[expect(clippy::too_many_arguments, reason = "the C method has eleven")]
     unsafe extern "C" fn init_with_planes(
         receiver: Id,
         _sel: Sel,

@@ -1,3 +1,5 @@
+#![allow(clippy::manual_dangling_ptr, clippy::missing_safety_doc)]
+
 //! `CVDisplayLink`, on a thread of its own.
 //!
 //! A display link is a callback at the refresh rate, and it is how a Mac game

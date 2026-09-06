@@ -1,3 +1,5 @@
+#![allow(clippy::missing_safety_doc, clippy::not_unsafe_ptr_arg_deref)]
+
 //! An Objective-C runtime.
 //!
 //! The guest's classes are Apple's objc4 ABI whatever host it runs on, and

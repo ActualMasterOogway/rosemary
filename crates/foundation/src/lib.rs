@@ -1,3 +1,11 @@
+#![allow(
+    clippy::chunks_exact_to_as_chunks,
+    clippy::collapsible_if,
+    clippy::let_and_return,
+    clippy::ptr_eq,
+    clippy::unnecessary_cast
+)]
+
 pub mod appleevent;
 mod attributed_string;
 mod block;

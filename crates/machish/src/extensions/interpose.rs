@@ -61,6 +61,7 @@ pub fn collect_interpositions<S: MachSpec>(
         // section rather than a short last pair, so the count truncates.
         let count = usize::try_from(sect.size / 16).unwrap_or(0);
         let words = read_words(mem, sect.addr.wrapping_add(slide), count * 2)?;
+        #[allow(clippy::chunks_exact_to_as_chunks)]
         for pair in words.chunks_exact(2) {
             let (replacement, replacee) = (pair[0], pair[1]);
             if replacement == 0 || replacee == 0 {

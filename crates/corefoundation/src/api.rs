@@ -1421,7 +1421,10 @@ pub unsafe extern "C" fn CFDataCreate(
 /// The keyboard layout `TISGetInputSourceProperty` hands back is Apple's
 /// `CFData`, and the copy of it goes straight back into `UCKeyTranslate` - so
 /// the copy has to be Apple's too. See [`crate::foreign`].
-pub unsafe extern "C" fn CFDataCreateCopy(allocator: CFAllocatorRef, data: CFTypeRef) -> CFTypeRef {
+pub unsafe extern "C" fn CFDataCreateCopy(
+    _allocator: CFAllocatorRef,
+    data: CFTypeRef,
+) -> CFTypeRef {
     #[cfg(target_os = "macos")]
     // SAFETY: the caller's obligation - null or an object.
     if unsafe { crate::foreign::is(data) } {
@@ -1523,6 +1526,8 @@ pub unsafe extern "C" fn CFURLGetFSRef(url: CFTypeRef, fs_ref: *mut c_void) -> B
     let Ok(path) = std::ffi::CString::new(path) else {
         return 0;
     };
+    #[cfg(not(target_os = "macos"))]
+    let _ = path;
     #[cfg(target_os = "macos")]
     {
         let Some(entry) = crate::foreign::entry(c"FSPathMakeRef") else {

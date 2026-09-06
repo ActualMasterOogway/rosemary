@@ -241,7 +241,7 @@ unsafe fn call_getter(imp: *const std::ffi::c_void, receiver: Id, sel: Sel, shap
 }
 
 /// The ivar `key` names: `_key` as Apple looks for it first, then `key`.
-fn ivar_for<'a>(class: &'static Class, key: &str) -> Option<&'static objc::class::Ivar> {
+fn ivar_for(class: &'static Class, key: &str) -> Option<&'static objc::class::Ivar> {
     for spelling in [format!("_{key}"), key.to_string()] {
         if let Ok(name) = CString::new(spelling)
             && let Some(ivar) = class.ivar(&name)
@@ -249,7 +249,6 @@ fn ivar_for<'a>(class: &'static Class, key: &str) -> Option<&'static objc::class
             return Some(ivar);
         }
     }
-    let _ = std::marker::PhantomData::<&'a ()>;
     None
 }
 

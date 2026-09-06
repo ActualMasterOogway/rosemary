@@ -85,7 +85,7 @@ fn the_three_halves_of_the_profile_are_told_apart() {
     };
     let (_, _, err) = run_guest_env(&[("ROSETTA3_PROFILE", "2000")], &path, &[]);
 
-    let translated = share(&err, "translated").expect(&format!("no shares line: {err}"));
+    let translated = share(&err, "translated").unwrap_or_else(|| panic!("no shares line: {err}"));
     let runtime = share(&err, "runtime").unwrap_or(0.0);
     let libraries = share(&err, "host libraries").unwrap_or(0.0);
 
@@ -133,7 +133,8 @@ fn the_ranking_written_to_a_file_agrees_with_the_one_printed() {
         &[],
     );
 
-    let histogram = std::fs::read_to_string(&out).expect(&format!("no {out:?}; stderr: {err}"));
+    let histogram =
+        std::fs::read_to_string(&out).unwrap_or_else(|_| panic!("no {out:?}; stderr: {err}"));
     assert!(
         histogram.lines().any(|l| l.starts_with("instruction\t")),
         "the file has no instruction rows: {histogram:.400}"
@@ -147,7 +148,8 @@ fn the_ranking_written_to_a_file_agrees_with_the_one_printed() {
     // property it must have is that its host ranges are ordered, non-empty and
     // inside the region they belong to - otherwise a lookup by host address
     // resolves to the wrong guest instruction, silently.
-    let text = std::fs::read_to_string(&map).expect(&format!("no {map:?}; stderr: {err}"));
+    let text =
+        std::fs::read_to_string(&map).unwrap_or_else(|_| panic!("no {map:?}; stderr: {err}"));
     let hex = |s: &str| u64::from_str_radix(s.trim_start_matches("0x"), 16).unwrap();
     let mut regions = 0;
     let mut instructions = 0;

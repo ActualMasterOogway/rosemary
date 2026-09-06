@@ -200,6 +200,7 @@ pub fn collect_thread_locals<S: MachSpec>(
         let count = usize::try_from(sect.entry_count(DESCRIPTOR_SIZE)).unwrap_or(0);
         let base = sect.addr.wrapping_add(slide);
         let words = read_words(mem, base, count * DESCRIPTOR_WORDS as usize)?;
+        #[allow(clippy::chunks_exact_to_as_chunks)]
         for (i, chunk) in words.chunks_exact(DESCRIPTOR_WORDS as usize).enumerate() {
             out.push(ThreadLocalDescriptor {
                 at: base.wrapping_add(i as u64 * DESCRIPTOR_SIZE),

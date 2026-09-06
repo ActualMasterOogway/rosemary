@@ -30,7 +30,7 @@ unsafe fn cstr<'a>(p: *const c_char) -> Option<&'a CStr> {
 /// # Safety
 ///
 /// `p` must be null or a class pointer this runtime produced.
-unsafe fn class<'a>(p: *const c_void) -> Option<&'static Class> {
+unsafe fn class(p: *const c_void) -> Option<&'static Class> {
     // SAFETY: the caller's obligation.
     unsafe { crate::class::from_ptr(p as *const Class) }
 }
@@ -40,7 +40,7 @@ unsafe fn class<'a>(p: *const c_void) -> Option<&'static Class> {
 /// # Safety
 ///
 /// `p` must be null or a handle this runtime produced.
-unsafe fn method<'a>(p: *const c_void) -> Option<&'static Method> {
+unsafe fn method(p: *const c_void) -> Option<&'static Method> {
     // SAFETY: the caller's obligation.
     (!p.is_null()).then(|| unsafe { &*(p as *const Method) })
 }
@@ -50,7 +50,7 @@ unsafe fn method<'a>(p: *const c_void) -> Option<&'static Method> {
 /// # Safety
 ///
 /// `p` must be null or a protocol this runtime produced.
-unsafe fn protocol<'a>(p: *const c_void) -> Option<&'static Protocol> {
+unsafe fn protocol(p: *const c_void) -> Option<&'static Protocol> {
     // SAFETY: the caller's obligation.
     (!p.is_null()).then(|| unsafe { &*(p as *const Protocol) })
 }
@@ -383,7 +383,7 @@ pub struct PropertyAttribute {
 /// # Safety
 ///
 /// `p` must be null or a handle this runtime produced.
-unsafe fn property<'a>(p: *const c_void) -> Option<&'static crate::property::Property> {
+unsafe fn property(p: *const c_void) -> Option<&'static crate::property::Property> {
     // SAFETY: the caller's obligation.
     (!p.is_null()).then(|| unsafe { &*(p as *const crate::property::Property) })
 }

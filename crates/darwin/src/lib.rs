@@ -1,3 +1,25 @@
+#![allow(
+    clippy::assertions_on_constants,
+    clippy::bool_assert_comparison,
+    clippy::explicit_counter_loop,
+    clippy::identity_op,
+    clippy::box_default,
+    clippy::chunks_exact_to_as_chunks,
+    clippy::doc_lazy_continuation,
+    clippy::len_without_is_empty,
+    clippy::manual_contains,
+    clippy::manual_slice_size_calculation,
+    clippy::missing_const_for_thread_local,
+    clippy::missing_safety_doc,
+    clippy::needless_return,
+    clippy::not_unsafe_ptr_arg_deref,
+    clippy::question_mark,
+    clippy::type_complexity,
+    clippy::unnecessary_cast,
+    clippy::unnecessary_lazy_evaluations,
+    clippy::useless_vec
+)]
+
 //! The macOS API surface Rosetta 3 targets, and a host implementation of each entry.
 
 use std::ffi::CString;

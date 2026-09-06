@@ -194,7 +194,7 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
         }
 
         // The first axis is X on the generic-desktop page, over SDL's own range.
-        let first_axis = cf::CFArrayGetValueAtIndex(elements, 1) as *const c_void;
+        let first_axis = cf::CFArrayGetValueAtIndex(elements, 1);
         assert_eq!(
             api::IOHIDElementGetUsagePage(first_axis),
             page::GENERIC_DESKTOP
@@ -216,7 +216,7 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
         assert_eq!(api::IOHIDValueGetElement(value), first_axis);
 
         // And the root collection's children are everything else.
-        let root = cf::CFArrayGetValueAtIndex(elements, 0) as *const c_void;
+        let root = cf::CFArrayGetValueAtIndex(elements, 0);
         assert_eq!(
             cf::CFArrayGetCount(api::IOHIDElementGetChildren(root)),
             count - 1

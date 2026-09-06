@@ -417,7 +417,7 @@ pub fn allocate_pair(
     let instance_start = superclass.map_or(size_of::<usize>(), |s| s.instance_size());
     let class = Class::new(
         name.clone(),
-        superclass.map_or(std::ptr::null_mut(), |s| ptr(s)),
+        superclass.map_or(std::ptr::null_mut(), ptr),
         false,
         instance_start + extra,
     );
