@@ -131,6 +131,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFDictionaryGetCount" => at!(api::CFDictionaryGetCount),
         "CFDictionaryApplyFunction" => at!(api::CFDictionaryApplyFunction),
         "CFDictionaryGetValue" => at!(api::CFDictionaryGetValue),
+        "CFDictionaryGetValueIfPresent" => at!(api::CFDictionaryGetValueIfPresent),
         "CFDictionaryContainsKey" => at!(api::CFDictionaryContainsKey),
         "CFDictionaryGetKeysAndValues" => at!(api::CFDictionaryGetKeysAndValues),
         "CFDictionaryCreateMutable" => at!(api::CFDictionaryCreateMutable),
@@ -285,6 +286,7 @@ pub const NAMES: &[&str] = &[
     "CFDictionaryGetCount",
     "CFDictionaryApplyFunction",
     "CFDictionaryGetValue",
+    "CFDictionaryGetValueIfPresent",
     "CFDictionaryContainsKey",
     "CFDictionaryGetKeysAndValues",
     "CFDictionaryCreateMutable",
@@ -1100,6 +1102,48 @@ mod collection_tests {
             api::CFRelease(usage);
             api::CFRelease(one);
             api::CFRelease(four);
+        }
+    }
+
+    #[test]
+    fn dictionary_get_value_if_present_reports_and_writes_only_a_match() {
+        bootstrap();
+        let key = string(c"key");
+        let missing = string(c"missing");
+        let value = number(number_type::SINT32, 7);
+
+        // SAFETY: real objects, callbacks, and a writable result pointer.
+        unsafe {
+            let dictionary = api::CFDictionaryCreate(
+                std::ptr::null(),
+                [key].as_ptr(),
+                [value].as_ptr(),
+                1,
+                &callbacks::TYPE_KEY_CALLBACKS,
+                &callbacks::TYPE_VALUE_CALLBACKS,
+            );
+            let mut result = missing;
+            assert_eq!(
+                api::CFDictionaryGetValueIfPresent(dictionary, key, &mut result),
+                1
+            );
+            assert_eq!(result, value);
+
+            result = value;
+            assert_eq!(
+                api::CFDictionaryGetValueIfPresent(dictionary, missing, &mut result),
+                0
+            );
+            assert_eq!(result, value, "an absent key leaves the result unchanged");
+            assert_eq!(
+                api::CFDictionaryGetValueIfPresent(dictionary, key, std::ptr::null_mut()),
+                1
+            );
+
+            api::CFRelease(dictionary);
+            api::CFRelease(key);
+            api::CFRelease(missing);
+            api::CFRelease(value);
         }
     }
 

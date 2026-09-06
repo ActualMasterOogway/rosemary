@@ -17,6 +17,10 @@ struct Controller {
     player_index: isize,
     extended: Id,
     vendor_name: Id,
+    motion: Id,
+    light: Id,
+    haptics: Id,
+    battery: Id,
     paused_handler: usize,
     paused_last: u8,
 }
@@ -82,6 +86,11 @@ struct ExtendedGamepad {
     button_options: Id,
 }
 
+#[repr(C)]
+struct Capability {
+    isa: *const Class,
+}
+
 #[derive(Clone, Copy)]
 struct Record {
     id: sdl3::JoystickId,
@@ -127,6 +136,14 @@ fn direction_class() -> &'static Class {
 
 fn extended_class() -> &'static Class {
     objc::class::lookup(c"GCExtendedGamepad").expect("GameController is bootstrapped")
+}
+
+fn capability(name: &std::ffi::CStr) -> Id {
+    let Some(class) = objc::class::lookup(name) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: all capability classes use the `Capability` layout.
+    unsafe { allocate::<Capability>(class) as Id }
 }
 
 unsafe fn allocate<T>(class: &'static Class) -> *mut T {
@@ -263,6 +280,8 @@ fn make_controller(id: sdl3::JoystickId, gamepad: sdl3::Gamepad) -> Id {
     }
     // SAFETY: `gamepad` was just opened and remains live in the controller.
     let name = unsafe { sdl3::gamepad_name(gamepad) };
+    // SAFETY: as above.
+    let properties = unsafe { sdl3::gamepad_properties(gamepad) };
     let vendor_name = foundation::string::from_str(&name);
     // SAFETY: a fresh instance.
     unsafe {
@@ -271,6 +290,14 @@ fn make_controller(id: sdl3::JoystickId, gamepad: sdl3::Gamepad) -> Id {
         (*controller).player_index = -1;
         (*controller).extended = make_extended(controller);
         (*controller).vendor_name = vendor_name;
+        (*controller).motion = std::ptr::null_mut();
+        (*controller).light = (properties.mono_led || properties.rgb_led || properties.player_led)
+            .then(|| capability(c"GCDeviceLight"))
+            .unwrap_or(std::ptr::null_mut());
+        (*controller).haptics = (properties.rumble || properties.trigger_rumble)
+            .then(|| capability(c"GCDeviceHaptics"))
+            .unwrap_or(std::ptr::null_mut());
+        (*controller).battery = std::ptr::null_mut();
         (*controller).paused_handler = 0;
         (*controller).paused_last =
             sdl3::gamepad_button(gamepad, sdl3::gamepad_button::START) as u8;
@@ -366,9 +393,36 @@ unsafe extern "C" fn controllers(_class: Id, _sel: Sel) -> Id {
     unsafe { corefoundation::api::CFAutorelease(array) as Id }
 }
 
+unsafe extern "C" fn supports_hid_device(
+    _class: Id,
+    _sel: Sel,
+    device: corefoundation::base::CFTypeRef,
+) -> bool {
+    if corefoundation::base::opaque_type_id(device) != Some(iokit::hid::device_type_id()) {
+        return false;
+    }
+    // SAFETY: the type registration above identifies one of IOKit's Device
+    // handles, which lives for the lifetime of the process.
+    let id = unsafe { (*(device as *const iokit::hid::Device)).id };
+    sdl3::gamepads().contains(&id)
+}
+
 unsafe extern "C" fn extended_gamepad(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: a controller.
     unsafe { (*(receiver as *mut Controller)).extended }
+}
+
+unsafe extern "C" fn controller_feature(receiver: Id, sel: Sel) -> Id {
+    // SAFETY: a controller and a live selector.
+    let controller = unsafe { &*(receiver as *const Controller) };
+    // SAFETY: Objective-C selectors are process-lifetime C strings.
+    match unsafe { std::ffi::CStr::from_ptr(objc::sel::name(sel)) }.to_bytes() {
+        b"motion" => controller.motion,
+        b"light" => controller.light,
+        b"haptics" => controller.haptics,
+        b"battery" => controller.battery,
+        _ => std::ptr::null_mut(),
+    }
 }
 
 unsafe extern "C" fn player_index(receiver: Id, _sel: Sel) -> isize {
@@ -649,12 +703,25 @@ pub fn bootstrap() {
             register(name, Some(extended), size_of::<ExtendedGamepad>());
         }
         register(c"GCColor", None, size_of::<usize>());
+        for name in [
+            c"GCMotion",
+            c"GCDeviceLight",
+            c"GCDeviceHaptics",
+            c"GCDeviceBattery",
+        ] {
+            register(name, None, size_of::<Capability>());
+        }
         let controller = register(c"GCController", None, size_of::<Controller>());
 
         controller.metaclass().replace_method(
             objc::sel::get("controllers"),
             controllers as *const c_void,
             c"@16@0:8",
+        );
+        controller.metaclass().replace_method(
+            objc::sel::get("supportsHIDDevice:"),
+            supports_hid_device as *const c_void,
+            c"B24@0:8^{__IOHIDDevice=}16",
         );
         for (name, imp, types) in [
             (
@@ -676,6 +743,13 @@ pub fn bootstrap() {
             ),
         ] {
             controller.replace_method(objc::sel::get(name), imp, types);
+        }
+        for name in ["motion", "light", "haptics", "battery"] {
+            controller.replace_method(
+                objc::sel::get(name),
+                controller_feature as *const c_void,
+                c"@16@0:8",
+            );
         }
         for class in [axis, button] {
             class.replace_method(
@@ -748,6 +822,10 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         "GCDualShockGamepad",
         "GCXboxGamepad",
         "GCColor",
+        "GCMotion",
+        "GCDeviceLight",
+        "GCDeviceHaptics",
+        "GCDeviceBattery",
     ] {
         let c = std::ffi::CString::new(name).expect("a class name");
         let class = objc::class::lookup(&c).expect("a registered GameController class");
@@ -823,9 +901,18 @@ mod tests {
         );
         assert!(
             controller
+                .metaclass()
+                .method(objc::sel::get("supportsHIDDevice:"))
+                .is_some()
+        );
+        assert!(
+            controller
                 .method(objc::sel::get("extendedGamepad"))
                 .is_some()
         );
+        for selector in ["motion", "light", "haptics", "battery"] {
+            assert!(controller.method(objc::sel::get(selector)).is_some());
+        }
         assert!(
             button_class()
                 .method(objc::sel::get("setValueChangedHandler:"))
@@ -853,17 +940,34 @@ mod tests {
         if !sdl3::available() || !sdl3::virtual_joystick::available() {
             return;
         }
+        unsafe extern "C" fn rumble(_data: *mut c_void, _low: u16, _high: u16) -> bool {
+            true
+        }
+        unsafe extern "C" fn set_led(_data: *mut c_void, _r: u8, _g: u8, _b: u8) -> bool {
+            true
+        }
         let desc = sdl3::virtual_joystick::Desc {
             kind: 1,
             vendor_id: 0x1234,
             product_id: 0x5678,
             naxes: 6,
             nbuttons: 15,
+            rumble: Some(rumble),
+            set_led: Some(set_led),
             ..Default::default()
         };
         let Some(id) = sdl3::virtual_joystick::attach(&desc) else {
             return;
         };
+        let hid = iokit::hid::Device::open(id).expect("the virtual HID device opens");
+        // SAFETY: `hid` is a live IOHIDDeviceRef for this call.
+        assert!(unsafe {
+            supports_hid_device(
+                std::ptr::null_mut(),
+                objc::sel::get("supportsHIDDevice:"),
+                std::sync::Arc::as_ptr(&hid).cast_mut().cast(),
+            )
+        });
         sync_devices(false);
         let object = CONTROLLERS
             .lock()
@@ -895,6 +999,12 @@ mod tests {
         // SAFETY: `object` is the live controller just found.
         let profile =
             unsafe { &*((*(object as *mut Controller)).extended as *const ExtendedGamepad) };
+        // SAFETY: `object` is the controller allocated above.
+        let controller = unsafe { &*(object as *const Controller) };
+        assert!(!controller.light.is_null());
+        assert!(!controller.haptics.is_null());
+        assert!(controller.motion.is_null());
+        assert!(controller.battery.is_null());
         // SAFETY: the profile owns inputs with the layouts being read.
         unsafe {
             assert_eq!(input_value(profile.button_a, objc::sel::get("value")), 1.0);

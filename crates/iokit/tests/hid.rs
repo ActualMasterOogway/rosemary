@@ -21,6 +21,8 @@ static MATCHED: AtomicUsize = AtomicUsize::new(0);
 static REMOVED: AtomicUsize = AtomicUsize::new(0);
 static DEVICE: Mutex<usize> = Mutex::new(0);
 static VALUES: Mutex<Vec<(u32, i64)>> = Mutex::new(Vec::new());
+static REPORTS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+static EFFECTS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 
 unsafe extern "C" fn matched(
     _context: *mut c_void,
@@ -52,6 +54,35 @@ unsafe extern "C" fn changed(
 
 unsafe extern "C" fn removed(_context: *mut c_void, _result: i32, _sender: *mut c_void) {
     REMOVED.fetch_add(1, Ordering::SeqCst);
+}
+
+unsafe extern "C" fn reported(
+    _context: *mut c_void,
+    _result: i32,
+    _sender: *mut c_void,
+    report_type: u32,
+    report_id: u32,
+    report: *mut u8,
+    length: isize,
+) {
+    assert_eq!(report_type, 0);
+    assert_eq!(report_id, 0);
+    // SAFETY: IOKit supplies this callback with `length` readable bytes.
+    let bytes = unsafe { std::slice::from_raw_parts(report, length as usize) };
+    REPORTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(bytes.to_vec());
+}
+
+unsafe extern "C" fn effect(_userdata: *mut c_void, data: *const c_void, length: i32) -> bool {
+    // SAFETY: SDL supplies the virtual-device callback with `length` bytes.
+    let bytes = unsafe { std::slice::from_raw_parts(data.cast(), length as usize) };
+    EFFECTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(bytes.to_vec());
+    true
 }
 
 fn string(text: &[u8]) -> CFTypeRef {
@@ -117,6 +148,7 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
         nbuttons: 15,
         nhats: 1,
         name: label.as_ptr(),
+        send_effect: Some(effect),
         ..Default::default()
     };
     sdl3::init(sdl3::init::JOYSTICK).expect("the joystick subsystem");
@@ -137,12 +169,16 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
             std::ptr::null_mut(),
         );
         api::IOHIDManagerRegisterInputValueCallback(manager, Some(changed), std::ptr::null_mut());
-        assert_eq!(api::IOHIDManagerOpen(manager, 0), 0, "the manager opens");
         api::IOHIDManagerScheduleWithRunLoop(
             manager,
             cf::CFRunLoopGetCurrent(),
             string(b"kCFRunLoopDefaultMode"),
         );
+        let early = api::IOHIDManagerCopyDevices(manager);
+        assert!(!early.is_null(), "scheduling activates device discovery");
+        assert_eq!(cf::CFSetGetCount(early), 1);
+        cf::CFRelease(early);
+        assert_eq!(api::IOHIDManagerOpen(manager, 0), 0, "open is idempotent");
     }
 
     pump_until(|| MATCHED.load(Ordering::SeqCst) > 0);
@@ -177,6 +213,18 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
         };
         assert_eq!(read(b"VendorID"), 0x045e, "the vendor id is SDL's own");
         assert_eq!(read(b"ProductID"), 0x028e);
+        assert_eq!(read(b"MaxInputReportSize"), 15);
+
+        let descriptor = api::IOHIDDeviceGetProperty(device, string(b"ReportDescriptor"));
+        assert_eq!(cf::CFGetTypeID(descriptor), cf::CFDataGetTypeID());
+        assert!(cf::CFDataGetLength(descriptor) > 0);
+
+        let service = api::IOHIDDeviceGetService(device);
+        assert_eq!(service, id);
+        let matching = iokit::registry::IORegistryEntryIDMatching(service as u64);
+        let reopened_service = iokit::registry::IOServiceGetMatchingService(0, matching);
+        assert_eq!(reopened_service, service);
+        assert_eq!(api::IOHIDDeviceCreate(std::ptr::null(), service), device);
     }
 
     // The element tree, walked the way a guest walks it.
@@ -223,15 +271,31 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
         );
     }
 
-    // Move it, and see the changes arrive as element callbacks.
+    // Move it, and see the same state arrive through both IOKit input APIs.
     let joystick = sdl3::open(id).expect("the joystick opens");
     VALUES.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    REPORTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    let mut report_buffer = [0u8; 15];
+    // SAFETY: the device remains alive and the buffer remains in scope through
+    // the callback registration below.
+    unsafe {
+        api::IOHIDDeviceRegisterInputReportCallback(
+            device,
+            report_buffer.as_mut_ptr(),
+            report_buffer.len() as isize,
+            Some(reported),
+            std::ptr::null_mut(),
+        );
+    }
     // SAFETY: an open virtual joystick.
     unsafe {
         assert!(sdl3::virtual_joystick::set_axis(joystick, 0, 20_000));
         assert!(sdl3::virtual_joystick::set_button(joystick, 2, true));
     }
-    pump_until(|| VALUES.lock().unwrap_or_else(|e| e.into_inner()).len() >= 2);
+    pump_until(|| {
+        VALUES.lock().unwrap_or_else(|e| e.into_inner()).len() >= 2
+            && !REPORTS.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+    });
 
     let values = VALUES.lock().unwrap_or_else(|e| e.into_inner()).clone();
     assert!(
@@ -243,6 +307,38 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
     assert!(
         values.contains(&(10, 1)),
         "the button did not arrive as element 10: {values:?}"
+    );
+    let reports = REPORTS.lock().unwrap_or_else(|e| e.into_inner());
+    let report = reports
+        .last()
+        .expect("the input report callback did not run");
+    assert_eq!(i16::from_le_bytes([report[0], report[1]]), 20_000);
+    assert_eq!(report[13] & 0x04, 0x04, "button 2 was not packed");
+    drop(reports);
+
+    let mut polled = [0u8; 15];
+    let mut polled_length = polled.len() as isize;
+    // SAFETY: the device and output buffer remain valid for the call.
+    unsafe {
+        assert_eq!(
+            api::IOHIDDeviceGetReport(device, 0, 0, polled.as_mut_ptr(), &mut polled_length,),
+            0
+        );
+    }
+    assert_eq!(polled_length, 15);
+    assert_eq!(polled, report_buffer);
+
+    let output = [0x05, 0xaa, 0x55];
+    // SAFETY: a live device and one readable output report.
+    unsafe {
+        assert_eq!(
+            api::IOHIDDeviceSetReport(device, 1, 5, output.as_ptr(), output.len() as isize),
+            0
+        );
+    }
+    assert_eq!(
+        EFFECTS.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+        &[output.to_vec()]
     );
 
     // SAFETY: a joystick this test opened.

@@ -1272,6 +1272,25 @@ pub unsafe extern "C" fn CFDictionaryGetValue(dictionary: CFTypeRef, key: CFType
         .map_or(std::ptr::null(), |at| d.entries[at].1)
 }
 
+pub unsafe extern "C" fn CFDictionaryGetValueIfPresent(
+    dictionary: CFTypeRef,
+    key: CFTypeRef,
+    value: *mut CFTypeRef,
+) -> Boolean {
+    // SAFETY: the caller's obligation.
+    let Some(d) = (unsafe { collections::dictionary(dictionary) }) else {
+        return 0;
+    };
+    let Some(at) = d.position(key) else {
+        return 0;
+    };
+    if !value.is_null() {
+        // SAFETY: the caller supplies a writable result pointer when non-null.
+        unsafe { *value = d.entries[at].1 };
+    }
+    1
+}
+
 pub unsafe extern "C" fn CFDictionaryContainsKey(dictionary: CFTypeRef, key: CFTypeRef) -> Boolean {
     // SAFETY: the caller's obligation.
     unsafe { collections::dictionary(dictionary) }.is_some_and(|d| d.position(key).is_some())

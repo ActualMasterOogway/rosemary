@@ -2,7 +2,7 @@ use std::ffi::c_void;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU8;
 
-use corefoundation::base::CFTypeID;
+use corefoundation::base::{CFIndex, CFTypeID};
 
 static DEVICE_TYPE: AtomicU8 = AtomicU8::new(0);
 static ELEMENT_TYPE: AtomicU8 = AtomicU8::new(0);
@@ -16,6 +16,16 @@ pub fn element_type_id() -> CFTypeID {
 }
 
 pub type RemovalCallback = unsafe extern "C" fn(*mut c_void, i32, *mut c_void);
+pub type ReportCallback =
+    unsafe extern "C" fn(*mut c_void, i32, *mut c_void, u32, u32, *mut u8, CFIndex);
+
+#[derive(Clone, Copy, Default)]
+struct RegisteredReport {
+    buffer: usize,
+    length: usize,
+    callback: Option<ReportCallback>,
+    context: usize,
+}
 
 pub mod page {
     pub const GENERIC_DESKTOP: u32 = 0x01;
@@ -74,6 +84,7 @@ const AXIS_USAGES: &[u32] = &[
 pub struct Device {
     pub id: sdl3::JoystickId,
     pub joystick: sdl3::Joystick,
+    raw: Mutex<usize>,
     pub name: String,
     pub vendor: u16,
     pub product: u16,
@@ -88,6 +99,8 @@ pub struct Device {
     /// [`Device::publish`].
     handles: std::sync::OnceLock<Vec<crate::value::ElementRef>>,
     removal: Mutex<(Option<RemovalCallback>, usize)>,
+    report: Mutex<RegisteredReport>,
+    last_report: Mutex<Vec<u8>>,
 }
 
 // SAFETY: `joystick` is an SDL handle used only from the thread that opened it -
@@ -118,10 +131,14 @@ impl Device {
             )
         };
         let elements = describe(axes, buttons, hats);
+        // SAFETY: the joystick is open. Not every SDL joystick has a raw HID
+        // path; those devices use the synthetic report representation below.
+        let raw = unsafe { sdl3::open_hid(joystick) }.map_or(0, |device| device as usize);
         let last = Mutex::new(vec![i64::MIN; elements.len()]);
         let device = std::sync::Arc::new(Device {
             id,
             joystick,
+            raw: Mutex::new(raw),
             name,
             vendor,
             product,
@@ -130,6 +147,8 @@ impl Device {
             last,
             handles: std::sync::OnceLock::new(),
             removal: Mutex::new((None, 0)),
+            report: Mutex::new(RegisteredReport::default()),
+            last_report: Mutex::new(Vec::new()),
         });
         device.publish();
         Some(device)
@@ -192,6 +211,202 @@ impl Device {
         }
     }
 
+    pub fn set_report_callback(
+        &self,
+        buffer: *mut u8,
+        length: usize,
+        callback: Option<ReportCallback>,
+        context: usize,
+    ) {
+        *self.report.lock().unwrap_or_else(|e| e.into_inner()) = RegisteredReport {
+            buffer: buffer as usize,
+            length,
+            callback,
+            context,
+        };
+        self.last_report
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    /// The decoded SDL state encoded as the descriptor returned for this
+    /// device: little-endian axes, byte-wide hats, then packed buttons.
+    pub fn input_report(&self) -> Vec<u8> {
+        let mut report = Vec::with_capacity(self.max_input_report_size());
+        for element in self
+            .elements
+            .iter()
+            .filter(|e| matches!(e.source, Source::Axis(_)))
+        {
+            report.extend_from_slice(&(self.value(element) as i16).to_le_bytes());
+        }
+        for element in self
+            .elements
+            .iter()
+            .filter(|e| matches!(e.source, Source::Hat(_)))
+        {
+            report.push(self.value(element) as u8);
+        }
+        let buttons: Vec<&Element> = self
+            .elements
+            .iter()
+            .filter(|e| matches!(e.source, Source::Button(_)))
+            .collect();
+        for chunk in buttons.chunks(8) {
+            let mut byte = 0;
+            for (bit, element) in chunk.iter().enumerate() {
+                byte |= ((self.value(element) != 0) as u8) << bit;
+            }
+            report.push(byte);
+        }
+        report
+    }
+
+    pub fn max_input_report_size(&self) -> usize {
+        if *self.raw.lock().unwrap_or_else(|e| e.into_inner()) != 0 {
+            // SDL recommends 4096 bytes for raw HID descriptors. The same
+            // bound is ample for an interrupt input report and is what HIDAPI
+            // uses for its reusable callback buffer.
+            return 4096;
+        }
+        let axes = self
+            .elements
+            .iter()
+            .filter(|e| matches!(e.source, Source::Axis(_)))
+            .count();
+        let hats = self
+            .elements
+            .iter()
+            .filter(|e| matches!(e.source, Source::Hat(_)))
+            .count();
+        let buttons = self
+            .elements
+            .iter()
+            .filter(|e| matches!(e.source, Source::Button(_)))
+            .count();
+        axes * 2 + hats + buttons.div_ceil(8)
+    }
+
+    /// A HID descriptor for the bytes produced by [`Device::input_report`].
+    pub fn report_descriptor(&self) -> Vec<u8> {
+        let raw = self.raw.lock().unwrap_or_else(|e| e.into_inner());
+        if *raw != 0
+            && let Some(descriptor) = sdl3::hid_report_descriptor(*raw as sdl3::HidDevice)
+        {
+            return descriptor;
+        }
+        drop(raw);
+        descriptor(
+            self.elements
+                .iter()
+                .filter(|e| matches!(e.source, Source::Axis(_)))
+                .count(),
+            self.elements
+                .iter()
+                .filter(|e| matches!(e.source, Source::Hat(_)))
+                .count(),
+            self.elements
+                .iter()
+                .filter(|e| matches!(e.source, Source::Button(_)))
+                .count(),
+        )
+    }
+
+    pub fn notify_report(&self) {
+        let registered = *self.report.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(callback) = registered.callback else {
+            return;
+        };
+        let raw = self.raw.lock().unwrap_or_else(|e| e.into_inner());
+        if *raw != 0 {
+            if registered.length == 0 || registered.buffer == 0 {
+                return;
+            }
+            let buffer = unsafe {
+                std::slice::from_raw_parts_mut(registered.buffer as *mut u8, registered.length)
+            };
+            let Some(length) = sdl3::hid_read(*raw as sdl3::HidDevice, buffer) else {
+                return;
+            };
+            drop(raw);
+            if length == 0 {
+                return;
+            }
+            let report_id = buffer.first().copied().unwrap_or(0) as u32;
+            // SAFETY: the registration supplies this callback and buffer.
+            unsafe {
+                callback(
+                    registered.context as *mut c_void,
+                    0,
+                    std::ptr::from_ref(self).cast_mut().cast(),
+                    0,
+                    report_id,
+                    registered.buffer as *mut u8,
+                    length as CFIndex,
+                );
+            }
+            return;
+        }
+        drop(raw);
+        let report = self.input_report();
+        {
+            let mut last = self.last_report.lock().unwrap_or_else(|e| e.into_inner());
+            if *last == report {
+                return;
+            }
+            last.clone_from(&report);
+        }
+        let length = report.len().min(registered.length);
+        if length != 0 && registered.buffer == 0 {
+            return;
+        }
+        // SAFETY: the registration promises a writable buffer of its stated
+        // size, and the callback is invoked only while the device is alive.
+        unsafe {
+            if length != 0 {
+                std::ptr::copy_nonoverlapping(
+                    report.as_ptr(),
+                    registered.buffer as *mut u8,
+                    length,
+                );
+            }
+            callback(
+                registered.context as *mut c_void,
+                0,
+                std::ptr::from_ref(self).cast_mut().cast(),
+                0,
+                0,
+                registered.buffer as *mut u8,
+                length as CFIndex,
+            );
+        }
+    }
+
+    pub fn raw_get_report(&self, feature: bool, report_id: u8, capacity: usize) -> Option<Vec<u8>> {
+        let raw = self.raw.lock().unwrap_or_else(|e| e.into_inner());
+        if *raw == 0 {
+            return None;
+        }
+        let mut bytes = vec![0; capacity];
+        if bytes.is_empty() {
+            return Some(bytes);
+        }
+        bytes[0] = report_id;
+        let length = sdl3::hid_get_report(*raw as sdl3::HidDevice, feature, &mut bytes)?;
+        bytes.truncate(length.min(bytes.len()));
+        Some(bytes)
+    }
+
+    pub fn raw_set_report(&self, feature: bool, bytes: &[u8]) -> Option<bool> {
+        let raw = self.raw.lock().unwrap_or_else(|e| e.into_inner());
+        (*raw != 0).then(|| sdl3::hid_write(*raw as sdl3::HidDevice, feature, bytes))
+    }
+
+    pub fn has_raw_reports(&self) -> bool {
+        *self.raw.lock().unwrap_or_else(|e| e.into_inner()) != 0
+    }
+
     /// What an element reads right now.
     pub fn value(&self, element: &Element) -> i64 {
         match element.source {
@@ -229,6 +444,49 @@ impl Device {
         }
         out
     }
+}
+
+fn descriptor(axes: usize, hats: usize, buttons: usize) -> Vec<u8> {
+    let mut out = vec![0x05, 0x01, 0x09, 0x05, 0xa1, 0x01];
+    if axes != 0 {
+        for usage in AXIS_USAGES.iter().copied().take(axes) {
+            out.extend_from_slice(&[0x09, usage as u8]);
+        }
+        out.extend_from_slice(&[
+            0x16, 0x00, 0x80, 0x26, 0xff, 0x7f, 0x75, 0x10, 0x95, axes as u8, 0x81, 0x02,
+        ]);
+    }
+    if hats != 0 {
+        out.extend_from_slice(&[
+            0x09, 0x39, 0x15, 0x00, 0x25, 0x07, 0x75, 0x08, 0x95, hats as u8, 0x81, 0x42,
+        ]);
+    }
+    if buttons != 0 {
+        out.extend_from_slice(&[
+            0x05,
+            0x09,
+            0x19,
+            0x01,
+            0x29,
+            buttons as u8,
+            0x15,
+            0x00,
+            0x25,
+            0x01,
+            0x75,
+            0x01,
+            0x95,
+            buttons as u8,
+            0x81,
+            0x02,
+        ]);
+        let padding = (8 - buttons % 8) % 8;
+        if padding != 0 {
+            out.extend_from_slice(&[0x75, 0x01, 0x95, padding as u8, 0x81, 0x03]);
+        }
+    }
+    out.push(0xc0);
+    out
 }
 
 fn hat_to_direction(bits: u8) -> i64 {

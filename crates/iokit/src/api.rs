@@ -7,7 +7,7 @@ use corefoundation::api as cf;
 use corefoundation::base::{CFIndex, CFTypeID, CFTypeRef};
 use corefoundation::collections::{self, Number};
 
-use crate::hid::{Device, RemovalCallback};
+use crate::hid::{Device, RemovalCallback, ReportCallback};
 use crate::manager::{Criterion, DeviceCallback, Manager, ValueCallback};
 use crate::value;
 
@@ -43,6 +43,16 @@ pub unsafe extern "C" fn IOHIDManagerCreate(_allocator: CFTypeRef, _options: u32
         .unwrap_or_else(|e| e.into_inner())
         .push(manager);
     handle
+}
+
+/// Reopen a device from the IORegistry service id HIDAPI saved in its path.
+pub unsafe extern "C" fn IOHIDDeviceCreate(_allocator: CFTypeRef, service: u32) -> CFTypeRef {
+    for manager in MANAGERS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        if let Some(device) = manager.device(service) {
+            return Arc::as_ptr(&device) as CFTypeRef;
+        }
+    }
+    std::ptr::null()
 }
 
 pub unsafe extern "C" fn IOHIDManagerOpen(manager: CFTypeRef, _options: u32) -> IOReturn {
@@ -191,6 +201,11 @@ pub unsafe extern "C" fn IOHIDManagerScheduleWithRunLoop(
     let Some(m) = (unsafe { self::manager(manager) }) else {
         return;
     };
+    // HIDAPI schedules a manager and immediately copies its devices without an
+    // explicit IOHIDManagerOpen. Scheduling is enough to activate discovery.
+    if !m.open() {
+        return;
+    }
     schedule(m as *const Manager as usize, run_loop, mode);
 }
 
@@ -284,6 +299,47 @@ pub unsafe extern "C" fn IOHIDDeviceGetProperty(device: CFTypeRef, key: CFTypeRe
         b"VersionNumber" => number(d.version as i64),
         b"PrimaryUsagePage" => number(d.elements[0].page as i64),
         b"PrimaryUsage" => number(d.elements[0].usage as i64),
+        b"MaxInputReportSize" => number(d.max_input_report_size() as i64),
+        b"ReportDescriptor" => {
+            let data = collections::new_data(d.report_descriptor());
+            // SAFETY: a fresh property value valid through the caller's pool.
+            unsafe { cf::CFAutorelease(data) }
+        }
+        b"DeviceUsagePairs" => {
+            let page = corefoundation::string::from_bytes(b"DeviceUsagePage", false);
+            let usage = corefoundation::string::from_bytes(b"DeviceUsage", false);
+            let page_value = collections::new_number(Number::Integer(d.elements[0].page as i64));
+            let usage_value = collections::new_number(Number::Integer(d.elements[0].usage as i64));
+            let pair = collections::new_dictionary(
+                &[(page, page_value), (usage, usage_value)],
+                corefoundation::callbacks::Policy::from_key_callbacks(),
+                corefoundation::callbacks::Policy::from_type_callbacks(),
+                false,
+            );
+            // SAFETY: the dictionary retained its four entries.
+            unsafe {
+                cf::CFRelease(page);
+                cf::CFRelease(usage);
+                cf::CFRelease(page_value);
+                cf::CFRelease(usage_value);
+            }
+            let pairs = collections::new_array(
+                &[pair],
+                corefoundation::callbacks::Policy::from_type_callbacks(),
+                false,
+            );
+            // SAFETY: the array retained its dictionary.
+            unsafe { cf::CFRelease(pair) };
+            // SAFETY: a fresh property value valid through the caller's pool.
+            unsafe { cf::CFAutorelease(pairs) }
+        }
+        b"Transport" => {
+            let s = corefoundation::string::from_bytes(b"USB", false);
+            // SAFETY: a fresh property value valid through the caller's pool.
+            unsafe { cf::CFAutorelease(s) }
+        }
+        b"SerialNumber" => std::ptr::null(),
+        b"bInterfaceNumber" => number(0),
         b"Product" | b"Manufacturer" => {
             let s = corefoundation::string::from_bytes(d.name.as_bytes(), false);
             // SAFETY: as above.
@@ -461,6 +517,11 @@ pub fn key_strings() -> Vec<(&'static str, &'static str)> {
         ("_kIOHIDPrimaryUsageKey", "PrimaryUsage"),
         ("_kIOHIDProductKey", "Product"),
         ("_kIOHIDManufacturerKey", "Manufacturer"),
+        ("_kIOHIDMaxInputReportSizeKey", "MaxInputReportSize"),
+        ("_kIOHIDReportDescriptorKey", "ReportDescriptor"),
+        ("_kIOHIDDeviceUsagePairsKey", "DeviceUsagePairs"),
+        ("_kIOHIDTransportKey", "Transport"),
+        ("_kIOHIDSerialNumberKey", "SerialNumber"),
     ]
 }
 
@@ -473,6 +534,9 @@ pub unsafe extern "C" fn IOHIDManagerCopyDevices(manager: CFTypeRef) -> CFTypeRe
     let Some(manager) = (unsafe { self::manager(manager) }) else {
         return std::ptr::null();
     };
+    // Populate synchronously: Some apps HIDAPI copies immediately after
+    // scheduling, before its run loop source has had a chance to perform.
+    manager.poll();
     let devices = manager.devices();
     if devices.is_empty() {
         return std::ptr::null();
@@ -489,11 +553,12 @@ pub unsafe extern "C" fn IOHIDManagerCopyDevices(manager: CFTypeRef) -> CFTypeRe
 
 /// `io_service_t IOHIDDeviceGetService(IOHIDDeviceRef)`.
 ///
-/// Zero. A device here is an SDL joystick, which has no IORegistry entry
-/// behind it, and every `io_service_t` in this tree is zero - see
-/// [`crate::registry`].
-pub unsafe extern "C" fn IOHIDDeviceGetService(_device: CFTypeRef) -> u32 {
-    0
+/// SDL's stable joystick instance id doubles as the synthetic IORegistry
+/// service id. HIDAPI saves it in a path and later gives it to
+/// [`IOHIDDeviceCreate`] to reopen this exact device.
+pub unsafe extern "C" fn IOHIDDeviceGetService(device: CFTypeRef) -> u32 {
+    // SAFETY: the caller's obligation.
+    unsafe { self::device(device) }.map_or(0, |device| device.id)
 }
 
 /// `IOHIDDeviceScheduleWithRunLoop` / `IOHIDDeviceUnscheduleFromRunLoop`.
@@ -533,36 +598,120 @@ pub unsafe extern "C" fn IOHIDDeviceRegisterRemovalCallback(
 
 /// The raw-report family: `IOHIDDeviceGetReport`, `IOHIDDeviceSetReport`,
 /// `IOHIDDeviceRegisterInputReportCallback`.
-///
-/// Refused. A report is the device's own HID protocol bytes, and SDL exposes a
-/// decoded joystick rather than the descriptor it was decoded from - so there
-/// is nothing to read out and nothing meaningful to write in. Fabricating an
-/// empty report would tell the caller the exchange succeeded.
 pub unsafe extern "C" fn IOHIDDeviceGetReport(
-    _device: CFTypeRef,
-    _report_type: u32,
-    _report_id: CFIndex,
-    _report: *mut u8,
-    _length: *mut CFIndex,
+    device: CFTypeRef,
+    report_type: u32,
+    report_id: CFIndex,
+    report: *mut u8,
+    length: *mut CFIndex,
 ) -> IOReturn {
-    ERROR
+    if report.is_null()
+        || length.is_null()
+        || !(report_type == 0 || report_type == 2)
+        || !(0..=u8::MAX as CFIndex).contains(&report_id)
+    {
+        return ERROR;
+    }
+    // SAFETY: the caller's obligation and the out pointer checked above.
+    let Some(device) = (unsafe { self::device(device) }) else {
+        return ERROR;
+    };
+    // SAFETY: the caller supplies the buffer capacity through `length`.
+    let capacity = unsafe { length.read() };
+    if capacity < 0 {
+        return ERROR;
+    }
+    if device.has_raw_reports() {
+        let extra_id = usize::from(report_id == 0);
+        let Some(bytes) = device.raw_get_report(
+            report_type == 2,
+            report_id as u8,
+            capacity as usize + extra_id,
+        ) else {
+            return ERROR;
+        };
+        let bytes = match report_id == 0 {
+            true => bytes.get(1..).unwrap_or_default(),
+            false => bytes.as_slice(),
+        };
+        let copied = bytes.len().min(capacity as usize);
+        // SAFETY: the caller promises `capacity` writable bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), report, copied);
+            length.write(copied as CFIndex);
+        }
+        return SUCCESS;
+    }
+    if report_type != 0 || report_id != 0 {
+        return ERROR;
+    }
+    let bytes = device.input_report();
+    let copied = bytes.len().min(capacity as usize);
+    // SAFETY: the caller promises `capacity` writable bytes.
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), report, copied);
+        length.write(copied as CFIndex);
+    }
+    SUCCESS
 }
 
 pub unsafe extern "C" fn IOHIDDeviceSetReport(
-    _device: CFTypeRef,
-    _report_type: u32,
-    _report_id: CFIndex,
-    _report: *const u8,
-    _length: CFIndex,
+    device: CFTypeRef,
+    report_type: u32,
+    report_id: CFIndex,
+    report: *const u8,
+    length: CFIndex,
 ) -> IOReturn {
-    ERROR
+    if report.is_null()
+        || length < 0
+        || !(report_type == 1 || report_type == 2)
+        || !(0..=u8::MAX as CFIndex).contains(&report_id)
+    {
+        return ERROR;
+    }
+    // SAFETY: the caller's obligation.
+    let Some(device) = (unsafe { self::device(device) }) else {
+        return ERROR;
+    };
+    // SAFETY: the caller promises `length` readable bytes.
+    let bytes = unsafe { std::slice::from_raw_parts(report, length as usize) };
+    if device.has_raw_reports() {
+        let mut with_id;
+        let bytes = if report_id == 0 {
+            with_id = Vec::with_capacity(bytes.len() + 1);
+            with_id.push(0);
+            with_id.extend_from_slice(bytes);
+            with_id.as_slice()
+        } else {
+            bytes
+        };
+        return match device.raw_set_report(report_type == 2, bytes) {
+            Some(true) => SUCCESS,
+            _ => ERROR,
+        };
+    }
+    if report_type != 1 {
+        return ERROR;
+    }
+    // SAFETY: the device is open and the bytes belong to this call.
+    match unsafe { sdl3::send_effect(device.joystick, bytes) } {
+        true => SUCCESS,
+        false => ERROR,
+    }
 }
 
 pub unsafe extern "C" fn IOHIDDeviceRegisterInputReportCallback(
-    _device: CFTypeRef,
-    _report: *mut u8,
-    _length: CFIndex,
-    _callback: *const c_void,
-    _context: *mut c_void,
+    device: CFTypeRef,
+    report: *mut u8,
+    length: CFIndex,
+    callback: Option<ReportCallback>,
+    context: *mut c_void,
 ) {
+    if length < 0 {
+        return;
+    }
+    // SAFETY: the caller's obligation.
+    if let Some(device) = unsafe { self::device(device) } {
+        device.set_report_callback(report, length as usize, callback, context as usize);
+    }
 }

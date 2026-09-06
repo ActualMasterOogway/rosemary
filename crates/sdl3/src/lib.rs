@@ -28,8 +28,10 @@ pub struct AudioSpec {
 }
 
 pub type Joystick = *mut c_void;
+pub type HidDevice = *mut c_void;
 pub type Gamepad = *mut c_void;
 pub type JoystickId = u32;
+pub type PropertiesId = u32;
 pub type Window = *mut c_void;
 pub type GlContext = *mut c_void;
 pub type Cursor = *mut c_void;
@@ -95,6 +97,7 @@ struct Api {
     SDL_OpenJoystick: Option<unsafe extern "C" fn(JoystickId) -> Joystick>,
     SDL_CloseJoystick: Option<unsafe extern "C" fn(Joystick)>,
     SDL_GetJoystickName: Option<unsafe extern "C" fn(Joystick) -> *const c_char>,
+    SDL_GetJoystickPath: Option<unsafe extern "C" fn(Joystick) -> *const c_char>,
     SDL_GetJoystickVendor: Option<unsafe extern "C" fn(Joystick) -> u16>,
     SDL_GetJoystickProduct: Option<unsafe extern "C" fn(Joystick) -> u16>,
     SDL_GetJoystickProductVersion: Option<unsafe extern "C" fn(Joystick) -> u16>,
@@ -104,10 +107,20 @@ struct Api {
     SDL_GetJoystickAxis: Option<unsafe extern "C" fn(Joystick, c_int) -> i16>,
     SDL_GetJoystickButton: Option<unsafe extern "C" fn(Joystick, c_int) -> bool>,
     SDL_GetJoystickHat: Option<unsafe extern "C" fn(Joystick, c_int) -> u8>,
+    SDL_SendJoystickEffect: Option<unsafe extern "C" fn(Joystick, *const c_void, c_int) -> bool>,
+    SDL_hid_open_path: Option<unsafe extern "C" fn(*const c_char) -> HidDevice>,
+    SDL_hid_get_input_report: Option<unsafe extern "C" fn(HidDevice, *mut u8, usize) -> c_int>,
+    SDL_hid_get_feature_report: Option<unsafe extern "C" fn(HidDevice, *mut u8, usize) -> c_int>,
+    SDL_hid_get_report_descriptor: Option<unsafe extern "C" fn(HidDevice, *mut u8, usize) -> c_int>,
+    SDL_hid_read_timeout: Option<unsafe extern "C" fn(HidDevice, *mut u8, usize, c_int) -> c_int>,
+    SDL_hid_write: Option<unsafe extern "C" fn(HidDevice, *const u8, usize) -> c_int>,
+    SDL_hid_send_feature_report: Option<unsafe extern "C" fn(HidDevice, *const u8, usize) -> c_int>,
     SDL_GetGamepads: Option<unsafe extern "C" fn(*mut c_int) -> *mut JoystickId>,
     SDL_OpenGamepad: Option<unsafe extern "C" fn(JoystickId) -> Gamepad>,
     SDL_CloseGamepad: Option<unsafe extern "C" fn(Gamepad)>,
     SDL_GetGamepadName: Option<unsafe extern "C" fn(Gamepad) -> *const c_char>,
+    SDL_GetGamepadProperties: Option<unsafe extern "C" fn(Gamepad) -> PropertiesId>,
+    SDL_GetBooleanProperty: Option<unsafe extern "C" fn(PropertiesId, *const c_char, bool) -> bool>,
     SDL_GetGamepadAxis: Option<unsafe extern "C" fn(Gamepad, c_int) -> i16>,
     SDL_GetGamepadButton: Option<unsafe extern "C" fn(Gamepad, c_int) -> bool>,
     SDL_free: Option<unsafe extern "C" fn(*mut c_void)>,
@@ -264,6 +277,7 @@ fn api() -> Option<&'static Api> {
             SDL_OpenJoystick,
             SDL_CloseJoystick,
             SDL_GetJoystickName,
+            SDL_GetJoystickPath,
             SDL_GetJoystickVendor,
             SDL_GetJoystickProduct,
             SDL_GetJoystickProductVersion,
@@ -273,10 +287,20 @@ fn api() -> Option<&'static Api> {
             SDL_GetJoystickAxis,
             SDL_GetJoystickButton,
             SDL_GetJoystickHat,
+            SDL_SendJoystickEffect,
+            SDL_hid_open_path,
+            SDL_hid_get_input_report,
+            SDL_hid_get_feature_report,
+            SDL_hid_get_report_descriptor,
+            SDL_hid_read_timeout,
+            SDL_hid_write,
+            SDL_hid_send_feature_report,
             SDL_GetGamepads,
             SDL_OpenGamepad,
             SDL_CloseGamepad,
             SDL_GetGamepadName,
+            SDL_GetGamepadProperties,
+            SDL_GetBooleanProperty,
             SDL_GetGamepadAxis,
             SDL_GetGamepadButton,
             SDL_free,
@@ -551,6 +575,63 @@ pub unsafe fn name(joystick: Joystick) -> String {
     }
 }
 
+/// Open SDL's raw HID handle for the same physical device as `joystick`.
+/// Virtual and platform-native devices without a HID path return `None`.
+///
+/// # Safety
+///
+/// As [`close`].
+pub unsafe fn open_hid(joystick: Joystick) -> Option<HidDevice> {
+    let api = api()?;
+    let path = unsafe { api.SDL_GetJoystickPath?(joystick) };
+    if path.is_null() {
+        return None;
+    }
+    let device = unsafe { api.SDL_hid_open_path?(path) };
+    (!device.is_null()).then_some(device)
+}
+
+pub fn hid_report_descriptor(device: HidDevice) -> Option<Vec<u8>> {
+    let get = api()?.SDL_hid_get_report_descriptor?;
+    let mut bytes = vec![0; 4096];
+    // SAFETY: an open HID handle and a writable vector.
+    let length = unsafe { get(device, bytes.as_mut_ptr(), bytes.len()) };
+    let length = usize::try_from(length).ok()?;
+    bytes.truncate(length);
+    Some(bytes)
+}
+
+pub fn hid_get_report(device: HidDevice, feature: bool, bytes: &mut [u8]) -> Option<usize> {
+    let api = api()?;
+    let get = match feature {
+        true => api.SDL_hid_get_feature_report?,
+        false => api.SDL_hid_get_input_report?,
+    };
+    // SAFETY: an open HID handle and a writable slice.
+    usize::try_from(unsafe { get(device, bytes.as_mut_ptr(), bytes.len()) }).ok()
+}
+
+pub fn hid_read(device: HidDevice, bytes: &mut [u8]) -> Option<usize> {
+    let read = api()?.SDL_hid_read_timeout?;
+    // SAFETY: an open HID handle and a writable slice; zero never blocks.
+    usize::try_from(unsafe { read(device, bytes.as_mut_ptr(), bytes.len(), 0) }).ok()
+}
+
+pub fn hid_write(device: HidDevice, feature: bool, bytes: &[u8]) -> bool {
+    let Some(api) = api() else {
+        return false;
+    };
+    let Some(write) = (match feature {
+        true => api.SDL_hid_send_feature_report,
+        false => api.SDL_hid_write,
+    }) else {
+        return false;
+    };
+    // SAFETY: an open HID handle and a readable slice.
+    usize::try_from(unsafe { write(device, bytes.as_ptr(), bytes.len()) })
+        .is_ok_and(|written| written == bytes.len())
+}
+
 /// Build a getter that takes a joystick and answers a number.
 macro_rules! getter {
     ($(#[$meta:meta])* $name:ident, $field:ident, $ty:ty, $default:expr) => {
@@ -619,6 +700,23 @@ pub unsafe fn hat(joystick: Joystick, index: c_int) -> u8 {
         Some(f) => unsafe { f(joystick, index) },
         None => 0,
     }
+}
+
+/// Send device-specific output bytes to a joystick.
+///
+/// # Safety
+///
+/// `joystick` must be open and `bytes` must be a report accepted by its SDL
+/// driver.
+pub unsafe fn send_effect(joystick: Joystick, bytes: &[u8]) -> bool {
+    let Some(send) = api().and_then(|a| a.SDL_SendJoystickEffect) else {
+        return false;
+    };
+    let Ok(length) = c_int::try_from(bytes.len()) else {
+        return false;
+    };
+    // SAFETY: the caller's obligation, and the slice covers `length` bytes.
+    unsafe { send(joystick, bytes.as_ptr().cast(), length) }
 }
 
 /// SDL's standard gamepad axes.
@@ -710,6 +808,48 @@ pub unsafe fn gamepad_name(gamepad: Gamepad) -> String {
         unsafe { CStr::from_ptr(text) }
             .to_string_lossy()
             .into_owned()
+    }
+}
+
+/// Output capabilities SDL reports for an opened gamepad.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct GamepadProperties {
+    pub mono_led: bool,
+    pub rgb_led: bool,
+    pub player_led: bool,
+    pub rumble: bool,
+    pub trigger_rumble: bool,
+}
+
+/// Read the properties associated with an opened gamepad.
+///
+/// # Safety
+///
+/// `gamepad` must be one [`open_gamepad`] returned and not yet closed.
+pub unsafe fn gamepad_properties(gamepad: Gamepad) -> GamepadProperties {
+    let Some(api) = api() else {
+        return GamepadProperties::default();
+    };
+    let (Some(properties), Some(boolean)) =
+        (api.SDL_GetGamepadProperties, api.SDL_GetBooleanProperty)
+    else {
+        return GamepadProperties::default();
+    };
+    // SAFETY: the caller's obligation.
+    let properties = unsafe { properties(gamepad) };
+    if properties == 0 {
+        return GamepadProperties::default();
+    }
+    let get = |name: &CStr| {
+        // SAFETY: `properties` is live and `name` is NUL-terminated.
+        unsafe { boolean(properties, name.as_ptr(), false) }
+    };
+    GamepadProperties {
+        mono_led: get(c"SDL.joystick.cap.mono_led"),
+        rgb_led: get(c"SDL.joystick.cap.rgb_led"),
+        player_led: get(c"SDL.joystick.cap.player_led"),
+        rumble: get(c"SDL.joystick.cap.rumble"),
+        trigger_rumble: get(c"SDL.joystick.cap.trigger_rumble"),
     }
 }
 

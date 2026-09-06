@@ -104,10 +104,14 @@ impl Manager {
     }
 
     pub fn open(&self) -> bool {
+        let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
+        if *open {
+            return true;
+        }
         if sdl3::init(sdl3::init::JOYSTICK).is_err() {
             return false;
         }
-        *self.open.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        *open = true;
         true
     }
 
@@ -238,10 +242,11 @@ impl Manager {
             .cloned()
             .collect();
         let registered = *self.values.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(callback) = registered.callback else {
-            return;
-        };
         for device in devices {
+            device.notify_report();
+            let Some(callback) = registered.callback else {
+                continue;
+            };
             for (cookie, value) in device.changed() {
                 let boxed = crate::value::new(&device, cookie, value);
                 // SAFETY: the callback is the guest's, and `boxed` is an

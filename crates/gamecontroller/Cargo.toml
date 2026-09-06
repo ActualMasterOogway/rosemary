@@ -9,4 +9,5 @@ license.workspace = true
 objc.workspace = true
 corefoundation.workspace = true
 foundation.workspace = true
+iokit.workspace = true
 sdl3.workspace = true

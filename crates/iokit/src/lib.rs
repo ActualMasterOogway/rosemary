@@ -41,6 +41,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         "IOHIDManagerUnscheduleFromRunLoop" => at!(api::IOHIDManagerUnscheduleFromRunLoop),
 
         "IOHIDDeviceRegisterInputValueCallback" => at!(api::IOHIDDeviceRegisterInputValueCallback),
+        "IOHIDDeviceCreate" => at!(api::IOHIDDeviceCreate),
         "IOHIDDeviceGetProperty" => at!(api::IOHIDDeviceGetProperty),
         "IOHIDDeviceCopyMatchingElements" => at!(api::IOHIDDeviceCopyMatchingElements),
         "IOHIDDeviceOpen" => at!(api::IOHIDDeviceOpen),
@@ -92,6 +93,7 @@ pub const NAMES: &[&str] = &[
     "IOHIDManagerScheduleWithRunLoop",
     "IOHIDManagerUnscheduleFromRunLoop",
     "IOHIDDeviceRegisterInputValueCallback",
+    "IOHIDDeviceCreate",
     "IOHIDDeviceGetProperty",
     "IOHIDDeviceCopyMatchingElements",
     "IOHIDDeviceOpen",

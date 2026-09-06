@@ -1,4 +1,4 @@
-//! The IORegistry, answered as a machine with no devices in it.
+//! A minimal IORegistry, with opaque services only for SDL HID devices.
 //!
 //! `IOServiceGetMatchingServices` returning an empty iterator is a real answer:
 //! it is what a Mac says for a match nothing satisfies, and a program that
@@ -20,6 +20,10 @@
 //!   `IONotificationPortGetRunLoopSource` is called on it without a check;
 //! - and every `IOObject` call takes `0` and answers success, because that is
 //!   the only object handle a caller can be holding.
+//!
+//! HID devices are not enumerated through this registry. Their SDL instance id
+//! is exposed as a service solely so HIDAPI can turn its `DevSrvsID:` path back
+//! into the `IOHIDDeviceRef` it already enumerated through `IOHIDManager`.
 //!
 //! Deliberately absent: anything that would hand back a property value.
 //! `IORegistryEntryCreateCFProperty` answers null - there is no entry it could
@@ -130,12 +134,21 @@ pub unsafe extern "C" fn IOServiceGetMatchingServices(
     SUCCESS
 }
 
-/// `io_service_t IOServiceGetMatchingService(port, matching)`. Zero: nothing
-/// matches.
+/// Resolve the synthetic service id in an `IORegistryEntryIDMatching`
+/// dictionary. Other matching dictionaries still match nothing.
 pub unsafe extern "C" fn IOServiceGetMatchingService(_port: u32, matching: CFTypeRef) -> IoObject {
+    let key = corefoundation::string::from_bytes(b"IORegistryEntryID", false);
+    // SAFETY: the caller's matching dictionary.
+    let value = unsafe { corefoundation::api::CFDictionaryGetValue(matching, key) };
+    // SAFETY: a value from that dictionary, if present.
+    let entry = unsafe { collections::number(value) }
+        .and_then(|number| IoObject::try_from(number.as_i64()).ok())
+        .unwrap_or(0);
+    // SAFETY: the lookup does not retain its temporary key.
+    unsafe { corefoundation::api::CFRelease(key) };
     // SAFETY: the reference the caller handed over.
     unsafe { consume(matching) };
-    0
+    entry
 }
 
 /// `io_object_t IOIteratorNext(io_iterator_t)`. Zero ends the loop.
@@ -182,14 +195,17 @@ pub unsafe extern "C" fn IORegistryEntryGetParentEntry(
 }
 
 pub unsafe extern "C" fn IORegistryEntryGetRegistryEntryID(
-    _entry: IoObject,
+    entry: IoObject,
     id: *mut u64,
 ) -> KernReturn {
     if !id.is_null() {
         // SAFETY: an out parameter the caller sized.
-        unsafe { id.write(0) };
+        unsafe { id.write(entry as u64) };
     }
-    NO_DEVICE
+    match entry {
+        0 => NO_DEVICE,
+        _ => SUCCESS,
+    }
 }
 
 /// `CFTypeRef IORegistryEntryCreateCFProperty(entry, key, allocator, options)`.
