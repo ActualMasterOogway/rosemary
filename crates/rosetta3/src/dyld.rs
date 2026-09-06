@@ -15,6 +15,7 @@ use machish::loader::Loader;
 use machish::memory::{MmapSpace, Regions};
 use machish::report::LinkReport;
 use machish::resolve::SyntheticDylib;
+use machish::spec::MachSpec;
 use machish::spec::arch::X86_64;
 
 use microlift::arch::x86_64::context::RegisterContext;
@@ -202,8 +203,15 @@ fn main_exports() -> Option<&'static MainExports> {
         .unwrap_or_else(|e| e.into_inner())
         .clone()?;
     let bytes = std::fs::read(&path).ok()?;
-    let object = MachObject::parse_any(&bytes, X86_64).ok()?;
-    let exports = ExportTable::parse(&object).ok()?;
+    let exports = match crate::exec::active()?.engine() {
+        crate::exec::Engine::Native => {
+            ExportTable::parse(&MachObject::parse_any(&bytes, crate::exec::native::HOST_SPEC).ok()?)
+                .ok()?
+        }
+        crate::exec::Engine::Emulated => {
+            ExportTable::parse(&MachObject::parse_any(&bytes, X86_64).ok()?).ok()?
+        }
+    };
     let leaked: &'static MainExports = Box::leak(Box::new(MainExports {
         exports,
         slide,
@@ -581,14 +589,32 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     }
 
     let bytes = std::fs::read(&resolved).map_err(|e| format!("{resolved}: {e}"))?;
-    // `parse_any` narrows a fat file to the x86-64 slice, and fails when there
-    // is none - which is the case a *native* arm64 dylib takes.
-    let object = MachObject::parse_any(&bytes, X86_64)
-        .map_err(|e| format!("{resolved}: not a loadable x86-64 Mach-O: {e}"))?;
+    match crate::exec::active().map(|exec| exec.engine()) {
+        Some(crate::exec::Engine::Native) => open_with(
+            &resolved,
+            &bytes,
+            crate::exec::native::HOST_SPEC,
+            crate::cxxlib::HOST,
+        ),
+        Some(crate::exec::Engine::Emulated) => open_with(&resolved, &bytes, X86_64, Flavor::Intel),
+        None => Err("no execution backend is active".to_string()),
+    }
+}
+
+/// Load one image using the architecture and executable-memory policy of the
+/// backend that will call it.
+fn open_with<S: MachSpec + 'static>(
+    resolved: &str,
+    bytes: &[u8],
+    spec: S,
+    flavor: Flavor,
+) -> std::result::Result<u64, String> {
+    let object = MachObject::parse_any(bytes, spec)
+        .map_err(|e| format!("{resolved}: not a loadable Mach-O for this backend: {e}"))?;
 
     let mut memory = MmapSpace::new();
     // Vendored libc++ ahead of the filesystem; see [`crate::cxxlib`].
-    let mut source = crate::cxxlib::source(Flavor::Intel);
+    let mut source = crate::cxxlib::source(flavor);
     let hosts = HostProviders::new();
     // Everything already loaded, which is what dyld resolves a new image
     // against.
@@ -599,10 +625,10 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
         .into_iter()
         .collect();
     extra.push(&loaded as &dyn machish::resolve::SymbolProvider);
-    let mut report = Loader::new(X86_64)
+    let mut report = Loader::new(spec)
         .link_with(
-            &bytes,
-            &resolved,
+            bytes,
+            resolved,
             &mut memory,
             &mut source,
             &hosts.chain(&extra),
@@ -610,16 +636,12 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
         .map_err(|e| format!("{resolved}: {e}"))?;
 
     // The same repair the program's own link needs, for the same reason.
-    crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory, Flavor::Intel)
+    crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory, flavor)
         .map_err(|e| format!("{resolved}: unwinder: {e}"))?;
-    crate::cxxlib::bind_cxxabi_to_the_vendored_one(&mut report, &mut memory, Flavor::Intel)
+    crate::cxxlib::bind_cxxabi_to_the_vendored_one(&mut report, &mut memory, flavor)
         .map_err(|e| format!("{resolved}: cxxabi: {e}"))?;
-    crate::cxxlib::bind_objc_exceptions_to_the_vendored_cxxabi(
-        &mut report,
-        &mut memory,
-        Flavor::Intel,
-    )
-    .map_err(|e| format!("{resolved}: objc exceptions: {e}"))?;
+    crate::cxxlib::bind_objc_exceptions_to_the_vendored_cxxabi(&mut report, &mut memory, flavor)
+        .map_err(|e| format!("{resolved}: objc exceptions: {e}"))?;
 
     // Say what did not resolve, here, rather than letting the guest find out by
     // calling it. The program's own link says it the same way, and this is the
@@ -670,7 +692,7 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     // only because the space can no longer move.
     let memory: &'static SharedSpace = Box::leak(Box::new(SharedSpace(memory)));
     let leaked: &'static Image = Box::leak(Box::new(Image {
-        path: resolved.clone(),
+        path: resolved.to_string(),
         handle: base,
         report,
         regions: memory.0.regions(),
@@ -804,10 +826,10 @@ fn collect_imports(
 
 /// Run the image's constructors, as dyld does before `dlopen` returns.
 fn run_initializers(image: &'static Image) -> std::result::Result<(), String> {
-    let Some(vm) = crate::thunk::current() else {
-        return Err("no VM is running on this thread".to_string());
+    let Some(exec) = crate::exec::active() else {
+        return Err("no execution backend is active".to_string());
     };
-    let (argc, argv, envp, apple) = vm.main_args();
+    let (argc, argv, envp, apple) = exec.main_args();
     let initializers: Vec<u64> = image
         .report
         .images
@@ -816,7 +838,7 @@ fn run_initializers(image: &'static Image) -> std::result::Result<(), String> {
         .flat_map(|i| i.initializers.iter().copied())
         .collect();
     for init in initializers {
-        vm.call(init, &[argc, argv, envp, apple])
+        exec.call(init, &[argc, argv, envp, apple])
             .map_err(|e| format!("initializer at {init:#x}: {e}"))?;
     }
     Ok(())
@@ -893,10 +915,20 @@ fn rpaths_of(path: &str) -> Vec<String> {
     let Ok(bytes) = std::fs::read(path) else {
         return Vec::new();
     };
-    let Ok(object) = MachObject::parse_any(&bytes, X86_64) else {
-        return Vec::new();
-    };
-    object.rpaths().map(|r| r.to_string()).collect()
+    match crate::exec::active().map(|exec| exec.engine()) {
+        Some(crate::exec::Engine::Native) => {
+            let Ok(object) = MachObject::parse_any(&bytes, crate::exec::native::HOST_SPEC) else {
+                return Vec::new();
+            };
+            object.rpaths().map(str::to_string).collect()
+        }
+        _ => {
+            let Ok(object) = MachObject::parse_any(&bytes, X86_64) else {
+                return Vec::new();
+            };
+            object.rpaths().map(str::to_string).collect()
+        }
+    }
 }
 
 /// The address `name` has in `handle`, as `dlsym` reports it.

@@ -2280,7 +2280,11 @@ pub const PLUGIN_C: &str = r#"
 #include <stdio.h>
 #include <string.h>
 
-__attribute__((constructor)) static void plugin_init(void) { puts("plugin loaded"); }
+extern int executable_value(void);
+
+__attribute__((constructor)) static void plugin_init(void) {
+    printf("plugin loaded %d\n", executable_value());
+}
 
 int plugin_len(const char *s) { return (int)strlen(s); }
 "#;
@@ -2305,6 +2309,8 @@ int main(void) {
     dlclose(h);
     return 0;
 }
+
+int executable_value(void) { return 42; }
 "#;
 
 /// Build [`DLOPEN_C`] and the plugin beside it, or `None` if this host cannot.
@@ -2318,7 +2324,13 @@ pub fn dlopen_fixture() -> Option<String> {
             build_x86_64(
                 "libplugin.dylib",
                 PLUGIN_C,
-                &["-dynamiclib", "-install_name", "@rpath/libplugin.dylib"],
+                &[
+                    "-dynamiclib",
+                    "-install_name",
+                    "@rpath/libplugin.dylib",
+                    "-undefined",
+                    "dynamic_lookup",
+                ],
             )?;
             build_x86_64("dlopener", DLOPEN_C, &[])
         })

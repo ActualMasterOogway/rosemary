@@ -1519,6 +1519,10 @@ fn cpuid(leaf: u32, subleaf: u32) -> [u32; 4] {
 }
 
 impl crate::exec::Execution for Vm {
+    fn engine(&self) -> crate::exec::Engine {
+        crate::exec::Engine::Emulated
+    }
+
     fn report(&self) -> &machish::report::LinkReport {
         &self.program.report
     }

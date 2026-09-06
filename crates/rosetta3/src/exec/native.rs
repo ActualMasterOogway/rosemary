@@ -260,6 +260,13 @@ impl Native {
 
         flush_icache(&report);
         crate::tls::register(&report);
+        // The dynamic loader needs the executable itself as the first flat
+        // namespace. Plugins such as `libYoYoGamepad` import C++ definitions
+        // from the runner rather than from one of their dependencies.
+        crate::dyld::set_executable_path(path, report.root().map_or(0, |i| i.slide));
+        if let Some(root) = report.root() {
+            crate::dyld::set_executable_header(root.base);
+        }
         // Before the program runs, because the first thing it may do is throw.
         crate::dyld::register_mapped_images(&report);
         // And to LLDB, which otherwise has nothing to name a frame in the
@@ -280,6 +287,10 @@ impl Native {
 }
 
 impl Execution for Native {
+    fn engine(&self) -> crate::exec::Engine {
+        crate::exec::Engine::Native
+    }
+
     fn report(&self) -> &LinkReport {
         &self.report
     }

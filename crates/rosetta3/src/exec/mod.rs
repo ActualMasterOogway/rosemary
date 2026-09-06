@@ -2,17 +2,43 @@
 
 pub mod native;
 
+use std::sync::OnceLock;
+
 use machish::report::LinkReport;
 
 use crate::vm::VmError;
 
 pub use native::Native;
 
+/// The backend running this process, for calls entered without an explicit
+/// [`Execution`] reference.
+///
+/// A guest reaches `dlopen` as an ordinary imported function. Its loaded
+/// image's initializers must be called through whichever backend launched the
+/// executable, including [`Native`], rather than assuming a JIT-backed VM.
+static ACTIVE: OnceLock<&'static dyn Execution> = OnceLock::new();
+
+/// Publish the backend that will execute the program.
+pub fn publish(exec: &'static dyn Execution) {
+    assert!(
+        ACTIVE.set(exec).is_ok(),
+        "an execution backend is already active"
+    );
+}
+
+/// The backend executing this process, if program startup has published it.
+pub(crate) fn active() -> Option<&'static dyn Execution> {
+    ACTIVE.get().copied()
+}
+
 /// A loaded program that can be started.
 ///
 /// Deliberately free of any register context: what a shim sees on the way
 /// through is emulation vocabulary, and a native backend has none of it.
 pub trait Execution: Sync {
+    /// Which backend calls this image's instructions.
+    fn engine(&self) -> Engine;
+
     /// The linking transcript, which is what the diagnostics are written against.
     fn report(&self) -> &LinkReport;
 

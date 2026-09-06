@@ -48,6 +48,7 @@ fn run(path: &str, args: Vec<OsString>, policy: ImportPolicy, forced: Option<Eng
             }
         },
     };
+    rosetta3::exec::publish(exec);
 
     match startup::run(exec) {
         // `exit` rather than returning the status. Returning goes back through

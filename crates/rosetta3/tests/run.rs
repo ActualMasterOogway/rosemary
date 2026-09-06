@@ -223,8 +223,8 @@ fn the_va_list_family_prints_what_the_host_libc_prints() {
 /// through `machish` into this process, and everything downstream of that has to
 /// follow. What each line of the expected output would falsify:
 ///
-/// - `plugin loaded` - the constructor ran, and it ran *before* `dlopen`
-///   returned, which is what dyld guarantees and what a plugin depends on.
+/// - `plugin loaded 42` - the constructor ran before `dlopen` returned and its
+///   flat import resolved back into the main executable.
 /// - `len=6` - the `dlsym` result is a **guest** address the runtime entered
 ///   through the JIT, and the `strlen` inside it reached the host's. That second
 ///   half is the one with no safety net: the plugin did not exist when the
@@ -244,7 +244,27 @@ fn the_guest_loads_an_intel_dylib_of_its_own_and_calls_into_it() {
 
     assert_eq!(status, Some(0), "stdout: {out:?} stderr: {err}");
     assert_eq!(
-        out, "plugin loaded\nlen=6\nmissing=1 reported=1\n",
+        out, "plugin loaded 42\nlen=6\nmissing=1 reported=1\n",
+        "stderr: {err}"
+    );
+}
+
+/// The native backend uses the same guest dyld implementation, but has no VM
+/// to run a loaded image's constructor. The active [`rosetta3::Execution`]
+/// must dispatch that call through [`rosetta3::Native`] instead.
+#[test]
+fn the_native_guest_loads_a_dylib_and_runs_its_constructor() {
+    if !cfg!(target_arch = "x86_64") {
+        skip!("the x86-64 fixture is not native on this host")
+    }
+    let Some(path) = common::dlopen_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
+    let (status, out, err) = run_guest_with(&["--native"], &path, &[]);
+
+    assert_eq!(status, Some(0), "stdout: {out:?} stderr: {err}");
+    assert_eq!(
+        out, "plugin loaded 42\nlen=6\nmissing=1 reported=1\n",
         "stderr: {err}"
     );
 }
