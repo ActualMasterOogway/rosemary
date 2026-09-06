@@ -739,6 +739,59 @@ pub unsafe fn gamepad_button(gamepad: Gamepad, button: c_int) -> bool {
     }
 }
 
+/// The desktop clipboard, as UTF-8 text.
+pub mod clipboard {
+    use super::*;
+
+    pub fn set_text(text: &[u8]) -> bool {
+        let Ok(text) = CString::new(text) else {
+            return false;
+        };
+        let Some(handle) = library() else {
+            return false;
+        };
+        // SAFETY: SDL3 declares this exact prototype.
+        let Some(set) = (unsafe {
+            entry::<unsafe extern "C" fn(*const c_char) -> bool>(handle, "SDL_SetClipboardText")
+        }) else {
+            return false;
+        };
+        // SAFETY: SDL copies the NUL-terminated text during the call.
+        unsafe { set(text.as_ptr()) }
+    }
+
+    pub fn text() -> Option<Vec<u8>> {
+        let handle = library()?;
+        // SAFETY: SDL3 declares this exact prototype.
+        let get = unsafe {
+            entry::<unsafe extern "C" fn() -> *mut c_char>(handle, "SDL_GetClipboardText")?
+        };
+        let free = api()?.SDL_free?;
+        // SAFETY: SDL returns either null or a NUL-terminated allocation that
+        // `SDL_free` owns and accepts.
+        let text = unsafe { get() };
+        if text.is_null() {
+            return None;
+        }
+        // SAFETY: as above; copy before giving the allocation back to SDL.
+        let bytes = unsafe { CStr::from_ptr(text).to_bytes().to_vec() };
+        // SAFETY: as above.
+        unsafe { free(text.cast()) };
+        Some(bytes)
+    }
+
+    /// Whether SDL currently has a text payload. This distinguishes an empty
+    /// desktop clipboard from an unavailable video/clipboard backend.
+    pub fn has_text() -> Option<bool> {
+        let handle = library()?;
+        // SAFETY: SDL3 declares this exact prototype.
+        let has =
+            unsafe { entry::<unsafe extern "C" fn() -> bool>(handle, "SDL_HasClipboardText")? };
+        // SAFETY: no arguments.
+        Some(unsafe { has() })
+    }
+}
+
 pub mod virtual_joystick {
     use super::*;
 

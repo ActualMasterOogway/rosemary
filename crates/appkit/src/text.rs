@@ -499,6 +499,18 @@ unsafe extern "C" fn delete_forward(receiver: Id, _sel: Sel, _sender: Id) {
     });
 }
 
+/// `-paste:`, the standard responder action for inserting plain text from the
+/// general pasteboard at the current selection.
+unsafe extern "C" fn paste(receiver: Id, _sel: Sel, _sender: Id) {
+    let Some(text) = crate::pasteboard::general_text() else {
+        return;
+    };
+    let text = String::from_utf8_lossy(&text);
+    if !text.is_empty() {
+        commit(receiver, &text);
+    }
+}
+
 /// `-shouldChangeTextInRange:replacementString:`. The in-memory text buffer
 /// has no separate validation delegate, so every edit is permitted.
 unsafe extern "C" fn should_change_text(
@@ -518,6 +530,23 @@ unsafe extern "C" fn should_change_text(
 /// every printable key twice.
 unsafe extern "C" fn key_down(receiver: Id, _sel: Sel, event: Id) {
     accept_key_interpretation(receiver);
+    let modifiers = unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) -> u64 = std::mem::transmute(objc::msg::entry());
+        f(event, objc::sel::get("modifierFlags"))
+    };
+    let key_code = unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) -> u16 = std::mem::transmute(objc::msg::entry());
+        f(event, objc::sel::get("keyCode"))
+    };
+    // Command-V is the AppKit shortcut. Control-V is accepted too because on
+    // the Linux hosts this runtime targets it is the desktop paste gesture.
+    if key_code == crate::keymap::vk::ANSI_V
+        && modifiers & (crate::keymap::flags::COMMAND | crate::keymap::flags::CONTROL) != 0
+    {
+        // SAFETY: this is the same standard text action as a Paste menu item.
+        unsafe { paste(receiver, objc::sel::get("paste:"), receiver) };
+        return;
+    }
     let sel = objc::sel::get("characters");
     // SAFETY: `-characters` is `id (id, SEL)` on an event this crate made.
     let characters = unsafe {
@@ -816,6 +845,7 @@ pub(crate) fn install() {
             c"v56@0:8@16{_NSRange=QQ}24{_NSRange=QQ}40";
         "deleteBackward:" => delete_backward, c"v24@0:8@16";
         "deleteForward:" => delete_forward, c"v24@0:8@16";
+        "paste:" => paste, c"v24@0:8@16";
         "selectAll:" => select_all, c"v24@0:8@16";
         "moveLeft:" => move_left, c"v24@0:8@16";
         "moveRight:" => move_right, c"v24@0:8@16";
@@ -968,6 +998,42 @@ mod tests {
             b"typed"
         );
         assert_eq!(read(view).selected.location, 5);
+    }
+
+    #[test]
+    fn paste_inserts_general_pasteboard_text_at_the_selection() {
+        let view = text_view();
+        let board_class =
+            objc::class::ptr(objc::class::lookup(c"NSPasteboard").expect("NSPasteboard")) as Id;
+        let general = unsafe {
+            let f: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+            f(board_class, objc::sel::get("generalPasteboard"))
+        };
+        let text = foundation::string::from_str(" pasted ");
+        let ty = foundation::string::from_str("public.utf8-plain-text");
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, Id, Id) -> u8 =
+                std::mem::transmute(objc::msg::entry());
+            assert_eq!(
+                f(general, objc::sel::get("setString:forType:"), text, ty),
+                1
+            );
+            set_string(
+                view,
+                objc::sel::get("setString:"),
+                foundation::string::from_str("beforeafter"),
+            );
+            set_selected_range(
+                view,
+                objc::sel::get("setSelectedRange:"),
+                NSRange {
+                    location: 6,
+                    length: 0,
+                },
+            );
+            paste(view, objc::sel::get("paste:"), std::ptr::null_mut());
+        }
+        assert_eq!(read(view).text, "before pasted after");
     }
 
     #[test]

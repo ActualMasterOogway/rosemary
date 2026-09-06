@@ -31,6 +31,7 @@ pub mod monitor;
 pub mod nib;
 pub mod nsevent;
 pub mod opengl;
+pub mod pasteboard;
 pub mod raster;
 pub mod screen;
 pub mod script;
@@ -59,6 +60,7 @@ pub fn bootstrap() {
         layer::install();
         text::install();
         opengl::install();
+        pasteboard::install();
         nsevent::install();
         monitor::install();
     });
