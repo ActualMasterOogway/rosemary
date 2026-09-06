@@ -112,9 +112,6 @@ pub const CLAIMED: &[&str] = &[
     "alarm",
     "chdir",
     "chown",
-    "close",
-    "dup",
-    "dup2",
     // The exec family is *not* here: the program being launched is usually another
     // Mach-O, which this host's kernel cannot execute. See `crate::spawn`.
     "fsync",

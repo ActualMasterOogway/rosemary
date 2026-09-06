@@ -321,6 +321,9 @@ pub mod entry {
         };
         // SAFETY: the caller's obligation, above.
         let rc = unsafe { libc::fcntl(fd, host_command, arg) };
+        if rc >= 0 && matches!(command, cmd::F_DUPFD | cmd::F_DUPFD_CLOEXEC) {
+            crate::net::sockopt::inherit_sigpipe_suppression(fd, rc);
+        }
         match command == cmd::F_GETFL && rc >= 0 {
             true => flags_to_guest(rc),
             false => rc,
@@ -576,6 +579,39 @@ mod tests {
         }
         assert_eq!(read, -1);
         assert_eq!(blocked, libc::EAGAIN, "the read blocked instead of failing");
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn f_dupfd_inherits_nosigpipe_state() {
+        let mut ends = [0 as libc::c_int; 2];
+        // SAFETY: a writable two-element descriptor array.
+        assert_eq!(
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, ends.as_mut_ptr()) },
+            0
+        );
+        let on = 1i32;
+        // SAFETY: one readable `int`, and the length says four.
+        assert_eq!(
+            unsafe {
+                crate::net::sockopt::setsockopt(ends[0], 0xffff, 0x1022, (&raw const on).cast(), 4)
+            },
+            0
+        );
+
+        // SAFETY: a live descriptor and the scalar minimum descriptor number.
+        let copied = unsafe { entry::fcntl(ends[0], cmd::F_DUPFD, 0) };
+        assert!(copied >= 0);
+        assert!(crate::net::sockopt::suppresses_sigpipe(copied));
+
+        // SAFETY: descriptors owned by this test.
+        unsafe {
+            libc::close(ends[0]);
+            libc::close(ends[1]);
+            libc::close(copied);
+        }
+        crate::net::sockopt::forget(ends[0]);
+        crate::net::sockopt::forget(copied);
     }
 
     #[test]

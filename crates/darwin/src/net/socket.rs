@@ -543,18 +543,29 @@ fn half_close_if_asked(fd: i32, darwin_flags: i32, sent: isize) -> isize {
 /// a descriptor the guest set the option on is sent instead, which is the same
 /// call for a socket and is where the flag can be given.
 ///
-/// The cost of being in this path at all is one relaxed load per write; see
-/// [`super::sockopt::any_suppress_sigpipe`].
+/// A process with no suppressed socket pays one relaxed load per write. A
+/// descriptor recorded as suppressed is also checked with `fstat`, because
+/// passed-through descriptor operations can reuse its number for a file; see
+/// [`super::sockopt::suppresses_sigpipe`].
 ///
 /// # Safety
 ///
 /// `buf` is `len` readable bytes.
 unsafe extern "C" fn write(fd: i32, buf: *const c_void, len: usize) -> isize {
     if super::sockopt::suppresses_sigpipe(fd) {
+        let previous_errno = crate::errno::get();
         // SAFETY: the caller's buffer. A `send` with no flags is a `write` on
-        // anything this branch can be reached for - the descriptor is one the
-        // guest set a socket option on.
-        return unsafe { libc::send(fd, buf, len, libc::MSG_NOSIGNAL) };
+        // a socket.
+        let sent = unsafe { libc::send(fd, buf, len, libc::MSG_NOSIGNAL) };
+        if sent >= 0 || crate::errno::get() != libc::ENOTSOCK {
+            return sent;
+        }
+        // The descriptor may have been replaced after the file-type check. The
+        // failed send touched no data; discard the stale socket state and make
+        // the write the caller actually requested. Preserve errno if that
+        // write succeeds.
+        super::sockopt::forget(fd);
+        crate::errno::set(previous_errno);
     }
     // SAFETY: the caller's buffer.
     unsafe { libc::write(fd, buf, len) }
@@ -570,13 +581,21 @@ unsafe extern "C" fn write(fd: i32, buf: *const c_void, len: usize) -> isize {
 /// `iov` is `iovcnt` readable `struct iovec`.
 unsafe extern "C" fn writev(fd: i32, iov: *const libc::iovec, iovcnt: i32) -> isize {
     if super::sockopt::suppresses_sigpipe(fd) {
+        let previous_errno = crate::errno::get();
         // SAFETY: zeroed is a valid `msghdr` - no name, no control - and the
         // two fields that matter are the caller's own iovecs.
         let mut host: libc::msghdr = unsafe { core::mem::zeroed() };
         host.msg_iov = iov.cast_mut();
         host.msg_iovlen = iovcnt.max(0) as _;
         // SAFETY: a `msghdr` this function built over the caller's iovecs.
-        return unsafe { libc::sendmsg(fd, &host, libc::MSG_NOSIGNAL) };
+        let sent = unsafe { libc::sendmsg(fd, &host, libc::MSG_NOSIGNAL) };
+        if sent >= 0 || crate::errno::get() != libc::ENOTSOCK {
+            return sent;
+        }
+        // As `write`: a non-socket result identifies stale per-descriptor
+        // state, and sendmsg cannot have consumed any of the iovecs.
+        super::sockopt::forget(fd);
+        crate::errno::set(previous_errno);
     }
     // SAFETY: the caller's iovecs, whose layout is the same on both platforms.
     unsafe { libc::writev(fd, iov, iovcnt) }
@@ -1017,6 +1036,33 @@ mod tests {
         fd
     }
 
+    /// A regular file whose number was most recently used by a socket carrying
+    /// `SO_NOSIGPIPE`. This is the replacement race the write path must still
+    /// defend against even though descriptor operations are shimmed.
+    fn file_with_stale_nosigpipe() -> i32 {
+        let (socket, peer) = pair();
+        let on = 1i32;
+        // SAFETY: one readable `int`, and the length says four.
+        assert_eq!(
+            unsafe {
+                crate::net::sockopt::setsockopt(socket, 0xffff, 0x1022, (&raw const on).cast(), 4)
+            },
+            0
+        );
+
+        let file = memory_file(b"");
+        assert_ne!(file, socket);
+        // SAFETY: both descriptors are live. This closes `socket` and makes
+        // its number refer to the regular file without passing through a shim.
+        assert_eq!(unsafe { libc::dup2(file, socket) }, socket);
+        // SAFETY: the duplicated source and the unused peer are no longer needed.
+        unsafe {
+            libc::close(file);
+            libc::close(peer);
+        }
+        socket
+    }
+
     #[test]
     fn sendfile_uses_darwins_argument_order_and_value_result_count() {
         let file = memory_file(b"abcdefghij");
@@ -1227,6 +1273,60 @@ mod tests {
         crate::net::sockopt::forget(ours);
         // SAFETY: a descriptor this test opened and no longer uses.
         unsafe { libc::close(ours) };
+    }
+
+    #[test]
+    fn write_discards_stale_nosigpipe_state_when_a_file_reuses_the_descriptor() {
+        let file = file_with_stale_nosigpipe();
+        crate::errno::set(libc::EDOM);
+
+        // SAFETY: three readable bytes and a live writable file descriptor.
+        assert_eq!(unsafe { write(file, c"abc".as_ptr().cast(), 3) }, 3);
+        assert_eq!(crate::errno::get(), libc::EDOM);
+        assert!(!crate::net::sockopt::suppresses_sigpipe(file));
+
+        // SAFETY: a live regular file, rewound before reading into three bytes.
+        assert_eq!(unsafe { libc::lseek(file, 0, libc::SEEK_SET) }, 0);
+        let mut bytes = [0u8; 3];
+        assert_eq!(
+            unsafe { libc::read(file, bytes.as_mut_ptr().cast(), bytes.len()) },
+            3
+        );
+        assert_eq!(&bytes, b"abc");
+        // SAFETY: a descriptor this test owns and no longer uses.
+        unsafe { libc::close(file) };
+    }
+
+    #[test]
+    fn writev_discards_stale_nosigpipe_state_when_a_file_reuses_the_descriptor() {
+        let file = file_with_stale_nosigpipe();
+        let parts = [
+            libc::iovec {
+                iov_base: c"ab".as_ptr().cast_mut().cast(),
+                iov_len: 2,
+            },
+            libc::iovec {
+                iov_base: c"c".as_ptr().cast_mut().cast(),
+                iov_len: 1,
+            },
+        ];
+        crate::errno::set(libc::EDOM);
+
+        // SAFETY: two valid iovecs and a live writable file descriptor.
+        assert_eq!(unsafe { writev(file, parts.as_ptr(), 2) }, 3);
+        assert_eq!(crate::errno::get(), libc::EDOM);
+        assert!(!crate::net::sockopt::suppresses_sigpipe(file));
+
+        // SAFETY: a live regular file, rewound before reading into three bytes.
+        assert_eq!(unsafe { libc::lseek(file, 0, libc::SEEK_SET) }, 0);
+        let mut bytes = [0u8; 3];
+        assert_eq!(
+            unsafe { libc::read(file, bytes.as_mut_ptr().cast(), bytes.len()) },
+            3
+        );
+        assert_eq!(&bytes, b"abc");
+        // SAFETY: a descriptor this test owns and no longer uses.
+        unsafe { libc::close(file) };
     }
 
     #[test]

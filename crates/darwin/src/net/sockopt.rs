@@ -239,10 +239,9 @@ unsafe fn queued_bytes(fd: i32, name: i32, value: *mut c_void, len: *mut u32) ->
 
 /// The descriptors `SO_NOSIGPIPE` is set on.
 ///
-/// Entries are cleared when a descriptor number is *issued* rather than when
-/// one is closed, because `close` is not this crate's call to see - and a stale
-/// entry would otherwise suppress `SIGPIPE` on whatever socket inherited the
-/// number.
+/// `close` clears entries eagerly and descriptor duplication copies or replaces
+/// them. `write` and `writev` still discard an entry when a file-type probe, or
+/// a raced `send`, proves its descriptor is no longer a socket.
 static SUPPRESSED: std::sync::Mutex<Option<std::collections::HashSet<i32>>> =
     std::sync::Mutex::new(None);
 
@@ -266,12 +265,50 @@ pub fn any_suppress_sigpipe() -> bool {
     SUPPRESSED_COUNT.load(std::sync::atomic::Ordering::Relaxed) != 0
 }
 
-/// Whether `fd` was given `SO_NOSIGPIPE`, and so wants `MSG_NOSIGNAL`.
+/// Whether `fd` was given `SO_NOSIGPIPE`, still names that socket, and so wants
+/// `MSG_NOSIGNAL`.
+///
+/// Membership alone is insufficient because descriptor replacement can race a
+/// write. The file type reported by `fstat` distinguishes a live socket from a
+/// reused non-socket. This check is only made for a number present in the set.
 pub fn suppresses_sigpipe(fd: i32) -> bool {
-    any_suppress_sigpipe() && with_suppressed(|held| held.contains(&fd))
+    if !any_suppress_sigpipe() || !with_suppressed(|held| held.contains(&fd)) {
+        return false;
+    }
+
+    let previous_errno = crate::errno::get();
+    // SAFETY: zero is a valid initial representation for the host's `stat`,
+    // and the call receives a writable object of exactly that type.
+    let mut status: libc::stat = unsafe { core::mem::zeroed() };
+    let rc = unsafe { libc::fstat(fd, &raw mut status) };
+    let is_socket = rc == 0 && status.st_mode & libc::S_IFMT == libc::S_IFSOCK;
+    if !is_socket {
+        forget(fd);
+    }
+    // This probe is invisible to the caller, including when it discovers a
+    // stale entry. The operation that follows is responsible for errno.
+    crate::errno::set(previous_errno);
+    is_socket
 }
 
-/// Forget any option set on `fd`, because it names a new socket now.
+/// Give a successfully duplicated descriptor the source's suppression state.
+///
+/// Darwin stores `SO_NOSIGPIPE` on the socket, so every descriptor referring
+/// to it observes the same value. The host has no option to inherit for us.
+pub fn inherit_sigpipe_suppression(from: i32, to: i32) {
+    if from == to || to < 0 {
+        return;
+    }
+    let suppressed = suppresses_sigpipe(from);
+    if suppressed || any_suppress_sigpipe() {
+        with_suppressed(|held| match suppressed {
+            true => held.insert(to),
+            false => held.remove(&to),
+        });
+    }
+}
+
+/// Forget any option set on `fd`, because it no longer names that socket.
 pub fn forget(fd: i32) {
     if fd >= 0 && any_suppress_sigpipe() {
         with_suppressed(|held| held.remove(&fd));
