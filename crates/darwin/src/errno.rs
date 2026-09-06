@@ -183,6 +183,7 @@ pub fn to_host(darwin: i32) -> i32 {
 /// The one accessor the rest of this project should use. `libc::__error` exists only
 /// on Darwin and `libc::__errno_location` only on Linux, so a direct call to either
 /// is a portability bug waiting for the other host.
+#[inline(always)]
 pub fn location() -> *mut libc::c_int {
     // SAFETY: both spellings return this thread's own slot, live for as long as the
     // thread is, and neither takes an argument.
@@ -196,11 +197,13 @@ pub fn location() -> *mut libc::c_int {
     }
 }
 
+#[inline(always)]
 pub fn get() -> i32 {
     // SAFETY: `location` returns a live slot for this thread.
     unsafe { *location() }
 }
 
+#[inline(always)]
 pub fn set(value: i32) {
     // SAFETY: as above.
     unsafe { *location() = value };
@@ -287,6 +290,7 @@ pub fn guest_location() -> *mut libc::c_int {
 ///
 /// What the guest would read; the reconciliation in [`error`] happens first, so
 /// this is the same value a guest calling `__error` and dereferencing it gets.
+#[inline(always)]
 pub fn guest_errno() -> i32 {
     // SAFETY: `guest_location` returns a live slot for this thread.
     unsafe { *guest_location() }
@@ -300,12 +304,14 @@ pub fn guest_errno() -> i32 {
 pub struct Held(i32);
 
 impl Held {
+    #[inline(always)]
     pub fn now() -> Held {
         Held(get())
     }
 }
 
 impl Drop for Held {
+    #[inline(always)]
     fn drop(&mut self) {
         set(self.0);
     }

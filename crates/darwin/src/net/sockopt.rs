@@ -16,6 +16,8 @@
 
 use std::ffi::c_void;
 
+use crate::errno;
+
 /// Darwin's `SOL_SOCKET`.
 const SOL_SOCKET: i32 = 0xffff;
 /// The `IPPROTO_*` levels, which do agree: they are the IANA protocol numbers.
@@ -276,7 +278,9 @@ pub fn suppresses_sigpipe(fd: i32) -> bool {
         return false;
     }
 
-    let previous_errno = crate::errno::get();
+    // This probe is invisible to the caller, including when it discovers a
+    // stale entry. The operation that follows is responsible for errno.
+    let _errno_guard = errno::Held::now();
     // SAFETY: zero is a valid initial representation for the host's `stat`,
     // and the call receives a writable object of exactly that type.
     let mut status: libc::stat = unsafe { core::mem::zeroed() };
@@ -285,9 +289,6 @@ pub fn suppresses_sigpipe(fd: i32) -> bool {
     if !is_socket {
         forget(fd);
     }
-    // This probe is invisible to the caller, including when it discovers a
-    // stale entry. The operation that follows is responsible for errno.
-    crate::errno::set(previous_errno);
     is_socket
 }
 
