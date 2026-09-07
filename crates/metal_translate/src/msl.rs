@@ -355,7 +355,6 @@ fn parse_blit_kernel(
             }),
             lanes: 4,
         })
-        || index_expression.trim() != format!("{}.x", gid_name.trim())
     {
         return Err(syntax_at(
             source,
@@ -411,7 +410,19 @@ fn parse_blit_kernel(
     let size = add(&mut values, uint3.clone());
     let in_bounds = add(&mut values, bool3);
     let all = add(&mut values, Type::Bool);
-    let x = add(&mut values, Type::u32());
+    let index = lower_blit_index(
+        index_expression.trim(),
+        IndexBindings {
+            gid_name: gid_name.trim(),
+            gid,
+            params_name: params_name.trim(),
+            params: params_value,
+            structure,
+        },
+        &mut values,
+        source,
+        source.find(inner).unwrap_or(0),
+    )?;
     let element_pointer = add(
         &mut values,
         Type::Pointer {
@@ -467,56 +478,53 @@ fn parse_blit_kernel(
     let write_block = Block {
         id: BlockId(1),
         name: "write".to_string(),
-        instructions: vec![
-            Instruction {
-                result: Some(x),
-                kind: InstructionKind::CompositeExtract {
-                    composite: Operand::Value(gid),
-                    index: 0,
+        instructions: {
+            let mut instructions = index.instructions;
+            instructions.extend([
+                Instruction {
+                    result: Some(element_pointer),
+                    kind: InstructionKind::ElementAddress {
+                        pointer: Operand::Value(input.value),
+                        index: Operand::Value(index.value),
+                    },
                 },
-            },
-            Instruction {
-                result: Some(element_pointer),
-                kind: InstructionKind::ElementAddress {
-                    pointer: Operand::Value(input.value),
-                    index: Operand::Value(x),
+                Instruction {
+                    result: Some(element),
+                    kind: InstructionKind::Load {
+                        pointer: Operand::Value(element_pointer),
+                    },
                 },
-            },
-            Instruction {
-                result: Some(element),
-                kind: InstructionKind::Load {
-                    pointer: Operand::Value(element_pointer),
+                Instruction {
+                    result: Some(converted),
+                    kind: InstructionKind::ConvertUToF {
+                        value: Operand::Value(element),
+                    },
                 },
-            },
-            Instruction {
-                result: Some(converted),
-                kind: InstructionKind::ConvertUToF {
-                    value: Operand::Value(element),
+                Instruction {
+                    result: Some(divisor),
+                    kind: InstructionKind::VectorSplat {
+                        value: Operand::f32(255.0),
+                        lanes: 4,
+                    },
                 },
-            },
-            Instruction {
-                result: Some(divisor),
-                kind: InstructionKind::VectorSplat {
-                    value: Operand::f32(255.0),
-                    lanes: 4,
+                Instruction {
+                    result: Some(normalized),
+                    kind: InstructionKind::FloatDiv {
+                        lhs: Operand::Value(converted),
+                        rhs: Operand::Value(divisor),
+                    },
                 },
-            },
-            Instruction {
-                result: Some(normalized),
-                kind: InstructionKind::FloatDiv {
-                    lhs: Operand::Value(converted),
-                    rhs: Operand::Value(divisor),
+                Instruction {
+                    result: None,
+                    kind: InstructionKind::TextureWrite {
+                        texture: Operand::Value(output.value),
+                        coordinate: Operand::Value(gid),
+                        value: Operand::Value(normalized),
+                    },
                 },
-            },
-            Instruction {
-                result: None,
-                kind: InstructionKind::TextureWrite {
-                    texture: Operand::Value(output.value),
-                    coordinate: Operand::Value(gid),
-                    value: Operand::Value(normalized),
-                },
-            },
-        ],
+            ]);
+            instructions
+        },
         terminator: Terminator::Return(None),
     };
     let module = Module {
@@ -543,6 +551,290 @@ fn parse_blit_kernel(
     };
     module.verify()?;
     Ok(module)
+}
+
+/// Lower the scalar address expressions used by some apps buffer blits. This
+/// deliberately accepts only named `uint3` components and `uint` arithmetic;
+/// unlike a textual substitution it leaves every load and operation explicit
+/// in Metal SSA.
+struct LoweredIndex {
+    value: ValueId,
+    instructions: Vec<Instruction>,
+}
+
+#[derive(Clone, Debug)]
+enum IndexExpression {
+    Component {
+        base: String,
+        field: Option<String>,
+        component: u32,
+    },
+    Add(Box<Self>, Box<Self>),
+    Multiply(Box<Self>, Box<Self>),
+}
+
+struct IndexBindings<'a> {
+    gid_name: &'a str,
+    gid: ValueId,
+    params_name: &'a str,
+    params: ValueId,
+    structure: &'a StructType,
+}
+
+fn lower_blit_index(
+    expression: &str,
+    bindings: IndexBindings<'_>,
+    values: &mut Vec<Type>,
+    source: &str,
+    offset: usize,
+) -> Result<LoweredIndex, TranslateError> {
+    let expression = IndexParser::new(expression).parse().map_err(|message| {
+        syntax_at(
+            source,
+            offset,
+            format!("unsupported MSL buffer element load ({message})"),
+        )
+    })?;
+    let mut lowerer = IndexLowerer {
+        bindings,
+        values,
+        instructions: Vec::new(),
+    };
+    let value = lowerer.lower(&expression).map_err(|message| {
+        syntax_at(
+            source,
+            offset,
+            format!("unsupported MSL buffer element load ({message})"),
+        )
+    })?;
+    Ok(LoweredIndex {
+        value,
+        instructions: lowerer.instructions,
+    })
+}
+
+struct IndexLowerer<'a> {
+    bindings: IndexBindings<'a>,
+    values: &'a mut Vec<Type>,
+    instructions: Vec<Instruction>,
+}
+
+impl IndexLowerer<'_> {
+    fn add(&mut self, ty: Type) -> ValueId {
+        let value = ValueId(self.values.len() as u32);
+        self.values.push(ty);
+        value
+    }
+
+    fn lower(&mut self, expression: &IndexExpression) -> Result<ValueId, String> {
+        match expression {
+            IndexExpression::Add(lhs, rhs) | IndexExpression::Multiply(lhs, rhs) => {
+                let lhs = self.lower(lhs)?;
+                let rhs = self.lower(rhs)?;
+                let result = self.add(Type::u32());
+                self.instructions.push(Instruction {
+                    result: Some(result),
+                    kind: if matches!(expression, IndexExpression::Add(_, _)) {
+                        InstructionKind::IntegerAdd {
+                            lhs: Operand::Value(lhs),
+                            rhs: Operand::Value(rhs),
+                        }
+                    } else {
+                        InstructionKind::IntegerMultiply {
+                            lhs: Operand::Value(lhs),
+                            rhs: Operand::Value(rhs),
+                        }
+                    },
+                });
+                Ok(result)
+            }
+            IndexExpression::Component {
+                base,
+                field,
+                component,
+            } if base == self.bindings.gid_name && field.is_none() => {
+                let result = self.add(Type::u32());
+                self.instructions.push(Instruction {
+                    result: Some(result),
+                    kind: InstructionKind::CompositeExtract {
+                        composite: Operand::Value(self.bindings.gid),
+                        index: *component,
+                    },
+                });
+                Ok(result)
+            }
+            IndexExpression::Component {
+                base,
+                field: Some(field),
+                component,
+            } if base == self.bindings.params_name => {
+                let (field_index, field_type) = self
+                    .bindings
+                    .structure
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .find(|(_, candidate)| candidate.name.as_deref() == Some(field.as_str()))
+                    .ok_or_else(|| format!("unknown parameter field `{field}`"))?;
+                if field_type.ty
+                    != (Type::Vector {
+                        element: Box::new(Type::u32()),
+                        lanes: 2,
+                    })
+                    && field_type.ty
+                        != (Type::Vector {
+                            element: Box::new(Type::u32()),
+                            lanes: 3,
+                        })
+                {
+                    return Err(format!("parameter field `{field}` is not uint2 or uint3"));
+                }
+                let vector = self.add(field_type.ty.clone());
+                self.instructions.push(Instruction {
+                    result: Some(vector),
+                    kind: InstructionKind::CompositeExtract {
+                        composite: Operand::Value(self.bindings.params),
+                        index: field_index as u32,
+                    },
+                });
+                let result = self.add(Type::u32());
+                self.instructions.push(Instruction {
+                    result: Some(result),
+                    kind: InstructionKind::CompositeExtract {
+                        composite: Operand::Value(vector),
+                        index: *component,
+                    },
+                });
+                Ok(result)
+            }
+            IndexExpression::Component { base, .. } => {
+                Err(format!("unknown address base `{base}`"))
+            }
+        }
+    }
+}
+
+struct IndexParser<'a> {
+    input: &'a [u8],
+    position: usize,
+}
+
+impl<'a> IndexParser<'a> {
+    fn new(input: &'a str) -> Self {
+        Self {
+            input: input.as_bytes(),
+            position: 0,
+        }
+    }
+
+    fn parse(mut self) -> Result<IndexExpression, String> {
+        let expression = self.addition()?;
+        self.space();
+        if self.position != self.input.len() {
+            return Err("unexpected token".to_string());
+        }
+        Ok(expression)
+    }
+
+    fn addition(&mut self) -> Result<IndexExpression, String> {
+        let mut expression = self.multiplication()?;
+        loop {
+            self.space();
+            if !self.take(b'+') {
+                return Ok(expression);
+            }
+            expression =
+                IndexExpression::Add(Box::new(expression), Box::new(self.multiplication()?));
+        }
+    }
+
+    fn multiplication(&mut self) -> Result<IndexExpression, String> {
+        let mut expression = self.primary()?;
+        loop {
+            self.space();
+            if !self.take(b'*') {
+                return Ok(expression);
+            }
+            expression = IndexExpression::Multiply(Box::new(expression), Box::new(self.primary()?));
+        }
+    }
+
+    fn primary(&mut self) -> Result<IndexExpression, String> {
+        self.space();
+        if self.take(b'(') {
+            let expression = self.addition()?;
+            self.space();
+            if !self.take(b')') {
+                return Err("unclosed parenthesis".to_string());
+            }
+            return Ok(expression);
+        }
+        let base = self.identifier()?;
+        self.dot()?;
+        let second = self.identifier()?;
+        self.space();
+        if self.take(b'.') {
+            let component = component(&self.identifier()?)?;
+            Ok(IndexExpression::Component {
+                base,
+                field: Some(second),
+                component,
+            })
+        } else {
+            Ok(IndexExpression::Component {
+                base,
+                field: None,
+                component: component(&second)?,
+            })
+        }
+    }
+
+    fn identifier(&mut self) -> Result<String, String> {
+        self.space();
+        let start = self.position;
+        while self.position < self.input.len()
+            && (self.input[self.position].is_ascii_alphanumeric()
+                || self.input[self.position] == b'_')
+        {
+            self.position += 1;
+        }
+        if start == self.position {
+            return Err("expected identifier".to_string());
+        }
+        Ok(std::str::from_utf8(&self.input[start..self.position])
+            .unwrap()
+            .to_string())
+    }
+    fn dot(&mut self) -> Result<(), String> {
+        self.space();
+        if self.take(b'.') {
+            Ok(())
+        } else {
+            Err("expected component selector".to_string())
+        }
+    }
+    fn space(&mut self) {
+        while self.position < self.input.len() && self.input[self.position].is_ascii_whitespace() {
+            self.position += 1;
+        }
+    }
+    fn take(&mut self, byte: u8) -> bool {
+        if self.input.get(self.position) == Some(&byte) {
+            self.position += 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn component(name: &str) -> Result<u32, String> {
+    match name {
+        "x" => Ok(0),
+        "y" => Ok(1),
+        "z" => Ok(2),
+        _ => Err("invalid vector component".to_string()),
+    }
 }
 
 /// A bounded diagnostic identifier for a rejected source statement. Source

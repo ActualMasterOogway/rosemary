@@ -236,7 +236,7 @@ fn source_msl_compiles_a_bounded_typed_blit_kernel() {
          texture3d<float, access::write> output [[texture(0)]])\n\
          {\n\
            if (all(gid < params.size)) {\n\
-             uchar4 element = input[gid.x];\n\
+             uchar4 element = input[(gid.z * params.stride.y + gid.y) * params.stride.x + gid.x + params.offset.x];\n\
              output.write(float4(element), gid);\n\
            }\n\
          }";
@@ -248,6 +248,8 @@ fn source_msl_compiles_a_bounded_typed_blit_kernel() {
         Op::All,
         Op::ConvertUToF,
         Op::FDiv,
+        Op::IMul,
+        Op::IAdd,
     ] {
         assert!(
             module

@@ -229,6 +229,10 @@ pub enum InstructionKind {
         lhs: Operand,
         rhs: Operand,
     },
+    IntegerMultiply {
+        lhs: Operand,
+        rhs: Operand,
+    },
     IntegerXor {
         lhs: Operand,
         rhs: Operand,
@@ -585,7 +589,9 @@ fn verify_instruction_types(
             }
             _ => false,
         },
-        InstructionKind::IntegerAdd { lhs, rhs } | InstructionKind::IntegerXor { lhs, rhs } => {
+        InstructionKind::IntegerAdd { lhs, rhs }
+        | InstructionKind::IntegerMultiply { lhs, rhs }
+        | InstructionKind::IntegerXor { lhs, rhs } => {
             result
                 .as_ref()
                 .is_some_and(|ty| matches!(ty, Type::Int { .. }))
@@ -703,6 +709,7 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         InstructionKind::Load { pointer } => vec![pointer],
         InstructionKind::Store { pointer, value } => vec![pointer, value],
         InstructionKind::IntegerAdd { lhs, rhs }
+        | InstructionKind::IntegerMultiply { lhs, rhs }
         | InstructionKind::IntegerXor { lhs, rhs }
         | InstructionKind::IntegerCompare { lhs, rhs, .. } => vec![lhs, rhs],
         InstructionKind::ElementAddress { pointer, index } => vec![pointer, index],

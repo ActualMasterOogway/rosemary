@@ -501,6 +501,16 @@ impl Emitter {
                     |builder, ty, id, a, b| builder.i_add(ty, id, a, b),
                 )?;
             }
+            InstructionKind::IntegerMultiply { lhs, rhs } => {
+                self.emit_binary(
+                    function,
+                    instruction,
+                    lhs,
+                    rhs,
+                    values,
+                    |builder, ty, id, a, b| builder.i_mul(ty, id, a, b),
+                )?;
+            }
             InstructionKind::IntegerXor { lhs, rhs } => {
                 self.emit_binary(
                     function,
@@ -826,6 +836,7 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         InstructionKind::Load { pointer } => vec![pointer],
         InstructionKind::Store { pointer, value } => vec![pointer, value],
         InstructionKind::IntegerAdd { lhs, rhs }
+        | InstructionKind::IntegerMultiply { lhs, rhs }
         | InstructionKind::IntegerXor { lhs, rhs }
         | InstructionKind::IntegerCompare { lhs, rhs, .. } => vec![lhs, rhs],
         InstructionKind::ElementAddress { pointer, index } => vec![pointer, index],
