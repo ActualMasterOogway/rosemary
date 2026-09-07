@@ -107,15 +107,19 @@ fn link_for(handle: *mut c_void) -> Option<Arc<Mutex<Link>>> {
         .map(|(_, link)| Arc::clone(link))
 }
 
-/// The refresh period of the display a link is on, in seconds.
+/// The refresh period of a display, in seconds.
 ///
-/// SDL cannot report a refresh rate through the entry points this tree binds, so
-/// sixty per second is the assumption - which is what a display link on a
-/// sixty-hertz display gives, and what every other rate is a multiple or a
-/// fraction of. A guest that integrates `videoTime` gets a consistent clock
-/// either way, because the timestamps this module hands out are built from the
-/// same number it drives the timer with.
-const DEFAULT_PERIOD: f64 = 1.0 / 60.0;
+/// A zero display names the primary display for the active-displays spelling.
+/// Sixty hertz is only a fallback for a host with no SDL video subsystem or no
+/// desktop mode; a real display link follows the mode SDL reports.
+fn display_period(display: u32) -> f64 {
+    let display = match display {
+        0 => sdl3::video::primary_display(),
+        display => display,
+    };
+    let refresh_rate = sdl3::video::display_refresh_rate(display).unwrap_or(60.0);
+    1.0 / f64::from(refresh_rate)
+}
 
 /// `CVReturn CVDisplayLinkCreateWithCGDisplay(CGDirectDisplayID, CVDisplayLinkRef *)`.
 ///
@@ -123,7 +127,7 @@ const DEFAULT_PERIOD: f64 = 1.0 / 60.0;
 ///
 /// `out` must be null or a writable pointer-sized slot.
 pub unsafe extern "C" fn CVDisplayLinkCreateWithCGDisplay(
-    _display: u32,
+    display: u32,
     out: *mut *mut c_void,
 ) -> i32 {
     if out.is_null() {
@@ -133,7 +137,7 @@ pub unsafe extern "C" fn CVDisplayLinkCreateWithCGDisplay(
         callback: None,
         context: std::ptr::null_mut(),
         running: None,
-        period: DEFAULT_PERIOD,
+        period: display_period(display),
         frame: 0,
         started: std::time::Instant::now(),
     }));
@@ -183,12 +187,13 @@ pub unsafe extern "C" fn CVDisplayLinkSetOutputCallback(
 
 pub unsafe extern "C" fn CVDisplayLinkSetCurrentCGDisplay(
     handle: *mut c_void,
-    _display: u32,
+    display: u32,
 ) -> i32 {
-    match link_for(handle).is_some() {
-        true => SUCCESS,
-        false => INVALID_ARGUMENT,
-    }
+    let Some(link) = link_for(handle) else {
+        return INVALID_ARGUMENT;
+    };
+    link.lock().unwrap_or_else(|e| e.into_inner()).period = display_period(display);
+    SUCCESS
 }
 
 pub unsafe extern "C" fn CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(
