@@ -106,6 +106,7 @@ struct VertexElement {
 
 static ALLOCATED_SIZE: AtomicU64 = AtomicU64::new(0);
 static REPORTED_LIBRARY_ERROR: AtomicBool = AtomicBool::new(false);
+static REPORTED_SOURCE_LIBRARY: AtomicBool = AtomicBool::new(false);
 
 fn device_class() -> &'static Class {
     objc::class::lookup(c"R3MTLDevice").expect("Metal is bootstrapped")
@@ -696,6 +697,7 @@ unsafe extern "C" fn new_library_with_source(
         Ok(source) => source,
         Err(_) => return fail_library(error, "Metal source is not valid UTF-8"),
     };
+    report_source_library(source);
     let target = unsafe { (*(receiver as *const Device)).target.as_ref() }
         .expect("target was checked above");
     let translated = match metal_translate::translate_msl(source, target) {
@@ -762,6 +764,26 @@ fn report_library_error(message: impl std::fmt::Display) {
     {
         eprintln!("rosetta3: Metal: shader library translation stopped: {message}");
     }
+}
+
+/// Report just enough information to identify the first guest source library
+/// without placing proprietary game shaders in a log file.
+fn report_source_library(source: &str) {
+    if std::env::var_os("ROSETTA3_TRACE_METAL").is_some()
+        && !REPORTED_SOURCE_LIBRARY.swap(true, Ordering::Relaxed)
+    {
+        eprintln!(
+            "rosetta3: Metal: source library: {} bytes, fnv1a64={:016x}",
+            source.len(),
+            fnv1a64(source.as_bytes()),
+        );
+    }
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 fn devices() -> &'static [usize] {

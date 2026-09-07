@@ -16,27 +16,43 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
     let source = strip_comments(source);
     let kernel = source
         .find("kernel void")
-        .ok_or_else(|| syntax("MSL source has no `kernel void` entry point"))?;
+        .ok_or_else(|| syntax_at(&source, 0, "MSL source has no `kernel void` entry point"))?;
     let after_kernel = source[kernel + "kernel void".len()..].trim_start();
     let name_end = after_kernel
         .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-        .ok_or_else(|| syntax("MSL kernel has no parameter list"))?;
+        .ok_or_else(|| syntax_at(&source, kernel, "MSL kernel has no parameter list"))?;
     let name = after_kernel[..name_end].trim();
     if name.is_empty() {
-        return Err(syntax("MSL kernel has no name"));
+        return Err(syntax_at(&source, kernel, "MSL kernel has no name"));
     }
     let after_name = &after_kernel[name_end..];
     let open = after_name
         .find('(')
-        .ok_or_else(|| syntax("MSL kernel has no parameter list"))?;
-    let close = matching(after_name, open, '(', ')')
-        .ok_or_else(|| syntax("MSL kernel has an unterminated parameter list"))?;
+        .ok_or_else(|| syntax_at(&source, kernel, "MSL kernel has no parameter list"))?;
+    let close = matching(after_name, open, '(', ')').ok_or_else(|| {
+        syntax_at(
+            &source,
+            kernel + "kernel void".len() + name_end + open,
+            "MSL kernel has an unterminated parameter list",
+        )
+    })?;
     let body_open = after_name[close + 1..]
         .find('{')
         .map(|offset| close + 1 + offset)
-        .ok_or_else(|| syntax("MSL kernel has no body"))?;
-    let body_close = matching(after_name, body_open, '{', '}')
-        .ok_or_else(|| syntax("MSL kernel has an unterminated body"))?;
+        .ok_or_else(|| {
+            syntax_at(
+                &source,
+                kernel + "kernel void".len() + name_end + close,
+                "MSL kernel has no body",
+            )
+        })?;
+    let body_close = matching(after_name, body_open, '{', '}').ok_or_else(|| {
+        syntax_at(
+            &source,
+            kernel + "kernel void".len() + name_end + body_open,
+            "MSL kernel has an unterminated body",
+        )
+    })?;
     let parameters = &after_name[open + 1..close];
     let body = &after_name[body_open + 1..body_close];
 
@@ -49,22 +65,38 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
         .filter(|raw| !raw.is_empty())
     {
         let Some(buffer) = raw.find("[[buffer(") else {
-            return Err(syntax(
+            return Err(syntax_at(
+                &source,
+                source.find(raw).unwrap_or(0),
                 "only `device uint*` buffer parameters are supported",
             ));
         };
         let index_end = raw[buffer + 9..]
             .find(")]]")
             .map(|offset| buffer + 9 + offset)
-            .ok_or_else(|| syntax("MSL buffer attribute is malformed"))?;
+            .ok_or_else(|| {
+                syntax_at(
+                    &source,
+                    source.find(raw).unwrap_or(0) + buffer,
+                    "MSL buffer attribute is malformed",
+                )
+            })?;
         let index = raw[buffer + 9..index_end]
             .trim()
             .parse::<u32>()
-            .map_err(|_| syntax("MSL buffer index is not an unsigned integer"))?;
+            .map_err(|_| {
+                syntax_at(
+                    &source,
+                    source.find(raw).unwrap_or(0) + buffer + 9,
+                    "MSL buffer index is not an unsigned integer",
+                )
+            })?;
         let declaration = raw[..buffer].trim();
         let tokens: Vec<_> = declaration.split_whitespace().collect();
         if tokens.len() != 3 || tokens[0] != "device" || tokens[1] != "uint*" {
-            return Err(syntax(
+            return Err(syntax_at(
+                &source,
+                source.find(raw).unwrap_or(0),
                 "only `device uint* name [[buffer(n)]]` is supported",
             ));
         }
@@ -90,7 +122,9 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
         });
     }
     if function_parameters.len() != 1 {
-        return Err(syntax(
+        return Err(syntax_at(
+            &source,
+            kernel,
             "the initial MSL frontend requires exactly one buffer parameter",
         ));
     }
@@ -99,10 +133,22 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
     let statement = body.trim().trim_end_matches(';').trim();
     let value = statement
         .strip_prefix(&prefix)
-        .ok_or_else(|| syntax("only `buffer[0] = integer_literal;` is supported"))?
+        .ok_or_else(|| {
+            syntax_at(
+                &source,
+                source.find(body).unwrap_or(0),
+                "only `buffer[0] = integer_literal;` is supported",
+            )
+        })?
         .trim()
         .parse::<u32>()
-        .map_err(|_| syntax("MSL store value is not a `uint` literal"))?;
+        .map_err(|_| {
+            syntax_at(
+                &source,
+                source.find(body).unwrap_or(0),
+                "MSL store value is not a `uint` literal",
+            )
+        })?;
 
     let module = Module {
         functions: vec![Function {
@@ -155,6 +201,11 @@ fn strip_comments(source: &str) -> String {
         .join("\n")
 }
 
-fn syntax(message: impl Into<String>) -> TranslateError {
-    TranslateError::one(Diagnostic::new(Phase::AirSyntax, message))
+fn syntax_at(source: &str, offset: usize, message: impl Into<String>) -> TranslateError {
+    let line = source[..offset.min(source.len())]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1;
+    TranslateError::one(Diagnostic::new(Phase::AirSyntax, message).at_line(line))
 }

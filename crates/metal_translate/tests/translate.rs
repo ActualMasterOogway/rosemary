@@ -202,7 +202,13 @@ fn compiles_a_source_msl_compute_kernel_to_spirv() {
 
 #[test]
 fn source_msl_rejects_unimplemented_operations() {
-    let error = parse_msl("kernel void f(device uint* output [[buffer(0)]]) { output[1] = 1; }")
-        .unwrap_err();
+    let error = parse_msl(
+        "\n\
+         kernel void f(device uint* output [[buffer(0)]]) {\n\
+             output[1] = 1;\n\
+         }",
+    )
+    .unwrap_err();
     assert_eq!(error.diagnostics[0].phase, Phase::AirSyntax);
+    assert_eq!(error.diagnostics[0].line, Some(2));
 }
