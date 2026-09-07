@@ -1,5 +1,5 @@
 use metal_translate::ir::{Access, InstructionKind, Stage};
-use metal_translate::{AirInput, Phase, TargetProfile, parse_air, translate};
+use metal_translate::{AirInput, Phase, TargetProfile, metallib_air, parse_air, translate};
 use rspirv::spirv::Op;
 
 const STORE: &str = include_str!("fixtures/kernel_store_const.ll");
@@ -107,6 +107,23 @@ fn rejects_non_kernel_air_without_a_spirv_fallback() {
 fn rejects_truncated_bitcode_as_a_container_error() {
     let error = parse_air(AirInput::Bitcode(b"not bitcode")).unwrap_err();
     assert_eq!(error.diagnostics[0].phase, Phase::AirContainer);
+}
+
+#[test]
+fn extracts_air_bitcode_from_a_metallib() {
+    let payload = [b'B', b'C', 0xc0, 0xde, 1, 2, 3, 4];
+    let mut library = vec![0; 88];
+    library[..4].copy_from_slice(b"MTLB");
+    library[72..80].copy_from_slice(&88_u64.to_le_bytes());
+    library[80..88].copy_from_slice(&28_u64.to_le_bytes());
+    library.extend_from_slice(&0x0b17_c0de_u32.to_le_bytes());
+    library.extend_from_slice(&0_u32.to_le_bytes());
+    library.extend_from_slice(&20_u32.to_le_bytes());
+    library.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    library.extend_from_slice(&u32::MAX.to_le_bytes());
+    library.extend_from_slice(&payload);
+
+    assert_eq!(metallib_air(&library).unwrap(), payload);
 }
 
 #[test]

@@ -853,6 +853,7 @@ version = "0.1.0"
 dependencies = [
  "ash",
  "corefoundation",
+ "darwin",
  "foundation",
  "metal_translate",
  "objc",

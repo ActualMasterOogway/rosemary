@@ -20,6 +20,14 @@ static HIERARCHY: &[(&str, Option<&str>, usize)] = &[
     ("NSView", Some("NSResponder"), crate::view::INSTANCE_SIZE),
     // Core Animation, and here for `-contentsScale`; see `crate::layer`.
     ("CALayer", None, crate::layer::INSTANCE_SIZE),
+    // QuartzCore's Metal presentation layer. Its inherited `+layer` is enough
+    // to let a view establish that its backing layer is Metal-compatible; the
+    // Metal runtime adds the drawable-producing surface behind it.
+    (
+        "CAMetalLayer",
+        Some("CALayer"),
+        crate::layer::METAL_INSTANCE_SIZE,
+    ),
     ("NSControl", Some("NSView"), 0),
     ("NSButton", Some("NSControl"), 0),
     ("NSTextField", Some("NSControl"), 0),

@@ -47,6 +47,7 @@
             ++ lib.optionals pkgs.stdenv.isLinux [
               pkgs.libglvnd
               pkgs.libGLU
+              pkgs.vulkan-loader
             ];
         in
         {
@@ -60,7 +61,6 @@
               pkgs.python3 # tools/guest-symbolicate.py
               # metal_translate
               pkgs.llvm
-              pkgs.vulkan-loader
             ];
 
             buildInputs = runtimeLibs;

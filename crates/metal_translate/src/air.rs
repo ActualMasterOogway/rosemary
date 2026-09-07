@@ -56,17 +56,38 @@ fn parse_minimal_store_bitcode(bitcode: &Bitcode) -> Result<Module, TranslateErr
         .iter()
         .filter_map(BitcodeElement::as_record)
         .filter(|record| record.id == 8)
+        // LLVM MODULE_CODE_FUNCTION field 4 is `isproto`. Declarations have a
+        // function record but no function block and must not be mistaken for
+        // additional AIR entry-point definitions.
+        .filter(|record| record.fields().get(4) == Some(&0))
         .collect();
-    if function_blocks.len() != 1 || function_records.len() != 1 {
-        return Err(semantic(
-            "the initial bitcode importer requires exactly one defined AIR function",
-        ));
-    }
     let string_table = child_block(&bitcode.elements, 23)
         .and_then(|block| first_payload(block, 1))
         .and_then(payload_bytes)
         .ok_or_else(|| semantic("LLVM bitcode has no string table"))?;
-    let function_fields = function_records[0].fields();
+    if function_blocks.len() != function_records.len() || function_records.is_empty() {
+        return Err(semantic(
+            "LLVM defined-function records do not match their function bodies",
+        ));
+    }
+    let entry_index = function_records
+        .iter()
+        .position(|record| {
+            let fields = record.fields();
+            let Some(offset) = fields
+                .first()
+                .and_then(|value| usize::try_from(*value).ok())
+            else {
+                return false;
+            };
+            let Some(length) = fields.get(1).and_then(|value| usize::try_from(*value).ok()) else {
+                return false;
+            };
+            string_table.get(offset..offset.saturating_add(length)) == Some(b"main0")
+        })
+        .or_else(|| (function_records.len() == 1).then_some(0))
+        .ok_or_else(|| semantic("AIR bitcode has no main0 entry function"))?;
+    let function_fields = function_records[entry_index].fields();
     let offset = usize::try_from(
         *function_fields
             .first()
@@ -87,7 +108,7 @@ fn parse_minimal_store_bitcode(bitcode: &Bitcode) -> Result<Module, TranslateErr
     .map_err(|_| semantic("LLVM function name is not UTF-8"))?
     .to_string();
 
-    let function_block = function_blocks[0];
+    let function_block = function_blocks[entry_index];
     let records: Vec<_> = function_block
         .elements
         .iter()

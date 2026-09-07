@@ -317,6 +317,9 @@ pub fn provider() -> SyntheticDylib {
     for (name, addr) in media_constants() {
         define_data(&mut lib, &name, addr);
     }
+    for (name, addr) in metal::data_symbols() {
+        define_data(&mut lib, &name, addr);
+    }
     for name in metal::NAMES {
         if let Some(addr) = metal::symbol(name) {
             define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());

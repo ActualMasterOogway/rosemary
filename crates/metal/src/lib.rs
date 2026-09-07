@@ -6,6 +6,7 @@ mod vulkan;
 
 use std::ffi::c_void;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use corefoundation::base::CFTypeRef;
 use objc::class::Class;
@@ -21,6 +22,78 @@ struct Device {
     target: *const metal_translate::TargetProfile,
 }
 
+#[repr(C)]
+struct CommandQueue {
+    isa: *const Class,
+    device: Id,
+}
+
+#[repr(C)]
+struct CommandBuffer {
+    isa: *const Class,
+    queue: Id,
+    completed_handler: Id,
+    status: u64,
+}
+
+#[repr(C)]
+struct CommandEncoder {
+    isa: *const Class,
+    command_buffer: Id,
+}
+
+#[repr(C)]
+struct Buffer {
+    isa: *const Class,
+    contents: *mut u8,
+    length: usize,
+    options: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TextureDescriptor {
+    isa: *const Class,
+    texture_type: u64,
+    pixel_format: u64,
+    width: u64,
+    height: u64,
+    depth: u64,
+    mipmap_level_count: u64,
+    sample_count: u64,
+    array_length: u64,
+    storage_mode: u64,
+    usage: u64,
+}
+
+#[repr(C)]
+struct Texture {
+    isa: *const Class,
+    descriptor: TextureDescriptor,
+}
+
+#[repr(C)]
+struct VertexDescriptor {
+    isa: *const Class,
+    layouts: Id,
+    attributes: Id,
+}
+
+#[repr(C)]
+struct IndexedDescriptors {
+    isa: *const Class,
+    elements: [Id; 31],
+}
+
+#[repr(C)]
+struct VertexElement {
+    isa: *const Class,
+    values: [u64; 3],
+}
+
+static ALLOCATED_SIZE: AtomicU64 = AtomicU64::new(0);
+static REPORTED_LIBRARY_ERROR: AtomicBool = AtomicBool::new(false);
+
 fn device_class() -> &'static Class {
     objc::class::lookup(c"R3MTLDevice").expect("Metal is bootstrapped")
 }
@@ -31,6 +104,58 @@ pub fn bootstrap() {
         foundation::bootstrap();
         let class =
             corefoundation::base::register(c"R3MTLDevice", None, size_of::<Device>(), false);
+        let queue_class = corefoundation::base::register(
+            c"R3MTLCommandQueue",
+            None,
+            size_of::<CommandQueue>(),
+            false,
+        );
+        let buffer_class =
+            corefoundation::base::register(c"R3MTLBuffer", None, size_of::<Buffer>(), false);
+        let command_buffer_class = corefoundation::base::register(
+            c"R3MTLCommandBuffer",
+            None,
+            size_of::<CommandBuffer>(),
+            false,
+        );
+        let command_encoder_class = corefoundation::base::register(
+            c"R3MTLCommandEncoder",
+            None,
+            size_of::<CommandEncoder>(),
+            false,
+        );
+        let descriptor_class = corefoundation::base::register(
+            c"MTLTextureDescriptor",
+            None,
+            size_of::<TextureDescriptor>(),
+            false,
+        );
+        let texture_class =
+            corefoundation::base::register(c"R3MTLTexture", None, size_of::<Texture>(), false);
+        let vertex_descriptor_class = corefoundation::base::register(
+            c"MTLVertexDescriptor",
+            None,
+            size_of::<VertexDescriptor>(),
+            false,
+        );
+        let indexed_descriptor_class = corefoundation::base::register(
+            c"R3MTLIndexedDescriptors",
+            None,
+            size_of::<IndexedDescriptors>(),
+            false,
+        );
+        let layout_class = corefoundation::base::register(
+            c"MTLVertexBufferLayoutDescriptor",
+            None,
+            size_of::<VertexElement>(),
+            false,
+        );
+        let attribute_class = corefoundation::base::register(
+            c"MTLVertexAttributeDescriptor",
+            None,
+            size_of::<VertexElement>(),
+            false,
+        );
         for (selector, implementation, types) in [
             ("name", name as *const c_void, c"@16@0:8" as &std::ffi::CStr),
             ("registryID", registry_id as *const c_void, c"Q16@0:8"),
@@ -58,10 +183,455 @@ pub fn bootstrap() {
                 supports_sample_count as *const c_void,
                 c"B24@0:8Q16",
             ),
+            (
+                "newCommandQueue",
+                new_command_queue as *const c_void,
+                c"@16@0:8",
+            ),
+            (
+                "newBufferWithLength:options:",
+                new_buffer as *const c_void,
+                c"@32@0:8Q16Q24",
+            ),
+            (
+                "newTextureWithDescriptor:",
+                new_texture as *const c_void,
+                c"@24@0:8@16",
+            ),
+            (
+                "newLibraryWithData:error:",
+                new_library_with_data as *const c_void,
+                c"@32@0:8@16^@24",
+            ),
+            (
+                "isDepth24Stencil8PixelFormatSupported",
+                no as *const c_void,
+                c"B16@0:8",
+            ),
+            (
+                "currentAllocatedSize",
+                current_allocated_size as *const c_void,
+                c"Q16@0:8",
+            ),
         ] {
             class.replace_method(objc::sel::get(selector), implementation, types);
         }
+        queue_class.replace_method(
+            objc::sel::get("device"),
+            queue_device as *const c_void,
+            c"@16@0:8",
+        );
+        for selector in ["commandBuffer", "commandBufferWithUnretainedReferences"] {
+            queue_class.replace_method(
+                objc::sel::get(selector),
+                new_command_buffer as *const c_void,
+                c"@16@0:8",
+            );
+        }
+        command_buffer_class.replace_method(
+            objc::sel::get("commandQueue"),
+            command_buffer_queue as *const c_void,
+            c"@16@0:8",
+        );
+        for selector in ["computeCommandEncoder", "blitCommandEncoder"] {
+            command_buffer_class.replace_method(
+                objc::sel::get(selector),
+                new_command_encoder as *const c_void,
+                c"@16@0:8",
+            );
+        }
+        command_buffer_class.replace_method(
+            objc::sel::get("addCompletedHandler:"),
+            add_completed_handler as *const c_void,
+            c"v24@0:8@?16",
+        );
+        command_buffer_class.replace_method(
+            objc::sel::get("commit"),
+            commit as *const c_void,
+            c"v16@0:8",
+        );
+        command_buffer_class.replace_method(
+            objc::sel::get("waitUntilCompleted"),
+            no_op as *const c_void,
+            c"v16@0:8",
+        );
+        command_buffer_class.replace_method(
+            objc::sel::get("status"),
+            command_buffer_status as *const c_void,
+            c"Q16@0:8",
+        );
+        for selector in [
+            "endEncoding",
+            "synchronizeResource:",
+            "setComputePipelineState:",
+            "setBuffer:offset:atIndex:",
+            "setTexture:atIndex:",
+            "dispatchThreadgroups:threadsPerThreadgroup:",
+            "dispatchThreads:threadsPerThreadgroup:",
+            "copyFromBuffer:sourceOffset:sourceBytesPerRow:sourceBytesPerImage:sourceSize:toTexture:destinationSlice:destinationLevel:destinationOrigin:",
+        ] {
+            command_encoder_class.replace_method(
+                objc::sel::get(selector),
+                no_op as *const c_void,
+                c"v16@0:8",
+            );
+        }
+        for (selector, implementation) in [
+            ("layouts", vertex_layouts as *const c_void),
+            ("attributes", vertex_attributes as *const c_void),
+        ] {
+            vertex_descriptor_class.replace_method(
+                objc::sel::get(selector),
+                implementation,
+                c"@16@0:8",
+            );
+        }
+        indexed_descriptor_class.replace_method(
+            objc::sel::get("objectAtIndexedSubscript:"),
+            indexed_descriptor as *const c_void,
+            c"@24@0:8Q16",
+        );
+        for class in [layout_class, attribute_class] {
+            for selector in [
+                "setStride:",
+                "setStepFunction:",
+                "setStepRate:",
+                "setFormat:",
+                "setOffset:",
+                "setBufferIndex:",
+            ] {
+                class.replace_method(
+                    objc::sel::get(selector),
+                    set_vertex_element_value as *const c_void,
+                    c"v24@0:8Q16",
+                );
+            }
+        }
+        buffer_class.replace_method(
+            objc::sel::get("contents"),
+            buffer_contents as *const c_void,
+            c"^v16@0:8",
+        );
+        buffer_class.replace_method(
+            objc::sel::get("didModifyRange:"),
+            no_op as *const c_void,
+            c"v32@0:8{_NSRange=QQ}16",
+        );
+        buffer_class.replace_method(
+            objc::sel::get("length"),
+            buffer_length as *const c_void,
+            c"Q16@0:8",
+        );
+        buffer_class.replace_method(
+            objc::sel::get("storageMode"),
+            buffer_storage_mode as *const c_void,
+            c"Q16@0:8",
+        );
+        for selector in [
+            "setTextureType:",
+            "setPixelFormat:",
+            "setWidth:",
+            "setHeight:",
+            "setDepth:",
+            "setMipmapLevelCount:",
+            "setSampleCount:",
+            "setArrayLength:",
+            "setStorageMode:",
+            "setUsage:",
+        ] {
+            descriptor_class.replace_method(
+                objc::sel::get(selector),
+                set_descriptor_value as *const c_void,
+                c"v24@0:8Q16",
+            );
+        }
+        for selector in [
+            "textureType",
+            "pixelFormat",
+            "width",
+            "height",
+            "depth",
+            "mipmapLevelCount",
+            "sampleCount",
+            "arrayLength",
+            "storageMode",
+            "usage",
+        ] {
+            descriptor_class.replace_method(
+                objc::sel::get(selector),
+                descriptor_value as *const c_void,
+                c"Q16@0:8",
+            );
+            texture_class.replace_method(
+                objc::sel::get(selector),
+                texture_value as *const c_void,
+                c"Q16@0:8",
+            );
+        }
     });
+}
+
+unsafe extern "C" fn new_command_queue(receiver: Id, _sel: Sel) -> Id {
+    let class = objc::class::lookup(c"R3MTLCommandQueue").expect("Metal is bootstrapped");
+    let queue = unsafe { corefoundation::base::allocate::<CommandQueue>(class) };
+    if !queue.is_null() {
+        unsafe { (*queue).device = objc::arc::retain(receiver) };
+    }
+    queue as Id
+}
+
+unsafe extern "C" fn queue_device(receiver: Id, _sel: Sel) -> Id {
+    unsafe { (*(receiver as *const CommandQueue)).device }
+}
+
+unsafe extern "C" fn new_command_buffer(receiver: Id, _sel: Sel) -> Id {
+    let class = objc::class::lookup(c"R3MTLCommandBuffer").expect("Metal is bootstrapped");
+    let buffer = unsafe { corefoundation::base::allocate::<CommandBuffer>(class) };
+    if !buffer.is_null() {
+        unsafe {
+            (*buffer).queue = objc::arc::retain(receiver);
+            (*buffer).completed_handler = std::ptr::null_mut();
+            (*buffer).status = 0;
+        }
+    }
+    buffer as Id
+}
+
+unsafe extern "C" fn new_command_encoder(receiver: Id, _sel: Sel) -> Id {
+    let class = objc::class::lookup(c"R3MTLCommandEncoder").expect("Metal is bootstrapped");
+    let encoder = unsafe { corefoundation::base::allocate::<CommandEncoder>(class) };
+    if !encoder.is_null() {
+        unsafe { (*encoder).command_buffer = objc::arc::retain(receiver) };
+    }
+    encoder as Id
+}
+
+unsafe extern "C" fn add_completed_handler(receiver: Id, _sel: Sel, block: Id) {
+    let command = unsafe { &mut *(receiver as *mut CommandBuffer) };
+    objc::arc::release(command.completed_handler);
+    command.completed_handler = unsafe { objc::shorthand::objc_retainBlock(block) };
+}
+
+unsafe extern "C" fn commit(receiver: Id, _sel: Sel) {
+    let command = unsafe { &mut *(receiver as *mut CommandBuffer) };
+    command.status = 4; // MTLCommandBufferStatusCompleted
+    let block = command.completed_handler;
+    if !block.is_null() {
+        let invoke = unsafe { *((block as *const u8).add(16) as *const usize) };
+        if invoke != 0 {
+            let call: unsafe extern "C" fn(Id, Id) = unsafe { std::mem::transmute(invoke) };
+            unsafe { call(block, receiver) };
+        }
+    }
+}
+
+unsafe extern "C" fn command_buffer_status(receiver: Id, _sel: Sel) -> u64 {
+    unsafe { (*(receiver as *const CommandBuffer)).status }
+}
+
+unsafe extern "C" fn no_op(_receiver: Id, _sel: Sel) {}
+
+unsafe fn vertex_descriptors(receiver: Id, layout: bool) -> Id {
+    let descriptor = unsafe { &mut *(receiver as *mut VertexDescriptor) };
+    let slot = if layout {
+        &mut descriptor.layouts
+    } else {
+        &mut descriptor.attributes
+    };
+    if slot.is_null() {
+        let collection_class =
+            objc::class::lookup(c"R3MTLIndexedDescriptors").expect("Metal is bootstrapped");
+        let collection =
+            unsafe { corefoundation::base::allocate::<IndexedDescriptors>(collection_class) };
+        if collection.is_null() {
+            return std::ptr::null_mut();
+        }
+        let element_name = if layout {
+            c"MTLVertexBufferLayoutDescriptor"
+        } else {
+            c"MTLVertexAttributeDescriptor"
+        };
+        let element_class = objc::class::lookup(element_name).expect("Metal is bootstrapped");
+        for element in unsafe { &mut (*collection).elements } {
+            *element =
+                unsafe { corefoundation::base::allocate::<VertexElement>(element_class) as Id };
+        }
+        *slot = collection as Id;
+    }
+    *slot
+}
+
+unsafe extern "C" fn vertex_layouts(receiver: Id, _sel: Sel) -> Id {
+    unsafe { vertex_descriptors(receiver, true) }
+}
+
+unsafe extern "C" fn vertex_attributes(receiver: Id, _sel: Sel) -> Id {
+    unsafe { vertex_descriptors(receiver, false) }
+}
+
+unsafe extern "C" fn indexed_descriptor(receiver: Id, _sel: Sel, index: usize) -> Id {
+    unsafe {
+        (*(receiver as *const IndexedDescriptors))
+            .elements
+            .get(index)
+            .copied()
+            .unwrap_or(std::ptr::null_mut())
+    }
+}
+
+unsafe extern "C" fn set_vertex_element_value(receiver: Id, sel: Sel, value: u64) {
+    let element = unsafe { &mut *(receiver as *mut VertexElement) };
+    let name = unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes();
+    let index = match name {
+        b"setStride:" | b"setFormat:" => 0,
+        b"setStepFunction:" | b"setOffset:" => 1,
+        b"setStepRate:" | b"setBufferIndex:" => 2,
+        _ => unreachable!("only registered vertex setters reach this method"),
+    };
+    element.values[index] = value;
+}
+
+unsafe extern "C" fn command_buffer_queue(receiver: Id, _sel: Sel) -> Id {
+    unsafe { (*(receiver as *const CommandBuffer)).queue }
+}
+
+unsafe extern "C" fn new_buffer(_receiver: Id, _sel: Sel, length: usize, options: u64) -> Id {
+    if length == 0 {
+        return std::ptr::null_mut();
+    }
+    let class = objc::class::lookup(c"R3MTLBuffer").expect("Metal is bootstrapped");
+    let buffer = unsafe { corefoundation::base::allocate::<Buffer>(class) };
+    if buffer.is_null() {
+        return std::ptr::null_mut();
+    }
+    let contents = vec![0u8; length].leak().as_mut_ptr();
+    unsafe {
+        (*buffer).contents = contents;
+        (*buffer).length = length;
+        (*buffer).options = options;
+    }
+    ALLOCATED_SIZE.fetch_add(length as u64, Ordering::Relaxed);
+    buffer as Id
+}
+
+unsafe extern "C" fn buffer_contents(receiver: Id, _sel: Sel) -> *mut u8 {
+    unsafe { (*(receiver as *const Buffer)).contents }
+}
+
+unsafe extern "C" fn buffer_length(receiver: Id, _sel: Sel) -> usize {
+    unsafe { (*(receiver as *const Buffer)).length }
+}
+
+unsafe extern "C" fn buffer_storage_mode(receiver: Id, _sel: Sel) -> u64 {
+    unsafe { ((*(receiver as *const Buffer)).options >> 4) & 0xf }
+}
+
+unsafe extern "C" fn set_descriptor_value(receiver: Id, sel: Sel, value: u64) {
+    let descriptor = unsafe { &mut *(receiver as *mut TextureDescriptor) };
+    match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
+        b"setTextureType:" => descriptor.texture_type = value,
+        b"setPixelFormat:" => descriptor.pixel_format = value,
+        b"setWidth:" => descriptor.width = value,
+        b"setHeight:" => descriptor.height = value,
+        b"setDepth:" => descriptor.depth = value,
+        b"setMipmapLevelCount:" => descriptor.mipmap_level_count = value,
+        b"setSampleCount:" => descriptor.sample_count = value,
+        b"setArrayLength:" => descriptor.array_length = value,
+        b"setStorageMode:" => descriptor.storage_mode = value,
+        b"setUsage:" => descriptor.usage = value,
+        _ => unreachable!("only registered descriptor setters reach this method"),
+    }
+}
+
+fn descriptor_field(descriptor: &TextureDescriptor, sel: Sel) -> u64 {
+    match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
+        b"textureType" => descriptor.texture_type,
+        b"pixelFormat" => descriptor.pixel_format,
+        b"width" => descriptor.width,
+        b"height" => descriptor.height,
+        b"depth" => descriptor.depth,
+        b"mipmapLevelCount" => descriptor.mipmap_level_count,
+        b"sampleCount" => descriptor.sample_count,
+        b"arrayLength" => descriptor.array_length,
+        b"storageMode" => descriptor.storage_mode,
+        b"usage" => descriptor.usage,
+        _ => unreachable!("only registered descriptor getters reach this method"),
+    }
+}
+
+unsafe extern "C" fn descriptor_value(receiver: Id, sel: Sel) -> u64 {
+    descriptor_field(unsafe { &*(receiver as *const TextureDescriptor) }, sel)
+}
+
+unsafe extern "C" fn texture_value(receiver: Id, sel: Sel) -> u64 {
+    descriptor_field(unsafe { &(*(receiver as *const Texture)).descriptor }, sel)
+}
+
+unsafe extern "C" fn new_texture(_receiver: Id, _sel: Sel, descriptor: Id) -> Id {
+    if descriptor.is_null() {
+        return std::ptr::null_mut();
+    }
+    let class = objc::class::lookup(c"R3MTLTexture").expect("Metal is bootstrapped");
+    let texture = unsafe { corefoundation::base::allocate::<Texture>(class) };
+    if texture.is_null() {
+        return std::ptr::null_mut();
+    }
+    let copied = unsafe { *(descriptor as *const TextureDescriptor) };
+    unsafe { (*texture).descriptor = copied };
+    let pixels = copied
+        .width
+        .saturating_mul(copied.height)
+        .saturating_mul(copied.depth.max(1))
+        .saturating_mul(copied.array_length.max(1));
+    ALLOCATED_SIZE.fetch_add(pixels.saturating_mul(4), Ordering::Relaxed);
+    texture as Id
+}
+
+unsafe extern "C" fn current_allocated_size(_receiver: Id, _sel: Sel) -> u64 {
+    ALLOCATED_SIZE.load(Ordering::Relaxed)
+}
+
+unsafe extern "C" fn new_library_with_data(
+    receiver: Id,
+    _sel: Sel,
+    data: u64,
+    _error: *mut Id,
+) -> Id {
+    let Some((bytes, length)) = darwin::dispatch::data::bytes(data) else {
+        report_library_error("newLibraryWithData:error: received non-dispatch data");
+        return std::ptr::null_mut();
+    };
+    let bytes = unsafe { std::slice::from_raw_parts(bytes, length) };
+    let air = match metal_translate::metallib_air(bytes) {
+        Ok(air) => air,
+        Err(error) => {
+            report_library_error(error);
+            return std::ptr::null_mut();
+        }
+    };
+    let target = unsafe { (*(receiver as *const Device)).target.as_ref() };
+    let Some(target) = target else {
+        report_library_error("Metal device has no Vulkan target profile");
+        return std::ptr::null_mut();
+    };
+    match metal_translate::translate(metal_translate::AirInput::Bitcode(air), target) {
+        Ok(_) => {
+            report_library_error("AIR translated, but MTLFunction objects are not connected yet");
+            std::ptr::null_mut()
+        }
+        Err(error) => {
+            report_library_error(error);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+fn report_library_error(message: impl std::fmt::Display) {
+    if std::env::var_os("ROSETTA3_TRACE_METAL").is_some()
+        && !REPORTED_LIBRARY_ERROR.swap(true, Ordering::Relaxed)
+    {
+        eprintln!("rosetta3: Metal: shader library translation stopped: {message}");
+    }
 }
 
 fn devices() -> &'static [usize] {
@@ -167,6 +737,21 @@ pub const NAMES: &[&str] = &[
     "CGDirectDisplayCopyCurrentMetalDevice",
 ];
 
+pub fn data_symbols() -> Vec<(String, u64)> {
+    bootstrap();
+    ["MTLTextureDescriptor", "MTLVertexDescriptor"]
+        .into_iter()
+        .filter_map(|name| {
+            let name_c = std::ffi::CString::new(name).ok()?;
+            let class = objc::class::lookup(&name_c)?;
+            Some((
+                format!("_OBJC_CLASS_$_{name}"),
+                objc::class::ptr(class) as usize as u64,
+            ))
+        })
+        .collect()
+}
+
 pub fn symbol(name: &str) -> Option<u64> {
     Some(match name.trim_start_matches('_') {
         "MTLCreateSystemDefaultDevice" => MTLCreateSystemDefaultDevice as *const (),
@@ -187,6 +772,32 @@ mod tests {
         for name in NAMES {
             assert_ne!(symbol(name), None);
             assert_eq!(symbol(&format!("_{name}")), symbol(name));
+        }
+    }
+
+    #[test]
+    fn descriptors_textures_buffers_and_queues_keep_their_metal_state() {
+        bootstrap();
+        unsafe {
+            let descriptor_class = objc::class::lookup(c"MTLTextureDescriptor").unwrap();
+            let descriptor = corefoundation::base::allocate::<TextureDescriptor>(descriptor_class);
+            set_descriptor_value(descriptor as Id, objc::sel::get("setWidth:"), 64);
+            set_descriptor_value(descriptor as Id, objc::sel::get("setHeight:"), 32);
+            set_descriptor_value(descriptor as Id, objc::sel::get("setStorageMode:"), 2);
+            let texture = new_texture(std::ptr::null_mut(), std::ptr::null(), descriptor as Id);
+            assert_eq!(texture_value(texture, objc::sel::get("width")), 64);
+            assert_eq!(texture_value(texture, objc::sel::get("height")), 32);
+
+            let buffer = new_buffer(std::ptr::null_mut(), std::ptr::null(), 256, 2 << 4);
+            assert!(!buffer_contents(buffer, std::ptr::null()).is_null());
+            assert_eq!(buffer_length(buffer, std::ptr::null()), 256);
+            assert_eq!(buffer_storage_mode(buffer, std::ptr::null()), 2);
+
+            let device = corefoundation::base::allocate::<Device>(device_class()) as Id;
+            let queue = new_command_queue(device, std::ptr::null());
+            let command = new_command_buffer(queue, std::ptr::null());
+            assert_eq!(queue_device(queue, std::ptr::null()), device);
+            assert_eq!(command_buffer_queue(command, std::ptr::null()), queue);
         }
     }
 

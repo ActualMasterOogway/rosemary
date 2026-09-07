@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 ash.workspace = true
 corefoundation.workspace = true
+darwin.workspace = true
 foundation.workspace = true
 objc.workspace = true
 metal_translate.workspace = true
