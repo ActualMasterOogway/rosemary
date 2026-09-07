@@ -35,7 +35,8 @@
               "rust-src"
               "rust-analyzer"
             ];
-            targets = lib.optional pkgs.stdenv.isDarwin "x86_64-apple-darwin";
+            targets = [ "x86_64-unknown-linux-musl" ] 
+              ++ lib.optional pkgs.stdenv.isDarwin "x86_64-apple-darwin";
           };
 
           runtimeLibs =
