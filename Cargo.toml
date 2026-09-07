@@ -20,6 +20,7 @@ corevideo = { path = "crates/corevideo" }
 coreaudio = { path = "crates/coreaudio" }
 contacts = { path = "crates/contacts" }
 gamecontroller = { path = "crates/gamecontroller" }
+forcefeedback = { path = "crates/forcefeedback" }
 metal_translate = { path = "crates/metal_translate" }
 libc = "0.2"
 gimli = "0.34"

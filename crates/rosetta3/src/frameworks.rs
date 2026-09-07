@@ -79,6 +79,14 @@ fn register_dlopen_names() {
     );
     crate::dyld::register_synthetic(
         &[
+            "/System/Library/Frameworks/ForceFeedback.framework/Versions/A/ForceFeedback",
+            "/System/Library/Frameworks/ForceFeedback.framework/ForceFeedback",
+            "ForceFeedback",
+        ],
+        symbol,
+    );
+    crate::dyld::register_synthetic(
+        &[
             "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation",
             "/System/Library/Frameworks/Foundation.framework/Foundation",
             "Foundation",
@@ -255,6 +263,12 @@ pub fn provider() -> SyntheticDylib {
     }
     for (name, addr) in iokit::data_symbols() {
         define_data(&mut lib, &name, addr);
+    }
+    // ForceFeedback translates the legacy effect API into SDL3 joystick rumble.
+    for name in forcefeedback::NAMES {
+        if let Some(addr) = forcefeedback::symbol(name) {
+            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
+        }
     }
     // AppKit up to the point a window would be needed. Its classes are here
     // even though none of them draws: a guest's `YYGLView : NSView` binds
@@ -436,6 +450,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         .or_else(|| objc::block::symbol(name))
         .or_else(|| foundation::symbol(name))
         .or_else(|| iokit::symbol(name))
+        .or_else(|| forcefeedback::symbol(name))
         .or_else(|| appkit::symbol(name))
         .or_else(|| corevideo::symbol(name))
         .or_else(|| crate::opengl::symbol(name))

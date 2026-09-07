@@ -108,6 +108,7 @@ struct Api {
     SDL_GetJoystickButton: Option<unsafe extern "C" fn(Joystick, c_int) -> bool>,
     SDL_GetJoystickHat: Option<unsafe extern "C" fn(Joystick, c_int) -> u8>,
     SDL_SendJoystickEffect: Option<unsafe extern "C" fn(Joystick, *const c_void, c_int) -> bool>,
+    SDL_RumbleJoystick: Option<unsafe extern "C" fn(Joystick, u16, u16, u32) -> bool>,
     SDL_hid_open_path: Option<unsafe extern "C" fn(*const c_char) -> HidDevice>,
     SDL_hid_get_input_report: Option<unsafe extern "C" fn(HidDevice, *mut u8, usize) -> c_int>,
     SDL_hid_get_feature_report: Option<unsafe extern "C" fn(HidDevice, *mut u8, usize) -> c_int>,
@@ -290,6 +291,7 @@ fn api() -> Option<&'static Api> {
             SDL_GetJoystickButton,
             SDL_GetJoystickHat,
             SDL_SendJoystickEffect,
+            SDL_RumbleJoystick,
             SDL_hid_open_path,
             SDL_hid_get_input_report,
             SDL_hid_get_feature_report,
@@ -721,6 +723,24 @@ pub unsafe fn send_effect(joystick: Joystick, bytes: &[u8]) -> bool {
     };
     // SAFETY: the caller's obligation, and the slice covers `length` bytes.
     unsafe { send(joystick, bytes.as_ptr().cast(), length) }
+}
+
+/// Start the joystick's two rumble motors for `duration_ms` milliseconds.
+///
+/// # Safety
+///
+/// `joystick` must be open. SDL accepts `0` for either motor to stop it.
+pub unsafe fn rumble(
+    joystick: Joystick,
+    low_frequency: u16,
+    high_frequency: u16,
+    duration_ms: u32,
+) -> bool {
+    let Some(rumble) = api().and_then(|a| a.SDL_RumbleJoystick) else {
+        return false;
+    };
+    // SAFETY: the caller guarantees that the joystick is open.
+    unsafe { rumble(joystick, low_frequency, high_frequency, duration_ms) }
 }
 
 /// SDL's standard gamepad axes.

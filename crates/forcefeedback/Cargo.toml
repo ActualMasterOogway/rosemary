@@ -1,0 +1,9 @@
+[package]
+name = "forcefeedback"
+description = "ForceFeedback framework reimplementation over SDL3 joystick rumble"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sdl3.workspace = true
