@@ -592,7 +592,7 @@ static POINTER: std::sync::Mutex<(f32, f32)> = std::sync::Mutex::new((0.0, 0.0))
 /// Record a programmatic cursor warp in window coordinates.
 ///
 /// SDL does not deliver a motion event for an in-window warp while relative
-/// mode is active. Without this explicit update, the cursor moves to Roblox's
+/// mode is active. Without this explicit update, the cursor moves to an app's
 /// lock point but every `NSEvent` and `+[NSEvent mouseLocation]` continues to
 /// report the position from before the lock.
 pub(crate) fn warp_pointer(x: f32, y: f32) {

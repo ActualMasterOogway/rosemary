@@ -1,5 +1,7 @@
 use metal_translate::ir::{Access, InstructionKind, Stage};
-use metal_translate::{AirInput, Phase, TargetProfile, metallib_air, parse_air, translate};
+use metal_translate::{
+    AirInput, Phase, TargetProfile, metallib_air, parse_air, parse_msl, translate, translate_msl,
+};
 use rspirv::spirv::Op;
 
 const STORE: &str = include_str!("fixtures/kernel_store_const.ll");
@@ -185,4 +187,22 @@ fn rejects_a_target_without_required_capabilities() {
     target.shader = false;
     let error = translate(AirInput::Text(STORE), &target).unwrap_err();
     assert_eq!(error.diagnostics[0].phase, Phase::SpirvEmission);
+}
+
+#[test]
+fn compiles_a_source_msl_compute_kernel_to_spirv() {
+    let source = "kernel void clear(device uint* output [[buffer(3)]]) { output[0] = 42; }";
+    let module = parse_msl(source).unwrap();
+    assert_eq!(module.functions[0].name, "clear");
+    assert_eq!(module.entries[0].resources[0].index, 3);
+    let library = translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap();
+    assert_eq!(library.entries[0].words[0], rspirv::spirv::MAGIC_NUMBER);
+    assert_eq!(library.entries[0].resources[0].binding, 3);
+}
+
+#[test]
+fn source_msl_rejects_unimplemented_operations() {
+    let error = parse_msl("kernel void f(device uint* output [[buffer(0)]]) { output[1] = 1; }")
+        .unwrap_err();
+    assert_eq!(error.diagnostics[0].phase, Phase::AirSyntax);
 }

@@ -6,11 +6,13 @@
 
 pub mod air;
 pub mod ir;
+pub mod msl;
 pub mod spirv;
 
 use std::fmt;
 
 pub use air::{AirInput, parse_air};
+pub use msl::parse_msl;
 pub use spirv::{EntryArtifact, ResourceBinding, TargetProfile, TranslatedLibrary, emit_spirv};
 
 /// The phase which reported a translation diagnostic.
@@ -84,6 +86,19 @@ pub fn translate(
     target: &TargetProfile,
 ) -> Result<TranslatedLibrary, TranslateError> {
     let module = parse_air(input)?;
+    emit_spirv(&module, target)
+}
+
+/// Parse and translate the supported source-MSL subset.
+///
+/// Source compilation starts as a separate frontend rather than pretending MSL
+/// is AIR.  Both frontends produce the same verified Metal IR before SPIR-V
+/// emission.
+pub fn translate_msl(
+    source: &str,
+    target: &TargetProfile,
+) -> Result<TranslatedLibrary, TranslateError> {
+    let module = parse_msl(source)?;
     emit_spirv(&module, target)
 }
 

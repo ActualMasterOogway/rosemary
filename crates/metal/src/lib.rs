@@ -23,6 +23,19 @@ struct Device {
 }
 
 #[repr(C)]
+struct Library {
+    isa: *const Class,
+    translated: metal_translate::TranslatedLibrary,
+}
+
+#[repr(C)]
+struct Function {
+    isa: *const Class,
+    library: Id,
+    entry: usize,
+}
+
+#[repr(C)]
 struct CommandQueue {
     isa: *const Class,
     device: Id,
@@ -108,6 +121,18 @@ pub fn bootstrap() {
             c"R3MTLCommandQueue",
             None,
             size_of::<CommandQueue>(),
+            false,
+        );
+        let library_class = corefoundation::base::register(
+            c"R3MTLLibrary",
+            None,
+            size_of::<Library>(),
+            false,
+        );
+        let function_class = corefoundation::base::register(
+            c"R3MTLFunction",
+            None,
+            size_of::<Function>(),
             false,
         );
         let buffer_class =
@@ -204,6 +229,11 @@ pub fn bootstrap() {
                 c"@32@0:8@16^@24",
             ),
             (
+                "newLibraryWithSource:options:error:",
+                new_library_with_source as *const c_void,
+                c"@40@0:8@16@24^@32",
+            ),
+            (
                 "isDepth24Stencil8PixelFormatSupported",
                 no as *const c_void,
                 c"B16@0:8",
@@ -216,6 +246,16 @@ pub fn bootstrap() {
         ] {
             class.replace_method(objc::sel::get(selector), implementation, types);
         }
+        library_class.replace_method(
+            objc::sel::get("newFunctionWithName:"),
+            new_function_with_name as *const c_void,
+            c"@24@0:8@16",
+        );
+        function_class.replace_method(
+            objc::sel::get("name"),
+            function_name as *const c_void,
+            c"@16@0:8",
+        );
         queue_class.replace_method(
             objc::sel::get("device"),
             queue_device as *const c_void,
@@ -626,6 +666,96 @@ unsafe extern "C" fn new_library_with_data(
     }
 }
 
+unsafe extern "C" fn new_library_with_source(
+    receiver: Id,
+    _sel: Sel,
+    source: Id,
+    _options: Id,
+    error: *mut Id,
+) -> Id {
+    if !error.is_null() {
+        // SAFETY: the guest passed a writable `NSError **`, as required by the
+        // Objective-C method contract.
+        unsafe { *error = std::ptr::null_mut() };
+    }
+    if source.is_null() {
+        return fail_library(error, "newLibraryWithSource: requires an NSString source");
+    }
+    if unsafe { (*(receiver as *const Device)).target.as_ref() }.is_none() {
+        return fail_library(error, "Metal device has no Vulkan target profile");
+    }
+
+    let source = unsafe { foundation::string::bytes(source) };
+    if source.is_empty() {
+        return fail_library(
+            error,
+            "newLibraryWithSource: received an empty or invalid NSString",
+        );
+    }
+    let source = match std::str::from_utf8(&source) {
+        Ok(source) => source,
+        Err(_) => return fail_library(error, "Metal source is not valid UTF-8"),
+    };
+    let target = unsafe { (*(receiver as *const Device)).target.as_ref() }
+        .expect("target was checked above");
+    let translated = match metal_translate::translate_msl(source, target) {
+        Ok(translated) => translated,
+        Err(translation_error) => return fail_library(error, &translation_error.to_string()),
+    };
+    let class = objc::class::lookup(c"R3MTLLibrary").expect("Metal is bootstrapped");
+    let library = unsafe { corefoundation::base::allocate::<Library>(class) };
+    if library.is_null() {
+        return fail_library(error, "could not allocate MTL source library");
+    }
+    // `allocate` only initializes the Objective-C header.  Write the Rust
+    // payload without dropping the uninitialized slot first.
+    unsafe { std::ptr::addr_of_mut!((*library).translated).write(translated) };
+    library as Id
+}
+
+unsafe extern "C" fn new_function_with_name(receiver: Id, _sel: Sel, name: Id) -> Id {
+    let name = unsafe { foundation::string::bytes(name) };
+    let Ok(name) = std::str::from_utf8(&name) else {
+        return std::ptr::null_mut();
+    };
+    let library = unsafe { &*(receiver as *const Library) };
+    let Some(entry) = library
+        .translated
+        .entries
+        .iter()
+        .position(|entry| entry.name == name)
+    else {
+        return std::ptr::null_mut();
+    };
+    let class = objc::class::lookup(c"R3MTLFunction").expect("Metal is bootstrapped");
+    let function = unsafe { corefoundation::base::allocate::<Function>(class) };
+    if function.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        (*function).library = receiver;
+        (*function).entry = entry;
+    }
+    function as Id
+}
+
+unsafe extern "C" fn function_name(receiver: Id, _sel: Sel) -> Id {
+    let function = unsafe { &*(receiver as *const Function) };
+    let library = unsafe { &*(function.library as *const Library) };
+    foundation::string::from_str(&library.translated.entries[function.entry].name)
+}
+
+fn fail_library(error: *mut Id, message: &str) -> Id {
+    report_library_error(message);
+    if !error.is_null() {
+        // SAFETY: the guest passed a writable `NSError **`.
+        unsafe {
+            *error = foundation::error::make("MTLLibraryErrorDomain", 3, message);
+        }
+    }
+    std::ptr::null_mut()
+}
+
 fn report_library_error(message: impl std::fmt::Display) {
     if std::env::var_os("ROSETTA3_TRACE_METAL").is_some()
         && !REPORTED_LIBRARY_ERROR.swap(true, Ordering::Relaxed)
@@ -799,6 +929,62 @@ mod tests {
             assert_eq!(queue_device(queue, std::ptr::null()), device);
             assert_eq!(command_buffer_queue(command, std::ptr::null()), queue);
         }
+    }
+
+    #[test]
+    fn device_registers_source_library_creation() {
+        bootstrap();
+        let method = device_class().method(objc::sel::get("newLibraryWithSource:options:error:"));
+        assert!(method.is_some());
+    }
+
+    #[test]
+    fn source_library_creation_reports_invalid_source() {
+        bootstrap();
+        let device = unsafe { corefoundation::base::allocate::<Device>(device_class()) } as Id;
+        let mut error = std::ptr::null_mut();
+        let library = unsafe {
+            new_library_with_source(
+                device,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(library.is_null());
+        assert!(!error.is_null());
+    }
+
+    #[test]
+    fn source_library_compiles_the_initial_msl_compute_kernel() {
+        bootstrap();
+        let device = unsafe { corefoundation::base::allocate::<Device>(device_class()) };
+        let target = Box::leak(Box::new(metal_translate::TargetProfile::vulkan_1_3()));
+        unsafe { (*device).target = target };
+        let source = foundation::string::from_str(
+            "kernel void clear(device uint* output [[buffer(0)]]) { output[0] = 42; }",
+        );
+        let mut error = std::ptr::null_mut();
+        let library = unsafe {
+            new_library_with_source(
+                device as Id,
+                std::ptr::null(),
+                source,
+                std::ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(!library.is_null());
+        assert!(error.is_null());
+        let function = unsafe {
+            new_function_with_name(
+                library,
+                std::ptr::null(),
+                foundation::string::from_str("clear"),
+            )
+        };
+        assert!(!function.is_null());
     }
 
     #[test]
