@@ -762,6 +762,19 @@ pub(crate) mod class {
         }
     }
 
+    fn resource_file_url(p: Option<std::path::PathBuf>) -> Id {
+        let Some(p) = p else {
+            return std::ptr::null_mut();
+        };
+        // SAFETY: a URL this call just made.
+        unsafe {
+            corefoundation::api::CFAutorelease(corefoundation::url::new_file_url(
+                &p.to_string_lossy(),
+                p.is_dir(),
+            )) as Id
+        }
+    }
+
     unsafe extern "C" fn bundle_url(receiver: Id, _sel: Sel) -> Id {
         // SAFETY: the receiver is an `NSBundle`.
         url(unsafe { layout_of(receiver) }.map(|b| b.root.clone()))
@@ -822,6 +835,17 @@ pub(crate) mod class {
         path(unsafe { layout_of(receiver) }.and_then(|b| b.resource(name, kind)))
     }
 
+    /// `-URLForResource:withExtension:`, the URL form of
+    /// `-pathForResource:ofType:`.
+    unsafe extern "C" fn url_for_resource(receiver: Id, _sel: Sel, name: Id, kind: Id) -> Id {
+        // SAFETY: both are `NSString`s or nil.
+        let (name, kind) = unsafe { (crate::string::bytes(name), crate::string::bytes(kind)) };
+        let (Ok(name), Ok(kind)) = (std::str::from_utf8(&name), std::str::from_utf8(&kind)) else {
+            return std::ptr::null_mut();
+        };
+        resource_file_url(unsafe { layout_of(receiver) }.and_then(|b| b.resource(name, kind)))
+    }
+
     unsafe extern "C" fn path_for_resource_in_directory(
         receiver: Id,
         sel: Sel,
@@ -871,6 +895,7 @@ pub(crate) mod class {
             "bundleIdentifier" => bundle_identifier, c"@16@0:8";
             "objectForInfoDictionaryKey:" => object_for_info_key, c"@24@0:8@16";
             "pathForResource:ofType:" => path_for_resource, c"@32@0:8@16@24";
+            "URLForResource:withExtension:" => url_for_resource, c"@32@0:8@16@24";
             "pathForResource:ofType:inDirectory:" => path_for_resource_in_directory, c"@40@0:8@16@24@32";
             "infoDictionary" => info_dictionary, c"@16@0:8";
             "executableName" => executable_name, c"*16@0:8"

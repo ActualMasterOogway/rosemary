@@ -147,6 +147,77 @@ unsafe extern "C" fn string_with_cstring_encoding(
     }
 }
 
+/// `+stringWithContentsOfURL:encoding:error:`, for the local file URLs this
+/// runtime can read.
+unsafe extern "C" fn string_with_contents_of_url(
+    _class: Id,
+    _sel: Sel,
+    url: Id,
+    ns: usize,
+    error: *mut Id,
+) -> Id {
+    if !error.is_null() {
+        // SAFETY: the caller passed a writable `NSError **`.
+        unsafe { *error = std::ptr::null_mut() };
+    }
+    let Some(path) =
+        (unsafe { corefoundation::url::as_url(url as CFTypeRef).and_then(|url| url.file_path()) })
+    else {
+        if !error.is_null() {
+            // SAFETY: the caller passed a writable `NSError **`.
+            unsafe {
+                *error = crate::error::make(
+                    "NSCocoaErrorDomain",
+                    256,
+                    "stringWithContentsOfURL: requires a file URL",
+                );
+            }
+        }
+        return std::ptr::null_mut();
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(why) => {
+            if !error.is_null() {
+                // SAFETY: the caller passed a writable `NSError **`.
+                unsafe {
+                    *error = crate::error::make(
+                        "NSCocoaErrorDomain",
+                        256,
+                        &format!("could not read {path}: {why}"),
+                    );
+                }
+            }
+            return std::ptr::null_mut();
+        }
+    };
+    // SAFETY: the bytes are a live buffer of their own length.
+    let string = unsafe {
+        api::CFStringCreateWithBytes(
+            std::ptr::null(),
+            bytes.as_ptr(),
+            bytes.len() as isize,
+            cf_encoding(ns),
+            0,
+        ) as Id
+    };
+    if string.is_null() && !error.is_null() {
+        // SAFETY: the caller passed a writable `NSError **`.
+        unsafe {
+            *error = crate::error::make(
+                "NSCocoaErrorDomain",
+                261,
+                &format!("could not decode {path} with encoding {ns}"),
+            );
+        }
+    }
+    if string.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: a string this call just created.
+    unsafe { api::CFAutorelease(string as CFTypeRef) as Id }
+}
+
 /// `+stringWithFormat:`, which arrives already rendered.
 ///
 /// A guest's variadic message never reaches an `IMP`: `objc::dispatch` reads the
@@ -821,6 +892,8 @@ pub(crate) fn install() {
     class_methods!(class, {
         "stringWithUTF8String:" => string_with_utf8, c"@24@0:8*16";
         "stringWithCString:encoding:" => string_with_cstring_encoding, c"@32@0:8*16Q24";
+        "stringWithContentsOfURL:encoding:error:" => string_with_contents_of_url,
+        c"@40@0:8@16Q24^@32";
         "string" => empty_string, c"@16@0:8";
         "stringWithFormat:" => string_with_format, c"@24@0:8@16";
         "localizedStringWithFormat:" => string_with_format, c"@24@0:8@16";
