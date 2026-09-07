@@ -589,6 +589,21 @@ fn chain(start: Id, sel: objc::sel::Sel) -> Option<(Id, &'static objc::class::Me
 /// filled it in, so the last motion is what says which view the event is about.
 static POINTER: std::sync::Mutex<(f32, f32)> = std::sync::Mutex::new((0.0, 0.0));
 
+/// Record a programmatic cursor warp in window coordinates.
+///
+/// SDL does not deliver a motion event for an in-window warp while relative
+/// mode is active. Without this explicit update, the cursor moves to Roblox's
+/// lock point but every `NSEvent` and `+[NSEvent mouseLocation]` continues to
+/// report the position from before the lock.
+pub(crate) fn warp_pointer(x: f32, y: f32) {
+    *POINTER.lock().unwrap_or_else(|e| e.into_inner()) = (x, y);
+}
+
+/// The last cursor position an event or programmatic warp established.
+pub(crate) fn pointer_position() -> (f32, f32) {
+    *POINTER.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Record where an event says the pointer is, and answer where a guest is to be
 /// told it is.
 ///
@@ -754,6 +769,16 @@ fn delegate_selector(name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_programmatic_warp_updates_the_reported_pointer() {
+        let previous = pointer_position();
+        warp_pointer(320.0, 240.0);
+        let warped = pointer_position();
+        *POINTER.lock().unwrap_or_else(|e| e.into_inner()) = previous;
+
+        assert_eq!(warped, (320.0, 240.0));
+    }
 
     /// Every name this crate publishes has a delegate method, so a notification
     /// cannot be posted with nowhere to send it.

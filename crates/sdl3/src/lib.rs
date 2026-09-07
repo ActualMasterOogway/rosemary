@@ -173,6 +173,7 @@ struct Api {
     SDL_DestroyCursor: Option<unsafe extern "C" fn(Cursor)>,
     SDL_GetMouseState: Option<unsafe extern "C" fn(*mut f32, *mut f32) -> u32>,
     SDL_GetGlobalMouseState: Option<unsafe extern "C" fn(*mut f32, *mut f32) -> u32>,
+    SDL_WarpMouseInWindow: Option<unsafe extern "C" fn(Window, f32, f32)>,
     SDL_WarpMouseGlobal: Option<unsafe extern "C" fn(f32, f32) -> bool>,
     SDL_SetWindowRelativeMouseMode: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_GetWindowRelativeMouseMode: Option<unsafe extern "C" fn(Window) -> bool>,
@@ -349,6 +350,7 @@ fn api() -> Option<&'static Api> {
             SDL_DestroyCursor,
             SDL_GetMouseState,
             SDL_GetGlobalMouseState,
+            SDL_WarpMouseInWindow,
             SDL_WarpMouseGlobal,
             SDL_SetWindowRelativeMouseMode,
             SDL_GetWindowRelativeMouseMode,
@@ -2031,6 +2033,19 @@ pub mod video {
         };
         // SAFETY: two coordinates.
         unsafe { f(x, y) }
+    }
+
+    /// Move the cursor to a window-relative point.
+    ///
+    /// Unlike the global spelling, SDL exposes no result, so `false` means
+    /// only that the host SDL does not publish the function.
+    pub fn warp_mouse_in_window(window: Window, x: f32, y: f32) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_WarpMouseInWindow) else {
+            return false;
+        };
+        // SAFETY: a window from SDL and two coordinates.
+        unsafe { f(window, x, y) };
+        true
     }
 
     /// `SDL_SetHint`, for the hints this tree has to override rather than
