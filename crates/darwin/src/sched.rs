@@ -12,7 +12,7 @@ unsafe extern "C" fn max(policy: i32) -> i32 {
             crate::errno::set(libc::EINVAL);
             -1
         },
-        |policy| unsafe { libc::sched_get_priority_max(policy) },
+        |_| pthread::consts::DARWIN_PRIORITY_MAX,
     )
 }
 
@@ -22,7 +22,7 @@ unsafe extern "C" fn min(policy: i32) -> i32 {
             crate::errno::set(libc::EINVAL);
             -1
         },
-        |policy| unsafe { libc::sched_get_priority_min(policy) },
+        |_| pthread::consts::DARWIN_PRIORITY_MIN,
     )
 }
 

@@ -31,6 +31,12 @@ unsafe extern "C" {
         pshared: *mut libc::c_int,
     ) -> libc::c_int;
 
+    /// POSIX, but not declared by the libc crate on Apple platforms.
+    pub fn pthread_mutexattr_setprotocol(
+        attr: *mut libc::pthread_mutexattr_t,
+        protocol: libc::c_int,
+    ) -> libc::c_int;
+
     /// Bound for Apple platforms and not under musl, where the crate declares only
     /// the setter.
     pub fn pthread_attr_getdetachstate(
@@ -59,6 +65,8 @@ pub mod cancel {
     #[cfg(target_os = "macos")]
     pub const ASYNCHRONOUS: libc::c_int = super::super::consts::PTHREAD_CANCEL_ASYNCHRONOUS;
 
+    // The libc crate does not currently expose these header constants on Linux;
+    // these are the glibc/musl declarations used by supported non-Apple hosts.
     #[cfg(not(target_os = "macos"))]
     pub const ENABLE: libc::c_int = 0;
     #[cfg(not(target_os = "macos"))]

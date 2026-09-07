@@ -2554,6 +2554,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("pthread_mutexattr_destroy", I32, P),
     sig!("pthread_mutexattr_init", I32, P),
     sig!("pthread_mutexattr_setprotocol", I32, P, I32),
+    sig!("pthread_mutexattr_getprotocol", I32, P, P),
     sig!("pthread_mutexattr_settype", I32, P, I32),
     sig!("pthread_mutexattr_gettype", I32, P, P),
     sig!("pthread_mutexattr_setpshared", I32, P, I32),

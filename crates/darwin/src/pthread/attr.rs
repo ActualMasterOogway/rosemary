@@ -13,6 +13,8 @@ pub struct Attributes {
     pub inherit_sched: i32,
     pub sched_policy: i32,
     pub sched_priority: i32,
+    pub qos_class: u32,
+    pub qos_relative_priority: i32,
 }
 
 impl Default for Attributes {
@@ -26,7 +28,9 @@ impl Default for Attributes {
             scope: PTHREAD_SCOPE_SYSTEM,
             inherit_sched: PTHREAD_INHERIT_SCHED,
             sched_policy: SCHED_OTHER,
-            sched_priority: 0,
+            sched_priority: DARWIN_PRIORITY_DEFAULT,
+            qos_class: QOS_CLASS_UNSPECIFIED,
+            qos_relative_priority: 0,
         }
     }
 }
@@ -98,6 +102,8 @@ impl Attributes {
                 inherit_sched: get(&r, slot::INHERIT) as i32,
                 sched_policy: (get(&r, slot::SCHED) & 0xffff_ffff) as i32,
                 sched_priority: (get(&r, slot::SCHED) >> 32) as i32,
+                qos_class: (get(&r, slot::SCOPE) >> 32) as u32,
+                qos_relative_priority: (get(&r, slot::INHERIT) >> 32) as i32,
             })
         }
     }
@@ -139,6 +145,8 @@ impl Attributes {
             inherit_sched: inherit,
             sched_policy: policy,
             sched_priority: param.sched_priority,
+            qos_class: QOS_CLASS_UNSPECIFIED,
+            qos_relative_priority: 0,
         })
     }
 
@@ -157,7 +165,7 @@ impl Attributes {
         // SAFETY: `attr` was just initialised by `pthread_attr_init`.
         unsafe {
             let a = attr.as_mut_ptr();
-            libc::pthread_attr_setstacksize(a, host_stack);
+            host_result(libc::pthread_attr_setstacksize(a, host_stack))?;
             #[cfg(not(target_os = "macos"))]
             {
                 let detach = match self.detached {
@@ -167,26 +175,52 @@ impl Attributes {
                 let Some(detach) = detach_state_to_host(detach) else {
                     return Err(err::EINVAL);
                 };
-                libc::pthread_attr_setdetachstate(a, detach);
+                host_result(libc::pthread_attr_setdetachstate(a, detach))?;
                 if let Some(guard) = self.guard_size {
-                    crate::pthread::raw::pthread_attr_setguardsize(a, guard);
+                    host_result(crate::pthread::raw::pthread_attr_setguardsize(a, guard))?;
                 }
             }
             #[cfg(target_os = "macos")]
             {
-                libc::pthread_attr_setdetachstate(
+                host_result(libc::pthread_attr_setdetachstate(
                     a,
                     match self.detached {
                         true => PTHREAD_CREATE_DETACHED,
                         false => PTHREAD_CREATE_JOINABLE,
                     },
-                );
+                ))?;
                 if let Some(guard) = self.guard_size {
-                    crate::pthread::raw::pthread_attr_setguardsize(a, guard);
+                    host_result(crate::pthread::raw::pthread_attr_setguardsize(a, guard))?;
                 }
+            }
+            let inherit = match self.inherit_sched {
+                PTHREAD_INHERIT_SCHED => libc::PTHREAD_INHERIT_SCHED,
+                PTHREAD_EXPLICIT_SCHED => libc::PTHREAD_EXPLICIT_SCHED,
+                _ => return Err(err::EINVAL),
+            };
+            host_result(libc::pthread_attr_setinheritsched(a, inherit))?;
+            if self.inherit_sched == PTHREAD_EXPLICIT_SCHED {
+                let Some(policy) = sched_policy_to_host(self.sched_policy) else {
+                    return Err(err::EINVAL);
+                };
+                let Some(priority) = sched_priority_to_host(self.sched_priority, policy) else {
+                    return Err(err::EINVAL);
+                };
+                host_result(libc::pthread_attr_setschedpolicy(a, policy))?;
+                let param = libc::sched_param {
+                    sched_priority: priority,
+                };
+                host_result(libc::pthread_attr_setschedparam(a, &param))?;
             }
         }
         Ok(attr)
+    }
+}
+
+fn host_result(rc: i32) -> Result<(), i32> {
+    match rc {
+        0 => Ok(()),
+        rc => Err(err::from_host(rc)),
     }
 }
 
@@ -208,7 +242,7 @@ impl HostAttr {
         // SAFETY: a live local.
         match unsafe { libc::pthread_attr_init(&mut attr) } {
             0 => Ok(HostAttr(attr)),
-            e => Err(e),
+            e => Err(err::from_host(e)),
         }
     }
 
@@ -318,18 +352,87 @@ pub mod imp {
         };
     }
 
-    setter!(attr_setdetachstate, slot::DETACH, |v| {
-        v == PTHREAD_CREATE_JOINABLE as u64 || v == PTHREAD_CREATE_DETACHED as u64
+    unsafe fn set_int(at: u64, index: usize, value: u64, valid: fn(i32) -> bool) -> i32 {
+        // SAFETY: the caller's guarantee.
+        let Some(r) = (unsafe { record(at) }) else {
+            return err::EINVAL;
+        };
+        let value = value as i32;
+        if !valid(value) {
+            return err::EINVAL;
+        }
+        set(&r, index, value as u32 as u64);
+        0
+    }
+
+    pub unsafe extern "C" fn attr_setdetachstate(at: u64, value: u64) -> i32 {
+        unsafe {
+            set_int(at, slot::DETACH, value, |v| {
+                matches!(v, PTHREAD_CREATE_JOINABLE | PTHREAD_CREATE_DETACHED)
+            })
+        }
+    }
+    setter!(attr_setstacksize, slot::STACK_SIZE, |v| {
+        v >= 16 * 1024 && v.is_multiple_of(DEFAULT_GUARD)
     });
-    setter!(attr_setstacksize, slot::STACK_SIZE, |v| v >= 16 * 1024);
-    setter!(attr_setstackaddr, slot::STACK_TOP, |v| v != 0);
+    setter!(attr_setstackaddr, slot::STACK_TOP, |v| {
+        v != 0 && v.is_multiple_of(DEFAULT_GUARD)
+    });
     setter!(attr_setguardsize, slot::GUARD_SIZE, |_| true);
-    setter!(attr_setscope, slot::SCOPE, |v| {
-        v == PTHREAD_SCOPE_SYSTEM as u64 || v == PTHREAD_SCOPE_PROCESS as u64
-    });
-    setter!(attr_setinheritsched, slot::INHERIT, |v| {
-        v == PTHREAD_INHERIT_SCHED as u64 || v == PTHREAD_EXPLICIT_SCHED as u64
-    });
+    pub unsafe extern "C" fn attr_setscope(at: u64, value: u64) -> i32 {
+        // Validate the attribute object before diagnosing its requested scope.
+        let Some(r) = (unsafe { record(at) }) else {
+            return err::EINVAL;
+        };
+        let value = value as i32;
+        match value {
+            PTHREAD_SCOPE_PROCESS => err::ENOTSUP,
+            PTHREAD_SCOPE_SYSTEM => {
+                set(&r, slot::SCOPE, value as u32 as u64);
+                0
+            }
+            _ => err::EINVAL,
+        }
+    }
+    pub unsafe extern "C" fn attr_setinheritsched(at: u64, value: u64) -> i32 {
+        unsafe {
+            set_int(at, slot::INHERIT, value, |v| {
+                matches!(v, PTHREAD_INHERIT_SCHED | PTHREAD_EXPLICIT_SCHED)
+            })
+        }
+    }
+
+    pub unsafe extern "C" fn attr_set_qos_class_np(at: u64, class: u32, relative: i32) -> i32 {
+        let Some(r) = (unsafe { record(at) }) else {
+            return err::EINVAL;
+        };
+        if !super::super::valid_qos(class, relative) {
+            return err::EINVAL;
+        }
+        let scope = get(&r, slot::SCOPE) as u32;
+        let inherit = get(&r, slot::INHERIT) as u32;
+        set(&r, slot::SCOPE, u64::from(scope) | (u64::from(class) << 32));
+        set(
+            &r,
+            slot::INHERIT,
+            u64::from(inherit) | ((relative as u32 as u64) << 32),
+        );
+        0
+    }
+
+    pub unsafe extern "C" fn attr_get_qos_class_np(at: u64, class: u64, relative: u64) -> i32 {
+        let Some(r) = (unsafe { record(at) }) else {
+            return err::EINVAL;
+        };
+        if class == 0 || relative == 0 {
+            return err::EINVAL;
+        }
+        unsafe {
+            *(class as usize as *mut u32) = (get(&r, slot::SCOPE) >> 32) as u32;
+            *(relative as usize as *mut i32) = (get(&r, slot::INHERIT) >> 32) as i32;
+        }
+        0
+    }
 
     getter!(attr_getdetachstate, slot::DETACH, i32, |v| v as i32);
     getter!(attr_getscope, slot::SCOPE, i32, |v| v as i32);
@@ -402,10 +505,17 @@ pub mod imp {
         let Some(r) = (unsafe { record(at) }) else {
             return err::EINVAL;
         };
-        if base == 0 || bytes < 16 * 1024 {
+        if base == 0
+            || bytes < 16 * 1024
+            || !base.is_multiple_of(DEFAULT_GUARD)
+            || !bytes.is_multiple_of(DEFAULT_GUARD)
+        {
             return err::EINVAL;
         }
-        set(&r, slot::STACK_TOP, base + bytes);
+        let Some(top) = base.checked_add(bytes) else {
+            return err::EINVAL;
+        };
+        set(&r, slot::STACK_TOP, top);
         set(&r, slot::STACK_SIZE, bytes);
         0
     }

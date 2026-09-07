@@ -60,7 +60,7 @@ unsafe fn reclaim<T>(at: u64) -> Box<T> {
 }
 
 /// A host mutex built for `kind`, or `None` if the host refused it.
-fn host_mutex(darwin_type: i32) -> Option<u64> {
+fn host_mutex(darwin_type: i32, protocol: i32) -> Option<u64> {
     let mut attr: libc::pthread_mutexattr_t = unsafe { core::mem::zeroed() };
     // SAFETY: a live local; `pthread_mutexattr_init` initialises the whole structure.
     if unsafe { libc::pthread_mutexattr_init(&mut attr) } != 0 {
@@ -69,6 +69,11 @@ fn host_mutex(darwin_type: i32) -> Option<u64> {
     let host_type = mutex_type_to_host(darwin_type)?;
     // SAFETY: an initialised attribute set and a type the translation vouched for.
     unsafe { libc::pthread_mutexattr_settype(&mut attr, host_type) };
+    // These constants agree on Darwin and supported Unix hosts.
+    if unsafe { super::raw::pthread_mutexattr_setprotocol(&mut attr, protocol) } != 0 {
+        unsafe { libc::pthread_mutexattr_destroy(&mut attr) };
+        return None;
+    }
 
     let m = empty::<libc::pthread_mutex_t>();
     // SAFETY: `m` is a live zeroed object of the right type and `attr` an initialised
@@ -107,7 +112,7 @@ unsafe fn mutex_of(at: u64) -> Option<*mut libc::pthread_mutex_t> {
     }
     // SAFETY: the caller's guarantee.
     let r = unsafe { Record::at(at, Kind::Mutex) };
-    r.payload_or_build(|signature| host_mutex(static_mutex_type(signature)))
+    r.payload_or_build(|signature| host_mutex(static_mutex_type(signature), PTHREAD_PRIO_NONE))
         .map(|p| p as usize as *mut libc::pthread_mutex_t)
 }
 
@@ -132,7 +137,7 @@ pub unsafe extern "C" fn mutex_init(at: u64, attr: u64) -> i32 {
         say_unsupported("a process-shared mutex");
         return err::ENOTSUP;
     }
-    let Some(host) = host_mutex(settings.kind) else {
+    let Some(host) = host_mutex(settings.kind, settings.protocol) else {
         return err::EINVAL;
     };
     // SAFETY: the caller's guarantee.
@@ -165,9 +170,17 @@ pub unsafe extern "C" fn mutex_destroy(at: u64) -> i32 {
     };
     // SAFETY: published by this module with this type, and now unreachable from the
     // guest - `take` replaced the signature before this ran.
-    let mut boxed = unsafe { reclaim::<libc::pthread_mutex_t>(host) };
+    let boxed = unsafe { reclaim::<libc::pthread_mutex_t>(host) };
+    let raw = Box::into_raw(boxed);
     // SAFETY: a live, initialised mutex this owns.
-    err::from_host(unsafe { libc::pthread_mutex_destroy(&mut *boxed) })
+    let rc = unsafe { libc::pthread_mutex_destroy(raw) };
+    if rc != 0 {
+        r.set_payload(host);
+        return err::from_host(rc);
+    }
+    // SAFETY: destroy succeeded and `raw` is again exclusively owned here.
+    drop(unsafe { Box::from_raw(raw) });
+    0
 }
 
 macro_rules! mutex_op {
@@ -221,9 +234,10 @@ pub unsafe extern "C" fn cond_init(at: u64, attr: u64) -> i32 {
         return err::EINVAL;
     }
     // SAFETY: the caller's guarantee.
-    if let Some(shared) = unsafe { simple_attr_pshared(attr, Kind::CondAttr) }
-        && shared == PTHREAD_PROCESS_SHARED
-    {
+    let Some(shared) = (unsafe { simple_attr_pshared(attr, Kind::CondAttr) }) else {
+        return err::EINVAL;
+    };
+    if shared == Some(PTHREAD_PROCESS_SHARED) {
         say_unsupported("a process-shared condition variable");
         return err::ENOTSUP;
     }
@@ -255,9 +269,17 @@ pub unsafe extern "C" fn cond_destroy(at: u64) -> i32 {
         return 0;
     };
     // SAFETY: published by this module, and now unreachable from the guest.
-    let mut boxed = unsafe { reclaim::<libc::pthread_cond_t>(host) };
+    let boxed = unsafe { reclaim::<libc::pthread_cond_t>(host) };
+    let raw = Box::into_raw(boxed);
     // SAFETY: a live condition variable this owns.
-    err::from_host(unsafe { libc::pthread_cond_destroy(&mut *boxed) })
+    let rc = unsafe { libc::pthread_cond_destroy(raw) };
+    if rc != 0 {
+        r.set_payload(host);
+        return err::from_host(rc);
+    }
+    // SAFETY: destroy succeeded and `raw` is again exclusively owned here.
+    drop(unsafe { Box::from_raw(raw) });
+    0
 }
 
 macro_rules! cond_signal_op {
@@ -330,6 +352,9 @@ pub unsafe extern "C" fn cond_timedwait_relative(at: u64, mutex: u64, reltime: u
     }
     // SAFETY: the caller states `reltime` is a readable `timespec`.
     let interval = unsafe { *(reltime as usize as *const libc::timespec) };
+    if interval.tv_sec < 0 || !(0..1_000_000_000).contains(&interval.tv_nsec) {
+        return err::EINVAL;
+    }
     let mut now: libc::timespec = unsafe { core::mem::zeroed() };
     // SAFETY: a live local. `CLOCK_REALTIME` is what an untouched `pthread_cond_t`
     // measures its deadlines against on both platforms.
@@ -384,9 +409,10 @@ pub unsafe extern "C" fn rwlock_init(at: u64, attr: u64) -> i32 {
         return err::EINVAL;
     }
     // SAFETY: the caller's guarantee.
-    if let Some(shared) = unsafe { simple_attr_pshared(attr, Kind::RwLockAttr) }
-        && shared == PTHREAD_PROCESS_SHARED
-    {
+    let Some(shared) = (unsafe { simple_attr_pshared(attr, Kind::RwLockAttr) }) else {
+        return err::EINVAL;
+    };
+    if shared == Some(PTHREAD_PROCESS_SHARED) {
         say_unsupported("a process-shared read-write lock");
         return err::ENOTSUP;
     }
@@ -418,9 +444,17 @@ pub unsafe extern "C" fn rwlock_destroy(at: u64) -> i32 {
         return 0;
     };
     // SAFETY: published by this module, and now unreachable from the guest.
-    let mut boxed = unsafe { reclaim::<libc::pthread_rwlock_t>(host) };
+    let boxed = unsafe { reclaim::<libc::pthread_rwlock_t>(host) };
+    let raw = Box::into_raw(boxed);
     // SAFETY: a live lock this owns.
-    err::from_host(unsafe { libc::pthread_rwlock_destroy(&mut *boxed) })
+    let rc = unsafe { libc::pthread_rwlock_destroy(raw) };
+    if rc != 0 {
+        r.set_payload(host);
+        return err::from_host(rc);
+    }
+    // SAFETY: destroy succeeded and `raw` is again exclusively owned here.
+    drop(unsafe { Box::from_raw(raw) });
+    0
 }
 
 macro_rules! rwlock_op {
@@ -519,20 +553,23 @@ impl MutexAttr {
 /// # Safety
 ///
 /// `attr` is null or a guest attribute object of `kind`.
-unsafe fn simple_attr_pshared(attr: u64, kind: Kind) -> Option<i32> {
+unsafe fn simple_attr_pshared(attr: u64, kind: Kind) -> Option<Option<i32>> {
     if attr == 0 {
-        return None;
+        return Some(None);
     }
     // SAFETY: the caller's guarantee.
     let r = unsafe { Record::at(attr, kind) };
-    r.is_ours().then(|| r.cell().load(Ordering::Relaxed) as i32)
+    r.is_ours()
+        .then(|| Some(r.cell().load(Ordering::Relaxed) as i32))
 }
 
-/// The three states a `pthread_once_t` moves through, in its own second word.
-mod once_state {
-    pub const PENDING: u64 = 0;
-    pub const RUNNING: u64 = 1;
-    pub const DONE: u64 = 2;
+fn host_once() -> Option<u64> {
+    Some(Box::into_raw(Box::new(libc::PTHREAD_ONCE_INIT)) as usize as u64)
+}
+
+thread_local! {
+    static ONCE_BODY: std::cell::Cell<*mut core::ffi::c_void> =
+        const { std::cell::Cell::new(core::ptr::null_mut()) };
 }
 
 /// Run `body` at most once for the `pthread_once_t` at `at`.
@@ -545,44 +582,35 @@ mod once_state {
 /// # Safety
 ///
 /// `at` is a guest `pthread_once_t *`.
-pub unsafe fn once(at: u64, body: impl FnOnce()) -> i32 {
+pub unsafe fn once<F: FnOnce()>(at: u64, body: F) -> i32 {
     if at == 0 {
         return err::EINVAL;
     }
     // SAFETY: the caller's guarantee.
     let r = unsafe { Record::at(at, Kind::Once) };
-    // A `pthread_once_t` is always statically initialised - there is no
-    // `pthread_once_init` - so the signature is the guest's and the state word is
-    // ours to claim.
-    if r.payload_or_build(|_| Some(once_state::PENDING)).is_none() {
+    let mut body = Some(body);
+    let Some(host) = r.payload_or_build(|_| host_once()) else {
         return err::EINVAL;
+    };
+
+    extern "C" fn invoke<F: FnOnce()>() {
+        ONCE_BODY.with(|slot| {
+            let body = slot.get().cast::<Option<F>>();
+            // SAFETY: `once` installed a live `Option<F>` for this thread, and the
+            // host invokes this callback synchronously before returning.
+            let body = unsafe { &mut *body }.take().expect("once body is present");
+            body();
+        });
     }
-    let cell = r.cell();
-    loop {
-        match cell.load(Ordering::Acquire) {
-            once_state::DONE => return 0,
-            once_state::RUNNING => {
-                // Another thread is inside the routine. POSIX says this one waits for
-                // it to return, which is the whole point of `pthread_once`.
-                std::hint::spin_loop();
-            }
-            _ => {
-                if cell
-                    .compare_exchange(
-                        once_state::PENDING,
-                        once_state::RUNNING,
-                        Ordering::Acquire,
-                        Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
-                    body();
-                    cell.store(once_state::DONE, Ordering::Release);
-                    return 0;
-                }
-            }
-        }
-    }
+
+    ONCE_BODY.with(|slot| {
+        let previous = slot.replace((&mut body as *mut Option<F>).cast());
+        // SAFETY: a live host once object, and a callback using this thread's slot.
+        let rc =
+            unsafe { libc::pthread_once(host as usize as *mut libc::pthread_once_t, invoke::<F>) };
+        slot.set(previous);
+        err::from_host(rc)
+    })
 }
 
 /// `int pthread_once(pthread_once_t *, void (*routine)(void))`
@@ -604,17 +632,15 @@ pub unsafe extern "C" fn once_entry(at: u64, routine: Option<extern "C" fn()>) -
     unsafe { once(at, || routine()) }
 }
 
-/// Report a pthread feature this crate declines to fake, once per description.
+/// Report a pthread feature this crate declines to fake, once per process.
 fn say_unsupported(what: &str) {
-    use std::sync::Mutex;
-    static SAID: Mutex<Vec<String>> = Mutex::new(Vec::new());
-    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
-    if said.iter().any(|s| s == what) {
+    use std::sync::atomic::AtomicBool;
+    static SAID: AtomicBool = AtomicBool::new(false);
+    if SAID.swap(true, Ordering::Relaxed) {
         return;
     }
-    said.push(what.to_string());
-    eprintln!(
-        "rosetta3: pthread: {what} is refused - the host object behind a guest's lock is on \
-         this process's heap, and a second process cannot reach it"
-    );
+    let _ = what;
+    const MESSAGE: &[u8] = b"rosetta3: pthread: a process-shared object is unsupported\n";
+    // SAFETY: a fixed static buffer; `write` is async-signal-safe.
+    unsafe { libc::write(libc::STDERR_FILENO, MESSAGE.as_ptr().cast(), MESSAGE.len()) };
 }

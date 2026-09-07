@@ -132,7 +132,9 @@ impl Kind {
             ],
             Kind::Cond => &[sig::COND_INIT],
             Kind::RwLock => &[sig::RWLOCK_INIT],
-            Kind::Once => &[sig::ONCE_INIT],
+            // Darwin's implementation ignores `__sig`, so a zero-filled control
+            // word is also a valid never-run once object.
+            Kind::Once => &[sig::ONCE_INIT, 0],
             // The attribute types have no static initializer: POSIX requires
             // `pthread_attr_init` and friends, so an attribute set this crate has not
             // seen is not one at all.
@@ -321,29 +323,28 @@ impl Record {
     /// undefined in POSIX; the previous payload is returned so the caller can free it
     /// rather than leak it.
     pub fn reinitialise(&self, payload: u64) -> Option<u64> {
-        let previous = (self.word(0).load(Ordering::Acquire) == ours(self.kind))
-            .then(|| self.word(PAYLOAD).load(Ordering::Relaxed));
+        let previous = (self.word(0).load(Ordering::Acquire) == ours(self.kind)
+            && self.owner_matches())
+        .then(|| self.word(PAYLOAD).load(Ordering::Relaxed));
         self.set_payload(payload);
         previous
     }
 }
 
-/// Report an object that was copied after being initialised, once per address.
+/// Report that an object was copied after being initialised, once per process.
 ///
 /// The failure this prevents is quiet: two mutexes sharing one host lock still lock
 /// and unlock, they just stop excluding each other. `EINVAL` alone would not say why.
 fn say_copied(kind: Kind, at: u64, owner: u64) {
-    use std::sync::Mutex;
-    static SAID: Mutex<Vec<u64>> = Mutex::new(Vec::new());
-    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
-    if said.contains(&at) {
+    use std::sync::atomic::AtomicBool;
+    static SAID: AtomicBool = AtomicBool::new(false);
+    if SAID.swap(true, Ordering::Relaxed) {
         return;
     }
-    said.push(at);
-    eprintln!(
-        "rosetta3: pthread: the {kind:?} at {at:#x} is a copy of the one at {owner:#x} - \
-         copying an initialised pthread object is undefined, and the copy is refused"
-    );
+    let _ = (kind, at, owner);
+    const MESSAGE: &[u8] = b"rosetta3: pthread: a copied initialised pthread object was refused\n";
+    // SAFETY: a fixed static buffer; `write` is async-signal-safe.
+    unsafe { libc::write(libc::STDERR_FILENO, MESSAGE.as_ptr().cast(), MESSAGE.len()) };
 }
 
 #[cfg(test)]

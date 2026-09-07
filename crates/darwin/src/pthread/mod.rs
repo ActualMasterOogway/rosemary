@@ -89,6 +89,86 @@ fn thread_of(guest: u64) -> libc::pthread_t {
     unsafe { core::mem::transmute_copy(&guest) }
 }
 
+fn thread_bits(thread: libc::pthread_t) -> u64 {
+    // SAFETY: `pthread_t` is pointer-sized on supported LP64 hosts.
+    unsafe { core::mem::transmute_copy(&thread) }
+}
+
+mod thread_ids {
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+    const CAPACITY: usize = 1024;
+    static THREADS: [AtomicU64; CAPACITY] = [const { AtomicU64::new(0) }; CAPACITY];
+    static IDS: [AtomicU32; CAPACITY] = [const { AtomicU32::new(0) }; CAPACITY];
+    static QOS: [AtomicU64; CAPACITY] = [const { AtomicU64::new(0) }; CAPACITY];
+
+    pub fn register(thread: u64, id: u32, qos: u64) {
+        let start = thread as usize % CAPACITY;
+        for offset in 0..CAPACITY {
+            let index = (start + offset) % CAPACITY;
+            let seen = THREADS[index].load(Ordering::Acquire);
+            if seen == thread {
+                QOS[index].store(qos, Ordering::Relaxed);
+                IDS[index].store(id, Ordering::Release);
+                return;
+            }
+            if seen == 0
+                && THREADS[index]
+                    .compare_exchange(0, thread, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+            {
+                QOS[index].store(qos, Ordering::Relaxed);
+                IDS[index].store(id, Ordering::Release);
+                return;
+            }
+        }
+    }
+
+    pub fn set_qos(thread: u64, qos: u64) {
+        let start = thread as usize % CAPACITY;
+        for offset in 0..CAPACITY {
+            let index = (start + offset) % CAPACITY;
+            match THREADS[index].load(Ordering::Acquire) {
+                seen if seen == thread => {
+                    QOS[index].store(qos, Ordering::Release);
+                    return;
+                }
+                0 => return,
+                _ => {}
+            }
+        }
+    }
+
+    pub fn qos(thread: u64) -> Option<u64> {
+        let start = thread as usize % CAPACITY;
+        for offset in 0..CAPACITY {
+            let index = (start + offset) % CAPACITY;
+            match THREADS[index].load(Ordering::Acquire) {
+                seen if seen == thread => return Some(QOS[index].load(Ordering::Acquire)),
+                0 => return None,
+                _ => {}
+            }
+        }
+        None
+    }
+
+    pub fn get(thread: u64) -> Option<u32> {
+        let start = thread as usize % CAPACITY;
+        for offset in 0..CAPACITY {
+            let index = (start + offset) % CAPACITY;
+            match THREADS[index].load(Ordering::Acquire) {
+                seen if seen == thread => {
+                    let id = IDS[index].load(Ordering::Acquire);
+                    return (id != 0).then_some(id);
+                }
+                0 => return None,
+                _ => {}
+            }
+        }
+        None
+    }
+}
+
 /// Build the `init`/`destroy`/`setter`/`getter` quartet for an attribute object whose
 /// whole state is one packed word.
 macro_rules! simple_attr {
@@ -124,7 +204,12 @@ macro_rules! simple_attr {
     };
 }
 
-simple_attr!(Kind::MutexAttr, mutexattr_init, mutexattr_destroy, 0);
+simple_attr!(
+    Kind::MutexAttr,
+    mutexattr_init,
+    mutexattr_destroy,
+    MutexAttr::default().packed_public()
+);
 simple_attr!(
     Kind::CondAttr,
     condattr_init,
@@ -193,6 +278,39 @@ pub unsafe extern "C" fn mutexattr_gettype(at: u64, out: u64) -> i32 {
     let settings = MutexAttr::unpacked_public(r.cell().load(std::sync::atomic::Ordering::Relaxed));
     // SAFETY: the caller states `out` is a writable `int *`.
     unsafe { *(out as usize as *mut i32) = settings.kind };
+    0
+}
+
+pub unsafe extern "C" fn mutexattr_setprotocol(at: u64, protocol: u64) -> i32 {
+    let Some(r) = (unsafe { mutexattr_word(at) }) else {
+        return err::EINVAL;
+    };
+    let protocol = protocol as i32;
+    if !matches!(
+        protocol,
+        PTHREAD_PRIO_NONE | PTHREAD_PRIO_INHERIT | PTHREAD_PRIO_PROTECT
+    ) {
+        return err::EINVAL;
+    }
+    let mut settings =
+        MutexAttr::unpacked_public(r.cell().load(std::sync::atomic::Ordering::Relaxed));
+    settings.protocol = protocol;
+    r.cell().store(
+        settings.packed_public(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    0
+}
+
+pub unsafe extern "C" fn mutexattr_getprotocol(at: u64, out: u64) -> i32 {
+    let Some(r) = (unsafe { mutexattr_word(at) }) else {
+        return err::EINVAL;
+    };
+    if out == 0 {
+        return err::EINVAL;
+    }
+    let settings = MutexAttr::unpacked_public(r.cell().load(std::sync::atomic::Ordering::Relaxed));
+    unsafe { *(out as usize as *mut i32) = settings.protocol };
     0
 }
 
@@ -415,6 +533,20 @@ pub unsafe extern "C" fn setname_np(name: u64) -> i32 {
     }
 }
 
+/// `int pthread_getname_np(pthread_t, char *, size_t)`.
+pub unsafe extern "C" fn getname_np(thread: u64, name: u64, len: u64) -> i32 {
+    if name == 0 || len == 0 {
+        return err::EINVAL;
+    }
+    err::from_host(unsafe {
+        libc::pthread_getname_np(
+            thread_of(thread),
+            name as usize as *mut libc::c_char,
+            len as usize,
+        )
+    })
+}
+
 /// Non-zero on the thread that ran `main`. Answered by comparing thread ids rather
 /// than by asking libpthread, which has no such call here.
 pub unsafe extern "C" fn main_np() -> i32 {
@@ -441,11 +573,13 @@ pub unsafe extern "C" fn threadid_np(thread: u64, out: u64) -> i32 {
         return err::EINVAL;
     }
     if thread != 0 {
-        // Another thread's id is not readable from here without a registry, and the
-        // callers that matter ask about themselves.
         // SAFETY: `thread` is a live handle; `pthread_equal` only compares.
         if unsafe { libc::pthread_equal(thread_of(thread), libc::pthread_self()) } == 0 {
-            return err::ENOTSUP;
+            let Some(id) = thread_ids::get(thread) else {
+                return err::ESRCH;
+            };
+            unsafe { *(out as usize as *mut u64) = u64::from(id) };
+            return 0;
         }
     }
     // SAFETY: the caller states `out` is a writable `uint64_t *`.
@@ -461,15 +595,11 @@ pub unsafe extern "C" fn threadid_np(thread: u64, out: u64) -> i32 {
 /// with a static initializer in a C++ image needs this on Linux at all - so
 /// [`id`] is the answer, unique while the thread runs.
 ///
-/// A thread other than the caller is `MACH_PORT_NULL`: another thread's id is
-/// not readable from here without a registry, and zero is what Apple's returns
-/// for a thread it cannot name. See [`threadid_np`], which has the same limit
-/// for the same reason.
 pub unsafe extern "C" fn mach_thread_np(thread: u64) -> u32 {
     if thread != 0 {
         // SAFETY: `thread` is a live handle; `pthread_equal` only compares.
         if unsafe { libc::pthread_equal(thread_of(thread), libc::pthread_self()) } == 0 {
-            return 0;
+            return thread_ids::get(thread).unwrap_or(0);
         }
     }
     id()
@@ -519,12 +649,52 @@ pub unsafe extern "C" fn set_qos_class_self_np(class: u32, relative: i32) -> i32
     }
     #[cfg(not(target_os = "linux"))]
     let _ = nice;
+    let packed = u64::from(class) | ((relative as u32 as u64) << 32);
+    CURRENT_QOS.with(|qos| qos.set(packed));
+    thread_ids::set_qos(thread_bits(unsafe { libc::pthread_self() }), packed);
+    0
+}
+
+thread_local! {
+    static CURRENT_QOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn valid_qos(class: u32, relative: i32) -> bool {
+    matches!(
+        class,
+        QOS_CLASS_BACKGROUND
+            | QOS_CLASS_UTILITY
+            | QOS_CLASS_DEFAULT
+            | QOS_CLASS_UNSPECIFIED
+            | QOS_CLASS_USER_INITIATED
+            | QOS_CLASS_USER_INTERACTIVE
+    ) && (QOS_MIN_RELATIVE_PRIORITY..=0).contains(&relative)
+}
+
+pub unsafe extern "C" fn get_qos_class_np(thread: u64, class: u64, relative: u64) -> i32 {
+    if class == 0 || relative == 0 {
+        return err::EINVAL;
+    }
+    let packed = if thread == 0
+        || unsafe { libc::pthread_equal(thread_of(thread), libc::pthread_self()) } != 0
+    {
+        CURRENT_QOS.with(std::cell::Cell::get)
+    } else {
+        let Some(qos) = thread_ids::qos(thread) else {
+            return err::ESRCH;
+        };
+        qos
+    };
+    unsafe {
+        *(class as usize as *mut u32) = packed as u32;
+        *(relative as usize as *mut i32) = (packed >> 32) as i32;
+    }
     0
 }
 
 /// `pthread_set_qos_class_self_np`'s failure: the libc convention, not the pthread one.
 fn qos_einval() -> i32 {
-    crate::errno::set(err::EINVAL);
+    crate::errno::set(libc::EINVAL);
     -1
 }
 
@@ -553,7 +723,7 @@ pub unsafe extern "C" fn setcancelstate(state: u64, old: u64) -> i32 {
         // SAFETY: the caller states `old` is a writable `int *`.
         unsafe { *(old as usize as *mut i32) = darwin };
     }
-    rc
+    err::from_host(rc)
 }
 
 /// `int pthread_setcanceltype(int, int *)`, inverted for the same reason.
@@ -578,7 +748,7 @@ pub unsafe extern "C" fn setcanceltype(kind: u64, old: u64) -> i32 {
         // SAFETY: the caller states `old` is a writable `int *`.
         unsafe { *(old as usize as *mut i32) = darwin };
     }
-    rc
+    err::from_host(rc)
 }
 
 fn host_cancel_enable() -> libc::c_int {
@@ -685,6 +855,9 @@ fn stack_size(attributes: &Attributes) -> usize {
 struct Start {
     entry: u64,
     arg: u64,
+    qos_class: u32,
+    qos_relative_priority: i32,
+    registered: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The host thread's start routine, which enters Darwin code and stays there.
@@ -704,7 +877,17 @@ extern "C" fn run(context: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
     // the same for the same reason.
     // SAFETY: the caller's guarantee - the same allocation, reclaimed once.
     let start = *unsafe { Box::from_raw(context as *mut Start) };
+    // SAFETY: this thread is live by definition.
+    let qos = u64::from(start.qos_class) | ((start.qos_relative_priority as u32 as u64) << 32);
+    thread_ids::register(thread_bits(unsafe { libc::pthread_self() }), id(), qos);
+    start
+        .registered
+        .store(true, std::sync::atomic::Ordering::Release);
     let _darwin = crate::tls::DarwinThread::enter();
+    if start.qos_class != QOS_CLASS_UNSPECIFIED || start.qos_relative_priority != 0 {
+        // SAFETY: values were validated by the attribute setter.
+        unsafe { set_qos_class_self_np(start.qos_class, start.qos_relative_priority) };
+    }
     // SAFETY: `create` refused a null, and a start routine is `void *(void *)` -
     // one pointer in, one out, which is what this signature is in the guest's
     // integer registers.
@@ -745,7 +928,14 @@ pub unsafe extern "C" fn create(out: u64, attr: u64, start: u64, arg: u64) -> i3
         Ok(host) => host,
         Err(rc) => return rc,
     };
-    let context = Box::into_raw(Box::new(Start { entry: start, arg }));
+    let registered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let context = Box::into_raw(Box::new(Start {
+        entry: start,
+        arg,
+        qos_class: attributes.qos_class,
+        qos_relative_priority: attributes.qos_relative_priority,
+        registered: std::sync::Arc::clone(&registered),
+    }));
     let mut thread = null_thread();
     // SAFETY: `host` is an initialised attribute set that outlives the call, which is
     // all `pthread_create` needs - it copies what it wants out of one. `run` is this
@@ -762,6 +952,11 @@ pub unsafe extern "C" fn create(out: u64, attr: u64, start: u64, arg: u64) -> i3
         // SAFETY: the thread did not start, so nothing else holds the allocation.
         drop(unsafe { Box::from_raw(context) });
         return err::from_host(rc);
+    }
+    // Make the cross-thread Darwin id available before `pthread_create` returns.
+    // The child publishes it at the first instruction of `run`.
+    while !registered.load(std::sync::atomic::Ordering::Acquire) {
+        std::thread::yield_now();
     }
     // SAFETY: the caller states `out` is a writable `pthread_t`, which is eight
     // opaque bytes on both platforms - see [`thread_of`], which reads it back.
@@ -851,6 +1046,8 @@ fn entries() -> &'static [(&'static str, u64)] {
             "pthread_attr_getschedpolicy" => attr::imp::attr_getschedpolicy,
             "pthread_attr_setschedparam" => attr::imp::attr_setschedparam,
             "pthread_attr_getschedparam" => attr::imp::attr_getschedparam,
+            "pthread_attr_set_qos_class_np" => attr::imp::attr_set_qos_class_np,
+            "pthread_attr_get_qos_class_np" => attr::imp::attr_get_qos_class_np,
 
             // Mutexes.
             "pthread_mutex_init" => sync::mutex_init,
@@ -862,6 +1059,8 @@ fn entries() -> &'static [(&'static str, u64)] {
             "pthread_mutexattr_destroy" => mutexattr_destroy,
             "pthread_mutexattr_settype" => mutexattr_settype,
             "pthread_mutexattr_gettype" => mutexattr_gettype,
+            "pthread_mutexattr_setprotocol" => mutexattr_setprotocol,
+            "pthread_mutexattr_getprotocol" => mutexattr_getprotocol,
             "pthread_mutexattr_setpshared" => mutexattr_setpshared,
             "pthread_mutexattr_getpshared" => mutexattr_getpshared,
             "pthread_mutexattr_setpolicy_np" => mutexattr_setpolicy_np,
@@ -910,11 +1109,13 @@ fn entries() -> &'static [(&'static str, u64)] {
             "pthread_get_stackaddr_np" => get_stackaddr_np,
             "pthread_get_stacksize_np" => get_stacksize_np,
             "pthread_setname_np" => setname_np,
+            "pthread_getname_np" => getname_np,
             "pthread_main_np" => main_np,
             "pthread_threadid_np" => threadid_np,
             "pthread_mach_thread_np" => mach_thread_np,
             "pthread_yield_np" => yield_np,
             "pthread_set_qos_class_self_np" => set_qos_class_self_np,
+            "pthread_get_qos_class_np" => get_qos_class_np,
             "pthread_setcancelstate" => setcancelstate,
             "pthread_setcanceltype" => setcanceltype,
 
@@ -924,6 +1125,17 @@ fn entries() -> &'static [(&'static str, u64)] {
         }
     })
 }
+
+/// Known Darwin pthread exports that are intentionally still unavailable.
+///
+/// Keeping this inventory next to `entries` makes the blanket `pthread_` denial in
+/// `divergent` explicit rather than making an absent symbol look overlooked.
+const _KNOWN_MISSING: &[&str] = &[
+    "pthread_mutexattr_setprioceiling",
+    "pthread_mutexattr_getprioceiling",
+    "pthread_mutex_setprioceiling",
+    "pthread_mutex_getprioceiling",
+];
 
 /// Names this module deliberately leaves to the host, and why.
 ///
@@ -1033,6 +1245,8 @@ mod tests {
     type Once = Obj<{ object::size::ONCE }>;
     type Attr = Obj<{ object::size::ATTR }>;
     type MutexAttrObj = Obj<{ object::size::MUTEXATTR }>;
+    type CondAttrObj = Obj<{ object::size::CONDATTR }>;
+    type RwLockAttrObj = Obj<{ object::size::RWLOCKATTR }>;
 
     /// The three names whose Darwin-shaped object glibc would misread must bind to
     /// *this crate's* entry, not to the host's.
@@ -1113,14 +1327,14 @@ mod tests {
 
             assert_eq!(
                 attr::imp::attr_setscope(a.at(), PTHREAD_SCOPE_PROCESS as u64),
-                0
+                err::ENOTSUP
             );
             let mut scope = 0i32;
             assert_eq!(
                 attr::imp::attr_getscope(a.at(), &mut scope as *mut _ as u64),
                 0
             );
-            assert_eq!(scope, PTHREAD_SCOPE_PROCESS);
+            assert_eq!(scope, PTHREAD_SCOPE_SYSTEM);
 
             assert_eq!(attr::imp::attr_setschedpolicy(a.at(), SCHED_RR as u64), 0);
             let mut policy = 0i32;
@@ -1226,6 +1440,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_failed_mutex_destroy_leaves_the_mutex_live() {
+        let m = Mutex::new();
+        unsafe {
+            assert_eq!(sync::mutex_init(m.at(), 0), 0);
+            assert_eq!(sync::mutex_lock(m.at()), 0);
+            assert_eq!(sync::mutex_destroy(m.at()), err::EBUSY);
+            assert_eq!(
+                sync::mutex_unlock(m.at()),
+                0,
+                "the host object was restored"
+            );
+            assert_eq!(sync::mutex_destroy(m.at()), 0, "destroy can be retried");
+        }
+    }
+
     /// The bug this whole file exists to prevent: `PTHREAD_MUTEX_RECURSIVE` is 2 on
     /// Darwin and 1 on Linux, so an untranslated request for a recursive lock returns
     /// an error-checking one - which does not recurse, it reports `EDEADLK`.
@@ -1296,6 +1526,65 @@ mod tests {
                 err::EINVAL,
                 "not an attribute set any more"
             );
+        }
+    }
+
+    #[test]
+    fn a_fresh_mutex_attribute_has_darwins_private_default() {
+        let attr = MutexAttrObj::new();
+        unsafe {
+            assert_eq!(mutexattr_init(attr.at()), 0);
+            let mut shared = 0;
+            assert_eq!(
+                mutexattr_getpshared(attr.at(), &mut shared as *mut _ as u64),
+                0
+            );
+            assert_eq!(shared, PTHREAD_PROCESS_PRIVATE);
+            let mut protocol = -1;
+            assert_eq!(
+                mutexattr_getprotocol(attr.at(), &mut protocol as *mut _ as u64),
+                0
+            );
+            assert_eq!(protocol, PTHREAD_PRIO_NONE);
+        }
+    }
+
+    #[test]
+    fn int_attribute_setters_ignore_unspecified_upper_register_bits() {
+        let attr = Attr::new();
+        unsafe {
+            assert_eq!(attr::imp::attr_init(attr.at()), 0);
+            let garbage = 0xdead_beef_0000_0000;
+            assert_eq!(
+                attr::imp::attr_setdetachstate(attr.at(), garbage | PTHREAD_CREATE_DETACHED as u64,),
+                0
+            );
+            assert_eq!(
+                attr::imp::attr_setinheritsched(attr.at(), garbage | PTHREAD_EXPLICIT_SCHED as u64,),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn qos_attributes_round_trip() {
+        let attr = Attr::new();
+        unsafe {
+            assert_eq!(attr::imp::attr_init(attr.at()), 0);
+            assert_eq!(
+                attr::imp::attr_set_qos_class_np(attr.at(), QOS_CLASS_UTILITY, -4),
+                0
+            );
+            let (mut class, mut relative) = (0u32, 0i32);
+            assert_eq!(
+                attr::imp::attr_get_qos_class_np(
+                    attr.at(),
+                    &mut class as *mut _ as u64,
+                    &mut relative as *mut _ as u64,
+                ),
+                0
+            );
+            assert_eq!((class, relative), (QOS_CLASS_UTILITY, -4));
         }
     }
 
@@ -1398,6 +1687,33 @@ mod tests {
             );
             assert_eq!(sync::mutex_unlock(original.at()), 0);
             assert_eq!(sync::mutex_destroy(original.at()), 0);
+        }
+    }
+
+    #[test]
+    fn reinitialising_a_copied_mutex_does_not_free_the_original() {
+        let original = Mutex::new();
+        unsafe { assert_eq!(sync::mutex_init(original.at(), 0), 0) };
+        let mut copy = Mutex::new();
+        copy.0.copy_from_slice(&original.0);
+        unsafe {
+            assert_eq!(sync::mutex_init(copy.at(), 0), 0);
+            assert_eq!(sync::mutex_lock(original.at()), 0);
+            assert_eq!(sync::mutex_unlock(original.at()), 0);
+            assert_eq!(sync::mutex_destroy(copy.at()), 0);
+            assert_eq!(sync::mutex_destroy(original.at()), 0);
+        }
+    }
+
+    #[test]
+    fn nonnull_invalid_cond_and_rwlock_attributes_are_refused() {
+        let c = Cond::new();
+        let l = RwLock::new();
+        let ca = CondAttrObj::new();
+        let ra = RwLockAttrObj::new();
+        unsafe {
+            assert_eq!(sync::cond_init(c.at(), ca.at()), err::EINVAL);
+            assert_eq!(sync::rwlock_init(l.at(), ra.at()), err::EINVAL);
         }
     }
 
@@ -1508,6 +1824,43 @@ mod tests {
                 start.elapsed() >= std::time::Duration::from_millis(15),
                 "it waited"
             );
+            assert_eq!(sync::mutex_unlock(m.at()), 0);
+            assert_eq!(sync::cond_destroy(c.at()), 0);
+            assert_eq!(sync::mutex_destroy(m.at()), 0);
+        }
+    }
+
+    #[test]
+    fn a_relative_timed_wait_rejects_invalid_intervals() {
+        let m = Mutex::new();
+        let c = Cond::new();
+        unsafe {
+            assert_eq!(sync::mutex_init(m.at(), 0), 0);
+            assert_eq!(sync::cond_init(c.at(), 0), 0);
+            assert_eq!(sync::mutex_lock(m.at()), 0);
+            for interval in [
+                libc::timespec {
+                    tv_sec: -1,
+                    tv_nsec: 0,
+                },
+                libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: -1,
+                },
+                libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 1_000_000_000,
+                },
+            ] {
+                assert_eq!(
+                    sync::cond_timedwait_relative(
+                        c.at(),
+                        m.at(),
+                        &interval as *const libc::timespec as u64,
+                    ),
+                    err::EINVAL
+                );
+            }
             assert_eq!(sync::mutex_unlock(m.at()), 0);
             assert_eq!(sync::cond_destroy(c.at()), 0);
             assert_eq!(sync::mutex_destroy(m.at()), 0);
@@ -1631,10 +1984,20 @@ mod tests {
     }
 
     #[test]
-    fn once_refuses_a_control_word_that_is_not_one() {
+    fn once_accepts_a_zeroed_control_word() {
         let o = Once::new();
-        // SAFETY: a live, zeroed object that carries no static initializer.
-        assert_eq!(unsafe { once(o.at(), || unreachable!()) }, err::EINVAL);
+        let ran = AtomicU32::new(0);
+        // SAFETY: Darwin treats a live, zeroed control as a fresh once object.
+        assert_eq!(
+            unsafe {
+                once(o.at(), || {
+                    ran.fetch_add(1, Ordering::Relaxed);
+                })
+            },
+            0
+        );
+        assert_eq!(unsafe { once(o.at(), || unreachable!()) }, 0);
+        assert_eq!(ran.load(Ordering::Relaxed), 1);
     }
 
     /// Darwin's cancel state values are the opposite way round from the host's, so an
@@ -1684,6 +2047,35 @@ mod tests {
         // A number that is not a signal on either host.
         // SAFETY: refused before anything is delivered.
         assert_eq!(unsafe { kill(this_thread(), 200) }, err::EINVAL);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn another_threads_darwin_ids_are_available() {
+        use std::sync::atomic::AtomicBool;
+
+        static GO: AtomicBool = AtomicBool::new(false);
+        extern "C" fn wait(_: u64) -> u64 {
+            while !GO.load(Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
+            0
+        }
+
+        GO.store(false, Ordering::Release);
+        let mut thread = 0u64;
+        unsafe {
+            assert_eq!(
+                create(&mut thread as *mut _ as u64, 0, wait as *const () as u64, 0,),
+                0
+            );
+            let mut tid = 0u64;
+            assert_eq!(threadid_np(thread, &mut tid as *mut _ as u64), 0);
+            assert_ne!(tid, 0);
+            assert_eq!(u64::from(mach_thread_np(thread)), tid);
+            GO.store(true, Ordering::Release);
+            assert_eq!(join(thread, 0), 0);
+        }
     }
 
     fn this_thread() -> u64 {

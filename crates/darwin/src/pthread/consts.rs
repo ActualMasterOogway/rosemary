@@ -153,6 +153,50 @@ pub fn sched_policy_from_host(host: libc::c_int) -> i32 {
     }
 }
 
+pub const DARWIN_PRIORITY_MIN: i32 = 15;
+pub const DARWIN_PRIORITY_DEFAULT: i32 = 31;
+pub const DARWIN_PRIORITY_MAX: i32 = 47;
+
+/// Scale Darwin's fixed priority range onto the selected host policy's range.
+pub fn sched_priority_to_host(darwin: i32, host_policy: libc::c_int) -> Option<i32> {
+    if !(DARWIN_PRIORITY_MIN..=DARWIN_PRIORITY_MAX).contains(&darwin) {
+        return None;
+    }
+    // SAFETY: the policy has already been translated to a host policy.
+    let (min, max) = unsafe {
+        (
+            libc::sched_get_priority_min(host_policy),
+            libc::sched_get_priority_max(host_policy),
+        )
+    };
+    if min < 0 || max < min {
+        return None;
+    }
+    if min == max {
+        return Some(min);
+    }
+    Some(
+        min + (darwin - DARWIN_PRIORITY_MIN) * (max - min)
+            / (DARWIN_PRIORITY_MAX - DARWIN_PRIORITY_MIN),
+    )
+}
+
+/// Scale a host policy's priority back into Darwin's fixed range.
+pub fn sched_priority_from_host(host: i32, host_policy: libc::c_int) -> i32 {
+    // SAFETY: `host_policy` came from the host scheduler.
+    let (min, max) = unsafe {
+        (
+            libc::sched_get_priority_min(host_policy),
+            libc::sched_get_priority_max(host_policy),
+        )
+    };
+    if min < 0 || max <= min {
+        return DARWIN_PRIORITY_DEFAULT;
+    }
+    DARWIN_PRIORITY_MIN
+        + (host.clamp(min, max) - min) * (DARWIN_PRIORITY_MAX - DARWIN_PRIORITY_MIN) / (max - min)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +245,24 @@ mod tests {
             "0 is not a Darwin detach state"
         );
         assert_eq!(sched_policy_to_host(99), None);
+    }
+
+    #[test]
+    fn scheduling_priorities_translate_in_both_directions() {
+        let other = sched_policy_to_host(SCHED_OTHER).unwrap();
+        assert_eq!(
+            sched_priority_to_host(DARWIN_PRIORITY_DEFAULT, other),
+            Some(0)
+        );
+        assert_eq!(sched_priority_from_host(0, other), DARWIN_PRIORITY_DEFAULT);
+        assert_eq!(sched_priority_to_host(DARWIN_PRIORITY_MIN - 1, other), None);
+
+        let fifo = sched_policy_to_host(SCHED_FIFO).unwrap();
+        let low = sched_priority_to_host(DARWIN_PRIORITY_MIN, fifo).unwrap();
+        let high = sched_priority_to_host(DARWIN_PRIORITY_MAX, fifo).unwrap();
+        assert_eq!(low, unsafe { libc::sched_get_priority_min(fifo) });
+        assert_eq!(high, unsafe { libc::sched_get_priority_max(fifo) });
+        assert_eq!(sched_priority_from_host(low, fifo), DARWIN_PRIORITY_MIN);
+        assert_eq!(sched_priority_from_host(high, fifo), DARWIN_PRIORITY_MAX);
     }
 }
