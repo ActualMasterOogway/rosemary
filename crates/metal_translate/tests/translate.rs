@@ -214,7 +214,7 @@ fn source_msl_rejects_unimplemented_operations() {
 }
 
 #[test]
-fn source_msl_accepts_blit_parameters_and_reaches_the_buffer_load() {
+fn source_msl_accepts_blit_body_through_its_texture_write() {
     let error = parse_msl(
         "struct BlitParams { uint3 offset; uint3 size; uint2 stride; };\n\
          kernel void blit(\n\
@@ -225,6 +225,7 @@ fn source_msl_accepts_blit_parameters_and_reaches_the_buffer_load() {
          {\n\
            if (all(gid < params.size)) {\n\
              uchar4 element = input[gid.x];\n\
+             output.write(float4(element), gid);\n\
            }\n\
          }",
     )
@@ -232,6 +233,6 @@ fn source_msl_accepts_blit_parameters_and_reaches_the_buffer_load() {
     assert_eq!(error.diagnostics[0].phase, Phase::AirSyntax);
     assert_eq!(
         error.diagnostics[0].message,
-        "MSL buffer element loads are not implemented"
+        "MSL texture writes require typed buffer/image lowering"
     );
 }

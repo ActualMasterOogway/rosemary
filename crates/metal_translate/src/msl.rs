@@ -104,7 +104,7 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
             ));
         }
     }
-    if let Some(error) = parse_blit_bounds_guard(&source, body) {
+    if let Some(error) = parse_blit_body(&source, body) {
         return Err(error);
     }
     let Some(writable_buffer) = resources.iter().find(|resource| {
@@ -200,11 +200,10 @@ fn parse_resource_attribute(
     Some((kind, index, access))
 }
 
-/// Recognize the bounds guard used by the shipped blit kernels before lowering
-/// their body. The guard is not accepted as a no-op: until vector comparison
-/// and reduction have Metal IR and SPIR-V lowering, parsing continues only far
-/// enough to identify the following operation accurately.
-fn parse_blit_bounds_guard(source: &str, body: &str) -> Option<TranslateError> {
+/// Parse the syntactic shape of the shipped blit kernels up through their image
+/// write. Each construct remains rejected until it has Metal IR and SPIR-V
+/// lowering; recognizing a construct here never makes it a no-op.
+fn parse_blit_body(source: &str, body: &str) -> Option<TranslateError> {
     let guard = body.trim_start();
     if !guard.starts_with("if") {
         return None;
@@ -224,20 +223,31 @@ fn parse_blit_bounds_guard(source: &str, body: &str) -> Option<TranslateError> {
         .map(|offset| close + 1 + offset)?;
     let body_close = matching(guard, body_open, '{', '}')?;
     let guarded_body = &guard[body_open + 1..body_close];
-    if let Some(load) = guarded_body.find("=") {
-        let statement = guarded_body[..load].trim();
-        if statement.split_whitespace().count() == 2 && guarded_body[load + 1..].contains('[') {
-            return Some(syntax_at(
-                source,
-                source.find(guarded_body).unwrap_or(0) + load,
-                "MSL buffer element loads are not implemented",
-            ));
-        }
+    let load_end = guarded_body.find(';')?;
+    let load = guarded_body[..load_end].trim();
+    let (declaration, expression) = load.split_once('=')?;
+    if declaration.split_whitespace().count() != 2
+        || !expression.contains('[')
+        || !expression.contains(']')
+    {
+        return Some(syntax_at(
+            source,
+            source.find(guarded_body).unwrap_or(0),
+            "unsupported MSL buffer element load",
+        ));
+    }
+    let write = guarded_body[load_end + 1..].trim();
+    if !write.starts_with("output.write(") || !write.ends_with(");") {
+        return Some(syntax_at(
+            source,
+            source.find(write).unwrap_or(0),
+            "unsupported MSL blit output operation",
+        ));
     }
     Some(syntax_at(
         source,
-        source.find(guard).unwrap_or(0),
-        "MSL conditional body operations are not implemented",
+        source.find(write).unwrap_or(0),
+        "MSL texture writes require typed buffer/image lowering",
     ))
 }
 
