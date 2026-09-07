@@ -51,20 +51,32 @@ fn parse_minimal_store_bitcode(bitcode: &Bitcode) -> Result<Module, TranslateErr
         .filter_map(BitcodeElement::as_block)
         .filter(|block| block.id == 12)
         .collect();
-    let function_records: Vec<_> = module_block
+    let all_function_records: Vec<_> = module_block
         .elements
         .iter()
         .filter_map(BitcodeElement::as_record)
         .filter(|record| record.id == 8)
-        // LLVM MODULE_CODE_FUNCTION field 4 is `isproto`. Declarations have a
-        // function record but no function block and must not be mistaken for
-        // additional AIR entry-point definitions.
-        .filter(|record| record.fields().get(4) == Some(&0))
         .collect();
-    let string_table = child_block(&bitcode.elements, 23)
+    // LLVM emits STRINGTABLE_BLOCK inside the module block.  Older producer
+    // versions put it at the top level, so search the complete bitstream
+    // rather than tying name resolution to one container layout.
+    let string_table = descendant_block(&bitcode.elements, 23)
         .and_then(|block| first_payload(block, 1))
-        .and_then(payload_bytes)
-        .ok_or_else(|| semantic("LLVM bitcode has no string table"))?;
+        .and_then(payload_bytes);
+    let legacy_names = legacy_function_names(module_block);
+    let function_records: Vec<_> = all_function_records
+        .iter()
+        .enumerate()
+        // LLVM's older AIR writer puts `isproto` in field 2, while the
+        // string-table layout used by the initial fixture puts it in field 4.
+        .filter(|(_, record)| {
+            if string_table.is_some() {
+                record.fields().get(4) == Some(&0)
+            } else {
+                record.fields().get(2) == Some(&0)
+            }
+        })
+        .collect();
     if function_blocks.len() != function_records.len() || function_records.is_empty() {
         return Err(semantic(
             "LLVM defined-function records do not match their function bodies",
@@ -72,41 +84,20 @@ fn parse_minimal_store_bitcode(bitcode: &Bitcode) -> Result<Module, TranslateErr
     }
     let entry_index = function_records
         .iter()
-        .position(|record| {
-            let fields = record.fields();
-            let Some(offset) = fields
-                .first()
-                .and_then(|value| usize::try_from(*value).ok())
-            else {
-                return false;
-            };
-            let Some(length) = fields.get(1).and_then(|value| usize::try_from(*value).ok()) else {
-                return false;
-            };
-            string_table.get(offset..offset.saturating_add(length)) == Some(b"main0")
+        .position(|(ordinal, record)| {
+            resolve_function_name(record, *ordinal, string_table.as_deref(), &legacy_names)
+                .as_deref()
+                == Some("main0")
         })
         .or_else(|| (function_records.len() == 1).then_some(0))
         .ok_or_else(|| semantic("AIR bitcode has no main0 entry function"))?;
-    let function_fields = function_records[entry_index].fields();
-    let offset = usize::try_from(
-        *function_fields
-            .first()
-            .ok_or_else(|| semantic("LLVM function record has no name offset"))?,
+    let name = resolve_function_name(
+        function_records[entry_index].1,
+        function_records[entry_index].0,
+        string_table.as_deref(),
+        &legacy_names,
     )
-    .map_err(|_| semantic("LLVM function name offset does not fit in memory"))?;
-    let length = usize::try_from(
-        *function_fields
-            .get(1)
-            .ok_or_else(|| semantic("LLVM function record has no name length"))?,
-    )
-    .map_err(|_| semantic("LLVM function name length does not fit in memory"))?;
-    let name = std::str::from_utf8(
-        string_table
-            .get(offset..offset + length)
-            .ok_or_else(|| semantic("LLVM function name is outside the string table"))?,
-    )
-    .map_err(|_| semantic("LLVM function name is not UTF-8"))?
-    .to_string();
+    .ok_or_else(|| semantic("LLVM entry function has no resolvable name"))?;
 
     let function_block = function_blocks[entry_index];
     let records: Vec<_> = function_block
@@ -215,11 +206,60 @@ fn parse_minimal_store_bitcode(bitcode: &Bitcode) -> Result<Module, TranslateErr
     })
 }
 
+/// Resolve both LLVM function-name encodings used by AIR. Modern bitcode puts
+/// name slices in STRINGTABLE_BLOCK. Apple's older AIR writer uses a
+/// VALUE_SYMTAB_BLOCK entry whose payload is the name and whose first field is
+/// the ordinal of its MODULE_CODE_FUNCTION record.
+fn resolve_function_name(
+    record: &llvm_bitcode::bitcode::Record,
+    ordinal: usize,
+    string_table: Option<&[u8]>,
+    legacy_names: &HashMap<usize, String>,
+) -> Option<String> {
+    if let Some(string_table) = string_table {
+        let offset = usize::try_from(*record.fields().first()?).ok()?;
+        let length = usize::try_from(*record.fields().get(1)?).ok()?;
+        return std::str::from_utf8(string_table.get(offset..offset.checked_add(length)?)?)
+            .ok()
+            .map(str::to_owned);
+    }
+    legacy_names.get(&ordinal).cloned()
+}
+
+fn legacy_function_names(module_block: &BitcodeBlock) -> HashMap<usize, String> {
+    let Some(symbol_table) = child_block(&module_block.elements, 14) else {
+        return HashMap::new();
+    };
+    symbol_table
+        .elements
+        .iter()
+        .filter_map(BitcodeElement::as_record)
+        .filter(|record| record.id == 1)
+        .filter_map(|record| {
+            let value = usize::try_from(*record.fields().first()?).ok()?;
+            let mut record = record.clone();
+            Some((value, payload_string(record.take_payload()?)?))
+        })
+        .collect()
+}
+
 fn child_block(elements: &[BitcodeElement], id: u32) -> Option<&BitcodeBlock> {
     elements
         .iter()
         .filter_map(BitcodeElement::as_block)
         .find(|block| block.id == id)
+}
+
+fn descendant_block(elements: &[BitcodeElement], id: u32) -> Option<&BitcodeBlock> {
+    for block in elements.iter().filter_map(BitcodeElement::as_block) {
+        if block.id == id {
+            return Some(block);
+        }
+        if let Some(found) = descendant_block(&block.elements, id) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 fn first_payload(block: &BitcodeBlock, record_id: u64) -> Option<Payload> {
