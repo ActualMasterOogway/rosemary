@@ -35,6 +35,17 @@ struct Function {
     entry: usize,
 }
 
+/// The source-library path can expose compute entry points before command
+/// encoding owns a Vulkan pipeline. Keep the Metal function/device pairing
+/// explicit so callers receive a real pipeline-state object rather than a
+/// fabricated success value.
+#[repr(C)]
+struct ComputePipeline {
+    isa: *const Class,
+    device: Id,
+    function: Id,
+}
+
 #[repr(C)]
 struct CommandQueue {
     isa: *const Class,
@@ -136,6 +147,12 @@ pub fn bootstrap() {
             size_of::<Function>(),
             false,
         );
+        let compute_pipeline_class = corefoundation::base::register(
+            c"R3MTLComputePipelineState",
+            None,
+            size_of::<ComputePipeline>(),
+            false,
+        );
         let buffer_class =
             corefoundation::base::register(c"R3MTLBuffer", None, size_of::<Buffer>(), false);
         let command_buffer_class = corefoundation::base::register(
@@ -235,6 +252,11 @@ pub fn bootstrap() {
                 c"@40@0:8@16@24^@32",
             ),
             (
+                "newComputePipelineStateWithFunction:error:",
+                new_compute_pipeline as *const c_void,
+                c"@32@0:8@16^@24",
+            ),
+            (
                 "isDepth24Stencil8PixelFormatSupported",
                 no as *const c_void,
                 c"B16@0:8",
@@ -256,6 +278,21 @@ pub fn bootstrap() {
             objc::sel::get("name"),
             function_name as *const c_void,
             c"@16@0:8",
+        );
+        compute_pipeline_class.replace_method(
+            objc::sel::get("device"),
+            compute_pipeline_device as *const c_void,
+            c"@16@0:8",
+        );
+        compute_pipeline_class.replace_method(
+            objc::sel::get("threadExecutionWidth"),
+            compute_pipeline_thread_width as *const c_void,
+            c"Q16@0:8",
+        );
+        compute_pipeline_class.replace_method(
+            objc::sel::get("maxTotalThreadsPerThreadgroup"),
+            compute_pipeline_max_threads as *const c_void,
+            c"Q16@0:8",
         );
         queue_class.replace_method(
             objc::sel::get("device"),
@@ -419,6 +456,58 @@ unsafe extern "C" fn new_command_queue(receiver: Id, _sel: Sel) -> Id {
         unsafe { (*queue).device = objc::arc::retain(receiver) };
     }
     queue as Id
+}
+
+unsafe extern "C" fn new_compute_pipeline(
+    receiver: Id,
+    _sel: Sel,
+    function: Id,
+    error: *mut Id,
+) -> Id {
+    if !error.is_null() {
+        unsafe { *error = std::ptr::null_mut() };
+    }
+    if function.is_null()
+        || !unsafe {
+            corefoundation::base::is_kind_of(
+                function as CFTypeRef,
+                objc::class::lookup(c"R3MTLFunction").expect("Metal is bootstrapped"),
+            )
+        }
+    {
+        if !error.is_null() {
+            unsafe {
+                *error = foundation::error::make(
+                    "MTLComputePipelineErrorDomain",
+                    3,
+                    "newComputePipelineStateWithFunction:error: requires an MTLFunction",
+                );
+            }
+        }
+        return std::ptr::null_mut();
+    }
+    let class = objc::class::lookup(c"R3MTLComputePipelineState").expect("Metal is bootstrapped");
+    let pipeline = unsafe { corefoundation::base::allocate::<ComputePipeline>(class) };
+    if pipeline.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        (*pipeline).device = objc::arc::retain(receiver);
+        (*pipeline).function = objc::arc::retain(function);
+    }
+    pipeline as Id
+}
+
+unsafe extern "C" fn compute_pipeline_device(receiver: Id, _sel: Sel) -> Id {
+    unsafe { (*(receiver as *const ComputePipeline)).device }
+}
+
+unsafe extern "C" fn compute_pipeline_thread_width(_receiver: Id, _sel: Sel) -> u64 {
+    32
+}
+
+unsafe extern "C" fn compute_pipeline_max_threads(_receiver: Id, _sel: Sel) -> u64 {
+    1024
 }
 
 unsafe extern "C" fn queue_device(receiver: Id, _sel: Sel) -> Id {
@@ -1007,6 +1096,50 @@ mod tests {
             )
         };
         assert!(!function.is_null());
+    }
+
+    #[test]
+    fn source_compute_function_creates_a_pipeline_state() {
+        bootstrap();
+        let device = unsafe { corefoundation::base::allocate::<Device>(device_class()) };
+        let target = Box::leak(Box::new(metal_translate::TargetProfile::vulkan_1_3()));
+        unsafe { (*device).target = target };
+        let source = foundation::string::from_str(
+            "kernel void clear(device uint* output [[buffer(0)]]) { output[0] = 42; }",
+        );
+        let mut error = std::ptr::null_mut();
+        let library = unsafe {
+            new_library_with_source(
+                device as Id,
+                std::ptr::null(),
+                source,
+                std::ptr::null_mut(),
+                &mut error,
+            )
+        };
+        let function = unsafe {
+            new_function_with_name(
+                library,
+                std::ptr::null(),
+                foundation::string::from_str("clear"),
+            )
+        };
+        let pipeline =
+            unsafe { new_compute_pipeline(device as Id, std::ptr::null(), function, &mut error) };
+        assert!(!pipeline.is_null());
+        assert!(error.is_null());
+        assert_eq!(
+            unsafe { compute_pipeline_device(pipeline, std::ptr::null()) },
+            device as Id
+        );
+        assert_eq!(
+            unsafe { compute_pipeline_thread_width(pipeline, std::ptr::null()) },
+            32
+        );
+        assert_eq!(
+            unsafe { compute_pipeline_max_threads(pipeline, std::ptr::null()) },
+            1024
+        );
     }
 
     #[test]

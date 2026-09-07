@@ -325,6 +325,10 @@ fn parse_blit_kernel(
         .split_once('=')
         .map(|(_, right)| right.trim().split('[').next().unwrap_or("").trim())
         .unwrap_or("");
+    let element_name = load
+        .split_once('=')
+        .and_then(|(left, _)| left.split_whitespace().last())
+        .unwrap_or("");
     let input = parameters
         .iter()
         .find(|parameter| parameter.name == input_name)
@@ -366,7 +370,17 @@ fn parse_blit_kernel(
         ));
     }
     let write = inner.split(';').nth(1).unwrap_or("").trim();
-    let output_name = write.split(".write(").next().unwrap_or("").trim();
+    let (output_name, write_value, write_coordinate) =
+        parse_blit_write(write).ok_or_else(|| {
+            syntax_at(
+                source,
+                source.find(inner).unwrap_or(0),
+                format!(
+                    "unsupported MSL blit output operation ({})",
+                    blit_statement_id(write)
+                ),
+            )
+        })?;
     let output = parameters
         .iter()
         .find(|parameter| parameter.name == output_name)
@@ -378,9 +392,8 @@ fn parse_blit_kernel(
             )
         })?;
     if output.ty != Type::Texture
-        || !write.contains("float4(")
-        || !write.ends_with(&format!(", {})", gid_name.trim()))
-            && !write.ends_with(&format!(", {});", gid_name.trim()))
+        || !is_normalized_uchar4(write_value, element_name)
+        || !is_offset_coordinate(write_coordinate, gid_name.trim(), params_name.trim())
     {
         return Err(syntax_at(
             source,
@@ -437,6 +450,27 @@ fn parse_blit_kernel(
     let converted = add(&mut values, float4.clone());
     let divisor = add(&mut values, float4.clone());
     let normalized = add(&mut values, float4);
+    let offset = add(&mut values, uint3.clone());
+    let coordinate = add(&mut values, uint3.clone());
+    let offset_field = structure
+        .fields
+        .iter()
+        .enumerate()
+        .find(|(_, field)| field.name.as_deref() == Some("offset"))
+        .ok_or_else(|| {
+            syntax_at(
+                source,
+                source.find(inner).unwrap_or(0),
+                "blit offset field is missing",
+            )
+        })?;
+    if offset_field.1.ty != uint3 {
+        return Err(syntax_at(
+            source,
+            source.find(inner).unwrap_or(0),
+            "blit offset field must be uint3",
+        ));
+    }
     let entry = Block {
         id: BlockId(0),
         name: "entry".to_string(),
@@ -518,10 +552,24 @@ fn parse_blit_kernel(
                     },
                 },
                 Instruction {
+                    result: Some(offset),
+                    kind: InstructionKind::CompositeExtract {
+                        composite: Operand::Value(params_value),
+                        index: offset_field.0 as u32,
+                    },
+                },
+                Instruction {
+                    result: Some(coordinate),
+                    kind: InstructionKind::IntegerAdd {
+                        lhs: Operand::Value(gid),
+                        rhs: Operand::Value(offset),
+                    },
+                },
+                Instruction {
                     result: None,
                     kind: InstructionKind::TextureWrite {
                         texture: Operand::Value(output.value),
-                        coordinate: Operand::Value(gid),
+                        coordinate: Operand::Value(coordinate),
                         value: Operand::Value(normalized),
                     },
                 },
@@ -554,6 +602,50 @@ fn parse_blit_kernel(
     };
     module.verify()?;
     Ok(module)
+}
+
+/// Split the exact two-argument image write form used by the uploaded blit
+/// kernel. Nested constructors make a plain comma split incorrect.
+fn parse_blit_write(statement: &str) -> Option<(&str, &str, &str)> {
+    let (output, arguments) = statement.split_once(".write(")?;
+    let arguments = arguments.strip_suffix(')')?;
+    let comma = top_level_comma(arguments)?;
+    Some((
+        output.trim(),
+        arguments[..comma].trim(),
+        arguments[comma + 1..].trim(),
+    ))
+}
+
+fn top_level_comma(arguments: &str) -> Option<usize> {
+    let mut depth = 0_u32;
+    for (offset, character) in arguments.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => depth = depth.checked_sub(1)?,
+            ',' if depth == 0 => return Some(offset),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn is_normalized_uchar4(value: &str, element: &str) -> bool {
+    let compact: String = value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    ["255.f", "255.0f", "255.0"]
+        .iter()
+        .any(|divisor| compact == format!("float4({element})/{divisor}"))
+}
+
+fn is_offset_coordinate(coordinate: &str, gid: &str, params: &str) -> bool {
+    let compact: String = coordinate
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    compact == format!("{gid}+{params}.offset")
 }
 
 /// Lower the scalar address expressions used by some apps buffer blits. This

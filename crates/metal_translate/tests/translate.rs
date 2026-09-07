@@ -262,7 +262,7 @@ fn source_msl_compiles_a_bounded_typed_blit_kernel() {
          {\n\
            if (all(gid < params.size)) {\n\
              uchar4 element = input[(gid.z * params.stride.y + gid.y) * params.stride.x + gid.x + params.offset.x];\n\
-             output.write(float4(element), gid);\n\
+             output.write(float4(element) / 255.f, gid + params.offset);\n\
            }\n\
          }";
     let library = translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap();

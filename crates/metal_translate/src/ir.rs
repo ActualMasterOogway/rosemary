@@ -592,9 +592,7 @@ fn verify_instruction_types(
         InstructionKind::IntegerAdd { lhs, rhs }
         | InstructionKind::IntegerMultiply { lhs, rhs }
         | InstructionKind::IntegerXor { lhs, rhs } => {
-            result
-                .as_ref()
-                .is_some_and(|ty| matches!(ty, Type::Int { .. }))
+            result.as_ref().is_some_and(is_integer_or_integer_vector)
                 && result == operand_type(function, lhs)
                 && result == operand_type(function, rhs)
         }
@@ -733,6 +731,11 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
 fn is_float_or_float_vector(ty: &Type) -> bool {
     matches!(ty, Type::Float { .. })
         || matches!(ty, Type::Vector { element, .. } if matches!(element.as_ref(), Type::Float { .. }))
+}
+
+fn is_integer_or_integer_vector(ty: &Type) -> bool {
+    matches!(ty, Type::Int { .. })
+        || matches!(ty, Type::Vector { element, .. } if matches!(element.as_ref(), Type::Int { .. }))
 }
 
 fn terminator_operands(terminator: &Terminator) -> Vec<&Operand> {
