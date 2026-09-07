@@ -7,6 +7,16 @@ pub mod power;
 pub mod registry;
 pub mod value;
 
+/// Emit HID discovery diagnostics when investigating a guest's controller
+/// integration. Kept here so both the API boundary and SDL-backed devices can
+/// describe the same call without adding a logging dependency.
+pub(crate) fn trace_hid(message: impl std::fmt::Display) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ENABLED.get_or_init(|| std::env::var_os("ROSETTA3_TRACE_HID").is_some()) {
+        eprintln!("rosetta3: HID: {message}");
+    }
+}
+
 /// This crate answers nothing without SDL3 to answer from.
 pub fn available() -> bool {
     sdl3::available()

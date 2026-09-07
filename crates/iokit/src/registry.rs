@@ -1,38 +1,18 @@
-//! A minimal IORegistry, with opaque services only for SDL HID devices.
+//! A compact IORegistry exposing active SDL HID devices.
 //!
-//! `IOServiceGetMatchingServices` returning an empty iterator is a real answer:
-//! it is what a Mac says for a match nothing satisfies, and a program that
-//! enumerates devices is written for it. Nothing here invents a device, because
-//! a fabricated `IORegistryEntry` would be one whose properties the caller then
-//! reads and believes.
-//!
-//! What the empty registry does have to be is *consistent*. A program takes an
-//! iterator, drains it, releases it, and arms a notification with it; every one
-//! of those has to succeed on nothing, or the failure lands somewhere other
-//! than where the devices are missing. So:
-//!
-//! - a matching dictionary is a real CFDictionary, because the caller releases
-//!   it and may put keys in it first;
-//! - an iterator is `0`, and `IOIteratorNext(0)` is "no more" rather than an
-//!   error - draining an empty iterator is what *arms* a matching notification,
-//!   so a caller that cannot drain it never gets one;
-//! - a notification port is a real object, because
-//!   `IONotificationPortGetRunLoopSource` is called on it without a check;
-//! - and every `IOObject` call takes `0` and answers success, because that is
-//!   the only object handle a caller can be holding.
-//!
-//! HID devices are not enumerated through this registry. Their SDL instance id
-//! is exposed as a service solely so HIDAPI can turn its `DevSrvsID:` path back
-//! into the `IOHIDDeviceRef` it already enumerated through `IOHIDManager`.
-//!
-//! Deliberately absent: anything that would hand back a property value.
-//! `IORegistryEntryCreateCFProperty` answers null - there is no entry it could
-//! have come from, and a null property is a case every caller has, where a
-//! made-up serial number or vendor id is not.
+//! HID devices have one stable synthetic `io_service_t`, their SDL instance
+//! id. This lets clients which enumerate through IORegistry (including HIDAPI)
+//! observe the same device and properties as clients using `IOHIDManager`.
+//! Iterator handles occupy a separate high range so they cannot collide with a
+//! service. Notifications remain intentionally inert: device discovery is
+//! performed when an HID manager is scheduled.
 
 #![allow(non_snake_case)]
 
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{c_char, c_void};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use corefoundation::base::CFTypeRef;
 use corefoundation::callbacks::Policy;
@@ -48,6 +28,11 @@ const SUCCESS: IOReturn = 0;
 /// `kIOReturnNoDevice`. The honest failure for a lookup in an empty registry,
 /// and distinct from `kIOReturnError` so a caller that tells them apart can.
 const NO_DEVICE: IOReturn = -536_870_212;
+
+/// Iterator handles are kept separate from the positive SDL instance ids used
+/// as synthetic `io_service_t`s.
+static NEXT_ITERATOR: AtomicU32 = AtomicU32::new(0x8000_0000);
+static ITERATORS: Mutex<BTreeMap<IoObject, VecDeque<IoObject>>> = Mutex::new(BTreeMap::new());
 
 /// `mach_port_t kIOMasterPortDefault` - and `kIOMainPortDefault`, its current
 /// spelling.
@@ -125,11 +110,23 @@ pub unsafe extern "C" fn IOServiceGetMatchingServices(
     matching: CFTypeRef,
     existing: *mut IoObject,
 ) -> KernReturn {
+    let services = crate::api::services();
     // SAFETY: the reference the caller handed over.
     unsafe { consume(matching) };
     if !existing.is_null() {
+        let iterator = NEXT_ITERATOR.fetch_add(1, Ordering::Relaxed);
+        if !services.is_empty() {
+            ITERATORS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(iterator, services.iter().copied().collect());
+        }
+        crate::trace_hid(format_args!(
+            "IOServiceGetMatchingServices -> {} service(s)",
+            services.len()
+        ));
         // SAFETY: an out parameter the caller sized.
-        unsafe { existing.write(0) };
+        unsafe { existing.write((!services.is_empty()).then_some(iterator).unwrap_or(0)) };
     }
     SUCCESS
 }
@@ -148,12 +145,18 @@ pub unsafe extern "C" fn IOServiceGetMatchingService(_port: u32, matching: CFTyp
     unsafe { corefoundation::api::CFRelease(key) };
     // SAFETY: the reference the caller handed over.
     unsafe { consume(matching) };
+    crate::trace_hid(format_args!("IOServiceGetMatchingService -> {entry}"));
     entry
 }
 
 /// `io_object_t IOIteratorNext(io_iterator_t)`. Zero ends the loop.
-pub unsafe extern "C" fn IOIteratorNext(_iterator: IoObject) -> IoObject {
-    0
+pub unsafe extern "C" fn IOIteratorNext(iterator: IoObject) -> IoObject {
+    ITERATORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(&iterator)
+        .and_then(VecDeque::pop_front)
+        .unwrap_or(0)
 }
 
 /// `boolean_t IOIteratorIsValid(io_iterator_t)`.
@@ -165,7 +168,11 @@ pub unsafe extern "C" fn IOIteratorIsValid(_iterator: IoObject) -> u32 {
     1
 }
 
-pub unsafe extern "C" fn IOObjectRelease(_object: IoObject) -> KernReturn {
+pub unsafe extern "C" fn IOObjectRelease(object: IoObject) -> KernReturn {
+    ITERATORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&object);
     SUCCESS
 }
 
@@ -208,27 +215,171 @@ pub unsafe extern "C" fn IORegistryEntryGetRegistryEntryID(
     }
 }
 
+fn property(device: &crate::hid::Device, key: &[u8]) -> CFTypeRef {
+    let number = |value: i64| collections::new_number(collections::Number::Integer(value));
+    match key {
+        b"VendorID" => number(device.vendor as i64),
+        b"ProductID" => number(device.product as i64),
+        b"VersionNumber" => number(device.version as i64),
+        b"PrimaryUsagePage" | b"DeviceUsagePage" => number(device.elements[0].page as i64),
+        b"PrimaryUsage" | b"DeviceUsage" => number(device.elements[0].usage as i64),
+        b"LocationID" | b"IOHIDLocationID" => number(device.id as i64),
+        b"MaxInputReportSize" => number(device.max_input_report_size() as i64),
+        b"ReportDescriptor" | b"IOHIDReportDescriptorKey" => {
+            collections::new_data(device.report_descriptor())
+        }
+        b"DeviceUsagePairs" => device_usage_pairs(device),
+        b"Product" | b"Manufacturer" => {
+            corefoundation::string::from_bytes(device.name.as_bytes(), false)
+        }
+        b"Transport" => corefoundation::string::from_bytes(b"USB", false),
+        b"bInterfaceNumber" => number(0),
+        _ => std::ptr::null_mut(),
+    }
+}
+
+fn device_usage_pairs(device: &crate::hid::Device) -> CFTypeRef {
+    let page = corefoundation::string::from_bytes(b"DeviceUsagePage", false);
+    let usage = corefoundation::string::from_bytes(b"DeviceUsage", false);
+    let page_value =
+        collections::new_number(collections::Number::Integer(device.elements[0].page as i64));
+    let usage_value = collections::new_number(collections::Number::Integer(
+        device.elements[0].usage as i64,
+    ));
+    let pair = collections::new_dictionary(
+        &[(page, page_value), (usage, usage_value)],
+        Policy::from_key_callbacks(),
+        Policy::from_type_callbacks(),
+        false,
+    );
+    // SAFETY: the dictionary retained its entries.
+    unsafe {
+        corefoundation::api::CFRelease(page);
+        corefoundation::api::CFRelease(usage);
+        corefoundation::api::CFRelease(page_value);
+        corefoundation::api::CFRelease(usage_value);
+    }
+    let pairs = collections::new_array(&[pair], Policy::from_type_callbacks(), false);
+    // SAFETY: the array retained the dictionary.
+    unsafe { corefoundation::api::CFRelease(pair) };
+    pairs
+}
+
+fn registry_properties(device: &crate::hid::Device) -> CFTypeRef {
+    let entries = [
+        (
+            b"IOProviderClass".as_slice(),
+            corefoundation::string::from_bytes(b"IOHIDDevice", false),
+        ),
+        (b"VendorID".as_slice(), property(device, b"VendorID")),
+        (b"ProductID".as_slice(), property(device, b"ProductID")),
+        (
+            b"VersionNumber".as_slice(),
+            property(device, b"VersionNumber"),
+        ),
+        (
+            b"PrimaryUsagePage".as_slice(),
+            property(device, b"PrimaryUsagePage"),
+        ),
+        (
+            b"PrimaryUsage".as_slice(),
+            property(device, b"PrimaryUsage"),
+        ),
+        (b"LocationID".as_slice(), property(device, b"LocationID")),
+        (
+            b"MaxInputReportSize".as_slice(),
+            property(device, b"MaxInputReportSize"),
+        ),
+        (
+            b"ReportDescriptor".as_slice(),
+            property(device, b"ReportDescriptor"),
+        ),
+        (
+            b"DeviceUsagePairs".as_slice(),
+            property(device, b"DeviceUsagePairs"),
+        ),
+        (b"Product".as_slice(), property(device, b"Product")),
+        (
+            b"Manufacturer".as_slice(),
+            property(device, b"Manufacturer"),
+        ),
+        (b"Transport".as_slice(), property(device, b"Transport")),
+        (
+            b"bInterfaceNumber".as_slice(),
+            property(device, b"bInterfaceNumber"),
+        ),
+    ];
+    let keys: Vec<_> = entries
+        .iter()
+        .map(|(key, _)| corefoundation::string::from_bytes(key, false))
+        .collect();
+    let pairs: Vec<_> = keys
+        .iter()
+        .zip(entries)
+        .map(|(key, (_, value))| (*key, value))
+        .collect();
+    let properties = collections::new_dictionary(
+        &pairs,
+        Policy::from_key_callbacks(),
+        Policy::from_type_callbacks(),
+        false,
+    );
+    for key in keys {
+        // SAFETY: the dictionary retained each key.
+        unsafe { corefoundation::api::CFRelease(key) };
+    }
+    for (_, value) in entries {
+        // SAFETY: the dictionary retained every property value.
+        unsafe { corefoundation::api::CFRelease(value) };
+    }
+    properties
+}
+
 /// `CFTypeRef IORegistryEntryCreateCFProperty(entry, key, allocator, options)`.
 pub unsafe extern "C" fn IORegistryEntryCreateCFProperty(
-    _entry: IoObject,
-    _key: CFTypeRef,
+    entry: IoObject,
+    key: CFTypeRef,
     _allocator: CFTypeRef,
     _options: u32,
 ) -> CFTypeRef {
-    std::ptr::null_mut()
+    let key = unsafe { corefoundation::string::as_string(key) }
+        .map(|s| s.utf8())
+        .unwrap_or_default();
+    let value = crate::api::device_for_service(entry)
+        .map(|device| property(&device, &key))
+        .unwrap_or(std::ptr::null_mut());
+    crate::trace_hid(format_args!(
+        "IORegistryEntryCreateCFProperty entry={entry} key={} -> {}",
+        String::from_utf8_lossy(&key),
+        !value.is_null()
+    ));
+    value
 }
 
 pub unsafe extern "C" fn IORegistryEntryCreateCFProperties(
-    _entry: IoObject,
+    entry: IoObject,
     properties: *mut CFTypeRef,
     _allocator: CFTypeRef,
     _options: u32,
 ) -> KernReturn {
-    if !properties.is_null() {
+    let values = crate::api::device_for_service(entry).map(|device| registry_properties(&device));
+    crate::trace_hid(format_args!(
+        "IORegistryEntryCreateCFProperties entry={entry} -> {}",
+        values.is_some()
+    ));
+    if let Some(values) = values {
+        if !properties.is_null() {
+            // SAFETY: an out parameter the caller sized.
+            unsafe { properties.write(values) };
+        }
+        SUCCESS
+    } else if !properties.is_null() {
         // SAFETY: an out parameter the caller sized.
         unsafe { properties.write(std::ptr::null_mut()) };
+        NO_DEVICE
+    } else {
+        NO_DEVICE
     }
-    NO_DEVICE
 }
 
 /// An `IONotificationPortRef`. Opaque to the guest and never dereferenced by

@@ -17,6 +17,28 @@ const ERROR: IOReturn = -536_870_212;
 
 static MANAGERS: Mutex<Vec<Arc<Manager>>> = Mutex::new(Vec::new());
 
+/// The SDL instance ids which currently back an `IOHIDDeviceRef`.
+pub(crate) fn services() -> Vec<u32> {
+    let mut services = MANAGERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .flat_map(|manager| manager.devices().into_iter().map(|device| device.id))
+        .collect::<Vec<_>>();
+    services.sort_unstable();
+    services.dedup();
+    services
+}
+
+/// Find a device by the SDL instance id used as its IORegistry service id.
+pub(crate) fn device_for_service(service: u32) -> Option<Arc<Device>> {
+    MANAGERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find_map(|manager| manager.device(service))
+}
+
 /// # Safety
 ///
 /// `manager` must be null or a pointer this module handed out.
@@ -42,6 +64,7 @@ pub unsafe extern "C" fn IOHIDManagerCreate(_allocator: CFTypeRef, _options: u32
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .push(manager);
+    crate::trace_hid(format_args!("IOHIDManagerCreate -> {handle:p}"));
     handle
 }
 
@@ -49,6 +72,9 @@ pub unsafe extern "C" fn IOHIDManagerCreate(_allocator: CFTypeRef, _options: u32
 pub unsafe extern "C" fn IOHIDDeviceCreate(_allocator: CFTypeRef, service: u32) -> CFTypeRef {
     for manager in MANAGERS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         if let Some(device) = manager.device(service) {
+            crate::trace_hid(format_args!(
+                "IOHIDDeviceCreate service={service} -> device"
+            ));
             return Arc::as_ptr(&device) as CFTypeRef;
         }
     }
@@ -57,10 +83,14 @@ pub unsafe extern "C" fn IOHIDDeviceCreate(_allocator: CFTypeRef, service: u32) 
 
 pub unsafe extern "C" fn IOHIDManagerOpen(manager: CFTypeRef, _options: u32) -> IOReturn {
     // SAFETY: the caller's obligation.
-    match unsafe { self::manager(manager) }.is_some_and(|m| m.open()) {
+    let result = match unsafe { self::manager(manager) }.is_some_and(|m| m.open()) {
         true => SUCCESS,
         false => ERROR,
-    }
+    };
+    crate::trace_hid(format_args!(
+        "IOHIDManagerOpen manager={manager:p} -> {result}"
+    ));
+    result
 }
 
 pub unsafe extern "C" fn IOHIDManagerClose(manager: CFTypeRef, _options: u32) -> IOReturn {
@@ -206,6 +236,9 @@ pub unsafe extern "C" fn IOHIDManagerScheduleWithRunLoop(
     if !m.open() {
         return;
     }
+    crate::trace_hid(format_args!(
+        "IOHIDManagerScheduleWithRunLoop manager={manager:p}"
+    ));
     schedule(m as *const Manager as usize, run_loop, mode);
 }
 
@@ -288,6 +321,11 @@ pub unsafe extern "C" fn IOHIDDeviceGetProperty(device: CFTypeRef, key: CFTypeRe
     let key = unsafe { corefoundation::string::as_string(key) }
         .map(|s| s.utf8())
         .unwrap_or_default();
+    crate::trace_hid(format_args!(
+        "IOHIDDeviceGetProperty id={} key={}",
+        d.id,
+        String::from_utf8_lossy(&key)
+    ));
     let number = |value: i64| {
         let n = collections::new_number(Number::Integer(value));
         // SAFETY: a fresh object handed straight back; the caller owns nothing.
@@ -370,6 +408,11 @@ pub unsafe extern "C" fn IOHIDDeviceCopyMatchingElements(
         .iter()
         .map(|e| d.handle(e.cookie) as CFTypeRef)
         .collect();
+    crate::trace_hid(format_args!(
+        "IOHIDDeviceCopyMatchingElements id={} -> {} elements",
+        d.id,
+        handles.len()
+    ));
     // The elements are not CoreFoundation objects, so the array holds them with
     // no callbacks: nothing to retain, nothing to release, and identity by
     // pointer - which is what a guest comparing two element references wants.
@@ -408,7 +451,12 @@ pub unsafe extern "C" fn IOHIDDeviceGetValue(
     let Some(element) = device.element(cookie) else {
         return ERROR;
     };
-    let value = value::new(device, cookie, device.value(element));
+    let integer = device.value(element);
+    crate::trace_hid(format_args!(
+        "IOHIDDeviceGetValue id={} cookie={cookie} value={integer}",
+        device.id
+    ));
+    let value = value::new(device, cookie, integer);
     // `GetValue` has no Create/Copy ownership; keep the value valid through the
     // caller's autorelease pool.
     let value = unsafe { cf::CFAutorelease(value) };
@@ -571,7 +619,9 @@ pub unsafe extern "C" fn IOHIDManagerCopyDevices(manager: CFTypeRef) -> CFTypeRe
 /// [`IOHIDDeviceCreate`] to reopen this exact device.
 pub unsafe extern "C" fn IOHIDDeviceGetService(device: CFTypeRef) -> u32 {
     // SAFETY: the caller's obligation.
-    unsafe { self::device(device) }.map_or(0, |device| device.id)
+    let service = unsafe { self::device(device) }.map_or(0, |device| device.id);
+    crate::trace_hid(format_args!("IOHIDDeviceGetService -> {service}"));
+    service
 }
 
 /// `IOHIDDeviceScheduleWithRunLoop` / `IOHIDDeviceUnscheduleFromRunLoop`.
@@ -581,10 +631,17 @@ pub unsafe extern "C" fn IOHIDDeviceGetService(device: CFTypeRef) -> u32 {
 /// nothing to attach, and refusing would stop a program that only wanted its
 /// callbacks to work.
 pub unsafe extern "C" fn IOHIDDeviceScheduleWithRunLoop(
-    _device: CFTypeRef,
+    device: CFTypeRef,
     _run_loop: CFTypeRef,
     _mode: CFTypeRef,
 ) {
+    // SAFETY: the caller's obligation.
+    if let Some(device) = unsafe { self::device(device) } {
+        crate::trace_hid(format_args!(
+            "IOHIDDeviceScheduleWithRunLoop id={}",
+            device.id
+        ));
+    }
 }
 
 pub unsafe extern "C" fn IOHIDDeviceUnscheduleFromRunLoop(
@@ -725,6 +782,10 @@ pub unsafe extern "C" fn IOHIDDeviceRegisterInputReportCallback(
     }
     // SAFETY: the caller's obligation.
     if let Some(device) = unsafe { self::device(device) } {
+        crate::trace_hid(format_args!(
+            "IOHIDDeviceRegisterInputReportCallback id={} length={length}",
+            device.id
+        ));
         device.set_report_callback(report, length as usize, callback, context as usize);
     }
 }

@@ -88,6 +88,7 @@ impl Manager {
     }
 
     pub fn set_criteria(&self, criteria: Vec<Criterion>) {
+        crate::trace_hid(format_args!("manager matching criteria={criteria:?}"));
         *self.criteria.lock().unwrap_or_else(|e| e.into_inner()) = criteria;
     }
 
@@ -100,6 +101,10 @@ impl Manager {
     }
 
     pub fn set_values(&self, callback: Option<ValueCallback>, context: usize) {
+        crate::trace_hid(format_args!(
+            "IOHIDManagerRegisterInputValueCallback installed={}",
+            callback.is_some()
+        ));
         *self.values.lock().unwrap_or_else(|e| e.into_inner()) = Registered { callback, context };
     }
 
@@ -182,6 +187,10 @@ impl Manager {
                     continue;
                 }
                 devices.insert(*id, Arc::clone(&device));
+                crate::trace_hid(format_args!(
+                    "manager accepted id={} as {:04x}:{:04x}",
+                    device.id, device.vendor, device.product
+                ));
                 appeared.push(device);
             }
             let gone: Vec<sdl3::JoystickId> = devices
@@ -248,6 +257,10 @@ impl Manager {
                 continue;
             };
             for (cookie, value) in device.changed() {
+                crate::trace_hid(format_args!(
+                    "input value id={} cookie={cookie} value={value}",
+                    device.id
+                ));
                 let boxed = crate::value::new(&device, cookie, value);
                 // SAFETY: the callback is the guest's, and `boxed` is an
                 // `IOHIDValueRef` this crate made and keeps alive for the call.

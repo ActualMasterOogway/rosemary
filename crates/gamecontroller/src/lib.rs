@@ -26,7 +26,7 @@ struct Controller {
     paused_last: u8,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Source {
     Axis(i32, bool),
     Trigger(i32),
@@ -44,7 +44,7 @@ struct Input {
     handler: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum DirectionKind {
     LeftStick,
     RightStick,
@@ -101,6 +101,13 @@ struct Record {
 }
 
 static CONTROLLERS: Mutex<Vec<Record>> = Mutex::new(Vec::new());
+
+fn trace_controller(message: impl std::fmt::Display) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ENABLED.get_or_init(|| std::env::var_os("ROSETTA3_TRACE_GAMECONTROLLER").is_some()) {
+        eprintln!("rosetta3: GameController: {message}");
+    }
+}
 
 fn sdl_ready() -> bool {
     static READY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -360,6 +367,9 @@ fn make_controller(id: sdl3::JoystickId, gamepad: sdl3::Gamepad) -> Id {
     let vendor = unsafe { sdl3::gamepad_vendor(gamepad) };
     let is_xbox =
         vendor == sdl3::usb_vendor::MICROSOFT || name.to_ascii_lowercase().contains("xbox");
+    trace_controller(format_args!(
+        "connected id={id} name={name:?} vendor={vendor:04x} xbox={is_xbox}"
+    ));
     let profile_class = if is_xbox {
         objc::class::lookup(c"GCXboxGamepad").expect("GameController is bootstrapped")
     } else {
@@ -471,6 +481,10 @@ unsafe extern "C" fn controllers(_class: Id, _sel: Sel) -> Id {
         .iter()
         .map(|r| r.object as *const c_void)
         .collect();
+    trace_controller(format_args!(
+        "GCController.controllers -> {} controllers",
+        values.len()
+    ));
     let array =
         corefoundation::collections::new_array(&values, Policy::from_type_callbacks(), false);
     // SAFETY: a fresh array follows Foundation's convenience-constructor rule.
@@ -488,7 +502,11 @@ unsafe extern "C" fn supports_hid_device(
     // SAFETY: the type registration above identifies one of IOKit's Device
     // handles, which lives for the lifetime of the process.
     let id = unsafe { (*(device as *const iokit::hid::Device)).id };
-    sdl3::gamepads().contains(&id)
+    let supported = sdl3::gamepads().contains(&id);
+    trace_controller(format_args!(
+        "GCController.supportsHIDDevice id={id} -> {supported}"
+    ));
+    supported
 }
 
 unsafe extern "C" fn extended_gamepad(receiver: Id, _sel: Sel) -> Id {
@@ -590,7 +608,13 @@ unsafe extern "C" fn input_is_analog(receiver: Id, _sel: Sel) -> bool {
 
 unsafe extern "C" fn set_input_handler(receiver: Id, _sel: Sel, block: Id) {
     // SAFETY: an axis or button input.
-    replace_block(unsafe { &mut (*(receiver as *mut Input)).handler }, block);
+    let input = unsafe { &mut *(receiver as *mut Input) };
+    trace_controller(format_args!(
+        "setValueChangedHandler source={:?} installed={}",
+        input.source,
+        !block.is_null()
+    ));
+    replace_block(&mut input.handler, block);
 }
 
 unsafe extern "C" fn direction_element(receiver: Id, sel: Sel) -> Id {
@@ -611,10 +635,13 @@ unsafe extern "C" fn direction_element(receiver: Id, sel: Sel) -> Id {
 
 unsafe extern "C" fn set_direction_handler(receiver: Id, _sel: Sel, block: Id) {
     // SAFETY: a direction pad.
-    replace_block(
-        unsafe { &mut (*(receiver as *mut Direction)).handler },
-        block,
-    );
+    let direction = unsafe { &mut *(receiver as *mut Direction) };
+    trace_controller(format_args!(
+        "setValueChangedHandler direction={:?} installed={}",
+        direction.kind,
+        !block.is_null()
+    ));
+    replace_block(&mut direction.handler, block);
 }
 
 unsafe extern "C" fn extended_element(receiver: Id, sel: Sel) -> Id {
@@ -649,6 +676,10 @@ fn call_input(input: Id) {
     if value == input_ref.last {
         return;
     }
+    trace_controller(format_args!(
+        "input changed source={:?} {} -> {}",
+        input_ref.source, input_ref.last, value
+    ));
     input_ref.last = value;
     let block = objc::block::copy(input_ref.handler as Id);
     // SAFETY: `setValueChangedHandler:` declares this block prototype.
@@ -668,6 +699,10 @@ fn call_direction(direction: Id) {
     if x == direction_ref.last_x && y == direction_ref.last_y {
         return;
     }
+    trace_controller(format_args!(
+        "direction changed kind={:?} ({}, {}) -> ({x}, {y})",
+        direction_ref.kind, direction_ref.last_x, direction_ref.last_y
+    ));
     direction_ref.last_x = x;
     direction_ref.last_y = y;
     let block = objc::block::copy(direction_ref.handler as Id);
@@ -1127,6 +1162,7 @@ mod tests {
             return;
         };
         let hid = iokit::hid::Device::open(id).expect("the virtual HID device opens");
+        bootstrap();
         // SAFETY: `hid` is a live IOHIDDeviceRef for this call.
         assert!(unsafe {
             supports_hid_device(

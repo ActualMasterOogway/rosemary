@@ -117,7 +117,7 @@ impl Device {
     pub fn open(id: sdl3::JoystickId) -> Option<std::sync::Arc<Device>> {
         let joystick = sdl3::open(id)?;
         // SAFETY: a joystick just opened and not yet closed.
-        let (name, vendor, product, version) = unsafe {
+        let (name, physical_vendor, physical_product, physical_version) = unsafe {
             (
                 sdl3::name(joystick),
                 sdl3::vendor(joystick),
@@ -133,12 +133,12 @@ impl Device {
                 sdl3::hats(joystick),
             )
         };
-        let gamepad = (vendor == sdl3::usb_vendor::MICROSOFT)
+        let gamepad = (physical_vendor == sdl3::usb_vendor::MICROSOFT)
             .then(|| sdl3::open_gamepad(id))
             .flatten()
             .map_or(0, |gamepad| gamepad as usize);
         let (vendor, product, version, elements) =
-            if vendor == sdl3::usb_vendor::MICROSOFT && gamepad != 0 {
+            if physical_vendor == sdl3::usb_vendor::MICROSOFT && gamepad != 0 {
                 // macOS publishes Microsoft pads to legacy IOKit clients as an
                 // Xbox 360-shaped synthetic HID device. Its stable semantic
                 // layout is what old games have in their mapping databases.
@@ -149,11 +149,27 @@ impl Device {
                     describe_gamepad(buttons),
                 )
             } else {
-                (vendor, product, version, describe(axes, buttons, hats))
+                (
+                    physical_vendor,
+                    physical_product,
+                    physical_version,
+                    describe(axes, buttons, hats),
+                )
             };
         // SAFETY: the joystick is open. Not every SDL joystick has a raw HID
         // path; those devices use the synthetic report representation below.
         let raw = unsafe { sdl3::open_hid(joystick) }.map_or(0, |device| device as usize);
+        crate::trace_hid(format_args!(
+            "device id={id} name={name:?} SDL={physical_vendor:04x}:{physical_product:04x}:{physical_version:04x} \
+             published={published_vendor:04x}:{published_product:04x}:{published_version:04x} \
+             gamepad={} raw_hid={} elements={}",
+            gamepad != 0,
+            raw != 0,
+            elements.len(),
+            published_vendor = vendor,
+            published_product = product,
+            published_version = version,
+        ));
         let last = Mutex::new(vec![i64::MIN; elements.len()]);
         let device = std::sync::Arc::new(Device {
             id,
@@ -347,25 +363,38 @@ impl Device {
             let buffer = unsafe {
                 std::slice::from_raw_parts_mut(registered.buffer as *mut u8, registered.length)
             };
-            let Some(length) = sdl3::hid_read(*raw as sdl3::HidDevice, buffer) else {
-                return;
-            };
             drop(raw);
-            if length == 0 {
-                return;
-            }
-            let report_id = buffer.first().copied().unwrap_or(0) as u32;
-            // SAFETY: the registration supplies this callback and buffer.
-            unsafe {
-                callback(
-                    registered.context as *mut c_void,
-                    0,
-                    std::ptr::from_ref(self).cast_mut().cast(),
-                    0,
-                    report_id,
-                    registered.buffer as *mut u8,
-                    length as CFIndex,
-                );
+            // SDL's non-blocking read still returns only one queued report.
+            // Switch controllers keep sending reports while idle, so taking
+            // one per 60 Hz run-loop turn lets old input pile up for seconds.
+            // Deliver the pending batch now, capped so a noisy device cannot
+            // monopolize the guest's run loop.
+            for _ in 0..64 {
+                let raw = self.raw.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(length) = sdl3::hid_read(*raw as sdl3::HidDevice, buffer) else {
+                    break;
+                };
+                drop(raw);
+                if length == 0 {
+                    break;
+                }
+                let report_id = buffer.first().copied().unwrap_or(0) as u32;
+                crate::trace_hid(format_args!(
+                    "input report id={} raw length={length} report_id={report_id}",
+                    self.id
+                ));
+                // SAFETY: the registration supplies this callback and buffer.
+                unsafe {
+                    callback(
+                        registered.context as *mut c_void,
+                        0,
+                        std::ptr::from_ref(self).cast_mut().cast(),
+                        0,
+                        report_id,
+                        registered.buffer as *mut u8,
+                        length as CFIndex,
+                    );
+                }
             }
             return;
         }
@@ -402,6 +431,10 @@ impl Device {
                 length as CFIndex,
             );
         }
+        crate::trace_hid(format_args!(
+            "input report id={} synthetic length={length}",
+            self.id
+        ));
     }
 
     pub fn raw_get_report(&self, feature: bool, report_id: u8, capacity: usize) -> Option<Vec<u8>> {

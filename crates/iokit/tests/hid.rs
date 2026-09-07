@@ -232,6 +232,57 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
         let reopened_service = iokit::registry::IOServiceGetMatchingService(0, matching);
         assert_eq!(reopened_service, service);
         assert_eq!(api::IOHIDDeviceCreate(std::ptr::null(), service), device);
+
+        let class = c"IOHIDDevice";
+        let matching = iokit::registry::IOServiceMatching(class.as_ptr());
+        let mut iterator = 0;
+        assert_eq!(
+            iokit::registry::IOServiceGetMatchingServices(0, matching, &mut iterator),
+            0
+        );
+        assert_ne!(iterator, 0, "the HID service is visible through IORegistry");
+        assert_eq!(iokit::registry::IOIteratorNext(iterator), service);
+        assert_eq!(iokit::registry::IOIteratorNext(iterator), 0);
+        let mut properties: CFTypeRef = std::ptr::null();
+        assert_eq!(
+            iokit::registry::IORegistryEntryCreateCFProperties(
+                service,
+                &mut properties,
+                std::ptr::null_mut(),
+                0,
+            ),
+            0
+        );
+        assert_eq!(
+            corefoundation::collections::number(cf::CFDictionaryGetValue(
+                properties,
+                string(b"ProductID"),
+            ))
+            .map(|value| value.as_i64()),
+            Some(i64::from(sdl3::usb_product::XBOX_360_CONTROLLER))
+        );
+        let usage_pairs = cf::CFDictionaryGetValue(properties, string(b"DeviceUsagePairs"));
+        assert_eq!(cf::CFGetTypeID(usage_pairs), cf::CFArrayGetTypeID());
+        assert_eq!(cf::CFArrayGetCount(usage_pairs), 1);
+        let usage_pair = cf::CFArrayGetValueAtIndex(usage_pairs, 0);
+        assert_eq!(
+            corefoundation::collections::number(cf::CFDictionaryGetValue(
+                usage_pair,
+                string(b"DeviceUsage"),
+            ))
+            .map(|value| value.as_i64()),
+            Some(i64::from(usage::GAMEPAD))
+        );
+        assert_eq!(
+            corefoundation::collections::number(cf::CFDictionaryGetValue(
+                properties,
+                string(b"bInterfaceNumber"),
+            ))
+            .map(|value| value.as_i64()),
+            Some(0)
+        );
+        cf::CFRelease(properties);
+        assert_eq!(iokit::registry::IOObjectRelease(iterator), 0);
     }
 
     // The element tree, walked the way a guest walks it.
