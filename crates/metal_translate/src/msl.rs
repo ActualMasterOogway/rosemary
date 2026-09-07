@@ -5,15 +5,19 @@
 //! a vertical source-compiler slice and, importantly, rejects every construct
 //! whose Metal semantics have not been implemented yet.
 
+use std::collections::HashMap;
+
 use crate::ir::{
     Access, AddressSpace, Block, BlockId, EntryPoint, Function, Instruction, InstructionKind,
-    Module, Operand, Parameter, Resource, ResourceKind, Stage, Terminator, Type, ValueId,
+    Module, Operand, Parameter, Resource, ResourceKind, Stage, StructField, StructType, Terminator,
+    Type, ValueId,
 };
 use crate::{Diagnostic, Phase, TranslateError};
 
 /// Parse the source-MSL subset currently implemented by the translator.
 pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
     let source = strip_comments(source);
+    let structs = parse_structs(&source)?;
     let kernel = source
         .find("kernel void")
         .ok_or_else(|| syntax_at(&source, 0, "MSL source has no `kernel void` entry point"))?;
@@ -59,77 +63,67 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
     let mut resources = Vec::new();
     let mut function_parameters = Vec::new();
     let mut values = Vec::new();
-    for raw in parameters
-        .split(',')
-        .map(str::trim)
-        .filter(|raw| !raw.is_empty())
-    {
-        let Some(buffer) = raw.find("[[buffer(") else {
-            return Err(syntax_at(
-                &source,
-                source.find(raw).unwrap_or(0),
-                "only `device uint*` buffer parameters are supported",
-            ));
-        };
-        let index_end = raw[buffer + 9..]
-            .find(")]]")
-            .map(|offset| buffer + 9 + offset)
-            .ok_or_else(|| {
-                syntax_at(
-                    &source,
-                    source.find(raw).unwrap_or(0) + buffer,
-                    "MSL buffer attribute is malformed",
-                )
-            })?;
-        let index = raw[buffer + 9..index_end]
-            .trim()
-            .parse::<u32>()
-            .map_err(|_| {
-                syntax_at(
-                    &source,
-                    source.find(raw).unwrap_or(0) + buffer + 9,
-                    "MSL buffer index is not an unsigned integer",
-                )
-            })?;
-        let declaration = raw[..buffer].trim();
-        let tokens: Vec<_> = declaration.split_whitespace().collect();
-        if tokens.len() != 3 || tokens[0] != "device" || tokens[1] != "uint*" {
-            return Err(syntax_at(
-                &source,
-                source.find(raw).unwrap_or(0),
-                "only `device uint* name [[buffer(n)]]` is supported",
-            ));
-        }
+    for raw in split_parameters(parameters) {
+        let offset = source.find(raw).unwrap_or(0);
+        let (declaration, attribute) = raw
+            .split_once("[[")
+            .ok_or_else(|| syntax_at(&source, offset, "MSL parameter has no attribute"))?;
+        let attribute = attribute
+            .strip_suffix("]]")
+            .ok_or_else(|| syntax_at(&source, offset, "MSL parameter attribute is malformed"))?
+            .trim();
+        let declaration = declaration.trim();
+        let name = declaration
+            .split_whitespace()
+            .last()
+            .ok_or_else(|| syntax_at(&source, offset, "MSL parameter has no name"))?;
+        let ty = parse_parameter_type(declaration, name, &structs)
+            .map_err(|message| syntax_at(&source, offset, message))?;
         let value = ValueId(values.len() as u32);
-        let ty = Type::Pointer {
-            space: AddressSpace::Device,
-            pointee: Box::new(Type::u32()),
-        };
         values.push(ty.clone());
         function_parameters.push(Parameter {
             value,
-            name: tokens[2].to_string(),
+            name: name.to_string(),
             ty: ty.clone(),
         });
-        resources.push(Resource {
-            argument: value.0,
-            kind: ResourceKind::Buffer,
-            index,
-            count: 1,
-            access: Access::Write,
-            ty,
-            name: Some(tokens[2].to_string()),
-        });
+        if let Some((kind, index, access)) = parse_resource_attribute(attribute, declaration, &ty) {
+            resources.push(Resource {
+                argument: value.0,
+                kind,
+                index,
+                count: 1,
+                access,
+                ty,
+                name: Some(name.to_string()),
+            });
+        } else if !attribute.starts_with("thread_position_in_grid") {
+            return Err(syntax_at(
+                &source,
+                offset,
+                "unsupported MSL parameter attribute",
+            ));
+        }
     }
-    if function_parameters.len() != 1 {
+    let Some(writable_buffer) = resources.iter().find(|resource| {
+        resource.kind == ResourceKind::Buffer
+            && resource.access != Access::Read
+            && resource.ty
+                == Type::Pointer {
+                    space: AddressSpace::Device,
+                    pointee: Box::new(Type::u32()),
+                }
+    }) else {
         return Err(syntax_at(
             &source,
-            kernel,
-            "the initial MSL frontend requires exactly one buffer parameter",
+            source.find(body).unwrap_or(0),
+            "MSL function body requires operations not implemented by the source frontend",
         ));
-    }
-    let parameter_value = function_parameters[0].value;
-    let prefix = format!("{}[0] =", function_parameters[0].name);
+    };
+    let parameter_value = function_parameters[writable_buffer.argument as usize].value;
+    let prefix = format!(
+        "{}[0] =",
+        function_parameters[writable_buffer.argument as usize].name
+    );
     let statement = body.trim().trim_end_matches(';').trim();
     let value = statement
         .strip_prefix(&prefix)
@@ -176,6 +170,213 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
     };
     module.verify()?;
     Ok(module)
+}
+
+fn parse_resource_attribute(
+    attribute: &str,
+    declaration: &str,
+    ty: &Type,
+) -> Option<(ResourceKind, u32, Access)> {
+    let (kind, index) = if let Some(index) = attribute.strip_prefix("buffer(") {
+        (ResourceKind::Buffer, index.strip_suffix(')')?)
+    } else if let Some(index) = attribute.strip_prefix("texture(") {
+        (ResourceKind::Texture, index.strip_suffix(')')?)
+    } else {
+        return None;
+    };
+    let index = index.trim().parse().ok()?;
+    let access = match ty {
+        Type::Pointer {
+            space: AddressSpace::Constant,
+            ..
+        } => Access::Read,
+        Type::Texture if declaration.contains("access::write") => Access::Write,
+        Type::Texture => Access::Read,
+        _ => Access::ReadWrite,
+    };
+    Some((kind, index, access))
+}
+
+fn parse_parameter_type(
+    declaration: &str,
+    name: &str,
+    structs: &HashMap<String, Type>,
+) -> Result<Type, String> {
+    let ty = declaration
+        .strip_suffix(name)
+        .ok_or_else(|| "MSL parameter declaration is malformed".to_string())?
+        .trim();
+    if let Some(pointee) = ty
+        .strip_prefix("device ")
+        .and_then(|ty| ty.strip_suffix('*'))
+    {
+        return Ok(Type::Pointer {
+            space: AddressSpace::Device,
+            pointee: Box::new(parse_value_type(pointee.trim(), structs)?),
+        });
+    }
+    if let Some(pointee) = ty
+        .strip_prefix("constant ")
+        .and_then(|ty| ty.strip_suffix('&'))
+    {
+        return Ok(Type::Pointer {
+            space: AddressSpace::Constant,
+            pointee: Box::new(parse_value_type(pointee.trim(), structs)?),
+        });
+    }
+    if ty.starts_with("texture2d<") || ty.starts_with("texture3d<") {
+        return Ok(Type::Texture);
+    }
+    parse_value_type(ty, structs)
+}
+
+fn parse_structs(source: &str) -> Result<HashMap<String, Type>, TranslateError> {
+    let mut structs = HashMap::new();
+    let mut remaining = source;
+    while let Some(start) = remaining.find("struct ") {
+        remaining = &remaining[start + "struct ".len()..];
+        let location = source.len() - remaining.len();
+        let name_end = remaining
+            .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .ok_or_else(|| syntax_at(source, location, "MSL struct has no body"))?;
+        let name = remaining[..name_end].trim();
+        let open = remaining[name_end..]
+            .find('{')
+            .map(|offset| name_end + offset)
+            .ok_or_else(|| syntax_at(source, location, "MSL struct has no body"))?;
+        let close = matching(remaining, open, '{', '}').ok_or_else(|| {
+            syntax_at(
+                source,
+                location + open,
+                "MSL struct has an unterminated body",
+            )
+        })?;
+        let mut fields = Vec::new();
+        let mut offset = 0;
+        let mut alignment = 1;
+        for field in remaining[open + 1..close]
+            .split(';')
+            .map(str::trim)
+            .filter(|field| !field.is_empty())
+        {
+            let mut tokens = field.split_whitespace();
+            let ty = tokens.next().ok_or_else(|| {
+                syntax_at(source, location + open, "MSL struct field has no type")
+            })?;
+            let field_name = tokens.next().ok_or_else(|| {
+                syntax_at(source, location + open, "MSL struct field has no name")
+            })?;
+            if tokens.next().is_some() {
+                return Err(syntax_at(
+                    source,
+                    location + open,
+                    "unsupported MSL struct field declaration",
+                ));
+            }
+            let ty = parse_value_type(ty, &structs)
+                .map_err(|message| syntax_at(source, location + open, message))?;
+            let (size, field_alignment) = type_layout(&ty).ok_or_else(|| {
+                syntax_at(source, location + open, "unsupported MSL struct field type")
+            })?;
+            offset = align_to(offset, field_alignment);
+            alignment = alignment.max(field_alignment);
+            fields.push(StructField {
+                name: Some(field_name.to_string()),
+                ty,
+                offset,
+            });
+            offset += size;
+        }
+        let size = align_to(offset, alignment);
+        structs.insert(
+            name.to_string(),
+            Type::Struct(StructType {
+                fields,
+                size,
+                alignment,
+                packed: false,
+            }),
+        );
+        remaining = &remaining[close + 1..];
+    }
+    Ok(structs)
+}
+
+fn parse_value_type(name: &str, structs: &HashMap<String, Type>) -> Result<Type, String> {
+    if let Some(ty) = structs.get(name) {
+        return Ok(ty.clone());
+    }
+    let base_end = name
+        .trim_end_matches(|character: char| character.is_ascii_digit())
+        .len();
+    let (base, suffix) = name.split_at(base_end);
+    let lanes = (!suffix.is_empty())
+        .then(|| suffix.parse::<u8>())
+        .transpose()
+        .map_err(|_| "invalid MSL vector width")?;
+    let scalar = match base {
+        "uint" => Type::u32(),
+        "int" => Type::i32(),
+        "uchar" => Type::Int {
+            bits: 8,
+            signed: false,
+        },
+        "float" => Type::Float { bits: 32 },
+        _ => return Err("unsupported MSL parameter type".to_string()),
+    };
+    Ok(lanes.map_or(scalar.clone(), |lanes| Type::Vector {
+        element: Box::new(scalar),
+        lanes,
+    }))
+}
+
+fn type_layout(ty: &Type) -> Option<(u32, u32)> {
+    match ty {
+        Type::Int { bits, .. } | Type::Float { bits } => {
+            Some((u32::from(*bits) / 8, u32::from(*bits) / 8))
+        }
+        Type::Vector { element, lanes } => {
+            let (size, alignment) = type_layout(element)?;
+            Some((
+                size * u32::from(*lanes),
+                if *lanes == 3 {
+                    alignment * 4
+                } else {
+                    alignment * u32::from(*lanes)
+                },
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn align_to(value: u32, alignment: u32) -> u32 {
+    value.next_multiple_of(alignment)
+}
+
+fn split_parameters(parameters: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut angle_depth = 0_u32;
+    for (offset, character) in parameters.char_indices() {
+        match character {
+            '<' => angle_depth += 1,
+            '>' => angle_depth = angle_depth.saturating_sub(1),
+            ',' if angle_depth == 0 => {
+                let part = parameters[start..offset].trim();
+                if !part.is_empty() {
+                    parts.push(part);
+                }
+                start = offset + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    let part = parameters[start..].trim();
+    if !part.is_empty() {
+        parts.push(part);
+    }
+    parts
 }
 
 fn matching(text: &str, open: usize, left: char, right: char) -> Option<usize> {

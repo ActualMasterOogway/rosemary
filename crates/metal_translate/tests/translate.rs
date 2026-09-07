@@ -212,3 +212,24 @@ fn source_msl_rejects_unimplemented_operations() {
     assert_eq!(error.diagnostics[0].phase, Phase::AirSyntax);
     assert_eq!(error.diagnostics[0].line, Some(2));
 }
+
+#[test]
+fn source_msl_accepts_blit_parameter_types_before_rejecting_its_body() {
+    let error = parse_msl(
+        "struct BlitParams { uint3 offset; uint3 size; uint2 stride; };\n\
+         kernel void blit(\n\
+           uint3 gid [[thread_position_in_grid]],\n\
+           constant BlitParams& params [[buffer(0)]],\n\
+           device uchar4* input [[buffer(1)]],\n\
+           texture3d<float, access::write> output [[texture(0)]])\n\
+         {\n\
+           if (all(gid < params.size)) {}\n\
+         }",
+    )
+    .unwrap_err();
+    assert_eq!(error.diagnostics[0].phase, Phase::AirSyntax);
+    assert_eq!(
+        error.diagnostics[0].message,
+        "MSL function body requires operations not implemented by the source frontend"
+    );
+}
