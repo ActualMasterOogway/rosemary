@@ -79,6 +79,14 @@ fn register_dlopen_names() {
     );
     crate::dyld::register_synthetic(
         &[
+            "/System/Library/Frameworks/Metal.framework/Versions/A/Metal",
+            "/System/Library/Frameworks/Metal.framework/Metal",
+            "Metal",
+        ],
+        symbol,
+    );
+    crate::dyld::register_synthetic(
+        &[
             "/System/Library/Frameworks/ForceFeedback.framework/Versions/A/ForceFeedback",
             "/System/Library/Frameworks/ForceFeedback.framework/ForceFeedback",
             "ForceFeedback",
@@ -309,7 +317,12 @@ pub fn provider() -> SyntheticDylib {
     for (name, addr) in media_constants() {
         define_data(&mut lib, &name, addr);
     }
-    for (name, addr) in shimmed().into_iter().chain(metal()) {
+    for name in metal::NAMES {
+        if let Some(addr) = metal::symbol(name) {
+            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
+        }
+    }
+    for (name, addr) in shimmed() {
         define_fn(&mut lib, &format!("_{name}"), addr);
     }
     lib
@@ -396,54 +409,12 @@ unsafe extern "C" fn unintercepted_alert() -> u64 {
     objc::fail!("NSRunAlertPanel was called rather than intercepted")
 }
 
-/// Metal, answered as a machine that has none.
-///
-/// `nil` is what `MTLCreateSystemDefaultDevice` returns on a Mac whose GPU
-/// Metal does not support, so it is an answer the callers were written for
-/// rather than one invented here - a game that gets it takes its own
-/// no-Metal path, which is OpenGL.
-///
-/// The alternative is leaving the three unbound, and that is not "no Metal", it
-/// is a call through a slot left zero: the renderer never learns the device is
-/// missing because it faults asking for it. Nothing else about Metal is
-/// answered, deliberately - a program that gets a device and then sends it a
-/// message is one that decided Metal *was* available, and every selector after
-/// that would have to be invented.
-///
-/// Absent on macOS, where the host's own framework is the answer.
-#[cfg(not(target_os = "macos"))]
-fn metal() -> Vec<(&'static str, *const ())> {
-    vec![
-        ("MTLCreateSystemDefaultDevice", no_metal_device as *const ()),
-        ("MTLCopyAllDevices", no_metal_device as *const ()),
-        (
-            "CGDirectDisplayCopyCurrentMetalDevice",
-            no_metal_device as *const (),
-        ),
-    ]
-}
-
-#[cfg(target_os = "macos")]
-fn metal() -> Vec<(&'static str, *const ())> {
-    Vec::new()
-}
-
-/// `nil`, for every Metal entry point that hands one back.
-///
-/// One function for all three: `MTLCopyAllDevices` is a `copy`, so a caller
-/// releases what it gets, and `nil` is the one value it can be handed without
-/// deciding who owns an array. `-count` on it is zero, which is the same
-/// "no devices" the empty array would have said.
-#[cfg(not(target_os = "macos"))]
-unsafe extern "C" fn no_metal_device() -> u64 {
-    0
-}
-
 pub fn symbol(name: &str) -> Option<u64> {
     if !builtin() {
         return None;
     }
     foundation::bootstrap();
+    // A dlsym answer must be the same address the flat provider binds.
     corefoundation::symbol(name)
         // libclosure, which a shim forwards to by name - see
         // `crate::shims::block`. Nothing on a host off Darwin defines it.
@@ -456,14 +427,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         .or_else(|| crate::opengl::symbol(name))
         .or_else(|| coreaudio::symbol(name))
         .or_else(|| gamecontroller::symbol(name))
-        // So a `dlsym` of one of these answers what the loader bound, which is
-        // the agreement `darwin::symbol`'s doc comment states.
-        .or_else(|| {
-            metal()
-                .into_iter()
-                .find(|(n, _)| *n == name)
-                .map(|(_, addr)| addr as usize as u64)
-        })
+        .or_else(|| metal::symbol(name))
 }
 
 /// Tell this tree's `NSBundle` which `.app` the guest is.

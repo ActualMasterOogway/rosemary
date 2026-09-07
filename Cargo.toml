@@ -22,6 +22,8 @@ contacts = { path = "crates/contacts" }
 gamecontroller = { path = "crates/gamecontroller" }
 forcefeedback = { path = "crates/forcefeedback" }
 metal_translate = { path = "crates/metal_translate" }
+metal = { path = "crates/metal" }
+ash = "0.38"
 libc = "0.2"
 gimli = "0.34"
 getrandom = "0.3"

@@ -1,0 +1,13 @@
+[package]
+name = "metal"
+description = "Metal framework objects backed by Vulkan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ash.workspace = true
+corefoundation.workspace = true
+foundation.workspace = true
+objc.workspace = true
+metal_translate.workspace = true

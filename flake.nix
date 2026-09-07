@@ -58,7 +58,9 @@
               # Cargo fetches microlift and the Cranelift fork over git.
               pkgs.git
               pkgs.python3 # tools/guest-symbolicate.py
-              pkgs.llvm # metal_translate
+              # metal_translate
+              pkgs.llvm
+              pkgs.vulkan-loader
             ];
 
             buildInputs = runtimeLibs;

@@ -19,6 +19,7 @@ coreaudio.workspace = true
 contacts.workspace = true
 gamecontroller.workspace = true
 forcefeedback.workspace = true
+metal.workspace = true
 gimli.workspace = true
 libc.workspace = true
 static_init.workspace = true
