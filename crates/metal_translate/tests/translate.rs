@@ -227,9 +227,8 @@ fn source_msl_rejects_texture_shapes_without_an_ir_type() {
 }
 
 #[test]
-fn source_msl_accepts_blit_body_through_its_texture_write() {
-    let error = parse_msl(
-        "struct BlitParams { uint3 offset; uint3 size; uint2 stride; };\n\
+fn source_msl_compiles_a_bounded_typed_blit_kernel() {
+    let source = "struct BlitParams { uint3 offset; uint3 size; uint2 stride; };\n\
          kernel void blit(\n\
            uint3 gid [[thread_position_in_grid]],\n\
            constant BlitParams& params [[buffer(0)]],\n\
@@ -240,14 +239,25 @@ fn source_msl_accepts_blit_body_through_its_texture_write() {
              uchar4 element = input[gid.x];\n\
              output.write(float4(element), gid);\n\
            }\n\
-         }",
-    )
-    .unwrap_err();
-    assert_eq!(error.diagnostics[0].phase, Phase::AirSyntax);
-    assert_eq!(
-        error.diagnostics[0].message,
-        "MSL texture writes require typed buffer/image lowering"
-    );
+         }";
+    let library = translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap();
+    let module = rspirv::dr::load_words(&library.entries[0].words).unwrap();
+    for operation in [
+        Op::ImageWrite,
+        Op::ULessThan,
+        Op::All,
+        Op::ConvertUToF,
+        Op::FDiv,
+    ] {
+        assert!(
+            module
+                .functions
+                .iter()
+                .flat_map(|function| &function.blocks)
+                .flat_map(|block| &block.instructions)
+                .any(|instruction| instruction.class.opcode == operation)
+        );
+    }
 }
 
 #[test]

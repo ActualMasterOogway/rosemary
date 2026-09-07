@@ -191,6 +191,7 @@ pub struct Instruction {
 pub enum Operand {
     Value(ValueId),
     Integer { ty: Type, value: u64 },
+    Float { ty: Type, bits: u64 },
 }
 
 impl Operand {
@@ -198,6 +199,13 @@ impl Operand {
         Self::Integer {
             ty: Type::u32(),
             value: u64::from(value),
+        }
+    }
+
+    pub fn f32(value: f32) -> Self {
+        Self::Float {
+            ty: Type::Float { bits: 32 },
+            bits: u64::from(value.to_bits()),
         }
     }
 }
@@ -209,6 +217,7 @@ pub enum IntegerPredicate {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InstructionKind {
+    GlobalInvocationId,
     Load {
         pointer: Operand,
     },
@@ -232,6 +241,28 @@ pub enum InstructionKind {
     ElementAddress {
         pointer: Operand,
         index: Operand,
+    },
+    CompositeExtract {
+        composite: Operand,
+        index: u32,
+    },
+    VectorUnsignedLessThan {
+        lhs: Operand,
+        rhs: Operand,
+    },
+    All {
+        vector: Operand,
+    },
+    ConvertUToF {
+        value: Operand,
+    },
+    FloatDiv {
+        lhs: Operand,
+        rhs: Operand,
+    },
+    VectorSplat {
+        value: Operand,
+        lanes: u8,
     },
     /// Store one texel through a writable Metal texture resource.
     ///
@@ -537,6 +568,13 @@ fn verify_instruction_types(
         .and_then(|value| function.values.get(value.0 as usize))
         .cloned();
     let valid = match &instruction.kind {
+        InstructionKind::GlobalInvocationId => {
+            result
+                == Some(Type::Vector {
+                    element: Box::new(Type::u32()),
+                    lanes: 3,
+                })
+        }
         InstructionKind::Load { pointer } => match operand_type(function, pointer) {
             Some(Type::Pointer { pointee, .. }) => result.as_ref() == Some(pointee.as_ref()),
             _ => false,
@@ -563,6 +601,62 @@ fn verify_instruction_types(
             matches!(result, Some(Type::Pointer { .. }))
                 && matches!(operand_type(function, pointer), Some(Type::Pointer { .. }))
                 && operand_type(function, index).is_some_and(|ty| matches!(ty, Type::Int { .. }))
+        }
+        InstructionKind::CompositeExtract { composite, index } => {
+            match operand_type(function, composite) {
+                Some(Type::Struct(structure)) => {
+                    structure
+                        .fields
+                        .get(*index as usize)
+                        .map(|field| field.ty.clone())
+                        == result
+                }
+                Some(Type::Vector { element, lanes }) => {
+                    *index < u32::from(lanes) && result.as_ref() == Some(element.as_ref())
+                }
+                _ => false,
+            }
+        }
+        InstructionKind::VectorUnsignedLessThan { lhs, rhs } => match operand_type(function, lhs) {
+            Some(Type::Vector { element, lanes }) => {
+                matches!(*element, Type::Int { signed: false, .. })
+                    && operand_type(function, rhs) == operand_type(function, lhs)
+                    && result
+                        == Some(Type::Vector {
+                            element: Box::new(Type::Bool),
+                            lanes,
+                        })
+            }
+            _ => false,
+        },
+        InstructionKind::All { vector } => {
+            matches!(operand_type(function, vector), Some(Type::Vector { element, .. }) if *element == Type::Bool)
+                && result == Some(Type::Bool)
+        }
+        InstructionKind::ConvertUToF { value } => match operand_type(function, value) {
+            Some(Type::Vector { element, lanes })
+                if matches!(*element, Type::Int { signed: false, .. }) =>
+            {
+                result
+                    == Some(Type::Vector {
+                        element: Box::new(Type::Float { bits: 32 }),
+                        lanes,
+                    })
+            }
+            Some(Type::Int { signed: false, .. }) => result == Some(Type::Float { bits: 32 }),
+            _ => false,
+        },
+        InstructionKind::FloatDiv { lhs, rhs } => {
+            result == operand_type(function, lhs)
+                && result == operand_type(function, rhs)
+                && result.as_ref().is_some_and(is_float_or_float_vector)
+        }
+        InstructionKind::VectorSplat { value, lanes } => {
+            result
+                == operand_type(function, value).map(|element| Type::Vector {
+                    element: Box::new(element),
+                    lanes: *lanes,
+                })
         }
         InstructionKind::TextureWrite {
             texture,
@@ -600,6 +694,7 @@ fn operand_type(function: &Function, operand: &Operand) -> Option<Type> {
     match operand {
         Operand::Value(value) => function.values.get(value.0 as usize).cloned(),
         Operand::Integer { ty, .. } => Some(ty.clone()),
+        Operand::Float { ty, .. } => Some(ty.clone()),
     }
 }
 
@@ -611,6 +706,14 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::IntegerXor { lhs, rhs }
         | InstructionKind::IntegerCompare { lhs, rhs, .. } => vec![lhs, rhs],
         InstructionKind::ElementAddress { pointer, index } => vec![pointer, index],
+        InstructionKind::CompositeExtract { composite, .. } => vec![composite],
+        InstructionKind::VectorUnsignedLessThan { lhs, rhs }
+        | InstructionKind::FloatDiv { lhs, rhs } => vec![lhs, rhs],
+        InstructionKind::All { vector } | InstructionKind::ConvertUToF { value: vector } => {
+            vec![vector]
+        }
+        InstructionKind::VectorSplat { value, .. } => vec![value],
+        InstructionKind::GlobalInvocationId => vec![],
         InstructionKind::TextureWrite {
             texture,
             coordinate,
@@ -618,6 +721,11 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         } => vec![texture, coordinate, value],
         InstructionKind::Phi { incomings } => incomings.iter().map(|(_, value)| value).collect(),
     }
+}
+
+fn is_float_or_float_vector(ty: &Type) -> bool {
+    matches!(ty, Type::Float { .. })
+        || matches!(ty, Type::Vector { element, .. } if matches!(element.as_ref(), Type::Float { .. }))
 }
 
 fn terminator_operands(terminator: &Terminator) -> Vec<&Operand> {

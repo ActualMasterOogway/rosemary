@@ -63,6 +63,7 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
     let mut resources = Vec::new();
     let mut function_parameters = Vec::new();
     let mut values = Vec::new();
+    let mut builtins = HashMap::new();
     for raw in split_parameters(parameters) {
         let offset = source.find(raw).unwrap_or(0);
         let (declaration, attribute) = raw
@@ -81,6 +82,11 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
             .map_err(|message| syntax_at(&source, offset, message))?;
         let value = ValueId(values.len() as u32);
         values.push(ty.clone());
+        if attribute.starts_with("thread_position_in_grid") {
+            builtins.insert(name.to_string(), value);
+            continue;
+        }
+        let argument = function_parameters.len() as u32;
         function_parameters.push(Parameter {
             value,
             name: name.to_string(),
@@ -88,7 +94,7 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
         });
         if let Some((kind, index, access)) = parse_resource_attribute(attribute, declaration, &ty) {
             resources.push(Resource {
-                argument: value.0,
+                argument,
                 kind,
                 index,
                 count: 1,
@@ -96,7 +102,7 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
                 ty,
                 name: Some(name.to_string()),
             });
-        } else if !attribute.starts_with("thread_position_in_grid") {
+        } else {
             return Err(syntax_at(
                 &source,
                 offset,
@@ -104,8 +110,16 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
             ));
         }
     }
-    if let Some(error) = parse_blit_body(&source, body) {
-        return Err(error);
+    if body.trim_start().starts_with("if") {
+        return parse_blit_kernel(
+            &source,
+            name,
+            body,
+            function_parameters,
+            values,
+            resources,
+            builtins,
+        );
     }
     let Some(writable_buffer) = resources.iter().find(|resource| {
         resource.kind == ResourceKind::Buffer
@@ -175,6 +189,373 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
     Ok(module)
 }
 
+fn parse_blit_kernel(
+    source: &str,
+    name: &str,
+    body: &str,
+    parameters: Vec<Parameter>,
+    mut values: Vec<Type>,
+    resources: Vec<Resource>,
+    builtins: HashMap<String, ValueId>,
+) -> Result<Module, TranslateError> {
+    let guard = body.trim_start();
+    let open = guard.find('(').ok_or_else(|| {
+        syntax_at(
+            source,
+            source.find(body).unwrap_or(0),
+            "MSL blit guard is malformed",
+        )
+    })?;
+    let close = matching(guard, open, '(', ')').ok_or_else(|| {
+        syntax_at(
+            source,
+            source.find(guard).unwrap_or(0),
+            "MSL blit guard is malformed",
+        )
+    })?;
+    let condition = guard[open + 1..close].trim();
+    let (gid_name, size_expression) = condition
+        .strip_prefix("all(")
+        .and_then(|value| value.strip_suffix(')'))
+        .and_then(|value| value.split_once('<'))
+        .ok_or_else(|| {
+            syntax_at(
+                source,
+                source.find(guard).unwrap_or(0),
+                "unsupported MSL conditional expression",
+            )
+        })?;
+    let gid = builtins.get(gid_name.trim()).copied().ok_or_else(|| {
+        syntax_at(
+            source,
+            source.find(guard).unwrap_or(0),
+            "blit guard must use thread_position_in_grid",
+        )
+    })?;
+    let (params_name, field_name) = size_expression.trim().split_once('.').ok_or_else(|| {
+        syntax_at(
+            source,
+            source.find(guard).unwrap_or(0),
+            "blit guard must compare against a parameter field",
+        )
+    })?;
+    let params = parameters
+        .iter()
+        .find(|parameter| parameter.name == params_name.trim())
+        .ok_or_else(|| {
+            syntax_at(
+                source,
+                source.find(guard).unwrap_or(0),
+                "blit guard parameter is missing",
+            )
+        })?;
+    let Type::Pointer {
+        pointee: params_pointee,
+        ..
+    } = &params.ty
+    else {
+        return Err(syntax_at(
+            source,
+            source.find(guard).unwrap_or(0),
+            "blit guard parameter is not a buffer",
+        ));
+    };
+    let Type::Struct(structure) = params_pointee.as_ref() else {
+        return Err(syntax_at(
+            source,
+            source.find(guard).unwrap_or(0),
+            "blit guard parameter is not a struct",
+        ));
+    };
+    let field = structure
+        .fields
+        .iter()
+        .enumerate()
+        .find(|(_, field)| field.name.as_deref() == Some(field_name.trim()))
+        .ok_or_else(|| {
+            syntax_at(
+                source,
+                source.find(guard).unwrap_or(0),
+                "blit size field is missing",
+            )
+        })?;
+    if field.1.ty
+        != (Type::Vector {
+            element: Box::new(Type::u32()),
+            lanes: 3,
+        })
+    {
+        return Err(syntax_at(
+            source,
+            source.find(guard).unwrap_or(0),
+            "blit size field must be uint3",
+        ));
+    }
+    let guarded = guard[close + 1..].trim_start();
+    let body_open = guarded.find('{').ok_or_else(|| {
+        syntax_at(
+            source,
+            source.find(guard).unwrap_or(0),
+            "MSL blit guard has no body",
+        )
+    })?;
+    let body_close = matching(guarded, body_open, '{', '}').ok_or_else(|| {
+        syntax_at(
+            source,
+            source.find(guard).unwrap_or(0),
+            "MSL blit guard has no body",
+        )
+    })?;
+    let inner = &guarded[body_open + 1..body_close];
+    let load = inner.split(';').next().unwrap_or("").trim();
+    let (_, index_expression) = load
+        .split_once('[')
+        .and_then(|(left, right)| right.strip_suffix(']').map(|right| (left, right)))
+        .ok_or_else(|| {
+            syntax_at(
+                source,
+                source.find(inner).unwrap_or(0),
+                format!(
+                    "unsupported MSL buffer element load ({})",
+                    blit_statement_id(load)
+                ),
+            )
+        })?;
+    let input_name = load
+        .split_once('=')
+        .map(|(_, right)| right.trim().split('[').next().unwrap_or("").trim())
+        .unwrap_or("");
+    let input = parameters
+        .iter()
+        .find(|parameter| parameter.name == input_name)
+        .ok_or_else(|| {
+            syntax_at(
+                source,
+                source.find(inner).unwrap_or(0),
+                "blit input buffer is missing",
+            )
+        })?;
+    let Type::Pointer {
+        space: AddressSpace::Device,
+        pointee: input_pointee,
+    } = &input.ty
+    else {
+        return Err(syntax_at(
+            source,
+            source.find(inner).unwrap_or(0),
+            "blit input must be a device buffer",
+        ));
+    };
+    let element_type = input_pointee.as_ref().clone();
+    if element_type
+        != (Type::Vector {
+            element: Box::new(Type::Int {
+                bits: 8,
+                signed: false,
+            }),
+            lanes: 4,
+        })
+        || index_expression.trim() != format!("{}.x", gid_name.trim())
+    {
+        return Err(syntax_at(
+            source,
+            source.find(inner).unwrap_or(0),
+            format!(
+                "unsupported MSL buffer element load ({})",
+                blit_statement_id(load)
+            ),
+        ));
+    }
+    let write = inner.split(';').nth(1).unwrap_or("").trim();
+    let output_name = write.split(".write(").next().unwrap_or("").trim();
+    let output = parameters
+        .iter()
+        .find(|parameter| parameter.name == output_name)
+        .ok_or_else(|| {
+            syntax_at(
+                source,
+                source.find(inner).unwrap_or(0),
+                "blit output texture is missing",
+            )
+        })?;
+    if output.ty != Type::Texture
+        || !write.contains("float4(")
+        || !write.ends_with(&format!(", {})", gid_name.trim()))
+            && !write.ends_with(&format!(", {});", gid_name.trim()))
+    {
+        return Err(syntax_at(
+            source,
+            source.find(inner).unwrap_or(0),
+            "unsupported MSL blit output operation",
+        ));
+    }
+    let add = |values: &mut Vec<Type>, ty: Type| {
+        let value = ValueId(values.len() as u32);
+        values.push(ty);
+        value
+    };
+    let uint3 = Type::Vector {
+        element: Box::new(Type::u32()),
+        lanes: 3,
+    };
+    let bool3 = Type::Vector {
+        element: Box::new(Type::Bool),
+        lanes: 3,
+    };
+    let uchar4 = element_type;
+    let float4 = Type::Vector {
+        element: Box::new(Type::Float { bits: 32 }),
+        lanes: 4,
+    };
+    let params_value = add(&mut values, params_pointee.as_ref().clone());
+    let size = add(&mut values, uint3.clone());
+    let in_bounds = add(&mut values, bool3);
+    let all = add(&mut values, Type::Bool);
+    let x = add(&mut values, Type::u32());
+    let element_pointer = add(
+        &mut values,
+        Type::Pointer {
+            space: AddressSpace::Device,
+            pointee: Box::new(uchar4.clone()),
+        },
+    );
+    let element = add(&mut values, uchar4);
+    let converted = add(&mut values, float4.clone());
+    let divisor = add(&mut values, float4.clone());
+    let normalized = add(&mut values, float4);
+    let entry = Block {
+        id: BlockId(0),
+        name: "entry".to_string(),
+        instructions: vec![
+            Instruction {
+                result: Some(gid),
+                kind: InstructionKind::GlobalInvocationId,
+            },
+            Instruction {
+                result: Some(params_value),
+                kind: InstructionKind::Load {
+                    pointer: Operand::Value(params.value),
+                },
+            },
+            Instruction {
+                result: Some(size),
+                kind: InstructionKind::CompositeExtract {
+                    composite: Operand::Value(params_value),
+                    index: field.0 as u32,
+                },
+            },
+            Instruction {
+                result: Some(in_bounds),
+                kind: InstructionKind::VectorUnsignedLessThan {
+                    lhs: Operand::Value(gid),
+                    rhs: Operand::Value(size),
+                },
+            },
+            Instruction {
+                result: Some(all),
+                kind: InstructionKind::All {
+                    vector: Operand::Value(in_bounds),
+                },
+            },
+        ],
+        terminator: Terminator::CondBranch {
+            condition: Operand::Value(all),
+            true_block: BlockId(1),
+            false_block: BlockId(2),
+        },
+    };
+    let write_block = Block {
+        id: BlockId(1),
+        name: "write".to_string(),
+        instructions: vec![
+            Instruction {
+                result: Some(x),
+                kind: InstructionKind::CompositeExtract {
+                    composite: Operand::Value(gid),
+                    index: 0,
+                },
+            },
+            Instruction {
+                result: Some(element_pointer),
+                kind: InstructionKind::ElementAddress {
+                    pointer: Operand::Value(input.value),
+                    index: Operand::Value(x),
+                },
+            },
+            Instruction {
+                result: Some(element),
+                kind: InstructionKind::Load {
+                    pointer: Operand::Value(element_pointer),
+                },
+            },
+            Instruction {
+                result: Some(converted),
+                kind: InstructionKind::ConvertUToF {
+                    value: Operand::Value(element),
+                },
+            },
+            Instruction {
+                result: Some(divisor),
+                kind: InstructionKind::VectorSplat {
+                    value: Operand::f32(255.0),
+                    lanes: 4,
+                },
+            },
+            Instruction {
+                result: Some(normalized),
+                kind: InstructionKind::FloatDiv {
+                    lhs: Operand::Value(converted),
+                    rhs: Operand::Value(divisor),
+                },
+            },
+            Instruction {
+                result: None,
+                kind: InstructionKind::TextureWrite {
+                    texture: Operand::Value(output.value),
+                    coordinate: Operand::Value(gid),
+                    value: Operand::Value(normalized),
+                },
+            },
+        ],
+        terminator: Terminator::Return(None),
+    };
+    let module = Module {
+        functions: vec![Function {
+            name: name.to_string(),
+            parameters,
+            values,
+            blocks: vec![
+                entry,
+                write_block,
+                Block {
+                    id: BlockId(2),
+                    name: "out_of_bounds".to_string(),
+                    instructions: vec![],
+                    terminator: Terminator::Return(None),
+                },
+            ],
+        }],
+        entries: vec![EntryPoint {
+            function: 0,
+            stage: Stage::Kernel,
+            resources,
+        }],
+    };
+    module.verify()?;
+    Ok(module)
+}
+
+/// A bounded diagnostic identifier for a rejected source statement. Source
+/// text is intentionally never included in diagnostics or tracing.
+fn blit_statement_id(statement: &str) -> String {
+    let hash = statement
+        .bytes()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+    format!("{} bytes, fnv1a64={hash:016x}", statement.len())
+}
+
 fn parse_resource_attribute(
     attribute: &str,
     declaration: &str,
@@ -197,57 +578,6 @@ fn parse_resource_attribute(
         _ => Access::ReadWrite,
     };
     Some((kind, index, access))
-}
-
-/// Parse the syntactic shape of the shipped blit kernels up through their image
-/// write. Each construct remains rejected until it has Metal IR and SPIR-V
-/// lowering; recognizing a construct here never makes it a no-op.
-fn parse_blit_body(source: &str, body: &str) -> Option<TranslateError> {
-    let guard = body.trim_start();
-    if !guard.starts_with("if") {
-        return None;
-    }
-    let open = guard.find('(')?;
-    let close = matching(guard, open, '(', ')')?;
-    let condition = guard[open + 1..close].trim();
-    if !condition.starts_with("all(") || !condition.contains('<') {
-        return Some(syntax_at(
-            source,
-            source.find(guard).unwrap_or(0),
-            "unsupported MSL conditional expression",
-        ));
-    }
-    let body_open = guard[close + 1..]
-        .find('{')
-        .map(|offset| close + 1 + offset)?;
-    let body_close = matching(guard, body_open, '{', '}')?;
-    let guarded_body = &guard[body_open + 1..body_close];
-    let load_end = guarded_body.find(';')?;
-    let load = guarded_body[..load_end].trim();
-    let (declaration, expression) = load.split_once('=')?;
-    if declaration.split_whitespace().count() != 2
-        || !expression.contains('[')
-        || !expression.contains(']')
-    {
-        return Some(syntax_at(
-            source,
-            source.find(guarded_body).unwrap_or(0),
-            "unsupported MSL buffer element load",
-        ));
-    }
-    let write = guarded_body[load_end + 1..].trim();
-    if !write.starts_with("output.write(") || !write.ends_with(");") {
-        return Some(syntax_at(
-            source,
-            source.find(write).unwrap_or(0),
-            "unsupported MSL blit output operation",
-        ));
-    }
-    Some(syntax_at(
-        source,
-        source.find(write).unwrap_or(0),
-        "MSL texture writes require typed buffer/image lowering",
-    ))
 }
 
 fn parse_parameter_type(

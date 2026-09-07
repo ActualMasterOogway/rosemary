@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use rspirv::binary::Assemble;
 use rspirv::dr::{Builder, Operand as SpirvOperand};
 use rspirv::spirv::{
-    AddressingModel, Capability, Decoration, Dim, ExecutionMode, ExecutionModel, FunctionControl,
-    ImageFormat, LoopControl, MemoryModel, StorageClass,
+    AddressingModel, BuiltIn, Capability, Decoration, Dim, ExecutionMode, ExecutionModel,
+    FunctionControl, ImageFormat, LoopControl, MemoryModel, StorageClass,
 };
 
 use crate::ir::{
@@ -161,6 +161,7 @@ struct Emitter {
     buffer_types: HashMap<Type, (u32, u32)>,
     interface: Vec<u32>,
     parameter_pointers: HashMap<ValueId, u32>,
+    global_invocation_id: Option<u32>,
 }
 
 impl Emitter {
@@ -176,6 +177,7 @@ impl Emitter {
             buffer_types: HashMap::new(),
             interface: Vec::new(),
             parameter_pointers: HashMap::new(),
+            global_invocation_id: None,
         }
     }
 
@@ -274,7 +276,13 @@ impl Emitter {
             return Ok(*ids);
         }
         let element_type = self.type_id(pointee)?;
-        let block_type = self.builder.type_struct([element_type]);
+        let array_type = self.builder.type_runtime_array(element_type);
+        self.builder.decorate(
+            array_type,
+            Decoration::ArrayStride,
+            [SpirvOperand::LiteralBit32(type_stride(pointee)?)],
+        );
+        let block_type = self.builder.type_struct([array_type]);
         self.builder.decorate(
             block_type,
             Decoration::Block,
@@ -300,6 +308,7 @@ impl Emitter {
         function: &Function,
     ) -> Result<u32, TranslateError> {
         self.collect_constants(function)?;
+        self.declare_global_invocation_id()?;
         let void = self.type_id(&Type::Void)?;
         let function_type = self.builder.type_function(void, []);
         let function_id = self.builder.id();
@@ -381,10 +390,32 @@ impl Emitter {
                     pointer_type,
                     Some(values[&parameter.value]),
                     variable,
-                    [zero],
+                    [zero, zero],
                 )
                 .map_err(build_error)?;
         }
+        Ok(())
+    }
+
+    fn declare_global_invocation_id(&mut self) -> Result<(), TranslateError> {
+        if self.global_invocation_id.is_some() {
+            return Ok(());
+        }
+        let vector = self.type_id(&Type::Vector {
+            element: Box::new(Type::u32()),
+            lanes: 3,
+        })?;
+        let pointer = self.builder.type_pointer(None, StorageClass::Input, vector);
+        let variable = self
+            .builder
+            .variable(pointer, None, StorageClass::Input, None);
+        self.builder.decorate(
+            variable,
+            Decoration::BuiltIn,
+            [SpirvOperand::BuiltIn(BuiltIn::GlobalInvocationId)],
+        );
+        self.interface.push(variable);
+        self.global_invocation_id = Some(variable);
         Ok(())
     }
 
@@ -392,14 +423,26 @@ impl Emitter {
         for block in &function.blocks {
             for instruction in &block.instructions {
                 for operand in instruction_operands(&instruction.kind) {
-                    if let Operand::Integer { ty, value } = operand {
-                        self.constant(ty, *value)?;
+                    match operand {
+                        Operand::Integer { ty, value } => {
+                            self.constant(ty, *value)?;
+                        }
+                        Operand::Float { ty, bits } => {
+                            self.constant(ty, *bits)?;
+                        }
+                        Operand::Value(_) => {}
                     }
                 }
             }
             for operand in terminator_operands(&block.terminator) {
-                if let Operand::Integer { ty, value } = operand {
-                    self.constant(ty, *value)?;
+                match operand {
+                    Operand::Integer { ty, value } => {
+                        self.constant(ty, *value)?;
+                    }
+                    Operand::Float { ty, bits } => {
+                        self.constant(ty, *bits)?;
+                    }
+                    Operand::Value(_) => {}
                 }
             }
         }
@@ -415,6 +458,22 @@ impl Emitter {
     ) -> Result<(), TranslateError> {
         let result_id = instruction.result.map(|result| values[&result]);
         match &instruction.kind {
+            InstructionKind::GlobalInvocationId => {
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("global invocation ID has no result"))?;
+                let ty = self.type_id(&function.values[result.0 as usize])?;
+                self.builder
+                    .load(
+                        ty,
+                        result_id,
+                        self.global_invocation_id
+                            .ok_or_else(|| emission("global invocation ID was not declared"))?,
+                        None,
+                        [],
+                    )
+                    .map_err(build_error)?;
+            }
             InstructionKind::Load { pointer } => {
                 let result = instruction
                     .result
@@ -477,8 +536,90 @@ impl Emitter {
                     .phi(ty, result_id, incoming)
                     .map_err(build_error)?;
             }
-            InstructionKind::ElementAddress { .. } => {
-                return Err(emission("element-address lowering is not implemented"));
+            InstructionKind::ElementAddress { pointer, index } => {
+                let Operand::Value(parameter) = pointer else {
+                    return Err(emission("element address requires a buffer parameter"));
+                };
+                let variable = self
+                    .parameter_pointers
+                    .get(parameter)
+                    .copied()
+                    .ok_or_else(|| emission("element address base is not a buffer resource"))?;
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("element address has no result"))?;
+                let Type::Pointer { pointee, .. } = &function.values[result.0 as usize] else {
+                    return Err(emission("element address result is not a pointer"));
+                };
+                let pointee = self.type_id(pointee)?;
+                let pointer_type =
+                    self.builder
+                        .type_pointer(None, StorageClass::StorageBuffer, pointee);
+                let zero = self.constant(&Type::u32(), 0)?;
+                let index = self.operand(index, values)?;
+                self.builder
+                    .access_chain(pointer_type, result_id, variable, [zero, index])
+                    .map_err(build_error)?;
+            }
+            InstructionKind::CompositeExtract { composite, index } => {
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("composite extract has no result"))?;
+                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let composite = self.operand(composite, values)?;
+                self.builder
+                    .composite_extract(ty, result_id, composite, [*index])
+                    .map_err(build_error)?;
+            }
+            InstructionKind::VectorUnsignedLessThan { lhs, rhs } => self.emit_binary(
+                function,
+                instruction,
+                lhs,
+                rhs,
+                values,
+                |builder, ty, id, a, b| builder.u_less_than(ty, id, a, b),
+            )?,
+            InstructionKind::All { vector } => {
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("all has no result"))?;
+                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let vector = self.operand(vector, values)?;
+                self.builder
+                    .all(ty, result_id, vector)
+                    .map_err(build_error)?;
+            }
+            InstructionKind::ConvertUToF { value } => {
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("conversion has no result"))?;
+                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let value = self.operand(value, values)?;
+                self.builder
+                    .convert_u_to_f(ty, result_id, value)
+                    .map_err(build_error)?;
+            }
+            InstructionKind::FloatDiv { lhs, rhs } => self.emit_binary(
+                function,
+                instruction,
+                lhs,
+                rhs,
+                values,
+                |builder, ty, id, a, b| builder.f_div(ty, id, a, b),
+            )?,
+            InstructionKind::VectorSplat { value, lanes } => {
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("vector splat has no result"))?;
+                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let value = self.operand(value, values)?;
+                self.builder
+                    .composite_construct(
+                        ty,
+                        result_id,
+                        std::iter::repeat_n(value, usize::from(*lanes)),
+                    )
+                    .map_err(build_error)?;
             }
             InstructionKind::TextureWrite {
                 texture,
@@ -561,6 +702,7 @@ impl Emitter {
                 .copied()
                 .ok_or_else(|| emission("operand refers to a missing value")),
             Operand::Integer { ty, value } => self.constant(ty, *value),
+            Operand::Float { ty, bits } => self.constant(ty, *bits),
         }
     }
 
@@ -571,7 +713,9 @@ impl Emitter {
         }
         let ty_id = self.type_id(ty)?;
         let id = match ty {
-            Type::Int { bits: 1..=32, .. } => self.builder.constant_bit32(ty_id, value as u32),
+            Type::Int { bits: 1..=32, .. } | Type::Float { bits: 32 } => {
+                self.builder.constant_bit32(ty_id, value as u32)
+            }
             Type::Int { bits: 33..=64, .. } => self.builder.constant_bit64(ty_id, value),
             _ => return Err(emission("unsupported SPIR-V constant type")),
         };
@@ -593,6 +737,23 @@ impl Emitter {
             Type::Vector { element, lanes } => {
                 let element = self.type_id(element)?;
                 self.builder.type_vector(element, u32::from(*lanes))
+            }
+            Type::Struct(structure) => {
+                let fields = structure
+                    .fields
+                    .iter()
+                    .map(|field| self.type_id(&field.ty))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let id = self.builder.type_struct(fields);
+                for (index, field) in structure.fields.iter().enumerate() {
+                    self.builder.member_decorate(
+                        id,
+                        index as u32,
+                        Decoration::Offset,
+                        [SpirvOperand::LiteralBit32(field.offset)],
+                    );
+                }
+                id
             }
             Type::Texture => {
                 let scalar = self.type_id(&Type::Float { bits: 32 })?;
@@ -616,6 +777,18 @@ fn descriptor_set(kind: ResourceKind) -> u32 {
         | ResourceKind::VisibleFunctionTable
         | ResourceKind::IntersectionFunctionTable
         | ResourceKind::ArgumentBuffer => 0,
+    }
+}
+
+fn type_stride(ty: &Type) -> Result<u32, TranslateError> {
+    match ty {
+        Type::Int { bits, .. } | Type::Float { bits } => Ok(u32::from(*bits) / 8),
+        Type::Vector { element, lanes } => {
+            let element = type_stride(element)?;
+            Ok(element * u32::from(*lanes))
+        }
+        Type::Struct(structure) => Ok(structure.size),
+        _ => Err(emission("buffer element type has no SPIR-V array stride")),
     }
 }
 
@@ -656,6 +829,14 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::IntegerXor { lhs, rhs }
         | InstructionKind::IntegerCompare { lhs, rhs, .. } => vec![lhs, rhs],
         InstructionKind::ElementAddress { pointer, index } => vec![pointer, index],
+        InstructionKind::CompositeExtract { composite, .. } => vec![composite],
+        InstructionKind::VectorUnsignedLessThan { lhs, rhs }
+        | InstructionKind::FloatDiv { lhs, rhs } => vec![lhs, rhs],
+        InstructionKind::All { vector } | InstructionKind::ConvertUToF { value: vector } => {
+            vec![vector]
+        }
+        InstructionKind::VectorSplat { value, .. } => vec![value],
+        InstructionKind::GlobalInvocationId => vec![],
         InstructionKind::TextureWrite {
             texture,
             coordinate,
