@@ -1,6 +1,10 @@
-use metal_translate::ir::{Access, InstructionKind, Stage};
+use metal_translate::ir::{
+    Access, Block, BlockId, EntryPoint, Function, InstructionKind, Module, Parameter, Resource,
+    ResourceKind, Stage, Terminator, Type, ValueId,
+};
 use metal_translate::{
-    AirInput, Phase, TargetProfile, metallib_air, parse_air, parse_msl, translate, translate_msl,
+    AirInput, Phase, TargetProfile, emit_spirv, metallib_air, parse_air, parse_msl, translate,
+    translate_msl,
 };
 use rspirv::spirv::Op;
 
@@ -214,6 +218,15 @@ fn source_msl_rejects_unimplemented_operations() {
 }
 
 #[test]
+fn source_msl_rejects_texture_shapes_without_an_ir_type() {
+    let error = parse_msl(
+        "kernel void f(texture2d<float, access::write> output [[texture(0)]]) { return; }",
+    )
+    .unwrap_err();
+    assert_eq!(error.diagnostics[0].message, "unsupported MSL texture type");
+}
+
+#[test]
 fn source_msl_accepts_blit_body_through_its_texture_write() {
     let error = parse_msl(
         "struct BlitParams { uint3 offset; uint3 size; uint2 stride; };\n\
@@ -234,5 +247,53 @@ fn source_msl_accepts_blit_body_through_its_texture_write() {
     assert_eq!(
         error.diagnostics[0].message,
         "MSL texture writes require typed buffer/image lowering"
+    );
+}
+
+#[test]
+fn emits_a_writable_3d_texture_descriptor_in_its_metal_namespace() {
+    let module = Module {
+        functions: vec![Function {
+            name: "clear_volume".to_string(),
+            parameters: vec![Parameter {
+                value: ValueId(0),
+                name: "output".to_string(),
+                ty: Type::Texture,
+            }],
+            values: vec![Type::Texture],
+            blocks: vec![Block {
+                id: BlockId(0),
+                name: "entry".to_string(),
+                instructions: Vec::new(),
+                terminator: Terminator::Return(None),
+            }],
+        }],
+        entries: vec![EntryPoint {
+            function: 0,
+            stage: Stage::Kernel,
+            resources: vec![Resource {
+                argument: 0,
+                kind: ResourceKind::Texture,
+                index: 7,
+                count: 1,
+                access: Access::Write,
+                ty: Type::Texture,
+                name: Some("output".to_string()),
+            }],
+        }],
+    };
+
+    let artifact = emit_spirv(&module, &TargetProfile::vulkan_1_3())
+        .unwrap()
+        .entries
+        .remove(0);
+    assert_eq!(artifact.resources[0].descriptor_set, 1);
+    assert_eq!(artifact.resources[0].binding, 7);
+    let parsed = rspirv::dr::load_words(&artifact.words).unwrap();
+    assert!(
+        parsed
+            .types_global_values
+            .iter()
+            .any(|instruction| instruction.class.opcode == Op::TypeImage)
     );
 }

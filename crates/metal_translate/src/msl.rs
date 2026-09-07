@@ -182,10 +182,9 @@ fn parse_resource_attribute(
 ) -> Option<(ResourceKind, u32, Access)> {
     let (kind, index) = if let Some(index) = attribute.strip_prefix("buffer(") {
         (ResourceKind::Buffer, index.strip_suffix(')')?)
-    } else if let Some(index) = attribute.strip_prefix("texture(") {
-        (ResourceKind::Texture, index.strip_suffix(')')?)
     } else {
-        return None;
+        let index = attribute.strip_prefix("texture(")?;
+        (ResourceKind::Texture, index.strip_suffix(')')?)
     };
     let index = index.trim().parse().ok()?;
     let access = match ty {
@@ -278,8 +277,11 @@ fn parse_parameter_type(
             pointee: Box::new(parse_value_type(pointee.trim(), structs)?),
         });
     }
-    if ty.starts_with("texture2d<") || ty.starts_with("texture3d<") {
+    if ty.starts_with("texture3d<float,") && ty.contains("access::write") {
         return Ok(Type::Texture);
+    }
+    if ty.starts_with("texture") {
+        return Err("unsupported MSL texture type".to_string());
     }
     parse_value_type(ty, structs)
 }

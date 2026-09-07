@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use rspirv::binary::Assemble;
 use rspirv::dr::{Builder, Operand as SpirvOperand};
 use rspirv::spirv::{
-    AddressingModel, Capability, Decoration, ExecutionMode, ExecutionModel, FunctionControl,
-    LoopControl, MemoryModel, StorageClass,
+    AddressingModel, Capability, Decoration, Dim, ExecutionMode, ExecutionModel, FunctionControl,
+    ImageFormat, LoopControl, MemoryModel, StorageClass,
 };
 
 use crate::ir::{
@@ -190,13 +190,42 @@ impl Emitter {
                 .parameters
                 .get(resource.argument as usize)
                 .ok_or_else(|| emission("resource refers to a missing function parameter"))?;
-            let Type::Pointer { pointee, .. } = &parameter.ty else {
-                return Err(emission("buffer resource parameter is not a pointer"));
+            let (variable, storage_class) = match (&resource.kind, &parameter.ty) {
+                (ResourceKind::Buffer, Type::Pointer { pointee, .. }) => {
+                    let (_block_type, pointer_type) = self.buffer_type(pointee)?;
+                    (
+                        self.builder.variable(
+                            pointer_type,
+                            None,
+                            StorageClass::StorageBuffer,
+                            None,
+                        ),
+                        StorageClass::StorageBuffer,
+                    )
+                }
+                (ResourceKind::Texture, Type::Texture) => {
+                    let image = self.type_id(&Type::Texture)?;
+                    let pointer =
+                        self.builder
+                            .type_pointer(None, StorageClass::UniformConstant, image);
+                    (
+                        self.builder
+                            .variable(pointer, None, StorageClass::UniformConstant, None),
+                        StorageClass::UniformConstant,
+                    )
+                }
+                (ResourceKind::Buffer, _) => {
+                    return Err(emission("buffer resource parameter is not a pointer"));
+                }
+                (ResourceKind::Texture, _) => {
+                    return Err(emission("texture resource parameter is not a texture"));
+                }
+                _ => {
+                    return Err(emission(
+                        "resource kind is not implemented by the SPIR-V emitter",
+                    ));
+                }
             };
-            let (_block_type, pointer_type) = self.buffer_type(pointee)?;
-            let variable =
-                self.builder
-                    .variable(pointer_type, None, StorageClass::StorageBuffer, None);
             let descriptor_set = descriptor_set(resource.kind);
             let binding = entry.stage.ordinal() * 256 + resource.index;
             self.builder.decorate(
@@ -209,18 +238,19 @@ impl Emitter {
                 Decoration::Binding,
                 [SpirvOperand::LiteralBit32(binding)],
             );
-            match resource.access {
-                Access::Read => self.builder.decorate(
+            match (storage_class, resource.access) {
+                // SPIR-V only permits these decorations on memory objects.
+                (StorageClass::StorageBuffer, Access::Read) => self.builder.decorate(
                     variable,
                     Decoration::NonWritable,
                     std::iter::empty::<SpirvOperand>(),
                 ),
-                Access::Write => self.builder.decorate(
+                (StorageClass::StorageBuffer, Access::Write) => self.builder.decorate(
                     variable,
                     Decoration::NonReadable,
                     std::iter::empty::<SpirvOperand>(),
                 ),
-                Access::ReadWrite => {}
+                _ => (),
             }
             self.interface.push(variable);
             // The parameter pointer is materialized in the entry block after the
@@ -332,6 +362,13 @@ impl Emitter {
                     parameter.name
                 )));
             };
+            if parameter.ty == Type::Texture {
+                let image = self.type_id(&Type::Texture)?;
+                self.builder
+                    .load(image, Some(values[&parameter.value]), variable, None, [])
+                    .map_err(build_error)?;
+                continue;
+            }
             let Type::Pointer { pointee, .. } = &parameter.ty else {
                 return Err(emission("resource parameter is not a pointer"));
             };
@@ -443,6 +480,18 @@ impl Emitter {
             InstructionKind::ElementAddress { .. } => {
                 return Err(emission("element-address lowering is not implemented"));
             }
+            InstructionKind::TextureWrite {
+                texture,
+                coordinate,
+                value,
+            } => {
+                let texture = self.operand(texture, values)?;
+                let coordinate = self.operand(coordinate, values)?;
+                let value = self.operand(value, values)?;
+                self.builder
+                    .image_write(texture, coordinate, value, None, [])
+                    .map_err(build_error)?;
+            }
         }
         Ok(())
     }
@@ -540,6 +589,16 @@ impl Emitter {
             Type::Int { bits, signed } => {
                 self.builder.type_int(u32::from(*bits), u32::from(*signed))
             }
+            Type::Float { bits } => self.builder.type_float(u32::from(*bits), None),
+            Type::Vector { element, lanes } => {
+                let element = self.type_id(element)?;
+                self.builder.type_vector(element, u32::from(*lanes))
+            }
+            Type::Texture => {
+                let scalar = self.type_id(&Type::Float { bits: 32 })?;
+                self.builder
+                    .type_image(scalar, Dim::Dim3D, 0, 0, 0, 2, ImageFormat::Unknown, None)
+            }
             _ => return Err(emission(format!("unsupported SPIR-V value type {ty:?}"))),
         };
         self.types.insert(ty.clone(), id);
@@ -597,6 +656,11 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::IntegerXor { lhs, rhs }
         | InstructionKind::IntegerCompare { lhs, rhs, .. } => vec![lhs, rhs],
         InstructionKind::ElementAddress { pointer, index } => vec![pointer, index],
+        InstructionKind::TextureWrite {
+            texture,
+            coordinate,
+            value,
+        } => vec![texture, coordinate, value],
         InstructionKind::Phi { incomings } => incomings.iter().map(|(_, value)| value).collect(),
     }
 }

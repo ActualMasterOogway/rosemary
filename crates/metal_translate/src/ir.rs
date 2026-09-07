@@ -54,6 +54,10 @@ pub enum Access {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResourceKind {
     Buffer,
+    /// A writable, non-arrayed 3D texture with `float4` texels.
+    ///
+    /// The initial image slice is intentionally specific. Other texture
+    /// shapes need their own Metal type before they can be emitted.
     Texture,
     Sampler,
     AccelerationStructure,
@@ -228,6 +232,15 @@ pub enum InstructionKind {
     ElementAddress {
         pointer: Operand,
         index: Operand,
+    },
+    /// Store one texel through a writable Metal texture resource.
+    ///
+    /// Coordinates and texels remain explicit SSA values: Metal's texture
+    /// namespace is represented by the resource, not by a Vulkan descriptor.
+    TextureWrite {
+        texture: Operand,
+        coordinate: Operand,
+        value: Operand,
     },
     Phi {
         incomings: Vec<(BlockId, Operand)>,
@@ -551,6 +564,23 @@ fn verify_instruction_types(
                 && matches!(operand_type(function, pointer), Some(Type::Pointer { .. }))
                 && operand_type(function, index).is_some_and(|ty| matches!(ty, Type::Int { .. }))
         }
+        InstructionKind::TextureWrite {
+            texture,
+            coordinate,
+            value,
+        } => {
+            result.is_none()
+                && operand_type(function, texture) == Some(Type::Texture)
+                && matches!(
+                    operand_type(function, coordinate),
+                    Some(Type::Vector { element, lanes: 3 }) if *element == Type::u32()
+                )
+                && matches!(
+                    operand_type(function, value),
+                    Some(Type::Vector { element, lanes: 4 })
+                        if *element == Type::Float { bits: 32 }
+                )
+        }
         InstructionKind::Phi { incomings } => {
             result.is_some()
                 && incomings
@@ -581,6 +611,11 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::IntegerXor { lhs, rhs }
         | InstructionKind::IntegerCompare { lhs, rhs, .. } => vec![lhs, rhs],
         InstructionKind::ElementAddress { pointer, index } => vec![pointer, index],
+        InstructionKind::TextureWrite {
+            texture,
+            coordinate,
+            value,
+        } => vec![texture, coordinate, value],
         InstructionKind::Phi { incomings } => incomings.iter().map(|(_, value)| value).collect(),
     }
 }
