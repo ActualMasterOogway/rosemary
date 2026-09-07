@@ -104,6 +104,9 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
             ));
         }
     }
+    if let Some(error) = parse_blit_bounds_guard(&source, body) {
+        return Err(error);
+    }
     let Some(writable_buffer) = resources.iter().find(|resource| {
         resource.kind == ResourceKind::Buffer
             && resource.access != Access::Read
@@ -195,6 +198,47 @@ fn parse_resource_attribute(
         _ => Access::ReadWrite,
     };
     Some((kind, index, access))
+}
+
+/// Recognize the bounds guard used by the shipped blit kernels before lowering
+/// their body. The guard is not accepted as a no-op: until vector comparison
+/// and reduction have Metal IR and SPIR-V lowering, parsing continues only far
+/// enough to identify the following operation accurately.
+fn parse_blit_bounds_guard(source: &str, body: &str) -> Option<TranslateError> {
+    let guard = body.trim_start();
+    if !guard.starts_with("if") {
+        return None;
+    }
+    let open = guard.find('(')?;
+    let close = matching(guard, open, '(', ')')?;
+    let condition = guard[open + 1..close].trim();
+    if !condition.starts_with("all(") || !condition.contains('<') {
+        return Some(syntax_at(
+            source,
+            source.find(guard).unwrap_or(0),
+            "unsupported MSL conditional expression",
+        ));
+    }
+    let body_open = guard[close + 1..]
+        .find('{')
+        .map(|offset| close + 1 + offset)?;
+    let body_close = matching(guard, body_open, '{', '}')?;
+    let guarded_body = &guard[body_open + 1..body_close];
+    if let Some(load) = guarded_body.find("=") {
+        let statement = guarded_body[..load].trim();
+        if statement.split_whitespace().count() == 2 && guarded_body[load + 1..].contains('[') {
+            return Some(syntax_at(
+                source,
+                source.find(guarded_body).unwrap_or(0) + load,
+                "MSL buffer element loads are not implemented",
+            ));
+        }
+    }
+    Some(syntax_at(
+        source,
+        source.find(guard).unwrap_or(0),
+        "MSL conditional body operations are not implemented",
+    ))
 }
 
 fn parse_parameter_type(
