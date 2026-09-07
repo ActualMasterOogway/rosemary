@@ -41,6 +41,11 @@ const _: () = assert!(size_of::<Rlimit>() == size_of::<libc::rlimit>());
 /// Darwin's `RLIM_INFINITY`.
 const DARWIN_INFINITY: u64 = (1 << 63) - 1;
 
+#[cfg(target_env = "musl")]
+type HostResource = c_int;
+#[cfg(not(target_env = "musl"))]
+type HostResource = u32;
+
 /// The host resource `darwin` is naming, or `None` for one this host has no
 /// counterpart for.
 ///
@@ -48,13 +53,13 @@ const DARWIN_INFINITY: u64 = (1 << 63) - 1;
 /// Darwin's `RLIMIT_AS` and `RLIMIT_RSS` are the same number, and it is the
 /// address space that is enforced there, so it maps to this host's
 /// `RLIMIT_AS`.
-fn resource(darwin: c_int) -> Option<u32> {
+fn resource(darwin: c_int) -> Option<HostResource> {
     Some(match darwin {
-        0..=4 => darwin as u32,
-        5 => libc::RLIMIT_AS,
-        6 => libc::RLIMIT_MEMLOCK,
-        7 => libc::RLIMIT_NPROC,
-        8 => libc::RLIMIT_NOFILE,
+        0..=4 => darwin as HostResource,
+        5 => libc::RLIMIT_AS as HostResource,
+        6 => libc::RLIMIT_MEMLOCK as HostResource,
+        7 => libc::RLIMIT_NPROC as HostResource,
+        8 => libc::RLIMIT_NOFILE as HostResource,
         _ => return None,
     })
 }

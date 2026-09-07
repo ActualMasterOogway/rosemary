@@ -203,7 +203,7 @@ unsafe fn block(addr: *mut u32, value: u32, timeout_ns: u64, shared: bool) -> Re
 
     let futex_op = FUTEX_WAIT | if shared { 0 } else { FUTEX_PRIVATE_FLAG };
     let timeout = libc::timespec {
-        tv_sec: (timeout_ns / 1_000_000_000) as libc::time_t,
+        tv_sec: (timeout_ns / 1_000_000_000) as _,
         tv_nsec: (timeout_ns % 1_000_000_000) as _,
     };
     // A null timeout is what a futex takes for "forever"; Darwin spells it zero.

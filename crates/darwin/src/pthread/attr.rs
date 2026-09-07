@@ -207,9 +207,8 @@ impl Attributes {
                     return Err(err::EINVAL);
                 };
                 host_result(libc::pthread_attr_setschedpolicy(a, policy))?;
-                let param = libc::sched_param {
-                    sched_priority: priority,
-                };
+                let mut param: libc::sched_param = core::mem::zeroed();
+                param.sched_priority = priority;
                 host_result(libc::pthread_attr_setschedparam(a, &param))?;
             }
         }

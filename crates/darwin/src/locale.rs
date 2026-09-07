@@ -57,6 +57,23 @@ pub unsafe fn is_c_numeric(loc: *mut core::ffi::c_void) -> Option<bool> {
     }
 }
 
+/// The mask selecting every locale category on this host's libc.
+#[cfg(test)]
+pub(crate) fn all_mask() -> libc::c_int {
+    #[cfg(target_os = "macos")]
+    {
+        libc::LC_ALL_MASK
+    }
+    #[cfg(all(not(target_os = "macos"), target_env = "gnu"))]
+    {
+        0x1fbf
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_env = "gnu")))]
+    {
+        0x7fff_ffff
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,25 +98,6 @@ mod tests {
     ///
     /// The same number everywhere it is defined - every category bit set - so writing
     /// it out is stating the value rather than choosing one.
-    fn all_mask() -> libc::c_int {
-        #[cfg(target_os = "macos")]
-        {
-            libc::LC_ALL_MASK
-        }
-        // glibc's is *not* all ones: it has thirteen categories and `LC_ALL`
-        // itself is a category number with no mask bit, so the value has a hole
-        // at bit 6. `newlocale` rejects a mask with a bit it does not know, so
-        // the all-ones musl spelling returns null here rather than the C locale.
-        #[cfg(all(not(target_os = "macos"), target_env = "gnu"))]
-        {
-            0x1fbf
-        }
-        #[cfg(all(not(target_os = "macos"), not(target_env = "gnu")))]
-        {
-            0x7fff_ffff
-        }
-    }
-
     #[test]
     fn a_null_handle_means_the_current_locale() {
         // SAFETY: null is one of the two values this accepts.

@@ -555,7 +555,11 @@ mod tests {
         // null argument only reports.
         unsafe {
             let before = libc::uselocale(std::ptr::null_mut());
-            let c = libc::newlocale(libc::LC_ALL_MASK, c"C".as_ptr(), std::ptr::null_mut());
+            let c = libc::newlocale(
+                crate::locale::all_mask(),
+                c"C".as_ptr(),
+                std::ptr::null_mut(),
+            );
             if c.is_null() {
                 return;
             }

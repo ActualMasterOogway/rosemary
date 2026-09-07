@@ -316,8 +316,13 @@ mod tests {
     #[test]
     fn the_locale_argument_is_the_one_the_number_is_formatted_in() {
         // SAFETY: a locale this test makes and frees.
-        let c_locale =
-            unsafe { libc::newlocale(libc::LC_ALL_MASK, c"C".as_ptr(), std::ptr::null_mut()) };
+        let c_locale = unsafe {
+            libc::newlocale(
+                crate::locale::all_mask(),
+                c"C".as_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
         if c_locale.is_null() {
             eprintln!("skipped: this host has no C locale");
             return;

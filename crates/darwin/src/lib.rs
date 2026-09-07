@@ -61,6 +61,7 @@ pub mod string;
 pub mod sysctl;
 pub mod sysinfo;
 pub mod tls;
+pub mod translation;
 pub mod ulock;
 pub mod uuid;
 pub mod vmmap;

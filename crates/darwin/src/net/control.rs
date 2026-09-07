@@ -149,11 +149,10 @@ fn push_host(out: &mut Vec<u8>, level: i32, kind: i32, fill: impl FnOnce(&mut Ve
     out.extend_from_slice(&[0; core::mem::size_of::<libc::cmsghdr>()]);
     fill(out);
     let len = out.len() - header;
-    let value = libc::cmsghdr {
-        cmsg_len: len as _,
-        cmsg_level: level,
-        cmsg_type: kind,
-    };
+    let mut value: libc::cmsghdr = unsafe { core::mem::zeroed() };
+    value.cmsg_len = len as _;
+    value.cmsg_level = level;
+    value.cmsg_type = kind;
     // SAFETY: the placeholder above reserved a complete host header. A byte
     // buffer provides no alignment guarantee, so write the structure unaligned.
     unsafe {
@@ -431,11 +430,11 @@ mod tests {
                 msg.msg_iov = &mut iov;
                 msg.msg_iovlen = 1;
                 msg.msg_control = control.as_mut_ptr().cast();
-                msg.msg_controllen = control.len();
+                msg.msg_controllen = control.len() as _;
                 assert_eq!(libc::sendmsg(sender.as_raw_fd(), &msg, 0), 1);
                 let mut incoming = vec![0u8; 256];
                 msg.msg_control = incoming.as_mut_ptr().cast();
-                msg.msg_controllen = incoming.len();
+                msg.msg_controllen = incoming.len() as _;
                 assert_eq!(libc::recvmsg(receiver.as_raw_fd(), &mut msg, 0), 1);
                 let mut output = [0u8; 128];
                 let (len, dropped) =
