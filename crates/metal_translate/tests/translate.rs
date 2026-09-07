@@ -218,6 +218,31 @@ fn source_msl_rejects_unimplemented_operations() {
 }
 
 #[test]
+fn source_msl_translation_errors_include_nearby_source() {
+    let source = "// Prelude\n\
+                  // More prelude\n\
+                  kernel void f(\n\
+                      texture2d<float, access::write> output [[texture(0)]]\n\
+                  ) { return; }\n\
+                  // Epilogue";
+    let error = translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap_err();
+
+    assert_eq!(error.diagnostics[0].line, Some(4));
+    assert_eq!(
+        error.to_string(),
+        concat!(
+            "AirSyntax at line 4: unsupported MSL texture type\n\n",
+            "MSL source context:\n",
+            "  2 | // More prelude\n",
+            "  3 | kernel void f(\n",
+            "> 4 | texture2d<float, access::write> output [[texture(0)]]\n",
+            "  5 | ) { return; }\n",
+            "  6 | // Epilogue",
+        )
+    );
+}
+
+#[test]
 fn source_msl_rejects_texture_shapes_without_an_ir_type() {
     let error = parse_msl(
         "kernel void f(texture2d<float, access::write> output [[texture(0)]]) { return; }",

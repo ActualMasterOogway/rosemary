@@ -98,8 +98,38 @@ pub fn translate_msl(
     source: &str,
     target: &TargetProfile,
 ) -> Result<TranslatedLibrary, TranslateError> {
-    let module = parse_msl(source)?;
+    let module = parse_msl(source).map_err(|mut error| {
+        for diagnostic in &mut error.diagnostics {
+            if let Some(line) = diagnostic.line {
+                diagnostic
+                    .message
+                    .push_str(&format_msl_source_context(source, line));
+            }
+        }
+        error
+    })?;
     emit_spirv(&module, target)
+}
+
+/// Render a small source window under an MSL diagnostic.
+///
+/// The parser reports one-based lines. Keep the window deliberately small so
+/// an Objective-C error message remains useful even for generated shaders.
+fn format_msl_source_context(source: &str, line: usize) -> String {
+    const CONTEXT_LINES: usize = 2;
+
+    let lines: Vec<_> = source.lines().collect();
+    let start = line.saturating_sub(CONTEXT_LINES + 1);
+    let end = line.saturating_add(CONTEXT_LINES).min(lines.len());
+    let width = end.max(1).to_string().len();
+    let mut context = String::from("\n\nMSL source context:");
+
+    for (index, text) in lines[start..end].iter().enumerate() {
+        let number = start + index + 1;
+        let marker = if number == line { '>' } else { ' ' };
+        context.push_str(&format!("\n{marker} {number:>width$} | {text}"));
+    }
+    context
 }
 
 /// Extract the LLVM bitcode payload from a compiled Metal library.

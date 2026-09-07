@@ -385,7 +385,10 @@ fn parse_blit_kernel(
         return Err(syntax_at(
             source,
             source.find(inner).unwrap_or(0),
-            "unsupported MSL blit output operation",
+            format!(
+                "unsupported MSL blit output operation ({})",
+                blit_statement_id(write)
+            ),
         ));
     }
     let add = |values: &mut Vec<Type>, ty: Type| {
