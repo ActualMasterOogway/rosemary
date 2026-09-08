@@ -292,6 +292,7 @@ fn emits_a_writable_3d_texture_descriptor_in_its_metal_namespace() {
     let module = Module {
         functions: vec![Function {
             name: "clear_volume".to_string(),
+            result: Type::Void,
             parameters: vec![Parameter {
                 value: ValueId(0),
                 name: "output".to_string(),

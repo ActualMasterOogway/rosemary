@@ -161,6 +161,7 @@ pub struct Module {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Function {
     pub name: String,
+    pub result: Type,
     pub parameters: Vec<Parameter>,
     pub values: Vec<Type>,
     pub blocks: Vec<Block>,
@@ -192,6 +193,7 @@ pub enum Operand {
     Value(ValueId),
     Integer { ty: Type, value: u64 },
     Float { ty: Type, bits: u64 },
+    Undef(Type),
 }
 
 impl Operand {
@@ -246,6 +248,10 @@ pub enum InstructionKind {
         pointer: Operand,
         index: Operand,
     },
+    FieldAddress {
+        pointer: Operand,
+        indices: Vec<u32>,
+    },
     CompositeExtract {
         composite: Operand,
         index: u32,
@@ -263,6 +269,48 @@ pub enum InstructionKind {
     FloatDiv {
         lhs: Operand,
         rhs: Operand,
+    },
+    FloatAdd {
+        lhs: Operand,
+        rhs: Operand,
+    },
+    FloatSubtract {
+        lhs: Operand,
+        rhs: Operand,
+    },
+    FloatMultiply {
+        lhs: Operand,
+        rhs: Operand,
+    },
+    VectorShuffle {
+        first: Operand,
+        second: Operand,
+        components: Vec<u32>,
+    },
+    CompositeInsert {
+        composite: Operand,
+        object: Operand,
+        index: u32,
+    },
+    FloatClamp {
+        value: Operand,
+        min: Operand,
+        max: Operand,
+    },
+    FloatMix {
+        first: Operand,
+        second: Operand,
+        weight: Operand,
+    },
+    FloatDot {
+        lhs: Operand,
+        rhs: Operand,
+    },
+    FloatSqrt {
+        value: Operand,
+    },
+    FloatExp2 {
+        value: Operand,
     },
     VectorSplat {
         value: Operand,
@@ -474,11 +522,25 @@ fn verify_function(function: &Function, diagnostics: &mut Vec<Diagnostic>) {
                 format!("{} branches on a non-boolean value", function.name),
             ));
         }
-        if matches!(block.terminator, Terminator::Return(Some(_))) {
-            diagnostics.push(Diagnostic::new(
-                Phase::IrVerification,
-                format!("{} returns a value from a void function", function.name),
-            ));
+        match &block.terminator {
+            Terminator::Return(None) if function.result != Type::Void => {
+                diagnostics.push(Diagnostic::new(
+                    Phase::IrVerification,
+                    format!(
+                        "{} returns no value from a non-void function",
+                        function.name
+                    ),
+                ))
+            }
+            Terminator::Return(Some(value))
+                if operand_type(function, value) != Some(function.result.clone()) =>
+            {
+                diagnostics.push(Diagnostic::new(
+                    Phase::IrVerification,
+                    format!("{} returns a value of the wrong type", function.name),
+                ));
+            }
+            _ => {}
         }
     }
 }
@@ -606,6 +668,10 @@ fn verify_instruction_types(
                 && matches!(operand_type(function, pointer), Some(Type::Pointer { .. }))
                 && operand_type(function, index).is_some_and(|ty| matches!(ty, Type::Int { .. }))
         }
+        InstructionKind::FieldAddress { pointer, .. } => {
+            matches!(result, Some(Type::Pointer { .. }))
+                && matches!(operand_type(function, pointer), Some(Type::Pointer { .. }))
+        }
         InstructionKind::CompositeExtract { composite, index } => {
             match operand_type(function, composite) {
                 Some(Type::Struct(structure)) => {
@@ -650,9 +716,76 @@ fn verify_instruction_types(
             Some(Type::Int { signed: false, .. }) => result == Some(Type::Float { bits: 32 }),
             _ => false,
         },
-        InstructionKind::FloatDiv { lhs, rhs } => {
+        InstructionKind::FloatDiv { lhs, rhs }
+        | InstructionKind::FloatAdd { lhs, rhs }
+        | InstructionKind::FloatSubtract { lhs, rhs }
+        | InstructionKind::FloatMultiply { lhs, rhs } => {
             result == operand_type(function, lhs)
                 && result == operand_type(function, rhs)
+                && result.as_ref().is_some_and(is_float_or_float_vector)
+        }
+        InstructionKind::FloatDot { lhs, rhs } => {
+            operand_type(function, lhs) == operand_type(function, rhs)
+                && matches!(operand_type(function, lhs), Some(Type::Vector { element, .. }) if matches!(element.as_ref(), Type::Float { .. }))
+                && result == Some(Type::Float { bits: 32 })
+        }
+        InstructionKind::VectorShuffle {
+            first,
+            second,
+            components,
+        } => match operand_type(function, first) {
+            Some(Type::Vector { element, lanes }) => {
+                operand_type(function, second)
+                    == Some(Type::Vector {
+                        element: element.clone(),
+                        lanes,
+                    })
+                    && result
+                        == Some(Type::Vector {
+                            element,
+                            lanes: components.len() as u8,
+                        })
+            }
+            _ => false,
+        },
+        InstructionKind::CompositeInsert {
+            composite,
+            object,
+            index,
+        } => match operand_type(function, composite) {
+            Some(Type::Vector { element, lanes }) => {
+                *index < u32::from(lanes)
+                    && operand_type(function, object) == Some(*element)
+                    && result == operand_type(function, composite)
+            }
+            Some(Type::Struct(structure)) => {
+                structure
+                    .fields
+                    .get(*index as usize)
+                    .map(|field| field.ty.clone())
+                    == operand_type(function, object)
+                    && result == operand_type(function, composite)
+            }
+            _ => false,
+        },
+        InstructionKind::FloatClamp { value, min, max } => {
+            result == operand_type(function, value)
+                && result == operand_type(function, min)
+                && result == operand_type(function, max)
+                && result.as_ref().is_some_and(is_float_or_float_vector)
+        }
+        InstructionKind::FloatMix {
+            first,
+            second,
+            weight,
+        } => {
+            result == operand_type(function, first)
+                && result == operand_type(function, second)
+                && result == operand_type(function, weight)
+                && result.as_ref().is_some_and(is_float_or_float_vector)
+        }
+        InstructionKind::FloatSqrt { value } | InstructionKind::FloatExp2 { value } => {
+            result == operand_type(function, value)
                 && result.as_ref().is_some_and(is_float_or_float_vector)
         }
         InstructionKind::VectorSplat { value, lanes } => {
@@ -699,6 +832,7 @@ fn operand_type(function: &Function, operand: &Operand) -> Option<Type> {
         Operand::Value(value) => function.values.get(value.0 as usize).cloned(),
         Operand::Integer { ty, .. } => Some(ty.clone()),
         Operand::Float { ty, .. } => Some(ty.clone()),
+        Operand::Undef(ty) => Some(ty.clone()),
     }
 }
 
@@ -711,10 +845,28 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::IntegerXor { lhs, rhs }
         | InstructionKind::IntegerCompare { lhs, rhs, .. } => vec![lhs, rhs],
         InstructionKind::ElementAddress { pointer, index } => vec![pointer, index],
+        InstructionKind::FieldAddress { pointer, .. } => vec![pointer],
         InstructionKind::CompositeExtract { composite, .. } => vec![composite],
         InstructionKind::VectorUnsignedLessThan { lhs, rhs }
-        | InstructionKind::FloatDiv { lhs, rhs } => vec![lhs, rhs],
-        InstructionKind::All { vector } | InstructionKind::ConvertUToF { value: vector } => {
+        | InstructionKind::FloatDiv { lhs, rhs }
+        | InstructionKind::FloatAdd { lhs, rhs }
+        | InstructionKind::FloatSubtract { lhs, rhs }
+        | InstructionKind::FloatMultiply { lhs, rhs }
+        | InstructionKind::FloatDot { lhs, rhs } => vec![lhs, rhs],
+        InstructionKind::VectorShuffle { first, second, .. } => vec![first, second],
+        InstructionKind::CompositeInsert {
+            composite, object, ..
+        } => vec![composite, object],
+        InstructionKind::FloatClamp { value, min, max } => vec![value, min, max],
+        InstructionKind::FloatMix {
+            first,
+            second,
+            weight,
+        } => vec![first, second, weight],
+        InstructionKind::All { vector }
+        | InstructionKind::ConvertUToF { value: vector }
+        | InstructionKind::FloatSqrt { value: vector }
+        | InstructionKind::FloatExp2 { value: vector } => {
             vec![vector]
         }
         InstructionKind::VectorSplat { value, .. } => vec![value],

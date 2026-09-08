@@ -6,7 +6,7 @@ use rspirv::binary::Assemble;
 use rspirv::dr::{Builder, Operand as SpirvOperand};
 use rspirv::spirv::{
     AddressingModel, BuiltIn, Capability, Decoration, Dim, ExecutionMode, ExecutionModel,
-    FunctionControl, ImageFormat, LoopControl, MemoryModel, StorageClass,
+    FunctionControl, GlslStd450Op, ImageFormat, LoopControl, MemoryModel, StorageClass,
 };
 
 use crate::ir::{
@@ -118,9 +118,9 @@ fn emit_entry(
     entry: &EntryPoint,
     target: &TargetProfile,
 ) -> Result<EntryArtifact, TranslateError> {
-    if entry.stage != Stage::Kernel {
+    if !matches!(entry.stage, Stage::Kernel | Stage::Fragment) {
         return Err(emission(
-            "the first emitter slice only supports kernel entry points",
+            "the emitter only supports kernel and fragment entry points",
         ));
     }
     let function = module
@@ -129,16 +129,32 @@ fn emit_entry(
         .ok_or_else(|| emission("entry point refers to a missing function"))?;
     let mut emitter = Emitter::new(target);
     let resources = emitter.declare_resources(entry, function)?;
+    emitter.declare_stage_io(entry, function)?;
     let function_id = emitter.emit_function(entry, function)?;
+    let execution_model = match entry.stage {
+        Stage::Kernel => ExecutionModel::GLCompute,
+        Stage::Fragment => ExecutionModel::Fragment,
+        _ => unreachable!(),
+    };
     emitter.builder.entry_point(
-        ExecutionModel::GLCompute,
+        execution_model,
         function_id,
         &function.name,
         emitter.interface.clone(),
     );
-    emitter
-        .builder
-        .execution_mode(function_id, ExecutionMode::LocalSize, [1, 1, 1]);
+    match entry.stage {
+        Stage::Kernel => {
+            emitter
+                .builder
+                .execution_mode(function_id, ExecutionMode::LocalSize, [1, 1, 1])
+        }
+        Stage::Fragment => {
+            emitter
+                .builder
+                .execution_mode(function_id, ExecutionMode::OriginUpperLeft, [])
+        }
+        _ => unreachable!(),
+    }
     let words = emitter.builder.module().assemble();
     rspirv::dr::load_words(&words)
         .map_err(|error| emission(format!("emitted SPIR-V could not be parsed: {error}")))?;
@@ -162,6 +178,9 @@ struct Emitter {
     interface: Vec<u32>,
     parameter_pointers: HashMap<ValueId, u32>,
     global_invocation_id: Option<u32>,
+    glsl_std_450: u32,
+    stage_inputs: HashMap<ValueId, u32>,
+    fragment_output: Option<u32>,
 }
 
 impl Emitter {
@@ -170,6 +189,7 @@ impl Emitter {
         builder.set_version(target.spirv_version.0, target.spirv_version.1);
         builder.capability(Capability::Shader);
         builder.memory_model(AddressingModel::Logical, MemoryModel::GLSL450);
+        let glsl_std_450 = builder.ext_inst_import("GLSL.std.450");
         Self {
             builder,
             types: HashMap::new(),
@@ -178,6 +198,9 @@ impl Emitter {
             interface: Vec::new(),
             parameter_pointers: HashMap::new(),
             global_invocation_id: None,
+            glsl_std_450,
+            stage_inputs: HashMap::new(),
+            fragment_output: None,
         }
     }
 
@@ -302,13 +325,66 @@ impl Emitter {
         Ok((block_type, pointer_type))
     }
 
+    fn declare_stage_io(
+        &mut self,
+        entry: &EntryPoint,
+        function: &Function,
+    ) -> Result<(), TranslateError> {
+        if entry.stage != Stage::Fragment {
+            return Ok(());
+        }
+        for parameter in &function.parameters {
+            if self.parameter_pointers.contains_key(&parameter.value) {
+                continue;
+            }
+            let location = parameter
+                .name
+                .strip_prefix("locn")
+                .and_then(|value| value.parse::<u32>().ok())
+                .ok_or_else(|| emission("fragment input has no decoded location"))?;
+            let ty = self.type_id(&parameter.ty)?;
+            let pointer = self.builder.type_pointer(None, StorageClass::Input, ty);
+            let variable = self
+                .builder
+                .variable(pointer, None, StorageClass::Input, None);
+            self.builder.decorate(
+                variable,
+                Decoration::Location,
+                [SpirvOperand::LiteralBit32(location)],
+            );
+            self.interface.push(variable);
+            self.stage_inputs.insert(parameter.value, variable);
+        }
+        let output_ty = Type::Vector {
+            element: Box::new(Type::Float { bits: 32 }),
+            lanes: 4,
+        };
+        let output_ty = self.type_id(&output_ty)?;
+        let pointer = self
+            .builder
+            .type_pointer(None, StorageClass::Output, output_ty);
+        let variable = self
+            .builder
+            .variable(pointer, None, StorageClass::Output, None);
+        self.builder.decorate(
+            variable,
+            Decoration::Location,
+            [SpirvOperand::LiteralBit32(0)],
+        );
+        self.interface.push(variable);
+        self.fragment_output = Some(variable);
+        Ok(())
+    }
+
     fn emit_function(
         &mut self,
-        _entry: &EntryPoint,
+        entry: &EntryPoint,
         function: &Function,
     ) -> Result<u32, TranslateError> {
         self.collect_constants(function)?;
-        self.declare_global_invocation_id()?;
+        if entry.stage == Stage::Kernel {
+            self.declare_global_invocation_id()?;
+        }
         let void = self.type_id(&Type::Void)?;
         let function_type = self.builder.type_function(void, []);
         let function_id = self.builder.id();
@@ -338,6 +414,7 @@ impl Emitter {
                 .map_err(build_error)?;
             if block_index == 0 {
                 self.materialize_parameter_pointers(function, &value_ids)?;
+                self.materialize_stage_inputs(function, &value_ids)?;
             }
             for instruction in &block.instructions {
                 self.emit_instruction(function, instruction, &block_ids, &value_ids)?;
@@ -366,10 +443,7 @@ impl Emitter {
         let zero = self.constant(&Type::u32(), 0)?;
         for parameter in &function.parameters {
             let Some(variable) = self.parameter_pointers.get(&parameter.value).copied() else {
-                return Err(emission(format!(
-                    "non-resource parameter {} is not supported",
-                    parameter.name
-                )));
+                continue;
             };
             if parameter.ty == Type::Texture {
                 let image = self.type_id(&Type::Texture)?;
@@ -392,6 +466,23 @@ impl Emitter {
                     variable,
                     [zero, zero],
                 )
+                .map_err(build_error)?;
+        }
+        Ok(())
+    }
+
+    fn materialize_stage_inputs(
+        &mut self,
+        function: &Function,
+        values: &HashMap<ValueId, u32>,
+    ) -> Result<(), TranslateError> {
+        for parameter in &function.parameters {
+            let Some(variable) = self.stage_inputs.get(&parameter.value).copied() else {
+                continue;
+            };
+            let ty = self.type_id(&parameter.ty)?;
+            self.builder
+                .load(ty, Some(values[&parameter.value]), variable, None, [])
                 .map_err(build_error)?;
         }
         Ok(())
@@ -431,6 +522,7 @@ impl Emitter {
                             self.constant(ty, *bits)?;
                         }
                         Operand::Value(_) => {}
+                        Operand::Undef(_) => {}
                     }
                 }
             }
@@ -443,6 +535,7 @@ impl Emitter {
                         self.constant(ty, *bits)?;
                     }
                     Operand::Value(_) => {}
+                    Operand::Undef(_) => {}
                 }
             }
         }
@@ -571,6 +664,36 @@ impl Emitter {
                     .access_chain(pointer_type, result_id, variable, [zero, index])
                     .map_err(build_error)?;
             }
+            InstructionKind::FieldAddress { pointer, indices } => {
+                let Operand::Value(parameter) = pointer else {
+                    return Err(emission("field address requires a buffer parameter"));
+                };
+                let variable = self
+                    .parameter_pointers
+                    .get(parameter)
+                    .copied()
+                    .ok_or_else(|| emission("field address base is not a buffer resource"))?;
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("field address has no result"))?;
+                let Type::Pointer { pointee, .. } = &function.values[result.0 as usize] else {
+                    return Err(emission("field address result is not a pointer"));
+                };
+                let pointee = self.type_id(pointee)?;
+                let pointer_type =
+                    self.builder
+                        .type_pointer(None, StorageClass::StorageBuffer, pointee);
+                let mut chain = vec![
+                    self.constant(&Type::u32(), 0)?,
+                    self.constant(&Type::u32(), 0)?,
+                ];
+                for index in indices {
+                    chain.push(self.constant(&Type::u32(), u64::from(*index))?);
+                }
+                self.builder
+                    .access_chain(pointer_type, result_id, variable, chain)
+                    .map_err(build_error)?;
+            }
             InstructionKind::CompositeExtract { composite, index } => {
                 let result = instruction
                     .result
@@ -617,6 +740,96 @@ impl Emitter {
                 values,
                 |builder, ty, id, a, b| builder.f_div(ty, id, a, b),
             )?,
+            InstructionKind::FloatAdd { lhs, rhs } => self.emit_binary(
+                function,
+                instruction,
+                lhs,
+                rhs,
+                values,
+                |builder, ty, id, a, b| builder.f_add(ty, id, a, b),
+            )?,
+            InstructionKind::FloatSubtract { lhs, rhs } => self.emit_binary(
+                function,
+                instruction,
+                lhs,
+                rhs,
+                values,
+                |builder, ty, id, a, b| builder.f_sub(ty, id, a, b),
+            )?,
+            InstructionKind::FloatMultiply { lhs, rhs } => self.emit_binary(
+                function,
+                instruction,
+                lhs,
+                rhs,
+                values,
+                |builder, ty, id, a, b| builder.f_mul(ty, id, a, b),
+            )?,
+            InstructionKind::FloatDot { lhs, rhs } => self.emit_binary(
+                function,
+                instruction,
+                lhs,
+                rhs,
+                values,
+                |builder, ty, id, a, b| builder.dot(ty, id, a, b),
+            )?,
+            InstructionKind::VectorShuffle {
+                first,
+                second,
+                components,
+            } => {
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("vector shuffle has no result"))?;
+                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let first = self.operand(first, values)?;
+                let second = self.operand(second, values)?;
+                self.builder
+                    .vector_shuffle(ty, result_id, first, second, components.iter().copied())
+                    .map_err(build_error)?;
+            }
+            InstructionKind::CompositeInsert {
+                composite,
+                object,
+                index,
+            } => {
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("composite insert has no result"))?;
+                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let composite = self.operand(composite, values)?;
+                let object = self.operand(object, values)?;
+                self.builder
+                    .composite_insert(ty, result_id, object, composite, [*index])
+                    .map_err(build_error)?;
+            }
+            InstructionKind::FloatClamp { value, min, max } => {
+                self.emit_ext_inst(
+                    function,
+                    instruction,
+                    values,
+                    GlslStd450Op::FClamp,
+                    [value, min, max],
+                )?;
+            }
+            InstructionKind::FloatMix {
+                first,
+                second,
+                weight,
+            } => {
+                self.emit_ext_inst(
+                    function,
+                    instruction,
+                    values,
+                    GlslStd450Op::FMix,
+                    [first, second, weight],
+                )?;
+            }
+            InstructionKind::FloatSqrt { value } => {
+                self.emit_ext_inst(function, instruction, values, GlslStd450Op::Sqrt, [value])?;
+            }
+            InstructionKind::FloatExp2 { value } => {
+                self.emit_ext_inst(function, instruction, values, GlslStd450Op::Exp2, [value])?;
+            }
             InstructionKind::VectorSplat { value, lanes } => {
                 let result = instruction
                     .result
@@ -669,6 +882,34 @@ impl Emitter {
         Ok(())
     }
 
+    fn emit_ext_inst<const N: usize>(
+        &mut self,
+        function: &Function,
+        instruction: &crate::ir::Instruction,
+        values: &HashMap<ValueId, u32>,
+        operation: GlslStd450Op,
+        operands: [&Operand; N],
+    ) -> Result<(), TranslateError> {
+        let result = instruction
+            .result
+            .ok_or_else(|| emission("extended instruction has no result"))?;
+        let ty = self.type_id(&function.values[result.0 as usize])?;
+        let operands = operands
+            .into_iter()
+            .map(|operand| self.operand(operand, values).map(SpirvOperand::IdRef))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.builder
+            .ext_inst(
+                ty,
+                Some(values[&result]),
+                self.glsl_std_450,
+                operation as u32,
+                operands,
+            )
+            .map_err(build_error)?;
+        Ok(())
+    }
+
     fn emit_terminator(
         &mut self,
         terminator: &Terminator,
@@ -695,7 +936,22 @@ impl Emitter {
             Terminator::Return(None) => self.builder.ret().map_err(build_error),
             Terminator::Return(Some(value)) => {
                 let value = self.operand(value, values)?;
-                self.builder.ret_value(value).map_err(build_error)
+                if let Some(output) = self.fragment_output {
+                    let float4 = self.type_id(&Type::Vector {
+                        element: Box::new(Type::Float { bits: 32 }),
+                        lanes: 4,
+                    })?;
+                    let extracted = self
+                        .builder
+                        .composite_extract(float4, None, value, [0])
+                        .map_err(build_error)?;
+                    self.builder
+                        .store(output, extracted, None, [])
+                        .map_err(build_error)?;
+                    self.builder.ret().map_err(build_error)
+                } else {
+                    self.builder.ret_value(value).map_err(build_error)
+                }
             }
             Terminator::Unreachable => self.builder.unreachable().map_err(build_error),
         }
@@ -713,6 +969,10 @@ impl Emitter {
                 .ok_or_else(|| emission("operand refers to a missing value")),
             Operand::Integer { ty, value } => self.constant(ty, *value),
             Operand::Float { ty, bits } => self.constant(ty, *bits),
+            Operand::Undef(ty) => {
+                let ty = self.type_id(ty)?;
+                Ok(self.builder.undef(ty, None))
+            }
         }
     }
 
@@ -840,10 +1100,28 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::IntegerXor { lhs, rhs }
         | InstructionKind::IntegerCompare { lhs, rhs, .. } => vec![lhs, rhs],
         InstructionKind::ElementAddress { pointer, index } => vec![pointer, index],
+        InstructionKind::FieldAddress { pointer, .. } => vec![pointer],
         InstructionKind::CompositeExtract { composite, .. } => vec![composite],
         InstructionKind::VectorUnsignedLessThan { lhs, rhs }
-        | InstructionKind::FloatDiv { lhs, rhs } => vec![lhs, rhs],
-        InstructionKind::All { vector } | InstructionKind::ConvertUToF { value: vector } => {
+        | InstructionKind::FloatDiv { lhs, rhs }
+        | InstructionKind::FloatAdd { lhs, rhs }
+        | InstructionKind::FloatSubtract { lhs, rhs }
+        | InstructionKind::FloatMultiply { lhs, rhs }
+        | InstructionKind::FloatDot { lhs, rhs } => vec![lhs, rhs],
+        InstructionKind::VectorShuffle { first, second, .. } => vec![first, second],
+        InstructionKind::CompositeInsert {
+            composite, object, ..
+        } => vec![composite, object],
+        InstructionKind::FloatClamp { value, min, max } => vec![value, min, max],
+        InstructionKind::FloatMix {
+            first,
+            second,
+            weight,
+        } => vec![first, second, weight],
+        InstructionKind::All { vector }
+        | InstructionKind::ConvertUToF { value: vector }
+        | InstructionKind::FloatSqrt { value: vector }
+        | InstructionKind::FloatExp2 { value: vector } => {
             vec![vector]
         }
         InstructionKind::VectorSplat { value, .. } => vec![value],

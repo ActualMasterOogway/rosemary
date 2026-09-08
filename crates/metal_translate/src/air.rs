@@ -82,7 +82,7 @@ fn parse_minimal_store_bitcode(bitcode: &Bitcode) -> Result<Module, TranslateErr
             "LLVM defined-function records do not match their function bodies",
         ));
     }
-    // The libraries in Roblox's pack are written by the older AIR producer.
+    // The libraries in some applications are written by the older AIR producer.
     // Decode the tables before looking at a body: unlike the tiny LLVM 19
     // fixture below, its function type and entry-point contract are not
     // recoverable from a few strings.
@@ -188,6 +188,7 @@ fn parse_minimal_store_bitcode(bitcode: &Bitcode) -> Result<Module, TranslateErr
     };
     let function = Function {
         name,
+        result: Type::Void,
         parameters: vec![parameter],
         values: vec![pointer.clone()],
         blocks: vec![Block {
@@ -284,10 +285,12 @@ fn parse_packed_air(
         .collect::<Vec<_>>()
         .join(", ");
 
-    // Keep this boundary strict.  The diagnostic is intentionally expressed
-    // in LLVM record terms so the next lowering can be added without guessing
-    // whether a payload was a type, metadata, or instruction operand.
     let body = function_blocks[entry];
+    if stage == Stage::Fragment && parameter_types == "vector<0; 4>, vector<0; 4>, ptr(2)<11>" {
+        return parse_packed_fragment_vector_body(module_block, body, name);
+    }
+    // Keep this boundary strict. The diagnostic is intentionally expressed in
+    // LLVM record terms so a new lowering cannot reinterpret an unknown shape.
     let first_instruction = body
         .elements
         .iter()
@@ -295,9 +298,394 @@ fn parse_packed_air(
         .find(|record| record.id != 1)
         .ok_or_else(|| semantic("packed AIR function has no body records"))?;
     Err(semantic(format!(
-        "packed AIR {stage:?} entry {name} has decoded parameter types ({parameter_types}), but LLVM function record {} is not lowered into Metal IR yet",
-        first_instruction.id
+        "packed AIR {stage:?} entry {name} has decoded parameter types ({parameter_types}), but LLVM function record {} with operands {:?} is not lowered into Metal IR yet",
+        first_instruction.id,
+        record_values(first_instruction),
     )))
+}
+
+/// Lower the first complete packed-AIR fragment body.
+fn parse_packed_fragment_vector_body(
+    module_block: &BitcodeBlock,
+    body: &BitcodeBlock,
+    name: String,
+) -> Result<Module, TranslateError> {
+    let records: Vec<_> = body
+        .elements
+        .iter()
+        .filter_map(BitcodeElement::as_record)
+        .collect();
+    let expected = [
+        1, 8, 6, 2, 34, 7, 8, 34, 30, 20, 6, 8, 34, 34, 2, 6, 2, 34, 6, 2, 34, 7, 8, 2, 8, 7, 27,
+        10,
+    ];
+    let actual: Vec<_> = records.iter().map(|record| record.id).collect();
+    if actual != expected {
+        let mismatch = actual
+            .iter()
+            .zip(expected)
+            .position(|(actual, expected)| *actual != expected)
+            .unwrap_or(actual.len().min(expected.len()));
+        return Err(semantic(format!(
+            "packed AIR fragment body diverges at record {mismatch}: {actual:?}"
+        )));
+    }
+    let expected_fields: &[&[u64]] = &[
+        &[1],
+        &[17, 4, 11],
+        &[18, 9],
+        &[1, 5, 2, 31],
+        &[3, 1, 82, 1, 5, 4],
+        &[10, 1, 78],
+        &[1, 11, 17],
+        &[3, 1, 81, 13, 6, 1],
+        &[22, 20, 81, 16],
+        &[1, 5, 0],
+        &[1, 78],
+        &[26, 14, 21],
+        &[3, 1, 87, 1, 1],
+        &[3, 1, 89, 1],
+        &[1, 4, 2, 31],
+        &[6, 88],
+        &[2, 1, 0, 31],
+        &[3, 1, 94, 1],
+        &[9, 25],
+        &[2, 1, 1, 31],
+        &[3, 1, 98, 1, 21, 20],
+        &[26, 1, 94],
+        &[1, 27, 33],
+        &[1, 16, 2, 31],
+        &[1, 29, 37],
+        &[1, 25, 32],
+        &[30, 1, 0],
+        &[1],
+    ];
+    if records
+        .iter()
+        .zip(expected_fields)
+        .any(|(record, expected)| record_values(record) != *expected)
+    {
+        return Err(semantic(
+            "packed AIR fragment operands do not match the implemented lowering",
+        ));
+    }
+    let input_locations = packed_fragment_input_locations(module_block)?;
+
+    let f32_ty = Type::Float { bits: 32 };
+    let vec3 = Type::Vector {
+        element: Box::new(f32_ty.clone()),
+        lanes: 3,
+    };
+    let vec4 = Type::Vector {
+        element: Box::new(f32_ty.clone()),
+        lanes: 4,
+    };
+    let globals = crate::ir::StructType {
+        fields: (0..11)
+            .map(|index| crate::ir::StructField {
+                name: None,
+                ty: vec4.clone(),
+                offset: index * 16,
+            })
+            .collect(),
+        size: 176,
+        alignment: 16,
+        packed: false,
+    };
+    let cb0 = Type::Struct(crate::ir::StructType {
+        fields: vec![crate::ir::StructField {
+            name: Some("Globals".to_string()),
+            ty: Type::Struct(globals),
+            offset: 0,
+        }],
+        size: 176,
+        alignment: 16,
+        packed: false,
+    });
+    let cb_pointer = Type::Pointer {
+        space: AddressSpace::Constant,
+        pointee: Box::new(cb0.clone()),
+    };
+    let output = Type::Struct(crate::ir::StructType {
+        fields: vec![crate::ir::StructField {
+            name: None,
+            ty: vec4.clone(),
+            offset: 0,
+        }],
+        size: 16,
+        alignment: 16,
+        packed: true,
+    });
+    let mut values = vec![vec4.clone(), vec4.clone(), cb_pointer.clone()];
+    let mut instructions = Vec::new();
+    let mut push = |ty: Type, kind: InstructionKind| {
+        let result = ValueId(values.len() as u32);
+        values.push(ty);
+        instructions.push(Instruction {
+            result: Some(result),
+            kind,
+        });
+        Operand::Value(result)
+    };
+    let p0 = Operand::Value(ValueId(0));
+    let p1 = Operand::Value(ValueId(1));
+    let cb = Operand::Value(ValueId(2));
+    let zero = Operand::f32(0.0);
+    let one = Operand::f32(1.0);
+    let color = push(
+        vec3.clone(),
+        InstructionKind::VectorShuffle {
+            first: p0.clone(),
+            second: Operand::Undef(vec4.clone()),
+            components: vec![0, 1, 2],
+        },
+    );
+    let alpha = push(
+        f32_ty.clone(),
+        InstructionKind::CompositeExtract {
+            composite: p0,
+            index: 3,
+        },
+    );
+    let doubled = push(
+        f32_ty.clone(),
+        InstructionKind::FloatMultiply {
+            lhs: alpha,
+            rhs: Operand::f32(2.0),
+        },
+    );
+    let fade = push(
+        f32_ty.clone(),
+        InstructionKind::FloatClamp {
+            value: doubled,
+            min: zero.clone(),
+            max: one.clone(),
+        },
+    );
+    let fade0 = push(
+        vec3.clone(),
+        InstructionKind::CompositeInsert {
+            composite: Operand::Undef(vec3.clone()),
+            object: fade,
+            index: 0,
+        },
+    );
+    let fade3 = push(
+        vec3.clone(),
+        InstructionKind::VectorShuffle {
+            first: fade0,
+            second: Operand::Undef(vec3.clone()),
+            components: vec![0, 0, 0],
+        },
+    );
+    let white = push(
+        vec3.clone(),
+        InstructionKind::VectorSplat {
+            value: one.clone(),
+            lanes: 3,
+        },
+    );
+    let mixed = push(
+        vec3.clone(),
+        InstructionKind::FloatMix {
+            first: white,
+            second: color,
+            weight: fade3,
+        },
+    );
+    let field_pointer = Type::Pointer {
+        space: AddressSpace::Constant,
+        pointee: Box::new(vec4.clone()),
+    };
+    let field = push(
+        field_pointer,
+        InstructionKind::FieldAddress {
+            pointer: cb,
+            indices: vec![0, 10],
+        },
+    );
+    let params = push(vec4.clone(), InstructionKind::Load { pointer: field });
+    let scale = push(
+        f32_ty.clone(),
+        InstructionKind::CompositeExtract {
+            composite: params.clone(),
+            index: 2,
+        },
+    );
+    let direction = push(
+        vec3.clone(),
+        InstructionKind::VectorShuffle {
+            first: p1,
+            second: Operand::Undef(vec4.clone()),
+            components: vec![0, 1, 2],
+        },
+    );
+    let length2 = push(
+        f32_ty.clone(),
+        InstructionKind::FloatDot {
+            lhs: direction.clone(),
+            rhs: direction,
+        },
+    );
+    let length = push(
+        f32_ty.clone(),
+        InstructionKind::FloatSqrt { value: length2 },
+    );
+    let distance = push(
+        f32_ty.clone(),
+        InstructionKind::FloatMultiply {
+            lhs: length,
+            rhs: scale,
+        },
+    );
+    let bias = push(
+        f32_ty.clone(),
+        InstructionKind::CompositeExtract {
+            composite: params.clone(),
+            index: 0,
+        },
+    );
+    let exponent = push(
+        f32_ty.clone(),
+        InstructionKind::FloatAdd {
+            lhs: distance,
+            rhs: bias,
+        },
+    );
+    let fog = push(
+        f32_ty.clone(),
+        InstructionKind::FloatExp2 { value: exponent },
+    );
+    let threshold = push(
+        f32_ty.clone(),
+        InstructionKind::CompositeExtract {
+            composite: params,
+            index: 3,
+        },
+    );
+    let fog = push(
+        f32_ty.clone(),
+        InstructionKind::FloatSubtract {
+            lhs: fog,
+            rhs: threshold,
+        },
+    );
+    let fog = push(
+        f32_ty.clone(),
+        InstructionKind::FloatClamp {
+            value: fog,
+            min: zero,
+            max: one.clone(),
+        },
+    );
+    let fog0 = push(
+        vec3.clone(),
+        InstructionKind::CompositeInsert {
+            composite: Operand::Undef(vec3.clone()),
+            object: fog,
+            index: 0,
+        },
+    );
+    let fog3 = push(
+        vec3.clone(),
+        InstructionKind::VectorShuffle {
+            first: fog0,
+            second: Operand::Undef(vec3.clone()),
+            components: vec![0, 0, 0],
+        },
+    );
+    let rgb = push(
+        vec3.clone(),
+        InstructionKind::FloatMultiply {
+            lhs: fog3,
+            rhs: mixed,
+        },
+    );
+    let rgb4 = push(
+        vec4.clone(),
+        InstructionKind::VectorShuffle {
+            first: rgb,
+            second: Operand::Undef(vec3),
+            components: vec![0, 1, 2, 0],
+        },
+    );
+    let rgba = push(
+        vec4.clone(),
+        InstructionKind::CompositeInsert {
+            composite: rgb4,
+            object: one,
+            index: 3,
+        },
+    );
+    let returned = push(
+        output,
+        InstructionKind::CompositeInsert {
+            composite: Operand::Undef(Type::Struct(crate::ir::StructType {
+                fields: vec![crate::ir::StructField {
+                    name: None,
+                    ty: vec4.clone(),
+                    offset: 0,
+                }],
+                size: 16,
+                alignment: 16,
+                packed: true,
+            })),
+            object: rgba,
+            index: 0,
+        },
+    );
+    Ok(Module {
+        functions: vec![Function {
+            name,
+            result: Type::Struct(crate::ir::StructType {
+                fields: vec![crate::ir::StructField {
+                    name: None,
+                    ty: vec4.clone(),
+                    offset: 0,
+                }],
+                size: 16,
+                alignment: 16,
+                packed: true,
+            }),
+            parameters: vec![
+                Parameter {
+                    value: ValueId(0),
+                    name: format!("locn{}", input_locations[0]),
+                    ty: vec4.clone(),
+                },
+                Parameter {
+                    value: ValueId(1),
+                    name: format!("locn{}", input_locations[1]),
+                    ty: vec4,
+                },
+                Parameter {
+                    value: ValueId(2),
+                    name: "buffer0".to_string(),
+                    ty: cb_pointer.clone(),
+                },
+            ],
+            values,
+            blocks: vec![Block {
+                id: BlockId(0),
+                name: "entry".to_string(),
+                instructions,
+                terminator: Terminator::Return(Some(returned)),
+            }],
+        }],
+        entries: vec![EntryPoint {
+            function: 0,
+            stage: Stage::Fragment,
+            resources: vec![Resource {
+                argument: 2,
+                kind: ResourceKind::Buffer,
+                index: 0,
+                count: 1,
+                access: Access::Read,
+                ty: cb_pointer,
+                name: Some("buffer0".to_string()),
+            }],
+        }],
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -484,6 +872,45 @@ fn record_values(record: &llvm_bitcode::bitcode::Record) -> Vec<u64> {
         values.extend(array);
     }
     values
+}
+
+/// AIR's argument metadata uses `user(locnN)` for stage inputs.  The metadata
+/// block is producer-independent, while parameter spellings in the value
+/// symbol table are not.  Keep locations in entry metadata rather than
+/// coupling packed-library lowering to a particular shader pack's names.
+fn packed_fragment_input_locations(
+    module_block: &BitcodeBlock,
+) -> Result<Vec<u32>, TranslateError> {
+    let text = collect_payload_text(&module_block.elements);
+    if !text.contains("air.render_target") {
+        return Err(semantic(
+            "packed AIR fragment metadata has no render target declaration",
+        ));
+    }
+    let mut locations = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find("user(locn") {
+        let after_prefix = &rest[start + "user(locn".len()..];
+        let Some(end) = after_prefix.find(')') else {
+            return Err(semantic(
+                "packed AIR stage-input metadata has an unterminated location",
+            ));
+        };
+        let location = after_prefix[..end]
+            .parse::<u32>()
+            .map_err(|_| semantic("packed AIR stage-input metadata has an invalid location"))?;
+        if !locations.contains(&location) {
+            locations.push(location);
+        }
+        rest = &after_prefix[end + 1..];
+    }
+    if locations.len() != 2 {
+        return Err(semantic(format!(
+            "packed AIR fragment body requires exactly two location inputs, metadata has {}",
+            locations.len()
+        )));
+    }
+    Ok(locations)
 }
 
 fn type_reference(field: Option<&u64>, defined: usize) -> Result<usize, TranslateError> {
@@ -772,6 +1199,7 @@ fn parse_text(text: &str) -> Result<Module, TranslateError> {
 
     let function = Function {
         name,
+        result: Type::Void,
         parameters,
         values,
         blocks,

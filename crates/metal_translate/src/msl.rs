@@ -164,6 +164,7 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
     let module = Module {
         functions: vec![Function {
             name: name.to_string(),
+            result: Type::Void,
             parameters: function_parameters,
             values,
             blocks: vec![Block {
@@ -581,6 +582,7 @@ fn parse_blit_kernel(
     let module = Module {
         functions: vec![Function {
             name: name.to_string(),
+            result: Type::Void,
             parameters,
             values,
             blocks: vec![
