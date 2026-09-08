@@ -12,6 +12,8 @@ use crate::ir::{
 };
 use crate::{Diagnostic, Phase, TranslateError};
 
+mod values;
+
 /// An AIR module in one of the representations accepted by the translator.
 #[derive(Clone, Copy, Debug)]
 pub enum AirInput<'a> {
@@ -273,7 +275,7 @@ fn parse_packed_air(
             .ok_or_else(|| semantic("packed AIR function pointer has no pointee type"))?,
         signature => signature,
     };
-    let DecodedType::Function { parameters, .. } = signature else {
+    let DecodedType::Function { parameters, result } = signature else {
         return Err(semantic(format!(
             "packed AIR function type {signature_index} is {}, not a function",
             signature.description()
@@ -286,21 +288,20 @@ fn parse_packed_air(
         .join(", ");
 
     let body = function_blocks[entry];
+    let value_table = values::ValueTable::decode(module_block, body, &types, parameters)?;
     if stage == Stage::Fragment && parameter_types == "vector<0; 4>, vector<0; 4>, ptr(2)<11>" {
         return parse_packed_fragment_vector_body(module_block, body, name);
     }
-    // Keep this boundary strict. The diagnostic is intentionally expressed in
-    // LLVM record terms so a new lowering cannot reinterpret an unknown shape.
-    let first_instruction = body
-        .elements
-        .iter()
-        .filter_map(BitcodeElement::as_record)
-        .find(|record| record.id != 1)
-        .ok_or_else(|| semantic("packed AIR function has no body records"))?;
+    value_table.lower_body(
+        body,
+        &types,
+        legacy_names,
+        name.clone(),
+        parameters,
+        *result,
+    )?;
     Err(semantic(format!(
-        "packed AIR {stage:?} entry {name} has decoded parameter types ({parameter_types}), but LLVM function record {} with operands {:?} is not lowered into Metal IR yet",
-        first_instruction.id,
-        record_values(first_instruction),
+        "packed AIR {stage:?} entry {name} has a decoded LLVM body and parameter types ({parameter_types}), but its stage interface still requires metadata lowering",
     )))
 }
 
@@ -1075,6 +1076,9 @@ fn collect_payload_text(elements: &[BitcodeElement]) -> String {
 }
 
 fn decode_sign_rotated(value: u64) -> i64 {
+    if value == 1 {
+        return i64::MIN;
+    }
     let magnitude = (value >> 1) as i64;
     if value & 1 == 0 {
         magnitude

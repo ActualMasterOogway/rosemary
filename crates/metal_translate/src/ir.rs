@@ -190,6 +190,7 @@ pub struct Instruction {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Operand {
+    Bool(bool),
     Value(ValueId),
     Integer { ty: Type, value: u64 },
     Float { ty: Type, bits: u64 },
@@ -252,6 +253,10 @@ pub enum InstructionKind {
         pointer: Operand,
         indices: Vec<u32>,
     },
+    BufferAddress {
+        pointer: Operand,
+        indices: Vec<Operand>,
+    },
     CompositeExtract {
         composite: Operand,
         index: u32,
@@ -266,9 +271,21 @@ pub enum InstructionKind {
     ConvertUToF {
         value: Operand,
     },
+    IntegerResize {
+        value: Operand,
+    },
     FloatDiv {
         lhs: Operand,
         rhs: Operand,
+    },
+    FloatOrderedGreaterEqual {
+        lhs: Operand,
+        rhs: Operand,
+    },
+    Select {
+        condition: Operand,
+        on_true: Operand,
+        on_false: Operand,
     },
     FloatAdd {
         lhs: Operand,
@@ -307,6 +324,12 @@ pub enum InstructionKind {
         rhs: Operand,
     },
     FloatSqrt {
+        value: Operand,
+    },
+    FloatAbs {
+        value: Operand,
+    },
+    FloatReciprocalSqrt {
         value: Operand,
     },
     FloatExp2 {
@@ -672,6 +695,45 @@ fn verify_instruction_types(
             matches!(result, Some(Type::Pointer { .. }))
                 && matches!(operand_type(function, pointer), Some(Type::Pointer { .. }))
         }
+        InstructionKind::BufferAddress { pointer, indices } => (|| {
+            let Some(Type::Pointer { space, pointee }) = operand_type(function, pointer) else {
+                return false;
+            };
+            let mut ty = *pointee;
+            let mut valid = !indices.is_empty();
+            for (position, index) in indices.iter().enumerate() {
+                valid &= matches!(operand_type(function, index), Some(Type::Int { .. }));
+                if position == 0 {
+                    continue;
+                }
+                ty = match ty {
+                    Type::Struct(ref structure) => {
+                        if let Operand::Integer { value, .. } = index {
+                            if let Some(field) = structure.fields.get(*value as usize) {
+                                field.ty.clone()
+                            } else {
+                                valid = false;
+                                Type::Void
+                            }
+                        } else {
+                            valid = false;
+                            Type::Void
+                        }
+                    }
+                    Type::Array { element, .. } | Type::Vector { element, .. } => *element,
+                    _ => {
+                        valid = false;
+                        Type::Void
+                    }
+                };
+            }
+            valid
+                && result
+                    == Some(Type::Pointer {
+                        space,
+                        pointee: Box::new(ty),
+                    })
+        })(),
         InstructionKind::CompositeExtract { composite, index } => {
             match operand_type(function, composite) {
                 Some(Type::Struct(structure)) => {
@@ -703,6 +765,12 @@ fn verify_instruction_types(
             matches!(operand_type(function, vector), Some(Type::Vector { element, .. }) if *element == Type::Bool)
                 && result == Some(Type::Bool)
         }
+        InstructionKind::IntegerResize { value } => {
+            matches!(
+                operand_type(function, value),
+                Some(Type::Int { signed: false, .. })
+            ) && matches!(result, Some(Type::Int { signed: false, .. }))
+        }
         InstructionKind::ConvertUToF { value } => match operand_type(function, value) {
             Some(Type::Vector { element, lanes })
                 if matches!(*element, Type::Int { signed: false, .. }) =>
@@ -716,6 +784,32 @@ fn verify_instruction_types(
             Some(Type::Int { signed: false, .. }) => result == Some(Type::Float { bits: 32 }),
             _ => false,
         },
+        InstructionKind::Select {
+            condition,
+            on_true,
+            on_false,
+        } => {
+            result == operand_type(function, on_true)
+                && result == operand_type(function, on_false)
+                && (operand_type(function, condition) == Some(Type::Bool)
+                    || matches!((&result, operand_type(function, condition)), (Some(Type::Vector { lanes, .. }), Some(Type::Vector { element, lanes: n })) if *element == Type::Bool && *lanes == n))
+        }
+        InstructionKind::FloatOrderedGreaterEqual { lhs, rhs } => {
+            operand_type(function, lhs) == operand_type(function, rhs)
+                && match operand_type(function, lhs) {
+                    Some(Type::Float { .. }) => result == Some(Type::Bool),
+                    Some(Type::Vector { element, lanes })
+                        if matches!(*element, Type::Float { .. }) =>
+                    {
+                        result
+                            == Some(Type::Vector {
+                                element: Box::new(Type::Bool),
+                                lanes,
+                            })
+                    }
+                    _ => false,
+                }
+        }
         InstructionKind::FloatDiv { lhs, rhs }
         | InstructionKind::FloatAdd { lhs, rhs }
         | InstructionKind::FloatSubtract { lhs, rhs }
@@ -784,7 +878,10 @@ fn verify_instruction_types(
                 && result == operand_type(function, weight)
                 && result.as_ref().is_some_and(is_float_or_float_vector)
         }
-        InstructionKind::FloatSqrt { value } | InstructionKind::FloatExp2 { value } => {
+        InstructionKind::FloatSqrt { value }
+        | InstructionKind::FloatExp2 { value }
+        | InstructionKind::FloatAbs { value }
+        | InstructionKind::FloatReciprocalSqrt { value } => {
             result == operand_type(function, value)
                 && result.as_ref().is_some_and(is_float_or_float_vector)
         }
@@ -833,6 +930,7 @@ fn operand_type(function: &Function, operand: &Operand) -> Option<Type> {
         Operand::Integer { ty, .. } => Some(ty.clone()),
         Operand::Float { ty, .. } => Some(ty.clone()),
         Operand::Undef(ty) => Some(ty.clone()),
+        Operand::Bool(_) => Some(Type::Bool),
     }
 }
 
@@ -847,12 +945,21 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         InstructionKind::ElementAddress { pointer, index } => vec![pointer, index],
         InstructionKind::FieldAddress { pointer, .. } => vec![pointer],
         InstructionKind::CompositeExtract { composite, .. } => vec![composite],
+        InstructionKind::BufferAddress { pointer, indices } => {
+            std::iter::once(pointer).chain(indices).collect()
+        }
         InstructionKind::VectorUnsignedLessThan { lhs, rhs }
+        | InstructionKind::FloatOrderedGreaterEqual { lhs, rhs }
         | InstructionKind::FloatDiv { lhs, rhs }
         | InstructionKind::FloatAdd { lhs, rhs }
         | InstructionKind::FloatSubtract { lhs, rhs }
         | InstructionKind::FloatMultiply { lhs, rhs }
         | InstructionKind::FloatDot { lhs, rhs } => vec![lhs, rhs],
+        InstructionKind::Select {
+            condition,
+            on_true,
+            on_false,
+        } => vec![condition, on_true, on_false],
         InstructionKind::VectorShuffle { first, second, .. } => vec![first, second],
         InstructionKind::CompositeInsert {
             composite, object, ..
@@ -865,7 +972,10 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         } => vec![first, second, weight],
         InstructionKind::All { vector }
         | InstructionKind::ConvertUToF { value: vector }
+        | InstructionKind::IntegerResize { value: vector }
         | InstructionKind::FloatSqrt { value: vector }
+        | InstructionKind::FloatAbs { value: vector }
+        | InstructionKind::FloatReciprocalSqrt { value: vector }
         | InstructionKind::FloatExp2 { value: vector } => {
             vec![vector]
         }

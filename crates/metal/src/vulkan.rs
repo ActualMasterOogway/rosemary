@@ -56,6 +56,8 @@ fn initialize() -> Result<State, String> {
         .map(|handle| {
             // SAFETY: every handle was returned by this live instance.
             let properties = unsafe { instance.get_physical_device_properties(handle) };
+            // SAFETY: the physical device belongs to this live instance.
+            let features = unsafe { instance.get_physical_device_features(handle) };
             let name = properties.device_name_as_c_str().map_or_else(
                 |_| "Vulkan Device".to_string(),
                 |name| name.to_string_lossy().into_owned(),
@@ -67,7 +69,10 @@ fn initialize() -> Result<State, String> {
             Adapter {
                 handle: handle.as_raw() as usize,
                 name,
-                target: target_profile(version),
+                target: metal_translate::TargetProfile {
+                    shader_int64: features.shader_int64 == vk::TRUE,
+                    ..target_profile(version)
+                },
             }
         })
         .collect::<Vec<_>>();
@@ -113,6 +118,7 @@ fn target_profile(version: (u8, u8)) -> metal_translate::TargetProfile {
         spirv_version,
         max_bound_descriptor_sets: 4,
         shader: true,
+        shader_int64: false,
     }
 }
 

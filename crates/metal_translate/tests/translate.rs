@@ -78,6 +78,203 @@ fn emits_parseable_spirv_for_each_core_kernel() {
 }
 
 #[test]
+fn emits_decoded_buffer_addresses_math_and_integer_widths() {
+    use metal_translate::ir::{Instruction, Operand};
+    let mut module = parse_air(AirInput::Text(STORE)).unwrap();
+    let function = &mut module.functions[0];
+    let pointer = function.parameters[0].ty.clone();
+    let f32_ty = Type::Float { bits: 32 };
+    let u64_ty = Type::Int {
+        bits: 64,
+        signed: false,
+    };
+    let operations = [
+        (
+            pointer,
+            InstructionKind::BufferAddress {
+                pointer: Operand::Value(ValueId(0)),
+                indices: vec![Operand::u32(0)],
+            },
+        ),
+        (
+            u64_ty,
+            InstructionKind::IntegerResize {
+                value: Operand::u32(17),
+            },
+        ),
+        (
+            f32_ty.clone(),
+            InstructionKind::FloatAbs {
+                value: Operand::f32(-4.0),
+            },
+        ),
+        (
+            f32_ty.clone(),
+            InstructionKind::FloatReciprocalSqrt {
+                value: Operand::f32(4.0),
+            },
+        ),
+        (
+            Type::Bool,
+            InstructionKind::FloatOrderedGreaterEqual {
+                lhs: Operand::f32(1.0),
+                rhs: Operand::f32(0.0),
+            },
+        ),
+        (
+            f32_ty,
+            InstructionKind::Select {
+                condition: Operand::Bool(true),
+                on_true: Operand::f32(1.0),
+                on_false: Operand::f32(0.0),
+            },
+        ),
+    ];
+    for (index, (ty, kind)) in operations.into_iter().enumerate() {
+        let result = ValueId(function.values.len() as u32);
+        function.values.push(ty);
+        function.blocks[0].instructions.insert(
+            index,
+            Instruction {
+                result: Some(result),
+                kind,
+            },
+        );
+    }
+    module.verify().unwrap();
+    let mut target = TargetProfile::vulkan_1_3();
+    assert!(
+        emit_spirv(&module, &target)
+            .unwrap_err()
+            .to_string()
+            .contains("Int64")
+    );
+    target.shader_int64 = true;
+    let library = emit_spirv(&module, &target).unwrap();
+    assert_eq!(
+        library.entries[0].required.capabilities,
+        ["Shader", "Int64"]
+    );
+    let binary = rspirv::dr::load_words(&library.entries[0].words).unwrap();
+    let opcodes: Vec<_> = binary
+        .functions
+        .iter()
+        .flat_map(|f| &f.blocks)
+        .flat_map(|b| &b.instructions)
+        .map(|i| i.class.opcode)
+        .collect();
+    for opcode in [
+        Op::AccessChain,
+        Op::UConvert,
+        Op::ExtInst,
+        Op::FOrdGreaterThanEqual,
+        Op::Select,
+    ] {
+        assert!(opcodes.contains(&opcode));
+    }
+}
+
+#[test]
+fn rejects_buffer_address_with_noninteger_index() {
+    use metal_translate::ir::{Instruction, Operand};
+    let mut module = parse_air(AirInput::Text(STORE)).unwrap();
+    let function = &mut module.functions[0];
+    let result = ValueId(function.values.len() as u32);
+    function.values.push(function.parameters[0].ty.clone());
+    function.blocks[0].instructions.insert(
+        0,
+        Instruction {
+            result: Some(result),
+            kind: InstructionKind::BufferAddress {
+                pointer: Operand::Value(ValueId(0)),
+                indices: vec![Operand::f32(0.0)],
+            },
+        },
+    );
+    assert!(module.verify().is_err());
+}
+
+#[test]
+fn emits_dynamic_array_index_inside_a_buffer_struct() {
+    use metal_translate::ir::{Instruction, Operand, StructField, StructType};
+    let mut module = parse_air(AirInput::Text(STORE)).unwrap();
+    let function = &mut module.functions[0];
+    let scalar_pointer = function.parameters[0].ty.clone();
+    let Type::Pointer { space, .. } = scalar_pointer.clone() else {
+        unreachable!()
+    };
+    let scalar_pointer = Type::Pointer {
+        space,
+        pointee: Box::new(Type::u32()),
+    };
+    let pointer = Type::Pointer {
+        space,
+        pointee: Box::new(Type::Struct(StructType {
+            fields: vec![StructField {
+                name: None,
+                offset: 0,
+                ty: Type::Array {
+                    element: Box::new(Type::u32()),
+                    count: 4,
+                },
+            }],
+            size: 16,
+            alignment: 4,
+            packed: false,
+        })),
+    };
+    function.parameters[0].ty = pointer.clone();
+    function.values = vec![pointer.clone(), Type::u32(), scalar_pointer];
+    module.entries[0].resources[0].ty = pointer;
+    function.blocks[0].instructions = vec![
+        Instruction {
+            result: Some(ValueId(1)),
+            kind: InstructionKind::IntegerAdd {
+                lhs: Operand::u32(1),
+                rhs: Operand::u32(1),
+            },
+        },
+        Instruction {
+            result: Some(ValueId(2)),
+            kind: InstructionKind::BufferAddress {
+                pointer: Operand::Value(ValueId(0)),
+                indices: vec![Operand::u32(0), Operand::u32(0), Operand::Value(ValueId(1))],
+            },
+        },
+        Instruction {
+            result: None,
+            kind: InstructionKind::Store {
+                pointer: Operand::Value(ValueId(2)),
+                value: Operand::u32(42),
+            },
+        },
+    ];
+    let library = emit_spirv(&module, &TargetProfile::vulkan_1_3()).unwrap();
+    let binary = rspirv::dr::load_words(&library.entries[0].words).unwrap();
+    assert!(
+        binary
+            .types_global_values
+            .iter()
+            .any(|i| i.class.opcode == Op::TypeArray)
+    );
+    assert!(
+        binary
+            .functions
+            .iter()
+            .flat_map(|f| &f.blocks)
+            .flat_map(|b| &b.instructions)
+            .any(|i| i.class.opcode == Op::AccessChain && i.operands.len() == 5)
+    );
+    // A struct field itself cannot be selected dynamically.
+    if let InstructionKind::BufferAddress { indices, .. } =
+        &mut module.functions[0].blocks[0].instructions[1].kind
+    {
+        indices[1] = Operand::Value(ValueId(1));
+    }
+    assert!(module.verify().is_err());
+}
+
+#[test]
 fn maps_buffer_indices_into_the_buffer_descriptor_set() {
     let library = translate(AirInput::Text(COPY), &TargetProfile::vulkan_1_3()).unwrap();
     let resources = &library.entries[0].resources;

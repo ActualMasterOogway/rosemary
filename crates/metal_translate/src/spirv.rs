@@ -22,6 +22,7 @@ pub struct TargetProfile {
     pub spirv_version: (u8, u8),
     pub max_bound_descriptor_sets: u32,
     pub shader: bool,
+    pub shader_int64: bool,
 }
 
 impl TargetProfile {
@@ -31,6 +32,7 @@ impl TargetProfile {
             spirv_version: (1, 6),
             max_bound_descriptor_sets: 4,
             shader: true,
+            shader_int64: false,
         }
     }
 }
@@ -155,6 +157,11 @@ fn emit_entry(
         }
         _ => unreachable!(),
     }
+    let capabilities = if emitter.uses_int64 {
+        vec!["Shader".to_string(), "Int64".to_string()]
+    } else {
+        vec!["Shader".to_string()]
+    };
     let words = emitter.builder.module().assemble();
     rspirv::dr::load_words(&words)
         .map_err(|error| emission(format!("emitted SPIR-V could not be parsed: {error}")))?;
@@ -164,13 +171,15 @@ fn emit_entry(
         words,
         resources,
         required: RequiredFeatures {
-            capabilities: vec!["Shader".to_string()],
+            capabilities,
             extensions: Vec::new(),
         },
     })
 }
 
 struct Emitter {
+    shader_int64: bool,
+    uses_int64: bool,
     builder: Builder,
     types: HashMap<Type, u32>,
     constants: HashMap<(Type, u64), u32>,
@@ -191,6 +200,8 @@ impl Emitter {
         builder.memory_model(AddressingModel::Logical, MemoryModel::GLSL450);
         let glsl_std_450 = builder.ext_inst_import("GLSL.std.450");
         Self {
+            shader_int64: target.shader_int64,
+            uses_int64: false,
             builder,
             types: HashMap::new(),
             constants: HashMap::new(),
@@ -522,7 +533,7 @@ impl Emitter {
                             self.constant(ty, *bits)?;
                         }
                         Operand::Value(_) => {}
-                        Operand::Undef(_) => {}
+                        Operand::Undef(_) | Operand::Bool(_) => {}
                     }
                 }
             }
@@ -535,7 +546,7 @@ impl Emitter {
                         self.constant(ty, *bits)?;
                     }
                     Operand::Value(_) => {}
-                    Operand::Undef(_) => {}
+                    Operand::Undef(_) | Operand::Bool(_) => {}
                 }
             }
         }
@@ -664,6 +675,33 @@ impl Emitter {
                     .access_chain(pointer_type, result_id, variable, [zero, index])
                     .map_err(build_error)?;
             }
+            InstructionKind::BufferAddress { pointer, indices } => {
+                let Operand::Value(parameter) = pointer else {
+                    return Err(emission("buffer address requires a resource parameter"));
+                };
+                let variable = self
+                    .parameter_pointers
+                    .get(parameter)
+                    .copied()
+                    .ok_or_else(|| emission("buffer address base is not a resource"))?;
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("buffer address has no result"))?;
+                let Type::Pointer { pointee, .. } = &function.values[result.0 as usize] else {
+                    return Err(emission("buffer address result is not a pointer"));
+                };
+                let pointee = self.type_id(pointee)?;
+                let ty = self
+                    .builder
+                    .type_pointer(None, StorageClass::StorageBuffer, pointee);
+                let mut chain = vec![self.constant(&Type::u32(), 0)?];
+                for index in indices {
+                    chain.push(self.operand(index, values)?);
+                }
+                self.builder
+                    .access_chain(ty, result_id, variable, chain)
+                    .map_err(build_error)?;
+            }
             InstructionKind::FieldAddress { pointer, indices } => {
                 let Operand::Value(parameter) = pointer else {
                     return Err(emission("field address requires a buffer parameter"));
@@ -720,6 +758,16 @@ impl Emitter {
                 let vector = self.operand(vector, values)?;
                 self.builder
                     .all(ty, result_id, vector)
+                    .map_err(build_error)?;
+            }
+            InstructionKind::IntegerResize { value } => {
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("integer resize has no result"))?;
+                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let value = self.operand(value, values)?;
+                self.builder
+                    .u_convert(ty, result_id, value)
                     .map_err(build_error)?;
             }
             InstructionKind::ConvertUToF { value } => {
@@ -824,8 +872,46 @@ impl Emitter {
                     [first, second, weight],
                 )?;
             }
+            InstructionKind::Select {
+                condition,
+                on_true,
+                on_false,
+            } => {
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("select has no result"))?;
+                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let condition = self.operand(condition, values)?;
+                let on_true = self.operand(on_true, values)?;
+                let on_false = self.operand(on_false, values)?;
+                self.builder
+                    .select(ty, result_id, condition, on_true, on_false)
+                    .map_err(build_error)?;
+            }
+            InstructionKind::FloatOrderedGreaterEqual { lhs, rhs } => {
+                self.emit_binary(
+                    function,
+                    instruction,
+                    lhs,
+                    rhs,
+                    values,
+                    |builder, ty, id, a, b| builder.f_ord_greater_than_equal(ty, id, a, b),
+                )?;
+            }
             InstructionKind::FloatSqrt { value } => {
                 self.emit_ext_inst(function, instruction, values, GlslStd450Op::Sqrt, [value])?;
+            }
+            InstructionKind::FloatAbs { value } => {
+                self.emit_ext_inst(function, instruction, values, GlslStd450Op::FAbs, [value])?;
+            }
+            InstructionKind::FloatReciprocalSqrt { value } => {
+                self.emit_ext_inst(
+                    function,
+                    instruction,
+                    values,
+                    GlslStd450Op::InverseSqrt,
+                    [value],
+                )?;
             }
             InstructionKind::FloatExp2 { value } => {
                 self.emit_ext_inst(function, instruction, values, GlslStd450Op::Exp2, [value])?;
@@ -963,6 +1049,14 @@ impl Emitter {
         values: &HashMap<ValueId, u32>,
     ) -> Result<u32, TranslateError> {
         match operand {
+            Operand::Bool(value) => {
+                let ty = self.type_id(&Type::Bool)?;
+                Ok(if *value {
+                    self.builder.constant_true(ty)
+                } else {
+                    self.builder.constant_false(ty)
+                })
+            }
             Operand::Value(value) => values
                 .get(value)
                 .copied()
@@ -1001,6 +1095,15 @@ impl Emitter {
             Type::Void => self.builder.type_void(),
             Type::Bool => self.builder.type_bool(),
             Type::Int { bits, signed } => {
+                if *bits == 64 {
+                    if !self.shader_int64 {
+                        return Err(emission("target profile does not support Int64"));
+                    }
+                    if !self.uses_int64 {
+                        self.builder.capability(Capability::Int64);
+                        self.uses_int64 = true;
+                    }
+                }
                 self.builder.type_int(u32::from(*bits), u32::from(*signed))
             }
             Type::Float { bits } => self.builder.type_float(u32::from(*bits), None),
@@ -1023,6 +1126,17 @@ impl Emitter {
                         [SpirvOperand::LiteralBit32(field.offset)],
                     );
                 }
+                id
+            }
+            Type::Array { element, count } => {
+                let element_id = self.type_id(element)?;
+                let count = self.constant(&Type::u32(), u64::from(*count))?;
+                let id = self.builder.type_array(element_id, count);
+                self.builder.decorate(
+                    id,
+                    Decoration::ArrayStride,
+                    [SpirvOperand::LiteralBit32(type_stride(element)?)],
+                );
                 id
             }
             Type::Texture => {
@@ -1055,9 +1169,12 @@ fn type_stride(ty: &Type) -> Result<u32, TranslateError> {
         Type::Int { bits, .. } | Type::Float { bits } => Ok(u32::from(*bits) / 8),
         Type::Vector { element, lanes } => {
             let element = type_stride(element)?;
-            Ok(element * u32::from(*lanes))
+            Ok(element * u32::from(*lanes).next_power_of_two())
         }
         Type::Struct(structure) => Ok(structure.size),
+        Type::Array { element, count } => type_stride(element)?
+            .checked_mul(*count)
+            .ok_or_else(|| emission("array stride overflows")),
         _ => Err(emission("buffer element type has no SPIR-V array stride")),
     }
 }
@@ -1102,12 +1219,21 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         InstructionKind::ElementAddress { pointer, index } => vec![pointer, index],
         InstructionKind::FieldAddress { pointer, .. } => vec![pointer],
         InstructionKind::CompositeExtract { composite, .. } => vec![composite],
+        InstructionKind::BufferAddress { pointer, indices } => {
+            std::iter::once(pointer).chain(indices).collect()
+        }
         InstructionKind::VectorUnsignedLessThan { lhs, rhs }
+        | InstructionKind::FloatOrderedGreaterEqual { lhs, rhs }
         | InstructionKind::FloatDiv { lhs, rhs }
         | InstructionKind::FloatAdd { lhs, rhs }
         | InstructionKind::FloatSubtract { lhs, rhs }
         | InstructionKind::FloatMultiply { lhs, rhs }
         | InstructionKind::FloatDot { lhs, rhs } => vec![lhs, rhs],
+        InstructionKind::Select {
+            condition,
+            on_true,
+            on_false,
+        } => vec![condition, on_true, on_false],
         InstructionKind::VectorShuffle { first, second, .. } => vec![first, second],
         InstructionKind::CompositeInsert {
             composite, object, ..
@@ -1120,7 +1246,10 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         } => vec![first, second, weight],
         InstructionKind::All { vector }
         | InstructionKind::ConvertUToF { value: vector }
+        | InstructionKind::IntegerResize { value: vector }
         | InstructionKind::FloatSqrt { value: vector }
+        | InstructionKind::FloatAbs { value: vector }
+        | InstructionKind::FloatReciprocalSqrt { value: vector }
         | InstructionKind::FloatExp2 { value: vector } => {
             vec![vector]
         }
