@@ -8,9 +8,10 @@
 use std::collections::HashMap;
 
 use crate::ir::{
-    Access, AddressSpace, Block, BlockId, EntryPoint, Function, Instruction, InstructionKind,
-    Module, Operand, Parameter, Resource, ResourceKind, Stage, StructField, StructType, Terminator,
-    Type, ValueId,
+    Access, AddressSpace, Block, BlockId, ConvertOp, EntryPoint, FloatBinaryOp, Function,
+    Instruction, InstructionKind, IntegerBinaryOp, IntegerPredicate, Module, Operand, Parameter,
+    Resource, ResourceKind, Stage, StructField, StructType, Terminator, TextureDimension,
+    TextureType, Type, ValueId,
 };
 use crate::{Diagnostic, Phase, TranslateError};
 
@@ -184,6 +185,8 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
             function: 0,
             stage: Stage::Kernel,
             resources,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         }],
     };
     module.verify()?;
@@ -392,7 +395,7 @@ fn parse_blit_kernel(
                 "blit output texture is missing",
             )
         })?;
-    if output.ty != Type::Texture
+    if output.ty != writable_float_texture3d()
         || !is_normalized_uchar4(write_value, element_name)
         || !is_offset_coordinate(write_coordinate, gid_name.trim(), params_name.trim())
     {
@@ -495,7 +498,8 @@ fn parse_blit_kernel(
             },
             Instruction {
                 result: Some(in_bounds),
-                kind: InstructionKind::VectorUnsignedLessThan {
+                kind: InstructionKind::IntegerCompare {
+                    predicate: IntegerPredicate::UnsignedLessThan,
                     lhs: Operand::Value(gid),
                     rhs: Operand::Value(size),
                 },
@@ -534,7 +538,8 @@ fn parse_blit_kernel(
                 },
                 Instruction {
                     result: Some(converted),
-                    kind: InstructionKind::ConvertUToF {
+                    kind: InstructionKind::Convert {
+                        op: ConvertOp::UnsignedToFloat,
                         value: Operand::Value(element),
                     },
                 },
@@ -547,7 +552,8 @@ fn parse_blit_kernel(
                 },
                 Instruction {
                     result: Some(normalized),
-                    kind: InstructionKind::FloatDiv {
+                    kind: InstructionKind::FloatBinary {
+                        op: FloatBinaryOp::Divide,
                         lhs: Operand::Value(converted),
                         rhs: Operand::Value(divisor),
                     },
@@ -561,7 +567,8 @@ fn parse_blit_kernel(
                 },
                 Instruction {
                     result: Some(coordinate),
-                    kind: InstructionKind::IntegerAdd {
+                    kind: InstructionKind::IntegerBinary {
+                        op: IntegerBinaryOp::Add,
                         lhs: Operand::Value(gid),
                         rhs: Operand::Value(offset),
                     },
@@ -569,6 +576,7 @@ fn parse_blit_kernel(
                 Instruction {
                     result: None,
                     kind: InstructionKind::TextureWrite {
+                        array_index: None,
                         texture: Operand::Value(output.value),
                         coordinate: Operand::Value(coordinate),
                         value: Operand::Value(normalized),
@@ -600,6 +608,8 @@ fn parse_blit_kernel(
             function: 0,
             stage: Stage::Kernel,
             resources,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         }],
     };
     module.verify()?;
@@ -732,12 +742,14 @@ impl IndexLowerer<'_> {
                 self.instructions.push(Instruction {
                     result: Some(result),
                     kind: if matches!(expression, IndexExpression::Add(_, _)) {
-                        InstructionKind::IntegerAdd {
+                        InstructionKind::IntegerBinary {
+                            op: IntegerBinaryOp::Add,
                             lhs: Operand::Value(lhs),
                             rhs: Operand::Value(rhs),
                         }
                     } else {
-                        InstructionKind::IntegerMultiply {
+                        InstructionKind::IntegerBinary {
+                            op: IntegerBinaryOp::Multiply,
                             lhs: Operand::Value(lhs),
                             rhs: Operand::Value(rhs),
                         }
@@ -962,11 +974,23 @@ fn parse_resource_attribute(
             space: AddressSpace::Constant,
             ..
         } => Access::Read,
-        Type::Texture if declaration.contains("access::write") => Access::Write,
-        Type::Texture => Access::Read,
+        Type::Texture(_) if declaration.contains("access::write") => Access::Write,
+        Type::Texture(_) => Access::Read,
         _ => Access::ReadWrite,
     };
     Some((kind, index, access))
+}
+
+/// The one texture shape this source-MSL frontend accepts.
+fn writable_float_texture3d() -> Type {
+    Type::Texture(TextureType {
+        dimension: TextureDimension::D3,
+        array: false,
+        multisampled: false,
+        depth: false,
+        texel: Box::new(Type::Float { bits: 32 }),
+        access: Access::Write,
+    })
 }
 
 fn parse_parameter_type(
@@ -997,7 +1021,7 @@ fn parse_parameter_type(
         });
     }
     if ty.starts_with("texture3d<float,") && ty.contains("access::write") {
-        return Ok(Type::Texture);
+        return Ok(writable_float_texture3d());
     }
     if ty.starts_with("texture") {
         return Err("unsupported MSL texture type".to_string());

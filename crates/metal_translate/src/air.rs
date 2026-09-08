@@ -6,12 +6,15 @@ use llvm_bitcode::Bitcode;
 use llvm_bitcode::bitcode::{BitcodeElement, Block as BitcodeBlock, Payload};
 
 use crate::ir::{
-    Access, AddressSpace, Block, BlockId, EntryPoint, Function, Instruction, InstructionKind,
-    IntegerPredicate, Module, Operand, Parameter, Resource, ResourceKind, Stage, Terminator, Type,
-    ValueId,
+    Access, AddressSpace, Block, BlockId, Builtin, ConvertOp, EntryPoint, FloatBinaryOp,
+    FloatPredicate, FloatUnaryOp, Function, Instruction, InstructionKind, IntegerBinaryOp,
+    IntegerPredicate, IntegerUnaryOp, Interpolation, Module, Operand, Parameter, Resource,
+    ResourceKind, Sampling, Stage, StageBinding, StageInput, StageOutput, Terminator,
+    TextureDimension, TextureType, Type, ValueId,
 };
 use crate::{Diagnostic, Phase, TranslateError};
 
+mod metadata;
 mod values;
 
 /// An AIR module in one of the representations accepted by the translator.
@@ -220,6 +223,8 @@ fn parse_minimal_store_bitcode(bitcode: &Bitcode) -> Result<Module, TranslateErr
                 ty: pointer,
                 name: Some(parameter_name),
             }],
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         }],
     })
 }
@@ -241,17 +246,15 @@ fn parse_packed_air(
         child_block(&module_block.elements, 17)
             .ok_or_else(|| semantic("packed AIR has no type table"))?,
     )?;
+    let metadata = metadata::Metadata::decode(module_block, &types)?;
     let stage = metadata_entry_stage(module_block)
         .ok_or_else(|| semantic("packed AIR has no supported entry metadata"))?;
+    let module_values = values::ValueTable::module_values(module_block, &types)?;
+    let interface = metadata.stage_interface(stage, &module_values, &types)?;
     let entry = function_records
         .iter()
-        .position(|(ordinal, _)| {
-            legacy_names
-                .get(ordinal)
-                .is_some_and(|name| name == "main0")
-        })
-        .or_else(|| (function_records.len() == 1).then_some(0))
-        .ok_or_else(|| semantic("packed AIR has no main0 entry function"))?;
+        .position(|(ordinal, _)| *ordinal == interface.function)
+        .ok_or_else(|| semantic("AIR entry metadata names a function without a body"))?;
     let (ordinal, record) = function_records[entry];
     let name = legacy_names
         .get(&ordinal)
@@ -281,412 +284,55 @@ fn parse_packed_air(
             signature.description()
         )));
     };
-    let parameter_types = parameters
-        .iter()
-        .map(|index| types[*index].description())
-        .collect::<Vec<_>>()
-        .join(", ");
-
     let body = function_blocks[entry];
     let value_table = values::ValueTable::decode(module_block, body, &types, parameters)?;
-    if stage == Stage::Fragment && parameter_types == "vector<0; 4>, vector<0; 4>, ptr(2)<11>" {
-        return parse_packed_fragment_vector_body(module_block, body, name);
-    }
-    value_table.lower_body(
+    let opaque_types = interface
+        .resources
+        .iter()
+        .filter_map(|resource| Some((resource.argument, resource.ty.clone()?)))
+        .collect();
+    let function = value_table.lower_body(
         body,
         &types,
-        legacy_names,
-        name.clone(),
-        parameters,
-        *result,
-    )?;
-    Err(semantic(format!(
-        "packed AIR {stage:?} entry {name} has a decoded LLVM body and parameter types ({parameter_types}), but its stage interface still requires metadata lowering",
-    )))
-}
-
-/// Lower the first complete packed-AIR fragment body.
-fn parse_packed_fragment_vector_body(
-    module_block: &BitcodeBlock,
-    body: &BitcodeBlock,
-    name: String,
-) -> Result<Module, TranslateError> {
-    let records: Vec<_> = body
-        .elements
-        .iter()
-        .filter_map(BitcodeElement::as_record)
-        .collect();
-    let expected = [
-        1, 8, 6, 2, 34, 7, 8, 34, 30, 20, 6, 8, 34, 34, 2, 6, 2, 34, 6, 2, 34, 7, 8, 2, 8, 7, 27,
-        10,
-    ];
-    let actual: Vec<_> = records.iter().map(|record| record.id).collect();
-    if actual != expected {
-        let mismatch = actual
-            .iter()
-            .zip(expected)
-            .position(|(actual, expected)| *actual != expected)
-            .unwrap_or(actual.len().min(expected.len()));
-        return Err(semantic(format!(
-            "packed AIR fragment body diverges at record {mismatch}: {actual:?}"
-        )));
-    }
-    let expected_fields: &[&[u64]] = &[
-        &[1],
-        &[17, 4, 11],
-        &[18, 9],
-        &[1, 5, 2, 31],
-        &[3, 1, 82, 1, 5, 4],
-        &[10, 1, 78],
-        &[1, 11, 17],
-        &[3, 1, 81, 13, 6, 1],
-        &[22, 20, 81, 16],
-        &[1, 5, 0],
-        &[1, 78],
-        &[26, 14, 21],
-        &[3, 1, 87, 1, 1],
-        &[3, 1, 89, 1],
-        &[1, 4, 2, 31],
-        &[6, 88],
-        &[2, 1, 0, 31],
-        &[3, 1, 94, 1],
-        &[9, 25],
-        &[2, 1, 1, 31],
-        &[3, 1, 98, 1, 21, 20],
-        &[26, 1, 94],
-        &[1, 27, 33],
-        &[1, 16, 2, 31],
-        &[1, 29, 37],
-        &[1, 25, 32],
-        &[30, 1, 0],
-        &[1],
-    ];
-    if records
-        .iter()
-        .zip(expected_fields)
-        .any(|(record, expected)| record_values(record) != *expected)
-    {
-        return Err(semantic(
-            "packed AIR fragment operands do not match the implemented lowering",
-        ));
-    }
-    let input_locations = packed_fragment_input_locations(module_block)?;
-
-    let f32_ty = Type::Float { bits: 32 };
-    let vec3 = Type::Vector {
-        element: Box::new(f32_ty.clone()),
-        lanes: 3,
-    };
-    let vec4 = Type::Vector {
-        element: Box::new(f32_ty.clone()),
-        lanes: 4,
-    };
-    let globals = crate::ir::StructType {
-        fields: (0..11)
-            .map(|index| crate::ir::StructField {
-                name: None,
-                ty: vec4.clone(),
-                offset: index * 16,
-            })
-            .collect(),
-        size: 176,
-        alignment: 16,
-        packed: false,
-    };
-    let cb0 = Type::Struct(crate::ir::StructType {
-        fields: vec![crate::ir::StructField {
-            name: Some("Globals".to_string()),
-            ty: Type::Struct(globals),
-            offset: 0,
-        }],
-        size: 176,
-        alignment: 16,
-        packed: false,
-    });
-    let cb_pointer = Type::Pointer {
-        space: AddressSpace::Constant,
-        pointee: Box::new(cb0.clone()),
-    };
-    let output = Type::Struct(crate::ir::StructType {
-        fields: vec![crate::ir::StructField {
-            name: None,
-            ty: vec4.clone(),
-            offset: 0,
-        }],
-        size: 16,
-        alignment: 16,
-        packed: true,
-    });
-    let mut values = vec![vec4.clone(), vec4.clone(), cb_pointer.clone()];
-    let mut instructions = Vec::new();
-    let mut push = |ty: Type, kind: InstructionKind| {
-        let result = ValueId(values.len() as u32);
-        values.push(ty);
-        instructions.push(Instruction {
-            result: Some(result),
-            kind,
-        });
-        Operand::Value(result)
-    };
-    let p0 = Operand::Value(ValueId(0));
-    let p1 = Operand::Value(ValueId(1));
-    let cb = Operand::Value(ValueId(2));
-    let zero = Operand::f32(0.0);
-    let one = Operand::f32(1.0);
-    let color = push(
-        vec3.clone(),
-        InstructionKind::VectorShuffle {
-            first: p0.clone(),
-            second: Operand::Undef(vec4.clone()),
-            components: vec![0, 1, 2],
-        },
-    );
-    let alpha = push(
-        f32_ty.clone(),
-        InstructionKind::CompositeExtract {
-            composite: p0,
-            index: 3,
-        },
-    );
-    let doubled = push(
-        f32_ty.clone(),
-        InstructionKind::FloatMultiply {
-            lhs: alpha,
-            rhs: Operand::f32(2.0),
-        },
-    );
-    let fade = push(
-        f32_ty.clone(),
-        InstructionKind::FloatClamp {
-            value: doubled,
-            min: zero.clone(),
-            max: one.clone(),
-        },
-    );
-    let fade0 = push(
-        vec3.clone(),
-        InstructionKind::CompositeInsert {
-            composite: Operand::Undef(vec3.clone()),
-            object: fade,
-            index: 0,
-        },
-    );
-    let fade3 = push(
-        vec3.clone(),
-        InstructionKind::VectorShuffle {
-            first: fade0,
-            second: Operand::Undef(vec3.clone()),
-            components: vec![0, 0, 0],
-        },
-    );
-    let white = push(
-        vec3.clone(),
-        InstructionKind::VectorSplat {
-            value: one.clone(),
-            lanes: 3,
-        },
-    );
-    let mixed = push(
-        vec3.clone(),
-        InstructionKind::FloatMix {
-            first: white,
-            second: color,
-            weight: fade3,
-        },
-    );
-    let field_pointer = Type::Pointer {
-        space: AddressSpace::Constant,
-        pointee: Box::new(vec4.clone()),
-    };
-    let field = push(
-        field_pointer,
-        InstructionKind::FieldAddress {
-            pointer: cb,
-            indices: vec![0, 10],
-        },
-    );
-    let params = push(vec4.clone(), InstructionKind::Load { pointer: field });
-    let scale = push(
-        f32_ty.clone(),
-        InstructionKind::CompositeExtract {
-            composite: params.clone(),
-            index: 2,
-        },
-    );
-    let direction = push(
-        vec3.clone(),
-        InstructionKind::VectorShuffle {
-            first: p1,
-            second: Operand::Undef(vec4.clone()),
-            components: vec![0, 1, 2],
-        },
-    );
-    let length2 = push(
-        f32_ty.clone(),
-        InstructionKind::FloatDot {
-            lhs: direction.clone(),
-            rhs: direction,
-        },
-    );
-    let length = push(
-        f32_ty.clone(),
-        InstructionKind::FloatSqrt { value: length2 },
-    );
-    let distance = push(
-        f32_ty.clone(),
-        InstructionKind::FloatMultiply {
-            lhs: length,
-            rhs: scale,
-        },
-    );
-    let bias = push(
-        f32_ty.clone(),
-        InstructionKind::CompositeExtract {
-            composite: params.clone(),
-            index: 0,
-        },
-    );
-    let exponent = push(
-        f32_ty.clone(),
-        InstructionKind::FloatAdd {
-            lhs: distance,
-            rhs: bias,
-        },
-    );
-    let fog = push(
-        f32_ty.clone(),
-        InstructionKind::FloatExp2 { value: exponent },
-    );
-    let threshold = push(
-        f32_ty.clone(),
-        InstructionKind::CompositeExtract {
-            composite: params,
-            index: 3,
-        },
-    );
-    let fog = push(
-        f32_ty.clone(),
-        InstructionKind::FloatSubtract {
-            lhs: fog,
-            rhs: threshold,
-        },
-    );
-    let fog = push(
-        f32_ty.clone(),
-        InstructionKind::FloatClamp {
-            value: fog,
-            min: zero,
-            max: one.clone(),
-        },
-    );
-    let fog0 = push(
-        vec3.clone(),
-        InstructionKind::CompositeInsert {
-            composite: Operand::Undef(vec3.clone()),
-            object: fog,
-            index: 0,
-        },
-    );
-    let fog3 = push(
-        vec3.clone(),
-        InstructionKind::VectorShuffle {
-            first: fog0,
-            second: Operand::Undef(vec3.clone()),
-            components: vec![0, 0, 0],
-        },
-    );
-    let rgb = push(
-        vec3.clone(),
-        InstructionKind::FloatMultiply {
-            lhs: fog3,
-            rhs: mixed,
-        },
-    );
-    let rgb4 = push(
-        vec4.clone(),
-        InstructionKind::VectorShuffle {
-            first: rgb,
-            second: Operand::Undef(vec3),
-            components: vec![0, 1, 2, 0],
-        },
-    );
-    let rgba = push(
-        vec4.clone(),
-        InstructionKind::CompositeInsert {
-            composite: rgb4,
-            object: one,
-            index: 3,
-        },
-    );
-    let returned = push(
-        output,
-        InstructionKind::CompositeInsert {
-            composite: Operand::Undef(Type::Struct(crate::ir::StructType {
-                fields: vec![crate::ir::StructField {
-                    name: None,
-                    ty: vec4.clone(),
-                    offset: 0,
-                }],
-                size: 16,
-                alignment: 16,
-                packed: true,
-            })),
-            object: rgba,
-            index: 0,
-        },
-    );
-    Ok(Module {
-        functions: vec![Function {
+        &values::Signature {
+            names: legacy_names,
             name,
-            result: Type::Struct(crate::ir::StructType {
-                fields: vec![crate::ir::StructField {
-                    name: None,
-                    ty: vec4.clone(),
-                    offset: 0,
-                }],
-                size: 16,
-                alignment: 16,
-                packed: true,
-            }),
-            parameters: vec![
-                Parameter {
-                    value: ValueId(0),
-                    name: format!("locn{}", input_locations[0]),
-                    ty: vec4.clone(),
-                },
-                Parameter {
-                    value: ValueId(1),
-                    name: format!("locn{}", input_locations[1]),
-                    ty: vec4,
-                },
-                Parameter {
-                    value: ValueId(2),
-                    name: "buffer0".to_string(),
-                    ty: cb_pointer.clone(),
-                },
-            ],
-            values,
-            blocks: vec![Block {
-                id: BlockId(0),
-                name: "entry".to_string(),
-                instructions,
-                terminator: Terminator::Return(Some(returned)),
-            }],
-        }],
+            parameter_types: parameters,
+            result_type: *result,
+            opaque_types: &opaque_types,
+        },
+    )?;
+    let resources = interface
+        .resources
+        .iter()
+        .map(|resource| {
+            let parameter = function
+                .parameters
+                .get(resource.argument as usize)
+                .ok_or_else(|| semantic("AIR resource names a missing argument"))?;
+            Ok(Resource {
+                argument: resource.argument,
+                kind: resource.kind,
+                index: resource.index,
+                count: resource.count,
+                access: resource.access,
+                ty: parameter.ty.clone(),
+                name: resource.name.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, TranslateError>>()?;
+    let module = Module {
+        functions: vec![function],
         entries: vec![EntryPoint {
             function: 0,
-            stage: Stage::Fragment,
-            resources: vec![Resource {
-                argument: 2,
-                kind: ResourceKind::Buffer,
-                index: 0,
-                count: 1,
-                access: Access::Read,
-                ty: cb_pointer,
-                name: Some("buffer0".to_string()),
-            }],
+            stage,
+            resources,
+            inputs: interface.inputs,
+            outputs: interface.outputs,
         }],
-    })
+    };
+    module.verify()?;
+    Ok(module)
 }
 
 #[derive(Clone, Debug)]
@@ -715,6 +361,12 @@ enum DecodedType {
         parameters: Vec<usize>,
     },
     Metadata,
+    /// An LLVM identified opaque type. AIR spells Metal's textures and
+    /// samplers this way; the Metal shape comes from the entry point's
+    /// `air.arg_type_name` metadata, not from this name.
+    Opaque(String),
+    /// A basic-block label type. It never types a value.
+    Label,
 }
 
 impl DecodedType {
@@ -740,6 +392,8 @@ impl DecodedType {
                 format!("fn({})->{result}", parameters.len())
             }
             Self::Metadata => "metadata".to_string(),
+            Self::Opaque(name) => format!("opaque {name}"),
+            Self::Label => "label".to_string(),
         }
     }
 }
@@ -809,7 +463,7 @@ fn decode_type_table(block: &BitcodeBlock) -> Result<Vec<DecodedType>, Translate
                     .collect::<Result<_, _>>()?,
             },
             19 => {
-                let _ = record
+                let name = record
                     .clone()
                     .take_payload()
                     .and_then(payload_string)
@@ -822,14 +476,14 @@ fn decode_type_table(block: &BitcodeBlock) -> Result<Vec<DecodedType>, Translate
                             .and_then(|bytes| String::from_utf8(bytes).ok())
                     })
                     .ok_or_else(|| semantic("named struct has no UTF-8 name"))?;
-                // STRUCT_NAME allocates the identified type; STRUCT_NAMED
-                // fills that slot rather than allocating another entry.
-                pending_named_struct = Some(types.len());
+                // STRUCT_NAME allocates the identified type; STRUCT_NAMED or
+                // OPAQUE fills that slot rather than allocating another entry.
+                pending_named_struct = Some((types.len(), name));
                 types.push(DecodedType::Void);
                 continue;
             }
             20 => {
-                let index = pending_named_struct
+                let (index, _) = pending_named_struct
                     .take()
                     .ok_or_else(|| semantic("named struct has no preceding name"))?;
                 let packed = fields.first() == Some(&1);
@@ -852,6 +506,14 @@ fn decode_type_table(block: &BitcodeBlock) -> Result<Vec<DecodedType>, Translate
                     .collect::<Result<_, _>>()?,
             },
             16 => DecodedType::Metadata,
+            5 => DecodedType::Label,
+            6 => {
+                let (index, name) = pending_named_struct
+                    .take()
+                    .ok_or_else(|| semantic("opaque type has no preceding name"))?;
+                types[index] = DecodedType::Opaque(name);
+                continue;
+            }
             _ => {
                 return Err(semantic(format!(
                     "unsupported packed AIR type record {}",
@@ -873,45 +535,6 @@ fn record_values(record: &llvm_bitcode::bitcode::Record) -> Vec<u64> {
         values.extend(array);
     }
     values
-}
-
-/// AIR's argument metadata uses `user(locnN)` for stage inputs.  The metadata
-/// block is producer-independent, while parameter spellings in the value
-/// symbol table are not.  Keep locations in entry metadata rather than
-/// coupling packed-library lowering to a particular shader pack's names.
-fn packed_fragment_input_locations(
-    module_block: &BitcodeBlock,
-) -> Result<Vec<u32>, TranslateError> {
-    let text = collect_payload_text(&module_block.elements);
-    if !text.contains("air.render_target") {
-        return Err(semantic(
-            "packed AIR fragment metadata has no render target declaration",
-        ));
-    }
-    let mut locations = Vec::new();
-    let mut rest = text.as_str();
-    while let Some(start) = rest.find("user(locn") {
-        let after_prefix = &rest[start + "user(locn".len()..];
-        let Some(end) = after_prefix.find(')') else {
-            return Err(semantic(
-                "packed AIR stage-input metadata has an unterminated location",
-            ));
-        };
-        let location = after_prefix[..end]
-            .parse::<u32>()
-            .map_err(|_| semantic("packed AIR stage-input metadata has an invalid location"))?;
-        if !locations.contains(&location) {
-            locations.push(location);
-        }
-        rest = &after_prefix[end + 1..];
-    }
-    if locations.len() != 2 {
-        return Err(semantic(format!(
-            "packed AIR fragment body requires exactly two location inputs, metadata has {}",
-            locations.len()
-        )));
-    }
-    Ok(locations)
 }
 
 fn type_reference(field: Option<&u64>, defined: usize) -> Result<usize, TranslateError> {
@@ -1219,6 +842,8 @@ fn parse_text(text: &str) -> Result<Module, TranslateError> {
             function: 0,
             stage: Stage::Kernel,
             resources,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         }],
     })
 }
@@ -1434,9 +1059,17 @@ fn parse_instruction(
         let lhs = parse_operand(lhs, &ty, values)?;
         let rhs = parse_operand(rhs, &ty, values)?;
         kind = if operator == "add" {
-            InstructionKind::IntegerAdd { lhs, rhs }
+            InstructionKind::IntegerBinary {
+                op: IntegerBinaryOp::Add,
+                lhs,
+                rhs,
+            }
         } else {
-            InstructionKind::IntegerXor { lhs, rhs }
+            InstructionKind::IntegerBinary {
+                op: IntegerBinaryOp::Xor,
+                lhs,
+                rhs,
+            }
         };
         result_type = ty;
     } else if let Some(rest) = expression.strip_prefix("icmp ult ") {
@@ -1716,4 +1349,102 @@ fn syntax(message: impl Into<String>, line: Option<usize>) -> TranslateError {
 
 fn semantic(message: impl Into<String>) -> TranslateError {
     TranslateError::one(Diagnostic::new(Phase::AirSemantics, message))
+}
+
+/// Synthetic LLVM bitstreams for tests.
+///
+/// Writing real bitcode keeps the decoders under test end to end, including
+/// their VBR field widths and block nesting, rather than testing a hand-built
+/// in-memory tree the parser would never produce.
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use super::*;
+
+    pub(crate) enum Element {
+        Record(u64, Vec<u64>),
+        Block(u32, Vec<Element>),
+    }
+
+    pub(crate) fn record(code: u64, fields: &[u64]) -> Element {
+        Element::Record(code, fields.to_vec())
+    }
+
+    pub(crate) fn block(id: u32, elements: Vec<Element>) -> Element {
+        Element::Block(id, elements)
+    }
+
+    fn fixed(bits: &mut Vec<bool>, value: u64, width: usize) {
+        bits.extend((0..width).map(|bit| value & (1 << bit) != 0));
+    }
+
+    fn vbr(bits: &mut Vec<bool>, mut value: u64, width: usize) {
+        loop {
+            let mut chunk = value & ((1 << (width - 1)) - 1);
+            value >>= width - 1;
+            if value != 0 {
+                chunk |= 1 << (width - 1);
+            }
+            fixed(bits, chunk, width);
+            if value == 0 {
+                break;
+            }
+        }
+    }
+
+    fn pad(bits: &mut Vec<bool>) {
+        while !bits.len().is_multiple_of(32) {
+            bits.push(false);
+        }
+    }
+
+    /// `width` is the enclosing block's abbreviation-ID width: two at the top
+    /// level, and three inside every block this builder writes.
+    fn write(bits: &mut Vec<bool>, element: &Element, width: usize) {
+        match element {
+            Element::Record(code, fields) => {
+                fixed(bits, 3, width);
+                vbr(bits, *code, 6);
+                vbr(bits, fields.len() as u64, 6);
+                for field in fields {
+                    vbr(bits, *field, 6);
+                }
+            }
+            Element::Block(id, elements) => {
+                fixed(bits, 1, width);
+                vbr(bits, u64::from(*id), 8);
+                vbr(bits, 3, 4);
+                pad(bits);
+                // The length in words is only known after the body is written.
+                let length_at = bits.len();
+                fixed(bits, 0, 32);
+                let body_at = bits.len();
+                for element in elements {
+                    write(bits, element, 3);
+                }
+                fixed(bits, 0, 3);
+                pad(bits);
+                let words = ((bits.len() - body_at) / 32) as u64;
+                for bit in 0..32 {
+                    bits[length_at + bit] = words & (1 << bit) != 0;
+                }
+            }
+        }
+    }
+
+    /// Assemble one top-level block and parse it back.
+    pub(crate) fn bitcode_block(root: Element) -> BitcodeBlock {
+        let mut bits = Vec::new();
+        write(&mut bits, &root, 2);
+        let mut bytes = b"BC\xc0\xde".to_vec();
+        bytes.extend(bits.chunks(8).map(|chunk| {
+            chunk
+                .iter()
+                .enumerate()
+                .fold(0u8, |byte, (bit, set)| byte | (u8::from(*set) << bit))
+        }));
+        Bitcode::new(&bytes).unwrap().elements[0]
+            .as_block()
+            .unwrap()
+            .clone()
+    }
 }

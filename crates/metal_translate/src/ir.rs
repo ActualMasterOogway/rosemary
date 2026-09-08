@@ -44,8 +44,10 @@ pub enum AddressSpace {
     ThreadgroupImageblock,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Access {
+    /// Metal `access::sample`: read through a sampler. Only textures have it.
+    Sample,
     Read,
     Write,
     ReadWrite,
@@ -54,10 +56,6 @@ pub enum Access {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResourceKind {
     Buffer,
-    /// A writable, non-arrayed 3D texture with `float4` texels.
-    ///
-    /// The initial image slice is intentionally specific. Other texture
-    /// shapes need their own Metal type before they can be emitted.
     Texture,
     Sampler,
     AccelerationStructure,
@@ -95,12 +93,35 @@ pub enum Type {
         space: AddressSpace,
         pointee: Box<Type>,
     },
-    Texture,
+    Texture(TextureType),
     Sampler,
     AccelerationStructure,
     VisibleFunctionTable,
     IntersectionFunctionTable,
     Imageblock,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TextureDimension {
+    D1,
+    D2,
+    D3,
+    Cube,
+}
+
+/// A Metal texture type. Metal spells the element type, dimensionality and
+/// access mode in the type itself; Vulkan splits the same information across
+/// an image type, a descriptor type and a capability.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct TextureType {
+    pub dimension: TextureDimension,
+    pub array: bool,
+    pub multisampled: bool,
+    /// A `depthNd` texture, which Metal only allows to be sampled as depth.
+    pub depth: bool,
+    /// The scalar type of one texel component.
+    pub texel: Box<Type>,
+    pub access: Access,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -145,11 +166,91 @@ pub struct Resource {
     pub name: Option<String>,
 }
 
+/// How a fragment stage input is interpolated across a primitive.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Interpolation {
+    pub sampling: Sampling,
+    pub perspective: bool,
+    pub flat: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Sampling {
+    Center,
+    Centroid,
+    Sample,
+}
+
+/// A Metal shader built-in. These name Metal's semantics; the SPIR-V built-in
+/// each maps to is a property of emission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Builtin {
+    /// `[[position]]`: a vertex output, and the fragment stage's window
+    /// coordinate input.
+    Position,
+    PointSize,
+    ClipDistance,
+    VertexId,
+    InstanceId,
+    BaseVertex,
+    BaseInstance,
+    FrontFacing,
+    PointCoord,
+    SampleId,
+    SampleMask,
+    Depth,
+    RenderTargetArrayIndex,
+    ViewportArrayIndex,
+    ThreadPositionInGrid,
+    ThreadPositionInThreadgroup,
+    ThreadgroupPositionInGrid,
+    ThreadgroupsPerGrid,
+    ThreadIndexInThreadgroup,
+    ThreadsPerThreadgroup,
+}
+
+/// Where one stage input or output is delivered.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StageBinding {
+    /// A user-defined attribute at a Metal location index.
+    Location {
+        location: u32,
+        interpolation: Option<Interpolation>,
+    },
+    /// A fragment colour attachment.
+    RenderTarget {
+        index: u32,
+    },
+    Builtin(Builtin),
+}
+
+/// One entry-point parameter delivered by the stage rather than by a resource
+/// binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StageInput {
+    pub argument: u32,
+    pub binding: StageBinding,
+    pub name: Option<String>,
+}
+
+/// One component of an entry point's returned value.
+///
+/// `field` selects a member of a returned structure; `None` means the whole
+/// result is this single output.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StageOutput {
+    pub field: Option<u32>,
+    pub binding: StageBinding,
+    pub name: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EntryPoint {
     pub function: usize,
     pub stage: Stage,
     pub resources: Vec<Resource>,
+    pub inputs: Vec<StageInput>,
+    pub outputs: Vec<StageOutput>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -188,12 +289,24 @@ pub struct Instruction {
     pub kind: InstructionKind,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Operand {
     Bool(bool),
     Value(ValueId),
-    Integer { ty: Type, value: u64 },
-    Float { ty: Type, bits: u64 },
+    Integer {
+        ty: Type,
+        value: u64,
+    },
+    Float {
+        ty: Type,
+        bits: u64,
+    },
+    /// A constant vector, array or structure. Metal spells these as values,
+    /// and some of its operations, such as a sampling offset, require one.
+    Composite {
+        ty: Type,
+        elements: Vec<Operand>,
+    },
     Undef(Type),
 }
 
@@ -213,9 +326,136 @@ impl Operand {
     }
 }
 
+/// Integer comparison predicates, matching LLVM's `icmp` set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IntegerPredicate {
+    Equal,
+    NotEqual,
     UnsignedLessThan,
+    UnsignedLessEqual,
+    UnsignedGreaterThan,
+    UnsignedGreaterEqual,
+    SignedLessThan,
+    SignedLessEqual,
+    SignedGreaterThan,
+    SignedGreaterEqual,
+}
+
+/// Floating comparison predicates, matching LLVM's `fcmp` set. Ordered
+/// comparisons are false when either operand is NaN; unordered are true.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FloatPredicate {
+    OrderedEqual,
+    OrderedNotEqual,
+    OrderedLessThan,
+    OrderedLessEqual,
+    OrderedGreaterThan,
+    OrderedGreaterEqual,
+    Ordered,
+    UnorderedEqual,
+    UnorderedNotEqual,
+    UnorderedLessThan,
+    UnorderedLessEqual,
+    UnorderedGreaterThan,
+    UnorderedGreaterEqual,
+    Unordered,
+}
+
+/// Elementwise integer arithmetic. Signedness is carried by the operation
+/// rather than by the operand type: Metal's `uint`/`int` distinction is
+/// already lost in AIR, where LLVM picks `udiv`/`sdiv` instead.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IntegerBinaryOp {
+    Add,
+    Subtract,
+    Multiply,
+    DivideUnsigned,
+    DivideSigned,
+    RemainderUnsigned,
+    RemainderSigned,
+    ShiftLeft,
+    ShiftRightLogical,
+    ShiftRightArithmetic,
+    And,
+    Or,
+    Xor,
+    MinimumSigned,
+    MinimumUnsigned,
+    MaximumSigned,
+    MaximumUnsigned,
+}
+
+/// Elementwise integer math library calls with one operand.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IntegerUnaryOp {
+    AbsoluteSigned,
+    SignSigned,
+    PopulationCount,
+    Not,
+}
+
+/// Elementwise floating arithmetic and two-operand math library calls.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FloatBinaryOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Remainder,
+    Minimum,
+    Maximum,
+    Power,
+    Atan2,
+    Step,
+}
+
+/// Elementwise floating math library calls with one operand.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FloatUnaryOp {
+    Negate,
+    Absolute,
+    Sign,
+    Sqrt,
+    InverseSqrt,
+    Exp,
+    Exp2,
+    Log,
+    Log2,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Floor,
+    Ceil,
+    Round,
+    Truncate,
+    Fract,
+    /// Screen-space derivatives, valid only in a fragment entry point.
+    DerivativeX,
+    DerivativeY,
+    DerivativeWidth,
+}
+
+/// Numeric conversions. Each keeps the source interpretation explicit so the
+/// backend never has to infer signedness from a result type alone.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConvertOp {
+    UnsignedToFloat,
+    SignedToFloat,
+    FloatToUnsigned,
+    FloatToSigned,
+    /// Widen an integer, filling new bits with zero.
+    ZeroExtend,
+    /// Widen an integer, replicating its sign bit.
+    SignExtend,
+    /// Narrow an integer, discarding high bits.
+    IntegerTruncate,
+    /// Change floating precision in either direction.
+    FloatResize,
+    /// Reinterpret the bits of an equally sized value.
+    Bitcast,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -228,20 +468,18 @@ pub enum InstructionKind {
         pointer: Operand,
         value: Operand,
     },
-    IntegerAdd {
-        lhs: Operand,
-        rhs: Operand,
-    },
-    IntegerMultiply {
-        lhs: Operand,
-        rhs: Operand,
-    },
-    IntegerXor {
+    IntegerBinary {
+        op: IntegerBinaryOp,
         lhs: Operand,
         rhs: Operand,
     },
     IntegerCompare {
         predicate: IntegerPredicate,
+        lhs: Operand,
+        rhs: Operand,
+    },
+    FloatCompare {
+        predicate: FloatPredicate,
         lhs: Operand,
         rhs: Operand,
     },
@@ -261,43 +499,35 @@ pub enum InstructionKind {
         composite: Operand,
         index: u32,
     },
-    VectorUnsignedLessThan {
-        lhs: Operand,
-        rhs: Operand,
-    },
     All {
         vector: Operand,
     },
-    ConvertUToF {
+    Any {
+        vector: Operand,
+    },
+    Convert {
+        op: ConvertOp,
         value: Operand,
-    },
-    IntegerResize {
-        value: Operand,
-    },
-    FloatDiv {
-        lhs: Operand,
-        rhs: Operand,
-    },
-    FloatOrderedGreaterEqual {
-        lhs: Operand,
-        rhs: Operand,
     },
     Select {
         condition: Operand,
         on_true: Operand,
         on_false: Operand,
     },
-    FloatAdd {
+    FloatBinary {
+        op: FloatBinaryOp,
         lhs: Operand,
         rhs: Operand,
     },
-    FloatSubtract {
-        lhs: Operand,
-        rhs: Operand,
+    FloatUnary {
+        op: FloatUnaryOp,
+        value: Operand,
     },
-    FloatMultiply {
-        lhs: Operand,
-        rhs: Operand,
+    /// Fused multiply-add: `first * second + addend`.
+    FloatFma {
+        first: Operand,
+        second: Operand,
+        addend: Operand,
     },
     VectorShuffle {
         first: Operand,
@@ -309,7 +539,17 @@ pub enum InstructionKind {
         object: Operand,
         index: u32,
     },
+    IntegerUnary {
+        op: IntegerUnaryOp,
+        value: Operand,
+    },
     FloatClamp {
+        value: Operand,
+        min: Operand,
+        max: Operand,
+    },
+    IntegerClamp {
+        signed: bool,
         value: Operand,
         min: Operand,
         max: Operand,
@@ -323,21 +563,35 @@ pub enum InstructionKind {
         lhs: Operand,
         rhs: Operand,
     },
-    FloatSqrt {
-        value: Operand,
-    },
-    FloatAbs {
-        value: Operand,
-    },
-    FloatReciprocalSqrt {
-        value: Operand,
-    },
-    FloatExp2 {
-        value: Operand,
-    },
     VectorSplat {
         value: Operand,
         lanes: u8,
+    },
+    /// Read one texel through a Metal sampler.
+    ///
+    /// Metal keeps the array slice, the sampling offset and an explicit level
+    /// of detail as separate arguments; combining the coordinate with the
+    /// slice is a Vulkan detail and belongs to emission.
+    TextureSample {
+        texture: Operand,
+        sampler: Operand,
+        coordinate: Operand,
+        array_index: Option<Operand>,
+        offset: Option<Operand>,
+        /// An explicit level of detail. Metal samples with an implicit level
+        /// when this is absent, which is only valid in a fragment stage.
+        lod: Option<Operand>,
+        /// `gather` selects one component of the four sampled texels.
+        gather: Option<u32>,
+    },
+    /// Read one texel by integer coordinate, without a sampler.
+    TextureRead {
+        texture: Operand,
+        coordinate: Operand,
+        array_index: Option<Operand>,
+        lod: Option<Operand>,
+        /// The sample index of a multisampled texture.
+        sample: Option<Operand>,
     },
     /// Store one texel through a writable Metal texture resource.
     ///
@@ -346,8 +600,17 @@ pub enum InstructionKind {
     TextureWrite {
         texture: Operand,
         coordinate: Operand,
+        array_index: Option<Operand>,
         value: Operand,
     },
+    /// One component of a texture's dimensions at a level of detail.
+    TextureQuerySize {
+        texture: Operand,
+        lod: Option<Operand>,
+        component: u32,
+    },
+    /// Metal `discard_fragment()`. It does not terminate the block.
+    DiscardFragment,
     Phi {
         incomings: Vec<(BlockId, Operand)>,
     },
@@ -674,17 +937,30 @@ fn verify_instruction_types(
             }
             _ => false,
         },
-        InstructionKind::IntegerAdd { lhs, rhs }
-        | InstructionKind::IntegerMultiply { lhs, rhs }
-        | InstructionKind::IntegerXor { lhs, rhs } => {
-            result.as_ref().is_some_and(is_integer_or_integer_vector)
+        InstructionKind::IntegerBinary { op, lhs, rhs } => {
+            // LLVM types a Metal `bool` as `i1`, so bitwise operations stand
+            // in for logical ones.
+            let boolean = matches!(
+                op,
+                IntegerBinaryOp::And | IntegerBinaryOp::Or | IntegerBinaryOp::Xor
+            ) && result.as_ref().is_some_and(is_boolean_or_boolean_vector);
+            (boolean || result.as_ref().is_some_and(is_integer_or_integer_vector))
                 && result == operand_type(function, lhs)
                 && result == operand_type(function, rhs)
         }
         InstructionKind::IntegerCompare { lhs, rhs, .. } => {
-            result == Some(Type::Bool)
-                && operand_type(function, lhs) == operand_type(function, rhs)
-                && operand_type(function, lhs).is_some_and(|ty| matches!(ty, Type::Int { .. }))
+            operand_type(function, lhs) == operand_type(function, rhs)
+                && operand_type(function, lhs)
+                    .as_ref()
+                    .is_some_and(is_integer_or_integer_vector)
+                && result == operand_type(function, lhs).map(boolean_shape)
+        }
+        InstructionKind::FloatCompare { lhs, rhs, .. } => {
+            operand_type(function, lhs) == operand_type(function, rhs)
+                && operand_type(function, lhs)
+                    .as_ref()
+                    .is_some_and(is_float_or_float_vector)
+                && result == operand_type(function, lhs).map(boolean_shape)
         }
         InstructionKind::ElementAddress { pointer, index } => {
             matches!(result, Some(Type::Pointer { .. }))
@@ -749,41 +1025,13 @@ fn verify_instruction_types(
                 _ => false,
             }
         }
-        InstructionKind::VectorUnsignedLessThan { lhs, rhs } => match operand_type(function, lhs) {
-            Some(Type::Vector { element, lanes }) => {
-                matches!(*element, Type::Int { signed: false, .. })
-                    && operand_type(function, rhs) == operand_type(function, lhs)
-                    && result
-                        == Some(Type::Vector {
-                            element: Box::new(Type::Bool),
-                            lanes,
-                        })
-            }
-            _ => false,
-        },
-        InstructionKind::All { vector } => {
+        InstructionKind::All { vector } | InstructionKind::Any { vector } => {
             matches!(operand_type(function, vector), Some(Type::Vector { element, .. }) if *element == Type::Bool)
                 && result == Some(Type::Bool)
         }
-        InstructionKind::IntegerResize { value } => {
-            matches!(
-                operand_type(function, value),
-                Some(Type::Int { signed: false, .. })
-            ) && matches!(result, Some(Type::Int { signed: false, .. }))
+        InstructionKind::Convert { op, value } => {
+            verify_convert(*op, operand_type(function, value), result.as_ref())
         }
-        InstructionKind::ConvertUToF { value } => match operand_type(function, value) {
-            Some(Type::Vector { element, lanes })
-                if matches!(*element, Type::Int { signed: false, .. }) =>
-            {
-                result
-                    == Some(Type::Vector {
-                        element: Box::new(Type::Float { bits: 32 }),
-                        lanes,
-                    })
-            }
-            Some(Type::Int { signed: false, .. }) => result == Some(Type::Float { bits: 32 }),
-            _ => false,
-        },
         InstructionKind::Select {
             condition,
             on_true,
@@ -794,28 +1042,23 @@ fn verify_instruction_types(
                 && (operand_type(function, condition) == Some(Type::Bool)
                     || matches!((&result, operand_type(function, condition)), (Some(Type::Vector { lanes, .. }), Some(Type::Vector { element, lanes: n })) if *element == Type::Bool && *lanes == n))
         }
-        InstructionKind::FloatOrderedGreaterEqual { lhs, rhs } => {
-            operand_type(function, lhs) == operand_type(function, rhs)
-                && match operand_type(function, lhs) {
-                    Some(Type::Float { .. }) => result == Some(Type::Bool),
-                    Some(Type::Vector { element, lanes })
-                        if matches!(*element, Type::Float { .. }) =>
-                    {
-                        result
-                            == Some(Type::Vector {
-                                element: Box::new(Type::Bool),
-                                lanes,
-                            })
-                    }
-                    _ => false,
-                }
-        }
-        InstructionKind::FloatDiv { lhs, rhs }
-        | InstructionKind::FloatAdd { lhs, rhs }
-        | InstructionKind::FloatSubtract { lhs, rhs }
-        | InstructionKind::FloatMultiply { lhs, rhs } => {
+        InstructionKind::FloatBinary { lhs, rhs, .. } => {
             result == operand_type(function, lhs)
                 && result == operand_type(function, rhs)
+                && result.as_ref().is_some_and(is_float_or_float_vector)
+        }
+        InstructionKind::FloatUnary { value, .. } => {
+            result == operand_type(function, value)
+                && result.as_ref().is_some_and(is_float_or_float_vector)
+        }
+        InstructionKind::FloatFma {
+            first,
+            second,
+            addend,
+        } => {
+            result == operand_type(function, first)
+                && result == operand_type(function, second)
+                && result == operand_type(function, addend)
                 && result.as_ref().is_some_and(is_float_or_float_vector)
         }
         InstructionKind::FloatDot { lhs, rhs } => {
@@ -868,6 +1111,18 @@ fn verify_instruction_types(
                 && result == operand_type(function, max)
                 && result.as_ref().is_some_and(is_float_or_float_vector)
         }
+        InstructionKind::IntegerClamp {
+            value, min, max, ..
+        } => {
+            result == operand_type(function, value)
+                && result == operand_type(function, min)
+                && result == operand_type(function, max)
+                && result.as_ref().is_some_and(is_integer_or_integer_vector)
+        }
+        InstructionKind::IntegerUnary { value, .. } => {
+            result == operand_type(function, value)
+                && result.as_ref().is_some_and(is_integer_or_integer_vector)
+        }
         InstructionKind::FloatMix {
             first,
             second,
@@ -878,13 +1133,6 @@ fn verify_instruction_types(
                 && result == operand_type(function, weight)
                 && result.as_ref().is_some_and(is_float_or_float_vector)
         }
-        InstructionKind::FloatSqrt { value }
-        | InstructionKind::FloatExp2 { value }
-        | InstructionKind::FloatAbs { value }
-        | InstructionKind::FloatReciprocalSqrt { value } => {
-            result == operand_type(function, value)
-                && result.as_ref().is_some_and(is_float_or_float_vector)
-        }
         InstructionKind::VectorSplat { value, lanes } => {
             result
                 == operand_type(function, value).map(|element| Type::Vector {
@@ -892,22 +1140,62 @@ fn verify_instruction_types(
                     lanes: *lanes,
                 })
         }
+        InstructionKind::TextureSample {
+            texture,
+            sampler,
+            coordinate,
+            array_index,
+            offset,
+            lod,
+            ..
+        } => {
+            let Some(Type::Texture(texture)) = operand_type(function, texture) else {
+                return invalid(function, instruction, diagnostics);
+            };
+            operand_type(function, sampler) == Some(Type::Sampler)
+                && texture.access == Access::Sample
+                && coordinate_shape(function, coordinate, &texture, Type::Float { bits: 32 })
+                && optional_is(function, array_index.as_ref(), &Type::u32())
+                && optional_integer_vector(function, offset.as_ref())
+                && optional_is(function, lod.as_ref(), &Type::Float { bits: 32 })
+                && result == Some(texel_vector(&texture))
+        }
+        InstructionKind::TextureRead {
+            texture,
+            coordinate,
+            array_index,
+            lod,
+            sample,
+        } => {
+            let Some(Type::Texture(texture)) = operand_type(function, texture) else {
+                return invalid(function, instruction, diagnostics);
+            };
+            coordinate_shape(function, coordinate, &texture, Type::u32())
+                && optional_is(function, array_index.as_ref(), &Type::u32())
+                && optional_is(function, lod.as_ref(), &Type::u32())
+                && optional_is(function, sample.as_ref(), &Type::u32())
+                && result == Some(texel_vector(&texture))
+        }
+        InstructionKind::TextureQuerySize { texture, lod, .. } => {
+            matches!(operand_type(function, texture), Some(Type::Texture(_)))
+                && optional_is(function, lod.as_ref(), &Type::u32())
+                && result == Some(Type::u32())
+        }
+        InstructionKind::DiscardFragment => result.is_none(),
         InstructionKind::TextureWrite {
             texture,
             coordinate,
+            array_index,
             value,
         } => {
+            let Some(Type::Texture(texture)) = operand_type(function, texture) else {
+                return invalid(function, instruction, diagnostics);
+            };
             result.is_none()
-                && operand_type(function, texture) == Some(Type::Texture)
-                && matches!(
-                    operand_type(function, coordinate),
-                    Some(Type::Vector { element, lanes: 3 }) if *element == Type::u32()
-                )
-                && matches!(
-                    operand_type(function, value),
-                    Some(Type::Vector { element, lanes: 4 })
-                        if *element == Type::Float { bits: 32 }
-                )
+                && texture.access != Access::Sample
+                && coordinate_shape(function, coordinate, &texture, Type::u32())
+                && optional_is(function, array_index.as_ref(), &Type::u32())
+                && operand_type(function, value) == Some(texel_vector(&texture))
         }
         InstructionKind::Phi { incomings } => {
             result.is_some()
@@ -917,15 +1205,113 @@ fn verify_instruction_types(
         }
     };
     if !valid {
-        diagnostics.push(Diagnostic::new(
-            Phase::IrVerification,
-            format!("{} has an ill-typed instruction", function.name),
-        ));
+        invalid(function, instruction, diagnostics);
     }
 }
 
-fn operand_type(function: &Function, operand: &Operand) -> Option<Type> {
+/// Report an instruction whose operands do not have the required shape and
+/// stop checking it.
+fn invalid(function: &Function, instruction: &Instruction, diagnostics: &mut Vec<Diagnostic>) {
+    diagnostics.push(Diagnostic::new(
+        Phase::IrVerification,
+        format!(
+            "{} has an ill-typed {}",
+            function.name,
+            instruction_name(&instruction.kind)
+        ),
+    ));
+}
+
+/// The instruction's kind, for diagnostics. `Debug` would print every
+/// operand, which is far more than a reader of a diagnostic needs.
+fn instruction_name(kind: &InstructionKind) -> &'static str {
+    match kind {
+        InstructionKind::GlobalInvocationId => "global invocation ID",
+        InstructionKind::Load { .. } => "load",
+        InstructionKind::Store { .. } => "store",
+        InstructionKind::IntegerBinary { .. } => "integer arithmetic",
+        InstructionKind::IntegerCompare { .. } => "integer comparison",
+        InstructionKind::FloatCompare { .. } => "floating comparison",
+        InstructionKind::ElementAddress { .. } => "element address",
+        InstructionKind::FieldAddress { .. } => "field address",
+        InstructionKind::BufferAddress { .. } => "buffer address",
+        InstructionKind::CompositeExtract { .. } => "composite extraction",
+        InstructionKind::CompositeInsert { .. } => "composite insertion",
+        InstructionKind::All { .. } => "all",
+        InstructionKind::Any { .. } => "any",
+        InstructionKind::Convert { .. } => "conversion",
+        InstructionKind::Select { .. } => "select",
+        InstructionKind::FloatBinary { .. } => "floating arithmetic",
+        InstructionKind::FloatUnary { .. } => "floating math call",
+        InstructionKind::FloatFma { .. } => "fused multiply-add",
+        InstructionKind::VectorShuffle { .. } => "vector shuffle",
+        InstructionKind::FloatClamp { .. } => "clamp",
+        InstructionKind::IntegerClamp { .. } => "integer clamp",
+        InstructionKind::IntegerUnary { .. } => "integer math call",
+        InstructionKind::FloatMix { .. } => "mix",
+        InstructionKind::FloatDot { .. } => "dot product",
+        InstructionKind::VectorSplat { .. } => "vector splat",
+        InstructionKind::TextureSample { .. } => "texture sample",
+        InstructionKind::TextureRead { .. } => "texture read",
+        InstructionKind::TextureWrite { .. } => "texture write",
+        InstructionKind::TextureQuerySize { .. } => "texture size query",
+        InstructionKind::DiscardFragment => "fragment discard",
+        InstructionKind::Phi { .. } => "phi",
+    }
+}
+
+fn optional_is(function: &Function, operand: Option<&Operand>, expected: &Type) -> bool {
+    operand.is_none_or(|operand| operand_type(function, operand).as_ref() == Some(expected))
+}
+
+fn optional_integer_vector(function: &Function, operand: Option<&Operand>) -> bool {
+    operand.is_none_or(|operand| {
+        operand_type(function, operand)
+            .as_ref()
+            .is_some_and(is_integer_or_integer_vector)
+    })
+}
+
+/// The number of coordinate components a texture dimension takes, excluding
+/// the array slice, which Metal passes separately.
+pub(crate) fn coordinate_lanes(texture: &TextureType) -> u8 {
+    match texture.dimension {
+        TextureDimension::D1 => 1,
+        TextureDimension::D2 => 2,
+        TextureDimension::D3 | TextureDimension::Cube => 3,
+    }
+}
+
+fn coordinate_shape(
+    function: &Function,
+    coordinate: &Operand,
+    texture: &TextureType,
+    element: Type,
+) -> bool {
+    let lanes = coordinate_lanes(texture);
+    let expected = if lanes == 1 {
+        element
+    } else {
+        Type::Vector {
+            element: Box::new(element),
+            lanes,
+        }
+    };
+    operand_type(function, coordinate) == Some(expected)
+}
+
+/// Metal always returns four components from a texture access, whatever the
+/// texture's storage format.
+fn texel_vector(texture: &TextureType) -> Type {
+    Type::Vector {
+        element: texture.texel.clone(),
+        lanes: 4,
+    }
+}
+
+pub(crate) fn operand_type(function: &Function, operand: &Operand) -> Option<Type> {
     match operand {
+        Operand::Composite { ty, .. } => Some(ty.clone()),
         Operand::Value(value) => function.values.get(value.0 as usize).cloned(),
         Operand::Integer { ty, .. } => Some(ty.clone()),
         Operand::Float { ty, .. } => Some(ty.clone()),
@@ -934,27 +1320,27 @@ fn operand_type(function: &Function, operand: &Operand) -> Option<Type> {
     }
 }
 
-fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
+pub(crate) fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
     match kind {
         InstructionKind::Load { pointer } => vec![pointer],
         InstructionKind::Store { pointer, value } => vec![pointer, value],
-        InstructionKind::IntegerAdd { lhs, rhs }
-        | InstructionKind::IntegerMultiply { lhs, rhs }
-        | InstructionKind::IntegerXor { lhs, rhs }
-        | InstructionKind::IntegerCompare { lhs, rhs, .. } => vec![lhs, rhs],
+        InstructionKind::IntegerBinary { lhs, rhs, .. }
+        | InstructionKind::IntegerCompare { lhs, rhs, .. }
+        | InstructionKind::FloatCompare { lhs, rhs, .. } => vec![lhs, rhs],
         InstructionKind::ElementAddress { pointer, index } => vec![pointer, index],
         InstructionKind::FieldAddress { pointer, .. } => vec![pointer],
         InstructionKind::CompositeExtract { composite, .. } => vec![composite],
         InstructionKind::BufferAddress { pointer, indices } => {
             std::iter::once(pointer).chain(indices).collect()
         }
-        InstructionKind::VectorUnsignedLessThan { lhs, rhs }
-        | InstructionKind::FloatOrderedGreaterEqual { lhs, rhs }
-        | InstructionKind::FloatDiv { lhs, rhs }
-        | InstructionKind::FloatAdd { lhs, rhs }
-        | InstructionKind::FloatSubtract { lhs, rhs }
-        | InstructionKind::FloatMultiply { lhs, rhs }
-        | InstructionKind::FloatDot { lhs, rhs } => vec![lhs, rhs],
+        InstructionKind::FloatBinary { lhs, rhs, .. } | InstructionKind::FloatDot { lhs, rhs } => {
+            vec![lhs, rhs]
+        }
+        InstructionKind::FloatFma {
+            first,
+            second,
+            addend,
+        } => vec![first, second, addend],
         InstructionKind::Select {
             condition,
             on_true,
@@ -964,19 +1350,20 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         InstructionKind::CompositeInsert {
             composite, object, ..
         } => vec![composite, object],
-        InstructionKind::FloatClamp { value, min, max } => vec![value, min, max],
+        InstructionKind::FloatClamp { value, min, max }
+        | InstructionKind::IntegerClamp {
+            value, min, max, ..
+        } => vec![value, min, max],
         InstructionKind::FloatMix {
             first,
             second,
             weight,
         } => vec![first, second, weight],
         InstructionKind::All { vector }
-        | InstructionKind::ConvertUToF { value: vector }
-        | InstructionKind::IntegerResize { value: vector }
-        | InstructionKind::FloatSqrt { value: vector }
-        | InstructionKind::FloatAbs { value: vector }
-        | InstructionKind::FloatReciprocalSqrt { value: vector }
-        | InstructionKind::FloatExp2 { value: vector } => {
+        | InstructionKind::Any { vector }
+        | InstructionKind::Convert { value: vector, .. }
+        | InstructionKind::FloatUnary { value: vector, .. }
+        | InstructionKind::IntegerUnary { value: vector, .. } => {
             vec![vector]
         }
         InstructionKind::VectorSplat { value, .. } => vec![value],
@@ -984,8 +1371,42 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         InstructionKind::TextureWrite {
             texture,
             coordinate,
+            array_index,
             value,
-        } => vec![texture, coordinate, value],
+        } => [texture, coordinate, value]
+            .into_iter()
+            .chain(array_index)
+            .collect(),
+        InstructionKind::TextureSample {
+            texture,
+            sampler,
+            coordinate,
+            array_index,
+            offset,
+            lod,
+            ..
+        } => [texture, sampler, coordinate]
+            .into_iter()
+            .chain(array_index)
+            .chain(offset)
+            .chain(lod)
+            .collect(),
+        InstructionKind::TextureRead {
+            texture,
+            coordinate,
+            array_index,
+            lod,
+            sample,
+        } => [texture, coordinate]
+            .into_iter()
+            .chain(array_index)
+            .chain(lod)
+            .chain(sample)
+            .collect(),
+        InstructionKind::TextureQuerySize { texture, lod, .. } => {
+            [texture].into_iter().chain(lod).collect()
+        }
+        InstructionKind::DiscardFragment => Vec::new(),
         InstructionKind::Phi { incomings } => incomings.iter().map(|(_, value)| value).collect(),
     }
 }
@@ -995,12 +1416,94 @@ fn is_float_or_float_vector(ty: &Type) -> bool {
         || matches!(ty, Type::Vector { element, .. } if matches!(element.as_ref(), Type::Float { .. }))
 }
 
+pub(crate) fn is_boolean_or_boolean_vector(ty: &Type) -> bool {
+    matches!(ty, Type::Bool)
+        || matches!(ty, Type::Vector { element, .. } if matches!(element.as_ref(), Type::Bool))
+}
+
 fn is_integer_or_integer_vector(ty: &Type) -> bool {
     matches!(ty, Type::Int { .. })
         || matches!(ty, Type::Vector { element, .. } if matches!(element.as_ref(), Type::Int { .. }))
 }
 
-fn terminator_operands(terminator: &Terminator) -> Vec<&Operand> {
+/// The boolean result of an elementwise comparison keeps the operand's shape:
+/// a scalar comparison yields `bool`, a vector comparison yields `bool` lanes.
+fn boolean_shape(ty: Type) -> Type {
+    match ty {
+        Type::Vector { lanes, .. } => Type::Vector {
+            element: Box::new(Type::Bool),
+            lanes,
+        },
+        _ => Type::Bool,
+    }
+}
+
+/// Conversions keep the operand shape and only change the element type.
+fn verify_convert(op: ConvertOp, source: Option<Type>, result: Option<&Type>) -> bool {
+    let (Some(source), Some(result)) = (source, result) else {
+        return false;
+    };
+    let (source, result) = match (source, result) {
+        (
+            Type::Vector {
+                element: source,
+                lanes,
+            },
+            Type::Vector {
+                element: result,
+                lanes: result_lanes,
+            },
+        ) if lanes == *result_lanes => (*source, result.as_ref().clone()),
+        (source @ (Type::Int { .. } | Type::Float { .. } | Type::Bool), result) => {
+            (source, result.clone())
+        }
+        _ => return false,
+    };
+    match (op, &source, &result) {
+        // Metal's `bool` is LLVM's `i1`, which widens and narrows like any
+        // other integer even though SPIR-V keeps booleans a separate type.
+        (
+            ConvertOp::ZeroExtend | ConvertOp::SignExtend,
+            Type::Bool,
+            Type::Int { .. } | Type::Float { .. },
+        )
+        | (ConvertOp::UnsignedToFloat | ConvertOp::SignedToFloat, Type::Bool, Type::Float { .. })
+        | (ConvertOp::IntegerTruncate, Type::Int { .. }, Type::Bool) => true,
+        (
+            ConvertOp::UnsignedToFloat | ConvertOp::SignedToFloat,
+            Type::Int { .. },
+            Type::Float { .. },
+        )
+        | (
+            ConvertOp::FloatToUnsigned | ConvertOp::FloatToSigned,
+            Type::Float { .. },
+            Type::Int { .. },
+        ) => true,
+        (
+            ConvertOp::ZeroExtend | ConvertOp::SignExtend,
+            Type::Int { bits: from, .. },
+            Type::Int { bits: to, .. },
+        ) => to > from,
+        (ConvertOp::IntegerTruncate, Type::Int { bits: from, .. }, Type::Int { bits: to, .. }) => {
+            to < from
+        }
+        (ConvertOp::FloatResize, Type::Float { bits: from }, Type::Float { bits: to }) => {
+            from != to
+        }
+        // A bitcast is only meaningful between equally sized representations.
+        (ConvertOp::Bitcast, _, _) => scalar_bits(&source) == scalar_bits(&result),
+        _ => false,
+    }
+}
+
+fn scalar_bits(ty: &Type) -> Option<u8> {
+    match ty {
+        Type::Int { bits, .. } | Type::Float { bits } => Some(*bits),
+        _ => None,
+    }
+}
+
+pub(crate) fn terminator_operands(terminator: &Terminator) -> Vec<&Operand> {
     match terminator {
         Terminator::CondBranch { condition, .. } => vec![condition],
         Terminator::Return(Some(value)) => vec![value],

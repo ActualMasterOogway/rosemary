@@ -1,7 +1,13 @@
 //! Inspect embedded metallibs without logging shader source or requiring a GPU.
+//!
+//! Reports, for each embedded library, either the emitted SPIR-V entry points
+//! or the first stage which rejected it. This exercises import, verification
+//! and emission; it does not parse the enclosing pack format and does not
+//! claim anything about GPU execution.
 use metal_translate::{
+    TargetProfile,
     air::{AirInput, parse_air},
-    metallib_air,
+    emit_spirv, metallib_air,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -12,6 +18,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|s| s.parse())
         .transpose()?
         .unwrap_or(10usize);
+    // Report what a device with 64-bit integer support would accept; that is
+    // the common desktop Vulkan profile.
+    let target = TargetProfile {
+        shader_int64: true,
+        ..TargetProfile::vulkan_1_3()
+    };
     for (ordinal, offset) in bytes
         .windows(4)
         .enumerate()
@@ -19,13 +31,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .take(limit)
         .enumerate()
     {
-        let result =
-            metallib_air(&bytes[offset..]).and_then(|air| parse_air(AirInput::Bitcode(air)));
+        let result = metallib_air(&bytes[offset..])
+            .and_then(|air| parse_air(AirInput::Bitcode(air)))
+            .and_then(|module| emit_spirv(&module, &target));
         match result {
-            Ok(module) => println!(
-                "{ordinal} at {offset}: imported {:?}",
-                module.entries[0].stage
-            ),
+            Ok(library) => {
+                // Writing the modules out lets an external validator check
+                // them; this example never claims they run on a GPU.
+                if let Some(directory) = std::env::var_os("ROSETTA3_SPIRV_OUT") {
+                    for (index, entry) in library.entries.iter().enumerate() {
+                        let path =
+                            std::path::Path::new(&directory).join(format!("{ordinal}-{index}.spv"));
+                        let bytes: Vec<u8> = entry
+                            .words
+                            .iter()
+                            .flat_map(|word| word.to_le_bytes())
+                            .collect();
+                        std::fs::write(path, bytes)?;
+                    }
+                }
+                println!(
+                    "{ordinal} at {offset}: emitted {:?}",
+                    library
+                        .entries
+                        .iter()
+                        .map(|entry| (entry.stage, entry.words.len()))
+                        .collect::<Vec<_>>()
+                )
+            }
             Err(error) => println!("{ordinal} at {offset}: {error}"),
         }
     }

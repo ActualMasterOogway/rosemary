@@ -1,17 +1,21 @@
 //! SPIR-V emission from Metal IR.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use rspirv::binary::Assemble;
-use rspirv::dr::{Builder, Operand as SpirvOperand};
+use rspirv::dr::{Builder, InsertPoint, Operand as SpirvOperand};
 use rspirv::spirv::{
     AddressingModel, BuiltIn, Capability, Decoration, Dim, ExecutionMode, ExecutionModel,
-    FunctionControl, GlslStd450Op, ImageFormat, LoopControl, MemoryModel, StorageClass,
+    FunctionControl, GlslStd450Op, ImageFormat, ImageOperands, LoopControl, MemoryModel,
+    SelectionControl, StorageClass,
 };
 
 use crate::ir::{
-    Access, BlockId, EntryPoint, Function, InstructionKind, IntegerPredicate, Module, Operand,
-    ResourceKind, Stage, Terminator, Type, ValueId,
+    Access, BlockId, Builtin, ConvertOp, EntryPoint, FloatBinaryOp, FloatPredicate, FloatUnaryOp,
+    Function, InstructionKind, IntegerBinaryOp, IntegerPredicate, IntegerUnaryOp, Module, Operand,
+    ResourceKind, Sampling, Stage, StageBinding, Terminator, TextureDimension, Type, ValueId,
+    coordinate_lanes, instruction_operands, is_boolean_or_boolean_vector, operand_type,
+    terminator_operands,
 };
 use crate::{Diagnostic, Phase, TranslateError};
 
@@ -120,21 +124,26 @@ fn emit_entry(
     entry: &EntryPoint,
     target: &TargetProfile,
 ) -> Result<EntryArtifact, TranslateError> {
-    if !matches!(entry.stage, Stage::Kernel | Stage::Fragment) {
+    if !matches!(entry.stage, Stage::Kernel | Stage::Fragment | Stage::Vertex) {
         return Err(emission(
-            "the emitter only supports kernel and fragment entry points",
+            "the emitter only supports kernel, vertex and fragment entry points",
         ));
     }
     let function = module
         .functions
         .get(entry.function)
         .ok_or_else(|| emission("entry point refers to a missing function"))?;
+    let mut function = single_exit(function.clone());
+    split_shared_merges(&mut function)?;
+    reverse_post_order(&mut function);
+    let function = &function;
     let mut emitter = Emitter::new(target);
     let resources = emitter.declare_resources(entry, function)?;
     emitter.declare_stage_io(entry, function)?;
     let function_id = emitter.emit_function(entry, function)?;
     let execution_model = match entry.stage {
         Stage::Kernel => ExecutionModel::GLCompute,
+        Stage::Vertex => ExecutionModel::Vertex,
         Stage::Fragment => ExecutionModel::Fragment,
         _ => unreachable!(),
     };
@@ -155,7 +164,13 @@ fn emit_entry(
                 .builder
                 .execution_mode(function_id, ExecutionMode::OriginUpperLeft, [])
         }
-        _ => unreachable!(),
+        // A vertex entry point declares no execution mode.
+        _ => {}
+    }
+    if emitter.writes_depth {
+        emitter
+            .builder
+            .execution_mode(function_id, ExecutionMode::DepthReplacing, []);
     }
     let capabilities = if emitter.uses_int64 {
         vec!["Shader".to_string(), "Int64".to_string()]
@@ -183,13 +198,21 @@ struct Emitter {
     builder: Builder,
     types: HashMap<Type, u32>,
     constants: HashMap<(Type, u64), u32>,
+    composites: HashMap<Operand, u32>,
     buffer_types: HashMap<Type, (u32, u32)>,
     interface: Vec<u32>,
     parameter_pointers: HashMap<ValueId, u32>,
     global_invocation_id: Option<u32>,
     glsl_std_450: u32,
     stage_inputs: HashMap<ValueId, u32>,
-    fragment_output: Option<u32>,
+    /// Output variables in the order of the entry point's output list; each
+    /// receives one component of the returned value.
+    stage_outputs: Vec<u32>,
+    /// The Metal result type of the entry function, needed to decompose a
+    /// returned structure into stage outputs.
+    return_type: Option<Type>,
+    /// Vulkan requires a fragment shader which writes depth to say so.
+    writes_depth: bool,
 }
 
 impl Emitter {
@@ -205,13 +228,16 @@ impl Emitter {
             builder,
             types: HashMap::new(),
             constants: HashMap::new(),
+            composites: HashMap::new(),
             buffer_types: HashMap::new(),
             interface: Vec::new(),
             parameter_pointers: HashMap::new(),
             global_invocation_id: None,
             glsl_std_450,
             stage_inputs: HashMap::new(),
-            fragment_output: None,
+            stage_outputs: Vec::new(),
+            return_type: None,
+            writes_depth: false,
         }
     }
 
@@ -239,8 +265,9 @@ impl Emitter {
                         StorageClass::StorageBuffer,
                     )
                 }
-                (ResourceKind::Texture, Type::Texture) => {
-                    let image = self.type_id(&Type::Texture)?;
+                (ResourceKind::Texture, resource @ Type::Texture(_))
+                | (ResourceKind::Sampler, resource @ Type::Sampler) => {
+                    let image = self.type_id(resource)?;
                     let pointer =
                         self.builder
                             .type_pointer(None, StorageClass::UniformConstant, image);
@@ -255,6 +282,9 @@ impl Emitter {
                 }
                 (ResourceKind::Texture, _) => {
                     return Err(emission("texture resource parameter is not a texture"));
+                }
+                (ResourceKind::Sampler, _) => {
+                    return Err(emission("sampler resource parameter is not a sampler"));
                 }
                 _ => {
                     return Err(emission(
@@ -316,7 +346,8 @@ impl Emitter {
             Decoration::ArrayStride,
             [SpirvOperand::LiteralBit32(type_stride(pointee)?)],
         );
-        let block_type = self.builder.type_struct([array_type]);
+        let block_type = self.builder.id();
+        self.builder.type_struct_id(Some(block_type), [array_type]);
         self.builder.decorate(
             block_type,
             Decoration::Block,
@@ -336,55 +367,154 @@ impl Emitter {
         Ok((block_type, pointer_type))
     }
 
+    /// Declare Vulkan input and output variables for the entry point's Metal
+    /// stage interface. Every binding comes from the entry point; nothing is
+    /// inferred from parameter names.
     fn declare_stage_io(
         &mut self,
         entry: &EntryPoint,
         function: &Function,
     ) -> Result<(), TranslateError> {
-        if entry.stage != Stage::Fragment {
-            return Ok(());
-        }
-        for parameter in &function.parameters {
-            if self.parameter_pointers.contains_key(&parameter.value) {
-                continue;
-            }
-            let location = parameter
-                .name
-                .strip_prefix("locn")
-                .and_then(|value| value.parse::<u32>().ok())
-                .ok_or_else(|| emission("fragment input has no decoded location"))?;
+        for input in &entry.inputs {
+            let parameter = function
+                .parameters
+                .get(input.argument as usize)
+                .ok_or_else(|| emission("stage input names a missing argument"))?;
             let ty = self.type_id(&parameter.ty)?;
             let pointer = self.builder.type_pointer(None, StorageClass::Input, ty);
             let variable = self
                 .builder
                 .variable(pointer, None, StorageClass::Input, None);
-            self.builder.decorate(
-                variable,
-                Decoration::Location,
-                [SpirvOperand::LiteralBit32(location)],
-            );
+            self.decorate_binding(variable, entry.stage, input.binding)?;
             self.interface.push(variable);
             self.stage_inputs.insert(parameter.value, variable);
+            // A kernel reaching the thread position through both a parameter
+            // and the built-in instruction must share one Vulkan variable.
+            if input.binding == StageBinding::Builtin(Builtin::ThreadPositionInGrid) {
+                self.global_invocation_id = Some(variable);
+            }
         }
-        let output_ty = Type::Vector {
-            element: Box::new(Type::Float { bits: 32 }),
-            lanes: 4,
-        };
-        let output_ty = self.type_id(&output_ty)?;
-        let pointer = self
-            .builder
-            .type_pointer(None, StorageClass::Output, output_ty);
-        let variable = self
-            .builder
-            .variable(pointer, None, StorageClass::Output, None);
-        self.builder.decorate(
-            variable,
-            Decoration::Location,
-            [SpirvOperand::LiteralBit32(0)],
-        );
-        self.interface.push(variable);
-        self.fragment_output = Some(variable);
+        if !entry.outputs.is_empty() {
+            self.return_type = Some(function.result.clone());
+        }
+        for (position, output) in entry.outputs.iter().enumerate() {
+            let ty = output_type(function, output, position)?;
+            let ty_id = self.type_id(&ty)?;
+            let pointer = self.builder.type_pointer(None, StorageClass::Output, ty_id);
+            let variable = self
+                .builder
+                .variable(pointer, None, StorageClass::Output, None);
+            self.decorate_binding(variable, entry.stage, output.binding)?;
+            self.interface.push(variable);
+            self.stage_outputs.push(variable);
+        }
         Ok(())
+    }
+
+    /// Attach the Vulkan decoration for one Metal stage binding.
+    fn decorate_binding(
+        &mut self,
+        variable: u32,
+        stage: Stage,
+        binding: StageBinding,
+    ) -> Result<(), TranslateError> {
+        match binding {
+            StageBinding::Location {
+                location,
+                interpolation,
+            } => {
+                self.builder.decorate(
+                    variable,
+                    Decoration::Location,
+                    [SpirvOperand::LiteralBit32(location)],
+                );
+                if let Some(interpolation) = interpolation {
+                    if interpolation.flat {
+                        self.builder.decorate(variable, Decoration::Flat, []);
+                    } else if !interpolation.perspective {
+                        self.builder
+                            .decorate(variable, Decoration::NoPerspective, []);
+                    }
+                    match interpolation.sampling {
+                        Sampling::Center => {}
+                        Sampling::Centroid => {
+                            self.builder.decorate(variable, Decoration::Centroid, []);
+                        }
+                        Sampling::Sample => {
+                            self.builder.capability(Capability::SampleRateShading);
+                            self.builder.decorate(variable, Decoration::Sample, []);
+                        }
+                    }
+                }
+            }
+            StageBinding::RenderTarget { index } => {
+                self.builder.decorate(
+                    variable,
+                    Decoration::Location,
+                    [SpirvOperand::LiteralBit32(index)],
+                );
+            }
+            StageBinding::Builtin(builtin) => {
+                let builtin = self.spirv_builtin(builtin, stage)?;
+                self.builder.decorate(
+                    variable,
+                    Decoration::BuiltIn,
+                    [SpirvOperand::BuiltIn(builtin)],
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Metal built-ins name a semantic; the SPIR-V built-in depends on the
+    /// stage and on whether it is read or written. `[[position]]` is Vulkan's
+    /// `Position` output in a vertex shader and `FragCoord` input in a
+    /// fragment shader.
+    fn spirv_builtin(&mut self, builtin: Builtin, stage: Stage) -> Result<BuiltIn, TranslateError> {
+        Ok(match (builtin, stage) {
+            (Builtin::Position, Stage::Fragment) => BuiltIn::FragCoord,
+            (Builtin::Position, _) => BuiltIn::Position,
+            (Builtin::PointSize, _) => BuiltIn::PointSize,
+            (Builtin::ClipDistance, _) => {
+                self.builder.capability(Capability::ClipDistance);
+                BuiltIn::ClipDistance
+            }
+            (Builtin::VertexId, _) => BuiltIn::VertexIndex,
+            (Builtin::InstanceId, _) => BuiltIn::InstanceIndex,
+            (Builtin::BaseVertex, _) => {
+                self.builder.capability(Capability::DrawParameters);
+                BuiltIn::BaseVertex
+            }
+            (Builtin::BaseInstance, _) => {
+                self.builder.capability(Capability::DrawParameters);
+                BuiltIn::BaseInstance
+            }
+            (Builtin::FrontFacing, _) => BuiltIn::FrontFacing,
+            (Builtin::PointCoord, _) => BuiltIn::PointCoord,
+            (Builtin::SampleId, _) => {
+                self.builder.capability(Capability::SampleRateShading);
+                BuiltIn::SampleId
+            }
+            (Builtin::SampleMask, _) => BuiltIn::SampleMask,
+            (Builtin::Depth, _) => {
+                self.writes_depth = true;
+                BuiltIn::FragDepth
+            }
+            (Builtin::RenderTargetArrayIndex, _) => {
+                self.builder.capability(Capability::Geometry);
+                BuiltIn::Layer
+            }
+            (Builtin::ViewportArrayIndex, _) => {
+                self.builder.capability(Capability::MultiViewport);
+                BuiltIn::ViewportIndex
+            }
+            (Builtin::ThreadPositionInGrid, _) => BuiltIn::GlobalInvocationId,
+            (Builtin::ThreadPositionInThreadgroup, _) => BuiltIn::LocalInvocationId,
+            (Builtin::ThreadgroupPositionInGrid, _) => BuiltIn::WorkgroupId,
+            (Builtin::ThreadgroupsPerGrid, _) => BuiltIn::NumWorkgroups,
+            (Builtin::ThreadIndexInThreadgroup, _) => BuiltIn::LocalInvocationIndex,
+            (Builtin::ThreadsPerThreadgroup, _) => BuiltIn::WorkgroupSize,
+        })
     }
 
     fn emit_function(
@@ -393,6 +523,7 @@ impl Emitter {
         function: &Function,
     ) -> Result<u32, TranslateError> {
         self.collect_constants(function)?;
+        let merges = control_flow_merges(function)?;
         if entry.stage == Stage::Kernel {
             self.declare_global_invocation_id()?;
         }
@@ -430,15 +561,24 @@ impl Emitter {
             for instruction in &block.instructions {
                 self.emit_instruction(function, instruction, &block_ids, &value_ids)?;
             }
-            if let Some((merge, continue_target)) = loop_shape(function, block.id) {
-                self.builder
+            match merges.get(&block.id) {
+                Some(Merge::Loop {
+                    merge,
+                    continue_target,
+                }) => self
+                    .builder
                     .loop_merge(
-                        block_ids[&merge],
-                        block_ids[&continue_target],
+                        block_ids[merge],
+                        block_ids[continue_target],
                         LoopControl::NONE,
                         std::iter::empty::<SpirvOperand>(),
                     )
-                    .map_err(build_error)?;
+                    .map_err(build_error)?,
+                Some(Merge::Selection { merge }) => self
+                    .builder
+                    .selection_merge(block_ids[merge], SelectionControl::NONE)
+                    .map_err(build_error)?,
+                None => {}
             }
             self.emit_terminator(&block.terminator, &block_ids, &value_ids)?;
         }
@@ -456,10 +596,12 @@ impl Emitter {
             let Some(variable) = self.parameter_pointers.get(&parameter.value).copied() else {
                 continue;
             };
-            if parameter.ty == Type::Texture {
-                let image = self.type_id(&Type::Texture)?;
+            // A texture or sampler is a handle, not addressable memory: it
+            // is loaded from its descriptor rather than indexed into.
+            if matches!(parameter.ty, Type::Texture(_) | Type::Sampler) {
+                let handle = self.type_id(&parameter.ty)?;
                 self.builder
-                    .load(image, Some(values[&parameter.value]), variable, None, [])
+                    .load(handle, Some(values[&parameter.value]), variable, None, [])
                     .map_err(build_error)?;
                 continue;
             }
@@ -521,36 +663,73 @@ impl Emitter {
         Ok(())
     }
 
+    /// SPIR-V declares constants at module scope, so they must be created
+    /// before the function body which uses them is emitted.
     fn collect_constants(&mut self, function: &Function) -> Result<(), TranslateError> {
         for block in &function.blocks {
             for instruction in &block.instructions {
                 for operand in instruction_operands(&instruction.kind) {
-                    match operand {
-                        Operand::Integer { ty, value } => {
-                            self.constant(ty, *value)?;
-                        }
-                        Operand::Float { ty, bits } => {
-                            self.constant(ty, *bits)?;
-                        }
-                        Operand::Value(_) => {}
-                        Operand::Undef(_) | Operand::Bool(_) => {}
-                    }
+                    self.declare_constant(operand)?;
                 }
             }
             for operand in terminator_operands(&block.terminator) {
-                match operand {
-                    Operand::Integer { ty, value } => {
-                        self.constant(ty, *value)?;
-                    }
-                    Operand::Float { ty, bits } => {
-                        self.constant(ty, *bits)?;
-                    }
-                    Operand::Value(_) => {}
-                    Operand::Undef(_) | Operand::Bool(_) => {}
-                }
+                self.declare_constant(operand)?;
             }
         }
         Ok(())
+    }
+
+    fn declare_constant(&mut self, operand: &Operand) -> Result<(), TranslateError> {
+        match operand {
+            Operand::Integer { ty, value } => {
+                self.constant(ty, *value)?;
+            }
+            Operand::Float { ty, bits } => {
+                self.constant(ty, *bits)?;
+            }
+            Operand::Composite { elements, .. } => {
+                for element in elements {
+                    self.declare_constant(element)?;
+                }
+                self.composite_constant(operand)?;
+            }
+            Operand::Value(_) | Operand::Undef(_) | Operand::Bool(_) => {}
+        }
+        Ok(())
+    }
+
+    fn composite_constant(&mut self, operand: &Operand) -> Result<u32, TranslateError> {
+        let Operand::Composite { ty, elements } = operand else {
+            return Err(emission("composite constant has no elements"));
+        };
+        if let Some(id) = self.composites.get(operand) {
+            return Ok(*id);
+        }
+        let ty_id = self.type_id(ty)?;
+        let members = elements
+            .iter()
+            .map(|element| match element {
+                Operand::Composite { .. } => self.composite_constant(element),
+                Operand::Integer { ty, value } => self.constant(ty, *value),
+                Operand::Float { ty, bits } => self.constant(ty, *bits),
+                Operand::Bool(value) => {
+                    let ty = self.type_id(&Type::Bool)?;
+                    Ok(if *value {
+                        self.builder.constant_true(ty)
+                    } else {
+                        self.builder.constant_false(ty)
+                    })
+                }
+                Operand::Undef(ty) => {
+                    let ty = self.type_id(ty)?;
+                    Ok(self.builder.undef(ty, None))
+                }
+                Operand::Value(_) => Err(emission("composite constant has a non-constant element")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let id = self.builder.constant_composite(ty_id, members);
+        self.composites.insert(operand.clone(), id);
+        Ok(id)
     }
 
     fn emit_instruction(
@@ -595,47 +774,181 @@ impl Emitter {
                     .store(pointer, value, None, [])
                     .map_err(build_error)?;
             }
-            InstructionKind::IntegerAdd { lhs, rhs } => {
-                self.emit_binary(
-                    function,
-                    instruction,
-                    lhs,
-                    rhs,
-                    values,
-                    |builder, ty, id, a, b| builder.i_add(ty, id, a, b),
-                )?;
-            }
-            InstructionKind::IntegerMultiply { lhs, rhs } => {
-                self.emit_binary(
-                    function,
-                    instruction,
-                    lhs,
-                    rhs,
-                    values,
-                    |builder, ty, id, a, b| builder.i_mul(ty, id, a, b),
-                )?;
-            }
-            InstructionKind::IntegerXor { lhs, rhs } => {
-                self.emit_binary(
-                    function,
-                    instruction,
-                    lhs,
-                    rhs,
-                    values,
-                    |builder, ty, id, a, b| builder.bitwise_xor(ty, id, a, b),
-                )?;
-            }
-            InstructionKind::IntegerCompare {
-                predicate: IntegerPredicate::UnsignedLessThan,
+            InstructionKind::IntegerBinary {
+                op:
+                    op @ (IntegerBinaryOp::MinimumSigned
+                    | IntegerBinaryOp::MinimumUnsigned
+                    | IntegerBinaryOp::MaximumSigned
+                    | IntegerBinaryOp::MaximumUnsigned),
                 lhs,
                 rhs,
             } => {
-                let ty = self.type_id(&Type::Bool)?;
-                let lhs = self.operand(lhs, values)?;
-                let rhs = self.operand(rhs, values)?;
-                self.builder
-                    .u_less_than(ty, result_id, lhs, rhs)
+                let operation = match op {
+                    IntegerBinaryOp::MinimumSigned => GlslStd450Op::SMin,
+                    IntegerBinaryOp::MinimumUnsigned => GlslStd450Op::UMin,
+                    IntegerBinaryOp::MaximumSigned => GlslStd450Op::SMax,
+                    _ => GlslStd450Op::UMax,
+                };
+                self.emit_ext_inst(function, instruction, values, operation, [lhs, rhs])?;
+            }
+            InstructionKind::IntegerClamp {
+                signed,
+                value,
+                min,
+                max,
+            } => {
+                let operation = if *signed {
+                    GlslStd450Op::SClamp
+                } else {
+                    GlslStd450Op::UClamp
+                };
+                self.emit_ext_inst(function, instruction, values, operation, [value, min, max])?;
+            }
+            InstructionKind::IntegerUnary { op, value } => match op {
+                IntegerUnaryOp::AbsoluteSigned => {
+                    self.emit_ext_inst(function, instruction, values, GlslStd450Op::SAbs, [value])?;
+                }
+                IntegerUnaryOp::SignSigned => {
+                    self.emit_ext_inst(
+                        function,
+                        instruction,
+                        values,
+                        GlslStd450Op::SSign,
+                        [value],
+                    )?;
+                }
+                IntegerUnaryOp::PopulationCount | IntegerUnaryOp::Not => {
+                    let result = instruction
+                        .result
+                        .ok_or_else(|| emission("integer math call has no result"))?;
+                    let ty = self.type_id(&function.values[result.0 as usize])?;
+                    let value = self.operand(value, values)?;
+                    if *op == IntegerUnaryOp::PopulationCount {
+                        self.builder.bit_count(ty, result_id, value)
+                    } else {
+                        self.builder.not(ty, result_id, value)
+                    }
                     .map_err(build_error)?;
+                }
+            },
+            // LLVM types Metal's `bool` as `i1`, so a bitwise operation on
+            // booleans stands in for a logical one; SPIR-V keeps them apart.
+            InstructionKind::IntegerBinary { op, lhs, rhs }
+                if instruction
+                    .result
+                    .and_then(|result| function.values.get(result.0 as usize))
+                    .is_some_and(is_boolean_or_boolean_vector) =>
+            {
+                self.emit_binary(
+                    function,
+                    instruction,
+                    lhs,
+                    rhs,
+                    values,
+                    |b, ty, id, x, y| {
+                        match op {
+                            IntegerBinaryOp::And => b.logical_and(ty, id, x, y),
+                            IntegerBinaryOp::Or => b.logical_or(ty, id, x, y),
+                            // Exclusive or on booleans is inequality.
+                            _ => b.logical_not_equal(ty, id, x, y),
+                        }
+                    },
+                )?;
+            }
+            InstructionKind::IntegerBinary { op, lhs, rhs } => {
+                self.emit_binary(
+                    function,
+                    instruction,
+                    lhs,
+                    rhs,
+                    values,
+                    |b, ty, id, x, y| match op {
+                        IntegerBinaryOp::Add => b.i_add(ty, id, x, y),
+                        IntegerBinaryOp::Subtract => b.i_sub(ty, id, x, y),
+                        IntegerBinaryOp::Multiply => b.i_mul(ty, id, x, y),
+                        IntegerBinaryOp::DivideUnsigned => b.u_div(ty, id, x, y),
+                        IntegerBinaryOp::DivideSigned => b.s_div(ty, id, x, y),
+                        IntegerBinaryOp::RemainderUnsigned => b.u_mod(ty, id, x, y),
+                        IntegerBinaryOp::RemainderSigned => b.s_rem(ty, id, x, y),
+                        IntegerBinaryOp::ShiftLeft => b.shift_left_logical(ty, id, x, y),
+                        IntegerBinaryOp::ShiftRightLogical => b.shift_right_logical(ty, id, x, y),
+                        IntegerBinaryOp::ShiftRightArithmetic => {
+                            b.shift_right_arithmetic(ty, id, x, y)
+                        }
+                        IntegerBinaryOp::And => b.bitwise_and(ty, id, x, y),
+                        IntegerBinaryOp::Or => b.bitwise_or(ty, id, x, y),
+                        IntegerBinaryOp::Xor => b.bitwise_xor(ty, id, x, y),
+                        // Minimum and maximum are extended instructions,
+                        // matched by the arm above.
+                        _ => unreachable!(),
+                    },
+                )?;
+            }
+            InstructionKind::IntegerCompare {
+                predicate,
+                lhs,
+                rhs,
+            } => {
+                self.emit_binary(
+                    function,
+                    instruction,
+                    lhs,
+                    rhs,
+                    values,
+                    |b, ty, id, x, y| match predicate {
+                        IntegerPredicate::Equal => b.i_equal(ty, id, x, y),
+                        IntegerPredicate::NotEqual => b.i_not_equal(ty, id, x, y),
+                        IntegerPredicate::UnsignedLessThan => b.u_less_than(ty, id, x, y),
+                        IntegerPredicate::UnsignedLessEqual => b.u_less_than_equal(ty, id, x, y),
+                        IntegerPredicate::UnsignedGreaterThan => b.u_greater_than(ty, id, x, y),
+                        IntegerPredicate::UnsignedGreaterEqual => {
+                            b.u_greater_than_equal(ty, id, x, y)
+                        }
+                        IntegerPredicate::SignedLessThan => b.s_less_than(ty, id, x, y),
+                        IntegerPredicate::SignedLessEqual => b.s_less_than_equal(ty, id, x, y),
+                        IntegerPredicate::SignedGreaterThan => b.s_greater_than(ty, id, x, y),
+                        IntegerPredicate::SignedGreaterEqual => {
+                            b.s_greater_than_equal(ty, id, x, y)
+                        }
+                    },
+                )?;
+            }
+            InstructionKind::FloatCompare {
+                predicate,
+                lhs,
+                rhs,
+            } => {
+                self.emit_binary(
+                    function,
+                    instruction,
+                    lhs,
+                    rhs,
+                    values,
+                    |b, ty, id, x, y| match predicate {
+                        FloatPredicate::OrderedEqual => b.f_ord_equal(ty, id, x, y),
+                        FloatPredicate::OrderedNotEqual => b.f_ord_not_equal(ty, id, x, y),
+                        FloatPredicate::OrderedLessThan => b.f_ord_less_than(ty, id, x, y),
+                        FloatPredicate::OrderedLessEqual => b.f_ord_less_than_equal(ty, id, x, y),
+                        FloatPredicate::OrderedGreaterThan => b.f_ord_greater_than(ty, id, x, y),
+                        FloatPredicate::OrderedGreaterEqual => {
+                            b.f_ord_greater_than_equal(ty, id, x, y)
+                        }
+                        FloatPredicate::Ordered => b.ordered(ty, id, x, y),
+                        FloatPredicate::UnorderedEqual => b.f_unord_equal(ty, id, x, y),
+                        FloatPredicate::UnorderedNotEqual => b.f_unord_not_equal(ty, id, x, y),
+                        FloatPredicate::UnorderedLessThan => b.f_unord_less_than(ty, id, x, y),
+                        FloatPredicate::UnorderedLessEqual => {
+                            b.f_unord_less_than_equal(ty, id, x, y)
+                        }
+                        FloatPredicate::UnorderedGreaterThan => {
+                            b.f_unord_greater_than(ty, id, x, y)
+                        }
+                        FloatPredicate::UnorderedGreaterEqual => {
+                            b.f_unord_greater_than_equal(ty, id, x, y)
+                        }
+                        FloatPredicate::Unordered => b.unordered(ty, id, x, y),
+                    },
+                )?;
             }
             InstructionKind::Phi { incomings } => {
                 let result = instruction
@@ -742,14 +1055,6 @@ impl Emitter {
                     .composite_extract(ty, result_id, composite, [*index])
                     .map_err(build_error)?;
             }
-            InstructionKind::VectorUnsignedLessThan { lhs, rhs } => self.emit_binary(
-                function,
-                instruction,
-                lhs,
-                rhs,
-                values,
-                |builder, ty, id, a, b| builder.u_less_than(ty, id, a, b),
-            )?,
             InstructionKind::All { vector } => {
                 let result = instruction
                     .result
@@ -760,58 +1065,235 @@ impl Emitter {
                     .all(ty, result_id, vector)
                     .map_err(build_error)?;
             }
-            InstructionKind::IntegerResize { value } => {
+            InstructionKind::Any { vector } => {
                 let result = instruction
                     .result
-                    .ok_or_else(|| emission("integer resize has no result"))?;
+                    .ok_or_else(|| emission("any has no result"))?;
                 let ty = self.type_id(&function.values[result.0 as usize])?;
-                let value = self.operand(value, values)?;
+                let vector = self.operand(vector, values)?;
                 self.builder
-                    .u_convert(ty, result_id, value)
+                    .any(ty, result_id, vector)
                     .map_err(build_error)?;
             }
-            InstructionKind::ConvertUToF { value } => {
+            // SPIR-V keeps booleans out of the numeric type system, so a
+            // conversion between `i1` and an integer becomes a selection or a
+            // comparison rather than a width change.
+            InstructionKind::Convert {
+                op:
+                    op @ (ConvertOp::ZeroExtend
+                    | ConvertOp::SignExtend
+                    | ConvertOp::UnsignedToFloat
+                    | ConvertOp::SignedToFloat),
+                value,
+            } if operand_type(function, value) == Some(Type::Bool) => {
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("conversion has no result"))?;
+                let result_type = function.values[result.0 as usize].clone();
+                let ty = self.type_id(&result_type)?;
+                // A sign extension of a set bit is all ones, that is -1;
+                // a widening or a conversion to floating point yields one.
+                let set = match (op, &result_type) {
+                    (ConvertOp::SignExtend, Type::Int { .. }) => u64::MAX,
+                    (_, Type::Float { bits: 32 }) => u64::from(1.0f32.to_bits()),
+                    _ => 1,
+                };
+                let one = self.constant(&result_type, set)?;
+                let zero = self.constant(&result_type, 0)?;
+                let value = self.operand(value, values)?;
+                self.builder
+                    .select(ty, result_id, value, one, zero)
+                    .map_err(build_error)?;
+            }
+            InstructionKind::Convert {
+                op: ConvertOp::IntegerTruncate,
+                value,
+            } if function
+                .values
+                .get(
+                    instruction
+                        .result
+                        .ok_or_else(|| emission("conversion has no result"))?
+                        .0 as usize,
+                )
+                .is_some_and(|ty| *ty == Type::Bool) =>
+            {
+                let ty = self.type_id(&Type::Bool)?;
+                let source = operand_type(function, value)
+                    .ok_or_else(|| emission("conversion operand has no type"))?;
+                // Narrowing to `i1` keeps the low bit.
+                let one = self.constant(&source, 1)?;
+                let zero = self.constant(&source, 0)?;
+                let value = self.operand(value, values)?;
+                let source_id = self.type_id(&source)?;
+                let masked = self
+                    .builder
+                    .bitwise_and(source_id, None, value, one)
+                    .map_err(build_error)?;
+                self.builder
+                    .i_not_equal(ty, result_id, masked, zero)
+                    .map_err(build_error)?;
+            }
+            InstructionKind::Convert { op, value } => {
                 let result = instruction
                     .result
                     .ok_or_else(|| emission("conversion has no result"))?;
                 let ty = self.type_id(&function.values[result.0 as usize])?;
                 let value = self.operand(value, values)?;
-                self.builder
-                    .convert_u_to_f(ty, result_id, value)
-                    .map_err(build_error)?;
+                let b = &mut self.builder;
+                match op {
+                    ConvertOp::UnsignedToFloat => b.convert_u_to_f(ty, result_id, value),
+                    ConvertOp::SignedToFloat => b.convert_s_to_f(ty, result_id, value),
+                    ConvertOp::FloatToUnsigned => b.convert_f_to_u(ty, result_id, value),
+                    ConvertOp::FloatToSigned => b.convert_f_to_s(ty, result_id, value),
+                    ConvertOp::ZeroExtend => b.u_convert(ty, result_id, value),
+                    ConvertOp::SignExtend => b.s_convert(ty, result_id, value),
+                    // SPIR-V narrows integers with the same width-changing
+                    // conversion; the result width discards the high bits.
+                    ConvertOp::IntegerTruncate => b.u_convert(ty, result_id, value),
+                    ConvertOp::FloatResize => b.f_convert(ty, result_id, value),
+                    ConvertOp::Bitcast => b.bitcast(ty, result_id, value),
+                }
+                .map_err(build_error)?;
             }
-            InstructionKind::FloatDiv { lhs, rhs } => self.emit_binary(
-                function,
-                instruction,
-                lhs,
-                rhs,
-                values,
-                |builder, ty, id, a, b| builder.f_div(ty, id, a, b),
-            )?,
-            InstructionKind::FloatAdd { lhs, rhs } => self.emit_binary(
-                function,
-                instruction,
-                lhs,
-                rhs,
-                values,
-                |builder, ty, id, a, b| builder.f_add(ty, id, a, b),
-            )?,
-            InstructionKind::FloatSubtract { lhs, rhs } => self.emit_binary(
-                function,
-                instruction,
-                lhs,
-                rhs,
-                values,
-                |builder, ty, id, a, b| builder.f_sub(ty, id, a, b),
-            )?,
-            InstructionKind::FloatMultiply { lhs, rhs } => self.emit_binary(
-                function,
-                instruction,
-                lhs,
-                rhs,
-                values,
-                |builder, ty, id, a, b| builder.f_mul(ty, id, a, b),
-            )?,
+            InstructionKind::FloatBinary { op, lhs, rhs } => match op {
+                FloatBinaryOp::Add
+                | FloatBinaryOp::Subtract
+                | FloatBinaryOp::Multiply
+                | FloatBinaryOp::Divide
+                | FloatBinaryOp::Remainder => {
+                    self.emit_binary(
+                        function,
+                        instruction,
+                        lhs,
+                        rhs,
+                        values,
+                        |b, ty, id, x, y| match op {
+                            FloatBinaryOp::Add => b.f_add(ty, id, x, y),
+                            FloatBinaryOp::Subtract => b.f_sub(ty, id, x, y),
+                            FloatBinaryOp::Multiply => b.f_mul(ty, id, x, y),
+                            FloatBinaryOp::Divide => b.f_div(ty, id, x, y),
+                            _ => b.f_rem(ty, id, x, y),
+                        },
+                    )?;
+                }
+                FloatBinaryOp::Minimum => {
+                    self.emit_ext_inst(
+                        function,
+                        instruction,
+                        values,
+                        GlslStd450Op::FMin,
+                        [lhs, rhs],
+                    )?;
+                }
+                FloatBinaryOp::Maximum => {
+                    self.emit_ext_inst(
+                        function,
+                        instruction,
+                        values,
+                        GlslStd450Op::FMax,
+                        [lhs, rhs],
+                    )?;
+                }
+                FloatBinaryOp::Power => {
+                    self.emit_ext_inst(
+                        function,
+                        instruction,
+                        values,
+                        GlslStd450Op::Pow,
+                        [lhs, rhs],
+                    )?;
+                }
+                FloatBinaryOp::Atan2 => {
+                    self.emit_ext_inst(
+                        function,
+                        instruction,
+                        values,
+                        GlslStd450Op::Atan2,
+                        [lhs, rhs],
+                    )?;
+                }
+                FloatBinaryOp::Step => {
+                    self.emit_ext_inst(
+                        function,
+                        instruction,
+                        values,
+                        GlslStd450Op::Step,
+                        [lhs, rhs],
+                    )?;
+                }
+            },
+            InstructionKind::FloatUnary { op, value } => match op {
+                FloatUnaryOp::Negate => {
+                    let result = instruction
+                        .result
+                        .ok_or_else(|| emission("negation has no result"))?;
+                    let ty = self.type_id(&function.values[result.0 as usize])?;
+                    let value = self.operand(value, values)?;
+                    self.builder
+                        .f_negate(ty, result_id, value)
+                        .map_err(build_error)?;
+                }
+                FloatUnaryOp::DerivativeX
+                | FloatUnaryOp::DerivativeY
+                | FloatUnaryOp::DerivativeWidth => {
+                    let result = instruction
+                        .result
+                        .ok_or_else(|| emission("derivative has no result"))?;
+                    let ty = self.type_id(&function.values[result.0 as usize])?;
+                    let value = self.operand(value, values)?;
+                    let b = &mut self.builder;
+                    match op {
+                        FloatUnaryOp::DerivativeX => b.d_pdx(ty, result_id, value),
+                        FloatUnaryOp::DerivativeY => b.d_pdy(ty, result_id, value),
+                        _ => b.fwidth(ty, result_id, value),
+                    }
+                    .map_err(build_error)?;
+                }
+                _ => {
+                    let operation = match op {
+                        FloatUnaryOp::Absolute => GlslStd450Op::FAbs,
+                        FloatUnaryOp::Sign => GlslStd450Op::FSign,
+                        FloatUnaryOp::Sqrt => GlslStd450Op::Sqrt,
+                        FloatUnaryOp::InverseSqrt => GlslStd450Op::InverseSqrt,
+                        FloatUnaryOp::Exp => GlslStd450Op::Exp,
+                        FloatUnaryOp::Exp2 => GlslStd450Op::Exp2,
+                        FloatUnaryOp::Log => GlslStd450Op::Log,
+                        FloatUnaryOp::Log2 => GlslStd450Op::Log2,
+                        FloatUnaryOp::Sin => GlslStd450Op::Sin,
+                        FloatUnaryOp::Cos => GlslStd450Op::Cos,
+                        FloatUnaryOp::Tan => GlslStd450Op::Tan,
+                        FloatUnaryOp::Asin => GlslStd450Op::Asin,
+                        FloatUnaryOp::Acos => GlslStd450Op::Acos,
+                        FloatUnaryOp::Atan => GlslStd450Op::Atan,
+                        FloatUnaryOp::Floor => GlslStd450Op::Floor,
+                        FloatUnaryOp::Ceil => GlslStd450Op::Ceil,
+                        FloatUnaryOp::Round => GlslStd450Op::RoundEven,
+                        FloatUnaryOp::Truncate => GlslStd450Op::Trunc,
+                        FloatUnaryOp::Fract => GlslStd450Op::Fract,
+                        FloatUnaryOp::Negate
+                        | FloatUnaryOp::DerivativeX
+                        | FloatUnaryOp::DerivativeY
+                        | FloatUnaryOp::DerivativeWidth => {
+                            return Err(emission("unreachable floating unary lowering"));
+                        }
+                    };
+                    self.emit_ext_inst(function, instruction, values, operation, [value])?;
+                }
+            },
+            InstructionKind::FloatFma {
+                first,
+                second,
+                addend,
+            } => {
+                self.emit_ext_inst(
+                    function,
+                    instruction,
+                    values,
+                    GlslStd450Op::Fma,
+                    [first, second, addend],
+                )?;
+            }
             InstructionKind::FloatDot { lhs, rhs } => self.emit_binary(
                 function,
                 instruction,
@@ -888,34 +1370,6 @@ impl Emitter {
                     .select(ty, result_id, condition, on_true, on_false)
                     .map_err(build_error)?;
             }
-            InstructionKind::FloatOrderedGreaterEqual { lhs, rhs } => {
-                self.emit_binary(
-                    function,
-                    instruction,
-                    lhs,
-                    rhs,
-                    values,
-                    |builder, ty, id, a, b| builder.f_ord_greater_than_equal(ty, id, a, b),
-                )?;
-            }
-            InstructionKind::FloatSqrt { value } => {
-                self.emit_ext_inst(function, instruction, values, GlslStd450Op::Sqrt, [value])?;
-            }
-            InstructionKind::FloatAbs { value } => {
-                self.emit_ext_inst(function, instruction, values, GlslStd450Op::FAbs, [value])?;
-            }
-            InstructionKind::FloatReciprocalSqrt { value } => {
-                self.emit_ext_inst(
-                    function,
-                    instruction,
-                    values,
-                    GlslStd450Op::InverseSqrt,
-                    [value],
-                )?;
-            }
-            InstructionKind::FloatExp2 { value } => {
-                self.emit_ext_inst(function, instruction, values, GlslStd450Op::Exp2, [value])?;
-            }
             InstructionKind::VectorSplat { value, lanes } => {
                 let result = instruction
                     .result
@@ -933,17 +1387,264 @@ impl Emitter {
             InstructionKind::TextureWrite {
                 texture,
                 coordinate,
+                array_index,
                 value,
             } => {
-                let texture = self.operand(texture, values)?;
-                let coordinate = self.operand(coordinate, values)?;
+                let image = self.operand(texture, values)?;
+                let coordinate =
+                    self.texture_coordinate(function, coordinate, array_index.as_ref(), values)?;
                 let value = self.operand(value, values)?;
                 self.builder
-                    .image_write(texture, coordinate, value, None, [])
+                    .image_write(image, coordinate, value, None, [])
+                    .map_err(build_error)?;
+            }
+            InstructionKind::TextureSample {
+                texture,
+                sampler,
+                coordinate,
+                array_index,
+                offset,
+                lod,
+                gather,
+            } => {
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("texture sample has no result"))?;
+                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let Some(Type::Texture(image_type)) = operand_type(function, texture) else {
+                    return Err(emission("texture sample has no texture operand"));
+                };
+                let image_id = self.type_id(&Type::Texture(image_type))?;
+                let sampled_type = self.builder.type_sampled_image(image_id);
+                let image = self.operand(texture, values)?;
+                let sampler = self.operand(sampler, values)?;
+                let sampled = self
+                    .builder
+                    .sampled_image(sampled_type, None, image, sampler)
+                    .map_err(build_error)?;
+                let coordinate =
+                    self.texture_coordinate(function, coordinate, array_index.as_ref(), values)?;
+                let mut mask = ImageOperands::NONE;
+                let mut extra = Vec::new();
+                if let Some(lod) = lod {
+                    mask |= ImageOperands::LOD;
+                    extra.push(SpirvOperand::IdRef(self.operand(lod, values)?));
+                }
+                if let Some(offset) = offset {
+                    // Metal requires a sampling offset to be a compile-time
+                    // constant, which is also the only form Vulkan accepts
+                    // outside a gather.
+                    if !matches!(offset, Operand::Composite { .. } | Operand::Integer { .. }) {
+                        return Err(emission(
+                            "a sampling offset must be a constant to be emitted",
+                        ));
+                    }
+                    mask |= if gather.is_some() {
+                        self.builder.capability(Capability::ImageGatherExtended);
+                        ImageOperands::OFFSET
+                    } else {
+                        ImageOperands::CONST_OFFSET
+                    };
+                    extra.push(SpirvOperand::IdRef(self.operand(offset, values)?));
+                }
+                match gather {
+                    Some(component) => {
+                        let component = self.constant(&Type::u32(), u64::from(*component))?;
+                        self.builder
+                            .image_gather(
+                                ty,
+                                result_id,
+                                sampled,
+                                coordinate,
+                                component,
+                                Some(mask),
+                                extra,
+                            )
+                            .map_err(build_error)?;
+                    }
+                    // An implicit level of detail needs the fragment stage's
+                    // derivatives; AIR requests an explicit level otherwise.
+                    None if lod.is_some() => {
+                        self.builder
+                            .image_sample_explicit_lod(
+                                ty, result_id, sampled, coordinate, mask, extra,
+                            )
+                            .map_err(build_error)?;
+                    }
+                    None => {
+                        self.builder
+                            .image_sample_implicit_lod(
+                                ty,
+                                result_id,
+                                sampled,
+                                coordinate,
+                                Some(mask),
+                                extra,
+                            )
+                            .map_err(build_error)?;
+                    }
+                }
+            }
+            InstructionKind::TextureRead {
+                texture,
+                coordinate,
+                array_index,
+                lod,
+                sample,
+            } => {
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("texture read has no result"))?;
+                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let Some(Type::Texture(image_type)) = operand_type(function, texture) else {
+                    return Err(emission("texture read has no texture operand"));
+                };
+                let image = self.operand(texture, values)?;
+                let coordinate =
+                    self.texture_coordinate(function, coordinate, array_index.as_ref(), values)?;
+                let mut mask = ImageOperands::NONE;
+                let mut extra = Vec::new();
+                if let Some(lod) = lod {
+                    mask |= ImageOperands::LOD;
+                    extra.push(SpirvOperand::IdRef(self.operand(lod, values)?));
+                }
+                if let Some(sample) = sample {
+                    mask |= ImageOperands::SAMPLE;
+                    extra.push(SpirvOperand::IdRef(self.operand(sample, values)?));
+                }
+                // A sampled image is fetched; a storage image is read.
+                if image_type.access == Access::Sample {
+                    self.builder
+                        .image_fetch(ty, result_id, image, coordinate, Some(mask), extra)
+                        .map_err(build_error)?;
+                } else {
+                    self.builder
+                        .image_read(ty, result_id, image, coordinate, Some(mask), extra)
+                        .map_err(build_error)?;
+                }
+            }
+            InstructionKind::TextureQuerySize {
+                texture,
+                lod,
+                component,
+            } => {
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("texture query has no result"))?;
+                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let Some(Type::Texture(image_type)) = operand_type(function, texture) else {
+                    return Err(emission("texture query has no texture operand"));
+                };
+                self.builder.capability(Capability::ImageQuery);
+                let lanes = coordinate_lanes(&image_type) + u8::from(image_type.array);
+                let size_type = self.type_id(&if lanes == 1 {
+                    Type::u32()
+                } else {
+                    Type::Vector {
+                        element: Box::new(Type::u32()),
+                        lanes,
+                    }
+                })?;
+                let image = self.operand(texture, values)?;
+                let size = match lod {
+                    Some(lod) => {
+                        let lod = self.operand(lod, values)?;
+                        self.builder
+                            .image_query_size_lod(size_type, None, image, lod)
+                            .map_err(build_error)?
+                    }
+                    None => self
+                        .builder
+                        .image_query_size(size_type, None, image)
+                        .map_err(build_error)?,
+                };
+                if lanes == 1 {
+                    self.builder
+                        .copy_object(ty, result_id, size)
+                        .map_err(build_error)?;
+                } else {
+                    self.builder
+                        .composite_extract(ty, result_id, size, [*component])
+                        .map_err(build_error)?;
+                }
+            }
+            // `discard_fragment` keeps executing in Metal, so demote the
+            // invocation rather than terminating the block with OpKill.
+            InstructionKind::DiscardFragment => {
+                self.builder
+                    .capability(Capability::DemoteToHelperInvocation);
+                // rspirv classifies this as a terminator and would close the
+                // block. SPIR-V lets execution continue after it, as Metal
+                // does, so append it without ending the block.
+                self.builder
+                    .insert_into_block(
+                        InsertPoint::End,
+                        rspirv::dr::Instruction::new(
+                            rspirv::spirv::Op::DemoteToHelperInvocation,
+                            None,
+                            None,
+                            Vec::new(),
+                        ),
+                    )
                     .map_err(build_error)?;
             }
         }
         Ok(())
+    }
+
+    /// Vulkan carries the array slice as an extra coordinate component;
+    /// Metal passes it separately.
+    fn texture_coordinate(
+        &mut self,
+        function: &Function,
+        coordinate: &Operand,
+        array_index: Option<&Operand>,
+        values: &HashMap<ValueId, u32>,
+    ) -> Result<u32, TranslateError> {
+        let base = self.operand(coordinate, values)?;
+        let Some(array_index) = array_index else {
+            return Ok(base);
+        };
+        let element = match operand_type(function, coordinate) {
+            Some(Type::Vector { element, .. }) => *element,
+            Some(scalar) => scalar,
+            None => return Err(emission("texture coordinate has no type")),
+        };
+        let lanes = match operand_type(function, coordinate) {
+            Some(Type::Vector { lanes, .. }) => lanes,
+            _ => 1,
+        };
+        // The slice joins the coordinate in the coordinate's own element
+        // type, which is integer for reads and floating for samples.
+        let index = self.operand(array_index, values)?;
+        let index = match &element {
+            Type::Float { .. } => {
+                let float = self.type_id(&element)?;
+                self.builder
+                    .convert_u_to_f(float, None, index)
+                    .map_err(build_error)?
+            }
+            _ => index,
+        };
+        let combined = self.type_id(&Type::Vector {
+            element: Box::new(element.clone()),
+            lanes: lanes + 1,
+        })?;
+        let scalar = self.type_id(&element)?;
+        let mut components = Vec::new();
+        for lane in 0..lanes {
+            components.push(if lanes == 1 {
+                base
+            } else {
+                self.builder
+                    .composite_extract(scalar, None, base, [u32::from(lane)])
+                    .map_err(build_error)?
+            });
+        }
+        components.push(index);
+        self.builder
+            .composite_construct(combined, None, components)
+            .map_err(build_error)
     }
 
     fn emit_binary<F>(
@@ -1020,24 +1721,32 @@ impl Emitter {
                     .map_err(build_error)
             }
             Terminator::Return(None) => self.builder.ret().map_err(build_error),
+            // A SPIR-V entry point returns void. Metal returns the stage's
+            // outputs as a value, so decompose it into the output variables.
             Terminator::Return(Some(value)) => {
+                let operand_type = self.return_type.clone();
                 let value = self.operand(value, values)?;
-                if let Some(output) = self.fragment_output {
-                    let float4 = self.type_id(&Type::Vector {
-                        element: Box::new(Type::Float { bits: 32 }),
-                        lanes: 4,
-                    })?;
-                    let extracted = self
-                        .builder
-                        .composite_extract(float4, None, value, [0])
-                        .map_err(build_error)?;
-                    self.builder
-                        .store(output, extracted, None, [])
-                        .map_err(build_error)?;
-                    self.builder.ret().map_err(build_error)
-                } else {
-                    self.builder.ret_value(value).map_err(build_error)
+                if self.stage_outputs.is_empty() {
+                    return self.builder.ret_value(value).map_err(build_error);
                 }
+                for (position, variable) in self.stage_outputs.clone().into_iter().enumerate() {
+                    let component = match &operand_type {
+                        Some(Type::Struct(structure)) => {
+                            let field = structure.fields.get(position).ok_or_else(|| {
+                                emission("stage output has no matching returned field")
+                            })?;
+                            let ty = self.type_id(&field.ty)?;
+                            self.builder
+                                .composite_extract(ty, None, value, [position as u32])
+                                .map_err(build_error)?
+                        }
+                        _ => value,
+                    };
+                    self.builder
+                        .store(variable, component, None, [])
+                        .map_err(build_error)?;
+                }
+                self.builder.ret().map_err(build_error)
             }
             Terminator::Unreachable => self.builder.unreachable().map_err(build_error),
         }
@@ -1063,6 +1772,7 @@ impl Emitter {
                 .ok_or_else(|| emission("operand refers to a missing value")),
             Operand::Integer { ty, value } => self.constant(ty, *value),
             Operand::Float { ty, bits } => self.constant(ty, *bits),
+            Operand::Composite { .. } => self.composite_constant(operand),
             Operand::Undef(ty) => {
                 let ty = self.type_id(ty)?;
                 Ok(self.builder.undef(ty, None))
@@ -1095,18 +1805,30 @@ impl Emitter {
             Type::Void => self.builder.type_void(),
             Type::Bool => self.builder.type_bool(),
             Type::Int { bits, signed } => {
-                if *bits == 64 {
-                    if !self.shader_int64 {
-                        return Err(emission("target profile does not support Int64"));
+                match bits {
+                    64 => {
+                        if !self.shader_int64 {
+                            return Err(emission("target profile does not support Int64"));
+                        }
+                        if !self.uses_int64 {
+                            self.builder.capability(Capability::Int64);
+                            self.uses_int64 = true;
+                        }
                     }
-                    if !self.uses_int64 {
-                        self.builder.capability(Capability::Int64);
-                        self.uses_int64 = true;
-                    }
+                    // Metal's `short` and `char` need their own Vulkan
+                    // capabilities; a shader using them says so.
+                    16 => self.builder.capability(Capability::Int16),
+                    8 => self.builder.capability(Capability::Int8),
+                    _ => {}
                 }
                 self.builder.type_int(u32::from(*bits), u32::from(*signed))
             }
-            Type::Float { bits } => self.builder.type_float(u32::from(*bits), None),
+            Type::Float { bits } => {
+                if *bits == 16 {
+                    self.builder.capability(Capability::Float16);
+                }
+                self.builder.type_float(u32::from(*bits), None)
+            }
             Type::Vector { element, lanes } => {
                 let element = self.type_id(element)?;
                 self.builder.type_vector(element, u32::from(*lanes))
@@ -1117,7 +1839,11 @@ impl Emitter {
                     .iter()
                     .map(|field| self.type_id(&field.ty))
                     .collect::<Result<Vec<_>, _>>()?;
-                let id = self.builder.type_struct(fields);
+                // Distinct Metal structures can have identical member types
+                // and different offsets. rspirv would reuse one SPIR-V type
+                // for both and decorate it twice, so force a fresh id.
+                let id = self.builder.id();
+                self.builder.type_struct_id(Some(id), fields);
                 for (index, field) in structure.fields.iter().enumerate() {
                     self.builder.member_decorate(
                         id,
@@ -1139,15 +1865,83 @@ impl Emitter {
                 );
                 id
             }
-            Type::Texture => {
-                let scalar = self.type_id(&Type::Float { bits: 32 })?;
-                self.builder
-                    .type_image(scalar, Dim::Dim3D, 0, 0, 0, 2, ImageFormat::Unknown, None)
+            Type::Texture(texture) => {
+                let texture = texture.clone();
+                let scalar = self.type_id(&texture.texel)?;
+                let dimension = match texture.dimension {
+                    TextureDimension::D1 => Dim::Dim1D,
+                    TextureDimension::D2 => Dim::Dim2D,
+                    TextureDimension::D3 => Dim::Dim3D,
+                    TextureDimension::Cube => Dim::DimCube,
+                };
+                // `Sampled` distinguishes an image read through a sampler
+                // from a storage image; Metal's access mode decides which.
+                let sampled = if texture.access == Access::Sample {
+                    1
+                } else {
+                    2
+                };
+                if texture.dimension == TextureDimension::D1 && sampled == 2 {
+                    self.builder.capability(Capability::Image1D);
+                }
+                if texture.multisampled && sampled == 2 {
+                    self.builder.capability(Capability::StorageImageMultisample);
+                }
+                if texture.dimension == TextureDimension::Cube && texture.array {
+                    self.builder.capability(Capability::SampledCubeArray);
+                }
+                // A storage image with an unknown format needs an explicit
+                // capability for each direction it is accessed in.
+                if sampled == 2 {
+                    match texture.access {
+                        Access::Read | Access::ReadWrite => {
+                            self.builder
+                                .capability(Capability::StorageImageReadWithoutFormat);
+                        }
+                        _ => {}
+                    }
+                    match texture.access {
+                        Access::Write | Access::ReadWrite => {
+                            self.builder
+                                .capability(Capability::StorageImageWriteWithoutFormat);
+                        }
+                        _ => {}
+                    }
+                }
+                self.builder.type_image(
+                    scalar,
+                    dimension,
+                    u32::from(texture.depth),
+                    u32::from(texture.array),
+                    u32::from(texture.multisampled),
+                    sampled,
+                    ImageFormat::Unknown,
+                    None,
+                )
             }
+            Type::Sampler => self.builder.type_sampler(),
             _ => return Err(emission(format!("unsupported SPIR-V value type {ty:?}"))),
         };
         self.types.insert(ty.clone(), id);
         Ok(id)
+    }
+}
+
+/// The Metal type of one stage output: a member of the returned structure, or
+/// the whole result when the entry point has a single unwrapped output.
+fn output_type(
+    function: &Function,
+    output: &crate::ir::StageOutput,
+    position: usize,
+) -> Result<Type, TranslateError> {
+    match (&function.result, output.field) {
+        (Type::Struct(structure), Some(field)) => structure
+            .fields
+            .get(field as usize)
+            .map(|field| field.ty.clone())
+            .ok_or_else(|| emission("stage output names a missing returned field")),
+        (result, None) if position == 0 => Ok(result.clone()),
+        _ => Err(emission("stage output does not match the returned type")),
     }
 }
 
@@ -1179,97 +1973,493 @@ fn type_stride(ty: &Type) -> Result<u32, TranslateError> {
     }
 }
 
-fn loop_shape(function: &Function, header: BlockId) -> Option<(BlockId, BlockId)> {
-    let block = function.blocks.iter().find(|block| block.id == header)?;
-    let Terminator::CondBranch {
-        true_block,
-        false_block,
-        ..
-    } = block.terminator
-    else {
-        return None;
-    };
-    let true_back = branches_to(function, true_block, header);
-    let false_back = branches_to(function, false_block, header);
-    match (true_back, false_back) {
-        (true, false) => Some((false_block, true_block)),
-        (false, true) => Some((true_block, false_block)),
-        _ => None,
-    }
-}
-
-fn branches_to(function: &Function, from: BlockId, target: BlockId) -> bool {
-    function
+/// Give a function a single returning block.
+///
+/// A Metal shader commonly returns from both sides of a bounds test. SPIR-V
+/// needs every conditional branch to name the block where its paths rejoin,
+/// and two returning blocks have none, so route both through one exit.
+fn single_exit(mut function: Function) -> Function {
+    let returning: Vec<_> = function
         .blocks
         .iter()
-        .find(|block| block.id == from)
-        .is_some_and(
-            |block| matches!(block.terminator, Terminator::Branch(value) if value == target),
+        .filter(|block| matches!(block.terminator, Terminator::Return(_)))
+        .map(|block| block.id)
+        .collect();
+    if returning.len() < 2 {
+        return function;
+    }
+    let exit = BlockId(
+        function
+            .blocks
+            .iter()
+            .map(|block| block.id.0)
+            .max()
+            .unwrap_or(0)
+            + 1,
+    );
+    let mut incomings = Vec::new();
+    for block in &mut function.blocks {
+        let Terminator::Return(value) = block.terminator.clone() else {
+            continue;
+        };
+        if let Some(value) = value {
+            incomings.push((block.id, value));
+        }
+        block.terminator = Terminator::Branch(exit);
+    }
+    let (instructions, terminator) = if incomings.is_empty() {
+        (Vec::new(), Terminator::Return(None))
+    } else {
+        let result = ValueId(function.values.len() as u32);
+        function.values.push(function.result.clone());
+        (
+            vec![crate::ir::Instruction {
+                result: Some(result),
+                kind: InstructionKind::Phi { incomings },
+            }],
+            Terminator::Return(Some(Operand::Value(result))),
         )
+    };
+    function.blocks.push(crate::ir::Block {
+        id: exit,
+        name: "exit".to_string(),
+        instructions,
+        terminator,
+    });
+    function
 }
 
-fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
-    match kind {
-        InstructionKind::Load { pointer } => vec![pointer],
-        InstructionKind::Store { pointer, value } => vec![pointer, value],
-        InstructionKind::IntegerAdd { lhs, rhs }
-        | InstructionKind::IntegerMultiply { lhs, rhs }
-        | InstructionKind::IntegerXor { lhs, rhs }
-        | InstructionKind::IntegerCompare { lhs, rhs, .. } => vec![lhs, rhs],
-        InstructionKind::ElementAddress { pointer, index } => vec![pointer, index],
-        InstructionKind::FieldAddress { pointer, .. } => vec![pointer],
-        InstructionKind::CompositeExtract { composite, .. } => vec![composite],
-        InstructionKind::BufferAddress { pointer, indices } => {
-            std::iter::once(pointer).chain(indices).collect()
+/// Order blocks so that a block always precedes those it dominates, which
+/// SPIR-V requires of a function's block list.
+fn reverse_post_order(function: &mut Function) {
+    let graph = ControlFlow::new(function);
+    let entry = function.blocks[0].id;
+    let mut order = Vec::new();
+    let mut visited = BTreeSet::new();
+    let mut stack = vec![(entry, 0usize)];
+    while let Some((block, index)) = stack.pop() {
+        if index == 0 && !visited.insert(block) {
+            continue;
         }
-        InstructionKind::VectorUnsignedLessThan { lhs, rhs }
-        | InstructionKind::FloatOrderedGreaterEqual { lhs, rhs }
-        | InstructionKind::FloatDiv { lhs, rhs }
-        | InstructionKind::FloatAdd { lhs, rhs }
-        | InstructionKind::FloatSubtract { lhs, rhs }
-        | InstructionKind::FloatMultiply { lhs, rhs }
-        | InstructionKind::FloatDot { lhs, rhs } => vec![lhs, rhs],
-        InstructionKind::Select {
-            condition,
-            on_true,
-            on_false,
-        } => vec![condition, on_true, on_false],
-        InstructionKind::VectorShuffle { first, second, .. } => vec![first, second],
-        InstructionKind::CompositeInsert {
-            composite, object, ..
-        } => vec![composite, object],
-        InstructionKind::FloatClamp { value, min, max } => vec![value, min, max],
-        InstructionKind::FloatMix {
-            first,
-            second,
-            weight,
-        } => vec![first, second, weight],
-        InstructionKind::All { vector }
-        | InstructionKind::ConvertUToF { value: vector }
-        | InstructionKind::IntegerResize { value: vector }
-        | InstructionKind::FloatSqrt { value: vector }
-        | InstructionKind::FloatAbs { value: vector }
-        | InstructionKind::FloatReciprocalSqrt { value: vector }
-        | InstructionKind::FloatExp2 { value: vector } => {
-            vec![vector]
+        match graph.successors[&block].get(index) {
+            Some(successor) => {
+                let successor = *successor;
+                stack.push((block, index + 1));
+                if !visited.contains(&successor) {
+                    stack.push((successor, 0));
+                }
+            }
+            None => order.push(block),
         }
-        InstructionKind::VectorSplat { value, .. } => vec![value],
-        InstructionKind::GlobalInvocationId => vec![],
-        InstructionKind::TextureWrite {
-            texture,
-            coordinate,
-            value,
-        } => vec![texture, coordinate, value],
-        InstructionKind::Phi { incomings } => incomings.iter().map(|(_, value)| value).collect(),
     }
+    order.reverse();
+    // Unreachable blocks keep their original relative position at the end.
+    let rank = |id: BlockId| {
+        order
+            .iter()
+            .position(|block| *block == id)
+            .unwrap_or(usize::MAX)
+    };
+    function.blocks.sort_by_key(|block| rank(block.id));
 }
 
-fn terminator_operands(terminator: &Terminator) -> Vec<&Operand> {
+/// Give each structured header its own merge block.
+///
+/// An `else if` chain reaches one rejoining block from several conditional
+/// branches, and SPIR-V forbids two headers from naming the same merge. Route
+/// the inner construct's edges through a new block, which then becomes its
+/// merge.
+fn split_shared_merges(function: &mut Function) -> Result<(), TranslateError> {
+    for _ in 0..function.blocks.len().max(1) {
+        let merges = control_flow_merges(function)?;
+        let mut claims: BTreeMap<BlockId, Vec<BlockId>> = BTreeMap::new();
+        for (header, merge) in &merges {
+            let block = match merge {
+                Merge::Selection { merge } | Merge::Loop { merge, .. } => *merge,
+            };
+            claims.entry(block).or_default().push(*header);
+        }
+        let Some((merge, headers)) = claims.into_iter().find(|(_, headers)| headers.len() > 1)
+        else {
+            return Ok(());
+        };
+        let graph = ControlFlow::new(function);
+        let dominators = graph.dominance(&[function.blocks[0].id], &graph.predecessors);
+        // The innermost header is the one every other claimant dominates.
+        let inner = headers
+            .iter()
+            .copied()
+            .max_by_key(|header| {
+                headers
+                    .iter()
+                    .filter(|other| dominators.dominates(**other, *header))
+                    .count()
+            })
+            .ok_or_else(|| emission("a merge block has no claiming header"))?;
+        let sources: Vec<BlockId> = graph
+            .predecessors
+            .get(&merge)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|predecessor| dominators.dominates(inner, *predecessor))
+            .collect();
+        if sources.is_empty() || sources.len() == graph.predecessors[&merge].len() {
+            return Err(emission(
+                "a shared merge block cannot be split into nested constructs",
+            ));
+        }
+        split_merge(function, merge, &sources);
+    }
+    Err(emission(
+        "control flow needs more restructuring than this translator performs",
+    ))
+}
+
+/// Insert a block between `sources` and `merge`, moving the phi inputs which
+/// arrive from those predecessors into it.
+fn split_merge(function: &mut Function, merge: BlockId, sources: &[BlockId]) {
+    let inserted = BlockId(
+        function
+            .blocks
+            .iter()
+            .map(|block| block.id.0)
+            .max()
+            .unwrap_or(0)
+            + 1,
+    );
+    for block in &mut function.blocks {
+        if !sources.contains(&block.id) {
+            continue;
+        }
+        block.terminator = match block.terminator.clone() {
+            Terminator::Branch(target) if target == merge => Terminator::Branch(inserted),
+            Terminator::CondBranch {
+                condition,
+                true_block,
+                false_block,
+            } => Terminator::CondBranch {
+                condition,
+                true_block: if true_block == merge {
+                    inserted
+                } else {
+                    true_block
+                },
+                false_block: if false_block == merge {
+                    inserted
+                } else {
+                    false_block
+                },
+            },
+            other => other,
+        };
+    }
+    let mut instructions = Vec::new();
+    let merge_block = function
+        .blocks
+        .iter()
+        .position(|block| block.id == merge)
+        .expect("the merge block exists");
+    let mut phis = std::mem::take(&mut function.blocks[merge_block].instructions);
+    for instruction in &mut phis {
+        let InstructionKind::Phi { incomings } = &mut instruction.kind else {
+            continue;
+        };
+        let (inner, outer): (Vec<_>, Vec<_>) = incomings
+            .iter()
+            .cloned()
+            .partition(|(from, _)| sources.contains(from));
+        let replacement = match inner.as_slice() {
+            [] => continue,
+            [(_, value)] => value.clone(),
+            _ => {
+                let result = ValueId(function.values.len() as u32);
+                let ty = instruction
+                    .result
+                    .and_then(|value| function.values.get(value.0 as usize))
+                    .cloned()
+                    .unwrap_or(Type::Void);
+                function.values.push(ty);
+                instructions.push(crate::ir::Instruction {
+                    result: Some(result),
+                    kind: InstructionKind::Phi { incomings: inner },
+                });
+                Operand::Value(result)
+            }
+        };
+        *incomings = outer;
+        incomings.push((inserted, replacement));
+    }
+    function.blocks[merge_block].instructions = phis;
+    function.blocks.push(crate::ir::Block {
+        id: inserted,
+        name: format!("merge{}", inserted.0),
+        instructions,
+        terminator: Terminator::Branch(merge),
+    });
+}
+
+/// The structured construct a block with two successors introduces.
+///
+/// SPIR-V has no unstructured control flow: every conditional branch must
+/// declare where its two paths rejoin, and a loop must additionally name its
+/// back edge. LLVM records neither, so both are recovered from the CFG.
+#[derive(Clone, Copy, Debug)]
+enum Merge {
+    Selection {
+        merge: BlockId,
+    },
+    Loop {
+        merge: BlockId,
+        continue_target: BlockId,
+    },
+}
+
+fn successors_of(terminator: &Terminator) -> Vec<BlockId> {
     match terminator {
-        Terminator::CondBranch { condition, .. } => vec![condition],
-        Terminator::Return(Some(value)) => vec![value],
-        _ => Vec::new(),
+        Terminator::Branch(target) => vec![*target],
+        Terminator::CondBranch {
+            true_block,
+            false_block,
+            ..
+        } => vec![*true_block, *false_block],
+        Terminator::Return(_) | Terminator::Unreachable => Vec::new(),
     }
+}
+
+struct ControlFlow {
+    blocks: Vec<BlockId>,
+    successors: HashMap<BlockId, Vec<BlockId>>,
+    predecessors: HashMap<BlockId, Vec<BlockId>>,
+}
+
+impl ControlFlow {
+    fn new(function: &Function) -> Self {
+        let mut graph = Self {
+            blocks: function.blocks.iter().map(|block| block.id).collect(),
+            successors: HashMap::new(),
+            predecessors: HashMap::new(),
+        };
+        for block in &function.blocks {
+            let successors = successors_of(&block.terminator);
+            for successor in &successors {
+                graph
+                    .predecessors
+                    .entry(*successor)
+                    .or_default()
+                    .push(block.id);
+            }
+            graph.successors.insert(block.id, successors);
+        }
+        graph
+    }
+
+    /// Iterative dataflow over a set lattice, used for both dominators and
+    /// post-dominators by swapping the edge direction.
+    fn dominance(&self, roots: &[BlockId], edges: &HashMap<BlockId, Vec<BlockId>>) -> Dominance {
+        let all: BTreeSet<_> = self.blocks.iter().copied().collect();
+        let mut sets: BTreeMap<BlockId, BTreeSet<BlockId>> = self
+            .blocks
+            .iter()
+            .map(|block| {
+                (
+                    *block,
+                    if roots.contains(block) {
+                        BTreeSet::from([*block])
+                    } else {
+                        all.clone()
+                    },
+                )
+            })
+            .collect();
+        loop {
+            let previous = sets.clone();
+            for block in self.blocks.iter().filter(|block| !roots.contains(block)) {
+                let incoming = edges.get(block).cloned().unwrap_or_default();
+                let mut next = match incoming.split_first() {
+                    Some((first, rest)) => {
+                        rest.iter().fold(previous[first].clone(), |set, edge| {
+                            set.intersection(&previous[edge]).copied().collect()
+                        })
+                    }
+                    None => BTreeSet::new(),
+                };
+                next.insert(*block);
+                sets.insert(*block, next);
+            }
+            if sets == previous {
+                return Dominance { sets };
+            }
+        }
+    }
+}
+
+struct Dominance {
+    sets: BTreeMap<BlockId, BTreeSet<BlockId>>,
+}
+
+impl Dominance {
+    fn dominates(&self, dominator: BlockId, block: BlockId) -> bool {
+        self.sets
+            .get(&block)
+            .is_some_and(|set| set.contains(&dominator))
+    }
+
+    /// The closest strict dominator: the one whose own dominator set is
+    /// largest, since a nearer dominator is dominated by every farther one.
+    fn immediate(&self, block: BlockId) -> Option<BlockId> {
+        self.sets
+            .get(&block)?
+            .iter()
+            .filter(|candidate| **candidate != block)
+            .max_by_key(|candidate| self.sets.get(candidate).map_or(0, BTreeSet::len))
+            .copied()
+    }
+}
+
+/// Recover the structured constructs of a function's control-flow graph.
+fn control_flow_merges(function: &Function) -> Result<HashMap<BlockId, Merge>, TranslateError> {
+    let graph = ControlFlow::new(function);
+    let entry = function.blocks[0].id;
+    let dominators = graph.dominance(&[entry], &graph.predecessors);
+    let exits: Vec<_> = graph
+        .blocks
+        .iter()
+        .copied()
+        .filter(|block| graph.successors[block].is_empty())
+        .collect();
+    let post_dominators = graph.dominance(&exits, &graph.successors);
+    // Loops first: a selection inside one may branch out of it, and that
+    // choice depends on where the loop continues.
+    let mut loops = Vec::new();
+    for block in &function.blocks {
+        if !matches!(block.terminator, Terminator::CondBranch { .. }) {
+            continue;
+        }
+        let latches: Vec<_> = graph
+            .predecessors
+            .get(&block.id)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|predecessor| dominators.dominates(block.id, *predecessor))
+            .collect();
+        if latches.is_empty() {
+            continue;
+        }
+        let [continue_target] = latches.as_slice() else {
+            return Err(emission(
+                "a loop with several back edges needs restructuring",
+            ));
+        };
+        let body = natural_loop(&graph, block.id, *continue_target);
+        let mut leaving: Vec<_> = body
+            .iter()
+            .flat_map(|member| graph.successors[member].iter().copied())
+            .filter(|successor| !body.contains(successor))
+            .collect();
+        leaving.sort_unstable();
+        leaving.dedup();
+        let [merge] = leaving.as_slice() else {
+            return Err(emission("a loop with several exits needs restructuring"));
+        };
+        loops.push((block.id, body, *merge, *continue_target));
+    }
+    let mut merges = HashMap::new();
+    for (header, _, merge, continue_target) in &loops {
+        merges.insert(
+            *header,
+            Merge::Loop {
+                merge: *merge,
+                continue_target: *continue_target,
+            },
+        );
+    }
+    for block in &function.blocks {
+        if !matches!(block.terminator, Terminator::CondBranch { .. })
+            || merges.contains_key(&block.id)
+        {
+            continue;
+        }
+        let merge = post_dominators.immediate(block.id).ok_or_else(|| {
+            emission("a conditional branch's paths never rejoin, which SPIR-V cannot express")
+        })?;
+        // A conditional which leaves an enclosing loop, whether by `break` or
+        // by `continue`, has no rejoining block inside the loop body: its
+        // paths meet only at the loop's merge or its continue target, and
+        // SPIR-V accepts neither as a selection's merge. Use the arm which
+        // keeps running the body instead.
+        let enclosing = loops
+            .iter()
+            .filter(|(_, body, _, _)| body.contains(&block.id))
+            .min_by_key(|(_, body, _, _)| body.len());
+        let merge = match enclosing {
+            Some((_, body, _, continue_target))
+                if !body.contains(&merge) || merge == *continue_target =>
+            {
+                let staying: Vec<_> = successors_of(&block.terminator)
+                    .into_iter()
+                    .filter(|successor| successor != continue_target)
+                    .filter(|successor| reaches(&graph, *successor, *continue_target, body))
+                    .collect();
+                match staying.as_slice() {
+                    [only] => *only,
+                    // Two arms which both run more of the body before
+                    // leaving it do not rejoin inside the loop. Expressing
+                    // that needs real restructuring, not a merge choice.
+                    _ => {
+                        return Err(emission(
+                            "a conditional which leaves its loop has no single continuing arm",
+                        ));
+                    }
+                }
+            }
+            _ => merge,
+        };
+        merges.insert(block.id, Merge::Selection { merge });
+    }
+    Ok(merges)
+}
+
+/// Whether `target` is reachable from `from` without leaving `within`.
+fn reaches(
+    graph: &ControlFlow,
+    from: BlockId,
+    target: BlockId,
+    within: &BTreeSet<BlockId>,
+) -> bool {
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![from];
+    while let Some(block) = pending.pop() {
+        if block == target {
+            return true;
+        }
+        if !within.contains(&block) || !seen.insert(block) {
+            continue;
+        }
+        pending.extend(graph.successors[&block].iter().copied());
+    }
+    false
+}
+
+/// The blocks of the natural loop formed by the back edge `latch -> header`.
+fn natural_loop(graph: &ControlFlow, header: BlockId, latch: BlockId) -> BTreeSet<BlockId> {
+    let mut body = BTreeSet::from([header]);
+    let mut pending = vec![latch];
+    while let Some(block) = pending.pop() {
+        if !body.insert(block) {
+            continue;
+        }
+        pending.extend(
+            graph
+                .predecessors
+                .get(&block)
+                .into_iter()
+                .flatten()
+                .copied(),
+        );
+    }
+    body
 }
 
 fn build_error(error: rspirv::dr::Error) -> TranslateError {

@@ -274,6 +274,11 @@ pub fn bootstrap() {
             new_function_with_name as *const c_void,
             c"@24@0:8@16",
         );
+        library_class.replace_method(
+            objc::sel::get("functionNames"),
+            library_function_names as *const c_void,
+            c"@16@0:8",
+        );
         function_class.replace_method(
             objc::sel::get("name"),
             function_name as *const c_void,
@@ -744,16 +749,30 @@ unsafe extern "C" fn new_library_with_data(
         report_library_error("Metal device has no Vulkan target profile");
         return std::ptr::null_mut();
     };
-    match metal_translate::translate(metal_translate::AirInput::Bitcode(air), target) {
-        Ok(_) => {
-            report_library_error("AIR translated, but MTLFunction objects are not connected yet");
-            std::ptr::null_mut()
-        }
-        Err(error) => {
-            report_library_error(error);
-            std::ptr::null_mut()
-        }
+    let translated =
+        match metal_translate::translate(metal_translate::AirInput::Bitcode(air), target) {
+            Ok(translated) => translated,
+            Err(error) => {
+                report_library_error(error);
+                return std::ptr::null_mut();
+            }
+        };
+    retain_library(translated)
+}
+
+/// Wrap a translated library in the `MTLLibrary` object the guest holds. Both
+/// library entry points differ only in how they obtain the translation.
+fn retain_library(translated: metal_translate::TranslatedLibrary) -> Id {
+    let class = objc::class::lookup(c"R3MTLLibrary").expect("Metal is bootstrapped");
+    let library = unsafe { corefoundation::base::allocate::<Library>(class) };
+    if library.is_null() {
+        report_library_error("could not allocate MTL library");
+        return std::ptr::null_mut();
     }
+    // `allocate` only initializes the Objective-C header.  Write the Rust
+    // payload without dropping the uninitialized slot first.
+    unsafe { std::ptr::addr_of_mut!((*library).translated).write(translated) };
+    library as Id
 }
 
 unsafe extern "C" fn new_library_with_source(
@@ -793,15 +812,11 @@ unsafe extern "C" fn new_library_with_source(
         Ok(translated) => translated,
         Err(translation_error) => return fail_library(error, &translation_error.to_string()),
     };
-    let class = objc::class::lookup(c"R3MTLLibrary").expect("Metal is bootstrapped");
-    let library = unsafe { corefoundation::base::allocate::<Library>(class) };
+    let library = retain_library(translated);
     if library.is_null() {
         return fail_library(error, "could not allocate MTL source library");
     }
-    // `allocate` only initializes the Objective-C header.  Write the Rust
-    // payload without dropping the uninitialized slot first.
-    unsafe { std::ptr::addr_of_mut!((*library).translated).write(translated) };
-    library as Id
+    library
 }
 
 unsafe extern "C" fn new_function_with_name(receiver: Id, _sel: Sel, name: Id) -> Id {
@@ -828,6 +843,26 @@ unsafe extern "C" fn new_function_with_name(receiver: Id, _sel: Sel, name: Id) -
         (*function).entry = entry;
     }
     function as Id
+}
+
+/// `-[MTLLibrary functionNames]`: the entry points the translation produced,
+/// in the order the library declares them.
+unsafe extern "C" fn library_function_names(receiver: Id, _sel: Sel) -> Id {
+    let library = unsafe { &*(receiver as *const Library) };
+    let names: Vec<corefoundation::base::CFTypeRef> = library
+        .translated
+        .entries
+        .iter()
+        .map(|entry| foundation::string::from_str(&entry.name) as corefoundation::base::CFTypeRef)
+        .collect();
+    // SAFETY: a fresh array over freshly created strings.
+    unsafe {
+        corefoundation::api::CFAutorelease(corefoundation::collections::new_array(
+            &names,
+            corefoundation::callbacks::Policy::from_type_callbacks(),
+            false,
+        )) as Id
+    }
 }
 
 unsafe extern "C" fn function_name(receiver: Id, _sel: Sel) -> Id {
@@ -1139,6 +1174,44 @@ mod tests {
         assert_eq!(
             unsafe { compute_pipeline_max_threads(pipeline, std::ptr::null()) },
             1024
+        );
+    }
+
+    /// A translated AIR library must expose its entry points as `MTLFunction`
+    /// objects and answer `functionNames`, exactly as the source path does:
+    /// a shipped Metal library is the only form a game uses.
+    #[test]
+    fn air_and_source_libraries_expose_the_same_function_objects() {
+        bootstrap();
+        let device = unsafe { corefoundation::base::allocate::<Device>(device_class()) };
+        let target = Box::leak(Box::new(metal_translate::TargetProfile::vulkan_1_3()));
+        unsafe { (*device).target = target };
+        let source = foundation::string::from_str(
+            "kernel void clear(device uint* output [[buffer(0)]]) { output[0] = 42; }",
+        );
+        let mut error = std::ptr::null_mut();
+        let library = unsafe {
+            new_library_with_source(
+                device as Id,
+                std::ptr::null(),
+                source,
+                std::ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(!library.is_null());
+        let names = unsafe { library_function_names(library, std::ptr::null()) };
+        assert_eq!(
+            unsafe { corefoundation::api::CFArrayGetCount(names as CFTypeRef) },
+            1
+        );
+        let name =
+            unsafe { corefoundation::api::CFArrayGetValueAtIndex(names as CFTypeRef, 0) as Id };
+        let function = unsafe { new_function_with_name(library, std::ptr::null(), name) };
+        assert!(!function.is_null());
+        assert_eq!(
+            unsafe { foundation::string::bytes(function_name(function, std::ptr::null())) },
+            b"clear"
         );
     }
 

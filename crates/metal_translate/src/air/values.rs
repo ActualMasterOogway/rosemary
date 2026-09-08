@@ -27,9 +27,28 @@ pub(super) struct ValueTable {
 }
 
 impl ValueTable {
+    /// Allocate only the module-level values: functions and module
+    /// constants. AIR's interface metadata refers to exactly these, so it can
+    /// be decoded before an entry function has been selected.
+    pub(super) fn module_values(
+        module: &BitcodeBlock,
+        types: &[DecodedType],
+    ) -> Result<Self, TranslateError> {
+        Self::decode_inner(module, None, types, &[])
+    }
+
     pub(super) fn decode(
         module: &BitcodeBlock,
         body: &BitcodeBlock,
+        types: &[DecodedType],
+        parameters: &[usize],
+    ) -> Result<Self, TranslateError> {
+        Self::decode_inner(module, Some(body), types, parameters)
+    }
+
+    fn decode_inner(
+        module: &BitcodeBlock,
+        body: Option<&BitcodeBlock>,
         types: &[DecodedType],
         parameters: &[usize],
     ) -> Result<Self, TranslateError> {
@@ -83,8 +102,8 @@ impl ValueTable {
             table.values.push(Value { ty, constant: None });
         }
         for block in body
-            .elements
-            .iter()
+            .into_iter()
+            .flat_map(|body| body.elements.iter())
             .filter_map(BitcodeElement::as_block)
             .filter(|b| b.id == 11)
         {
@@ -142,48 +161,95 @@ impl ValueTable {
     }
 
     fn operand_id(&self, encoded: u64) -> Result<usize, TranslateError> {
-        let encoded =
-            u32::try_from(encoded).map_err(|_| semantic("LLVM value reference exceeds 32 bits"))?;
-        let next = u32::try_from(self.values.len())
-            .map_err(|_| semantic("LLVM value table exceeds 32 bits"))?;
-        let id = if self.relative {
-            next.wrapping_sub(encoded)
-        } else {
-            encoded
-        } as usize;
+        let id = self.reference(encoded)?;
         if id >= self.values.len() {
             return Err(semantic(format!(
-                "LLVM value reference {encoded} resolves to undefined value {id} at {next}"
+                "LLVM value reference resolves to undefined value {id} at {}",
+                self.values.len()
             )));
         }
         Ok(id)
     }
 
+    /// Resolve a value reference without requiring it to be defined yet.
+    ///
+    /// LLVM lays a function's blocks out in an order which need not follow
+    /// dominance, so an operand can name an instruction which appears later
+    /// in the record stream. Those references carry their type inline.
+    fn reference(&self, encoded: u64) -> Result<usize, TranslateError> {
+        let encoded =
+            u32::try_from(encoded).map_err(|_| semantic("LLVM value reference exceeds 32 bits"))?;
+        let next = u32::try_from(self.values.len())
+            .map_err(|_| semantic("LLVM value table exceeds 32 bits"))?;
+        Ok(if self.relative {
+            next.wrapping_sub(encoded)
+        } else {
+            encoded
+        } as usize)
+    }
+
+    /// Lower one LLVM function body to a Metal IR function.
+    ///
+    /// `opaque_types` gives Metal types for arguments whose LLVM type is
+    /// opaque, keyed by argument position: AIR spells textures and samplers
+    /// only in entry-point metadata.
     pub(super) fn lower_body(
         mut self,
         body: &BitcodeBlock,
         types: &[DecodedType],
-        names: &HashMap<usize, String>,
-        name: String,
-        parameter_types: &[usize],
-        result_type: usize,
+        signature: &Signature<'_>,
     ) -> Result<Function, TranslateError> {
-        let declarations = body
+        let &Signature {
+            names,
+            ref name,
+            parameter_types,
+            result_type,
+            opaque_types,
+        } = signature;
+        let name = name.clone();
+        let records: Vec<_> = body
             .elements
             .iter()
             .filter_map(BitcodeElement::as_record)
-            .filter(|r| r.id == 1)
-            .count();
-        if declarations != 1
-            || !body
-                .elements
-                .iter()
-                .filter_map(BitcodeElement::as_record)
-                .next()
-                .is_some_and(|r| r.id == 1)
-        {
+            .collect();
+        let [declaration, rest @ ..] = records.as_slice() else {
+            return Err(semantic("LLVM function body is empty"));
+        };
+        if declaration.id != 1 || record_values(declaration).len() != 1 {
             return Err(semantic(
                 "LLVM function must begin with one DECLAREBLOCKS record",
+            ));
+        }
+        let block_count = usize::try_from(record_values(declaration)[0])
+            .map_err(|_| semantic("LLVM block count does not fit in memory"))?;
+        if block_count == 0 {
+            return Err(semantic("LLVM function declares no blocks"));
+        }
+        // LLVM stores a body as one flat record list; a terminator ends the
+        // current basic block. Split it before lowering so value numbering
+        // and block membership are decided separately.
+        let mut block_records: Vec<Vec<&llvm_bitcode::bitcode::Record>> =
+            vec![Vec::new(); block_count];
+        let mut index = 0;
+        for record in rest {
+            if record.id == 1 {
+                return Err(semantic("LLVM body has more than one DECLAREBLOCKS record"));
+            }
+            // Debug-location records annotate the preceding instruction.
+            if record.id == 33 || record.id == 35 {
+                continue;
+            }
+            let block = block_records
+                .get_mut(index)
+                .ok_or_else(|| semantic("LLVM body has more blocks than it declares"))?;
+            block.push(record);
+            if is_terminator(record.id) {
+                index += 1;
+            }
+        }
+        if index != block_count {
+            return Err(semantic(
+                "LLVM body's terminators do not match its declared block count",
             ));
         }
         let mut function = Function {
@@ -195,7 +261,25 @@ impl ValueTable {
         };
         let mut operands = HashMap::new();
         for (index, &ty) in parameter_types.iter().enumerate() {
-            let ty = ir_type(ty, types)?;
+            // An opaque LLVM argument is a Metal texture or sampler; its
+            // shape is only in metadata. Any other argument keeps its LLVM
+            // type, so a metadata mismatch is reported rather than obeyed.
+            let opaque = match &types[ty] {
+                DecodedType::Opaque(_) => true,
+                DecodedType::Pointer { pointee, .. } => {
+                    matches!(types[*pointee], DecodedType::Opaque(_))
+                }
+                _ => false,
+            };
+            let ty = match (opaque, opaque_types.get(&(index as u32))) {
+                (true, Some(ty)) => ty.clone(),
+                (true, None) => {
+                    return Err(semantic(
+                        "AIR opaque argument has no interface metadata type",
+                    ));
+                }
+                (false, _) => ir_type(ty, types)?,
+            };
             let value = ValueId(function.values.len() as u32);
             function.values.push(ty.clone());
             function.parameters.push(Parameter {
@@ -205,298 +289,607 @@ impl ValueTable {
             });
             operands.insert(self.argument_start + index, Operand::Value(value));
         }
-        let mut instructions = Vec::new();
-        let mut terminator = None;
+        // Composite constants need instructions. They are emitted at the head
+        // of the entry block so every later use is dominated by them.
+        let mut constants = Vec::new();
+        let mut blocks: Vec<Block> = Vec::new();
+        let mut phi_fixups: Vec<PhiFixup> = Vec::new();
+        // Pointers produced by a widening bitcast keep the pointee type they
+        // really address; a load through one is adapted to the requested type.
+        let mut aliases: HashMap<usize, PointerAlias> = HashMap::new();
+        // Metal IR values reserved for LLVM instructions which are used
+        // before the record stream defines them.
+        let mut forward: HashMap<usize, (ValueId, usize)> = HashMap::new();
         let first_result = self.values.len();
-        for record in body.elements.iter().filter_map(BitcodeElement::as_record) {
-            let fields = record_values(record);
-            if record.id == 1 {
-                if fields != [1] {
-                    return Err(semantic(
-                        "LLVM body requires control-flow lowering for multiple blocks",
-                    ));
+        for (block_index, block) in block_records.iter().enumerate() {
+            let mut instructions = Vec::new();
+            let mut terminator = None;
+            for record in block {
+                let fields = record_values(record);
+                if terminator.is_some() {
+                    return Err(semantic("LLVM instruction after terminator"));
                 }
-                continue;
-            }
-            if terminator.is_some() {
-                return Err(semantic("LLVM instruction after terminator"));
-            }
-            let mut operand = |encoded| -> Result<(usize, Operand), TranslateError> {
-                let id = self.operand_id(encoded)?;
-                let op = self.materialize(
-                    id,
-                    types,
-                    &mut function,
-                    &mut instructions,
-                    &mut operands,
-                    &mut Vec::new(),
-                )?;
-                Ok((self.values[id].ty, op))
-            };
-            let (ty, kind) = match (record.id, fields.as_slice()) {
-                (6, [vector, index]) => {
-                    let (ty, composite) = operand(*vector)?;
-                    let DecodedType::Vector { element, lanes } = types[ty] else {
-                        return Err(semantic("extractelement requires vector"));
-                    };
-                    let index = self.integer(self.operand_id(*index)?, types)?;
-                    if index >= u64::from(lanes) {
-                        return Err(semantic("extractelement lane is out of range"));
+                // `declared` is the type a record repeats for an operand it
+                // names before the record stream defines it: LLVM lays a
+                // function's blocks out in an order which need not follow
+                // dominance. Reserve a Metal IR value for such an operand and
+                // fill it in when the definition arrives.
+                let mut operand = |encoded: u64,
+                                   declared: Option<&u64>|
+                 -> Result<(usize, Operand), TranslateError> {
+                    let id = self.reference(encoded)?;
+                    if id < self.values.len() {
+                        let op = self.materialize(id, types, &mut operands, &mut Vec::new())?;
+                        return Ok((self.values[id].ty, op));
                     }
-                    (
-                        element,
-                        InstructionKind::CompositeExtract {
-                            composite,
-                            index: index as u32,
-                        },
-                    )
-                }
-                (7, [vector, object, index]) => {
-                    let (ty, composite) = operand(*vector)?;
-                    let (object_ty, object) = operand(*object)?;
-                    let DecodedType::Vector { element, lanes } = types[ty] else {
-                        return Err(semantic("insertelement requires vector"));
+                    let Some(declared) = declared else {
+                        return Err(semantic(format!(
+                            "LLVM value reference resolves to undefined value {id} at {}",
+                            self.values.len()
+                        )));
                     };
-                    let index = self.integer(self.operand_id(*index)?, types)?;
-                    if index >= u64::from(lanes) || object_ty != element {
-                        return Err(semantic("insertelement lane or element type mismatch"));
-                    }
-                    (
-                        ty,
-                        InstructionKind::CompositeInsert {
-                            composite,
-                            object,
-                            index: index as u32,
-                        },
-                    )
-                }
-                (8, [first, second, mask]) => {
-                    let (ty, first) = operand(*first)?;
-                    let (second_ty, second) = operand(*second)?;
-                    let DecodedType::Vector { element, lanes } = types[ty] else {
-                        return Err(semantic("shufflevector requires vectors"));
-                    };
-                    if ty != second_ty {
-                        return Err(semantic("shufflevector input type mismatch"));
-                    }
-                    let mask = self.operand_id(*mask)?;
-                    let components = self.shuffle_mask(mask, types)?;
-                    if components
-                        .iter()
-                        .any(|&index| index != u32::MAX && index >= lanes * 2)
-                    {
-                        return Err(semantic("shufflevector mask is out of range"));
-                    }
-                    let result = types.iter().position(|ty| matches!(ty, DecodedType::Vector { element: e, lanes: n } if *e == element && *n as usize == components.len())).ok_or_else(|| semantic("shufflevector result type missing"))?;
-                    (
-                        result,
-                        InstructionKind::VectorShuffle {
-                            first,
-                            second,
-                            components,
-                        },
-                    )
-                }
-                (3, [value, target, opcode @ (0 | 1)]) => {
-                    let (source, value) = operand(*value)?;
-                    let target = type_reference(Some(target), types.len())?;
-                    let (DecodedType::Integer(from), DecodedType::Integer(to)) =
-                        (&types[source], &types[target])
-                    else {
-                        return Err(semantic("LLVM integer cast requires scalar integers"));
-                    };
-                    if (*opcode == 0 && to >= from) || (*opcode == 1 && to <= from) {
-                        return Err(semantic("LLVM integer cast has invalid widths"));
-                    }
-                    (target, InstructionKind::IntegerResize { value })
-                }
-                (30, [pointer, indices @ ..]) if !indices.is_empty() => {
-                    let (pointer_ty, pointer) = operand(*pointer)?;
-                    let DecodedType::Pointer {
-                        mut pointee,
-                        address_space,
-                    } = types[pointer_ty]
-                    else {
-                        return Err(semantic("LLVM GEP requires pointer"));
-                    };
-                    let mut decoded = Vec::new();
-                    for (position, &index) in indices.iter().enumerate() {
-                        let (index_ty, value) = operand(index)?;
-                        if !matches!(types[index_ty], DecodedType::Integer(_)) {
-                            return Err(semantic("LLVM GEP index is not integer"));
-                        }
-                        if position > 0 {
-                            pointee = match &types[pointee] {
-                                DecodedType::Struct { fields, .. } => {
-                                    let field = self.integer(self.operand_id(index)?, types)?;
-                                    *fields
-                                        .get(field as usize)
-                                        .ok_or_else(|| semantic("LLVM GEP field out of bounds"))?
-                                }
-                                DecodedType::Array { element, .. }
-                                | DecodedType::Vector { element, .. } => *element,
-                                _ => return Err(semantic("LLVM GEP indexes a scalar")),
-                            };
-                        }
-                        decoded.push(value);
-                    }
-                    let target = types.iter().position(|ty| matches!(ty, DecodedType::Pointer { pointee: p, address_space: a } if *p == pointee && *a == address_space)).ok_or_else(|| semantic("LLVM GEP result pointer type is missing"))?;
-                    (
-                        target,
-                        InstructionKind::BufferAddress {
-                            pointer,
-                            indices: decoded,
-                        },
-                    )
-                }
-                (20, [pointer, alignment, volatile]) if *volatile == 0 && *alignment <= 32 => {
-                    let (ty, pointer) = operand(*pointer)?;
-                    let DecodedType::Pointer { pointee, .. } = types[ty] else {
-                        return Err(semantic("LLVM load requires pointer"));
-                    };
-                    (pointee, InstructionKind::Load { pointer })
-                }
-                (2, [lhs, rhs, opcode] | [lhs, rhs, opcode, _]) => {
-                    let (ty, lhs) = operand(*lhs)?;
-                    let (rhs_ty, rhs) = operand(*rhs)?;
-                    if ty != rhs_ty {
-                        return Err(semantic("LLVM binary operand type mismatch"));
-                    }
-                    let scalar = match types[ty] {
-                        DecodedType::Vector { element, .. } => &types[element],
-                        _ => &types[ty],
-                    };
-                    let kind = match (scalar, opcode) {
-                        (DecodedType::Float(_), 0) => InstructionKind::FloatAdd { lhs, rhs },
-                        (DecodedType::Float(_), 1) => InstructionKind::FloatSubtract { lhs, rhs },
-                        (DecodedType::Float(_), 2) => InstructionKind::FloatMultiply { lhs, rhs },
-                        (DecodedType::Float(_), 4) => InstructionKind::FloatDiv { lhs, rhs },
-                        _ => {
-                            return Err(semantic(format!(
-                                "unsupported LLVM binary opcode {opcode}"
-                            )));
+                    let ty = type_reference(Some(declared), types.len())?;
+                    let value = match forward.get(&id) {
+                        Some((value, _)) => *value,
+                        None => {
+                            let value = ValueId(function.values.len() as u32);
+                            function.values.push(ir_type(ty, types)?);
+                            forward.insert(id, (value, ty));
+                            value
                         }
                     };
-                    (ty, kind)
-                }
-                (34, [_, cc, callee, args @ ..]) if *cc == 1 => {
-                    let callee = self.operand_id(*callee)?;
-                    let signature = match types[self.values[callee].ty] {
-                        DecodedType::Pointer { pointee, .. } => pointee,
-                        _ => self.values[callee].ty,
-                    };
-                    let DecodedType::Function { result, parameters } = &types[signature] else {
-                        return Err(semantic("LLVM call target is not a function"));
-                    };
-                    if args.len() != parameters.len() {
-                        return Err(semantic("LLVM call arity mismatch"));
-                    }
-                    let mut actual = Vec::new();
-                    for (&arg, &expected) in args.iter().zip(parameters) {
-                        let (ty, value) = operand(arg)?;
-                        if ty != expected {
-                            return Err(semantic("LLVM call argument type mismatch"));
+                    Ok((ty, Operand::Value(value)))
+                };
+                let (ty, kind) = match (record.id, fields.as_slice()) {
+                    (6, [vector, index]) => {
+                        let (ty, composite) = operand(*vector, None)?;
+                        let DecodedType::Vector { element, lanes } = types[ty] else {
+                            return Err(semantic("extractelement requires vector"));
+                        };
+                        let index = self.integer(self.operand_id(*index)?, types)?;
+                        if index >= u64::from(lanes) {
+                            return Err(semantic("extractelement lane is out of range"));
                         }
-                        actual.push(value);
+                        (
+                            element,
+                            InstructionKind::CompositeExtract {
+                                composite,
+                                index: index as u32,
+                            },
+                        )
                     }
-                    let intrinsic = names
-                        .get(&callee)
-                        .ok_or_else(|| semantic("LLVM call target has no name"))?;
-                    let kind = match (intrinsic.as_str(), actual.as_slice()) {
-                        ("air.convert.f.f32.u.i32", [value]) => InstructionKind::ConvertUToF {
-                            value: value.clone(),
-                        },
-                        ("air.dot.v3f32" | "air.dot.v4f32", [lhs, rhs]) => {
-                            InstructionKind::FloatDot {
-                                lhs: lhs.clone(),
-                                rhs: rhs.clone(),
+                    (7, [vector, object, index]) => {
+                        let (ty, composite) = operand(*vector, None)?;
+                        let (object_ty, object) = operand(*object, None)?;
+                        let DecodedType::Vector { element, lanes } = types[ty] else {
+                            return Err(semantic("insertelement requires vector"));
+                        };
+                        let index = self.integer(self.operand_id(*index)?, types)?;
+                        if index >= u64::from(lanes) || object_ty != element {
+                            return Err(semantic("insertelement lane or element type mismatch"));
+                        }
+                        (
+                            ty,
+                            InstructionKind::CompositeInsert {
+                                composite,
+                                object,
+                                index: index as u32,
+                            },
+                        )
+                    }
+                    (8, [first, second, mask] | [first, _, second, mask]) => {
+                        let (ty, first) = match fields.as_slice() {
+                            [_, declared, _, _] => operand(*first, Some(declared))?,
+                            _ => operand(*first, None)?,
+                        };
+                        let (second_ty, second) = operand(*second, None)?;
+                        let DecodedType::Vector { element, lanes } = types[ty] else {
+                            return Err(semantic("shufflevector requires vectors"));
+                        };
+                        if ty != second_ty {
+                            return Err(semantic("shufflevector input type mismatch"));
+                        }
+                        let mask = self.operand_id(*mask)?;
+                        let components = self.shuffle_mask(mask, types)?;
+                        if components
+                            .iter()
+                            .any(|&index| index != u32::MAX && index >= lanes * 2)
+                        {
+                            return Err(semantic("shufflevector mask is out of range"));
+                        }
+                        let result = types.iter().position(|ty| matches!(ty, DecodedType::Vector { element: e, lanes: n } if *e == element && *n as usize == components.len())).ok_or_else(|| semantic("shufflevector result type missing"))?;
+                        (
+                            result,
+                            InstructionKind::VectorShuffle {
+                                first,
+                                second,
+                                components,
+                            },
+                        )
+                    }
+                    (3, [source_value, target, opcode]) => {
+                        let source_id = self.operand_id(*source_value)?;
+                        let (source, value) = operand(*source_value, None)?;
+                        let target = type_reference(Some(target), types.len())?;
+                        // Apple's compiler reads a `float3` struct member
+                        // with a `float4` load, because Metal pads a `float3`
+                        // to sixteen bytes. Record the pointee the pointer
+                        // really addresses and adapt at the load rather than
+                        // retyping the pointer.
+                        if let (
+                            DecodedType::Pointer {
+                                pointee: from,
+                                address_space,
+                            },
+                            DecodedType::Pointer {
+                                pointee: to,
+                                address_space: target_space,
+                            },
+                        ) = (&types[source], &types[target])
+                            && *opcode == 11
+                            && address_space == target_space
+                        {
+                            let actual =
+                                aliases.get(&source_id).map_or(*from, |alias| alias.pointee);
+                            reinterpretation(types, actual, *to)?;
+                            let id = self.values.len();
+                            aliases.insert(
+                                id,
+                                PointerAlias {
+                                    pointee: actual,
+                                    operand: value.clone(),
+                                },
+                            );
+                            define(
+                                &mut forward,
+                                id,
+                                value,
+                                &mut operands,
+                                &function,
+                                &mut instructions,
+                            )?;
+                            self.values.push(Value {
+                                ty: target,
+                                constant: None,
+                            });
+                            continue;
+                        }
+                        let op = cast_operation(*opcode, source, target, types)?;
+                        (target, InstructionKind::Convert { op, value })
+                    }
+                    (30, [pointer, indices @ ..]) if !indices.is_empty() => {
+                        let (pointer_ty, pointer) = operand(*pointer, None)?;
+                        let DecodedType::Pointer {
+                            mut pointee,
+                            address_space,
+                        } = types[pointer_ty]
+                        else {
+                            return Err(semantic("LLVM GEP requires pointer"));
+                        };
+                        let mut decoded = Vec::new();
+                        for (position, &index) in indices.iter().enumerate() {
+                            let (index_ty, value) = operand(index, None)?;
+                            if !matches!(types[index_ty], DecodedType::Integer(_)) {
+                                return Err(semantic("LLVM GEP index is not integer"));
                             }
+                            if position > 0 {
+                                pointee = match &types[pointee] {
+                                    DecodedType::Struct { fields, .. } => {
+                                        let field = self.integer(self.operand_id(index)?, types)?;
+                                        *fields.get(field as usize).ok_or_else(|| {
+                                            semantic("LLVM GEP field out of bounds")
+                                        })?
+                                    }
+                                    DecodedType::Array { element, .. }
+                                    | DecodedType::Vector { element, .. } => *element,
+                                    _ => return Err(semantic("LLVM GEP indexes a scalar")),
+                                };
+                            }
+                            decoded.push(value);
                         }
-                        ("air.fast_clamp.f32", [value, min, max]) => InstructionKind::FloatClamp {
-                            value: value.clone(),
-                            min: min.clone(),
-                            max: max.clone(),
-                        },
-                        ("air.fast_fabs.f32", [value]) => InstructionKind::FloatAbs {
-                            value: value.clone(),
-                        },
-                        ("air.fast_rsqrt.f32", [value]) => InstructionKind::FloatReciprocalSqrt {
-                            value: value.clone(),
-                        },
-                        _ => {
-                            return Err(semantic(format!(
-                                "LLVM intrinsic {intrinsic} needs Metal IR lowering"
-                            )));
+                        let target = types.iter().position(|ty| matches!(ty, DecodedType::Pointer { pointee: p, address_space: a } if *p == pointee && *a == address_space)).ok_or_else(|| semantic("LLVM GEP result pointer type is missing"))?;
+                        (
+                            target,
+                            InstructionKind::BufferAddress {
+                                pointer,
+                                indices: decoded,
+                            },
+                        )
+                    }
+                    (20, [pointer, alignment, volatile]) if *volatile == 0 && *alignment <= 32 => {
+                        let pointer_id = self.operand_id(*pointer)?;
+                        let (ty, pointer) = operand(*pointer, None)?;
+                        let DecodedType::Pointer { pointee, .. } = types[ty] else {
+                            return Err(semantic("LLVM load requires pointer"));
+                        };
+                        let Some(alias) = aliases.get(&pointer_id) else {
+                            let value = emit(
+                                &mut function,
+                                &mut instructions,
+                                ir_type(pointee, types)?,
+                                InstructionKind::Load { pointer },
+                            );
+                            define(
+                                &mut forward,
+                                self.values.len(),
+                                value,
+                                &mut operands,
+                                &function,
+                                &mut instructions,
+                            )?;
+                            self.values.push(Value {
+                                ty: pointee,
+                                constant: None,
+                            });
+                            continue;
+                        };
+                        let loaded = emit(
+                            &mut function,
+                            &mut instructions,
+                            ir_type(alias.pointee, types)?,
+                            InstructionKind::Load {
+                                pointer: alias.operand.clone(),
+                            },
+                        );
+                        let value = widen(
+                            loaded,
+                            alias.pointee,
+                            pointee,
+                            types,
+                            &mut function,
+                            &mut instructions,
+                        )?;
+                        define(
+                            &mut forward,
+                            self.values.len(),
+                            value,
+                            &mut operands,
+                            &function,
+                            &mut instructions,
+                        )?;
+                        self.values.push(Value {
+                            ty: pointee,
+                            constant: None,
+                        });
+                        continue;
+                    }
+                    (2, [lhs, rhs, opcode] | [lhs, rhs, opcode, _]) => {
+                        // A four-field record is ambiguous: it is either an
+                        // operation with fast-math flags, or one whose first
+                        // operand is not defined yet and so repeats its type.
+                        // Only the value table can tell them apart.
+                        let forward_form = matches!(
+                            fields.as_slice(),
+                            [first, ..] if self.reference(*first)? >= self.values.len()
+                        );
+                        let (lhs, rhs, opcode) = match (fields.as_slice(), forward_form) {
+                            ([first, declared, second, code], true) => (
+                                operand(*first, Some(declared))?,
+                                operand(*second, None)?,
+                                code,
+                            ),
+                            _ => (operand(*lhs, None)?, operand(*rhs, None)?, opcode),
+                        };
+                        let (ty, lhs) = lhs;
+                        let (rhs_ty, rhs) = rhs;
+                        if ty != rhs_ty {
+                            return Err(semantic("LLVM binary operand type mismatch"));
                         }
-                    };
-                    (*result, kind)
-                }
-                (28, [lhs, rhs, 3]) => {
-                    let (ty, lhs) = operand(*lhs)?;
-                    let (rhs_ty, rhs) = operand(*rhs)?;
-                    if ty != rhs_ty {
-                        return Err(semantic("LLVM comparison type mismatch"));
+                        let scalar = match types[ty] {
+                            DecodedType::Vector { element, .. } => &types[element],
+                            _ => &types[ty],
+                        };
+                        // LLVM shares one opcode space between integer and
+                        // floating arithmetic; the operand type selects which.
+                        let kind = match scalar {
+                            DecodedType::Float(_) => {
+                                let op = match opcode {
+                                    0 => FloatBinaryOp::Add,
+                                    1 => FloatBinaryOp::Subtract,
+                                    2 => FloatBinaryOp::Multiply,
+                                    4 => FloatBinaryOp::Divide,
+                                    6 => FloatBinaryOp::Remainder,
+                                    _ => {
+                                        return Err(semantic(format!(
+                                            "unsupported LLVM floating binary opcode {opcode}"
+                                        )));
+                                    }
+                                };
+                                InstructionKind::FloatBinary { op, lhs, rhs }
+                            }
+                            DecodedType::Integer(_) => {
+                                let op = match opcode {
+                                    0 => IntegerBinaryOp::Add,
+                                    1 => IntegerBinaryOp::Subtract,
+                                    2 => IntegerBinaryOp::Multiply,
+                                    3 => IntegerBinaryOp::DivideUnsigned,
+                                    4 => IntegerBinaryOp::DivideSigned,
+                                    5 => IntegerBinaryOp::RemainderUnsigned,
+                                    6 => IntegerBinaryOp::RemainderSigned,
+                                    7 => IntegerBinaryOp::ShiftLeft,
+                                    8 => IntegerBinaryOp::ShiftRightLogical,
+                                    9 => IntegerBinaryOp::ShiftRightArithmetic,
+                                    10 => IntegerBinaryOp::And,
+                                    11 => IntegerBinaryOp::Or,
+                                    12 => IntegerBinaryOp::Xor,
+                                    _ => {
+                                        return Err(semantic(format!(
+                                            "unsupported LLVM integer binary opcode {opcode}"
+                                        )));
+                                    }
+                                };
+                                InstructionKind::IntegerBinary { op, lhs, rhs }
+                            }
+                            _ => return Err(semantic("LLVM binary operand is not numeric")),
+                        };
+                        (ty, kind)
                     }
-                    let scalar = types
-                        .iter()
-                        .position(|t| matches!(t, DecodedType::Integer(1)))
-                        .ok_or_else(|| semantic("LLVM comparison has no boolean type"))?;
-                    let result = match types[ty] {
-                        DecodedType::Float(_) => scalar,
-                        DecodedType::Vector { element, lanes } if matches!(types[element], DecodedType::Float(_)) => types.iter().position(|t| matches!(t, DecodedType::Vector { element, lanes: n } if *element == scalar && *n == lanes)).ok_or_else(|| semantic("LLVM comparison has no boolean vector type"))?,
-                        _ => return Err(semantic("LLVM floating comparison requires floating operands")),
-                    };
-                    (
-                        result,
-                        InstructionKind::FloatOrderedGreaterEqual { lhs, rhs },
-                    )
-                }
-                (29, [on_true, on_false, condition]) => {
-                    let (ty, on_true) = operand(*on_true)?;
-                    let (false_ty, on_false) = operand(*on_false)?;
-                    let (_, condition) = operand(*condition)?;
-                    if ty != false_ty {
-                        return Err(semantic("LLVM select type mismatch"));
+                    (34, [_, cc, callee, args @ ..]) if *cc == 1 => {
+                        let callee = self.operand_id(*callee)?;
+                        let signature = match types[self.values[callee].ty] {
+                            DecodedType::Pointer { pointee, .. } => pointee,
+                            _ => self.values[callee].ty,
+                        };
+                        let DecodedType::Function { result, parameters } = &types[signature] else {
+                            return Err(semantic("LLVM call target is not a function"));
+                        };
+                        if args.len() != parameters.len() {
+                            return Err(semantic("LLVM call arity mismatch"));
+                        }
+                        let mut actual = Vec::new();
+                        for (&arg, &expected) in args.iter().zip(parameters) {
+                            let (ty, value) = operand(arg, None)?;
+                            if ty != expected {
+                                return Err(semantic("LLVM call argument type mismatch"));
+                            }
+                            actual.push(value);
+                        }
+                        let intrinsic = names
+                            .get(&callee)
+                            .ok_or_else(|| semantic("LLVM call target has no name"))?;
+                        let kind = air_intrinsic(intrinsic, &actual)?;
+                        if matches!(types[*result], DecodedType::Void) {
+                            instructions.push(Instruction { result: None, kind });
+                            continue;
+                        }
+                        (*result, kind)
                     }
-                    (
-                        ty,
-                        InstructionKind::Select {
+                    (9 | 28, [lhs, rhs, predicate] | [lhs, _, rhs, predicate]) => {
+                        let (ty, lhs) = match fields.as_slice() {
+                            [_, declared, _, _] => operand(*lhs, Some(declared))?,
+                            _ => operand(*lhs, None)?,
+                        };
+                        let (rhs_ty, rhs) = operand(*rhs, None)?;
+                        if ty != rhs_ty {
+                            return Err(semantic("LLVM comparison type mismatch"));
+                        }
+                        let scalar = match types[ty] {
+                            DecodedType::Vector { element, .. } => &types[element],
+                            _ => &types[ty],
+                        };
+                        let kind = match scalar {
+                            DecodedType::Float(_) => InstructionKind::FloatCompare {
+                                predicate: float_predicate(*predicate)?,
+                                lhs,
+                                rhs,
+                            },
+                            DecodedType::Integer(_) => InstructionKind::IntegerCompare {
+                                predicate: integer_predicate(*predicate)?,
+                                lhs,
+                                rhs,
+                            },
+                            _ => return Err(semantic("LLVM comparison operand is not numeric")),
+                        };
+                        (boolean_type(ty, types)?, kind)
+                    }
+                    (26, [aggregate, indices @ ..]) if !indices.is_empty() => {
+                        let (mut ty, mut composite) = operand(*aggregate, None)?;
+                        let mut extracted = None;
+                        for &index in indices {
+                            let index = u32::try_from(index)
+                                .map_err(|_| semantic("LLVM extractvalue index is too large"))?;
+                            let member = member_type(&types[ty], index)?;
+                            composite = emit(
+                                &mut function,
+                                &mut instructions,
+                                ir_type(member, types)?,
+                                InstructionKind::CompositeExtract { composite, index },
+                            );
+                            extracted = Some(composite.clone());
+                            ty = member;
+                        }
+                        let value = extracted.expect("indices are non-empty");
+                        define(
+                            &mut forward,
+                            self.values.len(),
+                            value,
+                            &mut operands,
+                            &function,
+                            &mut instructions,
+                        )?;
+                        self.values.push(Value { ty, constant: None });
+                        continue;
+                    }
+                    (27, [aggregate, object, index]) => {
+                        let (ty, composite) = operand(*aggregate, None)?;
+                        let (object_ty, object) = operand(*object, None)?;
+                        let index = u32::try_from(*index)
+                            .map_err(|_| semantic("LLVM insertvalue index is too large"))?;
+                        if member_type(&types[ty], index)? != object_ty {
+                            return Err(semantic("LLVM insertvalue element type mismatch"));
+                        }
+                        (
+                            ty,
+                            InstructionKind::CompositeInsert {
+                                composite,
+                                object,
+                                index,
+                            },
+                        )
+                    }
+                    (29, [on_true, on_false, condition]) => {
+                        let (ty, on_true) = operand(*on_true, None)?;
+                        let (false_ty, on_false) = operand(*on_false, None)?;
+                        let (_, condition) = operand(*condition, None)?;
+                        if ty != false_ty {
+                            return Err(semantic("LLVM select type mismatch"));
+                        }
+                        (
+                            ty,
+                            InstructionKind::Select {
+                                condition,
+                                on_true,
+                                on_false,
+                            },
+                        )
+                    }
+                    (10, []) => {
+                        if !matches!(types[result_type], DecodedType::Void) {
+                            return Err(semantic("LLVM void return from a non-void function"));
+                        }
+                        terminator = Some(Terminator::Return(None));
+                        continue;
+                    }
+                    (10, [value]) => {
+                        let (ty, value) = operand(*value, None)?;
+                        if ty != result_type {
+                            return Err(semantic("LLVM return type mismatch"));
+                        }
+                        terminator = Some(Terminator::Return(Some(value)));
+                        continue;
+                    }
+                    (11, [target]) => {
+                        terminator = Some(Terminator::Branch(block_id(*target, block_count)?));
+                        continue;
+                    }
+                    (11, [true_block, false_block, condition]) => {
+                        let (ty, condition) = operand(*condition, None)?;
+                        if !matches!(types[ty], DecodedType::Integer(1)) {
+                            return Err(semantic("LLVM conditional branch requires i1"));
+                        }
+                        terminator = Some(Terminator::CondBranch {
                             condition,
-                            on_true,
-                            on_false,
-                        },
-                    )
-                }
-                (10, [value]) => {
-                    let (ty, value) = operand(*value)?;
-                    if ty != result_type {
-                        return Err(semantic("LLVM return type mismatch"));
+                            true_block: block_id(*true_block, block_count)?,
+                            false_block: block_id(*false_block, block_count)?,
+                        });
+                        continue;
                     }
-                    terminator = Some(Terminator::Return(Some(value)));
-                    continue;
-                }
-                _ => {
-                    return Err(semantic(format!(
-                        "LLVM body record {} with operands {fields:?} needs lowering after {} decoded instruction result(s)",
-                        record.id,
-                        self.values.len() - first_result
-                    )));
-                }
-            };
-            let value = emit(&mut function, &mut instructions, ir_type(ty, types)?, kind);
-            operands.insert(self.values.len(), value);
-            self.values.push(Value { ty, constant: None });
+                    (15, []) => {
+                        terminator = Some(Terminator::Unreachable);
+                        continue;
+                    }
+                    // PHI: [result type, (value, predecessor block)...]. Its
+                    // incoming values may not be defined yet, so record them and
+                    // resolve after every block has been lowered.
+                    (16, [ty, incoming @ ..]) if !incoming.is_empty() => {
+                        if !incoming.len().is_multiple_of(2) {
+                            return Err(semantic("LLVM phi has an odd operand count"));
+                        }
+                        let ty = type_reference(Some(ty), types.len())?;
+                        let mut sources = Vec::new();
+                        for pair in incoming.as_chunks::<2>().0 {
+                            // Phi values use signed relative references, because
+                            // an incoming value may be defined after the phi.
+                            let delta = decode_sign_rotated(pair[0]);
+                            let id = i64::try_from(self.values.len())
+                                .map_err(|_| semantic("LLVM value table exceeds 64 bits"))?
+                                - delta;
+                            let id = usize::try_from(id)
+                                .map_err(|_| semantic("LLVM phi refers to a negative value"))?;
+                            sources.push((block_id(pair[1], block_count)?, id));
+                        }
+                        let value = emit(
+                            &mut function,
+                            &mut instructions,
+                            ir_type(ty, types)?,
+                            InstructionKind::Phi {
+                                incomings: Vec::new(),
+                            },
+                        );
+                        phi_fixups.push(PhiFixup {
+                            block: block_index,
+                            instruction: instructions.len() - 1,
+                            sources,
+                        });
+                        define(
+                            &mut forward,
+                            self.values.len(),
+                            value,
+                            &mut operands,
+                            &function,
+                            &mut instructions,
+                        )?;
+                        self.values.push(Value { ty, constant: None });
+                        continue;
+                    }
+                    _ => {
+                        return Err(semantic(format!(
+                            "LLVM body record {} with operands {fields:?} needs lowering after {} decoded instruction result(s)",
+                            record.id,
+                            self.values.len() - first_result
+                        )));
+                    }
+                };
+                let value = emit(&mut function, &mut instructions, ir_type(ty, types)?, kind);
+                define(
+                    &mut forward,
+                    self.values.len(),
+                    value,
+                    &mut operands,
+                    &function,
+                    &mut instructions,
+                )?;
+                self.values.push(Value { ty, constant: None });
+            }
+            blocks.push(Block {
+                id: BlockId(block_index as u32),
+                name: if block_index == 0 {
+                    "entry".to_string()
+                } else {
+                    format!("block{block_index}")
+                },
+                instructions,
+                terminator: terminator
+                    .ok_or_else(|| semantic("LLVM basic block has no terminator"))?,
+            });
         }
-        function.blocks.push(Block {
-            id: BlockId(0),
-            name: "entry".into(),
-            instructions,
-            terminator: terminator.ok_or_else(|| semantic("LLVM body has no terminator"))?,
-        });
+        if !forward.is_empty() {
+            return Err(semantic(
+                "LLVM forward reference names a value the body never defines",
+            ));
+        }
+        for fixup in phi_fixups {
+            let mut incomings = Vec::new();
+            for (predecessor, id) in fixup.sources {
+                let operand = self.materialize(id, types, &mut operands, &mut Vec::new())?;
+                incomings.push((predecessor, operand));
+            }
+            blocks[fixup.block].instructions[fixup.instruction].kind =
+                InstructionKind::Phi { incomings };
+        }
+        // Phi instructions must precede every other instruction in a block.
+        for block in &mut blocks {
+            let phis = block
+                .instructions
+                .iter()
+                .filter(|instruction| matches!(instruction.kind, InstructionKind::Phi { .. }))
+                .count();
+            if block.instructions[..phis]
+                .iter()
+                .any(|instruction| !matches!(instruction.kind, InstructionKind::Phi { .. }))
+            {
+                return Err(semantic(
+                    "LLVM phi does not precede its block's instructions",
+                ));
+            }
+        }
+        constants.append(&mut blocks[0].instructions);
+        blocks[0].instructions = constants;
+        function.blocks = blocks;
         Ok(function)
     }
 
-    fn integer(&self, id: usize, types: &[DecodedType]) -> Result<u64, TranslateError> {
+    pub(super) fn integer(&self, id: usize, types: &[DecodedType]) -> Result<u64, TranslateError> {
         if !self
             .values
             .get(id)
@@ -543,12 +936,12 @@ impl ValueTable {
         }
     }
 
+    /// Resolve an LLVM value reference to a Metal IR operand, expanding a
+    /// constant into a value rather than into instructions.
     fn materialize(
         &self,
         id: usize,
         types: &[DecodedType],
-        function: &mut Function,
-        instructions: &mut Vec<Instruction>,
         operands: &mut HashMap<usize, Operand>,
         active: &mut Vec<usize>,
     ) -> Result<Operand, TranslateError> {
@@ -577,54 +970,396 @@ impl ValueTable {
             Constant::Null if matches!(ty, Type::Int { .. }) => Operand::Integer { ty, value: 0 },
             Constant::Null if matches!(ty, Type::Float { .. }) => Operand::Float { ty, bits: 0 },
             Constant::Aggregate(ids) => {
-                let mut composite = Operand::Undef(ty.clone());
-                for (index, &id) in ids.iter().enumerate() {
-                    let object =
-                        self.materialize(id, types, function, instructions, operands, active)?;
-                    composite = emit(
-                        function,
-                        instructions,
-                        ty.clone(),
-                        InstructionKind::CompositeInsert {
-                            composite,
-                            object,
-                            index: index as u32,
-                        },
-                    );
+                let mut elements = Vec::new();
+                for &id in ids {
+                    elements.push(self.materialize(id, types, operands, active)?);
                 }
-                composite
+                Operand::Composite { ty, elements }
             }
             Constant::Data(data) => {
                 let member_types = aggregate_types(&types[value.ty])?;
-                let mut composite = Operand::Undef(ty.clone());
-                for (index, (&bits, member)) in data.iter().zip(member_types).enumerate() {
+                let mut elements = Vec::new();
+                for (&bits, member) in data.iter().zip(member_types) {
                     let member = ir_type(member, types)?;
-                    let object = match member {
+                    elements.push(match member {
                         Type::Int { .. } => Operand::Integer {
                             ty: member,
                             value: bits,
                         },
                         Type::Float { .. } => Operand::Float { ty: member, bits },
                         _ => return Err(semantic("LLVM DATA requires numeric scalar elements")),
-                    };
-                    composite = emit(
-                        function,
-                        instructions,
-                        ty.clone(),
-                        InstructionKind::CompositeInsert {
-                            composite,
-                            object,
-                            index: index as u32,
-                        },
-                    );
+                    });
                 }
-                composite
+                Operand::Composite { ty, elements }
             }
-            Constant::Null => zero_composite(&ty, function, instructions)?,
+            Constant::Null => zero_composite(&ty)?,
         };
         active.pop();
         operands.insert(id, result.clone());
         Ok(result)
+    }
+}
+
+/// LLVM cast opcodes. Each becomes an explicit Metal IR conversion; the IR
+/// verifier then checks the operand and result shapes.
+/// Decode an LLVM cast opcode and check that it agrees with the operand and
+/// result types. Vector casts convert lanewise and keep their lane count.
+fn cast_operation(
+    opcode: u64,
+    source: usize,
+    target: usize,
+    types: &[DecodedType],
+) -> Result<ConvertOp, TranslateError> {
+    let op = match opcode {
+        0 => ConvertOp::IntegerTruncate,
+        1 => ConvertOp::ZeroExtend,
+        2 => ConvertOp::SignExtend,
+        3 => ConvertOp::FloatToUnsigned,
+        4 => ConvertOp::FloatToSigned,
+        5 => ConvertOp::UnsignedToFloat,
+        6 => ConvertOp::SignedToFloat,
+        7 | 8 => ConvertOp::FloatResize,
+        11 => ConvertOp::Bitcast,
+        _ => return Err(semantic(format!("unsupported LLVM cast opcode {opcode}"))),
+    };
+    // A pointer cast reinterprets addressable memory. SPIR-V's logical
+    // addressing has no such operation; the body decoder handles the widening
+    // form separately and anything else is rejected here.
+    if matches!(types[source], DecodedType::Pointer { .. })
+        || matches!(types[target], DecodedType::Pointer { .. })
+    {
+        return Err(semantic(
+            "LLVM pointer cast needs explicit buffer reinterpretation",
+        ));
+    }
+    let (source, target) = match (&types[source], &types[target]) {
+        (
+            DecodedType::Vector {
+                element: source,
+                lanes,
+            },
+            DecodedType::Vector {
+                element: target,
+                lanes: target_lanes,
+            },
+        ) if lanes == target_lanes => (&types[*source], &types[*target]),
+        (DecodedType::Vector { .. }, _) | (_, DecodedType::Vector { .. }) => {
+            return Err(semantic("LLVM cast changes a value's lane count"));
+        }
+        (source, target) => (source, target),
+    };
+    let valid = match (op, source, target) {
+        (ConvertOp::IntegerTruncate, DecodedType::Integer(from), DecodedType::Integer(to)) => {
+            to < from
+        }
+        (
+            ConvertOp::ZeroExtend | ConvertOp::SignExtend,
+            DecodedType::Integer(from),
+            DecodedType::Integer(to),
+        ) => to > from,
+        (
+            ConvertOp::FloatToUnsigned | ConvertOp::FloatToSigned,
+            DecodedType::Float(_),
+            DecodedType::Integer(_),
+        )
+        | (
+            ConvertOp::UnsignedToFloat | ConvertOp::SignedToFloat,
+            DecodedType::Integer(_),
+            DecodedType::Float(_),
+        ) => true,
+        (ConvertOp::FloatResize, DecodedType::Float(from), DecodedType::Float(to)) => from != to,
+        (ConvertOp::Bitcast, source, target) => scalar_width(source) == scalar_width(target),
+        _ => false,
+    };
+    if !valid {
+        return Err(semantic(format!(
+            "LLVM cast opcode {opcode} does not apply to its operand and result types"
+        )));
+    }
+    Ok(op)
+}
+
+fn scalar_width(ty: &DecodedType) -> Option<u8> {
+    match ty {
+        DecodedType::Integer(bits) | DecodedType::Float(bits) => Some(*bits),
+        _ => None,
+    }
+}
+
+fn integer_predicate(predicate: u64) -> Result<IntegerPredicate, TranslateError> {
+    Ok(match predicate {
+        32 => IntegerPredicate::Equal,
+        33 => IntegerPredicate::NotEqual,
+        34 => IntegerPredicate::UnsignedGreaterThan,
+        35 => IntegerPredicate::UnsignedGreaterEqual,
+        36 => IntegerPredicate::UnsignedLessThan,
+        37 => IntegerPredicate::UnsignedLessEqual,
+        38 => IntegerPredicate::SignedGreaterThan,
+        39 => IntegerPredicate::SignedGreaterEqual,
+        40 => IntegerPredicate::SignedLessThan,
+        41 => IntegerPredicate::SignedLessEqual,
+        _ => {
+            return Err(semantic(format!(
+                "unsupported LLVM integer comparison predicate {predicate}"
+            )));
+        }
+    })
+}
+
+fn float_predicate(predicate: u64) -> Result<FloatPredicate, TranslateError> {
+    Ok(match predicate {
+        1 => FloatPredicate::OrderedEqual,
+        2 => FloatPredicate::OrderedGreaterThan,
+        3 => FloatPredicate::OrderedGreaterEqual,
+        4 => FloatPredicate::OrderedLessThan,
+        5 => FloatPredicate::OrderedLessEqual,
+        6 => FloatPredicate::OrderedNotEqual,
+        7 => FloatPredicate::Ordered,
+        8 => FloatPredicate::Unordered,
+        9 => FloatPredicate::UnorderedEqual,
+        10 => FloatPredicate::UnorderedGreaterThan,
+        11 => FloatPredicate::UnorderedGreaterEqual,
+        12 => FloatPredicate::UnorderedLessThan,
+        13 => FloatPredicate::UnorderedLessEqual,
+        14 => FloatPredicate::UnorderedNotEqual,
+        // Constant-valued comparisons would need a materialized constant
+        // rather than an instruction; AIR does not emit them.
+        _ => {
+            return Err(semantic(format!(
+                "unsupported LLVM floating comparison predicate {predicate}"
+            )));
+        }
+    })
+}
+
+/// The `i1` result type of a comparison, keeping the operand's vector shape.
+fn boolean_type(operand: usize, types: &[DecodedType]) -> Result<usize, TranslateError> {
+    let scalar = types
+        .iter()
+        .position(|ty| matches!(ty, DecodedType::Integer(1)))
+        .ok_or_else(|| semantic("LLVM comparison has no boolean type"))?;
+    match types[operand] {
+        DecodedType::Vector { lanes, .. } => types
+            .iter()
+            .position(
+                |ty| matches!(ty, DecodedType::Vector { element, lanes: n } if *element == scalar && *n == lanes),
+            )
+            .ok_or_else(|| semantic("LLVM comparison has no boolean vector type")),
+        _ => Ok(scalar),
+    }
+}
+
+fn member_type(ty: &DecodedType, index: u32) -> Result<usize, TranslateError> {
+    match ty {
+        DecodedType::Struct { fields, .. } => fields
+            .get(index as usize)
+            .copied()
+            .ok_or_else(|| semantic("LLVM aggregate index is out of range")),
+        DecodedType::Array { element, count } if index < *count => Ok(*element),
+        DecodedType::Vector { element, lanes } if index < *lanes => Ok(*element),
+        _ => Err(semantic("LLVM aggregate index applies to a non-aggregate")),
+    }
+}
+
+/// Decode an AIR intrinsic name into a Metal IR operation.
+///
+/// AIR names are `air.<operation>[.<type suffix>]*`, where the operation may
+/// carry a `fast_` or `precise_` prefix selecting the math library's accuracy.
+/// Matching on the operation rather than the full spelling keeps every vector
+/// and scalar width on one lowering path.
+///
+/// FIXME (ACCURACY): `fast_` and `precise_` lower identically. SPIR-V has no
+/// portable way to request Metal's relaxed accuracy, and the difference is
+/// below the precision most shaders depend on.
+fn air_intrinsic(name: &str, arguments: &[Operand]) -> Result<InstructionKind, TranslateError> {
+    let unsupported = || semantic(format!("LLVM intrinsic {name} needs Metal IR lowering"));
+    let mut parts = name.split('.');
+    if parts.next() != Some("air") {
+        return Err(unsupported());
+    }
+    let operation = parts.next().ok_or_else(unsupported)?;
+    let operation = operation
+        .strip_prefix("fast_")
+        .or_else(|| operation.strip_prefix("precise_"))
+        .unwrap_or(operation);
+    // AIR spells an integer operation's signedness in its first type suffix,
+    // for instance `air.min.u.i32` and `air.abs.s.v3i32`.
+    let signedness = parts
+        .clone()
+        .next()
+        .filter(|part| matches!(*part, "s" | "u"));
+    if operation == "convert" {
+        // `air.convert.<result kind>.<result type>.<source kind>.<source type>`
+        let suffix: Vec<_> = parts.collect();
+        let [result_kind, _, source_kind, _] = suffix.as_slice() else {
+            return Err(unsupported());
+        };
+        let op = match (*result_kind, *source_kind) {
+            ("f", "u") => ConvertOp::UnsignedToFloat,
+            ("f", "s") => ConvertOp::SignedToFloat,
+            ("u", "f") => ConvertOp::FloatToUnsigned,
+            ("s", "f") => ConvertOp::FloatToSigned,
+            _ => return Err(unsupported()),
+        };
+        let [value] = arguments else {
+            return Err(semantic(format!("LLVM intrinsic {name} takes one operand")));
+        };
+        return Ok(InstructionKind::Convert {
+            op,
+            value: value.clone(),
+        });
+    }
+    if let Some(kind) = air_texture_intrinsic(operation, arguments)? {
+        return Ok(kind);
+    }
+    let unary = |op| match arguments {
+        [value] => Ok(InstructionKind::FloatUnary {
+            op,
+            value: value.clone(),
+        }),
+        _ => Err(semantic(format!("LLVM intrinsic {name} takes one operand"))),
+    };
+    let binary = |op| match arguments {
+        [lhs, rhs] => Ok(InstructionKind::FloatBinary {
+            op,
+            lhs: lhs.clone(),
+            rhs: rhs.clone(),
+        }),
+        _ => Err(semantic(format!(
+            "LLVM intrinsic {name} takes two operands"
+        ))),
+    };
+    if let Some(signedness) = signedness {
+        let signed = signedness == "s";
+        let integer_binary = |op| match arguments {
+            [lhs, rhs] => Ok(InstructionKind::IntegerBinary {
+                op,
+                lhs: lhs.clone(),
+                rhs: rhs.clone(),
+            }),
+            _ => Err(semantic(format!(
+                "LLVM intrinsic {name} takes two operands"
+            ))),
+        };
+        let integer_unary = |op| match arguments {
+            [value] => Ok(InstructionKind::IntegerUnary {
+                op,
+                value: value.clone(),
+            }),
+            _ => Err(semantic(format!("LLVM intrinsic {name} takes one operand"))),
+        };
+        match operation {
+            "abs" => return integer_unary(IntegerUnaryOp::AbsoluteSigned),
+            "sign" => return integer_unary(IntegerUnaryOp::SignSigned),
+            "min" if signed => return integer_binary(IntegerBinaryOp::MinimumSigned),
+            "min" => return integer_binary(IntegerBinaryOp::MinimumUnsigned),
+            "max" if signed => return integer_binary(IntegerBinaryOp::MaximumSigned),
+            "max" => return integer_binary(IntegerBinaryOp::MaximumUnsigned),
+            "clamp" => {
+                return match arguments {
+                    [value, min, max] => Ok(InstructionKind::IntegerClamp {
+                        signed,
+                        value: value.clone(),
+                        min: min.clone(),
+                        max: max.clone(),
+                    }),
+                    _ => Err(semantic(format!(
+                        "LLVM intrinsic {name} takes three operands"
+                    ))),
+                };
+            }
+            _ => {}
+        }
+    }
+    match operation {
+        "popcount" => match arguments {
+            [value] => Ok(InstructionKind::IntegerUnary {
+                op: IntegerUnaryOp::PopulationCount,
+                value: value.clone(),
+            }),
+            _ => Err(semantic(format!("LLVM intrinsic {name} takes one operand"))),
+        },
+        "fabs" => unary(FloatUnaryOp::Absolute),
+        "sign" => unary(FloatUnaryOp::Sign),
+        "sqrt" => unary(FloatUnaryOp::Sqrt),
+        "rsqrt" => unary(FloatUnaryOp::InverseSqrt),
+        "exp" => unary(FloatUnaryOp::Exp),
+        "exp2" => unary(FloatUnaryOp::Exp2),
+        "log" => unary(FloatUnaryOp::Log),
+        "log2" => unary(FloatUnaryOp::Log2),
+        "sin" => unary(FloatUnaryOp::Sin),
+        "cos" => unary(FloatUnaryOp::Cos),
+        "tan" => unary(FloatUnaryOp::Tan),
+        "asin" => unary(FloatUnaryOp::Asin),
+        "acos" => unary(FloatUnaryOp::Acos),
+        "atan" => unary(FloatUnaryOp::Atan),
+        "floor" => unary(FloatUnaryOp::Floor),
+        "ceil" => unary(FloatUnaryOp::Ceil),
+        "rint" | "round" => unary(FloatUnaryOp::Round),
+        "trunc" => unary(FloatUnaryOp::Truncate),
+        "fract" => unary(FloatUnaryOp::Fract),
+        "dfdx" => unary(FloatUnaryOp::DerivativeX),
+        "dfdy" => unary(FloatUnaryOp::DerivativeY),
+        "fwidth" => unary(FloatUnaryOp::DerivativeWidth),
+        "fmin" => binary(FloatBinaryOp::Minimum),
+        "fmax" => binary(FloatBinaryOp::Maximum),
+        "pow" | "powr" => binary(FloatBinaryOp::Power),
+        "atan2" => binary(FloatBinaryOp::Atan2),
+        "step" => binary(FloatBinaryOp::Step),
+        "fmod" => binary(FloatBinaryOp::Remainder),
+        "dot" => match arguments {
+            [lhs, rhs] => Ok(InstructionKind::FloatDot {
+                lhs: lhs.clone(),
+                rhs: rhs.clone(),
+            }),
+            _ => Err(semantic(format!(
+                "LLVM intrinsic {name} takes two operands"
+            ))),
+        },
+        "clamp" => match arguments {
+            [value, min, max] => Ok(InstructionKind::FloatClamp {
+                value: value.clone(),
+                min: min.clone(),
+                max: max.clone(),
+            }),
+            _ => Err(semantic(format!(
+                "LLVM intrinsic {name} takes three operands"
+            ))),
+        },
+        "mix" => match arguments {
+            [first, second, weight] => Ok(InstructionKind::FloatMix {
+                first: first.clone(),
+                second: second.clone(),
+                weight: weight.clone(),
+            }),
+            _ => Err(semantic(format!(
+                "LLVM intrinsic {name} takes three operands"
+            ))),
+        },
+        "any" => match arguments {
+            [vector] => Ok(InstructionKind::Any {
+                vector: vector.clone(),
+            }),
+            _ => Err(semantic(format!("LLVM intrinsic {name} takes one operand"))),
+        },
+        "all" => match arguments {
+            [vector] => Ok(InstructionKind::All {
+                vector: vector.clone(),
+            }),
+            _ => Err(semantic(format!("LLVM intrinsic {name} takes one operand"))),
+        },
+        "discard_fragment" => Ok(InstructionKind::DiscardFragment),
+        "fma" => match arguments {
+            [first, second, addend] => Ok(InstructionKind::FloatFma {
+                first: first.clone(),
+                second: second.clone(),
+                addend: addend.clone(),
+            }),
+            _ => Err(semantic(format!(
+                "LLVM intrinsic {name} takes three operands"
+            ))),
+        },
+        _ => Err(unsupported()),
     }
 }
 
@@ -652,12 +1387,8 @@ fn emit(
     Operand::Value(result)
 }
 
-fn zero_composite(
-    ty: &Type,
-    function: &mut Function,
-    instructions: &mut Vec<Instruction>,
-) -> Result<Operand, TranslateError> {
-    let members = match ty {
+fn zero_composite(ty: &Type) -> Result<Operand, TranslateError> {
+    let members: Vec<&Type> = match ty {
         Type::Bool => return Ok(Operand::Bool(false)),
         Type::Int { .. } => {
             return Ok(Operand::Integer {
@@ -672,24 +1403,17 @@ fn zero_composite(
             });
         }
         Type::Vector { element, lanes } => vec![element.as_ref(); usize::from(*lanes)],
-        Type::Struct(s) => s.fields.iter().map(|f| &f.ty).collect(),
+        Type::Array { element, count } => vec![element.as_ref(); *count as usize],
+        Type::Struct(structure) => structure.fields.iter().map(|field| &field.ty).collect(),
         _ => return Err(semantic("LLVM zero constant type needs lowering")),
     };
-    let mut composite = Operand::Undef(ty.clone());
-    for (index, member) in members.into_iter().enumerate() {
-        let object = zero_composite(member, function, instructions)?;
-        composite = emit(
-            function,
-            instructions,
-            ty.clone(),
-            InstructionKind::CompositeInsert {
-                composite,
-                object,
-                index: index as u32,
-            },
-        );
-    }
-    Ok(composite)
+    Ok(Operand::Composite {
+        ty: ty.clone(),
+        elements: members
+            .into_iter()
+            .map(zero_composite)
+            .collect::<Result<_, _>>()?,
+    })
 }
 
 fn ir_type(index: usize, types: &[DecodedType]) -> Result<Type, TranslateError> {
@@ -853,56 +1577,14 @@ mod tests {
     // Encode owned, unabbreviated records to exercise the real bitstream
     // reader without an LLVM toolchain or proprietary shader fixtures.
     fn records_block(id: u32, records: &[(u64, &[u64])]) -> BitcodeBlock {
-        fn fixed(bits: &mut Vec<bool>, value: u64, width: usize) {
-            bits.extend((0..width).map(|bit| value & (1 << bit) != 0));
-        }
-        fn vbr(bits: &mut Vec<bool>, mut value: u64, width: usize) {
-            loop {
-                let mut chunk = value & ((1 << (width - 1)) - 1);
-                value >>= width - 1;
-                if value != 0 {
-                    chunk |= 1 << (width - 1);
-                }
-                fixed(bits, chunk, width);
-                if value == 0 {
-                    break;
-                }
-            }
-        }
-        fn words(bits: &mut Vec<bool>) {
-            while !bits.len().is_multiple_of(32) {
-                bits.push(false);
-            }
-        }
-        let mut body = Vec::new();
-        for (code, fields) in records {
-            fixed(&mut body, 3, 3);
-            vbr(&mut body, *code, 6);
-            vbr(&mut body, fields.len() as u64, 6);
-            for field in *fields {
-                vbr(&mut body, *field, 6);
-            }
-        }
-        fixed(&mut body, 0, 3);
-        words(&mut body);
-        let mut bits = Vec::new();
-        fixed(&mut bits, 1, 2);
-        vbr(&mut bits, u64::from(id), 8);
-        vbr(&mut bits, 3, 4);
-        words(&mut bits);
-        fixed(&mut bits, (body.len() / 32) as u64, 32);
-        bits.extend(body);
-        let mut bytes = b"BC\xc0\xde".to_vec();
-        bytes.extend(bits.chunks(8).map(|chunk| {
-            chunk
+        use crate::air::fixtures::{bitcode_block, block, record};
+        bitcode_block(block(
+            id,
+            records
                 .iter()
-                .enumerate()
-                .fold(0u8, |byte, (bit, set)| byte | (u8::from(*set) << bit))
-        }));
-        Bitcode::new(&bytes).unwrap().elements[0]
-            .as_block()
-            .unwrap()
-            .clone()
+                .map(|(code, fields)| record(*code, fields))
+                .collect(),
+        ))
     }
 
     #[test]
@@ -967,7 +1649,17 @@ mod tests {
         };
         let body = records_block(12, &[(1, &[1]), (6, &[36, 98]), (10, &[1])]);
         let function = table
-            .lower_body(&body, &types, &HashMap::new(), "extract".into(), &[1], 0)
+            .lower_body(
+                &body,
+                &types,
+                &Signature {
+                    names: &HashMap::new(),
+                    name: "extract".into(),
+                    parameter_types: &[1],
+                    result_type: 0,
+                    opaque_types: &HashMap::new(),
+                },
+            )
             .unwrap();
         assert_eq!(
             function.blocks[0].instructions[0].kind,
@@ -984,6 +1676,127 @@ mod tests {
         .unwrap();
     }
 
+    /// A body whose blocks are laid out so that a comparison names the phi
+    /// which dominates it but appears later in the record stream.
+    #[test]
+    fn lowers_multiple_blocks_with_a_phi_and_a_forward_reference() {
+        let types = vec![
+            DecodedType::Integer(32),
+            DecodedType::Integer(1),
+            DecodedType::Void,
+        ];
+        let table = ValueTable {
+            relative: true,
+            values: vec![
+                Value {
+                    ty: 0,
+                    constant: Some(Constant::Integer(0)),
+                },
+                Value {
+                    ty: 0,
+                    constant: Some(Constant::Integer(1)),
+                },
+            ],
+            argument_start: 0,
+        };
+        // entry:  br block2
+        // block1: %2 = icmp ult %3, 1; br %2, block2, block3
+        // block2: %3 = phi i32 [0, entry], [1, block1]; br block1
+        // block3: ret void
+        let body = records_block(
+            12,
+            &[
+                (1, &[4]),
+                (11, &[2]),
+                (28, &[4294967295, 0, 1, 36]),
+                (11, &[2, 3, 1]),
+                (16, &[0, 6, 0, 4, 1]),
+                (11, &[1]),
+                (10, &[]),
+            ],
+        );
+        let function = table
+            .lower_body(
+                &body,
+                &types,
+                &Signature {
+                    names: &HashMap::new(),
+                    name: "loop".into(),
+                    parameter_types: &[],
+                    result_type: 2,
+                    opaque_types: &HashMap::new(),
+                },
+            )
+            .unwrap();
+        assert_eq!(function.blocks.len(), 4);
+        let InstructionKind::Phi { .. } = function.blocks[2].instructions[0].kind else {
+            panic!("the third block starts with a phi");
+        };
+        // The comparison and the phi must name one SSA value, not two.
+        let InstructionKind::IntegerCompare { lhs, .. } = &function.blocks[1].instructions[0].kind
+        else {
+            panic!("the second block starts with a comparison");
+        };
+        assert_eq!(
+            Some(lhs.clone()),
+            function.blocks[2].instructions[0]
+                .result
+                .map(Operand::Value)
+        );
+        Module {
+            functions: vec![function],
+            entries: Vec::new(),
+        }
+        .verify()
+        .unwrap();
+    }
+
+    /// A value named before its definition carries its type inline; both uses
+    /// must resolve to the one SSA definition.
+    #[test]
+    fn rejects_a_forward_reference_whose_declared_type_is_wrong() {
+        let types = vec![
+            DecodedType::Integer(32),
+            DecodedType::Integer(1),
+            DecodedType::Void,
+        ];
+        let table = ValueTable {
+            relative: true,
+            values: vec![Value {
+                ty: 0,
+                constant: Some(Constant::Integer(1)),
+            }],
+            argument_start: 0,
+        };
+        // The comparison declares its forward operand as `i1`, but the
+        // instruction which defines it produces an `i32`.
+        let body = records_block(
+            12,
+            &[
+                (1, &[2]),
+                (28, &[2, 1, 1, 36]),
+                (11, &[1]),
+                (2, &[2, 2, 0]),
+                (10, &[]),
+            ],
+        );
+        assert!(
+            table
+                .lower_body(
+                    &body,
+                    &types,
+                    &Signature {
+                        names: &HashMap::new(),
+                        name: "bad".into(),
+                        parameter_types: &[],
+                        result_type: 2,
+                        opaque_types: &HashMap::new(),
+                    },
+                )
+                .is_err()
+        );
+    }
+
     #[test]
     fn lowers_integer_resize_and_checks_its_direction() {
         let types = vec![DecodedType::Integer(32), DecodedType::Integer(64)];
@@ -997,7 +1810,17 @@ mod tests {
         };
         let body = records_block(12, &[(1, &[1]), (3, &[1, 1, 1]), (10, &[1])]);
         let function = make()
-            .lower_body(&body, &types, &HashMap::new(), "extend".into(), &[0], 1)
+            .lower_body(
+                &body,
+                &types,
+                &Signature {
+                    names: &HashMap::new(),
+                    name: "extend".into(),
+                    parameter_types: &[0],
+                    result_type: 1,
+                    opaque_types: &HashMap::new(),
+                },
+            )
             .unwrap();
         Module {
             functions: vec![function],
@@ -1008,7 +1831,17 @@ mod tests {
         let body = records_block(12, &[(1, &[1]), (3, &[1, 1, 0]), (10, &[1])]);
         assert!(
             make()
-                .lower_body(&body, &types, &HashMap::new(), "bad".into(), &[0], 1)
+                .lower_body(
+                    &body,
+                    &types,
+                    &Signature {
+                        names: &HashMap::new(),
+                        name: "bad".into(),
+                        parameter_types: &[0],
+                        result_type: 1,
+                        opaque_types: &HashMap::new(),
+                    }
+                )
                 .is_err()
         );
     }
@@ -1039,7 +1872,17 @@ mod tests {
         };
         let body = records_block(12, &[(1, &[1]), (6, &[2, 1]), (10, &[1])]);
         let function = make(0, Constant::Integer(2))
-            .lower_body(&body, &types, &HashMap::new(), "lane2".into(), &[1], 0)
+            .lower_body(
+                &body,
+                &types,
+                &Signature {
+                    names: &HashMap::new(),
+                    name: "lane2".into(),
+                    parameter_types: &[1],
+                    result_type: 0,
+                    opaque_types: &HashMap::new(),
+                },
+            )
             .unwrap();
         assert!(matches!(
             function.blocks[0].instructions[0].kind,
@@ -1047,12 +1890,32 @@ mod tests {
         ));
         assert!(
             make(0, Constant::Integer(4))
-                .lower_body(&body, &types, &HashMap::new(), "bad".into(), &[1], 0)
+                .lower_body(
+                    &body,
+                    &types,
+                    &Signature {
+                        names: &HashMap::new(),
+                        name: "bad".into(),
+                        parameter_types: &[1],
+                        result_type: 0,
+                        opaque_types: &HashMap::new(),
+                    }
+                )
                 .is_err()
         );
         assert!(
             make(2, Constant::Null)
-                .lower_body(&body, &types, &HashMap::new(), "bad".into(), &[1], 0)
+                .lower_body(
+                    &body,
+                    &types,
+                    &Signature {
+                        names: &HashMap::new(),
+                        name: "bad".into(),
+                        parameter_types: &[1],
+                        result_type: 0,
+                        opaque_types: &HashMap::new(),
+                    }
+                )
                 .is_err()
         );
     }
@@ -1105,4 +1968,320 @@ mod tests {
         );
         assert!(decode_constant(4, &[2, 4], &DecodedType::Integer(32)).is_err());
     }
+}
+
+/// A phi whose incoming values are resolved after every block is lowered.
+struct PhiFixup {
+    block: usize,
+    instruction: usize,
+    sources: Vec<(BlockId, usize)>,
+}
+
+/// LLVM record codes which end a basic block.
+fn is_terminator(code: u64) -> bool {
+    matches!(code, 10 | 11 | 12 | 13 | 15 | 31 | 39 | 55 | 56)
+}
+
+fn block_id(index: u64, count: usize) -> Result<BlockId, TranslateError> {
+    let id = u32::try_from(index).map_err(|_| semantic("LLVM block index is too large"))?;
+    if id as usize >= count {
+        return Err(semantic("LLVM branch names a block which does not exist"));
+    }
+    Ok(BlockId(id))
+}
+
+/// Lower the AIR texture intrinsic family.
+///
+/// The operation name carries the access and the texture shape, for instance
+/// `sample_texture_2d_array` or `read_texture_2d_ms`. Metal's optional
+/// sampling arguments are passed as a present/absent flag followed by the
+/// value; only a constant flag is accepted, because a runtime choice between
+/// implicit and explicit level of detail has no SPIR-V form.
+fn air_texture_intrinsic(
+    operation: &str,
+    arguments: &[Operand],
+) -> Result<Option<InstructionKind>, TranslateError> {
+    let Some((access, shape)) = operation.split_once("_texture") else {
+        return Ok(None);
+    };
+    let shape = shape.strip_prefix('_').unwrap_or(shape);
+    let array = shape.ends_with("_array");
+    let multisampled = shape.ends_with("_ms");
+    let malformed = || {
+        semantic(format!(
+            "AIR intrinsic air.{operation} has unexpected operands"
+        ))
+    };
+    match access {
+        "sample" | "gather" => {
+            // (texture, sampler, coordinate, [array index], offset flag,
+            //  [offset], level flag, level). A cube texture takes no offset.
+            let [texture, sampler, coordinate, rest @ ..] = arguments else {
+                return Err(malformed());
+            };
+            let (array_index, rest) = if array {
+                let [index, rest @ ..] = rest else {
+                    return Err(malformed());
+                };
+                (Some(index.clone()), rest)
+            } else {
+                (None, rest)
+            };
+            let (offset, rest) = match rest {
+                [flag, offset, rest @ ..] if shape.starts_with("2d") || shape.starts_with("3d") => {
+                    (optional(flag, offset)?, rest)
+                }
+                rest => (None, rest),
+            };
+            if access == "gather" {
+                let [_component] = rest else {
+                    return Err(malformed());
+                };
+                // FIXME (ACCURACY): the gathered component is a runtime
+                // operand in AIR but a literal in SPIR-V. Lower the common
+                // red-channel gather and reject any other selector.
+                return Ok(Some(InstructionKind::TextureSample {
+                    texture: texture.clone(),
+                    sampler: sampler.clone(),
+                    coordinate: coordinate.clone(),
+                    array_index,
+                    offset,
+                    lod: None,
+                    gather: Some(0),
+                }));
+            }
+            let [flag, lod] = rest else {
+                return Err(malformed());
+            };
+            Ok(Some(InstructionKind::TextureSample {
+                texture: texture.clone(),
+                sampler: sampler.clone(),
+                coordinate: coordinate.clone(),
+                array_index,
+                offset,
+                lod: optional(flag, lod)?,
+                gather: None,
+            }))
+        }
+        "read" => {
+            // (texture, coordinate, [array index], level or sample index).
+            let [texture, coordinate, rest @ ..] = arguments else {
+                return Err(malformed());
+            };
+            let (array_index, rest) = if array {
+                let [index, rest @ ..] = rest else {
+                    return Err(malformed());
+                };
+                (Some(index.clone()), rest)
+            } else {
+                (None, rest)
+            };
+            let [selector] = rest else {
+                return Err(malformed());
+            };
+            Ok(Some(InstructionKind::TextureRead {
+                texture: texture.clone(),
+                coordinate: coordinate.clone(),
+                array_index,
+                lod: (!multisampled).then(|| selector.clone()),
+                sample: multisampled.then(|| selector.clone()),
+            }))
+        }
+        "write" => {
+            let [texture, coordinate, rest @ ..] = arguments else {
+                return Err(malformed());
+            };
+            let (array_index, rest) = if array {
+                let [index, rest @ ..] = rest else {
+                    return Err(malformed());
+                };
+                (Some(index.clone()), rest)
+            } else {
+                (None, rest)
+            };
+            let [value, _level] = rest else {
+                return Err(malformed());
+            };
+            Ok(Some(InstructionKind::TextureWrite {
+                texture: texture.clone(),
+                coordinate: coordinate.clone(),
+                array_index,
+                value: value.clone(),
+            }))
+        }
+        "get_width" | "get_height" | "get_depth" => {
+            let [texture, lod @ ..] = arguments else {
+                return Err(malformed());
+            };
+            Ok(Some(InstructionKind::TextureQuerySize {
+                texture: texture.clone(),
+                lod: lod.first().cloned(),
+                component: match access {
+                    "get_width" => 0,
+                    "get_height" => 1,
+                    _ => 2,
+                },
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// AIR passes an optional sampling argument as a boolean flag and a value.
+/// The flag must be a constant: SPIR-V chooses the sampling opcode at
+/// translation time, not at run time.
+fn optional(flag: &Operand, value: &Operand) -> Result<Option<Operand>, TranslateError> {
+    match flag {
+        Operand::Bool(false) => Ok(None),
+        Operand::Bool(true) => Ok(Some(value.clone())),
+        _ => Err(semantic(
+            "AIR texture sampling option is not a constant flag",
+        )),
+    }
+}
+
+/// A pointer whose LLVM type was widened by a bitcast. `pointee` is the type
+/// the address really holds.
+struct PointerAlias {
+    pointee: usize,
+    operand: Operand,
+}
+
+/// How a value loaded through a reinterpreted pointer is adapted to the type
+/// the load asked for.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Adaptation {
+    None,
+    /// Metal pads a `float3` to sixteen bytes, and Apple's compiler reads
+    /// such a member with a wider vector load.
+    Widen,
+    /// The same storage read as a different numeric type of equal width.
+    Bitcast,
+}
+
+/// Decide how a pointer reinterpretation can be honoured without changing a
+/// SPIR-V logical pointer's pointee type.
+fn reinterpretation(
+    types: &[DecodedType],
+    from: usize,
+    to: usize,
+) -> Result<Adaptation, TranslateError> {
+    if from == to {
+        return Ok(Adaptation::None);
+    }
+    let shape = |index: usize| match &types[index] {
+        DecodedType::Vector { element, lanes } => (*element, *lanes),
+        _ => (index, 1),
+    };
+    let (source, source_lanes) = shape(from);
+    let (target, target_lanes) = shape(to);
+    if source == target && source_lanes < target_lanes {
+        return Ok(Adaptation::Widen);
+    }
+    let width = |index: usize| match types[index] {
+        DecodedType::Integer(bits) | DecodedType::Float(bits) => Some(bits),
+        _ => None,
+    };
+    if source_lanes == target_lanes && width(source).is_some() && width(source) == width(target) {
+        return Ok(Adaptation::Bitcast);
+    }
+    Err(semantic(
+        "LLVM pointer cast needs explicit buffer reinterpretation",
+    ))
+}
+
+/// Adapt a value loaded through a reinterpreted pointer to the requested type.
+///
+/// FIXME (ACCURACY): lanes added by a widening load are undefined rather than
+/// the bytes Metal would read from a `float3`'s padding. Shaders discard
+/// them, and SPIR-V's logical addressing cannot name that padding.
+fn widen(
+    value: Operand,
+    from: usize,
+    to: usize,
+    types: &[DecodedType],
+    function: &mut Function,
+    instructions: &mut Vec<Instruction>,
+) -> Result<Operand, TranslateError> {
+    let target = ir_type(to, types)?;
+    match reinterpretation(types, from, to)? {
+        Adaptation::None => Ok(value),
+        Adaptation::Bitcast => Ok(emit(
+            function,
+            instructions,
+            target,
+            InstructionKind::Convert {
+                op: ConvertOp::Bitcast,
+                value,
+            },
+        )),
+        Adaptation::Widen => {
+            let lanes = |index: usize| match types[index] {
+                DecodedType::Vector { lanes, .. } => lanes,
+                _ => 1,
+            };
+            let components = (0..lanes(to))
+                .map(|lane| if lane < lanes(from) { lane } else { u32::MAX })
+                .collect();
+            let source = ir_type(from, types)?;
+            Ok(emit(
+                function,
+                instructions,
+                target,
+                InstructionKind::VectorShuffle {
+                    first: value,
+                    second: Operand::Undef(source),
+                    components,
+                },
+            ))
+        }
+    }
+}
+
+/// What a lowered function body needs beyond its own records: its LLVM
+/// signature, the names its calls resolve to, and the Metal types of any
+/// opaque arguments.
+pub(super) struct Signature<'a> {
+    pub names: &'a HashMap<usize, String>,
+    pub name: String,
+    pub parameter_types: &'a [usize],
+    pub result_type: usize,
+    pub opaque_types: &'a HashMap<u32, Type>,
+}
+
+/// Record the Metal IR operand an LLVM value lowered to.
+///
+/// A value used before the record stream defined it already has a reserved
+/// Metal IR value, because the use needed a type. Point the defining
+/// instruction at that reserved value so both refer to one SSA definition.
+fn define(
+    forward: &mut HashMap<usize, (ValueId, usize)>,
+    id: usize,
+    value: Operand,
+    operands: &mut HashMap<usize, Operand>,
+    function: &Function,
+    instructions: &mut [Instruction],
+) -> Result<(), TranslateError> {
+    let Some((reserved, _)) = forward.remove(&id) else {
+        operands.insert(id, value);
+        return Ok(());
+    };
+    let Operand::Value(defined) = value else {
+        return Err(semantic(
+            "LLVM forward reference names a value with no instruction",
+        ));
+    };
+    if function.values.get(reserved.0 as usize) != function.values.get(defined.0 as usize) {
+        return Err(semantic(
+            "LLVM forward reference declares the wrong result type",
+        ));
+    }
+    let instruction = instructions
+        .iter_mut()
+        .rev()
+        .find(|instruction| instruction.result == Some(defined))
+        .ok_or_else(|| semantic("LLVM forward reference has no defining instruction"))?;
+    instruction.result = Some(reserved);
+    operands.insert(id, Operand::Value(reserved));
+    Ok(())
 }

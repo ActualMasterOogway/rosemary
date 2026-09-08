@@ -1,6 +1,7 @@
 use metal_translate::ir::{
-    Access, Block, BlockId, EntryPoint, Function, InstructionKind, Module, Parameter, Resource,
-    ResourceKind, Stage, Terminator, Type, ValueId,
+    Access, Block, BlockId, ConvertOp, EntryPoint, FloatPredicate, FloatUnaryOp, Function,
+    InstructionKind, IntegerBinaryOp, Module, Operand, Parameter, Resource, ResourceKind, Stage,
+    Terminator, TextureDimension, TextureType, Type, ValueId,
 };
 use metal_translate::{
     AirInput, Phase, TargetProfile, emit_spirv, metallib_air, parse_air, parse_msl, translate,
@@ -98,25 +99,29 @@ fn emits_decoded_buffer_addresses_math_and_integer_widths() {
         ),
         (
             u64_ty,
-            InstructionKind::IntegerResize {
+            InstructionKind::Convert {
+                op: ConvertOp::ZeroExtend,
                 value: Operand::u32(17),
             },
         ),
         (
             f32_ty.clone(),
-            InstructionKind::FloatAbs {
+            InstructionKind::FloatUnary {
+                op: FloatUnaryOp::Absolute,
                 value: Operand::f32(-4.0),
             },
         ),
         (
             f32_ty.clone(),
-            InstructionKind::FloatReciprocalSqrt {
+            InstructionKind::FloatUnary {
+                op: FloatUnaryOp::InverseSqrt,
                 value: Operand::f32(4.0),
             },
         ),
         (
             Type::Bool,
-            InstructionKind::FloatOrderedGreaterEqual {
+            InstructionKind::FloatCompare {
+                predicate: FloatPredicate::OrderedGreaterEqual,
                 lhs: Operand::f32(1.0),
                 rhs: Operand::f32(0.0),
             },
@@ -229,7 +234,8 @@ fn emits_dynamic_array_index_inside_a_buffer_struct() {
     function.blocks[0].instructions = vec![
         Instruction {
             result: Some(ValueId(1)),
-            kind: InstructionKind::IntegerAdd {
+            kind: InstructionKind::IntegerBinary {
+                op: IntegerBinaryOp::Add,
                 lhs: Operand::u32(1),
                 rhs: Operand::u32(1),
             },
@@ -486,6 +492,14 @@ fn source_msl_compiles_a_bounded_typed_blit_kernel() {
 
 #[test]
 fn emits_a_writable_3d_texture_descriptor_in_its_metal_namespace() {
+    let texture = Type::Texture(TextureType {
+        dimension: TextureDimension::D3,
+        array: false,
+        multisampled: false,
+        depth: false,
+        texel: Box::new(Type::Float { bits: 32 }),
+        access: Access::Write,
+    });
     let module = Module {
         functions: vec![Function {
             name: "clear_volume".to_string(),
@@ -493,9 +507,9 @@ fn emits_a_writable_3d_texture_descriptor_in_its_metal_namespace() {
             parameters: vec![Parameter {
                 value: ValueId(0),
                 name: "output".to_string(),
-                ty: Type::Texture,
+                ty: texture.clone(),
             }],
-            values: vec![Type::Texture],
+            values: vec![texture.clone()],
             blocks: vec![Block {
                 id: BlockId(0),
                 name: "entry".to_string(),
@@ -512,9 +526,11 @@ fn emits_a_writable_3d_texture_descriptor_in_its_metal_namespace() {
                 index: 7,
                 count: 1,
                 access: Access::Write,
-                ty: Type::Texture,
+                ty: texture,
                 name: Some("output".to_string()),
             }],
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         }],
     };
 
@@ -531,4 +547,147 @@ fn emits_a_writable_3d_texture_descriptor_in_its_metal_namespace() {
             .iter()
             .any(|instruction| instruction.class.opcode == Op::TypeImage)
     );
+}
+
+/// SPIR-V has no unstructured control flow: a conditional branch must declare
+/// where its paths rejoin, and a loop must additionally name its back edge.
+/// LLVM records neither, so both are recovered from the graph.
+#[test]
+fn emits_structured_merges_for_a_loop_containing_a_conditional() {
+    let bool_ty = Type::Bool;
+    let function = Function {
+        name: "shade".to_string(),
+        result: Type::Void,
+        parameters: Vec::new(),
+        values: vec![bool_ty.clone(), bool_ty.clone()],
+        blocks: vec![
+            // header: loops while %0 holds, and contains an `if` on %1.
+            Block {
+                id: BlockId(0),
+                name: "header".to_string(),
+                instructions: Vec::new(),
+                terminator: Terminator::CondBranch {
+                    condition: Operand::Bool(true),
+                    true_block: BlockId(1),
+                    false_block: BlockId(3),
+                },
+            },
+            Block {
+                id: BlockId(1),
+                name: "body".to_string(),
+                instructions: Vec::new(),
+                terminator: Terminator::CondBranch {
+                    condition: Operand::Bool(false),
+                    true_block: BlockId(2),
+                    false_block: BlockId(4),
+                },
+            },
+            Block {
+                id: BlockId(2),
+                name: "taken".to_string(),
+                instructions: Vec::new(),
+                terminator: Terminator::Branch(BlockId(4)),
+            },
+            Block {
+                id: BlockId(3),
+                name: "exit".to_string(),
+                instructions: Vec::new(),
+                terminator: Terminator::Return(None),
+            },
+            // latch: the back edge to the header.
+            Block {
+                id: BlockId(4),
+                name: "latch".to_string(),
+                instructions: Vec::new(),
+                terminator: Terminator::Branch(BlockId(0)),
+            },
+        ],
+    };
+    let module = Module {
+        functions: vec![function],
+        entries: vec![EntryPoint {
+            function: 0,
+            stage: Stage::Fragment,
+            resources: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        }],
+    };
+    module.verify().unwrap();
+    let artifact = emit_spirv(&module, &TargetProfile::vulkan_1_3())
+        .unwrap()
+        .entries
+        .remove(0);
+    let parsed = rspirv::dr::load_words(&artifact.words).unwrap();
+    let opcodes: Vec<_> = parsed.functions[0]
+        .blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter())
+        .map(|instruction| instruction.class.opcode)
+        .collect();
+    assert!(opcodes.contains(&Op::LoopMerge));
+    assert!(opcodes.contains(&Op::SelectionMerge));
+}
+
+/// Metal returns from several places; SPIR-V needs one returning block so
+/// every conditional above them has somewhere to rejoin.
+#[test]
+fn routes_several_returns_through_one_exit_block() {
+    let module = Module {
+        functions: vec![Function {
+            name: "clip".to_string(),
+            result: Type::Void,
+            parameters: Vec::new(),
+            values: Vec::new(),
+            blocks: vec![
+                Block {
+                    id: BlockId(0),
+                    name: "entry".to_string(),
+                    instructions: Vec::new(),
+                    terminator: Terminator::CondBranch {
+                        condition: Operand::Bool(true),
+                        true_block: BlockId(1),
+                        false_block: BlockId(2),
+                    },
+                },
+                Block {
+                    id: BlockId(1),
+                    name: "inside".to_string(),
+                    instructions: Vec::new(),
+                    terminator: Terminator::Return(None),
+                },
+                Block {
+                    id: BlockId(2),
+                    name: "outside".to_string(),
+                    instructions: Vec::new(),
+                    terminator: Terminator::Return(None),
+                },
+            ],
+        }],
+        entries: vec![EntryPoint {
+            function: 0,
+            stage: Stage::Fragment,
+            resources: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        }],
+    };
+    module.verify().unwrap();
+    let artifact = emit_spirv(&module, &TargetProfile::vulkan_1_3())
+        .unwrap()
+        .entries
+        .remove(0);
+    let parsed = rspirv::dr::load_words(&artifact.words).unwrap();
+    let returns = parsed.functions[0]
+        .blocks
+        .iter()
+        .filter(|block| {
+            block
+                .instructions
+                .last()
+                .is_some_and(|instruction| instruction.class.opcode == Op::Return)
+        })
+        .count();
+    assert_eq!(returns, 1);
+    assert_eq!(parsed.functions[0].blocks.len(), 4);
 }
