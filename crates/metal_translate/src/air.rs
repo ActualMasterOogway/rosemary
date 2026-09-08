@@ -82,6 +82,21 @@ fn parse_minimal_store_bitcode(bitcode: &Bitcode) -> Result<Module, TranslateErr
             "LLVM defined-function records do not match their function bodies",
         ));
     }
+    // The libraries in Roblox's pack are written by the older AIR producer.
+    // Decode the tables before looking at a body: unlike the tiny LLVM 19
+    // fixture below, its function type and entry-point contract are not
+    // recoverable from a few strings.
+    if string_table.is_none()
+        && child_block(&module_block.elements, 17).is_some()
+        && metadata_entry_stage(module_block).is_some()
+    {
+        return parse_packed_air(
+            module_block,
+            &function_records,
+            &function_blocks,
+            &legacy_names,
+        );
+    }
     let entry_index = function_records
         .iter()
         .position(|(ordinal, record)| {
@@ -204,6 +219,323 @@ fn parse_minimal_store_bitcode(bitcode: &Bitcode) -> Result<Module, TranslateErr
             }],
         }],
     })
+}
+
+/// Decode the table-oriented AIR layout used by Metal's packed libraries.
+///
+/// This deliberately performs the type and metadata passes independently of
+/// instruction lowering.  A body is only accepted once every record has a
+/// Metal IR lowering; retaining the decoded contract here prevents the old
+/// string-search path from accidentally treating a fragment entry as a
+/// compute kernel.
+fn parse_packed_air(
+    module_block: &BitcodeBlock,
+    function_records: &[(usize, &&llvm_bitcode::bitcode::Record)],
+    function_blocks: &[&BitcodeBlock],
+    legacy_names: &HashMap<usize, String>,
+) -> Result<Module, TranslateError> {
+    let types = decode_type_table(
+        child_block(&module_block.elements, 17)
+            .ok_or_else(|| semantic("packed AIR has no type table"))?,
+    )?;
+    let stage = metadata_entry_stage(module_block)
+        .ok_or_else(|| semantic("packed AIR has no supported entry metadata"))?;
+    let entry = function_records
+        .iter()
+        .position(|(ordinal, _)| {
+            legacy_names
+                .get(ordinal)
+                .is_some_and(|name| name == "main0")
+        })
+        .or_else(|| (function_records.len() == 1).then_some(0))
+        .ok_or_else(|| semantic("packed AIR has no main0 entry function"))?;
+    let (ordinal, record) = function_records[entry];
+    let name = legacy_names
+        .get(&ordinal)
+        .cloned()
+        .ok_or_else(|| semantic("packed AIR entry has no value-symbol name"))?;
+    let signature_index = usize::try_from(
+        *record
+            .fields()
+            .first()
+            .ok_or_else(|| semantic("packed AIR function has no type"))?,
+    )
+    .map_err(|_| semantic("packed AIR function type does not fit in memory"))?;
+    let signature = types
+        .get(signature_index)
+        .ok_or_else(|| semantic("packed AIR function refers to a missing type"))?;
+    // Old LLVM module records name the pointer-to-function type. Newer
+    // producers name the function type directly.
+    let signature = match signature {
+        DecodedType::Pointer { pointee, .. } => types
+            .get(*pointee)
+            .ok_or_else(|| semantic("packed AIR function pointer has no pointee type"))?,
+        signature => signature,
+    };
+    let DecodedType::Function { parameters, .. } = signature else {
+        return Err(semantic(format!(
+            "packed AIR function type {signature_index} is {}, not a function",
+            signature.description()
+        )));
+    };
+    let parameter_types = parameters
+        .iter()
+        .map(|index| types[*index].description())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // Keep this boundary strict.  The diagnostic is intentionally expressed
+    // in LLVM record terms so the next lowering can be added without guessing
+    // whether a payload was a type, metadata, or instruction operand.
+    let body = function_blocks[entry];
+    let first_instruction = body
+        .elements
+        .iter()
+        .filter_map(BitcodeElement::as_record)
+        .find(|record| record.id != 1)
+        .ok_or_else(|| semantic("packed AIR function has no body records"))?;
+    Err(semantic(format!(
+        "packed AIR {stage:?} entry {name} has decoded parameter types ({parameter_types}), but LLVM function record {} is not lowered into Metal IR yet",
+        first_instruction.id
+    )))
+}
+
+#[derive(Clone, Debug)]
+enum DecodedType {
+    Void,
+    Float(u8),
+    Integer(u8),
+    Vector {
+        element: usize,
+        lanes: u32,
+    },
+    Array {
+        element: usize,
+        count: u32,
+    },
+    Struct {
+        fields: Vec<usize>,
+        packed: bool,
+    },
+    Pointer {
+        pointee: usize,
+        address_space: u64,
+    },
+    Function {
+        result: usize,
+        parameters: Vec<usize>,
+    },
+    Metadata,
+}
+
+impl DecodedType {
+    fn description(&self) -> String {
+        match self {
+            Self::Void => "void".to_string(),
+            Self::Float(bits) => format!("f{bits}"),
+            Self::Integer(bits) => format!("i{bits}"),
+            Self::Vector { element, lanes } => format!("vector<{element}; {lanes}>"),
+            Self::Array { element, count } => format!("array<{element}; {count}>"),
+            Self::Struct { fields, packed } => {
+                format!(
+                    "{}struct[{}]",
+                    if *packed { "packed " } else { "" },
+                    fields.len()
+                )
+            }
+            Self::Pointer {
+                pointee,
+                address_space,
+            } => format!("ptr({address_space})<{pointee}>"),
+            Self::Function { result, parameters } => {
+                format!("fn({})->{result}", parameters.len())
+            }
+            Self::Metadata => "metadata".to_string(),
+        }
+    }
+}
+
+/// Decode only the LLVM type records represented by the first packed AIR
+/// entry.  Referencing a type before it has been defined is rejected: AIR's
+/// table is ordered, and accepting a forward reference here would change the
+/// meaning of recursive structures.
+fn decode_type_table(block: &BitcodeBlock) -> Result<Vec<DecodedType>, TranslateError> {
+    let mut types = Vec::new();
+    let mut pending_named_struct = None;
+    for (record_ordinal, record) in block
+        .elements
+        .iter()
+        .filter_map(BitcodeElement::as_record)
+        .enumerate()
+    {
+        let fields = record_values(record);
+        let minimum_fields = match record.id {
+            7 | 8 => 1,
+            11 | 12 | 21 => 2,
+            _ => 0,
+        };
+        if fields.len() < minimum_fields {
+            return Err(semantic(format!(
+                "packed AIR type record {record_ordinal} (code {}) has {} field(s), expected at least {minimum_fields}",
+                record.id,
+                fields.len()
+            )));
+        }
+        let type_record = match record.id {
+            1 => continue, // NUMENTRY
+            2 => DecodedType::Void,
+            3 => DecodedType::Float(32),
+            7 => DecodedType::Integer(
+                u8::try_from(
+                    *fields
+                        .first()
+                        .ok_or_else(|| semantic("integer type has no width"))?,
+                )
+                .map_err(|_| semantic("integer type width is too large"))?,
+            ),
+            10 => DecodedType::Float(16),
+            11 => DecodedType::Array {
+                count: u32::try_from(
+                    *fields
+                        .first()
+                        .ok_or_else(|| semantic("array type has no count"))?,
+                )
+                .map_err(|_| semantic("array count is too large"))?,
+                element: type_reference(fields.get(1), types.len())?,
+            },
+            12 => DecodedType::Vector {
+                lanes: u32::try_from(
+                    *fields
+                        .first()
+                        .ok_or_else(|| semantic("vector type has no lane count"))?,
+                )
+                .map_err(|_| semantic("vector lane count is too large"))?,
+                element: type_reference(fields.get(1), types.len())?,
+            },
+            18 => DecodedType::Struct {
+                packed: fields.first() == Some(&1),
+                fields: fields[1..]
+                    .iter()
+                    .map(|field| type_reference(Some(field), types.len()))
+                    .collect::<Result<_, _>>()?,
+            },
+            19 => {
+                let _ = record
+                    .clone()
+                    .take_payload()
+                    .and_then(payload_string)
+                    .or_else(|| {
+                        record
+                            .fields()
+                            .iter()
+                            .map(|byte| u8::try_from(*byte).ok())
+                            .collect::<Option<Vec<_>>>()
+                            .and_then(|bytes| String::from_utf8(bytes).ok())
+                    })
+                    .ok_or_else(|| semantic("named struct has no UTF-8 name"))?;
+                // STRUCT_NAME allocates the identified type; STRUCT_NAMED
+                // fills that slot rather than allocating another entry.
+                pending_named_struct = Some(types.len());
+                types.push(DecodedType::Void);
+                continue;
+            }
+            20 => {
+                let index = pending_named_struct
+                    .take()
+                    .ok_or_else(|| semantic("named struct has no preceding name"))?;
+                let packed = fields.first() == Some(&1);
+                let fields = fields[1..]
+                    .iter()
+                    .map(|field| type_reference(Some(field), types.len()))
+                    .collect::<Result<_, _>>()?;
+                types[index] = DecodedType::Struct { packed, fields };
+                continue;
+            }
+            8 => DecodedType::Pointer {
+                pointee: type_reference(fields.first(), types.len())?,
+                address_space: *fields.get(1).unwrap_or(&0),
+            },
+            21 => DecodedType::Function {
+                result: type_reference(fields.get(1), types.len())?,
+                parameters: fields[2..]
+                    .iter()
+                    .map(|field| type_reference(Some(field), types.len()))
+                    .collect::<Result<_, _>>()?,
+            },
+            16 => DecodedType::Metadata,
+            _ => {
+                return Err(semantic(format!(
+                    "unsupported packed AIR type record {}",
+                    record.id
+                )));
+            }
+        };
+        types.push(type_record);
+    }
+    Ok(types)
+}
+
+/// Abbreviated LLVM records keep array operands in `Payload::Array` rather
+/// than `Record::fields()`. They are still consecutive operands of the same
+/// logical record (not an attached blob), notably for old AIR function types.
+fn record_values(record: &llvm_bitcode::bitcode::Record) -> Vec<u64> {
+    let mut values = record.fields().to_vec();
+    if let Some(Payload::Array(array)) = record.clone().take_payload() {
+        values.extend(array);
+    }
+    values
+}
+
+fn type_reference(field: Option<&u64>, defined: usize) -> Result<usize, TranslateError> {
+    let index =
+        usize::try_from(*field.ok_or_else(|| semantic("type record has no type reference"))?)
+            .map_err(|_| semantic("type reference does not fit in memory"))?;
+    if index >= defined {
+        return Err(semantic(
+            "packed AIR type has a forward or missing reference",
+        ));
+    }
+    Ok(index)
+}
+
+/// Metadata names are records, not incidental string payloads.  Pair each
+/// NAME with its following NAMED_NODE and select the entry stage from that
+/// relationship.
+fn metadata_entry_stage(module_block: &BitcodeBlock) -> Option<Stage> {
+    for block in module_block
+        .elements
+        .iter()
+        .filter_map(BitcodeElement::as_block)
+        .filter(|block| block.id == 15)
+    {
+        let mut name = None;
+        for record in block.elements.iter().filter_map(BitcodeElement::as_record) {
+            match record.id {
+                4 => {
+                    name = record
+                        .clone()
+                        .take_payload()
+                        .and_then(payload_string)
+                        .or_else(|| {
+                            record
+                                .fields()
+                                .iter()
+                                .map(|byte| u8::try_from(*byte).ok())
+                                .collect::<Option<Vec<_>>>()
+                                .and_then(|bytes| String::from_utf8(bytes).ok())
+                        });
+                }
+                10 if !record.fields().is_empty() => match name.as_deref() {
+                    Some("air.vertex") => return Some(Stage::Vertex),
+                    Some("air.fragment") => return Some(Stage::Fragment),
+                    Some("air.kernel") => return Some(Stage::Kernel),
+                    _ => name = None,
+                },
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 /// Resolve both LLVM function-name encodings used by AIR. Modern bitcode puts
