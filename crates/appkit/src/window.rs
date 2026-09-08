@@ -59,6 +59,7 @@ pub const DID_CHANGE_BACKING_PROPERTIES: &str = "NSWindowDidChangeBackingPropert
 /// `NSWindowStyleMask`.
 mod style {
     pub const TITLED: usize = 1;
+    pub const CLOSABLE: usize = 1 << 1;
     pub const RESIZABLE: usize = 1 << 3;
 }
 
@@ -474,6 +475,38 @@ unsafe extern "C" fn close(receiver: Id, sel: Sel) {
     unsafe { order_out(receiver, sel, std::ptr::null_mut()) };
 }
 
+/// Consult the delegate before closing, falling back to the window itself.
+unsafe extern "C" fn perform_close(receiver: Id, _sel: Sel, _sender: Id) {
+    if window_of(receiver).style_mask & style::CLOSABLE == 0 {
+        return;
+    }
+    let should_close = objc::sel::get("windowShouldClose:");
+    let target = [delegate_of(receiver), receiver]
+        .into_iter()
+        .find(|object| {
+            // SAFETY: the window and its delegate are live runtime objects or nil.
+            unsafe { objc::object::class_of(*object) }
+                .is_some_and(|class| class.method(should_close).is_some())
+        });
+    if let Some(target) = target {
+        // SAFETY: `-windowShouldClose:` is `BOOL (id, SEL, id)`.
+        let agrees = unsafe {
+            let send: unsafe extern "C" fn(Id, Sel, Id) -> u8 =
+                std::mem::transmute(objc::msg::entry());
+            send(target, should_close, receiver)
+        };
+        if agrees == 0 {
+            return;
+        }
+    }
+    // Send the message so a subclass's close override runs too.
+    // SAFETY: `-close` is `void (id, SEL)`.
+    unsafe {
+        let send: unsafe extern "C" fn(Id, Sel) = std::mem::transmute(objc::msg::entry());
+        send(receiver, objc::sel::get("close"));
+    }
+}
+
 /// The window a program's keystrokes go to, which is the last one ordered front.
 static KEY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -845,6 +878,7 @@ pub(crate) fn install() {
         "orderFront:" => make_key_and_order_front, c"v24@0:8@16";
         "orderOut:" => order_out, c"v24@0:8@16";
         "close" => close, c"v16@0:8";
+        "performClose:" => perform_close, c"v24@0:8@16";
         "isKeyWindow" => is_key_window, c"c16@0:8";
         "isMainWindow" => is_key_window, c"c16@0:8";
         "isVisible" => is_visible, c"c16@0:8";
@@ -908,6 +942,76 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn perform_close_respects_style_and_delegate_and_dispatches_close() {
+        crate::bootstrap();
+        let base = objc::class::lookup(c"NSWindow").unwrap();
+        let subclass = objc::class::allocate_pair(Some(base), c"PerformCloseWindow", 0).unwrap();
+        unsafe extern "C" fn veto(receiver: Id, sel: Sel, window: Id) -> u8 {
+            assert_eq!(sel, objc::sel::get("windowShouldClose:"));
+            assert_eq!(receiver, window);
+            0
+        }
+        unsafe extern "C" fn allow(_receiver: Id, sel: Sel, window: Id) -> u8 {
+            assert_eq!(sel, objc::sel::get("windowShouldClose:"));
+            assert!(!window.is_null());
+            1
+        }
+        unsafe extern "C" fn overridden_close(receiver: Id, sel: Sel) {
+            assert_eq!(sel, objc::sel::get("close"));
+            window_of(receiver).shown = 2;
+        }
+        subclass.add_method(
+            objc::sel::get("windowShouldClose:"),
+            veto as objc::class::Imp,
+            c"c24@0:8@16",
+        );
+        subclass.add_method(
+            objc::sel::get("close"),
+            overridden_close as objc::class::Imp,
+            c"v16@0:8",
+        );
+        objc::class::register_pair(subclass);
+        let delegate_class = objc::class::allocate_pair(
+            objc::class::lookup(c"NSObject"),
+            c"PerformCloseDelegate",
+            0,
+        )
+        .unwrap();
+        delegate_class.add_method(
+            objc::sel::get("windowShouldClose:"),
+            allow as objc::class::Imp,
+            c"c24@0:8@16",
+        );
+        objc::class::register_pair(delegate_class);
+        let delegate = objc::object::create_instance(delegate_class, 0);
+        let window = objc::object::create_instance(subclass, 0);
+        let plain = objc::object::create_instance(base, 0);
+        // SAFETY: live runtime windows; `-performClose:` is `void (id, SEL, id)`.
+        unsafe {
+            let send: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+            let sel = objc::sel::get("performClose:");
+            window_of(window).shown = 1;
+            send(window, sel, delegate);
+            assert_eq!(window_of(window).shown, 1);
+            window_of(window).style_mask = style::TITLED | style::CLOSABLE;
+            send(window, sel, delegate);
+            assert_eq!(window_of(window).shown, 1);
+            window_of(window).delegate = delegate;
+            send(window, sel, std::ptr::null_mut());
+            assert_eq!(window_of(window).shown, 2);
+            window_of(plain).shown = 1;
+            window_of(plain).style_mask = style::TITLED | style::CLOSABLE;
+            send(plain, sel, delegate);
+            assert_eq!(window_of(plain).shown, 0);
+            window_of(plain).shown = 1;
+            window_of(plain).delegate =
+                objc::object::create_instance(objc::class::lookup(c"NSObject").unwrap(), 0);
+            send(plain, sel, std::ptr::null_mut());
+            assert_eq!(window_of(plain).shown, 0);
+        }
+    }
 
     static REDIRECT: std::sync::Mutex<(usize, usize)> = std::sync::Mutex::new((0, 0));
 
