@@ -87,6 +87,10 @@ pub unsafe extern "C" fn pthread_atfork(
         // SAFETY: the caller's guarantee, and a DSO handle of this crate's own.
         unsafe { __register_atfork(prepare, parent, child, &raw const DSO_HANDLE as *const ()) }
     }
+    #[cfg(not(target_env = "gnu"))]
+    {
+        return 0;
+    }
 }
 
 /// `void __assert_rtn(const char *func, const char *file, int line, const char *expr)`
