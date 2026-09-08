@@ -60,32 +60,36 @@ struct MallInfo2 {
 ///
 /// `stats` is null or a writable Darwin `malloc_statistics_t`.
 pub unsafe extern "C" fn malloc_zone_statistics(_zone: *mut c_void, stats: *mut Statistics) {
-    unsafe extern "C" {
-        fn mallinfo2() -> MallInfo2;
-    }
-    if stats.is_null() {
-        return;
-    }
-    // SAFETY: takes no argument and returns by value.
-    let info = unsafe { mallinfo2() };
-    // SAFETY: the caller states `stats` is writable.
-    unsafe {
-        *stats = Statistics {
-            // glibc counts no blocks, and a count invented from the byte total
-            // would be a number with no meaning. Zero says "not reported",
-            // which is what a caller that divides by it needs to see.
-            blocks_in_use: 0,
-            _pad: 0,
-            // `uordblks` counts only what came out of the heap. A block past
-            // `M_MMAP_THRESHOLD` - which is most of a game's memory - is mapped
-            // instead and counted in `hblkhd`, so reporting the first alone says
-            // a program using two hundred megabytes is using sixteen kilobytes.
-            size_in_use: info.uordblks + info.hblkhd,
-            // The high-water mark is not kept either. Reporting the current
-            // total would say the program has never freed anything.
-            max_size_in_use: 0,
-            size_allocated: info.arena + info.hblkhd,
-        };
+    // Gated off to GNU because we don't know if other libc implementations have it, better to be safe than sorry.
+    #[cfg(target_env = "gnu")]
+    {
+        unsafe extern "C" {
+            fn mallinfo2() -> MallInfo2;
+        }
+        if stats.is_null() {
+            return;
+        }
+        // SAFETY: takes no argument and returns by value.
+        let info = unsafe { mallinfo2() };
+        // SAFETY: the caller states `stats` is writable.
+        unsafe {
+            *stats = Statistics {
+                // glibc counts no blocks, and a count invented from the byte total
+                // would be a number with no meaning. Zero says "not reported",
+                // which is what a caller that divides by it needs to see.
+                blocks_in_use: 0,
+                _pad: 0,
+                // `uordblks` counts only what came out of the heap. A block past
+                // `M_MMAP_THRESHOLD` - which is most of a game's memory - is mapped
+                // instead and counted in `hblkhd`, so reporting the first alone says
+                // a program using two hundred megabytes is using sixteen kilobytes.
+                size_in_use: info.uordblks + info.hblkhd,
+                // The high-water mark is not kept either. Reporting the current
+                // total would say the program has never freed anything.
+                max_size_in_use: 0,
+                size_allocated: info.arena + info.hblkhd,
+            };
+        }
     }
 }
 

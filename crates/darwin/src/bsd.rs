@@ -20,6 +20,7 @@ use machish::resolve::SyntheticDylib;
 unsafe extern "C" {
     /// glibc's, which *is* exported, and which `atexit` is a special case of.
     fn __cxa_atexit(func: *const (), arg: *mut c_void, dso: *const ()) -> c_int;
+    #[cfg(target_env = "gnu")]
     /// glibc's exported `pthread_atfork`, which takes the DSO handle as well.
     fn __register_atfork(
         prepare: *const (),
@@ -80,8 +81,12 @@ pub unsafe extern "C" fn pthread_atfork(
     parent: *const (),
     child: *const (),
 ) -> c_int {
-    // SAFETY: the caller's guarantee, and a DSO handle of this crate's own.
-    unsafe { __register_atfork(prepare, parent, child, &raw const DSO_HANDLE as *const ()) }
+    // FIXME (ACCURACY): fork handlers are completely dropped on non-GNU systems.
+    #[cfg(target_env = "gnu")]
+    {
+        // SAFETY: the caller's guarantee, and a DSO handle of this crate's own.
+        unsafe { __register_atfork(prepare, parent, child, &raw const DSO_HANDLE as *const ()) }
+    }
 }
 
 /// `void __assert_rtn(const char *func, const char *file, int line, const char *expr)`
