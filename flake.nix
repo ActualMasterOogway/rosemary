@@ -46,6 +46,7 @@
               pkgs.python3 # tools/guest-symbolicate.py
               # metal_translate
               pkgs.llvm
+              pkgs.vkdevicechooser
             ];
 
             buildInputs = runtimeLibs;

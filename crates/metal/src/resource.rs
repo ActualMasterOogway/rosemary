@@ -12,6 +12,7 @@ use crate::object::{self, methods};
 use ash::vk;
 
 pub(crate) struct Buffer {
+    pub gpu: &'static Gpu,
     pub inner: GpuBuffer,
     pub options: u64,
 }
@@ -20,6 +21,43 @@ pub(crate) struct Texture {
     pub gpu: &'static Gpu,
     pub descriptor: TextureDescriptor,
     pub image: GpuImage,
+    /// One view per mip level and array slice a render pass has attached,
+    /// made on first use. A texture usually has one and a blur pyramid has one
+    /// per level, so this is a short list rather than a map.
+    attachment_views: Vec<((u32, u32), vk::ImageView)>,
+}
+
+impl Texture {
+    /// The framebuffer attachment for one mip level and array slice.
+    pub fn attachment_view(&mut self, level: u32, slice: u32) -> vk::ImageView {
+        if let Some((_, view)) = self
+            .attachment_views
+            .iter()
+            .find(|(at, _)| *at == (level, slice))
+        {
+            return *view;
+        }
+        match self.gpu.create_attachment_view(&self.image, level, slice) {
+            Ok(view) => {
+                self.attachment_views.push(((level, slice), view));
+                view
+            }
+            Err(reason) => {
+                gpu::trace(format!("render pass attachment view failed: {reason}"));
+                self.image.view
+            }
+        }
+    }
+
+    /// The bytes `-[MTLDevice currentAllocatedSize]` counts this texture as.
+    /// Read from the image rather than the descriptor, so that the figure a
+    /// deallocation subtracts is the one its creation added.
+    pub fn accounted(&self) -> i64 {
+        i64::from(gpu::texel_size(self.image.format))
+            * i64::from(self.image.width)
+            * i64::from(self.image.height)
+            * i64::from(self.image.layers)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -216,19 +254,49 @@ pub(crate) struct IndexedCollection {
 
 // ---------------------------------------------------------------- buffers
 
+/// `ROSETTA3_TRACE_BUFFERS=1`: every `MTLBuffer` made and destroyed, with its
+/// length, its `MTLResourceOptions` and how many are live.
+///
+/// The aggregate counters say a run is allocating gigabytes a second; only the
+/// sizes say what it is allocating, and a game which asks for one size five
+/// hundred times over is a different problem from one which asks for five
+/// hundred sizes once each.
+fn tracing_buffers() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("ROSETTA3_TRACE_BUFFERS").is_some())
+}
+
 pub(crate) fn new_buffer(gpu: &'static Gpu, length: usize, options: u64) -> Id {
     if length == 0 {
         return std::ptr::null_mut();
     }
-    let inner = match gpu.create_buffer(length as u64) {
+    crate::stats::peak(crate::stats::Counter::BufferPeakBytes, length as u64);
+    if tracing_buffers() {
+        eprintln!(
+            "rosetta3: Metal: newBuffer {length} options {options:#x} live {}",
+            crate::live_buffers(1)
+        );
+    }
+    let inner = match crate::stats::timed(crate::stats::Counter::BufferMicros, || {
+        gpu.create_buffer(length as u64)
+    }) {
         Ok(inner) => inner,
         Err(reason) => {
             gpu::trace(format!("newBufferWithLength: failed: {reason}"));
             return std::ptr::null_mut();
         }
     };
-    crate::account(length as u64);
-    object::make(c"R3MTLBuffer", Buffer { inner, options })
+    crate::account(length as i64);
+    crate::stats::count(crate::stats::Counter::BuffersCreated);
+    crate::stats::add(crate::stats::Counter::BufferBytes, length as u64);
+    object::make(
+        c"R3MTLBuffer",
+        Buffer {
+            gpu,
+            inner,
+            options,
+        },
+    )
 }
 
 /// The mapping behind an `MTLBuffer` this crate made.
@@ -254,6 +322,47 @@ unsafe extern "C" fn buffer_length(receiver: Id, _sel: Sel) -> usize {
 unsafe extern "C" fn buffer_storage_mode(receiver: Id, _sel: Sel) -> u64 {
     // SAFETY: a buffer of this crate's.
     (unsafe { object::body::<Buffer>(receiver) }.options >> 4) & 0xf
+}
+
+/// `-[MTLBuffer dealloc]`.
+///
+/// Without this every buffer a guest makes is a `VkBuffer` and a range of a
+/// heap block held for the life of the process. A game which streams its world
+/// in makes gigabytes of them in a second, so the leak is not a slow one: it
+/// exhausts the adapter's memory during the first minute of play.
+///
+/// The last reference is gone, so nothing can bind it again, and a command
+/// buffer which did bind it holds a reference of its own until the work it was
+/// recorded into has completed.
+unsafe extern "C" fn buffer_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a buffer of this crate's.
+    let buffer = unsafe { object::body::<Buffer>(receiver) };
+    if tracing_buffers() {
+        eprintln!(
+            "rosetta3: Metal: freeBuffer {} live {}",
+            buffer.inner.length,
+            crate::live_buffers(-1)
+        );
+    }
+    crate::account(-(buffer.inner.length as i64));
+    let inner = std::mem::replace(&mut buffer.inner, GpuBuffer::none());
+    buffer.gpu.destroy_buffer(inner);
+    objc::arc::finalize(receiver);
+}
+
+/// `-[MTLTexture dealloc]`, for the same reason as a buffer's.
+unsafe extern "C" fn texture_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a texture of this crate's.
+    let texture = unsafe { object::body::<Texture>(receiver) };
+    crate::account(-texture.accounted());
+    for (_, view) in std::mem::take(&mut texture.attachment_views) {
+        // SAFETY: the last reference is gone, so nothing can attach it again,
+        // and a command buffer which did holds a reference until it completes.
+        unsafe { texture.gpu.device.destroy_image_view(view, None) };
+    }
+    let image = std::mem::replace(&mut texture.image, GpuImage::none());
+    texture.gpu.destroy_image(image);
+    objc::arc::finalize(receiver);
 }
 
 // --------------------------------------------------------------- textures
@@ -291,20 +400,20 @@ pub(crate) fn new_texture(gpu: &'static Gpu, descriptor: TextureDescriptor) -> I
             return std::ptr::null_mut();
         }
     };
-    crate::account(
-        u64::from(gpu::texel_size(format))
-            * descriptor.width.max(1)
-            * descriptor.height.max(1)
-            * u64::from(layers),
-    );
-    object::make(
+    let texture = object::make(
         c"R3MTLTexture",
         Texture {
             gpu,
             descriptor,
             image,
+            attachment_views: Vec::new(),
         },
-    )
+    );
+    if !texture.is_null() {
+        // SAFETY: the texture this call just made.
+        crate::account(unsafe { object::body::<Texture>(texture) }.accounted());
+    }
+    texture
 }
 
 /// Wrap an existing image as a Metal texture, for presentation, whose images
@@ -328,6 +437,7 @@ pub(crate) fn drawable_texture(gpu: &'static Gpu, image: GpuImage, pixel_format:
             gpu,
             descriptor,
             image,
+            attachment_views: Vec::new(),
         },
     )
 }
@@ -476,11 +586,8 @@ unsafe extern "C" fn replace_region(
     if let Err(reason) = result {
         gpu::trace(format!("replaceRegion: copy failed: {reason}"));
     }
-    // SAFETY: the copy completed before `one_shot` returned.
-    unsafe {
-        texture.gpu.device.destroy_buffer(staging.buffer, None);
-        texture.gpu.device.free_memory(staging.memory, None);
-    }
+    // The copy completed before `one_shot` returned.
+    texture.gpu.destroy_buffer(staging);
 }
 
 // --------------------------------------------------------------- samplers
@@ -752,6 +859,7 @@ unsafe extern "C" fn set_vertex_element_value(receiver: Id, sel: Sel, value: u64
 pub(crate) fn install() {
     let buffer = object::register::<Buffer>(c"R3MTLBuffer");
     methods!(buffer, {
+        "dealloc" => buffer_dealloc, c"v16@0:8";
         "contents" => buffer_contents, c"^v16@0:8";
         "length" => buffer_length, c"Q16@0:8";
         "storageMode" => buffer_storage_mode, c"Q16@0:8";
@@ -806,6 +914,7 @@ pub(crate) fn install() {
         );
     }
     methods!(texture, {
+        "dealloc" => texture_dealloc, c"v16@0:8";
         "replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:"
             => replace_region, c"v96@0:8{MTLRegion={MTLOrigin=QQQ}{MTLSize=QQQ}}16Q64Q72^v80Q88";
         "setLabel:" => crate::no_op, c"v24@0:8@16";

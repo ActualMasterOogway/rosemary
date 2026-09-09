@@ -679,6 +679,10 @@ extern "C" fn entry(raw: *mut c_void) -> *mut c_void {
     // exactly one thread, which is this one.
     let GuestStart { entry, arg, stack } = *unsafe { Box::from_raw(raw as *mut GuestStart) };
 
+    // `sigaltstack` is per thread. Without one here, a fault whose cause has
+    // already made this thread's stack unusable takes the report with it.
+    crate::fault::install_alternate_stack();
+
     if let Err(e) = adopt(stack) {
         // No error channel.
         eprintln!("rosetta3: a guest thread could not be given a stack: {e}");

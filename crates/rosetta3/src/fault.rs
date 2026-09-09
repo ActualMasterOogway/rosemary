@@ -387,10 +387,25 @@ fn keep_the_fault_signals() {
 /// thread has exactly one. Crashpad installs `MINSIGSTKSZ` - two kilobytes - and
 /// from then on the report below was being composed in it, faulting on its own
 /// frame. Installed here, and [`darwin::signal::retain_altstack`] keeps it.
-fn install_alternate_stack() {
+///
+/// Per thread, because `sigaltstack` is: a thread without one runs the handler
+/// on its own stack, and the fault which brought the handler here is often a
+/// wild pointer that has already made that stack unusable. A guest thread must
+/// call this before it enters the guest.
+pub fn install_alternate_stack() {
     /// Room for the report's frames with a wide margin. Leaked deliberately:
     /// this stack has to outlive everything, including a fault during exit.
     const BYTES: usize = 512 * 1024;
+
+    // SAFETY: reading the disposition this thread already has.
+    let existing = unsafe {
+        let mut current: libc::stack_t = std::mem::zeroed();
+        libc::sigaltstack(std::ptr::null(), &mut current);
+        current
+    };
+    if existing.ss_size >= BYTES && existing.ss_flags & libc::SS_DISABLE == 0 {
+        return;
+    }
 
     let stack = Box::leak(vec![0u8; BYTES].into_boxed_slice());
     // SAFETY: `stack` is a live, leaked, writable allocation of `BYTES` bytes,
@@ -458,6 +473,29 @@ static REPORT: Shared = Shared(std::cell::UnsafeCell::new(Buffer::empty()));
 /// Whether [`REPORT`] holds a report that has not been printed.
 static BUILDING: AtomicBool = AtomicBool::new(false);
 
+/// The section the handler is in, so that a report which stops names where.
+///
+/// Every section below the registers reads memory the fault has just said
+/// nothing can be trusted about, and the one which faults takes the rest of the
+/// report with it. Without this the report ended at the last line that had
+/// already been appended, which is a different place from the one that faulted
+/// and says nothing about which walk to distrust.
+static STAGE: AtomicUsize = AtomicUsize::new(0);
+
+const STAGES: [&str; 7] = [
+    "the header",
+    "the faulting address",
+    "the host pc and its region",
+    "the registers",
+    "the thread",
+    "the guest stack",
+    "the report",
+];
+
+fn stage(which: usize) {
+    STAGE.store(which, Ordering::SeqCst);
+}
+
 /// Print a report the handler faulted part-way through building.
 fn salvage() {
     if !BUILDING.swap(false, Ordering::SeqCst) {
@@ -466,7 +504,14 @@ fn salvage() {
     // SAFETY: the swap above hands this over exactly once, and the buffer is a
     // `static` - the frame that was filling it may be gone, its storage is not.
     let out = unsafe { &mut *REPORT.0.get() };
-    out.str("\n  (the handler faulted here; the rest of the report is missing)\n");
+    out.str("\n  (the handler faulted while reporting ");
+    out.str(
+        STAGES
+            .get(STAGE.load(Ordering::SeqCst))
+            .copied()
+            .unwrap_or("an unnamed section"),
+    );
+    out.str("; the rest of the report is missing)\n");
     out.flush();
 }
 
@@ -486,6 +531,7 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
     // its way out of the process.
     let out = unsafe { &mut *REPORT.0.get() };
     BUILDING.store(true, Ordering::SeqCst);
+    stage(0);
     out.str("rosetta3: fault: ");
     out.str(match signal {
         libc::SIGBUS => "SIGBUS",
@@ -496,6 +542,7 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
 
     // SAFETY: the kernel passes a live `siginfo_t` for the duration of the
     // handler; `si_addr` is the faulting address for both signals handled here.
+    stage(1);
     let addr = unsafe { info.as_ref() }.map_or(0, |i| unsafe { darwin::signal::fault_address(i) });
     out.str(" at ");
     out.hex(addr);
@@ -512,10 +559,14 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
     if let Some(pc) = host_pc(context) {
         out.str("\n  host pc ");
         out.hex(pc);
+        stage(2);
         say_region(out, pc);
     }
+    stage(3);
     say_registers(out, context);
+    stage(4);
     say_thread(out);
+    stage(5);
     // Everything above is read from the kernel's own `siginfo_t` and
     // `ucontext_t` and cannot fault. Everything below walks the guest's stack
     // and its images, and can. Printed here so the two arrive separately rather
@@ -539,6 +590,7 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
         say_caller(out, context);
     }
 
+    stage(6);
     out.str("\n");
     BUILDING.store(false, Ordering::SeqCst);
     out.flush();

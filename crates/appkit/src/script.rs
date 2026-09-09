@@ -22,6 +22,7 @@ use std::time::Instant;
 use sdl3::video::Event;
 
 pub const ENV: &str = "ROSETTA3_DEBUG_INPUT";
+pub const FILE_ENV: &str = "ROSETTA3_DEBUG_INPUT_FILE";
 
 /// Where the script last put the pointer, in SDL window coordinates, and
 /// whether it has put it anywhere at all.
@@ -83,27 +84,7 @@ fn parse(value: &str) -> Vec<Step> {
             eprintln!("rosetta3: appkit: {ENV}: {at:?} is not a number of seconds");
             continue;
         };
-        let rest = rest.trim();
-        let (verb, argument) = rest.split_once(' ').unwrap_or((rest, ""));
-        let argument = argument.trim();
-        let action = match verb {
-            "move" => point(argument).map(|(x, y)| Action::Move(x, y)),
-            "click" => Some(Action::Click {
-                button: argument.parse().unwrap_or(1),
-                clicks: 1,
-            }),
-            "doubleclick" => Some(Action::Click {
-                button: argument.parse().unwrap_or(1),
-                clicks: 2,
-            }),
-            "down" => Some(Action::Down(argument.parse().unwrap_or(1))),
-            "up" => Some(Action::Up(argument.parse().unwrap_or(1))),
-            "scroll" => point(argument).map(|(x, y)| Action::Scroll(x, y)),
-            "key" => crate::event::scancode(argument).map(Action::Key),
-            "type" => Some(Action::Type(argument.to_owned())),
-            _ => None,
-        };
-        match action {
+        match action(rest.trim()) {
             Some(action) => steps.push(Step { at, action }),
             None => eprintln!("rosetta3: appkit: {ENV}: {rest:?} is not an action"),
         }
@@ -112,9 +93,81 @@ fn parse(value: &str) -> Vec<Step> {
     steps
 }
 
+/// One `VERB [ARGUMENT]`, the body of a script step.
+fn action(rest: &str) -> Option<Action> {
+    let (verb, argument) = rest.split_once(' ').unwrap_or((rest, ""));
+    let argument = argument.trim();
+    match verb {
+        "move" => point(argument).map(|(x, y)| Action::Move(x, y)),
+        "click" => Some(Action::Click {
+            button: argument.parse().unwrap_or(1),
+            clicks: 1,
+        }),
+        "doubleclick" => Some(Action::Click {
+            button: argument.parse().unwrap_or(1),
+            clicks: 2,
+        }),
+        "down" => Some(Action::Down(argument.parse().unwrap_or(1))),
+        "up" => Some(Action::Up(argument.parse().unwrap_or(1))),
+        "scroll" => point(argument).map(|(x, y)| Action::Scroll(x, y)),
+        "key" => crate::event::scancode(argument).map(Action::Key),
+        "type" => Some(Action::Type(argument.to_owned())),
+        _ => None,
+    }
+}
+
 fn point(argument: &str) -> Option<(f32, f32)> {
     let (x, y) = argument.split_once(',')?;
     Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+}
+
+/// Perform whatever has been appended to `ROSETTA3_DEBUG_INPUT_FILE`.
+///
+/// A timed script has to be written before the run begins, which is exactly
+/// backwards for finding one's way through a program's own interface: where the
+/// next thing to click is depends on what the last click did. This reads the
+/// file's new lines each pump and performs each as one step, so a session can
+/// be driven a line at a time from outside while it runs.
+fn run_file(window: u32) {
+    use std::io::Read;
+
+    static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    static READ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static PARTIAL: Mutex<String> = Mutex::new(String::new());
+
+    let Some(path) = PATH
+        .get_or_init(|| std::env::var_os(FILE_ENV).map(std::path::PathBuf::from))
+        .as_ref()
+    else {
+        return;
+    };
+    let from = READ.load(Ordering::Relaxed);
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return;
+    };
+    if std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(from)).is_err() {
+        return;
+    }
+    let mut fresh = String::new();
+    let Ok(read) = file.read_to_string(&mut fresh) else {
+        return;
+    };
+    READ.store(from + read as u64, Ordering::Relaxed);
+    let mut partial = PARTIAL.lock().unwrap_or_else(|e| e.into_inner());
+    partial.push_str(&fresh);
+    // A line the writer has not finished is kept for the next pump, so a step
+    // is never performed with half its argument.
+    let complete = match partial.rfind('\n') {
+        Some(end) => partial.drain(..=end).collect::<String>(),
+        None => return,
+    };
+    drop(partial);
+    for line in complete.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        match action(line) {
+            Some(action) => perform(window, &action),
+            None => eprintln!("rosetta3: appkit: {FILE_ENV}: {line:?} is not an action"),
+        }
+    }
 }
 
 /// Run whatever the script has due, once per pump.
@@ -127,11 +180,6 @@ pub fn run() {
         Ok(value) => parse(&value),
         Err(_) => Vec::new(),
     });
-    let mut next = NEXT.load(Ordering::Relaxed);
-    if next >= script.len() {
-        return;
-    }
-    let elapsed = START.get_or_init(Instant::now).elapsed().as_secs_f64();
     let Some(window) = crate::window::sdl_windows()
         .into_iter()
         .map(sdl3::video::window_id)
@@ -139,6 +187,12 @@ pub fn run() {
     else {
         return;
     };
+    run_file(window);
+    let mut next = NEXT.load(Ordering::Relaxed);
+    if next >= script.len() {
+        return;
+    }
+    let elapsed = START.get_or_init(Instant::now).elapsed().as_secs_f64();
     while next < script.len() && script[next].at <= elapsed {
         perform(window, &script[next].action);
         next += 1;

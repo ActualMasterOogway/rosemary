@@ -10,6 +10,8 @@ use std::sync::{Mutex, OnceLock};
 
 use ash::{Device, Instance, vk};
 
+use crate::heap::{Allocation, Heap};
+
 /// One logical device and the queue Metal's single command-queue model uses.
 pub struct Gpu {
     pub device: Device,
@@ -26,6 +28,13 @@ pub struct Gpu {
     /// The pool and fence behind `one_shot`, which runs the small transfers
     /// and layout transitions Metal performs outside a command buffer.
     immediate: Mutex<Option<Immediate>>,
+    /// The blocks Metal buffers are cut out of, made on first use because the
+    /// memory type depends on what a buffer's requirements admit.
+    buffers: OnceLock<Heap>,
+    /// Two-timestamp query pools, one per command buffer in flight, kept for
+    /// reuse. Only under `ROSETTA3_METAL_STATS`.
+    timestamp_pools: Mutex<Vec<vk::QueryPool>>,
+    timestamp_period: f32,
 }
 
 struct Immediate {
@@ -120,6 +129,9 @@ impl Gpu {
             layouts: Mutex::new(HashMap::new()),
             render_passes: Mutex::new(HashMap::new()),
             immediate: Mutex::new(None),
+            buffers: OnceLock::new(),
+            timestamp_pools: Mutex::new(Vec::new()),
+            timestamp_period: properties.limits.timestamp_period,
         })
     }
 
@@ -154,6 +166,14 @@ impl Gpu {
 
     /// A Metal buffer: host visible so `-contents` can hand the guest a
     /// pointer, and usable by every stage Metal allows a buffer in.
+    ///
+    /// The memory is ordinary host memory, cached where the device offers it.
+    /// A heap which is host-visible *and* device-local looks like the better
+    /// answer and is the worse one: on a discrete adapter that is the PCI
+    /// aperture, a few hundred megabytes wide and uncached, so a game which
+    /// streams its world in overruns it and every byte the guest reads back
+    /// through `-contents` crosses the bus. `MTLStorageModeShared` on a Mac
+    /// with a discrete GPU is system memory too.
     pub fn create_buffer(&self, length: u64) -> Result<GpuBuffer, String> {
         let usage = vk::BufferUsageFlags::STORAGE_BUFFER
             | vk::BufferUsageFlags::UNIFORM_BUFFER
@@ -171,38 +191,69 @@ impl Gpu {
             .map_err(|error| format!("vkCreateBuffer failed with {error:?}"))?;
         // SAFETY: the buffer was just created by this device.
         let requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
-        let memory = self
-            .allocate(
-                requirements,
-                vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT
-                    | vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            )
+        let heap = self
+            .buffer_heap(requirements.memory_type_bits)
             .inspect_err(|_| {
                 // SAFETY: nothing is bound to the buffer yet.
                 unsafe { self.device.destroy_buffer(buffer, None) };
             })?;
-        // SAFETY: fresh, unbound buffer and memory from this device.
-        unsafe { self.device.bind_buffer_memory(buffer, memory, 0) }
-            .map_err(|error| format!("vkBindBufferMemory failed with {error:?}"))?;
-        // SAFETY: host-visible memory that nothing else has mapped.
-        let contents = unsafe {
+        let allocation = heap
+            .allocate(&self.device, requirements.size, requirements.alignment)
+            .inspect_err(|_| {
+                // SAFETY: as above.
+                unsafe { self.device.destroy_buffer(buffer, None) };
+            })?;
+        // SAFETY: a fresh, unbound buffer and a range nothing else holds.
+        unsafe {
             self.device
-                .map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                .bind_buffer_memory(buffer, allocation.memory, allocation.offset())
         }
-        .map_err(|error| format!("vkMapMemory failed with {error:?}"))?
-            as *mut u8;
-        // Metal zeroes `newBufferWithLength:options:`; a guest reading before
-        // writing must not see another allocation's bytes.
-        // SAFETY: the mapping covers the whole allocation.
-        unsafe { std::ptr::write_bytes(contents, 0, length as usize) };
+        .map_err(|error| format!("vkBindBufferMemory failed with {error:?}"))?;
+        // A guest which reads a fresh buffer before writing it must not see the
+        // bytes of a buffer this block last held. Memory the driver has just
+        // handed over is already zero, and during a streaming burst - which is
+        // where this matters, because it is gigabytes a second - almost all of
+        // it is, so only a reused range is written over.
+        if !allocation.pristine {
+            // SAFETY: the mapping covers this whole range.
+            crate::stats::timed(crate::stats::Counter::BufferZeroMicros, || unsafe {
+                std::ptr::write_bytes(allocation.contents, 0, length as usize)
+            });
+        }
         Ok(GpuBuffer {
             buffer,
-            memory,
-            contents,
+            allocation,
+            contents: allocation.contents,
             length,
         })
+    }
+
+    /// Destroy a buffer this device made and return its range to the heap.
+    ///
+    /// The caller must have waited for every submission which referred to it.
+    pub fn destroy_buffer(&self, buffer: GpuBuffer) {
+        // SAFETY: the caller guarantees the buffer is idle.
+        unsafe { self.device.destroy_buffer(buffer.buffer, None) };
+        if let Ok(heap) = self.buffer_heap(u32::MAX) {
+            heap.free(&self.device, buffer.allocation);
+        }
+    }
+
+    /// The heap every Metal buffer is cut from.
+    ///
+    /// One heap, not one per requirement mask: every buffer this crate makes is
+    /// created with the same usage flags, so every one of them reports the same
+    /// admissible memory types.
+    fn buffer_heap(&self, bits: u32) -> Result<&Heap, String> {
+        if let Some(heap) = self.buffers.get() {
+            return Ok(heap);
+        }
+        let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let index = self
+            .memory_type(bits, host | vk::MemoryPropertyFlags::HOST_CACHED)
+            .or_else(|| self.memory_type(bits, host))
+            .ok_or("no Vulkan memory type is host visible and coherent")?;
+        Ok(self.buffers.get_or_init(|| Heap::new(index)))
     }
 
     pub fn create_image(&self, description: &ImageDescription) -> Result<GpuImage, String> {
@@ -331,6 +382,35 @@ impl Gpu {
             .map_err(|error| format!("vkCreateImageView failed with {error:?}"))
     }
 
+    /// A view of one mip level of one array slice, which is what a framebuffer
+    /// attachment must be.
+    ///
+    /// A texture's own view covers every level and every layer, and is what a
+    /// shader samples. Metal names a level and a slice on a render pass
+    /// attachment, and a game which renders a blur pyramid names a different
+    /// one in every pass.
+    pub fn create_attachment_view(
+        &self,
+        image: &GpuImage,
+        level: u32,
+        slice: u32,
+    ) -> Result<vk::ImageView, String> {
+        let info = vk::ImageViewCreateInfo::default()
+            .image(image.image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(image.format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: image.aspect,
+                base_mip_level: level.min(image.levels.saturating_sub(1)),
+                level_count: 1,
+                base_array_layer: slice.min(image.layers.saturating_sub(1)),
+                layer_count: 1,
+            });
+        // SAFETY: the image belongs to this device and outlives the view.
+        unsafe { self.device.create_image_view(&info, None) }
+            .map_err(|error| format!("vkCreateImageView failed with {error:?}"))
+    }
+
     pub fn create_shader_module(
         &self,
         words: &[u32],
@@ -382,6 +462,12 @@ impl Gpu {
     /// Reconstructing Vulkan's optimal layouts would need per-subresource
     /// tracking across command buffers and threads. `GENERAL` is valid for
     /// every use and costs bandwidth on some hardware, not correctness.
+    ///
+    /// Using the optimal layout inside the pass and `GENERAL` outside it, which
+    /// needs no tracking at all, was measured and is much worse: the home page
+    /// went from 6.65 ms of device time a frame to 12.0 ms on a GTX 1660 SUPER,
+    /// because each of the twenty-five passes in a frame then decompresses its
+    /// attachments on the way out.
     pub fn render_pass(&self, key: &RenderPassKey) -> Result<vk::RenderPass, String> {
         let mut cache = self.render_passes.lock().expect("render pass cache");
         if let Some(pass) = cache.get(key) {
@@ -487,8 +573,11 @@ impl Gpu {
                 .map_err(|error| format!("vkQueueSubmit failed with {error:?}"))?;
         }
         // SAFETY: the fence was just submitted with this device.
-        unsafe { self.device.wait_for_fences(&[fence], true, u64::MAX) }
-            .map_err(|error| format!("vkWaitForFences failed with {error:?}"))
+        crate::stats::timed(crate::stats::Counter::QueueMicros, || {
+            // SAFETY: the fence belongs to this device and the submission above.
+            unsafe { self.device.wait_for_fences(&[fence], true, u64::MAX) }
+                .map_err(|error| format!("vkWaitForFences failed with {error:?}"))
+        })
     }
 
     /// Record and run one command list synchronously.
@@ -543,6 +632,38 @@ impl Gpu {
         self.submit_and_wait(immediate.command_buffer, immediate.fence)
     }
 
+    /// A pool of two timestamps for one command buffer, or a null handle where
+    /// the statistics are off or the device cannot time a queue.
+    pub fn timestamp_pool(&self) -> vk::QueryPool {
+        if !crate::stats::enabled() || self.timestamp_period == 0.0 {
+            return vk::QueryPool::null();
+        }
+        let mut pools = self.timestamp_pools.lock().expect("timestamp pools");
+        if let Some(pool) = pools.pop() {
+            return pool;
+        }
+        drop(pools);
+        let info = vk::QueryPoolCreateInfo::default()
+            .query_type(vk::QueryType::TIMESTAMP)
+            .query_count(2);
+        // SAFETY: a well-formed create info on this live device.
+        unsafe { self.device.create_query_pool(&info, None) }.unwrap_or(vk::QueryPool::null())
+    }
+
+    /// Hand a pool back once its command buffer's work has completed.
+    pub fn release_timestamp_pool(&self, pool: vk::QueryPool) {
+        if pool != vk::QueryPool::null() {
+            self.timestamp_pools
+                .lock()
+                .expect("timestamp pools")
+                .push(pool);
+        }
+    }
+
+    pub fn timestamp_period(&self) -> f64 {
+        f64::from(self.timestamp_period)
+    }
+
     /// Destroy an image this device made. The caller must have waited for
     /// every submission which referred to it.
     pub fn destroy_image(&self, image: GpuImage) {
@@ -564,7 +685,7 @@ pub const USAGE_RENDER_TARGET: u64 = 4;
 
 pub struct GpuBuffer {
     pub buffer: vk::Buffer,
-    pub memory: vk::DeviceMemory,
+    pub allocation: Allocation,
     pub contents: *mut u8,
     pub length: u64,
 }
@@ -580,6 +701,19 @@ pub struct GpuImage {
     pub levels: u32,
     pub layers: u32,
     pub samples: vk::SampleCountFlags,
+}
+
+impl GpuBuffer {
+    /// The buffer left behind when a real one is destroyed: it is never bound,
+    /// because the object holding it is being deallocated.
+    pub fn none() -> Self {
+        Self {
+            buffer: vk::Buffer::null(),
+            allocation: Allocation::none(),
+            contents: std::ptr::null_mut(),
+            length: 0,
+        }
+    }
 }
 
 impl GpuImage {

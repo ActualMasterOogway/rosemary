@@ -10,10 +10,12 @@
 mod completion;
 mod encoder;
 mod gpu;
+mod heap;
 mod object;
 mod pipeline;
 mod present;
 mod resource;
+pub mod stats;
 mod vulkan;
 
 use std::collections::BTreeSet;
@@ -57,8 +59,19 @@ static ALLOCATED_SIZE: AtomicU64 = AtomicU64::new(0);
 static REPORTED_LIBRARY_ERRORS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static REPORTED_SOURCE_LIBRARY: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn account(bytes: u64) {
-    ALLOCATED_SIZE.fetch_add(bytes, Ordering::Relaxed);
+/// Add to, or with a negative amount subtract from, what
+/// `-[MTLDevice currentAllocatedSize]` reports.
+pub(crate) fn account(bytes: i64) {
+    match bytes < 0 {
+        true => ALLOCATED_SIZE.fetch_sub(bytes.unsigned_abs(), Ordering::Relaxed),
+        false => ALLOCATED_SIZE.fetch_add(bytes as u64, Ordering::Relaxed),
+    };
+}
+
+/// The number of live `MTLBuffer`s after this change, for the buffer trace.
+pub(crate) fn live_buffers(delta: i64) -> i64 {
+    static LIVE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    LIVE.fetch_add(delta, Ordering::Relaxed) + delta
 }
 
 pub(crate) unsafe extern "C" fn no_op(_receiver: Id, _sel: Sel) {}

@@ -151,6 +151,16 @@ pub fn delegate_of(object: Id) -> Id {
     }
 }
 
+/// `ROSETTA3_WINDOW_SIZE=WIDTHxHEIGHT`, the size every window is created at.
+fn forced_size() -> Option<(i32, i32)> {
+    static SIZE: std::sync::OnceLock<Option<(i32, i32)>> = std::sync::OnceLock::new();
+    *SIZE.get_or_init(|| {
+        let value = std::env::var("ROSETTA3_WINDOW_SIZE").ok()?;
+        let (width, height) = value.split_once(['x', 'X'])?;
+        Some((width.trim().parse().ok()?, height.trim().parse().ok()?))
+    })
+}
+
 unsafe extern "C" fn init_with_content_rect(
     receiver: Id,
     _sel: Sel,
@@ -172,6 +182,13 @@ unsafe extern "C" fn init_with_content_rect(
         flags |= sdl3::video::flags::BORDERLESS;
     }
     let (x, y, width, height) = crate::geometry::rect_to_sdl(rect);
+    let (width, height) = match forced_size() {
+        // A guest which sizes its first window to a fraction of the screen is
+        // unusable in a headless or scripted session, where nothing can drag
+        // it larger. This says how large every window it makes must be.
+        Some((forced_width, forced_height)) => (forced_width, forced_height),
+        None => (width, height),
+    };
     let Some(sdl) = sdl3::video::create_window(c"", width.max(1), height.max(1), flags) else {
         // A window this runtime cannot make is not something to continue past:
         // every later method would be sent to a window with no SDL window

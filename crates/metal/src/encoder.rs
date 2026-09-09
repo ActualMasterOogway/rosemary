@@ -18,6 +18,7 @@ use crate::pipeline::{
     ComputePipeline, DepthStencilKey, RenderPipeline, RenderVariantKey, SETS, descriptor_type,
 };
 use crate::resource::{Buffer, DepthStencilState, SamplerState, Texture};
+use crate::stats::{self, Counter};
 
 /// Metal's per-stage binding tables. Index by `Stage::ordinal`.
 const STAGES: usize = 3;
@@ -45,6 +46,10 @@ pub(crate) struct CommandQueue {
 
 pub(crate) struct CommandBuffer {
     pub gpu: &'static Gpu,
+    /// Two timestamps around the whole recording, under `ROSETTA3_METAL_STATS`.
+    /// Whether a frame is waiting for the device or for this runtime is a
+    /// question only the device can answer.
+    timestamps: vk::QueryPool,
     pub queue: Id,
     pub pool: vk::CommandPool,
     pub command_buffer: vk::CommandBuffer,
@@ -196,10 +201,26 @@ unsafe extern "C" fn new_command_buffer(receiver: Id, _sel: Sel) -> Id {
         gpu::trace(format!("vkBeginCommandBuffer failed with {error:?}"));
         return std::ptr::null_mut();
     }
+    let timestamps = gpu.timestamp_pool();
+    if timestamps != vk::QueryPool::null() {
+        // SAFETY: recording into the command buffer opened above.
+        unsafe {
+            gpu.device
+                .cmd_reset_query_pool(command_buffer, timestamps, 0, 2);
+            gpu.device.cmd_write_timestamp(
+                command_buffer,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                timestamps,
+                0,
+            );
+        }
+    }
+    stats::count(Counter::CommandBuffers);
     object::make(
         c"R3MTLCommandBuffer",
         CommandBuffer {
             gpu,
+            timestamps,
             queue: objc::arc::retain(receiver),
             pool,
             command_buffer,
@@ -235,7 +256,10 @@ impl CommandBuffer {
                     .set_layouts(&layouts);
                 // SAFETY: the pool and layout belong to this live device.
                 match unsafe { self.gpu.device.allocate_descriptor_sets(&info) } {
-                    Ok(sets) => return sets.first().copied(),
+                    Ok(sets) => {
+                        stats::count(Counter::DescriptorSets);
+                        return sets.first().copied();
+                    }
                     // A full pool is expected: allocate another and retry.
                     Err(_) if attempt == 0 => {}
                     Err(error) => {
@@ -310,18 +334,49 @@ unsafe extern "C" fn commit(receiver: Id, _sel: Sel) {
     }
     command.recording = false;
     let gpu = command.gpu;
+    if command.timestamps != vk::QueryPool::null() {
+        // SAFETY: recording into this command buffer, which has not ended.
+        unsafe {
+            gpu.device.cmd_write_timestamp(
+                command.command_buffer,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                command.timestamps,
+                1,
+            )
+        };
+    }
     // SAFETY: recording began when the command buffer was made.
     if let Err(error) = unsafe { gpu.device.end_command_buffer(command.command_buffer) } {
         gpu::trace(format!("vkEndCommandBuffer failed with {error:?}"));
         command.status = 5; // MTLCommandBufferStatusError
         return;
     }
-    match gpu.submit_and_wait(command.command_buffer, command.fence) {
+    match stats::timed(Counter::SubmitMicros, || {
+        gpu.submit_and_wait(command.command_buffer, command.fence)
+    }) {
         Ok(()) => command.status = 4, // MTLCommandBufferStatusCompleted
         Err(reason) => {
             gpu::trace(format!("command buffer submission failed: {reason}"));
             command.status = 5;
         }
+    }
+    if command.timestamps != vk::QueryPool::null() {
+        let mut ticks = [0u64; 2];
+        // SAFETY: the submission completed, so both queries have results.
+        let read = unsafe {
+            gpu.device.get_query_pool_results(
+                command.timestamps,
+                0,
+                &mut ticks,
+                vk::QueryResultFlags::TYPE_64,
+            )
+        };
+        if read.is_ok() {
+            let nanoseconds = ticks[1].saturating_sub(ticks[0]) as f64 * gpu.timestamp_period();
+            stats::add(Counter::GpuMicros, (nanoseconds / 1000.0) as u64);
+        }
+        gpu.release_timestamp_pool(command.timestamps);
+        command.timestamps = vk::QueryPool::null();
     }
     let presents = std::mem::take(&mut command.presents);
     for drawable in presents {
@@ -382,6 +437,7 @@ unsafe extern "C" fn present_drawable_at_time(receiver: Id, sel: Sel, drawable: 
 // --------------------------------------------------------------- encoders
 
 pub(crate) fn new_encoder(command_buffer: Id, kind: Kind) -> Id {
+    stats::count(Counter::Encoders);
     object::make(
         c"R3MTLCommandEncoder",
         Encoder {
@@ -419,6 +475,20 @@ impl Encoder {
 
     /// Write the descriptor sets one pipeline's resources need and bind them.
     fn bind_resources(
+        &mut self,
+        resources: &[metal_translate::ResourceBinding],
+        layouts: &[vk::DescriptorSetLayout; SETS],
+        pipeline_layout: vk::PipelineLayout,
+        bind_point: vk::PipelineBindPoint,
+    ) {
+        let start = stats::enabled().then(std::time::Instant::now);
+        self.bind_resources_inner(resources, layouts, pipeline_layout, bind_point);
+        if let Some(start) = start {
+            stats::add(Counter::BindMicros, start.elapsed().as_micros() as u64);
+        }
+    }
+
+    fn bind_resources_inner(
         &mut self,
         resources: &[metal_translate::ResourceBinding],
         layouts: &[vk::DescriptorSetLayout; SETS],
@@ -484,7 +554,6 @@ impl Encoder {
                         kind,
                         Which::Buffer(buffer_infos.len() - 1),
                     ));
-                    command.retain(bound.object);
                 }
                 ResourceKind::Texture => {
                     let bound = self.textures[slot][index];
@@ -504,7 +573,6 @@ impl Encoder {
                         kind,
                         Which::Image(image_infos.len() - 1),
                     ));
-                    command.retain(bound);
                 }
                 ResourceKind::Sampler => {
                     let bound = self.samplers[slot][index];
@@ -520,7 +588,6 @@ impl Encoder {
                         kind,
                         Which::Image(image_infos.len() - 1),
                     ));
-                    command.retain(bound);
                 }
                 _ => continue,
             }
@@ -566,6 +633,9 @@ impl Encoder {
     /// Metal orders the work of one encoder against the next; nothing here
     /// tracks which resource a later encoder reads, so one full barrier
     /// between encoders is what keeps the order Metal promises.
+    ///
+    /// It is not what makes a frame slow: removing it entirely takes the Roblox
+    /// home page from 6.65 ms of device time a frame to 6.45 ms.
     fn barrier(&self) {
         let command = self.command();
         let memory = vk::MemoryBarrier::default()
@@ -640,6 +710,10 @@ unsafe extern "C" fn set_buffer(receiver: Id, sel: Sel, buffer: Id, offset: u64,
             offset,
         };
     }
+    // Metal retains what an encoder binds, and a guest is entitled to release
+    // its own reference the moment the call returns. The command buffer's
+    // reference outlives the work the binding is recorded into.
+    encoder.command().retain(buffer);
 }
 
 /// `-setBytes:length:atIndex:` and its per-stage spellings.
@@ -657,6 +731,8 @@ unsafe extern "C" fn set_bytes(receiver: Id, sel: Sel, bytes: *const u8, length:
         gpu::trace(format!("setBytes:length:atIndex: refused {length} byte(s)"));
         return;
     }
+    stats::count(Counter::SetBytesCalls);
+    stats::add(Counter::SetBytesBytes, length);
     let gpu = encoder.command().gpu;
     let buffer = crate::resource::new_buffer(gpu, length as usize, 0);
     if buffer.is_null() {
@@ -697,6 +773,7 @@ unsafe extern "C" fn set_texture(receiver: Id, sel: Sel, texture: Id, index: u64
     let encoder = unsafe { object::body::<Encoder>(receiver) };
     // SAFETY: a selector the runtime owns.
     let stage = selector_stage(unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes());
+    encoder.command().retain(texture);
     if let Some(slot) = encoder.textures[stage].get_mut(index as usize) {
         *slot = texture;
     }
@@ -707,6 +784,7 @@ unsafe extern "C" fn set_sampler(receiver: Id, sel: Sel, sampler: Id, index: u64
     let encoder = unsafe { object::body::<Encoder>(receiver) };
     // SAFETY: a selector the runtime owns.
     let stage = selector_stage(unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes());
+    encoder.command().retain(sampler);
     if let Some(slot) = encoder.samplers[stage].get_mut(index as usize) {
         *slot = sampler;
     }
@@ -875,6 +953,7 @@ unsafe extern "C" fn dispatch_threadgroups(
     let layout = state.layouts.pipeline;
     encoder.bind_resources(&resources, &sets, layout, vk::PipelineBindPoint::COMPUTE);
     gpu::milestone("compute dispatch");
+    stats::count(Counter::Dispatches);
     // SAFETY: as above.
     unsafe { device.cmd_dispatch(vk_command, counts[0], counts[1], counts[2]) };
 }
@@ -942,6 +1021,7 @@ impl Encoder {
         let layout = state.layouts.pipeline;
         self.bind_resources(&resources, &sets, layout, vk::PipelineBindPoint::GRAPHICS);
         gpu::milestone("draw");
+        stats::count(Counter::Draws);
         Some((device, vk_command))
     }
 }
@@ -1486,6 +1566,34 @@ impl Default for RenderPassDescriptor {
     }
 }
 
+/// `ROSETTA3_TRACE_PASSES=1`: each distinct render pass shape, once.
+///
+/// A frame's device time is spent in its passes, and a log which says only how
+/// many there were cannot say which one to look at. The size, the sample count
+/// and the load and store actions are what decide the cost of a pass before any
+/// shader runs.
+fn trace_pass(key: &RenderPassKey, width: u32, height: u32) {
+    static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    if std::env::var_os("ROSETTA3_TRACE_PASSES").is_none() {
+        return;
+    }
+    let line = format!(
+        "render pass {width}x{height} samples {:?} colors {:?} depth {:?}",
+        key.samples, key.colors, key.depth
+    );
+    let mut seen = SEEN.lock().expect("render pass trace");
+    if !seen.contains(&line) {
+        seen.push(line.clone());
+        gpu::trace(line);
+    }
+}
+
+/// One dimension of a mip level, which is the level-zero one halved that many
+/// times and never zero.
+fn level_extent(base: u32, level: u32) -> u32 {
+    (base >> level.min(31)).max(1)
+}
+
 fn load_op(metal: u64) -> vk::AttachmentLoadOp {
     match metal {
         1 => vk::AttachmentLoadOp::LOAD,
@@ -1532,7 +1640,8 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
             store_op(color.store_action),
         ));
         key.samples = texture.image.samples;
-        views.push(texture.image.view);
+        let level = color.level as u32;
+        views.push(texture.attachment_view(level, color.slice as u32));
         clears.push(vk::ClearValue {
             color: vk::ClearColorValue {
                 float32: [
@@ -1543,8 +1652,8 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
                 ],
             },
         });
-        width = width.min(texture.image.width);
-        height = height.min(texture.image.height);
+        width = width.min(level_extent(texture.image.width, level));
+        height = height.min(level_extent(texture.image.height, level));
         textures.push(color.texture);
     }
     let depth_attachment = if !descriptor.depth.texture.is_null() {
@@ -1569,15 +1678,16 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
             ));
         }
         key.samples = texture.image.samples;
-        views.push(texture.image.view);
+        let level = attachment.level as u32;
+        views.push(texture.attachment_view(level, attachment.slice as u32));
         clears.push(vk::ClearValue {
             depth_stencil: vk::ClearDepthStencilValue {
                 depth: descriptor.depth.clear_depth as f32,
                 stencil: descriptor.stencil.clear_stencil,
             },
         });
-        width = width.min(texture.image.width);
-        height = height.min(texture.image.height);
+        width = width.min(level_extent(texture.image.width, level));
+        height = height.min(level_extent(texture.image.height, level));
         textures.push(attachment.texture);
     }
     if views.is_empty() {
@@ -1603,6 +1713,7 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
         offset: vk::Offset2D { x: 0, y: 0 },
         extent: vk::Extent2D { width, height },
     };
+    trace_pass(&key, width, height);
     let begin = vk::RenderPassBeginInfo::default()
         .render_pass(pass)
         .framebuffer(framebuffer)

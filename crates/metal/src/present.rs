@@ -25,6 +25,11 @@ pub(crate) struct Drawable {
     pub gpu: &'static Gpu,
     pub texture: Id,
     pub layer: Id,
+    /// The buffer the frame is read back into, kept for the life of the
+    /// drawable. Making one per frame is a `vkCreateBuffer` and a range of the
+    /// heap for every frame, and the drawable's size never changes: a layer
+    /// which resizes vends a new drawable.
+    readback: Option<crate::gpu::GpuBuffer>,
 }
 
 /// The drawable a layer currently vends, remade when the layer's size changes.
@@ -85,6 +90,9 @@ unsafe extern "C" fn next_drawable(receiver: Id, _sel: Sel) -> Id {
             &mut texture.image,
             crate::gpu::GpuImage::none(),
         ));
+        if let Some(readback) = stale.readback.take() {
+            stale.gpu.destroy_buffer(readback);
+        }
         false
     });
 
@@ -124,11 +132,17 @@ unsafe extern "C" fn next_drawable(receiver: Id, _sel: Sel) -> Id {
             gpu,
             texture,
             layer: receiver,
+            readback: None,
         },
     );
     if drawable.is_null() {
         return std::ptr::null_mut();
     }
+    // The cache's own references. A drawable is vended again and again from
+    // here, and a guest which released the one it was handed - having never
+    // retained it - would otherwise leave this entry pointing at freed memory.
+    objc::arc::retain(drawable);
+    objc::arc::retain(texture);
     gpu::milestone("drawable");
     cache.push(Cached {
         layer: receiver as usize,
@@ -155,6 +169,13 @@ unsafe extern "C" fn drawable_present(receiver: Id, _sel: Sel) {
 
 /// Read the drawable's image back and blit it into the window.
 pub(crate) fn present(drawable: Id) {
+    crate::stats::timed(crate::stats::Counter::PresentMicros, || {
+        present_inner(drawable)
+    });
+    crate::stats::tick();
+}
+
+fn present_inner(drawable: Id) {
     if drawable.is_null() || !object::is_kind(drawable, c"R3CAMetalDrawable") {
         return;
     }
@@ -167,10 +188,13 @@ pub(crate) fn present(drawable: Id) {
     let height = texture.image.height;
     let bytes = u64::from(width) * u64::from(height) * 4;
 
-    let staging = match gpu.create_buffer(bytes) {
-        Ok(staging) => staging,
-        Err(reason) => return gpu::trace(format!("presentation staging failed: {reason}")),
-    };
+    if described.readback.is_none() {
+        match gpu.create_buffer(bytes) {
+            Ok(staging) => described.readback = Some(staging),
+            Err(reason) => return gpu::trace(format!("presentation staging failed: {reason}")),
+        }
+    }
+    let staging = described.readback.as_ref().expect("just made");
     let copy = vk::BufferImageCopy::default()
         .buffer_offset(0)
         .buffer_row_length(width)
@@ -187,18 +211,20 @@ pub(crate) fn present(drawable: Id) {
             depth: 1,
         });
     let image = texture.image.image;
-    let result = gpu.one_shot(|device, command_buffer| {
-        // SAFETY: recording into a command buffer the call owns; the image is
-        // in GENERAL layout from creation.
-        unsafe {
-            device.cmd_copy_image_to_buffer(
-                command_buffer,
-                image,
-                vk::ImageLayout::GENERAL,
-                staging.buffer,
-                &[copy],
-            )
-        };
+    let result = crate::stats::timed(crate::stats::Counter::ReadbackMicros, || {
+        gpu.one_shot(|device, command_buffer| {
+            // SAFETY: recording into a command buffer the call owns; the image is
+            // in GENERAL layout from creation.
+            unsafe {
+                device.cmd_copy_image_to_buffer(
+                    command_buffer,
+                    image,
+                    vk::ImageLayout::GENERAL,
+                    staging.buffer,
+                    &[copy],
+                )
+            };
+        })
     });
     if let Err(reason) = result {
         gpu::trace(format!("presentation readback failed: {reason}"));
@@ -207,13 +233,11 @@ pub(crate) fn present(drawable: Id) {
         // the whole allocation.
         let pixels = unsafe { std::slice::from_raw_parts(staging.contents, bytes as usize) };
         gpu::milestone("presented frame");
+        crate::stats::count(crate::stats::Counter::Frames);
         dump_frame(pixels, width, height, texture.image.format);
-        blit_to_window(pixels, width, height, texture.image.format);
-    }
-    // SAFETY: the copy completed before `one_shot` returned.
-    unsafe {
-        gpu.device.destroy_buffer(staging.buffer, None);
-        gpu.device.free_memory(staging.memory, None);
+        crate::stats::timed(crate::stats::Counter::BlitMicros, || {
+            blit_to_window(pixels, width, height, texture.image.format)
+        });
     }
 }
 
@@ -258,7 +282,10 @@ fn dump_frame(pixels: &[u8], width: u32, height: u32, format: vk::Format) {
 
 /// SDL's window surface is `SDL_PIXELFORMAT_XRGB8888` on every backend this
 /// runs on, which is B, G, R, X in memory. A drawable is usually
-/// `MTLPixelFormatBGRA8Unorm`, which is the same order.
+/// `MTLPixelFormatBGRA8Unorm`, which is the same order, so the common case is
+/// a row copy: the byte the window ignores is the one the drawable calls
+/// alpha. A drawable in R, G, B, A order needs its two ends exchanged, which
+/// is done a pixel at a time but a whole pixel at a time.
 fn blit_to_window(pixels: &[u8], width: u32, height: u32, format: vk::Format) {
     let swap_red_and_blue =
         format == vk::Format::R8G8B8A8_UNORM || format == vk::Format::R8G8B8A8_SRGB;
@@ -268,27 +295,28 @@ fn blit_to_window(pixels: &[u8], width: u32, height: u32, format: vk::Format) {
     };
     sdl3::video::present_window(window, |surface| {
         let rows = height.min(surface.height.max(0) as u32);
-        let columns = width.min(surface.width.max(0) as u32);
+        let columns = width.min(surface.width.max(0) as u32) as usize;
         for row in 0..rows {
             let source = (row * width * 4) as usize;
-            let destination = row as usize * surface.pitch as usize;
-            for column in 0..columns as usize {
-                let from = source + column * 4;
-                let Some(texel) = pixels.get(from..from + 4) else {
-                    continue;
-                };
-                let (b, g, r) = if swap_red_and_blue {
-                    (texel[2], texel[1], texel[0])
-                } else {
-                    (texel[0], texel[1], texel[2])
-                };
-                // SAFETY: SDL reported `pitch` bytes for each of `height`
-                // rows, and this write stays inside row `row`.
+            let Some(from) = pixels.get(source..source + columns * 4) else {
+                continue;
+            };
+            // SAFETY: SDL reported `pitch` bytes for each of `height` rows, and
+            // every write below stays inside row `row`.
+            let to = unsafe { surface.pixels.add(row as usize * surface.pitch as usize) };
+            if !swap_red_and_blue {
+                // SAFETY: `columns * 4` bytes, from a slice of that length into
+                // a row which is at least `width * 4` bytes wide.
+                unsafe { std::ptr::copy_nonoverlapping(from.as_ptr(), to, columns * 4) };
+                continue;
+            }
+            for (column, texel) in from.as_chunks::<4>().0.iter().enumerate() {
+                // SAFETY: `column` is below `columns`, inside this row.
                 unsafe {
-                    let out = surface.pixels.add(destination + column * 4);
-                    out.write(b);
-                    out.add(1).write(g);
-                    out.add(2).write(r);
+                    let out = to.add(column * 4);
+                    out.write(texel[2]);
+                    out.add(1).write(texel[1]);
+                    out.add(2).write(texel[0]);
                     out.add(3).write(0xff);
                 }
             }
