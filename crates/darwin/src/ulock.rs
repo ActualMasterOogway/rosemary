@@ -47,7 +47,27 @@ mod op {
 mod flag {
     pub const WAKE_ALL: u32 = 0x0000_0100;
     pub const WAKE_THREAD: u32 = 0x0000_0200;
+    pub const WAKE_ALLOW_NON_OWNER: u32 = 0x0000_0400;
+    pub const WAIT_WORKQ_DATA_CONTENTION: u32 = 0x0001_0000;
+    pub const WAIT_CANCEL_POINT: u32 = 0x0002_0000;
+    pub const WAIT_ADAPTIVE_SPIN: u32 = 0x0004_0000;
     pub const NO_ERRNO: u32 = 0x0100_0000;
+    pub const DEADLINE: u32 = 0x0200_0000;
+
+    pub const WAIT_MASK: u32 =
+        NO_ERRNO | DEADLINE | WAIT_WORKQ_DATA_CONTENTION | WAIT_CANCEL_POINT | WAIT_ADAPTIVE_SPIN;
+    pub const WAKE_MASK: u32 = NO_ERRNO | WAKE_ALL | WAKE_THREAD | WAKE_ALLOW_NON_OWNER;
+}
+
+fn valid_opcode(opcode: u32) -> bool {
+    matches!(
+        opcode,
+        op::COMPARE_AND_WAIT
+            | op::UNFAIR_LOCK
+            | op::COMPARE_AND_WAIT_SHARED
+            | op::COMPARE_AND_WAIT64
+            | op::COMPARE_AND_WAIT64_SHARED
+    )
 }
 
 /// Whether an opcode compares eight bytes rather than four.
@@ -75,7 +95,7 @@ fn is_shared(opcode: u32) -> bool {
 /// convention. A caller that asked for the first is one that cannot touch `errno`.
 fn fail(operation: u32, error: i32) -> i32 {
     if operation & flag::NO_ERRNO != 0 {
-        return -error;
+        return -crate::errno::from_host(error);
     }
     crate::errno::set(error);
     -1
@@ -135,7 +155,13 @@ pub unsafe extern "C" fn wait2(
 /// As [`wait`].
 unsafe fn wait_ns(operation: u32, addr: *mut c_void, value: u64, timeout_ns: u64) -> i32 {
     let opcode = operation & op::MASK;
-    if addr.is_null() || !(op::COMPARE_AND_WAIT..=op::COMPARE_AND_WAIT64_SHARED).contains(&opcode) {
+    let flags = operation & !op::MASK;
+    let alignment = if is_64_bit(opcode) { 8 } else { 4 };
+    if !valid_opcode(opcode)
+        || flags & !flag::WAIT_MASK != 0
+        || addr.is_null()
+        || (addr as usize) & (alignment - 1) != 0
+    {
         return fail(operation, libc::EINVAL);
     }
     // A futex compares 32 bits, so the upper half of a 64-bit operation is checked
@@ -152,14 +178,14 @@ unsafe fn wait_ns(operation: u32, addr: *mut c_void, value: u64, timeout_ns: u64
     // SAFETY: the caller states `addr` is a readable word; a 64-bit operation was
     // just confirmed to have eight readable bytes, and the low four are the futex's
     // on a little-endian host.
-    match unsafe {
-        block(
-            addr as *mut u32,
-            value as u32,
-            timeout_ns,
-            is_shared(opcode),
-        )
-    } {
+    let timeout = if timeout_ns == 0 {
+        None
+    } else if flags & flag::DEADLINE != 0 {
+        Some(timeout_ns.saturating_sub(monotonic_nanoseconds()))
+    } else {
+        Some(timeout_ns)
+    };
+    match unsafe { block(addr as *mut u32, value as u32, timeout, is_shared(opcode)) } {
         Ok(()) => 0,
         Err(libc::EAGAIN) => 0,
         Err(e) => fail(operation, e),
@@ -176,7 +202,14 @@ unsafe fn wait_ns(operation: u32, addr: *mut c_void, value: u64, timeout_ns: u64
 /// `addr` is a readable word.
 pub unsafe extern "C" fn wake(operation: u32, addr: *mut c_void, _wake_value: u64) -> i32 {
     let opcode = operation & op::MASK;
-    if addr.is_null() || !(op::COMPARE_AND_WAIT..=op::COMPARE_AND_WAIT64_SHARED).contains(&opcode) {
+    let flags = operation & !op::MASK;
+    if addr.is_null()
+        || !valid_opcode(opcode)
+        || flags & !flag::WAKE_MASK != 0
+        || (flags & flag::WAKE_THREAD != 0
+            && (flags & flag::WAKE_ALL != 0 || opcode == op::UNFAIR_LOCK))
+        || (flags & flag::WAKE_ALLOW_NON_OWNER != 0 && opcode != op::UNFAIR_LOCK)
+    {
         return fail(operation, libc::EINVAL);
     }
     // `ULF_WAKE_THREAD` names one thread by port, which a futex cannot single out.
@@ -191,26 +224,28 @@ pub unsafe extern "C" fn wake(operation: u32, addr: *mut c_void, _wake_value: u6
     }
 }
 
-/// Block on `addr` while it holds `value`, for at most `timeout_ns` (0 being forever).
+/// Block on `addr` while it holds `value`, for at most `timeout_ns`, or forever.
 ///
 /// # Safety
 ///
 /// `addr` is a readable, four-byte-aligned word.
 #[cfg(target_os = "linux")]
-unsafe fn block(addr: *mut u32, value: u32, timeout_ns: u64, shared: bool) -> Result<(), i32> {
+unsafe fn block(
+    addr: *mut u32,
+    value: u32,
+    timeout_ns: Option<u64>,
+    shared: bool,
+) -> Result<(), i32> {
     const FUTEX_WAIT: i32 = 0;
     const FUTEX_PRIVATE_FLAG: i32 = 128;
 
     let futex_op = FUTEX_WAIT | if shared { 0 } else { FUTEX_PRIVATE_FLAG };
-    let timeout = libc::timespec {
+    let timeout = timeout_ns.map(|timeout_ns| libc::timespec {
         tv_sec: (timeout_ns / 1_000_000_000) as _,
         tv_nsec: (timeout_ns % 1_000_000_000) as _,
-    };
-    // A null timeout is what a futex takes for "forever"; Darwin spells it zero.
-    let timeout = match timeout_ns {
-        0 => std::ptr::null(),
-        _ => &timeout,
-    };
+    });
+    // A null timeout is what a futex takes for "forever".
+    let timeout = timeout.as_ref().map_or(std::ptr::null(), |t| t);
     // SAFETY: the caller's guarantee for `addr`, and `timeout` is null or a live
     // local. `futex` reads both and writes neither.
     let rc = unsafe { libc::syscall(libc::SYS_futex, addr, futex_op, value, timeout, 0, 0) };
@@ -225,12 +260,31 @@ unsafe fn block(addr: *mut u32, value: u32, timeout_ns: u64, shared: bool) -> Re
 /// Correct - every caller re-checks its word and loops - and never reached on macOS,
 /// where the guest's `__ulock_wait` is the host's own.
 #[cfg(not(target_os = "linux"))]
-unsafe fn block(addr: *mut u32, value: u32, _timeout_ns: u64, _shared: bool) -> Result<(), i32> {
+unsafe fn block(
+    addr: *mut u32,
+    value: u32,
+    _timeout_ns: Option<u64>,
+    _shared: bool,
+) -> Result<(), i32> {
     // SAFETY: the caller states `addr` is a readable word.
     if unsafe { addr.read_volatile() } == value {
         std::thread::yield_now();
     }
     Ok(())
+}
+
+fn monotonic_nanoseconds() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: a live `timespec`; failure leaves the zero initialiser intact.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 {
+        return 0;
+    }
+    (now.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(now.tv_nsec as u64)
 }
 
 /// Wake one waiter on `addr`, or all of them, and report how many were woken.
@@ -387,6 +441,50 @@ mod tests {
         let rc = unsafe { wake(op::COMPARE_AND_WAIT, word.as_ptr() as *mut c_void, 0) };
         assert_eq!(rc, -1);
         assert_eq!(crate::errno::get(), libc::ENOENT);
+        crate::errno::set(0);
+    }
+
+    #[test]
+    fn invalid_opcode_flags_and_alignment_are_rejected() {
+        let mut word = 1u64;
+        let at = (&mut word as *mut u64).cast::<c_void>();
+        // Opcode four is declared for historical/debugging purposes but is not
+        // accepted by XNU's wait or wake syscall paths.
+        assert_eq!(unsafe { wait(op::UNFAIR_LOCK64_SHARED, at, 1, 1) }, -1);
+        assert_eq!(crate::errno::get(), libc::EINVAL);
+        assert_eq!(
+            unsafe { wait(op::COMPARE_AND_WAIT | flag::WAKE_ALL, at, 1, 1) },
+            -1
+        );
+        assert_eq!(crate::errno::get(), libc::EINVAL);
+        assert_eq!(
+            unsafe { wait(op::COMPARE_AND_WAIT, (at as *mut u8).add(1).cast(), 1, 1) },
+            -1
+        );
+        assert_eq!(crate::errno::get(), libc::EINVAL);
+        crate::errno::set(0);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_absolute_deadline_is_not_treated_as_a_relative_timeout() {
+        let word = AtomicU32::new(3);
+        let past = monotonic_nanoseconds().saturating_sub(1);
+        let started = std::time::Instant::now();
+        // SAFETY: a live, aligned word. A past absolute deadline must time out now,
+        // not after `past` nanoseconds (normally days since boot).
+        let rc = unsafe {
+            wait2(
+                op::COMPARE_AND_WAIT | flag::DEADLINE,
+                word.as_ptr().cast(),
+                3,
+                past,
+                0,
+            )
+        };
+        assert_eq!(rc, -1);
+        assert_eq!(crate::errno::get(), libc::ETIMEDOUT);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
         crate::errno::set(0);
     }
 }
