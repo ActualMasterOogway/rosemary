@@ -25,6 +25,14 @@ use ash::{Device, vk};
 /// reserve a hundred megabytes for it.
 const BLOCK: u64 = 64 << 20;
 
+/// TEMPORARY: `ROSETTA3_METAL_NOSUBALLOC=1` gives every allocation a block of
+/// its own, so a fault caused by two buffers sharing memory can be told from
+/// every other kind.
+fn dedicate_everything() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("ROSETTA3_METAL_NOSUBALLOC").is_some())
+}
+
 /// Where one buffer lives.
 #[derive(Clone, Copy)]
 pub struct Allocation {
@@ -94,16 +102,20 @@ impl Heap {
         let size = size.max(1).next_multiple_of(alignment);
         let mut state = self.state.lock().expect("buffer heap");
         if size <= BLOCK
+            && !dedicate_everything()
             && let Some(allocation) = state.carve(size, alignment)
         {
             return Ok(allocation);
         }
-        let capacity = size.max(BLOCK);
+        let capacity = match dedicate_everything() {
+            true => size,
+            false => size.max(BLOCK),
+        };
         let block = crate::stats::timed(crate::stats::Counter::BufferBlockMicros, || {
             self.block(device, capacity)
         })?;
         state.blocks.push(block);
-        if size > BLOCK {
+        if size > BLOCK || dedicate_everything() {
             // Its own block, freed when it is: nothing else is cut from it.
             let index = state.blocks.len() - 1;
             state.dedicated.push(index);

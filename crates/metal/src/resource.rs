@@ -334,6 +334,13 @@ unsafe extern "C" fn buffer_storage_mode(receiver: Id, _sel: Sel) -> u64 {
 /// The last reference is gone, so nothing can bind it again, and a command
 /// buffer which did bind it holds a reference of its own until the work it was
 /// recorded into has completed.
+/// TEMPORARY: `ROSETTA3_METAL_LEAK=1` keeps every device resource alive, to tell
+/// a fault caused by freeing one too early from every other kind.
+fn leaking() -> bool {
+    static LEAK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LEAK.get_or_init(|| std::env::var_os("ROSETTA3_METAL_LEAK").is_some())
+}
+
 unsafe extern "C" fn buffer_dealloc(receiver: Id, _sel: Sel) {
     // SAFETY: a buffer of this crate's.
     let buffer = unsafe { object::body::<Buffer>(receiver) };
@@ -346,7 +353,9 @@ unsafe extern "C" fn buffer_dealloc(receiver: Id, _sel: Sel) {
     }
     crate::account(-(buffer.inner.length as i64));
     let inner = std::mem::replace(&mut buffer.inner, GpuBuffer::none());
-    buffer.gpu.destroy_buffer(inner);
+    if !leaking() {
+        buffer.gpu.destroy_buffer(inner);
+    }
     objc::arc::finalize(receiver);
 }
 
@@ -358,10 +367,14 @@ unsafe extern "C" fn texture_dealloc(receiver: Id, _sel: Sel) {
     for (_, view) in std::mem::take(&mut texture.attachment_views) {
         // SAFETY: the last reference is gone, so nothing can attach it again,
         // and a command buffer which did holds a reference until it completes.
-        unsafe { texture.gpu.device.destroy_image_view(view, None) };
+        if !leaking() {
+            unsafe { texture.gpu.device.destroy_image_view(view, None) };
+        }
     }
     let image = std::mem::replace(&mut texture.image, GpuImage::none());
-    texture.gpu.destroy_image(image);
+    if !leaking() {
+        texture.gpu.destroy_image(image);
+    }
     objc::arc::finalize(receiver);
 }
 
@@ -719,9 +732,19 @@ unsafe extern "C" fn set_depth_compare(receiver: Id, _sel: Sel, value: u64) {
     unsafe { object::body::<DepthStencilState>(receiver) }.depth_compare = value;
 }
 
+unsafe extern "C" fn depth_compare(receiver: Id, _sel: Sel) -> u64 {
+    // SAFETY: a depth/stencil descriptor of this crate's.
+    unsafe { object::body::<DepthStencilState>(receiver) }.depth_compare
+}
+
 unsafe extern "C" fn set_depth_write(receiver: Id, _sel: Sel, value: u64) {
     // SAFETY: as above.
     unsafe { object::body::<DepthStencilState>(receiver) }.depth_write = value & 0xff != 0;
+}
+
+unsafe extern "C" fn depth_write(receiver: Id, _sel: Sel) -> bool {
+    // SAFETY: a depth/stencil descriptor of this crate's.
+    unsafe { object::body::<DepthStencilState>(receiver) }.depth_write
 }
 
 /// `-setFrontFaceStencil:` and `-setBackFaceStencil:` copy the descriptor's
@@ -740,6 +763,24 @@ unsafe extern "C" fn set_face_stencil(receiver: Id, sel: Sel, face: Id) {
         b"setFrontFaceStencil:" => descriptor.front = state,
         _ => descriptor.back = state,
     }
+}
+
+/// The face properties are values, not references into the depth descriptor.
+/// Return an autoreleased copy just as Metal does, so a caller can read and
+/// modify it before assigning it back with the corresponding setter.
+unsafe extern "C" fn face_stencil(receiver: Id, sel: Sel) -> Id {
+    // SAFETY: a depth/stencil descriptor of this crate's.
+    let descriptor = unsafe { object::body::<DepthStencilState>(receiver) };
+    if !descriptor.stencil_enabled {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: a selector the runtime owns.
+    let state = match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
+        b"frontFaceStencil" => descriptor.front,
+        b"backFaceStencil" => descriptor.back,
+        _ => unreachable!("only registered stencil getters reach this method"),
+    };
+    objc::arc::autorelease(object::make(c"MTLStencilDescriptor", state))
 }
 
 unsafe extern "C" fn stencil_descriptor_init(receiver: Id, _sel: Sel) -> Id {
@@ -765,6 +806,34 @@ unsafe extern "C" fn set_stencil_value(receiver: Id, sel: Sel, value: u64) {
 
 pub(crate) fn new_depth_stencil_state(state: DepthStencilState) -> Id {
     object::make(c"R3MTLDepthStencilState", state)
+}
+
+#[cfg(test)]
+mod depth_stencil_tests {
+    use super::*;
+
+    #[test]
+    fn reads_back_a_face_copy() {
+        crate::bootstrap();
+        let descriptor = object::make(c"MTLDepthStencilDescriptor", DepthStencilState::default());
+        let stencil = object::make(c"MTLStencilDescriptor", StencilState::default());
+        // SAFETY: these are methods on the two freshly made Metal descriptors.
+        unsafe {
+            set_stencil_value(stencil, objc::sel::get("setReadMask:"), 0x0f);
+            set_face_stencil(descriptor, objc::sel::get("setBackFaceStencil:"), stencil);
+        }
+
+        let pool = objc::arc::pool_push();
+        // SAFETY: this is the corresponding registered getter.
+        let copy = unsafe { face_stencil(descriptor, objc::sel::get("backFaceStencil")) };
+        assert!(!copy.is_null());
+        // SAFETY: the getter made this a stencil descriptor with the copied state.
+        assert_eq!(
+            unsafe { object::body::<StencilState>(copy) }.read_mask,
+            0x0f
+        );
+        objc::arc::pool_pop(pool);
+    }
 }
 
 // ------------------------------------------------------- vertex descriptor
@@ -952,9 +1021,13 @@ pub(crate) fn install() {
     let stencil = object::register::<StencilState>(c"MTLStencilDescriptor");
     methods!(depth, {
         "init" => depth_descriptor_init, c"@16@0:8";
+        "depthCompareFunction" => depth_compare, c"Q16@0:8";
         "setDepthCompareFunction:" => set_depth_compare, c"v24@0:8Q16";
+        "isDepthWriteEnabled" => depth_write, c"c16@0:8";
         "setDepthWriteEnabled:" => set_depth_write, c"v20@0:8c16";
+        "frontFaceStencil" => face_stencil, c"@16@0:8";
         "setFrontFaceStencil:" => set_face_stencil, c"v24@0:8@16";
+        "backFaceStencil" => face_stencil, c"@16@0:8";
         "setBackFaceStencil:" => set_face_stencil, c"v24@0:8@16";
         "setLabel:" => crate::no_op, c"v24@0:8@16";
     });

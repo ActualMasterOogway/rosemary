@@ -64,6 +64,7 @@ fn device_registers_the_metal_object_graph() {
         (c"MTLRenderPipelineDescriptor", "setVertexFunction:"),
         (c"MTLSamplerDescriptor", "setMinFilter:"),
         (c"MTLDepthStencilDescriptor", "setDepthWriteEnabled:"),
+        (c"MTLDepthStencilDescriptor", "backFaceStencil"),
         (c"R3CAMetalDrawable", "texture"),
     ] {
         let class = objc::class::lookup(class).expect("Metal is bootstrapped");

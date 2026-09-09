@@ -3353,6 +3353,18 @@ fn control_flow_merges(function: &Function) -> Result<HashMap<BlockId, Merge>, T
             }
             _ => merge,
         };
+        // A short-circuit arm may branch to its enclosing selection's merge:
+        // `if (a || b) ...` commonly reaches the same block from the outer
+        // test and the nested `b` test.  The nested branch is then an early
+        // exit from the enclosing selection, not a second selection header.
+        // Giving it a second `OpSelectionMerge` would require two constructs
+        // to claim one merge block.
+        if merges.iter().any(|(header, outer)| {
+            matches!(outer, Merge::Selection { merge: outer_merge } if *outer_merge == merge)
+                && dominators.dominates(*header, block.id)
+        }) {
+            continue;
+        }
         merges.insert(block.id, Merge::Selection { merge });
     }
     Ok(merges)

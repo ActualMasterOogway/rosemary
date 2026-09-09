@@ -43,32 +43,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = std::fs::write(path, air);
                 }
             })
-            .and_then(|air| parse_air(AirInput::Bitcode(air)))
-            .and_then(|module| emit_spirv(&module, &target));
+            .and_then(|air| parse_air(AirInput::Bitcode(air)));
         match result {
-            Ok(library) => {
-                // Writing the modules out lets an external validator check
-                // them; this example never claims they run on a GPU.
-                if let Some(directory) = std::env::var_os("ROSETTA3_SPIRV_OUT") {
-                    for (index, entry) in library.entries.iter().enumerate() {
-                        let path =
-                            std::path::Path::new(&directory).join(format!("{ordinal}-{index}.spv"));
-                        let bytes: Vec<u8> = entry
-                            .words
-                            .iter()
-                            .flat_map(|word| word.to_le_bytes())
-                            .collect();
-                        std::fs::write(path, bytes)?;
+            Ok(module) => {
+                // Keep these names with an emission failure: they are enough
+                // to correlate a rejected library with an engine log, but do
+                // not expose the shader implementation.
+                let entries = module
+                    .entries
+                    .iter()
+                    .map(|entry| module.functions[entry.function].name.as_str())
+                    .collect::<Vec<_>>();
+                let result = emit_spirv(&module, &target);
+                match result {
+                    Ok(library) => {
+                        // Writing the modules out lets an external validator check
+                        // them; this example never claims they run on a GPU.
+                        if let Some(directory) = std::env::var_os("ROSETTA3_SPIRV_OUT") {
+                            for (index, entry) in library.entries.iter().enumerate() {
+                                let path = std::path::Path::new(&directory)
+                                    .join(format!("{ordinal}-{index}.spv"));
+                                let bytes: Vec<u8> = entry
+                                    .words
+                                    .iter()
+                                    .flat_map(|word| word.to_le_bytes())
+                                    .collect();
+                                std::fs::write(path, bytes)?;
+                            }
+                        }
+                        println!(
+                            "{ordinal} at {offset}: emitted {:?}",
+                            library
+                                .entries
+                                .iter()
+                                .map(|entry| (entry.stage, entry.words.len()))
+                                .collect::<Vec<_>>()
+                        )
                     }
+                    Err(error) => println!("{ordinal} at {offset} ({entries:?}): {error}"),
                 }
-                println!(
-                    "{ordinal} at {offset}: emitted {:?}",
-                    library
-                        .entries
-                        .iter()
-                        .map(|entry| (entry.stage, entry.words.len()))
-                        .collect::<Vec<_>>()
-                )
             }
             Err(error) => println!("{ordinal} at {offset}: {error}"),
         }

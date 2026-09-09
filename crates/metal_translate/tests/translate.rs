@@ -632,6 +632,82 @@ fn emits_structured_merges_for_a_loop_containing_a_conditional() {
     assert!(opcodes.contains(&Op::SelectionMerge));
 }
 
+/// The second test in `a || b` may jump to the first test's merge.  That is
+/// an early exit from the enclosing selection, rather than another selection
+/// claiming the same merge block.
+#[test]
+fn emits_a_short_circuit_selection_with_one_merge() {
+    let function = Function {
+        name: "short_circuit".to_string(),
+        result: Type::Void,
+        parameters: Vec::new(),
+        values: Vec::new(),
+        blocks: vec![
+            Block {
+                id: BlockId(0),
+                name: "outer".to_string(),
+                instructions: Vec::new(),
+                terminator: Terminator::CondBranch {
+                    condition: Operand::Bool(true),
+                    true_block: BlockId(1),
+                    false_block: BlockId(2),
+                },
+            },
+            Block {
+                id: BlockId(1),
+                name: "taken".to_string(),
+                instructions: Vec::new(),
+                terminator: Terminator::Branch(BlockId(4)),
+            },
+            Block {
+                id: BlockId(2),
+                name: "inner".to_string(),
+                instructions: Vec::new(),
+                terminator: Terminator::CondBranch {
+                    condition: Operand::Bool(false),
+                    true_block: BlockId(1),
+                    false_block: BlockId(3),
+                },
+            },
+            Block {
+                id: BlockId(3),
+                name: "not_taken".to_string(),
+                instructions: Vec::new(),
+                terminator: Terminator::Branch(BlockId(4)),
+            },
+            Block {
+                id: BlockId(4),
+                name: "merge".to_string(),
+                instructions: Vec::new(),
+                terminator: Terminator::Return(None),
+            },
+        ],
+    };
+    let module = Module {
+        globals: Vec::new(),
+        functions: vec![function],
+        entries: vec![EntryPoint {
+            function: 0,
+            stage: Stage::Fragment,
+            resources: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        }],
+    };
+    let artifact = emit_spirv(&module, &TargetProfile::vulkan_1_3())
+        .unwrap()
+        .entries
+        .remove(0);
+    let parsed = rspirv::dr::load_words(&artifact.words).unwrap();
+    let merges = parsed.functions[0]
+        .blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter())
+        .filter(|instruction| instruction.class.opcode == Op::SelectionMerge)
+        .count();
+    assert_eq!(merges, 1);
+}
+
 /// Metal returns from several places; SPIR-V needs one returning block so
 /// every conditional above them has somewhere to rejoin.
 #[test]
