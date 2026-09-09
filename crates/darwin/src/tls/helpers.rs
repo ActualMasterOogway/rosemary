@@ -1,11 +1,16 @@
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use static_init::dynamic;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[dynamic]
 pub static HAS_FSGSBASE: bool = {
-    use std::arch::x86_64::{__cpuid, __cpuid_count};
+    /// Linux's `HWCAP2_FSGSBASE`, from `<asm/hwcap2.h>`.
+    ///
+    /// CPUID alone is not enough: the instructions fault unless the kernel also
+    /// enabled CR4.FSGSBASE. `AT_HWCAP2` reports that userspace may actually use
+    /// them.
+    const HWCAP2_FSGSBASE: libc::c_ulong = 1 << 1;
 
-    let max_leaf = __cpuid(0).eax;
-    max_leaf >= 7 && (__cpuid_count(7, 0).ebx & (1 << 0)) != 0
+    // SAFETY: `getauxval` reads the process's immutable ELF auxiliary vector.
+    unsafe { libc::getauxval(libc::AT_HWCAP2) & HWCAP2_FSGSBASE != 0 }
 };
