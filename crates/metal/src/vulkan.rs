@@ -5,10 +5,29 @@ use std::sync::OnceLock;
 use ash::{Entry, Instance, vk};
 use vk::Handle;
 
+use crate::gpu::Gpu;
+
 pub struct Adapter {
     pub handle: usize,
     pub name: String,
     pub target: metal_translate::TargetProfile,
+    /// The logical device, created the first time a Metal object needs one.
+    /// Enumerating adapters must stay cheap: a guest asks for the device list
+    /// long before it renders, and one of the adapters may never be used.
+    gpu: OnceLock<Result<Gpu, String>>,
+}
+
+impl Adapter {
+    pub fn gpu(&self) -> Result<&Gpu, &str> {
+        match self.gpu.get_or_init(|| {
+            let state = STATE.get().expect("adapters were enumerated first");
+            let instance = &state.as_ref().expect("this adapter came from it").instance;
+            Gpu::create(instance, vk::PhysicalDevice::from_raw(self.handle as u64))
+        }) {
+            Ok(gpu) => Ok(gpu),
+            Err(reason) => Err(reason),
+        }
+    }
 }
 
 struct State {
@@ -73,6 +92,7 @@ fn initialize() -> Result<State, String> {
                     shader_int64: features.shader_int64 == vk::TRUE,
                     ..target_profile(version)
                 },
+                gpu: OnceLock::new(),
             }
         })
         .collect::<Vec<_>>();

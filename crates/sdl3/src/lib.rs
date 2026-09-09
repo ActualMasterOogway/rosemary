@@ -37,6 +37,19 @@ pub type GlContext = *mut c_void;
 pub type Cursor = *mut c_void;
 
 /// `SDL_Rect`: a display's bounds, in the desktop's own coordinates.
+/// SDL3's public `SDL_Surface`. Only the fields before `refcount` are read.
+#[repr(C)]
+pub struct Surface {
+    pub flags: u32,
+    pub format: u32,
+    pub w: c_int,
+    pub h: c_int,
+    pub pitch: c_int,
+    pub pixels: *mut c_void,
+    pub refcount: c_int,
+    pub reserved: *mut c_void,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct Rect {
@@ -146,6 +159,10 @@ struct Api {
     SDL_CreateSurfaceFrom:
         Option<unsafe extern "C" fn(c_int, c_int, u32, *mut c_void, c_int) -> *mut c_void>,
     SDL_DestroySurface: Option<unsafe extern "C" fn(*mut c_void)>,
+    SDL_GetWindowSurface: Option<unsafe extern "C" fn(Window) -> *mut Surface>,
+    SDL_UpdateWindowSurface: Option<unsafe extern "C" fn(Window) -> bool>,
+    SDL_LockSurface: Option<unsafe extern "C" fn(*mut Surface) -> bool>,
+    SDL_UnlockSurface: Option<unsafe extern "C" fn(*mut Surface)>,
 
     SDL_GL_LoadLibrary: Option<unsafe extern "C" fn(*const c_char) -> bool>,
     SDL_GL_CreateContext: Option<unsafe extern "C" fn(Window) -> GlContext>,
@@ -327,6 +344,10 @@ fn api() -> Option<&'static Api> {
             SDL_SetWindowIcon,
             SDL_CreateSurfaceFrom,
             SDL_DestroySurface,
+            SDL_GetWindowSurface,
+            SDL_UpdateWindowSurface,
+            SDL_LockSurface,
+            SDL_UnlockSurface,
             SDL_GL_LoadLibrary,
             SDL_GL_CreateContext,
             SDL_GL_DestroyContext,
@@ -1596,6 +1617,64 @@ pub mod video {
             }
             up
         })
+    }
+
+    /// The window's presentable surface, described exactly as SDL3's public
+    /// `SDL_Surface` is: a caller writes `pitch`-strided rows into `pixels`.
+    pub struct Presentation {
+        pub width: i32,
+        pub height: i32,
+        pub pitch: i32,
+        pub format: u32,
+        pub pixels: *mut u8,
+    }
+
+    /// Borrow the window's surface, write into it, and show what was written.
+    ///
+    /// `body` is called only when SDL has a surface for the window; its
+    /// return value says whether anything was drawn and so whether the
+    /// surface is worth presenting.
+    pub fn present_window(window: Window, body: impl FnOnce(&Presentation) -> bool) -> bool {
+        let Some(api) = api() else {
+            return false;
+        };
+        let (Some(get), Some(update), Some(lock), Some(unlock)) = (
+            api.SDL_GetWindowSurface,
+            api.SDL_UpdateWindowSurface,
+            api.SDL_LockSurface,
+            api.SDL_UnlockSurface,
+        ) else {
+            return false;
+        };
+        // SAFETY: a window this crate created.
+        let surface = unsafe { get(window) };
+        if surface.is_null() {
+            return false;
+        }
+        // SAFETY: SDL just returned this surface and owns it until the window
+        // is resized or destroyed, neither of which happens under this call.
+        let described = unsafe {
+            let surface = &*surface;
+            Presentation {
+                width: surface.w,
+                height: surface.h,
+                pitch: surface.pitch,
+                format: surface.format,
+                pixels: surface.pixels as *mut u8,
+            }
+        };
+        if described.pixels.is_null() || described.width <= 0 || described.height <= 0 {
+            return false;
+        }
+        // SAFETY: the surface SDL just returned.
+        if !unsafe { lock(surface) } {
+            return false;
+        }
+        let drew = body(&described);
+        // SAFETY: locked immediately above.
+        unsafe { unlock(surface) };
+        // SAFETY: a window this crate created.
+        drew && unsafe { update(window) }
     }
 
     pub fn create_window(title: &CStr, width: i32, height: i32, flags: u64) -> Option<Window> {

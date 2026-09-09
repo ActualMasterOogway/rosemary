@@ -12,6 +12,8 @@ enum Constant {
     Float(u64),
     Aggregate(Vec<usize>),
     Data(Vec<u64>),
+    /// A pointer to one of the module's global variables.
+    Global(u32),
 }
 
 #[derive(Clone, Debug)]
@@ -24,6 +26,114 @@ pub(super) struct ValueTable {
     relative: bool,
     values: Vec<Value>,
     argument_start: usize,
+    /// One entry per module global, in declaration order, which is the order
+    /// `Constant::Global` indexes and the order the IR module keeps them in.
+    globals: Vec<PendingGlobal>,
+}
+
+/// A decoded `switch`, before it has been expanded into comparisons.
+struct PendingSwitch {
+    block: usize,
+    condition: Operand,
+    ty: Type,
+    default: BlockId,
+    cases: Vec<(u64, BlockId)>,
+}
+
+/// Replace one `switch` with a chain of equality tests.
+///
+/// SPIR-V has `OpSwitch`, but structured control flow would then have to
+/// recover a merge for an n-way branch. A chain reduces the switch to the
+/// two-way form the rest of the translator already restructures, at the cost
+/// of one comparison per case.
+fn expand_switch(function: &mut Function, blocks: &mut Vec<Block>, switch: PendingSwitch) {
+    let PendingSwitch {
+        block,
+        condition,
+        ty,
+        default,
+        cases,
+    } = switch;
+    let origin = BlockId(block as u32);
+    if cases.is_empty() {
+        blocks[block].terminator = Terminator::Branch(default);
+        return;
+    }
+    // The first test stays in the switch's own block; each later one needs a
+    // block of its own to be reached from the test before it.
+    let mut chain = vec![origin];
+    for position in 1..cases.len() {
+        let id = BlockId(blocks.len() as u32);
+        blocks.push(Block {
+            id,
+            name: format!("switch{block}_case{position}"),
+            instructions: Vec::new(),
+            terminator: Terminator::Unreachable,
+        });
+        chain.push(id);
+    }
+    let mut arrivals: Vec<(BlockId, Vec<BlockId>)> = Vec::new();
+    let mut record_arrival = |target: BlockId, from: BlockId| match arrivals
+        .iter_mut()
+        .find(|(block, _)| *block == target)
+    {
+        Some((_, sources)) => sources.push(from),
+        None => arrivals.push((target, vec![from])),
+    };
+    for (position, (value, target)) in cases.iter().enumerate() {
+        let result = ValueId(function.values.len() as u32);
+        function.values.push(Type::Bool);
+        let here = chain[position];
+        let next = chain.get(position + 1).copied().unwrap_or(default);
+        let owner = &mut blocks[here.0 as usize];
+        owner.instructions.push(Instruction {
+            result: Some(result),
+            kind: InstructionKind::IntegerCompare {
+                predicate: IntegerPredicate::Equal,
+                lhs: condition.clone(),
+                rhs: Operand::Integer {
+                    ty: ty.clone(),
+                    value: *value,
+                },
+            },
+        });
+        owner.terminator = Terminator::CondBranch {
+            condition: Operand::Value(result),
+            true_block: *target,
+            false_block: next,
+        };
+        record_arrival(*target, here);
+    }
+    record_arrival(default, *chain.last().expect("at least one case"));
+
+    // Every edge which left the switch block now leaves the chain block which
+    // tests that case, so the phis in each target follow their edge.
+    for (target, sources) in arrivals {
+        for instruction in &mut blocks[target.0 as usize].instructions {
+            let InstructionKind::Phi { incomings } = &mut instruction.kind else {
+                continue;
+            };
+            let Some(position) = incomings
+                .iter()
+                .position(|(predecessor, _)| *predecessor == origin)
+            else {
+                continue;
+            };
+            let (_, operand) = incomings.remove(position);
+            for source in &sources {
+                incomings.push((*source, operand.clone()));
+            }
+        }
+    }
+}
+
+/// A decoded `GLOBALVAR` record, before its initializer has been materialized.
+struct PendingGlobal {
+    space: AddressSpace,
+    /// The type index of what the variable holds, not of the pointer to it.
+    pointee: usize,
+    /// The value id of the initializer, if the record named one.
+    initializer: Option<usize>,
 }
 
 impl ValueTable {
@@ -66,6 +176,7 @@ impl ValueTable {
             relative: *version >= 1,
             values: Vec::new(),
             argument_start: 0,
+            globals: Vec::new(),
         };
         for record in module.elements.iter().filter_map(BitcodeElement::as_record) {
             match record.id {
@@ -75,9 +186,47 @@ impl ValueTable {
                         type_reference(fields.get(if *version == 2 { 2 } else { 0 }), types.len())?;
                     table.values.push(Value { ty, constant: None });
                 }
+                // A module global: Metal's constant lookup tables and its
+                // `threadgroup` arrays live here.
+                7 => {
+                    let fields = record_values(record);
+                    let index = if *version == 2 { 2 } else { 0 };
+                    let pointer = type_reference(fields.get(index), types.len())?;
+                    let flags = fields.get(index + 1).copied().unwrap_or(0);
+                    // Bit 1 says the record names the value type and its own
+                    // address space; without it the type field is a pointer.
+                    if flags & 2 != 0 {
+                        return Err(semantic(
+                            "LLVM global variable with an explicit value type needs decoding",
+                        ));
+                    }
+                    let DecodedType::Pointer {
+                        pointee,
+                        address_space,
+                    } = types[pointer]
+                    else {
+                        return Err(semantic("LLVM global variable is not a pointer"));
+                    };
+                    let space = address_space_of(address_space)?;
+                    let initializer = match fields.get(index + 2).copied().unwrap_or(0) {
+                        0 => None,
+                        id => Some(usize::try_from(id - 1).map_err(|_| {
+                            semantic("LLVM global initializer does not fit in memory")
+                        })?),
+                    };
+                    table.values.push(Value {
+                        ty: pointer,
+                        constant: Some(Constant::Global(table.globals.len() as u32)),
+                    });
+                    table.globals.push(PendingGlobal {
+                        space,
+                        pointee,
+                        initializer,
+                    });
+                }
                 // These also allocate value IDs. Reject until their pointer
                 // types and initializers can be represented, never skip them.
-                7 | 9 | 14 | 18 => {
+                9 | 14 | 18 => {
                     return Err(semantic(format!(
                         "unsupported LLVM module value record {}",
                         record.id
@@ -294,6 +443,7 @@ impl ValueTable {
         let mut constants = Vec::new();
         let mut blocks: Vec<Block> = Vec::new();
         let mut phi_fixups: Vec<PhiFixup> = Vec::new();
+        let mut switches: Vec<PendingSwitch> = Vec::new();
         // Pointers produced by a widening bitcast keep the pointee type they
         // really address; a load through one is adapted to the requested type.
         let mut aliases: HashMap<usize, PointerAlias> = HashMap::new();
@@ -411,35 +561,16 @@ impl ValueTable {
                         let source_id = self.operand_id(*source_value)?;
                         let (source, value) = operand(*source_value, None)?;
                         let target = type_reference(Some(target), types.len())?;
-                        // Apple's compiler reads a `float3` struct member
-                        // with a `float4` load, because Metal pads a `float3`
-                        // to sixteen bytes. Record the pointee the pointer
-                        // really addresses and adapt at the load rather than
-                        // retyping the pointer.
-                        if let (
-                            DecodedType::Pointer {
-                                pointee: from,
-                                address_space,
-                            },
-                            DecodedType::Pointer {
-                                pointee: to,
-                                address_space: target_space,
-                            },
-                        ) = (&types[source], &types[target])
-                            && *opcode == 11
-                            && address_space == target_space
+                        // A cast to `i8*` names raw bytes, which SPIR-V's
+                        // logical addressing cannot address. Apple's compiler
+                        // emits one only to hand a local to a lifetime
+                        // marker, so the cast carries the pointer unchanged
+                        // and the marker itself is dropped.
+                        if *opcode == 11
+                            && let DecodedType::Pointer { pointee, .. } = types[target]
+                            && matches!(types[pointee], DecodedType::Integer(8))
                         {
-                            let actual =
-                                aliases.get(&source_id).map_or(*from, |alias| alias.pointee);
-                            reinterpretation(types, actual, *to)?;
                             let id = self.values.len();
-                            aliases.insert(
-                                id,
-                                PointerAlias {
-                                    pointee: actual,
-                                    operand: value.clone(),
-                                },
-                            );
                             define(
                                 &mut forward,
                                 id,
@@ -449,13 +580,139 @@ impl ValueTable {
                                 &mut instructions,
                             )?;
                             self.values.push(Value {
-                                ty: target,
+                                ty: source,
                                 constant: None,
                             });
                             continue;
                         }
-                        let op = cast_operation(*opcode, source, target, types)?;
-                        (target, InstructionKind::Convert { op, value })
+                        // A `thread` array decays to a pointer to its first
+                        // element. SPIR-V spells that as an access chain, not
+                        // as a cast between pointer types.
+                        if *opcode == 11
+                            && let (
+                                DecodedType::Pointer {
+                                    pointee: from,
+                                    address_space: 0,
+                                },
+                                DecodedType::Pointer {
+                                    pointee: to,
+                                    address_space: 0,
+                                },
+                            ) = (&types[source], &types[target])
+                            && let DecodedType::Array { element, .. } = types[*from]
+                            && element == *to
+                        {
+                            (
+                                target,
+                                InstructionKind::BufferAddress {
+                                    pointer: value,
+                                    // The leading index steps the pointer, as
+                                    // in any LLVM `getelementptr`.
+                                    indices: vec![Operand::u32(0), Operand::u32(0)],
+                                },
+                            )
+                        } else {
+                            // Apple's compiler reads a `float3` struct member
+                            // with a `float4` load, because Metal pads a `float3`
+                            // to sixteen bytes. Record the pointee the pointer
+                            // really addresses and adapt at the load rather than
+                            // retyping the pointer.
+                            if let (
+                                DecodedType::Pointer {
+                                    pointee: from,
+                                    address_space,
+                                },
+                                DecodedType::Pointer {
+                                    pointee: to,
+                                    address_space: target_space,
+                                },
+                            ) = (&types[source], &types[target])
+                                && *opcode == 11
+                                && address_space == target_space
+                            {
+                                let actual =
+                                    aliases.get(&source_id).map_or(*from, |alias| alias.pointee);
+                                reinterpretation(types, actual, *to)?;
+                                let id = self.values.len();
+                                aliases.insert(
+                                    id,
+                                    PointerAlias {
+                                        pointee: actual,
+                                        operand: value.clone(),
+                                    },
+                                );
+                                define(
+                                    &mut forward,
+                                    id,
+                                    value,
+                                    &mut operands,
+                                    &function,
+                                    &mut instructions,
+                                )?;
+                                self.values.push(Value {
+                                    ty: target,
+                                    constant: None,
+                                });
+                                continue;
+                            }
+                            let op = cast_operation(*opcode, source, target, types)?;
+                            (target, InstructionKind::Convert { op, value })
+                        }
+                    }
+                    // ALLOCA: [allocated type, size type, size, packed flags].
+                    // Metal's `thread` locals arrive here; anything but one
+                    // element is a variable-length allocation, which SPIR-V's
+                    // logical addressing cannot express.
+                    (19, [allocated, size_type, size, packed]) => {
+                        let allocated = type_reference(Some(allocated), types.len())?;
+                        // Bit 6 of the packed field says the record names the
+                        // allocated type rather than a pointer to it.
+                        let (pointer, pointee) = if packed & (1 << 6) == 0 {
+                            match types[allocated] {
+                                DecodedType::Pointer {
+                                    pointee,
+                                    address_space: 0,
+                                } => (allocated, pointee),
+                                _ => {
+                                    return Err(semantic(
+                                        "LLVM alloca names a type which is not a thread pointer",
+                                    ));
+                                }
+                            }
+                        } else {
+                            let pointer = types
+                                .iter()
+                                .position(|ty| {
+                                    matches!(
+                                        ty,
+                                        DecodedType::Pointer {
+                                            pointee,
+                                            address_space: 0,
+                                        } if *pointee == allocated
+                                    )
+                                })
+                                .ok_or_else(|| {
+                                    semantic("LLVM alloca has no thread pointer result type")
+                                })?;
+                            (pointer, allocated)
+                        };
+                        let _ = type_reference(Some(size_type), types.len())?;
+                        if self.integer(
+                            usize::try_from(*size)
+                                .map_err(|_| semantic("LLVM alloca size does not fit in memory"))?,
+                            types,
+                        )? != 1
+                        {
+                            return Err(semantic(
+                                "LLVM alloca of more than one element needs lowering",
+                            ));
+                        }
+                        (
+                            pointer,
+                            InstructionKind::LocalVariable {
+                                ty: ir_type(pointee, types)?,
+                            },
+                        )
                     }
                     (30, [pointer, indices @ ..]) if !indices.is_empty() => {
                         let (pointer_ty, pointer) = operand(*pointer, None)?;
@@ -495,6 +752,31 @@ impl ValueTable {
                                 indices: decoded,
                             },
                         )
+                    }
+                    // STORE, in both the old form which implies the stored
+                    // value's type and the newer one which repeats it.
+                    (24 | 44, [pointer, value, alignment, volatile])
+                        if *volatile == 0 && *alignment <= 32 =>
+                    {
+                        let pointer_id = self.operand_id(*pointer)?;
+                        if aliases.contains_key(&pointer_id) {
+                            return Err(semantic(
+                                "LLVM store through a reinterpreted pointer needs lowering",
+                            ));
+                        }
+                        let (pointer_ty, pointer) = operand(*pointer, None)?;
+                        let DecodedType::Pointer { pointee, .. } = types[pointer_ty] else {
+                            return Err(semantic("LLVM store requires a pointer"));
+                        };
+                        let (value_ty, value) = operand(*value, None)?;
+                        if value_ty != pointee {
+                            return Err(semantic("LLVM store type mismatch"));
+                        }
+                        instructions.push(Instruction {
+                            result: None,
+                            kind: InstructionKind::Store { pointer, value },
+                        });
+                        continue;
                     }
                     (20, [pointer, alignment, volatile]) if *volatile == 0 && *alignment <= 32 => {
                         let pointer_id = self.operand_id(*pointer)?;
@@ -647,6 +929,12 @@ impl ValueTable {
                         let intrinsic = names
                             .get(&callee)
                             .ok_or_else(|| semantic("LLVM call target has no name"))?;
+                        // A lifetime marker bounds a local's live range for
+                        // LLVM's own optimizers. SPIR-V has no such thing, and
+                        // the variable is live for the whole function there.
+                        if intrinsic.starts_with("llvm.lifetime.") {
+                            continue;
+                        }
                         let kind = air_intrinsic(intrinsic, &actual)?;
                         if matches!(types[*result], DecodedType::Void) {
                             instructions.push(Instruction { result: None, kind });
@@ -774,6 +1062,40 @@ impl ValueTable {
                         });
                         continue;
                     }
+                    // SWITCH: [condition type, condition, default block,
+                    // (case value, case block)...]. Metal IR has no multi-way
+                    // branch, so the switch is recorded here and expanded into
+                    // a chain of comparisons once every block exists and its
+                    // phis can be repointed at the block which now reaches it.
+                    (12, [_condition_type, condition, default, cases @ ..])
+                        if cases.len().is_multiple_of(2) =>
+                    {
+                        let (condition_type, condition) = operand(*condition, None)?;
+                        if !matches!(types[condition_type], DecodedType::Integer(_)) {
+                            return Err(semantic("LLVM switch condition is not an integer"));
+                        }
+                        let mut decoded = Vec::new();
+                        for case in cases.as_chunks::<2>().0 {
+                            // A case value is an absolute value reference,
+                            // unlike the relatively numbered condition.
+                            let value = self.integer(
+                                usize::try_from(case[0]).map_err(|_| {
+                                    semantic("LLVM switch case does not fit in memory")
+                                })?,
+                                types,
+                            )?;
+                            decoded.push((value, block_id(case[1], block_count)?));
+                        }
+                        switches.push(PendingSwitch {
+                            block: block_index,
+                            condition,
+                            ty: ir_type(condition_type, types)?,
+                            default: block_id(*default, block_count)?,
+                            cases: decoded,
+                        });
+                        terminator = Some(Terminator::Unreachable);
+                        continue;
+                    }
                     (15, []) => {
                         terminator = Some(Terminator::Unreachable);
                         continue;
@@ -883,6 +1205,9 @@ impl ValueTable {
                 ));
             }
         }
+        for switch in switches {
+            expand_switch(&mut function, &mut blocks, switch);
+        }
         constants.append(&mut blocks[0].instructions);
         blocks[0].instructions = constants;
         function.blocks = blocks;
@@ -934,6 +1259,33 @@ impl ValueTable {
                 .collect(),
             _ => Err(semantic("LLVM shuffle mask is not constant")),
         }
+    }
+
+    /// The module's global variables, with their initializers materialized.
+    ///
+    /// A global's initializer is a constant which the module's constant block
+    /// defines after the record which names it, so this runs once the whole
+    /// value table exists.
+    pub(super) fn global_variables(
+        &self,
+        types: &[DecodedType],
+    ) -> Result<Vec<crate::ir::GlobalVariable>, TranslateError> {
+        let mut operands = HashMap::new();
+        self.globals
+            .iter()
+            .map(|global| {
+                let initializer = global
+                    .initializer
+                    .map(|id| self.materialize(id, types, &mut operands, &mut Vec::new()))
+                    .transpose()?;
+                Ok(crate::ir::GlobalVariable {
+                    name: String::new(),
+                    space: global.space,
+                    ty: ir_type(global.pointee, types)?,
+                    initializer,
+                })
+            })
+            .collect()
     }
 
     /// Resolve an LLVM value reference to a Metal IR operand, expanding a
@@ -993,6 +1345,7 @@ impl ValueTable {
                 Operand::Composite { ty, elements }
             }
             Constant::Null => zero_composite(&ty)?,
+            Constant::Global(index) => Operand::Global { index: *index, ty },
         };
         active.pop();
         operands.insert(id, result.clone());
@@ -1031,6 +1384,28 @@ fn cast_operation(
         return Err(semantic(
             "LLVM pointer cast needs explicit buffer reinterpretation",
         ));
+    }
+    // A bitcast reinterprets bits, so it alone may change the lane count as
+    // long as the value's total width is unchanged.
+    if op == ConvertOp::Bitcast {
+        let width = |index: usize| -> Option<u32> {
+            match &types[index] {
+                DecodedType::Integer(bits) | DecodedType::Float(bits) => Some(u32::from(*bits)),
+                DecodedType::Vector { element, lanes } => match &types[*element] {
+                    DecodedType::Integer(bits) | DecodedType::Float(bits) => {
+                        Some(u32::from(*bits) * lanes)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            }
+        };
+        return match (width(source), width(target)) {
+            (Some(from), Some(to)) if from == to => Ok(op),
+            _ => Err(semantic(
+                "LLVM bitcast changes a value's total width or is not numeric",
+            )),
+        };
     }
     let (source, target) = match (&types[source], &types[target]) {
         (
@@ -1199,6 +1574,9 @@ fn air_intrinsic(name: &str, arguments: &[Operand]) -> Result<InstructionKind, T
             ("f", "s") => ConvertOp::SignedToFloat,
             ("u", "f") => ConvertOp::FloatToUnsigned,
             ("s", "f") => ConvertOp::FloatToSigned,
+            // Metal spells `half(x)` and `float(h)` as a conversion between
+            // two floating kinds; the type suffixes say which widths.
+            ("f", "f") => ConvertOp::FloatResize,
             _ => return Err(unsupported()),
         };
         let [value] = arguments else {
@@ -1416,6 +1794,17 @@ fn zero_composite(ty: &Type) -> Result<Operand, TranslateError> {
     })
 }
 
+/// AIR numbers its address spaces the way Metal names them.
+fn address_space_of(space: u64) -> Result<AddressSpace, TranslateError> {
+    Ok(match space {
+        0 => AddressSpace::Thread,
+        1 => AddressSpace::Device,
+        2 => AddressSpace::Constant,
+        3 => AddressSpace::Threadgroup,
+        _ => return Err(semantic("unsupported AIR address space")),
+    })
+}
+
 fn ir_type(index: usize, types: &[DecodedType]) -> Result<Type, TranslateError> {
     fn convert(
         index: usize,
@@ -1451,13 +1840,7 @@ fn ir_type(index: usize, types: &[DecodedType]) -> Result<Type, TranslateError> 
                 pointee,
                 address_space,
             } => Type::Pointer {
-                space: match address_space {
-                    0 => AddressSpace::Thread,
-                    1 => AddressSpace::Device,
-                    2 => AddressSpace::Constant,
-                    3 => AddressSpace::Threadgroup,
-                    _ => return Err(semantic("unsupported AIR address space")),
-                },
+                space: address_space_of(*address_space)?,
                 pointee: Box::new(convert(*pointee, types, active)?),
             },
             DecodedType::Struct { fields, packed } => {
@@ -1643,6 +2026,7 @@ mod tests {
             constant: None,
         };
         let table = ValueTable {
+            globals: Vec::new(),
             relative: true,
             values,
             argument_start: 69,
@@ -1669,6 +2053,90 @@ mod tests {
             }
         );
         Module {
+            globals: Vec::new(),
+            functions: vec![function],
+            entries: Vec::new(),
+        }
+        .verify()
+        .unwrap();
+    }
+
+    /// LLVM's `switch` has no Metal IR form: it becomes one equality test
+    /// per case, each in the block the test before it falls through to, with
+    /// the phis of every target following the edge which now reaches it.
+    #[test]
+    fn a_switch_expands_into_a_chain_of_comparisons() {
+        let types = vec![
+            DecodedType::Integer(32),
+            DecodedType::Integer(1),
+            DecodedType::Void,
+        ];
+        let table = ValueTable {
+            globals: Vec::new(),
+            relative: true,
+            values: vec![
+                Value {
+                    ty: 0,
+                    constant: Some(Constant::Integer(7)),
+                },
+                Value {
+                    ty: 0,
+                    constant: Some(Constant::Integer(9)),
+                },
+            ],
+            argument_start: 0,
+        };
+        // entry:  switch i32 7, label %block3 [ 7, %block1  9, %block2 ]
+        // block1: br block3
+        // block2: br block3
+        // block3: %r = phi i32 [7, entry], [9, block1], [7, block2]; ret void
+        let body = records_block(
+            12,
+            &[
+                (1, &[4]),
+                // SWITCH: [condition type, condition, default, (value, block)...]
+                (12, &[0, 2, 3, 0, 1, 1, 2]),
+                (11, &[3]),
+                (11, &[3]),
+                (16, &[0, 4, 0, 2, 1, 4, 2]),
+                (10, &[]),
+            ],
+        );
+        let function = table
+            .lower_body(
+                &body,
+                &types,
+                &Signature {
+                    names: &HashMap::new(),
+                    name: "choose".into(),
+                    parameter_types: &[],
+                    result_type: 2,
+                    opaque_types: &HashMap::new(),
+                },
+            )
+            .unwrap();
+        // Two cases: the first test stays in the switch's block and the
+        // second gets a block of its own.
+        assert_eq!(function.blocks.len(), 5);
+        assert!(matches!(
+            function.blocks[0].instructions.last().map(|i| &i.kind),
+            Some(InstructionKind::IntegerCompare {
+                predicate: IntegerPredicate::Equal,
+                ..
+            })
+        ));
+        let InstructionKind::Phi { incomings } = &function.blocks[3].instructions[0].kind else {
+            panic!("the default block keeps its phi");
+        };
+        // The edge from the switch block now arrives from the last test.
+        assert!(
+            incomings
+                .iter()
+                .any(|(from, _)| *from == function.blocks[4].id),
+            "the default's phi follows the chain's last block"
+        );
+        Module {
+            globals: Vec::new(),
             functions: vec![function],
             entries: Vec::new(),
         }
@@ -1686,6 +2154,7 @@ mod tests {
             DecodedType::Void,
         ];
         let table = ValueTable {
+            globals: Vec::new(),
             relative: true,
             values: vec![
                 Value {
@@ -1744,6 +2213,7 @@ mod tests {
                 .map(Operand::Value)
         );
         Module {
+            globals: Vec::new(),
             functions: vec![function],
             entries: Vec::new(),
         }
@@ -1761,6 +2231,7 @@ mod tests {
             DecodedType::Void,
         ];
         let table = ValueTable {
+            globals: Vec::new(),
             relative: true,
             values: vec![Value {
                 ty: 0,
@@ -1801,6 +2272,7 @@ mod tests {
     fn lowers_integer_resize_and_checks_its_direction() {
         let types = vec![DecodedType::Integer(32), DecodedType::Integer(64)];
         let make = || ValueTable {
+            globals: Vec::new(),
             relative: true,
             values: vec![Value {
                 ty: 0,
@@ -1823,6 +2295,7 @@ mod tests {
             )
             .unwrap();
         Module {
+            globals: Vec::new(),
             functions: vec![function],
             entries: Vec::new(),
         }
@@ -1857,6 +2330,7 @@ mod tests {
             DecodedType::Float(32),
         ];
         let make = |ty, constant| ValueTable {
+            globals: Vec::new(),
             relative: true,
             argument_start: 0,
             values: vec![
@@ -1923,6 +2397,7 @@ mod tests {
     #[test]
     fn relative_references_include_module_constants() {
         let table = ValueTable {
+            globals: Vec::new(),
             relative: true,
             values: vec![
                 Value {
@@ -1943,6 +2418,7 @@ mod tests {
     #[test]
     fn absolute_references_do_not_subtract() {
         let table = ValueTable {
+            globals: Vec::new(),
             relative: false,
             values: vec![
                 Value {
@@ -2185,9 +2661,11 @@ fn reinterpretation(
     if source_lanes == target_lanes && width(source).is_some() && width(source) == width(target) {
         return Ok(Adaptation::Bitcast);
     }
-    Err(semantic(
-        "LLVM pointer cast needs explicit buffer reinterpretation",
-    ))
+    Err(semantic(format!(
+        "LLVM pointer cast needs explicit buffer reinterpretation: {} -> {}",
+        types[from].description(),
+        types[to].description(),
+    )))
 }
 
 /// Adapt a value loaded through a reinterpreted pointer to the requested type.

@@ -211,6 +211,7 @@ fn parse_minimal_store_bitcode(bitcode: &Bitcode) -> Result<Module, TranslateErr
     };
     Ok(Module {
         functions: vec![function],
+        globals: Vec::new(),
         entries: vec![EntryPoint {
             function: 0,
             stage: Stage::Kernel,
@@ -251,9 +252,13 @@ fn parse_packed_air(
         .ok_or_else(|| semantic("packed AIR has no supported entry metadata"))?;
     let module_values = values::ValueTable::module_values(module_block, &types)?;
     let interface = metadata.stage_interface(stage, &module_values, &types)?;
+    // AIR's entry metadata names the function by its module value id, and
+    // module globals share that numbering with functions.
+    let entry_ordinal = function_record_ordinal(module_block, interface.function)
+        .ok_or_else(|| semantic("AIR entry metadata names a value which is not a function"))?;
     let entry = function_records
         .iter()
-        .position(|(ordinal, _)| *ordinal == interface.function)
+        .position(|(ordinal, _)| *ordinal == entry_ordinal)
         .ok_or_else(|| semantic("AIR entry metadata names a function without a body"))?;
     let (ordinal, record) = function_records[entry];
     let name = legacy_names
@@ -291,6 +296,7 @@ fn parse_packed_air(
         .iter()
         .filter_map(|resource| Some((resource.argument, resource.ty.clone()?)))
         .collect();
+    let globals = value_table.global_variables(&types)?;
     let function = value_table.lower_body(
         body,
         &types,
@@ -323,6 +329,7 @@ fn parse_packed_air(
         .collect::<Result<Vec<_>, TranslateError>>()?;
     let module = Module {
         functions: vec![function],
+        globals,
         entries: vec![EntryPoint {
             function: 0,
             stage,
@@ -535,6 +542,36 @@ fn record_values(record: &llvm_bitcode::bitcode::Record) -> Vec<u64> {
         values.extend(array);
     }
     values
+}
+
+/// The position among a module's `FUNCTION` records of the value `id` names.
+///
+/// LLVM numbers module-level values in record order, and a global variable
+/// takes an id just as a function does, so the two orders only agree in a
+/// module without globals.
+fn function_record_ordinal(module: &BitcodeBlock, id: usize) -> Option<usize> {
+    let mut value = 0;
+    let mut functions = 0;
+    for record in module.elements.iter().filter_map(BitcodeElement::as_record) {
+        match record.id {
+            8 => {
+                if value == id {
+                    return Some(functions);
+                }
+                functions += 1;
+                value += 1;
+            }
+            // The other records which allocate a module-level value id.
+            7 | 9 | 14 | 18 => {
+                if value == id {
+                    return None;
+                }
+                value += 1;
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn type_reference(field: Option<&u64>, defined: usize) -> Result<usize, TranslateError> {
@@ -838,6 +875,7 @@ fn parse_text(text: &str) -> Result<Module, TranslateError> {
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Module {
         functions: vec![function],
+        globals: Vec::new(),
         entries: vec![EntryPoint {
             function: 0,
             stage: Stage::Kernel,

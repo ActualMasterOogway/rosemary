@@ -13,7 +13,10 @@ use std::fmt;
 
 pub use air::{AirInput, parse_air};
 pub use msl::parse_msl;
-pub use spirv::{EntryArtifact, ResourceBinding, TargetProfile, TranslatedLibrary, emit_spirv};
+pub use spirv::{
+    EntryArtifact, ResourceBinding, TargetProfile, TranslatedLibrary, WORKGROUP_SIZE_SPEC_IDS,
+    emit_spirv,
+};
 
 /// The phase which reported a translation diagnostic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

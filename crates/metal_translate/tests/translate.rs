@@ -501,6 +501,7 @@ fn emits_a_writable_3d_texture_descriptor_in_its_metal_namespace() {
         access: Access::Write,
     });
     let module = Module {
+        globals: Vec::new(),
         functions: vec![Function {
             name: "clear_volume".to_string(),
             result: Type::Void,
@@ -604,6 +605,7 @@ fn emits_structured_merges_for_a_loop_containing_a_conditional() {
         ],
     };
     let module = Module {
+        globals: Vec::new(),
         functions: vec![function],
         entries: vec![EntryPoint {
             function: 0,
@@ -634,6 +636,7 @@ fn emits_structured_merges_for_a_loop_containing_a_conditional() {
 #[test]
 fn routes_several_returns_through_one_exit_block() {
     let module = Module {
+        globals: Vec::new(),
         functions: vec![Function {
             name: "clip".to_string(),
             result: Type::Void,
@@ -690,4 +693,252 @@ fn routes_several_returns_through_one_exit_block() {
         .count();
     assert_eq!(returns, 1);
     assert_eq!(parsed.functions[0].blocks.len(), 4);
+}
+
+/// A Metal `constant` lookup table lives outside every function. It becomes a
+/// SPIR-V `Private` variable with its initializer, and reading it is an access
+/// chain into that variable rather than into a buffer block.
+#[test]
+fn a_module_constant_table_becomes_a_private_variable() {
+    use metal_translate::ir::{AddressSpace, GlobalVariable, Instruction};
+
+    let float = Type::Float { bits: 32 };
+    let table = Type::Array {
+        element: Box::new(float.clone()),
+        count: 2,
+    };
+    let pointer = Type::Pointer {
+        space: AddressSpace::Constant,
+        pointee: Box::new(table.clone()),
+    };
+    let element_pointer = Type::Pointer {
+        space: AddressSpace::Constant,
+        pointee: Box::new(float.clone()),
+    };
+    let buffer = Type::Pointer {
+        space: AddressSpace::Device,
+        pointee: Box::new(float.clone()),
+    };
+    let module = Module {
+        globals: vec![GlobalVariable {
+            name: "weights".to_string(),
+            space: AddressSpace::Constant,
+            ty: table.clone(),
+            initializer: Some(Operand::Composite {
+                ty: table,
+                elements: vec![Operand::f32(0.25), Operand::f32(0.75)],
+            }),
+        }],
+        functions: vec![Function {
+            name: "read_table".to_string(),
+            result: Type::Void,
+            parameters: vec![Parameter {
+                value: ValueId(0),
+                name: "output".to_string(),
+                ty: buffer.clone(),
+            }],
+            values: vec![
+                buffer.clone(),
+                element_pointer.clone(),
+                float.clone(),
+                buffer.clone(),
+            ],
+            blocks: vec![Block {
+                id: BlockId(0),
+                name: "entry".to_string(),
+                instructions: vec![
+                    Instruction {
+                        result: Some(ValueId(1)),
+                        kind: InstructionKind::BufferAddress {
+                            pointer: Operand::Global {
+                                index: 0,
+                                ty: pointer,
+                            },
+                            // LLVM's leading index steps the pointer itself.
+                            indices: vec![Operand::u32(0), Operand::u32(1)],
+                        },
+                    },
+                    Instruction {
+                        result: Some(ValueId(2)),
+                        kind: InstructionKind::Load {
+                            pointer: Operand::Value(ValueId(1)),
+                        },
+                    },
+                    Instruction {
+                        result: Some(ValueId(3)),
+                        kind: InstructionKind::ElementAddress {
+                            pointer: Operand::Value(ValueId(0)),
+                            index: Operand::u32(0),
+                        },
+                    },
+                    Instruction {
+                        result: None,
+                        kind: InstructionKind::Store {
+                            pointer: Operand::Value(ValueId(3)),
+                            value: Operand::Value(ValueId(2)),
+                        },
+                    },
+                ],
+                terminator: Terminator::Return(None),
+            }],
+        }],
+        entries: vec![EntryPoint {
+            function: 0,
+            stage: Stage::Kernel,
+            resources: vec![Resource {
+                argument: 0,
+                kind: ResourceKind::Buffer,
+                index: 0,
+                count: 1,
+                access: Access::Write,
+                ty: buffer,
+                name: Some("output".to_string()),
+            }],
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        }],
+    };
+    let library = emit_spirv(&module, &TargetProfile::vulkan_1_3()).expect("the module emits");
+    let parsed = rspirv::dr::load_words(&library.entries[0].words).unwrap();
+    let private = parsed
+        .types_global_values
+        .iter()
+        .find(|instruction| {
+            instruction.class.opcode == Op::Variable
+                && instruction.operands.first()
+                    == Some(&rspirv::dr::Operand::StorageClass(
+                        rspirv::spirv::StorageClass::Private,
+                    ))
+        })
+        .expect("the constant table is a Private variable");
+    assert_eq!(
+        private.operands.len(),
+        2,
+        "a Private variable keeps its initializer"
+    );
+    let table_chain = parsed.functions[0].blocks[0]
+        .instructions
+        .iter()
+        .find(|instruction| {
+            instruction.class.opcode == Op::AccessChain
+                && instruction.operands.first()
+                    == Some(&rspirv::dr::Operand::IdRef(private.result_id.unwrap()))
+        })
+        .expect("the table is read through an access chain");
+    assert_eq!(
+        table_chain.operands.len(),
+        2,
+        "an access chain into a variable drops LLVM's pointer step"
+    );
+}
+
+/// An `alloca` is a `Function`-storage variable, and SPIR-V requires every one
+/// of them in the entry block whatever block the `alloca` was written in.
+#[test]
+fn a_local_variable_is_declared_in_the_entry_block() {
+    use metal_translate::ir::{AddressSpace, Instruction};
+
+    let word = Type::u32();
+    let local = Type::Pointer {
+        space: AddressSpace::Thread,
+        pointee: Box::new(word.clone()),
+    };
+    let buffer = Type::Pointer {
+        space: AddressSpace::Device,
+        pointee: Box::new(word.clone()),
+    };
+    let module = Module {
+        globals: Vec::new(),
+        functions: vec![Function {
+            name: "scratch".to_string(),
+            result: Type::Void,
+            parameters: vec![Parameter {
+                value: ValueId(0),
+                name: "output".to_string(),
+                ty: buffer.clone(),
+            }],
+            values: vec![buffer.clone(), local.clone(), word.clone(), buffer.clone()],
+            blocks: vec![
+                Block {
+                    id: BlockId(0),
+                    name: "entry".to_string(),
+                    instructions: Vec::new(),
+                    terminator: Terminator::Branch(BlockId(1)),
+                },
+                Block {
+                    id: BlockId(1),
+                    name: "body".to_string(),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstructionKind::LocalVariable { ty: word.clone() },
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstructionKind::Store {
+                                pointer: Operand::Value(ValueId(1)),
+                                value: Operand::u32(7),
+                            },
+                        },
+                        Instruction {
+                            result: Some(ValueId(2)),
+                            kind: InstructionKind::Load {
+                                pointer: Operand::Value(ValueId(1)),
+                            },
+                        },
+                        Instruction {
+                            result: Some(ValueId(3)),
+                            kind: InstructionKind::ElementAddress {
+                                pointer: Operand::Value(ValueId(0)),
+                                index: Operand::u32(0),
+                            },
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstructionKind::Store {
+                                pointer: Operand::Value(ValueId(3)),
+                                value: Operand::Value(ValueId(2)),
+                            },
+                        },
+                    ],
+                    terminator: Terminator::Return(None),
+                },
+            ],
+        }],
+        entries: vec![EntryPoint {
+            function: 0,
+            stage: Stage::Kernel,
+            resources: vec![Resource {
+                argument: 0,
+                kind: ResourceKind::Buffer,
+                index: 0,
+                count: 1,
+                access: Access::Write,
+                ty: buffer,
+                name: Some("output".to_string()),
+            }],
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        }],
+    };
+    let library = emit_spirv(&module, &TargetProfile::vulkan_1_3()).expect("the module emits");
+    let parsed = rspirv::dr::load_words(&library.entries[0].words).unwrap();
+    let entry = &parsed.functions[0].blocks[0];
+    assert!(
+        entry.instructions.iter().any(|instruction| {
+            instruction.class.opcode == Op::Variable
+                && instruction.operands.first()
+                    == Some(&rspirv::dr::Operand::StorageClass(
+                        rspirv::spirv::StorageClass::Function,
+                    ))
+        }),
+        "the local is declared in the entry block"
+    );
+    assert!(
+        parsed.functions[0].blocks[1]
+            .instructions
+            .iter()
+            .all(|instruction| instruction.class.opcode != Op::Variable),
+        "no variable is left in the block the alloca was written in"
+    );
 }

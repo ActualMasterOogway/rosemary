@@ -47,6 +47,12 @@ impl Default for TargetProfile {
     }
 }
 
+/// The specialization constants a compute entry point's threadgroup size uses.
+///
+/// The runtime sets these when it creates the Vulkan pipeline for a Metal
+/// dispatch, because Metal names the threadgroup size at dispatch time.
+pub const WORKGROUP_SIZE_SPEC_IDS: [u32; 3] = [0, 1, 2];
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequiredFeatures {
     pub capabilities: Vec<String>,
@@ -134,10 +140,14 @@ fn emit_entry(
         .get(entry.function)
         .ok_or_else(|| emission("entry point refers to a missing function"))?;
     let mut function = single_exit(function.clone());
+    normalize_loop_headers(&mut function)?;
+    separate_loop_latches(&mut function)?;
     split_shared_merges(&mut function)?;
+    hoist_phis(&mut function);
     reverse_post_order(&mut function);
     let function = &function;
     let mut emitter = Emitter::new(target);
+    emitter.declare_globals(module)?;
     let resources = emitter.declare_resources(entry, function)?;
     emitter.declare_stage_io(entry, function)?;
     let function_id = emitter.emit_function(entry, function)?;
@@ -155,6 +165,11 @@ fn emit_entry(
     );
     match entry.stage {
         Stage::Kernel => {
+            // Metal has no threadgroup size in the shader: the host names it
+            // at dispatch. SPIR-V needs one at compile time, so the size is
+            // three specialization constants which the runtime supplies when
+            // it creates the Vulkan pipeline for a dispatch.
+            emitter.declare_workgroup_size()?;
             emitter
                 .builder
                 .execution_mode(function_id, ExecutionMode::LocalSize, [1, 1, 1])
@@ -194,6 +209,7 @@ fn emit_entry(
 
 struct Emitter {
     shader_int64: bool,
+    spirv_version: (u8, u8),
     uses_int64: bool,
     builder: Builder,
     types: HashMap<Type, u32>,
@@ -202,6 +218,17 @@ struct Emitter {
     buffer_types: HashMap<Type, (u32, u32)>,
     interface: Vec<u32>,
     parameter_pointers: HashMap<ValueId, u32>,
+    /// Each module global's variable and the storage class it lives in.
+    globals: HashMap<u32, (u32, StorageClass)>,
+    /// The storage class of every pointer an access chain produced, so a
+    /// chained access chain keeps the class of the variable it started from.
+    pointer_storage: HashMap<ValueId, StorageClass>,
+    /// Array and structure types outside a buffer. Vulkan forbids explicit
+    /// layout decorations there, so those types cannot share the ids the
+    /// laid-out buffer types use.
+    unlaid_types: HashMap<Type, u32>,
+    unlaid_composites: HashMap<Operand, u32>,
+    undefs: HashMap<Type, u32>,
     global_invocation_id: Option<u32>,
     glsl_std_450: u32,
     stage_inputs: HashMap<ValueId, u32>,
@@ -224,6 +251,7 @@ impl Emitter {
         let glsl_std_450 = builder.ext_inst_import("GLSL.std.450");
         Self {
             shader_int64: target.shader_int64,
+            spirv_version: target.spirv_version,
             uses_int64: false,
             builder,
             types: HashMap::new(),
@@ -232,6 +260,11 @@ impl Emitter {
             buffer_types: HashMap::new(),
             interface: Vec::new(),
             parameter_pointers: HashMap::new(),
+            globals: HashMap::new(),
+            pointer_storage: HashMap::new(),
+            unlaid_types: HashMap::new(),
+            unlaid_composites: HashMap::new(),
+            undefs: HashMap::new(),
             global_invocation_id: None,
             glsl_std_450,
             stage_inputs: HashMap::new(),
@@ -333,6 +366,34 @@ impl Emitter {
             });
         }
         Ok(reflected)
+    }
+
+    /// Declare `gl_WorkGroupSize` as a specialization constant vector.
+    ///
+    /// The decoration supersedes the `LocalSize` execution mode, which stays
+    /// in the module because a `GLCompute` entry point must declare one.
+    fn declare_workgroup_size(&mut self) -> Result<(), TranslateError> {
+        let uint = self.type_id(&Type::Int {
+            bits: 32,
+            signed: false,
+        })?;
+        let vector = self.builder.type_vector(uint, 3);
+        let lanes = WORKGROUP_SIZE_SPEC_IDS.map(|spec_id| {
+            let lane = self.builder.spec_constant_bit32(uint, 1);
+            self.builder.decorate(
+                lane,
+                Decoration::SpecId,
+                [SpirvOperand::LiteralBit32(spec_id)],
+            );
+            lane
+        });
+        let size = self.builder.spec_constant_composite(vector, lanes);
+        self.builder.decorate(
+            size,
+            Decoration::BuiltIn,
+            [SpirvOperand::BuiltIn(BuiltIn::WorkgroupSize)],
+        );
+        Ok(())
     }
 
     fn buffer_type(&mut self, pointee: &Type) -> Result<(u32, u32), TranslateError> {
@@ -555,6 +616,7 @@ impl Emitter {
                 .begin_block(Some(block_ids[&block.id]))
                 .map_err(build_error)?;
             if block_index == 0 {
+                self.materialize_local_variables(function, &value_ids)?;
                 self.materialize_parameter_pointers(function, &value_ids)?;
                 self.materialize_stage_inputs(function, &value_ids)?;
             }
@@ -584,6 +646,35 @@ impl Emitter {
         }
         self.builder.end_function().map_err(build_error)?;
         Ok(function_id)
+    }
+
+    /// Declare every `alloca` in the entry block.
+    ///
+    /// SPIR-V requires a function's `Function`-storage variables to be in its
+    /// first block, whatever block LLVM wrote the `alloca` in.
+    fn materialize_local_variables(
+        &mut self,
+        function: &Function,
+        values: &HashMap<ValueId, u32>,
+    ) -> Result<(), TranslateError> {
+        for block in &function.blocks {
+            for instruction in &block.instructions {
+                let InstructionKind::LocalVariable { ty } = &instruction.kind else {
+                    continue;
+                };
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("a local variable has no result"))?;
+                let pointee = self.unlaid_type_id(ty)?;
+                let pointer = self
+                    .builder
+                    .type_pointer(None, StorageClass::Function, pointee);
+                self.builder
+                    .variable(pointer, Some(values[&result]), StorageClass::Function, None);
+                self.pointer_storage.insert(result, StorageClass::Function);
+            }
+        }
+        Ok(())
     }
 
     fn materialize_parameter_pointers(
@@ -693,9 +784,36 @@ impl Emitter {
                 }
                 self.composite_constant(operand)?;
             }
-            Operand::Value(_) | Operand::Undef(_) | Operand::Bool(_) => {}
+            Operand::Undef(ty) => {
+                self.undef(ty)?;
+            }
+            Operand::Value(_) | Operand::Bool(_) | Operand::Global { .. } => {}
         }
         Ok(())
+    }
+
+    /// An `OpUndef` of one type, declared once at module scope.
+    ///
+    /// SPIR-V allows `OpUndef` inside a block, but a phi must be the first
+    /// instruction of its block, and an undefined phi operand would otherwise
+    /// be created between the phis it feeds.
+    fn undef(&mut self, ty: &Type) -> Result<u32, TranslateError> {
+        if let Some(id) = self.undefs.get(ty) {
+            return Ok(*id);
+        }
+        let ty_id = self.type_id(ty)?;
+        let id = self.builder.id();
+        self.builder
+            .module_mut()
+            .types_global_values
+            .push(rspirv::dr::Instruction::new(
+                rspirv::spirv::Op::Undef,
+                Some(ty_id),
+                Some(id),
+                Vec::new(),
+            ));
+        self.undefs.insert(ty.clone(), id);
+        Ok(id)
     }
 
     fn composite_constant(&mut self, operand: &Operand) -> Result<u32, TranslateError> {
@@ -720,9 +838,9 @@ impl Emitter {
                         self.builder.constant_false(ty)
                     })
                 }
-                Operand::Undef(ty) => {
-                    let ty = self.type_id(ty)?;
-                    Ok(self.builder.undef(ty, None))
+                Operand::Undef(ty) => self.undef(ty),
+                Operand::Global { .. } => {
+                    Err(emission("a global variable is not a constant element"))
                 }
                 Operand::Value(_) => Err(emission("composite constant has a non-constant element")),
             })
@@ -741,6 +859,8 @@ impl Emitter {
     ) -> Result<(), TranslateError> {
         let result_id = instruction.result.map(|result| values[&result]);
         match &instruction.kind {
+            // Declared in the entry block by `materialize_local_variables`.
+            InstructionKind::LocalVariable { .. } => {}
             InstructionKind::GlobalInvocationId => {
                 let result = instruction
                     .result
@@ -964,86 +1084,96 @@ impl Emitter {
                     .map_err(build_error)?;
             }
             InstructionKind::ElementAddress { pointer, index } => {
-                let Operand::Value(parameter) = pointer else {
-                    return Err(emission("element address requires a buffer parameter"));
-                };
-                let variable = self
-                    .parameter_pointers
-                    .get(parameter)
-                    .copied()
-                    .ok_or_else(|| emission("element address base is not a buffer resource"))?;
+                let (variable, storage, member) = self.pointer_base(pointer, values)?;
                 let result = instruction
                     .result
                     .ok_or_else(|| emission("element address has no result"))?;
                 let Type::Pointer { pointee, .. } = &function.values[result.0 as usize] else {
                     return Err(emission("element address result is not a pointer"));
                 };
-                let pointee = self.type_id(pointee)?;
-                let pointer_type =
-                    self.builder
-                        .type_pointer(None, StorageClass::StorageBuffer, pointee);
-                let zero = self.constant(&Type::u32(), 0)?;
-                let index = self.operand(index, values)?;
+                let pointee = match storage {
+                    StorageClass::StorageBuffer => self.type_id(pointee)?,
+                    _ => self.unlaid_type_id(pointee)?,
+                };
+                let pointer_type = self.builder.type_pointer(None, storage, pointee);
+                let mut chain = Vec::new();
+                if member {
+                    chain.push(self.constant(&Type::u32(), 0)?);
+                }
+                chain.push(self.operand(index, values)?);
                 self.builder
-                    .access_chain(pointer_type, result_id, variable, [zero, index])
+                    .access_chain(pointer_type, result_id, variable, chain)
                     .map_err(build_error)?;
+                self.pointer_storage.insert(result, storage);
             }
             InstructionKind::BufferAddress { pointer, indices } => {
-                let Operand::Value(parameter) = pointer else {
-                    return Err(emission("buffer address requires a resource parameter"));
-                };
-                let variable = self
-                    .parameter_pointers
-                    .get(parameter)
-                    .copied()
-                    .ok_or_else(|| emission("buffer address base is not a resource"))?;
+                let (variable, storage, member) = self.pointer_base(pointer, values)?;
                 let result = instruction
                     .result
                     .ok_or_else(|| emission("buffer address has no result"))?;
                 let Type::Pointer { pointee, .. } = &function.values[result.0 as usize] else {
                     return Err(emission("buffer address result is not a pointer"));
                 };
-                let pointee = self.type_id(pointee)?;
-                let ty = self
-                    .builder
-                    .type_pointer(None, StorageClass::StorageBuffer, pointee);
-                let mut chain = vec![self.constant(&Type::u32(), 0)?];
+                let pointee = match storage {
+                    StorageClass::StorageBuffer => self.type_id(pointee)?,
+                    _ => self.unlaid_type_id(pointee)?,
+                };
+                let ty = self.builder.type_pointer(None, storage, pointee);
+                let mut chain = Vec::new();
+                // LLVM's first GEP index steps the pointer itself. A buffer
+                // resource is a block whose one member is the array being
+                // stepped, so there the index selects that member's element;
+                // a variable pointing straight at an aggregate has nothing to
+                // step, and SPIR-V's first index already selects a member.
+                let indices = if member {
+                    chain.push(self.constant(&Type::u32(), 0)?);
+                    indices.as_slice()
+                } else {
+                    match indices.split_first() {
+                        Some((Operand::Integer { value: 0, .. }, rest)) => rest,
+                        _ => {
+                            return Err(emission(
+                                "an access chain into a global variable steps the pointer",
+                            ));
+                        }
+                    }
+                };
                 for index in indices {
                     chain.push(self.operand(index, values)?);
                 }
                 self.builder
                     .access_chain(ty, result_id, variable, chain)
                     .map_err(build_error)?;
+                self.pointer_storage.insert(result, storage);
             }
             InstructionKind::FieldAddress { pointer, indices } => {
-                let Operand::Value(parameter) = pointer else {
-                    return Err(emission("field address requires a buffer parameter"));
-                };
-                let variable = self
-                    .parameter_pointers
-                    .get(parameter)
-                    .copied()
-                    .ok_or_else(|| emission("field address base is not a buffer resource"))?;
+                let (variable, storage, member) = self.pointer_base(pointer, values)?;
                 let result = instruction
                     .result
                     .ok_or_else(|| emission("field address has no result"))?;
                 let Type::Pointer { pointee, .. } = &function.values[result.0 as usize] else {
                     return Err(emission("field address result is not a pointer"));
                 };
-                let pointee = self.type_id(pointee)?;
-                let pointer_type =
-                    self.builder
-                        .type_pointer(None, StorageClass::StorageBuffer, pointee);
-                let mut chain = vec![
-                    self.constant(&Type::u32(), 0)?,
-                    self.constant(&Type::u32(), 0)?,
-                ];
+                let pointee = match storage {
+                    StorageClass::StorageBuffer => self.type_id(pointee)?,
+                    _ => self.unlaid_type_id(pointee)?,
+                };
+                let pointer_type = self.builder.type_pointer(None, storage, pointee);
+                let mut chain = Vec::new();
+                if member {
+                    // A buffer block holds one runtime array, so a field of
+                    // its element is reached past the member and the element.
+                    let zero = self.constant(&Type::u32(), 0)?;
+                    chain.push(zero);
+                    chain.push(zero);
+                }
                 for index in indices {
                     chain.push(self.constant(&Type::u32(), u64::from(*index))?);
                 }
                 self.builder
                     .access_chain(pointer_type, result_id, variable, chain)
                     .map_err(build_error)?;
+                self.pointer_storage.insert(result, storage);
             }
             InstructionKind::CompositeExtract { composite, index } => {
                 let result = instruction
@@ -1773,10 +1903,12 @@ impl Emitter {
             Operand::Integer { ty, value } => self.constant(ty, *value),
             Operand::Float { ty, bits } => self.constant(ty, *bits),
             Operand::Composite { .. } => self.composite_constant(operand),
-            Operand::Undef(ty) => {
-                let ty = self.type_id(ty)?;
-                Ok(self.builder.undef(ty, None))
-            }
+            Operand::Global { index, .. } => self
+                .globals
+                .get(index)
+                .map(|(variable, _)| *variable)
+                .ok_or_else(|| emission("operand refers to a missing global variable")),
+            Operand::Undef(ty) => self.undef(ty),
         }
     }
 
@@ -1795,6 +1927,149 @@ impl Emitter {
         };
         self.constants.insert(key, id);
         Ok(id)
+    }
+
+    /// The type of a value which does not live in a buffer.
+    ///
+    /// Vulkan forbids `ArrayStride` and `Offset` outside the storage classes
+    /// which have an explicit layout, so a module global and a constant
+    /// composite need their own aggregate types.
+    fn unlaid_type_id(&mut self, ty: &Type) -> Result<u32, TranslateError> {
+        if let Some(id) = self.unlaid_types.get(ty) {
+            return Ok(*id);
+        }
+        let id = match ty {
+            Type::Array { element, count } => {
+                let element_id = self.unlaid_type_id(element)?;
+                let count = self.constant(&Type::u32(), u64::from(*count))?;
+                let id = self.builder.id();
+                self.builder.type_array_id(Some(id), element_id, count);
+                id
+            }
+            Type::Struct(structure) => {
+                let fields = structure
+                    .fields
+                    .iter()
+                    .map(|field| self.unlaid_type_id(&field.ty))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let id = self.builder.id();
+                self.builder.type_struct_id(Some(id), fields);
+                id
+            }
+            _ => return self.type_id(ty),
+        };
+        self.unlaid_types.insert(ty.clone(), id);
+        Ok(id)
+    }
+
+    /// Declare the module's global variables.
+    ///
+    /// Metal's `constant` tables become `Private` variables with their
+    /// initializer, and its `threadgroup` arrays become `Workgroup` variables,
+    /// which Vulkan does not let an initializer reach.
+    fn declare_globals(&mut self, module: &Module) -> Result<(), TranslateError> {
+        for (index, global) in module.globals.iter().enumerate() {
+            let storage = match global.space {
+                crate::ir::AddressSpace::Constant | crate::ir::AddressSpace::Thread => {
+                    StorageClass::Private
+                }
+                crate::ir::AddressSpace::Threadgroup
+                | crate::ir::AddressSpace::ThreadgroupImageblock => StorageClass::Workgroup,
+                crate::ir::AddressSpace::Device => {
+                    return Err(emission(
+                        "a module global in the device address space has no Vulkan form",
+                    ));
+                }
+            };
+            let pointee = self.unlaid_type_id(&global.ty)?;
+            let pointer = self.builder.type_pointer(None, storage, pointee);
+            let initializer = match &global.initializer {
+                Some(operand) if storage == StorageClass::Private => {
+                    Some(self.constant_operand(operand)?)
+                }
+                // A `threadgroup` variable is uninitialized in Metal too.
+                _ => None,
+            };
+            let variable = self.builder.variable(pointer, None, storage, initializer);
+            if !global.name.is_empty() {
+                self.builder.name(variable, global.name.clone());
+            }
+            // SPIR-V 1.4 widened an entry point's interface from its stage
+            // variables to every global one it can reach.
+            if self.spirv_version >= (1, 4) {
+                self.interface.push(variable);
+            }
+            self.globals.insert(index as u32, (variable, storage));
+        }
+        Ok(())
+    }
+
+    /// One constant operand, as the initializer of a global variable.
+    fn constant_operand(&mut self, operand: &Operand) -> Result<u32, TranslateError> {
+        match operand {
+            Operand::Integer { ty, value } => self.constant(ty, *value),
+            Operand::Float { ty, bits } => self.constant(ty, *bits),
+            Operand::Bool(value) => {
+                let ty = self.type_id(&Type::Bool)?;
+                Ok(if *value {
+                    self.builder.constant_true(ty)
+                } else {
+                    self.builder.constant_false(ty)
+                })
+            }
+            Operand::Composite { ty, elements } => {
+                if let Some(id) = self.unlaid_composites.get(operand) {
+                    return Ok(*id);
+                }
+                let ty_id = self.unlaid_type_id(ty)?;
+                let members = elements
+                    .iter()
+                    .map(|element| self.constant_operand(element))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let id = self.builder.constant_composite(ty_id, members);
+                self.unlaid_composites.insert(operand.clone(), id);
+                Ok(id)
+            }
+            Operand::Undef(ty) => self.undef(ty),
+            Operand::Value(_) | Operand::Global { .. } => Err(emission(
+                "a global variable's initializer is not a constant",
+            )),
+        }
+    }
+
+    /// The variable an access chain starts from, and the storage class its
+    /// result pointer lives in.
+    fn pointer_base(
+        &mut self,
+        pointer: &Operand,
+        values: &HashMap<ValueId, u32>,
+    ) -> Result<(u32, StorageClass, bool), TranslateError> {
+        match pointer {
+            Operand::Global { index, .. } => self
+                .globals
+                .get(index)
+                // A global's variable points straight at what it holds, so an
+                // access chain into it needs no leading member index.
+                .map(|(variable, storage)| (*variable, *storage, false))
+                .ok_or_else(|| emission("access chain base is a missing global variable")),
+            Operand::Value(value) => {
+                if let Some(variable) = self.parameter_pointers.get(value).copied() {
+                    // A buffer resource is a block with the buffer as its one
+                    // member, so every chain into it starts with that member.
+                    return Ok((variable, StorageClass::StorageBuffer, true));
+                }
+                let storage =
+                    self.pointer_storage.get(value).copied().ok_or_else(|| {
+                        emission("access chain base is not a resource or a global")
+                    })?;
+                let id = values
+                    .get(value)
+                    .copied()
+                    .ok_or_else(|| emission("access chain base refers to a missing value"))?;
+                Ok((id, storage, false))
+            }
+            _ => Err(emission("access chain base is not a pointer")),
+        }
     }
 
     fn type_id(&mut self, ty: &Type) -> Result<u32, TranslateError> {
@@ -1857,7 +2132,10 @@ impl Emitter {
             Type::Array { element, count } => {
                 let element_id = self.type_id(element)?;
                 let count = self.constant(&Type::u32(), u64::from(*count))?;
-                let id = self.builder.type_array(element_id, count);
+                // As for a structure: a decorated type must not be shared with
+                // the undecorated one a module global needs.
+                let id = self.builder.id();
+                self.builder.type_array_id(Some(id), element_id, count);
                 self.builder.decorate(
                     id,
                     Decoration::ArrayStride,
@@ -2116,6 +2394,167 @@ fn split_shared_merges(function: &mut Function) -> Result<(), TranslateError> {
     ))
 }
 
+/// Give a loop whose body rejoins at its latch an empty continue target.
+///
+/// SPIR-V's loop construct does not contain the continue construct, so a
+/// selection inside the body may not merge at the continue target. An
+/// `if`/`else` at the end of a loop body rejoins at exactly that block, so
+/// route the back edge through a new block and leave the old latch in the
+/// body, where it is a legal merge.
+fn separate_loop_latches(function: &mut Function) -> Result<(), TranslateError> {
+    for _ in 0..function.blocks.len().max(1) {
+        let graph = ControlFlow::new(function);
+        let entry = function.blocks[0].id;
+        let dominators = graph.dominance(&[entry], &graph.predecessors);
+        let exits: Vec<_> = graph
+            .blocks
+            .iter()
+            .copied()
+            .filter(|block| graph.successors[block].is_empty())
+            .collect();
+        let post_dominators = graph.dominance(&exits, &graph.successors);
+        let mut loops = Vec::new();
+        for block in &function.blocks {
+            let latches: Vec<_> = graph
+                .predecessors
+                .get(&block.id)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|predecessor| dominators.dominates(block.id, *predecessor))
+                .collect();
+            let [continue_target] = latches.as_slice() else {
+                continue;
+            };
+            loops.push((
+                block.id,
+                natural_loop(&graph, block.id, *continue_target),
+                *continue_target,
+            ));
+        }
+        let mut split = None;
+        for block in &function.blocks {
+            if !matches!(block.terminator, Terminator::CondBranch { .. }) {
+                continue;
+            }
+            if loops.iter().any(|(header, ..)| *header == block.id) {
+                continue;
+            }
+            let Some((header, body, continue_target)) = loops
+                .iter()
+                .filter(|(_, body, _)| body.contains(&block.id))
+                .min_by_key(|(_, body, _)| body.len())
+            else {
+                continue;
+            };
+            if post_dominators.immediate(block.id) != Some(*continue_target) {
+                continue;
+            }
+            // The emitter merges such a conditional at the arm which keeps
+            // running the body. When both arms do, or neither does, there is
+            // no such arm, and the latch is where they rejoin.
+            let staying = successors_of(&block.terminator)
+                .into_iter()
+                .filter(|successor| successor != continue_target)
+                .filter(|successor| reaches(&graph, *successor, *continue_target, body))
+                .count();
+            if staying == 1 {
+                continue;
+            }
+            split = Some((*header, *continue_target));
+            break;
+        }
+        let Some((header, latch)) = split else {
+            return Ok(());
+        };
+        split_merge(function, header, &[latch]);
+    }
+    Err(emission(
+        "a loop's latch could not be separated from its body",
+    ))
+}
+
+/// Give a loop whose header also chooses between two body paths a header of
+/// its own.
+///
+/// A block declares one merge instruction. When a loop header's conditional
+/// branch goes to two blocks inside the body, the header would have to be both
+/// the loop's header and the selection's, and SPIR-V has no way to say so.
+/// Routing every edge into the header through a new block leaves that block
+/// carrying the loop and the old header carrying the selection.
+fn normalize_loop_headers(function: &mut Function) -> Result<(), TranslateError> {
+    for _ in 0..function.blocks.len().max(1) {
+        let graph = ControlFlow::new(function);
+        let entry = function.blocks[0].id;
+        let dominators = graph.dominance(&[entry], &graph.predecessors);
+        let mut split = None;
+        for block in &function.blocks {
+            if !matches!(block.terminator, Terminator::CondBranch { .. }) {
+                continue;
+            }
+            let predecessors: Vec<_> = graph
+                .predecessors
+                .get(&block.id)
+                .into_iter()
+                .flatten()
+                .copied()
+                .collect();
+            let latches: Vec<_> = predecessors
+                .iter()
+                .copied()
+                .filter(|predecessor| dominators.dominates(block.id, *predecessor))
+                .collect();
+            let [continue_target] = latches.as_slice() else {
+                continue;
+            };
+            let body = natural_loop(&graph, block.id, *continue_target);
+            let mut leaving: Vec<_> = body
+                .iter()
+                .flat_map(|member| graph.successors[member].iter().copied())
+                .filter(|successor| !body.contains(successor))
+                .collect();
+            leaving.sort_unstable();
+            leaving.dedup();
+            let [merge] = leaving.as_slice() else {
+                continue;
+            };
+            // A header which leaves the loop or reaches its latch directly is
+            // already the loop's own test and needs no separate block.
+            if successors_of(&block.terminator)
+                .iter()
+                .any(|successor| successor == merge || successor == continue_target)
+            {
+                continue;
+            }
+            split = Some((block.id, predecessors));
+            break;
+        }
+        let Some((header, predecessors)) = split else {
+            return Ok(());
+        };
+        split_merge(function, header, &predecessors);
+    }
+    Err(emission(
+        "a loop header could not be separated from the selection it also makes",
+    ))
+}
+
+/// Move every phi to the head of its block.
+///
+/// SPIR-V requires it, and restructuring adds phis to blocks which already
+/// have instructions. A phi only names values from its predecessors, so its
+/// position within its own block never changes what it computes.
+fn hoist_phis(function: &mut Function) {
+    for block in &mut function.blocks {
+        let instructions = std::mem::take(&mut block.instructions);
+        let (phis, rest): (Vec<_>, Vec<_>) = instructions
+            .into_iter()
+            .partition(|instruction| matches!(instruction.kind, InstructionKind::Phi { .. }));
+        block.instructions = phis;
+        block.instructions.extend(rest);
+    }
+}
+
 /// Insert a block between `sources` and `merge`, moving the phi inputs which
 /// arrive from those predecessors into it.
 fn split_merge(function: &mut Function, merge: BlockId, sources: &[BlockId]) {
@@ -2333,9 +2772,6 @@ fn control_flow_merges(function: &Function) -> Result<HashMap<BlockId, Merge>, T
     // choice depends on where the loop continues.
     let mut loops = Vec::new();
     for block in &function.blocks {
-        if !matches!(block.terminator, Terminator::CondBranch { .. }) {
-            continue;
-        }
         let latches: Vec<_> = graph
             .predecessors
             .get(&block.id)
@@ -2394,10 +2830,21 @@ fn control_flow_merges(function: &Function) -> Result<HashMap<BlockId, Merge>, T
             .filter(|(_, body, _, _)| body.contains(&block.id))
             .min_by_key(|(_, body, _, _)| body.len());
         let merge = match enclosing {
-            Some((_, body, _, continue_target))
+            Some((_, body, loop_merge, continue_target))
                 if !body.contains(&merge) || merge == *continue_target =>
             {
-                let staying: Vec<_> = successors_of(&block.terminator)
+                let successors = successors_of(&block.terminator);
+                // A conditional whose two arms are the loop's own merge and
+                // its continue target is a `break` against a `continue`. It
+                // declares no selection: SPIR-V lets a branch leave a
+                // construct by either of those without one.
+                if successors
+                    .iter()
+                    .all(|successor| successor == loop_merge || successor == continue_target)
+                {
+                    continue;
+                }
+                let staying: Vec<_> = successors
                     .into_iter()
                     .filter(|successor| successor != continue_target)
                     .filter(|successor| reaches(&graph, *successor, *continue_target, body))

@@ -253,10 +253,26 @@ pub struct EntryPoint {
     pub outputs: Vec<StageOutput>,
 }
 
+/// A module-scope variable.
+///
+/// Metal puts a shader's constant lookup tables and its `threadgroup` arrays
+/// outside every function, so they belong to the module rather than to the
+/// entry point which reads them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GlobalVariable {
+    pub name: String,
+    pub space: AddressSpace,
+    /// The type of what the variable holds, not the pointer to it.
+    pub ty: Type,
+    /// `None` for a `threadgroup` variable, which has no initial value.
+    pub initializer: Option<Operand>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Module {
     pub functions: Vec<Function>,
     pub entries: Vec<EntryPoint>,
+    pub globals: Vec<GlobalVariable>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -306,6 +322,12 @@ pub enum Operand {
     Composite {
         ty: Type,
         elements: Vec<Operand>,
+    },
+    /// A pointer to one of the module's global variables. The type is the
+    /// pointer's, carried here so an operand's type never needs the module.
+    Global {
+        index: u32,
+        ty: Type,
     },
     Undef(Type),
 }
@@ -461,6 +483,11 @@ pub enum ConvertOp {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InstructionKind {
     GlobalInvocationId,
+    /// A function-scope variable: LLVM's `alloca`, which Metal spells as a
+    /// `thread` local. The type is what the variable holds.
+    LocalVariable {
+        ty: Type,
+    },
     Load {
         pointer: Operand,
     },
@@ -927,6 +954,11 @@ fn verify_instruction_types(
                     lanes: 3,
                 })
         }
+        InstructionKind::LocalVariable { ty } => matches!(
+            &result,
+            Some(Type::Pointer { space, pointee })
+                if *space == AddressSpace::Thread && pointee.as_ref() == ty
+        ),
         InstructionKind::Load { pointer } => match operand_type(function, pointer) {
             Some(Type::Pointer { pointee, .. }) => result.as_ref() == Some(pointee.as_ref()),
             _ => false,
@@ -1227,6 +1259,7 @@ fn invalid(function: &Function, instruction: &Instruction, diagnostics: &mut Vec
 fn instruction_name(kind: &InstructionKind) -> &'static str {
     match kind {
         InstructionKind::GlobalInvocationId => "global invocation ID",
+        InstructionKind::LocalVariable { .. } => "local variable",
         InstructionKind::Load { .. } => "load",
         InstructionKind::Store { .. } => "store",
         InstructionKind::IntegerBinary { .. } => "integer arithmetic",
@@ -1315,6 +1348,7 @@ pub(crate) fn operand_type(function: &Function, operand: &Operand) -> Option<Typ
         Operand::Value(value) => function.values.get(value.0 as usize).cloned(),
         Operand::Integer { ty, .. } => Some(ty.clone()),
         Operand::Float { ty, .. } => Some(ty.clone()),
+        Operand::Global { ty, .. } => Some(ty.clone()),
         Operand::Undef(ty) => Some(ty.clone()),
         Operand::Bool(_) => Some(Type::Bool),
     }
@@ -1322,6 +1356,7 @@ pub(crate) fn operand_type(function: &Function, operand: &Operand) -> Option<Typ
 
 pub(crate) fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
     match kind {
+        InstructionKind::LocalVariable { .. } => Vec::new(),
         InstructionKind::Load { pointer } => vec![pointer],
         InstructionKind::Store { pointer, value } => vec![pointer, value],
         InstructionKind::IntegerBinary { lhs, rhs, .. }
@@ -1439,10 +1474,17 @@ fn boolean_shape(ty: Type) -> Type {
 }
 
 /// Conversions keep the operand shape and only change the element type.
+///
+/// A bitcast is the exception: it reinterprets the same bits, so it may change
+/// the lane count as long as the total width is unchanged. Metal reads a
+/// `float4` back as a `half8` or a `uint2` as a `float2` this way.
 fn verify_convert(op: ConvertOp, source: Option<Type>, result: Option<&Type>) -> bool {
     let (Some(source), Some(result)) = (source, result) else {
         return false;
     };
+    if op == ConvertOp::Bitcast && reinterpretable(&source) && reinterpretable(result) {
+        return total_bits(&source) == total_bits(result) && total_bits(&source).is_some();
+    }
     let (source, result) = match (source, result) {
         (
             Type::Vector {
@@ -1493,6 +1535,26 @@ fn verify_convert(op: ConvertOp, source: Option<Type>, result: Option<&Type>) ->
         // A bitcast is only meaningful between equally sized representations.
         (ConvertOp::Bitcast, _, _) => scalar_bits(&source) == scalar_bits(&result),
         _ => false,
+    }
+}
+
+/// Whether a type is a numeric scalar or vector, whose bits a bitcast may
+/// reinterpret as another such type of the same total width.
+fn reinterpretable(ty: &Type) -> bool {
+    match ty {
+        Type::Int { .. } | Type::Float { .. } => true,
+        Type::Vector { element, .. } => {
+            matches!(**element, Type::Int { .. } | Type::Float { .. })
+        }
+        _ => false,
+    }
+}
+
+fn total_bits(ty: &Type) -> Option<u32> {
+    match ty {
+        Type::Int { bits, .. } | Type::Float { bits } => Some(u32::from(*bits)),
+        Type::Vector { element, lanes } => Some(total_bits(element)? * u32::from(*lanes)),
+        _ => None,
     }
 }
 

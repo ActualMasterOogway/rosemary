@@ -851,12 +851,14 @@ dependencies = [
 name = "metal"
 version = "0.1.0"
 dependencies = [
+ "appkit",
  "ash",
  "corefoundation",
  "darwin",
  "foundation",
  "metal_translate",
  "objc",
+ "sdl3",
 ]
 
 [[package]]
