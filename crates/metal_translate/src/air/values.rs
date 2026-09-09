@@ -1140,7 +1140,8 @@ impl ValueTable {
                         if name.starts_with("llvm.lifetime.") {
                             continue;
                         }
-                        let kind = air_intrinsic(&name, &actual)?;
+                        let kind = known_helper(&name, &actual)
+                            .unwrap_or_else(|| air_intrinsic(&name, &actual))?;
                         if matches!(types[*result], DecodedType::Void) {
                             instructions.push(Instruction { result: None, kind });
                             continue;
@@ -1577,6 +1578,26 @@ impl ValueTable {
         active.pop();
         operands.insert(id, result.clone());
         Ok(result)
+    }
+}
+
+/// Recognize compiler support functions whose bodies have a direct Metal IR
+/// operation. SPIRV-Cross emits this helper when translating GLSL's unsigned
+/// `findMSB`; retaining all non-entry LLVM functions just for it would obscure
+/// the operation the source shader requested.
+fn known_helper(
+    name: &str,
+    arguments: &[Operand],
+) -> Option<Result<InstructionKind, TranslateError>> {
+    match (name, arguments) {
+        ("_Z11spvFindUMSBIjET_S0_", [value]) => Some(Ok(InstructionKind::IntegerUnary {
+            op: IntegerUnaryOp::FindMostSignificantBitUnsigned,
+            value: value.clone(),
+        })),
+        ("_Z11spvFindUMSBIjET_S0_", _) => Some(Err(semantic(format!(
+            "LLVM helper {name} takes one operand"
+        )))),
+        _ => None,
     }
 }
 
@@ -2324,6 +2345,21 @@ fn decode_constant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_spirv_cross_unsigned_find_msb_helper() {
+        let value = Operand::u32(7);
+        let kind = known_helper("_Z11spvFindUMSBIjET_S0_", std::slice::from_ref(&value))
+            .expect("the helper is recognized")
+            .unwrap();
+        assert_eq!(
+            kind,
+            InstructionKind::IntegerUnary {
+                op: IntegerUnaryOp::FindMostSignificantBitUnsigned,
+                value,
+            }
+        );
+    }
 
     // Encode owned, unabbreviated records to exercise the real bitstream
     // reader without an LLVM toolchain or proprietary shader fixtures.

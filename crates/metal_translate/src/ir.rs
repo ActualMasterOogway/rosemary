@@ -418,6 +418,8 @@ pub enum IntegerUnaryOp {
     CountLeadingZeros,
     /// Metal's `ctz`, the same for trailing bits.
     CountTrailingZeros,
+    /// Index of the highest set bit, or -1 for zero.
+    FindMostSignificantBitUnsigned,
     Not,
 }
 
@@ -1578,6 +1580,115 @@ pub(crate) fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         InstructionKind::DiscardFragment | InstructionKind::Barrier { .. } => Vec::new(),
         InstructionKind::Atomic { pointer, value, .. } => vec![pointer, value],
         InstructionKind::Phi { incomings } => incomings.iter().map(|(_, value)| value).collect(),
+    }
+}
+
+pub(crate) fn instruction_operands_mut(kind: &mut InstructionKind) -> Vec<&mut Operand> {
+    match kind {
+        InstructionKind::LocalVariable { .. }
+        | InstructionKind::GlobalInvocationId
+        | InstructionKind::DiscardFragment
+        | InstructionKind::Barrier { .. } => Vec::new(),
+        InstructionKind::Load { pointer } => vec![pointer],
+        InstructionKind::Store { pointer, value }
+        | InstructionKind::Atomic { pointer, value, .. } => vec![pointer, value],
+        InstructionKind::IntegerBinary { lhs, rhs, .. }
+        | InstructionKind::IntegerCompare { lhs, rhs, .. }
+        | InstructionKind::FloatCompare { lhs, rhs, .. }
+        | InstructionKind::FloatBinary { lhs, rhs, .. }
+        | InstructionKind::FloatDot { lhs, rhs } => vec![lhs, rhs],
+        InstructionKind::ElementAddress { pointer, index } => vec![pointer, index],
+        InstructionKind::FieldAddress { pointer, .. } => vec![pointer],
+        InstructionKind::CompositeExtract { composite, .. } => vec![composite],
+        InstructionKind::VectorExtractDynamic { vector, index } => vec![vector, index],
+        InstructionKind::VectorInsertDynamic {
+            vector,
+            object,
+            index,
+        } => vec![vector, object, index],
+        InstructionKind::BufferAddress { pointer, indices } => {
+            std::iter::once(pointer).chain(indices).collect()
+        }
+        InstructionKind::FloatFma {
+            first,
+            second,
+            addend,
+        } => vec![first, second, addend],
+        InstructionKind::Select {
+            condition,
+            on_true,
+            on_false,
+        } => vec![condition, on_true, on_false],
+        InstructionKind::VectorShuffle { first, second, .. } => vec![first, second],
+        InstructionKind::CompositeInsert {
+            composite, object, ..
+        } => vec![composite, object],
+        InstructionKind::FloatClamp { value, min, max }
+        | InstructionKind::IntegerClamp {
+            value, min, max, ..
+        } => vec![value, min, max],
+        InstructionKind::FloatMix {
+            first,
+            second,
+            weight,
+        } => vec![first, second, weight],
+        InstructionKind::All { vector }
+        | InstructionKind::Any { vector }
+        | InstructionKind::Convert { value: vector, .. }
+        | InstructionKind::FloatUnary { value: vector, .. }
+        | InstructionKind::IntegerUnary { value: vector, .. }
+        | InstructionKind::VectorSplat { value: vector, .. } => vec![vector],
+        InstructionKind::TextureWrite {
+            texture,
+            coordinate,
+            array_index,
+            value,
+        } => {
+            let mut operands = vec![texture, coordinate, value];
+            operands.extend(array_index);
+            operands
+        }
+        InstructionKind::TextureSample {
+            texture,
+            sampler,
+            coordinate,
+            array_index,
+            offset,
+            lod,
+            gradient,
+            ..
+        } => {
+            let mut operands = vec![texture, sampler, coordinate];
+            operands.extend(array_index);
+            operands.extend(offset);
+            operands.extend(lod);
+            if let Some(gradient) = gradient {
+                operands.push(&mut gradient.0);
+                operands.push(&mut gradient.1);
+            }
+            operands
+        }
+        InstructionKind::TextureRead {
+            texture,
+            coordinate,
+            array_index,
+            lod,
+            sample,
+        } => {
+            let mut operands = vec![texture, coordinate];
+            operands.extend(array_index);
+            operands.extend(lod);
+            operands.extend(sample);
+            operands
+        }
+        InstructionKind::TextureQuerySize { texture, lod, .. } => {
+            let mut operands = vec![texture];
+            operands.extend(lod);
+            operands
+        }
+        InstructionKind::Phi { incomings } => {
+            incomings.iter_mut().map(|(_, value)| value).collect()
+        }
     }
 }
 

@@ -632,11 +632,11 @@ fn emits_structured_merges_for_a_loop_containing_a_conditional() {
     assert!(opcodes.contains(&Op::SelectionMerge));
 }
 
-/// The second test in `a || b` may jump to the first test's merge.  That is
-/// an early exit from the enclosing selection, rather than another selection
-/// claiming the same merge block.
+/// The second test in `a || b` initially shares the first test's merge. The
+/// structurizer gives it a merge block of its own, as SPIR-V requires of every
+/// conditional branch.
 #[test]
-fn emits_a_short_circuit_selection_with_one_merge() {
+fn gives_each_short_circuit_selection_its_own_merge() {
     let function = Function {
         name: "short_circuit".to_string(),
         result: Type::Void,
@@ -705,7 +705,7 @@ fn emits_a_short_circuit_selection_with_one_merge() {
         .flat_map(|block| block.instructions.iter())
         .filter(|instruction| instruction.class.opcode == Op::SelectionMerge)
         .count();
-    assert_eq!(merges, 1);
+    assert_eq!(merges, 2);
 }
 
 /// Metal returns from several places; SPIR-V needs one returning block so
@@ -1181,5 +1181,91 @@ fn a_pointer_phi_needs_the_variable_pointers_capability() {
             .capabilities
             .iter()
             .any(|capability| capability == "VariablePointersStorageBuffer")
+    );
+}
+
+#[test]
+fn a_constant_address_space_pointer_phi_keeps_its_buffer_storage_class() {
+    let array = Type::Array {
+        element: Box::new(Type::u32()),
+        count: 4,
+    };
+    let buffer = Type::Pointer {
+        space: AddressSpace::Constant,
+        pointee: Box::new(array),
+    };
+    let element = Type::Pointer {
+        space: AddressSpace::Constant,
+        pointee: Box::new(Type::u32()),
+    };
+    let module = Module {
+        globals: Vec::new(),
+        functions: vec![Function {
+            name: "main0".to_string(),
+            result: Type::Void,
+            parameters: vec![Parameter {
+                value: ValueId(0),
+                name: "input".to_string(),
+                ty: buffer.clone(),
+            }],
+            values: vec![buffer.clone(), element.clone(), element],
+            blocks: vec![
+                Block {
+                    id: BlockId(0),
+                    name: "entry".to_string(),
+                    instructions: Vec::new(),
+                    terminator: Terminator::Branch(BlockId(1)),
+                },
+                Block {
+                    id: BlockId(1),
+                    name: "address".to_string(),
+                    instructions: vec![Instruction {
+                        result: Some(ValueId(1)),
+                        kind: InstructionKind::ElementAddress {
+                            pointer: Operand::Value(ValueId(0)),
+                            index: Operand::u32(0),
+                        },
+                    }],
+                    terminator: Terminator::Branch(BlockId(2)),
+                },
+                Block {
+                    id: BlockId(2),
+                    name: "merge".to_string(),
+                    instructions: vec![Instruction {
+                        result: Some(ValueId(2)),
+                        kind: InstructionKind::Phi {
+                            incomings: vec![(BlockId(1), Operand::Value(ValueId(1)))],
+                        },
+                    }],
+                    terminator: Terminator::Return(None),
+                },
+            ],
+        }],
+        entries: vec![EntryPoint {
+            function: 0,
+            stage: Stage::Kernel,
+            resources: vec![Resource {
+                argument: 0,
+                kind: ResourceKind::Buffer,
+                index: 0,
+                count: 1,
+                access: Access::Read,
+                ty: buffer,
+                name: Some("input".to_string()),
+            }],
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        }],
+    };
+    let target = TargetProfile {
+        variable_pointers_storage_buffer: true,
+        ..TargetProfile::vulkan_1_3()
+    };
+    let artifact = emit_spirv(&module, &target).unwrap().entries.remove(0);
+    assert!(
+        artifact
+            .required
+            .capabilities
+            .contains(&"VariablePointersStorageBuffer".to_string())
     );
 }

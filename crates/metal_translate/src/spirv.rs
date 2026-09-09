@@ -15,7 +15,8 @@ use crate::ir::{
     EntryPoint, FloatBinaryOp, FloatPredicate, FloatUnaryOp, Function, InstructionKind,
     IntegerBinaryOp, IntegerPredicate, IntegerUnaryOp, MemoryOrder, Module, Operand, ResourceKind,
     Sampling, Stage, StageBinding, Terminator, TextureDimension, Type, ValueId, coordinate_lanes,
-    instruction_operands, is_boolean_or_boolean_vector, operand_type, terminator_operands,
+    instruction_operands, instruction_operands_mut, is_boolean_or_boolean_vector, operand_type,
+    terminator_operands,
 };
 use crate::{Diagnostic, Phase, TranslateError};
 
@@ -154,12 +155,15 @@ fn emit_entry(
     // turn adds a block another construct may claim. Run them to a fixed
     // point rather than once each, and treat one that never settles as the
     // rejection it is.
-    let rounds = limit(&function);
+    // Node splitting can expose several nested shared paths one at a time.
+    // Leave generous linear headroom while still rejecting a pass cycle.
+    let rounds = limit(&function).saturating_mul(8);
     let mut settled = false;
     for _ in 0..rounds {
         let mut changed = normalize_loop_headers(&mut function)?;
         changed |= separate_loop_latches(&mut function)?;
         changed |= isolate_loop_merges(&mut function)?;
+        changed |= isolate_shared_selection_paths(&mut function)?;
         changed |= split_shared_merges(&mut function)?;
         if !changed {
             settled = true;
@@ -933,8 +937,18 @@ impl Emitter {
                     .map_err(build_error)?;
             }
             InstructionKind::Store { pointer, value } => {
+                let storage = self.pointer_operand_storage(pointer)?;
                 let pointer = self.operand(pointer, values)?;
-                let value = self.operand(value, values)?;
+                // Aggregate types used in buffers carry explicit offsets and
+                // strides. Function and private memory must use the parallel
+                // undecorated type, including for a constant initializer.
+                let value = match (storage, value) {
+                    (StorageClass::StorageBuffer, _) | (_, Operand::Value(_)) => {
+                        self.operand(value, values)?
+                    }
+                    (_, Operand::Composite { .. }) => self.constant_operand(value)?,
+                    _ => self.operand(value, values)?,
+                };
                 self.builder
                     .store(pointer, value, None, [])
                     .map_err(build_error)?;
@@ -1030,6 +1044,15 @@ impl Emitter {
                             .select(ty, result_id, empty, full, found)
                             .map_err(build_error)?;
                     }
+                }
+                IntegerUnaryOp::FindMostSignificantBitUnsigned => {
+                    self.emit_ext_inst(
+                        function,
+                        instruction,
+                        values,
+                        GlslStd450Op::FindUMsb,
+                        [value],
+                    )?;
                 }
                 IntegerUnaryOp::PopulationCount | IntegerUnaryOp::Not => {
                     let result = instruction
@@ -1168,8 +1191,12 @@ impl Emitter {
                 let result = instruction
                     .result
                     .ok_or_else(|| emission("phi has no result"))?;
-                self.variable_pointer(&function.values[result.0 as usize], "phi")?;
-                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let ty = self.value_type_id(
+                    function,
+                    result,
+                    incomings.iter().map(|(_, operand)| operand),
+                    "phi",
+                )?;
                 let incoming = incomings
                     .iter()
                     .map(|(block, operand)| Ok((self.operand(operand, values)?, blocks[block])))
@@ -1177,7 +1204,6 @@ impl Emitter {
                 self.builder
                     .phi(ty, result_id, incoming)
                     .map_err(build_error)?;
-                self.note_pointer_storage(function, result);
             }
             InstructionKind::ElementAddress { pointer, index } => {
                 let (variable, storage, member) = self.pointer_base(pointer, values)?;
@@ -1615,15 +1641,18 @@ impl Emitter {
                 let result = instruction
                     .result
                     .ok_or_else(|| emission("select has no result"))?;
-                self.variable_pointer(&function.values[result.0 as usize], "select")?;
-                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let ty = self.value_type_id(
+                    function,
+                    result,
+                    [on_true, on_false].into_iter(),
+                    "select",
+                )?;
                 let condition = self.operand(condition, values)?;
                 let on_true = self.operand(on_true, values)?;
                 let on_false = self.operand(on_false, values)?;
                 self.builder
                     .select(ty, result_id, condition, on_true, on_false)
                     .map_err(build_error)?;
-                self.note_pointer_storage(function, result);
             }
             InstructionKind::VectorSplat { value, lanes } => {
                 let result = instruction
@@ -1933,23 +1962,69 @@ impl Emitter {
         Ok(())
     }
 
-    /// Record which storage class a pointer *value* lives in.
-    ///
-    /// An access chain asks its base which class it started from, and a phi or
-    /// a select is the only place a pointer that came from neither a variable
-    /// nor another chain can answer.
-    fn note_pointer_storage(&mut self, function: &Function, result: ValueId) {
-        let Type::Pointer { space, .. } = &function.values[result.0 as usize] else {
-            return;
+    /// Build an SSA value's type, resolving an ambiguous Metal pointer address
+    /// space from the values which reach it. A `constant` pointer can address
+    /// either a buffer or a module-private lookup table, while SPIR-V includes
+    /// that distinction in the pointer type itself.
+    fn value_type_id<'a>(
+        &mut self,
+        function: &Function,
+        result: ValueId,
+        operands: impl Iterator<Item = &'a Operand>,
+        what: &str,
+    ) -> Result<u32, TranslateError> {
+        let ty = &function.values[result.0 as usize];
+        let Type::Pointer { space, pointee } = ty else {
+            return self.type_id(ty);
         };
-        let storage = match space {
-            AddressSpace::Device => StorageClass::StorageBuffer,
+        let mut storage = match space {
+            AddressSpace::Device => Some(StorageClass::StorageBuffer),
             AddressSpace::Threadgroup | AddressSpace::ThreadgroupImageblock => {
-                StorageClass::Workgroup
+                Some(StorageClass::Workgroup)
             }
-            _ => return,
+            AddressSpace::Thread => Some(StorageClass::Function),
+            AddressSpace::Constant => None,
         };
+        for operand in operands {
+            let candidate = self.pointer_operand_storage(operand)?;
+            if storage.is_some_and(|existing| existing != candidate) {
+                return Err(emission(format!(
+                    "a {what} combines pointers from different Vulkan storage classes"
+                )));
+            }
+            storage = Some(candidate);
+        }
+        let storage = storage.ok_or_else(|| {
+            emission(format!(
+                "a pointer {what} in the {space:?} address space has no operands to determine its Vulkan storage class"
+            ))
+        })?;
+        self.variable_pointer(storage, what)?;
         self.pointer_storage.insert(result, storage);
+        let pointee = match storage {
+            StorageClass::StorageBuffer => self.type_id(pointee)?,
+            _ => self.unlaid_type_id(pointee)?,
+        };
+        Ok(self.builder.type_pointer(None, storage, pointee))
+    }
+
+    fn pointer_operand_storage(&self, operand: &Operand) -> Result<StorageClass, TranslateError> {
+        match operand {
+            Operand::Global { index, .. } => self
+                .globals
+                .get(index)
+                .map(|(_, storage)| *storage)
+                .ok_or_else(|| emission("pointer value refers to a missing global variable")),
+            Operand::Value(value) if self.parameter_pointers.contains_key(value) => {
+                Ok(StorageClass::StorageBuffer)
+            }
+            Operand::Value(value) => self.pointer_storage.get(value).copied().ok_or_else(|| {
+                emission("pointer value's Vulkan storage class has not been established")
+            }),
+            _ => Err(emission(
+                "pointer phi or select operand is not a pointer value",
+            )),
+        }
     }
 
     /// Note that a pointer is about to be a phi or a select operand.
@@ -1958,14 +2033,18 @@ impl Emitter {
     /// `VariablePointers` is what admits them, and it is an optional Vulkan
     /// feature. Rejecting here rather than emitting a module the device cannot
     /// accept keeps the failure on the translation side, where it is named.
-    fn variable_pointer(&mut self, ty: &Type, what: &str) -> Result<(), TranslateError> {
-        let Type::Pointer { space, .. } = ty else {
-            return Ok(());
-        };
+    fn variable_pointer(
+        &mut self,
+        storage: StorageClass,
+        what: &str,
+    ) -> Result<(), TranslateError> {
         // `VariablePointersStorageBuffer` covers `StorageBuffer` alone;
         // anything else, which for Metal means a `threadgroup` pointer, needs
         // the wider capability.
-        let wide = !matches!(space, AddressSpace::Device);
+        // Prefer the full capability when the device has it. The restricted
+        // StorageBuffer capability only permits pointers derived from the
+        // same buffer structure; Metal may phi pointers from two arguments.
+        let wide = storage != StorageClass::StorageBuffer || self.variable_pointers;
         let capability = match wide {
             true => Capability::VariablePointers,
             false => Capability::VariablePointersStorageBuffer,
@@ -2650,34 +2729,29 @@ fn limit(function: &Function) -> usize {
     function.blocks.len().max(1)
 }
 
-/// Give each structured header its own merge block.
+/// Duplicate a path which a nested selection shares with its enclosing one.
 ///
-/// An `else if` chain reaches one rejoining block from several conditional
-/// branches, and SPIR-V forbids two headers from naming the same merge. Route
-/// the inner construct's edges through a new block, which then becomes its
-/// merge.
-fn split_shared_merges(function: &mut Function) -> Result<bool, TranslateError> {
-    let mut changed = false;
-    // Each pass splits one shared merge and adds one block, and a split can
-    // expose another: an `else if` chain of n arms needs n - 1 splits, and the
-    // blocks it adds can themselves be claimed. The bound is a guard against
-    // a shape which never settles, not a statement about how many are needed.
-    for _ in 0..limit(function) {
-        let merges = control_flow_merges(function)?;
-        let mut claims: BTreeMap<BlockId, Vec<BlockId>> = BTreeMap::new();
-        for (header, merge) in &merges {
-            let block = match merge {
-                Merge::Selection { merge } | Merge::Loop { merge, .. } => *merge,
-            };
-            claims.entry(block).or_default().push(*header);
+/// In `if (a || b)`, the true edge of the `b` test enters the outer true arm.
+/// That arm is not dominated by the inner header, so the inner construct has
+/// no region of its own to merge. Clone the shared path for the inner edge;
+/// `split_shared_merges` can then give the two constructs distinct merge
+/// blocks. This is ordinary node splitting, with SSA definitions and phi
+/// inputs cloned alongside the blocks which own them.
+fn isolate_shared_selection_paths(function: &mut Function) -> Result<bool, TranslateError> {
+    let graph = ControlFlow::new(function);
+    let entry = function.blocks[0].id;
+    let dominators = graph.dominance(&[entry], &graph.predecessors);
+    let merges = control_flow_merges(function)?;
+    let mut claims: BTreeMap<BlockId, Vec<BlockId>> = BTreeMap::new();
+    for (header, merge) in &merges {
+        if let Merge::Selection { merge } = merge {
+            claims.entry(*merge).or_default().push(*header);
         }
-        let Some((merge, headers)) = claims.into_iter().find(|(_, headers)| headers.len() > 1)
-        else {
-            return Ok(changed);
-        };
-        let graph = ControlFlow::new(function);
-        let dominators = graph.dominance(&[function.blocks[0].id], &graph.predecessors);
-        // The innermost header is the one every other claimant dominates.
+    }
+    for (merge, headers) in claims {
+        if headers.len() < 2 {
+            continue;
+        }
         let inner = headers
             .iter()
             .copied()
@@ -2687,26 +2761,255 @@ fn split_shared_merges(function: &mut Function) -> Result<bool, TranslateError> 
                     .filter(|other| dominators.dominates(**other, *header))
                     .count()
             })
-            .ok_or_else(|| emission("a merge block has no claiming header"))?;
-        let sources: Vec<BlockId> = graph
-            .predecessors
-            .get(&merge)
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(|predecessor| dominators.dominates(inner, *predecessor))
-            .collect();
-        if sources.is_empty() || sources.len() == graph.predecessors[&merge].len() {
-            return Err(emission(
-                "a shared merge block cannot be split into nested constructs",
-            ));
+            .ok_or_else(|| emission("a shared merge block has no inner header"))?;
+        let mut redirects = Vec::new();
+        for block in &graph.blocks {
+            if !dominators.dominates(inner, *block) {
+                continue;
+            }
+            for successor in &graph.successors[block] {
+                if *successor != merge && !dominators.dominates(inner, *successor) {
+                    redirects.push((*block, *successor));
+                }
+            }
         }
-        split_merge(function, merge, &sources);
-        changed = true;
+        if redirects.is_empty() {
+            continue;
+        }
+        let mut region = BTreeSet::new();
+        let mut pending: Vec<_> = redirects.iter().map(|(_, target)| *target).collect();
+        while let Some(block) = pending.pop() {
+            if block == merge || !region.insert(block) {
+                continue;
+            }
+            pending.extend(graph.successors[&block].iter().copied());
+        }
+        clone_region(function, &region, &redirects, merge)?;
+        return Ok(true);
     }
-    Err(emission(
-        "control flow needs more restructuring than this translator performs",
-    ))
+    Ok(false)
+}
+
+fn clone_region(
+    function: &mut Function,
+    region: &BTreeSet<BlockId>,
+    redirects: &[(BlockId, BlockId)],
+    merge: BlockId,
+) -> Result<(), TranslateError> {
+    let mut next_block = function
+        .blocks
+        .iter()
+        .map(|block| block.id.0)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let block_map: HashMap<_, _> = region
+        .iter()
+        .map(|block| {
+            let cloned = BlockId(next_block);
+            next_block += 1;
+            (*block, cloned)
+        })
+        .collect();
+    let mut value_map = HashMap::new();
+    for block in function
+        .blocks
+        .iter()
+        .filter(|block| region.contains(&block.id))
+    {
+        for instruction in &block.instructions {
+            if let Some(value) = instruction.result {
+                let cloned = ValueId(function.values.len() as u32);
+                function
+                    .values
+                    .push(function.values[value.0 as usize].clone());
+                value_map.insert(value, cloned);
+            }
+        }
+    }
+    let originals: Vec<_> = function
+        .blocks
+        .iter()
+        .filter(|block| region.contains(&block.id))
+        .cloned()
+        .collect();
+    let redirected: BTreeSet<_> = redirects.iter().copied().collect();
+    let mut clones = Vec::new();
+    for mut block in originals {
+        let original_id = block.id;
+        block.id = block_map[&original_id];
+        block.name = format!("{}_clone{}", block.name, block.id.0);
+        for instruction in &mut block.instructions {
+            if let Some(result) = &mut instruction.result {
+                *result = value_map[result];
+            }
+            if let InstructionKind::Phi { incomings } = &mut instruction.kind {
+                incomings.retain(|(from, _)| {
+                    region.contains(from) || redirected.contains(&(*from, original_id))
+                });
+                for (from, _) in incomings.iter_mut() {
+                    if let Some(cloned) = block_map.get(from) {
+                        *from = *cloned;
+                    }
+                }
+            }
+            for operand in instruction_operands_mut(&mut instruction.kind) {
+                remap_value(operand, &value_map);
+            }
+        }
+        remap_terminator(&mut block.terminator, &block_map, &value_map);
+        clones.push(block);
+    }
+
+    // The original entries no longer receive the redirected edges.
+    for block in &mut function.blocks {
+        for instruction in &mut block.instructions {
+            if let InstructionKind::Phi { incomings } = &mut instruction.kind {
+                incomings.retain(|(from, _)| !redirected.contains(&(*from, block.id)));
+            }
+        }
+    }
+    // A cloned exit contributes the cloned SSA value to the old merge until
+    // the following merge-splitting pass places an inner merge in between.
+    let merge_block = function
+        .blocks
+        .iter_mut()
+        .find(|block| block.id == merge)
+        .ok_or_else(|| emission("a cloned region's merge block is missing"))?;
+    for instruction in &mut merge_block.instructions {
+        let InstructionKind::Phi { incomings } = &mut instruction.kind else {
+            continue;
+        };
+        let additions: Vec<_> = incomings
+            .iter()
+            .filter_map(|(from, value)| {
+                block_map.get(from).map(|cloned| {
+                    let mut value = value.clone();
+                    remap_value(&mut value, &value_map);
+                    (*cloned, value)
+                })
+            })
+            .collect();
+        incomings.extend(additions);
+    }
+    for (source, target) in redirects {
+        let block = function
+            .blocks
+            .iter_mut()
+            .find(|block| block.id == *source)
+            .ok_or_else(|| emission("a cloned region's incoming block is missing"))?;
+        redirect_edge(&mut block.terminator, *target, block_map[target]);
+    }
+    function.blocks.extend(clones);
+    Ok(())
+}
+
+fn remap_value(operand: &mut Operand, values: &HashMap<ValueId, ValueId>) {
+    if let Operand::Value(value) = operand
+        && let Some(cloned) = values.get(value)
+    {
+        *value = *cloned;
+    }
+}
+
+fn remap_terminator(
+    terminator: &mut Terminator,
+    blocks: &HashMap<BlockId, BlockId>,
+    values: &HashMap<ValueId, ValueId>,
+) {
+    match terminator {
+        Terminator::Branch(target) => {
+            if let Some(cloned) = blocks.get(target) {
+                *target = *cloned;
+            }
+        }
+        Terminator::CondBranch {
+            condition,
+            true_block,
+            false_block,
+        } => {
+            remap_value(condition, values);
+            if let Some(cloned) = blocks.get(true_block) {
+                *true_block = *cloned;
+            }
+            if let Some(cloned) = blocks.get(false_block) {
+                *false_block = *cloned;
+            }
+        }
+        Terminator::Return(value) => {
+            if let Some(value) = value {
+                remap_value(value, values);
+            }
+        }
+        Terminator::Unreachable => {}
+    }
+}
+
+fn redirect_edge(terminator: &mut Terminator, from: BlockId, to: BlockId) {
+    match terminator {
+        Terminator::Branch(target) if *target == from => *target = to,
+        Terminator::CondBranch {
+            true_block,
+            false_block,
+            ..
+        } => {
+            if *true_block == from {
+                *true_block = to;
+            }
+            if *false_block == from {
+                *false_block = to;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Give each structured header its own merge block.
+///
+/// An `else if` chain reaches one rejoining block from several conditional
+/// branches, and SPIR-V forbids two headers from naming the same merge. Route
+/// the inner construct's edges through a new block, which then becomes its
+/// merge.
+fn split_shared_merges(function: &mut Function) -> Result<bool, TranslateError> {
+    let merges = control_flow_merges(function)?;
+    let mut claims: BTreeMap<BlockId, Vec<BlockId>> = BTreeMap::new();
+    for (header, merge) in &merges {
+        let block = match merge {
+            Merge::Selection { merge } | Merge::Loop { merge, .. } => *merge,
+        };
+        claims.entry(block).or_default().push(*header);
+    }
+    let Some((merge, headers)) = claims.into_iter().find(|(_, headers)| headers.len() > 1) else {
+        return Ok(false);
+    };
+    let graph = ControlFlow::new(function);
+    let dominators = graph.dominance(&[function.blocks[0].id], &graph.predecessors);
+    // The innermost header is the one every other claimant dominates.
+    let inner = headers
+        .iter()
+        .copied()
+        .max_by_key(|header| {
+            headers
+                .iter()
+                .filter(|other| dominators.dominates(**other, *header))
+                .count()
+        })
+        .ok_or_else(|| emission("a merge block has no claiming header"))?;
+    let sources: Vec<BlockId> = graph
+        .predecessors
+        .get(&merge)
+        .into_iter()
+        .flatten()
+        .copied()
+        .filter(|predecessor| dominators.dominates(inner, *predecessor))
+        .collect();
+    if sources.is_empty() || sources.len() == graph.predecessors[&merge].len() {
+        return Err(emission(
+            "a shared merge block cannot be split into nested constructs",
+        ));
+    }
+    split_merge(function, merge, &sources);
+    Ok(true)
 }
 
 /// Give a loop whose body rejoins at its latch an empty continue target.
@@ -3353,18 +3656,6 @@ fn control_flow_merges(function: &Function) -> Result<HashMap<BlockId, Merge>, T
             }
             _ => merge,
         };
-        // A short-circuit arm may branch to its enclosing selection's merge:
-        // `if (a || b) ...` commonly reaches the same block from the outer
-        // test and the nested `b` test.  The nested branch is then an early
-        // exit from the enclosing selection, not a second selection header.
-        // Giving it a second `OpSelectionMerge` would require two constructs
-        // to claim one merge block.
-        if merges.iter().any(|(header, outer)| {
-            matches!(outer, Merge::Selection { merge: outer_merge } if *outer_merge == merge)
-                && dominators.dominates(*header, block.id)
-        }) {
-            continue;
-        }
         merges.insert(block.id, Merge::Selection { merge });
     }
     Ok(merges)
