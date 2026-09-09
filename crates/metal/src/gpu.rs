@@ -320,7 +320,12 @@ impl Gpu {
             .map_err(|error| format!("vkCreateImageView failed with {error:?}"))
     }
 
-    pub fn create_shader_module(&self, words: &[u32]) -> Result<vk::ShaderModule, String> {
+    pub fn create_shader_module(
+        &self,
+        words: &[u32],
+        entry: &str,
+    ) -> Result<vk::ShaderModule, String> {
+        dump_spirv(entry, words);
         let info = vk::ShaderModuleCreateInfo::default().code(words);
         // SAFETY: `words` lives across the call and is SPIR-V this process emitted.
         unsafe { self.device.create_shader_module(&info, None) }
@@ -653,8 +658,8 @@ pub fn pixel_format(metal: u64) -> vk::Format {
         41 => F::A1R5G5B5_UNORM_PACK16,
         42 => F::R4G4B4A4_UNORM_PACK16,
         43 => F::B5G5R5A1_UNORM_PACK16,
-        50 => F::R32_UINT,
-        51 => F::R32_SINT,
+        53 => F::R32_UINT,
+        54 => F::R32_SINT,
         55 => F::R32_SFLOAT,
         60 => F::R16G16_UNORM,
         62 => F::R16G16_SNORM,
@@ -703,8 +708,13 @@ pub fn pixel_format(metal: u64) -> vk::Format {
         253 => F::S8_UINT,
         // Metal's Depth24Unorm_Stencil8 has no exact portable Vulkan format on
         // every driver; D24_UNORM_S8_UINT is the same layout where present.
-        255 | 260 => F::D24_UNORM_S8_UINT,
+        255 => F::D24_UNORM_S8_UINT,
+        260 => F::D32_SFLOAT_S8_UINT,
+        // `X32_Stencil8` and `X24_Stencil8` are the stencil half of a combined
+        // texture seen on its own. The image carries both halves either way;
+        // which one a view reads is the aspect, not the format.
         261 => F::D32_SFLOAT_S8_UINT,
+        262 => F::D24_UNORM_S8_UINT,
         _ => F::UNDEFINED,
     }
 }
@@ -810,6 +820,44 @@ pub fn tracing() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("ROSETTA3_TRACE_METAL").is_some())
 }
 
+/// Write one module to `ROSETTA3_SPIRV_OUT`, so that a driver which rejects or
+/// crashes on a shader can be met with the exact bytes it was given.
+///
+/// A driver's SPIR-V front end is not a validator, and a module `spirv-val`
+/// accepts can still take one down; the file is the only way to tell which of
+/// the thousands a game compiles was the one.
+fn dump_spirv(entry: &str, words: &[u32]) {
+    let Some(directory) = std::env::var_os("ROSETTA3_SPIRV_OUT") else {
+        return;
+    };
+    let directory = std::path::PathBuf::from(directory);
+    if std::fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    // An entry point name is a Metal identifier, but nothing guarantees that of
+    // a name a translated library carries, and this becomes a path.
+    let safe: String = entry
+        .chars()
+        .map(|c| match c.is_ascii_alphanumeric() || c == '_' {
+            true => c,
+            false => '_',
+        })
+        .collect();
+    let mut bytes = Vec::with_capacity(words.len() * 4);
+    for word in words {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    let mut path = directory.join(&safe);
+    // Two libraries may carry the same entry point name with different bodies.
+    let mut ordinal = 0;
+    while path.exists() {
+        ordinal += 1;
+        path = directory.join(format!("{safe}.{ordinal}"));
+    }
+    path.set_extension("spv");
+    let _ = std::fs::write(path, bytes);
+}
+
 pub fn trace(message: impl std::fmt::Display) {
     if tracing() {
         eprintln!("rosetta3: Metal: {message}");
@@ -843,6 +891,13 @@ mod tests {
         assert_eq!(pixel_format(80), vk::Format::B8G8R8A8_UNORM);
         assert_eq!(pixel_format(70), vk::Format::R8G8B8A8_UNORM);
         assert_eq!(pixel_format(252), vk::Format::D32_SFLOAT);
+        // The single-channel 32-bit trio is numbered like the two- and
+        // four-channel ones, three above a multiple of ten and not below it.
+        assert_eq!(pixel_format(53), vk::Format::R32_UINT);
+        assert_eq!(pixel_format(54), vk::Format::R32_SINT);
+        assert_eq!(pixel_format(55), vk::Format::R32_SFLOAT);
+        assert_eq!(pixel_format(50), vk::Format::UNDEFINED);
+        assert_eq!(pixel_format(260), vk::Format::D32_SFLOAT_S8_UINT);
         assert_eq!(pixel_format(9999), vk::Format::UNDEFINED);
     }
 

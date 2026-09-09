@@ -53,6 +53,7 @@ pub(crate) struct CommandBuffer {
     /// Objects the recording refers to, retained until the work completes.
     retained: Vec<Id>,
     framebuffers: Vec<vk::Framebuffer>,
+    scheduled_handlers: Vec<Id>,
     completed_handlers: Vec<Id>,
     /// Drawables `-presentDrawable:` asked for, presented once the work is done.
     presents: Vec<Id>,
@@ -206,6 +207,7 @@ unsafe extern "C" fn new_command_buffer(receiver: Id, _sel: Sel) -> Id {
             descriptor_pools: Vec::new(),
             retained: Vec::new(),
             framebuffers: Vec::new(),
+            scheduled_handlers: Vec::new(),
             completed_handlers: Vec::new(),
             presents: Vec::new(),
             status: 0,
@@ -283,13 +285,19 @@ unsafe extern "C" fn command_buffer_status(receiver: Id, _sel: Sel) -> u64 {
     unsafe { object::body::<CommandBuffer>(receiver) }.status
 }
 
-unsafe extern "C" fn add_completed_handler(receiver: Id, _sel: Sel, block: Id) {
+unsafe extern "C" fn add_handler(receiver: Id, sel: Sel, block: Id) {
     // SAFETY: as above.
     let command = unsafe { object::body::<CommandBuffer>(receiver) };
     // SAFETY: the guest passed a block.
     let retained = unsafe { objc::shorthand::objc_retainBlock(block) };
-    if !retained.is_null() {
-        command.completed_handlers.push(retained);
+    if retained.is_null() {
+        return;
+    }
+    // SAFETY: a selector the runtime owns.
+    let scheduled = unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() == b"addScheduledHandler:";
+    match scheduled {
+        true => command.scheduled_handlers.push(retained),
+        false => command.completed_handlers.push(retained),
     }
 }
 
@@ -340,16 +348,20 @@ unsafe extern "C" fn commit(receiver: Id, _sel: Sel) {
         gpu.device.destroy_command_pool(command.pool, None);
         gpu.device.destroy_fence(command.fence, None);
     }
-    let handlers = std::mem::take(&mut command.completed_handlers);
-    for block in handlers {
-        // A block's invoke pointer is its third word.
-        // SAFETY: `objc_retainBlock` returned a live block.
-        let invoke = unsafe { *((block as *const u8).add(16) as *const usize) };
-        if invoke != 0 {
-            // SAFETY: a completion handler is `void (^)(id<MTLCommandBuffer>)`.
-            let call: unsafe extern "C" fn(Id, Id) = unsafe { std::mem::transmute(invoke) };
-            unsafe { call(block, receiver) };
-        }
+    // Not called here: Metal calls a completion handler from its own queue, and
+    // a guest which commits under a lock its handler also takes - which Roblox
+    // does - deadlocks against itself the moment one runs on the committing
+    // thread. See `crate::completion`.
+    // A scheduled handler runs when the work reaches the device and a
+    // completed handler when it finishes. This submission waits, so the two
+    // moments are one; the order between them is still Metal's.
+    for block in std::mem::take(&mut command.scheduled_handlers)
+        .into_iter()
+        .chain(std::mem::take(&mut command.completed_handlers))
+    {
+        // SAFETY: `objc_retainBlock` returned a live block, whose reference this
+        // gives away, and `receiver` is the live command buffer it belongs to.
+        unsafe { crate::completion::deliver(block, receiver) };
     }
 }
 
@@ -628,6 +640,46 @@ unsafe extern "C" fn set_buffer(receiver: Id, sel: Sel, buffer: Id, offset: u64,
             offset,
         };
     }
+}
+
+/// `-setBytes:length:atIndex:` and its per-stage spellings.
+///
+/// Metal's small inline constants, which have no `MTLBuffer` of their own. One
+/// is made here and retained by the command buffer, so the copy outlives the
+/// recording exactly as a bound buffer does. Metal's own limit is four
+/// kilobytes; a larger one is refused rather than quietly turned into an
+/// allocation the guest never asked for.
+unsafe extern "C" fn set_bytes(receiver: Id, sel: Sel, bytes: *const u8, length: u64, index: u64) {
+    const LIMIT: u64 = 4096;
+    // SAFETY: an encoder of this crate's.
+    let encoder = unsafe { object::body::<Encoder>(receiver) };
+    if bytes.is_null() || length == 0 || length > LIMIT {
+        gpu::trace(format!("setBytes:length:atIndex: refused {length} byte(s)"));
+        return;
+    }
+    let gpu = encoder.command().gpu;
+    let buffer = crate::resource::new_buffer(gpu, length as usize, 0);
+    if buffer.is_null() {
+        return;
+    }
+    // SAFETY: a buffer this call just made, whose mapping is `length` bytes.
+    let contents = unsafe { crate::resource::contents_of(buffer) };
+    if !contents.is_null() {
+        // SAFETY: the guest's `length` bytes into a mapping of that size.
+        unsafe { std::ptr::copy_nonoverlapping(bytes, contents, length as usize) };
+    }
+    // SAFETY: a selector the runtime owns.
+    let stage = selector_stage(unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes());
+    if let Some(slot) = encoder.buffers[stage].get_mut(index as usize) {
+        *slot = BufferBinding {
+            object: buffer,
+            offset: 0,
+        };
+    }
+    // The encoder's own reference; the command buffer keeps it alive until the
+    // work it was recorded into has finished.
+    encoder.command().retain(buffer);
+    objc::arc::release(buffer);
 }
 
 unsafe extern "C" fn set_buffer_offset(receiver: Id, sel: Sel, offset: u64, index: u64) {
@@ -1413,6 +1465,25 @@ pub(crate) struct RenderPassDescriptor {
     pub color_objects: Id,
     pub depth_object: Id,
     pub stencil_object: Id,
+    /// FIXME (ACCURACY): kept so that a guest reading the property back sees
+    /// what it set, and never written to. Occlusion queries are not
+    /// implemented, so a guest which reads the counts finds whatever the
+    /// buffer already held.
+    pub visibility_result_buffer: Id,
+}
+
+impl Default for RenderPassDescriptor {
+    fn default() -> Self {
+        Self {
+            colors: [AttachmentDescriptor::default(); RENDER_TARGETS],
+            depth: AttachmentDescriptor::default(),
+            stencil: AttachmentDescriptor::default(),
+            color_objects: std::ptr::null_mut(),
+            depth_object: std::ptr::null_mut(),
+            stencil_object: std::ptr::null_mut(),
+            visibility_result_buffer: std::ptr::null_mut(),
+        }
+    }
 }
 
 fn load_op(metal: u64) -> vk::AttachmentLoadOp {
@@ -1578,30 +1649,28 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
 
 unsafe extern "C" fn render_pass_descriptor_init(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: a freshly allocated render pass descriptor.
-    *unsafe { object::body::<RenderPassDescriptor>(receiver) } = RenderPassDescriptor {
-        colors: [AttachmentDescriptor::default(); RENDER_TARGETS],
-        depth: AttachmentDescriptor::default(),
-        stencil: AttachmentDescriptor::default(),
-        color_objects: std::ptr::null_mut(),
-        depth_object: std::ptr::null_mut(),
-        stencil_object: std::ptr::null_mut(),
-    };
+    *unsafe { object::body::<RenderPassDescriptor>(receiver) } = RenderPassDescriptor::default();
     receiver
+}
+
+unsafe extern "C" fn pass_visibility_result_buffer(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a render pass descriptor of this crate's.
+    unsafe { object::body::<RenderPassDescriptor>(receiver) }.visibility_result_buffer
+}
+
+unsafe extern "C" fn set_pass_visibility_result_buffer(receiver: Id, _sel: Sel, buffer: Id) {
+    // SAFETY: as above.
+    let descriptor = unsafe { object::body::<RenderPassDescriptor>(receiver) };
+    let previous = std::mem::replace(
+        &mut descriptor.visibility_result_buffer,
+        objc::arc::retain(buffer),
+    );
+    objc::arc::release(previous);
 }
 
 /// `+[MTLRenderPassDescriptor renderPassDescriptor]`.
 unsafe extern "C" fn new_render_pass_descriptor(_class: Id, _sel: Sel) -> Id {
-    let object = object::make(
-        c"MTLRenderPassDescriptor",
-        RenderPassDescriptor {
-            colors: [AttachmentDescriptor::default(); RENDER_TARGETS],
-            depth: AttachmentDescriptor::default(),
-            stencil: AttachmentDescriptor::default(),
-            color_objects: std::ptr::null_mut(),
-            depth_object: std::ptr::null_mut(),
-            stencil_object: std::ptr::null_mut(),
-        },
-    );
+    let object = object::make(c"MTLRenderPassDescriptor", RenderPassDescriptor::default());
     // SAFETY: a fresh object this call owns.
     unsafe { corefoundation::api::CFAutorelease(object as corefoundation::base::CFTypeRef) as Id }
 }
@@ -1763,7 +1832,8 @@ pub(crate) fn install() {
     methods!(command, {
         "commandQueue" => command_buffer_queue, c"@16@0:8";
         "status" => command_buffer_status, c"Q16@0:8";
-        "addCompletedHandler:" => add_completed_handler, c"v24@0:8@?16";
+        "addScheduledHandler:" => add_handler, c"v24@0:8@?16";
+        "addCompletedHandler:" => add_handler, c"v24@0:8@?16";
         "commit" => commit, c"v16@0:8";
         "waitUntilCompleted" => crate::no_op, c"v16@0:8";
         "waitUntilScheduled" => crate::no_op, c"v16@0:8";
@@ -1830,7 +1900,8 @@ pub(crate) fn install() {
         "colorAttachments" => pass_color_attachments, c"@16@0:8";
         "depthAttachment" => pass_single_attachment, c"@16@0:8";
         "stencilAttachment" => pass_single_attachment, c"@16@0:8";
-        "setVisibilityResultBuffer:" => crate::no_op, c"v24@0:8@16";
+        "visibilityResultBuffer" => pass_visibility_result_buffer, c"@16@0:8";
+        "setVisibilityResultBuffer:" => set_pass_visibility_result_buffer, c"v24@0:8@16";
         "setRenderTargetWidth:" => crate::no_op, c"v24@0:8Q16";
         "setRenderTargetHeight:" => crate::no_op, c"v24@0:8Q16";
         "setDefaultRasterSampleCount:" => crate::no_op, c"v24@0:8Q16";
@@ -1877,6 +1948,17 @@ pub(crate) fn install() {
             objc::sel::get(selector),
             set_buffer as *const std::ffi::c_void,
             c"v40@0:8@16Q24Q32",
+        );
+    }
+    for selector in [
+        "setBytes:length:atIndex:",
+        "setVertexBytes:length:atIndex:",
+        "setFragmentBytes:length:atIndex:",
+    ] {
+        encoder.replace_method(
+            objc::sel::get(selector),
+            set_bytes as *const std::ffi::c_void,
+            c"v40@0:8r^v16Q24Q32",
         );
     }
     for selector in [

@@ -413,6 +413,11 @@ pub enum IntegerUnaryOp {
     AbsoluteSigned,
     SignSigned,
     PopulationCount,
+    /// Metal's `clz`, which counts a value's leading zero bits and answers the
+    /// full width for zero.
+    CountLeadingZeros,
+    /// Metal's `ctz`, the same for trailing bits.
+    CountTrailingZeros,
     Not,
 }
 
@@ -526,6 +531,18 @@ pub enum InstructionKind {
         composite: Operand,
         index: u32,
     },
+    /// `v[i]` where `i` is not known until the shader runs. Metal allows it on
+    /// a vector, and only on a vector: a structure's members are named.
+    VectorExtractDynamic {
+        vector: Operand,
+        index: Operand,
+    },
+    /// The same for an assignment to one lane.
+    VectorInsertDynamic {
+        vector: Operand,
+        object: Operand,
+        index: Operand,
+    },
     All {
         vector: Operand,
     },
@@ -608,6 +625,10 @@ pub enum InstructionKind {
         /// An explicit level of detail. Metal samples with an implicit level
         /// when this is absent, which is only valid in a fragment stage.
         lod: Option<Operand>,
+        /// Explicit derivatives of the coordinate, as Metal's `gradient2d` and
+        /// its siblings supply them. They name the level of detail the way an
+        /// explicit `lod` does, and never appear alongside one.
+        gradient: Option<Box<(Operand, Operand)>>,
         /// `gather` selects one component of the four sampled texels.
         gather: Option<u32>,
     },
@@ -1057,6 +1078,21 @@ fn verify_instruction_types(
                 _ => false,
             }
         }
+        InstructionKind::VectorExtractDynamic { vector, index } => {
+            matches!(operand_type(function, index), Some(Type::Int { .. }))
+                && matches!(operand_type(function, vector),
+                    Some(Type::Vector { element, .. }) if result.as_ref() == Some(element.as_ref()))
+        }
+        InstructionKind::VectorInsertDynamic {
+            vector,
+            object,
+            index,
+        } => {
+            matches!(operand_type(function, index), Some(Type::Int { .. }))
+                && matches!(operand_type(function, vector),
+                    Some(Type::Vector { ref element, .. }) if operand_type(function, object).as_ref() == Some(element.as_ref()))
+                && result == operand_type(function, vector)
+        }
         InstructionKind::All { vector } | InstructionKind::Any { vector } => {
             matches!(operand_type(function, vector), Some(Type::Vector { element, .. }) if *element == Type::Bool)
                 && result == Some(Type::Bool)
@@ -1179,12 +1215,24 @@ fn verify_instruction_types(
             array_index,
             offset,
             lod,
+            gradient,
             ..
         } => {
             let Some(Type::Texture(texture)) = operand_type(function, texture) else {
                 return invalid(function, instruction, diagnostics);
             };
-            operand_type(function, sampler) == Some(Type::Sampler)
+            // A gradient names the level of detail, so a sample carries one or
+            // the other and never both.
+            let gradients_agree = match gradient.as_deref() {
+                None => true,
+                Some((dx, dy)) => {
+                    lod.is_none()
+                        && operand_type(function, dx).is_some()
+                        && operand_type(function, dx) == operand_type(function, dy)
+                }
+            };
+            gradients_agree
+                && operand_type(function, sampler) == Some(Type::Sampler)
                 && texture.access == Access::Sample
                 && coordinate_shape(function, coordinate, &texture, Type::Float { bits: 32 })
                 && optional_is(function, array_index.as_ref(), &Type::u32())
@@ -1269,6 +1317,8 @@ fn instruction_name(kind: &InstructionKind) -> &'static str {
         InstructionKind::FieldAddress { .. } => "field address",
         InstructionKind::BufferAddress { .. } => "buffer address",
         InstructionKind::CompositeExtract { .. } => "composite extraction",
+        InstructionKind::VectorExtractDynamic { .. } => "dynamic vector extraction",
+        InstructionKind::VectorInsertDynamic { .. } => "dynamic vector insertion",
         InstructionKind::CompositeInsert { .. } => "composite insertion",
         InstructionKind::All { .. } => "all",
         InstructionKind::Any { .. } => "any",
@@ -1365,6 +1415,12 @@ pub(crate) fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         InstructionKind::ElementAddress { pointer, index } => vec![pointer, index],
         InstructionKind::FieldAddress { pointer, .. } => vec![pointer],
         InstructionKind::CompositeExtract { composite, .. } => vec![composite],
+        InstructionKind::VectorExtractDynamic { vector, index } => vec![vector, index],
+        InstructionKind::VectorInsertDynamic {
+            vector,
+            object,
+            index,
+        } => vec![vector, object, index],
         InstructionKind::BufferAddress { pointer, indices } => {
             std::iter::once(pointer).chain(indices).collect()
         }
@@ -1419,12 +1475,15 @@ pub(crate) fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
             array_index,
             offset,
             lod,
+            gradient,
             ..
         } => [texture, sampler, coordinate]
             .into_iter()
             .chain(array_index)
             .chain(offset)
             .chain(lod)
+            .chain(gradient.as_deref().map(|(dx, _)| dx))
+            .chain(gradient.as_deref().map(|(_, dy)| dy))
             .collect(),
         InstructionKind::TextureRead {
             texture,

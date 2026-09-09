@@ -95,7 +95,7 @@ impl ComputePipeline {
         device: objc::object::Id,
         entry: &EntryArtifact,
     ) -> Result<Self, String> {
-        let module = gpu.create_shader_module(&entry.words)?;
+        let module = gpu.create_shader_module(&entry.words, &entry.name)?;
         let layouts = layouts_for(gpu, &[&entry.resources])?;
         Ok(Self {
             gpu,
@@ -137,6 +137,12 @@ impl ComputePipeline {
         let info = vk::ComputePipelineCreateInfo::default()
             .stage(stage)
             .layout(self.layouts.pipeline);
+        // Said before the call, not after: a driver's shader compiler is where a
+        // bad module is met, and one that dies there leaves nothing to say it.
+        gpu::trace(format!(
+            "compiling compute pipeline {} for threadgroup {size:?}",
+            self.name.to_string_lossy()
+        ));
         // SAFETY: every borrowed structure lives across the call.
         let pipeline = unsafe {
             self.gpu
@@ -270,8 +276,8 @@ impl RenderPipeline {
         layouts_in: &[VertexLayout; VERTEX_SLOTS],
         attributes_in: &[VertexAttribute; VERTEX_SLOTS],
     ) -> Result<Self, String> {
-        let vertex_module = gpu.create_shader_module(&vertex.words)?;
-        let fragment_module = gpu.create_shader_module(&fragment.words)?;
+        let vertex_module = gpu.create_shader_module(&vertex.words, &vertex.name)?;
+        let fragment_module = gpu.create_shader_module(&fragment.words, &fragment.name)?;
         let layouts = layouts_for(gpu, &[&vertex.resources, &fragment.resources])?;
 
         let mut bindings = Vec::new();

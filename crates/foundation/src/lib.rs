@@ -30,6 +30,7 @@ pub mod paths;
 pub mod plist;
 pub mod pool;
 pub mod processinfo;
+pub mod runtime;
 pub mod string;
 pub mod thread;
 pub mod timer;
@@ -84,6 +85,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         .or_else(|| bundle::cf::symbol(name))
         .or_else(|| notification::cf::symbol(name))
         .or_else(|| keychain::symbol(name))
+        .or_else(|| runtime::symbol(name))
         .or_else(|| locale::cf::symbol(name))
         .or_else(|| timer::cf::symbol(name))
 }
@@ -95,6 +97,7 @@ pub fn names() -> impl Iterator<Item = &'static str> {
         .chain(bundle::cf::NAMES)
         .chain(notification::cf::NAMES)
         .chain(keychain::NAMES)
+        .chain(runtime::NAMES)
         .chain(locale::cf::NAMES)
         .chain(timer::cf::NAMES)
         .copied()

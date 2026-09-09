@@ -32,6 +32,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enumerate()
     {
         let result = metallib_air(&bytes[offset..])
+            .inspect(|air| {
+                // The AIR itself, for `llvm-dis`, when a rejection needs to be
+                // read against the bitcode which produced it. Off unless asked
+                // for: this is the shader's own source in another form.
+                if let Some(directory) = std::env::var_os("ROSETTA3_AIR_OUT") {
+                    let path = std::path::Path::new(&directory).join(format!("{ordinal}.bc"));
+                    let _ = std::fs::write(path, air);
+                }
+            })
             .and_then(|air| parse_air(AirInput::Bitcode(air)))
             .and_then(|module| emit_spirv(&module, &target));
         match result {

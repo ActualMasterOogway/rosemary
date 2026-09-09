@@ -937,6 +937,55 @@ impl Emitter {
                         [value],
                     )?;
                 }
+                // SPIR-V has no zero count. `FindUMsb` answers -1 for zero,
+                // so subtracting it from the last bit index gives Metal's full
+                // width there and the leading zero count everywhere else.
+                // `FindILsb` answers -1 for zero too, but subtraction does not
+                // rescue it, so zero is selected for.
+                IntegerUnaryOp::CountLeadingZeros | IntegerUnaryOp::CountTrailingZeros => {
+                    let result = instruction
+                        .result
+                        .ok_or_else(|| emission("a zero count has no result"))?;
+                    let result_type = &function.values[result.0 as usize];
+                    let Type::Int { bits, .. } = result_type else {
+                        return Err(emission("a zero count applies to an integer"));
+                    };
+                    let width = u64::from(*bits);
+                    let ty = self.type_id(result_type)?;
+                    let scalar = result_type.clone();
+                    let value = self.operand(value, values)?;
+                    let leading = *op == IntegerUnaryOp::CountLeadingZeros;
+                    let found = self.builder.id();
+                    self.builder
+                        .ext_inst(
+                            ty,
+                            Some(found),
+                            self.glsl_std_450,
+                            match leading {
+                                true => GlslStd450Op::FindUMsb,
+                                false => GlslStd450Op::FindILsb,
+                            } as u32,
+                            [SpirvOperand::IdRef(value)],
+                        )
+                        .map_err(build_error)?;
+                    if leading {
+                        let last = self.constant(&scalar, width - 1)?;
+                        self.builder
+                            .i_sub(ty, result_id, last, found)
+                            .map_err(build_error)?;
+                    } else {
+                        let zero = self.constant(&scalar, 0)?;
+                        let full = self.constant(&scalar, width)?;
+                        let bool_type = self.type_id(&Type::Bool)?;
+                        let empty = self.builder.id();
+                        self.builder
+                            .i_equal(bool_type, Some(empty), value, zero)
+                            .map_err(build_error)?;
+                        self.builder
+                            .select(ty, result_id, empty, full, found)
+                            .map_err(build_error)?;
+                    }
+                }
                 IntegerUnaryOp::PopulationCount | IntegerUnaryOp::Not => {
                     let result = instruction
                         .result
@@ -1183,6 +1232,33 @@ impl Emitter {
                 let composite = self.operand(composite, values)?;
                 self.builder
                     .composite_extract(ty, result_id, composite, [*index])
+                    .map_err(build_error)?;
+            }
+            InstructionKind::VectorExtractDynamic { vector, index } => {
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("dynamic vector extract has no result"))?;
+                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let vector = self.operand(vector, values)?;
+                let index = self.operand(index, values)?;
+                self.builder
+                    .vector_extract_dynamic(ty, result_id, vector, index)
+                    .map_err(build_error)?;
+            }
+            InstructionKind::VectorInsertDynamic {
+                vector,
+                object,
+                index,
+            } => {
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("dynamic vector insert has no result"))?;
+                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let vector = self.operand(vector, values)?;
+                let object = self.operand(object, values)?;
+                let index = self.operand(index, values)?;
+                self.builder
+                    .vector_insert_dynamic(ty, result_id, vector, object, index)
                     .map_err(build_error)?;
             }
             InstructionKind::All { vector } => {
@@ -1535,6 +1611,7 @@ impl Emitter {
                 array_index,
                 offset,
                 lod,
+                gradient,
                 gather,
             } => {
                 let result = instruction
@@ -1559,6 +1636,14 @@ impl Emitter {
                 if let Some(lod) = lod {
                     mask |= ImageOperands::LOD;
                     extra.push(SpirvOperand::IdRef(self.operand(lod, values)?));
+                }
+                if let Some(gradient) = gradient.as_deref() {
+                    // SPIR-V's Grad takes the derivatives of the coordinate
+                    // without its array layer, which is the shape AIR already
+                    // passes them in.
+                    mask |= ImageOperands::GRAD;
+                    extra.push(SpirvOperand::IdRef(self.operand(&gradient.0, values)?));
+                    extra.push(SpirvOperand::IdRef(self.operand(&gradient.1, values)?));
                 }
                 if let Some(offset) = offset {
                     // Metal requires a sampling offset to be a compile-time
@@ -1594,7 +1679,7 @@ impl Emitter {
                     }
                     // An implicit level of detail needs the fragment stage's
                     // derivatives; AIR requests an explicit level otherwise.
-                    None if lod.is_some() => {
+                    None if lod.is_some() || gradient.is_some() => {
                         self.builder
                             .image_sample_explicit_lod(
                                 ty, result_id, sampled, coordinate, mask, extra,
@@ -2341,6 +2426,12 @@ fn reverse_post_order(function: &mut Function) {
     function.blocks.sort_by_key(|block| rank(block.id));
 }
 
+/// How many restructuring passes a function is allowed before its control flow
+/// is declared beyond this translator.
+fn limit(function: &Function) -> usize {
+    function.blocks.len().max(1)
+}
+
 /// Give each structured header its own merge block.
 ///
 /// An `else if` chain reaches one rejoining block from several conditional
@@ -2348,7 +2439,11 @@ fn reverse_post_order(function: &mut Function) {
 /// the inner construct's edges through a new block, which then becomes its
 /// merge.
 fn split_shared_merges(function: &mut Function) -> Result<(), TranslateError> {
-    for _ in 0..function.blocks.len().max(1) {
+    // Each pass splits one shared merge and adds one block, and a split can
+    // expose another: an `else if` chain of n arms needs n - 1 splits, and the
+    // blocks it adds can themselves be claimed. The bound is a guard against
+    // a shape which never settles, not a statement about how many are needed.
+    for _ in 0..limit(function) {
         let merges = control_flow_merges(function)?;
         let mut claims: BTreeMap<BlockId, Vec<BlockId>> = BTreeMap::new();
         for (header, merge) in &merges {
@@ -2396,13 +2491,15 @@ fn split_shared_merges(function: &mut Function) -> Result<(), TranslateError> {
 
 /// Give a loop whose body rejoins at its latch an empty continue target.
 ///
-/// SPIR-V's loop construct does not contain the continue construct, so a
-/// selection inside the body may not merge at the continue target. An
-/// `if`/`else` at the end of a loop body rejoins at exactly that block, so
-/// route the back edge through a new block and leave the old latch in the
-/// body, where it is a legal merge.
+/// SPIR-V's loop construct does not contain the continue construct, so no
+/// construct inside the body may merge at the continue target. Two shapes
+/// reach it: an `if`/`else` at the end of a loop body, which rejoins at
+/// exactly that block, and an inner loop the body leaves by continuing the
+/// outer one, whose only exit is that block. Both are answered the same way -
+/// route the back edge through a new block, leaving the old latch in the body
+/// where it is a legal merge.
 fn separate_loop_latches(function: &mut Function) -> Result<(), TranslateError> {
-    for _ in 0..function.blocks.len().max(1) {
+    for _ in 0..limit(function) {
         let graph = ControlFlow::new(function);
         let entry = function.blocks[0].id;
         let dominators = graph.dominance(&[entry], &graph.predecessors);
@@ -2426,24 +2523,56 @@ fn separate_loop_latches(function: &mut Function) -> Result<(), TranslateError> 
             let [continue_target] = latches.as_slice() else {
                 continue;
             };
-            loops.push((
-                block.id,
-                natural_loop(&graph, block.id, *continue_target),
-                *continue_target,
-            ));
+            let body = natural_loop(&graph, block.id, *continue_target);
+            let mut leaving: Vec<_> = body
+                .iter()
+                .flat_map(|member| graph.successors[member].iter().copied())
+                .filter(|successor| !body.contains(successor))
+                .collect();
+            leaving.sort_unstable();
+            leaving.dedup();
+            let exit = match leaving.as_slice() {
+                [merge] => Some(*merge),
+                // A loop with several exits is rejected later, by name; there
+                // is no single merge block here to compare against.
+                _ => None,
+            };
+            loops.push((block.id, body, *continue_target, exit));
         }
         let mut split = None;
+        // An inner loop the body leaves by continuing the outer one has the
+        // outer continue target as its merge, which lies outside the outer
+        // loop construct.
+        for (inner, inner_body, _, exit) in &loops {
+            let Some(exit) = exit else {
+                continue;
+            };
+            let enclosing = loops
+                .iter()
+                .filter(|(header, body, ..)| header != inner && body.contains(inner))
+                .min_by_key(|(_, body, ..)| body.len());
+            let Some((header, _, continue_target, _)) = enclosing else {
+                continue;
+            };
+            if exit == continue_target && !inner_body.contains(continue_target) {
+                split = Some((*header, *continue_target));
+                break;
+            }
+        }
         for block in &function.blocks {
+            if split.is_some() {
+                break;
+            }
             if !matches!(block.terminator, Terminator::CondBranch { .. }) {
                 continue;
             }
             if loops.iter().any(|(header, ..)| *header == block.id) {
                 continue;
             }
-            let Some((header, body, continue_target)) = loops
+            let Some((header, body, continue_target, _)) = loops
                 .iter()
-                .filter(|(_, body, _)| body.contains(&block.id))
-                .min_by_key(|(_, body, _)| body.len())
+                .filter(|(_, body, ..)| body.contains(&block.id))
+                .min_by_key(|(_, body, ..)| body.len())
             else {
                 continue;
             };
@@ -2483,7 +2612,7 @@ fn separate_loop_latches(function: &mut Function) -> Result<(), TranslateError> 
 /// Routing every edge into the header through a new block leaves that block
 /// carrying the loop and the old header carrying the selection.
 fn normalize_loop_headers(function: &mut Function) -> Result<(), TranslateError> {
-    for _ in 0..function.blocks.len().max(1) {
+    for _ in 0..limit(function) {
         let graph = ControlFlow::new(function);
         let entry = function.blocks[0].id;
         let dominators = graph.dominance(&[entry], &graph.predecessors);
@@ -2693,66 +2822,137 @@ impl ControlFlow {
         graph
     }
 
-    /// Iterative dataflow over a set lattice, used for both dominators and
-    /// post-dominators by swapping the edge direction.
+    /// Immediate dominators, by the Cooper-Harvey-Kennedy iteration, used for
+    /// both dominators and post-dominators by swapping the edge direction.
+    ///
+    /// `edges` names each block's incoming edges for the chosen direction, so
+    /// the walk itself follows their reverse. A dominator tree rather than a
+    /// set per block: a shader whose entry point inlines to a few thousand
+    /// blocks makes the set form quadratic in both time and memory, and every
+    /// restructuring pass recomputes this.
     fn dominance(&self, roots: &[BlockId], edges: &HashMap<BlockId, Vec<BlockId>>) -> Dominance {
-        let all: BTreeSet<_> = self.blocks.iter().copied().collect();
-        let mut sets: BTreeMap<BlockId, BTreeSet<BlockId>> = self
-            .blocks
-            .iter()
-            .map(|block| {
-                (
-                    *block,
-                    if roots.contains(block) {
-                        BTreeSet::from([*block])
-                    } else {
-                        all.clone()
-                    },
-                )
-            })
-            .collect();
-        loop {
-            let previous = sets.clone();
-            for block in self.blocks.iter().filter(|block| !roots.contains(block)) {
-                let incoming = edges.get(block).cloned().unwrap_or_default();
-                let mut next = match incoming.split_first() {
-                    Some((first, rest)) => {
-                        rest.iter().fold(previous[first].clone(), |set, edge| {
-                            set.intersection(&previous[edge]).copied().collect()
-                        })
-                    }
-                    None => BTreeSet::new(),
-                };
-                next.insert(*block);
-                sets.insert(*block, next);
+        let mut forward: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+        for (block, incoming) in edges {
+            for source in incoming {
+                forward.entry(*source).or_default().push(*block);
             }
-            if sets == previous {
-                return Dominance { sets };
+        }
+        // Reverse post-order, so that a block is visited after the blocks
+        // whose dominators it depends on wherever the graph is acyclic.
+        let mut visited = BTreeSet::new();
+        let mut post = Vec::new();
+        for root in roots {
+            if !visited.insert(*root) {
+                continue;
+            }
+            let mut stack = vec![(*root, 0usize)];
+            while let Some((block, index)) = stack.pop() {
+                let next = forward.get(&block).map(|s| s.as_slice()).unwrap_or(&[]);
+                match next.get(index) {
+                    Some(successor) => {
+                        stack.push((block, index + 1));
+                        if visited.insert(*successor) {
+                            stack.push((*successor, 0));
+                        }
+                    }
+                    None => post.push(block),
+                }
+            }
+        }
+        post.reverse();
+        let order: HashMap<BlockId, usize> = post
+            .iter()
+            .enumerate()
+            .map(|(index, block)| (*block, index))
+            .collect();
+
+        let mut idom: HashMap<BlockId, BlockId> = roots.iter().map(|root| (*root, *root)).collect();
+        loop {
+            let mut changed = false;
+            for block in &post {
+                if roots.contains(block) {
+                    continue;
+                }
+                let mut candidate = None;
+                for source in edges.get(block).into_iter().flatten() {
+                    if !idom.contains_key(source) {
+                        continue;
+                    }
+                    candidate = Some(match candidate {
+                        None => *source,
+                        // Two paths which meet at no common block leave this
+                        // one dominated by nothing but itself, which is what
+                        // its own identity records.
+                        Some(current) => match meet(*source, current, &idom, &order) {
+                            Some(meet) => meet,
+                            None => *block,
+                        },
+                    });
+                }
+                let candidate = candidate.unwrap_or(*block);
+                if idom.insert(*block, candidate) != Some(candidate) {
+                    changed = true;
+                }
+            }
+            if !changed {
+                return Dominance { idom };
             }
         }
     }
 }
 
+/// The closest block both `a` and `b` are dominated by, or `None` when they
+/// are reached from separate roots and share none.
+fn meet(
+    mut a: BlockId,
+    mut b: BlockId,
+    idom: &HashMap<BlockId, BlockId>,
+    order: &HashMap<BlockId, usize>,
+) -> Option<BlockId> {
+    while a != b {
+        let (deeper, shallower) = match order.get(&a)? > order.get(&b)? {
+            true => (&mut a, b),
+            false => (&mut b, a),
+        };
+        let next = *idom.get(deeper)?;
+        if next == *deeper {
+            // A root, and the other block is not below it.
+            let _ = shallower;
+            return None;
+        }
+        *deeper = next;
+    }
+    Some(a)
+}
+
+/// A dominator tree: each block's immediate dominator, with a root naming
+/// itself.
 struct Dominance {
-    sets: BTreeMap<BlockId, BTreeSet<BlockId>>,
+    idom: HashMap<BlockId, BlockId>,
 }
 
 impl Dominance {
+    /// Reflexive, as a dominator set which contains its own block is.
     fn dominates(&self, dominator: BlockId, block: BlockId) -> bool {
-        self.sets
-            .get(&block)
-            .is_some_and(|set| set.contains(&dominator))
+        let mut current = block;
+        loop {
+            if current == dominator {
+                return true;
+            }
+            match self.idom.get(&current) {
+                Some(next) if *next != current => current = *next,
+                _ => return false,
+            }
+        }
     }
 
-    /// The closest strict dominator: the one whose own dominator set is
-    /// largest, since a nearer dominator is dominated by every farther one.
+    /// The closest strict dominator, or `None` for a root and for a block
+    /// whose paths in are dominated by nothing they share.
     fn immediate(&self, block: BlockId) -> Option<BlockId> {
-        self.sets
-            .get(&block)?
-            .iter()
-            .filter(|candidate| **candidate != block)
-            .max_by_key(|candidate| self.sets.get(candidate).map_or(0, BTreeSet::len))
+        self.idom
+            .get(&block)
             .copied()
+            .filter(|dominator| *dominator != block)
     }
 }
 
@@ -2830,18 +3030,22 @@ fn control_flow_merges(function: &Function) -> Result<HashMap<BlockId, Merge>, T
             .filter(|(_, body, _, _)| body.contains(&block.id))
             .min_by_key(|(_, body, _, _)| body.len());
         let merge = match enclosing {
-            Some((_, body, loop_merge, continue_target))
+            Some((header, body, loop_merge, continue_target))
                 if !body.contains(&merge) || merge == *continue_target =>
             {
                 let successors = successors_of(&block.terminator);
                 // A conditional whose two arms are the loop's own merge and
-                // its continue target is a `break` against a `continue`. It
-                // declares no selection: SPIR-V lets a branch leave a
-                // construct by either of those without one.
-                if successors
-                    .iter()
-                    .all(|successor| successor == loop_merge || successor == continue_target)
-                {
+                // its continue target is a `break` against a `continue`, and
+                // one in the continue target itself whose arms are the back
+                // edge and the merge is a `do`/`while`'s test. Neither
+                // declares a selection: SPIR-V lets a branch leave a construct
+                // by a merge, a continue target or a back edge without one.
+                let structureless = |successor: &BlockId| {
+                    successor == loop_merge
+                        || successor == continue_target
+                        || (block.id == *continue_target && successor == header)
+                };
+                if successors.iter().all(structureless) {
                     continue;
                 }
                 let staying: Vec<_> = successors

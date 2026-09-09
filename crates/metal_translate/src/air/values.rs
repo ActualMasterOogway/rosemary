@@ -496,17 +496,39 @@ impl ValueTable {
                         let DecodedType::Vector { element, lanes } = types[ty] else {
                             return Err(semantic("extractelement requires vector"));
                         };
-                        let index = self.integer(self.operand_id(*index)?, types)?;
-                        if index >= u64::from(lanes) {
-                            return Err(semantic("extractelement lane is out of range"));
+                        // Metal's `v[i]` need not name a constant lane.
+                        let index_id = self.operand_id(*index)?;
+                        match self.integer(index_id, types) {
+                            Ok(lane) if lane < u64::from(lanes) => (
+                                element,
+                                InstructionKind::CompositeExtract {
+                                    composite,
+                                    index: lane as u32,
+                                },
+                            ),
+                            Ok(_) => {
+                                return Err(semantic("extractelement lane is out of range"));
+                            }
+                            Err(error) => {
+                                // Only a lane whose value is not yet known is
+                                // a dynamic index; one of the wrong type is
+                                // still the malformed record it was.
+                                if !matches!(
+                                    self.values.get(index_id).map(|value| &types[value.ty]),
+                                    Some(DecodedType::Integer(_))
+                                ) {
+                                    return Err(error);
+                                }
+                                let (_, index) = operand(*index, None)?;
+                                (
+                                    element,
+                                    InstructionKind::VectorExtractDynamic {
+                                        vector: composite,
+                                        index,
+                                    },
+                                )
+                            }
                         }
-                        (
-                            element,
-                            InstructionKind::CompositeExtract {
-                                composite,
-                                index: index as u32,
-                            },
-                        )
                     }
                     (7, [vector, object, index]) => {
                         let (ty, composite) = operand(*vector, None)?;
@@ -514,18 +536,43 @@ impl ValueTable {
                         let DecodedType::Vector { element, lanes } = types[ty] else {
                             return Err(semantic("insertelement requires vector"));
                         };
-                        let index = self.integer(self.operand_id(*index)?, types)?;
-                        if index >= u64::from(lanes) || object_ty != element {
-                            return Err(semantic("insertelement lane or element type mismatch"));
+                        if object_ty != element {
+                            return Err(semantic("insertelement element type mismatch"));
                         }
-                        (
-                            ty,
-                            InstructionKind::CompositeInsert {
-                                composite,
-                                object,
-                                index: index as u32,
-                            },
-                        )
+                        let index_id = self.operand_id(*index)?;
+                        match self.integer(index_id, types) {
+                            Ok(lane) if lane < u64::from(lanes) => (
+                                ty,
+                                InstructionKind::CompositeInsert {
+                                    composite,
+                                    object,
+                                    index: lane as u32,
+                                },
+                            ),
+                            Ok(_) => {
+                                return Err(semantic("insertelement lane is out of range"));
+                            }
+                            Err(error) => {
+                                // Only a lane whose value is not yet known is
+                                // a dynamic index; one of the wrong type is
+                                // still the malformed record it was.
+                                if !matches!(
+                                    self.values.get(index_id).map(|value| &types[value.ty]),
+                                    Some(DecodedType::Integer(_))
+                                ) {
+                                    return Err(error);
+                                }
+                                let (_, index) = operand(*index, None)?;
+                                (
+                                    ty,
+                                    InstructionKind::VectorInsertDynamic {
+                                        vector: composite,
+                                        object,
+                                        index,
+                                    },
+                                )
+                            }
+                        }
                     }
                     (8, [first, second, mask] | [first, _, second, mask]) => {
                         let (ty, first) = match fields.as_slice() {
@@ -632,13 +679,39 @@ impl ValueTable {
                             {
                                 let actual =
                                     aliases.get(&source_id).map_or(*from, |alias| alias.pointee);
+                                // A pointer to an array read as a pointer to
+                                // something the shape of its element addresses
+                                // element zero. Step into it, so that the load
+                                // reads one element rather than the whole
+                                // array, and adapt that element at the load.
+                                let (actual, address) = match types[actual] {
+                                    DecodedType::Array { element, .. }
+                                        if reinterpretation(types, element, *to).is_ok() =>
+                                    {
+                                        let pointer = Type::Pointer {
+                                            space: address_space_of(*address_space)?,
+                                            pointee: Box::new(ir_type(element, types)?),
+                                        };
+                                        let stepped = emit(
+                                            &mut function,
+                                            &mut instructions,
+                                            pointer,
+                                            InstructionKind::BufferAddress {
+                                                pointer: value.clone(),
+                                                indices: vec![Operand::u32(0), Operand::u32(0)],
+                                            },
+                                        );
+                                        (element, stepped)
+                                    }
+                                    _ => (actual, value.clone()),
+                                };
                                 reinterpretation(types, actual, *to)?;
                                 let id = self.values.len();
                                 aliases.insert(
                                     id,
                                     PointerAlias {
                                         pointee: actual,
-                                        operand: value.clone(),
+                                        operand: address,
                                     },
                                 );
                                 define(
@@ -759,19 +832,32 @@ impl ValueTable {
                         if *volatile == 0 && *alignment <= 32 =>
                     {
                         let pointer_id = self.operand_id(*pointer)?;
-                        if aliases.contains_key(&pointer_id) {
-                            return Err(semantic(
-                                "LLVM store through a reinterpreted pointer needs lowering",
-                            ));
-                        }
-                        let (pointer_ty, pointer) = operand(*pointer, None)?;
-                        let DecodedType::Pointer { pointee, .. } = types[pointer_ty] else {
-                            return Err(semantic("LLVM store requires a pointer"));
+                        let alias = aliases
+                            .get(&pointer_id)
+                            .map(|alias| (alias.pointee, alias.operand.clone()));
+                        let (pointee, pointer) = match alias {
+                            Some((pointee, operand)) => (pointee, operand),
+                            None => {
+                                let (pointer_ty, pointer) = operand(*pointer, None)?;
+                                let DecodedType::Pointer { pointee, .. } = types[pointer_ty] else {
+                                    return Err(semantic("LLVM store requires a pointer"));
+                                };
+                                (pointee, pointer)
+                            }
                         };
                         let (value_ty, value) = operand(*value, None)?;
-                        if value_ty != pointee {
-                            return Err(semantic("LLVM store type mismatch"));
-                        }
+                        // A store through a reinterpreted pointer is the
+                        // mirror of the load: the value the guest wrote is
+                        // adapted to what the address really holds, rather
+                        // than the pointer being retyped.
+                        let value = narrow(
+                            value,
+                            value_ty,
+                            pointee,
+                            types,
+                            &mut function,
+                            &mut instructions,
+                        )?;
                         instructions.push(Instruction {
                             result: None,
                             kind: InstructionKind::Store { pointer, value },
@@ -835,25 +921,30 @@ impl ValueTable {
                         });
                         continue;
                     }
-                    (2, [lhs, rhs, opcode] | [lhs, rhs, opcode, _]) => {
+                    (2, [lhs, rhs, opcode] | [lhs, rhs, opcode, _] | [lhs, _, rhs, opcode, _]) => {
                         // A four-field record is ambiguous: it is either an
                         // operation with fast-math flags, or one whose first
                         // operand is not defined yet and so repeats its type.
-                        // Only the value table can tell them apart.
+                        // Only the value table can tell them apart. A
+                        // five-field record is both at once and needs no
+                        // guessing.
                         let forward_form = matches!(
                             fields.as_slice(),
                             [first, ..] if self.reference(*first)? >= self.values.len()
                         );
-                        let (lhs, rhs, opcode) = match (fields.as_slice(), forward_form) {
-                            ([first, declared, second, code], true) => (
-                                operand(*first, Some(declared))?,
-                                operand(*second, None)?,
-                                code,
-                            ),
-                            _ => (operand(*lhs, None)?, operand(*rhs, None)?, opcode),
+                        let (lhs, second, opcode) = match (fields.as_slice(), forward_form) {
+                            ([first, declared, second, code], true)
+                            | ([first, declared, second, code, _], _) => {
+                                (operand(*first, Some(declared))?, second, code)
+                            }
+                            _ => (operand(*lhs, None)?, rhs, opcode),
                         };
                         let (ty, lhs) = lhs;
-                        let (rhs_ty, rhs) = rhs;
+                        // LLVM writes no type for the second operand of a
+                        // binary operation, even when it names a value the
+                        // record stream has not reached: both operands of one
+                        // have the same type, so the first one's is it.
+                        let (rhs_ty, rhs) = operand(*second, Some(&(ty as u64)))?;
                         if ty != rhs_ty {
                             return Err(semantic("LLVM binary operand type mismatch"));
                         }
@@ -906,7 +997,15 @@ impl ValueTable {
                         };
                         (ty, kind)
                     }
-                    (34, [_, cc, callee, args @ ..]) if *cc == 1 => {
+                    // The call marker field carries the calling convention
+                    // and the tail-call markers, none of which changes what
+                    // the call computes. The two bits which do change the
+                    // record's shape - an explicit function type and
+                    // fast-math flags, each inserting a field before the
+                    // callee - are rejected rather than misread.
+                    (34, [_, cc, callee, args @ ..])
+                        if cc & ((1 << CALL_EXPLICIT_TYPE) | (1 << CALL_FMF)) == 0 =>
+                    {
                         let callee = self.operand_id(*callee)?;
                         let signature = match types[self.values[callee].ty] {
                             DecodedType::Pointer { pointee, .. } => pointee,
@@ -915,6 +1014,107 @@ impl ValueTable {
                         let DecodedType::Function { result, parameters } = &types[signature] else {
                             return Err(semantic("LLVM call target is not a function"));
                         };
+                        let name = names
+                            .get(&callee)
+                            .ok_or_else(|| semantic("LLVM call target has no name"))?
+                            .clone();
+                        // `llvm.memcpy` declares byte pointers, so its
+                        // arguments never match the declaration by type. Metal
+                        // reaches it by assigning one whole structure, which
+                        // is a load and a store of that structure.
+                        if name.starts_with("llvm.memcpy.") {
+                            // Older LLVM spells an alignment between the
+                            // length and the volatile flag; both forms end
+                            // with markers this lowering does not need.
+                            let [destination, source, length, ..] = args else {
+                                return Err(semantic("llvm.memcpy has unexpected operands"));
+                            };
+                            let mut addressed = |encoded: u64,
+                                                 id: usize|
+                             -> Result<(usize, Operand), TranslateError> {
+                                if let Some(alias) = aliases.get(&id) {
+                                    return Ok((alias.pointee, alias.operand.clone()));
+                                }
+                                let (ty, value) = operand(encoded, None)?;
+                                match types[ty] {
+                                    DecodedType::Pointer { pointee, .. } => Ok((pointee, value)),
+                                    _ => Err(semantic("llvm.memcpy operand is not a pointer")),
+                                }
+                            };
+                            let destination_id = self.operand_id(*destination)?;
+                            let source_id = self.operand_id(*source)?;
+                            let (into, destination) = addressed(*destination, destination_id)?;
+                            let (from, source) = addressed(*source, source_id)?;
+                            if into != from {
+                                return Err(semantic(
+                                    "llvm.memcpy copies between two different types",
+                                ));
+                            }
+                            let copied = ir_type(into, types)?;
+                            let (size, _) = layout(&copied)?;
+                            let bytes = self.integer(self.operand_id(*length)?, types)?;
+                            if bytes != u64::from(size) {
+                                return Err(semantic(
+                                    "llvm.memcpy length is not one whole value of the copied type",
+                                ));
+                            }
+                            let loaded = emit(
+                                &mut function,
+                                &mut instructions,
+                                copied,
+                                InstructionKind::Load { pointer: source },
+                            );
+                            instructions.push(Instruction {
+                                result: None,
+                                kind: InstructionKind::Store {
+                                    pointer: destination,
+                                    value: loaded,
+                                },
+                            });
+                            continue;
+                        }
+                        // Metal reaches `llvm.memset` by initialising a local
+                        // array to zero, which is a store of a zero value.
+                        // Any other fill pattern would have to be spelled
+                        // byte by byte, which logical addressing cannot do.
+                        if name.starts_with("llvm.memset.") {
+                            let [destination, fill, length, ..] = args else {
+                                return Err(semantic("llvm.memset has unexpected operands"));
+                            };
+                            let destination_id = self.operand_id(*destination)?;
+                            let (into, destination) = match aliases.get(&destination_id) {
+                                Some(alias) => (alias.pointee, alias.operand.clone()),
+                                None => {
+                                    let (ty, value) = operand(*destination, None)?;
+                                    match types[ty] {
+                                        DecodedType::Pointer { pointee, .. } => (pointee, value),
+                                        _ => {
+                                            return Err(semantic(
+                                                "llvm.memset destination is not a pointer",
+                                            ));
+                                        }
+                                    }
+                                }
+                            };
+                            if self.integer(self.operand_id(*fill)?, types)? != 0 {
+                                return Err(semantic("llvm.memset fills with a nonzero byte"));
+                            }
+                            let cleared = ir_type(into, types)?;
+                            let (size, _) = layout(&cleared)?;
+                            if self.integer(self.operand_id(*length)?, types)? != u64::from(size) {
+                                return Err(semantic(
+                                    "llvm.memset length is not one whole value of the cleared type",
+                                ));
+                            }
+                            instructions.push(Instruction {
+                                result: None,
+                                kind: InstructionKind::Store {
+                                    pointer: destination,
+                                    value: zero_composite(&cleared)?,
+                                },
+                            });
+                            continue;
+                        }
                         if args.len() != parameters.len() {
                             return Err(semantic("LLVM call arity mismatch"));
                         }
@@ -926,16 +1126,13 @@ impl ValueTable {
                             }
                             actual.push(value);
                         }
-                        let intrinsic = names
-                            .get(&callee)
-                            .ok_or_else(|| semantic("LLVM call target has no name"))?;
                         // A lifetime marker bounds a local's live range for
                         // LLVM's own optimizers. SPIR-V has no such thing, and
                         // the variable is live for the whole function there.
-                        if intrinsic.starts_with("llvm.lifetime.") {
+                        if name.starts_with("llvm.lifetime.") {
                             continue;
                         }
-                        let kind = air_intrinsic(intrinsic, &actual)?;
+                        let kind = air_intrinsic(&name, &actual)?;
                         if matches!(types[*result], DecodedType::Void) {
                             instructions.push(Instruction { result: None, kind });
                             continue;
@@ -1650,6 +1847,23 @@ fn air_intrinsic(name: &str, arguments: &[Operand]) -> Result<InstructionKind, T
         }
     }
     match operation {
+        // The second operand is LLVM's "zero is undefined" hint. This
+        // lowering answers the width for zero whether or not the caller would
+        // have accepted anything, so the hint changes nothing.
+        "clz" => match arguments {
+            [value] | [value, _] => Ok(InstructionKind::IntegerUnary {
+                op: IntegerUnaryOp::CountLeadingZeros,
+                value: value.clone(),
+            }),
+            _ => Err(semantic(format!("LLVM intrinsic {name} takes one operand"))),
+        },
+        "ctz" => match arguments {
+            [value] | [value, _] => Ok(InstructionKind::IntegerUnary {
+                op: IntegerUnaryOp::CountTrailingZeros,
+                value: value.clone(),
+            }),
+            _ => Err(semantic(format!("LLVM intrinsic {name} takes one operand"))),
+        },
         "popcount" => match arguments {
             [value] => Ok(InstructionKind::IntegerUnary {
                 op: IntegerUnaryOp::PopulationCount,
@@ -2446,6 +2660,12 @@ mod tests {
     }
 }
 
+/// The bit of an LLVM call's marker field which says a function type precedes
+/// the callee.
+const CALL_EXPLICIT_TYPE: u32 = 15;
+/// The bit which says fast-math flags precede it.
+const CALL_FMF: u32 = 17;
+
 /// A phi whose incoming values are resolved after every block is lowered.
 struct PhiFixup {
     block: usize,
@@ -2473,6 +2693,10 @@ fn block_id(index: u64, count: usize) -> Result<BlockId, TranslateError> {
 /// sampling arguments are passed as a present/absent flag followed by the
 /// value; only a constant flag is accepted, because a runtime choice between
 /// implicit and explicit level of detail has no SPIR-V form.
+///
+/// A `_grad` suffix is Metal's `gradient2d(dPdx, dPdy)`: the derivatives take
+/// the place of the level-of-detail flag and value, and follow the array
+/// index rather than preceding it.
 fn air_texture_intrinsic(
     operation: &str,
     arguments: &[Operand],
@@ -2481,6 +2705,10 @@ fn air_texture_intrinsic(
         return Ok(None);
     };
     let shape = shape.strip_prefix('_').unwrap_or(shape);
+    let (shape, gradient) = match shape.strip_suffix("_grad") {
+        Some(shape) => (shape, true),
+        None => (shape, false),
+    };
     let array = shape.ends_with("_array");
     let multisampled = shape.ends_with("_ms");
     let malformed = || {
@@ -2503,6 +2731,11 @@ fn air_texture_intrinsic(
             } else {
                 (None, rest)
             };
+            let (gradient, rest) = match (gradient, rest) {
+                (false, rest) => (None, rest),
+                (true, [dx, dy, rest @ ..]) => (Some(Box::new((dx.clone(), dy.clone()))), rest),
+                (true, _) => return Err(malformed()),
+            };
             let (offset, rest) = match rest {
                 [flag, offset, rest @ ..] if shape.starts_with("2d") || shape.starts_with("3d") => {
                     (optional(flag, offset)?, rest)
@@ -2523,11 +2756,16 @@ fn air_texture_intrinsic(
                     array_index,
                     offset,
                     lod: None,
+                    gradient: None,
                     gather: Some(0),
                 }));
             }
-            let [flag, lod] = rest else {
-                return Err(malformed());
+            // A gradient sample carries no level-of-detail flag: the
+            // derivatives are the level.
+            let lod = match (gradient.is_some(), rest) {
+                (true, []) => None,
+                (false, [flag, lod]) => optional(flag, lod)?,
+                _ => return Err(malformed()),
             };
             Ok(Some(InstructionKind::TextureSample {
                 texture: texture.clone(),
@@ -2535,7 +2773,8 @@ fn air_texture_intrinsic(
                 coordinate: coordinate.clone(),
                 array_index,
                 offset,
-                lod: optional(flag, lod)?,
+                lod,
+                gradient,
                 gather: None,
             }))
         }
@@ -2610,9 +2849,9 @@ fn optional(flag: &Operand, value: &Operand) -> Result<Option<Operand>, Translat
     match flag {
         Operand::Bool(false) => Ok(None),
         Operand::Bool(true) => Ok(Some(value.clone())),
-        _ => Err(semantic(
-            "AIR texture sampling option is not a constant flag",
-        )),
+        other => Err(semantic(format!(
+            "AIR texture sampling option is not a constant flag: {other:?}"
+        ))),
     }
 }
 
@@ -2701,6 +2940,69 @@ fn widen(
             let components = (0..lanes(to))
                 .map(|lane| if lane < lanes(from) { lane } else { u32::MAX })
                 .collect();
+            let source = ir_type(from, types)?;
+            Ok(emit(
+                function,
+                instructions,
+                target,
+                InstructionKind::VectorShuffle {
+                    first: value,
+                    second: Operand::Undef(source),
+                    components,
+                },
+            ))
+        }
+    }
+}
+
+/// Adapt a value to the type the address it is stored through really holds.
+///
+/// The mirror of [`widen`]: where a load of a padded `float3` reads four lanes
+/// and drops one, a store of four writes the three the storage has.
+fn narrow(
+    value: Operand,
+    from: usize,
+    to: usize,
+    types: &[DecodedType],
+    function: &mut Function,
+    instructions: &mut Vec<Instruction>,
+) -> Result<Operand, TranslateError> {
+    if from == to {
+        return Ok(value);
+    }
+    let target = ir_type(to, types)?;
+    // `reinterpretation` is asked in the direction the storage was declared
+    // in, which is the one whose widening rule holds.
+    match reinterpretation(types, to, from)? {
+        Adaptation::None => Ok(value),
+        Adaptation::Bitcast => Ok(emit(
+            function,
+            instructions,
+            target,
+            InstructionKind::Convert {
+                op: ConvertOp::Bitcast,
+                value,
+            },
+        )),
+        Adaptation::Widen => {
+            let lanes = |index: usize| match types[index] {
+                DecodedType::Vector { lanes, .. } => lanes,
+                _ => 1,
+            };
+            // A shuffle produces a vector; storage of one lane is a scalar and
+            // takes the first component instead.
+            if lanes(to) == 1 {
+                return Ok(emit(
+                    function,
+                    instructions,
+                    target,
+                    InstructionKind::CompositeExtract {
+                        composite: value,
+                        index: 0,
+                    },
+                ));
+            }
+            let components = (0..lanes(to)).collect();
             let source = ir_type(from, types)?;
             Ok(emit(
                 function,

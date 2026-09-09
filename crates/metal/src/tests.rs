@@ -543,14 +543,7 @@ fn a_translated_triangle_draws_on_the_gpu() {
 
     let pass = object::make(
         c"MTLRenderPassDescriptor",
-        encoder::RenderPassDescriptor {
-            colors: [encoder::AttachmentDescriptor::default(); encoder::RENDER_TARGETS],
-            depth: encoder::AttachmentDescriptor::default(),
-            stencil: encoder::AttachmentDescriptor::default(),
-            color_objects: std::ptr::null_mut(),
-            depth_object: std::ptr::null_mut(),
-            stencil_object: std::ptr::null_mut(),
-        },
+        encoder::RenderPassDescriptor::default(),
     );
     // SAFETY: objects this test made, sent the selectors they implement.
     unsafe {
