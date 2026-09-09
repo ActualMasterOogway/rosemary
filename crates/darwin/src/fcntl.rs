@@ -37,6 +37,9 @@ pub mod cmd {
 /// A question about the guest's call, answered from the guest's numbers, so the answer
 /// does not change with the host.
 pub fn takes_third_argument(cmd: i32) -> bool {
+    // `F_NOCACHE` and `F_GLOBAL_NOCACHE` are not in this list: both take an
+    // `int` (0 or 1) that turns caching off or back on, per Darwin's
+    // `fcntl(2)`.
     !matches!(
         cmd,
         cmd::F_GETFD
@@ -45,8 +48,6 @@ pub fn takes_third_argument(cmd: i32) -> bool {
             | cmd::F_FULLFSYNC
             | cmd::F_FREEZE_FS
             | cmd::F_THAW_FS
-            | cmd::F_NOCACHE
-            | cmd::F_GLOBAL_NOCACHE
     )
 }
 
