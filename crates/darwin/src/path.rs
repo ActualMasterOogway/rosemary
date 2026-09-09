@@ -20,12 +20,6 @@
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
 
-/// How many components a path may have before this stops walking it.
-///
-/// A path that deep is a loop or a fuzz case, and the walk is one `read_dir` per
-/// component.
-const MAX_COMPONENTS: usize = 64;
-
 /// `path`, spelled the way the filesystem spells it, or `None` if no
 /// case-insensitive reading of it exists either.
 ///
@@ -50,13 +44,8 @@ pub fn insensitive(path: &CStr) -> Option<CString> {
         true => PathBuf::from("/"),
         false => PathBuf::from("."),
     };
-    let mut components = 0;
     for part in wanted.components() {
         use std::path::Component;
-        components += 1;
-        if components > MAX_COMPONENTS {
-            return None;
-        }
         match part {
             Component::RootDir => continue,
             Component::CurDir => continue,
@@ -104,7 +93,11 @@ pub fn insensitive_at(dirfd: libc::c_int, path: &CStr) -> Option<CString> {
 /// the caller has no way to notice.
 fn sole_match(directory: &Path, name: &str) -> Option<PathBuf> {
     let mut found = None;
-    for entry in std::fs::read_dir(directory).ok()?.flatten() {
+    for entry in std::fs::read_dir(directory).ok()? {
+        // An incomplete enumeration cannot prove that a match is unique. In
+        // particular, silently skipping an unreadable entry could make one of
+        // two case-folded names look like the sole match.
+        let entry = entry.ok()?;
         let candidate = entry.file_name();
         let candidate = candidate.to_str()?;
         if !candidate.eq_ignore_ascii_case(name) {
@@ -215,5 +208,32 @@ mod tests {
         unsafe { libc::close(dirfd) };
 
         assert!(found.to_bytes().ends_with(b"/Contents/Game.ios"));
+    }
+
+    /// Darwin accepts paths deeper than an arbitrary implementation limit as
+    /// long as the byte length remains within the filesystem's limit.
+    #[test]
+    fn a_valid_path_with_more_than_sixty_four_components_is_walked() {
+        let at = std::env::temp_dir().join(format!("r3-path-deep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&at);
+        let mut directory = at.clone();
+        for _ in 0..70 {
+            directory.push("D");
+        }
+        std::fs::create_dir_all(&directory).expect("a deep directory");
+        std::fs::write(directory.join("Leaf"), b"x").expect("a leaf");
+
+        let mut wanted = at;
+        for _ in 0..70 {
+            wanted.push("d");
+        }
+        wanted.push("leaf");
+        let wanted = CString::new(wanted.to_str().expect("utf-8")).expect("no NUL");
+        let found = insensitive(&wanted).expect("a case-insensitive deep match");
+        assert!(found.to_bytes().ends_with(b"/D/D/D/D/D/Leaf"));
+
+        // The resolved path owns no resources, so the tree can be removed now.
+        let root = std::env::temp_dir().join(format!("r3-path-deep-{}", std::process::id()));
+        std::fs::remove_dir_all(root).expect("the fixture is removed");
     }
 }
