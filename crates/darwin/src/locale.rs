@@ -11,10 +11,9 @@
 
 /// Whether `loc` formats numbers the way the C locale does.
 ///
-/// A null `loc` means **the caller's current locale**, which is what Darwin's `*_l`
-/// functions take it to mean and therefore what a guest passing null is asking for.
-/// Spelled explicitly on both hosts, because the portable spelling below would
-/// dereference it.
+/// A null `loc` means Darwin's C-locale sentinel for the `*_l` convenience
+/// functions. Spelled explicitly because glibc's `_l` functions dereference a
+/// null locale object.
 ///
 /// `None` for a handle nothing recognises, which the caller must not treat as a yes.
 ///
@@ -22,6 +21,9 @@
 ///
 /// `loc` is a `locale_t` this process obtained, or null.
 pub unsafe fn is_c_numeric(loc: *mut core::ffi::c_void) -> Option<bool> {
+    if loc.is_null() {
+        return Some(true);
+    }
     #[cfg(target_os = "macos")]
     {
         // SAFETY: the caller guarantees a `locale_t` or null, both of which
@@ -41,13 +43,22 @@ pub unsafe fn is_c_numeric(loc: *mut core::ffi::c_void) -> Option<bool> {
         // point instead. That *is* what "formats numbers the C way" means to the
         // renderer, and it is the property the caller depends on: a locale whose
         // decimal point is `.` renders identically to C, whatever it is called.
-        let point = match loc.is_null() {
-            // SAFETY: the non-`_l` form reads the caller's current locale and takes
-            // no handle, which is what a null `loc` asks for.
-            true => unsafe { libc::nl_langinfo(libc::RADIXCHAR) },
-            // SAFETY: the caller guarantees a live `locale_t`. The result is a
-            // NUL-terminated string owned by the locale, valid until it is freed.
-            false => unsafe { libc::nl_langinfo_l(libc::RADIXCHAR, loc as libc::locale_t) },
+        let loc = loc as libc::locale_t;
+        let _global = if loc == crate::xlocale::global_locale() {
+            // glibc forbids passing this distinguished handle to `_l`
+            // functions. Temporarily select it and use the plain query.
+            crate::xlocale::switch(loc)
+        } else {
+            None
+        };
+        // SAFETY: an ordinary locale is accepted by the `_l` query. For the
+        // global sentinel, the guard selected it as the thread locale first.
+        let point = unsafe {
+            if loc == crate::xlocale::global_locale() {
+                libc::nl_langinfo(libc::RADIXCHAR)
+            } else {
+                libc::nl_langinfo_l(libc::RADIXCHAR, loc)
+            }
         };
         if point.is_null() {
             return None;
@@ -91,16 +102,21 @@ mod tests {
         unsafe { libc::freelocale(loc) };
     }
 
-    /// A guest passing null is asking about its current locale, which this runtime
-    /// never changes - so it must get the same answer as the C locale itself, and
-    /// get it on both hosts.
+    /// A null is Darwin's explicit C-locale sentinel for convenience functions.
     /// `LC_ALL_MASK`, which the `libc` crate does not export for every host.
     ///
     /// The same number everywhere it is defined - every category bit set - so writing
     /// it out is stating the value rather than choosing one.
     #[test]
-    fn a_null_handle_means_the_current_locale() {
+    fn a_null_handle_means_the_c_locale() {
         // SAFETY: null is one of the two values this accepts.
         assert_eq!(unsafe { is_c_numeric(core::ptr::null_mut()) }, Some(true));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn the_global_locale_sentinel_is_not_passed_to_an_l_function() {
+        // SAFETY: LC_GLOBAL_LOCALE is a valid explicit locale selection.
+        assert!(unsafe { is_c_numeric(crate::xlocale::global_locale().cast()) }.is_some());
     }
 }

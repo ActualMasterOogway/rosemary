@@ -7,8 +7,10 @@
 //! function between a `uselocale` pair, and the module exists because the
 //! vendored `libc++` imports the whole family.
 //!
-//! A null `locale_t` means the caller's current locale, which is what Darwin's
-//! `xlocale.h` documents - so that is the one case that switches nothing.
+//! A null `locale_t` is Darwin's C-locale sentinel for these convenience
+//! functions. That differs from management functions such as `duplocale`, where
+//! null means the caller's current locale, and from glibc's `_l` functions,
+//! which dereference null.
 //!
 //! **The `mbstate_t` is not converted.** Darwin's is 128 bytes and glibc's is
 //! eight, and a guest hands its own across. That is safe in the direction it
@@ -24,6 +26,159 @@
 use std::ffi::{c_char, c_int, c_uint, c_void};
 
 use machish::resolve::SyntheticDylib;
+
+/// POSIX's distinguished `(locale_t)-1`, omitted by the Rust libc bindings on
+/// this target.
+pub(crate) fn global_locale() -> libc::locale_t {
+    usize::MAX as libc::locale_t
+}
+
+/// Darwin numbers locale categories in BSD order; glibc uses the order from
+/// its locale archive. Both sets of values are public ABI because callers pass
+/// the category itself to `setlocale` and one bit per category to `newlocale`.
+mod category {
+    use super::c_int;
+
+    pub const ALL: c_int = 0;
+    pub const COLLATE: c_int = 1;
+    pub const CTYPE: c_int = 2;
+    pub const MONETARY: c_int = 3;
+    pub const NUMERIC: c_int = 4;
+    pub const TIME: c_int = 5;
+    pub const MESSAGES: c_int = 6;
+
+    pub const COLLATE_MASK: c_int = 1 << 0;
+    pub const CTYPE_MASK: c_int = 1 << 1;
+    pub const MESSAGES_MASK: c_int = 1 << 2;
+    pub const MONETARY_MASK: c_int = 1 << 3;
+    pub const NUMERIC_MASK: c_int = 1 << 4;
+    pub const TIME_MASK: c_int = 1 << 5;
+    pub const ALL_MASK: c_int = (1 << 6) - 1;
+}
+
+fn host_category(guest: c_int) -> Option<c_int> {
+    Some(match guest {
+        category::ALL => libc::LC_ALL,
+        category::COLLATE => libc::LC_COLLATE,
+        category::CTYPE => libc::LC_CTYPE,
+        category::MONETARY => libc::LC_MONETARY,
+        category::NUMERIC => libc::LC_NUMERIC,
+        category::TIME => libc::LC_TIME,
+        category::MESSAGES => libc::LC_MESSAGES,
+        _ => return None,
+    })
+}
+
+fn host_category_mask(guest: c_int) -> Option<c_int> {
+    if guest & !category::ALL_MASK != 0 {
+        return None;
+    }
+    let mut host = 0;
+    for (guest_bit, host_bit) in [
+        (category::COLLATE_MASK, libc::LC_COLLATE_MASK),
+        (category::CTYPE_MASK, libc::LC_CTYPE_MASK),
+        (category::MESSAGES_MASK, libc::LC_MESSAGES_MASK),
+        (category::MONETARY_MASK, libc::LC_MONETARY_MASK),
+        (category::NUMERIC_MASK, libc::LC_NUMERIC_MASK),
+        (category::TIME_MASK, libc::LC_TIME_MASK),
+    ] {
+        if guest & guest_bit != 0 {
+            host |= host_bit;
+        }
+    }
+    Some(host)
+}
+
+/// `char *setlocale(int category, const char *locale)`.
+///
+/// # Safety
+///
+/// `locale` is null or a NUL-terminated locale name.
+pub unsafe extern "C" fn setlocale(category: c_int, locale: *const c_char) -> *mut c_char {
+    let Some(category) = host_category(category) else {
+        crate::errno::set(libc::EINVAL);
+        return core::ptr::null_mut();
+    };
+    // SAFETY: the caller's string and the translated host category.
+    unsafe { libc::setlocale(category, locale) }
+}
+
+/// `locale_t newlocale(int mask, const char *name, locale_t base)`.
+///
+/// # Safety
+///
+/// `name` is NUL-terminated and `base` is null or a locale returned by this
+/// process's locale functions.
+pub unsafe extern "C" fn newlocale(
+    mask: c_int,
+    name: *const c_char,
+    base: libc::locale_t,
+) -> libc::locale_t {
+    let replaces_all = mask == category::ALL_MASK;
+    let Some(mask) = host_category_mask(mask) else {
+        crate::errno::set(libc::EINVAL);
+        return core::ptr::null_mut();
+    };
+    // Darwin accepts a null name as the C locale. glibc requires a string.
+    let name = if name.is_null() { c"C".as_ptr() } else { name };
+
+    // Darwin starts an omitted base from the caller's current locale, whereas
+    // glibc starts one from the C locale. Make an owned copy because glibc is
+    // allowed to consume the base object it receives. LC_ALL is the documented
+    // exception on Darwin: it ignores `base` completely.
+    let owned_base = if base.is_null() && !replaces_all {
+        // SAFETY: a null query returns the current thread locale (possibly the
+        // distinguished global-locale value), both accepted by `duplocale`.
+        let current = unsafe { libc::uselocale(core::ptr::null_mut()) };
+        // SAFETY: `current` came from `uselocale`.
+        let copy = unsafe { libc::duplocale(current) };
+        if copy.is_null() {
+            return core::ptr::null_mut();
+        }
+        Some(copy)
+    } else {
+        None
+    };
+    let base = owned_base.unwrap_or(base);
+    // SAFETY: the caller's name and base, with a translated category mask.
+    let result = unsafe { libc::newlocale(mask, name, base) };
+    if result.is_null()
+        && let Some(copy) = owned_base
+    {
+        // On failure `newlocale` leaves its base untouched.
+        unsafe { libc::freelocale(copy) };
+    }
+    result
+}
+
+/// `locale_t duplocale(locale_t)`.
+///
+/// Darwin defines a null locale as the caller's current locale here; glibc
+/// requires an actual locale object (or `LC_GLOBAL_LOCALE`).
+pub unsafe extern "C" fn duplocale(loc: libc::locale_t) -> libc::locale_t {
+    let loc = if loc.is_null() {
+        // SAFETY: a null argument is a query.
+        unsafe { libc::uselocale(core::ptr::null_mut()) }
+    } else {
+        loc
+    };
+    // SAFETY: the resolved current locale or the caller's locale object.
+    unsafe { libc::duplocale(loc) }
+}
+
+/// `int freelocale(locale_t)`.
+///
+/// Darwin returns a status; POSIX/glibc's otherwise-identical function returns
+/// `void`. Forwarding it leaves the guest reading an arbitrary return register.
+pub unsafe extern "C" fn freelocale(loc: libc::locale_t) -> c_int {
+    if loc.is_null() || loc == global_locale() {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    // SAFETY: the caller's owned locale object.
+    unsafe { libc::freelocale(loc) };
+    0
+}
 
 /// The thread's locale, put back when this is dropped.
 ///
@@ -42,16 +197,25 @@ impl Drop for Switched {
 
 /// Make `loc` the thread's locale for as long as the guard lives.
 ///
-/// `None` for a null `loc`, which asks for the locale already in effect.
+/// `None` only if the host's C locale could not be constructed.
 pub(crate) fn switch(loc: libc::locale_t) -> Option<Switched> {
-    if loc.is_null() {
-        return None;
-    }
+    let loc = if loc.is_null() { c_locale()? } else { loc };
     // SAFETY: `loc` is a `locale_t` this process obtained - a guest's came from
     // `newlocale`, which is passed through. A null result means the switch did
     // not happen, and the guard then restores a null, which `uselocale` reads as
     // "the global locale" - the state a thread that never switched is in.
     Some(Switched(unsafe { libc::uselocale(loc) }))
+}
+
+/// A host object representing Darwin's `LC_C_LOCALE` null sentinel when it is
+/// used as the locale argument of a convenience function.
+fn c_locale() -> Option<libc::locale_t> {
+    static C: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let at = *C.get_or_init(|| {
+        // SAFETY: the C locale always exists and a null base is valid to glibc.
+        unsafe { libc::newlocale(libc::LC_ALL_MASK, c"C".as_ptr(), core::ptr::null_mut()) as usize }
+    });
+    (at != 0).then_some(at as libc::locale_t)
 }
 
 /// The plain functions each wrapper reaches, declared here because the `libc`
@@ -105,6 +269,19 @@ mod plain {
         pub fn isxdigit(c: c_int) -> c_int;
         pub fn isblank(c: c_int) -> c_int;
         pub fn isprint(c: c_int) -> c_int;
+        pub fn iswalpha(c: c_uint) -> c_int;
+        pub fn iswcntrl(c: c_uint) -> c_int;
+        pub fn iswdigit(c: c_uint) -> c_int;
+        pub fn iswgraph(c: c_uint) -> c_int;
+        pub fn iswlower(c: c_uint) -> c_int;
+        pub fn iswpunct(c: c_uint) -> c_int;
+        pub fn iswspace(c: c_uint) -> c_int;
+        pub fn iswupper(c: c_uint) -> c_int;
+        pub fn iswxdigit(c: c_uint) -> c_int;
+        pub fn iswblank(c: c_uint) -> c_int;
+        pub fn iswprint(c: c_uint) -> c_int;
+        pub fn towlower(c: c_uint) -> c_uint;
+        pub fn towupper(c: c_uint) -> c_uint;
         pub fn __ctype_get_mb_cur_max() -> usize;
         pub fn strtol(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> i64;
         pub fn strtoll(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> i64;
@@ -255,27 +432,57 @@ mod ctype {
 /// character-width field - are left clear, which is what they are for every
 /// character in a C or UTF-8 locale anyway.
 fn runetype(c: c_int) -> u32 {
+    if c < 0 {
+        return 0;
+    }
     let mut kinds = 0;
-    // SAFETY: every one of these takes an `int` and touches no memory.
+    // The byte ctype functions are defined only for `unsigned char` and EOF.
+    // Darwin's rune call-outs receive full Unicode scalar values, so using
+    // `isalpha` for (say) U+10FFFF indexes outside glibc's ctype table. Use the
+    // wide family outside the byte range instead.
     unsafe {
-        for (test, bit) in [
-            (
-                plain::isalpha as unsafe extern "C" fn(c_int) -> c_int,
-                ctype::ALPHA,
-            ),
-            (plain::iscntrl, ctype::CONTROL),
-            (plain::isdigit, ctype::DIGIT),
-            (plain::isgraph, ctype::GRAPH),
-            (plain::islower, ctype::LOWER),
-            (plain::ispunct, ctype::PUNCT),
-            (plain::isspace, ctype::SPACE),
-            (plain::isupper, ctype::UPPER),
-            (plain::isxdigit, ctype::XDIGIT),
-            (plain::isblank, ctype::BLANK),
-            (plain::isprint, ctype::PRINT),
-        ] {
-            if test(c) != 0 {
-                kinds |= bit;
+        if c <= u8::MAX as c_int {
+            for (test, bit) in [
+                (
+                    plain::isalpha as unsafe extern "C" fn(c_int) -> c_int,
+                    ctype::ALPHA,
+                ),
+                (plain::iscntrl, ctype::CONTROL),
+                (plain::isdigit, ctype::DIGIT),
+                (plain::isgraph, ctype::GRAPH),
+                (plain::islower, ctype::LOWER),
+                (plain::ispunct, ctype::PUNCT),
+                (plain::isspace, ctype::SPACE),
+                (plain::isupper, ctype::UPPER),
+                (plain::isxdigit, ctype::XDIGIT),
+                (plain::isblank, ctype::BLANK),
+                (plain::isprint, ctype::PRINT),
+            ] {
+                if test(c) != 0 {
+                    kinds |= bit;
+                }
+            }
+        } else {
+            let c = c as c_uint;
+            for (test, bit) in [
+                (
+                    plain::iswalpha as unsafe extern "C" fn(c_uint) -> c_int,
+                    ctype::ALPHA,
+                ),
+                (plain::iswcntrl, ctype::CONTROL),
+                (plain::iswdigit, ctype::DIGIT),
+                (plain::iswgraph, ctype::GRAPH),
+                (plain::iswlower, ctype::LOWER),
+                (plain::iswpunct, ctype::PUNCT),
+                (plain::iswspace, ctype::SPACE),
+                (plain::iswupper, ctype::UPPER),
+                (plain::iswxdigit, ctype::XDIGIT),
+                (plain::iswblank, ctype::BLANK),
+                (plain::iswprint, ctype::PRINT),
+            ] {
+                if test(c) != 0 {
+                    kinds |= bit;
+                }
             }
         }
     }
@@ -337,6 +544,9 @@ fn default_rune_locale() -> u64 {
 
     static AT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *AT.get_or_init(|| {
+        // `_DefaultRuneLocale` is the C table regardless of whichever locale
+        // the thread that first constructs the provider happens to use.
+        let _c = switch(core::ptr::null_mut());
         let mut locale = Box::new(RuneLocale {
             magic: [0; 8],
             encoding: [0; 32],
@@ -406,13 +616,32 @@ pub unsafe extern "C" fn maskrune_l(c: c_int, mask: u64, loc: libc::locale_t) ->
 /// `int __tolower(__darwin_ct_rune_t)` and `int __toupper(...)`, which Darwin's
 /// `<ctype.h>` inlines to for a character outside the cached ASCII range.
 pub unsafe extern "C" fn tolower_(c: c_int) -> c_int {
-    // SAFETY: takes an `int` and touches no memory.
-    unsafe { plain::tolower(c) }
+    if c < 0 {
+        return c;
+    }
+    // SAFETY: the byte function is used only in its defined domain; the wide
+    // function accepts every nonnegative value representable by Darwin's rune.
+    unsafe {
+        if c <= u8::MAX as c_int {
+            plain::tolower(c)
+        } else {
+            plain::towlower(c as c_uint) as c_int
+        }
+    }
 }
 
 pub unsafe extern "C" fn toupper_(c: c_int) -> c_int {
+    if c < 0 {
+        return c;
+    }
     // SAFETY: as above.
-    unsafe { plain::toupper(c) }
+    unsafe {
+        if c <= u8::MAX as c_int {
+            plain::toupper(c)
+        } else {
+            plain::towupper(c as c_uint) as c_int
+        }
+    }
 }
 
 /// `struct lconv *localeconv_l(locale_t)`
@@ -451,6 +680,10 @@ pub unsafe extern "C" fn mb_cur_max_l(loc: libc::locale_t) -> c_int {
 /// `tolower_l` to `__tolower_l`, and a guest compiled against that header
 /// imports the underscored one.
 pub const NAMES: &[&str] = &[
+    "setlocale",
+    "newlocale",
+    "duplocale",
+    "freelocale",
     "mbtowc_l",
     "btowc_l",
     "wctob_l",
@@ -496,6 +729,10 @@ pub const NAMES: &[&str] = &[
 
 pub fn symbol(name: &str) -> Option<u64> {
     let f: *const () = match name {
+        "setlocale" => setlocale as *const (),
+        "newlocale" => newlocale as *const (),
+        "duplocale" => duplocale as *const (),
+        "freelocale" => freelocale as *const (),
         "mbtowc_l" => mbtowc_l as *const (),
         "btowc_l" => btowc_l as *const (),
         "wctob_l" => wctob_l as *const (),
@@ -572,8 +809,6 @@ mod tests {
         }
     }
 
-    /// A null locale switches nothing, which is what Darwin's `_l` functions
-    /// take it to mean.
     /// Every name the list claims resolves, so `provide` cannot publish a null.
     #[test]
     fn every_listed_name_resolves() {
@@ -582,8 +817,61 @@ mod tests {
     }
 
     #[test]
-    fn a_null_locale_switches_nothing() {
-        assert!(switch(std::ptr::null_mut()).is_none());
+    fn darwin_locale_categories_are_translated() {
+        assert_eq!(host_category(category::ALL), Some(libc::LC_ALL));
+        assert_eq!(host_category(category::NUMERIC), Some(libc::LC_NUMERIC));
+        assert_ne!(category::NUMERIC, libc::LC_NUMERIC);
+        assert_eq!(host_category(99), None);
+
+        assert_eq!(
+            host_category_mask(category::NUMERIC_MASK),
+            Some(libc::LC_NUMERIC_MASK)
+        );
+        assert_eq!(
+            host_category_mask(category::COLLATE_MASK | category::TIME_MASK),
+            Some(libc::LC_COLLATE_MASK | libc::LC_TIME_MASK)
+        );
+        assert_eq!(host_category_mask(1 << 20), None);
+    }
+
+    #[test]
+    fn a_darwin_newlocale_mask_creates_the_requested_locale() {
+        // SAFETY: a static locale name and a null base.
+        let loc =
+            unsafe { newlocale(category::NUMERIC_MASK, c"C".as_ptr(), core::ptr::null_mut()) };
+        assert!(!loc.is_null());
+        // SAFETY: `newlocale` returned this object and nothing else uses it.
+        unsafe { libc::freelocale(loc) };
+
+        // Darwin uniquely defines a null locale name as the C locale.
+        // SAFETY: an all-category mask ignores the null base.
+        let loc =
+            unsafe { newlocale(category::ALL_MASK, core::ptr::null(), core::ptr::null_mut()) };
+        assert!(!loc.is_null());
+        // SAFETY: as above.
+        unsafe { libc::freelocale(loc) };
+    }
+
+    #[test]
+    fn a_null_convenience_locale_selects_c() {
+        let _switched = switch(std::ptr::null_mut()).expect("the C locale exists");
+        // SAFETY: a null argument only reports the current locale.
+        let current = unsafe { libc::uselocale(std::ptr::null_mut()) };
+        assert_eq!(current, c_locale().expect("the C locale exists"));
+    }
+
+    #[test]
+    fn null_duplocale_and_darwin_freelocale_semantics_are_preserved() {
+        // SAFETY: null asks for a copy of the current locale.
+        let copy = unsafe { duplocale(core::ptr::null_mut()) };
+        assert!(!copy.is_null());
+        // SAFETY: `copy` is owned by this test.
+        assert_eq!(unsafe { freelocale(copy) }, 0);
+        // Null is Darwin's C-locale sentinel, not an allocated object.
+        // SAFETY: testing the shim's checked error path.
+        assert_eq!(unsafe { freelocale(core::ptr::null_mut()) }, -1);
+        assert_eq!(crate::errno::get(), libc::EINVAL);
+        crate::errno::set(0);
     }
 
     /// And a null locale reaches the number parsers, which is the case that
@@ -618,6 +906,21 @@ mod tests {
         unsafe {
             assert_ne!(maskrune('7' as c_int, ctype::DIGIT as u64), 0);
             assert_eq!(maskrune('7' as c_int, ctype::ALPHA as u64), 0);
+        }
+    }
+
+    /// Darwin calls this entry for runes outside the cached byte table. Byte
+    /// ctype functions have a much smaller domain and glibc can fault when
+    /// handed this perfectly valid rune.
+    #[test]
+    fn a_unicode_rune_does_not_enter_the_byte_ctype_table() {
+        // SAFETY: neither function touches caller memory.
+        unsafe {
+            assert_eq!(maskrune(0x10ffff, ctype::DIGIT as u64), 0);
+            assert_eq!(tolower_(0x10ffff), 0x10ffff);
+            assert_eq!(toupper_(0x10ffff), 0x10ffff);
+            assert_eq!(maskrune(-2, u32::MAX as u64), 0);
+            assert_eq!(tolower_(-2), -2);
         }
     }
 

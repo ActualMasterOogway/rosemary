@@ -190,6 +190,18 @@ pub const NAMES: &[(&str, &str)] = &[
         "the EAI_ codes differ, in value and in sign",
     ),
     ("getnameinfo", "the NI_ flags differ"),
+    // BSD and glibc assign different integer values to locale categories and
+    // to the category-mask bits. `crate::xlocale` translates these two; the
+    // entries stop a library-specific lookup from finding glibc's versions.
+    ("setlocale", "the LC_* category values differ"),
+    ("newlocale", "the LC_*_MASK values differ"),
+    ("duplocale", "a null locale has different semantics"),
+    ("freelocale", "Darwin returns int and glibc returns void"),
+    // These are still unsupported: `nl_item` is another platform-specific
+    // integer namespace, and passing Darwin's value to glibc asks a different
+    // question (or indexes no item at all).
+    ("nl_langinfo", "the nl_item values differ"),
+    ("nl_langinfo_l", "the nl_item values differ"),
     ("dladdr", "Dl_info is laid out differently"),
     // The reading half of the clock family is reimplemented; see darwin::clock for
     // why the `clockid_t` cannot be passed through. Setting the clock is refused
