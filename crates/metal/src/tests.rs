@@ -569,6 +569,7 @@ fn a_translated_triangle_draws_on_the_gpu() {
         copy_texture_to_buffer(blit, target, readback, SIZE);
         send_void(blit, "endEncoding");
         send_void(command, "commit");
+        send_void(command, "waitUntilCompleted");
 
         let contents = object::body::<resource::Buffer>(readback).inner.contents;
         let middle = ((SIZE / 2) * SIZE + SIZE / 2) as usize * 4;

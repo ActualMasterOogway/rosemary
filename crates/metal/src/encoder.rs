@@ -11,6 +11,7 @@ use ash::vk;
 use metal_translate::ir::{ResourceKind, Stage};
 use objc::object::Id;
 use objc::sel::Sel;
+use std::sync::{Arc, Condvar, Mutex};
 
 use crate::gpu::{self, Gpu, RenderPassKey};
 use crate::object::{self, methods};
@@ -62,8 +63,54 @@ pub(crate) struct CommandBuffer {
     completed_handlers: Vec<Id>,
     /// Drawables `-presentDrawable:` asked for, presented once the work is done.
     presents: Vec<Id>,
-    pub status: u64,
+    completion: Arc<CommandCompletion>,
     recording: bool,
+}
+
+struct CommandCompletion {
+    status: Mutex<u64>,
+    changed: Condvar,
+}
+
+impl CommandCompletion {
+    fn new() -> Self {
+        Self {
+            status: Mutex::new(0),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn get(&self) -> u64 {
+        *self.status.lock().expect("Metal command status")
+    }
+
+    fn set(&self, status: u64) {
+        *self.status.lock().expect("Metal command status") = status;
+        self.changed.notify_all();
+    }
+
+    fn wait_for(&self, predicate: impl Fn(u64) -> bool) {
+        let mut status = self.status.lock().expect("Metal command status");
+        while !predicate(*status) {
+            status = self.changed.wait(status).expect("Metal command status");
+        }
+    }
+}
+
+/// Everything whose lifetime is tied to one Vulkan submission.
+pub(crate) struct Submission {
+    gpu: &'static Gpu,
+    timestamps: vk::QueryPool,
+    pool: vk::CommandPool,
+    command_buffer: vk::CommandBuffer,
+    fence: vk::Fence,
+    descriptor_pools: Vec<vk::DescriptorPool>,
+    retained: Vec<usize>,
+    framebuffers: Vec<vk::Framebuffer>,
+    completed_handlers: Vec<usize>,
+    presents: Vec<usize>,
+    object: usize,
+    completion: Arc<CommandCompletion>,
 }
 
 pub(crate) struct Encoder {
@@ -231,7 +278,7 @@ unsafe extern "C" fn new_command_buffer(receiver: Id, _sel: Sel) -> Id {
             scheduled_handlers: Vec::new(),
             completed_handlers: Vec::new(),
             presents: Vec::new(),
-            status: 0,
+            completion: Arc::new(CommandCompletion::new()),
             recording: true,
         },
     )
@@ -306,7 +353,9 @@ unsafe extern "C" fn command_buffer_queue(receiver: Id, _sel: Sel) -> Id {
 
 unsafe extern "C" fn command_buffer_status(receiver: Id, _sel: Sel) -> u64 {
     // SAFETY: as above.
-    unsafe { object::body::<CommandBuffer>(receiver) }.status
+    unsafe { object::body::<CommandBuffer>(receiver) }
+        .completion
+        .get()
 }
 
 unsafe extern "C" fn add_handler(receiver: Id, sel: Sel, block: Id) {
@@ -325,7 +374,7 @@ unsafe extern "C" fn add_handler(receiver: Id, sel: Sel, block: Id) {
     }
 }
 
-/// `-[MTLCommandBuffer commit]`: end recording, submit, and wait.
+/// `-[MTLCommandBuffer commit]`: end recording and submit asynchronously.
 unsafe extern "C" fn commit(receiver: Id, _sel: Sel) {
     // SAFETY: a command buffer of this crate's.
     let command = unsafe { object::body::<CommandBuffer>(receiver) };
@@ -348,76 +397,137 @@ unsafe extern "C" fn commit(receiver: Id, _sel: Sel) {
     // SAFETY: recording began when the command buffer was made.
     if let Err(error) = unsafe { gpu.device.end_command_buffer(command.command_buffer) } {
         gpu::trace(format!("vkEndCommandBuffer failed with {error:?}"));
-        command.status = 5; // MTLCommandBufferStatusError
+        command.completion.set(5); // MTLCommandBufferStatusError
         return;
     }
-    match stats::timed(Counter::SubmitMicros, || {
-        gpu.submit_and_wait(command.command_buffer, command.fence)
-    }) {
-        Ok(()) => command.status = 4, // MTLCommandBufferStatusCompleted
+    command.completion.set(2); // MTLCommandBufferStatusCommitted
+    let mut submission = Some(Submission {
+        gpu,
+        timestamps: std::mem::replace(&mut command.timestamps, vk::QueryPool::null()),
+        pool: command.pool,
+        command_buffer: command.command_buffer,
+        fence: command.fence,
+        descriptor_pools: std::mem::take(&mut command.descriptor_pools),
+        retained: std::mem::take(&mut command.retained)
+            .into_iter()
+            .map(|object| object as usize)
+            .collect(),
+        framebuffers: std::mem::take(&mut command.framebuffers),
+        completed_handlers: std::mem::take(&mut command.completed_handlers)
+            .into_iter()
+            .map(|block| block as usize)
+            .collect(),
+        presents: std::mem::take(&mut command.presents)
+            .into_iter()
+            .map(|drawable| drawable as usize)
+            .collect(),
+        object: objc::arc::retain(receiver) as usize,
+        completion: Arc::clone(&command.completion),
+    });
+    let completion = Arc::clone(&command.completion);
+    let submitted = stats::timed(Counter::SubmitMicros, || {
+        gpu.submit(command.command_buffer, command.fence, || {
+            completion.set(3); // MTLCommandBufferStatusScheduled
+            for block in std::mem::take(&mut command.scheduled_handlers) {
+                // SAFETY: the retained block reference is transferred to the
+                // handler worker, and `receiver` is live during this call.
+                unsafe { crate::completion::deliver(block, receiver) };
+            }
+            crate::submission::submit(submission.take().expect("pending submission"));
+        })
+    });
+    match submitted {
+        Ok(()) => {}
         Err(reason) => {
             gpu::trace(format!("command buffer submission failed: {reason}"));
-            command.status = 5;
+            for block in std::mem::take(&mut command.scheduled_handlers) {
+                // SAFETY: as above. The error status is installed by `finish`.
+                unsafe { crate::completion::deliver(block, receiver) };
+            }
+            submission
+                .take()
+                .expect("unsubmitted command")
+                .finish(Err(reason));
         }
     }
-    if command.timestamps != vk::QueryPool::null() {
-        let mut ticks = [0u64; 2];
-        // SAFETY: the submission completed, so both queries have results.
-        let read = unsafe {
-            gpu.device.get_query_pool_results(
-                command.timestamps,
-                0,
-                &mut ticks,
-                vk::QueryResultFlags::TYPE_64,
-            )
-        };
-        if read.is_ok() {
-            let nanoseconds = ticks[1].saturating_sub(ticks[0]) as f64 * gpu.timestamp_period();
-            stats::add(Counter::GpuMicros, (nanoseconds / 1000.0) as u64);
+}
+
+impl Submission {
+    pub(crate) fn wait_and_finish(self) {
+        let result = self.gpu.wait(self.fence);
+        self.finish(result);
+    }
+
+    fn finish(mut self, result: Result<(), String>) {
+        if let Err(reason) = &result {
+            gpu::trace(format!("command buffer completion failed: {reason}"));
         }
-        gpu.release_timestamp_pool(command.timestamps);
-        command.timestamps = vk::QueryPool::null();
-    }
-    let presents = std::mem::take(&mut command.presents);
-    for drawable in presents {
-        crate::present::present(drawable);
-        objc::arc::release(drawable);
-    }
-    // The work has completed, so everything the recording referred to and every
-    // transient object it created can go.
-    for framebuffer in std::mem::take(&mut command.framebuffers) {
-        // SAFETY: the submission finished before this point.
-        unsafe { gpu.device.destroy_framebuffer(framebuffer, None) };
-    }
-    for pool in std::mem::take(&mut command.descriptor_pools) {
-        // SAFETY: as above; the sets allocated from it are no longer in use.
-        unsafe { gpu.device.destroy_descriptor_pool(pool, None) };
-    }
-    for object in std::mem::take(&mut command.retained) {
+        if result.is_ok() && self.timestamps != vk::QueryPool::null() {
+            let mut ticks = [0u64; 2];
+            // SAFETY: the submission completed, so both queries have results.
+            let read = unsafe {
+                self.gpu.device.get_query_pool_results(
+                    self.timestamps,
+                    0,
+                    &mut ticks,
+                    vk::QueryResultFlags::TYPE_64,
+                )
+            };
+            if read.is_ok() {
+                let nanoseconds =
+                    ticks[1].saturating_sub(ticks[0]) as f64 * self.gpu.timestamp_period();
+                stats::add(Counter::GpuMicros, (nanoseconds / 1000.0) as u64);
+            }
+        }
+        self.gpu.release_timestamp_pool(self.timestamps);
+        for drawable in self.presents.drain(..).map(|drawable| drawable as Id) {
+            crate::present::present(drawable);
+            objc::arc::release(drawable);
+        }
+        // The work has completed, so everything the recording referred to and every
+        // transient object it created can go.
+        for framebuffer in self.framebuffers.drain(..) {
+            // SAFETY: the submission finished before this point.
+            unsafe { self.gpu.device.destroy_framebuffer(framebuffer, None) };
+        }
+        for pool in self.descriptor_pools.drain(..) {
+            // SAFETY: as above; the sets allocated from it are no longer in use.
+            unsafe { self.gpu.device.destroy_descriptor_pool(pool, None) };
+        }
+        for object in self.retained.drain(..).map(|object| object as Id) {
+            objc::arc::release(object);
+        }
+        // SAFETY: as above.
+        unsafe {
+            self.gpu
+                .device
+                .free_command_buffers(self.pool, &[self.command_buffer]);
+            self.gpu.device.destroy_command_pool(self.pool, None);
+            self.gpu.device.destroy_fence(self.fence, None);
+        }
+        self.completion.set(if result.is_ok() { 4 } else { 5 });
+        let object = self.object as Id;
+        for block in self.completed_handlers.drain(..).map(|block| block as Id) {
+            // SAFETY: `objc_retainBlock` returned a live block, whose reference this
+            // gives away, and `object` is retained by this submission.
+            unsafe { crate::completion::deliver(block, object) };
+        }
         objc::arc::release(object);
     }
-    // SAFETY: as above.
-    unsafe {
-        gpu.device
-            .free_command_buffers(command.pool, &[command.command_buffer]);
-        gpu.device.destroy_command_pool(command.pool, None);
-        gpu.device.destroy_fence(command.fence, None);
-    }
-    // Not called here: Metal calls a completion handler from its own queue, and
-    // a guest which commits under a lock its handler also takes - which Roblox
-    // does - deadlocks against itself the moment one runs on the committing
-    // thread. See `crate::completion`.
-    // A scheduled handler runs when the work reaches the device and a
-    // completed handler when it finishes. This submission waits, so the two
-    // moments are one; the order between them is still Metal's.
-    for block in std::mem::take(&mut command.scheduled_handlers)
-        .into_iter()
-        .chain(std::mem::take(&mut command.completed_handlers))
-    {
-        // SAFETY: `objc_retainBlock` returned a live block, whose reference this
-        // gives away, and `receiver` is the live command buffer it belongs to.
-        unsafe { crate::completion::deliver(block, receiver) };
-    }
+}
+
+unsafe extern "C" fn wait_until_completed(receiver: Id, _sel: Sel) {
+    // SAFETY: a command buffer of this crate's.
+    unsafe { object::body::<CommandBuffer>(receiver) }
+        .completion
+        .wait_for(|status| status >= 4);
+}
+
+unsafe extern "C" fn wait_until_scheduled(receiver: Id, _sel: Sel) {
+    // SAFETY: as above. Error is also terminal and must release the waiter.
+    unsafe { object::body::<CommandBuffer>(receiver) }
+        .completion
+        .wait_for(|status| status >= 3);
 }
 
 unsafe extern "C" fn present_drawable(receiver: Id, _sel: Sel, drawable: Id) {
@@ -1946,8 +2056,8 @@ pub(crate) fn install() {
         "addScheduledHandler:" => add_handler, c"v24@0:8@?16";
         "addCompletedHandler:" => add_handler, c"v24@0:8@?16";
         "commit" => commit, c"v16@0:8";
-        "waitUntilCompleted" => crate::no_op, c"v16@0:8";
-        "waitUntilScheduled" => crate::no_op, c"v16@0:8";
+        "waitUntilCompleted" => wait_until_completed, c"v16@0:8";
+        "waitUntilScheduled" => wait_until_scheduled, c"v16@0:8";
         "enqueue" => crate::no_op, c"v16@0:8";
         "presentDrawable:" => present_drawable, c"v24@0:8@16";
         "presentDrawable:atTime:" => present_drawable_at_time, c"v32@0:8@16d24";

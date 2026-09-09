@@ -16,6 +16,7 @@ mod pipeline;
 mod present;
 mod resource;
 pub mod stats;
+mod submission;
 mod vulkan;
 
 use std::collections::BTreeSet;

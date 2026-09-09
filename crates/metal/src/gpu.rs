@@ -550,16 +550,12 @@ impl Gpu {
             .map_err(|error| format!("vkCreateFramebuffer failed with {error:?}"))
     }
 
-    /// Submit one recorded command buffer and wait for it.
-    ///
-    /// FIXME (ACCURACY): Metal completes a command buffer asynchronously and
-    /// only `-waitUntilCompleted` blocks. Waiting inside `-commit` keeps every
-    /// resource's lifetime trivially correct while the runtime has no
-    /// per-submission resource tracking; it costs parallelism, not correctness.
-    pub fn submit_and_wait(
+    /// Submit one recorded command buffer.
+    pub fn submit(
         &self,
         command_buffer: vk::CommandBuffer,
         fence: vk::Fence,
+        submitted: impl FnOnce(),
     ) -> Result<(), String> {
         let buffers = [command_buffer];
         let submit = vk::SubmitInfo::default().command_buffers(&buffers);
@@ -571,13 +567,30 @@ impl Gpu {
             // SAFETY: as above; the command buffer has finished recording.
             unsafe { self.device.queue_submit(*queue, &[submit], fence) }
                 .map_err(|error| format!("vkQueueSubmit failed with {error:?}"))?;
+            // Keep asynchronous retirement in the same order as queue
+            // submission even when several guest threads commit concurrently.
+            submitted();
         }
-        // SAFETY: the fence was just submitted with this device.
+        Ok(())
+    }
+
+    /// Wait for a submitted command buffer's fence.
+    pub fn wait(&self, fence: vk::Fence) -> Result<(), String> {
         crate::stats::timed(crate::stats::Counter::QueueMicros, || {
             // SAFETY: the fence belongs to this device and the submission above.
             unsafe { self.device.wait_for_fences(&[fence], true, u64::MAX) }
                 .map_err(|error| format!("vkWaitForFences failed with {error:?}"))
         })
+    }
+
+    /// Submit one recorded command buffer and wait for it.
+    fn submit_and_wait(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        fence: vk::Fence,
+    ) -> Result<(), String> {
+        self.submit(command_buffer, fence, || {})?;
+        self.wait(fence)
     }
 
     /// Record and run one command list synchronously.
