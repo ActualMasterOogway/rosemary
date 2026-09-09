@@ -110,6 +110,9 @@ unsafe fn convert(host: *const libc::dirent) -> Dirent {
     // SAFETY: `len` is inside both, and the two do not overlap.
     unsafe { std::ptr::copy_nonoverlapping(name.as_ptr().cast(), out.name.as_mut_ptr(), len) };
     out.namlen = len as u16;
+    // Darwin directory records contain only the used name bytes and are padded
+    // to a 4-byte boundary. `sizeof(struct dirent)` is merely the maximum.
+    out.reclen = (std::mem::offset_of!(Dirent, name) + len + 1).next_multiple_of(4) as u16;
     out
 }
 
@@ -122,15 +125,20 @@ unsafe fn convert(host: *const libc::dirent) -> Dirent {
 ///
 /// `dir` is a handle `opendir` returned and has not been closed.
 unsafe fn next(dir: *mut libc::DIR) -> Result<Option<Dirent>, c_int> {
+    let saved = crate::errno::get();
     crate::errno::set(0);
     // SAFETY: the caller's obligation.
     let host = unsafe { libc::readdir(dir) };
     if host.is_null() {
         return match crate::errno::get() {
-            0 => Ok(None),
+            0 => {
+                crate::errno::set(saved);
+                Ok(None)
+            }
             error => Err(error),
         };
     }
+    crate::errno::set(saved);
     // SAFETY: non-null, and libc's own entry.
     Ok(Some(unsafe { convert(host) }))
 }
@@ -350,17 +358,14 @@ pub unsafe extern "C" fn scandir(
 ///
 /// Both arguments point at a live entry pointer.
 pub unsafe extern "C" fn alphasort(a: *const *const Dirent, b: *const *const Dirent) -> c_int {
-    // SAFETY: the caller's obligation, and `d_name` is NUL-terminated within
-    // the entry.
-    let name = |p: *const *const Dirent| unsafe { CStr::from_ptr((**p).name.as_ptr()) };
     if a.is_null() || b.is_null() {
         return 0;
     }
-    match name(a).cmp(name(b)) {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
-    }
+    // Darwin defines `alphasort` in terms of `strcoll`, not bytewise string
+    // order. This matters as soon as the process selects a non-C locale.
+    // SAFETY: the caller's obligation, and each `d_name` is NUL-terminated
+    // within its entry.
+    unsafe { libc::strcoll((**a).name.as_ptr(), (**b).name.as_ptr()) }
 }
 
 /// `getdirentries` is **not** here, and stays denied.
@@ -430,6 +435,17 @@ mod tests {
         assert_eq!(std::mem::offset_of!(Dirent, name), 21);
         assert_eq!(std::mem::offset_of!(libc::dirent, d_name), 19);
         assert_eq!(size_of::<Dirent>(), 1048);
+    }
+
+    #[test]
+    fn the_record_length_covers_the_used_name_and_four_byte_padding() {
+        let mut host: libc::dirent = unsafe { core::mem::zeroed() };
+        host.d_name[0] = b'a' as c_char;
+        host.d_name[1] = 0;
+        // SAFETY: a live host dirent with a terminated name.
+        let guest = unsafe { convert(&raw const host) };
+        assert_eq!(guest.namlen, 1);
+        assert_eq!(guest.reclen, 24);
     }
 
     /// A directory of three files, named per test so the suite can run in
@@ -513,6 +529,23 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("the fixture is removed");
     }
 
+    #[test]
+    fn reaching_the_end_of_a_directory_preserves_errno() {
+        let dir = fixture("errno");
+        let path = c_path(&dir);
+        // SAFETY: a path this test owns and a handle closed below.
+        unsafe {
+            let handle = opendir(path.as_ptr());
+            assert!(!handle.is_null());
+            while !readdir(handle).is_null() {}
+            crate::errno::set(libc::EINTR);
+            assert!(readdir(handle).is_null());
+            assert_eq!(crate::errno::get(), libc::EINTR);
+            closedir(handle);
+        }
+        std::fs::remove_dir_all(dir).expect("the fixture is removed");
+    }
+
     /// `scandir` selects, sorts and hands back an array the caller frees.
     #[test]
     fn scandir_selects_and_sorts() {
@@ -539,6 +572,21 @@ mod tests {
             crate::heap::free(list.cast());
         }
         std::fs::remove_dir_all(&dir).expect("the fixture is removed");
+    }
+
+    #[test]
+    fn alphasort_has_strcoll_semantics() {
+        let mut a = Dirent::default();
+        let mut b = Dirent::default();
+        a.name[..2].copy_from_slice(&[b'b' as c_char, 0]);
+        b.name[..2].copy_from_slice(&[b'a' as c_char, 0]);
+        let (a, b) = (&raw const a, &raw const b);
+        // SAFETY: two live entry pointers with terminated names.
+        let sorted = unsafe { alphasort(&raw const a, &raw const b) };
+        // SAFETY: the same inputs passed directly to the function Darwin
+        // specifies as alphasort's comparator.
+        let expected = unsafe { libc::strcoll((*a).name.as_ptr(), (*b).name.as_ptr()) };
+        assert_eq!(sorted.signum(), expected.signum());
     }
 
     /// A directory that is not there is a failure the caller can read, not a
