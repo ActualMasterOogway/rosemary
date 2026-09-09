@@ -248,11 +248,19 @@ pub unsafe extern "C" fn madvise(addr: *mut c_void, len: usize, adv: i32) -> i32
 ///
 /// As [`madvise`].
 pub unsafe extern "C" fn posix_madvise(addr: *mut c_void, len: usize, adv: i32) -> i32 {
-    // SAFETY: as `madvise`, which this is a return-convention wrapper for.
-    match unsafe { madvise(addr, len, adv) } {
-        0 => 0,
-        _ => crate::errno::get(),
-    }
+    let host = match adv {
+        darwin::MADV_NORMAL => libc::POSIX_MADV_NORMAL,
+        darwin::MADV_RANDOM => libc::POSIX_MADV_RANDOM,
+        darwin::MADV_SEQUENTIAL => libc::POSIX_MADV_SEQUENTIAL,
+        darwin::MADV_WILLNEED => libc::POSIX_MADV_WILLNEED,
+        darwin::MADV_DONTNEED => libc::POSIX_MADV_DONTNEED,
+        _ => return libc::EINVAL,
+    };
+    // `posix_madvise` is not `madvise` with a different return convention:
+    // Linux intentionally treats POSIX_MADV_DONTNEED as non-destructive,
+    // whereas MADV_DONTNEED may discard private anonymous contents.
+    // SAFETY: the caller's range and a translated POSIX advice.
+    unsafe { libc::posix_madvise(addr, len, host) }
 }
 
 /// `int msync(void *addr, size_t len, int flags)`
@@ -388,5 +396,35 @@ mod tests {
             Advice::Invalid,
             "an advice neither side names"
         );
+    }
+
+    #[test]
+    fn posix_advice_rejects_the_non_posix_madvise_tail() {
+        // SAFETY: invalid advice is rejected before the range is inspected.
+        assert_eq!(
+            unsafe { posix_madvise(core::ptr::null_mut(), 0, darwin::MADV_FREE) },
+            libc::EINVAL
+        );
+    }
+
+    #[test]
+    fn posix_dontneed_does_not_discard_private_anonymous_contents() {
+        let len = 4096;
+        // SAFETY: an anonymous mapping owned and released by this test.
+        unsafe {
+            let p = mmap(
+                core::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                darwin::MAP_PRIVATE | darwin::MAP_ANON,
+                -1,
+                0,
+            );
+            assert_ne!(p, libc::MAP_FAILED);
+            p.cast::<u8>().write(0xa5);
+            assert_eq!(posix_madvise(p, len, darwin::MADV_DONTNEED), 0);
+            assert_eq!(p.cast::<u8>().read(), 0xa5);
+            libc::munmap(p, len);
+        }
     }
 }
