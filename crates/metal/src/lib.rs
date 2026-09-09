@@ -16,6 +16,8 @@ mod present;
 mod resource;
 mod vulkan;
 
+use std::collections::BTreeSet;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -45,7 +47,14 @@ struct Function {
 }
 
 static ALLOCATED_SIZE: AtomicU64 = AtomicU64::new(0);
-static REPORTED_LIBRARY_ERROR: AtomicBool = AtomicBool::new(false);
+
+/// Diagnostics [`report_library_error`] has already printed.
+///
+/// A rejected library is reported by the shape it was rejected for rather than
+/// once per library: a game loads thousands, and the same gap in the translator
+/// accounts for a run of them. Keyed by the message so that a run collapses to
+/// one line and a new gap is still visible.
+static REPORTED_LIBRARY_ERRORS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static REPORTED_SOURCE_LIBRARY: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn account(bytes: u64) {
@@ -562,9 +571,14 @@ fn fail_library(error: *mut Id, message: &str) -> Id {
 }
 
 fn report_library_error(message: impl std::fmt::Display) {
-    if std::env::var_os("ROSETTA3_TRACE_METAL").is_some()
-        && !REPORTED_LIBRARY_ERROR.swap(true, Ordering::Relaxed)
-    {
+    if std::env::var_os("ROSETTA3_TRACE_METAL").is_none() {
+        return;
+    }
+    let message = message.to_string();
+    let mut seen = REPORTED_LIBRARY_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if seen.insert(message.clone()) {
         eprintln!("rosetta3: Metal: shader library translation stopped: {message}");
     }
 }

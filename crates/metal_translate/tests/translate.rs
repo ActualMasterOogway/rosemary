@@ -1,6 +1,7 @@
 use metal_translate::ir::{
-    Access, Block, BlockId, ConvertOp, EntryPoint, FloatPredicate, FloatUnaryOp, Function,
-    InstructionKind, IntegerBinaryOp, Module, Operand, Parameter, Resource, ResourceKind, Stage,
+    Access, AddressSpace, AtomicOp, BarrierMemory, BarrierScope, Block, BlockId, ConvertOp,
+    EntryPoint, FloatPredicate, FloatUnaryOp, Function, Instruction, InstructionKind,
+    IntegerBinaryOp, MemoryOrder, Module, Operand, Parameter, Resource, ResourceKind, Stage,
     Terminator, TextureDimension, TextureType, Type, ValueId,
 };
 use metal_translate::{
@@ -940,5 +941,169 @@ fn a_local_variable_is_declared_in_the_entry_block() {
             .iter()
             .all(|instruction| instruction.class.opcode != Op::Variable),
         "no variable is left in the block the alloca was written in"
+    );
+}
+
+/// A kernel with one `device uint*` buffer, whose body is what the caller
+/// supplies. Enough shape for the emitter; the buffer is the atomic's target.
+fn buffer_kernel(values: Vec<Type>, instructions: Vec<Instruction>) -> Module {
+    let buffer = Type::Pointer {
+        space: AddressSpace::Device,
+        pointee: Box::new(Type::Array {
+            element: Box::new(Type::u32()),
+            count: 4,
+        }),
+    };
+    let mut all = vec![buffer.clone()];
+    all.extend(values);
+    Module {
+        globals: Vec::new(),
+        functions: vec![Function {
+            name: "main0".to_string(),
+            result: Type::Void,
+            parameters: vec![Parameter {
+                value: ValueId(0),
+                name: "counters".to_string(),
+                ty: buffer.clone(),
+            }],
+            values: all,
+            blocks: vec![Block {
+                id: BlockId(0),
+                name: "entry".to_string(),
+                instructions,
+                terminator: Terminator::Return(None),
+            }],
+        }],
+        entries: vec![EntryPoint {
+            function: 0,
+            stage: Stage::Kernel,
+            resources: vec![Resource {
+                argument: 0,
+                kind: ResourceKind::Buffer,
+                index: 0,
+                count: 1,
+                access: Access::ReadWrite,
+                ty: buffer,
+                name: Some("counters".to_string()),
+            }],
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        }],
+    }
+}
+
+#[test]
+fn threadgroup_barrier_becomes_a_control_barrier() {
+    let module = buffer_kernel(
+        Vec::new(),
+        vec![Instruction {
+            result: None,
+            kind: InstructionKind::Barrier {
+                scope: BarrierScope::Threadgroup,
+                memory: BarrierMemory {
+                    threadgroup: true,
+                    ..BarrierMemory::default()
+                },
+            },
+        }],
+    );
+    module.verify().unwrap();
+    let artifact = emit_spirv(&module, &TargetProfile::vulkan_1_3())
+        .unwrap()
+        .entries
+        .remove(0);
+    let parsed = rspirv::dr::load_words(&artifact.words).unwrap();
+    assert!(
+        parsed.functions[0].blocks[0]
+            .instructions
+            .iter()
+            .any(|instruction| instruction.class.opcode == Op::ControlBarrier)
+    );
+}
+
+#[test]
+fn a_device_atomic_add_becomes_an_atomic_i_add() {
+    let element = Type::Pointer {
+        space: AddressSpace::Device,
+        pointee: Box::new(Type::u32()),
+    };
+    let module = buffer_kernel(
+        vec![element, Type::u32()],
+        vec![
+            Instruction {
+                result: Some(ValueId(1)),
+                kind: InstructionKind::BufferAddress {
+                    pointer: Operand::Value(ValueId(0)),
+                    indices: vec![
+                        Operand::Integer {
+                            ty: Type::u32(),
+                            value: 0,
+                        },
+                        Operand::Integer {
+                            ty: Type::u32(),
+                            value: 2,
+                        },
+                    ],
+                },
+            },
+            Instruction {
+                result: Some(ValueId(2)),
+                kind: InstructionKind::Atomic {
+                    op: AtomicOp::Add,
+                    pointer: Operand::Value(ValueId(1)),
+                    value: Operand::Integer {
+                        ty: Type::u32(),
+                        value: 1,
+                    },
+                    order: MemoryOrder::Relaxed,
+                    scope: BarrierScope::Device,
+                },
+            },
+        ],
+    );
+    module.verify().unwrap();
+    let artifact = emit_spirv(&module, &TargetProfile::vulkan_1_3())
+        .unwrap()
+        .entries
+        .remove(0);
+    let parsed = rspirv::dr::load_words(&artifact.words).unwrap();
+    assert!(
+        parsed.functions[0].blocks[0]
+            .instructions
+            .iter()
+            .any(|instruction| instruction.class.opcode == Op::AtomicIAdd)
+    );
+}
+
+#[test]
+fn a_pointer_phi_needs_the_variable_pointers_capability() {
+    let pointer = Type::Pointer {
+        space: AddressSpace::Device,
+        pointee: Box::new(Type::u32()),
+    };
+    let module = buffer_kernel(
+        vec![pointer],
+        vec![Instruction {
+            result: Some(ValueId(1)),
+            kind: InstructionKind::Phi {
+                incomings: Vec::new(),
+            },
+        }],
+    );
+    let target = TargetProfile::vulkan_1_3();
+    let error = emit_spirv(&module, &target).unwrap_err();
+    assert_eq!(error.diagnostics[0].phase, Phase::SpirvEmission);
+
+    let target = TargetProfile {
+        variable_pointers_storage_buffer: true,
+        ..target
+    };
+    let artifact = emit_spirv(&module, &target).unwrap().entries.remove(0);
+    assert!(
+        artifact
+            .required
+            .capabilities
+            .iter()
+            .any(|capability| capability == "VariablePointersStorageBuffer")
     );
 }

@@ -22,6 +22,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the common desktop Vulkan profile.
     let target = TargetProfile {
         shader_int64: true,
+        variable_pointers_storage_buffer: true,
+        variable_pointers: true,
         ..TargetProfile::vulkan_1_3()
     };
     for (ordinal, offset) in bytes

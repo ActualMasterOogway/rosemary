@@ -473,9 +473,14 @@ impl ValueTable {
                         return Ok((self.values[id].ty, op));
                     }
                     let Some(declared) = declared else {
+                        // Naming the record is what tells a reader whether the
+                        // decoder read the wrong field or the shader really
+                        // names a value nothing defines.
                         return Err(semantic(format!(
-                            "LLVM value reference resolves to undefined value {id} at {}",
-                            self.values.len()
+                            "LLVM value reference resolves to undefined value {id} at {}, in \
+                             body record {} with operands {fields:?}",
+                            self.values.len(),
+                            record.id
                         )));
                     };
                     let ty = type_reference(Some(declared), types.len())?;
@@ -532,10 +537,13 @@ impl ValueTable {
                     }
                     (7, [vector, object, index]) => {
                         let (ty, composite) = operand(*vector, None)?;
-                        let (object_ty, object) = operand(*object, None)?;
                         let DecodedType::Vector { element, lanes } = types[ty] else {
                             return Err(semantic("insertelement requires vector"));
                         };
+                        // LLVM writes no type for the inserted element, even
+                        // when it names a value the record stream has not
+                        // reached: the vector's element type is it.
+                        let (object_ty, object) = operand(*object, Some(&(element as u64)))?;
                         if object_ty != element {
                             return Err(semantic("insertelement element type mismatch"));
                         }
@@ -1195,10 +1203,32 @@ impl ValueTable {
                         self.values.push(Value { ty, constant: None });
                         continue;
                     }
-                    (27, [aggregate, object, index]) => {
-                        let (ty, composite) = operand(*aggregate, None)?;
-                        let (object_ty, object) = operand(*object, None)?;
-                        let index = u32::try_from(*index)
+                    (27, rest) if rest.len() >= 3 => {
+                        // LLVM writes both of `insertvalue`'s values as a
+                        // value-type pair, which repeats the type only for a
+                        // value the record stream has not reached yet. Only
+                        // the value table can say which form a record is in.
+                        let aggregate_forward = self.reference(rest[0])? >= self.values.len();
+                        let object_at = 1 + usize::from(aggregate_forward);
+                        let object_forward = match rest.get(object_at) {
+                            Some(field) => self.reference(*field)? >= self.values.len(),
+                            None => return Err(semantic("LLVM insertvalue record is too short")),
+                        };
+                        let index_at = object_at + 1 + usize::from(object_forward);
+                        let ([aggregate, aggregate_ty @ ..], [object, object_ty @ ..]) = (
+                            &rest[..object_at],
+                            &rest[object_at..index_at.min(rest.len())],
+                        ) else {
+                            return Err(semantic("LLVM insertvalue record is too short"));
+                        };
+                        let [index] = rest[index_at.min(rest.len())..] else {
+                            return Err(semantic(
+                                "LLVM insertvalue names more than one aggregate index",
+                            ));
+                        };
+                        let (ty, composite) = operand(*aggregate, aggregate_ty.first())?;
+                        let (object_ty, object) = operand(*object, object_ty.first())?;
+                        let index = u32::try_from(index)
                             .map_err(|_| semantic("LLVM insertvalue index is too large"))?;
                         if member_type(&types[ty], index)? != object_ty {
                             return Err(semantic("LLVM insertvalue element type mismatch"));
@@ -1784,6 +1814,20 @@ fn air_intrinsic(name: &str, arguments: &[Operand]) -> Result<InstructionKind, T
             value: value.clone(),
         });
     }
+    if operation == "wg" && parts.clone().next() == Some("barrier") {
+        let [memory, scope] = arguments else {
+            return Err(semantic(format!(
+                "LLVM intrinsic {name} takes two operands"
+            )));
+        };
+        return Ok(InstructionKind::Barrier {
+            scope: barrier_scope(scope, name)?,
+            memory: barrier_memory(memory, name)?,
+        });
+    }
+    if operation == "atomic" {
+        return air_atomic(name, parts.collect::<Vec<_>>().as_slice(), arguments);
+    }
     if let Some(kind) = air_texture_intrinsic(operation, arguments)? {
         return Ok(kind);
     }
@@ -1952,6 +1996,116 @@ fn air_intrinsic(name: &str, arguments: &[Operand]) -> Result<InstructionKind, T
             ))),
         },
         _ => Err(unsupported()),
+    }
+}
+
+/// The constant an AIR flag or enumerator argument must be.
+///
+/// Metal spells all four of a barrier's and an atomic's qualifiers as
+/// compile-time enumerators, so a run-time value here is a shader this
+/// translator has misread rather than one it should approximate.
+fn air_enumerator(operand: &Operand, name: &str, what: &str) -> Result<u64, TranslateError> {
+    match operand {
+        Operand::Integer { value, .. } => Ok(*value),
+        _ => Err(semantic(format!(
+            "LLVM intrinsic {name} has a run-time {what}, which Metal spells as a constant"
+        ))),
+    }
+}
+
+/// Metal's `mem_flags`, which say which address spaces a barrier orders.
+fn barrier_memory(operand: &Operand, name: &str) -> Result<BarrierMemory, TranslateError> {
+    let flags = air_enumerator(operand, name, "memory flag set")?;
+    // `mem_none` is 0; the rest are one bit each. `mem_threadgroup_imageblock`
+    // and `mem_object_data` are threadgroup memory as far as ordering goes.
+    const DEVICE: u64 = 1;
+    const THREADGROUP: u64 = 2;
+    const TEXTURE: u64 = 4;
+    const IMAGEBLOCK: u64 = 8;
+    const OBJECT_DATA: u64 = 16;
+    let known = DEVICE | THREADGROUP | TEXTURE | IMAGEBLOCK | OBJECT_DATA;
+    if flags & !known != 0 {
+        return Err(semantic(format!(
+            "LLVM intrinsic {name} names unknown Metal memory flags {flags}"
+        )));
+    }
+    Ok(BarrierMemory {
+        device: flags & DEVICE != 0,
+        threadgroup: flags & (THREADGROUP | IMAGEBLOCK | OBJECT_DATA) != 0,
+        texture: flags & TEXTURE != 0,
+    })
+}
+
+/// Metal's `memory_scope`, which says what a barrier makes wait and how far an
+/// atomic's ordering reaches.
+fn barrier_scope(operand: &Operand, name: &str) -> Result<BarrierScope, TranslateError> {
+    match air_enumerator(operand, name, "scope")? {
+        // `memory_scope_thread` orders one invocation against itself, which is
+        // the narrowest scope SPIR-V has a spelling for below a subgroup.
+        //
+        // FIXME (ACCURACY): it is widened to the SIMD-group. A wider scope
+        // costs a stronger barrier than Metal asked for, never a weaker one.
+        0 | 1 => Ok(BarrierScope::Simdgroup),
+        2 => Ok(BarrierScope::Threadgroup),
+        3 => Ok(BarrierScope::Device),
+        scope => Err(semantic(format!(
+            "LLVM intrinsic {name} names unknown Metal memory scope {scope}"
+        ))),
+    }
+}
+
+/// `air.atomic.<space>.<operation>[.<signedness>].<type>` and its operands.
+///
+/// The pointer's own address space says which memory the operation is in, so
+/// the `global`/`local` suffix is checked rather than believed.
+fn air_atomic(
+    name: &str,
+    suffix: &[&str],
+    arguments: &[Operand],
+) -> Result<InstructionKind, TranslateError> {
+    let unsupported = || semantic(format!("LLVM intrinsic {name} needs Metal IR lowering"));
+    let [space, operation, rest @ ..] = suffix else {
+        return Err(unsupported());
+    };
+    if !matches!(*space, "global" | "local") {
+        return Err(unsupported());
+    }
+    let signed = matches!(rest.first(), Some(&"s"));
+    let op = match *operation {
+        "add" => AtomicOp::Add,
+        "sub" => AtomicOp::Subtract,
+        "min" if signed => AtomicOp::MinimumSigned,
+        "min" => AtomicOp::MinimumUnsigned,
+        "max" if signed => AtomicOp::MaximumSigned,
+        "max" => AtomicOp::MaximumUnsigned,
+        "and" => AtomicOp::And,
+        "or" => AtomicOp::Or,
+        "xor" => AtomicOp::Xor,
+        "xchg" => AtomicOp::Exchange,
+        _ => return Err(unsupported()),
+    };
+    let [pointer, value, order, scope] = arguments else {
+        return Err(semantic(format!(
+            "LLVM intrinsic {name} takes four operands"
+        )));
+    };
+    Ok(InstructionKind::Atomic {
+        op,
+        pointer: pointer.clone(),
+        value: value.clone(),
+        order: memory_order(order, name)?,
+        scope: barrier_scope(scope, name)?,
+    })
+}
+
+/// Metal's `memory_order`, of which the language exposes two.
+fn memory_order(operand: &Operand, name: &str) -> Result<MemoryOrder, TranslateError> {
+    match air_enumerator(operand, name, "memory order")? {
+        0 => Ok(MemoryOrder::Relaxed),
+        // FIXME (ACCURACY): every other ordering is raised to sequential
+        // consistency. Metal's own `memory_order` has only `relaxed` and
+        // `seq_cst`, and a stronger order costs ordering, not correctness.
+        _ => Ok(MemoryOrder::SequentiallyConsistent),
     }
 }
 

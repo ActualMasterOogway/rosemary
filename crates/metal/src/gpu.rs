@@ -82,6 +82,16 @@ impl Gpu {
             enabled.push(ash::khr::swapchain::NAME.as_ptr());
         }
 
+        // The same reasoning as for the core features: enable what the device
+        // reports. A translated shader which phis a pointer declares
+        // `VariablePointers`, and Vulkan requires the matching feature to have
+        // been enabled at device creation.
+        let mut pointers = vk::PhysicalDeviceVariablePointersFeatures::default();
+        let mut reported = vk::PhysicalDeviceFeatures2::default().push_next(&mut pointers);
+        // SAFETY: the physical device belongs to this live instance, and both
+        // structures live across the call.
+        unsafe { instance.get_physical_device_features2(physical, &mut reported) };
+
         let priorities = [1.0f32];
         let queues = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family)
@@ -89,7 +99,8 @@ impl Gpu {
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queues)
             .enabled_features(&features)
-            .enabled_extension_names(&enabled);
+            .enabled_extension_names(&enabled)
+            .push_next(&mut pointers);
         // SAFETY: every borrowed structure lives across the call.
         let device = unsafe { instance.create_device(physical, &create_info, None) }
             .map_err(|error| format!("vkCreateDevice failed with {error:?}"))?;

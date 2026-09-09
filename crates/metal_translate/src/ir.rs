@@ -659,9 +659,69 @@ pub enum InstructionKind {
     },
     /// Metal `discard_fragment()`. It does not terminate the block.
     DiscardFragment,
+    /// Metal's `threadgroup_barrier` and `simdgroup_barrier`, which AIR spells
+    /// `air.wg.barrier`. The scope is what waits; the memory flags are which
+    /// address spaces the barrier orders.
+    Barrier {
+        scope: BarrierScope,
+        memory: BarrierMemory,
+    },
+    /// A read-modify-write on one memory location, which AIR spells
+    /// `air.atomic.<space>.<operation>.<signedness>.<type>`.
+    ///
+    /// Metal's memory order and scope arguments are carried as Metal names it
+    /// them, not as SPIR-V semantics.
+    Atomic {
+        op: AtomicOp,
+        pointer: Operand,
+        value: Operand,
+        order: MemoryOrder,
+        scope: BarrierScope,
+    },
     Phi {
         incomings: Vec<(BlockId, Operand)>,
     },
+}
+
+/// What a barrier makes wait, and how far an atomic's ordering reaches.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BarrierScope {
+    /// Metal's SIMD-group: the invocations which execute in lockstep.
+    Simdgroup,
+    /// Metal's threadgroup, which is a Vulkan workgroup.
+    Threadgroup,
+    /// The whole device.
+    Device,
+}
+
+/// The address spaces a barrier orders, which Metal spells as `mem_flags`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BarrierMemory {
+    pub device: bool,
+    pub threadgroup: bool,
+    pub texture: bool,
+}
+
+/// Metal's `memory_order`, of which only `relaxed` and `seq_cst` exist.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MemoryOrder {
+    Relaxed,
+    SequentiallyConsistent,
+}
+
+/// The read-modify-write an [`InstructionKind::Atomic`] performs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AtomicOp {
+    Add,
+    Subtract,
+    MinimumSigned,
+    MinimumUnsigned,
+    MaximumSigned,
+    MaximumUnsigned,
+    And,
+    Or,
+    Xor,
+    Exchange,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1262,6 +1322,19 @@ fn verify_instruction_types(
                 && result == Some(Type::u32())
         }
         InstructionKind::DiscardFragment => result.is_none(),
+        InstructionKind::Barrier { .. } => result.is_none(),
+        InstructionKind::Atomic { pointer, value, .. } => {
+            // Metal's atomics are on 32-bit integers in `device` or
+            // `threadgroup` memory, and the result is the value that was
+            // there.
+            let Some(Type::Pointer { space, pointee }) = operand_type(function, pointer) else {
+                return invalid(function, instruction, diagnostics);
+            };
+            matches!(space, AddressSpace::Device | AddressSpace::Threadgroup)
+                && matches!(*pointee, Type::Int { bits: 32, .. })
+                && operand_type(function, value).as_ref() == Some(&*pointee)
+                && result == Some(*pointee)
+        }
         InstructionKind::TextureWrite {
             texture,
             coordinate,
@@ -1339,6 +1412,8 @@ fn instruction_name(kind: &InstructionKind) -> &'static str {
         InstructionKind::TextureWrite { .. } => "texture write",
         InstructionKind::TextureQuerySize { .. } => "texture size query",
         InstructionKind::DiscardFragment => "fragment discard",
+        InstructionKind::Barrier { .. } => "barrier",
+        InstructionKind::Atomic { .. } => "atomic",
         InstructionKind::Phi { .. } => "phi",
     }
 }
@@ -1500,7 +1575,8 @@ pub(crate) fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         InstructionKind::TextureQuerySize { texture, lod, .. } => {
             [texture].into_iter().chain(lod).collect()
         }
-        InstructionKind::DiscardFragment => Vec::new(),
+        InstructionKind::DiscardFragment | InstructionKind::Barrier { .. } => Vec::new(),
+        InstructionKind::Atomic { pointer, value, .. } => vec![pointer, value],
         InstructionKind::Phi { incomings } => incomings.iter().map(|(_, value)| value).collect(),
     }
 }

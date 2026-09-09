@@ -6,11 +6,11 @@ use llvm_bitcode::Bitcode;
 use llvm_bitcode::bitcode::{BitcodeElement, Block as BitcodeBlock, Payload};
 
 use crate::ir::{
-    Access, AddressSpace, Block, BlockId, Builtin, ConvertOp, EntryPoint, FloatBinaryOp,
-    FloatPredicate, FloatUnaryOp, Function, Instruction, InstructionKind, IntegerBinaryOp,
-    IntegerPredicate, IntegerUnaryOp, Interpolation, Module, Operand, Parameter, Resource,
-    ResourceKind, Sampling, Stage, StageBinding, StageInput, StageOutput, Terminator,
-    TextureDimension, TextureType, Type, ValueId,
+    Access, AddressSpace, AtomicOp, BarrierMemory, BarrierScope, Block, BlockId, Builtin,
+    ConvertOp, EntryPoint, FloatBinaryOp, FloatPredicate, FloatUnaryOp, Function, Instruction,
+    InstructionKind, IntegerBinaryOp, IntegerPredicate, IntegerUnaryOp, Interpolation, MemoryOrder,
+    Module, Operand, Parameter, Resource, ResourceKind, Sampling, Stage, StageBinding, StageInput,
+    StageOutput, Terminator, TextureDimension, TextureType, Type, ValueId,
 };
 use crate::{Diagnostic, Phase, TranslateError};
 

@@ -207,6 +207,7 @@ pub(crate) fn present(drawable: Id) {
         // the whole allocation.
         let pixels = unsafe { std::slice::from_raw_parts(staging.contents, bytes as usize) };
         gpu::milestone("presented frame");
+        dump_frame(pixels, width, height, texture.image.format);
         blit_to_window(pixels, width, height, texture.image.format);
     }
     // SAFETY: the copy completed before `one_shot` returned.
@@ -214,6 +215,45 @@ pub(crate) fn present(drawable: Id) {
         gpu.device.destroy_buffer(staging.buffer, None);
         gpu.device.free_memory(staging.memory, None);
     }
+}
+
+/// Write a presented frame to `ROSETTA3_FRAME_OUT` as a binary PPM.
+///
+/// What reached the window is the one thing a log cannot say, and a headless
+/// or remote session has no other way to see it. `ROSETTA3_FRAME_INTERVAL`
+/// says how many frames to skip between files; the default keeps a run's
+/// output to a few files a second rather than one per frame.
+fn dump_frame(pixels: &[u8], width: u32, height: u32, format: vk::Format) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let Some(directory) = std::env::var_os("ROSETTA3_FRAME_OUT") else {
+        return;
+    };
+    static PRESENTED: AtomicU64 = AtomicU64::new(0);
+    let frame = PRESENTED.fetch_add(1, Ordering::Relaxed);
+    let interval = std::env::var("ROSETTA3_FRAME_INTERVAL")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|interval| *interval > 0)
+        .unwrap_or(30);
+    if !frame.is_multiple_of(interval) {
+        return;
+    }
+    let directory = std::path::PathBuf::from(directory);
+    if std::fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    let swap_red_and_blue =
+        !(format == vk::Format::R8G8B8A8_UNORM || format == vk::Format::R8G8B8A8_SRGB);
+    let mut out = format!("P6\n{width} {height}\n255\n").into_bytes();
+    out.reserve(width as usize * height as usize * 3);
+    for texel in pixels.as_chunks::<4>().0 {
+        match swap_red_and_blue {
+            true => out.extend_from_slice(&[texel[2], texel[1], texel[0]]),
+            false => out.extend_from_slice(&[texel[0], texel[1], texel[2]]),
+        }
+    }
+    let _ = std::fs::write(directory.join(format!("frame-{frame:06}.ppm")), out);
 }
 
 /// SDL's window surface is `SDL_PIXELFORMAT_XRGB8888` on every backend this

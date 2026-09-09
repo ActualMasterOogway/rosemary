@@ -77,6 +77,14 @@ fn initialize() -> Result<State, String> {
             let properties = unsafe { instance.get_physical_device_properties(handle) };
             // SAFETY: the physical device belongs to this live instance.
             let features = unsafe { instance.get_physical_device_features(handle) };
+            // Variable pointers is a Vulkan 1.1 feature with a structure of
+            // its own; a shader which phis or selects a pointer needs it, and
+            // the translator rejects such a shader where it is absent.
+            let mut pointers = vk::PhysicalDeviceVariablePointersFeatures::default();
+            let mut features2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut pointers);
+            // SAFETY: as above; `features2` and its chained structure live
+            // across the call.
+            unsafe { instance.get_physical_device_features2(handle, &mut features2) };
             let name = properties.device_name_as_c_str().map_or_else(
                 |_| "Vulkan Device".to_string(),
                 |name| name.to_string_lossy().into_owned(),
@@ -90,6 +98,9 @@ fn initialize() -> Result<State, String> {
                 name,
                 target: metal_translate::TargetProfile {
                     shader_int64: features.shader_int64 == vk::TRUE,
+                    variable_pointers_storage_buffer: pointers.variable_pointers_storage_buffer
+                        == vk::TRUE,
+                    variable_pointers: pointers.variable_pointers == vk::TRUE,
                     ..target_profile(version)
                 },
                 gpu: OnceLock::new(),
@@ -139,6 +150,8 @@ fn target_profile(version: (u8, u8)) -> metal_translate::TargetProfile {
         max_bound_descriptor_sets: 4,
         shader: true,
         shader_int64: false,
+        variable_pointers_storage_buffer: false,
+        variable_pointers: false,
     }
 }
 

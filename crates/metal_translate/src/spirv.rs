@@ -7,15 +7,15 @@ use rspirv::dr::{Builder, InsertPoint, Operand as SpirvOperand};
 use rspirv::spirv::{
     AddressingModel, BuiltIn, Capability, Decoration, Dim, ExecutionMode, ExecutionModel,
     FunctionControl, GlslStd450Op, ImageFormat, ImageOperands, LoopControl, MemoryModel,
-    SelectionControl, StorageClass,
+    MemorySemantics, SelectionControl, StorageClass,
 };
 
 use crate::ir::{
-    Access, BlockId, Builtin, ConvertOp, EntryPoint, FloatBinaryOp, FloatPredicate, FloatUnaryOp,
-    Function, InstructionKind, IntegerBinaryOp, IntegerPredicate, IntegerUnaryOp, Module, Operand,
-    ResourceKind, Sampling, Stage, StageBinding, Terminator, TextureDimension, Type, ValueId,
-    coordinate_lanes, instruction_operands, is_boolean_or_boolean_vector, operand_type,
-    terminator_operands,
+    Access, AddressSpace, AtomicOp, BarrierMemory, BarrierScope, BlockId, Builtin, ConvertOp,
+    EntryPoint, FloatBinaryOp, FloatPredicate, FloatUnaryOp, Function, InstructionKind,
+    IntegerBinaryOp, IntegerPredicate, IntegerUnaryOp, MemoryOrder, Module, Operand, ResourceKind,
+    Sampling, Stage, StageBinding, Terminator, TextureDimension, Type, ValueId, coordinate_lanes,
+    instruction_operands, is_boolean_or_boolean_vector, operand_type, terminator_operands,
 };
 use crate::{Diagnostic, Phase, TranslateError};
 
@@ -27,6 +27,12 @@ pub struct TargetProfile {
     pub max_bound_descriptor_sets: u32,
     pub shader: bool,
     pub shader_int64: bool,
+    /// `VkPhysicalDeviceVariablePointersFeatures::variablePointersStorageBuffer`,
+    /// which a pointer into a buffer needs before it can be a phi or a select.
+    pub variable_pointers_storage_buffer: bool,
+    /// `variablePointers`, which widens the above to `Workgroup` memory - a
+    /// pointer into a Metal `threadgroup` array.
+    pub variable_pointers: bool,
 }
 
 impl TargetProfile {
@@ -37,6 +43,8 @@ impl TargetProfile {
             max_bound_descriptor_sets: 4,
             shader: true,
             shader_int64: false,
+            variable_pointers_storage_buffer: false,
+            variable_pointers: false,
         }
     }
 }
@@ -140,9 +148,29 @@ fn emit_entry(
         .get(entry.function)
         .ok_or_else(|| emission("entry point refers to a missing function"))?;
     let mut function = single_exit(function.clone());
-    normalize_loop_headers(&mut function)?;
-    separate_loop_latches(&mut function)?;
-    split_shared_merges(&mut function)?;
+    // Each restructuring pass can expose work for the others: separating a
+    // loop's merge from the code outside it leaves the header choosing between
+    // two body paths, which is what normalizing headers answers, and that in
+    // turn adds a block another construct may claim. Run them to a fixed
+    // point rather than once each, and treat one that never settles as the
+    // rejection it is.
+    let rounds = limit(&function);
+    let mut settled = false;
+    for _ in 0..rounds {
+        let mut changed = normalize_loop_headers(&mut function)?;
+        changed |= separate_loop_latches(&mut function)?;
+        changed |= isolate_loop_merges(&mut function)?;
+        changed |= split_shared_merges(&mut function)?;
+        if !changed {
+            settled = true;
+            break;
+        }
+    }
+    if !settled {
+        return Err(emission(
+            "the control-flow restructuring passes never reached a fixed point",
+        ));
+    }
     hoist_phis(&mut function);
     reverse_post_order(&mut function);
     let function = &function;
@@ -187,11 +215,19 @@ fn emit_entry(
             .builder
             .execution_mode(function_id, ExecutionMode::DepthReplacing, []);
     }
-    let capabilities = if emitter.uses_int64 {
-        vec!["Shader".to_string(), "Int64".to_string()]
-    } else {
-        vec!["Shader".to_string()]
-    };
+    let mut capabilities = vec!["Shader".to_string()];
+    if emitter.uses_int64 {
+        capabilities.push("Int64".to_string());
+    }
+    let mut extensions = Vec::new();
+    if let Some(capability) = emitter.uses_variable_pointers {
+        capabilities.push(format!("{capability:?}"));
+        // The capability is core from SPIR-V 1.3; before that it needs the
+        // extension which introduced it.
+        if emitter.spirv_version < (1, 3) {
+            extensions.push("SPV_KHR_variable_pointers".to_string());
+        }
+    }
     let words = emitter.builder.module().assemble();
     rspirv::dr::load_words(&words)
         .map_err(|error| emission(format!("emitted SPIR-V could not be parsed: {error}")))?;
@@ -202,15 +238,21 @@ fn emit_entry(
         resources,
         required: RequiredFeatures {
             capabilities,
-            extensions: Vec::new(),
+            extensions,
         },
     })
 }
 
 struct Emitter {
     shader_int64: bool,
+    variable_pointers_storage_buffer: bool,
+    variable_pointers: bool,
     spirv_version: (u8, u8),
     uses_int64: bool,
+    /// Whether a pointer has been a phi or a select operand, and in which
+    /// storage class: `VariablePointers` is the wider of the two capabilities
+    /// and the only one `Workgroup` may use.
+    uses_variable_pointers: Option<Capability>,
     builder: Builder,
     types: HashMap<Type, u32>,
     constants: HashMap<(Type, u64), u32>,
@@ -251,8 +293,11 @@ impl Emitter {
         let glsl_std_450 = builder.ext_inst_import("GLSL.std.450");
         Self {
             shader_int64: target.shader_int64,
+            variable_pointers_storage_buffer: target.variable_pointers_storage_buffer,
+            variable_pointers: target.variable_pointers,
             spirv_version: target.spirv_version,
             uses_int64: false,
+            uses_variable_pointers: None,
             builder,
             types: HashMap::new(),
             constants: HashMap::new(),
@@ -1123,6 +1168,7 @@ impl Emitter {
                 let result = instruction
                     .result
                     .ok_or_else(|| emission("phi has no result"))?;
+                self.variable_pointer(&function.values[result.0 as usize], "phi")?;
                 let ty = self.type_id(&function.values[result.0 as usize])?;
                 let incoming = incomings
                     .iter()
@@ -1131,6 +1177,7 @@ impl Emitter {
                 self.builder
                     .phi(ty, result_id, incoming)
                     .map_err(build_error)?;
+                self.note_pointer_storage(function, result);
             }
             InstructionKind::ElementAddress { pointer, index } => {
                 let (variable, storage, member) = self.pointer_base(pointer, values)?;
@@ -1568,6 +1615,7 @@ impl Emitter {
                 let result = instruction
                     .result
                     .ok_or_else(|| emission("select has no result"))?;
+                self.variable_pointer(&function.values[result.0 as usize], "select")?;
                 let ty = self.type_id(&function.values[result.0 as usize])?;
                 let condition = self.operand(condition, values)?;
                 let on_true = self.operand(on_true, values)?;
@@ -1575,6 +1623,7 @@ impl Emitter {
                 self.builder
                     .select(ty, result_id, condition, on_true, on_false)
                     .map_err(build_error)?;
+                self.note_pointer_storage(function, result);
             }
             InstructionKind::VectorSplat { value, lanes } => {
                 let result = instruction
@@ -1803,8 +1852,154 @@ impl Emitter {
                     )
                     .map_err(build_error)?;
             }
+            InstructionKind::Barrier { scope, memory } => {
+                let execution = self.scope_id(*scope)?;
+                // Metal's barrier orders the memory its flags name and makes
+                // the invocations of `scope` wait; SPIR-V spells the first as
+                // memory semantics and takes a memory scope of its own, which
+                // is the same set of invocations.
+                let semantics = match memory_semantics(*memory) {
+                    0 => 0,
+                    bits => bits | MemorySemantics::ACQUIRE_RELEASE.bits(),
+                };
+                let semantics = self.constant(&Type::u32(), u64::from(semantics))?;
+                if *scope == BarrierScope::Simdgroup {
+                    self.builder.capability(Capability::GroupNonUniform);
+                }
+                self.builder
+                    .control_barrier(execution, execution, semantics)
+                    .map_err(build_error)?;
+            }
+            InstructionKind::Atomic {
+                op,
+                pointer,
+                value,
+                order,
+                scope,
+            } => {
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("atomic has no result"))?;
+                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let pointer_id = self.operand(pointer, values)?;
+                let value_id = self.operand(value, values)?;
+                let scope_id = self.scope_id(*scope)?;
+                // The address space the pointer is in is the memory this
+                // ordering applies to; Metal names no other.
+                let space = match operand_type(function, pointer) {
+                    Some(Type::Pointer { space, .. }) => space,
+                    _ => return Err(emission("atomic operand is not a pointer")),
+                };
+                let semantics = match order {
+                    MemoryOrder::Relaxed => 0,
+                    MemoryOrder::SequentiallyConsistent => {
+                        MemorySemantics::SEQUENTIALLY_CONSISTENT.bits()
+                            | match space {
+                                AddressSpace::Threadgroup => {
+                                    MemorySemantics::WORKGROUP_MEMORY.bits()
+                                }
+                                _ => MemorySemantics::UNIFORM_MEMORY.bits(),
+                            }
+                    }
+                };
+                let semantics = self.constant(&Type::u32(), u64::from(semantics))?;
+                let build =
+                    |builder: &mut Builder| match op {
+                        AtomicOp::Add => builder
+                            .atomic_i_add(ty, result_id, pointer_id, scope_id, semantics, value_id),
+                        AtomicOp::Subtract => builder
+                            .atomic_i_sub(ty, result_id, pointer_id, scope_id, semantics, value_id),
+                        AtomicOp::MinimumSigned => builder
+                            .atomic_s_min(ty, result_id, pointer_id, scope_id, semantics, value_id),
+                        AtomicOp::MinimumUnsigned => builder
+                            .atomic_u_min(ty, result_id, pointer_id, scope_id, semantics, value_id),
+                        AtomicOp::MaximumSigned => builder
+                            .atomic_s_max(ty, result_id, pointer_id, scope_id, semantics, value_id),
+                        AtomicOp::MaximumUnsigned => builder
+                            .atomic_u_max(ty, result_id, pointer_id, scope_id, semantics, value_id),
+                        AtomicOp::And => builder
+                            .atomic_and(ty, result_id, pointer_id, scope_id, semantics, value_id),
+                        AtomicOp::Or => builder
+                            .atomic_or(ty, result_id, pointer_id, scope_id, semantics, value_id),
+                        AtomicOp::Xor => builder
+                            .atomic_xor(ty, result_id, pointer_id, scope_id, semantics, value_id),
+                        AtomicOp::Exchange => builder.atomic_exchange(
+                            ty, result_id, pointer_id, scope_id, semantics, value_id,
+                        ),
+                    };
+                build(&mut self.builder).map_err(build_error)?;
+            }
         }
         Ok(())
+    }
+
+    /// Record which storage class a pointer *value* lives in.
+    ///
+    /// An access chain asks its base which class it started from, and a phi or
+    /// a select is the only place a pointer that came from neither a variable
+    /// nor another chain can answer.
+    fn note_pointer_storage(&mut self, function: &Function, result: ValueId) {
+        let Type::Pointer { space, .. } = &function.values[result.0 as usize] else {
+            return;
+        };
+        let storage = match space {
+            AddressSpace::Device => StorageClass::StorageBuffer,
+            AddressSpace::Threadgroup | AddressSpace::ThreadgroupImageblock => {
+                StorageClass::Workgroup
+            }
+            _ => return,
+        };
+        self.pointer_storage.insert(result, storage);
+    }
+
+    /// Note that a pointer is about to be a phi or a select operand.
+    ///
+    /// SPIR-V's logical addressing model has no pointer values by default;
+    /// `VariablePointers` is what admits them, and it is an optional Vulkan
+    /// feature. Rejecting here rather than emitting a module the device cannot
+    /// accept keeps the failure on the translation side, where it is named.
+    fn variable_pointer(&mut self, ty: &Type, what: &str) -> Result<(), TranslateError> {
+        let Type::Pointer { space, .. } = ty else {
+            return Ok(());
+        };
+        // `VariablePointersStorageBuffer` covers `StorageBuffer` alone;
+        // anything else, which for Metal means a `threadgroup` pointer, needs
+        // the wider capability.
+        let wide = !matches!(space, AddressSpace::Device);
+        let capability = match wide {
+            true => Capability::VariablePointers,
+            false => Capability::VariablePointersStorageBuffer,
+        };
+        let available = match wide {
+            true => self.variable_pointers,
+            false => self.variable_pointers || self.variable_pointers_storage_buffer,
+        };
+        if !available {
+            return Err(emission(format!(
+                "a {what} of pointers needs {capability:?}, which the target profile does not \
+                 report"
+            )));
+        }
+        // The wider capability implies the narrower one, so a module which
+        // needs both declares only the wider.
+        if self.uses_variable_pointers != Some(Capability::VariablePointers) {
+            self.uses_variable_pointers = Some(capability);
+            self.builder.capability(capability);
+            if self.spirv_version < (1, 3) {
+                self.builder.extension("SPV_KHR_variable_pointers");
+            }
+        }
+        Ok(())
+    }
+
+    /// The constant a SPIR-V execution or memory scope operand is spelled as.
+    fn scope_id(&mut self, scope: BarrierScope) -> Result<u32, TranslateError> {
+        let value = match scope {
+            BarrierScope::Device => rspirv::spirv::Scope::Device,
+            BarrierScope::Threadgroup => rspirv::spirv::Scope::Workgroup,
+            BarrierScope::Simdgroup => rspirv::spirv::Scope::Subgroup,
+        };
+        self.constant(&Type::u32(), value as u64)
     }
 
     /// Vulkan carries the array slice as an extra coordinate component;
@@ -2283,6 +2478,29 @@ impl Emitter {
                 )
             }
             Type::Sampler => self.builder.type_sampler(),
+            // A pointer only needs a type of its own where it is a value:
+            // an access chain builds its own result type from the storage
+            // class it started in, but a phi of two pointers into a buffer has
+            // to name one. Metal's address space says the storage class, and
+            // only the spaces a *pointer value* can be in are mapped: a
+            // `constant` or `thread` pointer may address either a module global
+            // or a buffer, which are different storage classes, and nothing in
+            // the type says which.
+            Type::Pointer { space, pointee } => {
+                let (storage, pointee) = match space {
+                    AddressSpace::Device => (StorageClass::StorageBuffer, self.type_id(pointee)?),
+                    AddressSpace::Threadgroup | AddressSpace::ThreadgroupImageblock => {
+                        (StorageClass::Workgroup, self.unlaid_type_id(pointee)?)
+                    }
+                    _ => {
+                        return Err(emission(format!(
+                            "a pointer value in the {space:?} address space has no one Vulkan \
+                             storage class"
+                        )));
+                    }
+                };
+                self.builder.type_pointer(None, storage, pointee)
+            }
             _ => return Err(emission(format!("unsupported SPIR-V value type {ty:?}"))),
         };
         self.types.insert(ty.clone(), id);
@@ -2438,7 +2656,8 @@ fn limit(function: &Function) -> usize {
 /// branches, and SPIR-V forbids two headers from naming the same merge. Route
 /// the inner construct's edges through a new block, which then becomes its
 /// merge.
-fn split_shared_merges(function: &mut Function) -> Result<(), TranslateError> {
+fn split_shared_merges(function: &mut Function) -> Result<bool, TranslateError> {
+    let mut changed = false;
     // Each pass splits one shared merge and adds one block, and a split can
     // expose another: an `else if` chain of n arms needs n - 1 splits, and the
     // blocks it adds can themselves be claimed. The bound is a guard against
@@ -2454,7 +2673,7 @@ fn split_shared_merges(function: &mut Function) -> Result<(), TranslateError> {
         }
         let Some((merge, headers)) = claims.into_iter().find(|(_, headers)| headers.len() > 1)
         else {
-            return Ok(());
+            return Ok(changed);
         };
         let graph = ControlFlow::new(function);
         let dominators = graph.dominance(&[function.blocks[0].id], &graph.predecessors);
@@ -2483,6 +2702,7 @@ fn split_shared_merges(function: &mut Function) -> Result<(), TranslateError> {
             ));
         }
         split_merge(function, merge, &sources);
+        changed = true;
     }
     Err(emission(
         "control flow needs more restructuring than this translator performs",
@@ -2498,7 +2718,8 @@ fn split_shared_merges(function: &mut Function) -> Result<(), TranslateError> {
 /// outer one, whose only exit is that block. Both are answered the same way -
 /// route the back edge through a new block, leaving the old latch in the body
 /// where it is a legal merge.
-fn separate_loop_latches(function: &mut Function) -> Result<(), TranslateError> {
+fn separate_loop_latches(function: &mut Function) -> Result<bool, TranslateError> {
+    let mut changed = false;
     for _ in 0..limit(function) {
         let graph = ControlFlow::new(function);
         let entry = function.blocks[0].id;
@@ -2594,12 +2815,75 @@ fn separate_loop_latches(function: &mut Function) -> Result<(), TranslateError> 
             break;
         }
         let Some((header, latch)) = split else {
-            return Ok(());
+            return Ok(changed);
         };
         split_merge(function, header, &[latch]);
+        changed = true;
     }
     Err(emission(
         "a loop's latch could not be separated from its body",
+    ))
+}
+
+/// Give a loop a merge block of its own where the block it leaves to is also
+/// reached from outside it.
+///
+/// A loop's merge must be dominated by its header. A block the body leaves to
+/// which something outside the loop also branches to is not, so the exit edges
+/// are routed through a new block, which is - and which becomes the merge,
+/// because it is now the only block the body leaves to.
+fn isolate_loop_merges(function: &mut Function) -> Result<bool, TranslateError> {
+    let mut changed = false;
+    for _ in 0..limit(function) {
+        let graph = ControlFlow::new(function);
+        let entry = function.blocks[0].id;
+        let dominators = graph.dominance(&[entry], &graph.predecessors);
+        let mut split = None;
+        for block in &function.blocks {
+            let latches: Vec<_> = graph
+                .predecessors
+                .get(&block.id)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|predecessor| dominators.dominates(block.id, *predecessor))
+                .collect();
+            let [continue_target] = latches.as_slice() else {
+                continue;
+            };
+            let body = natural_loop(&graph, block.id, *continue_target);
+            let mut leaving: Vec<_> = body
+                .iter()
+                .flat_map(|member| graph.successors[member].iter().copied())
+                .filter(|successor| !body.contains(successor))
+                .collect();
+            leaving.sort_unstable();
+            leaving.dedup();
+            let [merge] = leaving.as_slice() else {
+                continue;
+            };
+            if dominators.dominates(block.id, *merge) {
+                continue;
+            }
+            let inside: Vec<_> = graph
+                .predecessors
+                .get(merge)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|predecessor| body.contains(predecessor))
+                .collect();
+            split = Some((*merge, inside));
+            break;
+        }
+        let Some((merge, inside)) = split else {
+            return Ok(changed);
+        };
+        split_merge(function, merge, &inside);
+        changed = true;
+    }
+    Err(emission(
+        "a loop's merge could not be separated from the code which reaches it from outside",
     ))
 }
 
@@ -2611,7 +2895,8 @@ fn separate_loop_latches(function: &mut Function) -> Result<(), TranslateError> 
 /// the loop's header and the selection's, and SPIR-V has no way to say so.
 /// Routing every edge into the header through a new block leaves that block
 /// carrying the loop and the old header carrying the selection.
-fn normalize_loop_headers(function: &mut Function) -> Result<(), TranslateError> {
+fn normalize_loop_headers(function: &mut Function) -> Result<bool, TranslateError> {
+    let mut changed = false;
     for _ in 0..limit(function) {
         let graph = ControlFlow::new(function);
         let entry = function.blocks[0].id;
@@ -2659,9 +2944,10 @@ fn normalize_loop_headers(function: &mut Function) -> Result<(), TranslateError>
             break;
         }
         let Some((header, predecessors)) = split else {
-            return Ok(());
+            return Ok(changed);
         };
         split_merge(function, header, &predecessors);
+        changed = true;
     }
     Err(emission(
         "a loop header could not be separated from the selection it also makes",
@@ -3119,4 +3405,19 @@ fn build_error(error: rspirv::dr::Error) -> TranslateError {
 
 fn emission(message: impl Into<String>) -> TranslateError {
     TranslateError::one(Diagnostic::new(Phase::SpirvEmission, message))
+}
+
+/// The SPIR-V memory semantics Metal's `mem_flags` name.
+fn memory_semantics(memory: BarrierMemory) -> u32 {
+    let mut bits = 0;
+    if memory.device {
+        bits |= MemorySemantics::UNIFORM_MEMORY.bits();
+    }
+    if memory.threadgroup {
+        bits |= MemorySemantics::WORKGROUP_MEMORY.bits();
+    }
+    if memory.texture {
+        bits |= MemorySemantics::IMAGE_MEMORY.bits();
+    }
+    bits
 }
