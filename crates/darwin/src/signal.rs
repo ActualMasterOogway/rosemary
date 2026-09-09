@@ -318,16 +318,13 @@ pub fn retained(darwin_signum: i32) -> bool {
 /// handlers themselves, by the same lever and for the same reason.
 static RETAIN_ALTSTACK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// What the guest asked for on the retained alternate stack: `ss_sp`, `ss_size`
-/// and `ss_flags`, so it reads its own installation back.
-static PRETENDED_ALTSTACK: (
-    core::sync::atomic::AtomicU64,
-    core::sync::atomic::AtomicU64,
-    core::sync::atomic::AtomicI32,
-) = {
-    use core::sync::atomic::{AtomicI32, AtomicU64};
-    (AtomicU64::new(0), AtomicU64::new(0), AtomicI32::new(0))
-};
+// What this thread's guest asked for on the retained alternate stack.
+// Alternate stacks are thread-local kernel state. Keeping this process-global
+// would make one guest thread read (and overwrite) another thread's stack.
+thread_local! {
+    static PRETENDED_ALTSTACK: core::cell::Cell<(usize, usize, i32)> =
+        const { core::cell::Cell::new((0, 0, libc::SS_DISABLE)) };
+}
 
 /// Keep this thread's alternate signal stack, whatever the guest asks for.
 pub fn retain_altstack() {
@@ -341,23 +338,21 @@ pub fn altstack_retained() -> bool {
 
 /// The alternate stack the guest last asked for, for a caller reading it back.
 pub fn pretended_altstack() -> libc::stack_t {
-    use core::sync::atomic::Ordering::Relaxed;
-    // SAFETY: zeroed is a disabled stack, and every field is written below.
-    let mut stack: libc::stack_t = unsafe { core::mem::zeroed() };
-    stack.ss_sp = PRETENDED_ALTSTACK.0.load(Relaxed) as usize as *mut libc::c_void;
-    stack.ss_size = PRETENDED_ALTSTACK.1.load(Relaxed) as usize;
-    stack.ss_flags = PRETENDED_ALTSTACK.2.load(Relaxed);
-    stack
+    PRETENDED_ALTSTACK.with(|held| {
+        let (sp, size, flags) = held.get();
+        libc::stack_t {
+            ss_sp: sp as *mut libc::c_void,
+            ss_size: size,
+            ss_flags: flags,
+        }
+    })
 }
 
 /// Record what the guest asked for without acting on it.
 pub fn set_pretended_altstack(stack: &libc::stack_t) {
-    use core::sync::atomic::Ordering::Relaxed;
-    PRETENDED_ALTSTACK
-        .0
-        .store(stack.ss_sp as usize as u64, Relaxed);
-    PRETENDED_ALTSTACK.1.store(stack.ss_size as u64, Relaxed);
-    PRETENDED_ALTSTACK.2.store(stack.ss_flags, Relaxed);
+    PRETENDED_ALTSTACK.with(|held| {
+        held.set((stack.ss_sp as usize, stack.ss_size, stack.ss_flags));
+    });
 }
 
 /// A signal disposition in Darwin's shape: a handler, a 32-bit mask, and flags.
@@ -888,19 +883,30 @@ pub mod entry {
     /// # Safety
     ///
     /// `at` is [`STACK_SIZE`] readable bytes.
-    unsafe fn read_stack(at: *const u8) -> libc::stack_t {
+    unsafe fn read_stack(at: *const u8) -> Result<libc::stack_t, c_int> {
         let mut bytes = [0u8; STACK_SIZE];
         // SAFETY: the caller's structure, of Darwin's size.
         unsafe { core::ptr::copy_nonoverlapping(at, bytes.as_mut_ptr(), STACK_SIZE) };
         let flags = i32::from_le_bytes(bytes[16..20].try_into().unwrap());
-        libc::stack_t {
+        if !matches!(flags, 0 | SS_DISABLE) {
+            return Err(libc::EINVAL);
+        }
+        let stack = libc::stack_t {
             ss_sp: usize::from_le_bytes(bytes[0..8].try_into().unwrap()) as *mut c_void,
             ss_size: usize::from_le_bytes(bytes[8..16].try_into().unwrap()),
             ss_flags: match flags & SS_DISABLE != 0 {
                 true => libc::SS_DISABLE,
                 false => flags & SS_ONSTACK,
             },
+        };
+        // Modern Darwin requires a substantially larger signal stack than Linux.
+        // Passing the value through would let 2 KiB succeed where Darwin returns
+        // ENOMEM, only for a later handler to overflow it.
+        const DARWIN_MINSIGSTKSZ: usize = 32 * 1024;
+        if flags == 0 && stack.ss_size < DARWIN_MINSIGSTKSZ {
+            return Err(libc::ENOMEM);
         }
+        Ok(stack)
     }
 
     /// # Safety
@@ -928,7 +934,13 @@ pub mod entry {
         // SAFETY: the caller's structure, if it passed one.
         let wanted = match ss.is_null() {
             true => None,
-            false => Some(unsafe { read_stack(ss.cast()) }),
+            false => match unsafe { read_stack(ss.cast()) } {
+                Ok(stack) => Some(stack),
+                Err(error) => {
+                    crate::errno::set(error);
+                    return -1;
+                }
+            },
         };
         if altstack_retained() {
             let previous = pretended_altstack();
@@ -1031,7 +1043,7 @@ pub mod entry {
 
     /// The bit `signum` occupies, or `None` for a number that is not a signal.
     fn bit(signum: c_int) -> Option<u32> {
-        (1..=32).contains(&signum).then(|| 1u32 << (signum - 1))
+        (1..=31).contains(&signum).then(|| 1u32 << (signum - 1))
     }
 
     /// # Safety
@@ -1245,7 +1257,7 @@ pub mod entry {
             darwin[16..20].copy_from_slice(&SS_DISABLE.to_le_bytes());
 
             // SAFETY: `darwin` is `STACK_SIZE` bytes.
-            let host = unsafe { read_stack(darwin.as_ptr()) };
+            let host = unsafe { read_stack(darwin.as_ptr()) }.expect("a valid disabled stack");
             assert_eq!(host.ss_sp as usize, 0x1234_5000);
             assert_eq!(host.ss_size, 64 * 1024);
             assert_eq!(host.ss_flags, libc::SS_DISABLE);
@@ -1274,6 +1286,39 @@ pub mod entry {
             }
             assert_eq!(set[0], 1 << (signum::SIGUSR1 - 1));
             assert_eq!(set[1], 0xdead_beef, "nothing past the caller's word");
+        }
+
+        #[test]
+        fn signal_32_is_not_accepted_as_a_darwin_signal() {
+            let mut set = 0u32;
+            crate::errno::set(0);
+            // SAFETY: `set` is a live Darwin signal-set word.
+            assert_eq!(unsafe { sigaddset_(&mut set, 32) }, -1);
+            assert_eq!(crate::errno::get(), libc::EINVAL);
+            assert_eq!(set, 0);
+            crate::errno::set(0);
+        }
+
+        #[test]
+        fn alternate_stack_input_is_validated_to_darwins_rules() {
+            let mut darwin = [0u8; STACK_SIZE];
+            darwin[0..8].copy_from_slice(&0x1234_5000u64.to_le_bytes());
+            darwin[8..16].copy_from_slice(&2048u64.to_le_bytes());
+            // SAFETY: `darwin` is a complete Darwin stack_t.
+            assert_eq!(
+                unsafe { sigaltstack_(darwin.as_ptr().cast(), std::ptr::null_mut()) },
+                -1
+            );
+            assert_eq!(crate::errno::get(), libc::ENOMEM);
+
+            darwin[8..16].copy_from_slice(&(32u64 * 1024).to_le_bytes());
+            darwin[16..20].copy_from_slice(&2i32.to_le_bytes());
+            assert_eq!(
+                unsafe { sigaltstack_(darwin.as_ptr().cast(), std::ptr::null_mut()) },
+                -1
+            );
+            assert_eq!(crate::errno::get(), libc::EINVAL);
+            crate::errno::set(0);
         }
 
         /// `kill(pid, 0)` is the existence probe a crash handler watches its
@@ -1472,6 +1517,33 @@ mod tests {
     fn a_null_context_has_no_program_counter() {
         // SAFETY: null is the one argument this is documented to accept and refuse.
         assert_eq!(unsafe { interrupted_pc(core::ptr::null_mut()) }, None);
+    }
+
+    #[test]
+    fn retained_alternate_stack_state_is_per_thread_and_initially_disabled() {
+        let main = libc::stack_t {
+            ss_sp: 0x1234usize as *mut libc::c_void,
+            ss_size: 64 * 1024,
+            ss_flags: 0,
+        };
+        set_pretended_altstack(&main);
+
+        let other = std::thread::spawn(|| {
+            let initial = pretended_altstack();
+            assert!(initial.ss_sp.is_null());
+            assert_eq!(initial.ss_flags, libc::SS_DISABLE);
+            set_pretended_altstack(&libc::stack_t {
+                ss_sp: 0x5678usize as *mut libc::c_void,
+                ss_size: 32 * 1024,
+                ss_flags: 0,
+            });
+            pretended_altstack().ss_sp as usize
+        })
+        .join()
+        .expect("thread exits");
+
+        assert_eq!(other, 0x5678);
+        assert_eq!(pretended_altstack().ss_sp as usize, 0x1234);
     }
 }
 
