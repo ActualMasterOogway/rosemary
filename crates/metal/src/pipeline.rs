@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use ash::vk;
-use metal_translate::ir::{Access, ResourceKind, Stage};
+use metal_translate::ir::{ResourceKind, Stage};
 use metal_translate::{EntryArtifact, ResourceBinding};
 
 use crate::gpu::{self, Gpu, RenderPassKey};
@@ -27,9 +27,10 @@ pub(crate) struct Layouts {
 pub(crate) fn descriptor_type(binding: &ResourceBinding) -> Option<vk::DescriptorType> {
     match binding.kind {
         ResourceKind::Buffer => Some(vk::DescriptorType::STORAGE_BUFFER),
-        ResourceKind::Texture => Some(match binding.access {
-            Access::Sample => vk::DescriptorType::SAMPLED_IMAGE,
-            _ => vk::DescriptorType::STORAGE_IMAGE,
+        ResourceKind::Texture => Some(if binding.sampled {
+            vk::DescriptorType::SAMPLED_IMAGE
+        } else {
+            vk::DescriptorType::STORAGE_IMAGE
         }),
         ResourceKind::Sampler => Some(vk::DescriptorType::SAMPLER),
         _ => None,
@@ -166,6 +167,12 @@ pub(crate) struct RenderVariantKey {
     pub fill_mode: u64,
     pub depth_clip: u64,
     pub depth: DepthStencilKey,
+    /// Which of the pass's colour attachments are being resolved. A Metal
+    /// pipeline state says nothing about resolving - the pass descriptor does -
+    /// but Vulkan render passes are compatible only when their resolve
+    /// attachment references match, so the pipeline needs one variant per
+    /// resolve shape it is drawn under.
+    pub resolve_mask: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -262,7 +269,9 @@ pub(crate) struct RenderPipeline {
     pub stencil_format: vk::Format,
     pub samples: vk::SampleCountFlags,
     alpha_to_coverage: bool,
-    template: vk::RenderPass,
+    /// The pass shape this pipeline was declared against, without resolves;
+    /// `variant` adds those from the key and asks the cache for the pass.
+    pass: RenderPassKey,
     variants: Mutex<HashMap<RenderVariantKey, vk::Pipeline>>,
 }
 
@@ -355,6 +364,7 @@ impl RenderPipeline {
             None
         };
         let key = RenderPassKey {
+            color_resolves: vec![None; color_formats.len()],
             colors: color_formats,
             depth: attachment_depth.map(|format| {
                 (
@@ -369,7 +379,7 @@ impl RenderPipeline {
             )),
             samples,
         };
-        let template = gpu.render_pass(&key)?;
+        gpu.render_pass(&key)?;
 
         let mut resources = vertex.resources.clone();
         resources.extend(fragment.resources.iter().cloned());
@@ -391,7 +401,7 @@ impl RenderPipeline {
             stencil_format,
             samples,
             alpha_to_coverage: descriptor.alpha_to_coverage,
-            template,
+            pass: key,
             variants: Mutex::new(HashMap::new()),
         })
     }
@@ -401,6 +411,13 @@ impl RenderPipeline {
         if let Some(pipeline) = cache.get(key) {
             return Ok(*pipeline);
         }
+        let mut shape = self.pass.clone();
+        for (index, resolve) in shape.color_resolves.iter_mut().enumerate() {
+            if key.resolve_mask & (1 << index) != 0 {
+                *resolve = Some(self.pass.colors[index].0);
+            }
+        }
+        let pass = self.gpu.render_pass(&shape)?;
         let stages = [
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::VERTEX)
@@ -497,7 +514,7 @@ impl RenderPipeline {
             .color_blend_state(&blend)
             .dynamic_state(&dynamic)
             .layout(self.layouts.pipeline)
-            .render_pass(self.template)
+            .render_pass(pass)
             .subpass(0);
         // SAFETY: every borrowed structure lives across the call.
         let pipeline = unsafe {

@@ -49,6 +49,10 @@ struct Immediate {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RenderPassKey {
     pub colors: Vec<(vk::Format, vk::AttachmentLoadOp, vk::AttachmentStoreOp)>,
+    /// The single-sample attachment each colour is resolved into, where the
+    /// Metal store action asks for a resolve, and `None` where it does not.
+    /// One entry per colour, because Vulkan's resolve list is positional.
+    pub color_resolves: Vec<Option<vk::Format>>,
     pub depth: Option<(vk::Format, vk::AttachmentLoadOp, vk::AttachmentStoreOp)>,
     pub stencil: Option<(vk::AttachmentLoadOp, vk::AttachmentStoreOp)>,
     pub samples: vk::SampleCountFlags,
@@ -514,9 +518,43 @@ impl Gpu {
             );
             reference
         });
+        // Metal resolves a multisampled attachment by naming the destination
+        // on the pass descriptor; Vulkan does it with a second attachment the
+        // subpass names positionally, so a colour without a resolve still needs
+        // an entry. The resolve attachments follow the depth one, which is the
+        // order `begin_render_pass` builds the framebuffer's views in.
+        let mut resolves = Vec::new();
+        if key.color_resolves.iter().any(Option::is_some) {
+            for format in &key.color_resolves {
+                let Some(format) = format else {
+                    resolves
+                        .push(vk::AttachmentReference::default().attachment(vk::ATTACHMENT_UNUSED));
+                    continue;
+                };
+                resolves.push(
+                    vk::AttachmentReference::default()
+                        .attachment(attachments.len() as u32)
+                        .layout(vk::ImageLayout::GENERAL),
+                );
+                attachments.push(
+                    vk::AttachmentDescription::default()
+                        .format(*format)
+                        .samples(vk::SampleCountFlags::TYPE_1)
+                        .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                        .store_op(vk::AttachmentStoreOp::STORE)
+                        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                        .initial_layout(vk::ImageLayout::GENERAL)
+                        .final_layout(vk::ImageLayout::GENERAL),
+                );
+            }
+        }
         let mut subpass = vk::SubpassDescription::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
             .color_attachments(&colors);
+        if !resolves.is_empty() {
+            subpass = subpass.resolve_attachments(&resolves);
+        }
         if let Some(depth) = &depth {
             subpass = subpass.depth_stencil_attachment(depth);
         }
@@ -1019,6 +1057,22 @@ fn dump_spirv(entry: &str, words: &[u32]) {
 pub fn trace(message: impl std::fmt::Display) {
     if tracing() {
         eprintln!("rosetta3: Metal: {message}");
+    }
+}
+
+/// Report a message once however often the runtime reaches it, so that a gap a
+/// frame runs into does not fill the log.
+pub fn trace_once(message: impl std::fmt::Display) {
+    use std::sync::Mutex;
+    static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    if !tracing() {
+        return;
+    }
+    let message = message.to_string();
+    let mut seen = SEEN.lock().expect("trace list");
+    if !seen.contains(&message) {
+        eprintln!("rosetta3: Metal: {message}");
+        seen.push(message);
     }
 }
 

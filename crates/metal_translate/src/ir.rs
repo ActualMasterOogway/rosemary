@@ -124,6 +124,26 @@ pub struct TextureType {
     pub access: Access,
 }
 
+impl TextureType {
+    /// Whether Vulkan carries this texture as a sampled image rather than a
+    /// storage image.
+    ///
+    /// Only a texture a shader writes is a storage image. Metal's `read()` is
+    /// a texel fetch with no filtering, which a sampled image answers with
+    /// `OpImageFetch` exactly as a storage image answers `OpImageRead`, and
+    /// reading it as a storage image instead is wrong twice over: Metal's
+    /// `shaderRead` usage asks for a sampled image and nothing more, so the
+    /// image was never created with `VK_IMAGE_USAGE_STORAGE_BIT`, and many of
+    /// the formats a game renders into - `A2B10G10R10`, a depth format, a
+    /// compressed one - cannot be storage images on the adapter at all. What
+    /// comes back from such a descriptor is the surface's own layout, which for
+    /// a multisampled attachment is its samples interleaved across neighbouring
+    /// pixels.
+    pub fn sampled_image(&self) -> bool {
+        !matches!(self.access, Access::Write | Access::ReadWrite)
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct StructType {
     pub fields: Vec<StructField>,

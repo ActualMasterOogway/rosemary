@@ -128,6 +128,12 @@ pub(crate) struct Encoder {
     fill_mode: u64,
     depth_clip: u64,
     in_render_pass: bool,
+    /// Which colour attachments of the pass being recorded are resolved, for
+    /// the pipeline variant a draw needs. See [`RenderVariantKey`].
+    resolve_mask: u32,
+    /// Resolves a subpass cannot perform because the attachment has one sample,
+    /// recorded as image copies once the pass has ended.
+    pending_copies: Vec<PendingCopy>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -565,6 +571,8 @@ pub(crate) fn new_encoder(command_buffer: Id, kind: Kind) -> Id {
             fill_mode: 0,
             depth_clip: 0,
             in_render_pass: false,
+            resolve_mask: 0,
+            pending_copies: Vec::new(),
         },
     )
 }
@@ -779,6 +787,40 @@ unsafe extern "C" fn end_encoding(receiver: Id, _sel: Sel) {
                 .cmd_end_render_pass(command.command_buffer)
         };
         encoder.in_render_pass = false;
+        for copy in std::mem::take(&mut encoder.pending_copies) {
+            let source = vk::ImageSubresourceLayers {
+                aspect_mask: copy.aspect,
+                mip_level: copy.source_level,
+                base_array_layer: copy.source_slice,
+                layer_count: 1,
+            };
+            let destination = vk::ImageSubresourceLayers {
+                aspect_mask: copy.aspect,
+                mip_level: copy.destination_level,
+                base_array_layer: copy.destination_slice,
+                layer_count: 1,
+            };
+            let extent = vk::Extent3D {
+                width: copy.width,
+                height: copy.height,
+                depth: 1,
+            };
+            let region = vk::ImageCopy::default()
+                .src_subresource(source)
+                .dst_subresource(destination)
+                .extent(extent);
+            // SAFETY: recording into this command buffer, outside the pass.
+            unsafe {
+                command.gpu.device.cmd_copy_image(
+                    command.command_buffer,
+                    copy.source,
+                    vk::ImageLayout::GENERAL,
+                    copy.destination,
+                    vk::ImageLayout::GENERAL,
+                    &[region],
+                )
+            };
+        }
     }
     encoder.barrier();
 }
@@ -1091,6 +1133,7 @@ impl Encoder {
             fill_mode: self.fill_mode,
             depth_clip: self.depth_clip,
             depth: DepthStencilKey::from(&depth),
+            resolve_mask: self.resolve_mask,
         };
         let pipeline = match state.variant(&key) {
             Ok(pipeline) => pipeline,
@@ -1628,6 +1671,8 @@ pub(crate) struct AttachmentDescriptor {
     pub clear_depth: f64,
     pub clear_stencil: u32,
     pub resolve_texture: Id,
+    pub resolve_level: u64,
+    pub resolve_slice: u64,
 }
 
 impl Default for AttachmentDescriptor {
@@ -1642,8 +1687,26 @@ impl Default for AttachmentDescriptor {
             clear_depth: 1.0,
             clear_stencil: 0,
             resolve_texture: std::ptr::null_mut(),
+            resolve_level: 0,
+            resolve_slice: 0,
         }
     }
+}
+
+/// A `MTLStoreActionMultisampleResolve` from an attachment which has one
+/// sample. Vulkan resolves only a multisampled attachment, so the destination
+/// is filled with a copy instead, which is what a one-sample resolve is.
+#[derive(Clone, Copy)]
+pub(crate) struct PendingCopy {
+    pub source: vk::Image,
+    pub source_level: u32,
+    pub source_slice: u32,
+    pub destination: vk::Image,
+    pub destination_level: u32,
+    pub destination_slice: u32,
+    pub width: u32,
+    pub height: u32,
+    pub aspect: vk::ImageAspectFlags,
 }
 
 pub(crate) const RENDER_TARGETS: usize = 8;
@@ -1688,8 +1751,8 @@ fn trace_pass(key: &RenderPassKey, width: u32, height: u32) {
         return;
     }
     let line = format!(
-        "render pass {width}x{height} samples {:?} colors {:?} depth {:?}",
-        key.samples, key.colors, key.depth
+        "render pass {width}x{height} samples {:?} colors {:?} resolves {:?} depth {:?}",
+        key.samples, key.colors, key.color_resolves, key.depth
     );
     let mut seen = SEEN.lock().expect("render pass trace");
     if !seen.contains(&line) {
@@ -1712,11 +1775,66 @@ fn load_op(metal: u64) -> vk::AttachmentLoadOp {
     }
 }
 
+/// Whether an `MTLStoreAction` asks for a multisample resolve:
+/// `MultisampleResolve` is 2 and `StoreAndMultisampleResolve` is 3.
+fn resolves(metal: u64) -> bool {
+    metal == 2 || metal == 3
+}
+
+/// What becomes of the attachment the pass rendered into.
+///
+/// `MultisampleResolve` keeps only the resolved copy, so Metal is free to throw
+/// the multisampled image away and `DONT_CARE` looks like the honest
+/// translation. It is not: on the NVIDIA driver this runs on, discarding a
+/// multisampled attachment which the same subpass resolves makes the resolve
+/// write the surface's raw sample layout rather than the average - the scene
+/// comes out as one shaded pixel in every four with the rest black. Storing it
+/// costs the write-back of an attachment nothing reads again, and is correct.
 fn store_op(metal: u64) -> vk::AttachmentStoreOp {
     match metal {
         0 => vk::AttachmentStoreOp::DONT_CARE,
         _ => vk::AttachmentStoreOp::STORE,
     }
+}
+
+/// Where one colour attachment is resolved to, when the store action asks for
+/// a resolve and the destination can carry it.
+///
+/// Vulkan resolves only into an attachment of the same format, and Metal names
+/// a mip level and array slice of the destination rather than the whole
+/// texture. A destination this cannot express is reported and dropped: the
+/// multisampled attachment is then stored instead, which is wrong but visible,
+/// where a resolve nothing performs leaves the destination black.
+struct ResolveTarget {
+    format: vk::Format,
+    view: vk::ImageView,
+    image: vk::Image,
+    level: u32,
+    slice: u32,
+}
+
+fn resolve_attachment(color: &AttachmentDescriptor, format: vk::Format) -> Option<ResolveTarget> {
+    if !resolves(color.store_action) || color.resolve_texture.is_null() {
+        return None;
+    }
+    // SAFETY: only a texture of this crate's is attached.
+    let texture = unsafe { object::body::<Texture>(color.resolve_texture) };
+    if texture.image.format != format {
+        gpu::trace_once(format!(
+            "render pass resolves {format:?} into {:?}, which Vulkan cannot do",
+            texture.image.format
+        ));
+        return None;
+    }
+    let level = color.resolve_level as u32;
+    let slice = color.resolve_slice as u32;
+    Some(ResolveTarget {
+        format: texture.image.format,
+        view: texture.attachment_view(level, slice),
+        image: texture.image.image,
+        level,
+        slice,
+    })
 }
 
 /// Begin the Vulkan render pass one `MTLRenderPassDescriptor` describes.
@@ -1728,11 +1846,15 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
 
     let mut key = RenderPassKey {
         colors: Vec::new(),
+        color_resolves: Vec::new(),
         depth: None,
         stencil: None,
         samples: vk::SampleCountFlags::TYPE_1,
     };
     let mut views = Vec::new();
+    let mut resolve_views = Vec::new();
+    let mut resolve_mask = 0u32;
+    let mut copies: Vec<PendingCopy> = Vec::new();
     let mut clears = Vec::new();
     let mut width = u32::MAX;
     let mut height = u32::MAX;
@@ -1744,14 +1866,44 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
         }
         // SAFETY: only a texture of this crate's is attached.
         let texture = unsafe { object::body::<Texture>(color.texture) };
-        key.colors.push((
-            texture.image.format,
-            load_op(color.load_action),
-            store_op(color.store_action),
-        ));
+        let format = texture.image.format;
         key.samples = texture.image.samples;
         let level = color.level as u32;
         views.push(texture.attachment_view(level, color.slice as u32));
+        let (base_width, base_height) = (texture.image.width, texture.image.height);
+        let source_image = texture.image.image;
+        let multisampled = texture.image.samples != vk::SampleCountFlags::TYPE_1;
+        let resolve = resolve_attachment(color, format);
+        // A subpass resolve is the answer only for a multisampled attachment.
+        // Where the attachment has one sample the same store action means a
+        // plain copy, which is recorded once the pass has ended.
+        let subpass_resolve = resolve.as_ref().filter(|_| multisampled);
+        key.colors.push((
+            format,
+            load_op(color.load_action),
+            store_op(color.store_action),
+        ));
+        key.color_resolves
+            .push(subpass_resolve.map(|target| target.format));
+        if let Some(target) = &resolve {
+            textures.push(color.resolve_texture);
+            if multisampled {
+                resolve_mask |= 1 << (key.colors.len() - 1);
+                resolve_views.push(target.view);
+            } else {
+                copies.push(PendingCopy {
+                    source: source_image,
+                    source_level: level,
+                    source_slice: color.slice as u32,
+                    destination: target.image,
+                    destination_level: target.level,
+                    destination_slice: target.slice,
+                    width: level_extent(base_width, level),
+                    height: level_extent(base_height, level),
+                    aspect: vk::ImageAspectFlags::COLOR,
+                });
+            }
+        }
         clears.push(vk::ClearValue {
             color: vk::ClearColorValue {
                 float32: [
@@ -1762,8 +1914,8 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
                 ],
             },
         });
-        width = width.min(level_extent(texture.image.width, level));
-        height = height.min(level_extent(texture.image.height, level));
+        width = width.min(level_extent(base_width, level));
+        height = height.min(level_extent(base_height, level));
         textures.push(color.texture);
     }
     let depth_attachment = if !descriptor.depth.texture.is_null() {
@@ -1787,6 +1939,13 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
                 store_op(descriptor.stencil.store_action),
             ));
         }
+        // FIXME (ACCURACY): a depth or stencil resolve is not performed. Vulkan
+        // spells it as a subpass extension read through `vkCreateRenderPass2`,
+        // which nothing here uses yet; the resolve destination is left as it
+        // was rather than silently holding one sample of the attachment.
+        if resolves(attachment.store_action) && !attachment.resolve_texture.is_null() {
+            gpu::trace_once("render pass asks for a depth resolve, which is not implemented");
+        }
         key.samples = texture.image.samples;
         let level = attachment.level as u32;
         views.push(texture.attachment_view(level, attachment.slice as u32));
@@ -1804,6 +1963,8 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
         gpu::trace("renderCommandEncoderWithDescriptor: has no attachments");
         return;
     }
+    // The render pass declares the resolve attachments after the depth one.
+    views.extend(resolve_views);
     let width = width.max(1);
     let height = height.max(1);
 
@@ -1864,6 +2025,8 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
     };
     gpu::milestone("render pass");
     encoder.in_render_pass = true;
+    encoder.resolve_mask = resolve_mask;
+    encoder.pending_copies = copies;
 }
 
 // ------------------------------------- MTLRenderPassDescriptor and encoders
@@ -2001,7 +2164,9 @@ unsafe extern "C" fn set_attachment_number(receiver: Id, sel: Sel, value: u64) {
         b"setLoadAction:" => attachment.load_action = value,
         b"setStoreAction:" => attachment.store_action = value,
         b"setClearStencil:" => attachment.clear_stencil = value as u32,
-        b"setDepthPlane:" | b"setResolveLevel:" | b"setResolveSlice:" => (),
+        b"setResolveLevel:" => attachment.resolve_level = value,
+        b"setResolveSlice:" => attachment.resolve_slice = value,
+        b"setDepthPlane:" => (),
         _ => (),
     }
 }

@@ -77,6 +77,10 @@ pub struct ResourceBinding {
     pub binding: u32,
     pub count: u32,
     pub access: Access,
+    /// For a texture, whether Vulkan carries it as a sampled image rather than
+    /// a storage image. See [`ir::TextureType::sampled_image`]; a buffer or a
+    /// sampler leaves it false.
+    pub sampled: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -412,6 +416,10 @@ impl Emitter {
                 binding,
                 count: resource.count,
                 access: resource.access,
+                sampled: match &parameter.ty {
+                    Type::Texture(texture) => texture.sampled_image(),
+                    _ => false,
+                },
             });
         }
         Ok(reflected)
@@ -1806,7 +1814,7 @@ impl Emitter {
                     extra.push(SpirvOperand::IdRef(self.operand(sample, values)?));
                 }
                 // A sampled image is fetched; a storage image is read.
-                if image_type.access == Access::Sample {
+                if image_type.sampled_image() {
                     self.builder
                         .image_fetch(ty, result_id, image, coordinate, Some(mask), extra)
                         .map_err(build_error)?;
@@ -1839,13 +1847,21 @@ impl Emitter {
                     }
                 })?;
                 let image = self.operand(texture, values)?;
-                let size = match lod {
-                    Some(lod) => {
-                        let lod = self.operand(lod, values)?;
-                        self.builder
-                            .image_query_size_lod(size_type, None, image, lod)
-                            .map_err(build_error)?
+                // `OpImageQuerySize` covers a storage image and a multisampled
+                // one; every other sampled image needs the level named, and
+                // Metal's `get_width()` on a texture it only reads names none.
+                let level = match lod {
+                    Some(lod) => Some(self.operand(lod, values)?),
+                    None if image_type.sampled_image() && !image_type.multisampled => {
+                        Some(self.constant(&Type::u32(), 0)?)
                     }
+                    None => None,
+                };
+                let size = match level {
+                    Some(lod) => self
+                        .builder
+                        .image_query_size_lod(size_type, None, image, lod)
+                        .map_err(build_error)?,
                     None => self
                         .builder
                         .image_query_size(size_type, None, image)
@@ -2511,13 +2527,10 @@ impl Emitter {
                     TextureDimension::D3 => Dim::Dim3D,
                     TextureDimension::Cube => Dim::DimCube,
                 };
-                // `Sampled` distinguishes an image read through a sampler
-                // from a storage image; Metal's access mode decides which.
-                let sampled = if texture.access == Access::Sample {
-                    1
-                } else {
-                    2
-                };
+                // `Sampled` distinguishes an image a sampler or a fetch reads
+                // from a storage image; only a texture a shader writes is the
+                // latter. See `TextureType::sampled_image`.
+                let sampled = if texture.sampled_image() { 1 } else { 2 };
                 if texture.dimension == TextureDimension::D1 && sampled == 2 {
                     self.builder.capability(Capability::Image1D);
                 }
