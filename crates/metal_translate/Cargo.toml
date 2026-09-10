@@ -6,5 +6,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+libc.workspace = true
 llvm-bitcode.workspace = true
 rspirv.workspace = true

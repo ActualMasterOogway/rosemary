@@ -9,10 +9,12 @@
 //! whose value is that they are read, and a stale one would be reported as
 //! though this build had produced it.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 
 use crate::ir::{Access, ResourceKind, Stage};
 use crate::sha256::{self, Sha256};
@@ -135,10 +137,14 @@ fn cached_in(
         HITS.fetch_add(1, Ordering::Relaxed);
         return Ok(library);
     }
+    if let Some(library) = pending_entry(&path, &key) {
+        HITS.fetch_add(1, Ordering::Relaxed);
+        return Ok(library);
+    }
     MISSES.fetch_add(1, Ordering::Relaxed);
 
     let library = translate()?;
-    write_entry(&path, &key, &library);
+    queue_entry(path, key, &library);
     Ok(library)
 }
 
@@ -269,8 +275,6 @@ fn entry_path(root: &Path, key: &[u8; 32]) -> PathBuf {
     root.join(&name[..2]).join(format!("{name}.shader"))
 }
 
-// -------------------------------------------------------------- entry files
-
 fn read_entry(path: &Path, key: &[u8; 32]) -> Option<TranslatedLibrary> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -285,18 +289,171 @@ fn read_entry(path: &Path, key: &[u8; 32]) -> Option<TranslatedLibrary> {
         Some(library) => Some(library),
         None => {
             // A truncated or corrupt entry is replaced rather than trusted.
+            // Do not unlink it here: another process may have atomically
+            // replaced it between our read and this decision.
             ERRORS.fetch_add(1, Ordering::Relaxed);
-            let _ = std::fs::remove_file(path);
             None
         }
     }
 }
 
-fn write_entry(path: &Path, key: &[u8; 32], library: &TranslatedLibrary) {
-    if write_entry_inner(path, key, library).is_some() {
-        WRITES.fetch_add(1, Ordering::Relaxed);
-    } else {
+struct WriteJob {
+    path: PathBuf,
+    key: [u8; 32],
+    library: Arc<TranslatedLibrary>,
+}
+
+struct PendingEntry {
+    key: [u8; 32],
+    library: Arc<TranslatedLibrary>,
+}
+
+struct WriterState {
+    inner: Mutex<WriterStateInner>,
+    drained: Condvar,
+}
+
+struct WriterStateInner {
+    accepting: bool,
+    pending: HashMap<PathBuf, PendingEntry>,
+}
+
+struct Writer {
+    sender: mpsc::Sender<WriteJob>,
+    state: Arc<WriterState>,
+}
+
+fn pending_entry(path: &Path, key: &[u8; 32]) -> Option<TranslatedLibrary> {
+    let writer = writer()?;
+    let inner = writer
+        .state
+        .inner
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let entry = inner.pending.get(path)?;
+    (entry.key == *key).then(|| (*entry.library).clone())
+}
+
+/// Queue an owned cache entry for the single disk writer.
+///
+/// Keeping the library in `pending` makes a second lookup a hit even before
+/// the rename reaches disk. It also coalesces simultaneous writes of the same
+/// key, while the worker's owned values make the caller's lifetime irrelevant.
+fn queue_entry(path: PathBuf, key: [u8; 32], library: &TranslatedLibrary) {
+    let Some(writer) = writer() else {
+        return;
+    };
+    let mut inner = writer
+        .state
+        .inner
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !inner.accepting || inner.pending.contains_key(&path) {
+        return;
+    }
+    let library = Arc::new(library.clone());
+    inner.pending.insert(
+        path.clone(),
+        PendingEntry {
+            key,
+            library: Arc::clone(&library),
+        },
+    );
+    if writer
+        .sender
+        .send(WriteJob {
+            path: path.clone(),
+            key,
+            library,
+        })
+        .is_err()
+    {
+        inner.pending.remove(&path);
         ERRORS.fetch_add(1, Ordering::Relaxed);
+        writer.state.drained.notify_all();
+    }
+}
+
+fn writer() -> Option<&'static Writer> {
+    static WRITER: OnceLock<Option<Writer>> = OnceLock::new();
+    WRITER
+        .get_or_init(|| {
+            let (sender, receiver) = mpsc::channel();
+            let state = Arc::new(WriterState {
+                inner: Mutex::new(WriterStateInner {
+                    accepting: true,
+                    pending: HashMap::new(),
+                }),
+                drained: Condvar::new(),
+            });
+            let worker_state = Arc::clone(&state);
+            if std::thread::Builder::new()
+                .name("metal:shader-cache".to_owned())
+                .spawn(move || write_entries(receiver, &worker_state))
+                .is_err()
+            {
+                ERRORS.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+
+            // A guest commonly terminates through libc's `exit`, which does
+            // not unwind Rust frames. Drain there so a successful translation
+            // queued just before exit is not silently lost.
+            extern "C" fn flush_at_exit() {
+                drain(true);
+            }
+            // SAFETY: the callback has C's required signature and touches only
+            // process-lifetime state. The worker owns everything it writes.
+            if unsafe { libc::atexit(flush_at_exit) } != 0 {
+                ERRORS.fetch_add(1, Ordering::Relaxed);
+            }
+            Some(Writer { sender, state })
+        })
+        .as_ref()
+}
+
+fn write_entries(receiver: mpsc::Receiver<WriteJob>, state: &WriterState) {
+    while let Ok(job) = receiver.recv() {
+        if write_entry_inner(&job.path, &job.key, &job.library).is_some() {
+            WRITES.fetch_add(1, Ordering::Relaxed);
+        } else {
+            ERRORS.fetch_add(1, Ordering::Relaxed);
+        }
+        let mut inner = state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.pending.remove(&job.path);
+        state.drained.notify_all();
+    }
+}
+
+/// Wait until all cache writes queued so far have reached their final state.
+///
+/// Normal translation does not call this. It is useful to embedders before a
+/// controlled shutdown, and the process exit handler uses its stopping form.
+pub fn flush() {
+    drain(false);
+}
+
+fn drain(stop: bool) {
+    let Some(writer) = writer() else {
+        return;
+    };
+    let mut inner = writer
+        .state
+        .inner
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if stop {
+        inner.accepting = false;
+    }
+    while !inner.pending.is_empty() {
+        inner = writer
+            .state
+            .drained
+            .wait(inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
     }
 }
 
@@ -606,6 +763,7 @@ mod tests {
 
     impl Drop for Scratch {
         fn drop(&mut self) {
+            flush();
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
@@ -758,6 +916,7 @@ mod tests {
             translate,
         )
         .expect("the MSL frontend accepts this kernel");
+        flush();
         std::fs::write(&path, b"not a shader cache entry").expect("damage the entry");
 
         let recovered = cached_in(
@@ -768,6 +927,7 @@ mod tests {
             translate,
         )
         .expect("a retranslated library");
+        flush();
         assert_eq!(expected, recovered);
         assert!(path.exists(), "the entry was not written again");
         assert_eq!(
@@ -794,6 +954,25 @@ mod tests {
             .is_err()
         );
         assert!(!entry_path(&scratch.0, &key).exists());
+    }
+
+    #[test]
+    fn flush_finishes_an_asynchronous_write() {
+        let scratch = Scratch::new("flush");
+        let key = [0x7b; 32];
+        let path = entry_path(&scratch.0, &key);
+        let expected = library();
+
+        queue_entry(path.clone(), key, &expected);
+        flush();
+
+        assert_eq!(read_entry(&path, &key), Some(expected));
+        let temporary_files = std::fs::read_dir(path.parent().expect("entry directory"))
+            .expect("entry directory")
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(temporary_files, 0);
     }
 
     #[test]
