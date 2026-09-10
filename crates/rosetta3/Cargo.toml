@@ -18,6 +18,7 @@ corevideo.workspace = true
 coreaudio.workspace = true
 contacts.workspace = true
 gamecontroller.workspace = true
+webkit.workspace = true
 forcefeedback.workspace = true
 metal.workspace = true
 gimli.workspace = true

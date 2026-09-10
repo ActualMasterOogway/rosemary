@@ -20,6 +20,7 @@ corevideo = { path = "crates/corevideo" }
 coreaudio = { path = "crates/coreaudio" }
 contacts = { path = "crates/contacts" }
 gamecontroller = { path = "crates/gamecontroller" }
+webkit = { path = "crates/webkit" }
 forcefeedback = { path = "crates/forcefeedback" }
 metal_translate = { path = "crates/metal_translate" }
 metal = { path = "crates/metal" }

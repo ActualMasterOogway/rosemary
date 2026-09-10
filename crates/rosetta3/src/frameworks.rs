@@ -146,6 +146,14 @@ fn register_dlopen_names() {
         ],
         symbol,
     );
+    crate::dyld::register_synthetic(
+        &[
+            "/System/Library/Frameworks/WebKit.framework/Versions/A/WebKit",
+            "/System/Library/Frameworks/WebKit.framework/WebKit",
+            "WebKit",
+        ],
+        symbol,
+    );
     register_opengl_framework();
 }
 
@@ -311,6 +319,9 @@ pub fn provider() -> SyntheticDylib {
     for (name, addr) in gamecontroller::data_symbols() {
         define_data(&mut lib, &name, addr);
     }
+    for (name, addr) in webkit::data_symbols() {
+        define_data(&mut lib, &name, addr);
+    }
     for (name, addr) in appkit::data_symbols() {
         define_data(&mut lib, &name, addr);
     }
@@ -430,6 +441,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         .or_else(|| crate::opengl::symbol(name))
         .or_else(|| coreaudio::symbol(name))
         .or_else(|| gamecontroller::symbol(name))
+        .or_else(|| webkit::symbol(name))
         .or_else(|| metal::symbol(name))
 }
 
@@ -476,10 +488,10 @@ pub fn deny_host_frameworks(provider: &mut NativeDylibProvider) {
     // CoreFoundation reading a structure this runtime laid out. Denied whole
     // rather than per name, so that an entry point `corefoundation::sysconfig`
     // does not implement is refused by name instead of corrupting memory. An
-    // unimplemented Contacts or GameController call likewise must not hand an
-    // object from this tree to Apple's corresponding framework.
+    // an unimplemented Contacts, GameController or WebKit call likewise must
+    // not hand an object from this tree to Apple's corresponding framework.
     for prefix in [
-        "_CF", "_NS", "_kCF", "_kNS", "_SC", "_kSC", "_CN", "_kCN", "_GC", "_kGC",
+        "_CF", "_NS", "_kCF", "_kNS", "_SC", "_kSC", "_CN", "_kCN", "_GC", "_kGC", "_Web",
     ] {
         provider.deny_prefix(prefix);
     }

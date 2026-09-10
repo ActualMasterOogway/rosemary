@@ -1142,6 +1142,7 @@ dependencies = [
  "objc",
  "sdl3",
  "static_init",
+ "webkit",
 ]
 
 [[package]]
@@ -1592,6 +1593,15 @@ dependencies = [
  "libc",
  "wasmtime-internal-core",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "webkit"
+version = "0.1.0"
+dependencies = [
+ "corefoundation",
+ "foundation",
+ "objc",
 ]
 
 [[package]]
