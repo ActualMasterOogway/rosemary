@@ -8,7 +8,7 @@ use metal_translate::{
     AirInput, Phase, TargetProfile, emit_spirv, metallib_air, parse_air, parse_msl, translate,
     translate_msl,
 };
-use rspirv::spirv::Op;
+use rspirv::spirv::{Op, Scope};
 
 const STORE: &str = include_str!("fixtures/kernel_store_const.ll");
 const COPY: &str = include_str!("fixtures/kernel_copy_word.ll");
@@ -1089,12 +1089,30 @@ fn threadgroup_barrier_becomes_a_control_barrier() {
         .entries
         .remove(0);
     let parsed = rspirv::dr::load_words(&artifact.words).unwrap();
-    assert!(
-        parsed.functions[0].blocks[0]
-            .instructions
+    let barrier = parsed.functions[0].blocks[0]
+        .instructions
+        .iter()
+        .find(|instruction| instruction.class.opcode == Op::ControlBarrier)
+        .expect("a control barrier");
+    // The execution scope is the workgroup. A SIMD-group scope compiles and
+    // validates, and synchronises a fraction of the threadgroup: on a
+    // sixty-four thread group over thirty-two lane SIMD-groups, half of the
+    // writes a barrier is there to publish are still in flight after it.
+    let scope = |operand: &rspirv::dr::Operand| {
+        let id = operand.id_ref_any().expect("a scope operand");
+        parsed
+            .types_global_values
             .iter()
-            .any(|instruction| instruction.class.opcode == Op::ControlBarrier)
-    );
+            .find(|instruction| instruction.result_id == Some(id))
+            .and_then(|instruction| instruction.operands.first())
+            .and_then(|operand| match operand {
+                rspirv::dr::Operand::LiteralBit32(value) => Some(*value),
+                _ => None,
+            })
+            .expect("a constant scope")
+    };
+    assert_eq!(scope(&barrier.operands[0]), Scope::Workgroup as u32);
+    assert_eq!(scope(&barrier.operands[1]), Scope::Workgroup as u32);
 }
 
 #[test]

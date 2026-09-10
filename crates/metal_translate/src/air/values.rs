@@ -2059,16 +2059,28 @@ fn barrier_memory(operand: &Operand, name: &str) -> Result<BarrierMemory, Transl
 
 /// Metal's `memory_scope`, which says what a barrier makes wait and how far an
 /// atomic's ordering reaches.
+///
+/// The enumerator is Metal's `memory_scope`, which AIR numbers
+/// `work_item`, `threadgroup`, `device`, `all_gpus`. Two shapes in Apple's own
+/// output fix that numbering: a plain `threadgroup_barrier(mem_threadgroup)`
+/// is `air.wg.barrier(2, 1)`, and an `atomic_fetch_add_explicit` on a `device`
+/// pointer - whose scope defaults to the device - is `air.atomic.global.add(...,
+/// 2)`. Reading 1 as the SIMD-group and 2 as the threadgroup, as this did,
+/// makes every scope one level narrower than Metal asked for: a threadgroup
+/// barrier then synchronises only a SIMD-group, which on a threadgroup wider
+/// than one SIMD-group is no barrier at all.
 fn barrier_scope(operand: &Operand, name: &str) -> Result<BarrierScope, TranslateError> {
     match air_enumerator(operand, name, "scope")? {
-        // `memory_scope_thread` orders one invocation against itself, which is
-        // the narrowest scope SPIR-V has a spelling for below a subgroup.
+        // `memory_scope_work_item` orders one invocation against itself, which
+        // is narrower than anything SPIR-V spells.
         //
         // FIXME (ACCURACY): it is widened to the SIMD-group. A wider scope
         // costs a stronger barrier than Metal asked for, never a weaker one.
-        0 | 1 => Ok(BarrierScope::Simdgroup),
-        2 => Ok(BarrierScope::Threadgroup),
-        3 => Ok(BarrierScope::Device),
+        0 => Ok(BarrierScope::Simdgroup),
+        1 => Ok(BarrierScope::Threadgroup),
+        // `memory_scope_all_gpus` reaches further than one device, and this
+        // runtime drives one. Widening it costs ordering, not correctness.
+        2 | 3 => Ok(BarrierScope::Device),
         scope => Err(semantic(format!(
             "LLVM intrinsic {name} names unknown Metal memory scope {scope}"
         ))),
@@ -2345,6 +2357,47 @@ fn decode_constant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Apple's own output fixes AIR's `memory_scope` numbering: a plain
+    /// `threadgroup_barrier(mem_flags::mem_threadgroup)` is
+    /// `air.wg.barrier(2, 1)`. Reading the 1 as a SIMD-group leaves a
+    /// threadgroup wider than one SIMD-group with no barrier at all.
+    #[test]
+    fn a_threadgroup_barrier_names_the_threadgroup_scope() {
+        let kind = air_intrinsic("air.wg.barrier", &[Operand::u32(2), Operand::u32(1)])
+            .expect("the barrier is lowered");
+        assert_eq!(
+            kind,
+            InstructionKind::Barrier {
+                scope: BarrierScope::Threadgroup,
+                memory: BarrierMemory {
+                    threadgroup: true,
+                    ..BarrierMemory::default()
+                },
+            }
+        );
+    }
+
+    /// The same numbering read from the other end: an atomic on a `device`
+    /// pointer defaults to `memory_scope_device`, which Apple writes as 2.
+    #[test]
+    fn a_device_atomic_names_the_device_scope() {
+        let kind = air_intrinsic(
+            "air.atomic.global.add.u.i32",
+            &[
+                Operand::Value(ValueId(0)),
+                Operand::u32(1),
+                Operand::u32(0),
+                Operand::u32(2),
+            ],
+        )
+        .expect("the atomic is lowered");
+        let InstructionKind::Atomic { scope, order, .. } = kind else {
+            panic!("an atomic read-modify-write");
+        };
+        assert_eq!(scope, BarrierScope::Device);
+        assert_eq!(order, MemoryOrder::Relaxed);
+    }
 
     #[test]
     fn recognizes_spirv_cross_unsigned_find_msb_helper() {

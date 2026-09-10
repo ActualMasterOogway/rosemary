@@ -1898,11 +1898,17 @@ impl Emitter {
                     .map_err(build_error)?;
             }
             InstructionKind::Barrier { scope, memory } => {
-                let execution = self.scope_id(*scope)?;
-                // Metal's barrier orders the memory its flags name and makes
-                // the invocations of `scope` wait; SPIR-V spells the first as
-                // memory semantics and takes a memory scope of its own, which
-                // is the same set of invocations.
+                // `air.wg.barrier` is Metal's `threadgroup_barrier`: every
+                // invocation of the threadgroup waits, whatever memory scope
+                // the call names. So the execution scope is the workgroup and
+                // only the memory scope comes from the operand - a barrier
+                // executed at SIMD-group scope would let the rest of a
+                // threadgroup run past it, which is what Metal's barrier
+                // exists to prevent.
+                let execution = self.scope_id(BarrierScope::Threadgroup)?;
+                let memory_scope = self.scope_id(*scope)?;
+                // Metal's barrier orders the memory its flags name; SPIR-V
+                // spells that as memory semantics against a memory scope.
                 let semantics = match memory_semantics(*memory) {
                     0 => 0,
                     bits => bits | MemorySemantics::ACQUIRE_RELEASE.bits(),
@@ -1912,7 +1918,7 @@ impl Emitter {
                     self.builder.capability(Capability::GroupNonUniform);
                 }
                 self.builder
-                    .control_barrier(execution, execution, semantics)
+                    .control_barrier(execution, memory_scope, semantics)
                     .map_err(build_error)?;
             }
             InstructionKind::Atomic {

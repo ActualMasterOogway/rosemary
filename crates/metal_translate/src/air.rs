@@ -105,7 +105,8 @@ fn parse_minimal_store_bitcode(bitcode: &Bitcode) -> Result<Module, TranslateErr
     let entry_index = function_records
         .iter()
         .position(|(ordinal, record)| {
-            resolve_function_name(record, *ordinal, string_table.as_deref(), &legacy_names)
+            let value_id = function_value_id(module_block, *ordinal).unwrap_or(*ordinal);
+            resolve_function_name(record, value_id, string_table.as_deref(), &legacy_names)
                 .as_deref()
                 == Some("main0")
         })
@@ -113,7 +114,8 @@ fn parse_minimal_store_bitcode(bitcode: &Bitcode) -> Result<Module, TranslateErr
         .ok_or_else(|| semantic("AIR bitcode has no main0 entry function"))?;
     let name = resolve_function_name(
         function_records[entry_index].1,
-        function_records[entry_index].0,
+        function_value_id(module_block, function_records[entry_index].0)
+            .unwrap_or(function_records[entry_index].0),
         string_table.as_deref(),
         &legacy_names,
     )
@@ -260,9 +262,14 @@ fn parse_packed_air(
         .iter()
         .position(|(ordinal, _)| *ordinal == entry_ordinal)
         .ok_or_else(|| semantic("AIR entry metadata names a function without a body"))?;
-    let (ordinal, record) = function_records[entry];
+    let (_, record) = function_records[entry];
+    // The value-symbol table is keyed by module value id, which is what the
+    // entry metadata already names. It is not the function's position among
+    // the function records: module globals share that numbering, so a kernel
+    // whose module declares `threadgroup` arrays was taking the name of the
+    // first of them.
     let name = legacy_names
-        .get(&ordinal)
+        .get(&interface.function)
         .cloned()
         .ok_or_else(|| semantic("packed AIR entry has no value-symbol name"))?;
     let signature_index = usize::try_from(
@@ -574,6 +581,29 @@ fn function_record_ordinal(module: &BitcodeBlock, id: usize) -> Option<usize> {
     None
 }
 
+/// The module value id of the `ordinal`-th `FUNCTION` record, which is the key
+/// the value-symbol table uses. Module globals share LLVM's module-level value
+/// numbering with functions, so the two only agree in a module with no globals.
+fn function_value_id(module: &BitcodeBlock, ordinal: usize) -> Option<usize> {
+    let mut value = 0;
+    let mut functions = 0;
+    for record in module.elements.iter().filter_map(BitcodeElement::as_record) {
+        match record.id {
+            8 => {
+                if functions == ordinal {
+                    return Some(value);
+                }
+                functions += 1;
+                value += 1;
+            }
+            // The other records which allocate a module-level value id.
+            7 | 9 | 14 | 18 => value += 1,
+            _ => {}
+        }
+    }
+    None
+}
+
 fn type_reference(field: Option<&u64>, defined: usize) -> Result<usize, TranslateError> {
     let index =
         usize::try_from(*field.ok_or_else(|| semantic("type record has no type reference"))?)
@@ -629,10 +659,10 @@ fn metadata_entry_stage(module_block: &BitcodeBlock) -> Option<Stage> {
 /// Resolve both LLVM function-name encodings used by AIR. Modern bitcode puts
 /// name slices in STRINGTABLE_BLOCK. Apple's older AIR writer uses a
 /// VALUE_SYMTAB_BLOCK entry whose payload is the name and whose first field is
-/// the ordinal of its MODULE_CODE_FUNCTION record.
+/// the module value id of its MODULE_CODE_FUNCTION record.
 fn resolve_function_name(
     record: &llvm_bitcode::bitcode::Record,
-    ordinal: usize,
+    value_id: usize,
     string_table: Option<&[u8]>,
     legacy_names: &HashMap<usize, String>,
 ) -> Option<String> {
@@ -643,7 +673,7 @@ fn resolve_function_name(
             .ok()
             .map(str::to_owned);
     }
-    legacy_names.get(&ordinal).cloned()
+    legacy_names.get(&value_id).cloned()
 }
 
 fn legacy_function_names(module_block: &BitcodeBlock) -> HashMap<usize, String> {
