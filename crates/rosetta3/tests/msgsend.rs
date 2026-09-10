@@ -72,6 +72,28 @@ fn an_objective_c_program_sends_messages_and_prints_what_it_should() {
     );
 }
 
+#[test]
+fn an_objective_c_program_runs_with_builtin_hardening_enabled() {
+    let Some(path) = common::objc_messages_fixture("objc_messages_debug", &[]) else {
+        skip!("cannot build x86_64 Objective-C fixtures")
+    };
+    let native = std::process::Command::new(&path)
+        .output()
+        .expect("run fixture natively");
+    let output = std::process::Command::new(common::driver())
+        .args(["run", "--emulated", "--objc-debug", &path])
+        .env("ROSETTA3_OBJC", "builtin")
+        .output()
+        .expect("run fixture with Objective-C hardening");
+    assert_eq!(
+        output.status.code(),
+        native.status.code(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, native.stdout);
+}
+
 /// The same program at `-O2`, where clang **tail-jumps** to `objc_msgSend`.
 ///
 /// A different path through the runtime for identical output: there is no return

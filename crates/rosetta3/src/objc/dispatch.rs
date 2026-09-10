@@ -776,6 +776,7 @@ fn call_runtime(
     ctx: &mut RegisterContext,
     mem: &mut dyn GuestMemory,
 ) -> Result<()> {
+    let _debug_context = objc::debug::guest_context(ctx.rip, symbol);
     let entry = &RUNTIME[i];
     let Some(host) = host_address(i) else {
         return Err(AbiError::Unsatisfied {
@@ -892,6 +893,7 @@ fn send(
     ctx: &mut RegisterContext,
     mem: &mut dyn GuestMemory,
 ) -> Result<()> {
+    let _debug_context = objc::debug::guest_context(ctx.rip, symbol);
     let base = send.receiver_reg();
     let sel = arg_reg(ctx, base + 1);
 

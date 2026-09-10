@@ -28,6 +28,10 @@ pub fn retain(object: Id) -> Id {
     if object.is_null() {
         return object;
     }
+    crate::debug::validate(object, "retain");
+    if crate::class::is_known(object as *const crate::class::Class) {
+        return object;
+    }
     // A block counts its own references, in its `flags` word: see
     // `crate::block`. Retaining one here would leave the count in the block
     // untouched and a stack block on the stack.
@@ -35,7 +39,15 @@ pub fn retain(object: Id) -> Id {
     if unsafe { crate::block::is_block(object) } {
         return crate::block::copy(object);
     }
-    *counts().entry(object as usize).or_insert(0) += 1;
+    let mut map = counts();
+    let extra = map.entry(object as usize).or_insert(0);
+    if crate::debug::enabled() {
+        *extra = extra
+            .checked_add(1)
+            .unwrap_or_else(|| crate::fail!("objc debug: retain count overflow for {object:p}"));
+    } else {
+        *extra += 1;
+    }
     object
 }
 
@@ -46,6 +58,10 @@ pub fn retain(object: Id) -> Id {
 /// owns memory gets a chance to give it back.
 pub fn release(object: Id) {
     if object.is_null() {
+        return;
+    }
+    crate::debug::validate(object, "release");
+    if crate::class::is_known(object as *const crate::class::Class) {
         return;
     }
     // SAFETY: a live object; see [`retain`].
@@ -70,11 +86,16 @@ pub fn retain_count(object: Id) -> usize {
     if object.is_null() {
         return 0;
     }
+    crate::debug::validate(object, "retainCount");
+    if crate::class::is_known(object as *const crate::class::Class) {
+        return usize::MAX;
+    }
     1 + counts().get(&(object as usize)).copied().unwrap_or(0)
 }
 
 /// Send `-dealloc` if there is one, then give the memory back.
 fn deallocate(object: Id) {
+    crate::debug::begin_deallocation(object);
     clear_weak_references(object);
     let dealloc = crate::sel::get("dealloc");
     // SAFETY: `object` is an object this runtime allocated.
@@ -88,6 +109,7 @@ fn deallocate(object: Id) {
         // SAFETY: as above. An override is expected to end by calling super's,
         // and `NSObject`'s is what frees.
         unsafe { f(object, dealloc) };
+        crate::debug::require_finalized(object);
         return;
     }
     // SAFETY: nothing holds a reference; see `release`.
@@ -102,7 +124,12 @@ pub fn finalize(object: Id) {
 
 thread_local! {
     /// The autorelease stack for this thread: one `Vec` of objects per pool.
-    static POOLS: std::cell::RefCell<Vec<Vec<Id>>> = const { std::cell::RefCell::new(Vec::new()) };
+    static POOLS: std::cell::RefCell<Vec<Pool>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+struct Pool {
+    token: *mut c_void,
+    objects: Vec<Id>,
 }
 
 /// The sentinel `objc_autoreleasePoolPop` is given back.
@@ -112,8 +139,16 @@ thread_local! {
 pub fn pool_push() -> *mut c_void {
     POOLS.with(|pools| {
         let mut pools = pools.borrow_mut();
-        pools.push(Vec::new());
-        pools.len() as *mut c_void
+        let token = if crate::debug::enabled() {
+            crate::debug::new_pool(thread_id())
+        } else {
+            (pools.len() + 1) as *mut c_void
+        };
+        pools.push(Pool {
+            token,
+            objects: Vec::new(),
+        });
+        token
     })
 }
 
@@ -122,15 +157,29 @@ pub fn pool_push() -> *mut c_void {
 /// Pools nest, so a token naming an outer pool pops the inner ones too - which
 /// is what happens when a `@autoreleasepool` unwinds past one.
 pub fn pool_pop(token: *mut c_void) {
-    let depth = token as usize;
+    if crate::debug::enabled() {
+        crate::debug::validate_pool(token, thread_id());
+        let found = POOLS.with(|pools| pools.borrow().iter().any(|pool| pool.token == token));
+        if !found {
+            crate::fail!(
+                "objc debug: autorelease pool token {token:p} is not on this thread's stack"
+            );
+        }
+    }
     loop {
         let Some(pool) = POOLS.with(|pools| pools.borrow_mut().pop()) else {
+            if crate::debug::enabled() {
+                crate::fail!("objc debug: autorelease pool pop with an empty pool stack");
+            }
             return;
         };
-        for object in pool {
+        for object in pool.objects {
             release(object);
         }
-        if POOLS.with(|pools| pools.borrow().len()) < depth {
+        if crate::debug::enabled() {
+            crate::debug::pool_popped(pool.token);
+        }
+        if pool.token == token {
             return;
         }
     }
@@ -145,8 +194,9 @@ pub fn autorelease(object: Id) -> Id {
     if object.is_null() {
         return object;
     }
+    crate::debug::validate(object, "autorelease");
     POOLS.with(|pools| match pools.borrow_mut().last_mut() {
-        Some(pool) => pool.push(object),
+        Some(pool) => pool.objects.push(object),
         None => no_pool(),
     });
     object
@@ -166,7 +216,8 @@ static WEAK: LazyLock<RwLock<HashMap<usize, Vec<usize>>>> =
 
 /// Point `slot` at `object`, registering it to be zeroed on deallocation.
 pub fn store_weak(slot: *mut Id, object: Id) -> Id {
-    destroy_weak(slot);
+    crate::debug::weak_store(slot, object);
+    unregister_weak(slot);
     // SAFETY: the caller owns `slot`, which is a word of its own storage.
     unsafe { *slot = object };
     if !object.is_null() {
@@ -181,6 +232,7 @@ pub fn store_weak(slot: *mut Id, object: Id) -> Id {
 
 /// The object in `slot`, retained and autoreleased so the caller can use it.
 pub fn load_weak_retained(slot: *mut Id) -> Id {
+    crate::debug::weak_load(slot, "objc_loadWeakRetained");
     // SAFETY: the caller owns `slot`.
     let object = unsafe { *slot };
     if object.is_null() {
@@ -191,6 +243,26 @@ pub fn load_weak_retained(slot: *mut Id) -> Id {
 
 /// Unregister `slot` and clear it.
 pub fn destroy_weak(slot: *mut Id) {
+    crate::debug::weak_destroy(slot);
+    unregister_weak(slot);
+}
+
+/// Initialize uninitialized weak storage.
+pub fn init_weak(slot: *mut Id, object: Id) -> Id {
+    crate::debug::weak_init(slot, object);
+    // SAFETY: the caller supplies a writable word of uninitialized storage.
+    unsafe { *slot = object };
+    if !object.is_null() {
+        WEAK.write()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(object as usize)
+            .or_default()
+            .push(slot as usize);
+    }
+    object
+}
+
+fn unregister_weak(slot: *mut Id) {
     // SAFETY: the caller owns `slot`.
     let object = unsafe { *slot };
     if object.is_null() {
@@ -256,6 +328,7 @@ pub fn sync_enter(object: Id) {
     if object.is_null() {
         return;
     }
+    crate::debug::validate(object, "objc_sync_enter");
     let monitor = monitor(object);
     let me = thread_id();
     let mut owner = monitor.owner.lock().unwrap_or_else(|e| e.into_inner());
@@ -283,6 +356,7 @@ pub fn sync_exit(object: Id) {
     if object.is_null() {
         return;
     }
+    crate::debug::validate(object, "objc_sync_exit");
     let monitor = monitor(object);
     let mut owner = monitor.owner.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((holder, ref mut depth)) = *owner
@@ -293,6 +367,12 @@ pub fn sync_exit(object: Id) {
             *owner = None;
             monitor.condition.notify_one();
         }
+        return;
+    }
+    if crate::debug::enabled() {
+        crate::fail!(
+            "objc debug: objc_sync_exit({object:p}) without a matching enter on this thread"
+        );
     }
 }
 
@@ -304,6 +384,8 @@ static ASSOCIATIONS: LazyLock<RwLock<HashMap<(usize, usize), usize>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 pub fn set_associated(object: Id, key: *const c_void, value: Id) {
+    crate::debug::validate(object, "objc_setAssociatedObject");
+    crate::debug::validate(value, "objc_setAssociatedObject value");
     let mut map = ASSOCIATIONS.write().unwrap_or_else(|e| e.into_inner());
     match value.is_null() {
         true => map.remove(&(object as usize, key as usize)),
@@ -312,6 +394,7 @@ pub fn set_associated(object: Id, key: *const c_void, value: Id) {
 }
 
 pub fn associated(object: Id, key: *const c_void) -> Id {
+    crate::debug::validate(object, "objc_getAssociatedObject");
     ASSOCIATIONS
         .read()
         .unwrap_or_else(|e| e.into_inner())

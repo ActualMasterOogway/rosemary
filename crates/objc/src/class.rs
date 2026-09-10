@@ -218,6 +218,7 @@ impl Class {
 
     /// The method this class itself declares for `sel`, ignoring superclasses.
     pub fn own_method(&self, sel: Sel) -> Option<&'static Method> {
+        crate::sel::validate(sel);
         self.contents
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -250,6 +251,13 @@ impl Class {
     /// `false` rather than an error, because that is what the C API returns and
     /// because a duplicate is the guest declaring the same selector twice.
     pub fn add_method(&self, sel: Sel, imp: Imp, types: &CStr) -> bool {
+        crate::sel::validate(sel);
+        if crate::debug::enabled() && imp.is_null() {
+            crate::fail!(
+                "objc debug: class_addMethod on {} was given a null IMP",
+                self.name_str()
+            );
+        }
         let mut contents = self.contents.write().unwrap_or_else(|e| e.into_inner());
         if contents.methods.contains_key(&(sel as usize)) {
             return false;
@@ -259,6 +267,7 @@ impl Class {
             types: CString::from(types),
             imp: AtomicPtr::new(imp as *mut c_void),
         }));
+        crate::debug::note_handle(method, "method");
         contents.methods.insert(sel as usize, method);
         drop(contents);
         bump_generation();
@@ -268,6 +277,13 @@ impl Class {
     /// Install `imp` for `sel` whether or not it is already declared, returning
     /// the `IMP` that was there.
     pub fn replace_method(&self, sel: Sel, imp: Imp, types: &CStr) -> Imp {
+        crate::sel::validate(sel);
+        if crate::debug::enabled() && imp.is_null() {
+            crate::fail!(
+                "objc debug: class_replaceMethod on {} was given a null IMP",
+                self.name_str()
+            );
+        }
         if let Some(existing) = self.own_method(sel) {
             return existing.set_implementation(imp);
         }
@@ -294,6 +310,7 @@ impl Class {
             size,
             types: CString::from(types),
         }));
+        crate::debug::note_handle(ivar, "ivar");
         contents.ivars.push(ivar);
         self.instance_size.store(offset + size, Ordering::Release);
         true
@@ -309,6 +326,19 @@ impl Class {
                 .iter()
                 .find(|i| i.name.as_c_str() == name)
                 .copied()
+        })
+    }
+
+    /// Whether this class or a superclass declares this exact ivar handle.
+    pub fn contains_ivar(&'static self, ivar: *const Ivar) -> bool {
+        self.chain().any(|class| {
+            class
+                .contents
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .ivars
+                .iter()
+                .any(|known| std::ptr::eq(*known, ivar))
         })
     }
 
@@ -453,6 +483,12 @@ fn root_metaclass(class: &'static Class) -> &'static Class {
 
 /// Make `class` findable by name and instantiable.
 pub fn register_pair(class: &'static Class) {
+    if crate::debug::enabled() && class.is_registered() {
+        crate::fail!(
+            "objc debug: objc_registerClassPair called twice for {}",
+            class.name_str()
+        );
+    }
     if class.registered.swap(1, Ordering::AcqRel) != 0 {
         return;
     }
@@ -464,6 +500,12 @@ pub fn register_pair(class: &'static Class) {
 
 /// Forget a class pair that was allocated and never registered.
 pub fn dispose_pair(class: &'static Class) {
+    if crate::debug::enabled() && class.is_registered() {
+        crate::fail!(
+            "objc debug: objc_disposeClassPair called for registered class {}",
+            class.name_str()
+        );
+    }
     if class.is_registered() {
         with_classes(|classes| {
             classes.remove(class.name_str());
@@ -488,8 +530,14 @@ pub fn ptr(class: &'static Class) -> *mut Class {
 ///
 /// `p` must be null or a pointer this crate produced.
 pub unsafe fn from_ptr(p: *const Class) -> Option<&'static Class> {
-    // SAFETY: the caller's obligation.
-    (!p.is_null()).then(|| unsafe { &*p })
+    if p.is_null() {
+        return None;
+    }
+    if crate::debug::enabled() && !is_known(p) {
+        crate::fail!("objc debug: invalid class handle {p:p}");
+    }
+    // SAFETY: the caller's obligation, strengthened by the debug registry.
+    Some(unsafe { &*p })
 }
 
 /// The `IMP` `sel` resolves to on `class`, or null.

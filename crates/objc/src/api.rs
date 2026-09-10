@@ -41,6 +41,7 @@ unsafe fn class(p: *const c_void) -> Option<&'static Class> {
 ///
 /// `p` must be null or a handle this runtime produced.
 unsafe fn method(p: *const c_void) -> Option<&'static Method> {
+    crate::debug::validate_handle(p, "method", "Objective-C method API");
     // SAFETY: the caller's obligation.
     (!p.is_null()).then(|| unsafe { &*(p as *const Method) })
 }
@@ -51,6 +52,7 @@ unsafe fn method(p: *const c_void) -> Option<&'static Method> {
 ///
 /// `p` must be null or a protocol this runtime produced.
 unsafe fn protocol(p: *const c_void) -> Option<&'static Protocol> {
+    crate::debug::validate_handle(p, "protocol", "Objective-C protocol API");
     // SAFETY: the caller's obligation.
     (!p.is_null()).then(|| unsafe { &*(p as *const Protocol) })
 }
@@ -297,6 +299,7 @@ pub unsafe extern "C" fn method_setImplementation(m: *const c_void, imp: Imp) ->
 }
 
 pub unsafe extern "C" fn ivar_getOffset(ivar: *const c_void) -> isize {
+    crate::debug::validate_handle(ivar, "ivar", "ivar_getOffset");
     // SAFETY: an `Ivar` this runtime produced, or null.
     match ivar.is_null() {
         true => 0,
@@ -305,6 +308,7 @@ pub unsafe extern "C" fn ivar_getOffset(ivar: *const c_void) -> isize {
 }
 
 pub unsafe extern "C" fn ivar_getName(ivar: *const c_void) -> *const c_char {
+    crate::debug::validate_handle(ivar, "ivar", "ivar_getName");
     // SAFETY: as above.
     match ivar.is_null() {
         true => std::ptr::null(),
@@ -337,6 +341,16 @@ pub unsafe extern "C" fn object_getIndexedIvars(object: Id) -> *mut c_void {
 }
 
 pub unsafe extern "C" fn object_getIvar(object: Id, ivar: *const c_void) -> Id {
+    crate::debug::validate_handle(ivar, "ivar", "object_getIvar");
+    if crate::debug::enabled()
+        && !object.is_null()
+        && !ivar.is_null()
+        // SAFETY: the object and ivar handles were validated above.
+        && !unsafe { crate::object::class_of(object) }
+            .is_some_and(|class| class.contains_ivar(ivar as *const Ivar))
+    {
+        crate::fail!("objc debug: object_getIvar was given an ivar from another class");
+    }
     // SAFETY: the caller's obligation.
     let Some(name) = (unsafe { cstr(ivar_getName(ivar)) }) else {
         return std::ptr::null_mut();
@@ -346,6 +360,17 @@ pub unsafe extern "C" fn object_getIvar(object: Id, ivar: *const c_void) -> Id {
 }
 
 pub unsafe extern "C" fn object_setIvar(object: Id, ivar: *const c_void, value: Id) {
+    crate::debug::validate_handle(ivar, "ivar", "object_setIvar");
+    crate::debug::validate(value, "object_setIvar value");
+    if crate::debug::enabled()
+        && !object.is_null()
+        && !ivar.is_null()
+        // SAFETY: the object and ivar handles were validated above.
+        && !unsafe { crate::object::class_of(object) }
+            .is_some_and(|class| class.contains_ivar(ivar as *const Ivar))
+    {
+        crate::fail!("objc debug: object_setIvar was given an ivar from another class");
+    }
     // SAFETY: the caller's obligation.
     let Some(name) = (unsafe { cstr(ivar_getName(ivar)) }) else {
         return;
@@ -368,6 +393,7 @@ pub unsafe extern "C" fn objc_constructInstance(cls: *const c_void, bytes: *mut 
 }
 
 pub unsafe extern "C" fn objc_destructInstance(object: Id) -> Id {
+    crate::debug::validate(object, "objc_destructInstance");
     object
 }
 
@@ -384,6 +410,7 @@ pub struct PropertyAttribute {
 ///
 /// `p` must be null or a handle this runtime produced.
 unsafe fn property(p: *const c_void) -> Option<&'static crate::property::Property> {
+    crate::debug::validate_handle(p, "property", "Objective-C property API");
     // SAFETY: the caller's obligation.
     (!p.is_null()).then(|| unsafe { &*(p as *const crate::property::Property) })
 }
@@ -656,6 +683,7 @@ pub unsafe extern "C" fn objc_retainAutoreleasedReturnValue(object: Id) -> Id {
 }
 
 pub unsafe extern "C" fn objc_unsafeClaimAutoreleasedReturnValue(object: Id) -> Id {
+    crate::debug::validate(object, "objc_unsafeClaimAutoreleasedReturnValue");
     object
 }
 
@@ -682,9 +710,7 @@ pub unsafe extern "C" fn objc_initWeak(slot: *mut Id, value: Id) -> Id {
     if slot.is_null() {
         return std::ptr::null_mut();
     }
-    // SAFETY: the caller owns `slot`, which is uninitialized storage.
-    unsafe { *slot = std::ptr::null_mut() };
-    crate::arc::store_weak(slot, value)
+    crate::arc::init_weak(slot, value)
 }
 
 pub unsafe extern "C" fn objc_storeWeak(slot: *mut Id, value: Id) -> Id {
@@ -719,10 +745,9 @@ pub unsafe extern "C" fn objc_copyWeak(to: *mut Id, from: *mut Id) {
     if to.is_null() || from.is_null() {
         return;
     }
-    // SAFETY: the caller owns both slots; `to` is uninitialized.
-    unsafe { *to = std::ptr::null_mut() };
-    // SAFETY: as above.
-    crate::arc::store_weak(to, unsafe { *from });
+    crate::debug::weak_load(from, "objc_copyWeak");
+    // SAFETY: the caller owns both slots and `to` is uninitialized.
+    crate::arc::init_weak(to, unsafe { *from });
 }
 
 pub unsafe extern "C" fn objc_moveWeak(to: *mut Id, from: *mut Id) {

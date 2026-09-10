@@ -1,4 +1,4 @@
-//! `rosetta3 run [--slow] [--native|--emulated] <path> [args...]`.
+//! `rosetta3 run [--slow] [--native|--emulated] [--objc-debug] <path> [args...]`.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -107,7 +107,9 @@ fn main() -> ExitCode {
     // own and perfectly legal.
     let mut args = std::env::args_os().skip(1);
     let Some(first) = args.next() else {
-        eprintln!("usage: rosetta3 run [--native|--emulated] <mach-o path> [args...]");
+        eprintln!(
+            "usage: rosetta3 run [--native|--emulated] [--objc-debug] <mach-o path> [args...]"
+        );
         eprintln!("       rosetta3 <mach-o path> [--audit] [--ir]");
         return ExitCode::FAILURE;
     };
@@ -116,12 +118,14 @@ fn main() -> ExitCode {
         // force a backend the file's own slices would not have chosen.
         let mut policy = ImportPolicy::FastWhenKnown;
         let mut engine = None;
+        let mut objc_debug = false;
         let mut path = None;
         for arg in args.by_ref() {
             match arg.to_str().unwrap_or_default() {
                 "--slow" if path.is_none() => policy = ImportPolicy::AlwaysSlow,
                 "--native" if path.is_none() => engine = Some(Engine::Native),
                 "--emulated" if path.is_none() => engine = Some(Engine::Emulated),
+                "--objc-debug" if path.is_none() => objc_debug = true,
                 _ => {
                     path = Some(arg);
                     break;
@@ -129,7 +133,10 @@ fn main() -> ExitCode {
             }
         }
         let Some(path) = path else {
-            eprintln!("usage: rosetta3 run [--slow] [--native|--emulated] <mach-o path> [args...]");
+            eprintln!(
+                "usage: rosetta3 run [--slow] [--native|--emulated] [--objc-debug] \
+                 <mach-o path> [args...]"
+            );
             return ExitCode::FAILURE;
         };
         // The guest's *arguments* are bytes; its own path is not. Refused by
@@ -139,6 +146,23 @@ fn main() -> ExitCode {
             eprintln!("rosetta3: the program's path is not valid UTF-8");
             return ExitCode::FAILURE;
         };
+        if objc_debug {
+            if std::env::var("ROSETTA3_OBJC").as_deref() == Ok("native") {
+                eprintln!(
+                    "rosetta3: --objc-debug requires the built-in Objective-C runtime; \
+                     set ROSETTA3_OBJC=builtin"
+                );
+                return ExitCode::FAILURE;
+            }
+            if rosetta3::objc::host::backend() != rosetta3::objc::host::Backend::Builtin {
+                eprintln!(
+                    "rosetta3: --objc-debug requires the built-in Objective-C runtime; \
+                     set ROSETTA3_OBJC=builtin"
+                );
+                return ExitCode::FAILURE;
+            }
+            objc::debug::enable();
+        }
         // Before anything can ask: both say which program the guest is, and a
         // guest that finds its own resources through either must get the same
         // answer.

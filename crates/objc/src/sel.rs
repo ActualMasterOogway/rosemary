@@ -33,7 +33,21 @@ pub fn get(name: &str) -> Sel {
 
 /// A selector's name, which is the selector.
 pub fn name(sel: Sel) -> *const c_char {
+    validate(sel);
     sel
+}
+
+pub(crate) fn validate(sel: Sel) {
+    if crate::debug::enabled()
+        && !sel.is_null()
+        && !TABLE
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|known| known.as_ptr() == sel)
+    {
+        crate::fail!("objc debug: invalid selector handle {sel:p}");
+    }
 }
 
 /// Whether two selectors are the same.
@@ -41,6 +55,8 @@ pub fn name(sel: Sel) -> *const c_char {
 /// Pointer equality, because registration is what makes them equal. Null is
 /// compared as a value so `sel_isEqual(NULL, NULL)` is true, as it is on Apple's.
 pub fn is_equal(a: Sel, b: Sel) -> bool {
+    validate(a);
+    validate(b);
     a == b
 }
 

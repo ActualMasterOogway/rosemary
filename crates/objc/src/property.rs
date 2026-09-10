@@ -64,10 +64,12 @@ pub fn attributes_of(attributes: &CStr) -> Vec<(CString, CString)> {
 }
 
 pub fn make(name: &CStr, attributes: &CStr) -> &'static Property {
-    Box::leak(Box::new(Property {
+    let property = Box::leak(Box::new(Property {
         name: CString::from(name),
         attributes: CString::from(attributes),
-    }))
+    }));
+    crate::debug::note_handle(property, "property");
+    property
 }
 
 /// Split an attribute string on the commas that separate fields, ignoring the

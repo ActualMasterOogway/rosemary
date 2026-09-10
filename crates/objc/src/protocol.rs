@@ -43,11 +43,16 @@ unsafe impl Sync for Protocol {}
 unsafe impl Send for Protocol {}
 
 impl Protocol {
+    pub fn is_registered(&self) -> bool {
+        self.registered.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub fn name(&self) -> *const c_char {
         self.name.as_ptr()
     }
 
     pub fn add_method(&self, sel: Sel, types: &CStr, required: bool, instance: bool) {
+        crate::sel::validate(sel);
         let types: &'static CStr = Box::leak(CString::from(types).into_boxed_c_str());
         self.contents
             .write()
@@ -57,6 +62,13 @@ impl Protocol {
     }
 
     pub fn add_protocol(&self, other: &'static Protocol) {
+        if crate::debug::enabled() && (std::ptr::eq(self, other) || other.conforms_to(self)) {
+            crate::fail!(
+                "objc debug: adding {} to {} would make a protocol cycle",
+                other.name.to_string_lossy(),
+                self.name.to_string_lossy()
+            );
+        }
         self.contents
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -110,15 +122,23 @@ pub fn allocate(name: &CStr) -> Option<&'static Protocol> {
     if lookup(name).is_some() {
         return None;
     }
-    Some(Box::leak(Box::new(Protocol {
+    let protocol = Box::leak(Box::new(Protocol {
         name: CString::from(name),
         contents: RwLock::new(Contents::default()),
         registered: std::sync::atomic::AtomicBool::new(false),
-    })))
+    }));
+    crate::debug::note_handle(protocol, "protocol");
+    Some(protocol)
 }
 
 /// Make `protocol` findable by name.
 pub fn register(protocol: &'static Protocol) {
+    if crate::debug::enabled() && protocol.is_registered() {
+        crate::fail!(
+            "objc debug: objc_registerProtocol called twice for {}",
+            protocol.name.to_string_lossy()
+        );
+    }
     if protocol
         .registered
         .swap(true, std::sync::atomic::Ordering::AcqRel)

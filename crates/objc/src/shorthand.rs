@@ -10,6 +10,7 @@
 #![allow(non_snake_case)]
 
 use std::ffi::c_void;
+use std::mem::size_of;
 
 use crate::object::Id;
 use crate::sel::Sel;
@@ -71,6 +72,7 @@ pub unsafe extern "C" fn objc_opt_new(cls: Id) -> Id {
 }
 
 pub unsafe extern "C" fn objc_opt_self(object: Id) -> Id {
+    crate::debug::validate(object, "objc_opt_self");
     object
 }
 
@@ -115,6 +117,7 @@ pub unsafe extern "C" fn objc_getProperty(
     if receiver.is_null() {
         return std::ptr::null_mut();
     }
+    crate::debug::validate_range(receiver, offset, size_of::<Id>(), "objc_getProperty");
     // SAFETY: the compiler computed `offset` against this object's own class.
     let value = unsafe { *((receiver as *const u8).offset(offset) as *const Id) };
     crate::arc::autorelease(crate::arc::retain(value))
@@ -181,6 +184,7 @@ unsafe fn store_property(receiver: Id, offset: isize, value: Id) {
     if receiver.is_null() {
         return;
     }
+    crate::debug::validate_range(receiver, offset, size_of::<Id>(), "objc_setProperty");
     // SAFETY: the caller's obligation.
     let slot = unsafe { (receiver as *mut u8).offset(offset) as *mut Id };
     // SAFETY: as above.

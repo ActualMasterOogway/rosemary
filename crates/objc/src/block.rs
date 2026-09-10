@@ -182,6 +182,7 @@ pub fn copy(block: Id) -> Id {
     if block.is_null() {
         return block;
     }
+    crate::debug::validate(block, "_Block_copy");
     let source = block as *const Block;
     // SAFETY: a block literal, whose first three words are the header.
     let flags = unsafe { (*source).flags.load(Ordering::Relaxed) };
@@ -208,7 +209,10 @@ pub fn copy(block: Id) -> Id {
     // From the guest's allocator, not this process's: libclosure calls the one
     // `malloc` its process has, and when the guest ships a replacement that is
     // the guest's. See [`crate::allocator`].
-    let copied = unsafe { crate::allocator::guest_malloc(size) } as *mut Block;
+    let Some(allocation_size) = crate::debug::allocation_size(size) else {
+        crate::fail!("_Block_copy: the block size overflows its debug guard");
+    };
+    let copied = unsafe { crate::allocator::guest_malloc(allocation_size) } as *mut Block;
     if copied.is_null() {
         crate::fail!("_Block_copy: out of memory copying a block to the heap");
     }
@@ -220,6 +224,9 @@ pub fn copy(block: Id) -> Id {
             (flags & !(flag::REFCOUNT_MASK | flag::DEALLOCATING)) | flag::NEEDS_FREE | 2,
             Ordering::Relaxed,
         );
+        let class = crate::class::from_ptr(class_ptr(&MALLOC_CLASS))
+            .unwrap_or_else(|| crate::fail!("_Block_copy: malloc block class is not installed"));
+        crate::debug::allocated(copied as Id, class, size);
         if let Some(helpers) = helpers(source)
             && let Some(helper) = helpers.copy
         {
@@ -229,6 +236,7 @@ pub fn copy(block: Id) -> Id {
         // before its captures have been copied into it.
         (*copied).isa = class_ptr(&MALLOC_CLASS);
     }
+    crate::debug::validate(copied as Id, "_Block_copy helper");
     copied as Id
 }
 
@@ -237,6 +245,7 @@ pub fn release(block: Id) {
     if block.is_null() {
         return;
     }
+    crate::debug::validate(block, "_Block_release");
     let block = block as *mut Block;
     // SAFETY: a block literal.
     let flags = unsafe { (*block).flags.load(Ordering::Relaxed) };
@@ -249,6 +258,7 @@ pub fn release(block: Id) {
     if !latching_decr_should_deallocate(unsafe { &(*block).flags }) {
         return;
     }
+    crate::debug::begin_deallocation(block as Id);
     // SAFETY: nothing holds a reference; the dispose helper is the compiler's
     // and undoes exactly what the copy helper did.
     unsafe {
@@ -257,7 +267,9 @@ pub fn release(block: Id) {
         {
             helper(block as *mut c_void);
         }
-        crate::allocator::guest_free(block as *mut c_void);
+        if !crate::debug::finalized(block as Id) {
+            crate::allocator::guest_free(block as *mut c_void);
+        }
     }
 }
 
@@ -317,6 +329,7 @@ pub unsafe fn object_dispose(object: *const c_void, flags: i32) {
 ///
 /// `source` must be a `Block_byref`.
 unsafe fn byref_copy(source: *mut Byref) -> *mut Byref {
+    crate::debug::validate(source as Id, "_Block_object_assign byref");
     // SAFETY: the caller's obligation.
     let forwarding = unsafe { (*source).forwarding };
     if forwarding.is_null() {
@@ -344,7 +357,10 @@ unsafe fn byref_copy(source: *mut Byref) -> *mut Byref {
     }
     // SAFETY: `size` is what the compiler recorded for the whole variable, and
     // the allocator is the guest's for [`copy`]'s reason.
-    let copied = unsafe { crate::allocator::guest_malloc(size) } as *mut Byref;
+    let Some(allocation_size) = crate::debug::allocation_size(size) else {
+        crate::fail!("_Block_object_assign: the __block size overflows its debug guard");
+    };
+    let copied = unsafe { crate::allocator::guest_malloc(allocation_size) } as *mut Byref;
     if copied.is_null() {
         crate::fail!("_Block_object_assign: out of memory copying a __block variable");
     }
@@ -361,6 +377,7 @@ unsafe fn byref_copy(source: *mut Byref) -> *mut Byref {
         (*copied).forwarding = copied;
         (*copied).size = size as u32;
         (*source).forwarding = copied;
+        crate::debug::allocated_raw(copied as *mut c_void, size, "__block storage");
 
         match flags & byref_flag::HAS_COPY_DISPOSE != 0 {
             // The helpers are the compiler's, and copying the captured value is
@@ -391,6 +408,7 @@ unsafe fn byref_copy(source: *mut Byref) -> *mut Byref {
             ),
         }
     }
+    crate::debug::validate(copied as Id, "__block copy helper");
     copied
 }
 
@@ -398,11 +416,13 @@ unsafe fn byref_copy(source: *mut Byref) -> *mut Byref {
 ///
 /// As [`byref_copy`].
 unsafe fn byref_release(byref: *mut Byref) {
+    crate::debug::validate(byref as Id, "_Block_object_dispose byref");
     // SAFETY: the caller's obligation.
     let byref = unsafe { (*byref).forwarding };
     if byref.is_null() {
         return;
     }
+    crate::debug::validate(byref as Id, "_Block_object_dispose byref");
     // SAFETY: a byref.
     let flags = unsafe { (*byref).flags.load(Ordering::Relaxed) };
     if flags & byref_flag::NEEDS_FREE == 0 {
@@ -412,6 +432,7 @@ unsafe fn byref_release(byref: *mut Byref) {
     if !latching_decr_should_deallocate(unsafe { &(*byref).flags }) {
         return;
     }
+    crate::debug::begin_deallocation(byref as Id);
     // SAFETY: nothing holds a reference.
     unsafe {
         if flags & byref_flag::HAS_COPY_DISPOSE != 0
@@ -419,7 +440,9 @@ unsafe fn byref_release(byref: *mut Byref) {
         {
             destroy(byref as *mut c_void);
         }
-        crate::allocator::guest_free(byref as *mut c_void);
+        if !crate::debug::finalized(byref as Id) {
+            crate::allocator::guest_free(byref as *mut c_void);
+        }
     }
 }
 

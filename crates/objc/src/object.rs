@@ -19,16 +19,22 @@ pub type Id = *mut c_void;
 ///
 /// Null if the class was never registered: an unregistered class has no fixed
 /// size, and an instance of one would be a wrong program with no diagnostic.
+#[track_caller]
 pub fn create_instance(class: &'static Class, extra: usize) -> Id {
     if !class.is_registered() {
         return std::ptr::null_mut();
     }
-    let size = class.instance_size() + extra;
+    let Some(size) = class.instance_size().checked_add(extra) else {
+        return std::ptr::null_mut();
+    };
+    let Some(allocation_size) = crate::debug::allocation_size(size) else {
+        return std::ptr::null_mut();
+    };
     // SAFETY: a non-zero size. Zeroed by hand because the registry holds
     // `malloc` and `free` and not `calloc` - and zeroed it must be, which is
     // what `class_createInstance` promises and what every `-init` that skips a
     // field relies on.
-    let memory = unsafe { crate::allocator::guest_malloc(size) };
+    let memory = unsafe { crate::allocator::guest_malloc(allocation_size) };
     if memory.is_null() {
         return std::ptr::null_mut();
     }
@@ -36,6 +42,9 @@ pub fn create_instance(class: &'static Class, extra: usize) -> Id {
     unsafe { std::ptr::write_bytes(memory as *mut u8, 0, size) };
     // SAFETY: `memory` is at least one word and freshly ours.
     unsafe { *(memory as *mut *mut Class) = ptr(class) };
+    // SAFETY: `memory` was allocated with `allocation_size`, including the
+    // debug tail when enabled.
+    unsafe { crate::debug::allocated(memory, class, size) };
     crate::census::allocated(class);
     memory
 }
@@ -51,6 +60,9 @@ pub unsafe fn dispose_instance(object: Id) {
     }
     // SAFETY: the object is still readable, which is what names its class.
     unsafe { crate::census::freed(object) };
+    if crate::debug::finalized(object) {
+        return;
+    }
     // SAFETY: the caller's obligation, and the block came from
     // [`create_instance`], which takes it from the same allocator.
     unsafe { crate::allocator::guest_free(object) }
@@ -69,6 +81,7 @@ pub unsafe fn class_of(object: Id) -> Option<&'static Class> {
     if object.is_null() {
         return None;
     }
+    crate::debug::validate(object, "object_getClass");
     // SAFETY: the caller's obligation; the first word is the `isa`.
     let isa = unsafe { *(object as *const *const Class) };
     // SAFETY: an `isa` is a leaked `Class` or null.
@@ -86,6 +99,7 @@ pub unsafe fn set_class(object: Id, class: &'static Class) -> Option<&'static Cl
     }
     // SAFETY: the caller's obligation.
     let previous = unsafe { class_of(object) };
+    crate::debug::set_class(object, class);
     // SAFETY: as above; the first word is the `isa`.
     unsafe { *(object as *mut *mut Class) = ptr(class) };
     previous

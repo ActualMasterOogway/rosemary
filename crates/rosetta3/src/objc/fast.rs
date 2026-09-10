@@ -13,6 +13,9 @@ pub use crate::abi::Promotion;
 
 /// `name` as an inlined native call, if it is one.
 pub fn promotion(name: &str, resolved: u64) -> Option<Promotion> {
+    if objc::debug::enabled() {
+        return None;
+    }
     let name = name.strip_prefix('_').unwrap_or(name);
     let i = RUNTIME.binary_search_by_key(&name, |r| r.name).ok()?;
     let entry = &RUNTIME[i];
