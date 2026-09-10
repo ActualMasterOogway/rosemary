@@ -11,6 +11,15 @@ pub struct Layer {
     isa: *const c_void,
     /// `-contentsScale`. Never zero: see the module note.
     contents_scale: f64,
+    /// The view whose layer this is, or null. Unretained, the mirror of the
+    /// view's own retained reference: a layer never outlives the view that
+    /// holds it, and a retain here would be a cycle neither side could break.
+    ///
+    /// AppKit spells this `-superlayer` and a real one is a layer, not a
+    /// view. What the runtime actually needs it for is presentation: a
+    /// `CAMetalLayer`'s frame reaches a window through the view that holds
+    /// it, and nothing else in the object graph points that way.
+    view: Id,
     opaque: u8,
 }
 
@@ -50,6 +59,7 @@ unsafe extern "C" fn new_layer(class: Id, _sel: Sel) -> Id {
     };
     let layer = layer_of(object);
     layer.contents_scale = 1.0;
+    layer.view = std::ptr::null_mut();
     layer.opaque = 0;
     if objc::class::lookup(c"CAMetalLayer").is_some_and(|metal| {
         // SAFETY: the receiver of a class method is a class object.
@@ -67,6 +77,39 @@ unsafe extern "C" fn new_layer(class: Id, _sel: Sel) -> Id {
     }
     // SAFETY: a fresh object this call owns.
     unsafe { corefoundation::api::CFAutorelease(object as corefoundation::base::CFTypeRef) as Id }
+}
+
+/// Record which view holds `layer`, as `-[NSView setLayer:]` decides it.
+///
+/// # Safety
+///
+/// `layer` is null or a layer of this crate's, and `view` is null or a view
+/// of this crate's which outlives the layer.
+pub unsafe fn set_view(layer: Id, view: Id) {
+    if layer.is_null() || !is_layer(layer) {
+        return;
+    }
+    layer_of(layer).view = view;
+}
+
+/// The view a layer was given to, or null.
+///
+/// # Safety
+///
+/// As [`set_view`].
+pub unsafe fn view_of(layer: Id) -> Id {
+    match !layer.is_null() && is_layer(layer) {
+        true => layer_of(layer).view,
+        false => std::ptr::null_mut(),
+    }
+}
+
+fn is_layer(object: Id) -> bool {
+    objc::class::lookup(c"CALayer").is_some_and(|base| {
+        // SAFETY: null or an object the runtime allocated.
+        unsafe { objc::object::class_of(object) }
+            .is_some_and(|class| class.chain().any(|candidate| std::ptr::eq(candidate, base)))
+    })
 }
 
 unsafe extern "C" fn contents_scale(receiver: Id, _sel: Sel) -> f64 {

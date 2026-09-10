@@ -15,6 +15,7 @@ use crate::heap::{Allocation, Heap};
 /// One logical device and the queue Metal's single command-queue model uses.
 pub struct Gpu {
     pub device: Device,
+    pub physical: vk::PhysicalDevice,
     pub queue_family: u32,
     /// Vulkan requires external synchronization on a queue, and Metal lets any
     /// thread commit a command buffer.
@@ -36,6 +37,11 @@ pub struct Gpu {
     timestamp_pools: Mutex<Vec<vk::QueryPool>>,
     timestamp_period: f32,
     timestamp_valid_bits: u32,
+    /// `VK_KHR_swapchain`'s device functions, where the device has it. `None`
+    /// is a device which cannot present at all, and presentation falls back
+    /// to reading the frame back and blitting it through SDL's window
+    /// surface.
+    swapchain_api: Option<ash::khr::swapchain::Device>,
 }
 
 struct Immediate {
@@ -92,7 +98,8 @@ impl Gpu {
             })
         };
         let mut enabled: Vec<*const std::ffi::c_char> = Vec::new();
-        if has(ash::khr::swapchain::NAME) {
+        let presents = has(ash::khr::swapchain::NAME);
+        if presents {
             enabled.push(ash::khr::swapchain::NAME.as_ptr());
         }
 
@@ -125,8 +132,11 @@ impl Gpu {
         // SAFETY: as above.
         let properties = unsafe { instance.get_physical_device_properties(physical) };
 
+        let swapchain_api = presents.then(|| ash::khr::swapchain::Device::new(instance, &device));
+
         Ok(Self {
             device,
+            physical,
             queue_family,
             queue: Mutex::new(queue),
             memory,
@@ -138,6 +148,7 @@ impl Gpu {
             timestamp_pools: Mutex::new(Vec::new()),
             timestamp_period: properties.limits.timestamp_period,
             timestamp_valid_bits: families[queue_family as usize].timestamp_valid_bits,
+            swapchain_api,
         })
     }
 
@@ -612,6 +623,102 @@ impl Gpu {
             submitted();
         }
         Ok(())
+    }
+
+    /// `VK_KHR_swapchain`'s device functions, where this device has them.
+    pub fn swapchain_api(&self) -> Option<&ash::khr::swapchain::Device> {
+        self.swapchain_api.as_ref()
+    }
+
+    /// Whether this device's queue can present to `surface`.
+    ///
+    /// Metal has one queue, so there is no second family to fall back on: a
+    /// surface the graphics queue cannot present to is one this crate cannot
+    /// use a swapchain for.
+    pub fn can_present(&self, surface: vk::SurfaceKHR) -> bool {
+        let Some(api) = crate::vulkan::surface_api() else {
+            return false;
+        };
+        // SAFETY: a physical device and a surface of this instance's.
+        unsafe {
+            api.get_physical_device_surface_support(self.physical, self.queue_family, surface)
+        }
+        .unwrap_or(false)
+    }
+
+    /// Submit one command buffer with the semaphores presentation needs.
+    ///
+    /// [`Self::submit`] is the path a guest's command buffer takes and has no
+    /// semaphores at all; a swapchain image cannot be written before the
+    /// presentation engine is done with it, and cannot be presented before
+    /// the write has landed, so both ends need one.
+    pub fn submit_synchronized(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        fence: vk::Fence,
+        wait: &[(vk::Semaphore, vk::PipelineStageFlags)],
+        signal: &[vk::Semaphore],
+    ) -> Result<(), String> {
+        let buffers = [command_buffer];
+        let wait_semaphores = wait.iter().map(|(s, _)| *s).collect::<Vec<_>>();
+        let wait_stages = wait.iter().map(|(_, stage)| *stage).collect::<Vec<_>>();
+        let submit = vk::SubmitInfo::default()
+            .command_buffers(&buffers)
+            .wait_semaphores(&wait_semaphores)
+            .wait_dst_stage_mask(&wait_stages)
+            .signal_semaphores(signal);
+        let queue = self.queue.lock().expect("Vulkan queue");
+        // SAFETY: the queue is held exclusively; the fence and semaphores
+        // belong to this device.
+        unsafe { self.device.reset_fences(&[fence]) }
+            .map_err(|error| format!("vkResetFences failed with {error:?}"))?;
+        // SAFETY: as above; the command buffer has finished recording and
+        // every borrowed slice lives across the call.
+        unsafe { self.device.queue_submit(*queue, &[submit], fence) }
+            .map_err(|error| format!("vkQueueSubmit failed with {error:?}"))
+    }
+
+    /// Queue one swapchain image for presentation.
+    ///
+    /// The raw `VkResult` rather than a message, because `OUT_OF_DATE_KHR` is
+    /// not a failure: it is how the presentation engine says the window
+    /// changed size, and the caller answers by rebuilding the swapchain.
+    pub fn present(
+        &self,
+        swapchain: vk::SwapchainKHR,
+        image: u32,
+        wait: vk::Semaphore,
+    ) -> Result<bool, vk::Result> {
+        let api = self
+            .swapchain_api
+            .as_ref()
+            .ok_or(vk::Result::ERROR_UNKNOWN)?;
+        let semaphores = [wait];
+        let swapchains = [swapchain];
+        let images = [image];
+        let info = vk::PresentInfoKHR::default()
+            .wait_semaphores(&semaphores)
+            .swapchains(&swapchains)
+            .image_indices(&images);
+        let queue = self.queue.lock().expect("Vulkan queue");
+        // SAFETY: the queue is held exclusively, every borrowed slice lives
+        // across the call, and the image was acquired from this swapchain.
+        unsafe { api.queue_present(*queue, &info) }
+    }
+
+    /// Wait until the queue has finished everything submitted to it,
+    /// presentation included.
+    ///
+    /// A fence covers the submission that signals it and nothing else. A
+    /// presentation waits on a semaphore *after* that fence has signalled, so
+    /// a swapchain's semaphores are still in use by the queue when its
+    /// fences say the blits are done; only the queue itself going idle says
+    /// they are free. Presentation calls this when it rebuilds or gives up a
+    /// swapchain, which is a resize or a teardown and never a frame.
+    pub fn wait_queue_idle(&self) {
+        let queue = self.queue.lock().expect("Vulkan queue");
+        // SAFETY: the queue is held exclusively for the wait.
+        let _ = unsafe { self.device.queue_wait_idle(*queue) };
     }
 
     /// Wait for a submitted command buffer's fence.

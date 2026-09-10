@@ -172,15 +172,7 @@ unsafe extern "C" fn init_with_content_rect(
     let window = window_of(receiver);
     window.style_mask = style_mask;
 
-    let mut flags = sdl3::video::flags::OPENGL
-        | sdl3::video::flags::HIDDEN
-        | sdl3::video::flags::HIGH_PIXEL_DENSITY;
-    if style_mask & style::RESIZABLE != 0 {
-        flags |= sdl3::video::flags::RESIZABLE;
-    }
-    if style_mask & style::TITLED == 0 {
-        flags |= sdl3::video::flags::BORDERLESS;
-    }
+    let flags = creation_flags(style_mask, Api::Undecided);
     let (x, y, width, height) = crate::geometry::rect_to_sdl(rect);
     let (width, height) = match forced_size() {
         // A guest which sizes its first window to a fraction of the screen is
@@ -206,6 +198,130 @@ unsafe extern "C" fn init_with_content_rect(
         .unwrap_or_else(|e| e.into_inner())
         .push((sdl as usize, receiver as usize));
     receiver
+}
+
+/// Run `-initWithContentRect:...` for a test, answering whether SDL could
+/// make the window at all - a host with no display cannot, and a test which
+/// needs one skips rather than fails.
+///
+/// # Safety
+///
+/// `window` is a fresh `NSWindow` this runtime allocated.
+#[cfg(test)]
+pub unsafe fn init_with_content_rect_for_tests(window: Id, rect: NSRect) -> bool {
+    if sdl3::video::create_window(c"", 1, 1, sdl3::video::flags::HIDDEN).is_none() {
+        return false;
+    }
+    // SAFETY: the caller's obligation; the selector's signature is
+    // `id (id, SEL, NSRect, NSUInteger, NSUInteger, BOOL)`.
+    unsafe {
+        init_with_content_rect(
+            window,
+            objc::sel::get("initWithContentRect:styleMask:backing:defer:"),
+            rect,
+            style::TITLED,
+            0,
+            0,
+        )
+    };
+    // SAFETY: a window this call just initialised.
+    !unsafe { sdl_window(window) }.is_null()
+}
+
+/// The SDL flags for a window of `style_mask`, drawn with `api`.
+///
+/// A window is created with **no** graphics API by default, which is the
+/// whole of how this runtime avoids having to guess which one a guest wants.
+/// SDL commits a window to an API at creation and mostly cannot change its
+/// mind afterwards: it will convert an OpenGL window into a Vulkan one in
+/// place, but it converts the flags and the loaded libraries and not the
+/// backend's own state, so on Wayland the `EGLSurface`
+/// `Wayland_CreateWindow` made for an `SDL_WINDOW_OPENGL` window stays alive
+/// on the `wl_surface`, both drivers claim it, and the compositor answers
+/// `wp_linux_drm_syncobj_manager_v1: surface already exists` and closes the
+/// connection.
+///
+/// A window with neither flag has no `EGLSurface`, so nothing has claimed its
+/// surface: `SDL_Vulkan_CreateSurface` converts it safely and Metal
+/// presentation needs nothing decided in advance. OpenGL is the direction SDL
+/// will not convert - `SDL_GL_CreateContext` refuses a non-OpenGL window
+/// outright - so a guest which asks for an `NSOpenGLContext` has its window
+/// rebuilt as an OpenGL one; see [`rebuild_for_opengl`].
+fn creation_flags(style_mask: usize, api: Api) -> u64 {
+    let mut flags = sdl3::video::flags::HIDDEN | sdl3::video::flags::HIGH_PIXEL_DENSITY;
+    if matches!(api, Api::OpenGl) {
+        flags |= sdl3::video::flags::OPENGL;
+    }
+    if style_mask & style::RESIZABLE != 0 {
+        flags |= sdl3::video::flags::RESIZABLE;
+    }
+    if style_mask & style::TITLED == 0 {
+        flags |= sdl3::video::flags::BORDERLESS;
+    }
+    flags
+}
+
+/// The graphics API a window is created for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Api {
+    /// Neither OpenGL nor Vulkan: the window a guest gets until it says which
+    /// it draws with, and the one a Vulkan surface can be made for.
+    Undecided,
+    OpenGl,
+}
+
+/// Rebuild `receiver`'s SDL window as an OpenGL one, keeping the `NSWindow`.
+///
+/// `SDL_GL_CreateContext` refuses a window that was not created with
+/// `SDL_WINDOW_OPENGL`, and SDL has no public way to convert one, so the
+/// window has to be made again. The `NSWindow` is what the guest holds and it
+/// does not change; only the SDL window behind it does, so everything keyed
+/// on that - the event table, the object's own handle - is moved over.
+///
+/// A guest asks for a GL context before it draws anything, which is while the
+/// window is usually still hidden, so this is nearly always invisible.
+/// Answers whether the window is an OpenGL window afterwards.
+pub fn rebuild_for_opengl(receiver: Id) -> bool {
+    let window = window_of(receiver);
+    let old = window.sdl;
+    if old.is_null() {
+        return false;
+    }
+    if sdl3::video::window_flags(old) & sdl3::video::flags::OPENGL != 0 {
+        return true;
+    }
+    // What the replacement has to come back as. Asked of SDL rather than
+    // remembered, for the reason `-frame` is: a user may have moved or
+    // resized the window since it was made.
+    let (x, y) = sdl3::video::window_position(old).unwrap_or((0, 0));
+    let (width, height) = sdl3::video::window_size(old).unwrap_or((1, 1));
+    let title = sdl3::video::window_title(old);
+    let shown = window.shown != 0;
+
+    let flags = creation_flags(window.style_mask, Api::OpenGl);
+    let Some(new) = sdl3::video::create_window(&title, width.max(1), height.max(1), flags) else {
+        return false;
+    };
+    sdl3::video::set_window_position(new, x, y);
+    crate::icon::apply(new);
+    window.sdl = new;
+    {
+        let mut windows = WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
+        for entry in windows.iter_mut() {
+            if entry.0 == old as usize {
+                entry.0 = new as usize;
+            }
+        }
+    }
+    // The old window goes only once nothing points at it any more: its SDL
+    // window id appears in events already queued, and the table above is what
+    // those are resolved through.
+    sdl3::video::destroy_window(old);
+    if shown {
+        sdl3::video::show_window(new);
+        sdl3::video::raise_window(new);
+    }
+    true
 }
 
 /// The window's frame, asked of SDL rather than remembered.
@@ -1037,6 +1153,113 @@ mod tests {
         // SAFETY: the window and view the test made.
         unsafe { make_first_responder(window as Id, objc::sel::get("x"), to as Id) };
         1
+    }
+
+    #[test]
+    fn a_window_claims_no_graphics_api_until_one_is_asked_for() {
+        use sdl3::video::flags;
+
+        // The default. A window with neither flag has no `EGLSurface`, so
+        // `SDL_Vulkan_CreateSurface` can convert it and Metal presentation
+        // needs nothing known in advance about the guest.
+        let plain = creation_flags(style::TITLED | style::RESIZABLE, Api::Undecided);
+        assert_eq!(plain & flags::OPENGL, 0);
+        assert_eq!(plain & flags::VULKAN, 0);
+
+        // A guest that asks for an `NSOpenGLContext` gets the window rebuilt
+        // as this, because SDL will not convert to OpenGL.
+        let gl = creation_flags(style::TITLED | style::RESIZABLE, Api::OpenGl);
+        assert_ne!(gl & flags::OPENGL, 0);
+        assert_eq!(gl & flags::VULKAN, 0);
+
+        // Never both, whatever the style: SDL refuses such a window, and the
+        // whole point is that at most one driver owns the surface.
+        for style in [0, style::TITLED, style::RESIZABLE, style::CLOSABLE] {
+            for api in [Api::Undecided, Api::OpenGl] {
+                let flags = creation_flags(style, api);
+                assert!(
+                    flags & flags::OPENGL == 0 || flags & flags::VULKAN == 0,
+                    "a window was asked for both graphics APIs"
+                );
+            }
+        }
+
+        // The rest of the mapping is unchanged by any of it.
+        let api = Api::Undecided;
+        assert_ne!(creation_flags(style::RESIZABLE, api) & flags::RESIZABLE, 0);
+        assert_eq!(creation_flags(style::TITLED, api) & flags::BORDERLESS, 0);
+        assert_ne!(creation_flags(0, api) & flags::BORDERLESS, 0);
+        assert_ne!(creation_flags(0, api) & flags::HIDDEN, 0);
+    }
+
+    /// A window becomes an OpenGL window only when one is asked for, and
+    /// keeps its identity and its place when it does.
+    #[test]
+    fn a_window_rebuilt_for_opengl_keeps_what_it_had() {
+        crate::bootstrap();
+        let object =
+            objc::object::create_instance(objc::class::lookup(c"NSWindow").expect("NSWindow"), 0);
+        // SAFETY: a fresh window this test made.
+        let made = unsafe {
+            init_with_content_rect_for_tests(
+                object,
+                NSRect {
+                    origin: NSPoint { x: 0.0, y: 0.0 },
+                    size: NSSize {
+                        width: 320.0,
+                        height: 240.0,
+                    },
+                },
+            )
+        };
+        if !made {
+            return;
+        }
+        // SAFETY: a window this test made.
+        let before = unsafe { sdl_window(object) };
+        assert_eq!(
+            sdl3::video::window_flags(before) & sdl3::video::flags::OPENGL,
+            0,
+            "a window claimed OpenGL before anything asked for it"
+        );
+        sdl3::video::set_window_title(before, c"a title");
+        sdl3::video::set_window_position(before, 64, 48);
+        let size = sdl3::video::window_size(before).expect("a window");
+
+        assert!(rebuild_for_opengl(object));
+        // SAFETY: as above.
+        let after = unsafe { sdl_window(object) };
+        assert_ne!(after, before, "the window was not rebuilt");
+        assert_ne!(
+            sdl3::video::window_flags(after) & sdl3::video::flags::OPENGL,
+            0,
+            "the rebuilt window is not an OpenGL window"
+        );
+        assert_eq!(sdl3::video::window_size(after), Some(size));
+        // The title carries across exactly. `set_window_title` brands what
+        // it is given and `create_window` does not, which is what keeps the
+        // rebuild from branding an already branded title a second time.
+        let title = sdl3::video::window_title(after);
+        let title = String::from_utf8_lossy(title.to_bytes());
+        assert!(
+            title.starts_with("a title"),
+            "the rebuilt window lost its title: {title:?}"
+        );
+        assert_eq!(
+            title.matches("Rosetta 3").count(),
+            1,
+            "the rebuilt window's title was branded twice: {title:?}"
+        );
+        // The event table has to follow the window, or every event for it
+        // stops resolving to this object.
+        assert_eq!(window_for(after), object);
+        assert!(sdl_windows().contains(&after));
+        assert!(!sdl_windows().contains(&before));
+
+        // Asking twice is not two rebuilds.
+        assert!(rebuild_for_opengl(object));
+        // SAFETY: as above.
+        assert_eq!(unsafe { sdl_window(object) }, after);
     }
 
     #[test]

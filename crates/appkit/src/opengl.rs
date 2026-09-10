@@ -333,35 +333,52 @@ unsafe extern "C" fn clear_drawable(receiver: Id, _sel: Sel) {
 /// window is not part of the context on either side, though: `SDL_GL_MakeCurrent`
 /// takes it again on every call, so binding a context made against one window to
 /// another later is what the API is for rather than a workaround.
-fn drawable(context: &Context) -> sdl3::Window {
+/// The `NSWindow` a context draws into, which is the one its view is in and
+/// otherwise the program's current window.
+fn drawable_window(context: &Context) -> Id {
     // SAFETY: the view is null or an object this runtime allocated.
     let window = unsafe { crate::view::window_of(context.view) };
     // SAFETY: null or a window this crate made.
-    let sdl = unsafe { crate::window::sdl_window(window) };
-    if !sdl.is_null() {
-        return sdl;
+    if !unsafe { crate::window::sdl_window(window) }.is_null() {
+        return window;
     }
-    let fallback = match crate::window::key_window().is_null() {
+    match crate::window::key_window().is_null() {
         false => crate::window::key_window(),
         true => crate::window::all()
             .last()
             .copied()
             .unwrap_or(std::ptr::null_mut()),
-    };
+    }
+}
+
+fn drawable(context: &Context) -> sdl3::Window {
     // SAFETY: null or a window this crate made.
-    unsafe { crate::window::sdl_window(fallback) }
+    unsafe { crate::window::sdl_window(drawable_window(context)) }
 }
 
 /// Make the SDL context, if it is not there yet.
 fn ensure(receiver: Id, sent: &str) -> sdl3::Window {
     let context = context_of(receiver);
-    let window = drawable(context);
-    if window.is_null() {
+    let object = drawable_window(context);
+    // SAFETY: null or a window this crate made.
+    if unsafe { crate::window::sdl_window(object) }.is_null() {
         objc::fail!(
             "-[NSOpenGLContext {sent}]: there is no window to create a GL context against - the \
              program has not made one yet"
         );
     }
+    // A window is not made for OpenGL until a guest asks for a GL context,
+    // because a window made for OpenGL cannot afterwards be presented to
+    // with Vulkan. This is the asking, so the window is rebuilt now.
+    if !crate::window::rebuild_for_opengl(object) {
+        objc::fail!(
+            "-[NSOpenGLContext {sent}]: SDL could not make this window an OpenGL window: {}",
+            sdl3::error()
+        );
+    }
+    // The rebuild replaces it, so it is read back rather than remembered.
+    // SAFETY: a window this crate made, checked above.
+    let window = unsafe { crate::window::sdl_window(object) };
     if context.sdl.is_null() {
         apply(context.format);
         let Some(sdl) = sdl3::video::gl_create_context(window) else {

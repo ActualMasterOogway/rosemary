@@ -2,16 +2,50 @@
 //!
 //! Metal presents through a drawable the layer vends. Here a drawable is an
 //! ordinary Vulkan colour image which the game renders into exactly as it
-//! renders into any other texture; `-presentDrawable:` reads it back and hands
-//! the pixels to the window.
+//! renders into any other texture, and `-presentDrawable:` puts it on the
+//! screen.
 //!
-//! FIXME (ACCURACY): a real implementation owns a `VkSwapchainKHR` on a
-//! surface for the window, so the compositor scans out the image the GPU just
-//! wrote. SDL only creates a Vulkan surface for a window it was told at
-//! creation would be one, and a window's flags are fixed before anything knows
-//! whether the guest draws with Metal. Reading the frame back and blitting it
-//! through SDL's window surface is a whole frame of copies, and it is correct
-//! for every guest.
+//! There are two ways it does that. The first is a real one: the layer's view
+//! says which window it is in and where, and the drawable is blitted into
+//! that window's `VkSwapchainKHR` on the device, so the compositor scans out
+//! what the GPU wrote. [`crate::swapchain`] is that path and is where the
+//! interesting parts are.
+//!
+//! The second is the fallback below, kept for everything the first cannot
+//! serve: a host with no `VK_KHR_surface`, a device whose queue cannot
+//! present to the window, or a `CAMetalLayer` in no window this runtime made.
+//! It reads the frame back into a host buffer and blits it through SDL's
+//! window surface, which is a whole frame of copies and is correct for every
+//! guest. `ROSETTA3_PRESENT_READBACK` forces it, which is the only way to
+//! compare the two on one host.
+//!
+//! FIXME (ACCURACY): the fallback blits to the window rather than to the
+//! layer's rectangle of it, so a guest it catches with more than one layer
+//! sees the last one presented, full-window, instead of a composite. It has
+//! no swapchain to composite into and reading every layer back to composite
+//! on the host would cost more than the path it is standing in for. A guest
+//! which reaches it at all has no window this runtime placed, or no surface
+//! at all, so it has nowhere better to put the pixels either.
+//!
+//! Two things about windows are worth recording here.
+//!
+//! A window is created with no graphics API at all, so that a surface can be
+//! made for it whenever one is wanted. SDL will convert an OpenGL window into
+//! a Vulkan one in place, but the conversion changes the flags and the loaded
+//! libraries and not the backend's own state: on Wayland the `EGLSurface` SDL
+//! made with the window survives it, both drivers claim the same
+//! `wl_surface`, and the compositor kills the connection with
+//! `wp_linux_drm_syncobj_manager_v1: surface already exists`. A window with
+//! neither flag has no `EGLSurface` and converts cleanly, which is why
+//! `appkit::window` makes them that way and why nothing has to predict
+//! whether a guest draws with Metal. See `appkit::window::creation_flags`.
+//!
+//! A second presentable surface *inside* one window would need a subsurface,
+//! and SDL has no such thing on any backend: `SDL_CreatePopupWindow` is a
+//! separate OS window everywhere (a child `NSWindow`, a `WS_POPUP` `HWND`, an
+//! override-redirect X11 window, an `xdg_popup` the compositor may dismiss).
+//! Hence one swapchain per window with the view tree composited into it,
+//! which is what AppKit does anyway.
 
 use ash::vk;
 use objc::object::Id;
@@ -61,7 +95,14 @@ unsafe extern "C" fn next_drawable(receiver: Id, _sel: Sel) -> Id {
     let size = send_size(receiver, "drawableSize");
     let (mut width, mut height) = (size.0 as u32, size.1 as u32);
     if width == 0 || height == 0 {
-        let Some((w, h)) = window_size() else {
+        // A layer with no drawable size of its own is the size of the view
+        // holding it, which is what Core Animation gives it; a layer no view
+        // holds falls back to the window, as it did before layers could be
+        // placed at all.
+        let Some((w, h)) = layer_frame(receiver)
+            .map(|frame| (frame.width, frame.height))
+            .or_else(window_size)
+        else {
             return std::ptr::null_mut();
         };
         width = w;
@@ -188,6 +229,26 @@ fn present_inner(drawable: Id) {
     // SAFETY: a drawable's texture is this crate's.
     let texture = unsafe { object::body::<Texture>(described.texture) };
     let gpu = described.gpu;
+    let frame = layer_frame(described.layer);
+
+    // The swapchain is the whole of presentation where the window has one:
+    // the frame the guest drew stays on the device and the compositor scans
+    // out what the blit put there. Everything below this is the fallback.
+    if present_through_swapchain(described, texture, frame.as_ref()) {
+        gpu::milestone("presented frame");
+        crate::stats::count(crate::stats::Counter::Frames);
+        return;
+    }
+
+    // The layer's own window where it has one, and the first window
+    // otherwise - which is a guess, but the only one available for a layer
+    // this runtime cannot place. It is right for every guest with one
+    // window, which is every guest the readback path has ever run.
+    let window = frame
+        .as_ref()
+        .map(|frame| frame.window)
+        .or_else(|| appkit::window::sdl_windows().first().copied());
+
     let width = texture.image.width;
     let height = texture.image.height;
     let bytes = u64::from(width) * u64::from(height) * 4;
@@ -240,9 +301,48 @@ fn present_inner(drawable: Id) {
         crate::stats::count(crate::stats::Counter::Frames);
         dump_frame(pixels, width, height, texture.image.format);
         crate::stats::timed(crate::stats::Counter::BlitMicros, || {
-            blit_to_window(pixels, width, height, texture.image.format)
+            blit_to_window(pixels, width, height, texture.image.format, window)
         });
     }
+}
+
+/// Present the drawable through its window's swapchain, if it has one.
+///
+/// The layer says which view holds it and the view says where in which
+/// window it is; without both there is no surface to present to, and the
+/// caller reads the frame back instead. `ROSETTA3_PRESENT_READBACK` forces
+/// that older path, which is the only way to compare the two on one host and
+/// the escape hatch for a driver whose swapchain misbehaves.
+fn present_through_swapchain(
+    drawable: &Drawable,
+    texture: &Texture,
+    frame: Option<&appkit::view::Frame>,
+) -> bool {
+    if std::env::var_os("ROSETTA3_PRESENT_READBACK").is_some() {
+        return false;
+    }
+    let Some(frame) = frame else {
+        gpu::trace_once(
+            "a CAMetalLayer is in no window this runtime made, so its drawables are presented \
+             through a readback",
+        );
+        return false;
+    };
+    match crate::swapchain::present(drawable.gpu, drawable.layer as usize, frame, &texture.image) {
+        Ok(presented) => presented,
+        Err(reason) => {
+            gpu::trace(format!("swapchain presentation failed: {reason}"));
+            false
+        }
+    }
+}
+
+/// Where a layer sits in its window, or `None` for a layer no view holds.
+pub(crate) fn layer_frame(layer: Id) -> Option<appkit::view::Frame> {
+    // SAFETY: a `CAMetalLayer` this runtime made, whose view outlives it.
+    let view = unsafe { appkit::layer::view_of(layer) };
+    // SAFETY: null or a view of AppKit's.
+    unsafe { appkit::view::presentation_frame(view) }
 }
 
 /// Write a presented frame to `ROSETTA3_FRAME_OUT` as a binary PPM.
@@ -290,11 +390,16 @@ fn dump_frame(pixels: &[u8], width: u32, height: u32, format: vk::Format) {
 /// a row copy: the byte the window ignores is the one the drawable calls
 /// alpha. A drawable in R, G, B, A order needs its two ends exchanged, which
 /// is done a pixel at a time but a whole pixel at a time.
-fn blit_to_window(pixels: &[u8], width: u32, height: u32, format: vk::Format) {
+fn blit_to_window(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    format: vk::Format,
+    window: Option<sdl3::Window>,
+) {
     let swap_red_and_blue =
         format == vk::Format::R8G8B8A8_UNORM || format == vk::Format::R8G8B8A8_SRGB;
-    let windows = appkit::window::sdl_windows();
-    let Some(window) = windows.first().copied() else {
+    let Some(window) = window else {
         return;
     };
     sdl3::video::present_window(window, |surface| {

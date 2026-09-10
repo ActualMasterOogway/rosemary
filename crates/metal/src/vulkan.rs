@@ -32,6 +32,10 @@ impl Adapter {
 
 struct State {
     instance: Instance,
+    /// `VK_KHR_surface`, present only where the instance could be created
+    /// with the extension - a headless host has no surface extension at all,
+    /// and presentation falls back to the readback path there.
+    surface_api: Option<ash::khr::surface::Instance>,
     _entry: Entry,
     adapters: Vec<Adapter>,
 }
@@ -61,11 +65,22 @@ fn initialize() -> Result<State, String> {
         .engine_name(c"metal_translate")
         .engine_version(1)
         .api_version(vk::API_VERSION_1_1);
-    let create_info = vk::InstanceCreateInfo::default().application_info(&application);
-    // SAFETY: the create info and its application info live through the call,
-    // and the default allocator is used.
+    let surface_extensions = surface_extensions(&entry);
+    let enabled = surface_extensions
+        .iter()
+        .map(|name| name.as_ptr())
+        .collect::<Vec<_>>();
+    let create_info = vk::InstanceCreateInfo::default()
+        .application_info(&application)
+        .enabled_extension_names(&enabled);
+    // SAFETY: the create info, its application info and the extension name
+    // pointers - which are static - live through the call, and the default
+    // allocator is used.
     let instance = unsafe { entry.create_instance(&create_info, None) }
         .map_err(|error| format!("vkCreateInstance failed with {error:?}"))?;
+    let surface_api = surface_extensions
+        .contains(&ash::khr::surface::NAME)
+        .then(|| ash::khr::surface::Instance::new(&entry, &instance));
 
     // SAFETY: `instance` is live and ash owns its loaded instance functions.
     let physical = unsafe { instance.enumerate_physical_devices() }
@@ -118,9 +133,63 @@ fn initialize() -> Result<State, String> {
     ));
     Ok(State {
         instance,
+        surface_api,
         _entry: entry,
         adapters,
     })
+}
+
+/// The surface extensions to create the instance with: `VK_KHR_surface` and
+/// every window-system one the loader advertises.
+///
+/// Presentation needs these enabled on the *instance*, and the instance is
+/// created when a guest first asks for the adapter list - which is before it
+/// has a window, and so before anything could ask SDL which extensions its
+/// video backend wants. Asking the loader instead removes the ordering
+/// question entirely: enabling an extension the loader reports is harmless,
+/// the list is a superset of whatever SDL will need, and it costs nothing on
+/// a host which has none of them.
+fn surface_extensions(entry: &Entry) -> Vec<&'static std::ffi::CStr> {
+    // SAFETY: the entry owns a loaded Vulkan library.
+    let Ok(available) = (unsafe { entry.enumerate_instance_extension_properties(None) }) else {
+        return Vec::new();
+    };
+    let has = |name: &std::ffi::CStr| {
+        available.iter().any(|property| {
+            property
+                .extension_name_as_c_str()
+                .is_ok_and(|found| found == name)
+        })
+    };
+    if !has(ash::khr::surface::NAME) {
+        return Vec::new();
+    }
+    let mut wanted = vec![ash::khr::surface::NAME];
+    for name in [
+        ash::khr::xlib_surface::NAME,
+        ash::khr::xcb_surface::NAME,
+        ash::khr::wayland_surface::NAME,
+        ash::khr::win32_surface::NAME,
+        ash::khr::android_surface::NAME,
+        ash::ext::metal_surface::NAME,
+        ash::mvk::macos_surface::NAME,
+    ] {
+        if has(name) {
+            wanted.push(name);
+        }
+    }
+    wanted
+}
+
+/// `VK_KHR_surface`'s instance functions, where the instance has it.
+pub fn surface_api() -> Option<&'static ash::khr::surface::Instance> {
+    STATE.get()?.as_ref().ok()?.surface_api.as_ref()
+}
+
+/// The raw `VkInstance`, for SDL to make a surface against.
+pub fn instance_handle() -> Option<u64> {
+    use vk::Handle;
+    Some(STATE.get()?.as_ref().ok()?.instance.handle().as_raw())
 }
 
 fn load_entry() -> Result<Entry, String> {

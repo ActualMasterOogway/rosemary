@@ -143,6 +143,7 @@ struct Api {
     SDL_CreateWindow: Option<unsafe extern "C" fn(*const c_char, c_int, c_int, u64) -> Window>,
     SDL_DestroyWindow: Option<unsafe extern "C" fn(Window)>,
     SDL_SetWindowTitle: Option<unsafe extern "C" fn(Window, *const c_char) -> bool>,
+    SDL_GetWindowTitle: Option<unsafe extern "C" fn(Window) -> *const c_char>,
     SDL_GetWindowSize: Option<unsafe extern "C" fn(Window, *mut c_int, *mut c_int) -> bool>,
     SDL_SetWindowSize: Option<unsafe extern "C" fn(Window, c_int, c_int) -> bool>,
     SDL_GetWindowSizeInPixels: Option<unsafe extern "C" fn(Window, *mut c_int, *mut c_int) -> bool>,
@@ -155,6 +156,7 @@ struct Api {
     SDL_SetWindowResizable: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_GetWindowPixelDensity: Option<unsafe extern "C" fn(Window) -> f32>,
     SDL_GetWindowID: Option<unsafe extern "C" fn(Window) -> u32>,
+    SDL_GetWindowFlags: Option<unsafe extern "C" fn(Window) -> u64>,
     SDL_SetWindowIcon: Option<unsafe extern "C" fn(Window, *mut c_void) -> bool>,
     SDL_CreateSurfaceFrom:
         Option<unsafe extern "C" fn(c_int, c_int, u32, *mut c_void, c_int) -> *mut c_void>,
@@ -163,6 +165,14 @@ struct Api {
     SDL_UpdateWindowSurface: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_LockSurface: Option<unsafe extern "C" fn(*mut Surface) -> bool>,
     SDL_UnlockSurface: Option<unsafe extern "C" fn(*mut Surface)>,
+
+    /// `VkInstance` is a dispatchable handle, so a pointer; `VkSurfaceKHR` is
+    /// not, so a `uint64_t` on every platform. Neither is spelled in Vulkan's
+    /// own types here, because this crate does not depend on `ash`.
+    SDL_Vulkan_LoadLibrary: Option<unsafe extern "C" fn(*const c_char) -> bool>,
+    SDL_Vulkan_CreateSurface:
+        Option<unsafe extern "C" fn(Window, *mut c_void, *const c_void, *mut u64) -> bool>,
+    SDL_Vulkan_DestroySurface: Option<unsafe extern "C" fn(*mut c_void, u64, *const c_void)>,
 
     SDL_GL_LoadLibrary: Option<unsafe extern "C" fn(*const c_char) -> bool>,
     SDL_GL_CreateContext: Option<unsafe extern "C" fn(Window) -> GlContext>,
@@ -329,6 +339,7 @@ fn api() -> Option<&'static Api> {
             SDL_CreateWindow,
             SDL_DestroyWindow,
             SDL_SetWindowTitle,
+            SDL_GetWindowTitle,
             SDL_GetWindowSize,
             SDL_SetWindowSize,
             SDL_GetWindowSizeInPixels,
@@ -341,6 +352,7 @@ fn api() -> Option<&'static Api> {
             SDL_SetWindowResizable,
             SDL_GetWindowPixelDensity,
             SDL_GetWindowID,
+            SDL_GetWindowFlags,
             SDL_SetWindowIcon,
             SDL_CreateSurfaceFrom,
             SDL_DestroySurface,
@@ -348,6 +360,9 @@ fn api() -> Option<&'static Api> {
             SDL_UpdateWindowSurface,
             SDL_LockSurface,
             SDL_UnlockSurface,
+            SDL_Vulkan_LoadLibrary,
+            SDL_Vulkan_CreateSurface,
+            SDL_Vulkan_DestroySurface,
             SDL_GL_LoadLibrary,
             SDL_GL_CreateContext,
             SDL_GL_DestroyContext,
@@ -1231,6 +1246,18 @@ pub mod video {
         pub const BORDERLESS: u64 = 0x0000_0010;
         pub const RESIZABLE: u64 = 0x0000_0020;
         pub const HIGH_PIXEL_DENSITY: u64 = 0x0000_2000;
+        pub const VULKAN: u64 = 0x1000_0000;
+    }
+
+    /// The flags a window actually has, which is not always the set it was
+    /// asked for: SDL clears `OPENGL` and sets `VULKAN` on a window converted
+    /// by `SDL_Vulkan_CreateSurface`.
+    pub fn window_flags(window: Window) -> u64 {
+        let Some(f) = api().and_then(|a| a.SDL_GetWindowFlags) else {
+            return 0;
+        };
+        // SAFETY: a window this crate created.
+        unsafe { f(window) }
     }
 
     /// `SDL_GLAttr`, in declaration order - the enum has no assigned values, so
@@ -1619,6 +1646,68 @@ pub mod video {
         })
     }
 
+    /// Vulkan surfaces for a window SDL already owns.
+    ///
+    /// A window here is created with `SDL_WINDOW_OPENGL`, long before anything
+    /// knows whether the guest will draw with Metal. That used to settle the
+    /// question: SDL refused a surface for a window it had not been told at
+    /// creation would be a Vulkan one. Since SDL 3.4.0 it does not -
+    /// `SDL_Vulkan_CreateSurface` converts the window in place, clearing
+    /// `SDL_WINDOW_OPENGL`, unloading the GL library and loading the Vulkan
+    /// one - so the flags a window was made with no longer decide how it is
+    /// presented to.
+    ///
+    /// The conversion is one-way and it takes the GL library with it, so a
+    /// caller must not ask for a surface on a window the guest is also
+    /// drawing into with OpenGL.
+    pub mod vulkan {
+        use super::Window;
+        use std::ffi::c_void;
+
+        /// A Vulkan surface for `window`, as a raw `VkSurfaceKHR`.
+        ///
+        /// `instance` is a raw `VkInstance`, which must have been created with
+        /// `VK_KHR_surface` and the platform's own surface extension enabled;
+        /// SDL asks the same loader for the entry points, so the handle it
+        /// returns belongs to that instance.
+        pub fn create_surface(window: Window, instance: u64) -> Option<u64> {
+            let api = super::api()?;
+            let create = api.SDL_Vulkan_CreateSurface?;
+            if let Some(load) = api.SDL_Vulkan_LoadLibrary {
+                // SDL loads the loader itself inside `CreateSurface`, but
+                // doing it here separates "no Vulkan on this host" from "this
+                // window cannot have a surface" in the error a caller reports.
+                // SAFETY: a null path asks SDL for its own default.
+                unsafe { load(std::ptr::null()) };
+            }
+            let mut surface = 0u64;
+            // SAFETY: a window this crate created, a live instance handle from
+            // the caller, the default allocator, and an out parameter which
+            // lives across the call.
+            let made = unsafe {
+                create(
+                    window,
+                    instance as *mut c_void,
+                    std::ptr::null(),
+                    &raw mut surface,
+                )
+            };
+            (made && surface != 0).then_some(surface)
+        }
+
+        pub fn destroy_surface(instance: u64, surface: u64) {
+            let Some(destroy) = super::api().and_then(|a| a.SDL_Vulkan_DestroySurface) else {
+                return;
+            };
+            if surface == 0 {
+                return;
+            }
+            // SAFETY: a surface this module made from that instance, with
+            // nothing left depending on it.
+            unsafe { destroy(instance as *mut c_void, surface, std::ptr::null()) };
+        }
+    }
+
     /// The window's presentable surface, described exactly as SDL3's public
     /// `SDL_Surface` is: a caller writes `pitch`-strided rows into `pixels`.
     pub struct Presentation {
@@ -1789,6 +1878,25 @@ pub mod video {
         };
         // SAFETY: a window this crate created.
         unsafe { f(window) }
+    }
+
+    /// The window's title, empty where it has none.
+    ///
+    /// SDL owns the string and keeps it until the title is set again or the
+    /// window is destroyed, so it is copied out rather than borrowed.
+    pub fn window_title(window: Window) -> CString {
+        let empty = || CString::new("").expect("no interior NUL");
+        let Some(f) = api().and_then(|a| a.SDL_GetWindowTitle) else {
+            return empty();
+        };
+        // SAFETY: a window this crate created.
+        let title = unsafe { f(window) };
+        if title.is_null() {
+            return empty();
+        }
+        // SAFETY: SDL returns a NUL-terminated string it owns; it is copied
+        // before anything can set the title again.
+        unsafe { CStr::from_ptr(title) }.to_owned()
     }
 
     pub fn window_size(window: Window) -> Option<(i32, i32)> {

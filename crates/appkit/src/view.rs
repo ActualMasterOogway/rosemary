@@ -282,13 +282,17 @@ unsafe extern "C" fn posts_bounds_changed(receiver: Id, _sel: Sel) -> u8 {
     u8::from(view_of(receiver).posts & POSTS_BOUNDS != 0)
 }
 
-/// `-setLayer:`, which stores the layer and nothing more.
+/// `-setLayer:`, which stores the layer and points it back at this view.
 ///
-/// Nothing in this tree composites one: a guest that hands its view a
+/// The view does not draw the layer. A guest that hands its view a
 /// `CAMetalLayer` draws through the layer's own drawables, which are Metal's
-/// business rather than the view's. What the view owes it is to give the same
-/// object back from `-layer`, because that is where the guest reaches for it on
-/// every frame.
+/// business rather than the view's, and what the view owes it is to give the
+/// same object back from `-layer`, because that is where the guest reaches
+/// for it on every frame.
+///
+/// The back pointer is what makes those drawables presentable. A drawable
+/// knows its layer and nothing else, and the window it belongs in is up the
+/// view tree from here; see [`presentation_frame`].
 unsafe extern "C" fn set_layer(receiver: Id, _sel: Sel, layer: Id) {
     let view = view_of(receiver);
     if view.layer == layer {
@@ -296,6 +300,12 @@ unsafe extern "C" fn set_layer(receiver: Id, _sel: Sel, layer: Id) {
     }
     let previous = view.layer;
     view.layer = objc::arc::retain(layer);
+    // SAFETY: a layer this runtime made, and a view which outlives it - the
+    // view holds the only reference the layer is reached through.
+    unsafe {
+        crate::layer::set_view(previous, std::ptr::null_mut());
+        crate::layer::set_view(layer, receiver);
+    }
     objc::arc::release(previous);
 }
 
@@ -455,6 +465,106 @@ pub unsafe fn pointer_in(view: Id) -> Option<NSPoint> {
 /// Whether a rectangle of a view's holds a point, for [`crate::cursor`].
 pub fn holds(view: Id, rect: NSRect, point: NSPoint) -> bool {
     is_view(view) && contains(rect, point)
+}
+
+/// Where a view's layer lands in its window, in pixels from the top left.
+///
+/// This is the whole of the mapping from AppKit's view tree to a window a
+/// compositor knows about. AppKit gives every view a frame in its
+/// superview's coordinates, with the origin at the bottom left; a window
+/// system wants one rectangle in the window's own pixels, counted from the
+/// top left. So the origins are summed up the superview chain, the result is
+/// flipped against the window's height, and both are scaled by the window's
+/// pixel density - which is what separates a view's size in points from the
+/// number of pixels a drawable for it has to cover.
+///
+/// `None` where the view is not in a window this runtime made, which is the
+/// only answer presentation can act on: there is nothing to present to.
+///
+/// # Safety
+///
+/// `view` is null or a view of this crate's.
+pub unsafe fn presentation_frame(view: Id) -> Option<Frame> {
+    if !is_view(view) {
+        return None;
+    }
+    // SAFETY: the caller's obligation, checked above.
+    let window = unsafe { window_of(view) };
+    // SAFETY: null or a window this crate made.
+    let sdl = unsafe { crate::window::sdl_window(window) };
+    if sdl.is_null() {
+        return None;
+    }
+    let (mut x, mut y) = (0.0f64, 0.0f64);
+    let size = view_of(view).frame.size;
+    let mut current = view;
+    // Bounded for the reason [`window_of`] is: a subview list a guest built
+    // with a cycle in it must not hang a presenting frame.
+    for _ in 0..64 {
+        if !is_view(current) {
+            break;
+        }
+        let v = view_of(current);
+        x += v.frame.origin.x;
+        y += v.frame.origin.y;
+        if v.superview.is_null() {
+            break;
+        }
+        current = v.superview;
+    }
+    let (_, window_height) = sdl3::video::window_size(sdl)?;
+    let (pixel_width, pixel_height) = sdl3::video::window_size_in_pixels(sdl)?;
+    let density = sdl3::video::window_pixel_density(sdl) as f64;
+    let density = if density > 0.0 { density } else { 1.0 };
+    // AppKit counts up from the bottom of the window's content rect; a
+    // swapchain image counts down from the top of it.
+    let top = f64::from(window_height) - (y + size.height);
+    let frame = Frame {
+        window: sdl,
+        x: (x * density).round() as i32,
+        y: (top * density).round() as i32,
+        width: (size.width * density).round().max(0.0) as u32,
+        height: (size.height * density).round().max(0.0) as u32,
+        window_width: pixel_width.max(0) as u32,
+        window_height: pixel_height.max(0) as u32,
+    };
+    // A view with no frame of its own - one a guest made with
+    // `-initWithFrame:` of a zero rect and then never sized - covers its
+    // window rather than nothing, which is what AppKit's own autoresizing
+    // would have made of it.
+    match frame.width == 0 || frame.height == 0 {
+        true => Some(Frame {
+            x: 0,
+            y: 0,
+            width: frame.window_width,
+            height: frame.window_height,
+            ..frame
+        }),
+        false => Some(frame),
+    }
+}
+
+/// A view's layer as a window system sees it: a rectangle of pixels, and the
+/// window it is a rectangle of.
+pub struct Frame {
+    pub window: sdl3::Window,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub window_width: u32,
+    pub window_height: u32,
+}
+
+impl Frame {
+    /// Whether this frame is the whole window, so that whatever is drawn for
+    /// it needs nothing composited under or around it.
+    pub fn covers_window(&self) -> bool {
+        self.x <= 0
+            && self.y <= 0
+            && self.width >= self.window_width
+            && self.height >= self.window_height
+    }
 }
 
 /// The subviews of a view, for a caller walking the tree outside this module.
@@ -1212,5 +1322,74 @@ mod tests {
         unsafe { set_window(parent, window) };
         // SAFETY: as above.
         assert_eq!(unsafe { window_of(child) }, window);
+    }
+
+    /// A subview's rectangle in the pixels of the window it is in, which is
+    /// what presentation blits a `CAMetalLayer`'s drawable into.
+    ///
+    /// Needs a real window, because the height to flip against and the
+    /// pixel density to scale by are SDL's answers and not this crate's, so
+    /// it is skipped where no window can be made.
+    #[test]
+    fn a_subviews_frame_reaches_the_window_in_pixels() {
+        crate::bootstrap();
+        let window =
+            objc::object::create_instance(objc::class::lookup(c"NSWindow").expect("NSWindow"), 0);
+        // SAFETY: `-initWithContentRect:styleMask:backing:defer:` is
+        // `id (id, SEL, NSRect, NSUInteger, NSUInteger, BOOL)`.
+        let made = unsafe {
+            crate::window::init_with_content_rect_for_tests(window, rect(0.0, 0.0, 400.0, 300.0))
+        };
+        if !made {
+            return;
+        }
+        // SAFETY: a window this test made.
+        let sdl = unsafe { crate::window::sdl_window(window) };
+        let Some((_, height)) = sdl3::video::window_size(sdl) else {
+            return;
+        };
+        let density = sdl3::video::window_pixel_density(sdl) as f64;
+
+        let content = view(rect(0.0, 0.0, f64::from(height), f64::from(height)));
+        // SAFETY: both are objects this runtime allocated.
+        unsafe { set_window(content, window) };
+        let child = view(rect(50.0, 40.0, 100.0, 80.0));
+        // SAFETY: `-addSubview:` is `void (id, SEL, id)`.
+        unsafe { add_subview(content, objc::sel::get("addSubview:"), child) };
+
+        // SAFETY: a view of this crate's.
+        let frame = unsafe { presentation_frame(child) }.expect("the view is in a window");
+        assert_eq!(frame.window, sdl);
+        // AppKit counts the origin up from the bottom of the content rect;
+        // the answer counts down from the top of it.
+        assert_eq!(frame.x, (50.0 * density).round() as i32);
+        assert_eq!(
+            frame.y,
+            ((f64::from(height) - (40.0 + 80.0)) * density).round() as i32
+        );
+        assert_eq!(frame.width, (100.0 * density).round() as u32);
+        assert_eq!(frame.height, (80.0 * density).round() as u32);
+        // A subview of that size is not the window.
+        assert!(!frame.covers_window());
+
+        // A view the size of the window is, which is what puts a game's one
+        // layer on the direct path.
+        let whole = view(rect(0.0, 0.0, 400.0, f64::from(height)));
+        // SAFETY: as above.
+        unsafe { add_subview(content, objc::sel::get("addSubview:"), whole) };
+        // SAFETY: a view of this crate's.
+        let frame = unsafe { presentation_frame(whole) }.expect("the view is in a window");
+        assert!(frame.covers_window());
+    }
+
+    /// A view with no window has nowhere to be presented, which is what
+    /// sends a drawable down the readback path instead.
+    #[test]
+    fn a_view_outside_any_window_has_no_presentation_frame() {
+        let orphan = view(rect(0.0, 0.0, 100.0, 100.0));
+        // SAFETY: a view of this crate's.
+        assert!(unsafe { presentation_frame(orphan) }.is_none());
+        // SAFETY: null is one of the values this accepts.
+        assert!(unsafe { presentation_frame(std::ptr::null_mut()) }.is_none());
     }
 }
