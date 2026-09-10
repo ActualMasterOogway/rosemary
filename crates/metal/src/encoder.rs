@@ -58,6 +58,8 @@ pub(crate) struct CommandBuffer {
     /// Objects the recording refers to, retained until the work completes.
     retained: Vec<Id>,
     framebuffers: Vec<vk::Framebuffer>,
+    /// `ROSETTA3_PASS_OUT`: attachment readbacks written once the work is done.
+    captures: Vec<crate::capture::Capture>,
     scheduled_handlers: Vec<Id>,
     completed_handlers: Vec<Id>,
     /// Drawables `-presentDrawable:` asked for, presented once the work is done.
@@ -132,6 +134,7 @@ pub(crate) struct Submission {
     descriptor_pools: Vec<vk::DescriptorPool>,
     retained: Vec<usize>,
     framebuffers: Vec<vk::Framebuffer>,
+    captures: Vec<crate::capture::Capture>,
     completed_handlers: Vec<usize>,
     presents: Vec<usize>,
     object: usize,
@@ -162,6 +165,10 @@ pub(crate) struct Encoder {
     /// Resolves a subpass cannot perform because the attachment has one sample,
     /// recorded as image copies once the pass has ended.
     pending_copies: Vec<PendingCopy>,
+    /// `ROSETTA3_PASS_OUT`: the attachments to read back when this pass ends,
+    /// and the ordinal the capture of this pass is named by.
+    capture_targets: Vec<crate::capture::Target>,
+    capture_pass: Option<u64>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -319,6 +326,7 @@ unsafe extern "C" fn new_command_buffer(receiver: Id, _sel: Sel) -> Id {
             descriptor_pools: Vec::new(),
             retained: Vec::new(),
             framebuffers: Vec::new(),
+            captures: Vec::new(),
             scheduled_handlers: Vec::new(),
             completed_handlers: Vec::new(),
             presents: Vec::new(),
@@ -342,6 +350,9 @@ unsafe extern "C" fn command_buffer_dealloc(receiver: Id, _sel: Sel) {
         for framebuffer in std::mem::take(&mut command.framebuffers) {
             // SAFETY: nothing was submitted, so nothing refers to it.
             unsafe { gpu.device.destroy_framebuffer(framebuffer, None) };
+        }
+        for capture in std::mem::take(&mut command.captures) {
+            gpu.destroy_buffer(capture.buffer);
         }
         for pool in std::mem::take(&mut command.descriptor_pools) {
             // SAFETY: as above.
@@ -521,6 +532,7 @@ unsafe extern "C" fn commit(receiver: Id, _sel: Sel) {
             .map(|object| object as usize)
             .collect(),
         framebuffers: std::mem::take(&mut command.framebuffers),
+        captures: std::mem::take(&mut command.captures),
         completed_handlers: std::mem::take(&mut command.completed_handlers)
             .into_iter()
             .map(|block| block as usize)
@@ -608,6 +620,7 @@ impl Submission {
         }
         // The work has completed, so everything the recording referred to and every
         // transient object it created can go.
+        crate::capture::finish(self.gpu, std::mem::take(&mut self.captures));
         for framebuffer in self.framebuffers.drain(..) {
             // SAFETY: the submission finished before this point.
             unsafe { self.gpu.device.destroy_framebuffer(framebuffer, None) };
@@ -701,6 +714,8 @@ pub(crate) fn new_encoder(command_buffer: Id, kind: Kind) -> Id {
             in_render_pass: false,
             resolve_mask: 0,
             pending_copies: Vec::new(),
+            capture_targets: Vec::new(),
+            capture_pass: None,
         },
     ))
 }
@@ -965,6 +980,20 @@ unsafe extern "C" fn end_encoding(receiver: Id, _sel: Sel) {
                     &[region],
                 )
             };
+        }
+        let targets = std::mem::take(&mut encoder.capture_targets);
+        if let Some(pass) = encoder.capture_pass.take() {
+            for target in &targets {
+                if let Some(capture) = crate::capture::record(
+                    command.gpu,
+                    command.command_buffer,
+                    pass,
+                    "post",
+                    target,
+                ) {
+                    command.captures.push(capture);
+                }
+            }
         }
     }
     encoder.barrier();
@@ -1912,6 +1941,8 @@ fn level_extent(base: u32, level: u32) -> u32 {
     (base >> level.min(31)).max(1)
 }
 
+// FIXME (ACCURACY): DONT_CARE semantics probably follow the same rule for loads as they
+// do for stores that caused us lots of problems. TODO: should we just remove DONT_CARE here?
 fn load_op(metal: u64) -> vk::AttachmentLoadOp {
     match metal {
         1 => vk::AttachmentLoadOp::LOAD,
@@ -1926,20 +1957,23 @@ fn resolves(metal: u64) -> bool {
     metal == 2 || metal == 3
 }
 
-/// What becomes of the attachment the pass rendered into.
+/// What becomes of the attachment the pass rendered into: always `STORE`,
+/// whatever `MTLStoreAction` the pass names.
 ///
-/// `MultisampleResolve` keeps only the resolved copy, so Metal is free to throw
-/// the multisampled image away and `DONT_CARE` looks like the honest
-/// translation. It is not: on the NVIDIA driver this runs on, discarding a
-/// multisampled attachment which the same subpass resolves makes the resolve
-/// write the surface's raw sample layout rather than the average - the scene
-/// comes out as one shaded pixel in every four with the rest black. Storing it
-/// costs the write-back of an attachment nothing reads again, and is correct.
-fn store_op(metal: u64) -> vk::AttachmentStoreOp {
-    match metal {
-        0 => vk::AttachmentStoreOp::DONT_CARE,
-        _ => vk::AttachmentStoreOp::STORE,
-    }
+/// Metal's `DontCare` is permission to discard, not an instruction to. On the
+/// immediate-mode GPUs Metal runs on an attachment is plain memory whose
+/// contents outlive the pass, so a game writes `DontCare` on every pass which
+/// does not need the attachment kept and then reads that same texture later,
+/// and it works. Vulkan's `DONT_CARE` is not a hint: on the NVIDIA driver this
+/// runs on it invalidates the surface's compression metadata, and what the
+/// texture then reads back as is a sparse, dithered version of whatever it held
+/// before.
+///
+/// Storing costs the write-back of an attachment nothing reads again. It was
+/// not measurable: at a matched 9,070 draws a second that scene spends 388 ms
+/// of device time a second of wall clock discarding and 389 ms storing.
+fn store_op() -> vk::AttachmentStoreOp {
+    vk::AttachmentStoreOp::STORE
 }
 
 /// Where one colour attachment is resolved to, when the store action asks for
@@ -2000,6 +2034,7 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
     let mut resolve_views = Vec::new();
     let mut resolve_mask = 0u32;
     let mut copies: Vec<PendingCopy> = Vec::new();
+    let mut capture_targets: Vec<crate::capture::Target> = Vec::new();
     let mut clears = Vec::new();
     let mut width = u32::MAX;
     let mut height = u32::MAX;
@@ -2023,11 +2058,8 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
         // Where the attachment has one sample the same store action means a
         // plain copy, which is recorded once the pass has ended.
         let subpass_resolve = resolve.as_ref().filter(|_| multisampled);
-        key.colors.push((
-            format,
-            load_op(color.load_action),
-            store_op(color.store_action),
-        ));
+        key.colors
+            .push((format, load_op(color.load_action), store_op()));
         key.color_resolves
             .push(subpass_resolve.map(|target| target.format));
         if let Some(target) = &resolve {
@@ -2048,6 +2080,30 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
                     aspect: vk::ImageAspectFlags::COLOR,
                 });
             }
+        }
+        capture_targets.push(crate::capture::Target {
+            image: source_image,
+            aspect: vk::ImageAspectFlags::COLOR,
+            level,
+            slice: color.slice as u32,
+            width: level_extent(base_width, level),
+            height: level_extent(base_height, level),
+            format,
+            samples: texture.image.samples,
+            role: format!("c{}", key.colors.len() - 1),
+        });
+        if let Some(target) = &resolve {
+            capture_targets.push(crate::capture::Target {
+                image: target.image,
+                aspect: vk::ImageAspectFlags::COLOR,
+                level: target.level,
+                slice: target.slice,
+                width: level_extent(base_width, level),
+                height: level_extent(base_height, level),
+                format: target.format,
+                samples: vk::SampleCountFlags::TYPE_1,
+                role: format!("r{}", key.colors.len() - 1),
+            });
         }
         clears.push(vk::ClearValue {
             color: vk::ClearColorValue {
@@ -2076,13 +2132,10 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
         key.depth = Some((
             texture.image.format,
             load_op(attachment.load_action),
-            store_op(attachment.store_action),
+            store_op(),
         ));
         if !descriptor.stencil.texture.is_null() {
-            key.stencil = Some((
-                load_op(descriptor.stencil.load_action),
-                store_op(descriptor.stencil.store_action),
-            ));
+            key.stencil = Some((load_op(descriptor.stencil.load_action), store_op()));
         }
         // FIXME (ACCURACY): a depth or stencil resolve is not performed. Vulkan
         // spells it as a subpass extension read through `vkCreateRenderPass2`,
@@ -2102,6 +2155,17 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
         });
         width = width.min(level_extent(texture.image.width, level));
         height = height.min(level_extent(texture.image.height, level));
+        capture_targets.push(crate::capture::Target {
+            image: texture.image.image,
+            aspect: vk::ImageAspectFlags::DEPTH,
+            level,
+            slice: attachment.slice as u32,
+            width: level_extent(texture.image.width, level),
+            height: level_extent(texture.image.height, level),
+            format: texture.image.format,
+            samples: texture.image.samples,
+            role: "d".to_owned(),
+        });
         textures.push(attachment.texture);
     }
     if views.is_empty() {
@@ -2130,6 +2194,16 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
         extent: vk::Extent2D { width, height },
     };
     trace_pass(&key, width, height);
+    encoder.capture_pass = crate::capture::claim();
+    if let Some(pass) = encoder.capture_pass {
+        for target in &capture_targets {
+            if let Some(capture) =
+                crate::capture::record(gpu, command.command_buffer, pass, "pre", target)
+            {
+                command.captures.push(capture);
+            }
+        }
+    }
     let begin = vk::RenderPassBeginInfo::default()
         .render_pass(pass)
         .framebuffer(framebuffer)
@@ -2172,6 +2246,7 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
     encoder.in_render_pass = true;
     encoder.resolve_mask = resolve_mask;
     encoder.pending_copies = copies;
+    encoder.capture_targets = capture_targets;
 }
 
 // ------------------------------------- MTLRenderPassDescriptor and encoders

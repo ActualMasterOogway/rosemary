@@ -7,6 +7,7 @@
 
 #![allow(non_snake_case)]
 
+mod capture;
 mod completion;
 mod encoder;
 mod gpu;
