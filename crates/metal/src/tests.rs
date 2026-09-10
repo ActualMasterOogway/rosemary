@@ -60,6 +60,8 @@ fn device_registers_the_metal_object_graph() {
             c"R3MTLCommandEncoder",
             "drawPrimitives:vertexStart:vertexCount:instanceCount:",
         ),
+        (c"R3MTLCommandBuffer", "GPUStartTime"),
+        (c"R3MTLCommandBuffer", "GPUEndTime"),
         (c"MTLRenderPassDescriptor", "colorAttachments"),
         (c"MTLRenderPipelineDescriptor", "setVertexFunction:"),
         (c"MTLSamplerDescriptor", "setMinFilter:"),
@@ -206,11 +208,17 @@ fn a_translated_kernel_runs_on_the_gpu() {
         set_buffer_at(encoder, buffer, 0, 0);
         dispatch(encoder, 1);
         send_void(encoder, "endEncoding");
+        assert_eq!(send_double(command, "GPUStartTime"), 0.0);
+        assert_eq!(send_double(command, "GPUEndTime"), 0.0);
         send_void(command, "commit");
         send_void(command, "waitUntilCompleted");
 
         let contents = object::body::<resource::Buffer>(buffer).inner.contents;
         assert_eq!(std::ptr::read(contents as *const u32), 42);
+        let start = send_double(command, "GPUStartTime");
+        let end = send_double(command, "GPUEndTime");
+        assert!(start > 0.0);
+        assert!(end >= start);
     }
 }
 
@@ -248,6 +256,22 @@ unsafe fn send_void(receiver: Id, selector: &str) {
         unsafe { std::mem::transmute(method.implementation()) };
     // SAFETY: as above.
     unsafe { call(receiver, sel) };
+}
+
+/// # Safety
+///
+/// `receiver` must implement `selector` as `double (id, SEL)`.
+unsafe fn send_double(receiver: Id, selector: &str) -> f64 {
+    let sel = objc::sel::get(selector);
+    // SAFETY: an object the runtime allocated.
+    let method = unsafe { objc::object::class_of(receiver) }
+        .and_then(|class| class.method(sel))
+        .expect("the selector is registered");
+    // SAFETY: the caller guarantees the signature.
+    let call: unsafe extern "C" fn(Id, Sel) -> f64 =
+        unsafe { std::mem::transmute(method.implementation()) };
+    // SAFETY: as above.
+    unsafe { call(receiver, sel) }
 }
 
 /// # Safety

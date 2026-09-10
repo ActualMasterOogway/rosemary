@@ -32,9 +32,10 @@ pub struct Gpu {
     /// memory type depends on what a buffer's requirements admit.
     buffers: OnceLock<Heap>,
     /// Two-timestamp query pools, one per command buffer in flight, kept for
-    /// reuse. Only under `ROSETTA3_METAL_STATS`.
+    /// reuse by command-buffer timing and the optional statistics.
     timestamp_pools: Mutex<Vec<vk::QueryPool>>,
     timestamp_period: f32,
+    timestamp_valid_bits: u32,
 }
 
 struct Immediate {
@@ -136,6 +137,7 @@ impl Gpu {
             buffers: OnceLock::new(),
             timestamp_pools: Mutex::new(Vec::new()),
             timestamp_period: properties.limits.timestamp_period,
+            timestamp_valid_bits: families[queue_family as usize].timestamp_valid_bits,
         })
     }
 
@@ -684,9 +686,9 @@ impl Gpu {
     }
 
     /// A pool of two timestamps for one command buffer, or a null handle where
-    /// the statistics are off or the device cannot time a queue.
+    /// the device cannot time this queue.
     pub fn timestamp_pool(&self) -> vk::QueryPool {
-        if !crate::stats::enabled() || self.timestamp_period == 0.0 {
+        if self.timestamp_period == 0.0 || self.timestamp_valid_bits == 0 {
             return vk::QueryPool::null();
         }
         let mut pools = self.timestamp_pools.lock().expect("timestamp pools");
@@ -713,6 +715,10 @@ impl Gpu {
 
     pub fn timestamp_period(&self) -> f64 {
         f64::from(self.timestamp_period)
+    }
+
+    pub fn timestamp_valid_bits(&self) -> u32 {
+        self.timestamp_valid_bits
     }
 
     /// Destroy an image this device made. The caller must have waited for

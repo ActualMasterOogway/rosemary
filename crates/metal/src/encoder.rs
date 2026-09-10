@@ -47,9 +47,8 @@ pub(crate) struct CommandQueue {
 
 pub(crate) struct CommandBuffer {
     pub gpu: &'static Gpu,
-    /// Two timestamps around the whole recording, under `ROSETTA3_METAL_STATS`.
-    /// Whether a frame is waiting for the device or for this runtime is a
-    /// question only the device can answer.
+    /// Two timestamps around the whole recording. They back `gpuStartTime`
+    /// and `gpuEndTime`, and also the optional GPU-time statistic.
     timestamps: vk::QueryPool,
     pub queue: Id,
     pub pool: vk::CommandPool,
@@ -68,31 +67,57 @@ pub(crate) struct CommandBuffer {
 }
 
 struct CommandCompletion {
-    status: Mutex<u64>,
+    state: Mutex<CommandState>,
     changed: Condvar,
+}
+
+#[derive(Default)]
+struct CommandState {
+    status: u64,
+    gpu_start_time: f64,
+    gpu_end_time: f64,
 }
 
 impl CommandCompletion {
     fn new() -> Self {
         Self {
-            status: Mutex::new(0),
+            state: Mutex::new(CommandState::default()),
             changed: Condvar::new(),
         }
     }
 
     fn get(&self) -> u64 {
-        *self.status.lock().expect("Metal command status")
+        self.state.lock().expect("Metal command state").status
     }
 
     fn set(&self, status: u64) {
-        *self.status.lock().expect("Metal command status") = status;
+        self.state.lock().expect("Metal command state").status = status;
         self.changed.notify_all();
     }
 
+    fn finish(&self, status: u64, gpu_times: Option<(f64, f64)>) {
+        let mut state = self.state.lock().expect("Metal command state");
+        if let Some((start, end)) = gpu_times {
+            state.gpu_start_time = start;
+            state.gpu_end_time = end;
+        }
+        state.status = status;
+        self.changed.notify_all();
+    }
+
+    fn gpu_time(&self, end: bool) -> f64 {
+        let state = self.state.lock().expect("Metal command state");
+        if end {
+            state.gpu_end_time
+        } else {
+            state.gpu_start_time
+        }
+    }
+
     fn wait_for(&self, predicate: impl Fn(u64) -> bool) {
-        let mut status = self.status.lock().expect("Metal command status");
-        while !predicate(*status) {
-            status = self.changed.wait(status).expect("Metal command status");
+        let mut state = self.state.lock().expect("Metal command state");
+        while !predicate(state.status) {
+            state = self.changed.wait(state).expect("Metal command state");
         }
     }
 }
@@ -111,6 +136,9 @@ pub(crate) struct Submission {
     presents: Vec<usize>,
     object: usize,
     completion: Arc<CommandCompletion>,
+    /// Host time when Vulkan accepted this submission, used if this queue has
+    /// no device timestamps or reading them fails.
+    scheduled_time: f64,
 }
 
 pub(crate) struct Encoder {
@@ -424,6 +452,20 @@ unsafe extern "C" fn command_buffer_status(receiver: Id, _sel: Sel) -> u64 {
         .get()
 }
 
+unsafe extern "C" fn command_buffer_gpu_start_time(receiver: Id, _sel: Sel) -> f64 {
+    // SAFETY: as above.
+    unsafe { object::body::<CommandBuffer>(receiver) }
+        .completion
+        .gpu_time(false)
+}
+
+unsafe extern "C" fn command_buffer_gpu_end_time(receiver: Id, _sel: Sel) -> f64 {
+    // SAFETY: as above.
+    unsafe { object::body::<CommandBuffer>(receiver) }
+        .completion
+        .gpu_time(true)
+}
+
 unsafe extern "C" fn add_handler(receiver: Id, sel: Sel, block: Id) {
     // SAFETY: as above.
     let command = unsafe { object::body::<CommandBuffer>(receiver) };
@@ -489,6 +531,7 @@ unsafe extern "C" fn commit(receiver: Id, _sel: Sel) {
             .collect(),
         object: objc::arc::retain(receiver) as usize,
         completion: Arc::clone(&command.completion),
+        scheduled_time: 0.0,
     });
     let completion = Arc::clone(&command.completion);
     let submitted = stats::timed(Counter::SubmitMicros, || {
@@ -499,6 +542,8 @@ unsafe extern "C" fn commit(receiver: Id, _sel: Sel) {
                 // handler worker, and `receiver` is live during this call.
                 unsafe { crate::completion::deliver(block, receiver) };
             }
+            let pending = submission.as_mut().expect("pending submission");
+            pending.scheduled_time = darwin::mach::media_time();
             crate::submission::submit(submission.take().expect("pending submission"));
         })
     });
@@ -528,6 +573,7 @@ impl Submission {
         if let Err(reason) = &result {
             gpu::trace(format!("command buffer completion failed: {reason}"));
         }
+        let mut gpu_times = None;
         if result.is_ok() && self.timestamps != vk::QueryPool::null() {
             let mut ticks = [0u64; 2];
             // SAFETY: the submission completed, so both queries have results.
@@ -540,10 +586,20 @@ impl Submission {
                 )
             };
             if read.is_ok() {
-                let nanoseconds =
-                    ticks[1].saturating_sub(ticks[0]) as f64 * self.gpu.timestamp_period();
-                stats::add(Counter::GpuMicros, (nanoseconds / 1000.0) as u64);
+                let elapsed = timestamp_delta(ticks[0], ticks[1], self.gpu.timestamp_valid_bits())
+                    as f64
+                    * self.gpu.timestamp_period()
+                    / 1e9;
+                let end = darwin::mach::media_time();
+                gpu_times = Some((end - elapsed, end));
+                if stats::enabled() {
+                    stats::add(Counter::GpuMicros, (elapsed * 1e6) as u64);
+                }
             }
+        }
+        if result.is_ok() && gpu_times.is_none() {
+            let end = darwin::mach::media_time();
+            gpu_times = Some((self.scheduled_time.min(end), end));
         }
         self.gpu.release_timestamp_pool(self.timestamps);
         for drawable in self.presents.drain(..).map(|drawable| drawable as Id) {
@@ -571,7 +627,8 @@ impl Submission {
             self.gpu.device.destroy_command_pool(self.pool, None);
             self.gpu.device.destroy_fence(self.fence, None);
         }
-        self.completion.set(if result.is_ok() { 4 } else { 5 });
+        self.completion
+            .finish(if result.is_ok() { 4 } else { 5 }, gpu_times);
         let object = self.object as Id;
         for block in self.completed_handlers.drain(..).map(|block| block as Id) {
             // SAFETY: `objc_retainBlock` returned a live block, whose reference this
@@ -580,6 +637,14 @@ impl Submission {
         }
         objc::arc::release(object);
     }
+}
+
+fn timestamp_delta(start: u64, end: u64, valid_bits: u32) -> u64 {
+    let mask = match valid_bits {
+        64.. => u64::MAX,
+        bits => (1u64 << bits) - 1,
+    };
+    end.wrapping_sub(start) & mask
 }
 
 unsafe extern "C" fn wait_until_completed(receiver: Id, _sel: Sel) {
@@ -2341,6 +2406,8 @@ pub(crate) fn install() {
     methods!(command, {
         "commandQueue" => command_buffer_queue, c"@16@0:8";
         "status" => command_buffer_status, c"Q16@0:8";
+        "GPUStartTime" => command_buffer_gpu_start_time, c"d16@0:8";
+        "GPUEndTime" => command_buffer_gpu_end_time, c"d16@0:8";
         "addScheduledHandler:" => add_handler, c"v24@0:8@?16";
         "addCompletedHandler:" => add_handler, c"v24@0:8@?16";
         "commit" => commit, c"v16@0:8";

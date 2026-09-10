@@ -106,12 +106,17 @@ unsafe extern "C" fn timebase_info(info: *mut c_void) -> i32 {
     0
 }
 
+/// Host time in seconds on the same timeline as guest `mach_absolute_time`.
+pub fn media_time() -> f64 {
+    nanoseconds(libc::CLOCK_MONOTONIC) as f64 / 1e9
+}
+
 /// `CACurrentMediaTime`, which is `mach_absolute_time` in seconds.
 ///
 /// Not Mach's, but the same clock read through a different framework, and a
 /// guest that mixes the two must see one timeline.
 unsafe extern "C" fn current_media_time() -> f64 {
-    nanoseconds(libc::CLOCK_MONOTONIC) as f64 / 1e9
+    media_time()
 }
 
 /// Empty on macOS, where the host's own Mach is the guest's.
