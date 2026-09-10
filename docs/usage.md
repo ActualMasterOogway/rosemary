@@ -20,6 +20,13 @@ Rosetta 3 has a built in GUI that can be toggled with `SHIFT` + `F7`. This GUI s
 
 ## Execution modes
 
+`rosetta3 run --objc-debug <mach-o> [args...]` enables expensive, fail-fast
+checks in the built-in Objective-C runtime. It adds allocation tail guards,
+quarantines finalized objects, and validates reference counting, weak slots,
+autorelease pools, synchronization, selectors, and class handles. The option
+requires `ROSETTA3_OBJC=builtin`; it is intended for diagnosis rather than
+normal execution and can substantially increase memory use.
+
 Rosetta 3 has two execution modes currently:
 
 * native - which runs the app natively if it has a slice for your CPU
