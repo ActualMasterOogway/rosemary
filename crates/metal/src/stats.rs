@@ -114,4 +114,23 @@ pub fn tick() {
         .collect::<Vec<_>>()
         .join(" ");
     eprintln!("rosetta3: Metal: stats {line}");
+    report_shader_cache();
+}
+
+/// The on-disk shader cache, as totals rather than as a rate.
+///
+/// Libraries are loaded in a burst at startup and almost never afterwards, so
+/// a per-second figure for them is zero for the whole of a run. What is worth
+/// seeing is how much of the pack a launch translated and how much it read
+/// back: a run whose misses do not fall to zero on the second launch has a
+/// cache it cannot write.
+fn report_shader_cache() {
+    let cache = metal_translate::cache::stats();
+    if cache == metal_translate::cache::Stats::default() {
+        return;
+    }
+    eprintln!(
+        "rosetta3: Metal: shader cache total hits={} misses={} writes={} errors={}",
+        cache.hits, cache.misses, cache.writes, cache.errors
+    );
 }

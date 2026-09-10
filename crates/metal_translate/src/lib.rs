@@ -5,17 +5,20 @@
 //! properties of the input program.
 
 pub mod air;
+pub mod cache;
 pub mod ir;
 pub mod msl;
+mod sha256;
 pub mod spirv;
 
 use std::fmt;
 
 pub use air::{AirInput, parse_air};
+pub use cache::{CACHE_VERSION, translate_cached, translate_msl_cached};
 pub use msl::parse_msl;
 pub use spirv::{
-    EntryArtifact, ResourceBinding, TargetProfile, TranslatedLibrary, WORKGROUP_SIZE_SPEC_IDS,
-    emit_spirv,
+    EntryArtifact, RequiredFeatures, ResourceBinding, TargetProfile, TranslatedLibrary,
+    WORKGROUP_SIZE_SPEC_IDS, emit_spirv,
 };
 
 /// The phase which reported a translation diagnostic.

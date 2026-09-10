@@ -448,7 +448,7 @@ unsafe extern "C" fn new_library_with_data(
         return std::ptr::null_mut();
     };
     let translated =
-        match metal_translate::translate(metal_translate::AirInput::Bitcode(air), target) {
+        match metal_translate::translate_cached(metal_translate::AirInput::Bitcode(air), target) {
             Ok(translated) => translated,
             Err(error) => {
                 report_library_error(error);
@@ -502,7 +502,7 @@ unsafe extern "C" fn new_library_with_source(
         return fail_library(error, "Metal source is not valid UTF-8");
     };
     report_source_library(source);
-    let translated = match metal_translate::translate_msl(source, target) {
+    let translated = match metal_translate::translate_msl_cached(source, target) {
         Ok(translated) => translated,
         Err(translation_error) => return fail_library(error, &translation_error.to_string()),
     };
