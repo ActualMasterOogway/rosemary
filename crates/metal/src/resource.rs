@@ -843,8 +843,16 @@ unsafe extern "C" fn vertex_descriptor_init(receiver: Id, _sel: Sel) -> Id {
     let descriptor = unsafe { object::body::<VertexDescriptor>(receiver) };
     descriptor.layouts = [VertexLayout::default(); VERTEX_SLOTS];
     descriptor.attributes = [VertexAttribute::default(); VERTEX_SLOTS];
-    descriptor.layout_objects = std::ptr::null_mut();
-    descriptor.attribute_objects = std::ptr::null_mut();
+    // `-init` is `-reset` here, and a reset descriptor still owns whatever a
+    // previous one vended.
+    objc::arc::release(std::mem::replace(
+        &mut descriptor.layout_objects,
+        std::ptr::null_mut(),
+    ));
+    objc::arc::release(std::mem::replace(
+        &mut descriptor.attribute_objects,
+        std::ptr::null_mut(),
+    ));
     receiver
 }
 
@@ -897,6 +905,36 @@ unsafe extern "C" fn indexed_element(receiver: Id, _sel: Sel, index: usize) -> I
         .get(index)
         .copied()
         .unwrap_or(std::ptr::null_mut())
+}
+
+/// `-[R3MTLIndexedCollection dealloc]`: the elements are the collection's own.
+///
+/// Metal vends `-colorAttachments`, `-layouts` and `-attributes` as objects a
+/// game subscripts and mutates in place, so the descriptor which made one holds
+/// it and each element it contains. Without this every render pass descriptor a
+/// frame created left its eight attachment objects behind.
+unsafe extern "C" fn collection_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a collection of this crate's.
+    let collection = unsafe { object::body::<IndexedCollection>(receiver) };
+    for element in std::mem::take(&mut collection.elements) {
+        objc::arc::release(element);
+    }
+    objc::arc::finalize(receiver);
+}
+
+/// `-[MTLVertexDescriptor dealloc]`.
+unsafe extern "C" fn vertex_descriptor_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a vertex descriptor of this crate's.
+    let descriptor = unsafe { object::body::<VertexDescriptor>(receiver) };
+    objc::arc::release(std::mem::replace(
+        &mut descriptor.layout_objects,
+        std::ptr::null_mut(),
+    ));
+    objc::arc::release(std::mem::replace(
+        &mut descriptor.attribute_objects,
+        std::ptr::null_mut(),
+    ));
+    objc::arc::finalize(receiver);
 }
 
 unsafe extern "C" fn set_vertex_element_value(receiver: Id, sel: Sel, value: u64) {
@@ -1056,9 +1094,11 @@ pub(crate) fn install() {
         "init" => vertex_descriptor_init, c"@16@0:8";
         "layouts" => vertex_layouts, c"@16@0:8";
         "attributes" => vertex_attributes, c"@16@0:8";
+        "dealloc" => vertex_descriptor_dealloc, c"v16@0:8";
     });
     methods!(collection, {
         "objectAtIndexedSubscript:" => indexed_element, c"@24@0:8Q16";
+        "dealloc" => collection_dealloc, c"v16@0:8";
     });
     for selector in [
         "setStride:",

@@ -204,6 +204,14 @@ pub(crate) fn new_command_queue(gpu: &'static Gpu, device: Id) -> Id {
     )
 }
 
+/// `-[MTLCommandQueue dealloc]`.
+unsafe extern "C" fn queue_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a command queue of this crate's.
+    let queue = unsafe { object::body::<CommandQueue>(receiver) };
+    objc::arc::release(std::mem::replace(&mut queue.device, std::ptr::null_mut()));
+    objc::arc::finalize(receiver);
+}
+
 unsafe extern "C" fn queue_device(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: a command queue of this crate's.
     unsafe { object::body::<CommandQueue>(receiver) }.device
@@ -269,7 +277,9 @@ unsafe extern "C" fn new_command_buffer(receiver: Id, _sel: Sel) -> Id {
         }
     }
     stats::count(Counter::CommandBuffers);
-    object::make(
+    // `-commandBuffer` owns nothing it hands back: Metal vends an autoreleased
+    // command buffer, and a guest which keeps one retains it itself.
+    objc::arc::autorelease(object::make(
         c"R3MTLCommandBuffer",
         CommandBuffer {
             gpu,
@@ -287,7 +297,57 @@ unsafe extern "C" fn new_command_buffer(receiver: Id, _sel: Sel) -> Id {
             completion: Arc::new(CommandCompletion::new()),
             recording: true,
         },
-    )
+    ))
+}
+
+/// `-[MTLCommandBuffer dealloc]`.
+///
+/// A committed command buffer gave everything it held to its [`Submission`],
+/// which retires it; what is left here belongs to one which was never
+/// committed, and to the queue every command buffer retains.
+unsafe extern "C" fn command_buffer_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a command buffer of this crate's.
+    let command = unsafe { object::body::<CommandBuffer>(receiver) };
+    let gpu = command.gpu;
+    if command.recording {
+        command.recording = false;
+        for framebuffer in std::mem::take(&mut command.framebuffers) {
+            // SAFETY: nothing was submitted, so nothing refers to it.
+            unsafe { gpu.device.destroy_framebuffer(framebuffer, None) };
+        }
+        for pool in std::mem::take(&mut command.descriptor_pools) {
+            // SAFETY: as above.
+            unsafe { gpu.device.destroy_descriptor_pool(pool, None) };
+        }
+        // SAFETY: as above.
+        unsafe {
+            gpu.device
+                .free_command_buffers(command.pool, &[command.command_buffer]);
+            gpu.device.destroy_command_pool(command.pool, None);
+            gpu.device.destroy_fence(command.fence, None);
+        }
+        gpu.release_timestamp_pool(std::mem::replace(
+            &mut command.timestamps,
+            vk::QueryPool::null(),
+        ));
+        for object in std::mem::take(&mut command.retained) {
+            objc::arc::release(object);
+        }
+        for drawable in std::mem::take(&mut command.presents) {
+            objc::arc::release(drawable);
+        }
+        for block in std::mem::take(&mut command.scheduled_handlers) {
+            objc::block::release(block);
+        }
+        for block in std::mem::take(&mut command.completed_handlers) {
+            objc::block::release(block);
+        }
+    }
+    objc::arc::release(std::mem::replace(&mut command.queue, std::ptr::null_mut()));
+    // The `Arc` in the body is Rust's, and nothing else here owns memory.
+    // SAFETY: the body was established by `object::make` and is not read again.
+    unsafe { std::ptr::drop_in_place(command as *mut CommandBuffer) };
+    objc::arc::finalize(receiver);
 }
 
 // -------------------------------------------------------- command buffer
@@ -554,10 +614,13 @@ unsafe extern "C" fn present_drawable_at_time(receiver: Id, sel: Sel, drawable: 
 
 pub(crate) fn new_encoder(command_buffer: Id, kind: Kind) -> Id {
     stats::count(Counter::Encoders);
-    object::make(
+    // An encoder is vended autoreleased, as Metal vends one, and reads its
+    // command buffer for as long as it lives - so it holds a reference to it
+    // rather than trusting the guest to outlive the encoder it made.
+    objc::arc::autorelease(object::make(
         c"R3MTLCommandEncoder",
         Encoder {
-            command_buffer,
+            command_buffer: objc::arc::retain(command_buffer),
             kind,
             compute_pipeline: std::ptr::null_mut(),
             render_pipeline: std::ptr::null_mut(),
@@ -574,7 +637,24 @@ pub(crate) fn new_encoder(command_buffer: Id, kind: Kind) -> Id {
             resolve_mask: 0,
             pending_copies: Vec::new(),
         },
-    )
+    ))
+}
+
+/// `-[MTLCommandEncoder dealloc]`.
+///
+/// An encoder binds nothing of its own: the command buffer retains every
+/// resource bound through it, because that is the object whose recording still
+/// refers to them. What is left is the reference to that command buffer.
+unsafe extern "C" fn encoder_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: an encoder of this crate's.
+    let encoder = unsafe { object::body::<Encoder>(receiver) };
+    objc::arc::release(std::mem::replace(
+        &mut encoder.command_buffer,
+        std::ptr::null_mut(),
+    ));
+    // SAFETY: the body was established by `object::make` and is not read again.
+    unsafe { std::ptr::drop_in_place(encoder as *mut Encoder) };
+    objc::arc::finalize(receiver);
 }
 
 fn stage_slot(stage: Stage) -> usize {
@@ -2032,9 +2112,50 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
 // ------------------------------------- MTLRenderPassDescriptor and encoders
 
 unsafe extern "C" fn render_pass_descriptor_init(receiver: Id, _sel: Sel) -> Id {
-    // SAFETY: a freshly allocated render pass descriptor.
+    // SAFETY: a render pass descriptor of this crate's. `-init` reaches a fresh
+    // one, whose body is zero, and a reused one, which still owns what it holds.
+    unsafe { release_pass_contents(receiver) };
+    // SAFETY: as above.
     *unsafe { object::body::<RenderPassDescriptor>(receiver) } = RenderPassDescriptor::default();
     receiver
+}
+
+/// Give up every reference a render pass descriptor holds, leaving it null.
+///
+/// # Safety
+///
+/// `receiver` must be a `MTLRenderPassDescriptor` of this crate's.
+unsafe fn release_pass_contents(receiver: Id) {
+    // SAFETY: the caller's obligation.
+    let descriptor = unsafe { object::body::<RenderPassDescriptor>(receiver) };
+    let mut attachments: Vec<&mut AttachmentDescriptor> = descriptor.colors.iter_mut().collect();
+    attachments.push(&mut descriptor.depth);
+    attachments.push(&mut descriptor.stencil);
+    for attachment in attachments {
+        objc::arc::release(std::mem::replace(
+            &mut attachment.texture,
+            std::ptr::null_mut(),
+        ));
+        objc::arc::release(std::mem::replace(
+            &mut attachment.resolve_texture,
+            std::ptr::null_mut(),
+        ));
+    }
+    for slot in [
+        &mut descriptor.color_objects,
+        &mut descriptor.depth_object,
+        &mut descriptor.stencil_object,
+        &mut descriptor.visibility_result_buffer,
+    ] {
+        objc::arc::release(std::mem::replace(slot, std::ptr::null_mut()));
+    }
+}
+
+/// `-[MTLRenderPassDescriptor dealloc]`.
+unsafe extern "C" fn render_pass_descriptor_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a render pass descriptor of this crate's.
+    unsafe { release_pass_contents(receiver) };
+    objc::arc::finalize(receiver);
 }
 
 unsafe extern "C" fn pass_visibility_result_buffer(receiver: Id, _sel: Sel) -> Id {
@@ -2148,11 +2269,12 @@ unsafe extern "C" fn pass_single_attachment(receiver: Id, sel: Sel) -> Id {
 unsafe extern "C" fn set_attachment_object(receiver: Id, sel: Sel, value: Id) {
     let attachment = attachment_of(receiver);
     // SAFETY: a selector the runtime owns.
-    match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
-        b"setTexture:" => attachment.texture = objc::arc::retain(value),
-        b"setResolveTexture:" => attachment.resolve_texture = objc::arc::retain(value),
-        _ => (),
-    }
+    let slot = match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
+        b"setTexture:" => &mut attachment.texture,
+        b"setResolveTexture:" => &mut attachment.resolve_texture,
+        _ => return,
+    };
+    objc::arc::release(std::mem::replace(slot, objc::arc::retain(value)));
 }
 
 unsafe extern "C" fn set_attachment_number(receiver: Id, sel: Sel, value: u64) {
@@ -2210,6 +2332,7 @@ pub(crate) fn install() {
     methods!(queue, {
         "device" => queue_device, c"@16@0:8";
         "commandBuffer" => new_command_buffer, c"@16@0:8";
+        "dealloc" => queue_dealloc, c"v16@0:8";
         "commandBufferWithUnretainedReferences" => new_command_buffer, c"@16@0:8";
         "setLabel:" => crate::no_op, c"v24@0:8@16";
     });
@@ -2221,6 +2344,7 @@ pub(crate) fn install() {
         "addScheduledHandler:" => add_handler, c"v24@0:8@?16";
         "addCompletedHandler:" => add_handler, c"v24@0:8@?16";
         "commit" => commit, c"v16@0:8";
+        "dealloc" => command_buffer_dealloc, c"v16@0:8";
         "waitUntilCompleted" => wait_until_completed, c"v16@0:8";
         "waitUntilScheduled" => wait_until_scheduled, c"v16@0:8";
         "enqueue" => crate::no_op, c"v16@0:8";
@@ -2232,6 +2356,7 @@ pub(crate) fn install() {
     let encoder = objc::class::lookup(c"R3MTLCommandEncoder").expect("just registered");
     methods!(encoder, {
         "endEncoding" => end_encoding, c"v16@0:8";
+        "dealloc" => encoder_dealloc, c"v16@0:8";
         "setComputePipelineState:" => set_compute_pipeline, c"v24@0:8@16";
         "setRenderPipelineState:" => set_render_pipeline, c"v24@0:8@16";
         "setDepthStencilState:" => set_depth_stencil_state, c"v24@0:8@16";
@@ -2283,6 +2408,7 @@ pub(crate) fn install() {
     );
     methods!(pass, {
         "init" => render_pass_descriptor_init, c"@16@0:8";
+        "dealloc" => render_pass_descriptor_dealloc, c"v16@0:8";
         "colorAttachments" => pass_color_attachments, c"@16@0:8";
         "depthAttachment" => pass_single_attachment, c"@16@0:8";
         "stencilAttachment" => pass_single_attachment, c"@16@0:8";

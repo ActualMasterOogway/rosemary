@@ -708,7 +708,10 @@ pub(crate) struct ColorElement {
 }
 
 unsafe extern "C" fn descriptor_init(receiver: Id, _sel: Sel) -> Id {
-    // SAFETY: a freshly allocated render pipeline descriptor.
+    // SAFETY: a render pipeline descriptor of this crate's. This is `-reset`
+    // as well as `-init`, and a reset descriptor still owns what it holds.
+    unsafe { release_descriptor_contents(receiver) };
+    // SAFETY: as above.
     *unsafe { object::body::<RenderPipelineDescriptor>(receiver) } = RenderPipelineDescriptor {
         vertex_function: std::ptr::null_mut(),
         fragment_function: std::ptr::null_mut(),
@@ -723,16 +726,42 @@ unsafe extern "C" fn descriptor_init(receiver: Id, _sel: Sel) -> Id {
     receiver
 }
 
+/// Give up every reference a render pipeline descriptor holds.
+///
+/// # Safety
+///
+/// `receiver` must be a `MTLRenderPipelineDescriptor` of this crate's.
+unsafe fn release_descriptor_contents(receiver: Id) {
+    // SAFETY: the caller's obligation.
+    let descriptor = unsafe { object::body::<RenderPipelineDescriptor>(receiver) };
+    for slot in [
+        &mut descriptor.vertex_function,
+        &mut descriptor.fragment_function,
+        &mut descriptor.vertex_descriptor,
+        &mut descriptor.color_objects,
+    ] {
+        objc::arc::release(std::mem::replace(slot, std::ptr::null_mut()));
+    }
+}
+
+/// `-[MTLRenderPipelineDescriptor dealloc]`.
+unsafe extern "C" fn descriptor_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a render pipeline descriptor of this crate's.
+    unsafe { release_descriptor_contents(receiver) };
+    objc::arc::finalize(receiver);
+}
+
 unsafe extern "C" fn set_descriptor_object(receiver: Id, sel: Sel, value: Id) {
     // SAFETY: a render pipeline descriptor of this crate's.
     let descriptor = unsafe { object::body::<RenderPipelineDescriptor>(receiver) };
     // SAFETY: a selector the runtime owns.
-    match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
-        b"setVertexFunction:" => descriptor.vertex_function = objc::arc::retain(value),
-        b"setFragmentFunction:" => descriptor.fragment_function = objc::arc::retain(value),
-        b"setVertexDescriptor:" => descriptor.vertex_descriptor = objc::arc::retain(value),
-        _ => (),
-    }
+    let slot = match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
+        b"setVertexFunction:" => &mut descriptor.vertex_function,
+        b"setFragmentFunction:" => &mut descriptor.fragment_function,
+        b"setVertexDescriptor:" => &mut descriptor.vertex_descriptor,
+        _ => return,
+    };
+    objc::arc::release(std::mem::replace(slot, objc::arc::retain(value)));
 }
 
 unsafe extern "C" fn set_descriptor_number(receiver: Id, sel: Sel, value: u64) {
@@ -829,6 +858,7 @@ pub(crate) fn install() {
     methods!(descriptor, {
         "init" => descriptor_init, c"@16@0:8";
         "colorAttachments" => color_attachments, c"@16@0:8";
+        "dealloc" => descriptor_dealloc, c"v16@0:8";
         "setLabel:" => crate::no_op, c"v24@0:8@16";
         "reset" => descriptor_init, c"@16@0:8";
     });

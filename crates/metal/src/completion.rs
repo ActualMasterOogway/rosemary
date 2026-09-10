@@ -2,7 +2,7 @@
 //!
 //! Metal never calls a completion handler on the thread that committed: it calls
 //! it from the framework's own queue once the work has finished. Games rely on
-//! that. Roblox commits a command buffer while holding a renderer lock and takes
+//! that. Somee commit a command buffer while holding a renderer lock and takes
 //! the same lock in the handler, which is a plain sequential program on Apple's
 //! Metal and an instant self-deadlock if the handler runs inside `-commit`.
 //!

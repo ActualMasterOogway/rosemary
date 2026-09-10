@@ -36,6 +36,7 @@ pub fn create_instance(class: &'static Class, extra: usize) -> Id {
     unsafe { std::ptr::write_bytes(memory as *mut u8, 0, size) };
     // SAFETY: `memory` is at least one word and freshly ours.
     unsafe { *(memory as *mut *mut Class) = ptr(class) };
+    crate::census::allocated(class);
     memory
 }
 
@@ -48,6 +49,8 @@ pub unsafe fn dispose_instance(object: Id) {
     if object.is_null() {
         return;
     }
+    // SAFETY: the object is still readable, which is what names its class.
+    unsafe { crate::census::freed(object) };
     // SAFETY: the caller's obligation, and the block came from
     // [`create_instance`], which takes it from the same allocator.
     unsafe { crate::allocator::guest_free(object) }

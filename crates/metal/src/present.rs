@@ -74,7 +74,9 @@ unsafe extern "C" fn next_drawable(receiver: Id, _sel: Sel) -> Id {
     if let Some(entry) = cache.iter().find(|entry| {
         entry.layer == receiver as usize && entry.width == width && entry.height == height
     }) {
-        return entry.drawable as Id;
+        // Metal vends an autoreleased drawable; the cache's own reference is
+        // not the caller's to spend.
+        return objc::arc::autorelease(objc::arc::retain(entry.drawable as Id));
     }
     cache.retain(|entry| {
         if entry.layer != receiver as usize {
@@ -150,7 +152,9 @@ unsafe extern "C" fn next_drawable(receiver: Id, _sel: Sel) -> Id {
         height,
         drawable: drawable as usize,
     });
-    drawable
+    // The reference `object::make` returned, given to the caller as Metal gives
+    // it: autoreleased, on top of the cache's own.
+    objc::arc::autorelease(drawable)
 }
 
 unsafe extern "C" fn drawable_texture(receiver: Id, _sel: Sel) -> Id {

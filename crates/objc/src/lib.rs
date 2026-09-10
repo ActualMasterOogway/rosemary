@@ -34,6 +34,7 @@ pub mod allocator;
 pub mod api;
 pub mod arc;
 pub mod block;
+pub mod census;
 pub mod class;
 pub mod msg;
 mod nsobject;
