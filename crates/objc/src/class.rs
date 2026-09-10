@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use std::sync::{LazyLock, Mutex, RwLock};
+use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 
 use crate::sel::Sel;
 
@@ -549,4 +549,27 @@ pub fn method_implementation(class: &'static Class, sel: Sel) -> Imp {
     class
         .method(sel)
         .map_or(std::ptr::null(), |m| m.implementation())
+}
+
+/// `OS_object`: the class the runtime's own non-Objective-C objects wear.
+///
+/// Darwin's dispatch objects are Objective-C objects - `dispatch_queue_t` is
+/// `id`-compatible, and ARC emits `objc_storeStrong`, `objc_retain` and
+/// `objc_release` for one - so a guest that puts a queue in a strong variable
+/// hands it to this runtime's ARC. Reaching ARC with a null `isa` is
+/// indistinguishable from reaching it with zeroed garbage, which is what the
+/// hardening's `isa` check is there to catch; wearing a class of this
+/// runtime's own is what tells the two apart.
+///
+/// A root class with no methods is all that is needed. It carries no
+/// behaviour: a message actually sent to one of these still fails, but by
+/// selector rather than on a null `isa`.
+pub fn os_object_class() -> &'static Class {
+    static CLASS: OnceLock<&'static Class> = OnceLock::new();
+    CLASS.get_or_init(|| {
+        let class = allocate_pair(None, c"OS_object", 0)
+            .unwrap_or_else(|| crate::fail!("objc: the OS_object class name is already taken"));
+        register_pair(class);
+        class
+    })
 }

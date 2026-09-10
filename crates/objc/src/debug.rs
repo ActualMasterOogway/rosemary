@@ -425,8 +425,35 @@ pub(crate) fn pool_popped(token: *mut c_void) {
     }
 }
 
+/// Every weak slot the runtime has a registration for, and what it points at.
+///
+/// A slot with no entry is not automatically a fault: see [`require_zeroed`].
 static WEAK_SLOTS: LazyLock<Mutex<HashMap<usize, usize>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Accept an unregistered slot only when it reads as `nil`.
+///
+/// A weak slot is a word of storage, not a handle: `objc_storeWeak`,
+/// `objc_loadWeak*` and `objc_destroyWeak` are defined on any zeroed word,
+/// with no `objc_initWeak` before them. Two ordinary shapes rely on it - a
+/// `__weak` ivar or global, which is born zeroed and is never initialized
+/// explicitly, and the source slot of `objc_moveWeak`, which is left zeroed
+/// and unregistered and is then destroyed again by the scope cleanup that
+/// clang emits for the moved-from variable.
+///
+/// What is a fault is a *non-nil* word with no registration: uninitialized
+/// storage handed to the runtime, or a live weak slot copied bytewise out
+/// from under it.
+///
+/// # Safety
+///
+/// `slot` is a readable word owned by the caller.
+unsafe fn require_zeroed(slot: *mut Id, operation: &str) {
+    // SAFETY: the caller owns `slot`.
+    if !unsafe { *slot }.is_null() {
+        violation(operation, slot.cast(), "weak slot was never initialized");
+    }
+}
 
 pub(crate) fn weak_init(slot: *mut Id, object: Id) {
     if !enabled() {
@@ -449,41 +476,44 @@ pub(crate) fn weak_store(slot: *mut Id, object: Id) {
     }
     validate(object, "objc_storeWeak");
     let mut slots = WEAK_SLOTS.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(value) = slots.get_mut(&(slot as usize)) else {
-        violation(
-            "objc_storeWeak",
-            slot.cast(),
-            "weak slot was not initialized",
-        );
-    };
-    *value = object as usize;
+    if let Some(value) = slots.get_mut(&(slot as usize)) {
+        *value = object as usize;
+        return;
+    }
+    drop(slots);
+    // SAFETY: `objc_storeWeak` promises a readable word.
+    unsafe { require_zeroed(slot, "objc_storeWeak") };
+    WEAK_SLOTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(slot as usize, object as usize);
 }
 
 pub(crate) fn weak_load(slot: *mut Id, operation: &str) {
-    if enabled()
-        && !WEAK_SLOTS
+    if !enabled()
+        || WEAK_SLOTS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains_key(&(slot as usize))
     {
-        violation(operation, slot.cast(), "weak slot was not initialized");
+        return;
     }
+    // SAFETY: a weak load promises a readable word.
+    unsafe { require_zeroed(slot, operation) };
 }
 
 pub(crate) fn weak_destroy(slot: *mut Id) {
-    if enabled()
-        && WEAK_SLOTS
+    if !enabled()
+        || WEAK_SLOTS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&(slot as usize))
-            .is_none()
+            .is_some()
     {
-        violation(
-            "objc_destroyWeak",
-            slot.cast(),
-            "weak slot was not initialized",
-        );
+        return;
     }
+    // SAFETY: `objc_destroyWeak` promises a readable word.
+    unsafe { require_zeroed(slot, "objc_destroyWeak") };
 }
 
 #[cfg(test)]
@@ -535,6 +565,30 @@ mod tests {
                 crate::arc::release(object);
                 crate::arc::release(object);
             }
+            // What clang emits for a `__weak` local captured by value: the
+            // slot is moved out of, and the scope cleanup destroys it anyway.
+            "moved-weak" => {
+                let object = object(c"R3DebugMovedWeak", None);
+                let (mut from, mut to) = (std::ptr::null_mut(), std::ptr::null_mut());
+                // SAFETY: two words of this frame's own storage.
+                unsafe {
+                    crate::api::objc_initWeak(&mut from, object);
+                    crate::api::objc_moveWeak(&mut to, &mut from);
+                    crate::api::objc_destroyWeak(&mut from);
+                    crate::api::objc_destroyWeak(&mut to);
+                }
+            }
+            // A `__weak` ivar is born zeroed and never sees `objc_initWeak`.
+            "zeroed-weak" => {
+                let object = object(c"R3DebugZeroedWeak", None);
+                let mut ivar = std::ptr::null_mut();
+                // SAFETY: one word of this frame's own storage.
+                unsafe {
+                    crate::api::objc_storeWeak(&mut ivar, object);
+                    crate::api::objc_loadWeakRetained(&mut ivar);
+                    crate::api::objc_destroyWeak(&mut ivar);
+                }
+            }
             "guard" => {
                 let object = object(c"R3DebugGuard", None);
                 // SAFETY: deliberately corrupt the first debug-only guard byte.
@@ -559,8 +613,13 @@ mod tests {
                 crate::arc::pool_pop(pool);
             }
             "weak" => {
+                // A zeroed slot is legal storage for `objc_storeWeak`; garbage
+                // in the slot is what the check is for.
                 let mut slot = std::ptr::null_mut();
                 crate::arc::store_weak(&mut slot, std::ptr::null_mut());
+                crate::arc::destroy_weak(&mut slot);
+                let mut garbage = 0x10usize as Id;
+                crate::arc::destroy_weak(&mut garbage);
             }
             "property" => {
                 let object = object(c"R3DebugProperty", None);
@@ -614,11 +673,13 @@ mod tests {
         let executable = std::env::current_exe().expect("current test executable");
         for (case, expected) in [
             ("valid", None),
+            ("moved-weak", None),
+            ("zeroed-weak", None),
             ("guard", Some("tail guard")),
             ("overrelease", Some("use of finalized")),
             ("dealloc", Some("without calling super")),
             ("pool", Some("already popped")),
-            ("weak", Some("weak slot was not initialized")),
+            ("weak", Some("weak slot was never initialized")),
             ("property", Some("past the")),
             ("class", Some("invalid class handle")),
             ("selector", Some("invalid selector handle")),

@@ -30,9 +30,12 @@ pub enum Kind {
 #[repr(C)]
 pub struct Header {
     /// Where Darwin keeps the Objective-C `isa`, since its dispatch objects are
-    /// also Objective-C objects. Left null: nothing in this implementation reads
-    /// it, and a guest that sends one of these a message gets a null-`isa` crash
-    /// naming the line rather than a silent misread of the fields below.
+    /// also Objective-C objects. It has to be a real class of this runtime's:
+    /// ARC emits `objc_storeStrong` and friends for a `dispatch_queue_t`, and
+    /// the Objective-C runtime cannot tell an object with a null `isa` from a
+    /// pointer into zeroed memory. `OS_object` has no methods, so a message
+    /// actually sent to one of these still fails - by selector rather than by
+    /// misreading the fields below.
     isa: u64,
     kind: Kind,
     refs: AtomicUsize,
@@ -43,7 +46,7 @@ pub struct Header {
 impl Header {
     pub fn new(kind: Kind) -> Header {
         Header {
-            isa: 0,
+            isa: objc::class::ptr(objc::class::os_object_class()) as u64,
             kind,
             refs: AtomicUsize::new(1),
             context: AtomicU64::new(0),
@@ -193,6 +196,20 @@ mod tests {
             release(queue);
         }
         assert_eq!(FINALIZED.load(Ordering::Acquire), 77);
+    }
+
+    /// ARC reaches these objects - a guest's `dispatch_queue_t` in a strong
+    /// variable is an `objc_storeStrong` - and the Objective-C runtime reads
+    /// the first word to decide whether it has been handed an object at all.
+    #[test]
+    fn a_dispatch_object_wears_a_class_the_objc_runtime_knows() {
+        let queue = super::super::queue::create_serial("isa test");
+        // SAFETY: a live object of this module's.
+        unsafe {
+            let isa = header(queue).expect("header").isa;
+            assert!(objc::class::is_known(isa as *const objc::class::Class));
+            release(queue);
+        }
     }
 
     /// A handle of the wrong kind must be refused rather than reinterpreted.
