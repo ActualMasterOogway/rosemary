@@ -12,6 +12,11 @@ pub fn bootstrap() {
             standard_preferences as *const std::ffi::c_void,
             c"@16@0:8",
         );
+        class.replace_method(
+            objc::sel::get("setPlugInsEnabled:"),
+            set_plugins_enabled as *const std::ffi::c_void,
+            c"v20@0:8c16",
+        );
     });
 }
 
@@ -30,6 +35,13 @@ unsafe extern "C" fn standard_preferences(class: Id, _sel: Sel) -> Id {
         preferences as usize
     }) as Id
 }
+
+/// `-[WebPreferences setPlugInsEnabled:]`.
+///
+/// Web content is not implemented, so there is no plug-in subsystem to
+/// configure. Accepting the setting lets applications finish configuring the
+/// shared preferences object.
+unsafe extern "C" fn set_plugins_enabled(_receiver: Id, _sel: Sel, _enabled: u8) {}
 
 /// The Objective-C class objects exported by WebKit.framework.
 pub fn data_symbols() -> Vec<(String, u64)> {
@@ -85,6 +97,22 @@ mod tests {
         assert_eq!(first, second);
         let class = unsafe { objc::object::class_of(first) }.expect("an Objective-C object");
         assert_eq!(class.name_str(), "WebPreferences");
+    }
+
+    #[test]
+    fn accepts_enabling_and_disabling_plugins() {
+        let preferences = standard();
+        let class = unsafe { objc::object::class_of(preferences) }.expect("WebPreferences");
+        let method = class
+            .method(objc::sel::get("setPlugInsEnabled:"))
+            .expect("instance method");
+        let implementation: unsafe extern "C" fn(Id, Sel, u8) =
+            unsafe { std::mem::transmute(method.implementation()) };
+        // SAFETY: the method's encoding and implementation have this signature.
+        unsafe {
+            implementation(preferences, objc::sel::get("setPlugInsEnabled:"), 1);
+            implementation(preferences, objc::sel::get("setPlugInsEnabled:"), 0);
+        }
     }
 
     #[test]
