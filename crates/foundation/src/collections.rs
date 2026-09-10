@@ -197,6 +197,97 @@ unsafe extern "C" fn components_joined_by_string(receiver: Id, _sel: Sel, separa
     unsafe { api::CFAutorelease(joined) as Id }
 }
 
+/// One element's `-description`, for the container descriptions below.
+///
+/// The element is asked, rather than read as a string, because a container
+/// holds whatever was put in it - a number, another container - and the answer
+/// has to be that object's own text. An object that does not answer is written
+/// the way Apple writes one with no description: its class and its address.
+///
+/// # Safety
+///
+/// `object` must be null or live.
+unsafe fn describe(object: Id) -> Vec<u8> {
+    if object.is_null() {
+        return b"(null)".to_vec();
+    }
+    let sel = objc::sel::get("description");
+    // SAFETY: the caller's obligation.
+    let described = (unsafe { objc::object::class_of(object) })
+        .and_then(|class| class.method(sel))
+        .map(|_| {
+            // SAFETY: `-description` is `id (id, SEL)`.
+            unsafe {
+                let f: unsafe extern "C" fn(Id, Sel) -> Id =
+                    std::mem::transmute(objc::msg::entry());
+                f(object, sel)
+            }
+        })
+        .filter(|described| !described.is_null());
+    match described {
+        // SAFETY: a string this object just answered with.
+        Some(described) => unsafe { crate::string::bytes(described) },
+        None => {
+            // SAFETY: the caller's obligation.
+            let name = (unsafe { objc::object::class_of(object) })
+                // SAFETY: a realized class names itself with a live C string.
+                .map(|class| unsafe { std::ffi::CStr::from_ptr(class.name()) })
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| String::from("?"));
+            format!("<{name}: {object:p}>").into_bytes()
+        }
+    }
+}
+
+/// `-[NSArray description]`, in Apple's bracketed layout.
+///
+/// A program logs a container to see what is in it, so the elements are what
+/// this has to spell out; the exact whitespace is Apple's and matters to
+/// nothing, but a reader comparing a log against a Mac's should not have to
+/// translate.
+unsafe extern "C" fn array_description(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an array.
+    let Some(array) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    let mut out: Vec<u8> = b"(\n".to_vec();
+    for (i, value) in array.values.iter().enumerate() {
+        out.extend_from_slice(b"    ");
+        // SAFETY: an element of a live array.
+        out.extend_from_slice(&unsafe { describe(*value as Id) });
+        if i + 1 < array.values.len() {
+            out.push(b',');
+        }
+        out.push(b'\n');
+    }
+    out.push(b')');
+    let text = corefoundation::string::from_bytes(&out, false);
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(text) as Id }
+}
+
+/// `-[NSDictionary description]`, in Apple's braced layout.
+unsafe extern "C" fn dictionary_description(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a dictionary.
+    let Some(dictionary) = (unsafe { collections::dictionary(receiver as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    let mut out: Vec<u8> = b"{\n".to_vec();
+    for (key, value) in &dictionary.entries {
+        out.extend_from_slice(b"    ");
+        // SAFETY: a key of a live dictionary.
+        out.extend_from_slice(&unsafe { describe(*key as Id) });
+        out.extend_from_slice(b" = ");
+        // SAFETY: a value of a live dictionary.
+        out.extend_from_slice(&unsafe { describe(*value as Id) });
+        out.extend_from_slice(b";\n");
+    }
+    out.push(b'}');
+    let text = corefoundation::string::from_bytes(&out, false);
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(text) as Id }
+}
+
 /// `+[NSData dataWithContentsOfFile:]`.
 ///
 /// Nil for a file that cannot be read, which is Apple's answer and the one a
@@ -440,13 +531,31 @@ unsafe extern "C" fn array_with_capacity(_class: Id, _sel: Sel, _capacity: usize
     }
 }
 
-unsafe extern "C" fn array_with_object(_class: Id, _sel: Sel, object: Id) -> Id {
+/// Whether a cluster's convenience constructor was sent to its mutable class.
+///
+/// Apple declares `+arrayWithObject:` and `+dictionaryWithObject:forKey:` on the
+/// immutable class, and the mutable class inherits them - so one method answers
+/// for both, and only the receiver says which was asked for. A program that
+/// sends one to `NSMutableDictionary` writes to what comes back, and a
+/// collection made immutable there fails on the next line.
+fn mutable_receiver(class: Id, mutable: &std::ffi::CStr) -> bool {
+    // SAFETY: the receiver of a class method is a class this runtime knows.
+    let Some(class) = (unsafe { objc::class::from_ptr(class as *const objc::class::Class) }) else {
+        return false;
+    };
+    class.chain().any(|c| {
+        // SAFETY: a realized class names itself with a live C string.
+        unsafe { std::ffi::CStr::from_ptr(c.name()) == mutable }
+    })
+}
+
+unsafe extern "C" fn array_with_object(class: Id, _sel: Sel, object: Id) -> Id {
     // SAFETY: a fresh object holding a live one.
     unsafe {
         api::CFAutorelease(collections::new_array(
             &[object as CFTypeRef],
             Policy::from_type_callbacks(),
-            false,
+            mutable_receiver(class, c"NSMutableArray"),
         )) as Id
     }
 }
@@ -474,7 +583,7 @@ unsafe extern "C" fn array_with_array(_class: Id, _sel: Sel, other: Id) -> Id {
 /// `+arrayWithObjects:count:`, which is the counted spelling
 /// `objc::dispatch` rewrites the nil-terminated variadic into.
 unsafe extern "C" fn array_with_objects_count(
-    _class: Id,
+    class: Id,
     _sel: Sel,
     objects: *const Id,
     count: usize,
@@ -492,7 +601,7 @@ unsafe extern "C" fn array_with_objects_count(
         api::CFAutorelease(collections::new_array(
             slice,
             Policy::from_type_callbacks(),
-            false,
+            mutable_receiver(class, c"NSMutableArray"),
         )) as Id
     }
 }
@@ -566,6 +675,81 @@ unsafe extern "C" fn all_values(receiver: Id, _sel: Sel) -> Id {
     }
 }
 
+/// `-init` on `NSMutableArray` and `NSMutableDictionary`, which are class
+/// clusters.
+///
+/// `+alloc` on one of those answers an instance of the abstract class itself -
+/// an isa and nothing else - because that is all an abstract class has room
+/// for. Every read and every write goes through the contents a concrete
+/// `__NSCF*` object carries, so a placeholder handed back from `-init` answers
+/// empty to every question and swallows every write, silently: nothing here is
+/// wrong enough to fail on, and the program carries on with a collection that
+/// never fills. Apple's clusters substitute here too, which is why `-init` is
+/// documented there as returning "an object other than the receiver".
+///
+/// # Safety
+///
+/// `receiver` is null or an instance of the class this was installed on, and
+/// `concrete` answers a fresh object with one reference.
+unsafe fn cluster_init(receiver: Id, known: bool, concrete: impl FnOnce() -> CFTypeRef) -> Id {
+    if receiver.is_null() || known {
+        // Already concrete: `-init` on one of those is the identity, and
+        // replacing it would throw away contents the caller just made.
+        return receiver;
+    }
+    let object = concrete() as Id;
+    // The placeholder's one reference was the caller's, and it belongs to what
+    // is returned in its place.
+    objc::arc::release(receiver);
+    object
+}
+
+unsafe extern "C" fn init_mutable_array(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an object of this class.
+    let known = unsafe { collections::array(receiver as CFTypeRef) }.is_some();
+    // SAFETY: as above, with a fresh empty array.
+    unsafe {
+        cluster_init(receiver, known, || {
+            collections::new_array(&[], Policy::from_type_callbacks(), true)
+        })
+    }
+}
+
+/// `-initWithCapacity:`, where the capacity is a hint this store has no use for.
+unsafe extern "C" fn init_mutable_array_with_capacity(
+    receiver: Id,
+    sel: Sel,
+    _capacity: usize,
+) -> Id {
+    // SAFETY: the caller's obligation, forwarded.
+    unsafe { init_mutable_array(receiver, sel) }
+}
+
+unsafe extern "C" fn init_mutable_dictionary(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an object of this class.
+    let known = unsafe { collections::dictionary(receiver as CFTypeRef) }.is_some();
+    // SAFETY: as above, with a fresh empty dictionary.
+    unsafe {
+        cluster_init(receiver, known, || {
+            collections::new_dictionary(
+                &[],
+                Policy::from_key_callbacks(),
+                Policy::from_type_callbacks(),
+                true,
+            )
+        })
+    }
+}
+
+unsafe extern "C" fn init_mutable_dictionary_with_capacity(
+    receiver: Id,
+    sel: Sel,
+    _capacity: usize,
+) -> Id {
+    // SAFETY: the caller's obligation, forwarded.
+    unsafe { init_mutable_dictionary(receiver, sel) }
+}
+
 unsafe extern "C" fn new_dictionary(_class: Id, _sel: Sel) -> Id {
     collections::new_dictionary(
         &[],
@@ -585,9 +769,29 @@ unsafe extern "C" fn dictionary_with_capacity(_class: Id, _sel: Sel, _capacity: 
     unsafe { api::CFAutorelease(new_dictionary(_class, _sel) as CFTypeRef) as Id }
 }
 
+/// `+dictionaryWithObject:forKey:`, the one-pair spelling.
+unsafe extern "C" fn dictionary_with_object_for_key(
+    class: Id,
+    _sel: Sel,
+    object: Id,
+    key: Id,
+) -> Id {
+    if object.is_null() || key.is_null() {
+        return std::ptr::null_mut();
+    }
+    let dictionary = collections::new_dictionary(
+        &[(key as CFTypeRef, object as CFTypeRef)],
+        Policy::from_key_callbacks(),
+        Policy::from_type_callbacks(),
+        mutable_receiver(class, c"NSMutableDictionary"),
+    );
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(dictionary) as Id }
+}
+
 /// `+dictionaryWithObjects:forKeys:count:`, the counted spelling.
 unsafe extern "C" fn dictionary_with_objects_for_keys_count(
-    _class: Id,
+    class: Id,
     _sel: Sel,
     objects: *const Id,
     keys: *const Id,
@@ -617,7 +821,7 @@ unsafe extern "C" fn dictionary_with_objects_for_keys_count(
             &pairs,
             Policy::from_key_callbacks(),
             Policy::from_type_callbacks(),
-            false,
+            mutable_receiver(class, c"NSMutableDictionary"),
         )) as Id
     }
 }
@@ -767,6 +971,7 @@ pub(crate) fn install() {
         "sortedArrayUsingSelector:" => sorted_array_using_selector, c"@24@0:8:16";
         "filteredArrayUsingPredicate:" => filtered_array_using_predicate, c"@24@0:8@16";
         "countByEnumeratingWithState:objects:count:" => array_enumerate, c"Q40@0:8^{?=Q^@^QQ5}16^@24Q32";
+        "description" => array_description, c"@16@0:8";
     });
     class_methods!(array, {
         "array" => array_fn, c"@16@0:8";
@@ -774,6 +979,8 @@ pub(crate) fn install() {
         "arrayWithObjects:count:" => array_with_objects_count, c"@32@0:8^@16Q24";
     });
     methods!(mutable_array, {
+        "init" => init_mutable_array, c"@16@0:8";
+        "initWithCapacity:" => init_mutable_array_with_capacity, c"@24@0:8Q16";
         "addObject:" => add_object, c"v24@0:8@16";
         "removeObjectAtIndex:" => remove_object_at_index, c"v24@0:8Q16";
         "removeAllObjects" => remove_all_objects, c"v16@0:8";
@@ -795,13 +1002,17 @@ pub(crate) fn install() {
         "objectForKeyedSubscript:" => object_for_key, c"@24@0:8@16";
         "allKeys" => all_keys, c"@16@0:8";
         "allValues" => all_values, c"@16@0:8";
+        "description" => dictionary_description, c"@16@0:8";
         "valueForKey:" => dictionary_value_for_key, c"@24@0:8@16";
         "countByEnumeratingWithState:objects:count:" => dictionary_enumerate, c"Q40@0:8^{?=Q^@^QQ5}16^@24Q32";
     });
     class_methods!(dictionary_class, {
         "dictionaryWithObjects:forKeys:count:" => dictionary_with_objects_for_keys_count, c"@40@0:8^@16^@24Q32";
+        "dictionaryWithObject:forKey:" => dictionary_with_object_for_key, c"@32@0:8@16@24";
     });
     methods!(mutable_dictionary, {
+        "init" => init_mutable_dictionary, c"@16@0:8";
+        "initWithCapacity:" => init_mutable_dictionary_with_capacity, c"@24@0:8Q16";
         "setObject:forKey:" => set_object_for_key, c"v32@0:8@16@24";
         "setObject:forKeyedSubscript:" => set_object_for_key, c"v32@0:8@16@24";
         "removeObjectForKey:" => remove_object_for_key, c"v24@0:8@16";

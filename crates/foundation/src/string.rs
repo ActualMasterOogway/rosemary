@@ -552,6 +552,40 @@ fn slice(bytes: &[u8], from: usize, to: usize) -> Id {
     unsafe { api::CFAutorelease(s) as Id }
 }
 
+unsafe extern "C" fn removing_percent_encoding(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: the receiver is an NSString.
+    let original = unsafe { bytes(receiver) };
+    let mut decoded = Vec::with_capacity(original.len());
+    let mut index = 0;
+    while index < original.len() {
+        if original[index] == b'%' {
+            let hex = |byte: u8| match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                _ => None,
+            };
+            let value = original
+                .get(index + 1)
+                .copied()
+                .and_then(hex)
+                .zip(original.get(index + 2).copied().and_then(hex));
+            let Some((high, low)) = value else {
+                return std::ptr::null_mut();
+            };
+            decoded.push(high * 16 + low);
+            index += 3;
+        } else {
+            decoded.push(original[index]);
+            index += 1;
+        }
+    }
+    if std::str::from_utf8(&decoded).is_err() {
+        return std::ptr::null_mut();
+    }
+    slice(&decoded, 0, decoded.len())
+}
+
 unsafe extern "C" fn substring_from_index(receiver: Id, _sel: Sel, index: usize) -> Id {
     // SAFETY: an `NSString`.
     let whole = unsafe { bytes(receiver) };
@@ -874,6 +908,7 @@ pub(crate) fn install() {
         "initWithUTF8String:" => init_with_utf8, c"@24@0:8*16";
         "initWithCString:encoding:" => init_with_cstring_encoding, c"@32@0:8*16Q24";
         "initWithFormat:" => init_with_format, c"@24@0:8@16";
+        "stringByRemovingPercentEncoding" => removing_percent_encoding, c"@16@0:8";
         "stringByAppendingString:" => append_string, c"@24@0:8@16";
     });
     let mutable = objc::class::lookup(c"NSMutableString").expect("NSMutableString");
@@ -907,6 +942,40 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percent_decoding_handles_utf8_and_rejects_invalid_sequences() {
+        crate::bootstrap();
+        for (input, expected) in [
+            ("", Some("")),
+            ("plain+text", Some("plain+text")),
+            ("caf%C3%A9/%f0%9f%98%80", Some("café/😀")),
+            ("é%20text%2F%25%2520", Some("é text/%%20")),
+            ("%00", Some("\0")),
+            ("%", None),
+            ("%2", None),
+            ("%GG", None),
+            ("%+1", None),
+            ("%FF", None),
+            ("%C3", None),
+        ] {
+            let source = from_str(input);
+            // SAFETY: NSString's registered selector returns an object.
+            unsafe {
+                let send: unsafe extern "C" fn(Id, Sel) -> Id =
+                    std::mem::transmute(objc::msg::entry());
+                let result = send(source, objc::sel::get("stringByRemovingPercentEncoding"));
+                match expected {
+                    Some(expected) => {
+                        assert!(!result.is_null(), "{input}");
+                        assert_eq!(bytes(result), expected.as_bytes(), "{input}");
+                    }
+                    None => assert!(result.is_null(), "{input}"),
+                }
+                api::CFRelease(source as CFTypeRef);
+            }
+        }
+    }
 
     /// Splitting and joining are each other's inverse, which is the property a
     /// path or an argument list is taken apart and put back together on.

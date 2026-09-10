@@ -473,6 +473,97 @@ mod tests {
         }
     }
 
+    /// `[[NSMutableDictionary alloc] init]`, which is a class cluster: what
+    /// `+alloc` answers cannot hold anything, so `-init` has to substitute.
+    ///
+    /// The write-then-read is the point. A placeholder answers `-objectForKey:`
+    /// with nil and drops `-setObject:forKey:` on the floor without failing, so
+    /// a test that only checked the object was non-nil would pass on the bug
+    /// this covers.
+    #[test]
+    fn alloc_init_gives_a_collection_that_holds_what_is_put_in_it() {
+        bootstrap();
+        // SAFETY: each prototype is the one its selector declares.
+        unsafe {
+            let send0: unsafe extern "C" fn(Id, Sel) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            let send1: unsafe extern "C" fn(Id, Sel, Id) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            let send2: unsafe extern "C" fn(Id, Sel, Id, Id) =
+                std::mem::transmute(objc::msg::entry());
+            let count: unsafe extern "C" fn(Id, Sel) -> usize =
+                std::mem::transmute(objc::msg::entry());
+
+            let dictionary = send0(
+                send0(class(c"NSMutableDictionary"), objc::sel::get("alloc")),
+                objc::sel::get("init"),
+            );
+            let key = string::from_str("deeplink");
+            let value = string::from_str("roblox://experiences/start");
+            send2(dictionary, objc::sel::get("setObject:forKey:"), value, key);
+            assert_eq!(count(dictionary, objc::sel::get("count")), 1);
+            assert_eq!(
+                send1(dictionary, objc::sel::get("objectForKey:"), key),
+                value
+            );
+
+            let array = send0(
+                send0(class(c"NSMutableArray"), objc::sel::get("alloc")),
+                objc::sel::get("init"),
+            );
+            send1(array, objc::sel::get("addObject:"), value);
+            assert_eq!(count(array, objc::sel::get("count")), 1);
+        }
+    }
+
+    /// `+dictionaryWithObject:forKey:` is declared on the immutable class and
+    /// inherited by the mutable one, so what comes back depends on which was
+    /// asked - and a program that asks `NSMutableDictionary` writes to it.
+    #[test]
+    fn a_convenience_constructor_answers_the_class_it_was_sent_to() {
+        bootstrap();
+        // SAFETY: `+dictionaryWithObject:forKey:` is `id (*)(Class, SEL, id, id)`.
+        unsafe {
+            let with: unsafe extern "C" fn(Id, Sel, Id, Id) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            let sel = objc::sel::get("dictionaryWithObject:forKey:");
+            let key = string::from_str("k");
+            let value = string::from_str("v");
+            for (name, mutable) in [(c"NSDictionary", false), (c"NSMutableDictionary", true)] {
+                let d = with(class(name), sel, value, key);
+                assert_eq!(
+                    corefoundation::collections::dictionary(d as corefoundation::base::CFTypeRef)
+                        .expect("a dictionary")
+                        .mutable,
+                    mutable,
+                    "{name:?}"
+                );
+            }
+        }
+    }
+
+    /// `-description` on a container spells out what it holds, by asking each
+    /// element for its own - which is what a program logging one is after.
+    #[test]
+    fn a_container_describes_its_elements() {
+        bootstrap();
+        // SAFETY: `-description` is `id (*)(id, SEL)` and `+arrayWithObject:`
+        // is `id (*)(Class, SEL, id)`.
+        unsafe {
+            let send0: unsafe extern "C" fn(Id, Sel) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            let send1: unsafe extern "C" fn(Id, Sel, Id) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            let array = send1(
+                class(c"NSArray"),
+                objc::sel::get("arrayWithObject:"),
+                string::from_str("roblox://experiences/start"),
+            );
+            let text = send0(array, objc::sel::get("description"));
+            assert_eq!(string::bytes(text), b"(\n    roblox://experiences/start\n)");
+        }
+    }
+
     /// An array built the immutable way is marked immutable, which is what
     /// `-addObject:` refuses on.
     ///

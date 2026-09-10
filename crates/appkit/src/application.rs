@@ -144,6 +144,8 @@ unsafe extern "C" fn finish_launching(receiver: Id, _sel: Sel) {
         (DID_FINISH_LAUNCHING, "applicationDidFinishLaunching:"),
     ] {
         if name == DID_FINISH_LAUNCHING {
+            // SAFETY: an application, and a delegate the program set.
+            unsafe { open_launch_urls(receiver, delegate) };
             foundation::appleevent::raise(
                 foundation::appleevent::CORE_EVENT_CLASS,
                 foundation::appleevent::OPEN_APPLICATION,
@@ -154,6 +156,79 @@ unsafe extern "C" fn finish_launching(receiver: Id, _sel: Sel) {
         unsafe { send_if_implemented(delegate, selector, notification) };
         foundation::notification::post(name, receiver, std::ptr::null_mut());
     }
+}
+
+/// The URLs this launch was asked to open, in the order they were given.
+fn launch_urls() -> Vec<String> {
+    fn scheme(argument: &str) -> bool {
+        let Some((scheme, rest)) = argument.split_once(':') else {
+            return false;
+        };
+        // Two characters at least, so a lone drive letter or a stray `x:` is
+        // not mistaken for one, and a body.
+        scheme.len() >= 2
+            && !rest.is_empty()
+            && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    }
+    foundation::processinfo::guest_arguments()
+        .iter()
+        .skip(1)
+        .filter_map(|argument| argument.to_str().map(str::to_owned))
+        .filter(|argument| scheme(argument))
+        .collect()
+}
+
+/// `-[delegate application:openURLs:]`, where Apple sends it: after the program
+/// has had `applicationWillFinishLaunching:` to build whatever handles a URL,
+/// and before it is told launching finished, because a delegate that defers the
+/// URL to "after initialization" is waiting on the notification that has not
+/// been sent yet.
+///
+/// Nothing is sent for a launch with no URLs, which is the ordinary case - Apple
+/// does not send the method either, and a delegate is entitled to treat being
+/// called at all as meaning there is a URL.
+///
+/// # Safety
+///
+/// `receiver` is an application and `delegate` is null or live.
+unsafe fn open_launch_urls(receiver: Id, delegate: Id) {
+    let urls = launch_urls();
+    if urls.is_empty() || delegate.is_null() {
+        return;
+    }
+    let objects: Vec<corefoundation::base::CFTypeRef> = urls
+        .iter()
+        .map(|url| corefoundation::url::new(url))
+        .collect();
+    let array = corefoundation::collections::new_array(
+        &objects,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    // The array retained each URL, so this call's own references are done with.
+    for object in &objects {
+        // SAFETY: a URL this call just made.
+        unsafe { corefoundation::api::CFRelease(*object) };
+    }
+    let sel = objc::sel::get("application:openURLs:");
+    // SAFETY: the caller's obligation.
+    let method = (unsafe { objc::object::class_of(delegate) }).and_then(|c| c.method(sel));
+    if let Some(method) = method {
+        // SAFETY: `-application:openURLs:` is `void (id, SEL, NSApplication *,
+        // NSArray<NSURL *> *)`.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, Id, Id) = std::mem::transmute::<
+                *const c_void,
+                unsafe extern "C" fn(Id, Sel, Id, Id),
+            >(method.implementation());
+            f(delegate, sel, receiver, array as Id);
+        }
+    }
+    // SAFETY: the array this call made, which the delegate retains if it keeps it.
+    unsafe { corefoundation::api::CFRelease(array) };
 }
 
 /// `-run`.
@@ -479,6 +554,111 @@ mod tests {
         // SAFETY: the cell is a word this crate leaked.
         let held = unsafe { *(crate::ns_app_cell() as *const u64) };
         assert_eq!(held, app as usize as u64);
+    }
+
+    #[test]
+    fn only_scheme_shaped_arguments_are_launch_urls() {
+        crate::bootstrap();
+        foundation::processinfo::set_arguments(
+            &[
+                "roblox://not-argv-zero",
+                "-protocolString",
+                "roblox://experiences/start?placeId=1",
+                "--place",
+                "/Users/me/a:file",
+                "roblox-player:1+launchmode:play",
+                "x:",
+                "a:b",
+            ]
+            .map(Into::into),
+        );
+        assert_eq!(
+            launch_urls(),
+            [
+                "roblox://experiences/start?placeId=1",
+                "roblox-player:1+launchmode:play",
+            ]
+        );
+        foundation::processinfo::set_arguments(&["guest".into()]);
+        assert!(launch_urls().is_empty());
+    }
+
+    /// Where the URL arrives, which is the whole of the contract: a delegate
+    /// that defers a cold-launch URL until initialization has finished is
+    /// waiting for `applicationDidFinishLaunching:`, so a URL delivered after
+    /// it is a URL delivered too late.
+    #[test]
+    fn a_launch_url_reaches_the_delegate_between_the_two_notifications() {
+        crate::bootstrap();
+        static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+        unsafe extern "C" fn will_finish(_receiver: Id, _sel: Sel, _notification: Id) {
+            SEEN.lock().expect("no panic").push(String::from("will"));
+        }
+        unsafe extern "C" fn did_finish(_receiver: Id, _sel: Sel, _notification: Id) {
+            SEEN.lock().expect("no panic").push(String::from("did"));
+        }
+        unsafe extern "C" fn open_urls(_receiver: Id, _sel: Sel, _app: Id, urls: Id) {
+            // SAFETY: an `NSArray` of `NSURL`, which is what is sent.
+            let first = unsafe {
+                let f: unsafe extern "C" fn(Id, Sel) -> Id =
+                    std::mem::transmute(objc::msg::entry());
+                f(
+                    f(urls, objc::sel::get("firstObject")),
+                    objc::sel::get("absoluteString"),
+                )
+            };
+            // SAFETY: an `NSString` the URL answered with.
+            let bytes = unsafe { foundation::string::bytes(first) };
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            SEEN.lock().expect("no panic").push(text);
+        }
+
+        let delegate_class = corefoundation::base::register(
+            c"R3TestOpenUrlsDelegate",
+            objc::class::lookup(c"NSObject"),
+            size_of::<usize>(),
+            false,
+        );
+        for (name, imp) in [
+            (
+                "applicationWillFinishLaunching:",
+                will_finish as *const c_void,
+            ),
+            (
+                "applicationDidFinishLaunching:",
+                did_finish as *const c_void,
+            ),
+        ] {
+            delegate_class.add_method(objc::sel::get(name), imp, c"v24@0:8@16");
+        }
+        delegate_class.add_method(
+            objc::sel::get("application:openURLs:"),
+            open_urls as *const c_void,
+            c"v32@0:8@16@24",
+        );
+        let delegate = objc::object::create_instance(delegate_class, 0);
+
+        let class = objc::class::lookup(c"NSApplication").expect("NSApplication");
+        let app = objc::object::create_instance(class, INSTANCE_SIZE);
+        // SAFETY: an application this test made.
+        unsafe { set_delegate(app, objc::sel::get("setDelegate:"), delegate) };
+        foundation::processinfo::set_arguments(
+            &[
+                "guest",
+                "-protocolString",
+                "roblox://experiences/start?placeId=1",
+            ]
+            .map(Into::into),
+        );
+        // SAFETY: `-finishLaunching` is `void (id, SEL)`.
+        unsafe { finish_launching(app, objc::sel::get("finishLaunching")) };
+        foundation::processinfo::set_arguments(&["guest".into()]);
+
+        assert_eq!(
+            *SEEN.lock().expect("no panic"),
+            ["will", "roblox://experiences/start?placeId=1", "did"]
+        );
     }
 
     #[test]

@@ -512,6 +512,7 @@ impl Vm {
         // for them to point into.
         let (argc, argv, _, _) = stack.main_args();
         crate::shims::runtime::set_process_args(argc, argv);
+        foundation::processinfo::set_arguments(args);
 
         let mut ranges: Vec<Range<u64>> = program
             .memory

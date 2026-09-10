@@ -32,6 +32,41 @@ fn values() -> std::sync::MutexGuard<'static, BTreeMap<String, String>> {
     VALUES.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Consume key/value pairs after argv[0]. Later occurrences override earlier ones.
+fn parse_arguments(arguments: &[std::ffi::OsString]) -> BTreeMap<String, String> {
+    let mut values = BTreeMap::new();
+    let mut arguments = arguments.iter().skip(1);
+    while let Some(argument) = arguments.next() {
+        let argument = argument.to_string_lossy();
+        let Some(key) = argument.strip_prefix('-').filter(|key| !key.is_empty()) else {
+            continue;
+        };
+        let Some(value) = arguments.next() else {
+            break;
+        };
+        values.insert(key.to_owned(), value.to_string_lossy().into_owned());
+    }
+    values
+}
+
+fn argument_values() -> BTreeMap<String, String> {
+    parse_arguments(&crate::processinfo::guest_arguments())
+}
+
+/// # Safety
+///
+/// `receiver` is one of our defaults objects; `key` is null or an NSString.
+unsafe fn value_for_key(receiver: Id, key: Id) -> Option<String> {
+    // SAFETY: the caller's obligation.
+    let key = unsafe { key_text(key) }?;
+    argument_values().remove(&key).or_else(|| {
+        // SAFETY: the caller's obligation.
+        values()
+            .get(&format!("{}{key}", unsafe { prefix(receiver) }))
+            .cloned()
+    })
+}
+
 /// Under the directory macOS keeps preferences in, so a second launch finds
 /// what the first one wrote.
 fn store_path() -> PathBuf {
@@ -171,10 +206,7 @@ unsafe fn key_text(key: Id) -> Option<String> {
 /// an `NSString` too.
 unsafe extern "C" fn object_for_key(receiver: Id, _sel: Sel, key: Id) -> Id {
     // SAFETY: an `NSUserDefaults` this module made, and null or an `NSString`.
-    let Some(key) = (unsafe { scoped(receiver, key) }) else {
-        return std::ptr::null_mut();
-    };
-    let Some(value) = values().get(&key).cloned() else {
+    let Some(value) = (unsafe { value_for_key(receiver, key) }) else {
         return std::ptr::null_mut();
     };
     let string = crate::string::from_str(&value);
@@ -335,21 +367,28 @@ fn empty_dictionary() -> Id {
     unsafe { corefoundation::api::CFAutorelease(dictionary) as Id }
 }
 
-/// `-volatileDomainForName:` and `-persistentDomainForName:`.
-///
-/// Empty. The domains are Apple's partitioning of the same key space -
-/// `NSArgumentDomain` for the command line, `NSRegistrationDomain` for
-/// `-registerDefaults:`, one per bundle identifier for the rest - and this
-/// store is flat, so there is no domain to answer *with*. Empty rather than
-/// nil, because a caller that asks for a domain enumerates what comes back and
-/// nil is the answer for a domain that does not exist at all.
+/// The argument domain is volatile and never enters the persistent store.
+unsafe extern "C" fn volatile_domain_for_name(_receiver: Id, _sel: Sel, name: Id) -> Id {
+    // SAFETY: the domain name is null or an NSString.
+    if unsafe { key_text(name) }.as_deref() == Some("NSArgumentDomain") {
+        dictionary_from_values(&argument_values())
+    } else {
+        empty_dictionary()
+    }
+}
+
+/// Persistent domain enumeration is not implemented.
 unsafe extern "C" fn domain_for_name(_receiver: Id, _sel: Sel, _name: Id) -> Id {
     empty_dictionary()
 }
 
 /// `-dictionaryRepresentation`, which is every key this store has.
 unsafe extern "C" fn dictionary_representation(_receiver: Id, _sel: Sel) -> Id {
-    let pairs: Vec<(CFTypeRef, CFTypeRef)> = values()
+    dictionary_from_values(&values())
+}
+
+fn dictionary_from_values(values: &BTreeMap<String, String>) -> Id {
+    let pairs: Vec<(CFTypeRef, CFTypeRef)> = values
         .iter()
         .map(|(key, value)| {
             (
@@ -379,10 +418,7 @@ unsafe extern "C" fn dictionary_representation(_receiver: Id, _sel: Sel) -> Id {
 /// `-setVolatileDomain:forName:`, `-setPersistentDomain:forName:` and
 /// `-removePersistentDomainForName:`.
 ///
-/// Accepted and ignored, for the reason the getters answer empty: there are no
-/// domains here to set or to remove. Accepted rather than refused because a
-/// program that registers its own domain and carries on is one this store still
-/// serves through the flat key space.
+/// Domain mutation is not implemented; the argument domain comes from guest argv.
 unsafe extern "C" fn set_domain(_receiver: Id, _sel: Sel, _domain: Id, _name: Id) {}
 
 unsafe extern "C" fn remove_domain(_receiver: Id, _sel: Sel, _name: Id) {}
@@ -407,7 +443,7 @@ pub(crate) fn install() {
         "synchronize" => synchronize, c"c16@0:8";
         "registerDefaults:" => register_defaults, c"v24@0:8@16";
         "initWithSuiteName:" => init_with_suite_name, c"@24@0:8@16";
-        "volatileDomainForName:" => domain_for_name, c"@24@0:8@16";
+        "volatileDomainForName:" => volatile_domain_for_name, c"@24@0:8@16";
         "persistentDomainForName:" => domain_for_name, c"@24@0:8@16";
         "dictionaryRepresentation" => dictionary_representation, c"@16@0:8";
         "setVolatileDomain:forName:" => set_domain, c"v32@0:8@16@24";

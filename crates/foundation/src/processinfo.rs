@@ -163,9 +163,32 @@ unsafe extern "C" fn process_name(_receiver: Id, _sel: Sel) -> Id {
     autoreleased(&name)
 }
 
-/// `-arguments`, the guest's own `argv` as this process received it.
+static GUEST_ARGUMENTS: std::sync::Mutex<Option<Vec<std::ffi::OsString>>> =
+    std::sync::Mutex::new(None);
+
+/// Record guest argv before running guest initializers or the entry point.
+pub fn set_arguments(arguments: &[std::ffi::OsString]) {
+    *GUEST_ARGUMENTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(arguments.to_vec());
+}
+
+/// Guest argv only; host driver options must not become guest defaults.
+pub fn guest_arguments() -> Vec<std::ffi::OsString> {
+    GUEST_ARGUMENTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default()
+}
+
+/// `-arguments`, including the guest executable as the first element.
 unsafe extern "C" fn arguments(_receiver: Id, _sel: Sel) -> Id {
-    let strings: Vec<corefoundation::base::CFTypeRef> = std::env::args_os()
+    let args = GUEST_ARGUMENTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_else(|| std::env::args_os().collect());
+    let strings: Vec<corefoundation::base::CFTypeRef> = args
+        .iter()
         .map(|arg| {
             crate::string::from_str(&arg.to_string_lossy()) as corefoundation::base::CFTypeRef
         })
@@ -294,6 +317,40 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arguments_contain_only_guest_argv() {
+        crate::bootstrap();
+        let guest: Vec<std::ffi::OsString> = [
+            "/Applications/Guest App",
+            "--emulated",
+            "run",
+            "",
+            "hello world",
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        set_arguments(&guest);
+        // SAFETY: arguments ignores the receiver and returns an NSArray of strings.
+        unsafe {
+            let result = arguments(std::ptr::null_mut(), objc::sel::get("arguments"));
+            let array =
+                corefoundation::collections::array(result as corefoundation::base::CFTypeRef)
+                    .expect("an array");
+            let actual: Vec<Vec<u8>> = array
+                .values
+                .iter()
+                .map(|value| crate::string::bytes(*value as Id))
+                .collect();
+            let expected: Vec<Vec<u8>> = guest
+                .iter()
+                .map(|value| value.as_encoded_bytes().to_vec())
+                .collect();
+            assert_eq!(actual, expected);
+        }
+        *GUEST_ARGUMENTS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
 
     /// The whole point of the class: a version that is not zero, because
     /// `[[nil processInfo] operatingSystemVersion]` is macOS 0.0.0 and every
