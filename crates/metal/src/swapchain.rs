@@ -263,6 +263,12 @@ impl Swapchain {
         }
         .map_err(|error| format!("vkGetPhysicalDeviceSurfaceFormatsKHR failed: {error:?}"))?;
         let chosen = choose_format(&formats).ok_or("the surface reports no format")?;
+        // SAFETY: as above.
+        let present_modes = unsafe {
+            surface_api.get_physical_device_surface_present_modes(self.gpu.physical, self.surface)
+        }
+        .map_err(|error| format!("vkGetPhysicalDeviceSurfacePresentModesKHR failed: {error:?}"))?;
+        let present_mode = choose_present_mode(&present_modes);
 
         // `0xffff_ffff` in either direction is a surface which takes its size
         // from the swapchain rather than the other way round.
@@ -301,9 +307,7 @@ impl Swapchain {
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(capabilities.current_transform)
             .composite_alpha(composite_alpha(&capabilities))
-            // FIFO is the one mode every implementation must offer, and it is
-            // what `-displaySyncEnabled` asks for by default.
-            .present_mode(vk::PresentModeKHR::FIFO)
+            .present_mode(present_mode)
             .clipped(true)
             .old_swapchain(self.handle);
         // SAFETY: a well-formed create info; the old swapchain is retired by
@@ -627,6 +631,18 @@ fn choose_format(formats: &[vk::SurfaceFormatKHR]) -> Option<vk::SurfaceFormatKH
         .or_else(|| formats.first().copied())
 }
 
+/// Prefer low-latency, tear-free presentation where the surface supports it.
+///
+/// `FIFO` is required by Vulkan, so it is the safe fallback even if a broken
+/// implementation returns an empty list.
+fn choose_present_mode(modes: &[vk::PresentModeKHR]) -> vk::PresentModeKHR {
+    if modes.contains(&vk::PresentModeKHR::MAILBOX) {
+        vk::PresentModeKHR::MAILBOX
+    } else {
+        vk::PresentModeKHR::FIFO
+    }
+}
+
 /// `OPAQUE` where the surface offers it, which is what a game's window is.
 fn composite_alpha(capabilities: &vk::SurfaceCapabilitiesKHR) -> vk::CompositeAlphaFlagsKHR {
     for candidate in [
@@ -828,6 +844,18 @@ unsafe fn transition_to_present(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mailbox_presentation_is_preferred_when_available() {
+        assert_eq!(
+            choose_present_mode(&[vk::PresentModeKHR::FIFO, vk::PresentModeKHR::MAILBOX]),
+            vk::PresentModeKHR::MAILBOX
+        );
+        assert_eq!(
+            choose_present_mode(&[vk::PresentModeKHR::IMMEDIATE, vk::PresentModeKHR::FIFO]),
+            vk::PresentModeKHR::FIFO
+        );
+    }
 
     /// A window, a swapchain and a frame that reaches it.
     ///
