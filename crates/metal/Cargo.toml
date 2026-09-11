@@ -14,3 +14,4 @@ objc.workspace = true
 metal_translate.workspace = true
 appkit.workspace = true
 sdl3.workspace = true
+static_init.workspace = true

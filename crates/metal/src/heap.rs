@@ -19,6 +19,7 @@
 use std::sync::Mutex;
 
 use ash::{Device, vk};
+use static_init::dynamic;
 
 /// The block size. Large enough that a streaming burst is a handful of
 /// allocations, small enough that a program which uses one buffer does not
@@ -28,9 +29,12 @@ const BLOCK: u64 = 64 << 20;
 /// TEMPORARY: `ROSETTA3_METAL_NOSUBALLOC=1` gives every allocation a block of
 /// its own, so a fault caused by two buffers sharing memory can be told from
 /// every other kind.
+#[inline(always)]
 fn dedicate_everything() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("ROSETTA3_METAL_NOSUBALLOC").is_some())
+    #[dynamic]
+    static ON: bool = std::env::var_os("ROSETTA3_METAL_NOSUBALLOC").is_some();
+
+    *ON
 }
 
 /// Where one buffer lives.

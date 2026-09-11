@@ -17,6 +17,7 @@ use std::ffi::c_void;
 use foundation::geometry::{NSPoint, NSRect, NSSize};
 use objc::object::Id;
 use objc::sel::Sel;
+use static_init::dynamic;
 
 use crate::define::{class_methods, methods};
 
@@ -115,9 +116,12 @@ fn hot_spot_pixels(hot_spot: NSPoint, size: NSSize, width: u32, height: u32) -> 
 /// program's `-resetCursorRects` was never called, the rectangle it gave is on
 /// a view in no window, or the pointer is outside that rectangle - and the four
 /// have nothing in common to fix.
+#[inline(always)]
 pub fn tracing() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("ROSETTA3_TRACE_CURSOR").is_some())
+    #[dynamic]
+    static ON: bool = std::env::var_os("ROSETTA3_TRACE_CURSOR").is_some();
+
+    *ON
 }
 
 /// Show a cursor object's pixels, without recording it as the one a program

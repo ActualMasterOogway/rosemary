@@ -10,6 +10,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use static_init::dynamic;
+
 macro_rules! counters {
     ($($name:ident = $label:literal),* $(,)?) => {
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,9 +53,12 @@ counters!(
 const ZERO: AtomicU64 = AtomicU64::new(0);
 static VALUES: [AtomicU64; COUNTERS] = [ZERO; COUNTERS];
 
+#[inline(always)]
 pub fn enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("ROSETTA3_METAL_STATS").is_some_and(|value| value != "0"))
+    #[dynamic]
+    static ON: bool = std::env::var_os("ROSETTA3_METAL_STATS").is_some_and(|value| value != "0");
+
+    *ON
 }
 
 pub fn add(counter: Counter, amount: u64) {

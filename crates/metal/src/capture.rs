@@ -16,6 +16,7 @@
 
 use crate::gpu::{Gpu, GpuBuffer};
 use ash::vk;
+use static_init::dynamic;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// One attachment of one pass, named while the pass is recorded and read back
@@ -43,11 +44,12 @@ pub(crate) struct Target {
     pub role: String,
 }
 
+#[inline(always)]
 fn directory() -> Option<&'static std::path::Path> {
-    static DIRECTORY: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
-    DIRECTORY
-        .get_or_init(|| std::env::var_os("ROSETTA3_PASS_OUT").map(std::path::PathBuf::from))
-        .as_deref()
+    #[dynamic]
+    static DIRECTORY: Option<std::path::PathBuf> = std::env::var_os("ROSETTA3_PASS_OUT").map(std::path::PathBuf::from);
+
+    DIRECTORY.as_deref()
 }
 
 /// Whether this pass should be captured, and the serial number to name it by.

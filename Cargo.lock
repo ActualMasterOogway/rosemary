@@ -860,6 +860,7 @@ dependencies = [
  "metal_translate",
  "objc",
  "sdl3",
+ "static_init",
 ]
 
 [[package]]

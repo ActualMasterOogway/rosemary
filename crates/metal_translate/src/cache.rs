@@ -14,7 +14,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock, mpsc};
 
 use crate::ir::{Access, ResourceKind, Stage};
 use crate::sha256::{self, Sha256};
@@ -193,8 +193,7 @@ fn encode_target(target: &TargetProfile) -> Vec<u8> {
 /// The directory this build's entries live in, or `None` where the cache is
 /// disabled or the process has nowhere to put one.
 fn root() -> Option<&'static Path> {
-    static ROOT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-    ROOT.get_or_init(|| {
+    static ROOT: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
         let base = base_directory()?;
         // The version directory is named by a prefix of the digest: a full
         // one is 64 characters of path in front of every entry, and 64 bits
@@ -206,8 +205,8 @@ fn root() -> Option<&'static Path> {
         let root = base.join(version);
         std::fs::create_dir_all(&root).ok()?;
         Some(root)
-    })
-    .as_deref()
+    });
+    ROOT.as_deref()
 }
 
 fn base_directory() -> Option<PathBuf> {

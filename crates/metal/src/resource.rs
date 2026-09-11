@@ -6,6 +6,7 @@
 
 use objc::object::Id;
 use objc::sel::Sel;
+use static_init::dynamic;
 
 use crate::gpu::{self, Gpu, GpuBuffer, GpuImage, ImageDescription};
 use crate::object::{self, methods};
@@ -252,8 +253,6 @@ pub(crate) struct IndexedCollection {
     pub elements: Vec<Id>,
 }
 
-// ---------------------------------------------------------------- buffers
-
 /// `ROSETTA3_TRACE_BUFFERS=1`: every `MTLBuffer` made and destroyed, with its
 /// length, its `MTLResourceOptions` and how many are live.
 ///
@@ -261,9 +260,12 @@ pub(crate) struct IndexedCollection {
 /// sizes say what it is allocating, and a game which asks for one size five
 /// hundred times over is a different problem from one which asks for five
 /// hundred sizes once each.
+#[inline(always)]
 fn tracing_buffers() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("ROSETTA3_TRACE_BUFFERS").is_some())
+    #[dynamic]
+    static ON: bool = std::env::var_os("ROSETTA3_TRACE_BUFFERS").is_some();
+
+    *ON
 }
 
 pub(crate) fn new_buffer(gpu: &'static Gpu, length: usize, options: u64) -> Id {
@@ -336,9 +338,12 @@ unsafe extern "C" fn buffer_storage_mode(receiver: Id, _sel: Sel) -> u64 {
 /// recorded into has completed.
 /// TEMPORARY: `ROSETTA3_METAL_LEAK=1` keeps every device resource alive, to tell
 /// a fault caused by freeing one too early from every other kind.
+#[inline(always)]
 fn leaking() -> bool {
-    static LEAK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *LEAK.get_or_init(|| std::env::var_os("ROSETTA3_METAL_LEAK").is_some())
+    #[dynamic]
+    static LEAK: bool = std::env::var_os("ROSETTA3_METAL_LEAK").is_some();
+
+    *LEAK
 }
 
 unsafe extern "C" fn buffer_dealloc(receiver: Id, _sel: Sel) {

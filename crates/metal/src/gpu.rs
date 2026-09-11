@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use ash::{Device, Instance, vk};
+use static_init::dynamic;
 
 use crate::heap::{Allocation, Heap};
 
@@ -1124,9 +1125,12 @@ pub fn block_extent(format: vk::Format) -> (u32, u32) {
 }
 
 /// The process's Vulkan tracing switch, shared with `vulkan.rs`.
+#[inline(always)]
 pub fn tracing() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("ROSETTA3_TRACE_METAL").is_some())
+    #[dynamic]
+    static ENABLED: bool = std::env::var_os("ROSETTA3_TRACE_METAL").is_some();
+
+    *ENABLED
 }
 
 /// Write one module to `ROSETTA3_SPIRV_OUT`, so that a driver which rejects or
