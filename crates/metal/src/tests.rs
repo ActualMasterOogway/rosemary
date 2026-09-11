@@ -222,6 +222,54 @@ fn a_translated_kernel_runs_on_the_gpu() {
     }
 }
 
+/// An encoder reuses the descriptor set it last wrote while the bindings a
+/// dispatch needs are unchanged, so a rebind between dispatches must still
+/// reach the shader - including a rebind back to a buffer whose set was
+/// already replaced, and one to a `-setBytes:` copy in between.
+#[test]
+fn rebinding_between_dispatches_reaches_each_buffer() {
+    let Some(device) = gpu_device() else {
+        return;
+    };
+    let library = source_library(device, SMOKE_KERNEL);
+    // SAFETY: objects this test made, sent the selectors they implement.
+    unsafe {
+        let function = new_function_with_name(
+            library,
+            std::ptr::null(),
+            foundation::string::from_str("clear"),
+        );
+        let mut error = std::ptr::null_mut();
+        let pipeline = new_compute_pipeline(device, std::ptr::null(), function, &mut error);
+        assert!(!pipeline.is_null());
+        let buffers = [
+            new_buffer(device, std::ptr::null(), 16, 0),
+            new_buffer(device, std::ptr::null(), 16, 0),
+            new_buffer(device, std::ptr::null(), 16, 0),
+        ];
+        let queue = new_command_queue(device, std::ptr::null());
+        let command = send(queue, "commandBuffer");
+        let encoder = send(command, "computeCommandEncoder");
+        send_with_object(encoder, "setComputePipelineState:", pipeline);
+        set_buffer_at(encoder, buffers[0], 0, 0);
+        dispatch(encoder, 1);
+        dispatch(encoder, 1);
+        set_buffer_at(encoder, buffers[1], 0, 0);
+        dispatch(encoder, 1);
+        set_bytes_named(encoder, "setBytes:length:atIndex:", &[0; 16], 0);
+        dispatch(encoder, 1);
+        set_buffer_at(encoder, buffers[2], 0, 0);
+        dispatch(encoder, 1);
+        send_void(encoder, "endEncoding");
+        send_void(command, "commit");
+        send_void(command, "waitUntilCompleted");
+        for buffer in buffers {
+            let contents = object::body::<resource::Buffer>(buffer).inner.contents;
+            assert_eq!(std::ptr::read(contents as *const u32), 42);
+        }
+    }
+}
+
 // Small message-sending helpers: the tests drive the objects through the
 // selectors a guest uses rather than through the Rust implementations, so a
 // missing registration fails the test.
@@ -699,4 +747,178 @@ unsafe fn copy_texture_to_buffer(encoder: Id, texture: Id, buffer: Id, size: u64
             size * size * 4,
         )
     };
+}
+
+/// # Safety
+///
+/// `encoder` must be an `R3MTLCommandEncoder`.
+unsafe fn set_bytes_named(encoder: Id, selector: &str, bytes: &[u8], index: u64) {
+    let sel = objc::sel::get(selector);
+    // SAFETY: an object the runtime allocated.
+    let method = unsafe { objc::object::class_of(encoder) }
+        .and_then(|class| class.method(sel))
+        .expect("the selector is registered");
+    // SAFETY: the registered signature.
+    let call: unsafe extern "C" fn(Id, Sel, *const u8, u64, u64) =
+        unsafe { std::mem::transmute(method.implementation()) };
+    // SAFETY: as above.
+    unsafe { call(encoder, sel, bytes.as_ptr(), bytes.len() as u64, index) };
+}
+
+/// The CPU cost of recording: many dispatches and draws with the per-call
+/// binding churn a game's frame has, timed from the first bind to the end of
+/// `-commit`. Run with `cargo test --release -p metal -- --ignored
+/// --nocapture recording_cost`.
+#[test]
+#[ignore = "a benchmark, not a check"]
+fn recording_cost() {
+    let Some(device) = gpu_device() else {
+        return;
+    };
+    const DISPATCHES: usize = 20_000;
+    const DRAWS: usize = 20_000;
+    let library = source_library(device, SMOKE_KERNEL);
+    // SAFETY: objects this test made, sent the selectors they implement.
+    let (pipeline, buffers, queue) = unsafe {
+        let function = new_function_with_name(
+            library,
+            std::ptr::null(),
+            foundation::string::from_str("clear"),
+        );
+        let mut error = std::ptr::null_mut();
+        let pipeline = new_compute_pipeline(device, std::ptr::null(), function, &mut error);
+        let buffers = [
+            new_buffer(device, std::ptr::null(), 256, 0),
+            new_buffer(device, std::ptr::null(), 256, 0),
+        ];
+        (
+            pipeline,
+            buffers,
+            new_command_queue(device, std::ptr::null()),
+        )
+    };
+    let pool = objc::arc::pool_push();
+    // SAFETY: as above.
+    let compute = unsafe {
+        let start = std::time::Instant::now();
+        let command = send(queue, "commandBuffer");
+        let encoder = send(command, "computeCommandEncoder");
+        send_with_object(encoder, "setComputePipelineState:", pipeline);
+        for index in 0..DISPATCHES {
+            match index % 4 {
+                0 => set_bytes_named(encoder, "setBytes:length:atIndex:", &[0; 64], 0),
+                _ => set_buffer_at(encoder, buffers[index % 2], 0, 0),
+            }
+            dispatch(encoder, 1);
+        }
+        send_void(encoder, "endEncoding");
+        send_void(command, "commit");
+        let recorded = start.elapsed();
+        send_void(command, "waitUntilCompleted");
+        recorded
+    };
+    objc::arc::pool_pop(pool);
+
+    let library = retain_library(device, triangle_library());
+    // SAFETY: as in `a_translated_triangle_draws_on_the_gpu`.
+    let render = unsafe {
+        let vertex = new_function_with_name(
+            library,
+            std::ptr::null(),
+            foundation::string::from_str("triangle_vertex"),
+        );
+        let fragment = new_function_with_name(
+            library,
+            std::ptr::null(),
+            foundation::string::from_str("triangle_fragment"),
+        );
+        let vertex_descriptor = object::make(
+            c"MTLVertexDescriptor",
+            resource::VertexDescriptor {
+                layouts: [resource::VertexLayout::default(); resource::VERTEX_SLOTS],
+                attributes: [resource::VertexAttribute::default(); resource::VERTEX_SLOTS],
+                layout_objects: std::ptr::null_mut(),
+                attribute_objects: std::ptr::null_mut(),
+            },
+        );
+        send_number(
+            element_at(send(vertex_descriptor, "layouts"), 0),
+            "setStride:",
+            16,
+        );
+        let attribute = element_at(send(vertex_descriptor, "attributes"), 0);
+        send_number(attribute, "setFormat:", 31);
+        send_number(attribute, "setBufferIndex:", 0);
+        let descriptor = object::make(
+            c"MTLRenderPipelineDescriptor",
+            pipeline::RenderPipelineDescriptor {
+                vertex_function: vertex,
+                fragment_function: fragment,
+                vertex_descriptor,
+                colors: [pipeline::ColorAttachment::fresh(); pipeline::COLOR_ATTACHMENTS],
+                depth_format: 0,
+                stencil_format: 0,
+                sample_count: 1,
+                alpha_to_coverage: false,
+                color_objects: std::ptr::null_mut(),
+            },
+        );
+        send_number(
+            element_at(send(descriptor, "colorAttachments"), 0),
+            "setPixelFormat:",
+            80,
+        );
+        let mut error = std::ptr::null_mut();
+        let state = new_render_pipeline(device, std::ptr::null(), descriptor, &mut error);
+        let target = resource::new_texture(
+            gpu_of(device).expect("a Vulkan device"),
+            resource::TextureDescriptor {
+                texture_type: 2,
+                pixel_format: 80,
+                width: 64,
+                height: 64,
+                depth: 1,
+                mipmap_level_count: 1,
+                sample_count: 1,
+                array_length: 1,
+                storage_mode: 2,
+                usage: gpu::USAGE_RENDER_TARGET,
+            },
+        );
+        let pass = object::make(
+            c"MTLRenderPassDescriptor",
+            encoder::RenderPassDescriptor::default(),
+        );
+        let attachment = element_at(send(pass, "colorAttachments"), 0);
+        send_with_object(attachment, "setTexture:", target);
+        send_number(attachment, "setLoadAction:", 2);
+        send_number(attachment, "setStoreAction:", 1);
+
+        let pool = objc::arc::pool_push();
+        let start = std::time::Instant::now();
+        let command = send(queue, "commandBuffer");
+        let encoder = render_encoder(command, pass);
+        send_with_object(encoder, "setRenderPipelineState:", state);
+        for index in 0..DRAWS {
+            set_buffer_named(
+                encoder,
+                "setVertexBuffer:offset:atIndex:",
+                buffers[index % 2],
+                0,
+                0,
+            );
+            draw(encoder, 3);
+        }
+        send_void(encoder, "endEncoding");
+        send_void(command, "commit");
+        let recorded = start.elapsed();
+        send_void(command, "waitUntilCompleted");
+        objc::arc::pool_pop(pool);
+        recorded
+    };
+    eprintln!(
+        "recording: {:.2} us/dispatch, {:.2} us/draw",
+        compute.as_secs_f64() * 1e6 / DISPATCHES as f64,
+        render.as_secs_f64() * 1e6 / DRAWS as f64,
+    );
 }

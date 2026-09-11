@@ -47,9 +47,15 @@ pub(crate) struct Target {
 #[inline(always)]
 fn directory() -> Option<&'static std::path::Path> {
     #[dynamic]
-    static DIRECTORY: Option<std::path::PathBuf> = std::env::var_os("ROSETTA3_PASS_OUT").map(std::path::PathBuf::from);
+    static DIRECTORY: Option<std::path::PathBuf> =
+        std::env::var_os("ROSETTA3_PASS_OUT").map(std::path::PathBuf::from);
 
     DIRECTORY.as_deref()
+}
+
+/// Whether `ROSETTA3_PASS_OUT` is set at all.
+pub(crate) fn enabled() -> bool {
+    directory().is_some()
 }
 
 /// Whether this pass should be captured, and the serial number to name it by.

@@ -301,16 +301,6 @@ pub(crate) fn new_buffer(gpu: &'static Gpu, length: usize, options: u64) -> Id {
     )
 }
 
-/// The mapping behind an `MTLBuffer` this crate made.
-///
-/// # Safety
-///
-/// `buffer` is a buffer of this crate's.
-pub(crate) unsafe fn contents_of(buffer: Id) -> *mut u8 {
-    // SAFETY: the caller's guarantee.
-    unsafe { object::body::<Buffer>(buffer) }.inner.contents
-}
-
 unsafe extern "C" fn buffer_contents(receiver: Id, _sel: Sel) -> *mut u8 {
     // SAFETY: a buffer of this crate's.
     unsafe { object::body::<Buffer>(receiver) }.inner.contents

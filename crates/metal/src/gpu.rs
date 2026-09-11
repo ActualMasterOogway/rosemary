@@ -38,6 +38,14 @@ pub struct Gpu {
     timestamp_pools: Mutex<Vec<vk::QueryPool>>,
     timestamp_period: f32,
     timestamp_valid_bits: u32,
+    /// Command pools, descriptor pools and upload chunks whose submission has
+    /// retired, kept for the next command buffer. A game commits several
+    /// command buffers a frame, and creating and destroying each one's pool,
+    /// fence and descriptor pools every frame is driver work on the thread the
+    /// guest records on.
+    contexts: Mutex<Vec<CommandContext>>,
+    descriptor_pools: Mutex<Vec<vk::DescriptorPool>>,
+    upload_chunks: Mutex<Vec<GpuBuffer>>,
     /// `VK_KHR_swapchain`'s device functions, where the device has it. `None`
     /// is a device which cannot present at all, and presentation falls back
     /// to reading the frame back and blitting it through SDL's window
@@ -50,6 +58,23 @@ struct Immediate {
     command_buffer: vk::CommandBuffer,
     fence: vk::Fence,
 }
+
+/// One command buffer with the pool it was allocated from and the fence its
+/// submission signals.
+pub struct CommandContext {
+    pub pool: vk::CommandPool,
+    pub command_buffer: vk::CommandBuffer,
+    pub fence: vk::Fence,
+}
+
+/// How many retired objects of each kind are kept for reuse. Enough for the
+/// command buffers of a few frames in flight; a burst beyond it is destroyed
+/// rather than held for the rest of the run.
+const RECYCLED: usize = 32;
+
+/// The size of one chunk `-setBytes:` copies are cut from. Metal limits one
+/// copy to four kilobytes, so a chunk holds a frame's worth of them.
+pub const UPLOAD_CHUNK: u64 = 256 << 10;
 
 /// A render pass is keyed by the formats and load/store actions of its
 /// attachments: Vulkan bakes into the pass what Metal carries on the
@@ -149,6 +174,9 @@ impl Gpu {
             timestamp_pools: Mutex::new(Vec::new()),
             timestamp_period: properties.limits.timestamp_period,
             timestamp_valid_bits: families[queue_family as usize].timestamp_valid_bits,
+            contexts: Mutex::new(Vec::new()),
+            descriptor_pools: Mutex::new(Vec::new()),
+            upload_chunks: Mutex::new(Vec::new()),
             swapchain_api,
         })
     }
@@ -821,6 +849,143 @@ impl Gpu {
         }
     }
 
+    /// A command buffer ready to begin, recycled where one has retired.
+    pub fn acquire_context(&self) -> Result<CommandContext, String> {
+        if let Some(context) = self.contexts.lock().expect("command contexts").pop() {
+            return Ok(context);
+        }
+        let pool_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(self.queue_family)
+            .flags(vk::CommandPoolCreateFlags::TRANSIENT);
+        // SAFETY: a well-formed create info on this live device.
+        let pool = unsafe { self.device.create_command_pool(&pool_info, None) }
+            .map_err(|error| format!("vkCreateCommandPool failed with {error:?}"))?;
+        let allocate = vk::CommandBufferAllocateInfo::default()
+            .command_pool(pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let destroy_pool = || {
+            // SAFETY: nothing allocated from the pool is in use.
+            unsafe { self.device.destroy_command_pool(pool, None) }
+        };
+        // SAFETY: the pool was just created by this device.
+        let command_buffer = match unsafe { self.device.allocate_command_buffers(&allocate) } {
+            Ok(buffers) => buffers[0],
+            Err(error) => {
+                destroy_pool();
+                return Err(format!("vkAllocateCommandBuffers failed with {error:?}"));
+            }
+        };
+        // SAFETY: a well-formed create info on this live device.
+        let fence = match unsafe {
+            self.device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+        } {
+            Ok(fence) => fence,
+            Err(error) => {
+                destroy_pool();
+                return Err(format!("vkCreateFence failed with {error:?}"));
+            }
+        };
+        Ok(CommandContext {
+            pool,
+            command_buffer,
+            fence,
+        })
+    }
+
+    /// Hand back a command buffer which is not pending on the queue: its work
+    /// has completed, or it was never submitted.
+    pub fn release_context(&self, context: CommandContext) {
+        // SAFETY: the caller guarantees nothing allocated from the pool is
+        // pending, and the pool is not in use on any other thread.
+        let reset = unsafe {
+            self.device
+                .reset_command_pool(context.pool, vk::CommandPoolResetFlags::empty())
+        };
+        let mut contexts = self.contexts.lock().expect("command contexts");
+        if reset.is_ok() && contexts.len() < RECYCLED {
+            contexts.push(context);
+            return;
+        }
+        drop(contexts);
+        // SAFETY: as above.
+        unsafe {
+            self.device.destroy_command_pool(context.pool, None);
+            self.device.destroy_fence(context.fence, None);
+        }
+    }
+
+    /// An empty descriptor pool, recycled where one has retired.
+    pub fn acquire_descriptor_pool(&self) -> Result<vk::DescriptorPool, String> {
+        if let Some(pool) = self
+            .descriptor_pools
+            .lock()
+            .expect("descriptor pools")
+            .pop()
+        {
+            return Ok(pool);
+        }
+        const CAPACITY: u32 = 512;
+        let sizes = [
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(CAPACITY * 4),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(CAPACITY * 4),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_IMAGE)
+                .descriptor_count(CAPACITY),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLER)
+                .descriptor_count(CAPACITY * 2),
+        ];
+        let info = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(CAPACITY)
+            .pool_sizes(&sizes);
+        // SAFETY: a well-formed create info on this live device.
+        unsafe { self.device.create_descriptor_pool(&info, None) }
+            .map_err(|error| format!("vkCreateDescriptorPool failed with {error:?}"))
+    }
+
+    /// Hand back a descriptor pool none of whose sets a pending submission
+    /// still reads.
+    pub fn release_descriptor_pool(&self, pool: vk::DescriptorPool) {
+        // SAFETY: the caller guarantees no set from the pool is in use.
+        let reset = unsafe {
+            self.device
+                .reset_descriptor_pool(pool, vk::DescriptorPoolResetFlags::empty())
+        };
+        let mut pools = self.descriptor_pools.lock().expect("descriptor pools");
+        if reset.is_ok() && pools.len() < RECYCLED {
+            pools.push(pool);
+            return;
+        }
+        drop(pools);
+        // SAFETY: as above.
+        unsafe { self.device.destroy_descriptor_pool(pool, None) };
+    }
+
+    /// A host-visible buffer of [`UPLOAD_CHUNK`] bytes for small copies.
+    pub fn acquire_upload_chunk(&self) -> Result<GpuBuffer, String> {
+        if let Some(chunk) = self.upload_chunks.lock().expect("upload chunks").pop() {
+            return Ok(chunk);
+        }
+        self.create_buffer(UPLOAD_CHUNK)
+    }
+
+    /// Hand back an upload chunk no pending submission still reads.
+    pub fn release_upload_chunk(&self, chunk: GpuBuffer) {
+        let mut chunks = self.upload_chunks.lock().expect("upload chunks");
+        if chunks.len() < RECYCLED / 2 {
+            chunks.push(chunk);
+            return;
+        }
+        drop(chunks);
+        self.destroy_buffer(chunk);
+    }
+
     pub fn timestamp_period(&self) -> f64 {
         f64::from(self.timestamp_period)
     }
@@ -854,6 +1019,10 @@ pub struct GpuBuffer {
     pub contents: *mut u8,
     pub length: u64,
 }
+
+// SAFETY: `contents` is a permanent mapping of device memory, valid on every
+// thread; see `Allocation`.
+unsafe impl Send for GpuBuffer {}
 
 pub struct GpuImage {
     pub image: vk::Image,

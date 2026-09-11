@@ -13,7 +13,7 @@ use objc::object::Id;
 use objc::sel::Sel;
 use std::sync::{Arc, Condvar, Mutex};
 
-use crate::gpu::{self, Gpu, RenderPassKey};
+use crate::gpu::{self, CommandContext, Gpu, GpuBuffer, RenderPassKey};
 use crate::object::{self, methods};
 use crate::pipeline::{
     ComputePipeline, DepthStencilKey, RenderPipeline, RenderVariantKey, SETS, descriptor_type,
@@ -25,19 +25,81 @@ use crate::stats::{self, Counter};
 const STAGES: usize = 3;
 const SLOTS: usize = 32;
 
+/// A bound buffer, resolved to its Vulkan handle when it is bound so a draw
+/// does not reach through the object for it.
 #[derive(Clone, Copy)]
 struct BufferBinding {
-    object: Id,
+    buffer: vk::Buffer,
     offset: u64,
+    /// The offset past which the binding has no bytes.
+    end: u64,
+    /// The descriptor's range: the rest of a guest buffer, or exactly the
+    /// bytes a `-setBytes:` copied.
+    range: u64,
 }
 
 impl Default for BufferBinding {
     fn default() -> Self {
         Self {
-            object: std::ptr::null_mut(),
+            buffer: vk::Buffer::null(),
             offset: 0,
+            end: 0,
+            range: vk::WHOLE_SIZE,
         }
     }
+}
+
+/// A hasher for object addresses, which are already unique: the command
+/// buffer's retained set is probed on every bind.
+#[derive(Default)]
+struct AddressHasher(u64);
+
+impl std::hash::Hasher for AddressHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3);
+        }
+    }
+
+    fn write_usize(&mut self, address: usize) {
+        let mixed = (address as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        self.0 = mixed ^ (mixed >> 32);
+    }
+}
+
+type AddressSet = std::collections::HashSet<usize, std::hash::BuildHasherDefault<AddressHasher>>;
+
+/// One descriptor write, as the encoder last recorded it for a set.
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct DescriptorEntry {
+    binding: u32,
+    kind: vk::DescriptorType,
+    /// The buffer, image view or sampler, as its raw handle.
+    handle: u64,
+    offset: u64,
+    range: u64,
+}
+
+/// The descriptor set last written for one set index, reused while the
+/// resources a draw needs are the ones it already holds.
+#[derive(Default)]
+struct SetCache {
+    layout: vk::DescriptorSetLayout,
+    set: vk::DescriptorSet,
+    entries: Vec<DescriptorEntry>,
+}
+
+/// What is bound at one bind point, so that a draw which changes nothing
+/// records nothing.
+#[derive(Default)]
+struct BindPoint {
+    pipeline: vk::Pipeline,
+    layouts: [vk::DescriptorSetLayout; SETS],
+    sets: [vk::DescriptorSet; SETS],
 }
 
 pub(crate) struct CommandQueue {
@@ -56,7 +118,15 @@ pub(crate) struct CommandBuffer {
     pub fence: vk::Fence,
     descriptor_pools: Vec<vk::DescriptorPool>,
     /// Objects the recording refers to, retained until the work completes.
+    /// Each is retained once however often it is bound: a retain is a global
+    /// lock in the Objective-C runtime, and a frame binds the same objects
+    /// thousands of times.
     retained: Vec<Id>,
+    retained_set: AddressSet,
+    /// Chunks `-setBytes:` copies are cut from, and how far into the last
+    /// one the copies have reached.
+    uploads: Vec<GpuBuffer>,
+    upload_used: u64,
     framebuffers: Vec<vk::Framebuffer>,
     /// `ROSETTA3_PASS_OUT`: attachment readbacks written once the work is done.
     captures: Vec<crate::capture::Capture>,
@@ -133,6 +203,7 @@ pub(crate) struct Submission {
     fence: vk::Fence,
     descriptor_pools: Vec<vk::DescriptorPool>,
     retained: Vec<usize>,
+    uploads: Vec<GpuBuffer>,
     framebuffers: Vec<vk::Framebuffer>,
     captures: Vec<crate::capture::Capture>,
     completed_handlers: Vec<usize>,
@@ -169,6 +240,21 @@ pub(crate) struct Encoder {
     /// and the ordinal the capture of this pass is named by.
     capture_targets: Vec<crate::capture::Target>,
     capture_pass: Option<u64>,
+    /// The pipeline variant the last draw or dispatch used, with the state
+    /// which chose it, so a run of draws with one state asks no cache.
+    render_variant: Option<(Id, RenderVariantKey, vk::Pipeline)>,
+    compute_variant: Option<(Id, [u32; 3], vk::Pipeline)>,
+    /// Index by `bind_point_slot`.
+    bound: [BindPoint; 2],
+    set_cache: [SetCache; SETS],
+    /// Scratch for the entries a draw needs, kept to avoid an allocation.
+    wanted: [Vec<DescriptorEntry>; SETS],
+    vertex_buffers: [(vk::Buffer, u64); SLOTS],
+    index_buffer: (vk::Buffer, u64, vk::IndexType),
+}
+
+fn bind_point_slot(bind_point: vk::PipelineBindPoint) -> usize {
+    usize::from(bind_point == vk::PipelineBindPoint::GRAPHICS)
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -256,45 +342,28 @@ unsafe extern "C" fn new_command_buffer(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: a command queue of this crate's.
     let queue = unsafe { object::body::<CommandQueue>(receiver) };
     let gpu = queue.gpu;
-    let pool_info = vk::CommandPoolCreateInfo::default()
-        .queue_family_index(gpu.queue_family)
-        .flags(vk::CommandPoolCreateFlags::TRANSIENT);
-    // SAFETY: a well-formed create info on this live device.
-    let pool = match unsafe { gpu.device.create_command_pool(&pool_info, None) } {
-        Ok(pool) => pool,
-        Err(error) => {
-            gpu::trace(format!("vkCreateCommandPool failed with {error:?}"));
+    let context = match gpu.acquire_context() {
+        Ok(context) => context,
+        Err(reason) => {
+            gpu::trace(reason);
             return std::ptr::null_mut();
         }
     };
-    let allocate = vk::CommandBufferAllocateInfo::default()
-        .command_pool(pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(1);
-    // SAFETY: the pool was just created by this device.
-    let command_buffer = match unsafe { gpu.device.allocate_command_buffers(&allocate) } {
-        Ok(buffers) => buffers[0],
-        Err(error) => {
-            gpu::trace(format!("vkAllocateCommandBuffers failed with {error:?}"));
-            return std::ptr::null_mut();
-        }
-    };
-    // SAFETY: a well-formed create info on this live device.
-    let fence = match unsafe {
-        gpu.device
-            .create_fence(&vk::FenceCreateInfo::default(), None)
-    } {
-        Ok(fence) => fence,
-        Err(error) => {
-            gpu::trace(format!("vkCreateFence failed with {error:?}"));
-            return std::ptr::null_mut();
-        }
-    };
+    let CommandContext {
+        pool,
+        command_buffer,
+        fence,
+    } = context;
     let begin =
         vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-    // SAFETY: the command buffer is fresh and unrecorded.
+    // SAFETY: the command buffer is fresh or was reset with its pool.
     if let Err(error) = unsafe { gpu.device.begin_command_buffer(command_buffer, &begin) } {
         gpu::trace(format!("vkBeginCommandBuffer failed with {error:?}"));
+        gpu.release_context(CommandContext {
+            pool,
+            command_buffer,
+            fence,
+        });
         return std::ptr::null_mut();
     }
     let timestamps = gpu.timestamp_pool();
@@ -325,6 +394,9 @@ unsafe extern "C" fn new_command_buffer(receiver: Id, _sel: Sel) -> Id {
             fence,
             descriptor_pools: Vec::new(),
             retained: Vec::new(),
+            retained_set: AddressSet::default(),
+            uploads: Vec::new(),
+            upload_used: 0,
             framebuffers: Vec::new(),
             captures: Vec::new(),
             scheduled_handlers: Vec::new(),
@@ -355,16 +427,17 @@ unsafe extern "C" fn command_buffer_dealloc(receiver: Id, _sel: Sel) {
             gpu.destroy_buffer(capture.buffer);
         }
         for pool in std::mem::take(&mut command.descriptor_pools) {
-            // SAFETY: as above.
-            unsafe { gpu.device.destroy_descriptor_pool(pool, None) };
+            gpu.release_descriptor_pool(pool);
         }
-        // SAFETY: as above.
-        unsafe {
-            gpu.device
-                .free_command_buffers(command.pool, &[command.command_buffer]);
-            gpu.device.destroy_command_pool(command.pool, None);
-            gpu.device.destroy_fence(command.fence, None);
+        for chunk in std::mem::take(&mut command.uploads) {
+            gpu.release_upload_chunk(chunk);
         }
+        // Never submitted, so nothing allocated from the pool is pending.
+        gpu.release_context(CommandContext {
+            pool: command.pool,
+            command_buffer: command.command_buffer,
+            fence: command.fence,
+        });
         gpu.release_timestamp_pool(std::mem::replace(
             &mut command.timestamps,
             vk::QueryPool::null(),
@@ -393,7 +466,7 @@ unsafe extern "C" fn command_buffer_dealloc(receiver: Id, _sel: Sel) {
 
 impl CommandBuffer {
     fn retain(&mut self, object: Id) {
-        if !object.is_null() {
+        if !object.is_null() && self.retained_set.insert(object as usize) {
             self.retained.push(objc::arc::retain(object));
         }
     }
@@ -412,7 +485,7 @@ impl CommandBuffer {
                         stats::count(Counter::DescriptorSets);
                         return sets.first().copied();
                     }
-                    // A full pool is expected: allocate another and retry.
+                    // A full pool is expected: take another and retry.
                     Err(_) if attempt == 0 => {}
                     Err(error) => {
                         gpu::trace(format!("vkAllocateDescriptorSets failed with {error:?}"));
@@ -420,34 +493,52 @@ impl CommandBuffer {
                     }
                 }
             }
-            const CAPACITY: u32 = 512;
-            let sizes = [
-                vk::DescriptorPoolSize::default()
-                    .ty(vk::DescriptorType::STORAGE_BUFFER)
-                    .descriptor_count(CAPACITY * 4),
-                vk::DescriptorPoolSize::default()
-                    .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                    .descriptor_count(CAPACITY * 4),
-                vk::DescriptorPoolSize::default()
-                    .ty(vk::DescriptorType::STORAGE_IMAGE)
-                    .descriptor_count(CAPACITY),
-                vk::DescriptorPoolSize::default()
-                    .ty(vk::DescriptorType::SAMPLER)
-                    .descriptor_count(CAPACITY * 2),
-            ];
-            let info = vk::DescriptorPoolCreateInfo::default()
-                .max_sets(CAPACITY)
-                .pool_sizes(&sizes);
-            // SAFETY: a well-formed create info on this live device.
-            match unsafe { self.gpu.device.create_descriptor_pool(&info, None) } {
+            match self.gpu.acquire_descriptor_pool() {
                 Ok(pool) => self.descriptor_pools.push(pool),
-                Err(error) => {
-                    gpu::trace(format!("vkCreateDescriptorPool failed with {error:?}"));
+                Err(reason) => {
+                    gpu::trace(reason);
                     return None;
                 }
             }
         }
         None
+    }
+
+    /// Copy `bytes` into this command buffer's upload chunks, answering the
+    /// buffer and offset they landed at. The copy lives until the work does.
+    fn upload(&mut self, bytes: &[u8]) -> Option<(vk::Buffer, u64)> {
+        let length = bytes.len() as u64;
+        let limits = &self.gpu.limits;
+        let alignment = limits
+            .min_storage_buffer_offset_alignment
+            .max(limits.min_uniform_buffer_offset_alignment)
+            .max(16);
+        let offset = self.upload_used.next_multiple_of(alignment);
+        let offset = match self.uploads.last() {
+            Some(_) if offset + length <= gpu::UPLOAD_CHUNK => offset,
+            _ => {
+                match self.gpu.acquire_upload_chunk() {
+                    Ok(chunk) => self.uploads.push(chunk),
+                    Err(reason) => {
+                        gpu::trace(format!("setBytes: upload chunk failed: {reason}"));
+                        return None;
+                    }
+                }
+                0
+            }
+        };
+        let chunk = self.uploads.last().expect("a chunk was just ensured");
+        // SAFETY: the chunk is mapped over `UPLOAD_CHUNK` bytes, and this range
+        // is inside it and handed out once.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                chunk.contents.add(offset as usize),
+                bytes.len(),
+            )
+        };
+        self.upload_used = offset + length;
+        Some((chunk.buffer, offset))
     }
 }
 
@@ -527,10 +618,14 @@ unsafe extern "C" fn commit(receiver: Id, _sel: Sel) {
         command_buffer: command.command_buffer,
         fence: command.fence,
         descriptor_pools: std::mem::take(&mut command.descriptor_pools),
-        retained: std::mem::take(&mut command.retained)
-            .into_iter()
-            .map(|object| object as usize)
-            .collect(),
+        retained: {
+            command.retained_set = AddressSet::default();
+            std::mem::take(&mut command.retained)
+                .into_iter()
+                .map(|object| object as usize)
+                .collect()
+        },
+        uploads: std::mem::take(&mut command.uploads),
         framebuffers: std::mem::take(&mut command.framebuffers),
         captures: std::mem::take(&mut command.captures),
         completed_handlers: std::mem::take(&mut command.completed_handlers)
@@ -626,20 +721,21 @@ impl Submission {
             unsafe { self.gpu.device.destroy_framebuffer(framebuffer, None) };
         }
         for pool in self.descriptor_pools.drain(..) {
-            // SAFETY: as above; the sets allocated from it are no longer in use.
-            unsafe { self.gpu.device.destroy_descriptor_pool(pool, None) };
+            // The sets allocated from it are no longer in use.
+            self.gpu.release_descriptor_pool(pool);
+        }
+        for chunk in self.uploads.drain(..) {
+            self.gpu.release_upload_chunk(chunk);
         }
         for object in self.retained.drain(..).map(|object| object as Id) {
             objc::arc::release(object);
         }
-        // SAFETY: as above.
-        unsafe {
-            self.gpu
-                .device
-                .free_command_buffers(self.pool, &[self.command_buffer]);
-            self.gpu.device.destroy_command_pool(self.pool, None);
-            self.gpu.device.destroy_fence(self.fence, None);
-        }
+        // The submission finished, or never reached the queue.
+        self.gpu.release_context(CommandContext {
+            pool: self.pool,
+            command_buffer: self.command_buffer,
+            fence: self.fence,
+        });
         self.completion
             .finish(if result.is_ok() { 4 } else { 5 }, gpu_times);
         let object = self.object as Id;
@@ -716,6 +812,13 @@ pub(crate) fn new_encoder(command_buffer: Id, kind: Kind) -> Id {
             pending_copies: Vec::new(),
             capture_targets: Vec::new(),
             capture_pass: None,
+            render_variant: None,
+            compute_variant: None,
+            bound: Default::default(),
+            set_cache: Default::default(),
+            wanted: Default::default(),
+            vertex_buffers: [(vk::Buffer::null(), 0); SLOTS],
+            index_buffer: (vk::Buffer::null(), 0, vk::IndexType::UINT16),
         },
     ))
 }
@@ -775,35 +878,16 @@ impl Encoder {
     ) {
         let command = self.command();
         let gpu = command.gpu;
-        let mut sets = [vk::DescriptorSet::null(); SETS];
         let mut used = [false; SETS];
-        for binding in resources {
-            let set = binding.descriptor_set as usize;
-            if set < SETS {
-                used[set] = true;
-            }
-        }
-        for (index, present) in used.iter().enumerate() {
-            if *present {
-                let Some(set) = command.allocate_set(layouts[index]) else {
-                    return;
-                };
-                sets[index] = set;
-            }
-        }
-
-        let mut buffer_infos = Vec::new();
-        let mut image_infos = Vec::new();
-        let mut writes: Vec<(usize, u32, vk::DescriptorType, Which)> = Vec::new();
-        enum Which {
-            Buffer(usize),
-            Image(usize),
+        for wanted in &mut self.wanted {
+            wanted.clear();
         }
         for binding in resources {
             let set = binding.descriptor_set as usize;
             if set >= SETS {
                 continue;
             }
+            used[set] = true;
             let slot = stage_slot(binding.stage);
             let index = binding.metal_index as usize;
             if index >= SLOTS {
@@ -812,26 +896,18 @@ impl Encoder {
             let Some(kind) = descriptor_type(binding) else {
                 continue;
             };
-            match binding.kind {
+            let (handle, offset, range) = match binding.kind {
                 ResourceKind::Buffer => {
                     let bound = self.buffers[slot][index];
-                    if bound.object.is_null() {
+                    if bound.buffer == vk::Buffer::null() {
                         continue;
                     }
-                    // SAFETY: only a buffer of this crate's is ever bound.
-                    let buffer = unsafe { object::body::<Buffer>(bound.object) };
-                    buffer_infos.push(
-                        vk::DescriptorBufferInfo::default()
-                            .buffer(buffer.inner.buffer)
-                            .offset(bound.offset.min(buffer.inner.length))
-                            .range(vk::WHOLE_SIZE),
-                    );
-                    writes.push((
-                        set,
-                        binding.binding,
-                        kind,
-                        Which::Buffer(buffer_infos.len() - 1),
-                    ));
+                    use vk::Handle;
+                    (
+                        bound.buffer.as_raw(),
+                        bound.offset.min(bound.end),
+                        bound.range,
+                    )
                 }
                 ResourceKind::Texture => {
                     let bound = self.textures[slot][index];
@@ -840,17 +916,8 @@ impl Encoder {
                     }
                     // SAFETY: only a texture of this crate's is ever bound.
                     let texture = unsafe { object::body::<Texture>(bound) };
-                    image_infos.push(
-                        vk::DescriptorImageInfo::default()
-                            .image_view(texture.image.view)
-                            .image_layout(vk::ImageLayout::GENERAL),
-                    );
-                    writes.push((
-                        set,
-                        binding.binding,
-                        kind,
-                        Which::Image(image_infos.len() - 1),
-                    ));
+                    use vk::Handle;
+                    (texture.image.view.as_raw(), 0, 0)
                 }
                 ResourceKind::Sampler => {
                     let bound = self.samplers[slot][index];
@@ -859,53 +926,140 @@ impl Encoder {
                     }
                     // SAFETY: only a sampler state of this crate's is bound.
                     let sampler = unsafe { object::body::<SamplerState>(bound) };
-                    image_infos.push(vk::DescriptorImageInfo::default().sampler(sampler.sampler));
-                    writes.push((
-                        set,
-                        binding.binding,
-                        kind,
-                        Which::Image(image_infos.len() - 1),
-                    ));
+                    use vk::Handle;
+                    (sampler.sampler.as_raw(), 0, 0)
                 }
                 _ => continue,
+            };
+            self.wanted[set].push(DescriptorEntry {
+                binding: binding.binding,
+                kind,
+                handle,
+                offset,
+                range,
+            });
+        }
+
+        // A set whose layout and contents match the one this encoder last
+        // wrote is still valid: nothing writes a set once a draw has used it.
+        let mut sets = [vk::DescriptorSet::null(); SETS];
+        let mut fresh = [false; SETS];
+        for index in 0..SETS {
+            if !used[index] {
+                continue;
+            }
+            let cache = &mut self.set_cache[index];
+            if cache.set != vk::DescriptorSet::null()
+                && cache.layout == layouts[index]
+                && cache.entries == self.wanted[index]
+            {
+                sets[index] = cache.set;
+                continue;
+            }
+            let Some(set) = command.allocate_set(layouts[index]) else {
+                return;
+            };
+            cache.layout = layouts[index];
+            cache.set = set;
+            std::mem::swap(&mut cache.entries, &mut self.wanted[index]);
+            sets[index] = set;
+            fresh[index] = true;
+        }
+
+        if fresh.iter().any(|fresh| *fresh) {
+            let mut buffer_infos = Vec::new();
+            let mut image_infos = Vec::new();
+            for index in (0..SETS).filter(|index| fresh[*index]) {
+                for entry in &self.set_cache[index].entries {
+                    use vk::Handle;
+                    match entry.kind {
+                        vk::DescriptorType::STORAGE_BUFFER => buffer_infos.push(
+                            vk::DescriptorBufferInfo::default()
+                                .buffer(vk::Buffer::from_raw(entry.handle))
+                                .offset(entry.offset)
+                                .range(entry.range),
+                        ),
+                        vk::DescriptorType::SAMPLER => image_infos.push(
+                            vk::DescriptorImageInfo::default()
+                                .sampler(vk::Sampler::from_raw(entry.handle)),
+                        ),
+                        _ => image_infos.push(
+                            vk::DescriptorImageInfo::default()
+                                .image_view(vk::ImageView::from_raw(entry.handle))
+                                .image_layout(vk::ImageLayout::GENERAL),
+                        ),
+                    }
+                }
+            }
+            let (mut next_buffer, mut next_image) = (0, 0);
+            let mut writes = Vec::with_capacity(buffer_infos.len() + image_infos.len());
+            for index in (0..SETS).filter(|index| fresh[*index]) {
+                for entry in &self.set_cache[index].entries {
+                    let write = vk::WriteDescriptorSet::default()
+                        .dst_set(sets[index])
+                        .dst_binding(entry.binding)
+                        .descriptor_type(entry.kind);
+                    writes.push(match entry.kind {
+                        vk::DescriptorType::STORAGE_BUFFER => {
+                            next_buffer += 1;
+                            write.buffer_info(std::slice::from_ref(&buffer_infos[next_buffer - 1]))
+                        }
+                        _ => {
+                            next_image += 1;
+                            write.image_info(std::slice::from_ref(&image_infos[next_image - 1]))
+                        }
+                    });
+                }
+            }
+            if !writes.is_empty() {
+                // SAFETY: every referenced info lives across the call, and the
+                // sets are fresh, so no recorded command refers to them yet.
+                unsafe { gpu.device.update_descriptor_sets(&writes, &[]) };
             }
         }
 
-        let descriptor_writes = writes
-            .iter()
-            .map(|(set, binding, kind, which)| {
-                let write = vk::WriteDescriptorSet::default()
-                    .dst_set(sets[*set])
-                    .dst_binding(*binding)
-                    .descriptor_type(*kind);
-                match which {
-                    Which::Buffer(at) => {
-                        write.buffer_info(std::slice::from_ref(&buffer_infos[*at]))
-                    }
-                    Which::Image(at) => write.image_info(std::slice::from_ref(&image_infos[*at])),
-                }
-            })
-            .collect::<Vec<_>>();
-        if !descriptor_writes.is_empty() {
-            // SAFETY: every referenced info lives across the call, and the sets
-            // are not in use by a submitted command buffer.
-            unsafe { gpu.device.update_descriptor_sets(&descriptor_writes, &[]) };
+        // Pipeline layouts built from the same set layouts are compatible, so
+        // a set already bound under an identical shape stays bound.
+        let bound = &mut self.bound[bind_point_slot(bind_point)];
+        let compatible = bound.layouts == *layouts;
+        if !compatible {
+            bound.layouts = *layouts;
+            bound.sets = [vk::DescriptorSet::null(); SETS];
         }
-        for (index, present) in used.iter().enumerate() {
-            if *present {
-                // SAFETY: recording into this command buffer.
-                unsafe {
-                    gpu.device.cmd_bind_descriptor_sets(
-                        command.command_buffer,
-                        bind_point,
-                        pipeline_layout,
-                        index as u32,
-                        &[sets[index]],
-                        &[],
-                    )
-                };
+        for index in (0..SETS).filter(|index| used[*index]) {
+            if bound.sets[index] == sets[index] {
+                continue;
             }
+            bound.sets[index] = sets[index];
+            // SAFETY: recording into this command buffer.
+            unsafe {
+                gpu.device.cmd_bind_descriptor_sets(
+                    command.command_buffer,
+                    bind_point,
+                    pipeline_layout,
+                    index as u32,
+                    &[sets[index]],
+                    &[],
+                )
+            };
         }
+    }
+
+    /// Bind `pipeline` unless it is already what this bind point has bound.
+    fn bind_pipeline(&mut self, bind_point: vk::PipelineBindPoint, pipeline: vk::Pipeline) {
+        let bound = &mut self.bound[bind_point_slot(bind_point)];
+        if bound.pipeline == pipeline {
+            return;
+        }
+        bound.pipeline = pipeline;
+        let command = self.command();
+        // SAFETY: recording into this command buffer.
+        unsafe {
+            command
+                .gpu
+                .device
+                .cmd_bind_pipeline(command.command_buffer, bind_point, pipeline)
+        };
     }
 
     /// Metal orders the work of one encoder against the next; nothing here
@@ -999,42 +1153,61 @@ unsafe extern "C" fn end_encoding(receiver: Id, _sel: Sel) {
     encoder.barrier();
 }
 
+// A pipeline or depth/stencil state is read at every draw after it is set, so
+// the command buffer holds it from the moment it is bound, exactly as it holds
+// a bound buffer: a guest may release its own reference straight away.
+
 unsafe extern "C" fn set_compute_pipeline(receiver: Id, _sel: Sel, pipeline: Id) {
     // SAFETY: an encoder of this crate's.
-    unsafe { object::body::<Encoder>(receiver) }.compute_pipeline = pipeline;
+    let encoder = unsafe { object::body::<Encoder>(receiver) };
+    encoder.command().retain(pipeline);
+    encoder.compute_pipeline = pipeline;
 }
 
 unsafe extern "C" fn set_render_pipeline(receiver: Id, _sel: Sel, pipeline: Id) {
     // SAFETY: as above.
-    unsafe { object::body::<Encoder>(receiver) }.render_pipeline = pipeline;
+    let encoder = unsafe { object::body::<Encoder>(receiver) };
+    encoder.command().retain(pipeline);
+    encoder.render_pipeline = pipeline;
 }
 
 unsafe extern "C" fn set_depth_stencil_state(receiver: Id, _sel: Sel, state: Id) {
     // SAFETY: as above.
-    unsafe { object::body::<Encoder>(receiver) }.depth_state = state;
+    let encoder = unsafe { object::body::<Encoder>(receiver) };
+    encoder.command().retain(state);
+    encoder.depth_state = state;
 }
 
-/// The stage a Metal binding selector names.
-fn selector_stage(name: &[u8]) -> usize {
-    if name.starts_with(b"setVertex") {
-        1
-    } else if name.starts_with(b"setFragment") {
-        2
-    } else {
-        0
-    }
-}
+// The binding setters are registered once per stage, with the stage as a
+// const parameter: the generic, vertex and fragment spellings share a body.
 
-unsafe extern "C" fn set_buffer(receiver: Id, sel: Sel, buffer: Id, offset: u64, index: u64) {
+const COMPUTE: usize = 0;
+const VERTEX: usize = 1;
+const FRAGMENT: usize = 2;
+
+unsafe extern "C" fn set_buffer<const STAGE: usize>(
+    receiver: Id,
+    _sel: Sel,
+    buffer: Id,
+    offset: u64,
+    index: u64,
+) {
     // SAFETY: an encoder of this crate's.
     let encoder = unsafe { object::body::<Encoder>(receiver) };
-    // SAFETY: a selector the runtime owns.
-    let stage = selector_stage(unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes());
-    if let Some(slot) = encoder.buffers[stage].get_mut(index as usize) {
-        *slot = BufferBinding {
-            object: buffer,
+    let binding = if buffer.is_null() {
+        BufferBinding::default()
+    } else {
+        // SAFETY: only a buffer of this crate's is ever bound.
+        let inner = &unsafe { object::body::<Buffer>(buffer) }.inner;
+        BufferBinding {
+            buffer: inner.buffer,
             offset,
-        };
+            end: inner.length,
+            range: vk::WHOLE_SIZE,
+        }
+    };
+    if let Some(slot) = encoder.buffers[STAGE].get_mut(index as usize) {
+        *slot = binding;
     }
     // Metal retains what an encoder binds, and a guest is entitled to release
     // its own reference the moment the call returns. The command buffer's
@@ -1044,12 +1217,22 @@ unsafe extern "C" fn set_buffer(receiver: Id, sel: Sel, buffer: Id, offset: u64,
 
 /// `-setBytes:length:atIndex:` and its per-stage spellings.
 ///
-/// Metal's small inline constants, which have no `MTLBuffer` of their own. One
-/// is made here and retained by the command buffer, so the copy outlives the
+/// Metal's small inline constants, which have no `MTLBuffer` of their own. The
+/// bytes are copied into the command buffer's upload chunks, which outlive the
 /// recording exactly as a bound buffer does. Metal's own limit is four
 /// kilobytes; a larger one is refused rather than quietly turned into an
 /// allocation the guest never asked for.
-unsafe extern "C" fn set_bytes(receiver: Id, sel: Sel, bytes: *const u8, length: u64, index: u64) {
+///
+/// A game calls this for nearly every draw, so it must not make an object: a
+/// whole `MTLBuffer` here was a heap lock, a `VkBuffer`, a memory bind and two
+/// trips through the Objective-C runtime's global retain table per call.
+unsafe extern "C" fn set_bytes<const STAGE: usize>(
+    receiver: Id,
+    _sel: Sel,
+    bytes: *const u8,
+    length: u64,
+    index: u64,
+) {
     const LIMIT: u64 = 4096;
     // SAFETY: an encoder of this crate's.
     let encoder = unsafe { object::body::<Encoder>(receiver) };
@@ -1059,59 +1242,58 @@ unsafe extern "C" fn set_bytes(receiver: Id, sel: Sel, bytes: *const u8, length:
     }
     stats::count(Counter::SetBytesCalls);
     stats::add(Counter::SetBytesBytes, length);
-    let gpu = encoder.command().gpu;
-    let buffer = crate::resource::new_buffer(gpu, length as usize, 0);
-    if buffer.is_null() {
+    // SAFETY: the guest promised `length` readable bytes.
+    let source = unsafe { std::slice::from_raw_parts(bytes, length as usize) };
+    let Some((buffer, offset)) = encoder.command().upload(source) else {
         return;
-    }
-    // SAFETY: a buffer this call just made, whose mapping is `length` bytes.
-    let contents = unsafe { crate::resource::contents_of(buffer) };
-    if !contents.is_null() {
-        // SAFETY: the guest's `length` bytes into a mapping of that size.
-        unsafe { std::ptr::copy_nonoverlapping(bytes, contents, length as usize) };
-    }
-    // SAFETY: a selector the runtime owns.
-    let stage = selector_stage(unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes());
-    if let Some(slot) = encoder.buffers[stage].get_mut(index as usize) {
+    };
+    if let Some(slot) = encoder.buffers[STAGE].get_mut(index as usize) {
         *slot = BufferBinding {
-            object: buffer,
-            offset: 0,
+            buffer,
+            offset,
+            end: offset + length,
+            range: length,
         };
     }
-    // The encoder's own reference; the command buffer keeps it alive until the
-    // work it was recorded into has finished.
-    encoder.command().retain(buffer);
-    objc::arc::release(buffer);
 }
 
-unsafe extern "C" fn set_buffer_offset(receiver: Id, sel: Sel, offset: u64, index: u64) {
+unsafe extern "C" fn set_buffer_offset<const STAGE: usize>(
+    receiver: Id,
+    _sel: Sel,
+    offset: u64,
+    index: u64,
+) {
     // SAFETY: an encoder of this crate's.
     let encoder = unsafe { object::body::<Encoder>(receiver) };
-    // SAFETY: a selector the runtime owns.
-    let stage = selector_stage(unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes());
-    if let Some(slot) = encoder.buffers[stage].get_mut(index as usize) {
+    if let Some(slot) = encoder.buffers[STAGE].get_mut(index as usize) {
         slot.offset = offset;
     }
 }
 
-unsafe extern "C" fn set_texture(receiver: Id, sel: Sel, texture: Id, index: u64) {
+unsafe extern "C" fn set_texture<const STAGE: usize>(
+    receiver: Id,
+    _sel: Sel,
+    texture: Id,
+    index: u64,
+) {
     // SAFETY: an encoder of this crate's.
     let encoder = unsafe { object::body::<Encoder>(receiver) };
-    // SAFETY: a selector the runtime owns.
-    let stage = selector_stage(unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes());
     encoder.command().retain(texture);
-    if let Some(slot) = encoder.textures[stage].get_mut(index as usize) {
+    if let Some(slot) = encoder.textures[STAGE].get_mut(index as usize) {
         *slot = texture;
     }
 }
 
-unsafe extern "C" fn set_sampler(receiver: Id, sel: Sel, sampler: Id, index: u64) {
+unsafe extern "C" fn set_sampler<const STAGE: usize>(
+    receiver: Id,
+    _sel: Sel,
+    sampler: Id,
+    index: u64,
+) {
     // SAFETY: an encoder of this crate's.
     let encoder = unsafe { object::body::<Encoder>(receiver) };
-    // SAFETY: a selector the runtime owns.
-    let stage = selector_stage(unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes());
     encoder.command().retain(sampler);
-    if let Some(slot) = encoder.samplers[stage].get_mut(index as usize) {
+    if let Some(slot) = encoder.samplers[STAGE].get_mut(index as usize) {
         *slot = sampler;
     }
 }
@@ -1246,9 +1428,21 @@ unsafe extern "C" fn dispatch_threadgroups(
         per_group.height.max(1) as u32,
         per_group.depth.max(1) as u32,
     ];
-    let pipeline = match state.variant(size) {
-        Ok(pipeline) => pipeline,
-        Err(reason) => return gpu::trace(format!("compute pipeline creation failed: {reason}")),
+    let pipeline = match encoder.compute_variant {
+        Some((object, cached, pipeline))
+            if object == encoder.compute_pipeline && cached == size =>
+        {
+            pipeline
+        }
+        _ => match state.variant(size) {
+            Ok(pipeline) => {
+                encoder.compute_variant = Some((encoder.compute_pipeline, size, pipeline));
+                pipeline
+            }
+            Err(reason) => {
+                return gpu::trace(format!("compute pipeline creation failed: {reason}"));
+            }
+        },
     };
     // `-dispatchThreads:` counts threads; `-dispatchThreadgroups:` counts
     // groups. Metal rounds the thread form up to whole threadgroups.
@@ -1268,27 +1462,33 @@ unsafe extern "C" fn dispatch_threadgroups(
             groups.depth as u32,
         ]
     };
-    let command = encoder.command();
-    let device = command.gpu.device.clone();
-    let vk_command = command.command_buffer;
-    command.retain(encoder.compute_pipeline);
-    // SAFETY: recording into this command buffer.
-    unsafe { device.cmd_bind_pipeline(vk_command, vk::PipelineBindPoint::COMPUTE, pipeline) };
-    let resources = state.resources.clone();
-    let sets = state.layouts.sets;
-    let layout = state.layouts.pipeline;
-    encoder.bind_resources(&resources, &sets, layout, vk::PipelineBindPoint::COMPUTE);
+    encoder.bind_pipeline(vk::PipelineBindPoint::COMPUTE, pipeline);
+    encoder.bind_resources(
+        &state.resources,
+        &state.layouts.sets,
+        state.layouts.pipeline,
+        vk::PipelineBindPoint::COMPUTE,
+    );
     gpu::milestone("compute dispatch");
     stats::count(Counter::Dispatches);
-    // SAFETY: as above.
-    unsafe { device.cmd_dispatch(vk_command, counts[0], counts[1], counts[2]) };
+    let command = encoder.command();
+    // SAFETY: recording into this command buffer.
+    unsafe {
+        command
+            .gpu
+            .device
+            .cmd_dispatch(command.command_buffer, counts[0], counts[1], counts[2])
+    };
 }
 
 // ----------------------------------------------------------------- draw
 
 impl Encoder {
     /// Bind the pipeline variant and the resources one draw needs.
-    fn prepare_draw(&mut self, primitive: u64) -> Option<(ash::Device, vk::CommandBuffer)> {
+    fn prepare_draw(
+        &mut self,
+        primitive: u64,
+    ) -> Option<(&'static ash::Device, vk::CommandBuffer)> {
         if self.kind != Kind::Render || self.render_pipeline.is_null() || !self.in_render_pass {
             return None;
         }
@@ -1309,44 +1509,53 @@ impl Encoder {
             depth: DepthStencilKey::from(&depth),
             resolve_mask: self.resolve_mask,
         };
-        let pipeline = match state.variant(&key) {
-            Ok(pipeline) => pipeline,
-            Err(reason) => {
-                gpu::trace(format!("render pipeline creation failed: {reason}"));
-                return None;
+        let pipeline = match self.render_variant {
+            Some((object, cached, pipeline)) if object == self.render_pipeline && cached == key => {
+                pipeline
             }
+            _ => match state.variant(&key) {
+                Ok(pipeline) => {
+                    self.render_variant = Some((self.render_pipeline, key, pipeline));
+                    pipeline
+                }
+                Err(reason) => {
+                    gpu::trace(format!("render pipeline creation failed: {reason}"));
+                    return None;
+                }
+            },
         };
+        self.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, pipeline);
         let command = self.command();
-        let device = command.gpu.device.clone();
+        let device = &command.gpu.device;
         let vk_command = command.command_buffer;
-        command.retain(self.render_pipeline);
-        // SAFETY: recording into this command buffer.
-        unsafe { device.cmd_bind_pipeline(vk_command, vk::PipelineBindPoint::GRAPHICS, pipeline) };
 
         // Vertex streams are the buffer indices the vertex descriptor claims;
-        // every other bound buffer is a descriptor resource.
+        // every other bound buffer is a descriptor resource. The buffers were
+        // retained when they were bound.
         for stream in &state.vertex_streams {
-            let bound = self.buffers[1][*stream as usize % SLOTS];
-            if bound.object.is_null() {
+            let bound = self.buffers[VERTEX][*stream as usize % SLOTS];
+            if bound.buffer == vk::Buffer::null() {
                 continue;
             }
-            // SAFETY: only a buffer of this crate's is ever bound.
-            let buffer = unsafe { object::body::<Buffer>(bound.object) };
+            let binding = (bound.buffer, bound.offset.min(bound.end));
+            let Some(current) = self.vertex_buffers.get_mut(*stream as usize) else {
+                continue;
+            };
+            if *current == binding {
+                continue;
+            }
+            *current = binding;
             // SAFETY: recording into this command buffer.
             unsafe {
-                device.cmd_bind_vertex_buffers(
-                    vk_command,
-                    *stream,
-                    &[buffer.inner.buffer],
-                    &[bound.offset.min(buffer.inner.length)],
-                )
+                device.cmd_bind_vertex_buffers(vk_command, *stream, &[binding.0], &[binding.1])
             };
-            self.command().retain(bound.object);
         }
-        let resources = state.resources.clone();
-        let sets = state.layouts.sets;
-        let layout = state.layouts.pipeline;
-        self.bind_resources(&resources, &sets, layout, vk::PipelineBindPoint::GRAPHICS);
+        self.bind_resources(
+            &state.resources,
+            &state.layouts.sets,
+            state.layouts.pipeline,
+            vk::PipelineBindPoint::GRAPHICS,
+        );
         gpu::milestone("draw");
         stats::count(Counter::Draws);
         Some((device, vk_command))
@@ -1486,17 +1695,21 @@ unsafe fn draw_indexed(
     // SAFETY: the caller guarantees the buffer's class.
     let buffer = unsafe { object::body::<Buffer>(index_buffer) };
     encoder.command().retain(index_buffer);
+    let binding = (
+        buffer.inner.buffer,
+        index_offset,
+        match index_type {
+            1 => vk::IndexType::UINT32,
+            _ => vk::IndexType::UINT16,
+        },
+    );
+    if encoder.index_buffer != binding {
+        encoder.index_buffer = binding;
+        // SAFETY: recording into this command buffer.
+        unsafe { device.cmd_bind_index_buffer(command, binding.0, binding.1, binding.2) };
+    }
     // SAFETY: recording into this command buffer.
     unsafe {
-        device.cmd_bind_index_buffer(
-            command,
-            buffer.inner.buffer,
-            index_offset,
-            match index_type {
-                1 => vk::IndexType::UINT32,
-                _ => vk::IndexType::UINT16,
-            },
-        );
         device.cmd_draw_indexed(
             command,
             index_count as u32,
@@ -1776,7 +1989,7 @@ unsafe extern "C" fn generate_mipmaps(receiver: Id, _sel: Sel, texture: Id) {
     let command = encoder.command();
     // SAFETY: only a texture of this crate's reaches a blit encoder.
     let image = unsafe { object::body::<Texture>(texture) };
-    let device = command.gpu.device.clone();
+    let device = &command.gpu.device;
     let vk_command = command.command_buffer;
     let mut width = image.image.width as i32;
     let mut height = image.image.height as i32;
@@ -1921,7 +2134,9 @@ impl Default for RenderPassDescriptor {
 /// shader runs.
 fn trace_pass(key: &RenderPassKey, width: u32, height: u32) {
     static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-    if std::env::var_os("ROSETTA3_TRACE_PASSES").is_none() {
+    #[static_init::dynamic]
+    static ENABLED: bool = std::env::var_os("ROSETTA3_TRACE_PASSES").is_some();
+    if !*ENABLED {
         return;
     }
     let line = format!(
@@ -2039,6 +2254,9 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
     let mut width = u32::MAX;
     let mut height = u32::MAX;
     let mut textures = Vec::new();
+    // The targets only matter to `ROSETTA3_PASS_OUT`, and naming each one
+    // formats a string.
+    let capturing = crate::capture::enabled();
 
     for color in &descriptor.colors {
         if color.texture.is_null() {
@@ -2081,18 +2299,20 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
                 });
             }
         }
-        capture_targets.push(crate::capture::Target {
-            image: source_image,
-            aspect: vk::ImageAspectFlags::COLOR,
-            level,
-            slice: color.slice as u32,
-            width: level_extent(base_width, level),
-            height: level_extent(base_height, level),
-            format,
-            samples: texture.image.samples,
-            role: format!("c{}", key.colors.len() - 1),
-        });
-        if let Some(target) = &resolve {
+        if capturing {
+            capture_targets.push(crate::capture::Target {
+                image: source_image,
+                aspect: vk::ImageAspectFlags::COLOR,
+                level,
+                slice: color.slice as u32,
+                width: level_extent(base_width, level),
+                height: level_extent(base_height, level),
+                format,
+                samples: texture.image.samples,
+                role: format!("c{}", key.colors.len() - 1),
+            });
+        }
+        if let Some(target) = resolve.as_ref().filter(|_| capturing) {
             capture_targets.push(crate::capture::Target {
                 image: target.image,
                 aspect: vk::ImageAspectFlags::COLOR,
@@ -2155,17 +2375,19 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
         });
         width = width.min(level_extent(texture.image.width, level));
         height = height.min(level_extent(texture.image.height, level));
-        capture_targets.push(crate::capture::Target {
-            image: texture.image.image,
-            aspect: vk::ImageAspectFlags::DEPTH,
-            level,
-            slice: attachment.slice as u32,
-            width: level_extent(texture.image.width, level),
-            height: level_extent(texture.image.height, level),
-            format: texture.image.format,
-            samples: texture.image.samples,
-            role: "d".to_owned(),
-        });
+        if capturing {
+            capture_targets.push(crate::capture::Target {
+                image: texture.image.image,
+                aspect: vk::ImageAspectFlags::DEPTH,
+                level,
+                slice: attachment.slice as u32,
+                width: level_extent(texture.image.width, level),
+                height: level_extent(texture.image.height, level),
+                format: texture.image.format,
+                samples: texture.image.samples,
+                role: "d".to_owned(),
+            });
+        }
         textures.push(attachment.texture);
     }
     if views.is_empty() {
@@ -2593,60 +2815,85 @@ pub(crate) fn install() {
         "blitCommandEncoder" => new_blit_encoder, c"@16@0:8";
         "renderCommandEncoderWithDescriptor:" => new_render_encoder, c"@24@0:8@16";
     });
-    for selector in [
-        "setBuffer:offset:atIndex:",
-        "setVertexBuffer:offset:atIndex:",
-        "setFragmentBuffer:offset:atIndex:",
-    ] {
-        encoder.replace_method(
-            objc::sel::get(selector),
-            set_buffer as *const std::ffi::c_void,
+    let per_stage: [(&str, *const std::ffi::c_void, &std::ffi::CStr); 15] = [
+        (
+            "setBuffer:offset:atIndex:",
+            set_buffer::<COMPUTE> as *const std::ffi::c_void,
             c"v40@0:8@16Q24Q32",
-        );
-    }
-    for selector in [
-        "setBytes:length:atIndex:",
-        "setVertexBytes:length:atIndex:",
-        "setFragmentBytes:length:atIndex:",
-    ] {
-        encoder.replace_method(
-            objc::sel::get(selector),
-            set_bytes as *const std::ffi::c_void,
+        ),
+        (
+            "setVertexBuffer:offset:atIndex:",
+            set_buffer::<VERTEX> as *const std::ffi::c_void,
+            c"v40@0:8@16Q24Q32",
+        ),
+        (
+            "setFragmentBuffer:offset:atIndex:",
+            set_buffer::<FRAGMENT> as *const std::ffi::c_void,
+            c"v40@0:8@16Q24Q32",
+        ),
+        (
+            "setBytes:length:atIndex:",
+            set_bytes::<COMPUTE> as *const std::ffi::c_void,
             c"v40@0:8r^v16Q24Q32",
-        );
-    }
-    for selector in [
-        "setBufferOffset:atIndex:",
-        "setVertexBufferOffset:atIndex:",
-        "setFragmentBufferOffset:atIndex:",
-    ] {
-        encoder.replace_method(
-            objc::sel::get(selector),
-            set_buffer_offset as *const std::ffi::c_void,
+        ),
+        (
+            "setVertexBytes:length:atIndex:",
+            set_bytes::<VERTEX> as *const std::ffi::c_void,
+            c"v40@0:8r^v16Q24Q32",
+        ),
+        (
+            "setFragmentBytes:length:atIndex:",
+            set_bytes::<FRAGMENT> as *const std::ffi::c_void,
+            c"v40@0:8r^v16Q24Q32",
+        ),
+        (
+            "setBufferOffset:atIndex:",
+            set_buffer_offset::<COMPUTE> as *const std::ffi::c_void,
             c"v32@0:8Q16Q24",
-        );
-    }
-    for selector in [
-        "setTexture:atIndex:",
-        "setVertexTexture:atIndex:",
-        "setFragmentTexture:atIndex:",
-    ] {
-        encoder.replace_method(
-            objc::sel::get(selector),
-            set_texture as *const std::ffi::c_void,
+        ),
+        (
+            "setVertexBufferOffset:atIndex:",
+            set_buffer_offset::<VERTEX> as *const std::ffi::c_void,
+            c"v32@0:8Q16Q24",
+        ),
+        (
+            "setFragmentBufferOffset:atIndex:",
+            set_buffer_offset::<FRAGMENT> as *const std::ffi::c_void,
+            c"v32@0:8Q16Q24",
+        ),
+        (
+            "setTexture:atIndex:",
+            set_texture::<COMPUTE> as *const std::ffi::c_void,
             c"v32@0:8@16Q24",
-        );
-    }
-    for selector in [
-        "setSamplerState:atIndex:",
-        "setVertexSamplerState:atIndex:",
-        "setFragmentSamplerState:atIndex:",
-    ] {
-        encoder.replace_method(
-            objc::sel::get(selector),
-            set_sampler as *const std::ffi::c_void,
+        ),
+        (
+            "setVertexTexture:atIndex:",
+            set_texture::<VERTEX> as *const std::ffi::c_void,
             c"v32@0:8@16Q24",
-        );
+        ),
+        (
+            "setFragmentTexture:atIndex:",
+            set_texture::<FRAGMENT> as *const std::ffi::c_void,
+            c"v32@0:8@16Q24",
+        ),
+        (
+            "setSamplerState:atIndex:",
+            set_sampler::<COMPUTE> as *const std::ffi::c_void,
+            c"v32@0:8@16Q24",
+        ),
+        (
+            "setVertexSamplerState:atIndex:",
+            set_sampler::<VERTEX> as *const std::ffi::c_void,
+            c"v32@0:8@16Q24",
+        ),
+        (
+            "setFragmentSamplerState:atIndex:",
+            set_sampler::<FRAGMENT> as *const std::ffi::c_void,
+            c"v32@0:8@16Q24",
+        ),
+    ];
+    for (selector, implementation, types) in per_stage {
+        encoder.replace_method(objc::sel::get(selector), implementation, types);
     }
     for selector in [
         "setCullMode:",
