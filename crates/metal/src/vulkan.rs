@@ -17,6 +17,13 @@ pub struct Adapter {
     gpu: OnceLock<Result<Gpu, String>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct AdapterRank {
+    device_class: u8,
+    device_local_memory: u64,
+    max_image_dimension_2d: u32,
+}
+
 impl Adapter {
     pub fn gpu(&self) -> Result<&Gpu, &str> {
         match self.gpu.get_or_init(|| {
@@ -85,13 +92,15 @@ fn initialize() -> Result<State, String> {
     // SAFETY: `instance` is live and ash owns its loaded instance functions.
     let physical = unsafe { instance.enumerate_physical_devices() }
         .map_err(|error| format!("vkEnumeratePhysicalDevices failed with {error:?}"))?;
-    let adapters = physical
+    let mut adapters = physical
         .into_iter()
         .map(|handle| {
             // SAFETY: every handle was returned by this live instance.
             let properties = unsafe { instance.get_physical_device_properties(handle) };
             // SAFETY: the physical device belongs to this live instance.
             let features = unsafe { instance.get_physical_device_features(handle) };
+            // SAFETY: the physical device belongs to this live instance.
+            let memory = unsafe { instance.get_physical_device_memory_properties(handle) };
             // Variable pointers is a Vulkan 1.1 feature with a structure of
             // its own; a shader which phis or selects a pointer needs it, and
             // the translator rejects such a shader where it is absent.
@@ -108,19 +117,30 @@ fn initialize() -> Result<State, String> {
                 vk::api_version_major(properties.api_version) as u8,
                 vk::api_version_minor(properties.api_version) as u8,
             );
-            Adapter {
-                handle: handle.as_raw() as usize,
-                name,
-                target: metal_translate::TargetProfile {
-                    shader_int64: features.shader_int64 == vk::TRUE,
-                    variable_pointers_storage_buffer: pointers.variable_pointers_storage_buffer
-                        == vk::TRUE,
-                    variable_pointers: pointers.variable_pointers == vk::TRUE,
-                    ..target_profile(version)
+            (
+                adapter_rank(&properties, &memory),
+                Adapter {
+                    handle: handle.as_raw() as usize,
+                    name,
+                    target: metal_translate::TargetProfile {
+                        shader_int64: features.shader_int64 == vk::TRUE,
+                        variable_pointers_storage_buffer: pointers.variable_pointers_storage_buffer
+                            == vk::TRUE,
+                        variable_pointers: pointers.variable_pointers == vk::TRUE,
+                        ..target_profile(version)
+                    },
+                    gpu: OnceLock::new(),
                 },
-                gpu: OnceLock::new(),
-            }
+            )
         })
+        .collect::<Vec<_>>();
+    // Vulkan does not promise any useful enumeration order. Metal's default
+    // device is the first adapter below, so prefer dedicated graphics hardware
+    // and use capacity as a deterministic performance proxy within each class.
+    adapters.sort_by(|(left, _), (right, _)| right.cmp(left));
+    let adapters = adapters
+        .into_iter()
+        .map(|(_, adapter)| adapter)
         .collect::<Vec<_>>();
     if adapters.is_empty() {
         // SAFETY: no child objects were created from the instance.
@@ -137,6 +157,30 @@ fn initialize() -> Result<State, String> {
         _entry: entry,
         adapters,
     })
+}
+
+fn adapter_rank(
+    properties: &vk::PhysicalDeviceProperties,
+    memory: &vk::PhysicalDeviceMemoryProperties,
+) -> AdapterRank {
+    let device_class = match properties.device_type {
+        vk::PhysicalDeviceType::DISCRETE_GPU => 5,
+        vk::PhysicalDeviceType::INTEGRATED_GPU => 4,
+        vk::PhysicalDeviceType::VIRTUAL_GPU => 3,
+        vk::PhysicalDeviceType::OTHER => 2,
+        vk::PhysicalDeviceType::CPU => 1,
+        _ => 0,
+    };
+    let device_local_memory = memory.memory_heaps[..memory.memory_heap_count as usize]
+        .iter()
+        .filter(|heap| heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+        .map(|heap| heap.size)
+        .sum();
+    AdapterRank {
+        device_class,
+        device_local_memory,
+        max_image_dimension_2d: properties.limits.max_image_dimension2_d,
+    }
 }
 
 /// The surface extensions to create the instance with: `VK_KHR_surface` and
@@ -244,6 +288,47 @@ mod tests {
         assert_eq!(target_profile((1, 1)).spirv_version, (1, 3));
         assert_eq!(target_profile((1, 2)).spirv_version, (1, 5));
         assert_eq!(target_profile((1, 3)).spirv_version, (1, 6));
+    }
+
+    #[test]
+    fn adapter_rank_prefers_discrete_graphics_over_more_shared_memory() {
+        let discrete = properties(vk::PhysicalDeviceType::DISCRETE_GPU, 8192);
+        let integrated = properties(vk::PhysicalDeviceType::INTEGRATED_GPU, 16384);
+        let discrete_memory = memory(4 * 1024 * 1024 * 1024);
+        let integrated_memory = memory(64 * 1024 * 1024 * 1024);
+
+        assert!(
+            adapter_rank(&discrete, &discrete_memory)
+                > adapter_rank(&integrated, &integrated_memory)
+        );
+    }
+
+    #[test]
+    fn adapter_rank_uses_device_local_memory_within_a_device_class() {
+        let properties = properties(vk::PhysicalDeviceType::DISCRETE_GPU, 8192);
+
+        assert!(
+            adapter_rank(&properties, &memory(16 * 1024 * 1024 * 1024))
+                > adapter_rank(&properties, &memory(8 * 1024 * 1024 * 1024))
+        );
+    }
+
+    fn properties(
+        device_type: vk::PhysicalDeviceType,
+        image_dimension: u32,
+    ) -> vk::PhysicalDeviceProperties {
+        let mut properties = vk::PhysicalDeviceProperties::default();
+        properties.device_type = device_type;
+        properties.limits.max_image_dimension2_d = image_dimension;
+        properties
+    }
+
+    fn memory(device_local: u64) -> vk::PhysicalDeviceMemoryProperties {
+        let mut memory = vk::PhysicalDeviceMemoryProperties::default();
+        memory.memory_heap_count = 1;
+        memory.memory_heaps[0].size = device_local;
+        memory.memory_heaps[0].flags = vk::MemoryHeapFlags::DEVICE_LOCAL;
+        memory
     }
 
     #[test]
