@@ -867,6 +867,7 @@ dependencies = [
 name = "metal_translate"
 version = "0.1.0"
 dependencies = [
+ "ash",
  "libc",
  "llvm-bitcode",
  "rspirv",

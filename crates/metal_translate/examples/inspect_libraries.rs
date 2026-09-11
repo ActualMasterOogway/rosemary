@@ -5,9 +5,9 @@
 //! and emission; it does not parse the enclosing pack format and does not
 //! claim anything about GPU execution.
 use metal_translate::{
-    TargetProfile,
+    FunctionConstantValues, PassPipeline, TargetProfile,
     air::{AirInput, parse_air},
-    emit_spirv, metallib_air,
+    emit_spirv, metallib_air, specialize,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -44,6 +44,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             })
             .and_then(|air| parse_air(AirInput::Bitcode(air)));
+        // The same IR passes the runtime runs, as `ROSETTA3_METAL_PASSES`
+        // selects them, so that a rejection here is one a game would see.
+        let result = result.and_then(|mut module| {
+            specialize(&mut module, &FunctionConstantValues::new())?;
+            PassPipeline::from_env().run(&mut module)?;
+            Ok(module)
+        });
         match result {
             Ok(module) => {
                 // Keep these names with an emission failure: they are enough

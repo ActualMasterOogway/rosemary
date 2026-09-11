@@ -502,6 +502,7 @@ fn emits_a_writable_3d_texture_descriptor_in_its_metal_namespace() {
         access: Access::Write,
     });
     let module = Module {
+        static_initializers: Vec::new(),
         globals: Vec::new(),
         functions: vec![Function {
             name: "clear_volume".to_string(),
@@ -606,6 +607,7 @@ fn emits_structured_merges_for_a_loop_containing_a_conditional() {
         ],
     };
     let module = Module {
+        static_initializers: Vec::new(),
         globals: Vec::new(),
         functions: vec![function],
         entries: vec![EntryPoint {
@@ -684,6 +686,7 @@ fn gives_each_short_circuit_selection_its_own_merge() {
         ],
     };
     let module = Module {
+        static_initializers: Vec::new(),
         globals: Vec::new(),
         functions: vec![function],
         entries: vec![EntryPoint {
@@ -713,6 +716,7 @@ fn gives_each_short_circuit_selection_its_own_merge() {
 #[test]
 fn routes_several_returns_through_one_exit_block() {
     let module = Module {
+        static_initializers: Vec::new(),
         globals: Vec::new(),
         functions: vec![Function {
             name: "clip".to_string(),
@@ -797,7 +801,9 @@ fn a_module_constant_table_becomes_a_private_variable() {
         pointee: Box::new(float.clone()),
     };
     let module = Module {
+        static_initializers: Vec::new(),
         globals: vec![GlobalVariable {
+            function_constant: None,
             name: "weights".to_string(),
             space: AddressSpace::Constant,
             ty: table.clone(),
@@ -925,6 +931,7 @@ fn a_local_variable_is_declared_in_the_entry_block() {
         pointee: Box::new(word.clone()),
     };
     let module = Module {
+        static_initializers: Vec::new(),
         globals: Vec::new(),
         functions: vec![Function {
             name: "scratch".to_string(),
@@ -1033,6 +1040,7 @@ fn buffer_kernel(values: Vec<Type>, instructions: Vec<Instruction>) -> Module {
     let mut all = vec![buffer.clone()];
     all.extend(values);
     Module {
+        static_initializers: Vec::new(),
         globals: Vec::new(),
         functions: vec![Function {
             name: "main0".to_string(),
@@ -1217,6 +1225,7 @@ fn a_constant_address_space_pointer_phi_keeps_its_buffer_storage_class() {
         pointee: Box::new(Type::u32()),
     };
     let module = Module {
+        static_initializers: Vec::new(),
         globals: Vec::new(),
         functions: vec![Function {
             name: "main0".to_string(),

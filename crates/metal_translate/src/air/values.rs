@@ -134,6 +134,11 @@ struct PendingGlobal {
     pointee: usize,
     /// The value id of the initializer, if the record named one.
     initializer: Option<usize>,
+    /// The variable's own module value id, which the value-symbol table
+    /// names it by.
+    value_id: usize,
+    /// The one-based index of its section name, or zero for none.
+    section: u64,
 }
 
 impl ValueTable {
@@ -222,6 +227,9 @@ impl ValueTable {
                         space,
                         pointee,
                         initializer,
+                        value_id: table.values.len() - 1,
+                        // `[type, isconst, initid, linkage, alignment, section, ...]`
+                        section: fields.get(index + 5).copied().unwrap_or(0),
                     });
                 }
                 // These also allocate value IDs. Reject until their pointer
@@ -1140,8 +1148,35 @@ impl ValueTable {
                         if name.starts_with("llvm.lifetime.") {
                             continue;
                         }
-                        let kind = known_helper(&name, &actual)
-                            .unwrap_or_else(|| air_intrinsic(&name, &actual))?;
+                        let kind = if name.starts_with("air.normalize_function_constant_predicate.")
+                        {
+                            // A static initializer turns a function-constant
+                            // predicate into the one or zero a gated binding
+                            // is tested against. On an unsigned integer that
+                            // is exactly a clamp to [0, 1].
+                            // FIXME (ACCURACY): the meaning is read from the
+                            // intrinsic's name; no Apple library in reach
+                            // calls it with anything but zero or one.
+                            let [value] = actual.as_slice() else {
+                                return Err(semantic(format!(
+                                    "LLVM intrinsic {name} takes one operand"
+                                )));
+                            };
+                            let ty = ir_type(*result, types)?;
+                            let bound = |value| Operand::Integer {
+                                ty: ty.clone(),
+                                value,
+                            };
+                            InstructionKind::IntegerClamp {
+                                signed: false,
+                                value: value.clone(),
+                                min: bound(0),
+                                max: bound(1),
+                            }
+                        } else {
+                            known_helper(&name, &actual)
+                                .unwrap_or_else(|| air_intrinsic(&name, &actual))?
+                        };
                         if matches!(types[*result], DecodedType::Void) {
                             instructions.push(Instruction { result: None, kind });
                             continue;
@@ -1494,9 +1529,15 @@ impl ValueTable {
     /// A global's initializer is a constant which the module's constant block
     /// defines after the record which names it, so this runs once the whole
     /// value table exists.
+    ///
+    /// A global in the `air.fc_initializer` section is a function constant,
+    /// and its name, `<name>.MTL_FC_INIT_<index>_<type>`, is the only place
+    /// AIR records which one.
     pub(super) fn global_variables(
         &self,
         types: &[DecodedType],
+        names: &HashMap<usize, String>,
+        sections: &[String],
     ) -> Result<Vec<crate::ir::GlobalVariable>, TranslateError> {
         let mut operands = HashMap::new();
         self.globals
@@ -1506,11 +1547,33 @@ impl ValueTable {
                     .initializer
                     .map(|id| self.materialize(id, types, &mut operands, &mut Vec::new()))
                     .transpose()?;
+                let ty = ir_type(global.pointee, types)?;
+                let name = names.get(&global.value_id).cloned().unwrap_or_default();
+                let function_constant = match super::section_name(global.section, sections) {
+                    Some("air.fc_initializer") => {
+                        let slot = crate::specialize::parse_slot_name(&name).ok_or_else(|| {
+                            semantic(format!(
+                                "AIR function constant global `{name}` has no MTL_FC_INIT name"
+                            ))
+                        })?;
+                        if global.space != AddressSpace::Constant
+                            || !crate::specialize::encoding_matches(&ty, &slot.encoding)
+                        {
+                            return Err(semantic(format!(
+                                "AIR function constant {} is not a `constant` of type `{}`",
+                                slot.name, slot.encoding
+                            )));
+                        }
+                        Some(slot)
+                    }
+                    _ => None,
+                };
                 Ok(crate::ir::GlobalVariable {
-                    name: String::new(),
+                    name,
                     space: global.space,
-                    ty: ir_type(global.pointee, types)?,
+                    ty,
                     initializer,
+                    function_constant,
                 })
             })
             .collect()
@@ -1848,6 +1911,16 @@ fn air_intrinsic(name: &str, arguments: &[Operand]) -> Result<InstructionKind, T
     }
     if operation == "atomic" {
         return air_atomic(name, parts.collect::<Vec<_>>().as_slice(), arguments);
+    }
+    // `is_function_constant_defined(c)`, which AIR asks of the global which
+    // holds `c`. Specialization answers it.
+    if operation == "is_function_constant_defined" {
+        let [constant] = arguments else {
+            return Err(semantic(format!("LLVM intrinsic {name} takes one operand")));
+        };
+        return Ok(InstructionKind::FunctionConstantDefined {
+            constant: constant.clone(),
+        });
     }
     if let Some(kind) = air_texture_intrinsic(operation, arguments)? {
         return Ok(kind);
@@ -2510,6 +2583,7 @@ mod tests {
             }
         );
         Module {
+            static_initializers: Vec::new(),
             globals: Vec::new(),
             functions: vec![function],
             entries: Vec::new(),
@@ -2593,6 +2667,7 @@ mod tests {
             "the default's phi follows the chain's last block"
         );
         Module {
+            static_initializers: Vec::new(),
             globals: Vec::new(),
             functions: vec![function],
             entries: Vec::new(),
@@ -2670,6 +2745,7 @@ mod tests {
                 .map(Operand::Value)
         );
         Module {
+            static_initializers: Vec::new(),
             globals: Vec::new(),
             functions: vec![function],
             entries: Vec::new(),
@@ -2752,6 +2828,7 @@ mod tests {
             )
             .unwrap();
         Module {
+            static_initializers: Vec::new(),
             globals: Vec::new(),
             functions: vec![function],
             entries: Vec::new(),

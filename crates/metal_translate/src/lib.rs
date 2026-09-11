@@ -8,17 +8,24 @@ pub mod air;
 pub mod cache;
 pub mod ir;
 pub mod msl;
+pub mod passes;
 mod sha256;
+pub mod specialize;
 pub mod spirv;
 
 use std::fmt;
 
 pub use air::{AirInput, parse_air};
-pub use cache::{CACHE_VERSION, translate_cached, translate_msl_cached};
+pub use cache::{
+    CACHE_VERSION, translate_cached, translate_cached_with, translate_msl_cached,
+    translate_msl_cached_with, translate_specialized_cached,
+};
 pub use msl::parse_msl;
+pub use passes::{Pass, PassPipeline};
+pub use specialize::{FunctionConstantValues, metal_data_type_size, specialize};
 pub use spirv::{
-    EntryArtifact, RequiredFeatures, ResourceBinding, TargetProfile, TranslatedLibrary,
-    WORKGROUP_SIZE_SPEC_IDS, emit_spirv,
+    EntryArtifact, FunctionConstantInfo, RequiredFeatures, ResourceBinding, TargetProfile,
+    TranslatedLibrary, WORKGROUP_SIZE_SPEC_IDS, emit_spirv,
 };
 
 /// The phase which reported a translation diagnostic.
@@ -28,6 +35,7 @@ pub enum Phase {
     AirSyntax,
     AirSemantics,
     IrVerification,
+    Specialization,
     SpirvEmission,
 }
 
@@ -86,12 +94,37 @@ impl fmt::Display for TranslateError {
 
 impl std::error::Error for TranslateError {}
 
-/// Parse, verify, and emit every entry point in one AIR module.
+/// Parse, verify, optimize with the process's [`PassPipeline::from_env`], and
+/// emit every entry point in one AIR module.
 pub fn translate(
     input: AirInput<'_>,
     target: &TargetProfile,
 ) -> Result<TranslatedLibrary, TranslateError> {
-    let module = parse_air(input)?;
+    translate_with(input, target, PassPipeline::from_env())
+}
+
+/// [`translate`] with an explicit pass pipeline.
+pub fn translate_with(
+    input: AirInput<'_>,
+    target: &TargetProfile,
+    passes: &PassPipeline,
+) -> Result<TranslatedLibrary, TranslateError> {
+    translate_specialized(input, target, passes, &FunctionConstantValues::new())
+}
+
+/// [`translate_with`] for a function made with `MTLFunctionConstantValues`.
+///
+/// Specialization comes before the passes: a function constant which becomes
+/// a literal is what lets folding remove the code it switches off.
+pub fn translate_specialized(
+    input: AirInput<'_>,
+    target: &TargetProfile,
+    passes: &PassPipeline,
+    constants: &FunctionConstantValues,
+) -> Result<TranslatedLibrary, TranslateError> {
+    let mut module = parse_air(input)?;
+    specialize(&mut module, constants)?;
+    passes.run(&mut module)?;
     emit_spirv(&module, target)
 }
 
@@ -104,7 +137,16 @@ pub fn translate_msl(
     source: &str,
     target: &TargetProfile,
 ) -> Result<TranslatedLibrary, TranslateError> {
-    let module = parse_msl(source).map_err(|mut error| {
+    translate_msl_with(source, target, PassPipeline::from_env())
+}
+
+/// [`translate_msl`] with an explicit pass pipeline.
+pub fn translate_msl_with(
+    source: &str,
+    target: &TargetProfile,
+    passes: &PassPipeline,
+) -> Result<TranslatedLibrary, TranslateError> {
+    let mut module = parse_msl(source).map_err(|mut error| {
         for diagnostic in &mut error.diagnostics {
             if let Some(line) = diagnostic.line {
                 diagnostic
@@ -114,6 +156,8 @@ pub fn translate_msl(
         }
         error
     })?;
+    specialize(&mut module, &FunctionConstantValues::new())?;
+    passes.run(&mut module)?;
     emit_spirv(&module, target)
 }
 

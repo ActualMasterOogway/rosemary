@@ -44,11 +44,45 @@ struct Device {
 
 struct Library {
     translated: metal_translate::TranslatedLibrary,
+    /// The AIR the library was made from, kept only where it declares function
+    /// constants: each set of values a function is made with is a translation
+    /// of its own.
+    air: Option<Vec<u8>>,
+    /// The profile of the device which made the library.
+    target: Option<&'static metal_translate::TargetProfile>,
 }
 
 struct Function {
     library: Id,
     entry: usize,
+    /// The entry point translated for the function constants this function
+    /// was made with, in place of the library's own.
+    specialized: Option<metal_translate::EntryArtifact>,
+}
+
+impl Function {
+    /// The translated entry point this function runs.
+    ///
+    /// # Safety
+    ///
+    /// The function's library must be alive, which it is for as long as the
+    /// function holds it.
+    unsafe fn artifact(&self) -> Option<&'static metal_translate::EntryArtifact> {
+        if let Some(artifact) = &self.specialized {
+            // SAFETY: the artifact lives in this function's body, which
+            // outlives every pipeline made from it.
+            return Some(unsafe { &*(artifact as *const metal_translate::EntryArtifact) });
+        }
+        // SAFETY: the caller's obligation.
+        let library = unsafe { object::body::<Library>(self.library) };
+        library.translated.entries.get(self.entry)
+    }
+}
+
+/// `MTLFunctionConstantValues`: the values a guest specializes a function
+/// with.
+struct ConstantValues {
+    values: metal_translate::FunctionConstantValues,
 }
 
 static ALLOCATED_SIZE: AtomicU64 = AtomicU64::new(0);
@@ -97,6 +131,8 @@ pub fn bootstrap() {
         let class = object::register::<Device>(c"R3MTLDevice");
         let library_class = object::register::<Library>(c"R3MTLLibrary");
         let function_class = object::register::<Function>(c"R3MTLFunction");
+        let constant_values_class =
+            object::register::<ConstantValues>(c"MTLFunctionConstantValues");
         object::register::<pipeline::ComputePipeline>(c"R3MTLComputePipelineState");
         object::register::<pipeline::RenderPipeline>(c"R3MTLRenderPipelineState");
 
@@ -142,6 +178,8 @@ pub fn bootstrap() {
         });
         methods!(library_class, {
             "newFunctionWithName:" => new_function_with_name, c"@24@0:8@16";
+            "newFunctionWithName:constantValues:error:" => new_function_with_constants,
+                c"@40@0:8@16@24^@32";
             "functionNames" => library_function_names, c"@16@0:8";
             "device" => library_device, c"@16@0:8";
             "setLabel:" => no_op, c"v24@0:8@16";
@@ -149,6 +187,15 @@ pub fn bootstrap() {
         methods!(function_class, {
             "name" => function_name, c"@16@0:8";
             "setLabel:" => no_op, c"v24@0:8@16";
+        });
+        methods!(constant_values_class, {
+            "init" => constant_values_init, c"@16@0:8";
+            "reset" => constant_values_reset, c"v16@0:8";
+            "dealloc" => constant_values_dealloc, c"v16@0:8";
+            "setConstantValue:type:atIndex:" => set_constant_at_index, c"v40@0:8r^v16Q24Q32";
+            "setConstantValue:type:withName:" => set_constant_with_name, c"v40@0:8r^v16Q24@32";
+            "setConstantValues:type:withRange:" => set_constants_in_range,
+                c"v48@0:8r^v16Q24{_NSRange=QQ}32";
         });
 
         resource::install();
@@ -264,8 +311,9 @@ unsafe extern "C" fn new_compute_pipeline(
     // SAFETY: an `R3MTLFunction`, checked above.
     let entry = unsafe { object::body::<Function>(function) };
     // SAFETY: a function holds the library which vended it.
-    let library = unsafe { object::body::<Library>(entry.library) };
-    let artifact = &library.translated.entries[entry.entry];
+    let Some(artifact) = (unsafe { entry.artifact() }) else {
+        return fail("the MTLFunction has no translated entry point");
+    };
     match pipeline::ComputePipeline::new(gpu, receiver, artifact) {
         Ok(state) => {
             objc::arc::retain(receiver);
@@ -337,8 +385,7 @@ unsafe fn artifact_of(function: Id) -> Option<&'static metal_translate::EntryArt
     let entry = unsafe { object::body::<Function>(function) };
     // SAFETY: a function holds the library which vended it, and a library
     // outlives every function it made.
-    let library = unsafe { object::body::<Library>(entry.library) };
-    library.translated.entries.get(entry.entry)
+    unsafe { entry.artifact() }
 }
 
 unsafe extern "C" fn current_allocated_size(_receiver: Id, _sel: Sel) -> u64 {
@@ -457,12 +504,28 @@ unsafe extern "C" fn new_library_with_data(
                 return std::ptr::null_mut();
             }
         };
-    retain_library(receiver, translated)
+    retain_library(receiver, translated, Some(air), Some(target))
 }
 
 /// Wrap a translated library in the `MTLLibrary` object the guest holds.
-fn retain_library(device: Id, translated: metal_translate::TranslatedLibrary) -> Id {
-    let library = object::make(c"R3MTLLibrary", Library { translated });
+fn retain_library(
+    device: Id,
+    translated: metal_translate::TranslatedLibrary,
+    air: Option<&[u8]>,
+    target: Option<&'static metal_translate::TargetProfile>,
+) -> Id {
+    // Only a library with function constants is ever translated again.
+    let air = air
+        .filter(|_| !translated.function_constants.is_empty())
+        .map(<[u8]>::to_vec);
+    let library = object::make(
+        c"R3MTLLibrary",
+        Library {
+            translated,
+            air,
+            target,
+        },
+    );
     if library.is_null() {
         report_library_error("could not allocate MTL library");
         return std::ptr::null_mut();
@@ -508,7 +571,7 @@ unsafe extern "C" fn new_library_with_source(
         Ok(translated) => translated,
         Err(translation_error) => return fail_library(error, &translation_error.to_string()),
     };
-    let library = retain_library(receiver, translated);
+    let library = retain_library(receiver, translated, None, Some(target));
     if library.is_null() {
         return fail_library(error, "could not allocate MTL source library");
     }
@@ -536,8 +599,202 @@ unsafe extern "C" fn new_function_with_name(receiver: Id, _sel: Sel, name: Id) -
         Function {
             library: objc::arc::retain(receiver),
             entry,
+            specialized: None,
         },
     )
+}
+
+/// `-[MTLLibrary newFunctionWithName:constantValues:error:]`.
+///
+/// The library is translated again with the values, through the shader cache,
+/// which keys an entry by them; specialization comes before the IR passes, so
+/// the code a constant switches off is folded away before emission.
+unsafe extern "C" fn new_function_with_constants(
+    receiver: Id,
+    _sel: Sel,
+    name: Id,
+    constants: Id,
+    error: *mut Id,
+) -> Id {
+    if !error.is_null() {
+        // SAFETY: the guest passed a writable `NSError **`.
+        unsafe { *error = std::ptr::null_mut() };
+    }
+    // SAFETY: a guest `NSString`.
+    let name = unsafe { foundation::string::bytes(name) };
+    let Ok(name) = std::str::from_utf8(&name) else {
+        return fail_library(
+            error,
+            "newFunctionWithName: names a function in invalid UTF-8",
+        );
+    };
+    // SAFETY: an `R3MTLLibrary`.
+    let library = unsafe { object::body::<Library>(receiver) };
+    let Some(entry) = library
+        .translated
+        .entries
+        .iter()
+        .position(|entry| entry.name == name)
+    else {
+        return fail_library(error, &format!("the library has no function named {name}"));
+    };
+    // A library which declares no function constants has nothing to
+    // specialize: Metal ignores the values, and so does this.
+    let specialized = match (&library.air, library.target) {
+        (Some(air), Some(target)) => {
+            let values = if object::is_kind(constants, c"MTLFunctionConstantValues") {
+                // SAFETY: checked above.
+                unsafe { object::body::<ConstantValues>(constants) }
+                    .values
+                    .clone()
+            } else {
+                metal_translate::FunctionConstantValues::new()
+            };
+            let translated = metal_translate::translate_specialized_cached(
+                metal_translate::AirInput::Bitcode(air),
+                target,
+                metal_translate::PassPipeline::from_env(),
+                &values,
+            );
+            match translated {
+                Ok(mut translated) => {
+                    let Some(position) = translated
+                        .entries
+                        .iter()
+                        .position(|entry| entry.name == name)
+                    else {
+                        return fail_library(error, "specialization lost the function");
+                    };
+                    Some(translated.entries.swap_remove(position))
+                }
+                Err(translation) => return fail_library(error, &translation.to_string()),
+            }
+        }
+        _ => None,
+    };
+    object::make(
+        c"R3MTLFunction",
+        Function {
+            library: objc::arc::retain(receiver),
+            entry,
+            specialized,
+        },
+    )
+}
+
+// ------------------------------------------------- function constant values
+
+unsafe extern "C" fn constant_values_init(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an `MTLFunctionConstantValues` straight from `+alloc`, whose
+    // body is this call's to establish.
+    unsafe {
+        object::init(
+            receiver,
+            ConstantValues {
+                values: metal_translate::FunctionConstantValues::new(),
+            },
+        )
+    };
+    receiver
+}
+
+unsafe extern "C" fn constant_values_reset(receiver: Id, _sel: Sel) {
+    // SAFETY: an initialized `MTLFunctionConstantValues`.
+    unsafe { object::body::<ConstantValues>(receiver) }.values =
+        metal_translate::FunctionConstantValues::new();
+}
+
+unsafe extern "C" fn constant_values_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: the body `-init` established, dropped once as the object goes.
+    unsafe { std::ptr::drop_in_place(object::body::<ConstantValues>(receiver)) };
+    objc::arc::finalize(receiver);
+}
+
+/// Read one value of an `MTLDataType` from where the guest keeps it.
+///
+/// # Safety
+///
+/// `value` must be null or point at a value of `data_type`.
+unsafe fn constant_bytes<'a>(value: *const u8, data_type: u64) -> Option<&'a [u8]> {
+    let Some(size) = metal_translate::metal_data_type_size(data_type) else {
+        report_library_error(format!(
+            "MTLFunctionConstantValues was given MTLDataType {data_type}, which no function constant has"
+        ));
+        return None;
+    };
+    if value.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's obligation, for exactly the value's size.
+    Some(unsafe { std::slice::from_raw_parts(value, size) })
+}
+
+unsafe extern "C" fn set_constant_at_index(
+    receiver: Id,
+    _sel: Sel,
+    value: *const u8,
+    data_type: u64,
+    index: u64,
+) {
+    // SAFETY: Metal reads one value of `data_type` from `value`.
+    let Some(bytes) = (unsafe { constant_bytes(value, data_type) }) else {
+        return;
+    };
+    // SAFETY: an initialized `MTLFunctionConstantValues`.
+    let body = unsafe { object::body::<ConstantValues>(receiver) };
+    if let Err(message) = body.values.set_index(index as u32, data_type, bytes) {
+        report_library_error(message);
+    }
+}
+
+unsafe extern "C" fn set_constant_with_name(
+    receiver: Id,
+    _sel: Sel,
+    value: *const u8,
+    data_type: u64,
+    name: Id,
+) {
+    // SAFETY: Metal reads one value of `data_type` from `value`.
+    let Some(bytes) = (unsafe { constant_bytes(value, data_type) }) else {
+        return;
+    };
+    // SAFETY: a guest `NSString`.
+    let name = unsafe { foundation::string::bytes(name) };
+    let Ok(name) = std::str::from_utf8(&name) else {
+        return;
+    };
+    // SAFETY: an initialized `MTLFunctionConstantValues`.
+    let body = unsafe { object::body::<ConstantValues>(receiver) };
+    if let Err(message) = body.values.set_name(name, data_type, bytes) {
+        report_library_error(message);
+    }
+}
+
+/// `-setConstantValues:type:withRange:`: an array of values for consecutive
+/// indices. An `NSRange` is two words and arrives in two registers.
+unsafe extern "C" fn set_constants_in_range(
+    receiver: Id,
+    sel: Sel,
+    values: *const u8,
+    data_type: u64,
+    location: u64,
+    length: u64,
+) {
+    let Some(size) = metal_translate::metal_data_type_size(data_type) else {
+        report_library_error(format!(
+            "MTLFunctionConstantValues was given MTLDataType {data_type}, which no function constant has"
+        ));
+        return;
+    };
+    // A C array of a three-lane vector is laid out at four lanes, like every
+    // Metal vector type; each size here rounds up to the type's stride.
+    let stride = size.next_power_of_two();
+    for offset in 0..length {
+        // SAFETY: the guest's array holds `length` values of `data_type`.
+        let value = unsafe { values.add(offset as usize * stride) };
+        // SAFETY: as above.
+        unsafe { set_constant_at_index(receiver, sel, value, data_type, location + offset) };
+    }
 }
 
 /// `-[MTLLibrary functionNames]`: the entry points the translation produced,

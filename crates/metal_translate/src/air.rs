@@ -212,6 +212,7 @@ fn parse_minimal_store_bitcode(bitcode: &Bitcode) -> Result<Module, TranslateErr
         }],
     };
     Ok(Module {
+        static_initializers: Vec::new(),
         functions: vec![function],
         globals: Vec::new(),
         entries: vec![EntryPoint {
@@ -303,7 +304,17 @@ fn parse_packed_air(
         .iter()
         .filter_map(|resource| Some((resource.argument, resource.ty.clone()?)))
         .collect();
-    let globals = value_table.global_variables(&types)?;
+    let sections = section_names(module_block);
+    let globals = value_table.global_variables(&types, legacy_names, &sections)?;
+    let static_initializers = static_initializers(
+        module_block,
+        function_records,
+        function_blocks,
+        &types,
+        legacy_names,
+        &sections,
+        entry,
+    )?;
     let function = value_table.lower_body(
         body,
         &types,
@@ -335,6 +346,7 @@ fn parse_packed_air(
         })
         .collect::<Result<Vec<_>, TranslateError>>()?;
     let module = Module {
+        static_initializers,
         functions: vec![function],
         globals,
         entries: vec![EntryPoint {
@@ -347,6 +359,89 @@ fn parse_packed_air(
     };
     module.verify()?;
     Ok(module)
+}
+
+/// The module's section names, in the order a record's one-based section
+/// field counts them.
+fn section_names(module_block: &BitcodeBlock) -> Vec<String> {
+    module_block
+        .elements
+        .iter()
+        .filter_map(BitcodeElement::as_record)
+        .filter(|record| record.id == 5)
+        .map(|record| {
+            record_values(record)
+                .iter()
+                .filter_map(|&character| char::from_u32(u32::try_from(character).ok()?))
+                .collect()
+        })
+        .collect()
+}
+
+/// The section a record's one-based section field names.
+fn section_name(field: u64, sections: &[String]) -> Option<&str> {
+    let index = usize::try_from(field).ok()?.checked_sub(1)?;
+    sections.get(index).map(String::as_str)
+}
+
+/// Lower every function in the `air.static_init` section, in module order.
+///
+/// They compute a module's derived constants into its globals before an
+/// entry point runs, and [`crate::specialize()`] runs them. A function
+/// record's section is its seventh field in the layout Apple's AIR writer
+/// uses: `[type, cc, isproto, linkage, paramattr, alignment, section, ...]`.
+fn static_initializers(
+    module_block: &BitcodeBlock,
+    function_records: &[(usize, &&llvm_bitcode::bitcode::Record)],
+    function_blocks: &[&BitcodeBlock],
+    types: &[DecodedType],
+    names: &HashMap<usize, String>,
+    sections: &[String],
+    entry: usize,
+) -> Result<Vec<crate::ir::Function>, TranslateError> {
+    let mut initializers = Vec::new();
+    for (position, (ordinal, record)) in function_records.iter().enumerate() {
+        let section = record.fields().get(6).copied().unwrap_or(0);
+        if position == entry || section_name(section, sections) != Some("air.static_init") {
+            continue;
+        }
+        let name = function_value_id(module_block, *ordinal)
+            .and_then(|value| names.get(&value).cloned())
+            .unwrap_or_else(|| format!("static initializer {position}"));
+        let signature = record
+            .fields()
+            .first()
+            .and_then(|index| types.get(usize::try_from(*index).ok()?));
+        let signature = match signature {
+            Some(DecodedType::Pointer { pointee, .. }) => types.get(*pointee),
+            signature => signature,
+        };
+        let Some(DecodedType::Function { parameters, result }) = signature else {
+            return Err(semantic(format!(
+                "static initializer {name} has no function type"
+            )));
+        };
+        if !parameters.is_empty() {
+            return Err(semantic(format!(
+                "static initializer {name} takes arguments"
+            )));
+        }
+        let body = function_blocks[position];
+        let table = values::ValueTable::decode(module_block, body, types, parameters)?;
+        let no_opaque_types = HashMap::new();
+        initializers.push(table.lower_body(
+            body,
+            types,
+            &values::Signature {
+                names,
+                name,
+                parameter_types: parameters,
+                result_type: *result,
+                opaque_types: &no_opaque_types,
+            },
+        )?);
+    }
+    Ok(initializers)
 }
 
 #[derive(Clone, Debug)]
@@ -904,6 +999,7 @@ fn parse_text(text: &str) -> Result<Module, TranslateError> {
         .map(|resource| resource.into_ir(&function.parameters))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Module {
+        static_initializers: Vec::new(),
         functions: vec![function],
         globals: Vec::new(),
         entries: vec![EntryPoint {

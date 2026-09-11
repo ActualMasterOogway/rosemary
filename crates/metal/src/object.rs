@@ -35,6 +35,19 @@ pub(crate) fn make<T>(name: &CStr, body: T) -> Id {
     object as Id
 }
 
+/// Install the body of an instance the Objective-C runtime allocated, which
+/// is how a class a guest makes with `+alloc` and `-init` gets one.
+///
+/// # Safety
+///
+/// `receiver` must be an instance of a class declared for this `T` whose body
+/// has not been established, or has been dropped since.
+pub(crate) unsafe fn init<T>(receiver: Id, body: T) {
+    // SAFETY: the caller guarantees the layout; the old body is not dropped,
+    // because there is none.
+    unsafe { std::ptr::addr_of_mut!((*(receiver as *mut Object<T>)).body).write(body) };
+}
+
 /// The body of an object of a class declared with `register::<T>`.
 ///
 /// # Safety

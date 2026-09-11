@@ -265,8 +265,22 @@ impl Metadata {
             inputs: Vec::new(),
             outputs: Vec::new(),
         };
+        // An argument or output Metal declares only while a function constant
+        // holds names that constant here in place of its kind. Which of them
+        // exist is a question for specialization, and until it answers one a
+        // gated binding would be bound whether it exists or not.
+        let gated = |items: &[Item<'_>]| {
+            items
+                .iter()
+                .any(|item| matches!(item, Item::Text("air.function_constant")))
+        };
         for (position, node) in outputs.into_iter().enumerate() {
             let items = self.items(node, values, types)?;
+            if gated(&items) {
+                return Err(semantic(format!(
+                    "AIR output {position} exists only under a function constant, which specialization does not yet gate"
+                )));
+            }
             interface.outputs.push(StageOutput {
                 field: Some(position as u32),
                 binding: output_binding(&items)?,
@@ -286,6 +300,11 @@ impl Metadata {
             let Some(Item::Text(tag)) = rest.first() else {
                 return Err(semantic("AIR interface descriptor has no kind"));
             };
+            if gated(&items) {
+                return Err(semantic(format!(
+                    "AIR argument {argument} exists only under a function constant, which specialization does not yet gate"
+                )));
+            }
             match resource_kind(tag) {
                 Some(kind) => {
                     let access = access(rest);

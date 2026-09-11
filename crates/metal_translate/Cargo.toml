@@ -9,3 +9,8 @@ license.workspace = true
 libc.workspace = true
 llvm-bitcode.workspace = true
 rspirv.workspace = true
+
+[dev-dependencies]
+# Only `examples/shader_stats`, which compiles translated modules on a real
+# adapter; the translator itself knows nothing of Vulkan.
+ash.workspace = true

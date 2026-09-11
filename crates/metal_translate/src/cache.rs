@@ -19,8 +19,8 @@ use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock, mpsc};
 use crate::ir::{Access, ResourceKind, Stage};
 use crate::sha256::{self, Sha256};
 use crate::{
-    AirInput, EntryArtifact, RequiredFeatures, ResourceBinding, TargetProfile, TranslateError,
-    TranslatedLibrary,
+    AirInput, EntryArtifact, FunctionConstantInfo, FunctionConstantValues, PassPipeline,
+    RequiredFeatures, ResourceBinding, TargetProfile, TranslateError, TranslatedLibrary,
 };
 
 /// The SHA-256 of every file in this crate, as lowercase hexadecimal.
@@ -29,7 +29,7 @@ use crate::{
 pub const CACHE_VERSION: &str = env!("METAL_TRANSLATE_CACHE_VERSION");
 
 /// The container magic, which changes when the entry encoding does.
-const MAGIC: &[u8; 8] = b"R3MTLC01";
+const MAGIC: &[u8; 8] = b"R3MTLC02";
 
 /// Directory to hold the cache, overriding the user's cache directory.
 ///
@@ -93,11 +93,35 @@ pub fn translate_cached(
     input: AirInput<'_>,
     target: &TargetProfile,
 ) -> Result<TranslatedLibrary, TranslateError> {
+    translate_cached_with(input, target, PassPipeline::from_env())
+}
+
+/// [`crate::translate_with`] through the on-disk cache.
+pub fn translate_cached_with(
+    input: AirInput<'_>,
+    target: &TargetProfile,
+    passes: &PassPipeline,
+) -> Result<TranslatedLibrary, TranslateError> {
+    translate_specialized_cached(input, target, passes, &FunctionConstantValues::new())
+}
+
+/// [`crate::translate_specialized`] through the on-disk cache.
+///
+/// The values are part of the key, so each set of them a guest makes a
+/// function with is an entry of its own.
+pub fn translate_specialized_cached(
+    input: AirInput<'_>,
+    target: &TargetProfile,
+    passes: &PassPipeline,
+    constants: &FunctionConstantValues,
+) -> Result<TranslatedLibrary, TranslateError> {
     let (frontend, bytes) = match input {
         AirInput::Text(text) => (Frontend::AirText, text.as_bytes()),
         AirInput::Bitcode(bytes) => (Frontend::AirBitcode, bytes),
     };
-    cached(frontend, bytes, target, || crate::translate(input, target))
+    cached(frontend, bytes, target, passes, constants, || {
+        crate::translate_specialized(input, target, passes, constants)
+    })
 }
 
 /// [`crate::translate_msl`] through the on-disk cache.
@@ -105,32 +129,52 @@ pub fn translate_msl_cached(
     source: &str,
     target: &TargetProfile,
 ) -> Result<TranslatedLibrary, TranslateError> {
-    cached(Frontend::Msl, source.as_bytes(), target, || {
-        crate::translate_msl(source, target)
-    })
+    translate_msl_cached_with(source, target, PassPipeline::from_env())
+}
+
+/// [`crate::translate_msl_with`] through the on-disk cache.
+pub fn translate_msl_cached_with(
+    source: &str,
+    target: &TargetProfile,
+    passes: &PassPipeline,
+) -> Result<TranslatedLibrary, TranslateError> {
+    cached(
+        Frontend::Msl,
+        source.as_bytes(),
+        target,
+        passes,
+        &FunctionConstantValues::new(),
+        || crate::translate_msl_with(source, target, passes),
+    )
 }
 
 fn cached(
     frontend: Frontend,
     bytes: &[u8],
     target: &TargetProfile,
+    passes: &PassPipeline,
+    constants: &FunctionConstantValues,
     translate: impl FnOnce() -> Result<TranslatedLibrary, TranslateError>,
 ) -> Result<TranslatedLibrary, TranslateError> {
     match root() {
-        Some(root) => cached_in(root, frontend, bytes, target, translate),
+        Some(root) => cached_in(root, frontend, bytes, target, passes, constants, translate),
         None => translate(),
     }
 }
 
 /// As [`cached`], against a named directory rather than the process-wide one.
+///
+/// `translate` must run exactly the `passes` the key is made from.
 fn cached_in(
     root: &Path,
     frontend: Frontend,
     bytes: &[u8],
     target: &TargetProfile,
+    passes: &PassPipeline,
+    constants: &FunctionConstantValues,
     translate: impl FnOnce() -> Result<TranslatedLibrary, TranslateError>,
 ) -> Result<TranslatedLibrary, TranslateError> {
-    let key = key(frontend, bytes, target);
+    let key = key(frontend, bytes, target, passes, constants);
     let path = entry_path(root, &key);
 
     if let Some(library) = read_entry(&path, &key) {
@@ -148,13 +192,26 @@ fn cached_in(
     Ok(library)
 }
 
-/// The key naming this input, this target and this build of the translator.
-fn key(frontend: Frontend, bytes: &[u8], target: &TargetProfile) -> [u8; 32] {
+/// The key naming this input, this target, the IR passes the translation
+/// runs, and this build of the translator.
+///
+/// The build covers what each pass does; the pipeline covers which of them a
+/// process chose to run, which `ROSETTA3_METAL_PASSES` changes without a
+/// rebuild. An entry made without a pass is not what a run with it emits.
+fn key(
+    frontend: Frontend,
+    bytes: &[u8],
+    target: &TargetProfile,
+    passes: &PassPipeline,
+    constants: &FunctionConstantValues,
+) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update_field(MAGIC);
     hasher.update_field(CACHE_VERSION.as_bytes());
     hasher.update(&[frontend.tag()]);
     hasher.update_field(&encode_target(target));
+    hasher.update_field(&passes.fingerprint());
+    hasher.update_field(&constants.fingerprint());
     hasher.update_field(bytes);
     hasher.finish()
 }
@@ -515,6 +572,12 @@ fn encode(key: &[u8; 32], library: &TranslatedLibrary) -> Vec<u8> {
         write_strings(&mut payload, &entry.required.capabilities);
         write_strings(&mut payload, &entry.required.extensions);
     }
+    write_u32(&mut payload, library.function_constants.len() as u32);
+    for constant in &library.function_constants {
+        write_u32(&mut payload, constant.index);
+        write_string(&mut payload, &constant.name);
+        write_string(&mut payload, &constant.encoding);
+    }
 
     let mut bytes = Vec::with_capacity(payload.len() + 112);
     bytes.extend_from_slice(MAGIC);
@@ -582,7 +645,19 @@ fn decode(bytes: &[u8], key: &[u8; 32]) -> Option<TranslatedLibrary> {
             },
         });
     }
-    reader.at_end().then_some(TranslatedLibrary { entries })
+    let count = reader.u32()? as usize;
+    let mut function_constants = Vec::with_capacity(count.min(256));
+    for _ in 0..count {
+        function_constants.push(FunctionConstantInfo {
+            index: reader.u32()?,
+            name: reader.string()?,
+            encoding: reader.string()?,
+        });
+    }
+    reader.at_end().then_some(TranslatedLibrary {
+        entries,
+        function_constants,
+    })
 }
 
 fn write_u32(bytes: &mut Vec<u8>, value: u32) {
@@ -769,6 +844,11 @@ mod tests {
 
     fn library() -> TranslatedLibrary {
         TranslatedLibrary {
+            function_constants: vec![FunctionConstantInfo {
+                index: 3,
+                name: "useFog".to_owned(),
+                encoding: "b".to_owned(),
+            }],
             entries: vec![
                 EntryArtifact {
                     name: "kernel_store_const".to_owned(),
@@ -848,36 +928,142 @@ mod tests {
     }
 
     #[test]
-    fn a_key_covers_the_input_the_target_and_the_frontend() {
+    fn a_key_covers_the_input_the_target_the_frontend_and_the_passes() {
         let target = TargetProfile::vulkan_1_3();
-        let base = key(Frontend::AirBitcode, b"air", &target);
+        let base = key(
+            Frontend::AirBitcode,
+            b"air",
+            &target,
+            &PassPipeline::default(),
+            &FunctionConstantValues::new(),
+        );
 
-        assert_ne!(base, key(Frontend::AirBitcode, b"air2", &target));
-        assert_ne!(base, key(Frontend::AirText, b"air", &target));
-        assert_ne!(base, key(Frontend::Msl, b"air", &target));
+        assert_ne!(
+            base,
+            key(
+                Frontend::AirBitcode,
+                b"air2",
+                &target,
+                &PassPipeline::default(),
+                &FunctionConstantValues::new(),
+            )
+        );
+        assert_ne!(
+            base,
+            key(
+                Frontend::AirText,
+                b"air",
+                &target,
+                &PassPipeline::default(),
+                &FunctionConstantValues::new()
+            )
+        );
+        assert_ne!(
+            base,
+            key(
+                Frontend::Msl,
+                b"air",
+                &target,
+                &PassPipeline::default(),
+                &FunctionConstantValues::new()
+            )
+        );
 
         let mut wider = TargetProfile::vulkan_1_3();
         wider.variable_pointers = true;
-        assert_ne!(base, key(Frontend::AirBitcode, b"air", &wider));
+        assert_ne!(
+            base,
+            key(
+                Frontend::AirBitcode,
+                b"air",
+                &wider,
+                &PassPipeline::default(),
+                &FunctionConstantValues::new(),
+            )
+        );
 
         let mut int64 = TargetProfile::vulkan_1_3();
         int64.shader_int64 = true;
-        assert_ne!(base, key(Frontend::AirBitcode, b"air", &int64));
+        assert_ne!(
+            base,
+            key(
+                Frontend::AirBitcode,
+                b"air",
+                &int64,
+                &PassPipeline::default(),
+                &FunctionConstantValues::new(),
+            )
+        );
 
-        assert_eq!(base, key(Frontend::AirBitcode, b"air", &target), "stable");
+        let unoptimized = key(
+            Frontend::AirBitcode,
+            b"air",
+            &target,
+            &PassPipeline::none(),
+            &FunctionConstantValues::new(),
+        );
+        assert_ne!(base, unoptimized, "the passes a translation runs");
+        let mut fog = FunctionConstantValues::new();
+        fog.set_index(0, 53, &[1]).expect("a bool");
+        assert_ne!(
+            base,
+            key(
+                Frontend::AirBitcode,
+                b"air",
+                &target,
+                &PassPipeline::default(),
+                &fog
+            ),
+            "the function constant values",
+        );
+        let folded = PassPipeline::new([crate::Pass::FoldConstants]);
+        assert_ne!(
+            base,
+            key(
+                Frontend::AirBitcode,
+                b"air",
+                &target,
+                &folded,
+                &FunctionConstantValues::new()
+            )
+        );
+        assert_ne!(
+            unoptimized,
+            key(
+                Frontend::AirBitcode,
+                b"air",
+                &target,
+                &folded,
+                &FunctionConstantValues::new()
+            )
+        );
+
+        assert_eq!(
+            base,
+            key(
+                Frontend::AirBitcode,
+                b"air",
+                &target,
+                &PassPipeline::default(),
+                &FunctionConstantValues::new(),
+            ),
+            "stable"
+        );
     }
 
     #[test]
     fn a_second_translation_of_the_same_source_comes_from_the_cache() {
         let scratch = Scratch::new("hit");
         let target = TargetProfile::vulkan_1_3();
-        let translate = || crate::translate_msl(SOURCE, &target);
+        let translate = || crate::translate_msl_with(SOURCE, &target, &PassPipeline::default());
 
         let first = cached_in(
             &scratch.0,
             Frontend::Msl,
             SOURCE.as_bytes(),
             &target,
+            &PassPipeline::default(),
+            &FunctionConstantValues::new(),
             translate,
         )
         .expect("the MSL frontend accepts this kernel");
@@ -888,6 +1074,8 @@ mod tests {
             Frontend::Msl,
             SOURCE.as_bytes(),
             &target,
+            &PassPipeline::default(),
+            &FunctionConstantValues::new(),
             || {
                 translated_again = true;
                 translate()
@@ -903,8 +1091,14 @@ mod tests {
     fn a_damaged_entry_is_replaced_rather_than_trusted() {
         let scratch = Scratch::new("damaged");
         let target = TargetProfile::vulkan_1_3();
-        let translate = || crate::translate_msl(SOURCE, &target);
-        let key = key(Frontend::Msl, SOURCE.as_bytes(), &target);
+        let translate = || crate::translate_msl_with(SOURCE, &target, &PassPipeline::default());
+        let key = key(
+            Frontend::Msl,
+            SOURCE.as_bytes(),
+            &target,
+            &PassPipeline::default(),
+            &FunctionConstantValues::new(),
+        );
         let path = entry_path(&scratch.0, &key);
 
         let expected = cached_in(
@@ -912,6 +1106,8 @@ mod tests {
             Frontend::Msl,
             SOURCE.as_bytes(),
             &target,
+            &PassPipeline::default(),
+            &FunctionConstantValues::new(),
             translate,
         )
         .expect("the MSL frontend accepts this kernel");
@@ -923,6 +1119,8 @@ mod tests {
             Frontend::Msl,
             SOURCE.as_bytes(),
             &target,
+            &PassPipeline::default(),
+            &FunctionConstantValues::new(),
             translate,
         )
         .expect("a retranslated library");
@@ -940,7 +1138,13 @@ mod tests {
         let scratch = Scratch::new("failure");
         let target = TargetProfile::vulkan_1_3();
         let source = "this is not Metal shading language";
-        let key = key(Frontend::Msl, source.as_bytes(), &target);
+        let key = key(
+            Frontend::Msl,
+            source.as_bytes(),
+            &target,
+            &PassPipeline::default(),
+            &FunctionConstantValues::new(),
+        );
 
         assert!(
             cached_in(
@@ -948,7 +1152,9 @@ mod tests {
                 Frontend::Msl,
                 source.as_bytes(),
                 &target,
-                || { crate::translate_msl(source, &target) }
+                &PassPipeline::default(),
+                &FunctionConstantValues::new(),
+                || { crate::translate_msl_with(source, &target, &PassPipeline::default()) }
             )
             .is_err()
         );

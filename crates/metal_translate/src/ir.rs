@@ -286,6 +286,21 @@ pub struct GlobalVariable {
     pub ty: Type,
     /// `None` for a `threadgroup` variable, which has no initial value.
     pub initializer: Option<Operand>,
+    /// Set when the variable holds one of Metal's function constants, whose
+    /// value is supplied when a function is made rather than when the library
+    /// is compiled.
+    pub function_constant: Option<FunctionConstantSlot>,
+}
+
+/// A `[[function_constant(index)]]` declaration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FunctionConstantSlot {
+    pub index: u32,
+    /// The name Metal looks the constant up by, as well as by index.
+    pub name: String,
+    /// The Itanium mangling of the constant's Metal type, as AIR spells it:
+    /// `b` for `bool`, `j` for `uint`, `Dv4_f` for `float4`.
+    pub encoding: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -293,6 +308,11 @@ pub struct Module {
     pub functions: Vec<Function>,
     pub entries: Vec<EntryPoint>,
     pub globals: Vec<GlobalVariable>,
+    /// Functions which compute derived constants into globals before any entry
+    /// point runs, in the order they run. Specialization runs them, since
+    /// what they compute depends on function constants; emission never sees
+    /// one.
+    pub static_initializers: Vec<Function>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -703,6 +723,12 @@ pub enum InstructionKind {
     Phi {
         incomings: Vec<(BlockId, Operand)>,
     },
+    /// Metal's `is_function_constant_defined`, asked of the global which
+    /// holds one function constant. Specialization answers it; emission never
+    /// sees one.
+    FunctionConstantDefined {
+        constant: Operand,
+    },
 }
 
 /// What a barrier makes wait, and how far an atomic's ordering reaches.
@@ -791,9 +817,23 @@ impl Module {
                 }
             }
         }
-        for function in &self.functions {
+        for function in self.functions.iter().chain(&self.static_initializers) {
             verify_function(function, &mut diagnostics);
         }
+        if diagnostics.is_empty() {
+            Ok(())
+        } else {
+            Err(TranslateError { diagnostics })
+        }
+    }
+}
+
+impl Function {
+    /// Verify one function on its own, without the entry points which refer
+    /// to it.
+    pub(crate) fn verify(&self) -> Result<(), TranslateError> {
+        let mut diagnostics = Vec::new();
+        verify_function(self, &mut diagnostics);
         if diagnostics.is_empty() {
             Ok(())
         } else {
@@ -1372,6 +1412,9 @@ fn verify_instruction_types(
                 && optional_is(function, array_index.as_ref(), &Type::u32())
                 && operand_type(function, value) == Some(texel_vector(&texture))
         }
+        InstructionKind::FunctionConstantDefined { constant } => {
+            result == Some(Type::Bool) && matches!(constant, Operand::Global { .. })
+        }
         InstructionKind::Phi { incomings } => {
             result.is_some()
                 && incomings
@@ -1399,7 +1442,7 @@ fn invalid(function: &Function, instruction: &Instruction, diagnostics: &mut Vec
 
 /// The instruction's kind, for diagnostics. `Debug` would print every
 /// operand, which is far more than a reader of a diagnostic needs.
-fn instruction_name(kind: &InstructionKind) -> &'static str {
+pub(crate) fn instruction_name(kind: &InstructionKind) -> &'static str {
     match kind {
         InstructionKind::GlobalInvocationId => "global invocation ID",
         InstructionKind::LocalVariable { .. } => "local variable",
@@ -1437,6 +1480,7 @@ fn instruction_name(kind: &InstructionKind) -> &'static str {
         InstructionKind::Barrier { .. } => "barrier",
         InstructionKind::Atomic { .. } => "atomic",
         InstructionKind::Phi { .. } => "phi",
+        InstructionKind::FunctionConstantDefined { .. } => "function constant query",
     }
 }
 
@@ -1599,6 +1643,7 @@ pub(crate) fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         }
         InstructionKind::DiscardFragment | InstructionKind::Barrier { .. } => Vec::new(),
         InstructionKind::Atomic { pointer, value, .. } => vec![pointer, value],
+        InstructionKind::FunctionConstantDefined { constant } => vec![constant],
         InstructionKind::Phi { incomings } => incomings.iter().map(|(_, value)| value).collect(),
     }
 }
@@ -1706,6 +1751,7 @@ pub(crate) fn instruction_operands_mut(kind: &mut InstructionKind) -> Vec<&mut O
             operands.extend(lod);
             operands
         }
+        InstructionKind::FunctionConstantDefined { constant } => vec![constant],
         InstructionKind::Phi { incomings } => {
             incomings.iter_mut().map(|(_, value)| value).collect()
         }
@@ -1852,7 +1898,7 @@ fn resource_namespace(kind: ResourceKind) -> u8 {
     }
 }
 
-fn successors(terminator: &Terminator) -> Vec<BlockId> {
+pub(crate) fn successors(terminator: &Terminator) -> Vec<BlockId> {
     match terminator {
         Terminator::Branch(target) => vec![*target],
         Terminator::CondBranch {

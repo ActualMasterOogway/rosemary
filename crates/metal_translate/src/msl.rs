@@ -163,6 +163,7 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
         })?;
 
     let module = Module {
+        static_initializers: Vec::new(),
         globals: Vec::new(),
         functions: vec![Function {
             name: name.to_string(),
@@ -589,6 +590,7 @@ fn parse_blit_kernel(
         terminator: Terminator::Return(None),
     };
     let module = Module {
+        static_initializers: Vec::new(),
         globals: Vec::new(),
         functions: vec![Function {
             name: name.to_string(),

@@ -95,6 +95,19 @@ pub struct EntryArtifact {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TranslatedLibrary {
     pub entries: Vec<EntryArtifact>,
+    /// The library's `[[function_constant]]` declarations. A library with
+    /// any has to be translated again for each set of values a function is
+    /// made with.
+    pub function_constants: Vec<FunctionConstantInfo>,
+}
+
+/// One function constant a library declares, as reflection reports it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FunctionConstantInfo {
+    pub index: u32,
+    pub name: String,
+    /// The Itanium spelling of its Metal type.
+    pub encoding: String,
 }
 
 pub fn emit_spirv(
@@ -103,12 +116,30 @@ pub fn emit_spirv(
 ) -> Result<TranslatedLibrary, TranslateError> {
     module.verify()?;
     validate_target(target)?;
+    if !module.static_initializers.is_empty() {
+        return Err(emission(
+            "the module's static initializers have not been run; specialize it first",
+        ));
+    }
     let entries = module
         .entries
         .iter()
         .map(|entry| emit_entry(module, entry, target))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(TranslatedLibrary { entries })
+    let function_constants = module
+        .globals
+        .iter()
+        .filter_map(|global| global.function_constant.as_ref())
+        .map(|slot| FunctionConstantInfo {
+            index: slot.index,
+            name: slot.name.clone(),
+            encoding: slot.encoding.clone(),
+        })
+        .collect();
+    Ok(TranslatedLibrary {
+        entries,
+        function_constants,
+    })
 }
 
 fn validate_target(target: &TargetProfile) -> Result<(), TranslateError> {
@@ -1979,6 +2010,11 @@ impl Emitter {
                         ),
                     };
                 build(&mut self.builder).map_err(build_error)?;
+            }
+            InstructionKind::FunctionConstantDefined { .. } => {
+                return Err(emission(
+                    "a function constant query survived specialization",
+                ));
             }
         }
         Ok(())

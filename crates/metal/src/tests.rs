@@ -68,6 +68,15 @@ fn device_registers_the_metal_object_graph() {
         (c"MTLDepthStencilDescriptor", "setDepthWriteEnabled:"),
         (c"MTLDepthStencilDescriptor", "backFaceStencil"),
         (c"R3CAMetalDrawable", "texture"),
+        (c"R3MTLLibrary", "newFunctionWithName:constantValues:error:"),
+        (
+            c"MTLFunctionConstantValues",
+            "setConstantValue:type:atIndex:",
+        ),
+        (
+            c"MTLFunctionConstantValues",
+            "setConstantValues:type:withRange:",
+        ),
     ] {
         let class = objc::class::lookup(class).expect("Metal is bootstrapped");
         assert!(
@@ -154,6 +163,88 @@ fn a_translated_library_exposes_its_entry_points() {
         unsafe { foundation::string::bytes(function_name(function, std::ptr::null())) },
         b"clear"
     );
+}
+
+fn constant_values() -> Id {
+    bootstrap();
+    object::make(
+        c"MTLFunctionConstantValues",
+        ConstantValues {
+            values: metal_translate::FunctionConstantValues::new(),
+        },
+    )
+}
+
+#[test]
+fn function_constant_values_are_kept_by_index_name_and_range() {
+    let values = constant_values();
+    let flag = 1u8;
+    let lanes = [7u32, 11];
+    // SAFETY: the calls a guest makes, with values of the named types.
+    unsafe {
+        set_constant_at_index(values, std::ptr::null(), &flag, 53, 2);
+        set_constant_with_name(
+            values,
+            std::ptr::null(),
+            lanes.as_ptr().cast(),
+            34,
+            foundation::string::from_str("lanes"),
+        );
+        set_constants_in_range(values, std::ptr::null(), lanes.as_ptr().cast(), 33, 4, 2);
+    }
+    let mut expected = metal_translate::FunctionConstantValues::new();
+    expected.set_index(2, 53, &[1]).unwrap();
+    expected
+        .set_name("lanes", 34, &[7, 0, 0, 0, 11, 0, 0, 0])
+        .unwrap();
+    expected.set_index(4, 33, &7u32.to_le_bytes()).unwrap();
+    expected.set_index(5, 33, &11u32.to_le_bytes()).unwrap();
+    // SAFETY: an `MTLFunctionConstantValues` this test made.
+    assert_eq!(
+        unsafe { object::body::<ConstantValues>(values) }.values,
+        expected
+    );
+}
+
+/// A library which declares no function constants has nothing to specialize,
+/// so Metal hands back the function the values would not have changed.
+#[test]
+fn a_library_without_function_constants_ignores_the_values() {
+    let device = device_for_tests();
+    let library = source_library(device, SMOKE_KERNEL);
+    let values = constant_values();
+    let mut error = std::ptr::null_mut();
+    // SAFETY: the calls a guest makes.
+    let function = unsafe {
+        new_function_with_constants(
+            library,
+            std::ptr::null(),
+            foundation::string::from_str("clear"),
+            values,
+            &mut error,
+        )
+    };
+    assert!(!function.is_null());
+    assert!(error.is_null());
+    // SAFETY: a function this test made.
+    assert!(
+        unsafe { object::body::<Function>(function) }
+            .specialized
+            .is_none()
+    );
+
+    // SAFETY: as above.
+    let missing = unsafe {
+        new_function_with_constants(
+            library,
+            std::ptr::null(),
+            foundation::string::from_str("absent"),
+            values,
+            &mut error,
+        )
+    };
+    assert!(missing.is_null());
+    assert!(!error.is_null(), "a missing function is an error");
 }
 
 /// A device without a Vulkan device must refuse resource creation rather than
@@ -431,6 +522,7 @@ fn triangle_library() -> metal_translate::TranslatedLibrary {
         }],
     };
     let module = ir::Module {
+        static_initializers: Vec::new(),
         functions: vec![vertex, fragment],
         globals: Vec::new(),
         entries: vec![
@@ -510,7 +602,7 @@ fn a_translated_triangle_draws_on_the_gpu() {
         return;
     };
     const SIZE: u64 = 8;
-    let library = retain_library(device, triangle_library());
+    let library = retain_library(device, triangle_library(), None, None);
     // SAFETY: a library this test made.
     let (vertex, fragment) = unsafe {
         (
@@ -819,7 +911,7 @@ fn recording_cost() {
     };
     objc::arc::pool_pop(pool);
 
-    let library = retain_library(device, triangle_library());
+    let library = retain_library(device, triangle_library(), None, None);
     // SAFETY: as in `a_translated_triangle_draws_on_the_gpu`.
     let render = unsafe {
         let vertex = new_function_with_name(
