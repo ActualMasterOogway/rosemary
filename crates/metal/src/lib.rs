@@ -567,6 +567,7 @@ unsafe extern "C" fn new_library_with_source(
         return fail_library(error, "Metal source is not valid UTF-8");
     };
     report_source_library(source);
+    dump_source_library(source);
     let translated = match metal_translate::translate_msl_cached(source, target) {
         Ok(translated) => translated,
         Err(translation_error) => return fail_library(error, &translation_error.to_string()),
@@ -868,6 +869,18 @@ fn report_source_library(source: &str) {
             fnv1a64(source.as_bytes()),
         );
     }
+}
+
+fn dump_source_library(source: &str) {
+    let Some(directory) = std::env::var_os("ROSETTA3_MSL_OUT") else {
+        return;
+    };
+    let directory = std::path::PathBuf::from(directory);
+    if std::fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    let name = format!("msl-{:016x}.metal", fnv1a64(source.as_bytes()));
+    let _ = std::fs::write(directory.join(name), source);
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {

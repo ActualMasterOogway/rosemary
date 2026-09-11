@@ -19,24 +19,63 @@ use crate::{Diagnostic, Phase, TranslateError};
 pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
     let source = strip_comments(source);
     let structs = parse_structs(&source)?;
-    let kernel = source
-        .find("kernel void")
-        .ok_or_else(|| syntax_at(&source, 0, "MSL source has no `kernel void` entry point"))?;
+    let kernels: Vec<usize> = source
+        .match_indices("kernel void")
+        .map(|(offset, _)| offset)
+        .collect();
+    if kernels.is_empty() {
+        return Err(syntax_at(
+            &source,
+            0,
+            "MSL source has no `kernel void` entry point",
+        ));
+    }
+    // One library declares several kernels and a guest asks for each by name,
+    // so every one is parsed into the same module. Parsing only the first left
+    // `newFunctionWithName:` answering nil for the rest, which a guest that
+    // does not check reads as a shader which failed to compile.
+    let mut merged = Module {
+        functions: Vec::new(),
+        entries: Vec::new(),
+        globals: Vec::new(),
+        static_initializers: Vec::new(),
+    };
+    for kernel in kernels {
+        let module = parse_kernel(&source, &structs, kernel)?;
+        let base = merged.functions.len();
+        merged.functions.extend(module.functions);
+        merged
+            .entries
+            .extend(module.entries.into_iter().map(|mut entry| {
+                entry.function += base;
+                entry
+            }));
+    }
+    merged.verify()?;
+    Ok(merged)
+}
+
+/// Parse the one kernel which begins at `kernel` in `source`.
+fn parse_kernel(
+    source: &str,
+    structs: &HashMap<String, Type>,
+    kernel: usize,
+) -> Result<Module, TranslateError> {
     let after_kernel = source[kernel + "kernel void".len()..].trim_start();
     let name_end = after_kernel
         .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-        .ok_or_else(|| syntax_at(&source, kernel, "MSL kernel has no parameter list"))?;
+        .ok_or_else(|| syntax_at(source, kernel, "MSL kernel has no parameter list"))?;
     let name = after_kernel[..name_end].trim();
     if name.is_empty() {
-        return Err(syntax_at(&source, kernel, "MSL kernel has no name"));
+        return Err(syntax_at(source, kernel, "MSL kernel has no name"));
     }
     let after_name = &after_kernel[name_end..];
     let open = after_name
         .find('(')
-        .ok_or_else(|| syntax_at(&source, kernel, "MSL kernel has no parameter list"))?;
+        .ok_or_else(|| syntax_at(source, kernel, "MSL kernel has no parameter list"))?;
     let close = matching(after_name, open, '(', ')').ok_or_else(|| {
         syntax_at(
-            &source,
+            source,
             kernel + "kernel void".len() + name_end + open,
             "MSL kernel has an unterminated parameter list",
         )
@@ -46,14 +85,14 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
         .map(|offset| close + 1 + offset)
         .ok_or_else(|| {
             syntax_at(
-                &source,
+                source,
                 kernel + "kernel void".len() + name_end + close,
                 "MSL kernel has no body",
             )
         })?;
     let body_close = matching(after_name, body_open, '{', '}').ok_or_else(|| {
         syntax_at(
-            &source,
+            source,
             kernel + "kernel void".len() + name_end + body_open,
             "MSL kernel has an unterminated body",
         )
@@ -66,21 +105,26 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
     let mut values = Vec::new();
     let mut builtins = HashMap::new();
     for raw in split_parameters(parameters) {
-        let offset = source.find(raw).unwrap_or(0);
+        // Search from this kernel, not from the start of the library: two
+        // kernels may declare a parameter with identical text, and a
+        // diagnostic which named the first would point at the wrong line.
+        let offset = source[kernel..]
+            .find(raw)
+            .map_or(kernel, |offset| kernel + offset);
         let (declaration, attribute) = raw
             .split_once("[[")
-            .ok_or_else(|| syntax_at(&source, offset, "MSL parameter has no attribute"))?;
+            .ok_or_else(|| syntax_at(source, offset, "MSL parameter has no attribute"))?;
         let attribute = attribute
             .strip_suffix("]]")
-            .ok_or_else(|| syntax_at(&source, offset, "MSL parameter attribute is malformed"))?
+            .ok_or_else(|| syntax_at(source, offset, "MSL parameter attribute is malformed"))?
             .trim();
         let declaration = declaration.trim();
         let name = declaration
             .split_whitespace()
             .last()
-            .ok_or_else(|| syntax_at(&source, offset, "MSL parameter has no name"))?;
-        let ty = parse_parameter_type(declaration, name, &structs)
-            .map_err(|message| syntax_at(&source, offset, message))?;
+            .ok_or_else(|| syntax_at(source, offset, "MSL parameter has no name"))?;
+        let ty = parse_parameter_type(declaration, name, structs)
+            .map_err(|message| syntax_at(source, offset, message))?;
         let value = ValueId(values.len() as u32);
         values.push(ty.clone());
         if attribute.starts_with("thread_position_in_grid") {
@@ -105,7 +149,7 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
             });
         } else {
             return Err(syntax_at(
-                &source,
+                source,
                 offset,
                 "unsupported MSL parameter attribute",
             ));
@@ -113,7 +157,7 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
     }
     if body.trim_start().starts_with("if") {
         return parse_blit_kernel(
-            &source,
+            source,
             name,
             body,
             function_parameters,
@@ -132,7 +176,7 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
                 }
     }) else {
         return Err(syntax_at(
-            &source,
+            source,
             source.find(body).unwrap_or(0),
             "MSL function body requires operations not implemented by the source frontend",
         ));
@@ -147,7 +191,7 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
         .strip_prefix(&prefix)
         .ok_or_else(|| {
             syntax_at(
-                &source,
+                source,
                 source.find(body).unwrap_or(0),
                 "only `buffer[0] = integer_literal;` is supported",
             )
@@ -156,7 +200,7 @@ pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
         .parse::<u32>()
         .map_err(|_| {
             syntax_at(
-                &source,
+                source,
                 source.find(body).unwrap_or(0),
                 "MSL store value is not a `uint` literal",
             )
@@ -357,24 +401,30 @@ fn parse_blit_kernel(
         ));
     };
     let element_type = input_pointee.as_ref().clone();
-    if element_type
-        != (Type::Vector {
-            element: Box::new(Type::Int {
-                bits: 8,
-                signed: false,
-            }),
-            lanes: 4,
-        })
-    {
-        return Err(syntax_at(
+    let uchar = Type::Int {
+        bits: 8,
+        signed: false,
+    };
+    // The upload blits read an unsigned 8-bit element of one, two or four
+    // lanes. How many it has fixes which write form is correct, so the two
+    // are checked against each other below rather than independently.
+    let element_lanes = match &element_type {
+        ty if *ty == uchar => Some(1),
+        Type::Vector { element, lanes } if **element == uchar && matches!(*lanes, 2 | 4) => {
+            Some(*lanes)
+        }
+        _ => None,
+    }
+    .ok_or_else(|| {
+        syntax_at(
             source,
             source.find(inner).unwrap_or(0),
             format!(
                 "unsupported MSL buffer element load ({})",
                 blit_statement_id(load)
             ),
-        ));
-    }
+        )
+    })?;
     let write = inner.split(';').nth(1).unwrap_or("").trim();
     let (output_name, write_value, write_coordinate) =
         parse_blit_write(write).ok_or_else(|| {
@@ -397,9 +447,28 @@ fn parse_blit_kernel(
                 "blit output texture is missing",
             )
         })?;
-    if output.ty != writable_float_texture3d()
-        || !is_normalized_uchar4(write_value, element_name)
-        || !is_offset_coordinate(write_coordinate, gid_name.trim(), params_name.trim())
+    let dimension = if output.ty == writable_float_texture(TextureDimension::D3) {
+        Some(TextureDimension::D3)
+    } else if output.ty == writable_float_texture(TextureDimension::D2) {
+        Some(TextureDimension::D2)
+    } else {
+        None
+    };
+    // A two-dimensional destination takes a two-lane coordinate, which is
+    // what Metal's `gid.xy + params.offset.xy` spells and what the verifier
+    // requires of an image write.
+    let coordinate_lanes: u8 = match &dimension {
+        Some(TextureDimension::D2) => 2,
+        _ => 3,
+    };
+    if dimension.is_none()
+        || normalized_write(write_value, element_name) != Some(element_lanes)
+        || !is_offset_coordinate(
+            write_coordinate,
+            gid_name.trim(),
+            params_name.trim(),
+            coordinate_lanes,
+        )
     {
         return Err(syntax_at(
             source,
@@ -423,10 +492,23 @@ fn parse_blit_kernel(
         element: Box::new(Type::Bool),
         lanes: 3,
     };
-    let uchar4 = element_type;
+    let element_ty = element_type;
+    let float = Type::Float { bits: 32 };
+    let float_n = if element_lanes == 1 {
+        float.clone()
+    } else {
+        Type::Vector {
+            element: Box::new(float.clone()),
+            lanes: element_lanes,
+        }
+    };
     let float4 = Type::Vector {
-        element: Box::new(Type::Float { bits: 32 }),
+        element: Box::new(float.clone()),
         lanes: 4,
+    };
+    let uint2 = Type::Vector {
+        element: Box::new(Type::u32()),
+        lanes: 2,
     };
     let params_value = add(&mut values, params_pointee.as_ref().clone());
     let size = add(&mut values, uint3.clone());
@@ -449,15 +531,40 @@ fn parse_blit_kernel(
         &mut values,
         Type::Pointer {
             space: AddressSpace::Device,
-            pointee: Box::new(uchar4.clone()),
+            pointee: Box::new(element_ty.clone()),
         },
     );
-    let element = add(&mut values, uchar4);
-    let converted = add(&mut values, float4.clone());
-    let divisor = add(&mut values, float4.clone());
-    let normalized = add(&mut values, float4);
+    let element = add(&mut values, element_ty);
+    let converted = add(&mut values, float_n.clone());
+    // A scalar element divides by a scalar; only a vector needs the splat.
+    let divisor = (element_lanes > 1).then(|| add(&mut values, float_n.clone()));
+    let normalized = add(&mut values, float_n);
+    let zero_pad = (element_lanes == 2).then(|| {
+        add(
+            &mut values,
+            Type::Vector {
+                element: Box::new(float.clone()),
+                lanes: 2,
+            },
+        )
+    });
+    // Metal writes a four-lane texel whatever the element's width.
+    let texel = if element_lanes == 4 {
+        normalized
+    } else {
+        add(&mut values, float4)
+    };
     let offset = add(&mut values, uint3.clone());
-    let coordinate = add(&mut values, uint3.clone());
+    let gid_coordinate = (coordinate_lanes == 2).then(|| add(&mut values, uint2.clone()));
+    let offset_coordinate = (coordinate_lanes == 2).then(|| add(&mut values, uint2.clone()));
+    let coordinate = add(
+        &mut values,
+        if coordinate_lanes == 2 {
+            uint2
+        } else {
+            uint3.clone()
+        },
+    );
     let offset_field = structure
         .fields
         .iter()
@@ -545,46 +652,106 @@ fn parse_blit_kernel(
                         value: Operand::Value(element),
                     },
                 },
-                Instruction {
+            ]);
+            if let Some(divisor) = divisor {
+                instructions.push(Instruction {
                     result: Some(divisor),
                     kind: InstructionKind::VectorSplat {
                         value: Operand::f32(255.0),
+                        lanes: element_lanes,
+                    },
+                });
+            }
+            instructions.push(Instruction {
+                result: Some(normalized),
+                kind: InstructionKind::FloatBinary {
+                    op: FloatBinaryOp::Divide,
+                    lhs: Operand::Value(converted),
+                    rhs: divisor.map_or(Operand::f32(255.0), Operand::Value),
+                },
+            });
+            // A scalar is broadcast into the texel, which is what Metal's
+            // implicit scalar-to-vector conversion does; a two-lane element
+            // is padded with the zeroes the source itself names.
+            if element_lanes == 1 {
+                instructions.push(Instruction {
+                    result: Some(texel),
+                    kind: InstructionKind::VectorSplat {
+                        value: Operand::Value(normalized),
                         lanes: 4,
                     },
-                },
-                Instruction {
-                    result: Some(normalized),
-                    kind: InstructionKind::FloatBinary {
-                        op: FloatBinaryOp::Divide,
-                        lhs: Operand::Value(converted),
-                        rhs: Operand::Value(divisor),
+                });
+            } else if let Some(zero) = zero_pad {
+                instructions.extend([
+                    Instruction {
+                        result: Some(zero),
+                        kind: InstructionKind::VectorSplat {
+                            value: Operand::f32(0.0),
+                            lanes: 2,
+                        },
                     },
-                },
-                Instruction {
-                    result: Some(offset),
-                    kind: InstructionKind::CompositeExtract {
-                        composite: Operand::Value(params_value),
-                        index: offset_field.0 as u32,
+                    Instruction {
+                        result: Some(texel),
+                        kind: InstructionKind::VectorShuffle {
+                            first: Operand::Value(normalized),
+                            second: Operand::Value(zero),
+                            components: vec![0, 1, 2, 3],
+                        },
                     },
+                ]);
+            }
+            instructions.push(Instruction {
+                result: Some(offset),
+                kind: InstructionKind::CompositeExtract {
+                    composite: Operand::Value(params_value),
+                    index: offset_field.0 as u32,
                 },
-                Instruction {
+            });
+            match (gid_coordinate, offset_coordinate) {
+                (Some(gid_xy), Some(offset_xy)) => instructions.extend([
+                    Instruction {
+                        result: Some(gid_xy),
+                        kind: InstructionKind::VectorShuffle {
+                            first: Operand::Value(gid),
+                            second: Operand::Value(gid),
+                            components: vec![0, 1],
+                        },
+                    },
+                    Instruction {
+                        result: Some(offset_xy),
+                        kind: InstructionKind::VectorShuffle {
+                            first: Operand::Value(offset),
+                            second: Operand::Value(offset),
+                            components: vec![0, 1],
+                        },
+                    },
+                    Instruction {
+                        result: Some(coordinate),
+                        kind: InstructionKind::IntegerBinary {
+                            op: IntegerBinaryOp::Add,
+                            lhs: Operand::Value(gid_xy),
+                            rhs: Operand::Value(offset_xy),
+                        },
+                    },
+                ]),
+                _ => instructions.push(Instruction {
                     result: Some(coordinate),
                     kind: InstructionKind::IntegerBinary {
                         op: IntegerBinaryOp::Add,
                         lhs: Operand::Value(gid),
                         rhs: Operand::Value(offset),
                     },
+                }),
+            }
+            instructions.push(Instruction {
+                result: None,
+                kind: InstructionKind::TextureWrite {
+                    array_index: None,
+                    texture: Operand::Value(output.value),
+                    coordinate: Operand::Value(coordinate),
+                    value: Operand::Value(texel),
                 },
-                Instruction {
-                    result: None,
-                    kind: InstructionKind::TextureWrite {
-                        array_index: None,
-                        texture: Operand::Value(output.value),
-                        coordinate: Operand::Value(coordinate),
-                        value: Operand::Value(normalized),
-                    },
-                },
-            ]);
+            });
             instructions
         },
         terminator: Terminator::Return(None),
@@ -646,22 +813,45 @@ fn top_level_comma(arguments: &str) -> Option<usize> {
     None
 }
 
-fn is_normalized_uchar4(value: &str, element: &str) -> bool {
+/// How many lanes the normalized write form names, or `None` for a form this
+/// frontend does not implement.
+///
+/// The uploaded blits spell one operation three ways, one per element width:
+/// a four-lane element fills the texel, a scalar is broadcast into it by
+/// Metal's implicit conversion, and a two-lane element names the zeroes which
+/// fill the rest.
+fn normalized_write(value: &str, element: &str) -> Option<u8> {
     let compact: String = value
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect();
-    ["255.f", "255.0f", "255.0"]
-        .iter()
-        .any(|divisor| compact == format!("float4({element})/{divisor}"))
+    for divisor in ["255.f", "255.0f", "255.0"] {
+        if compact == format!("float4({element})/{divisor}") {
+            return Some(4);
+        }
+        if compact == format!("float({element})/{divisor}") {
+            return Some(1);
+        }
+        for zero in ["0.f", "0.0f", "0.0"] {
+            if compact == format!("float4(float2({element})/{divisor},{zero},{zero})") {
+                return Some(2);
+            }
+        }
+    }
+    None
 }
 
-fn is_offset_coordinate(coordinate: &str, gid: &str, params: &str) -> bool {
+/// Whether the coordinate is `gid + params.offset`, in the lane count the
+/// destination texture takes.
+fn is_offset_coordinate(coordinate: &str, gid: &str, params: &str, lanes: u8) -> bool {
     let compact: String = coordinate
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect();
-    compact == format!("{gid}+{params}.offset")
+    match lanes {
+        2 => compact == format!("{gid}.xy+{params}.offset.xy"),
+        _ => compact == format!("{gid}+{params}.offset"),
+    }
 }
 
 /// Lower the scalar address expressions used by some apps buffer blits. This
@@ -985,10 +1175,12 @@ fn parse_resource_attribute(
     Some((kind, index, access))
 }
 
-/// The one texture shape this source-MSL frontend accepts.
-fn writable_float_texture3d() -> Type {
+/// The texture shapes this source-MSL frontend accepts: a writable,
+/// non-arrayed float texture of two or three dimensions, which is what the
+/// runtime's own upload blits write into.
+fn writable_float_texture(dimension: TextureDimension) -> Type {
     Type::Texture(TextureType {
-        dimension: TextureDimension::D3,
+        dimension,
         array: false,
         multisampled: false,
         depth: false,
@@ -1024,8 +1216,13 @@ fn parse_parameter_type(
             pointee: Box::new(parse_value_type(pointee.trim(), structs)?),
         });
     }
-    if ty.starts_with("texture3d<float,") && ty.contains("access::write") {
-        return Ok(writable_float_texture3d());
+    if ty.contains("access::write") {
+        if ty.starts_with("texture3d<float,") {
+            return Ok(writable_float_texture(TextureDimension::D3));
+        }
+        if ty.starts_with("texture2d<float,") {
+            return Ok(writable_float_texture(TextureDimension::D2));
+        }
     }
     if ty.starts_with("texture") {
         return Err("unsupported MSL texture type".to_string());
