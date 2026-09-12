@@ -34,6 +34,7 @@ pub mod string;
 pub mod sysconfig;
 mod timezone;
 pub mod url;
+pub mod urlresource;
 pub mod uuid;
 
 /// Install the classes this crate owns. Idempotent.
@@ -209,6 +210,22 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFRunLoopSourceInvalidate" => at!(api::CFRunLoopSourceInvalidate),
         "CFRunLoopSourceIsValid" => at!(api::CFRunLoopSourceIsValid),
         "CFRunLoopAddSource" => at!(api::CFRunLoopAddSource),
+        "CFRunLoopObserverCreate" => at!(api::CFRunLoopObserverCreate),
+        "CFRunLoopObserverInvalidate" => at!(api::CFRunLoopObserverInvalidate),
+        "CFRunLoopObserverIsValid" => at!(api::CFRunLoopObserverIsValid),
+        "CFRunLoopObserverGetOrder" => at!(api::CFRunLoopObserverGetOrder),
+        "CFRunLoopAddObserver" => at!(api::CFRunLoopAddObserver),
+        "CFRunLoopRemoveObserver" => at!(api::CFRunLoopRemoveObserver),
+        "CFRunLoopContainsObserver" => at!(api::CFRunLoopContainsObserver),
+        "CFRunLoopAddCommonMode" => at!(api::CFRunLoopAddCommonMode),
+        "CFRunLoopIsWaiting" => at!(api::CFRunLoopIsWaiting),
+        "CFRunLoopTimerGetInterval" => at!(api::CFRunLoopTimerGetInterval),
+        "CFRunLoopTimerSetNextFireDate" => at!(api::CFRunLoopTimerSetNextFireDate),
+        "CFDataCreateMutable" => at!(api::CFDataCreateMutable),
+        "CFDataGetBytes" => at!(api::CFDataGetBytes),
+        "CFStringGetSystemEncoding" => at!(api::CFStringGetSystemEncoding),
+        "CFArrayContainsValue" => at!(api::CFArrayContainsValue),
+        "CFArrayAppendArray" => at!(api::CFArrayAppendArray),
         "CFRunLoopRemoveSource" => at!(api::CFRunLoopRemoveSource),
         "CFRunLoopContainsSource" => at!(api::CFRunLoopContainsSource),
         "CFAbsoluteTimeGetCurrent" => at!(api::CFAbsoluteTimeGetCurrent),
@@ -220,7 +237,11 @@ pub fn symbol(name: &str) -> Option<u64> {
 
         // SystemConfiguration, which is a framework of its own and is here
         // because its objects are CoreFoundation's - see [`sysconfig`].
-        other => return preferences::symbol(other).or_else(|| sysconfig::symbol(other)),
+        other => {
+            return preferences::symbol(other)
+                .or_else(|| urlresource::symbol(other))
+                .or_else(|| sysconfig::symbol(other));
+        }
     })
 }
 
@@ -345,6 +366,22 @@ pub const NAMES: &[&str] = &[
     "CFRunLoopSourceInvalidate",
     "CFRunLoopSourceIsValid",
     "CFRunLoopAddSource",
+    "CFRunLoopObserverCreate",
+    "CFRunLoopObserverInvalidate",
+    "CFRunLoopObserverIsValid",
+    "CFRunLoopObserverGetOrder",
+    "CFRunLoopAddObserver",
+    "CFRunLoopRemoveObserver",
+    "CFRunLoopContainsObserver",
+    "CFRunLoopAddCommonMode",
+    "CFRunLoopIsWaiting",
+    "CFRunLoopTimerGetInterval",
+    "CFRunLoopTimerSetNextFireDate",
+    "CFDataCreateMutable",
+    "CFDataGetBytes",
+    "CFStringGetSystemEncoding",
+    "CFArrayContainsValue",
+    "CFArrayAppendArray",
     "CFRunLoopRemoveSource",
     "CFRunLoopContainsSource",
     "CFAbsoluteTimeGetCurrent",
@@ -360,6 +397,7 @@ pub fn names() -> Vec<&'static str> {
     NAMES
         .iter()
         .chain(preferences::NAMES)
+        .chain(urlresource::NAMES)
         .chain(sysconfig::NAMES)
         .copied()
         .collect()
@@ -476,6 +514,8 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         "_kCFCoreFoundationVersionNumber".to_string(),
         base::global_cell("_kCFCoreFoundationVersionNumber", (1600.0f64).to_bits()),
     ));
+    out.extend(preferences::data_symbols());
+    out.extend(urlresource::data_symbols());
     out.extend(sysconfig::data_symbols());
     out
 }

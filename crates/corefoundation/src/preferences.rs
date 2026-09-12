@@ -60,14 +60,75 @@ unsafe fn text(value: CFTypeRef) -> Option<String> {
 ///
 /// A null application id is `kCFPreferencesAnyApplication` as far as this store
 /// is concerned - one place for a caller that did not name a domain, rather
-/// than a silent failure.
+/// than a silent failure. It is spelled with that constant's *value* rather
+/// than its name so that a caller passing the constant and a caller passing
+/// null land in one domain instead of two.
 ///
 /// # Safety
 ///
 /// `application` is null or a `CFStringRef`.
 unsafe fn domain_of(application: CFTypeRef) -> String {
     // SAFETY: the caller's obligation.
-    unsafe { text(application) }.unwrap_or_else(|| "kCFPreferencesAnyApplication".to_string())
+    unsafe { text(application) }.unwrap_or_else(|| ANY.to_string())
+}
+
+/// The value Apple's CoreFoundation gives `kCFPreferencesAnyApplication`,
+/// `kCFPreferencesAnyUser` and `kCFPreferencesAnyHost` - all three are this one
+/// string, and a guest comparing any of them against another finds them equal.
+const ANY: &str = "*";
+
+/// The `CFStringRef` domain globals, as `(Mach-O name, value)`.
+///
+/// These are **variables** holding string objects, not functions, so an
+/// unresolved one binds to zero and the guest's own initializer dereferences it
+/// before `main` - see [`crate::data_symbols`]. Qt is the case in hand: its
+/// `qsettings_mac.cpp` module initializer reads `kCFPreferencesCurrentHost` and
+/// `kCFPreferencesAnyHost` into a static array, so a null slot is a segfault at
+/// address zero during `run_initializers` with nothing to name the symbol.
+///
+/// The texts are Apple's own, not chosen here. They have to be, because a guest
+/// may compare two of them - the three `Any` domains are one string on a Mac -
+/// and because this store files keys by the text.
+const DOMAIN_STRINGS: &[(&str, &str)] = &[
+    ("_kCFPreferencesAnyApplication", ANY),
+    ("_kCFPreferencesAnyUser", ANY),
+    ("_kCFPreferencesAnyHost", ANY),
+    (
+        "_kCFPreferencesCurrentApplication",
+        "kCFPreferencesCurrentApplication",
+    ),
+    ("_kCFPreferencesCurrentUser", "kCFPreferencesCurrentUser"),
+    ("_kCFPreferencesCurrentHost", "kCFPreferencesCurrentHost"),
+];
+
+/// One interned string per distinct text, so that the three `Any` domains are
+/// the same object and a guest comparing them by pointer agrees with one
+/// comparing them with `CFEqual`.
+fn interned(text: &str) -> CFTypeRef {
+    static STRINGS: Mutex<Vec<(String, usize)>> = Mutex::new(Vec::new());
+    let mut strings = STRINGS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, object)) = strings.iter().find(|(t, _)| t == text) {
+        return *object as CFTypeRef;
+    }
+    let object = crate::string::from_bytes(text.as_bytes(), false);
+    // Retained forever: a global a guest may release is one it can make dangle.
+    objc::arc::retain(object as objc::object::Id);
+    strings.push((text.to_string(), object as usize));
+    object
+}
+
+/// The data symbols this module publishes, for [`crate::data_symbols`].
+pub fn data_symbols() -> Vec<(String, u64)> {
+    crate::bootstrap();
+    DOMAIN_STRINGS
+        .iter()
+        .map(|(symbol, text)| {
+            (
+                (*symbol).to_string(),
+                crate::base::global_cell(symbol, interned(text) as usize as u64),
+            )
+        })
+        .collect()
 }
 
 /// `CFPropertyListRef CFPreferencesCopyAppValue(CFStringRef, CFStringRef)`
@@ -216,6 +277,86 @@ pub unsafe extern "C" fn CFPreferencesGetAppIntegerValue(
     number.unwrap_or(0)
 }
 
+/// `CFArrayRef CFPreferencesCopyKeyList(CFStringRef applicationID, CFStringRef
+/// userName, CFStringRef hostName)`
+///
+/// NULL rather than an empty array for a domain with nothing in it, because that
+/// is the documented answer and what a caller tests for: Qt's `QSettings` reads
+/// this to list a group's children and treats NULL as "no such domain", where an
+/// empty array would have it report a domain that exists and is empty.
+///
+/// The user and host arguments are ignored, as in [`CFPreferencesCopyValue`].
+///
+/// # Safety
+///
+/// As [`CFPreferencesCopyAppValue`].
+pub unsafe extern "C" fn CFPreferencesCopyKeyList(
+    application: CFTypeRef,
+    _user: CFTypeRef,
+    _host: CFTypeRef,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation.
+    let domain = unsafe { domain_of(application) };
+    let store = store().lock().unwrap_or_else(|e| e.into_inner());
+    let keys: Vec<CFTypeRef> = match store.get(&domain) {
+        Some(keys) if !keys.is_empty() => keys
+            .keys()
+            .map(|k| crate::string::from_bytes(k.as_bytes(), false))
+            .collect(),
+        // Absent *and* present-but-empty are both "nothing to list": a domain
+        // left empty by removing its last key is not a domain a Mac would still
+        // report keys for.
+        _ => return std::ptr::null(),
+    };
+    let array = crate::collections::new_array(
+        &keys,
+        crate::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    // The array took its own reference to each key, so the ones made above are
+    // this function's to drop.
+    for key in keys {
+        // SAFETY: a string this function created and still holds.
+        unsafe { crate::api::CFRelease(key) };
+    }
+    array
+}
+
+/// `void CFPreferencesSetMultiple(CFDictionaryRef keysToSet, CFArrayRef
+/// keysToRemove, CFStringRef applicationID, CFStringRef userName, CFStringRef
+/// hostName)`
+///
+/// Removals first, then the writes, which is the order that makes a caller
+/// naming one key in both lists end up with the value rather than without it -
+/// Qt's `QSettings` sync does exactly that when a key is rewritten.
+///
+/// # Safety
+///
+/// `keys_to_set` is null or a `CFDictionaryRef` and `keys_to_remove` is null or
+/// a `CFArrayRef`; both are objects this runtime allocated.
+pub unsafe extern "C" fn CFPreferencesSetMultiple(
+    keys_to_set: CFTypeRef,
+    keys_to_remove: CFTypeRef,
+    application: CFTypeRef,
+    _user: CFTypeRef,
+    _host: CFTypeRef,
+) {
+    // SAFETY: the caller's obligation.
+    if let Some(remove) = unsafe { crate::collections::array(keys_to_remove) } {
+        for key in remove.values.clone() {
+            // SAFETY: a key from the caller's array and the caller's domain.
+            unsafe { CFPreferencesSetAppValue(key, std::ptr::null(), application) };
+        }
+    }
+    // SAFETY: the caller's obligation.
+    if let Some(set) = unsafe { crate::collections::dictionary(keys_to_set) } {
+        for (key, value) in set.entries.clone() {
+            // SAFETY: a pair from the caller's dictionary and the caller's domain.
+            unsafe { CFPreferencesSetAppValue(key, value, application) };
+        }
+    }
+}
+
 /// `Boolean CFPreferencesAppSynchronize(CFStringRef)`
 ///
 /// True, because there is nothing to flush: the store *is* the value every
@@ -241,6 +382,8 @@ pub const NAMES: &[&str] = &[
     "CFPreferencesSetValue",
     "CFPreferencesGetAppBooleanValue",
     "CFPreferencesGetAppIntegerValue",
+    "CFPreferencesCopyKeyList",
+    "CFPreferencesSetMultiple",
     "CFPreferencesAppSynchronize",
     "CFPreferencesSynchronize",
 ];
@@ -253,6 +396,8 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFPreferencesSetValue" => CFPreferencesSetValue as *const (),
         "CFPreferencesGetAppBooleanValue" => CFPreferencesGetAppBooleanValue as *const (),
         "CFPreferencesGetAppIntegerValue" => CFPreferencesGetAppIntegerValue as *const (),
+        "CFPreferencesCopyKeyList" => CFPreferencesCopyKeyList as *const (),
+        "CFPreferencesSetMultiple" => CFPreferencesSetMultiple as *const (),
         "CFPreferencesAppSynchronize" => CFPreferencesAppSynchronize as *const (),
         "CFPreferencesSynchronize" => CFPreferencesSynchronize as *const (),
         _ => return None,

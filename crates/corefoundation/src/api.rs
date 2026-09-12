@@ -1482,6 +1482,131 @@ pub unsafe extern "C" fn CFDataGetLength(data: CFTypeRef) -> CFIndex {
 /// pointer against null sees a valid one and dereferences it, and Apple's
 /// `CFDataGetBytePtr` never hands out an address that cannot be read. So an
 /// empty `CFData` answers with a byte of this runtime's own instead.
+/// `CFMutableDataRef CFDataCreateMutable(CFAllocatorRef, CFIndex capacity)`
+///
+/// The capacity is a hint, and a zero one means "no limit" - neither is a length,
+/// so the data starts empty either way.
+pub unsafe extern "C" fn CFDataCreateMutable(
+    _allocator: CFAllocatorRef,
+    capacity: CFIndex,
+) -> CFTypeRef {
+    let mut bytes = Vec::new();
+    if let Ok(capacity) = usize::try_from(capacity) {
+        bytes.reserve(capacity.min(1 << 24));
+    }
+    collections::new_data(bytes)
+}
+
+/// `void CFDataGetBytes(CFDataRef, CFRange, UInt8 *buffer)`, with the range
+/// flattened into the two words it is passed in.
+///
+/// A range that is not inside the data copies nothing, for
+/// [`CFStringGetCharacters`]' reason: the caller sized its buffer from the range it
+/// asked for.
+///
+/// # Safety
+///
+/// `buffer` is writable for `range_length` bytes.
+pub unsafe extern "C" fn CFDataGetBytes(
+    data: CFTypeRef,
+    range_location: CFIndex,
+    range_length: CFIndex,
+    buffer: *mut u8,
+) {
+    // SAFETY: the caller's obligation.
+    let Some(bytes) = (unsafe { collections::data(data) }) else {
+        return;
+    };
+    let (Ok(start), Ok(count)) = (
+        usize::try_from(range_location),
+        usize::try_from(range_length),
+    ) else {
+        return;
+    };
+    if buffer.is_null() || start.saturating_add(count) > bytes.len() {
+        return;
+    }
+    // SAFETY: the caller states `buffer` holds the range, which has just been
+    // checked against the data.
+    unsafe { std::ptr::copy_nonoverlapping(bytes[start..].as_ptr(), buffer, count) };
+}
+
+/// `CFStringEncoding CFStringGetSystemEncoding(void)`
+///
+/// UTF-8. On a Mac this is the encoding of the user's legacy script system, which
+/// is MacRoman on a machine that has never changed it; here every string this
+/// runtime builds is UTF-8 and every path the host takes is bytes, so UTF-8 is
+/// both the truth and what a caller round-tripping text through it needs.
+pub unsafe extern "C" fn CFStringGetSystemEncoding() -> u32 {
+    string::encoding::UTF8
+}
+
+/// `Boolean CFArrayContainsValue(CFArrayRef, CFRange, const void *)`, with the
+/// range flattened.
+///
+/// Compared with the array's own equality callback, which is what makes a search
+/// for a string find an equal one rather than only the same object.
+///
+/// # Safety
+///
+/// Both arguments are null or objects this runtime allocated.
+pub unsafe extern "C" fn CFArrayContainsValue(
+    array: CFTypeRef,
+    range_location: CFIndex,
+    range_length: CFIndex,
+    value: CFTypeRef,
+) -> Boolean {
+    // SAFETY: the caller's obligation.
+    let Some(contents) = (unsafe { collections::array(array) }) else {
+        return 0;
+    };
+    let (Ok(start), Ok(count)) = (
+        usize::try_from(range_location),
+        usize::try_from(range_length),
+    ) else {
+        return 0;
+    };
+    let end = start.saturating_add(count).min(contents.values.len());
+    contents
+        .values
+        .get(start..end)
+        .is_some_and(|slice| slice.iter().any(|v| contents.policy.equal(*v, value)))
+        as Boolean
+}
+
+/// `void CFArrayAppendArray(CFMutableArrayRef, CFArrayRef, CFRange)`, with the
+/// range flattened.
+///
+/// # Safety
+///
+/// As [`CFArrayContainsValue`].
+pub unsafe extern "C" fn CFArrayAppendArray(
+    array: CFTypeRef,
+    other: CFTypeRef,
+    range_location: CFIndex,
+    range_length: CFIndex,
+) {
+    // SAFETY: the caller's obligation.
+    let Some(source) = (unsafe { collections::array(other) }) else {
+        return;
+    };
+    let (Ok(start), Ok(count)) = (
+        usize::try_from(range_location),
+        usize::try_from(range_length),
+    ) else {
+        return;
+    };
+    let end = start.saturating_add(count).min(source.values.len());
+    let Some(taken) = source.values.get(start..end).map(<[_]>::to_vec) else {
+        return;
+    };
+    for value in taken {
+        // SAFETY: a value from the other array and the caller's destination; the
+        // append refuses an immutable array by name.
+        unsafe { CFArrayAppendValue(array, value) };
+    }
+}
+
 pub unsafe extern "C" fn CFDataGetBytePtr(data: CFTypeRef) -> *const u8 {
     static EMPTY: u8 = 0;
     // SAFETY: the caller's obligation.
@@ -2167,6 +2292,128 @@ pub unsafe extern "C" fn CFRunLoopSourceCreate(
     leak(runloop::new_source(context.perform, context.info as usize))
 }
 
+/// `CFRunLoopObserverRef CFRunLoopObserverCreate(CFAllocatorRef,
+/// CFOptionFlags activities, Boolean repeats, CFIndex order,
+/// CFRunLoopObserverCallBack, CFRunLoopObserverContext *)`
+///
+/// The context's `info` is what the callback is handed back; its retain and release
+/// callbacks are not called, as they are not for a source here either - the
+/// observer lives until the caller invalidates it.
+///
+/// # Safety
+///
+/// `context` is null or a live `CFRunLoopObserverContext`.
+pub unsafe extern "C" fn CFRunLoopObserverCreate(
+    _allocator: CFAllocatorRef,
+    activities: u32,
+    repeats: Boolean,
+    order: CFIndex,
+    callback: Option<runloop::ObserverCallback>,
+    context: *const CFRunLoopObserverContext,
+) -> CFTypeRef {
+    let info = match context.is_null() {
+        true => 0,
+        // SAFETY: the caller states it is a live context.
+        false => (unsafe { (*context).info }) as usize,
+    };
+    leak(runloop::new_observer(
+        activities,
+        repeats != 0,
+        order as i32,
+        callback,
+        info,
+    ))
+}
+
+/// `CFRunLoopObserverContext`, of which only `info` is read.
+#[repr(C)]
+pub struct CFRunLoopObserverContext {
+    pub version: CFIndex,
+    pub info: *mut std::ffi::c_void,
+    pub retain: Option<unsafe extern "C" fn(*const std::ffi::c_void) -> *const std::ffi::c_void>,
+    pub release: Option<unsafe extern "C" fn(*const std::ffi::c_void)>,
+    pub copy_description:
+        Option<unsafe extern "C" fn(*const std::ffi::c_void) -> CFTypeRef>,
+}
+
+pub unsafe extern "C" fn CFRunLoopObserverInvalidate(observer: CFTypeRef) {
+    // SAFETY: the caller's obligation.
+    if let Some(o) = unsafe { borrow::<runloop::Observer>(observer) } {
+        o.invalidate();
+    }
+}
+
+pub unsafe extern "C" fn CFRunLoopObserverIsValid(observer: CFTypeRef) -> Boolean {
+    // SAFETY: the caller's obligation.
+    unsafe { borrow::<runloop::Observer>(observer) }.is_some_and(|o| o.is_valid()) as Boolean
+}
+
+pub unsafe extern "C" fn CFRunLoopObserverGetOrder(observer: CFTypeRef) -> CFIndex {
+    // SAFETY: the caller's obligation.
+    unsafe { borrow::<runloop::Observer>(observer) }.map_or(0, |o| o.order() as CFIndex)
+}
+
+pub unsafe extern "C" fn CFRunLoopAddObserver(
+    loop_: CFTypeRef,
+    observer: CFTypeRef,
+    mode: CFTypeRef,
+) {
+    // SAFETY: the caller's obligation.
+    let (Some(l), Some(o)) = (unsafe { borrow::<RunLoop>(loop_) }, unsafe {
+        borrow::<runloop::Observer>(observer)
+    }) else {
+        return;
+    };
+    // SAFETY: as above.
+    l.add_observer(&o, &unsafe { mode_name(mode) });
+}
+
+pub unsafe extern "C" fn CFRunLoopRemoveObserver(
+    loop_: CFTypeRef,
+    observer: CFTypeRef,
+    mode: CFTypeRef,
+) {
+    // SAFETY: the caller's obligation.
+    let (Some(l), Some(o)) = (unsafe { borrow::<RunLoop>(loop_) }, unsafe {
+        borrow::<runloop::Observer>(observer)
+    }) else {
+        return;
+    };
+    // SAFETY: as above.
+    l.remove_observer(&o, &unsafe { mode_name(mode) });
+}
+
+pub unsafe extern "C" fn CFRunLoopContainsObserver(
+    loop_: CFTypeRef,
+    observer: CFTypeRef,
+    mode: CFTypeRef,
+) -> Boolean {
+    // SAFETY: the caller's obligation.
+    let (Some(l), Some(o)) = (unsafe { borrow::<RunLoop>(loop_) }, unsafe {
+        borrow::<runloop::Observer>(observer)
+    }) else {
+        return 0;
+    };
+    // SAFETY: as above.
+    l.contains_observer(&o, &unsafe { mode_name(mode) }) as Boolean
+}
+
+/// `void CFRunLoopAddCommonMode(CFRunLoopRef, CFStringRef)`
+pub unsafe extern "C" fn CFRunLoopAddCommonMode(loop_: CFTypeRef, mode: CFTypeRef) {
+    // SAFETY: the caller's obligation.
+    let Some(l) = (unsafe { borrow::<RunLoop>(loop_) }) else {
+        return;
+    };
+    // SAFETY: as above.
+    l.add_common_mode(&unsafe { mode_name(mode) });
+}
+
+/// `Boolean CFRunLoopIsWaiting(CFRunLoopRef)`
+pub unsafe extern "C" fn CFRunLoopIsWaiting(loop_: CFTypeRef) -> Boolean {
+    // SAFETY: the caller's obligation.
+    unsafe { borrow::<RunLoop>(loop_) }.is_some_and(|l| l.is_waiting()) as Boolean
+}
+
 pub unsafe extern "C" fn CFRunLoopSourceSignal(source: CFTypeRef) {
     // SAFETY: the caller's obligation.
     if let Some(s) = unsafe { borrow::<Source>(source) } {
@@ -2290,6 +2537,26 @@ pub unsafe extern "C" fn CFRunLoopRemoveTimer(loop_: CFTypeRef, timer: CFTypeRef
     };
     // SAFETY: as above.
     l.remove_timer(&t, &unsafe { mode_name(mode) });
+}
+
+/// `CFTimeInterval CFRunLoopTimerGetInterval(CFRunLoopTimerRef)`
+pub unsafe extern "C" fn CFRunLoopTimerGetInterval(timer: CFTypeRef) -> f64 {
+    // SAFETY: the caller's obligation.
+    unsafe { borrow::<Timer>(timer) }.map_or(0.0, |t| t.interval_seconds())
+}
+
+/// `void CFRunLoopTimerSetNextFireDate(CFRunLoopTimerRef, CFAbsoluteTime)`
+///
+/// How a caller reschedules a timer it already owns, which is what an event
+/// dispatcher does every time its next deadline moves - cheaper than invalidating
+/// one and creating another, and the reason it is not a courtesy to implement it.
+pub unsafe extern "C" fn CFRunLoopTimerSetNextFireDate(timer: CFTypeRef, fire_date: f64) {
+    // SAFETY: the caller's obligation.
+    if let Some(t) = unsafe { borrow::<Timer>(timer) } {
+        // `delay_until` is a delay from now, which is the form the creator takes;
+        // the timer wants the instant it lands on.
+        t.set_next(std::time::Instant::now() + delay_until(fire_date));
+    }
 }
 
 pub unsafe extern "C" fn CFRunLoopTimerInvalidate(timer: CFTypeRef) {

@@ -82,6 +82,20 @@ impl Timer {
         self.valid.load(Ordering::Acquire)
     }
 
+    /// The repeat interval in seconds, or zero for a one-shot - which is how
+    /// Apple's reports one, and what a caller testing "does this repeat" reads.
+    pub fn interval_seconds(&self) -> f64 {
+        self.interval.map_or(0.0, |i| i.as_secs_f64())
+    }
+
+    /// Move the next fire date, as `CFRunLoopTimerSetNextFireDate` does.
+    ///
+    /// A deadline already past fires on the next turn of the loop rather than
+    /// being refused: that is what a caller asking for "now" means.
+    pub fn set_next(&self, when: Instant) {
+        *self.next.lock().unwrap_or_else(|e| e.into_inner()) = when;
+    }
+
     /// When this timer is next due, or `None` if it never is.
     fn due(&self) -> Option<Instant> {
         self.is_valid()
@@ -117,16 +131,91 @@ impl Timer {
     }
 }
 
+/// `CFRunLoopObserverCallBack`.
+pub type ObserverCallback = unsafe extern "C" fn(CFTypeRef, u32, *mut c_void);
+
+/// `CFRunLoopActivity`. Apple's bit values, because a caller passes a mask of them
+/// in and reads one back out in the callback.
+pub mod activity {
+    pub const ENTRY: u32 = 1 << 0;
+    pub const BEFORE_TIMERS: u32 = 1 << 1;
+    pub const BEFORE_SOURCES: u32 = 1 << 2;
+    pub const BEFORE_WAITING: u32 = 1 << 5;
+    pub const AFTER_WAITING: u32 = 1 << 6;
+    pub const EXIT: u32 = 1 << 7;
+}
+
+/// An observer: a callback and the points in the loop it wants to hear about.
+///
+/// This is how a toolkit that is not *driving* the loop still gets to run on every
+/// turn of it - Qt's Cocoa event dispatcher hangs its `processEvents` on
+/// `BeforeWaiting`, so an observer that is never called is a Qt application whose
+/// events are never delivered.
+pub struct Observer {
+    activities: u32,
+    repeats: bool,
+    /// Lower runs first among observers of the same activity, which is the whole
+    /// of what `order` means.
+    order: i32,
+    callback: Option<ObserverCallback>,
+    info: usize,
+    valid: AtomicBool,
+}
+
+// SAFETY: as [`Source`].
+unsafe impl Send for Observer {}
+unsafe impl Sync for Observer {}
+
+impl Observer {
+    pub fn invalidate(&self) {
+        self.valid.store(false, Ordering::Release);
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.valid.load(Ordering::Acquire)
+    }
+
+    pub fn order(&self) -> i32 {
+        self.order
+    }
+
+    /// Call the callback if this observer asked about `what`.
+    ///
+    /// A one-shot observer is invalidated *before* the callback, so that a callback
+    /// which re-adds it gets an observer that fires again rather than one already
+    /// spent.
+    fn fire(self: &Arc<Observer>, what: u32) {
+        if !self.is_valid() || self.activities & what == 0 {
+            return;
+        }
+        if !self.repeats {
+            self.valid.store(false, Ordering::Release);
+        }
+        let Some(callback) = self.callback else {
+            return;
+        };
+        let handle = Arc::as_ptr(self) as CFTypeRef;
+        // SAFETY: `callback` is a
+        // `void (*)(CFRunLoopObserverRef, CFRunLoopActivity, void *)` the creator
+        // supplied, and `info` is the pointer it asked to be given back.
+        unsafe { callback(handle, what, self.info as *mut c_void) };
+    }
+}
+
 #[derive(Default)]
 struct Mode {
     sources: Vec<Arc<Source>>,
     timers: Vec<Arc<Timer>>,
+    observers: Vec<Arc<Observer>>,
 }
 
 pub struct RunLoop {
     modes: Mutex<BTreeMap<String, Mode>>,
     stopped: AtomicBool,
     waker: (Mutex<bool>, Condvar),
+    /// Set while the loop is asleep, for `CFRunLoopIsWaiting`. A caller asks it
+    /// from *another* thread to decide whether it needs to wake this one.
+    waiting: AtomicBool,
 }
 
 pub const DEFAULT_MODE: &str = "kCFRunLoopDefaultMode";
@@ -145,6 +234,7 @@ impl RunLoop {
             modes: Mutex::new(BTreeMap::new()),
             stopped: AtomicBool::new(false),
             waker: (Mutex::new(false), Condvar::new()),
+            waiting: AtomicBool::new(false),
         }
     }
 
@@ -212,6 +302,75 @@ impl RunLoop {
         }
     }
 
+    pub fn add_observer(&self, observer: &Arc<Observer>, mode: &str) {
+        for name in self.names(mode) {
+            let mut modes = self.modes.lock().unwrap_or_else(|e| e.into_inner());
+            let entry = modes.entry(name).or_default();
+            if !entry.observers.iter().any(|o| Arc::ptr_eq(o, observer)) {
+                entry.observers.push(Arc::clone(observer));
+                // Sorted on insertion rather than at every activity: the list
+                // changes rarely and is walked several times per turn of the loop.
+                entry.observers.sort_by_key(|o| o.order());
+            }
+        }
+        self.wake();
+    }
+
+    pub fn remove_observer(&self, observer: &Arc<Observer>, mode: &str) {
+        for name in self.names(mode) {
+            let mut modes = self.modes.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = modes.get_mut(&name) {
+                entry.observers.retain(|o| !Arc::ptr_eq(o, observer));
+            }
+        }
+    }
+
+    pub fn contains_observer(&self, observer: &Arc<Observer>, mode: &str) -> bool {
+        let modes = self.modes.lock().unwrap_or_else(|e| e.into_inner());
+        self.names(mode).iter().any(|name| {
+            modes
+                .get(name)
+                .is_some_and(|m| m.observers.iter().any(|o| Arc::ptr_eq(o, observer)))
+        })
+    }
+
+    /// Add `mode` to the set `kCFRunLoopCommonModes` stands for.
+    ///
+    /// Naming the mode is enough: [`RunLoop::names`] answers the common alias with
+    /// every mode the loop knows, so a mode that exists is already in the set. What
+    /// this adds is a mode that has nothing in it yet - which is exactly the case
+    /// a caller calls it for, since it runs before anything is scheduled.
+    pub fn add_common_mode(&self, mode: &str) {
+        let mut modes = self.modes.lock().unwrap_or_else(|e| e.into_inner());
+        modes.entry(mode.to_string()).or_default();
+    }
+
+    /// Whether the loop is asleep waiting for something to happen.
+    pub fn is_waiting(&self) -> bool {
+        self.waiting.load(Ordering::Acquire)
+    }
+
+    /// Tell every observer of `what` in `mode` that it has happened.
+    ///
+    /// Copied out from under the lock for [`RunLoop::contents`]' reason: an
+    /// observer's callback is entitled to add and remove observers, and Qt's does.
+    fn observe(&self, mode: &str, what: u32) {
+        let observers: Vec<Arc<Observer>> = {
+            let modes = self.modes.lock().unwrap_or_else(|e| e.into_inner());
+            let mut all: Vec<Arc<Observer>> = self
+                .names(mode)
+                .iter()
+                .filter_map(|name| modes.get(name))
+                .flat_map(|m| m.observers.iter().cloned())
+                .collect();
+            all.sort_by_key(|o| o.order());
+            all
+        };
+        for observer in &observers {
+            observer.fire(what);
+        }
+    }
+
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
         self.wake();
@@ -238,6 +397,21 @@ impl RunLoop {
         })
     }
 
+    /// Whether `mode` holds an observer that is still valid.
+    ///
+    /// Asked by [`RunLoop::is_empty`]: a mode with nothing but an observer in it is
+    /// not empty, because the observer is the thing that runs. Leaving it out is
+    /// what would make `CFRunLoopRunInMode` return `kCFRunLoopRunFinished` to a
+    /// caller whose only reason for running the loop was to be called back.
+    fn has_observer(&self, mode: &str) -> bool {
+        let modes = self.modes.lock().unwrap_or_else(|e| e.into_inner());
+        self.names(mode).iter().any(|name| {
+            modes
+                .get(name)
+                .is_some_and(|m| m.observers.iter().any(|o| o.is_valid()))
+        })
+    }
+
     /// Everything `mode` holds, copied out so the lock is not held across a
     /// callback.
     ///
@@ -260,6 +434,7 @@ impl RunLoop {
     /// Run `mode` for at most `seconds`, as `CFRunLoopRunInMode` does.
     pub fn run_in_mode(&self, mode: &str, seconds: f64, return_after_source: bool) -> i32 {
         self.stopped.store(false, Ordering::Release);
+        self.observe(mode, activity::ENTRY);
         let deadline = match seconds.is_finite() && seconds >= 0.0 {
             true => Instant::now().checked_add(Duration::from_secs_f64(seconds.min(1e9))),
             false => None,
@@ -267,27 +442,33 @@ impl RunLoop {
 
         loop {
             if self.stopped.swap(false, Ordering::AcqRel) {
+                self.observe(mode, activity::EXIT);
                 return result::STOPPED;
             }
-            if self.is_empty(mode) {
+            if self.is_empty(mode) && !self.has_observer(mode) {
+                self.observe(mode, activity::EXIT);
                 return result::FINISHED;
             }
 
             let now = Instant::now();
             let (sources, timers) = self.contents(mode);
             let mut handled = false;
+            self.observe(mode, activity::BEFORE_TIMERS);
             for timer in &timers {
                 handled |= timer.fire(now);
             }
+            self.observe(mode, activity::BEFORE_SOURCES);
             for source in &sources {
                 handled |= source.fire();
             }
             if handled && return_after_source {
+                self.observe(mode, activity::EXIT);
                 return result::HANDLED_SOURCE;
             }
             if let Some(deadline) = deadline
                 && Instant::now() >= deadline
             {
+                self.observe(mode, activity::EXIT);
                 return result::TIMED_OUT;
             }
 
@@ -300,7 +481,15 @@ impl RunLoop {
                 .flatten()
                 .min()
                 .unwrap_or_else(|| Instant::now() + Duration::from_millis(50));
+            // `BeforeWaiting` is the activity a toolkit does its own work in, so it
+            // is announced before the sleep and `AfterWaiting` after it - and an
+            // observer that signals a source from here is why the sleep may end up
+            // being no sleep at all.
+            self.observe(mode, activity::BEFORE_WAITING);
+            self.waiting.store(true, Ordering::Release);
             self.wait_until(wait_until);
+            self.waiting.store(false, Ordering::Release);
+            self.observe(mode, activity::AFTER_WAITING);
         }
     }
 
@@ -317,6 +506,26 @@ impl RunLoop {
             .unwrap_or_else(|e| e.into_inner());
         *woken = false;
     }
+}
+
+/// Build an observer.
+pub fn new_observer(
+    activities: u32,
+    repeats: bool,
+    order: i32,
+    callback: Option<ObserverCallback>,
+    info: usize,
+) -> Arc<Observer> {
+    let observer = Arc::new(Observer {
+        activities,
+        repeats,
+        order,
+        callback,
+        info,
+        valid: AtomicBool::new(true),
+    });
+    note(Arc::as_ptr(&observer));
+    observer
 }
 
 /// Build a version-0 source.
@@ -471,6 +680,108 @@ mod tests {
             result::TIMED_OUT
         );
         assert_eq!(calls(), 1);
+    }
+
+    /// A counter that also records which activities it was told about.
+    macro_rules! observer_counter {
+        () => {{
+            static SEEN: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+            unsafe extern "C" fn observe(_observer: CFTypeRef, what: u32, _info: *mut c_void) {
+                SEEN.lock().unwrap_or_else(|e| e.into_inner()).push(what);
+            }
+            (
+                || SEEN.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+                observe as ObserverCallback,
+            )
+        }};
+    }
+
+    /// The activities a turn of the loop announces, in order. This is the contract
+    /// an event dispatcher built on observers depends on.
+    #[test]
+    fn a_turn_of_the_loop_announces_its_activities_in_order() {
+        let (seen, observe) = observer_counter!();
+        let loop_ = Arc::new(RunLoop::new());
+        let observer = new_observer(
+            activity::ENTRY
+                | activity::BEFORE_TIMERS
+                | activity::BEFORE_SOURCES
+                | activity::BEFORE_WAITING
+                | activity::AFTER_WAITING
+                | activity::EXIT,
+            true,
+            0,
+            Some(observe),
+            0,
+        );
+        loop_.add_observer(&observer, DEFAULT_MODE);
+        assert_eq!(
+            loop_.run_in_mode(DEFAULT_MODE, 0.01, false),
+            result::TIMED_OUT,
+            "an observer is something to service, so the mode is not finished"
+        );
+        let seen = seen();
+        assert_eq!(seen.first(), Some(&activity::ENTRY), "entry first: {seen:?}");
+        assert_eq!(seen.last(), Some(&activity::EXIT), "exit last: {seen:?}");
+        let first_turn: Vec<u32> = seen
+            .iter()
+            .copied()
+            .skip(1)
+            .take_while(|a| *a != activity::EXIT)
+            .take(4)
+            .collect();
+        assert_eq!(
+            first_turn,
+            [
+                activity::BEFORE_TIMERS,
+                activity::BEFORE_SOURCES,
+                activity::BEFORE_WAITING,
+                activity::AFTER_WAITING
+            ],
+            "{seen:?}"
+        );
+    }
+
+    /// A one-shot observer fires once however many turns the loop takes, and an
+    /// invalidated one does not fire at all.
+    #[test]
+    fn a_one_shot_observer_fires_once_and_an_invalid_one_never() {
+        let (seen, observe) = observer_counter!();
+        let loop_ = Arc::new(RunLoop::new());
+        let once = new_observer(activity::BEFORE_WAITING, false, 0, Some(observe), 0);
+        loop_.add_observer(&once, DEFAULT_MODE);
+        loop_.run_in_mode(DEFAULT_MODE, 0.03, false);
+        assert_eq!(seen().len(), 1, "a one-shot observer fires once");
+        assert!(!once.is_valid(), "and is spent");
+
+        let never = new_observer(activity::BEFORE_WAITING, true, 0, Some(observe), 0);
+        never.invalidate();
+        loop_.add_observer(&never, DEFAULT_MODE);
+        loop_.run_in_mode(DEFAULT_MODE, 0.03, false);
+        assert_eq!(seen().len(), 1, "an invalidated observer is not called");
+    }
+
+    /// Lower order runs first, which is the whole of what `order` promises.
+    #[test]
+    fn observers_run_in_order() {
+        static ORDER: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+        unsafe extern "C" fn first(_o: CFTypeRef, _w: u32, _i: *mut c_void) {
+            ORDER.lock().unwrap_or_else(|e| e.into_inner()).push(1);
+        }
+        unsafe extern "C" fn second(_o: CFTypeRef, _w: u32, _i: *mut c_void) {
+            ORDER.lock().unwrap_or_else(|e| e.into_inner()).push(2);
+        }
+        let loop_ = Arc::new(RunLoop::new());
+        // Added high-order first, so the ordering cannot come from insertion.
+        let high = new_observer(activity::ENTRY, false, 10, Some(second as ObserverCallback), 0);
+        let low = new_observer(activity::ENTRY, false, -10, Some(first as ObserverCallback), 0);
+        loop_.add_observer(&high, DEFAULT_MODE);
+        loop_.add_observer(&low, DEFAULT_MODE);
+        loop_.run_in_mode(DEFAULT_MODE, 0.0, false);
+        assert_eq!(
+            ORDER.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+            [1, 2]
+        );
     }
 
     /// An empty mode returns at once rather than sleeping: a loop nothing can
