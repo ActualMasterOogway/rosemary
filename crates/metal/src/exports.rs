@@ -1,0 +1,125 @@
+//! The dynamic symbols the loader resolves against this framework.
+
+use super::*;
+
+pub(super) fn devices() -> &'static [usize] {
+    static DEVICES: OnceLock<Vec<usize>> = OnceLock::new();
+    DEVICES.get_or_init(|| {
+        bootstrap();
+        let adapters = match vulkan::adapters() {
+            Ok(adapters) => adapters,
+            Err(reason) => {
+                eprintln!("rosetta3: Metal: {reason}");
+                return Vec::new();
+            }
+        };
+        adapters
+            .iter()
+            .enumerate()
+            .map(|(ordinal, adapter)| {
+                let gpu = match adapter.gpu() {
+                    Ok(gpu) => Some(gpu),
+                    Err(reason) => {
+                        eprintln!(
+                            "rosetta3: Metal: {} has no logical device: {reason}",
+                            adapter.name
+                        );
+                        None
+                    }
+                };
+                object::make(
+                    c"R3MTLDevice",
+                    Device {
+                        ordinal: ordinal as u64 + 1,
+                        name: foundation::string::from_str(&adapter.name),
+                        target: &adapter.target,
+                        gpu,
+                    },
+                ) as usize
+            })
+            .filter(|device| *device != 0)
+            .collect()
+    })
+}
+
+/// Return the first Vulkan-backed Metal device, or nil when Vulkan is unavailable.
+///
+/// # Safety
+///
+/// Called through the Metal framework ABI.
+pub unsafe extern "C" fn MTLCreateSystemDefaultDevice() -> Id {
+    devices()
+        .first()
+        .copied()
+        .map_or(std::ptr::null_mut(), |device| device as Id)
+}
+
+/// Return a retained array containing every Vulkan-backed Metal device.
+///
+/// # Safety
+///
+/// Called through the Metal framework ABI.
+pub unsafe extern "C" fn MTLCopyAllDevices() -> Id {
+    bootstrap();
+    let values = devices()
+        .iter()
+        .map(|device| *device as CFTypeRef)
+        .collect::<Vec<_>>();
+    corefoundation::collections::new_array(
+        &values,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    ) as Id
+}
+
+/// Return a retained device for the requested display.
+///
+/// # Safety
+///
+/// Called through the CoreGraphics framework ABI.
+pub unsafe extern "C" fn CGDirectDisplayCopyCurrentMetalDevice(_display: u32) -> Id {
+    // SAFETY: called through the framework ABI.
+    let device = unsafe { MTLCreateSystemDefaultDevice() };
+    objc::arc::retain(device)
+}
+
+pub const NAMES: &[&str] = &[
+    "MTLCreateSystemDefaultDevice",
+    "MTLCopyAllDevices",
+    "CGDirectDisplayCopyCurrentMetalDevice",
+];
+
+pub fn data_symbols() -> Vec<(String, u64)> {
+    bootstrap();
+    [
+        "MTLTextureDescriptor",
+        "MTLVertexDescriptor",
+        "MTLSamplerDescriptor",
+        "MTLDepthStencilDescriptor",
+        "MTLStencilDescriptor",
+        "MTLRenderPipelineDescriptor",
+        "MTLRenderPassDescriptor",
+        "MTLCompileOptions",
+    ]
+    .into_iter()
+    .filter_map(|name| {
+        let name_c = std::ffi::CString::new(name).ok()?;
+        let class = objc::class::lookup(&name_c)?;
+        Some((
+            format!("_OBJC_CLASS_$_{name}"),
+            objc::class::ptr(class) as usize as u64,
+        ))
+    })
+    .collect()
+}
+
+pub fn symbol(name: &str) -> Option<u64> {
+    Some(match name.trim_start_matches('_') {
+        "MTLCreateSystemDefaultDevice" => MTLCreateSystemDefaultDevice as *const (),
+        "MTLCopyAllDevices" => MTLCopyAllDevices as *const (),
+        "CGDirectDisplayCopyCurrentMetalDevice" => {
+            CGDirectDisplayCopyCurrentMetalDevice as *const ()
+        }
+        _ => return None,
+    } as usize as u64)
+}
