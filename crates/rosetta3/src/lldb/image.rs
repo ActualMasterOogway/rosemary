@@ -9,10 +9,7 @@
 
 use machish::report::{ImageReport, LinkReport};
 
-use super::macho;
-
-/// `S_REGULAR`, plus the two attributes that make LLDB treat a section as code.
-const CODE: u32 = macho::S_ATTR_PURE_INSTRUCTIONS | macho::S_ATTR_SOME_INSTRUCTIONS;
+use super::object::{self, Kind};
 
 /// A segment that is not a mapping: the address space reserved below the image.
 const PAGEZERO: &str = "__PAGEZERO";
@@ -35,28 +32,24 @@ pub fn register_all(report: &LinkReport, root: &str) {
 fn register(image: &ImageReport, path: &str) {
     let stem = image.name.rsplit('/').next().unwrap_or(&image.name);
 
-    let sections: Vec<macho::Section> = image
+    let sections: Vec<object::Section> = image
         .segments
         .iter()
         .filter(|s| s.name != PAGEZERO && s.vmsize != 0)
-        .map(|s| macho::Section {
-            segname: s.name.clone(),
-            // LLDB types a section by name, and only a `__text` is disassembled
-            // as code.
-            sectname: match s.executable {
-                true => "__text".to_string(),
-                false => "__data".to_string(),
-            },
-            addr: s.vmaddr,
-            align: 12,
-            flags: match s.executable {
-                true => CODE,
-                false => 0,
-            },
-            size: s.vmsize,
-            // Nothing travels with the object: LLDB reads a loaded section out
-            // of the live process, and these run to a hundred megabytes.
-            data: Vec::new(),
+        // Mapped, not resident: nothing travels with the object, because LLDB
+        // reads a loaded section out of the live process and these run to a
+        // hundred megabytes.
+        .map(|s| {
+            object::Section::mapped(
+                match s.executable {
+                    true => Kind::Code,
+                    false => Kind::Data,
+                },
+                &s.name,
+                s.vmaddr,
+                12,
+                s.vmsize,
+            )
         })
         .collect();
 
@@ -68,8 +61,8 @@ fn register(image: &ImageReport, path: &str) {
     // So the image is named even when it yielded no symbols at all, and so
     // every address in it resolves to something rather than to the last symbol
     // of some other module.
-    syms.push(macho::Sym {
-        name: format!("_{stem}"),
+    syms.push(object::Sym {
+        name: stem.to_string(),
         sect: 1,
         value: sections[0].addr,
     });
@@ -82,11 +75,11 @@ fn register(image: &ImageReport, path: &str) {
         })
         .collect::<Vec<_>>();
 
-    super::publish(macho::write(&sections, &syms));
+    super::publish(object::write(&sections, &syms));
 }
 
 /// The 1-based index of the section holding `va`.
-fn section_of(sections: &[macho::Section], va: u64) -> Option<u8> {
+fn section_of(sections: &[object::Section], va: u64) -> Option<u8> {
     let index = sections
         .iter()
         .position(|s| va >= s.addr && va < s.addr.wrapping_add(s.size))?;
@@ -98,7 +91,7 @@ fn section_of(sections: &[macho::Section], va: u64) -> Option<u8> {
 /// Every symbol's *name* carries the unslid address, because that is the number
 /// a disassembler shows for the same instruction and the slide is this run's
 /// alone.
-fn symbols(image: &ImageReport, path: &str, stem: &str) -> Vec<macho::Sym> {
+fn symbols(image: &ImageReport, path: &str, stem: &str) -> Vec<object::Sym> {
     let mut syms = Vec::new();
 
     // Objective-C first, so a method's own name wins over the function start at
@@ -112,8 +105,8 @@ fn symbols(image: &ImageReport, path: &str, stem: &str) -> Vec<macho::Sym> {
                     .flat_map(|m| &m.ro.methods)
                     .map(|m| (m, '+')),
             ) {
-                syms.push(macho::Sym {
-                    name: format!("_{kind}[{} {}]", class.ro.name, method.name),
+                syms.push(object::Sym {
+                    name: format!("{kind}[{} {}]", class.ro.name, method.name),
                     sect: 1,
                     value: method.imp,
                 });
@@ -125,8 +118,8 @@ fn symbols(image: &ImageReport, path: &str, stem: &str) -> Vec<macho::Sym> {
                 .iter()
                 .chain(&category.class_methods)
             {
-                syms.push(macho::Sym {
-                    name: format!("_[{}({}) {}]", stem, category.name, method.name),
+                syms.push(object::Sym {
+                    name: format!("[{}({}) {}]", stem, category.name, method.name),
                     sect: 1,
                     value: method.imp,
                 });
@@ -136,8 +129,8 @@ fn symbols(image: &ImageReport, path: &str, stem: &str) -> Vec<macho::Sym> {
 
     // `LC_FUNCTION_STARTS` survives stripping
     for start in function_starts(path) {
-        syms.push(macho::Sym {
-            name: format!("_{stem}+{start:#x}"),
+        syms.push(object::Sym {
+            name: format!("{stem}+{start:#x}"),
             sect: 1,
             value: start.wrapping_add(image.slide),
         });

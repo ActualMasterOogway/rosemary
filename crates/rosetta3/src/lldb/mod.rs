@@ -1,7 +1,14 @@
 //! Opt-in LLDB support for translated guest code.
+//!
+//! Every translation, and every image the runtime mapped itself, is handed to
+//! the debugger through the GDB JIT interface as a small symbol file: see
+//! [`object`] for the two formats that takes, and [`image`] for the mapped
+//! images. `gdb` reads the same interface and the same files.
 
+mod elf;
 mod image;
 mod macho;
+mod object;
 
 pub use image::register_all as register_images;
 
@@ -84,11 +91,20 @@ pub fn enabled() -> bool {
             !value.is_empty() && value != "0"
         });
         if on {
+            // The plugin that reads the JIT interface is built on every
+            // platform but constructed by default on all of them except macOS,
+            // where nothing the debuggee does can make LLDB look.
+            let setting = match cfg!(target_os = "macos") {
+                true => {
+                    "rosetta3:   Its JIT loader is off by default on macOS, so LLDB \
+                         needs this\nrosetta3:   before any of it is visible:\n\
+                         rosetta3:     settings set plugin.jit-loader.gdb.enable on\n"
+                }
+                false => "",
+            };
             eprintln!(
-                "rosetta3: publishing translations to LLDB. Its JIT loader is off by \
-                 default on macOS,\nrosetta3:   so LLDB needs this before any of it is \
-                 visible:\nrosetta3:     settings set plugin.jit-loader.gdb.enable \
-                 on\nrosetta3:   x86-64 listings: {}",
+                "rosetta3: publishing translations to LLDB.\n{setting}rosetta3:   \
+                 x86-64 listings: {}",
                 listing_dir().display()
             );
         }
@@ -101,7 +117,7 @@ static REGISTER: Mutex<()> = Mutex::new(());
 
 /// Publish one newly compiled translation to LLDB.
 ///
-/// `code` is where the compiled arm64 landed, `guest_start..guest_end` the
+/// `code` is where the compiled host code landed, `guest_start..guest_end` the
 /// x86-64 it was lifted from, `image` that region named against its image (the
 /// `libfoo.dylib+0x1234` [`crate::program::Program::locate`] produces), `bytes`
 /// the guest instructions themselves, and `map` microlift's host-offset ->
@@ -118,31 +134,31 @@ pub fn register(
         return;
     }
 
-    let Some(object) = symfile(code, guest_start, guest_end, image, bytes, map) else {
+    let Some(file) = symfile(code, guest_start, guest_end, image, bytes, map) else {
         return;
     };
-    publish(object);
+    publish(file);
 }
 
 /// Hand one finished symbol file to LLDB.
-fn publish(object: Vec<u8>) {
+fn publish(file: Vec<u8>) {
     // LLDB needs the object to stay readable for as long as the entry is
     // registered, and entries are never withdrawn - a translation lives as long
     // as the process. So both are leaked, deliberately.
-    let object = Box::leak(object.into_boxed_slice());
+    let file = Box::leak(file.into_boxed_slice());
 
     let entry = Box::leak(Box::new(JitCodeEntry {
         next: std::ptr::null_mut(),
         prev: std::ptr::null_mut(),
-        symfile_addr: object.as_ptr(),
-        symfile_size: object.len() as u64,
+        symfile_addr: file.as_ptr(),
+        symfile_size: file.len() as u64,
     }));
 
     let _guard = REGISTER.lock().unwrap_or_else(|e| e.into_inner());
 
     // SAFETY:
     //
-    // * `entry` and `object` are leaked, so their addresses stay valid.
+    // * `entry` and `file` are leaked, so their addresses stay valid.
     // * `REGISTER` serializes every mutation of the global list, which guest
     //   threads reach concurrently: a lift runs outside the code cache's lock.
     // * LLDB reads this state from the stop inside `__jit_debug_register_code`,
@@ -167,7 +183,7 @@ fn publish(object: Vec<u8>) {
     }
 }
 
-/// Build the Mach-O LLDB will read out of this process's memory.
+/// Build the object file LLDB will read out of this process's memory.
 fn symfile(
     code: u64,
     guest_start: u64,
@@ -185,52 +201,48 @@ fn symfile(
     let listing = listing(image, guest_start, guest_end, bytes)?;
     let dwarf = dwarf(code, native_size, image, &listing, map)?;
 
-    // `__text` first, and this is not cosmetic.
-    // A copy of the live code. LLDB reads the running process for a loaded
-    // section, so this is only ever the fallback - but a `__text` with no
-    // contents is a section a reader is entitled to refuse.
+    // The code section first, and this is not cosmetic: a symbol names its
+    // section by index, and the ones below all name this one.
+    //
+    // A copy of the live code travels with it. LLDB reads the running process
+    // for a loaded section, so this is only ever the fallback - but a text
+    // section with no contents is one a reader is entitled to refuse.
     //
     // SAFETY: `code..code + native_size` is inside the buffer Cranelift
     // finalized for this region, which is mapped and immutable for the rest of
     // the process's life.
     let text = unsafe { std::slice::from_raw_parts(code as *const u8, native_size as usize) };
-    let mut sections = vec![macho::Section::resident(
-        "__TEXT",
-        "__text",
+    let mut sections = vec![object::Section::resident(
+        object::Kind::Code,
         code,
         2,
-        macho::S_ATTR_PURE_INSTRUCTIONS | macho::S_ATTR_SOME_INSTRUCTIONS,
         text.to_vec(),
     )];
 
-    for (sectname, data) in [
-        ("__debug_abbrev", dwarf.debug_abbrev.slice()),
-        ("__debug_info", dwarf.debug_info.slice()),
-        ("__debug_line", dwarf.debug_line.slice()),
-        ("__debug_str", dwarf.debug_str.slice()),
+    for (name, data) in [
+        ("abbrev", dwarf.debug_abbrev.slice()),
+        ("info", dwarf.debug_info.slice()),
+        ("line", dwarf.debug_line.slice()),
+        ("str", dwarf.debug_str.slice()),
     ] {
         if data.is_empty() {
             continue;
         }
-        sections.push(macho::Section::resident(
-            "__DWARF",
-            sectname,
+        sections.push(object::Section::resident(
+            object::Kind::Debug(name),
             0,
             0,
-            macho::S_ATTR_DEBUG,
             data.to_vec(),
         ));
     }
 
-    // Mach-O's C-linkage underscore. LLDB strips it back off for display, so
-    // the frame reads `guest_fault+0x470` rather than `_guest_fault+0x470`.
-    let syms = vec![macho::Sym {
-        name: format!("_{image}"),
+    let syms = vec![object::Sym {
+        name: image.to_string(),
         sect: 1,
         value: code,
     }];
 
-    Some(macho::write(&sections, &syms))
+    Some(object::write(&sections, &syms))
 }
 
 /// The DWARF for one region.

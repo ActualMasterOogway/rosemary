@@ -9,6 +9,9 @@
 # except macOS" - on an Apple target it is never even constructed, so no
 # breakpoint is set and the registrations go nowhere. Nothing the debuggee does
 # can change that; it has to be turned on here.
+#
+# Only macOS needs this file at all. Elsewhere the plugin is already on, and
+# `gdb` - which reads the same interface, and gets the same ELF - needs nothing.
 settings set plugin.jit-loader.gdb.enable on
 
 # Translated regions arrive as modules named JIT(0x...). This keeps a backtrace

@@ -1,15 +1,25 @@
 //! A Mach-O `MH_OBJECT` writer with exactly one customer: the symfile this runtime
-//! hands LLDB for a translated region.
+//! hands LLDB for a translated region, on a host whose debugger reads Mach-O.
+//!
+//! Compiled on every host, so that the format this tree is *about* keeps its
+//! tests wherever they are run; [`super::object::write`] picks between this and
+//! [`super::elf`] by the host's own debugger.
+#![allow(dead_code)]
+
+use super::object::{Kind, Section, Sym};
 
 /// Section attributes.
-pub const S_ATTR_PURE_INSTRUCTIONS: u32 = 0x8000_0000;
-pub const S_ATTR_SOME_INSTRUCTIONS: u32 = 0x0000_0400;
+const S_ATTR_PURE_INSTRUCTIONS: u32 = 0x8000_0000;
+const S_ATTR_SOME_INSTRUCTIONS: u32 = 0x0000_0400;
 /// `S_ATTR_DEBUG`, which is how a Mach-O section says "DWARF, not program
 /// data".
-pub const S_ATTR_DEBUG: u32 = 0x0200_0000;
+const S_ATTR_DEBUG: u32 = 0x0200_0000;
 
 const MH_MAGIC_64: u32 = 0xfeed_facf;
-const CPU_TYPE_ARM64: u32 = 0x0100_000c;
+#[cfg(target_arch = "aarch64")]
+const CPU_TYPE: u32 = 0x0100_000c;
+#[cfg(not(target_arch = "aarch64"))]
+const CPU_TYPE: u32 = 0x0100_0007;
 const MH_OBJECT: u32 = 1;
 const LC_SEGMENT_64: u32 = 0x19;
 const LC_SYMTAB: u32 = 0x2;
@@ -24,52 +34,17 @@ const NLIST_SIZE: usize = 16;
 /// LLDB keeps it in the symbol table it searches.
 const N_SECT_EXT: u8 = 0x0f;
 
-pub struct Section {
-    pub segname: String,
-    pub sectname: String,
-    /// The section's Mach-O `addr`. For `__text` this is the live address of
-    /// the compiled code; for the DWARF sections it is zero.
-    pub addr: u64,
-    /// Alignment as a power of two, the field's own encoding.
-    pub align: u32,
-    pub flags: u32,
-    /// The section's extent. Larger than `data` for a section whose contents
-    /// LLDB is expected to read out of the live process instead - which is
-    /// every section of a mapped image, none of which is worth copying.
-    pub size: u64,
-    pub data: Vec<u8>,
-}
-
-impl Section {
-    /// A section whose bytes travel with the object.
-    pub fn resident(
-        segname: &str,
-        sectname: &str,
-        addr: u64,
-        align: u32,
-        flags: u32,
-        data: Vec<u8>,
-    ) -> Self {
-        Section {
-            segname: segname.to_string(),
-            sectname: sectname.to_string(),
-            addr,
-            align,
-            flags,
-            size: data.len() as u64,
-            data,
-        }
+/// The segment and section names, and the flags, this format gives a [`Kind`].
+fn names(section: &Section) -> (&str, String, u32) {
+    match section.kind {
+        Kind::Code => (
+            "__TEXT",
+            "__text".to_string(),
+            S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS,
+        ),
+        Kind::Data => ("__DATA", "__data".to_string(), 0),
+        Kind::Debug(name) => ("__DWARF", format!("__debug_{name}"), S_ATTR_DEBUG),
     }
-}
-
-pub struct Sym {
-    /// Written verbatim. Mach-O's C-linkage underscore is the caller's to add;
-    /// LLDB strips a leading one when it displays the name.
-    pub name: String,
-    /// 1-based index into `sections`, the `n_sect` field's own encoding.
-    pub sect: u8,
-    /// The symbol's address, in the same space as its section's `addr`.
-    pub value: u64,
 }
 
 /// Serialize `sections` and `syms` into a Mach-O object.
@@ -103,6 +78,9 @@ pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
     let mut strx = Vec::with_capacity(syms.len());
     for sym in syms {
         strx.push(strtab.len() as u32);
+        // Mach-O's C-linkage underscore. LLDB strips it back off for display, so
+        // the frame reads `guest_fault+0x470` rather than `_guest_fault+0x470`.
+        strtab.push(b'_');
         strtab.extend_from_slice(sym.name.as_bytes());
         strtab.push(0);
     }
@@ -111,8 +89,8 @@ pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
     let mut out = Vec::with_capacity(stroff + strtab.len());
 
     out.extend_from_slice(&MH_MAGIC_64.to_le_bytes());
-    out.extend_from_slice(&CPU_TYPE_ARM64.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes()); // CPU_SUBTYPE_ARM64_ALL
+    out.extend_from_slice(&CPU_TYPE.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // CPU_SUBTYPE_*_ALL
     out.extend_from_slice(&MH_OBJECT.to_le_bytes());
     out.extend_from_slice(&2u32.to_le_bytes()); // ncmds: the segment and the symtab
     out.extend_from_slice(&sizeofcmds.to_le_bytes());
@@ -138,15 +116,22 @@ pub fn write(sections: &[Section], syms: &[Sym]) -> Vec<u8> {
     out.extend_from_slice(&0u32.to_le_bytes()); // flags
 
     for (section, &offset) in sections.iter().zip(&offsets) {
-        out.extend_from_slice(&name16(&section.sectname));
-        out.extend_from_slice(&name16(&section.segname));
+        let (segname, sectname, flags) = names(section);
+        // The caller's own name for the mapping wins, so a guest image's
+        // segments keep the names the debugger will show them under.
+        let segname = match section.segment.is_empty() {
+            true => segname,
+            false => &section.segment,
+        };
+        out.extend_from_slice(&name16(&sectname));
+        out.extend_from_slice(&name16(segname));
         out.extend_from_slice(&section.addr.to_le_bytes());
         out.extend_from_slice(&section.size.to_le_bytes());
         out.extend_from_slice(&offset.to_le_bytes());
         out.extend_from_slice(&section.align.to_le_bytes());
         out.extend_from_slice(&0u32.to_le_bytes()); // reloff
         out.extend_from_slice(&0u32.to_le_bytes()); // nreloc
-        out.extend_from_slice(&section.flags.to_le_bytes());
+        out.extend_from_slice(&flags.to_le_bytes());
         out.extend_from_slice(&[0u8; 12]); // reserved1..3
     }
 
@@ -197,18 +182,11 @@ mod tests {
     fn object() -> Vec<u8> {
         write(
             &[
-                Section::resident(
-                    "__TEXT",
-                    "__text",
-                    0x1_0234_5000,
-                    2,
-                    S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS,
-                    vec![0xc0, 0x03, 0x5f, 0xd6],
-                ),
-                Section::resident("__DWARF", "__debug_info", 0, 0, S_ATTR_DEBUG, vec![1, 2, 3]),
+                Section::resident(Kind::Code, 0x1_0234_5000, 2, vec![0xc0, 0x03, 0x5f, 0xd6]),
+                Section::resident(Kind::Debug("info"), 0, 0, vec![1, 2, 3]),
             ],
             &[Sym {
-                name: "_guest+0x40".into(),
+                name: "guest+0x40".into(),
                 sect: 1,
                 value: 0x1_0234_5000,
             }],
@@ -224,10 +202,10 @@ mod tests {
     }
 
     #[test]
-    fn the_header_describes_an_arm64_object() {
+    fn the_header_describes_an_object_for_this_host() {
         let bytes = object();
         assert_eq!(u32_at(&bytes, 0), MH_MAGIC_64);
-        assert_eq!(u32_at(&bytes, 4), CPU_TYPE_ARM64);
+        assert_eq!(u32_at(&bytes, 4), CPU_TYPE);
         assert_eq!(u32_at(&bytes, 12), MH_OBJECT);
         assert_eq!(u32_at(&bytes, 16), 2, "ncmds");
         // Every load command is accounted for, which is what a parser walks.
@@ -287,6 +265,7 @@ mod tests {
         let strx = u32_at(&bytes, symoff) as usize;
         let name = &bytes[stroff + strx..];
         let name = &name[..name.iter().position(|&b| b == 0).unwrap()];
+        // The underscore is this writer's, not the caller's.
         assert_eq!(name, b"_guest+0x40");
     }
 

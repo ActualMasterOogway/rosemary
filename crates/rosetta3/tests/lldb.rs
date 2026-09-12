@@ -8,6 +8,12 @@
 //! default on macOS, and the object named its code with an absolute symbol,
 //! which LLDB loads at no address at all.
 //!
+//! The symbol file is Mach-O or ELF depending on the host, and the two formats
+//! disagree about what a symbol's value means, so every assertion below is
+//! about the host it runs on. Only the last pair of tests can run on a host
+//! that cannot build a Mach-O guest to fault inside: they publish a region by
+//! hand instead.
+//!
 //! So the assertions here are about what a debugger *says*, not about what this
 //! crate emitted. What each would falsify:
 //!
@@ -31,11 +37,15 @@ use std::process::{Command, Stdio};
 
 use common::{build_x86_64, driver, fault_fixture};
 
-/// Whether this host has an `lldb` that can debug what we just built, and the
-/// test was opted in: attaching triggers a macOS prompt for developer tools
-/// access, which a non-interactive test run cannot answer.
+/// Whether this host has an `lldb` that can debug what we just built.
+///
+/// The opt-in is macOS's alone: debugging there prompts for developer tools
+/// access, which a non-interactive test run cannot answer. Elsewhere a debugger
+/// on a child of the test is ordinary and needs no permission.
 fn have_lldb() -> bool {
-    std::env::var_os("ROSETTA3_ENABLE_PRIVILEGED_TESTS").is_some()
+    let allowed = cfg!(not(target_os = "macos"))
+        || std::env::var_os("ROSETTA3_ENABLE_PRIVILEGED_TESTS").is_some();
+    allowed
         && Command::new("lldb")
             .arg("--version")
             .output()
@@ -102,7 +112,10 @@ fn lldb_loads_every_translation_it_is_handed() {
     );
 }
 
+/// The other side of this is [`the_default_is_what_the_notice_says`], which is
+/// the one that runs on a host whose LLDB constructs the plugin unasked.
 #[test]
+#[cfg(target_os = "macos")]
 fn the_macos_default_publishes_to_nobody() {
     if !have_lldb() {
         skip!("no lldb on this host")
@@ -200,9 +213,11 @@ fn the_listing_is_the_x86_64_the_region_was_lifted_from() {
     let (_, out, err) = common::run_guest_env(&[("ROSETTA3_LLDB", "1")], &path, &[]);
     assert!(out.contains("about to fault"), "{out:?} (stderr: {err})");
 
-    // The notice, which is the only thing that tells a user why LLDB is silent.
-    assert!(
+    // The notice, which on macOS is the only thing that tells a user why LLDB is
+    // silent. Elsewhere the plugin is on and there is nothing to say.
+    assert_eq!(
         err.contains("plugin.jit-loader.gdb.enable on"),
+        cfg!(target_os = "macos"),
         "stderr: {err}"
     );
 
@@ -339,5 +354,200 @@ fn a_debugger_that_arrives_late_still_sees_everything() {
     assert!(
         !text.contains("failed to load module"),
         "LLDB refused a symfile it read from the list; {text}"
+    );
+}
+
+/// x86-64 that stores through a null pointer, and then returns. Real guest
+/// instructions, because the listing is produced by decoding them.
+const GUEST_X86_64: &[u8] = &[
+    0x48, 0x31, 0xc0, // xor rax, rax
+    0x48, 0x89, 0x00, // mov [rax], rax
+    0xc3, // ret
+];
+
+/// The guest VA [`GUEST_X86_64`] is pretended to have been lifted from.
+const GUEST_VA: u64 = 0x1_0000_2000;
+
+/// The same thing in the host's own instruction set, which is what a lift of
+/// the above would have produced and what actually runs.
+#[cfg(target_arch = "aarch64")]
+const HOST_CODE: &[u8] = &[
+    0x00, 0x00, 0x80, 0xd2, // mov x0, #0
+    0x00, 0x00, 0x00, 0xf9, // str x0, [x0]
+    0xc0, 0x03, 0x5f, 0xd6, // ret
+];
+
+/// One range per guest instruction, as offsets into [`HOST_CODE`]: the shape of
+/// the map a real lift produces.
+#[cfg(target_arch = "aarch64")]
+const HOST_BOUNDS: &[(u32, u32)] = &[(0, 4), (4, 8), (8, 12)];
+
+/// The host being x86-64 too is a coincidence this test does not rely on: these
+/// are the instructions that run, and [`GUEST_X86_64`] the ones the listing is
+/// decoded from.
+#[cfg(not(target_arch = "aarch64"))]
+const HOST_CODE: &[u8] = &[
+    0x48, 0x31, 0xc0, // xor rax, rax
+    0x48, 0x89, 0x00, // mov [rax], rax
+    0xc3, // ret
+];
+
+#[cfg(not(target_arch = "aarch64"))]
+const HOST_BOUNDS: &[(u32, u32)] = &[(0, 3), (3, 6), (6, 7)];
+
+/// How the faulting region is named: the shape [`rosetta3::program::Program::locate`]
+/// produces, so the symbol a debugger shows is the one a real stop would show.
+const REGION: &str = "guest_fault+0x470";
+
+/// The debuggee for the test below, and not a test itself: it publishes a region
+/// of host code the way a lift does and then runs it, which faults.
+///
+/// It is `#[ignore]`d so an ordinary run never executes it, and re-entered by
+/// name under LLDB. This is what makes the round trip testable on a host that
+/// cannot build a Mach-O guest to fault inside: nothing here needs one - the
+/// bytes, the map and the addresses are all this test's own.
+#[test]
+#[ignore = "the debuggee of lldb_symbolicates_a_published_region; faults on purpose"]
+fn publish_a_region_and_fault() {
+    use microlift::core::srcloc::{GuestCodeMap, GuestCodeRange};
+
+    let len = HOST_CODE.len();
+    // SAFETY: an anonymous mapping of one page, with no fixed address asked for.
+    let code = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            4096,
+            libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            libc::MAP_PRIVATE | libc::MAP_ANON,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(code, libc::MAP_FAILED, "mapping a page to execute from");
+
+    // SAFETY: `code` is a page, and `HOST_CODE` is a handful of bytes of it.
+    unsafe { std::ptr::copy_nonoverlapping(HOST_CODE.as_ptr(), code.cast(), len) };
+
+    let map = GuestCodeMap::from_ranges(
+        HOST_BOUNDS
+            .iter()
+            .zip(guest_instruction_starts())
+            .map(|(&(start, end), guest_va)| GuestCodeRange {
+                start,
+                end,
+                guest_va,
+            })
+            .collect(),
+    );
+
+    rosetta3::lldb::register(
+        code as u64,
+        GUEST_VA,
+        GUEST_VA + GUEST_X86_64.len() as u64,
+        REGION,
+        GUEST_X86_64,
+        &map,
+    );
+
+    // SAFETY: the bytes just written are a function of no arguments that
+    // returns - after it faults, which is the point.
+    let entry: extern "C" fn() = unsafe { std::mem::transmute(code) };
+    entry();
+    panic!("the region was supposed to fault");
+}
+
+/// The guest VA of each instruction in [`GUEST_X86_64`].
+fn guest_instruction_starts() -> [u64; 3] {
+    [GUEST_VA, GUEST_VA + 3, GUEST_VA + 6]
+}
+
+/// Run this test binary's own debuggee under `lldb`, with `commands` issued
+/// after it stops, and return everything LLDB printed.
+///
+/// `--exact` so no other test comes with it, and `--test-threads=1` so the
+/// fault is on the thread LLDB reports as stopped.
+fn lldb_at_the_published_region(settings: &[&str], commands: &[&str]) -> String {
+    let exe = std::env::current_exe().expect("the path of this test binary");
+
+    let mut command = Command::new("lldb");
+    command.arg("--batch");
+    for setting in settings {
+        command.args(["-O", setting]);
+    }
+    command.args(["-o", "run"]);
+    // `-k`, not `-o`, for the same reason as `lldb_at_the_fault`: the process
+    // crashes, and the crash list is the one that runs then.
+    for one in commands {
+        command.args(["-k", one]);
+    }
+    let out = command
+        .arg("--")
+        .arg(&exe)
+        .args([
+            "publish_a_region_and_fault",
+            "--exact",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .env("ROSETTA3_LLDB", "1")
+        .output()
+        .expect("running lldb");
+
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    text
+}
+
+#[test]
+fn lldb_symbolicates_a_published_region() {
+    if !have_lldb() {
+        skip!("no lldb on this host")
+    }
+    let text = lldb_at_the_published_region(&[ENABLE], &["bt"]);
+
+    assert!(
+        text.contains("stop reason = signal SIGSEGV") || text.contains("EXC_BAD_ACCESS"),
+        "the debuggee did not fault under lldb; {text}"
+    );
+    assert!(
+        !text.contains("failed to load module"),
+        "LLDB refused the symfile; {text}"
+    );
+
+    // The same three facts the fixture-driven test asserts, about the same
+    // frame: a module, a name and a line of the x86-64 listing. The name is the
+    // one that catches the difference between the two formats - an ELF symbol's
+    // value is an offset into its section and a Mach-O one's is an address, and
+    // a frame whose symbol was placed at twice its address still has a module
+    // and still has a line.
+    let frame = text
+        .lines()
+        .find(|line| line.contains("frame #0:"))
+        .unwrap_or_else(|| panic!("no frame #0 in lldb's output; {text}"));
+    assert!(frame.contains("JIT(0x"), "not in a JIT module; {frame}");
+    assert!(
+        frame.contains("guest_fault+0x"),
+        "not symbolicated against the region's name; {frame}"
+    );
+    assert!(
+        frame.contains(".x86-64.s:"),
+        "resolved to no line of the listing; {frame}"
+    );
+}
+
+/// Whether LLDB reads the JIT interface without being asked, which is what the
+/// notice `crate::lldb` prints on macOS (and prints nowhere else) claims.
+#[test]
+fn the_default_is_what_the_notice_says() {
+    if !have_lldb() {
+        skip!("no lldb on this host")
+    }
+    let text = lldb_at_the_published_region(&[LOG], &[]);
+
+    assert_eq!(
+        text.contains("registering JIT entry"),
+        cfg!(not(target_os = "macos")),
+        "the JIT loader's default changed on this platform, and the notice \
+         `crate::lldb` prints has to change with it; {text}"
     );
 }
