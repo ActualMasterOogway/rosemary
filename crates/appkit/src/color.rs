@@ -77,6 +77,56 @@ static NAMED: &[(&str, f64, f64, f64, f64)] = &[
     ("selectedTextColor", 0.0, 0.0, 0.0, 1.0),
     ("windowFrameTextColor", 0.0, 0.0, 0.0, 1.0),
     ("disabledControlTextColor", 0.53, 0.53, 0.53, 1.0),
+    // The selection and header colours a widget toolkit builds a palette out of.
+    // Qt asks for all of these while its Cocoa plugin is still loading, and one
+    // it cannot get is not a wrong shade - it is an unrecognised selector and a
+    // program that stops. The accent-dependent ones are the blue accent's, which
+    // is the default and the only one this runtime has: there is no
+    // `NSColorAppearance` here to read another from.
+    ("headerTextColor", 0.0, 0.0, 0.0, 1.0),
+    ("headerColor", 0.93, 0.93, 0.93, 1.0),
+    ("selectedControlColor", 0.70, 0.84, 1.0, 1.0),
+    ("selectedControlTextColor", 0.0, 0.0, 0.0, 1.0),
+    ("selectedTextBackgroundColor", 0.70, 0.84, 1.0, 1.0),
+    ("alternateSelectedControlColor", 0.0, 0.39, 0.88, 1.0),
+    ("alternateSelectedControlTextColor", 1.0, 1.0, 1.0, 1.0),
+    ("selectedContentBackgroundColor", 0.0, 0.39, 0.88, 1.0),
+    ("selectedMenuItemTextColor", 1.0, 1.0, 1.0, 1.0),
+    // "Unemphasized" is the selection in a view that is not the first responder:
+    // grey rather than accented, with the ordinary text colour on top.
+    ("unemphasizedSelectedContentBackgroundColor", 0.86, 0.86, 0.86, 1.0),
+    ("unemphasizedSelectedTextBackgroundColor", 0.86, 0.86, 0.86, 1.0),
+    ("unemphasizedSelectedTextColor", 0.0, 0.0, 0.0, 1.0),
+    // The focus ring is drawn over what it surrounds, so its alpha is part of
+    // the colour rather than something the caller applies.
+    ("keyboardFocusIndicatorColor", 0.0, 0.37, 0.89, 0.25),
+    ("linkColor", 0.0, 0.41, 0.85, 1.0),
+    ("shadowColor", 0.0, 0.0, 0.0, 1.0),
+    ("highlightColor", 1.0, 1.0, 1.0, 1.0),
+    ("gridColor", 0.90, 0.90, 0.90, 1.0),
+    // The label tiers and the separator differ from `labelColor` only in alpha,
+    // which is how AppKit defines them.
+    ("secondaryLabelColor", 0.0, 0.0, 0.0, 0.5),
+    ("tertiaryLabelColor", 0.0, 0.0, 0.0, 0.26),
+    ("quaternaryLabelColor", 0.0, 0.0, 0.0, 0.1),
+    ("placeholderTextColor", 0.0, 0.0, 0.0, 0.25),
+    ("separatorColor", 0.0, 0.0, 0.0, 0.1),
+    ("underPageBackgroundColor", 0.60, 0.60, 0.60, 1.0),
+    ("alternatingContentBackgroundColor", 0.96, 0.96, 0.96, 1.0),
+    // The `systemX` palette, whose values are Apple's published sRGB ones. A
+    // program picks one to draw with rather than asking the appearance about it.
+    ("systemRedColor", 1.0, 0.23, 0.19, 1.0),
+    ("systemGreenColor", 0.16, 0.80, 0.25, 1.0),
+    ("systemBlueColor", 0.0, 0.48, 1.0, 1.0),
+    ("systemOrangeColor", 1.0, 0.58, 0.0, 1.0),
+    ("systemYellowColor", 1.0, 0.80, 0.0, 1.0),
+    ("systemPinkColor", 1.0, 0.18, 0.33, 1.0),
+    ("systemPurpleColor", 0.69, 0.32, 0.87, 1.0),
+    ("systemTealColor", 0.35, 0.78, 0.98, 1.0),
+    ("systemIndigoColor", 0.35, 0.34, 0.84, 1.0),
+    ("systemBrownColor", 0.64, 0.52, 0.37, 1.0),
+    ("systemGrayColor", 0.56, 0.56, 0.58, 1.0),
+    ("controlAccentColor", 0.0, 0.39, 0.88, 1.0),
     ("blackColor", 0.0, 0.0, 0.0, 1.0),
     ("whiteColor", 1.0, 1.0, 1.0, 1.0),
     ("clearColor", 0.0, 0.0, 0.0, 0.0),
@@ -136,6 +186,116 @@ unsafe extern "C" fn component(receiver: Id, sel: Sel) -> CGFloat {
     }
 }
 
+/// `-colorSpaceName`, the deprecated name of the space a colour is in.
+///
+/// Calibrated RGB, which is what every colour here is: four components in the
+/// space the module note describes. A caller compares the result against
+/// `NSDeviceCMYKColorSpace` before reaching for the CMYK accessors, and this sends
+/// it down the RGB branch - which is the one that can be answered.
+unsafe extern "C" fn color_space_name(_receiver: Id, _sel: Sel) -> Id {
+    // The same interned object the `_NSCalibratedRGBColorSpace` global holds, so a
+    // caller comparing the two with `==` - which is what a space-name check is
+    // written as - finds them identical as well as equal.
+    foundation::notification::name_object("NSCalibratedRGBColorSpace") as Id
+}
+
+/// `-colorUsingColorSpaceName:`
+///
+/// The receiver when the space asked for is an RGB one, and nil otherwise.
+///
+/// This is not the `self`-returning conversion the module note refuses. The note's
+/// objection is to a conversion that silently did not happen; a colour here *is*
+/// calibrated RGB, so answering it to a caller that asked for RGB is the
+/// conversion, complete. A caller that asked for CMYK or grey gets nil, which is
+/// the documented answer for a colour that cannot be converted and the branch it
+/// already has - rather than four RGB components relabelled as something else.
+///
+/// # Safety
+///
+/// `name` is an `NSString` or nil.
+unsafe extern "C" fn color_using_color_space_name(receiver: Id, _sel: Sel, name: Id) -> Id {
+    // SAFETY: the caller's obligation.
+    let name = unsafe { foundation::string::bytes(name) };
+    // A null or empty name means "the most appropriate space", which is this one.
+    if name.is_empty() {
+        return receiver;
+    }
+    const RGB: [&str; 4] = [
+        "NSCalibratedRGBColorSpace",
+        "NSDeviceRGBColorSpace",
+        "NSCustomColorSpace",
+        "kCGColorSpaceSRGB",
+    ];
+    match RGB.iter().any(|space| space.as_bytes() == name.as_slice()) {
+        true => receiver,
+        false => std::ptr::null_mut(),
+    }
+}
+
+/// `-colorUsingColorSpace:`
+///
+/// The receiver. There is one colour space in this runtime and every colour is
+/// already in it - see the module note - and the `NSColorSpace` a caller would pass
+/// to ask for another is a class this tree does not have, so the argument is
+/// always the space the receiver is in or nil.
+unsafe extern "C" fn color_using_color_space(receiver: Id, _sel: Sel, _space: Id) -> Id {
+    receiver
+}
+
+/// `-catalogNameComponent` and `-colorNameComponent`.
+///
+/// Nil, because a colour here is not a catalog colour: it is four components, and
+/// `+controlTextColor` resolved them when it was sent rather than handing back a
+/// named reference into a catalog that is resolved later.
+///
+/// The distinction is one a caller acts on. Qt asks whether the catalog is
+/// `System`, and renders a colour that says yes into a pattern image instead of
+/// reading its components - so claiming a catalog would send it down a drawing
+/// path to represent a colour that is already a plain one.
+unsafe extern "C" fn name_component(_receiver: Id, _sel: Sel) -> Id {
+    std::ptr::null_mut()
+}
+
+/// `-numberOfComponents`, which is four: red, green, blue and alpha.
+unsafe extern "C" fn number_of_components(_receiver: Id, _sel: Sel) -> isize {
+    4
+}
+
+/// `-whiteComponent`, the brightness of a grey colour.
+///
+/// The Rec. 601 luma of the three components, which is what AppKit answers for a
+/// colour that is not already grey - and for one that is, the three are equal and
+/// any weighting gives the same number back.
+unsafe extern "C" fn white_component(receiver: Id, _sel: Sel) -> CGFloat {
+    // SAFETY: a colour of this crate's.
+    let c = unsafe { &*(receiver as *const Color) };
+    0.299 * c.red + 0.587 * c.green + 0.114 * c.blue
+}
+
+/// `-getWhite:alpha:`
+///
+/// # Safety
+///
+/// Each out-parameter is null or writable for one `CGFloat`.
+unsafe extern "C" fn get_white(
+    receiver: Id,
+    sel: Sel,
+    white: *mut CGFloat,
+    alpha: *mut CGFloat,
+) {
+    // SAFETY: a colour of this crate's.
+    let c = unsafe { &*(receiver as *const Color) };
+    // SAFETY: the caller states each is null or writable.
+    unsafe {
+        if !white.is_null() {
+            *white = white_component(receiver, sel);
+        }
+        if !alpha.is_null() {
+            *alpha = c.alpha;
+        }
+    }
+}
+
 unsafe extern "C" fn get_components(
     receiver: Id,
     _sel: Sel,
@@ -183,6 +343,17 @@ pub(crate) fn install() {
         "blueComponent" => component, c"d16@0:8";
         "alphaComponent" => component, c"d16@0:8";
         "getRed:green:blue:alpha:" => get_components, c"v48@0:8^d16^d24^d32^d40";
+        "whiteComponent" => white_component, c"d16@0:8";
+        "getWhite:alpha:" => get_white, c"v32@0:8^d16^d24";
+        "numberOfComponents" => number_of_components, c"q16@0:8";
+        "colorSpaceName" => color_space_name, c"@16@0:8";
+        "colorUsingColorSpaceName:" => color_using_color_space_name, c"@24@0:8@16";
+        "colorUsingColorSpaceName:device:" => color_using_color_space_name, c"@32@0:8@16@24";
+        "colorUsingColorSpace:" => color_using_color_space, c"@24@0:8@16";
+        "catalogNameComponent" => name_component, c"@16@0:8";
+        "colorNameComponent" => name_component, c"@16@0:8";
+        "localizedCatalogNameComponent" => name_component, c"@16@0:8";
+        "localizedColorNameComponent" => name_component, c"@16@0:8";
     });
 }
 

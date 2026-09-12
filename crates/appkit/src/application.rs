@@ -13,6 +13,21 @@ pub struct Application {
     main_menu: Id,
     icon: Id,
     running: usize,
+    /// The three menus a program hands AppKit to fill in: the Services, Windows
+    /// and Help menus. Kept and not populated - there is no Services registry and
+    /// no window list to build a Windows menu from - because a program reads back
+    /// the menu it set and adds its own items to it.
+    services_menu: Id,
+    windows_menu: Id,
+    help_menu: Id,
+    /// `-dockMenu`, which a program sets and AppKit would ask its delegate for.
+    dock_menu: Id,
+    /// The modal window of the innermost session, or nil outside one. See
+    /// [`run_modal_for_window`].
+    modal_window: Id,
+    /// How deep the modal nesting is, so `-stopModal` ends one session rather
+    /// than all of them.
+    modal_depth: usize,
 }
 
 pub const INSTANCE_SIZE: usize = size_of::<Application>();
@@ -388,6 +403,164 @@ unsafe extern "C" fn key_window(_receiver: Id, _sel: Sel) -> Id {
     crate::window::key_window()
 }
 
+/// The four settable menus, each kept for the program to read back.
+///
+/// One implementation for all of them, resolved by the selector: the bodies would
+/// otherwise be eight copies of two lines, which is eight places to retain the
+/// wrong field.
+///
+/// # Safety
+///
+/// `receiver` is an application of this crate's.
+unsafe fn menu_slot<'a>(receiver: Id, sel: Sel) -> &'a mut Id {
+    // SAFETY: an application.
+    let app = unsafe { &mut *(receiver as *mut Application) };
+    // SAFETY: a registered selector is a NUL-terminated interned name.
+    let name = unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes();
+    match name {
+        b"windowsMenu" | b"setWindowsMenu:" => &mut app.windows_menu,
+        b"helpMenu" | b"setHelpMenu:" => &mut app.help_menu,
+        b"dockMenu" | b"setDockMenu:" => &mut app.dock_menu,
+        _ => &mut app.services_menu,
+    }
+}
+
+unsafe extern "C" fn menu_for(receiver: Id, sel: Sel) -> Id {
+    // SAFETY: an application of this crate's.
+    *unsafe { menu_slot(receiver, sel) }
+}
+
+unsafe extern "C" fn set_menu_for(receiver: Id, sel: Sel, menu: Id) {
+    // SAFETY: as above.
+    let slot = unsafe { menu_slot(receiver, sel) };
+    objc::arc::release(*slot);
+    *slot = objc::arc::retain(menu);
+}
+
+/// `-currentEvent`, the event being dispatched right now.
+///
+/// Nil outside an event, which is what it is here: events are pumped from
+/// `crate::event` and none is held across the call, so there is never one "being
+/// dispatched". A caller uses this to read the modifier keys at the moment of a
+/// click, and nil sends it down its "no event" branch rather than handing it
+/// somebody else's event.
+unsafe extern "C" fn current_event(_receiver: Id, _sel: Sel) -> Id {
+    std::ptr::null_mut()
+}
+
+/// `-sendEvent:`, the entry point a subclass overrides and then calls up into.
+///
+/// Nothing to route: there is no responder chain here, and the events a window
+/// acts on reach it from `crate::event` rather than through this. Accepting the
+/// call is still necessary - `QNSApplication` overrides `-sendEvent:` and calls
+/// `super`, so a missing one is an abort on the first event rather than an event
+/// that goes nowhere.
+unsafe extern "C" fn send_event(_receiver: Id, _sel: Sel, _event: Id) {}
+
+/// `-hide:`, `-unhide:`, `-unhideWithoutActivation` and `-arrangeInFront:`.
+///
+/// Window-server requests with no window server behind them. Accepted rather than
+/// refused because each is a thing a program asks *for* - hiding is a user
+/// command it forwards - and the honest outcome is that nothing hides, not that
+/// the program stops.
+unsafe extern "C" fn ignored_sender(_receiver: Id, _sel: Sel, _sender: Id) {}
+
+unsafe extern "C" fn ignored_nullary(_receiver: Id, _sel: Sel) {}
+
+/// `-requestUserAttention:`, which bounces the Dock icon.
+///
+/// There is no Dock. The return value is the request identifier a caller passes
+/// to `-cancelUserAttentionRequest:`, and zero is the identifier of no request -
+/// which is the truth and what a caller cancelling it will find.
+unsafe extern "C" fn request_user_attention(_receiver: Id, _sel: Sel, _kind: isize) -> isize {
+    0
+}
+
+unsafe extern "C" fn cancel_user_attention_request(_receiver: Id, _sel: Sel, _request: isize) {}
+
+unsafe extern "C" fn modal_window(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an application.
+    unsafe { (*(receiver as *const Application)).modal_window }
+}
+
+/// `NSModalResponse`. Apple's values, because a caller compares against them.
+mod modal_response {
+    /// `NSModalResponseStop`, which is what `-stopModal` makes the session return.
+    pub const STOP: isize = -1000;
+    /// `NSModalResponseContinue`, "the session is still running".
+    pub const CONTINUE: isize = -1002;
+}
+
+/// `-beginModalSessionForWindow:`
+///
+/// The session handle is the window, because that is all a session is here: the
+/// three calls that take one only ever ask which window it is about. A caller
+/// drives the loop itself with `-runModalSession:`, which is the shape that works
+/// without a nested event loop of AppKit's own.
+unsafe extern "C" fn begin_modal_session(receiver: Id, _sel: Sel, window: Id) -> Id {
+    // SAFETY: an application.
+    let app = unsafe { &mut *(receiver as *mut Application) };
+    app.modal_window = objc::arc::retain(window);
+    app.modal_depth += 1;
+    window
+}
+
+/// `-runModalSession:`, one turn of the caller's own modal loop.
+///
+/// Pumps the events a window needs and answers `NSModalResponseContinue` while
+/// the session is still open, so the caller loops; `-stopModal` closes it and the
+/// next turn answers `NSModalResponseStop`. Answering `Stop` straight away would
+/// make every modal dialog close before it was drawn, and answering `Continue`
+/// for ever would make one that never closes.
+unsafe extern "C" fn run_modal_session(receiver: Id, _sel: Sel, _session: Id) -> isize {
+    crate::event::pump(receiver);
+    // SAFETY: an application.
+    let app = unsafe { &*(receiver as *const Application) };
+    match app.modal_depth > 0 {
+        true => modal_response::CONTINUE,
+        false => modal_response::STOP,
+    }
+}
+
+unsafe extern "C" fn end_modal_session(receiver: Id, _sel: Sel, _session: Id) {
+    // SAFETY: an application.
+    let app = unsafe { &mut *(receiver as *mut Application) };
+    app.modal_depth = app.modal_depth.saturating_sub(1);
+    if app.modal_depth == 0 {
+        objc::arc::release(app.modal_window);
+        app.modal_window = std::ptr::null_mut();
+    }
+}
+
+/// `-stopModal` and `-abortModal`, which end the innermost session.
+unsafe extern "C" fn stop_modal(receiver: Id, _sel: Sel) {
+    // SAFETY: an application.
+    let app = unsafe { &mut *(receiver as *mut Application) };
+    app.modal_depth = app.modal_depth.saturating_sub(1);
+}
+
+/// `-runModalForWindow:`, the blocking form.
+///
+/// Runs the loop `-runModalSession:` leaves to the caller: pump until something
+/// calls `-stopModal`. The guard is that *only* guest code can stop it, so a
+/// window nothing ever dismisses would hang the program - which is what it does
+/// on a Mac too, and is why the pump is the same one the main loop uses rather
+/// than a spin.
+unsafe extern "C" fn run_modal_for_window(receiver: Id, sel: Sel, window: Id) -> isize {
+    // SAFETY: an application and a window of this crate's.
+    unsafe { begin_modal_session(receiver, sel, window) };
+    loop {
+        // SAFETY: as above; the session handle is the window.
+        let response = unsafe { run_modal_session(receiver, sel, window) };
+        if response != modal_response::CONTINUE {
+            break;
+        }
+    }
+    // SAFETY: as above.
+    unsafe { end_modal_session(receiver, sel, window) };
+    modal_response::STOP
+}
+
 /// Send `selector` to `target` if it has one, and do nothing if it does not.
 ///
 /// An *optional* protocol method, which `applicationDidFinishLaunching:` is - so
@@ -506,6 +679,30 @@ pub(crate) fn install() {
         "windows" => windows, c"@16@0:8";
         "keyWindow" => key_window, c"@16@0:8";
         "mainWindow" => key_window, c"@16@0:8";
+        "servicesMenu" => menu_for, c"@16@0:8";
+        "setServicesMenu:" => set_menu_for, c"v24@0:8@16";
+        "windowsMenu" => menu_for, c"@16@0:8";
+        "setWindowsMenu:" => set_menu_for, c"v24@0:8@16";
+        "helpMenu" => menu_for, c"@16@0:8";
+        "setHelpMenu:" => set_menu_for, c"v24@0:8@16";
+        "dockMenu" => menu_for, c"@16@0:8";
+        "setDockMenu:" => set_menu_for, c"v24@0:8@16";
+        "currentEvent" => current_event, c"@16@0:8";
+        "sendEvent:" => send_event, c"v24@0:8@16";
+        "hide:" => ignored_sender, c"v24@0:8@16";
+        "unhide:" => ignored_sender, c"v24@0:8@16";
+        "arrangeInFront:" => ignored_sender, c"v24@0:8@16";
+        "unhideWithoutActivation" => ignored_nullary, c"v16@0:8";
+        "updateWindows" => ignored_nullary, c"v16@0:8";
+        "requestUserAttention:" => request_user_attention, c"q24@0:8q16";
+        "cancelUserAttentionRequest:" => cancel_user_attention_request, c"v24@0:8q16";
+        "modalWindow" => modal_window, c"@16@0:8";
+        "beginModalSessionForWindow:" => begin_modal_session, c"@24@0:8@16";
+        "runModalSession:" => run_modal_session, c"q24@0:8^v16";
+        "endModalSession:" => end_modal_session, c"v24@0:8^v16";
+        "runModalForWindow:" => run_modal_for_window, c"q24@0:8@16";
+        "stopModal" => stop_modal, c"v16@0:8";
+        "abortModal" => stop_modal, c"v16@0:8";
     });
 }
 

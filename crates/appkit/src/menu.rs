@@ -17,7 +17,7 @@ use std::ffi::c_void;
 use objc::object::Id;
 use objc::sel::Sel;
 
-use crate::define::methods;
+use crate::define::{class_methods, methods};
 
 #[repr(C)]
 pub struct Menu {
@@ -45,6 +45,16 @@ pub struct MenuItem {
     state: isize,
     enabled: usize,
     hidden: usize,
+    /// Set only by `+separatorItem`. A separator is an ordinary item as far as
+    /// this bookkeeping goes; what makes it one is that it answers
+    /// `-isSeparatorItem`, which is how a caller walking a menu tells a divider
+    /// from something it should read a title off.
+    separator: usize,
+    /// Kept rather than ignored, because a caller that sets a key equivalent's
+    /// modifiers reads them back to build its own shortcut table.
+    modifier_mask: usize,
+    tool_tip: Id,
+    image: Id,
 }
 
 pub const MENU_INSTANCE_SIZE: usize = size_of::<Menu>();
@@ -342,11 +352,73 @@ unsafe extern "C" fn set_hidden(receiver: Id, _sel: Sel, hidden: u8) {
 }
 
 /// The requests that describe how a menu *looks*, which nothing here draws.
+/// `+[NSMenuItem separatorItem]`, the divider in a menu.
+///
+/// A fresh item each time, as Apple's is: a separator goes into exactly one menu
+/// at one index, and a shared singleton put into two menus would be at one index
+/// in both.
+unsafe extern "C" fn separator_item(_class: Id, _sel: Sel) -> Id {
+    let class = objc::class::lookup(c"NSMenuItem").expect("declared before its methods");
+    let object = objc::object::create_instance(class, 0);
+    item_of(object).separator = 1;
+    objc::arc::autorelease(object)
+}
+
+unsafe extern "C" fn is_separator_item(receiver: Id, _sel: Sel) -> u8 {
+    item_of(receiver).separator as u8
+}
+
+/// `-hasSubmenu`, which a caller asks before descending rather than reading
+/// `-submenu` and testing it for nil.
+unsafe extern "C" fn has_submenu(receiver: Id, _sel: Sel) -> u8 {
+    !item_of(receiver).submenu.is_null() as u8
+}
+
+unsafe extern "C" fn key_equivalent_modifier_mask(receiver: Id, _sel: Sel) -> usize {
+    item_of(receiver).modifier_mask
+}
+
+unsafe extern "C" fn set_key_equivalent_modifier_mask(receiver: Id, _sel: Sel, mask: usize) {
+    item_of(receiver).modifier_mask = mask;
+}
+
+unsafe extern "C" fn item_tool_tip(receiver: Id, _sel: Sel) -> Id {
+    item_of(receiver).tool_tip
+}
+
+unsafe extern "C" fn set_item_tool_tip(receiver: Id, _sel: Sel, text: Id) {
+    let item = item_of(receiver);
+    objc::arc::release(item.tool_tip);
+    item.tool_tip = objc::arc::retain(text);
+}
+
+unsafe extern "C" fn item_image(receiver: Id, _sel: Sel) -> Id {
+    item_of(receiver).image
+}
+
+unsafe extern "C" fn set_item_image(receiver: Id, _sel: Sel, image: Id) {
+    let item = item_of(receiver);
+    objc::arc::release(item.image);
+    item.image = objc::arc::retain(image);
+}
+
+/// `-indexOfItemWithSubmenu:`, `-indexOfItem:` asked the other way round.
+///
+/// How a caller finds where a submenu was attached so it can replace or remove it
+/// - `-1` for a submenu this menu does not hold, which is the convention every
+/// `indexOf` on `NSMenu` uses.
+unsafe extern "C" fn index_of_item_with_submenu(receiver: Id, _sel: Sel, submenu: Id) -> isize {
+    items_of(receiver)
+        .values
+        .iter()
+        .position(|value| item_of(*value as Id).submenu == submenu)
+        .map_or(-1, |at| at as isize)
+}
+
 unsafe extern "C" fn ignored_flag(_receiver: Id, _sel: Sel, _flag: u8) {}
 
 unsafe extern "C" fn ignored_object(_receiver: Id, _sel: Sel, _object: Id) {}
 
-unsafe extern "C" fn ignored_integer(_receiver: Id, _sel: Sel, _value: isize) {}
 
 pub(crate) fn install() {
     let menu = objc::class::lookup(c"NSMenu").expect("declared before its methods");
@@ -372,9 +444,13 @@ pub(crate) fn install() {
         "supermenu" => supermenu, c"@16@0:8";
         "setAutoenablesItems:" => ignored_flag, c"v20@0:8c16";
         "setSubmenu:forItem:" => ignored_object, c"v32@0:8@16@24";
+        "indexOfItemWithSubmenu:" => index_of_item_with_submenu, c"q24@0:8@16";
     });
 
     let item = objc::class::lookup(c"NSMenuItem").expect("declared before its methods");
+    class_methods!(item, {
+        "separatorItem" => separator_item, c"@16@0:8";
+    });
     methods!(item, {
         "initWithTitle:action:keyEquivalent:" => init_item, c"@40@0:8@16:24@32";
         "title" => item_title, c"@16@0:8";
@@ -397,8 +473,14 @@ pub(crate) fn install() {
         "setEnabled:" => set_enabled, c"v20@0:8c16";
         "isHidden" => is_hidden, c"c16@0:8";
         "setHidden:" => set_hidden, c"v20@0:8c16";
-        "setKeyEquivalentModifierMask:" => ignored_integer, c"v24@0:8Q16";
-        "setImage:" => ignored_object, c"v24@0:8@16";
+        "setKeyEquivalentModifierMask:" => set_key_equivalent_modifier_mask, c"v24@0:8Q16";
+        "keyEquivalentModifierMask" => key_equivalent_modifier_mask, c"Q16@0:8";
+        "isSeparatorItem" => is_separator_item, c"c16@0:8";
+        "hasSubmenu" => has_submenu, c"c16@0:8";
+        "toolTip" => item_tool_tip, c"@16@0:8";
+        "setToolTip:" => set_item_tool_tip, c"v24@0:8@16";
+        "image" => item_image, c"@16@0:8";
+        "setImage:" => set_item_image, c"v24@0:8@16";
         "setOnStateImage:" => ignored_object, c"v24@0:8@16";
         "setMixedStateImage:" => ignored_object, c"v24@0:8@16";
         "setRepresentedObject:" => ignored_object, c"v24@0:8@16";
@@ -432,6 +514,59 @@ mod tests {
         // SAFETY: `-setTag:` is `void (id, SEL, NSInteger)`.
         unsafe { set_item_tag(object, objc::sel::get("setTag:"), tag) };
         object
+    }
+
+    /// A separator answers `-isSeparatorItem` and an ordinary item does not,
+    /// which is how a caller walking a menu tells a divider from something with a
+    /// title to read.
+    #[test]
+    fn a_separator_says_so_and_an_ordinary_item_does_not() {
+        crate::bootstrap();
+        let class = objc::class::ptr(objc::class::lookup(c"NSMenuItem").expect("NSMenuItem")) as Id;
+        // SAFETY: `+separatorItem` is `id (Class, SEL)`.
+        let separator = unsafe { separator_item(class, objc::sel::get("separatorItem")) };
+        let plain = item(1);
+        // SAFETY: `-isSeparatorItem` is `BOOL (id, SEL)` on items of this crate's.
+        unsafe {
+            let sel = objc::sel::get("isSeparatorItem");
+            assert_eq!(is_separator_item(separator, sel), 1);
+            assert_eq!(is_separator_item(plain, sel), 0);
+        }
+        // And two separators are two items, so each can sit at its own index.
+        // SAFETY: as above.
+        let second = unsafe { separator_item(class, objc::sel::get("separatorItem")) };
+        assert_ne!(separator, second);
+    }
+
+    /// `-hasSubmenu` and `-indexOfItemWithSubmenu:` are the pair a caller uses to
+    /// find where a submenu was attached.
+    #[test]
+    fn a_submenu_is_found_by_the_item_holding_it() {
+        let parent = menu("Parent");
+        let child = menu("Child");
+        let holder = item(7);
+        let plain = item(8);
+        // SAFETY: menus and items this test made.
+        unsafe {
+            assert_eq!(has_submenu(holder, objc::sel::get("hasSubmenu")), 0);
+            set_item_submenu(holder, objc::sel::get("setSubmenu:"), child);
+            assert_eq!(has_submenu(holder, objc::sel::get("hasSubmenu")), 1);
+            add_item(parent, objc::sel::get("addItem:"), plain);
+            add_item(parent, objc::sel::get("addItem:"), holder);
+            assert_eq!(
+                index_of_item_with_submenu(parent, objc::sel::get("indexOfItemWithSubmenu:"), child),
+                1
+            );
+            // A submenu this menu does not hold is -1, not 0.
+            assert_eq!(
+                index_of_item_with_submenu(
+                    parent,
+                    objc::sel::get("indexOfItemWithSubmenu:"),
+                    menu("Elsewhere")
+                ),
+                -1
+            );
+        }
     }
 
     /// A tag is found through a submenu, which is how a program reaches the item

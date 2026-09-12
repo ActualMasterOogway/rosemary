@@ -32,6 +32,8 @@ pub mod nib;
 pub mod nsevent;
 pub mod opengl;
 pub mod pasteboard;
+mod pasteboard_manager;
+mod responder;
 pub mod raster;
 pub mod screen;
 pub mod script;
@@ -60,6 +62,7 @@ pub fn bootstrap() {
         layer::install();
         text::install();
         opengl::install();
+        responder::install();
         pasteboard::install();
         nsevent::install();
         monitor::install();
@@ -79,6 +82,30 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CGMainDisplayID" => at!(screen::CGMainDisplayID),
         "CGDisplayBounds" => at!(screen::CGDisplayBounds),
         "CGDisplayScreenSize" => at!(screen::CGDisplayScreenSize),
+        "CGDisplayIsMain" => at!(screen::CGDisplayIsMain),
+        "CGDisplayIsOnline" => at!(screen::CGDisplayIsOnline),
+        "CGDisplayIsAsleep" => at!(screen::CGDisplayIsAsleep),
+        "CGDisplayMirrorsDisplay" => at!(screen::CGDisplayMirrorsDisplay),
+        "CGDisplayModelNumber" => at!(screen::CGDisplayModelNumber),
+        "CGDisplayVendorNumber" => at!(screen::CGDisplayVendorNumber),
+        "CGDisplaySerialNumber" => at!(screen::CGDisplaySerialNumber),
+        "CGDisplayCopyDisplayMode" => at!(screen::CGDisplayCopyDisplayMode),
+        "CGDisplayModeGetRefreshRate" => at!(screen::CGDisplayModeGetRefreshRate),
+        "CGDisplayModeRelease" => at!(screen::CGDisplayModeRelease),
+        "CGDisplayModeRetain" => at!(screen::CGDisplayModeRetain),
+        "CGDisplayRegisterReconfigurationCallback" => {
+            at!(screen::CGDisplayRegisterReconfigurationCallback)
+        }
+        "CGDisplayRemoveReconfigurationCallback" => {
+            at!(screen::CGDisplayRemoveReconfigurationCallback)
+        }
+        "CGGetDisplaysWithRect" => at!(screen::CGGetDisplaysWithRect),
+        "CGDisplayCreateUUIDFromDisplayID" => at!(screen::CGDisplayCreateUUIDFromDisplayID),
+        "CGDisplayGetDisplayIDFromUUID" => at!(screen::CGDisplayGetDisplayIDFromUUID),
+        "NSBitsPerSampleFromDepth" => at!(screen::NSBitsPerSampleFromDepth),
+        "NSBitsPerPixelFromDepth" => at!(screen::NSBitsPerPixelFromDepth),
+        "NSNumberOfColorComponents" => at!(screen::NSNumberOfColorComponents),
+        "NSPlanarFromDepth" => at!(screen::NSPlanarFromDepth),
         // The two lists differ only in whether a mirrored display is named,
         // and nothing here mirrors.
         "CGGetOnlineDisplayList" | "CGGetActiveDisplayList" => {
@@ -125,8 +152,17 @@ pub fn symbol(name: &str) -> Option<u64> {
         "LMGetKbdType" => at!(textinput::LMGetKbdType),
         "LMGetKbdLast" => at!(textinput::LMGetKbdLast),
         "UCKeyTranslate" => at!(textinput::UCKeyTranslate),
-        _ => return None,
+        other => return pasteboard_manager::symbol(other),
     })
+}
+
+/// Every name [`symbol`] answers, this crate's and the Pasteboard Manager's.
+pub fn names() -> Vec<&'static str> {
+    NAMES
+        .iter()
+        .copied()
+        .chain(pasteboard_manager::NAMES.iter().copied())
+        .collect()
 }
 
 pub const NAMES: &[&str] = &[
@@ -134,6 +170,26 @@ pub const NAMES: &[&str] = &[
     "CGMainDisplayID",
     "CGDisplayBounds",
     "CGDisplayScreenSize",
+    "CGDisplayIsMain",
+    "CGDisplayIsOnline",
+    "CGDisplayIsAsleep",
+    "CGDisplayMirrorsDisplay",
+    "CGDisplayModelNumber",
+    "CGDisplayVendorNumber",
+    "CGDisplaySerialNumber",
+    "CGDisplayCopyDisplayMode",
+    "CGDisplayModeGetRefreshRate",
+    "CGDisplayModeRelease",
+    "CGDisplayModeRetain",
+    "CGDisplayRegisterReconfigurationCallback",
+    "CGDisplayRemoveReconfigurationCallback",
+    "CGGetDisplaysWithRect",
+    "CGDisplayCreateUUIDFromDisplayID",
+    "CGDisplayGetDisplayIDFromUUID",
+    "NSBitsPerSampleFromDepth",
+    "NSBitsPerPixelFromDepth",
+    "NSNumberOfColorComponents",
+    "NSPlanarFromDepth",
     "CGGetOnlineDisplayList",
     "CGGetActiveDisplayList",
     "CGDisplayIDToOpenGLDisplayMask",
@@ -203,6 +259,13 @@ pub fn data_symbols() -> Vec<(String, u64)> {
             corefoundation::base::global_cell(symbol, object),
         ));
     }
+    // Doubles rather than pointers - see [`FONT_WEIGHTS`].
+    for (symbol, weight) in FONT_WEIGHTS {
+        out.push((
+            (*symbol).to_string(),
+            corefoundation::base::global_cell(symbol, weight.to_bits()),
+        ));
+    }
     out
 }
 
@@ -240,6 +303,16 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
     application::DID_CHANGE_SCREEN_PARAMETERS,
     view::FRAME_DID_CHANGE,
     view::BOUNDS_DID_CHANGE,
+    // Watched by a widget toolkit and posted by nothing here: there is no system
+    // colour change to follow, no live resize to bracket, and no colour panel.
+    // Published for the reason the note above gives - a name nothing posts is a
+    // gap, a name nothing defines is a segfault at address zero.
+    "NSSystemColorsDidChangeNotification",
+    "NSApplicationWillBecomeActiveNotification",
+    "NSWindowWillStartLiveResizeNotification",
+    "NSWindowDidEndLiveResizeNotification",
+    "NSColorPanelColorDidChangeNotification",
+    "NSTextInputContextKeyboardSelectionDidChangeNotification",
 ];
 
 /// The other AppKit string globals a program reads.
@@ -250,6 +323,17 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
 pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_NSCalibratedRGBColorSpace", "NSCalibratedRGBColorSpace"),
     ("_NSDeviceRGBColorSpace", "NSDeviceRGBColorSpace"),
+    // The other colour-space names, published so the *comparison* against them
+    // works. `-colorSpaceName` answers calibrated RGB for every colour here, so a
+    // caller testing against these finds "no" - which is the answer, and which it
+    // cannot reach at all while the symbol it is comparing with is address zero.
+    ("_NSCalibratedWhiteColorSpace", "NSCalibratedWhiteColorSpace"),
+    ("_NSCalibratedBlackColorSpace", "NSCalibratedBlackColorSpace"),
+    ("_NSDeviceWhiteColorSpace", "NSDeviceWhiteColorSpace"),
+    ("_NSDeviceBlackColorSpace", "NSDeviceBlackColorSpace"),
+    ("_NSDeviceCMYKColorSpace", "NSDeviceCMYKColorSpace"),
+    ("_NSNamedColorSpace", "NSNamedColorSpace"),
+    ("_NSPatternColorSpace", "NSPatternColorSpace"),
     ("_NSDeviceResolution", "NSDeviceResolution"),
     ("_NSForegroundColorAttributeName", "NSColor"),
     ("_NSAppearanceNameAqua", "NSAppearanceNameAqua"),
@@ -260,6 +344,59 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     // that writes with one and reads with the other has to name the same type.
     ("_NSPasteboardTypeString", "public.utf8-plain-text"),
     ("_NSStringPboardType", "public.utf8-plain-text"),
+    // The rest of the deprecated pasteboard types, whose values are their own
+    // names - which is what they are on a Mac, and what makes a program that
+    // writes with the old spelling and reads with it find its own data.
+    ("_NSFilenamesPboardType", "NSFilenamesPboardType"),
+    ("_NSFilesPromisePboardType", "NSFilesPromisePboardType"),
+    ("_NSURLPboardType", "NSURLPboardType"),
+    ("_NSColorPboardType", "NSColorPboardType"),
+    ("_NSFontPboardType", "NSFontPboardType"),
+    ("_NSRulerPboardType", "NSRulerPboardType"),
+    ("_NSTIFFPboardType", "NSTIFFPboardType"),
+    ("_NSPDFPboardType", "NSPDFPboardType"),
+    ("_NSPostScriptPboardType", "NSPostScriptPboardType"),
+    ("_NSRTFPboardType", "NSRTFPboardType"),
+    ("_NSRTFDPboardType", "NSRTFDPboardType"),
+    ("_NSHTMLPboardType", "NSHTMLPboardType"),
+    ("_NSTabularTextPboardType", "NSTabularTextPboardType"),
+    ("_NSVCardPboardType", "NSVCardPboardType"),
+    ("_NSInkTextPboardType", "NSInkTextPboardType"),
+    ("_NSFileContentsPboardType", "NSFileContentsPboardType"),
+    (
+        "_NSMultipleTextSelectionPboardType",
+        "NSMultipleTextSelectionPboardType",
+    ),
+    // The drag pasteboard's name, which is Apple's string and not the symbol's:
+    // a program naming the board by hand has to name the same one.
+    ("_NSPasteboardNameDrag", "Apple CFPasteboard drag"),
+    // Attributed-string attribute names. Each is shorter than its symbol, as
+    // `NSForegroundColorAttributeName` above already is.
+    ("_NSUnderlineStyleAttributeName", "NSUnderline"),
+    ("_NSUnderlineColorAttributeName", "NSUnderlineColor"),
+    ("_NSDocumentTypeDocumentAttribute", "DocumentType"),
+    ("_NSHTMLTextDocumentType", "NSHTML"),
+    ("_NSRTFTextDocumentType", "NSRTF"),
+    // The only named system image a program asks for here.
+    ("_NSImageNameApplicationIcon", "NSApplicationIcon"),
+];
+
+/// `NSFontWeight` globals, which are **`CGFloat` variables** and not pointers.
+///
+/// The difference matters: a guest loads the symbol's address and reads a
+/// *double* out of it, so publishing one as a string object hands it the bit
+/// pattern of a pointer as a font weight. The values are Apple's own, on the
+/// -1.0 to 1.0 scale `+systemFontOfSize:weight:` takes.
+const FONT_WEIGHTS: &[(&str, f64)] = &[
+    ("_NSFontWeightUltraLight", -0.8),
+    ("_NSFontWeightThin", -0.6),
+    ("_NSFontWeightLight", -0.4),
+    ("_NSFontWeightRegular", 0.0),
+    ("_NSFontWeightMedium", 0.23),
+    ("_NSFontWeightSemibold", 0.3),
+    ("_NSFontWeightBold", 0.4),
+    ("_NSFontWeightHeavy", 0.56),
+    ("_NSFontWeightBlack", 0.62),
 ];
 
 /// `NSAppKitVersionNumber`, which is a `double` variable rather than a pointer.

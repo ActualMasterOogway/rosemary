@@ -7,6 +7,7 @@
 
 use std::ffi::c_void;
 
+use corefoundation::base::CFTypeRef;
 use foundation::geometry::{CGFloat, NSRect};
 use objc::object::Id;
 use objc::sel::Sel;
@@ -192,6 +193,60 @@ unsafe extern "C" fn device_description(receiver: Id, _sel: Sel) -> Id {
     unsafe { corefoundation::api::CFAutorelease(dictionary) as Id }
 }
 
+/// `-[NSScreen depth]`, an `NSWindowDepth`.
+///
+/// An `NSWindowDepth` is not a bit count: it is an opaque value a caller passes to
+/// `NSBitsPerPixelFromDepth` and its relatives, and the constants are small
+/// integers AppKit assigns. This answers `NSWindowDepthTwentyfourBitRGB`, which is
+/// the 8-bits-per-sample RGB depth `-deviceDescription` already reports under
+/// `NSDeviceBitsPerSample` - the two have to agree, because a caller that reads
+/// both and finds them different concludes the screen changed between the calls.
+unsafe extern "C" fn depth(_receiver: Id, _sel: Sel) -> i32 {
+    WINDOW_DEPTH_24_BIT_RGB
+}
+
+/// `NSWindowDepthTwentyfourBitRGB`. AppKit's own value, because a caller compares
+/// against the constant it imported.
+const WINDOW_DEPTH_24_BIT_RGB: i32 = 0x208;
+
+/// `NSBitsPerSampleFromDepth`, `NSBitsPerPixelFromDepth`,
+/// `NSNumberOfColorComponents` and `NSPlanarFromDepth` for the one depth this
+/// runtime reports.
+///
+/// Published because the depth is opaque: a caller that has one can only learn
+/// anything about it through these, and an unbound one leaves it dividing by a
+/// zero it got from nowhere.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn NSBitsPerSampleFromDepth(_depth: i32) -> isize {
+    8
+}
+
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn NSBitsPerPixelFromDepth(_depth: i32) -> isize {
+    32
+}
+
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn NSNumberOfColorComponents(_space: Id) -> isize {
+    3
+}
+
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn NSPlanarFromDepth(_depth: i32) -> u8 {
+    0
+}
+
+/// `-[NSScreen colorSpace]`, an `NSColorSpace`.
+///
+/// Nil, and deliberately. A colour space here would have to be one this tree can
+/// convert *through*, and `crate::color`'s note says why there is no conversion:
+/// every colour in this runtime is already in the space its only consumer wants.
+/// Nil is the documented answer for a screen whose profile cannot be read, and a
+/// caller takes its "assume sRGB" branch - which is what the display is.
+unsafe extern "C" fn color_space(_receiver: Id, _sel: Sel) -> Id {
+    std::ptr::null_mut()
+}
+
 /// AppKit's user-space unit is 1/72 inch, so an unscaled display is 72 dpi by
 /// definition rather than by measurement.
 const POINTS_PER_INCH: f64 = 72.0;
@@ -229,6 +284,261 @@ pub unsafe extern "C" fn CGDisplayBounds(display: u32) -> NSRect {
         },
         // What CoreGraphics answers for a display id it does not know.
         None => NSRect::default(),
+    }
+}
+
+/// `boolean_t CGDisplayIsMain(CGDirectDisplayID)`
+///
+/// The primary display, which is the one SDL lists first.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayIsMain(display: u32) -> u32 {
+    (display == sdl3::video::primary_display()) as u32
+}
+
+/// `boolean_t CGDisplayIsOnline(CGDirectDisplayID)`
+///
+/// Whether SDL still lists it. A display unplugged between two calls is exactly
+/// the case the question exists for.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayIsOnline(display: u32) -> u32 {
+    sdl3::video::displays().contains(&display) as u32
+}
+
+/// `boolean_t CGDisplayIsAsleep(CGDirectDisplayID)`
+///
+/// False: a display this process can enumerate is one SDL is talking to, and
+/// there is no sleep state to read. Answering true would have a caller skip the
+/// screen entirely.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayIsAsleep(_display: u32) -> u32 {
+    0
+}
+
+/// `CGDirectDisplayID CGDisplayMirrorsDisplay(CGDirectDisplayID)`
+///
+/// `kCGNullDirectDisplay`, because nothing here mirrors - the same fact
+/// [`CGGetOnlineDisplayList`] already relies on to answer for both display lists.
+/// A caller uses this to drop a mirror from its own list, and zero keeps every
+/// display in it.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayMirrorsDisplay(_display: u32) -> u32 {
+    0
+}
+
+/// `uint32_t CGDisplayModelNumber(CGDirectDisplayID)`, and the vendor and serial
+/// numbers beside it.
+///
+/// `kDisplayProductIDGeneric` and zeroes. These come from a display's EDID, which
+/// SDL does not expose, and a caller uses them to tell two monitors apart or to
+/// key a saved window position on - so an invented value that *changed* between
+/// runs would be worse than a constant one. The display id is what distinguishes
+/// screens here, and a caller already has it.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayModelNumber(_display: u32) -> u32 {
+    // `kDisplayProductIDGeneric`, the value CoreGraphics itself reports for a
+    // display whose product id it could not read.
+    0x717
+}
+
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayVendorNumber(_display: u32) -> u32 {
+    // `kDisplayVendorIDUnknown`.
+    0
+}
+
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplaySerialNumber(_display: u32) -> u32 {
+    0
+}
+
+/// A `CGDisplayModeRef`, which is the display id in a box.
+///
+/// `CGDisplayCopyDisplayMode` hands out a reference the caller releases, and the
+/// only thing asked of it here is the refresh rate - so the mode carries the
+/// display it came from and reads the rate when asked, for the reason the module
+/// note gives about caching.
+#[repr(C)]
+struct DisplayMode {
+    display: u32,
+}
+
+/// `CGDisplayModeRef CGDisplayCopyDisplayMode(CGDirectDisplayID)`
+///
+/// The handle is not an Objective-C object, so it is registered as an opaque
+/// CoreFoundation type: a caller releases it with `CGDisplayModeRelease`, and may
+/// pass it to `CFRetain`.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayCopyDisplayMode(display: u32) -> *const c_void {
+    if !sdl3::video::displays().contains(&display) {
+        return std::ptr::null();
+    }
+    let mode = Box::leak(Box::new(DisplayMode { display }));
+    let handle = mode as *const DisplayMode as *const c_void;
+    corefoundation::base::note_opaque(handle);
+    handle
+}
+
+/// `double CGDisplayModeGetRefreshRate(CGDisplayModeRef)`
+///
+/// Zero for a mode this runtime did not make, and zero when SDL reports no rate -
+/// which is what CoreGraphics answers for a display whose rate is not fixed, and
+/// the value a caller already has to handle.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayModeGetRefreshRate(mode: *const c_void) -> f64 {
+    if mode.is_null() || !corefoundation::base::is_opaque(mode) {
+        return 0.0;
+    }
+    // SAFETY: an opaque handle this module made, whose layout is `DisplayMode`.
+    let display = unsafe { (*(mode as *const DisplayMode)).display };
+    sdl3::video::display_refresh_rate(display).unwrap_or(0.0) as f64
+}
+
+/// `void CGDisplayModeRelease(CGDisplayModeRef)` and its retain.
+///
+/// A no-op: the handle is leaked for the life of the process, as every opaque
+/// handle in this tree is - see `corefoundation::base::note_opaque`.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayModeRelease(_mode: *const c_void) {}
+
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayModeRetain(mode: *const c_void) -> *const c_void {
+    mode
+}
+
+/// `CGError CGDisplayRegisterReconfigurationCallback(CGDisplayReconfigurationCallBack,
+/// void *)`
+///
+/// Accepted and never called. The callback fires when a display is added, removed
+/// or resized, and this runtime has no display-reconfiguration notification to
+/// hang it on - so a caller registers one, keeps its own cached screen list, and
+/// refreshes it the next time it asks about a screen instead. Refusing the
+/// registration is the worse answer: a caller reads that as "this process cannot
+/// track displays" and some give up on multi-monitor support entirely.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayRegisterReconfigurationCallback(
+    _callback: *const c_void,
+    _context: *mut c_void,
+) -> i32 {
+    CG_SUCCESS
+}
+
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayRemoveReconfigurationCallback(
+    _callback: *const c_void,
+    _context: *mut c_void,
+) -> i32 {
+    CG_SUCCESS
+}
+
+/// `CGError CGGetDisplaysWithRect(CGRect, uint32_t maxDisplays,
+/// CGDirectDisplayID *displays, uint32_t *matchingDisplayCount)`
+///
+/// The displays a rectangle touches, which is how a caller works out where to put
+/// a window it has a position for. Measured in CoreGraphics' top-left space, so
+/// the comparison is against [`CGDisplayBounds`] and not `-[NSScreen frame]`.
+///
+/// # Safety
+///
+/// As [`CGGetOnlineDisplayList`].
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGGetDisplaysWithRect(
+    rect: NSRect,
+    max: u32,
+    list: *mut u32,
+    count: *mut u32,
+) -> i32 {
+    let matching: Vec<u32> = sdl3::video::displays()
+        .into_iter()
+        .filter(|display| {
+            // SAFETY: a display id from SDL's own list.
+            let bounds = unsafe { CGDisplayBounds(*display) };
+            // Touching, not containing: a window straddling two screens is on
+            // both, which is what a caller asking this has to know.
+            rect.origin.x < bounds.origin.x + bounds.size.width
+                && bounds.origin.x < rect.origin.x + rect.size.width
+                && rect.origin.y < bounds.origin.y + bounds.size.height
+                && bounds.origin.y < rect.origin.y + rect.size.height
+        })
+        .collect();
+    if list.is_null() {
+        if count.is_null() {
+            return CG_ILLEGAL_ARGUMENT;
+        }
+        // SAFETY: the caller states it is writable.
+        unsafe { count.write(matching.len() as u32) };
+        return CG_SUCCESS;
+    }
+    let room = (max as usize).min(matching.len());
+    // SAFETY: the caller states `list` holds `max` ids.
+    unsafe { std::ptr::copy_nonoverlapping(matching.as_ptr(), list, room) };
+    if !count.is_null() {
+        // The number written, for the reason `CGGetOnlineDisplayList` gives.
+        // SAFETY: the caller states it is writable.
+        unsafe { count.write(room as u32) };
+    }
+    CG_SUCCESS
+}
+
+/// `CFUUIDRef CGDisplayCreateUUIDFromDisplayID(CGDirectDisplayID)`
+///
+/// A display's UUID is how a program remembers *which* monitor a window was on
+/// across runs, because a display id is only stable while the display stays
+/// plugged in. On a Mac it is derived from the EDID; SDL does not expose one, so
+/// this derives it from the display id instead.
+///
+/// What that costs is stated rather than hidden: the UUID is stable for as long as
+/// the display keeps its id, which is the whole of a run, and is **not** stable
+/// across a replug or a reboot the way Apple's is. A program using it to key a
+/// saved window position finds its own key again within the session and starts
+/// from the default next time - which is the behaviour a first run on a new
+/// monitor already has.
+///
+/// Version 4 in the variant and version nibbles, so a caller parsing it finds a
+/// well-formed UUID rather than something that fails its own validation.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayCreateUUIDFromDisplayID(display: u32) -> CFTypeRef {
+    if !sdl3::video::displays().contains(&display) {
+        return std::ptr::null();
+    }
+    let mut bytes = [0u8; 16];
+    // A fixed prefix so the UUID reads as this runtime's rather than looking like
+    // a real display's, and the id in the last four bytes.
+    bytes[..8].copy_from_slice(b"ROSETTA3");
+    bytes[12..].copy_from_slice(&display.to_be_bytes());
+    // Version 4, variant RFC 4122.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    // Interned, so two calls for one display hand back the same object - which is
+    // what `CFEqual` on two of them has to agree with. A `Create` hands over a
+    // reference, so this takes one for the caller to release.
+    let uuid = corefoundation::uuid::constant(bytes);
+    // SAFETY: an object this crate's UUID table keeps for the process.
+    unsafe { corefoundation::api::CFRetain(uuid) }
+}
+
+/// `CGDirectDisplayID CGDisplayGetDisplayIDFromUUID(CFUUIDRef)`
+///
+/// The inverse of [`CGDisplayCreateUUIDFromDisplayID`], which reads the id back
+/// out of the bytes it put there. `kCGNullDirectDisplay` for a UUID this runtime
+/// did not make, or for a display that is no longer attached - the second being
+/// exactly what a program restoring a saved window position needs to be told.
+///
+/// # Safety
+///
+/// `uuid` is null or an object this runtime allocated.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayGetDisplayIDFromUUID(uuid: CFTypeRef) -> u32 {
+    // SAFETY: the caller's obligation.
+    let Some(bytes) = (unsafe { corefoundation::uuid::bytes_of(uuid) }) else {
+        return 0;
+    };
+    if &bytes[..6] != b"ROSETT" {
+        return 0;
+    }
+    let display = u32::from_be_bytes(bytes[12..].try_into().expect("four bytes"));
+    match sdl3::video::displays().contains(&display) {
+        true => display,
+        false => 0,
     }
 }
 
@@ -349,6 +659,8 @@ pub(crate) fn install() {
         "visibleFrame" => visible_frame, c"{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8";
         "backingScaleFactor" => backing_scale_factor, c"d16@0:8";
         "maximumFramesPerSecond" => maximum_frames_per_second, c"q16@0:8";
+        "depth" => depth, c"i16@0:8";
+        "colorSpace" => color_space, c"@16@0:8";
         "deviceDescription" => device_description, c"@16@0:8";
     });
 }
