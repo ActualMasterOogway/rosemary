@@ -122,6 +122,95 @@ pub(crate) fn general_text() -> Option<Vec<u8>> {
         .and_then(|entry| entry.data.clone())
 }
 
+/// The board `PasteboardCreate(kPasteboardClipboard)` means.
+///
+/// The same board as `+[NSPasteboard generalPasteboard]`, because on a Mac the
+/// two APIs are two vocabularies for one clipboard - a program that copies
+/// through Cocoa and pastes through the Pasteboard Manager has to see its own
+/// text. See [`crate::pasteboard_manager`].
+pub(crate) const CLIPBOARD: &[u8] = GENERAL.as_bytes();
+
+/// The flavour types a named board currently holds.
+///
+/// The general board is synchronised with the desktop's clipboard first, for the
+/// reason [`sync_system_text`] gives: a read has to see what another application
+/// copied.
+pub(crate) fn flavors(name: &[u8]) -> Vec<Vec<u8>> {
+    let general = name == CLIPBOARD;
+    let receiver = named(name);
+    let mut all = boards().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(board) = board_mut(&mut all, receiver) else {
+        return Vec::new();
+    };
+    if general {
+        sync_system_text(board);
+    }
+    board.entries.iter().map(|entry| entry.ty.clone()).collect()
+}
+
+/// One flavour's bytes, or `None` for a flavour the board does not hold.
+pub(crate) fn flavor_data(name: &[u8], ty: &[u8]) -> Option<Vec<u8>> {
+    let general = name == CLIPBOARD;
+    let receiver = named(name);
+    let mut all = boards().lock().unwrap_or_else(|e| e.into_inner());
+    let board = board_mut(&mut all, receiver)?;
+    if general {
+        sync_system_text(board);
+    }
+    board
+        .entries
+        .iter()
+        .find(|entry| entry.ty == ty)
+        .and_then(|entry| entry.data.clone())
+}
+
+/// Write one flavour, replacing whatever that flavour held.
+pub(crate) fn put_flavor(name: &[u8], ty: &[u8], bytes: Vec<u8>) {
+    let general = name == CLIPBOARD;
+    let receiver = named(name);
+    let mut all = boards().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(board) = board_mut(&mut all, receiver) else {
+        return;
+    };
+    let entry = entry_mut(board, ty);
+    objc::arc::release(entry.property_list as Id);
+    entry.property_list = 0;
+    entry.data = Some(bytes.clone());
+    board.object_strings.clear();
+    board.change_count += 1;
+    // Out to the desktop as well, so another application can paste it - the same
+    // thing `-setData:forType:` does for the same board and the same flavour.
+    if general && ty == STRING.as_bytes() {
+        let _ = sdl3::clipboard::set_text(&bytes);
+    }
+}
+
+/// Empty a named board, and return its new change count.
+pub(crate) fn clear_named(name: &[u8]) -> isize {
+    let general = name == CLIPBOARD;
+    let receiver = named(name);
+    let mut all = boards().lock().unwrap_or_else(|e| e.into_inner());
+    let count = board_mut(&mut all, receiver).map_or(0, clear);
+    if general {
+        let _ = sdl3::clipboard::set_text(b"");
+    }
+    count
+}
+
+/// A named board's change count, after taking in anything the desktop changed.
+pub(crate) fn change_count_of(name: &[u8]) -> isize {
+    let general = name == CLIPBOARD;
+    let receiver = named(name);
+    let mut all = boards().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(board) = board_mut(&mut all, receiver) else {
+        return 0;
+    };
+    if general {
+        sync_system_text(board);
+    }
+    board.change_count
+}
+
 fn named(name: &[u8]) -> Id {
     let mut all = boards().lock().unwrap_or_else(|e| e.into_inner());
     if let Some((_, board)) = all.boards.iter().find(|(n, _)| n == name) {
