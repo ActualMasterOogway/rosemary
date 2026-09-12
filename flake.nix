@@ -25,12 +25,11 @@
 
           toolchain = pkgs.rust-bin.stable."1.98.0".default.override {
             extensions = [ "rust-src" "rust-analyzer" ];
-            targets = [ "x86_64-unknown-linux-musl" ]
-              ++ lib.optional pkgs.stdenv.isDarwin "x86_64-apple-darwin";
+            targets = lib.optional pkgs.stdenv.hostPlatform.isDarwin "x86_64-apple-darwin";
           };
 
           runtimeLibs = [ pkgs.sdl3 pkgs.curl pkgs.zlib ]
-            ++ lib.optionals pkgs.stdenv.isLinux [
+            ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               pkgs.libglvnd
               pkgs.libGLU
               pkgs.vulkan-loader
@@ -51,9 +50,9 @@
 
             buildInputs = runtimeLibs;
 
-            LD_LIBRARY_PATH = lib.optionalString pkgs.stdenv.isLinux
+            LD_LIBRARY_PATH = lib.optionalString pkgs.stdenv.hostPlatform.isLinux
               (lib.makeLibraryPath runtimeLibs);
-            DYLD_FALLBACK_LIBRARY_PATH = lib.optionalString pkgs.stdenv.isDarwin
+            DYLD_FALLBACK_LIBRARY_PATH = lib.optionalString pkgs.stdenv.hostPlatform.isDarwin
               (lib.makeLibraryPath runtimeLibs);
           };
         });
