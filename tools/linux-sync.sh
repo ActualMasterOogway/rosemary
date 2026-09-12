@@ -29,7 +29,7 @@
 #     container exec r3debian sh -c 'apt-get update -qq && \
 #         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
 #         build-essential curl pkg-config libcurl4-openssl-dev zlib1g-dev libsdl3-dev \\
-#         libglu1-mesa'
+#         libglu1-mesa libvulkan1 mesa-vulkan-drivers'
 #     container exec r3debian sh -c 'curl --proto "=https" --tlsv1.2 -sSf \
 #         https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.98.0 --profile minimal'
 #     tools/linux-sync.sh --vendor
@@ -41,6 +41,8 @@
 # it. `libglu1-mesa` does not come with it: `gluOrtho2D` is in Apple's OpenGL
 # framework and in a library of its own here, and a guest's `glu*` imports go
 # unresolved without it. See `darwin::load_host_libraries`.
+# `libvulkan1` is Metal's loader and `mesa-vulkan-drivers` supplies an ICD,
+# including lavapipe for the container's headless adapter-discovery tests.
 #
 # There is no display in the container. SDL runs headless by default; see the
 # `SDL_*` variables set below.
