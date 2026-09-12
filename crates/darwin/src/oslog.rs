@@ -121,7 +121,11 @@ impl Item<'_> {
     fn double(&self) -> f64 {
         match self.payload.len() {
             4 => f32::from_le_bytes(self.payload[..4].try_into().unwrap_or([0; 4])) as f64,
-            _ => f64::from_le_bytes(self.payload[..8.min(self.payload.len())].try_into().unwrap_or([0; 8])),
+            _ => f64::from_le_bytes(
+                self.payload[..8.min(self.payload.len())]
+                    .try_into()
+                    .unwrap_or([0; 8]),
+            ),
         }
     }
 
@@ -289,7 +293,10 @@ unsafe fn format_message(format: *const c_char, buffer: *const u8, size: u32) ->
 /// # Safety
 ///
 /// Both arguments are null or NUL-terminated strings.
-unsafe extern "C" fn os_log_create(subsystem: *const c_char, category: *const c_char) -> *mut c_void {
+unsafe extern "C" fn os_log_create(
+    subsystem: *const c_char,
+    category: *const c_char,
+) -> *mut c_void {
     // SAFETY: the caller's obligation.
     let (subsystem, category) = unsafe { (text(subsystem), text(category)) };
     let log: &'static Log = Box::leak(Box::new(Log {
@@ -336,7 +343,10 @@ unsafe extern "C" fn _os_log_impl(
         log_type::ERROR => "error",
         log_type::DEBUG => "debug",
         log_type::INFO => "info",
-        log_type::DEFAULT | _ => "",
+        log_type::DEFAULT => "",
+        // A level this module does not name reads as the default one: an
+        // unadorned line, rather than one labelled with a number.
+        _ => "",
     };
     // The subsystem and category when there are any, because that is how a reader
     // tells one of a program's logging categories from another - and nothing
@@ -469,7 +479,13 @@ mod tests {
         let wide = buffer(&[&(-5i64).to_le_bytes()]);
         assert_eq!(render(c"%lld", &wide), "-5");
         let hex = buffer(&[&255u32.to_le_bytes()]);
-        assert_eq!(render(c"%x/%X", &buffer(&[&255u32.to_le_bytes(), &255u32.to_le_bytes()])), "ff/FF");
+        assert_eq!(
+            render(
+                c"%x/%X",
+                &buffer(&[&255u32.to_le_bytes(), &255u32.to_le_bytes()])
+            ),
+            "ff/FF"
+        );
         assert_eq!(render(c"%#x", &hex), "ff");
     }
 

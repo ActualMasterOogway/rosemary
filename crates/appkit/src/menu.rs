@@ -419,7 +419,6 @@ unsafe extern "C" fn ignored_flag(_receiver: Id, _sel: Sel, _flag: u8) {}
 
 unsafe extern "C" fn ignored_object(_receiver: Id, _sel: Sel, _object: Id) {}
 
-
 pub(crate) fn install() {
     let menu = objc::class::lookup(c"NSMenu").expect("declared before its methods");
     methods!(menu, {
@@ -554,7 +553,11 @@ mod tests {
             add_item(parent, objc::sel::get("addItem:"), plain);
             add_item(parent, objc::sel::get("addItem:"), holder);
             assert_eq!(
-                index_of_item_with_submenu(parent, objc::sel::get("indexOfItemWithSubmenu:"), child),
+                index_of_item_with_submenu(
+                    parent,
+                    objc::sel::get("indexOfItemWithSubmenu:"),
+                    child
+                ),
                 1
             );
             // A submenu this menu does not hold is -1, not 0.

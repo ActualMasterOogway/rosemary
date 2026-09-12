@@ -129,7 +129,8 @@ unsafe fn current(object: Id, key_path: &[u8]) -> Option<Id> {
     let path = crate::string::from_str(&String::from_utf8_lossy(key_path));
     // SAFETY: `-valueForKeyPath:` is `id (id, SEL, NSString *)`.
     let value = unsafe {
-        let f: unsafe extern "C" fn(Id, Sel, Id) -> Id = std::mem::transmute(method.implementation());
+        let f: unsafe extern "C" fn(Id, Sel, Id) -> Id =
+            std::mem::transmute(method.implementation());
         let value = f(object, sel, path);
         corefoundation::api::CFRelease(path as corefoundation::base::CFTypeRef);
         value
@@ -278,7 +279,10 @@ pub const KEYS: &[(&str, &str)] = &[
     ("_NSKeyValueChangeNewKey", "new"),
     ("_NSKeyValueChangeOldKey", "old"),
     ("_NSKeyValueChangeIndexesKey", "indexes"),
-    ("_NSKeyValueChangeNotificationIsPriorKey", "notificationIsPrior"),
+    (
+        "_NSKeyValueChangeNotificationIsPriorKey",
+        "notificationIsPrior",
+    ),
 ];
 
 #[cfg(test)]
@@ -320,7 +324,8 @@ mod tests {
 
     fn observer_object() -> Id {
         crate::bootstrap();
-        let class = corefoundation::base::register(c"R3KvoObserver", None, size_of::<usize>(), false);
+        let class =
+            corefoundation::base::register(c"R3KvoObserver", None, size_of::<usize>(), false);
         class.replace_method(
             objc::sel::get("observeValueForKeyPath:ofObject:change:context:"),
             observed as *const std::ffi::c_void,
@@ -331,10 +336,7 @@ mod tests {
 
     fn plain_object() -> Id {
         crate::bootstrap();
-        objc::object::create_instance(
-            objc::class::lookup(c"NSObject").expect("NSObject"),
-            0,
-        )
+        objc::object::create_instance(objc::class::lookup(c"NSObject").expect("NSObject"), 0)
     }
 
     /// The registration fires on `-didChangeValueForKey:` and stops firing once

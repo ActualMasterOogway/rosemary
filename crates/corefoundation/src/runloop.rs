@@ -721,7 +721,11 @@ mod tests {
             "an observer is something to service, so the mode is not finished"
         );
         let seen = seen();
-        assert_eq!(seen.first(), Some(&activity::ENTRY), "entry first: {seen:?}");
+        assert_eq!(
+            seen.first(),
+            Some(&activity::ENTRY),
+            "entry first: {seen:?}"
+        );
         assert_eq!(seen.last(), Some(&activity::EXIT), "exit last: {seen:?}");
         let first_turn: Vec<u32> = seen
             .iter()
@@ -773,8 +777,20 @@ mod tests {
         }
         let loop_ = Arc::new(RunLoop::new());
         // Added high-order first, so the ordering cannot come from insertion.
-        let high = new_observer(activity::ENTRY, false, 10, Some(second as ObserverCallback), 0);
-        let low = new_observer(activity::ENTRY, false, -10, Some(first as ObserverCallback), 0);
+        let high = new_observer(
+            activity::ENTRY,
+            false,
+            10,
+            Some(second as ObserverCallback),
+            0,
+        );
+        let low = new_observer(
+            activity::ENTRY,
+            false,
+            -10,
+            Some(first as ObserverCallback),
+            0,
+        );
         loop_.add_observer(&high, DEFAULT_MODE);
         loop_.add_observer(&low, DEFAULT_MODE);
         loop_.run_in_mode(DEFAULT_MODE, 0.0, false);

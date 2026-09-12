@@ -1540,10 +1540,7 @@ impl crate::exec::Execution for Vm {
     /// `rewrite_refs` pass: a send from an emulated image is intercepted and
     /// `dispatch` translates the receiver, so the guest's own class references
     /// never have to hold a host pointer.
-    fn realize_loaded_objc(
-        &self,
-        report: &machish::report::LinkReport,
-    ) -> Result<(), VmError> {
+    fn realize_loaded_objc(&self, report: &machish::report::LinkReport) -> Result<(), VmError> {
         match self.objc() {
             // Registered classes: extend that runtime, selectors included.
             Some(_) => Vm::register_loaded_objc(self, report),

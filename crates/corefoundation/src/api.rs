@@ -1570,8 +1570,7 @@ pub unsafe extern "C" fn CFArrayContainsValue(
     contents
         .values
         .get(start..end)
-        .is_some_and(|slice| slice.iter().any(|v| contents.policy.equal(*v, value)))
-        as Boolean
+        .is_some_and(|slice| slice.iter().any(|v| contents.policy.equal(*v, value))) as Boolean
 }
 
 /// `void CFArrayAppendArray(CFMutableArrayRef, CFArrayRef, CFRange)`, with the
@@ -2332,8 +2331,7 @@ pub struct CFRunLoopObserverContext {
     pub info: *mut std::ffi::c_void,
     pub retain: Option<unsafe extern "C" fn(*const std::ffi::c_void) -> *const std::ffi::c_void>,
     pub release: Option<unsafe extern "C" fn(*const std::ffi::c_void)>,
-    pub copy_description:
-        Option<unsafe extern "C" fn(*const std::ffi::c_void) -> CFTypeRef>,
+    pub copy_description: Option<unsafe extern "C" fn(*const std::ffi::c_void) -> CFTypeRef>,
 }
 
 pub unsafe extern "C" fn CFRunLoopObserverInvalidate(observer: CFTypeRef) {

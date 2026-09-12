@@ -80,7 +80,11 @@ fn register<T: 'static>(name: &'static std::ffi::CStr) -> &'static Class {
 /// class table holds the pointer for as long as the class, which is forever.
 fn leaked_concrete_name(name: &std::ffi::CStr) -> &'static std::ffi::CStr {
     let text = format!("__NSCF{}", name.to_string_lossy().trim_start_matches("NS"));
-    Box::leak(std::ffi::CString::new(text).expect("a class name with no NUL").into_boxed_c_str())
+    Box::leak(
+        std::ffi::CString::new(text)
+            .expect("a class name with no NUL")
+            .into_boxed_c_str(),
+    )
 }
 
 /// Allocate an instance of `class` holding `contents`.
@@ -173,8 +177,12 @@ impl NumberFormat {
                 true => format!("{}", value as i64),
                 false => trimmed(value),
             },
-            // Decimal, and anything this tree does not distinguish.
-            s::DECIMAL | _ => match integral {
+            // Decimal, and anything this tree does not distinguish from it.
+            s::DECIMAL => match integral {
+                true => grouped(value, Some(0)),
+                false => grouped(value, None),
+            },
+            _ => match integral {
                 true => grouped(value, Some(0)),
                 false => grouped(value, None),
             },
@@ -219,7 +227,10 @@ fn trimmed(value: f64) -> String {
     match text.contains('e') || text.contains('E') {
         // Rust's shortest form goes exponential for very large and very small
         // magnitudes; a number formatter does not.
-        true => format!("{value:.6}").trim_end_matches('0').trim_end_matches('.').to_string(),
+        true => format!("{value:.6}")
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string(),
         false => text,
     }
 }
@@ -281,14 +292,19 @@ impl DateFormat {
             date_style::MEDIUM => "MMM d, y",
             date_style::LONG => "MMMM d, y",
             date_style::FULL => "EEEE, MMMM d, y",
-            date_style::NONE | _ => "",
+            date_style::NONE => "",
+            // A style this tree does not know is treated as none, for the reason
+            // the module note gives: a caller gets no date part rather than one
+            // written in a shape that was guessed at.
+            _ => "",
         };
         let time = match self.time {
             date_style::SHORT => "h:mm a",
             date_style::MEDIUM => "h:mm:ss a",
             date_style::LONG => "h:mm:ss a z",
             date_style::FULL => "h:mm:ss a zzzz",
-            date_style::NONE | _ => "",
+            // As above: no time part.
+            _ => "",
         };
         match (date.is_empty(), time.is_empty()) {
             (false, false) => format!("{date}, {time}"),
@@ -309,7 +325,9 @@ impl DateFormat {
             date_style::MEDIUM => format!("{month_short} {}, {year}", tm.tm_mday),
             date_style::LONG => format!("{month_long} {}, {year}", tm.tm_mday),
             date_style::FULL => format!("{day_long}, {month_long} {}, {year}", tm.tm_mday),
-            date_style::NONE | _ => String::new(),
+            date_style::NONE => String::new(),
+            // As in `pattern`: an unknown style is none.
+            _ => String::new(),
         };
         // Twelve-hour, because every English style is: midnight is `12 AM` and
         // noon is `12 PM`, not `0` and `12`.
@@ -326,7 +344,8 @@ impl DateFormat {
             date_style::MEDIUM | date_style::LONG | date_style::FULL => {
                 format!("{hour}:{:02}:{:02} {half}", tm.tm_min, tm.tm_sec)
             }
-            date_style::NONE | _ => String::new(),
+            // As above: no time part.
+            _ => String::new(),
         };
         match (date.is_empty(), time.is_empty()) {
             (false, false) => format!("{date} at {time}"),
@@ -385,9 +404,8 @@ fn first_weekday(country: &str) -> CFIndex {
 
 fn number_class() -> &'static Class {
     static CLASS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    let p = *CLASS.get_or_init(|| {
-        objc::class::ptr(register::<NumberFormat>(c"NSNumberFormatter")) as usize
-    });
+    let p = *CLASS
+        .get_or_init(|| objc::class::ptr(register::<NumberFormat>(c"NSNumberFormatter")) as usize);
     // SAFETY: a class registered above and kept for the process.
     unsafe { objc::class::from_ptr(p as *const Class).expect("a number formatter class") }
 }
@@ -402,8 +420,7 @@ fn date_class() -> &'static Class {
 
 fn calendar_class() -> &'static Class {
     static CLASS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    let p =
-        *CLASS.get_or_init(|| objc::class::ptr(register::<Calendar>(c"NSCalendar")) as usize);
+    let p = *CLASS.get_or_init(|| objc::class::ptr(register::<Calendar>(c"NSCalendar")) as usize);
     // SAFETY: a class registered above and kept for the process.
     unsafe { objc::class::from_ptr(p as *const Class).expect("a calendar class") }
 }
@@ -423,7 +440,7 @@ pub mod cf {
     use corefoundation::base::{CFIndex, CFTypeRef};
     use objc::object::Id;
 
-    use super::{Calendar, DateFormat, NumberFormat, MONTHS, WEEKDAYS};
+    use super::{Calendar, DateFormat, MONTHS, NumberFormat, WEEKDAYS};
 
     /// `CFNumberFormatterRef CFNumberFormatterCreate(CFAllocatorRef,
     /// CFLocaleRef, CFNumberFormatterStyle)`
@@ -499,8 +516,7 @@ pub mod cf {
         let Some(value) = (unsafe { corefoundation::collections::number(number) }) else {
             return std::ptr::null();
         };
-        crate::string::from_str(&format.format(value.as_f64(), !value.is_float()))
-            as CFTypeRef
+        crate::string::from_str(&format.format(value.as_f64(), !value.is_float())) as CFTypeRef
     }
 
     /// `CFStringRef CFNumberFormatterCreateStringWithValue(CFAllocatorRef,
@@ -570,7 +586,8 @@ pub mod cf {
     /// `formatter` is null or an object this runtime allocated.
     unsafe extern "C" fn CFDateFormatterGetFormat(formatter: CFTypeRef) -> CFTypeRef {
         // SAFETY: the caller's obligation.
-        let Some(format) = (unsafe { super::contents::<DateFormat>(formatter, super::date_class()) })
+        let Some(format) =
+            (unsafe { super::contents::<DateFormat>(formatter, super::date_class()) })
         else {
             return std::ptr::null();
         };
@@ -591,7 +608,8 @@ pub mod cf {
         date: CFTypeRef,
     ) -> CFTypeRef {
         // SAFETY: the caller's obligation.
-        let Some(format) = (unsafe { super::contents::<DateFormat>(formatter, super::date_class()) })
+        let Some(format) =
+            (unsafe { super::contents::<DateFormat>(formatter, super::date_class()) })
         else {
             return std::ptr::null();
         };
@@ -714,13 +732,11 @@ pub mod cf {
     const MONTH_SYMBOLS: &str = "kCFDateFormatterMonthSymbols";
     const SHORT_MONTH_SYMBOLS: &str = "kCFDateFormatterShortMonthSymbols";
     const STANDALONE_MONTH_SYMBOLS: &str = "kCFDateFormatterStandaloneMonthSymbols";
-    const SHORT_STANDALONE_MONTH_SYMBOLS: &str =
-        "kCFDateFormatterShortStandaloneMonthSymbols";
+    const SHORT_STANDALONE_MONTH_SYMBOLS: &str = "kCFDateFormatterShortStandaloneMonthSymbols";
     const WEEKDAY_SYMBOLS: &str = "kCFDateFormatterWeekdaySymbols";
     const SHORT_WEEKDAY_SYMBOLS: &str = "kCFDateFormatterShortWeekdaySymbols";
     const STANDALONE_WEEKDAY_SYMBOLS: &str = "kCFDateFormatterStandaloneWeekdaySymbols";
-    const SHORT_STANDALONE_WEEKDAY_SYMBOLS: &str =
-        "kCFDateFormatterShortStandaloneWeekdaySymbols";
+    const SHORT_STANDALONE_WEEKDAY_SYMBOLS: &str = "kCFDateFormatterShortStandaloneWeekdaySymbols";
     const AM_SYMBOL: &str = "kCFDateFormatterAMSymbol";
     const PM_SYMBOL: &str = "kCFDateFormatterPMSymbol";
 
@@ -848,7 +864,10 @@ mod tests {
     fn the_patterns_name_each_style() {
         let pattern = |date, time| DateFormat { date, time }.pattern();
         assert_eq!(pattern(date_style::SHORT, date_style::NONE), "M/d/yy");
-        assert_eq!(pattern(date_style::FULL, date_style::NONE), "EEEE, MMMM d, y");
+        assert_eq!(
+            pattern(date_style::FULL, date_style::NONE),
+            "EEEE, MMMM d, y"
+        );
         assert_eq!(pattern(date_style::NONE, date_style::SHORT), "h:mm a");
         assert_eq!(
             pattern(date_style::MEDIUM, date_style::SHORT),

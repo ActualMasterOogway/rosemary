@@ -113,8 +113,7 @@ pub unsafe extern "C" fn atexit_b(block: *mut c_void) -> c_int {
         None => {
             // SAFETY: the caller states this is a block literal, whose `flags`
             // are at a fixed offset by the Block ABI.
-            let flags =
-                unsafe { ((block as u64 + BLOCK_FLAGS_OFFSET) as *const u32).read() };
+            let flags = unsafe { ((block as u64 + BLOCK_FLAGS_OFFSET) as *const u32).read() };
             if flags & BLOCK_IS_GLOBAL == 0 {
                 return -1;
             }

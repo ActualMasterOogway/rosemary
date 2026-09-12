@@ -55,6 +55,12 @@ pub const DID_EXIT_FULL_SCREEN: &str = "NSWindowDidExitFullScreenNotification";
 /// Posted when the window moves to a screen of a different backing scale, which
 /// is what a guest recomputes its drawable size from.
 pub const DID_CHANGE_BACKING_PROPERTIES: &str = "NSWindowDidChangeBackingPropertiesNotification";
+/// The pair that brackets a user-driven resize. Published and not yet posted:
+/// nothing here distinguishes a drag of the window's edge from a programmatic
+/// resize, so a toolkit that batches work between the two does it for every resize
+/// instead - which is the slower path and not the wrong one.
+pub const WILL_START_LIVE_RESIZE: &str = "NSWindowWillStartLiveResizeNotification";
+pub const DID_END_LIVE_RESIZE: &str = "NSWindowDidEndLiveResizeNotification";
 
 /// `NSWindowStyleMask`.
 mod style {

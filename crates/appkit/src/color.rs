@@ -43,7 +43,14 @@ pub unsafe fn components(color: Id) -> (f64, f64, f64, f64) {
     (c.red, c.green, c.blue, c.alpha)
 }
 
+/// A colour object holding these components, owned by nobody: the caller gets it
+/// back autoreleased, as every `+colorWith...` constructor's result is.
 fn make(red: f64, green: f64, blue: f64, alpha: f64) -> Id {
+    objc::arc::autorelease(allocate(red, green, blue, alpha))
+}
+
+/// A colour object with a reference this function keeps.
+fn allocate(red: f64, green: f64, blue: f64, alpha: f64) -> Id {
     let class = objc::class::lookup(c"NSColor").expect("declared before its methods");
     // SAFETY: `Color` is the layout the class was registered with.
     let color = unsafe { corefoundation::base::allocate::<Color>(class) };
@@ -54,7 +61,34 @@ fn make(red: f64, green: f64, blue: f64, alpha: f64) -> Id {
         (*color).blue = blue;
         (*color).alpha = alpha;
     }
-    objc::arc::autorelease(color as Id)
+    color as Id
+}
+
+/// The object for one named colour, made once and kept for the process.
+///
+/// **Not autoreleased, and that is the whole point.** `+controlTextColor` on a Mac
+/// answers the same object every time and that object lives for ever, so a caller
+/// may put one straight into a `static` - which is exactly what a widget toolkit
+/// does: Qt's Cocoa theme fills a file-scope table of role colours from these in a
+/// module initializer and reads it back whenever it builds a palette. An
+/// autoreleased colour there is freed when the pool drains and the table is left
+/// holding dangling pointers, which surfaces much later as a message sent to freed
+/// memory in code that has nothing to do with colours.
+///
+/// Interned by name rather than per call for the same reason identity matters
+/// elsewhere in this tree: a caller comparing two `+textColor`s expects one object.
+fn singleton(name: &str, red: f64, green: f64, blue: f64, alpha: f64) -> Id {
+    static COLORS: std::sync::Mutex<Vec<(String, usize)>> = std::sync::Mutex::new(Vec::new());
+    let mut colors = COLORS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, object)) = colors.iter().find(|(n, _)| n == name) {
+        return *object as Id;
+    }
+    let color = allocate(red, green, blue, alpha);
+    // Retained forever: a named colour a guest can release is one it can make
+    // dangle, and these are handed out unowned.
+    objc::arc::retain(color);
+    colors.push((name.to_string(), color as usize));
+    color
 }
 
 /// The named colours, as `(selector, r, g, b, a)`.
@@ -94,8 +128,20 @@ static NAMED: &[(&str, f64, f64, f64, f64)] = &[
     ("selectedMenuItemTextColor", 1.0, 1.0, 1.0, 1.0),
     // "Unemphasized" is the selection in a view that is not the first responder:
     // grey rather than accented, with the ordinary text colour on top.
-    ("unemphasizedSelectedContentBackgroundColor", 0.86, 0.86, 0.86, 1.0),
-    ("unemphasizedSelectedTextBackgroundColor", 0.86, 0.86, 0.86, 1.0),
+    (
+        "unemphasizedSelectedContentBackgroundColor",
+        0.86,
+        0.86,
+        0.86,
+        1.0,
+    ),
+    (
+        "unemphasizedSelectedTextBackgroundColor",
+        0.86,
+        0.86,
+        0.86,
+        1.0,
+    ),
     ("unemphasizedSelectedTextColor", 0.0, 0.0, 0.0, 1.0),
     // The focus ring is drawn over what it surrounds, so its alpha is part of
     // the colour rather than something the caller applies.
@@ -152,11 +198,41 @@ unsafe extern "C" fn named(_class: Id, sel: Sel) -> Id {
     let name = unsafe { std::ffi::CStr::from_ptr(sel) };
     let name = name.to_string_lossy();
     match NAMED.iter().find(|(n, ..)| *n == name) {
-        Some((_, r, g, b, a)) => make(*r, *g, *b, *a),
+        Some((_, r, g, b, a)) => singleton(&name, *r, *g, *b, *a),
         // Unreachable through dispatch - the selector was installed from this
         // very table - and named rather than silent in case it stops being.
         None => objc::fail!("+[NSColor {name}]: not one of this runtime's named colours"),
     }
+}
+
+/// `+controlAlternatingRowBackgroundColors`, an `NSArray` of **two** colours.
+///
+/// Not in [`NAMED`] because it is not a colour: a table view alternates its row
+/// background between the two, so the answer is the pair and a caller indexes it
+/// with the row number. The members are the even and odd row backgrounds, which
+/// match `+controlBackgroundColor` and `+alternatingContentBackgroundColor` - a
+/// caller that uses one table and the other constant has to get the same shade.
+///
+/// Kept rather than autoreleased, for [`singleton`]'s reason: this is a named
+/// constant a caller may put straight into a `static`.
+unsafe extern "C" fn alternating_row_colors(_class: Id, _sel: Sel) -> Id {
+    static COLORS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+    let mut kept = COLORS.lock().unwrap_or_else(|e| e.into_inner());
+    if *kept != 0 {
+        return *kept as Id;
+    }
+    let even = singleton("controlBackgroundColor", 1.0, 1.0, 1.0, 1.0);
+    let odd = singleton("alternatingContentBackgroundColor", 0.96, 0.96, 0.96, 1.0);
+    let array = corefoundation::collections::new_array(
+        &[
+            even as corefoundation::base::CFTypeRef,
+            odd as corefoundation::base::CFTypeRef,
+        ],
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    *kept = array as usize;
+    array as Id
 }
 
 unsafe extern "C" fn color_with_rgba(
@@ -277,12 +353,7 @@ unsafe extern "C" fn white_component(receiver: Id, _sel: Sel) -> CGFloat {
 /// # Safety
 ///
 /// Each out-parameter is null or writable for one `CGFloat`.
-unsafe extern "C" fn get_white(
-    receiver: Id,
-    sel: Sel,
-    white: *mut CGFloat,
-    alpha: *mut CGFloat,
-) {
+unsafe extern "C" fn get_white(receiver: Id, sel: Sel, white: *mut CGFloat, alpha: *mut CGFloat) {
     // SAFETY: a colour of this crate's.
     let c = unsafe { &*(receiver as *const Color) };
     // SAFETY: the caller states each is null or writable.
@@ -329,6 +400,7 @@ pub(crate) fn install() {
         meta.replace_method(objc::sel::get(name), named as *const c_void, c"@16@0:8");
     }
     class_methods!(class, {
+        "controlAlternatingRowBackgroundColors" => alternating_row_colors, c"@16@0:8";
         "colorWithCalibratedRed:green:blue:alpha:" => color_with_rgba, c"@48@0:8d16d24d32d40";
         "colorWithDeviceRed:green:blue:alpha:" => color_with_rgba, c"@48@0:8d16d24d32d40";
         "colorWithSRGBRed:green:blue:alpha:" => color_with_rgba, c"@48@0:8d16d24d32d40";
@@ -374,6 +446,29 @@ mod tests {
             // SAFETY: a colour this crate just made.
             assert_eq!(unsafe { components(color) }, (*r, *g, *b, *a), "{name}");
         }
+    }
+
+    /// A named colour is the *same object* every time and is not autoreleased.
+    ///
+    /// The case this protects: a caller that puts one in a `static` during a module
+    /// initializer and reads it back after the pool has drained. An autoreleased
+    /// colour there is freed, and the read is a message to freed memory.
+    #[test]
+    fn a_named_colour_is_one_kept_object() {
+        crate::bootstrap();
+        let class = objc::class::ptr(objc::class::lookup(c"NSColor").expect("NSColor")) as Id;
+        let sel = objc::sel::get("controlTextColor");
+        // SAFETY: `+namedColor` is `id (Class, SEL)`.
+        let (first, second) = unsafe { (named(class, sel), named(class, sel)) };
+        assert_eq!(first, second, "a named colour is a singleton");
+        // Drain a pool around a read: an autoreleased colour would not survive it.
+        let pool = objc::arc::pool_push();
+        // SAFETY: the colour just obtained.
+        let before = unsafe { components(first) };
+        objc::arc::pool_pop(pool);
+        // SAFETY: still live, because nothing autoreleased it.
+        assert_eq!(unsafe { components(first) }, before);
+        assert_eq!(before, (0.0, 0.0, 0.0, 1.0));
     }
 
     /// And something that is not a colour reads as opaque black rather than as

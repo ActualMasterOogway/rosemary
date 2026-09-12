@@ -59,7 +59,10 @@ pub const KEYS: &[(&str, &str)] = &[
         "_kCFURLVolumeAvailableCapacityKey",
         VOLUME_AVAILABLE_CAPACITY,
     ),
-    ("_NSURLVolumeAvailableCapacityKey", VOLUME_AVAILABLE_CAPACITY),
+    (
+        "_NSURLVolumeAvailableCapacityKey",
+        VOLUME_AVAILABLE_CAPACITY,
+    ),
     ("_kCFURLVolumeIdentifierKey", VOLUME_IDENTIFIER),
     ("_NSURLVolumeIdentifierKey", VOLUME_IDENTIFIER),
 ];

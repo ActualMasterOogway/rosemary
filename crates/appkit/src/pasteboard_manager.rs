@@ -420,8 +420,7 @@ pub unsafe extern "C" fn PasteboardSetPromiseKeeper(
     let Some(board) = board_of(handle) else {
         return status::PARAM_ERR;
     };
-    *board.keeper.lock().unwrap_or_else(|e| e.into_inner()) =
-        (keeper as usize, context as usize);
+    *board.keeper.lock().unwrap_or_else(|e| e.into_inner()) = (keeper as usize, context as usize);
     status::NO_ERR
 }
 

@@ -33,8 +33,8 @@ pub mod nsevent;
 pub mod opengl;
 pub mod pasteboard;
 mod pasteboard_manager;
-mod responder;
 pub mod raster;
+mod responder;
 pub mod screen;
 pub mod script;
 pub mod text;
@@ -309,8 +309,8 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
     // gap, a name nothing defines is a segfault at address zero.
     "NSSystemColorsDidChangeNotification",
     "NSApplicationWillBecomeActiveNotification",
-    "NSWindowWillStartLiveResizeNotification",
-    "NSWindowDidEndLiveResizeNotification",
+    window::WILL_START_LIVE_RESIZE,
+    window::DID_END_LIVE_RESIZE,
     "NSColorPanelColorDidChangeNotification",
     "NSTextInputContextKeyboardSelectionDidChangeNotification",
 ];
@@ -327,8 +327,14 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     // works. `-colorSpaceName` answers calibrated RGB for every colour here, so a
     // caller testing against these finds "no" - which is the answer, and which it
     // cannot reach at all while the symbol it is comparing with is address zero.
-    ("_NSCalibratedWhiteColorSpace", "NSCalibratedWhiteColorSpace"),
-    ("_NSCalibratedBlackColorSpace", "NSCalibratedBlackColorSpace"),
+    (
+        "_NSCalibratedWhiteColorSpace",
+        "NSCalibratedWhiteColorSpace",
+    ),
+    (
+        "_NSCalibratedBlackColorSpace",
+        "NSCalibratedBlackColorSpace",
+    ),
     ("_NSDeviceWhiteColorSpace", "NSDeviceWhiteColorSpace"),
     ("_NSDeviceBlackColorSpace", "NSDeviceBlackColorSpace"),
     ("_NSDeviceCMYKColorSpace", "NSDeviceCMYKColorSpace"),
