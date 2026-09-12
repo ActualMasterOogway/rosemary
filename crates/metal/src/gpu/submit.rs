@@ -1,0 +1,194 @@
+use super::*;
+
+impl Gpu {
+    /// Submit one recorded command buffer.
+    pub fn submit(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        fence: vk::Fence,
+        submitted: impl FnOnce(),
+    ) -> Result<(), String> {
+        let buffers = [command_buffer];
+        let submit = vk::SubmitInfo::default().command_buffers(&buffers);
+        {
+            let queue = self.queue.lock().expect("Vulkan queue");
+            // SAFETY: the queue is held exclusively for the submission.
+            unsafe { self.device.reset_fences(&[fence]) }
+                .map_err(|error| format!("vkResetFences failed with {error:?}"))?;
+            // SAFETY: as above; the command buffer has finished recording.
+            unsafe { self.device.queue_submit(*queue, &[submit], fence) }
+                .map_err(|error| format!("vkQueueSubmit failed with {error:?}"))?;
+            // Keep asynchronous retirement in the same order as queue
+            // submission even when several guest threads commit concurrently.
+            submitted();
+        }
+        Ok(())
+    }
+
+    /// `VK_KHR_swapchain`'s device functions, where this device has them.
+    pub fn swapchain_api(&self) -> Option<&ash::khr::swapchain::Device> {
+        self.swapchain_api.as_ref()
+    }
+
+    /// Whether this device's queue can present to `surface`.
+    ///
+    /// Metal has one queue, so there is no second family to fall back on: a
+    /// surface the graphics queue cannot present to is one this crate cannot
+    /// use a swapchain for.
+    pub fn can_present(&self, surface: vk::SurfaceKHR) -> bool {
+        let Some(api) = crate::vulkan::surface_api() else {
+            return false;
+        };
+        // SAFETY: a physical device and a surface of this instance's.
+        unsafe {
+            api.get_physical_device_surface_support(self.physical, self.queue_family, surface)
+        }
+        .unwrap_or(false)
+    }
+
+    /// Submit one command buffer with the semaphores presentation needs.
+    ///
+    /// [`Self::submit`] is the path a guest's command buffer takes and has no
+    /// semaphores at all; a swapchain image cannot be written before the
+    /// presentation engine is done with it, and cannot be presented before
+    /// the write has landed, so both ends need one.
+    pub fn submit_synchronized(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        fence: vk::Fence,
+        wait: &[(vk::Semaphore, vk::PipelineStageFlags)],
+        signal: &[vk::Semaphore],
+    ) -> Result<(), String> {
+        let buffers = [command_buffer];
+        let wait_semaphores = wait.iter().map(|(s, _)| *s).collect::<Vec<_>>();
+        let wait_stages = wait.iter().map(|(_, stage)| *stage).collect::<Vec<_>>();
+        let submit = vk::SubmitInfo::default()
+            .command_buffers(&buffers)
+            .wait_semaphores(&wait_semaphores)
+            .wait_dst_stage_mask(&wait_stages)
+            .signal_semaphores(signal);
+        let queue = self.queue.lock().expect("Vulkan queue");
+        // SAFETY: the queue is held exclusively; the fence and semaphores
+        // belong to this device.
+        unsafe { self.device.reset_fences(&[fence]) }
+            .map_err(|error| format!("vkResetFences failed with {error:?}"))?;
+        // SAFETY: as above; the command buffer has finished recording and
+        // every borrowed slice lives across the call.
+        unsafe { self.device.queue_submit(*queue, &[submit], fence) }
+            .map_err(|error| format!("vkQueueSubmit failed with {error:?}"))
+    }
+
+    /// Queue one swapchain image for presentation.
+    ///
+    /// The raw `VkResult` rather than a message, because `OUT_OF_DATE_KHR` is
+    /// not a failure: it is how the presentation engine says the window
+    /// changed size, and the caller answers by rebuilding the swapchain.
+    pub fn present(
+        &self,
+        swapchain: vk::SwapchainKHR,
+        image: u32,
+        wait: vk::Semaphore,
+    ) -> Result<bool, vk::Result> {
+        let api = self
+            .swapchain_api
+            .as_ref()
+            .ok_or(vk::Result::ERROR_UNKNOWN)?;
+        let semaphores = [wait];
+        let swapchains = [swapchain];
+        let images = [image];
+        let info = vk::PresentInfoKHR::default()
+            .wait_semaphores(&semaphores)
+            .swapchains(&swapchains)
+            .image_indices(&images);
+        let queue = self.queue.lock().expect("Vulkan queue");
+        // SAFETY: the queue is held exclusively, every borrowed slice lives
+        // across the call, and the image was acquired from this swapchain.
+        unsafe { api.queue_present(*queue, &info) }
+    }
+
+    /// Wait until the queue has finished everything submitted to it,
+    /// presentation included.
+    ///
+    /// A fence covers the submission that signals it and nothing else. A
+    /// presentation waits on a semaphore *after* that fence has signalled, so
+    /// a swapchain's semaphores are still in use by the queue when its
+    /// fences say the blits are done; only the queue itself going idle says
+    /// they are free. Presentation calls this when it rebuilds or gives up a
+    /// swapchain, which is a resize or a teardown and never a frame.
+    pub fn wait_queue_idle(&self) {
+        let queue = self.queue.lock().expect("Vulkan queue");
+        // SAFETY: the queue is held exclusively for the wait.
+        let _ = unsafe { self.device.queue_wait_idle(*queue) };
+    }
+
+    /// Wait for a submitted command buffer's fence.
+    pub fn wait(&self, fence: vk::Fence) -> Result<(), String> {
+        crate::stats::timed(crate::stats::Counter::QueueMicros, || {
+            // SAFETY: the fence belongs to this device and the submission above.
+            unsafe { self.device.wait_for_fences(&[fence], true, u64::MAX) }
+                .map_err(|error| format!("vkWaitForFences failed with {error:?}"))
+        })
+    }
+
+    /// Submit one recorded command buffer and wait for it.
+    fn submit_and_wait(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        fence: vk::Fence,
+    ) -> Result<(), String> {
+        self.submit(command_buffer, fence, || {})?;
+        self.wait(fence)
+    }
+
+    /// Record and run one command list synchronously.
+    ///
+    /// Metal performs some work outside any command buffer the guest holds:
+    /// putting a fresh texture into a usable layout, and copying bytes a guest
+    /// handed to `-replaceRegion:`. Those go through here.
+    pub fn one_shot(&self, body: impl FnOnce(&Device, vk::CommandBuffer)) -> Result<(), String> {
+        let mut slot = self.immediate.lock().expect("immediate command state");
+        if slot.is_none() {
+            let pool_info = vk::CommandPoolCreateInfo::default()
+                .queue_family_index(self.queue_family)
+                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+            // SAFETY: a well-formed create info on this live device.
+            let pool = unsafe { self.device.create_command_pool(&pool_info, None) }
+                .map_err(|error| format!("vkCreateCommandPool failed with {error:?}"))?;
+            let allocate = vk::CommandBufferAllocateInfo::default()
+                .command_pool(pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(1);
+            // SAFETY: the pool was just created by this device.
+            let command_buffer = unsafe { self.device.allocate_command_buffers(&allocate) }
+                .map_err(|error| format!("vkAllocateCommandBuffers failed with {error:?}"))?[0];
+            // SAFETY: a well-formed create info on this live device.
+            let fence = unsafe {
+                self.device
+                    .create_fence(&vk::FenceCreateInfo::default(), None)
+            }
+            .map_err(|error| format!("vkCreateFence failed with {error:?}"))?;
+            *slot = Some(Immediate {
+                pool,
+                command_buffer,
+                fence,
+            });
+        }
+        let immediate = slot.as_ref().expect("just created");
+        let begin = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        // SAFETY: the mutex makes this the only user of the pool.
+        unsafe {
+            self.device
+                .reset_command_pool(immediate.pool, vk::CommandPoolResetFlags::empty())
+                .map_err(|error| format!("vkResetCommandPool failed with {error:?}"))?;
+            self.device
+                .begin_command_buffer(immediate.command_buffer, &begin)
+                .map_err(|error| format!("vkBeginCommandBuffer failed with {error:?}"))?;
+        }
+        body(&self.device, immediate.command_buffer);
+        // SAFETY: recording began above and has not ended.
+        unsafe { self.device.end_command_buffer(immediate.command_buffer) }
+            .map_err(|error| format!("vkEndCommandBuffer failed with {error:?}"))?;
+        self.submit_and_wait(immediate.command_buffer, immediate.fence)
+    }
+}
