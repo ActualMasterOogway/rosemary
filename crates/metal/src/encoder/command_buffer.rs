@@ -1,0 +1,288 @@
+//! `MTLCommandBuffer`: recording, commit, and its handlers.
+
+use super::*;
+
+pub(super) unsafe extern "C" fn new_command_buffer(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a command queue of this crate's.
+    let queue = unsafe { object::body::<CommandQueue>(receiver) };
+    let gpu = queue.gpu;
+    let context = match gpu.acquire_context() {
+        Ok(context) => context,
+        Err(reason) => {
+            gpu::trace(reason);
+            return std::ptr::null_mut();
+        }
+    };
+    let CommandContext {
+        pool,
+        command_buffer,
+        fence,
+    } = context;
+    let begin =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    // SAFETY: the command buffer is fresh or was reset with its pool.
+    if let Err(error) = unsafe { gpu.device.begin_command_buffer(command_buffer, &begin) } {
+        gpu::trace(format!("vkBeginCommandBuffer failed with {error:?}"));
+        gpu.release_context(CommandContext {
+            pool,
+            command_buffer,
+            fence,
+        });
+        return std::ptr::null_mut();
+    }
+    let timestamps = gpu.timestamp_pool();
+    if timestamps != vk::QueryPool::null() {
+        // SAFETY: recording into the command buffer opened above.
+        unsafe {
+            gpu.device
+                .cmd_reset_query_pool(command_buffer, timestamps, 0, 2);
+            gpu.device.cmd_write_timestamp(
+                command_buffer,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                timestamps,
+                0,
+            );
+        }
+    }
+    stats::count(Counter::CommandBuffers);
+    // `-commandBuffer` owns nothing it hands back: Metal vends an autoreleased
+    // command buffer, and a guest which keeps one retains it itself.
+    objc::arc::autorelease(object::make(
+        c"R3MTLCommandBuffer",
+        CommandBuffer {
+            gpu,
+            timestamps,
+            queue: objc::arc::retain(receiver),
+            pool,
+            command_buffer,
+            fence,
+            descriptor_pools: Vec::new(),
+            retained: Vec::new(),
+            retained_set: AddressSet::default(),
+            uploads: Vec::new(),
+            upload_used: 0,
+            framebuffers: Vec::new(),
+            captures: Vec::new(),
+            scheduled_handlers: Vec::new(),
+            completed_handlers: Vec::new(),
+            presents: Vec::new(),
+            completion: Arc::new(CommandCompletion::new()),
+            recording: true,
+        },
+    ))
+}
+
+/// `-[MTLCommandBuffer dealloc]`.
+///
+/// A committed command buffer gave everything it held to its [`Submission`],
+/// which retires it; what is left here belongs to one which was never
+/// committed, and to the queue every command buffer retains.
+pub(super) unsafe extern "C" fn command_buffer_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a command buffer of this crate's.
+    let command = unsafe { object::body::<CommandBuffer>(receiver) };
+    let gpu = command.gpu;
+    if command.recording {
+        command.recording = false;
+        for framebuffer in std::mem::take(&mut command.framebuffers) {
+            // SAFETY: nothing was submitted, so nothing refers to it.
+            unsafe { gpu.device.destroy_framebuffer(framebuffer, None) };
+        }
+        for capture in std::mem::take(&mut command.captures) {
+            gpu.destroy_buffer(capture.buffer);
+        }
+        for pool in std::mem::take(&mut command.descriptor_pools) {
+            gpu.release_descriptor_pool(pool);
+        }
+        for chunk in std::mem::take(&mut command.uploads) {
+            gpu.release_upload_chunk(chunk);
+        }
+        // Never submitted, so nothing allocated from the pool is pending.
+        gpu.release_context(CommandContext {
+            pool: command.pool,
+            command_buffer: command.command_buffer,
+            fence: command.fence,
+        });
+        gpu.release_timestamp_pool(std::mem::replace(
+            &mut command.timestamps,
+            vk::QueryPool::null(),
+        ));
+        for object in std::mem::take(&mut command.retained) {
+            objc::arc::release(object);
+        }
+        for drawable in std::mem::take(&mut command.presents) {
+            objc::arc::release(drawable);
+        }
+        for block in std::mem::take(&mut command.scheduled_handlers) {
+            objc::block::release(block);
+        }
+        for block in std::mem::take(&mut command.completed_handlers) {
+            objc::block::release(block);
+        }
+    }
+    objc::arc::release(std::mem::replace(&mut command.queue, std::ptr::null_mut()));
+    // The `Arc` in the body is Rust's, and nothing else here owns memory.
+    // SAFETY: the body was established by `object::make` and is not read again.
+    unsafe { std::ptr::drop_in_place(command as *mut CommandBuffer) };
+    objc::arc::finalize(receiver);
+}
+
+pub(super) unsafe extern "C" fn command_buffer_queue(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a command buffer of this crate's.
+    unsafe { object::body::<CommandBuffer>(receiver) }.queue
+}
+
+pub(super) unsafe extern "C" fn command_buffer_status(receiver: Id, _sel: Sel) -> u64 {
+    // SAFETY: as above.
+    unsafe { object::body::<CommandBuffer>(receiver) }
+        .completion
+        .get()
+}
+
+pub(super) unsafe extern "C" fn command_buffer_gpu_start_time(receiver: Id, _sel: Sel) -> f64 {
+    // SAFETY: as above.
+    unsafe { object::body::<CommandBuffer>(receiver) }
+        .completion
+        .gpu_time(false)
+}
+
+pub(super) unsafe extern "C" fn command_buffer_gpu_end_time(receiver: Id, _sel: Sel) -> f64 {
+    // SAFETY: as above.
+    unsafe { object::body::<CommandBuffer>(receiver) }
+        .completion
+        .gpu_time(true)
+}
+
+pub(super) unsafe extern "C" fn add_handler(receiver: Id, sel: Sel, block: Id) {
+    // SAFETY: as above.
+    let command = unsafe { object::body::<CommandBuffer>(receiver) };
+    // SAFETY: the guest passed a block.
+    let retained = unsafe { objc::shorthand::objc_retainBlock(block) };
+    if retained.is_null() {
+        return;
+    }
+    // SAFETY: a selector the runtime owns.
+    let scheduled = unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() == b"addScheduledHandler:";
+    match scheduled {
+        true => command.scheduled_handlers.push(retained),
+        false => command.completed_handlers.push(retained),
+    }
+}
+
+/// `-[MTLCommandBuffer commit]`: end recording and submit asynchronously.
+pub(super) unsafe extern "C" fn commit(receiver: Id, _sel: Sel) {
+    // SAFETY: a command buffer of this crate's.
+    let command = unsafe { object::body::<CommandBuffer>(receiver) };
+    if !command.recording {
+        return;
+    }
+    command.recording = false;
+    let gpu = command.gpu;
+    if command.timestamps != vk::QueryPool::null() {
+        // SAFETY: recording into this command buffer, which has not ended.
+        unsafe {
+            gpu.device.cmd_write_timestamp(
+                command.command_buffer,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                command.timestamps,
+                1,
+            )
+        };
+    }
+    // SAFETY: recording began when the command buffer was made.
+    if let Err(error) = unsafe { gpu.device.end_command_buffer(command.command_buffer) } {
+        gpu::trace(format!("vkEndCommandBuffer failed with {error:?}"));
+        command.completion.set(5); // MTLCommandBufferStatusError
+        return;
+    }
+    command.completion.set(2); // MTLCommandBufferStatusCommitted
+    let mut submission = Some(Submission {
+        gpu,
+        timestamps: std::mem::replace(&mut command.timestamps, vk::QueryPool::null()),
+        pool: command.pool,
+        command_buffer: command.command_buffer,
+        fence: command.fence,
+        descriptor_pools: std::mem::take(&mut command.descriptor_pools),
+        retained: {
+            command.retained_set = AddressSet::default();
+            std::mem::take(&mut command.retained)
+                .into_iter()
+                .map(|object| object as usize)
+                .collect()
+        },
+        uploads: std::mem::take(&mut command.uploads),
+        framebuffers: std::mem::take(&mut command.framebuffers),
+        captures: std::mem::take(&mut command.captures),
+        completed_handlers: std::mem::take(&mut command.completed_handlers)
+            .into_iter()
+            .map(|block| block as usize)
+            .collect(),
+        presents: std::mem::take(&mut command.presents)
+            .into_iter()
+            .map(|drawable| drawable as usize)
+            .collect(),
+        object: objc::arc::retain(receiver) as usize,
+        completion: Arc::clone(&command.completion),
+        scheduled_time: 0.0,
+    });
+    let completion = Arc::clone(&command.completion);
+    let submitted = stats::timed(Counter::SubmitMicros, || {
+        gpu.submit(command.command_buffer, command.fence, || {
+            completion.set(3); // MTLCommandBufferStatusScheduled
+            for block in std::mem::take(&mut command.scheduled_handlers) {
+                // SAFETY: the retained block reference is transferred to the
+                // handler worker, and `receiver` is live during this call.
+                unsafe { crate::completion::deliver(block, receiver) };
+            }
+            let pending = submission.as_mut().expect("pending submission");
+            pending.scheduled_time = darwin::mach::media_time();
+            crate::submission::submit(submission.take().expect("pending submission"));
+        })
+    });
+    match submitted {
+        Ok(()) => {}
+        Err(reason) => {
+            gpu::trace(format!("command buffer submission failed: {reason}"));
+            for block in std::mem::take(&mut command.scheduled_handlers) {
+                // SAFETY: as above. The error status is installed by `finish`.
+                unsafe { crate::completion::deliver(block, receiver) };
+            }
+            submission
+                .take()
+                .expect("unsubmitted command")
+                .finish(Err(reason));
+        }
+    }
+}
+
+pub(super) unsafe extern "C" fn wait_until_completed(receiver: Id, _sel: Sel) {
+    // SAFETY: a command buffer of this crate's.
+    unsafe { object::body::<CommandBuffer>(receiver) }
+        .completion
+        .wait_for(|status| status >= 4);
+}
+
+pub(super) unsafe extern "C" fn wait_until_scheduled(receiver: Id, _sel: Sel) {
+    // SAFETY: as above. Error is also terminal and must release the waiter.
+    unsafe { object::body::<CommandBuffer>(receiver) }
+        .completion
+        .wait_for(|status| status >= 3);
+}
+
+pub(super) unsafe extern "C" fn present_drawable(receiver: Id, _sel: Sel, drawable: Id) {
+    if drawable.is_null() {
+        return;
+    }
+    // SAFETY: a command buffer of this crate's.
+    let command = unsafe { object::body::<CommandBuffer>(receiver) };
+    command.presents.push(objc::arc::retain(drawable));
+}
+
+pub(super) unsafe extern "C" fn present_drawable_at_time(
+    receiver: Id,
+    sel: Sel,
+    drawable: Id,
+    _at: f64,
+) {
+    // SAFETY: forwards to the untimed form; the runtime presents immediately.
+    unsafe { present_drawable(receiver, sel, drawable) }
+}
