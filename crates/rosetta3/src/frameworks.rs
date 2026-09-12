@@ -290,7 +290,7 @@ pub fn provider() -> SyntheticDylib {
     // even though none of them draws: a guest's `YYGLView : NSView` binds
     // `_OBJC_CLASS_$_NSView` and is refused whole without it, where a declared
     // superclass turns that into one refusal per selector actually sent.
-    for name in appkit::NAMES {
+    for name in appkit::names() {
         if let Some(addr) = appkit::symbol(name) {
             define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
         }

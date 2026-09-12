@@ -85,6 +85,102 @@ struct MappedImage {
 /// walk behind a mutex.
 static MAPPED: OnceLock<Vec<MappedImage>> = OnceLock::new();
 
+/// One image the *program's own* link loaded, as something a later `dlopen` can
+/// bind against.
+struct ProgramImage {
+    /// The install name or path the loader knew it by - `@rpath/QtCore.framework/
+    /// Versions/5/QtCore` for a framework inside a bundle.
+    name: String,
+    slide: u64,
+    /// Parsed from the file on first use, and `None` if it cannot be: the image
+    /// is already mapped, so re-reading it is pure cost and only a `dlopen` ever
+    /// pays it.
+    exports: OnceLock<Option<ExportTable>>,
+}
+
+/// The images the program was linked against, for a later `dlopen` to resolve
+/// against.
+///
+/// Set once, before the program runs. See [`ProgramImages`].
+static PROGRAM_IMAGES: OnceLock<Vec<ProgramImage>> = OnceLock::new();
+
+/// Everything the *executable* was linked against, as a symbol provider.
+///
+/// The gap this closes: [`MainExports`] answers for the executable and
+/// [`LoadedImages`] for images the guest `dlopen`ed, and **neither** answers for
+/// the dylibs the executable itself pulled in. So a plugin loaded at runtime
+/// could not bind to the framework it is a plugin *for* - Qt's Cocoa plugin had
+/// fourteen hundred unresolved imports, every one of them a symbol QtCore and
+/// QtGui were already exporting from memory a few pages away.
+///
+/// Matched by leaf name like [`LoadedImages`], and for the same reason: one side
+/// spells it `@rpath/QtCore.framework/Versions/5/QtCore` and the other holds
+/// whatever path the file was opened from.
+struct ProgramImages;
+
+impl ProgramImages {
+    /// The recorded images whose leaf name matches a two-level reference, or all
+    /// of them for a flat one.
+    fn matching<'a>(named: Option<&'a str>) -> impl Iterator<Item = &'static ProgramImage> + 'a {
+        PROGRAM_IMAGES
+            .get()
+            .map(|v| v.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .filter(move |image| named.is_none_or(|n| n == leaf(&image.name)))
+    }
+
+    /// `image`'s export table, parsed from disk on first use.
+    fn exports(image: &'static ProgramImage) -> Option<&'static ExportTable> {
+        image
+            .exports
+            .get_or_init(|| {
+                let path = resolve_path(&image.name)?;
+                let bytes = std::fs::read(&path).ok()?;
+                match crate::exec::active()?.engine() {
+                    crate::exec::Engine::Native => ExportTable::parse(
+                        &MachObject::parse_any(&bytes, crate::exec::native::HOST_SPEC).ok()?,
+                    )
+                    .ok(),
+                    crate::exec::Engine::Emulated => {
+                        ExportTable::parse(&MachObject::parse_any(&bytes, X86_64).ok()?).ok()
+                    }
+                }
+            })
+            .as_ref()
+    }
+}
+
+impl machish::resolve::SymbolProvider for ProgramImages {
+    fn provides(&self, install_name: &str) -> bool {
+        Self::matching(Some(leaf(install_name))).next().is_some()
+    }
+
+    fn resolve(&self, sym: &machish::fixups::SymbolRef<'_>) -> Option<machish::resolve::Resolved> {
+        let named = sym.library.install_name().map(leaf);
+        for image in Self::matching(named) {
+            let Some(export) = Self::exports(image).and_then(|t| t.get(sym.name)) else {
+                continue;
+            };
+            // A re-export has no address of its own; see [`MainExports`].
+            let Some(addr) = export.address(image.slide) else {
+                continue;
+            };
+            return Some(machish::resolve::Resolved {
+                addr,
+                kind: match export.kind {
+                    machish::exports::ExportKind::ThreadLocal => {
+                        machish::resolve::SymbolKind::ThreadLocal
+                    }
+                    _ => machish::resolve::SymbolKind::Function,
+                },
+                tag: 0,
+            });
+        }
+        None
+    }
+}
+
 /// Publish `report`'s images for the questions dyld cannot answer about them.
 pub fn register_mapped_images(report: &LinkReport) {
     let images: Vec<MappedImage> = report
@@ -101,6 +197,22 @@ pub fn register_mapped_images(report: &LinkReport) {
         })
         .collect();
     let _ = MAPPED.set(images);
+    // The same images as something a later `dlopen` can bind against. The root
+    // is left out: it is [`MainExports`]' job, which knows the path it was
+    // launched from and answers `@executable_path` as well.
+    let root = report.root().map(|r| r.name.as_str());
+    let _ = PROGRAM_IMAGES.set(
+        report
+            .images
+            .iter()
+            .filter(|i| Some(i.name.as_str()) != root)
+            .map(|i| ProgramImage {
+                name: i.name.clone(),
+                slide: i.slide,
+                exports: OnceLock::new(),
+            })
+            .collect(),
+    );
 }
 
 /// The main executable's export table, parsed once, on first use.
@@ -519,6 +631,18 @@ pub fn contains(va: u64) -> bool {
     find(|i| region_of(i, va).map(|_| ())).is_some()
 }
 
+/// The mapped region holding `va`, for an image the *guest* loaded.
+///
+/// The loader of the *executable* owns only the executable's regions, so a pass
+/// that walks a `dlopen`ed image's metadata - selector uniquing and reference
+/// rewriting both - cannot find its addresses there. This is where they are.
+pub fn region_containing(va: u64) -> Option<(u64, &'static [u8])> {
+    if va < REGION_LO.load(Ordering::Relaxed) || va >= REGION_HI.load(Ordering::Relaxed) {
+        return None;
+    }
+    find(|image| region_of(image, va))
+}
+
 /// The recorded function starts inside `range`, for an image the *guest* loaded.
 pub fn function_starts_in(range: std::ops::Range<u64>) -> Vec<u64> {
     // An address is in one image, so the first image with anything in `range` is
@@ -620,10 +744,15 @@ fn open_with<S: MachSpec + 'static>(
     // against.
     let main = main_exports();
     let loaded = LoadedImages;
+    let program = ProgramImages;
     let mut extra: Vec<&dyn machish::resolve::SymbolProvider> = main
         .map(|m| m as &dyn machish::resolve::SymbolProvider)
         .into_iter()
         .collect();
+    // The program's own dependencies before the images the guest loaded: a
+    // plugin binds to the framework it extends, and that framework came in with
+    // the executable.
+    extra.push(&program as &dyn machish::resolve::SymbolProvider);
     extra.push(&loaded as &dyn machish::resolve::SymbolProvider);
     let mut report = Loader::new(spec)
         .link_with(
@@ -729,23 +858,13 @@ fn open_with<S: MachSpec + 'static>(
     // them.
     crate::tls::register(&leaked.report);
 
-    // Before any of this image's code runs, and after it is findable.
-    let vm = crate::thunk::current();
-    if let Some(vm) = vm {
-        match vm.objc() {
-            // Registered classes: extend that runtime, selectors included.
-            Some(_) => {
-                vm.register_loaded_objc(&leaked.report)
-                    .map_err(|e| format!("{resolved}: objc: {e}"))?;
-            }
-            // A program with no Objective-C of its own never registered, so
-            // there is no runtime to extend and no class of the program's a
-            // loaded image could subclass. The selectors are still its own.
-            None => {
-                crate::objc::unique_loaded_selectors(vm, &leaked.report)
-                    .map_err(|e| format!("{resolved}: objc selectors: {e}"))?;
-            }
-        }
+    // Before any of this image's code runs, and after it is findable. Asked of
+    // the *backend* rather than of a `Vm`, because a native guest has no `Vm` and
+    // would otherwise get an image whose selector references were never uniqued.
+    let exec = crate::exec::active();
+    if let Some(exec) = exec {
+        exec.realize_loaded_objc(&leaked.report)
+            .map_err(|e| format!("{resolved}: objc: {e}"))?;
     }
 
     // Every `_dyld_register_func_for_add_image` callback, before this image's
@@ -753,8 +872,8 @@ fn open_with<S: MachSpec + 'static>(
     announce(leaked.handle, leaked.slide);
 
     // Now the image's own code, in dyld's order.
-    if let Some(vm) = vm {
-        vm.run_loaded_load_methods(&leaked.report)
+    if let Some(exec) = exec {
+        exec.run_loaded_load_methods(&leaked.report)
             .map_err(|e| format!("{resolved}: objc +load: {e}"))?;
     }
 

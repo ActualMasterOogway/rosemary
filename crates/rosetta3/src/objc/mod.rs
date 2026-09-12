@@ -850,10 +850,17 @@ fn patch_ivar_offsets(
 /// through - but a native image reaches `objc_msgSend` directly, so a classref
 /// still holding the guest's own `objc_class` is a message to a structure this
 /// runtime never made.
-pub(crate) fn rewrite_refs(r: &dyn Realizer, rt: &ObjcRuntime) -> Result<usize, VmError> {
+/// `report` is which images to walk, and is not always `r`'s own: an image the
+/// guest `dlopen`ed has a report of its own, and its references need this pass as
+/// much as the executable's did.
+pub(crate) fn rewrite_refs(
+    r: &dyn Realizer,
+    rt: &ObjcRuntime,
+    report: &LinkReport,
+) -> Result<usize, VmError> {
     let mut view = r.memory();
     let mut rewritten = 0;
-    for image in r.report().images.iter().filter_map(|i| i.objc.as_ref()) {
+    for image in report.images.iter().filter_map(|i| i.objc.as_ref()) {
         // A superref names the class a `[super ...]` send starts its search
         // from, and is a class reference in every other respect.
         let classes = image.class_refs.iter().chain(image.super_refs.iter());

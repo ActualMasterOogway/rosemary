@@ -58,6 +58,25 @@ pub trait Execution: Sync {
     /// business, because reaching an `LC_UNIXTHREAD` one means entering on a
     /// stack rather than through a call.
     fn enter_main(&self) -> Result<u64, VmError>;
+
+    /// Realize the Objective-C metadata of an image the guest just loaded, and
+    /// unique its selector references.
+    ///
+    /// On the trait rather than done by `dyld` itself because the two backends
+    /// realize against different things: the emulated one extends the snapshot
+    /// its `Vm` holds, and the native one has no `Vm` at all. `dlopen` used to
+    /// ask for a `Vm` and do nothing when there was none, which left a native
+    /// guest's loaded image with *raw selector strings* in its `__objc_selrefs`
+    /// - so the first message it sent was refused by name, for a selector the
+    /// runtime really did have.
+    fn realize_loaded_objc(&self, report: &LinkReport) -> Result<(), VmError>;
+
+    /// Call the `+load` methods the image declares, returning how many ran.
+    ///
+    /// Separate from [`Execution::realize_loaded_objc`] because a `+load` is
+    /// guest code: it must run after the registration pass has finished and
+    /// outside whatever lock that pass holds.
+    fn run_loaded_load_methods(&self, report: &LinkReport) -> Result<usize, VmError>;
 }
 
 /// Which backend runs a program.

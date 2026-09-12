@@ -337,6 +337,17 @@ impl Execution for Native {
         Ok(())
     }
 
+    fn realize_loaded_objc(&self, report: &LinkReport) -> Result<(), VmError> {
+        self.realize_loaded(report)
+    }
+
+    fn run_loaded_load_methods(&self, report: &LinkReport) -> Result<usize, VmError> {
+        match crate::objc::published() {
+            Some(rt) => crate::objc::call_loaded_load_methods(self, rt, report),
+            None => Ok(0),
+        }
+    }
+
     fn enter_main(&self) -> Result<u64, VmError> {
         let root = self
             .report
@@ -356,6 +367,37 @@ impl Execution for Native {
 }
 
 impl Native {
+    /// Realize the Objective-C metadata of an image the guest `dlopen`ed.
+    ///
+    /// The same three passes [`Native::realize_objc`] runs for the executable,
+    /// against the loaded image's own report: extend the published runtime,
+    /// point the new image's class references at the registered objects, and
+    /// unique its selectors. The third is what `register_loaded` does last and
+    /// the one a native guest cannot do without - it reaches `objc_msgSend`
+    /// directly, so a selector reference still holding a string pointer is a
+    /// message the runtime cannot match against any method it has.
+    ///
+    /// Serialised, because two threads may `dlopen` at once and each publishes a
+    /// whole new snapshot: without the lock one would be built from a copy taken
+    /// before the other's classes went in and would then replace it.
+    fn realize_loaded(&self, report: &LinkReport) -> Result<(), VmError> {
+        static REGISTERING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = REGISTERING.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(current) = crate::objc::published() else {
+            // Nothing has registered, so there is no runtime to extend and no
+            // class of the program's this image could subclass. The selectors
+            // are still its own.
+            crate::objc::unique_loaded_selectors(self, report)?;
+            return Ok(());
+        };
+        let mut extended = current.clone();
+        crate::objc::register_loaded(self, &mut extended, report)?;
+        let leaked: &'static crate::objc::ObjcRuntime = Box::leak(Box::new(extended));
+        crate::objc::publish(leaked);
+        crate::objc::rewrite_refs(self, leaked, report)?;
+        Ok(())
+    }
+
     /// Realize the image's Objective-C metadata in this tree's own runtime.
     ///
     /// What `_objc_map_images` does for the host's libobjc, minus the part dyld
@@ -367,7 +409,7 @@ impl Native {
         crate::shims::variadic::install();
         let rt = Box::leak(Box::new(crate::objc::register(self)?));
         crate::objc::publish(rt);
-        crate::objc::rewrite_refs(self, rt)?;
+        crate::objc::rewrite_refs(self, rt, &self.report)?;
         // `+load` before the C constructors of the same image, which is dyld's
         // order and the one a program that uses both depends on.
         crate::objc::call_load_methods(self, rt)?;
@@ -381,13 +423,25 @@ impl Native {
 /// address is a host one and the copy is a `memcpy`. The loader's regions are
 /// still what says an address is *in* the program: a metadata pointer that is
 /// not belongs in a diagnostic rather than in a fault.
+///
+/// Two places to look, because after a `dlopen` there are two loaders. The
+/// executable's `MmapSpace` holds the executable and what it was linked against;
+/// an image the *guest* loaded was mapped by [`crate::dyld`] and its regions are
+/// there. A view that knew only the first silently found nothing for every
+/// address in a loaded image, so selector uniquing rewrote no slots and reported
+/// no error - the image kept raw strings in its `__objc_selrefs` and its first
+/// message was refused by name.
 struct HostView<'a>(&'a MmapSpace);
 
 impl HostView<'_> {
     fn span(&self, va: u64, len: usize) -> Result<*mut u8, machish::Error> {
         use machish::memory::Regions;
         let outside = || machish::Error::Memory("the address is in no mapped region");
-        let (base, bytes) = self.0.region_at(va).ok_or_else(outside)?;
+        let (base, bytes) = self
+            .0
+            .region_at(va)
+            .or_else(|| crate::dyld::region_containing(va))
+            .ok_or_else(outside)?;
         let offset = usize::try_from(va - base).map_err(|_| outside())?;
         if bytes.len() - offset < len {
             return Err(outside());
@@ -423,9 +477,10 @@ impl crate::objc::Realizer for Native {
         Box::new(HostView(&self.memory))
     }
 
+    /// Both loaders, for the reason [`HostView`] gives.
     fn is_guest_address(&self, va: u64) -> bool {
         use machish::memory::Regions;
-        self.memory.region_at(va).is_some()
+        self.memory.region_at(va).is_some() || crate::dyld::contains(va)
     }
 
     fn call(&self, f: u64, args: &[u64]) -> Result<u64, VmError> {

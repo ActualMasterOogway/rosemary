@@ -1536,6 +1536,31 @@ impl crate::exec::Execution for Vm {
         Vm::call(self, entry, args)
     }
 
+    /// The emulated backend extends the snapshot this `Vm` holds. No
+    /// `rewrite_refs` pass: a send from an emulated image is intercepted and
+    /// `dispatch` translates the receiver, so the guest's own class references
+    /// never have to hold a host pointer.
+    fn realize_loaded_objc(
+        &self,
+        report: &machish::report::LinkReport,
+    ) -> Result<(), VmError> {
+        match self.objc() {
+            // Registered classes: extend that runtime, selectors included.
+            Some(_) => Vm::register_loaded_objc(self, report),
+            // A program with no Objective-C of its own never registered, so
+            // there is no runtime to extend and no class of the program's a
+            // loaded image could subclass. The selectors are still its own.
+            None => crate::objc::unique_loaded_selectors(self, report).map(|_| ()),
+        }
+    }
+
+    fn run_loaded_load_methods(
+        &self,
+        report: &machish::report::LinkReport,
+    ) -> Result<usize, VmError> {
+        Vm::run_loaded_load_methods(self, report)
+    }
+
     fn prepare(&self) -> Result<(), VmError> {
         // The sampler and the overlay, neither of which a host without Mach and
         // Metal has. See the module list in `lib.rs`.
