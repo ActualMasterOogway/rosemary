@@ -44,6 +44,36 @@ fn a_native_exit_status_reaches_the_shell() {
     assert_eq!(status, Some(1), "stderr: {err}");
 }
 
+/// `-no_new_main` asks Apple's linker for the pre-10.8 entry sequence: an
+/// `LC_UNIXTHREAD` command whose entry reads the kernel argument frame at the
+/// stack pointer. That is observably different from calling an `LC_MAIN`
+/// entry with the arguments in registers.
+#[test]
+fn a_native_unix_thread_entry_matches_the_kernels_own_run_of_it() {
+    let Some(path) =
+        build_native_with("native_unix_thread", common::HELLO_C, &["-Wl,-no_new_main"])
+    else {
+        skip!("cannot build native LC_UNIXTHREAD fixtures")
+    };
+    let bytes = std::fs::read(&path).expect("read LC_UNIXTHREAD fixture");
+    let object = machish::image::MachObject::parse_any(&bytes, rosetta3::exec::native::HOST_SPEC)
+        .expect("parse LC_UNIXTHREAD fixture");
+    assert!(
+        matches!(
+            object.entry(),
+            Some(machish::image::EntryPoint::UnixThread { .. })
+        ),
+        "-no_new_main did not produce LC_UNIXTHREAD"
+    );
+    let Some((native_status, native_out)) = run_native(&path) else {
+        skip!("cannot run the native LC_UNIXTHREAD fixture")
+    };
+    let (status, out, err) = run_guest_with(&["--native"], &path, &[]);
+
+    assert_eq!(status, native_status, "stderr: {err}");
+    assert_eq!(out, native_out, "stderr: {err}");
+}
+
 #[test]
 fn native_constructors_run_in_order_before_main() {
     let Some(path) = build_native("native_ctors", common::CTOR_C) else {

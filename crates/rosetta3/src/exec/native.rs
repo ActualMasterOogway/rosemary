@@ -74,9 +74,39 @@ pub struct Native {
     /// The mappings the report's addresses point into, and what says an address
     /// is the program's. Dropping it would unmap the program.
     memory: MmapSpace,
-    /// Only the `argc`/`argv`/`envp`/`apple` block. Nothing runs on it: an
-    /// `LC_MAIN` image is entered by a call, on the host's own stack.
+    /// The `argc`/`argv`/`envp`/`apple` block and, for an `LC_UNIXTHREAD`
+    /// image, the stack its entry point runs on. An `LC_MAIN` image is entered
+    /// by a call on the host's own stack.
     stack: GuestStack,
+}
+
+/// Enter a process entry point with the kernel argument frame at the stack
+/// pointer.
+///
+/// This is a jump, not a call: an `LC_UNIXTHREAD` entry point finds `argc` in
+/// the first word at `rsp`/`sp`, where a call would have put its return
+/// address. Process entry points finish by calling `exit` and have nowhere to
+/// return to, so abandoning this function's frame is intentional.
+///
+/// # Safety
+///
+/// `entry` must name host-executable code and `sp` must name a suitably aligned
+/// kernel argument frame with enough writable stack below it.
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+unsafe extern "C" fn enter_unix_thread(_entry: u64, _sp: u64) -> ! {
+    core::arch::naked_asm!("mov rsp, rsi", "jmp rdi");
+}
+
+/// The arm64 form of [`enter_unix_thread`].
+///
+/// # Safety
+///
+/// The requirements are the same as for the x86-64 form.
+#[cfg(target_arch = "aarch64")]
+#[unsafe(naked)]
+unsafe extern "C" fn enter_unix_thread(_entry: u64, _sp: u64) -> ! {
+    core::arch::naked_asm!("mov sp, x1", "br x0");
 }
 
 // SAFETY: none of the three fields is mutated after construction, and the raw
@@ -353,14 +383,20 @@ impl Execution for Native {
             .report
             .root()
             .ok_or(VmError::NoCode { pc: 0, from: None })?;
-        if let Some(EntryPoint::UnixThread { .. }) = root.entry_command {
-            return Err(VmError::Unsupported {
-                what: "an LC_UNIXTHREAD entry point, which is entered on a stack of its own \
-                       rather than by a call"
-                    .to_string(),
-            });
-        }
         let entry = root.entry.ok_or(VmError::NoCode { pc: 0, from: None })?;
+        if let Some(EntryPoint::UnixThread { .. }) = root.entry_command {
+            let sp = self.stack.kernel_sp().expect(
+                "an LC_UNIXTHREAD program starts on the stack its arguments were laid out on",
+            );
+            // As with `call`, Darwin code needs the Darwin TSD array installed
+            // before its first instruction. A process entry point does not
+            // return, so this guard deliberately lives until `exit` ends the
+            // process.
+            let _darwin = darwin::tls::DarwinThread::enter();
+            // SAFETY: the loader mapped `entry` from a host-architecture image,
+            // and `GuestStack` owns the aligned, writable frame at `sp`.
+            unsafe { enter_unix_thread(entry, sp) }
+        }
         let (argc, argv, envp, apple) = self.main_args();
         self.call(entry, &[argc, argv, envp, apple])
     }
