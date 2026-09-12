@@ -197,6 +197,99 @@ pub unsafe extern "C" fn access(path: *const c_char, mode: c_int) -> c_int {
     })
 }
 
+/// Darwin's `PATH_MAX`, which is **not** the host's.
+///
+/// A guest sizes its `realpath` buffer with its own headers, so 1024 bytes is all
+/// the room there is - and Linux's `PATH_MAX` is 4096. Resolving into the caller's
+/// buffer directly would let a path longer than a guest expects overrun it, which
+/// is why [`realpath`] resolves into its own and copies.
+const DARWIN_PATH_MAX: usize = 1024;
+
+/// `char *realpath(const char *, char *resolved)`, with the same fallback.
+///
+/// Two reasons this is not a passthrough.
+///
+/// The first is the fallback, and it is what makes a Qt application start: every
+/// `QDir::canonicalPath` is a `realpath`, and the host's fails outright on a path
+/// whose case does not match the disk. Qt treats that failure as an *empty* path
+/// rather than as an error, so a plugin directory spelled `Contents/plugins` in a
+/// bundle that has `Contents/Plugins` does not merely fail to load - it puts an
+/// empty string in the library search path, and Qt then reports that it looked
+/// for its platform plugin in `""`.
+///
+/// The second is the buffer. Darwin's `PATH_MAX` is a quarter of this host's, so
+/// the result is measured against [`DARWIN_PATH_MAX`] and refused with
+/// `ENAMETOOLONG` if it does not fit - which is what Darwin itself answers, and
+/// the alternative is writing past the end of the caller's array.
+///
+/// # Safety
+///
+/// `path` is a NUL-terminated string, and `resolved` is null or writable for
+/// `PATH_MAX` bytes as the *guest* counts them.
+pub unsafe extern "C" fn realpath(path: *const c_char, resolved: *mut c_char) -> *mut c_char {
+    let found = with_fallback(path, |path| {
+        // Resolved into this crate's own buffer rather than the caller's: the
+        // host may write up to its own `PATH_MAX`, which is larger than the
+        // caller's array.
+        let mut buffer = [0 as c_char; libc::PATH_MAX as usize];
+        // SAFETY: the caller's obligation for `path`; `buffer` is a live local
+        // of the host's `PATH_MAX`.
+        let got = unsafe { libc::realpath(path, buffer.as_mut_ptr()) };
+        match got.is_null() {
+            true => (None, false),
+            // SAFETY: `realpath` wrote a NUL-terminated path into `buffer`.
+            false => (
+                Some(unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_owned()),
+                true,
+            ),
+        }
+    });
+    let Some(found) = found else {
+        return std::ptr::null_mut();
+    };
+    let bytes = found.as_bytes_with_nul();
+    if bytes.len() > DARWIN_PATH_MAX {
+        crate::errno::set(libc::ENAMETOOLONG);
+        return std::ptr::null_mut();
+    }
+    // A null `resolved` means "allocate one", and the caller frees it - so it has
+    // to come from the allocator the guest's `free` uses.
+    let out = match resolved.is_null() {
+        // SAFETY: a plain size; the block is the caller's to free.
+        true => unsafe { crate::heap::malloc(DARWIN_PATH_MAX) }.cast::<c_char>(),
+        false => resolved,
+    };
+    if out.is_null() {
+        crate::errno::set(libc::ENOMEM);
+        return std::ptr::null_mut();
+    }
+    // SAFETY: `out` is the caller's `PATH_MAX` array or a fresh block of that
+    // size, and `bytes` has just been checked to fit in it.
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr().cast::<c_char>(), out, bytes.len()) };
+    out
+}
+
+/// `ssize_t readlink(const char *, char *, size_t)`, with the same fallback.
+///
+/// Here for the same reason as [`access`]: a program that built a path in the
+/// wrong case asks about it, and the host answers `ENOENT` for a link that is
+/// there under another spelling.
+///
+/// # Safety
+///
+/// `path` is a NUL-terminated string and `buffer` is writable for `size` bytes.
+pub unsafe extern "C" fn readlink(
+    path: *const c_char,
+    buffer: *mut c_char,
+    size: libc::size_t,
+) -> libc::ssize_t {
+    with_fallback(path, |path| {
+        // SAFETY: the caller's obligation.
+        let n = unsafe { libc::readlink(path, buffer, size) };
+        (n, n >= 0)
+    })
+}
+
 /// `FILE *fopen(const char *, const char *)`, with the same fallback.
 ///
 /// # Safety
@@ -432,6 +525,8 @@ pub const NAMES: &[&str] = &[
     "statfs$INODE64",
     "fstatfs$INODE64",
     "access",
+    "realpath",
+    "readlink",
     "fopen",
     "fopen$UNIX2003",
     "open",
@@ -446,6 +541,8 @@ pub fn symbol(name: &str) -> Option<u64> {
         "statfs" | "statfs$INODE64" => statfs as *const (),
         "fstatfs" | "fstatfs$INODE64" => fstatfs as *const (),
         "access" => access as *const (),
+        "realpath" => realpath as *const (),
+        "readlink" => readlink as *const (),
         "fopen" | "fopen$UNIX2003" => fopen as *const (),
         "open" => open as *const (),
         "openat" => openat as *const (),

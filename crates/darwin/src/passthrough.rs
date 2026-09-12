@@ -17,11 +17,14 @@
 ///
 /// C names, without the Mach-O underscore.
 ///
-/// `access` and `fopen` were on this list and are not any more. The *call* is
-/// identical; what is not is the filesystem underneath it, which on a Mac is
-/// case-insensitive and here is not - so [`crate::stat`] wraps both with the
-/// fallback that difference needs, and a claim of "the host's own symbol is the
-/// answer" would be false off Darwin.
+/// `access`, `fopen` and `readlink` were on this list and are not any more. The
+/// *call* is identical; what is not is the filesystem underneath it, which on a
+/// Mac is case-insensitive and here is not - so [`crate::stat`] wraps them with
+/// the fallback that difference needs, and a claim of "the host's own symbol is
+/// the answer" would be false off Darwin. `realpath` never reached this list for
+/// the same reason and one more: Darwin's `PATH_MAX` is a quarter of this host's,
+/// so the host writing its own maximum into a buffer a guest sized with its own
+/// headers is an overrun.
 ///
 /// `qsort` and `bsearch` came off because of what they *call*: the comparator is
 /// guest code, and entering it needs the guest's thread pointer on a host that is
@@ -130,7 +133,6 @@ pub const CLAIMED: &[&str] = &[
     "pread",
     "pwrite",
     "read",
-    "readlink",
     "rmdir",
     "sleep",
     "symlink",

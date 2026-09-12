@@ -62,6 +62,76 @@ pub unsafe extern "C" fn atexit(handler: *const ()) -> c_int {
     }
 }
 
+/// `BLOCK_IS_GLOBAL` in a block literal's flags.
+///
+/// A global block's storage is its image's `__DATA`, so it outlives the process's
+/// exit without being copied. That is what makes [`atexit_b`] work even where no
+/// block runtime is registered, and the case in hand: a `^{ }` with nothing
+/// captured is always global.
+const BLOCK_IS_GLOBAL: u32 = 1 << 28;
+
+/// Byte offset of `flags` in a block literal, after `isa`.
+const BLOCK_FLAGS_OFFSET: u64 = 8;
+
+/// Run a block registered by [`atexit_b`], and give back the reference taken for
+/// it.
+///
+/// # Safety
+///
+/// Called by the host's exit machinery with the block `atexit_b` registered.
+unsafe extern "C" fn run_exit_block(block: *mut c_void) {
+    let block = block as u64;
+    // SAFETY: a block this process copied or a global one, either way still live:
+    // nothing releases it before exit.
+    unsafe { crate::dispatch::block::invoke(block) };
+    crate::dispatch::block::release(block);
+}
+
+/// `int atexit_b(void (^block)(void))`
+///
+/// The block form of [`atexit`], and a real entry point rather than a courtesy:
+/// Qt's Cocoa plugin registers its application delegate's teardown this way, and
+/// the call is a *tail* jump - so an unbound slot is a jump to address zero whose
+/// backtrace does not even name the block it came from.
+///
+/// The block is copied, because a caller may pass a stack block and this one
+/// outlives every frame. Where no block runtime is registered - see
+/// `darwin::dispatch::block::set_runtime` - a **global** block is still accepted
+/// as it stands, since its storage is its image's; anything else is refused by
+/// returning non-zero, which is what a caller checks and is the truth: the
+/// handler was not registered.
+///
+/// # Safety
+///
+/// `block` is null or a live block literal taking no arguments.
+pub unsafe extern "C" fn atexit_b(block: *mut c_void) -> c_int {
+    if block.is_null() {
+        return -1;
+    }
+    let kept = match crate::dispatch::block::copy(block as u64) {
+        Some(copied) => copied,
+        None => {
+            // SAFETY: the caller states this is a block literal, whose `flags`
+            // are at a fixed offset by the Block ABI.
+            let flags =
+                unsafe { ((block as u64 + BLOCK_FLAGS_OFFSET) as *const u32).read() };
+            if flags & BLOCK_IS_GLOBAL == 0 {
+                return -1;
+            }
+            block as u64
+        }
+    };
+    // SAFETY: a handler of this crate's own, the kept block as its argument, and
+    // a DSO handle of this crate's own.
+    unsafe {
+        __cxa_atexit(
+            run_exit_block as *const (),
+            kept as *mut c_void,
+            &raw const DSO_HANDLE as *const (),
+        )
+    }
+}
+
 /// `int pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void))`
 ///
 /// Here for exactly `atexit`'s reason: glibc keeps `pthread_atfork` in
@@ -207,6 +277,7 @@ pub unsafe extern "C" fn memset_s(
 
 pub const NAMES: &[&str] = &[
     "atexit",
+    "atexit_b",
     "pthread_atfork",
     "__assert_rtn",
     "srandomdev",
@@ -216,6 +287,7 @@ pub const NAMES: &[&str] = &[
 pub fn symbol(name: &str) -> Option<u64> {
     let f: *const () = match name {
         "atexit" => atexit as *const (),
+        "atexit_b" => atexit_b as *const (),
         "pthread_atfork" => pthread_atfork as *const (),
         "__assert_rtn" => assert_rtn as *const (),
         "srandomdev" => srandomdev as *const (),

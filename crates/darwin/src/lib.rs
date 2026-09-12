@@ -42,6 +42,7 @@ pub mod mach;
 pub mod malloc;
 pub mod math;
 pub mod net;
+mod oslog;
 pub mod passthrough;
 pub mod passwd;
 pub mod path;
@@ -624,6 +625,7 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
         dirent::provide(&mut lib);
         rlimit::provide(&mut lib);
         libproc::provide(&mut lib);
+        oslog::provide(&mut lib);
         kqueue::provide(&mut lib);
         #[cfg(target_arch = "x86_64")]
         printf_l::provide(&mut lib);
