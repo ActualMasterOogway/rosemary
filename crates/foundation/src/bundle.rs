@@ -25,8 +25,46 @@ pub struct Layout {
     pub contents: PathBuf,
     pub resources: PathBuf,
     pub frameworks: PathBuf,
+    /// `.../Foo.app/Contents/PlugIns`, spelled the way this bundle spells it -
+    /// see [`plugins_of`].
+    pub plugins: PathBuf,
     pub executable: PathBuf,
     pub info: Value,
+}
+
+/// The built-in plug-ins directory of the bundle at `contents`.
+///
+/// Apple's spelling is `PlugIns`, and that is what is looked for first. The
+/// fallback is what a case-insensitive volume gives away for free: a Mac's HFS+
+/// or APFS opens `Contents/PlugIns` on a bundle that ships `Contents/Plugins`
+/// without anyone noticing the difference, so a bundle built and tested only on
+/// a Mac may have the name in any case at all - Roblox Studio ships `Plugins`.
+/// On ext4 those are two different directories and the exact name finds nothing,
+/// which is a Qt application with no platform plugin and no way to open a
+/// window.
+///
+/// A bundle with neither gets `Contents/PlugIns` anyway, because the answer is
+/// where a plug-in *would* be: that is what
+/// [`cf::CFBundleCopyBuiltInPlugInsURL`] is for, and a caller that finds nothing
+/// there is entitled to the path rather than to a null.
+fn plugins_of(contents: &Path) -> PathBuf {
+    const APPLE: &str = "PlugIns";
+    let exact = contents.join(APPLE);
+    if exact.is_dir() {
+        return exact;
+    }
+    let found = std::fs::read_dir(contents).ok().and_then(|entries| {
+        entries
+            .flatten()
+            .find(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(APPLE))
+                    && e.path().is_dir()
+            })
+            .map(|e| e.path())
+    });
+    found.unwrap_or(exact)
 }
 
 impl Layout {
@@ -56,6 +94,7 @@ impl Layout {
             root: contents.parent()?.to_path_buf(),
             resources: contents.join("Resources"),
             frameworks: contents.join("Frameworks"),
+            plugins: plugins_of(contents),
             executable: executable.to_path_buf(),
             contents: contents.to_path_buf(),
             info,
@@ -87,6 +126,7 @@ impl Layout {
             root: root.to_path_buf(),
             resources: contents.join("Resources"),
             frameworks: contents.join("Frameworks"),
+            plugins: plugins_of(&contents),
             executable,
             contents,
             info,
@@ -301,6 +341,24 @@ pub mod cf {
         }
     }
 
+    /// `CFURLRef CFBundleCopyBuiltInPlugInsURL(CFBundleRef)`
+    ///
+    /// How a Qt application finds its own plugins: `QCoreApplication`'s default
+    /// library path is this URL, and a null here leaves it with an empty plugin
+    /// search path - so `libqcocoa` is never found, there is no platform plugin,
+    /// and Qt aborts before the first window. It is called during
+    /// `libraryPathsLocked`, which is the first thing `QApplication`'s
+    /// constructor needs.
+    ///
+    /// Answered whether or not the directory exists, for the reason
+    /// [`CFBundleCopyPrivateFrameworksURL`] gives.
+    unsafe extern "C" fn CFBundleCopyBuiltInPlugInsURL(_bundle: Id) -> Id {
+        match super::main() {
+            Some(bundle) => file_url(&bundle.plugins, true),
+            None => std::ptr::null_mut(),
+        }
+    }
+
     /// `CFArrayRef CFBundleCopyBundleLocalizations(CFBundleRef)`.
     unsafe extern "C" fn CFBundleCopyBundleLocalizations(_bundle: Id) -> Id {
         let Some(bundle) = super::main() else {
@@ -474,6 +532,7 @@ pub mod cf {
             "CFBundleCopyBundleURL" => at!(CFBundleCopyBundleURL),
             "CFBundleCopyResourcesDirectoryURL" => at!(CFBundleCopyResourcesDirectoryURL),
             "CFBundleCopyPrivateFrameworksURL" => at!(CFBundleCopyPrivateFrameworksURL),
+            "CFBundleCopyBuiltInPlugInsURL" => at!(CFBundleCopyBuiltInPlugInsURL),
             "CFBundleCopyBundleLocalizations" => at!(CFBundleCopyBundleLocalizations),
             "CFBundleCopyPreferredLocalizationsFromArray" => {
                 at!(CFBundleCopyPreferredLocalizationsFromArray)
@@ -497,6 +556,7 @@ pub mod cf {
         "CFBundleCopyBundleURL",
         "CFBundleCopyResourcesDirectoryURL",
         "CFBundleCopyPrivateFrameworksURL",
+        "CFBundleCopyBuiltInPlugInsURL",
         "CFBundleCopyBundleLocalizations",
         "CFBundleCopyPreferredLocalizationsFromArray",
         "CFBundleGetIdentifier",
@@ -811,6 +871,13 @@ pub(crate) mod class {
         path(unsafe { layout_of(receiver) }.map(|b| b.frameworks.clone()))
     }
 
+    /// `Contents/PlugIns`, which is not `Contents/Frameworks`: a caller looking
+    /// for a loadable plug-in that is handed the frameworks directory searches
+    /// the wrong one and finds nothing.
+    unsafe extern "C" fn built_in_plug_ins_path(receiver: Id, _sel: Sel) -> Id {
+        path(unsafe { layout_of(receiver) }.map(|b| b.plugins.clone()))
+    }
+
     unsafe extern "C" fn bundle_identifier(receiver: Id, _sel: Sel) -> Id {
         unsafe { info(receiver, "CFBundleIdentifier") }
     }
@@ -891,7 +958,7 @@ pub(crate) mod class {
             "resourcePath" => resource_path, c"@16@0:8";
             "executablePath" => executable_path, c"@16@0:8";
             "privateFrameworksPath" => private_frameworks_path, c"@16@0:8";
-            "builtInPlugInsPath" => private_frameworks_path, c"@16@0:8";
+            "builtInPlugInsPath" => built_in_plug_ins_path, c"@16@0:8";
             "bundleIdentifier" => bundle_identifier, c"@16@0:8";
             "objectForInfoDictionaryKey:" => object_for_info_key, c"@24@0:8@16";
             "pathForResource:ofType:" => path_for_resource, c"@32@0:8@16@24";

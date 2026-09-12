@@ -48,6 +48,22 @@ fn country() -> String {
     split(&posix()).1
 }
 
+/// The ISO 3166 country this locale names, for a caller deriving a fact about
+/// the place rather than reading a preference.
+pub(crate) fn country_code() -> String {
+    country()
+}
+
+/// Whether this locale's language is English.
+///
+/// The question `crate::formatter` asks before publishing an English month name:
+/// a caller told "September" for a French locale has been given a wrong answer it
+/// cannot detect, where one told nothing falls back to its own CLDR tables. See
+/// that module's note.
+pub(crate) fn is_english() -> bool {
+    language() == "en"
+}
+
 /// `language-REGION`, which is how a BCP 47 tag spells what `posix` returns.
 fn tag() -> String {
     format!("{}-{}", language(), country())
@@ -185,6 +201,26 @@ pub const KEYS: &[(&str, &str)] = &[
     (
         "_NSLocaleCollationIdentifier",
         "kCFLocaleCollationIdentifier",
+    ),
+    // The quotation delimiters, published so the symbol resolves. `component`
+    // answers nil for them, which is the point: which quotation marks a language
+    // uses is CLDR data this tree does not carry, and a caller told nothing falls
+    // back to its own - see `crate::formatter`.
+    (
+        "_kCFLocaleQuotationBeginDelimiterKey",
+        "kCFLocaleQuotationBeginDelimiterKey",
+    ),
+    (
+        "_kCFLocaleQuotationEndDelimiterKey",
+        "kCFLocaleQuotationEndDelimiterKey",
+    ),
+    (
+        "_kCFLocaleAlternateQuotationBeginDelimiterKey",
+        "kCFLocaleAlternateQuotationBeginDelimiterKey",
+    ),
+    (
+        "_kCFLocaleAlternateQuotationEndDelimiterKey",
+        "kCFLocaleAlternateQuotationEndDelimiterKey",
     ),
     ("_kCFLocaleIdentifier", "kCFLocaleIdentifier"),
     ("_kCFLocaleLanguageCode", "kCFLocaleLanguageCode"),

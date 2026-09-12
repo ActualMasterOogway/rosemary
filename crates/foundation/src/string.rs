@@ -134,6 +134,38 @@ unsafe extern "C" fn string_with_utf8(_class: Id, _sel: Sel, cstr: *const c_char
     }
 }
 
+/// `+stringWithCharacters:length:`, the UTF-16 constructor.
+///
+/// The Objective-C spelling of `CFStringCreateWithCharacters`, and the one a
+/// program holding UTF-16 uses: Qt's `QString` *is* UTF-16, so this is how every
+/// string it hands to Cocoa is built. The code units are kept as they are rather
+/// than going through UTF-8, for the reason that call gives - an unpaired
+/// surrogate a caller put there is a code unit it is entitled to read back.
+///
+/// # Safety
+///
+/// `chars` is null or covers `count` `unichar`s.
+unsafe extern "C" fn string_with_characters(
+    _class: Id,
+    _sel: Sel,
+    chars: *const u16,
+    count: usize,
+) -> Id {
+    // SAFETY: the caller's obligation.
+    let string = unsafe {
+        api::CFStringCreateWithCharacters(
+            std::ptr::null(),
+            chars,
+            count as corefoundation::base::CFIndex,
+        )
+    };
+    if string.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: a fresh object this call owns.
+    unsafe { api::CFAutorelease(string) as Id }
+}
+
 unsafe extern "C" fn string_with_cstring_encoding(
     _class: Id,
     _sel: Sel,
@@ -608,6 +640,60 @@ unsafe extern "C" fn substring_with_range(receiver: Id, _sel: Sel, range: NSRang
     )
 }
 
+/// `-getCharacters:range:`, which fills `buffer` with the UTF-16 of a range.
+///
+/// Real UTF-16 rather than the bytes `-characterAtIndex:` hands back, because
+/// this is the call a caller uses to read a *whole string* out in one go - Qt's
+/// `QString::fromCFString` does exactly that - and a string with anything outside
+/// ASCII in it would arrive as its UTF-8 bytes reinterpreted as characters.
+///
+/// A range outside the string writes nothing, for the reason
+/// `corefoundation::api::CFStringGetCharacters` gives: the caller sized the
+/// buffer from the range it asked for.
+///
+/// # Safety
+///
+/// `buffer` is writable for `range.length` `unichar`s.
+unsafe extern "C" fn get_characters_range(
+    receiver: Id,
+    _sel: Sel,
+    buffer: *mut u16,
+    range: NSRange,
+) {
+    // SAFETY: the receiver is an `NSString`, and the caller states the buffer
+    // holds the range's characters.
+    unsafe {
+        api::CFStringGetCharacters(
+            receiver as CFTypeRef,
+            range.location as corefoundation::base::CFIndex,
+            range.length as corefoundation::base::CFIndex,
+            buffer,
+        )
+    }
+}
+
+/// `-getCharacters:`, which is the whole string rather than a range.
+///
+/// # Safety
+///
+/// `buffer` is writable for `-length` `unichar`s.
+unsafe extern "C" fn get_characters(receiver: Id, sel: Sel, buffer: *mut u16) {
+    // SAFETY: an `NSString`.
+    let length = unsafe { length(receiver, sel) };
+    // SAFETY: the caller states the buffer holds the whole string.
+    unsafe {
+        get_characters_range(
+            receiver,
+            sel,
+            buffer,
+            NSRange {
+                location: 0,
+                length,
+            },
+        )
+    }
+}
+
 unsafe extern "C" fn lowercase(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: an `NSString`.
     let mut whole = unsafe { bytes(receiver) };
@@ -870,6 +956,8 @@ pub(crate) fn install() {
         "maximumLengthOfBytesUsingEncoding:" => length_of_bytes, c"Q24@0:8Q16";
         "isEqualToString:" => is_equal_to_string, c"B24@0:8@16";
         "characterAtIndex:" => character_at_index, c"S24@0:8Q16";
+        "getCharacters:range:" => get_characters_range, c"v40@0:8^S16{_NSRange=QQ}24";
+        "getCharacters:" => get_characters, c"v24@0:8^S16";
         "description" => description, c"@16@0:8";
         "copy" => copy, c"@16@0:8";
         "copyWithZone:" => copy, c"@24@0:8^v16";
@@ -933,9 +1021,15 @@ pub(crate) fn install() {
         "stringWithFormat:" => string_with_format, c"@24@0:8@16";
         "localizedStringWithFormat:" => string_with_format, c"@24@0:8@16";
         "stringWithString:" => string_with_string, c"@24@0:8@16";
+        "stringWithCharacters:length:" => string_with_characters, c"@32@0:8^S16Q24";
     });
     methods!(class, {
         "initWithString:" => string_with_string, c"@24@0:8@16";
+        // `-initWithCharacters:length:` on a freshly allocated `NSString` answers
+        // a new object rather than filling the receiver in. That is what every
+        // other initializer here does, and what the immutable storage allows:
+        // `corefoundation::string` lays a string out at creation.
+        "initWithCharacters:length:" => string_with_characters, c"@32@0:8^S16Q24";
     });
 }
 

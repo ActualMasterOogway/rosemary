@@ -18,10 +18,12 @@ mod define;
 pub mod error;
 pub mod exception;
 pub mod filemanager;
+pub mod formatter;
 pub mod geometry;
 pub mod json;
 pub mod keychain;
 pub mod kvc;
+pub mod kvo;
 pub mod locale;
 pub mod notification;
 pub mod objectify;
@@ -55,6 +57,8 @@ pub fn bootstrap() {
         geometry::install();
         value::install();
         kvc::install();
+        kvo::install();
+        runtime::install();
         notification::install();
         constant::install();
         declare_abstract();
@@ -62,6 +66,7 @@ pub fn bootstrap() {
         filemanager::install();
         exception::install();
         locale::install();
+        formatter::install();
         timer::install();
         thread::install();
         operation::install();
@@ -87,6 +92,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         .or_else(|| keychain::symbol(name))
         .or_else(|| runtime::symbol(name))
         .or_else(|| locale::cf::symbol(name))
+        .or_else(|| formatter::cf::symbol(name))
         .or_else(|| timer::cf::symbol(name))
 }
 
@@ -99,6 +105,7 @@ pub fn names() -> impl Iterator<Item = &'static str> {
         .chain(keychain::NAMES)
         .chain(runtime::NAMES)
         .chain(locale::cf::NAMES)
+        .chain(formatter::cf::NAMES)
         .chain(timer::cf::NAMES)
         .copied()
 }
@@ -291,6 +298,8 @@ pub fn data_symbols() -> Vec<(String, u64)> {
     let mut out = class_data();
     for (symbol, text) in locale::KEYS
         .iter()
+        .chain(formatter::cf::KEYS)
+        .chain(kvo::KEYS)
         .chain(keychain::KEYS)
         .copied()
         .chain(STRING_GLOBALS.iter().copied())

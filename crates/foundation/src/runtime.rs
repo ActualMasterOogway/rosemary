@@ -1,14 +1,19 @@
-//! Foundation's spellings of four Objective-C runtime questions.
+//! Foundation's spellings of four Objective-C runtime questions, and `-className`.
 //!
 //! `NSSelectorFromString` and `NSClassFromString` are what a program uses when
 //! the name it is acting on is data - a selector read from a nib, a class
 //! chosen by a feature flag - and their inverses are how it reports one. The
 //! runtime underneath is `objc`; this crate owns the `NSString` at each end.
+//!
+//! `-className` is here for the same reason: it is an `NSObject` method that
+//! answers with an `NSString`, and `objc` has no string to answer with.
 
 #![allow(non_snake_case)]
 
 use objc::object::Id;
 use objc::sel::Sel;
+
+use crate::define::methods;
 
 pub const NAMES: &[&str] = &[
     "NSSelectorFromString",
@@ -99,4 +104,29 @@ unsafe extern "C" fn NSStringFromClass(class: *const objc::class::Class) -> Id {
         return std::ptr::null_mut();
     };
     autoreleased(class.name_str())
+}
+
+/// `-className`, the receiver's class name as an `NSString`.
+///
+/// Foundation declares it on `NSObject`, so every object answers it - which is
+/// what a caller logging or dispatching on a type relies on. Autoreleased,
+/// because the name it is built from is the class's and the string is not.
+unsafe extern "C" fn class_name(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: the receiver is a live object.
+    let name = match unsafe { objc::object::class_of(receiver) } {
+        Some(class) => class.name_str().to_string(),
+        // Nil has no class, and `-className` on it would not have been dispatched
+        // - this is the unreachable branch rather than a guess.
+        None => String::new(),
+    };
+    let string = crate::string::from_str(&name);
+    // SAFETY: a fresh object.
+    unsafe { corefoundation::api::CFAutorelease(string as corefoundation::base::CFTypeRef) as Id }
+}
+
+pub(crate) fn install() {
+    let nsobject = objc::class::lookup(c"NSObject").expect("the runtime's own NSObject");
+    methods!(nsobject, {
+        "className" => class_name, c"@16@0:8";
+    });
 }
