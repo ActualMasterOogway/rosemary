@@ -52,6 +52,7 @@ pub use exports::{
 struct Device {
     ordinal: u64,
     name: Id,
+    recommended_working_set: u64,
     target: *const metal_translate::TargetProfile,
     /// `None` when the adapter has no logical device: every resource entry
     /// point then fails through the Metal API rather than pretending.

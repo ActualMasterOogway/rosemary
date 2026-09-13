@@ -32,6 +32,7 @@ pub(super) fn devices() -> &'static [usize] {
                     Device {
                         ordinal: ordinal as u64 + 1,
                         name: foundation::string::from_str(&adapter.name),
+                        recommended_working_set: adapter.recommended_working_set,
                         target: &adapter.target,
                         gpu,
                     },

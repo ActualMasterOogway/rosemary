@@ -214,8 +214,9 @@ pub(super) unsafe extern "C" fn no(_receiver: Id, _sel: Sel) -> bool {
     false
 }
 
-pub(super) unsafe extern "C" fn recommended_working_set(_receiver: Id, _sel: Sel) -> u64 {
-    1024 * 1024 * 1024
+pub(super) unsafe extern "C" fn recommended_working_set(receiver: Id, _sel: Sel) -> u64 {
+    // SAFETY: an `R3MTLDevice`.
+    unsafe { object::body::<Device>(receiver) }.recommended_working_set
 }
 
 pub(super) unsafe extern "C" fn max_buffer_length(receiver: Id, _sel: Sel) -> u64 {

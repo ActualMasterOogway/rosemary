@@ -10,6 +10,7 @@ use crate::gpu::Gpu;
 pub struct Adapter {
     pub handle: usize,
     pub name: String,
+    pub recommended_working_set: u64,
     pub target: metal_translate::TargetProfile,
     /// The logical device, created the first time a Metal object needs one.
     /// Enumerating adapters must stay cheap: a guest asks for the device list
@@ -101,6 +102,25 @@ fn initialize() -> Result<State, String> {
             let features = unsafe { instance.get_physical_device_features(handle) };
             // SAFETY: the physical device belongs to this live instance.
             let memory = unsafe { instance.get_physical_device_memory_properties(handle) };
+            let supports_memory_budget =
+                unsafe { instance.enumerate_device_extension_properties(handle) }.is_ok_and(
+                    |extensions| {
+                        extensions.iter().any(|property| {
+                            property
+                                .extension_name_as_c_str()
+                                .is_ok_and(|name| name == ash::ext::memory_budget::NAME)
+                        })
+                    },
+                );
+            let budget = supports_memory_budget.then(|| {
+                let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+                let mut properties =
+                    vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
+                // SAFETY: the physical device belongs to this live instance,
+                // and both structures live across the call.
+                unsafe { instance.get_physical_device_memory_properties2(handle, &mut properties) };
+                budget
+            });
             // Variable pointers is a Vulkan 1.1 feature with a structure of
             // its own; a shader which phis or selects a pointer needs it, and
             // the translator rejects such a shader where it is absent.
@@ -122,6 +142,7 @@ fn initialize() -> Result<State, String> {
                 Adapter {
                     handle: handle.as_raw() as usize,
                     name,
+                    recommended_working_set: recommended_working_set(&memory, budget.as_ref()),
                     target: metal_translate::TargetProfile {
                         shader_int64: features.shader_int64 == vk::TRUE,
                         variable_pointers_storage_buffer: pointers.variable_pointers_storage_buffer
@@ -181,6 +202,27 @@ fn adapter_rank(
         device_local_memory,
         max_image_dimension_2d: properties.limits.max_image_dimension2_d,
     }
+}
+
+fn recommended_working_set(
+    memory: &vk::PhysicalDeviceMemoryProperties,
+    budget: Option<&vk::PhysicalDeviceMemoryBudgetPropertiesEXT<'_>>,
+) -> u64 {
+    let heaps = &memory.memory_heaps[..memory.memory_heap_count as usize];
+    let capacity = heaps
+        .iter()
+        .filter(|heap| heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+        .map(|heap| heap.size)
+        .sum();
+    let budget = budget.map_or(0, |budget| {
+        heaps
+            .iter()
+            .enumerate()
+            .filter(|(_, heap)| heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+            .map(|(index, _)| budget.heap_budget[index])
+            .sum()
+    });
+    if budget == 0 { capacity } else { budget }
 }
 
 /// The surface extensions to create the instance with: `VK_KHR_surface` and
@@ -310,6 +352,28 @@ mod tests {
         assert!(
             adapter_rank(&properties, &memory(16 * 1024 * 1024 * 1024))
                 > adapter_rank(&properties, &memory(8 * 1024 * 1024 * 1024))
+        );
+    }
+
+    #[test]
+    fn working_set_uses_the_device_local_budget() {
+        let memory = memory(8 * 1024 * 1024 * 1024);
+        let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+        budget.heap_budget[0] = 6 * 1024 * 1024 * 1024;
+
+        assert_eq!(
+            recommended_working_set(&memory, Some(&budget)),
+            6 * 1024 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn working_set_falls_back_to_device_local_capacity() {
+        let memory = memory(8 * 1024 * 1024 * 1024);
+
+        assert_eq!(
+            recommended_working_set(&memory, None),
+            8 * 1024 * 1024 * 1024
         );
     }
 

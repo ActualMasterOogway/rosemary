@@ -8,6 +8,7 @@ fn device_for_tests() -> Id {
         Device {
             ordinal: 1,
             name: foundation::string::from_str("Test Device"),
+            recommended_working_set: 1 << 30,
             target,
             gpu: None,
         },
