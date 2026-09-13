@@ -39,7 +39,7 @@ Rosetta 3 currently has two execution backends:
 
 ## Building
 
-Rosetta 3 uses the Rust 2024 edition and currently requires Rust 1.88 or newer.
+Rosetta 3 uses the Rust 2024 edition and currently requires Rust 1.96 or newer.
 The Microlift and Microlift Wasmtime repositories are Git dependencies, so the
 build environment must be able to fetch them.
 
