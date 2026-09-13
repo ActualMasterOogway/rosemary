@@ -197,8 +197,13 @@ impl Swapchain {
         let surface = sdl3::video::vulkan::create_surface(window, instance)
             .ok_or_else(|| format!("SDL_Vulkan_CreateSurface failed: {}", sdl3::error()))?;
         let surface = vk::SurfaceKHR::from_raw(surface);
-        if !gpu.can_present(surface) {
+        // Until the `Swapchain` exists there is no `Drop` to undo any of this,
+        // so each piece is guarded and the guards are taken together once the
+        // last fallible step has succeeded.
+        let surface = gpu::Guard::new(surface, |surface| {
             sdl3::video::vulkan::destroy_surface(instance, surface.as_raw());
+        });
+        if !gpu.can_present(*surface) {
             return Err("the Vulkan queue Metal submits to cannot present to this window".into());
         }
         let pool_info = vk::CommandPoolCreateInfo::default()
@@ -207,36 +212,52 @@ impl Swapchain {
         // SAFETY: a well-formed create info on this live device.
         let pool = unsafe { gpu.device.create_command_pool(&pool_info, None) }
             .map_err(|error| format!("vkCreateCommandPool failed with {error:?}"))?;
+        // The command buffers are the pool's, so they go with it.
+        let pool = gpu::Guard::new(pool, |pool| {
+            // SAFETY: a pool of this device's, nothing allocated from it
+            // having been submitted.
+            unsafe { gpu.device.destroy_command_pool(pool, None) };
+        });
         let allocate = vk::CommandBufferAllocateInfo::default()
-            .command_pool(pool)
+            .command_pool(*pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(FRAMES_IN_FLIGHT as u32);
         // SAFETY: the pool was just created by this device.
         let command_buffers = unsafe { gpu.device.allocate_command_buffers(&allocate) }
             .map_err(|error| format!("vkAllocateCommandBuffers failed with {error:?}"))?;
-        let mut frames = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut frames = gpu::GuardedVec::new(|frame: &Frame| {
+            // SAFETY: objects of this device's, never submitted.
+            unsafe {
+                gpu.device.destroy_semaphore(frame.acquired, None);
+                gpu.device.destroy_fence(frame.done, None);
+            }
+        });
         for command_buffer in command_buffers {
             // A fence created signalled, because the first use of every frame
             // waits on it before it has ever been submitted.
             let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-            // SAFETY: well-formed create infos on this live device.
-            let (acquired, done) = unsafe {
-                (
-                    gpu.device
-                        .create_semaphore(&vk::SemaphoreCreateInfo::default(), None),
-                    gpu.device.create_fence(&fence_info, None),
-                )
-            };
+            // SAFETY: a well-formed create info on this live device.
+            let acquired = unsafe {
+                gpu.device
+                    .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+            }
+            .map_err(|error| format!("vkCreateSemaphore failed with {error:?}"))?;
+            let acquired = gpu::Guard::new(acquired, |acquired| {
+                // SAFETY: a semaphore of this device's, never submitted.
+                unsafe { gpu.device.destroy_semaphore(acquired, None) };
+            });
+            // SAFETY: a well-formed create info on this live device.
+            let done = unsafe { gpu.device.create_fence(&fence_info, None) }
+                .map_err(|error| format!("vkCreateFence failed with {error:?}"))?;
             frames.push(Frame {
                 command_buffer,
-                acquired: acquired
-                    .map_err(|error| format!("vkCreateSemaphore failed with {error:?}"))?,
-                done: done.map_err(|error| format!("vkCreateFence failed with {error:?}"))?,
+                acquired: acquired.take(),
+                done,
             });
         }
         let mut swapchain = Self {
             gpu,
-            surface,
+            surface: surface.take(),
             handle: vk::SwapchainKHR::null(),
             format: vk::Format::UNDEFINED,
             extent,
@@ -245,17 +266,22 @@ impl Swapchain {
             blitted: Vec::new(),
             composite: None,
             layers: Vec::new(),
-            pool,
-            frames,
+            pool: pool.take(),
+            frames: frames.take(),
             frame: 0,
         };
+        // From here the `Drop` above owns everything, including whatever
+        // `build` leaves behind when it fails.
         swapchain.build(extent)?;
         Ok(swapchain)
     }
 
     /// Create the `VkSwapchainKHR` itself, replacing whatever is there.
+    ///
+    /// Every replacement is built whole before any of it is installed: a
+    /// failure part-way leaves the swapchain exactly as it was, rather than a
+    /// `self.handle` naming a swapchain this call has already destroyed.
     fn build(&mut self, requested: vk::Extent2D) -> Result<(), String> {
-        self.requested = requested;
         let surface_api = crate::vulkan::surface_api().ok_or("VK_KHR_surface is gone")?;
         let api = self.gpu.swapchain_api().ok_or("VK_KHR_swapchain is gone")?;
         // SAFETY: a physical device and a surface of this instance's.
@@ -317,39 +343,54 @@ impl Swapchain {
             .clipped(true)
             .old_swapchain(self.handle);
         // SAFETY: a well-formed create info; the old swapchain is retired by
-        // this call and destroyed below.
+        // this call and destroyed once the replacement is whole.
         let handle = unsafe { api.create_swapchain(&info, None) }
             .map_err(|error| format!("vkCreateSwapchainKHR failed with {error:?}"))?;
-        if self.handle != vk::SwapchainKHR::null() {
-            // SAFETY: retired by the creation above, and every submission
-            // touching its images has been waited for by the caller.
-            unsafe { api.destroy_swapchain(self.handle, None) };
-        }
+        let handle = gpu::Guard::new(handle, |handle| {
+            // SAFETY: a swapchain of this device's which was never installed,
+            // so nothing has acquired an image from it.
+            unsafe { api.destroy_swapchain(handle, None) };
+        });
         // SAFETY: the swapchain was just created by this device.
-        let images = unsafe { api.get_swapchain_images(handle) }
+        let images = unsafe { api.get_swapchain_images(*handle) }
             .map_err(|error| format!("vkGetSwapchainImagesKHR failed with {error:?}"))?;
-        self.handle = handle;
-        self.format = chosen.format;
-        self.extent = extent;
-        // The old swapchain's images are gone with it, and so is the meaning
-        // of a semaphore indexed by one.
-        for semaphore in std::mem::take(&mut self.blitted) {
-            // SAFETY: the queue was made idle before the rebuild, and the
-            // swapchain these were presented through is destroyed above.
-            unsafe { self.gpu.device.destroy_semaphore(semaphore, None) };
-        }
-        self.blitted = images
-            .iter()
-            .map(|_| {
-                // SAFETY: a well-formed create info on this live device.
+        // One semaphore per image, made before anything is installed so that a
+        // failure half way through leaves neither these nor the swapchain.
+        let mut blitted = gpu::GuardedVec::new(|semaphore: &vk::Semaphore| {
+            // SAFETY: a semaphore of this device's, never submitted.
+            unsafe { self.gpu.device.destroy_semaphore(*semaphore, None) };
+        });
+        for _ in &images {
+            // SAFETY: a well-formed create info on this live device.
+            blitted.push(
                 unsafe {
                     self.gpu
                         .device
                         .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
                 }
-                .map_err(|error| format!("vkCreateSemaphore failed with {error:?}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                .map_err(|error| format!("vkCreateSemaphore failed with {error:?}"))?,
+            );
+        }
+
+        // Nothing below can fail, so the replacement is installed and the old
+        // state destroyed as one step.
+        let blitted = blitted.take();
+        let old = std::mem::replace(&mut self.handle, handle.take());
+        if old != vk::SwapchainKHR::null() {
+            // SAFETY: retired by the creation above, and every submission
+            // touching its images has been waited for by the caller.
+            unsafe { api.destroy_swapchain(old, None) };
+        }
+        // The old swapchain's images are gone with it, and so is the meaning
+        // of a semaphore indexed by one.
+        for semaphore in std::mem::replace(&mut self.blitted, blitted) {
+            // SAFETY: the queue was made idle before the rebuild, and the
+            // swapchain these were presented through is destroyed above.
+            unsafe { self.gpu.device.destroy_semaphore(semaphore, None) };
+        }
+        self.requested = requested;
+        self.format = chosen.format;
+        self.extent = extent;
         self.images = images;
         if let Some(composite) = self.composite.take() {
             self.gpu.destroy_image(composite);

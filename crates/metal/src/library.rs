@@ -305,3 +305,29 @@ pub(super) fn fnv1a64(bytes: &[u8]) -> u64 {
         (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
     })
 }
+
+/// `-[MTLLibrary dealloc]`.
+///
+/// The translated modules and the AIR kept for function constants are Rust
+/// allocations of this body's; a function made from the library retains it,
+/// so a library only reaches here once every function it vended has gone.
+pub(super) unsafe extern "C" fn library_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a library of this crate's.
+    let library = unsafe { object::body::<Library>(receiver) };
+    // SAFETY: the body was established by `object::make` and is not read again.
+    unsafe { std::ptr::drop_in_place(library as *mut Library) };
+    objc::arc::finalize(receiver);
+}
+
+/// `-[MTLFunction dealloc]`.
+pub(super) unsafe extern "C" fn function_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a function of this crate's.
+    let function = unsafe { object::body::<Function>(receiver) };
+    objc::arc::release(std::mem::replace(
+        &mut function.library,
+        std::ptr::null_mut(),
+    ));
+    // SAFETY: as above. The specialized artifact is this body's own.
+    unsafe { std::ptr::drop_in_place(function as *mut Function) };
+    objc::arc::finalize(receiver);
+}

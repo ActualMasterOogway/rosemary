@@ -55,13 +55,15 @@ pub(super) unsafe extern "C" fn dispatch_threadgroups(
         ]
     };
     encoder.bind_pipeline(vk::PipelineBindPoint::COMPUTE, pipeline);
-    encoder.bind_resources(
+    if !encoder.bind_resources(
         &state.resources,
         &state.layouts.sets,
         state.layouts.pipeline,
         state.layouts.push_set,
         vk::PipelineBindPoint::COMPUTE,
-    );
+    ) {
+        return;
+    }
     gpu::milestone("compute dispatch");
     stats::count(Counter::Dispatches);
     let command = encoder.command();

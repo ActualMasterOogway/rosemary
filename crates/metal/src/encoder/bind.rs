@@ -133,6 +133,19 @@ pub(super) unsafe extern "C" fn end_encoding(receiver: Id, _sel: Sel) {
     encoder.barrier();
 }
 
+/// Report a resource the pipeline declares which nothing satisfies.
+///
+/// The draw is still recorded: see [`Encoder::collect_writes`].
+fn unbound(binding: &metal_translate::ResourceBinding, what: &str) {
+    gpu::trace_once(format!(
+        "a shader resource {what}, so its descriptor keeps whatever the set last held"
+    ));
+    gpu::trace(format!(
+        "{:?} at Metal index {} of set {} {what}",
+        binding.kind, binding.metal_index, binding.descriptor_set
+    ));
+}
+
 impl Encoder {
     pub(super) fn command<'a>(&self) -> &'a mut CommandBuffer {
         // SAFETY: the encoder holds the command buffer which made it.
@@ -140,6 +153,11 @@ impl Encoder {
     }
 
     /// Write the descriptor sets one pipeline's resources need and bind them.
+    ///
+    /// `false` only where no descriptor set could be allocated at all, which
+    /// is the caller's cue to record nothing: there is no set to bind, so the
+    /// draw would consume whichever one the bind point last held.
+    #[must_use]
     pub(super) fn bind_resources(
         &mut self,
         resources: &[metal_translate::ResourceBinding],
@@ -147,14 +165,17 @@ impl Encoder {
         pipeline_layout: vk::PipelineLayout,
         push_set: Option<usize>,
         bind_point: vk::PipelineBindPoint,
-    ) {
+    ) -> bool {
         let start = stats::enabled().then(std::time::Instant::now);
-        self.bind_resources_inner(resources, layouts, pipeline_layout, push_set, bind_point);
+        let bound =
+            self.bind_resources_inner(resources, layouts, pipeline_layout, push_set, bind_point);
         if let Some(start) = start {
             stats::add(Counter::BindMicros, start.elapsed().as_micros() as u64);
         }
+        bound
     }
 
+    #[must_use]
     pub(super) fn bind_resources_inner(
         &mut self,
         resources: &[metal_translate::ResourceBinding],
@@ -162,13 +183,15 @@ impl Encoder {
         pipeline_layout: vk::PipelineLayout,
         push_set: Option<usize>,
         bind_point: vk::PipelineBindPoint,
-    ) {
+    ) -> bool {
         let used = self.collect_writes(resources);
         let push_compatible = self.bound[bind_point_slot(bind_point)].layouts == *layouts;
         let Some(sets) = self.materialize_sets(layouts, &used, push_set) else {
-            // A descriptor pool with nothing left abandons the bind, as it did
-            // when this was one function with an early return.
-            return;
+            gpu::trace_once(
+                "a descriptor set could not be allocated, so the draw or dispatch which needed \
+                 it is not recorded",
+            );
+            return false;
         };
         self.bind_sets(&used, &sets, layouts, pipeline_layout, bind_point);
         if let Some(index) = push_set.filter(|index| used[*index]) {
@@ -180,10 +203,22 @@ impl Encoder {
                 push_compatible,
             );
         }
+        true
     }
 
     /// Gather each binding into the descriptor writes its set wants, and
     /// report which sets the pipeline actually uses.
+    ///
+    /// A resource the pipeline declares but the guest never bound is skipped
+    /// rather than refused, and the draw is still recorded. Binding nil is
+    /// ordinary Metal - a nil texture samples as zero, and a shader which
+    /// declares a map the material does not use gets one - so refusing the
+    /// draw would drop geometry a real guest expects to see. The cost is that
+    /// the descriptor keeps whatever the set last held, which is
+    /// [a known gap](../../../../docs/metal.md): expressing Metal's semantics
+    /// needs `VK_EXT_robustness2`'s `nullDescriptor`, or a placeholder
+    /// resource per descriptor shape, which needs the texture's dimensionality
+    /// in the reflection.
     fn collect_writes(&mut self, resources: &[metal_translate::ResourceBinding]) -> [bool; SETS] {
         let mut used = [false; SETS];
         for wanted in &mut self.wanted {
@@ -192,12 +227,15 @@ impl Encoder {
         for binding in resources {
             let set = binding.descriptor_set as usize;
             if set >= SETS {
+                // Rejected by `layouts_for`, so not reachable through a
+                // pipeline which exists.
                 continue;
             }
             used[set] = true;
             let slot = stage_slot(binding.stage);
             let index = binding.metal_index as usize;
             if index >= SLOTS {
+                unbound(binding, "is past the Metal index this encoder tracks");
                 continue;
             }
             let Some(kind) = descriptor_type(binding) else {
@@ -207,6 +245,7 @@ impl Encoder {
                 ResourceKind::Buffer => {
                     let bound = self.buffers[slot][index];
                     if bound.buffer == vk::Buffer::null() {
+                        unbound(binding, "has no buffer bound to it");
                         continue;
                     }
                     use vk::Handle;
@@ -219,6 +258,7 @@ impl Encoder {
                 ResourceKind::Texture => {
                     let bound = self.textures[slot][index];
                     if bound.is_null() {
+                        unbound(binding, "has no texture bound to it");
                         continue;
                     }
                     // SAFETY: only a texture of this crate's is ever bound.
@@ -229,6 +269,7 @@ impl Encoder {
                 ResourceKind::Sampler => {
                     let bound = self.samplers[slot][index];
                     if bound.is_null() {
+                        unbound(binding, "has no sampler bound to it");
                         continue;
                     }
                     // SAFETY: only a sampler state of this crate's is bound.
@@ -566,13 +607,15 @@ impl Encoder {
                 device.cmd_bind_vertex_buffers(vk_command, *stream, &[binding.0], &[binding.1])
             };
         }
-        self.bind_resources(
+        if !self.bind_resources(
             &state.resources,
             &state.layouts.sets,
             state.layouts.pipeline,
             state.layouts.push_set,
             vk::PipelineBindPoint::GRAPHICS,
-        );
+        ) {
+            return None;
+        }
         gpu::milestone("draw");
         stats::count(Counter::Draws);
         Some((device, vk_command))

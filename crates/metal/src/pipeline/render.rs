@@ -121,6 +121,21 @@ impl RenderPipeline {
             let format = vertex_format(attribute.format).ok_or_else(|| {
                 format!("MTLVertexFormat {} has no Vulkan form", attribute.format)
             })?;
+            // `-setBufferIndex:` takes any `NSUInteger`, and the layouts below
+            // are the 31 a `MTLVertexDescriptor` has.
+            if attribute.buffer_index as usize >= VERTEX_SLOTS {
+                return Err(format!(
+                    "vertex attribute {index} names buffer index {}, which is outside the {} a \
+                     MTLVertexDescriptor has",
+                    attribute.buffer_index, VERTEX_SLOTS
+                ));
+            }
+            if u32::try_from(attribute.offset).is_err() {
+                return Err(format!(
+                    "vertex attribute {index} has offset {}, which Vulkan cannot express",
+                    attribute.offset
+                ));
+            }
             attributes.push(
                 vk::VertexInputAttributeDescription::default()
                     .location(index as u32)
@@ -133,11 +148,19 @@ impl RenderPipeline {
             }
         }
         for stream in &vertex_streams {
+            // Bounded by the check on every attribute above, which is where
+            // `vertex_streams` comes from.
             let layout = &layouts_in[*stream as usize];
+            let stride = u32::try_from(layout.stride).map_err(|_| {
+                format!(
+                    "vertex buffer {stream} has stride {}, which Vulkan cannot express",
+                    layout.stride
+                )
+            })?;
             bindings.push(
                 vk::VertexInputBindingDescription::default()
                     .binding(*stream)
-                    .stride(layout.stride as u32)
+                    .stride(stride)
                     // MTLVertexStepFunctionPerInstance is 2; per-vertex is 1
                     // and "constant" is 0, which Vulkan spells as a per-vertex
                     // stream with a zero stride the caller already set.
@@ -148,6 +171,21 @@ impl RenderPipeline {
             );
         }
 
+        // FIXME (ACCURACY): the colour list stops at the first render-target
+        // index with no format, matching the way a render pass closes a gap
+        // up rather than keeping it. A pipeline which declares targets 0 and 2
+        // therefore loses target 2. See the MRT gap in the known gaps.
+        if descriptor
+            .colors
+            .iter()
+            .skip_while(|color| color.pixel_format != 0)
+            .any(|color| color.pixel_format != 0)
+        {
+            gpu::trace_once(
+                "a render pipeline leaves a gap in its colour attachments, which this runtime \
+                 closes up: the targets after the gap are dropped",
+            );
+        }
         let colors = descriptor
             .colors
             .iter()
@@ -176,6 +214,8 @@ impl RenderPipeline {
             2 => vk::SampleCountFlags::TYPE_2,
             4 => vk::SampleCountFlags::TYPE_4,
             8 => vk::SampleCountFlags::TYPE_8,
+            16 => vk::SampleCountFlags::TYPE_16,
+            // FIXME (ACCURACY): is this default in the match arm actually sound?
             _ => vk::SampleCountFlags::TYPE_16,
         };
         let attachment_depth = if depth_format != vk::Format::UNDEFINED {
@@ -348,4 +388,29 @@ impl RenderPipeline {
         cache.insert(*key, pipeline);
         Ok(pipeline)
     }
+}
+
+/// `-[MTLRenderPipelineState dealloc]`.
+///
+/// As the compute form: a command buffer retains the state it binds until its
+/// work has retired, so nothing here can still be in flight. The render passes
+/// the variants were made against are the device's cache and stay.
+pub(super) unsafe extern "C" fn render_pipeline_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a render pipeline state of this crate's.
+    let state = unsafe { object::body::<RenderPipeline>(receiver) };
+    if !crate::resource::leaking() {
+        let variants = std::mem::take(&mut *state.variants.lock().expect("render pipeline cache"));
+        destroy_variants(state.gpu, variants.into_values());
+        state.layouts.destroy(state.gpu);
+        for module in [
+            std::mem::replace(&mut state.vertex_module, vk::ShaderModule::null()),
+            std::mem::replace(&mut state.fragment_module, vk::ShaderModule::null()),
+        ] {
+            // SAFETY: as above.
+            unsafe { state.gpu.device.destroy_shader_module(module, None) };
+        }
+    }
+    // SAFETY: the body was established by `object::make` and is not read again.
+    unsafe { std::ptr::drop_in_place(state as *mut RenderPipeline) };
+    objc::arc::finalize(receiver);
 }

@@ -287,10 +287,22 @@ pub(super) unsafe extern "C" fn replace_region(
     if bytes.is_null() {
         return;
     }
-    let [origin_x, origin_y, origin_z] = region.origin;
-    let [width, height, depth] = region.size;
     // SAFETY: a texture of this crate's.
     let texture = unsafe { object::body::<Texture>(receiver) };
+    // Every number below this line came from the guest. A region outside the
+    // texture, or a size which overflows, is a Metal programming error and
+    // becomes a diagnostic here rather than an invalid `vkCmdCopyBufferToImage`
+    // or a panic across `extern "C"`.
+    let checked = match texture.image.region(gpu::Region {
+        level,
+        slice,
+        origin: region.origin,
+        size: region.size,
+    }) {
+        Ok(checked) => checked,
+        Err(reason) => return gpu::trace(format!("replaceRegion: {reason}")),
+    };
+    let [width, height, depth] = region.size.map(|axis| axis.max(1));
     let (block_width, block_height) = gpu::block_extent(texture.image.format);
     let texel = u64::from(gpu::texel_size(texture.image.format));
     let rows = height.div_ceil(u64::from(block_height));
@@ -299,14 +311,39 @@ pub(super) unsafe extern "C" fn replace_region(
     } else {
         width.div_ceil(u64::from(block_width)) * texel
     };
-    let image_bytes = if bytes_per_image != 0 {
+    // Metal reads `bytesPerImage` only for a copy with more than one slice to
+    // it, and says to pass zero for a 2D texture; a guest which passes the
+    // whole mip level's size anyway must not make this stage - and read from
+    // the guest pointer - more than the region.
+    //
+    // This matters because the encoding for this selector did not describe
+    // `bytesPerImage` at all until recently, so the argument never arrived.
+    let image_bytes = if bytes_per_image != 0 && depth > 1 {
         bytes_per_image
     } else {
         row_bytes * rows
     };
-    let total = image_bytes * depth.max(1);
+    let Some(total) = image_bytes.checked_mul(depth) else {
+        return gpu::trace(format!(
+            "replaceRegion: {image_bytes} bytes an image over {depth} images overflows"
+        ));
+    };
     if total == 0 {
         return;
+    }
+    // The staging buffer is `total` bytes and the copy below reads
+    // `row_length * image_height * depth` of it, so a `bytesPerImage` which
+    // does not cover its own rows would have Vulkan read past the allocation.
+    let row_length = row_bytes / texel.max(1) * u64::from(block_width);
+    let image_height = rows * u64::from(block_height);
+    if image_bytes < row_bytes * rows
+        || u32::try_from(row_length).is_err()
+        || u32::try_from(image_height).is_err()
+    {
+        return gpu::trace(format!(
+            "replaceRegion: {bytes_per_row} bytes a row and {bytes_per_image} an image do not \
+             describe a {width}x{height}x{depth} region"
+        ));
     }
     let staging = match texture.gpu.create_buffer(total) {
         Ok(staging) => staging,
@@ -317,23 +354,23 @@ pub(super) unsafe extern "C" fn replace_region(
     unsafe { std::ptr::copy_nonoverlapping(bytes, staging.contents, total as usize) };
     let copy = vk::BufferImageCopy::default()
         .buffer_offset(0)
-        .buffer_row_length((row_bytes / texel * u64::from(block_width)) as u32)
-        .buffer_image_height((rows * u64::from(block_height)) as u32)
+        .buffer_row_length(row_length as u32)
+        .buffer_image_height(image_height as u32)
         .image_subresource(vk::ImageSubresourceLayers {
             aspect_mask: texture.image.aspect,
-            mip_level: level as u32,
-            base_array_layer: slice as u32,
+            mip_level: checked.level,
+            base_array_layer: checked.slice,
             layer_count: 1,
         })
         .image_offset(vk::Offset3D {
-            x: origin_x as i32,
-            y: origin_y as i32,
-            z: origin_z as i32,
+            x: checked.origin[0] as i32,
+            y: checked.origin[1] as i32,
+            z: checked.origin[2] as i32,
         })
         .image_extent(vk::Extent3D {
-            width: width.max(1) as u32,
-            height: height.max(1) as u32,
-            depth: depth.max(1) as u32,
+            width: checked.size[0],
+            height: checked.size[1],
+            depth: checked.size[2],
         });
     let image = texture.image.image;
     let result = texture.gpu.one_shot(|device, command_buffer| {

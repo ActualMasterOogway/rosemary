@@ -27,12 +27,15 @@ use sampler::*;
 use texture::*;
 use vertex::*;
 
+pub(crate) use buffer::leaking;
+
 pub(crate) use buffer::new_buffer;
 pub(crate) use depth_stencil::{DepthStencilState, StencilState, new_depth_stencil_state};
 pub(crate) use sampler::{SamplerDescriptor, SamplerState, compare_op, new_sampler};
 pub(crate) use texture::{Texture, TextureDescriptor, drawable_texture, new_texture};
 pub(crate) use vertex::{
-    IndexedCollection, VERTEX_SLOTS, VertexAttribute, VertexDescriptor, VertexLayout,
+    Element, IndexedCollection, VERTEX_SLOTS, VertexAttribute, VertexDescriptor, VertexLayout,
+    orphan, orphan_element,
 };
 
 pub(crate) struct Buffer {
@@ -153,12 +156,17 @@ pub(crate) fn install() {
     methods!(texture, {
         "dealloc" => texture_dealloc, c"v16@0:8";
         "replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:"
-            => replace_region, c"v96@0:8{MTLRegion={MTLOrigin=QQQ}{MTLSize=QQQ}}16Q64Q72^v80Q88";
+            => replace_region,
+                c"v104@0:8{MTLRegion={MTLOrigin=QQQ}{MTLSize=QQQ}}16Q64Q72^v80Q88Q96";
         "setLabel:" => crate::no_op, c"v24@0:8@16";
     });
 
     let sampler_descriptor = object::register::<SamplerDescriptor>(c"MTLSamplerDescriptor");
-    object::register::<SamplerState>(c"R3MTLSamplerState");
+    let sampler_state = object::register::<SamplerState>(c"R3MTLSamplerState");
+    methods!(sampler_state, {
+        "dealloc" => sampler_state_dealloc, c"v16@0:8";
+        "setLabel:" => crate::no_op, c"v24@0:8@16";
+    });
     methods!(sampler_descriptor, {
         "init" => sampler_descriptor_init, c"@16@0:8";
         "setLodMinClamp:" => set_sampler_clamp, c"v20@0:8f16";

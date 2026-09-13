@@ -193,6 +193,7 @@ pub fn bootstrap() {
             "currentAllocatedSize" => current_allocated_size, c"Q16@0:8";
         });
         methods!(library_class, {
+            "dealloc" => library_dealloc, c"v16@0:8";
             "newFunctionWithName:" => new_function_with_name, c"@24@0:8@16";
             "newFunctionWithName:constantValues:error:" => new_function_with_constants,
                 c"@40@0:8@16@24^@32";
@@ -201,6 +202,7 @@ pub fn bootstrap() {
             "setLabel:" => no_op, c"v24@0:8@16";
         });
         methods!(function_class, {
+            "dealloc" => function_dealloc, c"v16@0:8";
             "name" => function_name, c"@16@0:8";
             "setLabel:" => no_op, c"v24@0:8@16";
         });

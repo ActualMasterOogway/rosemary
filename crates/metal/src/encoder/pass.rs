@@ -178,6 +178,22 @@ struct Attachments {
     textures: Vec<Id>,
 }
 
+/// Record the sample count one attachment brings to a pass.
+///
+/// Metal requires every attachment of a pass to have the same one, and a
+/// Vulkan render pass has a single `samples` for the whole subpass, so the
+/// last attachment's count describes every one of them. A pass which mixes
+/// them is malformed Metal and is named rather than silently described wrong.
+fn samples(key: &mut RenderPassKey, count: vk::SampleCountFlags, first: bool) {
+    if !first && key.samples != count {
+        gpu::trace_once(
+            "a render pass mixes attachment sample counts, which Metal does not allow: the \
+             last attachment's count describes the whole pass",
+        );
+    }
+    key.samples = count;
+}
+
 /// Gather what a descriptor's attachments amount to, without touching the
 /// command buffer: the caller decides what to do when there are none.
 fn gather_attachments(descriptor: &RenderPassDescriptor) -> Attachments {
@@ -201,14 +217,30 @@ fn gather_attachments(descriptor: &RenderPassDescriptor) -> Attachments {
     // formats a string.
     let capturing = crate::capture::enabled();
 
-    for color in &descriptor.colors {
+    // FIXME (ACCURACY): a render-target index with no texture closes up rather
+    // than staying a gap, so a pass which attaches targets 0 and 2 describes
+    // two attachments and the fragment shader's `[[color(2)]]` lands on the
+    // second of them. Representing the gap needs a `VK_ATTACHMENT_UNUSED`
+    // reference here and the matching hole in the pipeline's colour list.
+    let last_color = descriptor
+        .colors
+        .iter()
+        .rposition(|color| !color.texture.is_null());
+    for (index, color) in descriptor.colors.iter().enumerate() {
         if color.texture.is_null() {
+            if last_color.is_some_and(|last| index < last) {
+                gpu::trace_once(
+                    "a render pass leaves a gap in its colour attachments, which this runtime \
+                     closes up: the targets after the gap are misrouted",
+                );
+            }
             continue;
         }
         // SAFETY: only a texture of this crate's is attached.
         let texture = unsafe { object::body::<Texture>(color.texture) };
         let format = texture.image.format;
-        key.samples = texture.image.samples;
+        let first = key.colors.is_empty();
+        samples(&mut key, texture.image.samples, first);
         let level = color.level as u32;
         views.push(texture.attachment_view(level, color.slice as u32));
         let (base_width, base_height) = (texture.image.width, texture.image.height);
@@ -282,6 +314,20 @@ fn gather_attachments(descriptor: &RenderPassDescriptor) -> Attachments {
         height = height.min(level_extent(base_height, level));
         textures.push(color.texture);
     }
+    // FIXME (ACCURACY): Metal allows a depth texture and a separate stencil
+    // texture on one pass; a Vulkan subpass has one depth/stencil attachment,
+    // so only the depth one is attached and the stencil texture is neither
+    // loaded nor stored. A combined depth/stencil texture named in both slots
+    // - which is what a game that wants both normally does - is unaffected.
+    if !descriptor.depth.texture.is_null()
+        && !descriptor.stencil.texture.is_null()
+        && descriptor.depth.texture != descriptor.stencil.texture
+    {
+        gpu::trace_once(
+            "a render pass names separate depth and stencil textures, which one Vulkan \
+             attachment cannot hold: the stencil texture is ignored",
+        );
+    }
     let depth_attachment = if !descriptor.depth.texture.is_null() {
         Some(&descriptor.depth)
     } else if !descriptor.stencil.texture.is_null() {
@@ -307,7 +353,8 @@ fn gather_attachments(descriptor: &RenderPassDescriptor) -> Attachments {
         if resolves(attachment.store_action) && !attachment.resolve_texture.is_null() {
             gpu::trace_once("render pass asks for a depth resolve, which is not implemented");
         }
-        key.samples = texture.image.samples;
+        let first = key.colors.is_empty();
+        samples(&mut key, texture.image.samples, first);
         let level = attachment.level as u32;
         views.push(texture.attachment_view(level, attachment.slice as u32));
         clears.push(vk::ClearValue {
@@ -449,7 +496,7 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
 pub(super) unsafe extern "C" fn render_pass_descriptor_init(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: a render pass descriptor of this crate's. `-init` reaches a fresh
     // one, whose body is zero, and a reused one, which still owns what it holds.
-    unsafe { release_pass_contents(receiver) };
+    unsafe { release_pass_contents(receiver, false) };
     // SAFETY: as above.
     *unsafe { object::body::<RenderPassDescriptor>(receiver) } = RenderPassDescriptor::default();
     receiver
@@ -457,10 +504,14 @@ pub(super) unsafe extern "C" fn render_pass_descriptor_init(receiver: Id, _sel: 
 
 /// Give up every reference a render pass descriptor holds, leaving it null.
 ///
+/// `orphaning` only where the descriptor itself is going: `-init` reaches a
+/// reused descriptor which is still alive, and Metal keeps setting through an
+/// attachment object a guest took before it.
+///
 /// # Safety
 ///
 /// `receiver` must be a `MTLRenderPassDescriptor` of this crate's.
-pub(super) unsafe fn release_pass_contents(receiver: Id) {
+pub(super) unsafe fn release_pass_contents(receiver: Id, orphaning: bool) {
     // SAFETY: the caller's obligation.
     let descriptor = unsafe { object::body::<RenderPassDescriptor>(receiver) };
     let mut attachments: Vec<&mut AttachmentDescriptor> = descriptor.colors.iter_mut().collect();
@@ -476,20 +527,34 @@ pub(super) unsafe fn release_pass_contents(receiver: Id) {
             std::ptr::null_mut(),
         ));
     }
-    for slot in [
-        &mut descriptor.color_objects,
-        &mut descriptor.depth_object,
-        &mut descriptor.stencil_object,
-        &mut descriptor.visibility_result_buffer,
-    ] {
-        objc::arc::release(std::mem::replace(slot, std::ptr::null_mut()));
+    // The attachment objects point back at this descriptor, and a guest may
+    // hold one - or the collection - after releasing the descriptor. Orphan
+    // each before it goes, so a later setter is a no-op rather than a write
+    // through a dangling pointer.
+    let colors = std::mem::replace(&mut descriptor.color_objects, std::ptr::null_mut());
+    if orphaning {
+        crate::resource::orphan(colors);
     }
+    objc::arc::release(colors);
+    for slot in [&mut descriptor.depth_object, &mut descriptor.stencil_object] {
+        let element = std::mem::replace(slot, std::ptr::null_mut());
+        if orphaning && !element.is_null() {
+            // SAFETY: an `R3MTLRenderPassAttachmentDescriptor` this descriptor
+            // made.
+            unsafe { crate::resource::orphan_element::<AttachmentElement>(element) };
+        }
+        objc::arc::release(element);
+    }
+    objc::arc::release(std::mem::replace(
+        &mut descriptor.visibility_result_buffer,
+        std::ptr::null_mut(),
+    ));
 }
 
 /// `-[MTLRenderPassDescriptor dealloc]`.
 pub(super) unsafe extern "C" fn render_pass_descriptor_dealloc(receiver: Id, _sel: Sel) {
     // SAFETY: a render pass descriptor of this crate's.
-    unsafe { release_pass_contents(receiver) };
+    unsafe { release_pass_contents(receiver, true) };
     objc::arc::finalize(receiver);
 }
 
@@ -526,6 +591,12 @@ pub(crate) struct AttachmentElement {
     pub slot: AttachmentSlot,
 }
 
+impl crate::resource::Element for AttachmentElement {
+    fn owner(&mut self) -> &mut Id {
+        &mut self.owner
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum AttachmentSlot {
     Color(usize),
@@ -533,16 +604,22 @@ pub(crate) enum AttachmentSlot {
     Stencil,
 }
 
-pub(super) fn attachment_of<'a>(element: Id) -> &'a mut AttachmentDescriptor {
+/// The attachment one element names, or `None` once the descriptor which
+/// vended the element has gone and orphaned it.
+pub(super) fn attachment_of<'a>(element: Id) -> Option<&'a mut AttachmentDescriptor> {
     // SAFETY: an attachment element of this crate's.
     let element = *unsafe { object::body::<AttachmentElement>(element) };
-    // SAFETY: the element holds the descriptor which made it.
+    if element.owner.is_null() {
+        return None;
+    }
+    // SAFETY: the element holds the descriptor which made it, which orphans
+    // every element it vended before it goes.
     let descriptor = unsafe { object::body::<RenderPassDescriptor>(element.owner) };
-    match element.slot {
+    Some(match element.slot {
         AttachmentSlot::Color(index) => &mut descriptor.colors[index],
         AttachmentSlot::Depth => &mut descriptor.depth,
         AttachmentSlot::Stencil => &mut descriptor.stencil,
-    }
+    })
 }
 
 pub(super) unsafe extern "C" fn pass_color_attachments(receiver: Id, _sel: Sel) -> Id {
@@ -564,7 +641,14 @@ pub(super) unsafe extern "C" fn pass_color_attachments(receiver: Id, _sel: Sel) 
         .collect::<Vec<_>>();
     let collection = object::make(
         c"R3MTLIndexedCollection",
-        crate::resource::IndexedCollection { elements },
+        crate::resource::IndexedCollection {
+            elements,
+            // SAFETY: every element here is an
+            // `R3MTLRenderPassAttachmentDescriptor`.
+            orphan: |element| unsafe {
+                crate::resource::orphan_element::<AttachmentElement>(element)
+            },
+        },
     );
     // SAFETY: as above.
     unsafe { object::body::<RenderPassDescriptor>(receiver) }.color_objects = collection;
@@ -606,7 +690,9 @@ pub(super) unsafe extern "C" fn pass_single_attachment(receiver: Id, sel: Sel) -
 }
 
 pub(super) unsafe extern "C" fn set_attachment_object(receiver: Id, sel: Sel, value: Id) {
-    let attachment = attachment_of(receiver);
+    let Some(attachment) = attachment_of(receiver) else {
+        return;
+    };
     // SAFETY: a selector the runtime owns.
     let slot = match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
         b"setTexture:" => &mut attachment.texture,
@@ -617,7 +703,9 @@ pub(super) unsafe extern "C" fn set_attachment_object(receiver: Id, sel: Sel, va
 }
 
 pub(super) unsafe extern "C" fn set_attachment_number(receiver: Id, sel: Sel, value: u64) {
-    let attachment = attachment_of(receiver);
+    let Some(attachment) = attachment_of(receiver) else {
+        return;
+    };
     // SAFETY: a selector the runtime owns.
     match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
         b"setLevel:" => attachment.level = value,
@@ -637,11 +725,15 @@ pub(super) unsafe extern "C" fn set_attachment_clear_color(
     _sel: Sel,
     color: ClearColor,
 ) {
-    attachment_of(receiver).clear_color = [color.red, color.green, color.blue, color.alpha];
+    if let Some(attachment) = attachment_of(receiver) {
+        attachment.clear_color = [color.red, color.green, color.blue, color.alpha];
+    }
 }
 
 pub(super) unsafe extern "C" fn set_attachment_clear_depth(receiver: Id, _sel: Sel, depth: f64) {
-    attachment_of(receiver).clear_depth = depth;
+    if let Some(attachment) = attachment_of(receiver) {
+        attachment.clear_depth = depth;
+    }
 }
 
 pub(super) unsafe extern "C" fn new_compute_encoder(receiver: Id, _sel: Sel) -> Id {

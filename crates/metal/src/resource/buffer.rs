@@ -78,7 +78,7 @@ pub(super) unsafe extern "C" fn buffer_storage_mode(receiver: Id, _sel: Sel) -> 
 /// TEMPORARY: `ROSETTA3_METAL_LEAK=1` keeps every device resource alive, to tell
 /// a fault caused by freeing one too early from every other kind.
 #[inline(always)]
-pub(super) fn leaking() -> bool {
+pub(crate) fn leaking() -> bool {
     #[dynamic]
     static LEAK: bool = std::env::var_os("ROSETTA3_METAL_LEAK").is_some();
 

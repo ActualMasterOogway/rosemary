@@ -95,3 +95,29 @@ pub(super) unsafe extern "C" fn compute_pipeline_max_threads(receiver: Id, _sel:
     let state = unsafe { object::body::<ComputePipeline>(receiver) };
     u64::from(state.gpu.limits.max_compute_work_group_invocations)
 }
+
+/// `-[MTLComputePipelineState dealloc]`.
+///
+/// Every command buffer which bound this state retained it, and released it
+/// when its submission retired, so the last reference to go is never one the
+/// device is still running.
+pub(super) unsafe extern "C" fn compute_pipeline_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a compute pipeline state of this crate's.
+    let state = unsafe { object::body::<ComputePipeline>(receiver) };
+    if !crate::resource::leaking() {
+        let variants = std::mem::take(&mut *state.variants.lock().expect("compute pipeline cache"));
+        destroy_variants(state.gpu, variants.into_values());
+        state.layouts.destroy(state.gpu);
+        // SAFETY: as above.
+        unsafe {
+            state.gpu.device.destroy_shader_module(
+                std::mem::replace(&mut state.module, vk::ShaderModule::null()),
+                None,
+            )
+        };
+    }
+    objc::arc::release(std::mem::replace(&mut state.device, std::ptr::null_mut()));
+    // SAFETY: the body was established by `object::make` and is not read again.
+    unsafe { std::ptr::drop_in_place(state as *mut ComputePipeline) };
+    objc::arc::finalize(receiver);
+}

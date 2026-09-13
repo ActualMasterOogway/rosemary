@@ -123,19 +123,17 @@ unsafe extern "C" fn next_drawable(receiver: Id, _sel: Sel) -> Id {
         if entry.layer != receiver as usize {
             return true;
         }
-        // The layer resized: the old drawable will never be vended again, and
-        // nothing is in flight because presentation waits for its readback.
-        // SAFETY: a drawable this module made.
-        let stale = unsafe { object::body::<Drawable>(entry.drawable as Id) };
-        // SAFETY: a drawable's texture is this crate's.
-        let texture = unsafe { object::body::<Texture>(stale.texture) };
-        stale.gpu.destroy_image(std::mem::replace(
-            &mut texture.image,
-            crate::gpu::GpuImage::none(),
-        ));
-        if let Some(readback) = stale.readback.take() {
-            stale.gpu.destroy_buffer(readback);
-        }
+        // The layer resized: the old drawable will never be vended again, so
+        // the cache gives up its references. It does not destroy anything: a
+        // command buffer which was handed this drawable retains it precisely
+        // because its work can still be running, and the presentation that
+        // follows still reads the image. The image and the readback buffer go
+        // in `drawable_dealloc`, once the last holder has let go.
+        let stale = entry.drawable as Id;
+        // SAFETY: a drawable this module made, whose texture is this crate's.
+        let texture = unsafe { object::body::<Drawable>(stale) }.texture;
+        objc::arc::release(texture);
+        objc::arc::release(stale);
         false
     });
 
@@ -210,6 +208,31 @@ unsafe extern "C" fn drawable_layer(receiver: Id, _sel: Sel) -> Id {
 
 unsafe extern "C" fn drawable_present(receiver: Id, _sel: Sel) {
     present(receiver);
+}
+
+/// `-[CAMetalDrawable dealloc]`.
+///
+/// A drawable outlives the cache entry that vended it whenever a command
+/// buffer still holds it, so this - and not the resize which evicted it - is
+/// where its image and readback buffer go. Everything which could have the
+/// device touching them has released its reference by now: a committed
+/// command buffer releases the drawable when its submission retires, and the
+/// readback path waits for its own copy before it returns.
+unsafe extern "C" fn drawable_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a drawable of this crate's.
+    let drawable = unsafe { object::body::<Drawable>(receiver) };
+    if let Some(readback) = drawable.readback.take() {
+        drawable.gpu.destroy_buffer(readback);
+    }
+    // The texture owns the drawable's image, and destroys it in its own
+    // `dealloc`.
+    objc::arc::release(std::mem::replace(
+        &mut drawable.texture,
+        std::ptr::null_mut(),
+    ));
+    // SAFETY: the body was established by `object::make` and is not read again.
+    unsafe { std::ptr::drop_in_place(drawable as *mut Drawable) };
+    objc::arc::finalize(receiver);
 }
 
 /// Read the drawable's image back and blit it into the window.
@@ -491,6 +514,7 @@ pub(crate) fn install() {
     object::register::<Drawable>(c"R3CAMetalDrawable");
     let drawable = objc::class::lookup(c"R3CAMetalDrawable").expect("just registered");
     methods!(drawable, {
+        "dealloc" => drawable_dealloc, c"v16@0:8";
         "texture" => drawable_texture, c"@16@0:8";
         "layer" => drawable_layer, c"@16@0:8";
         "present" => drawable_present, c"v16@0:8";

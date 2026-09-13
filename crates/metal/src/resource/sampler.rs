@@ -3,6 +3,7 @@
 use super::*;
 
 pub(crate) struct SamplerState {
+    pub gpu: &'static Gpu,
     pub sampler: vk::Sampler,
 }
 
@@ -95,7 +96,7 @@ pub(crate) fn new_sampler(gpu: &'static Gpu, descriptor: &SamplerDescriptor) -> 
             return std::ptr::null_mut();
         }
     };
-    object::make(c"R3MTLSamplerState", SamplerState { sampler })
+    object::make(c"R3MTLSamplerState", SamplerState { gpu, sampler })
 }
 
 pub(super) unsafe extern "C" fn sampler_descriptor_init(receiver: Id, _sel: Sel) -> Id {
@@ -132,4 +133,24 @@ pub(super) unsafe extern "C" fn set_sampler_clamp(receiver: Id, sel: Sel, value:
         b"setLodMaxClamp:" => descriptor.lod_max_clamp = value,
         _ => unreachable!("only registered clamp setters reach this method"),
     }
+}
+
+/// `-[MTLSamplerState dealloc]`.
+///
+/// An encoder which bound this sampler retained it, and releases it when its
+/// submission retires, so the last reference to go is never one the device is
+/// still reading.
+pub(super) unsafe extern "C" fn sampler_state_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a sampler state of this crate's.
+    let state = unsafe { object::body::<SamplerState>(receiver) };
+    if !leaking() {
+        // SAFETY: the last reference is gone, so nothing can bind it again.
+        unsafe {
+            state.gpu.device.destroy_sampler(
+                std::mem::replace(&mut state.sampler, vk::Sampler::null()),
+                None,
+            )
+        };
+    }
+    objc::arc::finalize(receiver);
 }

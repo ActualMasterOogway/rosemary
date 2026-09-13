@@ -158,8 +158,15 @@ impl Gpu {
             // SAFETY: a well-formed create info on this live device.
             let pool = unsafe { self.device.create_command_pool(&pool_info, None) }
                 .map_err(|error| format!("vkCreateCommandPool failed with {error:?}"))?;
+            // The pool owns the command buffer allocated from it, so one guard
+            // covers both: a fence which fails to be created leaves neither.
+            let pool = crate::gpu::Guard::new(pool, |pool| {
+                // SAFETY: a pool of this device's whose command buffer was
+                // never submitted.
+                unsafe { self.device.destroy_command_pool(pool, None) };
+            });
             let allocate = vk::CommandBufferAllocateInfo::default()
-                .command_pool(pool)
+                .command_pool(*pool)
                 .level(vk::CommandBufferLevel::PRIMARY)
                 .command_buffer_count(1);
             // SAFETY: the pool was just created by this device.
@@ -172,7 +179,7 @@ impl Gpu {
             }
             .map_err(|error| format!("vkCreateFence failed with {error:?}"))?;
             *slot = Some(Immediate {
-                pool,
+                pool: pool.take(),
                 command_buffer,
                 fence,
             });

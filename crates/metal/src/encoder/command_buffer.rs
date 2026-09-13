@@ -188,13 +188,12 @@ pub(super) unsafe extern "C" fn commit(receiver: Id, _sel: Sel) {
             )
         };
     }
-    // SAFETY: recording began when the command buffer was made.
-    if let Err(error) = unsafe { gpu.device.end_command_buffer(command.command_buffer) } {
-        gpu::trace(format!("vkEndCommandBuffer failed with {error:?}"));
-        command.completion.set(5); // MTLCommandBufferStatusError
-        return;
-    }
-    command.completion.set(2); // MTLCommandBufferStatusCommitted
+    // Everything the command buffer holds moves into the submission before
+    // recording is ended, because a `Submission` is the only thing which knows
+    // how to give it all back: `dealloc` cleans up only a command buffer which
+    // is still recording, so a failure between the two would otherwise strand
+    // the pool, the fence, the descriptor pools, the retained objects and
+    // every handler for good.
     let mut submission = Some(Submission {
         gpu,
         timestamps: std::mem::replace(&mut command.timestamps, vk::QueryPool::null()),
@@ -224,6 +223,24 @@ pub(super) unsafe extern "C" fn commit(receiver: Id, _sel: Sel) {
         completion: Arc::clone(&command.completion),
         scheduled_time: 0.0,
     });
+    // SAFETY: recording began when the command buffer was made.
+    if let Err(error) = unsafe { gpu.device.end_command_buffer(command.command_buffer) } {
+        gpu::trace(format!("vkEndCommandBuffer failed with {error:?}"));
+        for block in std::mem::take(&mut command.scheduled_handlers) {
+            // SAFETY: the retained block reference is transferred to the
+            // handler worker, and `receiver` is live during this call.
+            unsafe { crate::completion::deliver(block, receiver) };
+        }
+        // Nothing reached the queue, so the fence never signals: `finish`
+        // returns every resource and delivers the completion handlers with
+        // the error status.
+        submission
+            .take()
+            .expect("unrecorded command")
+            .finish(Err(format!("vkEndCommandBuffer failed with {error:?}")));
+        return;
+    }
+    command.completion.set(2); // MTLCommandBufferStatusCommitted
     let completion = Arc::clone(&command.completion);
     let submitted = stats::timed(Counter::SubmitMicros, || {
         gpu.submit(command.command_buffer, command.fence, || {

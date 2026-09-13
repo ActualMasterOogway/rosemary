@@ -55,26 +55,26 @@ impl Gpu {
         // SAFETY: a well-formed create info on this live device.
         let buffer = unsafe { self.device.create_buffer(&info, None) }
             .map_err(|error| format!("vkCreateBuffer failed with {error:?}"))?;
+        // Nothing is bound to the buffer until the guard is taken, so every
+        // failure below destroys it on the way out.
+        let buffer = Guard::new(buffer, |buffer| {
+            // SAFETY: a buffer of this device's which was never bound.
+            unsafe { self.device.destroy_buffer(buffer, None) };
+        });
         // SAFETY: the buffer was just created by this device.
-        let requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
-        let heap = self
-            .buffer_heap(requirements.memory_type_bits)
-            .inspect_err(|_| {
-                // SAFETY: nothing is bound to the buffer yet.
-                unsafe { self.device.destroy_buffer(buffer, None) };
-            })?;
-        let allocation = heap
-            .allocate(&self.device, requirements.size, requirements.alignment)
-            .inspect_err(|_| {
-                // SAFETY: as above.
-                unsafe { self.device.destroy_buffer(buffer, None) };
-            })?;
+        let requirements = unsafe { self.device.get_buffer_memory_requirements(*buffer) };
+        let heap = self.buffer_heap(requirements.memory_type_bits)?;
+        let allocation = heap.allocate(&self.device, requirements.size, requirements.alignment)?;
+        let allocation = Guard::new(allocation, |allocation| {
+            heap.free(&self.device, allocation);
+        });
         // SAFETY: a fresh, unbound buffer and a range nothing else holds.
         unsafe {
             self.device
-                .bind_buffer_memory(buffer, allocation.memory, allocation.offset())
+                .bind_buffer_memory(*buffer, allocation.memory, allocation.offset())
         }
         .map_err(|error| format!("vkBindBufferMemory failed with {error:?}"))?;
+        let (buffer, allocation) = (buffer.take(), allocation.take());
         // A guest which reads a fresh buffer before writing it must not see the
         // bytes of a buffer this block last held. Memory the driver has just
         // handed over is already zero, and during a streaming burst - which is
@@ -164,20 +164,25 @@ impl Gpu {
         // SAFETY: a well-formed create info on this live device.
         let image = unsafe { self.device.create_image(&info, None) }
             .map_err(|error| format!("vkCreateImage failed with {error:?}"))?;
+        // Everything below can fail; the guards unwind what has been made so
+        // far, and only the last statement of the function takes them.
+        let image = Guard::new(image, |image| {
+            // SAFETY: an image of this device's, referred to by nothing.
+            unsafe { self.device.destroy_image(image, None) };
+        });
         // SAFETY: the image was just created by this device.
-        let requirements = unsafe { self.device.get_image_memory_requirements(image) };
-        let memory = self
-            .allocate(
-                requirements,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                vk::MemoryPropertyFlags::empty(),
-            )
-            .inspect_err(|_| {
-                // SAFETY: nothing is bound to the image yet.
-                unsafe { self.device.destroy_image(image, None) };
-            })?;
+        let requirements = unsafe { self.device.get_image_memory_requirements(*image) };
+        let memory = self.allocate(
+            requirements,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk::MemoryPropertyFlags::empty(),
+        )?;
+        let memory = Guard::new(memory, |memory| {
+            // SAFETY: memory of this device's, bound to nothing which survives.
+            unsafe { self.device.free_memory(memory, None) };
+        });
         // SAFETY: fresh, unbound image and memory from this device.
-        unsafe { self.device.bind_image_memory(image, memory, 0) }
+        unsafe { self.device.bind_image_memory(*image, *memory, 0) }
             .map_err(|error| format!("vkBindImageMemory failed with {error:?}"))?;
         let aspect = aspect_of(description.format);
         let levels = description.levels.max(1);
@@ -189,7 +194,7 @@ impl Gpu {
                 .new_layout(vk::ImageLayout::GENERAL)
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(image)
+                .image(*image)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: aspect,
                     base_mip_level: 0,
@@ -211,15 +216,16 @@ impl Gpu {
                 )
             };
         })?;
-        let view = self.create_view(image, description)?;
+        let view = self.create_view(*image, description)?;
         Ok(GpuImage {
-            image,
-            memory: Some(memory),
+            image: image.take(),
+            memory: Some(memory.take()),
             view,
             format: description.format,
             aspect: aspect_of(description.format),
             width: description.width.max(1),
             height: description.height.max(1),
+            depth: description.depth.max(1),
             levels: description.levels.max(1),
             layers: description.layers.max(1),
             samples: sample_count(description.samples),

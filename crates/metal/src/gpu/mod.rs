@@ -7,9 +7,11 @@
 //!
 //! The device itself is here; allocation, submission and the recycled
 //! pools are in [`memory`], [`submit`] and [`pools`], with the Metal
-//! format tables in [`format`] and the tracing knobs in [`trace`].
+//! format tables in [`format`], the creation-path RAII guards in [`guard`],
+//! and the tracing knobs in [`trace`].
 
 mod format;
+mod guard;
 mod memory;
 mod pools;
 mod submit;
@@ -25,6 +27,7 @@ use crate::heap::{Allocation, Heap};
 
 use format::sample_count;
 pub use format::{aspect_of, block_extent, pixel_format, texel_size};
+pub(crate) use guard::{Guard, GuardedVec};
 use trace::dump_spirv;
 pub use trace::{milestone, trace, trace_once};
 
@@ -103,6 +106,10 @@ pub const UPLOAD_CHUNK: u64 = 256 << 10;
 /// descriptor.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RenderPassKey {
+    /// The pass's colour attachments, packed. See the MRT gap in
+    /// [the known gaps](../../../../docs/metal.md): an unattached render-target
+    /// index closes up rather than becoming a `VK_ATTACHMENT_UNUSED`
+    /// reference, so a pass which skips an index misroutes the ones after it.
     pub colors: Vec<(vk::Format, vk::AttachmentLoadOp, vk::AttachmentStoreOp)>,
     /// The single-sample attachment each colour is resolved into, where the
     /// Metal store action asks for a resolve, and `None` where it does not.
@@ -246,6 +253,7 @@ pub struct GpuImage {
     pub aspect: vk::ImageAspectFlags,
     pub width: u32,
     pub height: u32,
+    pub depth: u32,
     pub levels: u32,
     pub layers: u32,
     pub samples: vk::SampleCountFlags,
@@ -264,7 +272,97 @@ impl GpuBuffer {
     }
 }
 
+/// One subresource region of an image, as a Metal copy names it.
+///
+/// Every field is a guest `NSUInteger`, so none of them is known to fit a
+/// Vulkan `uint32_t` - let alone to name texels the image has - until
+/// [`GpuImage::region`] has said so.
+#[derive(Clone, Copy)]
+pub struct Region {
+    pub level: u64,
+    pub slice: u64,
+    pub origin: [u64; 3],
+    pub size: [u64; 3],
+}
+
+/// A region checked against the image it names.
+#[derive(Clone, Copy)]
+pub struct CheckedRegion {
+    pub level: u32,
+    pub slice: u32,
+    pub origin: [u32; 3],
+    pub size: [u32; 3],
+}
+
 impl GpuImage {
+    /// The extent of one mip level, which is the base extent halved `level`
+    /// times and never below one texel.
+    pub fn level_extent(&self, level: u32) -> [u32; 3] {
+        [self.width, self.height, self.depth].map(|base| (base >> level.min(31)).max(1))
+    }
+
+    /// Check one Metal copy region against this image.
+    ///
+    /// `Err` names what is wrong, for a caller which turns it into a Metal
+    /// diagnostic. Nothing below it reaches an `ash` call: a mip level, an
+    /// array slice or an extent the image does not have is undefined
+    /// behaviour in Vulkan, and every one of them is guest-controlled.
+    pub fn region(&self, region: Region) -> Result<CheckedRegion, String> {
+        let Region {
+            level,
+            slice,
+            origin,
+            size,
+        } = region;
+        if level >= u64::from(self.levels) {
+            return Err(format!(
+                "mipmap level {level} of a texture with {} levels",
+                self.levels
+            ));
+        }
+        if slice >= u64::from(self.layers) {
+            return Err(format!(
+                "slice {slice} of a texture with {} slices",
+                self.layers
+            ));
+        }
+        let level = level as u32;
+        // The bound is the level rounded up to whole blocks, not the level.
+        // A compressed level below one block - the 2x2 and 1x1 tail of any BC
+        // mip chain - still occupies a full 4x4 block, and both Metal and
+        // Vulkan let a copy that reaches the edge of the level cover it. A
+        // check against the level itself refuses every BC mip tail a game
+        // uploads, which is most of its textures.
+        let (block_width, block_height) = block_extent(self.format);
+        let blocks = [block_width, block_height, 1];
+        let extent = self.level_extent(level);
+        let bound: [u32; 3] =
+            std::array::from_fn(|axis| extent[axis].next_multiple_of(blocks[axis]));
+        let mut checked = CheckedRegion {
+            level,
+            slice: slice as u32,
+            origin: [0; 3],
+            size: [1; 3],
+        };
+        for axis in 0..3 {
+            let start = origin[axis];
+            // A Metal size of zero on an axis means one texel of it, which is
+            // how a 2D copy spells its depth.
+            let span = size[axis].max(1);
+            let end = start.checked_add(span).ok_or("a region which overflows")?;
+            if end > u64::from(bound[axis]) {
+                return Err(format!(
+                    "a region ending at {end} on axis {axis}, where level {level} is {} texels \
+                     and {} with its blocks",
+                    extent[axis], bound[axis]
+                ));
+            }
+            checked.origin[axis] = start as u32;
+            checked.size[axis] = span as u32;
+        }
+        Ok(checked)
+    }
+
     /// The image left behind when a drawable's own image is destroyed. It is
     /// never bound: the texture it belongs to is unreachable by then.
     pub fn none() -> Self {
@@ -276,6 +374,7 @@ impl GpuImage {
             aspect: vk::ImageAspectFlags::COLOR,
             width: 0,
             height: 0,
+            depth: 1,
             levels: 1,
             layers: 1,
             samples: vk::SampleCountFlags::TYPE_1,
@@ -295,4 +394,88 @@ pub struct ImageDescription {
     pub samples: u64,
     pub usage: u64,
     pub cube: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image(width: u32, height: u32, levels: u32, layers: u32) -> GpuImage {
+        GpuImage {
+            width,
+            height,
+            levels,
+            layers,
+            ..GpuImage::none()
+        }
+    }
+
+    fn image2d(width: u32, height: u32, levels: u32) -> GpuImage {
+        image(width, height, levels, 1)
+    }
+
+    fn region(level: u64, slice: u64, origin: [u64; 3], size: [u64; 3]) -> Region {
+        Region {
+            level,
+            slice,
+            origin,
+            size,
+        }
+    }
+
+    #[test]
+    fn a_region_inside_its_level_is_accepted_and_narrowed() {
+        let image = image(64, 32, 4, 6);
+        let checked = image
+            .region(region(2, 5, [4, 2, 0], [8, 4, 0]))
+            .expect("inside level two");
+        assert_eq!(checked.level, 2);
+        assert_eq!(checked.slice, 5);
+        assert_eq!(checked.origin, [4, 2, 0]);
+        // A Metal size of zero on an axis is one texel of it.
+        assert_eq!(checked.size, [8, 4, 1]);
+    }
+
+    #[test]
+    fn a_region_a_texture_cannot_hold_is_refused_rather_than_truncated() {
+        let image = image(64, 32, 4, 6);
+        // Level two of a 64x32 texture is 16x8.
+        assert!(image.region(region(2, 0, [0, 0, 0], [17, 8, 1])).is_err());
+        assert!(image.region(region(4, 0, [0, 0, 0], [1, 1, 1])).is_err());
+        assert!(image.region(region(0, 6, [0, 0, 0], [1, 1, 1])).is_err());
+        assert!(image.region(region(0, 0, [60, 0, 0], [8, 1, 1])).is_err());
+        // An origin and a size which overflow rather than exceed.
+        assert!(
+            image
+                .region(region(0, 0, [u64::MAX, 0, 0], [2, 1, 1]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_compressed_mip_tail_may_cover_its_whole_block() {
+        let mut image = image(16, 16, 5, 1);
+        image.format = vk::Format::BC3_UNORM_BLOCK;
+        // Level three is 2x2 texels and level four 1x1, and a BC3 upload
+        // names the 4x4 block each of them sits in.
+        for level in 3..5 {
+            let checked = image
+                .region(region(level, 0, [0, 0, 0], [4, 4, 1]))
+                .expect("a whole block of the mip tail");
+            assert_eq!(checked.size, [4, 4, 1]);
+        }
+        // One block, and no further.
+        assert!(image.region(region(4, 0, [0, 0, 0], [8, 4, 1])).is_err());
+        // An uncompressed texture of the same shape is bounded by the level.
+        assert!(
+            image2d(16, 16, 5)
+                .region(region(4, 0, [0, 0, 0], [4, 4, 1]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_mip_level_is_never_narrower_than_one_texel() {
+        assert_eq!(image(8, 1, 8, 1).level_extent(7), [1, 1, 1]);
+    }
 }

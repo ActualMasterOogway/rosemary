@@ -27,6 +27,7 @@ use objc::sel::Sel;
 use compute::*;
 use descriptor::*;
 use enums::*;
+use render::render_pipeline_dealloc;
 
 pub(crate) use compute::ComputePipeline;
 pub(crate) use render::{
@@ -41,6 +42,28 @@ pub(crate) struct Layouts {
     pub sets: [vk::DescriptorSetLayout; SETS],
     pub pipeline: vk::PipelineLayout,
     pub push_set: Option<usize>,
+}
+
+impl Layouts {
+    /// Give back what one pipeline state owns here.
+    ///
+    /// The pipeline layout only: the four set layouts live in the device's
+    /// cache, shared by every pipeline with the same resource shape, and stay
+    /// for the life of the device.
+    pub(super) fn destroy(&self, gpu: &Gpu) {
+        // SAFETY: the last reference to the pipeline state is gone, and every
+        // command buffer which bound it retained it until its work retired.
+        unsafe { gpu.device.destroy_pipeline_layout(self.pipeline, None) };
+    }
+}
+
+/// The teardown a pipeline state's `dealloc` performs, shared by the compute
+/// and render forms because the Vulkan objects are the same shape.
+pub(super) fn destroy_variants(gpu: &Gpu, variants: impl IntoIterator<Item = vk::Pipeline>) {
+    for pipeline in variants {
+        // SAFETY: as above.
+        unsafe { gpu.device.destroy_pipeline(pipeline, None) };
+    }
 }
 
 pub(crate) fn descriptor_type(binding: &ResourceBinding) -> Option<vk::DescriptorType> {
@@ -210,6 +233,7 @@ pub(crate) fn install() {
 
     let compute = objc::class::lookup(c"R3MTLComputePipelineState").expect("registered first");
     methods!(compute, {
+        "dealloc" => compute_pipeline_dealloc, c"v16@0:8";
         "device" => compute_pipeline_device, c"@16@0:8";
         "threadExecutionWidth" => compute_pipeline_thread_width, c"Q16@0:8";
         "maxTotalThreadsPerThreadgroup" => compute_pipeline_max_threads, c"Q16@0:8";
@@ -217,6 +241,7 @@ pub(crate) fn install() {
     });
     let render = objc::class::lookup(c"R3MTLRenderPipelineState").expect("registered first");
     methods!(render, {
+        "dealloc" => render_pipeline_dealloc, c"v16@0:8";
         "setLabel:" => crate::no_op, c"v24@0:8@16";
     });
 }

@@ -41,6 +41,50 @@ pub(crate) struct VertexElement {
 
 pub(crate) struct IndexedCollection {
     pub elements: Vec<Id>,
+    /// How to tell one of `elements` that its owner is gone. See [`orphan`].
+    pub orphan: fn(Id),
+}
+
+/// A child object which mutates the descriptor that vended it.
+///
+/// The descriptor owns the collection and the collection owns its elements,
+/// but a guest may hold an element - or the collection - longer than the
+/// descriptor: `-colorAttachments` is an object with its own retain count.
+/// The element cannot retain the owner back without making a cycle neither
+/// side can break, so the owner instead *orphans* every element it vended on
+/// the way out, and an orphaned element's setters and getters do nothing
+/// rather than writing through a dangling pointer.
+pub(crate) trait Element {
+    fn owner(&mut self) -> &mut Id;
+}
+
+/// Null the owner of one element of a `T`-shaped collection.
+///
+/// # Safety
+///
+/// `element` must be an instance of the class declared for this `T`.
+pub(crate) unsafe fn orphan_element<T: Element>(element: Id) {
+    // SAFETY: the caller's obligation.
+    *unsafe { object::body::<T>(element) }.owner() = std::ptr::null_mut();
+}
+
+/// Tell every element of a collection - which may be null, because a
+/// descriptor only makes one when a guest asks - that its owner is gone.
+pub(crate) fn orphan(collection: Id) {
+    if collection.is_null() {
+        return;
+    }
+    // SAFETY: a collection of this crate's.
+    let collection = unsafe { object::body::<IndexedCollection>(collection) };
+    for element in &collection.elements {
+        (collection.orphan)(*element);
+    }
+}
+
+impl Element for VertexElement {
+    fn owner(&mut self) -> &mut Id {
+        &mut self.owner
+    }
 }
 
 pub(super) unsafe extern "C" fn vertex_descriptor_init(receiver: Id, _sel: Sel) -> Id {
@@ -50,15 +94,28 @@ pub(super) unsafe extern "C" fn vertex_descriptor_init(receiver: Id, _sel: Sel) 
     descriptor.attributes = [VertexAttribute::default(); VERTEX_SLOTS];
     // `-init` is `-reset` here, and a reset descriptor still owns whatever a
     // previous one vended.
-    objc::arc::release(std::mem::replace(
-        &mut descriptor.layout_objects,
-        std::ptr::null_mut(),
-    ));
-    objc::arc::release(std::mem::replace(
-        &mut descriptor.attribute_objects,
-        std::ptr::null_mut(),
-    ));
+    release_collections(descriptor, false);
     receiver
+}
+
+/// Give up the collections a vertex descriptor vended.
+///
+/// `orphaning` only where the descriptor itself is going: a guest which holds
+/// `-layouts` past the descriptor keeps the collection and its elements alive,
+/// and orphaning leaves their setters harmless rather than writing into freed
+/// memory. A `-reset` must not orphan, because the descriptor is still there
+/// and Metal keeps setting through a collection a guest took before it.
+fn release_collections(descriptor: &mut VertexDescriptor, orphaning: bool) {
+    for slot in [
+        &mut descriptor.layout_objects,
+        &mut descriptor.attribute_objects,
+    ] {
+        let collection = std::mem::replace(slot, std::ptr::null_mut());
+        if orphaning {
+            orphan(collection);
+        }
+        objc::arc::release(collection);
+    }
 }
 
 pub(super) fn vertex_collection(receiver: Id, layout: bool) -> Id {
@@ -84,7 +141,14 @@ pub(super) fn vertex_collection(receiver: Id, layout: bool) -> Id {
             )
         })
         .collect::<Vec<_>>();
-    let collection = object::make(c"R3MTLIndexedCollection", IndexedCollection { elements });
+    let collection = object::make(
+        c"R3MTLIndexedCollection",
+        IndexedCollection {
+            elements,
+            // SAFETY: every element of this collection is an `R3MTLVertexElement`.
+            orphan: |element| unsafe { orphan_element::<VertexElement>(element) },
+        },
+    );
     // SAFETY: as above.
     let descriptor = unsafe { object::body::<VertexDescriptor>(receiver) };
     if layout {
@@ -130,22 +194,19 @@ pub(super) unsafe extern "C" fn collection_dealloc(receiver: Id, _sel: Sel) {
 /// `-[MTLVertexDescriptor dealloc]`.
 pub(super) unsafe extern "C" fn vertex_descriptor_dealloc(receiver: Id, _sel: Sel) {
     // SAFETY: a vertex descriptor of this crate's.
-    let descriptor = unsafe { object::body::<VertexDescriptor>(receiver) };
-    objc::arc::release(std::mem::replace(
-        &mut descriptor.layout_objects,
-        std::ptr::null_mut(),
-    ));
-    objc::arc::release(std::mem::replace(
-        &mut descriptor.attribute_objects,
-        std::ptr::null_mut(),
-    ));
+    release_collections(unsafe { object::body::<VertexDescriptor>(receiver) }, true);
     objc::arc::finalize(receiver);
 }
 
 pub(super) unsafe extern "C" fn set_vertex_element_value(receiver: Id, sel: Sel, value: u64) {
     // SAFETY: a vertex element of this crate's.
     let element = *unsafe { object::body::<VertexElement>(receiver) };
-    // SAFETY: the element holds the descriptor which made it.
+    if element.owner.is_null() {
+        // The descriptor which vended this element is gone.
+        return;
+    }
+    // SAFETY: the element holds the descriptor which made it, which orphans
+    // the element before it goes.
     let descriptor = unsafe { object::body::<VertexDescriptor>(element.owner) };
     // SAFETY: a selector the runtime owns.
     let name = unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes();
