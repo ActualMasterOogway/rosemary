@@ -23,7 +23,7 @@ fn gpu_device() -> Option<Id> {
     (!device.is_null() && gpu_of(device).is_some()).then_some(device)
 }
 
-const SMOKE_KERNEL: &str =
+const TEST_KERNEL: &str =
     "kernel void clear(device uint* output [[buffer(0)]]) { output[0] = 42; }";
 
 fn source_library(device: Id, source: &str) -> Id {
@@ -183,7 +183,7 @@ fn source_library_creation_reports_invalid_source() {
 #[test]
 fn a_translated_library_exposes_its_entry_points() {
     let device = device_for_tests();
-    let library = source_library(device, SMOKE_KERNEL);
+    let library = source_library(device, TEST_KERNEL);
     assert!(!library.is_null());
     // SAFETY: a library this test made.
     let names = unsafe { library_function_names(library, std::ptr::null()) };
@@ -250,7 +250,7 @@ fn function_constant_values_are_kept_by_index_name_and_range() {
 #[test]
 fn a_library_without_function_constants_ignores_the_values() {
     let device = device_for_tests();
-    let library = source_library(device, SMOKE_KERNEL);
+    let library = source_library(device, TEST_KERNEL);
     let values = constant_values();
     let mut error = std::ptr::null_mut();
     // SAFETY: the calls a guest makes.
@@ -305,8 +305,8 @@ fn a_translated_kernel_runs_on_the_gpu() {
     let Some(device) = gpu_device() else {
         return;
     };
-    let library = source_library(device, SMOKE_KERNEL);
-    assert!(!library.is_null(), "the smoke kernel must translate");
+    let library = source_library(device, TEST_KERNEL);
+    assert!(!library.is_null(), "the test kernel must translate");
     // SAFETY: a library this test made.
     let function = unsafe {
         new_function_with_name(
@@ -361,7 +361,7 @@ fn rebinding_between_dispatches_reaches_each_buffer() {
     let Some(device) = gpu_device() else {
         return;
     };
-    let library = source_library(device, SMOKE_KERNEL);
+    let library = source_library(device, TEST_KERNEL);
     // SAFETY: objects this test made, sent the selectors they implement.
     unsafe {
         let function = new_function_with_name(
@@ -397,6 +397,42 @@ fn rebinding_between_dispatches_reaches_each_buffer() {
             let contents = object::body::<resource::Buffer>(buffer).inner.contents;
             assert_eq!(std::ptr::read(contents as *const u32), 42);
         }
+    }
+}
+
+/// robustness2 makes a nil Metal buffer an explicit null descriptor, so a
+/// store is valid and discarded instead of reaching an undefined descriptor.
+#[test]
+fn a_nil_buffer_store_is_discarded_with_robustness2() {
+    let Some(device) = gpu_device() else {
+        return;
+    };
+    let gpu = gpu_of(device).expect("a Vulkan device");
+    if !gpu.null_descriptors {
+        return;
+    }
+    let library = source_library(device, TEST_KERNEL);
+    assert!(!library.is_null(), "the null-buffer kernel must translate");
+
+    // SAFETY: objects this test made, sent the selectors they implement.
+    unsafe {
+        let function = new_function_with_name(
+            library,
+            std::ptr::null(),
+            foundation::string::from_str("clear"),
+        );
+        let mut error = std::ptr::null_mut();
+        let pipeline = new_compute_pipeline(device, std::ptr::null(), function, &mut error);
+        assert!(!pipeline.is_null(), "compute pipeline creation failed");
+        let queue = new_command_queue(device, std::ptr::null());
+        let command = send(queue, "commandBuffer");
+        let encoder = send(command, "computeCommandEncoder");
+        send_with_object(encoder, "setComputePipelineState:", pipeline);
+        set_buffer_at(encoder, std::ptr::null_mut(), 0, 0);
+        dispatch(encoder, 1);
+        send_void(encoder, "endEncoding");
+        send_void(command, "commit");
+        send_void(command, "waitUntilCompleted");
     }
 }
 
@@ -908,7 +944,7 @@ fn recording_cost() {
     };
     const DISPATCHES: usize = 20_000;
     const DRAWS: usize = 20_000;
-    let library = source_library(device, SMOKE_KERNEL);
+    let library = source_library(device, TEST_KERNEL);
     // SAFETY: objects this test made, sent the selectors they implement.
     let (pipeline, buffers, queue) = unsafe {
         let function = new_function_with_name(

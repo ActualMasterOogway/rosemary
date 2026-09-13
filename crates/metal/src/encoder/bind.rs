@@ -136,10 +136,13 @@ pub(super) unsafe extern "C" fn end_encoding(receiver: Id, _sel: Sel) {
 /// Report a resource the pipeline declares which nothing satisfies.
 ///
 /// The draw is still recorded: see [`Encoder::collect_writes`].
-fn unbound(binding: &metal_translate::ResourceBinding, what: &str) {
-    gpu::trace_once(format!(
-        "a shader resource {what}, so its descriptor keeps whatever the set last held"
-    ));
+fn unbound(binding: &metal_translate::ResourceBinding, what: &str, represented: bool) {
+    let result = if represented {
+        "it is represented by a null descriptor"
+    } else {
+        "its descriptor keeps whatever the set last held"
+    };
+    gpu::trace_once(format!("a shader resource {what}; {result}"));
     gpu::trace(format!(
         "{:?} at Metal index {} of set {} {what}",
         binding.kind, binding.metal_index, binding.descriptor_set
@@ -209,17 +212,17 @@ impl Encoder {
     /// Gather each binding into the descriptor writes its set wants, and
     /// report which sets the pipeline actually uses.
     ///
-    /// A resource the pipeline declares but the guest never bound is skipped
-    /// rather than refused, and the draw is still recorded. Binding nil is
-    /// ordinary Metal - a nil texture samples as zero, and a shader which
-    /// declares a map the material does not use gets one - so refusing the
-    /// draw would drop geometry a real guest expects to see. The cost is that
-    /// the descriptor keeps whatever the set last held, which is
-    /// [a known gap](../../../../docs/metal.md): expressing Metal's semantics
-    /// needs `VK_EXT_robustness2`'s `nullDescriptor`, or a placeholder
-    /// resource per descriptor shape, which needs the texture's dimensionality
-    /// in the reflection.
+    /// With robustness2, a resource the pipeline declares but the guest never
+    /// bound becomes an explicit null descriptor. Vulkan does not admit null
+    /// standalone samplers, so those use the device's neutral sampler; the
+    /// paired null image still supplies the defined zero result. Without the
+    /// feature, retain the old skip fallback until reflection carries enough
+    /// descriptor shape to create matching placeholder images.
     fn collect_writes(&mut self, resources: &[metal_translate::ResourceBinding]) -> [bool; SETS] {
+        let (null_descriptors, null_sampler) = {
+            let gpu = self.command().gpu;
+            (gpu.null_descriptors, gpu.null_sampler)
+        };
         let mut used = [false; SETS];
         for wanted in &mut self.wanted {
             wanted.clear();
@@ -234,48 +237,84 @@ impl Encoder {
             used[set] = true;
             let slot = stage_slot(binding.stage);
             let index = binding.metal_index as usize;
-            if index >= SLOTS {
-                unbound(binding, "is past the Metal index this encoder tracks");
-                continue;
-            }
             let Some(kind) = descriptor_type(binding) else {
                 continue;
             };
             let (handle, offset, range) = match binding.kind {
                 ResourceKind::Buffer => {
-                    let bound = self.buffers[slot][index];
+                    let bound = self.buffers[slot].get(index).copied().unwrap_or_default();
                     if bound.buffer == vk::Buffer::null() {
-                        unbound(binding, "has no buffer bound to it");
-                        continue;
+                        let what = if index < SLOTS {
+                            "has no buffer bound to it"
+                        } else {
+                            "is past the Metal buffer index this encoder tracks"
+                        };
+                        unbound(binding, what, null_descriptors);
+                        if !null_descriptors {
+                            continue;
+                        }
                     }
                     use vk::Handle;
                     (
                         bound.buffer.as_raw(),
-                        bound.offset.min(bound.end),
-                        bound.range,
+                        if bound.buffer == vk::Buffer::null() {
+                            0
+                        } else {
+                            bound.offset.min(bound.end)
+                        },
+                        if bound.buffer == vk::Buffer::null() {
+                            vk::WHOLE_SIZE
+                        } else {
+                            bound.range
+                        },
                     )
                 }
                 ResourceKind::Texture => {
-                    let bound = self.textures[slot][index];
+                    let bound = self.textures[slot]
+                        .get(index)
+                        .copied()
+                        .unwrap_or(std::ptr::null_mut());
                     if bound.is_null() {
-                        unbound(binding, "has no texture bound to it");
-                        continue;
+                        let what = if index < SLOTS {
+                            "has no texture bound to it"
+                        } else {
+                            "is past the Metal texture index this encoder tracks"
+                        };
+                        unbound(binding, what, null_descriptors);
+                        if !null_descriptors {
+                            continue;
+                        }
+                        (0, 0, 0)
+                    } else {
+                        // SAFETY: only a texture of this crate's is ever bound.
+                        let texture = unsafe { object::body::<Texture>(bound) };
+                        use vk::Handle;
+                        (texture.image.view.as_raw(), 0, 0)
                     }
-                    // SAFETY: only a texture of this crate's is ever bound.
-                    let texture = unsafe { object::body::<Texture>(bound) };
-                    use vk::Handle;
-                    (texture.image.view.as_raw(), 0, 0)
                 }
                 ResourceKind::Sampler => {
-                    let bound = self.samplers[slot][index];
+                    let bound = self.samplers[slot]
+                        .get(index)
+                        .copied()
+                        .unwrap_or(std::ptr::null_mut());
                     if bound.is_null() {
-                        unbound(binding, "has no sampler bound to it");
-                        continue;
+                        let what = if index < SLOTS {
+                            "has no sampler bound to it"
+                        } else {
+                            "is past the Metal sampler index this encoder tracks"
+                        };
+                        unbound(binding, what, null_descriptors);
+                        if !null_descriptors {
+                            continue;
+                        }
+                        use vk::Handle;
+                        (null_sampler.as_raw(), 0, 0)
+                    } else {
+                        // SAFETY: only a sampler state of this crate's is bound.
+                        let sampler = unsafe { object::body::<SamplerState>(bound) };
+                        use vk::Handle;
+                        (sampler.sampler.as_raw(), 0, 0)
                     }
-                    // SAFETY: only a sampler state of this crate's is bound.
-                    let sampler = unsafe { object::body::<SamplerState>(bound) };
-                    use vk::Handle;
-                    (sampler.sampler.as_raw(), 0, 0)
                 }
                 _ => continue,
             };

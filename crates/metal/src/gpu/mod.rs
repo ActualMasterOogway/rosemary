@@ -34,6 +34,11 @@ pub use trace::{milestone, trace, trace_once};
 type DescriptorLayoutKey = (Vec<(u32, vk::DescriptorType)>, vk::ShaderStageFlags, bool);
 type DescriptorLayouts = HashMap<DescriptorLayoutKey, vk::DescriptorSetLayout>;
 
+// ash 0.38 was generated before robustness2 was ratified. The KHR feature
+// structures and structure types alias the EXT spellings exactly, so only the
+// extension name needs spelling locally until ash carries the newer headers.
+const ROBUSTNESS_2_KHR: &std::ffi::CStr = c"VK_KHR_robustness2";
+
 /// One logical device and the queue Metal's single command-queue model uses.
 pub struct Gpu {
     pub device: Device,
@@ -71,6 +76,12 @@ pub struct Gpu {
     /// which decides whether one set in a pipeline can use it.
     push_descriptor_api: Option<ash::khr::push_descriptor::Device>,
     pub max_push_descriptors: u32,
+    /// Whether null buffer and image-view descriptors have defined Metal-like
+    /// reads and writes on this device.
+    pub(crate) null_descriptors: bool,
+    /// robustness2 does not permit a null standalone sampler descriptor.
+    /// This neutral sampler keeps an otherwise-null resource table valid.
+    pub(crate) null_sampler: vk::Sampler,
     /// `VK_KHR_swapchain`'s device functions, where the device has it. `None`
     /// is a device which cannot present at all, and presentation falls back
     /// to reading the frame back and blitting it through SDL's window
@@ -108,6 +119,7 @@ fn create_device(
     features: &vk::PhysicalDeviceFeatures,
     extensions: &[*const std::ffi::c_char],
     target: &metal_translate::TargetProfile,
+    null_descriptors: bool,
 ) -> Result<Device, String> {
     let mut v11 = vk::PhysicalDeviceVulkan11Features {
         storage_buffer16_bit_access: target.storage_buffer16_bit_access.into(),
@@ -170,6 +182,10 @@ fn create_device(
         shader_demote_to_helper_invocation: target.demote_to_helper_invocation.into(),
         ..Default::default()
     };
+    let mut robustness2 = vk::PhysicalDeviceRobustness2FeaturesEXT {
+        null_descriptor: null_descriptors.into(),
+        ..Default::default()
+    };
 
     let mut create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(queues)
@@ -199,6 +215,9 @@ fn create_device(
         if target.demote_to_helper_invocation {
             create_info = create_info.push_next(&mut demote);
         }
+    }
+    if null_descriptors {
+        create_info = create_info.push_next(&mut robustness2);
     }
     // SAFETY: all feature structures and borrowed create-info data live
     // across the call, and every enabled bit came from the adapter query.
@@ -285,11 +304,44 @@ impl Gpu {
             enabled.push(ash::ext::shader_demote_to_helper_invocation::NAME.as_ptr());
         }
 
+        // Prefer the ratified spelling. The feature structure is an exact KHR
+        // alias of the older EXT structure represented by this ash release.
+        let robustness2 = if has(ROBUSTNESS_2_KHR) {
+            Some(ROBUSTNESS_2_KHR)
+        } else if has(ash::ext::robustness2::NAME) {
+            Some(ash::ext::robustness2::NAME)
+        } else {
+            None
+        };
+        let null_descriptors = robustness2.is_some_and(|_| {
+            let mut robustness2 = vk::PhysicalDeviceRobustness2FeaturesEXT::default();
+            let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut robustness2);
+            // SAFETY: robustness2 is advertised and both structures live
+            // across the query.
+            unsafe { instance.get_physical_device_features2(physical, &mut features) };
+            robustness2.null_descriptor == vk::TRUE
+        });
+        if null_descriptors {
+            enabled.push(
+                robustness2
+                    .expect("a queried robustness2 extension")
+                    .as_ptr(),
+            );
+        }
+
         let priorities = [1.0f32];
         let queues = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family)
             .queue_priorities(&priorities)];
-        let device = create_device(instance, physical, &queues, &features, &enabled, target)?;
+        let device = create_device(
+            instance,
+            physical,
+            &queues,
+            &features,
+            &enabled,
+            target,
+            null_descriptors,
+        )?;
         // SAFETY: the family was requested above with one queue.
         let queue = unsafe { device.get_device_queue(queue_family, 0) };
         // SAFETY: the physical device belongs to this live instance.
@@ -309,6 +361,15 @@ impl Gpu {
             push.max_push_descriptors
         } else {
             0
+        };
+        let null_sampler = if null_descriptors {
+            let info = vk::SamplerCreateInfo::default();
+            // SAFETY: the default sampler description is valid on every
+            // Vulkan device.
+            unsafe { device.create_sampler(&info, None) }
+                .map_err(|error| format!("vkCreateSampler for nil resources failed: {error:?}"))?
+        } else {
+            vk::Sampler::null()
         };
 
         Ok(Self {
@@ -330,6 +391,8 @@ impl Gpu {
             upload_chunks: Mutex::new(Vec::new()),
             push_descriptor_api,
             max_push_descriptors,
+            null_descriptors,
+            null_sampler,
             swapchain_api,
         })
     }
