@@ -308,15 +308,18 @@ impl Gpu {
         &self,
         bindings: &[(u32, vk::DescriptorType)],
         stages: vk::ShaderStageFlags,
+        push: bool,
     ) -> Result<vk::DescriptorSetLayout, String> {
         let mut key = bindings.to_vec();
         key.sort_unstable();
         key.dedup();
         let mut cache = self.layouts.lock().expect("descriptor layout cache");
+        let key = (key, stages, push);
         if let Some(layout) = cache.get(&key) {
             return Ok(*layout);
         }
         let entries = key
+            .0
             .iter()
             .map(|(binding, kind)| {
                 vk::DescriptorSetLayoutBinding::default()
@@ -326,7 +329,14 @@ impl Gpu {
                     .stage_flags(stages)
             })
             .collect::<Vec<_>>();
-        let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&entries);
+        let flags = if push {
+            vk::DescriptorSetLayoutCreateFlags::PUSH_DESCRIPTOR_KHR
+        } else {
+            vk::DescriptorSetLayoutCreateFlags::empty()
+        };
+        let info = vk::DescriptorSetLayoutCreateInfo::default()
+            .flags(flags)
+            .bindings(&entries);
         // SAFETY: the bindings live across the call.
         let layout = unsafe { self.device.create_descriptor_set_layout(&info, None) }
             .map_err(|error| format!("vkCreateDescriptorSetLayout failed with {error:?}"))?;

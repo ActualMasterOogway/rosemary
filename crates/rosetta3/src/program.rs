@@ -246,24 +246,7 @@ pub fn unbound_imports(report: &LinkReport) -> Vec<(&str, &machish::report::Miss
 }
 
 /// `ROSETTA3_FILL_UNBOUND_DATA=1`: put a readable address in every unbound
-/// *data* slot instead of leaving it zero.
-///
-/// An A/B and not a mode, and it exists because the minimal runtime - which runs
-/// this same client and draws UI this one does not - binds every unresolved
-/// import to a per-symbol trap stub, which is **readable, non-null memory**. So
-/// a guest testing a framework constant against nil branches one way there and
-/// the other way here, for four hundred symbols at once, and that difference is
-/// invisible from both sides. This is how to ask whether it matters.
-///
-/// Only data slots: a *function* slot left at zero is what makes a call through
-/// it reach [`crate::fault`] and be named, and filling one would trade the best
-/// diagnostic in this runtime for a jump into a page of zeroes.
-///
-/// What the guest gets is a page of zeroes, so a pointer that is dereferenced
-/// reads zero rather than faulting, and one that is *messaged* still fails - an
-/// `isa` of zero is not a class. That is the point: it moves the failure from
-/// "crashes on the load" to "behaves as if the constant existed and was empty",
-/// which is the minimal runtime's behaviour and can be compared against.
+/// data slot instead of leaving it zero.
 fn fill_unbound_data(unbound: &[(&str, &machish::report::MissingSymbol)]) {
     let Ok(which) = std::env::var("ROSETTA3_FILL_UNBOUND_DATA") else {
         return;
@@ -307,7 +290,7 @@ fn fill_unbound_data(unbound: &[(&str, &machish::report::MissingSymbol)]) {
     }
     eprintln!(
         "rosetta3: ROSETTA3_FILL_UNBOUND_DATA: {filled} data slot(s) point at a readable page \
-         instead of zero - this is an A/B against the minimal runtime, not a mode"
+         instead of zero"
     );
 }
 

@@ -145,10 +145,11 @@ impl Encoder {
         resources: &[metal_translate::ResourceBinding],
         layouts: &[vk::DescriptorSetLayout; SETS],
         pipeline_layout: vk::PipelineLayout,
+        push_set: Option<usize>,
         bind_point: vk::PipelineBindPoint,
     ) {
         let start = stats::enabled().then(std::time::Instant::now);
-        self.bind_resources_inner(resources, layouts, pipeline_layout, bind_point);
+        self.bind_resources_inner(resources, layouts, pipeline_layout, push_set, bind_point);
         if let Some(start) = start {
             stats::add(Counter::BindMicros, start.elapsed().as_micros() as u64);
         }
@@ -159,15 +160,26 @@ impl Encoder {
         resources: &[metal_translate::ResourceBinding],
         layouts: &[vk::DescriptorSetLayout; SETS],
         pipeline_layout: vk::PipelineLayout,
+        push_set: Option<usize>,
         bind_point: vk::PipelineBindPoint,
     ) {
         let used = self.collect_writes(resources);
-        let Some(sets) = self.materialize_sets(layouts, &used) else {
+        let push_compatible = self.bound[bind_point_slot(bind_point)].layouts == *layouts;
+        let Some(sets) = self.materialize_sets(layouts, &used, push_set) else {
             // A descriptor pool with nothing left abandons the bind, as it did
             // when this was one function with an early return.
             return;
         };
         self.bind_sets(&used, &sets, layouts, pipeline_layout, bind_point);
+        if let Some(index) = push_set.filter(|index| used[*index]) {
+            self.push_set(
+                index,
+                layouts[index],
+                pipeline_layout,
+                bind_point,
+                push_compatible,
+            );
+        }
     }
 
     /// Gather each binding into the descriptor writes its set wants, and
@@ -243,6 +255,7 @@ impl Encoder {
         &mut self,
         layouts: &[vk::DescriptorSetLayout; SETS],
         used: &[bool; SETS],
+        push_set: Option<usize>,
     ) -> Option<[vk::DescriptorSet; SETS]> {
         let command = self.command();
         let gpu = command.gpu;
@@ -251,7 +264,7 @@ impl Encoder {
         let mut sets = [vk::DescriptorSet::null(); SETS];
         let mut fresh = [false; SETS];
         for index in 0..SETS {
-            if !used[index] {
+            if !used[index] || push_set == Some(index) {
                 continue;
             }
             let cache = &mut self.set_cache[index];
@@ -322,6 +335,84 @@ impl Encoder {
             }
         }
         Some(sets)
+    }
+
+    /// Record one set directly into the command buffer. Its contents belong
+    /// to the bind point and remain live until an incompatible layout disturbs
+    /// them, so an unchanged draw can skip the command just like a bound set.
+    fn push_set(
+        &mut self,
+        index: usize,
+        layout: vk::DescriptorSetLayout,
+        pipeline_layout: vk::PipelineLayout,
+        bind_point: vk::PipelineBindPoint,
+        compatible: bool,
+    ) {
+        let cache = &self.set_cache[index];
+        if compatible && cache.layout == layout && cache.entries == self.wanted[index] {
+            return;
+        }
+
+        let entries = &self.wanted[index];
+        let mut buffer_infos = Vec::new();
+        let mut image_infos = Vec::new();
+        for entry in entries {
+            use vk::Handle;
+            match entry.kind {
+                vk::DescriptorType::STORAGE_BUFFER => buffer_infos.push(
+                    vk::DescriptorBufferInfo::default()
+                        .buffer(vk::Buffer::from_raw(entry.handle))
+                        .offset(entry.offset)
+                        .range(entry.range),
+                ),
+                vk::DescriptorType::SAMPLER => image_infos.push(
+                    vk::DescriptorImageInfo::default().sampler(vk::Sampler::from_raw(entry.handle)),
+                ),
+                _ => image_infos.push(
+                    vk::DescriptorImageInfo::default()
+                        .image_view(vk::ImageView::from_raw(entry.handle))
+                        .image_layout(vk::ImageLayout::GENERAL),
+                ),
+            }
+        }
+        let (mut next_buffer, mut next_image) = (0, 0);
+        let mut writes = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let write = vk::WriteDescriptorSet::default()
+                .dst_binding(entry.binding)
+                .descriptor_type(entry.kind);
+            writes.push(match entry.kind {
+                vk::DescriptorType::STORAGE_BUFFER => {
+                    next_buffer += 1;
+                    write.buffer_info(std::slice::from_ref(&buffer_infos[next_buffer - 1]))
+                }
+                _ => {
+                    next_image += 1;
+                    write.image_info(std::slice::from_ref(&image_infos[next_image - 1]))
+                }
+            });
+        }
+        let command = self.command();
+        let api = command
+            .gpu
+            .push_descriptor_api()
+            .expect("a push layout requires VK_KHR_push_descriptor");
+        // SAFETY: every referenced info lives across the call, the selected
+        // layout is the pipeline's unique push layout, and recording is live.
+        unsafe {
+            api.cmd_push_descriptor_set(
+                command.command_buffer,
+                bind_point,
+                pipeline_layout,
+                index as u32,
+                &writes,
+            )
+        };
+        stats::add(Counter::PushDescriptorWrites, entries.len() as u64);
+        let cache = &mut self.set_cache[index];
+        cache.layout = layout;
+        cache.set = vk::DescriptorSet::null();
+        std::mem::swap(&mut cache.entries, &mut self.wanted[index]);
     }
 
     /// Bind the sets the pipeline uses, skipping any already bound under a
@@ -479,6 +570,7 @@ impl Encoder {
             &state.resources,
             &state.layouts.sets,
             state.layouts.pipeline,
+            state.layouts.push_set,
             vk::PipelineBindPoint::GRAPHICS,
         );
         gpu::milestone("draw");

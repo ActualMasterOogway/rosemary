@@ -40,6 +40,7 @@ pub(crate) const SETS: usize = 4;
 pub(crate) struct Layouts {
     pub sets: [vk::DescriptorSetLayout; SETS],
     pub pipeline: vk::PipelineLayout,
+    pub push_set: Option<usize>,
 }
 
 pub(crate) fn descriptor_type(binding: &ResourceBinding) -> Option<vk::DescriptorType> {
@@ -84,20 +85,43 @@ pub(crate) fn layouts_for(gpu: &Gpu, resources: &[&[ResourceBinding]]) -> Result
             per_set[set].push((binding.binding, kind));
         }
     }
+    let push_set = choose_push_set(
+        per_set.each_ref().map(Vec::len),
+        gpu.max_push_descriptors as usize,
+    );
     let mut sets = [vk::DescriptorSetLayout::null(); SETS];
     for (index, bindings) in per_set.iter().enumerate() {
-        sets[index] = gpu.descriptor_set_layout(bindings, stages)?;
+        sets[index] = gpu.descriptor_set_layout(bindings, stages, push_set == Some(index))?;
     }
     let info = vk::PipelineLayoutCreateInfo::default().set_layouts(&sets);
     // SAFETY: the layouts live in the device's cache for its lifetime.
     let pipeline = unsafe { gpu.device.create_pipeline_layout(&info, None) }
         .map_err(|error| format!("vkCreatePipelineLayout failed with {error:?}"))?;
-    Ok(Layouts { sets, pipeline })
+    Ok(Layouts {
+        sets,
+        pipeline,
+        push_set,
+    })
 }
 
-// --------------------------------------------------------------- compute
-
-// ---------------------------------------------------------------- render
+/// Pick one set the implementation can push. Vulkan permits only one push
+/// layout per pipeline, and Metal buffers churn most often (`-setBytes:` also
+/// lands there), so prefer that set. If it is too large, use the fullest set
+/// which does fit rather than giving up on push descriptors altogether.
+fn choose_push_set(counts: [usize; SETS], limit: usize) -> Option<usize> {
+    if counts[0] != 0 && counts[0] <= limit {
+        return Some(0);
+    }
+    let mut selected = None;
+    let mut largest = 0;
+    for (index, count) in counts.into_iter().enumerate().skip(1) {
+        if count > largest && count <= limit {
+            selected = Some(index);
+            largest = count;
+        }
+    }
+    selected
+}
 
 impl From<&DepthStencilState> for DepthStencilKey {
     fn from(state: &DepthStencilState) -> Self {
@@ -120,8 +144,6 @@ impl From<&DepthStencilState> for DepthStencilKey {
         }
     }
 }
-
-// ------------------------------------------------- Objective-C descriptors
 
 pub(crate) fn install() {
     let descriptor = object::register::<RenderPipelineDescriptor>(c"MTLRenderPipelineDescriptor");
@@ -197,4 +219,16 @@ pub(crate) fn install() {
     methods!(render, {
         "setLabel:" => crate::no_op, c"v24@0:8@16";
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::choose_push_set;
+
+    #[test]
+    fn push_set_prefers_buffers_then_the_largest_one_that_fits() {
+        assert_eq!(choose_push_set([12, 8, 4, 0], 8), Some(1));
+        assert_eq!(choose_push_set([4, 8, 2, 0], 8), Some(0));
+        assert_eq!(choose_push_set([1, 0, 0, 0], 0), None);
+    }
 }

@@ -28,6 +28,9 @@ pub use format::{aspect_of, block_extent, pixel_format, texel_size};
 use trace::dump_spirv;
 pub use trace::{milestone, trace, trace_once};
 
+type DescriptorLayoutKey = (Vec<(u32, vk::DescriptorType)>, vk::ShaderStageFlags, bool);
+type DescriptorLayouts = HashMap<DescriptorLayoutKey, vk::DescriptorSetLayout>;
+
 /// One logical device and the queue Metal's single command-queue model uses.
 pub struct Gpu {
     pub device: Device,
@@ -40,7 +43,7 @@ pub struct Gpu {
     pub limits: vk::PhysicalDeviceLimits,
     /// One layout per distinct set of Metal binding indices, so pipelines
     /// sharing a resource shape share a layout.
-    layouts: Mutex<HashMap<Vec<(u32, vk::DescriptorType)>, vk::DescriptorSetLayout>>,
+    layouts: Mutex<DescriptorLayouts>,
     render_passes: Mutex<HashMap<RenderPassKey, vk::RenderPass>>,
     /// The pool and fence behind `one_shot`, which runs the small transfers
     /// and layout transitions Metal performs outside a command buffer.
@@ -61,6 +64,10 @@ pub struct Gpu {
     contexts: Mutex<Vec<CommandContext>>,
     descriptor_pools: Mutex<Vec<vk::DescriptorPool>>,
     upload_chunks: Mutex<Vec<GpuBuffer>>,
+    /// `VK_KHR_push_descriptor`, where advertised, and the descriptor limit
+    /// which decides whether one set in a pipeline can use it.
+    push_descriptor_api: Option<ash::khr::push_descriptor::Device>,
+    pub max_push_descriptors: u32,
     /// `VK_KHR_swapchain`'s device functions, where the device has it. `None`
     /// is a device which cannot present at all, and presentation falls back
     /// to reading the frame back and blitting it through SDL's window
@@ -143,6 +150,10 @@ impl Gpu {
         if presents {
             enabled.push(ash::khr::swapchain::NAME.as_ptr());
         }
+        let pushes = has(ash::khr::push_descriptor::NAME);
+        if pushes {
+            enabled.push(ash::khr::push_descriptor::NAME.as_ptr());
+        }
 
         // The same reasoning as for the core features: enable what the device
         // reports. A translated shader which phis a pointer declares
@@ -174,6 +185,18 @@ impl Gpu {
         let properties = unsafe { instance.get_physical_device_properties(physical) };
 
         let swapchain_api = presents.then(|| ash::khr::swapchain::Device::new(instance, &device));
+        let push_descriptor_api =
+            pushes.then(|| ash::khr::push_descriptor::Device::new(instance, &device));
+        let max_push_descriptors = if pushes {
+            let mut push = vk::PhysicalDevicePushDescriptorPropertiesKHR::default();
+            let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut push);
+            // SAFETY: the physical device belongs to this live instance, and
+            // both structures live across the call.
+            unsafe { instance.get_physical_device_properties2(physical, &mut properties) };
+            push.max_push_descriptors
+        } else {
+            0
+        };
 
         Ok(Self {
             device,
@@ -192,6 +215,8 @@ impl Gpu {
             contexts: Mutex::new(Vec::new()),
             descriptor_pools: Mutex::new(Vec::new()),
             upload_chunks: Mutex::new(Vec::new()),
+            push_descriptor_api,
+            max_push_descriptors,
             swapchain_api,
         })
     }

@@ -59,6 +59,7 @@ pub(super) unsafe extern "C" fn dispatch_threadgroups(
         &state.resources,
         &state.layouts.sets,
         state.layouts.pipeline,
+        state.layouts.push_set,
         vk::PipelineBindPoint::COMPUTE,
     );
     gpu::milestone("compute dispatch");

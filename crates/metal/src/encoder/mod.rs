@@ -4,8 +4,8 @@
 //! fence and descriptor pools, so that recording on several guest threads
 //! needs no cross-thread synchronization. Metal binds resources to an encoder
 //! and Vulkan binds descriptor sets to a pipeline, so the encoder keeps
-//! Metal's binding tables and materializes descriptor sets at each dispatch
-//! and draw.
+//! Metal's binding tables and materializes or pushes descriptors at each
+//! dispatch and draw.
 //!
 //! The shared state is here; recording is split by what it records, and
 //! `install` stays whole because one `R3MTLCommandEncoder` class carries the

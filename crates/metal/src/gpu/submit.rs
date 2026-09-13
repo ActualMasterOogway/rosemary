@@ -1,6 +1,10 @@
 use super::*;
 
 impl Gpu {
+    pub fn push_descriptor_api(&self) -> Option<&ash::khr::push_descriptor::Device> {
+        self.push_descriptor_api.as_ref()
+    }
+
     /// Submit one recorded command buffer.
     pub fn submit(
         &self,

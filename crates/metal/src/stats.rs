@@ -28,6 +28,7 @@ counters!(
     Blits = "blits",
     Encoders = "encoders",
     DescriptorSets = "descriptor_sets",
+    PushDescriptorWrites = "push_descriptor_writes",
     BuffersCreated = "buffers_created",
     BufferBytes = "buffer_bytes",
     SetBytesCalls = "set_bytes_calls",
