@@ -67,13 +67,14 @@ pub fn run_alert_panel(
         String::from_utf8_lossy(&out)
     );
 
-    // The host's panel is Apple's AppKit, and under `ROSETTA3_OBJC=builtin` the
-    // title and buttons are objects of *this* tree's runtime - a foreign
-    // structure read as a native one, which faults inside AppKit rather than
-    // showing anything.
-    let host = (!crate::frameworks::builtin())
-        .then(|| dlsym(symbol))
-        .flatten();
+    if crate::frameworks::builtin() {
+        ctx.rax = appkit::alert::run_alert_panel(&title, &out) as u64;
+        return Ok(());
+    }
+
+    // With the host Objective-C runtime in use, its AppKit understands the
+    // guest's NSString button objects and can provide the full three-button UI.
+    let host = dlsym(symbol);
     let (Some(host), Some(message)) = (host, escaped_string(&out)) else {
         // Nothing to show it with, so nobody answered: the guest's caller sees
         // the alternate button rather than the default, because a panel this
@@ -407,6 +408,11 @@ pub mod native {
         trampoline as *const c_void
     }
 
+    /// The address `_NSRunAlertPanel` is bound to by the built-in frameworks.
+    pub fn run_alert_panel() -> *const c_void {
+        alert_trampoline as *const c_void
+    }
+
     /// This process's own memory.
     ///
     /// A native image's pointers are host pointers, and what a `%s` names is as
@@ -472,6 +478,19 @@ pub mod native {
         }
     }
 
+    unsafe extern "C" fn render_alert_native(
+        title: u64,
+        format: u64,
+        _default_button: u64,
+        _alternate_button: u64,
+        _other_button: u64,
+        tail: u64,
+    ) -> i64 {
+        let title = cf_string_bytes(title).unwrap_or_default();
+        let message = render_tail("NSRunAlertPanel", format, tail).unwrap_or_default();
+        appkit::alert::run_alert_panel(&title, &message)
+    }
+
     /// Darwin's AArch64 ABI passes every variadic argument on the stack, so
     /// `va_start` is the stack pointer on entry and nothing has to be spilled.
     #[cfg(target_arch = "aarch64")]
@@ -481,6 +500,18 @@ pub mod native {
             "mov x1, sp",
             "b   {render}",
             render = sym render_native,
+        )
+    }
+
+    /// Darwin puts the variadic tail after the five named arguments on the
+    /// stack. Pass that address alongside the named arguments already in x0-x4.
+    #[cfg(target_arch = "aarch64")]
+    #[unsafe(naked)]
+    unsafe extern "C" fn alert_trampoline() {
+        core::arch::naked_asm!(
+            "mov x5, sp",
+            "b   {render}",
+            render = sym render_alert_native,
         )
     }
 
@@ -526,6 +557,46 @@ pub mod native {
             "pop  rbp",
             "ret",
             render = sym render_native,
+        )
+    }
+
+    /// Build the SysV `va_list` for the tail after five named integer
+    /// arguments. Only r9 remains available to the variadic arguments.
+    #[cfg(not(target_arch = "aarch64"))]
+    #[unsafe(naked)]
+    unsafe extern "C" fn alert_trampoline() {
+        core::arch::naked_asm!(
+            "push rbp",
+            "mov  rbp, rsp",
+            "sub  rsp, 208",
+            "mov  [rsp],      rdi",
+            "mov  [rsp + 8],  rsi",
+            "mov  [rsp + 16], rdx",
+            "mov  [rsp + 24], rcx",
+            "mov  [rsp + 32], r8",
+            "mov  [rsp + 40], r9",
+            "test al, al",
+            "je   2f",
+            "movaps [rsp + 48],  xmm0",
+            "movaps [rsp + 64],  xmm1",
+            "movaps [rsp + 80],  xmm2",
+            "movaps [rsp + 96],  xmm3",
+            "movaps [rsp + 112], xmm4",
+            "movaps [rsp + 128], xmm5",
+            "movaps [rsp + 144], xmm6",
+            "movaps [rsp + 160], xmm7",
+            "2:",
+            "mov  dword ptr [rsp + 176], 40",
+            "mov  dword ptr [rsp + 180], 48",
+            "lea  rax, [rbp + 16]",
+            "mov  [rsp + 184], rax",
+            "mov  [rsp + 192], rsp",
+            "lea  r9, [rsp + 176]",
+            "call {render}",
+            "mov  rsp, rbp",
+            "pop  rbp",
+            "ret",
+            render = sym render_alert_native,
         )
     }
 }

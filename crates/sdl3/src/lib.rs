@@ -105,6 +105,8 @@ struct Api {
     SDL_SetAppMetadataProperty: Option<unsafe extern "C" fn(*const c_char, *const c_char) -> bool>,
     SDL_GetError: Option<unsafe extern "C" fn() -> *const c_char>,
     SDL_PumpEvents: Option<unsafe extern "C" fn()>,
+    SDL_ShowSimpleMessageBox:
+        Option<unsafe extern "C" fn(u32, *const c_char, *const c_char, Window) -> bool>,
 
     SDL_GetJoysticks: Option<unsafe extern "C" fn(*mut c_int) -> *mut JoystickId>,
     SDL_OpenJoystick: Option<unsafe extern "C" fn(JoystickId) -> Joystick>,
@@ -303,6 +305,7 @@ fn api() -> Option<&'static Api> {
             SDL_SetAppMetadataProperty,
             SDL_GetError,
             SDL_PumpEvents,
+            SDL_ShowSimpleMessageBox,
             SDL_GetJoysticks,
             SDL_OpenJoystick,
             SDL_CloseJoystick,
@@ -438,6 +441,29 @@ pub fn error() -> String {
             .to_string_lossy()
             .into_owned(),
     }
+}
+
+/// Show a platform-native message box with a single acknowledgment button.
+pub fn show_simple_message_box(flags: u32, title: &CStr, message: &CStr) -> bool {
+    let Some(show) = api().and_then(|a| a.SDL_ShowSimpleMessageBox) else {
+        return false;
+    };
+    // SAFETY: both strings are NUL-terminated and a null parent window is
+    // explicitly allowed by SDL.
+    unsafe {
+        show(
+            flags,
+            title.as_ptr(),
+            message.as_ptr(),
+            std::ptr::null_mut(),
+        )
+    }
+}
+
+pub mod message_box {
+    pub const ERROR: u32 = 0x0000_0010;
+    pub const WARNING: u32 = 0x0000_0020;
+    pub const INFORMATION: u32 = 0x0000_0040;
 }
 
 /// What the desktop is told this program is.

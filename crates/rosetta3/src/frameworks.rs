@@ -415,12 +415,11 @@ fn media_constants() -> Vec<(String, u64)> {
 fn shimmed() -> Vec<(&'static str, *const ())> {
     vec![
         ("NSLog", crate::shims::nslog::native::nslog() as *const ()),
-        ("NSRunAlertPanel", unintercepted_alert as *const ()),
+        (
+            "NSRunAlertPanel",
+            crate::shims::nslog::native::run_alert_panel() as *const (),
+        ),
     ]
-}
-
-unsafe extern "C" fn unintercepted_alert() -> u64 {
-    objc::fail!("NSRunAlertPanel was called rather than intercepted")
 }
 
 pub fn symbol(name: &str) -> Option<u64> {

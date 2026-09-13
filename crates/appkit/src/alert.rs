@@ -10,7 +10,7 @@
 //! displayed cannot be reported as one the user agreed to. An alert with a
 //! single button has no such choice, and its one button is the answer.
 
-use std::ffi::c_void;
+use std::ffi::{CString, c_void};
 
 use objc::object::Id;
 use objc::sel::Sel;
@@ -32,6 +32,37 @@ pub const INSTANCE_SIZE: usize = size_of::<Alert>();
 
 /// `NSAlertFirstButtonReturn`. The rest count up from it.
 const FIRST_BUTTON_RETURN: i64 = 1000;
+
+/// `NSAlertDefaultReturn`, returned by the legacy `NSRunAlertPanel` function.
+pub const ALERT_DEFAULT_RETURN: i64 = 1;
+
+/// `NSAlertErrorReturn`, returned when SDL cannot display the panel.
+const ALERT_ERROR_RETURN: i64 = -2;
+
+/// Display the legacy `NSRunAlertPanel` UI after its format has been rendered.
+///
+/// `SDL_ShowSimpleMessageBox` has one acknowledgment button, so that button is
+/// the panel's default button. The legacy alternate and other titles cannot be
+/// represented by this SDL API.
+pub fn run_alert_panel(title: &[u8], message: &[u8]) -> i64 {
+    let title = CString::new(title).unwrap_or_else(|_| c"Alert".to_owned());
+    let message = CString::new(message).unwrap_or_else(|_| {
+        CString::new(
+            message
+                .iter()
+                .map(|byte| if *byte == 0 { b' ' } else { *byte })
+                .collect::<Vec<_>>(),
+        )
+        .expect("embedded NUL bytes were replaced")
+    });
+    match sdl3::show_simple_message_box(sdl3::message_box::INFORMATION, &title, &message) {
+        true => ALERT_DEFAULT_RETURN,
+        false => {
+            eprintln!("rosetta3: could not show guest alert: {}", sdl3::error());
+            ALERT_ERROR_RETURN
+        }
+    }
+}
 
 fn alert_of<'a>(receiver: Id) -> &'a mut Alert {
     // SAFETY: an alert of this crate's, which is what every method here is sent
