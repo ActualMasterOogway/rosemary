@@ -1,6 +1,7 @@
 //! `MTLRenderPipelineState` and the variants a render pass asks it for.
 
 use super::*;
+use crate::constants::*;
 
 /// The state Metal keeps on the encoder but Vulkan bakes into a pipeline.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -45,7 +46,7 @@ pub(crate) struct ColorAttachment {
 impl ColorAttachment {
     pub fn fresh() -> Self {
         Self {
-            pixel_format: 0,
+            pixel_format: MTL_PIXEL_FORMAT_INVALID,
             blending: false,
             source_rgb: 1,      // One
             destination_rgb: 0, // Zero
@@ -53,7 +54,7 @@ impl ColorAttachment {
             source_alpha: 1,
             destination_alpha: 0,
             alpha_operation: 0,
-            write_mask: 0xf, // MTLColorWriteMaskAll
+            write_mask: MTL_COLOR_WRITE_MASK_ALL,
         }
     }
 }
@@ -297,7 +298,7 @@ impl RenderPipeline {
             .scissor_count(1);
         let raster = vk::PipelineRasterizationStateCreateInfo::default()
             // MTLDepthClipModeClamp is 1.
-            .depth_clamp_enable(key.depth_clip == 1)
+            .depth_clamp_enable(key.depth_clip == MTL_DEPTH_CLIP_MODE_CLAMP)
             .polygon_mode(match key.fill_mode {
                 1 => vk::PolygonMode::LINE,
                 _ => vk::PolygonMode::FILL,

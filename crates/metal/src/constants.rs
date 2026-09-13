@@ -2,6 +2,27 @@
 
 use super::*;
 
+pub(crate) const MTL_PIXEL_FORMAT_INVALID: u64 = 0;
+pub(crate) const MTL_PIXEL_FORMAT_RGBA8_UNORM: u64 = 70;
+pub(crate) const MTL_PIXEL_FORMAT_BGRA8_UNORM: u64 = 80;
+
+pub(crate) const MTL_TEXTURE_TYPE_2D: u64 = 2;
+
+pub(crate) const MTL_STORAGE_MODE_MANAGED: u64 = 1;
+
+pub(crate) const MTL_GPU_FAMILY_MAC_1: u64 = 2001;
+pub(crate) const MTL_GPU_FAMILY_MAC_2: u64 = 2002;
+pub(crate) const MTL_GPU_FAMILY_COMMON_1: u64 = 3001;
+pub(crate) const MTL_GPU_FAMILY_COMMON_3: u64 = 3003;
+pub(crate) const MTL_GPU_FAMILY_METAL_3: u64 = 5001;
+pub(crate) const MTL_FEATURE_SET_MACOS_GPU_FAMILY_1_V1: u64 = 10000;
+pub(crate) const MTL_FEATURE_SET_MACOS_GPU_FAMILY_2_V1: u64 = 10005;
+
+pub(crate) const MTL_ARGUMENT_BUFFERS_TIER_1: u64 = 0;
+
+pub(crate) const MTL_COLOR_WRITE_MASK_ALL: u64 = 0xf;
+pub(crate) const MTL_DEPTH_CLIP_MODE_CLAMP: u64 = 1;
+
 pub(super) unsafe extern "C" fn constant_values_init(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: an `MTLFunctionConstantValues` straight from `+alloc`, whose
     // body is this call's to establish.

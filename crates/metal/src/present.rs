@@ -51,6 +51,7 @@ use ash::vk;
 use objc::object::Id;
 use objc::sel::Sel;
 
+use crate::constants::*;
 use crate::gpu::{self, Gpu, ImageDescription};
 use crate::object::{self, methods};
 use crate::resource::Texture;
@@ -109,7 +110,11 @@ unsafe extern "C" fn next_drawable(receiver: Id, _sel: Sel) -> Id {
         height = h;
     }
     let pixel_format = send_u64(receiver, "pixelFormat");
-    let pixel_format = if pixel_format == 0 { 80 } else { pixel_format };
+    let pixel_format = if pixel_format == MTL_PIXEL_FORMAT_INVALID {
+        MTL_PIXEL_FORMAT_BGRA8_UNORM
+    } else {
+        pixel_format
+    };
 
     let mut cache = CACHE.lock().expect("drawable cache");
     if let Some(entry) = cache.iter().find(|entry| {

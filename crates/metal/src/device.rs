@@ -239,13 +239,12 @@ pub(super) unsafe extern "C" fn max_threadgroup_memory(receiver: Id, _sel: Sel) 
 pub(super) unsafe extern "C" fn supports_family(_receiver: Id, _sel: Sel, family: u64) -> bool {
     matches!(
         family,
-        // MTLGPUFamilyMac1 and Mac2.
-        2001 | 2002
+        MTL_GPU_FAMILY_MAC_1 | MTL_GPU_FAMILY_MAC_2
         // MTLGPUFamilyCommon1 to Common3.
-        | 3001
-            ..=3003
+        | MTL_GPU_FAMILY_COMMON_1
+            ..=MTL_GPU_FAMILY_COMMON_3
         // MTLGPUFamilyMetal3.
-        | 5001
+        | MTL_GPU_FAMILY_METAL_3
     )
 }
 
@@ -256,8 +255,10 @@ pub(super) unsafe extern "C" fn supports_feature_set(
     _sel: Sel,
     feature_set: u64,
 ) -> bool {
-    // MTLFeatureSet_macOS_GPUFamily1_v1 through _GPUFamily2_v1.
-    matches!(feature_set, 10000..=10005)
+    matches!(
+        feature_set,
+        MTL_FEATURE_SET_MACOS_GPU_FAMILY_1_V1..=MTL_FEATURE_SET_MACOS_GPU_FAMILY_2_V1
+    )
 }
 
 pub(super) unsafe extern "C" fn yes(_receiver: Id, _sel: Sel) -> bool {
@@ -273,7 +274,7 @@ pub(super) unsafe extern "C" fn supports_bc(receiver: Id, _sel: Sel) -> bool {
 /// `-argumentBuffersSupport`: `MTLArgumentBuffersTier1`, which is the tier
 /// whose argument buffers this runtime could lower to descriptor sets.
 pub(super) unsafe extern "C" fn argument_buffers_tier(_receiver: Id, _sel: Sel) -> u64 {
-    0
+    MTL_ARGUMENT_BUFFERS_TIER_1
 }
 
 pub(super) unsafe extern "C" fn supports_sample_count(receiver: Id, _sel: Sel, count: u64) -> bool {

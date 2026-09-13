@@ -1,6 +1,7 @@
 //! Metal pixel formats as Vulkan ones, and the sizes they imply.
 
 use super::*;
+use crate::constants::{MTL_PIXEL_FORMAT_BGRA8_UNORM, MTL_PIXEL_FORMAT_RGBA8_UNORM};
 
 pub(crate) fn sample_count(count: u64) -> Option<vk::SampleCountFlags> {
     match count {
@@ -64,12 +65,12 @@ pub fn pixel_format(metal: u64) -> vk::Format {
         63 => F::R16G16_UINT,
         64 => F::R16G16_SINT,
         65 => F::R16G16_SFLOAT,
-        70 => F::R8G8B8A8_UNORM,
+        MTL_PIXEL_FORMAT_RGBA8_UNORM => F::R8G8B8A8_UNORM,
         71 => F::R8G8B8A8_SRGB,
         72 => F::R8G8B8A8_SNORM,
         73 => F::R8G8B8A8_UINT,
         74 => F::R8G8B8A8_SINT,
-        80 => F::B8G8R8A8_UNORM,
+        MTL_PIXEL_FORMAT_BGRA8_UNORM => F::B8G8R8A8_UNORM,
         81 => F::B8G8R8A8_SRGB,
         90 => F::A2B10G10R10_UNORM_PACK32,
         91 => F::A2B10G10R10_UINT_PACK32,

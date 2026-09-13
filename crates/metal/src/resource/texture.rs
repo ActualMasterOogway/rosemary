@@ -1,6 +1,7 @@
 //! `MTLTexture` and its descriptor.
 
 use super::*;
+use crate::constants::*;
 
 pub(crate) struct Texture {
     pub gpu: &'static Gpu,
@@ -63,15 +64,15 @@ impl TextureDescriptor {
     fn fresh() -> Self {
         // `-[MTLTextureDescriptor init]`'s documented defaults.
         Self {
-            texture_type: 2, // MTLTextureType2D
-            pixel_format: 0,
+            texture_type: MTL_TEXTURE_TYPE_2D,
+            pixel_format: MTL_PIXEL_FORMAT_INVALID,
             width: 1,
             height: 1,
             depth: 1,
             mipmap_level_count: 1,
             sample_count: 1,
             array_length: 1,
-            storage_mode: 1, // MTLStorageModeManaged on macOS
+            storage_mode: MTL_STORAGE_MODE_MANAGED,
             usage: gpu::USAGE_SHADER_READ,
         }
     }
