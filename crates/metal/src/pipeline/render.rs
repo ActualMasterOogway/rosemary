@@ -107,6 +107,12 @@ impl RenderPipeline {
         layouts_in: &[VertexLayout; VERTEX_SLOTS],
         attributes_in: &[VertexAttribute; VERTEX_SLOTS],
     ) -> Result<Self, String> {
+        let samples = gpu::sample_count(descriptor.sample_count).ok_or_else(|| {
+            format!(
+                "render pipeline has invalid Metal sample count {}",
+                descriptor.sample_count
+            )
+        })?;
         let vertex_module = gpu.create_shader_module(&vertex.words, &vertex.name)?;
         let fragment_module = gpu.create_shader_module(&fragment.words, &fragment.name)?;
         let layouts = layouts_for(gpu, &[&vertex.resources, &fragment.resources])?;
@@ -209,15 +215,6 @@ impl RenderPipeline {
         }
         let depth_format = gpu::pixel_format(descriptor.depth_format);
         let stencil_format = gpu::pixel_format(descriptor.stencil_format);
-        let samples = match descriptor.sample_count {
-            0 | 1 => vk::SampleCountFlags::TYPE_1,
-            2 => vk::SampleCountFlags::TYPE_2,
-            4 => vk::SampleCountFlags::TYPE_4,
-            8 => vk::SampleCountFlags::TYPE_8,
-            16 => vk::SampleCountFlags::TYPE_16,
-            // FIXME (ACCURACY): is this default in the match arm actually sound?
-            _ => vk::SampleCountFlags::TYPE_16,
-        };
         let attachment_depth = if depth_format != vk::Format::UNDEFINED {
             Some(depth_format)
         } else if stencil_format != vk::Format::UNDEFINED {

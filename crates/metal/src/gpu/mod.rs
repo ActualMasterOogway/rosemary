@@ -25,7 +25,7 @@ use static_init::dynamic;
 
 use crate::heap::{Allocation, Heap};
 
-use format::sample_count;
+pub(crate) use format::sample_count;
 pub use format::{aspect_of, block_extent, pixel_format, texel_size};
 pub(crate) use guard::{Guard, GuardedVec};
 use trace::dump_spirv;

@@ -276,10 +276,12 @@ pub(super) unsafe extern "C" fn argument_buffers_tier(_receiver: Id, _sel: Sel) 
     0
 }
 
-pub(super) unsafe extern "C" fn supports_sample_count(
-    _receiver: Id,
-    _sel: Sel,
-    count: u64,
-) -> bool {
-    matches!(count, 1 | 2 | 4)
+pub(super) unsafe extern "C" fn supports_sample_count(receiver: Id, _sel: Sel, count: u64) -> bool {
+    let Some(gpu) = gpu_of(receiver) else {
+        return false;
+    };
+    let Some(samples) = gpu::sample_count(count) else {
+        return false;
+    };
+    gpu.limits.framebuffer_color_sample_counts.contains(samples)
 }

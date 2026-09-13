@@ -2,13 +2,13 @@
 
 use super::*;
 
-pub(super) fn sample_count(count: u64) -> vk::SampleCountFlags {
+pub(crate) fn sample_count(count: u64) -> Option<vk::SampleCountFlags> {
     match count {
-        0 | 1 => vk::SampleCountFlags::TYPE_1,
-        2 => vk::SampleCountFlags::TYPE_2,
-        4 => vk::SampleCountFlags::TYPE_4,
-        8 => vk::SampleCountFlags::TYPE_8,
-        _ => vk::SampleCountFlags::TYPE_16,
+        1 => Some(vk::SampleCountFlags::TYPE_1),
+        2 => Some(vk::SampleCountFlags::TYPE_2),
+        4 => Some(vk::SampleCountFlags::TYPE_4),
+        8 => Some(vk::SampleCountFlags::TYPE_8),
+        _ => None,
     }
 }
 

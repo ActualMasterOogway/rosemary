@@ -124,6 +124,44 @@ fn the_device_reports_the_mac_gpu_families() {
 }
 
 #[test]
+fn sample_counts_follow_the_vulkan_device() {
+    for (count, sample) in [
+        (1, ash::vk::SampleCountFlags::TYPE_1),
+        (2, ash::vk::SampleCountFlags::TYPE_2),
+        (4, ash::vk::SampleCountFlags::TYPE_4),
+        (8, ash::vk::SampleCountFlags::TYPE_8),
+    ] {
+        assert_eq!(gpu::sample_count(count), Some(sample));
+    }
+    for count in [0, 3, 16, 64] {
+        assert_eq!(gpu::sample_count(count), None);
+    }
+
+    let Some(device) = gpu_device() else {
+        return;
+    };
+    let gpu = gpu_of(device).expect("a Vulkan device");
+    for (count, sample) in [
+        (1, ash::vk::SampleCountFlags::TYPE_1),
+        (2, ash::vk::SampleCountFlags::TYPE_2),
+        (4, ash::vk::SampleCountFlags::TYPE_4),
+        (8, ash::vk::SampleCountFlags::TYPE_8),
+    ] {
+        // SAFETY: the same query a guest makes on this live device.
+        let reported = unsafe { supports_sample_count(device, std::ptr::null(), count) };
+        assert_eq!(
+            reported,
+            gpu.limits.framebuffer_color_sample_counts.contains(sample)
+        );
+    }
+    // SAFETY: the same query with values outside Metal's supported set.
+    unsafe {
+        assert!(!supports_sample_count(device, std::ptr::null(), 0));
+        assert!(!supports_sample_count(device, std::ptr::null(), 16));
+    }
+}
+
+#[test]
 fn source_library_creation_reports_invalid_source() {
     let device = device_for_tests();
     let mut error = std::ptr::null_mut();

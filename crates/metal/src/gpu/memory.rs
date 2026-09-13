@@ -123,6 +123,12 @@ impl Gpu {
     }
 
     pub fn create_image(&self, description: &ImageDescription) -> Result<GpuImage, String> {
+        let samples = sample_count(description.samples).ok_or_else(|| {
+            format!(
+                "texture has invalid Metal sample count {}",
+                description.samples
+            )
+        })?;
         let mut usage = vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST;
         if description.usage & USAGE_SHADER_READ != 0 {
             usage |= vk::ImageUsageFlags::SAMPLED;
@@ -156,7 +162,7 @@ impl Gpu {
             })
             .mip_levels(description.levels.max(1))
             .array_layers(description.layers.max(1))
-            .samples(sample_count(description.samples))
+            .samples(samples)
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
@@ -228,7 +234,7 @@ impl Gpu {
             depth: description.depth.max(1),
             levels: description.levels.max(1),
             layers: description.layers.max(1),
-            samples: sample_count(description.samples),
+            samples,
         })
     }
 
