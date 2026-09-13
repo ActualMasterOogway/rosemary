@@ -31,8 +31,11 @@ impl Emitter {
             // `discard_fragment` keeps executing in Metal, so demote the
             // invocation rather than terminating the block with OpKill.
             InstructionKind::DiscardFragment => {
-                self.builder
-                    .capability(Capability::DemoteToHelperInvocation);
+                self.capability(Capability::DemoteToHelperInvocation)?;
+                if self.spirv_version < (1, 6) {
+                    self.builder
+                        .extension("SPV_EXT_demote_to_helper_invocation");
+                }
                 // rspirv classifies this as a terminator and would close the
                 // block. SPIR-V lets execution continue after it, as Metal
                 // does, so append it without ending the block.
@@ -66,7 +69,7 @@ impl Emitter {
                 };
                 let semantics = self.constant(&Type::u32(), u64::from(semantics))?;
                 if *scope == BarrierScope::Simdgroup {
-                    self.builder.capability(Capability::GroupNonUniform);
+                    self.capability(Capability::GroupNonUniform)?;
                 }
                 self.builder
                     .control_barrier(execution, memory_scope, semantics)

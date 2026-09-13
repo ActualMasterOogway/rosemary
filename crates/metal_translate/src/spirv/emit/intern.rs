@@ -192,25 +192,22 @@ impl Emitter {
             Type::Int { bits, signed } => {
                 match bits {
                     64 => {
-                        if !self.shader_int64 {
-                            return Err(emission("target profile does not support Int64"));
-                        }
                         if !self.uses_int64 {
-                            self.builder.capability(Capability::Int64);
+                            self.capability(Capability::Int64)?;
                             self.uses_int64 = true;
                         }
                     }
                     // Metal's `short` and `char` need their own Vulkan
                     // capabilities; a shader using them says so.
-                    16 => self.builder.capability(Capability::Int16),
-                    8 => self.builder.capability(Capability::Int8),
+                    16 => self.capability(Capability::Int16)?,
+                    8 => self.capability(Capability::Int8)?,
                     _ => {}
                 }
                 self.builder.type_int(u32::from(*bits), u32::from(*signed))
             }
             Type::Float { bits } => {
                 if *bits == 16 {
-                    self.builder.capability(Capability::Float16);
+                    self.capability(Capability::Float16)?;
                 }
                 self.builder.type_float(u32::from(*bits), None)
             }
@@ -267,28 +264,26 @@ impl Emitter {
                 // latter. See `TextureType::sampled_image`.
                 let sampled = if texture.sampled_image() { 1 } else { 2 };
                 if texture.dimension == TextureDimension::D1 && sampled == 2 {
-                    self.builder.capability(Capability::Image1D);
+                    self.capability(Capability::Image1D)?;
                 }
                 if texture.multisampled && sampled == 2 {
-                    self.builder.capability(Capability::StorageImageMultisample);
+                    self.capability(Capability::StorageImageMultisample)?;
                 }
                 if texture.dimension == TextureDimension::Cube && texture.array {
-                    self.builder.capability(Capability::SampledCubeArray);
+                    self.capability(Capability::SampledCubeArray)?;
                 }
                 // A storage image with an unknown format needs an explicit
                 // capability for each direction it is accessed in.
                 if sampled == 2 {
                     match texture.access {
                         Access::Read | Access::ReadWrite => {
-                            self.builder
-                                .capability(Capability::StorageImageReadWithoutFormat);
+                            self.capability(Capability::StorageImageReadWithoutFormat)?;
                         }
                         _ => {}
                     }
                     match texture.access {
                         Access::Write | Access::ReadWrite => {
-                            self.builder
-                                .capability(Capability::StorageImageWriteWithoutFormat);
+                            self.capability(Capability::StorageImageWriteWithoutFormat)?;
                         }
                         _ => {}
                     }

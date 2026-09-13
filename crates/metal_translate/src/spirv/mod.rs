@@ -42,7 +42,34 @@ pub struct TargetProfile {
     pub spirv_version: (u8, u8),
     pub max_bound_descriptor_sets: u32,
     pub shader: bool,
+    pub shader_int8: bool,
+    pub shader_int16: bool,
     pub shader_int64: bool,
+    pub shader_float16: bool,
+    pub storage_buffer8_bit_access: bool,
+    pub uniform_and_storage_buffer8_bit_access: bool,
+    pub storage_push_constant8: bool,
+    pub storage_buffer16_bit_access: bool,
+    pub uniform_and_storage_buffer16_bit_access: bool,
+    pub storage_push_constant16: bool,
+    pub storage_input_output16: bool,
+    pub shader_image_gather_extended: bool,
+    pub shader_storage_image_multisample: bool,
+    pub image_cube_array: bool,
+    pub shader_storage_image_read_without_format: bool,
+    pub shader_storage_image_write_without_format: bool,
+    pub shader_clip_distance: bool,
+    pub shader_draw_parameters: bool,
+    pub sample_rate_shading: bool,
+    pub geometry_shader: bool,
+    pub multi_viewport: bool,
+    pub demote_to_helper_invocation: bool,
+    /// Vulkan 1.1 subgroup operations support `GroupNonUniform` when the
+    /// physical device reports the basic operation for the shader stage.
+    pub group_non_uniform: bool,
+    /// Core Vulkan shader capabilities which have no optional feature bit.
+    pub image_1d: bool,
+    pub image_query: bool,
     /// `VkPhysicalDeviceVariablePointersFeatures::variablePointersStorageBuffer`,
     /// which a pointer into a buffer needs before it can be a phi or a select.
     pub variable_pointers_storage_buffer: bool,
@@ -58,10 +85,88 @@ impl TargetProfile {
             spirv_version: (1, 6),
             max_bound_descriptor_sets: 4,
             shader: true,
+            shader_int8: false,
+            shader_int16: false,
             shader_int64: false,
+            shader_float16: false,
+            storage_buffer8_bit_access: false,
+            uniform_and_storage_buffer8_bit_access: false,
+            storage_push_constant8: false,
+            storage_buffer16_bit_access: false,
+            uniform_and_storage_buffer16_bit_access: false,
+            storage_push_constant16: false,
+            storage_input_output16: false,
+            shader_image_gather_extended: false,
+            shader_storage_image_multisample: false,
+            image_cube_array: false,
+            shader_storage_image_read_without_format: false,
+            shader_storage_image_write_without_format: false,
+            shader_clip_distance: false,
+            shader_draw_parameters: false,
+            sample_rate_shading: false,
+            geometry_shader: false,
+            multi_viewport: false,
+            demote_to_helper_invocation: false,
+            group_non_uniform: false,
+            image_1d: true,
+            image_query: true,
             variable_pointers_storage_buffer: false,
             variable_pointers: false,
         }
+    }
+
+    pub fn supports_capability(&self, capability: &str) -> bool {
+        match capability {
+            "Shader" => self.shader,
+            "Int8" => self.shader_int8,
+            "Int16" => self.shader_int16,
+            "Int64" => self.shader_int64,
+            "Float16" => self.shader_float16,
+            "ImageGatherExtended" => self.shader_image_gather_extended,
+            "StorageImageMultisample" => self.shader_storage_image_multisample,
+            "SampledCubeArray" => self.image_cube_array,
+            "StorageImageReadWithoutFormat" => self.shader_storage_image_read_without_format,
+            "StorageImageWriteWithoutFormat" => self.shader_storage_image_write_without_format,
+            "ClipDistance" => self.shader_clip_distance,
+            "DrawParameters" => self.shader_draw_parameters,
+            "SampleRateShading" => self.sample_rate_shading,
+            "Geometry" => self.geometry_shader,
+            "MultiViewport" => self.multi_viewport,
+            "DemoteToHelperInvocation" => self.demote_to_helper_invocation,
+            "GroupNonUniform" => self.group_non_uniform,
+            "Image1D" => self.image_1d,
+            "ImageQuery" => self.image_query,
+            "VariablePointersStorageBuffer" => {
+                self.variable_pointers_storage_buffer || self.variable_pointers
+            }
+            "VariablePointers" => self.variable_pointers,
+            _ => false,
+        }
+    }
+
+    pub fn supports_extension(&self, extension: &str) -> bool {
+        match extension {
+            "SPV_KHR_variable_pointers" => {
+                self.variable_pointers_storage_buffer || self.variable_pointers
+            }
+            "SPV_EXT_demote_to_helper_invocation" => self.demote_to_helper_invocation,
+            _ => false,
+        }
+    }
+
+    pub fn unsupported_requirement<'a>(&self, required: &'a RequiredFeatures) -> Option<&'a str> {
+        required
+            .capabilities
+            .iter()
+            .find(|capability| !self.supports_capability(capability))
+            .map(String::as_str)
+            .or_else(|| {
+                required
+                    .extensions
+                    .iter()
+                    .find(|extension| !self.supports_extension(extension))
+                    .map(String::as_str)
+            })
     }
 }
 
@@ -269,20 +374,26 @@ fn emit_entry(
             .builder
             .execution_mode(function_id, ExecutionMode::DepthReplacing, []);
     }
-    let mut capabilities = vec!["Shader".to_string()];
-    if emitter.uses_int64 {
-        capabilities.push("Int64".to_string());
-    }
-    let mut extensions = Vec::new();
-    if let Some(capability) = emitter.uses_variable_pointers {
-        capabilities.push(format!("{capability:?}"));
-        // The capability is core from SPIR-V 1.3; before that it needs the
-        // extension which introduced it.
-        if emitter.spirv_version < (1, 3) {
-            extensions.push("SPV_KHR_variable_pointers".to_string());
-        }
-    }
-    let words = emitter.builder.module().assemble();
+    // Reflection is read from the completed module, so every declaration made
+    // by any emitter path is reported without a second feature list to update.
+    let module = emitter.builder.module();
+    let capabilities = module
+        .capabilities
+        .iter()
+        .filter_map(|instruction| match instruction.operands.first() {
+            Some(SpirvOperand::Capability(capability)) => Some(format!("{capability:?}")),
+            _ => None,
+        })
+        .collect();
+    let extensions = module
+        .extensions
+        .iter()
+        .filter_map(|instruction| match instruction.operands.first() {
+            Some(SpirvOperand::LiteralString(extension)) => Some(extension.clone()),
+            _ => None,
+        })
+        .collect();
+    let words = module.assemble();
     rspirv::dr::load_words(&words)
         .map_err(|error| emission(format!("emitted SPIR-V could not be parsed: {error}")))?;
     Ok(EntryArtifact {

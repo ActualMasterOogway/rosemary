@@ -77,7 +77,7 @@ impl Emitter {
                         ));
                     }
                     mask |= if gather.is_some() {
-                        self.builder.capability(Capability::ImageGatherExtended);
+                        self.capability(Capability::ImageGatherExtended)?;
                         ImageOperands::OFFSET
                     } else {
                         ImageOperands::CONST_OFFSET
@@ -172,7 +172,7 @@ impl Emitter {
                 let Some(Type::Texture(image_type)) = operand_type(function, texture) else {
                     return Err(emission("texture query has no texture operand"));
                 };
-                self.builder.capability(Capability::ImageQuery);
+                self.capability(Capability::ImageQuery)?;
                 let lanes = coordinate_lanes(&image_type) + u8::from(image_type.array);
                 let size_type = self.type_id(&if lanes == 1 {
                     Type::u32()

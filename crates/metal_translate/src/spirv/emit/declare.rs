@@ -235,7 +235,7 @@ impl Emitter {
                             self.builder.decorate(variable, Decoration::Centroid, []);
                         }
                         Sampling::Sample => {
-                            self.builder.capability(Capability::SampleRateShading);
+                            self.capability(Capability::SampleRateShading)?;
                             self.builder.decorate(variable, Decoration::Sample, []);
                         }
                     }
@@ -274,23 +274,23 @@ impl Emitter {
             (Builtin::Position, _) => BuiltIn::Position,
             (Builtin::PointSize, _) => BuiltIn::PointSize,
             (Builtin::ClipDistance, _) => {
-                self.builder.capability(Capability::ClipDistance);
+                self.capability(Capability::ClipDistance)?;
                 BuiltIn::ClipDistance
             }
             (Builtin::VertexId, _) => BuiltIn::VertexIndex,
             (Builtin::InstanceId, _) => BuiltIn::InstanceIndex,
             (Builtin::BaseVertex, _) => {
-                self.builder.capability(Capability::DrawParameters);
+                self.capability(Capability::DrawParameters)?;
                 BuiltIn::BaseVertex
             }
             (Builtin::BaseInstance, _) => {
-                self.builder.capability(Capability::DrawParameters);
+                self.capability(Capability::DrawParameters)?;
                 BuiltIn::BaseInstance
             }
             (Builtin::FrontFacing, _) => BuiltIn::FrontFacing,
             (Builtin::PointCoord, _) => BuiltIn::PointCoord,
             (Builtin::SampleId, _) => {
-                self.builder.capability(Capability::SampleRateShading);
+                self.capability(Capability::SampleRateShading)?;
                 BuiltIn::SampleId
             }
             (Builtin::SampleMask, _) => BuiltIn::SampleMask,
@@ -299,11 +299,11 @@ impl Emitter {
                 BuiltIn::FragDepth
             }
             (Builtin::RenderTargetArrayIndex, _) => {
-                self.builder.capability(Capability::Geometry);
+                self.capability(Capability::Geometry)?;
                 BuiltIn::Layer
             }
             (Builtin::ViewportArrayIndex, _) => {
-                self.builder.capability(Capability::MultiViewport);
+                self.capability(Capability::MultiViewport)?;
                 BuiltIn::ViewportIndex
             }
             (Builtin::ThreadPositionInGrid, _) => BuiltIn::GlobalInvocationId,

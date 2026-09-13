@@ -46,6 +46,18 @@ pub(super) fn retain_library(
     air: Option<&[u8]>,
     target: Option<&'static metal_translate::TargetProfile>,
 ) -> Id {
+    if let Some(target) = target
+        && let Some((entry, requirement)) = translated.entries.iter().find_map(|entry| {
+            target
+                .unsupported_requirement(&entry.required)
+                .map(|requirement| (entry.name.as_str(), requirement))
+        })
+    {
+        report_library_error(format!(
+            "entry point {entry} requires {requirement}, which the Vulkan device did not enable"
+        ));
+        return std::ptr::null_mut();
+    }
     // Only a library with function constants is ever translated again.
     let air = air
         .filter(|_| !translated.function_constants.is_empty())
@@ -198,7 +210,16 @@ pub(super) unsafe extern "C" fn new_function_with_constants(
                     else {
                         return fail_library(error, "specialization lost the function");
                     };
-                    Some(translated.entries.swap_remove(position))
+                    let entry = translated.entries.swap_remove(position);
+                    if let Some(requirement) = target.unsupported_requirement(&entry.required) {
+                        return fail_library(
+                            error,
+                            &format!(
+                                "entry point {name} requires {requirement}, which the Vulkan device did not enable"
+                            ),
+                        );
+                    }
+                    Some(entry)
                 }
                 Err(translation) => return fail_library(error, &translation.to_string()),
             }

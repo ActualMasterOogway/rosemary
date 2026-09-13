@@ -469,7 +469,12 @@ fn source_msl_compiles_a_bounded_typed_blit_kernel() {
              output.write(float4(element) / 255.f, gid + params.offset);\n\
            }\n\
          }";
-    let library = translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap();
+    let target = TargetProfile {
+        shader_int8: true,
+        shader_storage_image_write_without_format: true,
+        ..TargetProfile::vulkan_1_3()
+    };
+    let library = translate_msl(source, &target).unwrap();
     let module = rspirv::dr::load_words(&library.entries[0].words).unwrap();
     for operation in [
         Op::ImageWrite,
@@ -537,10 +542,11 @@ fn emits_a_writable_3d_texture_descriptor_in_its_metal_namespace() {
         }],
     };
 
-    let artifact = emit_spirv(&module, &TargetProfile::vulkan_1_3())
-        .unwrap()
-        .entries
-        .remove(0);
+    let target = TargetProfile {
+        shader_storage_image_write_without_format: true,
+        ..TargetProfile::vulkan_1_3()
+    };
+    let artifact = emit_spirv(&module, &target).unwrap().entries.remove(0);
     assert_eq!(artifact.resources[0].descriptor_set, 1);
     assert_eq!(artifact.resources[0].binding, 7);
     let parsed = rspirv::dr::load_words(&artifact.words).unwrap();
@@ -1294,5 +1300,62 @@ fn a_constant_address_space_pointer_phi_keeps_its_buffer_storage_class() {
             .required
             .capabilities
             .contains(&"VariablePointersStorageBuffer".to_string())
+    );
+}
+
+#[test]
+fn fragment_demote_is_negotiated_and_fully_reflected() {
+    let module = Module {
+        static_initializers: Vec::new(),
+        globals: Vec::new(),
+        functions: vec![Function {
+            name: "fragment_main".to_string(),
+            result: Type::Void,
+            parameters: Vec::new(),
+            values: Vec::new(),
+            blocks: vec![Block {
+                id: BlockId(0),
+                name: "entry".to_string(),
+                instructions: vec![Instruction {
+                    result: None,
+                    kind: InstructionKind::DiscardFragment,
+                }],
+                terminator: Terminator::Return(None),
+            }],
+        }],
+        entries: vec![EntryPoint {
+            function: 0,
+            stage: Stage::Fragment,
+            resources: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        }],
+    };
+    let mut target = TargetProfile {
+        vulkan_version: (1, 2),
+        spirv_version: (1, 5),
+        ..TargetProfile::vulkan_1_3()
+    };
+    target.demote_to_helper_invocation = false;
+    let error = emit_spirv(&module, &target).unwrap_err();
+    assert!(error.to_string().contains("DemoteToHelperInvocation"));
+
+    target.demote_to_helper_invocation = true;
+    let entry = emit_spirv(&module, &target).unwrap().entries.remove(0);
+    assert!(
+        entry
+            .required
+            .capabilities
+            .contains(&"DemoteToHelperInvocation".to_string())
+    );
+    assert_eq!(
+        entry.required.extensions,
+        ["SPV_EXT_demote_to_helper_invocation"]
+    );
+    assert_eq!(target.unsupported_requirement(&entry.required), None);
+    target.demote_to_helper_invocation = false;
+    assert_eq!(
+        target.unsupported_requirement(&entry.required),
+        Some("DemoteToHelperInvocation")
     );
 }

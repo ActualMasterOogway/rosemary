@@ -101,6 +101,111 @@ const RECYCLED: usize = 32;
 /// copy to four kilobytes, so a chunk holds a frame's worth of them.
 pub const UPLOAD_CHUNK: u64 = 256 << 10;
 
+fn create_device(
+    instance: &Instance,
+    physical: vk::PhysicalDevice,
+    queues: &[vk::DeviceQueueCreateInfo<'_>],
+    features: &vk::PhysicalDeviceFeatures,
+    extensions: &[*const std::ffi::c_char],
+    target: &metal_translate::TargetProfile,
+) -> Result<Device, String> {
+    let mut v11 = vk::PhysicalDeviceVulkan11Features {
+        storage_buffer16_bit_access: target.storage_buffer16_bit_access.into(),
+        uniform_and_storage_buffer16_bit_access: target
+            .uniform_and_storage_buffer16_bit_access
+            .into(),
+        storage_push_constant16: target.storage_push_constant16.into(),
+        storage_input_output16: target.storage_input_output16.into(),
+        variable_pointers_storage_buffer: target.variable_pointers_storage_buffer.into(),
+        variable_pointers: target.variable_pointers.into(),
+        shader_draw_parameters: target.shader_draw_parameters.into(),
+        ..Default::default()
+    };
+    let mut v12 = vk::PhysicalDeviceVulkan12Features {
+        storage_buffer8_bit_access: target.storage_buffer8_bit_access.into(),
+        uniform_and_storage_buffer8_bit_access: target
+            .uniform_and_storage_buffer8_bit_access
+            .into(),
+        storage_push_constant8: target.storage_push_constant8.into(),
+        shader_float16: target.shader_float16.into(),
+        shader_int8: target.shader_int8.into(),
+        ..Default::default()
+    };
+    let mut v13 = vk::PhysicalDeviceVulkan13Features {
+        shader_demote_to_helper_invocation: target.demote_to_helper_invocation.into(),
+        ..Default::default()
+    };
+    let mut storage16 = vk::PhysicalDevice16BitStorageFeatures {
+        storage_buffer16_bit_access: target.storage_buffer16_bit_access.into(),
+        uniform_and_storage_buffer16_bit_access: target
+            .uniform_and_storage_buffer16_bit_access
+            .into(),
+        storage_push_constant16: target.storage_push_constant16.into(),
+        storage_input_output16: target.storage_input_output16.into(),
+        ..Default::default()
+    };
+    let mut pointers = vk::PhysicalDeviceVariablePointersFeatures {
+        variable_pointers_storage_buffer: target.variable_pointers_storage_buffer.into(),
+        variable_pointers: target.variable_pointers.into(),
+        ..Default::default()
+    };
+    let mut draw = vk::PhysicalDeviceShaderDrawParametersFeatures {
+        shader_draw_parameters: target.shader_draw_parameters.into(),
+        ..Default::default()
+    };
+    let mut storage8 = vk::PhysicalDevice8BitStorageFeatures {
+        storage_buffer8_bit_access: target.storage_buffer8_bit_access.into(),
+        uniform_and_storage_buffer8_bit_access: target
+            .uniform_and_storage_buffer8_bit_access
+            .into(),
+        storage_push_constant8: target.storage_push_constant8.into(),
+        ..Default::default()
+    };
+    let mut small = vk::PhysicalDeviceShaderFloat16Int8Features {
+        shader_float16: target.shader_float16.into(),
+        shader_int8: target.shader_int8.into(),
+        ..Default::default()
+    };
+    let mut demote = vk::PhysicalDeviceShaderDemoteToHelperInvocationFeatures {
+        shader_demote_to_helper_invocation: target.demote_to_helper_invocation.into(),
+        ..Default::default()
+    };
+
+    let mut create_info = vk::DeviceCreateInfo::default()
+        .queue_create_infos(queues)
+        .enabled_features(features)
+        .enabled_extension_names(extensions);
+    if target.vulkan_version >= (1, 2) {
+        create_info = create_info.push_next(&mut v11).push_next(&mut v12);
+        if target.vulkan_version >= (1, 3) {
+            create_info = create_info.push_next(&mut v13);
+        } else if target.demote_to_helper_invocation {
+            create_info = create_info.push_next(&mut demote);
+        }
+    } else {
+        create_info = create_info
+            .push_next(&mut storage16)
+            .push_next(&mut pointers)
+            .push_next(&mut draw);
+        if target.storage_buffer8_bit_access
+            || target.uniform_and_storage_buffer8_bit_access
+            || target.storage_push_constant8
+        {
+            create_info = create_info.push_next(&mut storage8);
+        }
+        if target.shader_float16 || target.shader_int8 {
+            create_info = create_info.push_next(&mut small);
+        }
+        if target.demote_to_helper_invocation {
+            create_info = create_info.push_next(&mut demote);
+        }
+    }
+    // SAFETY: all feature structures and borrowed create-info data live
+    // across the call, and every enabled bit came from the adapter query.
+    unsafe { instance.create_device(physical, &create_info, None) }
+        .map_err(|error| format!("vkCreateDevice failed with {error:?}"))
+}
+
 /// A render pass is keyed by the formats and load/store actions of its
 /// attachments: Vulkan bakes into the pass what Metal carries on the
 /// descriptor.
@@ -121,7 +226,11 @@ pub struct RenderPassKey {
 }
 
 impl Gpu {
-    pub fn create(instance: &Instance, physical: vk::PhysicalDevice) -> Result<Self, String> {
+    pub fn create(
+        instance: &Instance,
+        physical: vk::PhysicalDevice,
+        target: &metal_translate::TargetProfile,
+    ) -> Result<Self, String> {
         // SAFETY: the physical device came from this live instance.
         let families = unsafe { instance.get_physical_device_queue_family_properties(physical) };
         let queue_family = families
@@ -161,29 +270,26 @@ impl Gpu {
         if pushes {
             enabled.push(ash::khr::push_descriptor::NAME.as_ptr());
         }
-
-        // The same reasoning as for the core features: enable what the device
-        // reports. A translated shader which phis a pointer declares
-        // `VariablePointers`, and Vulkan requires the matching feature to have
-        // been enabled at device creation.
-        let mut pointers = vk::PhysicalDeviceVariablePointersFeatures::default();
-        let mut reported = vk::PhysicalDeviceFeatures2::default().push_next(&mut pointers);
-        // SAFETY: the physical device belongs to this live instance, and both
-        // structures live across the call.
-        unsafe { instance.get_physical_device_features2(physical, &mut reported) };
+        if target.vulkan_version < (1, 2) {
+            if target.storage_buffer8_bit_access
+                || target.uniform_and_storage_buffer8_bit_access
+                || target.storage_push_constant8
+            {
+                enabled.push(ash::khr::_8bit_storage::NAME.as_ptr());
+            }
+            if target.shader_float16 || target.shader_int8 {
+                enabled.push(ash::khr::shader_float16_int8::NAME.as_ptr());
+            }
+        }
+        if target.vulkan_version < (1, 3) && target.demote_to_helper_invocation {
+            enabled.push(ash::ext::shader_demote_to_helper_invocation::NAME.as_ptr());
+        }
 
         let priorities = [1.0f32];
         let queues = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family)
             .queue_priorities(&priorities)];
-        let create_info = vk::DeviceCreateInfo::default()
-            .queue_create_infos(&queues)
-            .enabled_features(&features)
-            .enabled_extension_names(&enabled)
-            .push_next(&mut pointers);
-        // SAFETY: every borrowed structure lives across the call.
-        let device = unsafe { instance.create_device(physical, &create_info, None) }
-            .map_err(|error| format!("vkCreateDevice failed with {error:?}"))?;
+        let device = create_device(instance, physical, &queues, &features, &enabled, target)?;
         // SAFETY: the family was requested above with one queue.
         let queue = unsafe { device.get_device_queue(queue_family, 0) };
         // SAFETY: the physical device belongs to this live instance.

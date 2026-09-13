@@ -17,7 +17,7 @@ mod texture;
 use super::*;
 
 pub(super) struct Emitter {
-    pub(super) shader_int64: bool,
+    pub(super) target: TargetProfile,
     pub(super) variable_pointers_storage_buffer: bool,
     pub(super) variable_pointers: bool,
     pub(super) spirv_version: (u8, u8),
@@ -65,7 +65,7 @@ impl Emitter {
         builder.memory_model(AddressingModel::Logical, MemoryModel::GLSL450);
         let glsl_std_450 = builder.ext_inst_import("GLSL.std.450");
         Self {
-            shader_int64: target.shader_int64,
+            target: target.clone(),
             variable_pointers_storage_buffer: target.variable_pointers_storage_buffer,
             variable_pointers: target.variable_pointers,
             spirv_version: target.spirv_version,
@@ -90,6 +90,17 @@ impl Emitter {
             return_type: None,
             writes_depth: false,
         }
+    }
+
+    /// Declare a capability only when the negotiated Vulkan target admits it.
+    pub(super) fn capability(&mut self, capability: Capability) -> Result<(), TranslateError> {
+        if !self.target.supports_capability(&format!("{capability:?}")) {
+            return Err(emission(format!(
+                "target profile does not support {capability:?}"
+            )));
+        }
+        self.builder.capability(capability);
+        Ok(())
     }
 
     pub(super) fn emit_instruction(
@@ -257,7 +268,7 @@ impl Emitter {
         // needs both declares only the wider.
         if self.uses_variable_pointers != Some(Capability::VariablePointers) {
             self.uses_variable_pointers = Some(capability);
-            self.builder.capability(capability);
+            self.capability(capability)?;
             if self.spirv_version < (1, 3) {
                 self.builder.extension("SPV_KHR_variable_pointers");
             }

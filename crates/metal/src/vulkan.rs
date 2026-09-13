@@ -30,7 +30,11 @@ impl Adapter {
         match self.gpu.get_or_init(|| {
             let state = STATE.get().expect("adapters were enumerated first");
             let instance = &state.as_ref().expect("this adapter came from it").instance;
-            Gpu::create(instance, vk::PhysicalDevice::from_raw(self.handle as u64))
+            Gpu::create(
+                instance,
+                vk::PhysicalDevice::from_raw(self.handle as u64),
+                &self.target,
+            )
         }) {
             Ok(gpu) => Ok(gpu),
             Err(reason) => Err(reason),
@@ -67,12 +71,21 @@ pub fn adapters() -> Result<&'static [Adapter], &'static str> {
 
 fn initialize() -> Result<State, String> {
     let entry = load_entry()?;
+    // A loader predating Vulkan 1.1 returns `None`; this runtime's descriptor
+    // ABI cannot operate against it.
+    let loader_version = unsafe { entry.try_enumerate_instance_version() }
+        .map_err(|error| format!("vkEnumerateInstanceVersion failed with {error:?}"))?
+        .unwrap_or(vk::API_VERSION_1_0);
+    let instance_version = loader_version.min(vk::API_VERSION_1_3);
+    if instance_version < vk::API_VERSION_1_1 {
+        return Err("the Vulkan loader does not support Vulkan 1.1".to_string());
+    }
     let application = vk::ApplicationInfo::default()
         .application_name(c"rosetta3")
         .application_version(1)
         .engine_name(c"metal_translate")
         .engine_version(1)
-        .api_version(vk::API_VERSION_1_1);
+        .api_version(instance_version);
     let surface_extensions = surface_extensions(&entry);
     let enabled = surface_extensions
         .iter()
@@ -95,23 +108,18 @@ fn initialize() -> Result<State, String> {
         .map_err(|error| format!("vkEnumeratePhysicalDevices failed with {error:?}"))?;
     let mut adapters = physical
         .into_iter()
-        .map(|handle| {
+        .filter_map(|handle| {
             // SAFETY: every handle was returned by this live instance.
             let properties = unsafe { instance.get_physical_device_properties(handle) };
             // SAFETY: the physical device belongs to this live instance.
             let features = unsafe { instance.get_physical_device_features(handle) };
             // SAFETY: the physical device belongs to this live instance.
             let memory = unsafe { instance.get_physical_device_memory_properties(handle) };
+            let device_extensions =
+                unsafe { instance.enumerate_device_extension_properties(handle) }
+                    .unwrap_or_default();
             let supports_memory_budget =
-                unsafe { instance.enumerate_device_extension_properties(handle) }.is_ok_and(
-                    |extensions| {
-                        extensions.iter().any(|property| {
-                            property
-                                .extension_name_as_c_str()
-                                .is_ok_and(|name| name == ash::ext::memory_budget::NAME)
-                        })
-                    },
-                );
+                has_extension(&device_extensions, ash::ext::memory_budget::NAME);
             let budget = supports_memory_budget.then(|| {
                 let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
                 let mut properties =
@@ -121,38 +129,35 @@ fn initialize() -> Result<State, String> {
                 unsafe { instance.get_physical_device_memory_properties2(handle, &mut properties) };
                 budget
             });
-            // Variable pointers is a Vulkan 1.1 feature with a structure of
-            // its own; a shader which phis or selects a pointer needs it, and
-            // the translator rejects such a shader where it is absent.
-            let mut pointers = vk::PhysicalDeviceVariablePointersFeatures::default();
-            let mut features2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut pointers);
-            // SAFETY: as above; `features2` and its chained structure live
-            // across the call.
-            unsafe { instance.get_physical_device_features2(handle, &mut features2) };
             let name = properties.device_name_as_c_str().map_or_else(
                 |_| "Vulkan Device".to_string(),
                 |name| name.to_string_lossy().into_owned(),
             );
-            let version = (
-                vk::api_version_major(properties.api_version) as u8,
-                vk::api_version_minor(properties.api_version) as u8,
+            let effective_version = properties.api_version.min(instance_version);
+            if effective_version < vk::API_VERSION_1_1 {
+                trace(format!(
+                    "ignoring {name}: the device does not support Vulkan 1.1"
+                ));
+                return None;
+            }
+            let target = query_target(
+                &instance,
+                handle,
+                effective_version,
+                &device_extensions,
+                &features,
+                &properties,
             );
-            (
+            Some((
                 adapter_rank(&properties, &memory),
                 Adapter {
                     handle: handle.as_raw() as usize,
                     name,
                     recommended_working_set: recommended_working_set(&memory, budget.as_ref()),
-                    target: metal_translate::TargetProfile {
-                        shader_int64: features.shader_int64 == vk::TRUE,
-                        variable_pointers_storage_buffer: pointers.variable_pointers_storage_buffer
-                            == vk::TRUE,
-                        variable_pointers: pointers.variable_pointers == vk::TRUE,
-                        ..target_profile(version)
-                    },
+                    target,
                     gpu: OnceLock::new(),
                 },
-            )
+            ))
         })
         .collect::<Vec<_>>();
     // Vulkan does not promise any useful enumeration order. Metal's default
@@ -169,8 +174,10 @@ fn initialize() -> Result<State, String> {
         return Err("Vulkan reported no physical devices".to_string());
     }
     trace(format!(
-        "created Vulkan 1.1 instance with {} adapter(s)",
-        adapters.len()
+        "created Vulkan {}.{} instance with {} adapter(s)",
+        vk::api_version_major(instance_version),
+        vk::api_version_minor(instance_version),
+        adapters.len(),
     ));
     Ok(State {
         instance,
@@ -293,6 +300,155 @@ fn load_entry() -> Result<Entry, String> {
         .map_err(|error| format!("the Vulkan loader could not be opened: {error}"))
 }
 
+fn has_extension(extensions: &[vk::ExtensionProperties], name: &std::ffi::CStr) -> bool {
+    extensions.iter().any(|property| {
+        property
+            .extension_name_as_c_str()
+            .is_ok_and(|available| available == name)
+    })
+}
+
+/// Build the translator contract from features queryable through the effective
+/// instance/device version. Promoted aggregate structures may only be placed
+/// in the chain when that core version is available; older versions use the
+/// extension structures which introduced the same feature bits.
+fn query_target(
+    instance: &Instance,
+    physical: vk::PhysicalDevice,
+    effective: u32,
+    extensions: &[vk::ExtensionProperties],
+    core: &vk::PhysicalDeviceFeatures,
+    properties: &vk::PhysicalDeviceProperties,
+) -> metal_translate::TargetProfile {
+    let version = (
+        vk::api_version_major(effective) as u8,
+        vk::api_version_minor(effective) as u8,
+    );
+    let mut target = target_profile(version);
+    target.max_bound_descriptor_sets = properties.limits.max_bound_descriptor_sets;
+    target.shader_int16 = core.shader_int16 == vk::TRUE;
+    target.shader_int64 = core.shader_int64 == vk::TRUE;
+    target.shader_image_gather_extended = core.shader_image_gather_extended == vk::TRUE;
+    target.shader_storage_image_multisample = core.shader_storage_image_multisample == vk::TRUE;
+    target.image_cube_array = core.image_cube_array == vk::TRUE;
+    target.shader_storage_image_read_without_format =
+        core.shader_storage_image_read_without_format == vk::TRUE;
+    target.shader_storage_image_write_without_format =
+        core.shader_storage_image_write_without_format == vk::TRUE;
+    target.shader_clip_distance = core.shader_clip_distance == vk::TRUE;
+    target.sample_rate_shading = core.sample_rate_shading == vk::TRUE;
+    target.geometry_shader = core.geometry_shader == vk::TRUE;
+    target.multi_viewport = core.multi_viewport == vk::TRUE;
+
+    let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
+    let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut subgroup);
+    // SAFETY: the device belongs to this instance and the chain lives here.
+    unsafe { instance.get_physical_device_properties2(physical, &mut properties2) };
+    target.group_non_uniform = subgroup
+        .supported_stages
+        .contains(vk::ShaderStageFlags::COMPUTE)
+        && subgroup
+            .supported_operations
+            .contains(vk::SubgroupFeatureFlags::BASIC);
+
+    if effective >= vk::API_VERSION_1_2 {
+        let mut v11 = vk::PhysicalDeviceVulkan11Features::default();
+        let mut v12 = vk::PhysicalDeviceVulkan12Features::default();
+        if effective >= vk::API_VERSION_1_3 {
+            let mut v13 = vk::PhysicalDeviceVulkan13Features::default();
+            let mut features = vk::PhysicalDeviceFeatures2::default()
+                .push_next(&mut v11)
+                .push_next(&mut v12)
+                .push_next(&mut v13);
+            // SAFETY: every structure in the chain lives across the call.
+            unsafe { instance.get_physical_device_features2(physical, &mut features) };
+            target.demote_to_helper_invocation = v13.shader_demote_to_helper_invocation == vk::TRUE;
+        } else {
+            let mut features = vk::PhysicalDeviceFeatures2::default()
+                .push_next(&mut v11)
+                .push_next(&mut v12);
+            // SAFETY: every structure in the chain lives across the call.
+            unsafe { instance.get_physical_device_features2(physical, &mut features) };
+            if has_extension(
+                extensions,
+                ash::ext::shader_demote_to_helper_invocation::NAME,
+            ) {
+                let mut demote =
+                    vk::PhysicalDeviceShaderDemoteToHelperInvocationFeatures::default();
+                let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut demote);
+                // SAFETY: the extension is advertised and the chain lives here.
+                unsafe { instance.get_physical_device_features2(physical, &mut features) };
+                target.demote_to_helper_invocation =
+                    demote.shader_demote_to_helper_invocation == vk::TRUE;
+            }
+        }
+        target.storage_buffer16_bit_access = v11.storage_buffer16_bit_access == vk::TRUE;
+        target.uniform_and_storage_buffer16_bit_access =
+            v11.uniform_and_storage_buffer16_bit_access == vk::TRUE;
+        target.storage_push_constant16 = v11.storage_push_constant16 == vk::TRUE;
+        target.storage_input_output16 = v11.storage_input_output16 == vk::TRUE;
+        target.variable_pointers_storage_buffer = v11.variable_pointers_storage_buffer == vk::TRUE;
+        target.variable_pointers = v11.variable_pointers == vk::TRUE;
+        target.shader_draw_parameters = v11.shader_draw_parameters == vk::TRUE;
+        target.storage_buffer8_bit_access = v12.storage_buffer8_bit_access == vk::TRUE;
+        target.uniform_and_storage_buffer8_bit_access =
+            v12.uniform_and_storage_buffer8_bit_access == vk::TRUE;
+        target.storage_push_constant8 = v12.storage_push_constant8 == vk::TRUE;
+        target.shader_float16 = v12.shader_float16 == vk::TRUE;
+        target.shader_int8 = v12.shader_int8 == vk::TRUE;
+    } else {
+        let mut storage16 = vk::PhysicalDevice16BitStorageFeatures::default();
+        let mut pointers = vk::PhysicalDeviceVariablePointersFeatures::default();
+        let mut draw = vk::PhysicalDeviceShaderDrawParametersFeatures::default();
+        let mut features = vk::PhysicalDeviceFeatures2::default()
+            .push_next(&mut storage16)
+            .push_next(&mut pointers)
+            .push_next(&mut draw);
+        // SAFETY: these features are core in Vulkan 1.1.
+        unsafe { instance.get_physical_device_features2(physical, &mut features) };
+        target.storage_buffer16_bit_access = storage16.storage_buffer16_bit_access == vk::TRUE;
+        target.uniform_and_storage_buffer16_bit_access =
+            storage16.uniform_and_storage_buffer16_bit_access == vk::TRUE;
+        target.storage_push_constant16 = storage16.storage_push_constant16 == vk::TRUE;
+        target.storage_input_output16 = storage16.storage_input_output16 == vk::TRUE;
+        target.variable_pointers_storage_buffer =
+            pointers.variable_pointers_storage_buffer == vk::TRUE;
+        target.variable_pointers = pointers.variable_pointers == vk::TRUE;
+        target.shader_draw_parameters = draw.shader_draw_parameters == vk::TRUE;
+
+        if has_extension(extensions, ash::khr::_8bit_storage::NAME) {
+            let mut storage8 = vk::PhysicalDevice8BitStorageFeatures::default();
+            let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut storage8);
+            // SAFETY: the extension is advertised and the chain lives here.
+            unsafe { instance.get_physical_device_features2(physical, &mut features) };
+            target.storage_buffer8_bit_access = storage8.storage_buffer8_bit_access == vk::TRUE;
+            target.uniform_and_storage_buffer8_bit_access =
+                storage8.uniform_and_storage_buffer8_bit_access == vk::TRUE;
+            target.storage_push_constant8 = storage8.storage_push_constant8 == vk::TRUE;
+        }
+        if has_extension(extensions, ash::khr::shader_float16_int8::NAME) {
+            let mut small = vk::PhysicalDeviceShaderFloat16Int8Features::default();
+            let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut small);
+            // SAFETY: the extension is advertised and the chain lives here.
+            unsafe { instance.get_physical_device_features2(physical, &mut features) };
+            target.shader_float16 = small.shader_float16 == vk::TRUE;
+            target.shader_int8 = small.shader_int8 == vk::TRUE;
+        }
+        if has_extension(
+            extensions,
+            ash::ext::shader_demote_to_helper_invocation::NAME,
+        ) {
+            let mut demote = vk::PhysicalDeviceShaderDemoteToHelperInvocationFeatures::default();
+            let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut demote);
+            // SAFETY: the extension is advertised and the chain lives here.
+            unsafe { instance.get_physical_device_features2(physical, &mut features) };
+            target.demote_to_helper_invocation =
+                demote.shader_demote_to_helper_invocation == vk::TRUE;
+        }
+    }
+    target
+}
+
 fn target_profile(version: (u8, u8)) -> metal_translate::TargetProfile {
     let spirv_version = match version {
         (major, minor) if major > 1 || minor >= 3 => (1, 6),
@@ -304,7 +460,31 @@ fn target_profile(version: (u8, u8)) -> metal_translate::TargetProfile {
         spirv_version,
         max_bound_descriptor_sets: 4,
         shader: true,
+        shader_int8: false,
+        shader_int16: false,
         shader_int64: false,
+        shader_float16: false,
+        storage_buffer8_bit_access: false,
+        uniform_and_storage_buffer8_bit_access: false,
+        storage_push_constant8: false,
+        storage_buffer16_bit_access: false,
+        uniform_and_storage_buffer16_bit_access: false,
+        storage_push_constant16: false,
+        storage_input_output16: false,
+        shader_image_gather_extended: false,
+        shader_storage_image_multisample: false,
+        image_cube_array: false,
+        shader_storage_image_read_without_format: false,
+        shader_storage_image_write_without_format: false,
+        shader_clip_distance: false,
+        shader_draw_parameters: true,
+        sample_rate_shading: false,
+        geometry_shader: false,
+        multi_viewport: false,
+        demote_to_helper_invocation: false,
+        group_non_uniform: false,
+        image_1d: true,
+        image_query: true,
         variable_pointers_storage_buffer: false,
         variable_pointers: false,
     }

@@ -180,6 +180,19 @@ fn a_key_covers_the_input_the_target_the_frontend_and_the_passes() {
         )
     );
 
+    let mut demote = TargetProfile::vulkan_1_3();
+    demote.demote_to_helper_invocation = true;
+    assert_ne!(
+        base,
+        key(
+            Frontend::AirBitcode,
+            b"air",
+            &demote,
+            &PassPipeline::default(),
+            &FunctionConstantValues::new(),
+        )
+    );
+
     let unoptimized = key(
         Frontend::AirBitcode,
         b"air",
