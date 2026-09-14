@@ -38,6 +38,56 @@ struct Flags {
     delegate: usize,
 }
 
+/// State owned by an `NSTextField`, separate from the `NSTextView` AppKit uses
+/// as its field editor. The editor is retained for the process lifetime, like
+/// the other small side tables in this crate.
+#[derive(Clone)]
+struct Field {
+    text: String,
+    editable: bool,
+    selectable: bool,
+    delegate: usize,
+    editor: usize,
+}
+
+impl Default for Field {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            editable: true,
+            selectable: true,
+            delegate: 0,
+            editor: 0,
+        }
+    }
+}
+
+fn fields() -> &'static Mutex<HashMap<usize, Field>> {
+    static FIELDS: std::sync::OnceLock<Mutex<HashMap<usize, Field>>> = std::sync::OnceLock::new();
+    FIELDS.get_or_init(Default::default)
+}
+
+fn field(receiver: Id) -> Field {
+    fields()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(receiver as usize)
+        .or_default()
+        .clone()
+}
+
+fn is_text_field(receiver: Id) -> bool {
+    if receiver.is_null() {
+        return false;
+    }
+    let Some(base) = objc::class::lookup(c"NSTextField") else {
+        return false;
+    };
+    // SAFETY: a non-null object this runtime allocated.
+    unsafe { objc::object::class_of(receiver) }
+        .is_some_and(|class| class.chain().any(|class| std::ptr::eq(class, base)))
+}
+
 fn flags() -> &'static Mutex<HashMap<usize, Flags>> {
     static FLAGS: std::sync::OnceLock<Mutex<HashMap<usize, Flags>>> = std::sync::OnceLock::new();
     FLAGS.get_or_init(Default::default)
@@ -168,8 +218,95 @@ fn read(receiver: Id) -> Contents {
         .unwrap_or_default()
 }
 
+fn owner_of_editor(editor: Id) -> Option<Id> {
+    fields()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(_, field)| field.editor == editor as usize)
+        .map(|(owner, _)| *owner as Id)
+}
+
+fn sync_field(editor: Id) {
+    let Some(owner) = owner_of_editor(editor) else {
+        return;
+    };
+    let text = read(editor).text;
+    fields()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(owner as usize)
+        .or_default()
+        .text = text;
+}
+
+/// Resolve an `NSTextField` to the `NSTextView` that edits it.
+///
+/// AppKit puts the field editor, rather than the control, in the responder
+/// slot. Keeping that distinction means custom text clients and ordinary text
+/// views continue to receive their own input directly.
+pub(crate) fn editing_responder(window: Id, responder: Id) -> Id {
+    if !is_text_field(responder) || !field(responder).editable {
+        return responder;
+    }
+    let existing = field(responder).editor as Id;
+    let editor = if existing.is_null() {
+        let Some(class) = objc::class::lookup(c"NSTextView") else {
+            return responder;
+        };
+        let editor = objc::object::create_instance(class, 0);
+        // SAFETY: `-frame` returns NSRect on a view this crate made.
+        let frame = unsafe {
+            let f: unsafe extern "C" fn(Id, Sel) -> foundation::geometry::NSRect =
+                std::mem::transmute(objc::msg::entry_stret());
+            f(responder, objc::sel::get("frame"))
+        };
+        // SAFETY: a fresh text view and the documented frame initializer.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, foundation::geometry::NSRect) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            f(editor, objc::sel::get("initWithFrame:"), frame);
+            crate::view::set_window(editor, window);
+        }
+        set(editor, |flags| {
+            flags.field_editor = true;
+            flags.editable = true;
+            flags.selectable = true;
+            flags.delegate = responder as usize;
+        });
+        fields()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(responder as usize)
+            .or_default()
+            .editor = editor as usize;
+        editor
+    } else {
+        // A field can move between windows without changing identity.
+        // SAFETY: the cached object is the text view made above.
+        unsafe { crate::view::set_window(existing, window) };
+        existing
+    };
+    let text = field(responder).text;
+    let mut table = contents().lock().unwrap_or_else(|e| e.into_inner());
+    let state = table.entry(editor as usize).or_default();
+    state.text = text;
+    state.selected = NSRange {
+        location: utf16_len(&state.text),
+        length: 0,
+    };
+    state.marked = None;
+    editor
+}
+
+/// The visible view whose rectangle SDL should use for an input client.
+pub(crate) fn input_area(receiver: Id) -> Id {
+    owner_of_editor(receiver).unwrap_or(receiver)
+}
+
 pub(crate) const DID_CHANGE: &str = "NSTextDidChangeNotification";
 pub(crate) const DID_CHANGE_SELECTION: &str = "NSTextViewDidChangeSelectionNotification";
+pub(crate) const CONTROL_DID_CHANGE: &str = "NSControlTextDidChangeNotification";
 
 fn delegate_method(receiver: Id, name: &str) -> Option<(Id, Sel, &'static objc::class::Method)> {
     let delegate = get(receiver).delegate as Id;
@@ -245,6 +382,7 @@ fn edit(receiver: Id, with: impl FnOnce(&mut Contents)) {
         drop(table);
         did_change_selection(receiver);
     }
+    sync_field(receiver);
     notify_text_changed(receiver);
 }
 
@@ -812,6 +950,123 @@ unsafe extern "C" fn accepts_first_responder(_receiver: Id, _sel: Sel) -> u8 {
     1
 }
 
+unsafe extern "C" fn field_string_value(receiver: Id, _sel: Sel) -> Id {
+    objc::arc::autorelease(foundation::string::from_str(&field(receiver).text))
+}
+
+unsafe extern "C" fn field_set_string_value(receiver: Id, _sel: Sel, value: Id) {
+    // SAFETY: null or an NSString, as the selector requires.
+    let text = String::from_utf8_lossy(&unsafe { foundation::string::bytes(value) }).into_owned();
+    let editor = {
+        let mut table = fields().lock().unwrap_or_else(|e| e.into_inner());
+        let state = table.entry(receiver as usize).or_default();
+        state.text = text.clone();
+        state.editor as Id
+    };
+    if !editor.is_null() {
+        let mut table = contents().lock().unwrap_or_else(|e| e.into_inner());
+        let state = table.entry(editor as usize).or_default();
+        state.text = text;
+        state.selected = NSRange {
+            location: utf16_len(&state.text),
+            length: 0,
+        };
+        state.marked = None;
+    }
+}
+
+unsafe extern "C" fn field_set_editable(receiver: Id, _sel: Sel, value: u8) {
+    let mut table = fields().lock().unwrap_or_else(|e| e.into_inner());
+    let state = table.entry(receiver as usize).or_default();
+    state.editable = value != 0;
+    state.selectable |= value != 0;
+}
+
+unsafe extern "C" fn field_is_editable(receiver: Id, _sel: Sel) -> u8 {
+    field(receiver).editable as u8
+}
+
+unsafe extern "C" fn field_set_selectable(receiver: Id, _sel: Sel, value: u8) {
+    let mut table = fields().lock().unwrap_or_else(|e| e.into_inner());
+    let state = table.entry(receiver as usize).or_default();
+    state.selectable = value != 0;
+    state.editable &= value != 0;
+}
+
+unsafe extern "C" fn field_is_selectable(receiver: Id, _sel: Sel) -> u8 {
+    field(receiver).selectable as u8
+}
+
+unsafe extern "C" fn field_set_delegate(receiver: Id, _sel: Sel, value: Id) {
+    fields()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(receiver as usize)
+        .or_default()
+        .delegate = value as usize;
+}
+
+unsafe extern "C" fn field_delegate(receiver: Id, _sel: Sel) -> Id {
+    field(receiver).delegate as Id
+}
+
+unsafe extern "C" fn current_editor(receiver: Id, _sel: Sel) -> Id {
+    let editor = field(receiver).editor as Id;
+    if editor.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the receiver is a view from this runtime.
+    let window = unsafe { crate::view::window_of(receiver) };
+    if window.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: `-firstResponder` is `id (id, SEL)` on this window.
+    let first = unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+        f(window, objc::sel::get("firstResponder"))
+    };
+    (first == editor)
+        .then_some(editor)
+        .unwrap_or(std::ptr::null_mut())
+}
+
+unsafe extern "C" fn field_mouse_down(receiver: Id, _sel: Sel, _event: Id) {
+    if !field(receiver).editable {
+        return;
+    }
+    // SAFETY: the receiver is a text-field view from this runtime.
+    let window = unsafe { crate::view::window_of(receiver) };
+    if window.is_null() {
+        return;
+    }
+    // `NSWindow` resolves the control to its field editor before changing the
+    // responder. Going through dispatch preserves a guest window override.
+    // SAFETY: `-makeFirstResponder:` is `BOOL (id, SEL, id)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id) -> u8 = std::mem::transmute(objc::msg::entry());
+        f(window, objc::sel::get("makeFirstResponder:"), receiver);
+    }
+}
+
+/// The field editor's ordinary `NSTextDidChangeNotification` is surfaced to
+/// an `NSTextField` delegate using the control-specific callback AppKit uses.
+unsafe extern "C" fn field_text_did_change(receiver: Id, _sel: Sel, _notification: Id) {
+    let delegate = field(receiver).delegate as Id;
+    let sel = objc::sel::get("controlTextDidChange:");
+    // SAFETY: null or the unretained delegate the guest supplied.
+    let method = unsafe { objc::object::class_of(delegate) }.and_then(|class| class.method(sel));
+    let Some(method) = method else {
+        return;
+    };
+    let notification =
+        foundation::notification::make(CONTROL_DID_CHANGE, receiver, std::ptr::null_mut());
+    // SAFETY: the delegate method takes one notification object.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(method.implementation());
+        f(delegate, sel, notification);
+    }
+}
+
 pub(crate) fn install() {
     let text = objc::class::lookup(c"NSText").expect("declared before its methods");
     methods!(text, {
@@ -861,6 +1116,20 @@ pub(crate) fn install() {
         "validAttributesForMarkedText" => valid_attributes, c"@16@0:8";
         "doCommandBySelector:" => do_command_by_selector, c"v24@0:8:16";
         "acceptsFirstResponder" => accepts_first_responder, c"c16@0:8";
+    });
+    let field = objc::class::lookup(c"NSTextField").expect("declared before its methods");
+    methods!(field, {
+        "stringValue" => field_string_value, c"@16@0:8";
+        "setStringValue:" => field_set_string_value, c"v24@0:8@16";
+        "setEditable:" => field_set_editable, c"v20@0:8c16";
+        "isEditable" => field_is_editable, c"c16@0:8";
+        "setSelectable:" => field_set_selectable, c"v20@0:8c16";
+        "isSelectable" => field_is_selectable, c"c16@0:8";
+        "setDelegate:" => field_set_delegate, c"v24@0:8@16";
+        "delegate" => field_delegate, c"@16@0:8";
+        "currentEditor" => current_editor, c"@16@0:8";
+        "mouseDown:" => field_mouse_down, c"v24@0:8@16";
+        "textDidChange:" => field_text_did_change, c"v24@0:8@16";
     });
 }
 
@@ -924,6 +1193,12 @@ mod tests {
         objc::object::create_instance(class, 0)
     }
 
+    fn text_field() -> Id {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSTextField").expect("NSTextField");
+        objc::object::create_instance(class, 0)
+    }
+
     /// The whole point of storing rather than ignoring: what was set is what is
     /// read back, and two views do not share an answer.
     #[test]
@@ -937,6 +1212,44 @@ mod tests {
             assert_eq!(is_field_editor(a, sel), 1);
             assert_eq!(is_field_editor(b, sel), 0);
         }
+    }
+
+    #[test]
+    fn a_text_field_is_edited_through_a_field_editor() {
+        let field = text_field();
+        let window = objc::object::create_instance(objc::class::lookup(c"NSWindow").unwrap(), 0);
+        let initial = foundation::string::from_str("café");
+        // SAFETY: a live text field and NSString, with the selector signatures
+        // installed by this module.
+        unsafe {
+            field_set_string_value(field, objc::sel::get("setStringValue:"), initial);
+            crate::view::set_window(field, window);
+            let make: unsafe extern "C" fn(Id, Sel, Id) -> u8 =
+                std::mem::transmute(objc::msg::entry());
+            assert_eq!(
+                make(window, objc::sel::get("makeFirstResponder:"), field),
+                1
+            );
+        }
+        // SAFETY: the field and its window are live objects from this runtime.
+        let editor = unsafe { current_editor(field, objc::sel::get("currentEditor")) };
+        assert!(!editor.is_null());
+        assert_ne!(editor, field);
+        assert_eq!(input_area(editor), field);
+        // SAFETY: the editor above is the live NSTextView made by the bridge.
+        assert_eq!(
+            unsafe { is_field_editor(editor, objc::sel::get("isFieldEditor")) },
+            1
+        );
+
+        commit(editor, "!");
+        // SAFETY: `-stringValue` returns an NSString owned by this runtime.
+        let value = unsafe { field_string_value(field, objc::sel::get("stringValue")) };
+        // SAFETY: the value above is an NSString.
+        assert_eq!(
+            unsafe { foundation::string::bytes(value) },
+            "café!".as_bytes()
+        );
     }
 
     /// Editable implies selectable, and turning selection off turns editing off

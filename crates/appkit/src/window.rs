@@ -323,6 +323,7 @@ pub fn rebuild_for_opengl(receiver: Id) -> bool {
     // window id appears in events already queued, and the table above is what
     // those are resolved through.
     sdl3::video::destroy_window(old);
+    update_text_input(receiver);
     if shown {
         sdl3::video::show_window(new);
         sdl3::video::raise_window(new);
@@ -751,6 +752,7 @@ unsafe extern "C" fn make_first_responder(receiver: Id, _sel: Sel, responder: Id
             class.map_or("nil", |c| c.name_str())
         );
     }
+    let responder = crate::text::editing_responder(receiver, responder);
     let current = window_of(receiver).first_responder;
     if current == responder {
         update_text_input(receiver);
@@ -787,11 +789,41 @@ fn update_text_input(receiver: Id) {
     }
     match crate::text::is_input_client(window.first_responder) {
         true => {
+            set_text_input_area(window);
             sdl3::video::start_text_input(window.sdl);
         }
         false => {
             sdl3::video::stop_text_input(window.sdl);
         }
+    }
+}
+
+fn set_text_input_area(window: &Window) {
+    let area = crate::text::input_area(window.first_responder);
+    // SAFETY: an input client or the text field whose editor it is; both are
+    // live views from this runtime.
+    if let Some((_, area)) = unsafe { crate::view::input_frame(area) } {
+        sdl3::video::set_text_input_area(window.sdl, area, 0);
+    }
+}
+
+/// Refresh SDL's IME rectangle after the visible editor changes geometry.
+///
+/// # Safety
+///
+/// `view` must be a live view from this runtime.
+pub(crate) unsafe fn refresh_text_input_area_for(view: Id) {
+    // SAFETY: the caller's obligation.
+    let receiver = unsafe { crate::view::window_of(view) };
+    if receiver.is_null() {
+        return;
+    }
+    let window = window_of(receiver);
+    if !window.sdl.is_null()
+        && crate::text::is_input_client(window.first_responder)
+        && crate::text::input_area(window.first_responder) == view
+    {
+        set_text_input_area(window);
     }
 }
 

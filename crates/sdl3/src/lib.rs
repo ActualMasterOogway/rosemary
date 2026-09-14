@@ -195,6 +195,7 @@ struct Api {
     SDL_PollEvent: Option<unsafe extern "C" fn(*mut Event) -> bool>,
     SDL_StartTextInput: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_StopTextInput: Option<unsafe extern "C" fn(Window) -> bool>,
+    SDL_SetTextInputArea: Option<unsafe extern "C" fn(Window, *const Rect, c_int) -> bool>,
     SDL_HideCursor: Option<unsafe extern "C" fn() -> bool>,
     SDL_ShowCursor: Option<unsafe extern "C" fn() -> bool>,
     SDL_CreateColorCursor: Option<unsafe extern "C" fn(*mut c_void, c_int, c_int) -> Cursor>,
@@ -383,6 +384,7 @@ fn api() -> Option<&'static Api> {
             SDL_PollEvent,
             SDL_StartTextInput,
             SDL_StopTextInput,
+            SDL_SetTextInputArea,
             SDL_HideCursor,
             SDL_ShowCursor,
             SDL_CreateColorCursor,
@@ -1824,6 +1826,18 @@ pub mod video {
         swap_window => SDL_GL_SwapWindow,
         start_text_input => SDL_StartTextInput,
         stop_text_input => SDL_StopTextInput,
+    }
+
+    /// Tell the host input method where the active editor and caret are.
+    ///
+    /// SDL measures both in window coordinates, not drawable pixels. `cursor`
+    /// is the horizontal offset from the area's left edge.
+    pub fn set_text_input_area(window: Window, area: Rect, cursor: i32) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_SetTextInputArea) else {
+            return false;
+        };
+        // SAFETY: a window this crate created and a live rectangle for the call.
+        unsafe { f(window, &area, cursor) }
     }
 
     pub fn destroy_window(window: Window) {

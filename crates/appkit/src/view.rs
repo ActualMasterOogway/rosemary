@@ -88,6 +88,9 @@ fn note_geometry_change(receiver: Id, before: NSRect) {
     if posts & POSTS_BOUNDS != 0 && view.frame.size != before.size {
         foundation::notification::post(BOUNDS_DID_CHANGE, receiver, std::ptr::null_mut());
     }
+    // Moving or resizing the focused editor also moves the host IME UI.
+    // SAFETY: `receiver` is the live view whose geometry changed.
+    unsafe { crate::window::refresh_text_input_area_for(receiver) };
 }
 
 /// Resize `receiver`'s subviews for a superview that went from `old` to its
@@ -542,6 +545,54 @@ pub unsafe fn presentation_frame(view: Id) -> Option<Frame> {
         }),
         false => Some(frame),
     }
+}
+
+/// The view's rectangle in SDL's logical window coordinates.
+///
+/// This is deliberately not [`presentation_frame`]: SDL text-input areas are
+/// measured in window coordinates, while presentation uses drawable pixels.
+/// AppKit and SDL also put their origins at opposite vertical edges.
+///
+/// # Safety
+///
+/// `view` is null or a view of this crate's.
+pub unsafe fn input_frame(view: Id) -> Option<(sdl3::Window, sdl3::Rect)> {
+    if !is_view(view) {
+        return None;
+    }
+    // SAFETY: the caller's obligation, checked above.
+    let window = unsafe { window_of(view) };
+    // SAFETY: null or a window this crate made.
+    let sdl = unsafe { crate::window::sdl_window(window) };
+    if sdl.is_null() {
+        return None;
+    }
+    let (mut x, mut y) = (0.0f64, 0.0f64);
+    let size = view_of(view).frame.size;
+    let mut current = view;
+    for _ in 0..64 {
+        if !is_view(current) {
+            break;
+        }
+        let node = view_of(current);
+        x += node.frame.origin.x;
+        y += node.frame.origin.y;
+        if node.superview.is_null() {
+            break;
+        }
+        current = node.superview;
+    }
+    let (_, window_height) = sdl3::video::window_size(sdl)?;
+    let top = f64::from(window_height) - (y + size.height);
+    Some((
+        sdl,
+        sdl3::Rect {
+            x: x.round() as i32,
+            y: top.round() as i32,
+            w: size.width.round().max(0.0) as i32,
+            h: size.height.round().max(0.0) as i32,
+        },
+    ))
 }
 
 /// A view's layer as a window system sees it: a rectangle of pixels, and the

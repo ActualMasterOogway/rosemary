@@ -300,6 +300,7 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
     window::DID_CHANGE_BACKING_PROPERTIES,
     text::DID_CHANGE,
     text::DID_CHANGE_SELECTION,
+    text::CONTROL_DID_CHANGE,
     application::DID_CHANGE_SCREEN_PARAMETERS,
     view::FRAME_DID_CHANGE,
     view::BOUNDS_DID_CHANGE,
