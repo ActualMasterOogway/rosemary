@@ -80,7 +80,12 @@ impl Emitter {
                 ),
                 _ => (),
             }
-            self.interface.push(variable);
+            // Before SPIR-V 1.4 the entry-point interface may name only Input
+            // and Output variables. Descriptors remain visible to the entry
+            // point without appearing in this list.
+            if self.spirv_version >= (1, 4) {
+                self.interface.push(variable);
+            }
             // The parameter pointer is materialized in the entry block after the
             // function has begun. Temporarily retain the descriptor variable.
             self.parameter_pointers.insert(parameter.value, variable);
@@ -133,6 +138,7 @@ impl Emitter {
         if let Some(ids) = self.buffer_types.get(pointee) {
             return Ok(*ids);
         }
+        self.storage_type(pointee, StorageClass::StorageBuffer)?;
         let element_type = self.type_id(pointee)?;
         let array_type = self.builder.type_runtime_array(element_type);
         self.builder.decorate(
@@ -174,6 +180,7 @@ impl Emitter {
                 .parameters
                 .get(input.argument as usize)
                 .ok_or_else(|| emission("stage input names a missing argument"))?;
+            self.storage_type(&parameter.ty, StorageClass::Input)?;
             let ty = self.type_id(&parameter.ty)?;
             let pointer = self.builder.type_pointer(None, StorageClass::Input, ty);
             let variable = self
@@ -193,6 +200,7 @@ impl Emitter {
         }
         for (position, output) in entry.outputs.iter().enumerate() {
             let ty = output_type(function, output, position)?;
+            self.storage_type(&ty, StorageClass::Output)?;
             let ty_id = self.type_id(&ty)?;
             let pointer = self.builder.type_pointer(None, StorageClass::Output, ty_id);
             let variable = self
@@ -402,6 +410,7 @@ impl Emitter {
                 let result = instruction
                     .result
                     .ok_or_else(|| emission("a local variable has no result"))?;
+                self.arithmetic_type(ty)?;
                 let pointee = self.unlaid_type_id(ty)?;
                 let pointer = self
                     .builder
@@ -513,6 +522,7 @@ impl Emitter {
                     ));
                 }
             };
+            self.arithmetic_type(&global.ty)?;
             let pointee = self.unlaid_type_id(&global.ty)?;
             let pointer = self.builder.type_pointer(None, storage, pointee);
             let initializer = match &global.initializer {

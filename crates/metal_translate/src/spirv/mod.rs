@@ -122,6 +122,13 @@ impl TargetProfile {
             "Int16" => self.shader_int16,
             "Int64" => self.shader_int64,
             "Float16" => self.shader_float16,
+            "StorageBuffer8BitAccess" => self.storage_buffer8_bit_access,
+            "UniformAndStorageBuffer8BitAccess" => self.uniform_and_storage_buffer8_bit_access,
+            "StoragePushConstant8" => self.storage_push_constant8,
+            "StorageBuffer16BitAccess" => self.storage_buffer16_bit_access,
+            "UniformAndStorageBuffer16BitAccess" => self.uniform_and_storage_buffer16_bit_access,
+            "StoragePushConstant16" => self.storage_push_constant16,
+            "StorageInputOutput16" => self.storage_input_output16,
             "ImageGatherExtended" => self.shader_image_gather_extended,
             "StorageImageMultisample" => self.shader_storage_image_multisample,
             "SampledCubeArray" => self.image_cube_array,
@@ -150,6 +157,11 @@ impl TargetProfile {
                 self.variable_pointers_storage_buffer || self.variable_pointers
             }
             "SPV_EXT_demote_to_helper_invocation" => self.demote_to_helper_invocation,
+            "SPV_KHR_8bit_storage" => {
+                self.storage_buffer8_bit_access
+                    || self.uniform_and_storage_buffer8_bit_access
+                    || self.storage_push_constant8
+            }
             _ => false,
         }
     }

@@ -11,6 +11,33 @@ impl Emitter {
         values: &HashMap<ValueId, u32>,
         result_id: Option<u32>,
     ) -> Result<(), TranslateError> {
+        let result = instruction
+            .result
+            .ok_or_else(|| emission("conversion has no result"))?;
+        let result_type = &function.values[result.0 as usize];
+        let (op, value) = match &instruction.kind {
+            InstructionKind::Convert { op, value } => (op, value),
+            _ => unreachable!("not a convert instruction"),
+        };
+        let source_type = operand_type(function, value)
+            .ok_or_else(|| emission("conversion operand has no type"))?;
+        let storage_width_change =
+            match (op, numeric_width(&source_type), numeric_width(result_type)) {
+                (
+                    ConvertOp::ZeroExtend | ConvertOp::SignExtend | ConvertOp::IntegerTruncate,
+                    Some((false, source)),
+                    Some((false, result)),
+                )
+                | (ConvertOp::FloatResize, Some((true, source)), Some((true, result))) => {
+                    source == 32 && matches!(result, 8 | 16)
+                        || result == 32 && matches!(source, 8 | 16)
+                }
+                _ => false,
+            };
+        if !storage_width_change {
+            self.arithmetic_type(&source_type)?;
+            self.arithmetic_type(result_type)?;
+        }
         match &instruction.kind {
             // SPIR-V keeps booleans out of the numeric type system, so a
             // conversion between `i1` and an integer becomes a selection or a
@@ -96,5 +123,14 @@ impl Emitter {
             _ => unreachable!("not a convert instruction"),
         }
         Ok(())
+    }
+}
+
+fn numeric_width(ty: &Type) -> Option<(bool, u8)> {
+    match ty {
+        Type::Int { bits, .. } => Some((false, *bits)),
+        Type::Float { bits } => Some((true, *bits)),
+        Type::Vector { element, .. } => numeric_width(element),
+        _ => None,
     }
 }

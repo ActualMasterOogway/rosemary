@@ -471,6 +471,7 @@ fn source_msl_compiles_a_bounded_typed_blit_kernel() {
          }";
     let target = TargetProfile {
         shader_int8: true,
+        storage_buffer8_bit_access: true,
         shader_storage_image_write_without_format: true,
         ..TargetProfile::vulkan_1_3()
     };
@@ -1080,6 +1081,216 @@ fn buffer_kernel(values: Vec<Type>, instructions: Vec<Instruction>) -> Module {
             outputs: Vec::new(),
         }],
     }
+}
+
+fn typed_buffer_kernel(element: Type, values: Vec<Type>, instructions: Vec<Instruction>) -> Module {
+    let buffer = Type::Pointer {
+        space: AddressSpace::Device,
+        pointee: Box::new(element),
+    };
+    let mut all = vec![buffer.clone()];
+    all.extend(values);
+    Module {
+        static_initializers: Vec::new(),
+        globals: Vec::new(),
+        functions: vec![Function {
+            name: "small_values".to_string(),
+            result: Type::Void,
+            parameters: vec![Parameter {
+                value: ValueId(0),
+                name: "values".to_string(),
+                ty: buffer.clone(),
+            }],
+            values: all,
+            blocks: vec![Block {
+                id: BlockId(0),
+                name: "entry".to_string(),
+                instructions,
+                terminator: Terminator::Return(None),
+            }],
+        }],
+        entries: vec![EntryPoint {
+            function: 0,
+            stage: Stage::Kernel,
+            resources: vec![Resource {
+                argument: 0,
+                kind: ResourceKind::Buffer,
+                index: 0,
+                count: 1,
+                access: Access::ReadWrite,
+                ty: buffer,
+                name: Some("values".to_string()),
+            }],
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        }],
+    }
+}
+
+#[test]
+fn small_storage_buffer_types_use_storage_capabilities() {
+    for (element, capability) in [
+        (
+            Type::Int {
+                bits: 8,
+                signed: false,
+            },
+            "StorageBuffer8BitAccess",
+        ),
+        (
+            Type::Int {
+                bits: 16,
+                signed: true,
+            },
+            "StorageBuffer16BitAccess",
+        ),
+        (Type::Float { bits: 16 }, "StorageBuffer16BitAccess"),
+    ] {
+        let module = typed_buffer_kernel(element, Vec::new(), Vec::new());
+        let mut target = TargetProfile::vulkan_1_3();
+        let error = emit_spirv(&module, &target).unwrap_err();
+        assert!(error.to_string().contains(capability));
+
+        match capability {
+            "StorageBuffer8BitAccess" => target.storage_buffer8_bit_access = true,
+            "StorageBuffer16BitAccess" => target.storage_buffer16_bit_access = true,
+            _ => unreachable!(),
+        }
+        let artifact = emit_spirv(&module, &target).unwrap().entries.remove(0);
+        assert!(
+            artifact
+                .required
+                .capabilities
+                .iter()
+                .any(|it| it == capability)
+        );
+        assert!(
+            !artifact
+                .required
+                .capabilities
+                .iter()
+                .any(|it| { matches!(it.as_str(), "Int8" | "Int16" | "Float16") })
+        );
+    }
+}
+
+#[test]
+fn spirv_1_3_declares_the_8bit_storage_extension() {
+    let module = typed_buffer_kernel(
+        Type::Int {
+            bits: 8,
+            signed: false,
+        },
+        Vec::new(),
+        Vec::new(),
+    );
+    let target = TargetProfile {
+        vulkan_version: (1, 1),
+        spirv_version: (1, 3),
+        storage_buffer8_bit_access: true,
+        ..TargetProfile::vulkan_1_3()
+    };
+    let artifact = emit_spirv(&module, &target).unwrap().entries.remove(0);
+    assert_eq!(artifact.required.extensions, ["SPV_KHR_8bit_storage"]);
+}
+
+#[test]
+fn storage_only_8bit_values_can_be_loaded_and_widened() {
+    let byte = Type::Int {
+        bits: 8,
+        signed: false,
+    };
+    let byte_pointer = Type::Pointer {
+        space: AddressSpace::Device,
+        pointee: Box::new(byte.clone()),
+    };
+    let module = typed_buffer_kernel(
+        byte.clone(),
+        vec![byte_pointer, byte.clone(), Type::u32()],
+        vec![
+            Instruction {
+                result: Some(ValueId(1)),
+                kind: InstructionKind::ElementAddress {
+                    pointer: Operand::Value(ValueId(0)),
+                    index: Operand::u32(0),
+                },
+            },
+            Instruction {
+                result: Some(ValueId(2)),
+                kind: InstructionKind::Load {
+                    pointer: Operand::Value(ValueId(1)),
+                },
+            },
+            Instruction {
+                result: Some(ValueId(3)),
+                kind: InstructionKind::Convert {
+                    op: ConvertOp::ZeroExtend,
+                    value: Operand::Value(ValueId(2)),
+                },
+            },
+        ],
+    );
+    let target = TargetProfile {
+        storage_buffer8_bit_access: true,
+        ..TargetProfile::vulkan_1_3()
+    };
+    let artifact = emit_spirv(&module, &target).unwrap().entries.remove(0);
+    assert!(
+        artifact
+            .required
+            .capabilities
+            .contains(&"StorageBuffer8BitAccess".to_string())
+    );
+    assert!(!artifact.required.capabilities.contains(&"Int8".to_string()));
+}
+
+#[test]
+fn arithmetic_on_8bit_values_requires_shader_int8() {
+    let byte = Type::Int {
+        bits: 8,
+        signed: false,
+    };
+    let byte_pointer = Type::Pointer {
+        space: AddressSpace::Device,
+        pointee: Box::new(byte.clone()),
+    };
+    let module = typed_buffer_kernel(
+        byte.clone(),
+        vec![byte_pointer, byte.clone(), byte],
+        vec![
+            Instruction {
+                result: Some(ValueId(1)),
+                kind: InstructionKind::ElementAddress {
+                    pointer: Operand::Value(ValueId(0)),
+                    index: Operand::u32(0),
+                },
+            },
+            Instruction {
+                result: Some(ValueId(2)),
+                kind: InstructionKind::Load {
+                    pointer: Operand::Value(ValueId(1)),
+                },
+            },
+            Instruction {
+                result: Some(ValueId(3)),
+                kind: InstructionKind::IntegerBinary {
+                    op: IntegerBinaryOp::Add,
+                    lhs: Operand::Value(ValueId(2)),
+                    rhs: Operand::Value(ValueId(2)),
+                },
+            },
+        ],
+    );
+    let mut target = TargetProfile {
+        storage_buffer8_bit_access: true,
+        ..TargetProfile::vulkan_1_3()
+    };
+    let error = emit_spirv(&module, &target).unwrap_err();
+    assert!(error.to_string().contains("Int8"));
+
+    target.shader_int8 = true;
+    let artifact = emit_spirv(&module, &target).unwrap().entries.remove(0);
+    assert!(artifact.required.capabilities.contains(&"Int8".to_string()));
 }
 
 #[test]

@@ -20,6 +20,13 @@ impl Emitter {
     }
 
     pub(super) fn declare_constant(&mut self, operand: &Operand) -> Result<(), TranslateError> {
+        if let Operand::Integer { ty, .. }
+        | Operand::Float { ty, .. }
+        | Operand::Composite { ty, .. }
+        | Operand::Undef(ty) = operand
+        {
+            self.arithmetic_type(ty)?;
+        }
         match operand {
             Operand::Integer { ty, value } => {
                 self.constant(ty, *value)?;
@@ -190,27 +197,13 @@ impl Emitter {
             Type::Void => self.builder.type_void(),
             Type::Bool => self.builder.type_bool(),
             Type::Int { bits, signed } => {
-                match bits {
-                    64 => {
-                        if !self.uses_int64 {
-                            self.capability(Capability::Int64)?;
-                            self.uses_int64 = true;
-                        }
-                    }
-                    // Metal's `short` and `char` need their own Vulkan
-                    // capabilities; a shader using them says so.
-                    16 => self.capability(Capability::Int16)?,
-                    8 => self.capability(Capability::Int8)?,
-                    _ => {}
+                if *bits == 64 && !self.uses_int64 {
+                    self.capability(Capability::Int64)?;
+                    self.uses_int64 = true;
                 }
                 self.builder.type_int(u32::from(*bits), u32::from(*signed))
             }
-            Type::Float { bits } => {
-                if *bits == 16 {
-                    self.capability(Capability::Float16)?;
-                }
-                self.builder.type_float(u32::from(*bits), None)
-            }
+            Type::Float { bits } => self.builder.type_float(u32::from(*bits), None),
             Type::Vector { element, lanes } => {
                 let element = self.type_id(element)?;
                 self.builder.type_vector(element, u32::from(*lanes))
@@ -252,6 +245,7 @@ impl Emitter {
             }
             Type::Texture(texture) => {
                 let texture = texture.clone();
+                self.arithmetic_type(&texture.texel)?;
                 let scalar = self.type_id(&texture.texel)?;
                 let dimension = match texture.dimension {
                     TextureDimension::D1 => Dim::Dim1D,

@@ -103,6 +103,61 @@ impl Emitter {
         Ok(())
     }
 
+    /// Admit a small scalar used for calculations rather than only as the
+    /// element of an interface storage object.
+    pub(super) fn arithmetic_type(&mut self, ty: &Type) -> Result<(), TranslateError> {
+        match ty {
+            Type::Int { bits: 8, .. } => self.capability(Capability::Int8),
+            Type::Int { bits: 16, .. } => self.capability(Capability::Int16),
+            Type::Float { bits: 16 } => self.capability(Capability::Float16),
+            Type::Vector { element, .. } | Type::Array { element, .. } => {
+                self.arithmetic_type(element)
+            }
+            Type::Struct(structure) => {
+                for field in &structure.fields {
+                    self.arithmetic_type(&field.ty)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Declare the capability which permits a small type in an interface.
+    /// These capabilities deliberately do not imply small-width arithmetic.
+    pub(super) fn storage_type(
+        &mut self,
+        ty: &Type,
+        storage: StorageClass,
+    ) -> Result<(), TranslateError> {
+        let mut bits = BTreeSet::new();
+        small_storage_widths(ty, &mut bits);
+        for bits in bits {
+            let capability = match (bits, storage) {
+                (8, StorageClass::StorageBuffer) => Capability::StorageBuffer8BitAccess,
+                (8, StorageClass::Uniform) => Capability::UniformAndStorageBuffer8BitAccess,
+                (8, StorageClass::PushConstant) => Capability::StoragePushConstant8,
+                (8, _) => {
+                    return Err(emission(format!(
+                        "8-bit interface values are not supported in {storage:?} storage"
+                    )));
+                }
+                (16, StorageClass::StorageBuffer) => Capability::StorageBuffer16BitAccess,
+                (16, StorageClass::Uniform) => Capability::UniformAndStorageBuffer16BitAccess,
+                (16, StorageClass::PushConstant) => Capability::StoragePushConstant16,
+                (16, StorageClass::Input | StorageClass::Output) => {
+                    Capability::StorageInputOutput16
+                }
+                _ => continue,
+            };
+            self.capability(capability)?;
+            if bits == 8 && self.spirv_version < (1, 5) {
+                self.builder.extension("SPV_KHR_8bit_storage");
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn emit_instruction(
         &mut self,
         function: &Function,
@@ -111,6 +166,25 @@ impl Emitter {
         values: &HashMap<ValueId, u32>,
     ) -> Result<(), TranslateError> {
         let result_id = instruction.result.map(|result| values[&result]);
+        if !matches!(
+            instruction.kind,
+            InstructionKind::LocalVariable { .. }
+                | InstructionKind::Load { .. }
+                | InstructionKind::Store { .. }
+                | InstructionKind::ElementAddress { .. }
+                | InstructionKind::BufferAddress { .. }
+                | InstructionKind::FieldAddress { .. }
+                | InstructionKind::Convert { .. }
+        ) {
+            if let Some(result) = instruction.result {
+                self.arithmetic_type(&function.values[result.0 as usize])?;
+            }
+            for operand in instruction_operands(&instruction.kind) {
+                if let Some(ty) = operand_type(function, operand) {
+                    self.arithmetic_type(&ty)?;
+                }
+            }
+        }
         match &instruction.kind {
             InstructionKind::LocalVariable { .. }
             | InstructionKind::Load { .. }
@@ -509,5 +583,26 @@ impl Emitter {
             }
             _ => Err(emission("access chain base is not a pointer")),
         }
+    }
+}
+
+fn small_storage_widths(ty: &Type, widths: &mut BTreeSet<u8>) {
+    match ty {
+        Type::Int { bits: 8 | 16, .. } | Type::Float { bits: 16 } => {
+            let bits = match ty {
+                Type::Int { bits, .. } | Type::Float { bits } => *bits,
+                _ => unreachable!(),
+            };
+            widths.insert(bits);
+        }
+        Type::Vector { element, .. } | Type::Array { element, .. } => {
+            small_storage_widths(element, widths)
+        }
+        Type::Struct(structure) => {
+            for field in &structure.fields {
+                small_storage_widths(&field.ty, widths);
+            }
+        }
+        _ => {}
     }
 }
