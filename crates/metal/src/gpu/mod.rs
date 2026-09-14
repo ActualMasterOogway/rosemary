@@ -39,6 +39,12 @@ type DescriptorLayouts = HashMap<DescriptorLayoutKey, vk::DescriptorSetLayout>;
 // extension name needs spelling locally until ash carries the newer headers.
 const ROBUSTNESS_2_KHR: &std::ffi::CStr = c"VK_KHR_robustness2";
 
+#[derive(Clone, Copy)]
+struct DeviceCapabilities {
+    null_descriptors: bool,
+    vertex_attribute_divisor: bool,
+}
+
 /// One logical device and the queue Metal's single command-queue model uses.
 pub struct Gpu {
     pub device: Device,
@@ -79,6 +85,11 @@ pub struct Gpu {
     /// Whether null buffer and image-view descriptors have defined Metal-like
     /// reads and writes on this device.
     pub(crate) null_descriptors: bool,
+    /// Largest per-instance vertex step rate supported through
+    /// `VK_KHR_vertex_attribute_divisor`, or zero when it is unavailable.
+    pub(crate) max_vertex_attribute_divisor: u32,
+    /// Whether a draw using a vertex divisor may have a non-zero base instance.
+    pub(crate) divisor_non_zero_first_instance: bool,
     /// robustness2 does not permit a null standalone sampler descriptor.
     /// This neutral sampler keeps an otherwise-null resource table valid.
     pub(crate) null_sampler: vk::Sampler,
@@ -119,7 +130,7 @@ fn create_device(
     features: &vk::PhysicalDeviceFeatures,
     extensions: &[*const std::ffi::c_char],
     target: &metal_translate::TargetProfile,
-    null_descriptors: bool,
+    capabilities: DeviceCapabilities,
 ) -> Result<Device, String> {
     let mut v11 = vk::PhysicalDeviceVulkan11Features {
         storage_buffer16_bit_access: target.storage_buffer16_bit_access.into(),
@@ -183,7 +194,11 @@ fn create_device(
         ..Default::default()
     };
     let mut robustness2 = vk::PhysicalDeviceRobustness2FeaturesEXT {
-        null_descriptor: null_descriptors.into(),
+        null_descriptor: capabilities.null_descriptors.into(),
+        ..Default::default()
+    };
+    let mut divisor = vk::PhysicalDeviceVertexAttributeDivisorFeaturesKHR {
+        vertex_attribute_instance_rate_divisor: capabilities.vertex_attribute_divisor.into(),
         ..Default::default()
     };
 
@@ -216,8 +231,11 @@ fn create_device(
             create_info = create_info.push_next(&mut demote);
         }
     }
-    if null_descriptors {
+    if capabilities.null_descriptors {
         create_info = create_info.push_next(&mut robustness2);
+    }
+    if capabilities.vertex_attribute_divisor {
+        create_info = create_info.push_next(&mut divisor);
     }
     // SAFETY: all feature structures and borrowed create-info data live
     // across the call, and every enabled bit came from the adapter query.
@@ -329,6 +347,33 @@ impl Gpu {
             );
         }
 
+        let (max_vertex_attribute_divisor, divisor_non_zero_first_instance) =
+            if has(ash::khr::vertex_attribute_divisor::NAME) {
+                let mut divisor = vk::PhysicalDeviceVertexAttributeDivisorFeaturesKHR::default();
+                let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut divisor);
+                // SAFETY: the extension is advertised and both structures live
+                // across the query.
+                unsafe { instance.get_physical_device_features2(physical, &mut features) };
+                if divisor.vertex_attribute_instance_rate_divisor == vk::TRUE {
+                    let mut divisor =
+                        vk::PhysicalDeviceVertexAttributeDivisorPropertiesKHR::default();
+                    let mut properties =
+                        vk::PhysicalDeviceProperties2::default().push_next(&mut divisor);
+                    // SAFETY: the extension is advertised and both structures
+                    // live across the query.
+                    unsafe { instance.get_physical_device_properties2(physical, &mut properties) };
+                    enabled.push(ash::khr::vertex_attribute_divisor::NAME.as_ptr());
+                    (
+                        divisor.max_vertex_attrib_divisor,
+                        divisor.supports_non_zero_first_instance == vk::TRUE,
+                    )
+                } else {
+                    (0, false)
+                }
+            } else {
+                (0, false)
+            };
+
         let priorities = [1.0f32];
         let queues = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family)
@@ -340,7 +385,10 @@ impl Gpu {
             &features,
             &enabled,
             target,
-            null_descriptors,
+            DeviceCapabilities {
+                null_descriptors,
+                vertex_attribute_divisor: max_vertex_attribute_divisor != 0,
+            },
         )?;
         // SAFETY: the family was requested above with one queue.
         let queue = unsafe { device.get_device_queue(queue_family, 0) };
@@ -392,6 +440,8 @@ impl Gpu {
             push_descriptor_api,
             max_push_descriptors,
             null_descriptors,
+            max_vertex_attribute_divisor,
+            divisor_non_zero_first_instance,
             null_sampler,
             swapchain_api,
         })

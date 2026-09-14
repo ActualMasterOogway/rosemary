@@ -4,11 +4,22 @@ use super::*;
 
 /// `MTLVertexDescriptor`: 31 buffer layouts and 31 attributes, each a small
 /// bag of integers the render pipeline reads at creation time.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct VertexLayout {
     pub stride: u64,
     pub step_function: u64,
     pub step_rate: u64,
+}
+
+impl Default for VertexLayout {
+    fn default() -> Self {
+        Self {
+            stride: 0,
+            // MTLVertexStepFunctionPerVertex.
+            step_function: 1,
+            step_rate: 1,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]

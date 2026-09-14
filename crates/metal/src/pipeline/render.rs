@@ -87,6 +87,7 @@ pub(crate) struct RenderPipeline {
     pub vertex_streams: Vec<u32>,
     bindings: Vec<vk::VertexInputBindingDescription>,
     attributes: Vec<vk::VertexInputAttributeDescription>,
+    divisors: Vec<vk::VertexInputBindingDivisorDescriptionKHR>,
     colors: Vec<ColorAttachment>,
     pub depth_format: vk::Format,
     pub stencil_format: vk::Format,
@@ -120,6 +121,7 @@ impl RenderPipeline {
 
         let mut bindings = Vec::new();
         let mut attributes = Vec::new();
+        let mut divisors = Vec::new();
         let mut vertex_streams = Vec::new();
         for (index, attribute) in attributes_in.iter().enumerate() {
             if attribute.format == 0 {
@@ -164,18 +166,17 @@ impl RenderPipeline {
                     layout.stride
                 )
             })?;
+            let (input_rate, divisor) =
+                vertex_input_rate(*stream, layout, gpu.max_vertex_attribute_divisor)?;
             bindings.push(
                 vk::VertexInputBindingDescription::default()
                     .binding(*stream)
                     .stride(stride)
-                    // MTLVertexStepFunctionPerInstance is 2; per-vertex is 1
-                    // and "constant" is 0, which Vulkan spells as a per-vertex
-                    // stream with a zero stride the caller already set.
-                    .input_rate(match layout.step_function {
-                        2 => vk::VertexInputRate::INSTANCE,
-                        _ => vk::VertexInputRate::VERTEX,
-                    }),
+                    .input_rate(input_rate),
             );
+            if let Some(divisor) = divisor {
+                divisors.push(divisor);
+            }
         }
 
         // FIXME (ACCURACY): the colour list stops at the first render-target
@@ -256,6 +257,7 @@ impl RenderPipeline {
             vertex_streams,
             bindings,
             attributes,
+            divisors,
             colors,
             depth_format,
             stencil_format,
@@ -288,9 +290,14 @@ impl RenderPipeline {
                 .module(self.fragment_module)
                 .name(&self.fragment_name),
         ];
-        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+        let mut divisor_state = vk::PipelineVertexInputDivisorStateCreateInfoKHR::default()
+            .vertex_binding_divisors(&self.divisors);
+        let mut vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(&self.bindings)
             .vertex_attribute_descriptions(&self.attributes);
+        if !self.divisors.is_empty() {
+            vertex_input = vertex_input.push_next(&mut divisor_state);
+        }
         let assembly =
             vk::PipelineInputAssemblyStateCreateInfo::default().topology(topology(key.topology));
         let viewport = vk::PipelineViewportStateCreateInfo::default()
@@ -386,6 +393,61 @@ impl RenderPipeline {
         cache.insert(*key, pipeline);
         Ok(pipeline)
     }
+
+    pub fn supports_base_instance(&self, base_instance: u64) -> bool {
+        base_instance == 0 || self.divisors.is_empty() || self.gpu.divisor_non_zero_first_instance
+    }
+}
+
+fn vertex_input_rate(
+    stream: u32,
+    layout: &VertexLayout,
+    max_divisor: u32,
+) -> Result<
+    (
+        vk::VertexInputRate,
+        Option<vk::VertexInputBindingDivisorDescriptionKHR>,
+    ),
+    String,
+> {
+    match layout.step_function {
+        // Constant input is a per-vertex binding whose zero stride always
+        // addresses the same element.
+        0 if layout.stride == 0 => Ok((vk::VertexInputRate::VERTEX, None)),
+        0 => Err(format!(
+            "vertex buffer {stream} uses MTLVertexStepFunctionConstant with non-zero stride {}",
+            layout.stride
+        )),
+        1 => Ok((vk::VertexInputRate::VERTEX, None)),
+        2 if layout.step_rate == 0 => Err(format!(
+            "vertex buffer {stream} has a per-instance step rate of zero"
+        )),
+        2 if layout.step_rate == 1 => Ok((vk::VertexInputRate::INSTANCE, None)),
+        2 => {
+            let divisor = u32::try_from(layout.step_rate).map_err(|_| {
+                format!(
+                    "vertex buffer {stream} has step rate {}, which Vulkan cannot express",
+                    layout.step_rate
+                )
+            })?;
+            if divisor > max_divisor {
+                return Err(format!(
+                    "vertex buffer {stream} has step rate {divisor}, but this Vulkan device supports at most {max_divisor}"
+                ));
+            }
+            Ok((
+                vk::VertexInputRate::INSTANCE,
+                Some(
+                    vk::VertexInputBindingDivisorDescriptionKHR::default()
+                        .binding(stream)
+                        .divisor(divisor),
+                ),
+            ))
+        }
+        function => Err(format!(
+            "vertex buffer {stream} uses unsupported MTLVertexStepFunction {function}"
+        )),
+    }
 }
 
 /// `-[MTLRenderPipelineState dealloc]`.
@@ -411,4 +473,46 @@ pub(super) unsafe extern "C" fn render_pipeline_dealloc(receiver: Id, _sel: Sel)
     // SAFETY: the body was established by `object::make` and is not read again.
     unsafe { std::ptr::drop_in_place(state as *mut RenderPipeline) };
     objc::arc::finalize(receiver);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn per_instance_step_rate_becomes_a_vertex_divisor() {
+        let layout = VertexLayout {
+            stride: 16,
+            step_function: 2,
+            step_rate: 4,
+        };
+        let (rate, divisor) = vertex_input_rate(7, &layout, 16).expect("supported divisor");
+        let divisor = divisor.expect("a divisor");
+        assert_eq!(rate, vk::VertexInputRate::INSTANCE);
+        assert_eq!(divisor.binding, 7);
+        assert_eq!(divisor.divisor, 4);
+    }
+
+    #[test]
+    fn per_instance_step_rate_one_needs_no_extension_state() {
+        let layout = VertexLayout {
+            stride: 16,
+            step_function: 2,
+            step_rate: 1,
+        };
+        let (rate, divisor) = vertex_input_rate(0, &layout, 0).expect("core instance rate");
+        assert_eq!(rate, vk::VertexInputRate::INSTANCE);
+        assert!(divisor.is_none());
+    }
+
+    #[test]
+    fn unsupported_vertex_divisor_is_rejected() {
+        let layout = VertexLayout {
+            stride: 16,
+            step_function: 2,
+            step_rate: 4,
+        };
+        let error = vertex_input_rate(3, &layout, 2).expect_err("divisor exceeds the limit");
+        assert!(error.contains("supports at most 2"));
+    }
 }

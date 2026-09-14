@@ -584,12 +584,19 @@ impl Encoder {
     pub(super) fn prepare_draw(
         &mut self,
         primitive: u64,
+        base_instance: u64,
     ) -> Option<(&'static ash::Device, vk::CommandBuffer)> {
         if self.kind != Kind::Render || self.render_pipeline.is_null() || !self.in_render_pass {
             return None;
         }
         // SAFETY: only a render pipeline state of this crate's is ever bound.
         let state = unsafe { object::body::<RenderPipeline>(self.render_pipeline) };
+        if !state.supports_base_instance(base_instance) {
+            gpu::trace_once(
+                "a draw with a vertex step rate greater than one and a non-zero base instance is unsupported by this Vulkan device",
+            );
+            return None;
+        }
         let depth = if self.depth_state.is_null() {
             DepthStencilState::default()
         } else {

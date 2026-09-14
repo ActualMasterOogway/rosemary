@@ -12,7 +12,7 @@ pub(super) unsafe extern "C" fn draw_primitives(
 ) {
     // SAFETY: an encoder of this crate's.
     let encoder = unsafe { object::body::<Encoder>(receiver) };
-    let Some((device, command)) = encoder.prepare_draw(primitive) else {
+    let Some((device, command)) = encoder.prepare_draw(primitive, 0) else {
         return;
     };
     // SAFETY: recording into this command buffer.
@@ -38,7 +38,7 @@ pub(super) unsafe extern "C" fn draw_primitives_base(
 ) {
     // SAFETY: an encoder of this crate's.
     let encoder = unsafe { object::body::<Encoder>(receiver) };
-    let Some((device, command)) = encoder.prepare_draw(primitive) else {
+    let Some((device, command)) = encoder.prepare_draw(primitive, base_instance) else {
         return;
     };
     // SAFETY: recording into this command buffer.
@@ -129,7 +129,7 @@ pub(super) unsafe fn draw_indexed(
     if index_buffer.is_null() {
         return;
     }
-    let Some((device, command)) = encoder.prepare_draw(primitive) else {
+    let Some((device, command)) = encoder.prepare_draw(primitive, base_instance) else {
         return;
     };
     // SAFETY: the caller guarantees the buffer's class.
