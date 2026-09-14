@@ -43,6 +43,7 @@ const ROBUSTNESS_2_KHR: &std::ffi::CStr = c"VK_KHR_robustness2";
 struct DeviceCapabilities {
     null_descriptors: bool,
     vertex_attribute_divisor: bool,
+    swapchain_maintenance1: bool,
 }
 
 /// One logical device and the queue Metal's single command-queue model uses.
@@ -98,6 +99,9 @@ pub struct Gpu {
     /// to reading the frame back and blitting it through SDL's window
     /// surface.
     swapchain_api: Option<ash::khr::swapchain::Device>,
+    /// Whether present operations can carry fences which retire their wait
+    /// semaphores and swapchain resources without making the whole queue idle.
+    swapchain_maintenance1: bool,
 }
 
 struct Immediate {
@@ -201,6 +205,10 @@ fn create_device(
         vertex_attribute_instance_rate_divisor: capabilities.vertex_attribute_divisor.into(),
         ..Default::default()
     };
+    let mut swapchain_maintenance1 = vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT {
+        swapchain_maintenance1: capabilities.swapchain_maintenance1.into(),
+        ..Default::default()
+    };
 
     let mut create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(queues)
@@ -236,6 +244,9 @@ fn create_device(
     }
     if capabilities.vertex_attribute_divisor {
         create_info = create_info.push_next(&mut divisor);
+    }
+    if capabilities.swapchain_maintenance1 {
+        create_info = create_info.push_next(&mut swapchain_maintenance1);
     }
     // SAFETY: all feature structures and borrowed create-info data live
     // across the call, and every enabled bit came from the adapter query.
@@ -302,6 +313,17 @@ impl Gpu {
         let presents = has(ash::khr::swapchain::NAME);
         if presents {
             enabled.push(ash::khr::swapchain::NAME.as_ptr());
+        }
+        let swapchain_maintenance1 = presents && has(ash::ext::swapchain_maintenance1::NAME) && {
+            let mut maintenance = vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT::default();
+            let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut maintenance);
+            // SAFETY: the extension is advertised and both structures
+            // live across the query.
+            unsafe { instance.get_physical_device_features2(physical, &mut features) };
+            maintenance.swapchain_maintenance1 == vk::TRUE
+        };
+        if swapchain_maintenance1 {
+            enabled.push(ash::ext::swapchain_maintenance1::NAME.as_ptr());
         }
         let pushes = has(ash::khr::push_descriptor::NAME);
         if pushes {
@@ -388,6 +410,7 @@ impl Gpu {
             DeviceCapabilities {
                 null_descriptors,
                 vertex_attribute_divisor: max_vertex_attribute_divisor != 0,
+                swapchain_maintenance1,
             },
         )?;
         // SAFETY: the family was requested above with one queue.
@@ -444,6 +467,7 @@ impl Gpu {
             divisor_non_zero_first_instance,
             null_sampler,
             swapchain_api,
+            swapchain_maintenance1,
         })
     }
 }

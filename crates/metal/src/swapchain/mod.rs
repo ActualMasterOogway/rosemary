@@ -78,6 +78,10 @@ struct Swapchain {
     /// the acquisition itself the proof that the last presentation of this
     /// image is done with it.
     blitted: Vec<vk::Semaphore>,
+    /// Fences attached to presentations through swapchain maintenance1. One
+    /// per image lets acquisition identify the fence which may be recycled.
+    /// Empty on devices which use the queue-idle fallback.
+    presented: Vec<PresentFence>,
     /// Where layers accumulate when the window has more than one. `None`
     /// while a single layer covers the window, which needs no accumulator.
     composite: Option<GpuImage>,
@@ -101,6 +105,15 @@ struct Frame {
     /// its acquisition semaphore are not reused while the device still has
     /// them.
     done: vk::Fence,
+    submitted: bool,
+}
+
+struct PresentFence {
+    fence: vk::Fence,
+    /// Whether this fence was attached to a presentation and has not yet been
+    /// waited for. A fresh fence is unsignalled but has no operation to wait
+    /// for, so the distinction is required during initial teardown.
+    pending: bool,
 }
 
 static SWAPCHAINS: Mutex<Option<HashMap<usize, Swapchain>>> = Mutex::new(None);
@@ -253,6 +266,7 @@ impl Swapchain {
                 command_buffer,
                 acquired: acquired.take(),
                 done,
+                submitted: false,
             });
         }
         let mut swapchain = Self {
@@ -264,6 +278,7 @@ impl Swapchain {
             requested: extent,
             images: Vec::new(),
             blitted: Vec::new(),
+            presented: Vec::new(),
             composite: None,
             layers: Vec::new(),
             pool: pool.take(),
@@ -371,10 +386,31 @@ impl Swapchain {
                 .map_err(|error| format!("vkCreateSemaphore failed with {error:?}"))?,
             );
         }
+        let mut presented = gpu::GuardedVec::new(|present: &PresentFence| {
+            // SAFETY: a fence of this device's, never submitted.
+            unsafe { self.gpu.device.destroy_fence(present.fence, None) };
+        });
+        if self.gpu.has_present_fences() {
+            for _ in &images {
+                // Present fences must be unsignalled when passed to
+                // vkQueuePresentKHR.
+                let fence = unsafe {
+                    self.gpu
+                        .device
+                        .create_fence(&vk::FenceCreateInfo::default(), None)
+                }
+                .map_err(|error| format!("vkCreateFence failed with {error:?}"))?;
+                presented.push(PresentFence {
+                    fence,
+                    pending: false,
+                });
+            }
+        }
 
         // Nothing below can fail, so the replacement is installed and the old
         // state destroyed as one step.
         let blitted = blitted.take();
+        let presented = presented.take();
         let old = std::mem::replace(&mut self.handle, handle.take());
         if old != vk::SwapchainKHR::null() {
             // SAFETY: retired by the creation above, and every submission
@@ -384,9 +420,13 @@ impl Swapchain {
         // The old swapchain's images are gone with it, and so is the meaning
         // of a semaphore indexed by one.
         for semaphore in std::mem::replace(&mut self.blitted, blitted) {
-            // SAFETY: the queue was made idle before the rebuild, and the
-            // swapchain these were presented through is destroyed above.
+            // SAFETY: `idle` waited either the presentation fences or the
+            // queue before the swapchain these belonged to was destroyed.
             unsafe { self.gpu.device.destroy_semaphore(semaphore, None) };
+        }
+        for present in std::mem::replace(&mut self.presented, presented) {
+            // SAFETY: `idle` waited every pending use of this fence.
+            unsafe { self.gpu.device.destroy_fence(present.fence, None) };
         }
         self.requested = requested;
         self.format = chosen.format;
@@ -406,13 +446,36 @@ impl Swapchain {
 
     /// Block until nothing this swapchain gave the queue is still running.
     ///
-    /// The queue rather than this swapchain's fences: a fence signals when
-    /// the blit that signals it is done, but the presentation which waits on
-    /// that frame's semaphore is queued behind it and holds the semaphore
-    /// after the fence has fired. Destroying or retiring a swapchain while
-    /// that is outstanding is a use of a semaphore the queue still owns.
-    fn idle(&self) {
-        self.gpu.wait_queue_idle();
+    /// Presentation fences cover the presentation engine's access to the
+    /// image and wait semaphore. On an older device, only making the queue
+    /// idle supplies that guarantee.
+    fn idle(&mut self) {
+        if !self.gpu.has_present_fences() {
+            self.gpu.wait_queue_idle();
+            return;
+        }
+        let submitted = self
+            .frames
+            .iter()
+            .filter(|frame| frame.submitted)
+            .map(|frame| frame.done);
+        let presented = self
+            .presented
+            .iter()
+            .filter(|present| present.pending)
+            .map(|present| present.fence);
+        let fences = submitted.chain(presented).collect::<Vec<_>>();
+        if !fences.is_empty() {
+            // SAFETY: each fence belongs to this device and is associated
+            // with an operation which was successfully queued.
+            let _ = unsafe { self.gpu.device.wait_for_fences(&fences, true, u64::MAX) };
+        }
+        for frame in &mut self.frames {
+            frame.submitted = false;
+        }
+        for present in &mut self.presented {
+            present.pending = false;
+        }
     }
 
     /// The image layers accumulate into, made on the first frame that needs
@@ -480,6 +543,7 @@ impl Swapchain {
         // submission this slot last made.
         unsafe { self.gpu.device.wait_for_fences(&[done], true, u64::MAX) }
             .map_err(|error| format!("vkWaitForFences failed with {error:?}"))?;
+        self.frames[slot].submitted = false;
 
         let Some(index) = self.acquire(acquired)? else {
             // The swapchain was rebuilt underneath the acquisition. The frame
@@ -492,6 +556,26 @@ impl Swapchain {
         // presentation engine, so the presentation which last waited on this
         // semaphore is finished.
         let blitted = self.blitted[index as usize];
+        let present_fence = if let Some(present) = self.presented.get_mut(index as usize) {
+            if present.pending {
+                // SAFETY: this fence was attached to the last presentation
+                // of the image which acquisition just returned.
+                unsafe {
+                    self.gpu
+                        .device
+                        .wait_for_fences(&[present.fence], true, u64::MAX)
+                }
+                .map_err(|error| format!("vkWaitForFences failed with {error:?}"))?;
+                present.pending = false;
+            }
+            // SAFETY: the fence is either fresh or was waited above, and is
+            // not associated with an outstanding queue operation.
+            unsafe { self.gpu.device.reset_fences(&[present.fence]) }
+                .map_err(|error| format!("vkResetFences failed with {error:?}"))?;
+            Some(present.fence)
+        } else {
+            None
+        };
 
         let device = &self.gpu.device;
         let begin = vk::CommandBufferBeginInfo::default()
@@ -582,9 +666,22 @@ impl Swapchain {
             &[(acquired, vk::PipelineStageFlags::TRANSFER)],
             &[blitted],
         )?;
+        self.frames[slot].submitted = true;
         self.frame = self.frame.wrapping_add(1);
 
-        match self.gpu.present(self.handle, index, blitted) {
+        let result = self.gpu.present(self.handle, index, blitted, present_fence);
+        // OUT_OF_DATE and the other ordinary WSI errors still enqueue the
+        // semaphore wait. Only allocation failure is specified to leave all
+        // synchronization objects untouched.
+        if present_fence.is_some()
+            && !matches!(
+                result,
+                Err(vk::Result::ERROR_OUT_OF_HOST_MEMORY | vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)
+            )
+        {
+            self.presented[index as usize].pending = true;
+        }
+        match result {
             Ok(suboptimal) => {
                 if suboptimal {
                     // The image still reached the window; the next frame is
@@ -633,7 +730,8 @@ impl Drop for Swapchain {
         // The swapchain first: its images are what the semaphores below were
         // signalled for, and a surface outlives the swapchain made on it.
         if let Some(api) = self.gpu.swapchain_api() {
-            // SAFETY: the queue is idle, so nothing is in flight against it.
+            // SAFETY: the wait above retired every submission and presentation
+            // which refers to this swapchain.
             unsafe { api.destroy_swapchain(self.handle, None) };
         }
         for frame in &self.frames {
@@ -648,6 +746,10 @@ impl Drop for Swapchain {
             // SAFETY: as above, and the swapchain whose presentations waited
             // on these is destroyed first.
             unsafe { device.destroy_semaphore(semaphore, None) };
+        }
+        for present in std::mem::take(&mut self.presented) {
+            // SAFETY: the wait above retired every pending presentation.
+            unsafe { device.destroy_fence(present.fence, None) };
         }
         // SAFETY: the pool owns the command buffers, which are freed with it.
         unsafe { device.destroy_command_pool(self.pool, None) };

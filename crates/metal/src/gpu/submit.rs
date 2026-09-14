@@ -34,6 +34,12 @@ impl Gpu {
         self.swapchain_api.as_ref()
     }
 
+    /// Whether `vkQueuePresentKHR` can signal a fence when its objects are no
+    /// longer in use by the presentation engine.
+    pub fn has_present_fences(&self) -> bool {
+        self.swapchain_maintenance1
+    }
+
     /// Whether this device's queue can present to `surface`.
     ///
     /// Metal has one queue, so there is no second family to fall back on: a
@@ -92,6 +98,7 @@ impl Gpu {
         swapchain: vk::SwapchainKHR,
         image: u32,
         wait: vk::Semaphore,
+        fence: Option<vk::Fence>,
     ) -> Result<bool, vk::Result> {
         let api = self
             .swapchain_api
@@ -100,10 +107,17 @@ impl Gpu {
         let semaphores = [wait];
         let swapchains = [swapchain];
         let images = [image];
-        let info = vk::PresentInfoKHR::default()
+        let mut info = vk::PresentInfoKHR::default()
             .wait_semaphores(&semaphores)
             .swapchains(&swapchains)
             .image_indices(&images);
+        let fences;
+        let mut fence_info;
+        if let Some(fence) = fence {
+            fences = [fence];
+            fence_info = vk::SwapchainPresentFenceInfoEXT::default().fences(&fences);
+            info = info.push_next(&mut fence_info);
+        }
         let queue = self.queue.lock().expect("Vulkan queue");
         // SAFETY: the queue is held exclusively, every borrowed slice lives
         // across the call, and the image was acquired from this swapchain.
