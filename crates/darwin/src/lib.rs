@@ -24,6 +24,7 @@
 
 use std::ffi::CString;
 
+mod atomics;
 pub mod bsd;
 pub mod callback;
 pub mod clock;
@@ -607,6 +608,7 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
     data::provide(&mut lib);
     #[cfg(not(target_os = "macos"))]
     {
+        atomics::provide(&mut lib);
         xlocale::provide(&mut lib);
         stat::provide(&mut lib);
         malloc::provide(&mut lib);

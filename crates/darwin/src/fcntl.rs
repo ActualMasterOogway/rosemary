@@ -18,6 +18,7 @@ pub mod cmd {
     pub const F_GETLK: i32 = 7;
     pub const F_SETLK: i32 = 8;
     pub const F_SETLKW: i32 = 9;
+    pub const F_PREALLOCATE: i32 = 42;
     pub const F_SETSIZE: i32 = 43;
     pub const F_RDADVISE: i32 = 44;
     pub const F_RDAHEAD: i32 = 45;
@@ -76,6 +77,26 @@ pub struct Flock {
 }
 
 const _: () = assert!(size_of::<Flock>() == 24);
+
+/// Darwin's `fstore_t`, used by `F_PREALLOCATE`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Fstore {
+    pub flags: u32,
+    pub posmode: i32,
+    pub offset: i64,
+    pub length: i64,
+    pub bytes_allocated: i64,
+}
+
+const _: () = assert!(size_of::<Fstore>() == 32);
+
+pub mod preallocate {
+    pub const F_ALLOCATECONTIG: u32 = 2;
+    pub const F_ALLOCATEALL: u32 = 4;
+    pub const F_PEOFPOSMODE: i32 = 3;
+    pub const F_VOLPOSMODE: i32 = 4;
+}
 
 /// Darwin's `l_type` values, from `<sys/fcntl.h>`.
 pub mod lock {
@@ -269,8 +290,8 @@ pub mod entry {
     use machish::resolve::SyntheticDylib;
 
     use super::{
-        Flock, cmd, flags_to_guest, lock_type_to_guest, lock_type_to_host, split_flags_to_host,
-        takes_a_lock, takes_third_argument, to_host,
+        Flock, Fstore, cmd, flags_to_guest, lock_type_to_guest, lock_type_to_host, preallocate,
+        split_flags_to_host, takes_a_lock, takes_third_argument, to_host,
     };
 
     /// `int fcntl(int fd, int cmd, ...)`, with the ellipsis spelled out.
@@ -300,6 +321,10 @@ pub mod entry {
         command: libc::c_int,
         arg: usize,
     ) -> libc::c_int {
+        if command == cmd::F_PREALLOCATE {
+            // SAFETY: `F_PREALLOCATE` defines its third argument as `fstore_t *`.
+            return unsafe { preallocate(fd, arg as *mut Fstore) };
+        }
         let Some(host_command) = to_host(command) else {
             crate::errno::set(libc::EINVAL);
             return -1;
@@ -329,6 +354,54 @@ pub mod entry {
             true => flags_to_guest(rc),
             false => rc,
         }
+    }
+
+    unsafe fn preallocate(fd: libc::c_int, store: *mut Fstore) -> libc::c_int {
+        if store.is_null() {
+            crate::errno::set(libc::EINVAL);
+            return -1;
+        }
+        // SAFETY: the caller supplied the readable and writable `fstore_t`.
+        let request = unsafe { *store };
+        unsafe { (*store).bytes_allocated = 0 };
+        if !matches!(
+            request.flags,
+            preallocate::F_ALLOCATECONTIG | preallocate::F_ALLOCATEALL
+        ) || request.offset < 0
+            || request.length < 0
+        {
+            crate::errno::set(libc::EINVAL);
+            return -1;
+        }
+        let offset = match request.posmode {
+            preallocate::F_PEOFPOSMODE => {
+                let mut status: libc::stat = unsafe { std::mem::zeroed() };
+                // SAFETY: `status` is writable and `fd` is the caller's descriptor.
+                if unsafe { libc::fstat(fd, &mut status) } < 0 {
+                    return -1;
+                }
+                match status.st_size.checked_add(request.offset) {
+                    Some(offset) => offset,
+                    None => {
+                        crate::errno::set(libc::EOVERFLOW);
+                        return -1;
+                    }
+                }
+            }
+            preallocate::F_VOLPOSMODE => request.offset,
+            _ => {
+                crate::errno::set(libc::EINVAL);
+                return -1;
+            }
+        };
+        // `posix_fallocate` returns an errno value directly.
+        let error = unsafe { libc::posix_fallocate(fd, offset, request.length) };
+        if error != 0 {
+            crate::errno::set(error);
+            return -1;
+        }
+        unsafe { (*store).bytes_allocated = request.length };
+        0
     }
 
     /// The lock family, through a `struct flock` of this host's.
@@ -537,6 +610,38 @@ mod tests {
         let guest = oflag::O_RDWR | oflag::O_APPEND | oflag::O_NONBLOCK;
         let host = flags_to_host(guest).expect("all three have equivalents");
         assert_eq!(flags_to_guest(host), guest);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn f_preallocate_allocates_from_the_end_of_file() {
+        use std::os::fd::AsRawFd;
+
+        let path = std::env::temp_dir().join(format!(
+            "rosetta3-preallocate-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let file = std::fs::File::create(&path).expect("a temporary file");
+        let mut store = Fstore {
+            flags: preallocate::F_ALLOCATEALL,
+            posmode: preallocate::F_PEOFPOSMODE,
+            length: 102_400,
+            ..Fstore::default()
+        };
+        // SAFETY: a live descriptor and writable Darwin `fstore_t`.
+        let result = unsafe {
+            entry::fcntl(
+                file.as_raw_fd(),
+                cmd::F_PREALLOCATE,
+                (&raw mut store) as usize,
+            )
+        };
+        assert_eq!(result, 0);
+        assert_eq!(store.bytes_allocated, 102_400);
+        assert_eq!(file.metadata().unwrap().len(), 102_400);
+        drop(file);
+        let _ = std::fs::remove_file(path);
     }
 
     /// A host-only status bit is dropped rather than reported: `F_GETFL` answers

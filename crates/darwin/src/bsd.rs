@@ -274,6 +274,15 @@ pub unsafe extern "C" fn memset_s(
     }
 }
 
+/// Darwin's instruction-cache invalidation primitive.
+///
+/// x86-64 keeps its instruction and data caches coherent. The compiler fence
+/// prevents Rust from moving memory accesses across the explicit publication
+/// point the guest requested.
+pub unsafe extern "C" fn sys_icache_invalidate(_start: *mut c_void, _len: usize) {
+    unimplemented!();
+}
+
 pub const NAMES: &[&str] = &[
     "atexit",
     "atexit_b",
@@ -281,6 +290,7 @@ pub const NAMES: &[&str] = &[
     "__assert_rtn",
     "srandomdev",
     "memset_s",
+    "sys_icache_invalidate",
 ];
 
 pub fn symbol(name: &str) -> Option<u64> {
@@ -291,6 +301,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         "__assert_rtn" => assert_rtn as *const (),
         "srandomdev" => srandomdev as *const (),
         "memset_s" => memset_s as *const (),
+        "sys_icache_invalidate" => sys_icache_invalidate as *const (),
         _ => return None,
     };
     Some(f as usize as u64)
