@@ -1862,10 +1862,8 @@ pub mod video {
         let Some(f) = api().and_then(|a| a.SDL_SetWindowTitle) else {
             return false;
         };
-        let mut title_with_brand = title.to_owned().into_bytes();
-        title_with_brand.extend_from_slice(" (SDL3 via Rosetta 3)".as_bytes());
         // SAFETY: a window and a NUL-terminated title.
-        unsafe { f(window, CString::new(title_with_brand).unwrap().as_ptr()) }
+        unsafe { f(window, title.as_ptr()) }
     }
 
     /// `SDL_PIXELFORMAT_RGBA32`: four bytes per pixel, red first in memory.
