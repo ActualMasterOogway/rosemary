@@ -1,5 +1,8 @@
 //! How hard Cranelift is asked to work on the code it emits.
 
+use microlift::cranelift_codegen;
+use microlift::cranelift_native;
+
 use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_codegen::settings::{self, Configurable};
 use microlift::MicroliftError;

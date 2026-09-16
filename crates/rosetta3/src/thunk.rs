@@ -6,6 +6,9 @@ use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
+use microlift::cranelift_codegen;
+use microlift::cranelift_frontend;
+
 use cranelift_codegen::ir::{
     AbiParam, ArgumentPurpose, Function, InstBuilder, MemFlagsData, Signature, StackSlotData,
     StackSlotKind, UserFuncName, types,
