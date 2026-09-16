@@ -25,3 +25,6 @@ pub const INVALID_SCOPE: i32 = -10866;
 /// `kAudioUnitErr_InvalidElement`, which stands in for "not a unit of this
 /// runtime's" - there is no `badComponentInstance` in the AudioUnit range.
 pub const INVALID_COMPONENT: i32 = -10877;
+/// The same number under its own name, for the case it really is about: a bus
+/// past the element count a mixer was given.
+pub const INVALID_ELEMENT: i32 = -10877;

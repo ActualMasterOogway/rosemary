@@ -35,6 +35,7 @@ pub mod divergent;
 pub mod errno;
 pub mod fcntl;
 pub mod heap;
+pub mod idle;
 pub mod ioctl;
 pub mod kqueue;
 pub mod libproc;
@@ -247,6 +248,25 @@ fn implemented(name: &str) -> Option<u64> {
         .or_else(|| libproc_symbol(name))
         .or_else(|| printf_l_symbol(name))
         .or_else(|| kqueue_symbol(name))
+        .or_else(|| math_symbol(name))
+        .or_else(|| idle::symbol(name))
+}
+
+/// The part of [`math`] this crate answers everywhere, which is not the whole
+/// of it: the four Darwin-ABI returns in [`SHIMMED_ABOVE`] are intercepted by
+/// the runtime above and must stay libSystem's on Darwin.
+///
+/// The same two conditions [`provider`] publishes under, so that a `dlsym` of
+/// one of these names and an import of it answer the same address.
+fn math_symbol(name: &str) -> Option<u64> {
+    let ours = || math::symbol(name).map(|f| f as usize as u64);
+    if math::SHADOWED.contains(&name) {
+        return ours();
+    }
+    let unclaimed = strict::enabled() || host_symbol(name).is_none();
+    (math::PLAIN.contains(&name) && unclaimed)
+        .then(ours)
+        .flatten()
 }
 
 /// The variadic `_l` printers, which only an x86-64 host off Darwin publishes -
@@ -589,6 +609,13 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
             define_fn(&mut lib, &format!("_{name}"), f);
         }
     }
+    // These the host does define, and differently - see [`math::SHADOWED`].
+    for name in math::SHADOWED {
+        if let Some(f) = math::symbol(name) {
+            define_fn(&mut lib, &format!("_{name}"), f);
+        }
+    }
+    idle::provide(&mut lib);
     stdio::provide(&mut lib);
     errno::provide(&mut lib);
     sysctl::provide(&mut lib);

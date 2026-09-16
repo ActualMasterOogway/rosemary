@@ -33,6 +33,17 @@ const SET_INPUT_CALLBACK: u32 = 22;
 /// have the playback stream pulling a function that expects to be handed
 /// recorded frames.
 const OUTPUT_SET_INPUT_CALLBACK: u32 = 2005;
+/// `kAudioUnitProperty_ElementCount`: how many input buses a mixer has.
+const ELEMENT_COUNT: u32 = 11;
+/// The 3D mixer's own properties, which pick a spatialisation algorithm and
+/// describe how distance attenuates. Accepted and not acted on - see the note
+/// where they are matched.
+const SPATIALIZATION: &[u32] = &[
+    // `kAudioUnitProperty_SpatializationAlgorithm`, `DopplerRate`,
+    // `3DMixerRenderingFlags`, `3DMixerDistanceAtten`, `3DMixerDistanceParams`,
+    // and `ReverbPreset`.
+    3000, 3002, 3003, 3004, 3010, 3012,
+];
 /// `kAudioUnitProperty_MaximumFramesPerSlice`, which a guest reads to size its
 /// own mixing buffer.
 const MAXIMUM_FRAMES_PER_SLICE: u32 = 14;
@@ -50,6 +61,13 @@ mod scope {
     pub const INPUT: u32 = 1;
     pub const OUTPUT: u32 = 2;
 }
+
+/// The most input elements a mixer may have.
+///
+/// A game asks for one per simultaneous voice; this is well past what any of
+/// them use, and the point of the cap is that the count arrives from the guest
+/// and sizes an allocation.
+const MAXIMUM_ELEMENTS: usize = 256;
 
 /// The largest slice this crate will ever ask for. It is a constant rather than
 /// a tuning knob, because a guest allocates against the number it is told.
@@ -112,12 +130,59 @@ pub unsafe extern "C" fn AudioUnitSetProperty(
             .unwrap_or(INVALID_COMPONENT);
     };
     // SAFETY: the caller's obligation.
-    let status = unsafe { set(&unit, id, scope, data, size) };
+    let status = unsafe { set(&unit, id, scope, element, data, size) };
     crate::trace::say(
         format_args!("set property {id} scope {scope} element {element}"),
         status,
     );
     status
+}
+
+/// A property on one of a mixer's input buses.
+///
+/// # Safety
+///
+/// As [`AudioUnitSetProperty`]'s.
+unsafe fn set_on_element(
+    unit: &mut crate::Unit,
+    id: u32,
+    element: u32,
+    data: *const c_void,
+    size: u32,
+) -> i32 {
+    let Some(input) = unit.inputs.get_mut(element as usize) else {
+        // A bus past the count the guest asked for, rather than growing the
+        // mixer to fit: the count is what it sized its own voices against.
+        return INVALID_ELEMENT;
+    };
+    match id {
+        STREAM_FORMAT => {
+            if (size as usize) < size_of::<Format>() {
+                return INVALID_PROPERTY_VALUE;
+            }
+            // SAFETY: the caller's obligation, and the size was just checked.
+            input.format = unsafe { *(data as *const Format) };
+            SUCCESS
+        }
+        id if carries_a_callback(id) => {
+            if (size as usize) < size_of::<[usize; 2]>() {
+                return INVALID_PROPERTY_VALUE;
+            }
+            // SAFETY: as above; an `AURenderCallbackStruct` is a function
+            // pointer and a cookie.
+            let raw = unsafe { *(data as *const [*mut c_void; 2]) };
+            input.callback = (!raw[0].is_null()).then(|| Callback {
+                // SAFETY: the caller's obligation - this pointer is host
+                // callable with the `AURenderCallback` prototype.
+                proc: unsafe { std::mem::transmute::<*mut c_void, Proc>(raw[0]) },
+                ref_con: raw[1],
+            });
+            SUCCESS
+        }
+        // As on the unit: this crate never asks for more than `MAXIMUM_FRAMES`.
+        MAXIMUM_FRAMES_PER_SLICE => SUCCESS,
+        _ => INVALID_PROPERTY,
+    }
 }
 
 /// # Safety
@@ -127,6 +192,7 @@ unsafe fn set(
     unit: &std::sync::Mutex<crate::Unit>,
     id: u32,
     scope: u32,
+    element: u32,
     data: *const c_void,
     size: u32,
 ) -> i32 {
@@ -134,7 +200,75 @@ unsafe fn set(
         return PARAM_ERROR;
     }
     let mut unit = unit.lock().unwrap_or_else(|e| e.into_inner());
+    // A mixer's input scope is its elements, each with a format and a callback
+    // of its own - so the same two property ids mean "this bus" there and "the
+    // whole unit" everywhere else.
+    // A 3D mixer's placement properties, which say *how* to spatialise rather
+    // than where, and are set on the input scope like everything else about an
+    // element. This one pans and attenuates however it is asked to, so the
+    // choice changes nothing - and refusing it fails the voice outright, which
+    // is why this comes before the element dispatch rather than inside it.
+    if unit.kind == crate::Kind::Mixer && SPATIALIZATION.contains(&id) {
+        return SUCCESS;
+    }
+    if unit.kind == crate::Kind::Mixer && scope == scope::INPUT && id != ELEMENT_COUNT {
+        // SAFETY: the caller's obligation.
+        return unsafe { set_on_element(&mut unit, id, element, data, size) };
+    }
+    // A converter's two scopes are two different formats, and it is the only
+    // unit here for which the distinction matters.
+    if unit.kind == crate::Kind::Converter && id == STREAM_FORMAT {
+        if (size as usize) < size_of::<Format>() {
+            return INVALID_PROPERTY_VALUE;
+        }
+        // SAFETY: the caller's obligation, and the size was just checked.
+        let format = unsafe { *(data as *const Format) };
+        match scope {
+            scope::INPUT => unit.input_format = format,
+            scope::OUTPUT => unit.format = format,
+            _ => return INVALID_SCOPE,
+        }
+        crate::trace::say(
+            format_args!(
+                "converter {} format: {} Hz, {} channels, {} bits, flags {:#x}, {} bytes/frame",
+                match scope {
+                    scope::INPUT => "input",
+                    _ => "output",
+                },
+                format.sample_rate,
+                format.channels_per_frame,
+                format.bits_per_channel,
+                format.format_flags,
+                format.bytes_per_frame,
+            ),
+            SUCCESS,
+        );
+        return SUCCESS;
+    }
     match id {
+        ELEMENT_COUNT if unit.kind == crate::Kind::Mixer => {
+            if size < 4 {
+                return INVALID_PROPERTY_VALUE;
+            }
+            // SAFETY: the caller's obligation, and the size was just checked.
+            let count = unsafe { *(data as *const u32) } as usize;
+            if count > MAXIMUM_ELEMENTS {
+                return INVALID_PROPERTY_VALUE;
+            }
+            match scope {
+                scope::INPUT => {
+                    unit.inputs.resize(count, crate::mixer::Element::default());
+                    SUCCESS
+                }
+                // The output is one bus. A guest asking for another is asking
+                // for a mixer that splits rather than mixes.
+                scope::OUTPUT => match count {
+                    1 => SUCCESS,
+                    _ => INVALID_PROPERTY_VALUE,
+                },
+                _ => INVALID_SCOPE,
+            }
+        }
         STREAM_FORMAT => {
             if (size as usize) < size_of::<Format>() {
                 return INVALID_PROPERTY_VALUE;

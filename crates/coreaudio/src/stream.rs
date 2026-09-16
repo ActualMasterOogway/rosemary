@@ -57,6 +57,15 @@ impl Format {
         self.format_flags & flags::IS_NON_INTERLEAVED != 0
     }
 
+    /// Whether the samples are native-endian 32-bit floats, which is the one
+    /// layout [`crate::render`] can mix without converting.
+    pub fn is_float32(&self) -> bool {
+        self.format_id == FORMAT_LINEAR_PCM
+            && self.format_flags & flags::IS_FLOAT != 0
+            && self.format_flags & flags::IS_BIG_ENDIAN == 0
+            && self.bits_per_channel == 32
+    }
+
     /// Bytes in one frame of the buffer the callback fills.
     ///
     /// For a non-interleaved format `mBytesPerFrame` counts *one* channel, which

@@ -134,12 +134,10 @@ pub const CLAIMED: &[&str] = &[
     "pwrite",
     "read",
     "rmdir",
-    "sleep",
     "symlink",
     "sync",
     "truncate",
     "unlink",
-    "usleep",
     // <stdio.h>, minus the `FILE *` globals, which are named differently and live in
     // [`crate::stdio`]. `FILE` itself never crosses: the guest receives a pointer and
     // hands it back.

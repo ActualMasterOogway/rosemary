@@ -185,6 +185,12 @@ struct Api {
     SDL_GL_SetSwapInterval: Option<unsafe extern "C" fn(c_int) -> bool>,
     SDL_GL_GetProcAddress: Option<unsafe extern "C" fn(*const c_char) -> *mut c_void>,
 
+    /// The EGL objects SDL made, for the one thing `SDL_GL_*` cannot express -
+    /// see [`video::egl`]. Absent on an SDL whose GL is not EGL-backed.
+    SDL_EGL_GetCurrentDisplay: Option<unsafe extern "C" fn() -> *mut c_void>,
+    SDL_EGL_GetCurrentConfig: Option<unsafe extern "C" fn() -> *mut c_void>,
+    SDL_EGL_GetProcAddress: Option<unsafe extern "C" fn(*const c_char) -> *mut c_void>,
+
     SDL_GetPrimaryDisplay: Option<unsafe extern "C" fn() -> u32>,
     SDL_GetDisplays: Option<unsafe extern "C" fn(*mut c_int) -> *mut u32>,
     SDL_GetDisplayBounds: Option<unsafe extern "C" fn(u32, *mut Rect) -> bool>,
@@ -375,6 +381,9 @@ fn api() -> Option<&'static Api> {
             SDL_GL_SetAttribute,
             SDL_GL_SetSwapInterval,
             SDL_GL_GetProcAddress,
+            SDL_EGL_GetCurrentDisplay,
+            SDL_EGL_GetCurrentConfig,
+            SDL_EGL_GetProcAddress,
             SDL_GetPrimaryDisplay,
             SDL_GetDisplays,
             SDL_GetDisplayBounds,
@@ -2071,6 +2080,229 @@ pub mod video {
         };
         // SAFETY: an integer.
         unsafe { f(interval) }
+    }
+
+    /// The version and profile mask of the GL context current on this thread,
+    /// or `None` where there is none or it is older than GL 3.0.
+    ///
+    /// This is what a second context has to be asked for so that the guest sees
+    /// the same GL on both of its threads; see [`egl::create_shared`].
+    pub fn gl_current_version() -> Option<(i32, i32, i32)> {
+        const MAJOR_VERSION: u32 = 0x821B;
+        const MINOR_VERSION: u32 = 0x821C;
+        const CONTEXT_PROFILE_MASK: u32 = 0x9126;
+        let f = gl_proc_address(c"glGetIntegerv")?;
+        // SAFETY: `void glGetIntegerv(GLenum, GLint *)`.
+        let get: unsafe extern "C" fn(u32, *mut i32) = unsafe { std::mem::transmute(f) };
+        let read = |name| {
+            let mut value = -1;
+            // SAFETY: a writable int, which is one value for each name here.
+            unsafe { get(name, &mut value) };
+            value
+        };
+        let (major, minor) = (read(MAJOR_VERSION), read(MINOR_VERSION));
+        if major < 3 {
+            // Pre-3.0 has no `GL_MAJOR_VERSION`, so the reads above only set
+            // `GL_INVALID_ENUM` and leave the sentinel behind.
+            return None;
+        }
+        // The profile mask is GL 3.2 and later; below that it stays zero, which
+        // is what "no profile was asked for" is spelled as.
+        let profile = match (major, minor) {
+            (3, 0..=1) => 0,
+            _ => read(CONTEXT_PROFILE_MASK).max(0),
+        };
+        Some((major, minor, profile))
+    }
+
+    /// EGL underneath SDL's GL, for the one thing SDL's own API cannot express.
+    ///
+    /// AppKit lets a program send `-makeCurrentContext` to one `NSOpenGLContext`
+    /// from two threads and serialise the two itself, which is how every program
+    /// with a render thread hands drawing over. EGL refuses outright: a context
+    /// current on one thread cannot be made current on another, and only the
+    /// thread holding it can let it go - so a render thread asking for a context
+    /// the main thread still holds deadlocks or fails, and neither is what the
+    /// program asked for.
+    ///
+    /// The way out is a second context in the same *share group*: a distinct
+    /// context, current on the second thread, through which every shared
+    /// object (textures, buffers, shaders, programs, renderbuffers) is the
+    /// same object. `eglCreateContext` takes the context to share with as an
+    /// argument rather than reading it off the calling thread, which is exactly
+    /// the part `SDL_GL_CreateContext` cannot do.
+    pub mod egl {
+        use super::*;
+
+        const NONE: i32 = 0x3038;
+        const OPENGL_API: u32 = 0x30A2;
+        const CONTEXT_MAJOR_VERSION: i32 = 0x3098;
+        const CONTEXT_MINOR_VERSION: i32 = 0x30FB;
+        const CONTEXT_OPENGL_PROFILE_MASK: i32 = 0x30FD;
+
+        /// The core EGL calls this module makes. Resolved by hand because SDL
+        /// exposes its display and config but not the calls that take them.
+        struct Egl {
+            get_current_context: unsafe extern "C" fn() -> *mut c_void,
+            create_context: unsafe extern "C" fn(
+                *mut c_void,
+                *mut c_void,
+                *mut c_void,
+                *const i32,
+            ) -> *mut c_void,
+            destroy_context: unsafe extern "C" fn(*mut c_void, *mut c_void) -> u32,
+            bind_api: unsafe extern "C" fn(u32) -> u32,
+            get_error: unsafe extern "C" fn() -> i32,
+        }
+
+        /// One EGL entry point.
+        ///
+        /// `eglGetProcAddress` answers core entry points only from EGL 1.5, so
+        /// the library itself is asked first: it is already in the process, SDL
+        /// having loaded it to make the context this shares with.
+        fn entry_point(name: &CStr) -> Option<*mut c_void> {
+            // SAFETY: a NUL-terminated name against the default search order.
+            let found = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
+            if !found.is_null() {
+                return Some(found);
+            }
+            let handle = {
+                static EGL: OnceLock<usize> = OnceLock::new();
+                // SAFETY: a NUL-terminated soname. Never closed, as with every
+                // other `dlopen` in this crate.
+                *EGL.get_or_init(|| unsafe {
+                    libc::dlopen(c"libEGL.so.1".as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL)
+                        as usize
+                })
+            };
+            if handle != 0 {
+                // SAFETY: a handle from `dlopen` and a NUL-terminated name.
+                let found = unsafe { libc::dlsym(handle as *mut c_void, name.as_ptr()) };
+                if !found.is_null() {
+                    return Some(found);
+                }
+            }
+            let f = api()?.SDL_EGL_GetProcAddress?;
+            // SAFETY: a NUL-terminated name.
+            let found = unsafe { f(name.as_ptr()) };
+            (!found.is_null()).then_some(found)
+        }
+
+        // The target type of each transmute is the field it is assigned to,
+        // declared on `Egl` a few lines up; spelling it again inside the macro
+        // would be the same statement twice and only one of them checked.
+        #[allow(clippy::missing_transmute_annotations)]
+        fn egl() -> Option<&'static Egl> {
+            static EGL: OnceLock<Option<Egl>> = OnceLock::new();
+            EGL.get_or_init(|| {
+                /// Each field from the entry point of the same name.
+                macro_rules! resolve {
+                    ($($field:ident => $name:literal),* $(,)?) => {
+                        Egl {
+                            // SAFETY: each field's type above is the prototype
+                            // `EGL/egl.h` declares for that name.
+                            $($field: unsafe {
+                                std::mem::transmute(entry_point($name)?)
+                            },)*
+                        }
+                    };
+                }
+                Some(resolve! {
+                    get_current_context => c"eglGetCurrentContext",
+                    create_context => c"eglCreateContext",
+                    destroy_context => c"eglDestroyContext",
+                    bind_api => c"eglBindAPI",
+                    get_error => c"eglGetError",
+                })
+            })
+            .as_ref()
+        }
+
+        /// SDL's `EGLDisplay` and `EGLConfig`, which are the video device's
+        /// rather than any thread's despite the names.
+        fn display_and_config() -> Option<(*mut c_void, *mut c_void)> {
+            let api = api()?;
+            let (display, config) = (
+                api.SDL_EGL_GetCurrentDisplay?,
+                api.SDL_EGL_GetCurrentConfig?,
+            );
+            // SAFETY: no arguments; both answer null before a GL window exists.
+            let (display, config) = unsafe { (display(), config()) };
+            (!display.is_null()).then_some((display, config))
+        }
+
+        /// Whether `current` - the SDL context current on this thread - is an
+        /// `EGLContext`, which is what lets this module hand one back to
+        /// [`gl_make_current`].
+        ///
+        /// SDL's EGL backend returns the `EGLContext` as the `SDL_GLContext`
+        /// rather than wrapping it. That is an implementation detail, so it is
+        /// checked against the thread's own EGL state instead of assumed: on any
+        /// other backend the two differ and the caller is told there is no EGL
+        /// path here, rather than passing a foreign pointer into SDL.
+        pub fn backs(current: GlContext) -> bool {
+            let (Some(egl), Some(_)) = (egl(), display_and_config()) else {
+                return false;
+            };
+            // SAFETY: no arguments.
+            !current.is_null() && unsafe { (egl.get_current_context)() } == current
+        }
+
+        /// A second context sharing every object with `share`, asked for at the
+        /// given GL version and profile so that both threads see the same GL.
+        ///
+        /// `version` is `None` for a context older than GL 3.0, where there is
+        /// no version to ask for and the driver's default is the only choice.
+        pub fn create_shared(
+            share: GlContext,
+            version: Option<(i32, i32, i32)>,
+        ) -> Result<GlContext, String> {
+            let Some(egl) = egl() else {
+                return Err("this SDL's OpenGL is not EGL-backed".into());
+            };
+            let Some((display, config)) = display_and_config() else {
+                return Err("SDL has no EGL display".into());
+            };
+
+            let mut attributes = Vec::new();
+            if let Some((major, minor, profile)) = version {
+                attributes.extend_from_slice(&[
+                    CONTEXT_MAJOR_VERSION,
+                    major,
+                    CONTEXT_MINOR_VERSION,
+                    minor,
+                ]);
+                if profile != 0 {
+                    attributes.extend_from_slice(&[CONTEXT_OPENGL_PROFILE_MASK, profile]);
+                }
+            }
+            attributes.push(NONE);
+
+            // The client API is per-thread state, and this thread has never
+            // named one - so without this `eglCreateContext` would make an
+            // OpenGL ES context, which cannot share with a desktop GL one.
+            // SAFETY: an EGL enumerator.
+            unsafe { (egl.bind_api)(OPENGL_API) };
+            // SAFETY: SDL's own display and config, a context SDL created, and
+            // an `EGL_NONE`-terminated attribute list.
+            let context =
+                unsafe { (egl.create_context)(display, config, share, attributes.as_ptr()) };
+            if context.is_null() {
+                // SAFETY: no arguments.
+                let code = unsafe { (egl.get_error)() };
+                return Err(format!("eglCreateContext failed with {code:#x}"));
+            }
+            Ok(context)
+        }
+
+        /// Give back a context [`create_shared`] made.
+        pub fn destroy_shared(context: GlContext) {
+            let (Some(egl), Some((display, _))) = (egl(), display_and_config()) else {
+                return;
+            };
+            // SAFETY: SDL's display and a context this module created.
+            unsafe { (egl.destroy_context)(display, context) };
+        }
     }
 
     /// A GL entry point by name, which is how the `gl*` imports are satisfied.

@@ -58,6 +58,9 @@ dependencies = [
 [[package]]
 name = "audiotoolbox"
 version = "0.1.0"
+dependencies = [
+ "coreaudio",
+]
 
 [[package]]
 name = "autocfg"

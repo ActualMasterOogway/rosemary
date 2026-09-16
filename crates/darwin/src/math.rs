@@ -172,10 +172,109 @@ extern "C" fn exp10f_abi(x: f32) -> f32 {
     10f32.powf(x)
 }
 
+/// `<math.h>`'s classification macros, which on Darwin are calls.
+///
+/// `isnan(x)`, `isfinite(x)` and their siblings expand to a call to one of
+/// these, so a program doing nothing more exotic than checking a float imports
+/// them - and glibc spells only some of the family, under names of its own
+/// (`__finitef` for `__isfinitef`, nothing at all for the `d` suffix). What the
+/// missing ones cost is not a link error: the slot stays null and the first
+/// `isfinite()` the program reaches calls zero.
+///
+/// The `f` forms take a `float` and the `d` forms a `double`; each answers an
+/// `int`, as Darwin's `math.h` declares.
+mod classify {
+    /// Darwin's `FP_*`, which are **not** glibc's: `FP_NAN` is 1 here and 0
+    /// there, and the two orders disagree the rest of the way down. A guest
+    /// given the host's numbering reads "NaN" as "normal" and never says why.
+    const NAN: i32 = 1;
+    const INFINITE: i32 = 2;
+    const ZERO: i32 = 3;
+    const NORMAL: i32 = 4;
+    const SUBNORMAL: i32 = 5;
+
+    pub extern "C" fn isnanf(x: f32) -> i32 {
+        x.is_nan() as i32
+    }
+    pub extern "C" fn isnand(x: f64) -> i32 {
+        x.is_nan() as i32
+    }
+    pub extern "C" fn isinff(x: f32) -> i32 {
+        x.is_infinite() as i32
+    }
+    pub extern "C" fn isinfd(x: f64) -> i32 {
+        x.is_infinite() as i32
+    }
+    pub extern "C" fn isfinitef(x: f32) -> i32 {
+        x.is_finite() as i32
+    }
+    pub extern "C" fn isfinited(x: f64) -> i32 {
+        x.is_finite() as i32
+    }
+    pub extern "C" fn isnormalf(x: f32) -> i32 {
+        x.is_normal() as i32
+    }
+    pub extern "C" fn isnormald(x: f64) -> i32 {
+        x.is_normal() as i32
+    }
+    pub extern "C" fn signbitf(x: f32) -> i32 {
+        x.is_sign_negative() as i32
+    }
+    pub extern "C" fn signbitd(x: f64) -> i32 {
+        x.is_sign_negative() as i32
+    }
+    pub extern "C" fn fpclassifyf(x: f32) -> i32 {
+        match x.classify() {
+            std::num::FpCategory::Nan => NAN,
+            std::num::FpCategory::Infinite => INFINITE,
+            std::num::FpCategory::Zero => ZERO,
+            std::num::FpCategory::Subnormal => SUBNORMAL,
+            std::num::FpCategory::Normal => NORMAL,
+        }
+    }
+    pub extern "C" fn fpclassifyd(x: f64) -> i32 {
+        match x.classify() {
+            std::num::FpCategory::Nan => NAN,
+            std::num::FpCategory::Infinite => INFINITE,
+            std::num::FpCategory::Zero => ZERO,
+            std::num::FpCategory::Subnormal => SUBNORMAL,
+            std::num::FpCategory::Normal => NORMAL,
+        }
+    }
+}
+
 /// The names this module publishes that are plain functions rather than a
 /// Darwin return ABI: nothing above intercepts them, so a guest calls exactly
 /// these.
-pub const PLAIN: &[&str] = &["__exp10", "__exp10f"];
+///
+/// Published only where the host defines no such name, so that on Darwin each
+/// stays libSystem's. See [`SHADOWED`] for the ones that cannot be left to the
+/// host even when it has them.
+pub const PLAIN: &[&str] = &[
+    "__exp10",
+    "__exp10f",
+    // The half of the classification family glibc has no spelling for at all.
+    "__isnand",
+    "__isinfd",
+    "__isfinitef",
+    "__isfinited",
+    "__isnormalf",
+    "__isnormald",
+    "__signbitd",
+];
+
+/// Names the host also defines, but whose answer means something else there.
+///
+/// `__fpclassifyf` exists under glibc and returns glibc's `FP_*`, so binding a
+/// guest to it is worse than leaving it unbound: every classification comes
+/// back plausible and wrong. See [`classify`].
+#[cfg(not(target_os = "macos"))]
+pub const SHADOWED: &[&str] = &["__fpclassifyf", "__fpclassifyd"];
+
+/// On Darwin the host is libSystem, whose answers these reproduce - so there is
+/// nothing to shadow.
+#[cfg(target_os = "macos")]
+pub const SHADOWED: &[&str] = &[];
 
 /// The address to publish for each name in [`crate::SHIMMED_ABOVE`].
 ///
@@ -190,6 +289,18 @@ pub fn symbol(name: &str) -> Option<*const ()> {
         "__mulsc3" => mulsc3_abi as *const (),
         "__exp10" => exp10_abi as *const (),
         "__exp10f" => exp10f_abi as *const (),
+        "__isnanf" => classify::isnanf as *const (),
+        "__isnand" => classify::isnand as *const (),
+        "__isinff" => classify::isinff as *const (),
+        "__isinfd" => classify::isinfd as *const (),
+        "__isfinitef" => classify::isfinitef as *const (),
+        "__isfinited" => classify::isfinited as *const (),
+        "__isnormalf" => classify::isnormalf as *const (),
+        "__isnormald" => classify::isnormald as *const (),
+        "__signbitf" => classify::signbitf as *const (),
+        "__signbitd" => classify::signbitd as *const (),
+        "__fpclassifyf" => classify::fpclassifyf as *const (),
+        "__fpclassifyd" => classify::fpclassifyd as *const (),
         _ => return None,
     };
     Some(f)

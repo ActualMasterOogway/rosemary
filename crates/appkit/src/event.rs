@@ -10,6 +10,10 @@ use crate::window;
 /// about when the event names no window this crate made.
 pub fn pump(app: Id) {
     let _ = app;
+    // Before anything else: a thread waiting for a GL context this one holds is
+    // a thread that is not drawing, and reaching here is what says this one has
+    // finished with it. See `opengl::release_for_other_threads`.
+    crate::opengl::release_for_other_threads();
     gamecontroller::pump();
     debug_resize();
     debug_key();

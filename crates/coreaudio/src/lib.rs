@@ -31,12 +31,24 @@ mod converter;
 mod foreign;
 mod format;
 mod hal;
+pub mod mixer;
 mod render;
 mod status;
 mod stream;
 pub(crate) mod trace;
 
 pub use status::*;
+
+/// A four-character code as its characters, for a caller naming a component.
+pub fn trace_code(value: u32) -> String {
+    trace::code(value)
+}
+
+/// Say what one call did, under `ROSETTA3_TRACE_AUDIO`. For [`audiotoolbox`].
+pub fn trace(what: std::fmt::Arguments<'_>, status: i32) {
+    trace::say(what, status);
+}
+
 use stream::{Format, sdl_spec};
 
 /// `AudioComponentDescription`, which is five four-byte fields.
@@ -66,14 +78,44 @@ const SUBTYPE_REMOTE_IO: u32 = fourcc(b"rioc");
 /// `kAudioUnitManufacturer_Apple`.
 const MANUFACTURER_APPLE: u32 = fourcc(b"appl");
 
-/// The one component this crate has, as an opaque handle.
+/// The components this crate has, as opaque handles.
 ///
 /// The address of a static rather than an index: a guest compares the handle
 /// against null and passes it back, and nothing else.
 static OUTPUT_COMPONENT: u8 = 0;
+static MIXER_COMPONENT: u8 = 0;
 
 fn output_component() -> *mut c_void {
     &OUTPUT_COMPONENT as *const u8 as *mut c_void
+}
+
+fn mixer_component() -> *mut c_void {
+    &MIXER_COMPONENT as *const u8 as *mut c_void
+}
+
+/// `kAudioUnitType_FormatConverter` and the plain converter subtype.
+const TYPE_CONVERTER: u32 = fourcc(b"aufc");
+const SUBTYPE_CONVERTER: u32 = fourcc(b"conv");
+
+static CONVERTER_COMPONENT: u8 = 0;
+
+fn converter_component() -> *mut c_void {
+    &CONVERTER_COMPONENT as *const u8 as *mut c_void
+}
+
+fn describes_converter(d: &ComponentDescription) -> bool {
+    let matches = |field: u32, wanted: &[u32]| field == 0 || wanted.contains(&field);
+    d.kind == TYPE_CONVERTER
+        && matches(d.subtype, &[SUBTYPE_CONVERTER])
+        && matches(d.manufacturer, &[MANUFACTURER_APPLE])
+}
+
+/// Whether `description` asks for a mixer this crate can be.
+fn describes_mixer(d: &ComponentDescription) -> bool {
+    let matches = |field: u32, wanted: &[u32]| field == 0 || wanted.contains(&field);
+    d.kind == mixer::TYPE_MIXER
+        && matches(d.subtype, mixer::SUBTYPES)
+        && matches(d.manufacturer, &[MANUFACTURER_APPLE])
 }
 
 /// Whether `description` asks for the default output unit.
@@ -95,8 +137,35 @@ fn describes_default_output(d: &ComponentDescription) -> bool {
         && matches(d.manufacturer, &[MANUFACTURER_APPLE])
 }
 
-/// One output unit.
+/// What a unit is. There are two, and they render differently: an output unit
+/// is pulled by the device and a mixer is pulled by whatever it feeds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    Output,
+    Mixer,
+    /// `kAudioUnitSubType_AUConverter`: one input, one output, and a change of
+    /// format in between. A graph puts one in front of each voice so that a
+    /// sound recorded at its own rate reaches a mixer at the mixer's.
+    Converter,
+}
+
+/// One unit, of either kind.
 pub struct Unit {
+    pub(crate) kind: Kind,
+    /// A mixer's input elements. Empty for an output unit, whose single input
+    /// is [`Unit::callback`] or [`Unit::source`].
+    pub(crate) inputs: Vec<mixer::Element>,
+    /// The unit a graph connected to this one's input, as its handle, or zero.
+    pub(crate) source: usize,
+    /// A converter's *input* scope format; [`Unit::format`] is its output.
+    /// Unused by the other kinds, whose one format is the input they are given.
+    pub(crate) input_format: Format,
+    /// Input frames a converter has pulled and not yet consumed, interleaved as
+    /// floats - what makes resampling continuous across calls instead of
+    /// restarting, and clicking, at every buffer boundary.
+    pub(crate) pending: Vec<f32>,
+    /// How far into the first pending frame the next output sample falls.
+    pub(crate) phase: f64,
     /// The format the guest set on the input scope, which is the format its
     /// render callback will be asked to fill.
     format: Format,
@@ -143,8 +212,14 @@ pub unsafe extern "C" fn AudioComponentFindNext(
     }
     // SAFETY: the caller's obligation.
     let wanted = unsafe { *description };
-    match describes_default_output(&wanted) {
-        true => output_component(),
+    if describes_default_output(&wanted) {
+        return output_component();
+    }
+    if describes_mixer(&wanted) {
+        return mixer_component();
+    }
+    match describes_converter(&wanted) {
+        true => converter_component(),
         false => std::ptr::null_mut(),
     }
 }
@@ -161,10 +236,21 @@ pub unsafe extern "C" fn AudioComponentInstanceNew(
     if out.is_null() {
         return PARAM_ERROR;
     }
-    if component != output_component() {
-        return INVALID_COMPONENT;
-    }
+    let kind = match component {
+        c if c == output_component() => Kind::Output,
+        c if c == mixer_component() => Kind::Mixer,
+        c if c == converter_component() => Kind::Converter,
+        _ => return INVALID_COMPONENT,
+    };
     let unit = Arc::new(Mutex::new(Unit {
+        kind,
+        // A mixer starts with no elements: a guest sets how many it wants with
+        // `kAudioUnitProperty_ElementCount` before it configures any of them.
+        inputs: Vec::new(),
+        source: 0,
+        input_format: Format::default(),
+        pending: Vec::new(),
+        phase: 0.0,
         format: Format::default(),
         callback: None,
         stream: std::ptr::null_mut(),
@@ -206,6 +292,11 @@ pub unsafe extern "C" fn AudioUnitInitialize(handle: *mut c_void) -> i32 {
         return foreign::status(c"AudioUnitInitialize", handle).unwrap_or(INVALID_COMPONENT);
     };
     let mut unit = unit.lock().unwrap_or_else(|e| e.into_inner());
+    // A mixer plays through nothing: the unit it feeds is what opens a device,
+    // and this one is ready as soon as it exists.
+    if unit.kind != Kind::Output {
+        return SUCCESS;
+    }
     if !unit.stream.is_null() {
         return SUCCESS;
     }
@@ -243,6 +334,13 @@ pub unsafe extern "C" fn AudioOutputUnitStart(handle: *mut c_void) -> i32 {
         return foreign::status(c"AudioOutputUnitStart", handle).unwrap_or(INVALID_COMPONENT);
     };
     let mut unit = unit.lock().unwrap_or_else(|e| e.into_inner());
+    // A mixer has no device to start. A graph starts every unit it holds, so
+    // answering `kAudioUnitErr_Uninitialized` here would fail the whole graph
+    // over the one unit that was never going to play anything by itself.
+    if unit.kind != Kind::Output {
+        unit.running = true;
+        return SUCCESS;
+    }
     if unit.stream.is_null() {
         return UNINITIALIZED;
     }
@@ -372,6 +470,155 @@ pub unsafe extern "C" fn AudioUnitRender(
     status
 }
 
+/// `OSStatus AudioUnitSetParameter(AudioUnit, AudioUnitParameterID,
+/// AudioUnitScope, AudioUnitElement, AudioUnitParameterValue, UInt32)`
+///
+/// The parameters that mean something here are a mixer's per-element placement
+/// and gain; everything else is accepted by a unit that has the element and
+/// refused by one that does not, which is what tells a guest whether its voice
+/// exists.
+pub unsafe extern "C" fn AudioUnitSetParameter(
+    handle: *mut c_void,
+    id: u32,
+    scope: u32,
+    element: u32,
+    value: f32,
+    _buffer_offset: u32,
+) -> i32 {
+    let Some(unit) = unit_for(handle) else {
+        return INVALID_COMPONENT;
+    };
+    let mut unit = unit.lock().unwrap_or_else(|e| e.into_inner());
+    if unit.kind != Kind::Mixer {
+        return INVALID_PARAMETER;
+    }
+    // A mixer's parameters live on its input elements; the output scope has a
+    // volume this crate does not separate from the device's own.
+    const SCOPE_INPUT: u32 = 1;
+    if scope != SCOPE_INPUT {
+        return SUCCESS;
+    }
+    let Some(input) = mixer::element_mut(&mut unit.inputs, element) else {
+        return INVALID_ELEMENT;
+    };
+    trace::say(
+        format_args!("set parameter {id} element {element} = {value}"),
+        SUCCESS,
+    );
+    use mixer::parameter as p;
+    match id {
+        p::AZIMUTH => input.azimuth = value,
+        p::ELEVATION => input.elevation = value,
+        p::DISTANCE => input.distance = value,
+        p::GAIN => input.gain = value,
+        p::ENABLE => input.enabled = value != 0.0,
+        // Rate is a resampling this crate does not do. Accepted so that a game
+        // setting it to 1.0 - which every one of them does - is not told its
+        // voice failed.
+        p::PLAYBACK_RATE => {
+            if (value - 1.0).abs() > f32::EPSILON {
+                report_unsupported_rate();
+            }
+        }
+        _ => return INVALID_PARAMETER,
+    }
+    SUCCESS
+}
+
+/// `OSStatus AudioUnitGetParameter(...)`
+pub unsafe extern "C" fn AudioUnitGetParameter(
+    handle: *mut c_void,
+    id: u32,
+    scope: u32,
+    element: u32,
+    out: *mut f32,
+) -> i32 {
+    if out.is_null() {
+        return PARAM_ERROR;
+    }
+    let Some(unit) = unit_for(handle) else {
+        return INVALID_COMPONENT;
+    };
+    let unit = unit.lock().unwrap_or_else(|e| e.into_inner());
+    const SCOPE_INPUT: u32 = 1;
+    if unit.kind != Kind::Mixer || scope != SCOPE_INPUT {
+        return INVALID_PARAMETER;
+    }
+    let Some(input) = unit.inputs.get(element as usize) else {
+        return INVALID_ELEMENT;
+    };
+    use mixer::parameter as p;
+    let value = match id {
+        p::AZIMUTH => input.azimuth,
+        p::ELEVATION => input.elevation,
+        p::DISTANCE => input.distance,
+        p::GAIN => input.gain,
+        p::ENABLE => input.enabled as u32 as f32,
+        p::PLAYBACK_RATE => 1.0,
+        _ => return INVALID_PARAMETER,
+    };
+    // SAFETY: a writable float, as just checked.
+    unsafe { *out = value };
+    SUCCESS
+}
+
+/// Said once: a voice asking to be resampled is played at its own rate.
+fn report_unsupported_rate() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        eprintln!(
+            "rosetta3: audio: this program sets a mixer playback rate, which this runtime does \
+             not resample - those voices play at their recorded pitch"
+        );
+    });
+}
+
+/// Route `source`'s output into `destination`'s input bus, for a graph.
+///
+/// Answers whether both handles name units of this crate's. The connection is
+/// what makes a graph play: an output unit pulled by the device pulls the unit
+/// connected to it, and so on back through the mixer to each voice.
+pub fn connect(source: *mut c_void, destination: *mut c_void, destination_bus: u32) -> bool {
+    let (Some(from), Some(unit)) = (unit_for(source), unit_for(destination)) else {
+        return false;
+    };
+    // The format the connection carries is the source's output format, which is
+    // what CoreAudio propagates across a connection. Taking the destination's
+    // own instead would have the mixer asking for a stream nobody set up.
+    let carried = {
+        let from = from.lock().unwrap_or_else(|e| e.into_inner());
+        from.format
+    };
+    let mut unit = unit.lock().unwrap_or_else(|e| e.into_inner());
+    match unit.kind {
+        Kind::Mixer => match mixer::element_mut(&mut unit.inputs, destination_bus) {
+            Some(input) => {
+                input.source = source as usize;
+                input.format = carried;
+            }
+            None => return false,
+        },
+        Kind::Output | Kind::Converter => unit.source = source as usize,
+    }
+    true
+}
+
+/// Undo what [`connect`] did to one input bus.
+pub fn disconnect(destination: *mut c_void, destination_bus: u32) -> bool {
+    let Some(unit) = unit_for(destination) else {
+        return false;
+    };
+    let mut unit = unit.lock().unwrap_or_else(|e| e.into_inner());
+    match unit.kind {
+        Kind::Mixer => match mixer::element_mut(&mut unit.inputs, destination_bus) {
+            Some(input) => input.source = 0,
+            None => return false,
+        },
+        Kind::Output | Kind::Converter => unit.source = 0,
+    }
+    true
+}
+
 /// One entry point, as an address.
 macro_rules! at {
     ($f:expr) => {
@@ -391,6 +638,8 @@ pub fn symbol(name: &str) -> Option<u64> {
         "AudioUnitGetProperty" => at!(property::AudioUnitGetProperty),
         "AudioUnitSetProperty" => at!(property::AudioUnitSetProperty),
         "AudioUnitRender" => at!(AudioUnitRender),
+        "AudioUnitSetParameter" => at!(AudioUnitSetParameter),
+        "AudioUnitGetParameter" => at!(AudioUnitGetParameter),
         "AudioGetCurrentHostTime" => at!(AudioGetCurrentHostTime),
         "AudioConvertHostTimeToNanos" => at!(AudioConvertHostTimeToNanos),
         "AudioConvertNanosToHostTime" => at!(AudioConvertNanosToHostTime),
@@ -425,6 +674,8 @@ pub const NAMES: &[&str] = &[
     "AudioComponentInstanceNew",
     "AudioComponentInstanceDispose",
     "AudioUnitInitialize",
+    "AudioUnitSetParameter",
+    "AudioUnitGetParameter",
     "AudioUnitUninitialize",
     "AudioOutputUnitStart",
     "AudioOutputUnitStop",

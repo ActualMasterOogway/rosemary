@@ -1,0 +1,197 @@
+//! `CGEvent`, as much of it as a program that asks where the pointer is needs.
+//!
+//! Quartz's event API is two things at once: a way to *read* the input state
+//! and a way to *synthesise* input. A game uses the first to find the pointer
+//! when no window is under it - `CGEventCreate(NULL)` then
+//! `CGEventGetLocation` - and the second to put the pointer back, by posting a
+//! mouse-moved event. Both are here. Synthesising a *button* is not: see
+//! [`CGEventPost`].
+//!
+//! The coordinates are Quartz's global display space, whose origin is the top
+//! left of the desktop and whose y grows downward. That is SDL's own desktop
+//! space, so nothing is flipped here - unlike `+[NSEvent mouseLocation]`, which
+//! answers the same position in Cocoa's bottom-left space.
+
+use std::ffi::c_void;
+
+use foundation::geometry::NSPoint;
+use objc::class::Class;
+
+use corefoundation::base::CFTypeRef;
+
+/// `CGEventType`, the ones this module acts on.
+mod kind {
+    pub const NULL: u32 = 0;
+    pub const LEFT_MOUSE_DOWN: u32 = 1;
+    pub const LEFT_MOUSE_UP: u32 = 2;
+    pub const RIGHT_MOUSE_DOWN: u32 = 3;
+    pub const RIGHT_MOUSE_UP: u32 = 4;
+    pub const MOUSE_MOVED: u32 = 5;
+    pub const LEFT_MOUSE_DRAGGED: u32 = 6;
+    pub const RIGHT_MOUSE_DRAGGED: u32 = 7;
+    pub const OTHER_MOUSE_DOWN: u32 = 25;
+    pub const OTHER_MOUSE_UP: u32 = 26;
+    pub const OTHER_MOUSE_DRAGGED: u32 = 27;
+
+    /// Whether posting this event means "put the pointer here".
+    pub fn moves_the_pointer(kind: u32) -> bool {
+        matches!(
+            kind,
+            MOUSE_MOVED | LEFT_MOUSE_DRAGGED | RIGHT_MOUSE_DRAGGED | OTHER_MOUSE_DRAGGED
+        )
+    }
+
+    /// Whether this event is a button the runtime would have to synthesise.
+    pub fn presses_a_button(kind: u32) -> bool {
+        matches!(
+            kind,
+            LEFT_MOUSE_DOWN
+                | LEFT_MOUSE_UP
+                | RIGHT_MOUSE_DOWN
+                | RIGHT_MOUSE_UP
+                | OTHER_MOUSE_DOWN
+                | OTHER_MOUSE_UP
+        )
+    }
+}
+
+#[repr(C)]
+struct Body {
+    isa: *const Class,
+    /// Where the event says the pointer is, in Quartz's global coordinates.
+    location: NSPoint,
+    /// `CGEventType`.
+    kind: u32,
+}
+
+fn class() -> &'static Class {
+    static CLASS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let ptr = *CLASS.get_or_init(|| {
+        let class =
+            corefoundation::base::register(c"__NSCFType_CGEvent", None, size_of::<Body>(), true);
+        objc::class::ptr(class) as usize
+    });
+    // SAFETY: the cell holds a pointer to the class this function registered.
+    unsafe { objc::class::from_ptr(ptr as *const Class).expect("a class") }
+}
+
+/// An event object the caller owns and releases with `CFRelease`.
+fn new(location: NSPoint, kind: u32) -> CFTypeRef {
+    // SAFETY: `Body` begins with `isa` and is the layout `class` was registered
+    // with.
+    let body: *mut Body = unsafe { corefoundation::base::allocate(class()) };
+    if body.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: a live instance whose remaining bytes are ours to fill in.
+    unsafe {
+        (*body).location = location;
+        (*body).kind = kind;
+    }
+    body as CFTypeRef
+}
+
+/// Where the pointer is, in Quartz's global coordinates.
+///
+/// The same two exceptions `+[NSEvent mouseLocation]` makes, and for the same
+/// reason: a scripted pointer and a disassociated one are both places the
+/// window system's own cursor is not, and the two answers must not disagree.
+pub fn global_pointer() -> NSPoint {
+    let (x, y) = crate::script::pointer()
+        .or_else(crate::event::frozen_pointer)
+        .or_else(|| sdl3::video::global_mouse_state().map(|(x, y, _)| (x, y)))
+        .unwrap_or((0.0, 0.0));
+    NSPoint {
+        x: x as f64,
+        y: y as f64,
+    }
+}
+
+/// `CGEventRef CGEventCreate(CGEventSourceRef)`.
+///
+/// A null source means "describe the current input state", which is the only
+/// way this is used: the event it hands back carries where the pointer is now.
+/// A non-null source names a tap to take the state from, and this runtime has
+/// one input state - so the answer is the same either way.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGEventCreate(_source: *const c_void) -> CFTypeRef {
+    new(global_pointer(), kind::NULL)
+}
+
+/// `CGPoint CGEventGetLocation(CGEventRef)`.
+///
+/// Zero for anything that is not an event this module made, which is what
+/// CoreGraphics answers for a null event.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGEventGetLocation(event: CFTypeRef) -> NSPoint {
+    // SAFETY: null or an object this runtime allocated.
+    if !unsafe { corefoundation::base::is_kind_of(event, class()) } {
+        return NSPoint::default();
+    }
+    // SAFETY: an instance of `class()` is a `Body`.
+    unsafe { (*(event as *const Body)).location }
+}
+
+/// `CGEventRef CGEventCreateMouseEvent(CGEventSourceRef, CGEventType, CGPoint,
+/// CGMouseButton)`.
+///
+/// The button is recorded nowhere: the only kind of event this runtime can act
+/// on when it is posted is one that moves the pointer, and which button is held
+/// while it moves changes nothing about where it lands.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGEventCreateMouseEvent(
+    _source: *const c_void,
+    kind: u32,
+    location: NSPoint,
+    _button: u32,
+) -> CFTypeRef {
+    new(location, kind)
+}
+
+/// `void CGEventSetType(CGEventRef, CGEventType)`.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGEventSetType(event: CFTypeRef, kind: u32) {
+    // SAFETY: null or an object this runtime allocated.
+    if !unsafe { corefoundation::base::is_kind_of(event, class()) } {
+        return;
+    }
+    // SAFETY: an instance of `class()` is a `Body`.
+    unsafe { (*(event as *mut Body)).kind = kind };
+}
+
+/// `void CGEventPost(CGEventTapLocation, CGEventRef)`.
+///
+/// A posted mouse-moved event is how a program that has hidden the cursor puts
+/// it back where it wants it - the same request `CGWarpMouseCursorPosition`
+/// makes, so it is answered by the same code and inherits its handling of
+/// relative mouse mode.
+///
+/// A posted *button* is not delivered. Quartz would put it into the window
+/// server's stream, where it reaches every application and not only this one;
+/// what this runtime has instead is SDL's queue, which is fed by the window
+/// system and is not writable. Said once rather than ignored, because a program
+/// that synthesises a click and never sees one has no other way to find out.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGEventPost(_tap: u32, event: CFTypeRef) {
+    // SAFETY: null or an object this runtime allocated.
+    if !unsafe { corefoundation::base::is_kind_of(event, class()) } {
+        return;
+    }
+    // SAFETY: an instance of `class()` is a `Body`.
+    let body = unsafe { &*(event as *const Body) };
+    if kind::moves_the_pointer(body.kind) {
+        // SAFETY: a point, which is all it takes.
+        unsafe { crate::screen::CGWarpMouseCursorPosition(body.location) };
+        return;
+    }
+    if kind::presses_a_button(body.kind) {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            eprintln!(
+                "rosetta3: appkit: CGEventPost: this program synthesises mouse button events, \
+                 which this runtime cannot deliver - its event queue is the window system's and \
+                 is not writable"
+            );
+        });
+    }
+}

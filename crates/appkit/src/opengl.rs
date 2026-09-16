@@ -27,6 +27,57 @@ pub struct Context {
     /// The `CGLContextObj` behind the SDL context, recorded the first time it is
     /// made current - see [`cgl_context`].
     cgl: *mut c_void,
+    /// What it takes to be current on more than one thread at once, allocated
+    /// on first use by [`shared_of`]. Leaked with the object.
+    shared: *mut Cell,
+}
+
+/// [`Shared`], and the signal a thread waiting for the context sleeps on.
+struct Cell {
+    state: std::sync::Mutex<Shared>,
+    /// Raised when the thread holding the SDL context gives it up.
+    released: std::sync::Condvar,
+}
+
+/// The part of a context that more than one thread reaches.
+///
+/// AppKit lets a program send `-makeCurrentContext` to one context from two
+/// threads - a game does exactly that to hand drawing from the thread that set
+/// the renderer up to the thread that draws - and leaves serialising the two to
+/// the program. The GL underneath refuses: a context current on one thread
+/// cannot be made current on another, and only the thread holding it can let it
+/// go, so the second thread's request would fail outright.
+///
+/// So the context is *handed over*: the thread asking for one another thread
+/// holds says so, and the holder gives it up at its next pass through the event
+/// pump - see [`release_for_other_threads`]. That is the case this is really
+/// for, because it is what a program with a render thread does: set the
+/// renderer up on the thread that starts, then draw on the thread that draws.
+///
+/// A holder that never comes back to its event loop would hang the program, so
+/// the wait gives up and the asking thread gets a context of its own in the
+/// same *share group* instead: a distinct context through which every shared
+/// object - textures, buffers, shaders, programs, renderbuffers - is the same
+/// object. Vertex arrays, framebuffers and queries are **not** shared by
+/// OpenGL, so that fallback draws what a program that made none of those on the
+/// other thread would draw, and nothing otherwise.
+#[derive(Default)]
+struct Shared {
+    /// The thread the SDL context itself is current on, while one holds it.
+    owner: Option<std::thread::ThreadId>,
+    /// Whether another thread is waiting for the holder to give it up.
+    wanted: bool,
+    /// Whether the two below have been read off the SDL context yet, which can
+    /// only happen on the thread it is current on.
+    probed: bool,
+    /// Whether a sibling can be made at all, which needs an EGL-backed SDL.
+    egl: bool,
+    /// The version and profile the SDL context came back as, which a sibling is
+    /// asked for so that the guest sees the same GL through either. `None` for
+    /// a context older than GL 3.0, which has no version to ask for.
+    version: Option<(i32, i32, i32)>,
+    /// A context per thread that asked while another thread held the SDL one.
+    siblings: Vec<(std::thread::ThreadId, sdl3::GlContext)>,
 }
 
 pub const PIXEL_FORMAT_INSTANCE_SIZE: usize = size_of::<PixelFormat>();
@@ -155,6 +206,26 @@ fn format_of<'a>(receiver: Id) -> &'a mut PixelFormat {
 fn context_of<'a>(receiver: Id) -> &'a mut Context {
     // SAFETY: a context of this crate's.
     unsafe { &mut *(receiver as *mut Context) }
+}
+
+/// The context's [`Shared`], made on first use.
+///
+/// Under a lock of its own rather than a plain null check: the second thread to
+/// send `-makeCurrentContext` may be the first to reach this, and two threads
+/// allocating here at once would leave one of them holding a `Shared` the other
+/// never sees - which is the one piece of state that only works by being the
+/// same on both.
+fn shared_of(context: &mut Context) -> &'static Cell {
+    static CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = CREATION.lock().unwrap_or_else(|e| e.into_inner());
+    if context.shared.is_null() {
+        context.shared = Box::into_raw(Box::new(Cell {
+            state: std::sync::Mutex::new(Shared::default()),
+            released: std::sync::Condvar::new(),
+        }));
+    }
+    // SAFETY: allocated just above, and leaked with the object it belongs to.
+    unsafe { &*context.shared }
 }
 
 unsafe extern "C" fn init_with_attributes(receiver: Id, _sel: Sel, attributes: *const u32) -> Id {
@@ -396,21 +467,230 @@ unsafe extern "C" fn view(receiver: Id, _sel: Sel) -> Id {
     context_of(receiver).view
 }
 
-/// The context that was made current last, which `+currentContext` answers.
-static CURRENT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    /// The context this thread made current last, which `+currentContext`
+    /// answers. Per thread because that is what AppKit promises: a render
+    /// thread asking which context is current must not be told about the one
+    /// the thread that set the renderer up is drawing through.
+    static CURRENT: std::cell::Cell<Id> = const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+
+/// The context `thread` draws through while another thread holds the SDL one.
+///
+/// Made once per thread and kept, sharing a group with the SDL context - see
+/// [`Shared`]. Vertex arrays and framebuffers are the objects OpenGL does *not*
+/// share, so a program that makes one on the thread that sets the renderer up
+/// and binds it on the thread that draws is one this cannot serve; that program
+/// draws nothing rather than being told why, which is why the split is written
+/// down here.
+/// Said once, because the fallback is per-frame and the reason is not.
+fn warn_about_the_fallback() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        eprintln!(
+            "rosetta3: appkit: a thread asked for a GL context another thread has held since \
+             before it reached its event loop, so this one draws through a context sharing its \
+             objects instead - vertex arrays, framebuffers and queries the other thread made are \
+             not visible through it"
+        );
+    });
+}
+
+fn sibling(
+    state: &mut Shared,
+    primary: sdl3::GlContext,
+    thread: std::thread::ThreadId,
+) -> sdl3::GlContext {
+    if let Some(&(_, existing)) = state.siblings.iter().find(|(t, _)| *t == thread) {
+        return existing;
+    }
+    if !state.egl {
+        objc::fail!(
+            "-[NSOpenGLContext makeCurrentContext]: this context is current on another thread, \
+             and this SDL's OpenGL is not one a second context can be made to share with"
+        );
+    }
+    match sdl3::video::egl::create_shared(primary, state.version) {
+        Ok(sibling) => {
+            state.siblings.push((thread, sibling));
+            sibling
+        }
+        Err(why) => objc::fail!(
+            "-[NSOpenGLContext makeCurrentContext]: this context is current on another thread, \
+             and a second one sharing its objects could not be made: {why}"
+        ),
+    }
+}
+
+/// How long a thread waits for the context another thread holds before drawing
+/// through a sibling instead.
+///
+/// Long enough for a main thread that has just started a render thread to reach
+/// its event loop, which is a matter of milliseconds, and short enough that a
+/// program whose main thread never gets there is slow to start rather than
+/// hung.
+const HANDOFF: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Give up the SDL context if this thread holds it and another is waiting.
+///
+/// Called from the event pump, which is the one place a thread is known *not*
+/// to be part-way through drawing: it has returned to its event loop, so a
+/// context still current from its setup is one it has finished with. AppKit
+/// would leave it current there forever and let the program serialise the two
+/// threads itself, which is a thing the GL underneath has no call for - so the
+/// handover has to happen somewhere, and this is the somewhere that is safe.
+pub fn release_for_other_threads() {
+    let receiver = CURRENT.get();
+    if receiver.is_null() {
+        return;
+    }
+    let cell = shared_of(context_of(receiver));
+    let mut state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
+    if !state.wanted || state.owner != Some(std::thread::current().id()) {
+        return;
+    }
+    sdl3::video::gl_make_current(std::ptr::null_mut(), std::ptr::null_mut());
+    state.owner = None;
+    state.wanted = false;
+    CURRENT.set(std::ptr::null_mut());
+    cell.released.notify_all();
+}
 
 unsafe extern "C" fn make_current_context(receiver: Id, _sel: Sel) {
     let window = ensure(receiver, "makeCurrentContext");
     let context = context_of(receiver);
-    if !sdl3::video::gl_make_current(window, context.sdl) {
+    let primary = context.sdl;
+    let thread = std::thread::current().id();
+    let cell = shared_of(context);
+    let mut state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Another thread holds it, on a GL where that is a refusal rather than the
+    // program's own business to serialise. Ask, and wait: the objects a program
+    // makes on the thread it sets its renderer up on are only *some* of them
+    // shared, so the context itself is worth waiting for and a sibling is the
+    // fallback rather than the answer.
+    if state.egl && state.owner.is_some_and(|owner| owner != thread) {
+        state.wanted = true;
+        let (guard, wait) = cell
+            .released
+            .wait_timeout_while(state, HANDOFF, |state| {
+                state.owner.is_some_and(|owner| owner != thread)
+            })
+            .unwrap_or_else(|e| e.into_inner());
+        state = guard;
+        if wait.timed_out() {
+            state.wanted = false;
+            warn_about_the_fallback();
+        }
+    }
+
+    // Where a context *can* be current on several threads at once - CGL can,
+    // which is the contract AppKit's own is written against - none of the above
+    // applies and every thread simply gets the context SDL made.
+    let holds_primary = !state.egl || state.owner.is_none_or(|owner| owner == thread);
+    let sdl = match holds_primary {
+        true => primary,
+        false => sibling(&mut state, primary, thread),
+    };
+
+    if !sdl3::video::gl_make_current(window, sdl) {
         objc::fail!(
             "-[NSOpenGLContext makeCurrentContext]: SDL could not make the context current: {}",
             sdl3::error()
         );
     }
-    CURRENT.store(receiver as usize, std::sync::atomic::Ordering::Release);
+
+    if holds_primary {
+        state.owner = Some(thread);
+        // Read off the context now that it is current, which is the only place
+        // either answer can be had: the version is what a sibling has to be
+        // asked for, and whether SDL's handle is the EGL one is what says a
+        // sibling can be made at all.
+        if !state.probed {
+            state.probed = true;
+            state.version = sdl3::video::gl_current_version();
+            state.egl = sdl3::video::egl::backs(primary);
+            install_debug_output();
+        }
+    }
+    drop(state);
+
+    CURRENT.set(receiver);
     if context.cgl.is_null() {
         context.cgl = current_cgl_context();
+    }
+}
+
+/// `ROSETTA3_GL_DEBUG`: report every message the GL driver has about the calls
+/// the guest makes.
+///
+/// A guest checks `glGetError` where it thinks an error is likely, which is
+/// almost never where one happens - so its own log says an error arrived at the
+/// next call it bothered to check, naming a function that did nothing wrong.
+/// `KHR_debug` says which call, and often why, in the driver's own words.
+fn install_debug_output() {
+    if std::env::var_os("ROSETTA3_GL_DEBUG").is_none() {
+        return;
+    }
+    const DEBUG_OUTPUT: u32 = 0x92E0;
+    const DEBUG_OUTPUT_SYNCHRONOUS: u32 = 0x8242;
+    const DONT_CARE: u32 = 0x1100;
+
+    /// `GLDEBUGPROC`. The lengths are the driver's and the message is not NUL
+    /// terminated, so it is read by length.
+    unsafe extern "C" fn report(
+        _source: u32,
+        _kind: u32,
+        id: u32,
+        severity: u32,
+        length: i32,
+        message: *const std::ffi::c_char,
+        _user: *mut c_void,
+    ) {
+        let text = match message.is_null() || length < 0 {
+            true => String::new(),
+            // SAFETY: the driver's buffer and the length it just gave for it.
+            false => unsafe {
+                String::from_utf8_lossy(std::slice::from_raw_parts(
+                    message as *const u8,
+                    length as usize,
+                ))
+                .into_owned()
+            },
+        };
+        eprintln!("rosetta3: gl: [{severity:#x}/{id}] {}", text.trim_end());
+    }
+
+    let (Some(callback), Some(enable)) = (
+        sdl3::video::gl_proc_address(c"glDebugMessageCallback"),
+        sdl3::video::gl_proc_address(c"glEnable"),
+    ) else {
+        eprintln!("rosetta3: gl: this driver has no KHR_debug, so ROSETTA3_GL_DEBUG says nothing");
+        return;
+    };
+    // SAFETY: `void glEnable(GLenum)`.
+    let enable: unsafe extern "C" fn(u32) = unsafe { std::mem::transmute(enable) };
+    // SAFETY: `void glDebugMessageCallback(GLDEBUGPROC, const void *)`.
+    let set: unsafe extern "C" fn(
+        unsafe extern "C" fn(u32, u32, u32, u32, i32, *const std::ffi::c_char, *mut c_void),
+        *mut c_void,
+    ) = unsafe { std::mem::transmute(callback) };
+    // Synchronous, so the message arrives while the call that caused it is
+    // still on the stack and a breakpoint here names it.
+    // SAFETY: two GL enumerators and a callback of the declared shape.
+    unsafe {
+        enable(DEBUG_OUTPUT);
+        enable(DEBUG_OUTPUT_SYNCHRONOUS);
+        set(report, std::ptr::null_mut());
+    }
+    if let Some(control) = sdl3::video::gl_proc_address(c"glDebugMessageControl") {
+        // SAFETY: `void glDebugMessageControl(GLenum, GLenum, GLenum, GLsizei,
+        // const GLuint *, GLboolean)`.
+        let control: unsafe extern "C" fn(u32, u32, u32, i32, *const u32, u8) =
+            unsafe { std::mem::transmute(control) };
+        // Everything: the point of asking is not knowing what to ask about.
+        // SAFETY: three "don't care" enumerators and an empty id list.
+        unsafe { control(DONT_CARE, DONT_CARE, DONT_CARE, 0, std::ptr::null(), 1) };
     }
 }
 
@@ -446,12 +726,25 @@ unsafe extern "C" fn cgl_context(receiver: Id, sel: Sel) -> *mut c_void {
 }
 
 unsafe extern "C" fn current_context(_class: Id, _sel: Sel) -> Id {
-    CURRENT.load(std::sync::atomic::Ordering::Acquire) as Id
+    CURRENT.get()
 }
 
 unsafe extern "C" fn clear_current_context(_class: Id, _sel: Sel) {
     sdl3::video::gl_make_current(std::ptr::null_mut(), std::ptr::null_mut());
-    CURRENT.store(0, std::sync::atomic::Ordering::Release);
+    let receiver = CURRENT.replace(std::ptr::null_mut());
+    if receiver.is_null() {
+        return;
+    }
+    // Letting go of the SDL context hands it to whichever thread asks next,
+    // rather than leaving every later thread on a sibling of a context nobody
+    // holds.
+    let cell = shared_of(context_of(receiver));
+    let mut state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
+    if state.owner == Some(std::thread::current().id()) {
+        state.owner = None;
+        state.wanted = false;
+        cell.released.notify_all();
+    }
 }
 
 /// `-flushBuffer`: the swap that puts a frame on the screen.

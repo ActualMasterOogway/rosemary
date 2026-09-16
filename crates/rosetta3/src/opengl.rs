@@ -98,6 +98,11 @@ fn resolve(symbol: &str) -> Option<Resolved> {
 }
 
 fn address(name: &str) -> Option<u64> {
+    // A few entry points are this runtime's rather than the driver's, because
+    // what passes through them needs changing on the way. See [`crate::glsl`].
+    if let Some(ours) = crate::glsl::address(name) {
+        return Some(ours);
+    }
     let c = CString::new(name).ok()?;
     // GLU is not the driver's. It is a client-side library layered on GL, which
     // SDL does not load and whose names `SDL_GL_GetProcAddress` therefore does

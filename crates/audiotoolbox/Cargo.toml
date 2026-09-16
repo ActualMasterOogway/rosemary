@@ -4,3 +4,6 @@ description = "Reimplementation of AudioToolbox on top of SDL3 and cross-platfor
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+coreaudio.workspace = true

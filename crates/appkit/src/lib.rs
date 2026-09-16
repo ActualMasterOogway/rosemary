@@ -16,6 +16,7 @@ pub mod alert;
 pub mod appearance;
 pub mod application;
 pub mod button;
+pub mod cgevent;
 pub mod classes;
 pub mod color;
 pub mod coretext;
@@ -71,6 +72,7 @@ pub fn bootstrap() {
         layer::install();
         text::install();
         opengl::install();
+        darwin::idle::on_idle(opengl::release_for_other_threads);
         responder::install();
         pasteboard::install();
         nsevent::install();
@@ -130,6 +132,11 @@ pub fn symbol(name: &str) -> Option<u64> {
             at!(screen::CGAssociateMouseAndMouseCursorPosition)
         }
         "CGEventSourceKeyState" => at!(screen::CGEventSourceKeyState),
+        "CGEventCreate" => at!(cgevent::CGEventCreate),
+        "CGEventGetLocation" => at!(cgevent::CGEventGetLocation),
+        "CGEventCreateMouseEvent" => at!(cgevent::CGEventCreateMouseEvent),
+        "CGEventSetType" => at!(cgevent::CGEventSetType),
+        "CGEventPost" => at!(cgevent::CGEventPost),
         "CGColorSpaceCreateWithName" => at!(graphics::CGColorSpaceCreateWithName),
         "CGColorSpaceCreateDeviceRGB" => at!(graphics::CGColorSpaceCreateDeviceRGB),
         "CGColorSpaceRelease" => at!(graphics::CGColorSpaceRelease),
@@ -227,6 +234,11 @@ pub const NAMES: &[&str] = &[
     "CGWarpMouseCursorPosition",
     "CGAssociateMouseAndMouseCursorPosition",
     "CGEventSourceKeyState",
+    "CGEventCreate",
+    "CGEventGetLocation",
+    "CGEventCreateMouseEvent",
+    "CGEventSetType",
+    "CGEventPost",
     "CGColorSpaceCreateWithName",
     "CGColorSpaceCreateDeviceRGB",
     "CGColorSpaceRelease",
