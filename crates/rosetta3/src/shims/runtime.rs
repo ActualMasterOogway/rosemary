@@ -207,7 +207,7 @@ pub fn provider() -> SyntheticDylib {
     // selected, and the native backend is where a real host unwind happens.
     lib.define_fn(
         "__dyld_find_unwind_sections",
-        crate::dyld::find_unwind_sections_natively as *const (),
+        crate::dyld::entry::dyld_find_unwind_sections as *const (),
     );
     // Under high-level emulation the guest's Mach task *is* this process's. The
     // address, not the value.

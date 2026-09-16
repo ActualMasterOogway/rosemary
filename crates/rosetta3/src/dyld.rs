@@ -18,9 +18,6 @@ use machish::resolve::SyntheticDylib;
 use machish::spec::MachSpec;
 use machish::spec::arch::X86_64;
 
-use microlift::arch::x86_64::context::RegisterContext;
-
-use crate::abi::{AbiError, GuestMemory, Result};
 use crate::program::{AddrMap, HostProviders, ImportSite};
 
 /// An image this runtime loaded on the guest's behalf.
@@ -441,51 +438,6 @@ fn indexed_image(index: u32) -> Option<(u64, u64, String)> {
 fn image_count() -> u32 {
     u32::from(MAIN_HEADER.load(Ordering::Acquire) != 0)
         .saturating_add(IMAGE_COUNT.load(Ordering::Acquire) as u32)
-}
-
-fn image_count_shim(
-    _symbol: &str,
-    ctx: &mut RegisterContext,
-    _mem: &mut dyn GuestMemory,
-) -> Result<()> {
-    ctx.rax = image_count() as u64;
-    Ok(())
-}
-
-fn image_header_shim(
-    _symbol: &str,
-    ctx: &mut RegisterContext,
-    _mem: &mut dyn GuestMemory,
-) -> Result<()> {
-    ctx.rax = indexed_image(ctx.rdi as u32).map_or(0, |(header, _, _)| header);
-    Ok(())
-}
-
-fn image_slide_shim(
-    _symbol: &str,
-    ctx: &mut RegisterContext,
-    _mem: &mut dyn GuestMemory,
-) -> Result<()> {
-    ctx.rax = indexed_image(ctx.rdi as u32).map_or(0, |(_, slide, _)| slide);
-    Ok(())
-}
-
-fn image_name_shim(
-    _symbol: &str,
-    ctx: &mut RegisterContext,
-    _mem: &mut dyn GuestMemory,
-) -> Result<()> {
-    ctx.rax = indexed_image(ctx.rdi as u32).map_or(0, |(_, _, path)| path_cstr(&path));
-    Ok(())
-}
-
-fn image_containing_shim(
-    _symbol: &str,
-    ctx: &mut RegisterContext,
-    _mem: &mut dyn GuestMemory,
-) -> Result<()> {
-    ctx.rax = guest_image_at(ctx.rdi).map_or(0, |(header, _)| header);
-    Ok(())
 }
 
 /// The main executable's `mach_header` as the guest can address it.
@@ -1219,7 +1171,8 @@ pub fn native_symbol_at(host: u64) -> Option<&'static ImportSite> {
         .map(|i| view[i].1)
 }
 
-/// The `add image` callbacks the guest has registered, as **thunks**.
+/// The `add image` callbacks the guest has registered, as native-callable
+/// addresses.
 static ADD_IMAGE: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
 /// Tell one callback about one image.
@@ -1232,9 +1185,8 @@ fn notify(thunk: u64, header: u64, slide: u64) {
     if crate::shims::vmmap::tracing() {
         eprintln!("rosetta3: add-image notice: header {header:#x}, slide {slide:#x}");
     }
-    // SAFETY: `thunk` is a native arm64 trampoline this runtime compiled for a
-    // guest function of dyld's callback signature - two integer arguments, no
-    // return - which is inside the shape [`crate::thunk`] can carry.
+    // SAFETY: `thunk` is native code of dyld's callback signature - the guest's
+    // own function, or a [`crate::thunk`] standing for it.
     let f: extern "C" fn(u64, u64) = unsafe { std::mem::transmute::<u64, _>(thunk) };
     f(header, slide);
 }
@@ -1247,288 +1199,12 @@ fn announce(header: u64, slide: u64) {
     }
 }
 
-/// `void _dyld_register_func_for_add_image(void (*f)(const struct mach_header *,
-/// intptr_t))`
-///
-/// ## Scope
-///
-/// The images this runtime *maps* are reported.
-fn register_func_for_add_image(
-    symbol: &str,
-    ctx: &mut RegisterContext,
-    _mem: &mut dyn GuestMemory,
-    callbacks: &dyn crate::abi::Callbacks,
-) -> Result<()> {
-    let thunk = match ctx.rdi {
-        0 => return Ok(()),
-        va => callbacks.substitute(symbol, va)?,
-    };
-
-    // Registered before the retrospective notices go out, so an image loaded by
-    // one of those notices - an initializer that `dlopen`s, which is exactly
-    // what a plugin host does - is announced rather than missed.
-    ADD_IMAGE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(thunk);
-
-    let mut already: Vec<(u64, u64)> = Vec::new();
-    if let Some((_, slide)) = EXECUTABLE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
-        already.push((MAIN_HEADER.load(Ordering::Acquire), slide));
-    }
-    already.extend(snapshot().iter().map(|i| (i.handle, i.slide)));
-    for (header, slide) in already {
-        notify(thunk, header, slide);
-    }
-    Ok(())
-}
-
-/// `void _dyld_register_func_for_remove_image(...)`
-///
-/// Recorded and never called, because nothing is ever unloaded - see the scope note on
-/// `dlclose`. Accepting it is honest in a way refusing would not be.
-fn register_func_for_remove_image(
-    _symbol: &str,
-    _ctx: &mut RegisterContext,
-    _mem: &mut dyn GuestMemory,
-    _callbacks: &dyn crate::abi::Callbacks,
-) -> Result<()> {
-    Ok(())
-}
-
-/// Whether `name` is one of this module's callback-taking shims.
-///
-pub fn shim_for_callbacks(name: &str) -> Option<crate::signal::Shim> {
-    Some(match name {
-        "_dyld_register_func_for_add_image" => register_func_for_add_image,
-        "_dyld_register_func_for_remove_image" => register_func_for_remove_image,
-        _ => return None,
-    })
-}
-
 fn set_error(message: String) {
     *ERROR.lock().unwrap_or_else(|e| e.into_inner()) = CString::new(message).ok();
 }
 
 fn clear_error() {
     *ERROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
-}
-
-/// Whether `name` (underscore already stripped) is one of this module's.
-pub fn shim_for(name: &str) -> Option<crate::jmpbuf::Shim> {
-    matches!(
-        name,
-        "dlopen"
-            | "dlsym"
-            | "dlclose"
-            | "dlerror"
-            | "dladdr"
-            | "_dyld_image_count"
-            | "_dyld_get_image_header"
-            | "_dyld_get_image_vmaddr_slide"
-            | "_dyld_get_image_name"
-            | "_dyld_image_containing_address"
-            | "_dyld_find_unwind_sections"
-            | "getsegbyname"
-            | "getsectbyname"
-    )
-    .then_some(
-        |symbol, ctx, mem| match symbol.strip_prefix('_').unwrap_or(symbol) {
-            "dyld_image_count" => image_count_shim(symbol, ctx, mem),
-            "dyld_get_image_header" => image_header_shim(symbol, ctx, mem),
-            "dyld_get_image_vmaddr_slide" => image_slide_shim(symbol, ctx, mem),
-            "dyld_get_image_name" => image_name_shim(symbol, ctx, mem),
-            "dyld_image_containing_address" => image_containing_shim(symbol, ctx, mem),
-            _ => serve(symbol, ctx, mem),
-        },
-    )
-}
-
-fn serve(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
-    match symbol.strip_prefix('_').unwrap_or(symbol) {
-        "dlopen" => dlopen(symbol, ctx, mem),
-        "dlsym" => dlsym(symbol, ctx, mem),
-        "dlclose" => {
-            // No unloading; see the scope note. Zero is success, which is the
-            // honest answer.
-            clear_error();
-            ctx.rax = 0;
-            Ok(())
-        }
-        "dladdr" => dladdr(symbol, ctx, mem),
-        "getsegbyname" => {
-            let name = mem.read_cstr(ctx.rdi, symbol)?;
-            ctx.rax = load_command_in(MAIN_HEADER.load(Ordering::Acquire), &name, None);
-            Ok(())
-        }
-        "getsectbyname" => {
-            let segment = mem.read_cstr(ctx.rdi, symbol)?;
-            let section = mem.read_cstr(ctx.rsi, symbol)?;
-            ctx.rax = load_command_in(
-                MAIN_HEADER.load(Ordering::Acquire),
-                &segment,
-                Some(&section),
-            );
-            Ok(())
-        }
-        // Spelled with one fewer underscore than [`shim_for`] matches on.
-        "dyld_find_unwind_sections" => find_unwind_sections(symbol, ctx, mem),
-        "dlerror" => {
-            let taken = ERROR.lock().unwrap_or_else(|e| e.into_inner()).take();
-            let mut reported = REPORTED.lock().unwrap_or_else(|e| e.into_inner());
-            *reported = taken;
-            ctx.rax = reported.as_ref().map_or(0, |s| s.as_ptr() as usize as u64);
-            Ok(())
-        }
-        other => Err(AbiError::NoShim {
-            symbol: other.to_string(),
-        }),
-    }
-}
-
-fn dlopen(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
-    if ctx.rdi == 0 {
-        clear_error();
-        ctx.rax = global_handle();
-        return Ok(());
-    }
-    let path = mem.read_cstr(ctx.rdi, symbol)?;
-    let path = String::from_utf8_lossy(&path).into_owned();
-    if crate::shims::vmmap::tracing() {
-        eprintln!("rosetta3: dlopen({path:?}, flags {:#x})", ctx.rsi as i32);
-    }
-    match open(&path) {
-        Ok(handle) => {
-            clear_error();
-            ctx.rax = handle;
-        }
-        // No x86-64 Mach-O on disk under that name.
-        Err(reason) => match open_native(&path) {
-            Some(handle) => {
-                clear_error();
-                ctx.rax = handle;
-            }
-            None => {
-                set_error(format!("dlopen({path}): {reason}"));
-                ctx.rax = 0;
-            }
-        },
-    }
-    Ok(())
-}
-
-fn dlsym(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
-    let name = mem.read_cstr(ctx.rsi, symbol)?;
-    let name = String::from_utf8_lossy(&name).into_owned();
-    match lookup(ctx.rdi, &name) {
-        Some(addr) => {
-            clear_error();
-            ctx.rax = addr;
-        }
-        None => {
-            // Under the trace only. A `dlsym` that comes back null is how a
-            // program *asks* whether something is there, and a guest doing it
-            // once a frame would otherwise bury everything else on stderr. The
-            // message is still in `dlerror`, which is where a caller looks.
-            let err = format!("dlsym({name}): symbol not found");
-            if crate::shims::vmmap::tracing() {
-                eprintln!("rosetta3: {err}");
-            }
-            set_error(err);
-            ctx.rax = 0;
-        }
-    }
-    Ok(())
-}
-
-/// `int dladdr(const void *addr, Dl_info *info)`
-///
-/// The host's cannot answer this one at all for the addresses that matter.
-fn dladdr(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
-    let (addr, info) = (ctx.rdi, ctx.rsi);
-    let Some(found) = describe(addr) else {
-        // Not ours. The host knows its own images, and this is exactly the
-        // question it can answer.
-        let Some(host) = crate::host::symbol("dladdr") else {
-            ctx.rax = 0;
-            return Ok(());
-        };
-        // SAFETY: `dladdr` is `int (const void *, Dl_info *)`, and `info` is a
-        // guest address - which is a real address in this process, since the
-        // guest is identity-mapped. The host writes 32 bytes there, which is
-        // what the guest allocated.
-        let f: extern "C" fn(u64, u64) -> i32 =
-            unsafe { core::mem::transmute::<u64, extern "C" fn(u64, u64) -> i32>(host) };
-        crate::shims::set_int_return(ctx, f(addr, info));
-        return Ok(());
-    };
-    if info == 0 {
-        ctx.rax = 0;
-        return Ok(());
-    }
-    let mut words = [0u8; 32];
-    words[0..8].copy_from_slice(&found.fname.to_le_bytes());
-    words[8..16].copy_from_slice(&found.fbase.to_le_bytes());
-    words[16..24].copy_from_slice(&found.sname.to_le_bytes());
-    words[24..32].copy_from_slice(&found.saddr.to_le_bytes());
-    mem.write_bytes(info, &words, symbol)?;
-    // Non-zero on success, unlike almost everything else in `<dlfcn.h>`.
-    crate::shims::set_int_return(ctx, 1);
-    Ok(())
-}
-
-/// `bool _dyld_find_unwind_sections(void *addr, struct dyld_unwind_sections *)`
-///
-/// ## The structure, read out of the caller
-///
-/// `dyld_priv.h` is not in any SDK on this system, so the layout comes from the
-/// vendored `libunwind` that calls it - the same method [`crate::abi::table`]'s
-/// `KBGetLayoutType` entry uses, and the same one this project uses to decide which
-/// bytes are code:
-///
-/// ```text
-/// leaq -0x300(%rbp), %rsi   ; the structure
-/// callq __dyld_find_unwind_sections
-/// testb %al, %al            ; bool, in al
-/// movq -0x300(%rbp), ...    ; +0x00  mach_header *
-/// movq -0x2f8(%rbp), ...    ; +0x08  dwarf_section
-/// movq -0x2f0(%rbp), ...    ; +0x10  dwarf_section_length
-/// movq -0x2e8(%rbp), ...    ; +0x18  compact_unwind_section
-/// movq -0x2e0(%rbp), ...    ; +0x20  compact_unwind_section_length
-/// ```
-///
-/// ## Where the section bounds come from
-///
-/// The guest's own `mach_header`, walked by the **host's** libmacho.
-fn find_unwind_sections(
-    symbol: &str,
-    ctx: &mut RegisterContext,
-    mem: &mut dyn GuestMemory,
-) -> Result<()> {
-    let (addr, out) = (ctx.rdi, ctx.rsi);
-    let Some(words) = unwind_sections_of(addr) else {
-        // Not ours.
-        let Some(host) = crate::host::symbol("_dyld_find_unwind_sections") else {
-            crate::shims::set_int_return(ctx, 0);
-            return Ok(());
-        };
-        // SAFETY: `bool (*)(void *, struct dyld_unwind_sections *)`, and `out`
-        // is a guest address, which is a real address in this process. The host
-        // writes forty bytes there, which is what the guest reserved.
-        let f: extern "C" fn(u64, u64) -> bool =
-            unsafe { core::mem::transmute::<u64, extern "C" fn(u64, u64) -> bool>(host) };
-        crate::shims::set_int_return(ctx, i32::from(f(addr, out)));
-        return Ok(());
-    };
-    if out == 0 {
-        crate::shims::set_int_return(ctx, 0);
-        return Ok(());
-    }
-    mem.write_bytes(out, &words, symbol)?;
-    // True even when both sections are absent, which is a real answer rather
-    // than a failure.
-    crate::shims::set_int_return(ctx, 1);
-    Ok(())
 }
 
 /// The `dyld_unwind_sections` this runtime fills in for one of its own images.
@@ -1547,44 +1223,6 @@ fn unwind_sections_of(addr: u64) -> Option<[u8; 40]> {
         words[base + 8..base + 16].copy_from_slice(&len.to_le_bytes());
     }
     Some(words)
-}
-
-/// `_dyld_find_unwind_sections`, as the native backend's guest calls it: a plain
-/// host call, with no register context to read the arguments out of.
-///
-/// The vendored `libunwind` asks this for every frame it walks, and Apple's
-/// answers only for images dyld itself mapped - so under `native` every guest
-/// frame looked like it had no unwind info, and a `throw` reached `terminate`
-/// with no handler found. See [`MAPPED`].
-///
-/// # Safety
-///
-/// Called only through an import slot [`crate::shims::runtime::provider`]
-/// defines, with the two arguments the declaration gives it.
-pub unsafe extern "C" fn find_unwind_sections_natively(
-    addr: *const core::ffi::c_void,
-    out: *mut u8,
-) -> bool {
-    let addr = addr as usize as u64;
-    let Some(words) = unwind_sections_of(addr) else {
-        let Some(host) = crate::host::symbol("_dyld_find_unwind_sections") else {
-            return false;
-        };
-        // SAFETY: `bool (*)(void *, struct dyld_unwind_sections *)`. The host
-        // writes forty bytes at `out`, which is what the caller reserved.
-        let f: extern "C" fn(u64, *mut u8) -> bool =
-            unsafe { core::mem::transmute::<u64, extern "C" fn(u64, *mut u8) -> bool>(host) };
-        return f(addr, out);
-    };
-    if out.is_null() {
-        return false;
-    }
-    // SAFETY: the caller reserved a `struct dyld_unwind_sections`, whose forty
-    // bytes are the five words written here.
-    unsafe { core::ptr::copy_nonoverlapping(words.as_ptr(), out, words.len()) };
-    // True even when both sections are absent, which is a real answer rather
-    // than a failure.
-    true
 }
 
 /// `(mach_header VA, slide)` for the guest image containing `va`.
@@ -1834,24 +1472,20 @@ fn symbol_cstr(name: &str) -> u64 {
     interned(name.strip_prefix('_').unwrap_or(name))
 }
 
-/// The `dl` family as ordinary functions, for a guest nothing intercepts.
+/// The `dyld` family, one implementation for both backends.
 ///
-/// Under the emulated backend every one of these is answered by [`shim_for`]
-/// before the address in an import slot is ever used, which is why this module
-/// could publish the host's own and say they are never called. A native guest
-/// calls the slot directly, and there the host's are wrong twice over.
-mod entry {
+/// A native guest calls these through its import slots. The emulated backend
+/// reaches the same functions through the ABI table, so every signature here
+/// has a row there - and `dlopen`/`dlclose` are marked as reentering the guest,
+/// because initializers and terminators run inside them and an inlined call
+/// cannot host that.
+pub(crate) mod entry {
     use std::ffi::{CStr, c_char, c_void};
 
-    // ## The image-list calls, for the native backend
-    //
-    // The emulated backend reaches these through a shim; the native one calls
-    // whatever the slot holds. On a Mac the slot holds dyld's own - which is
-    // wrong, because dyld never saw the images this runtime mapped, but at
-    // least answers - and off it the host exports nothing at all, so the slot
-    // is zero and a program that asks how many images it has calls address
-    // zero. Rust's own standard library asks, which is how the crash handler
-    // stub found this.
+    use super::Ordering;
+
+    // A guest pointer is a host pointer under both backends: the emulated
+    // guest is identity-mapped.
 
     /// `uint32_t _dyld_image_count(void)`
     pub extern "C" fn dyld_image_count() -> u32 {
@@ -1878,18 +1512,117 @@ mod entry {
         super::guest_image_at(va).map_or(0, |(header, _)| header)
     }
 
-    /// `void *dlopen(const char *path, int mode)`
+    /// `void _dyld_register_func_for_add_image(void (*)(const struct mach_header *,
+    /// intptr_t))`
     ///
-    /// The mode is ignored, as the emulated shim ignores it: nothing here is
-    /// ever unloaded and every image is global, so `RTLD_LAZY`/`RTLD_NOW` and
-    /// `RTLD_LOCAL`/`RTLD_GLOBAL` describe a choice this runtime does not have.
-    /// That also sidesteps the flag values, which are not the host's either -
-    /// Darwin's `RTLD_GLOBAL` is `8`, and `8` under glibc is `RTLD_DEEPBIND`.
+    /// `f` is native code: a thunk under emulation, since the table names it as a
+    /// callback.
+    pub extern "C" fn dyld_register_func_for_add_image(f: u64) {
+        if f == 0 {
+            return;
+        }
+        // Registered before the retrospective notices, so an image one of them
+        // loads is announced rather than missed.
+        super::ADD_IMAGE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(f);
+
+        let mut already: Vec<(u64, u64)> = Vec::new();
+        if let Some((_, slide)) = super::EXECUTABLE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            already.push((super::MAIN_HEADER.load(Ordering::Acquire), slide));
+        }
+        already.extend(super::snapshot().iter().map(|i| (i.handle, i.slide)));
+        for (header, slide) in already {
+            super::notify(f, header, slide);
+        }
+    }
+
+    /// `void _dyld_register_func_for_remove_image(...)`. Accepted and never
+    /// called, because nothing is ever unloaded.
+    pub extern "C" fn dyld_register_func_for_remove_image(_f: u64) {}
+
+    /// `bool _dyld_find_unwind_sections(void *addr, struct dyld_unwind_sections *)`
+    ///
+    /// dyld answers only for images it mapped, so without this every guest frame
+    /// has no unwind info and a `throw` reaches `terminate`. The layout, read out
+    /// of the vendored `libunwind`: five words - `mach_header *`, then address
+    /// and length of `__eh_frame` and of `__unwind_info`.
     ///
     /// # Safety
     ///
-    /// `path` is null or NUL-terminated, as `dlopen`'s contract requires.
-    pub unsafe extern "C" fn dlopen(path: *const c_char, _mode: i32) -> *mut c_void {
+    /// `out` is null or forty writable bytes.
+    pub unsafe extern "C" fn dyld_find_unwind_sections(addr: *const c_void, out: *mut u8) -> bool {
+        let addr = addr as usize as u64;
+        let Some(words) = super::unwind_sections_of(addr) else {
+            let Some(host) = crate::host::symbol("_dyld_find_unwind_sections") else {
+                return false;
+            };
+            // SAFETY: `bool (*)(void *, struct dyld_unwind_sections *)`, with the
+            // caller's own arguments.
+            let f: unsafe extern "C" fn(u64, *mut u8) -> bool =
+                unsafe { core::mem::transmute(host as usize as *const ()) };
+            return unsafe { f(addr, out) };
+        };
+        if out.is_null() {
+            return false;
+        }
+        // SAFETY: the caller reserved the forty bytes written here.
+        unsafe { core::ptr::copy_nonoverlapping(words.as_ptr(), out, words.len()) };
+        // True even when both sections are absent: that is an answer.
+        true
+    }
+
+    /// `const struct segment_command_64 *getsegbyname(const char *)`, over the
+    /// guest's main image rather than this process's.
+    ///
+    /// # Safety
+    ///
+    /// `segment` is NUL-terminated.
+    pub unsafe extern "C" fn getsegbyname(segment: *const c_char) -> u64 {
+        if segment.is_null() {
+            return 0;
+        }
+        // SAFETY: the caller states `segment` is NUL-terminated.
+        let segment = unsafe { CStr::from_ptr(segment) };
+        super::load_command_in(
+            super::MAIN_HEADER.load(Ordering::Acquire),
+            segment.to_bytes(),
+            None,
+        )
+    }
+
+    /// `const struct section_64 *getsectbyname(const char *, const char *)`
+    ///
+    /// # Safety
+    ///
+    /// Both names are NUL-terminated.
+    pub unsafe extern "C" fn getsectbyname(segment: *const c_char, section: *const c_char) -> u64 {
+        if segment.is_null() || section.is_null() {
+            return 0;
+        }
+        // SAFETY: the caller states both are NUL-terminated.
+        let (segment, section) = unsafe { (CStr::from_ptr(segment), CStr::from_ptr(section)) };
+        super::load_command_in(
+            super::MAIN_HEADER.load(Ordering::Acquire),
+            segment.to_bytes(),
+            Some(section.to_bytes()),
+        )
+    }
+
+    /// `void *dlopen(const char *path, int mode)`
+    ///
+    /// The mode is ignored: nothing is unloaded and every image is global. That
+    /// also sidesteps the flag values, which differ between Darwin and glibc.
+    ///
+    /// # Safety
+    ///
+    /// `path` is null or NUL-terminated.
+    pub unsafe extern "C" fn dlopen(path: *const c_char, mode: i32) -> *mut c_void {
         if path.is_null() {
             super::clear_error();
             return super::global_handle() as usize as *mut c_void;
@@ -1899,11 +1632,11 @@ mod entry {
             .to_string_lossy()
             .into_owned();
         if crate::shims::vmmap::tracing() {
-            eprintln!("rosetta3: dlopen({path:?})");
+            eprintln!("rosetta3: dlopen({path:?}, flags {mode:#x})");
         }
         let handle = match super::open(&path) {
             Ok(handle) => Some(handle),
-            // No x86-64 Mach-O on disk under that name.
+            // No Mach-O for this backend on disk under that name.
             Err(reason) => super::open_native(&path).or_else(|| {
                 super::set_error(format!("dlopen({path}): {reason}"));
                 None
@@ -1922,9 +1655,7 @@ mod entry {
     ///
     /// # Safety
     ///
-    /// `name` is NUL-terminated. `handle` is not dereferenced: it is either one
-    /// [`super::open`] handed out or a pseudo-handle, and [`super::lookup`]
-    /// treats everything it does not recognise as a global search.
+    /// `name` is NUL-terminated. `handle` is never dereferenced.
     pub unsafe extern "C" fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void {
         if name.is_null() {
             return std::ptr::null_mut();
@@ -1939,7 +1670,8 @@ mod entry {
                 addr as usize as *mut c_void
             }
             None => {
-                // Under the trace only; see the emulated shim for why.
+                // Traced only: a null `dlsym` is how a program asks whether
+                // something exists, sometimes once a frame.
                 let err = format!("dlsym({name}): symbol not found");
                 if crate::shims::vmmap::tracing() {
                     eprintln!("rosetta3: {err}");
@@ -1950,7 +1682,8 @@ mod entry {
         }
     }
 
-    /// `int dlclose(void *handle)`. Nothing is unloaded; see the module note.
+    /// `int dlclose(void *handle)`. Nothing is unloaded, so no terminator runs
+    /// yet; the table still marks it as reentering for when one does.
     pub extern "C" fn dlclose(_handle: *mut c_void) -> i32 {
         super::clear_error();
         0
@@ -1973,20 +1706,18 @@ mod entry {
     ///
     /// # Safety
     ///
-    /// `info` is null or a writable Darwin `Dl_info`: four pointers.
+    /// `info` is null or four writable words.
     pub unsafe extern "C" fn dladdr(addr: *const c_void, info: *mut u64) -> i32 {
         let addr = addr as usize as u64;
         let Some(found) = super::describe(addr) else {
-            // Not ours. The host knows its own images, and this is exactly the
-            // question it can answer.
+            // Not ours; the host knows its own images.
             let Some(host) = crate::host::symbol("dladdr") else {
                 return 0;
             };
-            // SAFETY: `dladdr` is `int (const void *, Dl_info *)`, and the
-            // guest's `Dl_info` is four pointers in the order glibc's is.
+            // SAFETY: `int (const void *, Dl_info *)`; Darwin's and glibc's
+            // `Dl_info` are the same four pointers.
             let f: unsafe extern "C" fn(u64, *mut u64) -> i32 =
                 unsafe { core::mem::transmute(host as usize as *const ()) };
-            // SAFETY: the caller's own arguments.
             return unsafe { f(addr, info) };
         };
         if info.is_null() {
@@ -1999,61 +1730,59 @@ mod entry {
             info.add(2).write(found.sname);
             info.add(3).write(found.saddr);
         }
-        // Non-zero on success, unlike almost everything else in `<dlfcn.h>`.
+        // Non-zero on success, unlike the rest of `<dlfcn.h>`.
         1
     }
 }
 
-/// The `dl` family, claimed ahead of the host's.
-pub fn provider() -> SyntheticDylib {
-    let mut lib = SyntheticDylib::new("<rosetta3 dyld>");
-    lib.flat(true);
-    // Implemented here, because the native backend really does call these.
-    for (name, f) in [
+/// Every name [`provider`] defines, and the function it binds to.
+fn entries() -> [(&'static str, *const ()); 14] {
+    [
         ("_dlopen", entry::dlopen as *const ()),
         ("_dlsym", entry::dlsym as *const ()),
         ("_dlclose", entry::dlclose as *const ()),
         ("_dlerror", entry::dlerror as *const ()),
         ("_dladdr", entry::dladdr as *const ()),
-    ] {
-        lib.define_fn(name, f);
-    }
-    // The image list. This module's own implementations, not the host's: dyld
-    // never saw the images this runtime mapped, so its answers describe the
-    // wrong process - and off a Mac there is no dyld to ask at all, which
-    // leaves the slot zero and the guest calling it.
-    for (name, f) in [
-        ("_dyld_image_count", entry::dyld_image_count as *const ()),
+        ("__dyld_image_count", entry::dyld_image_count as *const ()),
         (
-            "_dyld_get_image_header",
+            "__dyld_get_image_header",
             entry::dyld_get_image_header as *const (),
         ),
         (
-            "_dyld_get_image_vmaddr_slide",
+            "__dyld_get_image_vmaddr_slide",
             entry::dyld_get_image_vmaddr_slide as *const (),
         ),
         (
-            "_dyld_get_image_name",
+            "__dyld_get_image_name",
             entry::dyld_get_image_name as *const (),
         ),
         (
-            "_dyld_image_containing_address",
+            "__dyld_image_containing_address",
             entry::dyld_image_containing_address as *const (),
         ),
-    ] {
-        lib.define_fn(&format!("_{name}"), f);
-    }
-    for name in [
-        // Spelled with the underscore the C identifier already carries.
-        "_dyld_register_func_for_add_image",
-        "_dyld_register_func_for_remove_image",
-        // On `machish`'s `_dyld_` denylist like the two above, and the reason
-        // `tests/unwind.rs` has been red.
-        "_dyld_find_unwind_sections",
-    ] {
-        if let Some(addr) = crate::host::symbol(name) {
-            lib.define_fn(&format!("_{name}"), addr as usize as *const ());
-        }
+        (
+            "__dyld_register_func_for_add_image",
+            entry::dyld_register_func_for_add_image as *const (),
+        ),
+        (
+            "__dyld_register_func_for_remove_image",
+            entry::dyld_register_func_for_remove_image as *const (),
+        ),
+        ("_getsegbyname", entry::getsegbyname as *const ()),
+        ("_getsectbyname", entry::getsectbyname as *const ()),
+    ]
+}
+
+/// The `dyld` family, claimed ahead of the host's: dyld never saw the images
+/// this runtime mapped, and off a Mac there is no dyld at all.
+///
+/// `__dyld_find_unwind_sections` is [`crate::shims::runtime::provider`]'s,
+/// which is in the native chain even when this one is not.
+pub fn provider() -> SyntheticDylib {
+    let mut lib = SyntheticDylib::new("<rosetta3 dyld>");
+    lib.flat(true);
+    for (name, f) in entries() {
+        lib.define_fn(name, f);
     }
     lib
 }
@@ -2061,31 +1790,47 @@ pub fn provider() -> SyntheticDylib {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::abi::{Classification, Lookup};
 
     #[test]
-    fn every_name_the_provider_claims_is_one_this_module_serves() {
-        // Two lists that must agree.
-        use machish::resolve::SymbolProvider;
+    fn every_entry_has_a_signature_the_emulated_backend_can_call() {
         let mut claimed = Vec::new();
-        SymbolProvider::enumerate(&provider(), &mut |name, _| claimed.push(name.to_string()));
-        assert!(!claimed.is_empty(), "the provider defines nothing");
-        for name in claimed {
-            let bare = name.strip_prefix('_').unwrap_or(&name);
+        machish::resolve::SymbolProvider::enumerate(&provider(), &mut |name, _| {
+            claimed.push(name.to_string())
+        });
+        assert_eq!(claimed.len(), entries().len());
+        for name in claimed
+            .iter()
+            .map(String::as_str)
+            .chain(["__dyld_find_unwind_sections"])
+        {
             assert!(
-                shim_for(bare).is_some() || shim_for_callbacks(bare).is_some(),
-                "{name} is claimed and not served"
+                matches!(crate::abi::table::lookup(0, name), Lookup::Known(_)),
+                "{name} has no signature"
             );
-            assert!(
-                crate::shims::is_shimmed(&name),
-                "{name} would be promoted to an inlined host call"
+            assert!(!crate::shims::is_shimmed(name), "{name} is still shimmed");
+        }
+    }
+
+    #[test]
+    fn calls_that_run_guest_code_are_never_inlined() {
+        for name in [
+            "_dlopen",
+            "_dlclose",
+            "__dyld_register_func_for_add_image",
+            "__dyld_register_func_for_remove_image",
+        ] {
+            assert_eq!(
+                crate::abi::classify(0, name),
+                Classification::Slow,
+                "{name}"
             );
         }
     }
 
     #[test]
     fn the_global_handle_is_not_a_plausible_image_base() {
-        // It is compared against `Image::handle`, which is a mapped base
-        // address. A small integer would eventually be one.
+        // Compared against `Image::handle`, a mapped base address.
         assert!(global_handle() > 0x1000);
     }
 
@@ -2097,7 +1842,6 @@ mod tests {
 
     #[test]
     fn a_native_arm64_image_is_refused_by_name() {
-        // The mirror of the failure this module exists for.
         let host_dylib = "/usr/lib/libSystem.B.dylib";
         if std::path::Path::new(host_dylib).exists() {
             let err = open(host_dylib).unwrap_err();
@@ -2105,23 +1849,6 @@ mod tests {
                 err.contains("x86-64") || err.contains("no such file"),
                 "{err}"
             );
-        }
-    }
-
-    #[test]
-    fn guest_image_apis_are_shims_not_host_calls() {
-        for name in [
-            "__dyld_image_count",
-            "__dyld_get_image_header",
-            "__dyld_get_image_vmaddr_slide",
-            "__dyld_get_image_name",
-            "__dyld_image_containing_address",
-        ] {
-            assert!(
-                shim_for(name.strip_prefix('_').unwrap()).is_some(),
-                "{name}"
-            );
-            assert!(crate::shims::is_shimmed(name), "{name} may be inlined");
         }
     }
 }

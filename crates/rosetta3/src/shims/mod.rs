@@ -181,7 +181,6 @@ pub fn dispatch(
                 .or_else(|| vmmap::shim_for(name))
                 .or_else(|| crate::jmpbuf::shim_for(name))
                 // .or_else(|| crate::unwind::shim_for(name))
-                .or_else(|| crate::dyld::shim_for(name))
                 .or_else(|| platform_shim_for(name))
             {
                 return Some(f(name, ctx, mem));
@@ -190,7 +189,6 @@ pub fn dispatch(
             return crate::signal::shim_for(name)
                 .or_else(|| pthread::shim_for(name))
                 .or_else(|| block::shim_for(name))
-                .or_else(|| crate::dyld::shim_for_callbacks(name))
                 .or_else(|| atexit::shim_for(name))
                 .or_else(|| zlib::shim_for(name))
                 .or_else(|| curl::shim_for(name))
@@ -212,11 +210,9 @@ pub fn is_shimmed(symbol: &str) -> bool {
         || vmmap::shim_for(name).is_some()
         || crate::jmpbuf::shim_for(name).is_some()
         || crate::unwind::shim_for(name).is_some()
-        || crate::dyld::shim_for(name).is_some()
         || crate::signal::shim_for(name).is_some()
         || pthread::shim_for(name).is_some()
         || block::shim_for(name).is_some()
-        || crate::dyld::shim_for_callbacks(name).is_some()
         || atexit::shim_for(name).is_some()
         || zlib::shim_for(name).is_some()
         || curl::shim_for(name).is_some()

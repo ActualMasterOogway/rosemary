@@ -21,6 +21,10 @@ pub struct FunctionAbi {
     /// matters, because handing the host an x86-64 address it will call as arm64 is the
     /// failure mode host->guest thunks exist to prevent.
     pub callbacks: &'static [u8],
+    /// The call can run guest code other than through [`callbacks`](Self::callbacks):
+    /// `dlopen` running initializers. Never inlined, so the guest's state is synced
+    /// before the host re-enters it.
+    pub reenters_guest: bool,
 }
 
 impl FunctionAbi {
@@ -132,7 +136,7 @@ fn by_tag(_tag: u64) -> Option<&'static FunctionAbi> {
 /// `(ret, args...)`, in `DynamicSymbol` order.
 macro_rules! sig {
     ($name:literal, $ret:expr $(, $arg:expr)* $(,)?) => {
-        FunctionAbi { name: $name, types: &[$ret $(, $arg)*], variadic: false, callbacks: &[] }
+        FunctionAbi { name: $name, types: &[$ret $(, $arg)*], variadic: false, callbacks: &[], reenters_guest: false }
     };
 }
 
@@ -145,6 +149,7 @@ macro_rules! vsig {
             types: &[$ret $(, $arg)* , T::VariadicList],
             variadic: true,
             callbacks: &[],
+            reenters_guest: false,
         }
     };
 }
@@ -158,6 +163,21 @@ macro_rules! cbsig {
             types: &[$ret $(, $arg)*],
             variadic: false,
             callbacks: &[$($cb),*],
+            reenters_guest: false,
+        }
+    };
+}
+
+/// As [`sig`], for a function that can run guest code; see
+/// [`FunctionAbi::reenters_guest`].
+macro_rules! rsig {
+    ($name:literal, $ret:expr $(, $arg:expr)* $(,)?) => {
+        FunctionAbi {
+            name: $name,
+            types: &[$ret $(, $arg)*],
+            variadic: false,
+            callbacks: &[],
+            reenters_guest: true,
         }
     };
 }
@@ -1277,8 +1297,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // What `@available` / `__builtin_available` compiles to: `bool
     // _availability_version_check(uint32_t count, dyld_build_version_t *)`.
     sig!("_availability_version_check", BOOL, U32, P),
-    // Guest dyld image introspection is served by [`crate::dyld`], which knows
-    // the x86-64 executable and libraries this linker mapped.
+    // Served by [`crate::dyld::entry`] under both backends.
     sig!("_dyld_image_count", U32),
     sig!("_dyld_get_image_header", P, U32),
     sig!("_dyld_get_image_vmaddr_slide", U64, U32),
@@ -1286,6 +1305,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     cbsig!([0], "_dyld_register_func_for_add_image", V, P),
     cbsig!([0], "_dyld_register_func_for_remove_image", V, P),
     sig!("_dyld_get_image_name", P, U32),
+    sig!("_dyld_find_unwind_sections", BOOL, P, P),
     sig!("_exit", V, I32),
     // The Darwin spellings that skip the signal mask, imported as `__longjmp`
     // and `__setjmp`.
@@ -1462,9 +1482,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `Dl_info` is four pointers and nothing else, so the guest allocates one
     // and the host fills it in place.
     sig!("dladdr", I32, P, P),
-    sig!("dlclose", I32, P),
+    // Initializers run inside `dlopen`, terminators inside `dlclose`.
+    rsig!("dlclose", I32, P),
     sig!("dlerror", P),
-    sig!("dlopen", P, P, I32),
+    rsig!("dlopen", P, P, I32),
     sig!("dlsym", P, P, P),
     vsig!("dprintf", I32, I32, P),
     sig!("dup", I32, I32),
