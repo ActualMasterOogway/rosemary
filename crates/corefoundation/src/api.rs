@@ -355,6 +355,9 @@ pub unsafe extern "C" fn CFStringGetMaximumSizeForEncoding(
         string::encoding::UTF16 | string::encoding::UTF16_BE | string::encoding::UTF16_LE => {
             length * 2 + 2
         }
+        string::encoding::UTF32 | string::encoding::UTF32_BE | string::encoding::UTF32_LE => {
+            length * 4 + 4
+        }
         _ => length,
     }
 }
@@ -383,7 +386,10 @@ pub unsafe extern "C" fn CFStringGetCString(
         // byte is itself, and a non-ASCII one has no defined answer here.
         e if e == string::encoding::UTF16
             || e == string::encoding::UTF16_BE
-            || e == string::encoding::UTF16_LE =>
+            || e == string::encoding::UTF16_LE
+            || e == string::encoding::UTF32
+            || e == string::encoding::UTF32_BE
+            || e == string::encoding::UTF32_LE =>
         {
             return 0;
         }
@@ -476,6 +482,28 @@ pub unsafe extern "C" fn CFStringGetBytes(
                 }
             }
             (bytes, 2, 2 * mark as usize)
+        }
+        string::encoding::UTF32 | string::encoding::UTF32_BE | string::encoding::UTF32_LE => {
+            // Characters here are UTF-16 units, so a range may split a pair;
+            // the half is dropped rather than written as an invalid scalar.
+            let units = s.units();
+            if start > units.len() {
+                return 0;
+            }
+            let end = (start + length).min(units.len());
+            let mark = external_representation != 0 && encoding == string::encoding::UTF32;
+            let big_endian = encoding == string::encoding::UTF32_BE;
+            let scalars = char::decode_utf16(units[start..end].iter().copied())
+                .filter_map(Result::ok)
+                .map(u32::from);
+            let mut bytes = Vec::new();
+            for scalar in mark.then_some(0xFEFF_u32).into_iter().chain(scalars) {
+                match big_endian {
+                    true => bytes.extend_from_slice(&scalar.to_be_bytes()),
+                    false => bytes.extend_from_slice(&scalar.to_le_bytes()),
+                }
+            }
+            (bytes, 4, 4 * mark as usize)
         }
         // An encoding with no table here converts nothing, which is what a
         // caller checking the return against zero already handles.

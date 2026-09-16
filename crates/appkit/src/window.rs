@@ -607,10 +607,13 @@ unsafe extern "C" fn set_title(receiver: Id, _sel: Sel, title: Id) {
     sdl3::video::set_window_title(sdl, &text);
 }
 
-unsafe extern "C" fn title(_receiver: Id, _sel: Sel) -> Id {
-    // SDL has no way to read a title back, so this answers with what a window
-    // with none has rather than with a title it might not have.
-    foundation::string::from_str("")
+unsafe extern "C" fn title(receiver: Id, _sel: Sel) -> Id {
+    let sdl = window_of(receiver).sdl;
+    let title = match sdl.is_null() {
+        true => c"".to_owned(),
+        false => sdl3::video::window_title(sdl),
+    };
+    objc::arc::autorelease(foundation::string::from_cstr(&title))
 }
 
 unsafe extern "C" fn make_key_and_order_front(receiver: Id, _sel: Sel, _sender: Id) {
@@ -1332,7 +1335,11 @@ mod tests {
         );
         assert_eq!(sdl3::video::window_size(after), Some(size));
         let title = sdl3::video::window_title(after);
-        assert_eq!(title.to_bytes(), b"a title", "the rebuilt window lost its title");
+        assert_eq!(
+            title.to_bytes(),
+            b"a title",
+            "the rebuilt window lost its title"
+        );
         // The event table has to follow the window, or every event for it
         // stops resolving to this object.
         assert_eq!(window_for(after), object);

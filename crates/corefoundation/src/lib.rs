@@ -866,6 +866,45 @@ mod tests {
         }
     }
 
+    /// Unreal hands `wchar_t` text over as UTF-32LE; a nil here was a nil
+    /// window title.
+    #[test]
+    fn a_string_can_be_created_from_utf32_and_utf16_bytes() {
+        bootstrap();
+        let text = "A Hat in Time \u{1F3A9}";
+        let read = |bytes: &[u8], encoding: u32| {
+            // SAFETY: a live buffer; the string is released here.
+            unsafe {
+                let s = api::CFStringCreateWithBytes(
+                    std::ptr::null(),
+                    bytes.as_ptr(),
+                    bytes.len() as base::CFIndex,
+                    encoding,
+                    0,
+                );
+                assert!(!s.is_null(), "encoding {encoding:#x} was refused");
+                let utf8 = string::as_string(s).unwrap().utf8();
+                api::CFRelease(s);
+                String::from_utf8(utf8).unwrap()
+            }
+        };
+        let le32: Vec<u8> = text
+            .chars()
+            .flat_map(|c| (c as u32).to_le_bytes())
+            .collect();
+        let be32: Vec<u8> = text
+            .chars()
+            .flat_map(|c| (c as u32).to_be_bytes())
+            .collect();
+        let be16: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        assert_eq!(read(&le32, string::encoding::UTF32_LE), text);
+        assert_eq!(read(&be32, string::encoding::UTF32_BE), text);
+        assert_eq!(read(&le32, string::encoding::UTF32), text);
+        let marked: Vec<u8> = [0, 0, 0xFE, 0xFF].into_iter().chain(be32).collect();
+        assert_eq!(read(&marked, string::encoding::UTF32), text);
+        assert_eq!(read(&be16, string::encoding::UTF16_BE), text);
+    }
+
     /// `CFStringGetBytes` in UTF-16: the byte order the encoding names, a mark
     /// only where Apple writes one, and a character count that is not the byte
     /// count.

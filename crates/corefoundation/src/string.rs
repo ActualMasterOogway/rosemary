@@ -52,8 +52,11 @@ pub struct CFString {
 pub mod encoding {
     pub const MAC_ROMAN: u32 = 0;
     pub const UTF16: u32 = 0x0100;
-    pub const UTF16_BE: u32 = 0x1_0100;
-    pub const UTF16_LE: u32 = 0x1_4000;
+    pub const UTF16_BE: u32 = 0x1000_0100;
+    pub const UTF16_LE: u32 = 0x1400_0100;
+    pub const UTF32: u32 = 0x0c00_0100;
+    pub const UTF32_BE: u32 = 0x1800_0100;
+    pub const UTF32_LE: u32 = 0x1c00_0100;
     pub const ASCII: u32 = 0x0600;
     pub const UTF8: u32 = 0x0800_0100;
     pub const ISO_LATIN_1: u32 = 0x0201;
@@ -83,6 +86,51 @@ fn is_utf16(encoding: u32) -> bool {
         encoding,
         encoding::UTF16 | encoding::UTF16_BE | encoding::UTF16_LE
     )
+}
+
+fn is_utf32(encoding: u32) -> bool {
+    matches!(
+        encoding,
+        encoding::UTF32 | encoding::UTF32_BE | encoding::UTF32_LE
+    )
+}
+
+/// Split `bytes` into `N`-byte units in `encoding`'s order. The order-less
+/// encodings honour a leading byte-order mark and drop it, and are host order
+/// without one; an explicit order keeps a leading U+FEFF as a character.
+fn units<const N: usize>(bytes: &[u8], encoding: u32, big: u32, little: u32) -> Vec<[u8; N]> {
+    let mut chunks = bytes
+        .chunks_exact(N)
+        .map(|c| <[u8; N]>::try_from(c).unwrap());
+    let mut big_endian = encoding == big;
+    let mut first = None;
+    if encoding != big && encoding != little {
+        big_endian = cfg!(target_endian = "big");
+        if let Some(head) = chunks.next() {
+            let mut mark = [0u8; N];
+            mark[N - 2] = 0xFE;
+            mark[N - 1] = 0xFF;
+            let mut reversed = mark;
+            reversed.reverse();
+            if head == mark {
+                big_endian = true;
+            } else if head == reversed {
+                big_endian = false;
+            } else {
+                first = Some(head);
+            }
+        }
+    }
+    first
+        .into_iter()
+        .chain(chunks)
+        .map(|mut unit| {
+            if big_endian == cfg!(target_endian = "little") {
+                unit.reverse();
+            }
+            unit
+        })
+        .collect()
 }
 
 /// The class a dynamically created string has.
@@ -560,7 +608,21 @@ pub fn from_encoded(bytes: &[u8], encoding: u32) -> CFTypeRef {
         return from_bytes(bytes, false);
     }
     if is_utf16(encoding) {
-        return from_bytes(bytes, true);
+        let units: Vec<u16> = units::<2>(bytes, encoding, encoding::UTF16_BE, encoding::UTF16_LE)
+            .into_iter()
+            .map(u16::from_ne_bytes)
+            .collect();
+        return from_utf16(&units);
+    }
+    if is_utf32(encoding) {
+        let mut wide = Vec::with_capacity(bytes.len() / 4);
+        for unit in units::<4>(bytes, encoding, encoding::UTF32_BE, encoding::UTF32_LE) {
+            let Some(ch) = char::from_u32(u32::from_ne_bytes(unit)) else {
+                return std::ptr::null();
+            };
+            wide.extend_from_slice(ch.encode_utf16(&mut [0; 2]));
+        }
+        return from_utf16(&wide);
     }
     std::ptr::null()
 }

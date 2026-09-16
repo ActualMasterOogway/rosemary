@@ -27,6 +27,9 @@ pub mod ns_encoding {
     pub const WINDOWS_CP1252: usize = 12;
     pub const UTF16_BE: usize = 0x9000_0100;
     pub const UTF16_LE: usize = 0x9400_0100;
+    pub const UTF32: usize = 0x8c00_0100;
+    pub const UTF32_BE: usize = 0x9800_0100;
+    pub const UTF32_LE: usize = 0x9c00_0100;
 }
 
 /// An `NSStringEncoding` as the CoreFoundation one.
@@ -35,8 +38,12 @@ pub fn cf_encoding(ns: usize) -> u32 {
         ns_encoding::ASCII => encoding::ASCII,
         ns_encoding::ISO_LATIN1 => encoding::ISO_LATIN_1,
         ns_encoding::WINDOWS_CP1252 => encoding::WINDOWS_LATIN1,
-        ns_encoding::UNICODE | ns_encoding::UTF16_LE => encoding::UTF16_LE,
+        ns_encoding::UNICODE => encoding::UTF16,
+        ns_encoding::UTF16_LE => encoding::UTF16_LE,
         ns_encoding::UTF16_BE => encoding::UTF16_BE,
+        ns_encoding::UTF32 => encoding::UTF32,
+        ns_encoding::UTF32_BE => encoding::UTF32_BE,
+        ns_encoding::UTF32_LE => encoding::UTF32_LE,
         // UTF-8 for everything else, including `NSNEXTSTEPStringEncoding`: it
         // is the encoding every caller in this tree has actually asked for, and
         // a wrong guess here is a string that reads back empty rather than one
