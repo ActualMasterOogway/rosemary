@@ -603,11 +603,31 @@ pub unsafe fn once<F: FnOnce()>(at: u64, body: F) -> i32 {
         });
     }
 
+    // For some reason, on macOS, the libc crate makes init_routine an Option ???
+    unsafe fn pthread_once_wrapper(
+        once_control: *mut libc::pthread_once_t,
+        init_routine: Option<unsafe extern "C" fn()>,
+    ) -> libc::c_int {
+        #[cfg(target_vendor = "apple")]
+        return unsafe { libc::pthread_once(once_control, init_routine) };
+        #[cfg(not(target_vendor = "apple"))]
+        return unsafe {
+            libc::pthread_once(
+                once_control,
+                init_routine.unwrap_or(|| std::ptr::null() as _),
+            )
+        };
+    }
+
     ONCE_BODY.with(|slot| {
         let previous = slot.replace((&mut body as *mut Option<F>).cast());
         // SAFETY: a live host once object, and a callback using this thread's slot.
-        let rc =
-            unsafe { libc::pthread_once(host as usize as *mut libc::pthread_once_t, invoke::<F>) };
+        let rc = unsafe {
+            pthread_once_wrapper(
+                host as usize as *mut libc::pthread_once_t,
+                Some(invoke::<F>),
+            )
+        };
         slot.set(previous);
         err::from_host(rc)
     })
