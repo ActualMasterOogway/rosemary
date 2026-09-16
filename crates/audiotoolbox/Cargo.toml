@@ -1,0 +1,6 @@
+[package]
+name = "audiotoolbox"
+description = "Reimplementation of AudioToolbox on top of SDL3 and cross-platform Rust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true

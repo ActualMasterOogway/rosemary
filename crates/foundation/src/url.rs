@@ -193,6 +193,54 @@ fn autoreleased_file_url(path: &str, directory: bool) -> Id {
     unsafe { corefoundation::api::CFAutorelease(url) as Id }
 }
 
+/// Collapse the path-only components Foundation standardizes without consulting
+/// the host filesystem. Following symlinks here would make `..` mean something
+/// different from the spelling in the URL.
+pub(crate) fn standardized_file_path(path: &str) -> String {
+    let absolute = path.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." if parts.last().is_some_and(|part| *part != "..") => {
+                parts.pop();
+            }
+            ".." if absolute => {}
+            other => parts.push(other),
+        }
+    }
+
+    let mut standardized = parts.join("/");
+    if absolute {
+        standardized.insert(0, '/');
+    }
+    if standardized.is_empty() {
+        standardized.push(if absolute { '/' } else { '.' });
+    }
+    standardized
+}
+
+/// `-URLByStandardizingPath` for file URLs.
+unsafe extern "C" fn url_by_standardizing_path(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: the receiver is an `NSURL`.
+    let Some(url) =
+        (unsafe { corefoundation::url::as_url(receiver as corefoundation::base::CFTypeRef) })
+    else {
+        return std::ptr::null_mut();
+    };
+    let Some(path) = url.file_path() else {
+        // Path standardization is meaningful for file URLs. Preserve another
+        // URL unchanged rather than corrupting its authority, query or fragment.
+        return unsafe {
+            corefoundation::api::CFAutorelease(corefoundation::api::CFRetain(
+                receiver as corefoundation::base::CFTypeRef,
+            )) as Id
+        };
+    };
+    let directory = url.text.ends_with('/');
+    autoreleased_file_url(&standardized_file_path(&path), directory)
+}
+
 /// `-URLByAppendingPathComponent:`, and the form that says what it is making.
 ///
 /// The single-argument form asks the file system whether the result is a
@@ -441,9 +489,23 @@ pub(crate) fn install() {
             => url_by_appending_path_component_is_directory, c"@28@0:8@16c24";
         "URLByAppendingPathExtension:" => url_by_appending_path_extension, c"@24@0:8@16";
         "URLByDeletingLastPathComponent" => url_by_deleting_last_path_component, c"@16@0:8";
+        "URLByStandardizingPath" => url_by_standardizing_path, c"@16@0:8";
         "lastPathComponent" => last_path_component, c"@16@0:8";
         "resourceValuesForKeys:error:" => resource_values_for_keys, c"@32@0:8@16^@24";
         "getResourceValue:forKey:error:" => get_resource_value, c"B40@0:8^@16@24^@32";
         "setResourceValue:forKey:error:" => set_resource_value, c"B40@0:8@16@24^@32";
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::standardized_file_path;
+
+    #[test]
+    fn standardizes_file_path_lexically() {
+        assert_eq!(standardized_file_path("/a//b/../c/."), "/a/c");
+        assert_eq!(standardized_file_path("/../../a"), "/a");
+        assert_eq!(standardized_file_path("a/../../b"), "../b");
+        assert_eq!(standardized_file_path("/"), "/");
+    }
 }

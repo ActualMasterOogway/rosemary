@@ -16,6 +16,8 @@ foundation = { path = "crates/foundation" }
 sdl3 = { path = "crates/sdl3" }
 iokit = { path = "crates/iokit" }
 appkit = { path = "crates/appkit" }
+applicationservices = { path = "crates/applicationservices" }
+audiotoolbox = { path = "crates/audiotoolbox" }
 corevideo = { path = "crates/corevideo" }
 coreaudio = { path = "crates/coreaudio" }
 contacts = { path = "crates/contacts" }

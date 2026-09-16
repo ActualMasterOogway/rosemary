@@ -11,6 +11,7 @@ mod attributed_string;
 mod block;
 mod boxed;
 pub mod bundle;
+mod characterset;
 mod constant;
 pub mod cookies;
 pub mod defaults;
@@ -38,6 +39,7 @@ pub mod thread;
 pub mod timer;
 pub mod unarchiver;
 pub mod url;
+mod urlcomponents;
 pub mod urlsession;
 pub mod value;
 
@@ -51,6 +53,7 @@ pub fn bootstrap() {
     ONCE.call_once(|| {
         corefoundation::bootstrap();
         string::install();
+        characterset::install();
         attributed_string::install();
         collections::install();
         pool::install();
@@ -71,6 +74,7 @@ pub fn bootstrap() {
         thread::install();
         operation::install();
         url::install();
+        urlcomponents::install();
         json::install();
         urlsession::install();
         cookies::install();
@@ -248,6 +252,8 @@ fn declare_abstract() {
 pub const CLASSES: &[&str] = &[
     "NSString",
     "NSAttributedString",
+    "NSCharacterSet",
+    "NSURLComponents",
     "NSHTTPCookie",
     "NSHTTPCookieStorage",
     "NSUserDefaults",

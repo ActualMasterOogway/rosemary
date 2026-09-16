@@ -1435,6 +1435,22 @@ pub unsafe extern "C" fn CFDataCreate(
     collections::new_data(slice.to_vec())
 }
 
+/// `CFDataCreateWithBytesNoCopy` with an owned compatibility copy.
+///
+/// CoreFoundation can borrow the caller's buffer and later release it through
+/// `contents_deallocator`. This runtime's data objects own a `Vec`, so copying
+/// preserves the bytes for the object's lifetime without trying to interpret a
+/// foreign allocator object.
+pub unsafe extern "C" fn CFDataCreateWithBytesNoCopy(
+    allocator: CFAllocatorRef,
+    bytes: *const u8,
+    length: CFIndex,
+    _contents_deallocator: CFAllocatorRef,
+) -> CFTypeRef {
+    // SAFETY: the validity requirement is identical to `CFDataCreate`'s.
+    unsafe { CFDataCreate(allocator, bytes, length) }
+}
+
 /// `CFDataCreateCopy`, which forwards a foreign original rather than reading it.
 ///
 /// The keyboard layout `TISGetInputSourceProperty` hands back is Apple's
@@ -2601,6 +2617,29 @@ mod tests {
         assert!(bytes as usize > 0xffff, "{bytes:p} is not a mapped address");
         // SAFETY: the pointer this call just promised is readable.
         assert_eq!(unsafe { bytes.read() }, 0);
+    }
+
+    #[test]
+    fn no_copy_data_keeps_an_owned_snapshot() {
+        let mut source = vec![1u8, 2, 3];
+        // SAFETY: `source` covers the stated length.
+        let data = unsafe {
+            CFDataCreateWithBytesNoCopy(
+                std::ptr::null(),
+                source.as_ptr(),
+                source.len() as CFIndex,
+                std::ptr::null(),
+            )
+        };
+        source[0] = 9;
+
+        // SAFETY: `data` was created above and remains retained.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(CFDataGetBytePtr(data), CFDataGetLength(data) as usize)
+        };
+        assert_eq!(bytes, [1, 2, 3]);
+        // SAFETY: balances the create rule.
+        unsafe { CFRelease(data) };
     }
 
     /// Null is still null: an object that is not a `CFData` has no bytes, and a

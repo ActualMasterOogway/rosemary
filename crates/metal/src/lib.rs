@@ -61,10 +61,11 @@ struct Device {
 
 struct Library {
     translated: metal_translate::TranslatedLibrary,
-    /// The AIR the library was made from, kept only where it declares function
-    /// constants: each set of values a function is made with is a translation
-    /// of its own.
-    air: Option<Vec<u8>>,
+    /// The AIR modules the library was made from, kept only where one declares
+    /// function constants: each set of values translates its owning module.
+    air: Option<Vec<Vec<u8>>>,
+    /// Owning AIR module for each translated entry point.
+    entry_modules: Vec<usize>,
     /// The profile of the device which made the library.
     target: Option<&'static metal_translate::TargetProfile>,
 }
@@ -185,6 +186,7 @@ pub fn bootstrap() {
             "newTextureWithDescriptor:" => new_texture, c"@24@0:8@16";
             "newSamplerStateWithDescriptor:" => new_sampler_state, c"@24@0:8@16";
             "newDepthStencilStateWithDescriptor:" => new_depth_stencil_state, c"@24@0:8@16";
+            "newDefaultLibrary" => new_default_library, c"@16@0:8";
             "newLibraryWithData:error:" => new_library_with_data, c"@32@0:8@16^@24";
             "newLibraryWithSource:options:error:" => new_library_with_source, c"@40@0:8@16@24^@32";
             "newComputePipelineStateWithFunction:error:" => new_compute_pipeline,

@@ -24,12 +24,15 @@ pub mod api;
 pub mod base;
 pub mod callbacks;
 pub mod collections;
+mod diskarbitration;
 /// Only on Darwin: nowhere else is there another CoreFoundation to meet.
 #[cfg(target_os = "macos")]
 pub mod foreign;
+mod fsevents;
 pub mod preferences;
 pub mod runloop;
 mod send;
+mod socket;
 pub mod string;
 pub mod sysconfig;
 mod timezone;
@@ -149,6 +152,7 @@ pub fn symbol(name: &str) -> Option<u64> {
 
         "CFDataGetTypeID" => at!(api::CFDataGetTypeID),
         "CFDataCreate" => at!(api::CFDataCreate),
+        "CFDataCreateWithBytesNoCopy" => at!(api::CFDataCreateWithBytesNoCopy),
         "CFDataCreateCopy" => at!(api::CFDataCreateCopy),
         "CFDataGetLength" => at!(api::CFDataGetLength),
         "CFDataGetBytePtr" => at!(api::CFDataGetBytePtr),
@@ -218,6 +222,15 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFRunLoopRemoveObserver" => at!(api::CFRunLoopRemoveObserver),
         "CFRunLoopContainsObserver" => at!(api::CFRunLoopContainsObserver),
         "CFRunLoopAddCommonMode" => at!(api::CFRunLoopAddCommonMode),
+        "CFSocketCreateWithNative" => at!(socket::create_with_native),
+        "CFSocketCreateRunLoopSource" => at!(socket::create_run_loop_source),
+        "CFSocketGetNative" => at!(socket::get_native),
+        "CFSocketIsValid" => at!(socket::is_valid),
+        "CFSocketGetSocketFlags" => at!(socket::get_flags),
+        "CFSocketSetSocketFlags" => at!(socket::set_flags),
+        "CFSocketEnableCallBacks" => at!(socket::enable_callbacks),
+        "CFSocketDisableCallBacks" => at!(socket::disable_callbacks),
+        "CFSocketInvalidate" => at!(socket::invalidate),
         "CFRunLoopIsWaiting" => at!(api::CFRunLoopIsWaiting),
         "CFRunLoopTimerGetInterval" => at!(api::CFRunLoopTimerGetInterval),
         "CFRunLoopTimerSetNextFireDate" => at!(api::CFRunLoopTimerSetNextFireDate),
@@ -239,6 +252,8 @@ pub fn symbol(name: &str) -> Option<u64> {
         // because its objects are CoreFoundation's - see [`sysconfig`].
         other => {
             return preferences::symbol(other)
+                .or_else(|| diskarbitration::symbol(other))
+                .or_else(|| fsevents::symbol(other))
                 .or_else(|| urlresource::symbol(other))
                 .or_else(|| sysconfig::symbol(other));
         }
@@ -322,6 +337,7 @@ pub const NAMES: &[&str] = &[
     "CFNumberGetByteSize",
     "CFDataGetTypeID",
     "CFDataCreate",
+    "CFDataCreateWithBytesNoCopy",
     "CFDataCreateCopy",
     "CFDataGetLength",
     "CFDataGetBytePtr",
@@ -374,6 +390,15 @@ pub const NAMES: &[&str] = &[
     "CFRunLoopRemoveObserver",
     "CFRunLoopContainsObserver",
     "CFRunLoopAddCommonMode",
+    "CFSocketCreateWithNative",
+    "CFSocketCreateRunLoopSource",
+    "CFSocketGetNative",
+    "CFSocketIsValid",
+    "CFSocketGetSocketFlags",
+    "CFSocketSetSocketFlags",
+    "CFSocketEnableCallBacks",
+    "CFSocketDisableCallBacks",
+    "CFSocketInvalidate",
     "CFRunLoopIsWaiting",
     "CFRunLoopTimerGetInterval",
     "CFRunLoopTimerSetNextFireDate",
@@ -397,6 +422,8 @@ pub fn names() -> Vec<&'static str> {
     NAMES
         .iter()
         .chain(preferences::NAMES)
+        .chain(diskarbitration::NAMES)
+        .chain(fsevents::NAMES)
         .chain(urlresource::NAMES)
         .chain(sysconfig::NAMES)
         .copied()
@@ -515,6 +542,7 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         base::global_cell("_kCFCoreFoundationVersionNumber", (1600.0f64).to_bits()),
     ));
     out.extend(preferences::data_symbols());
+    out.extend(diskarbitration::data_symbols());
     out.extend(urlresource::data_symbols());
     out.extend(sysconfig::data_symbols());
     out

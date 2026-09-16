@@ -53,6 +53,7 @@ fn device_registers_the_metal_object_graph() {
     bootstrap();
     for (class, selector) in [
         (c"R3MTLDevice", "newLibraryWithSource:options:error:"),
+        (c"R3MTLDevice", "newDefaultLibrary"),
         (
             c"R3MTLDevice",
             "newRenderPipelineStateWithDescriptor:error:",
@@ -677,7 +678,7 @@ fn a_translated_triangle_draws_on_the_gpu() {
         return;
     };
     const SIZE: u64 = 8;
-    let library = retain_library(device, triangle_library(), None, None);
+    let library = retain_library(device, triangle_library(), None, vec![0, 0], None);
     // SAFETY: a library this test made.
     let (vertex, fragment) = unsafe {
         (
@@ -986,7 +987,7 @@ fn recording_cost() {
     };
     objc::arc::pool_pop(pool);
 
-    let library = retain_library(device, triangle_library(), None, None);
+    let library = retain_library(device, triangle_library(), None, vec![0, 0], None);
     // SAFETY: as in `a_translated_triangle_draws_on_the_gpu`.
     let render = unsafe {
         let vertex = new_function_with_name(

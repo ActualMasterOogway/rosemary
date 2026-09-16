@@ -112,6 +112,26 @@ impl BodyLowering<'_> {
                             );
                             (element, stepped)
                         }
+                        DecodedType::Struct { ref fields, .. }
+                            if !fields.is_empty()
+                                && reinterpretation(self.types, fields[0], *to).is_ok() =>
+                        {
+                            let first = fields[0];
+                            let pointer = Type::Pointer {
+                                space: address_space_of(*address_space)?,
+                                pointee: Box::new(ir_type(first, self.types)?),
+                            };
+                            let stepped = emit(
+                                &mut self.function,
+                                &mut self.instructions,
+                                pointer,
+                                InstructionKind::BufferAddress {
+                                    pointer: value.clone(),
+                                    indices: vec![Operand::u32(0), Operand::u32(0)],
+                                },
+                            );
+                            (first, stepped)
+                        }
                         _ => (actual, value.clone()),
                     };
                     reinterpretation(self.types, actual, *to)?;
@@ -206,6 +226,7 @@ impl BodyLowering<'_> {
 
     pub(super) fn element_pointer(
         &mut self,
+        source: Option<&u64>,
         pointer: &u64,
         indices: &[u64],
         record: &llvm_bitcode::bitcode::Record,
@@ -220,6 +241,14 @@ impl BodyLowering<'_> {
             else {
                 return Err(semantic("LLVM GEP requires pointer"));
             };
+            if let Some(source) = source {
+                let source = type_reference(Some(source), self.types.len())?;
+                if source != pointee {
+                    return Err(semantic(
+                        "LLVM GEP source type does not match its pointer element",
+                    ));
+                }
+            }
             let mut decoded = Vec::new();
             for (position, &index) in indices.iter().enumerate() {
                 let (index_ty, value) = self.operand(index, None, record, fields)?;
@@ -300,6 +329,7 @@ impl BodyLowering<'_> {
     pub(super) fn load(
         &mut self,
         pointer: &u64,
+        result: Option<&u64>,
         record: &llvm_bitcode::bitcode::Record,
         fields: &[u64],
     ) -> Result<Lowered, TranslateError> {
@@ -308,11 +338,23 @@ impl BodyLowering<'_> {
         let DecodedType::Pointer { pointee, .. } = self.types[ty] else {
             return Err(semantic("LLVM load requires pointer"));
         };
+        let requested = match result {
+            Some(result) => {
+                let result = type_reference(Some(result), self.types.len())?;
+                if result != pointee {
+                    return Err(semantic(
+                        "LLVM load result type does not match its pointer element",
+                    ));
+                }
+                result
+            }
+            None => pointee,
+        };
         let Some(alias) = self.aliases.get(&pointer_id) else {
             let value = emit(
                 &mut self.function,
                 &mut self.instructions,
-                ir_type(pointee, self.types)?,
+                ir_type(requested, self.types)?,
                 InstructionKind::Load { pointer },
             );
             define(
@@ -324,7 +366,7 @@ impl BodyLowering<'_> {
                 &mut self.instructions,
             )?;
             self.table.values.push(Value {
-                ty: pointee,
+                ty: requested,
                 constant: None,
             });
             return Ok(Lowered::Done);
@@ -340,7 +382,7 @@ impl BodyLowering<'_> {
         let value = widen(
             loaded,
             alias.pointee,
-            pointee,
+            requested,
             self.types,
             &mut self.function,
             &mut self.instructions,
@@ -354,7 +396,7 @@ impl BodyLowering<'_> {
             &mut self.instructions,
         )?;
         self.table.values.push(Value {
-            ty: pointee,
+            ty: requested,
             constant: None,
         });
         Ok(Lowered::Done)

@@ -337,6 +337,35 @@ fn extracts_air_bitcode_from_a_metallib() {
 }
 
 #[test]
+fn extracts_every_air_module_from_a_metallib() {
+    fn wrapper(payload: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0b17_c0de_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&20_u32.to_le_bytes());
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(payload);
+        bytes.resize((bytes.len() + 15) & !15, 0);
+        bytes
+    }
+
+    let first = [b'B', b'C', 0xc0, 0xde, 1];
+    let second = [b'B', b'C', 0xc0, 0xde, 2, 3];
+    let wrappers = [wrapper(&first), wrapper(&second)].concat();
+    let mut library = vec![0; 88];
+    library[..4].copy_from_slice(b"MTLB");
+    library[72..80].copy_from_slice(&88_u64.to_le_bytes());
+    library[80..88].copy_from_slice(&(wrappers.len() as u64).to_le_bytes());
+    library.extend_from_slice(&wrappers);
+
+    assert_eq!(
+        metal_translate::metallib_airs(&library).unwrap(),
+        vec![first.as_slice(), second.as_slice()]
+    );
+}
+
+#[test]
 fn textual_and_bitcode_store_modules_are_equivalent() {
     let text = parse_air(AirInput::Text(STORE)).unwrap();
     let bitcode = parse_air(AirInput::Bitcode(&store_bitcode())).unwrap();

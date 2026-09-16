@@ -231,6 +231,65 @@ unsafe extern "C" fn copy_item_at_url(
     }
 }
 
+/// The `NSURLRelationship` between a directory and an item, using Apple's
+/// declaration order: contains, same, other.
+fn url_relationship(directory: &str, item: &str) -> isize {
+    const CONTAINS: isize = 0;
+    const SAME: isize = 1;
+    const OTHER: isize = 2;
+
+    let directory = crate::url::standardized_file_path(directory);
+    let item = crate::url::standardized_file_path(item);
+    if directory == item {
+        return SAME;
+    }
+    let prefix = match directory.as_str() {
+        "/" => "/".to_string(),
+        _ => format!("{}/", directory.trim_end_matches('/')),
+    };
+    if item.starts_with(&prefix) {
+        CONTAINS
+    } else {
+        OTHER
+    }
+}
+
+/// `-getRelationship:ofDirectoryAtURL:toItemAtURL:error:`.
+///
+/// # Safety
+///
+/// The URLs are null or `NSURL`s, and the two out-parameters are null or
+/// writable values of the types declared by the method.
+unsafe extern "C" fn get_relationship(
+    _receiver: Id,
+    _sel: Sel,
+    relationship: *mut isize,
+    directory: Id,
+    item: Id,
+    error: *mut Id,
+) -> u8 {
+    // SAFETY: the caller's obligation.
+    unsafe { no_error(error) };
+    if relationship.is_null() {
+        return 0;
+    }
+    // SAFETY: the arguments are `NSURL`s.
+    let Some(directory) = (unsafe { corefoundation::url::as_url(directory as CFTypeRef) })
+        .and_then(|u| u.file_path())
+    else {
+        return 0;
+    };
+    // SAFETY: as above.
+    let Some(item) =
+        (unsafe { corefoundation::url::as_url(item as CFTypeRef) }).and_then(|u| u.file_path())
+    else {
+        return 0;
+    };
+    // SAFETY: checked non-null and declared writable by the caller.
+    unsafe { *relationship = url_relationship(&directory, &item) };
+    1
+}
+
 /// A file URL for a directory, autoreleased.
 fn directory_url(path: &str) -> Id {
     // SAFETY: a URL this call just made.
@@ -552,6 +611,8 @@ pub(crate) fn install() {
         "URLsForDirectory:inDomains:" => urls_for_directory, c"@32@0:8Q16Q24";
         "URLForDirectory:inDomain:appropriateForURL:create:error:"
             => url_for_directory, c"@52@0:8Q16Q24@32c40^@44";
+        "getRelationship:ofDirectoryAtURL:toItemAtURL:error:"
+            => get_relationship, c"B48@0:8^q16@24@32^@40";
     });
 
     // Foundation's `NSFileAttributes` category: how a program reads the result
@@ -580,6 +641,14 @@ mod tests {
                 objc::sel::get("defaultManager"),
             )
         }
+    }
+
+    #[test]
+    fn url_relationship_observes_component_boundaries() {
+        assert_eq!(url_relationship("/a/b", "/a/b"), 1);
+        assert_eq!(url_relationship("/a/b", "/a/b/c/../d"), 0);
+        assert_eq!(url_relationship("/a/b", "/a/bc"), 2);
+        assert_eq!(url_relationship("/", "/a"), 0);
     }
 
     /// The three the runner uses, on a directory this test makes and removes.

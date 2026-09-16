@@ -187,6 +187,19 @@ fn format_msl_source_context(source: &str, line: usize) -> String {
 /// A metallib has four offset/size pairs in its fixed header. The final pair
 /// names a bitcode wrapper whose own header gives the payload offset and size.
 pub fn metallib_air(bytes: &[u8]) -> Result<&[u8], TranslateError> {
+    metallib_airs(bytes)?.into_iter().next().ok_or_else(|| {
+        TranslateError::one(Diagnostic::new(
+            Phase::AirContainer,
+            "metallib contains no AIR modules",
+        ))
+    })
+}
+
+/// Extract every LLVM bitcode payload from a compiled Metal library.
+///
+/// A metallib concatenates one sixteen-byte-aligned bitcode wrapper per
+/// exported module in the final section of its fixed header.
+pub fn metallib_airs(bytes: &[u8]) -> Result<Vec<&[u8]>, TranslateError> {
     fn u64_at(bytes: &[u8], offset: usize) -> Option<u64> {
         Some(u64::from_le_bytes(
             bytes.get(offset..offset + 8)?.try_into().ok()?,
@@ -208,23 +221,45 @@ pub fn metallib_air(bytes: &[u8]) -> Result<&[u8], TranslateError> {
     let wrapper_size = u64_at(bytes, 80)
         .and_then(|value| usize::try_from(value).ok())
         .ok_or_else(|| malformed("metallib has no bitcode-wrapper size"))?;
-    let wrapper = bytes
+    let wrappers = bytes
         .get(wrapper_offset..wrapper_offset.saturating_add(wrapper_size))
         .ok_or_else(|| malformed("metallib bitcode wrapper is out of bounds"))?;
-    if wrapper.get(..4) != Some(&0x0b17_c0de_u32.to_le_bytes()) {
-        return Err(malformed("metallib has an unknown bitcode wrapper"));
+    let mut offset = 0usize;
+    let mut modules = Vec::new();
+    while offset < wrappers.len() {
+        let wrapper = &wrappers[offset..];
+        if wrapper.get(..4) != Some(&0x0b17_c0de_u32.to_le_bytes()) {
+            return Err(malformed("metallib has an unknown bitcode wrapper"));
+        }
+        let payload_offset = u32_at(wrapper, 8)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| malformed("metallib has no AIR payload offset"))?;
+        let payload_size = u32_at(wrapper, 12)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| malformed("metallib has no AIR payload size"))?;
+        let end = payload_offset
+            .checked_add(payload_size)
+            .ok_or_else(|| malformed("metallib AIR payload size overflows"))?;
+        let payload = wrapper
+            .get(payload_offset..end)
+            .ok_or_else(|| malformed("metallib AIR payload is out of bounds"))?;
+        if payload.get(..4) != Some(&[b'B', b'C', 0xc0, 0xde]) {
+            return Err(malformed("metallib AIR payload is not LLVM bitcode"));
+        }
+        modules.push(payload);
+        let length = if end == wrapper.len() {
+            end
+        } else {
+            end.checked_add(15)
+                .map(|length| length & !15)
+                .ok_or_else(|| malformed("metallib bitcode wrapper size overflows"))?
+        };
+        offset = offset
+            .checked_add(length)
+            .ok_or_else(|| malformed("metallib bitcode wrapper offset overflows"))?;
     }
-    let payload_offset = u32_at(wrapper, 8)
-        .and_then(|value| usize::try_from(value).ok())
-        .ok_or_else(|| malformed("metallib has no AIR payload offset"))?;
-    let payload_size = u32_at(wrapper, 12)
-        .and_then(|value| usize::try_from(value).ok())
-        .ok_or_else(|| malformed("metallib has no AIR payload size"))?;
-    let payload = wrapper
-        .get(payload_offset..payload_offset.saturating_add(payload_size))
-        .ok_or_else(|| malformed("metallib AIR payload is out of bounds"))?;
-    if payload.get(..4) != Some(&[b'B', b'C', 0xc0, 0xde]) {
-        return Err(malformed("metallib AIR payload is not LLVM bitcode"));
+    if offset != wrappers.len() {
+        return Err(malformed("metallib bitcode wrappers exceed their section"));
     }
-    Ok(payload)
+    Ok(modules)
 }

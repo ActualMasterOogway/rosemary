@@ -1,0 +1,9 @@
+[package]
+name = "applicationservices"
+description = "Reimplementation of ApplicationServices on top of SDL3 and cross-platform Rust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+appkit.workspace = true

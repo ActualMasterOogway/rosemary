@@ -55,6 +55,9 @@ struct Event {
     button: i64,
     clicks: i64,
     repeat: bool,
+    subtype: i16,
+    data1: isize,
+    data2: isize,
 }
 
 pub const INSTANCE_SIZE: usize = size_of::<Event>();
@@ -101,6 +104,9 @@ reader! {
     characters -> Id { |e| e.characters },
     window -> Id { |e| e.window },
     is_a_repeat -> u8 { |e| e.repeat as u8 },
+    subtype -> i16 { |e| e.subtype },
+    data1 -> isize { |e| e.data1 },
+    data2 -> isize { |e| e.data2 },
 }
 
 /// The scroll accessors, which a program reads on every wheel event.
@@ -121,10 +127,6 @@ unsafe extern "C" fn no(_receiver: Id, _sel: Sel) -> u8 {
 }
 
 unsafe extern "C" fn zero(_receiver: Id, _sel: Sel) -> isize {
-    0
-}
-
-unsafe extern "C" fn zero_short(_receiver: Id, _sel: Sel) -> i16 {
     0
 }
 
@@ -201,6 +203,9 @@ pub struct Fields {
     pub button: i64,
     pub clicks: i64,
     pub repeat: bool,
+    pub subtype: i16,
+    pub data1: isize,
+    pub data2: isize,
 }
 
 /// Build an autoreleased event.
@@ -224,6 +229,9 @@ pub fn make(fields: Fields) -> Id {
         (*event).button = fields.button;
         (*event).clicks = fields.clicks;
         (*event).repeat = fields.repeat;
+        (*event).subtype = fields.subtype;
+        (*event).data1 = fields.data1;
+        (*event).data2 = fields.data2;
     }
     objc::arc::autorelease(event as Id)
 }
@@ -265,11 +273,103 @@ unsafe extern "C" fn mouse_location(_class: Id, _sel: Sel) -> NSPoint {
     }
 }
 
+/// `+[NSEvent enterExitEventWithType:location:modifierFlags:timestamp:
+/// windowNumber:context:eventNumber:trackingNumber:userData:]`.
+///
+/// The tracking metadata has no accessor used by this runtime. The event's
+/// window, type, location and modifiers are the parts Qt reads and routes.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn enter_exit_event(
+    _class: Id,
+    _sel: Sel,
+    kind: u64,
+    location: NSPoint,
+    modifiers: u64,
+    _timestamp: CGFloat,
+    window_number: isize,
+    _context: Id,
+    _event_number: isize,
+    _tracking_number: isize,
+    _user_data: *mut c_void,
+) -> Id {
+    let window = crate::window::all()
+        .into_iter()
+        .find(|window| {
+            let sel = objc::sel::get("windowNumber");
+            // SAFETY: every entry is a live `NSWindow`, and this is
+            // `NSInteger (id, SEL)`.
+            let number = unsafe {
+                let f: unsafe extern "C" fn(Id, Sel) -> isize =
+                    std::mem::transmute(objc::msg::entry());
+                f(*window, sel)
+            };
+            number == window_number
+        })
+        .unwrap_or(std::ptr::null_mut());
+    make(Fields {
+        kind,
+        modifiers,
+        location,
+        window,
+        ..Fields::default()
+    })
+}
+
+/// `+[NSEvent otherEventWithType:location:modifierFlags:timestamp:
+/// windowNumber:context:subtype:data1:data2:]`.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn other_event(
+    class: Id,
+    sel: Sel,
+    kind: u64,
+    location: NSPoint,
+    modifiers: u64,
+    timestamp: CGFloat,
+    window_number: isize,
+    context: Id,
+    subtype: i16,
+    data1: isize,
+    data2: isize,
+) -> Id {
+    // Use the same window lookup as enter/exit events, then add the fields
+    // specific to application-defined events.
+    let event = unsafe {
+        enter_exit_event(
+            class,
+            sel,
+            kind,
+            location,
+            modifiers,
+            timestamp,
+            window_number,
+            context,
+            0,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if !event.is_null() {
+        // SAFETY: `make` returned this module's allocation; the autorelease
+        // pool owns it but has not drained during this call.
+        let event = event as *mut Event;
+        unsafe {
+            (*event).subtype = subtype;
+            (*event).data1 = data1;
+            (*event).data2 = data2;
+        }
+    }
+    event
+}
+
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSEvent").expect("declared before its methods");
     crate::define::class_methods!(class, {
         "modifierFlags" => current_modifier_flags, c"Q16@0:8";
         "mouseLocation" => mouse_location, c"{CGPoint=dd}16@0:8";
+        "enterExitEventWithType:location:modifierFlags:timestamp:windowNumber:context:eventNumber:trackingNumber:userData:"
+            => enter_exit_event, c"@96@0:8Q16{CGPoint=dd}24Q40d48q56@64q72q80^v88";
+        "otherEventWithType:location:modifierFlags:timestamp:windowNumber:context:subtype:data1:data2:"
+            => other_event, c"@96@0:8Q16{CGPoint=dd}24Q40d48q56@64s72q80q88";
     });
     methods!(class, {
         "type" => kind, c"Q16@0:8";
@@ -296,7 +396,9 @@ pub(crate) fn install() {
         // here tracks one; zero is what an event outside any sequence carries.
         "eventNumber" => zero, c"q16@0:8";
         // `NSEventSubtype`, which for a mouse or key event is zero.
-        "subtype" => zero_short, c"s16@0:8";
+        "subtype" => subtype, c"s16@0:8";
+        "data1" => data1, c"q16@0:8";
+        "data2" => data2, c"q16@0:8";
         // `-magnification` is the pinch gesture's, and SDL delivers no pinch.
         "magnification" => zero_double, c"d16@0:8";
         "deltaZ" => zero_double, c"d16@0:8";

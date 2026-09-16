@@ -528,8 +528,11 @@ pub(super) fn air_texture_intrinsic(
             } else {
                 (None, rest)
             };
-            let [value, _level] = rest else {
-                return Err(malformed());
+            // Recent AIR adds a trailing write qualifier after the mip
+            // level. Neither changes the storage-image write SPIR-V emits.
+            let value = match rest {
+                [value, _] | [value, _, _] => value,
+                _ => return Err(malformed()),
             };
             Ok(Some(InstructionKind::TextureWrite {
                 texture: texture.clone(),

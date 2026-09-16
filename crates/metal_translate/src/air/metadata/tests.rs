@@ -193,3 +193,63 @@ fn named_records_do_not_consume_metadata_indices() {
     assert_eq!(metadata.string(1), Some("second"));
     assert_eq!(metadata.named("unrelated"), Some([0].as_slice()));
 }
+
+#[test]
+fn decodes_modern_node_operands_and_value_wrappers() {
+    let module = bitcode_block(block(
+        8,
+        vec![
+            record(1, &[0]),
+            record(8, &[3, 0, 0, 0]),
+            block(
+                15,
+                vec![
+                    record(1, string("kind")), // metadata 0
+                    record(2, &[3, 0]),        // metadata 1: function value 0
+                    record(3, &[2, 1, 0]),     // metadata 2: value, string, null
+                    record(4, string("entry")),
+                    record(10, &[2]),
+                ],
+            ),
+        ],
+    ));
+    let metadata = Metadata::decode(&module, &types()).unwrap();
+    let [value, text, empty] = metadata.node(2).unwrap() else {
+        panic!("expected three modern metadata operands");
+    };
+    assert!(matches!(value, Some(MetadataOperand::Metadata(1))));
+    assert!(matches!(text, Some(MetadataOperand::Metadata(0))));
+    assert!(empty.is_none());
+    assert_eq!(metadata.named("entry"), Some([2].as_slice()));
+}
+
+#[test]
+fn decodes_packed_metadata_string_table() {
+    fn push_vbr6(bits: &mut Vec<bool>, mut value: u64) {
+        loop {
+            let mut group = (value & 0x1f) as u8;
+            value >>= 5;
+            if value != 0 {
+                group |= 0x20;
+            }
+            bits.extend((0..6).map(|bit| group & (1 << bit) != 0));
+            if value == 0 {
+                break;
+            }
+        }
+    }
+
+    let mut bits = Vec::new();
+    push_vbr6(&mut bits, 3);
+    push_vbr6(&mut bits, 10);
+    let mut blob: Vec<u8> = bits.chunks(8).map(|_| 0).collect();
+    for (index, set) in bits.into_iter().enumerate() {
+        blob[index / 8] |= u8::from(set) << (index % 8);
+    }
+    let offset = blob.len();
+    blob.extend_from_slice(b"AIRair.kernel");
+    assert_eq!(
+        metadata_strings(&blob, 2, offset as u64).unwrap(),
+        ["AIR", "air.kernel"]
+    );
+}

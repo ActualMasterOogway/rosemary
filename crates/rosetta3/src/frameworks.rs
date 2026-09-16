@@ -154,6 +154,20 @@ fn register_dlopen_names() {
         ],
         symbol,
     );
+    crate::dyld::register_synthetic(
+        &[
+            "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/ApplicationServices",
+            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices",
+        ],
+        symbol,
+    );
+    crate::dyld::register_synthetic(
+        &[
+            "/System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox",
+            "/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox",
+        ],
+        symbol,
+    );
     register_opengl_framework();
 }
 
@@ -292,6 +306,18 @@ pub fn provider() -> SyntheticDylib {
     // superclass turns that into one refusal per selector actually sent.
     for name in appkit::names() {
         if let Some(addr) = appkit::symbol(name) {
+            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
+        }
+    }
+    // ApplicationServices
+    for name in applicationservices::names() {
+        if let Some(addr) = applicationservices::symbol(name) {
+            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
+        }
+    }
+    // AudioToolbox
+    for name in audiotoolbox::names() {
+        if let Some(addr) = audiotoolbox::symbol(name) {
             define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
         }
     }
@@ -436,6 +462,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         .or_else(|| iokit::symbol(name))
         .or_else(|| forcefeedback::symbol(name))
         .or_else(|| appkit::symbol(name))
+        .or_else(|| applicationservices::symbol(name))
         .or_else(|| corevideo::symbol(name))
         .or_else(|| crate::opengl::symbol(name))
         .or_else(|| coreaudio::symbol(name))

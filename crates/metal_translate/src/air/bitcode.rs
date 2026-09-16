@@ -737,11 +737,26 @@ fn legacy_function_names(module_block: &BitcodeBlock) -> HashMap<usize, String> 
         .elements
         .iter()
         .filter_map(BitcodeElement::as_record)
-        .filter(|record| record.id == 1)
+        .filter(|record| matches!(record.id, 1 | 3))
         .filter_map(|record| {
             let value = usize::try_from(*record.fields().first()?).ok()?;
             let mut record = record.clone();
-            Some((value, payload_string(record.take_payload()?)?))
+            let name = record.take_payload().and_then(payload_string).or_else(|| {
+                let prefix = match record.id {
+                    // VST_CODE_ENTRY: value id, name bytes.
+                    1 => 1,
+                    // VST_CODE_FNENTRY: value id, function offset, name bytes.
+                    3 => 2,
+                    _ => return None,
+                };
+                record_values(&record)
+                    .get(prefix..)?
+                    .iter()
+                    .map(|byte| u8::try_from(*byte).ok())
+                    .collect::<Option<Vec<_>>>()
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+            })?;
+            Some((value, name))
         })
         .collect()
 }
@@ -827,5 +842,22 @@ pub(super) fn decode_sign_rotated(value: u64) -> i64 {
         magnitude
     } else {
         -magnitude
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::air::fixtures::{bitcode_block, block, record};
+
+    #[test]
+    fn function_symbol_entry_skips_its_bitcode_offset() {
+        let mut fields = vec![7, 1234];
+        fields.extend(b"kernel".iter().copied().map(u64::from));
+        let module = bitcode_block(block(8, vec![block(14, vec![record(3, &fields)])]));
+        assert_eq!(
+            legacy_function_names(&module).get(&7),
+            Some(&"kernel".to_string())
+        );
     }
 }

@@ -1,4 +1,7 @@
+use std::collections::VecDeque;
 use std::ffi::{c_char, c_void};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use objc::class::Class;
 use objc::object::Id;
@@ -41,6 +44,18 @@ pub const WILL_RESIGN_ACTIVE: &str = "NSApplicationWillResignActiveNotification"
 pub const DID_CHANGE_SCREEN_PARAMETERS: &str = "NSApplicationDidChangeScreenParametersNotification";
 
 static SHARED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Events posted through `-postEvent:atStart:`. AppKit owns a reference while
+/// an event is queued; the application object itself is process-global, so the
+/// queue is too.
+static POSTED_EVENTS: Mutex<VecDeque<usize>> = Mutex::new(VecDeque::new());
+
+/// The event inside `-sendEvent:`, for `-currentEvent`.
+static CURRENT_EVENT: AtomicUsize = AtomicUsize::new(0);
+
+fn posted_events() -> std::sync::MutexGuard<'static, VecDeque<usize>> {
+    POSTED_EVENTS.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 pub fn shared() -> Id {
     SHARED.load(std::sync::atomic::Ordering::Acquire) as Id
@@ -274,6 +289,11 @@ unsafe extern "C" fn run(receiver: Id, sel: Sel) {
         // Cocoa backend needs its events drained for the window to appear at
         // all, so this is not only about delivering input.
         crate::event::pump(receiver);
+        // `-postEvent:atStart:` is used by Cocoa backends to wake work that
+        // must run through their `-sendEvent:` override. Dispatch through the
+        // receiver rather than calling this class's implementation directly so
+        // a principal `NSApplication` subclass sees the event.
+        unsafe { dispatch_posted_events(receiver) };
         // The main queue is drained here because this is the main thread: a block
         // sent to it with `dispatch_async` runs nowhere else, so a run loop that
         // never drained would leave every such block queued forever.
@@ -304,23 +324,50 @@ fn wait_interval(until: Id) -> f64 {
     seconds.max(0.0)
 }
 
-/// `-nextEventMatchingMask:untilDate:inMode:dequeue:`, which is always nil.
+fn event_matches_mask(event: Id, mask: u64) -> bool {
+    let kind = crate::nsevent::kind_of(event);
+    kind < u64::BITS as u64 && mask & (1_u64 << kind) != 0
+}
+
+/// Take or inspect the first posted event matching `mask`.
+fn queued_event(mask: u64, dequeue: bool) -> Id {
+    let mut queue = posted_events();
+    let Some(index) = queue
+        .iter()
+        .position(|event| event_matches_mask(*event as Id, mask))
+    else {
+        return std::ptr::null_mut();
+    };
+    let event = match dequeue {
+        true => queue
+            .remove(index)
+            .expect("the matching event is still queued") as Id,
+        false => objc::arc::retain(queue[index] as Id),
+    };
+    // A dequeued event transfers the queue's reference to the current
+    // autorelease pool. A peek acquired its own reference above.
+    objc::arc::autorelease(event)
+}
+
+/// `-nextEventMatchingMask:untilDate:inMode:dequeue:`.
 ///
 /// A program that drives its own loop - UE3 does - calls this instead of
 /// `-run`, so the pump has to happen here too or its window is never serviced.
-/// What it does not get is an event *object*: this tree turns a window-system
-/// event straight into the message to the responder it names (`event::deliver`)
-/// rather than keeping a queue of `NSEvent`s, so there is nothing to hand back.
-/// Input still arrives; forwarding it by hand is what is missing.
+/// Window-system input is still delivered directly by `event::pump`; events
+/// explicitly posted to the application are the objects this method returns.
 unsafe extern "C" fn next_event(
     receiver: Id,
     _sel: Sel,
-    _mask: u64,
+    mask: u64,
     until: Id,
     _mode: Id,
-    _dequeue: u8,
+    dequeue: u8,
 ) -> Id {
     crate::event::pump(receiver);
+    let event = queued_event(mask, dequeue != 0);
+    if !event.is_null() {
+        return event;
+    }
     // Apple blocks until the deadline when there is no event. Nothing here can
     // wake, so the wait is a short sleep: a loop asking for the next event with
     // a distant deadline and answered nil at once would spin a core.
@@ -437,15 +484,41 @@ unsafe extern "C" fn set_menu_for(receiver: Id, sel: Sel, menu: Id) {
     *slot = objc::arc::retain(menu);
 }
 
-/// `-currentEvent`, the event being dispatched right now.
+/// `-postEvent:atStart:`. The queue owns the event until it is dequeued or sent.
+unsafe extern "C" fn post_event(_receiver: Id, _sel: Sel, event: Id, at_start: u8) {
+    if event.is_null() {
+        return;
+    }
+    let event = objc::arc::retain(event) as usize;
+    let mut queue = posted_events();
+    match at_start != 0 {
+        true => queue.push_front(event),
+        false => queue.push_back(event),
+    }
+}
+
+/// Send every queued event through the application's dynamic `-sendEvent:`.
 ///
-/// Nil outside an event, which is what it is here: events are pumped from
-/// `crate::event` and none is held across the call, so there is never one "being
-/// dispatched". A caller uses this to read the modifier keys at the moment of a
-/// click, and nil sends it down its "no event" branch rather than handing it
-/// somebody else's event.
+/// # Safety
+///
+/// `receiver` is a live application.
+unsafe fn dispatch_posted_events(receiver: Id) {
+    while let Some(event) = posted_events().pop_front() {
+        let event = event as Id;
+        CURRENT_EVENT.store(event as usize, Ordering::Release);
+        // SAFETY: the caller's obligation; `-sendEvent:` is `void (id, SEL, id)`.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+            f(receiver, objc::sel::get("sendEvent:"), event);
+        }
+        CURRENT_EVENT.store(0, Ordering::Release);
+        objc::arc::release(event);
+    }
+}
+
+/// `-currentEvent`, the event inside `-sendEvent:`, and nil outside it.
 unsafe extern "C" fn current_event(_receiver: Id, _sel: Sel) -> Id {
-    std::ptr::null_mut()
+    CURRENT_EVENT.load(Ordering::Acquire) as Id
 }
 
 /// `-sendEvent:`, the entry point a subclass overrides and then calls up into.
@@ -687,6 +760,7 @@ pub(crate) fn install() {
         "setHelpMenu:" => set_menu_for, c"v24@0:8@16";
         "dockMenu" => menu_for, c"@16@0:8";
         "setDockMenu:" => set_menu_for, c"v24@0:8@16";
+        "postEvent:atStart:" => post_event, c"v28@0:8@16B24";
         "currentEvent" => current_event, c"@16@0:8";
         "sendEvent:" => send_event, c"v24@0:8@16";
         "hide:" => ignored_sender, c"v24@0:8@16";
@@ -709,6 +783,9 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tests below temporarily replace the process-wide guest argv.
+    static ARGUMENTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// One test for the singleton, because a process has one of it.
     ///
@@ -755,6 +832,7 @@ mod tests {
 
     #[test]
     fn only_scheme_shaped_arguments_are_launch_urls() {
+        let _arguments = ARGUMENTS.lock().expect("no panic");
         crate::bootstrap();
         foundation::processinfo::set_arguments(
             &[
@@ -786,6 +864,7 @@ mod tests {
     /// it is a URL delivered too late.
     #[test]
     fn a_launch_url_reaches_the_delegate_between_the_two_notifications() {
+        let _arguments = ARGUMENTS.lock().expect("no panic");
         crate::bootstrap();
         static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
@@ -870,6 +949,57 @@ mod tests {
             unsafe { foundation::string::bytes(name) },
             b"NSAppearanceNameAqua"
         );
+    }
+
+    #[test]
+    fn posted_events_honor_at_start_and_are_current_while_sent() {
+        crate::bootstrap();
+        static SEEN: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+        unsafe extern "C" fn record(receiver: Id, _sel: Sel, event: Id) {
+            // SAFETY: `receiver` is the test application.
+            let current = unsafe { current_event(receiver, objc::sel::get("currentEvent")) };
+            assert_eq!(current, event);
+            SEEN.lock()
+                .expect("no panic")
+                .push(crate::nsevent::kind_of(event));
+        }
+
+        SEEN.lock().expect("no panic").clear();
+        let class = corefoundation::base::register(
+            c"R3TestPostedEventApplication",
+            objc::class::lookup(c"NSApplication"),
+            INSTANCE_SIZE,
+            false,
+        );
+        class.add_method(
+            objc::sel::get("sendEvent:"),
+            record as *const c_void,
+            c"v24@0:8@16",
+        );
+        let app = objc::object::create_instance(class, 0);
+        let first = crate::nsevent::make(crate::nsevent::Fields {
+            kind: crate::nsevent::kind::KEY_DOWN,
+            ..Default::default()
+        });
+        let urgent = crate::nsevent::make(crate::nsevent::Fields {
+            kind: crate::nsevent::kind::KEY_UP,
+            ..Default::default()
+        });
+
+        // SAFETY: the objects and prototypes are the ones this test made.
+        unsafe {
+            post_event(app, objc::sel::get("postEvent:atStart:"), first, 0);
+            post_event(app, objc::sel::get("postEvent:atStart:"), urgent, 1);
+            dispatch_posted_events(app);
+        }
+
+        assert_eq!(
+            *SEEN.lock().expect("no panic"),
+            [crate::nsevent::kind::KEY_UP, crate::nsevent::kind::KEY_DOWN]
+        );
+        // SAFETY: outside `-sendEvent:` there is no current event.
+        assert!(unsafe { current_event(app, objc::sel::get("currentEvent")) }.is_null());
     }
 
     /// `-run` turns the run loop, and `-stop:` ends it.

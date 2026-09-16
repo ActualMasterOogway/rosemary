@@ -10,17 +10,22 @@
     clippy::useless_conversion
 )]
 
+use std::ffi::c_int;
+
 pub mod alert;
 pub mod appearance;
 pub mod application;
 pub mod button;
 pub mod classes;
 pub mod color;
+pub mod coretext;
 pub mod cursor;
 pub(crate) mod decode;
 mod define;
 pub mod event;
+mod font;
 pub mod geometry;
+pub mod graphics;
 pub mod icon;
 pub mod image;
 pub mod keymap;
@@ -42,6 +47,7 @@ pub mod textinput;
 pub mod uchr;
 pub mod view;
 pub mod window;
+pub mod workspace;
 
 pub fn bootstrap() {
     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -51,8 +57,11 @@ pub fn bootstrap() {
         alert::install();
         appearance::install();
         application::install();
+        workspace::install();
         color::install();
+        graphics::install();
         cursor::install();
+        font::install();
         image::install();
         image::bitmap::install();
         menu::install();
@@ -80,6 +89,7 @@ pub fn symbol(name: &str) -> Option<u64> {
     Some(match name {
         "NSApplicationMain" => at!(application::NSApplicationMain),
         "CGMainDisplayID" => at!(screen::CGMainDisplayID),
+        "CGSessionCopyCurrentDictionary" => at!(screen::CGSessionCopyCurrentDictionary),
         "CGDisplayBounds" => at!(screen::CGDisplayBounds),
         "CGDisplayScreenSize" => at!(screen::CGDisplayScreenSize),
         "CGDisplayIsMain" => at!(screen::CGDisplayIsMain),
@@ -106,6 +116,8 @@ pub fn symbol(name: &str) -> Option<u64> {
         "NSBitsPerPixelFromDepth" => at!(screen::NSBitsPerPixelFromDepth),
         "NSNumberOfColorComponents" => at!(screen::NSNumberOfColorComponents),
         "NSPlanarFromDepth" => at!(screen::NSPlanarFromDepth),
+        "NSColorSpaceFromDepth" => at!(screen::NSColorSpaceFromDepth),
+        "NSBestDepth" => at!(screen::NSBestDepth),
         // The two lists differ only in whether a mirrored display is named,
         // and nothing here mirrors.
         "CGGetOnlineDisplayList" | "CGGetActiveDisplayList" => {
@@ -118,6 +130,16 @@ pub fn symbol(name: &str) -> Option<u64> {
             at!(screen::CGAssociateMouseAndMouseCursorPosition)
         }
         "CGEventSourceKeyState" => at!(screen::CGEventSourceKeyState),
+        "CGColorSpaceCreateWithName" => at!(graphics::CGColorSpaceCreateWithName),
+        "CGColorSpaceCreateDeviceRGB" => at!(graphics::CGColorSpaceCreateDeviceRGB),
+        "CGColorSpaceRelease" => at!(graphics::CGColorSpaceRelease),
+        "CGBitmapContextCreate" => at!(graphics::CGBitmapContextCreate),
+        "CGContextRelease" => at!(graphics::CGContextRelease),
+        "CGContextTranslateCTM" => at!(graphics::CGContextTranslateCTM),
+        "CGContextScaleCTM" => at!(graphics::CGContextScaleCTM),
+        "CGContextSetTextDrawingMode" => at!(graphics::CGContextSetTextDrawingMode),
+        "CGContextSetGrayFillColor" => at!(graphics::CGContextSetGrayFillColor),
+        "CGContextSetShouldSmoothFonts" => at!(graphics::CGContextSetShouldSmoothFonts),
         "CGRectGetWidth" => at!(geometry::CGRectGetWidth),
         "CGRectGetHeight" => at!(geometry::CGRectGetHeight),
         "CGRectGetMinX" => at!(geometry::CGRectGetMinX),
@@ -127,6 +149,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CGRectGetMidY" => at!(geometry::CGRectGetMidY),
         "CGRectGetMaxY" => at!(geometry::CGRectGetMaxY),
         "NSPointInRect" => at!(geometry::NSPointInRect),
+        "NSMouseInRect" => at!(geometry::NSMouseInRect),
         "NSInsetRect" => at!(geometry::NSInsetRect),
         "TISCopyCurrentKeyboardInputSource" => at!(textinput::TISCopyCurrentKeyboardInputSource),
         "TISCopyCurrentKeyboardLayoutInputSource" => {
@@ -152,7 +175,10 @@ pub fn symbol(name: &str) -> Option<u64> {
         "LMGetKbdType" => at!(textinput::LMGetKbdType),
         "LMGetKbdLast" => at!(textinput::LMGetKbdLast),
         "UCKeyTranslate" => at!(textinput::UCKeyTranslate),
-        other => return pasteboard_manager::symbol(other),
+        "CGLEnable" => at!(CGLEnable),
+        "CGLDisable" => at!(CGLDisable),
+        "CGLSetParameter" => at!(CGLSetParameter),
+        other => return pasteboard_manager::symbol(other).or_else(|| coretext::symbol(other)),
     })
 }
 
@@ -162,12 +188,14 @@ pub fn names() -> Vec<&'static str> {
         .iter()
         .copied()
         .chain(pasteboard_manager::NAMES.iter().copied())
+        .chain(coretext::NAMES.iter().copied())
         .collect()
 }
 
 pub const NAMES: &[&str] = &[
     "NSApplicationMain",
     "CGMainDisplayID",
+    "CGSessionCopyCurrentDictionary",
     "CGDisplayBounds",
     "CGDisplayScreenSize",
     "CGDisplayIsMain",
@@ -190,6 +218,8 @@ pub const NAMES: &[&str] = &[
     "NSBitsPerPixelFromDepth",
     "NSNumberOfColorComponents",
     "NSPlanarFromDepth",
+    "NSColorSpaceFromDepth",
+    "NSBestDepth",
     "CGGetOnlineDisplayList",
     "CGGetActiveDisplayList",
     "CGDisplayIDToOpenGLDisplayMask",
@@ -197,6 +227,16 @@ pub const NAMES: &[&str] = &[
     "CGWarpMouseCursorPosition",
     "CGAssociateMouseAndMouseCursorPosition",
     "CGEventSourceKeyState",
+    "CGColorSpaceCreateWithName",
+    "CGColorSpaceCreateDeviceRGB",
+    "CGColorSpaceRelease",
+    "CGBitmapContextCreate",
+    "CGContextRelease",
+    "CGContextTranslateCTM",
+    "CGContextScaleCTM",
+    "CGContextSetTextDrawingMode",
+    "CGContextSetGrayFillColor",
+    "CGContextSetShouldSmoothFonts",
     "CGRectGetWidth",
     "CGRectGetHeight",
     "CGRectGetMinX",
@@ -206,6 +246,7 @@ pub const NAMES: &[&str] = &[
     "CGRectGetMidY",
     "CGRectGetMaxY",
     "NSPointInRect",
+    "NSMouseInRect",
     "NSInsetRect",
     "TISCopyCurrentKeyboardInputSource",
     "TISCopyCurrentKeyboardLayoutInputSource",
@@ -223,16 +264,54 @@ pub const NAMES: &[&str] = &[
     "LMGetKbdType",
     "LMGetKbdLast",
     "UCKeyTranslate",
+    "CGLDisable",
+    "CGLSetParameter",
+    "CGLEnable",
 ];
+
+// FIXME (ACCURACY): move all of these to the opengl framework and actually respect them
+#[allow(non_snake_case)]
+extern "C" fn CGLDisable() -> c_int {
+    0
+}
+
+#[allow(non_snake_case)]
+extern "C" fn CGLEnable() -> c_int {
+    0
+}
+
+#[allow(non_snake_case)]
+extern "C" fn CGLSetParameter() -> c_int {
+    0
+}
 
 pub fn ns_app_cell() -> u64 {
     corefoundation::base::global_cell("_NSApp", 0)
 }
 
+// CoreGraphics exports these structures themselves, rather than pointers to
+// them. A guest loads their addresses from its GOT and copies the fields.
+static CG_AFFINE_TRANSFORM_IDENTITY: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+static CG_POINT_ZERO: [f64; 2] = [0.0, 0.0];
+
 pub fn data_symbols() -> Vec<(String, u64)> {
     bootstrap();
     let mut out = classes::class_data();
+    out.extend(coretext::data_symbols());
     out.push(("_NSApp".to_string(), ns_app_cell()));
+    out.push((
+        "_CGAffineTransformIdentity".to_string(),
+        CG_AFFINE_TRANSFORM_IDENTITY.as_ptr() as usize as u64,
+    ));
+    out.push((
+        "_CGPointZero".to_string(),
+        CG_POINT_ZERO.as_ptr() as usize as u64,
+    ));
+    let srgb = foundation::notification::name_object("kCGColorSpaceSRGB");
+    out.push((
+        "_kCGColorSpaceSRGB".to_string(),
+        corefoundation::base::global_cell("_kCGColorSpaceSRGB", srgb),
+    ));
     for name in NOTIFICATION_NAMES {
         let symbol = format!("_{name}");
         let object = foundation::notification::name_object(name);
@@ -302,6 +381,10 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
     text::DID_CHANGE_SELECTION,
     text::CONTROL_DID_CHANGE,
     application::DID_CHANGE_SCREEN_PARAMETERS,
+    workspace::WILL_SLEEP,
+    workspace::DID_WAKE,
+    workspace::SCREENS_DID_SLEEP,
+    workspace::SCREENS_DID_WAKE,
     view::FRAME_DID_CHANGE,
     view::BOUNDS_DID_CHANGE,
     // Watched by a widget toolkit and posted by nothing here: there is no system
@@ -313,6 +396,7 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
     window::WILL_START_LIVE_RESIZE,
     window::DID_END_LIVE_RESIZE,
     "NSColorPanelColorDidChangeNotification",
+    "NSPreferredScrollerStyleDidChangeNotification",
     "NSTextInputContextKeyboardSelectionDidChangeNotification",
 ];
 
@@ -343,6 +427,8 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_NSPatternColorSpace", "NSPatternColorSpace"),
     ("_NSDeviceResolution", "NSDeviceResolution"),
     ("_NSForegroundColorAttributeName", "NSColor"),
+    ("_NSFontAttributeName", "NSFont"),
+    ("_NSObliquenessAttributeName", "NSObliqueness"),
     ("_NSAppearanceNameAqua", "NSAppearanceNameAqua"),
     ("_NSDeviceSize", "NSDeviceSize"),
     ("_NSModalPanelRunLoopMode", "NSModalPanelRunLoopMode"),
@@ -448,5 +534,17 @@ mod tests {
             "{}",
             class.name_str()
         );
+    }
+
+    #[test]
+    fn core_graphics_structure_globals_point_at_their_fields() {
+        let symbols = data_symbols();
+        let (_, identity) = symbols
+            .iter()
+            .find(|(name, _)| name == "_CGAffineTransformIdentity")
+            .expect("published");
+        // SAFETY: the symbol points at the six-double static above.
+        let fields = unsafe { std::slice::from_raw_parts(*identity as *const f64, 6) };
+        assert_eq!(fields, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
     }
 }

@@ -643,7 +643,10 @@ unsafe fn hit(view: Id, point: NSPoint, depth: usize) -> Id {
     // saying so in code this crate cannot see from the frame.
     let sel = objc::sel::get("hitTest:");
     // SAFETY: a live object this runtime allocated.
-    if let Some(method) = unsafe { objc::object::class_of(view) }.and_then(|c| c.method(sel)) {
+    if let Some(method) = unsafe { objc::object::class_of(view) }
+        .and_then(|c| c.method(sel))
+        .filter(|method| method.implementation() != hit_test_method as *const c_void)
+    {
         // SAFETY: `-hitTest:` is `id (id, SEL, NSPoint)`.
         return unsafe {
             let f: unsafe extern "C" fn(Id, Sel, NSPoint) -> Id =
@@ -651,6 +654,13 @@ unsafe fn hit(view: Id, point: NSPoint, depth: usize) -> Id {
             f(view, sel, point)
         };
     }
+    // SAFETY: validated above.
+    unsafe { hit_base(view, point, depth) }
+}
+
+/// The inherited `NSView` hit-test behavior, without redispatching an override
+/// on `view`. This distinction matters when that override calls `super`.
+unsafe fn hit_base(view: Id, point: NSPoint, depth: usize) -> Id {
     let frame = view_of(view).frame;
     if !contains(frame, point) {
         return std::ptr::null_mut();
@@ -675,6 +685,14 @@ unsafe fn hit(view: Id, point: NSPoint, depth: usize) -> Id {
         }
     }
     view
+}
+
+/// `-[NSView hitTest:]`; subclasses with their own method are dispatched by
+/// [`hit`] before this base implementation is considered.
+unsafe extern "C" fn hit_test_method(receiver: Id, _sel: Sel, point: NSPoint) -> Id {
+    // SAFETY: the receiver is a live view and the point is in its superview's
+    // coordinates, as expected by this module's tree walk.
+    unsafe { hit_base(receiver, point, 0) }
 }
 
 /// Whether a rectangle holds a point, on AppKit's half-open rule: the minimum
@@ -1072,6 +1090,8 @@ unsafe extern "C" fn ignored(_receiver: Id, _sel: Sel) {}
 
 unsafe extern "C" fn ignored_flag(_receiver: Id, _sel: Sel, _flag: u8) {}
 
+unsafe extern "C" fn ignored_object(_receiver: Id, _sel: Sel, _object: Id) {}
+
 unsafe extern "C" fn ignored_integer(_receiver: Id, _sel: Sel, _value: isize) {}
 
 unsafe extern "C" fn ignored_rect(_receiver: Id, _sel: Sel, _rect: NSRect) {}
@@ -1113,6 +1133,7 @@ pub(crate) fn install() {
         "isInFullScreenMode" => is_in_full_screen_mode, c"c16@0:8";
         "superview" => superview, c"@16@0:8";
         "subviews" => subviews, c"@16@0:8";
+        "hitTest:" => hit_test_method, c"@32@0:8{CGPoint=dd}16";
         "addSubview:" => add_subview, c"v24@0:8@16";
         "removeFromSuperview" => remove_from_superview, c"v16@0:8";
         "setWantsBestResolutionOpenGLSurface:" => set_wants_best_resolution, c"v20@0:8c16";
@@ -1129,6 +1150,13 @@ pub(crate) fn install() {
         "unlockFocus" => ignored, c"v16@0:8";
         "setNeedsDisplay:" => ignored_flag, c"v20@0:8c16";
         "setHidden:" => ignored_flag, c"v20@0:8c16";
+        // Drawing focus rings belongs to AppKit's control renderer, which this
+        // view does not have; accepting the policy still lets Qt construct it.
+        "setFocusRingType:" => ignored_integer, c"v24@0:8Q16";
+        // Drag delivery is not wired to SDL yet, but registration itself has
+        // no observable result other than which future drag messages arrive.
+        "registerForDraggedTypes:" => ignored_object, c"v24@0:8@16";
+        "unregisterDraggedTypes" => ignored, c"v16@0:8";
         "setAutoresizingMask:" => set_autoresizing_mask, c"v24@0:8Q16";
         "autoresizingMask" => autoresizing_mask, c"Q16@0:8";
         "setAutoresizesSubviews:" => set_autoresizes_subviews, c"v20@0:8c16";
@@ -1272,9 +1300,51 @@ mod tests {
     }
 
     static OVERRIDE_RAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static HIT_OVERRIDE_RUNS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
 
     unsafe extern "C" fn overridden_resize(_receiver: Id, _sel: Sel, _old: NSSize) {
         OVERRIDE_RAN.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    unsafe extern "C" fn overridden_hit_test(receiver: Id, sel: Sel, point: NSPoint) -> Id {
+        HIT_OVERRIDE_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Model an Objective-C override's `[super hitTest:point]`: enter the
+        // inherited implementation without redispatching this override.
+        unsafe { hit_test_method(receiver, sel, point) }
+    }
+
+    #[test]
+    fn a_hit_test_override_can_call_super_once() {
+        crate::bootstrap();
+        let class = corefoundation::base::register(
+            c"R3TestHitView",
+            objc::class::lookup(c"NSView"),
+            INSTANCE_SIZE,
+            false,
+        );
+        methods!(class, {
+            "hitTest:" => overridden_hit_test, c"@32@0:8{CGPoint=dd}16";
+        });
+        let object = objc::object::create_instance(class, 0);
+        // SAFETY: the object has `View` storage and the method signatures match.
+        unsafe {
+            init_with_frame(
+                object,
+                objc::sel::get("initWithFrame:"),
+                rect(0.0, 0.0, 100.0, 100.0),
+            );
+        }
+        HIT_OVERRIDE_RUNS.store(0, std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: a live view and a point inside it.
+        assert_eq!(
+            unsafe { hit_test(object, NSPoint { x: 5.0, y: 5.0 }) },
+            object
+        );
+        assert_eq!(
+            HIT_OVERRIDE_RUNS.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 
     /// The subview is *sent* `-resizeWithOldSuperviewSize:`, so a program that

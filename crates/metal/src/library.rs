@@ -2,6 +2,41 @@
 
 use super::*;
 
+/// `-[MTLDevice newDefaultLibrary]`: the main bundle's `default.metallib`.
+pub(super) unsafe extern "C" fn new_default_library(receiver: Id, _sel: Sel) -> Id {
+    let Some(path) =
+        foundation::bundle::main().and_then(|bundle| bundle.resource("default", "metallib"))
+    else {
+        report_library_error("newDefaultLibrary found no default.metallib in the main bundle");
+        return std::ptr::null_mut();
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            report_library_error(format!(
+                "newDefaultLibrary could not read {}: {error}",
+                path.display()
+            ));
+            return std::ptr::null_mut();
+        }
+    };
+    // SAFETY: an `R3MTLDevice`.
+    let target = unsafe { object::body::<Device>(receiver) }.target;
+    // SAFETY: the profile belongs to the process-wide adapter list.
+    let Some(target) = (unsafe { target.as_ref() }) else {
+        report_library_error("Metal device has no Vulkan target profile");
+        return std::ptr::null_mut();
+    };
+    let (translated, air, entry_modules) = match translate_metallib(&bytes, target) {
+        Ok(result) => result,
+        Err(error) => {
+            report_library_error(error);
+            return std::ptr::null_mut();
+        }
+    };
+    retain_library(receiver, translated, Some(air), entry_modules, Some(target))
+}
+
 pub(super) unsafe extern "C" fn new_library_with_data(
     receiver: Id,
     _sel: Sel,
@@ -14,13 +49,6 @@ pub(super) unsafe extern "C" fn new_library_with_data(
     };
     // SAFETY: dispatch reported this range as the data's bytes.
     let bytes = unsafe { std::slice::from_raw_parts(bytes, length) };
-    let air = match metal_translate::metallib_air(bytes) {
-        Ok(air) => air,
-        Err(error) => {
-            report_library_error(error);
-            return std::ptr::null_mut();
-        }
-    };
     // SAFETY: an `R3MTLDevice`.
     let target = unsafe { object::body::<Device>(receiver) }.target;
     // SAFETY: the profile belongs to the process-wide adapter list.
@@ -28,22 +56,54 @@ pub(super) unsafe extern "C" fn new_library_with_data(
         report_library_error("Metal device has no Vulkan target profile");
         return std::ptr::null_mut();
     };
-    let translated =
-        match metal_translate::translate_cached(metal_translate::AirInput::Bitcode(air), target) {
-            Ok(translated) => translated,
-            Err(error) => {
-                report_library_error(error);
-                return std::ptr::null_mut();
-            }
-        };
-    retain_library(receiver, translated, Some(air), Some(target))
+    let (translated, air, entry_modules) = match translate_metallib(bytes, target) {
+        Ok(result) => result,
+        Err(error) => {
+            report_library_error(error);
+            return std::ptr::null_mut();
+        }
+    };
+    retain_library(receiver, translated, Some(air), entry_modules, Some(target))
+}
+
+fn translate_metallib<'a>(
+    bytes: &'a [u8],
+    target: &metal_translate::TargetProfile,
+) -> Result<
+    (
+        metal_translate::TranslatedLibrary,
+        Vec<&'a [u8]>,
+        Vec<usize>,
+    ),
+    metal_translate::TranslateError,
+> {
+    let modules = metal_translate::metallib_airs(bytes)?;
+    let mut entries = Vec::new();
+    let mut function_constants = Vec::new();
+    let mut entry_modules = Vec::new();
+    for (module, air) in modules.iter().enumerate() {
+        let translated =
+            metal_translate::translate_cached(metal_translate::AirInput::Bitcode(air), target)?;
+        entry_modules.extend(std::iter::repeat_n(module, translated.entries.len()));
+        entries.extend(translated.entries);
+        function_constants.extend(translated.function_constants);
+    }
+    Ok((
+        metal_translate::TranslatedLibrary {
+            entries,
+            function_constants,
+        },
+        modules,
+        entry_modules,
+    ))
 }
 
 /// Wrap a translated library in the `MTLLibrary` object the guest holds.
 pub(super) fn retain_library(
     device: Id,
     translated: metal_translate::TranslatedLibrary,
-    air: Option<&[u8]>,
+    air: Option<Vec<&[u8]>>,
+    entry_modules: Vec<usize>,
     target: Option<&'static metal_translate::TargetProfile>,
 ) -> Id {
     if let Some(target) = target
@@ -61,12 +121,13 @@ pub(super) fn retain_library(
     // Only a library with function constants is ever translated again.
     let air = air
         .filter(|_| !translated.function_constants.is_empty())
-        .map(<[u8]>::to_vec);
+        .map(|modules| modules.into_iter().map(<[u8]>::to_vec).collect());
     let library = object::make(
         c"R3MTLLibrary",
         Library {
             translated,
             air,
+            entry_modules,
             target,
         },
     );
@@ -116,7 +177,8 @@ pub(super) unsafe extern "C" fn new_library_with_source(
         Ok(translated) => translated,
         Err(translation_error) => return fail_library(error, &translation_error.to_string()),
     };
-    let library = retain_library(receiver, translated, None, Some(target));
+    let entry_modules = vec![0; translated.entries.len()];
+    let library = retain_library(receiver, translated, None, entry_modules, Some(target));
     if library.is_null() {
         return fail_library(error, "could not allocate MTL source library");
     }
@@ -186,7 +248,14 @@ pub(super) unsafe extern "C" fn new_function_with_constants(
     // A library which declares no function constants has nothing to
     // specialize: Metal ignores the values, and so does this.
     let specialized = match (&library.air, library.target) {
-        (Some(air), Some(target)) => {
+        (Some(modules), Some(target)) => {
+            let Some(air) = library
+                .entry_modules
+                .get(entry)
+                .and_then(|module| modules.get(*module))
+            else {
+                return fail_library(error, "the function has no owning AIR module");
+            };
             let values = if object::is_kind(constants, c"MTLFunctionConstantValues") {
                 // SAFETY: checked above.
                 unsafe { object::body::<ConstantValues>(constants) }

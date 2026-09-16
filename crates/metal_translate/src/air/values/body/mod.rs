@@ -348,7 +348,13 @@ impl BodyLowering<'_> {
                 self.alloca(allocated, size_type, size, packed)
             }
             (30, [pointer, indices @ ..]) if !indices.is_empty() => {
-                self.element_pointer(pointer, indices, record, fields)
+                self.element_pointer(None, pointer, indices, record, fields)
+            }
+            // New LLVM GEP: inbounds, explicit source element type, pointer,
+            // then the same relative value references as the older record.
+            (43, [inbounds @ 0..=1, source, pointer, indices @ ..]) if !indices.is_empty() => {
+                let _ = inbounds;
+                self.element_pointer(Some(source), pointer, indices, record, fields)
             }
             (24 | 44, [pointer, value, alignment, volatile])
                 if *volatile == 0 && *alignment <= 32 =>
@@ -356,7 +362,12 @@ impl BodyLowering<'_> {
                 self.store(pointer, value, record, fields)
             }
             (20, [pointer, alignment, volatile]) if *volatile == 0 && *alignment <= 32 => {
-                self.load(pointer, record, fields)
+                self.load(pointer, None, record, fields)
+            }
+            // With opaque pointers enabled, LOAD carries the result type
+            // explicitly between the pointer and its alignment.
+            (20, [pointer, result, alignment, volatile]) if *volatile == 0 && *alignment <= 32 => {
+                self.load(pointer, Some(result), record, fields)
             }
             (2, [lhs, rhs, opcode] | [lhs, rhs, opcode, _] | [lhs, _, rhs, opcode, _]) => {
                 self.binary(lhs, rhs, opcode, record, fields)
@@ -364,7 +375,25 @@ impl BodyLowering<'_> {
             (34, [_, cc, callee, args @ ..])
                 if cc & ((1 << CALL_EXPLICIT_TYPE) | (1 << CALL_FMF)) == 0 =>
             {
-                self.call(callee, args, record, fields)
+                self.call(None, callee, args, record, fields)
+            }
+            (34, [_, cc, signature, callee, args @ ..])
+                if cc & (1 << CALL_EXPLICIT_TYPE) != 0 && cc & (1 << CALL_FMF) == 0 =>
+            {
+                self.call(Some(signature), callee, args, record, fields)
+            }
+            // Fast-math flags describe optimization latitude rather than a
+            // different operation in Metal IR. LLVM places them before the
+            // optional explicit function type.
+            (34, [_, cc, _, signature, callee, args @ ..])
+                if cc & (1 << CALL_EXPLICIT_TYPE) != 0 && cc & (1 << CALL_FMF) != 0 =>
+            {
+                self.call(Some(signature), callee, args, record, fields)
+            }
+            (34, [_, cc, _, callee, args @ ..])
+                if cc & (1 << CALL_EXPLICIT_TYPE) == 0 && cc & (1 << CALL_FMF) != 0 =>
+            {
+                self.call(None, callee, args, record, fields)
             }
             (9 | 28, [lhs, rhs, predicate] | [lhs, _, rhs, predicate]) => {
                 self.compare(lhs, rhs, predicate, record, fields)

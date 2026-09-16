@@ -320,6 +320,11 @@ unsafe extern "C" fn string_for_key(receiver: Id, sel: Sel, key: Id) -> Id {
     unsafe { object_for_key(receiver, sel, key) }
 }
 
+/// This string-backed defaults store has no values whose persisted type is an array.
+unsafe extern "C" fn string_array_for_key(_receiver: Id, _sel: Sel, _key: Id) -> Id {
+    std::ptr::null_mut()
+}
+
 /// `-synchronize`, which has already happened: every write goes to disk as it
 /// is made, so there is nothing deferred to flush. `YES`, because that is what
 /// a caller checks and it is true.
@@ -432,6 +437,7 @@ pub(crate) fn install() {
     methods!(class, {
         "objectForKey:" => object_for_key, c"@24@0:8@16";
         "stringForKey:" => string_for_key, c"@24@0:8@16";
+        "stringArrayForKey:" => string_array_for_key, c"@24@0:8@16";
         "setObject:forKey:" => set_object_for_key, c"v32@0:8@16@24";
         "removeObjectForKey:" => remove_object_for_key, c"v24@0:8@16";
         "boolForKey:" => bool_for_key, c"c24@0:8@16";

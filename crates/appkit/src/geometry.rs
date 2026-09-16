@@ -93,6 +93,24 @@ pub unsafe extern "C" fn NSPointInRect(point: NSPoint, rect: NSRect) -> u8 {
     contains(rect, point) as u8
 }
 
+/// `BOOL NSMouseInRect(NSPoint, NSRect, BOOL)`.
+///
+/// Cocoa assigns a point on a shared edge to only one adjacent rectangle. The
+/// horizontal interval is always half-open. The vertical interval follows the
+/// view orientation: a flipped view owns its minimum-y edge, while an
+/// unflipped view owns its maximum-y edge.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn NSMouseInRect(point: NSPoint, rect: NSRect, flipped: u8) -> u8 {
+    let (x, y, width, height) = standardized(rect);
+    let horizontal = point.x >= x && point.x < x + width;
+    let vertical = if flipped != 0 {
+        point.y >= y && point.y < y + height
+    } else {
+        point.y > y && point.y <= y + height
+    };
+    (horizontal && vertical) as u8
+}
+
 /// `NSRect NSInsetRect(NSRect, CGFloat, CGFloat)`: the rectangle shrunk by `dx`
 /// on each side and `dy` on each end. A negative amount grows it, which is how
 /// callers use it to make a margin.
@@ -187,5 +205,25 @@ mod tests {
     fn the_origin_is_the_other_corner() {
         let height = primary_height();
         assert_eq!(point_from_sdl(0.0, height), NSPoint { x: 0.0, y: 0.0 });
+    }
+
+    #[test]
+    fn mouse_rect_vertical_edge_tracks_view_orientation() {
+        let rect = NSRect {
+            origin: NSPoint { x: 10.0, y: 20.0 },
+            size: NSSize {
+                width: 30.0,
+                height: 40.0,
+            },
+        };
+
+        // SAFETY: these calls pass the function's plain value arguments.
+        unsafe {
+            assert_eq!(NSMouseInRect(NSPoint { x: 10.0, y: 20.0 }, rect, 1), 1);
+            assert_eq!(NSMouseInRect(NSPoint { x: 10.0, y: 60.0 }, rect, 1), 0);
+            assert_eq!(NSMouseInRect(NSPoint { x: 10.0, y: 20.0 }, rect, 0), 0);
+            assert_eq!(NSMouseInRect(NSPoint { x: 10.0, y: 60.0 }, rect, 0), 1);
+            assert_eq!(NSMouseInRect(NSPoint { x: 40.0, y: 30.0 }, rect, 0), 0);
+        }
     }
 }

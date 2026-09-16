@@ -349,6 +349,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFNullGetTypeID", U64),
     sig!("CFSetGetTypeID", U64),
     sig!("CFURLGetTypeID", U64),
+    sig!("DASessionCreate", P, P),
+    sig!("DADiskCreateFromVolumePath", P, P, P, P),
+    sig!("DADiskCopyDescription", P, P),
+    sig!("CFURLEnumeratorCreateForMountedVolumes", P, P, U64, P),
+    sig!("CFURLEnumeratorGetNextURL", I64, P, P, P),
     sig!("CFURLCreateFromFSRef", P, P, P),
     sig!("CFURLGetFSRef", BOOL, P, P),
     sig!("CFUUIDGetTypeID", U64),
@@ -362,6 +367,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // bytes are read out of guest memory and copied into the host's object,
     // which is what makes the copy the right one.
     sig!("CFDataCreate", P, P, P, I64),
+    sig!("CFDataCreateWithBytesNoCopy", P, P, P, I64, P),
     sig!("CFDataCreateCopy", P, P, P),
     sig!("CFDataGetBytePtr", P, P),
     sig!("CFDataGetLength", I64, P),
@@ -471,6 +477,15 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFRunLoopTimerIsValid", U8, P),
     sig!("CFRunLoopStop", V, P),
     sig!("CFRunLoopWakeUp", V, P),
+    cbsig!([3], "CFSocketCreateWithNative", P, P, I32, U64, P, P),
+    sig!("CFSocketCreateRunLoopSource", P, P, P, I64),
+    sig!("CFSocketGetNative", I32, P),
+    sig!("CFSocketIsValid", U8, P),
+    sig!("CFSocketGetSocketFlags", U64, P),
+    sig!("CFSocketSetSocketFlags", V, P, U64),
+    sig!("CFSocketEnableCallBacks", V, P, U64),
+    sig!("CFSocketDisableCallBacks", V, P, U64),
+    sig!("CFSocketInvalidate", V, P),
     // `CFAbsoluteTime` is a `double`, and this is where a timer's fire date
     // comes from.
     sig!("CFAbsoluteTimeGetCurrent", F64),
@@ -596,7 +611,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGAssociateMouseAndMouseCursorPosition", I32, I32),
     // `boolean_t CGCursorIsVisible(void)` - an `int`, not a `CGError`, and the
     // pair to `CGDisplayHideCursor`.
-    sig!("CGCursorIsVisible", I32),
+    sig!("CGCursorIsVisible", BOOL),
     // ## The bitmap context, which is how an image becomes texture bytes
     //
     // cocos2d-x decodes every texture the same way: a `CGImageSource` over
@@ -617,6 +632,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // two ordinary vector arguments.
     sig!("CGContextRelease", V, P),
     sig!("CGContextTranslateCTM", V, P, F64, F64),
+    sig!("CGContextScaleCTM", V, P, F64, F64),
+    sig!("CGContextSetTextDrawingMode", V, P, I32),
+    sig!("CGContextSetGrayFillColor", V, P, F64, F64),
+    sig!("CGContextSetShouldSmoothFonts", V, P, BOOL),
     sig!("CGDisplayCopyAllDisplayModes", P, U32, P),
     sig!("CGDisplayCopyDisplayMode", P, U32),
     // Seven floats and a flag, and the `boolean_t` at the end is the argument
@@ -716,6 +735,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGImageSourceCreateImageAtIndex", P, P, U64, P),
     sig!("CGImageSourceCreateWithData", P, P, P),
     sig!("CGMainDisplayID", U32),
+    sig!("CGSessionCopyCurrentDictionary", P),
     sig!("CGReleaseDisplayFadeReservation", I32, U32),
     // A `CGWindowLevel` and a `CGWindowLevelKey` are both `int32_t`.
     sig!("CGShieldingWindowLevel", I32),
@@ -1046,6 +1066,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `SEL NSSelectorFromString(NSString *)` - two pointers, and the reason it
     // needs no translation is.
     sig!("NSSelectorFromString", P, P),
+    sig!("NSFileTypeForHFSTypeCode", P, U32),
     // The handler is a guest function pointer the *runtime* calls, from inside
     // whatever raised - so it goes out as a thunk like every other callback
     // crossing the seam.
@@ -3116,6 +3137,40 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGColorGetTypeID", U64),
     sig!("CTFontGetTypeID", U64),
     sig!("CTRunGetTypeID", U64),
+    sig!("CTFontCreateUIFontForLanguage", P, U32, F64, P),
+    sig!("CTFontCreateWithName", P, P, F64, P),
+    sig!("CTFontCopyFontDescriptor", P, P),
+    sig!("CTFontCopyGraphicsFont", P, P, P),
+    sig!("CTFontCopyName", P, P, P),
+    sig!("CTFontCopyFamilyName", P, P),
+    sig!("CTFontCopyPostScriptName", P, P),
+    sig!("CTFontGetSymbolicTraits", U32, P),
+    sig!("CTFontGetUnitsPerEm", U32, P),
+    sig!("CTFontGetSize", F64, P),
+    sig!("CTFontGetAscent", F64, P),
+    sig!("CTFontGetDescent", F64, P),
+    sig!("CTFontGetLeading", F64, P),
+    sig!("CTFontGetCapHeight", F64, P),
+    sig!("CTFontGetXHeight", F64, P),
+    sig!("CTFontGetSlantAngle", F64, P),
+    sig!("CTFontGetUnderlinePosition", F64, P),
+    sig!("CTFontGetUnderlineThickness", F64, P),
+    sig!("CTFontGetAdvancesForGlyphs", F64, P, U32, P, P, I64),
+    sig!("CTFontGetGlyphsForCharacters", BOOL, P, P, P, I64),
+    sig!("CTFontDrawGlyphs", V, P, P, P, U64, P),
+    sig!("CTFontDescriptorCopyAttribute", P, P, P),
+    sig!("CTFontCopyAttribute", P, P, P),
+    sig!("CTFontCopyTraits", P, P),
+    sig!("CTFontDescriptorCreateWithAttributes", P, P),
+    sig!("CTFontDescriptorCreateMatchingFontDescriptor", P, P, P),
+    sig!("CTFontCreateWithFontDescriptor", P, P, F64, P),
+    sig!("CTFontCopyTable", P, P, U32, U32),
+    sig!("CTFontCopyDefaultCascadeListForLanguages", P, P, P),
+    sig!("CTFontManagerCopyAvailableFontFamilyNames", P),
+    sig!("CTFontManagerCreateFontDescriptorsFromURL", P, P),
+    sig!("CTFontManagerCreateFontDescriptorFromData", P, P),
+    sig!("NSColorSpaceFromDepth", P, I32),
+    sig!("NSBestDepth", I32, P, I64, I64, BOOL, P),
     sig!("CGEventSourceKeyState", BOOL, I32, U16),
     sig!("UTTypeConformsTo", BOOL, P, P),
     // `CFDictionaryRef _CFCopySystemVersionDictionary(void)` - private CF, and
@@ -3366,6 +3421,9 @@ pub static REFUSED: &[(&str, &str)] = &[
     ),
     ("CGRectContainsPoint", AGGREGATE),
     ("CGRectInset", AGGREGATE),
+    ("NSMouseInRect", AGGREGATE),
+    ("CTFontGetBoundingBox", AGGREGATE),
+    ("CTFontGetBoundingRectsForGlyphs", AGGREGATE),
     // `NSApp` is data like the rest of this block, and the least obvious of
     // them.
     ("NSApp", DATA),

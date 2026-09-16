@@ -34,6 +34,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "applicationservices"
+version = "0.1.0"
+dependencies = [
+ "appkit",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -47,6 +54,10 @@ checksum = "0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f"
 dependencies = [
  "libloading",
 ]
+
+[[package]]
+name = "audiotoolbox"
+version = "0.1.0"
 
 [[package]]
 name = "autocfg"
@@ -1124,6 +1135,8 @@ name = "rosetta3"
 version = "0.1.0"
 dependencies = [
  "appkit",
+ "applicationservices",
+ "audiotoolbox",
  "contacts",
  "coreaudio",
  "corefoundation",

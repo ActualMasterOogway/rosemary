@@ -19,6 +19,9 @@ pub const NAMES: &[&str] = &[
     "/System/Library/Frameworks/OpenGL.framework/Versions/Current/OpenGL",
     "/System/Library/Frameworks/OpenGL.framework/Versions/A/OpenGL",
     "/System/Library/Frameworks/OpenGL.framework/OpenGL",
+    "/System/Library/Frameworks/OpenGL.framework/Versions/Current/Libraries/libGL.dylib",
+    "/System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib",
+    "/System/Library/Frameworks/OpenGL.framework/Libraries/libGL.dylib",
     "OpenGL",
 ];
 

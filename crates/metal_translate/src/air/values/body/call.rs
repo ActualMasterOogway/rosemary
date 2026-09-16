@@ -5,6 +5,7 @@ use super::*;
 impl BodyLowering<'_> {
     pub(super) fn call(
         &mut self,
+        explicit_signature: Option<&u64>,
         callee: &u64,
         args: &[u64],
         record: &llvm_bitcode::bitcode::Record,
@@ -16,6 +17,13 @@ impl BodyLowering<'_> {
                 DecodedType::Pointer { pointee, .. } => pointee,
                 _ => self.table.values[callee].ty,
             };
+            if let Some(explicit) = explicit_signature
+                && type_reference(Some(explicit), self.types.len())? != signature
+            {
+                return Err(semantic(
+                    "LLVM call's explicit type does not match its target",
+                ));
+            }
             let DecodedType::Function { result, parameters } = &self.types[signature] else {
                 return Err(semantic("LLVM call target is not a function"));
             };

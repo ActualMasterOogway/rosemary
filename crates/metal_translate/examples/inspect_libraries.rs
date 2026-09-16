@@ -21,7 +21,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Report what a device with 64-bit integer support would accept; that is
     // the common desktop Vulkan profile.
     let target = TargetProfile {
+        shader_int8: true,
         shader_int64: true,
+        storage_buffer8_bit_access: true,
+        shader_storage_image_write_without_format: true,
         variable_pointers_storage_buffer: true,
         variable_pointers: true,
         ..TargetProfile::vulkan_1_3()

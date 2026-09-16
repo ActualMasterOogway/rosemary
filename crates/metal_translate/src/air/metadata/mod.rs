@@ -19,6 +19,7 @@ use fields::*;
 #[derive(Clone, Debug)]
 pub(super) enum MetadataValue {
     String(String),
+    Value(usize),
     Node(Vec<Option<MetadataOperand>>),
     Other,
 }
@@ -93,6 +94,34 @@ impl Metadata {
                     }
                     // METADATA_KIND declares an attachment kind, not a value.
                     6 => {}
+                    // METADATA_VALUE: a module value wrapped as metadata.
+                    2 => {
+                        let fields = record_values(record);
+                        let [_, value] = fields.as_slice() else {
+                            return Err(semantic("AIR metadata value has the wrong shape"));
+                        };
+                        values.push(MetadataValue::Value(usize::try_from(*value).map_err(
+                            |_| semantic("AIR metadata value id does not fit in memory"),
+                        )?));
+                    }
+                    // METADATA_NODE and METADATA_DISTINCT_NODE. Their operands
+                    // are one-based metadata IDs; zero is a null operand.
+                    3 | 5 => {
+                        let operands = record_values(record)
+                            .iter()
+                            .map(|id| {
+                                if *id == 0 {
+                                    return Ok(None);
+                                }
+                                usize::try_from(*id - 1)
+                                    .map(|index| Some(MetadataOperand::Metadata(index)))
+                                    .map_err(|_| {
+                                        semantic("AIR metadata operand does not fit in memory")
+                                    })
+                            })
+                            .collect::<Result<_, _>>()?;
+                        values.push(MetadataValue::Node(operands));
+                    }
                     // METADATA_OLD_NODE: (type, value) operand pairs.
                     8 => {
                         let fields = record_values(record);
@@ -119,6 +148,23 @@ impl Metadata {
                         }
                         values.push(MetadataValue::Node(operands));
                     }
+                    // METADATA_STRINGS: all strings share one blob. The blob's
+                    // prefix is a VBR6 stream of lengths and its suffix is the
+                    // concatenated UTF-8 bytes.
+                    35 => {
+                        let fields = record_values(record);
+                        let [count, offset] = fields.as_slice() else {
+                            return Err(semantic("AIR metadata strings have the wrong shape"));
+                        };
+                        let Some(Payload::Blob(blob)) = record.clone().take_payload() else {
+                            return Err(semantic("AIR metadata strings have no blob"));
+                        };
+                        values.extend(
+                            metadata_strings(&blob, *count, *offset)?
+                                .into_iter()
+                                .map(MetadataValue::String),
+                        );
+                    }
                     _ => values.push(MetadataValue::Other),
                 }
             }
@@ -142,6 +188,60 @@ impl Metadata {
             MetadataValue::String(text) => Some(text),
             _ => None,
         }
+    }
+}
+
+fn metadata_strings(blob: &[u8], count: u64, offset: u64) -> Result<Vec<String>, TranslateError> {
+    let count = usize::try_from(count)
+        .map_err(|_| semantic("AIR metadata string count does not fit in memory"))?;
+    let offset = usize::try_from(offset)
+        .map_err(|_| semantic("AIR metadata string offset does not fit in memory"))?;
+    if count == 0 || offset > blob.len() {
+        return Err(semantic("AIR metadata strings have an invalid layout"));
+    }
+    let lengths = &blob[..offset];
+    let mut strings = &blob[offset..];
+    let mut bit = 0usize;
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        let length = usize::try_from(read_vbr6(lengths, &mut bit)?)
+            .map_err(|_| semantic("AIR metadata string length does not fit in memory"))?;
+        let Some((text, rest)) = strings.split_at_checked(length) else {
+            return Err(semantic("AIR metadata strings are truncated"));
+        };
+        out.push(
+            std::str::from_utf8(text)
+                .map_err(|_| semantic("AIR metadata string is not UTF-8"))?
+                .to_string(),
+        );
+        strings = rest;
+    }
+    Ok(out)
+}
+
+/// One LLVM bitstream VBR value with six-bit groups and five payload bits.
+fn read_vbr6(bytes: &[u8], bit: &mut usize) -> Result<u64, TranslateError> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    loop {
+        let mut group = 0u8;
+        for position in 0..6 {
+            let Some(byte) = bytes.get(*bit / 8) else {
+                return Err(semantic("AIR metadata string lengths are truncated"));
+            };
+            group |= ((byte >> (*bit % 8)) & 1) << position;
+            *bit += 1;
+        }
+        value |= u64::from(group & 0x1f)
+            .checked_shl(shift)
+            .ok_or_else(|| semantic("AIR metadata string length overflows"))?;
+        if group & 0x20 == 0 {
+            return Ok(value);
+        }
+        shift = shift
+            .checked_add(5)
+            .filter(|shift| *shift < 64)
+            .ok_or_else(|| semantic("AIR metadata string length overflows"))?;
     }
 }
 
@@ -184,6 +284,8 @@ impl Metadata {
                 Some(MetadataOperand::Metadata(index)) => {
                     if let Some(text) = self.string(*index) {
                         items.push(Item::Text(text));
+                    } else if let Some(MetadataValue::Value(id)) = self.values.get(*index) {
+                        items.push(Item::Number(values.integer(*id, types)?));
                     }
                 }
                 Some(MetadataOperand::Value(id)) => {
@@ -250,8 +352,13 @@ impl Metadata {
                 "AIR entry metadata does not have a function, output and input list",
             ));
         };
-        let Some(MetadataOperand::Value(function)) = function else {
-            return Err(semantic("AIR entry metadata has no function"));
+        let function = match function {
+            Some(MetadataOperand::Value(function)) => *function,
+            Some(MetadataOperand::Metadata(index)) => match self.values.get(*index) {
+                Some(MetadataValue::Value(function)) => *function,
+                _ => return Err(semantic("AIR entry metadata has no function")),
+            },
+            None => return Err(semantic("AIR entry metadata has no function")),
         };
         let outputs = match outputs {
             Some(MetadataOperand::Metadata(index)) => self.list(*index)?,
@@ -265,7 +372,7 @@ impl Metadata {
             _ => return Err(semantic("AIR entry input list is not metadata")),
         };
         let mut interface = StageInterface {
-            function: *function,
+            function,
             resources: Vec::new(),
             inputs: Vec::new(),
             outputs: Vec::new(),

@@ -12,6 +12,22 @@ use foundation::geometry::{CGFloat, NSRect};
 use objc::object::Id;
 use objc::sel::Sel;
 
+/// `CGSessionCopyCurrentDictionary`.
+///
+/// There is no WindowServer login session on this host. An empty dictionary is
+/// still preferable to null: it represents a local session with none of the
+/// optional flags (notably `kCGSSessionRemote`) set, which is the environment
+/// the SDL-backed application actually runs in.
+#[expect(non_snake_case, reason = "the C spelling is the interface")]
+pub unsafe extern "C" fn CGSessionCopyCurrentDictionary() -> corefoundation::base::CFTypeRef {
+    corefoundation::collections::new_dictionary(
+        &[],
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    )
+}
+
 use crate::define::{class_methods, methods};
 
 #[repr(C)]
@@ -234,6 +250,27 @@ pub unsafe extern "C" fn NSNumberOfColorComponents(_space: Id) -> isize {
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn NSPlanarFromDepth(_depth: i32) -> u8 {
     0
+}
+
+/// The color-space name associated with the RGB depth this runtime reports.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn NSColorSpaceFromDepth(_depth: i32) -> Id {
+    foundation::notification::name_object("NSCalibratedRGBColorSpace") as Id
+}
+
+/// Choose the sole window depth this backend exposes.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn NSBestDepth(
+    _color_space: Id,
+    _bits_per_sample: isize,
+    _bits_per_pixel: isize,
+    _planar: u8,
+    exact: *mut u8,
+) -> i32 {
+    if !exact.is_null() {
+        unsafe { exact.write(1) };
+    }
+    WINDOW_DEPTH_24_BIT_RGB
 }
 
 /// `-[NSScreen colorSpace]`, an `NSColorSpace`.

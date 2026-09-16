@@ -453,6 +453,7 @@ impl RunLoop {
             let now = Instant::now();
             let (sources, timers) = self.contents(mode);
             let mut handled = false;
+            crate::socket::poll();
             self.observe(mode, activity::BEFORE_TIMERS);
             for timer in &timers {
                 handled |= timer.fire(now);

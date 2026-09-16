@@ -206,6 +206,21 @@ unsafe extern "C" fn init_with_content_rect(
     receiver
 }
 
+/// The designated initializer's screen-aware spelling. SDL chooses the host
+/// display from the rectangle, so the explicit `NSScreen` needs no separate
+/// translation here.
+unsafe extern "C" fn init_with_content_rect_screen(
+    receiver: Id,
+    sel: Sel,
+    rect: NSRect,
+    style_mask: usize,
+    backing: usize,
+    defer: u8,
+    _screen: Id,
+) -> Id {
+    unsafe { init_with_content_rect(receiver, sel, rect, style_mask, backing, defer) }
+}
+
 /// Run `-initWithContentRect:...` for a test, answering whether SDL could
 /// make the window at all - a host with no display cannot, and a test which
 /// needs one skips rather than fails.
@@ -486,6 +501,18 @@ unsafe extern "C" fn set_frame(receiver: Id, _sel: Sel, rect: NSRect) {
 
 unsafe extern "C" fn set_frame_display(receiver: Id, sel: Sel, rect: NSRect, _display: u8) {
     // SAFETY: `-setFrame:` is `void (id, SEL, NSRect)`.
+    unsafe { set_frame(receiver, sel, rect) };
+}
+
+unsafe extern "C" fn set_frame_display_animate(
+    receiver: Id,
+    sel: Sel,
+    rect: NSRect,
+    _display: u8,
+    _animate: u8,
+) {
+    // Animation has no SDL equivalent; applying the final frame preserves the
+    // observable geometry and the existing resize notifications.
     unsafe { set_frame(receiver, sel, rect) };
 }
 
@@ -966,6 +993,20 @@ unsafe extern "C" fn ignored_size(_receiver: Id, _sel: Sel, _size: NSSize) {}
 
 unsafe extern "C" fn ignored_integer(_receiver: Id, _sel: Sel, _value: isize) {}
 
+unsafe extern "C" fn no(_receiver: Id, _sel: Sel) -> u8 {
+    0
+}
+
+unsafe extern "C" fn nil(_receiver: Id, _sel: Sel) -> Id {
+    std::ptr::null_mut()
+}
+
+unsafe extern "C" fn zero_depth(_receiver: Id, _sel: Sel) -> i32 {
+    0
+}
+
+unsafe extern "C" fn ignored_depth(_receiver: Id, _sel: Sel, _depth: i32) {}
+
 /// `-invalidateCursorRectsForView:`, which is the whole of a program's custom
 /// cursor: AppKit answers it by discarding that view's rectangles and asking
 /// the view to install them again through `-resetCursorRects`, and the cursor
@@ -1017,6 +1058,8 @@ pub(crate) fn install() {
     methods!(class, {
         "initWithContentRect:styleMask:backing:defer:" => init_with_content_rect,
             c"@56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16Q48Q56c64";
+        "initWithContentRect:styleMask:backing:defer:screen:" => init_with_content_rect_screen,
+            c"@80@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16Q48Q56c64@72";
         "frame" => frame, c"{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8";
         "contentRectForFrameRect:" => identity_rect,
             c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
@@ -1024,6 +1067,7 @@ pub(crate) fn install() {
             c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "setFrame:" => set_frame, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "setFrame:display:" => set_frame_display, c"v52@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16c48";
+        "setFrame:display:animate:" => set_frame_display_animate, c"v52@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16c48c49";
         "setFrameOrigin:" => set_frame_origin, c"v32@0:8{CGPoint=dd}16";
         "convertBaseToScreen:" => convert_base_to_screen, c"{CGPoint=dd}32@0:8{CGPoint=dd}16";
         "convertScreenToBase:" => convert_screen_to_base, c"{CGPoint=dd}32@0:8{CGPoint=dd}16";
@@ -1072,6 +1116,18 @@ pub(crate) fn install() {
         "windowNumber" => window_number, c"q16@0:8";
         "setTitlebarAppearsTransparent:" => ignored_flag, c"v20@0:8c16";
         "setTitleVisibility:" => ignored_integer, c"v24@0:8q16";
+        "setTabbingMode:" => ignored_integer, c"v24@0:8q16";
+        "setAnimationBehavior:" => ignored_integer, c"v24@0:8q16";
+        "setHasShadow:" => ignored_flag, c"v20@0:8c16";
+        "setDocumentEdited:" => ignored_flag, c"v20@0:8c16";
+        "setWorksWhenModal:" => ignored_flag, c"v20@0:8c16";
+        "setResizeIncrements:" => ignored_size, c"v32@0:8{CGSize=dd}16";
+        "setTitleWithRepresentedFilename:" => ignored_object, c"v24@0:8@16";
+        "ignoresMouseEvents" => no, c"c16@0:8";
+        "toolbar" => nil, c"@16@0:8";
+        "depthLimit" => zero_depth, c"i16@0:8";
+        "setDepthLimit:" => ignored_depth, c"v20@0:8i16";
+        "setDynamicDepthLimit:" => ignored_flag, c"v20@0:8c16";
         "setMovableByWindowBackground:" => ignored_flag, c"v20@0:8c16";
         "setIgnoresMouseEvents:" => ignored_flag, c"v20@0:8c16";
         "collectionBehavior" => collection_behavior, c"Q16@0:8";

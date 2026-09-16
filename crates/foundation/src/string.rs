@@ -618,6 +618,54 @@ unsafe extern "C" fn removing_percent_encoding(receiver: Id, _sel: Sel) -> Id {
     slice(&decoded, 0, decoded.len())
 }
 
+/// Percent-encode UTF-8 for an `URLPathAllowedCharacterSet`.
+unsafe extern "C" fn adding_percent_encoding(receiver: Id, _sel: Sel, allowed: Id) -> Id {
+    if allowed.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the receiver is an NSString.
+    let original = unsafe { bytes(receiver) };
+    let mut encoded = Vec::with_capacity(original.len());
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for byte in original {
+        // SAFETY: the caller supplied an `NSCharacterSet`.
+        let allowed = unsafe { crate::characterset::contains(allowed, byte) };
+        if allowed {
+            encoded.push(byte);
+        } else {
+            encoded.extend_from_slice(&[
+                b'%',
+                HEX[(byte >> 4) as usize],
+                HEX[(byte & 15) as usize],
+            ]);
+        }
+    }
+    slice(&encoded, 0, encoded.len())
+}
+
+unsafe extern "C" fn trimming_characters(receiver: Id, _sel: Sel, set: Id) -> Id {
+    if set.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the receiver is an NSString.
+    let original = unsafe { bytes(receiver) };
+    let start = original
+        .iter()
+        .position(|byte| {
+            // SAFETY: `set` is the caller's live NSCharacterSet.
+            !unsafe { crate::characterset::contains(set, *byte) }
+        })
+        .unwrap_or(original.len());
+    let end = original
+        .iter()
+        .rposition(|byte| {
+            // SAFETY: as above.
+            !unsafe { crate::characterset::contains(set, *byte) }
+        })
+        .map_or(start, |index| index + 1);
+    slice(&original, start, end)
+}
+
 unsafe extern "C" fn substring_from_index(receiver: Id, _sel: Sel, index: usize) -> Id {
     // SAFETY: an `NSString`.
     let whole = unsafe { bytes(receiver) };
@@ -997,6 +1045,8 @@ pub(crate) fn install() {
         "initWithCString:encoding:" => init_with_cstring_encoding, c"@32@0:8*16Q24";
         "initWithFormat:" => init_with_format, c"@24@0:8@16";
         "stringByRemovingPercentEncoding" => removing_percent_encoding, c"@16@0:8";
+        "stringByAddingPercentEncodingWithAllowedCharacters:" => adding_percent_encoding, c"@24@0:8@16";
+        "stringByTrimmingCharactersInSet:" => trimming_characters, c"@24@0:8@16";
         "stringByAppendingString:" => append_string, c"@24@0:8@16";
     });
     let mutable = objc::class::lookup(c"NSMutableString").expect("NSMutableString");
@@ -1152,5 +1202,28 @@ mod tests {
             .expect("an array");
             assert_eq!(array.values.len(), 1, "separator {separator:?}");
         }
+    }
+
+    #[test]
+    fn url_path_percent_encoding_preserves_path_punctuation() {
+        crate::bootstrap();
+        let source = from_str("/login/a b?next=x");
+        // SAFETY: a nullary class method returning its process-lifetime set.
+        let allowed = unsafe {
+            crate::characterset::url_path_allowed_character_set(
+                std::ptr::null_mut(),
+                objc::sel::get("URLPathAllowedCharacterSet"),
+            )
+        };
+        // SAFETY: a string receiver and a live character-set object.
+        let encoded = unsafe {
+            adding_percent_encoding(
+                source,
+                objc::sel::get("stringByAddingPercentEncodingWithAllowedCharacters:"),
+                allowed,
+            )
+        };
+        // SAFETY: an NSString this call created.
+        assert_eq!(unsafe { bytes(encoded) }, b"/login/a%20b%3Fnext=x");
     }
 }

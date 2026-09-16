@@ -544,6 +544,11 @@ unsafe extern "C" fn unhide(_class: Id, _sel: Sel) {
     }
 }
 
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGCursorIsVisible() -> bool {
+    HIDDEN.load(std::sync::atomic::Ordering::Acquire) == 0
+}
+
 /// `-setOnMouseEntered:` and `-setOnMouseExited:`, which say that a *tracking
 /// area* should set this cursor rather than a cursor rectangle.
 ///

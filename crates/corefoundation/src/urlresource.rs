@@ -22,6 +22,11 @@
 // The C spellings are the interface.
 #![allow(non_snake_case)]
 
+use std::ffi::c_void;
+
+use objc::class::Class;
+use objc::object::Id;
+
 use crate::base::{CFIndex, CFTypeRef};
 
 /// `Boolean`, which is a byte.
@@ -386,11 +391,122 @@ pub unsafe extern "C" fn CFURLCreateWithBytes(
     }
 }
 
+#[repr(C)]
+struct EnumeratorBody {
+    isa: *const Class,
+    contents: *mut Enumerator,
+}
+
+struct Enumerator {
+    root: CFTypeRef,
+    yielded: bool,
+}
+
+impl Drop for Enumerator {
+    fn drop(&mut self) {
+        // SAFETY: the enumerator owns the create-rule reference to its URL.
+        unsafe { crate::api::CFRelease(self.root) };
+    }
+}
+
+fn enumerator_class() -> &'static Class {
+    static CLASS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let pointer = *CLASS.get_or_init(|| {
+        let class = crate::base::register(
+            c"__NSCFURLEnumerator",
+            None,
+            size_of::<EnumeratorBody>(),
+            true,
+        );
+        unsafe extern "C" fn dealloc(receiver: Id, _sel: objc::sel::Sel) {
+            // SAFETY: this class stores a boxed `Enumerator` in its second word.
+            unsafe {
+                let body = receiver as *mut EnumeratorBody;
+                if !(*body).contents.is_null() {
+                    drop(Box::from_raw((*body).contents));
+                    (*body).contents = std::ptr::null_mut();
+                }
+                objc::arc::finalize(receiver);
+            }
+        }
+        class.replace_method(
+            objc::sel::get("dealloc"),
+            dealloc as *const c_void,
+            c"v16@0:8",
+        );
+        objc::class::ptr(class) as usize
+    });
+    // SAFETY: the cell contains a registered, process-lifetime class.
+    unsafe { objc::class::from_ptr(pointer as *const Class).expect("a class") }
+}
+
+/// Enumerate the host's mounted volumes. The root filesystem is the portable
+/// volume every supported host has and is enough for Qt's storage accounting.
+pub unsafe extern "C" fn CFURLEnumeratorCreateForMountedVolumes(
+    _allocator: CFTypeRef,
+    _options: u64,
+    _property_keys: CFTypeRef,
+) -> CFTypeRef {
+    let root = crate::url::new_file_url("/", true);
+    // SAFETY: the body begins with `isa` and matches the registered size.
+    let body: *mut EnumeratorBody = unsafe { crate::base::allocate(enumerator_class()) };
+    if body.is_null() {
+        // SAFETY: `root` is this call's create-rule reference.
+        unsafe { crate::api::CFRelease(root) };
+        return std::ptr::null();
+    }
+    // SAFETY: `body` is a live instance with a writable contents word.
+    unsafe {
+        (*body).contents = Box::into_raw(Box::new(Enumerator {
+            root,
+            yielded: false,
+        }))
+    };
+    body as CFTypeRef
+}
+
+/// Return the root volume once, then `kCFURLEnumeratorEnd`.
+pub unsafe extern "C" fn CFURLEnumeratorGetNextURL(
+    enumerator: CFTypeRef,
+    url: *mut CFTypeRef,
+    error: *mut CFTypeRef,
+) -> CFIndex {
+    if !url.is_null() {
+        // SAFETY: the caller supplied the result word.
+        unsafe { url.write(std::ptr::null()) };
+    }
+    if !error.is_null() {
+        // SAFETY: the caller supplied the result word.
+        unsafe { error.write(std::ptr::null()) };
+    }
+    // SAFETY: the caller's handle must be null or a runtime object.
+    if !unsafe { crate::base::is_kind_of(enumerator, enumerator_class()) } {
+        return 2;
+    }
+    let body = enumerator as *mut EnumeratorBody;
+    // SAFETY: an instance of this class has the body above.
+    let state = unsafe { (*body).contents.as_mut() };
+    let Some(state) = state else {
+        return 2;
+    };
+    if state.yielded {
+        return 2;
+    }
+    state.yielded = true;
+    if !url.is_null() {
+        // Borrowed for as long as the enumerator remains alive.
+        unsafe { url.write(state.root) };
+    }
+    1
+}
+
 pub const NAMES: &[&str] = &[
     "CFURLCopyResourcePropertyForKey",
     "CFURLCopyResourcePropertiesForKeys",
     "CFURLCreateFromFileSystemRepresentation",
     "CFURLCreateWithBytes",
+    "CFURLEnumeratorCreateForMountedVolumes",
+    "CFURLEnumeratorGetNextURL",
 ];
 
 pub fn symbol(name: &str) -> Option<u64> {
@@ -401,6 +517,10 @@ pub fn symbol(name: &str) -> Option<u64> {
             CFURLCreateFromFileSystemRepresentation as *const ()
         }
         "CFURLCreateWithBytes" => CFURLCreateWithBytes as *const (),
+        "CFURLEnumeratorCreateForMountedVolumes" => {
+            CFURLEnumeratorCreateForMountedVolumes as *const ()
+        }
+        "CFURLEnumeratorGetNextURL" => CFURLEnumeratorGetNextURL as *const (),
         _ => return None,
     };
     Some(f as usize as u64)
@@ -487,5 +607,33 @@ mod tests {
         let (total, available) = capacity(&volume).expect("a mounted filesystem has a size");
         assert!(total > 0, "a volume with no bytes at all");
         assert!(available <= total);
+    }
+
+    #[test]
+    fn mounted_volume_enumerator_yields_root_then_ends() {
+        // SAFETY: null means the default allocator and no property keys.
+        let enumerator = unsafe {
+            CFURLEnumeratorCreateForMountedVolumes(std::ptr::null(), 0, std::ptr::null())
+        };
+        let mut url = std::ptr::null();
+        let mut error = std::ptr::null();
+        // SAFETY: both output words are writable and the enumerator is live.
+        assert_eq!(
+            unsafe { CFURLEnumeratorGetNextURL(enumerator, &mut url, &mut error) },
+            1
+        );
+        // SAFETY: the returned URL is borrowed from the live enumerator.
+        assert_eq!(
+            unsafe { crate::url::as_url(url) }.and_then(|u| u.file_path()),
+            Some("/".to_string())
+        );
+        assert!(error.is_null());
+        assert_eq!(
+            unsafe { CFURLEnumeratorGetNextURL(enumerator, &mut url, &mut error) },
+            2
+        );
+        assert!(url.is_null());
+        // SAFETY: balances the create rule.
+        unsafe { crate::api::CFRelease(enumerator) };
     }
 }

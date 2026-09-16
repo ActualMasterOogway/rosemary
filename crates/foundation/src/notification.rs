@@ -628,7 +628,7 @@ pub mod cf {
 }
 
 /// The default center, for a caller with no class object in hand.
-fn default_center_object() -> Id {
+pub fn default_center_object() -> Id {
     match objc::class::lookup(c"NSNotificationCenter") {
         Some(class) => center_of(class),
         None => std::ptr::null_mut(),

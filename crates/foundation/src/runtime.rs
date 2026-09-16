@@ -20,6 +20,7 @@ pub const NAMES: &[&str] = &[
     "NSStringFromSelector",
     "NSClassFromString",
     "NSStringFromClass",
+    "NSFileTypeForHFSTypeCode",
 ];
 
 pub fn symbol(name: &str) -> Option<u64> {
@@ -28,6 +29,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         "NSStringFromSelector" => NSStringFromSelector as *const (),
         "NSClassFromString" => NSClassFromString as *const (),
         "NSStringFromClass" => NSStringFromClass as *const (),
+        "NSFileTypeForHFSTypeCode" => NSFileTypeForHFSTypeCode as *const (),
         _ => return None,
     };
     Some(f as usize as u64)
@@ -106,6 +108,22 @@ unsafe extern "C" fn NSStringFromClass(class: *const objc::class::Class) -> Id {
     autoreleased(class.name_str())
 }
 
+/// `NSString *NSFileTypeForHFSTypeCode(OSType)`.
+///
+/// HFS types use the quoted four-byte spelling Foundation accepts as a file
+/// type, with the most significant byte first. Studio asks for `'APPL'` while
+/// classifying a workspace notification.
+unsafe extern "C" fn NSFileTypeForHFSTypeCode(code: u32) -> Id {
+    let bytes = code.to_be_bytes();
+    let mut encoded = [0u8; 6];
+    encoded[0] = b'\'';
+    encoded[1..5].copy_from_slice(&bytes);
+    encoded[5] = b'\'';
+    let string = corefoundation::string::from_bytes(&encoded, false);
+    // SAFETY: a fresh string returned by a non-create Foundation function.
+    unsafe { corefoundation::api::CFAutorelease(string) as Id }
+}
+
 /// `-className`, the receiver's class name as an `NSString`.
 ///
 /// Foundation declares it on `NSObject`, so every object answers it - which is
@@ -129,4 +147,18 @@ pub(crate) fn install() {
     methods!(nsobject, {
         "className" => class_name, c"@16@0:8";
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hfs_type_preserves_four_character_byte_order() {
+        crate::bootstrap();
+        // SAFETY: the returned object is a live Foundation string.
+        let encoded = unsafe { NSFileTypeForHFSTypeCode(u32::from_be_bytes(*b"APPL")) };
+        // SAFETY: `encoded` is the string created immediately above.
+        assert_eq!(unsafe { crate::string::bytes(encoded) }, b"'APPL'");
+    }
 }

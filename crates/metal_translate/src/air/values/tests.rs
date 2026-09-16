@@ -42,6 +42,33 @@ fn a_device_atomic_names_the_device_scope() {
 }
 
 #[test]
+fn a_modern_texture_write_accepts_its_trailing_qualifier() {
+    let texture = Operand::Value(ValueId(0));
+    let coordinate = Operand::Value(ValueId(1));
+    let value = Operand::Value(ValueId(2));
+    let kind = air_intrinsic(
+        "air.write_texture_3d.v4f32",
+        &[
+            texture.clone(),
+            coordinate.clone(),
+            value.clone(),
+            Operand::u32(0),
+            Operand::u32(2),
+        ],
+    )
+    .expect("the texture write is lowered");
+    assert_eq!(
+        kind,
+        InstructionKind::TextureWrite {
+            texture,
+            coordinate,
+            array_index: None,
+            value,
+        }
+    );
+}
+
+#[test]
 fn recognizes_spirv_cross_unsigned_find_msb_helper() {
     let value = Operand::u32(7);
     let kind = known_helper("_Z11spvFindUMSBIjET_S0_", std::slice::from_ref(&value))
@@ -417,6 +444,62 @@ fn lowers_integer_resize_and_checks_its_direction() {
                     result_type: 1,
                     opaque_types: &HashMap::new(),
                 }
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn lowers_a_modern_load_with_an_explicit_result_type() {
+    let types = vec![
+        DecodedType::Integer(32),
+        DecodedType::Pointer {
+            pointee: 0,
+            address_space: 1,
+        },
+        DecodedType::Integer(64),
+    ];
+    let make = || ValueTable {
+        globals: Vec::new(),
+        relative: true,
+        values: vec![Value {
+            ty: 1,
+            constant: None,
+        }],
+        argument_start: 0,
+    };
+    let body = records_block(12, &[(1, &[1]), (20, &[1, 0, 3, 0]), (10, &[1])]);
+    let function = make()
+        .lower_body(
+            &body,
+            &types,
+            &Signature {
+                names: &HashMap::new(),
+                name: "load".into(),
+                parameter_types: &[1],
+                result_type: 0,
+                opaque_types: &HashMap::new(),
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        function.blocks[0].instructions[0].kind,
+        InstructionKind::Load { .. }
+    ));
+
+    let bad = records_block(12, &[(1, &[1]), (20, &[1, 2, 3, 0]), (10, &[1])]);
+    assert!(
+        make()
+            .lower_body(
+                &bad,
+                &types,
+                &Signature {
+                    names: &HashMap::new(),
+                    name: "bad".into(),
+                    parameter_types: &[1],
+                    result_type: 0,
+                    opaque_types: &HashMap::new(),
+                },
             )
             .is_err()
     );
