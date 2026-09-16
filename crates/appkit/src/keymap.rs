@@ -258,6 +258,17 @@ pub mod flags {
     pub const COMMAND: u64 = 1 << 20;
     pub const NUMERIC_PAD: u64 = 1 << 21;
     pub const FUNCTION: u64 = 1 << 23;
+
+    /// `NX_DEVICE*KEYMASK`: which side is held, in the low word AppKit leaves
+    /// undocumented. Unreal's `-flagsChanged:` reads only these.
+    pub const DEVICE_LCTL: u64 = 0x0001;
+    pub const DEVICE_LSHIFT: u64 = 0x0002;
+    pub const DEVICE_RSHIFT: u64 = 0x0004;
+    pub const DEVICE_LCMD: u64 = 0x0008;
+    pub const DEVICE_RCMD: u64 = 0x0010;
+    pub const DEVICE_LALT: u64 = 0x0020;
+    pub const DEVICE_RALT: u64 = 0x0040;
+    pub const DEVICE_RCTL: u64 = 0x2000;
 }
 
 pub fn modifiers(sdl_modifiers: u16) -> u64 {
@@ -269,6 +280,14 @@ pub fn modifiers(sdl_modifiers: u16) -> u64 {
         (keymod::GUI, flags::COMMAND),
         (keymod::CAPS, flags::CAPS_LOCK),
         (keymod::NUM, flags::NUMERIC_PAD),
+        (keymod::LCTRL, flags::DEVICE_LCTL),
+        (keymod::RCTRL, flags::DEVICE_RCTL),
+        (keymod::LSHIFT, flags::DEVICE_LSHIFT),
+        (keymod::RSHIFT, flags::DEVICE_RSHIFT),
+        (keymod::LALT, flags::DEVICE_LALT),
+        (keymod::RALT, flags::DEVICE_RALT),
+        (keymod::LGUI, flags::DEVICE_LCMD),
+        (keymod::RGUI, flags::DEVICE_RCMD),
     ] {
         if sdl_modifiers & from != 0 {
             out |= to;
@@ -369,10 +388,13 @@ mod tests {
 
     #[test]
     fn sdl_modifiers_become_appkit_flags() {
-        assert_eq!(modifiers(keymod::RSHIFT), flags::SHIFT);
+        assert_eq!(
+            modifiers(keymod::RSHIFT),
+            flags::SHIFT | flags::DEVICE_RSHIFT
+        );
         assert_eq!(
             modifiers(keymod::LCTRL | keymod::LALT),
-            flags::CONTROL | flags::OPTION
+            flags::CONTROL | flags::OPTION | flags::DEVICE_LCTL | flags::DEVICE_LALT
         );
         assert_eq!(modifiers(keymod::NONE), 0);
     }
