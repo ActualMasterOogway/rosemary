@@ -612,10 +612,8 @@ pub unsafe fn once<F: FnOnce()>(at: u64, body: F) -> i32 {
         return unsafe { libc::pthread_once(once_control, init_routine) };
         #[cfg(not(target_vendor = "apple"))]
         return unsafe {
-            libc::pthread_once(
-                once_control,
-                init_routine.unwrap_or(|| std::ptr::null() as _),
-            )
+            let init_routine_raw: extern "C" fn() = std::mem::transmute(init_routine);
+            libc::pthread_once(once_control, init_routine_raw)
         };
     }
 
