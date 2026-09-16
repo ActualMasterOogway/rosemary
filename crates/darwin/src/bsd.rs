@@ -280,7 +280,57 @@ pub unsafe extern "C" fn memset_s(
 /// freshly written code is already executable and there is nothing to flush.
 pub unsafe extern "C" fn sys_icache_invalidate(_start: *mut c_void, _len: usize) {}
 
+/// Locks for compiler-rt's generic atomics, one per address bucket.
+///
+/// `std::atomic<T>` of a `T` too large to be a machine word is compiled to calls
+/// here, with the object's address naming what is locked. Hashing addresses to
+/// a fixed set of locks is compiler-rt's own scheme: two unrelated atomics may
+/// share a lock, which costs contention and never correctness.
+static ATOMIC_LOCKS: [std::sync::Mutex<()>; 64] = [const { std::sync::Mutex::new(()) }; 64];
+
+fn atomic_lock(address: *const c_void) -> std::sync::MutexGuard<'static, ()> {
+    // Objects are at least word-aligned, so the low bits carry nothing.
+    let index = ((address as usize) >> 3) % ATOMIC_LOCKS.len();
+    ATOMIC_LOCKS[index]
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// `void __atomic_load(int size, void *src, void *dest, int model)`.
+///
+/// # Safety
+///
+/// `src` and `dest` must each be valid for `size` bytes.
+pub unsafe extern "C" fn atomic_load(
+    size: i32,
+    src: *const c_void,
+    dest: *mut c_void,
+    _model: i32,
+) {
+    let _guard = atomic_lock(src);
+    // SAFETY: the caller's obligation.
+    unsafe { std::ptr::copy(src as *const u8, dest as *mut u8, size.max(0) as usize) };
+}
+
+/// `void __atomic_store(int size, void *dest, void *src, int model)`.
+///
+/// # Safety
+///
+/// As [`atomic_load`].
+pub unsafe extern "C" fn atomic_store(
+    size: i32,
+    dest: *mut c_void,
+    src: *const c_void,
+    _model: i32,
+) {
+    let _guard = atomic_lock(dest);
+    // SAFETY: the caller's obligation.
+    unsafe { std::ptr::copy(src as *const u8, dest as *mut u8, size.max(0) as usize) };
+}
+
 pub const NAMES: &[&str] = &[
+    "__atomic_load",
+    "__atomic_store",
     "atexit",
     "atexit_b",
     "pthread_atfork",
@@ -292,6 +342,8 @@ pub const NAMES: &[&str] = &[
 
 pub fn symbol(name: &str) -> Option<u64> {
     let f: *const () = match name {
+        "__atomic_load" => atomic_load as *const (),
+        "__atomic_store" => atomic_store as *const (),
         "atexit" => atexit as *const (),
         "atexit_b" => atexit_b as *const (),
         "pthread_atfork" => pthread_atfork as *const (),
@@ -317,6 +369,19 @@ pub fn provide(lib: &mut SyntheticDylib) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generic_atomics_copy_the_whole_value() {
+        let stored = [7u8; 48];
+        let mut cell = [0u8; 48];
+        let mut loaded = [0u8; 48];
+        // SAFETY: three buffers of the size passed.
+        unsafe {
+            atomic_store(48, cell.as_mut_ptr().cast(), stored.as_ptr().cast(), 5);
+            atomic_load(48, cell.as_ptr().cast(), loaded.as_mut_ptr().cast(), 5);
+        }
+        assert_eq!(loaded, stored);
+    }
 
     #[test]
     fn every_listed_name_resolves() {

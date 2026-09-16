@@ -957,7 +957,47 @@ unsafe extern "C" fn number_with_bool(_class: Id, _sel: Sel, value: bool) -> Id 
     }
 }
 
+unsafe extern "C" fn set_with_object(_class: Id, _sel: Sel, object: Id) -> Id {
+    let values: &[CFTypeRef] = match object.is_null() {
+        true => &[],
+        false => &[object as CFTypeRef],
+    };
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(collections::new_set(values, Policy::from_type_callbacks())) as Id }
+}
+
+unsafe extern "C" fn set_count(receiver: Id, _sel: Sel) -> usize {
+    // SAFETY: a set.
+    unsafe { collections::set(receiver as CFTypeRef) }.map_or(0, |set| set.values.len())
+}
+
+unsafe extern "C" fn set_contains_object(receiver: Id, _sel: Sel, object: Id) -> bool {
+    // SAFETY: a set.
+    unsafe { collections::set(receiver as CFTypeRef) }.is_some_and(|set| {
+        set.values
+            .iter()
+            .any(|value| set.policy.equal(*value, object as CFTypeRef))
+    })
+}
+
+unsafe extern "C" fn set_any_object(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a set.
+    unsafe { collections::set(receiver as CFTypeRef) }
+        .and_then(|set| set.values.first().copied())
+        .map_or(std::ptr::null_mut(), |value| value as Id)
+}
+
 pub(crate) fn install() {
+    let set = objc::class::lookup(c"NSSet").expect("CoreFoundation registered NSSet");
+    class_methods!(set, {
+        "setWithObject:" => set_with_object, c"@24@0:8@16";
+    });
+    methods!(set, {
+        "count" => set_count, c"Q16@0:8";
+        "containsObject:" => set_contains_object, c"B24@0:8@16";
+        "anyObject" => set_any_object, c"@16@0:8";
+    });
+
     let array = objc::class::lookup(c"NSArray").expect("CoreFoundation registered NSArray");
     let mutable_array = objc::class::lookup(c"NSMutableArray").expect("NSMutableArray");
     methods!(array, {

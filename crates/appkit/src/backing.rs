@@ -361,9 +361,14 @@ fn present_dirty() {
     let Some(stores) = stores.as_mut() else {
         return;
     };
-    for (&window, store) in stores.iter_mut().filter(|(_, store)| store.dirty) {
+    for (&window, store) in stores
+        .iter_mut()
+        .filter(|(window, store)| store.dirty || dump_overdue(**window as sdl3::Window))
+    {
         let window = window as sdl3::Window;
         store.dirty = false;
+        let composed = compose(window, store);
+        let store = composed.as_ref().unwrap_or(store);
         dump(window, store);
         if presenter.is_some_and(|present| present(window, store)) {
             continue;
@@ -387,22 +392,183 @@ fn present_dirty() {
     }
 }
 
+/// Pixels a view shows above its window's store.
+///
+/// A view whose content comes from outside the window's drawing - a web view,
+/// whose page another toolkit renders - is a layer the window server stacks
+/// above the views that draw into the store. Writing it into the store instead
+/// would lose it at the next flush of the view underneath, which repaints its
+/// whole rectangle without knowing a subview is there.
+pub struct Overlay {
+    pub width: u32,
+    pub height: u32,
+    /// Premultiplied B, G, R, A, top row first.
+    pub pixels: Vec<u8>,
+}
+
+/// Keyed by the view's address, in the order the overlays were first set.
+static OVERLAYS: Mutex<Vec<(usize, Overlay)>> = Mutex::new(Vec::new());
+
+/// Show `overlay` over `view`'s rectangle from the next present on.
+///
+/// The view must call [`remove_overlay`] before it is deallocated.
+pub fn set_overlay(view: Id, overlay: Overlay) {
+    {
+        let mut overlays = OVERLAYS.lock().unwrap_or_else(|e| e.into_inner());
+        match overlays.iter_mut().find(|(key, _)| *key == view as usize) {
+            Some((_, existing)) => *existing = overlay,
+            None => overlays.push((view as usize, overlay)),
+        }
+    }
+    mark_window_of(view);
+}
+
+pub fn remove_overlay(view: Id) {
+    let removed = {
+        let mut overlays = OVERLAYS.lock().unwrap_or_else(|e| e.into_inner());
+        let before = overlays.len();
+        overlays.retain(|(key, _)| *key != view as usize);
+        overlays.len() != before
+    };
+    if removed {
+        mark_window_of(view);
+    }
+}
+
+/// Have the store of `view`'s window presented again, creating it if the
+/// window has none: an overlay on a window nothing else draws into still has
+/// to reach the screen.
+fn mark_window_of(view: Id) {
+    // SAFETY: a live view, which both callers are passed.
+    let Some(frame) = (unsafe { crate::view::presentation_frame(view) }) else {
+        return;
+    };
+    with_store(frame.window, |store| store.dirty = true);
+}
+
+/// The store with every visible overlay of `window` drawn over it, or `None`
+/// when there is nothing to draw and the store can be presented as it is.
+fn compose(window: sdl3::Window, store: &Store) -> Option<Store> {
+    let overlays = OVERLAYS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut composed: Option<Store> = None;
+    for (view, overlay) in overlays.iter() {
+        let view = *view as Id;
+        // SAFETY: an overlay is removed before its view is deallocated.
+        let shown = unsafe { crate::view::window_of(view) };
+        if !crate::window::is_shown(shown) || crate::view::is_hidden_or_has_hidden_ancestor(view) {
+            continue;
+        }
+        // SAFETY: as above.
+        let Some(frame) = (unsafe { crate::view::presentation_frame(view) }) else {
+            continue;
+        };
+        if frame.window != window {
+            continue;
+        }
+        let target = composed.get_or_insert_with(|| Store {
+            width: store.width,
+            height: store.height,
+            pixels: store.pixels.clone(),
+            dirty: false,
+        });
+        blend_overlay(target, overlay, frame.x, frame.y, frame.width, frame.height);
+    }
+    composed
+}
+
+/// Draw `overlay` scaled into the rectangle at `left`, `top` of `store`,
+/// source-over, nearest-neighbour.
+fn blend_overlay(
+    store: &mut Store,
+    overlay: &Overlay,
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
+) {
+    let (source_width, source_height) = (overlay.width as usize, overlay.height as usize);
+    if source_width == 0
+        || source_height == 0
+        || width == 0
+        || height == 0
+        || overlay.pixels.len() < source_width * source_height * 4
+    {
+        return;
+    }
+    let x0 = left.max(0) as usize;
+    let y0 = top.max(0) as usize;
+    let x1 = (i64::from(left) + i64::from(width)).clamp(0, i64::from(store.width)) as usize;
+    let y1 = (i64::from(top) + i64::from(height)).clamp(0, i64::from(store.height)) as usize;
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let columns: Vec<usize> = (x0..x1)
+        .map(|x| {
+            ((x as i64 - i64::from(left)) as usize * source_width / width as usize)
+                .min(source_width - 1)
+        })
+        .collect();
+    for y in y0..y1 {
+        let row = ((y as i64 - i64::from(top)) as usize * source_height / height as usize)
+            .min(source_height - 1);
+        let from_row = &overlay.pixels[row * source_width * 4..(row + 1) * source_width * 4];
+        let base = y * store.width as usize * 4;
+        let to_row = &mut store.pixels[base + x0 * 4..base + x1 * 4];
+        for (target, &column) in to_row.as_chunks_mut::<4>().0.iter_mut().zip(&columns) {
+            let texel = &from_row[column * 4..column * 4 + 4];
+            let alpha = u32::from(texel[3]);
+            if alpha == 255 {
+                target.copy_from_slice(texel);
+                continue;
+            }
+            for channel in 0..4 {
+                let blended =
+                    u32::from(texel[channel]) + u32::from(target[channel]) * (255 - alpha) / 255;
+                target[channel] = blended.min(255) as u8;
+            }
+        }
+    }
+}
+
 /// `ROSETTA3_STORE_OUT=DIR`: write each window's store as a binary PPM when it
 /// is presented, at most once a second per window, overwriting the last.
 ///
 /// The Metal frame dump sees only layers; this is the half of a window that
 /// views drew on the CPU, for a session with no screen to look at.
+/// When each window's store was last written, and whether a present since
+/// then went unwritten.
+static DUMPED: Mutex<Vec<(usize, std::time::Instant, bool)>> = Mutex::new(Vec::new());
+
+/// Whether a store should be presented again only so that its last frame is
+/// written: without this, a window that stops changing within a second of
+/// its last dump leaves a stale picture of itself behind.
+fn dump_overdue(window: sdl3::Window) -> bool {
+    std::env::var_os("ROSETTA3_STORE_OUT").is_some()
+        && DUMPED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|(key, at, skipped)| {
+                *key == window as usize && *skipped && at.elapsed().as_secs_f64() >= 1.0
+            })
+}
+
 fn dump(window: sdl3::Window, store: &Store) {
     use std::time::Instant;
     let Some(directory) = std::env::var_os("ROSETTA3_STORE_OUT") else {
         return;
     };
-    static LAST: Mutex<Vec<(usize, Instant)>> = Mutex::new(Vec::new());
-    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-    match last.iter_mut().find(|(key, _)| *key == window as usize) {
-        Some((_, at)) if at.elapsed().as_secs_f64() < 1.0 => return,
-        Some((_, at)) => *at = Instant::now(),
-        None => last.push((window as usize, Instant::now())),
+    let mut last = DUMPED.lock().unwrap_or_else(|e| e.into_inner());
+    match last.iter_mut().find(|(key, _, _)| *key == window as usize) {
+        Some((_, at, skipped)) if at.elapsed().as_secs_f64() < 1.0 => {
+            *skipped = true;
+            return;
+        }
+        Some((_, at, skipped)) => {
+            *at = Instant::now();
+            *skipped = false;
+        }
+        None => last.push((window as usize, Instant::now(), false)),
     }
     let mut out = format!("P6\n{} {}\n255\n", store.width, store.height).into_bytes();
     for texel in store.pixels.chunks_exact(4) {
@@ -625,6 +791,40 @@ mod tests {
         );
         assert_eq!(mirrored.pixels, [255, 0, 0, 255, 0, 0, 255, 255]);
         FOCUS.with(|stack| stack.borrow_mut().clear());
+    }
+
+    #[test]
+    fn an_overlay_is_scaled_into_its_rectangle_over_the_store() {
+        let mut store = store_of(4, 2);
+        store.pixels = vec![9; 4 * 2 * 4];
+        // One opaque texel and one fully transparent one, stretched over two
+        // store pixels each.
+        let overlay = Overlay {
+            width: 2,
+            height: 1,
+            pixels: vec![1, 2, 3, 255, 0, 0, 0, 0],
+        };
+        blend_overlay(&mut store, &overlay, 0, 1, 4, 1);
+        assert_eq!(&store.pixels[..16], &[9; 16]);
+        assert_eq!(
+            &store.pixels[16..],
+            &[1, 2, 3, 255, 1, 2, 3, 255, 9, 9, 9, 9, 9, 9, 9, 9]
+        );
+    }
+
+    #[test]
+    fn an_overlay_past_the_store_edge_is_clipped() {
+        let mut store = store_of(2, 2);
+        let overlay = Overlay {
+            width: 1,
+            height: 1,
+            pixels: vec![7, 7, 7, 255],
+        };
+        blend_overlay(&mut store, &overlay, 1, -1, 4, 2);
+        assert_eq!(
+            store.pixels,
+            [0, 0, 0, 0, 7, 7, 7, 255, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
     }
 
     #[test]

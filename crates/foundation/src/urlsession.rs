@@ -130,6 +130,50 @@ fn autoreleased_request(url: Id, timeout: f64) -> Id {
     objc::arc::autorelease(make(request_class(), Request::new(text, timeout)))
 }
 
+/// A new autoreleased request for `url`, for a framework handing a guest the
+/// request something else is making.
+pub fn request_for(url: &str) -> Id {
+    objc::arc::autorelease(make(
+        request_class(),
+        Request::new(url.to_string(), DEFAULT_TIMEOUT_SECONDS),
+    ))
+}
+
+/// What a framework that performs a guest's request elsewhere needs of it.
+pub struct RequestParts {
+    pub url: String,
+    pub method: String,
+    pub headers: Vec<(String, String)>,
+}
+
+/// A request's URL, method and headers.
+///
+/// # Safety
+///
+/// `request` must be null or an object this runtime allocated.
+pub unsafe fn request_parts(request: Id) -> Option<RequestParts> {
+    // SAFETY: the caller's obligation.
+    let request = unsafe { request_of(request) }?;
+    Some(RequestParts {
+        url: request.url.clone(),
+        method: request.method.clone(),
+        headers: request.headers.clone(),
+    })
+}
+
+/// A new autoreleased `NSHTTPURLResponse`, for a framework whose own loader
+/// received it.
+pub fn http_response(url: &str, status: u16, headers: Vec<(String, String)>) -> Id {
+    objc::arc::autorelease(make(
+        response_class(),
+        Response {
+            url: url.to_string(),
+            status,
+            headers,
+        },
+    ))
+}
+
 unsafe extern "C" fn set_url(receiver: Id, _sel: Sel, url: Id) {
     // SAFETY: an `NSURL`, or nil.
     let Some(text) = (unsafe { crate::url::text_of(url) }) else {

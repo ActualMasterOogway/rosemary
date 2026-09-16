@@ -3329,6 +3329,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("sigdelset", I32, P, I32),
     sig!("sigismember", I32, P, I32),
     sig!("sys_icache_invalidate", V, P, U64),
+    // compiler-rt's generic atomics: `void (int size, void *, void *, int model)`.
+    sig!("__atomic_load", V, I32, P, P, I32),
+    sig!("__atomic_store", V, I32, P, P, I32),
     // `int proc_get_wakemon_params(pid_t, int32_t *rate_hz, int32_t *flags)` -
     // libproc SPI with no header on this system, read out of the kernel's own
     // `proc_info` interface.

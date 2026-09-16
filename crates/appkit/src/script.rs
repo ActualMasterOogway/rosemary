@@ -23,6 +23,7 @@ use sdl3::video::Event;
 
 pub const ENV: &str = "ROSETTA3_DEBUG_INPUT";
 pub const FILE_ENV: &str = "ROSETTA3_DEBUG_INPUT_FILE";
+pub const WINDOW_ENV: &str = "ROSETTA3_DEBUG_INPUT_WINDOW";
 
 /// Where the script last put the pointer, in SDL window coordinates, and
 /// whether it has put it anywhere at all.
@@ -180,11 +181,17 @@ pub fn run() {
         Ok(value) => parse(&value),
         Err(_) => Vec::new(),
     });
-    let Some(window) = crate::window::sdl_windows()
-        .into_iter()
-        .map(sdl3::video::window_id)
-        .next()
-    else {
+    // `ROSETTA3_DEBUG_INPUT_WINDOW=key`: the key window rather than the first
+    // window made, for a script that drives a dialog.
+    static KEY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let key = *KEY.get_or_init(|| std::env::var(WINDOW_ENV).is_ok_and(|value| value == "key"));
+    let sdl = match key {
+        // SAFETY: null or a window this crate made.
+        true => Some(unsafe { crate::window::sdl_window(crate::window::key_window()) })
+            .filter(|sdl| !sdl.is_null()),
+        false => crate::window::sdl_windows().into_iter().next(),
+    };
+    let Some(window) = sdl.map(sdl3::video::window_id) else {
         return;
     };
     run_file(window);

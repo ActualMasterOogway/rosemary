@@ -1641,8 +1641,11 @@ version = "0.1.0"
 dependencies = [
  "appkit",
  "corefoundation",
+ "darwin",
  "foundation",
+ "libc",
  "objc",
+ "sdl3",
 ]
 
 [[package]]

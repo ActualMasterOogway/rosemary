@@ -124,6 +124,22 @@ macro_rules! accessor {
 accessor!(absolute_string, |u| Some(u.text.clone()));
 accessor!(path, |u| Some(u.path()).filter(|p| !p.is_empty()));
 accessor!(scheme, |u| Some(u.scheme()).filter(|s| !s.is_empty()));
+accessor!(host, |u| host_of(&u.text));
+
+/// A URL's host: the authority without its user information or port, and an
+/// IPv6 literal without its brackets. `None` for a URL with no authority.
+fn host_of(text: &str) -> Option<String> {
+    let (_, rest) = text.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = match authority.strip_prefix('[') {
+        Some(literal) => literal.split(']').next()?,
+        None => authority.split(':').next()?,
+    };
+    (!host.is_empty()).then(|| host.to_string())
+}
 
 /// `-fileSystemRepresentation`, which is a `const char *` into storage the URL
 /// keeps alive - so it is autoreleased as an `NSString` and its bytes handed
@@ -482,6 +498,7 @@ pub(crate) fn install() {
         "description" => absolute_string, c"@16@0:8";
         "path" => path, c"@16@0:8";
         "scheme" => scheme, c"@16@0:8";
+        "host" => host, c"@16@0:8";
         "isFileURL" => is_file_url, c"c16@0:8";
         "fileSystemRepresentation" => file_system_representation, c"*16@0:8";
         "URLByAppendingPathComponent:" => url_by_appending_path_component, c"@24@0:8@16";
@@ -499,6 +516,20 @@ pub(crate) fn install() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn host_drops_user_information_port_and_brackets() {
+        assert_eq!(
+            super::host_of("https://user:pw@studiomsgbus.rbx.com:443/message?msg0=1"),
+            Some("studiomsgbus.rbx.com".to_string())
+        );
+        assert_eq!(
+            super::host_of("http://[::1]:8080/"),
+            Some("::1".to_string())
+        );
+        assert_eq!(super::host_of("file:///tmp/x"), None);
+        assert_eq!(super::host_of("roblox-studio-auth:/?code=1"), None);
+    }
+
     use super::standardized_file_path;
 
     #[test]

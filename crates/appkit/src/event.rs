@@ -22,7 +22,28 @@ pub fn pump(app: Id) {
     while let Some(event) = sdl3::video::poll() {
         deliver(event);
     }
+    for hook in PUMP_HOOKS.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        hook();
+    }
     crate::backing::pump();
+}
+
+static PUMP_HOOKS: std::sync::Mutex<Vec<fn()>> = std::sync::Mutex::new(Vec::new());
+
+/// Run `hook` on every turn of the main thread's event pump, after input is
+/// delivered and before stores are presented.
+///
+/// For another toolkit whose own main loop has to turn on this thread: WebKit's
+/// GTK main context is serviced here, so its callbacks reach the guest on the
+/// thread AppKit promises them on.
+pub fn add_pump_hook(hook: fn()) {
+    let mut hooks = PUMP_HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+    if !hooks
+        .iter()
+        .any(|existing| std::ptr::fn_addr_eq(*existing, hook))
+    {
+        hooks.push(hook);
+    }
 }
 
 /// `ROSETTA3_DEBUG_RESIZE=WxH@SECONDS`: resize the program's window once, that

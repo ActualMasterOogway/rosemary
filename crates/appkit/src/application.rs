@@ -538,6 +538,13 @@ unsafe extern "C" fn send_event(_receiver: Id, _sel: Sel, _event: Id) {}
 /// the program stops.
 unsafe extern "C" fn ignored_sender(_receiver: Id, _sel: Sel, _sender: Id) {}
 
+/// `-isFullKeyboardAccessEnabled`: whether Tab moves focus through every
+/// control rather than text fields and lists alone. That is a macOS System
+/// Settings switch with no desktop counterpart here, and it is off by default.
+unsafe extern "C" fn is_full_keyboard_access_enabled(_receiver: Id, _sel: Sel) -> u8 {
+    0
+}
+
 unsafe extern "C" fn ignored_nullary(_receiver: Id, _sel: Sel) {}
 
 /// `-requestUserAttention:`, which bounces the Dock icon.
@@ -575,6 +582,20 @@ unsafe extern "C" fn begin_modal_session(receiver: Id, _sel: Sel, window: Id) ->
     let app = unsafe { &mut *(receiver as *mut Application) };
     app.modal_window = objc::arc::retain(window);
     app.modal_depth += 1;
+    // Beginning a session is what puts the window on screen: Qt shows an
+    // application-modal dialog with this call alone and never orders it front.
+    if !window.is_null() {
+        // SAFETY: `-makeKeyAndOrderFront:` is `void (id, SEL, id)`, sent so a
+        // window subclass's override runs.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+            f(
+                window,
+                objc::sel::get("makeKeyAndOrderFront:"),
+                std::ptr::null_mut(),
+            );
+        }
+    }
     window
 }
 
@@ -738,6 +759,7 @@ pub(crate) fn install() {
         "setApplicationIconImage:" => set_application_icon_image, c"v24@0:8@16";
         "isRunning" => is_running, c"c16@0:8";
         "isActive" => is_active, c"c16@0:8";
+        "isFullKeyboardAccessEnabled" => is_full_keyboard_access_enabled, c"c16@0:8";
         "effectiveAppearance" => effective_appearance, c"@16@0:8";
         "finishLaunching" => finish_launching, c"v16@0:8";
         "run" => run, c"v16@0:8";

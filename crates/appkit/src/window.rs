@@ -30,6 +30,9 @@ pub struct Window {
     maximum: NSSize,
     fullscreen: usize,
     miniaturized: usize,
+    /// `-representedFilename`, an owned `NSString` or null for the empty
+    /// string AppKit answers before one is set.
+    represented_filename: Id,
 }
 
 pub const INSTANCE_SIZE: usize = size_of::<Window>();
@@ -622,6 +625,46 @@ unsafe extern "C" fn title(receiver: Id, _sel: Sel) -> Id {
     objc::arc::autorelease(foundation::string::from_cstr(&title))
 }
 
+/// `-setRepresentedFilename:`. AppKit shows the file's proxy icon in the title
+/// bar; SDL has no such thing, so the path is only kept to be read back.
+unsafe extern "C" fn set_represented_filename(receiver: Id, _sel: Sel, filename: Id) {
+    let window = window_of(receiver);
+    let copy = match filename.is_null() {
+        true => std::ptr::null_mut(),
+        false => {
+            // SAFETY: an `NSString`; copied, as the property is declared `copy`.
+            let bytes = unsafe { foundation::string::bytes(filename) };
+            foundation::string::from_str(&String::from_utf8_lossy(&bytes))
+        }
+    };
+    objc::arc::release(window.represented_filename);
+    window.represented_filename = copy;
+}
+
+unsafe extern "C" fn represented_filename(receiver: Id, _sel: Sel) -> Id {
+    match window_of(receiver).represented_filename {
+        filename if filename.is_null() => objc::arc::autorelease(foundation::string::from_str("")),
+        filename => filename,
+    }
+}
+
+/// `-setTitleWithRepresentedFilename:`: the represented filename, and the
+/// file's name as the title.
+unsafe extern "C" fn set_title_with_represented_filename(receiver: Id, sel: Sel, filename: Id) {
+    // SAFETY: forwarded with the same receiver and argument.
+    unsafe { set_represented_filename(receiver, sel, filename) };
+    if filename.is_null() {
+        return;
+    }
+    // SAFETY: an `NSString`.
+    let path = unsafe { foundation::string::bytes(filename) };
+    let at = path.iter().rposition(|b| *b == b'/').map_or(0, |i| i + 1);
+    let title = foundation::string::from_str(&String::from_utf8_lossy(&path[at..]));
+    // SAFETY: the window this was sent to, and a string this function owns.
+    unsafe { set_title(receiver, sel, title) };
+    objc::arc::release(title);
+}
+
 /// `-display`: redraw the whole content view at the next pump.
 unsafe extern "C" fn display_window(receiver: Id, _sel: Sel) {
     let content = window_of(receiver).content_view;
@@ -1140,7 +1183,9 @@ pub(crate) fn install() {
         "setDocumentEdited:" => ignored_flag, c"v20@0:8c16";
         "setWorksWhenModal:" => ignored_flag, c"v20@0:8c16";
         "setResizeIncrements:" => ignored_size, c"v32@0:8{CGSize=dd}16";
-        "setTitleWithRepresentedFilename:" => ignored_object, c"v24@0:8@16";
+        "setTitleWithRepresentedFilename:" => set_title_with_represented_filename, c"v24@0:8@16";
+        "representedFilename" => represented_filename, c"@16@0:8";
+        "setRepresentedFilename:" => set_represented_filename, c"v24@0:8@16";
         "ignoresMouseEvents" => no, c"c16@0:8";
         "toolbar" => nil, c"@16@0:8";
         "depthLimit" => zero_depth, c"i16@0:8";

@@ -33,6 +33,8 @@
               pkgs.libglvnd
               pkgs.libGLU
               pkgs.vulkan-loader
+              # webkit: loaded with dlopen, so it has to be on the library path.
+              pkgs.webkitgtk_6_0
             ];
         in {
           default = pkgs.mkShell {
@@ -49,6 +51,10 @@
             ];
 
             buildInputs = runtimeLibs;
+
+            # WebKitGTK's network stack finds TLS through a GIO module.
+            GIO_EXTRA_MODULES = lib.optionalString pkgs.stdenv.hostPlatform.isLinux
+              "${pkgs.glib-networking}/lib/gio/modules";
 
             LD_LIBRARY_PATH = lib.optionalString pkgs.stdenv.hostPlatform.isLinux
               (lib.makeLibraryPath runtimeLibs);

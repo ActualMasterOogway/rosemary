@@ -12,12 +12,12 @@ use objc::sel::Sel;
 use corefoundation::base::CFTypeRef;
 
 #[repr(C)]
-pub(crate) struct Body<T> {
+pub struct Body<T> {
     isa: *const Class,
     contents: *mut T,
 }
 
-pub(crate) fn register<T: 'static>(
+pub fn register<T: 'static>(
     name: &'static std::ffi::CStr,
     superclass: Option<&'static Class>,
 ) -> &'static Class {
@@ -42,7 +42,7 @@ pub(crate) fn register<T: 'static>(
     class
 }
 
-pub(crate) fn make<T>(class: &'static Class, contents: T) -> Id {
+pub fn make<T>(class: &'static Class, contents: T) -> Id {
     // SAFETY: `Body<T>` begins with `isa` and is the layout `class` was
     // registered with.
     let body: *mut Body<T> = unsafe { corefoundation::base::allocate(class) };
@@ -61,7 +61,7 @@ pub(crate) fn make<T>(class: &'static Class, contents: T) -> Id {
 /// # Safety
 ///
 /// `object` must be null or an instance of a class [`register`]ed for `T`.
-pub(crate) unsafe fn fill<T>(object: Id, contents: T) {
+pub unsafe fn fill<T>(object: Id, contents: T) {
     if object.is_null() {
         return;
     }
@@ -77,7 +77,7 @@ pub(crate) unsafe fn fill<T>(object: Id, contents: T) {
 /// # Safety
 ///
 /// `object` must be null or an object this runtime allocated.
-pub(crate) unsafe fn contents<'a, T>(object: Id, class: &'static Class) -> Option<&'a mut T> {
+pub unsafe fn contents<'a, T>(object: Id, class: &'static Class) -> Option<&'a mut T> {
     // SAFETY: the caller's obligation.
     if !unsafe { corefoundation::base::is_kind_of(object as CFTypeRef, class) } {
         return None;

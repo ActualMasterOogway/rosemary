@@ -1,15 +1,80 @@
+//! WebKit.framework, over WebKitGTK.
+//!
+//! `WKWebView` and the objects around it - configuration, user scripts,
+//! navigation and UI delegates, the cookie store - are backed by an offscreen
+//! WebKitGTK 6.0 view. See [`web_view`] for how its pages reach the window and
+//! [`input`] for how events reach its pages.
+
 use objc::class::Class;
 use objc::object::Id;
 use objc::sel::Sel;
 
+mod configuration;
+mod data_store;
+mod engine;
+mod gtk;
+mod input;
+mod web_view;
+
+/// Send a message: `send!(receiver, "selector:", argument => Type, ...; Return)`.
+///
+/// # Safety
+///
+/// The receiver must be null or a live object, and the types the prototype of
+/// the method that will run.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! send {
+    ($receiver:expr, $sel:literal $(, $arg:expr => $ty:ty)* ; $ret:ty) => {{
+        let f: unsafe extern "C" fn(objc::object::Id, objc::sel::Sel $(, $ty)*) -> $ret =
+            std::mem::transmute(objc::msg::entry());
+        f($receiver, objc::sel::get($sel) $(, $arg)*)
+    }};
+}
+
+/// Install instance methods on a class.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! methods {
+    ($class:expr, { $( $sel:literal => $imp:expr, $types:literal );* $(;)? }) => {{
+        let class: &'static objc::class::Class = $class;
+        $( class.replace_method(objc::sel::get($sel), $imp as *const std::ffi::c_void, $types); )*
+    }};
+}
+
+/// Install class methods, which live on the metaclass.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! class_methods {
+    ($class:expr, { $( $sel:literal => $imp:expr, $types:literal );* $(;)? }) => {{
+        let meta = $class.metaclass();
+        $( meta.replace_method(objc::sel::get($sel), $imp as *const std::ffi::c_void, $types); )*
+    }};
+}
+
+/// An `NSNumber`'s truth, and false for nil.
+pub(crate) fn bool_value(value: Id) -> bool {
+    // SAFETY: null is checked; `-boolValue` is `BOOL (id, SEL)`.
+    !value.is_null() && unsafe { send!(value, "boolValue"; u8) } != 0
+}
+
+/// The classes a guest can link against.
 const CLASSES: &[&std::ffi::CStr] = &[
     c"WebPreferences",
     c"WKWebViewConfiguration",
     c"WKProcessPool",
+    c"WKPreferences",
     c"WKUserContentController",
     c"WKWebsiteDataStore",
+    c"WKHTTPCookieStore",
     c"WKUserScript",
     c"WKWebView",
+    c"WKNavigation",
+    c"WKNavigationAction",
+    c"WKNavigationResponse",
+    c"WKFrameInfo",
+    c"WKSecurityOrigin",
+    c"WKWindowFeatures",
 ];
 
 pub fn bootstrap() {
@@ -17,72 +82,17 @@ pub fn bootstrap() {
     ONCE.call_once(|| {
         foundation::bootstrap();
         appkit::bootstrap();
-        // Registered first so the loop below finds it rather than creating an
-        // NSObject subclass: guests subclass WKWebView and treat it as a view.
-        let view = objc::class::lookup(c"NSView").expect("AppKit registers NSView");
-        corefoundation::base::abstract_class(c"WKWebView", Some(view));
-        for name in CLASSES {
-            corefoundation::base::abstract_class(name, None);
-        }
-        let class = objc::class::lookup(c"WebPreferences").expect("registered above");
-        class.metaclass().replace_method(
-            objc::sel::get("standardPreferences"),
-            standard_preferences as *const std::ffi::c_void,
-            c"@16@0:8",
-        );
-        class.replace_method(
-            objc::sel::get("setPlugInsEnabled:"),
-            set_plugins_enabled as *const std::ffi::c_void,
-            c"v20@0:8c16",
-        );
+        configuration::install();
+        data_store::install();
+        web_view::install();
 
-        let configuration = objc::class::lookup(c"WKWebViewConfiguration").expect("registered");
-        for selector in [
-            "setProcessPool:",
-            "setUserContentController:",
-            "setApplicationNameForUserAgent:",
-        ] {
-            configuration.replace_method(
-                objc::sel::get(selector),
-                accept_object_setting as *const std::ffi::c_void,
-                c"v24@0:8@16",
-            );
-        }
-
-        let controller = objc::class::lookup(c"WKUserContentController").expect("registered");
-        controller.replace_method(
-            objc::sel::get("removeAllUserScripts"),
-            remove_all_user_scripts as *const std::ffi::c_void,
-            c"v16@0:8",
-        );
-
-        let web_view = objc::class::lookup(c"WKWebView").expect("registered");
-        web_view.replace_method(
-            objc::sel::get("initWithFrame:configuration:"),
-            init_web_view as *const std::ffi::c_void,
-            c"@56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48",
-        );
-        for selector in ["setNavigationDelegate:", "setUIDelegate:"] {
-            web_view.replace_method(
-                objc::sel::get(selector),
-                accept_object_setting as *const std::ffi::c_void,
-                c"v24@0:8@16",
-            );
-        }
-
-        let script = objc::class::lookup(c"WKUserScript").expect("registered");
-        script.replace_method(
-            objc::sel::get("initWithSource:injectionTime:forMainFrameOnly:"),
-            init_user_script as *const std::ffi::c_void,
-            c"@36@0:8@16q24c32",
-        );
-
-        let store = objc::class::lookup(c"WKWebsiteDataStore").expect("registered");
-        store.metaclass().replace_method(
-            objc::sel::get("defaultDataStore"),
-            default_data_store as *const std::ffi::c_void,
-            c"@16@0:8",
-        );
+        let preferences = corefoundation::base::abstract_class(c"WebPreferences", None);
+        class_methods!(preferences, {
+            "standardPreferences" => standard_preferences, c"@16@0:8";
+        });
+        methods!(preferences, {
+            "setPlugInsEnabled:" => set_plugins_enabled, c"v20@0:8c16";
+        });
     });
 }
 
@@ -104,57 +114,10 @@ unsafe extern "C" fn standard_preferences(class: Id, _sel: Sel) -> Id {
 
 /// `-[WebPreferences setPlugInsEnabled:]`.
 ///
-/// Web content is not implemented, so there is no plug-in subsystem to
-/// configure. Accepting the setting lets applications finish configuring the
-/// shared preferences object.
+/// The legacy `WebView` these preferences configure is not implemented, so
+/// there is no plug-in subsystem to configure. Accepting the setting lets
+/// applications finish configuring the shared preferences object.
 unsafe extern "C" fn set_plugins_enabled(_receiver: Id, _sel: Sel, _enabled: u8) {}
-
-unsafe extern "C" fn accept_object_setting(_receiver: Id, _sel: Sel, _value: Id) {}
-
-/// `-[WKWebView initWithFrame:configuration:]`: a view with no web content.
-///
-/// NSView's own initializer is called directly rather than through dispatch, as
-/// a guest subclass may override `-initWithFrame:` to call this one.
-unsafe extern "C" fn init_web_view(
-    receiver: Id,
-    _sel: Sel,
-    frame: foundation::geometry::NSRect,
-    _configuration: Id,
-) -> Id {
-    let init = objc::sel::get("initWithFrame:");
-    let method = objc::class::lookup(c"NSView")
-        .and_then(|view| view.method(init))
-        .expect("AppKit implements -[NSView initWithFrame:]");
-    // SAFETY: NSView's `-initWithFrame:` has this signature.
-    let implementation: unsafe extern "C" fn(Id, Sel, foundation::geometry::NSRect) -> Id =
-        unsafe { std::mem::transmute(method.implementation()) };
-    unsafe { implementation(receiver, init, frame) }
-}
-
-/// Scripts are accepted but never run, as there is no web content.
-unsafe extern "C" fn init_user_script(
-    receiver: Id,
-    _sel: Sel,
-    _source: Id,
-    _injection_time: isize,
-    _main_frame_only: u8,
-) -> Id {
-    receiver
-}
-
-unsafe extern "C" fn remove_all_user_scripts(_receiver: Id, _sel: Sel) {}
-
-unsafe extern "C" fn default_data_store(class: Id, _sel: Sel) -> Id {
-    static DEFAULT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-
-    *DEFAULT.get_or_init(|| {
-        // SAFETY: this is the registered `WKWebsiteDataStore` class object.
-        let class = unsafe { objc::class::from_ptr(class as *const Class) }.expect("a class");
-        let store = objc::object::create_instance(class, 0);
-        objc::arc::retain(store);
-        store as usize
-    }) as Id
-}
 
 /// The Objective-C class objects exported by WebKit.framework.
 pub fn data_symbols() -> Vec<(String, u64)> {
@@ -195,19 +158,8 @@ mod tests {
     fn standard() -> Id {
         bootstrap();
         let class = objc::class::lookup(c"WebPreferences").expect("WebPreferences");
-        let method = class
-            .metaclass()
-            .method(objc::sel::get("standardPreferences"))
-            .expect("class method");
-        let implementation: unsafe extern "C" fn(Id, Sel) -> Id =
-            unsafe { std::mem::transmute(method.implementation()) };
-        // SAFETY: the method's encoding and implementation have this signature.
-        unsafe {
-            implementation(
-                objc::class::ptr(class) as Id,
-                objc::sel::get("standardPreferences"),
-            )
-        }
+        // SAFETY: the class method takes no arguments and returns an object.
+        unsafe { send!(objc::class::ptr(class) as Id, "standardPreferences"; Id) }
     }
 
     #[test]
@@ -223,16 +175,10 @@ mod tests {
     #[test]
     fn accepts_enabling_and_disabling_plugins() {
         let preferences = standard();
-        let class = unsafe { objc::object::class_of(preferences) }.expect("WebPreferences");
-        let method = class
-            .method(objc::sel::get("setPlugInsEnabled:"))
-            .expect("instance method");
-        let implementation: unsafe extern "C" fn(Id, Sel, u8) =
-            unsafe { std::mem::transmute(method.implementation()) };
         // SAFETY: the method's encoding and implementation have this signature.
         unsafe {
-            implementation(preferences, objc::sel::get("setPlugInsEnabled:"), 1);
-            implementation(preferences, objc::sel::get("setPlugInsEnabled:"), 0);
+            send!(preferences, "setPlugInsEnabled:", 1u8 => u8; ());
+            send!(preferences, "setPlugInsEnabled:", 0u8 => u8; ());
         }
     }
 
@@ -242,7 +188,7 @@ mod tests {
         assert!(
             symbols
                 .iter()
-                .any(|(name, _)| name == "_OBJC_CLASS_$_WebPreferences")
+                .any(|(name, _)| name == "_OBJC_CLASS_$_WKWebView")
         );
         assert!(
             symbols
@@ -259,12 +205,14 @@ mod tests {
     }
 
     #[test]
-    fn web_view_is_a_view_initialized_with_its_frame() {
+    fn web_view_is_a_view_that_keeps_its_configuration() {
+        // SAFETY: no other test reads the environment; a unit test must not
+        // start GTK and a web process.
+        unsafe { std::env::set_var("ROSETTA3_WEBKIT", "0") };
         bootstrap();
         let class = objc::class::lookup(c"WKWebView").expect("registered");
         let view = objc::class::lookup(c"NSView").expect("NSView");
         assert!(class.chain().any(|ancestor| std::ptr::eq(ancestor, view)));
-        let object = objc::object::create_instance(class, 0);
         let frame = foundation::geometry::NSRect {
             origin: foundation::geometry::NSPoint { x: 1.0, y: 2.0 },
             size: foundation::geometry::NSSize {
@@ -272,38 +220,64 @@ mod tests {
                 height: 40.0,
             },
         };
-        // SAFETY: a fresh WKWebView instance and a null configuration.
-        let result = unsafe {
-            init_web_view(
-                object,
-                objc::sel::get("initWithFrame:configuration:"),
-                frame,
-                std::ptr::null_mut(),
-            )
-        };
-        assert_eq!(result, object);
-        let method = class.method(objc::sel::get("frame")).expect("-frame");
-        let get: unsafe extern "C" fn(Id, Sel) -> foundation::geometry::NSRect =
-            unsafe { std::mem::transmute(method.implementation()) };
-        assert_eq!(unsafe { get(object, objc::sel::get("frame")) }, frame);
+        // SAFETY: each message is sent with its method's prototype.
+        unsafe {
+            let configuration = send!(
+                objc::class::ptr(objc::class::lookup(c"WKWebViewConfiguration").unwrap()) as Id,
+                "new"; Id
+            );
+            let controller = send!(configuration, "userContentController"; Id);
+            assert!(!controller.is_null());
+            assert_eq!(
+                send!(configuration, "userContentController"; Id),
+                controller
+            );
+            let object = objc::object::create_instance(class, 0);
+            let object = send!(object, "initWithFrame:configuration:",
+                frame => foundation::geometry::NSRect, configuration => Id; Id);
+            assert_eq!(send!(object, "configuration"; Id), configuration);
+            // A structure this large is returned through memory, so the
+            // method is called directly rather than through `objc_msgSend`.
+            let get = class.method(objc::sel::get("frame")).expect("-frame");
+            let get: unsafe extern "C" fn(Id, Sel) -> foundation::geometry::NSRect =
+                std::mem::transmute(get.implementation());
+            assert_eq!(get(object, objc::sel::get("frame")), frame);
+            let store = send!(configuration, "websiteDataStore"; Id);
+            let class = objc::class::lookup(c"WKWebsiteDataStore").unwrap();
+            assert_eq!(
+                store,
+                send!(objc::class::ptr(class) as Id, "defaultDataStore"; Id)
+            );
+        }
     }
 
     #[test]
-    fn default_website_data_store_is_stable() {
+    fn user_scripts_keep_their_source_and_injection_point() {
         bootstrap();
-        let class = objc::class::lookup(c"WKWebsiteDataStore").expect("registered");
-        // SAFETY: the method has no explicit arguments and returns an object.
+        let class = objc::class::lookup(c"WKUserScript").expect("registered");
+        // SAFETY: each message is sent with its method's prototype.
         unsafe {
-            let first = default_data_store(
-                objc::class::ptr(class) as Id,
-                objc::sel::get("defaultDataStore"),
+            let script = objc::object::create_instance(class, 0);
+            let script = send!(script, "initWithSource:injectionTime:forMainFrameOnly:",
+                engine::string("window.rbx = {};") => Id, 1isize => isize, 1u8 => u8; Id);
+            assert_eq!(
+                engine::text_of(send!(script, "source"; Id)),
+                "window.rbx = {};"
             );
-            let second = default_data_store(
-                objc::class::ptr(class) as Id,
-                objc::sel::get("defaultDataStore"),
+            assert_eq!(send!(script, "injectionTime"; isize), 1);
+            assert_eq!(send!(script, "isForMainFrameOnly"; u8), 1);
+            let controller = send!(
+                objc::class::ptr(objc::class::lookup(c"WKUserContentController").unwrap()) as Id,
+                "new"; Id
             );
-            assert!(!first.is_null());
-            assert_eq!(first, second);
+            send!(controller, "addUserScript:", script => Id; ());
+            let scripts = send!(controller, "userScripts"; Id);
+            assert_eq!(send!(scripts, "count"; usize), 1);
+            send!(controller, "removeAllUserScripts"; ());
+            assert_eq!(
+                send!(send!(controller, "userScripts"; Id), "count"; usize),
+                0
+            );
         }
     }
 }

@@ -9,7 +9,7 @@
 pub mod appleevent;
 mod attributed_string;
 mod block;
-mod boxed;
+pub mod boxed;
 pub mod bundle;
 mod characterset;
 mod constant;
