@@ -54,6 +54,10 @@ struct Converter {
     /// call: Apple's contract lets a caller point `mData` at storage it reuses
     /// only after the *next* invocation, and SDL has already copied by then.
     held: Vec<u8>,
+    /// Converted frames on their way out, interleaved as SDL produces them.
+    /// Kept on the converter rather than allocated per call, because every one
+    /// of those calls is on an audio thread.
+    scratch: Vec<u8>,
 }
 
 // SAFETY: `stream` is SDL's own handle, used only through `sdl3::audio`, and it
@@ -104,6 +108,7 @@ pub unsafe extern "C" fn AudioConverterNew(
         destination,
         stream,
         held: Vec::new(),
+        scratch: Vec::new(),
     }));
     let handle = Arc::as_ptr(&converter) as *mut c_void;
     CONVERTERS
@@ -336,45 +341,112 @@ pub unsafe extern "C" fn AudioConverterFillComplexBuffer(
     };
     let mut converter = converter.lock().unwrap_or_else(|e| e.into_inner());
 
-    // SAFETY: the caller's obligation. Only the first buffer is filled: this
-    // converter's output formats are interleaved, so there is exactly one.
+    // SAFETY: the caller's obligation.
     let out = unsafe { &mut *output };
-    if out.count == 0 || out.count as usize > MAX_BUFFERS || out.buffers[0].data.is_null() {
+    let destination = converter.destination;
+    let channels = destination.channels_per_frame.max(1) as usize;
+    // How many buffers the output is spread over, and how much of a frame each
+    // one holds: a non-interleaved format puts one channel in each, and an
+    // interleaved one puts the whole frame in the first.
+    let planes = match destination.non_interleaved() {
+        true => channels.min(out.count as usize),
+        false => 1,
+    };
+    let plane_frame = destination.bytes_per_frame.max(1) as usize;
+    if out.count == 0 || out.count as usize > MAX_BUFFERS || planes == 0 {
         // SAFETY: as above.
         unsafe { *packets = 0 };
         return PARAM_ERROR;
     }
-    let frame_bytes = converter.destination.bytes_per_packet.max(1) as usize;
-    // SAFETY: the caller's obligation: the buffer is writable for its own size.
-    let room = (out.buffers[0].byte_size as usize).min(unsafe { *packets } as usize * frame_bytes);
-    let destination = out.buffers[0].data.cast::<u8>();
+    if out.buffers[..planes].iter().any(|b| b.data.is_null()) {
+        // SAFETY: as above.
+        unsafe { *packets = 0 };
+        return PARAM_ERROR;
+    }
+
+    // In frames, which for linear PCM is also in packets: every buffer has to
+    // hold the whole of what is produced, so the smallest of them is the room.
+    // SAFETY: the caller's obligation.
+    let mut room = unsafe { *packets } as usize;
+    for buffer in &out.buffers[..planes] {
+        room = room.min(buffer.byte_size as usize / plane_frame);
+    }
+
+    // What SDL hands back is interleaved whatever the destination's layout is,
+    // so it is taken into this scratch and dealt out to the buffers below.
+    let stream_frame = match destination.non_interleaved() {
+        true => plane_frame * channels,
+        false => plane_frame,
+    };
+    converter.scratch.clear();
+    converter.scratch.resize(room * stream_frame, 0);
 
     let mut produced = 0usize;
-    while produced < room {
+    while produced < converter.scratch.len() {
         // SAFETY: a stream this crate made.
         if unsafe { sdl3::audio::available(converter.stream) } == 0
             && !feed(&mut converter, input, input_data)
         {
             break;
         }
-        // SAFETY: the destination is writable for `room` bytes, so the tail
-        // from `produced` is writable for the rest.
-        let taken = unsafe {
-            sdl3::audio::get(
-                converter.stream,
-                std::slice::from_raw_parts_mut(destination.add(produced), room - produced),
-            )
-        };
+        let taken =
+            unsafe { sdl3::audio::get(converter.stream, &mut converter.scratch[produced..]) };
         if taken == 0 {
             break;
         }
         produced += taken;
     }
+    // A partial frame is no frame: half of one written into a caller's buffer
+    // is a click, and the count reported back would not account for it.
+    let frames = produced / stream_frame;
 
-    out.buffers[0].byte_size = produced as u32;
+    for (plane, buffer) in out.buffers[..planes].iter_mut().enumerate() {
+        // SAFETY: the caller says the buffer is writable for `mDataByteSize`,
+        // and `room` was measured against that.
+        let into = unsafe {
+            std::slice::from_raw_parts_mut(buffer.data.cast::<u8>(), frames * plane_frame)
+        };
+        match destination.non_interleaved() {
+            true => unweave(&converter.scratch, into, plane, plane_frame, stream_frame),
+            false => into.copy_from_slice(&converter.scratch[..frames * plane_frame]),
+        }
+        buffer.byte_size = (frames * plane_frame) as u32;
+    }
+
     // SAFETY: the caller's obligation.
-    unsafe { *packets = (produced / frame_bytes) as u32 };
+    unsafe { *packets = frames as u32 };
     SUCCESS
+}
+
+/// Lay one channel's own buffer into its place in an interleaved stream.
+///
+/// `plane_frame` is what one frame takes in the channel's buffer and
+/// `stream_frame` what it takes in the stream, so the channel's slot is the
+/// `plane`th of them. The two are what a non-interleaved description means:
+/// `mBytesPerFrame` counts one channel, and the stream SDL takes counts all of
+/// them.
+fn weave(from: &[u8], into: &mut [u8], plane: usize, plane_frame: usize, stream_frame: usize) {
+    let at = plane * plane_frame;
+    for (frame, sample) in from.chunks_exact(plane_frame).enumerate() {
+        let to = frame * stream_frame + at;
+        if to + plane_frame > into.len() {
+            return;
+        }
+        into[to..to + plane_frame].copy_from_slice(sample);
+    }
+}
+
+/// Take one channel back out of an interleaved stream: [`weave`] the other way,
+/// for the buffers a caller hands a converter to fill.
+fn unweave(from: &[u8], into: &mut [u8], plane: usize, plane_frame: usize, stream_frame: usize) {
+    let at = plane * plane_frame;
+    for (frame, sample) in into.chunks_exact_mut(plane_frame).enumerate() {
+        let take = frame * stream_frame + at;
+        if take + plane_frame > from.len() {
+            return;
+        }
+        sample.copy_from_slice(&from[take..take + plane_frame]);
+    }
 }
 
 /// Ask the caller's input procedure for more, and give it to SDL.
@@ -383,7 +455,6 @@ pub unsafe extern "C" fn AudioConverterFillComplexBuffer(
 /// the resampler hands back its tail rather than holding samples for input that
 /// is never coming.
 fn feed(converter: &mut Converter, input: InputProc, input_data: *mut c_void) -> bool {
-    let frame_bytes = converter.source.bytes_per_packet.max(1) as usize;
     let mut wanted = 4096u32;
     let mut list = AudioBufferList {
         count: 1,
@@ -406,24 +477,52 @@ fn feed(converter: &mut Converter, input: InputProc, input_data: *mut c_void) ->
             input_data,
         )
     };
-    let supplied = match status == SUCCESS && list.count > 0 {
-        true => list.buffers[0],
-        false => {
-            // SAFETY: a stream this crate made.
-            unsafe { sdl3::audio::flush(converter.stream) };
-            return false;
-        }
+    if status != SUCCESS || list.count == 0 {
+        // SAFETY: a stream this crate made.
+        unsafe { sdl3::audio::flush(converter.stream) };
+        return false;
+    }
+    let channels = converter.source.channels_per_frame.max(1) as usize;
+    let planes = match converter.source.non_interleaved() {
+        true => channels.min(list.count as usize),
+        false => 1,
     };
-    let bytes = (supplied.byte_size as usize).min(wanted as usize * frame_bytes);
-    if bytes == 0 || supplied.data.is_null() {
+    let plane_frame = converter.source.bytes_per_frame.max(1) as usize;
+    // Frames the procedure supplied, which is the smallest of what it put in
+    // each plane and of what it says it supplied in packets.
+    let mut frames = wanted as usize * converter.source.frames_per_packet.max(1) as usize;
+    for buffer in &list.buffers[..planes] {
+        if buffer.data.is_null() {
+            frames = 0;
+            break;
+        }
+        frames = frames.min(buffer.byte_size as usize / plane_frame);
+    }
+    if frames == 0 {
         // SAFETY: as above.
         unsafe { sdl3::audio::flush(converter.stream) };
         return false;
     }
-    // SAFETY: the guest's procedure says this buffer holds `mDataByteSize`
-    // readable bytes.
-    converter.held =
-        unsafe { std::slice::from_raw_parts(supplied.data.cast::<u8>(), bytes) }.to_vec();
+
+    // SDL takes one interleaved stream, so a planar supply is woven together
+    // here rather than put a channel at a time - which would play as the left
+    // channel followed by the right.
+    let stream_frame = match converter.source.non_interleaved() {
+        true => plane_frame * channels,
+        false => plane_frame,
+    };
+    converter.held.clear();
+    converter.held.resize(frames * stream_frame, 0);
+    for (plane, buffer) in list.buffers[..planes].iter().enumerate() {
+        // SAFETY: the guest's procedure says this buffer holds `mDataByteSize`
+        // readable bytes, and `frames` was measured against that.
+        let from =
+            unsafe { std::slice::from_raw_parts(buffer.data.cast::<u8>(), frames * plane_frame) };
+        match converter.source.non_interleaved() {
+            true => weave(from, &mut converter.held, plane, plane_frame, stream_frame),
+            false => converter.held.copy_from_slice(from),
+        }
+    }
     // SAFETY: a stream this crate made, and a live slice.
     unsafe { sdl3::audio::put(converter.stream, &converter.held) }
 }
@@ -458,6 +557,32 @@ mod tests {
             FORMAT_NOT_SUPPORTED
         );
         assert!(handle.is_null());
+    }
+
+    /// Two planar channels become one interleaved stream and come back out of
+    /// it, which is the whole of what a non-interleaved format asks for.
+    #[test]
+    fn a_planar_channel_weaves_into_its_own_slot_and_back() {
+        let (left, right) = (*b"L0L1L2L3", *b"R0R1R2R3");
+        let mut stream = [0u8; 16];
+        weave(&left, &mut stream, 0, 2, 4);
+        weave(&right, &mut stream, 1, 2, 4);
+        assert_eq!(&stream, b"L0R0L1R1L2R2L3R3");
+
+        let (mut back_left, mut back_right) = ([0u8; 8], [0u8; 8]);
+        unweave(&stream, &mut back_left, 0, 2, 4);
+        unweave(&stream, &mut back_right, 1, 2, 4);
+        assert_eq!(&back_left, &left);
+        assert_eq!(&back_right, &right);
+    }
+
+    /// A stream shorter than the buffer it is dealt into stops rather than
+    /// reading past it: what SDL had is what the caller is told it produced.
+    #[test]
+    fn weaving_stops_at_the_end_of_what_there_is() {
+        let mut half = [b'.'; 8];
+        unweave(b"L0R0L1R1", &mut half, 0, 2, 4);
+        assert_eq!(&half, b"L0L1....");
     }
 
     /// A handle this crate did not make is a parameter error rather than a

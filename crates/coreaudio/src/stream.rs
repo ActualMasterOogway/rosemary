@@ -12,6 +12,7 @@ mod flags {
     pub const IS_FLOAT: u32 = 1 << 0;
     pub const IS_BIG_ENDIAN: u32 = 1 << 1;
     pub const IS_SIGNED_INTEGER: u32 = 1 << 2;
+    pub const IS_PACKED: u32 = 1 << 3;
     pub const IS_NON_INTERLEAVED: u32 = 1 << 5;
 }
 
@@ -32,17 +33,27 @@ pub struct Format {
 
 const _: () = assert!(size_of::<Format>() == 40);
 
-/// What a unit reports before a guest sets anything: the canonical output
-/// format, which is what Apple's default output unit starts at.
+/// What a unit reports before a guest sets anything: `AudioUnit`'s canonical
+/// format, which is what every unit's scopes start at on Apple's.
+///
+/// Canonical means **non-interleaved** 32-bit float - one buffer per channel,
+/// and so `mBytesPerFrame` and `mBytesPerPacket` of four, counting one channel.
+/// That is not cosmetic. A program builds its own descriptions by reading a
+/// unit's and editing it, and then does its arithmetic in the units the answer
+/// implied: a packet is four bytes because a packet is one channel's sample.
+/// Answering with an interleaved eight-byte description has such a program
+/// asking a converter for twice the packets its buffer holds, and writing the
+/// short fills over each other - which plays as the audio it wrote, torn into
+/// halving pieces.
 impl Default for Format {
     fn default() -> Self {
         Format {
             sample_rate: 44100.0,
             format_id: FORMAT_LINEAR_PCM,
-            format_flags: flags::IS_FLOAT,
-            bytes_per_packet: 8,
+            format_flags: flags::IS_FLOAT | flags::IS_PACKED | flags::IS_NON_INTERLEAVED,
+            bytes_per_packet: 4,
             frames_per_packet: 1,
-            bytes_per_frame: 8,
+            bytes_per_frame: 4,
             channels_per_frame: 2,
             bits_per_channel: 32,
             reserved: 0,
@@ -144,6 +155,20 @@ pub unsafe fn close(unit: &mut Unit) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The canonical format is the one Apple's units report, and a program
+    /// reads it to size its own buffers: one buffer per channel, four bytes to
+    /// a frame of it.
+    #[test]
+    fn the_default_is_the_audio_unit_canonical_format() {
+        let canonical = Format::default();
+        assert!(canonical.is_float32());
+        assert!(canonical.non_interleaved());
+        assert_eq!(canonical.bytes_per_frame, 4);
+        assert_eq!(canonical.bytes_per_packet, 4);
+        assert_eq!(canonical.frames_per_packet, 1);
+        assert_eq!(canonical.channels_per_frame, 2);
+    }
 
     #[test]
     fn the_canonical_formats_map_and_the_rest_are_refused() {

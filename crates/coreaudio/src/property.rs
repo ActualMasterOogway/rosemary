@@ -185,6 +185,24 @@ unsafe fn set_on_element(
     }
 }
 
+/// The format a scope and element of `unit` carries.
+///
+/// Which one a guest is asking about is the whole of the question: a mixer's
+/// input scope is its elements, each with a format of its own, and a converter
+/// exists to have two. Answering the output format to every ask is what has a
+/// program build its own descriptions against the wrong side of a unit - and it
+/// does build them that way, by reading one and editing it.
+fn format_of(unit: &crate::Unit, scope: u32, element: u32) -> Format {
+    match (unit.kind, scope) {
+        (crate::Kind::Mixer, scope::INPUT) => unit
+            .inputs
+            .get(element as usize)
+            .map_or_else(Format::default, |input| input.format),
+        (crate::Kind::Converter, scope::INPUT) => unit.input_format,
+        _ => unit.format,
+    }
+}
+
 /// # Safety
 ///
 /// As [`AudioUnitSetProperty`]'s.
@@ -404,7 +422,7 @@ pub unsafe extern "C" fn AudioUnitGetProperty(
                 return INVALID_PROPERTY_VALUE;
             }
             // SAFETY: the caller's obligation, and the capacity was checked.
-            unsafe { *(out as *mut Format) = unit.format };
+            unsafe { *(out as *mut Format) = format_of(&unit, scope, element) };
             SUCCESS
         }
         MAXIMUM_FRAMES_PER_SLICE => {

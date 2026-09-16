@@ -201,6 +201,12 @@ fn pull(
                 return false;
             }
             let per = frames * format.bytes_per_frame();
+            // One run per channel, side by side in `into`: a format whose frame
+            // is wider than the caller sized for would have the last channel's
+            // run past the end of it.
+            if per.saturating_mul(channels) > into.len() {
+                return false;
+            }
             list.count = channels as u32;
             for (i, buffer) in list.buffers[..channels].iter_mut().enumerate() {
                 buffer.channels = 1;
@@ -413,7 +419,11 @@ fn convert(
         source_format.channels_per_frame as usize,
         format.channels_per_frame as usize,
     );
-    if !format.is_float32() || format.non_interleaved() || !(1..=2).contains(&out_channels) {
+    // The layout of `format` is not read here: `into` is this runtime's own
+    // buffer, always interleaved, and `pull` has already put a guest's planar
+    // fill back together by the time its frames reach `pending`. What the
+    // format still has to say is the sample type and the channel count.
+    if !format.is_float32() || !(1..=2).contains(&out_channels) {
         report_unmixable(format);
         return false;
     }
@@ -535,6 +545,12 @@ fn fill_pending(
 
 /// Interleaved floats from whatever sample type the format names.
 ///
+/// The bytes are **already interleaved**, whatever the format's layout says: a
+/// planar fill is woven back together by [`pull`] as it comes out of the guest,
+/// and a connected unit renders interleaved. Only the sample type is read from
+/// the format here; reading the layout too would take the stream apart a second
+/// time and play each channel's samples as the other's.
+///
 /// `None` for a format this does not decode, which the caller reports rather
 /// than playing as if the bytes meant something else.
 fn to_floats(bytes: &[u8], format: Format, frames: usize, channels: usize) -> Option<Vec<f32>> {
@@ -550,16 +566,7 @@ fn to_floats(bytes: &[u8], format: Format, frames: usize, channels: usize) -> Op
     let total = frames * channels;
     let mut out = Vec::with_capacity(total);
     for i in 0..total {
-        // Planar input is laid out channel by channel; interleaved frame by
-        // frame. Either way this reads them out interleaved.
-        let index = match format.non_interleaved() {
-            true => {
-                let (frame, channel) = (i / channels, i % channels);
-                channel * frames + frame
-            }
-            false => i,
-        };
-        let at = index * width;
+        let at = i * width;
         if at + width > bytes.len() {
             return None;
         }
@@ -591,7 +598,9 @@ const MAX_GRAPH_DEPTH: u32 = 8;
 /// sample type plays full-scale noise.
 fn mix(unit: &mut crate::Unit, format: Format, frames: usize, into: &mut [u8], depth: u32) -> bool {
     let out_channels = format.channels_per_frame as usize;
-    if !format.is_float32() || format.non_interleaved() || !(1..=2).contains(&out_channels) {
+    // As in [`convert`]: `into` is interleaved whatever the format says, since
+    // it is this runtime's buffer and not one a guest laid out.
+    if !format.is_float32() || !(1..=2).contains(&out_channels) {
         report_unmixable(format);
         return false;
     }
@@ -768,20 +777,19 @@ mod tests {
         assert_eq!(got, vec![-1.0, 0.0]);
     }
 
-    /// Planar input is read out interleaved, which is what the mix wants.
+    /// A planar format's bytes have already been woven together by the time
+    /// they reach here, so they are read straight through rather than taken
+    /// apart again - which is what the canonical format made the common case.
     #[test]
-    fn planar_float_input_is_read_interleaved() {
-        let format = Format {
-            format_flags: (1 << 0) | (1 << 5),
-            ..Format::default()
-        };
+    fn a_planar_format_does_not_deinterleave_twice() {
+        let format = Format::default();
+        assert!(format.non_interleaved());
         let mut bytes = Vec::new();
         for value in [1.0f32, 2.0, 3.0, 4.0] {
             bytes.extend_from_slice(&value.to_ne_bytes());
         }
-        // Two frames of two channels: `L1 L2 R1 R2` becomes `L1 R1 L2 R2`.
         let got = to_floats(&bytes, format, 2, 2).expect("decodable");
-        assert_eq!(got, vec![1.0, 3.0, 2.0, 4.0]);
+        assert_eq!(got, vec![1.0, 2.0, 3.0, 4.0]);
     }
 
     /// A format nothing here decodes is refused rather than played as noise.
