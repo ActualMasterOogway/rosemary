@@ -754,12 +754,12 @@ mod tests {
 pub unsafe extern "C" fn CGWarpMouseCursorPosition(point: foundation::geometry::NSPoint) -> i32 {
     let point = (point.x as f32, point.y as f32);
     let windows = crate::window::sdl_windows();
-    let origin = windows
-        .first()
-        .copied()
+    let target = crate::event::pointer_window();
+    let origin = target
         .and_then(sdl3::video::window_position)
         .unwrap_or((0, 0));
     let local = local_warp_point(point, origin);
+    let from = crate::event::pointer_position();
     crate::event::warp_pointer(local.0, local.1);
 
     let relative: Vec<_> = windows
@@ -769,10 +769,11 @@ pub unsafe extern "C" fn CGWarpMouseCursorPosition(point: foundation::geometry::
         .collect();
     if relative.is_empty() {
         forget_relative_warp();
+        crate::event::expect_warp_echo(from, local);
         if !sdl3::video::warp_mouse_global(point.0, point.1)
-            && let Some(window) = windows.first()
+            && let Some(window) = target
         {
-            sdl3::video::warp_mouse_in_window(*window, local.0, local.1);
+            sdl3::video::warp_mouse_in_window(window, local.0, local.1);
         }
         return 0;
     }
@@ -788,14 +789,13 @@ pub unsafe extern "C" fn CGWarpMouseCursorPosition(point: foundation::geometry::
         return 0;
     }
 
+    crate::event::expect_warp_echo(from, local);
     let mut released = true;
     for window in &relative {
         released &= sdl3::video::set_relative_mouse_mode(*window, false);
     }
     let warped = sdl3::video::warp_mouse_global(point.0, point.1)
-        || windows
-            .first()
-            .is_some_and(|window| sdl3::video::warp_mouse_in_window(*window, local.0, local.1));
+        || target.is_some_and(|window| sdl3::video::warp_mouse_in_window(window, local.0, local.1));
     for window in relative {
         sdl3::video::set_relative_mouse_mode(window, true);
     }

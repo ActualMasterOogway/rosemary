@@ -262,7 +262,7 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             // owner believing the pointer is outside forever.
             let at = match entered {
                 true => sdl3::video::mouse_state()
-                    .map(|(x, y, _)| track_pointer(x, y))
+                    .map(|(x, y, _)| track_pointer(window, x, y))
                     .unwrap_or_else(|| *POINTER.lock().unwrap_or_else(|e| e.into_inner())),
                 // SDL may already report an outside coordinate on leave. The
                 // last motion is the view the pointer is leaving.
@@ -364,12 +364,15 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             dy,
             buttons,
         } => {
+            if take_warp_echo(x, y) {
+                return;
+            }
             let held = crate::button::held(buttons);
             // A disassociated pointer reports the deltas and none of the
             // movement: the location a guest reads back is where the cursor was
             // when it broke the link, which is what CoreGraphics does and what
             // SDL, still tracking a position inside the window, does not.
-            let (x, y) = track_pointer(x, y);
+            let (x, y) = track_pointer(id, x, y);
             // Before the drop below: a cursor rectangle applies whether or not
             // anything asked for `-mouseMoved:`, and AppKit re-decides the
             // pointer on every move rather than only when a rectangle changes.
@@ -405,7 +408,7 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             y,
         } => {
             let kind = crate::button::event_kind(button, down);
-            let (x, y) = track_pointer(x, y);
+            let (x, y) = track_pointer(id, x, y);
             send(id, Some((x, y)), |window, location| Fields {
                 kind,
                 modifiers: current_modifiers(),
@@ -603,6 +606,36 @@ pub(crate) fn warp_pointer(x: f32, y: f32) {
     *POINTER.lock().unwrap_or_else(|e| e.into_inner()) = (x, y);
 }
 
+/// Where a physical warp is expected to be echoed back as a motion event.
+///
+/// CoreGraphics posts no event for a warp, but SDL does (Cocoa sends one
+/// synchronously, X11 reports the server's MotionNotify), with a delta of
+/// `target - previous`. A game that recentres the cursor after every
+/// `-mouseMoved:` would read that delta as the player undoing their own motion.
+static WARP_ECHO: std::sync::Mutex<Option<(f32, f32)>> = std::sync::Mutex::new(None);
+
+/// Swallow the next motion event that lands on `to`, in window coordinates.
+/// Nothing is armed when `from` is already there: SDL drops a warp that moves
+/// nothing, and a stale echo would eat the next real motion to reach `to`.
+pub(crate) fn expect_warp_echo(from: (f32, f32), to: (f32, f32)) {
+    let echo = (!lands_on(from, to)).then_some(to);
+    *WARP_ECHO.lock().unwrap_or_else(|e| e.into_inner()) = echo;
+}
+
+fn take_warp_echo(x: f32, y: f32) -> bool {
+    let mut echo = WARP_ECHO.lock().unwrap_or_else(|e| e.into_inner());
+    let hit = echo.is_some_and(|target| lands_on(target, (x, y)));
+    if hit {
+        *echo = None;
+    }
+    hit
+}
+
+/// Within half a pixel: SDL converts between desktop and window coordinates.
+fn lands_on(target: (f32, f32), point: (f32, f32)) -> bool {
+    (target.0 - point.0).abs() < 0.5 && (target.1 - point.1).abs() < 0.5
+}
+
 /// The last cursor position an event or programmatic warp established.
 pub(crate) fn pointer_position() -> (f32, f32) {
     *POINTER.lock().unwrap_or_else(|e| e.into_inner())
@@ -618,7 +651,8 @@ pub(crate) fn pointer_position() -> (f32, f32) {
 /// click that took SDL's answer would move the frozen point to somewhere the
 /// cursor never was - which is a hit test, and so a first responder, against the
 /// wrong view.
-fn track_pointer(x: f32, y: f32) -> (f32, f32) {
+fn track_pointer(window: u32, x: f32, y: f32) -> (f32, f32) {
+    POINTER_WINDOW.store(window, std::sync::atomic::Ordering::Relaxed);
     let mut pointer = POINTER.lock().unwrap_or_else(|e| e.into_inner());
     if crate::screen::mouse_is_associated() {
         *pointer = (x, y);
@@ -633,12 +667,26 @@ pub(crate) fn frozen_pointer() -> Option<(f32, f32)> {
         return None;
     }
     let (x, y) = *POINTER.lock().unwrap_or_else(|e| e.into_inner());
-    let origin = crate::window::sdl_windows()
-        .into_iter()
-        .next()
+    let origin = pointer_window()
         .and_then(sdl3::video::window_position)
         .unwrap_or((0, 0));
     Some((x + origin.0 as f32, y + origin.1 as f32))
+}
+
+/// The SDL id of the window the last pointer event came from; `0` before any.
+static POINTER_WINDOW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The window [`POINTER`] is relative to: the one the pointer was last seen
+/// in, not the first one made. A game with a splash window still open would
+/// otherwise translate every desktop point against the splash.
+pub(crate) fn pointer_window() -> Option<sdl3::Window> {
+    let windows = window::sdl_windows();
+    let id = POINTER_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
+    windows
+        .iter()
+        .copied()
+        .find(|w| id != 0 && sdl3::video::window_id(*w) == id)
+        .or_else(|| windows.first().copied())
 }
 
 /// Whether `-mouseMoved:` should be delivered at all.
@@ -784,6 +832,16 @@ mod tests {
         *POINTER.lock().unwrap_or_else(|e| e.into_inner()) = previous;
 
         assert_eq!(warped, (320.0, 240.0));
+    }
+
+    #[test]
+    fn a_warp_echo_is_taken_once() {
+        expect_warp_echo((400.0, 300.0), (400.0, 300.0));
+        assert!(!take_warp_echo(400.0, 300.0));
+        expect_warp_echo((0.0, 0.0), (400.0, 300.0));
+        assert!(!take_warp_echo(405.0, 300.0));
+        assert!(take_warp_echo(400.2, 299.9));
+        assert!(!take_warp_echo(400.0, 300.0));
     }
 
     /// Every name this crate publishes has a delegate method, so a notification
