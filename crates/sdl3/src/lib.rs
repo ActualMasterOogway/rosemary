@@ -59,9 +59,7 @@ pub struct Rect {
     pub h: c_int,
 }
 
-/// `SDL_DisplayMode`, of which only the refresh rate is read here. Declared
-/// whole because SDL hands back a pointer into its own array and the fields
-/// after the one wanted are what put it at the right offset.
+/// `SDL_DisplayMode`.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct DisplayMode {
@@ -197,6 +195,8 @@ struct Api {
     SDL_GetDisplayUsableBounds: Option<unsafe extern "C" fn(u32, *mut Rect) -> bool>,
     SDL_GetDisplayContentScale: Option<unsafe extern "C" fn(u32) -> f32>,
     SDL_GetDesktopDisplayMode: Option<unsafe extern "C" fn(u32) -> *const DisplayMode>,
+    SDL_GetFullscreenDisplayModes:
+        Option<unsafe extern "C" fn(u32, *mut c_int) -> *mut *mut DisplayMode>,
 
     SDL_PollEvent: Option<unsafe extern "C" fn(*mut Event) -> bool>,
     SDL_StartTextInput: Option<unsafe extern "C" fn(Window) -> bool>,
@@ -390,6 +390,7 @@ fn api() -> Option<&'static Api> {
             SDL_GetDisplayUsableBounds,
             SDL_GetDisplayContentScale,
             SDL_GetDesktopDisplayMode,
+            SDL_GetFullscreenDisplayModes,
             SDL_PollEvent,
             SDL_StartTextInput,
             SDL_StopTextInput,
@@ -2389,6 +2390,39 @@ pub mod video {
         // SAFETY: SDL's own mode record, valid until the display changes.
         let rate = unsafe { (*mode).refresh_rate };
         (rate > 0.0).then_some(rate)
+    }
+
+    /// The desktop mode, copied out of SDL's record.
+    pub fn desktop_mode(display: u32) -> Option<DisplayMode> {
+        let f = api()?.SDL_GetDesktopDisplayMode?;
+        // SAFETY: a display id.
+        let mode = unsafe { f(display) };
+        // SAFETY: SDL's own mode record, valid until the display changes.
+        (!mode.is_null()).then(|| unsafe { *mode })
+    }
+
+    /// Every fullscreen mode SDL lists for `display`, largest first.
+    pub fn fullscreen_modes(display: u32) -> Vec<DisplayMode> {
+        let Some(api) = api() else {
+            return Vec::new();
+        };
+        let (Some(get), Some(free)) = (api.SDL_GetFullscreenDisplayModes, api.SDL_free) else {
+            return Vec::new();
+        };
+        let mut count = 0;
+        // SAFETY: a display id and a writable int; the array is SDL's to free.
+        let list = unsafe { get(display, &mut count) };
+        if list.is_null() {
+            return Vec::new();
+        }
+        // SAFETY: `count` non-null mode pointers, as SDL just reported.
+        let out = unsafe { std::slice::from_raw_parts(list, count.max(0) as usize) }
+            .iter()
+            .map(|m| unsafe { **m })
+            .collect();
+        // SAFETY: SDL allocated it, modes included, as one block.
+        unsafe { free(list as *mut c_void) };
+        out
     }
 
     pub fn set_cursor_visible(visible: bool) -> bool {

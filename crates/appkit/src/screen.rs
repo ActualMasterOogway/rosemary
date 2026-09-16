@@ -388,15 +388,32 @@ pub unsafe extern "C" fn CGDisplaySerialNumber(_display: u32) -> u32 {
     0
 }
 
-/// A `CGDisplayModeRef`, which is the display id in a box.
+/// A `CGDisplayModeRef`: the display it came from, and the SDL mode it names.
 ///
-/// `CGDisplayCopyDisplayMode` hands out a reference the caller releases, and the
-/// only thing asked of it here is the refresh rate - so the mode carries the
-/// display it came from and reads the rate when asked, for the reason the module
-/// note gives about caching.
+/// `fixed` is `None` for the mode `CGDisplayCopyDisplayMode` hands out, which reads
+/// the desktop mode when asked, for the reason the module note gives about
+/// caching. A listed mode is a snapshot of one SDL fullscreen mode.
 #[repr(C)]
 struct DisplayMode {
     display: u32,
+    fixed: Option<sdl3::DisplayMode>,
+}
+
+fn new_mode(display: u32, fixed: Option<sdl3::DisplayMode>) -> *const c_void {
+    let mode = Box::leak(Box::new(DisplayMode { display, fixed }));
+    let handle = mode as *const DisplayMode as *const c_void;
+    corefoundation::base::note_opaque(handle);
+    handle
+}
+
+/// The SDL mode behind a handle this module made, or `None`.
+fn sdl_mode_of(mode: *const c_void) -> Option<sdl3::DisplayMode> {
+    if mode.is_null() || !corefoundation::base::is_opaque(mode) {
+        return None;
+    }
+    // SAFETY: an opaque handle this module made, whose layout is `DisplayMode`.
+    let mode = unsafe { &*(mode as *const DisplayMode) };
+    mode.fixed.or_else(|| sdl3::video::desktop_mode(mode.display))
 }
 
 /// `CGDisplayModeRef CGDisplayCopyDisplayMode(CGDirectDisplayID)`
@@ -409,10 +426,43 @@ pub unsafe extern "C" fn CGDisplayCopyDisplayMode(display: u32) -> *const c_void
     if !sdl3::video::displays().contains(&display) {
         return std::ptr::null();
     }
-    let mode = Box::leak(Box::new(DisplayMode { display }));
-    let handle = mode as *const DisplayMode as *const c_void;
-    corefoundation::base::note_opaque(handle);
-    handle
+    new_mode(display, None)
+}
+
+/// `CFArrayRef CGDisplayCopyAllDisplayModes(CGDirectDisplayID, CFDictionaryRef)`
+///
+/// SDL's fullscreen modes, with the desktop mode added when SDL does not list it,
+/// so the mode a caller is already in is always one it can find. The options
+/// dictionary only asks for Retina duplicates, which SDL does not list apart.
+/// Null for an unknown display, as CoreGraphics answers.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayCopyAllDisplayModes(
+    display: u32,
+    _options: CFTypeRef,
+) -> CFTypeRef {
+    if !sdl3::video::displays().contains(&display) {
+        return std::ptr::null();
+    }
+    let mut modes = sdl3::video::fullscreen_modes(display);
+    if let Some(desktop) = sdl3::video::desktop_mode(display) {
+        let listed = modes.iter().any(|m| {
+            (m.w, m.h, m.pixel_density, m.refresh_rate)
+                == (desktop.w, desktop.h, desktop.pixel_density, desktop.refresh_rate)
+        });
+        if !listed {
+            modes.insert(0, desktop);
+        }
+    }
+    let handles: Vec<CFTypeRef> = modes
+        .into_iter()
+        .map(|m| new_mode(display, Some(m)) as CFTypeRef)
+        .collect();
+    // No retain callbacks: the modes are leaked, so there is nothing to count.
+    corefoundation::collections::new_array(
+        &handles,
+        corefoundation::callbacks::Policy::NONE,
+        false,
+    )
 }
 
 /// `double CGDisplayModeGetRefreshRate(CGDisplayModeRef)`
@@ -422,12 +472,48 @@ pub unsafe extern "C" fn CGDisplayCopyDisplayMode(display: u32) -> *const c_void
 /// the value a caller already has to handle.
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn CGDisplayModeGetRefreshRate(mode: *const c_void) -> f64 {
-    if mode.is_null() || !corefoundation::base::is_opaque(mode) {
-        return 0.0;
-    }
-    // SAFETY: an opaque handle this module made, whose layout is `DisplayMode`.
-    let display = unsafe { (*(mode as *const DisplayMode)).display };
-    sdl3::video::display_refresh_rate(display).unwrap_or(0.0) as f64
+    sdl_mode_of(mode).map_or(0.0, |m| m.refresh_rate.max(0.0) as f64)
+}
+
+/// `size_t CGDisplayModeGetWidth(CGDisplayModeRef)`, in points.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayModeGetWidth(mode: *const c_void) -> usize {
+    sdl_mode_of(mode).map_or(0, |m| m.w.max(0) as usize)
+}
+
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayModeGetHeight(mode: *const c_void) -> usize {
+    sdl_mode_of(mode).map_or(0, |m| m.h.max(0) as usize)
+}
+
+fn pixels(points: i32, density: f32) -> usize {
+    let density = if density > 0.0 { density } else { 1.0 };
+    (points.max(0) as f32 * density).round() as usize
+}
+
+/// `size_t CGDisplayModeGetPixelWidth(CGDisplayModeRef)`, points times density.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayModeGetPixelWidth(mode: *const c_void) -> usize {
+    sdl_mode_of(mode).map_or(0, |m| pixels(m.w, m.pixel_density))
+}
+
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayModeGetPixelHeight(mode: *const c_void) -> usize {
+    sdl_mode_of(mode).map_or(0, |m| pixels(m.h, m.pixel_density))
+}
+
+/// `uint32_t CGDisplayModeGetIOFlags(CGDisplayModeRef)`
+///
+/// `kDisplayModeValidFlag | kDisplayModeSafeFlag`: every mode SDL lists can be set.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayModeGetIOFlags(mode: *const c_void) -> u32 {
+    sdl_mode_of(mode).map_or(0, |_| 0x1 | 0x2)
+}
+
+/// `bool CGDisplayModeIsUsableForDesktopGUI(CGDisplayModeRef)`
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayModeIsUsableForDesktopGUI(mode: *const c_void) -> u8 {
+    sdl_mode_of(mode).is_some() as u8
 }
 
 /// `void CGDisplayModeRelease(CGDisplayModeRef)` and its retain.

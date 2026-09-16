@@ -105,6 +105,13 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CGDisplayModeGetRefreshRate" => at!(screen::CGDisplayModeGetRefreshRate),
         "CGDisplayModeRelease" => at!(screen::CGDisplayModeRelease),
         "CGDisplayModeRetain" => at!(screen::CGDisplayModeRetain),
+        "CGDisplayCopyAllDisplayModes" => at!(screen::CGDisplayCopyAllDisplayModes),
+        "CGDisplayModeGetWidth" => at!(screen::CGDisplayModeGetWidth),
+        "CGDisplayModeGetHeight" => at!(screen::CGDisplayModeGetHeight),
+        "CGDisplayModeGetPixelWidth" => at!(screen::CGDisplayModeGetPixelWidth),
+        "CGDisplayModeGetPixelHeight" => at!(screen::CGDisplayModeGetPixelHeight),
+        "CGDisplayModeGetIOFlags" => at!(screen::CGDisplayModeGetIOFlags),
+        "CGDisplayModeIsUsableForDesktopGUI" => at!(screen::CGDisplayModeIsUsableForDesktopGUI),
         "CGDisplayRegisterReconfigurationCallback" => {
             at!(screen::CGDisplayRegisterReconfigurationCallback)
         }
@@ -216,6 +223,13 @@ pub const NAMES: &[&str] = &[
     "CGDisplayModeGetRefreshRate",
     "CGDisplayModeRelease",
     "CGDisplayModeRetain",
+    "CGDisplayCopyAllDisplayModes",
+    "CGDisplayModeGetWidth",
+    "CGDisplayModeGetHeight",
+    "CGDisplayModeGetPixelWidth",
+    "CGDisplayModeGetPixelHeight",
+    "CGDisplayModeGetIOFlags",
+    "CGDisplayModeIsUsableForDesktopGUI",
     "CGDisplayRegisterReconfigurationCallback",
     "CGDisplayRemoveReconfigurationCallback",
     "CGGetDisplaysWithRect",
