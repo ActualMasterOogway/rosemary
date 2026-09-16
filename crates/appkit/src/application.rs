@@ -278,36 +278,71 @@ unsafe extern "C" fn run(receiver: Id, sel: Sel) {
     // SAFETY: as above; `-finishLaunching` is `void (id, SEL)`.
     unsafe { finish_launching(receiver, sel) };
 
-    let loop_ = corefoundation::runloop::main();
     loop {
         // SAFETY: an application.
         if unsafe { (*(receiver as *const Application)).running } == 0 {
             break;
         }
-        // The window system first, and every turn. A window that is never
-        // pumped is one the platform has not been told to show: on macOS SDL's
-        // Cocoa backend needs its events drained for the window to appear at
-        // all, so this is not only about delivering input.
-        crate::event::pump(receiver);
-        // `-postEvent:atStart:` is used by Cocoa backends to wake work that
-        // must run through their `-sendEvent:` override. Dispatch through the
-        // receiver rather than calling this class's implementation directly so
-        // a principal `NSApplication` subclass sees the event.
-        unsafe { dispatch_posted_events(receiver) };
-        // The main queue is drained here because this is the main thread: a block
-        // sent to it with `dispatch_async` runs nowhere else, so a run loop that
-        // never drained would leave every such block queued forever.
-        darwin::dispatch::queue::drain_main();
-        // A short slice rather than a long one: the run loop's timers are what
-        // drive a frame - see `corevideo` - and a turn that blocked for a tenth
-        // of a second would cap the frame rate at ten.
-        let result = loop_.run_in_mode(corefoundation::runloop::DEFAULT_MODE, 0.002, false);
-        if result == corefoundation::runloop::result::FINISHED {
-            // Nothing scheduled: a program with no display link and no source is
-            // waiting to be told to stop, and spinning on that would be a core
-            // at a hundred per cent for a window that is only being looked at.
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        // SAFETY: an application.
+        unsafe { turn(receiver, corefoundation::runloop::DEFAULT_MODE) };
+    }
+}
+
+/// `NSModalPanelRunLoopMode` and `NSEventTrackingRunLoopMode`, which AppKit adds
+/// to the common modes: a timer a toolkit schedules in the common modes has to
+/// keep firing while a modal session or a tracking loop runs.
+fn register_common_modes() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let loop_ = corefoundation::runloop::main();
+        loop_.add_common_mode(MODAL_PANEL_MODE);
+        loop_.add_common_mode("NSEventTrackingRunLoopMode");
+    });
+}
+
+const MODAL_PANEL_MODE: &str = "NSModalPanelRunLoopMode";
+
+/// One turn of the main thread's loop in `mode`: what `-run` does each time
+/// round, and what `-runModalSession:` does once.
+///
+/// # Safety
+///
+/// `receiver` must be an application.
+unsafe fn turn(receiver: Id, mode: &str) {
+    register_common_modes();
+    // The window system first, and every turn. A window that is never pumped is
+    // one the platform has not been told to show: on macOS SDL's Cocoa backend
+    // needs its events drained for the window to appear at all, so this is not
+    // only about delivering input.
+    crate::event::pump(receiver);
+    // `-postEvent:atStart:` is used by Cocoa backends to wake work that must run
+    // through their `-sendEvent:` override. Dispatch through the receiver rather
+    // than calling this class's implementation directly so a principal
+    // `NSApplication` subclass sees the event.
+    // SAFETY: the caller's obligation.
+    unsafe { dispatch_posted_events(receiver) };
+    // SAFETY: the caller's obligation.
+    unsafe { service_run_loop(mode, 0.002) };
+}
+
+/// Drain the main queue and run the main run loop in `mode` for `seconds`.
+///
+/// The main queue is drained here because this is the main thread: a block sent
+/// to it with `dispatch_async` runs nowhere else. The slice is short because the
+/// run loop's timers are what drive a frame - see `corevideo` - and the window
+/// system is pumped between slices, not by the loop.
+///
+/// # Safety
+///
+/// Called on the main thread, from a place a run loop callback may reenter.
+unsafe fn service_run_loop(mode: &str, seconds: f64) {
+    darwin::dispatch::queue::drain_main();
+    let result = corefoundation::runloop::main().run_in_mode(mode, seconds, false);
+    if result == corefoundation::runloop::result::FINISHED && seconds > 0.0 {
+        // Nothing scheduled: a program with no display link and no source is
+        // waiting to be told to stop, and spinning on that would be a core at a
+        // hundred per cent for a window that is only being looked at.
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 
@@ -360,21 +395,28 @@ unsafe extern "C" fn next_event(
     _sel: Sel,
     mask: u64,
     until: Id,
-    _mode: Id,
+    mode: Id,
     dequeue: u8,
 ) -> Id {
+    register_common_modes();
     crate::event::pump(receiver);
     let event = queued_event(mask, dequeue != 0);
     if !event.is_null() {
         return event;
     }
-    // Apple blocks until the deadline when there is no event. Nothing here can
-    // wake, so the wait is a short sleep: a loop asking for the next event with
-    // a distant deadline and answered nil at once would spin a core.
-    if wait_interval(until) > 0.0 {
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-    std::ptr::null_mut()
+    // Apple runs the run loop in `mode` until an event arrives or the deadline
+    // passes, and a toolkit waiting in here - Qt in a modal session does - relies
+    // on its timers and sources firing meanwhile. Window-system input does not
+    // wake the loop here, so the wait is a short slice and the caller asks again.
+    let mode = match mode.is_null() {
+        true => corefoundation::runloop::DEFAULT_MODE.to_string(),
+        // SAFETY: a mode is a string object.
+        false => String::from_utf8_lossy(&unsafe { foundation::string::bytes(mode) }).into_owned(),
+    };
+    let seconds = wait_interval(until).min(0.002);
+    // SAFETY: the main thread's event call, where Apple runs the loop too.
+    unsafe { service_run_loop(&mode, seconds) };
+    queued_event(mask, dequeue != 0)
 }
 
 /// `-stop:`, which ends the loop above after the current turn.
@@ -601,13 +643,16 @@ unsafe extern "C" fn begin_modal_session(receiver: Id, _sel: Sel, window: Id) ->
 
 /// `-runModalSession:`, one turn of the caller's own modal loop.
 ///
-/// Pumps the events a window needs and answers `NSModalResponseContinue` while
+/// Takes one turn of the main loop in `NSModalPanelRunLoopMode` - events, posted
+/// events, the main queue and the run loop's timers and sources, which a toolkit
+/// spinning this call depends on - and answers `NSModalResponseContinue` while
 /// the session is still open, so the caller loops; `-stopModal` closes it and the
 /// next turn answers `NSModalResponseStop`. Answering `Stop` straight away would
 /// make every modal dialog close before it was drawn, and answering `Continue`
 /// for ever would make one that never closes.
 unsafe extern "C" fn run_modal_session(receiver: Id, _sel: Sel, _session: Id) -> isize {
-    crate::event::pump(receiver);
+    // SAFETY: an application.
+    unsafe { turn(receiver, MODAL_PANEL_MODE) };
     // SAFETY: an application.
     let app = unsafe { &*(receiver as *const Application) };
     match app.modal_depth > 0 {

@@ -202,6 +202,11 @@ impl Observer {
     }
 }
 
+struct Common {
+    names: Vec<String>,
+    items: Mode,
+}
+
 #[derive(Default)]
 struct Mode {
     sources: Vec<Arc<Source>>,
@@ -211,6 +216,11 @@ struct Mode {
 
 pub struct RunLoop {
     modes: Mutex<BTreeMap<String, Mode>>,
+    /// What `kCFRunLoopCommonModes` stands for: the modes in the set, and every
+    /// item added under the alias, which a mode joining the set later receives.
+    ///
+    /// Never held while `modes` is locked by the same call.
+    common: Mutex<Common>,
     stopped: AtomicBool,
     waker: (Mutex<bool>, Condvar),
     /// Set while the loop is asleep, for `CFRunLoopIsWaiting`. A caller asks it
@@ -232,28 +242,42 @@ impl RunLoop {
     fn new() -> RunLoop {
         RunLoop {
             modes: Mutex::new(BTreeMap::new()),
+            common: Mutex::new(Common {
+                names: vec![DEFAULT_MODE.to_string()],
+                items: Mode::default(),
+            }),
             stopped: AtomicBool::new(false),
             waker: (Mutex::new(false), Condvar::new()),
             waiting: AtomicBool::new(false),
         }
     }
 
-    /// The modes a name refers to: itself, or every mode for the common alias.
+    /// The modes a name refers to: itself, or the common set for the alias.
     fn names(&self, mode: &str) -> Vec<String> {
         if mode != COMMON_MODES {
             return vec![mode.to_string()];
         }
-        let modes = self.modes.lock().unwrap_or_else(|e| e.into_inner());
-        // The default one always, so a source added to the common modes before
-        // any mode exists is still there when the loop runs the default one.
-        let mut names: Vec<String> = modes.keys().cloned().collect();
-        if !names.iter().any(|n| n == DEFAULT_MODE) {
-            names.push(DEFAULT_MODE.to_string());
+        self.common
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .names
+            .clone()
+    }
+
+    /// Record or forget an item added under the common alias, so a mode added to
+    /// the set later gets it too.
+    fn note_common(&self, mode: &str, update: impl FnOnce(&mut Mode)) {
+        if mode == COMMON_MODES {
+            update(&mut self.common.lock().unwrap_or_else(|e| e.into_inner()).items);
         }
-        names
     }
 
     pub fn add_source(&self, source: &Arc<Source>, mode: &str) {
+        self.note_common(mode, |common| {
+            if !common.sources.iter().any(|s| Arc::ptr_eq(s, source)) {
+                common.sources.push(Arc::clone(source));
+            }
+        });
         for name in self.names(mode) {
             let mut modes = self.modes.lock().unwrap_or_else(|e| e.into_inner());
             let entry = modes.entry(name).or_default();
@@ -265,6 +289,9 @@ impl RunLoop {
     }
 
     pub fn remove_source(&self, source: &Arc<Source>, mode: &str) {
+        self.note_common(mode, |common| {
+            common.sources.retain(|s| !Arc::ptr_eq(s, source));
+        });
         for name in self.names(mode) {
             let mut modes = self.modes.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = modes.get_mut(&name) {
@@ -283,6 +310,11 @@ impl RunLoop {
     }
 
     pub fn add_timer(&self, timer: &Arc<Timer>, mode: &str) {
+        self.note_common(mode, |common| {
+            if !common.timers.iter().any(|t| Arc::ptr_eq(t, timer)) {
+                common.timers.push(Arc::clone(timer));
+            }
+        });
         for name in self.names(mode) {
             let mut modes = self.modes.lock().unwrap_or_else(|e| e.into_inner());
             let entry = modes.entry(name).or_default();
@@ -294,6 +326,9 @@ impl RunLoop {
     }
 
     pub fn remove_timer(&self, timer: &Arc<Timer>, mode: &str) {
+        self.note_common(mode, |common| {
+            common.timers.retain(|t| !Arc::ptr_eq(t, timer));
+        });
         for name in self.names(mode) {
             let mut modes = self.modes.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = modes.get_mut(&name) {
@@ -303,6 +338,11 @@ impl RunLoop {
     }
 
     pub fn add_observer(&self, observer: &Arc<Observer>, mode: &str) {
+        self.note_common(mode, |common| {
+            if !common.observers.iter().any(|o| Arc::ptr_eq(o, observer)) {
+                common.observers.push(Arc::clone(observer));
+            }
+        });
         for name in self.names(mode) {
             let mut modes = self.modes.lock().unwrap_or_else(|e| e.into_inner());
             let entry = modes.entry(name).or_default();
@@ -317,6 +357,9 @@ impl RunLoop {
     }
 
     pub fn remove_observer(&self, observer: &Arc<Observer>, mode: &str) {
+        self.note_common(mode, |common| {
+            common.observers.retain(|o| !Arc::ptr_eq(o, observer));
+        });
         for name in self.names(mode) {
             let mut modes = self.modes.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = modes.get_mut(&name) {
@@ -336,11 +379,36 @@ impl RunLoop {
 
     /// Add `mode` to the set `kCFRunLoopCommonModes` stands for.
     ///
-    /// Naming the mode is enough: [`RunLoop::names`] answers the common alias with
-    /// every mode the loop knows, so a mode that exists is already in the set. What
-    /// this adds is a mode that has nothing in it yet - which is exactly the case
-    /// a caller calls it for, since it runs before anything is scheduled.
+    /// As CoreFoundation does, the mode also gets everything already added under
+    /// the alias: AppKit makes its modal and tracking modes common after a toolkit
+    /// may have scheduled its timers and sources, and those still have to fire
+    /// while a modal session runs.
     pub fn add_common_mode(&self, mode: &str) {
+        if mode == COMMON_MODES {
+            return;
+        }
+        let (sources, timers, observers) = {
+            let mut common = self.common.lock().unwrap_or_else(|e| e.into_inner());
+            if common.names.iter().any(|name| name == mode) {
+                return;
+            }
+            common.names.push(mode.to_string());
+            let items = &common.items;
+            (
+                items.sources.clone(),
+                items.timers.clone(),
+                items.observers.clone(),
+            )
+        };
+        for source in &sources {
+            self.add_source(source, mode);
+        }
+        for timer in &timers {
+            self.add_timer(timer, mode);
+        }
+        for observer in &observers {
+            self.add_observer(observer, mode);
+        }
         let mut modes = self.modes.lock().unwrap_or_else(|e| e.into_inner());
         modes.entry(mode.to_string()).or_default();
     }
@@ -909,5 +977,32 @@ mod tests {
             result::HANDLED_SOURCE
         );
         assert_eq!(calls(), 1);
+    }
+
+    /// A mode made common later still runs what was added under the alias
+    /// before, and a mode that is not common does not.
+    #[test]
+    fn a_mode_made_common_later_gets_what_the_alias_already_holds() {
+        let (calls, perform, _) = counter!();
+        let loop_ = Arc::new(RunLoop::new());
+        let source = new_source(Some(perform), 0);
+        loop_.add_source(&source, COMMON_MODES);
+        source.signal();
+        assert_eq!(
+            loop_.run_in_mode("Private", 0.0, true),
+            result::FINISHED,
+            "a mode outside the common set holds nothing"
+        );
+
+        loop_.add_common_mode("Modal");
+        assert_eq!(
+            loop_.run_in_mode("Modal", 1.0, true),
+            result::HANDLED_SOURCE
+        );
+        assert_eq!(calls(), 1);
+
+        loop_.remove_source(&source, COMMON_MODES);
+        assert_eq!(loop_.run_in_mode("Modal", 0.0, true), result::FINISHED);
+        assert_eq!(loop_.run_in_mode(DEFAULT_MODE, 0.0, true), result::FINISHED);
     }
 }
