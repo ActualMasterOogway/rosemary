@@ -747,6 +747,30 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `CGImageGetWidth`/`Height`/`BitsPerComponent` are `size_t`; a
     // `CGImageAlphaInfo` is a `uint32_t` enum; the index into a source is a
     // `size_t`.
+    sig!("CGDataProviderCreateWithData", P, P, P, U64, P),
+    sig!("CGDataProviderRelease", V, P),
+    // `CGImageCreate(size_t width, size_t height, size_t bitsPerComponent,
+    // size_t bitsPerPixel, size_t bytesPerRow, CGColorSpaceRef,
+    // CGBitmapInfo, CGDataProviderRef, const CGFloat *decode,
+    // bool shouldInterpolate, CGColorRenderingIntent)`.
+    sig!(
+        "CGImageCreate",
+        P,
+        U64,
+        U64,
+        U64,
+        U64,
+        U64,
+        P,
+        U32,
+        P,
+        P,
+        U8,
+        I32
+    ),
+    sig!("CGImageCreateCopyWithColorSpace", P, P, P),
+    sig!("CGImageRetain", P, P),
+    sig!("CGImageRelease", V, P),
     sig!("CGImageGetAlphaInfo", U32, P),
     sig!("CGImageGetBitsPerComponent", U64, P),
     sig!("CGImageGetColorSpace", P, P),
@@ -1175,6 +1199,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("TISCopyCurrentASCIICapableKeyboardLayoutInputSource", P),
     sig!("TISCopyCurrentKeyboardInputSource", P),
     sig!("TISCopyCurrentKeyboardLayoutInputSource", P),
+    sig!("TISCopyInputMethodKeyboardLayoutOverride", P),
     // `TISInputSourceRef TISCopyInputSourceForLanguage(CFStringRef)`, and the
     // two list calls beside it - the second argument of the general one is a
     // `Boolean`, which is a byte rather than the four this ABI would guess.
@@ -3178,6 +3203,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CTFontGetUnderlineThickness", F64, P),
     sig!("CTFontGetAdvancesForGlyphs", F64, P, U32, P, P, I64),
     sig!("CTFontGetGlyphsForCharacters", BOOL, P, P, P, I64),
+    sig!("CTFontCreatePathForGlyph", P, P, U16, P),
     sig!("CTFontDrawGlyphs", V, P, P, P, U64, P),
     sig!("CTFontDescriptorCopyAttribute", P, P, P),
     sig!("CTFontCopyAttribute", P, P, P),
@@ -3190,6 +3216,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CTFontManagerCopyAvailableFontFamilyNames", P),
     sig!("CTFontManagerCreateFontDescriptorsFromURL", P, P),
     sig!("CTFontManagerCreateFontDescriptorFromData", P, P),
+    sig!("CTFontDescriptorCreateCopyWithAttributes", P, P, P),
+    sig!("CTFontDescriptorCreateWithNameAndSize", P, P, F64),
+    sig!("CTFontDescriptorCreateMatchingFontDescriptors", P, P, P),
+    sig!("CTFontCreateCopyWithAttributes", P, P, F64, P, P),
+    sig!("CTFontCreateWithGraphicsFont", P, P, F64, P, P),
+    sig!("CTGetCoreTextVersion", U32),
     sig!("NSColorSpaceFromDepth", P, I32),
     sig!("NSBestDepth", I32, P, I64, I64, BOOL, P),
     sig!("CGEventSourceKeyState", BOOL, I32, U16),

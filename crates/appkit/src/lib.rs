@@ -15,7 +15,9 @@ use std::ffi::c_int;
 pub mod alert;
 pub mod appearance;
 pub mod application;
+pub mod backing;
 pub mod button;
+pub mod cgcontext;
 pub mod cgevent;
 pub mod classes;
 pub mod color;
@@ -25,6 +27,7 @@ pub(crate) mod decode;
 mod define;
 pub mod event;
 mod font;
+pub mod fonts;
 pub mod geometry;
 pub mod graphics;
 pub mod icon;
@@ -61,6 +64,7 @@ pub fn bootstrap() {
         workspace::install();
         color::install();
         graphics::install();
+        cgcontext::install();
         cursor::install();
         font::install();
         image::install();
@@ -69,6 +73,7 @@ pub fn bootstrap() {
         screen::install();
         window::install();
         view::install();
+        backing::install();
         layer::install();
         text::install();
         opengl::install();
@@ -147,13 +152,17 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CGColorSpaceCreateWithName" => at!(graphics::CGColorSpaceCreateWithName),
         "CGColorSpaceCreateDeviceRGB" => at!(graphics::CGColorSpaceCreateDeviceRGB),
         "CGColorSpaceRelease" => at!(graphics::CGColorSpaceRelease),
-        "CGBitmapContextCreate" => at!(graphics::CGBitmapContextCreate),
-        "CGContextRelease" => at!(graphics::CGContextRelease),
-        "CGContextTranslateCTM" => at!(graphics::CGContextTranslateCTM),
-        "CGContextScaleCTM" => at!(graphics::CGContextScaleCTM),
-        "CGContextSetTextDrawingMode" => at!(graphics::CGContextSetTextDrawingMode),
-        "CGContextSetGrayFillColor" => at!(graphics::CGContextSetGrayFillColor),
-        "CGContextSetShouldSmoothFonts" => at!(graphics::CGContextSetShouldSmoothFonts),
+        "CGDataProviderCreateWithData" => at!(graphics::CGDataProviderCreateWithData),
+        "CGDataProviderRelease" => at!(graphics::CGDataProviderRelease),
+        "CGImageCreate" => at!(graphics::CGImageCreate),
+        "CGImageCreateCopyWithColorSpace" => at!(graphics::CGImageCreateCopyWithColorSpace),
+        "CGImageRetain" => at!(graphics::CGImageRetain),
+        "CGImageRelease" => at!(graphics::CGImageRelease),
+        "CGImageGetWidth" => at!(graphics::CGImageGetWidth),
+        "CGImageGetHeight" => at!(graphics::CGImageGetHeight),
+        "CGImageGetBitsPerComponent" => at!(graphics::CGImageGetBitsPerComponent),
+        "CGImageGetAlphaInfo" => at!(graphics::CGImageGetAlphaInfo),
+        "CGImageGetColorSpace" => at!(graphics::CGImageGetColorSpace),
         "CGRectGetWidth" => at!(geometry::CGRectGetWidth),
         "CGRectGetHeight" => at!(geometry::CGRectGetHeight),
         "CGRectGetMinX" => at!(geometry::CGRectGetMinX),
@@ -166,6 +175,9 @@ pub fn symbol(name: &str) -> Option<u64> {
         "NSMouseInRect" => at!(geometry::NSMouseInRect),
         "NSInsetRect" => at!(geometry::NSInsetRect),
         "TISCopyCurrentKeyboardInputSource" => at!(textinput::TISCopyCurrentKeyboardInputSource),
+        "TISCopyInputMethodKeyboardLayoutOverride" => {
+            at!(textinput::TISCopyInputMethodKeyboardLayoutOverride)
+        }
         "TISCopyCurrentKeyboardLayoutInputSource" => {
             at!(textinput::TISCopyCurrentKeyboardLayoutInputSource)
         }
@@ -192,7 +204,11 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CGLEnable" => at!(CGLEnable),
         "CGLDisable" => at!(CGLDisable),
         "CGLSetParameter" => at!(CGLSetParameter),
-        other => return pasteboard_manager::symbol(other).or_else(|| coretext::symbol(other)),
+        other => {
+            return pasteboard_manager::symbol(other)
+                .or_else(|| coretext::symbol(other))
+                .or_else(|| cgcontext::symbol(other));
+        }
     })
 }
 
@@ -203,6 +219,7 @@ pub fn names() -> Vec<&'static str> {
         .copied()
         .chain(pasteboard_manager::NAMES.iter().copied())
         .chain(coretext::NAMES.iter().copied())
+        .chain(cgcontext::NAMES.iter().copied())
         .collect()
 }
 
@@ -256,13 +273,17 @@ pub const NAMES: &[&str] = &[
     "CGColorSpaceCreateWithName",
     "CGColorSpaceCreateDeviceRGB",
     "CGColorSpaceRelease",
-    "CGBitmapContextCreate",
-    "CGContextRelease",
-    "CGContextTranslateCTM",
-    "CGContextScaleCTM",
-    "CGContextSetTextDrawingMode",
-    "CGContextSetGrayFillColor",
-    "CGContextSetShouldSmoothFonts",
+    "CGDataProviderCreateWithData",
+    "CGDataProviderRelease",
+    "CGImageCreate",
+    "CGImageCreateCopyWithColorSpace",
+    "CGImageRetain",
+    "CGImageRelease",
+    "CGImageGetWidth",
+    "CGImageGetHeight",
+    "CGImageGetBitsPerComponent",
+    "CGImageGetAlphaInfo",
+    "CGImageGetColorSpace",
     "CGRectGetWidth",
     "CGRectGetHeight",
     "CGRectGetMinX",
@@ -275,6 +296,7 @@ pub const NAMES: &[&str] = &[
     "NSMouseInRect",
     "NSInsetRect",
     "TISCopyCurrentKeyboardInputSource",
+    "TISCopyInputMethodKeyboardLayoutOverride",
     "TISCopyCurrentKeyboardLayoutInputSource",
     "TISCopyCurrentASCIICapableKeyboardInputSource",
     "TISCopyCurrentASCIICapableKeyboardLayoutInputSource",
@@ -319,11 +341,14 @@ pub fn ns_app_cell() -> u64 {
 // them. A guest loads their addresses from its GOT and copies the fields.
 static CG_AFFINE_TRANSFORM_IDENTITY: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 static CG_POINT_ZERO: [f64; 2] = [0.0, 0.0];
+/// `{{-CGFLOAT_MAX / 2, -CGFLOAT_MAX / 2}, {CGFLOAT_MAX, CGFLOAT_MAX}}`.
+static CG_RECT_INFINITE: [f64; 4] = [f64::MAX / -2.0, f64::MAX / -2.0, f64::MAX, f64::MAX];
 
 pub fn data_symbols() -> Vec<(String, u64)> {
     bootstrap();
     let mut out = classes::class_data();
     out.extend(coretext::data_symbols());
+    out.extend(cgcontext::data_symbols());
     out.push(("_NSApp".to_string(), ns_app_cell()));
     out.push((
         "_CGAffineTransformIdentity".to_string(),
@@ -332,6 +357,10 @@ pub fn data_symbols() -> Vec<(String, u64)> {
     out.push((
         "_CGPointZero".to_string(),
         CG_POINT_ZERO.as_ptr() as usize as u64,
+    ));
+    out.push((
+        "_CGRectInfinite".to_string(),
+        CG_RECT_INFINITE.as_ptr() as usize as u64,
     ));
     let srgb = foundation::notification::name_object("kCGColorSpaceSRGB");
     out.push((

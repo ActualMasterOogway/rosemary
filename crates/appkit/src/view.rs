@@ -45,6 +45,8 @@ pub struct View {
     /// `-setAutoresizesSubviews:`, which is `YES` on a fresh view - so the
     /// field is stored inverted, and zero means the AppKit default.
     does_not_autoresize_subviews: usize,
+    /// `-setHidden:`.
+    hidden: usize,
 }
 
 /// The bits of [`View::posts`].
@@ -1067,23 +1069,55 @@ unsafe extern "C" fn no(_receiver: Id, _sel: Sel) -> u8 {
 /// and swaps. With `-display` empty the game ticks, the display link fires, and
 /// the window stays black.
 ///
-/// Sent rather than called, so the *guest's* override is what runs. A view with
-/// no `-drawRect:` of its own draws nothing, which is what an empty view does.
-unsafe extern "C" fn display(receiver: Id, sel: Sel) {
-    let sel_draw = objc::sel::get("drawRect:");
-    // SAFETY: a live view; `-bounds` is `NSRect (id, SEL)`.
-    let rect = unsafe { bounds(receiver, sel) };
-    // SAFETY: a live object this runtime allocated.
-    let responds =
-        unsafe { objc::object::class_of(receiver) }.is_some_and(|c| c.method(sel_draw).is_some());
-    if !responds {
-        return;
+/// Sent rather than called, so the *guest's* override is what runs, with the
+/// view's focus locked so that what it draws lands in the window's store. A
+/// view with no `-drawRect:` of its own draws nothing, which is what an empty
+/// view does.
+unsafe extern "C" fn display(receiver: Id, _sel: Sel) {
+    crate::backing::display_view(receiver);
+}
+
+unsafe extern "C" fn set_needs_display(receiver: Id, _sel: Sel, flag: u8) {
+    if flag != 0 {
+        crate::backing::needs_display(receiver);
     }
-    // SAFETY: `-drawRect:` is `void (id, SEL, NSRect)`.
-    unsafe {
-        let f: unsafe extern "C" fn(Id, Sel, NSRect) = std::mem::transmute(objc::msg::entry());
-        f(receiver, sel_draw, rect);
+}
+
+unsafe extern "C" fn set_needs_display_in_rect(receiver: Id, _sel: Sel, _rect: NSRect) {
+    crate::backing::needs_display(receiver);
+}
+
+unsafe extern "C" fn set_hidden(receiver: Id, _sel: Sel, hidden: u8) {
+    let was = view_of(receiver).hidden != 0;
+    view_of(receiver).hidden = usize::from(hidden != 0);
+    if was && hidden == 0 {
+        crate::backing::needs_display(receiver);
     }
+}
+
+unsafe extern "C" fn is_hidden(receiver: Id, _sel: Sel) -> u8 {
+    u8::from(view_of(receiver).hidden != 0)
+}
+
+unsafe extern "C" fn is_hidden_or_has_hidden_ancestor_method(receiver: Id, _sel: Sel) -> u8 {
+    u8::from(is_hidden_or_has_hidden_ancestor(receiver))
+}
+
+/// Whether `view` or any view above it is hidden, which is what decides
+/// whether it is drawn or presented at all.
+pub fn is_hidden_or_has_hidden_ancestor(view: Id) -> bool {
+    let mut current = view;
+    for _ in 0..64 {
+        if !is_view(current) {
+            return false;
+        }
+        let node = view_of(current);
+        if node.hidden != 0 {
+            return true;
+        }
+        current = node.superview;
+    }
+    false
 }
 
 unsafe extern "C" fn ignored(_receiver: Id, _sel: Sel) {}
@@ -1093,8 +1127,6 @@ unsafe extern "C" fn ignored_flag(_receiver: Id, _sel: Sel, _flag: u8) {}
 unsafe extern "C" fn ignored_object(_receiver: Id, _sel: Sel, _object: Id) {}
 
 unsafe extern "C" fn ignored_integer(_receiver: Id, _sel: Sel, _value: isize) {}
-
-unsafe extern "C" fn ignored_rect(_receiver: Id, _sel: Sel, _rect: NSRect) {}
 
 /// `-addCursorRect:cursor:`, which is only ever called from inside a view's own
 /// `-resetCursorRects`: the rectangle it records lasts until the next
@@ -1143,13 +1175,12 @@ pub(crate) fn install() {
         "canBecomeKeyView" => yes, c"c16@0:8";
         "isOpaque" => yes, c"c16@0:8";
         "isFlipped" => no, c"c16@0:8";
-        "isHidden" => no, c"c16@0:8";
+        "isHidden" => is_hidden, c"c16@0:8";
+        "isHiddenOrHasHiddenAncestor" => is_hidden_or_has_hidden_ancestor_method, c"c16@0:8";
         "display" => display, c"v16@0:8";
         "displayIfNeeded" => display, c"v16@0:8";
-        "lockFocus" => ignored, c"v16@0:8";
-        "unlockFocus" => ignored, c"v16@0:8";
-        "setNeedsDisplay:" => ignored_flag, c"v20@0:8c16";
-        "setHidden:" => ignored_flag, c"v20@0:8c16";
+        "setNeedsDisplay:" => set_needs_display, c"v20@0:8c16";
+        "setHidden:" => set_hidden, c"v20@0:8c16";
         // Drawing focus rings belongs to AppKit's control renderer, which this
         // view does not have; accepting the policy still lets Qt construct it.
         "setFocusRingType:" => ignored_integer, c"v24@0:8Q16";
@@ -1165,7 +1196,8 @@ pub(crate) fn install() {
             c"v32@0:8{CGSize=dd}16";
         "resizeWithOldSuperviewSize:" => resize_with_old_superview_size,
             c"v32@0:8{CGSize=dd}16";
-        "setNeedsDisplayInRect:" => ignored_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
+        "setNeedsDisplayInRect:" => set_needs_display_in_rect,
+            c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "addCursorRect:cursor:" => add_cursor_rect,
             c"v56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
         "discardCursorRects" => discard_cursor_rects, c"v16@0:8";

@@ -8,12 +8,19 @@ const CLASSES: &[&std::ffi::CStr] = &[
     c"WKProcessPool",
     c"WKUserContentController",
     c"WKWebsiteDataStore",
+    c"WKUserScript",
+    c"WKWebView",
 ];
 
 pub fn bootstrap() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         foundation::bootstrap();
+        appkit::bootstrap();
+        // Registered first so the loop below finds it rather than creating an
+        // NSObject subclass: guests subclass WKWebView and treat it as a view.
+        let view = objc::class::lookup(c"NSView").expect("AppKit registers NSView");
+        corefoundation::base::abstract_class(c"WKWebView", Some(view));
         for name in CLASSES {
             corefoundation::base::abstract_class(name, None);
         }
@@ -49,6 +56,27 @@ pub fn bootstrap() {
             c"v16@0:8",
         );
 
+        let web_view = objc::class::lookup(c"WKWebView").expect("registered");
+        web_view.replace_method(
+            objc::sel::get("initWithFrame:configuration:"),
+            init_web_view as *const std::ffi::c_void,
+            c"@56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48",
+        );
+        for selector in ["setNavigationDelegate:", "setUIDelegate:"] {
+            web_view.replace_method(
+                objc::sel::get(selector),
+                accept_object_setting as *const std::ffi::c_void,
+                c"v24@0:8@16",
+            );
+        }
+
+        let script = objc::class::lookup(c"WKUserScript").expect("registered");
+        script.replace_method(
+            objc::sel::get("initWithSource:injectionTime:forMainFrameOnly:"),
+            init_user_script as *const std::ffi::c_void,
+            c"@36@0:8@16q24c32",
+        );
+
         let store = objc::class::lookup(c"WKWebsiteDataStore").expect("registered");
         store.metaclass().replace_method(
             objc::sel::get("defaultDataStore"),
@@ -82,6 +110,37 @@ unsafe extern "C" fn standard_preferences(class: Id, _sel: Sel) -> Id {
 unsafe extern "C" fn set_plugins_enabled(_receiver: Id, _sel: Sel, _enabled: u8) {}
 
 unsafe extern "C" fn accept_object_setting(_receiver: Id, _sel: Sel, _value: Id) {}
+
+/// `-[WKWebView initWithFrame:configuration:]`: a view with no web content.
+///
+/// NSView's own initializer is called directly rather than through dispatch, as
+/// a guest subclass may override `-initWithFrame:` to call this one.
+unsafe extern "C" fn init_web_view(
+    receiver: Id,
+    _sel: Sel,
+    frame: foundation::geometry::NSRect,
+    _configuration: Id,
+) -> Id {
+    let init = objc::sel::get("initWithFrame:");
+    let method = objc::class::lookup(c"NSView")
+        .and_then(|view| view.method(init))
+        .expect("AppKit implements -[NSView initWithFrame:]");
+    // SAFETY: NSView's `-initWithFrame:` has this signature.
+    let implementation: unsafe extern "C" fn(Id, Sel, foundation::geometry::NSRect) -> Id =
+        unsafe { std::mem::transmute(method.implementation()) };
+    unsafe { implementation(receiver, init, frame) }
+}
+
+/// Scripts are accepted but never run, as there is no web content.
+unsafe extern "C" fn init_user_script(
+    receiver: Id,
+    _sel: Sel,
+    _source: Id,
+    _injection_time: isize,
+    _main_frame_only: u8,
+) -> Id {
+    receiver
+}
 
 unsafe extern "C" fn remove_all_user_scripts(_receiver: Id, _sel: Sel) {}
 
@@ -197,6 +256,36 @@ mod tests {
             .expect("cookie data type");
         // SAFETY: data symbols publish the address of a process-lifetime cell.
         assert_ne!(unsafe { *(*cookie_cell as *const u64) }, 0);
+    }
+
+    #[test]
+    fn web_view_is_a_view_initialized_with_its_frame() {
+        bootstrap();
+        let class = objc::class::lookup(c"WKWebView").expect("registered");
+        let view = objc::class::lookup(c"NSView").expect("NSView");
+        assert!(class.chain().any(|ancestor| std::ptr::eq(ancestor, view)));
+        let object = objc::object::create_instance(class, 0);
+        let frame = foundation::geometry::NSRect {
+            origin: foundation::geometry::NSPoint { x: 1.0, y: 2.0 },
+            size: foundation::geometry::NSSize {
+                width: 30.0,
+                height: 40.0,
+            },
+        };
+        // SAFETY: a fresh WKWebView instance and a null configuration.
+        let result = unsafe {
+            init_web_view(
+                object,
+                objc::sel::get("initWithFrame:configuration:"),
+                frame,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(result, object);
+        let method = class.method(objc::sel::get("frame")).expect("-frame");
+        let get: unsafe extern "C" fn(Id, Sel) -> foundation::geometry::NSRect =
+            unsafe { std::mem::transmute(method.implementation()) };
+        assert_eq!(unsafe { get(object, objc::sel::get("frame")) }, frame);
     }
 
     #[test]

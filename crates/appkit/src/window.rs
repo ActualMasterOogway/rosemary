@@ -134,6 +134,12 @@ pub unsafe fn sdl_window(object: Id) -> sdl3::Window {
     }
 }
 
+/// Whether the window has been ordered onto the screen.
+pub fn is_shown(object: Id) -> bool {
+    // SAFETY: null or an object this runtime allocated.
+    !unsafe { sdl_window(object) }.is_null() && window_of(object).shown != 0
+}
+
 /// A window's content view, for the event pump.
 pub fn content_view_of(object: Id) -> Id {
     match object.is_null() {
@@ -614,6 +620,14 @@ unsafe extern "C" fn title(receiver: Id, _sel: Sel) -> Id {
         false => sdl3::video::window_title(sdl),
     };
     objc::arc::autorelease(foundation::string::from_cstr(&title))
+}
+
+/// `-display`: redraw the whole content view at the next pump.
+unsafe extern "C" fn display_window(receiver: Id, _sel: Sel) {
+    let content = window_of(receiver).content_view;
+    if !content.is_null() {
+        crate::backing::needs_display(content);
+    }
 }
 
 unsafe extern "C" fn make_key_and_order_front(receiver: Id, _sel: Sel, _sender: Id) {
@@ -1159,7 +1173,10 @@ pub(crate) fn install() {
         "isMiniaturized" => is_miniaturized, c"c16@0:8";
         "isZoomed" => is_zoomed, c"c16@0:8";
         "center" => ignored, c"v16@0:8";
-        "display" => ignored, c"v16@0:8";
+        "display" => display_window, c"v16@0:8";
+        "displayIfNeeded" => ignored, c"v16@0:8";
+        "flushWindow" => ignored, c"v16@0:8";
+        "flushWindowIfNeeded" => ignored, c"v16@0:8";
         "update" => ignored, c"v16@0:8";
         "invalidateCursorRectsForView:" => invalidate_cursor_rects_for_view, c"v24@0:8@16";
         "resetCursorRects" => reset_cursor_rects, c"v16@0:8";

@@ -52,7 +52,7 @@ use objc::object::Id;
 use objc::sel::Sel;
 
 use crate::constants::*;
-use crate::gpu::{self, Gpu, ImageDescription};
+use crate::gpu::{self, Gpu, GpuImage, ImageDescription};
 use crate::object::{self, methods};
 use crate::resource::Texture;
 
@@ -257,6 +257,11 @@ fn present_inner(drawable: Id) {
     // SAFETY: a drawable's texture is this crate's.
     let texture = unsafe { object::body::<Texture>(described.texture) };
     let gpu = described.gpu;
+    // SAFETY: a `CAMetalLayer` this runtime made.
+    let view = unsafe { appkit::layer::view_of(described.layer) };
+    if appkit::view::is_hidden_or_has_hidden_ancestor(view) {
+        return;
+    }
     let frame = layer_frame(described.layer);
 
     // The swapchain is the whole of presentation where the window has one:
@@ -516,6 +521,7 @@ fn send_size(receiver: Id, selector: &str) -> (f64, f64) {
 
 pub(crate) fn install() {
     appkit::bootstrap();
+    appkit::backing::set_presenter(present_store);
     object::register::<Drawable>(c"R3CAMetalDrawable");
     let drawable = objc::class::lookup(c"R3CAMetalDrawable").expect("just registered");
     methods!(drawable, {
@@ -536,4 +542,172 @@ pub(crate) fn install() {
 
 unsafe extern "C" fn drawable_id(_receiver: Id, _sel: Sel) -> u64 {
     0
+}
+
+/// A window's CPU-drawn contents on the device: see [`present_store`].
+struct StoreImage {
+    gpu: &'static Gpu,
+    image: GpuImage,
+    staging: gpu::GpuBuffer,
+}
+
+// SAFETY: Vulkan handles and a permanent mapping, used under `STORE_IMAGES`.
+unsafe impl Send for StoreImage {}
+
+/// Keyed by the SDL window's address.
+static STORE_IMAGES: std::sync::Mutex<Vec<(usize, StoreImage)>> = std::sync::Mutex::new(Vec::new());
+
+/// Images replaced by a resize, with how many more presentations to keep them
+/// for: a presentation already submitted may still be blitting one.
+static RETIRED: std::sync::Mutex<Vec<(StoreImage, usize)>> = std::sync::Mutex::new(Vec::new());
+
+/// More than the swapchain's frames in flight, so that every submission which
+/// could name a retired image has finished before it is destroyed.
+const FRAMES_RETIRED: usize = 4;
+
+/// Present what AppKit's views drew on the CPU for `window`.
+///
+/// The store is uploaded and composited into the window's swapchain as one
+/// more layer covering the window, so that it and any `CAMetalLayer`s share
+/// the one surface the window has. A layer presenting afterwards lands over
+/// it, which is AppKit's order for a layer-backed subview.
+pub(crate) fn present_store(window: sdl3::Window, store: &appkit::backing::Store) -> bool {
+    if std::env::var_os("ROSETTA3_PRESENT_READBACK").is_some() {
+        return false;
+    }
+    // SAFETY: the Metal framework's exported constructor, which has no
+    // preconditions.
+    let device = unsafe { crate::MTLCreateSystemDefaultDevice() };
+    let Some(gpu) = crate::gpu_of_device(device) else {
+        return false;
+    };
+    let mut images = STORE_IMAGES.lock().expect("store images");
+    let at = images.iter().position(|(key, _)| *key == window as usize);
+    let stale = at.is_some_and(|at| {
+        let image = &images[at].1.image;
+        (image.width, image.height) != (store.width, store.height)
+    });
+    if stale {
+        let (_, old) = images.remove(at.expect("checked above"));
+        RETIRED
+            .lock()
+            .expect("retired images")
+            .push((old, FRAMES_RETIRED));
+    }
+    if at.is_none() || stale {
+        let image = match gpu.create_image(&ImageDescription {
+            image_type: vk::ImageType::TYPE_2D,
+            view_type: vk::ImageViewType::TYPE_2D,
+            format: vk::Format::B8G8R8A8_UNORM,
+            width: store.width,
+            height: store.height,
+            depth: 1,
+            levels: 1,
+            layers: 1,
+            samples: 1,
+            usage: gpu::USAGE_SHADER_READ,
+            cube: false,
+        }) {
+            Ok(image) => image,
+            Err(reason) => {
+                gpu::trace(format!("window store image creation failed: {reason}"));
+                return false;
+            }
+        };
+        let staging = match gpu.create_buffer(store.pixels.len() as u64) {
+            Ok(staging) => staging,
+            Err(reason) => {
+                gpu.destroy_image(image);
+                gpu::trace(format!("window store staging failed: {reason}"));
+                return false;
+            }
+        };
+        images.push((
+            window as usize,
+            StoreImage {
+                gpu,
+                image,
+                staging,
+            },
+        ));
+    }
+    let entry = &images
+        .iter()
+        .find(|(key, _)| *key == window as usize)
+        .expect("made above")
+        .1;
+    // SAFETY: the staging buffer is mapped over the store's whole length.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            store.pixels.as_ptr(),
+            entry.staging.contents,
+            store.pixels.len(),
+        )
+    };
+    let copy = vk::BufferImageCopy::default()
+        .image_subresource(vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        })
+        .image_extent(vk::Extent3D {
+            width: store.width,
+            height: store.height,
+            depth: 1,
+        });
+    let (buffer, image) = (entry.staging.buffer, entry.image.image);
+    let uploaded = entry.gpu.one_shot(|device, command_buffer| {
+        // SAFETY: recording into a command buffer the call owns; the image is
+        // in GENERAL layout from creation.
+        unsafe {
+            device.cmd_copy_buffer_to_image(
+                command_buffer,
+                buffer,
+                image,
+                vk::ImageLayout::GENERAL,
+                &[copy],
+            )
+        };
+    });
+    if let Err(reason) = uploaded {
+        gpu::trace(format!("window store upload failed: {reason}"));
+        return false;
+    }
+    let frame = appkit::view::Frame {
+        window,
+        x: 0,
+        y: 0,
+        width: store.width,
+        height: store.height,
+        window_width: store.width,
+        window_height: store.height,
+    };
+    let presented = match crate::swapchain::present(gpu, window as usize, &frame, &entry.image) {
+        Ok(presented) => presented,
+        Err(reason) => {
+            gpu::trace(format!("window store presentation failed: {reason}"));
+            false
+        }
+    };
+    drop(images);
+    let expired: Vec<StoreImage> = {
+        let mut retired = RETIRED.lock().expect("retired images");
+        for (_, remaining) in retired.iter_mut() {
+            *remaining = remaining.saturating_sub(1);
+        }
+        let (expired, kept) = std::mem::take(&mut *retired)
+            .into_iter()
+            .partition::<Vec<_>, _>(|(_, remaining)| *remaining == 0);
+        *retired = kept;
+        expired.into_iter().map(|(image, _)| image).collect()
+    };
+    for old in expired {
+        old.gpu.destroy_buffer(old.staging);
+        old.gpu.destroy_image(old.image);
+    }
+    if presented {
+        gpu::milestone("window store");
+    }
+    presented
 }

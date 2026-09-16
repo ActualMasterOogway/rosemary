@@ -323,11 +323,12 @@ pub fn data_symbols() -> Vec<(String, u64)> {
             corefoundation::base::global_cell(&symbol, object),
         ));
     }
-    // `NSZeroPoint` and `NSZeroRect` are **structs** in Foundation's `__DATA`,
+    // `NSZeroPoint`, `NSZeroSize` and `NSZeroRect` are **structs** in Foundation's `__DATA`,
     // not pointers to them: the guest loads the symbol's address and reads two
     // or four doubles out of it. A one-word cell would leave the rest of the
     // read off the end of the allocation.
     out.push(("_NSZeroPoint".to_string(), zeroed::<geometry::NSPoint>()));
+    out.push(("_NSZeroSize".to_string(), zeroed::<geometry::NSSize>()));
     out.push(("_NSZeroRect".to_string(), zeroed::<geometry::NSRect>()));
     // The CoreGraphics spellings of the same three, which are separate symbols
     // in a separate framework's `__DATA` even though the types are identical.

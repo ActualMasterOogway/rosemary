@@ -16,7 +16,7 @@
 
 use std::ffi::c_void;
 
-use foundation::geometry::NSSize;
+use foundation::geometry::{NSRect, NSSize};
 use objc::object::Id;
 use objc::sel::Sel;
 
@@ -31,6 +31,9 @@ pub struct Image {
     /// for the usual image that was made from data and has none.
     reps: Id,
     size: NSSize,
+    /// A retained `CGImage` for an image made with `-initWithCGImage:size:`,
+    /// which is the one kind this module can draw.
+    cg_image: *const c_void,
 }
 
 pub const INSTANCE_SIZE: usize = size_of::<Image>();
@@ -269,6 +272,106 @@ unsafe extern "C" fn set_size(receiver: Id, _sel: Sel, size: NSSize) {
     image_of(receiver).size = size;
 }
 
+/// `-initWithCGImage:size:`, where a zero size means the image's pixel size.
+unsafe extern "C" fn init_with_cg_image(
+    receiver: Id,
+    _sel: Sel,
+    cg_image: *const c_void,
+    size: NSSize,
+) -> Id {
+    if cg_image.is_null() {
+        return std::ptr::null_mut();
+    }
+    let image = image_of(receiver);
+    // SAFETY: a `CGImage` the caller holds a reference to.
+    image.cg_image = unsafe { corefoundation::api::CFRetain(cg_image) };
+    image.size = match size.width > 0.0 && size.height > 0.0 {
+        true => size,
+        // SAFETY: as above.
+        false => unsafe {
+            NSSize {
+                width: crate::graphics::CGImageGetWidth(cg_image) as f64,
+                height: crate::graphics::CGImageGetHeight(cg_image) as f64,
+            }
+        },
+    };
+    receiver
+}
+
+unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
+    let image = image_of(receiver);
+    if !image.cg_image.is_null() {
+        // SAFETY: the reference `-initWithCGImage:size:` took.
+        unsafe { corefoundation::api::CFRelease(image.cg_image) };
+        image.cg_image = std::ptr::null();
+    }
+    objc::arc::finalize(receiver);
+}
+
+/// Draw a `CGImage`-backed image into the focused view.
+#[allow(clippy::too_many_arguments)]
+fn draw(
+    receiver: Id,
+    sel: Sel,
+    destination: NSRect,
+    from: NSRect,
+    operation: usize,
+    fraction: f64,
+    respect_flipped: bool,
+) {
+    let image = image_of(receiver);
+    if image.cg_image.is_null() {
+        // SAFETY: `needs_pixels` reads only the receiver and selector.
+        unsafe { needs_pixels(receiver, sel) };
+    }
+    let Some((width, height, pixels)) = crate::graphics::image_bgra(image.cg_image) else {
+        return;
+    };
+    crate::backing::draw_image(
+        &pixels,
+        width,
+        height,
+        image.size,
+        destination,
+        from,
+        operation,
+        fraction,
+        respect_flipped,
+    );
+}
+
+unsafe extern "C" fn draw_in_rect_respect_flipped(
+    receiver: Id,
+    sel: Sel,
+    destination: NSRect,
+    from: NSRect,
+    operation: usize,
+    fraction: f64,
+    respect_flipped: u8,
+    _hints: Id,
+) {
+    draw(
+        receiver,
+        sel,
+        destination,
+        from,
+        operation,
+        fraction,
+        respect_flipped != 0,
+    );
+}
+
+unsafe extern "C" fn draw_in_rect(
+    receiver: Id,
+    sel: Sel,
+    destination: NSRect,
+    from: NSRect,
+    operation: usize,
+    fraction: f64,
+) {
+    draw(receiver, sel, destination, from, operation, fraction, false);
+}
+
 /// Everything that still needs a decoded raster this module cannot produce.
 ///
 /// One implementation for the whole family, naming the selector it was reached
@@ -308,6 +411,8 @@ pub(crate) fn install() {
     methods!(class, {
         "initWithData:" => init_with_data, c"@24@0:8@16";
         "initWithSize:" => init_with_size, c"@32@0:8{CGSize=dd}16";
+        "initWithCGImage:size:" => init_with_cg_image, c"@40@0:8^{CGImage=}16{CGSize=dd}24";
+        "dealloc" => dealloc, c"v16@0:8";
         "addRepresentation:" => add_representation, c"v24@0:8@16";
         "representations" => representations, c"@16@0:8";
         "initWithContentsOfFile:" => init_with_contents_of_file, c"@24@0:8@16";
@@ -334,10 +439,6 @@ pub(crate) fn install() {
             "bestRepresentationForRect:context:hints:",
             c"@64@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48@56",
         ),
-        (
-            "drawInRect:fromRect:operation:fraction:",
-            c"v96@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16{CGRect={CGPoint=dd}{CGSize=dd}}48Q80d88",
-        ),
     ] {
         class.replace_method(
             objc::sel::get(selector),
@@ -345,6 +446,13 @@ pub(crate) fn install() {
             types,
         );
     }
+    methods!(class, {
+        "drawInRect:fromRect:operation:fraction:" => draw_in_rect,
+            c"v96@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16{CGRect={CGPoint=dd}{CGSize=dd}}48Q80d88";
+        "drawInRect:fromRect:operation:fraction:respectFlipped:hints:" =>
+            draw_in_rect_respect_flipped,
+            c"v108@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16{CGRect={CGPoint=dd}{CGSize=dd}}48Q80d88c96@100";
+    });
 }
 
 #[cfg(test)]

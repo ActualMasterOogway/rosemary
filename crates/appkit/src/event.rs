@@ -22,6 +22,7 @@ pub fn pump(app: Id) {
     while let Some(event) = sdl3::video::poll() {
         deliver(event);
     }
+    crate::backing::pump();
 }
 
 /// `ROSETTA3_DEBUG_RESIZE=WxH@SECONDS`: resize the program's window once, that

@@ -13,3 +13,5 @@ foundation.workspace = true
 sdl3.workspace = true
 gamecontroller.workspace = true
 static_init.workspace = true
+owned_ttf_parser.workspace = true
+ab_glyph_rasterizer.workspace = true

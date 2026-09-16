@@ -46,6 +46,8 @@ static HIERARCHY: &[(&str, Option<&str>, usize)] = &[
     ("NSColor", None, crate::color::INSTANCE_SIZE),
     ("NSAppearance", None, size_of::<usize>()),
     ("NSImage", None, crate::image::INSTANCE_SIZE),
+    ("NSGraphicsContext", None, 0),
+    ("NSColorSpace", None, 0),
     ("NSImageRep", None, 0),
     (
         "NSBitmapImageRep",

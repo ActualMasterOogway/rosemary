@@ -96,6 +96,14 @@ pub unsafe extern "C" fn TISCopyCurrentKeyboardInputSource() -> CFTypeRef {
     retained(current_source())
 }
 
+/// `TISInputSourceRef TISCopyInputMethodKeyboardLayoutOverride(void)`.
+///
+/// No input method is active, so there is no layout override and callers fall
+/// back to the current keyboard input source.
+pub unsafe extern "C" fn TISCopyInputMethodKeyboardLayoutOverride() -> CFTypeRef {
+    std::ptr::null()
+}
+
 /// `TISCopyCurrentKeyboardLayoutInputSource`, and the two ASCII-capable
 /// spellings beside it.
 ///

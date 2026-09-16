@@ -32,6 +32,8 @@ gimli = "0.34"
 getrandom = "0.3"
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip", "cookies"] }
 static_init = "1.0.4"
+owned_ttf_parser = "0.25"
+ab_glyph_rasterizer = "0.1.9"
 llvm-bitcode = "0.4.0"
 rspirv = "0.13.0"
 
