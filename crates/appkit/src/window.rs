@@ -187,7 +187,8 @@ unsafe extern "C" fn init_with_content_rect(
         Some((forced_width, forced_height)) => (forced_width, forced_height),
         None => (width, height),
     };
-    let Some(sdl) = sdl3::video::create_window(c"", width.max(1), height.max(1), flags) else {
+    let title = crate::metadata::name();
+    let Some(sdl) = sdl3::video::create_window(title, width.max(1), height.max(1), flags) else {
         // A window this runtime cannot make is not something to continue past:
         // every later method would be sent to a window with no SDL window
         // behind it, and each would answer plausibly and do nothing.
@@ -1330,20 +1331,8 @@ mod tests {
             "the rebuilt window is not an OpenGL window"
         );
         assert_eq!(sdl3::video::window_size(after), Some(size));
-        // The title carries across exactly. `set_window_title` brands what
-        // it is given and `create_window` does not, which is what keeps the
-        // rebuild from branding an already branded title a second time.
         let title = sdl3::video::window_title(after);
-        let title = String::from_utf8_lossy(title.to_bytes());
-        assert!(
-            title.starts_with("a title"),
-            "the rebuilt window lost its title: {title:?}"
-        );
-        assert_eq!(
-            title.matches("Rosetta 3").count(),
-            1,
-            "the rebuilt window's title was branded twice: {title:?}"
-        );
+        assert_eq!(title.to_bytes(), b"a title", "the rebuilt window lost its title");
         // The event table has to follow the window, or every event for it
         // stops resolving to this object.
         assert_eq!(window_for(after), object);

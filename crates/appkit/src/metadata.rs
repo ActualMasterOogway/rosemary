@@ -7,7 +7,17 @@
 //! the identifier against a desktop entry for window grouping and for the icon
 //! shown outside the window.
 
+use std::ffi::CString;
 use std::path::Path;
+use std::sync::OnceLock;
+
+static NAME: OnceLock<CString> = OnceLock::new();
+
+/// The guest's name as published, which is what a window is titled until the
+/// guest says otherwise. Empty before [`publish`].
+pub fn name() -> &'static std::ffi::CStr {
+    NAME.get().map_or(c"", CString::as_c_str)
+}
 
 /// Tell SDL who the guest is.
 ///
@@ -23,9 +33,13 @@ pub fn publish(executable: &Path) {
     // Nothing in an `Info.plist` names the developer or a product page, so
     // SDL's `creator` and `url` are left unset rather than filled in from a key
     // that means something else.
+    let name = owned(bundle.and_then(|b| b.display_name()))
+        .or_else(|| Some(executable.file_stem()?.to_string_lossy().into_owned()));
+    if let Some(title) = name.as_deref().and_then(|n| CString::new(n).ok()) {
+        let _ = NAME.set(title);
+    }
     sdl3::set_app_metadata(&sdl3::AppMetadata {
-        name: owned(bundle.and_then(|b| b.display_name()))
-            .or_else(|| Some(executable.file_stem()?.to_string_lossy().into_owned())),
+        name,
         version: owned(bundle.and_then(|b| b.version())),
         identifier: owned(bundle.and_then(|b| b.identifier())),
         copyright: owned(bundle.and_then(|b| b.copyright())),
