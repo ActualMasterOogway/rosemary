@@ -723,6 +723,10 @@ fn open_with<S: MachSpec + 'static>(
         .map_err(|e| format!("{resolved}: cxxabi: {e}"))?;
     crate::cxxlib::bind_objc_exceptions_to_the_vendored_cxxabi(&mut report, &mut memory, flavor)
         .map_err(|e| format!("{resolved}: objc exceptions: {e}"))?;
+    // The program's allocator replacement reaches a plugin as it reaches every
+    // image the program was linked with.
+    crate::interpose::apply_to_loaded(&mut report, &mut memory)
+        .map_err(|e| format!("{resolved}: interpose: {e}"))?;
 
     // Say what did not resolve, here, rather than letting the guest find out by
     // calling it. The program's own link says it the same way, and this is the

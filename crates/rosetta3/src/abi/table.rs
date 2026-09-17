@@ -531,6 +531,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFStringConvertIANACharSetNameToEncoding", U32, P),
     sig!("CFStringConvertNSStringEncodingToEncoding", U32, U64),
     sig!("CFStringCreateWithCharacters", P, P, P, I64),
+    sig!("CFStringCreateWithCharactersNoCopy", P, P, P, I64, P),
     sig!("CFStringCreateWithCString", P, P, P, U32),
     // `CFStringRef CFStringCreateWithBytes(CFAllocatorRef, const UInt8 *bytes,
     // CFIndex numBytes, CFStringEncoding, Boolean isExternalRepresentation)`.
@@ -1199,6 +1200,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // translate a virtual key code into characters.
     sig!("TISCopyCurrentASCIICapableKeyboardInputSource", P),
     sig!("TISCopyCurrentASCIICapableKeyboardLayoutInputSource", P),
+    sig!("GetCurrentKeyModifiers", U32),
     sig!("TISCopyCurrentKeyboardInputSource", P),
     sig!("TISCopyCurrentKeyboardLayoutInputSource", P),
     sig!("TISCopyInputMethodKeyboardLayoutOverride", P),

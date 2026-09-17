@@ -63,22 +63,66 @@ pub fn apply<M: Regions>(report: &mut LinkReport, memory: &mut M) -> Result<usiz
     // Gathered before the loop because the loop mutates `report.images`, and
     // because an image may interpose a function another image also interposes -
     // in which case dyld applies both, in load order, and so does this.
-    let requests: Vec<(u64, machish::report::Interposition)> = report
-        .images
-        .iter()
-        .flat_map(|i| i.interpositions.iter().map(move |p| (i.base, *p)))
-        .collect();
+    let requests = remember(report, true);
     if requests.is_empty() {
         return Ok(0);
     }
 
-    let mut rebound = 0;
     // Which symbols actually moved. Kept so the split check below can ask the
     // one question that matters about a partial interposition - see [`missed`].
     let mut moved: BTreeSet<String> = BTreeSet::new();
+    let rebound = rebind(report, memory, &requests, &mut moved)?;
+    let interposers: BTreeSet<u64> = report
+        .images
+        .iter()
+        .filter(|i| !i.interpositions.is_empty())
+        .map(|i| i.base)
+        .collect();
+    for line in missed(report, &moved, &interposers) {
+        eprintln!("rosetta3: interpose: {line}");
+    }
+    Ok(rebound)
+}
+
+/// Every interposition an image loaded so far declared, as `(interposer, pair)`.
+///
+/// Kept because dyld applies an interposition to images loaded *later* too: a
+/// plugin `dlopen`ed after the program started binds `free` like any other
+/// image, and left on the host's it frees blocks the replacement made. Qt's
+/// `libqcocoa` is the case in hand - its `operator delete` of a `QPointer`'s
+/// control block, allocated in `QtCore` by Studio's mimalloc, faulted in the
+/// host's mimalloc.
+static ACTIVE: std::sync::Mutex<Vec<(u64, machish::report::Interposition)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Add `report`'s own interpositions to [`ACTIVE`] and return all of them.
+/// `program` starts the list afresh, as a program's link is the first.
+fn remember(report: &LinkReport, program: bool) -> Vec<(u64, machish::report::Interposition)> {
+    let mut active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+    if program {
+        active.clear();
+    }
+    active.extend(
+        report
+            .images
+            .iter()
+            .flat_map(|i| i.interpositions.iter().map(move |p| (i.base, *p))),
+    );
+    active.clone()
+}
+
+/// Point every binding in `report` that resolved to a replacee at its
+/// replacement, except in the image that asked for it.
+fn rebind<M: Regions>(
+    report: &mut LinkReport,
+    memory: &mut M,
+    requests: &[(u64, machish::report::Interposition)],
+    moved: &mut BTreeSet<String>,
+) -> Result<usize, machish::Error> {
+    let mut rebound = 0;
     for (from, pair) in requests {
         for image in &mut report.images {
-            if image.base == from {
+            if image.base == *from {
                 continue;
             }
             for binding in &mut image.bindings {
@@ -103,16 +147,23 @@ pub fn apply<M: Regions>(report: &mut LinkReport, memory: &mut M) -> Result<usiz
             }
         }
     }
-    let interposers: BTreeSet<u64> = report
-        .images
-        .iter()
-        .filter(|i| !i.interpositions.is_empty())
-        .map(|i| i.base)
-        .collect();
-    for line in missed(report, &moved, &interposers) {
-        eprintln!("rosetta3: interpose: {line}");
-    }
     Ok(rebound)
+}
+
+/// [`apply`] for an image the guest `dlopen`ed: the interpositions already in
+/// effect, and any the new image declares, applied to its bindings.
+pub fn apply_to_loaded<M: Regions>(
+    report: &mut LinkReport,
+    memory: &mut M,
+) -> Result<usize, machish::Error> {
+    if disabled() {
+        return Ok(0);
+    }
+    let requests = remember(report, false);
+    if requests.is_empty() {
+        return Ok(0);
+    }
+    rebind(report, memory, &requests, &mut BTreeSet::new())
 }
 
 /// The `malloc`/`free` the guest's own images call, once every interposition
@@ -252,4 +303,62 @@ pub fn describe(report: &LinkReport) -> Vec<String> {
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use machish::fixups::BindKind;
+    use machish::memory::{AddressSpace, BufferSpace, Placement};
+    use machish::report::{BindingRecord, ImageReport, Interposition};
+
+    use super::*;
+
+    const HOST_FREE: u64 = 0xaaaa_0000;
+    const GUEST_FREE: u64 = 0xbbbb_0000;
+
+    fn image(name: &str, base: u64, slot: Option<u64>) -> ImageReport {
+        ImageReport {
+            name: name.to_string(),
+            base,
+            bindings: slot
+                .map(|slot_va| BindingRecord {
+                    slot_va,
+                    stub_va: None,
+                    library: None,
+                    symbol: "_free".to_string(),
+                    resolved: HOST_FREE,
+                    kind: BindKind::NonLazy,
+                    weak_import: false,
+                    tag: 0,
+                })
+                .into_iter()
+                .collect(),
+            ..ImageReport::default()
+        }
+    }
+
+    #[test]
+    fn a_loaded_image_gets_the_programs_interpositions() {
+        let mut memory = BufferSpace::new(0x10_0000);
+        let slots = memory.reserve(0x1000, 0x1000, Placement::Anywhere).unwrap();
+
+        let mut allocator = image("libmimalloc.dylib", 0x1000, None);
+        allocator.interpositions.push(Interposition {
+            replacement: GUEST_FREE,
+            replacee: HOST_FREE,
+        });
+        let mut program = LinkReport {
+            images: vec![image("Program", 0x2000, Some(slots)), allocator],
+        };
+        apply(&mut program, &mut memory).unwrap();
+
+        let mut plugin = LinkReport {
+            images: vec![image("libplugin.dylib", 0x3000, Some(slots + 8))],
+        };
+        assert_eq!(apply_to_loaded(&mut plugin, &mut memory).unwrap(), 1);
+        assert_eq!(plugin.images[0].bindings[0].resolved, GUEST_FREE);
+        let mut slot = [0u8; 8];
+        memory.read(slots + 8, &mut slot).unwrap();
+        assert_eq!(u64::from_le_bytes(slot), GUEST_FREE);
+    }
 }
