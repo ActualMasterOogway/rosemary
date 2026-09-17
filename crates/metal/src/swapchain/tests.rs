@@ -98,7 +98,7 @@ fn a_window_is_presented_to_through_its_swapchain() {
     };
     for _ in 0..12 {
         assert_eq!(
-            present(gpu, 1, &frame, &source),
+            present(gpu, 1, &frame, &source, &[]),
             Ok(true),
             "the window was not presented to through a swapchain"
         );
@@ -113,7 +113,7 @@ fn a_window_is_presented_to_through_its_swapchain() {
     );
     let steady = handle().expect("a swapchain for the window");
     for _ in 0..12 {
-        assert_eq!(present(gpu, 1, &frame, &source), Ok(true));
+        assert_eq!(present(gpu, 1, &frame, &source, &[]), Ok(true));
     }
     // A window that has not resized keeps the swapchain it has. A
     // surface with a `currentExtent` of its own answers a size that is
@@ -136,7 +136,7 @@ fn a_window_is_presented_to_through_its_swapchain() {
         window_height: height as u32,
         ..frame
     };
-    assert_eq!(present(gpu, 1, &resized, &source), Ok(true));
+    assert_eq!(present(gpu, 1, &resized, &source, &[]), Ok(true));
 
     // Take the swapchain out of the map so that its `Drop` runs the
     // teardown while the window it presented to is still alive.
@@ -212,10 +212,10 @@ fn two_layers_in_a_window_are_composited_into_one_image() {
 
     // The first layer alone takes the direct path; the second brings the
     // composite into existence, and both are presented after that.
-    assert_eq!(present(gpu, 1, &whole, &background), Ok(true));
-    assert_eq!(present(gpu, 2, &corner, &overlay), Ok(true));
-    assert_eq!(present(gpu, 1, &whole, &background), Ok(true));
-    assert_eq!(present(gpu, 2, &corner, &overlay), Ok(true));
+    assert_eq!(present(gpu, 1, &whole, &background, &[]), Ok(true));
+    assert_eq!(present(gpu, 2, &corner, &overlay, &[]), Ok(true));
+    assert_eq!(present(gpu, 1, &whole, &background, &[]), Ok(true));
+    assert_eq!(present(gpu, 2, &corner, &overlay, &[]), Ok(true));
 
     let composited = SWAPCHAINS
         .lock()
@@ -289,7 +289,7 @@ fn an_opengl_window_is_refused_rather_than_converted() {
         .expect("a colour image");
 
     assert_eq!(
-        present(gpu, 1, &frame, &source),
+        present(gpu, 1, &frame, &source, &[]),
         Ok(false),
         "an OpenGL window was given a Vulkan surface"
     );
@@ -305,7 +305,7 @@ fn an_opengl_window_is_refused_rather_than_converted() {
         "the window lost its OpenGL flag"
     );
     // And it is remembered, so a run does not retry it every frame.
-    assert_eq!(present(gpu, 1, &frame, &source), Ok(false));
+    assert_eq!(present(gpu, 1, &frame, &source, &[]), Ok(false));
 
     REFUSED
         .lock()
@@ -438,7 +438,7 @@ fn a_layer_on_a_guests_own_window_is_presented_through_a_swapchain() {
         })
         .expect("a colour image");
     assert_eq!(
-        present(gpu, layer as usize, &frame, &source),
+        present(gpu, layer as usize, &frame, &source, &[]),
         Ok(true),
         "a guest's own window fell back to the readback"
     );
@@ -481,4 +481,74 @@ fn a_frame_off_the_edge_of_its_window_is_clipped_to_it() {
     assert!(clamp(&frame(-50, 0, 10, 10), extent).is_none());
     // A frame with no area of its own is the same answer.
     assert!(clamp(&frame(10, 10, 0, 40), extent).is_none());
+}
+
+/// The window's store is presented around the layers over it: a rectangle a
+/// `CAMetalLayer` owns keeps what that layer last presented there, and the
+/// rest of the store still reaches the window.
+#[test]
+fn the_store_is_presented_around_a_layers_rectangle() {
+    let whole = Region {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 100,
+    };
+    let hole = Region {
+        x: 20,
+        y: 30,
+        width: 40,
+        height: 10,
+    };
+    let pieces = subtract(whole, &[hole]);
+    // The bands above, below, left and right of the hole, and nothing else.
+    assert_eq!(
+        pieces,
+        vec![
+            Region {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 30
+            },
+            Region {
+                x: 0,
+                y: 40,
+                width: 100,
+                height: 60
+            },
+            Region {
+                x: 0,
+                y: 30,
+                width: 20,
+                height: 10
+            },
+            Region {
+                x: 60,
+                y: 30,
+                width: 40,
+                height: 10
+            },
+        ]
+    );
+    // Every piece is inside the whole and outside the hole, and together they
+    // are the whole less the hole.
+    let area: i32 = pieces.iter().map(|p| p.width * p.height).sum();
+    assert_eq!(area, 100 * 100 - 40 * 10);
+
+    // A layer covering the window leaves nothing of the store, and a hole
+    // outside it takes nothing away.
+    assert!(subtract(whole, &[whole]).is_empty());
+    assert_eq!(
+        subtract(
+            whole,
+            &[Region {
+                x: 200,
+                y: 0,
+                width: 10,
+                height: 10
+            }]
+        ),
+        vec![whole]
+    );
 }

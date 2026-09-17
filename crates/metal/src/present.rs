@@ -361,7 +361,13 @@ fn present_through_swapchain(
         );
         return false;
     };
-    match crate::swapchain::present(drawable.gpu, drawable.layer as usize, frame, &texture.image) {
+    match crate::swapchain::present(
+        drawable.gpu,
+        drawable.layer as usize,
+        frame,
+        &texture.image,
+        &[],
+    ) {
         Ok(presented) => presented,
         Err(reason) => {
             gpu::trace(format!("swapchain presentation failed: {reason}"));
@@ -571,7 +577,11 @@ const FRAMES_RETIRED: usize = 4;
 /// more layer covering the window, so that it and any `CAMetalLayer`s share
 /// the one surface the window has. A layer presenting afterwards lands over
 /// it, which is AppKit's order for a layer-backed subview.
-pub(crate) fn present_store(window: sdl3::Window, store: &appkit::backing::Store) -> bool {
+pub(crate) fn present_store(
+    window: sdl3::Window,
+    store: &appkit::backing::Store,
+    holes: &[appkit::backing::Hole],
+) -> bool {
     if std::env::var_os("ROSETTA3_PRESENT_READBACK").is_some() {
         return false;
     }
@@ -683,13 +693,28 @@ pub(crate) fn present_store(window: sdl3::Window, store: &appkit::backing::Store
         window_width: store.width,
         window_height: store.height,
     };
-    let presented = match crate::swapchain::present(gpu, window as usize, &frame, &entry.image) {
-        Ok(presented) => presented,
-        Err(reason) => {
-            gpu::trace(format!("window store presentation failed: {reason}"));
-            false
-        }
-    };
+    let holes: Vec<(usize, crate::swapchain::Region)> = holes
+        .iter()
+        .map(|hole| {
+            (
+                hole.layer,
+                crate::swapchain::Region {
+                    x: hole.rect.x.clamp(0, i64::from(i32::MAX)) as i32,
+                    y: hole.rect.y.clamp(0, i64::from(i32::MAX)) as i32,
+                    width: hole.rect.width.clamp(0, i64::from(i32::MAX)) as i32,
+                    height: hole.rect.height.clamp(0, i64::from(i32::MAX)) as i32,
+                },
+            )
+        })
+        .collect();
+    let presented =
+        match crate::swapchain::present(gpu, window as usize, &frame, &entry.image, &holes) {
+            Ok(presented) => presented,
+            Err(reason) => {
+                gpu::trace(format!("window store presentation failed: {reason}"));
+                false
+            }
+        };
     drop(images);
     let expired: Vec<StoreImage> = {
         let mut retired = RETIRED.lock().expect("retired images");

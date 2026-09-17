@@ -323,6 +323,19 @@ unsafe extern "C" fn layer(receiver: Id, _sel: Sel) -> Id {
     view_of(receiver).layer
 }
 
+/// The layer `-setLayer:` gave a view, or null.
+pub(crate) fn layer_of(view: Id) -> Id {
+    match is_view(view) {
+        true => view_of(view).layer,
+        false => std::ptr::null_mut(),
+    }
+}
+
+/// Whether `-setHidden:` hid this view itself, ancestors aside.
+pub(crate) fn is_hidden_itself(view: Id) -> bool {
+    is_view(view) && view_of(view).hidden != 0
+}
+
 unsafe extern "C" fn set_allowed_touch_types(receiver: Id, _sel: Sel, mask: usize) {
     view_of(receiver).allowed_touch_types = mask;
 }
@@ -469,18 +482,138 @@ pub unsafe fn pointer_in(view: Id) -> Option<NSPoint> {
     if window.is_null() {
         return None;
     }
-    let mut point = crate::window::pointer_location(window);
+    Some(point_from_window(
+        view,
+        crate::window::pointer_location(window),
+    ))
+}
+
+/// `-isFlipped`, sent so that a subclass's override answers: Qt's views are
+/// all flipped, and nothing about one says so except that method.
+pub fn is_flipped(view: Id) -> bool {
+    if !is_view(view) {
+        return false;
+    }
+    // SAFETY: a live view; the selector is `BOOL (id, SEL)`.
+    unsafe {
+        let send: unsafe extern "C" fn(Id, Sel) -> u8 = std::mem::transmute(objc::msg::entry());
+        send(view, objc::sel::get("isFlipped")) != 0
+    }
+}
+
+/// The vertical coordinate `y` of a view's own space as its superview's.
+///
+/// Both ends can be flipped: `flipped` is the view's, `outer_flipped` the
+/// superview's, and a view in no superview is in its window, which is not.
+fn y_to_superview(frame: NSRect, flipped: bool, outer_flipped: bool, y: f64) -> f64 {
+    let from_top = match flipped {
+        true => y,
+        false => frame.size.height - y,
+    };
+    match outer_flipped {
+        true => frame.origin.y + from_top,
+        false => frame.origin.y + frame.size.height - from_top,
+    }
+}
+
+/// The inverse of [`y_to_superview`].
+fn y_from_superview(frame: NSRect, flipped: bool, outer_flipped: bool, y: f64) -> f64 {
+    let from_top = match outer_flipped {
+        true => y - frame.origin.y,
+        false => frame.origin.y + frame.size.height - y,
+    };
+    match flipped {
+        true => from_top,
+        false => frame.size.height - from_top,
+    }
+}
+
+/// A point in `view`'s coordinates, in its superview's.
+fn to_superview(view: Id, point: NSPoint) -> NSPoint {
+    let v = view_of(view);
+    NSPoint {
+        x: point.x + v.frame.origin.x,
+        y: y_to_superview(v.frame, is_flipped(view), is_flipped(v.superview), point.y),
+    }
+}
+
+/// A point in `view`'s superview's coordinates, in the view's own.
+fn from_superview(view: Id, point: NSPoint) -> NSPoint {
+    let v = view_of(view);
+    NSPoint {
+        x: point.x - v.frame.origin.x,
+        y: y_from_superview(v.frame, is_flipped(view), is_flipped(v.superview), point.y),
+    }
+}
+
+/// A point in `view`'s coordinates, in its window's base coordinates.
+///
+/// Every `-isFlipped` on the way up applies, which is what puts a flipped
+/// superview's subview at `y = 0` along its top edge. Null is the window.
+pub fn point_to_window(view: Id, point: NSPoint) -> NSPoint {
+    let mut point = point;
     let mut node = view;
-    for _ in 0..32 {
+    // Bounded for the reason [`window_of`] is.
+    for _ in 0..64 {
         if !is_view(node) {
             break;
         }
-        let origin = view_of(node).frame.origin;
-        point.x -= origin.x;
-        point.y -= origin.y;
+        point = to_superview(node, point);
         node = view_of(node).superview;
     }
-    Some(point)
+    point
+}
+
+/// The inverse of [`point_to_window`].
+pub fn point_from_window(view: Id, point: NSPoint) -> NSPoint {
+    let mut chain = Vec::new();
+    let mut node = view;
+    for _ in 0..64 {
+        if !is_view(node) {
+            break;
+        }
+        chain.push(node);
+        node = view_of(node).superview;
+    }
+    chain
+        .into_iter()
+        .rev()
+        .fold(point, |point, node| from_superview(node, point))
+}
+
+/// A rectangle from one coordinate space to another by its corners, which
+/// swap vertically when exactly one of the two spaces is flipped.
+fn rect_between(rect: NSRect, map: impl Fn(NSPoint) -> NSPoint) -> NSRect {
+    let a = map(rect.origin);
+    let b = map(NSPoint {
+        x: rect.origin.x + rect.size.width,
+        y: rect.origin.y + rect.size.height,
+    });
+    NSRect {
+        origin: NSPoint {
+            x: a.x.min(b.x),
+            y: a.y.min(b.y),
+        },
+        size: NSSize {
+            width: (b.x - a.x).abs(),
+            height: (b.y - a.y).abs(),
+        },
+    }
+}
+
+/// A view's bounds in its window's base coordinates.
+pub fn rect_in_window(view: Id) -> NSRect {
+    let size = match is_view(view) {
+        true => view_of(view).frame.size,
+        false => NSSize::default(),
+    };
+    rect_between(
+        NSRect {
+            origin: NSPoint::default(),
+            size,
+        },
+        |point| point_to_window(view, point),
+    )
 }
 
 /// Whether a rectangle of a view's holds a point, for [`crate::cursor`].
@@ -516,23 +649,8 @@ pub unsafe fn presentation_frame(view: Id) -> Option<Frame> {
     if sdl.is_null() {
         return None;
     }
-    let (mut x, mut y) = (0.0f64, 0.0f64);
-    let size = view_of(view).frame.size;
-    let mut current = view;
-    // Bounded for the reason [`window_of`] is: a subview list a guest built
-    // with a cycle in it must not hang a presenting frame.
-    for _ in 0..64 {
-        if !is_view(current) {
-            break;
-        }
-        let v = view_of(current);
-        x += v.frame.origin.x;
-        y += v.frame.origin.y;
-        if v.superview.is_null() {
-            break;
-        }
-        current = v.superview;
-    }
+    let rect = rect_in_window(view);
+    let (x, y, size) = (rect.origin.x, rect.origin.y, rect.size);
     let (_, window_height) = sdl3::video::window_size(sdl)?;
     let (pixel_width, pixel_height) = sdl3::video::window_size_in_pixels(sdl)?;
     let density = sdl3::video::window_pixel_density(sdl) as f64;
@@ -585,21 +703,8 @@ pub unsafe fn input_frame(view: Id) -> Option<(sdl3::Window, sdl3::Rect)> {
     if sdl.is_null() {
         return None;
     }
-    let (mut x, mut y) = (0.0f64, 0.0f64);
-    let size = view_of(view).frame.size;
-    let mut current = view;
-    for _ in 0..64 {
-        if !is_view(current) {
-            break;
-        }
-        let node = view_of(current);
-        x += node.frame.origin.x;
-        y += node.frame.origin.y;
-        if node.superview.is_null() {
-            break;
-        }
-        current = node.superview;
-    }
+    let rect = rect_in_window(view);
+    let (x, y, size) = (rect.origin.x, rect.origin.y, rect.size);
     let (_, window_height) = sdl3::video::window_size(sdl)?;
     let top = f64::from(window_height) - (y + size.height);
     Some((
@@ -683,10 +788,7 @@ unsafe fn hit_base(view: Id, point: NSPoint, depth: usize) -> Id {
     if !contains(frame, point) {
         return std::ptr::null_mut();
     }
-    let local = NSPoint {
-        x: point.x - frame.origin.x,
-        y: point.y - frame.origin.y,
-    };
+    let local = from_superview(view, point);
     // SAFETY: the subview list is an array of this runtime's, holding views.
     let children =
         unsafe { corefoundation::collections::array(view_of(view).subviews as *const c_void) };
@@ -938,51 +1040,21 @@ unsafe extern "C" fn convert_size_to_backing(receiver: Id, _sel: Sel, size: NSSi
     }
 }
 
-/// Where `view`'s origin is in its window's base coordinates.
-///
-/// Origins summed up the superview chain, the same walk [`pointer_in`] and
-/// [`presentation_frame`] make: nothing here applies `-isFlipped`, so the
-/// three agree on where a view is. `nil` is the window itself.
-fn window_offset(view: Id) -> NSPoint {
-    let mut offset = NSPoint::default();
-    let mut node = view;
-    // Bounded for the reason [`window_of`] is.
-    for _ in 0..64 {
-        if !is_view(node) {
-            break;
-        }
-        let origin = view_of(node).frame.origin;
-        offset.x += origin.x;
-        offset.y += origin.y;
-        node = view_of(node).superview;
-    }
-    offset
+/// A point from `from`'s coordinates to `to`'s, through their window; `nil`
+/// on either side is the window itself.
+fn convert_point(point: NSPoint, from: Id, to: Id) -> NSPoint {
+    point_from_window(to, point_to_window(from, point))
 }
 
-/// How far a point moves going from `from`'s coordinates to `to`'s.
-fn conversion(from: Id, to: Id) -> NSPoint {
-    let (from, to) = (window_offset(from), window_offset(to));
-    NSPoint {
-        x: from.x - to.x,
-        y: from.y - to.y,
-    }
-}
-
-fn translated(point: NSPoint, by: NSPoint) -> NSPoint {
-    NSPoint {
-        x: point.x + by.x,
-        y: point.y + by.y,
-    }
-}
-
-/// `-convertPoint:fromView:`.
+/// `-convertPoint:fromView:`, which is how Qt turns `-locationInWindow` into
+/// a position in its flipped view.
 unsafe extern "C" fn convert_point_from_view(
     receiver: Id,
     _sel: Sel,
     point: NSPoint,
     from: Id,
 ) -> NSPoint {
-    translated(point, conversion(from, receiver))
+    convert_point(point, from, receiver)
 }
 
 unsafe extern "C" fn convert_point_to_view(
@@ -991,7 +1063,7 @@ unsafe extern "C" fn convert_point_to_view(
     point: NSPoint,
     to: Id,
 ) -> NSPoint {
-    translated(point, conversion(receiver, to))
+    convert_point(point, receiver, to)
 }
 
 unsafe extern "C" fn convert_rect_from_view(
@@ -1000,19 +1072,13 @@ unsafe extern "C" fn convert_rect_from_view(
     rect: NSRect,
     from: Id,
 ) -> NSRect {
-    NSRect {
-        origin: translated(rect.origin, conversion(from, receiver)),
-        size: rect.size,
-    }
+    convert_rect(rect, from, receiver)
 }
 
 /// `-convertRect:toView:`, which Qt uses to place a popup relative to the
 /// window before asking the window for screen coordinates.
 unsafe extern "C" fn convert_rect_to_view(receiver: Id, _sel: Sel, rect: NSRect, to: Id) -> NSRect {
-    NSRect {
-        origin: translated(rect.origin, conversion(receiver, to)),
-        size: rect.size,
-    }
+    convert_rect(rect, receiver, to)
 }
 
 unsafe extern "C" fn window(receiver: Id, _sel: Sel) -> Id {
@@ -1154,10 +1220,7 @@ pub(crate) fn frame_of(view: Id) -> NSRect {
 
 /// A rectangle in `from`'s coordinates, in `to`'s.
 pub(crate) fn convert_rect(rect: NSRect, from: Id, to: Id) -> NSRect {
-    NSRect {
-        origin: translated(rect.origin, conversion(from, to)),
-        size: rect.size,
-    }
+    rect_between(rect, |point| convert_point(point, from, to))
 }
 
 unsafe extern "C" fn remove_from_superview(receiver: Id, _sel: Sel) {
@@ -1555,6 +1618,68 @@ mod tests {
                 rect(1.0, 1.0, 4.0, 4.0)
             );
         }
+    }
+
+    unsafe extern "C" fn flipped_yes(_receiver: Id, _sel: Sel) -> u8 {
+        1
+    }
+
+    fn flipped_view(frame: NSRect) -> Id {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"R3TestFlippedView").unwrap_or_else(|| {
+            let class = corefoundation::base::register(
+                c"R3TestFlippedView",
+                objc::class::lookup(c"NSView"),
+                INSTANCE_SIZE,
+                false,
+            );
+            methods!(class, {
+                "isFlipped" => flipped_yes, c"c16@0:8";
+            });
+            class
+        });
+        let object = objc::object::create_instance(class, 0);
+        // SAFETY: the object has `View` storage.
+        unsafe { init_with_frame(object, objc::sel::get("initWithFrame:"), frame) }
+    }
+
+    /// Qt's views are flipped, and a subview at `y = 0` of one is along its
+    /// top edge: in window coordinates, the top of the window.
+    #[test]
+    fn a_flipped_superview_places_its_subviews_from_the_top() {
+        let content = flipped_view(rect(0.0, 0.0, 200.0, 100.0));
+        let ribbon = flipped_view(rect(0.0, 0.0, 200.0, 20.0));
+        let plain = view(rect(10.0, 30.0, 50.0, 40.0));
+        // SAFETY: `-addSubview:` is `void (id, SEL, id)` on views.
+        unsafe {
+            add_subview(content, objc::sel::get("addSubview:"), ribbon);
+            add_subview(content, objc::sel::get("addSubview:"), plain);
+        }
+        assert_eq!(rect_in_window(ribbon), rect(0.0, 80.0, 200.0, 20.0));
+        assert_eq!(rect_in_window(plain), rect(10.0, 30.0, 50.0, 40.0));
+
+        // A window point near the top is near the top of the flipped ribbon,
+        // and one inside the unflipped view counts up from its bottom.
+        let top = NSPoint { x: 5.0, y: 95.0 };
+        assert_eq!(point_from_window(ribbon, top), NSPoint { x: 5.0, y: 5.0 });
+        assert_eq!(
+            point_from_window(plain, NSPoint { x: 15.0, y: 35.0 }),
+            NSPoint { x: 5.0, y: 5.0 }
+        );
+        assert_eq!(point_to_window(ribbon, NSPoint { x: 5.0, y: 5.0 }), top);
+        let sel = objc::sel::get("convertPoint:fromView:");
+        // SAFETY: a view of this module's, and nil is the window.
+        let local = unsafe { convert_point_from_view(ribbon, sel, top, std::ptr::null_mut()) };
+        assert_eq!(local, NSPoint { x: 5.0, y: 5.0 });
+
+        // The hit test takes the point in the content view's superview's
+        // coordinates, which for a content view are the window's.
+        // SAFETY: live views.
+        assert_eq!(unsafe { hit_test(content, top) }, ribbon);
+        assert_eq!(
+            unsafe { hit_test(content, NSPoint { x: 15.0, y: 35.0 }) },
+            plain
+        );
     }
 
     fn children(view: Id) -> Vec<Id> {

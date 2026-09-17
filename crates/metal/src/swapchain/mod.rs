@@ -128,11 +128,15 @@ static REFUSED: Mutex<Option<HashMap<usize, ()>>> = Mutex::new(None);
 /// which is not an error: the caller falls back to reading the frame back and
 /// blitting it through SDL's window surface, and every host without
 /// `VK_KHR_surface` takes that path.
+///
+/// `holes` are rectangles of other layers, which keep what those layers last
+/// presented there: the window's store is presented around its views' layers.
 pub(crate) fn present(
     gpu: &'static Gpu,
     layer: usize,
     frame: &appkit::view::Frame,
     source: &GpuImage,
+    holes: &[(usize, Region)],
 ) -> Result<bool, String> {
     if gpu.swapchain_api().is_none() || crate::vulkan::surface_api().is_none() {
         return Ok(false);
@@ -182,7 +186,73 @@ pub(crate) fn present(
     if swapchain.requested != extent {
         swapchain.rebuild(extent)?;
     }
-    swapchain.present(frame, source)
+    // Only a layer that has presented here has anything of its own to keep:
+    // over any other hole the source is still what the window shows.
+    let holes: Vec<Region> = holes
+        .iter()
+        .filter(|(owner, _)| *owner != layer && swapchain.layers.contains(owner))
+        .map(|(_, region)| *region)
+        .collect();
+    let regions = match holes.is_empty() {
+        true => None,
+        false => Some(subtract(
+            Region {
+                x: frame.x,
+                y: frame.y,
+                width: frame.width as i32,
+                height: frame.height as i32,
+            },
+            &holes,
+        )),
+    };
+    swapchain.present(frame, source, regions.as_deref())
+}
+
+/// A rectangle of window pixels, top-left origin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Region {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// `whole` less every rectangle in `holes`, as rectangles that do not overlap.
+pub(crate) fn subtract(whole: Region, holes: &[Region]) -> Vec<Region> {
+    let mut pieces = vec![whole];
+    for hole in holes {
+        let mut next = Vec::with_capacity(pieces.len() + 4);
+        for piece in pieces {
+            let left = piece.x.max(hole.x);
+            let top = piece.y.max(hole.y);
+            let right = (piece.x + piece.width).min(hole.x + hole.width);
+            let bottom = (piece.y + piece.height).min(hole.y + hole.height);
+            if left >= right || top >= bottom {
+                next.push(piece);
+                continue;
+            }
+            let (piece_right, piece_bottom) = (piece.x + piece.width, piece.y + piece.height);
+            let bands = [
+                (piece.x, piece.y, piece.width, top - piece.y),
+                (piece.x, bottom, piece.width, piece_bottom - bottom),
+                (piece.x, top, left - piece.x, bottom - top),
+                (right, top, piece_right - right, bottom - top),
+            ];
+            next.extend(
+                bands
+                    .into_iter()
+                    .filter(|&(_, _, width, height)| width > 0 && height > 0)
+                    .map(|(x, y, width, height)| Region {
+                        x,
+                        y,
+                        width,
+                        height,
+                    }),
+            );
+        }
+        pieces = next;
+    }
+    pieces
 }
 
 impl Swapchain {
@@ -526,11 +596,18 @@ impl Swapchain {
         Ok(self.composite.as_ref().expect("just made").image)
     }
 
-    fn present(&mut self, frame: &appkit::view::Frame, source: &GpuImage) -> Result<bool, String> {
+    /// `regions`, where given, are the parts of `frame` to blit, each from
+    /// the same rectangle of `source`: the source is the window's size.
+    fn present(
+        &mut self,
+        frame: &appkit::view::Frame,
+        source: &GpuImage,
+        regions: Option<&[Region]>,
+    ) -> Result<bool, String> {
         // One layer covering the window needs no accumulator: what it draws
         // is the whole of what the window shows, so it goes straight into the
         // image the presentation engine hands back.
-        let direct = self.layers.len() <= 1 && frame.covers_window();
+        let direct = self.layers.len() <= 1 && frame.covers_window() && regions.is_none();
         let composite = match direct {
             true => None,
             false => Some(self.composite()?),
@@ -609,16 +686,42 @@ impl Swapchain {
                     // A layer wholly off the edge of its window contributes
                     // nothing; what the composite already holds is still
                     // what the window shows, so it is presented unchanged.
-                    if let Some(into) = clamp(frame, self.extent) {
-                        blit(
-                            device,
-                            command_buffer,
-                            source.image,
-                            extent_of(source),
-                            composite,
-                            vk::ImageLayout::GENERAL,
-                            into,
-                        );
+                    match regions {
+                        Some(regions) => {
+                            for region in regions {
+                                let part = appkit::view::Frame {
+                                    x: region.x,
+                                    y: region.y,
+                                    width: region.width.max(0) as u32,
+                                    height: region.height.max(0) as u32,
+                                    ..*frame
+                                };
+                                if let Some(into) = clamp(&part, self.extent) {
+                                    blit(
+                                        device,
+                                        command_buffer,
+                                        source.image,
+                                        into,
+                                        composite,
+                                        vk::ImageLayout::GENERAL,
+                                        into,
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            if let Some(into) = clamp(frame, self.extent) {
+                                blit(
+                                    device,
+                                    command_buffer,
+                                    source.image,
+                                    extent_of(source),
+                                    composite,
+                                    vk::ImageLayout::GENERAL,
+                                    into,
+                                );
+                            }
+                        }
                     }
                     // The blit above must land before the one below reads it.
                     barrier(

@@ -181,15 +181,21 @@ pub fn run() {
         Ok(value) => parse(&value),
         Err(_) => Vec::new(),
     });
-    // `ROSETTA3_DEBUG_INPUT_WINDOW=key`: the key window rather than the first
-    // window made, for a script that drives a dialog.
-    static KEY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let key = *KEY.get_or_init(|| std::env::var(WINDOW_ENV).is_ok_and(|value| value == "key"));
-    let sdl = match key {
+    // `ROSETTA3_DEBUG_INPUT_WINDOW`: which window the script drives - `key`
+    // for the key window, for a dialog; `main` for the largest shown one, for
+    // an application window the compositor has not given focus to; the first
+    // window made otherwise.
+    static WHICH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let which = WHICH.get_or_init(|| std::env::var(WINDOW_ENV).unwrap_or_default());
+    let sdl = match which.as_str() {
         // SAFETY: null or a window this crate made.
-        true => Some(unsafe { crate::window::sdl_window(crate::window::key_window()) })
+        "key" => Some(unsafe { crate::window::sdl_window(crate::window::key_window()) })
             .filter(|sdl| !sdl.is_null()),
-        false => crate::window::sdl_windows().into_iter().next(),
+        // The biggest window on the screen, which is the one a program's own
+        // interface is in: a script that drives an application whose window
+        // the compositor has not given focus to cannot ask for the key one.
+        "main" => main_window(),
+        _ => crate::window::sdl_windows().into_iter().next(),
     };
     let Some(window) = sdl.map(sdl3::video::window_id) else {
         return;
@@ -207,8 +213,24 @@ pub fn run() {
     }
 }
 
+/// The largest shown window this runtime has made.
+fn main_window() -> Option<sdl3::Window> {
+    crate::window::all()
+        .into_iter()
+        .filter(|window| crate::window::is_shown(*window))
+        // SAFETY: a window this crate made.
+        .map(|window| unsafe { crate::window::sdl_window(window) })
+        .filter(|sdl| !sdl.is_null())
+        .max_by_key(|sdl| {
+            sdl3::video::window_size(*sdl).map_or(0, |(w, h)| i64::from(w) * i64::from(h))
+        })
+}
+
 fn perform(window: u32, action: &Action) {
     eprintln!("rosetta3: appkit: {ENV}: {action:?}");
+    // And to `ROSETTA3_EVENT_LOG`, which a guest that replaces its own stderr
+    // cannot take with it.
+    crate::event::debug_log(&format!("script {action:?}"));
     let (x, y) = *POINTER.lock().unwrap_or_else(|e| e.into_inner());
     match action {
         Action::Move(to_x, to_y) => {

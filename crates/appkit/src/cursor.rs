@@ -448,6 +448,7 @@ fn holding_rect() -> Option<Id> {
 /// `NSTrackingAreaOptions`.
 mod tracking {
     pub const MOUSE_ENTERED_AND_EXITED: usize = 0x01;
+    pub const MOUSE_MOVED: usize = 0x02;
     pub const CURSOR_UPDATE: usize = 0x04;
     pub const ACTIVE_WHEN_FIRST_RESPONDER: usize = 0x10;
     pub const ACTIVE_IN_KEY_WINDOW: usize = 0x20;
@@ -660,6 +661,30 @@ pub fn update_tracking(window: Id, dragging: bool) {
     for entry in areas {
         objc::arc::release(entry.area);
     }
+}
+
+/// The areas of `window` that `-mouseMoved:` goes to for a move with no
+/// button held: active, holding the pointer, and made with
+/// `NSTrackingMouseMoved`. Retained, for the caller to release.
+///
+/// AppKit sends those moves to each area's owner, which is the only place Qt
+/// listens for them: its `QNSView` gives a helper object the area, and the
+/// view itself has no `-mouseMoved:`.
+pub fn mouse_moved_areas(window: Id) -> Vec<Id> {
+    if window.is_null() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for entry in installed(window) {
+        let wanted = entry.active
+            && entry.holds
+            && area_of(entry.area).is_some_and(|a| a.options & tracking::MOUSE_MOVED != 0);
+        match wanted {
+            true => out.push(entry.area),
+            false => objc::arc::release(entry.area),
+        }
+    }
+    out
 }
 
 /// The pointer left `window`: every area it was inside is told so, and the

@@ -177,16 +177,72 @@ pub unsafe extern "C" fn proc_pidinfo(
     }
 }
 
+/// `int proc_name(int pid, void *buffer, uint32_t buffersize)`
+///
+/// The process's name, NUL-terminated; the length is returned, zero on a
+/// failure. Qt's `QLockFile` asks it whether a lock file's owner is still the
+/// program that wrote it, and removes the lock when it is not.
+///
+/// A process this runtime runs is named for its guest rather than for
+/// `rosetta3`, which is what the guest would see on a Mac.
+///
+/// # Safety
+///
+/// `buffer` is null or writable for `size` bytes.
+pub unsafe extern "C" fn proc_name(pid: c_int, buffer: *mut c_void, size: u32) -> c_int {
+    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        crate::errno::set(libc::ESRCH);
+        return 0;
+    };
+    let Some(name) = process_name(&cmdline) else {
+        crate::errno::set(libc::ESRCH);
+        return 0;
+    };
+    // `p_name` is 2 * MAXCOMLEN bytes.
+    let name = &name.as_bytes()[..name.len().min(32)];
+    if buffer.is_null() || (size as usize) <= name.len() {
+        crate::errno::set(libc::EINVAL);
+        return 0;
+    }
+    // SAFETY: the caller's buffer holds `size` bytes, more than the name.
+    unsafe {
+        std::ptr::copy_nonoverlapping(name.as_ptr(), buffer.cast::<u8>(), name.len());
+        *buffer.cast::<u8>().add(name.len()) = 0;
+    }
+    name.len() as c_int
+}
+
+/// The name a process's NUL-separated command line gives it: the file name
+/// of its executable, or of its guest when that executable is `rosetta3 run`.
+fn process_name(cmdline: &[u8]) -> Option<String> {
+    let arguments: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
+    let base = |argument: &[u8]| {
+        let text = String::from_utf8_lossy(argument).into_owned();
+        text.rsplit('/').next().map(str::to_owned)
+    };
+    let program = base(arguments.first()?)?;
+    if program == "rosetta3"
+        && arguments.get(1).is_some_and(|a| *a == b"run")
+        && let Some(guest) = arguments[2..]
+            .iter()
+            .find(|a| !a.is_empty() && !a.starts_with(b"-"))
+    {
+        return base(guest);
+    }
+    (!program.is_empty()).then_some(program)
+}
+
 /// How many threads this process is running.
 fn threads() -> i32 {
     std::fs::read_dir("/proc/self/task").map_or(1, |entries| entries.count().max(1) as i32)
 }
 
-pub const NAMES: &[&str] = &["proc_pidinfo"];
+pub const NAMES: &[&str] = &["proc_pidinfo", "proc_name"];
 
 pub fn symbol(name: &str) -> Option<u64> {
     match name {
         "proc_pidinfo" => Some(proc_pidinfo as *const () as usize as u64),
+        "proc_name" => Some(proc_name as *const () as usize as u64),
         _ => None,
     }
 }
@@ -203,6 +259,18 @@ pub fn provide(lib: &mut SyntheticDylib) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_guest_is_named_for_its_executable_not_the_runtime() {
+        assert_eq!(
+            process_name(b"/x/rosetta3\0run\0--emulated\0/A.app/Contents/MacOS/Studio\0-p\0"),
+            Some("Studio".to_owned())
+        );
+        assert_eq!(
+            process_name(b"/usr/bin/bash\0-c\0"),
+            Some("bash".to_owned())
+        );
+    }
+
     use super::*;
 
     #[test]

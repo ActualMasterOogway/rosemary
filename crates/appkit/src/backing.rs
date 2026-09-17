@@ -1,19 +1,27 @@
 //! What a window shows of the views that draw on the CPU.
 //!
-//! AppKit gives every window a backing store which `-drawRect:` draws into
-//! with the view's focus locked, and the window server composites that store
-//! with the window's layers. Qt's raster widgets reach the screen exactly this
-//! way: `QNSWindowBackingStore::flush` locks focus on its view and draws the
-//! widget image with `-[NSImage drawInRect:fromRect:...]`.
+//! AppKit gives every view that draws a backing of its own - since macOS
+//! 10.14 every window is layer-backed, so each view is a layer - and the
+//! window server composites them back to front, subviews over their
+//! superviews. `-drawRect:` draws into the view's with its focus locked. Qt's
+//! raster widgets reach the screen exactly this way:
+//! `QNSWindowBackingStore::flush` locks focus on its view and draws the widget
+//! image with `-[NSImage drawInRect:fromRect:...]`.
 //!
-//! Here a store is premultiplied B, G, R, A pixels at the window's pixel size,
-//! top row first. Presenting one goes through [`set_presenter`] when something
-//! has claimed the window's surface - Metal composites the store under its
-//! layers, as the window server would - and through SDL's window surface
-//! otherwise.
+//! One store per window instead would be wrong in a way that shows: Qt gives
+//! every native child widget a view of its own and flushes each separately,
+//! a parent's flush covering its children's rectangles, so whichever flushed
+//! last would win and the window would flicker between them.
 //!
-//! FIXME (ACCURACY): drawing is scaled nearest-neighbour and clipped to the
-//! focused view's rectangle only, not to its superviews'.
+//! Here a store is premultiplied B, G, R, A pixels, top row first: one per
+//! view that has drawn, at the view's pixel size, and one per window which
+//! the views are composited into. Presenting a window's goes through
+//! [`set_presenter`] when something has claimed the window's surface - Metal
+//! composites it under its layers, as the window server would - and through
+//! SDL's window surface otherwise.
+//!
+//! FIXME (ACCURACY): drawing is scaled nearest-neighbour and a view's bounds
+//! origin is taken to be zero.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -34,8 +42,108 @@ pub struct Store {
     dirty: bool,
 }
 
-/// Keyed by the SDL window's address.
+impl Store {
+    fn new(width: u32, height: u32) -> Self {
+        Store {
+            width,
+            height,
+            pixels: vec![0; width as usize * height as usize * 4],
+            dirty: false,
+        }
+    }
+
+    /// Change the size, keeping what the top-left corner held.
+    fn resize(&mut self, width: u32, height: u32) {
+        if (self.width, self.height) == (width, height) {
+            return;
+        }
+        let mut pixels = vec![0; width as usize * height as usize * 4];
+        let columns = self.width.min(width) as usize;
+        for row in 0..self.height.min(height) as usize {
+            let from = row * self.width as usize * 4;
+            let to = row * width as usize * 4;
+            pixels[to..to + columns * 4].copy_from_slice(&self.pixels[from..from + columns * 4]);
+        }
+        *self = Store {
+            width,
+            height,
+            pixels,
+            dirty: true,
+        };
+    }
+}
+
+/// A rectangle of pixels, top-left origin; empty when either extent is not
+/// positive.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rect {
+    pub x: i64,
+    pub y: i64,
+    pub width: i64,
+    pub height: i64,
+}
+
+impl Rect {
+    fn is_empty(&self) -> bool {
+        self.width <= 0 || self.height <= 0
+    }
+
+    fn intersection(&self, other: &Rect) -> Rect {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let right = (self.x + self.width).min(other.x + other.width);
+        let bottom = (self.y + self.height).min(other.y + other.height);
+        Rect {
+            x,
+            y,
+            width: (right - x).max(0),
+            height: (bottom - y).max(0),
+        }
+    }
+
+    fn union(&self, other: &Rect) -> Rect {
+        if self.is_empty() {
+            return *other;
+        }
+        if other.is_empty() {
+            return *self;
+        }
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        Rect {
+            x,
+            y,
+            width: (self.x + self.width).max(other.x + other.width) - x,
+            height: (self.y + self.height).max(other.y + other.height) - y,
+        }
+    }
+}
+
+/// A view's layer as the window's store leaves room for it: the presenter
+/// keeps what the layer last presented there instead of the store's pixels.
+#[derive(Clone, Copy, Debug)]
+pub struct Hole {
+    pub layer: usize,
+    pub rect: Rect,
+}
+
+/// Each window's composite, keyed by the SDL window's address.
 static STORES: Mutex<Option<HashMap<usize, Store>>> = Mutex::new(None);
+
+/// Each drawn view's own pixels, keyed by the view's address.
+static VIEW_STORES: Mutex<Option<HashMap<usize, Store>>> = Mutex::new(None);
+
+/// What a window's composite is waiting on: the part of it views have drawn
+/// over since it was last composed, and where each view was then, so that a
+/// view which moved, hid or went away is recomposed without drawing.
+#[derive(Default)]
+struct WindowState {
+    damage: Rect,
+    placed: Vec<(usize, Rect)>,
+    holes: Vec<Hole>,
+}
+
+static WINDOWS: Mutex<Option<HashMap<usize, WindowState>>> = Mutex::new(None);
 
 /// Views sent `-setNeedsDisplay:`, by address, drawn at the next pump.
 static NEEDS_DISPLAY: Mutex<Vec<usize>> = Mutex::new(Vec::new());
@@ -45,9 +153,9 @@ static NEEDS_DISPLAY: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 /// can run a nested event loop that pumps again. Zero marks a forgotten entry.
 static DRAWING: Mutex<Vec<Vec<usize>>> = Mutex::new(Vec::new());
 
-/// Presents a store for a window; `false` where it cannot, so that SDL's
-/// window surface is used instead.
-pub type Presenter = fn(sdl3::Window, &Store) -> bool;
+/// Presents a window's store, leaving `holes` to the layers named in them;
+/// `false` where it cannot, so that SDL's window surface is used instead.
+pub type Presenter = fn(sdl3::Window, &Store, &[Hole]) -> bool;
 
 static PRESENTER: Mutex<Option<Presenter>> = Mutex::new(None);
 
@@ -61,7 +169,7 @@ pub fn set_presenter(presenter: Presenter) {
 struct Focus {
     view: Id,
     window: sdl3::Window,
-    /// The view's top-left corner and size in window pixels.
+    /// The view's top-left corner in window pixels, and its size in pixels.
     x: f64,
     y: f64,
     width: f64,
@@ -73,14 +181,6 @@ struct Focus {
 
 thread_local! {
     static FOCUS: RefCell<Vec<Focus>> = const { RefCell::new(Vec::new()) };
-}
-
-fn send_flag(receiver: Id, selector: &str) -> bool {
-    // SAFETY: a live object; the selector is `BOOL (id, SEL)`.
-    unsafe {
-        let send: unsafe extern "C" fn(Id, Sel) -> u8 = std::mem::transmute(objc::msg::entry());
-        send(receiver, objc::sel::get(selector)) != 0
-    }
 }
 
 fn focus_on(view: Id) -> Option<Focus> {
@@ -99,7 +199,7 @@ fn focus_on(view: Id) -> Option<Focus> {
         width: f64::from(frame.width),
         height: f64::from(frame.height),
         density: if density > 0.0 { density } else { 1.0 },
-        flipped: send_flag(view, "isFlipped"),
+        flipped: crate::view::is_flipped(view),
     })
 }
 
@@ -119,35 +219,16 @@ fn current_focus() -> Option<Focus> {
     FOCUS.with(|stack| stack.borrow().last().copied())
 }
 
-fn with_store<R>(window: sdl3::Window, body: impl FnOnce(&mut Store) -> R) -> Option<R> {
-    let (width, height) = sdl3::video::window_size_in_pixels(window)?;
-    let (width, height) = (width.max(1) as u32, height.max(1) as u32);
-    let mut stores = STORES.lock().unwrap_or_else(|e| e.into_inner());
-    let store = stores
+fn damage(window: sdl3::Window, rect: Rect) {
+    if rect.is_empty() {
+        return;
+    }
+    let mut windows = WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
+    let state = windows
         .get_or_insert_with(HashMap::new)
         .entry(window as usize)
-        .or_insert_with(|| Store {
-            width,
-            height,
-            pixels: vec![0; width as usize * height as usize * 4],
-            dirty: false,
-        });
-    if (store.width, store.height) != (width, height) {
-        let mut pixels = vec![0; width as usize * height as usize * 4];
-        let columns = store.width.min(width) as usize;
-        for row in 0..store.height.min(height) as usize {
-            let from = row * store.width as usize * 4;
-            let to = row * width as usize * 4;
-            pixels[to..to + columns * 4].copy_from_slice(&store.pixels[from..from + columns * 4]);
-        }
-        *store = Store {
-            width,
-            height,
-            pixels,
-            dirty: true,
-        };
-    }
-    Some(body(store))
+        .or_default();
+    state.damage = state.damage.union(&rect);
 }
 
 /// `NSCompositingOperation` values this draws with; any other is drawn as
@@ -174,7 +255,14 @@ pub(crate) fn draw_image(
     let Some(focus) = current_focus() else {
         return;
     };
-    with_store(focus.window, |store| {
+    let (width, height) = (focus.width.max(1.0) as u32, focus.height.max(1.0) as u32);
+    let drawn = {
+        let mut stores = VIEW_STORES.lock().unwrap_or_else(|e| e.into_inner());
+        let store = stores
+            .get_or_insert_with(HashMap::new)
+            .entry(focus.view as usize)
+            .or_insert_with(|| Store::new(width, height));
+        store.resize(width, height);
         draw_into(
             store,
             source,
@@ -187,10 +275,19 @@ pub(crate) fn draw_image(
             fraction,
             respect_flipped,
         )
-    });
+    };
+    damage(
+        focus.window,
+        Rect {
+            x: drawn.x + focus.x as i64,
+            y: drawn.y + focus.y as i64,
+            ..drawn
+        },
+    );
 }
 
-/// [`draw_image`], into a store already in hand.
+/// [`draw_image`], into the focused view's store; answers the rectangle of
+/// it that changed.
 #[allow(clippy::too_many_arguments)]
 fn draw_into(
     store: &mut Store,
@@ -203,16 +300,16 @@ fn draw_into(
     operation: usize,
     fraction: f64,
     respect_flipped: bool,
-) {
+) -> Rect {
     let Some(focus) = current_focus() else {
-        return;
+        return Rect::default();
     };
     if source_width == 0
         || source_height == 0
         || fraction <= 0.0
         || source.len() < source_width * source_height * 4
     {
-        return;
+        return Rect::default();
     }
     let from = match from.size.width <= 0.0 || from.size.height <= 0.0 {
         true => NSRect {
@@ -228,32 +325,28 @@ fn draw_into(
     let source_w = from.size.width * scale_x;
     let source_h = from.size.height * scale_y;
 
-    let view_height = focus.height / focus.density;
+    let view_height = f64::from(store.height) / focus.density;
     let top = match focus.flipped {
         true => destination.origin.y,
         false => view_height - (destination.origin.y + destination.size.height),
     };
-    let left = focus.x + destination.origin.x * focus.density;
-    let top = focus.y + top * focus.density;
+    let left = destination.origin.x * focus.density;
+    let top = top * focus.density;
     let width = destination.size.width * focus.density;
     let height = destination.size.height * focus.density;
     if width <= 0.0 || height <= 0.0 {
-        return;
+        return Rect::default();
     }
     // A flipped context draws an image upside down unless asked not to.
     let mirrored = focus.flipped && !respect_flipped;
     let opacity = (fraction.min(1.0) * 256.0) as u32;
 
-    let clip_left = focus.x.max(0.0);
-    let clip_top = focus.y.max(0.0);
-    let clip_right = (focus.x + focus.width).min(f64::from(store.width));
-    let clip_bottom = (focus.y + focus.height).min(f64::from(store.height));
-    let x0 = left.max(clip_left).round() as i64;
-    let x1 = (left + width).min(clip_right).round() as i64;
-    let y0 = top.max(clip_top).round() as i64;
-    let y1 = (top + height).min(clip_bottom).round() as i64;
+    let x0 = left.max(0.0).round() as i64;
+    let x1 = (left + width).min(f64::from(store.width)).round() as i64;
+    let y0 = top.max(0.0).round() as i64;
+    let y1 = (top + height).min(f64::from(store.height)).round() as i64;
     if x0 >= x1 || y0 >= y1 {
-        return;
+        return Rect::default();
     }
     let columns: Vec<usize> = (x0..x1)
         .map(|x| {
@@ -270,7 +363,7 @@ fn draw_into(
         let from_row = &source[row * source_width * 4..(row + 1) * source_width * 4];
         let base = y as usize * store.width as usize * 4;
         let to_row = &mut store.pixels[base + x0 as usize * 4..base + x1 as usize * 4];
-        for (target, &column) in to_row.chunks_exact_mut(4).zip(&columns) {
+        for (target, &column) in to_row.as_chunks_mut::<4>().0.iter_mut().zip(&columns) {
             let texel = &from_row[column * 4..column * 4 + 4];
             if operation == COMPOSITE_COPY && opacity >= 256 {
                 target.copy_from_slice(texel);
@@ -288,6 +381,12 @@ fn draw_into(
         }
     }
     store.dirty = true;
+    Rect {
+        x: x0,
+        y: y0,
+        width: x1 - x0,
+        height: y1 - y0,
+    }
 }
 
 /// Mark a view for `-drawRect:` at the next pump.
@@ -295,6 +394,19 @@ pub(crate) fn needs_display(view: Id) {
     let mut pending = NEEDS_DISPLAY.lock().unwrap_or_else(|e| e.into_inner());
     if !pending.contains(&(view as usize)) {
         pending.push(view as usize);
+    }
+}
+
+/// Mark a view and everything under it, as a window that has nothing valid
+/// to show needs.
+fn needs_display_in_tree(view: Id, depth: usize) {
+    if view.is_null() || depth > 64 {
+        return;
+    }
+    needs_display(view);
+    // SAFETY: a view this crate made.
+    for child in unsafe { crate::view::children(view) } {
+        needs_display_in_tree(child, depth + 1);
     }
 }
 
@@ -309,6 +421,13 @@ pub(crate) fn forget(view: Id) {
         for entry in batch.iter_mut().filter(|entry| **entry == key) {
             *entry = 0;
         }
+    }
+    if let Some(stores) = VIEW_STORES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
+        stores.remove(&key);
     }
 }
 
@@ -336,7 +455,7 @@ pub(crate) fn display_view(view: Id) {
     pop_focus();
 }
 
-/// Draw everything marked for display and present every store that changed.
+/// Draw everything marked for display and present every window that changed.
 pub fn pump() {
     for window in crate::window::all() {
         if !crate::window::is_shown(window) {
@@ -353,13 +472,10 @@ pub fn pump() {
             .as_ref()
             .and_then(|stores| stores.get(&(sdl as usize)))
             .map(|store| (store.width as i32, store.height as i32));
-        // A window newly shown, or resized, has nothing valid in its store:
-        // AppKit redraws the whole window then.
+        // A window newly shown, or resized, has nothing valid in it: AppKit
+        // redraws the whole window then.
         if current != Some((width.max(1), height.max(1))) {
-            let content = crate::window::content_view_of(window);
-            if !content.is_null() {
-                needs_display(content);
-            }
+            needs_display_in_tree(crate::window::content_view_of(window), 0);
         }
     }
     let pending = std::mem::take(&mut *NEEDS_DISPLAY.lock().unwrap_or_else(|e| e.into_inner()));
@@ -381,7 +497,244 @@ pub fn pump() {
         }
     }
     DRAWING.lock().unwrap_or_else(|e| e.into_inner()).pop();
+    for window in crate::window::all() {
+        if crate::window::is_shown(window) {
+            compose_window(window);
+        }
+    }
     present_dirty();
+}
+
+/// One view's place in the composite.
+struct Placed {
+    view: Id,
+    /// Where it is, in window pixels, and the part of that its ancestors let
+    /// show.
+    rect: Rect,
+    clip: Rect,
+}
+
+/// The shown views of a window, back to front, placed.
+fn place_tree(window: Id, sdl: sdl3::Window) -> Vec<Placed> {
+    let mut out = Vec::new();
+    let Some((points_high, pixels)) = sdl3::video::window_size(sdl)
+        .zip(sdl3::video::window_size_in_pixels(sdl))
+        .map(|((w, h), (pw, ph))| (h, (w, pw, ph)))
+    else {
+        return out;
+    };
+    let (points_wide, pixel_width, pixel_height) = pixels;
+    let density = match points_wide > 0 {
+        true => f64::from(pixel_width) / f64::from(points_wide),
+        false => 1.0,
+    };
+    let whole = Rect {
+        x: 0,
+        y: 0,
+        width: i64::from(pixel_width),
+        height: i64::from(pixel_height),
+    };
+    let content = crate::window::content_view_of(window);
+    // The window's base coordinates: not flipped, origin at the bottom.
+    let base = NSRect {
+        origin: NSPoint::default(),
+        size: NSSize {
+            width: f64::from(points_wide),
+            height: f64::from(points_high),
+        },
+    };
+    let geometry = Geometry {
+        window_height: f64::from(points_high),
+        density,
+    };
+    place_view(content, base, false, whole, geometry, 0, &mut out);
+    out
+}
+
+#[derive(Clone, Copy)]
+struct Geometry {
+    /// The window's height in points, which base coordinates count up from.
+    window_height: f64,
+    /// Window pixels per point.
+    density: f64,
+}
+
+/// Place `view`, whose superview's rectangle in window base coordinates is
+/// `outer` and whose flippedness is `outer_flipped`, then its subviews.
+fn place_view(
+    view: Id,
+    outer: NSRect,
+    outer_flipped: bool,
+    clip: Rect,
+    geometry: Geometry,
+    depth: usize,
+    out: &mut Vec<Placed>,
+) {
+    if view.is_null() || depth > 64 || crate::view::is_hidden_itself(view) {
+        return;
+    }
+    let frame = crate::view::frame_of(view);
+    let y = match outer_flipped {
+        true => outer.origin.y + outer.size.height - frame.origin.y - frame.size.height,
+        false => outer.origin.y + frame.origin.y,
+    };
+    let in_window = NSRect {
+        origin: NSPoint {
+            x: outer.origin.x + frame.origin.x,
+            y,
+        },
+        size: frame.size,
+    };
+    let density = geometry.density;
+    let rect = Rect {
+        x: (in_window.origin.x * density).round() as i64,
+        y: ((geometry.window_height - (y + frame.size.height)) * density).round() as i64,
+        width: (frame.size.width * density).round() as i64,
+        height: (frame.size.height * density).round() as i64,
+    };
+    let clip = clip.intersection(&rect);
+    out.push(Placed { view, rect, clip });
+    let flipped = crate::view::is_flipped(view);
+    // SAFETY: a view this crate made.
+    for child in unsafe { crate::view::children(view) } {
+        place_view(child, in_window, flipped, clip, geometry, depth + 1, out);
+    }
+}
+
+/// Bring a window's composite up to date with its views: recompose what was
+/// drawn over, and everywhere a view appeared, moved or went away.
+fn compose_window(window: Id) {
+    // SAFETY: a window this crate made.
+    let sdl = unsafe { crate::window::sdl_window(window) };
+    let Some((width, height)) = sdl3::video::window_size_in_pixels(sdl) else {
+        return;
+    };
+    let (width, height) = (width.max(1) as u32, height.max(1) as u32);
+    let placed = place_tree(window, sdl);
+    let now: Vec<(usize, Rect)> = placed.iter().map(|p| (p.view as usize, p.clip)).collect();
+    let holes: Vec<Hole> = placed
+        .iter()
+        .filter_map(|p| {
+            let layer = crate::view::layer_of(p.view);
+            (!layer.is_null() && !p.clip.is_empty()).then_some(Hole {
+                layer: layer as usize,
+                rect: p.clip,
+            })
+        })
+        .collect();
+
+    let mut stores = STORES.lock().unwrap_or_else(|e| e.into_inner());
+    let store = stores
+        .get_or_insert_with(HashMap::new)
+        .entry(sdl as usize)
+        .or_insert_with(|| Store::new(width, height));
+    let whole = Rect {
+        x: 0,
+        y: 0,
+        width: i64::from(width),
+        height: i64::from(height),
+    };
+    let resized = (store.width, store.height) != (width, height);
+    if resized {
+        *store = Store::new(width, height);
+    }
+
+    let mut windows = WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
+    let state = windows
+        .get_or_insert_with(HashMap::new)
+        .entry(sdl as usize)
+        .or_default();
+    let mut region = std::mem::take(&mut state.damage);
+    if resized {
+        region = whole;
+    }
+    if state.placed != now {
+        // Where each view was and is, for every one that changed.
+        for (_, rect) in state.placed.iter().filter(|entry| !now.contains(entry)) {
+            region = region.union(rect);
+        }
+        for (_, rect) in now.iter().filter(|entry| !state.placed.contains(entry)) {
+            region = region.union(rect);
+        }
+        state.placed = now;
+    }
+    let holes_changed = state.holes.len() != holes.len()
+        || state
+            .holes
+            .iter()
+            .zip(&holes)
+            .any(|(a, b)| a.layer != b.layer || a.rect != b.rect);
+    state.holes = holes;
+    drop(windows);
+    let region = region.intersection(&whole);
+    if region.is_empty() {
+        if holes_changed {
+            store.dirty = true;
+        }
+        return;
+    }
+
+    for row in region.y..region.y + region.height {
+        let base = (row as usize * width as usize + region.x as usize) * 4;
+        store.pixels[base..base + region.width as usize * 4].fill(0);
+    }
+    let views = VIEW_STORES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(views) = views.as_ref() {
+        for p in &placed {
+            let Some(source) = views.get(&(p.view as usize)) else {
+                continue;
+            };
+            blend_at(
+                store,
+                source,
+                p.rect.x,
+                p.rect.y,
+                p.clip.intersection(&region),
+            );
+        }
+    }
+    store.dirty = true;
+}
+
+/// Draw `source` with its top-left corner at `left`, `top` of `store`,
+/// source-over, within `clip`.
+fn blend_at(store: &mut Store, source: &Store, left: i64, top: i64, clip: Rect) {
+    let source_rect = Rect {
+        x: left,
+        y: top,
+        width: i64::from(source.width),
+        height: i64::from(source.height),
+    };
+    let area = clip.intersection(&source_rect);
+    if area.is_empty() {
+        return;
+    }
+    let columns = area.width as usize;
+    for row in area.y..area.y + area.height {
+        let from = ((row - top) as usize * source.width as usize + (area.x - left) as usize) * 4;
+        let to = (row as usize * store.width as usize + area.x as usize) * 4;
+        let from_row = &source.pixels[from..from + columns * 4];
+        let to_row = &mut store.pixels[to..to + columns * 4];
+        for (target, texel) in to_row
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(from_row.as_chunks::<4>().0)
+        {
+            match texel[3] {
+                255 => target.copy_from_slice(texel),
+                0 => {}
+                alpha => {
+                    let keep = 255 - u32::from(alpha);
+                    for channel in 0..4 {
+                        let blended =
+                            u32::from(texel[channel]) + u32::from(target[channel]) * keep / 255;
+                        target[channel] = blended.min(255) as u8;
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn present_dirty() {
@@ -399,7 +752,14 @@ fn present_dirty() {
         let composed = compose(window, store);
         let store = composed.as_ref().unwrap_or(store);
         dump(window, store);
-        if presenter.is_some_and(|present| present(window, store)) {
+        let holes = WINDOWS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|windows| windows.get(&(window as usize)))
+            .map(|state| state.holes.clone())
+            .unwrap_or_default();
+        if presenter.is_some_and(|present| present(window, store, &holes)) {
             continue;
         }
         sdl3::video::present_window(window, |surface| {
@@ -464,15 +824,23 @@ pub fn remove_overlay(view: Id) {
     }
 }
 
-/// Have the store of `view`'s window presented again, creating it if the
-/// window has none: an overlay on a window nothing else draws into still has
-/// to reach the screen.
+/// Have `view`'s window presented again, composing it if nothing has been:
+/// an overlay on a window nothing else draws into still has to reach the
+/// screen.
 fn mark_window_of(view: Id) {
     // SAFETY: a live view, which both callers are passed.
     let Some(frame) = (unsafe { crate::view::presentation_frame(view) }) else {
         return;
     };
-    with_store(frame.window, |store| store.dirty = true);
+    damage(
+        frame.window,
+        Rect {
+            x: i64::from(frame.x),
+            y: i64::from(frame.y),
+            width: i64::from(frame.width),
+            height: i64::from(frame.height),
+        },
+    );
 }
 
 /// The store with every visible overlay of `window` drawn over it, or `None`
@@ -600,21 +968,11 @@ fn dump(window: sdl3::Window, store: &Store) {
         None => last.push((window as usize, Instant::now(), false)),
     }
     let mut out = format!("P6\n{} {}\n255\n", store.width, store.height).into_bytes();
-    for texel in store.pixels.chunks_exact(4) {
+    for texel in store.pixels.as_chunks::<4>().0 {
         out.extend_from_slice(&[texel[2], texel[1], texel[0]]);
     }
     let name = format!("store-{:x}.ppm", window as usize);
     let _ = std::fs::write(std::path::Path::new(&directory).join(name), out);
-}
-
-/// Whether a store has been drawn into for `window`, for a presenter deciding
-/// whether a window has CPU-drawn content under its layers.
-pub fn has_store(window: sdl3::Window) -> bool {
-    STORES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .is_some_and(|stores| stores.contains_key(&(window as usize)))
 }
 
 unsafe extern "C" fn lock_focus_if_can_draw(receiver: Id, _sel: Sel) -> u8 {
@@ -769,6 +1127,172 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A view of `NSView`'s, and one of a flipped subclass, so a tree can be
+    /// placed without a window.
+    fn view(frame: NSRect, flipped: bool) -> Id {
+        crate::bootstrap();
+        let name = match flipped {
+            true => c"R3BackingFlippedView",
+            false => c"NSView",
+        };
+        let class = objc::class::lookup(name).unwrap_or_else(|| {
+            let class = corefoundation::base::register(
+                name,
+                objc::class::lookup(c"NSView"),
+                crate::view::INSTANCE_SIZE,
+                false,
+            );
+            methods!(class, {
+                "isFlipped" => flipped_yes, c"c16@0:8";
+            });
+            class
+        });
+        let object = objc::object::create_instance(class, 0);
+        // SAFETY: `-initWithFrame:` is `id (id, SEL, NSRect)` on a view.
+        unsafe {
+            let send: unsafe extern "C" fn(Id, Sel, NSRect) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            send(object, objc::sel::get("initWithFrame:"), frame)
+        }
+    }
+
+    unsafe extern "C" fn flipped_yes(_receiver: Id, _sel: Sel) -> u8 {
+        1
+    }
+
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
+        NSRect {
+            origin: NSPoint { x, y },
+            size: NSSize { width, height },
+        }
+    }
+
+    fn add(parent: Id, child: Id) {
+        // SAFETY: `-addSubview:` is `void (id, SEL, id)` on views.
+        unsafe {
+            let send: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+            send(parent, objc::sel::get("addSubview:"), child);
+        }
+    }
+
+    /// Where the compositor puts each view, from a flipped tree: a subview at
+    /// the top of its superview is at the top of the window, and one that
+    /// hangs over an edge shows only the part inside.
+    #[test]
+    fn places_a_flipped_tree_from_the_top_of_the_window() {
+        let content = view(rect(0.0, 0.0, 200.0, 100.0), true);
+        let ribbon = view(rect(0.0, 0.0, 200.0, 20.0), true);
+        let overhanging = view(rect(150.0, 10.0, 100.0, 5.0), true);
+        add(content, ribbon);
+        add(ribbon, overhanging);
+
+        let mut placed = Vec::new();
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 100,
+        };
+        place_view(
+            content,
+            rect(0.0, 0.0, 200.0, 100.0),
+            false,
+            whole,
+            Geometry {
+                window_height: 100.0,
+                density: 1.0,
+            },
+            0,
+            &mut placed,
+        );
+        let rects: Vec<Rect> = placed.iter().map(|p| p.rect).collect();
+        assert_eq!(rects[0], whole);
+        assert_eq!(
+            rects[1],
+            Rect {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 20
+            }
+        );
+        assert_eq!(
+            rects[2],
+            Rect {
+                x: 150,
+                y: 10,
+                width: 100,
+                height: 5
+            }
+        );
+        // Clipped to its superview, which is what keeps a scrolled view's
+        // children inside it.
+        assert_eq!(
+            placed[2].clip,
+            Rect {
+                x: 150,
+                y: 10,
+                width: 50,
+                height: 5
+            }
+        );
+    }
+
+    /// A hidden view is placed nowhere, and takes its subviews with it.
+    #[test]
+    fn a_hidden_view_is_not_placed() {
+        let content = view(rect(0.0, 0.0, 10.0, 10.0), true);
+        let hidden = view(rect(0.0, 0.0, 10.0, 5.0), true);
+        let under = view(rect(0.0, 0.0, 10.0, 2.0), true);
+        add(content, hidden);
+        add(hidden, under);
+        // SAFETY: `-setHidden:` is `void (id, SEL, BOOL)` on a view.
+        unsafe {
+            let send: unsafe extern "C" fn(Id, Sel, u8) = std::mem::transmute(objc::msg::entry());
+            send(hidden, objc::sel::get("setHidden:"), 1);
+        }
+        let mut placed = Vec::new();
+        place_view(
+            content,
+            rect(0.0, 0.0, 10.0, 10.0),
+            false,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            },
+            Geometry {
+                window_height: 10.0,
+                density: 1.0,
+            },
+            0,
+            &mut placed,
+        );
+        assert_eq!(placed.len(), 1);
+        assert_eq!(placed[0].view, content);
+    }
+
+    /// A subview's pixels are over its superview's, whichever drew last: one
+    /// store per window would instead show whichever flushed last.
+    #[test]
+    fn a_subviews_pixels_are_over_its_superviews() {
+        let mut window = store_of(2, 1);
+        let mut parent = store_of(2, 1);
+        parent.pixels = vec![1, 1, 1, 255, 1, 1, 1, 255];
+        let mut child = store_of(1, 1);
+        child.pixels = vec![9, 9, 9, 255];
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 1,
+        };
+        blend_at(&mut window, &parent, 0, 0, whole);
+        blend_at(&mut window, &child, 1, 0, whole);
+        assert_eq!(window.pixels, [1, 1, 1, 255, 9, 9, 9, 255]);
+    }
 
     fn store_of(width: u32, height: u32) -> Store {
         Store {

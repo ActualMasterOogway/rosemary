@@ -389,16 +389,7 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             // pointer on every move rather than only when a rectangle changes.
             crate::cursor::apply();
             crate::cursor::update_tracking(object_for(id), held.is_some());
-            if held.is_none() && !wants_mouse_moved(object_for(id)) {
-                if tracing() {
-                    eprintln!(
-                        "rosetta3: appkit: -mouseMoved: dropped: the window did not ask for it \
-                         and no view is tracking"
-                    );
-                }
-                return;
-            }
-            send(id, Some((x, y)), |window, location| Fields {
+            let fields = |window, location, area| Fields {
                 kind: crate::button::dragged_kind(held),
                 modifiers: current_modifiers(),
                 location,
@@ -408,7 +399,35 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
                 },
                 button: held.map_or(0, crate::button::number),
                 window,
+                tracking_area: area,
                 ..Fields::default()
+            };
+            if held.is_none() {
+                // An area made with `NSTrackingMouseMoved` has its owner sent
+                // the move, and that is the whole of the delivery: the view
+                // under the pointer is not sent it a second time.
+                let window = object_for(id);
+                let areas = crate::cursor::mouse_moved_areas(window);
+                if !areas.is_empty() {
+                    let location = location(window, x, y);
+                    for area in &areas {
+                        dispatch(window, nsevent::make(fields(window, location, *area)));
+                    }
+                    areas.into_iter().for_each(objc::arc::release);
+                    return;
+                }
+            }
+            if held.is_none() && !wants_mouse_moved(object_for(id)) {
+                if tracing() {
+                    eprintln!(
+                        "rosetta3: appkit: -mouseMoved: dropped: the window did not ask for it \
+                         and no view is tracking"
+                    );
+                }
+                return;
+            }
+            send(id, Some((x, y)), |window, location| {
+                fields(window, location, std::ptr::null_mut())
             });
         }
         Event::MouseButton {
@@ -510,8 +529,65 @@ pub(crate) fn dispatch(window: Id, event: Id) {
 /// an event with a position goes to the view under it, and a key event goes to
 /// the first responder. Either way the search walks up the responder chain from
 /// there, and an event nothing implements is dropped.
+/// `ROSETTA3_EVENT_LOG=FILE`: append a line per input event and scripted
+/// action to a file.
+///
+/// Not stderr: a guest which redirects its own - Studio replaces it with its
+/// log file once it is running - takes every later trace line with it, and
+/// input arrives long after that.
+pub const LOG_ENV: &str = "ROSETTA3_EVENT_LOG";
+
+fn log_path() -> Option<&'static std::path::Path> {
+    static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| std::env::var_os(LOG_ENV).map(std::path::PathBuf::from))
+        .as_deref()
+}
+
+pub fn debug_log(line: &str) {
+    use std::io::Write;
+    let Some(path) = log_path() else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+/// What [`route`] is about to do with an event, for [`LOG_ENV`]: where it is,
+/// which tracking area it came from, and the view under it.
+fn log_route(window: Id, event: Id, kind: u64) {
+    if log_path().is_none() {
+        return;
+    }
+    let at = nsevent::location_of(event);
+    // SAFETY: null or the content view, which this crate made.
+    let hit = unsafe { crate::view::hit_test(window::content_view_of(window), at) };
+    // SAFETY: null or a live object this runtime allocated.
+    let class = unsafe { objc::object::class_of(hit) }.map_or("-", objc::class::Class::name_str);
+    let rect = crate::view::rect_in_window(hit);
+    let local = crate::view::point_from_window(hit, at);
+    debug_log(&format!(
+        "route kind {kind} window {window:p} at ({:.1},{:.1}) area {:p} hit {hit:p} {class} \
+         in window ({:.1},{:.1} {:.0}x{:.0}) local ({:.1},{:.1})",
+        at.x,
+        at.y,
+        nsevent::tracking_area_of(event),
+        rect.origin.x,
+        rect.origin.y,
+        rect.size.width,
+        rect.size.height,
+        local.x,
+        local.y,
+    ));
+}
+
 pub fn route(window: Id, event: Id) {
     let kind = nsevent::kind_of(event);
+    log_route(window, event, kind);
     let Some(selector) = responder_selector(kind) else {
         return;
     };
