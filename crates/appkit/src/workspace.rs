@@ -62,6 +62,20 @@ unsafe extern "C" fn frontmost_application(_receiver: Id, _sel: Sel) -> Id {
     current()
 }
 
+/// `-[NSWorkspace iconForFileType:]` and `-iconForFile:`: a blank 32x32 image.
+///
+/// Apple never answers nil - a type it knows nothing about gets the generic
+/// document icon - and a program puts the result straight into a cell or menu
+/// item without checking. There is no icon theme to take artwork from here, so
+/// the image is the right size with nothing in it, which draws as nothing.
+unsafe extern "C" fn icon_for_file_type(_receiver: Id, _sel: Sel, _type: Id) -> Id {
+    let image = crate::image::empty(foundation::geometry::NSSize {
+        width: 32.0,
+        height: 32.0,
+    });
+    objc::arc::autorelease(image)
+}
+
 /// The `NSRunningApplication` for this process, a process-lifetime singleton.
 fn current() -> Id {
     *CURRENT.get_or_init(|| {
@@ -145,6 +159,8 @@ pub(crate) fn install() {
         "URLForApplicationToOpenURL:" => application_url_for_url, c"@24@0:8@16";
         "notificationCenter" => notification_center, c"@16@0:8";
         "frontmostApplication" => frontmost_application, c"@16@0:8";
+        "iconForFileType:" => icon_for_file_type, c"@24@0:8@16";
+        "iconForFile:" => icon_for_file_type, c"@24@0:8@16";
     });
 
     let running =
@@ -180,6 +196,22 @@ mod tests {
         let center = unsafe { notification_center(first, objc::sel::get("notificationCenter")) };
         assert!(!center.is_null());
         assert_eq!(center, foundation::notification::default_center_object());
+    }
+
+    #[test]
+    fn a_file_type_icon_is_an_image_even_for_an_unknown_type() {
+        crate::bootstrap();
+        let kind = foundation::string::from_str("r3-no-such-type");
+        // SAFETY: `-iconForFileType:` is `id (id, SEL, id)`.
+        let icon = unsafe {
+            icon_for_file_type(
+                std::ptr::null_mut(),
+                objc::sel::get("iconForFileType:"),
+                kind,
+            )
+        };
+        assert!(!icon.is_null());
+        assert_eq!(crate::image::declared_size(icon).width, 32.0);
     }
 
     #[test]

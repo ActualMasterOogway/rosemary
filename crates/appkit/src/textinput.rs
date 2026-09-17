@@ -55,7 +55,7 @@ pub const TYPE_KEYBOARD_LAYOUT: &str = "TISTypeKeyboardLayout";
 
 /// The identifier and name of the one source, which a guest displays and files
 /// preferences under.
-const SOURCE_ID: &str = "com.apple.keylayout.US";
+pub(crate) const SOURCE_ID: &str = "com.apple.keylayout.US";
 const SOURCE_NAME: &str = "U.S.";
 const SOURCE_BUNDLE_ID: &str = "com.apple.CarbonComponents";
 

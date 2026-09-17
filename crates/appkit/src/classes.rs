@@ -71,6 +71,8 @@ static HIERARCHY: &[(&str, Option<&str>, usize)] = &[
     ("NSRunningApplication", None, 0),
     ("NSAlert", None, crate::alert::INSTANCE_SIZE),
     ("NSNib", None, 0),
+    ("NSTextInputContext", None, 0),
+    ("NSDockTile", None, crate::dock::INSTANCE_SIZE),
     (
         "NSTrackingArea",
         None,

@@ -151,6 +151,15 @@ pub fn content_view_of(object: Id) -> Id {
     }
 }
 
+/// A window's own first responder, nil when it has none - not the window
+/// itself, which is what `-firstResponder` answers then.
+pub fn first_responder_of(object: Id) -> Id {
+    match object.is_null() {
+        true => std::ptr::null_mut(),
+        false => window_of(object).first_responder,
+    }
+}
+
 /// Whether `-mouseMoved:` should be delivered to this window, for the event
 /// pump: AppKit drops those unless a window asked for them, and a game that
 /// never asked would otherwise get a stream it does not expect.

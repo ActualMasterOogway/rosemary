@@ -20,7 +20,7 @@ use foundation::geometry::{NSRect, NSSize};
 use objc::object::Id;
 use objc::sel::Sel;
 
-use crate::define::methods;
+use crate::define::{class_methods, methods};
 
 #[repr(C)]
 pub struct Image {
@@ -198,7 +198,56 @@ unsafe extern "C" fn init_with_data(receiver: Id, _sel: Sel, data: Id) -> Id {
     };
     image.data = objc::arc::retain(data);
     image.size = recognised.size;
+    if image.size.width <= 0.0 || image.size.height <= 0.0 {
+        // A container whose header does not say how big it is - `.icns` - is
+        // measured by decoding it, since `-size` is asked before anything is
+        // drawn. The decode is kept rather than repeated at draw time.
+        if let Some(cg_image) = cg_image_of(receiver) {
+            // SAFETY: a `CGImage` this image holds.
+            image.size = unsafe {
+                NSSize {
+                    width: crate::graphics::CGImageGetWidth(cg_image) as f64,
+                    height: crate::graphics::CGImageGetHeight(cg_image) as f64,
+                }
+            };
+        }
+    }
     receiver
+}
+
+/// The image's pixels as a `CGImage` it holds, decoding them on first use.
+///
+/// `None` only for a container [`crate::raster`] has no decoder for.
+fn cg_image_of(receiver: Id) -> Option<*const c_void> {
+    let image = image_of(receiver);
+    if image.cg_image.is_null() {
+        image.cg_image = crate::graphics::image_from_bitmap(bitmap(receiver)?);
+    }
+    (!image.cg_image.is_null()).then_some(image.cg_image)
+}
+
+/// `-CGImageForProposedRect:context:hints:`.
+///
+/// The image's one bitmap, whatever rect was proposed: there is only one
+/// representation to choose from, so the rect is left as the caller passed it.
+/// The `CGImage` belongs to the image, as Apple's does, and lives as long as it.
+unsafe extern "C" fn cg_image_for_proposed_rect(
+    receiver: Id,
+    sel: Sel,
+    _rect: *mut NSRect,
+    _context: Id,
+    _hints: Id,
+) -> *const c_void {
+    let image = image_of(receiver);
+    if image.cg_image.is_null() && image.data.is_null() && image.reps.is_null() {
+        // Nothing to make one of, which Apple answers with NULL.
+        return std::ptr::null();
+    }
+    match cg_image_of(receiver) {
+        Some(cg_image) => cg_image,
+        // SAFETY: `needs_pixels` reads only the receiver and selector.
+        None => unsafe { needs_pixels(receiver, sel) },
+    }
 }
 
 unsafe extern "C" fn init_with_contents_of_file(receiver: Id, sel: Sel, path: Id) -> Id {
@@ -216,6 +265,85 @@ unsafe extern "C" fn init_with_contents_of_file(receiver: Id, sel: Sel, path: Id
     let image = unsafe { init_with_data(receiver, sel, data as Id) };
     // SAFETY: as above; the image retained it if it kept it.
     unsafe { corefoundation::api::CFRelease(data) };
+    image
+}
+
+/// A fresh image of `size` with nothing in it, owned by the caller.
+///
+/// What `-initWithSize:` makes, for a caller that needs an image to hand back
+/// and has no pixels to put in it.
+pub fn empty(size: NSSize) -> Id {
+    let class = objc::class::lookup(c"NSImage").expect("declared before its methods");
+    let image = objc::object::create_instance(class, 0);
+    image_of(image).size = size;
+    image
+}
+
+/// The extensions `+imageNamed:` tries after the name as given, in the order
+/// Apple's lookup prefers them.
+const NAMED_EXTENSIONS: &[&str] = &["png", "tiff", "tif", "icns", "jpg", "jpeg", "gif", "bmp"];
+
+/// `+[NSImage imageNamed:]`.
+///
+/// The main bundle's resource of that name, with or without an extension, and
+/// `NSApplicationIcon` for the application's icon. The answer is cached per
+/// name and never released, because Apple's is: a program compares the
+/// images it gets for one name by identity, and does not retain them.
+///
+/// Nil for a name nothing has, which is Apple's answer too - and every other
+/// system image name (`NSImageNameStatusAvailable` and friends) is one of
+/// those here, because the artwork for them is Apple's and not in the bundle.
+unsafe extern "C" fn image_named(_class: Id, _sel: Sel, name: Id) -> Id {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static NAMED: Mutex<Option<HashMap<String, usize>>> = Mutex::new(None);
+
+    if name.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: an `NSString`.
+    let Ok(name) = String::from_utf8(unsafe { foundation::string::bytes(name) }) else {
+        return std::ptr::null_mut();
+    };
+    let mut named = NAMED.lock().unwrap_or_else(|e| e.into_inner());
+    let named = named.get_or_insert_default();
+    if let Some(image) = named.get(&name) {
+        return *image as Id;
+    }
+    if name == "NSApplicationIcon" {
+        let icon = crate::application::icon_image();
+        if !icon.is_null() {
+            // Not cached: the program may set another one later.
+            return icon;
+        }
+    }
+    let path = foundation::bundle::main().and_then(|bundle| {
+        let path = match name.as_str() {
+            "NSApplicationIcon" => return bundle.icon(),
+            name => bundle.resource(name, ""),
+        };
+        path.or_else(|| {
+            NAMED_EXTENSIONS
+                .iter()
+                .find_map(|extension| bundle.resource(&name, extension))
+        })
+    });
+    let Some(bytes) = path.and_then(|path| std::fs::read(path).ok()) else {
+        return std::ptr::null_mut();
+    };
+    let class = objc::class::lookup(c"NSImage").expect("declared before its methods");
+    let image = objc::object::create_instance(class, 0);
+    let data = corefoundation::collections::new_data(bytes);
+    // SAFETY: `-initWithData:` is `id (id, SEL, id)`, and the data is a fresh
+    // object this call owns a reference to.
+    let initialised = unsafe { init_with_data(image, objc::sel::get("initWithData:"), data as Id) };
+    // SAFETY: as above; the image retained it if it kept it.
+    unsafe { corefoundation::api::CFRelease(data) };
+    if initialised.is_null() {
+        objc::arc::release(image);
+        return std::ptr::null_mut();
+    }
+    named.insert(name, image as usize);
     image
 }
 
@@ -320,11 +448,16 @@ fn draw(
     respect_flipped: bool,
 ) {
     let image = image_of(receiver);
-    if image.cg_image.is_null() {
+    if image.cg_image.is_null() && image.data.is_null() && image.reps.is_null() {
+        // An image made with `-initWithSize:` and given nothing: there is
+        // nothing to draw, and Apple draws nothing.
+        return;
+    }
+    let Some(cg_image) = cg_image_of(receiver) else {
         // SAFETY: `needs_pixels` reads only the receiver and selector.
         unsafe { needs_pixels(receiver, sel) };
-    }
-    let Some((width, height, pixels)) = crate::graphics::image_bgra(image.cg_image) else {
+    };
+    let Some((width, height, pixels)) = crate::graphics::image_bgra(cg_image) else {
         return;
     };
     crate::backing::draw_image(
@@ -408,6 +541,9 @@ unsafe extern "C" fn tiff_representation(receiver: Id, _sel: Sel) -> Id {
 
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSImage").expect("declared before its methods");
+    class_methods!(class, {
+        "imageNamed:" => image_named, c"@24@0:8@16";
+    });
     methods!(class, {
         "initWithData:" => init_with_data, c"@24@0:8@16";
         "initWithSize:" => init_with_size, c"@32@0:8{CGSize=dd}16";
@@ -423,6 +559,8 @@ pub(crate) fn install() {
     // that is wanted first names itself.
     methods!(class, {
         "TIFFRepresentation" => tiff_representation, c"@16@0:8";
+        "CGImageForProposedRect:context:hints:" => cg_image_for_proposed_rect,
+            c"^v40@0:8^{CGRect={CGPoint=dd}{CGSize=dd}}16@24@32";
     });
     // The pixel family, each reached by the same implementation so that the one
     // that is wanted first names itself. The encodings are still each method's
@@ -431,10 +569,6 @@ pub(crate) fn install() {
     for (selector, types) in [
         ("lockFocus", c"v16@0:8"),
         ("unlockFocus", c"v16@0:8"),
-        (
-            "CGImageForProposedRect:context:hints:",
-            c"^v40@0:8^{CGRect={CGPoint=dd}{CGSize=dd}}16@24@32",
-        ),
         (
             "bestRepresentationForRect:context:hints:",
             c"@64@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48@56",
@@ -487,6 +621,16 @@ mod tests {
 
     /// Anything else is `None`, which is what makes `-initWithData:` nil rather
     /// than an image that would draw nothing.
+    #[test]
+    fn a_name_nothing_has_is_nil() {
+        crate::bootstrap();
+        let name = foundation::string::from_str("R3NoSuchImage");
+        // SAFETY: `+imageNamed:` is `id (Class, SEL, id)`.
+        let image =
+            unsafe { image_named(std::ptr::null_mut(), objc::sel::get("imageNamed:"), name) };
+        assert!(image.is_null());
+    }
+
     #[test]
     fn unrecognised_data_is_not_an_image() {
         assert_eq!(recognise(b"not an image at all"), None);
@@ -816,6 +960,38 @@ pub mod bitmap {
             // SAFETY: one RGBA pixel, as the rep reports.
             let rgba = unsafe { std::slice::from_raw_parts(pixels, 4) };
             assert_eq!(rgba, &[0x30, 0x20, 0x10, 0xff], "red, green, blue, opaque");
+
+            // The same image hands out a `CGImage` of those pixels, and the
+            // same one each time, because the image owns it.
+            let sel = objc::sel::get("CGImageForProposedRect:context:hints:");
+            let null = std::ptr::null_mut();
+            // SAFETY: `id (id, SEL, NSRect *, id, id)`, all of which may be nil.
+            let cg_image = unsafe {
+                super::super::cg_image_for_proposed_rect(
+                    image,
+                    sel,
+                    std::ptr::null_mut(),
+                    null,
+                    null,
+                )
+            };
+            assert!(!cg_image.is_null());
+            assert_eq!(
+                unsafe {
+                    super::super::cg_image_for_proposed_rect(
+                        image,
+                        sel,
+                        std::ptr::null_mut(),
+                        null,
+                        null,
+                    )
+                },
+                cg_image
+            );
+            let (width, height, bgra) =
+                crate::graphics::image_bgra(cg_image).expect("a layout image_bgra reads");
+            assert_eq!((width, height), (1, 1));
+            assert_eq!(bgra, [0x10, 0x20, 0x30, 0xff]);
             // SAFETY: both are `NSInteger (id, SEL)`.
             unsafe {
                 assert_eq!(pixels_wide(rep, objc::sel::get("pixelsWide")), 1);

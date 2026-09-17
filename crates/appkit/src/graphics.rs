@@ -165,6 +165,46 @@ pub unsafe extern "C" fn CGImageCreate(
     image as CFTypeRef
 }
 
+/// A `CGImage` over a decoded bitmap, which it takes ownership of.
+///
+/// Unpremultiplied RGBA with alpha last, big-endian component order - the
+/// layout [`crate::raster::Bitmap`] already is, so nothing is converted.
+pub(crate) fn image_from_bitmap(bitmap: crate::raster::Bitmap) -> CFTypeRef {
+    unsafe extern "C" fn release(info: *mut c_void, _data: *const c_void, _size: usize) {
+        // SAFETY: the box `image_from_bitmap` leaked into `info`.
+        drop(unsafe { Box::from_raw(info as *mut Vec<u8>) });
+    }
+    const ALPHA_LAST: u32 = 3;
+    let (width, height) = (bitmap.width as usize, bitmap.height as usize);
+    let pixels = Box::new(bitmap.pixels);
+    let (data, size) = (pixels.as_ptr(), pixels.len());
+    // SAFETY: the provider owns the box until its release callback frees it,
+    // and the vector's buffer does not move while boxed.
+    unsafe {
+        let provider = CGDataProviderCreateWithData(
+            Box::into_raw(pixels).cast(),
+            data.cast(),
+            size,
+            Some(release),
+        );
+        let image = CGImageCreate(
+            width,
+            height,
+            8,
+            32,
+            width * 4,
+            std::ptr::null(),
+            ALPHA_LAST,
+            provider,
+            std::ptr::null(),
+            0,
+            0,
+        );
+        CGDataProviderRelease(provider);
+        image
+    }
+}
+
 /// The pixels stay shared with the original: only the color space differs,
 /// and nothing here color-manages.
 pub unsafe extern "C" fn CGImageCreateCopyWithColorSpace(

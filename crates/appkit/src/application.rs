@@ -109,6 +109,16 @@ unsafe extern "C" fn set_main_menu(receiver: Id, _sel: Sel, value: Id) {
     unsafe { (*(receiver as *mut Application)).main_menu = objc::arc::retain(value) };
 }
 
+/// The icon the program set on `NSApp`, or nil when it set none or there is no
+/// `NSApp` yet.
+pub(crate) fn icon_image() -> Id {
+    match shared() {
+        app if app.is_null() => app,
+        // SAFETY: the shared application.
+        app => unsafe { (*(app as *const Application)).icon },
+    }
+}
+
 /// `-applicationIconImage`.
 ///
 /// What the program itself set, and nil otherwise. Apple would answer with the
