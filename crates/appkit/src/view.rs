@@ -922,27 +922,81 @@ unsafe extern "C" fn convert_size_to_backing(receiver: Id, _sel: Sel, size: NSSi
     }
 }
 
-/// `-convertPoint:fromView:`.
+/// Where `view`'s origin is in its window's base coordinates.
 ///
-/// Only the two cases that are answerable without a view hierarchy that has
-/// positions in it: `nil`, which means the window, and the receiver itself. A
-/// conversion between two sibling views would need each one's origin inside its
-/// superview, which this tree does not track - so it is refused by name rather
-/// than answered with the point unchanged, which would be off by wherever the
-/// views actually are.
+/// Origins summed up the superview chain, the same walk [`pointer_in`] and
+/// [`presentation_frame`] make: nothing here applies `-isFlipped`, so the
+/// three agree on where a view is. `nil` is the window itself.
+fn window_offset(view: Id) -> NSPoint {
+    let mut offset = NSPoint::default();
+    let mut node = view;
+    // Bounded for the reason [`window_of`] is.
+    for _ in 0..64 {
+        if !is_view(node) {
+            break;
+        }
+        let origin = view_of(node).frame.origin;
+        offset.x += origin.x;
+        offset.y += origin.y;
+        node = view_of(node).superview;
+    }
+    offset
+}
+
+/// How far a point moves going from `from`'s coordinates to `to`'s.
+fn conversion(from: Id, to: Id) -> NSPoint {
+    let (from, to) = (window_offset(from), window_offset(to));
+    NSPoint {
+        x: from.x - to.x,
+        y: from.y - to.y,
+    }
+}
+
+fn translated(point: NSPoint, by: NSPoint) -> NSPoint {
+    NSPoint {
+        x: point.x + by.x,
+        y: point.y + by.y,
+    }
+}
+
+/// `-convertPoint:fromView:`.
 unsafe extern "C" fn convert_point_from_view(
     receiver: Id,
     _sel: Sel,
     point: NSPoint,
     from: Id,
 ) -> NSPoint {
-    if from.is_null() || from == receiver {
-        return point;
+    translated(point, conversion(from, receiver))
+}
+
+unsafe extern "C" fn convert_point_to_view(
+    receiver: Id,
+    _sel: Sel,
+    point: NSPoint,
+    to: Id,
+) -> NSPoint {
+    translated(point, conversion(receiver, to))
+}
+
+unsafe extern "C" fn convert_rect_from_view(
+    receiver: Id,
+    _sel: Sel,
+    rect: NSRect,
+    from: Id,
+) -> NSRect {
+    NSRect {
+        origin: translated(rect.origin, conversion(from, receiver)),
+        size: rect.size,
     }
-    objc::fail!(
-        "-[NSView convertPoint:fromView:]: a conversion between two views needs a view \
-         hierarchy with positions in it, which this runtime does not have"
-    );
+}
+
+/// `-convertRect:toView:`, which Qt uses to place a popup relative to the
+/// window before asking the window for screen coordinates.
+unsafe extern "C" fn convert_rect_to_view(receiver: Id, _sel: Sel, rect: NSRect, to: Id) -> NSRect {
+    NSRect {
+        origin: translated(rect.origin, conversion(receiver, to)),
+        size: rect.size,
+    }
 }
 
 unsafe extern "C" fn window(receiver: Id, _sel: Sel) -> Id {
@@ -1227,6 +1281,11 @@ pub(crate) fn install() {
             c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "convertSizeToBacking:" => convert_size_to_backing, c"{CGSize=dd}32@0:8{CGSize=dd}16";
         "convertPoint:fromView:" => convert_point_from_view, c"{CGPoint=dd}40@0:8{CGPoint=dd}16@32";
+        "convertPoint:toView:" => convert_point_to_view, c"{CGPoint=dd}40@0:8{CGPoint=dd}16@32";
+        "convertRect:fromView:" => convert_rect_from_view,
+            c"{CGRect={CGPoint=dd}{CGSize=dd}}56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
+        "convertRect:toView:" => convert_rect_to_view,
+            c"{CGRect={CGPoint=dd}{CGSize=dd}}56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
         "window" => window, c"@16@0:8";
         "isInFullScreenMode" => is_in_full_screen_mode, c"c16@0:8";
         "superview" => superview, c"@16@0:8";
@@ -1339,6 +1398,31 @@ mod tests {
         assert!(children(first).is_empty());
         assert_eq!(children(second), vec![subview]);
         assert_eq!(objc::arc::retain_count(subview), 2);
+    }
+
+    #[test]
+    fn converts_a_rect_between_a_subview_and_its_window() {
+        let (superview, subview) = tree(
+            rect(10.0, 20.0, 100.0, 100.0),
+            rect(5.0, 7.0, 50.0, 50.0),
+            0,
+        );
+        let sel = objc::sel::get("convertRect:toView:");
+        // SAFETY: both are views of this module's, and nil is the window.
+        unsafe {
+            assert_eq!(
+                convert_rect_to_view(subview, sel, rect(1.0, 1.0, 4.0, 4.0), std::ptr::null_mut()),
+                rect(16.0, 28.0, 4.0, 4.0)
+            );
+            assert_eq!(
+                convert_rect_to_view(subview, sel, rect(1.0, 1.0, 4.0, 4.0), superview),
+                rect(6.0, 8.0, 4.0, 4.0)
+            );
+            assert_eq!(
+                convert_rect_from_view(subview, sel, rect(6.0, 8.0, 4.0, 4.0), superview),
+                rect(1.0, 1.0, 4.0, 4.0)
+            );
+        }
     }
 
     fn children(view: Id) -> Vec<Id> {

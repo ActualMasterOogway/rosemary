@@ -1180,6 +1180,8 @@ pub(crate) fn install() {
         "setTabbingMode:" => ignored_integer, c"v24@0:8q16";
         "setAnimationBehavior:" => ignored_integer, c"v24@0:8q16";
         "setHasShadow:" => ignored_flag, c"v20@0:8c16";
+        // No shadow is drawn, so there is none to recompute.
+        "invalidateShadow" => ignored, c"v16@0:8";
         "setDocumentEdited:" => ignored_flag, c"v20@0:8c16";
         "setWorksWhenModal:" => ignored_flag, c"v20@0:8c16";
         "setResizeIncrements:" => ignored_size, c"v32@0:8{CGSize=dd}16";

@@ -33,6 +33,7 @@ pub mod plist;
 pub mod pool;
 pub mod processinfo;
 pub mod runtime;
+mod signature;
 pub mod string;
 pub mod thread;
 pub mod timer;
@@ -61,6 +62,7 @@ pub fn bootstrap() {
         kvc::install();
         kvo::install();
         runtime::install();
+        signature::install();
         notification::install();
         constant::install();
         declare_abstract();
@@ -287,6 +289,7 @@ pub const CLASSES: &[&str] = &[
     "NSProcessInfo",
     "NSAppleEventManager",
     "NSAppleEventDescriptor",
+    "NSMethodSignature",
 ];
 
 // The image-resident number classes are `constant::CLASSES`, published the same
