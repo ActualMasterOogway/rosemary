@@ -1,12 +1,5 @@
-//! `fcntl` and the `open` flag word, neither of which survives being forwarded.
-//!
-//! The command numbers agree only up to `F_SETFL`, and the flags do not agree at
-//! all: Darwin's `O_NONBLOCK` is `0x0004` and Linux's is `0o4000`. A `F_SETFL`
-//! passed straight through therefore *succeeds* and sets nothing, which is how
-//! curl's wakeup pipe stayed blocking and its drain loop stopped forever on the
-//! second read.
+use crate::translation::DarwinTranslation;
 
-/// Darwin's `fcntl` commands, from `<sys/fcntl.h>`.
 pub mod cmd {
     pub const F_DUPFD: i32 = 0;
     pub const F_GETFD: i32 = 1;
@@ -33,10 +26,6 @@ pub mod cmd {
     pub const F_DUPFD_CLOEXEC: i32 = 67;
 }
 
-/// Whether `cmd` reads a third argument.
-///
-/// A question about the guest's call, answered from the guest's numbers, so the answer
-/// does not change with the host.
 pub fn takes_third_argument(cmd: i32) -> bool {
     // `F_NOCACHE` and `F_GLOBAL_NOCACHE` are not in this list: both take an
     // `int` (0 or 1) that turns caching off or back on, per Darwin's
@@ -52,20 +41,6 @@ pub fn takes_third_argument(cmd: i32) -> bool {
     )
 }
 
-/// Darwin's `struct flock`, which is not this host's.
-///
-/// The two platforms hold the same five fields in a different **order**:
-///
-/// | | Darwin | Linux |
-/// |---|---|---|
-/// | 0 | `l_start` | `l_type`, `l_whence` |
-/// | 8 | `l_len` | `l_start` |
-/// | 16 | `l_pid` | `l_len` |
-/// | 20 | `l_type`, `l_whence` | `l_pid` at 24 |
-///
-/// So forwarding the structure reads a whole-file lock's `l_start` of 0 as
-/// `l_type` 0, which is Linux's `F_RDLCK` where Darwin's 0 is not a lock type at
-/// all. The values are renumbered too - see [`lock_type_to_host`].
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct Flock {
@@ -78,7 +53,6 @@ pub struct Flock {
 
 const _: () = assert!(size_of::<Flock>() == 24);
 
-/// Darwin's `fstore_t`, used by `F_PREALLOCATE`.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct Fstore {
@@ -98,19 +72,12 @@ pub mod preallocate {
     pub const F_VOLPOSMODE: i32 = 4;
 }
 
-/// Darwin's `l_type` values, from `<sys/fcntl.h>`.
 pub mod lock {
     pub const F_RDLCK: i16 = 1;
     pub const F_UNLCK: i16 = 2;
     pub const F_WRLCK: i16 = 3;
 }
 
-/// Darwin's lock type as this host's, which renumbers all three.
-///
-/// `None` for a value that is none of them: a lock type nothing recognises is a
-/// caller's bug, and passing it on would ask for whichever lock this host gives
-/// that number - `F_UNLCK` for Darwin's `F_WRLCK`, which is an unlock where an
-/// exclusive lock was asked for.
 #[cfg(not(target_os = "macos"))]
 pub fn lock_type_to_host(kind: i16) -> Option<i16> {
     Some(match kind {
@@ -121,7 +88,6 @@ pub fn lock_type_to_host(kind: i16) -> Option<i16> {
     })
 }
 
-/// And back, for what `F_GETLK` reports about the lock that is in the way.
 #[cfg(not(target_os = "macos"))]
 pub fn lock_type_to_guest(kind: i16) -> i16 {
     match kind as libc::c_int {
@@ -131,23 +97,10 @@ pub fn lock_type_to_guest(kind: i16) -> i16 {
     }
 }
 
-/// Whether a command takes a `struct flock` rather than a scalar.
 pub fn takes_a_lock(cmd: i32) -> bool {
     matches!(cmd, cmd::F_GETLK | cmd::F_SETLK | cmd::F_SETLKW)
 }
 
-/// The host command that means what Darwin's `cmd` means, or `None`.
-///
-/// `None` is the answer for two separate reasons, and neither is worth guessing
-/// past:
-///
-/// * `F_FULLFSYNC`, which asks the drive to flush its own write cache. Linux spells
-///   that `fsync` - a different call, not a different command number - so a caller
-///   that wants it has to make it, and this cannot.
-/// * The rest of the Darwin-only tail, which has no host equivalent at all.
-///
-/// The lock family is *not* refused: it is translated, structure and all, by
-/// [`entry::fcntl`].
 #[cfg(not(target_os = "macos"))]
 pub fn to_host(cmd: i32) -> Option<libc::c_int> {
     Some(match cmd {
@@ -192,10 +145,6 @@ pub mod oflag {
     pub const O_CLOEXEC: i32 = 0x0100_0000;
 }
 
-/// Whether the guest asked to create the file.
-///
-/// Its own function because it decides whether `open`'s third argument exists at all,
-/// and reading it through `libc::O_CREAT` is wrong by a factor of eight on Linux.
 pub fn creates(flags: i32) -> bool {
     flags & oflag::O_CREAT != 0
 }
@@ -208,16 +157,13 @@ pub fn creates(flags: i32) -> bool {
 /// did not get one has been told it succeeded.
 #[cfg(not(target_os = "macos"))]
 pub fn flags_to_host(flags: i32) -> Result<libc::c_int, i32> {
-    match split_flags_to_host(flags) {
-        (host, 0) => Ok(host),
-        (_, unknown) => Err(unknown),
+    let flags = FcntlFlags(flags);
+    match flags.unknown() {
+        0 => Ok(flags.to_host()),
+        unknown => Err(unknown),
     }
 }
 
-/// One Darwin flag and the host flag that means the same thing.
-///
-/// `O_SYNC` precedes `O_DSYNC` because Linux's `O_SYNC` *contains* `O_DSYNC`'s
-/// bit, so a reader that took the narrower one first would never see the wider.
 #[cfg(not(target_os = "macos"))]
 const PAIRS: &[(i32, libc::c_int)] = &[
     (oflag::O_NONBLOCK, libc::O_NONBLOCK),
@@ -234,44 +180,79 @@ const PAIRS: &[(i32, libc::c_int)] = &[
     (oflag::O_CLOEXEC, libc::O_CLOEXEC),
 ];
 
-/// The host flags, and the Darwin bits nothing here corresponds to.
-///
-/// Split out because `open` and `F_SETFL` want opposite things from the leftover:
-/// `open` refuses, `F_SETFL` drops. See [`entry::fcntl`] for why.
 #[cfg(not(target_os = "macos"))]
-fn split_flags_to_host(flags: i32) -> (libc::c_int, i32) {
-    // The access mode is the low two bits and has the same three values on both.
-    let mut host = flags & oflag::O_ACCMODE;
-    let mut rest = flags & !oflag::O_ACCMODE;
-    for (darwin, native) in PAIRS {
-        if rest & darwin != 0 {
-            host |= native;
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FcntlFlags(pub i32);
+
+#[cfg(not(target_os = "macos"))]
+impl FcntlFlags {
+    /// Darwin bits with no equivalent. Zero if everything was translated.
+    pub fn unknown(&self) -> i32 {
+        let mut rest = self.0 & !oflag::O_ACCMODE;
+        for (darwin, _) in PAIRS {
             rest &= !darwin;
         }
+        rest
     }
-    (host, rest)
+
+    /// The same word with everything but `honored` taken out of it.
+    ///
+    /// For a call that acts on a handful of the `open` flags and ignores the
+    /// rest, as `shm_open` does: masking on the *Darwin* side says which flags
+    /// that call honours without restating how any of them is spelled here.
+    pub fn honoring(self, honored: i32) -> Self {
+        Self(self.0 & (oflag::O_ACCMODE | honored))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl DarwinTranslation<libc::c_int> for FcntlFlags {
+    /// Every bit this host has a name for; see [`FcntlFlags::unknown`] for the
+    /// rest.
+    fn to_host(&self) -> libc::c_int {
+        // The access mode is the low two bits and has the same three values on both.
+        let mut host = self.0 & oflag::O_ACCMODE;
+        for (darwin, native) in PAIRS {
+            if self.0 & darwin != 0 {
+                host |= native;
+            }
+        }
+        host
+    }
+
+    /// The host's word as the guest's, for what `F_GETFL` answers.
+    ///
+    /// This direction drops what it cannot name rather than reporting it, and
+    /// has no `unknown` counterpart. A host-only status bit - Linux sets
+    /// `O_LARGEFILE` on nearly every descriptor, and has `O_PATH` and
+    /// `O_NOATIME` besides - describes a property Darwin has no spelling for,
+    /// and `F_GETFL`'s answer is not a request the guest made: the guest reads
+    /// it, sets a bit, and hands it back to `F_SETFL`, which translates it the
+    /// other way. Reporting here would fail every `F_GETFL` on this host.
+    fn from_host(host: &libc::c_int) -> Self {
+        let mut guest = host & oflag::O_ACCMODE;
+        // A matched bit is taken out of `rest` because Linux's `O_SYNC`
+        // contains `O_DSYNC`'s bit - see [`PAIRS`] - and one host word must
+        // not answer as both.
+        let mut rest = host & !oflag::O_ACCMODE;
+        for (darwin, native) in PAIRS {
+            if rest & native == *native {
+                guest |= darwin;
+                rest &= !native;
+            }
+        }
+        Self(guest)
+    }
 }
 
 /// The host's flag word as the guest's, for what `F_GETFL` answers.
 ///
-/// The reverse of [`flags_to_host`], and unlike it this one *drops* what it
-/// cannot name rather than reporting it. A host-only status bit - Linux sets
-/// `O_LARGEFILE` on nearly every descriptor, and has `O_PATH` and `O_NOATIME`
-/// besides - describes a property Darwin has no spelling for, and `F_GETFL`'s
-/// answer is not a request the guest made: the guest reads it, sets a bit, and
-/// hands it back to `F_SETFL`, which translates it the other way. Refusing here
-/// would fail every `F_GETFL` on this host.
+/// [`FcntlFlags::from_host`] in the caller's own terms; see it for why this
+/// direction drops rather than reports.
 #[cfg(not(target_os = "macos"))]
 pub fn flags_to_guest(flags: libc::c_int) -> i32 {
-    let mut guest = flags & oflag::O_ACCMODE;
-    let mut rest = flags & !oflag::O_ACCMODE;
-    for (darwin, native) in PAIRS {
-        if rest & native == *native {
-            guest |= darwin;
-            rest &= !native;
-        }
-    }
-    guest
+    FcntlFlags::from_host(&flags).0
 }
 
 #[cfg(target_os = "macos")]
@@ -290,8 +271,8 @@ pub mod entry {
     use machish::resolve::SyntheticDylib;
 
     use super::{
-        Flock, Fstore, cmd, flags_to_guest, lock_type_to_guest, lock_type_to_host, preallocate,
-        split_flags_to_host, takes_a_lock, takes_third_argument, to_host,
+        DarwinTranslation, FcntlFlags, Flock, Fstore, cmd, flags_to_guest, lock_type_to_guest,
+        lock_type_to_host, preallocate, takes_a_lock, takes_third_argument, to_host,
     };
 
     /// `int fcntl(int fd, int cmd, ...)`, with the ellipsis spelled out.
@@ -337,11 +318,11 @@ pub mod entry {
         let arg = match command {
             _ if !takes_third_argument(command) => 0,
             cmd::F_SETFL => {
-                let (host, dropped) = split_flags_to_host(arg as i32);
-                if dropped != 0 {
-                    say_dropped(dropped);
+                let flags = FcntlFlags(arg as i32);
+                if flags.unknown() != 0 {
+                    say_dropped(flags.unknown());
                 }
-                host as usize
+                flags.to_host() as usize
             }
             _ => arg,
         };
@@ -499,6 +480,33 @@ mod tests {
         let write = flags_to_host(oflag::O_WRONLY | oflag::O_CREAT | oflag::O_TRUNC).unwrap();
         assert_eq!(write & libc::O_ACCMODE, libc::O_WRONLY);
         assert!(write & libc::O_CREAT != 0 && write & libc::O_TRUNC != 0);
+    }
+
+    /// A call that acts on some of the `open` flags names them in Darwin's
+    /// spelling and gets the host's, which is what keeps `shm_open` from
+    /// restating the table.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn honoring_keeps_the_named_flags_and_the_access_mode() {
+        let guest = FcntlFlags(oflag::O_RDWR | oflag::O_CREAT | oflag::O_APPEND);
+        let kept = guest.honoring(oflag::O_CREAT);
+        assert_eq!(kept, FcntlFlags(oflag::O_RDWR | oflag::O_CREAT));
+        let host = kept.to_host();
+        assert_eq!(host & libc::O_ACCMODE, libc::O_RDWR);
+        assert_eq!(host & libc::O_CREAT, libc::O_CREAT);
+        assert_eq!(host & libc::O_APPEND, 0);
+    }
+
+    /// The bits a guest asked for that this host cannot name, which the
+    /// conversion itself does not decide the fate of.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn the_unmappable_bits_are_reported_apart_from_the_translation() {
+        const O_SHLOCK: i32 = 0x0010;
+        let guest = FcntlFlags(oflag::O_RDONLY | oflag::O_NONBLOCK | O_SHLOCK);
+        assert_eq!(guest.unknown(), O_SHLOCK);
+        assert_eq!(guest.to_host(), libc::O_RDONLY | libc::O_NONBLOCK);
+        assert_eq!(FcntlFlags(oflag::O_RDONLY | oflag::O_NONBLOCK).unknown(), 0);
     }
 
     /// A flag with no host equivalent is reported, not dropped: a guest told its

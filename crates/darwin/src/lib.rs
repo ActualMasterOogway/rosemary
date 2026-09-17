@@ -55,6 +55,7 @@ pub mod random;
 pub mod rlimit;
 pub mod sched;
 pub mod select;
+pub mod shm;
 pub mod signal;
 pub mod spawn;
 pub mod stat;
@@ -245,6 +246,7 @@ fn implemented(name: &str) -> Option<u64> {
         .or_else(|| passwd_symbol(name))
         .or_else(|| dirent_symbol(name))
         .or_else(|| rlimit_symbol(name))
+        .or_else(|| shm_symbol(name))
         .or_else(|| libproc_symbol(name))
         .or_else(|| printf_l_symbol(name))
         .or_else(|| kqueue_symbol(name))
@@ -352,6 +354,20 @@ fn rlimit_symbol(name: &str) -> Option<u64> {
     #[cfg(not(target_os = "macos"))]
     {
         return rlimit::symbol(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = name;
+        None
+    }
+}
+
+/// POSIX shared memory, which only a host whose `O_` flags and segment
+/// namespace are not Darwin's rewrites.
+fn shm_symbol(name: &str) -> Option<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return shm::symbol(name);
     }
     #[cfg(target_os = "macos")]
     {
@@ -653,6 +669,7 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
         passwd::provide(&mut lib);
         dirent::provide(&mut lib);
         rlimit::provide(&mut lib);
+        shm::provide(&mut lib);
         libproc::provide(&mut lib);
         oslog::provide(&mut lib);
         kqueue::provide(&mut lib);
