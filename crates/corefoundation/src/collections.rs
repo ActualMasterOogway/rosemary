@@ -330,6 +330,29 @@ impl Number {
     }
 }
 
+/// A number and the `CFNumberType` it answers `CFNumberGetType` with.
+///
+/// The type is the canonical one for what it was created from - `kCFNumberIntType`
+/// is `kCFNumberSInt32Type` - because that is all Apple's keeps, and a guest
+/// switching on it sees the six storage types and never the C names.
+struct NumberBody {
+    value: Number,
+    kind: i32,
+}
+
+/// The canonical `CFNumberType` for a type a number can be created with.
+pub fn canonical_number_type(kind: i32) -> Option<i32> {
+    use number_type as t;
+    Some(match number_shape(kind)? {
+        (1, false) => t::SINT8,
+        (2, false) => t::SINT16,
+        (4, false) => t::SINT32,
+        (4, true) => t::FLOAT32,
+        (_, false) => t::SINT64,
+        (_, true) => t::FLOAT64,
+    })
+}
+
 /// How wide `type` is, and whether it is floating point.
 pub fn number_shape(kind: i32) -> Option<(usize, bool)> {
     use number_type as t;
@@ -347,7 +370,7 @@ pub fn number_shape(kind: i32) -> Option<(usize, bool)> {
 pub fn number_class() -> &'static Class {
     static CLASS: OnceLock<usize> = OnceLock::new();
     let p = *CLASS.get_or_init(|| {
-        objc::class::ptr(register::<Number>(
+        objc::class::ptr(register::<NumberBody>(
             c"__NSCFNumber",
             crate::base::abstract_class(c"NSNumber", None),
         )) as usize
@@ -356,8 +379,23 @@ pub fn number_class() -> &'static Class {
     unsafe { &*(p as *const Class) }
 }
 
+/// A number of the widest type of its kind: `SInt64` or `Float64`.
 pub fn new_number(value: Number) -> CFTypeRef {
-    make(number_class(), value)
+    let kind = match value {
+        Number::Integer(_) => number_type::SINT64,
+        Number::Float(_) => number_type::FLOAT64,
+    };
+    new_number_of_type(value, kind)
+}
+
+/// A number that reports `kind`, canonicalised; an unknown `kind` reports the
+/// widest type of the value's kind.
+pub fn new_number_of_type(value: Number, kind: i32) -> CFTypeRef {
+    let kind = canonical_number_type(kind).unwrap_or(match value {
+        Number::Integer(_) => number_type::SINT64,
+        Number::Float(_) => number_type::FLOAT64,
+    });
+    make(number_class(), NumberBody { value, kind })
 }
 
 /// `__NSCFBoolean`, which is a subclass of `NSNumber` here as it is on Darwin.
@@ -404,7 +442,17 @@ pub fn boolean(value: bool) -> CFTypeRef {
 /// As [`contents`].
 pub unsafe fn number<'a>(object: CFTypeRef) -> Option<&'a mut Number> {
     // SAFETY: the caller's obligation.
-    unsafe { contents(object, number_class()) }
+    unsafe { contents::<NumberBody>(object, number_class()) }.map(|body| &mut body.value)
+}
+
+/// The canonical `CFNumberType` a number was created with.
+///
+/// # Safety
+///
+/// As [`contents`].
+pub unsafe fn number_type(object: CFTypeRef) -> Option<i32> {
+    // SAFETY: the caller's obligation.
+    unsafe { contents::<NumberBody>(object, number_class()) }.map(|body| body.kind)
 }
 
 pub fn data_class() -> &'static Class {

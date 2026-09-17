@@ -48,6 +48,14 @@ pub(crate) fn install() {
         instance_method_for as Imp,
         c"^?24@0:8:16",
     );
+    // A class is its own copy, which is what lets one be a dictionary key.
+    add(meta, "copy", class_of_class as Imp, c"@16@0:8");
+    add(
+        meta,
+        "copyWithZone:",
+        class_copy_with_zone as Imp,
+        c"@24@0:8^v16",
+    );
     add(meta, "initialize", initialize as Imp, c"v16@0:8");
     add(meta, "load", initialize as Imp, c"v16@0:8");
 
@@ -58,6 +66,7 @@ pub(crate) fn install() {
     add(class, "autorelease", autorelease as Imp, c"@16@0:8");
     add(class, "retainCount", retain_count as Imp, c"Q16@0:8");
     add(class, "self", itself as Imp, c"@16@0:8");
+    add(class, "copy", copy as Imp, c"@16@0:8");
     add(class, "class", class_of as Imp, c"#16@0:8");
     add(class, "superclass", instance_superclass as Imp, c"#16@0:8");
     add(class, "isEqual:", is_equal as Imp, c"B24@0:8@16");
@@ -365,6 +374,28 @@ unsafe extern "C" fn does_not_recognize(receiver: Id, _sel: Sel, selector: Sel) 
     crate::fail!("unrecognized selector sent to instance of {name}: {selector}");
 }
 
+/// `-copy` is `[self copyWithZone:nil]`, sent rather than looked up here.
+///
+/// `NSObject` does not adopt `NSCopying`: a class that has no `-copyWithZone:`
+/// reaches the runtime's unrecognised-selector failure, which is Apple's
+/// exception, and names the selector that is missing rather than `-copy`.
+unsafe extern "C" fn copy(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: `-copyWithZone:` is `id (id, SEL, NSZone *)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, *mut c_void) -> Id =
+            std::mem::transmute(crate::msg::entry());
+        f(
+            receiver,
+            crate::sel::get("copyWithZone:"),
+            std::ptr::null_mut(),
+        )
+    }
+}
+
+unsafe extern "C" fn class_copy_with_zone(receiver: Id, _sel: Sel, _zone: *mut c_void) -> Id {
+    receiver
+}
+
 /// `+initialize` and `+load`, which `NSObject` answers by doing nothing.
 unsafe extern "C" fn initialize(_receiver: Id, _sel: Sel) {}
 
@@ -439,5 +470,46 @@ mod tests {
             sel::get("answer") as *const c_void,
         );
         assert_eq!(result as usize, 42);
+    }
+
+    unsafe extern "C" fn copy_with_zone(_receiver: Id, _sel: Sel, _zone: *mut c_void) -> Id {
+        7 as Id
+    }
+
+    /// `-copy` is the class's `-copyWithZone:`, found by dispatch rather than
+    /// answered by `NSObject`.
+    #[test]
+    fn copy_sends_copy_with_zone() {
+        let object = instance(c"Rosetta3CopyA");
+        // SAFETY: an instance made above.
+        let class = unsafe { crate::object::class_of(object) }.expect("an instance");
+        assert!(class.add_method(
+            sel::get("copyWithZone:"),
+            copy_with_zone as Imp,
+            c"@24@0:8^v16"
+        ));
+        assert_eq!(send(object, "copy", std::ptr::null()) as usize, 7);
+    }
+
+    /// A class copies to itself.
+    #[test]
+    fn a_class_is_its_own_copy() {
+        crate::bootstrap();
+        let class = crate::class::ptr(crate::class::lookup(c"NSObject").expect("NSObject")) as Id;
+        // SAFETY: `+copy` is `id (Class, SEL)`.
+        assert_eq!(unsafe { copy_class(class) }, class);
+    }
+
+    /// # Safety
+    ///
+    /// `class` is a class pointer.
+    unsafe fn copy_class(class: Id) -> Id {
+        // SAFETY: the caller's obligation.
+        let meta = unsafe { crate::object::class_of(class) }.expect("a metaclass");
+        let imp = crate::class::method_implementation(meta, sel::get("copy"));
+        // SAFETY: `+copy` is `id (Class, SEL)`.
+        let f: unsafe extern "C" fn(Id, Sel) -> Id = unsafe { std::mem::transmute(imp) };
+        // SAFETY: as above.
+        unsafe { f(class, sel::get("copy")) }
     }
 }

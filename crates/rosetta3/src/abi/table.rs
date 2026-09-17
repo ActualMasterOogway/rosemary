@@ -448,6 +448,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFNetworkCopyProxiesForAutoConfigurationScript", P, P, P, P),
     sig!("CFNetworkCopyProxiesForURL", P, P, P),
     sig!("CFNumberCreate", P, P, I64, P),
+    // `CFNumberType` is a `CFIndex` enum.
+    sig!("CFNumberGetType", I64, P),
     sig!("CFNumberGetTypeID", U64),
     // `Boolean` is an `unsigned char`, not an `int`.
     sig!("CFNumberGetValue", U8, P, I64, P),

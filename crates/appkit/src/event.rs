@@ -301,6 +301,10 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
                 ..Fields::default()
             });
             crate::cursor::apply();
+            match entered {
+                true => crate::cursor::update_tracking(object_for(window), false),
+                false => crate::cursor::forget_tracking(object_for(window)),
+            }
         }
         Event::WindowFocus { window, gained } => {
             let object = object_for(window);
@@ -399,6 +403,7 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             // anything asked for `-mouseMoved:`, and AppKit re-decides the
             // pointer on every move rather than only when a rectangle changes.
             crate::cursor::apply();
+            crate::cursor::update_tracking(object_for(id), held.is_some());
             if held.is_none() && !wants_mouse_moved(object_for(id)) {
                 if tracing() {
                     eprintln!(

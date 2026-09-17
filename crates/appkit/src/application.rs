@@ -473,6 +473,28 @@ unsafe extern "C" fn set_presentation_options(_receiver: Id, _sel: Sel, options:
     PRESENTATION.store(options, std::sync::atomic::Ordering::Release);
 }
 
+/// `-windowWithWindowNumber:`, or nil for a number no window of this
+/// process's has.
+///
+/// Asked through dispatch, as `-windowNumber` is what a subclass may answer
+/// differently. Zero is no window's number: a window with no SDL window yet
+/// answers it, and must not be found by it.
+unsafe extern "C" fn window_with_window_number(_receiver: Id, _sel: Sel, number: isize) -> Id {
+    if number == 0 {
+        return std::ptr::null_mut();
+    }
+    let sel = objc::sel::get("windowNumber");
+    crate::window::all()
+        .into_iter()
+        // SAFETY: every entry is a live `NSWindow`, and this is
+        // `NSInteger (id, SEL)`.
+        .find(|window| unsafe {
+            let f: unsafe extern "C" fn(Id, Sel) -> isize = std::mem::transmute(objc::msg::entry());
+            f(*window, sel) == number
+        })
+        .unwrap_or(std::ptr::null_mut())
+}
+
 /// The windows this runtime has made, in the order they were made.
 unsafe extern "C" fn windows(_receiver: Id, _sel: Sel) -> Id {
     let objects: Vec<corefoundation::base::CFTypeRef> = crate::window::all()
@@ -817,6 +839,7 @@ pub(crate) fn install() {
         "setPresentationOptions:" => set_presentation_options, c"v24@0:8Q16";
         "nextEventMatchingMask:untilDate:inMode:dequeue:" => next_event, c"@48@0:8Q16@24@32B40";
         "windows" => windows, c"@16@0:8";
+        "windowWithWindowNumber:" => window_with_window_number, c"@24@0:8q16";
         "keyWindow" => key_window, c"@16@0:8";
         "mainWindow" => key_window, c"@16@0:8";
         "servicesMenu" => menu_for, c"@16@0:8";
@@ -850,6 +873,19 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No window has the number zero or a number nothing was given, and
+    /// asking for one is nil rather than the first window.
+    #[test]
+    fn an_unknown_window_number_is_nil() {
+        crate::bootstrap();
+        let sel = objc::sel::get("windowWithWindowNumber:");
+        // SAFETY: `-windowWithWindowNumber:` is `id (id, SEL, NSInteger)`.
+        unsafe {
+            assert!(window_with_window_number(std::ptr::null_mut(), sel, 0).is_null());
+            assert!(window_with_window_number(std::ptr::null_mut(), sel, -7).is_null());
+        }
+    }
 
     /// Tests below temporarily replace the process-wide guest argv.
     static ARGUMENTS: std::sync::Mutex<()> = std::sync::Mutex::new(());

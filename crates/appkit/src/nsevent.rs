@@ -32,6 +32,7 @@ pub mod kind {
     pub const KEY_DOWN: u64 = 10;
     pub const KEY_UP: u64 = 11;
     pub const FLAGS_CHANGED: u64 = 12;
+    pub const CURSOR_UPDATE: u64 = 17;
     pub const SCROLL_WHEEL: u64 = 22;
     pub const OTHER_MOUSE_DOWN: u64 = 25;
     pub const OTHER_MOUSE_UP: u64 = 26;
@@ -58,6 +59,9 @@ struct Event {
     subtype: i16,
     data1: isize,
     data2: isize,
+    /// `-trackingArea`, unretained like `window`: the view that holds the area
+    /// outlives the dispatch the event is made for.
+    tracking_area: Id,
 }
 
 pub const INSTANCE_SIZE: usize = size_of::<Event>();
@@ -107,6 +111,7 @@ reader! {
     subtype -> i16 { |e| e.subtype },
     data1 -> isize { |e| e.data1 },
     data2 -> isize { |e| e.data2 },
+    tracking_area -> Id { |e| e.tracking_area },
 }
 
 /// The scroll accessors, which a program reads on every wheel event.
@@ -206,6 +211,7 @@ pub struct Fields {
     pub subtype: i16,
     pub data1: isize,
     pub data2: isize,
+    pub tracking_area: Id,
 }
 
 /// Build an autoreleased event.
@@ -232,6 +238,7 @@ pub fn make(fields: Fields) -> Id {
         (*event).subtype = fields.subtype;
         (*event).data1 = fields.data1;
         (*event).data2 = fields.data2;
+        (*event).tracking_area = fields.tracking_area;
     }
     objc::arc::autorelease(event as Id)
 }
@@ -249,6 +256,13 @@ pub fn kind_of(event: Id) -> u64 {
 pub fn location_of(event: Id) -> NSPoint {
     // SAFETY: as above.
     unsafe { event_of(event) }.map_or(NSPoint::default(), |e| e.location)
+}
+
+/// `-copyWithZone:`. An event is immutable, so its copy is the same object
+/// with one more owner - and the unretained window and tracking area it names
+/// stay as valid as they were in the original.
+unsafe extern "C" fn copy_with_zone(receiver: Id, _sel: Sel, _zone: *mut c_void) -> Id {
+    objc::arc::retain(receiver)
 }
 
 /// `+[NSEvent mouseLocation]`: the pointer in screen coordinates, asked of the
@@ -399,10 +413,12 @@ pub(crate) fn install() {
         "subtype" => subtype, c"s16@0:8";
         "data1" => data1, c"q16@0:8";
         "data2" => data2, c"q16@0:8";
+        "trackingArea" => tracking_area, c"@16@0:8";
         // `-magnification` is the pinch gesture's, and SDL delivers no pinch.
         "magnification" => zero_double, c"d16@0:8";
         "deltaZ" => zero_double, c"d16@0:8";
         "timestamp" => timestamp, c"d16@0:8";
+        "copyWithZone:" => copy_with_zone, c"@24@0:8^v16";
     });
 }
 
@@ -429,6 +445,22 @@ mod tests {
                 NSPoint { x: 3.0, y: 4.0 }
             );
         }
+    }
+
+    /// An event is immutable, so its copy is itself with one more owner.
+    #[test]
+    fn an_event_copies_to_itself() {
+        crate::bootstrap();
+        let event = make(Fields::default());
+        let before = objc::arc::retain_count(event);
+        // SAFETY: `-copy` is `id (id, SEL)`, inherited from `NSObject`.
+        let copy = unsafe {
+            let f: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+            f(event, objc::sel::get("copy"))
+        };
+        assert_eq!(copy, event);
+        assert_eq!(objc::arc::retain_count(event), before + 1);
+        objc::arc::release(copy);
     }
 
     /// A receiver that is not an event answers zero rather than reading a field

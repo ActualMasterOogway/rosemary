@@ -930,9 +930,10 @@ unsafe extern "C" fn string_value(receiver: Id, _sel: Sel) -> Id {
 unsafe extern "C" fn number_with_int(_class: Id, _sel: Sel, value: i32) -> Id {
     // SAFETY: a fresh object.
     unsafe {
-        api::CFAutorelease(collections::new_number(collections::Number::Integer(
-            value as i64,
-        ))) as Id
+        api::CFAutorelease(collections::new_number_of_type(
+            collections::Number::Integer(value as i64),
+            collections::number_type::SINT32,
+        )) as Id
     }
 }
 

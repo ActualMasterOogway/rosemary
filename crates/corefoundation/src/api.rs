@@ -1387,7 +1387,7 @@ pub unsafe extern "C" fn CFNumberCreate(
             collections::Number::Integer((raw << shift) >> shift)
         }
     };
-    collections::new_number(number)
+    collections::new_number_of_type(number, kind)
 }
 
 /// `CFNumberGetValue`: `false` when the value does not fit what was asked for.
@@ -1435,12 +1435,21 @@ pub unsafe extern "C" fn CFNumberIsFloatType(number: CFTypeRef) -> Boolean {
     unsafe { collections::number(number) }.is_some_and(|n| n.is_float()) as Boolean
 }
 
+/// `CFNumberGetType`: the canonical type the number was created with, which is
+/// one of the six `SInt`/`Float` storage types whatever C name it was given.
+///
+/// Zero, which is no type, for anything that is not a number.
+pub unsafe extern "C" fn CFNumberGetType(number: CFTypeRef) -> CFIndex {
+    // SAFETY: the caller's obligation.
+    unsafe { collections::number_type(number) }.map_or(0, |kind| kind as CFIndex)
+}
+
+/// The width of the number's canonical type.
 pub unsafe extern "C" fn CFNumberGetByteSize(number: CFTypeRef) -> CFIndex {
     // SAFETY: the caller's obligation.
-    match unsafe { collections::number(number) } {
-        Some(_) => 8,
-        None => 0,
-    }
+    unsafe { collections::number_type(number) }
+        .and_then(collections::number_shape)
+        .map_or(0, |(width, _)| width as CFIndex)
 }
 
 pub unsafe extern "C" fn CFDataGetTypeID() -> CFTypeID {

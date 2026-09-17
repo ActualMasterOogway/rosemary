@@ -773,6 +773,33 @@ pub unsafe fn any_tracking_area(view: Id) -> bool {
         .any(|child| unsafe { any_tracking_area(child as Id) })
 }
 
+/// The tracking areas a view holds, in the order they were added.
+///
+/// # Safety
+///
+/// `view` must be null or an object this runtime allocated.
+pub unsafe fn tracking_areas_of(view: Id) -> Vec<Id> {
+    if !is_view(view) {
+        return Vec::new();
+    }
+    // SAFETY: the list is an array of this runtime's.
+    let list = unsafe {
+        corefoundation::collections::array(view_of(view).tracking_areas as *const c_void)
+    };
+    list.map(|a| a.values.iter().map(|v| *v as Id).collect())
+        .unwrap_or_default()
+}
+
+/// The bounds a view reports, for a tracking area made with
+/// `NSTrackingInVisibleRect`.
+pub fn bounds_of(view: Id) -> NSRect {
+    match is_view(view) {
+        // SAFETY: a view of this crate's.
+        true => unsafe { bounds(view, objc::sel::get("bounds")) },
+        false => NSRect::default(),
+    }
+}
+
 /// The view above this one, for walking the responder chain.
 ///
 /// # Safety
@@ -964,6 +991,14 @@ unsafe extern "C" fn add_subview(receiver: Id, sel: Sel, subview: Id) {
     if !is_view(subview) {
         return;
     }
+    // A view has one superview: moving it takes it out of the old list, or the
+    // old parent keeps a reference and, when it goes, frees what it no longer owns.
+    // Held across the move because the old list may own the only reference.
+    objc::arc::retain(subview);
+    if !view_of(subview).superview.is_null() {
+        // SAFETY: `-removeFromSuperview` is `void (id, SEL)`.
+        unsafe { remove_from_superview(subview, objc::sel::get("removeFromSuperview")) };
+    }
     view_of(subview).superview = receiver;
     // SAFETY: `-subviews` is `id (id, SEL)` and answers a mutable array.
     let list = unsafe { subviews(receiver, sel) };
@@ -972,6 +1007,7 @@ unsafe extern "C" fn add_subview(receiver: Id, sel: Sel, subview: Id) {
             .values
             .push(array.policy.retain(subview as *const c_void));
     }
+    objc::arc::release(subview);
     // SAFETY: a view this crate made, now in a window.
     unsafe { update_tracking_areas(subview) };
 }
@@ -989,8 +1025,40 @@ unsafe extern "C" fn remove_from_superview(receiver: Id, _sel: Sel) {
     }
     // SAFETY: an array this module made.
     if let Some(array) = unsafe { corefoundation::collections::array(list as *const c_void) } {
+        let before = array.values.len();
         array.values.retain(|v| *v != receiver as *const c_void);
+        // The list retained the view once per `-addSubview:`, which now moves
+        // out of a single entry at most; last, as it may free the receiver.
+        for _ in array.values.len()..before {
+            array.policy.release(receiver as *const c_void);
+        }
     }
+}
+
+/// `-dealloc`. Subviews are told their superview is gone before the list that
+/// retains them is released: a subview something else still holds would
+/// otherwise walk its ancestors into freed memory.
+unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
+    let view = view_of(receiver);
+    let subviews = std::mem::replace(&mut view.subviews, std::ptr::null_mut());
+    // SAFETY: an array this module made, or null.
+    if let Some(array) = unsafe { corefoundation::collections::array(subviews as *const c_void) } {
+        for child in &array.values {
+            let child = *child as Id;
+            if is_view(child) && view_of(child).superview == receiver {
+                view_of(child).superview = std::ptr::null_mut();
+            }
+        }
+    }
+    objc::arc::release(subviews);
+    let tracking_areas = std::mem::replace(&mut view.tracking_areas, std::ptr::null_mut());
+    objc::arc::release(tracking_areas);
+    let layer = std::mem::replace(&mut view.layer, std::ptr::null_mut());
+    // SAFETY: the layer this view set, which must not point back at it.
+    unsafe { crate::layer::set_view(layer, std::ptr::null_mut()) };
+    objc::arc::release(layer);
+    crate::cursor::discard_rects(receiver);
+    objc::arc::finalize(receiver);
 }
 
 /// `-addTrackingArea:` and its two companions.
@@ -1168,6 +1236,7 @@ pub(crate) fn install() {
         "hitTest:" => hit_test_method, c"@32@0:8{CGPoint=dd}16";
         "addSubview:" => add_subview, c"v24@0:8@16";
         "removeFromSuperview" => remove_from_superview, c"v16@0:8";
+        "dealloc" => dealloc, c"v16@0:8";
         "setWantsBestResolutionOpenGLSurface:" => set_wants_best_resolution, c"v20@0:8c16";
         "wantsBestResolutionOpenGLSurface" => wants_best_resolution, c"c16@0:8";
         "backingScaleFactor" => backing_scale_factor, c"d16@0:8";
@@ -1250,6 +1319,35 @@ mod tests {
         unsafe { add_subview(superview, objc::sel::get("addSubview:"), subview) };
         view_of(subview).autoresizing_mask = mask;
         (superview, subview)
+    }
+
+    #[test]
+    fn a_freed_superview_leaves_its_retained_subview_detached() {
+        let (superview, subview) = tree(rect(0.0, 0.0, 10.0, 10.0), rect(0.0, 0.0, 5.0, 5.0), 0);
+        objc::arc::retain(subview);
+        objc::arc::release(superview);
+        assert!(view_of(subview).superview.is_null());
+        assert!(!is_hidden_or_has_hidden_ancestor(subview));
+        objc::arc::release(subview);
+    }
+
+    #[test]
+    fn moving_a_subview_takes_it_out_of_its_old_superview() {
+        let (first, subview) = tree(rect(0.0, 0.0, 10.0, 10.0), rect(0.0, 0.0, 5.0, 5.0), 0);
+        let second = view(rect(0.0, 0.0, 10.0, 10.0));
+        // SAFETY: `-addSubview:` is `void (id, SEL, id)`.
+        unsafe { add_subview(second, objc::sel::get("addSubview:"), subview) };
+        assert_eq!(view_of(subview).superview, second);
+        assert!(children(first).is_empty());
+        assert_eq!(children(second), vec![subview]);
+        assert_eq!(objc::arc::retain_count(subview), 2);
+    }
+
+    fn children(view: Id) -> Vec<Id> {
+        // SAFETY: an array this module made.
+        unsafe { corefoundation::collections::array(view_of(view).subviews as *const c_void) }
+            .map(|a| a.values.iter().map(|v| *v as Id).collect())
+            .unwrap_or_default()
     }
 
     fn set_frame_of(view: Id, frame: NSRect) {

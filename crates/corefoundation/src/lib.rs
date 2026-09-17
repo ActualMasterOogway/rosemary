@@ -147,6 +147,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFBooleanGetValue" => at!(api::CFBooleanGetValue),
         "CFNumberCreate" => at!(api::CFNumberCreate),
         "CFNumberGetValue" => at!(api::CFNumberGetValue),
+        "CFNumberGetType" => at!(api::CFNumberGetType),
         "CFNumberIsFloatType" => at!(api::CFNumberIsFloatType),
         "CFNumberGetByteSize" => at!(api::CFNumberGetByteSize),
 
@@ -333,6 +334,7 @@ pub const NAMES: &[&str] = &[
     "CFBooleanGetValue",
     "CFNumberCreate",
     "CFNumberGetValue",
+    "CFNumberGetType",
     "CFNumberIsFloatType",
     "CFNumberGetByteSize",
     "CFDataGetTypeID",
@@ -1364,6 +1366,38 @@ mod collection_tests {
                 "a value that does not fit must report that it does not"
             );
             api::CFRelease(n);
+        }
+    }
+
+    /// A number reports the canonical type it was created with, and the width
+    /// of that type, whatever C name the caller used.
+    #[test]
+    fn a_number_reports_its_canonical_type() {
+        bootstrap();
+        for (created, reported, size) in [
+            (number_type::CHAR, number_type::SINT8, 1),
+            (number_type::SHORT, number_type::SINT16, 2),
+            (number_type::INT, number_type::SINT32, 4),
+            (number_type::SINT32, number_type::SINT32, 4),
+            (number_type::LONG, number_type::SINT64, 8),
+            (number_type::CFINDEX, number_type::SINT64, 8),
+            (number_type::FLOAT, number_type::FLOAT32, 4),
+            (number_type::DOUBLE, number_type::FLOAT64, 8),
+            (number_type::CGFLOAT, number_type::FLOAT64, 8),
+        ] {
+            let n = number(created, 0);
+            // SAFETY: a number made above.
+            unsafe {
+                assert_eq!(api::CFNumberGetType(n), reported as isize, "{created}");
+                assert_eq!(api::CFNumberGetByteSize(n), size, "{created}");
+                api::CFRelease(n);
+            }
+        }
+        // SAFETY: an object that is not a number.
+        unsafe {
+            let s = string(c"not a number");
+            assert_eq!(api::CFNumberGetType(s), 0);
+            api::CFRelease(s);
         }
     }
 
