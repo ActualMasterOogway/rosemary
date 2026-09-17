@@ -711,20 +711,8 @@ fn tracking_event(kind: u64, window: Id, location: NSPoint, area: Id) -> Id {
 /// `-[NSResponder cursorUpdate:]`: pass it to the next responder, which for a
 /// view is its superview and then its window.
 unsafe extern "C" fn responder_cursor_update(receiver: Id, sel: Sel, event: Id) {
-    // SAFETY: null or an object this runtime allocated.
-    let next = match unsafe { crate::view::superview_of(receiver) } {
-        // SAFETY: as above.
-        next if next.is_null() => unsafe { crate::view::window_of(receiver) },
-        next => next,
-    };
-    if next.is_null() {
-        return;
-    }
-    // SAFETY: the prototype this method was installed with.
-    unsafe {
-        let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
-        f(next, sel, event);
-    }
+    // SAFETY: installed as `v24@0:8@16`.
+    unsafe { crate::responder::forward(receiver, sel, event) }
 }
 
 /// `-[NSWindow cursorUpdate:]`, the end of the chain: nothing below asked for a

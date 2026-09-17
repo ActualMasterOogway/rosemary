@@ -1,4 +1,5 @@
-//! `NSResponder`'s contextual menu, which every responder inherits.
+//! `NSResponder`'s contextual menu and its default event methods, which every
+//! responder inherits.
 //!
 //! `-menu` and `-setMenu:` are declared on `NSResponder`, so an application, a
 //! window and a view all answer them - Qt sets one on `NSApp` while building its
@@ -55,11 +56,43 @@ unsafe extern "C" fn set_menu(receiver: Id, _sel: Sel, value: Id) {
     }
 }
 
+/// Send an event method on to the next responder: a view's superview, then its
+/// window. A window is the end of the chain here, as it has no window of its own.
+///
+/// # Safety
+///
+/// `receiver` is null or an object this runtime allocated, and `sel` is a
+/// `void (id, SEL, NSEvent *)` method.
+pub(crate) unsafe fn forward(receiver: Id, sel: Sel, event: Id) {
+    // SAFETY: null or an object this runtime allocated.
+    let next = match unsafe { crate::view::superview_of(receiver) } {
+        // SAFETY: as above.
+        next if next.is_null() => unsafe { crate::view::window_of(receiver) },
+        next => next,
+    };
+    if next.is_null() {
+        return;
+    }
+    // SAFETY: the prototype the caller vouches for.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+        f(next, sel, event);
+    }
+}
+
+/// `-[NSResponder mouseUp:]`: a responder that does not handle the release
+/// passes it up, so a container that took the press also sees it end.
+unsafe extern "C" fn mouse_up(receiver: Id, sel: Sel, event: Id) {
+    // SAFETY: installed as `v24@0:8@16`.
+    unsafe { forward(receiver, sel, event) }
+}
+
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSResponder").expect("declared before its methods");
     methods!(class, {
         "menu" => menu, c"@16@0:8";
         "setMenu:" => set_menu, c"v24@0:8@16";
+        "mouseUp:" => mouse_up, c"v24@0:8@16";
     });
 }
 
@@ -91,6 +124,32 @@ mod tests {
             set_menu(one, set, second);
             assert_eq!(menu(one, get), second, "replaced, not appended");
         }
+    }
+
+    /// `-mouseUp:` climbs to the first ancestor that overrides it.
+    #[test]
+    fn mouse_up_reaches_an_overriding_superview() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEEN: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn record(receiver: Id, _sel: Sel, _event: Id) {
+            SEEN.store(receiver as usize, Ordering::Release);
+        }
+        crate::bootstrap();
+        let sel = objc::sel::get("mouseUp:");
+        let view = objc::class::lookup(c"NSView").expect("NSView");
+        let class =
+            objc::class::allocate_pair(Some(view), c"MouseUpRecorder", 0).expect("a subclass");
+        class.add_method(sel, record as objc::class::Imp, c"v24@0:8@16");
+        objc::class::register_pair(class);
+        let parent = objc::object::create_instance(class, 0);
+        let child = responder(c"NSView");
+        // SAFETY: `-addSubview:` is `void (id, SEL, id)` on views of this crate's.
+        unsafe {
+            let add: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+            add(parent, objc::sel::get("addSubview:"), child);
+            mouse_up(child, sel, std::ptr::null_mut());
+        }
+        assert_eq!(SEEN.load(Ordering::Acquire), parent as usize);
     }
 
     /// Every responder subclass inherits it, which is the point of putting it on
