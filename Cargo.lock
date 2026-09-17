@@ -1175,6 +1175,7 @@ dependencies = [
  "mimalloc",
  "objc",
  "sdl3",
+ "security",
  "static_init",
  "webkit",
 ]
@@ -1262,6 +1263,15 @@ name = "sdl3"
 version = "0.1.0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "security"
+version = "0.1.0"
+dependencies = [
+ "corefoundation",
+ "foundation",
+ "objc",
 ]
 
 [[package]]

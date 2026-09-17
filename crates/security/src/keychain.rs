@@ -66,7 +66,7 @@ fn items() -> std::sync::MutexGuard<'static, BTreeMap<Identity, Vec<u8>>> {
 }
 
 fn store_path() -> PathBuf {
-    PathBuf::from(crate::home_directory()).join("Library/Keychains/rosetta3-items.tsv")
+    PathBuf::from(foundation::home_directory()).join("Library/Keychains/rosetta3-items.tsv")
 }
 
 /// Tab-separated, with the value hex-encoded.
@@ -129,7 +129,7 @@ fn from_hex(text: &str) -> Option<Vec<u8>> {
 ///
 /// `query` must be null or a `CFDictionary`.
 unsafe fn attribute(query: CFTypeRef, key: &str) -> Option<String> {
-    let name = crate::string::from_str(key);
+    let name = foundation::string::from_str(key);
     // SAFETY: the caller's obligation for `query`; `name` is a live string.
     let value = unsafe { corefoundation::api::CFDictionaryGetValue(query, name as CFTypeRef) };
     // SAFETY: a fresh string this call owns.
@@ -138,7 +138,7 @@ unsafe fn attribute(query: CFTypeRef, key: &str) -> Option<String> {
         return None;
     }
     // SAFETY: whatever the caller stored, read as a string.
-    let bytes = unsafe { crate::string::bytes(value as objc::object::Id) };
+    let bytes = unsafe { foundation::string::bytes(value as objc::object::Id) };
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -160,7 +160,7 @@ unsafe fn identity_of(query: CFTypeRef) -> Identity {
 ///
 /// `query` must be null or a `CFDictionary`.
 unsafe fn value_data(query: CFTypeRef) -> Option<Vec<u8>> {
-    let name = crate::string::from_str("v_Data");
+    let name = foundation::string::from_str("v_Data");
     // SAFETY: the caller's obligation.
     let value = unsafe { corefoundation::api::CFDictionaryGetValue(query, name as CFTypeRef) };
     // SAFETY: a fresh string this call owns.
@@ -181,7 +181,7 @@ unsafe fn value_data(query: CFTypeRef) -> Option<Vec<u8>> {
         return Some(data.clone());
     }
     // SAFETY: as above - answers empty for anything that is not a string.
-    let text = unsafe { crate::string::bytes(value as objc::object::Id) };
+    let text = unsafe { foundation::string::bytes(value as objc::object::Id) };
     (!text.is_empty()).then_some(text)
 }
 

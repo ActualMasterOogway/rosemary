@@ -140,6 +140,14 @@ fn register_dlopen_names() {
     );
     crate::dyld::register_synthetic(
         &[
+            "/System/Library/Frameworks/Security.framework/Versions/A/Security",
+            "/System/Library/Frameworks/Security.framework/Security",
+            "Security",
+        ],
+        symbol,
+    );
+    crate::dyld::register_synthetic(
+        &[
             "/System/Library/Frameworks/GameController.framework/Versions/A/GameController",
             "/System/Library/Frameworks/GameController.framework/GameController",
             "GameController",
@@ -342,6 +350,15 @@ pub fn provider() -> SyntheticDylib {
     for (name, addr) in contacts::data_symbols() {
         define_data(&mut lib, &name, addr);
     }
+    // Security's keychain, stored in a file under the guest's home.
+    for name in security::names() {
+        if let Some(addr) = security::symbol(name) {
+            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
+        }
+    }
+    for (name, addr) in security::data_symbols() {
+        define_data(&mut lib, &name, addr);
+    }
     for (name, addr) in gamecontroller::data_symbols() {
         define_data(&mut lib, &name, addr);
     }
@@ -459,6 +476,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         // `crate::shims::block`. Nothing on a host off Darwin defines it.
         .or_else(|| objc::block::symbol(name))
         .or_else(|| foundation::symbol(name))
+        .or_else(|| security::symbol(name))
         .or_else(|| iokit::symbol(name))
         .or_else(|| forcefeedback::symbol(name))
         .or_else(|| appkit::symbol(name))
