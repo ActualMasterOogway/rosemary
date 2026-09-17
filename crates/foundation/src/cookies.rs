@@ -280,14 +280,27 @@ unsafe extern "C" fn cookie_with_properties(_class: Id, _sel: Sel, properties: I
     if name.is_empty() {
         return std::ptr::null_mut();
     }
-    // Normalised as a header's is.
-    let domain = get(&["NSHTTPCookieDomain", "Domain", "domain"])
+    // Normalised as a header's is. With no domain of its own the cookie takes
+    // its origin URL's host, as one from a `Set-Cookie` header takes the host
+    // it came from.
+    let mut domain = get(&["NSHTTPCookieDomain", "Domain", "domain"])
         .trim_start_matches('.')
         .to_ascii_lowercase();
+    if domain.is_empty() {
+        // SAFETY: null or an object this runtime allocated.
+        domain =
+            unsafe { origin_host(object(&["NSHTTPCookieOriginURL", "OriginURL", "originURL"])) };
+    }
     let path = get(&["NSHTTPCookiePath", "Path", "path"]);
     let secure = !get(&["NSHTTPCookieSecure", "Secure", "secure"]).is_empty();
+    // A discarded cookie is a session cookie whatever its expiry says.
     // SAFETY: null or an object this runtime allocated.
-    let expires = unsafe { expiry(object(&["NSHTTPCookieExpires", "Expires", "expires"])) };
+    let discard = unsafe { flag(object(&["NSHTTPCookieDiscard", "Discard", "discard"])) };
+    let expires = match discard {
+        true => None,
+        // SAFETY: as above.
+        false => unsafe { expiry(object(&["NSHTTPCookieExpires", "Expires", "expires"])) },
+    };
     make_cookie(Cookie {
         name,
         value,
@@ -299,6 +312,54 @@ unsafe extern "C" fn cookie_with_properties(_class: Id, _sel: Sel, properties: I
         secure,
         expires,
     })
+}
+
+/// The host in an `NSHTTPCookieOriginURL`, which Apple's takes as either an
+/// `NSURL` or an `NSString`; empty for anything else.
+///
+/// # Safety
+///
+/// `value` must be null or an object this runtime allocated.
+unsafe fn origin_host(value: Id) -> String {
+    if value.is_null() {
+        return String::new();
+    }
+    // SAFETY: the caller's obligation.
+    if unsafe { corefoundation::string::as_string(value as CFTypeRef) }.is_some() {
+        // SAFETY: an `NSString`.
+        return split_url(&unsafe { text(value) }).0;
+    }
+    // SAFETY: the caller's obligation.
+    if unsafe { corefoundation::url::as_url(value as CFTypeRef) }.is_some() {
+        // SAFETY: an `NSURL`, which answers `-absoluteString`.
+        return unsafe { host_and_path(value) }.0;
+    }
+    String::new()
+}
+
+/// A boolean property such as `NSHTTPCookieDiscard`: the string `"TRUE"` as
+/// Apple's constants spell it, or an `NSNumber`/`CFBoolean` a caller put there
+/// by hand.
+///
+/// # Safety
+///
+/// `value` must be null or an object this runtime allocated.
+unsafe fn flag(value: Id) -> bool {
+    if value.is_null() {
+        return false;
+    }
+    if value as CFTypeRef == corefoundation::collections::boolean(true) {
+        return true;
+    }
+    // SAFETY: the caller's obligation.
+    if let Some(number) = unsafe { corefoundation::collections::number(value as CFTypeRef) } {
+        return number.as_i64() != 0;
+    }
+    // SAFETY: the caller's obligation; empty for anything but a string.
+    let text = unsafe { text(value) };
+    ["true", "yes", "1"]
+        .iter()
+        .any(|t| text.trim().eq_ignore_ascii_case(t))
 }
 
 /// The expiry in an `NSHTTPCookieExpires`.
@@ -532,6 +593,12 @@ unsafe extern "C" fn cookie_properties(receiver: Id, _sel: Sel) -> Id {
     ]
     .into_iter()
     .chain(cookie.secure.then_some(("NSHTTPCookieSecure", "TRUE")))
+    .chain(
+        cookie
+            .expires
+            .is_none()
+            .then_some(("NSHTTPCookieDiscard", "TRUE")),
+    )
     .map(|(key, value)| {
         (
             crate::string::from_str(key) as CFTypeRef,

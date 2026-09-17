@@ -356,9 +356,11 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_NSArgumentDomain", "NSArgumentDomain"),
     // The cookie property keys, whose values are the bare words a `Set-Cookie`
     // attribute is spelled with.
+    ("_NSHTTPCookieDiscard", "Discard"),
     ("_NSHTTPCookieDomain", "Domain"),
     ("_NSHTTPCookieExpires", "Expires"),
     ("_NSHTTPCookieName", "Name"),
+    ("_NSHTTPCookieOriginURL", "OriginURL"),
     ("_NSHTTPCookiePath", "Path"),
     ("_NSHTTPCookieSecure", "Secure"),
     ("_NSHTTPCookieValue", "Value"),
