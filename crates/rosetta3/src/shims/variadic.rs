@@ -80,6 +80,7 @@ pub fn install() {
         originals.push((key, previous as u64));
     }
     let _ = ORIGINALS.set(originals);
+    install_object_lists();
 }
 
 /// The implementation `sel` had before [`install`].
@@ -165,4 +166,214 @@ unsafe extern "C" fn trampoline() {
         "ret",
         service = sym service,
     )
+}
+
+/// Nil-terminated object lists, as `(class, variadic, counted, pairs)`: the
+/// class method a program sends, and the counted one that says the same thing
+/// without an ellipsis. `pairs` reads the list as `object, key, object, key`.
+///
+/// The emulated backend rewrites these in `objc::dispatch` before any `IMP` is
+/// reached; a native image reaches one, so it has to be a variadic one.
+const OBJECT_LISTS: &[(&str, &str, &str, bool)] = &[
+    (
+        "NSArray",
+        "arrayWithObjects:",
+        "arrayWithObjects:count:",
+        false,
+    ),
+    (
+        "NSDictionary",
+        "dictionaryWithObjectsAndKeys:",
+        "dictionaryWithObjects:forKeys:count:",
+        true,
+    ),
+];
+
+/// `(variadic selector, counted selector, pairs)` for each installed list.
+static LISTS: OnceLock<Vec<(u64, u64, bool)>> = OnceLock::new();
+
+/// Add each object list as a class method answered by [`list_trampoline`].
+///
+/// Added rather than swizzled: an `IMP` cannot take an ellipsis, so a class that
+/// already has one of these is left with what it has.
+fn install_object_lists() {
+    let mut lists = Vec::new();
+    for (class, variadic, counted, pairs) in OBJECT_LISTS {
+        let (Some(c), Some(v), Some(n)) = (
+            host::c_string(class),
+            host::c_string(variadic),
+            host::c_string(counted),
+        ) else {
+            continue;
+        };
+        // SAFETY: NUL-terminated strings that outlive the calls; every pointer
+        // the runtime answers is checked before use.
+        unsafe {
+            let cls = host::objc_lookUpClass(c.as_ptr());
+            if cls.is_null() {
+                continue;
+            }
+            let variadic = host::sel_registerName(v.as_ptr());
+            let counted = host::sel_registerName(n.as_ptr());
+            if host::class_getClassMethod(cls, counted).is_null() {
+                continue;
+            }
+            let meta = host::object_getClass(cls);
+            host::class_addMethod(
+                meta,
+                variadic,
+                list_trampoline as Imp,
+                c"@24@0:8@16".as_ptr(),
+            );
+            lists.push((variadic as u64, counted as u64, *pairs));
+        }
+    }
+    let _ = LISTS.set(lists);
+}
+
+/// Integer registers left for the tail after receiver, selector and first
+/// object. Darwin's AArch64 ABI puts every variadic argument on the stack.
+#[cfg(target_arch = "aarch64")]
+const TAIL_REGISTERS: usize = 0;
+#[cfg(not(target_arch = "aarch64"))]
+const TAIL_REGISTERS: usize = 3;
+
+/// Collect the list up to its nil and send the counted method.
+///
+/// `registers` holds [`TAIL_REGISTERS`] saved integer registers and `stack` is
+/// the first stack-passed argument; the tail is the one and then the other.
+unsafe extern "C" fn list_service(
+    receiver: u64,
+    sel: Sel,
+    first: u64,
+    registers: *const u64,
+    stack: *const u64,
+) -> u64 {
+    let Some(&(_, counted, pairs)) = LISTS
+        .get()
+        .and_then(|l| l.iter().find(|(v, _, _)| *v == sel as u64))
+    else {
+        objc::fail!("an object list was serviced before its counted method was recorded");
+    };
+    let mut at = 0;
+    let mut next = || {
+        // SAFETY: the caller passed a nil-terminated list, and this stops
+        // reading at the nil.
+        let value = unsafe {
+            match at < TAIL_REGISTERS {
+                true => *registers.add(at),
+                false => *stack.add(at - TAIL_REGISTERS),
+            }
+        };
+        at += 1;
+        value
+    };
+    let (mut objects, mut keys) = (Vec::new(), Vec::new());
+    let mut object = first;
+    while object != 0 {
+        objects.push(object);
+        if pairs {
+            keys.push(next());
+        }
+        object = next();
+    }
+    // SAFETY: the receiver is a class, and the counted method was found on it
+    // at install time with the prototype each arm transmutes to.
+    unsafe {
+        let imp = host::class_getMethodImplementation(
+            host::object_getClass(receiver as host::Class),
+            counted as Sel,
+        );
+        match pairs {
+            false => {
+                let f: unsafe extern "C" fn(u64, Sel, *const u64, usize) -> u64 =
+                    core::mem::transmute(imp);
+                f(receiver, counted as Sel, objects.as_ptr(), objects.len())
+            }
+            true => {
+                let f: unsafe extern "C" fn(u64, Sel, *const u64, *const u64, usize) -> u64 =
+                    core::mem::transmute(imp);
+                f(
+                    receiver,
+                    counted as Sel,
+                    objects.as_ptr(),
+                    keys.as_ptr(),
+                    objects.len(),
+                )
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[unsafe(naked)]
+unsafe extern "C" fn list_trampoline() {
+    core::arch::naked_asm!(
+        "mov x3, xzr",
+        "mov x4, sp",
+        "b   {service}",
+        service = sym list_service,
+    )
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+#[unsafe(naked)]
+unsafe extern "C" fn list_trampoline() {
+    core::arch::naked_asm!(
+        "push rbp",
+        "mov  rbp, rsp",
+        "sub  rsp, 32",
+        "mov  [rsp], rcx",
+        "mov  [rsp + 8], r8",
+        "mov  [rsp + 16], r9",
+        "mov  rcx, rsp",
+        "lea  r8, [rbp + 16]",
+        "call {service}",
+        "mov  rsp, rbp",
+        "pop  rbp",
+        "ret",
+        service = sym list_service,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Five objects put the tail past the three saved registers and onto the
+    /// stack, which is the half of the walk a short list never reaches.
+    ///
+    /// x86-64 only: a Rust variadic call on another host follows that host's
+    /// ABI rather than Darwin's.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn a_nil_terminated_list_reaches_the_counted_method() {
+        foundation::bootstrap();
+        install();
+        let objects: Vec<u64> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|s| foundation::string::from_str(s) as u64)
+            .collect();
+        // SAFETY: NUL-terminated literals; the trampoline is installed above
+        // and is `id (Class, SEL, id, ...)`.
+        unsafe {
+            let class = host::objc_lookUpClass(c"NSArray".as_ptr());
+            let sel = host::sel_registerName(c"arrayWithObjects:".as_ptr());
+            let imp = host::class_getMethodImplementation(host::object_getClass(class), sel);
+            let f: unsafe extern "C" fn(u64, Sel, u64, ...) -> u64 = core::mem::transmute(imp);
+            let [a, b, c, d, e] = objects[..] else {
+                unreachable!()
+            };
+            let array = f(class as u64, sel, a, b, c, d, e, 0u64);
+            let array = corefoundation::collections::array(array as *const std::ffi::c_void)
+                .expect("an array");
+            assert_eq!(array.values.len(), 5);
+            assert_eq!(array.values[4] as u64, e);
+
+            let one = f(class as u64, sel, a, 0u64);
+            let one = corefoundation::collections::array(one as *const std::ffi::c_void)
+                .expect("an array");
+            assert_eq!(one.values.len(), 1);
+        }
+    }
 }

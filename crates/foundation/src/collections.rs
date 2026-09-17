@@ -95,6 +95,52 @@ unsafe extern "C" fn sorted_array_using_selector(receiver: Id, _sel: Sel, _compa
     }
 }
 
+/// `NSEnumerationReverse`. `NSEnumerationConcurrent` is a permission rather than
+/// a promise, so walking in order honours it.
+const ENUMERATION_REVERSE: usize = 1 << 1;
+
+/// `NSNotFound`.
+const NOT_FOUND: usize = isize::MAX as usize;
+
+/// `-indexOfObjectWithOptions:passingTest:`: the first index whose object the
+/// block accepts, walking backwards under `NSEnumerationReverse`.
+unsafe extern "C" fn index_of_object_with_options_passing_test(
+    receiver: Id,
+    _sel: Sel,
+    options: usize,
+    block: Id,
+) -> usize {
+    // SAFETY: an array.
+    let Some(array) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return NOT_FOUND;
+    };
+    // SAFETY: null or a block.
+    let Some(invoke) = (unsafe { block_invoke(block) }) else {
+        return NOT_FOUND;
+    };
+    // SAFETY: the block is `BOOL (^)(id, NSUInteger, BOOL *)`.
+    let call: unsafe extern "C" fn(Id, Id, usize, *mut bool) -> bool =
+        unsafe { std::mem::transmute(invoke) };
+    // A copy, because the block may mutate the array it is testing.
+    let values = array.values.clone();
+    let order: Box<dyn Iterator<Item = usize>> = match options & ENUMERATION_REVERSE {
+        0 => Box::new(0..values.len()),
+        _ => Box::new((0..values.len()).rev()),
+    };
+    let mut stop = false;
+    for at in order {
+        // SAFETY: as above; `stop` outlives the call.
+        if unsafe { call(block, values[at] as Id, at, &mut stop) } {
+            return at;
+        }
+        // A block that stops without accepting anything found nothing.
+        if stop {
+            break;
+        }
+    }
+    NOT_FOUND
+}
+
 unsafe extern "C" fn filtered_array_using_predicate(receiver: Id, _sel: Sel, predicate: Id) -> Id {
     let Some(array) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
         return std::ptr::null_mut();
@@ -966,6 +1012,11 @@ unsafe extern "C" fn set_with_object(_class: Id, _sel: Sel, object: Id) -> Id {
     unsafe { api::CFAutorelease(collections::new_set(values, Policy::from_type_callbacks())) as Id }
 }
 
+unsafe extern "C" fn set_with_capacity(_class: Id, _sel: Sel, _capacity: usize) -> Id {
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(collections::new_set(&[], Policy::from_type_callbacks())) as Id }
+}
+
 unsafe extern "C" fn set_count(receiver: Id, _sel: Sel) -> usize {
     // SAFETY: a set.
     unsafe { collections::set(receiver as CFTypeRef) }.map_or(0, |set| set.values.len())
@@ -991,6 +1042,7 @@ pub(crate) fn install() {
     let set = objc::class::lookup(c"NSSet").expect("CoreFoundation registered NSSet");
     class_methods!(set, {
         "setWithObject:" => set_with_object, c"@24@0:8@16";
+        "setWithCapacity:" => set_with_capacity, c"@24@0:8Q16";
     });
     methods!(set, {
         "count" => set_count, c"Q16@0:8";
@@ -1010,6 +1062,7 @@ pub(crate) fn install() {
         "componentsJoinedByString:" => components_joined_by_string, c"@24@0:8@16";
         "sortedArrayUsingSelector:" => sorted_array_using_selector, c"@24@0:8:16";
         "filteredArrayUsingPredicate:" => filtered_array_using_predicate, c"@24@0:8@16";
+        "indexOfObjectWithOptions:passingTest:" => index_of_object_with_options_passing_test, c"Q32@0:8Q16@?24";
         "countByEnumeratingWithState:objects:count:" => array_enumerate, c"Q40@0:8^{?=Q^@^QQ5}16^@24Q32";
         "description" => array_description, c"@16@0:8";
     });

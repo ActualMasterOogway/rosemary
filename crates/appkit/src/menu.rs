@@ -27,7 +27,8 @@ pub struct Menu {
     items: Id,
     /// Unretained, as every AppKit delegate is.
     delegate: Id,
-    /// The item this menu is the submenu of, which is how `-supermenu` walks up.
+    /// The item this menu is the submenu of. `-supermenu` answers that item's
+    /// menu rather than the item, so it follows the item when it moves.
     supermenu: Id,
 }
 
@@ -55,6 +56,8 @@ pub struct MenuItem {
     modifier_mask: usize,
     tool_tip: Id,
     image: Id,
+    /// Kept and never drawn, like everything else here.
+    view: Id,
 }
 
 pub const MENU_INSTANCE_SIZE: usize = size_of::<Menu>();
@@ -153,20 +156,36 @@ unsafe extern "C" fn insert_item(receiver: Id, _sel: Sel, item: Id, index: isize
     item_of(item).menu = receiver;
 }
 
-unsafe extern "C" fn remove_item(receiver: Id, _sel: Sel, item: Id) {
+/// Take the item at `at` out of the menu, which then no longer owns it.
+fn detach(receiver: Id, at: usize) {
     let list = items_of(receiver);
-    list.values.retain(|v| *v != item as *const c_void);
+    let value = list.values.remove(at);
+    let item = item_of(value as Id);
+    if item.menu == receiver {
+        item.menu = std::ptr::null_mut();
+    }
+    list.policy.release(value);
+}
+
+unsafe extern "C" fn remove_item(receiver: Id, sel: Sel, item: Id) {
+    // SAFETY: `-indexOfItem:` is `NSInteger (id, SEL, id)`.
+    let at = unsafe { index_of_item(receiver, sel, item) };
+    if at >= 0 {
+        detach(receiver, at as usize);
+    }
 }
 
 unsafe extern "C" fn remove_item_at_index(receiver: Id, _sel: Sel, index: isize) {
     let list = items_of(receiver);
     if let Some(at) = corefoundation::collections::at(index, list.values.len()) {
-        list.values.remove(at);
+        detach(receiver, at);
     }
 }
 
 unsafe extern "C" fn remove_all_items(receiver: Id, _sel: Sel) {
-    items_of(receiver).values.clear();
+    while !items_of(receiver).values.is_empty() {
+        detach(receiver, items_of(receiver).values.len() - 1);
+    }
 }
 
 unsafe extern "C" fn index_of_item(receiver: Id, _sel: Sel, item: Id) -> isize {
@@ -241,7 +260,10 @@ unsafe extern "C" fn set_menu_delegate(receiver: Id, _sel: Sel, value: Id) {
 }
 
 unsafe extern "C" fn supermenu(receiver: Id, _sel: Sel) -> Id {
-    menu_of(receiver).supermenu
+    match menu_of(receiver).supermenu {
+        holder if holder.is_null() => holder,
+        holder => item_of(holder).menu,
+    }
 }
 
 unsafe extern "C" fn init_item(
@@ -291,6 +313,9 @@ unsafe extern "C" fn item_submenu(receiver: Id, _sel: Sel) -> Id {
 
 unsafe extern "C" fn set_item_submenu(receiver: Id, _sel: Sel, submenu: Id) {
     let item = item_of(receiver);
+    if !item.submenu.is_null() && menu_of(item.submenu).supermenu == receiver {
+        menu_of(item.submenu).supermenu = std::ptr::null_mut();
+    }
     objc::arc::release(item.submenu);
     item.submenu = objc::arc::retain(submenu);
     if !submenu.is_null() {
@@ -402,6 +427,16 @@ unsafe extern "C" fn set_item_image(receiver: Id, _sel: Sel, image: Id) {
     item.image = objc::arc::retain(image);
 }
 
+unsafe extern "C" fn item_view(receiver: Id, _sel: Sel) -> Id {
+    item_of(receiver).view
+}
+
+unsafe extern "C" fn set_item_view(receiver: Id, _sel: Sel, view: Id) {
+    let item = item_of(receiver);
+    objc::arc::release(item.view);
+    item.view = objc::arc::retain(view);
+}
+
 /// `-indexOfItemWithSubmenu:`, `-indexOfItem:` asked the other way round.
 ///
 /// How a caller finds where a submenu was attached so it can replace or remove it
@@ -480,6 +515,8 @@ pub(crate) fn install() {
         "setToolTip:" => set_item_tool_tip, c"v24@0:8@16";
         "image" => item_image, c"@16@0:8";
         "setImage:" => set_item_image, c"v24@0:8@16";
+        "view" => item_view, c"@16@0:8";
+        "setView:" => set_item_view, c"v24@0:8@16";
         "setOnStateImage:" => ignored_object, c"v24@0:8@16";
         "setMixedStateImage:" => ignored_object, c"v24@0:8@16";
         "setRepresentedObject:" => ignored_object, c"v24@0:8@16";
@@ -592,8 +629,8 @@ mod tests {
                 wanted
             );
             assert!(item_with_tag(root, objc::sel::get("itemWithTag:"), 7).is_null());
-            // And the submenu knows what it hangs from.
-            assert_eq!(supermenu(file, objc::sel::get("supermenu")), holder);
+            // And the submenu knows the menu it hangs from, not the item.
+            assert_eq!(supermenu(file, objc::sel::get("supermenu")), root);
         }
     }
 
@@ -625,6 +662,10 @@ mod tests {
             );
             // An index outside the list is nil rather than a panic.
             assert!(item_at_index(menu, objc::sel::get("itemAtIndex:"), 9).is_null());
+            // A removed item no longer names the menu it left.
+            assert!(item_menu(second, objc::sel::get("menu")).is_null());
+            remove_item_at_index(menu, objc::sel::get("removeItemAtIndex:"), 0);
+            assert_eq!(number_of_items(menu, objc::sel::get("numberOfItems")), 0);
         }
     }
 }

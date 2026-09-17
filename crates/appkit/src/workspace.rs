@@ -6,6 +6,7 @@ use objc::sel::Sel;
 use crate::define::{class_methods, methods};
 
 static SHARED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+static CURRENT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
 pub const WILL_SLEEP: &str = "NSWorkspaceWillSleepNotification";
 pub const DID_WAKE: &str = "NSWorkspaceDidWakeNotification";
@@ -52,6 +53,76 @@ unsafe extern "C" fn notification_center(_receiver: Id, _sel: Sel) -> Id {
     foundation::notification::default_center_object()
 }
 
+/// `-[NSWorkspace frontmostApplication]`: this process.
+///
+/// The same answer as `-[NSApplication isActive]`, which never resigns because
+/// no other application here can be in front. A program comparing this against
+/// its own process to decide whether it has focus must not find a stranger.
+unsafe extern "C" fn frontmost_application(_receiver: Id, _sel: Sel) -> Id {
+    current()
+}
+
+/// The `NSRunningApplication` for this process, a process-lifetime singleton.
+fn current() -> Id {
+    *CURRENT.get_or_init(|| {
+        let class =
+            objc::class::lookup(c"NSRunningApplication").expect("declared before its methods");
+        let object = objc::object::create_instance(class, 0);
+        objc::arc::retain(object);
+        object as usize
+    }) as Id
+}
+
+/// `+[NSRunningApplication currentApplication]`.
+unsafe extern "C" fn current_application(_class: Id, _sel: Sel) -> Id {
+    current()
+}
+
+fn autoreleased(text: &str) -> Id {
+    let string = foundation::string::from_str(text);
+    // SAFETY: a fresh CFString, toll-free bridged to NSString.
+    unsafe { corefoundation::api::CFAutorelease(string as _) as Id }
+}
+
+/// `-processIdentifier`. Only this process is ever represented.
+unsafe extern "C" fn process_identifier(_receiver: Id, _sel: Sel) -> i32 {
+    std::process::id() as i32
+}
+
+/// `-bundleIdentifier`: nil for an executable outside a bundle, as on macOS.
+unsafe extern "C" fn bundle_identifier(_receiver: Id, _sel: Sel) -> Id {
+    match foundation::bundle::main().and_then(|b| b.identifier()) {
+        Some(identifier) => autoreleased(identifier),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// `-localizedName`: the bundle's display name, else the executable's name.
+unsafe extern "C" fn localized_name(_receiver: Id, _sel: Sel) -> Id {
+    if let Some(name) = foundation::bundle::main().and_then(|b| b.display_name()) {
+        return autoreleased(name);
+    }
+    let name = std::env::args_os().next().and_then(|arg| {
+        std::path::Path::new(&arg)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+    });
+    match name {
+        Some(name) => autoreleased(&name),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// `-isActive`: always, for the reason given at [`frontmost_application`].
+unsafe extern "C" fn running_is_active(_receiver: Id, _sel: Sel) -> u8 {
+    1
+}
+
+/// `-activateWithOptions:`: already active, which Apple reports as success.
+unsafe extern "C" fn activate_with_options(_receiver: Id, _sel: Sel, _options: usize) -> u8 {
+    1
+}
+
 /// `+[NSRunningApplication runningApplicationsWithBundleIdentifier:]`.
 ///
 /// Host processes are not registered applications in this Darwin workspace.
@@ -73,12 +144,21 @@ pub(crate) fn install() {
     methods!(class, {
         "URLForApplicationToOpenURL:" => application_url_for_url, c"@24@0:8@16";
         "notificationCenter" => notification_center, c"@16@0:8";
+        "frontmostApplication" => frontmost_application, c"@16@0:8";
     });
 
     let running =
         objc::class::lookup(c"NSRunningApplication").expect("declared before its methods");
     class_methods!(running, {
         "runningApplicationsWithBundleIdentifier:" => running_applications, c"@24@0:8@16";
+        "currentApplication" => current_application, c"@16@0:8";
+    });
+    methods!(running, {
+        "processIdentifier" => process_identifier, c"i16@0:8";
+        "bundleIdentifier" => bundle_identifier, c"@16@0:8";
+        "localizedName" => localized_name, c"@16@0:8";
+        "isActive" => running_is_active, c"c16@0:8";
+        "activateWithOptions:" => activate_with_options, c"c24@0:8Q16";
     });
 }
 
@@ -100,5 +180,22 @@ mod tests {
         let center = unsafe { notification_center(first, objc::sel::get("notificationCenter")) };
         assert!(!center.is_null());
         assert_eq!(center, foundation::notification::default_center_object());
+    }
+
+    #[test]
+    fn frontmost_application_is_this_process() {
+        crate::bootstrap();
+        // SAFETY: both take no explicit arguments.
+        let frontmost = unsafe {
+            frontmost_application(std::ptr::null_mut(), objc::sel::get("frontmostApplication"))
+        };
+        let current = unsafe {
+            current_application(std::ptr::null_mut(), objc::sel::get("currentApplication"))
+        };
+        assert!(!frontmost.is_null());
+        assert_eq!(frontmost, current);
+        // SAFETY: `-processIdentifier` takes no explicit arguments.
+        let pid = unsafe { process_identifier(frontmost, objc::sel::get("processIdentifier")) };
+        assert_eq!(pid, std::process::id() as i32);
     }
 }

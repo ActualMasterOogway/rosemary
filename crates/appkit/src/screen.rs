@@ -413,7 +413,8 @@ fn sdl_mode_of(mode: *const c_void) -> Option<sdl3::DisplayMode> {
     }
     // SAFETY: an opaque handle this module made, whose layout is `DisplayMode`.
     let mode = unsafe { &*(mode as *const DisplayMode) };
-    mode.fixed.or_else(|| sdl3::video::desktop_mode(mode.display))
+    mode.fixed
+        .or_else(|| sdl3::video::desktop_mode(mode.display))
 }
 
 /// `CGDisplayModeRef CGDisplayCopyDisplayMode(CGDirectDisplayID)`
@@ -447,7 +448,12 @@ pub unsafe extern "C" fn CGDisplayCopyAllDisplayModes(
     if let Some(desktop) = sdl3::video::desktop_mode(display) {
         let listed = modes.iter().any(|m| {
             (m.w, m.h, m.pixel_density, m.refresh_rate)
-                == (desktop.w, desktop.h, desktop.pixel_density, desktop.refresh_rate)
+                == (
+                    desktop.w,
+                    desktop.h,
+                    desktop.pixel_density,
+                    desktop.refresh_rate,
+                )
         });
         if !listed {
             modes.insert(0, desktop);
@@ -458,11 +464,7 @@ pub unsafe extern "C" fn CGDisplayCopyAllDisplayModes(
         .map(|m| new_mode(display, Some(m)) as CFTypeRef)
         .collect();
     // No retain callbacks: the modes are leaked, so there is nothing to count.
-    corefoundation::collections::new_array(
-        &handles,
-        corefoundation::callbacks::Policy::NONE,
-        false,
-    )
+    corefoundation::collections::new_array(&handles, corefoundation::callbacks::Policy::NONE, false)
 }
 
 /// `double CGDisplayModeGetRefreshRate(CGDisplayModeRef)`

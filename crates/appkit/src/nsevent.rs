@@ -299,6 +299,12 @@ unsafe extern "C" fn mouse_location(_class: Id, _sel: Sel) -> NSPoint {
     }
 }
 
+/// `+[NSEvent pressedMouseButtons]`: the buttons held right now, asked of the
+/// window system for the same reason `+mouseLocation` is.
+unsafe extern "C" fn pressed_mouse_buttons(_class: Id, _sel: Sel) -> u64 {
+    sdl3::video::global_mouse_state().map_or(0, |(_, _, mask)| crate::button::pressed_mask(mask))
+}
+
 /// `+[NSEvent enterExitEventWithType:location:modifierFlags:timestamp:
 /// windowNumber:context:eventNumber:trackingNumber:userData:]`.
 ///
@@ -392,6 +398,7 @@ pub(crate) fn install() {
     crate::define::class_methods!(class, {
         "modifierFlags" => current_modifier_flags, c"Q16@0:8";
         "mouseLocation" => mouse_location, c"{CGPoint=dd}16@0:8";
+        "pressedMouseButtons" => pressed_mouse_buttons, c"Q16@0:8";
         "enterExitEventWithType:location:modifierFlags:timestamp:windowNumber:context:eventNumber:trackingNumber:userData:"
             => enter_exit_event, c"@96@0:8Q16{CGPoint=dd}24Q40d48q56@64q72q80^v88";
         "otherEventWithType:location:modifierFlags:timestamp:windowNumber:context:subtype:data1:data2:"

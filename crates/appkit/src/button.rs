@@ -17,6 +17,15 @@ pub fn number(button: u8) -> i64 {
     }
 }
 
+/// `+[NSEvent pressedMouseButtons]` for an `SDL_GetMouseState` mask: bit `n`
+/// is the button whose `-buttonNumber` is `n`, so the two orders differ in the
+/// same way the numbers do.
+pub fn pressed_mask(mask: u32) -> u64 {
+    (1..=32u8)
+        .filter(|b| mask & mouse::mask(*b) != 0)
+        .fold(0, |bits, b| bits | 1 << number(b))
+}
+
 /// The `NSEventType` a press or release of this button is.
 pub fn event_kind(button: u8, down: bool) -> u64 {
     match (button, down) {
@@ -61,6 +70,18 @@ mod tests {
         assert_eq!(number(mouse::MIDDLE), 2);
         assert_eq!(number(mouse::X1), 3);
         assert_eq!(number(mouse::X2), 4);
+    }
+
+    #[test]
+    fn a_pressed_mask_is_in_appkits_button_order() {
+        assert_eq!(pressed_mask(0), 0);
+        assert_eq!(pressed_mask(mouse::mask(mouse::LEFT)), 0b1);
+        assert_eq!(pressed_mask(mouse::mask(mouse::RIGHT)), 0b10);
+        assert_eq!(pressed_mask(mouse::mask(mouse::MIDDLE)), 0b100);
+        assert_eq!(
+            pressed_mask(mouse::mask(mouse::LEFT) | mouse::mask(mouse::X2)),
+            0b10001
+        );
     }
 
     #[test]
