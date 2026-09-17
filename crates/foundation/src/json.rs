@@ -61,7 +61,7 @@ fn write(object: CFTypeRef, out: &mut Vec<u8>, options: usize, depth: usize) -> 
             return Ok(());
         }
         if let Some(number) = corefoundation::collections::number(object) {
-            write_number(number, out)?;
+            write_number(&number, out)?;
             return Ok(());
         }
         if let Some(array) = corefoundation::collections::array(object) {
@@ -691,6 +691,45 @@ mod tests {
             encode(object, writing::SORTED_KEYS),
             br#"{"n":1,"ok":true}"#
         );
+    }
+
+    /// `false` is written as `false`: a boolean used to read as no number at
+    /// all, which the writer took for true.
+    #[test]
+    fn false_stays_false() {
+        crate::bootstrap();
+        let object = decode(br#"{"no":false,"yes":true}"#, 0);
+        assert_eq!(
+            encode(object, writing::SORTED_KEYS),
+            br#"{"no":false,"yes":true}"#
+        );
+    }
+
+    /// `+numberWithBool:` is the boolean object itself, and it answers the
+    /// `NSNumber` getters with its value.
+    #[test]
+    fn number_with_bool_is_the_boolean() {
+        crate::bootstrap();
+        let number = objc::class::ptr(objc::class::lookup(c"NSNumber").expect("NSNumber")) as Id;
+        for value in [true, false] {
+            // SAFETY: `+numberWithBool:` is `id (Class, SEL, BOOL)` and
+            // `-boolValue`/`-intValue` are `(id, SEL)` getters.
+            unsafe {
+                let make: unsafe extern "C" fn(Id, Sel, bool) -> Id =
+                    std::mem::transmute(objc::msg::entry());
+                let object = make(number, objc::sel::get("numberWithBool:"), value);
+                assert_eq!(
+                    object as CFTypeRef,
+                    corefoundation::collections::boolean(value)
+                );
+                let get_bool: unsafe extern "C" fn(Id, Sel) -> bool =
+                    std::mem::transmute(objc::msg::entry());
+                assert_eq!(get_bool(object, objc::sel::get("boolValue")), value);
+                let get_int: unsafe extern "C" fn(Id, Sel) -> i32 =
+                    std::mem::transmute(objc::msg::entry());
+                assert_eq!(get_int(object, objc::sel::get("intValue")), value as i32);
+            }
+        }
     }
 
     /// An id past 2^53 is the case a JSON reader that keeps every number as a

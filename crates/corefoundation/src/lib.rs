@@ -1401,6 +1401,81 @@ mod collection_tests {
         }
     }
 
+    /// A boolean reads as the number it is, and reports the char type Apple's
+    /// does.
+    #[test]
+    fn a_boolean_is_read_as_a_number() {
+        bootstrap();
+        // SAFETY: the process's two booleans.
+        unsafe {
+            for (object, expected) in [
+                (collections::boolean(true), 1),
+                (collections::boolean(false), 0),
+            ] {
+                let mut read: i32 = -1;
+                assert_eq!(
+                    api::CFNumberGetValue(
+                        object,
+                        number_type::SINT32,
+                        &mut read as *mut i32 as *mut c_void
+                    ),
+                    1
+                );
+                assert_eq!(read, expected);
+                assert_eq!(api::CFNumberGetType(object), number_type::CHAR as isize);
+                assert_eq!(api::CFNumberGetByteSize(object), 1);
+                assert_eq!(api::CFNumberIsFloatType(object), 0);
+            }
+        }
+    }
+
+    /// The constant numbers clang lays out are numbers to CoreFoundation too,
+    /// and an integer's encoding gives its type.
+    #[test]
+    fn a_constant_number_is_read_by_its_layout() {
+        bootstrap();
+        let nsnumber = base::abstract_class(c"NSNumber", None);
+        let integer = objc::class::lookup(c"NSConstantIntegerNumber").unwrap_or_else(|| {
+            let class = objc::class::allocate_pair(Some(nsnumber), c"NSConstantIntegerNumber", 0)
+                .expect("a fresh class");
+            objc::class::register_pair(class);
+            class
+        });
+        let double = objc::class::lookup(c"NSConstantDoubleNumber").unwrap_or_else(|| {
+            let class = objc::class::allocate_pair(Some(nsnumber), c"NSConstantDoubleNumber", 0)
+                .expect("a fresh class");
+            objc::class::register_pair(class);
+            class
+        });
+        #[repr(C)]
+        struct Integer(*const objc::class::Class, *const std::ffi::c_char, i64);
+        #[repr(C)]
+        struct Double(*const objc::class::Class, f64);
+        let int = Integer(objc::class::ptr(integer), c"i".as_ptr(), -9);
+        let unsigned = Integer(objc::class::ptr(integer), c"I".as_ptr(), 9);
+        let real = Double(objc::class::ptr(double), 2.5);
+        // SAFETY: each is laid out as its class's instances are.
+        unsafe {
+            let int = &int as *const Integer as CFTypeRef;
+            assert_eq!(api::CFNumberGetType(int), number_type::SINT32 as isize);
+            let mut read: i64 = 0;
+            assert_eq!(
+                api::CFNumberGetValue(
+                    int,
+                    number_type::SINT64,
+                    &mut read as *mut i64 as *mut c_void
+                ),
+                1
+            );
+            assert_eq!(read, -9);
+            let unsigned = &unsigned as *const Integer as CFTypeRef;
+            assert_eq!(api::CFNumberGetType(unsigned), number_type::SINT64 as isize);
+            let real = &real as *const Double as CFTypeRef;
+            assert_eq!(api::CFNumberGetType(real), number_type::FLOAT64 as isize);
+            assert_eq!(api::CFNumberIsFloatType(real), 1);
+        }
+    }
+
     /// A negative `SInt8` is negative, which sign extension is the whole of.
     #[test]
     fn a_narrow_signed_number_is_sign_extended() {

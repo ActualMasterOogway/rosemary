@@ -29,6 +29,10 @@ pub struct TrackingArea {
     options: usize,
     owner: Id,
     user_info: Id,
+    /// Whether the pointer is inside, for `-mouseEntered:` and `-mouseExited:`.
+    inside: usize,
+    /// Whether this is the area that last sent `-cursorUpdate:` in its window.
+    has_cursor: usize,
 }
 
 pub const TRACKING_AREA_INSTANCE_SIZE: usize = size_of::<TrackingArea>();
@@ -70,6 +74,10 @@ unsafe extern "C" fn init_tracking_area(
     // and is usually the owner itself, so retaining would be a cycle.
     area.owner = owner;
     area.user_info = objc::arc::retain(user_info);
+    // `NSTrackingAssumeInside` is the answer to "was the pointer inside when
+    // this was added", and the first move sends the exit if it was wrong.
+    area.inside = (options & tracking::ASSUME_INSIDE != 0) as usize;
+    area.has_cursor = 0;
     receiver
 }
 
@@ -437,98 +445,109 @@ fn holding_rect() -> Option<Id> {
     })
 }
 
-/// `NSTrackingAreaOptions`, the ones that decide whether an area takes part in
-/// cursor updates.
+/// `NSTrackingAreaOptions`.
 mod tracking {
+    pub const MOUSE_ENTERED_AND_EXITED: usize = 0x01;
     pub const CURSOR_UPDATE: usize = 0x04;
     pub const ACTIVE_WHEN_FIRST_RESPONDER: usize = 0x10;
     pub const ACTIVE_IN_KEY_WINDOW: usize = 0x20;
     pub const ACTIVE_IN_ACTIVE_APP: usize = 0x40;
     pub const ACTIVE_ALWAYS: usize = 0x80;
+    pub const ASSUME_INSIDE: usize = 0x100;
     pub const IN_VISIBLE_RECT: usize = 0x200;
     pub const ENABLED_DURING_MOUSE_DRAG: usize = 0x400;
 }
 
-/// Whether an area with these options is live for a cursor update.
+/// Whether an area with these options is active at all.
 ///
 /// There is one application and it is always active, so only the key-window and
 /// first-responder conditions can turn an area off.
-fn tracks_cursor(
-    options: usize,
-    in_key_window: bool,
-    owner_is_first: bool,
-    dragging: bool,
-) -> bool {
+fn is_active(options: usize, in_key_window: bool, owner_is_first: bool) -> bool {
     use tracking::*;
-    if options & CURSOR_UPDATE == 0 || (dragging && options & ENABLED_DURING_MOUSE_DRAG == 0) {
-        return false;
-    }
     options & (ACTIVE_ALWAYS | ACTIVE_IN_ACTIVE_APP) != 0
         || (options & ACTIVE_IN_KEY_WINDOW != 0 && in_key_window)
         || (options & ACTIVE_WHEN_FIRST_RESPONDER != 0 && in_key_window && owner_is_first)
 }
 
-/// The cursor-update area the pointer was last inside, as `(window, area)`
-/// addresses. Compared, never dereferenced: the area may be gone by the next
-/// move.
-static CURSOR_AREA: std::sync::Mutex<Option<(usize, usize)>> = std::sync::Mutex::new(None);
+/// Whether a drag holds this area's events back until it ends.
+fn held_by_drag(options: usize, dragging: bool) -> bool {
+    dragging && options & tracking::ENABLED_DURING_MOUSE_DRAG == 0
+}
 
-/// The topmost live cursor-update area holding the pointer, and its view.
+/// A tracking area of this crate's, checked rather than assumed: the object
+/// comes back out of a guest-visible list and an event a guest built.
+fn area_of<'a>(object: Id) -> Option<&'a mut TrackingArea> {
+    if object.is_null() {
+        return None;
+    }
+    // SAFETY: an object this runtime allocated.
+    let is_area = unsafe { objc::object::class_of(object) }.is_some_and(|c| {
+        objc::class::lookup(c"NSTrackingArea")
+            .is_some_and(|k| c.chain().any(|x| std::ptr::eq(x, k)))
+    });
+    // SAFETY: the check above says the storage is this module's.
+    is_area.then(|| unsafe { &mut *(object as *mut TrackingArea) })
+}
+
+/// The owner a tracking-area event is delivered to, or null.
+pub fn tracking_owner_of(area: Id) -> Id {
+    area_of(area).map_or(std::ptr::null_mut(), |a| a.owner)
+}
+
+/// The `userInfo` an area was made with, which `-[NSEvent userData]` answers.
+pub fn tracking_user_info_of(area: Id) -> Id {
+    area_of(area).map_or(std::ptr::null_mut(), |a| a.user_info)
+}
+
+/// One area installed in a window, and whether it holds the pointer now.
+struct Installed {
+    /// Retained for the pass: a handler may remove the area, and the events
+    /// built from it still name it.
+    area: Id,
+    active: bool,
+    holds: bool,
+}
+
+/// Every area in a view tree, in drawing order - parents before children and
+/// siblings in order - so the last one holding the pointer is the topmost.
 ///
-/// Topmost is the last found walking parent before children and siblings in
-/// order, which is the drawing order.
+/// Areas on hidden views are listed as holding nothing: a view that is hidden
+/// with the pointer inside it is one the pointer has left.
 ///
 /// # Safety
 ///
 /// `view` must be null or an object this runtime allocated.
-unsafe fn cursor_area_in(
-    view: Id,
-    key: bool,
-    first: Id,
-    dragging: bool,
-    found: &mut Option<(Id, Id)>,
-) {
-    if view.is_null() || crate::view::is_hidden_or_has_hidden_ancestor(view) {
+unsafe fn installed_in(view: Id, key: bool, first: Id, out: &mut Vec<Installed>) {
+    if view.is_null() {
         return;
     }
+    let hidden = crate::view::is_hidden_or_has_hidden_ancestor(view);
     // SAFETY: the caller's obligation.
-    let areas = unsafe { crate::view::tracking_areas_of(view) };
+    let point = unsafe { crate::view::pointer_in(view) };
     // SAFETY: as above.
-    if let Some(point) = (!areas.is_empty())
-        .then(|| unsafe { crate::view::pointer_in(view) })
-        .flatten()
-    {
-        for area in areas.into_iter().filter(|a| !a.is_null()) {
-            // SAFETY: a tracking area of this crate's, retained by the view.
-            let area_of = unsafe { &*(area as *const TrackingArea) };
-            if !tracks_cursor(area_of.options, key, area_of.owner == first, dragging) {
-                continue;
-            }
-            let rect = match area_of.options & tracking::IN_VISIBLE_RECT != 0 {
-                true => crate::view::bounds_of(view),
-                false => area_of.rect,
-            };
-            if crate::view::holds(view, rect, point) {
-                *found = Some((area, area_of.owner));
-            }
-        }
+    for area in unsafe { crate::view::tracking_areas_of(view) } {
+        let Some(tracked) = area_of(area) else {
+            continue;
+        };
+        let rect = match tracked.options & tracking::IN_VISIBLE_RECT != 0 {
+            true => crate::view::bounds_of(view),
+            false => tracked.rect,
+        };
+        out.push(Installed {
+            area: objc::arc::retain(area),
+            active: is_active(tracked.options, key, tracked.owner == first),
+            holds: !hidden && point.is_some_and(|p| crate::view::holds(view, rect, p)),
+        });
     }
     // SAFETY: as above.
     for child in unsafe { crate::view::children(view) } {
         // SAFETY: an object this runtime allocated.
-        unsafe { cursor_area_in(child, key, first, dragging, found) };
+        unsafe { installed_in(child, key, first, out) };
     }
 }
 
-/// Send `-cursorUpdate:` as AppKit does for `NSTrackingCursorUpdate` areas.
-///
-/// Only on a change of area: entering one tells its owner, and leaving the last
-/// one tells the view under the pointer, whose inherited method walks up to the
-/// window and puts the arrow back. Called for every move in `window`.
-pub fn update_tracking(window: Id, dragging: bool) {
-    if window.is_null() {
-        return;
-    }
+/// The areas of `window`'s content view, retained; see [`Installed`].
+fn installed(window: Id) -> Vec<Installed> {
     let key = crate::window::key_window() == window;
     let first = match key {
         // SAFETY: `-firstResponder` is `id (id, SEL)` on a window this crate made.
@@ -538,70 +557,155 @@ pub fn update_tracking(window: Id, dragging: bool) {
         },
         false => std::ptr::null_mut(),
     };
-    let mut found = None;
+    let mut out = Vec::new();
     // SAFETY: null or the content view, which this crate made.
-    unsafe {
-        cursor_area_in(
-            crate::window::content_view_of(window),
-            key,
-            first,
-            dragging,
-            &mut found,
-        )
-    };
-    let now = found.map(|(area, _)| (window as usize, area as usize));
-    let before = std::mem::replace(
-        &mut *CURSOR_AREA.lock().unwrap_or_else(|e| e.into_inner()),
-        now,
-    );
-    if before == now {
+    unsafe { installed_in(crate::window::content_view_of(window), key, first, &mut out) };
+    out
+}
+
+/// Deliver tracking events for the pointer's position in `window`, as AppKit
+/// does from its tracking areas. Called for every move in the window.
+///
+/// The state lives on each area - whether the pointer is inside it, and whether
+/// it is the one that last had `-cursorUpdate:` - so an area that is removed
+/// takes its state with it, and a new one at the same address starts clean.
+///
+/// - `NSTrackingMouseEnteredAndExited`: `-mouseEntered:` and `-mouseExited:` to
+///   the owner of every area the pointer crosses, exits first.
+/// - `NSTrackingCursorUpdate`: `-cursorUpdate:` when the topmost such area
+///   changes, to its owner; leaving the last one sends it to the view under the
+///   pointer, whose inherited method walks up to the window and puts the arrow
+///   back.
+///
+/// During a drag an area without `NSTrackingEnabledDuringMouseDrag` keeps the
+/// state it had, and is brought up to date by the first move after the drag.
+pub fn update_tracking(window: Id, dragging: bool) {
+    if window.is_null() {
         return;
     }
-    let location = crate::window::pointer_location(window);
-    let target = match found {
-        Some((_, owner)) => owner,
-        // Only a pointer leaving an area in this window resets anything: the
-        // other window's cursor is not this one's to change, and a drag holds
-        // the cursor it started with.
-        None if before.is_some_and(|(w, _)| w == window as usize) && !dragging => {
-            // SAFETY: null or the content view, which this crate made.
-            let view =
-                unsafe { crate::view::hit_test(crate::window::content_view_of(window), location) };
-            match view.is_null() {
-                true => window,
-                false => view,
+    let areas = installed(window);
+    let mut exits = Vec::new();
+    let mut enters = Vec::new();
+    for entry in &areas {
+        let Some(tracked) = area_of(entry.area) else {
+            continue;
+        };
+        if tracked.options & tracking::MOUSE_ENTERED_AND_EXITED == 0
+            || held_by_drag(tracked.options, dragging)
+        {
+            continue;
+        }
+        let inside = entry.active && entry.holds;
+        if inside != (tracked.inside != 0) {
+            tracked.inside = inside as usize;
+            match inside {
+                true => enters.push(entry.area),
+                false => exits.push(entry.area),
             }
         }
-        None => return,
+    }
+
+    let location = crate::window::pointer_location(window);
+    let mut events: Vec<Id> = exits
+        .into_iter()
+        .map(|area| tracking_event(crate::nsevent::kind::MOUSE_EXITED, window, location, area))
+        .chain(enters.into_iter().map(|area| {
+            tracking_event(crate::nsevent::kind::MOUSE_ENTERED, window, location, area)
+        }))
+        .collect();
+
+    let wants_cursor = |entry: &&Installed| {
+        area_of(entry.area).is_some_and(|a| a.options & tracking::CURSOR_UPDATE != 0)
     };
-    if target.is_null() {
-        return;
+    let topmost = areas
+        .iter()
+        .filter(wants_cursor)
+        .filter(|e| e.active && e.holds)
+        .rfind(|e| area_of(e.area).is_some_and(|a| !held_by_drag(a.options, dragging)))
+        .map(|e| e.area);
+    let previous = areas
+        .iter()
+        .find(|e| area_of(e.area).is_some_and(|a| a.has_cursor != 0))
+        .map(|e| e.area);
+    // A drag holds the cursor it started with, unless an area that asked to be
+    // told during one takes it.
+    if topmost != previous && (topmost.is_some() || !dragging) {
+        if let Some(tracked) = previous.and_then(area_of) {
+            tracked.has_cursor = 0;
+        }
+        match topmost {
+            Some(area) => {
+                if let Some(tracked) = area_of(area) {
+                    tracked.has_cursor = 1;
+                }
+                events.push(tracking_event(
+                    crate::nsevent::kind::CURSOR_UPDATE,
+                    window,
+                    location,
+                    area,
+                ));
+            }
+            None => events.push(tracking_event(
+                crate::nsevent::kind::CURSOR_UPDATE,
+                window,
+                location,
+                std::ptr::null_mut(),
+            )),
+        }
     }
-    let event = crate::nsevent::make(crate::nsevent::Fields {
-        kind: crate::nsevent::kind::CURSOR_UPDATE,
-        location,
-        window,
-        tracking_area: found.map_or(std::ptr::null_mut(), |(area, _)| area),
-        ..Default::default()
-    });
-    if tracing() {
-        eprintln!("rosetta3: appkit: -cursorUpdate: to {target:p}");
+
+    for event in events {
+        crate::event::dispatch(window, event);
     }
-    // SAFETY: `-cursorUpdate:` is `void (id, SEL, NSEvent *)`, and every
-    // responder inherits one from `NSResponder`.
-    unsafe {
-        let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
-        f(target, objc::sel::get("cursorUpdate:"), event);
+    for entry in areas {
+        objc::arc::release(entry.area);
     }
 }
 
-/// The pointer left `window`: nothing in it holds the pointer any more, and the
-/// next entry has to update the cursor again.
+/// The pointer left `window`: every area it was inside is told so, and the
+/// next entry updates the cursor again.
 pub fn forget_tracking(window: Id) {
-    let mut area = CURSOR_AREA.lock().unwrap_or_else(|e| e.into_inner());
-    if area.is_some_and(|(w, _)| w == window as usize) {
-        *area = None;
+    if window.is_null() {
+        return;
     }
+    let areas = installed(window);
+    let location = crate::window::pointer_location(window);
+    let mut events = Vec::new();
+    for entry in &areas {
+        let Some(tracked) = area_of(entry.area) else {
+            continue;
+        };
+        tracked.has_cursor = 0;
+        if tracked.inside != 0 {
+            tracked.inside = 0;
+            events.push(tracking_event(
+                crate::nsevent::kind::MOUSE_EXITED,
+                window,
+                location,
+                entry.area,
+            ));
+        }
+    }
+    for event in events {
+        crate::event::dispatch(window, event);
+    }
+    for entry in areas {
+        objc::arc::release(entry.area);
+    }
+}
+
+fn tracking_event(kind: u64, window: Id, location: NSPoint, area: Id) -> Id {
+    if tracing() {
+        eprintln!("rosetta3: appkit: tracking event {kind} for area {area:p}");
+    }
+    crate::nsevent::make(crate::nsevent::Fields {
+        kind,
+        modifiers: crate::keymap::modifiers(sdl3::video::keyboard_modifiers()),
+        location,
+        window,
+        tracking_area: area,
+        ..Default::default()
+    })
 }
 
 /// `-[NSResponder cursorUpdate:]`: pass it to the next responder, which for a
@@ -746,9 +850,8 @@ pub unsafe extern "C" fn CGCursorIsVisible() -> bool {
 /// `-setOnMouseEntered:` and `-setOnMouseExited:`, which say that a *tracking
 /// area* should set this cursor rather than a cursor rectangle.
 ///
-/// Stored and read back, not acted on: nothing here delivers the enter and exit
-/// events a tracking area's cursor would be set from, and answering the getter
-/// with a guess would tell a program its cursor is installed when it is not.
+/// Acted on by the cursor's own `-mouseEntered:` and `-mouseExited:`, which a
+/// tracking area owned by the cursor delivers.
 unsafe extern "C" fn set_on_mouse_entered(receiver: Id, _sel: Sel, on: u8) {
     // SAFETY: a cursor of this crate's.
     unsafe { &mut *(receiver as *mut Cursor) }.on_mouse_entered = (on != 0) as usize;
@@ -767,6 +870,24 @@ unsafe extern "C" fn set_on_mouse_exited(receiver: Id, _sel: Sel, on: u8) {
 unsafe extern "C" fn is_set_on_mouse_exited(receiver: Id, _sel: Sel) -> u8 {
     // SAFETY: as above.
     (unsafe { (*(receiver as *const Cursor)).on_mouse_exited } != 0) as u8
+}
+
+/// `-mouseEntered:`: set this cursor, if it was told to on entry.
+unsafe extern "C" fn cursor_mouse_entered(receiver: Id, sel: Sel, _event: Id) {
+    // SAFETY: a cursor of this crate's.
+    if unsafe { (*(receiver as *const Cursor)).on_mouse_entered } != 0 {
+        // SAFETY: `-set` is `void (id, SEL)`.
+        unsafe { set(receiver, sel) };
+    }
+}
+
+/// `-mouseExited:`: set this cursor, if it was told to on exit.
+unsafe extern "C" fn cursor_mouse_exited(receiver: Id, sel: Sel, _event: Id) {
+    // SAFETY: a cursor of this crate's.
+    if unsafe { (*(receiver as *const Cursor)).on_mouse_exited } != 0 {
+        // SAFETY: `-set` is `void (id, SEL)`.
+        unsafe { set(receiver, sel) };
+    }
 }
 
 /// `+pop`, which is the class spelling of the instance `-pop` below.
@@ -835,6 +956,8 @@ pub(crate) fn install() {
         "isSetOnMouseEntered" => is_set_on_mouse_entered, c"c16@0:8";
         "setOnMouseExited:" => set_on_mouse_exited, c"v20@0:8c16";
         "isSetOnMouseExited" => is_set_on_mouse_exited, c"c16@0:8";
+        "mouseEntered:" => cursor_mouse_entered, c"v24@0:8@16";
+        "mouseExited:" => cursor_mouse_exited, c"v24@0:8@16";
         "dealloc" => dealloc, c"v16@0:8";
     });
 }
@@ -911,42 +1034,103 @@ mod tests {
         assert_eq!(objc::arc::retain_count(cursor), before);
     }
 
-    /// Only a cursor-update area takes part, and its active option decides
-    /// when: a key-window area stops in a background window, and a drag
-    /// holds the cursor unless the area asked to be told during one.
+    /// The active option decides when an area is live: a key-window area stops
+    /// in a background window, and a drag holds an area back unless it asked
+    /// to be told during one.
     #[test]
-    fn a_cursor_update_area_is_live_by_its_options() {
+    fn an_area_is_active_by_its_options() {
         use tracking::*;
-        assert!(!tracks_cursor(ACTIVE_ALWAYS, true, true, false));
-        assert!(tracks_cursor(
-            CURSOR_UPDATE | ACTIVE_ALWAYS,
-            false,
-            false,
-            false
-        ));
-        assert!(tracks_cursor(
-            CURSOR_UPDATE | ACTIVE_IN_KEY_WINDOW,
-            true,
-            false,
-            false
-        ));
-        assert!(!tracks_cursor(
-            CURSOR_UPDATE | ACTIVE_IN_KEY_WINDOW,
-            false,
-            false,
-            false
-        ));
-        let first = CURSOR_UPDATE | ACTIVE_WHEN_FIRST_RESPONDER;
-        assert!(tracks_cursor(first, true, true, false));
-        assert!(!tracks_cursor(first, true, false, false));
-        assert!(!tracks_cursor(
-            CURSOR_UPDATE | ACTIVE_ALWAYS,
-            true,
-            true,
-            true
-        ));
-        let drag = CURSOR_UPDATE | ACTIVE_ALWAYS | ENABLED_DURING_MOUSE_DRAG;
-        assert!(tracks_cursor(drag, true, true, true));
+        assert!(!is_active(0, true, true));
+        assert!(is_active(ACTIVE_ALWAYS, false, false));
+        assert!(is_active(ACTIVE_IN_ACTIVE_APP, false, false));
+        assert!(is_active(ACTIVE_IN_KEY_WINDOW, true, false));
+        assert!(!is_active(ACTIVE_IN_KEY_WINDOW, false, false));
+        assert!(is_active(ACTIVE_WHEN_FIRST_RESPONDER, true, true));
+        assert!(!is_active(ACTIVE_WHEN_FIRST_RESPONDER, true, false));
+        assert!(!is_active(ACTIVE_WHEN_FIRST_RESPONDER, false, true));
+        assert!(held_by_drag(ACTIVE_ALWAYS, true));
+        assert!(!held_by_drag(ACTIVE_ALWAYS, false));
+        assert!(!held_by_drag(ENABLED_DURING_MOUSE_DRAG, true));
+    }
+
+    /// `NSTrackingAssumeInside` starts an area inside, so the first move that
+    /// finds the pointer elsewhere sends the exit; without it, the enter.
+    #[test]
+    fn assume_inside_starts_an_area_inside() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSTrackingArea").expect("NSTrackingArea");
+        let sel = objc::sel::get("initWithRect:options:owner:userInfo:");
+        for (options, inside) in [(tracking::ASSUME_INSIDE, 1), (0, 0)] {
+            let area = objc::object::create_instance(class, 0);
+            // SAFETY: the prototype the method is installed with.
+            unsafe {
+                init_tracking_area(
+                    area,
+                    sel,
+                    NSRect::default(),
+                    options,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_eq!(area_of(area).map(|a| a.inside), Some(inside));
+        }
+        assert!(
+            area_of(objc::object::create_instance(
+                objc::class::lookup(c"NSView").expect("NSView"),
+                0
+            ))
+            .is_none()
+        );
+    }
+
+    /// A tracking-area event goes to the area's owner, whatever that is, and a
+    /// cursor owning one sets itself on entry when it was told to.
+    #[test]
+    fn a_tracking_event_reaches_its_owner() {
+        crate::bootstrap();
+        let cursor =
+            objc::object::create_instance(objc::class::lookup(c"NSCursor").expect("NSCursor"), 0);
+        // SAFETY: a cursor made above.
+        unsafe { set_on_mouse_entered(cursor, objc::sel::get("setOnMouseEntered:"), 1) };
+        let area = objc::object::create_instance(
+            objc::class::lookup(c"NSTrackingArea").expect("NSTrackingArea"),
+            0,
+        );
+        // SAFETY: the prototype the method is installed with.
+        unsafe {
+            init_tracking_area(
+                area,
+                objc::sel::get("initWithRect:options:owner:userInfo:"),
+                NSRect::default(),
+                tracking::MOUSE_ENTERED_AND_EXITED | tracking::ACTIVE_ALWAYS,
+                cursor,
+                std::ptr::null_mut(),
+            )
+        };
+        let event = crate::nsevent::make(crate::nsevent::Fields {
+            kind: crate::nsevent::kind::MOUSE_EXITED,
+            tracking_area: area,
+            ..Default::default()
+        });
+        CURRENT.store(0, std::sync::atomic::Ordering::Release);
+        crate::event::route(std::ptr::null_mut(), event);
+        assert_eq!(
+            CURRENT.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "not set on exit"
+        );
+        let event = crate::nsevent::make(crate::nsevent::Fields {
+            kind: crate::nsevent::kind::MOUSE_ENTERED,
+            tracking_area: area,
+            ..Default::default()
+        });
+        crate::event::route(std::ptr::null_mut(), event);
+        assert_eq!(
+            CURRENT.load(std::sync::atomic::Ordering::Acquire),
+            cursor as usize
+        );
+        CURRENT.store(0, std::sync::atomic::Ordering::Release);
     }
 
     /// `-cursorUpdate:` is inherited by every responder, and the window's own

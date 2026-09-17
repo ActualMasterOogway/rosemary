@@ -747,8 +747,8 @@ pub unsafe fn update_tracking_areas(view: Id) {
 /// Not *which* area and not its rectangle: the question a caller has is whether
 /// the program asked to be told about the pointer at all, and a view that added
 /// one covering part of itself still wants `-mouseMoved:` while the pointer is
-/// in it. Reporting per-rectangle would need enter and exit events, which this
-/// crate does not deliver.
+/// in it. Enter and exit are per-area, and [`crate::cursor::update_tracking`]
+/// delivers those.
 ///
 /// # Safety
 ///
@@ -1064,10 +1064,8 @@ unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
 /// `-addTrackingArea:` and its two companions.
 ///
 /// The area is kept in the subview-shaped list a view already has for it, so
-/// `-removeTrackingArea:` can find the object it was given back. Nothing yet
-/// *delivers* from one: mouse-entered and mouse-exited are the event pump's, and
-/// a tracking area with no pump is a region that is watched by nobody - which is
-/// what a program that has not yet had an event sees anyway.
+/// `-removeTrackingArea:` can find the object it was given back. Delivery is
+/// [`crate::cursor::update_tracking`]'s, which walks these lists on every move.
 unsafe extern "C" fn add_tracking_area(receiver: Id, _sel: Sel, area: Id) {
     let view = view_of(receiver);
     if view.tracking_areas.is_null() {

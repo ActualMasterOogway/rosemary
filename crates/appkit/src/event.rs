@@ -282,24 +282,9 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             // the resulting leave and re-entry as window events rather than
             // mouse-motion events; dropping them leaves an NSTrackingArea
             // owner believing the pointer is outside forever.
-            let at = match entered {
-                true => sdl3::video::mouse_state()
-                    .map(|(x, y, _)| track_pointer(window, x, y))
-                    .unwrap_or_else(|| *POINTER.lock().unwrap_or_else(|e| e.into_inner())),
-                // SDL may already report an outside coordinate on leave. The
-                // last motion is the view the pointer is leaving.
-                false => *POINTER.lock().unwrap_or_else(|e| e.into_inner()),
-            };
-            send(window, Some(at), |window, location| Fields {
-                kind: match entered {
-                    true => kind::MOUSE_ENTERED,
-                    false => kind::MOUSE_EXITED,
-                },
-                modifiers: current_modifiers(),
-                location,
-                window,
-                ..Fields::default()
-            });
+            if entered && let Some((x, y, _)) = sdl3::video::mouse_state() {
+                track_pointer(window, x, y);
+            }
             crate::cursor::apply();
             match entered {
                 true => crate::cursor::update_tracking(object_for(window), false),
@@ -495,7 +480,11 @@ fn send(id: u32, at: Option<(f32, f32)>, fields: impl FnOnce(Id, NSPoint) -> Fie
         return;
     }
     let point = at.map(|(x, y)| location(window, x, y)).unwrap_or_default();
-    let event = nsevent::make(fields(window, point));
+    dispatch(window, nsevent::make(fields(window, point)));
+}
+
+/// Hand a built event to its window's `-sendEvent:`, after the local monitors.
+pub(crate) fn dispatch(window: Id, event: Id) {
     // Before the window sees it, which is where AppKit runs a local monitor: a
     // monitor exists to swallow an event, and one that ran afterwards could
     // only take it back.
@@ -527,6 +516,33 @@ pub fn route(window: Id, event: Id) {
         return;
     };
     let sel = objc::sel::get(selector);
+    // A tracking area's events are its owner's, which need not be a view and
+    // is not reached by walking up from one.
+    let area = nsevent::tracking_area_of(event);
+    if !area.is_null() {
+        let owner = crate::cursor::tracking_owner_of(area);
+        // SAFETY: null or a live object: an owner removes its areas before
+        // it goes, as AppKit requires.
+        let method = unsafe { objc::object::class_of(owner) }.and_then(|c| c.method(sel));
+        if tracing() {
+            eprintln!(
+                "rosetta3: appkit: -{selector} to tracking area owner {owner:p}{}",
+                match method.is_some() {
+                    true => "",
+                    false => " - NOT implemented",
+                }
+            );
+        }
+        if let Some(method) = method {
+            // SAFETY: every tracking method is `void (id, SEL, NSEvent *)`.
+            unsafe {
+                let f: unsafe extern "C" fn(Id, objc::sel::Sel, Id) =
+                    std::mem::transmute(method.implementation());
+                f(owner, sel, event);
+            }
+        }
+        return;
+    }
     let start = match positional(kind) {
         // SAFETY: null or the content view, which this crate made.
         true => unsafe {
@@ -571,6 +587,7 @@ fn responder_selector(kind: u64) -> Option<&'static str> {
         kind::OTHER_MOUSE_DRAGGED => "otherMouseDragged:",
         kind::MOUSE_ENTERED => "mouseEntered:",
         kind::MOUSE_EXITED => "mouseExited:",
+        kind::CURSOR_UPDATE => "cursorUpdate:",
         kind::SCROLL_WHEEL => "scrollWheel:",
         kind::KEY_DOWN => "keyDown:",
         kind::KEY_UP => "keyUp:",

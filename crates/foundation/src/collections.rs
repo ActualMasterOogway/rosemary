@@ -949,13 +949,12 @@ unsafe extern "C" fn number_with_double(_class: Id, _sel: Sel, value: f64) -> Id
     unsafe { api::CFAutorelease(collections::new_number(collections::Number::Float(value))) as Id }
 }
 
+/// `+numberWithBool:` is `kCFBooleanTrue` or `kCFBooleanFalse` itself, as
+/// Apple's is: a guest compares the answer against `@YES` by identity, and
+/// `CFGetTypeID` of it is the boolean type.
 unsafe extern "C" fn number_with_bool(_class: Id, _sel: Sel, value: bool) -> Id {
-    // SAFETY: a fresh object.
-    unsafe {
-        api::CFAutorelease(collections::new_number(collections::Number::Integer(
-            value as i64,
-        ))) as Id
-    }
+    // Not autoreleased: the two objects live for the process.
+    collections::boolean(value) as Id
 }
 
 unsafe extern "C" fn set_with_object(_class: Id, _sel: Sel, object: Id) -> Id {

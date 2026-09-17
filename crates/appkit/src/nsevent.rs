@@ -252,6 +252,18 @@ pub fn kind_of(event: Id) -> u64 {
     unsafe { event_of(event) }.map_or(0, |e| e.kind)
 }
 
+/// The tracking area an enter, exit or cursor-update event is about, or null.
+pub fn tracking_area_of(event: Id) -> Id {
+    // SAFETY: null or a live object this runtime allocated.
+    unsafe { event_of(event) }.map_or(std::ptr::null_mut(), |e| e.tracking_area)
+}
+
+/// `-userData`: for a tracking-area event, the `userInfo` the area was made
+/// with, which is what AppKit hands back.
+unsafe extern "C" fn user_data(receiver: Id, _sel: Sel) -> *mut c_void {
+    crate::cursor::tracking_user_info_of(tracking_area_of(receiver))
+}
+
 /// Where the event happened, in its window's coordinates.
 pub fn location_of(event: Id) -> NSPoint {
     // SAFETY: as above.
@@ -414,6 +426,7 @@ pub(crate) fn install() {
         "data1" => data1, c"q16@0:8";
         "data2" => data2, c"q16@0:8";
         "trackingArea" => tracking_area, c"@16@0:8";
+        "userData" => user_data, c"^v16@0:8";
         // `-magnification` is the pinch gesture's, and SDL delivers no pinch.
         "magnification" => zero_double, c"d16@0:8";
         "deltaZ" => zero_double, c"d16@0:8";

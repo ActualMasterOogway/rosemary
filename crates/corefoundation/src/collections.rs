@@ -408,7 +408,7 @@ pub fn new_number_of_type(value: Number, kind: i32) -> CFTypeRef {
 pub fn boolean_class() -> &'static Class {
     static CLASS: OnceLock<usize> = OnceLock::new();
     let p = *CLASS.get_or_init(|| {
-        let class = register::<Number>(
+        let class = register::<NumberBody>(
             c"__NSCFBoolean",
             crate::base::abstract_class(c"NSNumber", None),
         );
@@ -431,28 +431,132 @@ pub fn boolean(value: bool) -> CFTypeRef {
         false => &FALSE,
     };
     *cell.get_or_init(|| {
-        let object = make(boolean_class(), Number::Integer(value as i64));
+        // `kCFNumberCharType`, which is what Apple's answers for a boolean: it
+        // is the one type outside the canonical six, because `-objCType` of one
+        // is `c`.
+        let body = NumberBody {
+            value: Number::Integer(value as i64),
+            kind: number_type::CHAR,
+        };
+        let object = make(boolean_class(), body);
         objc::arc::retain(object as objc::object::Id);
         object as usize
     }) as CFTypeRef
 }
 
+/// The CoreFoundation storage of a number or a boolean.
+///
 /// # Safety
 ///
 /// As [`contents`].
-pub unsafe fn number<'a>(object: CFTypeRef) -> Option<&'a mut Number> {
+unsafe fn number_body<'a>(object: CFTypeRef) -> Option<&'a mut NumberBody> {
     // SAFETY: the caller's obligation.
-    unsafe { contents::<NumberBody>(object, number_class()) }.map(|body| &mut body.value)
+    unsafe {
+        contents::<NumberBody>(object, number_class())
+            .or_else(|| contents::<NumberBody>(object, boolean_class()))
+    }
 }
 
-/// The canonical `CFNumberType` a number was created with.
+/// The compiler's constant number layouts, as `Foundation` registers their
+/// classes. Read here because a literal `@5` reaches CoreFoundation functions
+/// as often as a number made at run time does, and the layout is clang's.
+#[repr(C)]
+struct ConstantInteger {
+    isa: *const Class,
+    encoding: *const std::ffi::c_char,
+    value: i64,
+}
+
+#[repr(C)]
+struct ConstantDouble {
+    isa: *const Class,
+    value: f64,
+}
+
+#[repr(C)]
+struct ConstantFloat {
+    isa: *const Class,
+    value: f32,
+}
+
+/// The canonical type of an integer `-objCType`: an unsigned type is stored in
+/// the next wider signed one, as `+numberWithUnsignedInt:` is.
+fn integer_encoding_type(encoding: u8) -> i32 {
+    use number_type as t;
+    match encoding {
+        b'c' | b'B' => t::SINT8,
+        b's' | b'C' => t::SINT16,
+        b'i' | b'S' => t::SINT32,
+        _ => t::SINT64,
+    }
+}
+
+/// A constant number the compiler laid out, with its canonical type.
 ///
 /// # Safety
 ///
-/// As [`contents`].
+/// `object` must be null or an object this runtime allocated or bound.
+unsafe fn constant_number(object: CFTypeRef) -> Option<(Number, i32)> {
+    // SAFETY: the caller's obligation.
+    let class = unsafe { crate::base::class_of(object) }?;
+    let is = |name: &std::ffi::CStr| {
+        objc::class::lookup(name).is_some_and(|k| class.chain().any(|c| std::ptr::eq(c, k)))
+    };
+    // SAFETY: an instance of each class has that class's clang layout.
+    unsafe {
+        if is(c"NSConstantIntegerNumber") {
+            let n = &*(object as *const ConstantInteger);
+            let encoding = match n.encoding.is_null() {
+                true => b'q',
+                false => *n.encoding as u8,
+            };
+            return Some((Number::Integer(n.value), integer_encoding_type(encoding)));
+        }
+        if is(c"NSConstantDoubleNumber") {
+            let n = &*(object as *const ConstantDouble);
+            return Some((Number::Float(n.value), number_type::FLOAT64));
+        }
+        if is(c"NSConstantFloatNumber") {
+            let n = &*(object as *const ConstantFloat);
+            return Some((Number::Float(n.value as f64), number_type::FLOAT32));
+        }
+    }
+    None
+}
+
+/// A number's value and its `CFNumberType`: a CoreFoundation number, a
+/// boolean, or a constant the compiler laid out.
+///
+/// # Safety
+///
+/// `object` must be null or an object this runtime allocated or bound.
+pub unsafe fn number_value(object: CFTypeRef) -> Option<(Number, i32)> {
+    // SAFETY: the caller's obligation.
+    match unsafe { number_body(object) } {
+        Some(body) => Some((body.value, body.kind)),
+        // SAFETY: as above.
+        None => unsafe { constant_number(object) },
+    }
+}
+
+/// A number's value; see [`number_value`].
+///
+/// # Safety
+///
+/// As [`number_value`].
+pub unsafe fn number(object: CFTypeRef) -> Option<Number> {
+    // SAFETY: the caller's obligation.
+    unsafe { number_value(object) }.map(|(value, _)| value)
+}
+
+/// The `CFNumberType` a number reports; see [`number_value`].
+///
+/// # Safety
+///
+/// As [`number_value`].
 pub unsafe fn number_type(object: CFTypeRef) -> Option<i32> {
     // SAFETY: the caller's obligation.
-    unsafe { contents::<NumberBody>(object, number_class()) }.map(|body| body.kind)
+    unsafe { number_value(object) }.map(|(_, kind)| kind)
 }
 
 pub fn data_class() -> &'static Class {
