@@ -337,7 +337,7 @@ unsafe extern "C" fn value_for_key(receiver: Id, _sel: Sel, key: Id) -> Id {
         return std::ptr::null_mut();
     };
 
-    // The three getter spellings Apple looks for, in its order.
+    // The getter spellings Apple looks for, in its order.
     let mut chars = key.chars();
     let capitalized = match chars.next() {
         Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
@@ -347,6 +347,7 @@ unsafe extern "C" fn value_for_key(receiver: Id, _sel: Sel, key: Id) -> Id {
         key.to_string(),
         format!("get{capitalized}"),
         format!("is{capitalized}"),
+        format!("_{key}"),
     ] {
         let sel = objc::sel::get(&name);
         let Some(method) = class.method(sel) else {

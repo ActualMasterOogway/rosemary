@@ -682,6 +682,21 @@ fn connect(engine: &Engine, gtk: Ptr, signal: &std::ffi::CStr, handler: *const (
 /// # Safety
 ///
 /// `configuration` must be a configuration.
+/// The user agent a view made with `configuration` sends.
+///
+/// # Safety
+///
+/// `configuration` must be a configuration, or nil.
+unsafe fn user_agent(configuration: Id) -> String {
+    let mut agent = USER_AGENT.to_string();
+    // SAFETY: the caller's obligation.
+    if let Some(name) = unsafe { configuration::application_name_of(configuration) } {
+        agent.push(' ');
+        agent.push_str(&name);
+    }
+    agent
+}
+
 unsafe fn make_gtk_view(engine: &Engine, configuration: Id, id: usize) -> Ptr {
     let api = engine.api;
     // SAFETY: the caller's obligation.
@@ -705,12 +720,8 @@ unsafe fn make_gtk_view(engine: &Engine, configuration: Id, id: usize) -> Ptr {
     }
     // SAFETY: the new widget is floating until something sinks it; this owns it.
     unsafe { (api.g_object_ref_sink)(gtk) };
-    let mut agent = USER_AGENT.to_string();
     // SAFETY: the caller's obligation.
-    if let Some(name) = unsafe { configuration::application_name_of(configuration) } {
-        agent.push(' ');
-        agent.push_str(&name);
-    }
+    let agent = unsafe { user_agent(configuration) };
     if engine::tracing() {
         eprintln!("rosetta3: webkit: user agent {agent}");
     }
@@ -1169,6 +1180,13 @@ unsafe extern "C" fn snapshot_ready(source: Ptr, result: Ptr, data: Ptr) {
 
 unsafe extern "C" fn configuration_getter(receiver: Id, _sel: Sel) -> Id {
     with_object(receiver, |v| v.configuration).unwrap_or_default() as Id
+}
+
+/// The private `-_userAgent`, which apps reach as `valueForKey:@"userAgent"`.
+unsafe extern "C" fn user_agent_getter(receiver: Id, _sel: Sel) -> Id {
+    let configuration = with_object(receiver, |v| v.configuration).unwrap_or_default() as Id;
+    // SAFETY: the view's own configuration, or nil.
+    engine::string(&unsafe { user_agent(configuration) })
 }
 
 unsafe extern "C" fn set_navigation_delegate(receiver: Id, _sel: Sel, delegate: Id) {
@@ -1654,6 +1672,7 @@ pub fn install() {
         "initWithFrame:" => init_with_frame, c"@48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "dealloc" => dealloc, c"v16@0:8";
         "configuration" => configuration_getter, c"@16@0:8";
+        "_userAgent" => user_agent_getter, c"@16@0:8";
         "navigationDelegate" => navigation_delegate, c"@16@0:8";
         "setNavigationDelegate:" => set_navigation_delegate, c"v24@0:8@16";
         "UIDelegate" => ui_delegate, c"@16@0:8";
