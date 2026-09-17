@@ -1,4 +1,4 @@
-//! Minimal AppKit font-manager facade.
+//! Minimal `NSFont` and `NSFontManager` facades.
 
 use objc::object::Id;
 use objc::sel::Sel;
@@ -30,7 +30,42 @@ unsafe extern "C" fn localized_name(_receiver: Id, _sel: Sel, family: Id, face: 
     if family.is_null() { face } else { family }
 }
 
+/// `+[NSFont fontWithName:size:]`.
+///
+/// `NSFont` is toll-free bridged to `CTFont`, so the font is the Core Text one.
+unsafe extern "C" fn font_with_name(_class: Id, _sel: Sel, name: Id, size: f64) -> Id {
+    // SAFETY: null or a string, as the selector requires.
+    let font =
+        unsafe { crate::coretext::CTFontCreateWithName(name as *const _, size, std::ptr::null()) };
+    // SAFETY: a fresh object, or null.
+    unsafe { autorelease(font) }
+}
+
+/// `+systemFontOfSize:`, and its bold twin, which is the same face here: the
+/// fallback family is the only one there is to pick from.
+unsafe extern "C" fn system_font_of_size(_class: Id, _sel: Sel, size: f64) -> Id {
+    // SAFETY: `kCTFontUIFontSystem` with no language.
+    let font = unsafe { crate::coretext::CTFontCreateUIFontForLanguage(2, size, std::ptr::null()) };
+    // SAFETY: a fresh object, or null.
+    unsafe { autorelease(font) }
+}
+
+unsafe fn autorelease(font: *const std::ffi::c_void) -> Id {
+    if font.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the caller's obligation.
+    unsafe { corefoundation::api::CFAutorelease(font) as Id }
+}
+
 pub(crate) fn install() {
+    let class = objc::class::lookup(c"NSFont").expect("declared before its methods");
+    class_methods!(class, {
+        "fontWithName:size:" => font_with_name, c"@32@0:8@16d24";
+        "systemFontOfSize:" => system_font_of_size, c"@24@0:8d16";
+        "boldSystemFontOfSize:" => system_font_of_size, c"@24@0:8d16";
+    });
+
     let class = objc::class::lookup(c"NSFontManager").expect("declared before its methods");
     class_methods!(class, {
         "sharedFontManager" => shared_font_manager, c"@16@0:8";

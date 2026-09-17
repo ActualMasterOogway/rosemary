@@ -34,6 +34,8 @@ pub struct Image {
     /// A retained `CGImage` for an image made with `-initWithCGImage:size:`,
     /// which is the one kind this module can draw.
     cg_image: *const c_void,
+    /// `-setTemplate:`. Only read back: nothing here tints an image.
+    template: usize,
 }
 
 pub const INSTANCE_SIZE: usize = size_of::<Image>();
@@ -392,6 +394,35 @@ unsafe extern "C" fn init_with_size(receiver: Id, _sel: Sel, size: NSSize) -> Id
     receiver
 }
 
+unsafe extern "C" fn set_template(receiver: Id, _sel: Sel, flag: u8) {
+    image_of(receiver).template = usize::from(flag != 0);
+}
+
+unsafe extern "C" fn is_template(receiver: Id, _sel: Sel) -> u8 {
+    u8::from(image_of(receiver).template != 0)
+}
+
+/// `+imageWithSize:flipped:drawingHandler:`: an image of that size.
+///
+/// The handler is what AppKit calls each time the image is drawn, and an image
+/// here is never drawn into anything - so it is never called, and the image is
+/// only as good as its size, which is what a program lays itself out by.
+unsafe extern "C" fn image_with_size(
+    class: Id,
+    _sel: Sel,
+    size: NSSize,
+    _flipped: u8,
+    _handler: Id,
+) -> Id {
+    // SAFETY: the receiver of a class method is a class.
+    let Some(class) = (unsafe { objc::class::from_ptr(class as *const objc::class::Class) }) else {
+        return std::ptr::null_mut();
+    };
+    let image = objc::object::create_instance(class, 0);
+    image_of(image).size = size;
+    objc::arc::autorelease(image)
+}
+
 unsafe extern "C" fn size(receiver: Id, _sel: Sel) -> NSSize {
     image_of(receiver).size
 }
@@ -543,6 +574,7 @@ pub(crate) fn install() {
     let class = objc::class::lookup(c"NSImage").expect("declared before its methods");
     class_methods!(class, {
         "imageNamed:" => image_named, c"@24@0:8@16";
+        "imageWithSize:flipped:drawingHandler:" => image_with_size, c"@44@0:8{CGSize=dd}16c32@?36";
     });
     methods!(class, {
         "initWithData:" => init_with_data, c"@24@0:8@16";
@@ -554,6 +586,8 @@ pub(crate) fn install() {
         "initWithContentsOfFile:" => init_with_contents_of_file, c"@24@0:8@16";
         "size" => size, c"{CGSize=dd}16@0:8";
         "setSize:" => set_size, c"v32@0:8{CGSize=dd}16";
+        "setTemplate:" => set_template, c"v20@0:8c16";
+        "isTemplate" => is_template, c"c16@0:8";
     });
     // The pixel family, each reached by the same implementation so that the one
     // that is wanted first names itself.

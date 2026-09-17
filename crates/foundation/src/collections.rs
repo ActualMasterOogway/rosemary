@@ -202,6 +202,28 @@ unsafe extern "C" fn add_object(receiver: Id, _sel: Sel, object: Id) {
     a.values.push(a.policy.retain(object as CFTypeRef));
 }
 
+unsafe extern "C" fn add_objects_from_array(receiver: Id, _sel: Sel, other: Id) {
+    // SAFETY: an array.
+    let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return;
+    };
+    if !a.mutable {
+        immutable("NSArray", "addObjectsFromArray:");
+    }
+    if other.is_null() {
+        return;
+    }
+    // Cloned first: an array may be asked to add its own contents.
+    // SAFETY: the argument is an array if it is one of ours.
+    let values = match unsafe { collections::array(other as CFTypeRef) } {
+        Some(o) => o.values.clone(),
+        None => objc::fail!("-[NSMutableArray addObjectsFromArray:]: the argument is not an array"),
+    };
+    for value in values {
+        a.values.push(a.policy.retain(value));
+    }
+}
+
 unsafe extern "C" fn remove_object_at_index(receiver: Id, _sel: Sel, index: usize) {
     // SAFETY: an array.
     let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
@@ -1098,6 +1120,7 @@ pub(crate) fn install() {
         "init" => init_mutable_array, c"@16@0:8";
         "initWithCapacity:" => init_mutable_array_with_capacity, c"@24@0:8Q16";
         "addObject:" => add_object, c"v24@0:8@16";
+        "addObjectsFromArray:" => add_objects_from_array, c"v24@0:8@16";
         "removeObjectAtIndex:" => remove_object_at_index, c"v24@0:8Q16";
         "removeAllObjects" => remove_all_objects, c"v16@0:8";
     });

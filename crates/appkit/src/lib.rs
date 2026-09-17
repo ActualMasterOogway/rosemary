@@ -13,6 +13,7 @@
 use std::ffi::c_int;
 
 pub mod alert;
+mod animation;
 pub mod appearance;
 pub mod application;
 pub mod backing;
@@ -21,6 +22,7 @@ pub mod cgcontext;
 pub mod cgevent;
 pub mod classes;
 pub mod color;
+mod controls;
 pub mod coretext;
 pub mod cursor;
 pub(crate) mod decode;
@@ -36,6 +38,7 @@ pub mod image;
 mod input_context;
 pub mod keymap;
 pub mod layer;
+mod layout;
 pub mod menu;
 pub mod metadata;
 pub mod monitor;
@@ -76,6 +79,9 @@ pub fn bootstrap() {
         screen::install();
         window::install();
         view::install();
+        layout::install();
+        controls::install();
+        animation::install();
         backing::install();
         layer::install();
         text::install();

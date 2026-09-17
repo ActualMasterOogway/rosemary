@@ -47,6 +47,9 @@ pub struct View {
     does_not_autoresize_subviews: usize,
     /// `-setHidden:`.
     hidden: usize,
+    /// `-setTranslatesAutoresizingMaskIntoConstraints:`, inverted like
+    /// `does_not_autoresize_subviews` so that zero is AppKit's `YES`.
+    constrained: usize,
 }
 
 /// The bits of [`View::posts`].
@@ -82,6 +85,7 @@ fn note_geometry_change(receiver: Id, before: NSRect) {
     if view.frame.size != before.size {
         resize_subviews(receiver, before.size);
     }
+    crate::layout::solve();
     let view = view_of(receiver);
     let posts = view.posts;
     if posts & POSTS_FRAME != 0 {
@@ -143,7 +147,8 @@ fn resize_subviews(receiver: Id, old: NSSize) {
 unsafe extern "C" fn resize_with_old_superview_size(receiver: Id, _sel: Sel, old: NSSize) {
     let view = view_of(receiver);
     let superview = view.superview;
-    if !is_view(superview) {
+    // A view placed by constraints is not also placed by its mask.
+    if !is_view(superview) || view.constrained != 0 {
         return;
     }
     let new = view_of(superview).frame.size;
@@ -333,7 +338,7 @@ fn view_of<'a>(receiver: Id) -> &'a mut View {
     unsafe { &mut *(receiver as *mut View) }
 }
 
-fn is_view(object: Id) -> bool {
+pub(crate) fn is_view(object: Id) -> bool {
     // SAFETY: null or an object this runtime allocated, which is what every
     // caller has.
     unsafe { objc::object::class_of(object) }.is_some_and(|c| {
@@ -1064,6 +1069,81 @@ unsafe extern "C" fn add_subview(receiver: Id, sel: Sel, subview: Id) {
     objc::arc::release(subview);
     // SAFETY: a view this crate made, now in a window.
     unsafe { update_tracking_areas(subview) };
+    crate::layout::solve();
+}
+
+/// `NSWindowOrderingMode`'s `NSWindowBelow`; `NSWindowAbove` is everything else.
+const ORDER_BELOW: isize = -1;
+
+/// `-addSubview:positioned:relativeTo:`: `-addSubview:`, then moved to sit just
+/// above or below `other`, or above or below every sibling when `other` is not
+/// one.
+unsafe extern "C" fn add_subview_positioned(
+    receiver: Id,
+    sel: Sel,
+    subview: Id,
+    place: isize,
+    other: Id,
+) {
+    // SAFETY: as `-addSubview:`.
+    unsafe { add_subview(receiver, sel, subview) };
+    if !is_view(subview) || view_of(subview).superview != receiver {
+        return;
+    }
+    let list = view_of(receiver).subviews;
+    // SAFETY: an array this module made.
+    let Some(array) = (unsafe { corefoundation::collections::array(list as *const c_void) }) else {
+        return;
+    };
+    let Some(from) = array
+        .values
+        .iter()
+        .rposition(|v| *v == subview as *const c_void)
+    else {
+        return;
+    };
+    let entry = array.values.remove(from);
+    let anchor = (other != subview)
+        .then(|| {
+            array
+                .values
+                .iter()
+                .position(|v| *v == other as *const c_void)
+        })
+        .flatten();
+    let at = match (anchor, place == ORDER_BELOW) {
+        (Some(i), true) => i,
+        (Some(i), false) => i + 1,
+        (None, true) => 0,
+        (None, false) => array.values.len(),
+    };
+    array.values.insert(at, entry);
+}
+
+unsafe extern "C" fn set_translates_autoresizing_mask(receiver: Id, _sel: Sel, flag: u8) {
+    view_of(receiver).constrained = usize::from(flag == 0);
+    crate::layout::solve();
+}
+
+unsafe extern "C" fn translates_autoresizing_mask(receiver: Id, _sel: Sel) -> u8 {
+    u8::from(view_of(receiver).constrained == 0)
+}
+
+/// Whether constraints, rather than the frame a program sets, place `view`.
+pub(crate) fn is_constrained(view: Id) -> bool {
+    is_view(view) && view_of(view).constrained != 0
+}
+
+pub(crate) fn frame_of(view: Id) -> NSRect {
+    view_of(view).frame
+}
+
+/// A rectangle in `from`'s coordinates, in `to`'s.
+pub(crate) fn convert_rect(rect: NSRect, from: Id, to: Id) -> NSRect {
+    NSRect {
+        origin: translated(rect.origin, conversion(from, to)),
+        size: rect.size,
+    }
 }
 
 unsafe extern "C" fn remove_from_superview(receiver: Id, _sel: Sel) {
@@ -1105,6 +1185,7 @@ unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
         }
     }
     objc::arc::release(subviews);
+    crate::layout::forget(receiver);
     let tracking_areas = std::mem::replace(&mut view.tracking_areas, std::ptr::null_mut());
     objc::arc::release(tracking_areas);
     let layer = std::mem::replace(&mut view.layer, std::ptr::null_mut());
@@ -1292,6 +1373,10 @@ pub(crate) fn install() {
         "subviews" => subviews, c"@16@0:8";
         "hitTest:" => hit_test_method, c"@32@0:8{CGPoint=dd}16";
         "addSubview:" => add_subview, c"v24@0:8@16";
+        "addSubview:positioned:relativeTo:" => add_subview_positioned, c"v40@0:8@16q24@32";
+        "setTranslatesAutoresizingMaskIntoConstraints:" => set_translates_autoresizing_mask,
+            c"v20@0:8c16";
+        "translatesAutoresizingMaskIntoConstraints" => translates_autoresizing_mask, c"c16@0:8";
         "removeFromSuperview" => remove_from_superview, c"v16@0:8";
         "dealloc" => dealloc, c"v16@0:8";
         "setWantsBestResolutionOpenGLSurface:" => set_wants_best_resolution, c"v20@0:8c16";

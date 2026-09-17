@@ -1,0 +1,658 @@
+//! The standard controls a program builds its own window from: `NSStackView`,
+//! `NSBox`, `NSProgressIndicator`, and the convenience constructors of
+//! `NSButton` and `NSTextField`.
+//!
+//! None of these draws, as no view here does. What they keep is the state a
+//! program reads back, and - for the stack view - where its arranged subviews
+//! go, since that is geometry a program's other views are tied to.
+
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+use foundation::geometry::{NSPoint, NSRect, NSSize};
+use objc::object::Id;
+use objc::sel::Sel;
+
+use crate::define::{class_methods, methods};
+use crate::view;
+
+/// `NSEdgeInsets`.
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct NSEdgeInsets {
+    pub top: f64,
+    pub left: f64,
+    pub bottom: f64,
+    pub right: f64,
+}
+
+/// `NSUserInterfaceLayoutOrientation`.
+const VERTICAL: isize = 1;
+/// `NSStackViewDistribution`.
+const FILL_EQUALLY: isize = 1;
+/// `NSStackViewGravity`: leading and top are 1, centre 2, trailing and bottom 3.
+const GRAVITY_CENTER: isize = 2;
+const GRAVITY_TRAILING: isize = 3;
+
+#[derive(Clone)]
+struct Stack {
+    orientation: isize,
+    distribution: isize,
+    alignment: isize,
+    spacing: f64,
+    insets: NSEdgeInsets,
+    detaches_hidden_views: bool,
+    /// Arranged subviews and their gravities, unretained: the subview list
+    /// holds each one, and [`forget`] drops it when it goes.
+    views: Vec<(usize, isize)>,
+}
+
+impl Default for Stack {
+    fn default() -> Self {
+        Self {
+            orientation: 0,
+            // `NSStackViewDistributionGravityAreas`.
+            distribution: -1,
+            // `NSLayoutAttributeCenterY`, for the default horizontal stack.
+            alignment: 10,
+            spacing: 8.0,
+            insets: NSEdgeInsets::default(),
+            detaches_hidden_views: true,
+            views: Vec::new(),
+        }
+    }
+}
+
+fn stacks() -> &'static Mutex<HashMap<usize, Stack>> {
+    static STACKS: OnceLock<Mutex<HashMap<usize, Stack>>> = OnceLock::new();
+    STACKS.get_or_init(Default::default)
+}
+
+fn stack(receiver: Id) -> Stack {
+    stacks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&(receiver as usize))
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn update_stack(receiver: Id, with: impl FnOnce(&mut Stack)) {
+    with(
+        stacks()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(receiver as usize)
+            .or_default(),
+    );
+    crate::layout::solve();
+}
+
+pub(crate) fn has_stacks() -> bool {
+    stacks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .any(|s| !s.views.is_empty())
+}
+
+/// Drop a view that is going away, as a stack or as something arranged in one.
+pub(crate) fn forget(object: Id) {
+    let mut table = stacks().lock().unwrap_or_else(|e| e.into_inner());
+    table.remove(&(object as usize));
+    for stack in table.values_mut() {
+        stack.views.retain(|(v, _)| *v != object as usize);
+    }
+    drop(table);
+    let key = object as usize;
+    for (table, objects) in [
+        (boxes(), &slot::BOX_OBJECTS[..]),
+        (indicators(), &[][..]),
+        (buttons(), &slot::BUTTON_OBJECTS[..]),
+    ] {
+        let gone = table.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+        if let Some(row) = gone {
+            for at in objects {
+                objc::arc::release(row[*at] as Id);
+            }
+        }
+    }
+}
+
+/// Place one stack's arranged subviews; whether any of them moved.
+fn arrange(receiver: Id, stack: &Stack) -> bool {
+    let size = view::frame_of(receiver).size;
+    let vertical = stack.orientation == VERTICAL;
+    let flipped = crate::layout::is_flipped(receiver);
+    let insets = stack.insets;
+    let views: Vec<(Id, isize)> = stack
+        .views
+        .iter()
+        .map(|(v, g)| (*v as Id, *g))
+        // SAFETY: views this crate made, still in the list `forget` keeps.
+        .filter(|(v, _)| unsafe { view::superview_of(*v) } == receiver)
+        .filter(|(v, _)| {
+            !(stack.detaches_hidden_views && view::is_hidden_or_has_hidden_ancestor(*v))
+        })
+        .collect();
+    if views.is_empty() {
+        return false;
+    }
+    let (length, lead, trail) = if vertical {
+        (size.height, insets.top, insets.bottom)
+    } else {
+        (size.width, insets.left, insets.right)
+    };
+    let (cross, cross_lead, cross_trail) = if vertical {
+        (size.width, insets.left, insets.right)
+    } else {
+        (size.height, insets.bottom, insets.top)
+    };
+    let extent = |v: Id| {
+        let s = view::frame_of(v).size;
+        if vertical {
+            (s.height, s.width)
+        } else {
+            (s.width, s.height)
+        }
+    };
+    // Each view's distance from the leading edge and its length along the axis.
+    let mut spans: Vec<(Id, f64, f64)> = Vec::new();
+    let spacing = stack.spacing;
+    if stack.distribution == FILL_EQUALLY {
+        let n = views.len() as f64;
+        let each = ((length - lead - trail - spacing * (n - 1.0)) / n).max(0.0);
+        for (i, (v, _)) in views.iter().enumerate() {
+            spans.push((*v, lead + i as f64 * (each + spacing), each));
+        }
+    } else {
+        let group = |gravity: &dyn Fn(isize) -> bool| -> Vec<(Id, f64)> {
+            views
+                .iter()
+                .filter(|(_, g)| gravity(*g))
+                .map(|(v, _)| (*v, extent(*v).0))
+                .collect()
+        };
+        let total = |g: &[(Id, f64)]| {
+            g.iter().map(|(_, l)| *l).sum::<f64>() + spacing * (g.len().max(1) - 1) as f64
+        };
+        let leading = group(&|g| g != GRAVITY_CENTER && g != GRAVITY_TRAILING);
+        let center = group(&|g| g == GRAVITY_CENTER);
+        let trailing = group(&|g| g == GRAVITY_TRAILING);
+        for (views, start) in [
+            (&leading, lead),
+            (&center, (length - total(&center)) / 2.0),
+            (&trailing, length - trail - total(&trailing)),
+        ] {
+            let mut at = start;
+            for (v, l) in views {
+                spans.push((*v, at, *l));
+                at += l + spacing;
+            }
+        }
+    }
+    let mut moved = false;
+    for (v, at, along) in spans {
+        let (_, across) = extent(v);
+        // Distance from the cross axis's bottom or left edge. Edge alignments
+        // across the stack's axis hug that edge; every other one centres.
+        let offset = match stack.alignment {
+            1 | 5 if vertical => cross_lead,
+            2 | 6 if vertical => cross - cross_trail - across,
+            3 if !vertical => cross - cross_trail - across,
+            4 if !vertical => cross_lead,
+            _ => cross_lead + (cross - cross_lead - cross_trail - across) / 2.0,
+        };
+        let frame = if vertical {
+            let y = if flipped {
+                at
+            } else {
+                size.height - at - along
+            };
+            NSRect {
+                origin: NSPoint { x: offset, y },
+                size: NSSize {
+                    width: across,
+                    height: along,
+                },
+            }
+        } else {
+            let y = if flipped {
+                cross - offset - across
+            } else {
+                offset
+            };
+            NSRect {
+                origin: NSPoint { x: at, y },
+                size: NSSize {
+                    width: along,
+                    height: across,
+                },
+            }
+        };
+        moved |= crate::layout::set_frame(v, frame);
+    }
+    moved
+}
+
+/// Place every stack's arranged subviews; whether any of them moved.
+pub(crate) fn arrange_stacks() -> bool {
+    let snapshot: Vec<(usize, Stack)> = stacks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|(_, s)| !s.views.is_empty())
+        .map(|(k, s)| (*k, s.clone()))
+        .collect();
+    let mut moved = false;
+    for (receiver, stack) in snapshot {
+        moved |= arrange(receiver as Id, &stack);
+    }
+    moved
+}
+
+unsafe extern "C" fn stack_set_orientation(receiver: Id, _sel: Sel, value: isize) {
+    update_stack(receiver, |s| {
+        // The default alignment follows the orientation, as AppKit's does.
+        if s.alignment == 10 && value == VERTICAL {
+            s.alignment = 9;
+        } else if s.alignment == 9 && value != VERTICAL {
+            s.alignment = 10;
+        }
+        s.orientation = value;
+    });
+}
+
+unsafe extern "C" fn stack_orientation(receiver: Id, _sel: Sel) -> isize {
+    stack(receiver).orientation
+}
+
+unsafe extern "C" fn stack_set_distribution(receiver: Id, _sel: Sel, value: isize) {
+    update_stack(receiver, |s| s.distribution = value);
+}
+
+unsafe extern "C" fn stack_distribution(receiver: Id, _sel: Sel) -> isize {
+    stack(receiver).distribution
+}
+
+unsafe extern "C" fn stack_set_alignment(receiver: Id, _sel: Sel, value: isize) {
+    update_stack(receiver, |s| s.alignment = value);
+}
+
+unsafe extern "C" fn stack_alignment(receiver: Id, _sel: Sel) -> isize {
+    stack(receiver).alignment
+}
+
+unsafe extern "C" fn stack_set_spacing(receiver: Id, _sel: Sel, value: f64) {
+    update_stack(receiver, |s| s.spacing = value);
+}
+
+unsafe extern "C" fn stack_spacing(receiver: Id, _sel: Sel) -> f64 {
+    stack(receiver).spacing
+}
+
+unsafe extern "C" fn stack_set_edge_insets(receiver: Id, _sel: Sel, value: NSEdgeInsets) {
+    update_stack(receiver, |s| s.insets = value);
+}
+
+unsafe extern "C" fn stack_edge_insets(receiver: Id, _sel: Sel) -> NSEdgeInsets {
+    stack(receiver).insets
+}
+
+unsafe extern "C" fn stack_set_detaches_hidden_views(receiver: Id, _sel: Sel, value: u8) {
+    update_stack(receiver, |s| s.detaches_hidden_views = value != 0);
+}
+
+unsafe extern "C" fn stack_detaches_hidden_views(receiver: Id, _sel: Sel) -> u8 {
+    u8::from(stack(receiver).detaches_hidden_views)
+}
+
+fn send_object(receiver: Id, selector: &str, argument: Id) {
+    // SAFETY: every selector this is used with is `void (id, SEL, id)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+        f(receiver, objc::sel::get(selector), argument);
+    }
+}
+
+fn arrange_view(receiver: Id, subview: Id, gravity: isize) {
+    if !view::is_view(subview) {
+        return;
+    }
+    // AppKit's own: an arranged subview is placed by the stack, not its mask.
+    // SAFETY: `-setTranslatesAutoresizingMaskIntoConstraints:` takes a BOOL.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, u8) = std::mem::transmute(objc::msg::entry());
+        f(
+            subview,
+            objc::sel::get("setTranslatesAutoresizingMaskIntoConstraints:"),
+            0,
+        );
+    }
+    send_object(receiver, "addSubview:", subview);
+    update_stack(receiver, |s| {
+        s.views.retain(|(v, _)| *v != subview as usize);
+        s.views.push((subview as usize, gravity));
+    });
+}
+
+unsafe extern "C" fn stack_add_view_in_gravity(
+    receiver: Id,
+    _sel: Sel,
+    subview: Id,
+    gravity: isize,
+) {
+    arrange_view(receiver, subview, gravity);
+}
+
+unsafe extern "C" fn stack_add_arranged_subview(receiver: Id, _sel: Sel, subview: Id) {
+    arrange_view(receiver, subview, 1);
+}
+
+unsafe extern "C" fn stack_remove_arranged_subview(receiver: Id, _sel: Sel, subview: Id) {
+    update_stack(receiver, |s| {
+        s.views.retain(|(v, _)| *v != subview as usize)
+    });
+}
+
+unsafe extern "C" fn stack_arranged_subviews(receiver: Id, _sel: Sel) -> Id {
+    let values: Vec<*const std::ffi::c_void> = stack(receiver)
+        .views
+        .iter()
+        .map(|(v, _)| *v as *const std::ffi::c_void)
+        .collect();
+    let array = corefoundation::collections::new_array(
+        &values,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    // SAFETY: a fresh object.
+    unsafe { corefoundation::api::CFAutorelease(array) as Id }
+}
+
+fn boxes() -> &'static Mutex<HashMap<usize, Vec<usize>>> {
+    static TABLE: OnceLock<Mutex<HashMap<usize, Vec<usize>>>> = OnceLock::new();
+    TABLE.get_or_init(Default::default)
+}
+
+fn indicators() -> &'static Mutex<HashMap<usize, Vec<usize>>> {
+    static TABLE: OnceLock<Mutex<HashMap<usize, Vec<usize>>>> = OnceLock::new();
+    TABLE.get_or_init(Default::default)
+}
+
+fn buttons() -> &'static Mutex<HashMap<usize, Vec<usize>>> {
+    static TABLE: OnceLock<Mutex<HashMap<usize, Vec<usize>>>> = OnceLock::new();
+    TABLE.get_or_init(Default::default)
+}
+
+/// Slots in each control's row. Object slots are retained; the rest are plain
+/// values stored as words. The views are the rows' keys, so [`forget`] is what
+/// frees them.
+mod slot {
+    pub const BOX_TYPE: usize = 0;
+    pub const FILL_COLOR: usize = 1;
+    pub const BORDER_COLOR: usize = 2;
+    pub const BOX_OBJECTS: [usize; 2] = [FILL_COLOR, BORDER_COLOR];
+
+    pub const INDETERMINATE: usize = 0;
+    pub const STYLE: usize = 1;
+    pub const ANIMATING: usize = 2;
+    pub const VALUE: usize = 3;
+
+    pub const IMAGE: usize = 0;
+    pub const TARGET: usize = 1;
+    pub const ACTION: usize = 2;
+    pub const BUTTON_OBJECTS: [usize; 1] = [IMAGE];
+}
+
+const ROW: usize = 4;
+
+fn read(table: &Mutex<HashMap<usize, Vec<usize>>>, receiver: Id, at: usize) -> usize {
+    table
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&(receiver as usize))
+        .and_then(|row| row.get(at).copied())
+        .unwrap_or(0)
+}
+
+fn write(table: &Mutex<HashMap<usize, Vec<usize>>>, receiver: Id, at: usize, value: usize) {
+    let mut table = table.lock().unwrap_or_else(|e| e.into_inner());
+    table
+        .entry(receiver as usize)
+        .or_insert_with(|| vec![0; ROW])[at] = value;
+}
+
+/// Store a retained object, releasing the one it replaces.
+fn write_object(table: &Mutex<HashMap<usize, Vec<usize>>>, receiver: Id, at: usize, value: Id) {
+    let old = read(table, receiver, at);
+    write(table, receiver, at, objc::arc::retain(value) as usize);
+    objc::arc::release(old as Id);
+}
+
+unsafe extern "C" fn box_set_box_type(receiver: Id, _sel: Sel, value: usize) {
+    write(boxes(), receiver, slot::BOX_TYPE, value);
+}
+
+unsafe extern "C" fn box_box_type(receiver: Id, _sel: Sel) -> usize {
+    read(boxes(), receiver, slot::BOX_TYPE)
+}
+
+unsafe extern "C" fn box_set_fill_color(receiver: Id, _sel: Sel, value: Id) {
+    write_object(boxes(), receiver, slot::FILL_COLOR, value);
+}
+
+unsafe extern "C" fn box_fill_color(receiver: Id, _sel: Sel) -> Id {
+    read(boxes(), receiver, slot::FILL_COLOR) as Id
+}
+
+unsafe extern "C" fn box_set_border_color(receiver: Id, _sel: Sel, value: Id) {
+    write_object(boxes(), receiver, slot::BORDER_COLOR, value);
+}
+
+unsafe extern "C" fn box_border_color(receiver: Id, _sel: Sel) -> Id {
+    read(boxes(), receiver, slot::BORDER_COLOR) as Id
+}
+
+unsafe extern "C" fn indicator_set_indeterminate(receiver: Id, _sel: Sel, value: u8) {
+    // Stored inverted: a fresh indicator is indeterminate.
+    write(
+        indicators(),
+        receiver,
+        slot::INDETERMINATE,
+        usize::from(value == 0),
+    );
+}
+
+unsafe extern "C" fn indicator_is_indeterminate(receiver: Id, _sel: Sel) -> u8 {
+    u8::from(read(indicators(), receiver, slot::INDETERMINATE) == 0)
+}
+
+unsafe extern "C" fn indicator_set_style(receiver: Id, _sel: Sel, value: usize) {
+    write(indicators(), receiver, slot::STYLE, value);
+}
+
+unsafe extern "C" fn indicator_style(receiver: Id, _sel: Sel) -> usize {
+    read(indicators(), receiver, slot::STYLE)
+}
+
+/// `-startAnimation:`. Nothing spins, since nothing draws; the state is kept
+/// for `-isAnimating`-style reads a program makes of its own indicator.
+unsafe extern "C" fn indicator_start_animation(receiver: Id, _sel: Sel, _sender: Id) {
+    write(indicators(), receiver, slot::ANIMATING, 1);
+}
+
+unsafe extern "C" fn indicator_stop_animation(receiver: Id, _sel: Sel, _sender: Id) {
+    write(indicators(), receiver, slot::ANIMATING, 0);
+}
+
+unsafe extern "C" fn indicator_set_double_value(receiver: Id, _sel: Sel, value: f64) {
+    write(
+        indicators(),
+        receiver,
+        slot::VALUE,
+        value.to_bits() as usize,
+    );
+}
+
+unsafe extern "C" fn indicator_double_value(receiver: Id, _sel: Sel) -> f64 {
+    f64::from_bits(read(indicators(), receiver, slot::VALUE) as u64)
+}
+
+unsafe extern "C" fn button_set_image(receiver: Id, _sel: Sel, value: Id) {
+    write_object(buttons(), receiver, slot::IMAGE, value);
+}
+
+unsafe extern "C" fn button_image(receiver: Id, _sel: Sel) -> Id {
+    read(buttons(), receiver, slot::IMAGE) as Id
+}
+
+/// `-setTarget:`, unretained as a control's target is.
+unsafe extern "C" fn button_set_target(receiver: Id, _sel: Sel, value: Id) {
+    write(buttons(), receiver, slot::TARGET, value as usize);
+}
+
+unsafe extern "C" fn button_target(receiver: Id, _sel: Sel) -> Id {
+    read(buttons(), receiver, slot::TARGET) as Id
+}
+
+unsafe extern "C" fn button_set_action(receiver: Id, _sel: Sel, value: Sel) {
+    write(buttons(), receiver, slot::ACTION, value as usize);
+}
+
+unsafe extern "C" fn button_action(receiver: Id, _sel: Sel) -> Sel {
+    read(buttons(), receiver, slot::ACTION) as Sel
+}
+
+/// A fresh, autoreleased view of the receiving class with a zero frame.
+fn new_view(class: Id) -> Option<Id> {
+    // SAFETY: the receiver of a class method is a class.
+    let class = unsafe { objc::class::from_ptr(class as *const objc::class::Class) }?;
+    let object = objc::object::create_instance(class, 0);
+    let frame = NSRect {
+        origin: NSPoint { x: 0.0, y: 0.0 },
+        size: NSSize {
+            width: 0.0,
+            height: 0.0,
+        },
+    };
+    // SAFETY: `-initWithFrame:` is `id (id, SEL, NSRect)`, sent so a subclass's
+    // override runs.
+    let object = unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, NSRect) -> Id =
+            std::mem::transmute(objc::msg::entry());
+        f(object, objc::sel::get("initWithFrame:"), frame)
+    };
+    (!object.is_null()).then(|| objc::arc::autorelease(object))
+}
+
+/// `+buttonWithImage:target:action:`, sized to the image as AppKit sizes it to
+/// fit.
+unsafe extern "C" fn button_with_image(
+    class: Id,
+    _sel: Sel,
+    image: Id,
+    target: Id,
+    action: Sel,
+) -> Id {
+    let Some(button) = new_view(class) else {
+        return std::ptr::null_mut();
+    };
+    send_object(button, "setImage:", image);
+    send_object(button, "setTarget:", target);
+    // SAFETY: `-setAction:` is `void (id, SEL, SEL)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Sel) = std::mem::transmute(objc::msg::entry());
+        f(button, objc::sel::get("setAction:"), action);
+    }
+    if !image.is_null() {
+        // SAFETY: `-size` is `NSSize (id, SEL)`, and `-setFrameSize:` its mirror.
+        unsafe {
+            let size: unsafe extern "C" fn(Id, Sel) -> NSSize =
+                std::mem::transmute(objc::msg::entry());
+            let size = size(image, objc::sel::get("size"));
+            let set: unsafe extern "C" fn(Id, Sel, NSSize) =
+                std::mem::transmute(objc::msg::entry());
+            set(button, objc::sel::get("setFrameSize:"), size);
+        }
+    }
+    button
+}
+
+/// `+labelWithString:`: a text field that can be neither edited nor selected.
+unsafe extern "C" fn label_with_string(class: Id, _sel: Sel, string: Id) -> Id {
+    let Some(label) = new_view(class) else {
+        return std::ptr::null_mut();
+    };
+    send_object(label, "setStringValue:", string);
+    for selector in ["setEditable:", "setSelectable:"] {
+        // SAFETY: both are `void (id, SEL, BOOL)`.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, u8) = std::mem::transmute(objc::msg::entry());
+            f(label, objc::sel::get(selector), 0);
+        }
+    }
+    label
+}
+
+pub(crate) fn install() {
+    let class = objc::class::lookup(c"NSStackView").expect("declared before its methods");
+    methods!(class, {
+        "setOrientation:" => stack_set_orientation, c"v24@0:8q16";
+        "orientation" => stack_orientation, c"q16@0:8";
+        "setDistribution:" => stack_set_distribution, c"v24@0:8q16";
+        "distribution" => stack_distribution, c"q16@0:8";
+        "setAlignment:" => stack_set_alignment, c"v24@0:8q16";
+        "alignment" => stack_alignment, c"q16@0:8";
+        "setSpacing:" => stack_set_spacing, c"v24@0:8d16";
+        "spacing" => stack_spacing, c"d16@0:8";
+        "setEdgeInsets:" => stack_set_edge_insets, c"v48@0:8{NSEdgeInsets=dddd}16";
+        "edgeInsets" => stack_edge_insets, c"{NSEdgeInsets=dddd}16@0:8";
+        "setDetachesHiddenViews:" => stack_set_detaches_hidden_views, c"v20@0:8c16";
+        "detachesHiddenViews" => stack_detaches_hidden_views, c"c16@0:8";
+        "addView:inGravity:" => stack_add_view_in_gravity, c"v32@0:8@16q24";
+        "addArrangedSubview:" => stack_add_arranged_subview, c"v24@0:8@16";
+        "removeArrangedSubview:" => stack_remove_arranged_subview, c"v24@0:8@16";
+        "arrangedSubviews" => stack_arranged_subviews, c"@16@0:8";
+    });
+
+    let class = objc::class::lookup(c"NSBox").expect("declared before its methods");
+    methods!(class, {
+        "setBoxType:" => box_set_box_type, c"v24@0:8Q16";
+        "boxType" => box_box_type, c"Q16@0:8";
+        "setFillColor:" => box_set_fill_color, c"v24@0:8@16";
+        "fillColor" => box_fill_color, c"@16@0:8";
+        "setBorderColor:" => box_set_border_color, c"v24@0:8@16";
+        "borderColor" => box_border_color, c"@16@0:8";
+    });
+
+    let class = objc::class::lookup(c"NSProgressIndicator").expect("declared before its methods");
+    methods!(class, {
+        "setIndeterminate:" => indicator_set_indeterminate, c"v20@0:8c16";
+        "isIndeterminate" => indicator_is_indeterminate, c"c16@0:8";
+        "setStyle:" => indicator_set_style, c"v24@0:8Q16";
+        "style" => indicator_style, c"Q16@0:8";
+        "startAnimation:" => indicator_start_animation, c"v24@0:8@16";
+        "stopAnimation:" => indicator_stop_animation, c"v24@0:8@16";
+        "setDoubleValue:" => indicator_set_double_value, c"v24@0:8d16";
+        "doubleValue" => indicator_double_value, c"d16@0:8";
+    });
+
+    let class = objc::class::lookup(c"NSButton").expect("declared before its methods");
+    class_methods!(class, {
+        "buttonWithImage:target:action:" => button_with_image, c"@40@0:8@16@24:32";
+    });
+    methods!(class, {
+        "setImage:" => button_set_image, c"v24@0:8@16";
+        "image" => button_image, c"@16@0:8";
+        "setTarget:" => button_set_target, c"v24@0:8@16";
+        "target" => button_target, c"@16@0:8";
+        "setAction:" => button_set_action, c"v24@0:8:16";
+        "action" => button_action, c":16@0:8";
+    });
+
+    let class = objc::class::lookup(c"NSTextField").expect("declared before its methods");
+    class_methods!(class, {
+        "labelWithString:" => label_with_string, c"@24@0:8@16";
+    });
+}
