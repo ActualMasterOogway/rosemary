@@ -187,6 +187,18 @@ unsafe extern "C" fn timestamp(_receiver: Id, _sel: Sel) -> CGFloat {
         .as_secs_f64()
 }
 
+/// `+[NSEvent doubleClickInterval]`, in seconds.
+///
+/// SDL counts the clicks this runtime hands on as `-clickCount`, so the answer
+/// has to be SDL's window rather than the host desktop's preference: a guest
+/// that does its own timing - a view that treats two presses inside the interval
+/// as one gesture - must agree with the count it is given, and SDL's is half a
+/// second unless `SDL_MOUSE_DOUBLE_CLICK_TIME` says otherwise. Nothing here sets
+/// that hint.
+unsafe extern "C" fn double_click_interval(_class: Id, _sel: Sel) -> CGFloat {
+    0.5
+}
+
 /// `+[NSEvent modifierFlags]`, which asks about the keyboard *now* rather than
 /// about an event. SDL is the only thing here that knows.
 unsafe extern "C" fn current_modifier_flags(_class: Id, _sel: Sel) -> u64 {
@@ -399,6 +411,7 @@ pub(crate) fn install() {
         "modifierFlags" => current_modifier_flags, c"Q16@0:8";
         "mouseLocation" => mouse_location, c"{CGPoint=dd}16@0:8";
         "pressedMouseButtons" => pressed_mouse_buttons, c"Q16@0:8";
+        "doubleClickInterval" => double_click_interval, c"d16@0:8";
         "enterExitEventWithType:location:modifierFlags:timestamp:windowNumber:context:eventNumber:trackingNumber:userData:"
             => enter_exit_event, c"@96@0:8Q16{CGPoint=dd}24Q40d48q56@64q72q80^v88";
         "otherEventWithType:location:modifierFlags:timestamp:windowNumber:context:subtype:data1:data2:"

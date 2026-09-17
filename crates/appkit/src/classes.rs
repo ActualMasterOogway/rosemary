@@ -35,6 +35,7 @@ static HIERARCHY: &[(&str, Option<&str>, usize)] = &[
     ("NSText", Some("NSView"), 0),
     ("NSTextView", Some("NSText"), 0),
     ("NSScrollView", Some("NSView"), 0),
+    ("NSScroller", Some("NSControl"), 0),
     ("NSClipView", Some("NSView"), 0),
     ("NSBox", Some("NSView"), 0),
     ("NSStackView", Some("NSView"), 0),

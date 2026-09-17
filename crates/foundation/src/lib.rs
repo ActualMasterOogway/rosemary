@@ -37,6 +37,7 @@ mod signature;
 pub mod string;
 pub mod thread;
 pub mod timer;
+mod timezone;
 pub mod unarchiver;
 pub mod url;
 mod urlcomponents;
@@ -72,6 +73,7 @@ pub fn bootstrap() {
         locale::install();
         formatter::install();
         timer::install();
+        timezone::install();
         thread::install();
         operation::install();
         url::install();
@@ -277,6 +279,7 @@ pub const CLASSES: &[&str] = &[
     "NSException",
     "NSRunLoop",
     "NSTimer",
+    "NSTimeZone",
     "NSFormatter",
     "NSThread",
     "NSLock",

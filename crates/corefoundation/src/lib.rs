@@ -35,7 +35,7 @@ mod send;
 mod socket;
 pub mod string;
 pub mod sysconfig;
-mod timezone;
+pub mod timezone;
 pub mod url;
 pub mod urlresource;
 pub mod uuid;

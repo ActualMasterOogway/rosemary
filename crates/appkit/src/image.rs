@@ -703,6 +703,15 @@ pub mod bitmap {
         bits_per_pixel: usize,
         bytes_per_row: usize,
         has_alpha: usize,
+        /// `-setSize:`, the rep's size in *points*, or zero for one that has
+        /// not been told a size.
+        ///
+        /// Zero rather than a copy of the pixel dimensions at init, so that
+        /// `-size` answers the pixels for as long as nobody has said otherwise:
+        /// the two differ only for a rep that stands for a scaled image - a 2x
+        /// rep is half as many points as pixels - and that is exactly what the
+        /// setter is for.
+        declared: NSSize,
     }
 
     pub const INSTANCE_SIZE: usize = size_of::<BitmapRep>();
@@ -739,6 +748,39 @@ pub mod bitmap {
             Some(bitmap) => adopt(receiver, bitmap),
             None => std::ptr::null_mut(),
         }
+    }
+
+    /// `-initWithCGImage:`, the other direction of the conversion `NSImage`'s
+    /// `-initWithCGImage:size:` does.
+    ///
+    /// The pixels are *copied* rather than shared with the `CGImage`: a rep
+    /// hands out `-bitmapData` for the guest to write through, and writing
+    /// through it must not edit an image someone else still holds. Nil for a
+    /// pixel layout [`crate::graphics::image_bgra`] does not decode, which is
+    /// `NSBitmapImageRep`'s own answer for an image it cannot represent.
+    unsafe extern "C" fn init_with_cg_image(
+        receiver: Id,
+        _sel: Sel,
+        cg_image: *const c_void,
+    ) -> Id {
+        if cg_image.is_null() {
+            return std::ptr::null_mut();
+        }
+        let Some((width, height, mut pixels)) = crate::graphics::image_bgra(cg_image) else {
+            return std::ptr::null_mut();
+        };
+        // `image_bgra` composites, and a rep's samples are R, G, B, A.
+        for pixel in pixels.as_chunks_mut::<4>().0 {
+            pixel.swap(0, 2);
+        }
+        adopt(
+            receiver,
+            crate::raster::Bitmap {
+                width: width as u32,
+                height: height as u32,
+                pixels,
+            },
+        )
     }
 
     /// The eleven-argument designated initialiser.
@@ -889,12 +931,29 @@ pub mod bitmap {
         0
     }
 
+    /// `-size`: what the rep was told it measures, in points, and the pixel
+    /// count until it is told. A rep whose size differs from its pixels is a
+    /// scaled one, and only `-setSize:` can say so - nothing here reads a DPI
+    /// out of an image.
     unsafe extern "C" fn rep_size(receiver: Id, _sel: Sel) -> NSSize {
         let rep = rep_of(receiver);
-        NSSize {
-            width: rep.width as f64,
-            height: rep.height as f64,
+        match rep.declared.width > 0.0 && rep.declared.height > 0.0 {
+            true => rep.declared,
+            false => NSSize {
+                width: rep.width as f64,
+                height: rep.height as f64,
+            },
         }
+    }
+
+    /// `-setSize:`. A zero or negative size puts the rep back on its pixel
+    /// dimensions rather than recording a size no drawing could use: AppKit
+    /// treats a rep's size as the extent it draws into, and zero is not one.
+    unsafe extern "C" fn set_rep_size(receiver: Id, _sel: Sel, size: NSSize) {
+        rep_of(receiver).declared = match size.width > 0.0 && size.height > 0.0 {
+            true => size,
+            false => NSSize::default(),
+        };
     }
 
     unsafe extern "C" fn tiff_representation(receiver: Id, _sel: Sel) -> Id {
@@ -925,6 +984,7 @@ pub mod bitmap {
         });
         methods!(class, {
             "initWithData:" => init_with_data, c"@24@0:8@16";
+            "initWithCGImage:" => init_with_cg_image, c"@24@0:8^{CGImage=}16";
             "initWithBitmapDataPlanes:pixelsWide:pixelsHigh:bitsPerSample:samplesPerPixel:hasAlpha:isPlanar:colorSpaceName:bitmapFormat:bytesPerRow:bitsPerPixel:"
                 => init_with_planes, c"@104@0:8^*16q24q32q40q48c56c64@72Q80q88q96";
             "bitmapData" => bitmap_data, c"^v16@0:8";
@@ -937,6 +997,7 @@ pub mod bitmap {
             "hasAlpha" => has_alpha, c"c16@0:8";
             "isPlanar" => is_planar, c"c16@0:8";
             "size" => rep_size, c"{CGSize=dd}16@0:8";
+            "setSize:" => set_rep_size, c"v32@0:8{CGSize=dd}16";
             "TIFFRepresentation" => tiff_representation, c"@16@0:8";
         });
     }
@@ -1030,6 +1091,104 @@ pub mod bitmap {
             unsafe {
                 assert_eq!(pixels_wide(rep, objc::sel::get("pixelsWide")), 1);
                 assert_eq!(samples_per_pixel(rep, objc::sel::get("samplesPerPixel")), 4);
+            }
+        }
+
+        /// A `CGImage` read back as a rep: the same pixels, in the rep's RGBA
+        /// order rather than the compositor's BGRA, and in the rep's own buffer.
+        #[test]
+        fn a_cg_image_reads_back_as_rgba_samples() {
+            crate::bootstrap();
+            let cg_image = crate::graphics::image_from_bitmap(crate::raster::Bitmap {
+                width: 2,
+                height: 1,
+                pixels: vec![0x10, 0x20, 0x30, 0xff, 0x40, 0x50, 0x60, 0xff],
+            });
+            let rep = objc::object::create_instance(
+                objc::class::lookup(c"NSBitmapImageRep").expect("NSBitmapImageRep"),
+                0,
+            );
+            // SAFETY: `-initWithCGImage:` is `id (id, SEL, CGImageRef)`.
+            let rep = unsafe {
+                init_with_cg_image(rep, objc::sel::get("initWithCGImage:"), cg_image.cast())
+            };
+            assert!(!rep.is_null());
+            // SAFETY: each is the accessor its selector declares.
+            unsafe {
+                assert_eq!(pixels_wide(rep, objc::sel::get("pixelsWide")), 2);
+                assert_eq!(pixels_high(rep, objc::sel::get("pixelsHigh")), 1);
+                assert_eq!(bytes_per_row(rep, objc::sel::get("bytesPerRow")), 8);
+                assert_eq!(has_alpha(rep, objc::sel::get("hasAlpha")), 1);
+                let data = bitmap_data(rep, objc::sel::get("bitmapData"));
+                // SAFETY: two RGBA pixels, as the rep reports.
+                let pixels = std::slice::from_raw_parts(data, 8);
+                assert_eq!(pixels, &[0x10, 0x20, 0x30, 0xff, 0x40, 0x50, 0x60, 0xff]);
+                // The rep copied: releasing the image leaves it readable.
+                corefoundation::api::CFRelease(cg_image);
+                assert_eq!(*pixels.first().expect("a pixel"), 0x10);
+            }
+        }
+
+        /// A rep measures its pixels until it is told otherwise, and then
+        /// measures what it was told - which is how a 2x rep says it is half as
+        /// many points as pixels.
+        #[test]
+        fn a_rep_reports_the_size_it_was_given() {
+            crate::bootstrap();
+            let rep = objc::object::create_instance(
+                objc::class::lookup(c"NSBitmapImageRep").expect("NSBitmapImageRep"),
+                0,
+            );
+            let rep = adopt(rep, crate::raster::Bitmap::new(64, 32));
+            let get = objc::sel::get("size");
+            let set = objc::sel::get("setSize:");
+            // SAFETY: `-size` is `NSSize (id, SEL)` and `-setSize:` its setter.
+            unsafe {
+                assert_eq!(
+                    rep_size(rep, get),
+                    NSSize {
+                        width: 64.0,
+                        height: 32.0
+                    },
+                    "the pixels, until something says otherwise"
+                );
+                let half = NSSize {
+                    width: 32.0,
+                    height: 16.0,
+                };
+                set_rep_size(rep, set, half);
+                assert_eq!(rep_size(rep, get), half);
+                // The pixels are unchanged: a size is points, not samples.
+                assert_eq!(pixels_wide(rep, objc::sel::get("pixelsWide")), 64);
+                assert_eq!(bytes_per_row(rep, objc::sel::get("bytesPerRow")), 256);
+                // And a size no drawing could use puts it back on its pixels.
+                set_rep_size(rep, set, NSSize::default());
+                assert_eq!(
+                    rep_size(rep, get),
+                    NSSize {
+                        width: 64.0,
+                        height: 32.0
+                    }
+                );
+            }
+        }
+
+        /// Nil rather than an empty rep for what is not an image at all, which
+        /// is what a caller checking the result is told.
+        #[test]
+        fn a_non_image_makes_no_rep() {
+            crate::bootstrap();
+            let rep = objc::object::create_instance(
+                objc::class::lookup(c"NSBitmapImageRep").expect("NSBitmapImageRep"),
+                0,
+            );
+            let sel = objc::sel::get("initWithCGImage:");
+            // SAFETY: `-initWithCGImage:` with null, and with an object that is
+            // not a `CGImage`.
+            unsafe {
+                assert!(init_with_cg_image(rep, sel, std::ptr::null()).is_null());
+                let string = foundation::string::from_str("not an image");
+                assert!(init_with_cg_image(rep, sel, string.cast()).is_null());
             }
         }
 

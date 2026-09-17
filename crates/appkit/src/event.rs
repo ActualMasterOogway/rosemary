@@ -378,6 +378,12 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             if take_warp_echo(x, y) {
                 return;
             }
+            // A window being dragged by `-performWindowDragWithEvent:` consumes
+            // the move: it moved the window, and AppKit does not also report it
+            // as a drag inside the window it just moved.
+            if crate::window::drag_moved() {
+                return;
+            }
             let held = crate::button::held(buttons);
             // A disassociated pointer reports the deltas and none of the
             // movement: the location a guest reads back is where the cursor was
@@ -439,6 +445,13 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             y,
         } => {
             let kind = crate::button::event_kind(button, down);
+            // The release ends a window drag. The event is still delivered: a
+            // guest that started the drag from its own `-mouseDown:` is holding
+            // a button as far as it knows, and swallowing the up would leave it
+            // there.
+            if !down {
+                crate::window::end_drag();
+            }
             let (x, y) = track_pointer(id, x, y);
             send(id, Some((x, y)), |window, location| Fields {
                 kind,

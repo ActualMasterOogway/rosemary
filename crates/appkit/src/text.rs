@@ -192,7 +192,7 @@ pub(crate) fn begin_key_interpretation(receiver: Id) {
     }
 }
 
-fn accept_key_interpretation(receiver: Id) {
+pub(crate) fn accept_key_interpretation(receiver: Id) {
     interpreting()
         .lock()
         .unwrap_or_else(|e| e.into_inner())

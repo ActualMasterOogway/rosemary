@@ -595,6 +595,59 @@ unsafe extern "C" fn label_with_string(class: Id, _sel: Sel, string: Id) -> Id {
     label
 }
 
+/// `+[NSScroller scrollerWidth]`, the breadth of a scroller in points.
+///
+/// The legacy metric, which is the one a program that lays a scroller out by
+/// hand is asking for: it subtracts this from a content width. Nothing here
+/// draws a scroller, so this is a number rather than a measurement - but it has
+/// to be *the* number, because the guest's arithmetic has to agree with the
+/// frame [`scroller_init_with_frame`] hands back.
+const SCROLLER_WIDTH: f64 = 15.0;
+
+/// The small control size's scroller, which is the one size that differs.
+const SMALL_SCROLLER_WIDTH: f64 = 11.0;
+
+unsafe extern "C" fn scroller_width(_class: Id, _sel: Sel) -> f64 {
+    SCROLLER_WIDTH
+}
+
+/// `NSControlSize`: regular is 0, small 1, mini 2.
+unsafe extern "C" fn scroller_width_for_control_size(_class: Id, _sel: Sel, size: usize) -> f64 {
+    match size {
+        0 => SCROLLER_WIDTH,
+        _ => SMALL_SCROLLER_WIDTH,
+    }
+}
+
+/// `-[NSScroller initWithFrame:]`, which is not the inherited one: a scroller
+/// constrains the frame it is given.
+///
+/// Its long side is the direction it scrolls - a frame wider than it is tall is
+/// a horizontal scroller - and its short side is forced to [`SCROLLER_WIDTH`],
+/// because a scroller has one breadth and AppKit does not let a caller pick
+/// another. A program reads `-frame` back to lay out the view beside it, so the
+/// constraint is the observable part of this method.
+unsafe extern "C" fn scroller_init_with_frame(receiver: Id, sel: Sel, frame: NSRect) -> Id {
+    let mut frame = frame;
+    match frame.size.width > frame.size.height {
+        true => frame.size.height = SCROLLER_WIDTH,
+        false => frame.size.width = SCROLLER_WIDTH,
+    }
+    // `NSView`'s designated initialiser, reached by its class rather than by
+    // sending: a send would find this override again.
+    let Some(method) = objc::class::lookup(c"NSView")
+        .and_then(|class| class.method(objc::sel::get("initWithFrame:")))
+    else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: `-initWithFrame:` is `id (id, SEL, NSRect)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, NSRect) -> Id =
+            std::mem::transmute(method.implementation());
+        f(receiver, sel, frame)
+    }
+}
+
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSStackView").expect("declared before its methods");
     methods!(class, {
@@ -655,4 +708,93 @@ pub(crate) fn install() {
     class_methods!(class, {
         "labelWithString:" => label_with_string, c"@24@0:8@16";
     });
+
+    let class = objc::class::lookup(c"NSScroller").expect("declared before its methods");
+    class_methods!(class, {
+        "scrollerWidth" => scroller_width, c"d16@0:8";
+        "scrollerWidthForControlSize:" => scroller_width_for_control_size, c"d24@0:8Q16";
+    });
+    methods!(class, {
+        "initWithFrame:" => scroller_init_with_frame,
+            c"@48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scroller(frame: NSRect) -> Id {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSScroller").expect("NSScroller");
+        let object = objc::object::create_instance(class, 0);
+        // SAFETY: `-initWithFrame:` is `id (id, SEL, NSRect)`.
+        unsafe { scroller_init_with_frame(object, objc::sel::get("initWithFrame:"), frame) }
+    }
+
+    /// A scroller keeps the length it was given and takes the breadth AppKit
+    /// gives it, in whichever direction the frame said it runs.
+    #[test]
+    fn a_scroller_is_constrained_to_one_breadth() {
+        let rect = |width: f64, height: f64| NSRect {
+            origin: NSPoint { x: 4.0, y: 7.0 },
+            size: NSSize { width, height },
+        };
+        let vertical = scroller(rect(40.0, 300.0));
+        assert!(!vertical.is_null());
+        assert_eq!(
+            view::frame_of(vertical),
+            rect(SCROLLER_WIDTH, 300.0),
+            "a tall frame is a vertical scroller, narrowed"
+        );
+        let horizontal = scroller(rect(300.0, 40.0));
+        assert_eq!(
+            view::frame_of(horizontal),
+            rect(300.0, SCROLLER_WIDTH),
+            "a wide frame is a horizontal scroller, flattened"
+        );
+        // A square is vertical, as it is on a Mac: horizontal needs width
+        // *greater* than height.
+        assert_eq!(
+            view::frame_of(scroller(rect(40.0, 40.0))).size.width,
+            SCROLLER_WIDTH
+        );
+        objc::arc::release(vertical);
+        objc::arc::release(horizontal);
+    }
+
+    /// A scroller is a control, and a view - which is what lets a program put
+    /// one in its subview tree at all.
+    #[test]
+    fn a_scroller_is_a_control() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSScroller").expect("NSScroller");
+        for name in [c"NSControl", c"NSView", c"NSResponder"] {
+            let ancestor = objc::class::lookup(name).expect("an ancestor");
+            assert!(
+                class.chain().any(|c| std::ptr::eq(c, ancestor)),
+                "a scroller is not a {name:?}"
+            );
+        }
+    }
+
+    /// The breadth a program lays out against is the breadth it gets.
+    #[test]
+    fn the_published_width_is_the_constraint() {
+        crate::bootstrap();
+        // SAFETY: both are class methods of this module's.
+        unsafe {
+            let sel = objc::sel::get("scrollerWidth");
+            assert_eq!(scroller_width(std::ptr::null_mut(), sel), SCROLLER_WIDTH);
+            let sel = objc::sel::get("scrollerWidthForControlSize:");
+            assert_eq!(
+                scroller_width_for_control_size(std::ptr::null_mut(), sel, 0),
+                SCROLLER_WIDTH
+            );
+            assert_eq!(
+                scroller_width_for_control_size(std::ptr::null_mut(), sel, 1),
+                SMALL_SCROLLER_WIDTH
+            );
+        }
+    }
 }

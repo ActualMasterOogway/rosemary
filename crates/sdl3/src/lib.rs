@@ -149,6 +149,8 @@ struct Api {
     SDL_GetWindowSizeInPixels: Option<unsafe extern "C" fn(Window, *mut c_int, *mut c_int) -> bool>,
     SDL_GetWindowPosition: Option<unsafe extern "C" fn(Window, *mut c_int, *mut c_int) -> bool>,
     SDL_SetWindowPosition: Option<unsafe extern "C" fn(Window, c_int, c_int) -> bool>,
+    SDL_SetWindowOpacity: Option<unsafe extern "C" fn(Window, f32) -> bool>,
+    SDL_GetWindowOpacity: Option<unsafe extern "C" fn(Window) -> f32>,
     SDL_ShowWindow: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_HideWindow: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_RaiseWindow: Option<unsafe extern "C" fn(Window) -> bool>,
@@ -355,6 +357,8 @@ fn api() -> Option<&'static Api> {
             SDL_GetWindowSizeInPixels,
             SDL_GetWindowPosition,
             SDL_SetWindowPosition,
+            SDL_SetWindowOpacity,
+            SDL_GetWindowOpacity,
             SDL_ShowWindow,
             SDL_HideWindow,
             SDL_RaiseWindow,
@@ -1982,6 +1986,28 @@ pub mod video {
         };
         // SAFETY: a window this crate created.
         unsafe { f(window, x, y) }
+    }
+
+    /// `SDL_SetWindowOpacity`, where 1.0 is opaque.
+    ///
+    /// False when the window system will not composite a translucent window,
+    /// which is a thing a caller has to be able to tell: AppKit's alpha is a
+    /// property that reads back whatever was set, and this is not.
+    pub fn set_window_opacity(window: Window, opacity: f32) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_SetWindowOpacity) else {
+            return false;
+        };
+        // SAFETY: a window this crate created.
+        unsafe { f(window, opacity) }
+    }
+
+    /// The window's opacity, or `None` when SDL cannot say - it answers a
+    /// negative number for a window it has no opacity for.
+    pub fn window_opacity(window: Window) -> Option<f32> {
+        let f = api()?.SDL_GetWindowOpacity?;
+        // SAFETY: a window this crate created.
+        let opacity = unsafe { f(window) };
+        (opacity >= 0.0).then_some(opacity)
     }
 
     pub fn set_window_fullscreen(window: Window, on: bool) -> bool {

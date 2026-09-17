@@ -24,6 +24,10 @@ pub struct Layer {
     /// the usual delegate and owns the layer, so a retain would be a cycle.
     delegate: Id,
     bounds: NSRect,
+    /// `-mask`, retained: Core Animation declares the property `strong`, and a
+    /// program that builds a mask layer, hands it over and drops its own
+    /// reference expects the layer it set to still be there.
+    mask: Id,
     opaque: u8,
     needs_display: u8,
     needs_layout: u8,
@@ -68,6 +72,7 @@ unsafe extern "C" fn new_layer(class: Id, _sel: Sel) -> Id {
     layer.view = std::ptr::null_mut();
     layer.delegate = std::ptr::null_mut();
     layer.bounds = NSRect::default();
+    layer.mask = std::ptr::null_mut();
     layer.opaque = 0;
     layer.needs_display = 0;
     layer.needs_layout = 0;
@@ -319,6 +324,8 @@ unsafe extern "C" fn action_for_key(receiver: Id, _sel: Sel, key: Id) -> Id {
 /// holding it is freed.
 unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
     objc::arc::destroy_weak(&mut layer_of(receiver).delegate);
+    let mask = std::mem::replace(&mut layer_of(receiver).mask, std::ptr::null_mut());
+    objc::arc::release(mask);
     if objc::class::lookup(c"CAMetalLayer").is_some_and(|metal| {
         // SAFETY: a live layer being deallocated.
         unsafe { objc::object::class_of(receiver) }.is_some_and(|class| {
@@ -331,6 +338,36 @@ unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
         objc::arc::release(device);
     }
     objc::arc::finalize(receiver);
+}
+
+/// `-setMask:`, the layer whose alpha clips this one.
+///
+/// Stored, retained and answered - and nothing is clipped. Nothing in this tree
+/// composites a layer tree: a view draws itself, and a `CAMetalLayer` hands its
+/// drawable to the window. A mask is a *property* here, which is what a program
+/// that sets one, reads it back, and animates its bounds actually depends on;
+/// pixels outside it are not cut, and a program whose visual effect is entirely
+/// the mask gets an unclipped layer rather than a wrong one.
+///
+/// A layer masking *itself* is refused rather than stored: Core Animation calls
+/// it undefined, and the retain it would take here is one the layer holds on
+/// itself - a cycle that never comes apart. Refused quietly, because a real
+/// AppKit draws such a layer wrongly rather than killing the program, and this
+/// runtime has no drawing to get wrong.
+unsafe extern "C" fn set_mask(receiver: Id, _sel: Sel, mask: Id) {
+    if mask == receiver {
+        return;
+    }
+    let layer = layer_of(receiver);
+    if layer.mask != mask {
+        let old = layer.mask;
+        layer.mask = objc::arc::retain(mask);
+        objc::arc::release(old);
+    }
+}
+
+unsafe extern "C" fn mask(receiver: Id, _sel: Sel) -> Id {
+    layer_of(receiver).mask
 }
 
 unsafe extern "C" fn set_device(receiver: Id, _sel: Sel, device: Id) {
@@ -390,6 +427,8 @@ pub(crate) fn install() {
         "isOpaque" => is_opaque, c"c16@0:8";
         "bounds" => bounds, c"{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8";
         "setBounds:" => set_bounds, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
+        "mask" => mask, c"@16@0:8";
+        "setMask:" => set_mask, c"v24@0:8@16";
         "delegate" => delegate, c"@16@0:8";
         "setDelegate:" => set_delegate, c"v24@0:8@16";
         "display" => display, c"v16@0:8";
@@ -428,6 +467,75 @@ mod tests {
         let class = objc::class::lookup(c"CALayer").expect("CALayer");
         // SAFETY: the class this crate declared.
         unsafe { new_layer(objc::class::ptr(class) as Id, objc::sel::get("layer")) }
+    }
+
+    /// A mask is a strong property: the layer that was set is the layer that
+    /// comes back, and it survives the setter dropping its own reference.
+    #[test]
+    fn a_layer_keeps_the_mask_it_was_given() {
+        let masked = layer();
+        let first = layer();
+        let second = layer();
+        let get = objc::sel::get("mask");
+        let set = objc::sel::get("setMask:");
+        let before = objc::arc::retain_count(first);
+        // SAFETY: `-mask` and `-setMask:` on layers this test made.
+        unsafe {
+            assert!(mask(masked, get).is_null(), "a fresh layer has no mask");
+            set_mask(masked, set, first);
+            assert_eq!(mask(masked, get), first);
+            assert_eq!(
+                objc::arc::retain_count(first),
+                before + 1,
+                "the layer holds the mask it was given"
+            );
+            // Replacing one releases the old and retains the new.
+            set_mask(masked, set, second);
+            assert_eq!(mask(masked, get), second);
+            assert_eq!(objc::arc::retain_count(first), before);
+            // Setting the same mask twice does not retain it twice.
+            let held = objc::arc::retain_count(second);
+            set_mask(masked, set, second);
+            assert_eq!(objc::arc::retain_count(second), held);
+            // And nil clears it, releasing what was there.
+            set_mask(masked, set, std::ptr::null_mut());
+            assert!(mask(masked, get).is_null());
+            assert_eq!(objc::arc::retain_count(second), held - 1);
+        }
+    }
+
+    /// A layer that masked itself would hold a reference to itself, which no
+    /// release could ever reach.
+    #[test]
+    fn a_layer_does_not_mask_itself() {
+        let layer = layer();
+        let before = objc::arc::retain_count(layer);
+        // SAFETY: `-setMask:` is `void (id, SEL, CALayer *)`.
+        unsafe {
+            set_mask(layer, objc::sel::get("setMask:"), layer);
+            assert!(mask(layer, objc::sel::get("mask")).is_null());
+        }
+        assert_eq!(objc::arc::retain_count(layer), before, "no cycle taken");
+    }
+
+    /// The mask goes when the layer does, which is what makes the retain above
+    /// an ownership rather than a leak.
+    #[test]
+    fn deallocating_a_layer_releases_its_mask() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"CALayer").expect("CALayer");
+        let owner = objc::object::create_instance(class, 0);
+        let mask_layer = layer();
+        let held = objc::arc::retain_count(mask_layer);
+        // SAFETY: `-setMask:` on a layer this test owns outright.
+        unsafe { set_mask(owner, objc::sel::get("setMask:"), mask_layer) };
+        assert_eq!(objc::arc::retain_count(mask_layer), held + 1);
+        objc::arc::release(owner);
+        assert_eq!(
+            objc::arc::retain_count(mask_layer),
+            held,
+            "-dealloc gave the mask back"
+        );
     }
 
     /// The whole reason the class exists: a scale of zero is what a message to

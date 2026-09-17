@@ -80,6 +80,197 @@ pub(crate) unsafe fn forward(receiver: Id, sel: Sel, event: Id) {
     }
 }
 
+/// The responder chain from `receiver` outwards, `receiver` first.
+///
+/// AppKit's chain, as far as this tree has one: a view's superviews, then the
+/// window, then the window's delegate, then the application and *its* delegate.
+/// The two delegates are in it because `NSWindow` and `NSApplication` override
+/// `-tryToPerform:with:` to try theirs - a program puts its actions on the
+/// application delegate and expects them found from anywhere.
+///
+/// An application is the one receiver that does not start with itself: AppKit
+/// looks in the key window first, which is what makes a menu action reach the
+/// window the user is typing into rather than the delegate's fallback.
+///
+/// Bounded, like [`crate::view::window_of`]: a subview cycle a guest built must
+/// not hang inside what looks like an action dispatch.
+fn chain(receiver: Id) -> Vec<Id> {
+    fn push(out: &mut Vec<Id>, object: Id) {
+        if !object.is_null() && !out.contains(&object) {
+            out.push(object);
+        }
+    }
+    let mut out = Vec::new();
+    let application = crate::application::shared();
+    let mut current = match receiver == application && !application.is_null() {
+        true => crate::window::first_responder_of(crate::window::key_window()),
+        false => receiver,
+    };
+    for _ in 0..64 {
+        if current.is_null() {
+            break;
+        }
+        push(&mut out, current);
+        // SAFETY: null or an object this runtime allocated.
+        let next = unsafe { crate::view::superview_of(current) };
+        // SAFETY: as above. Null once `current` is no longer a view, which is
+        // where the window ends the view part of the chain.
+        current = match next.is_null() {
+            true => unsafe { crate::view::window_of(current) },
+            false => next,
+        };
+    }
+    // The window the chain arrived at, which is the last responder in it that
+    // has a delegate of its own.
+    let window = out.iter().rev().copied().find(|object| {
+        // SAFETY: an object this runtime allocated.
+        unsafe { objc::object::class_of(*object) }.is_some_and(|c| {
+            objc::class::lookup(c"NSWindow").is_some_and(|k| c.chain().any(|x| std::ptr::eq(x, k)))
+        })
+    });
+    if let Some(window) = window {
+        push(&mut out, crate::window::delegate_of(window));
+    }
+    push(&mut out, application);
+    if !application.is_null() {
+        // SAFETY: `-delegate` is `id (id, SEL)` on the application.
+        let delegate = unsafe {
+            let f: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+            f(application, objc::sel::get("delegate"))
+        };
+        push(&mut out, delegate);
+    }
+    out
+}
+
+/// `-[NSResponder tryToPerform:with:]`, which `NSView` inherits rather than
+/// declares - and so do `NSWindow` and `NSApplication`, each of which overrides
+/// it only to widen the chain [`chain`] already walks.
+///
+/// The first responder in the chain that implements `action` is sent it, with
+/// `object` as the argument, and the answer is YES. Nothing in the chain
+/// implementing it is NO and *nothing sent* - which is the whole point of the
+/// method: a caller uses it to ask whether an action can be performed at all.
+unsafe extern "C" fn try_to_perform(receiver: Id, _sel: Sel, action: Sel, object: Id) -> u8 {
+    if action.is_null() {
+        return 0;
+    }
+    for target in chain(receiver) {
+        // SAFETY: a live responder from the chain.
+        let Some(method) =
+            (unsafe { objc::object::class_of(target) }).and_then(|class| class.method(action))
+        else {
+            continue;
+        };
+        // SAFETY: an action method is `void (id, SEL, id)` - the shape every
+        // `-tryToPerform:with:` caller's selector has.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(method.implementation());
+            f(target, action, object);
+        }
+        return 1;
+    }
+    0
+}
+
+/// The standard editing command a key means, or `None` for a key that types
+/// something rather than commanding something.
+///
+/// Apple's list is the key bindings dictionary, which a user can edit; this is
+/// the part of it every Mac has and every text client implements. Matched on the
+/// virtual key rather than on `-characters` because a command key's character is
+/// a private-use code point that only exists to be turned back into this.
+fn command_for(key_code: u16, modifiers: u64) -> Option<&'static str> {
+    use crate::keymap::vk;
+    let shift = modifiers & crate::keymap::flags::SHIFT != 0;
+    Some(match key_code {
+        vk::RETURN | vk::KEYPAD_ENTER => "insertNewline:",
+        vk::TAB if shift => "insertBacktab:",
+        vk::TAB => "insertTab:",
+        vk::DELETE => "deleteBackward:",
+        vk::FORWARD_DELETE => "deleteForward:",
+        vk::ESCAPE => "cancelOperation:",
+        vk::LEFT_ARROW if shift => "moveLeftAndModifySelection:",
+        vk::RIGHT_ARROW if shift => "moveRightAndModifySelection:",
+        vk::UP_ARROW if shift => "moveUpAndModifySelection:",
+        vk::DOWN_ARROW if shift => "moveDownAndModifySelection:",
+        vk::LEFT_ARROW => "moveLeft:",
+        vk::RIGHT_ARROW => "moveRight:",
+        vk::UP_ARROW => "moveUp:",
+        vk::DOWN_ARROW => "moveDown:",
+        vk::HOME => "moveToBeginningOfDocument:",
+        vk::END => "moveToEndOfDocument:",
+        vk::PAGE_UP => "pageUp:",
+        vk::PAGE_DOWN => "pageDown:",
+        _ => return None,
+    })
+}
+
+/// `-[NSResponder interpretKeyEvents:]`: hand key events to the text system.
+///
+/// Two things happen, and the first is the one a guest is really asking for. A
+/// view calls this from its `-keyDown:` to say *this key was text, not a game
+/// control*, and that is what decides where the host's resolved text commit goes
+/// - see [`crate::text::accepts_host_text`]. A view that never calls it keeps its
+/// keys.
+///
+/// The second is the editing commands, sent on as `-doCommandBySelector:`. What
+/// is deliberately *not* sent is the printable text of the event: this host's
+/// text arrives separately and layout-resolved from SDL, and inserting
+/// `-characters` here as well would type every printable key twice - the same
+/// reason [`crate::text`]'s own `-keyDown:` does not.
+unsafe extern "C" fn interpret_key_events(receiver: Id, _sel: Sel, events: Id) {
+    crate::text::accept_key_interpretation(receiver);
+    // SAFETY: null or an `NSArray`, which is what the method takes.
+    let Some(array) =
+        (unsafe { corefoundation::collections::array(events as *const std::ffi::c_void) })
+    else {
+        return;
+    };
+    let command_sel = objc::sel::get("doCommandBySelector:");
+    // SAFETY: a live responder this method was sent to.
+    let Some(method) =
+        (unsafe { objc::object::class_of(receiver) }).and_then(|class| class.method(command_sel))
+    else {
+        return;
+    };
+    for event in array.values.iter().copied() {
+        let event = event as Id;
+        if event.is_null() {
+            continue;
+        }
+        // SAFETY: `-type`, `-keyCode` and `-modifierFlags` on an event, each
+        // with the prototype its selector declares. A member of this array that
+        // is not an event reads as zero rather than as another object's fields.
+        let (kind, key_code, modifiers) = unsafe {
+            let integer: unsafe extern "C" fn(Id, Sel) -> u64 =
+                std::mem::transmute(objc::msg::entry());
+            let short: unsafe extern "C" fn(Id, Sel) -> u16 =
+                std::mem::transmute(objc::msg::entry());
+            (
+                integer(event, objc::sel::get("type")),
+                short(event, objc::sel::get("keyCode")),
+                integer(event, objc::sel::get("modifierFlags")),
+            )
+        };
+        // A key *up* commands nothing: it would repeat every command the
+        // matching key down already performed.
+        if kind != crate::nsevent::kind::KEY_DOWN {
+            continue;
+        }
+        let Some(command) = command_for(key_code, modifiers) else {
+            continue;
+        };
+        // SAFETY: `-doCommandBySelector:` is `void (id, SEL, SEL)`, and the
+        // implementation is the one the receiver's class answers with.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, Sel) =
+                std::mem::transmute(method.implementation());
+            f(receiver, command_sel, objc::sel::get(command));
+        }
+    }
+}
+
 /// `-[NSResponder mouseUp:]`: a responder that does not handle the release
 /// passes it up, so a container that took the press also sees it end.
 unsafe extern "C" fn mouse_up(receiver: Id, sel: Sel, event: Id) {
@@ -93,6 +284,8 @@ pub(crate) fn install() {
         "menu" => menu, c"@16@0:8";
         "setMenu:" => set_menu, c"v24@0:8@16";
         "mouseUp:" => mouse_up, c"v24@0:8@16";
+        "interpretKeyEvents:" => interpret_key_events, c"v24@0:8@16";
+        "tryToPerform:with:" => try_to_perform, c"c32@0:8:16@24";
     });
 }
 
@@ -150,6 +343,152 @@ mod tests {
             mouse_up(child, sel, std::ptr::null_mut());
         }
         assert_eq!(SEEN.load(Ordering::Acquire), parent as usize);
+    }
+
+    /// The command keys, as the selectors a text client is expected to answer.
+    #[test]
+    fn a_command_key_is_a_standard_selector() {
+        use crate::keymap::{flags, vk};
+        assert_eq!(command_for(vk::RETURN, 0), Some("insertNewline:"));
+        assert_eq!(command_for(vk::TAB, 0), Some("insertTab:"));
+        assert_eq!(command_for(vk::TAB, flags::SHIFT), Some("insertBacktab:"));
+        assert_eq!(command_for(vk::DELETE, 0), Some("deleteBackward:"));
+        assert_eq!(command_for(vk::LEFT_ARROW, 0), Some("moveLeft:"));
+        assert_eq!(
+            command_for(vk::LEFT_ARROW, flags::SHIFT),
+            Some("moveLeftAndModifySelection:")
+        );
+        // A key that types something commands nothing: inserting it is the
+        // separate, layout-resolved text commit.
+        assert_eq!(command_for(vk::ANSI_A, 0), None);
+        assert_eq!(command_for(vk::ANSI_A, flags::SHIFT), None);
+    }
+
+    /// One array of events in, one `-doCommandBySelector:` per command key out,
+    /// and nothing for the key that types.
+    #[test]
+    fn interpreting_key_events_sends_the_commands() {
+        use std::sync::Mutex;
+        static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        unsafe extern "C" fn record(_receiver: Id, _sel: Sel, command: Sel) {
+            // SAFETY: a selector's name is a NUL-terminated string the runtime
+            // keeps for the process.
+            let name = unsafe { std::ffi::CStr::from_ptr(objc::sel::name(command)) };
+            SEEN.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(name.to_string_lossy().into_owned());
+        }
+        crate::bootstrap();
+        let view = objc::class::lookup(c"NSView").expect("NSView");
+        let class =
+            objc::class::allocate_pair(Some(view), c"CommandRecorder", 0).expect("a subclass");
+        class.add_method(
+            objc::sel::get("doCommandBySelector:"),
+            record as objc::class::Imp,
+            c"v24@0:8:16",
+        );
+        objc::class::register_pair(class);
+        let receiver = objc::object::create_instance(class, 0);
+        let key = |code: u16, kind: u64| {
+            crate::nsevent::make(crate::nsevent::Fields {
+                kind,
+                key_code: code,
+                ..crate::nsevent::Fields::default()
+            }) as *const std::ffi::c_void
+        };
+        let events = [
+            key(crate::keymap::vk::RETURN, crate::nsevent::kind::KEY_DOWN),
+            key(crate::keymap::vk::ANSI_A, crate::nsevent::kind::KEY_DOWN),
+            key(crate::keymap::vk::DELETE, crate::nsevent::kind::KEY_DOWN),
+            // A key up repeats no command.
+            key(crate::keymap::vk::RETURN, crate::nsevent::kind::KEY_UP),
+        ];
+        let array = corefoundation::collections::new_array(
+            &events,
+            corefoundation::callbacks::Policy::from_type_callbacks(),
+            false,
+        );
+        // SAFETY: `-interpretKeyEvents:` is `void (id, SEL, id)`.
+        unsafe {
+            interpret_key_events(receiver, objc::sel::get("interpretKeyEvents:"), array as Id)
+        };
+        assert_eq!(
+            *SEEN.lock().unwrap_or_else(|e| e.into_inner()),
+            vec!["insertNewline:".to_string(), "deleteBackward:".to_string()]
+        );
+        assert!(
+            crate::text::accepts_host_text(receiver),
+            "a view that interpreted its keys is taking text"
+        );
+    }
+
+    /// An action nobody implements is NO, and nothing is sent - which is what
+    /// a caller uses the method to find out.
+    #[test]
+    fn an_unhandled_action_is_refused() {
+        let view = responder(c"NSView");
+        // SAFETY: `-tryToPerform:with:` is `BOOL (id, SEL, SEL, id)`.
+        let answered = unsafe {
+            try_to_perform(
+                view,
+                objc::sel::get("tryToPerform:with:"),
+                objc::sel::get("r3NoSuchAction:"),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(answered, 0);
+    }
+
+    /// The action climbs to the first responder in the chain that implements
+    /// it, and is sent there with the object the caller passed.
+    #[test]
+    fn an_action_reaches_the_first_responder_that_implements_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static TARGET: AtomicUsize = AtomicUsize::new(0);
+        static ARGUMENT: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn perform(receiver: Id, _sel: Sel, object: Id) {
+            TARGET.store(receiver as usize, Ordering::Release);
+            ARGUMENT.store(object as usize, Ordering::Release);
+        }
+        crate::bootstrap();
+        let action = objc::sel::get("r3Perform:");
+        let view = objc::class::lookup(c"NSView").expect("NSView");
+        let class = objc::class::allocate_pair(Some(view), c"ActionTarget", 0).expect("a subclass");
+        class.add_method(action, perform as objc::class::Imp, c"v24@0:8@16");
+        objc::class::register_pair(class);
+        let parent = objc::object::create_instance(class, 0);
+        let child = responder(c"NSView");
+        let sender = responder(c"NSView");
+        // SAFETY: `-addSubview:` is `void (id, SEL, id)` on views of this crate's.
+        unsafe {
+            let add: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+            add(parent, objc::sel::get("addSubview:"), child);
+        }
+        // SAFETY: `-tryToPerform:with:` is `BOOL (id, SEL, SEL, id)`.
+        let answered =
+            unsafe { try_to_perform(child, objc::sel::get("tryToPerform:with:"), action, sender) };
+        assert_eq!(answered, 1, "the superview implements it");
+        assert_eq!(TARGET.load(Ordering::Acquire), parent as usize);
+        assert_eq!(ARGUMENT.load(Ordering::Acquire), sender as usize);
+    }
+
+    /// `-tryToPerform:with:` is `NSResponder`'s, not `NSView`'s: Apple declares
+    /// it on the base class, and every responder here reaches the same one.
+    #[test]
+    fn try_to_perform_is_inherited_from_the_responder() {
+        crate::bootstrap();
+        let sel = objc::sel::get("tryToPerform:with:");
+        let responder = objc::class::lookup(c"NSResponder").expect("NSResponder");
+        let owned = responder.method(sel).expect("declared on NSResponder");
+        for name in [c"NSView", c"NSWindow", c"NSApplication", c"NSScroller"] {
+            let class = objc::class::lookup(name).expect("a responder subclass");
+            let found = class.method(sel).expect("inherited");
+            assert_eq!(
+                found.implementation(),
+                owned.implementation(),
+                "{name:?} does not reach NSResponder's"
+            );
+        }
     }
 
     /// Every responder subclass inherits it, which is the point of putting it on

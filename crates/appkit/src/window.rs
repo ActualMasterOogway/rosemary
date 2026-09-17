@@ -33,6 +33,20 @@ pub struct Window {
     /// `-representedFilename`, an owned `NSString` or null for the empty
     /// string AppKit answers before one is set.
     represented_filename: Id,
+    /// `NSPanel`'s `-becomesKeyOnlyIfNeeded`. A panel's field, kept in the
+    /// window body because `NSPanel` adds no storage of its own here - every
+    /// panel *is* one of these - and one word costs less than a side table
+    /// keyed by address.
+    becomes_key_only_if_needed: usize,
+    /// `-setAlphaValue:`, with [`Window::alpha_set`] saying whether it was ever
+    /// given one - a fresh window is fully opaque, and zero is a legal alpha, so
+    /// the field cannot carry its own default.
+    alpha: CGFloat,
+    alpha_set: usize,
+    /// `-setMovable:`, stored inverted so that zero is AppKit's `YES`.
+    immovable: usize,
+    /// `-setShowsToolbarButton:`.
+    shows_toolbar_button: usize,
 }
 
 pub const INSTANCE_SIZE: usize = size_of::<Window>();
@@ -792,6 +806,163 @@ pub fn set_key_window(window: Id) {
     KEY.store(window as usize, std::sync::atomic::Ordering::Release);
 }
 
+/// `-setAlphaValue:`: the window's opacity, pushed to the compositor.
+///
+/// SDL's opacity is the whole window's, which is what AppKit's alpha is too. A
+/// compositor that will not composite a translucent window refuses, and the
+/// value is still recorded: `-alphaValue` is a property a program reads back to
+/// decide how far a fade has got, and answering something other than what was
+/// set would break that whether or not the pixels changed.
+unsafe extern "C" fn set_alpha_value(receiver: Id, _sel: Sel, alpha: CGFloat) {
+    let window = window_of(receiver);
+    window.alpha = alpha.clamp(0.0, 1.0);
+    window.alpha_set = 1;
+    if !window.sdl.is_null() {
+        sdl3::video::set_window_opacity(window.sdl, window.alpha as f32);
+    }
+}
+
+unsafe extern "C" fn alpha_value(receiver: Id, _sel: Sel) -> CGFloat {
+    let window = window_of(receiver);
+    match window.alpha_set != 0 {
+        true => window.alpha,
+        false => 1.0,
+    }
+}
+
+/// `-setShowsToolbarButton:`, the toggle at the right of a titled window's
+/// title bar.
+///
+/// Stored and answered. The button belongs to a title bar this runtime does not
+/// draw - SDL gives the host's decorations, which have no toolbar of AppKit's to
+/// toggle - so there is nothing to show or hide, and a program that sets the
+/// flag while building a window and reads it back later gets its own answer.
+unsafe extern "C" fn set_shows_toolbar_button(receiver: Id, _sel: Sel, shows: u8) {
+    window_of(receiver).shows_toolbar_button = shows as usize;
+}
+
+unsafe extern "C" fn shows_toolbar_button(receiver: Id, _sel: Sel) -> u8 {
+    (window_of(receiver).shows_toolbar_button != 0) as u8
+}
+
+/// `-setMovable:`. A window that says no cannot be moved by the *program*
+/// either, which is the part this runtime can honour: see
+/// [`perform_window_drag_with_event`], which refuses to start a drag on one.
+///
+/// It does not reach the host's own title bar. A person dragging the
+/// decorations SDL asked the window system for is moving the window whatever
+/// AppKit thinks, and there is no SDL call that says otherwise.
+unsafe extern "C" fn set_movable(receiver: Id, _sel: Sel, movable: u8) {
+    window_of(receiver).immovable = (movable == 0) as usize;
+}
+
+unsafe extern "C" fn is_movable(receiver: Id, _sel: Sel) -> u8 {
+    (window_of(receiver).immovable == 0) as u8
+}
+
+/// `-performWindowDragWithEvent:`: drag the window with the pointer until the
+/// button comes up.
+///
+/// A program with a borderless window calls this from its own `-mouseDown:` to
+/// make a region behave like a title bar. AppKit takes over the event stream
+/// there and then; this starts a session the event pump carries on - see
+/// [`drag_moved`] - because the pump is the only thing here that sees the
+/// pointer move, and a loop of its own inside this call would starve everything
+/// else the pump drives.
+///
+/// The pointer is tracked in the *desktop's* coordinates. A window-relative
+/// position moves with the window it is measured against, which would feed each
+/// move back into the next one.
+unsafe extern "C" fn perform_window_drag_with_event(receiver: Id, _sel: Sel, _event: Id) {
+    let window = window_of(receiver);
+    if window.immovable != 0 || window.sdl.is_null() {
+        return;
+    }
+    let (Some((pointer_x, pointer_y, _)), Some((origin_x, origin_y))) = (
+        sdl3::video::global_mouse_state(),
+        sdl3::video::window_position(window.sdl),
+    ) else {
+        return;
+    };
+    *drag().lock().unwrap_or_else(|e| e.into_inner()) = Some(Drag {
+        window: receiver as usize,
+        pointer: (pointer_x, pointer_y),
+        origin: (origin_x, origin_y),
+    });
+}
+
+/// A window drag in progress, and what it started from.
+struct Drag {
+    window: usize,
+    /// The pointer in desktop coordinates when the drag began.
+    pointer: (f32, f32),
+    /// The window's position then.
+    origin: (i32, i32),
+}
+
+fn drag() -> &'static std::sync::Mutex<Option<Drag>> {
+    static DRAG: std::sync::Mutex<Option<Drag>> = std::sync::Mutex::new(None);
+    &DRAG
+}
+
+/// Carry a drag started by `-performWindowDragWithEvent:` one pointer move
+/// further; whether one is in progress and the move belongs to it.
+///
+/// True means the event pump has nothing more to do with the move: the window
+/// moved under the pointer, and AppKit does not also send `-mouseDragged:` for
+/// a move it consumed dragging a window.
+pub(crate) fn drag_moved() -> bool {
+    let session = drag().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(session) = session.as_ref() else {
+        return false;
+    };
+    // Through the table rather than through the object: a window closed during
+    // its own drag is gone from the table, and this must not be what reads a
+    // freed body to find that out.
+    let sdl = WINDOWS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(_, object)| *object == session.window)
+        .map_or(std::ptr::null_mut(), |(sdl, _)| *sdl as sdl3::Window);
+    if sdl.is_null() {
+        return false;
+    }
+    let Some((x, y, _)) = sdl3::video::global_mouse_state() else {
+        return false;
+    };
+    let at = |start: i32, from: f32, to: f32| start + (to - from).round() as i32;
+    sdl3::video::set_window_position(
+        sdl,
+        at(session.origin.0, session.pointer.0, x),
+        at(session.origin.1, session.pointer.1, y),
+    );
+    true
+}
+
+/// End a window drag, from the pump's mouse-up. Nothing to do when none is in
+/// progress, which is every mouse-up but the one.
+pub(crate) fn end_drag() {
+    *drag().lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// `-[NSPanel becomesKeyOnlyIfNeeded]` and its setter.
+///
+/// A palette that says yes wants clicks to reach its controls without taking key
+/// away from the document window - a tool palette whose buttons work while the
+/// text caret stays where it is. This runtime does not choose which window is
+/// key: SDL does, from the window the host's compositor focuses, and
+/// [`set_key_window`] follows it. So the flag is stored and answered rather than
+/// acted on, which keeps a guest's own `-becomesKeyOnlyIfNeeded` read - it sets
+/// it while building a palette and asks later - agreeing with what it set.
+unsafe extern "C" fn becomes_key_only_if_needed(receiver: Id, _sel: Sel) -> u8 {
+    (window_of(receiver).becomes_key_only_if_needed != 0) as u8
+}
+
+unsafe extern "C" fn set_becomes_key_only_if_needed(receiver: Id, _sel: Sel, value: u8) {
+    window_of(receiver).becomes_key_only_if_needed = value as usize;
+}
+
 unsafe extern "C" fn is_key_window(receiver: Id, _sel: Sel) -> u8 {
     (key_window() == receiver) as u8
 }
@@ -1156,6 +1327,11 @@ pub(crate) fn install() {
         "becomeFirstResponder" => accepts_responder_change, c"c16@0:8";
         "resignFirstResponder" => accepts_responder_change, c"c16@0:8";
     });
+    let panel = objc::class::lookup(c"NSPanel").expect("declared before its methods");
+    methods!(panel, {
+        "becomesKeyOnlyIfNeeded" => becomes_key_only_if_needed, c"c16@0:8";
+        "setBecomesKeyOnlyIfNeeded:" => set_becomes_key_only_if_needed, c"v20@0:8c16";
+    });
     let class = objc::class::lookup(c"NSWindow").expect("declared before its methods");
     class_methods!(class, {
         "windowNumberAtPoint:belowWindowWithWindowNumber:" => window_number_at_point,
@@ -1240,6 +1416,13 @@ pub(crate) fn install() {
         "setDepthLimit:" => ignored_depth, c"v20@0:8i16";
         "setDynamicDepthLimit:" => ignored_flag, c"v20@0:8c16";
         "setMovableByWindowBackground:" => ignored_flag, c"v20@0:8c16";
+        "setAlphaValue:" => set_alpha_value, c"v24@0:8d16";
+        "alphaValue" => alpha_value, c"d16@0:8";
+        "setShowsToolbarButton:" => set_shows_toolbar_button, c"v20@0:8c16";
+        "showsToolbarButton" => shows_toolbar_button, c"c16@0:8";
+        "setMovable:" => set_movable, c"v20@0:8c16";
+        "isMovable" => is_movable, c"c16@0:8";
+        "performWindowDragWithEvent:" => perform_window_drag_with_event, c"v24@0:8@16";
         "setIgnoresMouseEvents:" => ignored_flag, c"v20@0:8c16";
         "collectionBehavior" => collection_behavior, c"Q16@0:8";
         "setCollectionBehavior:" => set_collection_behavior, c"v24@0:8Q16";
@@ -1283,6 +1466,112 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A window with no SDL window behind it still records its alpha: the
+    /// property reads back what the program set, whether or not the host
+    /// composites it.
+    #[test]
+    fn a_window_reports_the_alpha_it_was_set() {
+        crate::bootstrap();
+        let window =
+            objc::object::create_instance(objc::class::lookup(c"NSWindow").expect("NSWindow"), 0);
+        let get = objc::sel::get("alphaValue");
+        let set = objc::sel::get("setAlphaValue:");
+        // SAFETY: `-alphaValue` is `CGFloat (id, SEL)` and `-setAlphaValue:` its
+        // setter, on a window this test made.
+        unsafe {
+            assert_eq!(alpha_value(window, get), 1.0, "a fresh window is opaque");
+            set_alpha_value(window, set, 0.25);
+            assert_eq!(alpha_value(window, get), 0.25);
+            // Zero is a legal alpha, and has to be told apart from "never set".
+            set_alpha_value(window, set, 0.0);
+            assert_eq!(alpha_value(window, get), 0.0);
+            // Out of range is clamped rather than passed on to the compositor.
+            set_alpha_value(window, set, 4.0);
+            assert_eq!(alpha_value(window, get), 1.0);
+            set_alpha_value(window, set, -1.0);
+            assert_eq!(alpha_value(window, get), 0.0);
+        }
+        objc::arc::release(window);
+    }
+
+    /// The two flags that are stored and answered, each defaulting the way
+    /// AppKit's does: a window is movable and shows no toolbar button.
+    #[test]
+    fn a_window_keeps_its_movable_and_toolbar_flags() {
+        crate::bootstrap();
+        let window =
+            objc::object::create_instance(objc::class::lookup(c"NSWindow").expect("NSWindow"), 0);
+        // SAFETY: each is the accessor its selector declares.
+        unsafe {
+            let (get, set) = (objc::sel::get("isMovable"), objc::sel::get("setMovable:"));
+            assert_eq!(is_movable(window, get), 1, "movable unless told otherwise");
+            set_movable(window, set, 0);
+            assert_eq!(is_movable(window, get), 0);
+            set_movable(window, set, 1);
+            assert_eq!(is_movable(window, get), 1);
+
+            let (get, set) = (
+                objc::sel::get("showsToolbarButton"),
+                objc::sel::get("setShowsToolbarButton:"),
+            );
+            assert_eq!(shows_toolbar_button(window, get), 0);
+            set_shows_toolbar_button(window, set, 1);
+            assert_eq!(shows_toolbar_button(window, get), 1);
+        }
+        objc::arc::release(window);
+    }
+
+    /// An immovable window refuses the drag, and a window with no SDL window
+    /// behind it starts none - neither may leave a session the pump would then
+    /// carry on against nothing.
+    #[test]
+    fn a_drag_needs_a_movable_window() {
+        crate::bootstrap();
+        let window =
+            objc::object::create_instance(objc::class::lookup(c"NSWindow").expect("NSWindow"), 0);
+        let sel = objc::sel::get("performWindowDragWithEvent:");
+        // SAFETY: `-performWindowDragWithEvent:` is `void (id, SEL, NSEvent *)`.
+        unsafe {
+            set_movable(window, objc::sel::get("setMovable:"), 0);
+            perform_window_drag_with_event(window, sel, std::ptr::null_mut());
+            assert!(
+                drag().lock().unwrap_or_else(|e| e.into_inner()).is_none(),
+                "an immovable window does not drag"
+            );
+            // Movable, but with no SDL window: there is nothing to position.
+            set_movable(window, objc::sel::get("setMovable:"), 1);
+            perform_window_drag_with_event(window, sel, std::ptr::null_mut());
+            assert!(drag().lock().unwrap_or_else(|e| e.into_inner()).is_none());
+        }
+        assert!(!drag_moved(), "no session, nothing consumed");
+        end_drag();
+        objc::arc::release(window);
+    }
+
+    /// A panel answers the flag it was set, and only a panel is asked it: the
+    /// property is `NSPanel`'s, and a plain window that inherited it would
+    /// answer a question AppKit does not put to it.
+    #[test]
+    fn a_panel_keeps_its_becomes_key_only_if_needed() {
+        crate::bootstrap();
+        let panel =
+            objc::object::create_instance(objc::class::lookup(c"NSPanel").expect("NSPanel"), 0);
+        let get = objc::sel::get("becomesKeyOnlyIfNeeded");
+        // SAFETY: the getter and setter of a panel this test made.
+        unsafe {
+            assert_eq!(becomes_key_only_if_needed(panel, get), 0, "off by default");
+            set_becomes_key_only_if_needed(panel, objc::sel::get("setBecomesKeyOnlyIfNeeded:"), 1);
+            assert_eq!(becomes_key_only_if_needed(panel, get), 1);
+        }
+        assert!(
+            objc::class::lookup(c"NSWindow")
+                .and_then(|class| class.method(get))
+                .is_none(),
+            "a window is not asked a panel's question"
+        );
+        objc::arc::release(panel);
+    }
 
     /// A view that outlives its window must not answer `-window` with it:
     /// Studio's dock panels are freed while Qt still holds their views.
