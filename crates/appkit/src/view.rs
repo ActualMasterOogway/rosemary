@@ -358,6 +358,17 @@ pub unsafe fn set_window(view: Id, window: Id) {
     view_of(view).window = window;
 }
 
+/// Forget `window` as the window `view` is the content view of, if it still is.
+///
+/// # Safety
+///
+/// As [`set_window`].
+pub unsafe fn detach_window(view: Id, window: Id) {
+    if is_view(view) && view_of(view).window == window {
+        view_of(view).window = std::ptr::null_mut();
+    }
+}
+
 /// The window a view is in, following the superview chain.
 ///
 /// # Safety
@@ -1059,6 +1070,9 @@ unsafe extern "C" fn add_subview(receiver: Id, sel: Sel, subview: Id) {
         unsafe { remove_from_superview(subview, objc::sel::get("removeFromSuperview")) };
     }
     view_of(subview).superview = receiver;
+    // A window's content view that becomes a subview is in its new parent's
+    // window, and a link left here would win over the superview chain.
+    view_of(subview).window = std::ptr::null_mut();
     // SAFETY: `-subviews` is `id (id, SEL)` and answers a mutable array.
     let list = unsafe { subviews(receiver, sel) };
     if let Some(array) = unsafe { corefoundation::collections::array(list as *const c_void) } {
@@ -1186,6 +1200,7 @@ unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
     }
     objc::arc::release(subviews);
     crate::layout::forget(receiver);
+    crate::backing::forget(receiver);
     let tracking_areas = std::mem::replace(&mut view.tracking_areas, std::ptr::null_mut());
     objc::arc::release(tracking_areas);
     let layer = std::mem::replace(&mut view.layer, std::ptr::null_mut());
@@ -1471,6 +1486,38 @@ mod tests {
         assert!(view_of(subview).superview.is_null());
         assert!(!is_hidden_or_has_hidden_ancestor(subview));
         objc::arc::release(subview);
+    }
+
+    /// Qt makes a window's content view a subview elsewhere when the window
+    /// becomes a child; the old window must not keep answering `-window`.
+    #[test]
+    fn a_content_view_added_as_a_subview_leaves_its_window() {
+        let parent = view(rect(0.0, 0.0, 10.0, 10.0));
+        let content = view(rect(0.0, 0.0, 5.0, 5.0));
+        let window = parent;
+        // SAFETY: two views this test made; the window pointer is only compared.
+        unsafe {
+            set_window(content, window);
+            add_subview(parent, objc::sel::get("addSubview:"), content);
+            assert!(window_of(content).is_null());
+        }
+    }
+
+    #[test]
+    fn detaching_a_window_only_forgets_that_window() {
+        let content = view(rect(0.0, 0.0, 5.0, 5.0));
+        let (window, other) = (
+            view(rect(0.0, 0.0, 1.0, 1.0)),
+            view(rect(0.0, 0.0, 1.0, 1.0)),
+        );
+        // SAFETY: views this test made; the window pointers are only compared.
+        unsafe {
+            set_window(content, window);
+            detach_window(content, other);
+            assert_eq!(window_of(content), window);
+            detach_window(content, window);
+            assert!(window_of(content).is_null());
+        }
     }
 
     #[test]

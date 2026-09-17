@@ -576,8 +576,15 @@ unsafe extern "C" fn content_view(receiver: Id, _sel: Sel) -> Id {
 /// match it.
 unsafe extern "C" fn set_content_view(receiver: Id, _sel: Sel, view: Id) {
     let window = window_of(receiver);
-    objc::arc::release(window.content_view);
-    window.content_view = objc::arc::retain(view);
+    let old = std::mem::replace(&mut window.content_view, objc::arc::retain(view));
+    // The view being replaced may outlive this window: Qt keeps its own reference
+    // and moves the view elsewhere, and a stale link would answer `-window` with
+    // this object after it is freed.
+    if old != view {
+        // SAFETY: null or an object this runtime allocated.
+        unsafe { crate::view::detach_window(old, receiver) };
+    }
+    objc::arc::release(old);
     // SAFETY: `view` is null or an object this runtime allocated.
     unsafe { crate::view::set_window(view, receiver) };
     if view.is_null() || window.sdl.is_null() {
@@ -705,6 +712,35 @@ unsafe extern "C" fn order_out(receiver: Id, _sel: Sel, _sender: Id) {
         std::sync::atomic::Ordering::AcqRel,
         std::sync::atomic::Ordering::Acquire,
     );
+}
+
+/// `-dealloc`. The content view is told it has no window before it is released,
+/// since whoever else holds it would otherwise follow `-window` into freed memory,
+/// and the window leaves every table that answers with it.
+///
+/// The SDL window is hidden rather than destroyed: a Metal swapchain may still
+/// be keyed by it, and that table is not this crate's to clear.
+unsafe extern "C" fn dealloc(receiver: Id, sel: Sel) {
+    let window = window_of(receiver);
+    let content = std::mem::replace(&mut window.content_view, std::ptr::null_mut());
+    // SAFETY: null or an object this runtime allocated.
+    unsafe { crate::view::detach_window(content, receiver) };
+    objc::arc::release(content);
+    objc::arc::release(std::mem::replace(
+        &mut window.background,
+        std::ptr::null_mut(),
+    ));
+    objc::arc::release(std::mem::replace(
+        &mut window.represented_filename,
+        std::ptr::null_mut(),
+    ));
+    // SAFETY: `-orderOut:` is `void (id, SEL, id)`; it also gives up key status.
+    unsafe { order_out(receiver, sel, std::ptr::null_mut()) };
+    WINDOWS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(_, object)| *object != receiver as usize);
+    objc::arc::finalize(receiver);
 }
 
 unsafe extern "C" fn close(receiver: Id, sel: Sel) {
@@ -1163,6 +1199,7 @@ pub(crate) fn install() {
         "orderFront:" => make_key_and_order_front, c"v24@0:8@16";
         "orderOut:" => order_out, c"v24@0:8@16";
         "close" => close, c"v16@0:8";
+        "dealloc" => dealloc, c"v16@0:8";
         "performClose:" => perform_close, c"v24@0:8@16";
         "isKeyWindow" => is_key_window, c"c16@0:8";
         "isMainWindow" => is_key_window, c"c16@0:8";
@@ -1246,6 +1283,25 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A view that outlives its window must not answer `-window` with it:
+    /// Studio's dock panels are freed while Qt still holds their views.
+    #[test]
+    fn a_freed_window_leaves_its_content_view_windowless() {
+        crate::bootstrap();
+        let window = objc::object::create_instance(objc::class::lookup(c"NSWindow").unwrap(), 0);
+        let class = objc::class::lookup(c"NSView").unwrap();
+        let view = objc::object::create_instance(class, 0);
+        // SAFETY: a window and a view this test made; the selectors take an id.
+        unsafe {
+            set_content_view(window, objc::sel::get("setContentView:"), view);
+            assert_eq!(crate::view::window_of(view), window);
+            objc::arc::release(window);
+            assert!(crate::view::window_of(view).is_null());
+        }
+        assert_eq!(objc::arc::retain_count(view), 1);
+        objc::arc::release(view);
+    }
 
     #[test]
     fn perform_close_respects_style_and_delegate_and_dispatches_close() {

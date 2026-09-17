@@ -172,6 +172,26 @@ pub fn constant_class() -> &'static Class {
     unsafe { &*(p as *const Class) }
 }
 
+/// A string that no number of releases frees, for a global the guest reads.
+///
+/// Laid out as a compiled literal is, with [`constant_class`] as its class, so
+/// `CFRelease` finds a `-dealloc` that does nothing. A global has to be this
+/// rather than an ordinary string with an extra retain: Qt's `QCFString` adopts
+/// `kCFPreferencesAnyHost` without retaining it and releases it on destruction,
+/// once per `QSettings`, which frees an ordinary string after a few dozen.
+pub fn immortal(text: &str) -> CFTypeRef {
+    let mut bytes = text.as_bytes().to_vec();
+    bytes.push(0);
+    let str = Box::leak(bytes.into_boxed_slice()).as_ptr();
+    let object = Box::leak(Box::new(CFString {
+        isa: objc::class::ptr(constant_class()),
+        flags: 0,
+        str,
+        length: text.len() as i64,
+    }));
+    std::ptr::from_mut(object) as CFTypeRef
+}
+
 /// The methods a string answers: equality by characters, and the length and
 /// bytes an `NSString` caller asks for.
 ///

@@ -40,6 +40,11 @@ static STORES: Mutex<Option<HashMap<usize, Store>>> = Mutex::new(None);
 /// Views sent `-setNeedsDisplay:`, by address, drawn at the next pump.
 static NEEDS_DISPLAY: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
+/// The batches [`pump`] is drawing, innermost last, so a view freed by another
+/// view's `-drawRect:` is taken out of them too. A stack because a `-drawRect:`
+/// can run a nested event loop that pumps again. Zero marks a forgotten entry.
+static DRAWING: Mutex<Vec<Vec<usize>>> = Mutex::new(Vec::new());
+
 /// Presents a store for a window; `false` where it cannot, so that SDL's
 /// window surface is used instead.
 pub type Presenter = fn(sdl3::Window, &Store) -> bool;
@@ -293,6 +298,20 @@ pub(crate) fn needs_display(view: Id) {
     }
 }
 
+/// Forget a view that is being deallocated, so no pump draws freed memory.
+pub(crate) fn forget(view: Id) {
+    let key = view as usize;
+    NEEDS_DISPLAY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|v| *v != key);
+    for batch in DRAWING.lock().unwrap_or_else(|e| e.into_inner()).iter_mut() {
+        for entry in batch.iter_mut().filter(|entry| **entry == key) {
+            *entry = 0;
+        }
+    }
+}
+
 /// Draw `view` now, with its focus locked, as `-display` does.
 pub(crate) fn display_view(view: Id) {
     let sel_draw = objc::sel::get("drawRect:");
@@ -344,14 +363,24 @@ pub fn pump() {
         }
     }
     let pending = std::mem::take(&mut *NEEDS_DISPLAY.lock().unwrap_or_else(|e| e.into_inner()));
-    for view in pending {
-        let view = view as Id;
+    let count = pending.len();
+    let depth = {
+        let mut drawing = DRAWING.lock().unwrap_or_else(|e| e.into_inner());
+        drawing.push(pending);
+        drawing.len() - 1
+    };
+    for at in 0..count {
+        let view = DRAWING.lock().unwrap_or_else(|e| e.into_inner())[depth][at] as Id;
+        if view.is_null() {
+            continue;
+        }
         // SAFETY: a view this crate recorded while it was live.
         let window = unsafe { crate::view::window_of(view) };
         if crate::window::is_shown(window) && !crate::view::is_hidden_or_has_hidden_ancestor(view) {
             display_view(view);
         }
     }
+    DRAWING.lock().unwrap_or_else(|e| e.into_inner()).pop();
     present_dirty();
 }
 

@@ -110,9 +110,8 @@ fn interned(text: &str) -> CFTypeRef {
     if let Some((_, object)) = strings.iter().find(|(t, _)| t == text) {
         return *object as CFTypeRef;
     }
-    let object = crate::string::from_bytes(text.as_bytes(), false);
-    // Retained forever: a global a guest may release is one it can make dangle.
-    objc::arc::retain(object as objc::object::Id);
+    // Immortal: a global a guest may release is one it can make dangle.
+    let object = crate::string::immortal(text);
     strings.push((text.to_string(), object as usize));
     object
 }
@@ -411,6 +410,21 @@ mod tests {
 
     fn string(text: &str) -> CFTypeRef {
         crate::string::from_bytes(text.as_bytes(), false)
+    }
+
+    /// Qt's `QMacSettingsPrivate` releases `kCFPreferencesAnyHost` without
+    /// having retained it, once per `QSettings`.
+    #[test]
+    fn a_domain_constant_survives_any_number_of_releases() {
+        crate::bootstrap();
+        let any = interned(ANY);
+        for _ in 0..8 {
+            // SAFETY: a string this module made.
+            unsafe { crate::api::CFRelease(any) };
+        }
+        // SAFETY: as above, and still live.
+        assert_eq!(unsafe { crate::api::CFStringGetLength(any) }, 1);
+        assert_eq!(interned(ANY), any);
     }
 
     #[test]

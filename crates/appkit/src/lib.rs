@@ -184,6 +184,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         "NSPointInRect" => at!(geometry::NSPointInRect),
         "NSMouseInRect" => at!(geometry::NSMouseInRect),
         "NSInsetRect" => at!(geometry::NSInsetRect),
+        "GetCurrentKeyModifiers" => at!(keymap::GetCurrentKeyModifiers),
         "TISCopyCurrentKeyboardInputSource" => at!(textinput::TISCopyCurrentKeyboardInputSource),
         "TISCopyInputMethodKeyboardLayoutOverride" => {
             at!(textinput::TISCopyInputMethodKeyboardLayoutOverride)
@@ -305,6 +306,7 @@ pub const NAMES: &[&str] = &[
     "NSPointInRect",
     "NSMouseInRect",
     "NSInsetRect",
+    "GetCurrentKeyModifiers",
     "TISCopyCurrentKeyboardInputSource",
     "TISCopyInputMethodKeyboardLayoutOverride",
     "TISCopyCurrentKeyboardLayoutInputSource",

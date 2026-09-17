@@ -296,6 +296,31 @@ pub fn modifiers(sdl_modifiers: u16) -> u64 {
     out
 }
 
+/// Carbon's `EventModifiers` bits, which `GetCurrentKeyModifiers` answers in.
+mod carbon {
+    pub const CMD_KEY: u32 = 1 << 8;
+    pub const SHIFT_KEY: u32 = 1 << 9;
+    pub const ALPHA_LOCK: u32 = 1 << 10;
+    pub const OPTION_KEY: u32 = 1 << 11;
+    pub const CONTROL_KEY: u32 = 1 << 12;
+}
+
+/// `UInt32 GetCurrentKeyModifiers(void)`: the modifier keys held now, in
+/// Carbon's bits. Qt's key mapper asks this rather than `+[NSEvent modifierFlags]`.
+pub unsafe extern "C" fn GetCurrentKeyModifiers() -> u32 {
+    let held = sdl3::video::keyboard_modifiers();
+    [
+        (keymod::GUI, carbon::CMD_KEY),
+        (keymod::SHIFT, carbon::SHIFT_KEY),
+        (keymod::CAPS, carbon::ALPHA_LOCK),
+        (keymod::ALT, carbon::OPTION_KEY),
+        (keymod::CTRL, carbon::CONTROL_KEY),
+    ]
+    .into_iter()
+    .filter(|(from, _)| held & from != 0)
+    .fold(0, |out, (_, to)| out | to)
+}
+
 /// Whether a scancode is a modifier, which AppKit reports as `-flagsChanged:`
 /// and never as a key.
 pub fn is_modifier(scancode: u32) -> bool {

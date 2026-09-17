@@ -231,6 +231,19 @@ pub unsafe extern "C" fn CFStringCreateWithBytes(
     string::from_encoded(slice, encoding)
 }
 
+/// `CFStringCreateWithCharactersNoCopy`: the characters are copied anyway, as
+/// [`CFStringCreateWithCStringNoCopy`] copies its bytes, so the buffer is never
+/// handed to `contents_deallocator`.
+pub unsafe extern "C" fn CFStringCreateWithCharactersNoCopy(
+    allocator: CFAllocatorRef,
+    chars: *const u16,
+    count: CFIndex,
+    _contents_deallocator: CFAllocatorRef,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation.
+    unsafe { CFStringCreateWithCharacters(allocator, chars, count) }
+}
+
 /// `CFStringRef CFStringCreateWithCharacters(CFAllocatorRef, const UniChar *,
 /// CFIndex numChars)`.
 ///

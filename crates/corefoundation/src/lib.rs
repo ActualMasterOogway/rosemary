@@ -89,6 +89,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         "CFStringCreateWithCStringNoCopy" => at!(api::CFStringCreateWithCStringNoCopy),
         "CFStringCreateWithBytes" => at!(api::CFStringCreateWithBytes),
         "CFStringCreateWithCharacters" => at!(api::CFStringCreateWithCharacters),
+        "CFStringCreateWithCharactersNoCopy" => at!(api::CFStringCreateWithCharactersNoCopy),
         "CFStringCreateCopy" => at!(api::CFStringCreateCopy),
         "CFStringCreateWithSubstring" => at!(api::CFStringCreateWithSubstring),
         "CFStringGetLength" => at!(api::CFStringGetLength),
@@ -282,6 +283,7 @@ pub const NAMES: &[&str] = &[
     "CFStringCreateWithCStringNoCopy",
     "CFStringCreateWithBytes",
     "CFStringCreateWithCharacters",
+    "CFStringCreateWithCharactersNoCopy",
     "CFStringCreateCopy",
     "CFStringCreateWithSubstring",
     "CFStringGetLength",
@@ -487,6 +489,13 @@ pub fn data_symbols() -> Vec<(String, u64)> {
             &callbacks::TYPE_KEY_CALLBACKS as *const _ as usize as u64,
         ),
     ];
+    // A `const CFTimeInterval`, so the symbol is the double itself. Qt's
+    // `QDateTime::toCFDate` subtracts it before `CFDateCreate`.
+    static INTERVAL_SINCE_1970: f64 = 978_307_200.0;
+    out.push((
+        "_kCFAbsoluteTimeIntervalSince1970".to_string(),
+        &INTERVAL_SINCE_1970 as *const f64 as usize as u64,
+    ));
     for name in [
         "_kCFAllocatorDefault",
         "_kCFAllocatorSystemDefault",
