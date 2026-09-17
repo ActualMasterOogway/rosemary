@@ -410,6 +410,17 @@ fn needs_display_in_tree(view: Id, depth: usize) {
     }
 }
 
+/// Forget a window whose SDL window is about to be destroyed.
+///
+/// The store is keyed by the SDL window's address and SDL reuses addresses, so
+/// a store left behind would be handed to the next window made - at the size the
+/// old one was.
+pub fn forget_window(sdl: sdl3::Window) {
+    if let Some(stores) = STORES.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        stores.remove(&(sdl as usize));
+    }
+}
+
 /// Forget a view that is being deallocated, so no pump draws freed memory.
 pub(crate) fn forget(view: Id) {
     let key = view as usize;

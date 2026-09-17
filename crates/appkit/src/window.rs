@@ -47,6 +47,13 @@ pub struct Window {
     immovable: usize,
     /// `-setShowsToolbarButton:`.
     shows_toolbar_button: usize,
+    /// The frame the guest last asked for, in AppKit's screen coordinates.
+    ///
+    /// Kept as well as asked of SDL because the two need not agree: a Wayland
+    /// compositor places a toplevel where it likes and ignores every later
+    /// request, so what a guest asked for is not readable back from the window
+    /// system - and it is what a window remade as a popup has to be placed at.
+    requested: NSRect,
 }
 
 pub const INSTANCE_SIZE: usize = size_of::<Window>();
@@ -86,10 +93,215 @@ mod style {
     pub const RESIZABLE: usize = 1 << 3;
 }
 
+/// The `NSWindowLevel`s that say what a window is *for*.
+///
+/// A level is the only thing that distinguishes a menu from a frameless window
+/// a program drew a title bar into: both are untitled, and AppKit needs no
+/// further distinction because it places and stacks every window the same way.
+/// A Wayland compositor does not - a menu has to be a popup surface, positioned
+/// against its parent - so the level is what this tree classifies by.
+mod window_level {
+    /// `NSFloatingWindowLevel`: a tool palette, above its document.
+    pub const FLOATING: isize = 3;
+    /// `NSPopUpMenuWindowLevel`: a menu, a combo box's list, a popover.
+    pub const POPUP_MENU: isize = 101;
+    /// `NSScreenSaverWindowLevel`, which is where Qt puts a tooltip - above
+    /// everything, and never taking the pointer or the keyboard.
+    pub const SCREEN_SAVER: isize = 1000;
+}
+
+/// How the host window system presents a window.
+///
+/// AppKit has one kind of window and stacks it by level. Wayland has two that
+/// matter here, and the difference is not cosmetic: a toplevel is placed,
+/// decorated and focused by the compositor and **cannot be positioned by the
+/// program at all**, while a popup is placed exactly where its parent says,
+/// carries no decoration and leaves the keyboard where it was. A menu made as a
+/// toplevel therefore appears wherever the compositor likes, which is the
+/// defect this distinction exists to remove.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Presentation {
+    /// An ordinary window, decorated when the style mask says titled.
+    Toplevel,
+    /// A menu or dropdown: positioned against its parent, undecorated, and not
+    /// taking the keyboard - which is what AppKit does with a borderless panel
+    /// at menu level, since `QNSPanel` refuses to become key.
+    Menu,
+    /// A tooltip: as a menu, and never taking the pointer either.
+    Tooltip,
+}
+
+impl Presentation {
+    /// The SDL flags that distinguish the two popup kinds, or none.
+    fn popup_flags(self) -> Option<u64> {
+        match self {
+            Presentation::Toplevel => None,
+            // Not focusable, so the keyboard stays with the window the toolkit
+            // thinks is active: `-[QNSPanel canBecomeKeyWindow]` answers no for
+            // a popup, and Qt routes keys to the popup through the window that
+            // *is* key. A popup that took focus would make that window resign,
+            // and the menu would answer nothing.
+            Presentation::Menu => {
+                Some(sdl3::video::flags::POPUP_MENU | sdl3::video::flags::NOT_FOCUSABLE)
+            }
+            Presentation::Tooltip => {
+                Some(sdl3::video::flags::TOOLTIP | sdl3::video::flags::NOT_FOCUSABLE)
+            }
+        }
+    }
+}
+
+/// What the window is, from what the guest set on it.
+///
+/// Read at every ordering rather than remembered from creation, because a
+/// toolkit reuses its windows: Qt hides one, changes its style mask and level,
+/// and shows it again as something else entirely - a tooltip where a dialog was.
+fn presentation(window: &Window) -> Presentation {
+    if window.style_mask & style::TITLED != 0 {
+        return Presentation::Toplevel;
+    }
+    match window.level {
+        level if level >= window_level::SCREEN_SAVER => Presentation::Tooltip,
+        level if level >= window_level::POPUP_MENU => Presentation::Menu,
+        _ => Presentation::Toplevel,
+    }
+}
+
+/// The window a popup is positioned against: the key window, else the largest
+/// window on the screen.
+///
+/// AppKit needs no such thing - a menu is placed in screen coordinates - and
+/// this Qt does not call `-addChildWindow:ordered:`, so there is nothing to
+/// read the answer off. The largest shown window is the program's own interface,
+/// which is what a menu of that program belongs to.
+fn popup_parent(receiver: Id) -> sdl3::Window {
+    let candidates = || {
+        all()
+            .into_iter()
+            .filter(|window| *window != receiver && is_shown(*window))
+            // A popup of a popup is legal and is what a submenu is, but the
+            // parent has to be one that is still on the screen.
+            .filter_map(|window| {
+                // SAFETY: a window this crate made.
+                let sdl = unsafe { sdl_window(window) };
+                (!sdl.is_null()).then_some(sdl)
+            })
+    };
+    // SAFETY: null or a window this crate made.
+    let key = unsafe { sdl_window(key_window()) };
+    if !key.is_null() && candidates().any(|sdl| sdl == key) {
+        return key;
+    }
+    candidates()
+        .max_by_key(|sdl| {
+            sdl3::video::window_size(*sdl).map_or(0, |(w, h)| i64::from(w) * i64::from(h))
+        })
+        .unwrap_or(std::ptr::null_mut())
+}
+
+/// The presentation an SDL window was actually made with.
+fn presentation_of_sdl(sdl: sdl3::Window) -> Presentation {
+    let flags = sdl3::video::window_flags(sdl);
+    if flags & sdl3::video::flags::TOOLTIP != 0 {
+        return Presentation::Tooltip;
+    }
+    match flags & sdl3::video::flags::POPUP_MENU != 0 {
+        true => Presentation::Menu,
+        false => Presentation::Toplevel,
+    }
+}
+
+/// Where a window is on the desktop, in SDL's coordinates.
+///
+/// A popup's own position is measured from its parent's origin, which is what
+/// SDL both takes and answers for one; every caller here wants the desktop.
+pub(crate) fn global_position(sdl: sdl3::Window) -> Option<(i32, i32)> {
+    let (x, y) = sdl3::video::window_position(sdl)?;
+    let parent = sdl3::video::window_parent(sdl);
+    if parent.is_null() {
+        return Some((x, y));
+    }
+    let (parent_x, parent_y) = global_position(parent)?;
+    Some((x + parent_x, y + parent_y))
+}
+
+/// The reverse: a desktop position as the offset SDL wants for this window.
+fn local_position(sdl: sdl3::Window, x: i32, y: i32) -> (i32, i32) {
+    let parent = sdl3::video::window_parent(sdl);
+    if parent.is_null() {
+        return (x, y);
+    }
+    match global_position(parent) {
+        Some((parent_x, parent_y)) => (x - parent_x, y - parent_y),
+        None => (x, y),
+    }
+}
+
+/// `ROSETTA3_TRACE_WINDOW=1`: report every change to a window's identity - its
+/// creation, style mask, level, frame and ordering.
+///
+/// A toolkit says what kind of window it wants through those five and nothing
+/// else, and the answer to "why did this appear undecorated, in the wrong place,
+/// deaf to the pointer" is which of them arrived, in what order, and with what.
+/// Written to the event log as well as to stderr, because a guest that replaces
+/// its own stderr takes every later line with it.
+pub const TRACE_ENV: &str = "ROSETTA3_TRACE_WINDOW";
+
+pub(crate) fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os(TRACE_ENV).is_some())
+}
+
+pub(crate) fn trace(args: std::fmt::Arguments) {
+    if !tracing() {
+        return;
+    }
+    let line = format!("rosetta3: appkit: window: {args}");
+    eprintln!("{line}");
+    crate::event::debug_log(&line);
+}
+
+macro_rules! trace {
+    ($($arg:tt)*) => { crate::window::trace(format_args!($($arg)*)) };
+}
+
 fn window_of<'a>(receiver: Id) -> &'a mut Window {
     // SAFETY: a window of this crate's, which is what every method here is sent
     // to.
     unsafe { &mut *(receiver as *mut Window) }
+}
+
+/// What to run before an SDL window is destroyed.
+///
+/// Anything keyed by the SDL window's *address* has to drop its entry then, or
+/// it will be handed to the next window made - SDL reuses addresses - at the
+/// wrong size and against the wrong surface. `appkit::backing` clears its own
+/// store directly; `metal` registers here, because nothing in this crate may
+/// call into it.
+static DESTROY_HOOKS: std::sync::Mutex<Vec<fn(sdl3::Window)>> = std::sync::Mutex::new(Vec::new());
+
+/// Run `hook` on every SDL window this crate is about to destroy.
+pub fn add_destroy_hook(hook: fn(sdl3::Window)) {
+    let mut hooks = DESTROY_HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+    if !hooks
+        .iter()
+        .any(|existing| std::ptr::fn_addr_eq(*existing, hook))
+    {
+        hooks.push(hook);
+    }
+}
+
+/// Destroy an SDL window, telling everything keyed on it first.
+fn destroy_sdl_window(sdl: sdl3::Window) {
+    crate::backing::forget_window(sdl);
+    for hook in DESTROY_HOOKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        hook(sdl);
+    }
+    sdl3::video::destroy_window(sdl);
 }
 
 /// Every live window, so an SDL event's window id can find the object it belongs
@@ -209,6 +421,7 @@ unsafe extern "C" fn init_with_content_rect(
 ) -> Id {
     let window = window_of(receiver);
     window.style_mask = style_mask;
+    window.requested = rect;
 
     let flags = creation_flags(style_mask, Api::Undecided);
     let (x, y, width, height) = crate::geometry::rect_to_sdl(rect);
@@ -232,6 +445,15 @@ unsafe extern "C" fn init_with_content_rect(
     sdl3::video::set_window_position(sdl, x, y);
     crate::icon::apply(sdl);
     window.sdl = sdl;
+    trace!(
+        "{receiver:p} created: style {style_mask:#x} frame ({:.0},{:.0} {:.0}x{:.0}) sdl \
+         ({x},{y} {width}x{height}) id {}",
+        rect.origin.x,
+        rect.origin.y,
+        rect.size.width,
+        rect.size.height,
+        sdl3::video::window_id(sdl),
+    );
     WINDOWS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -328,36 +550,83 @@ enum Api {
 ///
 /// `SDL_GL_CreateContext` refuses a window that was not created with
 /// `SDL_WINDOW_OPENGL`, and SDL has no public way to convert one, so the
-/// window has to be made again. The `NSWindow` is what the guest holds and it
-/// does not change; only the SDL window behind it does, so everything keyed
-/// on that - the event table, the object's own handle - is moved over.
+/// window has to be made again.
 ///
 /// A guest asks for a GL context before it draws anything, which is while the
 /// window is usually still hidden, so this is nearly always invisible.
 /// Answers whether the window is an OpenGL window afterwards.
 pub fn rebuild_for_opengl(receiver: Id) -> bool {
     let window = window_of(receiver);
+    if window.sdl.is_null() {
+        return false;
+    }
+    if sdl3::video::window_flags(window.sdl) & sdl3::video::flags::OPENGL != 0 {
+        return true;
+    }
+    let want = presentation(window);
+    remake(receiver, Api::OpenGl, want)
+}
+
+/// Replace `receiver`'s SDL window with one made for `api` and `want`, keeping
+/// the `NSWindow`.
+///
+/// SDL decides at creation what a window *is* - which graphics API it carries,
+/// and whether it is a toplevel or a popup - and can change neither afterwards.
+/// A guest changes its mind about both: it asks for a GL context on a window it
+/// already made, and it hides a window, gives it a menu's level and shows it
+/// again as a menu. So the window is made again.
+///
+/// The `NSWindow` is what the guest holds and it does not change; only the SDL
+/// window behind it does, so everything keyed on that - the event table, the
+/// backing store, the object's own handle - is moved over or dropped.
+fn remake(receiver: Id, api: Api, want: Presentation) -> bool {
+    let window = window_of(receiver);
     let old = window.sdl;
     if old.is_null() {
         return false;
     }
-    if sdl3::video::window_flags(old) & sdl3::video::flags::OPENGL != 0 {
-        return true;
-    }
-    // What the replacement has to come back as. Asked of SDL rather than
-    // remembered, for the reason `-frame` is: a user may have moved or
-    // resized the window since it was made.
-    let (x, y) = sdl3::video::window_position(old).unwrap_or((0, 0));
+    // What the replacement has to come back as. The size is asked of SDL - a
+    // user may have resized the window since it was made - but the position is
+    // the one the guest asked for, because a compositor that places toplevels
+    // itself never gave the guest's request effect in the first place.
     let (width, height) = sdl3::video::window_size(old).unwrap_or((1, 1));
     let title = sdl3::video::window_title(old);
     let shown = window.shown != 0;
+    let (x, y, _, _) = crate::geometry::rect_to_sdl(window.requested);
 
-    let flags = creation_flags(window.style_mask, Api::OpenGl);
-    let Some(new) = sdl3::video::create_window(&title, width.max(1), height.max(1), flags) else {
+    let flags = creation_flags(window.style_mask, api);
+    let new = match want.popup_flags() {
+        Some(popup) => {
+            let parent = popup_parent(receiver);
+            let (offset_x, offset_y) = match global_position(parent) {
+                Some((parent_x, parent_y)) => (x - parent_x, y - parent_y),
+                None => (x, y),
+            };
+            // Neither hidden nor borderless is legal on a popup, and a popup is
+            // both without being told: SDL shows it with its parent.
+            let flags = (flags & !sdl3::video::flags::BORDERLESS) | popup;
+            sdl3::video::create_popup_window(
+                parent,
+                offset_x,
+                offset_y,
+                width.max(1),
+                height.max(1),
+                flags,
+            )
+        }
+        None => sdl3::video::create_window(&title, width.max(1), height.max(1), flags),
+    };
+    let Some(new) = new else {
+        trace!(
+            "{receiver:p} could not be remade as {want:?}: {}",
+            sdl3::error()
+        );
         return false;
     };
-    sdl3::video::set_window_position(new, x, y);
-    crate::icon::apply(new);
+    if want == Presentation::Toplevel {
+        sdl3::video::set_window_position(new, x, y);
+        crate::icon::apply(new);
+    }
     window.sdl = new;
     {
         let mut windows = WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
@@ -369,12 +638,17 @@ pub fn rebuild_for_opengl(receiver: Id) -> bool {
     }
     // The old window goes only once nothing points at it any more: its SDL
     // window id appears in events already queued, and the table above is what
-    // those are resolved through.
-    sdl3::video::destroy_window(old);
+    // those are resolved through. Its backing store goes with it - SDL reuses
+    // addresses, and a store left behind would be the next window's, at the
+    // wrong size.
+    destroy_sdl_window(old);
     update_text_input(receiver);
+    trace!("{receiver:p} remade as {want:?} ({api:?})");
     if shown {
         sdl3::video::show_window(new);
-        sdl3::video::raise_window(new);
+        if want == Presentation::Toplevel {
+            sdl3::video::raise_window(new);
+        }
     }
     true
 }
@@ -384,12 +658,15 @@ pub fn rebuild_for_opengl(receiver: Id) -> bool {
 /// A user can drag or resize a window, and a remembered rectangle would then be
 /// where the program last put it rather than where it is.
 unsafe extern "C" fn frame(receiver: Id, _sel: Sel) -> NSRect {
-    let sdl = window_of(receiver).sdl;
-    if sdl.is_null() {
+    let window = window_of(receiver);
+    if window.sdl.is_null() {
         return NSRect::default();
     }
-    let (x, y) = sdl3::video::window_position(sdl).unwrap_or((0, 0));
-    let (w, h) = sdl3::video::window_size(sdl).unwrap_or((0, 0));
+    let (w, h) = sdl3::video::window_size(window.sdl).unwrap_or((0, 0));
+    let (x, y) = match global_position(window.sdl) {
+        Some(position) => position,
+        None => return window.requested,
+    };
     crate::geometry::rect_from_sdl(x, y, w, h)
 }
 
@@ -523,13 +800,21 @@ unsafe extern "C" fn identity_rect(_receiver: Id, _sel: Sel, rect: NSRect) -> NS
 }
 
 unsafe extern "C" fn set_frame(receiver: Id, _sel: Sel, rect: NSRect) {
-    let sdl = window_of(receiver).sdl;
+    let window = window_of(receiver);
+    window.requested = rect;
+    let sdl = window.sdl;
     if sdl.is_null() {
         return;
     }
     let (x, y, width, height) = crate::geometry::rect_to_sdl(rect);
+    let (local_x, local_y) = local_position(sdl, x, y);
+    trace!(
+        "{receiver:p} frame ({:.0},{:.0} {:.0}x{:.0}) -> sdl ({local_x},{local_y} \
+         {width}x{height})",
+        rect.origin.x, rect.origin.y, rect.size.width, rect.size.height,
+    );
     sdl3::video::set_window_size(sdl, width.max(1), height.max(1));
-    sdl3::video::set_window_position(sdl, x, y);
+    sdl3::video::set_window_position(sdl, local_x, local_y);
 }
 
 unsafe extern "C" fn set_frame_display(receiver: Id, sel: Sel, rect: NSRect, _display: u8) {
@@ -554,7 +839,8 @@ unsafe extern "C" fn set_frame_origin(
     _sel: Sel,
     origin: foundation::geometry::NSPoint,
 ) {
-    let sdl = window_of(receiver).sdl;
+    let window = window_of(receiver);
+    let sdl = window.sdl;
     if sdl.is_null() {
         return;
     }
@@ -566,12 +852,20 @@ unsafe extern "C" fn set_frame_origin(
             height: h as f64,
         },
     };
+    window.requested = rect;
     let (x, y, _, _) = crate::geometry::rect_to_sdl(rect);
-    sdl3::video::set_window_position(sdl, x, y);
+    let (local_x, local_y) = local_position(sdl, x, y);
+    trace!(
+        "{receiver:p} origin ({:.0},{:.0}) -> sdl ({local_x},{local_y})",
+        origin.x, origin.y
+    );
+    sdl3::video::set_window_position(sdl, local_x, local_y);
 }
 
 unsafe extern "C" fn set_content_size(receiver: Id, _sel: Sel, size: NSSize) {
-    let sdl = window_of(receiver).sdl;
+    let window = window_of(receiver);
+    window.requested.size = size;
+    let sdl = window.sdl;
     if !sdl.is_null() {
         sdl3::video::set_window_size(sdl, (size.width as i32).max(1), (size.height as i32).max(1));
     }
@@ -704,17 +998,67 @@ unsafe extern "C" fn display_window(receiver: Id, _sel: Sel) {
 }
 
 unsafe extern "C" fn make_key_and_order_front(receiver: Id, _sel: Sel, _sender: Id) {
-    let sdl = window_of(receiver).sdl;
-    if sdl.is_null() {
+    let window = window_of(receiver);
+    if window.sdl.is_null() {
         return;
     }
+    let want = presentation(window);
+    trace!(
+        "{receiver:p} ordered front as {want:?}: style {:#x} level {}",
+        window.style_mask, window.level,
+    );
+    // What a window is, is decided here and not at creation: a toolkit gives a
+    // window its style mask and its level after making it, and reuses one
+    // window as a dialog, then as a tooltip. A popup's parent has to be on the
+    // screen, so a popup with nothing to hang off stays a toplevel.
+    if want != presentation_of_sdl(window.sdl)
+        && !(want != Presentation::Toplevel && popup_parent(receiver).is_null())
+    {
+        let api = match sdl3::video::window_flags(window.sdl) & sdl3::video::flags::OPENGL != 0 {
+            true => Api::OpenGl,
+            false => Api::Undecided,
+        };
+        remake(receiver, api, want);
+    }
+    let window = window_of(receiver);
+    let sdl = window.sdl;
+    apply_style(receiver);
+    // The frame again, now that the window is the kind it is going to be: a
+    // popup made a moment ago was placed against whatever its parent's position
+    // was then, and a toplevel remade as a popup was never placed at all.
+    let (x, y, width, height) = crate::geometry::rect_to_sdl(window.requested);
+    if width > 0 && height > 0 {
+        let (local_x, local_y) = local_position(sdl, x, y);
+        sdl3::video::set_window_size(sdl, width.max(1), height.max(1));
+        sdl3::video::set_window_position(sdl, local_x, local_y);
+    }
     sdl3::video::show_window(sdl);
-    sdl3::video::raise_window(sdl);
+    if want == Presentation::Toplevel {
+        // A popup cannot be raised - it is already above its parent, and SDL
+        // refuses - and asking would only log a failure.
+        sdl3::video::raise_window(sdl);
+    }
     window_of(receiver).shown = 1;
-    KEY.store(receiver as usize, std::sync::atomic::Ordering::Release);
+    trace!(
+        "{receiver:p} shown at sdl {:?} size {:?}",
+        sdl3::video::window_position(sdl),
+        sdl3::video::window_size(sdl),
+    );
+    if want != Presentation::Tooltip {
+        KEY.store(receiver as usize, std::sync::atomic::Ordering::Release);
+    }
+    // Where the window actually ended up. On a Mac a window is placed exactly
+    // where it was asked to be, so a toolkit has no reason to look again; here
+    // the compositor chooses, and a toolkit which never hears about it maps
+    // every later pointer position against a window that is somewhere else. It
+    // is also the pair of notifications a window gets when it is ordered onto
+    // the screen for real, and Qt does not treat its window as exposed - or act
+    // on any of the input it is sent - until they arrive.
+    crate::event::window_geometry_changed(receiver);
 }
 
 unsafe extern "C" fn order_out(receiver: Id, _sel: Sel, _sender: Id) {
+    trace!("{receiver:p} ordered out");
     let sdl = window_of(receiver).sdl;
     if !sdl.is_null() {
         sdl3::video::hide_window(sdl);
@@ -1010,6 +1354,10 @@ unsafe extern "C" fn accepts_mouse_moved(receiver: Id, _sel: Sel) -> u8 {
 }
 
 unsafe extern "C" fn set_level(receiver: Id, _sel: Sel, level: isize) {
+    trace!(
+        "{receiver:p} level {} -> {level}",
+        window_of(receiver).level
+    );
     window_of(receiver).level = level;
 }
 
@@ -1023,9 +1371,39 @@ unsafe extern "C" fn style_mask(receiver: Id, _sel: Sel) -> usize {
 
 unsafe extern "C" fn set_style_mask(receiver: Id, _sel: Sel, mask: usize) {
     let window = window_of(receiver);
+    if window.style_mask != mask {
+        trace!("{receiver:p} style {:#x} -> {mask:#x}", window.style_mask);
+    }
     window.style_mask = mask;
-    if !window.sdl.is_null() {
-        sdl3::video::set_window_resizable(window.sdl, mask & style::RESIZABLE != 0);
+    apply_style(receiver);
+}
+
+/// Give the host window what the style mask and level ask for.
+///
+/// The three that reach a window system: whether it is decorated, whether the
+/// user may resize it, and whether it floats above ordinary windows. A popup has
+/// none of them - it is undecorated, sized by its parent and already on top.
+fn apply_style(receiver: Id) {
+    let window = window_of(receiver);
+    let sdl = window.sdl;
+    if sdl.is_null() || presentation_of_sdl(sdl) != Presentation::Toplevel {
+        return;
+    }
+    sdl3::video::set_window_bordered(sdl, window.style_mask & style::TITLED != 0);
+    sdl3::video::set_window_always_on_top(sdl, window.level >= window_level::FLOATING);
+    // The resizable bit is the one that is not simply followed once the
+    // window is on the screen. Qt clears it on a window for as long as a popup
+    // of that window is open - QTBUG-30266, "a window should not be resizable
+    // while a transient popup is open" - and restores it afterwards. On a Mac
+    // that greys out the zoom button while a menu is down and costs nothing.
+    // Here it makes SDL pin the toplevel's minimum and maximum size to its
+    // current one, so the compositor re-decorates the window - its maximize
+    // button disappears - and may resize it, every time a menu opens. So the
+    // bit reaches the window system while the window is off the screen, which
+    // is where a program that means it sets it, and a visible window keeps the
+    // decorations it has. `-styleMask` still answers with whatever was set.
+    if window.shown == 0 {
+        sdl3::video::set_window_resizable(sdl, window.style_mask & style::RESIZABLE != 0);
     }
 }
 
@@ -1466,6 +1844,45 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a window is, is read off its style mask and its level together -
+    /// and is read again at every ordering, because a toolkit reuses one window
+    /// as a dialog and then as a tooltip.
+    #[test]
+    fn a_windows_kind_follows_its_style_mask_and_level() {
+        crate::bootstrap();
+        let window =
+            objc::object::create_instance(objc::class::lookup(c"NSWindow").expect("NSWindow"), 0);
+        let body = window_of(window);
+
+        // A titled window is a toplevel whatever its level says: a program that
+        // floats its document window above the others still wants a real one.
+        body.style_mask = style::TITLED | style::CLOSABLE | style::RESIZABLE;
+        body.level = window_level::POPUP_MENU;
+        assert_eq!(presentation(body), Presentation::Toplevel);
+
+        // Borderless at an ordinary level is a window a program draws its own
+        // frame into - a splash screen - and not a menu.
+        body.style_mask = 0;
+        body.level = 0;
+        assert_eq!(presentation(body), Presentation::Toplevel);
+
+        // Borderless at menu level and above are the two popups.
+        body.level = window_level::POPUP_MENU;
+        assert_eq!(presentation(body), Presentation::Menu);
+        body.level = window_level::SCREEN_SAVER;
+        assert_eq!(presentation(body), Presentation::Tooltip);
+
+        // Neither takes the keyboard, which is what `-[QNSPanel
+        // canBecomeKeyWindow]` answers for a popup.
+        for kind in [Presentation::Menu, Presentation::Tooltip] {
+            let flags = kind.popup_flags().expect("a popup");
+            assert_ne!(flags & sdl3::video::flags::NOT_FOCUSABLE, 0, "{kind:?}");
+        }
+        assert_eq!(Presentation::Toplevel.popup_flags(), None);
+
+        objc::arc::release(window);
+    }
 
     /// A window with no SDL window behind it still records its alpha: the
     /// property reads back what the program set, whether or not the host

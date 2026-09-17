@@ -141,6 +141,9 @@ struct Api {
     SDL_free: Option<unsafe extern "C" fn(*mut c_void)>,
 
     SDL_CreateWindow: Option<unsafe extern "C" fn(*const c_char, c_int, c_int, u64) -> Window>,
+    SDL_CreatePopupWindow:
+        Option<unsafe extern "C" fn(Window, c_int, c_int, c_int, c_int, u64) -> Window>,
+    SDL_GetWindowParent: Option<unsafe extern "C" fn(Window) -> Window>,
     SDL_DestroyWindow: Option<unsafe extern "C" fn(Window)>,
     SDL_SetWindowTitle: Option<unsafe extern "C" fn(Window, *const c_char) -> bool>,
     SDL_GetWindowTitle: Option<unsafe extern "C" fn(Window) -> *const c_char>,
@@ -156,6 +159,9 @@ struct Api {
     SDL_RaiseWindow: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_SetWindowFullscreen: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_SetWindowResizable: Option<unsafe extern "C" fn(Window, bool) -> bool>,
+    SDL_SetWindowBordered: Option<unsafe extern "C" fn(Window, bool) -> bool>,
+    SDL_SetWindowAlwaysOnTop: Option<unsafe extern "C" fn(Window, bool) -> bool>,
+    SDL_SetWindowFocusable: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_GetWindowPixelDensity: Option<unsafe extern "C" fn(Window) -> f32>,
     SDL_GetWindowID: Option<unsafe extern "C" fn(Window) -> u32>,
     SDL_GetWindowFlags: Option<unsafe extern "C" fn(Window) -> u64>,
@@ -349,6 +355,8 @@ fn api() -> Option<&'static Api> {
             SDL_GetGamepadButton,
             SDL_free,
             SDL_CreateWindow,
+            SDL_CreatePopupWindow,
+            SDL_GetWindowParent,
             SDL_DestroyWindow,
             SDL_SetWindowTitle,
             SDL_GetWindowTitle,
@@ -364,6 +372,9 @@ fn api() -> Option<&'static Api> {
             SDL_RaiseWindow,
             SDL_SetWindowFullscreen,
             SDL_SetWindowResizable,
+            SDL_SetWindowBordered,
+            SDL_SetWindowAlwaysOnTop,
+            SDL_SetWindowFocusable,
             SDL_GetWindowPixelDensity,
             SDL_GetWindowID,
             SDL_GetWindowFlags,
@@ -1288,7 +1299,12 @@ pub mod video {
         pub const BORDERLESS: u64 = 0x0000_0010;
         pub const RESIZABLE: u64 = 0x0000_0020;
         pub const HIGH_PIXEL_DENSITY: u64 = 0x0000_2000;
+        pub const ALWAYS_ON_TOP: u64 = 0x0001_0000;
+        pub const UTILITY: u64 = 0x0002_0000;
+        pub const TOOLTIP: u64 = 0x0004_0000;
+        pub const POPUP_MENU: u64 = 0x0008_0000;
         pub const VULKAN: u64 = 0x1000_0000;
+        pub const NOT_FOCUSABLE: u64 = 0x0000_0000_8000_0000;
     }
 
     /// The flags a window actually has, which is not always the set it was
@@ -1818,6 +1834,32 @@ pub mod video {
         (!window.is_null()).then_some(window)
     }
 
+    pub fn create_popup_window(
+        parent: Window,
+        offset_x: i32,
+        offset_y: i32,
+        width: i32,
+        height: i32,
+        flags: u64,
+    ) -> Option<Window> {
+        if !init_video() || parent.is_null() {
+            return None;
+        }
+        let create = api()?.SDL_CreatePopupWindow?;
+        // SAFETY: a window this crate created, and SDL's own flags.
+        let window = unsafe { create(parent, offset_x, offset_y, width, height, flags) };
+        (!window.is_null()).then_some(window)
+    }
+
+    /// The window a popup is positioned against, or null for a toplevel.
+    pub fn window_parent(window: Window) -> Window {
+        match api().and_then(|a| a.SDL_GetWindowParent) {
+            // SAFETY: a window this crate created.
+            Some(f) => unsafe { f(window) },
+            None => std::ptr::null_mut(),
+        }
+    }
+
     /// One-argument window calls that answer whether they worked.
     macro_rules! window_call {
         ($($name:ident => $entry:ident),* $(,)?) => {
@@ -2012,6 +2054,35 @@ pub mod video {
 
     pub fn set_window_fullscreen(window: Window, on: bool) -> bool {
         let Some(f) = api().and_then(|a| a.SDL_SetWindowFullscreen) else {
+            return false;
+        };
+        // SAFETY: a window this crate created.
+        unsafe { f(window, on) }
+    }
+
+    /// `SDL_SetWindowBordered`: whether the window system draws a frame around
+    /// the window.
+    ///
+    /// A guest that draws its own title bar - which is what a toolkit does for
+    /// a borderless window - gets two of them without this.
+    pub fn set_window_bordered(window: Window, on: bool) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_SetWindowBordered) else {
+            return false;
+        };
+        // SAFETY: a window this crate created.
+        unsafe { f(window, on) }
+    }
+
+    pub fn set_window_always_on_top(window: Window, on: bool) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_SetWindowAlwaysOnTop) else {
+            return false;
+        };
+        // SAFETY: a window this crate created.
+        unsafe { f(window, on) }
+    }
+
+    pub fn set_window_focusable(window: Window, on: bool) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_SetWindowFocusable) else {
             return false;
         };
         // SAFETY: a window this crate created.

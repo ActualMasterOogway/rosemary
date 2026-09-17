@@ -483,6 +483,32 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
     }
 }
 
+/// Tell a window's guest where the window actually is and how large it actually
+/// is, by posting the pair of notifications a real move and resize would.
+///
+/// On a Mac a window is placed and sized exactly as the program asked, so the
+/// program never has to look again. A Wayland compositor places a toplevel
+/// itself and may hand back a different size, and a toolkit that never hears
+/// about it keeps mapping pointer positions against a window that is elsewhere.
+/// The same pair is what a toolkit waits for before it treats a window as
+/// on-screen at all.
+pub fn window_geometry_changed(object: Id) {
+    // SAFETY: a window this crate made.
+    let sdl = unsafe { window::sdl_window(object) };
+    if sdl.is_null() {
+        return;
+    }
+    let id = sdl3::video::window_id(sdl);
+    if let Some((width, height)) = sdl3::video::window_size(sdl) {
+        deliver(sdl3::video::Event::WindowResized {
+            window: id,
+            width,
+            height,
+        });
+    }
+    post(id, window::DID_MOVE);
+}
+
 fn current_modifiers() -> u64 {
     crate::keymap::modifiers(sdl3::video::keyboard_modifiers())
 }

@@ -528,6 +528,7 @@ fn send_size(receiver: Id, selector: &str) -> (f64, f64) {
 pub(crate) fn install() {
     appkit::bootstrap();
     appkit::backing::set_presenter(present_store);
+    appkit::window::add_destroy_hook(forget_window);
     object::register::<Drawable>(c"R3CAMetalDrawable");
     let drawable = objc::class::lookup(c"R3CAMetalDrawable").expect("just registered");
     methods!(drawable, {
@@ -577,6 +578,21 @@ const FRAMES_RETIRED: usize = 4;
 /// more layer covering the window, so that it and any `CAMetalLayer`s share
 /// the one surface the window has. A layer presenting afterwards lands over
 /// it, which is AppKit's order for a layer-backed subview.
+/// Drop what this module and the swapchains hold for a window being destroyed.
+fn forget_window(window: sdl3::Window) {
+    let key = window as usize;
+    let mut images = STORE_IMAGES.lock().expect("store images");
+    if let Some(at) = images.iter().position(|(existing, _)| *existing == key) {
+        let (_, image) = images.remove(at);
+        RETIRED
+            .lock()
+            .expect("retired images")
+            .push((image, FRAMES_RETIRED));
+    }
+    drop(images);
+    crate::swapchain::forget_window(window);
+}
+
 pub(crate) fn present_store(
     window: sdl3::Window,
     store: &appkit::backing::Store,

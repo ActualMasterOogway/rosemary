@@ -39,10 +39,13 @@ pub fn pointer() -> Option<(f32, f32)> {
         return None;
     }
     let (x, y) = *POINTER.lock().unwrap_or_else(|e| e.into_inner());
-    let origin = crate::window::sdl_windows()
-        .into_iter()
-        .next()
-        .and_then(sdl3::video::window_position)
+    // Against the window the script is driving, not the first one made: a step
+    // is written in the coordinates of the window it names, and measuring it
+    // from another window puts the pointer somewhere neither of them is - which
+    // reads exactly like the program ignoring the pointer, since every tracking
+    // area then decides it is somewhere else.
+    let origin = target_window()
+        .and_then(crate::window::global_position)
         .unwrap_or((0, 0));
     Some((x + origin.0 as f32, y + origin.1 as f32))
 }
@@ -62,6 +65,12 @@ enum Action {
     Key(u32),
     /// Each character in turn, as the key that types it.
     Type(String),
+    /// Drive a different window from here on, by the names
+    /// `ROSETTA3_DEBUG_INPUT_WINDOW` takes.
+    ///
+    /// A menu is opened by a click on one window and answers clicks on another,
+    /// so which window a script drives cannot be settled before it runs.
+    Window(String),
 }
 
 struct Step {
@@ -113,6 +122,7 @@ fn action(rest: &str) -> Option<Action> {
         "scroll" => point(argument).map(|(x, y)| Action::Scroll(x, y)),
         "key" => crate::event::scancode(argument).map(Action::Key),
         "type" => Some(Action::Type(argument.to_owned())),
+        "window" => Some(Action::Window(argument.to_owned())),
         _ => None,
     }
 }
@@ -129,7 +139,7 @@ fn point(argument: &str) -> Option<(f32, f32)> {
 /// next thing to click is depends on what the last click did. This reads the
 /// file's new lines each pump and performs each as one step, so a session can
 /// be driven a line at a time from outside while it runs.
-fn run_file(window: u32) {
+fn run_file() {
     use std::io::Read;
 
     static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
@@ -165,7 +175,7 @@ fn run_file(window: u32) {
     drop(partial);
     for line in complete.lines().map(str::trim).filter(|l| !l.is_empty()) {
         match action(line) {
-            Some(action) => perform(window, &action),
+            Some(action) => perform(&action),
             None => eprintln!("rosetta3: appkit: {FILE_ENV}: {line:?} is not an action"),
         }
     }
@@ -181,13 +191,42 @@ pub fn run() {
         Ok(value) => parse(&value),
         Err(_) => Vec::new(),
     });
-    // `ROSETTA3_DEBUG_INPUT_WINDOW`: which window the script drives - `key`
-    // for the key window, for a dialog; `main` for the largest shown one, for
-    // an application window the compositor has not given focus to; the first
-    // window made otherwise.
+    if target().is_none() {
+        return;
+    }
+    run_file();
+    let mut next = NEXT.load(Ordering::Relaxed);
+    if next >= script.len() {
+        return;
+    }
+    let elapsed = START.get_or_init(Instant::now).elapsed().as_secs_f64();
+    while next < script.len() && script[next].at <= elapsed {
+        perform(&script[next].action);
+        next += 1;
+        NEXT.store(next, Ordering::Relaxed);
+    }
+}
+
+/// The window the next step drives.
+///
+/// Asked once per step rather than once per turn of the pump, because a
+/// `window` step chooses a different one and the steps that follow it - in the
+/// same batch of lines, usually - are exactly the ones that have to go there.
+///
+/// `ROSETTA3_DEBUG_INPUT_WINDOW` says which: `key` for the key window, for a
+/// dialog; `main` for the largest shown one, for an application window the
+/// compositor has not given focus to; `top` for the most recently shown, for a
+/// menu; the first window made otherwise.
+fn target() -> Option<u32> {
+    target_window().map(sdl3::video::window_id)
+}
+
+/// The SDL window [`target`] names.
+fn target_window() -> Option<sdl3::Window> {
     static WHICH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let which = WHICH.get_or_init(|| std::env::var(WINDOW_ENV).unwrap_or_default());
-    let sdl = match which.as_str() {
+    let chosen = CHOSEN.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    match chosen.as_deref().unwrap_or(which) {
         // SAFETY: null or a window this crate made.
         "key" => Some(unsafe { crate::window::sdl_window(crate::window::key_window()) })
             .filter(|sdl| !sdl.is_null()),
@@ -195,21 +234,16 @@ pub fn run() {
         // interface is in: a script that drives an application whose window
         // the compositor has not given focus to cannot ask for the key one.
         "main" => main_window(),
+        // The most recently shown window, which is the menu or dialog that has
+        // just opened: the one a script has to drive to answer whether a popup
+        // responds to the pointer at all.
+        "top" => crate::window::all()
+            .into_iter()
+            .filter(|window| crate::window::is_shown(*window))
+            // SAFETY: a window this crate made.
+            .map(|window| unsafe { crate::window::sdl_window(window) })
+            .rfind(|sdl| !sdl.is_null()),
         _ => crate::window::sdl_windows().into_iter().next(),
-    };
-    let Some(window) = sdl.map(sdl3::video::window_id) else {
-        return;
-    };
-    run_file(window);
-    let mut next = NEXT.load(Ordering::Relaxed);
-    if next >= script.len() {
-        return;
-    }
-    let elapsed = START.get_or_init(Instant::now).elapsed().as_secs_f64();
-    while next < script.len() && script[next].at <= elapsed {
-        perform(window, &script[next].action);
-        next += 1;
-        NEXT.store(next, Ordering::Relaxed);
     }
 }
 
@@ -226,11 +260,17 @@ fn main_window() -> Option<sdl3::Window> {
         })
 }
 
-fn perform(window: u32, action: &Action) {
+/// The window a `window` step chose, which overrides [`WINDOW_ENV`].
+static CHOSEN: Mutex<Option<String>> = Mutex::new(None);
+
+fn perform(action: &Action) {
     eprintln!("rosetta3: appkit: {ENV}: {action:?}");
     // And to `ROSETTA3_EVENT_LOG`, which a guest that replaces its own stderr
     // cannot take with it.
     crate::event::debug_log(&format!("script {action:?}"));
+    let Some(window) = target() else {
+        return;
+    };
     let (x, y) = *POINTER.lock().unwrap_or_else(|e| e.into_inner());
     match action {
         Action::Move(to_x, to_y) => {
@@ -260,6 +300,9 @@ fn perform(window: u32, action: &Action) {
             y: *dy,
         }),
         Action::Key(scancode) => key(window, *scancode, 0, 0),
+        Action::Window(name) => {
+            *CHOSEN.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.clone());
+        }
         Action::Type(text) => {
             for character in text.chars() {
                 match typed(character) {

@@ -122,6 +122,22 @@ static SWAPCHAINS: Mutex<Option<HashMap<usize, Swapchain>>> = Mutex::new(None);
 /// not retry - and re-report - a surface the host will never give.
 static REFUSED: Mutex<Option<HashMap<usize, ()>>> = Mutex::new(None);
 
+/// Drop everything held for an SDL window that is about to be destroyed.
+///
+/// `appkit` remakes a window when what it is changes - a hidden dialog shown
+/// again as a menu - and the map here is keyed by the window's address, which
+/// SDL reuses. An entry left behind would be presented to a surface that no
+/// longer exists.
+pub(crate) fn forget_window(window: sdl3::Window) {
+    let key = window as usize;
+    if let Some(all) = SWAPCHAINS.lock().expect("swapchains").as_mut() {
+        all.remove(&key);
+    }
+    if let Some(refused) = REFUSED.lock().expect("refused windows").as_mut() {
+        refused.remove(&key);
+    }
+}
+
 /// Blit `source` into `window`'s swapchain image at `frame` and present it.
 ///
 /// `Ok(false)` is "this window cannot be presented to with a swapchain",
