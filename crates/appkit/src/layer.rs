@@ -1,6 +1,6 @@
 use std::ffi::c_void;
 
-use foundation::geometry::NSSize;
+use foundation::geometry::{NSRect, NSSize};
 use objc::object::Id;
 use objc::sel::Sel;
 
@@ -20,7 +20,13 @@ pub struct Layer {
     /// `CAMetalLayer`'s frame reaches a window through the view that holds
     /// it, and nothing else in the object graph points that way.
     view: Id,
+    /// `-delegate`, a `__weak` slot as Core Animation declares it: a view is
+    /// the usual delegate and owns the layer, so a retain would be a cycle.
+    delegate: Id,
+    bounds: NSRect,
     opaque: u8,
+    needs_display: u8,
+    needs_layout: u8,
 }
 
 pub const INSTANCE_SIZE: usize = size_of::<Layer>();
@@ -60,7 +66,11 @@ unsafe extern "C" fn new_layer(class: Id, _sel: Sel) -> Id {
     let layer = layer_of(object);
     layer.contents_scale = 1.0;
     layer.view = std::ptr::null_mut();
+    layer.delegate = std::ptr::null_mut();
+    layer.bounds = NSRect::default();
     layer.opaque = 0;
+    layer.needs_display = 0;
+    layer.needs_layout = 0;
     if objc::class::lookup(c"CAMetalLayer").is_some_and(|metal| {
         // SAFETY: the receiver of a class method is a class object.
         unsafe { objc::class::from_ptr(class as *const objc::class::Class) }.is_some_and(|actual| {
@@ -135,6 +145,194 @@ unsafe extern "C" fn is_opaque(receiver: Id, _sel: Sel) -> u8 {
     layer_of(receiver).opaque
 }
 
+unsafe extern "C" fn bounds(receiver: Id, _sel: Sel) -> NSRect {
+    layer_of(receiver).bounds
+}
+
+unsafe extern "C" fn set_bounds(receiver: Id, _sel: Sel, bounds: NSRect) {
+    layer_of(receiver).bounds = bounds;
+}
+
+unsafe extern "C" fn set_delegate(receiver: Id, _sel: Sel, delegate: Id) {
+    objc::arc::store_weak(&mut layer_of(receiver).delegate, delegate);
+}
+
+unsafe extern "C" fn delegate(receiver: Id, _sel: Sel) -> Id {
+    layer_of(receiver).delegate
+}
+
+/// The layer's delegate, if it implements `name`.
+///
+/// Checked here rather than left to the send: every `CALayerDelegate` method
+/// is optional, and a missing one selects a different path, not a no-op.
+fn delegate_responding(receiver: Id, name: &str) -> Option<(Id, Sel)> {
+    let delegate = layer_of(receiver).delegate;
+    let sel = objc::sel::get(name);
+    // SAFETY: null or a live object, which the weak slot guarantees.
+    unsafe { objc::object::class_of(delegate) }?.method(sel)?;
+    Some((delegate, sel))
+}
+
+fn send_void(receiver: Id, name: &str) {
+    // SAFETY: a `void (id, SEL)` method on a live layer.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) = std::mem::transmute(objc::msg::entry());
+        f(receiver, objc::sel::get(name));
+    }
+}
+
+/// `-display`: the delegate's `-displayLayer:` if it has one, otherwise a
+/// context sized to the bounds for `-drawInContext:`.
+///
+/// This layer has no `contents`, so what is drawn is discarded; the calls are
+/// made because guests put their state updates in them.
+unsafe extern "C" fn display(receiver: Id, _sel: Sel) {
+    layer_of(receiver).needs_display = 0;
+    if let Some((delegate, sel)) = delegate_responding(receiver, "displayLayer:") {
+        // SAFETY: `-displayLayer:` is `void (id, SEL, CALayer *)`.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+            f(delegate, sel, receiver);
+        }
+        return;
+    }
+    if let Some((delegate, sel)) = delegate_responding(receiver, "layerWillDraw:") {
+        // SAFETY: `-layerWillDraw:` is `void (id, SEL, CALayer *)`.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+            f(delegate, sel, receiver);
+        }
+    }
+    let layer = layer_of(receiver);
+    let scale = layer.contents_scale;
+    let width = (layer.bounds.size.width * scale).ceil();
+    let height = (layer.bounds.size.height * scale).ceil();
+    if !(width >= 1.0 && height >= 1.0) {
+        return;
+    }
+    // SAFETY: an owned buffer of the given size; 1 is premultiplied RGBA.
+    let context = unsafe {
+        crate::cgcontext::CGBitmapContextCreate(
+            std::ptr::null_mut(),
+            width as usize,
+            height as usize,
+            8,
+            0,
+            std::ptr::null(),
+            1,
+        )
+    };
+    if context.is_null() {
+        return;
+    }
+    // SAFETY: `-drawInContext:` is `void (id, SEL, CGContextRef)`, and the
+    // context is released only after the send returns.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, *const c_void) =
+            std::mem::transmute(objc::msg::entry());
+        f(receiver, objc::sel::get("drawInContext:"), context.cast());
+        corefoundation::api::CFRelease(context);
+    }
+}
+
+/// `-drawInContext:`, whose base implementation is the delegate's
+/// `-drawLayer:inContext:`.
+unsafe extern "C" fn draw_in_context(receiver: Id, _sel: Sel, context: *const c_void) {
+    if let Some((delegate, sel)) = delegate_responding(receiver, "drawLayer:inContext:") {
+        // SAFETY: `-drawLayer:inContext:` is `void (id, SEL, CALayer *, CGContextRef)`.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, Id, *const c_void) =
+                std::mem::transmute(objc::msg::entry());
+            f(delegate, sel, receiver, context);
+        }
+    }
+}
+
+unsafe extern "C" fn set_needs_display(receiver: Id, _sel: Sel) {
+    layer_of(receiver).needs_display = 1;
+}
+
+unsafe extern "C" fn needs_display(receiver: Id, _sel: Sel) -> u8 {
+    layer_of(receiver).needs_display
+}
+
+/// `-displayIfNeeded`. There is no transaction commit to do this implicitly,
+/// so a layer is only redrawn when asked.
+unsafe extern "C" fn display_if_needed(receiver: Id, _sel: Sel) {
+    if layer_of(receiver).needs_display != 0 {
+        send_void(receiver, "display");
+    }
+}
+
+/// `-layoutSublayers`, whose base implementation is the delegate's
+/// `-layoutSublayersOfLayer:`.
+unsafe extern "C" fn layout_sublayers(receiver: Id, _sel: Sel) {
+    if let Some((delegate, sel)) = delegate_responding(receiver, "layoutSublayersOfLayer:") {
+        // SAFETY: `-layoutSublayersOfLayer:` is `void (id, SEL, CALayer *)`.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+            f(delegate, sel, receiver);
+        }
+    }
+}
+
+unsafe extern "C" fn set_needs_layout(receiver: Id, _sel: Sel) {
+    layer_of(receiver).needs_layout = 1;
+}
+
+unsafe extern "C" fn needs_layout(receiver: Id, _sel: Sel) -> u8 {
+    layer_of(receiver).needs_layout
+}
+
+unsafe extern "C" fn layout_if_needed(receiver: Id, _sel: Sel) {
+    let layer = layer_of(receiver);
+    if layer.needs_layout != 0 {
+        layer.needs_layout = 0;
+        send_void(receiver, "layoutSublayers");
+    }
+}
+
+/// `-actionForKey:`. The delegate is asked first, and its `NSNull` means "no
+/// action" without falling through. Nothing animates here, so there is no
+/// default action to fall through to either.
+unsafe extern "C" fn action_for_key(receiver: Id, _sel: Sel, key: Id) -> Id {
+    let Some((delegate, sel)) = delegate_responding(receiver, "actionForLayer:forKey:") else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: `-actionForLayer:forKey:` is `id (id, SEL, CALayer *, NSString *)`.
+    let action = unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id, Id) -> Id =
+            std::mem::transmute(objc::msg::entry());
+        f(delegate, sel, receiver, key)
+    };
+    let null = objc::class::lookup(c"NSNull");
+    // SAFETY: null or an object the delegate returned.
+    match unsafe { objc::object::class_of(action) } {
+        Some(class) if null.is_some_and(|null| class.chain().any(|c| std::ptr::eq(c, null))) => {
+            std::ptr::null_mut()
+        }
+        _ => action,
+    }
+}
+
+/// `-dealloc`, which must unregister the weak delegate slot before the memory
+/// holding it is freed.
+unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
+    objc::arc::destroy_weak(&mut layer_of(receiver).delegate);
+    if objc::class::lookup(c"CAMetalLayer").is_some_and(|metal| {
+        // SAFETY: a live layer being deallocated.
+        unsafe { objc::object::class_of(receiver) }.is_some_and(|class| {
+            class
+                .chain()
+                .any(|candidate| std::ptr::eq(candidate, metal))
+        })
+    }) {
+        let device = std::mem::replace(&mut metal_layer_of(receiver).device, std::ptr::null_mut());
+        objc::arc::release(device);
+    }
+    objc::arc::finalize(receiver);
+}
+
 unsafe extern "C" fn set_device(receiver: Id, _sel: Sel, device: Id) {
     let layer = metal_layer_of(receiver);
     if layer.device != device {
@@ -190,6 +388,21 @@ pub(crate) fn install() {
         "setContentsScale:" => set_contents_scale, c"v24@0:8d16";
         "setOpaque:" => set_opaque, c"v20@0:8c16";
         "isOpaque" => is_opaque, c"c16@0:8";
+        "bounds" => bounds, c"{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8";
+        "setBounds:" => set_bounds, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
+        "delegate" => delegate, c"@16@0:8";
+        "setDelegate:" => set_delegate, c"v24@0:8@16";
+        "display" => display, c"v16@0:8";
+        "drawInContext:" => draw_in_context, c"v24@0:8^{CGContext=}16";
+        "setNeedsDisplay" => set_needs_display, c"v16@0:8";
+        "needsDisplay" => needs_display, c"c16@0:8";
+        "displayIfNeeded" => display_if_needed, c"v16@0:8";
+        "layoutSublayers" => layout_sublayers, c"v16@0:8";
+        "setNeedsLayout" => set_needs_layout, c"v16@0:8";
+        "needsLayout" => needs_layout, c"c16@0:8";
+        "layoutIfNeeded" => layout_if_needed, c"v16@0:8";
+        "actionForKey:" => action_for_key, c"@24@0:8@16";
+        "dealloc" => dealloc, c"v16@0:8";
     });
     let metal = objc::class::lookup(c"CAMetalLayer").expect("declared before its methods");
     methods!(metal, {
@@ -261,5 +474,165 @@ mod tests {
             set_contents_scale(layer, sel, 0.0);
             assert_eq!(contents_scale(layer, sel), 2.0, "zero must not be stored");
         }
+    }
+
+    thread_local! {
+        static CALLS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn record(name: &'static str) {
+        CALLS.with(|calls| calls.borrow_mut().push(name));
+    }
+
+    fn take_calls() -> Vec<&'static str> {
+        CALLS.with(|calls| std::mem::take(&mut *calls.borrow_mut()))
+    }
+
+    unsafe extern "C" fn will_draw(_: Id, _: Sel, _: Id) {
+        record("layerWillDraw:");
+    }
+
+    unsafe extern "C" fn draw_layer(_: Id, _: Sel, _: Id, context: *const c_void) {
+        assert!(!context.is_null());
+        record("drawLayer:inContext:");
+    }
+
+    unsafe extern "C" fn display_layer(_: Id, _: Sel, _: Id) {
+        record("displayLayer:");
+    }
+
+    unsafe extern "C" fn layout_layer(_: Id, _: Sel, _: Id) {
+        record("layoutSublayersOfLayer:");
+    }
+
+    unsafe extern "C" fn null_action(_: Id, _: Sel, _: Id, _: Id) -> Id {
+        let class = objc::class::lookup(c"NSNull").expect("NSNull");
+        // SAFETY: `+null` is `id (Class, SEL)`.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+            f(objc::class::ptr(class) as Id, objc::sel::get("null"))
+        }
+    }
+
+    fn delegate_class(name: &std::ffi::CStr, displays: bool) -> &'static objc::class::Class {
+        static REGISTERING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        crate::bootstrap();
+        let _guard = REGISTERING.lock().unwrap();
+        objc::class::lookup(name).unwrap_or_else(|| {
+            let base = objc::class::lookup(c"NSObject").expect("NSObject");
+            let class = objc::class::allocate_pair(Some(base), name, 0).expect("a fresh class");
+            let add = |sel: &str, imp: *const c_void, types: &std::ffi::CStr| {
+                assert!(class.add_method(objc::sel::get(sel), imp as objc::class::Imp, types));
+            };
+            add("layerWillDraw:", will_draw as *const c_void, c"v24@0:8@16");
+            add(
+                "drawLayer:inContext:",
+                draw_layer as *const c_void,
+                c"v32@0:8@16^v24",
+            );
+            add(
+                "layoutSublayersOfLayer:",
+                layout_layer as *const c_void,
+                c"v24@0:8@16",
+            );
+            add(
+                "actionForLayer:forKey:",
+                null_action as *const c_void,
+                c"@32@0:8@16@24",
+            );
+            if displays {
+                add(
+                    "displayLayer:",
+                    display_layer as *const c_void,
+                    c"v24@0:8@16",
+                );
+            }
+            objc::class::register_pair(class);
+            class
+        })
+    }
+
+    fn layer_with_delegate(name: &std::ffi::CStr, displays: bool) -> (Id, Id) {
+        let layer = layer();
+        let delegate = objc::object::create_instance(delegate_class(name, displays), 0);
+        // SAFETY: a layer this test made.
+        unsafe { set_delegate(layer, objc::sel::get("setDelegate:"), delegate) };
+        take_calls();
+        (layer, delegate)
+    }
+
+    #[test]
+    fn display_prefers_the_delegates_display_layer() {
+        let (layer, _delegate) = layer_with_delegate(c"Rosetta3DisplayingLayerDelegate", true);
+        let sel = objc::sel::get("x");
+        // SAFETY: a layer this test made.
+        unsafe {
+            set_bounds(
+                layer,
+                sel,
+                NSRect {
+                    size: NSSize {
+                        width: 4.0,
+                        height: 4.0,
+                    },
+                    ..Default::default()
+                },
+            );
+            display(layer, sel);
+        }
+        assert_eq!(take_calls(), ["displayLayer:"]);
+    }
+
+    #[test]
+    fn display_draws_through_the_delegate_into_a_context() {
+        let (layer, delegate) = layer_with_delegate(c"Rosetta3DrawingLayerDelegate", false);
+        let sel = objc::sel::get("x");
+        // SAFETY: a layer this test made.
+        unsafe {
+            assert_eq!(delegate_of(layer), delegate);
+            set_bounds(
+                layer,
+                sel,
+                NSRect {
+                    size: NSSize {
+                        width: 4.0,
+                        height: 4.0,
+                    },
+                    ..Default::default()
+                },
+            );
+            set_needs_display(layer, sel);
+            display_if_needed(layer, sel);
+            display_if_needed(layer, sel);
+        }
+        assert_eq!(take_calls(), ["layerWillDraw:", "drawLayer:inContext:"]);
+    }
+
+    #[test]
+    fn layout_and_actions_consult_the_delegate() {
+        let (layer, _delegate) = layer_with_delegate(c"Rosetta3DrawingLayerDelegate", false);
+        let sel = objc::sel::get("x");
+        // SAFETY: a layer this test made.
+        unsafe {
+            set_needs_layout(layer, sel);
+            layout_if_needed(layer, sel);
+            layout_if_needed(layer, sel);
+            assert!(action_for_key(layer, sel, std::ptr::null_mut()).is_null());
+        }
+        assert_eq!(take_calls(), ["layoutSublayersOfLayer:"]);
+    }
+
+    #[test]
+    fn the_delegate_is_not_retained_and_is_zeroed_when_it_goes() {
+        let (layer, delegate) = layer_with_delegate(c"Rosetta3DrawingLayerDelegate", false);
+        assert_eq!(objc::arc::retain_count(delegate), 1);
+        objc::arc::release(delegate);
+        // SAFETY: a layer this test made.
+        assert!(unsafe { delegate_of(layer) }.is_null());
+    }
+
+    unsafe fn delegate_of(layer: Id) -> Id {
+        // SAFETY: as the caller's.
+        unsafe { delegate(layer, objc::sel::get("delegate")) }
     }
 }
