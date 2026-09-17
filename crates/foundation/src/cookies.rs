@@ -57,9 +57,37 @@ fn jar() -> std::sync::MutexGuard<'static, Vec<Cookie>> {
     JAR.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Where the jar lives, under the directory macOS keeps cookies in.
+/// Where the jar lives: one file per app, under the directory macOS keeps
+/// cookies in.
+///
+/// macOS has not shared `+sharedHTTPCookieStorage` between apps since 10.11 -
+/// each gets `~/Library/Cookies/<bundle id>.binarycookies` - and programs rely
+/// on that.
+///
+/// Decided once, so the file a jar was loaded from is the file it is saved to
+/// even if the main bundle were to change in between.
 fn store_path() -> PathBuf {
-    PathBuf::from(crate::home_directory()).join("Library/Cookies/rosetta3-cookies.tsv")
+    static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let identifier = crate::bundle::main().and_then(|bundle| bundle.identifier());
+        PathBuf::from(crate::home_directory())
+            .join("Library/Cookies")
+            .join(store_file_name(identifier))
+    })
+    .clone()
+}
+
+/// The jar's file name for the app with this bundle identifier.
+///
+/// Not `.binarycookies`: the format is this runtime's own, and a file with
+/// Apple's name and not Apple's contents is a trap for anything that reads it.
+/// An identifier that could leave the directory, or none at all, takes the
+/// runtime's name instead.
+fn store_file_name(identifier: Option<&str>) -> String {
+    let identifier = identifier
+        .filter(|id| !id.is_empty() && !id.contains('/') && !id.starts_with('.'))
+        .unwrap_or("rosetta3");
+    format!("{identifier}.cookies.tsv")
 }
 
 /// Tab-separated, one cookie per line.
@@ -674,6 +702,10 @@ unsafe extern "C" fn delete_cookie(_receiver: Id, _sel: Sel, cookie: Id) {
     let Some(cookie) = (unsafe { cookie_of(cookie) }) else {
         return;
     };
+    trace(format_args!(
+        "-deleteCookie: {}@{}{}",
+        cookie.name, cookie.domain, cookie.path
+    ));
     let mut jar = jar();
     jar.retain(|existing| !existing.same_as(cookie));
     save(&jar);
@@ -787,6 +819,22 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_app_keeps_its_own_jar() {
+        assert_eq!(
+            store_file_name(Some("com.test.app1")),
+            "com.test.app1.cookies.tsv"
+        );
+        assert_ne!(
+            store_file_name(Some("com.test.app1")),
+            store_file_name(Some("com.test.app2"))
+        );
+        assert_eq!(store_file_name(None), "rosetta3.cookies.tsv");
+        assert_eq!(store_file_name(Some("")), "rosetta3.cookies.tsv");
+        assert_eq!(store_file_name(Some("../evil")), "rosetta3.cookies.tsv");
+        assert_eq!(store_file_name(Some("a/b")), "rosetta3.cookies.tsv");
+    }
 
     #[test]
     fn a_url_splits_into_a_host_and_a_path() {
