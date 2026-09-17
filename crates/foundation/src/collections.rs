@@ -1031,6 +1031,25 @@ unsafe extern "C" fn set_contains_object(receiver: Id, _sel: Sel, object: Id) ->
     })
 }
 
+/// `-addObject:`, which keeps the set's contents unique under its own equality.
+unsafe extern "C" fn set_add_object(receiver: Id, _sel: Sel, object: Id) {
+    if object.is_null() {
+        objc::fail!("-[NSMutableSet addObject:]: object cannot be nil");
+    }
+    // SAFETY: a set.
+    let Some(set) = (unsafe { collections::set(receiver as CFTypeRef) }) else {
+        return;
+    };
+    let object = object as CFTypeRef;
+    if !set
+        .values
+        .iter()
+        .any(|value| set.policy.equal(*value, object))
+    {
+        set.values.push(set.policy.retain(object));
+    }
+}
+
 unsafe extern "C" fn set_any_object(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: a set.
     unsafe { collections::set(receiver as CFTypeRef) }
@@ -1048,6 +1067,10 @@ pub(crate) fn install() {
         "count" => set_count, c"Q16@0:8";
         "containsObject:" => set_contains_object, c"B24@0:8@16";
         "anyObject" => set_any_object, c"@16@0:8";
+    });
+    let mutable_set = objc::class::lookup(c"NSMutableSet").expect("NSMutableSet");
+    methods!(mutable_set, {
+        "addObject:" => set_add_object, c"v24@0:8@16";
     });
 
     let array = objc::class::lookup(c"NSArray").expect("CoreFoundation registered NSArray");

@@ -487,6 +487,33 @@ mod tests {
         }
     }
 
+    /// Adding an object the set already holds leaves one copy of it.
+    #[test]
+    fn a_mutable_set_holds_each_added_object_once() {
+        bootstrap();
+        // SAFETY: each prototype is the one its selector declares.
+        unsafe {
+            let with_capacity: unsafe extern "C" fn(Id, Sel, usize) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            let send1: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+            let contains: unsafe extern "C" fn(Id, Sel, Id) -> bool =
+                std::mem::transmute(objc::msg::entry());
+            let count: unsafe extern "C" fn(Id, Sel) -> usize =
+                std::mem::transmute(objc::msg::entry());
+
+            let set = with_capacity(
+                class(c"NSMutableSet"),
+                objc::sel::get("setWithCapacity:"),
+                0,
+            );
+            let element = string::from_str("element");
+            send1(set, objc::sel::get("addObject:"), element);
+            send1(set, objc::sel::get("addObject:"), element);
+            assert_eq!(count(set, objc::sel::get("count")), 1);
+            assert!(contains(set, objc::sel::get("containsObject:"), element));
+        }
+    }
+
     /// `[[NSMutableDictionary alloc] init]`, which is a class cluster: what
     /// `+alloc` answers cannot hold anything, so `-init` has to substitute.
     ///
