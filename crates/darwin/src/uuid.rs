@@ -22,8 +22,6 @@
 
 use std::ffi::c_char;
 
-use machish::resolve::SyntheticDylib;
-
 /// `uuid_t`: sixteen bytes, on both platforms.
 const LEN: usize = 16;
 
@@ -236,46 +234,18 @@ unsafe extern "C" fn parse(text: *const c_char, out: *mut u8) -> i32 {
     0
 }
 
-pub const NAMES: &[&str] = &[
-    "uuid_clear",
-    "uuid_compare",
-    "uuid_copy",
-    "uuid_generate",
-    "uuid_generate_random",
-    "uuid_generate_time",
-    "uuid_is_null",
-    "uuid_parse",
-    "uuid_unparse",
-    "uuid_unparse_lower",
-    "uuid_unparse_upper",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "uuid_clear" => clear as *const (),
-        "uuid_compare" => compare as *const (),
-        "uuid_copy" => copy as *const (),
-        // All three generate a version-4 UUID; see the module note.
-        "uuid_generate" | "uuid_generate_random" | "uuid_generate_time" => {
-            generate_random as *const ()
-        }
-        "uuid_is_null" => is_null as *const (),
-        "uuid_parse" => parse as *const (),
-        // Darwin's plain spelling is the upper-case one.
-        "uuid_unparse" | "uuid_unparse_upper" => unparse_upper as *const (),
-        "uuid_unparse_lower" => unparse_lower as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
+exports::exports! {
+    functions {
+        "uuid_clear" => clear,
+        "uuid_compare" => compare,
+        "uuid_copy" => copy,
+        /// All three generate a version-4 UUID; see the module note.
+        "uuid_generate" | "uuid_generate_random" | "uuid_generate_time" => generate_random,
+        "uuid_is_null" => is_null,
+        "uuid_parse" => parse,
+        /// Darwin's plain spelling is the upper-case one.
+        "uuid_unparse" | "uuid_unparse_upper" => unparse_upper,
+        "uuid_unparse_lower" => unparse_lower,
     }
 }
 
