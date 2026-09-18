@@ -110,131 +110,60 @@ unsafe fn once_with(predicate: *mut c_void, body: impl FnOnce()) {
     state.store(DONE, Ordering::Release);
 }
 
-/// Empty on macOS, where the host's libdispatch is the guest's.
-#[cfg(target_os = "macos")]
-pub fn symbol(_name: &str) -> Option<u64> {
-    None
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn symbol(name: &str) -> Option<u64> {
-    macro_rules! at {
-        ($f:expr) => {
-            $f as *const () as usize as u64
-        };
-    }
-    let address = match name {
-        // Queues.
-        "dispatch_queue_create" => at!(queue::queue_create),
-        "dispatch_queue_create_with_target" => at!(queue::queue_create_with_target),
-        "dispatch_queue_get_label" => at!(queue::queue_get_label),
-        "dispatch_get_global_queue" => at!(queue::get_global_queue),
-
-        // Submission.
-        "dispatch_async" => at!(queue::async_),
-        "dispatch_async_f" => at!(queue::async_f),
-        "dispatch_sync" => at!(queue::sync),
-        "dispatch_sync_f" => at!(queue::sync_f),
-        "dispatch_after" => at!(queue::after),
-        "dispatch_after_f" => at!(queue::after_f),
-        "dispatch_once" => at!(once),
-        "dispatch_once_f" => at!(once_f),
-
-        // Groups.
-        "dispatch_group_create" => at!(sync::group_create),
-        "dispatch_group_enter" => at!(sync::group_enter),
-        "dispatch_group_leave" => at!(sync::group_leave),
-        "dispatch_group_notify" => at!(sync::group_notify),
-        "dispatch_group_notify_f" => at!(sync::group_notify_f),
-        "dispatch_group_async_f" => at!(sync::group_async_f),
-        "dispatch_group_wait" => at!(sync::group_wait),
-
-        // Semaphores.
-        "dispatch_semaphore_create" => at!(sync::semaphore_create),
-        "dispatch_semaphore_signal" => at!(sync::semaphore_signal),
-        "dispatch_semaphore_wait" => at!(sync::semaphore_wait),
-
-        // Time.
-        "dispatch_time" => at!(time::time),
-
-        // Data.
-        "dispatch_data_create" => at!(data::create),
-        "dispatch_data_get_size" => at!(data::get_size),
-
-        // The object protocol every one of the above shares.
-        "dispatch_retain" => at!(object::retain_entry),
-        "dispatch_release" => at!(object::release_entry),
-        "dispatch_set_context" => at!(object::set_context),
-        "dispatch_get_context" => at!(object::get_context),
-        "dispatch_set_finalizer_f" => at!(object::set_finalizer_f),
-
-        _ => return None,
-    };
-    Some(address)
-}
-
-#[cfg(target_os = "macos")]
-pub fn provide(_lib: &mut machish::resolve::SyntheticDylib) {}
-
-/// Define every entry, and the three *data* symbols a guest takes the address of.
+/// `_dispatch_main_q`, and a note that the thread binding it is the main one.
 ///
-/// `dispatch_get_main_queue()` is an inline function in Darwin's SDK, so a guest
-/// never calls anything to reach the main queue - it references `_dispatch_main_q`
-/// directly, and the symbol has to resolve to a real object.
+/// Recorded here rather than at start-up because this is the call that runs on
+/// the thread the program was loaded on, which is what `dispatch_get_main_queue`
+/// means by main.
 #[cfg(not(target_os = "macos"))]
-pub fn provide(lib: &mut machish::resolve::SyntheticDylib) {
-    // This runs on the main thread while the guest is being linked, which is what
-    // makes it the place to record which thread that is.
+fn main_queue() -> u64 {
     queue::note_main_thread();
-    for name in NAMES {
-        crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap() as *const ());
-    }
-    crate::define_data(lib, "__dispatch_main_q", queue::main_queue());
-    crate::define_data(
-        lib,
-        "__dispatch_queue_attr_concurrent",
-        queue::concurrent_attr(),
-    );
-    crate::define_data(
-        lib,
-        "__dispatch_data_destructor_free",
-        data::destructor_free(),
-    );
+    queue::main_queue()
 }
 
-/// Everything [`symbol`] answers.
-pub const NAMES: &[&str] = &[
-    "dispatch_queue_create",
-    "dispatch_queue_create_with_target",
-    "dispatch_queue_get_label",
-    "dispatch_get_global_queue",
-    "dispatch_async",
-    "dispatch_async_f",
-    "dispatch_sync",
-    "dispatch_sync_f",
-    "dispatch_after",
-    "dispatch_after_f",
-    "dispatch_once",
-    "dispatch_once_f",
-    "dispatch_group_create",
-    "dispatch_group_enter",
-    "dispatch_group_leave",
-    "dispatch_group_notify",
-    "dispatch_group_notify_f",
-    "dispatch_group_async_f",
-    "dispatch_group_wait",
-    "dispatch_semaphore_create",
-    "dispatch_semaphore_signal",
-    "dispatch_semaphore_wait",
-    "dispatch_time",
-    "dispatch_data_create",
-    "dispatch_data_get_size",
-    "dispatch_retain",
-    "dispatch_release",
-    "dispatch_set_context",
-    "dispatch_get_context",
-    "dispatch_set_finalizer_f",
-];
+#[cfg(target_os = "macos")]
+exports::exports! {}
+
+#[cfg(not(target_os = "macos"))]
+exports::exports! {
+    functions {
+        "dispatch_queue_create" => queue::queue_create,
+        "dispatch_queue_create_with_target" => queue::queue_create_with_target,
+        "dispatch_queue_get_label" => queue::queue_get_label,
+        "dispatch_get_global_queue" => queue::get_global_queue,
+        "dispatch_async" => queue::async_,
+        "dispatch_async_f" => queue::async_f,
+        "dispatch_sync" => queue::sync,
+        "dispatch_sync_f" => queue::sync_f,
+        "dispatch_after" => queue::after,
+        "dispatch_after_f" => queue::after_f,
+        "dispatch_once" => once,
+        "dispatch_once_f" => once_f,
+        "dispatch_group_create" => sync::group_create,
+        "dispatch_group_enter" => sync::group_enter,
+        "dispatch_group_leave" => sync::group_leave,
+        "dispatch_group_notify" => sync::group_notify,
+        "dispatch_group_notify_f" => sync::group_notify_f,
+        "dispatch_group_async_f" => sync::group_async_f,
+        "dispatch_group_wait" => sync::group_wait,
+        "dispatch_semaphore_create" => sync::semaphore_create,
+        "dispatch_semaphore_signal" => sync::semaphore_signal,
+        "dispatch_semaphore_wait" => sync::semaphore_wait,
+        "dispatch_time" => time::time,
+        "dispatch_data_create" => data::create,
+        "dispatch_data_get_size" => data::get_size,
+        "dispatch_retain" => object::retain_entry,
+        "dispatch_release" => object::release_entry,
+        "dispatch_set_context" => object::set_context,
+        "dispatch_get_context" => object::get_context,
+        "dispatch_set_finalizer_f" => object::set_finalizer_f,
+    }
+    data {
+        "__dispatch_main_q" => main_queue(),
+        "__dispatch_queue_attr_concurrent" => queue::concurrent_attr(),
+        "__dispatch_data_destructor_free" => data::destructor_free(),
+    }
+}
 
 #[cfg(test)]
 mod tests {

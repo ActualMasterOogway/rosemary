@@ -121,177 +121,115 @@ unsafe extern "C" fn current_media_time() -> f64 {
 
 /// Empty on macOS, where the host's own Mach is the guest's.
 #[cfg(target_os = "macos")]
-pub fn symbol(_name: &str) -> Option<u64> {
-    None
-}
+exports::exports! {}
 
 #[cfg(not(target_os = "macos"))]
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "mach_absolute_time" => absolute_time as *const (),
-        "mach_continuous_time" => continuous_time as *const (),
-        "mach_timebase_info" => timebase_info as *const (),
-        "CACurrentMediaTime" => current_media_time as *const (),
+exports::exports! {
+    functions {
+        "mach_absolute_time" => absolute_time,
+        "mach_continuous_time" => continuous_time,
+        "mach_timebase_info" => timebase_info,
+        "CACurrentMediaTime" => current_media_time,
 
-        "mach_error" => kern::mach_error as *const (),
-        "mach_error_string" => kern::mach_error_string as *const (),
-        "bootstrap_strerror" => kern::bootstrap_strerror as *const (),
+        "mach_error" => kern::mach_error,
+        "mach_error_string" => kern::mach_error_string,
+        "bootstrap_strerror" => kern::bootstrap_strerror,
 
-        "mach_task_self" => task::mach_task_self as *const (),
-        "mach_host_self" => task::mach_host_self as *const (),
-        "mach_thread_self" => task::mach_thread_self as *const (),
-        "task_info" => info::task_info as *const (),
-        "host_page_size" => info::host_page_size as *const (),
-        "host_statistics" => info::host_statistics as *const (),
-        "host_statistics64" => info::host_statistics64 as *const (),
-        "task_get_special_port" => task::task_get_special_port as *const (),
-        "task_set_special_port" => task::task_set_special_port as *const (),
+        "mach_task_self" => task::mach_task_self,
+        "mach_host_self" => task::mach_host_self,
+        "mach_thread_self" => task::mach_thread_self,
+        "task_info" => info::task_info,
+        "host_page_size" => info::host_page_size,
+        "host_statistics" => info::host_statistics,
+        "host_statistics64" => info::host_statistics64,
+        "task_get_special_port" => task::task_get_special_port,
+        "task_set_special_port" => task::task_set_special_port,
 
         // The exception-port family. `task`, `host` and `thread` are the same
         // three calls with a different first argument, and nothing here
         // delivers from any of them, so one implementation answers all three.
-        "task_set_exception_ports" => task::task_set_exception_ports as *const (),
-        "thread_set_exception_ports" => task::thread_set_exception_ports as *const (),
-        "host_set_exception_ports" => task::host_set_exception_ports as *const (),
-        "task_get_exception_ports" | "host_get_exception_ports" | "thread_get_exception_ports" => {
-            task::task_get_exception_ports as *const ()
-        }
+        "task_set_exception_ports" => task::task_set_exception_ports,
+        "thread_set_exception_ports" => task::thread_set_exception_ports,
+        "host_set_exception_ports" => task::host_set_exception_ports,
+        "task_get_exception_ports"
+            | "host_get_exception_ports"
+            | "thread_get_exception_ports" => task::task_get_exception_ports,
         "task_swap_exception_ports"
-        | "host_swap_exception_ports"
-        | "thread_swap_exception_ports" => task::task_swap_exception_ports as *const (),
+            | "host_swap_exception_ports"
+            | "thread_swap_exception_ports" => task::task_swap_exception_ports,
 
-        "mach_port_allocate" => space::mach_port_allocate as *const (),
-        "mach_port_deallocate" => space::mach_port_deallocate as *const (),
-        "mach_port_destroy" => space::mach_port_destroy as *const (),
-        "mach_port_mod_refs" => space::mach_port_mod_refs as *const (),
-        "mach_port_get_refs" => space::mach_port_get_refs as *const (),
-        "mach_port_insert_right" => space::mach_port_insert_right as *const (),
-        "mach_port_extract_right" => space::mach_port_extract_right as *const (),
-        "mach_port_type" => space::mach_port_type as *const (),
-        "mach_port_insert_member" => space::mach_port_insert_member as *const (),
-        "mach_port_move_member" => space::mach_port_move_member as *const (),
-        "mach_port_set_attributes" => space::mach_port_set_attributes as *const (),
-        "mach_port_request_notification" => space::mach_port_request_notification as *const (),
+        "mach_port_allocate" => space::mach_port_allocate,
+        "mach_port_deallocate" => space::mach_port_deallocate,
+        "mach_port_destroy" => space::mach_port_destroy,
+        "mach_port_mod_refs" => space::mach_port_mod_refs,
+        "mach_port_get_refs" => space::mach_port_get_refs,
+        "mach_port_insert_right" => space::mach_port_insert_right,
+        "mach_port_extract_right" => space::mach_port_extract_right,
+        "mach_port_type" => space::mach_port_type,
+        "mach_port_insert_member" => space::mach_port_insert_member,
+        "mach_port_move_member" => space::mach_port_move_member,
+        "mach_port_set_attributes" => space::mach_port_set_attributes,
+        "mach_port_request_notification" => space::mach_port_request_notification,
 
-        "mach_msg" => msg::mach_msg as *const (),
-        "mach_msg_overwrite" => msg::mach_msg_overwrite as *const (),
-        "mach_msg_destroy" => msg::mach_msg_destroy as *const (),
-        "mig_get_reply_port" => msg::mig_get_reply_port as *const (),
-        "mig_put_reply_port" => msg::mig_put_reply_port as *const (),
-        "mig_dealloc_reply_port" => msg::mig_dealloc_reply_port as *const (),
+        "mach_msg" => msg::mach_msg,
+        "mach_msg_overwrite" => msg::mach_msg_overwrite,
+        "mach_msg_destroy" => msg::mach_msg_destroy,
+        "mig_get_reply_port" => msg::mig_get_reply_port,
+        "mig_put_reply_port" => msg::mig_put_reply_port,
+        "mig_dealloc_reply_port" => msg::mig_dealloc_reply_port,
 
-        "bootstrap_check_in" => bootstrap::bootstrap_check_in as *const (),
-        "bootstrap_look_up" => bootstrap::bootstrap_look_up as *const (),
-        "bootstrap_look_up2" => bootstrap::bootstrap_look_up2 as *const (),
-        "bootstrap_register" => bootstrap::bootstrap_register as *const (),
-        "bootstrap_parent" => bootstrap::bootstrap_parent as *const (),
+        "bootstrap_check_in" => bootstrap::bootstrap_check_in,
+        "bootstrap_look_up" => bootstrap::bootstrap_look_up,
+        "bootstrap_look_up2" => bootstrap::bootstrap_look_up2,
+        "bootstrap_register" => bootstrap::bootstrap_register,
+        "bootstrap_parent" => bootstrap::bootstrap_parent,
 
-        "semaphore_create" => sync::semaphore_create as *const (),
-        "semaphore_destroy" => sync::semaphore_destroy as *const (),
-        "semaphore_signal" => sync::semaphore_signal as *const (),
-        "semaphore_signal_all" => sync::semaphore_signal_all as *const (),
-        "semaphore_signal_thread" => sync::semaphore_signal_thread as *const (),
-        "semaphore_wait" => sync::semaphore_wait as *const (),
-        "semaphore_timedwait" => sync::semaphore_timedwait as *const (),
-
-        _ => return None,
-    };
-    Some(f as usize as u64)
+        "semaphore_create" => sync::semaphore_create,
+        "semaphore_destroy" => sync::semaphore_destroy,
+        "semaphore_signal" => sync::semaphore_signal,
+        "semaphore_signal_all" => sync::semaphore_signal_all,
+        "semaphore_signal_thread" => sync::semaphore_signal_thread,
+        "semaphore_wait" => sync::semaphore_wait,
+        "semaphore_timedwait" => sync::semaphore_timedwait,
+    }
+    // Unlike a function, an unbound data import is not refused at the call - it
+    // binds to zero and the guest's next instruction dereferences it, which is a
+    // segfault at address zero with no symbol anywhere near it. These are the
+    // reason this module has to exist at all rather than leaving the family
+    // denied.
+    data {
+        "_mach_task_self_" => &raw const task::TASK_SELF_PORT as usize as u64,
+        "_bootstrap_port" => &raw const bootstrap::BOOTSTRAP_PORT as usize as u64,
+        "_NDR_record" => (&raw const task::NDR_RECORD).cast::<u8>() as usize as u64,
+        "_vm_page_size" => vm_page_size(),
+        "_vm_page_mask" => vm_page_mask(),
+        "_vm_page_shift" => vm_page_shift(),
+    }
 }
 
-#[cfg(target_os = "macos")]
-pub fn provide(_lib: &mut machish::resolve::SyntheticDylib) {}
+/// Where each page-size global lives, with the three filled before any is
+/// handed out.
+///
+/// The loader binds the address and the guest reads the word through it, so the
+/// value has to be there before the symbol is published rather than before it is
+/// read. `publish_page_size` is idempotent, so asking three times is free.
+#[cfg(not(target_os = "macos"))]
+fn vm_page_size() -> u64 {
+    info::publish_page_size();
+    &raw const info::VM_PAGE_SIZE as usize as u64
+}
 
 #[cfg(not(target_os = "macos"))]
-pub fn provide(lib: &mut machish::resolve::SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap() as *const ());
-    }
-    // The data imports. Unlike a function, an unbound one of these is not
-    // refused at the call - it binds to zero and the guest's next instruction
-    // dereferences it, which is a segfault at address zero with no symbol
-    // anywhere near it. They are the reason this module has to exist at all
-    // rather than leaving the family denied.
+fn vm_page_mask() -> u64 {
     info::publish_page_size();
-    for (mach_o, addr) in [
-        ("_mach_task_self_", &raw const task::TASK_SELF_PORT as usize),
-        (
-            "_bootstrap_port",
-            &raw const bootstrap::BOOTSTRAP_PORT as usize,
-        ),
-        (
-            "_NDR_record",
-            (&raw const task::NDR_RECORD).cast::<u8>() as usize,
-        ),
-        ("_vm_page_size", &raw const info::VM_PAGE_SIZE as usize),
-        ("_vm_page_mask", &raw const info::VM_PAGE_MASK as usize),
-        ("_vm_page_shift", &raw const info::VM_PAGE_SHIFT as usize),
-    ] {
-        crate::define_data(lib, mach_o, addr as u64);
-    }
+    &raw const info::VM_PAGE_MASK as usize as u64
 }
 
-/// Every *function* [`symbol`] answers.
-///
-/// The data symbols are not here: [`provide`] publishes those by address, and
-/// handing one out through `symbol` would let a caller bind it as code.
-pub const NAMES: &[&str] = &[
-    "mach_absolute_time",
-    "mach_continuous_time",
-    "mach_timebase_info",
-    "CACurrentMediaTime",
-    "mach_error",
-    "mach_error_string",
-    "bootstrap_strerror",
-    "mach_task_self",
-    "mach_host_self",
-    "mach_thread_self",
-    "task_info",
-    "host_page_size",
-    "host_statistics",
-    "host_statistics64",
-    "task_get_special_port",
-    "task_set_special_port",
-    "task_set_exception_ports",
-    "task_get_exception_ports",
-    "task_swap_exception_ports",
-    "thread_set_exception_ports",
-    "thread_get_exception_ports",
-    "thread_swap_exception_ports",
-    "host_set_exception_ports",
-    "host_get_exception_ports",
-    "host_swap_exception_ports",
-    "mach_port_allocate",
-    "mach_port_deallocate",
-    "mach_port_destroy",
-    "mach_port_mod_refs",
-    "mach_port_get_refs",
-    "mach_port_insert_right",
-    "mach_port_extract_right",
-    "mach_port_type",
-    "mach_port_insert_member",
-    "mach_port_move_member",
-    "mach_port_set_attributes",
-    "mach_port_request_notification",
-    "mach_msg",
-    "mach_msg_overwrite",
-    "mach_msg_destroy",
-    "mig_get_reply_port",
-    "mig_put_reply_port",
-    "mig_dealloc_reply_port",
-    "bootstrap_check_in",
-    "bootstrap_look_up",
-    "bootstrap_look_up2",
-    "bootstrap_register",
-    "bootstrap_parent",
-    "semaphore_create",
-    "semaphore_destroy",
-    "semaphore_signal",
-    "semaphore_signal_all",
-    "semaphore_signal_thread",
-    "semaphore_wait",
-    "semaphore_timedwait",
-];
+#[cfg(not(target_os = "macos"))]
+fn vm_page_shift() -> u64 {
+    info::publish_page_size();
+    &raw const info::VM_PAGE_SHIFT as usize as u64
+}
 
 #[cfg(test)]
 mod tests {

@@ -816,80 +816,35 @@ pub unsafe extern "C" fn attr_setbinpref_np(
     0
 }
 
-/// Empty on macOS, where the host's own spawn runs a Mach-O correctly.
 #[cfg(target_os = "macos")]
-pub fn symbol(_name: &str) -> Option<u64> {
-    None
-}
+exports::exports! {}
 
 #[cfg(not(target_os = "macos"))]
-pub fn symbol(name: &str) -> Option<u64> {
-    macro_rules! at {
-        ($f:expr) => {
-            $f as *const () as usize as u64
-        };
-    }
-    let address = match name {
-        "execv" => at!(execv),
-        "execve" => at!(execve),
-        "execvp" => at!(execvp),
-        "posix_spawn" => at!(posix_spawn),
-        "posix_spawnp" => at!(posix_spawnp),
-        "posix_spawn_file_actions_init" => at!(file_actions_init),
-        "posix_spawn_file_actions_destroy" => at!(file_actions_destroy),
-        "posix_spawn_file_actions_addopen" => at!(file_actions_addopen),
-        "posix_spawn_file_actions_adddup2" => at!(file_actions_adddup2),
-        "posix_spawn_file_actions_addclose" => at!(file_actions_addclose),
-        "posix_spawn_file_actions_addinherit_np" => at!(file_actions_addinherit_np),
-        "posix_spawn_file_actions_addchdir_np" => at!(file_actions_addchdir_np),
-        "posix_spawn_file_actions_addfchdir_np" => at!(file_actions_addfchdir_np),
-        "posix_spawnattr_init" => at!(attr_init),
-        "posix_spawnattr_destroy" => at!(attr_destroy),
-        "posix_spawnattr_setflags" => at!(attr_setflags),
-        "posix_spawnattr_getflags" => at!(attr_getflags),
-        "posix_spawnattr_setpgroup" => at!(attr_setpgroup),
-        "posix_spawnattr_setsigmask" => at!(attr_setsigmask),
-        "posix_spawnattr_setsigdefault" => at!(attr_setsigdefault),
-        "posix_spawnattr_setbinpref_np" => at!(attr_setbinpref_np),
-        _ => return None,
-    };
-    Some(address)
-}
-
-#[cfg(target_os = "macos")]
-pub fn provide(_lib: &mut machish::resolve::SyntheticDylib) {}
-
-#[cfg(not(target_os = "macos"))]
-pub fn provide(lib: &mut machish::resolve::SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap() as *const ());
+exports::exports! {
+    functions {
+        "execv" => execv,
+        "execve" => execve,
+        "execvp" => execvp,
+        "posix_spawn" => posix_spawn,
+        "posix_spawnp" => posix_spawnp,
+        "posix_spawn_file_actions_init" => file_actions_init,
+        "posix_spawn_file_actions_destroy" => file_actions_destroy,
+        "posix_spawn_file_actions_addopen" => file_actions_addopen,
+        "posix_spawn_file_actions_adddup2" => file_actions_adddup2,
+        "posix_spawn_file_actions_addclose" => file_actions_addclose,
+        "posix_spawn_file_actions_addinherit_np" => file_actions_addinherit_np,
+        "posix_spawn_file_actions_addchdir_np" => file_actions_addchdir_np,
+        "posix_spawn_file_actions_addfchdir_np" => file_actions_addfchdir_np,
+        "posix_spawnattr_init" => attr_init,
+        "posix_spawnattr_destroy" => attr_destroy,
+        "posix_spawnattr_setflags" => attr_setflags,
+        "posix_spawnattr_getflags" => attr_getflags,
+        "posix_spawnattr_setpgroup" => attr_setpgroup,
+        "posix_spawnattr_setsigmask" => attr_setsigmask,
+        "posix_spawnattr_setsigdefault" => attr_setsigdefault,
+        "posix_spawnattr_setbinpref_np" => attr_setbinpref_np,
     }
 }
-
-/// Everything [`symbol`] answers.
-pub const NAMES: &[&str] = &[
-    "execv",
-    "execve",
-    "execvp",
-    "posix_spawn",
-    "posix_spawnp",
-    "posix_spawn_file_actions_init",
-    "posix_spawn_file_actions_destroy",
-    "posix_spawn_file_actions_addopen",
-    "posix_spawn_file_actions_adddup2",
-    "posix_spawn_file_actions_addclose",
-    "posix_spawn_file_actions_addinherit_np",
-    "posix_spawn_file_actions_addchdir_np",
-    "posix_spawn_file_actions_addfchdir_np",
-    "posix_spawnattr_init",
-    "posix_spawnattr_destroy",
-    "posix_spawnattr_setflags",
-    "posix_spawnattr_getflags",
-    "posix_spawnattr_setpgroup",
-    "posix_spawnattr_setsigmask",
-    "posix_spawnattr_setsigdefault",
-    "posix_spawnattr_setbinpref_np",
-];
 
 #[cfg(test)]
 mod tests {

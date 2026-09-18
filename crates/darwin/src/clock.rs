@@ -300,55 +300,23 @@ unsafe extern "C" fn clock() -> u64 {
     unsafe { host::clock() as u64 }
 }
 
-/// Empty on macOS, where the guest's clock ids are the host's.
 #[cfg(target_os = "macos")]
-pub fn symbol(_name: &str) -> Option<u64> {
-    None
-}
+exports::exports! {}
 
 #[cfg(not(target_os = "macos"))]
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "clock_gettime" => gettime as *const (),
-        "clock_getres" => getres as *const (),
-        "clock_gettime_nsec_np" => gettime_nsec_np as *const (),
-        "clock" => clock as *const (),
-        "gettimeofday" => gettimeofday as *const (),
-        #[cfg(not(target_os = "macos"))]
-        "utimes" => utimes as *const (),
-        #[cfg(not(target_os = "macos"))]
-        "futimes" => futimes as *const (),
-        #[cfg(not(target_os = "macos"))]
-        "lutimes" => lutimes as *const (),
-        #[cfg(not(target_os = "macos"))]
-        "settimeofday" => settimeofday as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-#[cfg(target_os = "macos")]
-pub fn provide(_lib: &mut machish::resolve::SyntheticDylib) {}
-
-#[cfg(not(target_os = "macos"))]
-pub fn provide(lib: &mut machish::resolve::SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap() as *const ());
+exports::exports! {
+    functions {
+        "clock_gettime" => gettime,
+        "clock_getres" => getres,
+        "clock_gettime_nsec_np" => gettime_nsec_np,
+        "clock" => clock,
+        "gettimeofday" => gettimeofday,
+        "utimes" => utimes,
+        "futimes" => futimes,
+        "lutimes" => lutimes,
+        "settimeofday" => settimeofday,
     }
 }
-
-/// Everything [`symbol`] answers.
-pub const NAMES: &[&str] = &[
-    "clock",
-    "clock_gettime",
-    "clock_getres",
-    "clock_gettime_nsec_np",
-    "gettimeofday",
-    "utimes",
-    "futimes",
-    "lutimes",
-    "settimeofday",
-];
 
 #[cfg(test)]
 mod tests {
