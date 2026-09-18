@@ -11,6 +11,7 @@
 //! own. The frameworks therefore follow `ROSETTA3_OBJC` rather than carrying a
 //! switch each.
 
+use exports::Exports;
 use machish::resolve::{NativeDylibProvider, SyntheticDylib};
 
 use crate::objc::host::{Backend, backend};
@@ -65,119 +66,196 @@ fn install_block_runtime() {
 ///
 /// Both spellings of each: the install name, and the versioned path an
 /// `LC_LOAD_DYLIB` records.
+/// A framework this tree implements, and everything the three published views of
+/// it are derived from.
+///
+/// They used to be three hand-kept lists - the paths a `dlopen` answers, the
+/// loop that publishes, the chain a `dlsym` walks - and a framework in one and
+/// not another is a name that binds and cannot be found, or a path that returns
+/// null. `AudioToolbox` had been missing from the first.
+struct Framework {
+    /// The leaf, which is the framework directory's name and the spelling a
+    /// `dlopen("AppKit")` uses.
+    leaf: &'static str,
+    /// The `Versions/` letter a real install carries: C for the two frameworks
+    /// old enough to have one, A for everything younger.
+    version: char,
+    /// Umbrellas that re-export it. A program that links Cocoa imports AppKit's
+    /// symbols through that name.
+    umbrellas: &'static [&'static str],
+    /// Its entry points, which the generated table publishes.
+    provide: Option<fn(&mut dyn exports::Exports)>,
+    /// Its data symbols, which are objects built at run time rather than a list.
+    data: Option<fn() -> Vec<(String, u64)>>,
+    /// What a `dlsym` of a bare C name answers. `None` where the framework
+    /// publishes only class objects, which a guest binds at link and never asks
+    /// for by name - see `contacts`.
+    symbol: Option<fn(&str) -> Option<u64>>,
+}
+
+/// In the order they were published in before this was one list, because the
+/// library underneath is a map and the last definition of a name would win.
+/// `no_framework_defines_a_symbol_another_one_does` is what says the order
+/// cannot matter.
+static FRAMEWORKS: &[Framework] = &[
+    Framework {
+        leaf: "CoreFoundation",
+        version: 'A',
+        umbrellas: &[],
+        provide: Some(corefoundation::provide),
+        data: Some(corefoundation::data_symbols),
+        symbol: Some(corefoundation::symbol),
+    },
+    Framework {
+        leaf: "Foundation",
+        version: 'C',
+        umbrellas: &[],
+        provide: Some(foundation::provide),
+        data: Some(foundation::data_symbols),
+        symbol: Some(foundation::symbol),
+    },
+    Framework {
+        leaf: "IOKit",
+        version: 'A',
+        umbrellas: &[],
+        provide: Some(iokit::provide),
+        data: Some(iokit::data_symbols),
+        symbol: Some(iokit::symbol),
+    },
+    Framework {
+        leaf: "ForceFeedback",
+        version: 'A',
+        umbrellas: &[],
+        provide: Some(forcefeedback::provide),
+        data: None,
+        symbol: Some(forcefeedback::symbol),
+    },
+    Framework {
+        leaf: "AppKit",
+        version: 'C',
+        umbrellas: &["Cocoa"],
+        provide: Some(appkit::provide),
+        data: Some(appkit::data_symbols),
+        symbol: Some(appkit::symbol),
+    },
+    Framework {
+        leaf: "ApplicationServices",
+        version: 'A',
+        umbrellas: &[],
+        provide: Some(applicationservices::provide),
+        data: None,
+        symbol: Some(applicationservices::symbol),
+    },
+    Framework {
+        leaf: "AudioToolbox",
+        version: 'A',
+        umbrellas: &[],
+        provide: Some(audiotoolbox::provide),
+        data: None,
+        symbol: Some(audiotoolbox::symbol),
+    },
+    Framework {
+        leaf: "CoreVideo",
+        version: 'A',
+        umbrellas: &[],
+        provide: Some(corevideo::provide),
+        data: None,
+        symbol: Some(corevideo::symbol),
+    },
+    Framework {
+        leaf: "CoreAudio",
+        version: 'A',
+        umbrellas: &[],
+        provide: Some(coreaudio::provide),
+        data: None,
+        symbol: Some(coreaudio::symbol),
+    },
+    Framework {
+        leaf: "Contacts",
+        version: 'A',
+        umbrellas: &[],
+        provide: None,
+        data: Some(contacts::data_symbols),
+        symbol: None,
+    },
+    Framework {
+        leaf: "Security",
+        version: 'A',
+        umbrellas: &[],
+        provide: Some(security::provide),
+        data: Some(security::data_symbols),
+        symbol: Some(security::symbol),
+    },
+    Framework {
+        leaf: "GameController",
+        version: 'A',
+        umbrellas: &[],
+        provide: None,
+        data: Some(gamecontroller::data_symbols),
+        symbol: Some(gamecontroller::symbol),
+    },
+    Framework {
+        leaf: "WebKit",
+        version: 'A',
+        umbrellas: &[],
+        provide: None,
+        data: Some(webkit::data_symbols),
+        symbol: Some(webkit::symbol),
+    },
+    Framework {
+        leaf: "Metal",
+        version: 'A',
+        umbrellas: &[],
+        provide: Some(metal::provide),
+        data: Some(metal::data_symbols),
+        symbol: Some(metal::symbol),
+    },
+];
+
+/// The spellings a guest opens `framework` by.
+///
+/// Both the install name and the versioned path an `LC_LOAD_DYLIB` records, and
+/// the bare leaf - `dyld::synthetic::find` matches a query against a registered
+/// name by the whole path or by the query's leaf, never by the leaf of the
+/// registered name, so a framework without its bare spelling is one a
+/// `dlopen("AppKit")` cannot reach.
+fn paths_of(framework: &Framework) -> Vec<String> {
+    let mut out = Vec::new();
+    for leaf in std::iter::once(framework.leaf).chain(framework.umbrellas.iter().copied()) {
+        // An umbrella is always Versions/A; only what it re-exports is old
+        // enough to be C.
+        let version = if leaf == framework.leaf {
+            framework.version
+        } else {
+            'A'
+        };
+        out.push(format!(
+            "/System/Library/Frameworks/{leaf}.framework/Versions/{version}/{leaf}"
+        ));
+        out.push(format!(
+            "/System/Library/Frameworks/{leaf}.framework/{leaf}"
+        ));
+        out.push(leaf.to_string());
+    }
+    out
+}
+
+/// Every library in this tree, and the paths a guest opens it by.
+///
+/// A guest that `dlopen`s a framework this runtime implements must get a live
+/// handle rather than null: the frameworks have no file on disk, so the
+/// filesystem search in `dyld::resolve_path` can never find one. It also stops
+/// the *host's* framework being loaded in its place, which under the builtin
+/// runtime would put Apple's classes in front of a guest that has ours.
 fn register_dlopen_names() {
     if !builtin() {
         return;
     }
-    crate::dyld::register_synthetic(
-        &[
-            "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
-            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
-            "CoreFoundation",
-        ],
-        symbol,
-    );
-    crate::dyld::register_synthetic(
-        &[
-            "/System/Library/Frameworks/Metal.framework/Versions/A/Metal",
-            "/System/Library/Frameworks/Metal.framework/Metal",
-            "Metal",
-        ],
-        symbol,
-    );
-    crate::dyld::register_synthetic(
-        &[
-            "/System/Library/Frameworks/ForceFeedback.framework/Versions/A/ForceFeedback",
-            "/System/Library/Frameworks/ForceFeedback.framework/ForceFeedback",
-            "ForceFeedback",
-        ],
-        symbol,
-    );
-    crate::dyld::register_synthetic(
-        &[
-            "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation",
-            "/System/Library/Frameworks/Foundation.framework/Foundation",
-            "Foundation",
-        ],
-        symbol,
-    );
-    crate::dyld::register_synthetic(
-        &[
-            "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit",
-            "/System/Library/Frameworks/IOKit.framework/IOKit",
-            "IOKit",
-        ],
-        symbol,
-    );
-    crate::dyld::register_synthetic(
-        &[
-            "/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit",
-            "/System/Library/Frameworks/AppKit.framework/AppKit",
-            "AppKit",
-            // Cocoa is the umbrella, and a program that links it imports
-            // AppKit's symbols through that name.
-            "/System/Library/Frameworks/Cocoa.framework/Versions/A/Cocoa",
-            "/System/Library/Frameworks/Cocoa.framework/Cocoa",
-            "Cocoa",
-        ],
-        symbol,
-    );
-    crate::dyld::register_synthetic(
-        &[
-            "/System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo",
-            "/System/Library/Frameworks/CoreVideo.framework/CoreVideo",
-            "CoreVideo",
-        ],
-        symbol,
-    );
-    crate::dyld::register_synthetic(
-        &[
-            "/System/Library/Frameworks/Contacts.framework/Versions/A/Contacts",
-            "/System/Library/Frameworks/Contacts.framework/Contacts",
-            "Contacts",
-        ],
-        symbol,
-    );
-    crate::dyld::register_synthetic(
-        &[
-            "/System/Library/Frameworks/Security.framework/Versions/A/Security",
-            "/System/Library/Frameworks/Security.framework/Security",
-            "Security",
-        ],
-        symbol,
-    );
-    crate::dyld::register_synthetic(
-        &[
-            "/System/Library/Frameworks/GameController.framework/Versions/A/GameController",
-            "/System/Library/Frameworks/GameController.framework/GameController",
-            "GameController",
-        ],
-        symbol,
-    );
-    crate::dyld::register_synthetic(
-        &[
-            "/System/Library/Frameworks/WebKit.framework/Versions/A/WebKit",
-            "/System/Library/Frameworks/WebKit.framework/WebKit",
-            "WebKit",
-        ],
-        symbol,
-    );
-    crate::dyld::register_synthetic(
-        &[
-            "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/ApplicationServices",
-            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices",
-            "ApplicationServices",
-        ],
-        symbol,
-    );
-    crate::dyld::register_synthetic(
-        &[
-            "/System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox",
-            "/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox",
-            "AudioToolbox",
-        ],
-        symbol,
-    );
+    for framework in FRAMEWORKS {
+        let paths = paths_of(framework);
+        let borrowed: Vec<&str> = paths.iter().map(String::as_str).collect();
+        crate::dyld::register_synthetic(&borrowed, symbol);
+    }
     register_opengl_framework();
 }
 
@@ -195,7 +273,7 @@ fn register_opengl_framework() {
     if !crate::opengl::interposed() {
         return;
     }
-    crate::dyld::register_synthetic(crate::opengl::NAMES, crate::opengl::symbol);
+    crate::dyld::register_synthetic(crate::opengl::INSTALL_PATHS, crate::opengl::symbol);
 }
 
 /// Push the outermost autorelease pool, the one a process is born with.
@@ -247,18 +325,6 @@ fn withheld(name: &str) -> bool {
     out
 }
 
-fn define_fn(lib: &mut SyntheticDylib, name: &str, address: *const ()) {
-    if !withheld(name) {
-        lib.define_fn(name, address);
-    }
-}
-
-fn define_data(lib: &mut SyntheticDylib, name: &str, address: u64) {
-    if !withheld(name) {
-        lib.define_data(name, address);
-    }
-}
-
 /// The frameworks, as a library the loader can bind against.
 ///
 /// Flat, like the rest of this runtime's providers: which framework an image
@@ -275,114 +341,25 @@ pub fn provider() -> SyntheticDylib {
     // registered it would publish a null for that symbol, which is the very
     // failure the globals exist to avoid.
     foundation::bootstrap();
-    for name in corefoundation::names() {
-        if let Some(addr) = corefoundation::symbol(name) {
-            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
+    let out = &mut exports::Denying {
+        inner: &mut lib,
+        deny: withheld,
+    };
+    for framework in FRAMEWORKS {
+        if let Some(provide) = framework.provide {
+            provide(out);
         }
-    }
-    for (name, addr) in corefoundation::data_symbols() {
-        define_data(&mut lib, &name, addr);
-    }
-    // The class objects, which are data: a guest's `[NSMutableArray array]`
-    // binds `_OBJC_CLASS_$_NSMutableArray` and sends to whatever it gets.
-    for (name, addr) in foundation::data_symbols() {
-        define_data(&mut lib, &name, addr);
-    }
-    for name in foundation::names() {
-        if let Some(addr) = foundation::symbol(name) {
-            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
+        if let Some(data) = framework.data {
+            for (name, addr) in data() {
+                out.data(&name, addr);
+            }
         }
-    }
-    // IOKit's HID half, on SDL3. Published even where there is no SDL3: a guest
-    // then gets a manager that declines to open, which is a diagnosis, where an
-    // unresolved import would only say the symbol was missing.
-    for name in iokit::names() {
-        if let Some(addr) = iokit::symbol(name) {
-            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
-        }
-    }
-    for (name, addr) in iokit::data_symbols() {
-        define_data(&mut lib, &name, addr);
-    }
-    // ForceFeedback translates the legacy effect API into SDL3 joystick rumble.
-    for name in forcefeedback::names() {
-        if let Some(addr) = forcefeedback::symbol(name) {
-            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
-        }
-    }
-    // AppKit up to the point a window would be needed. Its classes are here
-    // even though none of them draws: a guest's `YYGLView : NSView` binds
-    // `_OBJC_CLASS_$_NSView` and is refused whole without it, where a declared
-    // superclass turns that into one refusal per selector actually sent.
-    for name in appkit::names() {
-        if let Some(addr) = appkit::symbol(name) {
-            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
-        }
-    }
-    // ApplicationServices
-    for name in applicationservices::names() {
-        if let Some(addr) = applicationservices::symbol(name) {
-            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
-        }
-    }
-    // AudioToolbox
-    for name in audiotoolbox::names() {
-        if let Some(addr) = audiotoolbox::symbol(name) {
-            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
-        }
-    }
-    // CoreVideo, which is one thing: the display link a Mac game's frame loop
-    // hangs on. Its callback is guest code, and reaches this runtime as a thunk
-    // because `abi::table` names that parameter a callback.
-    for name in corevideo::names() {
-        if let Some(addr) = corevideo::symbol(name) {
-            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
-        }
-    }
-    // CoreAudio's output half, on SDL3. Published even where there is no SDL3,
-    // for the reason IOKit's is: a unit that declines to open is a diagnosis,
-    // where an unresolved import only says the symbol was missing.
-    for name in coreaudio::names() {
-        if let Some(addr) = coreaudio::symbol(name) {
-            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
-        }
-    }
-    // Contacts has no backing store. Its one class reports that access is
-    // restricted, which lets applications disable contact-dependent features.
-    for (name, addr) in contacts::data_symbols() {
-        define_data(&mut lib, &name, addr);
-    }
-    // Security's keychain, stored in a file under the guest's home.
-    for name in security::names() {
-        if let Some(addr) = security::symbol(name) {
-            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
-        }
-    }
-    for (name, addr) in security::data_symbols() {
-        define_data(&mut lib, &name, addr);
-    }
-    for (name, addr) in gamecontroller::data_symbols() {
-        define_data(&mut lib, &name, addr);
-    }
-    for (name, addr) in webkit::data_symbols() {
-        define_data(&mut lib, &name, addr);
-    }
-    for (name, addr) in appkit::data_symbols() {
-        define_data(&mut lib, &name, addr);
     }
     for (name, addr) in media_constants() {
-        define_data(&mut lib, &name, addr);
-    }
-    for (name, addr) in metal::data_symbols() {
-        define_data(&mut lib, &name, addr);
-    }
-    for name in metal::names() {
-        if let Some(addr) = metal::symbol(name) {
-            define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
-        }
+        out.data(&name, addr);
     }
     for (name, addr) in shimmed() {
-        define_fn(&mut lib, &format!("_{name}"), addr);
+        out.function(&format!("_{name}"), addr as usize as u64);
     }
     lib
 }
@@ -472,23 +449,19 @@ pub fn symbol(name: &str) -> Option<u64> {
         return None;
     }
     foundation::bootstrap();
-    // A dlsym answer must be the same address the flat provider binds.
-    corefoundation::symbol(name)
+    // A dlsym answer must be the same address the flat provider binds, which is
+    // why both come from `FRAMEWORKS`.
+    FRAMEWORKS
+        .iter()
+        .filter_map(|f| f.symbol)
+        .find_map(|symbol| symbol(name))
         // libclosure, which a shim forwards to by name - see
-        // `crate::shims::block`. Nothing on a host off Darwin defines it.
+        // `crate::shims::block`. Nothing on a host off Darwin defines it, and it
+        // has no framework of its own to be a row.
         .or_else(|| objc::block::symbol(name))
-        .or_else(|| foundation::symbol(name))
-        .or_else(|| security::symbol(name))
-        .or_else(|| iokit::symbol(name))
-        .or_else(|| forcefeedback::symbol(name))
-        .or_else(|| appkit::symbol(name))
-        .or_else(|| applicationservices::symbol(name))
-        .or_else(|| corevideo::symbol(name))
+        // The host's GL, reached by `dlsym` rather than enumerated - see
+        // `crate::opengl`, which publishes it through its own lazy provider.
         .or_else(|| crate::opengl::symbol(name))
-        .or_else(|| coreaudio::symbol(name))
-        .or_else(|| gamecontroller::symbol(name))
-        .or_else(|| webkit::symbol(name))
-        .or_else(|| metal::symbol(name))
 }
 
 /// Tell this tree's `NSBundle` which `.app` the guest is.
@@ -540,5 +513,88 @@ pub fn deny_host_frameworks(provider: &mut NativeDylibProvider) {
         "_CF", "_NS", "_kCF", "_kNS", "_SC", "_kSC", "_CN", "_kCN", "_GC", "_kGC", "_Web",
     ] {
         provider.deny_prefix(prefix);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Everything the provider publishes, in order.
+    fn published() -> exports::Recording {
+        let mut out = exports::Recording::default();
+        foundation::bootstrap();
+        for framework in FRAMEWORKS {
+            if let Some(provide) = framework.provide {
+                provide(&mut out);
+            }
+            if let Some(data) = framework.data {
+                for (name, addr) in data() {
+                    out.data(&name, addr);
+                }
+            }
+        }
+        out
+    }
+
+    /// The library underneath is a map, so a name two frameworks define is one
+    /// whose address depends on the order they are listed in - while `symbol`
+    /// answers with the first that knows it, which may be the other one. Both
+    /// `foundation` and `appkit` had been defining `_CGPointZero`.
+    #[test]
+    fn no_framework_defines_a_symbol_another_one_does() {
+        if !builtin() {
+            return;
+        }
+        let out = published();
+        let mut seen: Vec<&str> = Vec::new();
+        let mut twice: Vec<&str> = Vec::new();
+        for name in out.symbols() {
+            if seen.contains(&name) {
+                twice.push(name);
+            } else {
+                seen.push(name);
+            }
+        }
+        assert!(twice.is_empty(), "defined more than once: {twice:?}");
+    }
+
+    /// A framework with no bare spelling is one a `dlopen("AudioToolbox")`
+    /// cannot reach, because `dyld::synthetic::find` never takes the leaf of a
+    /// registered name. Deriving the paths is what makes that unrepresentable.
+    #[test]
+    fn every_framework_answers_a_dlopen_by_its_leaf() {
+        for framework in FRAMEWORKS {
+            let paths = paths_of(framework);
+            for leaf in std::iter::once(framework.leaf).chain(framework.umbrellas.iter().copied()) {
+                assert!(paths.iter().any(|p| p == leaf), "{leaf}");
+                assert!(
+                    paths.iter().any(
+                        |p| p == &format!("/System/Library/Frameworks/{leaf}.framework/{leaf}")
+                    ),
+                    "{leaf}: the install name"
+                );
+            }
+        }
+    }
+
+    /// The invariant the three lists could not state when they were three: the
+    /// address a link binds and the address a `dlsym` answers are one.
+    #[test]
+    fn a_published_function_is_the_one_dlsym_answers() {
+        if !builtin() {
+            return;
+        }
+        for framework in FRAMEWORKS {
+            let (Some(provide), Some(answer)) = (framework.provide, framework.symbol) else {
+                continue;
+            };
+            let mut out = exports::Recording::default();
+            provide(&mut out);
+            for (mach_o, address) in &out.functions {
+                let bare = mach_o.strip_prefix('_').expect("the Mach-O underscore");
+                assert_eq!(answer(bare), Some(*address), "{}: {mach_o}", framework.leaf);
+            }
+        }
     }
 }

@@ -15,7 +15,7 @@ pub fn interposed() -> bool {
 
 /// The paths a guest names the framework by: the install name an
 /// `LC_LOAD_DYLIB` records, and the spellings a `dlopen` uses.
-pub const NAMES: &[&str] = &[
+pub const INSTALL_PATHS: &[&str] = &[
     "/System/Library/Frameworks/OpenGL.framework/Versions/Current/OpenGL",
     "/System/Library/Frameworks/OpenGL.framework/Versions/A/OpenGL",
     "/System/Library/Frameworks/OpenGL.framework/OpenGL",
@@ -33,8 +33,8 @@ pub const NAMES: &[&str] = &[
 /// placement would otherwise open a display connection and a GL driver in every
 /// process, including the ones that never draw.
 pub fn provider() -> LazyDylib {
-    let mut lib = LazyDylib::new(NAMES[0], open, resolve);
-    for name in &NAMES[1..] {
+    let mut lib = LazyDylib::new(INSTALL_PATHS[0], open, resolve);
+    for name in &INSTALL_PATHS[1..] {
         lib.alias(name);
     }
     lib.flat(interposed());
