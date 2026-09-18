@@ -795,6 +795,12 @@ fn present_dirty() {
         if presenter.is_some_and(|present| present(window, store, &holes)) {
             continue;
         }
+        // The guest's own GL context owns this window's surface; see
+        // [`crate::window::draws_with_opengl`]. There is nothing to fall back
+        // to, so the store is left unshown rather than taking the context away.
+        if crate::window::draws_with_opengl(window) {
+            continue;
+        }
         sdl3::video::present_window(window, |surface| {
             let rows = store.height.min(surface.height.max(0) as u32) as usize;
             let columns = store.width.min(surface.width.max(0) as u32) as usize;

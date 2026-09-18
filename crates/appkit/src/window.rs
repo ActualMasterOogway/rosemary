@@ -546,6 +546,18 @@ enum Api {
     OpenGl,
 }
 
+/// Whether `sdl` is a window the guest draws into with OpenGL.
+///
+/// Such a window belongs to the guest's GL context: it is presented by
+/// `-[NSOpenGLContext flushBuffer]`, and nothing else may ask SDL for its
+/// surface. `SDL_GetWindowSurface` on a GL window makes SDL build a framebuffer
+/// of its own, which means a second GL context that SDL leaves current - after
+/// which every call the guest makes lands in a context where none of its
+/// objects exist.
+pub fn draws_with_opengl(sdl: sdl3::Window) -> bool {
+    !sdl.is_null() && sdl3::video::window_flags(sdl) & sdl3::video::flags::OPENGL != 0
+}
+
 /// Rebuild `receiver`'s SDL window as an OpenGL one, keeping the `NSWindow`.
 ///
 /// `SDL_GL_CreateContext` refuses a window that was not created with
@@ -2169,6 +2181,7 @@ mod tests {
         sdl3::video::set_window_title(before, c"a title");
         sdl3::video::set_window_position(before, 64, 48);
         let size = sdl3::video::window_size(before).expect("a window");
+        assert!(!draws_with_opengl(before));
 
         assert!(rebuild_for_opengl(object));
         // SAFETY: as above.
@@ -2178,6 +2191,11 @@ mod tests {
             sdl3::video::window_flags(after) & sdl3::video::flags::OPENGL,
             0,
             "the rebuilt window is not an OpenGL window"
+        );
+        assert!(
+            draws_with_opengl(after),
+            "the rebuilt window does not own its surface, so the backing store \
+             would ask SDL for it and take the guest's GL context away"
         );
         assert_eq!(sdl3::video::window_size(after), Some(size));
         let title = sdl3::video::window_title(after);
