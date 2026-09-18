@@ -710,6 +710,21 @@ fn current_cgl_context() -> *mut c_void {
     }
 }
 
+/// Whether making this context current on this thread would take it away from
+/// another thread that is drawing through it.
+///
+/// Only ever true where the GL underneath is one a context cannot be current on
+/// two threads at once - see [`Shared`]. Where it can, which is the CGL this
+/// class is modelled on, every thread holds the context and nothing is taken.
+fn held_by_another_thread(context: &mut Context) -> bool {
+    let cell = shared_of(context);
+    let state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
+    state.egl
+        && state
+            .owner
+            .is_some_and(|owner| owner != std::thread::current().id())
+}
+
 /// `-CGLContextObj`, the context SDL made underneath this one.
 ///
 /// Recorded when the context is made current, because the only way to name
@@ -717,8 +732,15 @@ fn current_cgl_context() -> *mut c_void {
 /// current is made current here: the alternative is answering null, and the CGL
 /// calls a program makes with it - `CGLEnable`, `CGLSetParameter` - would then
 /// silently do nothing to the context it meant.
+///
+/// Except when another thread is drawing through it, which is the case that is
+/// not worth the answer: there is no CGL under an EGL, so making the context
+/// current here would interrupt the thread that is rendering only to answer
+/// null anyway. A program asks this during startup - Unreal does, from
+/// `-applicationDidFinishLaunching:`, while its render thread is already
+/// drawing - and taking the context there is what stops the program dead.
 unsafe extern "C" fn cgl_context(receiver: Id, sel: Sel) -> *mut c_void {
-    if context_of(receiver).cgl.is_null() {
+    if context_of(receiver).cgl.is_null() && !held_by_another_thread(context_of(receiver)) {
         // SAFETY: the receiver is a context of this crate's.
         unsafe { make_current_context(receiver, sel) };
     }

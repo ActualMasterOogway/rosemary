@@ -635,6 +635,28 @@ fn compose_window(window: Id) {
         .collect();
 
     let mut stores = STORES.lock().unwrap_or_else(|e| e.into_inner());
+    // A window no view has drawn into has nothing to compose. Composing it
+    // anyway makes a store of transparent black out of the content view's own
+    // rectangle - a view that appeared is a region to recompose, and there is
+    // nothing to recompose it from - and presenting that paints over whatever
+    // else owns the window's pixels. For a guest drawing through an
+    // `NSOpenGLContext` that is the whole of its frame, so the window goes
+    // black. Once a view has drawn, the composite exists and is kept up to
+    // date from then on, including as content goes away again.
+    let composed_before = stores
+        .as_ref()
+        .is_some_and(|stores| stores.contains_key(&(sdl as usize)));
+    if !composed_before && holes.is_empty() {
+        let views = VIEW_STORES.lock().unwrap_or_else(|e| e.into_inner());
+        let drawn = views.as_ref().is_some_and(|views| {
+            placed
+                .iter()
+                .any(|p| views.contains_key(&(p.view as usize)))
+        });
+        if !drawn {
+            return;
+        }
+    }
     let store = stores
         .get_or_insert_with(HashMap::new)
         .entry(sdl as usize)

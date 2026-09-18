@@ -1378,6 +1378,17 @@ unsafe extern "C" fn set_style_mask(receiver: Id, _sel: Sel, mask: usize) {
     apply_style(receiver);
 }
 
+/// The content size the guest last asked this window for, in the units
+/// `SDL_GetWindowSize` answers in.
+///
+/// What a resize is measured against: a window the compositor sized exactly as
+/// asked has nothing to report, and reporting it anyway is not free - see
+/// [`crate::event::window_geometry_changed`].
+pub(crate) fn requested_size(receiver: Id) -> Option<(i32, i32)> {
+    let (_, _, width, height) = crate::geometry::rect_to_sdl(window_of(receiver).requested);
+    (width > 0 && height > 0).then_some((width, height))
+}
+
 /// Give the host window what the style mask and level ask for.
 ///
 /// The three that reach a window system: whether it is decorated, whether the

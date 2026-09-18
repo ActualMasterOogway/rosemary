@@ -499,7 +499,15 @@ pub fn window_geometry_changed(object: Id) {
         return;
     }
     let id = sdl3::video::window_id(sdl);
-    if let Some((width, height)) = sdl3::video::window_size(sdl) {
+    // Only when the compositor actually chose a different size. `-windowDidResize:`
+    // is not a notification a program merely notes: Unreal rebuilds its viewport
+    // from it, which means dropping the GL context on the thread that draws and
+    // taking it on the thread that runs this - and a context handed back and
+    // forth is the one thing the GL under this runtime cannot do. A window that
+    // came back the size it asked for has nothing to say.
+    if let Some((width, height)) = sdl3::video::window_size(sdl)
+        && window::requested_size(object) != Some((width, height))
+    {
         deliver(sdl3::video::Event::WindowResized {
             window: id,
             width,
