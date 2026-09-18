@@ -352,7 +352,6 @@ pub fn ns_app_cell() -> u64 {
 // CoreGraphics exports these structures themselves, rather than pointers to
 // them. A guest loads their addresses from its GOT and copies the fields.
 static CG_AFFINE_TRANSFORM_IDENTITY: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
-static CG_POINT_ZERO: [f64; 2] = [0.0, 0.0];
 /// `{{-CGFLOAT_MAX / 2, -CGFLOAT_MAX / 2}, {CGFLOAT_MAX, CGFLOAT_MAX}}`.
 static CG_RECT_INFINITE: [f64; 4] = [f64::MAX / -2.0, f64::MAX / -2.0, f64::MAX, f64::MAX];
 
@@ -365,10 +364,6 @@ pub fn data_symbols() -> Vec<(String, u64)> {
     out.push((
         "_CGAffineTransformIdentity".to_string(),
         CG_AFFINE_TRANSFORM_IDENTITY.as_ptr() as usize as u64,
-    ));
-    out.push((
-        "_CGPointZero".to_string(),
-        CG_POINT_ZERO.as_ptr() as usize as u64,
     ));
     out.push((
         "_CGRectInfinite".to_string(),
