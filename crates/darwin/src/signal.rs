@@ -1170,53 +1170,25 @@ pub mod entry {
         }
     }
 
-    pub const NAMES: &[&str] = &[
-        "signal",
-        "sigaction",
-        "sigprocmask",
-        "pthread_sigmask",
-        "sigaltstack",
-        "sigsuspend",
-        "sigpending",
-        "raise",
-        "kill",
-        "killpg",
-        "sigemptyset",
-        "sigfillset",
-        "sigaddset",
-        "sigdelset",
-        "sigismember",
-        "strsignal",
-        "psignal",
-    ];
-
-    pub fn symbol(name: &str) -> Option<u64> {
-        let f: *const () = match name {
-            "signal" => signal_ as *const (),
-            "sigaction" => sigaction_ as *const (),
-            "sigprocmask" => sigprocmask_ as *const (),
-            "pthread_sigmask" => pthread_sigmask_ as *const (),
-            "sigaltstack" => sigaltstack_ as *const (),
-            "sigsuspend" => sigsuspend_ as *const (),
-            "sigpending" => sigpending_ as *const (),
-            "raise" => raise_ as *const (),
-            "kill" => kill_ as *const (),
-            "killpg" => killpg_ as *const (),
-            "sigemptyset" => sigemptyset_ as *const (),
-            "sigfillset" => sigfillset_ as *const (),
-            "sigaddset" => sigaddset_ as *const (),
-            "sigdelset" => sigdelset_ as *const (),
-            "sigismember" => sigismember_ as *const (),
-            "strsignal" => strsignal_ as *const (),
-            "psignal" => psignal_ as *const (),
-            _ => return None,
-        };
-        Some(f as usize as u64)
-    }
-
-    pub fn provide(lib: &mut machish::resolve::SyntheticDylib) {
-        for name in NAMES {
-            crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap() as *const ());
+    exports::exports! {
+        functions {
+            "signal" => signal_,
+            "sigaction" => sigaction_,
+            "sigprocmask" => sigprocmask_,
+            "pthread_sigmask" => pthread_sigmask_,
+            "sigaltstack" => sigaltstack_,
+            "sigsuspend" => sigsuspend_,
+            "sigpending" => sigpending_,
+            "raise" => raise_,
+            "kill" => kill_,
+            "killpg" => killpg_,
+            "sigemptyset" => sigemptyset_,
+            "sigfillset" => sigfillset_,
+            "sigaddset" => sigaddset_,
+            "sigdelset" => sigdelset_,
+            "sigismember" => sigismember_,
+            "strsignal" => strsignal_,
+            "psignal" => psignal_,
         }
     }
 

@@ -1,8 +1,6 @@
 //! `uname`, `sysconf` and `compat_mode`: what the system says it is, and which
 //! century it is in.
 
-use machish::resolve::SyntheticDylib;
-
 use crate::sysctl::{
     CTL_HW, CTL_KERN, HW_MACHINE, KERN_HOSTNAME, KERN_OSRELEASE, KERN_OSTYPE, KERN_VERSION,
 };
@@ -455,53 +453,25 @@ unsafe extern "C" fn gestalt(selector: u32, response: *mut i32) -> i16 {
     0
 }
 
-/// The names this module answers, which is not the same list on both hosts:
-/// `Gestalt` is CoreServices' and is passed through where there is one, and
-/// `sysconf`'s names are Darwin's already on a Mac.
-fn names() -> &'static [&'static str] {
-    #[cfg(target_os = "macos")]
-    {
-        &["uname", "compat_mode"]
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        &[
-            "uname",
-            "compat_mode",
-            "Gestalt",
-            "sysconf",
-            "getrusage",
-            "pathconf",
-            "fpathconf",
-            "confstr",
-        ]
-    }
-}
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "uname" => uname as *const (),
-        "compat_mode" => compat_mode as *const (),
+// Not the same list on both hosts: `Gestalt` is CoreServices' and is passed
+// through where there is one, and `sysconf`'s names are Darwin's already on a
+// Mac.
+exports::exports! {
+    functions {
+        "uname" => uname,
+        "compat_mode" => compat_mode,
         #[cfg(not(target_os = "macos"))]
-        "Gestalt" => gestalt as *const (),
+        "Gestalt" => gestalt,
         #[cfg(not(target_os = "macos"))]
-        "sysconf" => sysconf as *const (),
+        "sysconf" => sysconf,
         #[cfg(not(target_os = "macos"))]
-        "getrusage" => getrusage as *const (),
+        "getrusage" => getrusage,
         #[cfg(not(target_os = "macos"))]
-        "pathconf" => pathconf as *const (),
+        "pathconf" => pathconf,
         #[cfg(not(target_os = "macos"))]
-        "fpathconf" => fpathconf as *const (),
+        "fpathconf" => fpathconf,
         #[cfg(not(target_os = "macos"))]
-        "confstr" => confstr as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in names() {
-        crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap() as *const ());
+        "confstr" => confstr,
     }
 }
 

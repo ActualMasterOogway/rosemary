@@ -20,8 +20,6 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use machish::resolve::SyntheticDylib;
-
 /// Top-level MIB identifiers.
 pub const CTL_KERN: i32 = 1;
 pub const CTL_HW: i32 = 6;
@@ -673,19 +671,11 @@ unsafe extern "C" fn sysctlnametomib(
     0
 }
 
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "sysctl" => sysctl as *const (),
-        "sysctlbyname" => sysctlbyname as *const (),
-        "sysctlnametomib" => sysctlnametomib as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in ["sysctl", "sysctlbyname", "sysctlnametomib"] {
-        crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap() as *const ());
+exports::exports! {
+    functions {
+        "sysctl" => sysctl,
+        "sysctlbyname" => sysctlbyname,
+        "sysctlnametomib" => sysctlnametomib,
     }
 }
 

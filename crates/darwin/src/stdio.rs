@@ -10,18 +10,6 @@
 //! them and this module still resolves them: the two are different questions about the
 //! same symbol.
 
-use machish::resolve::SyntheticDylib;
-
-/// Darwin's name for each stream, and the host's.
-///
-/// The Mach-O spelling carries one more underscore than the C identifier, which is
-/// why the table is written in C names and [`crate::c_name`] has already run.
-const STREAMS: &[(&str, &str)] = &[
-    ("__stdinp", HOST_STDIN),
-    ("__stdoutp", HOST_STDOUT),
-    ("__stderrp", HOST_STDERR),
-];
-
 #[cfg(target_os = "macos")]
 const HOST_STDIN: &str = "__stdinp";
 #[cfg(target_os = "macos")]
@@ -36,18 +24,12 @@ const HOST_STDOUT: &str = "stdout";
 #[cfg(not(target_os = "macos"))]
 const HOST_STDERR: &str = "stderr";
 
-/// The address of the `FILE *` object `name` denotes, if this module knows it.
-pub fn symbol(name: &str) -> Option<u64> {
-    let (_, host) = STREAMS.iter().find(|(darwin, _)| *darwin == name)?;
-    crate::host_symbol(host)
-}
-
 /// The host's `stdout`, as **this runtime's** own stream.
 ///
-/// Distinct from [`symbol`], which answers a guest's import: this is the stream a shim
-/// writes a guest's `printf` output to, and it is a `FILE *` rather than the address
-/// of one. Null if nothing exported it, which every caller has to survive because a
-/// stream is not something to abort over.
+/// Distinct from the published symbol, which answers a guest's import: this is the
+/// stream a shim writes a guest's `printf` output to, and it is a `FILE *` rather
+/// than the address of one. Null if nothing exported it, which every caller has to
+/// survive because a stream is not something to abort over.
 pub fn stdout() -> *mut libc::FILE {
     stream(HOST_STDOUT)
 }
@@ -71,14 +53,15 @@ fn stream(host: &str) -> *mut libc::FILE {
     unsafe { *(at as usize as *const *mut libc::FILE) }
 }
 
-pub fn provide(lib: &mut SyntheticDylib) {
-    for (darwin, host) in STREAMS {
-        // The Mach-O underscore, put back: the guest imports `___stdoutp`.
-        crate::define_data(
-            lib,
-            &format!("_{darwin}"),
-            crate::host_symbol(host).unwrap_or(0),
-        );
+exports::exports! {
+    // The Mach-O underscore is added here; the C identifiers carry one of their
+    // own, so the guest imports `___stdoutp`. Constants because the address is
+    // the host stream's, fixed for the process - so the loader and a `dlsym`
+    // asking separately get the same one.
+    constants {
+        "__stdinp" => crate::host_symbol(HOST_STDIN).unwrap_or(0),
+        "__stdoutp" => crate::host_symbol(HOST_STDOUT).unwrap_or(0),
+        "__stderrp" => crate::host_symbol(HOST_STDERR).unwrap_or(0),
     }
 }
 
@@ -91,7 +74,7 @@ mod tests {
     /// is by naming a symbol that is a `FILE` rather than a pointer to one.
     #[test]
     fn each_stream_resolves_to_a_pointer_to_a_live_file() {
-        for (darwin, _) in STREAMS {
+        for darwin in names() {
             let at = symbol(darwin).unwrap_or_else(|| panic!("{darwin} resolves"));
             // SAFETY: the host exports this symbol as `FILE *`, so its address is a
             // valid `FILE **` for the life of the process.

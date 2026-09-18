@@ -45,11 +45,8 @@ pub unsafe extern "C" fn ioctl(fd: libc::c_int, guest_request: u64, arg: usize) 
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn symbol(name: &str) -> Option<u64> {
-    (name == "ioctl").then_some(ioctl as *const () as usize as u64)
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn provide(lib: &mut machish::resolve::SyntheticDylib) {
-    crate::define_fn(lib, "_ioctl", ioctl as *const ());
+exports::exports! {
+    functions {
+        "ioctl" => ioctl,
+    }
 }

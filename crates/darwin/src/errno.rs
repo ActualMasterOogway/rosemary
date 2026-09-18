@@ -22,8 +22,6 @@
 //! See [`error`] for how the translation is arranged for a slot the guest holds
 //! a pointer to.
 
-use machish::resolve::SyntheticDylib;
-
 /// Darwin's `errno` values, paired with this host's for the same name.
 ///
 /// The first thirty-four agree and are still listed: the point of the table is
@@ -317,14 +315,12 @@ impl Drop for Held {
     }
 }
 
-pub fn symbol(name: &str) -> Option<u64> {
-    (name == "_error").then(|| error as *const () as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    // Two underscores as the Mach-O spells it: one from C mangling, one from the
-    // identifier `__error`.
-    crate::define_fn(lib, "___error", error as *const ());
+exports::exports! {
+    functions {
+        // Two underscores as the Mach-O spells it: one from C mangling, one
+        // from the identifier `__error`.
+        "_error" => error,
+    }
 }
 
 #[cfg(test)]

@@ -21,8 +21,6 @@
 //! guest's - but all of it is *compiled and tested* there, against the very
 //! implementation a guest would otherwise have called.
 
-use machish::resolve::SyntheticDylib;
-
 pub mod attr;
 pub mod consts;
 pub mod object;
@@ -1205,11 +1203,11 @@ pub const SHIMMED_ABOVE: &[&str] = &[
 /// outright, so a name this crate has *not* thought about is refused rather than
 /// quietly answered. A passthrough registered here costs nothing at run time - the
 /// guest's slot holds the host address either way.
-pub fn provide(lib: &mut SyntheticDylib) {
+pub fn provide(out: &mut dyn exports::Exports) {
     #[cfg(not(target_os = "macos"))]
     {
         for (name, address) in entries() {
-            crate::define_fn(lib, &format!("_{name}"), *address as *const ());
+            crate::define_fn(out, &format!("_{name}"), *address as *const ());
         }
         // Both lists are bound to the host's own function: [`PASSED_THROUGH`] because
         // that is the implementation, and [`SHIMMED_ABOVE`] because the slot has to
@@ -1217,12 +1215,12 @@ pub fn provide(lib: &mut SyntheticDylib) {
         // anything at run time - the guest's slot holds the host address either way.
         for name in PASSED_THROUGH.iter().chain(SHIMMED_ABOVE) {
             if let Some(host) = crate::host_symbol(name) {
-                crate::define_fn(lib, &format!("_{name}"), host as *const ());
+                crate::define_fn(out, &format!("_{name}"), host as *const ());
             }
         }
     }
     #[cfg(target_os = "macos")]
-    let _ = lib;
+    let _ = out;
 }
 
 #[cfg(test)]

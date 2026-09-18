@@ -2,8 +2,6 @@
 
 #![cfg(not(target_os = "macos"))]
 
-use machish::resolve::SyntheticDylib;
-
 unsafe extern "C" fn arc4random() -> u32 {
     let mut bytes = [0; 4];
     if getrandom::fill(&mut bytes).is_err() {
@@ -21,15 +19,9 @@ unsafe extern "C" fn arc4random_buf(out: *mut u8, len: usize) {
     }
 }
 
-pub fn symbol(name: &str) -> Option<u64> {
-    Some(match name {
-        "arc4random" => arc4random as *const () as usize as u64,
-        "arc4random_buf" => arc4random_buf as *const () as usize as u64,
-        _ => return None,
-    })
-}
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in ["arc4random", "arc4random_buf"] {
-        crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap() as *const ());
+exports::exports! {
+    functions {
+        "arc4random" => arc4random,
+        "arc4random_buf" => arc4random_buf,
     }
 }

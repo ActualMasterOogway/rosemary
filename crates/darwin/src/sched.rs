@@ -2,8 +2,6 @@
 
 #![cfg(not(target_os = "macos"))]
 
-use machish::resolve::SyntheticDylib;
-
 use crate::pthread;
 
 unsafe extern "C" fn max(policy: i32) -> i32 {
@@ -26,17 +24,9 @@ unsafe extern "C" fn min(policy: i32) -> i32 {
     )
 }
 
-pub fn symbol(name: &str) -> Option<u64> {
-    let f = match name {
-        "sched_get_priority_max" => max as *const (),
-        "sched_get_priority_min" => min as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in ["sched_get_priority_max", "sched_get_priority_min"] {
-        crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap() as *const ());
+exports::exports! {
+    functions {
+        "sched_get_priority_max" => max,
+        "sched_get_priority_min" => min,
     }
 }

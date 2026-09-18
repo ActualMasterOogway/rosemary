@@ -268,7 +268,6 @@ pub fn flags_to_host(flags: i32) -> Result<libc::c_int, i32> {
 /// `fcntl` itself, for a host whose commands and flag word are not Darwin's.
 #[cfg(not(target_os = "macos"))]
 pub mod entry {
-    use machish::resolve::SyntheticDylib;
 
     use super::{
         DarwinTranslation, FcntlFlags, Flock, Fstore, cmd, flags_to_guest, lock_type_to_guest,
@@ -442,22 +441,9 @@ pub mod entry {
         );
     }
 
-    pub const NAMES: &[&str] = &["fcntl"];
-
-    pub fn symbol(name: &str) -> Option<u64> {
-        match name {
-            "fcntl" => Some(fcntl as *const () as usize as u64),
-            _ => None,
-        }
-    }
-
-    pub fn provide(lib: &mut SyntheticDylib) {
-        for name in NAMES {
-            crate::define_fn(
-                lib,
-                &format!("_{name}"),
-                symbol(name).unwrap_or(0) as *const (),
-            );
+    exports::exports! {
+        functions {
+            "fcntl" => fcntl,
         }
     }
 }

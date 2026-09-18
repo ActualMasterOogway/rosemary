@@ -1,7 +1,5 @@
 //! libSystem globals that have no host object to bind on Linux.
 
-use machish::resolve::SyntheticDylib;
-
 /// Darwin keeps the public resolver state in a 512-byte, pointer-aligned object.
 ///
 /// Resolver entry points initialise it before consuming its fields. Keeping the
@@ -24,28 +22,22 @@ struct DefaultLog([u8; 8]);
 static DEFAULT_LOG: DefaultLog = DefaultLog([0; 8]);
 
 #[cfg(target_os = "macos")]
-pub fn provide(_lib: &mut SyntheticDylib) {}
+exports::exports! {}
 
 #[cfg(not(target_os = "macos"))]
-pub fn provide(lib: &mut SyntheticDylib) {
-    // Both C identifiers begin with `_`, in addition to Mach-O's leading
-    // underscore.
-    crate::define_data(
-        lib,
-        "__res",
-        (&raw const RESOLVER_STATE).cast::<u8>() as usize as u64,
-    );
-    crate::define_data(
-        lib,
-        "__os_log_default",
-        &raw const DEFAULT_LOG as usize as u64,
-    );
+exports::exports! {
+    // Both C identifiers begin with `_`, in addition to Mach-O's leading one.
+    data {
+        "__res" => (&raw const RESOLVER_STATE).cast::<u8>() as usize as u64,
+        "__os_log_default" => &raw const DEFAULT_LOG as usize as u64,
+    }
 }
 
 #[cfg(all(test, not(target_os = "macos")))]
 mod tests {
     use super::*;
     use machish::fixups::{LibraryRef, SymbolRef};
+    use machish::resolve::SyntheticDylib;
     use machish::resolve::{SymbolKind, SymbolProvider};
 
     fn resolve(lib: &SyntheticDylib, name: &str) -> machish::resolve::Resolved {

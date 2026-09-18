@@ -26,8 +26,6 @@
 use std::ffi::{CStr, c_char, c_void};
 use std::io::Write;
 
-use machish::resolve::SyntheticDylib;
-
 /// `os_log_type_t`. Apple's values, because the caller passes one in.
 mod log_type {
     pub const DEFAULT: u8 = 0x00;
@@ -414,26 +412,18 @@ unsafe extern "C" fn os_activity_scope_enter(_activity: *mut c_void, state: *mut
 
 unsafe extern "C" fn os_activity_scope_leave(_state: *mut u64) {}
 
-pub fn provide(lib: &mut SyntheticDylib) {
-    // `_os_log_impl` and `_os_activity_create` begin with an underscore of their
-    // own, in addition to Mach-O's.
-    for (name, f) in [
-        ("_os_log_create", os_log_create as *const ()),
-        ("_os_log_type_enabled", os_log_type_enabled as *const ()),
-        ("__os_log_impl", _os_log_impl as *const ()),
-        ("_os_retain", os_retain as *const ()),
-        ("_os_release", os_release as *const ()),
-        ("__os_activity_create", _os_activity_create as *const ()),
-        (
-            "_os_activity_scope_enter",
-            os_activity_scope_enter as *const (),
-        ),
-        (
-            "_os_activity_scope_leave",
-            os_activity_scope_leave as *const (),
-        ),
-    ] {
-        crate::define_fn(lib, name, f);
+exports::exports! {
+    functions {
+        "os_log_create" => os_log_create,
+        "os_log_type_enabled" => os_log_type_enabled,
+        // `_os_log_impl` and `_os_activity_create` begin with an underscore of
+        // their own, in addition to Mach-O's.
+        "_os_log_impl" => _os_log_impl,
+        "os_retain" => os_retain,
+        "os_release" => os_release,
+        "_os_activity_create" => _os_activity_create,
+        "os_activity_scope_enter" => os_activity_scope_enter,
+        "os_activity_scope_leave" => os_activity_scope_leave,
     }
 }
 

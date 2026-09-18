@@ -214,44 +214,104 @@ fn registered(name: &str) -> Option<u64> {
         .find_map(|source| source(name))
 }
 
+/// Every module this crate publishes, once.
+///
+/// `provider` and `implemented` are both this list. They used to be two, in two
+/// hand-kept orders, and a module in one and not the other is a name the loader
+/// binds and a `dlsym` answers null for - which is what had happened to
+/// `atomics` and `oslog`.
+///
+/// The order is the publishing order. Nothing here may define a name another
+/// entry defines - see `no_module_defines_a_name_another_one_does`, which is
+/// what makes the order not matter.
+static MODULES: &[exports::Module] = &[
+    idle::MODULE,
+    stdio::MODULE,
+    errno::MODULE,
+    sysctl::MODULE,
+    sysinfo::MODULE,
+    PTHREAD,
+    mach::MODULE,
+    clock::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    sched::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    random::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    ioctl::MODULE,
+    ulock::MODULE,
+    spawn::MODULE,
+    dispatch::MODULE,
+    data::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    atomics::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    xlocale::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    stat::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    malloc::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    vmmap::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    string::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    poll::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    select::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    net::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    xattr::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    uuid::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    signal::entry::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    fcntl::entry::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    bsd::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    callback::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    passwd::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    dirent::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    rlimit::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    shm::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    libproc::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    oslog::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    kqueue::MODULE,
+    #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
+    printf_l::MODULE,
+];
+
+/// `pthread` as a row, written out because it has no table to generate one.
+///
+/// Its `provide` binds most names to the *host's* address, looked up at run
+/// time, so there is no list of names to derive - see `pthread::provide`.
+const PTHREAD: exports::Module = exports::Module {
+    path: "darwin::pthread",
+    names: pthread_names,
+    symbol: pthread::symbol,
+    provide: pthread::provide,
+};
+
+fn pthread_names() -> exports::Names {
+    exports::Names::new()
+}
+
 fn implemented(name: &str) -> Option<u64> {
     registered(name)
-        .or_else(|| stdio::symbol(name))
-        .or_else(|| errno::symbol(name))
-        .or_else(|| sysctl::symbol(name))
-        .or_else(|| sysinfo::symbol(name))
-        .or_else(|| pthread::symbol(name))
-        .or_else(|| mach::symbol(name))
-        .or_else(|| clock::symbol(name))
-        .or_else(|| ioctl_symbol(name))
-        .or_else(|| sched_symbol(name))
-        .or_else(|| random_symbol(name))
-        .or_else(|| ulock::symbol(name))
-        .or_else(|| spawn::symbol(name))
-        .or_else(|| dispatch::symbol(name))
-        .or_else(|| xlocale_symbol(name))
-        .or_else(|| stat_symbol(name))
-        .or_else(|| malloc_symbol(name))
-        .or_else(|| vmmap_symbol(name))
-        .or_else(|| poll_symbol(name))
-        .or_else(|| select_symbol(name))
-        .or_else(|| net_symbol(name))
-        .or_else(|| xattr_symbol(name))
-        .or_else(|| uuid_symbol(name))
-        .or_else(|| string_symbol(name))
-        .or_else(|| signal_symbol(name))
-        .or_else(|| fcntl_symbol(name))
-        .or_else(|| bsd_symbol(name))
-        .or_else(|| callback_symbol(name))
-        .or_else(|| passwd_symbol(name))
-        .or_else(|| dirent_symbol(name))
-        .or_else(|| rlimit_symbol(name))
-        .or_else(|| shm_symbol(name))
-        .or_else(|| libproc_symbol(name))
-        .or_else(|| printf_l_symbol(name))
-        .or_else(|| kqueue_symbol(name))
+        .or_else(|| exports::Module::resolve(MODULES, name))
+        // Not a row: it probes the host and consults `strict`, so which answer
+        // it gives depends on more than the name. See `math_symbol`.
         .or_else(|| math_symbol(name))
-        .or_else(|| idle::symbol(name))
 }
 
 /// The part of [`math`] this crate answers everywhere, which is not the whole
@@ -269,327 +329,6 @@ fn math_symbol(name: &str) -> Option<u64> {
     (math::PLAIN.contains(&name) && unclaimed)
         .then(ours)
         .flatten()
-}
-
-/// The variadic `_l` printers, which only an x86-64 host off Darwin publishes -
-/// the trampolines behind them are that ABI's. See [`printf_l`].
-fn printf_l_symbol(name: &str) -> Option<u64> {
-    #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
-    {
-        return printf_l::symbol(name);
-    }
-    #[cfg(not(all(not(target_os = "macos"), target_arch = "x86_64")))]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// `kqueue`, which only a host that has no event queue of its own rebuilds out
-/// of `poll`.
-fn kqueue_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return kqueue::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-fn sched_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return sched::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-fn random_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return random::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-fn ioctl_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return ioctl::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// `<libproc.h>`, which only a host that has not got one publishes.
-fn libproc_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return libproc::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// The resource limits, which only a host whose `RLIMIT_` numbers and
-/// `RLIM_INFINITY` are not Darwin's rewrites.
-fn rlimit_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return rlimit::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// POSIX shared memory, which only a host whose `O_` flags and segment
-/// namespace are not Darwin's rewrites.
-fn shm_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return shm::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// `<dirent.h>`, which only a host whose `struct dirent` is not Darwin's
-/// rewrites.
-fn dirent_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return dirent::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// `<pwd.h>`, which only a host whose `struct passwd` is not Darwin's rewrites.
-fn passwd_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return passwd::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// The names a Mac's libc exports and this host's does not, which only a host
-/// that is missing them publishes.
-/// The host functions whose *callback* is guest code, which on a host that is not
-/// Darwin has to be entered with the guest's thread pointer. See [`callback`].
-fn callback_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return callback::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-fn bsd_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return bsd::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// `fcntl`, which only a host whose commands and `O_` flags are not Darwin's
-/// rewrites.
-fn fcntl_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return fcntl::entry::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// The signal family, which only a host whose signal numbers, `sigset_t`,
-/// `struct sigaction` and `stack_t` are not Darwin's publishes.
-fn signal_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return signal::entry::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// The socket API, which only a host whose `sockaddr` is not Darwin's rewrites.
-fn net_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return net::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// `<uuid/uuid.h>`, which only a host that keeps it out of its libc publishes.
-fn uuid_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return uuid::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// Extended attributes, which only a host that namespaces them rewrites.
-fn xattr_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return xattr::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// `select`, which only a host that once refused it on the strength of a
-/// declaration publishes; see [`select`].
-fn select_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return select::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// `poll`, which only a host whose `POLL*` bits are not Darwin's rewrites.
-fn poll_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return poll::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// Apple's `<string.h>` extensions, which only a host without them publishes.
-fn string_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return string::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// The memory-mapping family, which only a host whose `MAP_`/`MADV_`/`MS_`
-/// values are not Darwin's needs rewritten.
-fn vmmap_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return vmmap::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// The zoned-allocator questions, which only a host with no zones answers.
-fn malloc_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return malloc::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// The `struct stat` family and the path calls beside it, which only a host
-/// whose layout is not Darwin's publishes.
-fn stat_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return stat::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-}
-
-/// The `xlocale.h` family, which only a host without it publishes.
-fn xlocale_symbol(name: &str) -> Option<u64> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return xlocale::symbol(name);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
 }
 
 pub fn is_implemented(symbol: &str) -> bool {
@@ -614,6 +353,10 @@ pub const SHIMMED_ABOVE: &[&str] = &["__sincosf_stret", "__sincos_stret", "__div
 pub fn provider() -> machish::resolve::SyntheticDylib {
     let mut lib = machish::resolve::SyntheticDylib::new("<darwin>");
     lib.flat(true);
+    // Every definition goes through the null guard: a slot holding zero is
+    // worse than an unbound import, which is at least refused by name at the
+    // call rather than jumping to address zero.
+    let out = &mut exports::NonNull(&mut lib);
     for name in SHIMMED_ABOVE.iter().chain(math::PLAIN) {
         // Only where the host has none: on Darwin these are libSystem's own, and
         // shadowing them would replace an implementation with a placeholder in
@@ -622,80 +365,65 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
         if (strict::enabled() || host_symbol(name).is_none())
             && let Some(f) = math::symbol(name)
         {
-            define_fn(&mut lib, &format!("_{name}"), f);
+            define_fn(out, &format!("_{name}"), f);
         }
     }
     // These the host does define, and differently - see [`math::SHADOWED`].
     for name in math::SHADOWED {
         if let Some(f) = math::symbol(name) {
-            define_fn(&mut lib, &format!("_{name}"), f);
+            define_fn(out, &format!("_{name}"), f);
         }
     }
-    idle::provide(&mut lib);
-    stdio::provide(&mut lib);
-    errno::provide(&mut lib);
-    sysctl::provide(&mut lib);
-    sysinfo::provide(&mut lib);
-    pthread::provide(&mut lib);
-    mach::provide(&mut lib);
-    clock::provide(&mut lib);
-    #[cfg(not(target_os = "macos"))]
-    sched::provide(&mut lib);
-    #[cfg(not(target_os = "macos"))]
-    random::provide(&mut lib);
-    #[cfg(not(target_os = "macos"))]
-    ioctl::provide(&mut lib);
-    ulock::provide(&mut lib);
-    spawn::provide(&mut lib);
-    dispatch::provide(&mut lib);
-    data::provide(&mut lib);
-    #[cfg(not(target_os = "macos"))]
-    {
-        atomics::provide(&mut lib);
-        xlocale::provide(&mut lib);
-        stat::provide(&mut lib);
-        malloc::provide(&mut lib);
-        vmmap::provide(&mut lib);
-        string::provide(&mut lib);
-        poll::provide(&mut lib);
-        select::provide(&mut lib);
-        net::provide(&mut lib);
-        xattr::provide(&mut lib);
-        uuid::provide(&mut lib);
-        signal::entry::provide(&mut lib);
-        fcntl::entry::provide(&mut lib);
-        bsd::provide(&mut lib);
-        callback::provide(&mut lib);
-        passwd::provide(&mut lib);
-        dirent::provide(&mut lib);
-        rlimit::provide(&mut lib);
-        shm::provide(&mut lib);
-        libproc::provide(&mut lib);
-        oslog::provide(&mut lib);
-        kqueue::provide(&mut lib);
-        #[cfg(target_arch = "x86_64")]
-        printf_l::provide(&mut lib);
-    }
+    exports::Module::provide_all(MODULES, out);
     lib
 }
 
-/// Define `mach_o` as a function, if `f` is non-null.
-pub(crate) fn define_fn(lib: &mut machish::resolve::SyntheticDylib, mach_o: &str, f: *const ()) {
-    if !f.is_null() {
-        lib.define_fn(mach_o, f);
-    }
-}
-
-/// Define `mach_o` as data at `addr`, if `addr` is non-zero.
-pub(crate) fn define_data(lib: &mut machish::resolve::SyntheticDylib, mach_o: &str, addr: u64) {
-    if addr != 0 {
-        lib.define_data(mach_o, addr);
-    }
+/// Define `mach_o` as a function, for the modules not yet on the table.
+pub(crate) fn define_fn(out: &mut dyn exports::Exports, mach_o: &str, f: *const ()) {
+    out.function(mach_o, f as usize as u64);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The publishing order is the lookup order, and neither may decide an
+    /// answer. Two modules defining one name would make it decide both: the
+    /// library is a map, so the later definition wins the link, while
+    /// `implemented` stops at the earlier one and a `dlsym` gets that.
+    #[test]
+    fn no_module_defines_a_name_another_one_does() {
+        let mut seen: Vec<(&str, &str)> = Vec::new();
+        for module in MODULES {
+            for name in (module.names)() {
+                if let Some((_, first)) = seen.iter().find(|(n, _)| *n == name) {
+                    panic!("{name} is defined by both {first} and {}", module.path);
+                }
+                seen.push((name, module.path));
+            }
+        }
+    }
+
+    /// Every name a module publishes is one a `dlsym` answers - the invariant
+    /// the two lists could not state when they were two, and which `atomics` and
+    /// `oslog` had been breaking.
+    ///
+    /// Through `symbol` rather than `implemented`, in the Mach-O spelling a
+    /// guest actually asks with, so the underscore this crate strips is part of
+    /// what is checked.
+    #[test]
+    fn a_published_name_is_the_one_dlsym_answers() {
+        for module in MODULES {
+            for name in (module.names)() {
+                let mach_o = format!("_{name}");
+                assert!(
+                    symbol(&mach_o).is_some(),
+                    "{}: {mach_o} is published and unanswered",
+                    module.path
+                );
+            }
+        }
+    }
 
     /// A name cannot be both claimed safe to pass through and denied as divergent -
     /// the two lists are the same question answered opposite ways, and a name in both
