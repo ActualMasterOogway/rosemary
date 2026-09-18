@@ -7,10 +7,6 @@
 
 pub mod augraph;
 
-pub fn names() -> Vec<&'static str> {
-    augraph::NAMES.to_vec()
-}
-
-pub fn symbol(name: &str) -> Option<u64> {
-    augraph::symbol(name)
+exports::group! {
+    augraph,
 }

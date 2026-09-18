@@ -463,58 +463,27 @@ pub unsafe extern "C" fn FFEffectStop(handle: *mut c_void) -> HResult {
     OK
 }
 
-macro_rules! at {
-    ($f:expr) => {
-        $f as *const () as usize as u64
-    };
+exports::exports! {
+    functions {
+        "FFIsForceFeedback" => FFIsForceFeedback,
+        "FFCreateDevice" => FFCreateDevice,
+        "FFReleaseDevice" => FFReleaseDevice,
+        "FFDeviceCreateEffect" => FFDeviceCreateEffect,
+        "FFDeviceReleaseEffect" => FFDeviceReleaseEffect,
+        "FFDeviceGetForceFeedbackCapabilities" => FFDeviceGetForceFeedbackCapabilities,
+        "FFDeviceGetForceFeedbackProperty" => FFDeviceGetForceFeedbackProperty,
+        "FFDeviceSetForceFeedbackProperty" => FFDeviceSetForceFeedbackProperty,
+        "FFDeviceSendForceFeedbackCommand" => FFDeviceSendForceFeedbackCommand,
+        "FFEffectGetEffectStatus" => FFEffectGetEffectStatus,
+        "FFEffectSetParameters" => FFEffectSetParameters,
+        "FFEffectStart" => FFEffectStart,
+        "FFEffectStop" => FFEffectStop,
+    }
 }
-pub fn symbol(name: &str) -> Option<u64> {
-    Some(match name {
-        "FFIsForceFeedback" => at!(FFIsForceFeedback),
-        "FFCreateDevice" => at!(FFCreateDevice),
-        "FFReleaseDevice" => at!(FFReleaseDevice),
-        "FFDeviceCreateEffect" => at!(FFDeviceCreateEffect),
-        "FFDeviceReleaseEffect" => at!(FFDeviceReleaseEffect),
-        "FFDeviceGetForceFeedbackCapabilities" => at!(FFDeviceGetForceFeedbackCapabilities),
-        "FFDeviceGetForceFeedbackProperty" => at!(FFDeviceGetForceFeedbackProperty),
-        "FFDeviceSetForceFeedbackProperty" => at!(FFDeviceSetForceFeedbackProperty),
-        "FFDeviceSendForceFeedbackCommand" => at!(FFDeviceSendForceFeedbackCommand),
-        "FFEffectGetEffectStatus" => at!(FFEffectGetEffectStatus),
-        "FFEffectSetParameters" => at!(FFEffectSetParameters),
-        "FFEffectStart" => at!(FFEffectStart),
-        "FFEffectStop" => at!(FFEffectStop),
-        _ => return None,
-    })
-}
-pub const NAMES: &[&str] = &[
-    "FFIsForceFeedback",
-    "FFCreateDevice",
-    "FFReleaseDevice",
-    "FFDeviceCreateEffect",
-    "FFDeviceReleaseEffect",
-    "FFDeviceGetForceFeedbackCapabilities",
-    "FFDeviceGetForceFeedbackProperty",
-    "FFDeviceSetForceFeedbackProperty",
-    "FFDeviceSendForceFeedbackCommand",
-    "FFEffectGetEffectStatus",
-    "FFEffectSetParameters",
-    "FFEffectStart",
-    "FFEffectStop",
-];
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_published_name_has_an_address() {
-        let missing: Vec<_> = NAMES
-            .iter()
-            .copied()
-            .filter(|name| symbol(name).is_none())
-            .collect();
-        assert!(missing.is_empty(), "listed but unresolved: {missing:?}");
-    }
 
     #[test]
     fn public_layouts_match_the_headers() {

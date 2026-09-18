@@ -45,8 +45,8 @@ use library::*;
 use object::methods;
 
 pub use exports::{
-    CGDirectDisplayCopyCurrentMetalDevice, MTLCopyAllDevices, MTLCreateSystemDefaultDevice, NAMES,
-    data_symbols, symbol,
+    CGDirectDisplayCopyCurrentMetalDevice, MTLCopyAllDevices, MTLCreateSystemDefaultDevice,
+    data_symbols, names, provide, symbol,
 };
 
 struct Device {

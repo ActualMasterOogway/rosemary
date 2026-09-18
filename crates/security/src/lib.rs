@@ -2,14 +2,8 @@
 
 pub mod keychain;
 
-/// The C entry points this crate answers.
-pub fn symbol(name: &str) -> Option<u64> {
-    keychain::symbol(name)
-}
-
-/// Every name [`symbol`] answers.
-pub fn names() -> impl Iterator<Item = &'static str> {
-    keychain::NAMES.iter().copied()
+exports::group! {
+    keychain,
 }
 
 /// The `kSec*` key globals, each a cell holding an `NSString *`.

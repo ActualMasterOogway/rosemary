@@ -84,12 +84,6 @@ pub unsafe extern "C" fn CGDirectDisplayCopyCurrentMetalDevice(_display: u32) ->
     objc::arc::retain(device)
 }
 
-pub const NAMES: &[&str] = &[
-    "MTLCreateSystemDefaultDevice",
-    "MTLCopyAllDevices",
-    "CGDirectDisplayCopyCurrentMetalDevice",
-];
-
 pub fn data_symbols() -> Vec<(String, u64)> {
     bootstrap();
     [
@@ -114,13 +108,30 @@ pub fn data_symbols() -> Vec<(String, u64)> {
     .collect()
 }
 
-pub fn symbol(name: &str) -> Option<u64> {
-    Some(match name.trim_start_matches('_') {
-        "MTLCreateSystemDefaultDevice" => MTLCreateSystemDefaultDevice as *const (),
-        "MTLCopyAllDevices" => MTLCopyAllDevices as *const (),
-        "CGDirectDisplayCopyCurrentMetalDevice" => {
-            CGDirectDisplayCopyCurrentMetalDevice as *const ()
+/// Metal's entry points.
+///
+/// The crate has a module of this name too, so the macro is spelled absolutely.
+mod entries {
+    use super::{
+        CGDirectDisplayCopyCurrentMetalDevice, MTLCopyAllDevices, MTLCreateSystemDefaultDevice,
+    };
+
+    ::exports::exports! {
+        functions {
+            "MTLCreateSystemDefaultDevice" => MTLCreateSystemDefaultDevice,
+            "MTLCopyAllDevices" => MTLCopyAllDevices,
+            "CGDirectDisplayCopyCurrentMetalDevice" => CGDirectDisplayCopyCurrentMetalDevice,
         }
-        _ => return None,
-    } as usize as u64)
+    }
+}
+
+#[allow(unused_imports)]
+pub use entries::{MODULE, names, provide};
+
+/// The address `name` has here, in either spelling.
+///
+/// Both, unlike every other crate's: a caller that has not stripped the Mach-O
+/// underscore gets the same answer as one that has.
+pub fn symbol(name: &str) -> Option<u64> {
+    entries::symbol(name.trim_start_matches('_'))
 }

@@ -331,48 +331,21 @@ unsafe extern "C" fn fire(_timer: *const c_void, info: *mut c_void) {
     unsafe { callback(info, &now, &output, 0, &mut flags_out, context) };
 }
 
-/// One entry point, as an address.
-macro_rules! at {
-    ($f:expr) => {
-        $f as *const () as usize as u64
-    };
+exports::exports! {
+    functions {
+        "CVDisplayLinkCreateWithCGDisplay" => CVDisplayLinkCreateWithCGDisplay,
+        "CVDisplayLinkCreateWithActiveCGDisplays" => CVDisplayLinkCreateWithActiveCGDisplays,
+        "CVDisplayLinkSetOutputCallback" => CVDisplayLinkSetOutputCallback,
+        "CVDisplayLinkSetCurrentCGDisplay" => CVDisplayLinkSetCurrentCGDisplay,
+        "CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext" => CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext,
+        "CVDisplayLinkGetActualOutputVideoRefreshPeriod" => CVDisplayLinkGetActualOutputVideoRefreshPeriod,
+        "CVDisplayLinkStart" => CVDisplayLinkStart,
+        "CVDisplayLinkStop" => CVDisplayLinkStop,
+        "CVDisplayLinkRetain" => CVDisplayLinkRetain,
+        "CVDisplayLinkRelease" => CVDisplayLinkRelease,
+        "CVDisplayLinkIsRunning" => CVDisplayLinkIsRunning,
+    }
 }
-
-pub fn symbol(name: &str) -> Option<u64> {
-    Some(match name {
-        "CVDisplayLinkCreateWithCGDisplay" => at!(CVDisplayLinkCreateWithCGDisplay),
-        "CVDisplayLinkCreateWithActiveCGDisplays" => at!(CVDisplayLinkCreateWithActiveCGDisplays),
-        "CVDisplayLinkSetOutputCallback" => at!(CVDisplayLinkSetOutputCallback),
-        "CVDisplayLinkSetCurrentCGDisplay" => at!(CVDisplayLinkSetCurrentCGDisplay),
-        "CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext" => {
-            at!(CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext)
-        }
-        "CVDisplayLinkGetActualOutputVideoRefreshPeriod" => {
-            at!(CVDisplayLinkGetActualOutputVideoRefreshPeriod)
-        }
-        "CVDisplayLinkStart" => at!(CVDisplayLinkStart),
-        "CVDisplayLinkStop" => at!(CVDisplayLinkStop),
-        "CVDisplayLinkRetain" => at!(CVDisplayLinkRetain),
-        "CVDisplayLinkRelease" => at!(CVDisplayLinkRelease),
-        "CVDisplayLinkIsRunning" => at!(CVDisplayLinkIsRunning),
-        _ => return None,
-    })
-}
-
-/// Every name [`symbol`] answers.
-pub const NAMES: &[&str] = &[
-    "CVDisplayLinkCreateWithCGDisplay",
-    "CVDisplayLinkCreateWithActiveCGDisplays",
-    "CVDisplayLinkSetOutputCallback",
-    "CVDisplayLinkSetCurrentCGDisplay",
-    "CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext",
-    "CVDisplayLinkGetActualOutputVideoRefreshPeriod",
-    "CVDisplayLinkStart",
-    "CVDisplayLinkStop",
-    "CVDisplayLinkRetain",
-    "CVDisplayLinkRelease",
-    "CVDisplayLinkIsRunning",
-];
 
 #[cfg(test)]
 mod tests {
@@ -471,15 +444,5 @@ mod tests {
                 INVALID_ARGUMENT
             );
         }
-    }
-
-    #[test]
-    fn every_listed_name_resolves() {
-        let missing: Vec<&str> = NAMES
-            .iter()
-            .copied()
-            .filter(|n| symbol(n).is_none())
-            .collect();
-        assert!(missing.is_empty(), "listed but unresolved: {missing:?}");
     }
 }

@@ -33,6 +33,7 @@ dependencies = [
  "ab_glyph_rasterizer",
  "corefoundation",
  "darwin",
+ "exports",
  "foundation",
  "gamecontroller",
  "objc",
@@ -46,6 +47,7 @@ name = "applicationservices"
 version = "0.1.0"
 dependencies = [
  "appkit",
+ "exports",
 ]
 
 [[package]]
@@ -68,6 +70,7 @@ name = "audiotoolbox"
 version = "0.1.0"
 dependencies = [
  "coreaudio",
+ "exports",
 ]
 
 [[package]]
@@ -174,6 +177,7 @@ name = "contacts"
 version = "0.1.0"
 dependencies = [
  "corefoundation",
+ "exports",
  "foundation",
  "objc",
 ]
@@ -209,6 +213,7 @@ name = "coreaudio"
 version = "0.1.0"
 dependencies = [
  "corefoundation",
+ "exports",
  "libc",
  "sdl3",
  "static_init",
@@ -218,6 +223,7 @@ dependencies = [
 name = "corefoundation"
 version = "0.1.0"
 dependencies = [
+ "exports",
  "getrandom 0.3.4",
  "libc",
  "objc",
@@ -229,6 +235,7 @@ name = "corevideo"
 version = "0.1.0"
 dependencies = [
  "corefoundation",
+ "exports",
  "objc",
  "sdl3",
 ]
@@ -427,6 +434,7 @@ dependencies = [
 name = "darwin"
 version = "0.1.0"
 dependencies = [
+ "exports",
  "getrandom 0.3.4",
  "libc",
  "machish",
@@ -467,6 +475,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
+name = "exports"
+version = "0.1.0"
+dependencies = [
+ "machish",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -498,6 +513,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 name = "forcefeedback"
 version = "0.1.0"
 dependencies = [
+ "exports",
  "sdl3",
 ]
 
@@ -516,6 +532,7 @@ version = "0.1.0"
 dependencies = [
  "corefoundation",
  "darwin",
+ "exports",
  "libc",
  "objc",
  "ureq",
@@ -537,6 +554,7 @@ name = "gamecontroller"
 version = "0.1.0"
 dependencies = [
  "corefoundation",
+ "exports",
  "foundation",
  "iokit",
  "objc",
@@ -755,6 +773,7 @@ name = "iokit"
 version = "0.1.0"
 dependencies = [
  "corefoundation",
+ "exports",
  "libc",
  "objc",
  "sdl3",
@@ -885,6 +904,7 @@ dependencies = [
  "ash",
  "corefoundation",
  "darwin",
+ "exports",
  "foundation",
  "metal_translate",
  "objc",
@@ -984,6 +1004,7 @@ dependencies = [
 name = "objc"
 version = "0.1.0"
 dependencies = [
+ "exports",
  "libc",
 ]
 
@@ -1277,6 +1298,7 @@ name = "security"
 version = "0.1.0"
 dependencies = [
  "corefoundation",
+ "exports",
  "foundation",
  "objc",
 ]
@@ -1659,6 +1681,7 @@ dependencies = [
  "appkit",
  "corefoundation",
  "darwin",
+ "exports",
  "foundation",
  "libc",
  "objc",

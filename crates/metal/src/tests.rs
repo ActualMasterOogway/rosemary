@@ -42,9 +42,9 @@ fn source_library(device: Id, source: &str) -> Id {
 
 #[test]
 fn every_export_resolves_with_both_spellings() {
-    for name in NAMES {
-        assert_ne!(symbol(name), None);
-        assert_eq!(symbol(&format!("_{name}")), symbol(name));
+    for name in names() {
+        assert_ne!(symbol(&name), None);
+        assert_eq!(symbol(&format!("_{name}")), symbol(&name));
     }
 }
 

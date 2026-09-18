@@ -305,7 +305,7 @@ pub fn provider() -> SyntheticDylib {
         define_data(&mut lib, &name, addr);
     }
     // ForceFeedback translates the legacy effect API into SDL3 joystick rumble.
-    for name in forcefeedback::NAMES {
+    for name in forcefeedback::names() {
         if let Some(addr) = forcefeedback::symbol(name) {
             define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
         }
@@ -334,7 +334,7 @@ pub fn provider() -> SyntheticDylib {
     // CoreVideo, which is one thing: the display link a Mac game's frame loop
     // hangs on. Its callback is guest code, and reaches this runtime as a thunk
     // because `abi::table` names that parameter a callback.
-    for name in corevideo::NAMES {
+    for name in corevideo::names() {
         if let Some(addr) = corevideo::symbol(name) {
             define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
         }
@@ -342,7 +342,7 @@ pub fn provider() -> SyntheticDylib {
     // CoreAudio's output half, on SDL3. Published even where there is no SDL3,
     // for the reason IOKit's is: a unit that declines to open is a diagnosis,
     // where an unresolved import only says the symbol was missing.
-    for name in coreaudio::NAMES {
+    for name in coreaudio::names() {
         if let Some(addr) = coreaudio::symbol(name) {
             define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
         }
@@ -376,7 +376,7 @@ pub fn provider() -> SyntheticDylib {
     for (name, addr) in metal::data_symbols() {
         define_data(&mut lib, &name, addr);
     }
-    for name in metal::NAMES {
+    for name in metal::names() {
         if let Some(addr) = metal::symbol(name) {
             define_fn(&mut lib, &format!("_{name}"), addr as usize as *const ());
         }

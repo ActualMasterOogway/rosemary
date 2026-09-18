@@ -450,50 +450,26 @@ pub unsafe extern "C" fn IODispatchCalloutFromMessage(
 ) {
 }
 
-pub const NAMES: &[&str] = &[
-    "IOServiceMatching",
-    "IORegistryEntryIDMatching",
-    "IOServiceGetMatchingServices",
-    "IOServiceGetMatchingService",
-    "IOIteratorNext",
-    "IOIteratorIsValid",
-    "IOObjectRelease",
-    "IOObjectRetain",
-    "IOObjectIsEqualTo",
-    "IORegistryEntryFromPath",
-    "IORegistryEntryGetParentEntry",
-    "IORegistryEntryGetRegistryEntryID",
-    "IORegistryEntryCreateCFProperty",
-    "IORegistryEntryCreateCFProperties",
-    "IONotificationPortCreate",
-    "IONotificationPortDestroy",
-    "IONotificationPortGetMachPort",
-    "IOServiceAddMatchingNotification",
-    "IODispatchCalloutFromMessage",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let addr = match name {
-        "IOServiceMatching" => IOServiceMatching as *const (),
-        "IORegistryEntryIDMatching" => IORegistryEntryIDMatching as *const (),
-        "IOServiceGetMatchingServices" => IOServiceGetMatchingServices as *const (),
-        "IOServiceGetMatchingService" => IOServiceGetMatchingService as *const (),
-        "IOIteratorNext" => IOIteratorNext as *const (),
-        "IOIteratorIsValid" => IOIteratorIsValid as *const (),
-        "IOObjectRelease" => IOObjectRelease as *const (),
-        "IOObjectRetain" => IOObjectRetain as *const (),
-        "IOObjectIsEqualTo" => IOObjectIsEqualTo as *const (),
-        "IORegistryEntryFromPath" => IORegistryEntryFromPath as *const (),
-        "IORegistryEntryGetParentEntry" => IORegistryEntryGetParentEntry as *const (),
-        "IORegistryEntryGetRegistryEntryID" => IORegistryEntryGetRegistryEntryID as *const (),
-        "IORegistryEntryCreateCFProperty" => IORegistryEntryCreateCFProperty as *const (),
-        "IORegistryEntryCreateCFProperties" => IORegistryEntryCreateCFProperties as *const (),
-        "IONotificationPortCreate" => IONotificationPortCreate as *const (),
-        "IONotificationPortDestroy" => IONotificationPortDestroy as *const (),
-        "IONotificationPortGetMachPort" => IONotificationPortGetMachPort as *const (),
-        "IOServiceAddMatchingNotification" => IOServiceAddMatchingNotification as *const (),
-        "IODispatchCalloutFromMessage" => IODispatchCalloutFromMessage as *const (),
-        _ => return None,
-    };
-    Some(addr as usize as u64)
+exports::exports! {
+    functions {
+        "IOServiceMatching" => IOServiceMatching,
+        "IORegistryEntryIDMatching" => IORegistryEntryIDMatching,
+        "IOServiceGetMatchingServices" => IOServiceGetMatchingServices,
+        "IOServiceGetMatchingService" => IOServiceGetMatchingService,
+        "IOIteratorNext" => IOIteratorNext,
+        "IOIteratorIsValid" => IOIteratorIsValid,
+        "IOObjectRelease" => IOObjectRelease,
+        "IOObjectRetain" => IOObjectRetain,
+        "IOObjectIsEqualTo" => IOObjectIsEqualTo,
+        "IORegistryEntryFromPath" => IORegistryEntryFromPath,
+        "IORegistryEntryGetParentEntry" => IORegistryEntryGetParentEntry,
+        "IORegistryEntryGetRegistryEntryID" => IORegistryEntryGetRegistryEntryID,
+        "IORegistryEntryCreateCFProperty" => IORegistryEntryCreateCFProperty,
+        "IORegistryEntryCreateCFProperties" => IORegistryEntryCreateCFProperties,
+        "IONotificationPortCreate" => IONotificationPortCreate,
+        "IONotificationPortDestroy" => IONotificationPortDestroy,
+        "IONotificationPortGetMachPort" => IONotificationPortGetMachPort,
+        "IOServiceAddMatchingNotification" => IOServiceAddMatchingNotification,
+        "IODispatchCalloutFromMessage" => IODispatchCalloutFromMessage,
+    }
 }

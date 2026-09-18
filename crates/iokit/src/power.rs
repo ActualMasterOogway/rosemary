@@ -63,20 +63,11 @@ pub unsafe extern "C" fn IOPSNotificationCreateRunLoopSource(
     std::ptr::null_mut()
 }
 
-pub const NAMES: &[&str] = &[
-    "IOPSCopyPowerSourcesInfo",
-    "IOPSCopyPowerSourcesList",
-    "IOPSGetPowerSourceDescription",
-    "IOPSNotificationCreateRunLoopSource",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let addr = match name {
-        "IOPSCopyPowerSourcesInfo" => IOPSCopyPowerSourcesInfo as *const (),
-        "IOPSCopyPowerSourcesList" => IOPSCopyPowerSourcesList as *const (),
-        "IOPSGetPowerSourceDescription" => IOPSGetPowerSourceDescription as *const (),
-        "IOPSNotificationCreateRunLoopSource" => IOPSNotificationCreateRunLoopSource as *const (),
-        _ => return None,
-    };
-    Some(addr as usize as u64)
+exports::exports! {
+    functions {
+        "IOPSCopyPowerSourcesInfo" => IOPSCopyPowerSourcesInfo,
+        "IOPSCopyPowerSourcesList" => IOPSCopyPowerSourcesList,
+        "IOPSGetPowerSourceDescription" => IOPSGetPowerSourceDescription,
+        "IOPSNotificationCreateRunLoopSource" => IOPSNotificationCreateRunLoopSource,
+    }
 }

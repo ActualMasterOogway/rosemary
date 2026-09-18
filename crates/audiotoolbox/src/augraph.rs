@@ -497,48 +497,22 @@ pub unsafe extern "C" fn AUGraphIsInitialized(handle: *mut c_void, initialized: 
     SUCCESS
 }
 
-/// The names this module answers.
-pub const NAMES: &[&str] = &[
-    "NewAUGraph",
-    "DisposeAUGraph",
-    "AUGraphOpen",
-    "AUGraphAddNode",
-    "AUGraphNodeInfo",
-    "AUGraphConnectNodeInput",
-    "AUGraphDisconnectNodeInput",
-    "AUGraphInitialize",
-    "AUGraphUninitialize",
-    "AUGraphStart",
-    "AUGraphStop",
-    "AUGraphUpdate",
-    "AUGraphIsRunning",
-    "AUGraphIsOpen",
-    "AUGraphIsInitialized",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    /// One entry point, as an address.
-    macro_rules! at {
-        ($f:expr) => {
-            $f as *const () as usize as u64
-        };
+exports::exports! {
+    functions {
+        "NewAUGraph" => NewAUGraph,
+        "DisposeAUGraph" => DisposeAUGraph,
+        "AUGraphOpen" => AUGraphOpen,
+        "AUGraphAddNode" => AUGraphAddNode,
+        "AUGraphNodeInfo" => AUGraphNodeInfo,
+        "AUGraphConnectNodeInput" => AUGraphConnectNodeInput,
+        "AUGraphDisconnectNodeInput" => AUGraphDisconnectNodeInput,
+        "AUGraphInitialize" => AUGraphInitialize,
+        "AUGraphUninitialize" => AUGraphUninitialize,
+        "AUGraphStart" => AUGraphStart,
+        "AUGraphStop" => AUGraphStop,
+        "AUGraphUpdate" => AUGraphUpdate,
+        "AUGraphIsRunning" => AUGraphIsRunning,
+        "AUGraphIsOpen" => AUGraphIsOpen,
+        "AUGraphIsInitialized" => AUGraphIsInitialized,
     }
-    Some(match name {
-        "NewAUGraph" => at!(NewAUGraph),
-        "DisposeAUGraph" => at!(DisposeAUGraph),
-        "AUGraphOpen" => at!(AUGraphOpen),
-        "AUGraphAddNode" => at!(AUGraphAddNode),
-        "AUGraphNodeInfo" => at!(AUGraphNodeInfo),
-        "AUGraphConnectNodeInput" => at!(AUGraphConnectNodeInput),
-        "AUGraphDisconnectNodeInput" => at!(AUGraphDisconnectNodeInput),
-        "AUGraphInitialize" => at!(AUGraphInitialize),
-        "AUGraphUninitialize" => at!(AUGraphUninitialize),
-        "AUGraphStart" => at!(AUGraphStart),
-        "AUGraphStop" => at!(AUGraphStop),
-        "AUGraphUpdate" => at!(AUGraphUpdate),
-        "AUGraphIsRunning" => at!(AUGraphIsRunning),
-        "AUGraphIsOpen" => at!(AUGraphIsOpen),
-        "AUGraphIsInitialized" => at!(AUGraphIsInitialized),
-        _ => return None,
-    })
 }

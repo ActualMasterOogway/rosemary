@@ -302,22 +302,13 @@ pub unsafe extern "C" fn SecItemUpdate(query: CFTypeRef, changes: CFTypeRef) -> 
     SUCCESS
 }
 
-pub const NAMES: &[&str] = &[
-    "SecItemAdd",
-    "SecItemCopyMatching",
-    "SecItemDelete",
-    "SecItemUpdate",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "SecItemAdd" => SecItemAdd as *const (),
-        "SecItemCopyMatching" => SecItemCopyMatching as *const (),
-        "SecItemDelete" => SecItemDelete as *const (),
-        "SecItemUpdate" => SecItemUpdate as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
+exports::exports! {
+    functions {
+        "SecItemAdd" => SecItemAdd,
+        "SecItemCopyMatching" => SecItemCopyMatching,
+        "SecItemDelete" => SecItemDelete,
+        "SecItemUpdate" => SecItemUpdate,
+    }
 }
 
 #[cfg(test)]

@@ -22,126 +22,53 @@ pub fn available() -> bool {
     sdl3::available()
 }
 
-/// One entry point, as an address.
-macro_rules! at {
-    ($f:expr) => {
-        $f as *const () as usize as u64
-    };
-}
-
-/// The address `name` has here, or `None`.
-pub fn symbol(name: &str) -> Option<u64> {
-    Some(match name {
-        "IOHIDManagerCreate" => at!(api::IOHIDManagerCreate),
-        "IOHIDManagerOpen" => at!(api::IOHIDManagerOpen),
-        "IOHIDManagerClose" => at!(api::IOHIDManagerClose),
-        "IOHIDManagerGetTypeID" => at!(api::IOHIDManagerGetTypeID),
-        "IOHIDManagerSetDeviceMatching" => at!(api::IOHIDManagerSetDeviceMatching),
-        "IOHIDManagerSetDeviceMatchingMultiple" => at!(api::IOHIDManagerSetDeviceMatchingMultiple),
-        "IOHIDManagerRegisterDeviceMatchingCallback" => {
-            at!(api::IOHIDManagerRegisterDeviceMatchingCallback)
-        }
-        "IOHIDManagerRegisterDeviceRemovalCallback" => {
-            at!(api::IOHIDManagerRegisterDeviceRemovalCallback)
-        }
-        "IOHIDManagerRegisterInputValueCallback" => {
-            at!(api::IOHIDManagerRegisterInputValueCallback)
-        }
-        "IOHIDManagerScheduleWithRunLoop" => at!(api::IOHIDManagerScheduleWithRunLoop),
-        "IOHIDManagerUnscheduleFromRunLoop" => at!(api::IOHIDManagerUnscheduleFromRunLoop),
-
-        "IOHIDDeviceRegisterInputValueCallback" => at!(api::IOHIDDeviceRegisterInputValueCallback),
-        "IOHIDDeviceCreate" => at!(api::IOHIDDeviceCreate),
-        "IOHIDDeviceGetProperty" => at!(api::IOHIDDeviceGetProperty),
-        "IOHIDDeviceCopyMatchingElements" => at!(api::IOHIDDeviceCopyMatchingElements),
-        "IOHIDDeviceOpen" => at!(api::IOHIDDeviceOpen),
-        "IOHIDDeviceClose" => at!(api::IOHIDDeviceClose),
-        "IOHIDDeviceGetTypeID" => at!(api::IOHIDDeviceGetTypeID),
-        "IOHIDDeviceGetValue" => at!(api::IOHIDDeviceGetValue),
-
-        "IOHIDElementGetCookie" => at!(api::IOHIDElementGetCookie),
-        "IOHIDElementGetUsagePage" => at!(api::IOHIDElementGetUsagePage),
-        "IOHIDElementGetUsage" => at!(api::IOHIDElementGetUsage),
-        "IOHIDElementGetType" => at!(api::IOHIDElementGetType),
-        "IOHIDElementGetLogicalMin" => at!(api::IOHIDElementGetLogicalMin),
-        "IOHIDElementGetLogicalMax" => at!(api::IOHIDElementGetLogicalMax),
-        "IOHIDElementGetChildren" => at!(api::IOHIDElementGetChildren),
-        "IOHIDElementGetTypeID" => at!(api::IOHIDElementGetTypeID),
-
-        "IOHIDValueGetElement" => at!(api::IOHIDValueGetElement),
-        "IOHIDValueGetIntegerValue" => at!(api::IOHIDValueGetIntegerValue),
-        "IOHIDValueGetLength" => at!(api::IOHIDValueGetLength),
-        "IOHIDValueGetScaledValue" => at!(api::IOHIDValueGetScaledValue),
-        "IOHIDValueGetTypeID" => at!(api::IOHIDValueGetTypeID),
-
-        "IOHIDManagerCopyDevices" => at!(api::IOHIDManagerCopyDevices),
-        "IOHIDDeviceGetService" => at!(api::IOHIDDeviceGetService),
-        "IOHIDDeviceScheduleWithRunLoop" => at!(api::IOHIDDeviceScheduleWithRunLoop),
-        "IOHIDDeviceUnscheduleFromRunLoop" => at!(api::IOHIDDeviceUnscheduleFromRunLoop),
-        "IOHIDDeviceRegisterRemovalCallback" => at!(api::IOHIDDeviceRegisterRemovalCallback),
-        "IOHIDDeviceGetReport" => at!(api::IOHIDDeviceGetReport),
-        "IOHIDDeviceSetReport" => at!(api::IOHIDDeviceSetReport),
-        "IOHIDDeviceRegisterInputReportCallback" => {
-            at!(api::IOHIDDeviceRegisterInputReportCallback)
-        }
-
-        _ => return power::symbol(name).or_else(|| registry::symbol(name)),
-    })
-}
-
-/// Every name [`symbol`] answers.
-pub const NAMES: &[&str] = &[
-    "IOHIDManagerCreate",
-    "IOHIDManagerOpen",
-    "IOHIDManagerClose",
-    "IOHIDManagerGetTypeID",
-    "IOHIDManagerSetDeviceMatching",
-    "IOHIDManagerSetDeviceMatchingMultiple",
-    "IOHIDManagerRegisterDeviceMatchingCallback",
-    "IOHIDManagerRegisterDeviceRemovalCallback",
-    "IOHIDManagerRegisterInputValueCallback",
-    "IOHIDManagerScheduleWithRunLoop",
-    "IOHIDManagerUnscheduleFromRunLoop",
-    "IOHIDDeviceRegisterInputValueCallback",
-    "IOHIDDeviceCreate",
-    "IOHIDDeviceGetProperty",
-    "IOHIDDeviceCopyMatchingElements",
-    "IOHIDDeviceOpen",
-    "IOHIDDeviceClose",
-    "IOHIDDeviceGetTypeID",
-    "IOHIDDeviceGetValue",
-    "IOHIDElementGetCookie",
-    "IOHIDElementGetUsagePage",
-    "IOHIDElementGetUsage",
-    "IOHIDElementGetType",
-    "IOHIDElementGetLogicalMin",
-    "IOHIDElementGetLogicalMax",
-    "IOHIDElementGetChildren",
-    "IOHIDElementGetTypeID",
-    "IOHIDValueGetElement",
-    "IOHIDValueGetIntegerValue",
-    "IOHIDValueGetLength",
-    "IOHIDValueGetScaledValue",
-    "IOHIDValueGetTypeID",
-    "IOHIDManagerCopyDevices",
-    "IOHIDDeviceGetService",
-    "IOHIDDeviceScheduleWithRunLoop",
-    "IOHIDDeviceUnscheduleFromRunLoop",
-    "IOHIDDeviceRegisterRemovalCallback",
-    "IOHIDDeviceGetReport",
-    "IOHIDDeviceSetReport",
-    "IOHIDDeviceRegisterInputReportCallback",
-];
-
-/// Every name this crate answers: the HID family above, the power sources in
-/// [`power`], and the registry in [`registry`].
-pub fn names() -> Vec<&'static str> {
-    NAMES
-        .iter()
-        .copied()
-        .chain(power::NAMES.iter().copied())
-        .chain(registry::NAMES.iter().copied())
-        .collect()
+exports::exports! {
+    functions {
+        "IOHIDManagerCreate" => api::IOHIDManagerCreate,
+        "IOHIDManagerOpen" => api::IOHIDManagerOpen,
+        "IOHIDManagerClose" => api::IOHIDManagerClose,
+        "IOHIDManagerGetTypeID" => api::IOHIDManagerGetTypeID,
+        "IOHIDManagerSetDeviceMatching" => api::IOHIDManagerSetDeviceMatching,
+        "IOHIDManagerSetDeviceMatchingMultiple" => api::IOHIDManagerSetDeviceMatchingMultiple,
+        "IOHIDManagerRegisterDeviceMatchingCallback" => api::IOHIDManagerRegisterDeviceMatchingCallback,
+        "IOHIDManagerRegisterDeviceRemovalCallback" => api::IOHIDManagerRegisterDeviceRemovalCallback,
+        "IOHIDManagerRegisterInputValueCallback" => api::IOHIDManagerRegisterInputValueCallback,
+        "IOHIDManagerScheduleWithRunLoop" => api::IOHIDManagerScheduleWithRunLoop,
+        "IOHIDManagerUnscheduleFromRunLoop" => api::IOHIDManagerUnscheduleFromRunLoop,
+        "IOHIDDeviceRegisterInputValueCallback" => api::IOHIDDeviceRegisterInputValueCallback,
+        "IOHIDDeviceCreate" => api::IOHIDDeviceCreate,
+        "IOHIDDeviceGetProperty" => api::IOHIDDeviceGetProperty,
+        "IOHIDDeviceCopyMatchingElements" => api::IOHIDDeviceCopyMatchingElements,
+        "IOHIDDeviceOpen" => api::IOHIDDeviceOpen,
+        "IOHIDDeviceClose" => api::IOHIDDeviceClose,
+        "IOHIDDeviceGetTypeID" => api::IOHIDDeviceGetTypeID,
+        "IOHIDDeviceGetValue" => api::IOHIDDeviceGetValue,
+        "IOHIDElementGetCookie" => api::IOHIDElementGetCookie,
+        "IOHIDElementGetUsagePage" => api::IOHIDElementGetUsagePage,
+        "IOHIDElementGetUsage" => api::IOHIDElementGetUsage,
+        "IOHIDElementGetType" => api::IOHIDElementGetType,
+        "IOHIDElementGetLogicalMin" => api::IOHIDElementGetLogicalMin,
+        "IOHIDElementGetLogicalMax" => api::IOHIDElementGetLogicalMax,
+        "IOHIDElementGetChildren" => api::IOHIDElementGetChildren,
+        "IOHIDElementGetTypeID" => api::IOHIDElementGetTypeID,
+        "IOHIDValueGetElement" => api::IOHIDValueGetElement,
+        "IOHIDValueGetIntegerValue" => api::IOHIDValueGetIntegerValue,
+        "IOHIDValueGetLength" => api::IOHIDValueGetLength,
+        "IOHIDValueGetScaledValue" => api::IOHIDValueGetScaledValue,
+        "IOHIDValueGetTypeID" => api::IOHIDValueGetTypeID,
+        "IOHIDManagerCopyDevices" => api::IOHIDManagerCopyDevices,
+        "IOHIDDeviceGetService" => api::IOHIDDeviceGetService,
+        "IOHIDDeviceScheduleWithRunLoop" => api::IOHIDDeviceScheduleWithRunLoop,
+        "IOHIDDeviceUnscheduleFromRunLoop" => api::IOHIDDeviceUnscheduleFromRunLoop,
+        "IOHIDDeviceRegisterRemovalCallback" => api::IOHIDDeviceRegisterRemovalCallback,
+        "IOHIDDeviceGetReport" => api::IOHIDDeviceGetReport,
+        "IOHIDDeviceSetReport" => api::IOHIDDeviceSetReport,
+        "IOHIDDeviceRegisterInputReportCallback" => api::IOHIDDeviceRegisterInputReportCallback,
+    }
+    groups {
+        power,
+        registry,
+    }
 }
 
 /// The `kIOHID*Key` globals and [`registry`]'s master port, as
@@ -181,16 +108,6 @@ fn key_object(text: &'static str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_listed_name_resolves() {
-        let missing: Vec<&str> = NAMES
-            .iter()
-            .copied()
-            .filter(|n| symbol(n).is_none())
-            .collect();
-        assert!(missing.is_empty(), "listed but unresolved: {missing:?}");
-    }
 
     /// Every key a guest builds a matching dictionary from is the *same object*
     /// each time it is read, which is what makes it work as a key at all.

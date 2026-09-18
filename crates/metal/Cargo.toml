@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+exports.workspace = true
 ash.workspace = true
 corefoundation.workspace = true
 darwin.workspace = true
