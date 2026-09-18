@@ -1,7 +1,5 @@
 use std::ffi::c_void;
 
-use machish::resolve::SyntheticDylib;
-
 /// Darwin's `<sys/mman.h>` flag bits, by their own names.
 ///
 /// Written out rather than taken from the `libc` crate, whose Darwin constants
@@ -273,31 +271,15 @@ pub unsafe extern "C" fn msync(addr: *mut c_void, len: usize, flags: i32) -> i32
     unsafe { libc::msync(addr, len, sync_flags(flags)) }
 }
 
-/// The names this module answers for.
-///
-/// `munmap`, `mprotect`, `mlock`, `munlock` and `mincore` are deliberately
-/// absent: none of them takes a flag word that diverges, so each is a genuine
-/// passthrough and is claimed as one in [`crate::passthrough`].
-pub const NAMES: &[&str] = &["mmap", "madvise", "posix_madvise", "msync"];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f = match name {
-        "mmap" => mmap as *const (),
-        "madvise" => madvise as *const (),
-        "posix_madvise" => posix_madvise as *const (),
-        "msync" => msync as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
+// `munmap`, `mprotect`, `mlock`, `munlock` and `mincore` are deliberately
+// absent: none of them takes a flag word that diverges, so each is a genuine
+// passthrough and is claimed as one in `crate::passthrough`.
+exports::exports! {
+    functions {
+        "mmap" => mmap,
+        "madvise" => madvise,
+        "posix_madvise" => posix_madvise,
+        "msync" => msync,
     }
 }
 

@@ -15,8 +15,6 @@
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 
-use machish::resolve::SyntheticDylib;
-
 unsafe extern "C" {
     /// glibc's, which *is* exported, and which `atexit` is a special case of.
     fn __cxa_atexit(func: *const (), arg: *mut c_void, dso: *const ()) -> c_int;
@@ -328,41 +326,17 @@ pub unsafe extern "C" fn atomic_store(
     unsafe { std::ptr::copy(src as *const u8, dest as *mut u8, size.max(0) as usize) };
 }
 
-pub const NAMES: &[&str] = &[
-    "__atomic_load",
-    "__atomic_store",
-    "atexit",
-    "atexit_b",
-    "pthread_atfork",
-    "__assert_rtn",
-    "srandomdev",
-    "memset_s",
-    "sys_icache_invalidate",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "__atomic_load" => atomic_load as *const (),
-        "__atomic_store" => atomic_store as *const (),
-        "atexit" => atexit as *const (),
-        "atexit_b" => atexit_b as *const (),
-        "pthread_atfork" => pthread_atfork as *const (),
-        "__assert_rtn" => assert_rtn as *const (),
-        "srandomdev" => srandomdev as *const (),
-        "memset_s" => memset_s as *const (),
-        "sys_icache_invalidate" => sys_icache_invalidate as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
+exports::exports! {
+    functions {
+        "__atomic_load" => atomic_load,
+        "__atomic_store" => atomic_store,
+        "atexit" => atexit,
+        "atexit_b" => atexit_b,
+        "pthread_atfork" => pthread_atfork,
+        "__assert_rtn" => assert_rtn,
+        "srandomdev" => srandomdev,
+        "memset_s" => memset_s,
+        "sys_icache_invalidate" => sys_icache_invalidate,
     }
 }
 
@@ -381,13 +355,6 @@ mod tests {
             atomic_load(48, cell.as_ptr().cast(), loaded.as_mut_ptr().cast(), 5);
         }
         assert_eq!(loaded, stored);
-    }
-
-    #[test]
-    fn every_listed_name_resolves() {
-        for name in NAMES {
-            assert!(symbol(name).is_some(), "{name}");
-        }
     }
 
     /// The count is what is written, and a count past the destination is an

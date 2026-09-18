@@ -42,8 +42,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{c_int, c_void};
 use std::sync::{Arc, Mutex};
 
-use machish::resolve::SyntheticDylib;
-
 /// `struct kevent`, which the guest both fills in and reads back.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -459,27 +457,13 @@ pub unsafe extern "C" fn kevent(
     out.len() as c_int
 }
 
-pub const NAMES: &[&str] = &["kqueue", "kevent"];
-
 /// `kevent64` and the filters `poll` cannot answer; see the module note.
 pub const REFUSED: &[&str] = &["kevent64", "kevent_qos"];
 
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "kqueue" => kqueue as *const (),
-        "kevent" => kevent as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
+exports::exports! {
+    functions {
+        "kqueue" => kqueue,
+        "kevent" => kevent,
     }
 }
 
@@ -499,13 +483,6 @@ mod tests {
         // SAFETY: a live array of two `int`.
         assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
         (ends[0], ends[1])
-    }
-
-    #[test]
-    fn every_listed_name_resolves() {
-        for name in NAMES {
-            assert!(symbol(name).is_some(), "{name}");
-        }
     }
 
     /// The case the client needs: a descriptor is registered, nothing is ready,

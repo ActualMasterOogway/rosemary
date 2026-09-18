@@ -25,8 +25,6 @@
 
 use std::ffi::{c_char, c_int, c_uint, c_void};
 
-use machish::resolve::SyntheticDylib;
-
 /// POSIX's distinguished `(locale_t)-1`, omitted by the Rust libc bindings on
 /// this target.
 pub(crate) fn global_locale() -> libc::locale_t {
@@ -674,109 +672,48 @@ pub unsafe extern "C" fn mb_cur_max_l(loc: libc::locale_t) -> c_int {
     unsafe { plain::__ctype_get_mb_cur_max() as c_int }
 }
 
-/// Every name this module answers, in the Mach-O spelling.
-///
-/// Two pairs are the same function under two names: Darwin's `<ctype.h>` inlines
-/// `tolower_l` to `__tolower_l`, and a guest compiled against that header
-/// imports the underscored one.
-pub const NAMES: &[&str] = &[
-    "setlocale",
-    "newlocale",
-    "duplocale",
-    "freelocale",
-    "mbtowc_l",
-    "btowc_l",
-    "wctob_l",
-    "mbrlen_l",
-    "mbrtowc_l",
-    "mbsrtowcs_l",
-    "mbsnrtowcs_l",
-    "wcrtomb_l",
-    "wcsnrtombs_l",
-    "wcwidth_l",
-    "localeconv_l",
-    "__mb_cur_max_l",
-    // Three underscores, and not a typo. Darwin's `<xlocale/_ctype.h>` defines
-    // `__mb_cur_max_l` and friends as *inline* functions that call these, so a
-    // guest compiled against that header imports the inner spelling and never the
-    // outer one. `libc++.1.dylib` imports all three of these and none of the two-
-    // underscore forms above.
-    "___mb_cur_max_l",
-    "tolower_l",
-    "toupper_l",
-    "__tolower_l",
-    "__toupper_l",
-    "___tolower_l",
-    "___toupper_l",
-    "__maskrune",
-    "__maskrune_l",
-    "___maskrune",
-    "___maskrune_l",
-    "__tolower",
-    "__toupper",
-    "___tolower",
-    "___toupper",
-    "strtol_l",
-    "strtoll_l",
-    "strtoul_l",
-    "strtoull_l",
-    "strtod_l",
-    "strtof_l",
-    "strcoll_l",
-    "strxfrm_l",
-    "strftime_l",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "setlocale" => setlocale as *const (),
-        "newlocale" => newlocale as *const (),
-        "duplocale" => duplocale as *const (),
-        "freelocale" => freelocale as *const (),
-        "mbtowc_l" => mbtowc_l as *const (),
-        "btowc_l" => btowc_l as *const (),
-        "wctob_l" => wctob_l as *const (),
-        "mbrlen_l" => mbrlen_l as *const (),
-        "mbrtowc_l" => mbrtowc_l as *const (),
-        "mbsrtowcs_l" => mbsrtowcs_l as *const (),
-        "mbsnrtowcs_l" => mbsnrtowcs_l as *const (),
-        "wcrtomb_l" => wcrtomb_l as *const (),
-        "wcsnrtombs_l" => wcsnrtombs_l as *const (),
-        "wcwidth_l" => wcwidth_l as *const (),
-        "localeconv_l" => localeconv_l as *const (),
-        "__mb_cur_max_l" | "___mb_cur_max_l" => mb_cur_max_l as *const (),
-        "tolower_l" | "__tolower_l" | "___tolower_l" => tolower_l as *const (),
-        "toupper_l" | "__toupper_l" | "___toupper_l" => toupper_l as *const (),
-        "__maskrune" | "___maskrune" => maskrune as *const (),
-        "__maskrune_l" | "___maskrune_l" => maskrune_l as *const (),
-        "strtol_l" => strtol_l as *const (),
-        "strtoll_l" => strtoll_l as *const (),
-        "strtoul_l" => strtoul_l as *const (),
-        "strtoull_l" => strtoull_l as *const (),
-        "strtod_l" => strtod_l as *const (),
-        "strtof_l" => strtof_l as *const (),
-        "strcoll_l" => strcoll_l as *const (),
-        "strxfrm_l" => strxfrm_l as *const (),
-        "strftime_l" => strftime_l as *const (),
-        "__tolower" | "___tolower" => tolower_ as *const (),
-        "__toupper" | "___toupper" => toupper_ as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
+// Two pairs are the same function under two names: Darwin's `<ctype.h>` inlines
+// `tolower_l` to `__tolower_l`, and a guest compiled against that header imports
+// the underscored one.
+exports::exports! {
+    functions {
+        "setlocale" => setlocale,
+        "newlocale" => newlocale,
+        "duplocale" => duplocale,
+        "freelocale" => freelocale,
+        "mbtowc_l" => mbtowc_l,
+        "btowc_l" => btowc_l,
+        "wctob_l" => wctob_l,
+        "mbrlen_l" => mbrlen_l,
+        "mbrtowc_l" => mbrtowc_l,
+        "mbsrtowcs_l" => mbsrtowcs_l,
+        "mbsnrtowcs_l" => mbsnrtowcs_l,
+        "wcrtomb_l" => wcrtomb_l,
+        "wcsnrtombs_l" => wcsnrtombs_l,
+        "wcwidth_l" => wcwidth_l,
+        "localeconv_l" => localeconv_l,
+        "__mb_cur_max_l" | "___mb_cur_max_l" => mb_cur_max_l,
+        "tolower_l" | "__tolower_l" | "___tolower_l" => tolower_l,
+        "toupper_l" | "__toupper_l" | "___toupper_l" => toupper_l,
+        "__maskrune" | "___maskrune" => maskrune,
+        "__maskrune_l" | "___maskrune_l" => maskrune_l,
+        "strtol_l" => strtol_l,
+        "strtoll_l" => strtoll_l,
+        "strtoul_l" => strtoul_l,
+        "strtoull_l" => strtoull_l,
+        "strtod_l" => strtod_l,
+        "strtof_l" => strtof_l,
+        "strcoll_l" => strcoll_l,
+        "strxfrm_l" => strxfrm_l,
+        "strftime_l" => strftime_l,
+        "__tolower" | "___tolower" => tolower_,
+        "__toupper" | "___toupper" => toupper_,
     }
-    // Data rather than a function: the guest reads this object's fields directly,
-    // and every `isspace`/`tolower` the header inlined faults on a null slot.
-    // The Mach-O underscore, put back: the guest imports `__DefaultRuneLocale`.
-    crate::define_data(lib, "__DefaultRuneLocale", default_rune_locale());
+    data {
+        // The Mach-O underscore, put back: the guest imports
+        // `__DefaultRuneLocale`.
+        "__DefaultRuneLocale" => default_rune_locale(),
+    }
 }
 
 #[cfg(test)]
@@ -807,13 +744,6 @@ mod tests {
             assert_eq!(libc::uselocale(std::ptr::null_mut()), before);
             libc::freelocale(c);
         }
-    }
-
-    /// Every name the list claims resolves, so `provide` cannot publish a null.
-    #[test]
-    fn every_listed_name_resolves() {
-        let missing: Vec<&&str> = NAMES.iter().filter(|n| symbol(n).is_none()).collect();
-        assert!(missing.is_empty(), "listed but unresolved: {missing:?}");
     }
 
     #[test]

@@ -1,5 +1,3 @@
-use machish::resolve::SyntheticDylib;
-
 use std::ffi::c_void;
 use std::hint::spin_loop;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicPtr, Ordering, fence};
@@ -209,61 +207,23 @@ pub unsafe extern "C" fn OSSpinLockUnlock(lock: *mut c_void) {
     unsafe { atomic_i32(lock) }.store(0, Ordering::Release);
 }
 
-pub const NAMES: &[&str] = &[
-    "OSAtomicAdd32",
-    "OSAtomicAdd32Barrier",
-    "OSAtomicAdd64",
-    "OSAtomicAdd64Barrier",
-    "OSAtomicCompareAndSwap32",
-    "OSAtomicCompareAndSwap32Barrier",
-    "OSAtomicCompareAndSwap64",
-    "OSAtomicCompareAndSwap64Barrier",
-    "OSAtomicCompareAndSwapInt",
-    "OSAtomicCompareAndSwapIntBarrier",
-    "OSAtomicCompareAndSwapPtr",
-    "OSAtomicCompareAndSwapPtrBarrier",
-    "OSMemoryBarrier",
-    "OSSpinLockLock",
-    "OSSpinLockTry",
-    "OSSpinLockUnlock",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    Some(match name {
-        "OSAtomicAdd32" => OSAtomicAdd32 as *const () as u64,
-        "OSAtomicAdd32Barrier" => OSAtomicAdd32Barrier as *const () as u64,
-
-        "OSAtomicAdd64" => OSAtomicAdd64 as *const () as u64,
-        "OSAtomicAdd64Barrier" => OSAtomicAdd64Barrier as *const () as u64,
-
-        "OSAtomicCompareAndSwap32" => OSAtomicCompareAndSwap32 as *const () as u64,
-        "OSAtomicCompareAndSwap32Barrier" => OSAtomicCompareAndSwap32Barrier as *const () as u64,
-
-        "OSAtomicCompareAndSwap64" => OSAtomicCompareAndSwap64 as *const () as u64,
-        "OSAtomicCompareAndSwap64Barrier" => OSAtomicCompareAndSwap64Barrier as *const () as u64,
-
-        "OSAtomicCompareAndSwapInt" => OSAtomicCompareAndSwapInt as *const () as u64,
-        "OSAtomicCompareAndSwapIntBarrier" => OSAtomicCompareAndSwapIntBarrier as *const () as u64,
-
-        "OSAtomicCompareAndSwapPtr" => OSAtomicCompareAndSwapPtr as *const () as u64,
-        "OSAtomicCompareAndSwapPtrBarrier" => OSAtomicCompareAndSwapPtrBarrier as *const () as u64,
-
-        "OSMemoryBarrier" => OSMemoryBarrier as *const () as u64,
-
-        "OSSpinLockLock" => OSSpinLockLock as *const () as u64,
-        "OSSpinLockTry" => OSSpinLockTry as *const () as u64,
-        "OSSpinLockUnlock" => OSSpinLockUnlock as *const () as u64,
-
-        _ => return None,
-    })
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
+exports::exports! {
+    functions {
+        "OSAtomicAdd32" => OSAtomicAdd32,
+        "OSAtomicAdd32Barrier" => OSAtomicAdd32Barrier,
+        "OSAtomicAdd64" => OSAtomicAdd64,
+        "OSAtomicAdd64Barrier" => OSAtomicAdd64Barrier,
+        "OSAtomicCompareAndSwap32" => OSAtomicCompareAndSwap32,
+        "OSAtomicCompareAndSwap32Barrier" => OSAtomicCompareAndSwap32Barrier,
+        "OSAtomicCompareAndSwap64" => OSAtomicCompareAndSwap64,
+        "OSAtomicCompareAndSwap64Barrier" => OSAtomicCompareAndSwap64Barrier,
+        "OSAtomicCompareAndSwapInt" => OSAtomicCompareAndSwapInt,
+        "OSAtomicCompareAndSwapIntBarrier" => OSAtomicCompareAndSwapIntBarrier,
+        "OSAtomicCompareAndSwapPtr" => OSAtomicCompareAndSwapPtr,
+        "OSAtomicCompareAndSwapPtrBarrier" => OSAtomicCompareAndSwapPtrBarrier,
+        "OSMemoryBarrier" => OSMemoryBarrier,
+        "OSSpinLockLock" => OSSpinLockLock,
+        "OSSpinLockTry" => OSSpinLockTry,
+        "OSSpinLockUnlock" => OSSpinLockUnlock,
     }
 }

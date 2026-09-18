@@ -18,8 +18,6 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use machish::resolve::SyntheticDylib;
-
 /// The registered hook, as an address. Zero until something registers one.
 static HOOK: AtomicUsize = AtomicUsize::new(0);
 
@@ -69,22 +67,11 @@ unsafe extern "C" fn sched_yield() -> i32 {
     unsafe { libc::sched_yield() }
 }
 
-/// The names this module answers, which are the sleeps and the yield.
-pub const NAMES: &[&str] = &["usleep", "sleep", "nanosleep", "sched_yield"];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f = match name {
-        "usleep" => usleep as *const (),
-        "sleep" => sleep as *const (),
-        "nanosleep" => nanosleep as *const (),
-        "sched_yield" => sched_yield as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap() as *const ());
+exports::exports! {
+    functions {
+        "usleep" => usleep,
+        "sleep" => sleep,
+        "nanosleep" => nanosleep,
+        "sched_yield" => sched_yield,
     }
 }

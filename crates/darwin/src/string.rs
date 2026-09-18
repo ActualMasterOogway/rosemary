@@ -18,8 +18,6 @@
 
 use std::ffi::{c_char, c_void};
 
-use machish::resolve::SyntheticDylib;
-
 /// Fill `len` bytes at `b` by repeating the `n`-byte pattern at `pattern`.
 ///
 /// A trailing partial copy is written, which is what Apple's does: the length is
@@ -148,35 +146,14 @@ pub unsafe extern "C" fn perror(s: *const c_char) {
     }
 }
 
-pub const NAMES: &[&str] = &[
-    "memset_pattern4",
-    "memset_pattern8",
-    "memset_pattern16",
-    "strerror",
-    "strerror_r",
-    "perror",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "memset_pattern4" => memset_pattern4 as *const (),
-        "memset_pattern8" => memset_pattern8 as *const (),
-        "memset_pattern16" => memset_pattern16 as *const (),
-        "strerror" => strerror as *const (),
-        "perror" => perror as *const (),
-        "strerror_r" => strerror_r as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
+exports::exports! {
+    functions {
+        "memset_pattern4" => memset_pattern4,
+        "memset_pattern8" => memset_pattern8,
+        "memset_pattern16" => memset_pattern16,
+        "strerror" => strerror,
+        "perror" => perror,
+        "strerror_r" => strerror_r,
     }
 }
 

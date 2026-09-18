@@ -15,8 +15,6 @@
 
 use std::ffi::c_void;
 
-use machish::resolve::SyntheticDylib;
-
 /// Darwin's `malloc_statistics_t`. Four fields, and the layout is ABI: a guest
 /// reads `size_in_use` out of a structure it allocated on its own stack.
 #[repr(C)]
@@ -93,22 +91,9 @@ pub unsafe extern "C" fn malloc_zone_statistics(_zone: *mut c_void, stats: *mut 
     }
 }
 
-pub const NAMES: &[&str] = &["malloc_zone_statistics"];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    match name {
-        "malloc_zone_statistics" => Some(malloc_zone_statistics as *const () as usize as u64),
-        _ => None,
-    }
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
+exports::exports! {
+    functions {
+        "malloc_zone_statistics" => malloc_zone_statistics,
     }
 }
 

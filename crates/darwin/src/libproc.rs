@@ -13,8 +13,6 @@
 
 use std::ffi::{c_int, c_void};
 
-use machish::resolve::SyntheticDylib;
-
 const PROC_PIDLISTFDS: c_int = 1;
 const PROC_PIDTASKINFO: c_int = 4;
 
@@ -237,23 +235,10 @@ fn threads() -> i32 {
     std::fs::read_dir("/proc/self/task").map_or(1, |entries| entries.count().max(1) as i32)
 }
 
-pub const NAMES: &[&str] = &["proc_pidinfo", "proc_name"];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    match name {
-        "proc_pidinfo" => Some(proc_pidinfo as *const () as usize as u64),
-        "proc_name" => Some(proc_name as *const () as usize as u64),
-        _ => None,
-    }
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
+exports::exports! {
+    functions {
+        "proc_pidinfo" => proc_pidinfo,
+        "proc_name" => proc_name,
     }
 }
 
@@ -272,13 +257,6 @@ mod tests {
     }
 
     use super::*;
-
-    #[test]
-    fn every_listed_name_resolves() {
-        for name in NAMES {
-            assert!(symbol(name).is_some(), "{name}");
-        }
-    }
 
     /// The call this exists for: how many descriptors are open, which is the
     /// return value divided by the entry size.

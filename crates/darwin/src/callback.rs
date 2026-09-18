@@ -21,8 +21,6 @@
 
 use core::ffi::{c_int, c_void};
 
-use machish::resolve::SyntheticDylib;
-
 /// `int (*)(const void *, const void *)`, the comparator both take.
 type Compare = unsafe extern "C" fn(*const c_void, *const c_void) -> c_int;
 
@@ -60,24 +58,10 @@ pub unsafe extern "C" fn bsearch(
     unsafe { crate::call_as_darwin!(libc::bsearch(key, base, nel, width, compar)) }
 }
 
-pub const NAMES: &[&str] = &["qsort", "bsearch"];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "qsort" => qsort as *const (),
-        "bsearch" => bsearch as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
+exports::exports! {
+    functions {
+        "qsort" => qsort,
+        "bsearch" => bsearch,
     }
 }
 

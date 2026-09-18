@@ -35,8 +35,6 @@ use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int};
 use std::sync::Mutex;
 
-use machish::resolve::SyntheticDylib;
-
 /// Darwin's `struct dirent`, the `_DARWIN_FEATURE_64_BIT_INODE` layout.
 ///
 /// `#[repr(C)]` because the guest reads it by offset; the trailing name is not
@@ -377,35 +375,14 @@ pub unsafe extern "C" fn alphasort(a: *const *const Dirent, b: *const *const Dir
 /// [`crate::divergent`]'s list, which is what stops the host's being bound.
 pub const REFUSED: &[&str] = &["getdirentries"];
 
-pub const NAMES: &[&str] = &[
-    "opendir",
-    "readdir",
-    "readdir_r",
-    "closedir",
-    "scandir",
-    "alphasort",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "opendir" => opendir as *const (),
-        "readdir" => readdir as *const (),
-        "readdir_r" => readdir_r as *const (),
-        "closedir" => closedir as *const (),
-        "scandir" => scandir as *const (),
-        "alphasort" => alphasort as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
+exports::exports! {
+    functions {
+        "opendir" => opendir,
+        "readdir" => readdir,
+        "readdir_r" => readdir_r,
+        "closedir" => closedir,
+        "scandir" => scandir,
+        "alphasort" => alphasort,
     }
 }
 
@@ -418,13 +395,6 @@ mod tests {
     fn c_path(path: &std::path::Path) -> std::ffi::CString {
         use std::os::unix::ffi::OsStrExt;
         std::ffi::CString::new(path.as_os_str().as_bytes()).expect("a path with no NUL")
-    }
-
-    #[test]
-    fn every_listed_name_resolves() {
-        for name in NAMES {
-            assert!(symbol(name).is_some(), "{name}");
-        }
     }
 
     /// The offsets are the guest's. `d_name` is the one that matters: two bytes

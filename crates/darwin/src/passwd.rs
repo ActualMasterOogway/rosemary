@@ -16,8 +16,6 @@
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 
-use machish::resolve::SyntheticDylib;
-
 /// Darwin's `struct passwd`, from `<pwd.h>`.
 ///
 /// `#[repr(C)]` because the guest reads it by offset - see the module note on
@@ -185,37 +183,16 @@ pub unsafe extern "C" fn getpwnam(name: *const c_char) -> *mut Passwd {
 /// which is the bug this module was written for.
 pub const REFUSED: &[&str] = &["getpwuid_r", "getpwnam_r"];
 
-pub const NAMES: &[&str] = &["getpwuid", "getpwnam"];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "getpwuid" => getpwuid as *const (),
-        "getpwnam" => getpwnam as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
+exports::exports! {
+    functions {
+        "getpwuid" => getpwuid,
+        "getpwnam" => getpwnam,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_listed_name_resolves() {
-        for name in NAMES {
-            assert!(symbol(name).is_some(), "{name}");
-        }
-    }
 
     /// The offsets are the guest's, and `pw_dir` is the one that matters: at
     /// Darwin's 48 it is past the end of this host's whole structure.

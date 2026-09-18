@@ -313,34 +313,17 @@ unsafe fn unblock(_addr: *mut u32, _all: bool, _shared: bool) -> i64 {
 
 /// Empty on macOS, where the host's own kernel answers these.
 #[cfg(target_os = "macos")]
-pub fn symbol(_name: &str) -> Option<u64> {
-    None
-}
+exports::exports! {}
 
 #[cfg(not(target_os = "macos"))]
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "__ulock_wait" => wait as *const (),
-        "__ulock_wait2" => wait2 as *const (),
-        "__ulock_wake" => wake as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-#[cfg(target_os = "macos")]
-pub fn provide(_lib: &mut machish::resolve::SyntheticDylib) {}
-
-#[cfg(not(target_os = "macos"))]
-pub fn provide(lib: &mut machish::resolve::SyntheticDylib) {
-    for name in NAMES {
+exports::exports! {
+    functions {
         // One underscore from C mangling on top of the two in the identifier.
-        crate::define_fn(lib, &format!("_{name}"), symbol(name).unwrap() as *const ());
+        "__ulock_wait" => wait,
+        "__ulock_wait2" => wait2,
+        "__ulock_wake" => wake,
     }
 }
-
-/// Everything [`symbol`] answers.
-pub const NAMES: &[&str] = &["__ulock_wait", "__ulock_wait2", "__ulock_wake"];
 
 #[cfg(test)]
 mod tests {

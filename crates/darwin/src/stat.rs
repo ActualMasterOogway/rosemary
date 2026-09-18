@@ -19,8 +19,6 @@
 
 use std::ffi::{CStr, c_char, c_int};
 
-use machish::resolve::SyntheticDylib;
-
 /// Darwin's `struct stat` as an x86-64 guest sees it - the `_DARWIN_FEATURE_64_BIT_INODE`
 /// layout, which is the only one arm64 and modern x86-64 code has.
 #[repr(C)]
@@ -513,51 +511,19 @@ pub unsafe extern "C" fn fstatfs(fd: c_int, out: *mut Statfs) -> c_int {
     result
 }
 
-pub const NAMES: &[&str] = &[
-    "stat",
-    "lstat",
-    "fstat",
-    "stat$INODE64",
-    "lstat$INODE64",
-    "fstat$INODE64",
-    "statfs",
-    "fstatfs",
-    "statfs$INODE64",
-    "fstatfs$INODE64",
-    "access",
-    "realpath",
-    "readlink",
-    "fopen",
-    "fopen$UNIX2003",
-    "open",
-    "openat",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "stat" | "stat$INODE64" => stat as *const (),
-        "lstat" | "lstat$INODE64" => lstat as *const (),
-        "fstat" | "fstat$INODE64" => fstat as *const (),
-        "statfs" | "statfs$INODE64" => statfs as *const (),
-        "fstatfs" | "fstatfs$INODE64" => fstatfs as *const (),
-        "access" => access as *const (),
-        "realpath" => realpath as *const (),
-        "readlink" => readlink as *const (),
-        "fopen" | "fopen$UNIX2003" => fopen as *const (),
-        "open" => open as *const (),
-        "openat" => openat as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
+exports::exports! {
+    functions {
+        "stat" | "stat$INODE64" => stat,
+        "lstat" | "lstat$INODE64" => lstat,
+        "fstat" | "fstat$INODE64" => fstat,
+        "statfs" | "statfs$INODE64" => statfs,
+        "fstatfs" | "fstatfs$INODE64" => fstatfs,
+        "access" => access,
+        "realpath" => realpath,
+        "readlink" => readlink,
+        "fopen" | "fopen$UNIX2003" => fopen,
+        "open" => open,
+        "openat" => openat,
     }
 }
 
@@ -578,7 +544,7 @@ mod tests {
 
     #[test]
     fn every_listed_name_resolves_and_a_variant_is_its_base() {
-        for name in NAMES {
+        for name in names() {
             assert!(symbol(name).is_some(), "{name}");
             assert_eq!(symbol(name), symbol(base(name)), "{name}");
         }

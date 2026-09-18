@@ -23,8 +23,6 @@
 
 use std::ffi::c_void;
 
-use machish::resolve::SyntheticDylib;
-
 /// Darwin's `POLL*`, from `<sys/poll.h>`.
 mod bit {
     pub const IN: i16 = 0x0001;
@@ -162,19 +160,9 @@ unsafe extern "C" fn poll(fds: *mut c_void, nfds: libc::nfds_t, timeout: i32) ->
     rc
 }
 
-pub const NAMES: &[&str] = &["poll"];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    (name == "poll").then(|| poll as *const () as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
+exports::exports! {
+    functions {
+        "poll" => poll,
     }
 }
 

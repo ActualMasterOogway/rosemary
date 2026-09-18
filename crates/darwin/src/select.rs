@@ -25,8 +25,6 @@
 
 use std::ffi::{c_int, c_void};
 
-use machish::resolve::SyntheticDylib;
-
 /// `int select(int, fd_set *, fd_set *, fd_set *, struct timeval *)`
 ///
 /// # Safety
@@ -104,24 +102,10 @@ unsafe extern "C" fn pselect(
     }
 }
 
-pub const NAMES: &[&str] = &["select", "pselect"];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "select" => select as *const (),
-        "pselect" => pselect as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
+exports::exports! {
+    functions {
+        "select" => select,
+        "pselect" => pselect,
     }
 }
 
@@ -222,12 +206,5 @@ mod tests {
             "a millisecond read as a thousand seconds"
         );
         let _ = empty;
-    }
-
-    #[test]
-    fn every_listed_name_resolves() {
-        for name in NAMES {
-            assert!(symbol(name).is_some(), "{name}");
-        }
     }
 }

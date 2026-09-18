@@ -41,8 +41,6 @@
 
 use std::ffi::{c_char, c_int, c_void};
 
-use machish::resolve::SyntheticDylib;
-
 /// The SysV `va_list`, which is one of these and not a pointer.
 ///
 /// `#[repr(C)]` because the trampoline writes it by offset and glibc reads it
@@ -221,25 +219,11 @@ unsafe extern "C" {
     fn rosetta3_asprintf_l();
 }
 
-pub const NAMES: &[&str] = &["snprintf_l", "sscanf_l", "asprintf_l"];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: unsafe extern "C" fn() = match name {
+exports::exports! {
+    functions {
         "snprintf_l" => rosetta3_snprintf_l,
         "sscanf_l" => rosetta3_sscanf_l,
         "asprintf_l" => rosetta3_asprintf_l,
-        _ => return None,
-    };
-    Some(f as *const () as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
     }
 }
 
@@ -255,13 +239,6 @@ mod tests {
     -> unsafe extern "C" fn(*mut c_char, usize, libc::locale_t, *const c_char, ...) -> c_int {
         // SAFETY: the trampoline is a variadic function of this shape.
         unsafe { std::mem::transmute(symbol("snprintf_l").expect("published")) }
-    }
-
-    #[test]
-    fn every_listed_name_resolves() {
-        for name in NAMES {
-            assert!(symbol(name).is_some(), "{name}");
-        }
     }
 
     /// Six integer arguments and one past them: the seventh is on the caller's

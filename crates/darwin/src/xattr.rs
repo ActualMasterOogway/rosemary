@@ -31,8 +31,6 @@
 
 use std::ffi::{CStr, CString, c_char, c_void};
 
-use machish::resolve::SyntheticDylib;
-
 /// Linux's own attribute namespaces, which are not the guest's to use.
 const HOST_NAMESPACES: &[&str] = &["user.", "security.", "system.", "trusted."];
 
@@ -220,26 +218,12 @@ unsafe fn host_name(name: *const c_char) -> Option<CString> {
     to_host(unsafe { CStr::from_ptr(name) })
 }
 
-pub const NAMES: &[&str] = &["getxattr", "setxattr", "removexattr", "listxattr"];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "getxattr" => getxattr as *const (),
-        "setxattr" => setxattr as *const (),
-        "removexattr" => removexattr as *const (),
-        "listxattr" => listxattr as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
+exports::exports! {
+    functions {
+        "getxattr" => getxattr,
+        "setxattr" => setxattr,
+        "removexattr" => removexattr,
+        "listxattr" => listxattr,
     }
 }
 

@@ -2,8 +2,6 @@
 
 use std::ffi::{CStr, CString, c_char, c_int};
 
-use machish::resolve::SyntheticDylib;
-
 use crate::{
     fcntl::{FcntlFlags, oflag},
     translation::DarwinTranslation,
@@ -86,37 +84,16 @@ pub unsafe extern "C" fn shm_unlink(name: *const c_char) -> c_int {
     unsafe { libc::shm_unlink(name.as_ptr()) }
 }
 
-pub const NAMES: &[&str] = &["shm_open", "shm_unlink"];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "shm_open" => shm_open as *const (),
-        "shm_unlink" => shm_unlink as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
+exports::exports! {
+    functions {
+        "shm_open" => shm_open,
+        "shm_unlink" => shm_unlink,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_listed_name_resolves() {
-        for name in NAMES {
-            assert!(symbol(name).is_some(), "{name}");
-        }
-    }
 
     /// The word `shm_open` hands the host, for a Darwin word the guest gave.
     fn to_host_flags(guest: c_int) -> c_int {

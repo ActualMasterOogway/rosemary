@@ -25,8 +25,6 @@
 
 use std::ffi::c_int;
 
-use machish::resolve::SyntheticDylib;
-
 /// Darwin's `struct rlimit`. The same layout as this host's, and named here so
 /// the guest's is never confused for it.
 #[repr(C)]
@@ -134,24 +132,10 @@ pub unsafe extern "C" fn setrlimit(darwin: c_int, value: *const Rlimit) -> c_int
     unsafe { libc::setrlimit(resource, &raw const host) }
 }
 
-pub const NAMES: &[&str] = &["getrlimit", "setrlimit"];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "getrlimit" => getrlimit as *const (),
-        "setrlimit" => setrlimit as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in NAMES {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
+exports::exports! {
+    functions {
+        "getrlimit" => getrlimit,
+        "setrlimit" => setrlimit,
     }
 }
 
@@ -162,13 +146,6 @@ mod tests {
     /// Darwin's `RLIMIT_NOFILE`, which is this host's `RLIMIT_MEMLOCK` if the
     /// number is passed through.
     const DARWIN_NOFILE: c_int = 8;
-
-    #[test]
-    fn every_listed_name_resolves() {
-        for name in NAMES {
-            assert!(symbol(name).is_some(), "{name}");
-        }
-    }
 
     #[test]
     fn the_descriptor_limit_is_the_descriptor_limit_and_not_the_lock_limit() {
