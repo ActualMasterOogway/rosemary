@@ -413,18 +413,7 @@ const MEDIA_CONSTANTS: &[(&str, &str)] = &[
 /// globals go through one: the symbol names a *variable* holding the pointer,
 /// and a guest loads it before dereferencing.
 fn media_constants() -> Vec<(String, u64)> {
-    MEDIA_CONSTANTS
-        .iter()
-        .map(|(symbol, text)| {
-            (
-                (*symbol).to_string(),
-                corefoundation::base::global_cell(
-                    symbol,
-                    foundation::notification::name_object(text),
-                ),
-            )
-        })
-        .collect()
+    corefoundation::base::string_globals(MEDIA_CONSTANTS)
 }
 
 /// Names this tree answers only as a shim, and the address the loader binds.

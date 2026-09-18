@@ -241,32 +241,17 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         "_kCGColorSpaceSRGB".to_string(),
         corefoundation::base::global_cell("_kCGColorSpaceSRGB", srgb),
     ));
-    for name in NOTIFICATION_NAMES {
-        let symbol = format!("_{name}");
-        let object = foundation::notification::name_object(name);
-        out.push((
-            symbol.clone(),
-            corefoundation::base::global_cell(&symbol, object),
-        ));
-    }
+    out.extend(corefoundation::base::named_string_globals(
+        NOTIFICATION_NAMES,
+    ));
     out.push((
         "_NSAppKitVersionNumber".to_string(),
         corefoundation::base::global_cell("_NSAppKitVersionNumber", APPKIT_VERSION.to_bits()),
     ));
-    for (symbol, text) in textinput::STRING_GLOBALS {
-        let object = foundation::notification::name_object(text);
-        out.push((
-            symbol.to_string(),
-            corefoundation::base::global_cell(symbol, object),
-        ));
-    }
-    for (symbol, text) in STRING_GLOBALS {
-        let object = foundation::notification::name_object(text);
-        out.push((
-            symbol.to_string(),
-            corefoundation::base::global_cell(symbol, object),
-        ));
-    }
+    out.extend(corefoundation::base::string_globals(
+        textinput::STRING_GLOBALS,
+    ));
+    out.extend(corefoundation::base::string_globals(STRING_GLOBALS));
     // Doubles rather than pointers - see [`FONT_WEIGHTS`].
     for (symbol, weight) in FONT_WEIGHTS {
         out.push((

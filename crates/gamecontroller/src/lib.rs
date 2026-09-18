@@ -1040,13 +1040,7 @@ pub fn data_symbols() -> Vec<(String, u64)> {
             objc::class::ptr(class.metaclass()) as usize as u64,
         ));
     }
-    for (symbol, text) in STRING_GLOBALS {
-        let object = foundation::notification::name_object(text);
-        out.push((
-            symbol.to_string(),
-            corefoundation::base::global_cell(symbol, object),
-        ));
-    }
+    out.extend(corefoundation::base::string_globals(STRING_GLOBALS));
     out
 }
 

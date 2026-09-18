@@ -240,6 +240,34 @@ pub fn opaque_type_id(handle: CFTypeRef) -> Option<CFTypeID> {
         .flatten()
 }
 
+/// Each `(Mach-O name, text)` as a cell holding the interned string.
+///
+/// A pointer-typed global is a *variable*, so the symbol is a cell and the
+/// string goes inside it - see [`global_cell`] and [`interned_name`] for the two
+/// halves. Seven modules wrote this loop out; the tables they wrote it over are
+/// data already, so this is a function rather than anything cleverer.
+pub fn string_globals(entries: &[(&str, &str)]) -> Vec<(String, u64)> {
+    entries
+        .iter()
+        .map(|(symbol, text)| (symbol.to_string(), global_cell(symbol, interned_name(text))))
+        .collect()
+}
+
+/// [`string_globals`] for the globals whose text *is* their name.
+///
+/// The Mach-O underscore is added here, so the symbol and the string it holds
+/// come from one spelling rather than two that could disagree.
+pub fn named_string_globals(names: &[&str]) -> Vec<(String, u64)> {
+    names
+        .iter()
+        .map(|name| {
+            let symbol = format!("_{name}");
+            let cell = global_cell(&symbol, interned_name(name));
+            (symbol, cell)
+        })
+        .collect()
+}
+
 /// A constant string global's object, the same one every time it is asked for.
 ///
 /// Five modules had a copy of this, and each had its own table - so the same

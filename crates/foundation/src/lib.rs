@@ -290,26 +290,12 @@ pub const CLASSES: &[&str] = &[
 /// each goes through a cell - see `corefoundation::base::global_cell`.
 pub fn data_symbols() -> Vec<(String, u64)> {
     let mut out = class_data();
-    for (symbol, text) in locale::KEYS
-        .iter()
-        .chain(formatter::cf::KEYS)
-        .chain(kvo::KEYS)
-        .copied()
-        .chain(STRING_GLOBALS.iter().copied())
-    {
-        out.push((
-            symbol.to_string(),
-            corefoundation::base::global_cell(symbol, notification::name_object(text)),
-        ));
+    for table in [locale::KEYS, formatter::cf::KEYS, kvo::KEYS, STRING_GLOBALS] {
+        out.extend(corefoundation::base::string_globals(table));
     }
-    for name in NOTIFICATION_NAMES {
-        let symbol = format!("_{name}");
-        let object = notification::name_object(name);
-        out.push((
-            symbol.clone(),
-            corefoundation::base::global_cell(&symbol, object),
-        ));
-    }
+    out.extend(corefoundation::base::named_string_globals(
+        NOTIFICATION_NAMES,
+    ));
     // `NSZeroPoint`, `NSZeroSize` and `NSZeroRect` are **structs** in Foundation's `__DATA`,
     // not pointers to them: the guest loads the symbol's address and reads two
     // or four doubles out of it. A one-word cell would leave the rest of the

@@ -1055,15 +1055,7 @@ exports::exports! {
 }
 
 pub fn data_symbols() -> Vec<(String, u64)> {
-    ATTRIBUTE_GLOBALS
-        .iter()
-        .map(|(symbol, text)| {
-            (
-                (*symbol).to_string(),
-                corefoundation::base::global_cell(symbol, key(text) as usize as u64),
-            )
-        })
-        .collect()
+    corefoundation::base::string_globals(ATTRIBUTE_GLOBALS)
 }
 
 #[cfg(test)]
