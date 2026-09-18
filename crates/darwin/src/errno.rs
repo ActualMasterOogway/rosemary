@@ -317,9 +317,9 @@ impl Drop for Held {
 
 exports::exports! {
     functions {
-        // Two underscores as the Mach-O spells it: one from C mangling, one
-        // from the identifier `__error`.
         "_error" => error,
+        // Darwin exports two error symbols but they're the same function.
+        "__error" => error,
     }
 }
 
