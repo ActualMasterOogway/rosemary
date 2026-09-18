@@ -498,18 +498,7 @@ unsafe fn text_of(string: Id) -> String {
 /// compares the constant against the name it was handed, and two objects with
 /// equal text are not the same object.
 pub fn name_object(text: &'static str) -> u64 {
-    static NAMES: std::sync::Mutex<Vec<(&'static str, u64)>> = std::sync::Mutex::new(Vec::new());
-    crate::bootstrap();
-    let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((_, addr)) = names.iter().find(|(t, _)| *t == text) {
-        return *addr;
-    }
-    let object = crate::string::from_str(text);
-    // Retained forever: a global a guest may release is one it can make dangle.
-    objc::arc::retain(object);
-    let addr = object as usize as u64;
-    names.push((text, addr));
-    addr
+    corefoundation::base::interned_name(text)
 }
 
 /// The CoreFoundation spellings, which name the same centers and the same

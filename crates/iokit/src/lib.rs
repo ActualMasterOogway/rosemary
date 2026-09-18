@@ -85,24 +85,10 @@ pub fn data_symbols() -> Vec<(String, u64)> {
     out.extend(api::key_strings().into_iter().map(|(symbol, text)| {
         (
             symbol.to_string(),
-            corefoundation::base::global_cell(symbol, key_object(text)),
+            corefoundation::base::global_cell(symbol, corefoundation::base::interned_name(text)),
         )
     }));
     out
-}
-
-fn key_object(text: &'static str) -> u64 {
-    static KEYS: std::sync::Mutex<Vec<(&'static str, u64)>> = std::sync::Mutex::new(Vec::new());
-    let mut keys = KEYS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((_, addr)) = keys.iter().find(|(t, _)| *t == text) {
-        return *addr;
-    }
-    let object = corefoundation::string::from_bytes(text.as_bytes(), false);
-    // Retained forever: a global a guest may release is one it can make dangle.
-    objc::arc::retain(object as objc::object::Id);
-    let addr = object as usize as u64;
-    keys.push((text, addr));
-    addr
 }
 
 #[cfg(test)]

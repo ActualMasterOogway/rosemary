@@ -219,25 +219,6 @@ exports::exports! {
     }
 }
 
-/// A mode name, as a string that lives for the process.
-///
-/// `kCFRunLoopDefaultMode` is a `CFStringRef` a guest reads once and passes back
-/// into every `CFRunLoopAddSource`, so it has to be a real string object and it
-/// has to be the same one every time.
-fn mode_name_object(name: &'static str) -> u64 {
-    static NAMES: std::sync::Mutex<Vec<(&'static str, u64)>> = std::sync::Mutex::new(Vec::new());
-    let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((_, addr)) = names.iter().find(|(n, _)| *n == name) {
-        return *addr;
-    }
-    // Retained forever: a global a guest may release is one it can make dangle.
-    let object = string::from_bytes(name.as_bytes(), false);
-    objc::arc::retain(object as objc::object::Id);
-    let addr = object as usize as u64;
-    names.push((name, addr));
-    addr
-}
-
 /// The symbols that are **data**, as `(Mach-O name, address)`.
 ///
 /// `___CFConstantStringClassReference` is the whole reason a guest's `@"literal"`
@@ -304,7 +285,7 @@ pub fn data_symbols() -> Vec<(String, u64)> {
     ] {
         out.push((
             name.to_string(),
-            base::global_cell(name, mode_name_object(mode)),
+            base::global_cell(name, base::interned_name(mode)),
         ));
     }
     // The string-valued globals, each of which is exactly its own name without
@@ -313,7 +294,7 @@ pub fn data_symbols() -> Vec<(String, u64)> {
     for (symbol, text) in KEY_STRINGS {
         out.push((
             symbol.to_string(),
-            base::global_cell(symbol, mode_name_object(text)),
+            base::global_cell(symbol, base::interned_name(text)),
         ));
     }
     for (symbol, value) in [

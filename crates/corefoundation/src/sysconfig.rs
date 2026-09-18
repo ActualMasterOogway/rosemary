@@ -543,7 +543,10 @@ pub unsafe extern "C" fn SCDynamicStoreCopyValue(_store: CFTypeRef, key: CFTypeR
     };
     let name = crate::string::from_bytes(interface.as_bytes(), false);
     let value = crate::collections::new_dictionary(
-        &[(interned(PRIMARY_INTERFACE), name)],
+        &[(
+            crate::base::interned_name(PRIMARY_INTERFACE) as CFTypeRef,
+            name,
+        )],
         Policy::from_key_callbacks(),
         Policy::from_type_callbacks(),
         false,
@@ -693,21 +696,6 @@ const KEY_STRINGS: &[(&str, &str)] = &[
     ("_kSCNetworkInterfaceTypeIEEE80211", "IEEE80211"),
 ];
 
-/// One interned string per distinct text, so that a guest comparing a key it
-/// read back against the global gets identity as well as equality.
-fn interned(text: &str) -> CFTypeRef {
-    static STRINGS: std::sync::Mutex<Vec<(String, usize)>> = std::sync::Mutex::new(Vec::new());
-    let mut strings = STRINGS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((_, object)) = strings.iter().find(|(t, _)| t == text) {
-        return *object as CFTypeRef;
-    }
-    let object = crate::string::from_bytes(text.as_bytes(), false);
-    // Retained forever: a global a guest may release is one it can make dangle.
-    objc::arc::retain(object as objc::object::Id);
-    strings.push((text.to_string(), object as usize));
-    object
-}
-
 /// The `kSC*` globals, as `(Mach-O name, address)`.
 pub fn data_symbols() -> Vec<(String, u64)> {
     crate::bootstrap();
@@ -716,7 +704,10 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         .map(|(symbol, text)| {
             (
                 (*symbol).to_string(),
-                crate::base::global_cell(symbol, interned(text) as usize as u64),
+                crate::base::global_cell(
+                    symbol,
+                    crate::base::interned_name(text) as CFTypeRef as usize as u64,
+                ),
             )
         })
         .collect()

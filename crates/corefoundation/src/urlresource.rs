@@ -518,26 +518,13 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         .map(|(symbol, text)| {
             (
                 (*symbol).to_string(),
-                crate::base::global_cell(symbol, interned(text) as usize as u64),
+                crate::base::global_cell(
+                    symbol,
+                    crate::base::interned_name(text) as CFTypeRef as usize as u64,
+                ),
             )
         })
         .collect()
-}
-
-/// One interned string per key, so that the `kCF` and `NS` spellings of a key are
-/// the same object - which is what makes a dictionary built with one readable
-/// with the other.
-fn interned(text: &str) -> CFTypeRef {
-    static STRINGS: std::sync::Mutex<Vec<(String, usize)>> = std::sync::Mutex::new(Vec::new());
-    let mut strings = STRINGS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((_, object)) = strings.iter().find(|(t, _)| t == text) {
-        return *object as CFTypeRef;
-    }
-    let object = crate::string::from_bytes(text.as_bytes(), false);
-    // Retained forever: a global a guest may release is one it can make dangle.
-    objc::arc::retain(object as objc::object::Id);
-    strings.push((text.to_string(), object as usize));
-    object
 }
 
 #[cfg(test)]

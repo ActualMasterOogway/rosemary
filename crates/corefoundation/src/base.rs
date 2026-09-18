@@ -240,6 +240,31 @@ pub fn opaque_type_id(handle: CFTypeRef) -> Option<CFTypeID> {
         .flatten()
 }
 
+/// A constant string global's object, the same one every time it is asked for.
+///
+/// Five modules had a copy of this, and each had its own table - so the same
+/// text reached from two of them was two objects. Identity is the whole point:
+/// a guest compares the constant it was handed against the one it imported, and
+/// two strings with equal text are not the same string.
+///
+/// Not [`crate::string::immortal`], which builds a `__CFConstantString`. That is
+/// a different class, and `preferences` wants it deliberately; this is the
+/// ordinary string every other caller was building.
+pub fn interned_name(text: &str) -> u64 {
+    static STRINGS: std::sync::Mutex<Vec<(String, u64)>> = std::sync::Mutex::new(Vec::new());
+    crate::bootstrap();
+    let mut strings = STRINGS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, object)) = strings.iter().find(|(t, _)| t == text) {
+        return *object;
+    }
+    let object = crate::string::from_bytes(text.as_bytes(), false);
+    // Retained forever: a global a guest may release is one it can make dangle.
+    objc::arc::retain(object as objc::object::Id);
+    let address = object as usize as u64;
+    strings.push((text.to_string(), address));
+    address
+}
+
 /// The address of the **variable** a pointer-typed global names.
 ///
 /// `kCFRunLoopDefaultMode` is a `CFStringRef` variable, not an object. A guest
