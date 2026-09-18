@@ -546,7 +546,7 @@ pub fn provider() -> SyntheticDylib {
         // it is the runtime that answers for it: `objc_retainBlock` and
         // `_Block_copy` are one function, and whichever runtime has one has the
         // other.
-        .chain(objc::block::NAMES.iter().copied());
+        .chain(objc::block::names());
     for name in names {
         // Never dropped. A name this provider does not define falls through to
         // the native provider - or, on a host that denies the family, goes

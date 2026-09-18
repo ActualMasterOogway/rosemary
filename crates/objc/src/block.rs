@@ -562,37 +562,36 @@ mod entry {
     }
 }
 
-/// One entry point, as an address.
-macro_rules! at {
-    ($f:expr) => {
-        $f as *const () as usize as u64
-    };
+mod entries {
+    use super::entry;
+
+    exports::exports! {
+        functions {
+            "_Block_copy" => entry::_Block_copy,
+            "_Block_release" => entry::_Block_release,
+            "_Block_object_assign" => entry::_Block_object_assign,
+            "_Block_object_dispose" => entry::_Block_object_dispose,
+        }
+    }
 }
 
-/// The C entry points, by name.
+pub use entries::{MODULE, names, provide};
+
+/// The C entry points, by name, in either spelling.
 ///
-/// Either spelling: these are the one family whose C identifiers *begin* with an
-/// underscore, so a caller that has stripped the one a Mach-O symbol carries
-/// asks for `_Block_copy` and a caller that has stripped it twice - which
+/// These are the one family whose C identifiers *begin* with an underscore, so a
+/// caller that has stripped the one a Mach-O symbol carries asks for
+/// `_Block_copy` and a caller that has stripped it twice - which
 /// `darwin::c_name` does on the way to a `dlsym` - asks for `Block_copy`.
 pub fn symbol(name: &str) -> Option<u64> {
     crate::bootstrap();
-    Some(match name.strip_prefix('_').unwrap_or(name) {
-        "Block_copy" => at!(entry::_Block_copy),
-        "Block_release" => at!(entry::_Block_release),
-        "Block_object_assign" => at!(entry::_Block_object_assign),
-        "Block_object_dispose" => at!(entry::_Block_object_dispose),
-        _ => return None,
-    })
+    entries::symbol(name).or_else(|| entries::symbol(&alloc_prefixed(name)))
 }
 
-/// Every name [`symbol`] answers.
-pub const NAMES: &[&str] = &[
-    "_Block_copy",
-    "_Block_release",
-    "_Block_object_assign",
-    "_Block_object_dispose",
-];
+/// `name` with the underscore its C identifier carries put back.
+fn alloc_prefixed(name: &str) -> String {
+    format!("_{name}")
+}
 
 /// The three `isa` values, which a guest's block literal names as *data*.
 ///

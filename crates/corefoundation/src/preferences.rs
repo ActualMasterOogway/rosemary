@@ -374,34 +374,19 @@ pub extern "C" fn CFPreferencesSynchronize(
     1
 }
 
-pub const NAMES: &[&str] = &[
-    "CFPreferencesCopyAppValue",
-    "CFPreferencesSetAppValue",
-    "CFPreferencesCopyValue",
-    "CFPreferencesSetValue",
-    "CFPreferencesGetAppBooleanValue",
-    "CFPreferencesGetAppIntegerValue",
-    "CFPreferencesCopyKeyList",
-    "CFPreferencesSetMultiple",
-    "CFPreferencesAppSynchronize",
-    "CFPreferencesSynchronize",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "CFPreferencesCopyAppValue" => CFPreferencesCopyAppValue as *const (),
-        "CFPreferencesSetAppValue" => CFPreferencesSetAppValue as *const (),
-        "CFPreferencesCopyValue" => CFPreferencesCopyValue as *const (),
-        "CFPreferencesSetValue" => CFPreferencesSetValue as *const (),
-        "CFPreferencesGetAppBooleanValue" => CFPreferencesGetAppBooleanValue as *const (),
-        "CFPreferencesGetAppIntegerValue" => CFPreferencesGetAppIntegerValue as *const (),
-        "CFPreferencesCopyKeyList" => CFPreferencesCopyKeyList as *const (),
-        "CFPreferencesSetMultiple" => CFPreferencesSetMultiple as *const (),
-        "CFPreferencesAppSynchronize" => CFPreferencesAppSynchronize as *const (),
-        "CFPreferencesSynchronize" => CFPreferencesSynchronize as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
+exports::exports! {
+    functions {
+        "CFPreferencesCopyAppValue" => CFPreferencesCopyAppValue,
+        "CFPreferencesSetAppValue" => CFPreferencesSetAppValue,
+        "CFPreferencesCopyValue" => CFPreferencesCopyValue,
+        "CFPreferencesSetValue" => CFPreferencesSetValue,
+        "CFPreferencesGetAppBooleanValue" => CFPreferencesGetAppBooleanValue,
+        "CFPreferencesGetAppIntegerValue" => CFPreferencesGetAppIntegerValue,
+        "CFPreferencesCopyKeyList" => CFPreferencesCopyKeyList,
+        "CFPreferencesSetMultiple" => CFPreferencesSetMultiple,
+        "CFPreferencesAppSynchronize" => CFPreferencesAppSynchronize,
+        "CFPreferencesSynchronize" => CFPreferencesSynchronize,
+    }
 }
 
 #[cfg(test)]
@@ -425,13 +410,6 @@ mod tests {
         // SAFETY: as above, and still live.
         assert_eq!(unsafe { crate::api::CFStringGetLength(any) }, 1);
         assert_eq!(interned(ANY), any);
-    }
-
-    #[test]
-    fn every_listed_name_resolves() {
-        for name in NAMES {
-            assert!(symbol(name).is_some(), "{name}");
-        }
     }
 
     /// A key nothing set is NULL and "does not exist", which is what a program

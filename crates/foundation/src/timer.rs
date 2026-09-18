@@ -518,22 +518,13 @@ pub mod cf {
         super::date_of(date)
     }
 
-    macro_rules! at {
-        ($f:expr) => {
-            $f as *const () as usize as u64
-        };
+    exports::exports! {
+        functions {
+            "CFDateGetTypeID" => CFDateGetTypeID,
+            "CFDateCreate" => CFDateCreate,
+            "CFDateGetAbsoluteTime" => CFDateGetAbsoluteTime,
+        }
     }
-
-    pub fn symbol(name: &str) -> Option<u64> {
-        Some(match name {
-            "CFDateGetTypeID" => at!(CFDateGetTypeID),
-            "CFDateCreate" => at!(CFDateCreate),
-            "CFDateGetAbsoluteTime" => at!(CFDateGetAbsoluteTime),
-            _ => return None,
-        })
-    }
-
-    pub const NAMES: &[&str] = &["CFDateGetTypeID", "CFDateCreate", "CFDateGetAbsoluteTime"];
 }
 
 #[cfg(test)]

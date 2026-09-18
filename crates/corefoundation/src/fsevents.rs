@@ -103,28 +103,16 @@ pub unsafe extern "C" fn release(stream: *const Stream) {
     }
 }
 
-pub const NAMES: &[&str] = &[
-    "FSEventStreamCreate",
-    "FSEventStreamSetDispatchQueue",
-    "FSEventStreamStart",
-    "FSEventStreamStop",
-    "FSEventStreamFlushSync",
-    "FSEventStreamInvalidate",
-    "FSEventStreamRelease",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let function: *const () = match name {
-        "FSEventStreamCreate" => create as *const (),
-        "FSEventStreamSetDispatchQueue" => set_dispatch_queue as *const (),
-        "FSEventStreamStart" => start as *const (),
-        "FSEventStreamStop" => stop as *const (),
-        "FSEventStreamFlushSync" => flush_sync as *const (),
-        "FSEventStreamInvalidate" => invalidate as *const (),
-        "FSEventStreamRelease" => release as *const (),
-        _ => return None,
-    };
-    Some(function as usize as u64)
+exports::exports! {
+    functions {
+        "FSEventStreamCreate" => create,
+        "FSEventStreamSetDispatchQueue" => set_dispatch_queue,
+        "FSEventStreamStart" => start,
+        "FSEventStreamStop" => stop,
+        "FSEventStreamFlushSync" => flush_sync,
+        "FSEventStreamInvalidate" => invalidate,
+        "FSEventStreamRelease" => release,
+    }
 }
 
 #[cfg(test)]

@@ -500,30 +500,15 @@ pub unsafe extern "C" fn CFURLEnumeratorGetNextURL(
     1
 }
 
-pub const NAMES: &[&str] = &[
-    "CFURLCopyResourcePropertyForKey",
-    "CFURLCopyResourcePropertiesForKeys",
-    "CFURLCreateFromFileSystemRepresentation",
-    "CFURLCreateWithBytes",
-    "CFURLEnumeratorCreateForMountedVolumes",
-    "CFURLEnumeratorGetNextURL",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "CFURLCopyResourcePropertyForKey" => CFURLCopyResourcePropertyForKey as *const (),
-        "CFURLCopyResourcePropertiesForKeys" => CFURLCopyResourcePropertiesForKeys as *const (),
-        "CFURLCreateFromFileSystemRepresentation" => {
-            CFURLCreateFromFileSystemRepresentation as *const ()
-        }
-        "CFURLCreateWithBytes" => CFURLCreateWithBytes as *const (),
-        "CFURLEnumeratorCreateForMountedVolumes" => {
-            CFURLEnumeratorCreateForMountedVolumes as *const ()
-        }
-        "CFURLEnumeratorGetNextURL" => CFURLEnumeratorGetNextURL as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
+exports::exports! {
+    functions {
+        "CFURLCopyResourcePropertyForKey" => CFURLCopyResourcePropertyForKey,
+        "CFURLCopyResourcePropertiesForKeys" => CFURLCopyResourcePropertiesForKeys,
+        "CFURLCreateFromFileSystemRepresentation" => CFURLCreateFromFileSystemRepresentation,
+        "CFURLCreateWithBytes" => CFURLCreateWithBytes,
+        "CFURLEnumeratorCreateForMountedVolumes" => CFURLEnumeratorCreateForMountedVolumes,
+        "CFURLEnumeratorGetNextURL" => CFURLEnumeratorGetNextURL,
+    }
 }
 
 /// The data symbols this module publishes, for [`crate::data_symbols`].
@@ -558,13 +543,6 @@ fn interned(text: &str) -> CFTypeRef {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_listed_name_resolves() {
-        for name in NAMES {
-            assert!(symbol(name).is_some(), "{name}");
-        }
-    }
 
     /// Both spellings of a key have to be the same object, or a dictionary built
     /// with the CoreFoundation key cannot be read with the Foundation one.

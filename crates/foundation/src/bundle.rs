@@ -517,54 +517,24 @@ pub mod cf {
         }
     }
 
-    /// One entry point, as an address.
-    macro_rules! at {
-        ($f:expr) => {
-            $f as *const () as usize as u64
-        };
+    exports::exports! {
+        functions {
+            "CFBundleGetMainBundle" => CFBundleGetMainBundle,
+            "CFBundleCopyResourceURL" => CFBundleCopyResourceURL,
+            "CFBundleCopyExecutableURL" => CFBundleCopyExecutableURL,
+            "CFBundleCopyBundleURL" => CFBundleCopyBundleURL,
+            "CFBundleCopyResourcesDirectoryURL" => CFBundleCopyResourcesDirectoryURL,
+            "CFBundleCopyPrivateFrameworksURL" => CFBundleCopyPrivateFrameworksURL,
+            "CFBundleCopyBuiltInPlugInsURL" => CFBundleCopyBuiltInPlugInsURL,
+            "CFBundleCopyBundleLocalizations" => CFBundleCopyBundleLocalizations,
+            "CFBundleCopyPreferredLocalizationsFromArray" => CFBundleCopyPreferredLocalizationsFromArray,
+            "CFBundleGetIdentifier" => CFBundleGetIdentifier,
+            "CFBundleGetInfoDictionary" => CFBundleGetInfoDictionary,
+            "CFBundleGetValueForInfoDictionaryKey" => CFBundleGetValueForInfoDictionaryKey,
+            "CFBundleGetVersionNumber" => CFBundleGetVersionNumber,
+            "CFBundleCreate" => CFBundleCreate,
+        }
     }
-
-    pub fn symbol(name: &str) -> Option<u64> {
-        Some(match name {
-            "CFBundleGetMainBundle" => at!(CFBundleGetMainBundle),
-            "CFBundleCopyResourceURL" => at!(CFBundleCopyResourceURL),
-            "CFBundleCopyExecutableURL" => at!(CFBundleCopyExecutableURL),
-            "CFBundleCopyBundleURL" => at!(CFBundleCopyBundleURL),
-            "CFBundleCopyResourcesDirectoryURL" => at!(CFBundleCopyResourcesDirectoryURL),
-            "CFBundleCopyPrivateFrameworksURL" => at!(CFBundleCopyPrivateFrameworksURL),
-            "CFBundleCopyBuiltInPlugInsURL" => at!(CFBundleCopyBuiltInPlugInsURL),
-            "CFBundleCopyBundleLocalizations" => at!(CFBundleCopyBundleLocalizations),
-            "CFBundleCopyPreferredLocalizationsFromArray" => {
-                at!(CFBundleCopyPreferredLocalizationsFromArray)
-            }
-            "CFBundleGetIdentifier" => at!(CFBundleGetIdentifier),
-            "CFBundleGetInfoDictionary" => at!(CFBundleGetInfoDictionary),
-            "CFBundleGetValueForInfoDictionaryKey" => {
-                at!(CFBundleGetValueForInfoDictionaryKey)
-            }
-            "CFBundleGetVersionNumber" => at!(CFBundleGetVersionNumber),
-            "CFBundleCreate" => at!(CFBundleCreate),
-            _ => return None,
-        })
-    }
-
-    /// Every name [`symbol`] answers.
-    pub const NAMES: &[&str] = &[
-        "CFBundleGetMainBundle",
-        "CFBundleCopyResourceURL",
-        "CFBundleCopyExecutableURL",
-        "CFBundleCopyBundleURL",
-        "CFBundleCopyResourcesDirectoryURL",
-        "CFBundleCopyPrivateFrameworksURL",
-        "CFBundleCopyBuiltInPlugInsURL",
-        "CFBundleCopyBundleLocalizations",
-        "CFBundleCopyPreferredLocalizationsFromArray",
-        "CFBundleGetIdentifier",
-        "CFBundleGetInfoDictionary",
-        "CFBundleGetValueForInfoDictionaryKey",
-        "CFBundleGetVersionNumber",
-        "CFBundleCreate",
-    ];
 }
 
 /// The bundle the program is, once something has said which.

@@ -1008,112 +1008,50 @@ pub unsafe extern "C" fn CTFontManagerCreateFontDescriptorFromData(data: CFTypeR
     face_attributes(first, 0.0)
 }
 
-pub const NAMES: &[&str] = &[
-    "CTFontCreateUIFontForLanguage",
-    "CTFontCreateWithName",
-    "CTFontCopyFontDescriptor",
-    "CTFontCopyGraphicsFont",
-    "CTFontCopyName",
-    "CTFontCopyFamilyName",
-    "CTFontCopyPostScriptName",
-    "CTFontGetSymbolicTraits",
-    "CTFontGetUnitsPerEm",
-    "CTFontGetSize",
-    "CTFontGetAscent",
-    "CTFontGetDescent",
-    "CTFontGetLeading",
-    "CTFontGetCapHeight",
-    "CTFontGetXHeight",
-    "CTFontGetSlantAngle",
-    "CTFontGetUnderlinePosition",
-    "CTFontGetUnderlineThickness",
-    "CTFontGetBoundingBox",
-    "CTFontGetBoundingRectsForGlyphs",
-    "CTFontGetAdvancesForGlyphs",
-    "CTFontGetGlyphsForCharacters",
-    "CTFontDrawGlyphs",
-    "CTFontCreatePathForGlyph",
-    "CTFontDescriptorCopyAttribute",
-    "CTFontCopyAttribute",
-    "CTFontCopyTraits",
-    "CTFontDescriptorCreateWithAttributes",
-    "CTFontDescriptorCreateMatchingFontDescriptor",
-    "CTFontCreateWithFontDescriptor",
-    "CTFontCopyTable",
-    "CTFontCopyDefaultCascadeListForLanguages",
-    "CTFontManagerCopyAvailableFontFamilyNames",
-    "CTFontManagerCreateFontDescriptorsFromURL",
-    "CTFontManagerCreateFontDescriptorFromData",
-    "CTFontDescriptorCreateCopyWithAttributes",
-    "CTFontDescriptorCreateWithNameAndSize",
-    "CTFontDescriptorCreateMatchingFontDescriptors",
-    "CTFontCreateCopyWithAttributes",
-    "CTFontCreateWithGraphicsFont",
-    "CTGetCoreTextVersion",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    macro_rules! at {
-        ($function:expr) => {
-            $function as *const () as usize as u64
-        };
+exports::exports! {
+    functions {
+        "CTFontCreateUIFontForLanguage" => CTFontCreateUIFontForLanguage,
+        "CTFontCreateWithName" => CTFontCreateWithName,
+        "CTFontCopyFontDescriptor" => CTFontCopyFontDescriptor,
+        "CTFontCopyGraphicsFont" => CTFontCopyGraphicsFont,
+        "CTFontCopyName" => CTFontCopyName,
+        "CTFontCopyFamilyName" => CTFontCopyFamilyName,
+        "CTFontCopyPostScriptName" => CTFontCopyPostScriptName,
+        "CTFontGetSymbolicTraits" => CTFontGetSymbolicTraits,
+        "CTFontGetUnitsPerEm" => CTFontGetUnitsPerEm,
+        "CTFontGetSize" => CTFontGetSize,
+        "CTFontGetAscent" => CTFontGetAscent,
+        "CTFontGetDescent" => CTFontGetDescent,
+        "CTFontGetLeading" => CTFontGetLeading,
+        "CTFontGetCapHeight" => CTFontGetCapHeight,
+        "CTFontGetXHeight" => CTFontGetXHeight,
+        "CTFontGetSlantAngle" => CTFontGetSlantAngle,
+        "CTFontGetUnderlinePosition" => CTFontGetUnderlinePosition,
+        "CTFontGetUnderlineThickness" => CTFontGetUnderlineThickness,
+        "CTFontGetBoundingBox" => CTFontGetBoundingBox,
+        "CTFontGetBoundingRectsForGlyphs" => CTFontGetBoundingRectsForGlyphs,
+        "CTFontGetAdvancesForGlyphs" => CTFontGetAdvancesForGlyphs,
+        "CTFontGetGlyphsForCharacters" => CTFontGetGlyphsForCharacters,
+        "CTFontDrawGlyphs" => CTFontDrawGlyphs,
+        "CTFontCreatePathForGlyph" => CTFontCreatePathForGlyph,
+        "CTFontDescriptorCopyAttribute" => CTFontDescriptorCopyAttribute,
+        "CTFontCopyAttribute" => CTFontCopyAttribute,
+        "CTFontCopyTraits" => CTFontCopyTraits,
+        "CTFontDescriptorCreateWithAttributes" => CTFontDescriptorCreateWithAttributes,
+        "CTFontDescriptorCreateMatchingFontDescriptor" => CTFontDescriptorCreateMatchingFontDescriptor,
+        "CTFontCreateWithFontDescriptor" => CTFontCreateWithFontDescriptor,
+        "CTFontCopyTable" => CTFontCopyTable,
+        "CTFontCopyDefaultCascadeListForLanguages" => CTFontCopyDefaultCascadeListForLanguages,
+        "CTFontManagerCopyAvailableFontFamilyNames" => CTFontManagerCopyAvailableFontFamilyNames,
+        "CTFontManagerCreateFontDescriptorsFromURL" => CTFontManagerCreateFontDescriptorsFromURL,
+        "CTFontManagerCreateFontDescriptorFromData" => CTFontManagerCreateFontDescriptorFromData,
+        "CTFontDescriptorCreateCopyWithAttributes" => CTFontDescriptorCreateCopyWithAttributes,
+        "CTFontDescriptorCreateWithNameAndSize" => CTFontDescriptorCreateWithNameAndSize,
+        "CTFontDescriptorCreateMatchingFontDescriptors" => CTFontDescriptorCreateMatchingFontDescriptors,
+        "CTFontCreateCopyWithAttributes" => CTFontCreateCopyWithAttributes,
+        "CTFontCreateWithGraphicsFont" => CTFontCreateWithGraphicsFont,
+        "CTGetCoreTextVersion" => CTGetCoreTextVersion,
     }
-    Some(match name {
-        "CTFontCreateUIFontForLanguage" => at!(CTFontCreateUIFontForLanguage),
-        "CTFontCreateWithName" => at!(CTFontCreateWithName),
-        "CTFontCopyFontDescriptor" => at!(CTFontCopyFontDescriptor),
-        "CTFontCopyGraphicsFont" => at!(CTFontCopyGraphicsFont),
-        "CTFontCopyName" => at!(CTFontCopyName),
-        "CTFontCopyFamilyName" => at!(CTFontCopyFamilyName),
-        "CTFontCopyPostScriptName" => at!(CTFontCopyPostScriptName),
-        "CTFontGetSymbolicTraits" => at!(CTFontGetSymbolicTraits),
-        "CTFontGetUnitsPerEm" => at!(CTFontGetUnitsPerEm),
-        "CTFontGetSize" => at!(CTFontGetSize),
-        "CTFontGetAscent" => at!(CTFontGetAscent),
-        "CTFontGetDescent" => at!(CTFontGetDescent),
-        "CTFontGetLeading" => at!(CTFontGetLeading),
-        "CTFontGetCapHeight" => at!(CTFontGetCapHeight),
-        "CTFontGetXHeight" => at!(CTFontGetXHeight),
-        "CTFontGetSlantAngle" => at!(CTFontGetSlantAngle),
-        "CTFontGetUnderlinePosition" => at!(CTFontGetUnderlinePosition),
-        "CTFontGetUnderlineThickness" => at!(CTFontGetUnderlineThickness),
-        "CTFontGetBoundingBox" => at!(CTFontGetBoundingBox),
-        "CTFontGetBoundingRectsForGlyphs" => at!(CTFontGetBoundingRectsForGlyphs),
-        "CTFontGetAdvancesForGlyphs" => at!(CTFontGetAdvancesForGlyphs),
-        "CTFontGetGlyphsForCharacters" => at!(CTFontGetGlyphsForCharacters),
-        "CTFontDrawGlyphs" => at!(CTFontDrawGlyphs),
-        "CTFontCreatePathForGlyph" => at!(CTFontCreatePathForGlyph),
-        "CTFontDescriptorCopyAttribute" => at!(CTFontDescriptorCopyAttribute),
-        "CTFontCopyAttribute" => at!(CTFontCopyAttribute),
-        "CTFontCopyTraits" => at!(CTFontCopyTraits),
-        "CTFontDescriptorCreateWithAttributes" => at!(CTFontDescriptorCreateWithAttributes),
-        "CTFontDescriptorCreateMatchingFontDescriptor" => {
-            at!(CTFontDescriptorCreateMatchingFontDescriptor)
-        }
-        "CTFontCreateWithFontDescriptor" => at!(CTFontCreateWithFontDescriptor),
-        "CTFontCopyTable" => at!(CTFontCopyTable),
-        "CTFontCopyDefaultCascadeListForLanguages" => {
-            at!(CTFontCopyDefaultCascadeListForLanguages)
-        }
-        "CTFontManagerCopyAvailableFontFamilyNames" => {
-            at!(CTFontManagerCopyAvailableFontFamilyNames)
-        }
-        "CTFontManagerCreateFontDescriptorsFromURL" => {
-            at!(CTFontManagerCreateFontDescriptorsFromURL)
-        }
-        "CTFontManagerCreateFontDescriptorFromData" => {
-            at!(CTFontManagerCreateFontDescriptorFromData)
-        }
-        "CTFontDescriptorCreateCopyWithAttributes" => at!(CTFontDescriptorCreateCopyWithAttributes),
-        "CTFontDescriptorCreateWithNameAndSize" => at!(CTFontDescriptorCreateWithNameAndSize),
-        "CTFontDescriptorCreateMatchingFontDescriptors" => {
-            at!(CTFontDescriptorCreateMatchingFontDescriptors)
-        }
-        "CTFontCreateCopyWithAttributes" => at!(CTFontCreateCopyWithAttributes),
-        "CTFontCreateWithGraphicsFont" => at!(CTFontCreateWithGraphicsFont),
-        "CTGetCoreTextVersion" => at!(CTGetCoreTextVersion),
-        _ => return None,
-    })
 }
 
 pub fn data_symbols() -> Vec<(String, u64)> {

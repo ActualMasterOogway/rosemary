@@ -597,34 +597,14 @@ pub mod cf {
             .retain(|o| o.center != center || o.observer != observer);
     }
 
-    /// One entry point, as an address.
-    macro_rules! at {
-        ($f:expr) => {
-            $f as *const () as usize as u64
-        };
+    exports::exports! {
+        functions {
+            "CFNotificationCenterGetLocalCenter" => CFNotificationCenterGetLocalCenter,
+            "CFNotificationCenterGetDistributedCenter" => CFNotificationCenterGetDistributedCenter,
+            "CFNotificationCenterAddObserver" => CFNotificationCenterAddObserver,
+            "CFNotificationCenterRemoveEveryObserver" => CFNotificationCenterRemoveEveryObserver,
+        }
     }
-
-    pub fn symbol(name: &str) -> Option<u64> {
-        Some(match name {
-            "CFNotificationCenterGetLocalCenter" => at!(CFNotificationCenterGetLocalCenter),
-            "CFNotificationCenterGetDistributedCenter" => {
-                at!(CFNotificationCenterGetDistributedCenter)
-            }
-            "CFNotificationCenterAddObserver" => at!(CFNotificationCenterAddObserver),
-            "CFNotificationCenterRemoveEveryObserver" => {
-                at!(CFNotificationCenterRemoveEveryObserver)
-            }
-            _ => return None,
-        })
-    }
-
-    /// Every name [`symbol`] answers.
-    pub const NAMES: &[&str] = &[
-        "CFNotificationCenterGetLocalCenter",
-        "CFNotificationCenterGetDistributedCenter",
-        "CFNotificationCenterAddObserver",
-        "CFNotificationCenterRemoveEveryObserver",
-    ];
 }
 
 /// The default center, for a caller with no class object in hand.

@@ -313,28 +313,14 @@ pub mod cf {
         super::shared()
     }
 
-    pub fn symbol(name: &str) -> Option<u64> {
-        macro_rules! at {
-            ($f:expr) => {
-                $f as *const () as usize as u64
-            };
+    exports::exports! {
+        functions {
+            "CFLocaleGetSystem" => CFLocaleGetSystem,
+            "CFLocaleCopyCurrent" => CFLocaleCopyCurrent,
+            "CFLocaleGetIdentifier" => CFLocaleGetIdentifier,
+            "CFLocaleGetValue" => CFLocaleGetValue,
         }
-        Some(match name {
-            "CFLocaleGetSystem" => at!(CFLocaleGetSystem),
-            "CFLocaleCopyCurrent" => at!(CFLocaleCopyCurrent),
-            "CFLocaleGetIdentifier" => at!(CFLocaleGetIdentifier),
-            "CFLocaleGetValue" => at!(CFLocaleGetValue),
-            _ => return None,
-        })
     }
-
-    /// Every name [`symbol`] answers.
-    pub const NAMES: &[&str] = &[
-        "CFLocaleGetSystem",
-        "CFLocaleCopyCurrent",
-        "CFLocaleGetIdentifier",
-        "CFLocaleGetValue",
-    ];
 }
 
 pub(crate) fn install() {

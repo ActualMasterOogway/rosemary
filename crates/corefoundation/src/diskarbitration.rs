@@ -53,20 +53,12 @@ pub unsafe extern "C" fn disk_copy_description(disk: CFTypeRef) -> CFTypeRef {
     dictionary
 }
 
-pub const NAMES: &[&str] = &[
-    "DASessionCreate",
-    "DADiskCreateFromVolumePath",
-    "DADiskCopyDescription",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let function: *const () = match name {
-        "DASessionCreate" => session_create as *const (),
-        "DADiskCreateFromVolumePath" => disk_create_from_volume_path as *const (),
-        "DADiskCopyDescription" => disk_copy_description as *const (),
-        _ => return None,
-    };
-    Some(function as usize as u64)
+exports::exports! {
+    functions {
+        "DASessionCreate" => session_create,
+        "DADiskCreateFromVolumePath" => disk_create_from_volume_path,
+        "DADiskCopyDescription" => disk_copy_description,
+    }
 }
 
 pub fn data_symbols() -> Vec<(String, u64)> {

@@ -722,66 +722,29 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         .collect()
 }
 
-macro_rules! at {
-    ($f:expr) => {
-        $f as *const () as usize as u64
-    };
+exports::exports! {
+    functions {
+        "SCNetworkReachabilityCreateWithAddress" => SCNetworkReachabilityCreateWithAddress,
+        "SCNetworkReachabilityCreateWithName" => SCNetworkReachabilityCreateWithName,
+        "SCNetworkReachabilityGetFlags" => SCNetworkReachabilityGetFlags,
+        "SCNetworkReachabilitySetCallback" => SCNetworkReachabilitySetCallback,
+        "SCNetworkReachabilityScheduleWithRunLoop" => SCNetworkReachabilityScheduleWithRunLoop,
+        "SCNetworkReachabilityUnscheduleFromRunLoop" => SCNetworkReachabilityUnscheduleFromRunLoop,
+        "SCDynamicStoreCopyProxies" => SCDynamicStoreCopyProxies,
+        "SCDynamicStoreCreate" => SCDynamicStoreCreate,
+        "SCDynamicStoreKeyCreateNetworkGlobalEntity" => SCDynamicStoreKeyCreateNetworkGlobalEntity,
+        "SCDynamicStoreCopyValue" => SCDynamicStoreCopyValue,
+        "SCPreferencesCreate" => SCPreferencesCreate,
+        "SCPreferencesGetValue" => SCPreferencesGetValue,
+        "SCNetworkServiceCopy" => SCNetworkServiceCopy,
+        "SCNetworkServiceGetInterface" => SCNetworkServiceGetInterface,
+        "SCNetworkInterfaceGetInterfaceType" => SCNetworkInterfaceGetInterfaceType,
+    }
 }
-
-pub fn symbol(name: &str) -> Option<u64> {
-    Some(match name {
-        "SCNetworkReachabilityCreateWithAddress" => at!(SCNetworkReachabilityCreateWithAddress),
-        "SCNetworkReachabilityCreateWithName" => at!(SCNetworkReachabilityCreateWithName),
-        "SCNetworkReachabilityGetFlags" => at!(SCNetworkReachabilityGetFlags),
-        "SCNetworkReachabilitySetCallback" => at!(SCNetworkReachabilitySetCallback),
-        "SCNetworkReachabilityScheduleWithRunLoop" => {
-            at!(SCNetworkReachabilityScheduleWithRunLoop)
-        }
-        "SCNetworkReachabilityUnscheduleFromRunLoop" => {
-            at!(SCNetworkReachabilityUnscheduleFromRunLoop)
-        }
-        "SCDynamicStoreCopyProxies" => at!(SCDynamicStoreCopyProxies),
-        "SCDynamicStoreCreate" => at!(SCDynamicStoreCreate),
-        "SCDynamicStoreKeyCreateNetworkGlobalEntity" => {
-            at!(SCDynamicStoreKeyCreateNetworkGlobalEntity)
-        }
-        "SCDynamicStoreCopyValue" => at!(SCDynamicStoreCopyValue),
-        "SCPreferencesCreate" => at!(SCPreferencesCreate),
-        "SCPreferencesGetValue" => at!(SCPreferencesGetValue),
-        "SCNetworkServiceCopy" => at!(SCNetworkServiceCopy),
-        "SCNetworkServiceGetInterface" => at!(SCNetworkServiceGetInterface),
-        "SCNetworkInterfaceGetInterfaceType" => at!(SCNetworkInterfaceGetInterfaceType),
-        _ => return None,
-    })
-}
-
-pub const NAMES: &[&str] = &[
-    "SCNetworkReachabilityCreateWithAddress",
-    "SCNetworkReachabilityCreateWithName",
-    "SCNetworkReachabilityGetFlags",
-    "SCNetworkReachabilitySetCallback",
-    "SCNetworkReachabilityScheduleWithRunLoop",
-    "SCNetworkReachabilityUnscheduleFromRunLoop",
-    "SCDynamicStoreCopyProxies",
-    "SCDynamicStoreCreate",
-    "SCDynamicStoreKeyCreateNetworkGlobalEntity",
-    "SCDynamicStoreCopyValue",
-    "SCPreferencesCreate",
-    "SCPreferencesGetValue",
-    "SCNetworkServiceCopy",
-    "SCNetworkServiceGetInterface",
-    "SCNetworkInterfaceGetInterfaceType",
-];
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_listed_name_resolves() {
-        let missing: Vec<&&str> = NAMES.iter().filter(|n| symbol(n).is_none()).collect();
-        assert!(missing.is_empty(), "listed but unresolved: {missing:?}");
-    }
 
     /// A null argument is the one case that still answers NULL, on both hosts.
     #[test]

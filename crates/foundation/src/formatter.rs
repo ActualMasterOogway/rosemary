@@ -774,48 +774,21 @@ pub mod cf {
         ("_kCFDateFormatterPMSymbol", PM_SYMBOL),
     ];
 
-    macro_rules! at {
-        ($f:expr) => {
-            $f as *const () as usize as u64
-        };
+    exports::exports! {
+        functions {
+            "CFNumberFormatterCreate" => CFNumberFormatterCreate,
+            "CFNumberFormatterSetProperty" => CFNumberFormatterSetProperty,
+            "CFNumberFormatterCreateStringWithNumber" => CFNumberFormatterCreateStringWithNumber,
+            "CFNumberFormatterCreateStringWithValue" => CFNumberFormatterCreateStringWithValue,
+            "CFDateFormatterCreate" => CFDateFormatterCreate,
+            "CFDateFormatterGetFormat" => CFDateFormatterGetFormat,
+            "CFDateFormatterCreateStringWithDate" => CFDateFormatterCreateStringWithDate,
+            "CFDateFormatterCopyProperty" => CFDateFormatterCopyProperty,
+            "CFCalendarCopyCurrent" => CFCalendarCopyCurrent,
+            "CFCalendarGetFirstWeekday" => CFCalendarGetFirstWeekday,
+            "CFLocaleCopyDisplayNameForPropertyValue" => CFLocaleCopyDisplayNameForPropertyValue,
+        }
     }
-
-    pub fn symbol(name: &str) -> Option<u64> {
-        Some(match name {
-            "CFNumberFormatterCreate" => at!(CFNumberFormatterCreate),
-            "CFNumberFormatterSetProperty" => at!(CFNumberFormatterSetProperty),
-            "CFNumberFormatterCreateStringWithNumber" => {
-                at!(CFNumberFormatterCreateStringWithNumber)
-            }
-            "CFNumberFormatterCreateStringWithValue" => {
-                at!(CFNumberFormatterCreateStringWithValue)
-            }
-            "CFDateFormatterCreate" => at!(CFDateFormatterCreate),
-            "CFDateFormatterGetFormat" => at!(CFDateFormatterGetFormat),
-            "CFDateFormatterCreateStringWithDate" => at!(CFDateFormatterCreateStringWithDate),
-            "CFDateFormatterCopyProperty" => at!(CFDateFormatterCopyProperty),
-            "CFCalendarCopyCurrent" => at!(CFCalendarCopyCurrent),
-            "CFCalendarGetFirstWeekday" => at!(CFCalendarGetFirstWeekday),
-            "CFLocaleCopyDisplayNameForPropertyValue" => {
-                at!(CFLocaleCopyDisplayNameForPropertyValue)
-            }
-            _ => return None,
-        })
-    }
-
-    pub const NAMES: &[&str] = &[
-        "CFNumberFormatterCreate",
-        "CFNumberFormatterSetProperty",
-        "CFNumberFormatterCreateStringWithNumber",
-        "CFNumberFormatterCreateStringWithValue",
-        "CFDateFormatterCreate",
-        "CFDateFormatterGetFormat",
-        "CFDateFormatterCreateStringWithDate",
-        "CFDateFormatterCopyProperty",
-        "CFCalendarCopyCurrent",
-        "CFCalendarGetFirstWeekday",
-        "CFLocaleCopyDisplayNameForPropertyValue",
-    ];
 }
 
 #[cfg(test)]
@@ -906,15 +879,5 @@ mod tests {
         assert_eq!(first_weekday("DE"), 2);
         assert_eq!(first_weekday("FR"), 2);
         assert_eq!(first_weekday("JP"), 1);
-    }
-
-    #[test]
-    fn every_listed_name_resolves() {
-        let missing: Vec<&str> = cf::NAMES
-            .iter()
-            .copied()
-            .filter(|n| cf::symbol(n).is_none())
-            .collect();
-        assert!(missing.is_empty(), "listed but unresolved: {missing:?}");
     }
 }

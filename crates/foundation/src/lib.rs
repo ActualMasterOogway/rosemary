@@ -87,32 +87,17 @@ pub fn bootstrap() {
     });
 }
 
-/// The C entry points this crate answers, from whichever module owns them.
-///
-/// Bundle and search-path calls are CoreFoundation and Foundation spellings of
-/// questions only this crate can answer - `corefoundation` is underneath it and
-/// has neither an `NSBundle` nor a `$HOME`.
-pub fn symbol(name: &str) -> Option<u64> {
-    paths::symbol(name)
-        .or_else(|| bundle::cf::symbol(name))
-        .or_else(|| notification::cf::symbol(name))
-        .or_else(|| runtime::symbol(name))
-        .or_else(|| locale::cf::symbol(name))
-        .or_else(|| formatter::cf::symbol(name))
-        .or_else(|| timer::cf::symbol(name))
-}
-
-/// Every name [`symbol`] answers.
-pub fn names() -> impl Iterator<Item = &'static str> {
-    paths::NAMES
-        .iter()
-        .chain(bundle::cf::NAMES)
-        .chain(notification::cf::NAMES)
-        .chain(runtime::NAMES)
-        .chain(locale::cf::NAMES)
-        .chain(formatter::cf::NAMES)
-        .chain(timer::cf::NAMES)
-        .copied()
+exports::group! {
+    paths,
+    /// Bundle and search-path calls are CoreFoundation and Foundation spellings
+    /// of questions only this crate can answer - `corefoundation` is underneath
+    /// it and has neither an `NSBundle` nor a `$HOME`.
+    bundle::cf,
+    notification::cf,
+    runtime,
+    locale::cf,
+    formatter::cf,
+    timer::cf,
 }
 
 /// This user's home directory.

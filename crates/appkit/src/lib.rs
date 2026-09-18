@@ -95,143 +95,105 @@ pub fn bootstrap() {
     });
 }
 
-macro_rules! at {
-    ($f:expr) => {
-        $f as *const () as usize as u64
-    };
-}
-
-pub fn symbol(name: &str) -> Option<u64> {
-    bootstrap();
-    Some(match name {
-        "NSApplicationMain" => at!(application::NSApplicationMain),
-        "CGMainDisplayID" => at!(screen::CGMainDisplayID),
-        "CGSessionCopyCurrentDictionary" => at!(screen::CGSessionCopyCurrentDictionary),
-        "CGDisplayBounds" => at!(screen::CGDisplayBounds),
-        "CGDisplayScreenSize" => at!(screen::CGDisplayScreenSize),
-        "CGDisplayIsMain" => at!(screen::CGDisplayIsMain),
-        "CGDisplayIsOnline" => at!(screen::CGDisplayIsOnline),
-        "CGDisplayIsAsleep" => at!(screen::CGDisplayIsAsleep),
-        "CGDisplayMirrorsDisplay" => at!(screen::CGDisplayMirrorsDisplay),
-        "CGDisplayModelNumber" => at!(screen::CGDisplayModelNumber),
-        "CGDisplayVendorNumber" => at!(screen::CGDisplayVendorNumber),
-        "CGDisplaySerialNumber" => at!(screen::CGDisplaySerialNumber),
-        "CGDisplayCopyDisplayMode" => at!(screen::CGDisplayCopyDisplayMode),
-        "CGDisplayModeGetRefreshRate" => at!(screen::CGDisplayModeGetRefreshRate),
-        "CGDisplayModeRelease" => at!(screen::CGDisplayModeRelease),
-        "CGDisplayModeRetain" => at!(screen::CGDisplayModeRetain),
-        "CGDisplayCopyAllDisplayModes" => at!(screen::CGDisplayCopyAllDisplayModes),
-        "CGDisplayModeGetWidth" => at!(screen::CGDisplayModeGetWidth),
-        "CGDisplayModeGetHeight" => at!(screen::CGDisplayModeGetHeight),
-        "CGDisplayModeGetPixelWidth" => at!(screen::CGDisplayModeGetPixelWidth),
-        "CGDisplayModeGetPixelHeight" => at!(screen::CGDisplayModeGetPixelHeight),
-        "CGDisplayModeGetIOFlags" => at!(screen::CGDisplayModeGetIOFlags),
-        "CGDisplayModeIsUsableForDesktopGUI" => at!(screen::CGDisplayModeIsUsableForDesktopGUI),
-        "CGDisplayRegisterReconfigurationCallback" => {
-            at!(screen::CGDisplayRegisterReconfigurationCallback)
-        }
-        "CGDisplayRemoveReconfigurationCallback" => {
-            at!(screen::CGDisplayRemoveReconfigurationCallback)
-        }
-        "CGGetDisplaysWithRect" => at!(screen::CGGetDisplaysWithRect),
-        "CGDisplayCreateUUIDFromDisplayID" => at!(screen::CGDisplayCreateUUIDFromDisplayID),
-        "CGDisplayGetDisplayIDFromUUID" => at!(screen::CGDisplayGetDisplayIDFromUUID),
-        "NSBitsPerSampleFromDepth" => at!(screen::NSBitsPerSampleFromDepth),
-        "NSBitsPerPixelFromDepth" => at!(screen::NSBitsPerPixelFromDepth),
-        "NSNumberOfColorComponents" => at!(screen::NSNumberOfColorComponents),
-        "NSPlanarFromDepth" => at!(screen::NSPlanarFromDepth),
-        "NSColorSpaceFromDepth" => at!(screen::NSColorSpaceFromDepth),
-        "NSBestDepth" => at!(screen::NSBestDepth),
-        // The two lists differ only in whether a mirrored display is named,
-        // and nothing here mirrors.
-        "CGGetOnlineDisplayList" | "CGGetActiveDisplayList" => {
-            at!(screen::CGGetOnlineDisplayList)
-        }
-        "CGDisplayIDToOpenGLDisplayMask" => at!(screen::CGDisplayIDToOpenGLDisplayMask),
-        "CGDisplayIOServicePort" => at!(screen::CGDisplayIOServicePort),
-        "CGWarpMouseCursorPosition" => at!(screen::CGWarpMouseCursorPosition),
-        "CGAssociateMouseAndMouseCursorPosition" => {
-            at!(screen::CGAssociateMouseAndMouseCursorPosition)
-        }
-        "CGEventSourceKeyState" => at!(screen::CGEventSourceKeyState),
-        "CGEventCreate" => at!(cgevent::CGEventCreate),
-        "CGEventGetLocation" => at!(cgevent::CGEventGetLocation),
-        "CGEventCreateMouseEvent" => at!(cgevent::CGEventCreateMouseEvent),
-        "CGEventSetType" => at!(cgevent::CGEventSetType),
-        "CGEventPost" => at!(cgevent::CGEventPost),
-        "CGColorSpaceCreateWithName" => at!(graphics::CGColorSpaceCreateWithName),
-        "CGColorSpaceCreateDeviceRGB" => at!(graphics::CGColorSpaceCreateDeviceRGB),
-        "CGColorSpaceRelease" => at!(graphics::CGColorSpaceRelease),
-        "CGDataProviderCreateWithData" => at!(graphics::CGDataProviderCreateWithData),
-        "CGDataProviderRelease" => at!(graphics::CGDataProviderRelease),
-        "CGImageCreate" => at!(graphics::CGImageCreate),
-        "CGImageCreateCopyWithColorSpace" => at!(graphics::CGImageCreateCopyWithColorSpace),
-        "CGImageRetain" => at!(graphics::CGImageRetain),
-        "CGImageRelease" => at!(graphics::CGImageRelease),
-        "CGImageGetWidth" => at!(graphics::CGImageGetWidth),
-        "CGImageGetHeight" => at!(graphics::CGImageGetHeight),
-        "CGImageGetBitsPerComponent" => at!(graphics::CGImageGetBitsPerComponent),
-        "CGImageGetAlphaInfo" => at!(graphics::CGImageGetAlphaInfo),
-        "CGImageGetColorSpace" => at!(graphics::CGImageGetColorSpace),
-        "CGRectGetWidth" => at!(geometry::CGRectGetWidth),
-        "CGRectGetHeight" => at!(geometry::CGRectGetHeight),
-        "CGRectGetMinX" => at!(geometry::CGRectGetMinX),
-        "CGRectGetMidX" => at!(geometry::CGRectGetMidX),
-        "CGRectGetMaxX" => at!(geometry::CGRectGetMaxX),
-        "CGRectGetMinY" => at!(geometry::CGRectGetMinY),
-        "CGRectGetMidY" => at!(geometry::CGRectGetMidY),
-        "CGRectGetMaxY" => at!(geometry::CGRectGetMaxY),
-        "NSPointInRect" => at!(geometry::NSPointInRect),
-        "NSMouseInRect" => at!(geometry::NSMouseInRect),
-        "NSInsetRect" => at!(geometry::NSInsetRect),
-        "GetCurrentKeyModifiers" => at!(keymap::GetCurrentKeyModifiers),
-        "TISCopyCurrentKeyboardInputSource" => at!(textinput::TISCopyCurrentKeyboardInputSource),
-        "TISCopyInputMethodKeyboardLayoutOverride" => {
-            at!(textinput::TISCopyInputMethodKeyboardLayoutOverride)
-        }
-        "TISCopyCurrentKeyboardLayoutInputSource" => {
-            at!(textinput::TISCopyCurrentKeyboardLayoutInputSource)
-        }
-        "TISCopyCurrentASCIICapableKeyboardInputSource" => {
-            at!(textinput::TISCopyCurrentASCIICapableKeyboardInputSource)
-        }
-        "TISCopyCurrentASCIICapableKeyboardLayoutInputSource" => {
-            at!(textinput::TISCopyCurrentASCIICapableKeyboardLayoutInputSource)
-        }
-        "TISCopyInputSourceForLanguage" => at!(textinput::TISCopyInputSourceForLanguage),
-        "TISCreateInputSourceList" => at!(textinput::TISCreateInputSourceList),
-        "TISCreateASCIICapableInputSourceList" => {
-            at!(textinput::TISCreateASCIICapableInputSourceList)
-        }
-        "TISSelectInputSource" => at!(textinput::TISSelectInputSource),
-        "TISDeselectInputSource" => at!(textinput::TISDeselectInputSource),
-        "TISEnableInputSource" => at!(textinput::TISEnableInputSource),
-        "TISDisableInputSource" => at!(textinput::TISDisableInputSource),
-        "TISGetInputSourceProperty" => at!(textinput::TISGetInputSourceProperty),
-        "KBGetLayoutType" => at!(textinput::KBGetLayoutType),
-        "LMGetKbdType" => at!(textinput::LMGetKbdType),
-        "LMGetKbdLast" => at!(textinput::LMGetKbdLast),
-        "UCKeyTranslate" => at!(textinput::UCKeyTranslate),
-        "CGLEnable" => at!(CGLEnable),
-        "CGLDisable" => at!(CGLDisable),
-        "CGLSetParameter" => at!(CGLSetParameter),
-        other => {
-            return pasteboard_manager::symbol(other)
-                .or_else(|| coretext::symbol(other))
-                .or_else(|| cgcontext::symbol(other));
-        }
-    })
-}
-
-/// Every name [`symbol`] answers, this crate's and the Pasteboard Manager's.
-pub fn names() -> Vec<&'static str> {
-    NAMES
-        .iter()
-        .copied()
-        .chain(pasteboard_manager::NAMES.iter().copied())
-        .chain(coretext::NAMES.iter().copied())
-        .chain(cgcontext::NAMES.iter().copied())
-        .collect()
+exports::exports! {
+    functions {
+        "NSApplicationMain" => application::NSApplicationMain,
+        "CGMainDisplayID" => screen::CGMainDisplayID,
+        "CGSessionCopyCurrentDictionary" => screen::CGSessionCopyCurrentDictionary,
+        "CGDisplayBounds" => screen::CGDisplayBounds,
+        "CGDisplayScreenSize" => screen::CGDisplayScreenSize,
+        "CGDisplayIsMain" => screen::CGDisplayIsMain,
+        "CGDisplayIsOnline" => screen::CGDisplayIsOnline,
+        "CGDisplayIsAsleep" => screen::CGDisplayIsAsleep,
+        "CGDisplayMirrorsDisplay" => screen::CGDisplayMirrorsDisplay,
+        "CGDisplayModelNumber" => screen::CGDisplayModelNumber,
+        "CGDisplayVendorNumber" => screen::CGDisplayVendorNumber,
+        "CGDisplaySerialNumber" => screen::CGDisplaySerialNumber,
+        "CGDisplayCopyDisplayMode" => screen::CGDisplayCopyDisplayMode,
+        "CGDisplayModeGetRefreshRate" => screen::CGDisplayModeGetRefreshRate,
+        "CGDisplayModeRelease" => screen::CGDisplayModeRelease,
+        "CGDisplayModeRetain" => screen::CGDisplayModeRetain,
+        "CGDisplayCopyAllDisplayModes" => screen::CGDisplayCopyAllDisplayModes,
+        "CGDisplayModeGetWidth" => screen::CGDisplayModeGetWidth,
+        "CGDisplayModeGetHeight" => screen::CGDisplayModeGetHeight,
+        "CGDisplayModeGetPixelWidth" => screen::CGDisplayModeGetPixelWidth,
+        "CGDisplayModeGetPixelHeight" => screen::CGDisplayModeGetPixelHeight,
+        "CGDisplayModeGetIOFlags" => screen::CGDisplayModeGetIOFlags,
+        "CGDisplayModeIsUsableForDesktopGUI" => screen::CGDisplayModeIsUsableForDesktopGUI,
+        "CGDisplayRegisterReconfigurationCallback" => screen::CGDisplayRegisterReconfigurationCallback,
+        "CGDisplayRemoveReconfigurationCallback" => screen::CGDisplayRemoveReconfigurationCallback,
+        "CGGetDisplaysWithRect" => screen::CGGetDisplaysWithRect,
+        "CGDisplayCreateUUIDFromDisplayID" => screen::CGDisplayCreateUUIDFromDisplayID,
+        "CGDisplayGetDisplayIDFromUUID" => screen::CGDisplayGetDisplayIDFromUUID,
+        "NSBitsPerSampleFromDepth" => screen::NSBitsPerSampleFromDepth,
+        "NSBitsPerPixelFromDepth" => screen::NSBitsPerPixelFromDepth,
+        "NSNumberOfColorComponents" => screen::NSNumberOfColorComponents,
+        "NSPlanarFromDepth" => screen::NSPlanarFromDepth,
+        "NSColorSpaceFromDepth" => screen::NSColorSpaceFromDepth,
+        "NSBestDepth" => screen::NSBestDepth,
+        "CGGetOnlineDisplayList" | "CGGetActiveDisplayList" => screen::CGGetOnlineDisplayList,
+        "CGDisplayIDToOpenGLDisplayMask" => screen::CGDisplayIDToOpenGLDisplayMask,
+        "CGDisplayIOServicePort" => screen::CGDisplayIOServicePort,
+        "CGWarpMouseCursorPosition" => screen::CGWarpMouseCursorPosition,
+        "CGAssociateMouseAndMouseCursorPosition" => screen::CGAssociateMouseAndMouseCursorPosition,
+        "CGEventSourceKeyState" => screen::CGEventSourceKeyState,
+        "CGEventCreate" => cgevent::CGEventCreate,
+        "CGEventGetLocation" => cgevent::CGEventGetLocation,
+        "CGEventCreateMouseEvent" => cgevent::CGEventCreateMouseEvent,
+        "CGEventSetType" => cgevent::CGEventSetType,
+        "CGEventPost" => cgevent::CGEventPost,
+        "CGColorSpaceCreateWithName" => graphics::CGColorSpaceCreateWithName,
+        "CGColorSpaceCreateDeviceRGB" => graphics::CGColorSpaceCreateDeviceRGB,
+        "CGColorSpaceRelease" => graphics::CGColorSpaceRelease,
+        "CGDataProviderCreateWithData" => graphics::CGDataProviderCreateWithData,
+        "CGDataProviderRelease" => graphics::CGDataProviderRelease,
+        "CGImageCreate" => graphics::CGImageCreate,
+        "CGImageCreateCopyWithColorSpace" => graphics::CGImageCreateCopyWithColorSpace,
+        "CGImageRetain" => graphics::CGImageRetain,
+        "CGImageRelease" => graphics::CGImageRelease,
+        "CGImageGetWidth" => graphics::CGImageGetWidth,
+        "CGImageGetHeight" => graphics::CGImageGetHeight,
+        "CGImageGetBitsPerComponent" => graphics::CGImageGetBitsPerComponent,
+        "CGImageGetAlphaInfo" => graphics::CGImageGetAlphaInfo,
+        "CGImageGetColorSpace" => graphics::CGImageGetColorSpace,
+        "CGRectGetWidth" => geometry::CGRectGetWidth,
+        "CGRectGetHeight" => geometry::CGRectGetHeight,
+        "CGRectGetMinX" => geometry::CGRectGetMinX,
+        "CGRectGetMidX" => geometry::CGRectGetMidX,
+        "CGRectGetMaxX" => geometry::CGRectGetMaxX,
+        "CGRectGetMinY" => geometry::CGRectGetMinY,
+        "CGRectGetMidY" => geometry::CGRectGetMidY,
+        "CGRectGetMaxY" => geometry::CGRectGetMaxY,
+        "NSPointInRect" => geometry::NSPointInRect,
+        "NSMouseInRect" => geometry::NSMouseInRect,
+        "NSInsetRect" => geometry::NSInsetRect,
+        "GetCurrentKeyModifiers" => keymap::GetCurrentKeyModifiers,
+        "TISCopyCurrentKeyboardInputSource" => textinput::TISCopyCurrentKeyboardInputSource,
+        "TISCopyInputMethodKeyboardLayoutOverride" => textinput::TISCopyInputMethodKeyboardLayoutOverride,
+        "TISCopyCurrentKeyboardLayoutInputSource" => textinput::TISCopyCurrentKeyboardLayoutInputSource,
+        "TISCopyCurrentASCIICapableKeyboardInputSource" => textinput::TISCopyCurrentASCIICapableKeyboardInputSource,
+        "TISCopyCurrentASCIICapableKeyboardLayoutInputSource" => textinput::TISCopyCurrentASCIICapableKeyboardLayoutInputSource,
+        "TISCopyInputSourceForLanguage" => textinput::TISCopyInputSourceForLanguage,
+        "TISCreateInputSourceList" => textinput::TISCreateInputSourceList,
+        "TISCreateASCIICapableInputSourceList" => textinput::TISCreateASCIICapableInputSourceList,
+        "TISSelectInputSource" => textinput::TISSelectInputSource,
+        "TISDeselectInputSource" => textinput::TISDeselectInputSource,
+        "TISEnableInputSource" => textinput::TISEnableInputSource,
+        "TISDisableInputSource" => textinput::TISDisableInputSource,
+        "TISGetInputSourceProperty" => textinput::TISGetInputSourceProperty,
+        "KBGetLayoutType" => textinput::KBGetLayoutType,
+        "LMGetKbdType" => textinput::LMGetKbdType,
+        "LMGetKbdLast" => textinput::LMGetKbdLast,
+        "UCKeyTranslate" => textinput::UCKeyTranslate,
+        "CGLEnable" => CGLEnable,
+        "CGLDisable" => CGLDisable,
+        "CGLSetParameter" => CGLSetParameter,
+    }
+    groups {
+        pasteboard_manager,
+        coretext,
+        cgcontext,
+    }
 }
 
 pub const NAMES: &[&str] = &[
@@ -565,16 +527,6 @@ const APPKIT_VERSION: f64 = 2022.0;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_listed_name_resolves() {
-        let missing: Vec<&str> = NAMES
-            .iter()
-            .copied()
-            .filter(|n| symbol(n).is_none())
-            .collect();
-        assert!(missing.is_empty(), "listed but unresolved: {missing:?}");
-    }
 
     /// A data symbol is the address of a word holding the value, never the value
     /// itself: the guest loads through it. The check is that reading the cell

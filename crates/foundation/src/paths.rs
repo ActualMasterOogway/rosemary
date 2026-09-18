@@ -142,25 +142,10 @@ unsafe extern "C" fn temporary_directory() -> Id {
     })
 }
 
-/// One entry point, as an address.
-macro_rules! at {
-    ($f:expr) => {
-        $f as *const () as usize as u64
-    };
+exports::exports! {
+    functions {
+        "NSSearchPathForDirectoriesInDomains" => search_path,
+        "NSHomeDirectory" => home_directory,
+        "NSTemporaryDirectory" => temporary_directory,
+    }
 }
-
-pub fn symbol(name: &str) -> Option<u64> {
-    Some(match name {
-        "NSSearchPathForDirectoriesInDomains" => at!(search_path),
-        "NSHomeDirectory" => at!(home_directory),
-        "NSTemporaryDirectory" => at!(temporary_directory),
-        _ => return None,
-    })
-}
-
-/// Every name [`symbol`] answers.
-pub const NAMES: &[&str] = &[
-    "NSSearchPathForDirectoriesInDomains",
-    "NSHomeDirectory",
-    "NSTemporaryDirectory",
-];

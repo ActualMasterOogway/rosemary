@@ -15,24 +15,14 @@ use objc::sel::Sel;
 
 use crate::define::methods;
 
-pub const NAMES: &[&str] = &[
-    "NSSelectorFromString",
-    "NSStringFromSelector",
-    "NSClassFromString",
-    "NSStringFromClass",
-    "NSFileTypeForHFSTypeCode",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "NSSelectorFromString" => NSSelectorFromString as *const (),
-        "NSStringFromSelector" => NSStringFromSelector as *const (),
-        "NSClassFromString" => NSClassFromString as *const (),
-        "NSStringFromClass" => NSStringFromClass as *const (),
-        "NSFileTypeForHFSTypeCode" => NSFileTypeForHFSTypeCode as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
+exports::exports! {
+    functions {
+        "NSSelectorFromString" => NSSelectorFromString,
+        "NSStringFromSelector" => NSStringFromSelector,
+        "NSClassFromString" => NSClassFromString,
+        "NSStringFromClass" => NSStringFromClass,
+        "NSFileTypeForHFSTypeCode" => NSFileTypeForHFSTypeCode,
+    }
 }
 
 /// The text of an `NSString` argument, or `None` when it is nil or not one.

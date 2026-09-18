@@ -436,58 +436,26 @@ pub unsafe extern "C" fn PasteboardResolvePromises(handle: *const c_void) -> i32
     }
 }
 
-macro_rules! at {
-    ($f:expr) => {
-        $f as *const () as usize as u64
-    };
+exports::exports! {
+    functions {
+        "PasteboardCreate" => PasteboardCreate,
+        "PasteboardClear" => PasteboardClear,
+        "PasteboardSynchronize" => PasteboardSynchronize,
+        "PasteboardGetItemCount" => PasteboardGetItemCount,
+        "PasteboardGetItemIdentifier" => PasteboardGetItemIdentifier,
+        "PasteboardCopyItemFlavors" => PasteboardCopyItemFlavors,
+        "PasteboardCopyItemFlavorData" => PasteboardCopyItemFlavorData,
+        "PasteboardPutItemFlavor" => PasteboardPutItemFlavor,
+        "PasteboardGetItemFlavorFlags" => PasteboardGetItemFlavorFlags,
+        "PasteboardCopyName" => PasteboardCopyName,
+        "PasteboardSetPromiseKeeper" => PasteboardSetPromiseKeeper,
+        "PasteboardResolvePromises" => PasteboardResolvePromises,
+    }
 }
-
-pub fn symbol(name: &str) -> Option<u64> {
-    Some(match name {
-        "PasteboardCreate" => at!(PasteboardCreate),
-        "PasteboardClear" => at!(PasteboardClear),
-        "PasteboardSynchronize" => at!(PasteboardSynchronize),
-        "PasteboardGetItemCount" => at!(PasteboardGetItemCount),
-        "PasteboardGetItemIdentifier" => at!(PasteboardGetItemIdentifier),
-        "PasteboardCopyItemFlavors" => at!(PasteboardCopyItemFlavors),
-        "PasteboardCopyItemFlavorData" => at!(PasteboardCopyItemFlavorData),
-        "PasteboardPutItemFlavor" => at!(PasteboardPutItemFlavor),
-        "PasteboardGetItemFlavorFlags" => at!(PasteboardGetItemFlavorFlags),
-        "PasteboardCopyName" => at!(PasteboardCopyName),
-        "PasteboardSetPromiseKeeper" => at!(PasteboardSetPromiseKeeper),
-        "PasteboardResolvePromises" => at!(PasteboardResolvePromises),
-        _ => return None,
-    })
-}
-
-pub const NAMES: &[&str] = &[
-    "PasteboardCreate",
-    "PasteboardClear",
-    "PasteboardSynchronize",
-    "PasteboardGetItemCount",
-    "PasteboardGetItemIdentifier",
-    "PasteboardCopyItemFlavors",
-    "PasteboardCopyItemFlavorData",
-    "PasteboardPutItemFlavor",
-    "PasteboardGetItemFlavorFlags",
-    "PasteboardCopyName",
-    "PasteboardSetPromiseKeeper",
-    "PasteboardResolvePromises",
-];
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_listed_name_resolves() {
-        let missing: Vec<&str> = NAMES
-            .iter()
-            .copied()
-            .filter(|n| symbol(n).is_none())
-            .collect();
-        assert!(missing.is_empty(), "listed but unresolved: {missing:?}");
-    }
 
     fn string(text: &str) -> CFTypeRef {
         corefoundation::string::from_bytes(text.as_bytes(), false)
