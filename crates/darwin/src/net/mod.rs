@@ -21,8 +21,6 @@
 
 #![cfg(not(target_os = "macos"))]
 
-use machish::resolve::SyntheticDylib;
-
 pub mod addr;
 pub mod control;
 pub mod descriptor;
@@ -32,41 +30,13 @@ pub mod resolve;
 pub mod socket;
 pub mod sockopt;
 
-/// Every name this module answers, across its parts.
-pub fn names() -> impl Iterator<Item = &'static str> {
-    descriptor::NAMES
-        .iter()
-        .chain(socket::NAMES)
-        .chain(sockopt::NAMES)
-        .chain(resolve::NAMES)
-        .chain(ifaddrs::NAMES)
-        .chain(interface::NAMES)
-        .copied()
-}
-
-pub fn symbol(name: &str) -> Option<u64> {
-    descriptor::symbol(name)
-        .or_else(|| socket::symbol(name))
-        .or_else(|| sockopt::symbol(name))
-        .or_else(|| resolve::symbol(name))
-        .or_else(|| ifaddrs::symbol(name))
-        .or_else(|| interface::symbol(name))
-}
-
-pub fn provide(lib: &mut SyntheticDylib) {
-    for name in names() {
-        crate::define_fn(
-            lib,
-            &format!("_{name}"),
-            symbol(name).unwrap_or(0) as *const (),
-        );
-    }
-    crate::define_data(lib, "_in6addr_any", interface::ANY.as_ptr() as u64);
-    crate::define_data(
-        lib,
-        "_in6addr_loopback",
-        interface::LOOPBACK.as_ptr() as u64,
-    );
+exports::group! {
+    descriptor,
+    socket,
+    sockopt,
+    resolve,
+    ifaddrs,
+    interface,
 }
 
 #[cfg(test)]

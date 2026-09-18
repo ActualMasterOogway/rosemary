@@ -244,15 +244,11 @@ unsafe extern "C" fn freeifaddrs(head: *mut IfAddrs) {
     unsafe { free_list(head) };
 }
 
-pub const NAMES: &[&str] = &["getifaddrs", "freeifaddrs"];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "getifaddrs" => getifaddrs as *const (),
-        "freeifaddrs" => freeifaddrs as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
+exports::exports! {
+    functions {
+        "getifaddrs" => getifaddrs,
+        "freeifaddrs" => freeifaddrs,
+    }
 }
 
 #[cfg(test)]

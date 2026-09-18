@@ -558,15 +558,11 @@ fn is_pending_error(level: i32, name: i32, len: *const u32) -> bool {
         && unsafe { *len as usize >= core::mem::size_of::<i32>() }
 }
 
-pub const NAMES: &[&str] = &["setsockopt", "getsockopt"];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "setsockopt" => setsockopt as *const (),
-        "getsockopt" => getsockopt as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
+exports::exports! {
+    functions {
+        "setsockopt" => setsockopt,
+        "getsockopt" => getsockopt,
+    }
 }
 
 #[cfg(test)]

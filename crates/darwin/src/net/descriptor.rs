@@ -31,16 +31,12 @@ unsafe extern "C" fn dup2(from: i32, to: i32) -> i32 {
     copied
 }
 
-pub const NAMES: &[&str] = &["close", "dup", "dup2"];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "close" => close as *const (),
-        "dup" => dup as *const (),
-        "dup2" => dup2 as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
+exports::exports! {
+    functions {
+        "close" => close,
+        "dup" => dup,
+        "dup2" => dup2,
+    }
 }
 
 #[cfg(test)]

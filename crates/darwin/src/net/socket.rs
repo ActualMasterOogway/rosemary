@@ -914,52 +914,28 @@ unsafe extern "C" fn inet_ntop(
     unsafe { host_inet_ntop(af, src, dst, size) }
 }
 
-pub const NAMES: &[&str] = &[
-    "write",
-    "writev",
-    "sendfile",
-    "connectx",
-    "socket",
-    "socketpair",
-    "bind",
-    "connect",
-    "accept",
-    "getsockname",
-    "getpeername",
-    "send",
-    "recv",
-    "sendto",
-    "recvfrom",
-    "sendmsg",
-    "recvmsg",
-    "inet_pton",
-    "inet_ntop",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "write" => write as *const (),
-        "writev" => writev as *const (),
-        "sendfile" => sendfile as *const (),
-        "connectx" => connectx as *const (),
-        "socket" => socket as *const (),
-        "socketpair" => socketpair as *const (),
-        "bind" => bind as *const (),
-        "connect" => connect as *const (),
-        "accept" => accept as *const (),
-        "getsockname" => getsockname as *const (),
-        "getpeername" => getpeername as *const (),
-        "send" => send as *const (),
-        "recv" => recv as *const (),
-        "sendto" => sendto as *const (),
-        "recvfrom" => recvfrom as *const (),
-        "sendmsg" => sendmsg as *const (),
-        "recvmsg" => recvmsg as *const (),
-        "inet_pton" => inet_pton as *const (),
-        "inet_ntop" => inet_ntop as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
+exports::exports! {
+    functions {
+        "write" => write,
+        "writev" => writev,
+        "sendfile" => sendfile,
+        "connectx" => connectx,
+        "socket" => socket,
+        "socketpair" => socketpair,
+        "bind" => bind,
+        "connect" => connect,
+        "accept" => accept,
+        "getsockname" => getsockname,
+        "getpeername" => getpeername,
+        "send" => send,
+        "recv" => recv,
+        "sendto" => sendto,
+        "recvfrom" => recvfrom,
+        "sendmsg" => sendmsg,
+        "recvmsg" => recvmsg,
+        "inet_pton" => inet_pton,
+        "inet_ntop" => inet_ntop,
+    }
 }
 
 #[cfg(test)]

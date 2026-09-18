@@ -33,6 +33,9 @@ mod leaf {
             "_leaf_datum" => 0xdead_beef,
             "_OBJC_CLASS_$_Leaf" => 0x1000,
         }
+        constants {
+            "leaf_constant" => 0x2000,
+        }
     }
 }
 
@@ -94,7 +97,10 @@ fn a_published_data_symbol_keeps_the_spelling_it_was_given() {
     let mut out = Recording::default();
     leaf::provide(&mut out);
     let names: alloc::vec::Vec<&str> = out.data.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(names, ["_leaf_datum", "_OBJC_CLASS_$_Leaf"]);
+    assert_eq!(
+        names,
+        ["_leaf_datum", "_OBJC_CLASS_$_Leaf", "_leaf_constant"]
+    );
 }
 
 /// Data is published but is not part of the function lookup a `dlsym` uses.
@@ -102,6 +108,17 @@ fn a_published_data_symbol_keeps_the_spelling_it_was_given() {
 fn a_data_symbol_is_not_a_name_symbol_answers() {
     assert_eq!(leaf::symbol("_leaf_datum"), None);
     assert!(!leaf::names().contains(&"_leaf_datum"));
+}
+
+/// A constant is at a fixed address, so answering it twice - once to the loader
+/// and once to a `dlsym` - gives the same one. That is what lets it be in both.
+#[test]
+fn a_constant_is_published_and_answered() {
+    let mut out = Recording::default();
+    leaf::provide(&mut out);
+    assert!(out.symbols().contains(&"_leaf_constant"));
+    assert_eq!(leaf::symbol("leaf_constant"), Some(0x2000));
+    assert!(leaf::names().contains(&"leaf_constant"));
 }
 
 #[test]

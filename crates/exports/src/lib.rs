@@ -125,6 +125,12 @@ pub fn address(f: *const ()) -> u64 {
 /// name is the Mach-O spelling verbatim: those are not all C identifiers -
 /// `_OBJC_CLASS_$_NSView` is not - and there is no bare form to derive one from.
 ///
+/// A `constants` entry is data at a fixed address - a `static`'s, not a cell
+/// built on demand - written in the bare spelling. Being fixed is what lets
+/// `symbol()` answer it as well, so a `dlsym` of `in6addr_any` gets the address
+/// the loader bound. Ordinary `data` is left out of `symbol()`: not every such
+/// expression can be evaluated twice and give the same answer.
+///
 /// Generated: `MEMBERS`, `names()`, `symbol()`, `provide()` and `MODULE`. Data
 /// entries are deliberately absent from `names()` and `symbol()`, which are the
 /// function lookup a `dlsym` uses; publishing them is `provide()`'s job.
@@ -136,6 +142,9 @@ macro_rules! exports {
         })?
         $(data {
             $($(#[$dmeta:meta])* $dname:literal => $dvalue:expr),* $(,)?
+        })?
+        $(constants {
+            $($(#[$cmeta:meta])* $cname:literal => $cvalue:expr),* $(,)?
         })?
         $(groups {
             $($(#[$gmeta:meta])* $gmodule:ident $(:: $gtail:ident)*),* $(,)?
@@ -158,6 +167,11 @@ macro_rules! exports {
                     $(out.push($falias);)*
                 }
             )*)?
+            $($(
+                $(#[$cmeta])*
+                #[allow(unused_doc_comments)]
+                out.push($cname);
+            )*)?
             out.extend($crate::Module::all_names(MEMBERS));
             out
         }
@@ -171,6 +185,10 @@ macro_rules! exports {
                     $fname $(| $falias)* => {
                         return Some($crate::address($ftarget as *const ()));
                     }
+                )*)?
+                $($(
+                    $(#[$cmeta])*
+                    $cname => return Some($cvalue),
                 )*)?
                 _ => {}
             }
@@ -193,6 +211,11 @@ macro_rules! exports {
                 $(#[$dmeta])*
                 #[allow(unused_doc_comments)]
                 out.data($dname, $dvalue);
+            )*)?
+            $($(
+                $(#[$cmeta])*
+                #[allow(unused_doc_comments)]
+                out.data(concat!("_", $cname), $cvalue);
             )*)?
             $crate::Module::provide_all(MEMBERS, out);
         }

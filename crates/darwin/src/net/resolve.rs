@@ -486,28 +486,16 @@ unsafe extern "C" fn gethostbyaddr(addr: *const c_void, len: u32, af: i32) -> *m
     unsafe { in_darwins_shape(host_gethostbyaddr(addr, len, af)) }
 }
 
-pub const NAMES: &[&str] = &[
-    "getaddrinfo",
-    "freeaddrinfo",
-    "gai_strerror",
-    "getnameinfo",
-    "gethostbyname",
-    "gethostbyname2",
-    "gethostbyaddr",
-];
-
-pub fn symbol(name: &str) -> Option<u64> {
-    let f: *const () = match name {
-        "getaddrinfo" => getaddrinfo as *const (),
-        "freeaddrinfo" => freeaddrinfo as *const (),
-        "gai_strerror" => gai_strerror as *const (),
-        "getnameinfo" => getnameinfo as *const (),
-        "gethostbyname" => gethostbyname as *const (),
-        "gethostbyname2" => gethostbyname2 as *const (),
-        "gethostbyaddr" => gethostbyaddr as *const (),
-        _ => return None,
-    };
-    Some(f as usize as u64)
+exports::exports! {
+    functions {
+        "getaddrinfo" => getaddrinfo,
+        "freeaddrinfo" => freeaddrinfo,
+        "gai_strerror" => gai_strerror,
+        "getnameinfo" => getnameinfo,
+        "gethostbyname" => gethostbyname,
+        "gethostbyname2" => gethostbyname2,
+        "gethostbyaddr" => gethostbyaddr,
+    }
 }
 
 #[cfg(test)]
