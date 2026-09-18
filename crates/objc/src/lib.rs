@@ -68,150 +68,118 @@ pub fn bootstrap() {
     });
 }
 
-/// One entry point, as an address.
-macro_rules! at {
-    ($f:expr) => {
-        $f as *const () as usize as u64
-    };
-}
-
-/// The address `name` has in this runtime, or `None` if it defines no such
-/// symbol.
-///
-/// `name` is the C identifier, without the leading underscore a Mach-O export
-/// carries. The shape mirrors [`darwin::symbol`], and for the same reason: it is
-/// what a `dlsym` against this runtime has to answer.
-pub fn symbol(name: &str) -> Option<u64> {
-    bootstrap();
-    Some(match name {
-        // selectors
-        "sel_registerName" | "sel_getUid" => at!(api::sel_registerName),
-        "sel_getName" => at!(api::sel_getName),
-        "sel_isEqual" => at!(api::sel_isEqual),
-
-        // classes
-        "objc_getClass" => at!(api::objc_getClass),
-        "objc_lookUpClass" => at!(api::objc_lookUpClass),
-        "objc_getRequiredClass" => at!(api::objc_getRequiredClass),
-        "objc_getMetaClass" => at!(api::objc_getMetaClass),
-        "objc_allocateClassPair" => at!(api::objc_allocateClassPair),
-        "objc_registerClassPair" => at!(api::objc_registerClassPair),
-        "objc_disposeClassPair" => at!(api::objc_disposeClassPair),
-        "class_getName" => at!(api::class_getName),
-        "class_getSuperclass" => at!(api::class_getSuperclass),
-        "class_isMetaClass" => at!(api::class_isMetaClass),
-        "class_getInstanceSize" => at!(api::class_getInstanceSize),
-        "class_addMethod" => at!(api::class_addMethod),
-        "class_replaceMethod" => at!(api::class_replaceMethod),
-        "class_addIvar" => at!(api::class_addIvar),
-        "class_getInstanceVariable" => at!(api::class_getInstanceVariable),
-        "class_getInstanceMethod" => at!(api::class_getInstanceMethod),
-        "class_getClassMethod" => at!(api::class_getClassMethod),
-        "class_getMethodImplementation" => at!(api::class_getMethodImplementation),
-        "class_respondsToSelector" => at!(api::class_respondsToSelector),
-        "class_addProtocol" => at!(api::class_addProtocol),
-        "class_conformsToProtocol" => at!(api::class_conformsToProtocol),
-        "class_createInstance" => at!(api::class_createInstance),
-
-        // methods and ivars
-        "method_getImplementation" => at!(api::method_getImplementation),
-        "method_getTypeEncoding" => at!(api::method_getTypeEncoding),
-        "method_getName" => at!(api::method_getName),
-        "method_setImplementation" => at!(api::method_setImplementation),
-        "ivar_getOffset" => at!(api::ivar_getOffset),
-        "ivar_getName" => at!(api::ivar_getName),
-
-        // properties
-        "class_copyPropertyList" => at!(api::class_copyPropertyList),
-        "class_getProperty" => at!(api::class_getProperty),
-        "class_addProperty" => at!(api::class_addProperty),
-        "class_replaceProperty" => at!(api::class_replaceProperty),
-        "property_getName" => at!(api::property_getName),
-        "property_getAttributes" => at!(api::property_getAttributes),
-        "property_copyAttributeList" => at!(api::property_copyAttributeList),
-
-        // objects
-        "object_getClass" => at!(api::object_getClass),
-        "object_setClass" => at!(api::object_setClass),
-        "object_getClassName" => at!(api::object_getClassName),
-        "object_getIndexedIvars" => at!(api::object_getIndexedIvars),
-        "object_getIvar" => at!(api::object_getIvar),
-        "object_setIvar" => at!(api::object_setIvar),
-        "objc_constructInstance" => at!(api::objc_constructInstance),
-        "objc_destructInstance" => at!(api::objc_destructInstance),
-        "objc_loadClassref" => at!(api::objc_loadClassref),
-
-        // protocols
-        "objc_getProtocol" => at!(api::objc_getProtocol),
-        "objc_allocateProtocol" => at!(api::objc_allocateProtocol),
-        "objc_registerProtocol" => at!(api::objc_registerProtocol),
-        "protocol_getName" => at!(api::protocol_getName),
-        "protocol_addProtocol" => at!(api::protocol_addProtocol),
-        "protocol_addMethodDescription" => at!(api::protocol_addMethodDescription),
-        "protocol_getMethodDescription" => at!(api::protocol_getMethodDescription),
-
-        // reference counting
-        "objc_retain" => at!(api::objc_retain),
-        "objc_release" => at!(api::objc_release),
-        "objc_autorelease" => at!(api::objc_autorelease),
-        "objc_autoreleasePoolPush" => at!(api::objc_autoreleasePoolPush),
-        "objc_autoreleasePoolPop" => at!(api::objc_autoreleasePoolPop),
-        "objc_autoreleaseReturnValue" => at!(api::objc_autoreleaseReturnValue),
-        "objc_retainAutorelease" => at!(api::objc_retainAutorelease),
-        "objc_retainAutoreleaseReturnValue" => at!(api::objc_retainAutoreleaseReturnValue),
-        "objc_retainAutoreleasedReturnValue" => at!(api::objc_retainAutoreleasedReturnValue),
-        "objc_unsafeClaimAutoreleasedReturnValue" => {
-            at!(api::objc_unsafeClaimAutoreleasedReturnValue)
-        }
-        "objc_storeStrong" => at!(api::objc_storeStrong),
-        "objc_initWeak" => at!(api::objc_initWeak),
-        "objc_storeWeak" => at!(api::objc_storeWeak),
-        "objc_loadWeak" => at!(api::objc_loadWeak),
-        "objc_loadWeakRetained" => at!(api::objc_loadWeakRetained),
-        "objc_destroyWeak" => at!(api::objc_destroyWeak),
-        "objc_copyWeak" => at!(api::objc_copyWeak),
-        "objc_moveWeak" => at!(api::objc_moveWeak),
-        "objc_sync_enter" => at!(api::objc_sync_enter),
-        "objc_sync_exit" => at!(api::objc_sync_exit),
-        "objc_setAssociatedObject" => at!(api::objc_setAssociatedObject),
-        "objc_getAssociatedObject" => at!(api::objc_getAssociatedObject),
-
-        // the folded messages
-        "objc_alloc" => at!(shorthand::objc_alloc),
-        "objc_allocWithZone" => at!(shorthand::objc_allocWithZone),
-        "objc_alloc_init" => at!(shorthand::objc_alloc_init),
-        "objc_opt_new" => at!(shorthand::objc_opt_new),
-        "objc_opt_self" => at!(shorthand::objc_opt_self),
-        "objc_opt_class" => at!(shorthand::objc_opt_class),
-        "objc_opt_isKindOfClass" => at!(shorthand::objc_opt_isKindOfClass),
-        "objc_opt_respondsToSelector" => at!(shorthand::objc_opt_respondsToSelector),
-        "objc_getProperty" => at!(shorthand::objc_getProperty),
-        "objc_setProperty" => at!(shorthand::objc_setProperty),
-        "objc_setProperty_atomic" => at!(shorthand::objc_setProperty_atomic),
-        "objc_setProperty_nonatomic" => at!(shorthand::objc_setProperty_nonatomic),
-        "objc_setProperty_atomic_copy" => at!(shorthand::objc_setProperty_atomic_copy),
-        "objc_setProperty_nonatomic_copy" => at!(shorthand::objc_setProperty_nonatomic_copy),
-        "objc_retainBlock" => at!(shorthand::objc_retainBlock),
-
-        // libclosure, which is this runtime's for the reason `block` gives.
-        name if block::symbol(name).is_some() => block::symbol(name)?,
-        "objc_enumerationMutation" => at!(shorthand::objc_enumerationMutation),
-        "objc_terminate" => at!(shorthand::objc_terminate),
-
-        // the send itself
+exports::exports! {
+    functions {
+        "sel_registerName" | "sel_getUid" => api::sel_registerName,
+        "sel_getName" => api::sel_getName,
+        "sel_isEqual" => api::sel_isEqual,
+        "objc_getClass" => api::objc_getClass,
+        "objc_lookUpClass" => api::objc_lookUpClass,
+        "objc_getRequiredClass" => api::objc_getRequiredClass,
+        "objc_getMetaClass" => api::objc_getMetaClass,
+        "objc_allocateClassPair" => api::objc_allocateClassPair,
+        "objc_registerClassPair" => api::objc_registerClassPair,
+        "objc_disposeClassPair" => api::objc_disposeClassPair,
+        "class_getName" => api::class_getName,
+        "class_getSuperclass" => api::class_getSuperclass,
+        "class_isMetaClass" => api::class_isMetaClass,
+        "class_getInstanceSize" => api::class_getInstanceSize,
+        "class_addMethod" => api::class_addMethod,
+        "class_replaceMethod" => api::class_replaceMethod,
+        "class_addIvar" => api::class_addIvar,
+        "class_getInstanceVariable" => api::class_getInstanceVariable,
+        "class_getInstanceMethod" => api::class_getInstanceMethod,
+        "class_getClassMethod" => api::class_getClassMethod,
+        "class_getMethodImplementation" => api::class_getMethodImplementation,
+        "class_respondsToSelector" => api::class_respondsToSelector,
+        "class_addProtocol" => api::class_addProtocol,
+        "class_conformsToProtocol" => api::class_conformsToProtocol,
+        "class_createInstance" => api::class_createInstance,
+        "method_getImplementation" => api::method_getImplementation,
+        "method_getTypeEncoding" => api::method_getTypeEncoding,
+        "method_getName" => api::method_getName,
+        "method_setImplementation" => api::method_setImplementation,
+        "ivar_getOffset" => api::ivar_getOffset,
+        "ivar_getName" => api::ivar_getName,
+        "class_copyPropertyList" => api::class_copyPropertyList,
+        "class_getProperty" => api::class_getProperty,
+        "class_addProperty" => api::class_addProperty,
+        "class_replaceProperty" => api::class_replaceProperty,
+        "property_getName" => api::property_getName,
+        "property_getAttributes" => api::property_getAttributes,
+        "property_copyAttributeList" => api::property_copyAttributeList,
+        "object_getClass" => api::object_getClass,
+        "object_setClass" => api::object_setClass,
+        "object_getClassName" => api::object_getClassName,
+        "object_getIndexedIvars" => api::object_getIndexedIvars,
+        "object_getIvar" => api::object_getIvar,
+        "object_setIvar" => api::object_setIvar,
+        "objc_constructInstance" => api::objc_constructInstance,
+        "objc_destructInstance" => api::objc_destructInstance,
+        "objc_loadClassref" => api::objc_loadClassref,
+        "objc_getProtocol" => api::objc_getProtocol,
+        "objc_allocateProtocol" => api::objc_allocateProtocol,
+        "objc_registerProtocol" => api::objc_registerProtocol,
+        "protocol_getName" => api::protocol_getName,
+        "protocol_addProtocol" => api::protocol_addProtocol,
+        "protocol_addMethodDescription" => api::protocol_addMethodDescription,
+        "protocol_getMethodDescription" => api::protocol_getMethodDescription,
+        "objc_retain" => api::objc_retain,
+        "objc_release" => api::objc_release,
+        "objc_autorelease" => api::objc_autorelease,
+        "objc_autoreleasePoolPush" => api::objc_autoreleasePoolPush,
+        "objc_autoreleasePoolPop" => api::objc_autoreleasePoolPop,
+        "objc_autoreleaseReturnValue" => api::objc_autoreleaseReturnValue,
+        "objc_retainAutorelease" => api::objc_retainAutorelease,
+        "objc_retainAutoreleaseReturnValue" => api::objc_retainAutoreleaseReturnValue,
+        "objc_retainAutoreleasedReturnValue" => api::objc_retainAutoreleasedReturnValue,
+        "objc_unsafeClaimAutoreleasedReturnValue" => api::objc_unsafeClaimAutoreleasedReturnValue,
+        "objc_storeStrong" => api::objc_storeStrong,
+        "objc_initWeak" => api::objc_initWeak,
+        "objc_storeWeak" => api::objc_storeWeak,
+        "objc_loadWeak" => api::objc_loadWeak,
+        "objc_loadWeakRetained" => api::objc_loadWeakRetained,
+        "objc_destroyWeak" => api::objc_destroyWeak,
+        "objc_copyWeak" => api::objc_copyWeak,
+        "objc_moveWeak" => api::objc_moveWeak,
+        "objc_sync_enter" => api::objc_sync_enter,
+        "objc_sync_exit" => api::objc_sync_exit,
+        "objc_setAssociatedObject" => api::objc_setAssociatedObject,
+        "objc_getAssociatedObject" => api::objc_getAssociatedObject,
+        "objc_alloc" => shorthand::objc_alloc,
+        "objc_allocWithZone" => shorthand::objc_allocWithZone,
+        "objc_alloc_init" => shorthand::objc_alloc_init,
+        "objc_opt_new" => shorthand::objc_opt_new,
+        "objc_opt_self" => shorthand::objc_opt_self,
+        "objc_opt_class" => shorthand::objc_opt_class,
+        "objc_opt_isKindOfClass" => shorthand::objc_opt_isKindOfClass,
+        "objc_opt_respondsToSelector" => shorthand::objc_opt_respondsToSelector,
+        "objc_getProperty" => shorthand::objc_getProperty,
+        "objc_setProperty" => shorthand::objc_setProperty,
+        "objc_setProperty_atomic" => shorthand::objc_setProperty_atomic,
+        "objc_setProperty_nonatomic" => shorthand::objc_setProperty_nonatomic,
+        "objc_setProperty_atomic_copy" => shorthand::objc_setProperty_atomic_copy,
+        "objc_setProperty_nonatomic_copy" => shorthand::objc_setProperty_nonatomic_copy,
+        "objc_retainBlock" => shorthand::objc_retainBlock,
+        "objc_enumerationMutation" => shorthand::objc_enumerationMutation,
+        "objc_terminate" => shorthand::objc_terminate,
         "objc_msgSend" => msg::entry() as usize as u64,
         "objc_msgSendSuper" => msg::entry_super() as usize as u64,
         "objc_msgSendSuper2" => msg::entry_super2() as usize as u64,
-        // The `_stret` spellings are x86-64's, and are the same entry points
-        // again on AArch64, where an indirect return travels in `x8` and
-        // displaces no argument.
         "objc_msgSend_stret" => msg::entry_stret() as usize as u64,
         "objc_msgSendSuper_stret" => msg::entry_super_stret() as usize as u64,
         "objc_msgSendSuper2_stret" => msg::entry_super2_stret() as usize as u64,
-
-        _ => return None,
-    })
+    }
+    // libclosure, which is this runtime's for the reason `block` gives.
+    groups {
+        block,
+    }
 }
+
+/// The classes this crate owns, as opposed to a framework's.
+///
+/// One, and it is the one the system's libobjc owns too.
+pub const ROOT_CLASSES: &[&str] = &["NSObject"];
 
 /// The class objects this runtime exports as *data*.
 ///
@@ -242,135 +210,9 @@ pub fn class_data() -> Vec<(String, u64)> {
     data
 }
 
-/// The classes this crate owns, as opposed to a framework's.
-///
-/// One, and it is the one the system's libobjc owns too.
-pub const ROOT_CLASSES: &[&str] = &["NSObject"];
-
-/// Every name [`symbol`] answers, for [`provider`] and for the test below.
-///
-/// A second list rather than a generated one, because the match in [`symbol`] is
-/// what a reader checks against the headers and a macro would hide it.
-pub const NAMES: &[&str] = &[
-    "sel_registerName",
-    "sel_getUid",
-    "sel_getName",
-    "sel_isEqual",
-    "objc_getClass",
-    "objc_lookUpClass",
-    "objc_getRequiredClass",
-    "objc_getMetaClass",
-    "objc_allocateClassPair",
-    "objc_registerClassPair",
-    "objc_disposeClassPair",
-    "class_getName",
-    "class_getSuperclass",
-    "class_isMetaClass",
-    "class_getInstanceSize",
-    "class_addMethod",
-    "class_replaceMethod",
-    "class_addIvar",
-    "class_getInstanceVariable",
-    "class_getInstanceMethod",
-    "class_getClassMethod",
-    "class_getMethodImplementation",
-    "class_respondsToSelector",
-    "class_addProtocol",
-    "class_conformsToProtocol",
-    "class_createInstance",
-    "method_getImplementation",
-    "method_getTypeEncoding",
-    "method_getName",
-    "method_setImplementation",
-    "ivar_getOffset",
-    "ivar_getName",
-    "class_copyPropertyList",
-    "class_getProperty",
-    "class_addProperty",
-    "class_replaceProperty",
-    "property_getName",
-    "property_getAttributes",
-    "property_copyAttributeList",
-    "object_getClass",
-    "object_setClass",
-    "object_getClassName",
-    "object_getIndexedIvars",
-    "object_getIvar",
-    "object_setIvar",
-    "objc_constructInstance",
-    "objc_destructInstance",
-    "objc_loadClassref",
-    "objc_getProtocol",
-    "objc_allocateProtocol",
-    "objc_registerProtocol",
-    "protocol_getName",
-    "protocol_addProtocol",
-    "protocol_addMethodDescription",
-    "protocol_getMethodDescription",
-    "objc_retain",
-    "objc_release",
-    "objc_autorelease",
-    "objc_autoreleasePoolPush",
-    "objc_autoreleasePoolPop",
-    "objc_autoreleaseReturnValue",
-    "objc_retainAutorelease",
-    "objc_retainAutoreleaseReturnValue",
-    "objc_retainAutoreleasedReturnValue",
-    "objc_unsafeClaimAutoreleasedReturnValue",
-    "objc_storeStrong",
-    "objc_initWeak",
-    "objc_storeWeak",
-    "objc_loadWeak",
-    "objc_loadWeakRetained",
-    "objc_destroyWeak",
-    "objc_copyWeak",
-    "objc_moveWeak",
-    "objc_sync_enter",
-    "objc_sync_exit",
-    "objc_setAssociatedObject",
-    "objc_getAssociatedObject",
-    "objc_alloc",
-    "objc_allocWithZone",
-    "objc_alloc_init",
-    "objc_opt_new",
-    "objc_opt_self",
-    "objc_opt_class",
-    "objc_opt_isKindOfClass",
-    "objc_opt_respondsToSelector",
-    "objc_getProperty",
-    "objc_setProperty",
-    "objc_setProperty_atomic",
-    "objc_setProperty_nonatomic",
-    "objc_setProperty_atomic_copy",
-    "objc_setProperty_nonatomic_copy",
-    "objc_retainBlock",
-    "_Block_copy",
-    "_Block_release",
-    "_Block_object_assign",
-    "_Block_object_dispose",
-    "objc_enumerationMutation",
-    "objc_terminate",
-    "objc_msgSend",
-    "objc_msgSendSuper",
-    "objc_msgSendSuper2",
-    "objc_msgSend_stret",
-    "objc_msgSendSuper_stret",
-    "objc_msgSendSuper2_stret",
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_listed_name_resolves() {
-        let missing: Vec<&str> = NAMES
-            .iter()
-            .copied()
-            .filter(|n| symbol(n).is_none())
-            .collect();
-        assert!(missing.is_empty(), "listed but unresolved: {missing:?}");
-    }
 
     #[test]
     fn nsobject_is_installed_and_its_metaclass_chain_terminates() {
