@@ -69,7 +69,6 @@ pub unsafe fn is_c_numeric(loc: *mut core::ffi::c_void) -> Option<bool> {
 }
 
 /// The mask selecting every locale category on this host's libc.
-#[cfg(test)]
 pub(crate) fn all_mask() -> libc::c_int {
     #[cfg(target_os = "macos")]
     {
