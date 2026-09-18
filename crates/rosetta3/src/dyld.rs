@@ -1011,8 +1011,18 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
     // A handle for a library this runtime is. Scoped: a guest that opened one
     // framework and asks it for another's symbol should be told no, which is
     // what the host's loader would say.
+    //
+    // Recorded like any other host answer: what a synthetic library returns is
+    // a host address as much as `dlsym`'s is - the GL driver's entry point, or
+    // one of this runtime's own functions - and a guest that calls it through a
+    // register reaches it by no import site unless one is made here.
     if let Some(library) = synthetic::by_handle(handle) {
-        return (library.symbol)(name);
+        let addr = (library.symbol)(name)?;
+        return Some(remember_native_symbol(
+            addr,
+            name,
+            library.names.first().cloned(),
+        ));
     }
 
     // A handle from the host's loader.
@@ -1057,7 +1067,7 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
 
     // Then the libraries this runtime is, for a global search.
     if let Some(addr) = crate::frameworks::symbol(name) {
-        return Some(addr);
+        return Some(remember_native_symbol(addr, name, None));
     }
 
     // The global fallback, which is a *host* search - and one that has to go

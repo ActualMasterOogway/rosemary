@@ -22,6 +22,12 @@ pub mod block;
 /// same way [`audiounit`]'s is.
 pub mod component;
 pub mod corefoundation;
+/// Not gated: what this family bridges is a *calling convention* - a struct
+/// passed or returned by value, which the signature table cannot name - and
+/// that is true of the tree's own CoreGraphics as much as of Apple's. Every
+/// entry resolves through [`host::host_or_refuse`], so a host with no answer
+/// is refused by name rather than gated out.
+pub mod coregraphics;
 pub mod curl;
 pub(crate) mod host;
 pub mod intdiv;
@@ -42,8 +48,6 @@ pub mod zlib;
 pub mod appkit;
 #[cfg(target_os = "macos")]
 pub mod cfuuid;
-#[cfg(target_os = "macos")]
-pub mod coregraphics;
 #[cfg(target_os = "macos")]
 pub mod coremedia;
 #[cfg(target_os = "macos")]
@@ -72,6 +76,7 @@ pub type CallbackShim =
 fn platform_shim_for(name: &str) -> Option<Shim> {
     crate::objc::dispatch::shim_for(name)
         .or_else(|| component::shim_for(name))
+        .or_else(|| coregraphics::shim_for(name))
         .or_else(|| macos_shim_for(name))
 }
 
@@ -79,8 +84,7 @@ fn platform_shim_for(name: &str) -> Option<Shim> {
 /// and no Mach.
 #[cfg(target_os = "macos")]
 fn macos_shim_for(name: &str) -> Option<Shim> {
-    coregraphics::shim_for(name)
-        .or_else(|| coremedia::shim_for(name))
+    coremedia::shim_for(name)
         .or_else(|| cfuuid::shim_for(name))
         .or_else(|| appkit::shim_for(name))
         .or_else(|| machthread::shim_for(name))

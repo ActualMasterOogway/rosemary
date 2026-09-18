@@ -62,7 +62,7 @@ pub fn pthread_create(
 
     // SAFETY: `host_attr` is initialised and outlives the call, which is all
     // `pthread_create` needs - it copies what it wants out of an attribute set.
-    let result = crate::thread::spawn(GuestStart { entry, arg, stack }, unsafe {
+    let result = crate::thread::spawn(GuestStart::new(entry, arg, stack), unsafe {
         &*host_attr.as_mut_ptr()
     });
 

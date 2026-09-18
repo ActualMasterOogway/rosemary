@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell, UnsafeCell};
 use std::ffi::c_void;
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use microlift::arch::x86_64::context::RegisterContext;
 use microlift::core::link::{BlockLinkConfig, BlockLinkEntry};
@@ -650,11 +650,31 @@ pub struct GuestStart {
     pub arg: u64,
     /// Where the guest's frames go.
     pub stack: StackRequest,
+    /// Set by the new thread once its Darwin id is published. See [`spawn`].
+    published: Arc<AtomicBool>,
+}
+
+impl GuestStart {
+    pub fn new(entry: u64, arg: u64, stack: StackRequest) -> Self {
+        Self {
+            entry,
+            arg,
+            stack,
+            published: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 /// Start a host thread that runs `start` as a guest thread.
+///
+/// Returns only once the new thread has published its Darwin id, because the
+/// guest may read it the instant `pthread_create` returns: Unreal records a
+/// worker's `pthread_mach_thread_np` there and asserts on it from then on. This
+/// is `darwin::pthread::create`'s handshake, which the emulated backend cannot
+/// reuse - a guest thread needs a guest stack, so it starts here instead.
 pub fn spawn(start: GuestStart, attr: &libc::pthread_attr_t) -> Result<libc::pthread_t, i32> {
     let mut thread: libc::pthread_t = darwin::pthread::null_thread();
+    let published = Arc::clone(&start.published);
     let boxed = Box::into_raw(Box::new(start)) as *mut c_void;
     // SAFETY: `entry` is this module's own function; `boxed` is a live leaked
     // allocation which the new thread takes ownership of, and which is
@@ -664,6 +684,9 @@ pub fn spawn(start: GuestStart, attr: &libc::pthread_attr_t) -> Result<libc::pth
         // SAFETY: `pthread_create` failed, so nothing else holds the pointer.
         drop(unsafe { Box::from_raw(boxed as *mut GuestStart) });
         return Err(rc);
+    }
+    while !published.load(Ordering::Acquire) {
+        std::thread::yield_now();
     }
     Ok(thread)
 }
@@ -677,7 +700,18 @@ extern "C" fn entry(raw: *mut c_void) -> *mut c_void {
     // live at that moment is a leak once per thread that exits that way.
     // SAFETY: the pointer came from `Box::into_raw` in `spawn` and is handed to
     // exactly one thread, which is this one.
-    let GuestStart { entry, arg, stack } = *unsafe { Box::from_raw(raw as *mut GuestStart) };
+    let GuestStart {
+        entry,
+        arg,
+        stack,
+        published,
+    } = *unsafe { Box::from_raw(raw as *mut GuestStart) };
+
+    // Before anything else this thread does, and before `spawn` returns: the
+    // handle the parent is about to be handed has to name a thread whose id the
+    // registry already knows.
+    darwin::pthread::publish_self();
+    published.store(true, Ordering::Release);
 
     // `sigaltstack` is per thread. Without one here, a fault whose cause has
     // already made this thread's stack unusable takes the report with it.

@@ -37,15 +37,11 @@ fn rect_of_display(
     ctx: &mut RegisterContext,
     mem: &mut dyn GuestMemory,
 ) -> Result<()> {
-    let Some(host) = crate::host::symbol(symbol.strip_prefix('_').unwrap_or(symbol)) else {
-        return Err(AbiError::NoShim {
-            symbol: symbol.to_string(),
-        });
-    };
+    let host = host_or_refuse(symbol)?;
     let (buffer, display) = (ctx.rdi, ctx.rsi as u32);
     // SAFETY: the symbol is one [`shim_for`] matched, which really is
-    // `CGRect (*)(CGDirectDisplayID)`, and `host_symbol` resolved it out of a
-    // CoreGraphics this process has loaded.
+    // `CGRect (*)(CGDirectDisplayID)`, resolved out of whichever CoreGraphics
+    // this process has - Apple's, or this tree's own.
     let f: extern "C" fn(u32) -> CgRect =
         unsafe { core::mem::transmute::<u64, extern "C" fn(u32) -> CgRect>(host) };
     let rect = f(display);

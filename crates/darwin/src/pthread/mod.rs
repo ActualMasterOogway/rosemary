@@ -169,6 +169,21 @@ mod thread_ids {
     }
 }
 
+/// Publish this thread's Darwin id under its own `pthread_t`.
+///
+/// [`create`] does this from inside [`run`], but a runtime that starts guest
+/// threads itself - the emulated backend does, because a guest thread needs a
+/// guest stack as well as a host one - never reaches [`create`]. Without it
+/// [`mach_thread_np`] answers zero for every thread but the caller's own, and a
+/// guest that records a thread's id at creation and compares it later - which is
+/// what `IsInRenderingThread()` is - compares against zero forever.
+///
+/// Called from the new thread, before anything guest-visible runs on it.
+pub fn publish_self() {
+    // SAFETY: this thread is live by definition.
+    thread_ids::register(thread_bits(unsafe { libc::pthread_self() }), id(), 0);
+}
+
 /// Build the `init`/`destroy`/`setter`/`getter` quartet for an attribute object whose
 /// whole state is one packed word.
 macro_rules! simple_attr {
