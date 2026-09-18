@@ -166,6 +166,7 @@ fn register_dlopen_names() {
         &[
             "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/ApplicationServices",
             "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices",
+            "ApplicationServices",
         ],
         symbol,
     );
@@ -173,6 +174,7 @@ fn register_dlopen_names() {
         &[
             "/System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox",
             "/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox",
+            "AudioToolbox",
         ],
         symbol,
     );
