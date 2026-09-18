@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 machish = { path = "crates/machish" }
+exports = { path = "crates/exports" }
 darwin = { path = "crates/darwin" }
 objc = { path = "crates/objc" }
 corefoundation = { path = "crates/corefoundation" }

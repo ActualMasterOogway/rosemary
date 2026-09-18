@@ -1,0 +1,224 @@
+//! How a module declares the symbols it publishes to a guest, once.
+//!
+//! A module that stands in for part of a Darwin library used to say the same
+//! thing three times: a list of names, a `match` from name to address, and a
+//! loop that walked the list and called the `match` to fill a
+//! `SyntheticDylib`. Nothing made the three agree, and a name added to one and
+//! forgotten in another is invisible - a `dlsym` that answers null for a name
+//! the loader binds, or a published address nothing can reach. Both had
+//! happened by the time this crate was written.
+//!
+//! Here a module writes the table and this crate derives the rest, so the
+//! three views cannot disagree.
+//!
+//! No `machish` by default: the framework crates know nothing about Mach-O and
+//! must not learn, so the loader's library is a sink behind a feature that only
+//! the two crates already building one turn on.
+
+#![no_std]
+
+extern crate alloc;
+
+use alloc::vec::Vec;
+
+mod sink;
+
+/// The bare C names a module answers.
+///
+/// Named so that [`exports!`] can spell it without the calling crate needing an
+/// `alloc` of its own in scope.
+pub type Names = Vec<&'static str>;
+
+pub use sink::{Denying, NonNull, Recording};
+
+/// Where a module's symbols go.
+///
+/// Every published symbol passes through one of these two calls, so a policy
+/// that has to see all of them - refusing a null address, `ROSETTA3_WITHHOLD` -
+/// is a wrapper here rather than a copy of `define_fn` in each crate that has
+/// one.
+///
+/// Object-safe on purpose: a `fn(&mut dyn Exports)` is what lets a module be a
+/// row in a table instead of a hand-written call.
+pub trait Exports {
+    /// `symbol` is the Mach-O spelling, leading underscore included.
+    fn function(&mut self, symbol: &str, address: u64);
+    fn data(&mut self, symbol: &str, address: u64);
+}
+
+/// One module's answers, as a value.
+///
+/// The three used to be separate declarations that had to agree by hand. A row
+/// is what makes them agree by construction, and what lets the crates above
+/// hold their modules in a list rather than in a hand-ordered chain of calls
+/// that a second hand-ordered chain of calls has to mirror.
+#[derive(Clone, Copy)]
+pub struct Module {
+    /// The declaring module's path, for a test's failure message.
+    pub path: &'static str,
+    /// Every bare C name [`Module::symbol`] answers - no leading underscore,
+    /// the spelling a `dlsym` uses.
+    ///
+    /// A function rather than a slice because a group's names are its members'
+    /// and cannot be one `const`, and because a `cfg` on an entry is a
+    /// statement here rather than an element of an array literal. Nothing on a
+    /// hot path asks.
+    pub names: fn() -> Names,
+    pub symbol: fn(&str) -> Option<u64>,
+    pub provide: fn(&mut dyn Exports),
+}
+
+impl Module {
+    /// Answer with the first module that knows `name`.
+    ///
+    /// The lookup half of a table. Its order is the order of the list, which is
+    /// the same order [`Module::provide_all`] publishes in - one list, so the
+    /// two cannot diverge.
+    pub fn resolve(modules: &[Module], name: &str) -> Option<u64> {
+        modules.iter().find_map(|m| (m.symbol)(name))
+    }
+
+    /// Publish every module in `modules`.
+    pub fn provide_all(modules: &[Module], out: &mut dyn Exports) {
+        for m in modules {
+            (m.provide)(out);
+        }
+    }
+
+    /// Every name any of `modules` answers.
+    pub fn all_names(modules: &[Module]) -> Names {
+        modules.iter().flat_map(|m| (m.names)()).collect()
+    }
+}
+
+/// The address of a function, as the loader wants it.
+///
+/// One cast, rather than the copy of `macro_rules! at` that eight modules had
+/// and a ninth spelled out by hand.
+#[doc(hidden)]
+pub fn address(f: *const ()) -> u64 {
+    f as usize as u64
+}
+
+/// Declare what a module publishes.
+///
+/// Three optional sections, each written once:
+///
+/// ```ignore
+/// exports::exports! {
+///     functions {
+///         "uuid_clear" => clear,
+///         /// All three generate a version-4 UUID; see the module note.
+///         "uuid_generate" | "uuid_generate_random" | "uuid_generate_time" => generate_random,
+///         #[cfg(not(target_os = "macos"))]
+///         "uuid_parse" => parse,
+///     }
+///     data {
+///         "_NSApp" => ns_app_cell(),
+///     }
+///     groups { pasteboard_manager, coretext, cgcontext }
+/// }
+/// ```
+///
+/// A `functions` name is the bare C spelling and the Mach-O `_` is added here,
+/// so the two come from one token and no module allocates to publish. A `data`
+/// name is the Mach-O spelling verbatim: those are not all C identifiers -
+/// `_OBJC_CLASS_$_NSView` is not - and there is no bare form to derive one from.
+///
+/// Generated: `MEMBERS`, `names()`, `symbol()`, `provide()` and `MODULE`. Data
+/// entries are deliberately absent from `names()` and `symbol()`, which are the
+/// function lookup a `dlsym` uses; publishing them is `provide()`'s job.
+#[macro_export]
+macro_rules! exports {
+    (
+        $(functions {
+            $($(#[$fmeta:meta])* $fname:literal $(| $falias:literal)* => $ftarget:expr),* $(,)?
+        })?
+        $(data {
+            $($(#[$dmeta:meta])* $dname:literal => $dvalue:expr),* $(,)?
+        })?
+        $(groups {
+            $($(#[$gmeta:meta])* $gmodule:ident $(:: $gtail:ident)*),* $(,)?
+        })?
+    ) => {
+        /// The modules this one answers for, beyond its own entries.
+        pub const MEMBERS: &[$crate::Module] = &[
+            $($($(#[$gmeta])* $gmodule $(:: $gtail)* ::MODULE,)*)?
+        ];
+
+        /// Every bare C name [`symbol`] answers, this module's and its members'.
+        #[allow(unused_mut)]
+        pub fn names() -> $crate::Names {
+            let mut out = $crate::Names::new();
+            $($(
+                $(#[$fmeta])*
+                #[allow(unused_doc_comments)]
+                {
+                    out.push($fname);
+                    $(out.push($falias);)*
+                }
+            )*)?
+            out.extend($crate::Module::all_names(MEMBERS));
+            out
+        }
+
+        /// The address a guest asking for the bare C name `name` should get.
+        #[allow(unused_variables, unused_doc_comments)]
+        pub fn symbol(name: &str) -> Option<u64> {
+            match name {
+                $($(
+                    $(#[$fmeta])*
+                    $fname $(| $falias)* => {
+                        return Some($crate::address($ftarget as *const ()));
+                    }
+                )*)?
+                _ => {}
+            }
+            $crate::Module::resolve(MEMBERS, name)
+        }
+
+        /// Publish everything this module defines into `out`.
+        #[allow(unused_variables)]
+        pub fn provide(out: &mut dyn $crate::Exports) {
+            $($(
+                $(#[$fmeta])*
+                #[allow(unused_doc_comments)]
+                {
+                    let address = $crate::address($ftarget as *const ());
+                    out.function(concat!("_", $fname), address);
+                    $(out.function(concat!("_", $falias), address);)*
+                }
+            )*)?
+            $($(
+                $(#[$dmeta])*
+                #[allow(unused_doc_comments)]
+                out.data($dname, $dvalue);
+            )*)?
+            $crate::Module::provide_all(MEMBERS, out);
+        }
+
+        /// This module as a row, for the table above it.
+        pub const MODULE: $crate::Module = $crate::Module {
+            path: module_path!(),
+            names,
+            symbol,
+            provide,
+        };
+    };
+}
+
+/// Declare a module that only gathers others.
+///
+/// The short spelling of an [`exports!`] with nothing but a `groups` section,
+/// which is what every aggregator in the tree is.
+#[macro_export]
+macro_rules! group {
+    ($($(#[$meta:meta])* $module:ident $(:: $tail:ident)*),* $(,)?) => {
+        $crate::exports! {
+            groups { $($(#[$meta])* $module $(:: $tail)*),* }
+        }
+    };
+}
+
+#[cfg(test)]
+mod tests;
