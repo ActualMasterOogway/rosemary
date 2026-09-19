@@ -65,7 +65,6 @@ pub const CLAIMED: &[&str] = &[
     "strtok_r",
     "bcmp",
     "bcopy",
-    "bzero",
     "index",
     "rindex",
     // <stdlib.h>. `malloc` and friends operate on an address space both sides share.

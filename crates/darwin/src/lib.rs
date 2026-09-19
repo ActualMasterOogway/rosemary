@@ -28,6 +28,8 @@ mod atomics;
 pub mod bsd;
 pub mod callback;
 pub mod clock;
+#[cfg(not(target_os = "macos"))]
+pub mod compat;
 pub mod data;
 pub mod dirent;
 pub mod dispatch;
@@ -233,6 +235,8 @@ static MODULES: &[exports::Module] = &[
     PTHREAD,
     mach::MODULE,
     clock::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    compat::MODULE,
     #[cfg(not(target_os = "macos"))]
     sched::MODULE,
     #[cfg(not(target_os = "macos"))]
