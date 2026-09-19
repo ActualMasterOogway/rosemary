@@ -9,7 +9,7 @@ fn checked(len: usize, capacity: usize) {
     }
 }
 
-pub unsafe extern "C" fn memcpy_chk(
+unsafe extern "C" fn memcpy_chk(
     dst: *mut c_void,
     src: *const c_void,
     len: usize,
@@ -20,7 +20,7 @@ pub unsafe extern "C" fn memcpy_chk(
     dst
 }
 
-pub unsafe extern "C" fn memmove_chk(
+unsafe extern "C" fn memmove_chk(
     dst: *mut c_void,
     src: *const c_void,
     len: usize,
@@ -31,7 +31,7 @@ pub unsafe extern "C" fn memmove_chk(
     dst
 }
 
-pub unsafe extern "C" fn memset_chk(
+unsafe extern "C" fn memset_chk(
     dst: *mut c_void,
     byte: c_int,
     len: usize,
@@ -46,7 +46,7 @@ unsafe fn c_len(s: *const c_char) -> usize {
     unsafe { libc::strlen(s) }
 }
 
-pub unsafe extern "C" fn strcpy_chk(
+unsafe extern "C" fn strcpy_chk(
     dst: *mut c_char,
     src: *const c_char,
     capacity: usize,
@@ -57,7 +57,7 @@ pub unsafe extern "C" fn strcpy_chk(
     dst
 }
 
-pub unsafe extern "C" fn strcat_chk(
+unsafe extern "C" fn strcat_chk(
     dst: *mut c_char,
     src: *const c_char,
     capacity: usize,
@@ -69,7 +69,24 @@ pub unsafe extern "C" fn strcat_chk(
     dst
 }
 
-pub unsafe extern "C" fn strlcpy_chk(
+unsafe extern "C" fn strncpy_chk(
+    dst: *mut c_char,
+    src: *const c_char,
+    len: usize,
+    capacity: usize,
+) -> *mut c_char {
+    checked(len, capacity);
+    // strncpy copies at most len bytes and zero-pads the remainder of the
+    // destination, so it never reads past the source terminator.
+    let copied = unsafe { libc::strnlen(src, len) };
+    unsafe {
+        std::ptr::copy_nonoverlapping(src, dst, copied);
+        std::ptr::write_bytes(dst.add(copied), 0, len - copied);
+    }
+    dst
+}
+
+unsafe extern "C" fn strlcpy_chk(
     dst: *mut c_char,
     src: *const c_char,
     size: usize,
@@ -87,7 +104,7 @@ pub unsafe extern "C" fn strlcpy_chk(
     len
 }
 
-pub unsafe extern "C" fn strlcat_chk(
+unsafe extern "C" fn strlcat_chk(
     dst: *mut c_char,
     src: *const c_char,
     size: usize,
@@ -200,6 +217,7 @@ exports::exports! {
         "__strcpy_chk" => strcpy_chk,
         "__strlcat_chk" => strlcat_chk,
         "__strlcpy_chk" => strlcpy_chk,
+        "__strncpy_chk" => strncpy_chk,
     }
 }
 
@@ -216,6 +234,30 @@ mod tests {
             assert_eq!(strlcat_chk(dst.as_mut_ptr(), c"XYZ".as_ptr(), 8, 8), 6);
             assert_eq!(std::ffi::CStr::from_ptr(dst.as_ptr()).to_bytes(), b"abcXYZ");
         }
+    }
+
+    #[test]
+    fn strncpy_chk_pads_the_destination() {
+        let mut dst = [b'!' as c_char; 8];
+        unsafe {
+            assert_eq!(
+                strncpy_chk(dst.as_mut_ptr(), c"ab".as_ptr(), 6, 8),
+                dst.as_mut_ptr()
+            );
+        }
+        assert_eq!(
+            dst,
+            [
+                b'a' as c_char,
+                b'b' as c_char,
+                0,
+                0,
+                0,
+                0,
+                b'!' as c_char,
+                b'!' as c_char
+            ]
+        );
     }
 
     #[test]
