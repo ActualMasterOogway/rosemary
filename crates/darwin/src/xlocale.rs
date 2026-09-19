@@ -211,7 +211,13 @@ fn c_locale() -> Option<libc::locale_t> {
     static C: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     let at = *C.get_or_init(|| {
         // SAFETY: the C locale always exists and a null base is valid to glibc.
-        unsafe { libc::newlocale(crate::locale::all_mask(), c"C".as_ptr(), core::ptr::null_mut()) as usize }
+        unsafe {
+            libc::newlocale(
+                crate::locale::all_mask(),
+                c"C".as_ptr(),
+                core::ptr::null_mut(),
+            ) as usize
+        }
     });
     (at != 0).then_some(at as libc::locale_t)
 }

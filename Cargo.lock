@@ -1190,6 +1190,7 @@ dependencies = [
  "corefoundation",
  "corevideo",
  "darwin",
+ "exports",
  "forcefeedback",
  "foundation",
  "gamecontroller",

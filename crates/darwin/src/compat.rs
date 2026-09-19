@@ -507,7 +507,9 @@ pub unsafe extern "C" fn tcsetattr(fd: c_int, action: c_int, input: *const Termi
 
 exports::exports! {
     functions {
-        "__bzero" => bzero,
+        // Both spellings: x86-64 Darwin code emits the underscored alias, and
+        // `passthrough` no longer claims the plain one, so this is what owns it.
+        "bzero" | "__bzero" => bzero,
         "__memcpy_chk" => memcpy_chk,
         "__memmove_chk" => memmove_chk,
         "__memset_chk" => memset_chk,

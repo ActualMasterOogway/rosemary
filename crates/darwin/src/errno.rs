@@ -315,10 +315,14 @@ impl Drop for Held {
     }
 }
 
+// Both spellings, for one entry point. Darwin exports `___error` alone - the C
+// identifier `__error` with Mach-O's underscore on top - but `base_name` strips
+// exactly one underscore, and this is the rare identifier that begins with one
+// of its own. So a caller holding the Mach-O name lands on `__error` and one
+// holding the C name lands on `_error`, and only listing both answers both.
 exports::exports! {
     functions {
         "_error" => error,
-        // Darwin exports two error symbols but they're the same function.
         "__error" => error,
     }
 }
