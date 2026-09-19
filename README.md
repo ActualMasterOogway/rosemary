@@ -75,6 +75,16 @@ cargo test --release
 
 On macOS, install the Xcode command-line tools before building.
 
+On Alpine Linux, install the following dependencies first:
+
+```sh
+sudo apk add sdl3-dev zlib-dev curl-dev glu-dev webkit2gtk-6.0 mesa rust cargo
+```
+
+musl support is experimental, and not all applications may run underneath it,
+though we encourage you to report issues faced with it anyway, as they likely
+are a sign of an incorrectly translated Darwin API.
+
 On Debian-based Linux systems, install the native build and runtime dependencies
 first:
 
