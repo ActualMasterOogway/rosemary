@@ -306,7 +306,8 @@ mod carbon {
 }
 
 /// `UInt32 GetCurrentKeyModifiers(void)`: the modifier keys held now, in
-/// Carbon's bits. Qt's key mapper asks this rather than `+[NSEvent modifierFlags]`.
+/// Carbon's bits. Qt's key mapper asks this rather than `+[NSEvent modifierFlags]`.]
+#[allow(non_snake_case)]
 pub unsafe extern "C" fn GetCurrentKeyModifiers() -> u32 {
     let held = sdl3::video::keyboard_modifiers();
     [

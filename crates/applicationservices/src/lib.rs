@@ -1,6 +1,6 @@
 #[repr(i32)]
 enum CGWindowLevelKey {
-    BaseWindow = 0,
+    _BaseWindow = 0,
 }
 
 type CGWindowLevel = i32;
