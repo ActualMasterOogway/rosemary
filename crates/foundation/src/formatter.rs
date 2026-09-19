@@ -362,8 +362,8 @@ impl DateFormat {
 /// this host's time zone and its daylight-saving rules - the same answer the
 /// guest's own `localtime` would give it.
 fn civil(when: f64) -> libc::tm {
-    let seconds = when as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let seconds = when as _;
     // SAFETY: a live `time_t` and a live `tm` for the call to fill in.
     unsafe { libc::localtime_r(&seconds, &mut tm) };
     tm
