@@ -32,43 +32,19 @@ const _: () = {
     assert!(std::mem::offset_of!(Statistics, size_in_use) == 8);
 };
 
-/// glibc's `struct mallinfo2`, which is ten `size_t`s.
-///
-/// Declared here rather than taken from the `libc` crate, which does not carry
-/// it: the two fields read below are the third and the eighth, and naming the
-/// whole structure is what makes that a fact rather than an offset.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct MallInfo2 {
-    arena: usize,
-    ordblks: usize,
-    smblks: usize,
-    hblks: usize,
-    hblkhd: usize,
-    usmblks: usize,
-    fsmblks: usize,
-    uordblks: usize,
-    fordblks: usize,
-    keepcost: usize,
-}
-
 /// `void malloc_zone_statistics(malloc_zone_t *zone, malloc_statistics_t *stats)`
 ///
 /// # Safety
 ///
 /// `stats` is null or a writable Darwin `malloc_statistics_t`.
 pub unsafe extern "C" fn malloc_zone_statistics(_zone: *mut c_void, stats: *mut Statistics) {
-    // Gated off to GNU because we don't know if other libc implementations have it, better to be safe than sorry.
+    if stats.is_null() {
+        return;
+    }
     #[cfg(target_env = "gnu")]
     {
-        unsafe extern "C" {
-            fn mallinfo2() -> MallInfo2;
-        }
-        if stats.is_null() {
-            return;
-        }
         // SAFETY: takes no argument and returns by value.
-        let info = unsafe { mallinfo2() };
+        let info = unsafe { libc::mallinfo2() };
         // SAFETY: the caller states `stats` is writable.
         unsafe {
             *stats = Statistics {
@@ -86,6 +62,18 @@ pub unsafe extern "C" fn malloc_zone_statistics(_zone: *mut c_void, stats: *mut 
                 // total would say the program has never freed anything.
                 max_size_in_use: 0,
                 size_allocated: info.arena + info.hblkhd,
+            };
+        }
+    }
+    #[cfg(not(target_env = "gnu"))]
+    {
+        unsafe {
+            *stats = Statistics {
+                blocks_in_use: 0,
+                _pad: 0,
+                size_in_use: 0,
+                max_size_in_use: 0,
+                size_allocated: 0,
             };
         }
     }
