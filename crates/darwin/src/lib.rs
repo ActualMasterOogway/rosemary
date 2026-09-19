@@ -25,6 +25,7 @@
 use std::ffi::CString;
 
 mod atomics;
+pub mod backtrace;
 pub mod bsd;
 pub mod callback;
 pub mod clock;
@@ -304,6 +305,8 @@ static MODULES: &[exports::Module] = &[
     oslog::MODULE,
     #[cfg(not(target_os = "macos"))]
     kqueue::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    backtrace::MODULE,
     #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
     printf_l::MODULE,
     #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]

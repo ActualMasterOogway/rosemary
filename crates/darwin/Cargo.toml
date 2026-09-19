@@ -10,5 +10,6 @@ machish.workspace = true
 exports = { workspace = true, features = ["machish"] }
 objc.workspace = true
 libc.workspace = true
+backtrace.workspace = true
 static_init.workspace = true
 getrandom.workspace = true
