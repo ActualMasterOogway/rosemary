@@ -58,6 +58,7 @@ pub mod poll;
 pub mod printf_l;
 pub mod pthread;
 pub mod random;
+mod resolv;
 pub mod rlimit;
 pub mod sched;
 pub mod select;
@@ -305,6 +306,8 @@ static MODULES: &[exports::Module] = &[
     kqueue::MODULE,
     #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
     printf_l::MODULE,
+    #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
+    resolv::MODULE,
 ];
 
 /// `pthread` as a row, written out because it has no table to generate one.
