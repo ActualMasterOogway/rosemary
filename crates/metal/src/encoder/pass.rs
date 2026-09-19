@@ -16,6 +16,10 @@ pub(crate) struct AttachmentDescriptor {
     pub resolve_texture: Id,
     pub resolve_level: u64,
     pub resolve_slice: u64,
+    /// `MTLMultisampleDepthResolveFilter` on a depth attachment and
+    /// `MTLMultisampleStencilResolveFilter` on a stencil one. A colour
+    /// attachment has no filter and never reads it.
+    pub resolve_filter: u64,
 }
 
 /// A `MTLStoreActionMultisampleResolve` from an attachment which has one
@@ -158,6 +162,193 @@ pub(super) fn resolve_attachment(
     })
 }
 
+/// The Vulkan resolve mode one `MTLMultisampleDepthResolveFilter` asks for.
+///
+/// `Sample0` is 0, `Min` is 1 and `Max` is 2. Metal has no average filter for
+/// depth, so `VK_RESOLVE_MODE_AVERAGE` is never chosen.
+fn depth_filter(filter: u64) -> Option<vk::ResolveModeFlags> {
+    match filter {
+        0 => Some(vk::ResolveModeFlags::SAMPLE_ZERO),
+        1 => Some(vk::ResolveModeFlags::MIN),
+        2 => Some(vk::ResolveModeFlags::MAX),
+        _ => None,
+    }
+}
+
+/// The Vulkan resolve mode one `MTLMultisampleStencilResolveFilter` asks for.
+///
+/// `Sample0` is 0. `DepthResolvedSample` is 1 and means the stencil value of
+/// whichever sample the depth filter chose, which Vulkan cannot express: its
+/// stencil mode is independent of the depth one.
+fn stencil_filter(filter: u64) -> Option<vk::ResolveModeFlags> {
+    match filter {
+        0 => Some(vk::ResolveModeFlags::SAMPLE_ZERO),
+        _ => None,
+    }
+}
+
+/// The resolve mode for each aspect of one depth/stencil resolve, or why this
+/// device cannot perform the one the pass asks for.
+///
+/// `depth` and `stencil` are the Metal filters of the aspects which are being
+/// resolved, and `None` an aspect which is not. Vulkan names one resolve
+/// attachment with a mode per aspect, and a device may support only some of
+/// the modes, only matching modes, or only resolving both aspects at once.
+pub(super) fn resolve_modes(
+    support: ResolveSupport,
+    aspect: vk::ImageAspectFlags,
+    depth: Option<u64>,
+    stencil: Option<u64>,
+) -> Result<(vk::ResolveModeFlags, vk::ResolveModeFlags), String> {
+    let mut depth_mode = vk::ResolveModeFlags::NONE;
+    if let Some(filter) = depth {
+        if !aspect.contains(vk::ImageAspectFlags::DEPTH) {
+            return Err("a depth resolve of an attachment which has no depth aspect".to_owned());
+        }
+        let mode = depth_filter(filter)
+            .ok_or_else(|| format!("MTLMultisampleDepthResolveFilter {filter} is not a filter"))?;
+        if !support.depth_modes.contains(mode) {
+            return Err(format!(
+                "a depth resolve needs {mode:?}, which this Vulkan device does not support"
+            ));
+        }
+        depth_mode = mode;
+    }
+    let mut stencil_mode = vk::ResolveModeFlags::NONE;
+    if let Some(filter) = stencil {
+        if !aspect.contains(vk::ImageAspectFlags::STENCIL) {
+            return Err(
+                "a stencil resolve of an attachment which has no stencil aspect".to_owned(),
+            );
+        }
+        let mode = stencil_filter(filter).ok_or_else(|| {
+            format!(
+                "MTLMultisampleStencilResolveFilter {filter} names a sample the depth filter                  chose, which Vulkan cannot express"
+            )
+        })?;
+        if !support.stencil_modes.contains(mode) {
+            return Err(format!(
+                "a stencil resolve needs {mode:?}, which this Vulkan device does not support"
+            ));
+        }
+        stencil_mode = mode;
+    }
+    if depth_mode.is_empty() && stencil_mode.is_empty() {
+        return Err("a resolve of neither aspect".to_owned());
+    }
+    // The independence rules bind only where the attachment has both aspects:
+    // with one aspect the other mode is not read.
+    let both = aspect.contains(vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL);
+    if both && depth_mode != stencil_mode {
+        if depth_mode.is_empty() || stencil_mode.is_empty() {
+            if !support.independent_none {
+                return Err(
+                    "a resolve of one aspect of a depth/stencil attachment and not the other,                      which this Vulkan device does not support"
+                        .to_owned(),
+                );
+            }
+        } else if !support.independent {
+            return Err(format!(
+                "a depth resolve with {depth_mode:?} and a stencil resolve with                  {stencil_mode:?}, where this Vulkan device needs one mode for both"
+            ));
+        }
+    }
+    Ok((depth_mode, stencil_mode))
+}
+
+/// Where the depth/stencil attachment is resolved to, when the pass asks for a
+/// resolve and the device and the destination can carry it.
+pub(super) struct DepthResolveTarget {
+    pub resolve: DepthResolve,
+    pub view: vk::ImageView,
+    pub image: vk::Image,
+    pub level: u32,
+    pub slice: u32,
+    pub texture: Id,
+}
+
+/// The depth/stencil resolve one `MTLRenderPassDescriptor` asks for.
+///
+/// Metal names a resolve destination on the depth attachment and another on
+/// the stencil one; a Vulkan subpass has a single depth/stencil resolve
+/// attachment with a mode per aspect, so the two must name the same texture.
+/// A resolve this cannot express is reported and dropped, which leaves the
+/// destination as it was rather than holding one arbitrary sample.
+///
+/// `attached` is the texture the pass attached, which is the depth one where
+/// it has both: the aspect whose texture is not attached is not resolved
+/// either, because it is not rendered into.
+fn depth_resolve(
+    gpu: &Gpu,
+    descriptor: &RenderPassDescriptor,
+    attached: Id,
+    format: vk::Format,
+    aspect: vk::ImageAspectFlags,
+) -> Option<DepthResolveTarget> {
+    let wants = |attachment: &AttachmentDescriptor| {
+        attachment.texture == attached
+            && resolves(attachment.store_action)
+            && !attachment.resolve_texture.is_null()
+    };
+    let depth = wants(&descriptor.depth).then_some(&descriptor.depth);
+    let mut stencil = wants(&descriptor.stencil).then_some(&descriptor.stencil);
+    if let (Some(from_depth), Some(from_stencil)) = (depth, stencil)
+        && from_depth.resolve_texture != from_stencil.resolve_texture
+    {
+        gpu::trace_once(
+            "a render pass names separate depth and stencil resolve textures, which one Vulkan \
+             resolve attachment cannot hold: the stencil one is ignored",
+        );
+        stencil = None;
+    }
+    let named = depth.or(stencil)?;
+    // SAFETY: only a texture of this crate's is attached.
+    let destination = unsafe { object::body::<Texture>(named.resolve_texture) };
+    if destination.image.format != format {
+        gpu::trace_once(format!(
+            "render pass resolves depth {format:?} into {:?}, which Vulkan cannot do",
+            destination.image.format
+        ));
+        return None;
+    }
+    let Some(resolving) = &gpu.depth_stencil_resolve else {
+        gpu::trace_once(
+            "a render pass asks for a depth or stencil resolve, which this Vulkan device cannot \
+             perform",
+        );
+        return None;
+    };
+    // A device may resolve one aspect and not the other; where it may not,
+    // dropping the aspect Metal asked for less loudly would silently change
+    // what the pass writes, so the whole resolve is reported instead.
+    let (depth_mode, stencil_mode) = match resolve_modes(
+        resolving.support,
+        aspect,
+        depth.map(|attachment| attachment.resolve_filter),
+        stencil.map(|attachment| attachment.resolve_filter),
+    ) {
+        Ok(modes) => modes,
+        Err(reason) => {
+            gpu::trace_once(format!("a render pass asks for {reason}"));
+            return None;
+        }
+    };
+    let level = named.resolve_level as u32;
+    let slice = named.resolve_slice as u32;
+    Some(DepthResolveTarget {
+        resolve: DepthResolve {
+            format: destination.image.format,
+            depth_mode,
+            stencil_mode,
+        },
+        view: destination.attachment_view(level, slice),
+        image: destination.image.image,
+        level,
+        slice,
+        texture: named.resolve_texture,
+    })
+}
+
 /// Begin the Vulkan render pass one `MTLRenderPassDescriptor` describes.
 /// What one `MTLRenderPassDescriptor`'s attachments amount to in Vulkan.
 struct Attachments {
@@ -167,6 +358,9 @@ struct Attachments {
     resolve_views: Vec<vk::ImageView>,
     /// Which colour attachments resolve, as a bitmask over render targets.
     resolve_mask: u32,
+    /// The view the depth/stencil attachment resolves into, which the render
+    /// pass declares after the colour resolves.
+    depth_resolve_view: Option<vk::ImageView>,
     /// Copies Metal's `MTLStoreActionStoreAndMultisampleResolve` implies.
     copies: Vec<PendingCopy>,
     capture_targets: Vec<crate::capture::Target>,
@@ -196,17 +390,19 @@ fn samples(key: &mut RenderPassKey, count: vk::SampleCountFlags, first: bool) {
 
 /// Gather what a descriptor's attachments amount to, without touching the
 /// command buffer: the caller decides what to do when there are none.
-fn gather_attachments(descriptor: &RenderPassDescriptor) -> Attachments {
+fn gather_attachments(gpu: &Gpu, descriptor: &RenderPassDescriptor) -> Attachments {
     let mut key = RenderPassKey {
         colors: Vec::new(),
         color_resolves: Vec::new(),
         depth: None,
         stencil: None,
+        depth_resolve: None,
         samples: vk::SampleCountFlags::TYPE_1,
     };
     let mut views = Vec::new();
     let mut resolve_views = Vec::new();
     let mut resolve_mask = 0u32;
+    let mut depth_resolve_view = None;
     let mut copies: Vec<PendingCopy> = Vec::new();
     let mut capture_targets: Vec<crate::capture::Target> = Vec::new();
     let mut clears = Vec::new();
@@ -346,17 +542,49 @@ fn gather_attachments(descriptor: &RenderPassDescriptor) -> Attachments {
         if !descriptor.stencil.texture.is_null() {
             key.stencil = Some((load_op(descriptor.stencil.load_action), store_op()));
         }
-        // FIXME (ACCURACY): a depth or stencil resolve is not performed. Vulkan
-        // spells it as a subpass extension read through `vkCreateRenderPass2`,
-        // which nothing here uses yet; the resolve destination is left as it
-        // was rather than silently holding one sample of the attachment.
-        if resolves(attachment.store_action) && !attachment.resolve_texture.is_null() {
-            gpu::trace_once("render pass asks for a depth resolve, which is not implemented");
-        }
         let first = key.colors.is_empty();
         samples(&mut key, texture.image.samples, first);
         let level = attachment.level as u32;
         views.push(texture.attachment_view(level, attachment.slice as u32));
+        let (format, aspect) = (texture.image.format, texture.image.aspect);
+        let multisampled = texture.image.samples != vk::SampleCountFlags::TYPE_1;
+        let (base_width, base_height) = (texture.image.width, texture.image.height);
+        let source_image = texture.image.image;
+        if let Some(resolve) = depth_resolve(gpu, descriptor, attachment.texture, format, aspect) {
+            textures.push(resolve.texture);
+            if multisampled {
+                key.depth_resolve = Some(resolve.resolve);
+                depth_resolve_view = Some(resolve.view);
+            } else {
+                // A subpass resolves only a multisampled attachment; with one
+                // sample the same store action means a plain copy, as it does
+                // for a colour attachment.
+                copies.push(PendingCopy {
+                    source: source_image,
+                    source_level: level,
+                    source_slice: attachment.slice as u32,
+                    destination: resolve.image,
+                    destination_level: resolve.level,
+                    destination_slice: resolve.slice,
+                    width: level_extent(base_width, level),
+                    height: level_extent(base_height, level),
+                    aspect,
+                });
+            }
+            if capturing {
+                capture_targets.push(crate::capture::Target {
+                    image: resolve.image,
+                    aspect: vk::ImageAspectFlags::DEPTH,
+                    level: resolve.level,
+                    slice: resolve.slice,
+                    width: level_extent(base_width, level),
+                    height: level_extent(base_height, level),
+                    format,
+                    samples: vk::SampleCountFlags::TYPE_1,
+                    role: "rd".to_owned(),
+                });
+            }
+        }
         clears.push(vk::ClearValue {
             depth_stencil: vk::ClearDepthStencilValue {
                 depth: descriptor.depth.clear_depth as f32,
@@ -385,6 +613,7 @@ fn gather_attachments(descriptor: &RenderPassDescriptor) -> Attachments {
         views,
         resolve_views,
         resolve_mask,
+        depth_resolve_view,
         copies,
         capture_targets,
         clears,
@@ -405,19 +634,22 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
         mut views,
         resolve_views,
         resolve_mask,
+        depth_resolve_view,
         copies,
         capture_targets,
         clears,
         width,
         height,
         textures,
-    } = gather_attachments(descriptor);
+    } = gather_attachments(gpu, descriptor);
     if views.is_empty() {
         gpu::trace("renderCommandEncoderWithDescriptor: has no attachments");
         return;
     }
-    // The render pass declares the resolve attachments after the depth one.
+    // The render pass declares the colour resolve attachments after the depth
+    // one, and the depth resolve after those.
     views.extend(resolve_views);
+    views.extend(depth_resolve_view);
     let width = width.max(1);
     let height = height.max(1);
 
@@ -489,6 +721,7 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
     gpu::milestone("render pass");
     encoder.in_render_pass = true;
     encoder.resolve_mask = resolve_mask;
+    encoder.depth_resolve = key.depth_resolve;
     encoder.pending_copies = copies;
     encoder.capture_targets = capture_targets;
 }
@@ -715,6 +948,11 @@ pub(super) unsafe extern "C" fn set_attachment_number(receiver: Id, sel: Sel, va
         b"setClearStencil:" => attachment.clear_stencil = value as u32,
         b"setResolveLevel:" => attachment.resolve_level = value,
         b"setResolveSlice:" => attachment.resolve_slice = value,
+        // One field for both: an attachment is the depth one or the stencil
+        // one, and each has only its own filter.
+        b"setDepthResolveFilter:" | b"setStencilResolveFilter:" => {
+            attachment.resolve_filter = value
+        }
         b"setDepthPlane:" => (),
         _ => (),
     }
@@ -756,4 +994,120 @@ pub(super) unsafe extern "C" fn new_render_encoder(receiver: Id, _sel: Sel, desc
     let described = unsafe { object::body::<RenderPassDescriptor>(descriptor) };
     begin_render_pass(encoder, described);
     encoder
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DEPTH_STENCIL: vk::ImageAspectFlags = vk::ImageAspectFlags::from_raw(
+        vk::ImageAspectFlags::DEPTH.as_raw() | vk::ImageAspectFlags::STENCIL.as_raw(),
+    );
+
+    /// A device which supports every mode for both aspects independently.
+    fn everything() -> ResolveSupport {
+        let all = vk::ResolveModeFlags::SAMPLE_ZERO
+            | vk::ResolveModeFlags::AVERAGE
+            | vk::ResolveModeFlags::MIN
+            | vk::ResolveModeFlags::MAX;
+        ResolveSupport {
+            depth_modes: all,
+            stencil_modes: all,
+            independent_none: true,
+            independent: true,
+        }
+    }
+
+    /// The least a device supporting the feature may report: sample zero for
+    /// both aspects, resolved together and with the same mode.
+    fn minimal() -> ResolveSupport {
+        ResolveSupport {
+            depth_modes: vk::ResolveModeFlags::SAMPLE_ZERO,
+            stencil_modes: vk::ResolveModeFlags::SAMPLE_ZERO,
+            independent_none: false,
+            independent: false,
+        }
+    }
+
+    #[test]
+    fn depth_resolve_filters_become_vulkan_modes() {
+        let expected = [
+            vk::ResolveModeFlags::SAMPLE_ZERO,
+            vk::ResolveModeFlags::MIN,
+            vk::ResolveModeFlags::MAX,
+        ];
+        for (filter, mode) in expected.into_iter().enumerate() {
+            let (depth, stencil) = resolve_modes(
+                everything(),
+                vk::ImageAspectFlags::DEPTH,
+                Some(filter as u64),
+                None,
+            )
+            .expect("a supported depth filter");
+            assert_eq!(depth, mode);
+            assert_eq!(stencil, vk::ResolveModeFlags::NONE);
+        }
+    }
+
+    #[test]
+    fn both_aspects_resolve_with_sample_zero_on_a_minimal_device() {
+        let (depth, stencil) =
+            resolve_modes(minimal(), DEPTH_STENCIL, Some(0), Some(0)).expect("sample zero");
+        assert_eq!(depth, vk::ResolveModeFlags::SAMPLE_ZERO);
+        assert_eq!(stencil, vk::ResolveModeFlags::SAMPLE_ZERO);
+    }
+
+    #[test]
+    fn a_resolve_mode_the_device_lacks_is_rejected() {
+        let error = resolve_modes(minimal(), vk::ImageAspectFlags::DEPTH, Some(1), None)
+            .expect_err("minimum is optional");
+        assert!(error.contains("MIN"), "{error}");
+    }
+
+    #[test]
+    fn the_depth_resolved_stencil_sample_filter_is_rejected() {
+        let error = resolve_modes(everything(), DEPTH_STENCIL, Some(0), Some(1))
+            .expect_err("no Vulkan stencil mode follows the depth filter");
+        assert!(
+            error.contains("MTLMultisampleStencilResolveFilter 1"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn resolving_one_aspect_alone_needs_independent_resolve_none() {
+        assert!(resolve_modes(minimal(), DEPTH_STENCIL, Some(0), None).is_err());
+        let support = ResolveSupport {
+            independent_none: true,
+            ..minimal()
+        };
+        let (depth, stencil) =
+            resolve_modes(support, DEPTH_STENCIL, Some(0), None).expect("one aspect alone");
+        assert_eq!(depth, vk::ResolveModeFlags::SAMPLE_ZERO);
+        assert_eq!(stencil, vk::ResolveModeFlags::NONE);
+    }
+
+    #[test]
+    fn two_modes_on_one_attachment_need_independent_resolve() {
+        let support = ResolveSupport {
+            depth_modes: vk::ResolveModeFlags::SAMPLE_ZERO | vk::ResolveModeFlags::MIN,
+            independent_none: true,
+            ..minimal()
+        };
+        let error = resolve_modes(support, DEPTH_STENCIL, Some(1), Some(0))
+            .expect_err("differing modes need independent resolve");
+        assert!(error.contains("one mode for both"), "{error}");
+        let support = ResolveSupport {
+            independent: true,
+            ..support
+        };
+        assert!(resolve_modes(support, DEPTH_STENCIL, Some(1), Some(0)).is_ok());
+    }
+
+    #[test]
+    fn an_aspect_the_attachment_does_not_have_is_rejected() {
+        let error = resolve_modes(everything(), vk::ImageAspectFlags::DEPTH, None, Some(0))
+            .expect_err("no stencil aspect");
+        assert!(error.contains("no stencil aspect"), "{error}");
+    }
 }

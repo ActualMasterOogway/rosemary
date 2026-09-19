@@ -446,7 +446,87 @@ impl Gpu {
                 );
             }
         }
-        let mut subpass = vk::SubpassDescription::default()
+        // Vulkan's depth/stencil resolve destination is one further
+        // attachment, after the colour resolves, and the subpass names it
+        // through an extension structure `vkCreateRenderPass` cannot carry.
+        let depth_resolve = key.depth_resolve.map(|resolve| {
+            let reference = vk::AttachmentReference::default()
+                .attachment(attachments.len() as u32)
+                .layout(vk::ImageLayout::GENERAL);
+            attachments.push(
+                vk::AttachmentDescription::default()
+                    .format(resolve.format)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .stencil_store_op(vk::AttachmentStoreOp::STORE)
+                    .initial_layout(vk::ImageLayout::GENERAL)
+                    .final_layout(vk::ImageLayout::GENERAL),
+            );
+            (resolve, reference)
+        });
+        let pass = match depth_resolve {
+            Some((resolve, reference)) => self.create_depth_resolving_pass(
+                &attachments,
+                &colors,
+                &resolves,
+                depth,
+                resolve,
+                reference,
+            )?,
+            None => {
+                let mut subpass = vk::SubpassDescription::default()
+                    .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+                    .color_attachments(&colors);
+                if !resolves.is_empty() {
+                    subpass = subpass.resolve_attachments(&resolves);
+                }
+                if let Some(depth) = &depth {
+                    subpass = subpass.depth_stencil_attachment(depth);
+                }
+                let subpasses = [subpass];
+                let info = vk::RenderPassCreateInfo::default()
+                    .attachments(&attachments)
+                    .subpasses(&subpasses);
+                // SAFETY: every borrowed slice lives across the call.
+                unsafe { self.device.create_render_pass(&info, None) }
+                    .map_err(|error| format!("vkCreateRenderPass failed with {error:?}"))?
+            }
+        };
+        cache.insert(key.clone(), pass);
+        Ok(pass)
+    }
+
+    /// The same subpass through `vkCreateRenderPass2`, which is the only form
+    /// that can name a depth/stencil resolve attachment.
+    ///
+    /// The version-two structures carry exactly the version-one fields plus a
+    /// `pNext`, so the descriptions and references are converted rather than
+    /// described twice: one shape of render pass, whichever call creates it.
+    fn create_depth_resolving_pass(
+        &self,
+        attachments: &[vk::AttachmentDescription],
+        colors: &[vk::AttachmentReference],
+        resolves: &[vk::AttachmentReference],
+        depth: Option<vk::AttachmentReference>,
+        resolve: DepthResolve,
+        reference: vk::AttachmentReference,
+    ) -> Result<vk::RenderPass, String> {
+        let creation = self
+            .depth_stencil_resolve
+            .as_ref()
+            .ok_or("a render pass resolves depth on a device without depth/stencil resolve")?;
+        let attachments = attachments.iter().map(description2).collect::<Vec<_>>();
+        let colors = colors.iter().map(reference2).collect::<Vec<_>>();
+        let resolves = resolves.iter().map(reference2).collect::<Vec<_>>();
+        let depth = depth.map(|depth| reference2(&depth));
+        let destination = reference2(&reference);
+        let mut resolve_state = vk::SubpassDescriptionDepthStencilResolve::default()
+            .depth_resolve_mode(resolve.depth_mode)
+            .stencil_resolve_mode(resolve.stencil_mode)
+            .depth_stencil_resolve_attachment(&destination);
+        let mut subpass = vk::SubpassDescription2::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
             .color_attachments(&colors);
         if !resolves.is_empty() {
@@ -455,15 +535,21 @@ impl Gpu {
         if let Some(depth) = &depth {
             subpass = subpass.depth_stencil_attachment(depth);
         }
+        subpass = subpass.push_next(&mut resolve_state);
         let subpasses = [subpass];
-        let info = vk::RenderPassCreateInfo::default()
+        let info = vk::RenderPassCreateInfo2::default()
             .attachments(&attachments)
             .subpasses(&subpasses);
-        // SAFETY: every borrowed slice lives across the call.
-        let pass = unsafe { self.device.create_render_pass(&info, None) }
-            .map_err(|error| format!("vkCreateRenderPass failed with {error:?}"))?;
-        cache.insert(key.clone(), pass);
-        Ok(pass)
+        // SAFETY: every borrowed slice and the extension structure live across
+        // the call, and the entry point is the device's own or the one loaded
+        // for `VK_KHR_create_renderpass2`.
+        unsafe {
+            match &creation.renderpass2 {
+                Some(api) => api.create_render_pass2(&info, None),
+                None => self.device.create_render_pass2(&info, None),
+            }
+        }
+        .map_err(|error| format!("vkCreateRenderPass2 failed with {error:?}"))
     }
 
     pub fn create_framebuffer(
@@ -484,4 +570,26 @@ impl Gpu {
         unsafe { self.device.create_framebuffer(&info, None) }
             .map_err(|error| format!("vkCreateFramebuffer failed with {error:?}"))
     }
+}
+
+/// One attachment description in the form `vkCreateRenderPass2` takes.
+fn description2(description: &vk::AttachmentDescription) -> vk::AttachmentDescription2<'static> {
+    vk::AttachmentDescription2::default()
+        .flags(description.flags)
+        .format(description.format)
+        .samples(description.samples)
+        .load_op(description.load_op)
+        .store_op(description.store_op)
+        .stencil_load_op(description.stencil_load_op)
+        .stencil_store_op(description.stencil_store_op)
+        .initial_layout(description.initial_layout)
+        .final_layout(description.final_layout)
+}
+
+/// One attachment reference in the same form. `aspectMask` is read only for an
+/// input attachment, which this runtime never declares, so it stays empty.
+fn reference2(reference: &vk::AttachmentReference) -> vk::AttachmentReference2<'static> {
+    vk::AttachmentReference2::default()
+        .attachment(reference.attachment)
+        .layout(reference.layout)
 }

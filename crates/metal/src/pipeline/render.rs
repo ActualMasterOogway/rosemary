@@ -18,6 +18,9 @@ pub(crate) struct RenderVariantKey {
     /// attachment references match, so the pipeline needs one variant per
     /// resolve shape it is drawn under.
     pub resolve_mask: u32,
+    /// The depth/stencil resolve of the pass, for the same reason. Only the
+    /// modes matter here: the format is the pipeline's own depth format.
+    pub depth_resolve: Option<DepthResolve>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -226,6 +229,7 @@ impl RenderPipeline {
         };
         let key = RenderPassKey {
             color_resolves: vec![None; color_formats.len()],
+            depth_resolve: None,
             colors: color_formats,
             depth: attachment_depth.map(|format| {
                 (
@@ -279,6 +283,12 @@ impl RenderPipeline {
                 *resolve = Some(self.pass.colors[index].0);
             }
         }
+        // The resolve destination has the attachment's format, which the
+        // pipeline declared; the modes come from the pass being recorded.
+        shape.depth_resolve = match (key.depth_resolve, shape.depth) {
+            (Some(resolve), Some((format, _, _))) => Some(DepthResolve { format, ..resolve }),
+            _ => None,
+        };
         let pass = self.gpu.render_pass(&shape)?;
         let stages = [
             vk::PipelineShaderStageCreateInfo::default()

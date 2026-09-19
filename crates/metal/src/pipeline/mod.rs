@@ -18,7 +18,7 @@ use ash::vk;
 use metal_translate::ir::{ResourceKind, Stage};
 use metal_translate::{EntryArtifact, ResourceBinding};
 
-use crate::gpu::{self, Gpu, RenderPassKey};
+use crate::gpu::{self, DepthResolve, Gpu, RenderPassKey};
 use crate::object::{self, methods};
 use crate::resource::{DepthStencilState, VERTEX_SLOTS, VertexAttribute, VertexLayout, compare_op};
 use objc::object::Id;

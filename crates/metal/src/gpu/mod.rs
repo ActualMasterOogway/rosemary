@@ -46,6 +46,29 @@ struct DeviceCapabilities {
     swapchain_maintenance1: bool,
 }
 
+/// What `VK_KHR_depth_stencil_resolve` - core in Vulkan 1.2 - can do on this
+/// device, and how a render pass which uses it is created.
+pub(crate) struct DepthStencilResolve {
+    /// `VK_KHR_create_renderpass2`'s entry points, where the resolve is
+    /// reached through the extension rather than through Vulkan 1.2 core.
+    pub renderpass2: Option<ash::khr::create_renderpass2::Device>,
+    pub support: ResolveSupport,
+}
+
+/// The depth and stencil resolve modes a device reports. Sample-zero is the
+/// only one every implementation supporting the feature must have; average,
+/// minimum and maximum are optional, so a Metal filter is mapped only when
+/// the device names it.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ResolveSupport {
+    pub depth_modes: vk::ResolveModeFlags,
+    pub stencil_modes: vk::ResolveModeFlags,
+    /// Whether one aspect may resolve while the other does not.
+    pub independent_none: bool,
+    /// Whether the two aspects may use different modes.
+    pub independent: bool,
+}
+
 /// One logical device and the queue Metal's single command-queue model uses.
 pub struct Gpu {
     pub device: Device,
@@ -102,6 +125,10 @@ pub struct Gpu {
     /// Whether present operations can carry fences which retire their wait
     /// semaphores and swapchain resources without making the whole queue idle.
     swapchain_maintenance1: bool,
+    /// Depth/stencil resolve, where the device has it. `None` is a device
+    /// which cannot resolve a multisampled depth or stencil attachment at
+    /// all, and a pass which asks for one is reported and left unresolved.
+    pub(crate) depth_stencil_resolve: Option<DepthStencilResolve>,
 }
 
 struct Immediate {
@@ -270,7 +297,21 @@ pub struct RenderPassKey {
     pub color_resolves: Vec<Option<vk::Format>>,
     pub depth: Option<(vk::Format, vk::AttachmentLoadOp, vk::AttachmentStoreOp)>,
     pub stencil: Option<(vk::AttachmentLoadOp, vk::AttachmentStoreOp)>,
+    /// The single-sample attachment the depth/stencil attachment resolves
+    /// into. Vulkan carries one for the whole subpass rather than one per
+    /// aspect, which is why Metal's two resolve destinations must be the same
+    /// texture.
+    pub depth_resolve: Option<DepthResolve>,
     pub samples: vk::SampleCountFlags,
+}
+
+/// A depth/stencil resolve destination and the mode each aspect resolves
+/// with. `NONE` on an aspect is an aspect which is not resolved.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct DepthResolve {
+    pub format: vk::Format,
+    pub depth_mode: vk::ResolveModeFlags,
+    pub stencil_mode: vk::ResolveModeFlags,
 }
 
 impl Gpu {
@@ -396,6 +437,37 @@ impl Gpu {
                 (0, false)
             };
 
+        // Depth/stencil resolve is properties-only: there is no feature bit to
+        // enable, but the render pass which uses it must be created through
+        // `vkCreateRenderPass2`, which is core in Vulkan 1.2 and an extension
+        // of its own before that.
+        let depth_stencil_resolve_core = target.vulkan_version >= (1, 2);
+        let depth_stencil_resolve_extension = !depth_stencil_resolve_core
+            && has(ash::khr::depth_stencil_resolve::NAME)
+            && has(ash::khr::create_renderpass2::NAME);
+        let resolve_support = (depth_stencil_resolve_core || depth_stencil_resolve_extension)
+            .then(|| {
+                if depth_stencil_resolve_extension {
+                    enabled.push(ash::khr::create_renderpass2::NAME.as_ptr());
+                    enabled.push(ash::khr::depth_stencil_resolve::NAME.as_ptr());
+                }
+                let mut resolve = vk::PhysicalDeviceDepthStencilResolveProperties::default();
+                let mut properties =
+                    vk::PhysicalDeviceProperties2::default().push_next(&mut resolve);
+                // SAFETY: the properties are core or the extension is
+                // advertised, and both structures live across the query.
+                unsafe { instance.get_physical_device_properties2(physical, &mut properties) };
+                ResolveSupport {
+                    depth_modes: resolve.supported_depth_resolve_modes,
+                    stencil_modes: resolve.supported_stencil_resolve_modes,
+                    independent_none: resolve.independent_resolve_none == vk::TRUE,
+                    independent: resolve.independent_resolve == vk::TRUE,
+                }
+            })
+            // A device which reports no mode for either aspect can resolve
+            // nothing, and is the same as one without the feature at all.
+            .filter(|support| !(support.depth_modes | support.stencil_modes).is_empty());
+
         let priorities = [1.0f32];
         let queues = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family)
@@ -420,6 +492,11 @@ impl Gpu {
         // SAFETY: as above.
         let properties = unsafe { instance.get_physical_device_properties(physical) };
 
+        let depth_stencil_resolve = resolve_support.map(|support| DepthStencilResolve {
+            renderpass2: depth_stencil_resolve_extension
+                .then(|| ash::khr::create_renderpass2::Device::new(instance, &device)),
+            support,
+        });
         let swapchain_api = presents.then(|| ash::khr::swapchain::Device::new(instance, &device));
         let push_descriptor_api =
             pushes.then(|| ash::khr::push_descriptor::Device::new(instance, &device));
@@ -468,6 +545,7 @@ impl Gpu {
             null_sampler,
             swapchain_api,
             swapchain_maintenance1,
+            depth_stencil_resolve,
         })
     }
 }

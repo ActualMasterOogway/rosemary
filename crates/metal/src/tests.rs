@@ -669,6 +669,204 @@ unsafe fn element_at(receiver: Id, index: u64) -> Id {
     unsafe { call(receiver, sel, index) }
 }
 
+/// A multisampled depth attachment resolved into a one-sample texture, which
+/// is what `VK_KHR_depth_stencil_resolve` adds. The pass clears depth to one,
+/// draws a triangle covering every sample at a depth of a half, and the
+/// resolve destination must hold the half rather than the clear.
+#[test]
+fn a_multisampled_depth_attachment_resolves_into_its_destination() {
+    let Some(device) = gpu_device() else {
+        return;
+    };
+    let gpu = gpu_of(device).expect("a Vulkan device");
+    const SAMPLES: u64 = 4;
+    const SIZE: u64 = 8;
+    // MTLPixelFormatDepth32Float, and the colour the fragment shader writes.
+    const DEPTH32: u64 = 252;
+    const BGRA8: u64 = 80;
+    let multisampled = ash::vk::SampleCountFlags::TYPE_4;
+    if !gpu
+        .limits
+        .framebuffer_depth_sample_counts
+        .contains(multisampled)
+        || !gpu
+            .limits
+            .framebuffer_color_sample_counts
+            .contains(multisampled)
+    {
+        return;
+    }
+    let Some(resolving) = &gpu.depth_stencil_resolve else {
+        return;
+    };
+    if !resolving
+        .support
+        .depth_modes
+        .contains(ash::vk::ResolveModeFlags::SAMPLE_ZERO)
+    {
+        return;
+    }
+
+    let library = retain_library(device, triangle_library(), None, vec![0, 0], None);
+    // SAFETY: as in `a_translated_triangle_draws_on_the_gpu`.
+    let (vertex, fragment) = unsafe {
+        (
+            new_function_with_name(
+                library,
+                std::ptr::null(),
+                foundation::string::from_str("triangle_vertex"),
+            ),
+            new_function_with_name(
+                library,
+                std::ptr::null(),
+                foundation::string::from_str("triangle_fragment"),
+            ),
+        )
+    };
+    let vertex_descriptor = object::make(
+        c"MTLVertexDescriptor",
+        resource::VertexDescriptor {
+            layouts: [resource::VertexLayout::default(); resource::VERTEX_SLOTS],
+            attributes: [resource::VertexAttribute::default(); resource::VERTEX_SLOTS],
+            layout_objects: std::ptr::null_mut(),
+            attribute_objects: std::ptr::null_mut(),
+        },
+    );
+    // SAFETY: objects this test made, sent the selectors they implement.
+    unsafe {
+        send_number(
+            element_at(send(vertex_descriptor, "layouts"), 0),
+            "setStride:",
+            16,
+        );
+        let attribute = element_at(send(vertex_descriptor, "attributes"), 0);
+        send_number(attribute, "setFormat:", 31); // MTLVertexFormatFloat4
+        send_number(attribute, "setBufferIndex:", 0);
+    }
+    let descriptor = object::make(
+        c"MTLRenderPipelineDescriptor",
+        pipeline::RenderPipelineDescriptor {
+            vertex_function: vertex,
+            fragment_function: fragment,
+            vertex_descriptor,
+            colors: [pipeline::ColorAttachment::fresh(); pipeline::COLOR_ATTACHMENTS],
+            depth_format: DEPTH32,
+            stencil_format: 0,
+            sample_count: SAMPLES,
+            alpha_to_coverage: false,
+            color_objects: std::ptr::null_mut(),
+        },
+    );
+    // SAFETY: a descriptor this test made.
+    unsafe {
+        send_number(
+            element_at(send(descriptor, "colorAttachments"), 0),
+            "setPixelFormat:",
+            BGRA8,
+        );
+    }
+    let mut error = std::ptr::null_mut();
+    // SAFETY: a device and a descriptor this test made.
+    let state = unsafe { new_render_pipeline(device, std::ptr::null(), descriptor, &mut error) };
+    assert!(!state.is_null(), "render pipeline creation failed");
+    // Depth is written only where the test's half is nearer than the clear.
+    let depth_state = resource::new_depth_stencil_state(resource::DepthStencilState {
+        // MTLCompareFunctionLess.
+        depth_compare: 1,
+        depth_write: true,
+        ..resource::DepthStencilState::default()
+    });
+
+    let texture = |pixel_format, sample_count| {
+        resource::new_texture(
+            gpu,
+            resource::TextureDescriptor {
+                texture_type: 2,
+                pixel_format,
+                width: SIZE,
+                height: SIZE,
+                depth: 1,
+                mipmap_level_count: 1,
+                sample_count,
+                array_length: 1,
+                storage_mode: 2,
+                usage: gpu::USAGE_RENDER_TARGET,
+            },
+        )
+    };
+    let color = texture(BGRA8, SAMPLES);
+    let depth = texture(DEPTH32, SAMPLES);
+    let resolved = texture(DEPTH32, 1);
+    assert!(!color.is_null() && !depth.is_null() && !resolved.is_null());
+    // SAFETY: the same calls the guest makes.
+    let (vertices, readback, queue) = unsafe {
+        (
+            new_buffer(device, std::ptr::null(), 48, 0),
+            new_buffer(device, std::ptr::null(), (SIZE * SIZE * 4) as usize, 0),
+            new_command_queue(device, std::ptr::null()),
+        )
+    };
+    // A triangle covering the whole target, half way into clip space.
+    // SAFETY: a buffer this test made, mapped over its whole length.
+    unsafe {
+        let contents = object::body::<resource::Buffer>(vertices).inner.contents as *mut f32;
+        for (index, value) in [
+            -1.0f32, -1.0, 0.5, 1.0, //
+            3.0, -1.0, 0.5, 1.0, //
+            -1.0, 3.0, 0.5, 1.0,
+        ]
+        .iter()
+        .enumerate()
+        {
+            contents.add(index).write(*value);
+        }
+    }
+
+    let pass = object::make(
+        c"MTLRenderPassDescriptor",
+        encoder::RenderPassDescriptor::default(),
+    );
+    // SAFETY: objects this test made, sent the selectors they implement.
+    unsafe {
+        let attachment = element_at(send(pass, "colorAttachments"), 0);
+        send_with_object(attachment, "setTexture:", color);
+        send_number(attachment, "setLoadAction:", 2); // Clear
+        send_number(attachment, "setStoreAction:", 1); // Store
+        let attachment = send(pass, "depthAttachment");
+        send_with_object(attachment, "setTexture:", depth);
+        send_number(attachment, "setLoadAction:", 2); // Clear, to the default 1.0
+        // StoreAndMultisampleResolve, with the default Sample0 filter.
+        send_number(attachment, "setStoreAction:", 3);
+        send_with_object(attachment, "setResolveTexture:", resolved);
+    }
+
+    // SAFETY: objects this test made, sent the selectors they implement.
+    unsafe {
+        let command = send(queue, "commandBuffer");
+        let render = render_encoder(command, pass);
+        assert!(!render.is_null());
+        send_with_object(render, "setRenderPipelineState:", state);
+        send_with_object(render, "setDepthStencilState:", depth_state);
+        set_buffer_named(render, "setVertexBuffer:offset:atIndex:", vertices, 0, 0);
+        draw(render, 3);
+        send_void(render, "endEncoding");
+
+        let blit = send(command, "blitCommandEncoder");
+        copy_texture_to_buffer(blit, resolved, readback, SIZE);
+        send_void(blit, "endEncoding");
+        send_void(command, "commit");
+        send_void(command, "waitUntilCompleted");
+
+        let contents = object::body::<resource::Buffer>(readback).inner.contents as *const f32;
+        let middle = ((SIZE / 2) * SIZE + SIZE / 2) as usize;
+        let depth = contents.add(middle).read();
+        assert!(
+            (depth - 0.5).abs() < 1.0e-5,
+            "the depth resolve wrote {depth}, not the drawn 0.5"
+        );
+    }
+}
+
 /// The whole render path on a real device: a translated vertex/fragment pair,
 /// a render pipeline, a render pass with a clear, one draw, and a blit which
 /// reads the result back.

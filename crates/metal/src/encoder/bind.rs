@@ -25,6 +25,7 @@ pub(crate) fn new_encoder(command_buffer: Id, kind: Kind) -> Id {
             depth_clip: 0,
             in_render_pass: false,
             resolve_mask: 0,
+            depth_resolve: None,
             pending_copies: Vec::new(),
             capture_targets: Vec::new(),
             capture_pass: None,
@@ -611,6 +612,7 @@ impl Encoder {
             depth_clip: self.depth_clip,
             depth: DepthStencilKey::from(&depth),
             resolve_mask: self.resolve_mask,
+            depth_resolve: self.depth_resolve,
         };
         let pipeline = match self.render_variant {
             Some((object, cached, pipeline)) if object == self.render_pipeline && cached == key => {

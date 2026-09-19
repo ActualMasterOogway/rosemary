@@ -41,7 +41,9 @@ use objc::object::Id;
 use objc::sel::Sel;
 use std::sync::{Arc, Condvar, Mutex};
 
-use crate::gpu::{self, CommandContext, Gpu, GpuBuffer, RenderPassKey};
+use crate::gpu::{
+    self, CommandContext, DepthResolve, Gpu, GpuBuffer, RenderPassKey, ResolveSupport,
+};
 use crate::object::{self, methods};
 use crate::pipeline::{
     ComputePipeline, DepthStencilKey, RenderPipeline, RenderVariantKey, SETS, descriptor_type,
@@ -184,6 +186,9 @@ pub(crate) struct Encoder {
     /// Which colour attachments of the pass being recorded are resolved, for
     /// the pipeline variant a draw needs. See [`RenderVariantKey`].
     resolve_mask: u32,
+    /// The depth/stencil resolve of the pass being recorded, for the same
+    /// reason: a Vulkan render pass carries it and a Metal pipeline does not.
+    depth_resolve: Option<DepthResolve>,
     /// Resolves a subpass cannot perform because the attachment has one sample,
     /// recorded as image copies once the pass has ended.
     pending_copies: Vec<PendingCopy>,
@@ -380,6 +385,7 @@ impl Default for AttachmentDescriptor {
             resolve_texture: std::ptr::null_mut(),
             resolve_level: 0,
             resolve_slice: 0,
+            resolve_filter: 0,
         }
     }
 }
@@ -517,6 +523,8 @@ pub(crate) fn install() {
         "setClearStencil:",
         "setResolveLevel:",
         "setResolveSlice:",
+        "setDepthResolveFilter:",
+        "setStencilResolveFilter:",
     ] {
         attachment.replace_method(
             objc::sel::get(selector),
