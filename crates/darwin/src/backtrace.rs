@@ -61,11 +61,7 @@ pub unsafe extern "C" fn backtrace_symbols(
     entries
 }
 
-pub unsafe extern "C" fn backtrace_symbols_fd(
-    array: *const *mut c_void,
-    size: c_int,
-    fd: c_int,
-) {
+pub unsafe extern "C" fn backtrace_symbols_fd(array: *const *mut c_void, size: c_int, fd: c_int) {
     if array.is_null() || size <= 0 {
         return;
     }
@@ -190,8 +186,7 @@ fn write_all(fd: c_int, mut bytes: &[u8]) {
         // SAFETY: a descriptor the caller chose, and a buffer this process owns.
         let written = unsafe { libc::write(fd, bytes.as_ptr() as *const c_void, bytes.len()) };
         if written <= 0 {
-            if written < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
-            {
+            if written < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
                 continue;
             }
             return;
