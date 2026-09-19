@@ -401,6 +401,26 @@ fn rebinding_between_dispatches_reaches_each_buffer() {
     }
 }
 
+/// `MTLSamplerAddressModeMirrorClampToEdge` is the one Metal wrap mode Vulkan
+/// makes conditional on a feature.
+#[test]
+fn a_mirror_clamp_sampler_follows_the_device_feature() {
+    let Some(device) = gpu_device() else {
+        return;
+    };
+    let gpu = gpu_of(device).expect("a Vulkan device");
+    let descriptor = resource::SamplerDescriptor {
+        address: [1, 0, 0],
+        ..resource::SamplerDescriptor::default()
+    };
+    // Mirror-clamp is created where the device offers it and rejected where
+    // it does not, rather than quietly becoming a different wrap mode.
+    assert_eq!(
+        !resource::new_sampler(gpu, &descriptor).is_null(),
+        gpu.sampler_mirror_clamp_to_edge
+    );
+}
+
 /// robustness2 makes a nil Metal buffer an explicit null descriptor, so a
 /// store is valid and discarded instead of reaching an undefined descriptor.
 #[test]

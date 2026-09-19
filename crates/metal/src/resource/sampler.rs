@@ -67,13 +67,27 @@ pub(crate) fn new_sampler(gpu: &'static Gpu, descriptor: &SamplerDescriptor) -> 
         _ => vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
     };
     let anisotropy = descriptor.max_anisotropy.clamp(1, 16) as f32;
+    let address = descriptor.address.map(address_mode);
+    // Mirror-clamp is the one Metal wrap mode Vulkan makes conditional, and
+    // no other mode is close enough to stand in for it: clamping instead
+    // would mirror nothing and repeating would not clamp.
+    if !gpu.sampler_mirror_clamp_to_edge
+        && address.contains(&vk::SamplerAddressMode::MIRROR_CLAMP_TO_EDGE)
+    {
+        gpu::trace_once(
+            "rejecting a sampler using MTLSamplerAddressModeMirrorClampToEdge: the Vulkan \
+             device has neither the samplerMirrorClampToEdge feature nor \
+             VK_KHR_sampler_mirror_clamp_to_edge",
+        );
+        return std::ptr::null_mut();
+    }
     let info = vk::SamplerCreateInfo::default()
         .mag_filter(filter(descriptor.mag_filter))
         .min_filter(filter(descriptor.min_filter))
         .mipmap_mode(mip_mode(descriptor.mip_filter))
-        .address_mode_u(address_mode(descriptor.address[0]))
-        .address_mode_v(address_mode(descriptor.address[1]))
-        .address_mode_w(address_mode(descriptor.address[2]))
+        .address_mode_u(address[0])
+        .address_mode_v(address[1])
+        .address_mode_w(address[2])
         .anisotropy_enable(anisotropy > 1.0)
         .max_anisotropy(anisotropy)
         .compare_enable(descriptor.compare_function != 0)
@@ -153,4 +167,25 @@ pub(super) unsafe extern "C" fn sampler_state_dealloc(receiver: Id, _sel: Sel) {
         };
     }
     objc::arc::finalize(receiver);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mirror_clamp_to_edge_is_the_conditional_address_mode() {
+        // The rejection in `new_sampler` recognises the mode by this value,
+        // so the two must agree on which Metal wrap needs the feature.
+        assert_eq!(
+            address_mode(1),
+            vk::SamplerAddressMode::MIRROR_CLAMP_TO_EDGE
+        );
+        for metal in [0, 2, 3, 4, 5, 6] {
+            assert_ne!(
+                address_mode(metal),
+                vk::SamplerAddressMode::MIRROR_CLAMP_TO_EDGE
+            );
+        }
+    }
 }

@@ -44,6 +44,9 @@ struct DeviceCapabilities {
     null_descriptors: bool,
     vertex_attribute_divisor: bool,
     swapchain_maintenance1: bool,
+    /// Whether `VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE` is legal, as
+    /// the Vulkan 1.2 feature bit rather than the extension.
+    sampler_mirror_clamp_to_edge: bool,
 }
 
 /// What `VK_KHR_depth_stencil_resolve` - core in Vulkan 1.2 - can do on this
@@ -114,6 +117,11 @@ pub struct Gpu {
     pub(crate) max_vertex_attribute_divisor: u32,
     /// Whether a draw using a vertex divisor may have a non-zero base instance.
     pub(crate) divisor_non_zero_first_instance: bool,
+    /// Whether a sampler may use `MTLSamplerAddressModeMirrorClampToEdge`.
+    /// The mode is not legal on an unextended Vulkan 1.1 device, and a
+    /// sampler which asks for it there is rejected rather than given a
+    /// different wrap.
+    pub(crate) sampler_mirror_clamp_to_edge: bool,
     /// robustness2 does not permit a null standalone sampler descriptor.
     /// This neutral sampler keeps an otherwise-null resource table valid.
     pub(crate) null_sampler: vk::Sampler,
@@ -183,6 +191,7 @@ fn create_device(
         storage_push_constant8: target.storage_push_constant8.into(),
         shader_float16: target.shader_float16.into(),
         shader_int8: target.shader_int8.into(),
+        sampler_mirror_clamp_to_edge: capabilities.sampler_mirror_clamp_to_edge.into(),
         ..Default::default()
     };
     let mut v13 = vk::PhysicalDeviceVulkan13Features {
@@ -279,6 +288,16 @@ fn create_device(
     // across the call, and every enabled bit came from the adapter query.
     unsafe { instance.create_device(physical, &create_info, None) }
         .map_err(|error| format!("vkCreateDevice failed with {error:?}"))
+}
+
+/// Which spelling of mirror-clamp sampling a device offers: the Vulkan 1.2
+/// feature bit, or the extension which preceded it. Enabling both would be
+/// redundant, and neither means the address mode is rejected.
+fn mirror_clamp_support(core_feature: bool, extension: bool) -> (bool, bool) {
+    match core_feature {
+        true => (true, false),
+        false => (false, extension),
+    }
 }
 
 /// A render pass is keyed by the formats and load/store actions of its
@@ -385,6 +404,27 @@ impl Gpu {
             enabled.push(ash::ext::shader_demote_to_helper_invocation::NAME.as_ptr());
         }
 
+        // `MTLSamplerAddressModeMirrorClampToEdge` maps onto an address mode
+        // which an unextended Vulkan 1.1 device does not accept. Vulkan 1.2
+        // carries it as an optional feature bit, and the extension which
+        // preceded it needs no bit at all - only enabling. Prefer the bit,
+        // and fall back to the extension where the device reports it instead.
+        let mirror_clamp_feature = target.vulkan_version >= (1, 2) && {
+            let mut v12 = vk::PhysicalDeviceVulkan12Features::default();
+            let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut v12);
+            // SAFETY: the device reports Vulkan 1.2 and both structures live
+            // across the query.
+            unsafe { instance.get_physical_device_features2(physical, &mut features) };
+            v12.sampler_mirror_clamp_to_edge == vk::TRUE
+        };
+        let (mirror_clamp_feature, mirror_clamp_extension) = mirror_clamp_support(
+            mirror_clamp_feature,
+            has(ash::khr::sampler_mirror_clamp_to_edge::NAME),
+        );
+        if mirror_clamp_extension {
+            enabled.push(ash::khr::sampler_mirror_clamp_to_edge::NAME.as_ptr());
+        }
+
         // Prefer the ratified spelling. The feature structure is an exact KHR
         // alias of the older EXT structure represented by this ash release.
         let robustness2 = if has(ROBUSTNESS_2_KHR) {
@@ -483,6 +523,7 @@ impl Gpu {
                 null_descriptors,
                 vertex_attribute_divisor: max_vertex_attribute_divisor != 0,
                 swapchain_maintenance1,
+                sampler_mirror_clamp_to_edge: mirror_clamp_feature,
             },
         )?;
         // SAFETY: the family was requested above with one queue.
@@ -540,6 +581,7 @@ impl Gpu {
             push_descriptor_api,
             max_push_descriptors,
             null_descriptors,
+            sampler_mirror_clamp_to_edge: mirror_clamp_feature || mirror_clamp_extension,
             max_vertex_attribute_divisor,
             divisor_non_zero_first_instance,
             null_sampler,
@@ -742,6 +784,22 @@ mod tests {
             origin,
             size,
         }
+    }
+
+    #[test]
+    fn mirror_clamp_prefers_the_core_feature_over_the_extension() {
+        assert_eq!(mirror_clamp_support(true, true), (true, false));
+        assert_eq!(mirror_clamp_support(true, false), (true, false));
+    }
+
+    #[test]
+    fn mirror_clamp_falls_back_to_the_extension() {
+        assert_eq!(mirror_clamp_support(false, true), (false, true));
+    }
+
+    #[test]
+    fn mirror_clamp_is_unsupported_without_either_spelling() {
+        assert_eq!(mirror_clamp_support(false, false), (false, false));
     }
 
     #[test]
