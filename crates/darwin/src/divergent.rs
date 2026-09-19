@@ -61,9 +61,17 @@ pub const NAMES: &[(&str, &str)] = &[
     // Darwin's `glob_t` is `{ gl_pathc, gl_matchc, gl_offs, gl_flags, gl_pathv }`
     // and glibc's is `{ gl_pathc, gl_pathv, gl_offs, gl_flags }`, so a guest
     // reading the results at Darwin's offset 32 reads glibc's `gl_closedir`.
+    // Kept listed although `crate::glob` now answers both: the entry is what
+    // stops the host's own from being bound instead, and `reason` carves an
+    // implemented name back out. `globfree` matters as much as `glob` - it is
+    // handed the same structure and frees what it reads out of it.
     (
         "glob",
         "glob_t is laid out differently - gl_pathv is the second field here and the fifth there",
+    ),
+    (
+        "globfree",
+        "as `glob`: it frees the pointer it reads at gl_pathv",
     ),
     // `FTSENT::fts_statp` is a `struct stat *`, which is the [`STAT`] divergence
     // one pointer removed - the walk would hand the guest this host's.

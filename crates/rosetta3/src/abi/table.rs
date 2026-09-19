@@ -2297,6 +2297,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `glob`'s error callback is guest code called once per unreadable
     // directory.
     cbsig!([2], "glob", I32, P, I32, P, P),
+    // Frees what `glob` allocated, and must be the shim's own: the host's would
+    // read `gl_pathv` out of a Darwin `glob_t` at the wrong offset.
+    sig!("globfree", V, P),
     sig!("gluOrtho2D", V, F64, F64, F64, F64),
     sig!("gmtime", P, P),
     sig!("gmtime_r", P, P, P),

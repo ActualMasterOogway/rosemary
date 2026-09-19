@@ -36,6 +36,10 @@ pub mod dispatch;
 pub mod divergent;
 pub mod errno;
 pub mod fcntl;
+#[cfg(not(target_os = "macos"))]
+pub mod fortify;
+#[cfg(not(target_os = "macos"))]
+pub mod glob;
 pub mod heap;
 pub mod idle;
 pub mod ioctl;
@@ -66,6 +70,8 @@ pub mod strict;
 pub mod string;
 pub mod sysctl;
 pub mod sysinfo;
+#[cfg(not(target_os = "macos"))]
+pub mod termios;
 pub mod tls;
 pub mod translation;
 pub mod ulock;
@@ -237,6 +243,12 @@ static MODULES: &[exports::Module] = &[
     clock::MODULE,
     #[cfg(not(target_os = "macos"))]
     compat::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    fortify::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    glob::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    termios::MODULE,
     #[cfg(not(target_os = "macos"))]
     sched::MODULE,
     #[cfg(not(target_os = "macos"))]
