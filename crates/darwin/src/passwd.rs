@@ -173,6 +173,39 @@ pub unsafe extern "C" fn getpwnam(name: *const c_char) -> *mut Passwd {
     unsafe { publish(host) }
 }
 
+/// The directory `~` or `~name` stands for, or `None` for a user this host has
+/// never heard of.
+///
+/// Here rather than in [`crate::glob`], which is what asks, because the `$HOME`
+/// rule [`home_of`] applies is the one a guest must see from every direction:
+/// a tilde that expanded to a different directory than `getpwuid` reports would
+/// have the guest building two sets of paths.
+pub fn home(user: Option<&CStr>) -> Option<CString> {
+    crate::errno::set(0);
+    // SAFETY: a scalar, or the caller's NUL-terminated name; both return libc's
+    // own storage or null.
+    let host = unsafe {
+        match user {
+            Some(name) => libc::getpwnam(name.as_ptr()),
+            None => libc::getpwuid(libc::getuid()),
+        }
+    };
+    if host.is_null() {
+        // A container often has no passwd entry for the uid it runs as, and
+        // `$HOME` is still the answer for the calling user.
+        return match user {
+            Some(_) => None,
+            None => std::env::var_os("HOME").and_then(|home| {
+                use std::os::unix::ffi::OsStrExt;
+                CString::new(home.as_bytes()).ok()
+            }),
+        };
+    }
+    // SAFETY: non-null, and libc's own entry.
+    let home = home_of(unsafe { &*host });
+    (!home.as_bytes().is_empty()).then_some(home)
+}
+
 /// The reentrant pair are **not** here, deliberately.
 ///
 /// `getpwuid_r` fills a `struct passwd` the *caller* supplies out of a buffer
