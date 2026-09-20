@@ -48,6 +48,10 @@
               # metal_translate
               pkgs.llvm
               pkgs.vkdevicechooser
+              # tools/steamclient: cross-compiles the guest-facing SteamClient
+              # dylib to Mach-O without a macOS SDK.
+              pkgs.llvmPackages.clang-unwrapped
+              pkgs.lld
             ];
 
             buildInputs = runtimeLibs;
