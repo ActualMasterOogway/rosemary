@@ -621,9 +621,15 @@ pub fn disconnect(destination: *mut c_void, destination_bus: u32) -> bool {
 
 exports::exports! {
     functions {
-        "AudioComponentFindNext" => AudioComponentFindNext,
-        "AudioComponentInstanceNew" => AudioComponentInstanceNew,
-        "AudioComponentInstanceDispose" => AudioComponentInstanceDispose,
+        // The three Carbon Component Manager spellings are aliases rather than
+        // entries of their own: they are these calls under 1994 names, with the
+        // same twenty-byte descriptor and the same argument order, and a guest
+        // that opens its output unit the old way has to reach this registry and
+        // not a second one beside it. `OSErr` is `OSStatus` narrowed to its low
+        // half, which a zero and the framework's own negative codes survive.
+        "AudioComponentFindNext" | "FindNextComponent" => AudioComponentFindNext,
+        "AudioComponentInstanceNew" | "OpenAComponent" => AudioComponentInstanceNew,
+        "AudioComponentInstanceDispose" | "CloseComponent" => AudioComponentInstanceDispose,
         "AudioUnitInitialize" => AudioUnitInitialize,
         "AudioUnitUninitialize" => AudioUnitUninitialize,
         "AudioOutputUnitStart" => AudioOutputUnitStart,
@@ -671,6 +677,27 @@ fn test_component() -> *mut c_void {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// UNDERTALE opens its output unit through the Carbon Component Manager,
+    /// and a legacy spelling nothing publishes binds to zero: the game runs to
+    /// its first sound and faults at a null call. Asserted at the registry
+    /// rather than described, so the aliases cannot be dropped by accident.
+    #[test]
+    fn the_carbon_spellings_reach_the_same_registry() {
+        for (legacy, modern) in [
+            ("_FindNextComponent", "_AudioComponentFindNext"),
+            ("_OpenAComponent", "_AudioComponentInstanceNew"),
+            ("_CloseComponent", "_AudioComponentInstanceDispose"),
+        ] {
+            let bare = legacy.trim_start_matches('_');
+            assert_eq!(
+                symbol(bare),
+                symbol(modern.trim_start_matches('_')),
+                "{legacy} must be {modern}"
+            );
+            assert!(names().contains(&bare), "{legacy} must be published");
+        }
+    }
 
     #[test]
     fn only_the_default_output_component_is_found() {
